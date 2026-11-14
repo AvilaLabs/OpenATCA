@@ -1184,7 +1184,7 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-ADSB-009** No trace input panics: every prefix of a sample and 5 000 seeded random byte
   mutations give reports or an error, and every kept report is in range.
 - **OA-ADSB-010** The OAF1 payload (`docs/ADSB_PAYLOAD.md`) round-trips and has the documented
-  layout: header, 64-byte little-endian records, reserved bytes zero.
+  layout: header, 80-byte little-endian records, reserved byte zero.
 - **OA-ADSB-011** A payload with a wrong length, magic, record length, reserved field, count or a
   record value out of range is refused and appends nothing; the encoder refuses an empty or
   out-of-range row range and more than the per-frame maximum.
@@ -1217,6 +1217,17 @@ frame of their feed has been fed (as the ADS-B table is).
   contiguous, non-empty, in order and cover every report once.
 - **OA-ADSB-020** A clip frames reports with any grouping, including the earlier one of up to
   60 000 reports per frame, and `decode_payload` gives the same reports in the same order.
+- **OA-ADSB-021** The `ADS2` payload carries the measurements (wind speed and direction, true and
+  indicated airspeed, Mach, magnetic and true heading, outer and total air temperature, roll, track
+  rate) in 80-byte records at the documented offsets, round-trips them, and refuses a record whose
+  direction, heading or roll is out of range.
+- **OA-ADSB-022** An `ADS1` payload as the first clips wrote it still decodes, with the measurements
+  absent and its own rules (64-byte records, zero bytes after offset 57, up to 60 000 records).
+- **OA-ADSB-023** The measurements are read from the aircraft object (and indicated airspeed and roll
+  from the row's own columns, the object overriding), are per observation and never carried to a row
+  without them.
+- **OA-ADSB-024** A malformed or out-of-range measurement is left absent and counted once per row in
+  `Stats::bad_measurements`; the row is still kept; 360 degrees wraps to 0.
 ## Weather aloft (oa-grib2)
 
 GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO
@@ -1690,3 +1701,13 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
 - **OA-WIND-014** On the real data (skipped when absent) RAP agrees with the HRRR 250 hPa wind at t12z with
   a median vector difference under 2 m/s (and is worse without the rotation), and a half-hourly sweep over
   all hours never holds more than three and refuses a time after the last hour.
+- **OA-WIND-015** ADS-B observations for the RAP comparison are the reports that have a barometric
+  altitude (not on the ground) and a readsb wind (speed and direction) or outer air temperature, at most
+  one per aircraft per gap, with position, time, roll and track rate carried over in SI-ready units.
+- **OA-WIND-016** The ADS-B comparison gives, for RAP minus readsb, the count, median and 95th percentile
+  vector difference, the speed bias and the u and v bias, and the temperature difference against `oat`,
+  for all observations, by altitude band (4) and by turning state (straight, turning, unknown); a refused
+  query is counted by reason and left out, and a failed file load stops it.
+- **OA-WIND-017** `oa-wind-check adsb` refuses a bad `--gap-s` (exit 2), skips with a note and exit 0
+  when there are no RAP files, does not scan an archive whose day does not overlap the RAP hours, and on
+  the real data (skipped when absent) exits 0 with either the comparison or the no-overlap statement.

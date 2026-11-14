@@ -13,6 +13,7 @@ workspace = true
 # Workspace crates; not outside dependencies (RULESET F1).
 oa-grib2 = { path = "../oa-grib2" }
 oa-awc = { path = "../oa-awc" }
+oa-adsb = { path = "../oa-adsb" }
 
 [[bin]]
 name = "oa-wind-check"

@@ -1,6 +1,6 @@
-# ADS-B reports in OAF1 frames (ADS1)
+# ADS-B reports in OAF1 frames (ADS2, reads ADS1)
 
-Status: adopted 2026-11-14. Written by `oa-adsb-clip` (crate `oa-adsb`), read by
+Status: adopted 2026-11-14; `ADS2` (measurements) 2026-11-14. Written by `oa-adsb-clip` (crate `oa-adsb`), read by
 `oa_adsb::decode_payload`. Source data: adsb.lol `globe_history` day archives (readsb trace
 files, ODbL); the format of those is described in the `oa-adsb` crate documentation, with the
 readsb commit it was read from.
@@ -25,22 +25,36 @@ of ADS-B reports is a feed of its own kind: one file per feed, as with SFDPS, TB
   that is at least `--frame-ms` (default 1000) after it, so each frame spans under one second
   of report time by default and `oa-replay` merges ADS-B with the SWIM feeds at that
   granularity. A frame also ends at 60 000 reports (header plus records stay under the 4 MiB
-  payload limit). Readers do not depend on this: a clip with any grouping, such as the earlier
+  payload limit; 50 000 for `ADS2`, 60 000 for `ADS1`). Readers do not depend on this: a clip with any grouping, such as the earlier
   one of 60 000 reports per frame, decodes the same.
+
+## Versions
+
+* `ADS1`: 64-byte records, at most 60 000 per frame. Written by the first version of
+  `oa-adsb-clip`; bytes 57 to 63 of a record are reserved and zero.
+* `ADS2`: 80-byte records, at most 50 000 per frame (16 + 80 * 50 000 stays under the 4 MiB
+  payload limit). Bytes 0 to 56 are the `ADS1` record unchanged; bytes 57 to 78 add the
+  measurements below; byte 79 is reserved and zero. Only `ADS2` is written now.
+
+`decode_payload` reads both, by magic; an `ADS1` record decodes with every measurement absent.
+The OAF1 frame, its sequence and its time use are identical, so `oa-replay` and `oa-truth`
+(which decode through `decode_payload` and use none of the measurements) see the same reports from an old clip as before,
+and the hashes of their tables do not change. A reader that knows only `ADS1` refuses an `ADS2`
+payload by its magic.
 
 ## Payload
 
-All integers little-endian. A 16-byte header, then `count` records of 64 bytes.
+All integers little-endian. A 16-byte header, then `count` records.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 4 | magic, ASCII `ADS1` |
-| 4 | 2 | record length, 64 |
+| 0 | 4 | magic, ASCII `ADS2` (or `ADS1`) |
+| 4 | 2 | record length, 80 (64 for `ADS1`) |
 | 6 | 2 | reserved, 0 |
-| 8 | 4 | count, u32, at most 60 000 |
+| 8 | 4 | count, u32, at most 50 000 (60 000 for `ADS1`) |
 | 12 | 4 | reserved, 0 |
 
-The payload length is exactly `16 + 64 * count`.
+The payload length is exactly `16 + record length * count`.
 
 Record (offsets from the start of the record):
 
@@ -68,16 +82,36 @@ Record (offsets from the start of the record):
 | 54 | 1 | version | ADS-B version, 0 to 7; `255` absent |
 | 55 | 1 | gva | 0 to 3; `255` absent |
 | 56 | 1 | sda | 0 to 3; `255` absent |
-| 57 | 7 | reserved, 0 | |
+| 57 | 2 | wind speed `ws`, u16 | knots, readsb-derived; `65535` absent |
+| 59 | 2 | wind direction `wd`, u16 | degrees true, the direction the wind blows from, 0 to 359 (readsb's 360 is stored as 0); `65535` absent |
+| 61 | 2 | true airspeed `tas`, u16 | knots; `65535` absent |
+| 63 | 2 | indicated airspeed `ias`, u16 | knots; `65535` absent |
+| 65 | 2 | Mach number, u16 | 0.001; `65535` absent |
+| 67 | 2 | magnetic heading, u16 | 0.01 degree, 0 to 35999; `65535` absent |
+| 69 | 2 | true heading, u16 | 0.01 degree, 0 to 35999; `65535` absent |
+| 71 | 2 | outer air temperature `oat`, i16 | whole degrees C, readsb-derived; `-32768` absent |
+| 73 | 2 | total air temperature `tat`, i16 | whole degrees C, readsb-derived; `-32768` absent |
+| 75 | 2 | roll, i16 | 0.01 degree, negative is left, within 18000 in magnitude; `-32768` absent |
+| 77 | 2 | track rate, i16 | 0.01 degree per second; `-32768` absent |
+| 79 | 1 | reserved, 0 | |
+
+(`ADS1` records have bytes 57 to 63 reserved, 0, and no measurements.)
 
 The fields from `callsign` on come from the aircraft object that readsb prints on some rows
 only; a report without an object has them absent. They are not carried forward from earlier rows.
+The measurements from offset 57 are per observation in the same way (`ias` and `roll` are also
+taken from the source row's own columns when the row has no object). What readsb's `ws`, `wd`,
+`oat` and `tat` mean, when readsb computes them and their known limits are in the `oa-adsb`
+crate documentation (section "Measurements and what readsb's wind means"). A value that is
+malformed or out of range in the source is left absent (counted, `measurements_bad` in the clip
+tool's output), not refused.
 
 ## Reader rules
 
 A payload with a wrong length, magic, record length, a non-zero reserved byte, a count above the
-maximum, or a record whose latitude or longitude is out of range, whose flags use bits 5 to 7 or
-whose source is not 0 to 13 or 255 is refused whole (`PayloadError`) and yields no reports.
+maximum of its version, or a record whose latitude or longitude is out of range, whose flags use
+bits 5 to 7, whose source is not 0 to 13 or 255, whose wind direction is 360 or more, whose
+heading is 36000 or more or whose roll is beyond 180 degrees is refused whole (`PayloadError`) and yields no reports.
 
 ## Clip tool
 

@@ -6,6 +6,11 @@
 //! 1. The model against `oa-grib2`'s own decoded values at grid points (exact).
 //! 2. RAP against HRRR at the same time and level (t12z, 250 hPa).
 //! 3. RAP against pilot-reported winds (AWC PIREPs with wind direction, speed and level).
+//!
+//! `oa-wind-check adsb [data-dir] [--gap-s <seconds>]` is a separate mode: RAP against the wind
+//! and temperature aircraft report over ADS-B (adsb.lol archives, readsb `ws`/`wd`/`oat`).
+
+mod adsb_mode;
 
 use oa_awc::{finalize_pirep, new_pirep_table, parse_pirep, pirep_len, PirepStats, PirepTable};
 use oa_grib2::{decode_stream, Field, Parameter};
@@ -106,16 +111,30 @@ fn field(fields: &[Field], p: Parameter, pa: f32) -> Option<&Field> {
 }
 
 fn main() -> ExitCode {
-    let root = match std::env::args_os().nth(1) {
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let adsb = args.get(1).is_some_and(|a| a == "adsb");
+    let first = if adsb { 2 } else { 1 };
+    let root = match args.get(first).filter(|a| !a.starts_with("--")) {
         Some(d) => PathBuf::from(d),
         None => match std::env::var_os("OPENATCA_DATA") {
             Some(d) => PathBuf::from(d),
             None => {
-                eprintln!("usage: oa-wind-check [data-dir]   (or set OPENATCA_DATA)");
+                eprintln!("usage: oa-wind-check [adsb] [data-dir]   (or set OPENATCA_DATA)");
                 return ExitCode::from(2);
             }
         },
     };
+    if adsb {
+        let rest = args.get(first..).unwrap_or(&[]);
+        let rest = if rest.first().is_some_and(|a| !a.starts_with("--")) {
+            rest.get(1..).unwrap_or(&[])
+        } else {
+            rest
+        };
+        return adsb_mode::run(&root, rest);
+    }
     let raw = root.join("raw");
     let rap = list(&raw.join("rap"), "rap.", ".grib2");
     if rap.is_empty() {

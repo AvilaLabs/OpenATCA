@@ -6,9 +6,9 @@ use oa_json::{Doc, Kind, NodeIx};
 
 use crate::{
     reports_push, Filter, Reports, Row, Stats, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN,
-    MAX_TRACE_NODES, MAX_TRACE_ROWS, NON_ICAO, REJ_ALTITUDE, REJ_FLAGS, REJ_OBJECT, REJ_POSITION,
-    REJ_RATE, REJ_SHAPE, REJ_SOURCE, REJ_SPEED, REJ_TIME, REJ_TRACK, ROW_EMPTY, SIL_PER_HOUR,
-    SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES,
+    MAX_TRACE_NODES, MAX_TRACE_ROWS, NONE_I16, NONE_U16, NON_ICAO, REJ_ALTITUDE, REJ_FLAGS,
+    REJ_OBJECT, REJ_POSITION, REJ_RATE, REJ_SHAPE, REJ_SOURCE, REJ_SPEED, REJ_TIME, REJ_TRACK,
+    ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES,
 };
 
 /// Why a whole trace file was refused.
@@ -107,11 +107,75 @@ fn fixed(v: f64, scale: f64) -> i64 {
     (v * scale).round() as i64
 }
 
+/// An optional measurement: `Ok(None)` for null, `Ok(Some(x))` for a finite number in
+/// `[lo, hi]`, `Err` for anything else.
+fn measure(doc: &Doc<'_>, n: NodeIx, lo: f64, hi: f64) -> Result<Option<f64>, ()> {
+    match doc.kind(n) {
+        Some(Kind::Null) => Ok(None),
+        Some(Kind::Number) => match doc.as_f64(n) {
+            Some(x) if (lo..=hi).contains(&x) => Ok(Some(x)),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+/// Stores the measurement `key` of an aircraft object (or an `ias`/`roll` row column) in the
+/// row, converted to fixed point. A malformed or out-of-range value is left absent and counted
+/// in `bad`: the position it came with is still good. Returns false for an unknown key.
+fn read_measurement(doc: &Doc<'_>, key: &str, v: NodeIx, row: &mut Row, bad: &mut u64) -> bool {
+    let u16_of = |lo: f64, hi: f64, scale: f64, bad: &mut u64| -> u16 {
+        match measure(doc, v, lo, hi) {
+            Ok(Some(x)) => fixed(x, scale) as u16,
+            Ok(None) => NONE_U16,
+            Err(()) => {
+                *bad += 1;
+                NONE_U16
+            }
+        }
+    };
+    let i16_of = |lo: f64, hi: f64, scale: f64, bad: &mut u64| -> i16 {
+        match measure(doc, v, lo, hi) {
+            Ok(Some(x)) => fixed(x, scale) as i16,
+            Ok(None) => NONE_I16,
+            Err(()) => {
+                *bad += 1;
+                NONE_I16
+            }
+        }
+    };
+    match key {
+        "ws" => row.ws_kt = u16_of(0.0, 1000.0, 1.0, bad),
+        // `%.0f` can print 360 for a direction just under north.
+        "wd" => row.wd_deg = wrap(u16_of(0.0, 360.0, 1.0, bad), 360),
+        "tas" => row.tas_kt = u16_of(0.0, 2000.0, 1.0, bad),
+        "ias" => row.ias_kt = u16_of(0.0, 2000.0, 1.0, bad),
+        "mach" => row.mach_milli = u16_of(0.0, 5.0, 1000.0, bad),
+        "mag_heading" => row.mag_heading_cdeg = wrap(u16_of(0.0, 360.0, 100.0, bad), 36_000),
+        "true_heading" => row.true_heading_cdeg = wrap(u16_of(0.0, 360.0, 100.0, bad), 36_000),
+        "oat" => row.oat_c = i16_of(-200.0, 200.0, 1.0, bad),
+        "tat" => row.tat_c = i16_of(-200.0, 200.0, 1.0, bad),
+        "roll" => row.roll_cdeg = i16_of(-180.0, 180.0, 100.0, bad),
+        "track_rate" => row.track_rate_cdps = i16_of(-300.0, 300.0, 100.0, bad),
+        _ => return false,
+    }
+    true
+}
+
+/// An angle wrapped into `[0, modulus)` (360 becomes 0); absent stays absent.
+fn wrap(v: u16, modulus: u16) -> u16 {
+    if v == NONE_U16 {
+        v
+    } else {
+        v % modulus
+    }
+}
+
 /// Fields of the per-row aircraft object that we keep. Ranges are the widths of the ADS-B bit
 /// fields readsb copies through (`nac_p` four bits, `nac_v` three, `sil`, `gva` and `sda` two);
 /// `nic` is readsb's computed 0 to 11. Real data carries `nac_v` up to 7, so the defined 0 to 4
 /// is not the bound.
-fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row) -> Result<(), ()> {
+fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row, bad: &mut u64) -> Result<(), ()> {
     if doc.len(obj) > MAX_OBJECT_MEMBERS {
         return Err(());
     }
@@ -119,6 +183,9 @@ fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row) -> Result<(), ()> {
         let Some(key) = doc.str(k) else {
             return Err(());
         };
+        if read_measurement(doc, key, v, row, bad) {
+            continue;
+        }
         let small = |max: i64| -> Result<u8, ()> {
             match opt_int(doc, Some(v), 0, max)? {
                 Some(x) => Ok(x as u8),
@@ -173,7 +240,7 @@ fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row) -> Result<(), ()> {
 }
 
 /// Reasons a row fails after its position and time were accepted.
-fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row) -> Result<(), usize> {
+fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> Result<(), usize> {
     let col = |i: usize| cols.get(i).copied();
     // Flags first: they say what the altitude and rate columns mean.
     let flags = match opt_int(doc, col(6), 0, 15) {
@@ -240,10 +307,18 @@ fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row) -> Result<(), usiz
             _ => return Err(REJ_SOURCE),
         }
     }
+    // Indicated airspeed and roll are columns of every row; the aircraft object, when present,
+    // repeats them with more digits and overrides them below.
+    if let Some(n) = col(12) {
+        read_measurement(doc, "ias", n, row, bad);
+    }
+    if let Some(n) = col(13) {
+        read_measurement(doc, "roll", n, row, bad);
+    }
     if let Some(n) = col(8) {
         match doc.kind(n) {
             Some(Kind::Null) => {}
-            Some(Kind::Object) => read_object(doc, n, row).map_err(|()| REJ_OBJECT)?,
+            Some(Kind::Object) => read_object(doc, n, row, bad).map_err(|()| REJ_OBJECT)?,
             _ => return Err(REJ_OBJECT),
         }
     }
@@ -353,11 +428,13 @@ pub fn decode_trace(
         row.icao = icao;
         row.lat_e7 = lat_e7;
         row.lon_e7 = lon_e7;
-        if let Err(why) = decode_rest(&doc, cols, &mut row) {
+        let mut bad = 0;
+        if let Err(why) = decode_rest(&doc, cols, &mut row, &mut bad) {
             reject(&mut local, why);
             continue;
         }
         local.kept += 1;
+        local.bad_measurements += u64::from(bad > 0);
         reports_push(out, &row);
     }
     crate::stats_add(stats, &local);

@@ -36,11 +36,12 @@ fn payload_round_trips_and_has_the_documented_layout() {
     let mut p = Vec::new();
     encode_payload(&mut p, &r, 10, 60).unwrap();
     assert_eq!(p.len(), PAYLOAD_HEADER_LEN + 50 * RECORD_LEN);
-    assert_eq!(&p[..4], b"ADS1");
-    assert_eq!(u16::from_le_bytes([p[4], p[5]]), 64);
+    assert_eq!(&p[..4], b"ADS2");
+    assert_eq!(RECORD_LEN, 80);
+    assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80);
     assert_eq!(u32::from_le_bytes([p[8], p[9], p[10], p[11]]), 50);
     // First record: icao at 0, lat at 4, time at 24, callsign at 40, nac_p at 50.
-    let rec = &p[16..80];
+    let rec = &p[16..96];
     let row10 = reports_row(&r, 10).unwrap();
     assert_eq!(
         u32::from_le_bytes(rec[0..4].try_into().unwrap()),
@@ -56,7 +57,10 @@ fn payload_round_trips_and_has_the_documented_layout() {
     );
     assert_eq!(&rec[40..48], b"UAL123\0\0");
     assert_eq!(rec[50], row10.nac_p);
-    assert!(rec[57..].iter().all(|&b| b == 0));
+    // Measurements at 57..79 are absent in this sample; the last byte is reserved.
+    assert!(rec[57..71].iter().all(|&b| b == 0xff));
+    assert!(rec[71..79].chunks(2).all(|c| c == [0x00, 0x80]));
+    assert_eq!(rec[79], 0);
     let mut back = Reports::default();
     assert_eq!(decode_payload(&p, &mut back).unwrap(), 50);
     for i in 0..50 {
@@ -94,7 +98,7 @@ fn bad_payloads_are_refused_and_append_nothing() {
     bad(&m, PayloadError::TooManyRows);
     // Record 3: latitude out of range, then unknown flag bits, then unknown source, then a
     // non-zero reserved byte.
-    for (at, v) in [(4usize, 0x7fu8), (38, 0x80), (39, 14), (60, 1)] {
+    for (at, v) in [(4usize, 0x7fu8), (38, 0x80), (39, 14), (79, 1)] {
         let mut m = p.clone();
         let rec = 16 + 3 * RECORD_LEN;
         if at == 4 {
@@ -233,4 +237,131 @@ fn payloads_of_any_grouping_decode_to_the_same_reports() {
     assert!(frame_ranges(&r, DEFAULT_FRAME_MS).len() > 30);
     assert_eq!(old, new);
     assert_eq!(old, r);
+}
+
+fn measured_row() -> Row {
+    Row {
+        icao: 0xabc123,
+        time_ns: 1_700_000_000_250_000_000,
+        lat_e7: 420_000_000,
+        lon_e7: -880_000_000,
+        baro_alt_ft: 35000,
+        gs_dkt: 4800,
+        track_ddeg: 2700,
+        ws_kt: 62,
+        wd_deg: 285,
+        tas_kt: 470,
+        ias_kt: 255,
+        mach_milli: 812,
+        mag_heading_cdeg: 26_987,
+        true_heading_cdeg: 27_650,
+        oat_c: -54,
+        tat_c: -29,
+        roll_cdeg: -1_072,
+        track_rate_cdps: -3,
+        ..ROW_EMPTY
+    }
+}
+
+// REQ: OA-ADSB-021
+#[test]
+fn measurements_round_trip_at_the_documented_offsets() {
+    let mut r = Reports::default();
+    reports_push(&mut r, &measured_row());
+    reports_push(&mut r, &ROW_EMPTY_IN_BOX);
+    let mut p = Vec::new();
+    encode_payload(&mut p, &r, 0, 2).unwrap();
+    let rec = &p[16..96];
+    let u = |at: usize| u16::from_le_bytes([rec[at], rec[at + 1]]);
+    let s = |at: usize| i16::from_le_bytes([rec[at], rec[at + 1]]);
+    assert_eq!((u(57), u(59), u(61), u(63)), (62, 285, 470, 255));
+    assert_eq!((u(65), u(67), u(69)), (812, 26_987, 27_650));
+    assert_eq!((s(71), s(73), s(75), s(77)), (-54, -29, -1_072, -3));
+    let mut back = Reports::default();
+    assert_eq!(decode_payload(&p, &mut back).unwrap(), 2);
+    assert_eq!(reports_row(&back, 0), Some(measured_row()));
+    assert_eq!(reports_row(&back, 1), Some(ROW_EMPTY_IN_BOX));
+    assert_eq!(back.ws_kt, [62, NONE_U16]);
+    assert_eq!(back.oat_c, [-54, NONE_I16]);
+    // A corrupt measurement is refused: direction 360, heading 360.00, roll beyond 180.
+    for (at, v) in [(59usize, 360u16), (67, 36_000), (75, 18_001)] {
+        let mut m = p.clone();
+        m[16 + at..16 + at + 2].copy_from_slice(&v.to_le_bytes());
+        let mut out = Reports::default();
+        assert_eq!(
+            decode_payload(&m, &mut out).unwrap_err(),
+            PayloadError::BadRecord(0)
+        );
+        assert_eq!(reports_len(&out), 0);
+    }
+}
+
+const ROW_EMPTY_IN_BOX: Row = Row {
+    icao: 0xabc124,
+    time_ns: 1_700_000_001_000_000_000,
+    lat_e7: 420_000_000,
+    lon_e7: -880_000_000,
+    ..ROW_EMPTY
+};
+
+/// An `ADS1` payload as the first clips wrote it: 64-byte records, bytes 57 to 63 zero.
+fn legacy_payload(r: &Reports) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(b"ADS1");
+    v.extend_from_slice(&64u16.to_le_bytes());
+    v.extend_from_slice(&0u16.to_le_bytes());
+    v.extend_from_slice(&(reports_len(r) as u32).to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    for i in 0..reports_len(r) {
+        let mut p = Vec::new();
+        let mut one = Reports::default();
+        reports_push(&mut one, &reports_row(r, i).unwrap());
+        encode_payload(&mut p, &one, 0, 1).unwrap();
+        // The first 57 bytes of an ADS2 record are the ADS1 record.
+        v.extend_from_slice(&p[16..16 + 57]);
+        v.extend_from_slice(&[0; 7]);
+    }
+    v
+}
+
+// REQ: OA-ADSB-022
+#[test]
+fn legacy_ads1_payloads_still_decode_with_measurements_absent() {
+    let r = sample_rows(40);
+    let p = legacy_payload(&r);
+    assert_eq!(p.len(), PAYLOAD_HEADER_LEN + 40 * LEGACY_RECORD_LEN);
+    let mut back = Reports::default();
+    assert_eq!(decode_payload(&p, &mut back).unwrap(), 40);
+    assert_eq!(back, r);
+    assert!(back.ws_kt.iter().all(|&x| x == NONE_U16));
+    // Legacy rules still hold: a non-zero byte after 57 is refused; so is a 80-byte record
+    // length under the old magic; the old count limit applies, not the new one.
+    let mut m = p.clone();
+    m[16 + 3 * 64 + 60] = 1;
+    let mut out = Reports::default();
+    assert_eq!(
+        decode_payload(&m, &mut out).unwrap_err(),
+        PayloadError::BadRecord(3)
+    );
+    let mut m = p.clone();
+    m[4] = 80;
+    assert_eq!(
+        decode_payload(&m, &mut out).unwrap_err(),
+        PayloadError::Layout
+    );
+    let mut m = p[..16].to_vec();
+    m[8..12].copy_from_slice(&(LEGACY_MAX_ROWS as u32 + 1).to_le_bytes());
+    assert_eq!(
+        decode_payload(&m, &mut out).unwrap_err(),
+        PayloadError::TooManyRows
+    );
+    let mut m = p[..16].to_vec();
+    m[8..12].copy_from_slice(&(MAX_ROWS_PER_FRAME as u32 + 1).to_le_bytes());
+    m.resize(16 + (MAX_ROWS_PER_FRAME + 1) * LEGACY_RECORD_LEN, 0);
+    // Zero records are valid ADS1 records only if in range: latitude 0 is, so this decodes.
+    assert_eq!(
+        decode_payload(&m, &mut out).unwrap(),
+        MAX_ROWS_PER_FRAME + 1
+    );
+    assert_eq!(reports_len(&out), MAX_ROWS_PER_FRAME + 1);
 }

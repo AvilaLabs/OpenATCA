@@ -238,6 +238,7 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         st.traces_read, st.traces_refused, res.trace_entries, res.other_entries, st.rows_seen,
         st.outside_box, st.outside_time, st.kept
     );
+    eprintln!("measurements_bad {}", st.bad_measurements);
     let rej: Vec<String> = REJECT_NAMES
         .iter()
         .zip(st.rejected.iter())
