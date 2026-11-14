@@ -25,6 +25,7 @@ members = [
     "crates/oa-grib2",
     "crates/oa-j2k",
     "crates/oa-mva",
+    "crates/oa-awc",
     "tools/oa-trace",
 ]
 

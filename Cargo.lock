@@ -29,6 +29,13 @@ name = "oa-arinc424"
 version = "0.0.1"
 
 [[package]]
+name = "oa-awc"
+version = "0.0.1"
+dependencies = [
+ "oa-json",
+]
+
+[[package]]
 name = "oa-csv"
 version = "0.0.1"
 
