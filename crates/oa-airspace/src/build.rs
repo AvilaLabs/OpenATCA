@@ -9,7 +9,8 @@
 //!    both sources are merged under one identity (class of kind, ident, ICAO region, scope):
 //!    fixes with enroute/terminal waypoints by (ident, region), airports by ICAO or FAA ident,
 //!    navaids by ident and class (nearest first, within [`MAX_PAIR_M`], because short NDB
-//!    identifiers recur across the country), runway thresholds by airport and designator.
+//!    identifiers recur across the country; the NASR navaid is unique by its own id, type, city
+//!    and state, and is never dropped because its derived key collides), runway thresholds by airport and designator.
 //!    Position rule: CIFP when both sources have the object; both positions are kept to report
 //!    every pair that differs by more than [`DISAGREE_M`] (OA-ASP-003).
 //! 2. **Selection area** (OA-ASP-002): the ARTCC's HIGH and LOW polygons plus the buffer.
@@ -41,9 +42,10 @@ use std::fmt;
 pub const NM_M: f64 = 1852.0;
 /// A NASR and a CIFP position closer than this agree; farther apart is reported (OA-ASP-003).
 pub const DISAGREE_M: f64 = 1.0;
-/// Navaids with the same identifier and class pair up when within this distance (short NDB
-/// identifiers recur across the country, so the nearest one is the same object).
-pub const MAX_PAIR_M: f64 = 100_000.0;
+/// A NASR navaid and a CIFP navaid with the same identifier and class pair up only when within
+/// this distance, 1 nautical mile like airports (short NDB identifiers recur across the
+/// country, so a farther same-identifier navaid is another station).
+pub const MAX_PAIR_M: f64 = MAX_AIRPORT_PAIR_M;
 /// A NASR airport and a CIFP airport with the same identifier pair up only when within this
 /// distance, 1 nautical mile (OA-ASP-011). A farther same-identifier pair is two different
 /// places that share a code: it is not merged, and the report lists it as a disagreement.
@@ -165,6 +167,12 @@ pub struct BuildInfo {
     pub position_defects: Vec<PositionDefect>,
     /// Keys that occurred twice within a source (second dropped), and positions that differ.
     pub duplicates: Vec<String>,
+    /// NASR navaids that were not paired because two CIFP navaids lie within the pairing cap, or
+    /// because two NASR navaids want the same CIFP navaid.
+    pub navaid_ambiguous: Vec<String>,
+    /// NASR navaids with a same-identifier CIFP navaid beyond the pairing cap: `(metres, text)`,
+    /// nearest first.
+    pub navaid_over_cap: Vec<(f64, String)>,
     /// Navaids whose NASR type and CIFP class disagree.
     pub kind_mismatches: Vec<String>,
     /// NASR-only procedures (not coded in CIFP), as `airport kind ident`.
@@ -398,7 +406,8 @@ struct Maps {
 
 const NO_CAND: usize = usize::MAX;
 
-/// Records a CIFP navaid under its lookup key; a terminal NDB also under its airport.
+/// Records a CIFP navaid under its lookup key; a terminal NDB also under its airport. The first
+/// registration of a key stays; the earlier, different candidate is returned when there is one.
 fn register_cifp_nav(
     maps: &mut Maps,
     sub: char,
@@ -406,17 +415,83 @@ fn register_cifp_nav(
     region: &str,
     airport: Option<&str>,
     cand: usize,
-) {
+) -> Option<usize> {
+    let mut earlier = None;
     if sub != 'N' {
-        maps.nav_cifp
-            .insert((ident.to_string(), region.to_string(), sub), cand);
+        let e = *maps
+            .nav_cifp
+            .entry((ident.to_string(), region.to_string(), sub))
+            .or_insert(cand);
+        if e != cand {
+            earlier = Some(e);
+        }
     }
     if let Some(a) = airport.and_then(|a| maps.apt_cifp.get(a).copied()) {
-        maps.tndb.insert((a, ident.to_string()), cand);
+        let e = *maps.tndb.entry((a, ident.to_string())).or_insert(cand);
+        if e != cand {
+            earlier = Some(e);
+        }
     }
+    earlier
+}
+
+/// A navaid candidate under construction: the model point plus where it came from, until every
+/// navaid is known and the identities can be made unique.
+// A7.2: cold struct, size guard waived
+struct NavC {
+    cand: Cand,
+    /// Index of the NASR navaid, when the point has one.
+    nasr: Option<usize>,
+    /// CIFP navaids (indexes into the CIFP list) that are this point.
+    members: Vec<usize>,
+    /// The airport scope a point gets when its identity needs one: set when every CIFP record of
+    /// the point is a terminal NDB (P/N).
+    airport: Option<String>,
 }
 
 /// The CIFP-side data needed to compare navaid classes.
+// A7.2: cold struct, size guard waived
+struct CNav {
+    kind: u8,
+    ident: String,
+    region: String,
+    sub: char,
+    /// The airport of a terminal NDB.
+    airport: Option<String>,
+    pos: (f64, f64),
+    name: String,
+    elev: Option<i32>,
+}
+
+/// `K3 D/B`, `K3 P/N KBRD`: which CIFP record a message means.
+fn cnav_label(c: &CNav) -> String {
+    let section = match c.sub {
+        'N' => "P/N",
+        'B' => "D/B",
+        _ => "D/V",
+    };
+    match c.airport.as_deref().filter(|_| c.sub == 'N') {
+        Some(a) => format!("{} {section} {a}", c.region),
+        None => format!("{} {section}", c.region),
+    }
+}
+
+/// `BRAINERD, MN`: the NASR record's own place, for messages and for telling two apart.
+fn nasr_place(n: &nasr::nav::Navaid) -> String {
+    format!("{}, {}", n.city, n.state_code.as_deref().unwrap_or("-"))
+}
+
+/// Pairs NASR navaids with CIFP navaids and builds one candidate per distinct navaid.
+///
+/// A NASR navaid is unique by its own key (id, type, city, state). It pairs with the nearest
+/// CIFP navaid of the same identifier and class (D/V, D/B or P/N of any airport) within
+/// [`MAX_PAIR_M`]; several CIFP records of one place (same region, within
+/// [`TERMINAL_NDB_SAME_M`]) are one navaid. Two different CIFP candidates in the cap, or one
+/// CIFP navaid wanted by two NASR navaids, pair nobody and are reported. A NASR navaid never
+/// pairs beyond the cap; the nearest same-identifier CIFP navaid is reported with its distance.
+/// A NASR navaid is never dropped because its (ident, region) equals another's: where the
+/// identity would collide, the NASR navaids among the colliding points take a scope that tells
+/// them apart.
 fn pair_navaids(
     src: &Sources,
     ell: &Ellipsoid,
@@ -425,18 +500,6 @@ fn pair_navaids(
     info: &mut BuildInfo,
 ) {
     // CIFP navaids, with the position taken and the kind derived from the class.
-    // A7.2: cold struct, size guard waived
-    struct CNav {
-        kind: u8,
-        ident: String,
-        region: String,
-        sub: char,
-        /// The airport of a terminal NDB.
-        airport: Option<String>,
-        pos: (f64, f64),
-        name: String,
-        elev: Option<i32>,
-    }
     let mut cnavs: Vec<CNav> = Vec::new();
     let mut no_position = 0usize;
     for v in &src.cifp.vhf_navaids {
@@ -480,86 +543,213 @@ fn pair_navaids(
             .or_default()
             .push(i);
     }
-    let mut paired = vec![false; cnavs.len()];
+
+    // Phase 1: for each NASR navaid, the CIFP navaids that are one place with its nearest match.
+    // A7.2: cold struct, size guard waived
+    struct Try {
+        ni: usize,
+        kind: u8,
+        npos: (f64, f64),
+        /// Nearest first.
+        group: Vec<usize>,
+    }
+    let mut tries: Vec<Try> = Vec::new();
     let mut skipped_types = 0usize;
-    maps.nasr_nav_cand = vec![NO_CAND; src.nasr.navaids.len()];
     for (ni, n) in src.nasr.navaids.iter().enumerate() {
         let Some(kind) = nasr_nav_kind(&n.nav_type) else {
             skipped_types += 1;
             continue;
         };
         let npos = nasr_pos(&n.position);
-        // Nearest unpaired CIFP navaid with the same ident and class, within MAX_PAIR_M.
-        let mut best: Option<(f64, usize)> = None;
+        // A VOR test facility (VOT) is a signal at an airport, never the VOR beside it: CIFP
+        // has no record for it, so it is not offered to the pairing.
+        if n.nav_type == "VOT" {
+            tries.push(Try {
+                ni,
+                kind,
+                npos,
+                group: Vec::new(),
+            });
+            continue;
+        }
+        let mut near: Vec<(f64, usize)> = Vec::new();
         if let Some(list) = by_class_ident.get(&(point_kind::class(kind), n.nav_id.as_str())) {
             for &ci in list {
-                if paired.get(ci).copied().unwrap_or(true) {
-                    continue;
-                }
-                let Some(c) = cnavs.get(ci) else { continue };
-                let d = pos_distance(ell, npos, c.pos);
-                if d <= MAX_PAIR_M && best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, ci));
-                }
-            }
-        }
-        let mut cand = new_cand(kind, &n.nav_id, npos);
-        cand.nasr = true;
-        cand.nasr_pos = Some(npos);
-        cand.defect = defect_of(&n.position, "NAV_BASE.csv", n.line);
-        cand.name = Some(n.name.clone());
-        cand.elev = n.elev.and_then(round_i32);
-        match best {
-            Some((_, ci)) => {
-                if let Some(p) = paired.get_mut(ci) {
-                    *p = true;
-                }
                 if let Some(c) = cnavs.get(ci) {
-                    cand.cifp = true;
-                    cand.cifp_pos = Some(c.pos);
-                    cand.pos = c.pos;
-                    cand.region = Some(c.region.clone());
-                    if cand.elev.is_none() {
-                        cand.elev = c.elev;
-                    }
-                    if point_kind::name(c.kind) != point_kind::name(kind) {
-                        info.kind_mismatches.push(format!(
-                            "navaid {} ({}): NASR type {}, CIFP class gives {}",
-                            n.nav_id,
-                            c.region,
-                            n.nav_type,
-                            point_kind::name(c.kind)
-                        ));
-                    }
-                    let i = reg.add(ell, cand, false, "navaid");
-                    register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i);
-                    if let Some(slot) = maps.nasr_nav_cand.get_mut(ni) {
-                        *slot = i;
-                    }
-                }
-            }
-            None => {
-                cand.scope = n.state_code.clone();
-                let i = reg.add(ell, cand, false, "navaid");
-                if let Some(slot) = maps.nasr_nav_cand.get_mut(ni) {
-                    *slot = i;
+                    let d = pos_distance(ell, npos, c.pos);
+                    near.push((if d.is_nan() { f64::INFINITY } else { d }, ci));
                 }
             }
         }
-        maps.nasr_nav
-            .entry((n.nav_id.clone(), n.nav_type.clone()))
-            .or_default()
-            .push(ni);
-        maps.nasr_nav_by_id
-            .entry(n.nav_id.clone())
-            .or_default()
-            .push(ni);
+        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let label = || format!("navaid {} {} ({})", n.nav_id, n.nav_type, nasr_place(n));
+        let Some(&(d0, c0)) = near.first() else {
+            tries.push(Try {
+                ni,
+                kind,
+                npos,
+                group: Vec::new(),
+            });
+            continue;
+        };
+        if d0 > MAX_PAIR_M {
+            let nearest = cnavs.get(c0).map_or_else(String::new, cnav_label);
+            let text = format!(
+                "{}: nearest CIFP navaid of that identifier and class is {nearest}, beyond the {} m pairing cap, not paired",
+                label(),
+                MAX_PAIR_M
+            );
+            info.navaid_over_cap.push((d0, text));
+            tries.push(Try {
+                ni,
+                kind,
+                npos,
+                group: Vec::new(),
+            });
+            continue;
+        }
+        let first = cnavs.get(c0);
+        let in_cap = near.iter().take_while(|(d, _)| *d <= MAX_PAIR_M);
+        let (same, other): (Vec<_>, Vec<_>) =
+            in_cap.partition(|(_, ci)| match (first, cnavs.get(*ci)) {
+                (Some(f), Some(c)) => {
+                    f.region == c.region && pos_distance(ell, f.pos, c.pos) <= TERMINAL_NDB_SAME_M
+                }
+                _ => false,
+            });
+        if other.is_empty() {
+            tries.push(Try {
+                ni,
+                kind,
+                npos,
+                group: same.iter().map(|&(_, ci)| ci).collect(),
+            });
+        } else {
+            let all: Vec<String> = same
+                .iter()
+                .chain(other.iter())
+                .filter_map(|&(d, ci)| cnavs.get(ci).map(|c| format!("{} {d:.1} m", cnav_label(c))))
+                .collect();
+            info.navaid_ambiguous.push(format!(
+                "{}: {} different CIFP navaids of that identifier and class lie within {} m ({}); not paired",
+                label(),
+                all.len(),
+                MAX_PAIR_M,
+                all.join("; ")
+            ));
+            tries.push(Try {
+                ni,
+                kind,
+                npos,
+                group: Vec::new(),
+            });
+        }
     }
     if skipped_types > 0 {
         info.skipped.push((
             "NASR navaids of types the model does not carry (FAN MARKER, ...)".to_string(),
             skipped_types,
         ));
+    }
+    // A CIFP navaid wanted by two NASR navaids pairs neither.
+    let mut wanted_by: Vec<Vec<usize>> = vec![Vec::new(); cnavs.len()];
+    for (ti, t) in tries.iter().enumerate() {
+        for &ci in &t.group {
+            if let Some(w) = wanted_by.get_mut(ci) {
+                w.push(ti);
+            }
+        }
+    }
+    for t in &mut tries {
+        let Some(n) = src.nasr.navaids.get(t.ni) else {
+            continue;
+        };
+        let shared = t
+            .group
+            .iter()
+            .find(|&&ci| wanted_by.get(ci).is_some_and(|w| w.len() > 1))
+            .copied();
+        if let Some(ci) = shared {
+            let k = wanted_by.get(ci).map_or(0, Vec::len);
+            info.navaid_ambiguous.push(format!(
+                "navaid {} {} ({}): CIFP navaid {} is the match of {k} NASR navaids; none of them is paired",
+                n.nav_id,
+                n.nav_type,
+                nasr_place(n),
+                cnavs.get(ci).map_or_else(String::new, cnav_label)
+            ));
+            t.group.clear();
+        }
+    }
+
+    // Phase 2: one candidate per NASR navaid, then the CIFP navaids not taken.
+    let mut paired = vec![false; cnavs.len()];
+    let mut navs: Vec<NavC> = Vec::new();
+    maps.nasr_nav_cand = vec![NO_CAND; src.nasr.navaids.len()];
+    for t in &tries {
+        let Some(n) = src.nasr.navaids.get(t.ni) else {
+            continue;
+        };
+        let mut cand = new_cand(t.kind, &n.nav_id, t.npos);
+        cand.nasr = true;
+        cand.nasr_pos = Some(t.npos);
+        cand.defect = defect_of(&n.position, "NAV_BASE.csv", n.line);
+        cand.name = Some(n.name.clone());
+        cand.elev = n.elev.and_then(round_i32);
+        let mut airport = None;
+        if let Some(c) = t.group.first().and_then(|&ci| cnavs.get(ci)) {
+            cand.cifp = true;
+            cand.cifp_pos = Some(c.pos);
+            cand.pos = c.pos;
+            cand.region = Some(c.region.clone());
+            if cand.elev.is_none() {
+                cand.elev = c.elev;
+            }
+            if point_kind::name(c.kind) != point_kind::name(t.kind) {
+                info.kind_mismatches.push(format!(
+                    "navaid {} ({}): NASR type {}, CIFP class gives {}",
+                    n.nav_id,
+                    c.region,
+                    n.nav_type,
+                    point_kind::name(c.kind)
+                ));
+            }
+            let only_terminal = t
+                .group
+                .iter()
+                .all(|&ci| cnavs.get(ci).is_some_and(|m| m.sub == 'N'));
+            if only_terminal {
+                airport = c.airport.clone();
+            }
+            for &ci in &t.group {
+                if let Some(p) = paired.get_mut(ci) {
+                    *p = true;
+                }
+            }
+        } else {
+            cand.scope = n.state_code.clone();
+        }
+        navs.push(NavC {
+            cand,
+            nasr: Some(t.ni),
+            members: t.group.clone(),
+            airport,
+        });
+    }
+    // CIFP navaids with no NASR partner.
+    let mut by_cir: HashMap<(u8, String, String), Vec<usize>> = HashMap::new();
+    let mut cifp_only: HashMap<Key, usize> = HashMap::new();
+    for (ni, nc) in navs.iter().enumerate() {
+        if nc.cand.scope.is_none() {
+            by_cir
+                .entry((
+                    point_kind::class(nc.cand.kind),
+                    nc.cand.ident.clone(),
+                    nc.cand.region.clone().unwrap_or_default(),
+                ))
+                .or_default()
+                .push(ni);
+        }
     }
     for (ci, c) in cnavs.iter().enumerate() {
         if paired.get(ci).copied().unwrap_or(true) {
@@ -575,20 +765,123 @@ fn pair_navaids(
             // A terminal NDB is often the same NDB as an enroute one (same identifier, region
             // and position): it then shares that point. A different NDB with the same
             // identifier is told apart by its airport, kept as the point's scope.
-            let same = reg.by_key.get(&key_of(&cand, false)).copied().filter(|&e| {
-                reg.cands
-                    .get(e)
-                    .is_some_and(|o| pos_distance(ell, o.pos, c.pos) <= TERMINAL_NDB_SAME_M)
-            });
+            let same = by_cir
+                .get(&(point_kind::class(c.kind), c.ident.clone(), c.region.clone()))
+                .and_then(|l| {
+                    l.iter().copied().find(|&e| {
+                        navs.get(e).is_some_and(|o| {
+                            pos_distance(ell, o.cand.pos, c.pos) <= TERMINAL_NDB_SAME_M
+                        })
+                    })
+                });
             if let Some(e) = same {
-                register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), e);
+                if let Some(o) = navs.get_mut(e) {
+                    o.members.push(ci);
+                }
                 continue;
             }
             cand.scope = c.airport.clone();
         }
-        let i = reg.add(ell, cand, false, "navaid");
-        register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i);
+        let key = key_of(&cand, false);
+        if let Some(&e) = cifp_only.get(&key) {
+            // The same CIFP key twice: the first is the point, as for every other source key.
+            if let Some(o) = navs.get_mut(e) {
+                let d = pos_distance(ell, o.cand.pos, c.pos);
+                info.duplicates.push(format!(
+                    "navaid {} (region {}, scope {}) occurs twice in the sources; the second is dropped (positions {d:.1} m apart)",
+                    key.1, key.2, key.3
+                ));
+                o.members.push(ci);
+            }
+            continue;
+        }
+        cifp_only.insert(key, navs.len());
+        if cand.scope.is_none() {
+            by_cir
+                .entry((point_kind::class(c.kind), c.ident.clone(), c.region.clone()))
+                .or_default()
+                .push(navs.len());
+        }
+        navs.push(NavC {
+            cand,
+            nasr: None,
+            members: vec![ci],
+            airport: None,
+        });
     }
+
+    // Phase 3: where identities collide, the NASR navaids among them take a scope that tells
+    // them apart (the airport of a terminal NDB, else their own place, then type, then line).
+    for tier in 0..3u8 {
+        let mut count: HashMap<Key, usize> = HashMap::new();
+        for nc in &navs {
+            *count.entry(key_of(&nc.cand, false)).or_default() += 1;
+        }
+        let mut changed = false;
+        for nc in &mut navs {
+            let Some(n) = nc.nasr.and_then(|ni| src.nasr.navaids.get(ni)) else {
+                continue;
+            };
+            if count.get(&key_of(&nc.cand, false)).copied().unwrap_or(0) < 2 {
+                continue;
+            }
+            let place = format!("{}/{}", n.state_code.as_deref().unwrap_or("-"), n.city);
+            nc.cand.scope = Some(match (tier, nc.airport.as_ref()) {
+                (0, Some(a)) => a.clone(),
+                (0, None) => place,
+                (1, _) => format!("{place}/{}", n.nav_type),
+                _ => format!("{place}/{}/{}", n.nav_type, n.line),
+            });
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Registration. A CIFP reference resolves to the point its own record belongs to.
+    for nc in navs {
+        let members = nc.members;
+        let nasr_ix = nc.nasr;
+        let i = reg.add(ell, nc.cand, false, "navaid");
+        if let Some(slot) = nasr_ix.and_then(|ni| maps.nasr_nav_cand.get_mut(ni)) {
+            *slot = i;
+        }
+        for ci in members {
+            let Some(c) = cnavs.get(ci) else { continue };
+            if let Some(prev) =
+                register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i)
+            {
+                let d = match (reg.cands.get(prev), reg.cands.get(i)) {
+                    (Some(a), Some(b)) => pos_distance(ell, a.pos, b.pos),
+                    _ => f64::NAN,
+                };
+                reg.duplicates.push(format!(
+                    "CIFP navaid {} ({}, {}) names two different stations {d:.1} m apart; references resolve to the first",
+                    c.ident,
+                    c.region,
+                    cnav_label(c)
+                ));
+            }
+        }
+    }
+    for t in &tries {
+        let Some(n) = src.nasr.navaids.get(t.ni) else {
+            continue;
+        };
+        let ni = t.ni;
+        maps.nasr_nav
+            .entry((n.nav_id.clone(), n.nav_type.clone()))
+            .or_default()
+            .push(ni);
+        maps.nasr_nav_by_id
+            .entry(n.nav_id.clone())
+            .or_default()
+            .push(ni);
+    }
+    info.navaid_ambiguous.sort();
+    info.navaid_over_cap
+        .sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)));
 }
 
 /// Two NDB records of one identifier and region closer than this are one NDB, metres.

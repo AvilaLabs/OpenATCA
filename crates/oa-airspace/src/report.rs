@@ -18,6 +18,9 @@ use oa_sha256::to_hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+/// How many over-cap navaid pairs the report lists (the count is always stated).
+const OVER_CAP_LISTED: usize = 100;
+
 /// Everything the report prints.
 // A7.2: cold struct, size guard waived
 pub struct ReportInput<'a> {
@@ -353,7 +356,7 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     let _ = writeln!(o, "same-identifier pair is not merged and is listed below); thresholds by airport and designator;");
     let _ = writeln!(
         o,
-        "navaids by ident and class, nearest first within {} m (short NDB identifiers recur).",
+        "navaids by NASR id, type, city and state, paired with the nearest CIFP navaid of the same ident and class within {} m; ambiguity and a farther same-ident navaid are listed below.",
         MAX_PAIR_M
     );
     let _ = writeln!(o, "Boundary sources are explicit per row: NASR ARB (published ARTCC outline, not ERAM operational boundaries or");
@@ -631,6 +634,26 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
         }
     };
     list(&mut o, "duplicate keys within a source", &info.duplicates);
+    list(
+        &mut o,
+        "navaids not paired because the match is ambiguous",
+        &info.navaid_ambiguous,
+    );
+    let _ = writeln!(
+        o,
+        "NASR navaids whose nearest same-identifier CIFP navaid is beyond the {MAX_PAIR_M} m pairing cap (not paired; nearest first): {}",
+        info.navaid_over_cap.len()
+    );
+    for (d, text) in info.navaid_over_cap.iter().take(OVER_CAP_LISTED) {
+        let _ = writeln!(o, "    {d:.1} m  {text}");
+    }
+    if info.navaid_over_cap.len() > OVER_CAP_LISTED {
+        let _ = writeln!(
+            o,
+            "    ... and {} more, farther than these",
+            info.navaid_over_cap.len() - OVER_CAP_LISTED
+        );
+    }
     list(
         &mut o,
         "navaid type disagreements (NASR type versus CIFP class)",

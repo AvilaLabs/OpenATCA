@@ -114,6 +114,14 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ASP-013** The `oa-adapt` command line rejects unknown, duplicate and valueless flags,
   empty values and malformed identifiers, and parses SHA-256 values as exactly 64 hexadecimal
   digits.
+- **OA-ASP-014** A NASR navaid is unique by its own key (id, type, city, state) and is never
+  dropped because its derived (ident, region) equals another's: where identities would
+  collide, the NASR navaids among them take a scope (the airport of a terminal NDB, else
+  state and city). A NASR navaid pairs with a CIFP navaid (D/V, D/B or P/N) only when it is
+  the same ident and class and the nearest, within 1 NM (`MAX_PAIR_M`); two CIFP candidates in
+  the cap, or one CIFP navaid wanted by two NASR navaids, pair nobody and are reported; a
+  farther same-ident navaid is reported with its distance. A CIFP reference resolves by its
+  own ident, region, section and airport, never to another station's point.
 
 ### Traceability (oa-trace)
 

@@ -1391,3 +1391,154 @@ fn two_objects_with_one_diff_key_are_an_error_not_a_silent_overwrite() {
     assert_eq!(err.table, "unresolved");
     assert!(err.what.contains("share the diff key"), "{}", err.what);
 }
+
+/// A terminal NDB (PN) record `ident` at `airport`, region K5, at the given CIFP position text.
+fn terminal_ndb_record(ident: &str, airport: &str, pos: &str) -> String {
+    MDW_TERMINAL_NDB
+        .replace("KMDWK5 IK    K5", &format!("{airport}K5 {ident:<6}K5"))
+        .replace("N41010417W087541357", pos)
+}
+
+/// A NASR NDB row (cloned from the first fixture navaid) with its own city and position.
+fn nasr_ndb(
+    src: &oa_airspace::source::Sources,
+    id: &str,
+    city: &str,
+    lat: f64,
+    lon: f64,
+) -> oa_nasr::nav::Navaid {
+    let mut n = src.nasr.navaids[0].clone();
+    n.nav_id = id.to_string();
+    n.nav_type = "NDB".to_string();
+    n.state_code = Some("IL".to_string());
+    n.city = city.to_string();
+    n.tacan_dme_position = None;
+    n.position = oa_nasr::position::from_parts(lat, lon, lat, lon);
+    n
+}
+
+// REQ: OA-ASP-014
+#[test]
+fn two_same_ident_ndbs_in_one_region_both_survive_and_a_scoped_reference_finds_its_own() {
+    // Two NDBs `ZZ`, both region K5, at KMDW and KORD, and a third NASR-only `ZZ` in IL.
+    let cifp = cifp_edited(|t| {
+        name_terminal_ndb(t).replace("020IK   K5PN0E", "020ZZ   K5PN0E")
+            + &terminal_ndb_record("ZZ", "KMDW", "N41470000W087450000")
+            + &terminal_ndb_record("ZZ", "KORD", "N41585000W087540000")
+    });
+    let mut src = sources_from(&nasr_files(), &cifp);
+    let midway = nasr_ndb(
+        &src,
+        "ZZ",
+        "CHICAGO",
+        41.0 + 47.0 / 60.0,
+        -(87.0 + 45.0 / 60.0),
+    );
+    let ohare = nasr_ndb(
+        &src,
+        "ZZ",
+        "CHICAGO O'HARE",
+        41.0 + 58.0 / 60.0 + 50.0 / 3600.0,
+        -87.9,
+    );
+    let lone = nasr_ndb(&src, "ZZ", "ELMHURST", 41.9, -88.2);
+    src.nasr.navaids.extend([midway, ohare, lone]);
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let m = &out.model;
+    validate_model(m).expect("valid");
+    // Nothing is dropped and nothing is called a duplicate.
+    assert!(out.info.duplicates.is_empty(), "{:?}", out.info.duplicates);
+    assert!(out.info.navaid_ambiguous.is_empty());
+    let at_midway = find_point(m, key("ZZ", "K5", "KMDW", point_kind::NDB)).expect("ZZ at KMDW");
+    let at_ohare = find_point(m, key("ZZ", "K5", "KORD", point_kind::NDB)).expect("ZZ at KORD");
+    let lone_ix = find_point(m, key("ZZ", "", "IL", point_kind::NDB)).expect("NASR-only ZZ");
+    assert!(
+        bit_get(&m.points.src_nasr, at_midway.row())
+            && bit_get(&m.points.src_cifp, at_midway.row())
+    );
+    assert!(
+        bit_get(&m.points.src_nasr, at_ohare.row()) && bit_get(&m.points.src_cifp, at_ohare.row())
+    );
+    assert!(
+        bit_get(&m.points.src_nasr, lone_ix.row()) && !bit_get(&m.points.src_cifp, lone_ix.row())
+    );
+    // Each carries its own position (41 47 00 N 087 45 00 W and 41 58 50 N 087 54 00 W).
+    assert!((m.points.lat[at_midway.row()] - 417_833_333).abs() < 100);
+    assert!((m.points.lat[at_ohare.row()] - 419_805_556).abs() < 100);
+    assert!(m.disagreements.point.is_empty());
+    // The one leg that names `ZZ` at KMDW resolves to the Midway point, not the other two.
+    let refs: Vec<PointIx> = m
+        .legs
+        .fix
+        .iter()
+        .copied()
+        .filter(|&p| p != PointIx::NONE && point_key(m, p).is_some_and(|k| k.ident == "ZZ"))
+        .collect();
+    assert_eq!(refs, vec![at_midway]);
+}
+
+// REQ: OA-ASP-014
+#[test]
+fn ambiguous_and_over_cap_navaid_matches_pair_nobody_and_are_reported() {
+    // `ZX`: two different CIFP NDBs 300 m apart, one NASR NDB between them: ambiguous.
+    // `ZY`: one CIFP NDB 2.8 km from its NASR namesake: beyond the cap.
+    let cifp = cifp_edited(|t| {
+        t + &terminal_ndb_record("ZX", "KMDW", "N41470000W087450000")
+            + &terminal_ndb_record("ZX", "KORD", "N41470800W087450000")
+            + &terminal_ndb_record("ZY", "KMDW", "N41440000W087450000")
+    });
+    let mut src = sources_from(&nasr_files(), &cifp);
+    let zx = nasr_ndb(
+        &src,
+        "ZX",
+        "CHICAGO",
+        41.0 + 47.0 / 60.0 + 4.0 / 3600.0,
+        -(87.0 + 45.0 / 60.0),
+    );
+    let zy = nasr_ndb(
+        &src,
+        "ZY",
+        "CHICAGO",
+        41.0 + 45.5 / 60.0,
+        -(87.0 + 45.0 / 60.0),
+    );
+    src.nasr.navaids.extend([zx, zy]);
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let m = &out.model;
+    validate_model(m).expect("valid");
+    assert_eq!(
+        out.info.navaid_ambiguous.len(),
+        1,
+        "{:?}",
+        out.info.navaid_ambiguous
+    );
+    assert!(out.info.navaid_ambiguous[0].contains("navaid ZX NDB"));
+    assert_eq!(
+        out.info.navaid_over_cap.len(),
+        1,
+        "{:?}",
+        out.info.navaid_over_cap
+    );
+    let (d, text) = &out.info.navaid_over_cap[0];
+    assert!((*d - 2_778.0).abs() < 20.0, "{d}");
+    assert!(text.contains("navaid ZY NDB"));
+    // Nobody is dropped: ZX is the NASR point and two CIFP points, ZY one of each.
+    let count = |id: &str| {
+        (0..m.points.kind.len())
+            .filter(|&i| s(m, m.points.ident[i]) == id)
+            .count()
+    };
+    assert_eq!(count("ZX"), 3);
+    assert_eq!(count("ZY"), 2);
+    assert!(out.info.duplicates.is_empty(), "{:?}", out.info.duplicates);
+    // The report states both.
+    let report = report_for(&out, &src);
+    assert!(
+        report.contains("not paired because the match is ambiguous: 1"),
+        "{report}"
+    );
+    assert!(
+        report.contains("pairing cap (not paired; nearest first): 1"),
+        "{report}"
+    );
+}
