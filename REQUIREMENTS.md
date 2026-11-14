@@ -138,3 +138,52 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ZIP-004** A ZIP64 extra field must hold exactly the values whose central-directory field
   is 0xFFFFFFFF, once; any other combination is rejected. An archive entry cannot be built
   outside the parser.
+
+## M1 — SWIM input adapters
+
+### XML (oa-xml)
+
+- **OA-XML-001** Accepts the XML declaration with version 1.0 and encoding UTF-8 (any case) or
+  none, and an optional standalone pseudo-attribute and UTF-8 byte order mark; rejects any other
+  version, any other encoding, and a malformed declaration, each with its own error.
+- **OA-XML-002** Accepts elements, attributes in either quote style, namespace declarations,
+  comments, CDATA sections and whitespace, and produces a flat struct-of-arrays document in which
+  every name, value and text is a span into the input; whitespace-only text between markup is
+  not stored.
+- **OA-XML-003** Accepts character references (decimal and hexadecimal) and the five predefined
+  entities, and flags the attribute values and text that contain them.
+- **OA-XML-004** Rejects any DOCTYPE, wherever it appears, with a dedicated error, so that
+  entity-expansion (billion laughs) and external-entity (XXE) documents are refused.
+- **OA-XML-005** Rejects processing instructions other than the XML declaration.
+- **OA-XML-006** Rejects undefined entities and malformed or out-of-range references, with the
+  offset of the reference.
+- **OA-XML-007** Rejects input that is not valid UTF-8, with the offset of the first bad byte.
+- **OA-XML-008** Rejects characters outside the XML 1.0 `Char` production, whether raw or
+  written as a character reference.
+- **OA-XML-009** Rejects mismatched end tags, unclosed elements, input that ends inside markup,
+  and malformed tags, names and attributes.
+- **OA-XML-010** Rejects duplicate attributes on one element.
+- **OA-XML-011** Rejects text, elements and other markup before or after the root element;
+  whitespace and comments are allowed there.
+- **OA-XML-012** Rejects an undeclared namespace prefix on an element or attribute, honouring
+  declaration scope; `xml` is predefined.
+- **OA-XML-013** Resolves an element's or attribute's prefix to its namespace URI span through
+  the in-scope declarations, with a free function, including default namespaces, `xmlns=""` and
+  unprefixed attributes.
+- **OA-XML-014** Decodes a span's references into a caller-supplied buffer and fails, without
+  writing past it, when the buffer is too small.
+- **OA-XML-015** Compares a span to a string, decoding references on the fly without allocating.
+- **OA-XML-016** Enforces every limit (input bytes, depth, elements, attributes, attributes per
+  element, name length, text nodes): a message at the limit parses and one unit over is refused
+  with an error naming the limit and the byte offset.
+- **OA-XML-017** Never panics: every truncation, every single-byte replacement, deletion and
+  duplication of valid messages, and arbitrary byte strings, give a document or an error.
+- **OA-XML-018** Every error carries the byte offset of the problem and a readable message.
+- **OA-XML-019** A parser is reusable: tables keep their construction-time capacity across
+  parses (no allocation after initialisation), and no state leaks from one message to the next,
+  including after a failed parse.
+- **OA-XML-020** Every real SWIM message in the local sample (`OPENATCA_SCDS`) parses; the test
+  reports file count, maximum depth, maximum element count and throughput, and skips when the
+  variable is unset.
+- **OA-XML-021** The element table is a consistent tree: parents, first children and next
+  siblings agree, and a walk from the root visits every element once.

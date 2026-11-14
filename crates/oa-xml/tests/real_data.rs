@@ -1,0 +1,97 @@
+//! Whole-corpus test against real FAA SWIM messages. Needs `OPENATCA_SCDS` (a directory searched
+//! recursively for `*.msg` files) and skips when it is unset. The data is never copied into the
+//! repository.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use oa_xml::{Limits, Parser};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            collect(&p, out);
+        } else if p.extension().is_some_and(|e| e == "msg") {
+            out.push(p);
+        }
+    }
+}
+
+// REQ: OA-XML-020
+#[test]
+fn every_real_swim_message_parses() {
+    let Some(dir) = std::env::var_os("OPENATCA_SCDS") else {
+        eprintln!("OPENATCA_SCDS is not set: skipping the real SWIM data test");
+        return;
+    };
+    let mut files = Vec::new();
+    collect(Path::new(&dir), &mut files);
+    assert!(
+        !files.is_empty(),
+        "no *.msg files under {}",
+        dir.to_string_lossy()
+    );
+    let data: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    let total: usize = data.iter().map(Vec::len).sum();
+
+    let mut parser = Parser::new(Limits::default());
+    let mut failed = 0usize;
+    let mut max_depth = 0u32;
+    let mut max_elems = 0usize;
+    let mut depth: Vec<u32> = Vec::new();
+    for (f, bytes) in files.iter().zip(&data) {
+        match parser.parse(bytes) {
+            Ok(d) => {
+                max_elems = max_elems.max(d.elem_name.len());
+                depth.clear();
+                for p in d.elem_parent {
+                    let v = if p.0 == u32::MAX {
+                        1
+                    } else {
+                        depth[p.0 as usize] + 1
+                    };
+                    max_depth = max_depth.max(v);
+                    depth.push(v);
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                if failed <= 10 {
+                    eprintln!("FAIL {}: {e}", f.display());
+                }
+            }
+        }
+    }
+
+    // Timed pass: parse only, results discarded.
+    let rounds = 5;
+    let t = Instant::now();
+    let mut sink = 0usize;
+    for _ in 0..rounds {
+        for bytes in &data {
+            if let Ok(d) = parser.parse(bytes) {
+                sink += d.elem_name.len();
+            }
+        }
+    }
+    let secs = t.elapsed().as_secs_f64();
+    let mbps = (total * rounds) as f64 / 1e6 / secs;
+    eprintln!(
+        "real data: {} files, {} bytes, failed {failed}, max depth {max_depth}, \
+         max elements {max_elems}, {mbps:.0} MB/s ({} msg/s) [{sink}]",
+        files.len(),
+        total,
+        ((files.len() * rounds) as f64 / secs) as u64,
+    );
+    assert_eq!(failed, 0, "{failed} real messages failed to parse");
+}

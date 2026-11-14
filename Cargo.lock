@@ -42,5 +42,9 @@ name = "oa-trace"
 version = "0.0.1"
 
 [[package]]
+name = "oa-xml"
+version = "0.0.1"
+
+[[package]]
 name = "oa-zip"
 version = "0.0.1"
