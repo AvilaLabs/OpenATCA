@@ -5,12 +5,13 @@
 //!
 //! ```text
 //! oa-adsb-clip --out <file|-> [--box lat_min,lat_max,lon_min,lon_max]
-//!              [--from <time>] [--to <time>] [--allow-truncated] <part>...
+//!              [--from <time>] [--to <time>] [--frame-ms <n>] [--allow-truncated] <part>...
 //! ```
 //!
 //! The box is in degrees (default: ZAU, 38.5,46.5,-93.5,-83.5). Times are Unix seconds or
 //! `YYYY-MM-DDTHH:MM:SSZ`; the window is `[from, to)`. Parts are the pieces of one split tar in
-//! order, or a single tar. If the parts end early the tool says so and exits 3 unless
+//! order, or a single tar. A frame holds the reports within `--frame-ms` (1 to 60000, default
+//! 1000) of its first report, at most 60 000; its receive time is the first report's time. If the parts end early the tool says so and exits 3 unless
 //! `--allow-truncated` is given (the frames written are still valid). A summary goes to
 //! standard error; standard output carries frames only, and only with `--out -`.
 
@@ -19,8 +20,9 @@ use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 use oa_adsb::{
-    encode_payload, reports_extend, reports_len, scan_archive, summarize, Filter, Reports, ScanEnd,
-    ScanError, MAX_ROWS_PER_FRAME, REJECT_NAMES, ZAU_BOX,
+    encode_payload, frame_ranges, reports_extend, reports_len, scan_archive, summarize, Filter,
+    Reports, ScanEnd, ScanError, DEFAULT_FRAME_MS, MAX_FRAME_MS, MIN_FRAME_MS, REJECT_NAMES,
+    ZAU_BOX,
 };
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 
@@ -32,12 +34,13 @@ const MAX_HELD_ROWS: usize = 40 * 1024 * 1024;
 struct Args {
     out: String,
     filter: Filter,
+    frame_ms: u32,
     allow_truncated: bool,
     parts: Vec<String>,
 }
 
 fn usage() -> &'static str {
-    "usage: oa-adsb-clip --out <file|-> [--box lat_min,lat_max,lon_min,lon_max] [--from <time>] [--to <time>] [--allow-truncated] <part>..."
+    "usage: oa-adsb-clip --out <file|-> [--box lat_min,lat_max,lon_min,lon_max] [--from <time>] [--to <time>] [--frame-ms <n>] [--allow-truncated] <part>..."
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` to Unix seconds (proleptic Gregorian, UTC).
@@ -85,6 +88,7 @@ fn parse_time(s: &str) -> Result<i64, String> {
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = None;
     let mut filter = ZAU_BOX;
+    let mut frame_ms = DEFAULT_FRAME_MS;
     let mut allow_truncated = false;
     let mut parts = Vec::new();
     let mut it = args.iter();
@@ -117,6 +121,16 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 filter.from_ns = parse_time(&value("--from")?)?.saturating_mul(1_000_000_000)
             }
             "--to" => filter.to_ns = parse_time(&value("--to")?)?.saturating_mul(1_000_000_000),
+            "--frame-ms" => {
+                let v = value("--frame-ms")?;
+                frame_ms = v
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (MIN_FRAME_MS..=MAX_FRAME_MS).contains(n))
+                    .ok_or(format!(
+                        "--frame-ms must be {MIN_FRAME_MS} to {MAX_FRAME_MS}, got `{v}`"
+                    ))?;
+            }
             "--allow-truncated" => allow_truncated = true,
             "--help" | "-h" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -130,20 +144,19 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     Ok(Args {
         out,
         filter,
+        frame_ms,
         allow_truncated,
         parts,
     })
 }
 
-/// Writes `r` (already sorted by time) as frames; returns frames written.
-fn write_frames(r: &Reports, out: &mut dyn Write) -> Result<u64, String> {
+/// Writes `r` (already sorted by time) as frames of at most `frame_ms` span; returns frames
+/// written.
+fn write_frames(r: &Reports, frame_ms: u32, out: &mut dyn Write) -> Result<u64, String> {
     let mut seq = 0u64;
     let mut payload = Vec::new();
     let mut frame = vec![0u8; MAX_FRAME_LEN];
-    let n = reports_len(r);
-    let mut from = 0;
-    while from < n {
-        let to = (from + MAX_ROWS_PER_FRAME).min(n);
+    for (from, to) in frame_ranges(r, frame_ms) {
         payload.clear();
         encode_payload(&mut payload, r, from, to).map_err(|e| e.to_string())?;
         let t_ns = r.time_ns.get(from).copied().unwrap_or(0);
@@ -160,7 +173,6 @@ fn write_frames(r: &Reports, out: &mut dyn Write) -> Result<u64, String> {
         out.write_all(frame.get(..len).unwrap_or(&[]))
             .map_err(|e| e.to_string())?;
         seq += 1;
-        from = to;
     }
     Ok(seq)
 }
@@ -210,12 +222,12 @@ fn run(a: &Args) -> Result<ExitCode, String> {
     drop(held);
     let frames = if a.out == "-" {
         let mut w = BufWriter::new(io::stdout().lock());
-        let n = write_frames(&sorted, &mut w)?;
+        let n = write_frames(&sorted, a.frame_ms, &mut w)?;
         w.flush().map_err(|e| e.to_string())?;
         n
     } else {
         let mut w = BufWriter::new(File::create(&a.out).map_err(|e| format!("{}: {e}", a.out))?);
-        let n = write_frames(&sorted, &mut w)?;
+        let n = write_frames(&sorted, a.frame_ms, &mut w)?;
         w.flush().map_err(|e| e.to_string())?;
         n
     };

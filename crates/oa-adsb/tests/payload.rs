@@ -160,3 +160,77 @@ fn summary_counts_aircraft_nac_p_and_position_jumps() {
     assert_eq!((s2.aircraft, s2.pairs, s2.jumps, s2.jitter), (2, 5, 2, 1));
     assert_eq!(summarize(&Reports::default()), Summary::default());
 }
+
+fn at_times(ms: &[i64]) -> Reports {
+    let mut r = Reports::default();
+    for &m in ms {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + m * 1_000_000;
+        reports_push(&mut r, &row);
+    }
+    r
+}
+
+// REQ: OA-ADSB-019
+#[test]
+fn frame_ranges_split_by_time_and_by_count_and_cover_every_row_once() {
+    // A report exactly `frame_ms` after the first starts a new frame; one ms earlier does not.
+    let r = at_times(&[0, 999, 1000, 1500, 1999, 2000, 2000, 5000]);
+    assert_eq!(frame_ranges(&r, 1000), [(0, 2), (2, 5), (5, 7), (7, 8)]);
+    assert_eq!(
+        frame_ranges(&r, 1),
+        [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 7), (7, 8)]
+    );
+    assert_eq!(frame_ranges(&r, 60_000), [(0, 8)]);
+    // Out-of-range spans are clamped, never zero-length frames.
+    assert_eq!(frame_ranges(&r, 0), frame_ranges(&r, 1));
+    assert_eq!(frame_ranges(&r, u32::MAX), [(0, 8)]);
+    assert!(frame_ranges(&Reports::default(), 1000).is_empty());
+    // Count: many reports in one instant split at the per-frame maximum.
+    let n = MAX_ROWS_PER_FRAME * 2 + 7;
+    let r = at_times(&vec![0; n]);
+    let m = MAX_ROWS_PER_FRAME;
+    assert_eq!(frame_ranges(&r, 1000), [(0, m), (m, 2 * m), (2 * m, n)]);
+    // Property: contiguous, non-empty, in order, covering every row, within the limits.
+    let mut ms = Vec::new();
+    let mut t = 0i64;
+    for i in 0..5000i64 {
+        t += (i * 7919) % 400;
+        ms.push(t);
+    }
+    let r = at_times(&ms);
+    for span in [1, 10, 250, 1000, 60_000] {
+        let ranges = frame_ranges(&r, span);
+        let mut next = 0;
+        for &(a, b) in &ranges {
+            assert_eq!(a, next);
+            assert!(b > a && b - a <= MAX_ROWS_PER_FRAME);
+            assert!(r.time_ns[b - 1] - r.time_ns[a] < i64::from(span) * 1_000_000);
+            next = b;
+        }
+        assert_eq!(next, ms.len());
+    }
+}
+
+// REQ: OA-ADSB-020
+#[test]
+fn payloads_of_any_grouping_decode_to_the_same_reports() {
+    // An old clip (one frame of many seconds) and a new one (a frame per second) hold the same
+    // reports; decoding either gives the same rows in the same order.
+    let r = at_times(&(0..4000).map(|i| i * 10).collect::<Vec<_>>());
+    let decode_all = |ranges: &[(usize, usize)]| {
+        let mut out = Reports::default();
+        for &(a, b) in ranges {
+            let mut p = Vec::new();
+            encode_payload(&mut p, &r, a, b).unwrap();
+            assert_eq!(decode_payload(&p, &mut out).unwrap(), b - a);
+        }
+        out
+    };
+    let old = decode_all(&[(0, 4000)]);
+    let new = decode_all(&frame_ranges(&r, DEFAULT_FRAME_MS));
+    assert!(frame_ranges(&r, DEFAULT_FRAME_MS).len() > 30);
+    assert_eq!(old, new);
+    assert_eq!(old, r);
+}

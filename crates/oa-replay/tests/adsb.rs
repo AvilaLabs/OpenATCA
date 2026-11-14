@@ -12,8 +12,8 @@ mod common;
 
 use common::*;
 use oa_adsb::{
-    encode_payload, reports_len, reports_push, Reports, Row, F_GROUND, NONE_I32, NONE_U16, NONE_U8,
-    NON_ICAO, PAYLOAD_MAGIC, RECORD_LEN, ROW_EMPTY,
+    encode_payload, frame_ranges, reports_len, reports_push, Reports, Row, F_GROUND, NONE_I32,
+    NONE_U16, NONE_U8, NON_ICAO, PAYLOAD_MAGIC, RECORD_LEN, ROW_EMPTY,
 };
 use oa_feed::Kind;
 use oa_replay::{
@@ -562,4 +562,59 @@ fn a_mixed_swim_and_adsb_replay_is_deterministic_in_any_order_and_chunking() {
     );
     assert_ne!(snapshot(&q).hash, want.hash);
     assert_eq!(q.table.live, p.table.live);
+}
+
+// REQ: OA-RPL-040
+#[test]
+fn a_one_second_frame_adsb_clip_interleaves_with_a_swim_feed_at_one_second() {
+    // 30 s of ADS-B at 10 reports a second, framed as `oa-adsb-clip` does by default, and a
+    // TFMS frame every 3 s.
+    let rows: Vec<Row> = (0..300i64)
+        .map(|i| row(0xA2_0000 + (i % 3) as u32, T0 + i * NS / 10))
+        .collect();
+    let r = reports(&rows);
+    let ranges = frame_ranges(&r, 1000);
+    assert_eq!(ranges.len(), 30);
+    let mut a = Vec::new();
+    for (seq, &(from, to)) in ranges.iter().enumerate() {
+        let mut p = Vec::new();
+        encode_payload(&mut p, &r, from, to).unwrap();
+        a.extend(frame(1, seq as u64, rows[from].time_ns, &p));
+    }
+    let mut t = Vec::new();
+    for k in 0..10i64 {
+        t.extend(frame(1, k as u64, T0 + k * 3 * NS + NS / 2, b"x"));
+    }
+    let mut got: Vec<(FeedKind, i64)> = Vec::new();
+    merge_streams(
+        vec![
+            spec_from_bytes(FeedKind::Adsb, vec![a]),
+            spec_from_bytes(FeedKind::Tfms, vec![t]),
+        ],
+        4096,
+        &mut |m| got.push((m.feed, m.recv_ns)),
+    )
+    .unwrap();
+    assert_eq!(got.len(), 40);
+    assert!(got.windows(2).all(|w| w[0].1 <= w[1].1));
+    // Three ADS-B frames sit between neighbouring TFMS frames, and no ADS-B frame is more than
+    // a second after the previous one.
+    let adsb: Vec<i64> = got
+        .iter()
+        .filter(|g| g.0 == FeedKind::Adsb)
+        .map(|g| g.1)
+        .collect();
+    assert!(adsb.windows(2).all(|w| w[1] - w[0] <= NS));
+    let mut run = 0;
+    let mut runs = Vec::new();
+    for g in &got {
+        if g.0 == FeedKind::Adsb {
+            run += 1;
+        } else {
+            runs.push(run);
+            run = 0;
+        }
+    }
+    assert!(runs.iter().all(|&n| n <= 3), "{runs:?}");
+    assert_eq!(runs.iter().sum::<i32>() + run, 30);
 }

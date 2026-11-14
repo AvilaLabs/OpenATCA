@@ -917,6 +917,8 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
 - **OA-RPL-039** Replaying a real ADS-B clip written by `oa-adsb-clip` (`OPENATCA_ADSB_CLIP`) twice
   and with another read size gives identical checkpoints and final hash, with no error and no refused
   aircraft (skipped if unset).
+- **OA-RPL-040** An `oa-replay` merge of a one-second-frame ADS-B clip and a SWIM feed gives the
+  frames in receive-time order, interleaved at about one-second granularity.
 
 ## M5 — Terrain and obstacles
 
@@ -1117,6 +1119,16 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
   the first 8 MiB, or all of it with `OPENATCA_ADSB_FULL`) no trace is refused and no row is
   rejected, reports are kept in the ZAU box, and under 0.1 % of consecutive pairs are position
   jumps; the test prints the counts and skips when the data is absent.
+- **OA-ADSB-017** `oa-adsb-clip` starts a new frame when the next report is at least
+  `--frame-ms` (default 1000) after the frame's first report, stamps each frame with its first
+  report's time, and writes every report exactly once and in time order whatever the span.
+- **OA-ADSB-018** `--frame-ms` outside 1 to 60000, or not a whole number, is refused with exit 2
+  and the usage line; 1 and 60000 are accepted.
+- **OA-ADSB-019** The frame splitter ends a frame at the span (a report exactly one span later
+  starts the next) or at 60 000 reports, clamps the span to 1 to 60000 ms, and its ranges are
+  contiguous, non-empty, in order and cover every report once.
+- **OA-ADSB-020** A clip frames reports with any grouping, including the earlier one of up to
+  60 000 reports per frame, and `decode_payload` gives the same reports in the same order.
 ## Weather aloft (oa-grib2)
 
 GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO

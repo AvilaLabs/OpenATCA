@@ -17,6 +17,36 @@ pub const RECORD_LEN: usize = 64;
 pub const MAX_ROWS_PER_FRAME: usize = 60_000;
 const _: () = assert!(PAYLOAD_HEADER_LEN + MAX_ROWS_PER_FRAME * RECORD_LEN <= 4 * 1024 * 1024);
 
+/// Frame time span of the clip tool when `--frame-ms` is not given, in milliseconds.
+pub const DEFAULT_FRAME_MS: u32 = 1000;
+/// Smallest and largest accepted `--frame-ms`.
+pub const MIN_FRAME_MS: u32 = 1;
+pub const MAX_FRAME_MS: u32 = 60_000;
+
+/// Splits time-sorted `r` into frame row ranges `(from, to)`: a range ends when the next report
+/// is at least `frame_ms` after the range's first report, or at [`MAX_ROWS_PER_FRAME`] rows.
+/// The ranges are in order, non-empty and cover every row once. `frame_ms` is clamped to
+/// [`MIN_FRAME_MS`]..=[`MAX_FRAME_MS`].
+pub fn frame_ranges(r: &Reports, frame_ms: u32) -> Vec<(usize, usize)> {
+    let span_ns = i64::from(frame_ms.clamp(MIN_FRAME_MS, MAX_FRAME_MS)) * 1_000_000;
+    let n = reports_len(r);
+    let mut out = Vec::new();
+    let mut from = 0;
+    while from < n {
+        let t0 = r.time_ns.get(from).copied().unwrap_or(0);
+        let mut to = from + 1;
+        while to < n
+            && to - from < MAX_ROWS_PER_FRAME
+            && r.time_ns.get(to).copied().unwrap_or(0).saturating_sub(t0) < span_ns
+        {
+            to += 1;
+        }
+        out.push((from, to));
+        from = to;
+    }
+    out
+}
+
 /// Why a payload was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadError {

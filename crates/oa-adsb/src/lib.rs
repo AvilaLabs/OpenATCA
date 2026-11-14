@@ -73,8 +73,8 @@ mod trace;
 
 pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
 pub use frames::{
-    decode_payload, encode_payload, PayloadError, MAX_ROWS_PER_FRAME, PAYLOAD_HEADER_LEN,
-    PAYLOAD_MAGIC, RECORD_LEN,
+    decode_payload, encode_payload, frame_ranges, PayloadError, DEFAULT_FRAME_MS, MAX_FRAME_MS,
+    MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
 };
 pub use summary::{summarize, Summary, MAX_JUMP_KT, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};
