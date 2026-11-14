@@ -17,6 +17,8 @@ members = [
     "crates/oa-notam",
     "crates/oa-tfms",
     "crates/oa-display",
+    "crates/oa-tiff",
+    "crates/oa-dof",
     "tools/oa-trace",
 ]
 

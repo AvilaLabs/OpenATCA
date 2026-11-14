@@ -880,3 +880,95 @@ the FAA event extension).
   identically to the unsplit recording, with the same checkpoints and final state hash.
 - **OA-RPL-029** TFMS and FNS frames are counted per feed in a "not yet applied" bucket until their
   decoders exist; they change no flight state and raise no error.
+
+## M5 — Terrain and obstacles
+
+### GeoTIFF elevation (oa-tiff)
+
+- **OA-TIFF-001** Reads classic TIFF 6.0 in little and big endian; a bad byte-order mark or magic
+  number is refused, BigTIFF (magic 43) is refused with a typed error, and truncated headers are
+  errors.
+- **OA-TIFF-002** Reads strips (any rows per strip, including a short last strip) and tiles
+  (including tiles that overhang the right and bottom edges), uncompressed, giving the samples
+  that were written.
+- **OA-TIFF-003** Decompresses Deflate (tags 8 and 32946) through the zlib wrapper, checking the
+  header, refusing a preset dictionary and verifying the Adler-32 and the exact decompressed size.
+- **OA-TIFF-004** Decodes TIFF 6.0 LZW (MSB-first, early change, clear codes, table full) to
+  exactly the size the segment needs, and refuses bad codes, streams that end early and streams
+  that run long.
+- **OA-TIFF-005** Applies predictor 2 (horizontal differencing, 16-bit integers) and predictor 3
+  (floating point byte planes), in both byte orders, with every compression and in both layouts,
+  restoring float bit patterns exactly; a predictor that does not fit the sample type is refused.
+- **OA-TIFF-006** Reads one sample per pixel as 32-bit float or 16-bit signed integer; other
+  layouts, other sample counts, planar data and other compressions are refused with a typed error.
+- **OA-TIFF-007** Places samples by the GeoTIFF raster-type convention: for `PixelIsArea` the
+  tiepoint is the outer corner of the pixel and samples are half a pixel inside it, for
+  `PixelIsPoint` the tiepoint is the sample; a tiepoint away from the raster origin is honoured.
+- **OA-TIFF-008** Accepts only geographic rasters in NAD83 (4269) or WGS 84 (4326) with axis-aligned
+  pixels, one tiepoint and a positive finite pixel scale inside the valid latitude and longitude
+  range; missing or inconsistent georeferencing and `ModelTransformation` are refused.
+- **OA-TIFF-009** Turns the `GDAL_NODATA` value and any NaN into NaN samples and counts them; an
+  unparsable nodata text is refused.
+- **OA-TIFF-010** Enforces stated limits (file, dimension, pixel count, segment, tag value count,
+  IFD entries, ASCII length) and never panics: every truncation, byte inversion and seeded random
+  input gives a grid or an error; a repeated tag is refused.
+- **OA-TIFF-011** `grid_elevation_at` interpolates bilinearly, is exact at samples, reproduces a
+  plane exactly, reports points beyond the outermost samples as outside, and reports a cell with
+  any nodata corner as no data rather than averaging the rest.
+- **OA-TIFF-012** `grid_max_in_radius` returns the highest valid sample within a great-circle
+  radius with its position, counts valid and nodata samples, reports whether the circle's edge lies
+  inside the data, and refuses a bad centre or a radius that is not positive, finite and within the
+  limit.
+- **OA-TIFF-013** `grid_max_in_polygon` does the same inside a polygon (even-odd in the
+  latitude/longitude plane, concave polygons included), and refuses polygons with fewer than three
+  or too many vertices, non-finite vertices or a span over 180 degrees of longitude.
+- **OA-TIFF-014** A tile set answers elevation, radius and polygon queries across tile edges for
+  both overlapping tiles and abutting tiles whose lattices line up, agrees with the same query on
+  the undivided grid, does not invent a value across tiles that do not line up, and prefers a tile
+  with data over one with nodata.
+- **OA-TIFF-015** Tile sets over the tile limit are refused, empty sets answer outside, and
+  polygons over the vertex limit are refused.
+- **OA-TIFF-016** On the real USGS 3DEP 1 arc-second tiles (`OPENATCA_DATA`) every tile is 3612 by
+  3612, pixel-is-area, its nominal degree begins on an integer degree at a pixel corner, shared
+  borders with the east and north neighbours coincide in position, agree in value to within a metre
+  for all but a fraction of a percent of samples, and match far better than the same overlap shifted
+  by one pixel; skipped when the variable is unset.
+- **OA-TIFF-017** For every NASR airport inside the loaded tiles the 3DEP elevation at the airport
+  reference point is compared with the surveyed field elevation; the test reports count, median,
+  95th percentile and the ten worst per airport kind, and the same comparison with the sampling point
+  moved by half and whole pixels; it requires a median under 15 ft and a 95th percentile under 60 ft
+  for land airports; skipped when the data is absent.
+- **OA-TIFF-018** For every DOF obstacle inside the loaded tiles `AMSL - AGL` is compared with the
+  3DEP elevation at its position, verified and unverified separately; the test reports median,
+  95th percentile and the ten worst, and requires a median under 25 ft for verified obstacles;
+  skipped when the data is absent.
+- **OA-TIFF-019** On two adjacent real tiles a tile set answers elevation points on both sides of
+  the shared edge to within a metre of the owning tile, and a radius across the seam returns the
+  highest sample of both tiles; skipped when the data is absent.
+
+### Digital Obstacle File (oa-dof)
+
+- **OA-DOF-001** Parses every field of the FAA DOF line format (OAS code and number, verification,
+  country, state, city, latitude and longitude with hemisphere, type, quantity, AGL and AMSL feet
+  including negative AMSL, lighting, horizontal and vertical accuracy, marking, FAA study number,
+  action, Julian date) into struct-of-arrays with the currency date of the file.
+- **OA-DOF-002** Positions are exact in 1e-7 degrees for seconds to 0.01, signed by hemisphere;
+  degrees, minutes, seconds and hemisphere are range checked, the poles and the antimeridian are
+  accepted and anything beyond them is refused.
+- **OA-DOF-003** Accuracy codes decode per the README tables to feet and metres (horizontal 1 to 8,
+  vertical A to H; unknown, blank and invalid codes decode to none), and every lighting and marking
+  letter of the README has a name.
+- **OA-DOF-004** Each field that fails validation, including separator columns, rejects the line
+  with a typed error naming the field and the 1-based line; short and over-long lines are rejected
+  with their length; Julian dates are checked against the calendar including leap years.
+- **OA-DOF-005** Counts physical lines and rejected lines (the kept list is capped, the total is
+  not), accepts CRLF and LF and a missing final newline, skips nothing silently, and refuses files
+  with a missing or malformed currency line or header as a whole.
+- **OA-DOF-006** The bounding-box query returns the obstacles inside a latitude/longitude box with
+  inclusive edges and supports boxes that cross the antimeridian.
+- **OA-DOF-007** The parser never panics: every truncation, byte replacement and seeded random
+  input gives a file or an error, and the accepted columns stay the same length with
+  lines = accepted + rejected + header.
+- **OA-DOF-008** The real `DOF.DAT` (`OPENATCA_DATA`) parses with no rejected line, the line and
+  obstacle counts agree, the per-state and per-country files are subsets whose total falls short
+  by under 100 obstacles, and positions are inside the world; skipped when the data is absent.

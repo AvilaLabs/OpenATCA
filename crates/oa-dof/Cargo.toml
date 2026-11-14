@@ -1,0 +1,16 @@
+[package]
+name = "oa-dof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# F1: path dependency inside this workspace, to read the FAA zip in the real-data test.
+oa-zip = { path = "../oa-zip" }
