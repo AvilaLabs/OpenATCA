@@ -116,7 +116,10 @@ section is what we intend to build first.
 5. **Open data model.** Every internal message has a published schema. External formats
    (ASTERIX, ARINC 424, AIXM, FIXM, the SWIM feeds) are handled at the edge by adapters, so the
    core never depends on any one source.
-6. **Minimal dependencies.** Core logic is written in-house. Outside code only for proven
+6. **Data-oriented design.** The engineering law is docs/RULESET.md (Connor's zat4 ruleset adapted
+   to Rust): plain data in struct-of-arrays, typed indexes, compile-time size guards, a pure core
+   with time as an input, no allocation after startup in the real-time core.
+6a. **Minimal dependencies.** Core logic is written in-house. Outside code only for proven
    cryptography and entropy, each exception recorded with its reason.
 
 7. **The controller display is safety over flash** (Connor, 2026-11-13). Data is shown with as
