@@ -77,6 +77,8 @@ pub fn pdftotext(path: &Path) -> Result<String, String> {
 pub fn pdf_path_for(dir: &Path, facility: &str, set: &str) -> PathBuf {
     if set == "TAV" {
         dir.join(format!("{facility}_TAV.pdf"))
+    } else if let Some(sub) = set.strip_prefix("SUB ") {
+        dir.join(format!("{facility}_{sub}_MVA.pdf"))
     } else {
         dir.join(format!("{facility}_MVA_{set}.pdf"))
     }
@@ -90,7 +92,7 @@ pub fn compare_chart(m: &Model, chart: usize, labels: &[(String, i32)]) -> PdfRe
         .next()
         .map(|i| facility_text(m, SectorIx(i as u32)))
         .unwrap_or_default();
-    let set = m.chart_set.get(chart).map_or("?", |s| s.name());
+    let set = crate::chart_set_text(m, chart);
     let mut rep = PdfReport {
         chart: format!("{fac} {set}"),
         xml_sectors: secs.len(),
@@ -130,8 +132,8 @@ pub fn check_all(m: &Model, dir: &Path) -> Vec<PdfStatus> {
         .map(|c| {
             let secs = sector_range_of_chart(m, c);
             let fac = facility_text(m, SectorIx(secs.start as u32));
-            let set = m.chart_set.get(c).map_or("?", |s| s.name());
-            let path = pdf_path_for(dir, &fac, set);
+            let set = crate::chart_set_text(m, c);
+            let path = pdf_path_for(dir, &fac, &set);
             if !path.is_file() {
                 return PdfStatus::Unavailable(format!("{} is absent", path.display()));
             }

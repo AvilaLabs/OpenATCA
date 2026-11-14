@@ -5,22 +5,27 @@
 //! table, closing vertex included, exactly as the source gives it. Charts (one per facility and
 //! set) own contiguous ranges of sectors.
 
-use crate::{MAX_FACILITY_BYTES, MAX_SECTOR_ID_BYTES};
+use crate::{MAX_FACILITY_BYTES, MAX_SECTOR_ID_BYTES, MAX_SUB_BYTES};
 use std::fmt;
 use std::ops::Range;
 
 /// Which published set a chart belongs to. FUS3 and FUS5 are the two MVA sets of a facility (3
-/// and 5 nautical mile separation sectors); TAV is the center's Minimum IFR Altitude chart.
+/// and 5 nautical mile separation sectors); TAV is the center's Minimum IFR Altitude chart; Sub
+/// is a separate MVA chart for one sub-area of a facility (`SAV_LHW_MVA`: Wright Army Airfield),
+/// whose sub-area name is kept in [`Model::sub`] / [`Model::chart_sub`]. A Sub chart states no
+/// separation standard of its own, so it is never folded into a FUS3 or FUS5 query
+/// (see [`crate::min_altitude_with_sub`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum SetKind {
     Fus3 = 0,
     Fus5 = 1,
     Tav = 2,
+    Sub = 3,
 }
 
 /// Display names of [`SetKind`], indexed by the discriminant.
-pub const SET_NAMES: [&str; 3] = ["FUS3", "FUS5", "TAV"];
+pub const SET_NAMES: [&str; 4] = ["FUS3", "FUS5", "TAV", "SUB"];
 
 impl SetKind {
     /// The published name (`FUS3`, `FUS5`, `TAV`).
@@ -29,17 +34,18 @@ impl SetKind {
             SetKind::Fus3 => "FUS3",
             SetKind::Fus5 => "FUS5",
             SetKind::Tav => "TAV",
+            SetKind::Sub => "SUB",
         }
     }
 }
 
-/// A set name that is not FUS3, FUS5 or TAV.
+/// A set name that is not FUS3, FUS5, TAV or SUB.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SetKindParseError;
 
 impl fmt::Display for SetKindParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "set must be FUS3, FUS5 or TAV")
+        write!(f, "set must be FUS3, FUS5, TAV or SUB")
     }
 }
 
@@ -50,6 +56,7 @@ impl std::str::FromStr for SetKind {
             "FUS3" => Ok(SetKind::Fus3),
             "FUS5" => Ok(SetKind::Fus5),
             "TAV" => Ok(SetKind::Tav),
+            "SUB" => Ok(SetKind::Sub),
             _ => Err(SetKindParseError),
         }
     }
@@ -75,6 +82,9 @@ pub struct Model {
     pub facility: Vec<[u8; MAX_FACILITY_BYTES]>,
     /// The chart set of the sector.
     pub set: Vec<SetKind>,
+    /// Sub-area name of the sector's chart (`LHW`), ASCII, NUL padded; all NUL unless the set is
+    /// [`SetKind::Sub`].
+    pub sub: Vec<[u8; MAX_SUB_BYTES]>,
     /// Sector identifier, ASCII, NUL padded.
     pub sector_id: Vec<[u8; MAX_SECTOR_ID_BYTES]>,
     /// Minimum altitude, feet MSL.
@@ -102,6 +112,8 @@ pub struct Model {
     pub chart_facility: Vec<[u8; MAX_FACILITY_BYTES]>,
     /// Chart set.
     pub chart_set: Vec<SetKind>,
+    /// Chart sub-area name, as in `sub`.
+    pub chart_sub: Vec<[u8; MAX_SUB_BYTES]>,
     /// First sector of the chart.
     pub chart_first_sector: Vec<u32>,
     /// Sectors in the chart.
@@ -176,4 +188,14 @@ pub fn sector_name_text(m: &Model, s: SectorIx) -> String {
         .get(s.0 as usize)
         .map(|b| padded_text(b))
         .unwrap_or_default()
+}
+
+/// The set of chart `c` as text for labels and PDF names: `FUS3`, `FUS5`, `TAV`, or `SUB LHW` for
+/// a sub-area chart; `?` when the chart does not exist.
+pub fn chart_set_text(m: &Model, c: usize) -> String {
+    match (m.chart_set.get(c), m.chart_sub.get(c)) {
+        (Some(SetKind::Sub), Some(b)) => format!("SUB {}", padded_text(b)),
+        (Some(s), _) => s.name().to_string(),
+        _ => "?".to_string(),
+    }
 }

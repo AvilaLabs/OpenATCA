@@ -316,17 +316,11 @@ fn refuses_bad_values() {
     ));
     assert!(matches!(
         bad("RFD_MVA_FUS3", "RFD_MVA_FUS4"),
-        MvaError::BadValue {
-            field: "message description",
-            ..
-        }
+        MvaError::UnknownChartName { .. }
     ));
     assert!(matches!(
         bad("RFD_MVA", "rfd_MVA"),
-        MvaError::BadValue {
-            field: "message description",
-            ..
-        }
+        MvaError::UnknownChartName { .. }
     ));
     assert!(matches!(
         bad(
@@ -719,6 +713,7 @@ fn raw_model(rings_: &[&[(i32, i32)]]) -> Model {
     let mut m = new_model();
     m.facility.push(*b"TST\0");
     m.set.push(SetKind::Fus3);
+    m.sub.push([0; MAX_SUB_BYTES]);
     m.sector_id.push(*b"A\0\0\0\0\0\0\0");
     m.min_alt_ft.push(2500);
     m.ring_first.push(0);
@@ -1032,4 +1027,143 @@ fn terrain_scan_takes_samples_inside_the_polygon_only() {
         Some(-500.0)
     );
     assert_eq!(clearance::margin_ft(&mk(None, None, 2500)), None);
+}
+
+fn one_sq(name: &'static str, alt: i32, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Fix> {
+    vec![Fix {
+        name,
+        alt,
+        rings: vec![sq(x0, y0, x1, y1)],
+    }]
+}
+
+// REQ: OA-MVA-021
+#[test]
+fn sub_area_chart_names_load_with_their_sub_area() {
+    let (m, l) = load("SAV_LHW_MVA_2022", &one_sq("A", 1500, 0.0, 0.0, 1.0, 1.0)).unwrap();
+    assert_eq!(l.sectors, 1);
+    assert_eq!(m.set, vec![SetKind::Sub]);
+    assert_eq!(facility_text(&m, SectorIx(0)), "SAV");
+    assert_eq!(&m.sub[0], b"LHW\0");
+    assert_eq!(&m.chart_sub[0], b"LHW\0");
+    assert_eq!(chart_set_text(&m, 0), "SUB LHW");
+    // The edition label is optional, a year and a version are accepted.
+    for d in [
+        "SAV_LHW_MVA",
+        "SAV_LHW_MVA_2022_v2",
+        "SAV_LHW_MVA_v1",
+        "FHU_FHU_MVA_2024",
+    ] {
+        assert_eq!(
+            load(d, &one_sq("A", 1500, 0.0, 0.0, 1.0, 1.0))
+                .unwrap()
+                .0
+                .set,
+            vec![SetKind::Sub]
+        );
+    }
+    // Older names are unchanged and keep an empty sub-area.
+    let f = load("ALO_MVA_FUS3_2024", &one_sq("A", 2000, 0.0, 0.0, 1.0, 1.0))
+        .unwrap()
+        .0;
+    assert_eq!(&f.sub[0], &[0u8; MAX_SUB_BYTES]);
+    assert_eq!(chart_set_text(&f, 0), "FUS3");
+    // The same facility and sub-area twice is a duplicate; another sub-area is not.
+    let mut m = new_model();
+    let mut p = new_parser().unwrap();
+    let mut add = |d: &str| {
+        load_message(
+            &mut m,
+            &mut p,
+            message(d, MVA, &one_sq("A", 1500, 0.0, 0.0, 1.0, 1.0)).as_bytes(),
+        )
+    };
+    assert!(add("SAV_LHW_MVA_2022").is_ok());
+    assert!(add("SAV_HXD_MVA_2022").is_ok());
+    assert!(add("SAV_MVA_FUS3_2022").is_ok());
+    assert!(matches!(
+        add("SAV_LHW_MVA_2023"),
+        Err(MvaError::DuplicateChart { set, .. }) if set == "SUB LHW"
+    ));
+    assert_eq!(chart_count(&m), 3);
+}
+
+// REQ: OA-MVA-022
+#[test]
+fn unknown_chart_names_are_refused_with_a_clear_error() {
+    for d in [
+        "HLN_MVA_MULTI",
+        "ZUA_MVA_CENRAP",
+        "TWF_BYI_VOR_MVA",
+        "ZLC_GTF_MVA_FUS5",
+        "D01_DEN_PUB_MVA_FUS3",
+        "ZHN_ITO%20ASR8_MVA",
+        "SAV_LHW_MVA_20X2",
+        "SAV_LHW_MVA_2022_x",
+        "SAV_LHW_MVA_2022_v1_extra",
+        "SAV_LHWWW_MVA",
+        "SAV_lhw_MVA",
+        "SAV_MVA_MVA",
+        "SAV",
+    ] {
+        let r = load(d, &one_sq("A", 1500, 0.0, 0.0, 1.0, 1.0));
+        match r {
+            Err(MvaError::UnknownChartName { name, .. }) => assert_eq!(name, d),
+            other => panic!("{d:?}: {other:?}"),
+        }
+    }
+    let e = load("HLN_MVA_MULTI", &one_sq("A", 1500, 0.0, 0.0, 1.0, 1.0)).unwrap_err();
+    assert!(e
+        .to_string()
+        .contains("unknown chart name \"HLN_MVA_MULTI\""));
+}
+
+// REQ: OA-MVA-023
+#[test]
+fn sub_area_charts_are_queried_apart_and_joined_conservatively() {
+    let mut m = new_model();
+    let mut p = new_parser().unwrap();
+    for (d, alt, x1) in [
+        ("SAV_MVA_FUS3_2024", 2000, 2.0),
+        ("SAV_LHW_MVA_2022", 2500, 1.0),
+        ("CHS_LHW_MVA_2022", 4000, 1.0),
+    ] {
+        load_message(
+            &mut m,
+            &mut p,
+            message(d, MVA, &one_sq("A", alt, 0.0, 0.0, x1, 1.0)).as_bytes(),
+        )
+        .unwrap();
+    }
+    let at = |lat, lon, set| min_altitude_at(&m, lat, lon, set).unwrap();
+    // FUS3 does not see the sub-area chart; the Sub set sees both facilities' sub charts.
+    assert_eq!(at(0.5, 0.5, SetKind::Fus3).unwrap().min_alt_ft, 2000);
+    assert_eq!(at(0.5, 0.5, SetKind::Sub).unwrap().sectors, 2);
+    // Joined for SAV: the higher of FUS3 (2000) and SAV's own sub chart (2500); CHS's is ignored.
+    let j = min_altitude_with_sub(&m, 0.5, 0.5, SetKind::Fus3, "SAV")
+        .unwrap()
+        .unwrap();
+    assert_eq!((j.min_alt_ft, j.sectors), (2500, 2));
+    // Outside the sub chart the FUS3 answer stands; a FUS5 query finds nothing.
+    let j = min_altitude_with_sub(&m, 0.5, 1.5, SetKind::Fus3, "SAV")
+        .unwrap()
+        .unwrap();
+    assert_eq!((j.min_alt_ft, j.sectors), (2000, 1));
+    // A sub chart alone answers when the set has no chart there.
+    let j = min_altitude_with_sub(&m, 0.5, 0.5, SetKind::Fus5, "SAV")
+        .unwrap()
+        .unwrap();
+    assert_eq!((j.min_alt_ft, j.sectors), (2500, 1));
+    assert_eq!(
+        min_altitude_with_sub(&m, 5.0, 5.0, SetKind::Fus3, "SAV"),
+        Ok(None)
+    );
+    assert_eq!(
+        min_altitude_with_sub(&m, 95.0, 0.0, SetKind::Fus3, "SAV"),
+        Err(MvaError::BadCoordinate)
+    );
+    assert_eq!(
+        pdf::pdf_path_for(std::path::Path::new("d"), "SAV", "SUB LHW"),
+        std::path::Path::new("d/SAV_LHW_MVA.pdf")
+    );
 }

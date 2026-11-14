@@ -11,8 +11,8 @@
 
 use oa_mva::check::{clearance, coverage, pdf, rings};
 use oa_mva::{
-    chart_count, facility_text, load_directory, sector_count, sector_range_of_chart, Model,
-    SectorIx, SetKind,
+    chart_count, chart_set_text, facility_text, load_directory, sector_count,
+    sector_range_of_chart, Model, SectorIx, SetKind,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,7 +72,7 @@ fn chart_label(m: &Model, c: usize) -> String {
     format!(
         "{} {}",
         facility_text(m, SectorIx(s as u32)),
-        m.chart_set.get(c).map_or("?", |s| s.name())
+        chart_set_text(m, c)
     )
 }
 
@@ -117,7 +117,7 @@ fn main() -> ExitCode {
         m.vert_lat_e7.len()
     );
     println!("== Altitude ranges (feet MSL)");
-    for set in [SetKind::Fus3, SetKind::Fus5, SetKind::Tav] {
+    for set in [SetKind::Fus3, SetKind::Fus5, SetKind::Tav, SetKind::Sub] {
         let alts: Vec<i32> = (0..sector_count(m))
             .filter(|&i| m.set.get(i) == Some(&set))
             .filter_map(|i| m.min_alt_ft.get(i).copied())
@@ -273,7 +273,7 @@ fn run_clearance(
         .map(|i| SectorIx(i as u32))
         .collect();
     let res = clearance::clearance(m, &sectors, tdir, &dof)?;
-    for set in [SetKind::Fus3, SetKind::Fus5, SetKind::Tav] {
+    for set in [SetKind::Fus3, SetKind::Fus5, SetKind::Tav, SetKind::Sub] {
         let mut mg: Vec<f64> = res
             .iter()
             .filter(|c| c.set == set.name())
