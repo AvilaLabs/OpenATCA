@@ -1,0 +1,27 @@
+[package]
+name = "oa-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates only; none is an outside dependency (RULESET F1).
+oa-feed = { path = "../oa-feed" }
+oa-xml = { path = "../oa-xml" }
+oa-fixm = { path = "../oa-fixm" }
+oa-tbfm = { path = "../oa-tbfm" }
+oa-sha256 = { path = "../oa-sha256" }
+oa-zip = { path = "../oa-zip" }
+
+[dev-dependencies]
+# Workspace crate: compresses test recordings to .oaf.gz.
+oa-deflate = { path = "../oa-deflate" }
+
+[[bin]]
+name = "oa-replay"
+path = "src/main.rs"

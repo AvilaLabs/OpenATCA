@@ -65,6 +65,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-replay"
+version = "0.0.1"
+dependencies = [
+ "oa-deflate",
+ "oa-feed",
+ "oa-fixm",
+ "oa-sha256",
+ "oa-tbfm",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-sha256"
 version = "0.0.1"
 

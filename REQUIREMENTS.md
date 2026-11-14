@@ -622,3 +622,89 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   uses a fixed-capacity grid of cells with a bounded list each, allocated once; a full cell drops
   the label and counts it. No two drawn labels overlap, a label is dropped only where every offset
   is taken by a label of equal or higher priority, and the result does not depend on point order.
+
+### Replay and flight state (oa-replay)
+
+Milestone M1, "record and replay; bit-exact replay harness". Recorded feeds go in, one
+deterministic flight state comes out.
+
+- **OA-RPL-001** The flight table is a struct-of-arrays of fixed capacity (default 32,768
+  flights) allocated once at construction; bad settings (capacity 0 or above 2^24, a non-positive
+  age limit or sweep spacing) are errors. Its key indexes are sized to at least twice the capacity,
+  so the load never exceeds 1/2.
+- **OA-RPL-002** An SFDPS row, applied with the replay time as an argument, fills the flight's
+  identity (callsign, computer id, departure, arrival, aircraft type, flight-plan id), last
+  position (latitude, longitude, altitude, ground speed, track velocity), position time,
+  last-update time, last source and controlling unit, and counts the update.
+- **OA-RPL-003** A position older than the flight's last position time never overwrites it: the
+  row's position fields are dropped and the row is counted as out of order (per flight and in
+  total), while its other fields still apply. An equal or newer position applies. A row without
+  a position is never out of order.
+- **OA-RPL-004** Identity fields fill when empty and confirm when equal; a different non-empty
+  callsign, departure, arrival or aircraft type is a counted field conflict and the held value
+  is kept. The computer id is not identity (each centre assigns its own) and takes the latest.
+- **OA-RPL-005** A TBFM row links to the flight whose flight-plan identifier equals the row's
+  `gufi` attribute (the TBFM `gufi` is the SFDPS `flightPlan@identifier`, not the SFDPS GUFI). A
+  `gufi` matching no flight creates a TBFM-first flight, which takes its real GUFI when SFDPS
+  reports the same flight plan; linked, created and promoted rows are counted.
+- **OA-RPL-006** A TBFM row with no `gufi` links through the `(centre, tmaId)` pair, held in a
+  second fixed-size index; a row that matches nothing is counted as unlinked and applies
+  nothing. The same `tmaId` from another centre is another key.
+- **OA-RPL-007** TBFM rows set the metering columns: meter fix, ETA at the meter fix, STA (the
+  scheduling-fix time where the feed has no meter-fix time), runway and the frozen flag (`sfz`).
+  A TBFM row older than the flight's last TBFM message time is refused whole and counted as out
+  of order.
+- **OA-RPL-008** A TBFM `DEL` change type, on the `air` or on the `mrp` section, clears the
+  metering columns and the frozen flag. It does not delete the flight, and metering can start
+  again.
+- **OA-RPL-009** A flight is evicted only when its last update is more than the age limit
+  (default 30 minutes, configurable) older than the replay time, at a sweep that runs on a fixed
+  cadence of replay time (multiples of the sweep spacing, default one minute). Exactly the limit
+  is not older than it. Nothing is evicted between sweeps.
+- **OA-RPL-010** A sweep visits slots in slot order and returns the evicted slots to a free stack,
+  so slot reuse is deterministic; eviction removes the flight from every index.
+- **OA-RPL-011** A full table refuses a new flight (from either feed) and counts it; it never
+  evicts early to make room. Existing flights keep updating, and the refused flight is admitted
+  once a sweep has freed a slot (INTERFACES IF-R1).
+- **OA-RPL-012** The state hash is SHA-256 over a canonical serialisation iterating live flights
+  in GUFI order, so it does not depend on insertion history: shuffled application of commuting
+  updates gives the same hash.
+- **OA-RPL-013** The state hash does not depend on slot assignment or eviction history, and
+  changes when any column changes; an empty table's hash does not depend on capacity.
+- **OA-RPL-014** The open-addressing index (linear probing, backward-shift deletion) agrees with
+  a model under random inserts and removes, including with a degenerate hash that forces long
+  probe runs; it refuses past load 1/2; its hash functions are fixed, unkeyed, deterministic
+  functions of the key (not adversarial-robust, and bounded by the index length per operation).
+- **OA-RPL-015** The flight table allocates nothing after construction: every column and index
+  keeps its address and capacity through applying, refusing, sweeping and evicting.
+- **OA-RPL-016** The pipeline takes replay time from each frame's `recv_unix_ns` and records a
+  checkpoint (replay time, frames, rows applied, flights live, state hash) at the first frame at
+  or after each multiple of the checkpoint spacing (default 10 s).
+- **OA-RPL-017** Every parse, decode and apply failure is counted under its own kind (XML,
+  unsupported root, bad GUFI, bad timestamp, malformed field, TBFM field, and the rest); REJECT
+  and STATUS frames are counted and not decoded. Nothing is silently skipped.
+- **OA-RPL-018** Replay time never goes backwards; a frame earlier than one already seen is
+  counted as a time regression.
+- **OA-RPL-019** Replaying the same recordings twice, or with the input read in any chunking
+  (1 byte to 16 MiB), or with the files named in another order, gives identical checkpoints,
+  counters and final state hash.
+- **OA-RPL-020** A `.oaf.gz` recording replays identically to its raw `.oaf` (chosen by the
+  file's first bytes); a gzip file cut short is counted and its frames up to the cut replay.
+- **OA-RPL-021** Several recordings, each with a feed kind, merge into one stream ordered by
+  `(recv_unix_ns, feed kind, seq)`, then file position and byte offset: a total order, so any
+  permutation of the same frames sorts to the same sequence.
+- **OA-RPL-022** Corrupted recordings (every single-byte flip, truncations, random garbage and
+  damage) and corrupted XML payloads never panic; a damaged frame leaves a count, and a cut inside
+  a frame is a counted truncation.
+- **OA-RPL-023** The `oa-replay` command line gives each file the feed kind of the flag that
+  names it, sets the checkpoint spacing, age limit, sweep spacing and capacity, and rejects
+  missing, zero, non-numeric and unknown arguments.
+- **OA-RPL-024** The `oa-replay` binary prints the checkpoints and a final summary (frames and
+  rows per feed, TBFM linking, table totals, errors by kind, flights live and the final state
+  hash); every line except the `timing` line is identical from run to run, whatever the flag
+  order or read size; exit status is 2 for usage errors and 1 for an unreadable file.
+- **OA-RPL-025** Replaying the real SCDS recordings under `OPENATCA_REC` (SFDPS and TBFM) twice
+  and with another read size gives identical checkpoints and the same final state hash, with no
+  frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset).
+- **OA-RPL-026** The canonical serialisation of a fixed table state has a pinned golden hash, so
+  a change of the serialisation or of what the state holds is a deliberate, visible edit.
