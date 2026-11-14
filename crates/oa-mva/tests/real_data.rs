@@ -282,3 +282,38 @@ fn the_check_binary_prints_the_summary_and_exits_by_result() {
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("BAD.xml: REFUSED"), "{text}");
 }
+
+// REQ: OA-MVA-024
+#[test]
+fn real_zjx_charts_all_load_including_the_sub_area_chart() {
+    let Some(d) = std::env::var_os("OPENATCA_DATA").filter(|d| !d.is_empty()) else {
+        eprintln!("OPENATCA_DATA is not set; skipping real-data test");
+        return;
+    };
+    let dir = PathBuf::from(d).join("raw/mva-zjx");
+    if !dir.join("SAV_LHW_MVA.xml").is_file() {
+        eprintln!("{} is absent; skipping real-data test", dir.display());
+        return;
+    }
+    let l = load_directory(&dir).unwrap();
+    for (name, r) in &l.files {
+        assert!(r.is_ok(), "{name}: {r:?}");
+    }
+    let m = &l.model;
+    eprintln!(
+        "{} files, {} charts, {} sectors",
+        l.files.len(),
+        chart_count(m),
+        sector_count(m)
+    );
+    assert_eq!(l.files.len(), 20);
+    assert_eq!(chart_count(m), 20);
+    let c = (0..chart_count(m))
+        .find(|&c| m.chart_set[c] == SetKind::Sub)
+        .unwrap();
+    assert_eq!(chart_set_text(m, c), "SUB LHW");
+    assert_eq!(
+        sector_count(m) - m.set.iter().filter(|s| **s != SetKind::Sub).count(),
+        17
+    );
+}

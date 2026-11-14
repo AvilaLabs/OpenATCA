@@ -125,6 +125,48 @@ pub fn min_altitude_at(
     Ok(best)
 }
 
+/// The conservative minimum altitude for a facility's `set` query: the higher of the
+/// [`min_altitude_at`] answer for `set` and the answer of every sub-area chart of `facility`
+/// (sets of [`SetKind::Sub`]) containing the point. A sub-area chart (`SAV_LHW_MVA`) has its own
+/// plot and states no separation standard, so it is not part of the FUS3/FUS5 answer; for a
+/// warning the higher minimum wins where they overlap, which this function gives. `sectors`
+/// counts the sectors of both. `None` when neither contains the point.
+pub fn min_altitude_with_sub(
+    m: &Model,
+    lat: f64,
+    lon: f64,
+    set: SetKind,
+    facility: &str,
+) -> Result<Option<MinAlt>, MvaError> {
+    let (la, lo) = to_e7(lat, lon)?;
+    let mut best = min_altitude_at(m, lat, lon, set)?;
+    let fac = facility.as_bytes();
+    for i in 0..sector_count(m) {
+        if m.set.get(i) != Some(&SetKind::Sub) {
+            continue;
+        }
+        let f = m.facility.get(i).map_or(&[][..], |b| {
+            let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            b.get(..n).unwrap_or(&[])
+        });
+        if f != fac || !sector_contains(m, SectorIx(i as u32), la, lo) {
+            continue;
+        }
+        let alt = m.min_alt_ft.get(i).copied().unwrap_or(i32::MIN);
+        best = Some(match best {
+            Some(b) => MinAlt {
+                min_alt_ft: b.min_alt_ft.max(alt),
+                sectors: b.sectors + 1,
+            },
+            None => MinAlt {
+                min_alt_ft: alt,
+                sectors: 1,
+            },
+        });
+    }
+    Ok(best)
+}
+
 /// Distance in nautical miles from a point to a segment, in a plane whose axes are scaled by
 /// `kx` and `ky` nautical miles per degree.
 fn seg_dist_nm(p: (f64, f64), a: (f64, f64), b: (f64, f64), kx: f64, ky: f64) -> f64 {

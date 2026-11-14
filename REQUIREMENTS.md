@@ -1327,6 +1327,16 @@ decoder is OA-GRIB-021.
   the test skips when the terrain or DOF files are absent.
 - **OA-MVA-020** `oa-mva-check` prints the load, ring, coverage, PDF and clearance sections,
   exits 0 when every file loads, 1 when a file is refused (naming it), and 2 on bad arguments.
+- **OA-MVA-021** A message named `<FAC>_<SUB>_MVA[_<year>][_v<n>]` (`SAV_LHW_MVA_2022`) loads as
+  a sub-area chart of facility FAC with set kind `Sub` and the sub-area kept per sector and per
+  chart; the same facility and sub-area twice is a duplicate, another sub-area is not.
+- **OA-MVA-022** A message name that is none of the accepted forms (`HLN_MVA_MULTI`,
+  `ZLC_GTF_MVA_FUS5`, a malformed edition label, ...) is refused with an error naming it, and
+  the model is left unchanged.
+- **OA-MVA-023** Sub-area charts are not part of a FUS3, FUS5 or TAV query; `min_altitude_with_sub`
+  returns the higher of the set's answer and the facility's own sub-area charts at the point.
+- **OA-MVA-024** On the real `raw/mva-zjx` files (skipped when absent) all 20 messages load,
+  including `SAV_LHW_MVA` as a sub-area chart with 17 sectors.
 
 ## M2 — Weather inputs
 

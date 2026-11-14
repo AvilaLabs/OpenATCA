@@ -12,14 +12,15 @@
 //!
 //! ```text
 //! msg:AIXMBasicMessage
-//!   gml:description       "<facility>_MVA_FUS3|FUS5[_suffix]" or "<facility>_TAV[_suffix]"
+//!   gml:description       "<facility>_MVA_FUS3|FUS5[_suffix]", "<facility>_TAV[_suffix]" or
+//!                         "<facility>_<sub>_MVA[_year][_vN]" (a sub-area chart)
 //!   gml:boundedBy         empty (xsi:nil)
 //!   aixm:sequenceNumber   optional, digits
 //!   aixm:messageMetadata  optional, empty
 //!   msg:hasMember+        each holds exactly one aixm:Airspace
 //! aixm:Airspace
 //!   gml:description       "MINIMUM VECTORING ALTITUDE (MVA)" (FUS3, FUS5) or
-//!                         "MINIMUM IFR ALTITUDE (MIA)" (TAV)
+//!                         "MINIMUM IFR ALTITUDE (MIA)" (TAV)  (sub-area charts: as MVA)
 //!   gml:boundedBy         optional, empty
 //!   aixm:timeSlice        exactly one, holding exactly one aixm:AirspaceTimeSlice
 //! aixm:AirspaceTimeSlice
@@ -57,11 +58,12 @@
 //!
 //! A message that is refused leaves the model exactly as it was.
 
-use crate::model::{Model, SetKind};
+use crate::model::{chart_set_text, Model, SetKind};
 use crate::{
     MvaError, E7, MAX_ALT_FT, MAX_CHARTS, MAX_FACILITY_BYTES, MAX_FILE_BYTES, MAX_POSLIST_BYTES,
     MAX_RINGS_PER_SECTOR, MAX_SECTORS, MAX_SECTORS_PER_CHART, MAX_SECTOR_ID_BYTES,
-    MAX_SECTOR_SPAN_DEG, MAX_VERTICES, MAX_VERTICES_PER_RING, MIN_ALT_FT, MIN_VERTICES_PER_RING,
+    MAX_SECTOR_SPAN_DEG, MAX_SUB_BYTES, MAX_VERTICES, MAX_VERTICES_PER_RING, MIN_ALT_FT,
+    MIN_VERTICES_PER_RING,
 };
 use oa_xml::{
     attr_needs_decode, decode_into, resolve_elem_ns, span_bytes, text_needs_decode, AttrIx, Doc,
@@ -781,37 +783,83 @@ fn parse_surface(w: &W<'_>, hp: ElemIx) -> Result<Vec<Ring>, MvaError> {
     Ok(rings)
 }
 
-/// The facility, set and the expected feature description from the message's own name.
-fn parse_chart_name(w: &W<'_>, d: ElemIx) -> Result<([u8; MAX_FACILITY_BYTES], SetKind), MvaError> {
+/// What a message name says about its chart: facility, set and (Sub only) the sub-area.
+struct ChartName {
+    fac: [u8; MAX_FACILITY_BYTES],
+    set: SetKind,
+    sub: [u8; MAX_SUB_BYTES],
+}
+
+fn is_code(b: &[u8], min: usize, max: usize) -> bool {
+    b.len() >= min
+        && b.len() <= max
+        && b.iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// Whether the remaining tokens of a name are an edition label: nothing, a four digit year, a
+/// `v<digits>` version, or a year then a version. (Checked for sub-area names only; the older
+/// forms keep their label uninterpreted.)
+fn is_edition<'a>(mut rest: impl Iterator<Item = &'a [u8]>) -> bool {
+    let mut next = rest.next();
+    if let Some(y) = next {
+        if y.len() == 4 && y.iter().all(u8::is_ascii_digit) {
+            next = rest.next();
+        }
+    }
+    if let Some(v) = next {
+        let digits = v.strip_prefix(b"v");
+        if !digits
+            .is_some_and(|d| !d.is_empty() && d.len() <= 3 && d.iter().all(u8::is_ascii_digit))
+        {
+            return false;
+        }
+        next = rest.next();
+    }
+    next.is_none()
+}
+
+/// The facility, set and sub-area from the message's own name. The names seen on the FAA site
+/// (surveyed in `docs/MVA_NAMES.md`) that are accepted:
+///
+/// * `<FAC>_MVA_FUS3|FUS5[_label...]` (`ALO_MVA_FUS3_2024`, `C90_MVA_FUS5_2024_v1`)
+/// * `<FAC>_TAV[_label...]` (`ZAU_TAV_2025`)
+/// * `<FAC>_<SUB>_MVA[_<year>][_v<n>]` (`SAV_LHW_MVA_2022`), a separate sub-area chart
+///
+/// Everything else (`HLN_MVA_MULTI`, `ZLC_GTF_MVA_FUS5`, `D01_DEN_PUB_MVA_FUS3`, ...) is refused
+/// with [`MvaError::UnknownChartName`].
+fn parse_chart_name(w: &W<'_>, d: ElemIx) -> Result<ChartName, MvaError> {
     let t = leaf_text(w, d, "message description")?;
     let t = trim(&t);
-    let bad = MvaError::BadValue {
-        field: "message description",
+    let bad = MvaError::UnknownChartName {
+        name: String::from_utf8_lossy(t.get(..t.len().min(64)).unwrap_or(&[])).into_owned(),
         at: at(w, d),
     };
-    // `ID_MVA_FUS3_2024`, `ID_MVA_FUS5_2024_v1`, `ZAU_TAV_2025`: the first tokens name the
-    // chart; the rest is the FAA's edition label and is not interpreted.
     let mut parts = t.split(|&c| c == b'_');
-    let fac = parts.next().ok_or_else(|| bad.clone())?;
-    if fac.len() < 2
-        || fac.len() > MAX_FACILITY_BYTES
-        || !fac
-            .iter()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-    {
+    let fac = parts.next().unwrap_or(&[]);
+    if !is_code(fac, 2, MAX_FACILITY_BYTES) {
         return Err(bad);
     }
+    let mut sub = [0u8; MAX_SUB_BYTES];
     let set = match (parts.next(), parts.next()) {
         (Some(b"MVA"), Some(b"FUS3")) => SetKind::Fus3,
         (Some(b"MVA"), Some(b"FUS5")) => SetKind::Fus5,
         (Some(b"TAV"), _) => SetKind::Tav,
+        (Some(s), Some(b"MVA"))
+            if is_code(s, 2, MAX_SUB_BYTES) && s != b"MVA" && s != b"TAV" && is_edition(parts) =>
+        {
+            for (d, c) in sub.iter_mut().zip(s) {
+                *d = *c;
+            }
+            SetKind::Sub
+        }
         _ => return Err(bad),
     };
     let mut f = [0u8; MAX_FACILITY_BYTES];
     for (d, s) in f.iter_mut().zip(fac) {
         *d = *s;
     }
-    Ok((f, set))
+    Ok(ChartName { fac: f, set, sub })
 }
 
 /// Where the model ended before a message, for rollback.
@@ -834,6 +882,7 @@ fn marks(m: &Model) -> Marks {
 fn rollback(m: &mut Model, k: &Marks) {
     m.facility.truncate(k.sectors);
     m.set.truncate(k.sectors);
+    m.sub.truncate(k.sectors);
     m.sector_id.truncate(k.sectors);
     m.min_alt_ft.truncate(k.sectors);
     m.ring_first.truncate(k.sectors);
@@ -854,16 +903,12 @@ fn rollback(m: &mut Model, k: &Marks) {
     m.vert_lon_e7.truncate(k.verts);
     m.chart_facility.truncate(k.charts);
     m.chart_set.truncate(k.charts);
+    m.chart_sub.truncate(k.charts);
     m.chart_first_sector.truncate(k.charts);
     m.chart_sector_count.truncate(k.charts);
 }
 
-fn append(
-    m: &mut Model,
-    fac: [u8; MAX_FACILITY_BYTES],
-    set: SetKind,
-    secs: &[Sector],
-) -> Result<Loaded, MvaError> {
+fn append(m: &mut Model, name: &ChartName, secs: &[Sector]) -> Result<Loaded, MvaError> {
     let (s0, r0, v0) = (
         m.min_alt_ft.len(),
         m.ring_vert_count.len(),
@@ -908,8 +953,9 @@ fn append(
                 at: s.at,
             });
         }
-        m.facility.push(fac);
-        m.set.push(set);
+        m.facility.push(name.fac);
+        m.set.push(name.set);
+        m.sub.push(name.sub);
         m.sector_id.push(s.id);
         m.min_alt_ft.push(s.alt);
         m.ring_first.push(ring_first as u32);
@@ -920,8 +966,9 @@ fn append(
         m.bbox_lon_max.push(lo1);
     }
     let chart = m.chart_set.len();
-    m.chart_facility.push(fac);
-    m.chart_set.push(set);
+    m.chart_facility.push(name.fac);
+    m.chart_set.push(name.set);
+    m.chart_sub.push(name.sub);
     m.chart_first_sector.push(s0 as u32);
     m.chart_sector_count.push(secs.len() as u32);
     Ok(Loaded {
@@ -978,7 +1025,8 @@ fn load_inner(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<Loaded
     )?;
     let c = "AIXMBasicMessage";
     let d = one(&w, root, &ks, c, Q::Gml, "description")?;
-    let (fac, set) = parse_chart_name(&w, d)?;
+    let name = parse_chart_name(&w, d)?;
+    let set = name.set;
     if let Some(b) = opt(&w, root, &ks, c, Q::Gml, "boundedBy")? {
         empty(&w, b, "boundedBy")?;
     }
@@ -992,14 +1040,17 @@ fn load_inner(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<Loaded
             });
         }
     }
-    if m.chart_facility
-        .iter()
-        .zip(&m.chart_set)
-        .any(|(f, s)| *f == fac && *s == set)
-    {
+    if (0..m.chart_set.len()).any(|c| {
+        m.chart_facility.get(c) == Some(&name.fac)
+            && m.chart_set.get(c) == Some(&set)
+            && m.chart_sub.get(c) == Some(&name.sub)
+    }) {
+        let mut probe = Model::default();
+        probe.chart_set.push(set);
+        probe.chart_sub.push(name.sub);
         return Err(MvaError::DuplicateChart {
-            facility: short_name(trim_nul(&fac)),
-            set: set.name(),
+            facility: short_name(trim_nul(&name.fac)),
+            set: chart_set_text(&probe, 0),
         });
     }
     if m.chart_set.len() >= MAX_CHARTS {
@@ -1063,7 +1114,7 @@ fn load_inner(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<Loaded
             at: at(&w, root),
         });
     }
-    append(m, fac, set, &secs)
+    append(m, &name, &secs)
 }
 
 fn trim_nul(b: &[u8]) -> &[u8] {

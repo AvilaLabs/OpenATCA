@@ -38,13 +38,13 @@ pub use aixm::{
 };
 pub use geom::{locate_in_ring, Where};
 pub use model::{
-    chart_count, facility_text, new_model, ring_is_hole, ring_range, ring_vertices, sector_count,
-    sector_name_text, sector_range_of_chart, Model, SectorIx, SetKind, SetKindParseError,
-    SET_NAMES,
+    chart_count, chart_set_text, facility_text, new_model, ring_is_hole, ring_range, ring_vertices,
+    sector_count, sector_name_text, sector_range_of_chart, Model, SectorIx, SetKind,
+    SetKindParseError, SET_NAMES,
 };
 pub use query::{
-    min_altitude_at, sector_contains, sector_distance_nm, sectors_containing,
-    sectors_within_radius, MinAlt,
+    min_altitude_at, min_altitude_with_sub, sector_contains, sector_distance_nm,
+    sectors_containing, sectors_within_radius, MinAlt,
 };
 
 use std::fmt;
@@ -73,6 +73,8 @@ pub const MAX_CHARTS: usize = 256;
 pub const MAX_POSLIST_BYTES: usize = 1 << 20;
 /// Longest facility identifier (`C90`, `ZAU`), bytes.
 pub const MAX_FACILITY_BYTES: usize = 4;
+/// Longest sub-area name of a sub-area chart (`LHW`), bytes.
+pub const MAX_SUB_BYTES: usize = 4;
 /// Longest sector identifier (`A`, `AA`, `GALO01`), bytes.
 pub const MAX_SECTOR_ID_BYTES: usize = 8;
 /// Lowest minimum altitude accepted, feet MSL.
@@ -121,6 +123,8 @@ pub enum MvaError {
         found: usize,
         at: u32,
     },
+    /// A message description that is not one of the chart names this reader knows.
+    UnknownChartName { name: String, at: u32 },
     /// A value outside what this reader accepts for `field`.
     BadValue { field: &'static str, at: u32 },
     /// A ring whose first and last vertices differ.
@@ -132,7 +136,7 @@ pub enum MvaError {
         at: u32,
     },
     /// The same facility and chart set was already loaded.
-    DuplicateChart { facility: String, set: &'static str },
+    DuplicateChart { facility: String, set: String },
     /// Two sectors in one chart share an identifier.
     DuplicateSector { name: String, at: u32 },
     /// A query coordinate outside latitude [-90, 90] or longitude [-180, 180], or not finite.
@@ -166,6 +170,10 @@ impl fmt::Display for MvaError {
             } => write!(
                 f,
                 "{context} needs exactly one <{name}>, found {found} (byte {at})"
+            ),
+            MvaError::UnknownChartName { name, at } => write!(
+                f,
+                "unknown chart name {name:?} (byte {at}); accepted: <FAC>_MVA_FUS3|FUS5[_year][_vN], <FAC>_TAV[_year][_vN], <FAC>_<SUB>_MVA[_year][_vN]"
             ),
             MvaError::BadValue { field, at } => write!(f, "bad {field} (byte {at})"),
             MvaError::RingNotClosed { at } => {
