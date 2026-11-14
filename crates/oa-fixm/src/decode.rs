@@ -12,8 +12,15 @@ use crate::{
 };
 use oa_xml::{
     attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes,
-    text_needs_decode, AttrIx, Doc, ElemIx, Ns, Span, TextIx,
+    text_needs_decode, AttrIx, Doc, ElemIx, Ns, Span, SpanKind, TextIx,
 };
+
+/// The bytes of a name or namespace span. Spans of a parsed `Doc` always lie inside its input; a
+/// span that did not would read as empty, which matches no name, so the element or attribute
+/// is unknown and nothing is decoded from it. Values use `span_bytes` and report the error.
+fn name_bytes(input: &[u8], sp: Span) -> &[u8] {
+    span_bytes(input, sp).unwrap_or(&[])
+}
 
 const NS_NAS: &[u8] = b"http://www.faa.aero/nas/3.0";
 const NS_XSI: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
@@ -302,11 +309,20 @@ fn field<T>(
     }
 }
 
-fn raw_bytes<'x>(input: &'x [u8], sp: Span, entity: bool, buf: &'x mut [u8]) -> Raw<'x> {
+fn raw_bytes<'x>(
+    input: &'x [u8],
+    sp: Span,
+    entity: bool,
+    kind: SpanKind,
+    buf: &'x mut [u8],
+) -> Raw<'x> {
     if !entity {
-        return Raw::Val(span_bytes(input, sp));
+        return match span_bytes(input, sp) {
+            Ok(b) => Raw::Val(b),
+            Err(_) => Raw::Bad,
+        };
     }
-    let Ok(n) = decode_into(sp, input, &mut *buf) else {
+    let Ok(n) = decode_into(sp, input, &mut *buf, kind) else {
         return Raw::Bad;
     };
     let buf: &'x [u8] = buf;
@@ -325,7 +341,7 @@ fn find_attr(doc: &Doc<'_>, i: usize, name: &[u8]) -> Option<usize> {
         let hit = doc
             .attr_name
             .get(a)
-            .is_some_and(|&n| span_bytes(doc.input, n) == name);
+            .is_some_and(|&n| name_bytes(doc.input, n) == name);
         if unprefixed && hit {
             return Some(a);
         }
@@ -341,7 +357,7 @@ fn attr<'x>(doc: &Doc<'x>, i: usize, name: &[u8], buf: &'x mut [u8]) -> Raw<'x> 
         return Raw::Bad;
     };
     let ent = attr_needs_decode(doc, AttrIx(a as u32));
-    raw_bytes(doc.input, sp, ent, buf)
+    raw_bytes(doc.input, sp, ent, SpanKind::AttrValue, buf)
 }
 
 /// The text of element `i`, trimmed. An element with no text, or with several text nodes, is
@@ -355,7 +371,7 @@ fn text<'x>(doc: &Doc<'x>, texts: &[u32], i: usize, buf: &'x mut [u8]) -> Raw<'x
         return Raw::Bad;
     };
     let ent = text_needs_decode(doc, TextIx(t));
-    match raw_bytes(doc.input, sp, ent, buf) {
+    match raw_bytes(doc.input, sp, ent, SpanKind::Text, buf) {
         Raw::Val(b) => Raw::Val(trim(b)),
         other => other,
     }
@@ -477,8 +493,8 @@ fn unit_pair(unit: Raw<'_>, sector: Raw<'_>) -> Option<Option<[u8; 8]>> {
 fn is_xmlns(doc: &Doc<'_>, a: usize) -> bool {
     let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
     let name = doc.attr_name.get(a).copied().unwrap_or_default();
-    (prefix.len == 0 && span_bytes(doc.input, name) == b"xmlns")
-        || span_bytes(doc.input, prefix) == b"xmlns"
+    (prefix.len == 0 && name_bytes(doc.input, name) == b"xmlns")
+        || name_bytes(doc.input, prefix) == b"xmlns"
 }
 
 fn attr_range(doc: &Doc<'_>, i: usize) -> core::ops::Range<usize> {
@@ -560,9 +576,9 @@ impl Decoder {
             });
         }
         let root_ok = n > 0
-            && span_bytes(input, doc.elem_name.first().copied().unwrap_or_default())
+            && name_bytes(input, doc.elem_name.first().copied().unwrap_or_default())
                 == b"MessageCollection"
-            && matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(u) if span_bytes(input, u) == NS_NAS);
+            && matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(u) if name_bytes(input, u) == NS_NAS);
         if !root_ok {
             self.stats.unsupported_roots = self.stats.unsupported_roots.saturating_add(1);
             return Err(FixmError::UnsupportedRoot);
@@ -614,7 +630,7 @@ impl Decoder {
                     && doc
                         .attr_name
                         .get(a)
-                        .is_some_and(|&nm| span_bytes(doc.input, nm) == b"xmlns")
+                        .is_some_and(|&nm| name_bytes(doc.input, nm) == b"xmlns")
             });
         }
         if let Some(s) = self.state.first_mut() {
@@ -631,7 +647,7 @@ impl Decoder {
                     && doc
                         .attr_name
                         .get(a)
-                        .is_some_and(|&nm| span_bytes(doc.input, nm) == b"xmlns")
+                        .is_some_and(|&nm| name_bytes(doc.input, nm) == b"xmlns")
             });
             let dflt = declares || self.dflt_ns.get(pi).copied().unwrap_or(false);
             if let Some(d) = self.dflt_ns.get_mut(i) {
@@ -662,11 +678,11 @@ impl Decoder {
             } else {
                 self.hash.get(pi).copied().unwrap_or(0)
             };
-            let mut h = extend(base, span_bytes(doc.input, name));
+            let mut h = extend(base, name_bytes(doc.input, name));
             match ns {
                 Ns::None => {}
                 Ns::Xml => h = extend(h, b"{xml"),
-                Ns::Uri(u) => h = extend(extend(h, b"{"), span_bytes(doc.input, u)),
+                Ns::Uri(u) => h = extend(extend(h, b"{"), name_bytes(doc.input, u)),
             }
             if let Some(x) = self.hash.get_mut(i) {
                 *x = h;
@@ -716,16 +732,16 @@ impl Decoder {
             }
             let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
             let name = doc.attr_name.get(a).copied().unwrap_or_default();
-            let nb = span_bytes(doc.input, name);
+            let nb = name_bytes(doc.input, name);
             if prefix.len > 0 {
                 let xsi = matches!(
                     resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
-                    Ns::Uri(u) if span_bytes(doc.input, u) == NS_XSI
+                    Ns::Uri(u) if name_bytes(doc.input, u) == NS_XSI
                 );
                 if xsi && (nb == b"type" || nb == b"nil") {
                     continue;
                 }
-                let ah = extend(attr_hash(h, span_bytes(doc.input, prefix)), nb);
+                let ah = extend(attr_hash(h, name_bytes(doc.input, prefix)), nb);
                 self.note_unknown(doc, i, Some(a), ah, sum);
                 continue;
             }
@@ -1133,9 +1149,12 @@ impl Decoder {
                     capacity: out.strings.len(),
                 });
             };
-            match decode_into(sp, doc.input, dst) {
+            match decode_into(sp, doc.input, dst, SpanKind::AttrValue) {
                 Ok(n) => n,
-                Err(_) if avail > limit => {
+                // A bad reference or span, or a value longer than the route limit.
+                Err(e)
+                    if !matches!(e, oa_xml::XmlError::OutputTooSmall { .. }) || avail > limit =>
+                {
                     mark_err(m, Field::Route);
                     return Ok(());
                 }
@@ -1146,7 +1165,10 @@ impl Decoder {
                 }
             }
         } else {
-            let src = span_bytes(doc.input, sp);
+            let Ok(src) = span_bytes(doc.input, sp) else {
+                mark_err(m, Field::Route);
+                return Ok(());
+            };
             if src.len() > limit {
                 mark_err(m, Field::Route);
                 return Ok(());
@@ -1257,12 +1279,12 @@ fn is_flight_message(doc: &Doc<'_>, i: usize, buf: &mut [u8]) -> bool {
     for a in attr_range(doc, i) {
         let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
         let name = doc.attr_name.get(a).copied().unwrap_or_default();
-        if prefix.len == 0 || span_bytes(doc.input, name) != b"type" {
+        if prefix.len == 0 || name_bytes(doc.input, name) != b"type" {
             continue;
         }
         let xsi = matches!(
             resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
-            Ns::Uri(u) if span_bytes(doc.input, u) == NS_XSI
+            Ns::Uri(u) if name_bytes(doc.input, u) == NS_XSI
         );
         if !xsi {
             continue;
@@ -1271,7 +1293,7 @@ fn is_flight_message(doc: &Doc<'_>, i: usize, buf: &mut [u8]) -> bool {
             return false;
         };
         let ent = attr_needs_decode(doc, AttrIx(a as u32));
-        if let Raw::Val(v) = raw_bytes(doc.input, sp, ent, buf) {
+        if let Raw::Val(v) = raw_bytes(doc.input, sp, ent, SpanKind::AttrValue, buf) {
             let local = v.rsplit(|&b| b == b':').next().unwrap_or(v);
             return local == b"FlightMessageType";
         }
@@ -1321,7 +1343,7 @@ fn path_text(doc: &Doc<'_>, i: usize, attr: Option<usize>, out: &mut [u8; MAX_PA
     let mut first = true;
     for k in (0..depth).rev() {
         let ix = chain.get(k).copied().unwrap_or(0) as usize;
-        let name = span_bytes(
+        let name = name_bytes(
             doc.input,
             doc.elem_name.get(ix).copied().unwrap_or_default(),
         );
@@ -1335,7 +1357,7 @@ fn path_text(doc: &Doc<'_>, i: usize, attr: Option<usize>, out: &mut [u8; MAX_PA
         first = false;
     }
     if let Some(a) = attr {
-        let name = span_bytes(doc.input, doc.attr_name.get(a).copied().unwrap_or_default());
+        let name = name_bytes(doc.input, doc.attr_name.get(a).copied().unwrap_or_default());
         if !put(name, Some(b'@'), &mut len) {
             if let Some(d) = out.get_mut(len) {
                 *d = b'~';

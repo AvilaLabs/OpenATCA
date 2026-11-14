@@ -51,7 +51,7 @@ struct Run {
 }
 
 fn run_with(xml: &str, cap: usize, strings: usize, limits: Limits) -> (Run, Result<(), FixmError>) {
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
     let mut dec = Decoder::new(limits);
     let mut ev = new_events(cap, strings);
@@ -754,7 +754,7 @@ fn row_capacity_is_all_or_nothing_per_document() {
     assert_eq!(r.ev.capacity, 3);
 
     // Existing rows survive a refused document.
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::default());
     let mut ev = new_events(3, 1024);
     let one_doc = doc(&[message("TH", "")]);
@@ -922,7 +922,7 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
 // REQ: OA-FIXM-010
 #[test]
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::default());
     let mut ev = new_events(8, 64);
     for xml in [
@@ -954,7 +954,7 @@ fn documents_that_are_not_sfdps_message_collections_are_refused() {
 #[test]
 fn element_limit_and_input_mismatch_are_errors() {
     let xml = doc(&[message("TH", "")]);
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).unwrap();
     let n = d.elem_name.len();
     let mut ev = new_events(4, 64);
@@ -1032,7 +1032,7 @@ fn mutated_fixtures_never_panic() {
         ),
     ]);
     let bytes = seed.as_bytes();
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits {
         max_unknown_paths: 8,
         ..Limits::default()
@@ -1108,7 +1108,7 @@ fn mutated_fixtures_never_panic() {
 fn decoder_is_reusable_and_does_not_grow() {
     let big = doc(&[message("TH", TH_BODY), message("FH", TH_BODY)]);
     let small = doc(&[message("BA", "")]);
-    let mut parser = Parser::new(XmlLimits::default());
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::default());
     let mut ev = new_events(8, 4096);
     let caps = |e: &Events| {
@@ -1161,4 +1161,19 @@ fn field_tables_agree() {
     assert_eq!(code_str(b"AB\0\0"), "AB");
     assert_eq!(code_str(b"ABCD"), "ABCD");
     assert_eq!(code_str(b"\0\0"), "");
+}
+
+// REQ: OA-FIXM-015
+#[test]
+fn route_attribute_whitespace_is_normalised() {
+    let route = |t: &str| format!(r#"<agreed><route nasRouteText="{t}"/></agreed>"#);
+    // A literal tab or line end in an attribute value reads as one space.
+    let (r, res) = run_with(
+        &doc(&[message("FH", &route("AA\tBB\r\nCC"))]),
+        4,
+        64,
+        Limits::default(),
+    );
+    res.unwrap();
+    assert_eq!(route_text(&r.ev, 0), "AA BB CC");
 }

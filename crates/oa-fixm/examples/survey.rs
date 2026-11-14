@@ -25,14 +25,14 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn s(d: &Doc<'_>, sp: oa_xml::Span) -> String {
-    String::from_utf8_lossy(span_bytes(d.input, sp)).into_owned()
+    String::from_utf8_lossy(span_bytes(d.input, sp).unwrap()).into_owned()
 }
 
 fn main() {
     let dir = std::env::args().nth(1).unwrap();
     let mut files = Vec::new();
     collect(Path::new(&dir), &mut files);
-    let mut parser = Parser::new(Limits::default());
+    let mut parser = Parser::new(Limits::default()).unwrap();
     // path -> (messages containing, occurrences, attribute names)
     let mut paths: BTreeMap<String, (u64, u64, BTreeSet<String>)> = BTreeMap::new();
     let mut src: BTreeMap<String, u64> = BTreeMap::new();

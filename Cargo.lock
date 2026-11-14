@@ -37,6 +37,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-fixm"
+version = "0.0.1"
+dependencies = [
+ "oa-xml",
+]
+
+[[package]]
 name = "oa-geo"
 version = "0.0.1"
 

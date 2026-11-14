@@ -49,7 +49,7 @@ fn every_real_sfdps_message_decodes() {
     let data: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     let total: usize = data.iter().map(Vec::len).sum();
 
-    let mut parser = Parser::new(oa_xml::Limits::default());
+    let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
     let mut dec = Decoder::new(Limits::default());
     let mut ev = new_events(1024, 1 << 20);
     let mut parse_failed = 0usize;
