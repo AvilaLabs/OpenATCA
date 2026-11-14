@@ -905,9 +905,9 @@ fn recorder_rotates_caps_and_never_deletes() {
         .collect();
     assert_eq!(ours.len() as u32, rec.files_opened());
     assert_eq!(ours.len(), 4); // 2 frames per file at 250 bytes, 7 frames
-    assert!(ours.iter().all(|n| n.ends_with(".oaf")
-        && n.len() == "scds-test-20231114T221320Z.oaf".len()
-        || n.contains("Z-")));
+    assert!(ours
+        .iter()
+        .all(|n| n.ends_with(".oaf") && n.len() == "scds-test-20231114T221320Z-0001.oaf".len()));
     let mut sizes: Vec<u64> = ours
         .iter()
         .map(|n| std::fs::metadata(dir.join(n)).unwrap().len())
@@ -1049,9 +1049,9 @@ fn compressed_recording_names_and_content() {
     rec.finish().unwrap();
     assert_eq!(
         files_in(&dir),
-        vec!["scds-x-20231114T221320Z.oaf.gz".to_string()]
+        vec!["scds-x-20231114T221320Z-0001.oaf.gz".to_string()]
     );
-    let bytes = std::fs::read(dir.join("scds-x-20231114T221320Z.oaf.gz")).unwrap();
+    let bytes = std::fs::read(dir.join("scds-x-20231114T221320Z-0001.oaf.gz")).unwrap();
     assert_eq!(&bytes[..3], &[0x1f, 0x8b, 8]);
     assert!(
         bytes.len() < all.len() / 2,
@@ -1064,7 +1064,8 @@ fn compressed_recording_names_and_content() {
     assert_eq!((s.members, s.truncated), (1, None));
     assert_eq!(rec.total_bytes(), bytes.len() as u64);
     assert_eq!(rec.files_opened(), 1);
-    // A second recorder in the same second gets a suffixed name; raw files keep `.oaf`.
+    // A second recorder in the same second gets the next number, and name order is creation
+    // order (OA-FEED-019); raw files keep `.oaf`.
     let mut again = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
     again.write_frame(&frames[0].1, 1_700_000_000).unwrap();
     again.finish().unwrap();
@@ -1074,13 +1075,13 @@ fn compressed_recording_names_and_content() {
     assert_eq!(
         files_in(&dir),
         vec![
-            "scds-x-20231114T221320Z-2.oaf.gz".to_string(),
-            "scds-x-20231114T221320Z.oaf".to_string(),
-            "scds-x-20231114T221320Z.oaf.gz".to_string(),
+            "scds-x-20231114T221320Z-0001.oaf".to_string(),
+            "scds-x-20231114T221320Z-0001.oaf.gz".to_string(),
+            "scds-x-20231114T221320Z-0002.oaf.gz".to_string(),
         ]
     );
     assert_eq!(
-        std::fs::read(dir.join("scds-x-20231114T221320Z.oaf")).unwrap(),
+        std::fs::read(dir.join("scds-x-20231114T221320Z-0001.oaf")).unwrap(),
         frames[0].1
     );
     std::fs::remove_dir_all(&dir).unwrap();

@@ -316,8 +316,10 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-018** Replaying recorded files gives an identical health record and summary every
   time, equal to reading the same bytes as one stream, from frame fields only (never the clock).
 - **OA-FEED-019** Recording rotates at the size limit on frame boundaries, names files
-  `<feed>-<UTC start>.oaf` (raw; `.oaf.gz` when compressed, OA-FEED-026), counts existing recordings toward the total cap, stops once with a
-  warning at the cap and never deletes a file.
+  `<feed>-<UTC start>-<NNNN>.oaf` (raw; `.oaf.gz` when compressed, OA-FEED-026) with a
+  zero-padded counter from 0001 within one second, so name order is creation order; counts
+  existing recordings toward the total cap, stops once with a warning at the cap and never
+  deletes a file.
 - **OA-FEED-020** UTC file names and timestamps are correct calendar times, including leap days
   and times before 1970.
 - **OA-FEED-021** Every frame error carries and prints the byte offset of the problem.

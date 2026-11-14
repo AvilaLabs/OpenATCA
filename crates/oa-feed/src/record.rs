@@ -2,8 +2,8 @@
 //! (`.oaf.gz`, the default) or verbatim (`.oaf`). Shell (file system); the clock is passed in as
 //! a value so naming is testable.
 //!
-//! Files are named `<feed>-<UTC start>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`, with `-2`,
-//! `-3` if a name is taken). Frames are never split across files. The total size of every `.oaf`
+//! Files are named `<feed>-<UTC start>-<NNNN>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`;
+//! `NNNN` counts from 0001 within one second, so name order is creation order). Frames are never split across files. The total size of every `.oaf`
 //! and `.oaf.gz` file in the directory is capped; at the cap recording stops, once, with a
 //! warning, and nothing is deleted (a recording is evidence, A8).
 //!
@@ -66,6 +66,9 @@ pub struct Recorder {
     stopped: bool,
     files_opened: u32,
 }
+
+/// Most recordings that can be opened in one UTC second (the four-digit name counter).
+const MAX_SAME_SECOND: u32 = 9999;
 
 fn is_recording(p: &Path) -> bool {
     p.file_name()
@@ -230,11 +233,16 @@ impl Recorder {
         };
         let mut n = 1u32;
         loop {
-            let name = if n == 1 {
-                format!("{}-{stamp}.{ext}", self.feed)
-            } else {
-                format!("{}-{stamp}-{n}.{ext}", self.feed)
-            };
+            // Always numbered and zero-padded, so name order is creation order: a second file
+            // in the same second must not sort before the first (a replay glob would then play
+            // them out of order and show false sequence gaps).
+            if n > MAX_SAME_SECOND {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("more than {MAX_SAME_SECOND} recordings named for one second"),
+                ));
+            }
+            let name = format!("{}-{stamp}-{n:04}.{ext}", self.feed);
             match OpenOptions::new()
                 .write(true)
                 .create_new(true)
