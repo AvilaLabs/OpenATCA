@@ -47,6 +47,12 @@ and published.
 1. **Selection.** Reports with NACp ≥ 8 (95% position uncertainty under 0.05 NM, about 93 m)
    and NIC ≥ 7, SIL 3, ADS-B version 2 where the field exists; positions with a fault flag
    or a kinematically impossible jump are removed and counted.
+   In adsb.lol traces the quality fields (NACp, NIC, SIL, version) appear only on rows that
+   carry readsb's aircraft object, about a quarter of rows in the 2026-11-13 sample. They are
+   carried forward within a trace for at most 60 s; rows with no quality value within that age
+   are not truth. On that sample, 99% of rows with a known NACp had NACp ≥ 8, and 22 position
+   jumps above 700 kt (largest 2,782 kt) were found in 3.2 million row pairs: the jump filter is
+   needed.
 2. **Legs.** Each aircraft (24-bit address) splits into legs at readsb's new-leg flag or a gap of
    more than 120 s.
 3. **Smoother.** Per leg, in a local east-north-up frame, a fixed-interval Rauch–Tung–Striebel
