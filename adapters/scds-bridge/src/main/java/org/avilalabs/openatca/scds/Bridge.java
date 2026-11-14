@@ -52,6 +52,8 @@ public final class Bridge {
     // Stray prints must never corrupt the frame stream.
     OutputStream raw = new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 1 << 16);
     System.setOut(ERR);
+    // The Solace client logs through java.util.logging at INFO; keep stderr to our own events.
+    java.util.logging.Logger.getLogger("").setLevel(java.util.logging.Level.WARNING);
     EnvFile env;
     try {
       env = EnvFile.read(Path.of(args[0]));
