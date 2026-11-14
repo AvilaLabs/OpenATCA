@@ -60,14 +60,19 @@ mod build;
 mod frame;
 mod linalg;
 mod loo;
+mod quality;
 mod query;
 mod smooth;
 
 pub use build::build_truth;
+pub use quality::{
+    nacp_epu_m, nacv_epu_mps, quality_check, Held, QualityState, QualityVerdict, HELD_NONE,
+};
 pub use query::{
     aircraft_addrs, leg_addr, leg_count, leg_end_ms, leg_end_ns, leg_reports, leg_start_ms,
     leg_start_ns, legs_of, truth_at, truth_hash_into,
 };
+pub use smooth::SIGMA95;
 
 use std::fmt;
 

@@ -71,6 +71,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-wind` | Wind and temperature aloft at (lat, lon, pressure altitude, time) from RAP analyses, never extrapolated, and the `oa-wind-check` validation tool |
 | `crates/oa-asterix` | ASTERIX category 021, 048 and 062 encoder and decoder: generic core (data block, FSPEC, item kinds, constant UAP tables) and typed items for the tracker |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, report writer, and the `oa-bench` binary |
+| `crates/oa-track` | M3 surveillance tracker, ADS-B only: horizontal and vertical interacting-multiple-model filters in a re-centred local frame, time-of-applicability ordering with re-filtering, M-of-N initiation, coasting, drop, fixed one-second output, split-report scoring against `oa-truth` and `oa-bench`, and the `oa-track-run` tool |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

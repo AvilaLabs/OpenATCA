@@ -201,11 +201,24 @@ name = "oa-trace"
 version = "0.0.1"
 
 [[package]]
+name = "oa-track"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-geo",
+ "oa-sha256",
+ "oa-truth",
+]
+
+[[package]]
 name = "oa-truth"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-feed",
+ "oa-geo",
  "oa-sha256",
 ]
 
