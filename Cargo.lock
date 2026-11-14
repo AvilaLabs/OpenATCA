@@ -197,6 +197,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-wind"
+version = "0.0.1"
+dependencies = [
+ "oa-awc",
+ "oa-grib2",
+]
+
+[[package]]
 name = "oa-xml"
 version = "0.0.1"
 

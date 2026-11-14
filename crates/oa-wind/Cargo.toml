@@ -1,0 +1,19 @@
+[package]
+name = "oa-wind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-grib2 = { path = "../oa-grib2" }
+oa-awc = { path = "../oa-awc" }
+
+[[bin]]
+name = "oa-wind-check"
+path = "src/main.rs"
