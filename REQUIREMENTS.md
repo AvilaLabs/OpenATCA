@@ -57,8 +57,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 ### CIFP (oa-arinc424)
 
-- **OA-424-001** Parses the CIFP header record and the cycle of every data record, rejecting a
-  file that mixes cycles.
+- **OA-424-001** Parses the CIFP header record and the cycle of every data record. Records carry
+  the cycle of their last change, so earlier cycles are expected; a record whose cycle is later
+  than the header's is rejected. (Amended 2026-11-14: the original text, "rejecting a file that
+  mixes cycles", contradicted how the FAA codes CIFP.)
 - **OA-424-002** Parses airport (PA), runway (PG), VHF navaid (D), NDB (DB), enroute waypoint
   (EA), terminal waypoint (PC) and localizer/glide slope (PI) records.
 - **OA-424-003** Parses airway (ER) records into ordered fixes with route type and altitudes.
