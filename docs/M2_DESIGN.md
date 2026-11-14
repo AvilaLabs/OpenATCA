@@ -106,7 +106,7 @@ cruise, descent from the truth vertical rate), altitude band and coast indicator
 | F2 | Schedule delivery | TBFM scheduled time vs truth crossing time |
 | F3 | Arrival and departure time error | TFMS estimates vs truth landing and takeoff, by look-ahead |
 | R1 | Route conformance | truth cross-track distance from ERAM's expanded route; share of flight time beyond 2 NM, with each case listed (LS-201) |
-| H1 | Handoff timing | handoff initiation and acceptance vs truth crossing of the sector or ARTCC boundary |
+| H1 | Handoff timing | handoff initiation and acceptance vs truth crossing of the ARTCC boundary (ERAM sector boundaries are not public, so sector-to-sector handoffs are counted but not timed) |
 
 Truth crossing of a meter fix is the time of closest approach to the fix within 2 NM; if the
 aircraft never passes within 2 NM the flight is excluded and counted. Landing is the last truth
