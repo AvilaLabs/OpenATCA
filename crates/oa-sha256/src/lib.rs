@@ -76,46 +76,162 @@ impl Default for Sha256 {
     }
 }
 
+/// One round of the compression function. The eight working variables are passed in rotated
+/// order, so no register shuffling happens between rounds: `d` and `h` are the only two updated.
+macro_rules! round {
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $k:expr, $w:expr) => {
+        let t1 = $h
+            .wrapping_add($e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25))
+            .wrapping_add($g ^ ($e & ($f ^ $g)))
+            .wrapping_add($k)
+            .wrapping_add($w);
+        $d = $d.wrapping_add(t1);
+        $h = t1
+            .wrapping_add($a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22))
+            .wrapping_add(($a & $b) | ($c & ($a | $b)));
+    };
+}
+
+/// Advance word `$i` of the 16-word rolling message schedule in place.
+macro_rules! expand {
+    ($w:ident, $i:literal, $i1:literal, $i9:literal, $i14:literal) => {
+        let x = $w[$i1];
+        let y = $w[$i14];
+        $w[$i] = $w[$i]
+            .wrapping_add(x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3))
+            .wrapping_add($w[$i9])
+            .wrapping_add(y.rotate_right(17) ^ y.rotate_right(19) ^ (y >> 10));
+    };
+}
+
 /// Process one 64-byte block into the chaining state.
-// E3 / H2: every index below is bounded by a constant. `w` and `K` hold 64 words and `t` runs
-// over 0..64 (the schedule loop starts at 16 and reads at most 16 back), so none can go out of
-// range.
+///
+/// The schedule lives in a 16-word array rolled in place, each word computed just before the
+/// round that consumes it, and all 64 rounds are unrolled with the round constants as
+/// immediates. Every index is a literal, so no bounds checks remain.
+// E3 / H2: every index below is a literal into a `[u32; 16]` (below 16) or the 64-word `K`
+// (below 64); the compiler checks literal indexes into arrays at build time, so none can go
+// out of range.
 #[allow(clippy::indexing_slicing)]
 fn compress(h: &mut [u32; 8], block: &[u8; BLOCK_LEN]) {
-    let mut w = [0u32; 64];
+    let mut w = [0u32; 16];
     let (words, _) = block.as_chunks::<4>();
     for (wi, c) in w.iter_mut().zip(words) {
         *wi = u32::from_be_bytes(*c);
     }
-    for t in 16..64 {
-        let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
-        let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
-        w[t] = w[t - 16]
-            .wrapping_add(s0)
-            .wrapping_add(w[t - 7])
-            .wrapping_add(s1);
-    }
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
-    for t in 0..64 {
-        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let ch = (e & f) ^ (!e & g);
-        let t1 = hh
-            .wrapping_add(s1)
-            .wrapping_add(ch)
-            .wrapping_add(K[t])
-            .wrapping_add(w[t]);
-        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
-        let t2 = s0.wrapping_add(maj);
-        hh = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(t1);
-        d = c;
-        c = b;
-        b = a;
-        a = t1.wrapping_add(t2);
-    }
+    round!(a, b, c, d, e, f, g, hh, K[0], w[0]);
+    round!(hh, a, b, c, d, e, f, g, K[1], w[1]);
+    round!(g, hh, a, b, c, d, e, f, K[2], w[2]);
+    round!(f, g, hh, a, b, c, d, e, K[3], w[3]);
+    round!(e, f, g, hh, a, b, c, d, K[4], w[4]);
+    round!(d, e, f, g, hh, a, b, c, K[5], w[5]);
+    round!(c, d, e, f, g, hh, a, b, K[6], w[6]);
+    round!(b, c, d, e, f, g, hh, a, K[7], w[7]);
+    round!(a, b, c, d, e, f, g, hh, K[8], w[8]);
+    round!(hh, a, b, c, d, e, f, g, K[9], w[9]);
+    round!(g, hh, a, b, c, d, e, f, K[10], w[10]);
+    round!(f, g, hh, a, b, c, d, e, K[11], w[11]);
+    round!(e, f, g, hh, a, b, c, d, K[12], w[12]);
+    round!(d, e, f, g, hh, a, b, c, K[13], w[13]);
+    round!(c, d, e, f, g, hh, a, b, K[14], w[14]);
+    round!(b, c, d, e, f, g, hh, a, K[15], w[15]);
+    expand!(w, 0, 1, 9, 14);
+    round!(a, b, c, d, e, f, g, hh, K[16], w[0]);
+    expand!(w, 1, 2, 10, 15);
+    round!(hh, a, b, c, d, e, f, g, K[17], w[1]);
+    expand!(w, 2, 3, 11, 0);
+    round!(g, hh, a, b, c, d, e, f, K[18], w[2]);
+    expand!(w, 3, 4, 12, 1);
+    round!(f, g, hh, a, b, c, d, e, K[19], w[3]);
+    expand!(w, 4, 5, 13, 2);
+    round!(e, f, g, hh, a, b, c, d, K[20], w[4]);
+    expand!(w, 5, 6, 14, 3);
+    round!(d, e, f, g, hh, a, b, c, K[21], w[5]);
+    expand!(w, 6, 7, 15, 4);
+    round!(c, d, e, f, g, hh, a, b, K[22], w[6]);
+    expand!(w, 7, 8, 0, 5);
+    round!(b, c, d, e, f, g, hh, a, K[23], w[7]);
+    expand!(w, 8, 9, 1, 6);
+    round!(a, b, c, d, e, f, g, hh, K[24], w[8]);
+    expand!(w, 9, 10, 2, 7);
+    round!(hh, a, b, c, d, e, f, g, K[25], w[9]);
+    expand!(w, 10, 11, 3, 8);
+    round!(g, hh, a, b, c, d, e, f, K[26], w[10]);
+    expand!(w, 11, 12, 4, 9);
+    round!(f, g, hh, a, b, c, d, e, K[27], w[11]);
+    expand!(w, 12, 13, 5, 10);
+    round!(e, f, g, hh, a, b, c, d, K[28], w[12]);
+    expand!(w, 13, 14, 6, 11);
+    round!(d, e, f, g, hh, a, b, c, K[29], w[13]);
+    expand!(w, 14, 15, 7, 12);
+    round!(c, d, e, f, g, hh, a, b, K[30], w[14]);
+    expand!(w, 15, 0, 8, 13);
+    round!(b, c, d, e, f, g, hh, a, K[31], w[15]);
+    expand!(w, 0, 1, 9, 14);
+    round!(a, b, c, d, e, f, g, hh, K[32], w[0]);
+    expand!(w, 1, 2, 10, 15);
+    round!(hh, a, b, c, d, e, f, g, K[33], w[1]);
+    expand!(w, 2, 3, 11, 0);
+    round!(g, hh, a, b, c, d, e, f, K[34], w[2]);
+    expand!(w, 3, 4, 12, 1);
+    round!(f, g, hh, a, b, c, d, e, K[35], w[3]);
+    expand!(w, 4, 5, 13, 2);
+    round!(e, f, g, hh, a, b, c, d, K[36], w[4]);
+    expand!(w, 5, 6, 14, 3);
+    round!(d, e, f, g, hh, a, b, c, K[37], w[5]);
+    expand!(w, 6, 7, 15, 4);
+    round!(c, d, e, f, g, hh, a, b, K[38], w[6]);
+    expand!(w, 7, 8, 0, 5);
+    round!(b, c, d, e, f, g, hh, a, K[39], w[7]);
+    expand!(w, 8, 9, 1, 6);
+    round!(a, b, c, d, e, f, g, hh, K[40], w[8]);
+    expand!(w, 9, 10, 2, 7);
+    round!(hh, a, b, c, d, e, f, g, K[41], w[9]);
+    expand!(w, 10, 11, 3, 8);
+    round!(g, hh, a, b, c, d, e, f, K[42], w[10]);
+    expand!(w, 11, 12, 4, 9);
+    round!(f, g, hh, a, b, c, d, e, K[43], w[11]);
+    expand!(w, 12, 13, 5, 10);
+    round!(e, f, g, hh, a, b, c, d, K[44], w[12]);
+    expand!(w, 13, 14, 6, 11);
+    round!(d, e, f, g, hh, a, b, c, K[45], w[13]);
+    expand!(w, 14, 15, 7, 12);
+    round!(c, d, e, f, g, hh, a, b, K[46], w[14]);
+    expand!(w, 15, 0, 8, 13);
+    round!(b, c, d, e, f, g, hh, a, K[47], w[15]);
+    expand!(w, 0, 1, 9, 14);
+    round!(a, b, c, d, e, f, g, hh, K[48], w[0]);
+    expand!(w, 1, 2, 10, 15);
+    round!(hh, a, b, c, d, e, f, g, K[49], w[1]);
+    expand!(w, 2, 3, 11, 0);
+    round!(g, hh, a, b, c, d, e, f, K[50], w[2]);
+    expand!(w, 3, 4, 12, 1);
+    round!(f, g, hh, a, b, c, d, e, K[51], w[3]);
+    expand!(w, 4, 5, 13, 2);
+    round!(e, f, g, hh, a, b, c, d, K[52], w[4]);
+    expand!(w, 5, 6, 14, 3);
+    round!(d, e, f, g, hh, a, b, c, K[53], w[5]);
+    expand!(w, 6, 7, 15, 4);
+    round!(c, d, e, f, g, hh, a, b, K[54], w[6]);
+    expand!(w, 7, 8, 0, 5);
+    round!(b, c, d, e, f, g, hh, a, K[55], w[7]);
+    expand!(w, 8, 9, 1, 6);
+    round!(a, b, c, d, e, f, g, hh, K[56], w[8]);
+    expand!(w, 9, 10, 2, 7);
+    round!(hh, a, b, c, d, e, f, g, K[57], w[9]);
+    expand!(w, 10, 11, 3, 8);
+    round!(g, hh, a, b, c, d, e, f, K[58], w[10]);
+    expand!(w, 11, 12, 4, 9);
+    round!(f, g, hh, a, b, c, d, e, K[59], w[11]);
+    expand!(w, 12, 13, 5, 10);
+    round!(e, f, g, hh, a, b, c, d, K[60], w[12]);
+    expand!(w, 13, 14, 6, 11);
+    round!(d, e, f, g, hh, a, b, c, K[61], w[13]);
+    expand!(w, 14, 15, 7, 12);
+    round!(c, d, e, f, g, hh, a, b, K[62], w[14]);
+    expand!(w, 15, 0, 8, 13);
+    round!(b, c, d, e, f, g, hh, a, K[63], w[15]);
     for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
         *x = x.wrapping_add(y);
     }

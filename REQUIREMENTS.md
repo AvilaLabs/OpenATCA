@@ -134,6 +134,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   test vector (short, long and Monte Carlo messages).
 - **OA-SHA-002** Hashes streamed input incrementally with the same result as one-shot hashing,
   for every split point of the test messages.
+- **OA-SHA-003** Matches the straightforward reference implementation on 10,000 deterministic
+  pseudo-random messages of 0 to 2,000 bytes, hashed one-shot and in chunks at random split points.
+- **OA-SHA-004** Reports throughput in MB/s at 1 KiB, 64 KiB and 8 MiB (release builds only,
+  informational, no assertion on speed) alongside the system `sha256sum` when present.
 
 ### Archives (oa-zip)
 
