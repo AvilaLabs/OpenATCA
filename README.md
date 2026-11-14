@@ -52,6 +52,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-zip` | ZIP and DEFLATE reader with hard limits |
 | `crates/oa-airspace` | The airspace model and the `oa-adapt` tool |
 | `crates/oa-xml` | Bounded XML 1.0 parser for FAA SWIM messages |
+| `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

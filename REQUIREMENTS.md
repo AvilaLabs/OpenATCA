@@ -516,3 +516,69 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   waypoint and an airport to a model airport by its identifier or alternate identifier (never
   to a runway threshold), counts distinct identifiers and rows per role and per scope (all
   centres, the model's own centre) and lists the identifiers that do not resolve.
+
+## M1 — Controller display
+
+### Display list, projection, font, rasterizer (oa-display)
+
+- **OA-DSP-001** The display list is a flat struct-of-arrays list of line, polyline (a span of a
+  shared vertex array), filled rectangle, circle outline and text primitives. Every primitive
+  carries a palette index and a layer, coordinates are `i32` in 1/16 pixel, and a colour index,
+  layer, text size or circle radius out of range is refused.
+- **OA-DSP-002** Capacity is fixed at creation. A push to a full table returns an error naming the
+  table and its capacity and marks the list faulted; a faulted list is never drawn.
+- **OA-DSP-003** Clearing a list for the next frame keeps every capacity, so building frames does
+  not allocate in the list.
+- **OA-DSP-004** The projection puts the centre at the middle of the screen with north up and
+  east right, and projecting then unprojecting a screen position, or the reverse, returns it to
+  within 1/16 pixel (and the position to within 1e-7 degree plus that quantum).
+- **OA-DSP-005** The distance from the centre drawn on screen is within 0.15 % of the WGS-84
+  geodesic (oa-geo) out to 400 NM at centres from the equator to 65 N, and bearings are true to
+  0.3 degree.
+- **OA-DSP-006** The projection refuses a centre off the globe, a range outside 0.05 to 20000 NM,
+  a zero-size screen, the absent-position sentinel and positions off the globe, and saturates a
+  far projected point instead of overflowing; ring radii are true ground distances.
+- **OA-DSP-007** The stroke font has every character of A to Z, 0 to 9 and ` .,/-+:()*#` with the
+  up and down arrows, sorted for lookup, with every stroke on the 5 by 8 grid; lowercase folds to
+  capitals and an unknown character draws a crossed box.
+- **OA-DSP-008** The easily confused characters 0 and O, 1 and I, 5 and S, 8 and B, and 2 and Z
+  differ in at least 4 cells of the glyph grid, other close neighbours in at least 3, and no two
+  glyphs are identical.
+- **OA-DSP-009** The rasterizer clips every primitive to the buffer exactly: a clipped line, circle
+  and rectangle equal the part inside the buffer of the unclipped drawing; lines entirely outside,
+  crossing each edge and on each corner behave correctly; nothing is written outside the visible
+  pixels, however extreme the coordinates; and a line is the same whichever end comes first.
+- **OA-DSP-010** The rasterizer is integer only and deterministic: the frame depends only on the
+  list and the frame geometry, not on what the buffer held before or on the stride.
+- **OA-DSP-011** A deterministic sweep of random primitives, including `i32` extremes, every size
+  and alignment, odd strings and many buffer geometries, never panics, writes only palette colours
+  to visible pixels, writes nothing else, and gives the same hashes on a second run.
+- **OA-DSP-012** Small fixed scenes (a line fan with rectangle, circle and polyline; every glyph
+  class at several sizes and alignments; layers with clipping; a hand-built airspace map) render
+  to pinned SHA-256 hashes.
+- **OA-DSP-013** The frame hash is the SHA-256 of the visible pixels in row order, independent of
+  stride, and changes with any pixel; an unusable frame geometry or short buffer is refused.
+- **OA-DSP-014** A faulted list, or a list whose columns, indexes, spans or text were edited into
+  an inconsistent state, is refused before any pixel is written.
+- **OA-DSP-015** Text is anchored left, centre or right at the top of its capitals, and its
+  extent is the glyph grid scaled by the size.
+- **OA-DSP-016** Every foreground palette colour has at least 4.5:1 contrast on the background,
+  and no two data colours come within 55 (of 255) of each other in plain RGB or as seen with
+  protanopia, deuteranopia or tritanopia.
+- **OA-DSP-017** The airspace map draws ARTCC HIGH and LOW boundaries (closed, in distinct
+  colours and layers), airway legs, fixes, navaids and airports as distinct symbols, labels below
+  configurable range thresholds, range rings at their true radius with labels, and a legend naming
+  the facility, cycles, range, ring spacing and both strata.
+- **OA-DSP-018** A scene that overflows any table fails with an error naming it, leaves the list
+  faulted and is never drawn, and the capacities computed from the model hold at every range and
+  centre including the poles and the antimeridian.
+- **OA-DSP-019** The same model and view give the same list and the same bytes however many
+  frames come between, and a frame never changes the list's capacity.
+- **OA-DSP-020** The PPM writer emits P6 with RGB order, no row padding, and an error, not a
+  panic, for a short buffer.
+- **OA-DSP-021** A real ZAU snapshot (`OPENATCA_SNAPSHOT`) renders, every frame has the same hash,
+  and the time per frame at 1920 by 1080 is reported; the test skips when the variable is unset.
+- **OA-DSP-022** `oa-scope render` draws a snapshot to a PPM and reports the frame's SHA-256, and
+  a malformed command line is a usage error naming the problem.
+- **OA-DSP-023** Points and legs the map cannot place are counted and said on the screen in the
+  alert colour, never dropped silently.

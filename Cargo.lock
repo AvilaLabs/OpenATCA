@@ -30,6 +30,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-display"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-geo",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-feed"
 version = "0.0.1"
 dependencies = [
