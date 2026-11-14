@@ -64,6 +64,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
 | `crates/oa-grib2` | GRIB2 decoder for NOAA RAP and HRRR winds and temperatures aloft |
 | `crates/oa-j2k` | JPEG 2000 decoder for the profile of GRIB2 template 5.40 (NOAA RAP packing) |
+| `crates/oa-mva` | FAA Minimum Vectoring Altitude and center MIA charts (AIXM 5.1) as a queryable model, and the `oa-mva-check` validation tool |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

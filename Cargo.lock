@@ -90,6 +90,16 @@ name = "oa-json"
 version = "0.0.1"
 
 [[package]]
+name = "oa-mva"
+version = "0.0.1"
+dependencies = [
+ "oa-dof",
+ "oa-tiff",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
