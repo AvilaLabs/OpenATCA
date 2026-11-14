@@ -1806,3 +1806,59 @@ raw bytes. The decisions where the specification leaves room are listed in the `
   for tens of thousands of rows within the same bounds.
 - **OA-AST-021** A refusal renders as text naming the category, the record, the data item (and subitem) and
   the byte, and leaves out the parts that do not apply.
+
+## M3 — Sensor simulation (oa-sensorsim)
+
+Simulated secondary radar plots and injected ADS-B spoofs, generated from `oa-truth` (docs/M3_DESIGN.md
+sections 1, 2 and 4). Error values are only those of docs/BENCHMARKS.md 3.1 "Simulated sensor inputs"; the
+radar biases, split geometry and earth-radius factor have no sourced value and are parameters with no default.
+
+- **OA-SIM-001** The generator is xoshiro256** seeded by SplitMix64, written from the published algorithms;
+  both reproduce their published output sequences, streams for different (seed, aircraft, scan) words differ
+  and repeat exactly, and uniform and normal draws have the right moments.
+- **OA-SIM-002** Each named profile (`MSSR_EUROCONTROL_1997`, `MODE_S_ATC302`, `SSR_CD2_ATC302`) carries the
+  tabulated values (range and azimuth sigma, quantum, altitude resolution, scan periods 4.8 s and 12 s,
+  detection, Mode A, Mode C, false and split rates) and the simulated range and azimuth errors have the
+  profile's sigma within 4% over more than 10 000 plots, with a mean consistent with zero.
+- **OA-SIM-003** Range and azimuth bias are added exactly (with the random error set to zero, measured minus
+  true equals the bias to 1e-9).
+- **OA-SIM-004** A plot is made at the instant the beam azimuth equals the target azimuth: exactly the scan
+  start plus the azimuth fraction of the period for a stationary target (to the nanosecond), and, for a moving
+  target, at a time where the beam azimuth equals the azimuth of the truth position at that time (checked
+  through the public truth query), inside the revolution, and not where a frozen-target solve puts it.
+- **OA-SIM-005** Detection, false-plot and split-plot rates match the profile within 4.5 binomial standard
+  deviations; false plots are uniform in area over the coverage disc and in azimuth, timed by the beam; split
+  plots repeat the plot time and differ by the stated range and azimuth offsets.
+- **OA-SIM-006** A target beyond the coverage range or below the 4/3-earth line of sight (effective-radius
+  factor a site parameter) gets no plot and is counted by cause; the line-of-sight test matches the radio
+  horizon formula 4.12 (sqrt h1 + sqrt h2) km.
+- **OA-SIM-007** Altitude is quantised to 100 ft (Mode C) or 25 ft (Mode S) by the profile, and range to the
+  1/8 NM grid for SSR CD-2.
+- **OA-SIM-008** CAT048 output decodes with `oa-asterix` to the same plots within the element quantisation
+  (range 1/512 NM, azimuth half of 360/2^16 degree, time 1/256 s plus the millisecond floor), with Mode A,
+  flight level, address, SIM flag and target type, one block per scan.
+- **OA-SIM-009** The same seed, truth and site give identical plots and identical CAT048 bytes; a different
+  seed differs; an aircraft's plots do not depend on which other aircraft are in the truth.
+- **OA-SIM-010** Each aircraft gets its own Mode A code (never 0000, 7500, 7600 or 7700); Mode S profiles put
+  the aircraft address on the plot and non-Mode S profiles do not.
+- **OA-SIM-011** An invalid site or profile (latitude, period, azimuth, coverage past the CAT048 range
+  element, earth factor, non-finite bias, probability above one) is refused with a typed error, and a plot
+  range past the CAT048 element is refused at encoding.
+- **OA-SIM-012** The ghost transform adds an aircraft with a new address on a straight track at the stated
+  speed and track, labels exactly those rows, and leaves every original row intact and in order.
+- **OA-SIM-013** The drift transform moves the victim's reports in the window by the stated rate times the
+  elapsed time along the stated bearing, labels exactly those rows, and changes nothing else.
+- **OA-SIM-014** The replay transform copies the victim's reports of a window shifted later in time, under
+  the victim's or another address, with the original positions, and labels them.
+- **OA-SIM-015** The duplicate-address transform re-sends a donor aircraft's reports under the victim's
+  address and labels them; the victim's and donor's own rows are unchanged.
+- **OA-SIM-016** Every spoof transform refuses an address already present (ghost), an address past its
+  width, a non-positive interval, shift or window, a victim or donor without reports and equal victim and
+  donor, with a typed error.
+- **OA-SIM-017** Transforms compose, and a detector's flags score against the labels as a confusion matrix
+  (true and false positives and negatives, and per attack kind) whose cells sum to the row count.
+- **OA-SIM-018** On a real ZAU clip (skipped when `OPENATCA_SENSORSIM_CLIP` is absent) a terminal and an
+  en-route radar produce plots whose CAT048 output decodes, with a detection rate within one percentage point
+  of the profile's.
+- **OA-SIM-019** The `oa-sensorsim` binary writes the plots (CSV and CAT048) of an OAF1 clip, gives the same
+  bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.

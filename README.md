@@ -70,6 +70,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, truth and airspace wiring (`oa-truth`, M0 model), report writer, and the `oa-bench` binary |
 | `crates/oa-wind` | Wind and temperature aloft at (lat, lon, pressure altitude, time) from RAP analyses, never extrapolated, and the `oa-wind-check` validation tool |
 | `crates/oa-asterix` | ASTERIX category 021, 048 and 062 encoder and decoder: generic core (data block, FSPEC, item kinds, constant UAP tables) and typed items for the tracker |
+| `crates/oa-sensorsim` | M3 sensor simulation from `oa-truth`: rotating-beam secondary radar plots (named error profiles from BENCHMARKS 3.1, bias, Pd, false and split plots, line of sight, quantisation) as a table and ASTERIX CAT048, ADS-B spoof transforms (ghost, drift, replay, duplicate address) with row labels, and the `oa-sensorsim` binary |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, report writer, and the `oa-bench` binary |
 | `tools/oa-trace` | Requirements traceability checker |
 
