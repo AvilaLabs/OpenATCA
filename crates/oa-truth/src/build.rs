@@ -1,36 +1,20 @@
 //! Truth construction: selection, legs, smoothing. Core (pure).
 
-use oa_adsb::{reports_len, reports_row, Reports, F_NEW_LEG, F_STALE, NONE_U8};
+use oa_adsb::{reports_len, reports_row, Reports, F_NEW_LEG};
 
 use crate::frame::{frame_angle, frame_new, project, Frame};
 use crate::loo::{loo_finish, loo_leg, LooAcc};
+use crate::quality::{nacp_epu_m, quality_check, QualityState};
 use crate::smooth::{interp, smooth, LegView, SIGMA95};
 use crate::{
-    Fraction, Truth, TruthConfig, TruthError, TruthStats, ADSB_SOURCES, MAX_FRAME_ARC_RAD,
-    MAX_REPORTS, REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_NACP, REM_NIC, REM_NO_QUALITY,
-    REM_SHORT_LEG, REM_SIL, REM_SOURCE, REM_STALE, REM_VERSION, SPLIT_FRAME, SPLIT_GAP, SPLIT_JUMP,
+    Fraction, Truth, TruthConfig, TruthError, TruthStats, MAX_FRAME_ARC_RAD, MAX_REPORTS,
+    REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_SHORT_LEG, SPLIT_FRAME, SPLIT_GAP, SPLIT_JUMP,
     SPLIT_NEW_LEG,
 };
 
 const NS_PER_MS: i64 = 1_000_000;
 const MPS_PER_KT: f64 = 0.514_444_444_444;
 const EARTH_R_M: f64 = 6_371_008.8;
-/// 95 % radius in metres for NACp 0 to 11 (DO-260B table 2-14); NACp 0 is "unknown".
-const NACP_EPU_M: [f64; 12] = [
-    f64::INFINITY,
-    18_520.0,
-    7_408.0,
-    3_704.0,
-    1_852.0,
-    926.0,
-    555.6,
-    185.2,
-    92.6,
-    30.0,
-    10.0,
-    3.0,
-];
-
 /// Checks a configuration; the error names the first bad value.
 fn check_config(c: &TruthConfig) -> Result<(), TruthError> {
     let bad = |w: &'static str| Err(TruthError::BadConfig(w));
@@ -64,26 +48,6 @@ fn check_config(c: &TruthConfig) -> Result<(), TruthError> {
         return bad("jump_resync, min_leg_points or loo_stride");
     }
     Ok(())
-}
-
-/// A quality value and when it was last seen.
-struct Held {
-    v: u8,
-    at: i64,
-}
-
-/// The value for a row: its own if present, else the held one if young enough.
-fn held_value(h: &mut Held, own: u8, t: i64, carry_ns: i64, carried: &mut bool) -> Option<u8> {
-    if own != NONE_U8 {
-        h.v = own;
-        h.at = t;
-        return Some(own);
-    }
-    if h.at != i64::MIN && t - h.at <= carry_ns {
-        *carried = true;
-        return Some(h.v);
-    }
-    None
 }
 
 /// Reports of the leg being collected. A7.2: cold, transient scratch.
@@ -245,12 +209,8 @@ fn process_aircraft(
     rows: &[(u32, i64, u32)],
 ) -> Result<(), TruthError> {
     let cfg = b.cfg;
-    let carry_ns = cfg.quality_carry_ms * NS_PER_MS;
     let gap_ns = cfg.leg_gap_ms * NS_PER_MS;
-    let mut h_nacp = Held { v: 0, at: i64::MIN };
-    let mut h_nic = Held { v: 0, at: i64::MIN };
-    let mut h_sil = Held { v: 0, at: i64::MIN };
-    let mut h_ver = Held { v: 0, at: i64::MIN };
+    let mut q = QualityState::default();
     let mut buf = LegBuf::default();
     let mut frame: Option<Frame> = None;
     let mut pending_new_leg = false;
@@ -263,33 +223,8 @@ fn process_aircraft(
         if row.flags & F_NEW_LEG != 0 {
             pending_new_leg = true;
         }
-        let mut carried = false;
-        let nacp = held_value(&mut h_nacp, row.nac_p, t, carry_ns, &mut carried);
-        let nic = held_value(&mut h_nic, row.nic, t, carry_ns, &mut carried);
-        let sil = held_value(&mut h_sil, row.sil, t, carry_ns, &mut carried);
-        let ver = held_value(&mut h_ver, row.version, t, carry_ns, &mut carried);
-        // The first failing rule is the reason.
-        let fail = if !(-900_000_000..=900_000_000).contains(&row.lat_e7)
-            || !(-1_800_000_000..=1_800_000_000).contains(&row.lon_e7)
-        {
-            Some(REM_INVALID)
-        } else if row.flags & F_STALE != 0 {
-            Some(REM_STALE)
-        } else if row.source != NONE_U8 && !ADSB_SOURCES.contains(&row.source) {
-            Some(REM_SOURCE)
-        } else if nacp.is_none() || nic.is_none() || sil.is_none() {
-            Some(REM_NO_QUALITY)
-        } else if nacp.is_some_and(|v| v < cfg.min_nacp || v > 11) {
-            Some(REM_NACP)
-        } else if nic.is_some_and(|v| v < cfg.min_nic) {
-            Some(REM_NIC)
-        } else if sil.is_some_and(|v| v < cfg.required_sil) {
-            Some(REM_SIL)
-        } else if ver.is_some_and(|v| v < cfg.min_version) {
-            Some(REM_VERSION)
-        } else {
-            None
-        };
+        let verdict = quality_check(&mut q, &row, t, cfg);
+        let (fail, carried, nacp) = (verdict.removal, verdict.carried, verdict.nacp);
         if let Some(kind) = fail {
             count_removed(b, kind);
             continue;
@@ -340,9 +275,7 @@ fn process_aircraft(
         if carried {
             b.stats.quality_carried += 1;
         }
-        let epu = nacp
-            .and_then(|v| NACP_EPU_M.get(usize::from(v)).copied())
-            .unwrap_or(f64::INFINITY);
+        let epu = nacp.map_or(f64::INFINITY, nacp_epu_m);
         buf.t.push(t);
         buf.lat_e7.push(row.lat_e7);
         buf.lon_e7.push(row.lon_e7);

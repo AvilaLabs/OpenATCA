@@ -138,7 +138,7 @@ The core is pure, as elsewhere: same inputs give the same tracks, byte for byte.
 
 ## Build order
 
-1. `oa-track` on ADS-B only, scored with split reports against M2's ERAM numbers.
+1. `oa-track` on ADS-B only, scored with split reports against M2's ERAM numbers. **Built** (OA-TRK-001 to 029): `oa-track-run` scores on thinned input; see the report it writes for the numbers.
 2. `oa-sensorsim` and radar fusion with registration.
 3. Integrity checks and the spoof test.
 4. `oa-asterix`, after the specification download is approved.

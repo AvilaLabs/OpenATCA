@@ -9,7 +9,7 @@
 //!   ERAM track samples, handoffs, expanded routes, TBFM and TFMS estimates), [`ingest`] and
 //!   [`scan`] (decoded messages into those tables), [`thindex`], [`assoc`] (address first, then
 //!   callsign and a gate), [`pair`] (paired samples), [`stats`] (the exact percentile method),
-//!   [`metrics_th`] (T1 to T4), [`metrics_flow`] (T5 to T9), [`metrics_event`] (F1 to F3, R1,
+//!   [`tracker_input`] (a tracker's output rows as the legacy stream, M3), [`metrics_th`] (T1 to T4), [`metrics_flow`] (T5 to T9), [`metrics_event`] (F1 to F3, R1,
 //!   H1), [`run`], [`synth`] (the synthetic self-test) and [`report`] (text and CSV).
 //! * Shell: [`input`] (reads the recorded message directories and the ADS-B clip, hashes the
 //!   input files) and the
@@ -36,4 +36,5 @@ pub mod scan;
 pub mod stats;
 pub mod synth;
 pub mod thindex;
+pub mod tracker_input;
 pub mod truth;

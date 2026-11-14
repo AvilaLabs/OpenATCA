@@ -23,7 +23,7 @@ const PRIOR_VEL_VAR: f64 = 62_500.0;
 const PRIOR_ACC_VAR: f64 = 900.0;
 
 /// `sqrt(2 ln 20)`: the 95 % radius of a circular normal, in sigmas.
-pub(crate) const SIGMA95: f64 = 2.447_746_830_680_816;
+pub const SIGMA95: f64 = 2.447_746_830_680_816;
 
 /// The smoother's output for one leg, one entry per report. A7.2: cold, per-leg scratch.
 #[derive(Debug, Clone, Default)]

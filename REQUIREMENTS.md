@@ -1890,3 +1890,97 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   sample `asterix.pcap`) is refused by the Ed 1.21 decoder and not misread; on the real file all 100 are
   refused and all 100 tile their blocks exactly under the Ed 0.17 layout with a constant data source and a
   time of track that never runs backwards.
+## M3 — Surveillance tracking (oa-track)
+
+### ADS-B-only tracker and its scoring (oa-track, oa-bench adapter)
+
+- **OA-TRK-001** A measurement (time of applicability, sensor id, position with covariance, optional
+  velocity with covariance, optional barometric or geometric altitude with quantisation, optional vertical
+  rate, address and identity; one 72-byte record) is validated before use: a position out of range, a
+  covariance that is not finite and positive definite, a bad velocity, an altitude or rate out of range, and
+  a missing address are refused with a typed reason and counted; no track is made from them. Bad
+  configurations (zero capacity, M above N, a non-positive time, an unknown filter mode) are refused.
+- **OA-TRK-002** On straight flight with noise taken from NACp 9, the tracker's position error is below
+  7 m RMS at 1 Hz (raw reports: 17 m) and its speed and heading errors are below 1 m/s and 0.2 degree; at
+  17 s input the one-second output stays under 25 m. The horizontal state lives in a local east-north plane
+  (`oa_geo::aeqd`, moved from `oa-truth` so both share it) re-centred on every update.
+- **OA-TRK-003** Position noise is the NACp 95 % bound over 2.448 per axis; with those values the mean
+  normalised innovation squared of a position is 2.0 (within 1.7 to 2.4), and a report that claims three
+  times the true accuracy pushes it above 3.
+- **OA-TRK-004** Constant-rate turns at 1.5, 3 (standard rate) and 6 degrees per second at 1 s input, and
+  3 degrees per second at 5 s input, are followed (position under 15 m RMS, heading under 3 degrees, scored
+  on the one-second output); the interacting pair beats a single straight-model filter with the same
+  process noise by 34 to 99 % in position and by 4 to 50 % in speed, and beats the best of three single
+  filters (process noise 0.05 to 5 m^2/s^3) by 0 to 99 % in position (the test prints the table).
+- **OA-TRK-005** On straight flight the pair costs nothing against one straight filter, and the model
+  probabilities follow the aircraft: the turn probability is above 0.8 in the middle of a turn and below
+  0.1 on a straight leg, and the turn rate estimate is within 0.5 degree per second of a 3 degree per
+  second turn.
+- **OA-TRK-006** An aircraft accelerating at 1 m/s^2 is tracked to under 10 m RMS position and 2 m/s RMS
+  speed.
+- **OA-TRK-007** The vertical filter (level and climb/descent models, quantisation as noise of variance
+  step squared over 12) tracks a profile of level, 2,000 fpm climb, level and 1,500 fpm descent with 25 ft
+  quantised altitudes to under 12 ft RMS and 120 fpm RMS, and its model probabilities exceed 0.9 in the
+  middle of each phase.
+- **OA-TRK-008** A track 600 km from the origin at 64 degrees north is as accurate as one at the origin
+  (position under 8 m RMS, speed under 1 m/s), because the frame is re-centred on every update and the
+  velocity rotated by the change of the frame's axes.
+- **OA-TRK-009** A measurement that arrives out of order inside the window is applied by re-filtering from
+  stored state: with every fifth neighbour pair swapped, each swap is re-filtered and replayed exactly
+  once and the output after the last swap is bit-identical to the in-order run.
+- **OA-TRK-010** A measurement older than the clock by more than the window, one inside the window but
+  older than every stored state of its track, and an exact repeat (same time and sensor) are each counted
+  and dropped under their own counter; one inside the stored states is applied.
+- **OA-TRK-011** A track is confirmed by 2 reports within 3 expected intervals, one expected interval after
+  the first (the initiation delay is logged); a lone report expires, a second report after the window
+  restarts the track, and a second report implying more than 700 kt restarts it (each counted).
+- **OA-TRK-012** A silent track is flagged coasting from the first tick more than 3 expected intervals
+  after its last update (104 s for a last update at 100 s) and dropped, logged and its slot freed at the
+  first tick more than 60 s after it (no tick after 160 s).
+- **OA-TRK-013** The fixed-rate output is a row per confirmed track at every whole second, one second
+  apart; update rows carry the reports' own times.
+- **OA-TRK-014** The same measurements give the same output bytes (the output digest and every column are
+  equal across runs and across a different table capacity).
+- **OA-TRK-015** Capacities are bounded and overflow is counted: reports of aircraft beyond the track
+  capacity are refused and counted one by one, output rows past the table capacity are counted, and track
+  log entries past the log capacity are counted.
+- **OA-TRK-016** Two aircraft crossing 120 m apart keep their own addresses and each stays within 50 m
+  of its own truth: identity is the address, never the kinematics.
+- **OA-TRK-017** After the tracker is built no buffer it owns changes address or capacity through a run with
+  confirmations, late measurements, drops, restarts and overflow of the output, the log and the track
+  table (a counting allocator needs `unsafe`, which RULESET A0 forbids here, so the check is on the
+  buffers).
+- **OA-TRK-018** The ADS-B adapter derives the position covariance from NACp (bound over 2.448, per axis;
+  NACp 8 to 11 checked against the DO-260B bounds) and the velocity covariance from NACv, with velocity
+  from ground speed and track and 25 ft altitude quantisation.
+- **OA-TRK-019** NACp, NIC, SIL, version and NACv are carried forward at most 60 s; a row with none in
+  that age is removed like truth's `no_quality_in_age`; a velocity without NACv is used as NACv 1 and
+  counted; a row with only a geometric altitude passes it flagged geometric.
+- **OA-TRK-020** The adapter's gates are `oa_truth::quality_check`, the code truth selection uses: on a mixed
+  batch the removals by reason (stale flag, source, no quality, NACp, NIC, SIL, version) equal
+  `oa-truth`'s.
+- **OA-TRK-021** A tracker's output rows are scored by `oa-bench`'s unchanged metric functions through
+  `tracker_input`: a 100 m error in a known direction is recovered from T1 and T2, 2 m/s in speed from T3,
+  50 ft from T4, and a copy of truth scores zero.
+- **OA-TRK-022** Track sample columns of different lengths are refused with a typed error.
+- **OA-TRK-023** The scoring split is exact: per aircraft, reports in (time, input index) order numbered
+  from 0, even to set A (the tracker) and odd to set B (truth); the sets are disjoint, together every
+  report, and independent of input order except between same-time reports.
+- **OA-TRK-024** The quality fields are carried forward over the whole aircraft sequence before the split
+  (the same 60 s rule and code) and written into both sets, so splitting does not starve the tracker of
+  NACp.
+- **OA-TRK-025** The scoring run's configuration comes from the measured interval distribution of set A:
+  the expected interval is the median, the initiation interval the 90th percentile, the drop time truth's
+  leg gap (120 s).
+- **OA-TRK-026** Straight and turning are separated as in ESASSP Vol 1 4.2.14: transversal acceleration
+  (speed times heading rate over a 6 s span of truth) above 1.5 m/s^2 is a turn; heading wraps at north.
+- **OA-TRK-027** On a synthetic clip with known truth (a straight, a turning and an accelerating aircraft),
+  the split, tracker, truth from the other half and the unchanged metrics run end to end: every track is
+  confirmed 4 s after its first report, the position error is under 25 m RMS on both the one-second output
+  and the report-time rows, both classes are populated and T5 of the output is one second.
+- **OA-TRK-028** `oa-track-run --adsb <clip.oaf> --out <dir>` writes `report.txt`, `report.csv`,
+  `tracks.csv` and `esassp.csv`, each scored number labelled as on thinned input and not an ESASSP exit
+  result, byte-identical output digest across runs; usage errors exit 2 and an unreadable clip exits 1.
+- **OA-TRK-029** On the real ZAU hour (skipped when `OPENATCA_ADSB_CLIP` is unset) the tracker runs with no
+  capacity refusals or lost rows, is reproducible, confirms more than 80 % of its tracks and scores under
+  60 m RMS at report times against the other half's truth.
