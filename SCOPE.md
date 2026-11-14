@@ -107,6 +107,26 @@ section is what we intend to build first.
    priority class. When load exceeds capacity the platform sheds in a written order and says so;
    it never passes on corrupted or inconsistent data silently. A fault in one site or one adapter
    cannot spread past its boundary.
+2a. **Overload in systems we do not control** (Connor, 2026-11-14). We cannot fix another
+   system's routers, but we can make sure we never cause their overload, see it first, survive
+   it, and never pass on what it corrupts:
+   - **Never the cause.** Every interface we send on has a published traffic contract (maximum
+     rate, maximum burst, maximum message size) enforced inside our own sender. During shadow
+     mode we measure what each interface can absorb and set the contract below it. A new system
+     joined to an old one must prove it cannot flood it, which is exactly what failed on
+     2026-11-13.
+   - **See it first.** Every input feed reports its health continuously: rate, latency, sequence
+     gaps, duplicate and out-of-order messages, and disagreement with independent sources. Rising
+     latency and gaps are leading indicators; we alarm on trends, not only on outright loss, and
+     we always distinguish "no traffic" from "feed dead".
+   - **Never pass on corruption.** When a source starts disagreeing with independent sources
+     (radar against ADS-B against flight plans), it is quarantined and flagged, not averaged in.
+   - **Survive it.** Each facility's instance is autonomous for safety functions. Surveillance can
+     come from receivers local to the facility (ADS-B ground stations independent of the
+     inter-facility network), so a backbone outage degrades coordination between facilities, not
+     each facility's own traffic picture. When the network returns, state re-synchronises.
+   - **Show the margin.** As an independent monitor, the platform can report the load and health
+     of the feeds it watches, giving operators warning before a collapse rather than after.
 3. **Deterministic replay.** Every input is recorded with its time. Any run can be replayed bit
    for bit. This is how we test, how we compare against legacy output, and how an outage is
    investigated after the fact.
