@@ -5,3 +5,4 @@ DEFECTS.md
 *.jar
 *.env
 *.oaf
+/.claude/
