@@ -233,3 +233,90 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     assert!(err.contains("missing.oaf"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// REQ: OA-RPL-038
+#[test]
+fn adsb_flags_name_files_and_directories_and_the_binary_replays_them() {
+    let c = parse_args(&args(&[
+        "--adsb",
+        "a.oaf",
+        "--adsb-dir",
+        "d",
+        "--sfdps",
+        "s.oaf",
+    ]))
+    .unwrap();
+    let inp = |feed, p: &str, dir| Input {
+        feed,
+        path: PathBuf::from(p),
+        dir,
+    };
+    assert_eq!(
+        c.inputs,
+        vec![
+            inp(FeedKind::Adsb, "a.oaf", false),
+            inp(FeedKind::Adsb, "d", true),
+            inp(FeedKind::Sfdps, "s.oaf", false),
+        ]
+    );
+    assert!(parse_args(&args(&["--adsb"])).is_err());
+    assert!(parse_args(&args(&["--adsb-dir"])).is_err());
+    assert!(oa_replay::cli::USAGE.contains("--adsb"));
+
+    let dir = scratch("adsb");
+    let t0 = DAY * 1_000_000 + 3_500_000_000;
+    let mut a = Vec::new();
+    for k in 0..30i64 {
+        let mut r = oa_adsb::Reports::default();
+        for j in 0..3u32 {
+            oa_adsb::reports_push(
+                &mut r,
+                &oa_adsb::Row {
+                    icao: 0xAB_0000 + j,
+                    time_ns: t0 + k * 2_000_000_000,
+                    lat_e7: 420_000_000,
+                    lon_e7: -880_000_000,
+                    baro_alt_ft: 30_000,
+                    ..oa_adsb::ROW_EMPTY
+                },
+            );
+        }
+        let mut p = Vec::new();
+        oa_adsb::encode_payload(&mut p, &r, 0, 3).unwrap();
+        a.extend(frame(1, k as u64, t0 + k * 2_000_000_000, &p));
+    }
+    a.extend(frame(1, 30, t0 + 61_000_000_000, b"garbage"));
+    let file = dir.join("adsb.oaf");
+    std::fs::write(&file, &a).unwrap();
+    let (code, out, _) = run_bin(&["--adsb", file.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(out.contains(
+        "feed adsb frames=31 messages=31 other_frames=0 not_applied=0 rows=90 applied=90"
+    ));
+    assert!(out.contains("adsb aircraft=3 capacity=65536 applied=90 out_of_order=0 refused_full=0"));
+    assert!(out.contains("errors adsb-length=1"));
+    // A directory of rotated files is the same stream; the same text apart from the file count.
+    let d = dir.join("rot");
+    std::fs::create_dir_all(&d).unwrap();
+    let mid = a.len() / 2;
+    let mut cut = 0;
+    let mut at = 0;
+    while at < mid {
+        at += 40 + u32::from_le_bytes(a[at + 32..at + 36].try_into().unwrap()) as usize;
+        cut = at;
+    }
+    std::fs::write(d.join("adsb-0001.oaf"), &a[..cut]).unwrap();
+    std::fs::write(d.join("adsb-0002.oaf"), &a[cut..]).unwrap();
+    let (_, outd, _) = run_bin(&["--adsb-dir", d.to_str().unwrap()]);
+    let norm = |o: &str| -> Vec<String> {
+        stable(o)
+            .lines()
+            .filter(|l| !l.starts_with("summary "))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(norm(&out), norm(&outd));
+    let (_, out2, _) = run_bin(&["--chunk-bytes", "41", "--adsb", file.to_str().unwrap()]);
+    assert_eq!(stable(&out), stable(&out2));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -87,8 +87,8 @@ fn recordings(n: i64) -> (Vec<u8>, Vec<u8>) {
 struct Outcome {
     checkpoints: Vec<Checkpoint>,
     last: Checkpoint,
-    frames: [u64; 4],
-    rows_applied: [u64; 4],
+    frames: [u64; oa_replay::FEED_COUNT],
+    rows_applied: [u64; oa_replay::FEED_COUNT],
     errors: [u64; oa_replay::ERR_COUNT],
     bytes: u64,
     flights: usize,
@@ -236,9 +236,9 @@ fn every_failure_is_counted_by_kind() {
     assert_eq!(n(ErrKind::TbfmField), 1);
     assert_eq!(n(ErrKind::SfdpsField), 1);
     assert_eq!(errors_total(&p.errors), 8, "{:?}", p.errors);
-    assert_eq!(p.other_frames, [1, 1, 0, 0]);
-    assert_eq!(p.frames, [6, 4, 0, 0]);
-    assert_eq!(p.messages, [5, 3, 0, 0]);
+    assert_eq!(p.other_frames, [1, 1, 0, 0, 0]);
+    assert_eq!(p.frames, [6, 4, 0, 0, 0]);
+    assert_eq!(p.messages, [5, 3, 0, 0, 0]);
     // The row with the bad field was kept without it.
     assert_eq!(p.rows_applied[0], 1);
     assert_eq!(ERR_NAMES.len(), oa_replay::ERR_COUNT);
@@ -506,9 +506,9 @@ fn tfms_and_fns_frames_are_counted_as_not_yet_applied() {
         T0 + 10,
         b"state=connected",
     );
-    assert_eq!(p.not_applied, [0, 0, 5, 1]);
-    assert_eq!(p.frames, [0, 0, 5, 2]);
-    assert_eq!(p.other_frames, [0, 0, 0, 1]);
+    assert_eq!(p.not_applied, [0, 0, 5, 1, 0]);
+    assert_eq!(p.frames, [0, 0, 5, 2, 0]);
+    assert_eq!(p.other_frames, [0, 0, 0, 1, 0]);
     assert_eq!(errors_total(&p.errors), 0);
     assert_eq!(rows_applied_total(&p), 0);
     assert_eq!(p.table.live, 0);

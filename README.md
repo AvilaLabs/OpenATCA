@@ -58,6 +58,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-json` | Strict bounded RFC 8259 JSON parser |
 | `crates/oa-tar` | Streaming ustar/GNU tar reader, split archives, typed truncation |
 | `crates/oa-adsb` | adsb.lol / readsb trace decoder and the `oa-adsb-clip` tool |
+| `crates/oa-replay` | Replay of recorded SWIM feeds (SFDPS, TBFM, TFMS, FNS) and ADS-B clips (`--adsb`, `--adsb-dir`) in one time-ordered stream; flight and aircraft state with a deterministic hash; the `oa-replay` tool |
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
@@ -71,7 +72,7 @@ cargo run -p oa-trace          # every requirement must have a test
 ```
 
 Tests that need full FAA datasets read them from paths in environment variables (`OPENATCA_RAW`,
-`OPENATCA_DATA`, `OPENATCA_CIFP`, `OPENATCA_NASR`, `OPENATCA_GEODTEST`) and skip when they are
+`OPENATCA_DATA`, `OPENATCA_CIFP`, `OPENATCA_NASR`, `OPENATCA_GEODTEST`, `OPENATCA_ADSB_CLIP`) and skip when they are
 unset. [DATA.md](DATA.md) lists where to download each one.
 
 ## Data

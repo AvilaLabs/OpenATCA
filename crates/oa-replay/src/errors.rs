@@ -57,10 +57,22 @@ pub enum ErrKind {
     TbfmCapacity,
     /// A row index the apply step could not resolve.
     BadRow,
+    /// An ADS-B payload of the wrong length.
+    AdsbLength,
+    /// An ADS-B payload that does not start with `ADS1`.
+    AdsbMagic,
+    /// An ADS-B payload with an unsupported record length or a non-zero reserved field.
+    AdsbLayout,
+    /// An ADS-B payload with more records than a frame may carry.
+    AdsbTooManyRows,
+    /// An ADS-B payload with a record whose values are out of range.
+    AdsbBadRecord,
+    /// An ADS-B payload the decoder could not range-check (an internal inconsistency).
+    AdsbInternal,
 }
 
 /// Number of [`ErrKind`] values.
-pub const ERR_COUNT: usize = 26;
+pub const ERR_COUNT: usize = 32;
 
 /// Display names, indexed by `ErrKind as usize`.
 pub const ERR_NAMES: [&str; ERR_COUNT] = [
@@ -90,6 +102,12 @@ pub const ERR_NAMES: [&str; ERR_COUNT] = [
     "tbfm-field",
     "tbfm-capacity",
     "bad-row",
+    "adsb-length",
+    "adsb-magic",
+    "adsb-layout",
+    "adsb-too-many-rows",
+    "adsb-bad-record",
+    "adsb-internal",
 ];
 
 /// Counts by [`ErrKind`].

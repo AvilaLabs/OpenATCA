@@ -134,3 +134,33 @@ fn the_real_recordings_replay_to_the_same_state_every_time() {
     assert!(errors_total(&p.errors) < p.messages.iter().sum::<u64>());
     assert_eq!(st.refused_full, 0);
 }
+
+// REQ: OA-RPL-039
+#[test]
+fn a_real_adsb_clip_replays_to_the_same_state_every_time() {
+    // OPENATCA_ADSB_CLIP: an OAF clip written by `oa-adsb-clip` from an adsb.lol archive.
+    let Some(path) = std::env::var_os("OPENATCA_ADSB_CLIP") else {
+        eprintln!("OPENATCA_ADSB_CLIP is not set: skipping the real ADS-B clip replay");
+        return;
+    };
+    let files = vec![(FeedKind::Adsb, PathBuf::from(path))];
+    let a = replay(&files, 64 * 1024);
+    let b = replay(&files, 4097);
+    let f = FeedKind::Adsb as usize;
+    let p = &a.p;
+    eprintln!(
+        "adsb: frames={} rows={} applied={} out_of_order={} aircraft={} errors={} in {:.3} s",
+        p.frames[f],
+        p.rows_seen[f],
+        p.rows_applied[f],
+        p.rows_out_of_order[f],
+        p.adsb.live,
+        errors_total(&p.errors),
+        a.elapsed
+    );
+    assert!(p.frames[f] > 0 && p.rows_applied[f] > 0 && p.adsb.live > 0);
+    assert_eq!(errors_total(&p.errors), 0);
+    assert_eq!(p.adsb.stats.refused_full, 0);
+    assert_eq!(a.final_hash, b.final_hash);
+    assert_eq!(a.p.checkpoints, b.p.checkpoints);
+}
