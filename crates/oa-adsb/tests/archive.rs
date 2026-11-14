@@ -1,0 +1,411 @@
+//! Archive scanning and the `oa-adsb-clip` binary, on archives built here (tar writer, gzip
+//! with stored deflate blocks), plus a real-data run gated on OPENATCA_DATA.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use std::io::{Cursor, Read};
+use std::path::PathBuf;
+use std::process::Command;
+
+use oa_adsb::*;
+use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
+
+// ---- builders -------------------------------------------------------------------------------
+
+const BLOCK: usize = 512;
+
+fn put(h: &mut [u8; BLOCK], at: usize, bytes: &[u8]) {
+    h[at..at + bytes.len()].copy_from_slice(bytes);
+}
+
+fn tar_header(name: &str, size: usize, typeflag: u8) -> [u8; BLOCK] {
+    let mut h = [0u8; BLOCK];
+    put(&mut h, 0, name.as_bytes());
+    put(&mut h, 100, b"0000644\0");
+    put(&mut h, 124, format!("{size:011o}\0").as_bytes());
+    put(&mut h, 136, b"14000000000\0");
+    h[156] = typeflag;
+    put(&mut h, 257, b"ustar\x0000");
+    put(&mut h, 148, b"        ");
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    put(&mut h, 148, format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+fn tar_entry(out: &mut Vec<u8>, name: &str, data: &[u8]) {
+    out.extend_from_slice(&tar_header(name, data.len(), b'0'));
+    out.extend_from_slice(data);
+    out.resize(out.len() + (BLOCK - data.len() % BLOCK) % BLOCK, 0);
+}
+
+/// A gzip member holding `data` in stored deflate blocks.
+fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut o = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
+    let mut chunks = data.chunks(65535).peekable();
+    if chunks.peek().is_none() {
+        o.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(c) = chunks.next() {
+        o.push(u8::from(chunks.peek().is_none()));
+        o.extend_from_slice(&(c.len() as u16).to_le_bytes());
+        o.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
+        o.extend_from_slice(c);
+    }
+    o.extend_from_slice(&oa_zip::crc32(data).to_le_bytes());
+    o.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    o
+}
+
+fn trace_json(icao: &str, rows: &[&str]) -> String {
+    format!(
+        "{{\"icao\":\"{icao}\",\"timestamp\":1794528000.000,\"trace\":[{}]}}",
+        rows.join(",")
+    )
+}
+
+/// Rows in and around ZAU at one-second steps from the base.
+fn in_box(n: usize, lat: f64) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            format!(
+                "[{}.00,{:.6},-90.000000,30000,400.0,90.0,0,0,null,\"adsb_icao\",30500,null,null,null]",
+                1000 + i,
+                lat + i as f64 * 0.0001
+            )
+        })
+        .collect()
+}
+
+struct Day {
+    tar: Vec<u8>,
+    /// Offset in `tar` where the entry for trace C starts.
+    c_at: usize,
+}
+
+fn day() -> Day {
+    let mut t = Vec::new();
+    tar_entry(&mut t, "./LICENSE-ODbL.txt", b"licence text");
+    t.extend_from_slice(&tar_header("./traces/", 0, b'5'));
+    let a = in_box(5, 41.0);
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    tar_entry(
+        &mut t,
+        "./traces/aa/trace_full_aaaaaa.json",
+        &gzip(trace_json("aaaaaa", &a).as_bytes()),
+    );
+    let b = in_box(3, 42.0);
+    let b: Vec<&str> = b.iter().map(String::as_str).collect();
+    tar_entry(
+        &mut t,
+        "./traces/bb/trace_full_bbbbbb.json",
+        trace_json("bbbbbb", &b).as_bytes(),
+    );
+    let c_at = t.len();
+    // Outside the box (Europe): read, counted, not delivered.
+    let c = trace_json(
+        "cccccc",
+        &["[1.0,49.0,10.0,1000,1.0,1.0,0,0,null,\"adsb_icao\"]"],
+    );
+    tar_entry(
+        &mut t,
+        "./traces/cc/trace_full_cccccc.json",
+        &gzip(c.as_bytes()),
+    );
+    // Corrupt gzip (a flipped data byte breaks the CRC).
+    let mut d = gzip(trace_json("dddddd", &a).as_bytes());
+    let n = d.len();
+    d[n - 12] ^= 0xff;
+    tar_entry(&mut t, "./traces/dd/trace_full_dddddd.json", &d);
+    // Valid gzip around broken JSON.
+    tar_entry(
+        &mut t,
+        "./traces/ee/trace_full_eeeeee.json",
+        &gzip(b"{\"icao\":"),
+    );
+    // One good row, one bad row.
+    let f = trace_json(
+        "ffffff",
+        &[
+            "[1.0,43.0,-90.0,1000,1.0,1.0,99,0]",
+            "[2.0,43.0,-90.0,1000,1.0,1.0,0,0]",
+        ],
+    );
+    tar_entry(
+        &mut t,
+        "./traces/ff/trace_full_ffffff.json",
+        &gzip(f.as_bytes()),
+    );
+    // Not traces: other names are skipped unread.
+    tar_entry(&mut t, "./acas/acas.json", b"{}");
+    t.resize(t.len() + 2 * BLOCK, 0);
+    Day { tar: t, c_at }
+}
+
+fn scan(parts: Vec<Cursor<Vec<u8>>>, f: &Filter) -> (ScanResult, Vec<(u32, usize)>) {
+    let mut calls = Vec::new();
+    let res = scan_archive(parts, f, &mut |r: &Reports| -> Result<(), String> {
+        calls.push((r.icao[0], reports_len(r)));
+        Ok(())
+    })
+    .unwrap();
+    (res, calls)
+}
+
+// ---- tests ----------------------------------------------------------------------------------
+
+// REQ: OA-ADSB-013
+#[test]
+fn archive_scan_decodes_traces_and_survives_bad_ones() {
+    let d = day();
+    let (res, calls) = scan(vec![Cursor::new(d.tar.clone())], &ZAU_BOX);
+    assert_eq!(res.end, ScanEnd::Complete);
+    assert_eq!(calls, [(0xaaaaaa, 5), (0xbbbbbb, 3), (0xffffff, 1)]);
+    assert_eq!((res.trace_entries, res.other_entries), (6, 3));
+    let st = res.stats;
+    assert_eq!((st.traces_read, st.traces_refused), (4, 2));
+    assert_eq!((st.kept, st.outside_box), (9, 1));
+    assert_eq!(st.rejected[REJ_FLAGS], 1);
+    assert_eq!(st.rows_seen, 5 + 3 + 1 + 2);
+    assert_eq!(res.error_samples.len(), 2);
+    assert!(
+        res.error_samples[0].contains("trace_full_dddddd"),
+        "{:?}",
+        res.error_samples
+    );
+    assert!(
+        res.error_samples[0].contains("CRC"),
+        "{:?}",
+        res.error_samples
+    );
+    assert!(
+        res.error_samples[1].contains("trace_full_eeeeee"),
+        "{:?}",
+        res.error_samples
+    );
+    // The time window applies while streaming.
+    let f = Filter {
+        from_ns: 1_794_528_000_000_000_000 + 1002 * 1_000_000_000,
+        ..ZAU_BOX
+    };
+    let (res, calls) = scan(vec![Cursor::new(d.tar)], &f);
+    // ffffff's rows are at +1 s and +2 s, before the window: both counted as outside it (the
+    // bad one too, since the window is checked before the rest of the row).
+    assert_eq!(calls, [(0xaaaaaa, 3), (0xbbbbbb, 1)]);
+    assert_eq!(res.stats.outside_time, 2 + 2 + 2);
+}
+
+// REQ: OA-ADSB-014
+#[test]
+fn split_archive_gives_the_same_result_and_first_part_alone_is_truncated() {
+    let d = day();
+    let (whole, calls) = scan(vec![Cursor::new(d.tar.clone())], &ZAU_BOX);
+    for cut in [
+        1usize,
+        511,
+        512,
+        700,
+        1500,
+        d.c_at,
+        d.c_at + 3,
+        d.tar.len() - 600,
+    ] {
+        let parts = vec![
+            Cursor::new(d.tar[..cut].to_vec()),
+            Cursor::new(d.tar[cut..].to_vec()),
+        ];
+        let (res, c) = scan(parts, &ZAU_BOX);
+        assert_eq!(res, whole, "cut {cut}");
+        assert_eq!(c, calls);
+    }
+    // Only the first part: everything before the cut is delivered, and the end is typed.
+    let (res, c) = scan(vec![Cursor::new(d.tar[..d.c_at + 600].to_vec())], &ZAU_BOX);
+    let ScanEnd::Truncated(t) = &res.end else {
+        panic!("{:?}", res.end)
+    };
+    assert_eq!(t.offset, (d.c_at + 600) as u64);
+    assert_eq!(t.entry, "./traces/cc/trace_full_cccccc.json");
+    assert_eq!(c, [(0xaaaaaa, 5), (0xbbbbbb, 3)]);
+    assert_eq!(res.stats.traces_read, 2);
+    // A cut at an entry boundary has no entry named but is still truncated.
+    let (res, _) = scan(vec![Cursor::new(d.tar[..d.c_at].to_vec())], &ZAU_BOX);
+    assert!(matches!(res.end, ScanEnd::Truncated(_)));
+    // The sink failing stops the scan with its error.
+    let r = scan_archive(vec![Cursor::new(d.tar)], &ZAU_BOX, &mut |_: &Reports| {
+        Err("disk full".to_string())
+    });
+    assert!(matches!(r, Err(ScanError::Sink(ref s)) if s == "disk full"));
+}
+
+fn tmp(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+}
+
+fn read_frames(path: &PathBuf) -> (Vec<u8>, Reports, usize) {
+    let bytes = std::fs::read(path).unwrap();
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let mut rd = FrameReader::new(&mut buf).unwrap();
+    rd.push(&bytes);
+    let mut out = Reports::default();
+    let mut frames = 0;
+    while let Some(f) = rd.next() {
+        let f = f.unwrap();
+        assert_eq!(f.kind, Kind::Message);
+        assert_eq!(f.flags, oa_feed::FLAG_BYTES);
+        assert_eq!(f.seq, frames as u64);
+        let n = decode_payload(f.payload, &mut out).unwrap();
+        // The frame's receive time is its first report's time.
+        assert_eq!(f.recv_unix_ns, out.time_ns[reports_len(&out) - n]);
+        assert_eq!(f.jms_timestamp_ms, f.recv_unix_ns / 1_000_000);
+        frames += 1;
+    }
+    assert!(rd.finish().is_none());
+    (bytes, out, frames)
+}
+
+// REQ: OA-ADSB-015
+#[test]
+fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
+    let d = day();
+    let a = tmp("clip.tar.aa");
+    let b = tmp("clip.tar.ab");
+    let cut = d.c_at + 77;
+    std::fs::write(&a, &d.tar[..cut]).unwrap();
+    std::fs::write(&b, &d.tar[cut..]).unwrap();
+    let out = tmp("clip.oaf");
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let run = |args: &[&str]| Command::new(exe).args(args).output().unwrap();
+    let (sa, sb, so) = (
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        out.to_str().unwrap(),
+    );
+    // Both parts: complete, 9 reports, sorted by time.
+    let o = run(&["--out", so, sa, sb]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(
+        err.contains("kept=9") && err.contains("archive: complete"),
+        "{err}"
+    );
+    assert!(err.contains("traces_refused=2"), "{err}");
+    let (_, r, frames) = read_frames(&out);
+    assert_eq!((reports_len(&r), frames), (9, 1));
+    assert!(r.time_ns.windows(2).all(|w| w[0] <= w[1]));
+    // ffffff's good row is at +2 s, before the others' first report at +1000 s.
+    assert_eq!(r.icao[0], 0xffffff);
+    assert_eq!(summarize(&r).aircraft, 3);
+    // Window with an ISO time and a smaller box.
+    let o = run(&[
+        "--out",
+        so,
+        "--from",
+        "2026-11-13T00:16:42Z",
+        "--box",
+        "41.5,42.5,-91,-89",
+        sa,
+        sb,
+    ]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    let (_, r, _) = read_frames(&out);
+    // 1794528000 is 2026-11-13T00:00:00Z; 00:16:42 is +1002 s; only bbbbbb (lat 42.x) is in the box.
+    assert_eq!(r.icao, [0xbbbbbb]);
+    // The first part alone: truncated, exit 3, frames still written; allowed with a flag.
+    let o = run(&["--out", so, sa]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(3), "{err}");
+    assert!(err.contains("TRUNCATED"), "{err}");
+    let (_, r, _) = read_frames(&out);
+    assert_eq!(reports_len(&r), 8);
+    let o = run(&["--out", so, "--allow-truncated", sa]);
+    assert!(o.status.success());
+    // Frames to standard output with `--out -`, and nothing else there.
+    let o = run(&["--out", "-", sa, sb]);
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let mut rd = FrameReader::new(&mut buf).unwrap();
+    rd.push(&o.stdout);
+    assert!(rd.next().unwrap().is_ok());
+    assert!(rd.next().is_none());
+    // Argument errors exit 2.
+    for bad in [
+        &["--out", so][..],
+        &["sa"][..],
+        &["--out", so, "--box", "1,2,3", sa][..],
+        &["--out", so, "--from", "yesterday", sa][..],
+        &["--out", so, "--bogus", sa][..],
+    ] {
+        assert_eq!(run(bad).status.code(), Some(2), "{bad:?}");
+    }
+    let o = run(&["--out", so, "/nonexistent/part.tar"]);
+    assert_eq!(o.status.code(), Some(1));
+}
+
+// REQ: OA-ADSB-016
+#[test]
+fn real_day_archive_first_part() {
+    let Some(root) = std::env::var_os("OPENATCA_DATA") else {
+        eprintln!("skip: OPENATCA_DATA not set");
+        return;
+    };
+    let dir = PathBuf::from(root).join("raw/adsblol");
+    let part = std::fs::read_dir(&dir).ok().and_then(|rd| {
+        let mut v: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(".tar.aa"))
+            .collect();
+        v.sort();
+        v.pop()
+    });
+    let Some(part) = part else {
+        eprintln!("skip: no *.tar.aa under {}", dir.display());
+        return;
+    };
+    // The whole 2 GB part takes minutes without optimisation; by default read a prefix.
+    // OPENATCA_ADSB_FULL=1 reads all of it (use a release build).
+    let limit = if std::env::var_os("OPENATCA_ADSB_FULL").is_some() {
+        u64::MAX
+    } else {
+        8 * 1024 * 1024
+    };
+    let f = std::fs::File::open(&part).unwrap().take(limit);
+    let mut all = Reports::default();
+    let res = scan_archive(
+        vec![std::io::BufReader::new(f)],
+        &ZAU_BOX,
+        &mut |r: &Reports| -> Result<(), ()> {
+            reports_extend(&mut all, r);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let st = res.stats;
+    let s = summarize(&all);
+    eprintln!(
+        "real {}: traces_read={} refused={} rows_seen={} kept={} aircraft={} nac_p_known={} nac_p>=8={} ({:.2}% of known, {:.2}% of kept) pairs={} jumps>{}kt={} jitter={} max_implied_kt={:.0} archive_complete={}",
+        part.display(), st.traces_read, st.traces_refused, st.rows_seen, st.kept, s.aircraft,
+        s.nac_p_known, s.nac_p_ge_8,
+        100.0 * s.nac_p_ge_8 as f64 / s.nac_p_known.max(1) as f64,
+        100.0 * s.nac_p_ge_8 as f64 / s.reports.max(1) as f64,
+        s.pairs, MAX_JUMP_KT, s.jumps, s.jitter, s.max_implied_kt,
+        std::mem::discriminant(&res.end) == std::mem::discriminant(&ScanEnd::Complete),
+    );
+    assert!(st.traces_read > 100, "{st:?}");
+    assert_eq!(st.traces_refused, 0, "{:?}", res.error_samples);
+    assert_eq!(st.rejected.iter().sum::<u64>(), 0, "{:?}", st.rejected);
+    assert!(st.kept > 0 && s.aircraft > 0);
+    assert!(s.nac_p_known > 0);
+    // Real positions do not jump: over 99.9 % of consecutive pairs are plausible.
+    assert!(
+        s.jumps * 1000 < s.pairs.max(1),
+        "{} jumps of {} pairs",
+        s.jumps,
+        s.pairs
+    );
+    // The scan ended because the cap or the part ended, never on a refusal.
+    assert!(matches!(res.end, ScanEnd::Truncated(_) | ScanEnd::Complete));
+}

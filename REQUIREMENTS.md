@@ -880,3 +880,111 @@ the FAA event extension).
   identically to the unsplit recording, with the same checkpoints and final state hash.
 - **OA-RPL-029** TFMS and FNS frames are counted per feed in a "not yet applied" bucket until their
   decoders exist; they change no flight state and raise no error.
+
+## M1 — ADS-B history input
+
+### JSON (oa-json)
+
+- **OA-JSON-001** Parses exactly RFC 8259: every JSONTestSuite `y_` case is accepted and every
+  `n_` case refused (gated on `OPENATCA_DATA/raw/jsontestsuite`, 95 and 188 cases), and a
+  hand-written set of valid and invalid texts (leading zeros, `+`, `NaN`, trailing commas,
+  single quotes, comments, vertical tab as whitespace, unterminated values) agrees.
+- **OA-JSON-002** Every bound is a constant in `Limits` and exceeding it is a typed error with the
+  byte offset: input bytes, nesting depth, string bytes (counted on the raw text, escapes
+  included) and node count (values plus object keys); a text exactly at a bound is accepted.
+- **OA-JSON-003** Numbers are kept as their source text; `as_f64` returns `None` when the value is
+  not finite, and `as_i64` returns `None` for a fraction, an exponent or a value outside `i64`
+  (`i64::MIN` and `i64::MAX` are accepted).
+- **OA-JSON-004** Strings decode the eight short escapes and `\u` including surrogate pairs; a lone
+  or mis-ordered surrogate, a bad escape and an unescaped control character are refused with
+  their own errors.
+- **OA-JSON-005** Invalid UTF-8 anywhere in the input, a byte-order mark, and any non-whitespace
+  after the top-level value are refused, the last with the offset of the first extra byte.
+- **OA-JSON-006** Duplicate object keys are accepted and all kept in document order; `get`
+  returns the last.
+- **OA-JSON-007** Nothing recurses: a million nested arrays parse (with the depth limit raised)
+  and are walked without overflowing the stack, and the default depth limit refuses them.
+- **OA-JSON-008** For each of the 35 JSONTestSuite `i_` cases the outcome is the documented choice
+  in the test table (out-of-range numbers accepted as text with `as_f64` finite or not; lone
+  surrogates, invalid UTF-8, a byte-order mark and 500-deep nesting refused); a case added to
+  the suite without a documented choice fails the test.
+- **OA-JSON-009** The document is a flat arena in document order; `elements`, `members`, `get`,
+  `skip` and the kind accessors give the right nodes for nested arrays and objects, and queries
+  of the wrong kind or an out-of-range index return empty or `None`.
+- **OA-JSON-010** No input panics: every prefix of a sample and 20 000 seeded random byte
+  mutations give a document or an error.
+
+### Tar archives (oa-tar)
+
+- **OA-TAR-001** Reads ustar entries with prefix names, directories, empty files and data padded
+  to 512-byte blocks, and finds the end-of-archive marker.
+- **OA-TAR-002** A sequence of readers is one stream: splitting the archive at every byte offset
+  into two parts, and into parts of one byte and zero bytes, gives the same entries.
+- **OA-TAR-003** If the stream ends early, at any byte offset, the reader returns a typed
+  `Truncated` (offset, stage, entry, declared size, data present) after the complete entries,
+  never an error and never a panic; a stream ending between entries without the end marker, or
+  inside the marker, is also `Truncated`; the reader stays finished.
+- **OA-TAR-004** GNU long names (type `L`), PAX `path` overrides and ignored keys, skipped PAX
+  global headers, and GNU base-256 sizes are read.
+- **OA-TAR-005** A size over the entry limit, a name over the name limit, a long-name or PAX record
+  over the metadata limit, a bad checksum, a non-octal size, a non-UTF-8 name, a negative
+  base-256 size and data after a lone zero block are each refused with a typed error carrying
+  the offset, and the reader then refuses further calls.
+- **OA-TAR-006** Entry data the caller did not read is skipped; link, device and directory entries
+  carry no data whatever the size field says.
+- **OA-TAR-007** A reader error is reported with the stream offset and an interrupted read is
+  retried.
+- **OA-TAR-008** Seeded random byte damage and garbage of several lengths never panic.
+
+### ADS-B history (oa-adsb)
+
+- **OA-ADSB-001** A trace row with every column and an aircraft object decodes to the right time
+  (base plus offset, to the millisecond), position (1e-7 degree), barometric and geometric
+  altitude, ground speed (0.1 kt), track (0.1 degree), vertical rate, source type, callsign,
+  squawk, category, `nic`, `nac_p`, `nac_v`, `sil`, `sil_type`, `version`, `gva` and `sda`;
+  a row without an object has those fields absent.
+- **OA-ADSB-002** Each flag bit (stale, new leg, rate is geometric, altitude is geometric) is read
+  as readsb writes it; a geometric altitude is reported as geometric and not as barometric;
+  `"ground"` sets the ground flag; null altitude, speed, track and rate are absent.
+- **OA-ADSB-003** All 14 readsb source types are recognised by name in readsb's order; rows from
+  files before 2022 (7 to 9 columns) decode with the source absent; extra columns are ignored.
+- **OA-ADSB-004** Aircraft-object fields are range checked (bit-field widths) and trailing spaces
+  are removed from callsigns; unknown keys are ignored; duplicate keys keep the last; a malformed
+  known field refuses the row as `object`.
+- **OA-ADSB-005** Each value rule (position range, altitude, speed, track, flags, vertical rate,
+  source, row shape, time) refuses the row alone and counts it under its own reason; the other
+  rows of the trace are kept.
+- **OA-ADSB-006** The box (edges inclusive) and the time window (`[from, to)`) are applied while
+  decoding; rows outside are counted separately and not delivered; the ZAU box is
+  38.5 to 46.5 N, 83.5 to 93.5 W.
+- **OA-ADSB-007** A structural error (not an object, missing or malformed `icao`, `timestamp` or
+  `trace`, an out-of-range timestamp, a JSON error) refuses the whole trace and leaves the output
+  and the counts untouched; a `~` address sets the non-ICAO bit.
+- **OA-ADSB-008** A trace over the row limit is refused whole; a row over the column limit and an
+  object over the member limit are refused alone.
+- **OA-ADSB-009** No trace input panics: every prefix of a sample and 5 000 seeded random byte
+  mutations give reports or an error, and every kept report is in range.
+- **OA-ADSB-010** The OAF1 payload (`docs/ADSB_PAYLOAD.md`) round-trips and has the documented
+  layout: header, 64-byte little-endian records, reserved bytes zero.
+- **OA-ADSB-011** A payload with a wrong length, magic, record length, reserved field, count or a
+  record value out of range is refused and appends nothing; the encoder refuses an empty or
+  out-of-range row range and more than the per-frame maximum.
+- **OA-ADSB-012** The summary counts distinct aircraft, reports with `nac_p`, and those with
+  `nac_p` of 8 or more, and finds position jumps (implied speed over 700 kt and at least
+  0.5 NM apart) between consecutive reports of one aircraft in time order, exempting a report
+  that starts a new leg and counting closer pairs separately as noise; input order does not
+  matter.
+- **OA-ADSB-013** Scanning a day archive decodes gzip and plain trace files, skips other entries,
+  counts and names a corrupt gzip and a JSON error without stopping, delivers one batch per
+  trace with reports, and applies the time window.
+- **OA-ADSB-014** An archive split into parts gives the same result as the whole; the first part
+  alone ends in a typed truncation after delivering every complete trace before the cut; a sink
+  error stops the scan.
+- **OA-ADSB-015** `oa-adsb-clip` writes OAF1 MESSAGE frames sorted by time whose receive time is
+  the first report's time, honours `--box`, `--from` and `--to` (Unix seconds or ISO UTC),
+  reports truncation and exits 3 unless `--allow-truncated`, writes only frames to standard
+  output with `--out -`, and exits 2 on bad arguments and 1 on an unreadable part.
+- **OA-ADSB-016** On the real first part of an adsb.lol day archive (`OPENATCA_DATA/raw/adsblol`;
+  the first 8 MiB, or all of it with `OPENATCA_ADSB_FULL`) no trace is refused and no row is
+  rejected, reports are kept in the ZAU box, and under 0.1 % of consecutive pairs are position
+  jumps; the test prints the counts and skips when the data is absent.

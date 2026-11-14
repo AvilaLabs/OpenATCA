@@ -1,0 +1,21 @@
+[package]
+name = "oa-adsb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-json = { path = "../oa-json" }
+oa-tar = { path = "../oa-tar" }
+oa-zip = { path = "../oa-zip" }
+oa-feed = { path = "../oa-feed" }
+
+[[bin]]
+name = "oa-adsb-clip"
+path = "src/main.rs"

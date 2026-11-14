@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "oa-adsb"
+version = "0.0.1"
+dependencies = [
+ "oa-feed",
+ "oa-json",
+ "oa-tar",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-airspace"
 version = "0.0.1"
 dependencies = [
@@ -58,6 +68,10 @@ name = "oa-geo"
 version = "0.0.1"
 
 [[package]]
+name = "oa-json"
+version = "0.0.1"
+
+[[package]]
 name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
@@ -88,6 +102,10 @@ dependencies = [
 
 [[package]]
 name = "oa-sha256"
+version = "0.0.1"
+
+[[package]]
+name = "oa-tar"
 version = "0.0.1"
 
 [[package]]
