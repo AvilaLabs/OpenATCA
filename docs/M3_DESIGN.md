@@ -1,6 +1,6 @@
 # M3 — Surveillance tracking: design
 
-Status: draft 2026-11-14, for Connor's review before building.
+Status: approved by Connor 2026-11-14.
 
 ## Goal
 
