@@ -708,3 +708,89 @@ deterministic flight state comes out.
   frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset).
 - **OA-RPL-026** The canonical serialisation of a fixed table state has a pinned golden hash, so
   a change of the serialisation or of what the state holds is a deliberate, visible edit.
+
+### FNS NOTAM messages (oa-notam)
+
+Built on the survey in `docs/FNS_SURVEY.md` (112 real messages, AIXM 5.1 `AIXMBasicMessage` with
+the FAA event extension).
+
+- **OA-NOTAM-001** Decodes an AIXM 5.1 basic message with one `event:Event` into one row, in a
+  caller-owned struct-of-arrays: event identifier (UUID), NOTAM series, number, year, type (new,
+  replace, cancel), the referenced NOTAM (series, number, year, all three
+  or none), location designator, affected FIR, ICAO location, cross-reference id, issue time and
+  cancellation time; verified on hand-written messages.
+- **OA-NOTAM-002** Times are strict: ISO-8601 UTC (`Z` only, real calendar dates, no leap second,
+  1970 to 9999, a fraction of at most three digits) and the compact `YYYYMMDDhhmm` form read to
+  exact Unix milliseconds; every other form is refused.
+- **OA-NOTAM-003** The output has a stated capacity for rows, text bytes, polygons and vertices,
+  reserved once; rows round-trip through the columns, a push at capacity writes nothing and says
+  so, and the staged row keeps its budgeted size (RULESET A3, A7, C2).
+- **OA-NOTAM-004** The features of a message (airport, runway, runway direction, runway element,
+  taxiway, taxiway element, navaid, unit, obstacle area, vertical structure, radar system,
+  primary surveillance radar) are recorded as a kind mask and the most specific kind, with the
+  airport designator and ICAO indicator, the runway (or runway direction) designator, the navaid
+  type and the unit designator; member order does not matter.
+- **OA-NOTAM-005** The classification codes are read: Q code (`selectionCode`), scenario,
+  classification (INTL, DOM, MIL) and the traffic, purpose and scope letters as bit sets; short
+  codes are trimmed of surrounding white space; a letter outside the vocabulary or repeated is a
+  field error.
+- **OA-NOTAM-006** The start and end of the effective period come from both the `validTime` and
+  the compact `effectiveStart` and `effectiveEnd`; either alone stands, and two that disagree
+  are a field error on that field. An end written `PERM` or ending in `EST` sets an explicit
+  permanent or estimated flag.
+- **OA-NOTAM-007** The NOTAM text and the schedule are kept in a bounded string table,
+  entity-decoded with white space kept exactly; a text longer than the limit, empty, or in
+  several text nodes is a field error and takes no table space.
+- **OA-NOTAM-008** The altitude floor and ceiling are in feet with a reference (MSL, AGL, flight
+  level): `lowerLimit` and `upperLimit` (`SFC`, `GND`, `UNL`, `FLnnn`, feet and metres above
+  ground or mean sea level) win over the `minimumFL` and `maximumFL` pair; an unknown form, a
+  value outside -2,000 to 100,000 ft, or a floor above the ceiling in the same reference is a
+  field error.
+- **OA-NOTAM-009** The circle is the centre of `coordinates` (`DDMM[NS]DDDMM[EW]`, whole minutes,
+  range checked) in 1e-7 degree and the `radius` (1 to 999 nautical miles) in metres; a centre
+  or radius alone is kept but is not a circle.
+- **OA-NOTAM-010** Polygons (`posList` of runway and taxiway element surfaces) are spans of a
+  shared vertex array of 1e-7 degree coordinates, closing vertex not repeated, each with its
+  feature kind; a coordinate out of range or not a number, an open ring, fewer than four points,
+  an odd number of values, a reference system other than EPSG:4326 as a URN, or a ring over the
+  vertex limit is a field error on the row, none of the message's polygons is kept, and nothing is
+  dropped silently.
+- **OA-NOTAM-011** Every field has its own refusal: a malformed value is a counted field error,
+  the row is kept, the field is absent and its bit is set in the row's error word; a
+  single-valued field given twice, or an empty value element, is an error rather than first-wins.
+- **OA-NOTAM-012** A document with no event, several events, no or an invalid event identifier, no
+  or several NOTAM elements, a wrong root or namespace, or that is not well-formed XML is refused
+  whole, appends nothing, is counted by reason and does not affect its neighbours.
+- **OA-NOTAM-013** Reaching a row, text, polygon or vertex capacity is a refusal naming the
+  table, with the rows, string table, polygons and vertices exactly as before (IF-R1); a
+  document over the element limit is refused likewise.
+- **OA-NOTAM-014** Elements and attributes outside the structure seen in real data, including a
+  known name in another namespace and feature kinds not in the survey, are counted per path in a
+  bounded table (overflow counted too) and never errors; only the topmost unknown element of a
+  subtree is counted and nothing inside it is read.
+- **OA-NOTAM-015** The decoder never panics: every truncation, deletion, duplication and
+  replacement of each byte of messages with every feature kind and field, and seeded random
+  damage, give a row or an error, with every present column inside its model range and the
+  tables unchanged after a refusal.
+- **OA-NOTAM-016** After construction decoding does not grow any column or table, across accepted
+  and refused documents; no state leaks from one document to the next or between decoders.
+- **OA-NOTAM-017** Every real FNS message of the local sample (`OPENATCA_SCDS`, directories named
+  `fns*`) decodes with no rejection, no field error and no unknown path; the test reports
+  messages, rows, rejections by reason, field errors by field, feature kinds, rows with geometry
+  and throughput, which must be at least 20,000 messages per second (parse and decode, one
+  thread, release builds); it skips when the variable is unset.
+- **OA-NOTAM-018** Against an airspace snapshot of one ARTCC (`OPENATCA_SNAPSHOT`) the real rows'
+  locations, airports, runways and navaids are resolved to model entries, and the polygons are
+  tested against the model's ARTCC boundary; the distinct identifiers and rows that resolve are
+  reported for all rows and for the model's own FIR; the test skips when either variable is
+  unset.
+- **OA-NOTAM-019** Field names, bits and display tables agree.
+- **OA-NOTAM-020** The cross-check resolves a location to a model airport (identifier or
+  alternate), fix, navaid, terminal waypoint or ARTCC; an airport to a model airport; a runway
+  when the airport resolves and every end named is a threshold of that airport; and an ILS when
+  the airport has a localizer; it counts distinct identifiers and rows per role and scope and
+  lists those that do not resolve.
+- **OA-NOTAM-021** The cross-check reports which polygons touch the model's own ARTCC boundary
+  (high and low) by geodesic containment of vertices and boundary samples, and how many circle
+  centres are inside it; polygons oa-geo refuses and boundaries oa-geo refuses are counted, not
+  errors.

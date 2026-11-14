@@ -65,6 +65,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-notam"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-geo",
+ "oa-xml",
+]
+
+[[package]]
 name = "oa-replay"
 version = "0.0.1"
 dependencies = [

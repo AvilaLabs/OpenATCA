@@ -1,0 +1,15 @@
+[package]
+name = "oa-notam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oa-xml = { path = "../oa-xml" }
+oa-airspace = { path = "../oa-airspace" }
+oa-geo = { path = "../oa-geo" }
