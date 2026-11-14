@@ -32,6 +32,12 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   behaviour, no trait objects, no invariants enforced by attached code. Behaviour lives in free
   functions that take data and return data. Derives (`Clone`, `Copy`, `Debug`, `PartialEq`) and
   `const` constructors that only assemble fields are allowed.
+- **A1.1 [DEFAULT]** One exception (amended 2026-11-14): a *validated value type* (a single
+  physical value or coordinate with a range invariant, such as `LatLon`) may keep private fields,
+  a checked constructor that returns `Result`, and plain field accessors, and nothing else. This
+  makes an invalid value unrepresentable, which is worth more here than the purity of A1.
+  Subsystem types that hold precomputed state (an ellipsoid's series tables, a prepared polygon)
+  are subsystems under D5, not records, and keep their interface methods.
 - **A2 [MUST]** Design for the many. Anything that can occur more than once (tracks, flight plans,
   fixes, alerts) is stored and processed as a collection. There is no single-track code path the
   bulk path does not also serve.
