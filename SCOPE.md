@@ -428,8 +428,9 @@ area proximity warning (special use and temporary restricted airspace from NASR 
 on 3DEP terrain, the FAA obstacle file and MVA/MIA data. Terrain maxima used for warnings must be
 conservative: every terrain cell that touches a protection volume counts (not only samples whose
 centres fall inside it), and the possible height of terrain between samples is bounded, not
-interpolated away. The current `oa-tiff` radius query counts sample centres only and is
-therefore not yet the warning-grade query.
+interpolated away. The plain `oa-tiff` radius and polygon queries count sample centres only and are
+not the warning-grade queries; the `*_conservative` variants are (footprint of one full step, WGS 84
+radius, typed incomplete result).
 
 Exit:
 - Monte Carlo evaluation over the MIT LL encounter models: risk ratio, missed alerts and

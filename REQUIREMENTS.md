@@ -983,6 +983,37 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
   the shared edge to within a metre of the owning tile, and a radius across the seam returns the
   highest sample of both tiles; skipped when the data is absent.
 
+- **OA-TIFF-020** The `*_conservative` radius queries count a sample when any quad it is a corner
+  of touches the circle (the closed square of one full step around its centre, a superset of the
+  `PixelIsArea` pixel and valid for `PixelIsPoint`), so no interpolation between samples can exceed
+  the result; a high sample clipped by the circle edge is found, a query smaller than one cell
+  returns the corners of the cell it lies in, and a sample two steps out is not counted.
+- **OA-TIFF-021** The conservative radius is a WGS 84 geodesic distance bounded below with the
+  smallest meridian and prime-vertical radii over the latitude band the radius can reach, so a
+  sample within the true distance always counts and over-inclusion is bounded (documented, tested
+  against Vincenty's inverse formula at 0.5, 20, 41 and 60 degrees); a circle reaching a pole or
+  crossing the antimeridian is refused with a typed error.
+- **OA-TIFF-022** The conservative polygon queries count a sample when its footprint touches the
+  polygon (edge contact, containment either way, concave polygons, polygons smaller than a cell).
+- **OA-TIFF-023** The conservative queries across a tile set (abutting and overlapping tiles)
+  return what the undivided grid returns; for overlapping tiles a valid sample beats nodata.
+- **OA-TIFF-024** A conservative result is never a bare number: it is complete or incomplete, and
+  an incomplete one carries the count of nodata samples, the count of missing samples (the area
+  leaves the loaded data, including past the outermost samples), the number of whole-degree squares
+  holding them, and the highest valid sample as a lower bound only.
+- **OA-TIFF-025** Conservative queries refuse an empty tile set, tiles that do not share one
+  lattice, too many tiles, too large a region, a bad radius, a bad centre and bad polygons.
+- **OA-TIFF-026** On random small grids the conservative radius maximum is never below a
+  brute-force reference (bilinear and nearest-sample surfaces sampled at 1/16 of a step, inside the
+  circle by WGS 84 distance) and never above the best sample within the documented over-inclusion
+  margin.
+- **OA-TIFF-027** The same property for polygons against a brute-force reference.
+- **OA-TIFF-028** On a 3 by 3 block of real 3DEP tiles around Chicago (`OPENATCA_DATA`), for 500
+  random points and radii of 1, 3 and 5 nm, every conservative answer is complete and not below
+  the centre-only maximum except for the sphere-versus-ellipsoid radius difference (under 1% of
+  queries); the test reports how often and by how much (in feet) it exceeds it and the query time;
+  skipped when the data is absent.
+
 ### Digital Obstacle File (oa-dof)
 
 - **OA-DOF-001** Parses every field of the FAA DOF line format (OAS code and number, verification,

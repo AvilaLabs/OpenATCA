@@ -542,3 +542,85 @@ fn real_tile_set_across_a_seam() {
     // Outside the two tiles.
     assert_eq!(elevation_at(&set, 44.5, -86.0), Elevation::Outside);
 }
+
+// REQ: OA-TIFF-028
+#[test]
+fn real_conservative_against_centre_only() {
+    let Some(dir) = tile_dir() else { return };
+    // A 3 by 3 block of tiles around Chicago: latitude 40 to 43, longitude -89 to -86.
+    let mut tiles = Vec::new();
+    for lat in 40..43 {
+        for lon in -89..-86 {
+            match load(&dir, lat, lon) {
+                Some(g) => tiles.push(g),
+                None => {
+                    eprintln!("tile {} absent; skipping", tile_name(lat, lon));
+                    return;
+                }
+            }
+        }
+    }
+    let set = TileSet { tiles };
+    // 500 pseudo-random points in the ZAU area, kept 8 nm inside the block.
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut unit = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let pts: Vec<(f64, f64)> = (0..500)
+        .map(|_| (40.2 + unit() * 2.6, -88.8 + unit() * 2.6))
+        .collect();
+    for rnm in [1.0, 3.0, 5.0] {
+        let mut diffs = Vec::new();
+        let mut times = Vec::new();
+        let (mut below, mut incomplete) = (0, 0);
+        for &(lat, lon) in &pts {
+            let old = max_elevation_in_radius(&set, lat, lon, rnm).unwrap();
+            let t = std::time::Instant::now();
+            let new = max_elevation_in_radius_conservative(&set, lat, lon, rnm).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            let new_m = match new {
+                TerrainMax::Complete { peak, .. } => peak.metres,
+                TerrainMax::Incomplete { .. } => {
+                    incomplete += 1;
+                    continue;
+                }
+            };
+            let d = feet(f64::from(new_m) - f64::from(old.peak.unwrap().metres));
+            if d < -1e-6 {
+                below += 1;
+            }
+            diffs.push(d);
+        }
+        diffs.sort_by(f64::total_cmp);
+        times.sort_by(f64::total_cmp);
+        let exceed = diffs.iter().filter(|&&d| d > 1e-6).count();
+        let pos: Vec<f64> = diffs.iter().copied().filter(|&d| d > 1e-6).collect();
+        eprintln!(
+            "{rnm} nm: {} queries, incomplete {incomplete}; conservative above centre-only in {exceed} ({:.1}%), below in {below}; \
+             excess ft over all: median {:.1} p90 {:.1} p99 {:.1} max {:.1}; over the exceeding ones: median {:.1} mean {:.1}; \
+             time ms: median {:.2} p99 {:.2} max {:.2}",
+            diffs.len(),
+            100.0 * exceed as f64 / diffs.len() as f64,
+            percentile(&diffs, 0.5),
+            percentile(&diffs, 0.9),
+            percentile(&diffs, 0.99),
+            percentile(&diffs, 1.0),
+            percentile(&pos, 0.5),
+            pos.iter().sum::<f64>() / pos.len().max(1) as f64,
+            percentile(&times, 0.5),
+            percentile(&times, 0.99),
+            percentile(&times, 1.0),
+        );
+        assert_eq!(incomplete, 0);
+        // The conservative maximum is not lower than the centre-only one, except where the
+        // centre-only query's spherical radius reaches a sample the WGS 84 radius does not.
+        assert!(
+            below * 100 <= diffs.len(),
+            "{below} of {} below",
+            diffs.len()
+        );
+    }
+}
