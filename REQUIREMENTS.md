@@ -539,7 +539,7 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   a zero-size screen, the absent-position sentinel and positions off the globe, and saturates a
   far projected point instead of overflowing; ring radii are true ground distances.
 - **OA-DSP-007** The stroke font has every character of A to Z, 0 to 9 and ` .,/-+:()*#` with the
-  up and down arrows, sorted for lookup, with every stroke on the 5 by 8 grid; lowercase folds to
+  up and down arrows and `<` `>`, sorted for lookup, with every stroke on the 5 by 8 grid; lowercase folds to
   capitals and an unknown character draws a crossed box.
 - **OA-DSP-008** The easily confused characters 0 and O, 1 and I, 5 and S, 8 and B, and 2 and Z
   differ in at least 4 cells of the glyph grid, other close neighbours in at least 3, and no two
@@ -581,4 +581,31 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
 - **OA-DSP-022** `oa-scope render` draws a snapshot to a PPM and reports the frame's SHA-256, and
   a malformed command line is a usage error naming the problem.
 - **OA-DSP-023** Points and legs the map cannot place are counted and said on the screen in the
-  alert colour, never dropped silently.
+  alert colour, never dropped silently. A leg that ends at a published border crossing is
+  expected data, not an unplaced one (see OA-DSP-027).
+- **OA-DSP-024** Lines and polylines are 1 or 2 pixels wide (another width is refused). A 2 pixel
+  line is the Bresenham line plus a copy one pixel along its minor axis, deterministic, the same
+  whichever end is first, clipped like any line, and pinned by a golden hash.
+- **OA-DSP-025** The map hides detail by default and says so. Every layer (own boundary, neighbour
+  boundaries, high airways J and Q, low airways V and T, VOR-class navaids, airports, fixes,
+  labels, rings) can be switched off, fixes show within 60 NM, airports above 60 NM only with a
+  coded instrument procedure, VOR, VORTAC and VOR-DME always, NDB, DME and TACAN within 60 NM,
+  labels within 60 NM, each threshold configurable, and a `HIDDEN:` legend line names everything
+  left out by a layer switch or a threshold at the current range.
+- **OA-DSP-026** The own facility's boundary is drawn 2 pixels wide in its stratum colour;
+  neighbouring facilities' boundaries are 1 pixel wide in a dimmer colour under it.
+- **OA-DSP-027** The alert colour is used only for conditions that need attention, never for
+  expected data. Legs ending at border crossings (unresolved role BORDER_CROSSING) are reported in
+  the normal text colour as a count; the alert colour appears only when points, legs or edges are
+  genuinely unplaced.
+- **OA-DSP-028** The legend sits in a fixed strip at the top of the screen that the projection
+  excludes from its map area, so the legend never hides map data and the range circle fits below
+  it; legend rows stay inside the strip and do not overlap.
+- **OA-DSP-029** Each range ring is labelled where it crosses the 45 degree north-east diagonal
+  from the centre, and no two ring labels overlap at any ring spacing or screen size.
+- **OA-DSP-030** Positions outside a latitude and longitude box around the view are rejected
+  before projection, and the box never changes the picture: the list is identical with and
+  without it, including near the antimeridian.
+- **OA-DSP-031** The frame hash is computed only on request (`--hash`, or in tests), not on every
+  frame; the command line takes `--hide` and the range thresholds, and a bad layer name is a usage
+  error.

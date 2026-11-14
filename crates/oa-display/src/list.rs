@@ -37,6 +37,8 @@ pub enum DisplayError {
     BadLayer(u8),
     BadSize(u8),
     BadRadius(i32),
+    /// Line width in pixels must be 1 or 2.
+    BadWidth(u8),
     /// A polyline vertex was added with no polyline open.
     NoPolyline,
     /// The view configuration is not usable; the text says which part.
@@ -54,6 +56,7 @@ impl fmt::Display for DisplayError {
             DisplayError::BadLayer(l) => write!(f, "layer {l} is not below {MAX_LAYERS}"),
             DisplayError::BadSize(s) => write!(f, "text size {s} is not 1 to {MAX_TEXT_SIZE}"),
             DisplayError::BadRadius(r) => write!(f, "circle radius {r} is negative"),
+            DisplayError::BadWidth(w) => write!(f, "line width {w} is not 1 or 2"),
             DisplayError::NoPolyline => write!(f, "polyline vertex added with no polyline open"),
             DisplayError::BadView(what) => write!(f, "bad view: {what}"),
         }
@@ -84,6 +87,8 @@ pub struct Lines {
     pub y1: Vec<i32>,
     pub colour: Vec<u8>,
     pub layer: Vec<u8>,
+    /// Width in pixels, 1 or 2.
+    pub width: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -115,6 +120,8 @@ pub struct Polylines {
     pub len: Vec<u32>,
     pub colour: Vec<u8>,
     pub layer: Vec<u8>,
+    /// Width in pixels, 1 or 2.
+    pub width: Vec<u8>,
 }
 
 /// Text: `len` bytes of the list's string table from `start`. `x`, `y` anchor the string: `y` is
@@ -163,6 +170,7 @@ pub fn list_new(caps: ListCaps) -> DisplayList {
             y1: Vec::with_capacity(caps.lines),
             colour: Vec::with_capacity(caps.lines),
             layer: Vec::with_capacity(caps.lines),
+            width: Vec::with_capacity(caps.lines),
         },
         rects: Rects {
             x0: Vec::with_capacity(caps.rects),
@@ -184,6 +192,7 @@ pub fn list_new(caps: ListCaps) -> DisplayList {
             len: Vec::with_capacity(caps.polylines),
             colour: Vec::with_capacity(caps.polylines),
             layer: Vec::with_capacity(caps.polylines),
+            width: Vec::with_capacity(caps.polylines),
         },
         poly_x: Vec::with_capacity(caps.poly_vertices),
         poly_y: Vec::with_capacity(caps.poly_vertices),
@@ -211,6 +220,7 @@ pub fn list_clear(l: &mut DisplayList) {
     l.lines.y1.clear();
     l.lines.colour.clear();
     l.lines.layer.clear();
+    l.lines.width.clear();
     l.rects.x0.clear();
     l.rects.y0.clear();
     l.rects.x1.clear();
@@ -226,6 +236,7 @@ pub fn list_clear(l: &mut DisplayList) {
     l.polylines.len.clear();
     l.polylines.colour.clear();
     l.polylines.layer.clear();
+    l.polylines.width.clear();
     l.poly_x.clear();
     l.poly_y.clear();
     l.texts.x.clear();
@@ -257,6 +268,13 @@ fn check_style(l: &mut DisplayList, colour: u8, layer: u8) -> Result<(), Display
     Ok(())
 }
 
+fn check_width(l: &mut DisplayList, width: u8) -> Result<(), DisplayError> {
+    if !(1..=2).contains(&width) {
+        return fault(l, DisplayError::BadWidth(width));
+    }
+    Ok(())
+}
+
 fn check_room(
     l: &mut DisplayList,
     table: &'static str,
@@ -273,15 +291,28 @@ fn mark(l: &mut DisplayList, layer: u8) {
     l.layers_used |= 1 << layer;
 }
 
-/// Adds a line segment.
+/// Adds a one pixel line segment.
 pub fn push_line(
+    l: &mut DisplayList,
+    p0: (i32, i32),
+    p1: (i32, i32),
+    colour: u8,
+    layer: u8,
+) -> Result<(), DisplayError> {
+    push_line_w(l, p0, p1, colour, layer, 1)
+}
+
+/// Adds a line segment `width` pixels wide, 1 or 2 (see [`crate::raster`] for how 2 is drawn).
+pub fn push_line_w(
     l: &mut DisplayList,
     (x0, y0): (i32, i32),
     (x1, y1): (i32, i32),
     colour: u8,
     layer: u8,
+    width: u8,
 ) -> Result<(), DisplayError> {
     check_style(l, colour, layer)?;
+    check_width(l, width)?;
     check_room(l, "lines", l.lines.x0.len(), l.caps.lines)?;
     l.lines.x0.push(x0);
     l.lines.y0.push(y0);
@@ -289,6 +320,7 @@ pub fn push_line(
     l.lines.y1.push(y1);
     l.lines.colour.push(colour);
     l.lines.layer.push(layer);
+    l.lines.width.push(width);
     mark(l, layer);
     Ok(())
 }
@@ -335,10 +367,21 @@ pub fn push_circle(
     Ok(())
 }
 
-/// Opens a polyline; the vertices that follow, from [`push_vertex`], belong to it until the next
-/// polyline is opened.
+/// Opens a one pixel polyline; the vertices that follow, from [`push_vertex`], belong to it until
+/// the next polyline is opened.
 pub fn begin_polyline(l: &mut DisplayList, colour: u8, layer: u8) -> Result<(), DisplayError> {
+    begin_polyline_w(l, colour, layer, 1)
+}
+
+/// Opens a polyline `width` pixels wide, 1 or 2.
+pub fn begin_polyline_w(
+    l: &mut DisplayList,
+    colour: u8,
+    layer: u8,
+    width: u8,
+) -> Result<(), DisplayError> {
     check_style(l, colour, layer)?;
+    check_width(l, width)?;
     check_room(l, "polylines", l.polylines.start.len(), l.caps.polylines)?;
     // The vertex count is bounded by the capacity, which is a usize built from a u32-sized
     // allocation in practice; a list too large for u32 rows is refused as full.
@@ -347,6 +390,7 @@ pub fn begin_polyline(l: &mut DisplayList, colour: u8, layer: u8) -> Result<(), 
     l.polylines.len.push(0);
     l.polylines.colour.push(colour);
     l.polylines.layer.push(layer);
+    l.polylines.width.push(width);
     mark(l, layer);
     Ok(())
 }
@@ -405,7 +449,7 @@ pub fn push_text(
 
 /// The capacity of every column, in a fixed order. Equal before and after a frame means the
 /// frame allocated nothing in the list (C1).
-pub fn list_capacities(l: &DisplayList) -> [usize; 32] {
+pub fn list_capacities(l: &DisplayList) -> [usize; 34] {
     [
         l.lines.x0.capacity(),
         l.lines.y0.capacity(),
@@ -413,6 +457,7 @@ pub fn list_capacities(l: &DisplayList) -> [usize; 32] {
         l.lines.y1.capacity(),
         l.lines.colour.capacity(),
         l.lines.layer.capacity(),
+        l.lines.width.capacity(),
         l.rects.x0.capacity(),
         l.rects.y0.capacity(),
         l.rects.x1.capacity(),
@@ -428,6 +473,7 @@ pub fn list_capacities(l: &DisplayList) -> [usize; 32] {
         l.polylines.len.capacity(),
         l.polylines.colour.capacity(),
         l.polylines.layer.capacity(),
+        l.polylines.width.capacity(),
         l.poly_x.capacity(),
         l.poly_y.capacity(),
         l.texts.x.capacity(),

@@ -227,6 +227,19 @@ fn draw_line(c: &mut Canvas<'_>, bytes: [u8; 4], p0: (i64, i64), p1: (i64, i64))
     }
 }
 
+/// Draws a line `width` pixels wide, 1 or 2. A two pixel line is the one pixel line and a copy of
+/// it moved one pixel along its minor axis (down for a shallow line, right for a steep one), so it
+/// is two pixels thick measured along that axis and at least 1.41 pixels thick across the line.
+/// Both copies are clipped exactly like any line, so the result is deterministic and exact.
+fn draw_line_w(c: &mut Canvas<'_>, bytes: [u8; 4], p0: (i64, i64), p1: (i64, i64), width: u8) {
+    draw_line(c, bytes, p0, p1);
+    if width >= 2 {
+        let shallow = (p1.0 - p0.0).abs() >= (p1.1 - p0.1).abs();
+        let (ox, oy) = if shallow { (0, 16) } else { (16, 0) };
+        draw_line(c, bytes, (p0.0 + ox, p0.1 + oy), (p1.0 + ox, p1.1 + oy));
+    }
+}
+
 /// Fills the pixels whose centres lie inside the rectangle between two corners.
 fn fill_rect(c: &mut Canvas<'_>, bytes: [u8; 4], x0: i64, y0: i64, x1: i64, y1: i64) {
     let (xa, xb) = (x0.min(x1), x0.max(x1));
@@ -332,6 +345,7 @@ pub fn validate_list(l: &DisplayList) -> Result<(), RenderError> {
         l.lines.y1.len(),
         l.lines.colour.len(),
         l.lines.layer.len(),
+        l.lines.width.len(),
     ]
     .iter()
     .any(|&k| k != n)
@@ -368,6 +382,7 @@ pub fn validate_list(l: &DisplayList) -> Result<(), RenderError> {
         l.polylines.len.len(),
         l.polylines.colour.len(),
         l.polylines.layer.len(),
+        l.polylines.width.len(),
     ]
     .iter()
     .any(|&k| k != n)
@@ -403,6 +418,15 @@ pub fn validate_list(l: &DisplayList) -> Result<(), RenderError> {
         return Err(RenderError::BadList(
             "a colour or layer index is out of range",
         ));
+    }
+    if !l
+        .lines
+        .width
+        .iter()
+        .chain(&l.polylines.width)
+        .all(|w| (1..=2).contains(w))
+    {
+        return Err(RenderError::BadList("a line width is not 1 or 2"));
     }
     if l.circles.r.iter().any(|&r| r < 0) {
         return Err(RenderError::BadList("a circle radius is negative"));
@@ -499,7 +523,14 @@ fn draw_layer(c: &mut Canvas<'_>, l: &DisplayList, layer: u8) {
         }
     }
     let p = &l.polylines;
-    for (((s, n), k), ly) in p.start.iter().zip(&p.len).zip(&p.colour).zip(&p.layer) {
+    for ((((s, n), k), ly), w) in p
+        .start
+        .iter()
+        .zip(&p.len)
+        .zip(&p.colour)
+        .zip(&p.layer)
+        .zip(&p.width)
+    {
         if *ly != layer {
             continue;
         }
@@ -512,12 +543,12 @@ fn draw_layer(c: &mut Canvas<'_>, l: &DisplayList, layer: u8) {
         for (x, y) in xs.iter().zip(ys) {
             let cur = (i64::from(*x), i64::from(*y));
             // A one-vertex polyline is a point.
-            draw_line(c, b, prev.unwrap_or(cur), cur);
+            draw_line_w(c, b, prev.unwrap_or(cur), cur, *w);
             prev = Some(cur);
         }
     }
     let ln = &l.lines;
-    for (((((x0, y0), x1), y1), k), ly) in ln
+    for ((((((x0, y0), x1), y1), k), ly), w) in ln
         .x0
         .iter()
         .zip(&ln.y0)
@@ -525,13 +556,15 @@ fn draw_layer(c: &mut Canvas<'_>, l: &DisplayList, layer: u8) {
         .zip(&ln.y1)
         .zip(&ln.colour)
         .zip(&ln.layer)
+        .zip(&ln.width)
     {
         if *ly == layer {
-            draw_line(
+            draw_line_w(
                 c,
                 colour(*k),
                 (i64::from(*x0), i64::from(*y0)),
                 (i64::from(*x1), i64::from(*y1)),
+                *w,
             );
         }
     }
@@ -697,12 +730,16 @@ mod tests {
     }
 
     fn line_list(lines: &[(i32, i32, i32, i32)]) -> DisplayList {
+        line_list_w(lines, 1)
+    }
+
+    fn line_list_w(lines: &[(i32, i32, i32, i32)], width: u8) -> DisplayList {
         let mut l = list_new(ListCaps {
             lines: lines.len(),
             ..big()
         });
         for &(x0, y0, x1, y1) in lines {
-            push_line(&mut l, (x0, y0), (x1, y1), TEXT, 0).unwrap();
+            push_line_w(&mut l, (x0, y0), (x1, y1), TEXT, 0, width).unwrap();
         }
         l
     }
@@ -725,17 +762,24 @@ mod tests {
                 p[0] = range(&mut s, 0, w * 16 - 1);
                 p[1] = range(&mut s, 0, h * 16 - 1);
             }
-            let small_list = line_list(&[(p[0] as i32, p[1] as i32, p[2] as i32, p[3] as i32)]);
+            let width = if round % 4 == 3 { 2 } else { 1 };
+            let small_list = line_list_w(
+                &[(p[0] as i32, p[1] as i32, p[2] as i32, p[3] as i32)],
+                width,
+            );
             let mut small = fb(w as u32, h as u32, 3);
             rasterize(&small_list, &small.spec, &mut small.buf).unwrap();
             assert_intact(&small);
             let shift = (M * 16) as i32;
-            let big_list = line_list(&[(
-                p[0] as i32 + shift,
-                p[1] as i32 + shift,
-                p[2] as i32 + shift,
-                p[3] as i32 + shift,
-            )]);
+            let big_list = line_list_w(
+                &[(
+                    p[0] as i32 + shift,
+                    p[1] as i32 + shift,
+                    p[2] as i32 + shift,
+                    p[3] as i32 + shift,
+                )],
+                width,
+            );
             let mut large = fb((w + 2 * M) as u32, (h + 2 * M) as u32, 0);
             rasterize(&big_list, &large.spec, &mut large.buf).unwrap();
             for y in 0..h {
@@ -969,7 +1013,15 @@ mod tests {
                         0 => {
                             let (a, b, c, d) =
                                 (coord(&mut s), coord(&mut s), coord(&mut s), coord(&mut s));
-                            push_line(&mut l, (a, b), (c, d), colour, layer).unwrap();
+                            push_line_w(
+                                &mut l,
+                                (a, b),
+                                (c, d),
+                                colour,
+                                layer,
+                                1 + (xorshift(&mut s) % 2) as u8,
+                            )
+                            .unwrap();
                         }
                         1 => {
                             let (a, b, c, d) =
@@ -982,7 +1034,13 @@ mod tests {
                             push_circle(&mut l, (a, b), r, colour, layer).unwrap();
                         }
                         3 => {
-                            begin_polyline(&mut l, colour, layer).unwrap();
+                            begin_polyline_w(
+                                &mut l,
+                                colour,
+                                layer,
+                                1 + (xorshift(&mut s) % 2) as u8,
+                            )
+                            .unwrap();
                             for _ in 0..(xorshift(&mut s) % 7) {
                                 let (a, b) = (coord(&mut s), coord(&mut s));
                                 push_vertex(&mut l, a, b).unwrap();
@@ -1185,6 +1243,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    // REQ: OA-DSP-024
+    #[test]
+    fn a_two_pixel_line_is_the_line_and_its_copy_one_pixel_along_the_minor_axis() {
+        let mut s = 31_u64;
+        for _ in 0..400 {
+            let p: Vec<i32> = (0..4).map(|_| range(&mut s, 0, 60 * 16) as i32).collect();
+            let mut one = fb(64, 64, 0);
+            let mut two = fb(64, 64, 0);
+            draw(&mut one, &line_list(&[(p[0], p[1], p[2], p[3])]));
+            draw(&mut two, &line_list_w(&[(p[0], p[1], p[2], p[3])], 2));
+            assert_intact(&two);
+            let shallow = (p[2] - p[0]).abs() >= (p[3] - p[1]).abs();
+            let (ox, oy) = if shallow { (0, 1) } else { (1, 0) };
+            let base = lit(&one);
+            // Exactly the base pixels and the base pixels moved by one, inside the frame.
+            let mut want: Vec<(i64, i64)> = base
+                .iter()
+                .flat_map(|&(x, y)| [(x, y), (x + ox, y + oy)])
+                .filter(|&(x, y)| x < 64 && y < 64)
+                .collect();
+            want.sort_unstable();
+            want.dedup();
+            let mut got = lit(&two);
+            got.sort_unstable();
+            assert_eq!(got, want, "{p:?}");
+        }
+        // Axis-aligned lines are exactly two pixels thick.
+        let mut f = fb(40, 40, 0);
+        draw(
+            &mut f,
+            &line_list_w(&[(5 * 16, 10 * 16, 25 * 16, 10 * 16)], 2),
+        );
+        assert_eq!(lit(&f).len(), 2 * 21);
+        let mut f = fb(40, 40, 0);
+        draw(
+            &mut f,
+            &line_list_w(&[(10 * 16, 5 * 16, 10 * 16, 25 * 16)], 2),
+        );
+        assert_eq!(lit(&f).len(), 2 * 21);
+    }
+
+    // REQ: OA-DSP-024
+    #[test]
+    fn two_pixel_polylines_and_goldens_and_refused_widths() {
+        let mut l = list_new(big());
+        begin_polyline_w(&mut l, 2, 1, 2).unwrap();
+        for (x, y) in [(3, 3), (30, 8), (50, 40), (10, 44), (3, 3)] {
+            push_vertex(&mut l, x * 16 + 3, y * 16 + 11).unwrap();
+        }
+        for (i, (dx, dy)) in [
+            (28, 0),
+            (20, 20),
+            (0, 28),
+            (-20, 20),
+            (-28, 0),
+            (-20, -20),
+            (0, -28),
+            (20, -20),
+            (28, 9),
+            (9, 28),
+            (-9, 28),
+            (-28, 9),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            push_line_w(
+                &mut l,
+                (32 * 16, 24 * 16),
+                ((32 + dx) * 16 + 7, (24 + dy) * 16 + 5),
+                3 + (i % 2) as u8,
+                2,
+                2,
+            )
+            .unwrap();
+        }
+        let mut f = fb(64, 48, 0);
+        let d = draw(&mut f, &l);
+        assert_intact(&f);
+        assert_eq!(
+            to_hex(&d),
+            "0af409950f76dc896b0fd5a15e2d753af1df8348b7aae218b5b3fb292d481e9e"
+        );
+        // A width other than 1 or 2 is refused when pushed and when found in a list.
+        let mut bad = list_new(big());
+        assert_eq!(
+            push_line_w(&mut bad, (0, 0), (1, 1), 1, 0, 3),
+            Err(DisplayError::BadWidth(3))
+        );
+        assert_eq!(
+            push_line_w(&mut bad, (0, 0), (1, 1), 1, 0, 0),
+            Err(DisplayError::BadWidth(0))
+        );
+        let mut bad = list_new(big());
+        begin_polyline_w(&mut bad, 1, 0, 2).unwrap();
+        bad.polylines.width[0] = 9;
+        assert!(matches!(
+            render(&bad, &f.spec, &mut f.buf),
+            Err(RenderError::BadList(_))
+        ));
     }
 
     // REQ: OA-DSP-012

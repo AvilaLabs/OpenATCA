@@ -14,10 +14,14 @@ pub const FIX: u8 = 5;
 pub const AIRPORT: u8 = 6;
 pub const RING: u8 = 7;
 pub const DIM_TEXT: u8 = 8;
-/// Reserved for alerts (conflict, MSAW); nothing in the static map uses it.
+/// Reserved for conditions that need attention (a conflict, MSAW, data the map could not place),
+/// never for expected data.
 pub const ALERT: u8 = 9;
+/// Boundaries of neighbouring facilities: the same hues as the own boundary, dimmer.
+pub const NEIGHBOUR_HIGH: u8 = 10;
+pub const NEIGHBOUR_LOW: u8 = 11;
 
-/// XRGB8888 values: `0x00RRGGBB`. Entries 10 to 15 are reserved and black.
+/// XRGB8888 values: `0x00RRGGBB`. Entries 12 to 15 are reserved and black.
 pub const PALETTE: [u32; PALETTE_LEN] = [
     0x000B_0F14, // background
     0x00E8_EDF2, // text
@@ -29,8 +33,8 @@ pub const PALETTE: [u32; PALETTE_LEN] = [
     0x002F_3B48, // range ring
     0x007E_8B99, // dim text
     0x00FF_5A4F, // alert
-    0,
-    0,
+    0x002F_6F96, // neighbour ARTCC HIGH (dim sky blue)
+    0x009A_6B00, // neighbour ARTCC LOW (dim orange)
     0,
     0,
     0,
@@ -123,6 +127,12 @@ mod tests {
             let c = contrast(BACKGROUND, i);
             assert!(c >= 4.5, "{name} has contrast {c:.2}:1");
         }
+        // Neighbouring boundaries are dimmer than the own boundary but still plainly visible.
+        for i in [NEIGHBOUR_HIGH, NEIGHBOUR_LOW] {
+            assert!(contrast(BACKGROUND, i) >= 3.0);
+        }
+        assert!(luminance(NEIGHBOUR_HIGH) < luminance(ARTCC_HIGH) * 0.6);
+        assert!(luminance(NEIGHBOUR_LOW) < luminance(ARTCC_LOW) * 0.6);
         // The rings are decoration, not data: visible but quiet.
         let c = contrast(BACKGROUND, RING);
         assert!((1.3..3.0).contains(&c), "ring contrast {c:.2}:1");
@@ -150,7 +160,16 @@ mod tests {
             [0.004_733, 0.691_367, 0.303_900],
         ];
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let data = [ARTCC_HIGH, ARTCC_LOW, AIRWAY, FIX, AIRPORT, ALERT];
+        let data = [
+            ARTCC_HIGH,
+            ARTCC_LOW,
+            NEIGHBOUR_HIGH,
+            NEIGHBOUR_LOW,
+            AIRWAY,
+            FIX,
+            AIRPORT,
+            ALERT,
+        ];
         for (kind, m) in [
             ("normal", identity),
             ("protan", protan),

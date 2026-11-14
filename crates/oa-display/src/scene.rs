@@ -1,12 +1,43 @@
-//! The static airspace map (**core**, B1, B2): a pure function from the airspace model and a view
-//! to a display list. Nothing is read from a clock or a file; the same model and view give the same
-//! list.
+//! The static airspace map (**core**, B1, B2): a pure function from the airspace model, an index of
+//! it, and a view to a display list. Nothing is read from a clock or a file; the same inputs give
+//! the same list.
 //!
-//! Drawn: ARTCC HIGH and LOW boundaries (distinct colours), every airway leg as a thin line, fixes
-//! (triangle), navaids (ring and dot) and airports (large ring), labels for them below a range
-//! threshold, a range-ring scale from the centre, a centre mark, and a legend naming the facility,
-//! the data cycles, the range and the ring spacing. The legend is on screen so a picture can never
-//! be separated from the data it shows.
+//! # What is drawn
+//!
+//! Safety over flash: the map shows the data that matters at the range it is set to, and says on
+//! the screen what it is not showing.
+//!
+//! * The own facility's ARTCC HIGH and LOW boundaries (the facility the snapshot was built for),
+//!   two pixels wide in the full strata colours; neighbouring facilities' boundaries one pixel wide
+//!   in dimmer colours of the same hues.
+//! * Airway legs as thin lines: high airways (designators J and Q) and low airways (every other
+//!   designator, V and T among them).
+//! * Navaids: VOR, VORTAC and VOR-DME (always), NDB, DME and TACAN (within a range threshold), as a
+//!   small ring and dot. Fixes as a triangle (within a range threshold). Airports as a ring and
+//!   dot: those with at least one coded instrument procedure in the model always, the others
+//!   within a range threshold.
+//! * Labels for symbols within a range threshold, a range-ring scale with each ring labelled where
+//!   it meets the 45 degree north-east ray (so no two labels can meet), and a centre mark.
+//! * A legend strip along the top of the screen: facility and cycles, range and ring spacing, the
+//!   boundary colours, a `HIDDEN:` line naming every range threshold or layer switch that is hiding
+//!   something, the count of airway legs that end at a published border crossing, and, only when
+//!   something truly could not be placed, an alert line.
+//!
+//! Every layer can be switched off ([`Layers`]) and every threshold set ([`View`]); the defaults
+//! are in the crate README.
+//!
+//! # The legend strip
+//!
+//! The strip is reserved: the projection's map area is the screen below it
+//! ([`LEGEND_STRIP_PX`] rows), so the circle of the chosen range always fits whole in the map area
+//! and no data inside the range is under the legend. Map primitives beyond that circle are clipped
+//! at the strip's lower edge by its opaque backdrop; that is the edge of the view, not hidden data.
+//!
+//! # The alert colour
+//!
+//! The alert colour appears only for a condition that needs attention: data the map tried to
+//! place and could not. A leg that ends at a border crossing is expected data (the FAA publishes
+//! the crossing as a pseudo-point with no position) and is reported in the normal colour.
 //!
 //! Boundary and airway edges are geodesics, not straight lines on the glass: a long edge is split
 //! into short pieces whose end points are interpolated on the sphere, so the drawn curve follows
@@ -19,27 +50,38 @@
 
 use crate::font::{text_width_units, CAP_HEIGHT};
 use crate::list::{
-    begin_polyline, list_clear, push_circle, push_line, push_rect, push_text, push_vertex,
+    begin_polyline_w, list_clear, push_circle, push_line, push_rect, push_text, push_vertex,
     DisplayError, DisplayList, ListCaps, ALIGN_LEFT,
 };
 use crate::palette as pal;
-use crate::project::{project, project_rad, projection_new, ring_radius16, Projection, NM_M};
-use oa_airspace::model::{point_kind, str_or_empty, stratum, Model, POS_NONE};
+use crate::project::{
+    dlon_e7, in_bbox, project, project_rad, projection_new, ring_radius16, view_bbox, Bbox,
+    Projection, NM_M,
+};
+use oa_airspace::model::{
+    bit_get, point_kind, str_or_empty, stratum, unresolved_role, Model, PointIx, POS_NONE,
+};
 use std::fmt::Write;
 
 /// Layers, drawn first to last.
 pub const LAYER_RING: u8 = 0;
 pub const LAYER_AIRWAY: u8 = 1;
-pub const LAYER_ARTCC_LOW: u8 = 2;
-pub const LAYER_ARTCC_HIGH: u8 = 3;
-pub const LAYER_SYMBOL: u8 = 4;
-pub const LAYER_TEXT: u8 = 5;
-pub const LAYER_LEGEND_BG: u8 = 6;
-pub const LAYER_LEGEND: u8 = 7;
+pub const LAYER_NEIGHBOUR: u8 = 2;
+pub const LAYER_ARTCC_LOW: u8 = 3;
+pub const LAYER_ARTCC_HIGH: u8 = 4;
+pub const LAYER_SYMBOL: u8 = 5;
+pub const LAYER_TEXT: u8 = 6;
+pub const LAYER_LEGEND_BG: u8 = 7;
+pub const LAYER_LEGEND: u8 = 8;
 
-/// Default label thresholds, nautical miles of range.
-pub const DEFAULT_FIX_LABEL_MAX_NM: f64 = 60.0;
-pub const DEFAULT_AIRPORT_LABEL_MAX_NM: f64 = 60.0;
+/// Height of the legend strip, pixels: five rows of text and a rule.
+pub const LEGEND_STRIP_PX: u32 = 104;
+
+/// Default range thresholds, nautical miles from the centre to the nearest edge of the map.
+pub const DEFAULT_FIX_MAX_NM: f64 = 60.0;
+pub const DEFAULT_NON_IFR_AIRPORT_MAX_NM: f64 = 60.0;
+pub const DEFAULT_MINOR_NAVAID_MAX_NM: f64 = 60.0;
+pub const DEFAULT_LABEL_MAX_NM: f64 = 60.0;
 
 const SUBDIV_BOUNDARY: u32 = 64;
 const SUBDIV_AIRWAY: u32 = 16;
@@ -63,17 +105,102 @@ const LEGEND_SIZE: u8 = 12;
 /// Rows reserved beyond the points for fixed furniture (rings, legend, centre mark).
 const FURNITURE: usize = 256;
 
-/// A projection and the label thresholds.
+/// Which layers are drawn. Each can be switched off from the command line (`--hide`).
+// A7.2: cold struct, size guard waived (one per display).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layers {
+    pub own_boundary: bool,
+    pub neighbour_boundaries: bool,
+    pub high_airways: bool,
+    pub low_airways: bool,
+    /// All navaids: VOR-class always (range permitting nothing), the minor ones by threshold.
+    pub vors: bool,
+    pub airports: bool,
+    pub fixes: bool,
+    pub labels: bool,
+    pub rings: bool,
+}
+
+/// Names of the layers, in the order of [`Layers`], as the command line spells them.
+pub const LAYER_NAMES: [&str; 9] = [
+    "own-boundary",
+    "neighbour-boundaries",
+    "high-airways",
+    "low-airways",
+    "vors",
+    "airports",
+    "fixes",
+    "labels",
+    "rings",
+];
+
+/// Every layer on.
+pub fn layers_all() -> Layers {
+    Layers {
+        own_boundary: true,
+        neighbour_boundaries: true,
+        high_airways: true,
+        low_airways: true,
+        vors: true,
+        airports: true,
+        fixes: true,
+        labels: true,
+        rings: true,
+    }
+}
+
+/// Switches the layer called `name` (one of [`LAYER_NAMES`]) on or off. False for an unknown name.
+pub fn layer_set(l: &mut Layers, name: &str, on: bool) -> bool {
+    let slot = match name {
+        "own-boundary" => &mut l.own_boundary,
+        "neighbour-boundaries" => &mut l.neighbour_boundaries,
+        "high-airways" => &mut l.high_airways,
+        "low-airways" => &mut l.low_airways,
+        "vors" => &mut l.vors,
+        "airports" => &mut l.airports,
+        "fixes" => &mut l.fixes,
+        "labels" => &mut l.labels,
+        "rings" => &mut l.rings,
+        _ => return false,
+    };
+    *slot = on;
+    true
+}
+
+/// The layer switches as an array in the order of [`LAYER_NAMES`].
+pub fn layers_flags(l: &Layers) -> [bool; 9] {
+    [
+        l.own_boundary,
+        l.neighbour_boundaries,
+        l.high_airways,
+        l.low_airways,
+        l.vors,
+        l.airports,
+        l.fixes,
+        l.labels,
+        l.rings,
+    ]
+}
+
+/// A projection, the layer switches and the range thresholds.
 // A7.2: cold struct, size guard waived (one per display).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     pub proj: Projection,
-    /// Fixes and navaids are labelled when the range is at most this many nautical miles.
-    pub fix_label_max_nm: f64,
-    pub airport_label_max_nm: f64,
+    /// Latitude and longitude box of the map, for rejecting positions before projecting them.
+    pub bbox: Option<Bbox>,
+    pub layers: Layers,
+    /// Fixes are drawn only when the range is at most this many nautical miles.
+    pub fix_max_nm: f64,
+    /// Airports without a coded instrument procedure: likewise.
+    pub non_ifr_airport_max_nm: f64,
+    /// NDB, DME and TACAN: likewise.
+    pub minor_navaid_max_nm: f64,
+    /// Labels: likewise.
+    pub label_max_nm: f64,
 }
 
-/// A view with default label thresholds.
+/// A view with every layer on and the default thresholds.
 pub fn view_new(
     centre_lat_e7: i32,
     centre_lon_e7: i32,
@@ -81,10 +208,22 @@ pub fn view_new(
     width: u32,
     height: u32,
 ) -> Result<View, DisplayError> {
+    let proj = projection_new(
+        centre_lat_e7,
+        centre_lon_e7,
+        range_nm,
+        width,
+        height,
+        LEGEND_STRIP_PX,
+    )?;
     Ok(View {
-        proj: projection_new(centre_lat_e7, centre_lon_e7, range_nm, width, height)?,
-        fix_label_max_nm: DEFAULT_FIX_LABEL_MAX_NM,
-        airport_label_max_nm: DEFAULT_AIRPORT_LABEL_MAX_NM,
+        bbox: view_bbox(&proj, MARGIN / 16),
+        proj,
+        layers: layers_all(),
+        fix_max_nm: DEFAULT_FIX_MAX_NM,
+        non_ifr_airport_max_nm: DEFAULT_NON_IFR_AIRPORT_MAX_NM,
+        minor_navaid_max_nm: DEFAULT_MINOR_NAVAID_MAX_NM,
+        label_max_nm: DEFAULT_LABEL_MAX_NM,
     })
 }
 
@@ -92,7 +231,8 @@ pub fn view_new(
 // A7.2: cold struct, size guard waived (one per frame).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SceneStats {
-    pub boundaries: u32,
+    pub own_boundaries: u32,
+    pub neighbour_boundaries: u32,
     pub airway_legs: u32,
     pub airway_legs_off_screen: u32,
     pub fixes: u32,
@@ -100,12 +240,127 @@ pub struct SceneStats {
     pub airports: u32,
     pub labels: u32,
     pub rings: u32,
+    /// Airway legs with an end at a published border crossing: expected, not drawable.
+    pub legs_at_border: u32,
     /// Fixes, navaids and airports with no position or that cannot be projected.
     pub points_unplaced: u32,
-    /// Airway legs with an end that has no position or cannot be projected.
+    /// Airway legs with an end that has no position or cannot be projected, not at a border.
     pub legs_unplaced: u32,
     /// Boundary vertices and edges that cannot be projected, and rings that do not index.
     pub edges_unplaced: u32,
+}
+
+/// What the scene needs to know about a model beyond its tables as stored, found once at
+/// start-up (allocating) and then read every frame.
+// A7.2: cold struct, size guard waived (one per model).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneIndex {
+    /// Per airway leg: 1 for a high airway (designator J or Q), else 0.
+    pub leg_high: Vec<u8>,
+    /// Per airway leg: bit 0 when its start is a border crossing, bit 1 when its end is.
+    pub leg_border: Vec<u8>,
+    /// Per point: 1 for an airport with at least one coded instrument procedure.
+    pub point_ifr: Vec<u8>,
+    /// Per boundary: 1 when it belongs to the facility the model was built for.
+    pub boundary_own: Vec<u8>,
+}
+
+/// Builds the index. A leg end is a border crossing when the model's unresolved table holds a
+/// `BORDER_CROSSING` row for that airway at that leg's ordinal (the start) or the next ordinal
+/// (the end), and the end is truly absent from the leg.
+pub fn scene_index(m: &Model) -> SceneIndex {
+    let n_legs = m.airway_legs.from.len();
+    let mut leg_high = vec![0u8; n_legs];
+    let mut leg_border = vec![0u8; n_legs];
+    for (desig, span) in m.airways.designator.iter().zip(&m.airways.legs) {
+        let high = matches!(
+            str_or_empty(&m.strings, *desig).as_bytes().first(),
+            Some(b'J' | b'Q')
+        );
+        let start = span.start.row();
+        for j in 0..span.len as usize {
+            if let Some(h) = leg_high.get_mut(start + j) {
+                *h = u8::from(high);
+            }
+        }
+    }
+    let u = &m.unresolved;
+    for i in 0..u.role.len() {
+        let border = u.role.get(i) == Some(&unresolved_role::BORDER_CROSSING)
+            && u.owner_kind.get(i) == Some(&oa_airspace::model::owner_kind::AIRWAY);
+        if !border {
+            continue;
+        }
+        let (Some(owner), Some(scope), Some(ord)) =
+            (u.owner.get(i), u.scope.get(i), u.ordinal.get(i))
+        else {
+            continue;
+        };
+        let (owner, scope) = (
+            str_or_empty(&m.strings, *owner),
+            str_or_empty(&m.strings, *scope),
+        );
+        let ord = *ord as usize;
+        for ((desig, loc), span) in m
+            .airways
+            .designator
+            .iter()
+            .zip(&m.airways.location)
+            .zip(&m.airways.legs)
+        {
+            if str_or_empty(&m.strings, *desig) != owner || scope.as_bytes() != [*loc] {
+                continue;
+            }
+            let start = span.start.row();
+            let len = span.len as usize;
+            let mut mark = |j: usize, bit: u8| {
+                if j < len {
+                    if let Some(b) = leg_border.get_mut(start + j) {
+                        *b |= bit;
+                    }
+                }
+            };
+            mark(ord, 1);
+            if let Some(prev) = ord.checked_sub(1) {
+                mark(prev, 2);
+            }
+        }
+    }
+    // A border bit stands only where the leg really lacks that end.
+    for (r, b) in leg_border.iter_mut().enumerate() {
+        let from_none = m
+            .airway_legs
+            .from
+            .get(r)
+            .is_none_or(|p| *p == PointIx::NONE);
+        let to_none = m.airway_legs.to.get(r).is_none_or(|p| *p == PointIx::NONE);
+        if !from_none {
+            *b &= !1;
+        }
+        if !to_none {
+            *b &= !2;
+        }
+    }
+    let mut point_ifr = vec![0u8; m.points.kind.len()];
+    for (i, ap) in m.procs.airport.iter().enumerate() {
+        if bit_get(&m.procs.coded, i) {
+            if let Some(f) = point_ifr.get_mut(ap.row()) {
+                *f = 1;
+            }
+        }
+    }
+    let boundary_own = m
+        .boundaries
+        .facility
+        .iter()
+        .map(|f| u8::from(str_or_empty(&m.strings, *f) == m.meta.artcc))
+        .collect();
+    SceneIndex {
+        leg_high,
+        leg_border,
+        point_ifr,
+        boundary_own,
+    }
 }
 
 /// Capacities that cannot overflow for `m`: counted from the model, with the worst-case edge
@@ -145,7 +400,7 @@ pub fn scene_caps(m: &Model) -> ListCaps {
 
 /// A short string built on the stack, so a frame allocates nothing for its labels.
 struct Label {
-    buf: [u8; 96],
+    buf: [u8; 192],
     len: usize,
 }
 
@@ -161,7 +416,7 @@ impl Write for Label {
 
 fn label() -> Label {
     Label {
-        buf: [0; 96],
+        buf: [0; 192],
         len: 0,
     }
 }
@@ -267,6 +522,7 @@ fn edge_point(proj: &Projection, e: &Edge, i: u32) -> Option<(i32, i32)> {
 fn off_same_side(proj: &Projection, a: (i32, i32), b: (i32, i32)) -> bool {
     let w = i64::from(proj.width) * 16;
     let h = i64::from(proj.height) * 16;
+    let t = i64::from(proj.top_inset) * 16;
     let m = i64::from(MARGIN);
     let (ax, ay, bx, by) = (
         i64::from(a.0),
@@ -276,15 +532,25 @@ fn off_same_side(proj: &Projection, a: (i32, i32), b: (i32, i32)) -> bool {
     );
     (ax < -m && bx < -m)
         || (ax > w + m && bx > w + m)
-        || (ay < -m && by < -m)
+        || (ay < t - m && by < t - m)
         || (ay > h + m && by > h + m)
 }
 
 fn on_screen(proj: &Projection, p: (i32, i32)) -> bool {
     let w = i64::from(proj.width) * 16;
     let h = i64::from(proj.height) * 16;
+    let t = i64::from(proj.top_inset) * 16;
     let m = i64::from(MARGIN);
-    (-m..=w + m).contains(&i64::from(p.0)) && (-m..=h + m).contains(&i64::from(p.1))
+    (-m..=w + m).contains(&i64::from(p.0)) && (t - m..=h + m).contains(&i64::from(p.1))
+}
+
+/// True when both positions lie beyond the same side of the box.
+fn outside_same_side(bb: &Bbox, a: (i32, i32), b: (i32, i32)) -> bool {
+    let (da, db) = (dlon_e7(a.1, bb.centre_lon), dlon_e7(b.1, bb.centre_lon));
+    (a.0 < bb.lat_min && b.0 < bb.lat_min)
+        || (a.0 > bb.lat_max && b.0 > bb.lat_max)
+        || (da < bb.dlon_min && db < bb.dlon_min)
+        || (da > bb.dlon_max && db > bb.dlon_max)
 }
 
 fn add(p: (i32, i32), dx: i32, dy: i32) -> (i32, i32) {
@@ -293,7 +559,8 @@ fn add(p: (i32, i32), dx: i32, dy: i32) -> (i32, i32) {
 
 /// The ring spacing, nautical miles: the first of a fixed series at least [`MIN_RING_PX`] wide.
 pub fn ring_step_nm(proj: &Projection) -> f64 {
-    let px_per_nm = f64::from(proj.width.min(proj.height)) / 2.0 / proj.range_nm;
+    let map_h = proj.height - proj.top_inset;
+    let px_per_nm = f64::from(proj.width.min(map_h)) / 2.0 / proj.range_nm;
     RING_STEPS_NM
         .iter()
         .copied()
@@ -303,22 +570,33 @@ pub fn ring_step_nm(proj: &Projection) -> f64 {
 
 /// Clears `l` and builds the static map for `m` as seen through `v`. On an error the list is left
 /// faulted (it overflowed or was misused) and will not be drawn; show a fault, never the frame.
-pub fn build_scene(l: &mut DisplayList, m: &Model, v: &View) -> Result<SceneStats, DisplayError> {
+pub fn build_scene(
+    l: &mut DisplayList,
+    m: &Model,
+    idx: &SceneIndex,
+    v: &View,
+) -> Result<SceneStats, DisplayError> {
     list_clear(l);
     let mut st = SceneStats::default();
-    let p = &v.proj;
-    rings(l, p, &mut st)?;
-    boundaries(l, m, p, &mut st)?;
-    airways(l, m, p, &mut st)?;
-    points(l, m, v, &mut st)?;
-    legend(l, m, p, &st)?;
+    if v.layers.rings {
+        rings(l, &v.proj, &mut st)?;
+    }
+    boundaries(l, m, idx, v, &mut st)?;
+    airways(l, m, idx, v, &mut st)?;
+    points(l, m, idx, v, &mut st)?;
+    legend(l, m, v, &st)?;
     Ok(st)
 }
 
+/// The ring labels sit where each ring meets the ray 45 degrees east of north from the centre.
+/// Rings are at least [`MIN_RING_PX`] apart along every ray, so along this one successive label
+/// anchors are at least 63 pixels apart in both x and y, more than a label is tall or wide.
 fn rings(l: &mut DisplayList, p: &Projection, st: &mut SceneStats) -> Result<(), DisplayError> {
     let centre = (p.cx16.round() as i32, p.cy16.round() as i32);
     let step = ring_step_nm(p);
-    let half_diag16 = f64::from(p.width).hypot(f64::from(p.height)) * 8.0;
+    let map_h = f64::from(p.height - p.top_inset);
+    let half_diag16 = f64::from(p.width).hypot(map_h) * 8.0;
+    let (w16, top16) = (i64::from(p.width) * 16, i64::from(p.top_inset) * 16);
     let mut k = 1_i64;
     while k <= MAX_RINGS {
         let nm = step * k as f64;
@@ -330,14 +608,16 @@ fn rings(l: &mut DisplayList, p: &Projection, st: &mut SceneStats) -> Result<(),
         }
         push_circle(l, centre, r, pal::RING, LAYER_RING)?;
         st.rings += 1;
-        // The label sits on the east axis, above the ring, when that is on screen.
-        let lx = centre.0.saturating_add(r).saturating_add(4 * 16);
-        if i64::from(lx) < i64::from(p.width) * 16 {
+        // cos 45 degrees as 181 / 256, exact integer arithmetic.
+        let d = i64::from(r) * 181 / 256;
+        let (ax, ay) = (i64::from(centre.0) + d, i64::from(centre.1) - d);
+        let (lx, ly) = (ax + 5 * 16, ay - 12 * 16);
+        if lx < w16 && ly > top16 {
             let mut t = label();
             put_nm(&mut t, nm);
             push_text(
                 l,
-                (lx, centre.1.saturating_sub(15 * 16)),
+                (lx as i32, ly as i32),
                 LABEL_SIZE,
                 ALIGN_LEFT,
                 pal::DIM_TEXT,
@@ -368,14 +648,22 @@ fn rings(l: &mut DisplayList, p: &Projection, st: &mut SceneStats) -> Result<(),
 fn boundaries(
     l: &mut DisplayList,
     m: &Model,
-    p: &Projection,
+    idx: &SceneIndex,
+    v: &View,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
+    let p = &v.proj;
     let b = &m.boundaries;
-    for (s, span) in b.stratum.iter().zip(&b.vertices) {
-        let (colour, layer) = match *s {
-            stratum::ARTCC_HIGH => (pal::ARTCC_HIGH, LAYER_ARTCC_HIGH),
-            stratum::ARTCC_LOW => (pal::ARTCC_LOW, LAYER_ARTCC_LOW),
+    for (i, (s, span)) in b.stratum.iter().zip(&b.vertices).enumerate() {
+        let own = idx.boundary_own.get(i) == Some(&1);
+        if (own && !v.layers.own_boundary) || (!own && !v.layers.neighbour_boundaries) {
+            continue;
+        }
+        let (colour, layer, width) = match (*s, own) {
+            (stratum::ARTCC_HIGH, true) => (pal::ARTCC_HIGH, LAYER_ARTCC_HIGH, 2),
+            (stratum::ARTCC_LOW, true) => (pal::ARTCC_LOW, LAYER_ARTCC_LOW, 2),
+            (stratum::ARTCC_HIGH, false) => (pal::NEIGHBOUR_HIGH, LAYER_NEIGHBOUR, 1),
+            (stratum::ARTCC_LOW, false) => (pal::NEIGHBOUR_LOW, LAYER_NEIGHBOUR, 1),
             _ => continue,
         };
         let start = span.start.row();
@@ -389,8 +677,12 @@ fn boundaries(
         let (Some(first), Some(last)) = (ring.first(), ring.last()) else {
             continue;
         };
-        begin_polyline(l, colour, layer)?;
-        st.boundaries += 1;
+        begin_polyline_w(l, colour, layer, width)?;
+        if own {
+            st.own_boundaries += 1;
+        } else {
+            st.neighbour_boundaries += 1;
+        }
         // Closed: a ring whose last vertex is not its first is closed by an edge back.
         let closing = (first != last).then_some(first);
         let mut prev: Option<(i32, i32)> = None;
@@ -421,20 +713,37 @@ fn boundaries(
 fn airways(
     l: &mut DisplayList,
     m: &Model,
-    p: &Projection,
+    idx: &SceneIndex,
+    v: &View,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
+    let p = &v.proj;
     let pts = &m.points;
-    let pos = |ix: oa_airspace::model::PointIx| -> Option<(i32, i32)> {
+    let pos = |ix: PointIx| -> Option<(i32, i32)> {
         let lat = *pts.lat.get(ix.row())?;
         let lon = *pts.lon.get(ix.row())?;
         (lat != POS_NONE && lon != POS_NONE).then_some((lat, lon))
     };
-    for (f, t) in m.airway_legs.from.iter().zip(&m.airway_legs.to) {
+    for (r, (f, t)) in m.airway_legs.from.iter().zip(&m.airway_legs.to).enumerate() {
+        let high = idx.leg_high.get(r) == Some(&1);
+        if (high && !v.layers.high_airways) || (!high && !v.layers.low_airways) {
+            continue;
+        }
+        let border = idx.leg_border.get(r).copied().unwrap_or(0);
+        if border != 0 {
+            st.legs_at_border += 1;
+            continue;
+        }
         let (Some(a), Some(b)) = (pos(*f), pos(*t)) else {
             st.legs_unplaced += 1;
             continue;
         };
+        if let Some(bb) = &v.bbox {
+            if outside_same_side(bb, a, b) {
+                st.airway_legs_off_screen += 1;
+                continue;
+            }
+        }
         let Some(e) = edge_plan(p, a, b, SUBDIV_AIRWAY) else {
             st.legs_unplaced += 1;
             continue;
@@ -458,30 +767,39 @@ fn airways(
 fn points(
     l: &mut DisplayList,
     m: &Model,
+    idx: &SceneIndex,
     v: &View,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
     let p = &v.proj;
+    let range = p.range_nm;
+    let labels_on = v.layers.labels && range <= v.label_max_nm;
     let pts = &m.points;
     let rows = pts.kind.iter().zip(&pts.lat).zip(&pts.lon).zip(&pts.ident);
-    for (((kind, lat), lon), ident) in rows {
-        let drawn = matches!(
-            *kind,
-            point_kind::FIX
-                | point_kind::VOR
-                | point_kind::VORTAC
-                | point_kind::VOR_DME
-                | point_kind::DME
-                | point_kind::TACAN
-                | point_kind::NDB
-                | point_kind::AIRPORT
-        );
-        if !drawn {
+    for (i, (((kind, lat), lon), ident)) in rows.enumerate() {
+        let shown = match *kind {
+            point_kind::FIX => v.layers.fixes && range <= v.fix_max_nm,
+            point_kind::VOR | point_kind::VORTAC | point_kind::VOR_DME => v.layers.vors,
+            point_kind::DME | point_kind::TACAN | point_kind::NDB => {
+                v.layers.vors && range <= v.minor_navaid_max_nm
+            }
+            point_kind::AIRPORT => {
+                v.layers.airports
+                    && (range <= v.non_ifr_airport_max_nm || idx.point_ifr.get(i) == Some(&1))
+            }
+            _ => false,
+        };
+        if !shown {
             continue;
         }
         if *lat == POS_NONE || *lon == POS_NONE {
             st.points_unplaced += 1;
             continue;
+        }
+        if let Some(bb) = &v.bbox {
+            if !in_bbox(bb, *lat, *lon) {
+                continue;
+            }
         }
         let Some(c) = project(p, *lat, *lon) else {
             st.points_unplaced += 1;
@@ -490,7 +808,7 @@ fn points(
         if !on_screen(p, c) {
             continue;
         }
-        let label_max = match *kind {
+        let dx = match *kind {
             point_kind::FIX => {
                 // Triangle, apex up.
                 let top = add(c, 0, -SYM);
@@ -500,33 +818,28 @@ fn points(
                 push_line(l, bl, br, pal::FIX, LAYER_SYMBOL)?;
                 push_line(l, br, top, pal::FIX, LAYER_SYMBOL)?;
                 st.fixes += 1;
-                v.fix_label_max_nm
+                SYM + 4 * 16
             }
             point_kind::AIRPORT => {
                 push_circle(l, c, SYM * 5 / 4, pal::AIRPORT, LAYER_SYMBOL)?;
                 push_line(l, c, c, pal::AIRPORT, LAYER_SYMBOL)?;
                 st.airports += 1;
-                v.airport_label_max_nm
+                SYM * 5 / 4 + 4 * 16
             }
             _ => {
                 push_circle(l, c, SYM, pal::FIX, LAYER_SYMBOL)?;
                 push_line(l, c, c, pal::FIX, LAYER_SYMBOL)?;
                 st.navaids += 1;
-                v.fix_label_max_nm
+                SYM + 4 * 16
             }
         };
-        if p.range_nm <= label_max {
+        if labels_on {
             let name = str_or_empty(&m.strings, *ident);
             if !name.is_empty() {
                 let colour = if *kind == point_kind::AIRPORT {
                     pal::AIRPORT
                 } else {
                     pal::TEXT
-                };
-                let dx = if *kind == point_kind::AIRPORT {
-                    SYM * 5 / 4 + 4 * 16
-                } else {
-                    SYM + 4 * 16
                 };
                 push_text(
                     l,
@@ -544,69 +857,176 @@ fn points(
     Ok(())
 }
 
-fn legend(
-    l: &mut DisplayList,
-    m: &Model,
-    p: &Projection,
-    st: &SceneStats,
-) -> Result<(), DisplayError> {
-    let mut rows: [(Label, u8); 5] = [
-        (label(), pal::TEXT),
-        (label(), pal::TEXT),
-        (label(), pal::ARTCC_HIGH),
-        (label(), pal::ARTCC_LOW),
-        (label(), pal::ALERT),
-    ];
-    let [r0, r1, r2, r3, r4] = &mut rows;
-    let _ = write!(
-        r0.0,
-        "{} NASR {} CIFP {}",
-        m.meta.artcc, m.meta.nasr_effective, m.meta.cifp_cycle
-    );
-    let _ = write!(r1.0, "NORTH UP  RANGE ");
-    put_nm(&mut r1.0, p.range_nm);
-    let _ = write!(r1.0, " NM  RINGS ");
-    put_nm(&mut r1.0, ring_step_nm(p));
-    let _ = write!(r1.0, " NM");
-    let _ = write!(r2.0, "ARTCC HIGH");
-    let _ = write!(r3.0, "ARTCC LOW");
-    let unplaced = st.points_unplaced + st.legs_unplaced + st.edges_unplaced;
-    if unplaced > 0 {
-        // Data the map could not place is said on screen, not dropped silently.
-        let _ = write!(
-            r4.0,
-            "NOT PLACED {} PTS {} LEGS {} EDGES",
-            st.points_unplaced, st.legs_unplaced, st.edges_unplaced
-        );
+/// Width of a string of `chars` characters at the legend size, 1/16 pixel.
+fn legend_width16(chars: usize) -> i32 {
+    let units = i64::from(text_width_units(chars));
+    i32::try_from(units * i64::from(LEGEND_SIZE) * 16 / i64::from(CAP_HEIGHT)).unwrap_or(i32::MAX)
+}
+
+/// The `HIDDEN:` line: every range threshold or layer switch that is hiding something.
+fn hidden_line(v: &View) -> Label {
+    let mut t = label();
+    let _ = write!(t, "HIDDEN: ");
+    let mut n = 0;
+    let range = v.proj.range_nm;
+    let lay = &v.layers;
+    let mut item = |t: &mut Label, text: &str, nm: Option<f64>| {
+        if n > 0 {
+            let _ = write!(t, ", ");
+        }
+        let _ = write!(t, "{text}");
+        if let Some(nm) = nm {
+            let _ = write!(t, ">");
+            put_nm(t, nm);
+            let _ = write!(t, "NM");
+        }
+        n += 1;
+    };
+    if lay.fixes && range > v.fix_max_nm {
+        item(&mut t, "FIXES", Some(v.fix_max_nm));
     }
+    if lay.airports && range > v.non_ifr_airport_max_nm {
+        item(&mut t, "NON-IFR APTS", Some(v.non_ifr_airport_max_nm));
+    }
+    if lay.vors && range > v.minor_navaid_max_nm {
+        item(&mut t, "NDB/DME/TACAN", Some(v.minor_navaid_max_nm));
+    }
+    if lay.labels && range > v.label_max_nm {
+        item(&mut t, "LABELS", Some(v.label_max_nm));
+    }
+    for (name, on) in LAYER_NAMES.iter().zip(layers_flags(lay)) {
+        if !on {
+            let mut up = label();
+            for c in name.chars() {
+                let _ = write!(up, "{}", c.to_ascii_uppercase());
+            }
+            let _ = write!(up, " OFF");
+            item(&mut t, label_str(&up), None);
+        }
+    }
+    if n == 0 {
+        let _ = write!(t, "NONE");
+    }
+    t
+}
+
+fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(), DisplayError> {
+    let p = &v.proj;
     let x = 8 * 16;
     let pitch = 18 * 16;
-    let widest = rows.iter().map(|(t, _)| t.len).max().unwrap_or(0);
-    let wide16 =
-        i64::from(text_width_units(widest)) * i64::from(LEGEND_SIZE) * 16 / i64::from(CAP_HEIGHT);
-    let right = i32::try_from(wide16).unwrap_or(0).saturating_add(2 * x);
-    // A backdrop, so map lines never cross the text.
+    let mut y = 8 * 16;
+    let strip16 = i32::try_from(LEGEND_STRIP_PX * 16).unwrap_or(i32::MAX);
+    let width16 = i32::try_from(i64::from(p.width) * 16).unwrap_or(i32::MAX);
+    // An opaque backdrop the full width of the strip, and a rule under it.
     push_rect(
         l,
         (0, 0),
-        (right, 8 * 16 + pitch * 5),
+        (width16, strip16),
         pal::BACKGROUND,
         LAYER_LEGEND_BG,
     )?;
-    let mut y = 8 * 16;
-    for (t, colour) in &rows {
-        if t.len > 0 {
-            push_text(
-                l,
-                (x, y),
-                LEGEND_SIZE,
-                ALIGN_LEFT,
-                *colour,
-                LAYER_LEGEND,
-                label_str(t),
-            )?;
+    push_line(
+        l,
+        (0, strip16 - 8),
+        (width16, strip16 - 8),
+        pal::RING,
+        LAYER_LEGEND,
+    )?;
+
+    let mut t = label();
+    let _ = write!(
+        t,
+        "{} NASR {} CIFP {}  NORTH UP  RANGE ",
+        m.meta.artcc, m.meta.nasr_effective, m.meta.cifp_cycle
+    );
+    put_nm(&mut t, p.range_nm);
+    let _ = write!(t, " NM  RINGS ");
+    put_nm(&mut t, ring_step_nm(p));
+    let _ = write!(t, " NM");
+    push_text(
+        l,
+        (x, y),
+        LEGEND_SIZE,
+        ALIGN_LEFT,
+        pal::TEXT,
+        LAYER_LEGEND,
+        label_str(&t),
+    )?;
+    y += pitch;
+
+    // The boundary key: own facility two pixels, neighbours dimmer.
+    let mut kx = x;
+    for (name, colour, own) in [
+        ("HIGH", pal::ARTCC_HIGH, true),
+        ("LOW", pal::ARTCC_LOW, true),
+        ("NEIGHBOUR HIGH", pal::NEIGHBOUR_HIGH, false),
+        ("NEIGHBOUR LOW", pal::NEIGHBOUR_LOW, false),
+    ] {
+        let mut k = label();
+        if own {
+            let _ = write!(k, "{} {name}", m.meta.artcc);
+        } else {
+            let _ = write!(k, "{name}");
         }
-        y += pitch;
+        push_text(
+            l,
+            (kx, y),
+            LEGEND_SIZE,
+            ALIGN_LEFT,
+            colour,
+            LAYER_LEGEND,
+            label_str(&k),
+        )?;
+        kx = kx
+            .saturating_add(legend_width16(k.len))
+            .saturating_add(legend_width16(2));
+    }
+    y += pitch;
+
+    let h = hidden_line(v);
+    push_text(
+        l,
+        (x, y),
+        LEGEND_SIZE,
+        ALIGN_LEFT,
+        pal::TEXT,
+        LAYER_LEGEND,
+        label_str(&h),
+    )?;
+    y += pitch;
+
+    if st.legs_at_border > 0 {
+        let mut t = label();
+        let _ = write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border);
+        push_text(
+            l,
+            (x, y),
+            LEGEND_SIZE,
+            ALIGN_LEFT,
+            pal::TEXT,
+            LAYER_LEGEND,
+            label_str(&t),
+        )?;
+    }
+    y += pitch;
+
+    // The alert colour is for what needs attention: data the map tried to place and could not.
+    if st.points_unplaced + st.legs_unplaced + st.edges_unplaced > 0 {
+        let mut t = label();
+        let _ = write!(
+            t,
+            "NOT PLACED {} PTS {} LEGS {} EDGES",
+            st.points_unplaced, st.legs_unplaced, st.edges_unplaced
+        );
+        push_text(
+            l,
+            (x, y),
+            LEGEND_SIZE,
+            ALIGN_LEFT,
+            pal::ALERT,
+            LAYER_LEGEND,
+            label_str(&t),
+        )?;
     }
     Ok(())
 }

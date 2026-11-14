@@ -1,6 +1,6 @@
 //! The map over a real ZAU snapshot. Reads the snapshot path from `OPENATCA_SNAPSHOT` (build one
 //! with `oa-adapt build --nasr <zip> --cifp <zip> --artcc ZAU --out <file>`) and skips when it is
-//! unset. Reports the time per frame at 1920 by 1080.
+//! unset. Reports the time per frame at 1920 by 1080, at 250 NM and 60 NM.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -12,7 +12,7 @@ use oa_airspace::model::{stratum, validate_model};
 use oa_airspace::snapshot::decode;
 use oa_display::list::{list_capacities, list_clear, list_new};
 use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
-use oa_display::scene::{build_scene, scene_caps, view_new};
+use oa_display::scene::{build_scene, scene_caps, scene_index, view_new};
 use oa_sha256::to_hex;
 use std::time::Instant;
 
@@ -49,53 +49,73 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         "snapshot has no ARTCC boundaries"
     );
 
-    // Chicago, 250 NM from the centre to the shorter edge, as a controller sets a scope.
-    let view = view_new(419_800_000, -879_000_000, 250.0, 1920, 1080).unwrap();
+    // Chicago, as a controller sets a scope: 250 NM, and 60 NM about O'Hare, from the centre to
+    // the shorter edge.
     let spec = FrameSpec {
         width: 1920,
         height: 1080,
         stride: 1920 * 4,
     };
+    let index = scene_index(&model);
     let mut list = list_new(scene_caps(&model));
     let mut buf = vec![0u8; frame_len(&spec)];
     let caps = list_capacities(&list);
-
-    let stats = build_scene(&mut list, &model, &view).unwrap();
-    assert!(
-        stats.boundaries > 0 && stats.airway_legs > 100 && stats.fixes > 100 && stats.airports > 10
-    );
-    assert!(stats.rings >= 4);
-    rasterize(&list, &spec, &mut buf).unwrap();
-    let first = frame_digest(&spec, &buf).unwrap();
-
-    let (mut build_ms, mut raster_ms, mut hash_ms) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..30 {
-        let t0 = Instant::now();
-        build_scene(&mut list, &model, &view).unwrap();
-        let t1 = Instant::now();
+    let mut wide = None;
+    for (lat, lon, range) in [
+        (419_800_000, -879_000_000, 250.0),
+        (419_786_000, -879_048_000, 60.0),
+    ] {
+        let view = view_new(lat, lon, range, 1920, 1080).unwrap();
+        let stats = build_scene(&mut list, &model, &index, &view).unwrap();
+        // Nothing the data cannot place; the border legs are expected data, not a fault.
+        assert_eq!(
+            (
+                stats.points_unplaced,
+                stats.legs_unplaced,
+                stats.edges_unplaced
+            ),
+            (0, 0, 0),
+            "{stats:?}"
+        );
+        assert!(stats.own_boundaries > 0 && stats.rings >= 2 && stats.airway_legs > 10);
+        if range > 100.0 {
+            assert!(stats.legs_at_border > 0, "{stats:?}");
+            assert!(stats.neighbour_boundaries > 0 && stats.airports > 10);
+            wide = Some(view);
+        } else {
+            assert!(stats.fixes > 100 && stats.labels > 100, "{stats:?}");
+        }
         rasterize(&list, &spec, &mut buf).unwrap();
-        let t2 = Instant::now();
-        let d = frame_digest(&spec, &buf).unwrap();
-        let t3 = Instant::now();
-        // Every frame is the same bytes: the picture is a pure function of model and view.
-        assert_eq!(d, first, "frames differ");
-        build_ms.push((t1 - t0).as_secs_f64() * 1e3);
-        raster_ms.push((t2 - t1).as_secs_f64() * 1e3);
-        hash_ms.push((t3 - t2).as_secs_f64() * 1e3);
+        let first = frame_digest(&spec, &buf).unwrap();
+
+        let (mut build_ms, mut raster_ms) = (Vec::new(), Vec::new());
+        for _ in 0..30 {
+            let t0 = Instant::now();
+            build_scene(&mut list, &model, &index, &view).unwrap();
+            let t1 = Instant::now();
+            rasterize(&list, &spec, &mut buf).unwrap();
+            let t2 = Instant::now();
+            // Every frame is the same bytes: the picture is a pure function of model and view.
+            // (The hash is taken after the timed section: it is not part of a frame.)
+            assert_eq!(frame_digest(&spec, &buf).unwrap(), first, "frames differ");
+            build_ms.push((t1 - t0).as_secs_f64() * 1e3);
+            raster_ms.push((t2 - t1).as_secs_f64() * 1e3);
+        }
+        assert_eq!(
+            list_capacities(&list),
+            caps,
+            "a frame changed the list's capacity"
+        );
+        eprintln!("ZAU {range} NM frame sha256 {}", to_hex(&first));
+        eprintln!("drawn: {stats:?}");
+        eprintln!(
+            "per frame at 1920x1080, {range} NM (median of 30): build {:.2} ms, raster {:.2} ms",
+            median(&mut build_ms),
+            median(&mut raster_ms)
+        );
     }
-    assert_eq!(
-        list_capacities(&list),
-        caps,
-        "a frame changed the list's capacity"
-    );
-    eprintln!("ZAU map frame sha256 {}", to_hex(&first));
-    eprintln!("drawn: {stats:?}");
-    eprintln!(
-        "per frame at 1920x1080 (median of 30): build {:.2} ms, raster {:.2} ms, sha-256 {:.2} ms",
-        median(&mut build_ms),
-        median(&mut raster_ms),
-        median(&mut hash_ms)
-    );
+    let view = wide.unwrap();
+    build_scene(&mut list, &model, &index, &view).unwrap();
 
     // Where the raster time goes: the same list with one kind of primitive removed.
     let mut probe = |name: &str, f: &dyn Fn(&mut oa_display::list::DisplayList)| {

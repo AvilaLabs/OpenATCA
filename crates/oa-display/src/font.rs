@@ -215,6 +215,14 @@ pub const GLYPHS: &[Glyph] = &[
         strokes: &[[2, 1, 2, 2], [2, 4, 2, 5]],
     },
     Glyph {
+        ch: '<',
+        strokes: &[[4, 1, 0, 3], [0, 3, 4, 5]],
+    },
+    Glyph {
+        ch: '>',
+        strokes: &[[0, 1, 4, 3], [4, 3, 0, 5]],
+    },
+    Glyph {
         ch: 'A',
         strokes: &[[0, 6, 2, 0], [2, 0, 4, 6], [1, 4, 3, 4]],
     },
@@ -478,7 +486,7 @@ mod tests {
     fn the_font_has_every_required_character_in_search_order() {
         for ch in ('A'..='Z')
             .chain('0'..='9')
-            .chain(" .,/-+:()*#\u{2191}\u{2193}".chars())
+            .chain(" .,/-+:()*#<>\u{2191}\u{2193}".chars())
         {
             assert!(
                 GLYPHS.binary_search_by(|g| g.ch.cmp(&ch)).is_ok(),

@@ -52,6 +52,8 @@ pub struct Projection {
     pub range_nm: f64,
     pub width: u32,
     pub height: u32,
+    /// Rows at the top of the screen kept out of the map (the legend strip).
+    pub top_inset: u32,
     /// First eccentricity of WGS-84.
     pub ecc: f64,
     /// Gauss sphere constants: longitude scale `n`, latitude constant `c`.
@@ -70,13 +72,15 @@ pub struct Projection {
 }
 
 /// A projection centred on the given point, with `range_nm` nautical miles from the centre to the
-/// nearest edge of a `width` by `height` pixel screen (half the shorter side).
+/// nearest edge of the map area: the `width` by `height` pixel screen less its top `top_inset`
+/// rows, so half the shorter side of that area, centred in it.
 pub fn projection_new(
     centre_lat_e7: i32,
     centre_lon_e7: i32,
     range_nm: f64,
     width: u32,
     height: u32,
+    top_inset: u32,
 ) -> Result<Projection, DisplayError> {
     if !(-900_000_000..=900_000_000).contains(&centre_lat_e7)
         || !(-1_800_000_000..=1_800_000_000).contains(&centre_lon_e7)
@@ -91,6 +95,10 @@ pub fn projection_new(
     if width == 0 || height == 0 || width > 1 << 16 || height > 1 << 16 {
         return Err(DisplayError::BadView("screen size is outside 1 to 65536"));
     }
+    if top_inset >= height || height - top_inset < 16 {
+        return Err(DisplayError::BadView("the legend strip leaves no map area"));
+    }
+    let map_h = height - top_inset;
     let lat0 = f64::from(centre_lat_e7) * 1e-7_f64.to_radians();
     let lon0 = f64::from(centre_lon_e7) * 1e-7_f64.to_radians();
     let ell = wgs84();
@@ -110,7 +118,7 @@ pub fn projection_new(
     let sin_chi_start = (w1 - 1.0) / (w1 + 1.0);
     let c = (n + sin0) * (1.0 - sin_chi_start) / ((n - sin0) * (1.0 + sin_chi_start));
     let (sin_chi0, cos_chi0) = chi_sin_cos(c, w1);
-    let half_short = f64::from(width.min(height)) / 2.0;
+    let half_short = f64::from(width.min(map_h)) / 2.0;
     let scale = f64::from(SUBPIXEL) * half_short / (range_nm * NM_M);
     Ok(Projection {
         centre_lat_e7,
@@ -118,6 +126,7 @@ pub fn projection_new(
         range_nm,
         width,
         height,
+        top_inset,
         ecc,
         n,
         c,
@@ -127,7 +136,7 @@ pub fn projection_new(
         radius_m,
         scale,
         cx16: f64::from(width) * f64::from(SUBPIXEL) / 2.0,
-        cy16: f64::from(height) * f64::from(SUBPIXEL) / 2.0,
+        cy16: (f64::from(top_inset) + f64::from(map_h) / 2.0) * f64::from(SUBPIXEL),
     })
 }
 
@@ -237,6 +246,77 @@ pub fn unproject(p: &Projection, x16: i32, y16: i32) -> Option<(i32, i32)> {
     Some((lat_e7 as i32, lon_e7 as i32))
 }
 
+/// A latitude and longitude box around the visible map, for rejecting a position before it is
+/// projected. Longitude is held relative to the centre so the box needs no antimeridian case.
+// A7.2: cold struct, size guard waived (one per view).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bbox {
+    pub lat_min: i32,
+    pub lat_max: i32,
+    pub centre_lon: i32,
+    /// Longitude offset from the centre, 1e-7 degree, in -1.8e9 to 1.8e9.
+    pub dlon_min: i64,
+    pub dlon_max: i64,
+}
+
+/// Longitude offset from `centre`, wrapped into -180 to 180 degrees, 1e-7 degree.
+pub fn dlon_e7(lon: i32, centre: i32) -> i64 {
+    (i64::from(lon) - i64::from(centre) + 1_800_000_000).rem_euclid(3_600_000_000) - 1_800_000_000
+}
+
+/// The box around the map area grown by `margin_px`, found by unprojecting its border (a position
+/// is on the globe in the area only if it is between the border's extremes, as latitude and
+/// longitude have no maximum inside the area when it holds no pole), then padded by 5 % and
+/// 0.01 degree. `None` when the area reaches within 5 degrees of a pole or spans more than 180
+/// degrees of longitude: then nothing is culled.
+pub fn view_bbox(p: &Projection, margin_px: i32) -> Option<Bbox> {
+    const STEPS: i32 = 32;
+    let m = margin_px.max(0) * SUBPIXEL;
+    let (x0, x1) = (
+        -m,
+        i32::try_from(i64::from(p.width) * 16)
+            .ok()?
+            .checked_add(m)?,
+    );
+    let top = i32::try_from(i64::from(p.top_inset) * 16).ok()? - m;
+    let y1 = i32::try_from(i64::from(p.height) * 16)
+        .ok()?
+        .checked_add(m)?;
+    let (mut lat_lo, mut lat_hi) = (i32::MAX, i32::MIN);
+    let (mut dl_lo, mut dl_hi) = (i64::MAX, i64::MIN);
+    for k in 0..=STEPS {
+        let fx = x0 + ((i64::from(x1) - i64::from(x0)) * i64::from(k) / i64::from(STEPS)) as i32;
+        let fy = top + ((i64::from(y1) - i64::from(top)) * i64::from(k) / i64::from(STEPS)) as i32;
+        for (x, y) in [(fx, top), (fx, y1), (x0, fy), (x1, fy)] {
+            let (lat, lon) = unproject(p, x, y)?;
+            lat_lo = lat_lo.min(lat);
+            lat_hi = lat_hi.max(lat);
+            let d = dlon_e7(lon, p.centre_lon_e7);
+            dl_lo = dl_lo.min(d);
+            dl_hi = dl_hi.max(d);
+        }
+    }
+    if lat_lo < -850_000_000 || lat_hi > 850_000_000 || dl_lo < -900_000_000 || dl_hi > 900_000_000
+    {
+        return None;
+    }
+    let pad_lat = i64::from(lat_hi - lat_lo) / 20 + 100_000;
+    let pad_lon = (dl_hi - dl_lo) / 20 + 100_000;
+    Some(Bbox {
+        lat_min: i32::try_from(i64::from(lat_lo) - pad_lat).ok()?,
+        lat_max: i32::try_from(i64::from(lat_hi) + pad_lat).ok()?,
+        centre_lon: p.centre_lon_e7,
+        dlon_min: dl_lo - pad_lon,
+        dlon_max: dl_hi + pad_lon,
+    })
+}
+
+/// False when the position is certainly outside the box.
+pub fn in_bbox(b: &Bbox, lat: i32, lon: i32) -> bool {
+    let d = dlon_e7(lon, b.centre_lon);
+    lat >= b.lat_min && lat <= b.lat_max && d >= b.dlon_min && d <= b.dlon_max
+}
+
 /// Screen radius, 1/16 pixel, of the circle of true radius `metres` about the centre. `None` when
 /// the radius is half the globe or more.
 pub fn ring_radius16(p: &Projection, metres: f64) -> Option<i32> {
@@ -261,7 +341,7 @@ mod tests {
     const ORD: (i32, i32) = (419_786_000, -879_048_000);
 
     fn proj(range: f64) -> Projection {
-        projection_new(ORD.0, ORD.1, range, 1920, 1080).unwrap()
+        projection_new(ORD.0, ORD.1, range, 1920, 1080, 0).unwrap()
     }
 
     /// Deterministic generator for sweeps.
@@ -347,7 +427,7 @@ mod tests {
         ] {
             let c = LatLon::new(clat, clon).unwrap();
             let (clat7, clon7) = ((clat * 1e7).round() as i32, (clon * 1e7).round() as i32);
-            let p = projection_new(clat7, clon7, 400.0, 1920, 1080).unwrap();
+            let p = projection_new(clat7, clon7, 400.0, 1920, 1080, 0).unwrap();
             let scale_px_per_m = p.scale / 16.0;
             for nm in [1.0, 10.0, 50.0, 100.0, 200.0, 300.0, 400.0] {
                 for bearing in (0..360).step_by(5) {
@@ -423,15 +503,84 @@ mod tests {
         if let Some((x, y)) = project(&p, -ORD.0, ORD.1 + 1_800_000_000) {
             assert!(x.abs() > 16 * 100_000 || y.abs() > 16 * 100_000);
         }
-        assert!(projection_new(ORD.0, ORD.1, 0.0, 1920, 1080).is_err());
-        assert!(projection_new(ORD.0, ORD.1, f64::NAN, 1920, 1080).is_err());
-        assert!(projection_new(ORD.0, ORD.1, 1e9, 1920, 1080).is_err());
-        assert!(projection_new(ORD.0, ORD.1, 100.0, 0, 1080).is_err());
-        assert!(projection_new(i32::MIN, 0, 100.0, 1920, 1080).is_err());
+        assert!(projection_new(ORD.0, ORD.1, 0.0, 1920, 1080, 0).is_err());
+        assert!(projection_new(ORD.0, ORD.1, f64::NAN, 1920, 1080, 0).is_err());
+        assert!(projection_new(ORD.0, ORD.1, 1e9, 1920, 1080, 0).is_err());
+        assert!(projection_new(ORD.0, ORD.1, 100.0, 0, 1080, 0).is_err());
+        assert!(projection_new(i32::MIN, 0, 100.0, 1920, 1080, 0).is_err());
         // Far points saturate instead of overflowing.
-        let tiny = projection_new(ORD.0, ORD.1, 0.05, 1920, 1080).unwrap();
+        let tiny = projection_new(ORD.0, ORD.1, 0.05, 1920, 1080, 0).unwrap();
         let (x, y) = project(&tiny, ORD.0 + 400_000_000, ORD.1 + 500_000_000).unwrap();
         assert!(x.abs() <= COORD_LIMIT && y.abs() <= COORD_LIMIT);
+    }
+
+    // REQ: OA-DSP-028
+    #[test]
+    fn the_map_area_excludes_the_top_strip_and_the_range_circle_fits_in_it() {
+        let p = projection_new(ORD.0, ORD.1, 250.0, 1920, 1080, 104).unwrap();
+        // Centred in the area below the strip, not in the whole screen.
+        assert_eq!(
+            project(&p, ORD.0, ORD.1),
+            Some((960 * 16, (104 + 488) * 16))
+        );
+        // The range reaches the top of the map area, 488 pixels above the centre, and no higher.
+        let ell = oa_geo::wgs84();
+        let c = LatLon::new(41.9786, -87.9048).unwrap();
+        let n = ell.direct(c, 0.0, 250.0 * NM_M).unwrap().position;
+        let (_, y) = project(
+            &p,
+            (n.lat() * 1e7).round() as i32,
+            (n.lon() * 1e7).round() as i32,
+        )
+        .unwrap();
+        let top = f64::from(y) / 16.0;
+        assert!((top - 104.0).abs() < 1.5, "250 NM north is at row {top}");
+        // A strip that leaves no map is refused.
+        assert!(projection_new(ORD.0, ORD.1, 250.0, 1920, 100, 104).is_err());
+        assert!(projection_new(ORD.0, ORD.1, 250.0, 1920, 110, 104).is_err());
+    }
+
+    // REQ: OA-DSP-030
+    #[test]
+    fn the_bounding_box_holds_every_visible_position() {
+        let mut s = 77_u64;
+        for (lat, lon, range) in [
+            (ORD.0, ORD.1, 250.0),
+            (ORD.0, ORD.1, 3.0),
+            (0, 1_790_000_000, 400.0),
+            (-340_000_000, 1_790_000_000, 900.0),
+            (600_000_000, -1_790_000_000, 50.0),
+        ] {
+            let p = projection_new(lat, lon, range, 1920, 1080, 104).unwrap();
+            let b = view_bbox(&p, 64).expect("a box for a mid-latitude view");
+            for _ in 0..4000 {
+                // Any position on the screen below the strip, with the margin.
+                let x = range_i(&mut s, -64 * 16, 1984 * 16);
+                let y = range_i(&mut s, (104 - 64) * 16, 1144 * 16);
+                if let Some((la, lo)) = unproject(&p, x, y) {
+                    assert!(
+                        in_bbox(&b, la, lo),
+                        "({x},{y}) -> ({la},{lo}) is outside {b:?}"
+                    );
+                }
+            }
+            // A far position is outside.
+            assert!(!in_bbox(&b, lat + 300_000_000, lon));
+        }
+        // Near a pole, or spanning half the globe, nothing is culled.
+        assert!(view_bbox(
+            &projection_new(890_000_000, 0, 100.0, 800, 600, 104).unwrap(),
+            64
+        )
+        .is_none());
+        assert!(view_bbox(&projection_new(0, 0, 9000.0, 800, 600, 104).unwrap(), 64).is_none());
+        // The longitude offset wraps at the antimeridian.
+        assert_eq!(dlon_e7(-1_790_000_000, 1_790_000_000), 20_000_000);
+        assert_eq!(dlon_e7(1_790_000_000, -1_790_000_000), -20_000_000);
+    }
+
+    fn range_i(s: &mut u64, lo: i32, hi: i32) -> i32 {
+        lo + (xorshift(s) % (i64::from(hi) - i64::from(lo) + 1) as u64) as i32
     }
 
     // REQ: OA-DSP-006
