@@ -131,6 +131,11 @@ section is what we intend to build first.
    visible. General GUI toolkits (egui and similar) are acceptable only for internal engineering
    tools, never the controller display, because of their dependency trees and the layout
    decisions they make on our behalf.
+   Planned presentation path: our renderer draws into a plain pixel buffer (pure, testable byte
+   for byte against reference images); presenting it is a swappable backend. X11 over its socket
+   protocol first (no dependencies, no unsafe, works under Xwayland), a headless image backend for
+   tests, and Linux KMS/DRM direct-to-display for dedicated controller consoles later, so no
+   desktop stack sits between the data and the pixels.
 
 Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
 already in use across Avila Labs). The core targets the standard library only.
