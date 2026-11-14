@@ -822,3 +822,67 @@ fn nothing_allocates_after_the_tracker_is_built() {
         )
     );
 }
+
+/// Three aircraft whose reports arrive scrambled by up to 14 positions (past the 12-deep window
+/// for some), with a different-sensor repeat of some reports and a wild position now and then.
+fn scrambled_world() -> Vec<Measurement> {
+    let mut all: Vec<(f64, Measurement)> = Vec::new();
+    let mut rng = Rng(0xF00D);
+    for (a, addr) in [0x1A1A1Au32, 0x2B2B2B, 0x3C3C3C].into_iter().enumerate() {
+        for (k, m) in base_measurements(addr, 160, 1.0, 20 + a as u64)
+            .into_iter()
+            .enumerate()
+        {
+            let mut m = m;
+            if k % 37 == 21 {
+                m.lat_e7 += 90_000; // about a kilometre of jump: rejected by the gate
+            }
+            let arrival = k as f64 + rng.uniform() * 14.0;
+            all.push((arrival, m));
+            if k % 9 == 4 {
+                let mut d = m;
+                d.sensor = 3;
+                all.push((arrival + 0.5, d));
+            }
+            if k % 11 == 5 {
+                all.push((arrival + 2.5, m)); // the exact same report again
+            }
+        }
+    }
+    all.sort_by(|x, y| x.0.total_cmp(&y.0));
+    all.into_iter().map(|x| x.1).collect()
+}
+
+// REQ: OA-TRK-030
+#[test]
+fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_replaced() {
+    // The digest and counters below were recorded from the implementation that kept a full filter
+    // state per ring slot; the anchor-and-replay ring must reproduce every output bit and
+    // counter (re-filtering, duplicates, ring and window drops included).
+    let ms = scrambled_world();
+    let (t, out) = run(&big_config(), &ms, 200.0);
+    let s = tracker_stats(&t);
+    let counters = format!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        s.offered,
+        s.applied,
+        s.duplicates,
+        s.late_window,
+        s.late_ring,
+        s.refiltered,
+        s.replayed,
+        s.jump_rejected,
+        s.resyncs,
+        s.nis_n
+    );
+    let digest = hash_of(&out);
+    println!("scrambled: {counters} nis_sum {:016x} digest {digest}", s.nis_sum.to_bits());
+    assert!(s.refiltered > 20 && s.late_ring > 0 && s.duplicates > 0 && s.jump_rejected > 0);
+    assert_eq!(counters, GOLDEN_COUNTERS);
+    assert_eq!(s.nis_sum.to_bits(), GOLDEN_NIS_BITS);
+    assert_eq!(digest, GOLDEN_DIGEST);
+}
+
+const GOLDEN_COUNTERS: &str = "579 477 30 53 4 288 869 14 0 1343";
+const GOLDEN_NIS_BITS: u64 = 0x40a4_9f6c_7a87_a22b;
+const GOLDEN_DIGEST: &str = "6ea4de8c2647f225e2b723d0422fb68eef0b81dea5a641f733827844421c6cd5";
