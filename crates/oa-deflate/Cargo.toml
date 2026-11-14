@@ -1,0 +1,14 @@
+[package]
+name = "oa-deflate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1: path dependency inside this workspace, for CRC-32 (gzip trailer) and, in tests, the inflater.
+oa-zip = { path = "../oa-zip" }

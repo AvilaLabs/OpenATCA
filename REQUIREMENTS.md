@@ -259,3 +259,38 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   and a p50, p95 or maximum in the overflow bin prints as `>=600000`.
 - **OA-FEED-025** Latencies of 7 to 10.5 s (as measured on the live TBFM feed) fall in distinct
   1 s bins, and p50, p95 and the maximum come out as numbers in that range; a printed quantile never exceeds the maximum.
+### Compression (oa-deflate)
+
+- **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
+  exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
+  bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
+- **OA-DEF-002** Uses maximum-length (258) matches and the maximum distance (32768); data that
+  repeats a 32 KiB block compresses to about one copy, and a repeat just outside the window is
+  still decoded correctly.
+- **OA-DEF-003** The gzip writer emits an RFC 1952 member (no timestamp, no name) whose CRC-32
+  and ISIZE are correct, writes the header even for empty input, and is reusable for further
+  members with identical output.
+- **OA-DEF-004** The system `gzip -t` and `gzip -dc` accept our output, including concatenated
+  members, for all levels and for chunked writes.
+- **OA-DEF-005** The oa-zip inflater decodes the system `gzip` output (levels 1, 6, 9) of the
+  same inputs; the test skips when `gzip` is missing.
+- **OA-DEF-006** Huffman codes are complete prefix codes of at most 15 bits (7 for the
+  code-length code) for any frequencies, including those whose unlimited tree is deeper, and for
+  zero or one used symbol.
+- **OA-DEF-007** Incompressible input falls back to stored blocks, so output exceeds input by
+  framing only (about 5 bytes per 64 KiB).
+- **OA-DEF-008** Sync flush ends on a byte boundary with an empty stored block; the output cut
+  there, closed with an empty final block, decodes (also in system `gzip`) to exactly the data
+  written before the flush. A flush with no new input emits nothing.
+- **OA-DEF-009** Every feed directory of the real SWIM sample (`OPENATCA_SCDS`, `*.msg`
+  concatenated) round-trips at levels 1, 6 and 9; the test reports ratio and MB/s per level
+  against `gzip -6` and `xz -6`, requires level 6 to be within 10% of `gzip -6` and at least
+  30 MB/s (release builds), and skips when the variable is unset.
+- **OA-DEF-010** Never panics and always round-trips for chunk sizes from 1 byte upward
+  (1, 7, 258, 4097, ...), irregular chunking and interspersed flushes, empty writes, and finish
+  or flush with nothing written.
+- **OA-DEF-011** Output is a pure function of input, level and write boundaries (no clock, no
+  randomness); a compressor is reusable after `finish` or `reset` with identical output, and
+  allocates only in `new`.
+- **OA-DEF-012** An error returned by the output closure is returned unchanged by `write`,
+  `flush` and `finish`; the compressor works again after `reset`.
