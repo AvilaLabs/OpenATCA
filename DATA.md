@@ -9,6 +9,8 @@ committed. Each entry records where it came from and its SHA-256.
 | 2026-10-29 | CIFP (ARINC 424-18) | `CIFP_261029.zip` | `e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d` | https://aeronav.faa.gov/Upload_313-d/cifp/CIFP_261029.zip |
 | n/a | GeographicLib geodesic test set (MIT, C. F. F. Karney) | `GeodTest-short.dat.gz` | `31d376e8158f7af26277d887d7a1e7726e14d172db5a848a1730dd4886ab6121` | https://downloads.sourceforge.net/project/geographiclib/testdata/GeodTest-short.dat.gz |
 | n/a | NIST CAVP SHA byte-oriented test vectors | `shabytetestvectors.zip` | `929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8` | https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip |
+| 2026-10-01 | NASR 28-day subscription, CSV edition | `NASR_CSV_01_Oct_2026.zip` | `8e42286d8af8350097397e6337a1b0d922f22b0c0e331f6142e8e1210f6828f4` | https://nfdc.faa.gov/webContent/28DaySub/extra/01_Oct_2026_CSV.zip |
+| 2026-10-01 | CIFP (ARINC 424-18) | `CIFP_261001.zip` | `6a84a58d92c598b8effe7daabb85443e90ac216ccc148890df8f13590e5c1b8b` | https://aeronav.faa.gov/Upload_313-d/cifp/CIFP_261001.zip |
 
 The NASR server returns 503 to clients without a browser-like User-Agent.
 
