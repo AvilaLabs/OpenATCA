@@ -89,3 +89,19 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 - **OA-TRC-001** Lists every requirement without a test and every test tag naming an unknown
   requirement, and exits non-zero if either list is non-empty.
+
+### Hashing (oa-sha256)
+
+- **OA-SHA-001** Computes SHA-256 per FIPS 180-4, matching every NIST CAVP SHA-256 byte-oriented
+  test vector (short, long and Monte Carlo messages).
+- **OA-SHA-002** Hashes streamed input incrementally with the same result as one-shot hashing,
+  for every split point of the test messages.
+
+### Archives (oa-zip)
+
+- **OA-ZIP-001** Reads ZIP archives (central directory, local headers, stored and deflate
+  entries), rejecting encrypted, multi-disk and ZIP64-beyond-limits archives with a clear error.
+- **OA-ZIP-002** Inflates DEFLATE streams per RFC 1951 (stored, fixed and dynamic Huffman
+  blocks), verifying each entry's CRC-32 and uncompressed size.
+- **OA-ZIP-003** Enforces limits on entry count, uncompressed size per entry and total, and
+  compression ratio, so a crafted archive cannot exhaust memory or disk.

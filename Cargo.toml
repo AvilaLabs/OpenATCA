@@ -5,6 +5,8 @@ members = [
     "crates/oa-geo",
     "crates/oa-nasr",
     "crates/oa-arinc424",
+    "crates/oa-sha256",
+    "crates/oa-zip",
     "crates/oa-airspace",
     "tools/oa-trace",
 ]
