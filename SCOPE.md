@@ -119,6 +119,16 @@ section is what we intend to build first.
 6. **Minimal dependencies.** Core logic is written in-house. Outside code only for proven
    cryptography and entropy, each exception recorded with its reason.
 
+7. **The controller display is safety over flash** (Connor, 2026-11-13). Data is shown with as
+   little abstraction as possible. The display is a pure function from traffic state to a plain
+   list of drawing commands, redrawn from current state every frame, so nothing on screen can
+   drift from the data and the screen content is testable exactly. Characters are drawn with
+   stroke fonts we define, not a font engine. A thin renderer draws the list; the only outside
+   code is the minimal layer that opens a window. Stale, coasting and frozen states are always
+   visible. General GUI toolkits (egui and similar) are acceptable only for internal engineering
+   tools, never the controller display, because of their dependency trees and the layout
+   decisions they make on our behalf.
+
 Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
 already in use across Avila Labs). The core targets the standard library only.
 
