@@ -1,0 +1,145 @@
+//! Point-in-polygon where every polygon edge is a geodesic on the ellipsoid.
+//!
+//! Method (OA-GEO-006): crossing-number test along the meridian through the test point. The
+//! north pole is outside any polygon this type accepts, so a point is inside exactly when the
+//! half meridian running north from it crosses the boundary an odd number of times. Longitude
+//! is strictly monotone along a geodesic that is not a meridian, so for each edge the point
+//! where it crosses the test longitude is unique; it is found by bisection on the arc length
+//! using the direct problem (about 64 evaluations, converged far below a micrometre), and the
+//! edge counts when that crossing lies north of the test point. Vertices that sit exactly on
+//! the test meridian follow a half-open rule (a vertex belongs to the eastern side), so a
+//! vertex is never counted twice or missed. Edges that cross the antimeridian are handled
+//! because all longitudes are taken relative to the test point.
+//!
+//! Limits, all enforced when the polygon is built:
+//! * at least 3 distinct vertices, at most 100 000, none at a pole;
+//! * every edge shorter than 10 000 km and spanning less than 180 degrees of longitude;
+//! * the boundary must not enclose a pole (detected: the longitude change summed round the
+//!   ring would be +-360 degrees instead of 0);
+//! * edges must not cross each other (not checked; behaviour for a self-intersecting ring is
+//!   the even-odd rule, which is what this test computes).
+//!
+//! A point lying exactly on the boundary may be reported either way.
+
+use crate::error::GeoError;
+use crate::geodesic::{ang_normalize, Ellipsoid};
+use crate::latlon::LatLon;
+
+const MAX_VERTICES: usize = 100_000;
+const MAX_EDGE_M: f64 = 10_000_000.0;
+
+#[derive(Debug, Clone)]
+struct Edge {
+    start: LatLon,
+    azi1: f64,
+    s12: f64,
+    /// Signed longitude change along the edge, degrees, unreduced.
+    span: f64,
+}
+
+/// A polygon whose edges are geodesics. The ring is closed implicitly (a repeated first vertex
+/// at the end is accepted and dropped).
+#[derive(Debug, Clone)]
+pub struct Polygon {
+    ell: Ellipsoid,
+    edges: Vec<Edge>,
+}
+
+impl Polygon {
+    /// Builds and validates a polygon; see the module documentation for the limits.
+    pub fn new(ell: &Ellipsoid, vertices: &[LatLon]) -> Result<Polygon, GeoError> {
+        if vertices.len() > MAX_VERTICES + 1 {
+            return Err(GeoError::BadPolygon("more than 100000 vertices"));
+        }
+        let mut ring: Vec<LatLon> = Vec::with_capacity(vertices.len());
+        for &v in vertices {
+            if v.lat().abs() >= 90.0 {
+                return Err(GeoError::BadPolygon("vertex at a pole"));
+            }
+            if ring.last() != Some(&v) {
+                ring.push(v);
+            }
+        }
+        while ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() < 3 {
+            return Err(GeoError::BadPolygon("fewer than 3 distinct vertices"));
+        }
+        let mut edges = Vec::with_capacity(ring.len());
+        let mut total_span = 0.0;
+        for i in 0..ring.len() {
+            let a = ring[i];
+            let b = ring[(i + 1) % ring.len()];
+            let inv = ell.inverse(a, b)?;
+            if inv.distance_m >= MAX_EDGE_M {
+                return Err(GeoError::BadPolygon("edge longer than 10000 km"));
+            }
+            let (_, span, _) = ell.direct_unrolled(a.lat(), inv.azimuth1_deg, inv.distance_m);
+            if !span.is_finite() || span.abs() >= 180.0 {
+                return Err(GeoError::BadPolygon("edge spans 180 degrees of longitude"));
+            }
+            total_span += span;
+            edges.push(Edge {
+                start: a,
+                azi1: inv.azimuth1_deg,
+                s12: inv.distance_m,
+                span,
+            });
+        }
+        if total_span.abs() > 180.0 {
+            return Err(GeoError::BadPolygon("boundary encloses a pole"));
+        }
+        Ok(Polygon {
+            ell: ell.clone(),
+            edges,
+        })
+    }
+
+    /// Number of edges.
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Always false: a valid polygon has at least three edges.
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// True if `p` is inside the polygon (even-odd rule). A point on the boundary may be
+    /// reported either way.
+    pub fn contains(&self, p: LatLon) -> bool {
+        let mut inside = false;
+        for edge in &self.edges {
+            let a = ang_normalize(edge.start.lon() - p.lon());
+            let w = a + edge.span;
+            if (a > 0.0) == (w > 0.0) {
+                continue;
+            }
+            if self.crossing_latitude(edge, a) > p.lat() {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    /// Latitude at which `edge` crosses the test meridian, where `a` is the longitude of the
+    /// edge start relative to that meridian.
+    fn crossing_latitude(&self, edge: &Edge, a: f64) -> f64 {
+        let dir = if edge.span < 0.0 { -1.0 } else { 1.0 };
+        let (mut lo, mut hi) = (0.0, edge.s12);
+        for _ in 0..64 {
+            let mid = 0.5 * (lo + hi);
+            let (_, lon12, _) = self.ell.direct_unrolled(edge.start.lat(), edge.azi1, mid);
+            if dir * (lon12 + a) <= 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let (lat, _, _) = self
+            .ell
+            .direct_unrolled(edge.start.lat(), edge.azi1, 0.5 * (lo + hi));
+        lat
+    }
+}
