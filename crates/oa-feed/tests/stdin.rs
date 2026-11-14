@@ -23,7 +23,7 @@ fn frames() -> Vec<u8> {
     out
 }
 
-// REQ: OA-FEED-023
+// REQ: OA-FEED-023, OA-FEED-026
 #[test]
 fn stdin_mode_records_verbatim_and_replay_agrees() {
     let dir = std::env::temp_dir().join(format!("oa-feed-it-{}", std::process::id()));
@@ -31,7 +31,7 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
     let data = frames();
     let bin = env!("CARGO_BIN_EXE_oa-feed");
     let mut child = Command::new(bin)
-        .args(["--stdin", "--feed", "it", "--record"])
+        .args(["--stdin", "--feed", "it", "--record-raw"])
         .arg(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -55,6 +55,7 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
         .map(|e| e.unwrap().path())
         .collect();
     assert_eq!(files.len(), 1);
+    assert!(files[0].to_string_lossy().ends_with(".oaf"));
     assert_eq!(
         std::fs::read(&files[0]).unwrap(),
         data,
@@ -83,4 +84,81 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
         "replay output is identical on every run"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-031
+#[test]
+fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {
+    let base = std::env::temp_dir().join(format!("oa-feed-it-gz-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let data = frames();
+    let bin = env!("CARGO_BIN_EXE_oa-feed");
+    let mut outputs = Vec::new();
+    for flag in ["--record", "--record-raw"] {
+        let dir = base.join(&flag[2..]);
+        let mut child = Command::new(bin)
+            .args(["--stdin", "--feed", "it", flag])
+            .arg(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&data).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let rep = Command::new(bin)
+            .arg("replay")
+            .arg(&files[0])
+            .output()
+            .unwrap();
+        assert!(
+            rep.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rep.stderr)
+        );
+        outputs.push((files.remove(0), rep.stdout));
+    }
+    let (gz, gz_out) = &outputs[0];
+    let (raw, raw_out) = &outputs[1];
+    assert!(gz.to_string_lossy().ends_with(".oaf.gz"), "{gz:?}");
+    assert!(raw.to_string_lossy().ends_with(".oaf"), "{raw:?}");
+    let gz_bytes = std::fs::read(gz).unwrap();
+    assert_eq!(&gz_bytes[..2], &[0x1f, 0x8b]);
+    assert!(gz_bytes.len() < data.len());
+    // The whole replay output, health summary included, is the same text.
+    assert_eq!(
+        String::from_utf8_lossy(gz_out),
+        String::from_utf8_lossy(raw_out)
+    );
+    assert!(String::from_utf8_lossy(gz_out).contains("msgs=20 "));
+    // The system gzip accepts the file and decodes it to the input.
+    match Command::new("gzip").arg("-dc").arg(gz).output() {
+        Ok(o) => {
+            assert!(o.status.success());
+            assert_eq!(o.stdout, data);
+        }
+        Err(e) => eprintln!("gzip not available: {e}"),
+    }
+    // A copy cut short, as a crash would leave it, replays and says so.
+    let cut = base.join("cut.oaf.gz");
+    std::fs::write(&cut, &gz_bytes[..gz_bytes.len() / 2]).unwrap();
+    let rep = Command::new(bin).arg("replay").arg(&cut).output().unwrap();
+    assert!(
+        !rep.status.success(),
+        "a truncated file is not a clean replay"
+    );
+    let text = String::from_utf8(rep.stdout).unwrap();
+    assert!(text.contains("gzip truncated"), "{text}");
+    assert!(text.contains("replay files=1 "), "{text}");
+    std::fs::remove_dir_all(&base).unwrap();
 }

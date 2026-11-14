@@ -16,8 +16,8 @@ use crate::health::{
     FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED,
 };
 use crate::reader::FrameReader;
-use crate::record::{utc_stamp, Outcome, Recorder};
-use crate::replay::{replay_files, replay_sources};
+use crate::record::{utc_stamp, Format, Outcome, Recorder};
+use crate::replay::{replay_files, replay_sources, GzNoteKind};
 use crate::{
     FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN, MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
 };
@@ -881,7 +881,7 @@ fn recorder_rotates_caps_and_never_deletes() {
     assert_eq!(f.len(), 100);
     // A pre-existing file counts toward the cap and is left alone.
     std::fs::write(dir.join("old.oaf"), [0u8; 150]).unwrap();
-    let mut rec = Recorder::open(&dir, "scds-test", 250, 150 + 700).unwrap();
+    let mut rec = Recorder::open(&dir, "scds-test", 250, 150 + 700, Format::Raw).unwrap();
     let mut outcomes = Vec::new();
     for i in 0..10 {
         outcomes.push(rec.write_frame(&f, 1_700_000_000 + i / 3).unwrap());
@@ -938,7 +938,7 @@ fn utc_names_are_correct_calendar_times() {
 
 // ---------------------------------------------------------------- command line
 
-// REQ: OA-FEED-022
+// REQ: OA-FEED-022, OA-FEED-026
 #[test]
 fn command_line_parsing() {
     let a = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
@@ -964,8 +964,19 @@ fn command_line_parsing() {
         c => panic!("{c:?}"),
     }
     assert!(
-        matches!(cli::parse(&a("replay a.oaf b.oaf")).unwrap(), Command::Replay(v) if v.len() == 2)
+        matches!(cli::parse(&a("replay a.oaf b.oaf.gz")).unwrap(), Command::Replay(v) if v.len() == 2)
     );
+    // Compressed recording is the default; `--record-raw` asks for plain files.
+    match cli::parse(&a("--stdin --record /r")).unwrap() {
+        Command::Live(l) => {
+            assert_eq!((l.record, l.record_raw), (Some(PathBuf::from("/r")), false))
+        }
+        c => panic!("{c:?}"),
+    }
+    match cli::parse(&a("--stdin --record-raw /r")).unwrap() {
+        Command::Live(l) => assert_eq!((l.record, l.record_raw), (Some(PathBuf::from("/r")), true)),
+        c => panic!("{c:?}"),
+    }
     assert!(matches!(cli::parse(&a("--help")).unwrap(), Command::Help));
     for bad in [
         "",
@@ -976,7 +987,432 @@ fn command_line_parsing() {
         "--env x --duration soon",
         "--bogus",
         "--env x --summary-every 0",
+        "--stdin --record /a --record-raw /b",
+        "--stdin --record-raw /a --record /b",
+        "--stdin --record-raw",
     ] {
         assert!(cli::parse(&a(bad)).is_err(), "{bad:?} should be refused");
     }
+}
+
+// ---------------------------------------------------------------- compressed recording
+
+/// Reads a whole gzip file (or a part of one) with the oa-zip reader; the bytes delivered and
+/// the summary.
+fn gunzip_all(bytes: &[u8]) -> (Vec<u8>, oa_zip::GzipSummary) {
+    let mut r = oa_zip::GzipReader::new(oa_zip::InflateLimits::output_only(1 << 32));
+    let mut out = Vec::new();
+    r.push(
+        bytes,
+        &mut |b: &[u8]| -> Result<(), std::convert::Infallible> {
+            out.extend_from_slice(b);
+            Ok(())
+        },
+    )
+    .unwrap();
+    (out, r.finish())
+}
+
+/// Frames with receive times `step_ms` apart starting at `t0_s`, 100-ish bytes and varied.
+fn timed_frames(n: u64, t0_s: i64, step_ms: i64) -> Vec<(i64, Vec<u8>)> {
+    (0..n)
+        .map(|i| {
+            let recv = t0_s * SEC + i as i64 * step_ms * 1_000_000;
+            let body = format!("<msg n=\"{i}\" v=\"{}\"/>", i * 7919 % 10_007);
+            (
+                recv / SEC,
+                frame(1, 0, i, recv, recv / 1_000_000 - 5, body.as_bytes()),
+            )
+        })
+        .collect()
+}
+
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    v.sort();
+    v
+}
+
+// REQ: OA-FEED-026
+#[test]
+fn compressed_recording_names_and_content() {
+    let dir = tmpdir("gzname");
+    let frames = timed_frames(300, 1_700_000_000, 20);
+    let all: Vec<u8> = frames.iter().flat_map(|f| f.1.clone()).collect();
+    let mut rec = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    for (secs, f) in &frames {
+        assert_eq!(rec.write_frame(f, *secs).unwrap(), Outcome::Written);
+    }
+    rec.finish().unwrap();
+    assert_eq!(
+        files_in(&dir),
+        vec!["scds-x-20231114T221320Z.oaf.gz".to_string()]
+    );
+    let bytes = std::fs::read(dir.join("scds-x-20231114T221320Z.oaf.gz")).unwrap();
+    assert_eq!(&bytes[..3], &[0x1f, 0x8b, 8]);
+    assert!(
+        bytes.len() < all.len() / 2,
+        "{} of {}",
+        bytes.len(),
+        all.len()
+    );
+    let (out, s) = gunzip_all(&bytes);
+    assert!(out == all, "recorded frames are the input frames exactly");
+    assert_eq!((s.members, s.truncated), (1, None));
+    assert_eq!(rec.total_bytes(), bytes.len() as u64);
+    assert_eq!(rec.files_opened(), 1);
+    // A second recorder in the same second gets a suffixed name; raw files keep `.oaf`.
+    let mut again = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    again.write_frame(&frames[0].1, 1_700_000_000).unwrap();
+    again.finish().unwrap();
+    let mut raw = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Raw).unwrap();
+    raw.write_frame(&frames[0].1, 1_700_000_000).unwrap();
+    raw.finish().unwrap();
+    assert_eq!(
+        files_in(&dir),
+        vec![
+            "scds-x-20231114T221320Z-2.oaf.gz".to_string(),
+            "scds-x-20231114T221320Z.oaf".to_string(),
+            "scds-x-20231114T221320Z.oaf.gz".to_string(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read(dir.join("scds-x-20231114T221320Z.oaf")).unwrap(),
+        frames[0].1
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-027
+#[test]
+fn compressed_recording_is_flushed_every_second_and_on_exit() {
+    let dir = tmpdir("gzflush");
+    // 10 frames a second for 5 seconds.
+    let frames = timed_frames(50, 1_700_000_000, 100);
+    let mut rec = Recorder::open(&dir, "f", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    let path = |dir: &std::path::Path| dir.join(files_in(dir).remove(0));
+    let mut written: Vec<u8> = Vec::new();
+    let mut last_flush_idx = 0usize;
+    for (i, (secs, f)) in frames.iter().enumerate() {
+        rec.write_frame(f, *secs).unwrap();
+        written.extend(f);
+        // A crash now leaves this file: read it as it lies on disk, without finishing.
+        let on_disk = std::fs::read(path(&dir)).unwrap();
+        let (out, s) = gunzip_all(&on_disk);
+        assert!(written.starts_with(&out), "frame {i}: not a prefix");
+        // Everything up to the last frame at least one second after the previous flush is there.
+        let flush_due = i > 0 && frames[i].0 > frames[last_flush_idx].0;
+        if flush_due {
+            assert_eq!(out.len(), written.len(), "frame {i}: a flush was due");
+            last_flush_idx = i;
+        }
+        // At no point is more than about a second (ten frames) missing.
+        let missing = written.len() - out.len();
+        let per_frame = frames[i].1.len();
+        assert!(
+            missing <= 11 * per_frame,
+            "frame {i}: {missing} bytes missing"
+        );
+        assert!(
+            s.truncated.is_some(),
+            "a file still being written is open-ended"
+        );
+    }
+    // The feed goes quiet: an idle flush a second later saves the tail.
+    let before = std::fs::read(path(&dir)).unwrap();
+    let (out, _) = gunzip_all(&before);
+    rec.idle_flush(1_700_000_004).unwrap(); // not yet a second past the last flush
+    rec.idle_flush(1_700_000_005 + 1).unwrap();
+    let (out2, _) = gunzip_all(&std::fs::read(path(&dir)).unwrap());
+    assert!(out2.len() >= out.len());
+    assert_eq!(
+        out2.len(),
+        written.len(),
+        "idle flush leaves nothing behind"
+    );
+    // Exit finishes the member: complete, trailer verified.
+    rec.finish().unwrap();
+    let (out3, s) = gunzip_all(&std::fs::read(path(&dir)).unwrap());
+    assert!(out3 == written);
+    assert_eq!((s.members, s.truncated), (1, None));
+    // Finishing twice, or flushing with nothing open, is harmless.
+    rec.finish().unwrap();
+    rec.idle_flush(1_800_000_000).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-028
+#[test]
+fn compressed_rotation_and_cap_count_bytes_on_disk() {
+    let dir = tmpdir("gzrot");
+    // Frames the compressor can barely shrink, so compressed size tracks frame size.
+    let mut r = 12345u64;
+    let mut noise = |n: usize| -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                (r >> 24) as u8
+            })
+            .collect()
+    };
+    let frames: Vec<(i64, Vec<u8>)> = (0..60u64)
+        .map(|i| {
+            let recv = 1_700_000_000 * SEC + i as i64 * SEC;
+            (recv / SEC, frame(1, 0, i, recv, 0, &noise(400)))
+        })
+        .collect();
+    // Pre-existing files of both kinds count toward the cap and are left alone.
+    std::fs::write(dir.join("old.oaf"), [0u8; 1000]).unwrap();
+    std::fs::write(dir.join("old2.oaf.gz"), [0u8; 500]).unwrap();
+    std::fs::write(dir.join("notes.txt"), [0u8; 9999]).unwrap();
+    let rotate = 2000u64;
+    let cap = 1500 + 12_000;
+    let mut rec = Recorder::open(&dir, "r", rotate, cap, Format::Gzip).unwrap();
+    assert_eq!(rec.total_bytes(), 1500);
+    let mut stopped_at = None;
+    for (i, (secs, f)) in frames.iter().enumerate() {
+        match rec.write_frame(f, *secs).unwrap() {
+            Outcome::Written => {}
+            Outcome::StoppedNow => {
+                assert!(stopped_at.is_none());
+                stopped_at = Some(i);
+            }
+            Outcome::Stopped => assert!(stopped_at.is_some()),
+        }
+    }
+    let stopped_at = stopped_at.expect("the cap was reached");
+    rec.finish().unwrap();
+    let names = files_in(&dir);
+    assert!(names.contains(&"old.oaf".to_string()) && names.contains(&"old2.oaf.gz".to_string()));
+    assert!(names.contains(&"notes.txt".to_string()));
+    let ours: Vec<&String> = names.iter().filter(|n| n.starts_with("r-")).collect();
+    assert_eq!(ours.len() as u32, rec.files_opened());
+    assert!(ours.len() >= 5, "{ours:?}");
+    let mut sum = 1500u64;
+    let mut got = Vec::new();
+    for (k, n) in ours.iter().enumerate() {
+        let b = std::fs::read(dir.join(n)).unwrap();
+        sum += b.len() as u64;
+        // Every file is finished and holds whole frames; all but the last passed the rotation size
+        // by less than a flush interval's worth.
+        let (out, s) = gunzip_all(&b);
+        assert_eq!((s.members, s.truncated), (1, None), "{n}");
+        let mut off = 0;
+        while off < out.len() {
+            let len = u32::from_le_bytes(out[off + 32..off + 36].try_into().unwrap()) as usize;
+            off += HEADER_LEN + len + TRAILER_LEN;
+        }
+        assert_eq!(off, out.len(), "{n} holds whole frames");
+        if k + 1 < ours.len() {
+            assert!(
+                b.len() as u64 >= rotate && (b.len() as u64) < rotate + 600,
+                "{n}: {}",
+                b.len()
+            );
+        }
+        got.extend(out);
+    }
+    assert_eq!(rec.total_bytes(), sum, "the total is bytes on disk");
+    assert!(
+        sum >= cap && sum < cap + 1000,
+        "stopped at about the cap: {sum} vs {cap}"
+    );
+    let want: Vec<u8> = frames[..stopped_at]
+        .iter()
+        .flat_map(|f| f.1.clone())
+        .collect();
+    assert!(got == want, "the frames before the stop are all there");
+    assert_eq!(std::fs::metadata(dir.join("old.oaf")).unwrap().len(), 1000);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A reader that hands out one byte per call.
+struct OneByte<'a>(&'a [u8]);
+impl std::io::Read for OneByte<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.split_first() {
+            Some((b, rest)) if !buf.is_empty() => {
+                buf[0] = *b;
+                self.0 = rest;
+                Ok(1)
+            }
+            _ => Ok(0),
+        }
+    }
+}
+
+/// Gzip of `data` as one finished member via the recorder's own path (a `Recorder` file).
+fn record_gz(
+    dir: &std::path::Path,
+    feed: &str,
+    rotate: u64,
+    frames: &[u8],
+    secs: &[i64],
+) -> Vec<PathBuf> {
+    let mut rec = Recorder::open(dir, feed, rotate, u64::MAX, Format::Gzip).unwrap();
+    let mut off = 0;
+    for &t in secs {
+        let len = u32::from_le_bytes(frames[off + 32..off + 36].try_into().unwrap()) as usize;
+        let n = HEADER_LEN + len + TRAILER_LEN;
+        rec.write_frame(&frames[off..off + n], t).unwrap();
+        off += n;
+    }
+    assert_eq!(off, frames.len());
+    rec.finish().unwrap();
+    // Creation order: a name taken in the same second gets `-2`, which sorts before the `.`
+    // of the plain name, so compare the names without their extension.
+    let mut names = files_in(dir);
+    names.sort_by_key(|n| {
+        n.trim_end_matches(".gz")
+            .trim_end_matches(".oaf")
+            .to_string()
+    });
+    names.into_iter().map(|n| dir.join(n)).collect()
+}
+
+fn frame_secs(stream: &[u8]) -> Vec<i64> {
+    let mut v = Vec::new();
+    let mut off = 0;
+    while off < stream.len() {
+        let len = u32::from_le_bytes(stream[off + 32..off + 36].try_into().unwrap()) as usize;
+        let recv = i64::from_le_bytes(stream[off + 16..off + 24].try_into().unwrap());
+        v.push(recv.div_euclid(SEC));
+        off += HEADER_LEN + len + TRAILER_LEN;
+    }
+    v
+}
+
+// REQ: OA-FEED-029
+#[test]
+fn replay_chooses_by_magic_not_by_name() {
+    let dir = tmpdir("magic");
+    let stream = fixture();
+    let secs = frame_secs(&stream);
+    let gz_dir = dir.join("gz");
+    let gz = record_gz(&gz_dir, "m", u64::MAX, &stream, &secs);
+    assert_eq!(gz.len(), 1);
+    let gz_bytes = std::fs::read(&gz[0]).unwrap();
+    // Names swapped: raw frames called `.oaf.gz`, gzip called `.oaf` or with no extension.
+    std::fs::write(dir.join("raw-named-gz.oaf.gz"), &stream).unwrap();
+    std::fs::write(dir.join("gz-named-oaf.oaf"), &gz_bytes).unwrap();
+    std::fs::write(dir.join("gz-no-extension"), &gz_bytes).unwrap();
+    let base = replay_sources(vec![&stream[..]]).unwrap();
+    for name in ["raw-named-gz.oaf.gz", "gz-named-oaf.oaf", "gz-no-extension"] {
+        let r = replay_files(&[dir.join(name)]).unwrap();
+        assert_eq!(r.health, base.health, "{name}");
+        assert_eq!(r.bytes, stream.len() as u64, "{name}");
+        assert!(r.errors.is_empty() && r.gzip.is_empty(), "{name}");
+    }
+    // The decision does not depend on how the source chunks its reads.
+    let r = replay_sources(vec![OneByte(&gz_bytes)]).unwrap();
+    assert_eq!((&r.health, r.gzip.len()), (&base.health, 0));
+    let r = replay_sources(vec![OneByte(&stream)]).unwrap();
+    assert_eq!(r.health, base.health);
+    // Empty and one-byte sources are raw, not gzip.
+    let r = replay_sources(vec![&b""[..], &b"\x1f"[..]]).unwrap();
+    assert!(r.gzip.is_empty() && r.health.messages == 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-030
+#[test]
+fn compressed_replay_summary_is_identical_to_raw() {
+    let dir = tmpdir("gzrep");
+    let stream = fixture();
+    let secs = frame_secs(&stream);
+    // Rotating small makes several members/files, replayed in order like the raw ones.
+    let files = record_gz(&dir, "rep", 120, &stream, &secs);
+    assert!(files.len() >= 3, "{files:?}");
+    let gz = replay_files(&files).unwrap();
+    let raw = replay_sources(vec![&stream[..]]).unwrap();
+    assert_eq!(gz.health, raw.health);
+    assert_eq!(gz.bytes, raw.bytes);
+    assert_eq!(
+        format_summary(&gz.health, gz.health.last_recv_ns),
+        format_summary(&raw.health, raw.health.last_recv_ns)
+    );
+    assert!(gz.errors.is_empty() && gz.gzip.is_empty());
+    assert_eq!(gz.files, files.len());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-030
+#[test]
+fn crashed_and_damaged_compressed_files_replay_what_is_good() {
+    let dir = tmpdir("gzcrash");
+    let stream = fixture();
+    let secs = frame_secs(&stream);
+    // A crash mid-recording: copy the file while the recorder is open and not finished.
+    let mut rec = Recorder::open(&dir, "c", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    let mut off = 0;
+    let mut lens = Vec::new();
+    for &t in &secs {
+        let len = u32::from_le_bytes(stream[off + 32..off + 36].try_into().unwrap()) as usize;
+        let n = HEADER_LEN + len + TRAILER_LEN;
+        rec.write_frame(&stream[off..off + n], t).unwrap();
+        off += n;
+        lens.push(off);
+    }
+    let live = std::fs::read(dir.join(files_in(&dir).remove(0))).unwrap();
+    std::fs::write(dir.join("crashed.oaf.gz"), &live).unwrap();
+    rec.finish().unwrap();
+    let r = replay_files(&[dir.join("crashed.oaf.gz")]).unwrap();
+    assert_eq!(r.gzip.len(), 1, "never a silent success");
+    let GzNoteKind::Truncated(t) = &r.gzip[0].kind else {
+        panic!("{:?}", r.gzip)
+    };
+    assert_eq!(t.stage, oa_zip::TruncStage::Data);
+    assert_eq!(t.tail_bytes, r.bytes);
+    assert!(t.flushed_bytes <= t.tail_bytes);
+    // Every frame replayed is a whole frame of the original (the rest is a partial tail).
+    let whole = lens
+        .iter()
+        .rev()
+        .find(|&&l| l as u64 <= r.bytes)
+        .copied()
+        .unwrap();
+    assert!(
+        whole >= lens[lens.len() / 2],
+        "most of the stream survives the crash"
+    );
+    let upto = replay_sources(vec![&stream[..whole]]).unwrap();
+    assert_eq!(r.health.messages, upto.health.messages);
+    // A file cut exactly at a flush replays whole frames with no frame error.
+    let cut = replay_sources(vec![&stream[..t.flushed_bytes as usize]]).unwrap();
+    assert!(cut.errors.is_empty() || t.flushed_bytes as usize != whole);
+
+    // A flipped bit in the middle: the frames before it replay and the damage is reported.
+    let full =
+        std::fs::read(dir.join(files_in(&dir).iter().find(|n| n.starts_with("c-")).unwrap()))
+            .unwrap();
+    let mut bad = full.clone();
+    let at = bad.len() / 2;
+    bad[at] ^= 0x10;
+    std::fs::write(dir.join("bad.oaf.gz"), &bad).unwrap();
+    let r = replay_files(&[dir.join("bad.oaf.gz")]).unwrap();
+    assert_eq!(r.gzip.len(), 1);
+    assert!(
+        matches!(r.gzip[0].kind, GzNoteKind::Damaged(_))
+            || matches!(r.gzip[0].kind, GzNoteKind::Truncated(_)),
+        "{:?}",
+        r.gzip
+    );
+    assert!(r.health.messages > 0 && r.health.messages < 150);
+    // A wrong CRC-32 is its own report, after all the data was replayed.
+    let mut bad = full.clone();
+    let n = bad.len();
+    bad[n - 8] ^= 1;
+    std::fs::write(dir.join("crc.oaf.gz"), &bad).unwrap();
+    let r = replay_files(&[dir.join("crc.oaf.gz")]).unwrap();
+    assert!(matches!(
+        &r.gzip[0].kind,
+        GzNoteKind::Damaged(oa_zip::GzipError::CrcMismatch { .. })
+    ));
+    assert_eq!(r.health.messages, 150);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

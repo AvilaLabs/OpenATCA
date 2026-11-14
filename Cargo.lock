@@ -33,6 +33,7 @@ dependencies = [
 name = "oa-feed"
 version = "0.0.1"
 dependencies = [
+ "oa-deflate",
  "oa-zip",
 ]
 

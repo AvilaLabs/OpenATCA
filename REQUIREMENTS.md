@@ -147,6 +147,35 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   is 0xFFFFFFFF, once; any other combination is rejected. An archive entry cannot be built
   outside the parser.
 
+- **OA-ZIP-005** The streaming inflater (`Inflater`) takes input in pieces of any size and gives
+  exactly the output of the one-shot `inflate` for every chunking from 1 byte up, for stored,
+  fixed and dynamic blocks; it reports the bytes it consumed and the end of the stream, so bytes
+  after the stream are left to the caller; and `inflate` is built on it. Output reaches the sink
+  in runs of at most one window, and an error from the sink is returned unchanged.
+- **OA-ZIP-006** The streaming inflater and the gzip reader keep hard limits: a total output cap
+  (across all members for gzip) and a compression-ratio cap above a small exempt size, each its
+  own error; a gzip bomb stops at the cap with an error and the good prefix delivered.
+- **OA-ZIP-007** The streaming inflater and gzip reader allocate only when created: a fixed
+  32 KiB window, three Huffman tables and fixed-size arrays, and no growable collection. The
+  window and the tables keep their address and size through pushes, resets and members. (A
+  counting allocator needs an `unsafe` impl, which RULESET A0 forbids in this crate, so the check
+  is on the buffers themselves.)
+- **OA-ZIP-008** The gzip reader parses every header form (FEXTRA, FNAME, FCOMMENT and FHCRC in
+  any combination), verifies CRC-32 and ISIZE, and reads concatenated members, identically for
+  every chunking from 1 byte up and in agreement with the system `gzip` (skipped if missing).
+- **OA-ZIP-009** Each kind of gzip damage has its own error: bad magic (first and second byte,
+  and at a later member), unsupported method, reserved flags, over-long name, header CRC-16,
+  invalid DEFLATE data, CRC-32 and ISIZE; after an error the reader refuses further input.
+- **OA-ZIP-010** A gzip stream cut short (a file a crash left after a sync flush) is read up to the
+  cut: `finish` reports it truncated, with the stage (header, data, trailer), the bytes recovered
+  from the unfinished member and how many of them lie before its last sync flush; all of it was
+  delivered; the cut is never reported as success and never an error that loses the good data;
+  a cut after a flush recovers exactly the flushed data, at every cut point.
+- **OA-ZIP-011** Never panics: every byte flip, deletion, insertion and truncation of valid
+  streams, and seeded noise in several chunkings, give output and errors for the streaming
+  inflater and the gzip reader; the streaming inflater gives the same output and error for every
+  chunking of the same input.
+
 ## M1 — SWIM input adapters
 
 ### XML (oa-xml)
@@ -287,7 +316,7 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-018** Replaying recorded files gives an identical health record and summary every
   time, equal to reading the same bytes as one stream, from frame fields only (never the clock).
 - **OA-FEED-019** Recording rotates at the size limit on frame boundaries, names files
-  `<feed>-<UTC start>.oaf`, counts existing recordings toward the total cap, stops once with a
+  `<feed>-<UTC start>.oaf` (raw; `.oaf.gz` when compressed, OA-FEED-026), counts existing recordings toward the total cap, stops once with a
   warning at the cap and never deletes a file.
 - **OA-FEED-020** UTC file names and timestamps are correct calendar times, including leap days
   and times before 1970.
@@ -295,13 +324,35 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-022** The command line accepts the documented forms and refuses missing or malformed
   arguments, exclusive options and unknown flags.
 - **OA-FEED-023** The `oa-feed` binary in `--stdin` mode reads frames, prints a health line,
-  records the input byte for byte, and `oa-feed replay` of the recording prints the same figures
+  records the input byte for byte (`--record-raw`), and `oa-feed replay` of the recording prints the same figures
   on every run.
 - **OA-FEED-024** The latency histogram has 10 ms bins to 100 ms, 100 ms bins to 1 s, 1 s bins to
   60 s, 10 s bins to 600 s and one overflow bin; each bin's upper edge is the next bin's start,
   and a p50, p95 or maximum in the overflow bin prints as `>=600000`.
 - **OA-FEED-025** Latencies of 7 to 10.5 s (as measured on the live TBFM feed) fall in distinct
   1 s bins, and p50, p95 and the maximum come out as numbers in that range; a printed quantile never exceeds the maximum.
+- **OA-FEED-026** `--record` writes `<feed>-<UTC start>.oaf.gz` (gzip, level 6) and
+  `--record-raw` keeps the plain `.oaf`; the two are exclusive; the recorded frames are the input
+  frames exactly.
+- **OA-FEED-027** A compressed recording is sync-flushed once a frame's receive time is a second
+  past the last flush, by an idle flush when the feed is quiet, and on rotation and exit (each
+  file is finished with its trailer): a file read while recording, or after a crash, holds every
+  frame up to the last flush.
+- **OA-FEED-028** Rotation and the total cap count the compressed bytes on disk, including
+  existing `.oaf` and `.oaf.gz` files, rotate on frame boundaries, stop once at the cap and never
+  delete a file.
+- **OA-FEED-029** Replay chooses gzip or raw from the file's first bytes, not its name, even when
+  the source returns one byte per read.
+- **OA-FEED-030** Replaying a compressed recording gives a health record, summary and byte count
+  identical to replaying the same frames uncompressed; a file cut by a crash replays every frame
+  up to the cut and is reported truncated with the bytes recovered; damaged gzip data is
+  reported and the frames before it still replay.
+- **OA-FEED-031** The `oa-feed` binary in `--stdin` mode records a compressed file that
+  `gzip -t` accepts and that decodes to the input, and `oa-feed replay` of it prints exactly what
+  replay of the raw recording prints.
+- **OA-FEED-032** The real SCDS recordings under `OPENATCA_SCDS_REC` (`*.oaf`) converted to
+  `.oaf.gz` replay to identical summaries; the test reports the compressed sizes and ratios and
+  skips when the variable is unset.
 
 ### Compression (oa-deflate)
 

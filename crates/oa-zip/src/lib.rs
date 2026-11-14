@@ -3,6 +3,11 @@
 //! functions ([`Archive::parse`], [`Archive::extract`], [`inflate`], [`crc32`]); shell only for
 //! [`read_archive_file`], which reads a file under a size limit.
 //!
+//! The inflater also streams: [`Inflater`] takes input in pieces of any size and [`GzipReader`]
+//! reads concatenated gzip members (RFC 1952) on top of it, recovering the good part of a file
+//! cut short by a crash. Both are here, not in `oa-deflate`, because they decode untrusted input
+//! and share the hardened tables and limits of the one-shot [`inflate`], which is built on them.
+//!
 //! Nothing here ever writes a file: entries are extracted to memory, so a hostile entry name
 //! cannot reach the file system. Names with `..`, absolute paths, drive letters or NUL are still
 //! listed, but [`Archive::extract`] refuses them ([`ZipError::UnsafePath`]).
@@ -13,10 +18,14 @@
 //! entry that did not pass the directory checks cannot exist. Cold, offline code: A7.2 applies.
 
 mod crc32;
+mod gzip;
 mod inflate;
 
 pub use crc32::{crc32, crc32_update};
-pub use inflate::{inflate, InflateError, WINDOW_LEN};
+pub use gzip::{GzipError, GzipReader, GzipSummary, TruncStage, Truncated, MAX_HEADER_FIELD};
+pub use inflate::{
+    inflate, Consumed, InflateError, InflateLimits, Inflater, StreamError, WINDOW_LEN,
+};
 
 use std::fmt;
 use std::io::Read;

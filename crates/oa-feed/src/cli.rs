@@ -2,10 +2,14 @@
 //!
 //! ```text
 //! oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>]
-//!         [--record <dir>] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>]
-//!         [--summary-every <s>]
-//! oa-feed replay <file.oaf>...
+//!         [--record <dir> | --record-raw <dir>] [--max-bytes <n>] [--rotate-bytes <n>]
+//!         [--duration <s>] [--summary-every <s>]
+//! oa-feed replay <file.oaf | file.oaf.gz>...
 //! ```
+//!
+//! `--record` writes gzip-compressed `.oaf.gz` files, `--record-raw` plain `.oaf`. Sizes
+//! (`--max-bytes`, `--rotate-bytes`) count the bytes on disk. Replay tells the two apart by the
+//! file's first bytes, not its name.
 
 use std::path::PathBuf;
 
@@ -41,6 +45,8 @@ pub struct Live {
     pub feed: String,
     /// Recording directory.
     pub record: Option<PathBuf>,
+    /// Record plain `.oaf` instead of gzip-compressed `.oaf.gz`.
+    pub record_raw: bool,
     /// Total cap on recorded bytes.
     pub max_bytes: u64,
     /// Rotation size of one recording file.
@@ -65,8 +71,8 @@ pub enum Command {
 /// Usage text.
 pub const USAGE: &str =
     "usage:\n  oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>] \
-[--record <dir>] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] [--summary-every <s>]\n  \
-oa-feed replay <file.oaf>...";
+[--record <dir> | --record-raw <dir>] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
+[--summary-every <s>]\n  oa-feed replay <file.oaf | file.oaf.gz>...";
 
 /// Parses arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
@@ -77,6 +83,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut stdin = false;
     let mut feed = None;
     let mut record = None;
+    let mut record_raw = false;
     let mut max_bytes = DEFAULT_MAX_BYTES;
     let mut rotate_bytes = DEFAULT_ROTATE_BYTES;
     let mut duration_secs = None;
@@ -101,7 +108,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--jar" => jar = Some(PathBuf::from(value("--jar")?)),
             "--java" => java = Some(PathBuf::from(value("--java")?)),
             "--feed" => feed = Some(value("--feed")?),
-            "--record" => record = Some(PathBuf::from(value("--record")?)),
+            "--record" | "--record-raw" => {
+                if record.is_some() {
+                    return Err("--record and --record-raw are exclusive and given once".into());
+                }
+                record_raw = a == "--record-raw";
+                record = Some(PathBuf::from(value(a)?));
+            }
             "--max-bytes" => max_bytes = number("--max-bytes", &value("--max-bytes")?)?,
             "--rotate-bytes" => rotate_bytes = number("--rotate-bytes", &value("--rotate-bytes")?)?,
             "--duration" => duration_secs = Some(number("--duration", &value("--duration")?)?),
@@ -137,6 +150,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         source,
         feed,
         record,
+        record_raw,
         max_bytes,
         rotate_bytes,
         duration_secs,

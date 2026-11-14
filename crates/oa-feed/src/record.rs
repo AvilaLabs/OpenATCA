@@ -1,14 +1,37 @@
-//! Frame recording: raw frames appended verbatim to size-rotated `.oaf` files. Shell (file
-//! system); the clock is passed in as a value so naming is testable.
+//! Frame recording: frames appended to size-rotated files, gzip-compressed as they are written
+//! (`.oaf.gz`, the default) or verbatim (`.oaf`). Shell (file system); the clock is passed in as
+//! a value so naming is testable.
 //!
-//! Files are named `<feed>-<UTC start>.oaf` (UTC as `YYYYMMDDTHHMMSSZ`, with `-2`, `-3` if a name
-//! is taken). A new file starts when the next frame would push the current one past the rotation
-//! size. The total size of every `.oaf` file in the directory is capped; at the cap recording
-//! stops, once, with a warning, and nothing is deleted (a recording is evidence, A8).
+//! Files are named `<feed>-<UTC start>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`, with `-2`,
+//! `-3` if a name is taken). Frames are never split across files. The total size of every `.oaf`
+//! and `.oaf.gz` file in the directory is capped; at the cap recording stops, once, with a
+//! warning, and nothing is deleted (a recording is evidence, A8).
+//!
+//! Compressed recordings (oa-deflate, level 6) are a sequence of gzip members, one per file. The
+//! compressor is sync-flushed when a frame's receive time has moved a whole second past the last
+//! flush, and by [`Recorder::idle_flush`] when the feed is quiet, so a crash loses at most about
+//! one second of frames; each file is finished (final block and CRC-32 trailer) on rotation, at
+//! the cap and in [`Recorder::finish`]. Rotation and the cap count the compressed bytes that are
+//! on disk, not the frame bytes: the compressor holds a little back, so a file can pass the
+//! rotation size, and the total the cap, by the output of one flush interval before the next
+//! check sees it. A file cut by a crash is read back up to its last flush (oa-zip
+//! `GzipReader`).
 
+use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use oa_deflate::{GzipWriter, DEFAULT_LEVEL};
+
+/// How frames are stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// Gzip members at level 6, `.oaf.gz`.
+    Gzip,
+    /// The frames' own bytes, `.oaf`.
+    Raw,
+}
 
 /// What [`write_frame`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,68 +44,175 @@ pub enum Outcome {
     Stopped,
 }
 
+/// The open file: bytes on disk so far, the compressor, and when it was last flushed.
+// A7.2: cold struct, size guard waived
+struct Current {
+    file: File,
+    disk: u64,
+    gz: Option<GzipWriter>,
+    flushed_secs: i64,
+}
+
 /// Recording state for one feed. A subsystem under D5: it owns the open file.
 pub struct Recorder {
     dir: PathBuf,
     feed: String,
+    format: Format,
     rotate_bytes: u64,
     max_bytes: u64,
     total: u64,
-    current: Option<(File, u64)>,
+    current: Option<Current>,
+    scratch: Vec<u8>,
     stopped: bool,
     files_opened: u32,
 }
 
+fn is_recording(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".oaf") || n.ends_with(".oaf.gz"))
+}
+
 impl Recorder {
-    /// Prepares `dir` (created if missing) and counts the bytes of existing `.oaf` files toward
-    /// the cap.
-    pub fn open(dir: &Path, feed: &str, rotate_bytes: u64, max_bytes: u64) -> io::Result<Recorder> {
+    /// Prepares `dir` (created if missing) and counts the bytes of existing `.oaf` and
+    /// `.oaf.gz` files toward the cap.
+    pub fn open(
+        dir: &Path,
+        feed: &str,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        format: Format,
+    ) -> io::Result<Recorder> {
         fs::create_dir_all(dir)?;
         let mut total = 0u64;
         for e in fs::read_dir(dir)? {
             let e = e?;
-            if e.path().extension().is_some_and(|x| x == "oaf") {
+            if is_recording(&e.path()) {
                 total = total.saturating_add(e.metadata()?.len());
             }
         }
         Ok(Recorder {
             dir: dir.to_path_buf(),
             feed: feed.to_string(),
+            format,
             rotate_bytes: rotate_bytes.max(1),
             max_bytes,
             total,
             current: None,
+            scratch: Vec::new(),
             stopped: false,
             files_opened: 0,
         })
     }
 
-    /// Appends one whole frame, rotating first if needed. `now_unix_secs` names a new file.
+    /// Appends one whole frame, rotating first if needed. `now_unix_secs` is the frame's receive
+    /// time: it names a new file and times the sync flush.
     pub fn write_frame(&mut self, raw: &[u8], now_unix_secs: i64) -> io::Result<Outcome> {
         if self.stopped {
             return Ok(Outcome::Stopped);
         }
         let len = raw.len() as u64;
-        if self.total.saturating_add(len) > self.max_bytes {
+        let over_cap = match self.format {
+            Format::Raw => self.total.saturating_add(len) > self.max_bytes,
+            // The compressed size of this frame is not known yet; stop once the disk is full.
+            Format::Gzip => self.total >= self.max_bytes,
+        };
+        if over_cap {
+            self.finish()?;
             self.stopped = true;
             return Ok(Outcome::StoppedNow);
         }
         let rotate = match &self.current {
-            Some((_, n)) => *n > 0 && n.saturating_add(len) > self.rotate_bytes,
+            Some(c) => match self.format {
+                Format::Raw => c.disk > 0 && c.disk.saturating_add(len) > self.rotate_bytes,
+                Format::Gzip => c.disk >= self.rotate_bytes,
+            },
             None => true,
         };
         if rotate {
-            self.current = Some((self.create(now_unix_secs)?, 0));
+            self.finish()?;
+            self.current = Some(self.create(now_unix_secs)?);
         }
-        if let Some((f, n)) = self.current.as_mut() {
-            f.write_all(raw)?;
-            *n += len;
-            self.total += len;
+        let Some(cur) = self.current.as_mut() else {
+            return Ok(Outcome::Written);
+        };
+        self.scratch.clear();
+        match cur.gz.as_mut() {
+            Some(gz) => {
+                let mut sink = |b: &[u8]| -> Result<(), Infallible> {
+                    self.scratch.extend_from_slice(b);
+                    Ok(())
+                };
+                let mut r = gz.write(raw, &mut sink);
+                if r.is_ok() && now_unix_secs >= cur.flushed_secs.saturating_add(1) {
+                    cur.flushed_secs = now_unix_secs;
+                    r = gz.flush(&mut sink);
+                }
+                if let Err(never) = r {
+                    match never {}
+                }
+            }
+            None => self.scratch.extend_from_slice(raw),
         }
+        cur.file.write_all(&self.scratch)?;
+        let n = self.scratch.len() as u64;
+        cur.disk += n;
+        self.total += n;
         Ok(Outcome::Written)
     }
 
-    /// Bytes recorded in the directory so far, including files that were already there.
+    /// Sync-flushes the compressor if a whole second has passed since the last flush; for a feed
+    /// that has gone quiet, so frames already written do not sit in the compressor. A flush with
+    /// nothing new writes nothing. A no-op for raw recordings.
+    pub fn idle_flush(&mut self, now_unix_secs: i64) -> io::Result<()> {
+        let Some(cur) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let Some(gz) = cur.gz.as_mut() else {
+            return Ok(());
+        };
+        if now_unix_secs < cur.flushed_secs.saturating_add(1) {
+            return Ok(());
+        }
+        cur.flushed_secs = now_unix_secs;
+        self.scratch.clear();
+        let mut sink = |b: &[u8]| -> Result<(), Infallible> {
+            self.scratch.extend_from_slice(b);
+            Ok(())
+        };
+        if let Err(never) = gz.flush(&mut sink) {
+            match never {}
+        }
+        cur.file.write_all(&self.scratch)?;
+        let n = self.scratch.len() as u64;
+        cur.disk += n;
+        self.total += n;
+        Ok(())
+    }
+
+    /// Ends the open file: the compressed member gets its final block and trailer, and the file
+    /// is synced to the operating system. Call at exit; rotation and the cap do it themselves.
+    pub fn finish(&mut self) -> io::Result<()> {
+        let Some(mut cur) = self.current.take() else {
+            return Ok(());
+        };
+        if let Some(gz) = cur.gz.as_mut() {
+            self.scratch.clear();
+            let mut sink = |b: &[u8]| -> Result<(), Infallible> {
+                self.scratch.extend_from_slice(b);
+                Ok(())
+            };
+            if let Err(never) = gz.finish(&mut sink) {
+                match never {}
+            }
+            cur.file.write_all(&self.scratch)?;
+            self.total += self.scratch.len() as u64;
+        }
+        cur.file.flush()
+    }
+
+    /// Bytes recorded in the directory so far (on disk, so compressed for `.oaf.gz`), including
+    /// files that were already there.
     pub fn total_bytes(&self) -> u64 {
         self.total
     }
@@ -92,23 +222,35 @@ impl Recorder {
         self.files_opened
     }
 
-    fn create(&mut self, now_unix_secs: i64) -> io::Result<File> {
+    fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
         let stamp = utc_stamp(now_unix_secs);
+        let ext = match self.format {
+            Format::Gzip => "oaf.gz",
+            Format::Raw => "oaf",
+        };
         let mut n = 1u32;
         loop {
             let name = if n == 1 {
-                format!("{}-{stamp}.oaf", self.feed)
+                format!("{}-{stamp}.{ext}", self.feed)
             } else {
-                format!("{}-{stamp}-{n}.oaf", self.feed)
+                format!("{}-{stamp}-{n}.{ext}", self.feed)
             };
             match OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(self.dir.join(name))
             {
-                Ok(f) => {
+                Ok(file) => {
                     self.files_opened += 1;
-                    return Ok(f);
+                    return Ok(Current {
+                        file,
+                        disk: 0,
+                        gz: match self.format {
+                            Format::Gzip => Some(GzipWriter::new(DEFAULT_LEVEL)),
+                            Format::Raw => None,
+                        },
+                        flushed_secs: now_unix_secs,
+                    });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
                 Err(e) => return Err(e),

@@ -18,9 +18,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{format_summary, observe_error, observe_frame, observe_skipped, FeedHealth};
-use oa_feed::record::{utc_iso, Outcome, Recorder};
-use oa_feed::replay::replay_files;
+use oa_feed::record::{utc_iso, Format, Outcome, Recorder};
+use oa_feed::replay::{replay_files, GzNoteKind};
 use oa_feed::{FrameReader, MAX_FRAME_LEN};
+use oa_zip::TruncStage;
 
 const DEFAULT_JAR: &str = "adapters/scds-bridge/target/scds-bridge.jar";
 const CHUNK: usize = 64 * 1024;
@@ -72,6 +73,22 @@ fn replay(files: &[PathBuf]) -> ExitCode {
     for fe in &rep.errors {
         println!("file={} {}", fe.file, fe.error);
     }
+    for note in &rep.gzip {
+        match &note.kind {
+            GzNoteKind::Truncated(t) => {
+                let at = match t.stage {
+                    TruncStage::Header => "in the header",
+                    TruncStage::Data => "in the data",
+                    TruncStage::Trailer => "in the trailer (data complete, CRC-32 unchecked)",
+                };
+                println!(
+                    "file={} gzip truncated {at}: recovered {} bytes of the last member, {} of them before its last flush",
+                    note.file, t.tail_bytes, t.flushed_bytes
+                );
+            }
+            GzNoteKind::Damaged(e) => println!("file={} {e}", note.file),
+        }
+    }
     // Replay never reads the clock: the report time is the last frame's own time.
     println!(
         "replay files={} bytes={} {}",
@@ -79,7 +96,7 @@ fn replay(files: &[PathBuf]) -> ExitCode {
         rep.bytes,
         format_summary(&rep.health, rep.health.last_recv_ns)
     );
-    if rep.errors.is_empty() {
+    if rep.errors.is_empty() && rep.gzip.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -145,8 +162,18 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
 
     let mut recorder = match &cfg.record {
         Some(dir) => Some(
-            Recorder::open(dir, &cfg.feed, cfg.rotate_bytes, cfg.max_bytes)
-                .map_err(|e| format!("cannot open recording directory: {e}"))?,
+            Recorder::open(
+                dir,
+                &cfg.feed,
+                cfg.rotate_bytes,
+                cfg.max_bytes,
+                if cfg.record_raw {
+                    Format::Raw
+                } else {
+                    Format::Gzip
+                },
+            )
+            .map_err(|e| format!("cannot open recording directory: {e}"))?,
         ),
         None => None,
     };
@@ -209,7 +236,15 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 }
                 break;
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // A quiet feed: frames already written must not sit in the compressor.
+                if let Some(r) = recorder.as_mut() {
+                    if let Err(e) = r.idle_flush(now_ns().div_euclid(1_000_000_000)) {
+                        eprintln!("oa-feed: WARNING feed={} recording failed: {e}", cfg.feed);
+                        recorder = None;
+                    }
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -225,6 +260,12 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     if let Some(mut c) = child {
         let _ = c.kill();
         let _ = c.wait();
+    }
+    if let Some(r) = recorder.as_mut() {
+        if let Err(e) = r.finish() {
+            eprintln!("oa-feed: WARNING feed={} recording failed: {e}", cfg.feed);
+            exit = ExitCode::FAILURE;
+        }
     }
     print!("final ");
     print_summary(&cfg.feed, &health);
