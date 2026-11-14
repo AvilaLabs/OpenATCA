@@ -29,7 +29,9 @@ use crate::latlon::LatLon;
 const MAX_VERTICES: usize = 100_000;
 const MAX_EDGE_M: f64 = 10_000_000.0;
 
-#[derive(Debug, Clone)]
+/// Hot: one per polygon edge, scanned on every containment test (A7).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
 struct Edge {
     start: LatLon,
     azi1: f64,
@@ -37,10 +39,12 @@ struct Edge {
     /// Signed longitude change along the edge, degrees, unreduced.
     span: f64,
 }
+const _: () = assert!(core::mem::size_of::<Edge>() == 40);
 
 /// A polygon whose edges are geodesics. The ring is closed implicitly (a repeated first vertex
 /// at the end is accepted and dropped).
 #[derive(Debug, Clone)]
+// A7.2: cold struct, size guard waived
 pub struct Polygon {
     ell: Ellipsoid,
     edges: Vec<Edge>,
@@ -69,9 +73,9 @@ impl Polygon {
         }
         let mut edges = Vec::with_capacity(ring.len());
         let mut total_span = 0.0;
-        for i in 0..ring.len() {
-            let a = ring[i];
-            let b = ring[(i + 1) % ring.len()];
+        for (i, &a) in ring.iter().enumerate() {
+            // `i + 1` wraps to 0, and the ring has at least three vertices, so `get` succeeds.
+            let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(a);
             let inv = ell.inverse(a, b)?;
             if inv.distance_m >= MAX_EDGE_M {
                 return Err(GeoError::BadPolygon("edge longer than 10000 km"));

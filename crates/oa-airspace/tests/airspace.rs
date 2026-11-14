@@ -1,11 +1,18 @@
 //! The model built from the committed fixtures: a cut of the 2026-10-29 NASR and CIFP data (the
 //! ZAU boundary, KORD, KMDW and KJFK with a few procedures, two airways, and what they reference).
 //! See `fixtures/PROVENANCE.txt`.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 
 use common::*;
 use oa_airspace::build::{build_model, BuildError};
+use oa_airspace::diff::diff_models;
 use oa_airspace::load::{load_bytes, parse_expectation, Expectation, LoadError};
 use oa_airspace::model::*;
 use oa_airspace::report::{boundary_separations, render_report, table_sizes, ReportInput};
@@ -70,7 +77,7 @@ fn the_fixture_builds_a_valid_model_for_zau() {
     // Strings are interned once: no string appears twice.
     let n = str_count(&m.strings);
     let mut all: Vec<&str> = (0..n as u32)
-        .filter_map(|i| str_at(&m.strings, StrIx(i)))
+        .filter_map(|i| str_at(&m.strings, StrIx::new(i)))
         .collect();
     let before = all.len();
     all.sort_unstable();
@@ -97,13 +104,11 @@ fn a_point_is_identified_by_ident_region_and_kind_class() {
         point_kind::class(point_kind::TERMINAL_WAYPOINT)
     );
     let mosco = find_point(&m, key("MOSCO", "K3", "", point_kind::FIX)).expect("MOSCO");
-    assert_eq!(m.points.kind[mosco.0 as usize], point_kind::FIX);
+    assert_eq!(m.points.kind[mosco.row()], point_kind::FIX);
     // Runway thresholds are scoped by their airport.
     let thr = find_point(&m, key("09L", "K5", "KORD", point_kind::THRESHOLD)).expect("KORD 09L");
-    assert_eq!(m.points.kind[thr.0 as usize], point_kind::THRESHOLD);
-    assert!(
-        bit_get(&m.points.src_nasr, thr.0 as usize) && bit_get(&m.points.src_cifp, thr.0 as usize)
-    );
+    assert_eq!(m.points.kind[thr.row()], point_kind::THRESHOLD);
+    assert!(bit_get(&m.points.src_nasr, thr.row()) && bit_get(&m.points.src_cifp, thr.row()));
 }
 
 // REQ: OA-ASP-001
@@ -145,11 +150,11 @@ fn objects_inside_the_artcc_are_selected_and_distant_ones_are_not() {
     let m = fixture_build().model;
     let ord = airport(&m, "KORD").expect("KORD");
     let mdw = airport(&m, "KMDW").expect("KMDW");
-    assert!(bit_get(&m.points.in_area, ord.0 as usize));
-    assert!(bit_get(&m.points.in_area, mdw.0 as usize));
+    assert!(bit_get(&m.points.in_area, ord.row()));
+    assert!(bit_get(&m.points.in_area, mdw.row()));
     // KJFK is in the data but 1,000 km from ZAU: not selected, and none of its procedures.
     if let Some(jfk) = airport(&m, "KJFK") {
-        assert!(!bit_get(&m.points.in_area, jfk.0 as usize));
+        assert!(!bit_get(&m.points.in_area, jfk.row()));
         assert!(
             procs_at(&m, jfk).is_empty(),
             "no KJFK procedure may be in the ZAU model"
@@ -200,13 +205,13 @@ fn every_procedure_of_every_airport_inside_is_selected_with_its_points() {
     }
     // BENKY6 is coded: it has legs with path terminators and fixes.
     let st = find_proc(&m, "KORD", proc_kind::STAR, "BENKY6").expect("BENKY6");
-    assert!(bit_get(&m.procs.coded, st.0 as usize));
-    let routes = m.procs.routes[st.0 as usize];
+    assert!(bit_get(&m.procs.coded, st.row()));
+    let routes = m.procs.routes[st.row()];
     assert!(routes.len > 0);
     let mut legs = 0;
-    for r in routes.start.0..routes.start.0 + routes.len {
+    for r in routes.start.get()..routes.start.get() + routes.len {
         let ls = m.routes.legs[r as usize];
-        for i in ls.start.0..ls.start.0 + ls.len {
+        for i in ls.start.get()..ls.start.get() + ls.len {
             assert_ne!(m.legs.path_term[i as usize], path_term::NONE);
             legs += 1;
         }
@@ -342,7 +347,7 @@ fn an_injected_105_metre_offset_is_caught_with_its_distance() {
                 && bit_get(&clean.points.in_area, i)
         })
         .expect("a fix in both sources");
-    let k = point_key(&clean, PointIx(target as u32)).expect("key");
+    let k = point_key(&clean, PointIx::new(target as u32)).expect("key");
     let (id, region) = (k.ident.to_string(), k.region.to_string());
     let cifp_lat = clean.points.lat[target];
     let cifp_lon = clean.points.lon[target];
@@ -365,8 +370,8 @@ fn an_injected_105_metre_offset_is_caught_with_its_distance() {
     let dist = f64::from(d.dist_mm[0]) / 1000.0;
     assert!((dist - 105.0).abs() < 0.5, "distance {dist} m");
     // The CIFP position is the one taken; the NASR position is kept in the table.
-    assert_eq!(m.points.lat[row.0 as usize], cifp_lat);
-    assert_eq!(m.points.lon[row.0 as usize], cifp_lon);
+    assert_eq!(m.points.lat[row.row()], cifp_lat);
+    assert_eq!(m.points.lon[row.row()], cifp_lon);
     assert!(
         d.nasr_lat[0] > cifp_lat,
         "the NASR position is north of the CIFP one"
@@ -412,7 +417,7 @@ fn offsets_under_a_metre_are_not_disagreements_and_larger_ones_sort_by_distance(
         })
         .take(3)
         .map(|i| {
-            let k = point_key(&clean, PointIx(i as u32)).expect("key");
+            let k = point_key(&clean, PointIx::new(i as u32)).expect("key");
             (k.ident.to_string(), k.region.to_string())
         })
         .collect();
@@ -530,7 +535,7 @@ fn a_leg_naming_a_terminal_ndb_resolves_to_it_by_airport() {
     assert_eq!(unresolved_error_count(&m2) + 1, unresolved_error_count(&m));
     let ik = find_point(&m2, key("IK", "K5", "KMDW", point_kind::NDB)).expect("IK at KMDW");
     // 41 01 04.17 N, 087 54 13.57 W in 1e-7 degrees.
-    let (lat, lon) = (m2.points.lat[ik.0 as usize], m2.points.lon[ik.0 as usize]);
+    let (lat, lon) = (m2.points.lat[ik.row()], m2.points.lon[ik.row()]);
     assert!((lat - 410_178_250).abs() < 100 && (lon + 879_037_700).abs() < 100);
 }
 
@@ -593,7 +598,7 @@ fn deleting_an_airway_fix_lists_the_leg_that_names_it() {
     // The airway keeps its other legs; the model stays valid.
     validate_model(m).expect("valid");
     let aw = find_airway(m, "V156", b'C').expect("V156");
-    assert!(m.airways.legs[aw.0 as usize].len >= 1);
+    assert!(m.airways.legs[aw.row()].len >= 1);
 }
 
 // REQ: OA-ASP-004
@@ -1068,4 +1073,321 @@ fn a_diff_of_an_inconsistent_model_is_an_error_not_a_panic() {
     b.points.lat.pop();
     assert!(diff_models(&a, &b).is_err());
     assert!(diff_models(&b, &a).is_err());
+}
+
+/// The first leg index and count of an airway in the model.
+fn airway_legs(m: &Model, designator: &str) -> (usize, usize) {
+    let aw = find_airway(m, designator, b'C').expect("airway");
+    let span = m.airways.legs[aw.row()];
+    (span.start.row(), span.len as usize)
+}
+
+fn v156(src: &mut oa_airspace::source::Sources) -> &mut oa_nasr::awy::Airway {
+    src.nasr
+        .airways
+        .iter_mut()
+        .find(|a| a.base.awy_id == "V156")
+        .expect("V156 in the fixture")
+}
+
+// REQ: OA-ASP-010
+#[test]
+fn an_airway_leg_ends_at_the_next_row_only_when_that_row_continues_the_same_airway() {
+    // Untouched: every leg is joined and nothing is reported.
+    let clean_src = fixture_sources();
+    let clean = build_model(&clean_src, &params("ZAU", 92_600)).expect("build");
+    assert!(clean.info.airway_breaks.is_empty());
+    let (first, n) = airway_legs(&clean.model, "V156");
+    assert!(n >= 2);
+    assert_ne!(clean.model.airway_legs.to[first], PointIx::NONE);
+
+    // The next row starts at a different point than this leg's end: the leg has no end point.
+    let mut src = fixture_sources();
+    v156(&mut src).segments[0].to_point = Some("NOSUCH".to_string());
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let (first, _) = airway_legs(&out.model, "V156");
+    assert_eq!(out.model.airway_legs.to[first], PointIx::NONE);
+    assert_eq!(
+        out.info.airway_breaks.len(),
+        1,
+        "{:?}",
+        out.info.airway_breaks
+    );
+    assert!(out.info.airway_breaks[0].contains("V156"));
+    validate_model(&out.model).expect("valid");
+    // The report lists it.
+    assert!(report_for(&out, &src).contains("airway legs without a joined end point: 1"));
+
+    // The next row belongs to another airway (two airways adjacent in the source).
+    let mut src = fixture_sources();
+    v156(&mut src).segments[1].awy_id = "V157".to_string();
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let (first, _) = airway_legs(&out.model, "V156");
+    assert_eq!(out.model.airway_legs.to[first], PointIx::NONE);
+    // Leg 0 ends on a foreign row, and leg 1 starts on one.
+    assert_eq!(
+        out.info.airway_breaks.len(),
+        2,
+        "{:?}",
+        out.info.airway_breaks
+    );
+
+    // The next row is not further along the airway.
+    let mut src = fixture_sources();
+    let a = v156(&mut src);
+    a.segments[1].point_seq = a.segments[0].point_seq;
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let (first, _) = airway_legs(&out.model, "V156");
+    assert_eq!(out.model.airway_legs.to[first], PointIx::NONE);
+
+    // A gap flag is stored with its leg, and does not by itself break the join.
+    let mut src = fixture_sources();
+    v156(&mut src).segments[0].awy_seg_gap_flag = true;
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let (first, _) = airway_legs(&out.model, "V156");
+    assert!(bit_get(&out.model.airway_legs.gap, first));
+    assert_ne!(out.model.airway_legs.to[first], PointIx::NONE);
+    assert!(out.info.airway_breaks.is_empty());
+    // A gap-flagged leg whose end is not the next row is reported as such.
+    v156(&mut src).segments[0].to_point = Some("NOSUCH".to_string());
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    assert_eq!(out.model.airway_legs.to[first], PointIx::NONE);
+    assert!(out.info.airway_breaks[0].contains("gap flagged"));
+}
+
+/// The first boundary point of the first CIFP controlled-airspace volume with an arc.
+fn first_arc(src: &mut oa_airspace::source::Sources) -> &mut oa_arinc424::BoundaryPoint {
+    src.cifp
+        .controlled_airspace
+        .iter_mut()
+        .flat_map(|v| v.boundary.iter_mut())
+        .find(|p| {
+            matches!(
+                p.via,
+                oa_arinc424::BoundaryVia::ClockwiseArc
+                    | oa_arinc424::BoundaryVia::CounterClockwiseArc
+            )
+        })
+        .expect("an arc in the fixture")
+}
+
+fn first_circle(src: &mut oa_airspace::source::Sources) -> &mut oa_arinc424::BoundaryPoint {
+    src.cifp
+        .controlled_airspace
+        .iter_mut()
+        .flat_map(|v| v.boundary.iter_mut())
+        .find(|p| p.via == oa_arinc424::BoundaryVia::Circle)
+        .expect("a circle")
+}
+
+// REQ: OA-ASP-009
+#[test]
+fn an_airspace_circle_or_arc_without_a_usable_radius_is_an_error_naming_the_record() {
+    for radius in [None, Some(0.0), Some(f64::NAN), Some(-1.0)] {
+        let mut src = fixture_sources();
+        first_arc(&mut src).arc_distance_nm = radius;
+        match build_model(&src, &params("ZAU", 92_600)) {
+            Err(BuildError::BadRecord { location, reason }) => {
+                assert!(location.contains("CIFP line"), "{location}");
+                assert!(reason.contains("radius"), "{reason}");
+            }
+            other => panic!(
+                "radius {radius:?}: {:?}",
+                other.map(|o| o.model.points.kind.len())
+            ),
+        }
+    }
+    // A circle, which has no boundary point, without a radius.
+    let mut src = fixture_sources();
+    let p = first_arc(&mut src);
+    p.via = oa_arinc424::BoundaryVia::Circle;
+    p.position = None;
+    p.arc_distance_nm = None;
+    assert!(matches!(
+        build_model(&src, &params("ZAU", 92_600)),
+        Err(BuildError::BadRecord { .. })
+    ));
+    // The same circle with a radius builds, and its radius is stored.
+    first_circle(&mut src).arc_distance_nm = Some(5.0);
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    validate_model(&out.model).expect("valid");
+}
+
+// REQ: OA-ASP-009
+#[test]
+fn a_procedure_leg_course_outside_0_to_360_degrees_is_an_error_naming_the_record() {
+    let set = |course: Option<f64>| {
+        let mut src = fixture_sources();
+        let leg = src
+            .cifp
+            .procedures
+            .iter_mut()
+            .find(|p| p.airport_ident == "KORD")
+            .and_then(|p| p.routes.iter_mut().flat_map(|r| r.legs.iter_mut()).next())
+            .expect("a KORD procedure leg");
+        leg.course_deg = course;
+        build_model(&src, &params("ZAU", 92_600))
+    };
+    for bad in [400.0, 360.1, -0.1, f64::NAN, f64::INFINITY] {
+        match set(Some(bad)) {
+            Err(BuildError::BadRecord { location, reason }) => {
+                assert!(
+                    location.contains("KORD") && location.contains("CIFP line"),
+                    "{location}"
+                );
+                assert!(reason.contains("0 to 360"), "{reason}");
+            }
+            other => panic!(
+                "course {bad}: {:?}",
+                other.map(|o| o.model.points.kind.len())
+            ),
+        }
+    }
+    // The ends of the range are accepted and stored in hundredths of a degree.
+    for (deg, stored) in [(0.0, 0u16), (360.0, 36_000)] {
+        let out = set(Some(deg)).expect("builds");
+        assert!(out.model.legs.course_mag_cdeg.contains(&stored), "{deg}");
+        validate_model(&out.model).expect("valid");
+    }
+    assert!(set(None).is_ok());
+}
+
+// REQ: OA-ASP-011
+#[test]
+fn same_identifier_airports_pair_only_within_one_nautical_mile() {
+    let kord = |m: &Model| {
+        // Merged, the airport carries CIFP's region; unmerged, the NASR object (no region) wins.
+        let ix = airport(m, "KORD")
+            .or_else(|| find_point(m, key("KORD", "", "", point_kind::AIRPORT)))
+            .expect("KORD");
+        (
+            bit_get(&m.points.src_nasr, ix.row()),
+            bit_get(&m.points.src_cifp, ix.row()),
+        )
+    };
+    let shift = |metres: f64| {
+        let mut src = fixture_sources();
+        let ap = src
+            .cifp
+            .airports
+            .iter_mut()
+            .find(|a| a.ident == "KORD")
+            .expect("KORD in CIFP");
+        ap.position.lat += metres / 111_050.0;
+        let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+        (out, src)
+    };
+    // 500 m apart: one object from both sources, as before.
+    let (near, _) = shift(500.0);
+    assert_eq!(kord(&near.model), (true, true));
+    // 5 km apart: the same code names two places, so they are not merged and the report lists
+    // the pair as a disagreement and says what the cap is.
+    let (far, src) = shift(5_000.0);
+    assert_ne!(kord(&far.model), (true, true));
+    let listed = far
+        .info
+        .pairs_over
+        .iter()
+        .find(|(_, label)| label.contains("pairing cap") && label.contains("KORD"));
+    let (d, _) = listed.expect("the far pair is reported");
+    assert!((4_500.0..5_500.0).contains(d), "{d}");
+    let report = report_for(&far, &src);
+    assert!(report.contains("1852 m"), "{report}");
+    assert!(report.contains("pairing cap"));
+    validate_model(&far.model).expect("valid");
+}
+
+fn class_pair_model() -> Model {
+    let mut m = empty_model(Meta {
+        nasr_effective: 20_261_029,
+        cifp_cycle: 2611,
+        artcc: "ZAU".to_string(),
+        buffer_m: 0,
+        nasr_sha256: [0; 32],
+        cifp_sha256: [0; 32],
+    });
+    for text in ["", "X", "K5"] {
+        m.strings.text.push_str(text);
+        m.strings.offsets.push(m.strings.text.len() as u32);
+    }
+    // Two different objects share ident and region: a fix and a VOR.
+    let p = &mut m.points;
+    p.kind = vec![point_kind::FIX, point_kind::VOR];
+    p.lat = vec![420_000_000, 420_000_000];
+    p.lon = vec![-880_000_000, -880_000_000];
+    p.elev_ft = vec![ELEV_NONE; 2];
+    p.ident = vec![StrIx::new(1); 2];
+    p.alt_ident = vec![StrIx::NONE; 2];
+    p.region = vec![StrIx::new(2); 2];
+    p.scope = vec![StrIx::NONE; 2];
+    p.name = vec![StrIx::NONE; 2];
+    for b in [
+        &mut p.src_nasr,
+        &mut p.src_cifp,
+        &mut p.in_area,
+        &mut p.cls_b,
+        &mut p.cls_c,
+        &mut p.cls_d,
+        &mut p.cls_e,
+    ] {
+        *b = bit_zeros(2);
+    }
+    let d = &mut m.disagreements;
+    d.point = vec![PointIx::new(0), PointIx::new(1)];
+    d.nasr_lat = vec![420_000_100, 420_000_100];
+    d.nasr_lon = vec![-880_000_000, -880_000_000];
+    d.dist_mm = vec![1_500, 1_500];
+    validate_model(&m).expect("valid");
+    m
+}
+
+// REQ: OA-ASP-007
+#[test]
+fn diff_keys_tell_apart_objects_that_share_ident_and_region() {
+    let a = class_pair_model();
+    let mut b = class_pair_model();
+    b.disagreements.dist_mm[0] = 2_500; // only the fix's disagreement changes
+    let d = diff_models(&a, &b).expect("diff");
+    let changed: Vec<_> = d
+        .entries
+        .iter()
+        .filter(|e| e.class == "disagreement")
+        .collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(changed[0].key.contains("fix X/K5"), "{}", changed[0].key);
+    // Moving the VOR's instead is a different entry.
+    let mut c = class_pair_model();
+    c.disagreements.dist_mm[1] = 2_500;
+    let d = diff_models(&a, &c).expect("diff");
+    let changed: Vec<_> = d
+        .entries
+        .iter()
+        .filter(|e| e.class == "disagreement")
+        .collect();
+    assert_eq!(changed.len(), 1);
+    assert!(changed[0].key.contains("VOR X/K5"), "{}", changed[0].key);
+}
+
+// REQ: OA-ASP-007
+#[test]
+fn two_objects_with_one_diff_key_are_an_error_not_a_silent_overwrite() {
+    let mut m = fixture_build().model;
+    assert!(
+        !m.unresolved.role.is_empty(),
+        "the fixture has unresolved references"
+    );
+    // Repeat row 0 of the unresolved table: same owner, ordinal, role, name and region.
+    let u = &mut m.unresolved;
+    u.role.push(u.role[0]);
+    u.owner_kind.push(u.owner_kind[0]);
+    u.owner.push(u.owner[0]);
+    u.scope.push(u.scope[0]);
+    u.ordinal.push(u.ordinal[0]);
+    u.name.push(u.name[0]);
+    u.region.push(u.region[0]);
+    u.wanted.push(u.wanted[0]);
+    validate_model(&m).expect("the table has no uniqueness rule, so it validates");
+    let err = diff_models(&m, &m).expect_err("duplicate key");
+    assert_eq!(err.table, "unresolved");
+    assert!(err.what.contains("share the diff key"), "{}", err.what);
 }

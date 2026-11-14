@@ -3,6 +3,12 @@
 //! can be checked against an independent source are asserted. "NASR" values are from the
 //! 2026-10-29 NASR CSV subscriber files and are quoted in the comments. The same checks run
 //! over the whole file in `nasr_cross.rs` when the data is available.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 

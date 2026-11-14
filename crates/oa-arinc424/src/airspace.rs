@@ -30,6 +30,7 @@ pub enum BoundaryVia {
 
 /// One boundary record.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct BoundaryPoint {
     /// Cols 21-24.
     pub sequence: u32,
@@ -52,6 +53,7 @@ pub struct BoundaryPoint {
 
 /// A controlling agency or other continuation of a UR volume (cols 100-123 for application type `C`).
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct AirspaceContinuation {
     pub meta: Meta,
     /// Col 25: continuation record number.
@@ -64,6 +66,7 @@ pub struct AirspaceContinuation {
 
 /// One airspace volume: all records sharing designation and multiple code, in sequence order.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Airspace {
     pub meta: Meta,
     pub kind: AirspaceKind,
@@ -170,7 +173,7 @@ pub(crate) fn parse_boundary_point(r: &Rec) -> Result<BoundaryPoint, ErrorKind> 
         position,
         arc_origin,
         arc_distance_nm: r.scaled("arc distance", 71, 74, 10.0)?,
-        arc_bearing_deg: r.scaled("arc bearing", 75, 78, 10.0)?,
+        arc_bearing_deg: r.bearing("arc bearing", 75, 78)?,
     })
 }
 

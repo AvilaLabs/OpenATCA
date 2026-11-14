@@ -7,6 +7,7 @@ use crate::types::{Meta, Position};
 
 /// VHF navaid record (section D, blank subsection): VOR, VOR/DME, VORTAC, DME, TACAN, ILS/DME.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct VhfNavaid {
     pub meta: Meta,
     /// Cols 7-10 / 11-12. The airport an ILS/DME or terminal navaid belongs to; blank for
@@ -77,6 +78,7 @@ pub(crate) fn parse_vhf(r: &Rec, meta: Meta) -> Result<VhfNavaid, ErrorKind> {
 
 /// NDB record: enroute (section D, subsection B) or terminal (section P, subsection N).
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Ndb {
     pub meta: Meta,
     /// Cols 7-10 / 11-12. The airport a terminal NDB (`PN`) belongs to; blank for enroute

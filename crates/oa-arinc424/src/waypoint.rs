@@ -16,6 +16,7 @@ pub enum WaypointKind {
 
 /// A named fix.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Waypoint {
     pub meta: Meta,
     pub kind: WaypointKind,

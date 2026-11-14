@@ -1,4 +1,10 @@
 //! Workspace-wide rules that apply to this crate: no unsafe code, no outside dependencies.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::path::PathBuf;
 

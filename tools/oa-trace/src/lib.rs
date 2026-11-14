@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// A requirement as defined in the register.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Requirement {
     pub id: String,
     /// 1-based line in the register.
@@ -19,6 +20,7 @@ pub struct Requirement {
 
 /// A test that names a requirement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+// A7.2: cold struct, size guard waived
 pub struct TestRef {
     /// Path relative to the root, with `/` separators.
     pub file: String,
@@ -28,6 +30,7 @@ pub struct TestRef {
 
 /// A tag problem (malformed ID, or not followed by `#[test]`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+// A7.2: cold struct, size guard waived
 pub struct TagError {
     pub file: String,
     pub line: usize,
@@ -36,6 +39,7 @@ pub struct TagError {
 
 /// Result of scanning a workspace.
 #[derive(Debug, Default)]
+// A7.2: cold struct, size guard waived
 pub struct Report {
     /// Requirement ID -> tests naming it (sorted).
     pub covered: BTreeMap<String, Vec<TestRef>>,
@@ -109,6 +113,7 @@ pub fn parse_requirements(text: &str) -> Vec<Requirement> {
 
 /// A tag found in a source file.
 #[derive(Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Tag {
     pub line: usize,
     pub ids: Vec<String>,
@@ -150,7 +155,9 @@ pub fn parse_tags(file: &str, text: &str, errors: &mut Vec<TagError>) -> Vec<Tag
         if bad {
             continue;
         }
-        let name = lines[i + 2..]
+        let name = lines
+            .get(i + 2..)
+            .unwrap_or(&[])
             .iter()
             .take(8)
             .find_map(|l| fn_name(l))
@@ -378,6 +385,12 @@ pub fn render_markdown(rep: &Report) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

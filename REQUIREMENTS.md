@@ -16,6 +16,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   length, record count, string length) with an error naming the source, line and limit.
 - **OA-GEN-004** No parser panics on any input. Arbitrary byte input produces either a value or
   an error.
+- **OA-GEN-005** Every struct held in quantity as an array element asserts its exact size at
+  compile time, and every index type is four bytes with one shared `NONE` sentinel (RULESET A4,
+  A7).
 
 ### CSV (oa-csv)
 
@@ -72,6 +75,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   sequences including arcs and their centres and radii.
 - **OA-424-006** Parses Grid MORA (AS) records.
 - **OA-424-007** Every field position used is verified by a test against a real CIFP record.
+- **OA-424-008** A field outside its character class or range (bearings and courses over 360
+  degrees, magnetic variation over 180, section and subsection codes, fix identifiers, the
+  IFR flag, the header production flag) is an error naming the field.
 
 ### Airspace model (oa-airspace)
 
@@ -87,6 +93,27 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   byte-identical snapshot and identical SHA-256.
 - **OA-ASP-007** Diffs two snapshots, listing added, removed and changed objects with the
   changed fields.
+
+- **OA-ASP-008** The selection area's bounding filter never excludes a point that is inside the
+  area or its buffer: it is correct for areas and volumes crossing the antimeridian and includes
+  the poleward bulge of every geodesic edge. A boundary that cannot be turned into an outline is
+  an error, never read as "does not touch".
+
+- **OA-ASP-009** A source record that is incomplete or out of range in a way that would change
+  its meaning is a build error naming the record, never a stored default: an airspace circle or
+  arc without a usable radius, a procedure leg course outside 0 to 360 degrees.
+- **OA-ASP-010** An airway leg ends at the next row only when that row belongs to the same
+  airway, lies further along it and starts at the point the leg names as its end; otherwise the
+  leg has no end point and the report lists it. A gap flag is stored with its leg.
+- **OA-ASP-011** A NASR airport and a CIFP airport with the same identifier are merged only
+  within 1 NM (`MAX_AIRPORT_PAIR_M`); a farther pair is two objects, listed in the report as a
+  disagreement, and the report states the cap.
+- **OA-ASP-012** The snapshot writer enforces the limits the reader enforces (ARTCC length,
+  file size), so every file it writes can be read back; a model whose column values are out of
+  range (coordinates, altitudes, bearings, codes) fails validation.
+- **OA-ASP-013** The `oa-adapt` command line rejects unknown, duplicate and valueless flags,
+  empty values and malformed identifiers, and parses SHA-256 values as exactly 64 hexadecimal
+  digits.
 
 ### Traceability (oa-trace)
 
@@ -108,3 +135,6 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   blocks), verifying each entry's CRC-32 and uncompressed size.
 - **OA-ZIP-003** Enforces limits on entry count, uncompressed size per entry and total, and
   compression ratio, so a crafted archive cannot exhaust memory or disk.
+- **OA-ZIP-004** A ZIP64 extra field must hold exactly the values whose central-directory field
+  is 0xFFFFFFFF, once; any other combination is rejected. An archive entry cannot be built
+  outside the parser.

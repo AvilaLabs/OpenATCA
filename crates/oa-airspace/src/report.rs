@@ -8,7 +8,7 @@
 //! references (all), boundary geometry (the geodesic-versus-rhumb Unknown, UK-001),
 //! fixed-point rounding, other findings, snapshot identity.
 
-use crate::build::{BuildInfo, DISAGREE_M, MAX_PAIR_M, POSITION_DEFECT_DEG};
+use crate::build::{BuildInfo, DISAGREE_M, MAX_AIRPORT_PAIR_M, MAX_PAIR_M, POSITION_DEFECT_DEG};
 use crate::geom::{e7_to_deg, edge_separations, latlon_e7, RingSeparation};
 use crate::model::*;
 use crate::source::{ArchiveInfo, Diagnostics};
@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 /// Everything the report prints.
+// A7.2: cold struct, size guard waived
 pub struct ReportInput<'a> {
     pub model: &'a Model,
     pub info: &'a BuildInfo,
@@ -32,6 +33,7 @@ pub struct ReportInput<'a> {
 
 /// One row of the boundary-geometry section.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct BoundarySep {
     pub facility: String,
     pub stratum: u8,
@@ -56,7 +58,7 @@ pub fn boundary_separations(m: &Model) -> Vec<BoundarySep> {
         if span.len == 0 {
             continue;
         }
-        let start = span.start.0 as usize;
+        let start = span.start.row();
         let verts = m
             .vertices
             .get(start..start.saturating_add(span.len as usize))
@@ -96,6 +98,7 @@ pub fn boundary_separations(m: &Model) -> Vec<BoundarySep> {
 /// Rows, bytes per row (sum of the columns' widths; a bitset column counts as one eighth of a
 /// byte) and total bytes of one table.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct TableSize {
     pub name: &'static str,
     pub rows: usize,
@@ -184,7 +187,7 @@ fn count_where(col: &[u8], v: u8) -> usize {
 fn point_label(m: &Model, ix: PointIx) -> String {
     match point_key(m, ix) {
         Some(k) => {
-            let kind = at(&m.points.kind, ix.0).map_or("?", point_kind::name);
+            let kind = at(&m.points.kind, ix.get()).map_or("?", point_kind::name);
             let mut s = format!("{kind} {}", k.ident);
             if !k.region.is_empty() {
                 let _ = write!(s, " ({})", k.region);
@@ -255,10 +258,21 @@ fn schema_section(out: &mut String, diag: &Diagnostics) {
             );
         }
         let rejected = d.rejected.len();
-        if rejected > 0 {
-            let _ = writeln!(out, "    {rejected} rows rejected by the typed parser:");
+        if rejected > 0 || d.rejected_dropped > 0 {
+            let _ = writeln!(
+                out,
+                "    {} rows rejected by the typed parser:",
+                rejected as u64 + d.rejected_dropped
+            );
             for r in &d.rejected {
                 let _ = writeln!(out, "      {r}");
+            }
+            if d.rejected_dropped > 0 {
+                let _ = writeln!(
+                    out,
+                    "      ({} more not listed: past the per-file cap)",
+                    d.rejected_dropped
+                );
             }
         }
     }
@@ -335,7 +349,8 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     let _ = writeln!(o, "that touch the area, and MORA cells that overlap it.");
     let _ = writeln!(o, "Position rule: where NASR and CIFP both carry an object the CIFP position is taken (CIFP is the coded");
     let _ = writeln!(o, "navigation data; NASR is the registry). Every pair differing by more than {DISAGREE_M} m is listed below.");
-    let _ = writeln!(o, "Pairing: fixes by (ident, region); airports by ICAO or FAA identifier; thresholds by airport and designator;");
+    let _ = writeln!(o, "Pairing: fixes by (ident, region); airports by ICAO or FAA identifier, nearest first within {} m (1 NM; a farther", MAX_AIRPORT_PAIR_M);
+    let _ = writeln!(o, "same-identifier pair is not merged and is listed below); thresholds by airport and designator;");
     let _ = writeln!(
         o,
         "navaids by ident and class, nearest first within {} m (short NDB identifiers recur).",
@@ -474,7 +489,7 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
         let (Some(pix), Some(mm)) = (d.point.get(i), d.dist_mm.get(i)) else {
             continue;
         };
-        let ix = pix.0 as usize;
+        let ix = pix.row();
         let cifp = (
             p.lat.get(ix).copied().map(e7_to_deg),
             p.lon.get(ix).copied().map(e7_to_deg),
@@ -632,6 +647,11 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
         &info.class_mismatches,
     );
     list(&mut o, "boundary notes", &info.boundary_notes);
+    list(
+        &mut o,
+        "airway legs without a joined end point",
+        &info.airway_breaks,
+    );
     let _ = writeln!(o, "source records skipped:");
     for (what, n) in &info.skipped {
         let _ = writeln!(o, "    {n:>7}  {what}");

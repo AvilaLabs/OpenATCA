@@ -44,6 +44,10 @@ pub const DISAGREE_M: f64 = 1.0;
 /// Navaids with the same identifier and class pair up when within this distance (short NDB
 /// identifiers recur across the country, so the nearest one is the same object).
 pub const MAX_PAIR_M: f64 = 100_000.0;
+/// A NASR airport and a CIFP airport with the same identifier pair up only when within this
+/// distance, 1 nautical mile (OA-ASP-011). A farther same-identifier pair is two different
+/// places that share a code: it is not merged, and the report lists it as a disagreement.
+pub const MAX_AIRPORT_PAIR_M: f64 = NM_M;
 /// A NASR record whose own decimal and DMS positions differ by more than this (degrees, one
 /// model unit) is reported as a source defect.
 pub const POSITION_DEFECT_DEG: f64 = 1e-7;
@@ -54,6 +58,7 @@ pub const MAX_ARTCC_LEN: usize = 8;
 
 /// Selection parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct BuildParams {
     /// ARTCC identifier, e.g. `ZAU`.
     pub artcc: String,
@@ -84,6 +89,9 @@ pub enum BuildError {
     },
     /// A source value cannot be stored (out of range).
     Unstorable(String),
+    /// A source record is incomplete or out of range in a way that would change its meaning
+    /// (OA-ASP-009); `location` names the file or line and the record.
+    BadRecord { location: String, reason: String },
     /// The assembled model failed its own validation (a defect in this crate).
     Model(ModelError),
 }
@@ -107,6 +115,7 @@ impl fmt::Display for BuildError {
                 write!(f, "geodesy failed while {context}: {error:?}")
             }
             BuildError::Unstorable(m) => write!(f, "cannot store: {m}"),
+            BuildError::BadRecord { location, reason } => write!(f, "{location}: {reason}"),
             BuildError::Model(e) => write!(f, "internal error: {e}"),
         }
     }
@@ -120,6 +129,7 @@ fn geo(context: &'static str) -> impl Fn(GeoError) -> BuildError {
 
 /// A NASR record whose published decimal position disagrees with its own DMS position.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct PositionDefect {
     pub file: &'static str,
     pub line: u64,
@@ -143,6 +153,7 @@ pub struct Rounding {
 
 /// What the build learned that the model tables do not hold; the report prints it.
 #[derive(Clone, Debug, Default, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct BuildInfo {
     pub artcc_name: String,
     /// Every distinct NASR `EFF_DATE` in the consumed files; the model keeps the latest.
@@ -166,6 +177,9 @@ pub struct BuildInfo {
     pub unverified_alt_desc: usize,
     /// Boundaries that could not be used for the area test, with the reason.
     pub boundary_notes: Vec<String>,
+    /// Airway legs whose end point is not the next row of the same airway (OA-ASP-010): the leg
+    /// is kept with no end point, and the reason is listed here.
+    pub airway_breaks: Vec<String>,
     /// Candidate counts: (label, count).
     pub candidates: Vec<(String, usize)>,
     /// NASR/CIFP pairs compared over the whole cycle (not only the selection).
@@ -180,6 +194,7 @@ pub struct BuildInfo {
 
 /// The model and what the report needs beside it.
 #[derive(Debug)]
+// A7.2: cold struct, size guard waived
 pub struct BuildOutput {
     pub model: Model,
     pub info: BuildInfo,
@@ -190,6 +205,7 @@ pub struct BuildOutput {
 
 /// A NASR record's own decimal/DMS disagreement.
 #[derive(Clone, Debug)]
+// A7.2: cold struct, size guard waived
 struct Defect {
     file: &'static str,
     line: u64,
@@ -198,6 +214,7 @@ struct Defect {
 
 /// A point object before selection: both sources' views merged.
 #[derive(Clone, Debug)]
+// A7.2: cold struct, size guard waived
 struct Cand {
     kind: u8,
     ident: String,
@@ -250,6 +267,7 @@ fn new_cand(kind: u8, ident: &str, pos: (f64, f64)) -> Cand {
 }
 
 /// The candidates and the identity index over them.
+// A7.2: cold struct, size guard waived
 struct Registry {
     cands: Vec<Cand>,
     by_key: HashMap<Key, usize>,
@@ -356,6 +374,7 @@ fn cifp_vhf_kind(class: [char; 5]) -> u8 {
 }
 
 /// Everything the later steps look references up in.
+// A7.2: cold struct, size guard waived
 struct Maps {
     /// (ident, region) to the fix-class candidate.
     fix: HashMap<(String, String), usize>,
@@ -406,6 +425,7 @@ fn pair_navaids(
     info: &mut BuildInfo,
 ) {
     // CIFP navaids, with the position taken and the kind derived from the class.
+    // A7.2: cold struct, size guard waived
     struct CNav {
         kind: u8,
         ident: String,
@@ -491,7 +511,9 @@ fn pair_navaids(
         cand.elev = n.elev.and_then(round_i32);
         match best {
             Some((_, ci)) => {
-                paired[ci] = true;
+                if let Some(p) = paired.get_mut(ci) {
+                    *p = true;
+                }
                 if let Some(c) = cnavs.get(ci) {
                     cand.cifp = true;
                     cand.cifp_pos = Some(c.pos);
@@ -605,6 +627,9 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
     let mut cifp_paired: Vec<bool> = vec![false; src.cifp.airports.len()];
     for (ci, c) in src.cifp.airports.iter().enumerate() {
         let cpos = (c.position.lat, c.position.lon);
+        // The nearest same-identifier airport beyond the pairing cap, if no list has one in it.
+        let mut too_far: Option<(f64, usize)> = None;
+        let mut paired_here = false;
         let lists = [
             nasr_by_icao.get(c.ident.as_str()),
             nasr_by_faa.get(c.ident.as_str()),
@@ -620,8 +645,13 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
                     continue;
                 };
                 let d = pos_distance(ell, nasr_pos(&n.position), cpos);
-                if best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, ni));
+                // A distance that cannot be computed (NaN) is not within the cap.
+                if d <= MAX_AIRPORT_PAIR_M {
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, ni));
+                    }
+                } else if too_far.is_none_or(|(bd, _)| d.is_nan() || d < bd) {
+                    too_far = Some((d, ni));
                 }
             }
             if let Some((_, ni)) = best {
@@ -631,8 +661,30 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
                 if let Some(p) = cifp_paired.get_mut(ci) {
                     *p = true;
                 }
+                paired_here = true;
                 break;
             }
+        }
+        if let (false, Some((d, ni))) = (paired_here, too_far) {
+            let d = if d.is_nan() { f64::INFINITY } else { d };
+            info.pairs_compared += 1;
+            info.pairs_over_limit += 1;
+            if d.is_finite() {
+                info.pairs_max_m = info.pairs_max_m.max(d);
+            }
+            info.pairs_over.push((
+                d,
+                format!(
+                    "airport {} ({}): NASR {} is beyond the {} m pairing cap, not paired",
+                    c.ident,
+                    c.icao_region,
+                    src.nasr
+                        .airports
+                        .get(ni)
+                        .map_or("?", |n| n.arpt_id.as_str()),
+                    MAX_AIRPORT_PAIR_M
+                ),
+            ));
         }
     }
     let airport_cand = |reg: &mut Registry,
@@ -915,6 +967,7 @@ enum Res {
 }
 
 /// What a NASR reference tells us about the point it names.
+// A7.2: cold struct, size guard waived
 struct NasrRef<'a> {
     name: &'a str,
     ptype: &'a str,
@@ -1045,6 +1098,7 @@ fn resolve_cifp(maps: &Maps, f: &c424::FixRef, airport: Option<usize>) -> Option
 // ---------------------------------------------------------------------------------------------
 // Output structures (before assembly)
 
+// A7.2: cold struct, size guard waived
 struct UnresolvedOut {
     role: u8,
     owner_kind: u8,
@@ -1056,6 +1110,7 @@ struct UnresolvedOut {
     wanted: String,
 }
 
+// A7.2: cold struct, size guard waived
 struct LegOut {
     fix: Option<usize>,
     center: Option<usize>,
@@ -1070,12 +1125,14 @@ struct LegOut {
     speed: u16,
 }
 
+// A7.2: cold struct, size guard waived
 struct RouteOut {
     route_type: u8,
     transition: String,
     legs: Vec<LegOut>,
 }
 
+// A7.2: cold struct, size guard waived
 struct ProcOut {
     airport: usize,
     kind: u8,
@@ -1087,6 +1144,7 @@ struct ProcOut {
     routes: Vec<RouteOut>,
 }
 
+// A7.2: cold struct, size guard waived
 struct AirwayOut<'a> {
     src: &'a nasr::awy::Airway,
     designator: String,
@@ -1095,6 +1153,7 @@ struct AirwayOut<'a> {
     legs: Vec<(Option<usize>, Option<usize>, usize)>,
 }
 
+// A7.2: cold struct, size guard waived
 struct SegOut {
     via: u8,
     lat: i32,
@@ -1105,6 +1164,7 @@ struct SegOut {
     bearing_cdeg: u16,
 }
 
+// A7.2: cold struct, size guard waived
 struct BoundaryOut {
     source: u8,
     stratum: u8,
@@ -1202,7 +1262,23 @@ fn cifp_leg(
     scope: &str,
     unresolved: &mut Vec<UnresolvedOut>,
     info: &mut BuildInfo,
-) -> LegOut {
+) -> Result<LegOut, BuildError> {
+    // A course is a bearing in 0 to 360 degrees (OA-ASP-009); the model stores it in 1/100
+    // degree. 360 is allowed: ARINC 424 codes north as 3600.
+    let course = match leg.course_deg {
+        None => NONE_U16,
+        Some(d) => (d.is_finite() && (0.0..=360.0).contains(&d))
+            .then(|| round_u32(d * 100.0))
+            .flatten()
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or_else(|| BuildError::BadRecord {
+                location: format!(
+                    "CIFP line {} procedure {} at {} (leg {})",
+                    leg.meta.line, owner, scope, ordinal
+                ),
+                reason: format!("course {d} degrees is outside 0 to 360"),
+            })?,
+    };
     let mut resolve = |f: &Option<c424::FixRef>, role: u8| -> Option<usize> {
         let f = f.as_ref()?;
         let r = resolve_cifp(maps, f, Some(airport));
@@ -1244,7 +1320,7 @@ fn cifp_leg(
             alt_desc::UNVERIFIED
         }
     };
-    LegOut {
+    Ok(LegOut {
         fix,
         center,
         path_term: path_term_code(leg.path_terminator),
@@ -1254,11 +1330,7 @@ fn cifp_leg(
             Some(c424::TurnDirection::Right) => turn::RIGHT,
             Some(c424::TurnDirection::Either) => turn::EITHER,
         },
-        course: leg
-            .course_deg
-            .and_then(|d| round_u32(d * 100.0))
-            .and_then(|v| u16::try_from(v).ok())
-            .unwrap_or(NONE_U16),
+        course,
         dist_or_time,
         is_time,
         alt_desc,
@@ -1269,7 +1341,7 @@ fn cifp_leg(
             .and_then(|v| u16::try_from(v).ok())
             .filter(|&v| v != NONE_U16)
             .unwrap_or(NONE_U16),
-    }
+    })
 }
 
 fn nasr_proc_ident(
@@ -1591,7 +1663,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                     &p.airport_ident,
                     &mut unresolved,
                     &mut info,
-                );
+                )?;
                 referenced.extend(lo.fix.iter().chain(lo.center.iter()));
                 legs.push(lo);
                 ordinal += 1;
@@ -1768,6 +1840,19 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         }) {
             continue;
         }
+        let joined = |i: usize| match (a.segments.get(i), a.segments.get(i + 1)) {
+            (Some(s), Some(n)) => {
+                n.awy_id == a.base.awy_id
+                    && n.awy_location == a.base.awy_location
+                    && s.awy_id == a.base.awy_id
+                    && s.awy_location == a.base.awy_location
+                    && n.point_seq > s.point_seq
+                    && s.to_point
+                        .as_deref()
+                        .is_some_and(|t| t.trim().eq_ignore_ascii_case(n.from_point.trim()))
+            }
+            _ => false,
+        };
         let mut legs = Vec::new();
         for (i, s) in a.segments.iter().enumerate() {
             let has_next = s.to_point.is_some();
@@ -1795,7 +1880,25 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                 });
             }
             if has_next {
-                legs.push((found(i), found(i + 1), i));
+                // The leg ends at the next row only when that row is the point this row names as
+                // its end, on the same airway, further along it (OA-ASP-010). A row after a
+                // break in the airway is not the end of this leg. A segment flagged as a gap is
+                // still a leg (the flag is stored with it); the flag does not move its end.
+                let end = if joined(i) {
+                    found(i + 1)
+                } else {
+                    info.airway_breaks.push(format!(
+                        "airway {} {} seq {} (line {}): end point {:?} is not the next row of the airway{}",
+                        a.base.awy_id,
+                        a.base.awy_location,
+                        s.point_seq,
+                        s.line,
+                        s.to_point.as_deref().unwrap_or(""),
+                        if s.awy_seg_gap_flag { " (gap flagged)" } else { "" },
+                    ));
+                    None
+                };
+                legs.push((found(i), end, i));
             }
             referenced.extend(found(i));
         }
@@ -1897,10 +2000,23 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                     c424::BoundaryVia::CounterClockwiseArc => via::ARC_CCW,
                     c424::BoundaryVia::ClockwiseArc => via::ARC_CW,
                 };
-                let radius = p
-                    .arc_distance_nm
-                    .and_then(|nm| round_u32(nm * NM_M))
-                    .unwrap_or(0);
+                let radius = p.arc_distance_nm.and_then(|nm| round_u32(nm * NM_M));
+                // A circle or an arc without a radius has no shape: refuse it rather than
+                // store a radius of zero (OA-ASP-009).
+                let radius = match radius {
+                    Some(r) if r > 0 => r,
+                    _ if matches!(via, via::GEODESIC | via::RHUMB) => radius.unwrap_or(0),
+                    _ => {
+                        return Err(BuildError::BadRecord {
+                            location: format!(
+                                "CIFP line {} airspace {} {} (boundary sequence {})",
+                                v.meta.line, v.designation, v.multiple_code, p.sequence
+                            ),
+                            reason: "circle or arc has a missing, unusable or zero radius"
+                                .to_string(),
+                        })
+                    }
+                };
                 ins.push(SegIn {
                     via,
                     pos: (la != POS_NONE).then(|| latlon_e7(la, lo).ok()).flatten(),
@@ -2082,7 +2198,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
     }
     let point = |ci: Option<usize>| -> PointIx {
         ci.and_then(|c| ix_of.get(c).copied())
-            .map_or(PointIx::NONE, PointIx)
+            .map_or(PointIx::NONE, PointIx::new)
     };
 
     let mut strings = Interner::default();
@@ -2184,7 +2300,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
     }
     disagreements.sort_unstable();
     for (p, (la, lo), mm) in disagreements {
-        model.disagreements.point.push(PointIx(p));
+        model.disagreements.point.push(PointIx::new(p));
         model.disagreements.nasr_lat.push(la);
         model.disagreements.nasr_lon.push(lo);
         model.disagreements.dist_mm.push(mm);
@@ -2215,12 +2331,12 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             b.floor_ft.push(bo.floor);
             b.ceiling_ft.push(bo.ceiling);
             b.vertices.push(Span {
-                start: VertexIx(model.vertices.len() as u32),
+                start: VertexIx::new(model.vertices.len() as u32),
                 len: bo.verts.len() as u32,
             });
             model.vertices.extend_from_slice(&bo.verts);
             b.segs.push(Span {
-                start: SegIx(model.segments.via.len() as u32),
+                start: SegIx::new(model.segments.via.len() as u32),
                 len: bo.segs.len() as u32,
             });
             for s in &bo.segs {
@@ -2251,7 +2367,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             model.airways.designator.push(strings.intern(&a.designator));
             model.airways.location.push(a.location);
             model.airways.legs.push(Span {
-                start: AirwayLegIx(leg_row as u32),
+                start: AirwayLegIx::new(leg_row as u32),
                 len: a.legs.len() as u32,
             });
             for (from, to, si) in &a.legs {
@@ -2314,7 +2430,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             pr.ident.push(strings.intern(&p.ident));
             pr.name.push(strings.intern_opt(p.name.as_deref()));
             pr.routes.push(Span {
-                start: RouteIx(model.routes.route_type.len() as u32),
+                start: RouteIx::new(model.routes.route_type.len() as u32),
                 len: p.routes.len() as u32,
             });
             bit_set(&mut pr.src_nasr, row, p.nasr);
@@ -2329,7 +2445,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                     strings.intern_opt(Some(r.transition.as_str()).filter(|t| !t.is_empty())),
                 );
                 model.routes.legs.push(Span {
-                    start: LegIx(model.legs.fix.len() as u32),
+                    start: LegIx::new(model.legs.fix.len() as u32),
                     len: r.legs.len() as u32,
                 });
                 for l in &r.legs {
@@ -2403,6 +2519,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
 
 /// Builds the string table: identical strings are stored once, in first-use order.
 #[derive(Default)]
+// A7.2: cold struct, size guard waived
 struct Interner {
     table: StrTable,
     map: HashMap<String, u32>,
@@ -2411,7 +2528,7 @@ struct Interner {
 impl Interner {
     fn intern(&mut self, s: &str) -> StrIx {
         if let Some(&i) = self.map.get(s) {
-            return StrIx(i);
+            return StrIx::new(i);
         }
         let i = u32::try_from(str_count(&self.table)).unwrap_or(NONE_U32);
         self.table.text.push_str(s);
@@ -2419,7 +2536,7 @@ impl Interner {
             .offsets
             .push(u32::try_from(self.table.text.len()).unwrap_or(NONE_U32));
         self.map.insert(s.to_string(), i);
-        StrIx(i)
+        StrIx::new(i)
     }
 
     fn intern_opt(&mut self, s: Option<&str>) -> StrIx {

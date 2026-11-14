@@ -1,5 +1,11 @@
 //! Shared helpers for the integration tests.
 #![allow(dead_code)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_arinc424::{parse_bytes, parse_record, Cifp, Position, Record, RECORD_LEN};
 

@@ -1,6 +1,12 @@
 //! Shared test support: the committed fixture files, a stored-ZIP writer, and builders that turn
 //! the fixtures into the two input archives and a model. Not every test file uses every item.
 #![allow(dead_code)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_airspace::build::{build_model, BuildOutput, BuildParams};
 use oa_airspace::load::load_bytes;

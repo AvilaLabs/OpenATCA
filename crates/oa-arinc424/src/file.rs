@@ -23,6 +23,7 @@ use crate::{
 
 /// A parsed CIFP file.
 #[derive(Debug, Clone, Default)]
+// A7.2: cold struct, size guard waived
 pub struct Cifp {
     pub header: Option<Header>,
     pub airports: Vec<Airport>,
@@ -162,6 +163,7 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
+// A7.2: cold struct, size guard waived
 struct Builder<'s> {
     source: &'s str,
     out: Cifp,

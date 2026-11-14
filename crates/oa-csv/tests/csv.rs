@@ -1,4 +1,10 @@
 //! Tests for oa-csv.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_csv::{
     CsvError, CsvErrorKind, Limits, Reader, MAX_FIELDS, MAX_FIELD_BYTES, MAX_RECORDS,
@@ -116,8 +122,8 @@ fn rfc_violations_are_errors() {
 fn fields_are_read_by_header_name() {
     let mut r = reader(b"FIX_ID,ICAO\nABC,K5\n").expect("header");
     let rec = r.next_record().expect("ok").expect("record");
-    assert_eq!(rec.get("ICAO").expect("col"), "K5");
-    assert_eq!(rec.get("FIX_ID").expect("col"), "ABC");
+    assert_eq!(rec.get(r.header(), "ICAO").expect("col"), "K5");
+    assert_eq!(rec.get(r.header(), "FIX_ID").expect("col"), "ABC");
     assert!(r.header().contains("ICAO"));
     assert!(r.next_record().expect("ok").is_none());
 }
@@ -127,7 +133,7 @@ fn fields_are_read_by_header_name() {
 fn missing_column_is_an_error_naming_it() {
     let mut r = reader(b"A,B\n1,2\n").expect("header");
     let rec = r.next_record().expect("ok").expect("record");
-    let e = rec.get("NOPE").expect_err("missing column");
+    let e = rec.get(r.header(), "NOPE").expect_err("missing column");
     assert_eq!(e.kind, CsvErrorKind::MissingColumn("NOPE".to_string()));
     assert!(e.to_string().contains("NOPE"));
     assert!(r.header().index_of("NOPE").is_err());
@@ -400,10 +406,10 @@ fn fuzz_random_bytes_never_panic() {
             if let Ok(mut r) = Reader::with_limits("fuzz", Cursor::new(bytes.clone()), l) {
                 let mut n = 0;
                 while let Ok(Some(rec)) = r.next_record() {
-                    for name in rec.header().names() {
-                        let _ = rec.get(name);
+                    for name in r.header().names() {
+                        let _ = rec.get(r.header(), name);
                     }
-                    let _ = rec.get("missing");
+                    let _ = rec.get(r.header(), "missing");
                     n += 1;
                     assert!(n <= 1000);
                 }

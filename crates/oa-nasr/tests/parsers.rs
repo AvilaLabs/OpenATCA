@@ -1,4 +1,10 @@
 //! Unit tests over small excerpts of the real FAA files (tests/fixtures) and inline CSV.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_nasr::schema::{
     self, parse_schemas, validate, ColumnSpec, DataType, FileSchema, ViolationKind,
@@ -1052,4 +1058,27 @@ fn fuzz_random_bytes_never_panic() {
             .collect();
         run_all_parsers(&b);
     }
+}
+
+// REQ: OA-GEN-003
+#[test]
+fn rejected_rows_past_the_cap_are_counted_not_stored() {
+    let header = "\"EFF_DATE\",\"SITE_NO\",\"SITE_TYPE_CODE\",\"STATE_CODE\",\"ARPT_ID\",\"CITY\",\"COUNTRY_CODE\",\"CLASS_B_AIRSPACE\",\"CLASS_C_AIRSPACE\",\"CLASS_D_AIRSPACE\",\"CLASS_E_AIRSPACE\",\"AIRSPACE_HRS\",\"REMARK\"\r\n";
+    // A flag other than Y or empty rejects the row.
+    let bad = "\"d\",\"1\",\"A\",\"IL\",\"XYZ\",\"C\",\"US\",\"N\",\"\",\"\",\"\",\"\",\"\"\r\n";
+    let total = oa_nasr::MAX_REJECTED_PER_FILE + 50;
+    let mut text = String::from(header);
+    for _ in 0..total {
+        text.push_str(bad);
+    }
+    let p = cls::parse_class_airspace("c.csv", txt(&text)).unwrap_or_else(|e| panic!("{e}"));
+    assert!(p.records.is_empty());
+    assert_eq!(p.rejected.len(), oa_nasr::MAX_REJECTED_PER_FILE);
+    assert_eq!(p.rejected_dropped, 50);
+    // The kept rows are the first ones, in file order.
+    assert_eq!(p.rejected[0].line, 2);
+    // A file under the cap drops nothing.
+    let small = cls::parse_class_airspace("c.csv", txt(&format!("{header}{bad}{bad}")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((small.rejected.len(), small.rejected_dropped), (2, 0));
 }

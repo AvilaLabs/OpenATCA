@@ -8,7 +8,9 @@
 //! listed, but [`Archive::extract`] refuses them ([`ZipError::UnsafePath`]).
 //!
 //! `Archive` is a subsystem under D5 (it owns the parsed directory), so it keeps methods;
-//! [`Entry`] and [`Limits`] are plain records (A1). Cold, offline code: A7.2 applies.
+//! [`Limits`] is a plain record (A1). [`Entry`] is a validated value (A1.1): its fields are
+//! private, only the parser builds one, and callers read it through plain accessors, so an
+//! entry that did not pass the directory checks cannot exist. Cold, offline code: A7.2 applies.
 
 mod crc32;
 mod inflate;
@@ -45,6 +47,7 @@ pub const MAX_EOCD_SEARCH: usize = 22 + 65_535;
 
 /// The enforced limits, gathered so tests (and callers with tighter needs) can lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Limits {
     pub max_entries: usize,
     pub max_entry_bytes: u64,
@@ -178,19 +181,60 @@ impl From<InflateError> for ZipError {
     }
 }
 
-/// One central-directory record. Plain data (A1).
+/// One central-directory record that passed the directory checks (A1.1: private fields, a
+/// parser-only constructor, plain accessors). A7.2: cold struct, size guard waived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
+    name: String,
+    method: u16,
+    flags: u16,
+    crc32: u32,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    local_offset: u64,
+    zip64: bool,
+}
+
+impl Entry {
     /// Name as stored (invalid UTF-8 is replaced, not rejected).
-    pub name: String,
-    pub method: u16,
-    pub flags: u16,
-    pub crc32: u32,
-    pub compressed_size: u64,
-    pub uncompressed_size: u64,
-    pub local_offset: u64,
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Storage method ([`METHOD_STORED`] or [`METHOD_DEFLATE`]).
+    pub fn method(&self) -> u16 {
+        self.method
+    }
+
+    /// General purpose bit flags as stored.
+    pub fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// CRC-32 of the uncompressed data, as declared.
+    pub fn crc32(&self) -> u32 {
+        self.crc32
+    }
+
+    /// Compressed size in bytes, as declared.
+    pub fn compressed_size(&self) -> u64 {
+        self.compressed_size
+    }
+
+    /// Uncompressed size in bytes, as declared; within the archive's limits.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_size
+    }
+
+    /// Offset of the entry's local header.
+    pub fn local_offset(&self) -> u64 {
+        self.local_offset
+    }
+
     /// Sizes or offset came from a ZIP64 extra field.
-    pub zip64: bool,
+    pub fn is_zip64(&self) -> bool {
+        self.zip64
+    }
 }
 
 const SIG_LOCAL: u32 = 0x0403_4b50;
@@ -243,14 +287,14 @@ pub fn is_safe_path(name: &str) -> bool {
     if name.starts_with('/') || name.starts_with('\\') {
         return false;
     }
-    let b = name.as_bytes();
-    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+    if matches!(name.as_bytes().get(..2), Some([c, b':']) if c.is_ascii_alphabetic()) {
         return false;
     }
     !name.split(['/', '\\']).any(|c| c == "..")
 }
 
 /// Fields from the end-of-central-directory record(s), after ZIP64 resolution.
+// A7.2: cold struct, size guard waived
 struct Eocd {
     entries: u64,
     cd_size: u64,
@@ -339,6 +383,7 @@ fn read_eocd(d: &[u8], pos: usize) -> Result<Option<Eocd>, ZipError> {
 
 /// An opened archive: the bytes plus the parsed central directory.
 #[derive(Debug)]
+// A7.2: cold struct, size guard waived
 pub struct Archive<'a> {
     data: &'a [u8],
     entries: Vec<Entry>,
@@ -612,6 +657,7 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
     let want_disk = disk == 0xFFFF;
     // Walk extra fields; id 0x0001 carries the ZIP64 values for whichever fields were 0xFFFF...
     let mut x = 0usize;
+    let mut seen_zip64 = false;
     while x < extra.len() {
         let id = u16_at(extra, x, "extra field")?;
         let sz = usize::from(u16_at(extra, x + 2, "extra field")?);
@@ -619,7 +665,22 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
             .get(x + 4..x + 4 + sz)
             .ok_or(ZipError::Truncated("extra field"))?;
         if id == 0x0001 {
+            if seen_zip64 {
+                return Err(ZipError::Zip64("more than one zip64 extra field"));
+            }
+            seen_zip64 = true;
             e.zip64 = true;
+            // The extra field holds exactly the values whose 32-bit field is 0xFFFFFFFF, in
+            // this order (APPNOTE 4.5.3): a different length means the flag and the field
+            // disagree.
+            let want = 8
+                * (usize::from(want_usize) + usize::from(want_csize) + usize::from(want_off))
+                + 4 * usize::from(want_disk);
+            if body.len() != want {
+                return Err(ZipError::Zip64(
+                    "zip64 extra field does not match the 0xFFFFFFFF fields",
+                ));
+            }
             let mut q = 0usize;
             let next_u64 = |q: &mut usize| -> Result<u64, ZipError> {
                 let v = u64_at(body, *q, "zip64 extra")?;
@@ -643,6 +704,13 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
     }
     if (want_usize || want_csize || want_off || want_disk) && !e.zip64 {
         return Err(ZipError::Zip64("0xFFFFFFFF field without zip64 extra"));
+    }
+    // The converse: a zip64 extra field that no 0xFFFFFFFF field asks for is inconsistent
+    // (rejected above for any body that is not empty; an empty one is rejected here).
+    if e.zip64 && !(want_usize || want_csize || want_off || want_disk) {
+        return Err(ZipError::Zip64(
+            "zip64 extra field without a 0xFFFFFFFF field",
+        ));
     }
     if disk_wide != 0 {
         return Err(ZipError::MultiDisk);

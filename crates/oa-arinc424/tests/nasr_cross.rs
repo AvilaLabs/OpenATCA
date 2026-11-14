@@ -4,6 +4,12 @@
 //!
 //! This is OA-424-007 evidence at scale: where both sources carry a point, the DMS-derived
 //! position must agree with the FAA's own decimal value to within rounding.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::collections::HashMap;
 use std::fs::File;

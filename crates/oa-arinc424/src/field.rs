@@ -4,6 +4,7 @@ use crate::error::ErrorKind;
 use crate::types::{parse_cycle, Altitude, Meta, Position};
 
 /// One 132-character ASCII record. Columns are 1-based and inclusive, as in the layouts.
+// A7.2: cold struct, size guard waived
 pub(crate) struct Rec<'a> {
     s: &'a str,
 }
@@ -98,6 +99,57 @@ impl<'a> Rec<'a> {
         }
     }
 
+    /// A bearing or course in tenths of a degree (`0000` to `3600`): digits only, 0 to 360
+    /// degrees; blank gives `None`. A larger value is a field that is not a bearing.
+    pub fn bearing(
+        &self,
+        field: &'static str,
+        a: usize,
+        b: usize,
+    ) -> Result<Option<f64>, ErrorKind> {
+        match self.uint(field, a, b)? {
+            None => Ok(None),
+            Some(t) if t <= 3600 => Ok(Some(f64::from(t) / 10.0)),
+            Some(_) => Err(self.bad(field, a, b, "expected 0 to 360 degrees")),
+        }
+    }
+
+    /// An identifier: letters and digits only (upper case, as the FAA codes them); blank gives
+    /// the empty string. Anything else is a field in the wrong place or a damaged record.
+    pub fn ident(&self, field: &'static str, a: usize, b: usize) -> Result<String, ErrorKind> {
+        let t = self.trim(a, b);
+        if t.bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        {
+            Ok(t.to_string())
+        } else {
+            Err(self.bad(field, a, b, "expected upper-case letters and digits"))
+        }
+    }
+
+    /// The section and subsection codes of a referenced record: a letter, and a letter, digit
+    /// or blank.
+    pub fn section_codes(
+        &self,
+        field: &'static str,
+        sec_col: usize,
+        sub_col: usize,
+    ) -> Result<(char, char), ErrorKind> {
+        let (sec, sub) = (self.ch(sec_col), self.ch(sub_col));
+        if !sec.is_ascii_uppercase() {
+            return Err(self.bad(field, sec_col, sec_col, "section code must be a letter"));
+        }
+        if !(sub.is_ascii_uppercase() || sub.is_ascii_digit() || sub == ' ') {
+            return Err(self.bad(
+                field,
+                sub_col,
+                sub_col,
+                "subsection code must be a letter, digit or blank",
+            ));
+        }
+        Ok((sec, sub))
+    }
+
     /// Digits scaled by `1/div`; blank gives `None`.
     pub fn scaled(
         &self,
@@ -129,6 +181,9 @@ impl<'a> Rec<'a> {
         }
         let digits = self.raw(a + 1, b);
         let v = parse_digits(digits).ok_or_else(|| self.bad(field, a, b, "expected digits"))?;
+        if v > 1800 {
+            return Err(self.bad(field, a, b, "expected at most 180 degrees"));
+        }
         match self.ch(a) {
             'E' => Ok(Some(f64::from(v) / 10.0)),
             'W' => Ok(Some(-(f64::from(v) / 10.0))),

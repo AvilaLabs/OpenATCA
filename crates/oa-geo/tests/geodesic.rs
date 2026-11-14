@@ -2,6 +2,12 @@
 //!
 //! `fixtures/geodtest_sample.dat` is a 31-line excerpt that always runs. If the environment
 //! variable OPENATCA_GEODTEST names `GeodTest-short.dat` (10,000 lines) the whole set runs too.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_geo::{wgs84, Ellipsoid, LatLon};
 

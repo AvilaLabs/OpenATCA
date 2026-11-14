@@ -64,6 +64,7 @@ impl std::error::Error for InflateError {}
 
 /// LSB-first bit reader. Past the end of input it supplies virtual zero bits and reports
 /// `Truncated` as soon as any of them is consumed.
+// A7.2: cold struct, size guard waived
 struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
@@ -130,6 +131,7 @@ impl<'a> Bits<'a> {
 }
 
 /// Canonical Huffman decoder: a fast single-lookup table plus the counts/symbols form.
+// A7.2: cold struct, size guard waived
 struct Huffman {
     count: [u16; MAX_CODE_LEN + 1],
     symbol: [u16; MAX_LIT_SYMBOLS],
@@ -138,6 +140,10 @@ struct Huffman {
 }
 
 impl Huffman {
+    // E3 / H2: `count`, `offs` and `next_code` have MAX_CODE_LEN + 2 entries and are indexed by a
+    // code length that is 1..=MAX_CODE_LEN (lengths above it were rejected in the first loop) or
+    // by 0; `fast` is indexed below FAST_SIZE by the loop condition.
+    #[allow(clippy::indexing_slicing)]
     fn build(lengths: &[u8]) -> Result<Huffman, InflateError> {
         let mut h = Huffman {
             count: [0; MAX_CODE_LEN + 1],
@@ -209,6 +215,9 @@ impl Huffman {
         Ok(h)
     }
 
+    // E3 / H2: the `fast` index is masked to FAST_SIZE - 1 and `count` is indexed by a length in
+    // 1..=MAX_CODE_LEN, both inside their arrays.
+    #[allow(clippy::indexing_slicing)]
     fn decode(&self, bits: &mut Bits) -> Result<u16, InflateError> {
         bits.refill();
         let e = self.fast[(bits.buf as usize) & (FAST_SIZE - 1)];
@@ -435,6 +444,12 @@ pub fn inflate(input: &[u8], size_hint: usize, max_output: usize) -> Result<Vec<
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

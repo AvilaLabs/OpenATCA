@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufRead};
-use std::rc::Rc;
 
 /// Largest accepted record, in raw bytes, counting quotes, delimiters and embedded newlines.
 /// The longest real NASR record is a few kilobytes; 1 MiB leaves a wide margin while bounding
@@ -40,6 +39,7 @@ pub const MAX_RECORDS: usize = 5_000_000;
 
 /// The size limits applied by a [`Reader`]. `Limits::default()` uses the named constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Limits {
     /// See [`MAX_RECORD_BYTES`].
     pub max_record_bytes: usize,
@@ -106,6 +106,7 @@ pub enum CsvErrorKind {
 
 /// An error with the source name and the 1-based physical line of the offending record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct CsvError {
     /// Source name given to the reader (usually a file name).
     pub source: String,
@@ -149,6 +150,7 @@ impl std::error::Error for CsvError {}
 
 /// The header row: column names and a name-to-index lookup.
 #[derive(Debug)]
+// A7.2: cold struct, size guard waived
 pub struct Header {
     source: String,
     line: u64,
@@ -194,8 +196,8 @@ impl Header {
 
 /// One data record. Fields are read by column name.
 #[derive(Debug, Clone)]
+// A7.2: cold struct, size guard waived
 pub struct Record {
-    header: Rc<Header>,
     line: u64,
     data: String,
     ends: Vec<usize>,
@@ -205,11 +207,6 @@ impl Record {
     /// 1-based physical line on which this record starts.
     pub fn line(&self) -> u64 {
         self.line
-    }
-
-    /// The header this record was read under.
-    pub fn header(&self) -> &Header {
-        &self.header
     }
 
     /// Number of fields (equal to the header's).
@@ -232,14 +229,16 @@ impl Record {
         self.data.get(start..end)
     }
 
-    /// The field in the named column. A missing column is an error naming it.
-    pub fn get(&self, name: &str) -> Result<&str, CsvError> {
-        let i = self.header.index_of(name)?;
+    /// The field in the named column of `header` (the reader's, see [`Reader::header`]). A
+    /// missing column is an error naming it. The record holds no reference to its header: a
+    /// record is plain data (A1, A4), so the caller passes the header it read it under.
+    pub fn get(&self, header: &Header, name: &str) -> Result<&str, CsvError> {
+        let i = header.index_of(name)?;
         self.field(i).ok_or_else(|| CsvError {
-            source: self.header.source.clone(),
+            source: header.source.clone(),
             line: self.line,
             kind: CsvErrorKind::FieldCountMismatch {
-                expected: self.header.len(),
+                expected: header.len(),
                 found: self.ends.len(),
             },
         })
@@ -261,16 +260,18 @@ enum State {
 }
 
 /// A streaming CSV reader over any `BufRead`.
+// A7.2: cold struct, size guard waived
 pub struct Reader<R: BufRead> {
     reader: R,
     source: String,
     limits: Limits,
-    header: Rc<Header>,
+    header: Header,
     next_line: u64,
     records_read: usize,
     failed: bool,
 }
 
+// A7.2: cold struct, size guard waived
 struct Raw {
     line: u64,
     data: Vec<u8>,
@@ -320,12 +321,12 @@ impl<R: BufRead> Reader<R> {
             }
             names.push(name);
         }
-        let header = Rc::new(Header {
+        let header = Header {
             source: source.clone(),
             line,
             names,
             index,
-        });
+        };
         Ok(Reader {
             reader,
             source,
@@ -393,12 +394,7 @@ impl<R: BufRead> Reader<R> {
             });
         }
         self.records_read += 1;
-        Ok(Some(Record {
-            header: Rc::clone(&self.header),
-            line,
-            data,
-            ends,
-        }))
+        Ok(Some(Record { line, data, ends }))
     }
 }
 

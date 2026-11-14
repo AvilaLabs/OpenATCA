@@ -30,7 +30,7 @@ fn main() {
         match archive.extract_entry(e) {
             Ok(v) => total += v.len() as u64, // dropped immediately: peak is one entry
             Err(err) => {
-                eprintln!("{}: {err}", e.name);
+                eprintln!("{}: {err}", e.name());
                 std::process::exit(1);
             }
         }

@@ -1,4 +1,10 @@
 //! Rhumb lines and the geodesic-versus-rhumb separation (OA-GEO-007).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon};
 

@@ -9,6 +9,7 @@ pub const CELLS_PER_RECORD: usize = 30;
 
 /// One Grid MORA record: a row of 30 one-degree cells.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct GridMora {
     pub meta: Meta,
     /// Cols 14-16 (`N41`): the southern edge of the row, signed degrees. The row covers

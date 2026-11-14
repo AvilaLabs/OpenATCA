@@ -32,6 +32,7 @@ pub struct ArchiveInfo {
 /// The NASR files the model consumes, parsed. Files the model does not take (`FIX_NAV`,
 /// `APT_RWY`, ...) are not loaded.
 #[derive(Clone, Debug, Default)]
+// A7.2: cold struct, size guard waived
 pub struct NasrData {
     pub arb_base: Vec<ArbBase>,
     pub boundaries: Vec<Boundary>,
@@ -59,6 +60,9 @@ pub struct FileDiag {
     /// Violations beyond the validator's cap, counted but not kept.
     pub dropped: u64,
     pub rejected: Vec<RowError>,
+    /// Rejected rows beyond the parser's cap (`oa_nasr::MAX_REJECTED_PER_FILE`), counted only.
+    /// For a parser that joins several files this is booked on the last file it loaded.
+    pub rejected_dropped: u64,
 }
 
 /// Everything the loaders noticed that is not a model object. Cold struct (A7.2).

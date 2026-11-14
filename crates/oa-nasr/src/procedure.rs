@@ -61,6 +61,7 @@ fn join_key(kind: ProcedureKind, r: &Row<'_>) -> Result<String, Fail> {
 
 /// A row of `STAR_BASE` or `DP_BASE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct ProcedureBase {
     /// 1-based line in the file.
     pub line: u64,
@@ -91,6 +92,7 @@ pub fn served_airports(base: &ProcedureBase) -> impl Iterator<Item = &str> {
 
 /// A row of `STAR_APT` or `DP_APT`: a body serves an airport, optionally one runway end.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct ProcedureAirport {
     /// 1-based line in the file.
     pub line: u64,
@@ -117,6 +119,7 @@ pub enum RoutePortion {
 
 /// A row of `STAR_RTE` or `DP_RTE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct RoutePoint {
     /// 1-based line in the file.
     pub line: u64,
@@ -153,6 +156,7 @@ pub fn associations(point: &RoutePoint) -> Vec<(&str, Option<&str>)> {
 
 /// The route points of one body or transition, ordered by `POINT_SEQ`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct ProcedureRoute {
     /// `ROUTE_PORTION_TYPE`.
     pub portion: RoutePortion,
@@ -168,6 +172,7 @@ pub struct ProcedureRoute {
 
 /// A procedure with its airports and routes.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Procedure {
     /// STAR or DP.
     pub kind: ProcedureKind,
@@ -189,6 +194,7 @@ pub fn parse_bases<R: BufRead>(
     Ok(Parsed {
         records: keyed.records.into_iter().map(|(_, b)| b).collect(),
         rejected: keyed.rejected,
+        rejected_dropped: keyed.rejected_dropped,
     })
 }
 
@@ -242,6 +248,7 @@ pub fn parse_airports<R: BufRead>(
     })
 }
 
+// A7.2: cold struct, size guard waived
 struct RteRow {
     code: String,
     portion: RoutePortion,
@@ -303,19 +310,28 @@ pub fn parse_procedures<R1: BufRead, R2: BufRead, R3: BufRead>(
     let apts = parse_airports(kind, apt.0, apt.1)?;
     let rtes = parse_route_rows(kind, rte.0, rte.1)?;
     let mut rejected = bases.rejected;
-    rejected.extend(apts.rejected);
-    rejected.extend(rtes.rejected);
+    let mut dropped = bases
+        .rejected_dropped
+        .saturating_add(apts.rejected_dropped)
+        .saturating_add(rtes.rejected_dropped);
+    for e in apts.rejected.into_iter().chain(rtes.rejected) {
+        crate::reject(&mut rejected, &mut dropped, e);
+    }
 
     let mut procs: Vec<Procedure> = Vec::with_capacity(bases.records.len());
     let mut index: HashMap<String, usize> = HashMap::new();
     for (key, b) in bases.records {
         if index.contains_key(&key) {
-            rejected.push(RowError {
-                file: base.0.to_string(),
-                line: b.line,
-                column: code_col(kind).to_string(),
-                kind: RowErrorKind::DuplicateKey(key),
-            });
+            crate::reject(
+                &mut rejected,
+                &mut dropped,
+                RowError {
+                    file: base.0.to_string(),
+                    line: b.line,
+                    column: code_col(kind).to_string(),
+                    kind: RowErrorKind::DuplicateKey(key),
+                },
+            );
             continue;
         }
         index.insert(key, procs.len());
@@ -329,12 +345,16 @@ pub fn parse_procedures<R1: BufRead, R2: BufRead, R3: BufRead>(
     for (code, a) in apts.records {
         match index.get(&code).and_then(|&i| procs.get_mut(i)) {
             Some(p) => p.airports.push(a),
-            None => rejected.push(RowError {
-                file: apt.0.to_string(),
-                line: a.line,
-                column: code_col(kind).to_string(),
-                kind: RowErrorKind::OrphanRecord(code),
-            }),
+            None => crate::reject(
+                &mut rejected,
+                &mut dropped,
+                RowError {
+                    file: apt.0.to_string(),
+                    line: a.line,
+                    column: code_col(kind).to_string(),
+                    kind: RowErrorKind::OrphanRecord(code),
+                },
+            ),
         }
     }
     let mut grouped: Vec<BTreeMap<RouteKey, Vec<RoutePoint>>> =
@@ -345,12 +365,16 @@ pub fn parse_procedures<R1: BufRead, R2: BufRead, R3: BufRead>(
                 .entry((r.portion, r.body_seq, r.route_name, r.transition))
                 .or_default()
                 .push(r.point),
-            None => rejected.push(RowError {
-                file: rte.0.to_string(),
-                line: r.point.line,
-                column: code_col(kind).to_string(),
-                kind: RowErrorKind::OrphanRecord(r.code),
-            }),
+            None => crate::reject(
+                &mut rejected,
+                &mut dropped,
+                RowError {
+                    file: rte.0.to_string(),
+                    line: r.point.line,
+                    column: code_col(kind).to_string(),
+                    kind: RowErrorKind::OrphanRecord(r.code),
+                },
+            ),
         }
     }
     for (p, g) in procs.iter_mut().zip(grouped) {
@@ -359,15 +383,19 @@ pub fn parse_procedures<R1: BufRead, R2: BufRead, R3: BufRead>(
             let mut kept: Vec<RoutePoint> = Vec::with_capacity(points.len());
             for pt in points {
                 if kept.last().is_some_and(|k| k.point_seq == pt.point_seq) {
-                    rejected.push(RowError {
-                        file: rte.0.to_string(),
-                        line: pt.line,
-                        column: "POINT_SEQ".to_string(),
-                        kind: RowErrorKind::DuplicateKey(format!(
-                            "{}/{route_name}/{}",
-                            p.base.computer_code, pt.point_seq
-                        )),
-                    });
+                    crate::reject(
+                        &mut rejected,
+                        &mut dropped,
+                        RowError {
+                            file: rte.0.to_string(),
+                            line: pt.line,
+                            column: "POINT_SEQ".to_string(),
+                            kind: RowErrorKind::DuplicateKey(format!(
+                                "{}/{route_name}/{}",
+                                p.base.computer_code, pt.point_seq
+                            )),
+                        },
+                    );
                 } else {
                     kept.push(pt);
                 }
@@ -384,5 +412,6 @@ pub fn parse_procedures<R1: BufRead, R2: BufRead, R3: BufRead>(
     Ok(Parsed {
         records: procs,
         rejected,
+        rejected_dropped: dropped,
     })
 }

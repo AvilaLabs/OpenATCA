@@ -35,6 +35,7 @@ pub enum DataType {
 
 /// One column of a data file's schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct ColumnSpec {
     /// Column name.
     pub name: String,
@@ -48,6 +49,7 @@ pub struct ColumnSpec {
 
 /// The schema of one data file.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct FileSchema {
     /// File name without extension, e.g. `FIX_BASE`.
     pub file: String,
@@ -57,6 +59,7 @@ pub struct FileSchema {
 
 /// All schemas in one structure file, keyed by data file name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Schemas {
     /// Schemas by data file name (e.g. `FIX_BASE`), in sorted order.
     pub files: BTreeMap<String, FileSchema>,
@@ -96,12 +99,12 @@ pub fn parse_schemas<R: BufRead>(source: &str, reader: R) -> Result<Schemas, Nas
     let mut out = Schemas::default();
     while let Some(rec) = csv.next_record()? {
         let line = rec.line();
-        let file = rec.get("CSV File")?.trim().to_string();
-        let raw_name = rec.get("Column Name")?;
+        let file = rec.get(csv.header(), "CSV File")?.trim().to_string();
+        let raw_name = rec.get(csv.header(), "Column Name")?;
         let name = raw_name.trim().to_string();
-        let max = rec.get("Max Length")?.trim();
-        let ty = rec.get("Data Type")?.trim();
-        let nullable = match rec.get("Nullable")?.trim() {
+        let max = rec.get(csv.header(), "Max Length")?.trim();
+        let ty = rec.get(csv.header(), "Data Type")?.trim();
+        let nullable = match rec.get(csv.header(), "Nullable")?.trim() {
             "Yes" => true,
             "No" => false,
             other => return Err(schema_err(source, line, format!("Nullable {other:?}"))),
@@ -182,6 +185,7 @@ pub enum ViolationKind {
 
 /// One schema violation: file, 1-based line (1 for header problems), column and kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct SchemaViolation {
     /// Data file name.
     pub file: String,
@@ -195,6 +199,7 @@ pub struct SchemaViolation {
 
 /// The outcome of validating one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Validation {
     /// Data file name.
     pub file: String,
@@ -211,6 +216,7 @@ pub fn total_violations(v: &Validation) -> u64 {
     v.violations.len() as u64 + v.dropped
 }
 
+// A7.2: cold struct, size guard waived
 struct Collector {
     file: String,
     violations: Vec<SchemaViolation>,

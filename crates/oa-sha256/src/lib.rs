@@ -62,6 +62,7 @@ const K: [u32; 64] = [
 
 /// Streaming SHA-256 state.
 #[derive(Clone, Debug)]
+// A7.2: cold struct, size guard waived
 pub struct Sha256 {
     h: [u32; 8],
     buf: [u8; BLOCK_LEN],
@@ -76,6 +77,10 @@ impl Default for Sha256 {
 }
 
 /// Process one 64-byte block into the chaining state.
+// E3 / H2: every index below is bounded by a constant. `w` and `K` hold 64 words and `t` runs
+// over 0..64 (the schedule loop starts at 16 and reads at most 16 back), so none can go out of
+// range.
+#[allow(clippy::indexing_slicing)]
 fn compress(h: &mut [u32; 8], block: &[u8; BLOCK_LEN]) {
     let mut w = [0u32; 64];
     let (words, _) = block.as_chunks::<4>();
@@ -141,9 +146,12 @@ impl Sha256 {
         if self.buf_len > 0 {
             let room = BLOCK_LEN - self.buf_len;
             let take = room.min(data.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
-            self.buf_len += take;
-            data = &data[take..];
+            let (head, tail) = data.split_at_checked(take).unwrap_or((data, &[]));
+            for (dst, src) in self.buf.iter_mut().skip(self.buf_len).zip(head) {
+                *dst = *src;
+            }
+            self.buf_len += head.len();
+            data = tail;
             if self.buf_len < BLOCK_LEN {
                 return Ok(());
             }
@@ -155,7 +163,9 @@ impl Sha256 {
         for block in blocks {
             compress(&mut self.h, block);
         }
-        self.buf[..rest.len()].copy_from_slice(rest);
+        for (dst, src) in self.buf.iter_mut().zip(rest) {
+            *dst = *src;
+        }
         self.buf_len = rest.len();
         Ok(())
     }
@@ -164,13 +174,19 @@ impl Sha256 {
     pub fn finalize(mut self) -> Digest {
         let bits = self.total.wrapping_mul(8); // total <= MAX_MESSAGE_BYTES, cannot wrap
         let mut block = [0u8; BLOCK_LEN];
-        block[..self.buf_len].copy_from_slice(&self.buf[..self.buf_len]);
-        block[self.buf_len] = 0x80;
+        for (dst, src) in block.iter_mut().zip(self.buf.iter().take(self.buf_len)) {
+            *dst = *src;
+        }
+        if let Some(b) = block.get_mut(self.buf_len) {
+            *b = 0x80;
+        }
         if self.buf_len + 1 > BLOCK_LEN - 8 {
             compress(&mut self.h, &block);
             block = [0u8; BLOCK_LEN];
         }
-        block[BLOCK_LEN - 8..].copy_from_slice(&bits.to_be_bytes());
+        if let Some(len) = block.last_chunk_mut::<8>() {
+            *len = bits.to_be_bytes();
+        }
         compress(&mut self.h, &block);
         let mut out = [0u8; DIGEST_LEN];
         let (words, _) = out.as_chunks_mut::<4>();
@@ -196,7 +212,14 @@ pub fn sha256_reader<R: Read>(mut r: R) -> Result<Digest, Sha256Error> {
     loop {
         match r.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => h.update(&buf[..n])?,
+            Ok(n) => {
+                let chunk = buf.get(..n).ok_or_else(|| {
+                    Sha256Error::Io(std::io::Error::other(
+                        "reader returned more than it was given room for",
+                    ))
+                })?;
+                h.update(chunk)?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(Sha256Error::Io(e)),
         }
@@ -206,16 +229,22 @@ pub fn sha256_reader<R: Read>(mut r: R) -> Result<Digest, Sha256Error> {
 
 /// Lowercase hex encoding of bytes.
 pub fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        s.push(DIGITS[(b >> 4) as usize] as char);
-        s.push(DIGITS[(b & 15) as usize] as char);
+        // Writing to a String cannot fail.
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -339,10 +368,66 @@ mod tests {
 
     // REQ: OA-SHA-001, OA-GEN-004
     #[test]
-    fn padding_boundaries_do_not_panic() {
-        for n in 0..200usize {
-            let d = vec![0xa5u8; n];
-            let _ = sha256(&d);
+    fn padding_boundaries_match_known_digests() {
+        // Digests of n bytes of 'a' from coreutils `sha256sum`, an independent implementation.
+        // 55 is the longest message whose padding fits the first block, 56 the shortest that
+        // needs a second, 63 and 64 straddle the block edge, 119/120 are the same boundaries in
+        // the second block.
+        let known: [(usize, &str); 11] = [
+            (
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                1,
+                "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+            ),
+            (
+                55,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                56,
+                "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            ),
+            (
+                57,
+                "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6",
+            ),
+            (
+                63,
+                "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34",
+            ),
+            (
+                64,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+            (
+                65,
+                "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0",
+            ),
+            (
+                119,
+                "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb",
+            ),
+            (
+                120,
+                "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c",
+            ),
+            (
+                128,
+                "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e",
+            ),
+        ];
+        for (n, want) in known {
+            let data = vec![b'a'; n];
+            assert_eq!(to_hex(&sha256(&data)), want, "one-shot, {n} bytes");
+            // The same message fed one byte at a time pads from a partial block.
+            let mut h = Sha256::new();
+            for b in &data {
+                h.update(std::slice::from_ref(b)).unwrap();
+            }
+            assert_eq!(to_hex(&h.finalize()), want, "streamed, {n} bytes");
         }
     }
 

@@ -1,6 +1,12 @@
 //! Builds over the full FAA files. These read the directory named by the `OPENATCA_RAW`
 //! environment variable (it holds `nasr-2026-10-29/`, `cifp-2026-10-29/` and the 2026-10-01
 //! pair) and skip, with a message, when it is unset. Run with `--release --nocapture`.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_airspace::build::{build_model, BuildOutput, BuildParams};
 use oa_airspace::diff::{diff_counts, diff_models, render_diff, Change};
@@ -102,7 +108,7 @@ fn zau_builds_from_the_2026_10_29_cycle() {
     for icao in ["KORD", "KMDW", "KMKE", "KRFD"] {
         let ix = find(m, icao, point_kind::AIRPORT).unwrap_or_else(|| panic!("{icao} missing"));
         assert!(
-            bit_get(&m.points.in_area, ix.0 as usize),
+            bit_get(&m.points.in_area, ix.row()),
             "{icao} must be inside ZAU"
         );
     }

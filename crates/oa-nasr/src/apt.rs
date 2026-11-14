@@ -37,6 +37,7 @@ const DISPLACED_THR_POS: PosCols = PosCols {
 
 /// A row of `APT_BASE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Airport {
     /// 1-based line in the file.
     pub line: u64,
@@ -87,6 +88,7 @@ pub struct Airport {
 
 /// A row of `APT_RWY`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Runway {
     /// 1-based line in the file.
     pub line: u64,
@@ -116,6 +118,7 @@ pub struct Runway {
 
 /// A row of `APT_RWY_END`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct RunwayEnd {
     /// 1-based line in the file.
     pub line: u64,

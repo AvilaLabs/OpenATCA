@@ -1,9 +1,16 @@
 //! The `oa-adapt` command line, end to end over the fixture archives.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 
 use common::*;
 use oa_airspace::cli::*;
+use oa_airspace::load::parse_expectation;
 use oa_airspace::snapshot::decode;
 use oa_sha256::{sha256, to_hex};
 use std::path::{Path, PathBuf};
@@ -254,4 +261,92 @@ fn diff_command_lists_changes_between_two_snapshots() {
         &mut Vec::new()
     )
     .is_err());
+}
+
+// REQ: OA-ASP-013
+#[test]
+fn arguments_are_strict_about_hex_duplicates_empty_values_and_unknown_flags() {
+    let hex = "ab".repeat(32);
+    // `u8::from_str_radix` accepts a leading plus sign; the hash parser must not.
+    let plus = format!("A.zip=+f{}", &hex[2..]);
+    assert_eq!(plus.len() - "A.zip=".len(), 64);
+    assert!(parse_expectation(&plus).is_err());
+    assert!(parse_expectation(&format!("A.zip={}\u{e9}", &hex[..62])).is_err());
+
+    let base = ["--nasr", "n", "--cifp", "c", "--artcc", "ZAU", "--out", "o"];
+    let with = |extra: &[&str]| {
+        let mut v: Vec<&str> = base.to_vec();
+        v.extend_from_slice(extra);
+        args(&v)
+    };
+    let h0 = "00".repeat(32);
+    let h1 = "11".repeat(32);
+    for (what, bad) in [
+        ("duplicate --nasr", with(&["--nasr", "n2"])),
+        ("duplicate --out", with(&["--out", "o2"])),
+        (
+            "duplicate --buffer-nm",
+            with(&["--buffer-nm", "1", "--buffer-nm", "2"]),
+        ),
+        ("duplicate --artcc", with(&["--artcc", "ZMP"])),
+        (
+            "one file expected twice",
+            with(&[
+                "--expect-sha256",
+                &format!("n={h0}"),
+                "--expect-sha256",
+                &format!("n={h1}"),
+            ]),
+        ),
+        (
+            "empty value",
+            args(&["--nasr", "", "--cifp", "c", "--artcc", "ZAU", "--out", "o"]),
+        ),
+        (
+            "a flag where a value belongs",
+            args(&["--nasr", "--cifp", "c", "--artcc", "ZAU", "--out", "o"]),
+        ),
+        (
+            "bad artcc",
+            args(&["--nasr", "n", "--cifp", "c", "--artcc", "Z A", "--out", "o"]),
+        ),
+        (
+            "long artcc",
+            args(&[
+                "--nasr",
+                "n",
+                "--cifp",
+                "c",
+                "--artcc",
+                "ABCDEFGHI",
+                "--out",
+                "o",
+            ]),
+        ),
+        ("bare word", with(&["stray"])),
+        ("malformed hash", with(&["--expect-sha256", &plus])),
+    ] {
+        assert!(
+            matches!(parse_build_args(&bad), Err(CliError::Usage(_))),
+            "{what}: {bad:?}"
+        );
+    }
+    // The same flags without the fault parse.
+    assert!(parse_build_args(&with(&["--expect-sha256", &format!("n={h0}")])).is_ok());
+    // `diff` takes exactly two paths and no flags.
+    let mut sink = Vec::new();
+    for bad in [
+        args(&["a"]),
+        args(&["a", "b", "c"]),
+        args(&["a", "--bogus"]),
+        args(&["a", ""]),
+    ] {
+        assert!(
+            matches!(
+                run(&[vec!["diff".to_string()], bad.clone()].concat(), &mut sink),
+                Err(CliError::Usage(_))
+            ),
+            "{bad:?}"
+        );
+    }
 }

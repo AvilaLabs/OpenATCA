@@ -25,6 +25,7 @@ const GOLDEN: f64 = 0.618_033_988_749_894_9;
 
 /// Distance and constant course of a rhumb line.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct RhumbInverse {
     /// Length along the rhumb line, metres.
     pub distance_m: f64,
@@ -34,6 +35,7 @@ pub struct RhumbInverse {
 
 /// Maximum separation between the geodesic and the rhumb line joining two points.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Separation {
     /// Largest distance from a point on the rhumb line to the geodesic, metres.
     pub max_m: f64,

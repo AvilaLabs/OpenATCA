@@ -100,6 +100,7 @@ pub enum RowErrorKind {
 
 /// A rejected row: file, 1-based line, column and reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct RowError {
     /// Source file name.
     pub file: String,
@@ -129,11 +130,15 @@ impl fmt::Display for RowError {
 
 /// The result of parsing one file: the records that parsed and the rows that were rejected.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Parsed<T> {
     /// Parsed records, in file order (grouped parsers document their own order).
     pub records: Vec<T>,
-    /// Rows that were rejected, in file order.
+    /// Rows that were rejected, in file order; at most [`MAX_REJECTED_PER_FILE`] are kept.
     pub rejected: Vec<RowError>,
+    /// Rejected rows beyond the cap: counted, not stored, so a badly broken file cannot exhaust
+    /// memory (RULESET C2). Zero for every ordinary file.
+    pub rejected_dropped: u64,
 }
 
 impl<T> Default for Parsed<T> {
@@ -141,7 +146,22 @@ impl<T> Default for Parsed<T> {
         Parsed {
             records: Vec::new(),
             rejected: Vec::new(),
+            rejected_dropped: 0,
         }
+    }
+}
+
+/// Most rejected rows kept per file. A real cycle rejects a handful; 10,000 is far beyond any
+/// plausible defect list and still a small allocation. Rows past it are counted in
+/// [`Parsed::rejected_dropped`].
+pub const MAX_REJECTED_PER_FILE: usize = 10_000;
+
+/// Keeps `e` while the list is under [`MAX_REJECTED_PER_FILE`]; past it, counts instead.
+pub(crate) fn reject(list: &mut Vec<RowError>, dropped: &mut u64, e: RowError) {
+    if list.len() < MAX_REJECTED_PER_FILE {
+        list.push(e);
+    } else {
+        *dropped = dropped.saturating_add(1);
     }
 }
 

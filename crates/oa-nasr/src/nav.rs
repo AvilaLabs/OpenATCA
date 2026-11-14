@@ -22,6 +22,7 @@ const TACAN_DME_POS: PosCols = PosCols {
 
 /// A row of `NAV_BASE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Navaid {
     /// 1-based line in the file.
     pub line: u64,

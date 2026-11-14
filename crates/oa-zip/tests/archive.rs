@@ -1,9 +1,15 @@
 //! Integration tests for oa-zip. Fixtures are built by tests/fixtures/make_fixtures.py (Python
 //! standard library only); expected extractions sit in tests/fixtures/expected/.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_zip::{
-    crc32, inflate, is_safe_path, read_archive_file, Archive, Limits, ZipError, DEFAULT_LIMITS,
-    MAX_EOCD_SEARCH,
+    crc32, inflate, is_safe_path, read_archive_file, Archive, InflateError, Limits, ZipError,
+    DEFAULT_LIMITS, MAX_EOCD_SEARCH,
 };
 use std::path::{Path, PathBuf};
 
@@ -55,7 +61,7 @@ impl XorShift {
 #[test]
 fn stored_archive_lists_and_extracts() {
     let a = Archive::parse(STORED).unwrap();
-    let names: Vec<&str> = a.entries().iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = a.entries().iter().map(|e| e.name()).collect();
     assert_eq!(names, ["a.txt", "empty.txt", "dir/"]);
     assert_eq!(a.extract("a.txt").unwrap(), b"stored contents\n");
     assert_eq!(a.extract("empty.txt").unwrap(), b"");
@@ -69,8 +75,13 @@ fn deflate_archive_every_entry_matches() {
     let a = Archive::parse(DEFLATE).unwrap();
     assert_eq!(a.entries().len(), 8);
     for e in a.entries() {
-        assert_eq!(e.method, 8, "{}", e.name);
-        assert_eq!(a.extract(&e.name).unwrap(), expected(&e.name), "{}", e.name);
+        assert_eq!(e.method(), 8, "{}", e.name());
+        assert_eq!(
+            a.extract(e.name()).unwrap(),
+            expected(e.name()),
+            "{}",
+            e.name()
+        );
     }
 }
 
@@ -80,8 +91,8 @@ fn block_types_all_exercised() {
     // zlib emits fixed blocks for tiny text, dynamic for larger text, stored blocks at level 0.
     let a = Archive::parse(DEFLATE).unwrap();
     let first_byte_type = |name: &str| {
-        let e = a.entries().iter().find(|e| e.name == name).unwrap();
-        let off = e.local_offset as usize;
+        let e = a.entries().iter().find(|e| e.name() == name).unwrap();
+        let off = e.local_offset() as usize;
         let n = u16::from_le_bytes([DEFLATE[off + 26], DEFLATE[off + 27]]) as usize;
         let x = u16::from_le_bytes([DEFLATE[off + 28], DEFLATE[off + 29]]) as usize;
         (DEFLATE[off + 30 + n + x] >> 1) & 3
@@ -136,13 +147,13 @@ fn wrong_declared_size_rejected() {
     let e = a
         .entries()
         .iter()
-        .find(|e| e.name == "dynamic.txt")
+        .find(|e| e.name() == "dynamic.txt")
         .unwrap()
         .clone();
     let cd = find(&d, b"dynamic.txt", central(&d)) - 46;
-    d[cd + 24..cd + 28].copy_from_slice(&(e.uncompressed_size as u32 - 1).to_le_bytes());
-    let off = e.local_offset as usize;
-    d[off + 22..off + 26].copy_from_slice(&(e.uncompressed_size as u32 - 1).to_le_bytes());
+    d[cd + 24..cd + 28].copy_from_slice(&(e.uncompressed_size() as u32 - 1).to_le_bytes());
+    let off = e.local_offset() as usize;
+    d[off + 22..off + 26].copy_from_slice(&(e.uncompressed_size() as u32 - 1).to_le_bytes());
     let a = Archive::parse(&d).unwrap();
     assert!(matches!(
         a.extract("dynamic.txt"),
@@ -150,8 +161,8 @@ fn wrong_declared_size_rejected() {
     ));
     // Too large a declared size: the stream ends early.
     let mut d = DEFLATE.to_vec();
-    d[cd + 24..cd + 28].copy_from_slice(&(e.uncompressed_size as u32 + 5).to_le_bytes());
-    d[off + 22..off + 26].copy_from_slice(&(e.uncompressed_size as u32 + 5).to_le_bytes());
+    d[cd + 24..cd + 28].copy_from_slice(&(e.uncompressed_size() as u32 + 5).to_le_bytes());
+    d[off + 22..off + 26].copy_from_slice(&(e.uncompressed_size() as u32 + 5).to_le_bytes());
     let a = Archive::parse(&d).unwrap();
     assert!(matches!(
         a.extract("dynamic.txt"),
@@ -162,17 +173,15 @@ fn wrong_declared_size_rejected() {
 // REQ: OA-ZIP-001
 #[test]
 fn truncated_archive_rejected_at_every_length() {
+    // Cutting the archive anywhere removes (part of) the end-of-central-directory record, which
+    // is the last thing in it, so every prefix is refused for that reason.
     for len in 0..DEFLATE.len() {
         let r = Archive::parse(&DEFLATE[..len]);
-        if let Ok(a) = r {
-            // Only possible if the tail still holds a self-consistent directory; extraction must
-            // then fail or succeed without panicking.
-            for e in a.entries() {
-                let _ = a.extract(&e.name);
-            }
-        }
+        assert!(
+            matches!(r, Err(ZipError::NoEndOfCentralDirectory)),
+            "prefix of {len} bytes: {r:?}"
+        );
     }
-    assert!(Archive::parse(&DEFLATE[..DEFLATE.len() - 1]).is_err());
     assert!(matches!(
         Archive::parse(&[]),
         Err(ZipError::NoEndOfCentralDirectory)
@@ -244,12 +253,12 @@ fn a_lying_stream_cannot_exceed_declared_size() {
     let e = a
         .entries()
         .iter()
-        .find(|e| e.name == "run.bin")
+        .find(|e| e.name() == "run.bin")
         .unwrap()
         .clone();
     let cd = find(&d, b"run.bin", central(&d)) - 46;
     d[cd + 24..cd + 28].copy_from_slice(&10u32.to_le_bytes());
-    let off = e.local_offset as usize;
+    let off = e.local_offset() as usize;
     d[off + 22..off + 26].copy_from_slice(&10u32.to_le_bytes());
     let a = Archive::parse(&d).unwrap();
     assert!(matches!(
@@ -339,7 +348,7 @@ fn local_header_disagreeing_with_directory_rejected() {
 #[test]
 fn data_descriptors_accepted_and_mismatch_rejected() {
     let a = Archive::parse(DESCRIPTOR).unwrap();
-    assert!(a.entries().iter().all(|e| e.flags & 8 != 0));
+    assert!(a.entries().iter().all(|e| e.flags() & 8 != 0));
     assert_eq!(a.extract("streamed.txt").unwrap(), expected("streamed.txt"));
     assert_eq!(
         a.extract("streamed2.bin").unwrap(),
@@ -364,7 +373,7 @@ fn data_descriptors_accepted_and_mismatch_rejected() {
 #[test]
 fn zip64_read_and_limits() {
     let a = Archive::parse(ZIP64).unwrap();
-    assert!(a.entries()[0].zip64);
+    assert!(a.entries()[0].is_zip64());
     assert_eq!(a.extract("big64.txt").unwrap(), expected("big64.txt"));
     // A zip64 entry declaring 5 GiB exceeds MAX_ENTRY_BYTES; nothing is allocated for it.
     assert!(matches!(
@@ -386,8 +395,11 @@ fn zip64_read_and_limits() {
 fn eocd_search_is_bounded() {
     let mut d = vec![0u8; MAX_EOCD_SEARCH + 100];
     d.extend_from_slice(STORED);
-    // Valid archive preceded by junk: offsets are wrong, so parse fails cleanly.
-    assert!(Archive::parse(&d).is_err());
+    // Valid archive preceded by junk: the directory offsets point at the wrong bytes.
+    assert!(matches!(
+        Archive::parse(&d),
+        Err(ZipError::BadSignature("central directory"))
+    ));
     // A comment longer than the search window pushes the record out of reach.
     let mut d = STORED.to_vec();
     let e = eocd(&d);
@@ -395,14 +407,54 @@ fn eocd_search_is_bounded() {
     d[e + 21] = 0xff;
     d.extend(std::iter::repeat_n(b'c', 65535));
     d.extend_from_slice(&[0u8; 10]);
-    assert!(Archive::parse(&d).is_err());
+    assert!(matches!(
+        Archive::parse(&d),
+        Err(ZipError::NoEndOfCentralDirectory)
+    ));
     // A maximal comment is still found.
     let mut d = STORED.to_vec();
     let e = eocd(&d);
     d[e + 20] = 0xff;
     d[e + 21] = 0xff;
     d.extend(std::iter::repeat_n(b'c', 65535));
-    assert!(Archive::parse(&d).is_ok());
+    let plain = Archive::parse(STORED).unwrap().entries().len();
+    assert_eq!(Archive::parse(&d).unwrap().entries().len(), plain);
+}
+
+// REQ: OA-ZIP-002
+#[test]
+fn inflate_rejects_each_kind_of_malformed_stream_with_its_error() {
+    // Reserved block type 3.
+    assert_eq!(
+        inflate(&[0x07], 0, 1 << 20),
+        Err(InflateError::ReservedBlockType)
+    );
+    // Stored block whose LEN and NLEN are not complements.
+    assert_eq!(
+        inflate(&[0x01, 5, 0, 0, 0], 0, 1 << 20),
+        Err(InflateError::StoredLengthMismatch)
+    );
+    // Stored block of 5 bytes with 1 present.
+    assert_eq!(
+        inflate(&[0x01, 5, 0, 0xfa, 0xff, b'a'], 0, 1 << 20),
+        Err(InflateError::Truncated)
+    );
+    // The same stored block, fully present, against an output limit of 2.
+    assert_eq!(
+        inflate(
+            &[0x01, 5, 0, 0xfa, 0xff, b'a', b'b', b'c', b'd', b'e'],
+            0,
+            2
+        ),
+        Err(InflateError::OutputLimit { max_output: 2 })
+    );
+    // A fixed-Huffman block that copies from before the start of the output.
+    assert_eq!(
+        inflate(&[0x03, 0x02, 0x00, 0x00], 0, 1 << 20),
+        Err(InflateError::DistanceTooFar)
+    );
+    // Empty input.
+    assert_eq!(inflate(&[], 0, 1 << 20), Err(InflateError::Truncated));
 }
 
 // REQ: OA-ZIP-002, OA-GEN-004
@@ -421,6 +473,7 @@ fn inflate_random_input_never_panics() {
 fn mutated_archives_never_panic() {
     let seeds: [&[u8]; 6] = [STORED, DEFLATE, DESCRIPTOR, ZIP64, TRAVERSAL, MANY];
     let mut r = XorShift(0x2545f4914f6cdd1d);
+    let mut rejected = 0usize;
     for (si, seed) in seeds.iter().enumerate() {
         for iter in 0..1500 {
             let mut d = seed.to_vec();
@@ -444,14 +497,35 @@ fn mutated_archives_never_panic() {
                     }
                 }
             }
-            if let Ok(a) = Archive::parse(&d) {
-                for e in a.entries() {
-                    let _ = a.extract_entry(e);
+            match Archive::parse(&d) {
+                Ok(a) => {
+                    for e in a.entries() {
+                        // Extraction either verifies (size and CRC) or names what is wrong.
+                        match a.extract_entry(e) {
+                            Ok(v) => {
+                                assert_eq!(v.len() as u64, e.uncompressed_size());
+                                assert_eq!(crc32(&v), e.crc32());
+                            }
+                            Err(err) => {
+                                assert!(!matches!(err, ZipError::Io(_)), "seed {si}/{iter}: {err}");
+                                rejected += 1;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    assert!(!matches!(err, ZipError::Io(_)), "seed {si}/{iter}: {err}");
+                    rejected += 1;
                 }
             }
-            let _ = (si, iter);
         }
     }
+    // Most mutations damage something the reader checks; a reader that accepted everything
+    // would fail here.
+    assert!(
+        rejected > 2000,
+        "only {rejected} of 9000 mutations rejected"
+    );
 }
 
 // REQ: OA-ZIP-002
@@ -478,11 +552,11 @@ fn compare_zip_to_extracted(raw: &Path, zip_rel: &str, dir_rel: &str) -> (usize,
     for e in a.entries() {
         let t = std::time::Instant::now();
         let got = a.extract_entry(e).unwrap();
-        if e.method == 8 {
+        if e.method() == 8 {
             inflate_secs += t.elapsed().as_secs_f64();
         }
-        let want = std::fs::read(raw.join(dir_rel).join(&e.name)).unwrap();
-        assert!(got == want, "{} differs", e.name);
+        let want = std::fs::read(raw.join(dir_rel).join(e.name())).unwrap();
+        assert!(got == want, "{} differs", e.name());
         total += got.len() as u64;
     }
     (a.entries().len(), total, inflate_secs)
@@ -522,4 +596,28 @@ fn real_cifp_zip_matches_extracted_copy() {
         "cifp: {n} entries, {total} bytes, {:.1} MB/s (extract+crc)",
         total as f64 / 1e6 / secs
     );
+}
+
+// REQ: OA-ZIP-004
+#[test]
+fn a_zip64_extra_field_must_match_the_fields_that_ask_for_it() {
+    // The fixture's entry has 0xFFFFFFFF in the compressed and uncompressed size fields and a
+    // zip64 extra field of two 8-byte values.
+    let cd = central(ZIP64);
+    let is_mismatch = |d: &[u8]| matches!(Archive::parse(d), Err(ZipError::Zip64(w)) if w.contains("zip64 extra"));
+    // The extra field's declared size is changed to one value.
+    let mut d = ZIP64.to_vec();
+    let extra = cd + 46 + 9;
+    assert_eq!(&d[extra..extra + 4], &[1, 0, 16, 0]);
+    d[extra + 2] = 8;
+    assert!(is_mismatch(&d));
+    // One size field no longer asks for the extra, which still holds both values.
+    let mut d = ZIP64.to_vec();
+    d[cd + 24..cd + 28].copy_from_slice(&5u32.to_le_bytes());
+    assert!(is_mismatch(&d));
+    // Neither asks for it.
+    d[cd + 20..cd + 24].copy_from_slice(&5u32.to_le_bytes());
+    assert!(is_mismatch(&d));
+    // The unmodified fixture is still accepted.
+    assert!(Archive::parse(ZIP64).unwrap().entries()[0].is_zip64());
 }

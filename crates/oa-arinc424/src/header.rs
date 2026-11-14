@@ -7,6 +7,7 @@ use crate::types::{parse_cycle, Cycle};
 /// The header of a CIFP file. HDR01 carries the file attributes; the other header records
 /// are free text and kept raw.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Header {
     /// HDR01 cols 6-20.
     pub file_name: String,
@@ -50,7 +51,10 @@ pub(crate) fn parse_hdr01(text: &str) -> Result<Header, ErrorKind> {
     Ok(Header {
         file_name: r.text(6, 20),
         version: r.text(21, 23),
-        production_flag: r.ch(24),
+        production_flag: match r.ch(24) {
+            c @ ('P' | 'T') => c,
+            _ => return Err(bad("production flag must be P or T")),
+        },
         record_length: record_length as usize,
         record_count: record_count as usize,
         cycle,

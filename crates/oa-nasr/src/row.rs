@@ -1,7 +1,7 @@
 //! Typed access to one CSV row, shared by every file parser.
 
 use crate::{dms_to_decimal, NasrError, Parsed, Position, RowError, RowErrorKind};
-use oa_csv::{Reader, Record};
+use oa_csv::{Header, Reader, Record};
 use std::io::BufRead;
 
 /// Why reading a field failed: stops the stream, or rejects just this row.
@@ -17,6 +17,7 @@ impl From<oa_csv::CsvError> for Fail {
 }
 
 /// Column names of a DMS position and its published decimals.
+// A7.2: cold struct, size guard waived
 pub(crate) struct PosCols {
     pub lat_deg: &'static str,
     pub lat_min: &'static str,
@@ -44,8 +45,10 @@ pub(crate) const STD_POS: PosCols = PosCols {
     lon_dec: "LONG_DECIMAL",
 };
 
+// A7.2: cold struct, size guard waived
 pub(crate) struct Row<'a> {
     pub file: &'a str,
+    pub header: &'a Header,
     pub rec: &'a Record,
 }
 
@@ -70,8 +73,8 @@ pub(crate) fn decimal_shape(s: &str) -> Option<(usize, usize)> {
 }
 
 impl<'a> Row<'a> {
-    pub fn new(file: &'a str, rec: &'a Record) -> Row<'a> {
-        Row { file, rec }
+    pub fn new(file: &'a str, header: &'a Header, rec: &'a Record) -> Row<'a> {
+        Row { file, header, rec }
     }
 
     pub fn line(&self) -> u64 {
@@ -89,7 +92,7 @@ impl<'a> Row<'a> {
 
     /// The trimmed text of a column; a missing column is fatal.
     pub fn text(&self, col: &str) -> Result<&'a str, Fail> {
-        Ok(self.rec.get(col)?.trim())
+        Ok(self.rec.get(self.header, col)?.trim())
     }
 
     pub fn req(&self, col: &str) -> Result<String, Fail> {
@@ -248,9 +251,9 @@ where
     let mut csv = Reader::new(file, reader)?;
     let mut out = Parsed::default();
     while let Some(rec) = csv.next_record()? {
-        match f(&Row::new(file, &rec)) {
+        match f(&Row::new(file, csv.header(), &rec)) {
             Ok(v) => out.records.push(v),
-            Err(Fail::Row(e)) => out.rejected.push(e),
+            Err(Fail::Row(e)) => crate::reject(&mut out.rejected, &mut out.rejected_dropped, e),
             Err(Fail::Fatal(e)) => return Err(e),
         }
     }

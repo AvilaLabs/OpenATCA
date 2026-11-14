@@ -8,6 +8,7 @@
 /// appears to truncate rather than round, so a healthy record differs by less than `1e-8`; a
 /// difference beyond that is a data defect for the airspace model to report.
 #[derive(Clone, Copy, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Position {
     /// Latitude computed from DMS, degrees.
     pub lat: f64,

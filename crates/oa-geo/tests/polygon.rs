@@ -1,4 +1,10 @@
 //! Point-in-polygon with geodesic edges (OA-GEO-006), including the real ZAU LOW boundary.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon, Polygon};
 

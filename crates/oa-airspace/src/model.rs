@@ -31,11 +31,27 @@ macro_rules! index_type {
         $(#[$m])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(transparent)]
-        pub struct $name(pub u32);
+        pub struct $name(u32);
 
         impl $name {
             /// Absent reference.
             pub const NONE: $name = $name(NONE_U32);
+
+            /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+            /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+            pub const fn new(raw: u32) -> $name {
+                $name(raw)
+            }
+
+            /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+            pub const fn get(self) -> u32 {
+                self.0
+            }
+
+            /// The row as a `usize` for slicing a column; a `u32` always fits.
+            pub const fn row(self) -> usize {
+                self.0 as usize
+            }
         }
     };
 }
@@ -352,6 +368,7 @@ pub mod owner_kind {
 
 /// A bitset column (A6): `len` bits packed into 64-bit words, bits at and beyond `len` zero.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct BitSet {
     pub words: Vec<u64>,
     pub len: u32,
@@ -411,6 +428,7 @@ pub fn bit_count(b: &BitSet) -> usize {
 
 /// A string table: all strings concatenated, `offsets` holds `count + 1` byte positions.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct StrTable {
     pub text: String,
     pub offsets: Vec<u32>,
@@ -468,6 +486,7 @@ pub struct Meta {
 /// Points: fixes, navaids, airports, runway thresholds, terminal waypoints, localizers.
 /// Identity is (class of kind, ident, region, scope); sorted by (ident, region, scope, class).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Points {
     pub kind: Vec<u8>,
     pub lat: Vec<i32>,
@@ -503,6 +522,7 @@ pub type Vertices = Vec<PosE7>;
 /// Boundaries: ARTCC (NASR), class B/C/D and SUA (CIFP). Sorted by
 /// (source, stratum, facility, multiple code, name).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Boundaries {
     pub source: Vec<u8>,
     pub stratum: Vec<u8>,
@@ -526,6 +546,7 @@ pub struct Boundaries {
 /// Boundary segments of CIFP-sourced boundaries: one row per ARINC 424 boundary record. The
 /// via code says how this row's point joins the next one's; arcs and circles carry their centre.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Segments {
     pub via: Vec<u8>,
     /// [`POS_NONE`] for a circle (the circle has no boundary point, only a centre).
@@ -542,6 +563,7 @@ pub struct Segments {
 
 /// Airways (NASR `AWY_BASE`/`AWY_SEG_ALT`). Sorted by (designator, location).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Airways {
     pub designator: Vec<StrIx>,
     /// NASR `AWY_LOCATION` letter (`C`, `A`, `H`).
@@ -551,6 +573,7 @@ pub struct Airways {
 
 /// Airway legs in route order within each airway.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct AirwayLegs {
     pub from: Vec<PointIx>,
     pub to: Vec<PointIx>,
@@ -568,6 +591,7 @@ pub struct AirwayLegs {
 
 /// Procedures. Sorted by (airport ident, kind, ident).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Procs {
     pub kind: Vec<u8>,
     pub airport: Vec<PointIx>,
@@ -583,6 +607,7 @@ pub struct Procs {
 
 /// Routes: one per transition (or common route) of a procedure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Routes {
     /// CIFP route type character (`4`, `5`, `6`, `A`, `I`, ...); 0 for a NASR-only route.
     pub route_type: Vec<u8>,
@@ -593,6 +618,7 @@ pub struct Routes {
 
 /// Procedure legs in sequence order within each route.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Legs {
     pub fix: Vec<PointIx>,
     /// Arc centre or MSA centre point.
@@ -613,6 +639,7 @@ pub struct Legs {
 
 /// Grid MORA cells, one row per selected one-degree cell. Sorted by (lat, lon).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Mora {
     /// Southern edge of the cell, signed degrees.
     pub lat: Vec<i16>,
@@ -625,6 +652,7 @@ pub struct Mora {
 /// A reference that names a point neither source has (OA-ASP-004), plus the airway border
 /// crossings, which are expected and carry the role [`unresolved_role::BORDER_CROSSING`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Unresolved {
     pub role: Vec<u8>,
     pub owner_kind: Vec<u8>,
@@ -644,6 +672,7 @@ pub struct Unresolved {
 /// Points present in both NASR and CIFP whose positions differ by more than 1 m (OA-ASP-003).
 /// The point row holds the CIFP position (the one taken); this table keeps the NASR one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Disagreements {
     pub point: Vec<PointIx>,
     pub nasr_lat: Vec<i32>,
@@ -674,6 +703,7 @@ pub struct Model {
 
 /// Why a model failed validation: which table and what is wrong.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct ModelError {
     pub table: &'static str,
     pub what: String,
@@ -823,6 +853,60 @@ fn pos_ok(table: &'static str, lat: i32, lon: i32, none_ok: bool) -> Result<(), 
     Ok(())
 }
 
+/// Limit: the lowest altitude or elevation a row may hold, feet (below any land elevation).
+pub const ALT_MIN_FT: i32 = -2_000;
+/// Limit: the highest altitude or elevation a row may hold, feet.
+pub const ALT_MAX_FT: i32 = 1_000_000;
+/// Limit: the largest bearing a row may hold, hundredths of a degree (360 degrees; ARINC 424
+/// codes north as 3600 tenths, so 360 is legitimate).
+pub const BEARING_MAX_CDEG: u16 = 36_000;
+
+/// Every altitude in `col` is one of the named sentinels or within [`ALT_MIN_FT`],
+/// [`ALT_MAX_FT`].
+fn alt_ok(table: &'static str, name: &'static str, col: &[i32]) -> Result<(), ModelError> {
+    for (row, v) in col.iter().enumerate() {
+        let sentinel = matches!(*v, ALT_NONE | ALT_GROUND | ALT_UNKNOWN | ALT_UNLIMITED);
+        if !sentinel && !(ALT_MIN_FT..=ALT_MAX_FT).contains(v) {
+            return Err(bad(
+                table,
+                format!("{name}[{row}] = {v} ft is outside the altitude range"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every bearing in `col` is [`NONE_U16`] or at most [`BEARING_MAX_CDEG`].
+fn bearing_ok(table: &'static str, name: &'static str, col: &[u16]) -> Result<(), ModelError> {
+    for (row, v) in col.iter().enumerate() {
+        if *v != NONE_U16 && *v > BEARING_MAX_CDEG {
+            return Err(bad(
+                table,
+                format!("{name}[{row}] = {v} is not a bearing in 0 to 360 degrees"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every value of a small code column is 0 (absent) or one of `allowed`.
+fn enum_ok(
+    table: &'static str,
+    name: &'static str,
+    col: &[u8],
+    allowed: &[u8],
+) -> Result<(), ModelError> {
+    for (row, v) in col.iter().enumerate() {
+        if *v != 0 && !allowed.contains(v) {
+            return Err(bad(
+                table,
+                format!("{name}[{row}] = {v} is not a valid code"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Keys must be strictly increasing (sorted, no duplicates).
 fn increasing<K: Ord>(
     table: &'static str,
@@ -913,7 +997,10 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
         return Err(bad("strings", "offsets do not span the text"));
     }
     for w in s.offsets.windows(2) {
-        let (a, b) = (w[0] as usize, w[1] as usize);
+        let (a, b) = match w {
+            [a, b] => (*a as usize, *b as usize),
+            _ => (usize::MAX, 0),
+        };
         if a > b || s.text.get(a..b).is_none() {
             return Err(bad(
                 "strings",
@@ -962,6 +1049,7 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     for (lat, lon) in p.lat.iter().zip(&p.lon) {
         pos_ok("points", *lat, *lon, false)?;
     }
+    alt_ok("points", "elev_ft", &p.elev_ft)?;
     increasing("points", point_keys(m))?;
 
     let nv = m.vertices.len();
@@ -1002,6 +1090,16 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     )?;
     str_ok("boundaries", "facility", &b.facility, n_str, false)?;
     str_ok("boundaries", "name", &b.name, n_str, true)?;
+    alt_ok("boundaries", "floor_ft", &b.floor_ft)?;
+    alt_ok("boundaries", "ceiling_ft", &b.ceiling_ft)?;
+    for (row, mu) in b.multiple.iter().enumerate() {
+        if *mu != 0 && !mu.is_ascii_graphic() {
+            return Err(bad(
+                "boundaries",
+                format!("multiple[{row}] = {mu} is not a printable code"),
+            ));
+        }
+    }
     spans_tile("boundaries", "vertices", &b.vertices, |i| i.0, nv)?;
     spans_tile("boundaries", "segs", &b.segs, |i| i.0, ns)?;
     increasing(
@@ -1040,6 +1138,28 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     for (lat, lon) in g.arc_lat.iter().zip(&g.arc_lon) {
         pos_ok("segments", *lat, *lon, true)?;
     }
+    bearing_ok("segments", "bearing_cdeg", &g.bearing_cdeg)?;
+    // A circle or arc has a centre and a radius; every row but a circle has a point.
+    for row in 0..ns {
+        let (Some(&v), Some(&lat), Some(&arc_lat), Some(&radius)) = (
+            g.via.get(row),
+            g.lat.get(row),
+            g.arc_lat.get(row),
+            g.radius_m.get(row),
+        ) else {
+            continue;
+        };
+        let round = matches!(v, via::CIRCLE | via::ARC_CW | via::ARC_CCW);
+        if round && (arc_lat == POS_NONE || radius == 0) {
+            return Err(bad(
+                "segments",
+                format!("row {row} is a circle or arc without a centre and radius"),
+            ));
+        }
+        if v != via::CIRCLE && lat == POS_NONE {
+            return Err(bad("segments", format!("row {row} has no point")));
+        }
+    }
 
     let a = &m.airways;
     let na = a.designator.len();
@@ -1050,6 +1170,14 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
         &[("location", a.location.len()), ("legs", a.legs.len())],
     )?;
     str_ok("airways", "designator", &a.designator, n_str, false)?;
+    for (row, loc) in a.location.iter().enumerate() {
+        if !loc.is_ascii_graphic() {
+            return Err(bad(
+                "airways",
+                format!("location[{row}] = {loc} is not a printable letter"),
+            ));
+        }
+    }
     spans_tile("airways", "legs", &a.legs, |i| i.0, nl)?;
     increasing(
         "airways",
@@ -1077,6 +1205,31 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
         ("dogleg", &l.dogleg),
     ] {
         bits_ok("airway_legs", name, bs, nl)?;
+    }
+    for (name, col) in [
+        ("mea_ft", &l.mea_ft),
+        ("mea_opp_ft", &l.mea_opp_ft),
+        ("gps_mea_ft", &l.gps_mea_ft),
+    ] {
+        alt_ok("airway_legs", name, col)?;
+    }
+    for (name, col) in [("mea_dir", &l.mea_dir), ("gps_mea_dir", &l.gps_mea_dir)] {
+        enum_ok(
+            "airway_legs",
+            name,
+            col,
+            &[
+                compass::NORTH,
+                compass::NORTHEAST,
+                compass::EAST,
+                compass::SOUTHEAST,
+                compass::SOUTH,
+                compass::SOUTHWEST,
+                compass::WEST,
+                compass::NORTHWEST,
+                compass::OTHER,
+            ],
+        )?;
     }
     point_ok("airway_legs", "from", &l.from, n, true)?;
     point_ok("airway_legs", "to", &l.to, n, true)?;
@@ -1146,6 +1299,25 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     point_ok("legs", "fix", &lg.fix, n, true)?;
     point_ok("legs", "center", &lg.center, n, true)?;
     code_ok("legs", "path_term", &lg.path_term, path_term::MAX, true)?;
+    enum_ok(
+        "legs",
+        "turn",
+        &lg.turn,
+        &[turn::LEFT, turn::RIGHT, turn::EITHER],
+    )?;
+    enum_ok(
+        "legs",
+        "alt_desc",
+        &lg.alt_desc,
+        &[
+            alt_desc::AT_OR_ABOVE,
+            alt_desc::BETWEEN,
+            alt_desc::UNVERIFIED,
+        ],
+    )?;
+    bearing_ok("legs", "course_mag_cdeg", &lg.course_mag_cdeg)?;
+    alt_ok("legs", "alt1_ft", &lg.alt1_ft)?;
+    alt_ok("legs", "alt2_ft", &lg.alt2_ft)?;
 
     let mo = &m.mora;
     same_len(
@@ -1153,6 +1325,21 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
         mo.lat.len(),
         &[("lon", mo.lon.len()), ("hundreds_ft", mo.hundreds_ft.len())],
     )?;
+    for (row, ((lat, lon), h)) in mo.lat.iter().zip(&mo.lon).zip(&mo.hundreds_ft).enumerate() {
+        // A one-degree cell: southwest corner within the globe, value in hundreds of feet.
+        if !(-90..90).contains(lat) || !(-180..180).contains(lon) {
+            return Err(bad(
+                "mora",
+                format!("row {row} names a cell outside the globe"),
+            ));
+        }
+        if *h != MORA_UNKNOWN && !(0..=1_000).contains(h) {
+            return Err(bad(
+                "mora",
+                format!("hundreds_ft[{row}] = {h} is outside 0 to 100000 ft"),
+            ));
+        }
+    }
     increasing("mora", mo.lat.iter().zip(&mo.lon).map(|(a, b)| (*a, *b)))?;
 
     let u = &m.unresolved;
@@ -1209,6 +1396,7 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
 /// Identity key of a point: (ident, region, scope, class of kind) as strings; the derived
 /// ordering is the table's sort order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+// A7.2: cold struct, size guard waived
 pub struct PointKey<'a> {
     pub ident: &'a str,
     pub region: &'a str,

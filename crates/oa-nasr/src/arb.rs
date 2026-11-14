@@ -7,6 +7,7 @@ use std::io::BufRead;
 
 /// A row of `ARB_BASE`: one air route traffic control centre (or CERAP).
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct ArbBase {
     /// 1-based line in the file.
     pub line: u64,
@@ -36,6 +37,7 @@ pub struct ArbBase {
 
 /// One point of a boundary (a row of `ARB_SEG`).
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct BoundaryPoint {
     /// 1-based line in the file.
     pub line: u64,
@@ -55,6 +57,7 @@ pub struct BoundaryPoint {
 
 /// An ordered point sequence for one facility, altitude structure and boundary type.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Boundary {
     /// `LOCATION_ID`.
     pub location_id: String,
@@ -88,6 +91,7 @@ pub fn parse_base<R: BufRead>(source: &str, reader: R) -> Result<Parsed<ArbBase>
     })
 }
 
+// A7.2: cold struct, size guard waived
 struct SegRow {
     location_id: String,
     location_name: Option<String>,
@@ -120,6 +124,7 @@ pub fn parse_boundaries<R: BufRead>(
         })
     })?;
     let mut rejected = rows.rejected;
+    let mut dropped = rows.rejected_dropped;
     type Key = (String, String, String);
     let mut groups: BTreeMap<Key, (Option<String>, Vec<BoundaryPoint>)> = BTreeMap::new();
     for s in rows.records {
@@ -136,15 +141,19 @@ pub fn parse_boundaries<R: BufRead>(
         let mut kept: Vec<BoundaryPoint> = Vec::with_capacity(points.len());
         for p in points {
             if kept.last().is_some_and(|k| k.point_seq == p.point_seq) {
-                rejected.push(RowError {
-                    file: source.to_string(),
-                    line: p.line,
-                    column: "POINT_SEQ".to_string(),
-                    kind: RowErrorKind::DuplicateKey(format!(
-                        "{location_id}/{altitude}/{boundary_type}/{}",
-                        p.point_seq
-                    )),
-                });
+                crate::reject(
+                    &mut rejected,
+                    &mut dropped,
+                    RowError {
+                        file: source.to_string(),
+                        line: p.line,
+                        column: "POINT_SEQ".to_string(),
+                        kind: RowErrorKind::DuplicateKey(format!(
+                            "{location_id}/{altitude}/{boundary_type}/{}",
+                            p.point_seq
+                        )),
+                    },
+                );
             } else {
                 kept.push(p);
             }
@@ -158,5 +167,9 @@ pub fn parse_boundaries<R: BufRead>(
         });
     }
     rejected.sort_by_key(|e| e.line);
-    Ok(Parsed { records, rejected })
+    Ok(Parsed {
+        records,
+        rejected,
+        rejected_dropped: dropped,
+    })
 }

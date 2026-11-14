@@ -21,6 +21,7 @@ const MAXIT2: u32 = MAXIT1 + 53 + 10;
 
 /// Result of the inverse problem.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Inverse {
     /// Geodesic distance in metres.
     pub distance_m: f64,
@@ -32,6 +33,7 @@ pub struct Inverse {
 
 /// Result of the direct problem.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Direct {
     /// The destination.
     pub position: LatLon,
@@ -41,6 +43,7 @@ pub struct Direct {
 
 /// An ellipsoid of revolution plus the precomputed series tables for it. Build once and reuse.
 #[derive(Debug, Clone)]
+// A7.2: cold struct, size guard waived
 pub struct Ellipsoid {
     pub(crate) a: f64,
     pub(crate) f: f64,
@@ -261,6 +264,7 @@ fn astroid(x: f64, y: f64) -> f64 {
     uv / ((uv + sq(w)).sqrt() + w)
 }
 
+// A7.2: cold struct, size guard waived
 struct Lambda12 {
     lam12: f64,
     salp2: f64,
@@ -275,6 +279,7 @@ struct Lambda12 {
 }
 
 /// Starting guess for the inverse problem. `sig12 >= 0` means the solution is complete.
+// A7.2: cold struct, size guard waived
 struct Start {
     sig12: f64,
     salp1: f64,
@@ -329,6 +334,10 @@ impl Ellipsoid {
         }
     }
 
+    // E3 / H2: the loops index fixed-size tables by the loop's own bounds: `j` and `l` walk
+    // `coef::A3` and `coef::C3`, which match the 7-element and 6x7 tables, and `i` and `m - 1 - i`
+    // lie in 0..GL_N for i < GL_N / 2.
+    #[allow(clippy::indexing_slicing)]
     fn finish_tables(&mut self) {
         for (j, row) in coef::A3.iter().enumerate() {
             self.a3x[j] = polyval(row, self.n);

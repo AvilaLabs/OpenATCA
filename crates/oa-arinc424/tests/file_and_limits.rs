@@ -1,5 +1,11 @@
 //! File-level behaviour: header and cycle rule (OA-424-001), limits (OA-GEN-003), no panics
 //! (OA-GEN-004), no unsafe code (OA-GEN-001) and no dependencies (OA-GEN-002).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 

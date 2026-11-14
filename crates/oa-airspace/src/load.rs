@@ -21,6 +21,7 @@ use std::path::Path;
 
 /// An expected SHA-256 for an input archive, from `--expect-sha256 <file>=<hex>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Expectation {
     /// Archive file name (no directory).
     pub file: String,
@@ -99,11 +100,12 @@ impl From<NasrError> for LoadError {
     }
 }
 
-/// Parses `<file>=<hex>`; the hex may be upper or lower case.
+/// Parses `<file>=<hex>`; the hex is exactly 64 hexadecimal digits, upper or lower case. Every
+/// character is checked: `u8::from_str_radix` alone would accept a leading `+` in a pair.
 pub fn parse_expectation(arg: &str) -> Result<Expectation, LoadError> {
     let bad = || LoadError::BadExpectation(arg.to_string());
     let (file, hex) = arg.rsplit_once('=').ok_or_else(bad)?;
-    if file.is_empty() || hex.len() != 64 {
+    if file.is_empty() || hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(bad());
     }
     let mut sha256 = [0u8; 32];
@@ -227,7 +229,7 @@ fn extract(archive_name: &str, zip: &Archive<'_>, file: &str) -> Result<Vec<u8>,
     let mut hits = zip
         .entries()
         .iter()
-        .filter(|e| e.name == file || e.name.ends_with(&suffix));
+        .filter(|e| e.name() == file || e.name().ends_with(&suffix));
     let first = hits.next().ok_or_else(|| LoadError::MissingEntry {
         archive: archive_name.to_string(),
         entry: file.to_string(),
@@ -256,6 +258,7 @@ const STRUCTURE_FILES: [&str; 8] = [
 /// Reads one data file: extracts it, validates it against its schema, and hands the bytes to
 /// `parse`, which returns the parsed records and the rows it rejected. The `FileDiag` is pushed
 /// into `diag`.
+// A7.2: cold struct, size guard waived
 struct NasrReader<'a> {
     name: &'a str,
     zip: &'a Archive<'a>,
@@ -285,16 +288,19 @@ impl NasrReader<'_> {
 }
 
 /// Files rejected rows to the diagnostics of the file they came from.
-fn attach(diag: &mut Diagnostics, rejected: Vec<RowError>) {
+fn attach(diag: &mut Diagnostics, rejected: Vec<RowError>, dropped: u64) {
     for r in rejected {
         if let Some(d) = diag.nasr_files.iter_mut().find(|d| d.file == r.file) {
             d.rejected.push(r);
         }
     }
+    if let Some(d) = diag.nasr_files.last_mut() {
+        d.rejected_dropped = d.rejected_dropped.saturating_add(dropped);
+    }
 }
 
 fn take<T>(parsed: Parsed<T>, diag: &mut Diagnostics) -> Vec<T> {
-    attach(diag, parsed.rejected);
+    attach(diag, parsed.rejected, parsed.rejected_dropped);
     parsed.records
 }
 

@@ -66,7 +66,7 @@ pub enum SnapshotError {
     BadTag { expected: &'static str },
     /// A count claims more rows than the remaining bytes could hold.
     CountExceedsFile { table: &'static str, rows: u64 },
-    /// The artcc field is longer than [`MAX_ARTCC_BYTES`] or not UTF-8.
+    /// The artcc field is longer than [`MAX_ARTCC_BYTES`] (or, reading, not UTF-8).
     BadArtcc,
     /// The string table text is not valid UTF-8.
     BadText,
@@ -148,13 +148,13 @@ fn put_i16s(out: &mut Vec<u8>, col: &[i16]) {
 
 fn put_strs(out: &mut Vec<u8>, col: &[StrIx]) {
     for v in col {
-        put_u32(out, v.0);
+        put_u32(out, v.get());
     }
 }
 
 fn put_points(out: &mut Vec<u8>, col: &[PointIx]) {
     for v in col {
-        put_u32(out, v.0);
+        put_u32(out, v.get());
     }
 }
 
@@ -171,9 +171,22 @@ fn put_bits(out: &mut Vec<u8>, b: &BitSet) {
     }
 }
 
-/// Encodes a model. The model is validated first; an inconsistent model is refused (E5).
+/// Refuses a snapshot length the reader would refuse (OA-ASP-012).
+fn check_len(len: usize) -> Result<(), SnapshotError> {
+    if len > MAX_SNAPSHOT_BYTES {
+        return Err(SnapshotError::FileTooLarge { len });
+    }
+    Ok(())
+}
+
+/// Encodes a model. The model is validated first; an inconsistent model is refused (E5). The
+/// writer enforces the limits the reader enforces ([`MAX_ARTCC_BYTES`], [`MAX_SNAPSHOT_BYTES`]),
+/// so every file it produces can be read back (OA-ASP-012).
 pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     validate_model(m).map_err(SnapshotError::Invalid)?;
+    if m.meta.artcc.len() > MAX_ARTCC_BYTES {
+        return Err(SnapshotError::BadArtcc);
+    }
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, FORMAT_VERSION);
@@ -229,8 +242,8 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_strs(&mut out, &b.name);
     put_i32s(&mut out, &b.floor_ft);
     put_i32s(&mut out, &b.ceiling_ft);
-    put_spans(&mut out, &b.vertices, |i| i.0);
-    put_spans(&mut out, &b.segs, |i| i.0);
+    put_spans(&mut out, &b.vertices, |i| i.get());
+    put_spans(&mut out, &b.segs, |i| i.get());
     put_bits(&mut out, &b.floor_agl);
     put_bits(&mut out, &b.ceiling_agl);
 
@@ -248,7 +261,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_header(&mut out, TAG_AWYS, count("airways", a.designator.len())?);
     put_strs(&mut out, &a.designator);
     out.extend_from_slice(&a.location);
-    put_spans(&mut out, &a.legs, |i| i.0);
+    put_spans(&mut out, &a.legs, |i| i.get());
 
     let l = &m.airway_legs;
     put_header(&mut out, TAG_AWLG, count("airway_legs", l.from.len())?);
@@ -269,7 +282,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_points(&mut out, &pr.airport);
     put_strs(&mut out, &pr.ident);
     put_strs(&mut out, &pr.name);
-    put_spans(&mut out, &pr.routes, |i| i.0);
+    put_spans(&mut out, &pr.routes, |i| i.get());
     for bs in [&pr.src_nasr, &pr.src_cifp, &pr.coded] {
         put_bits(&mut out, bs);
     }
@@ -278,7 +291,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_header(&mut out, TAG_RTES, count("routes", r.route_type.len())?);
     out.extend_from_slice(&r.route_type);
     put_strs(&mut out, &r.transition);
-    put_spans(&mut out, &r.legs, |i| i.0);
+    put_spans(&mut out, &r.legs, |i| i.get());
 
     let lg = &m.legs;
     put_header(&mut out, TAG_LEGS, count("legs", lg.fix.len())?);
@@ -317,6 +330,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_i32s(&mut out, &d.nasr_lat);
     put_i32s(&mut out, &d.nasr_lon);
     put_u32s(&mut out, &d.dist_mm);
+    check_len(out.len())?;
     Ok(out)
 }
 
@@ -324,6 +338,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
 // Reading
 
 /// A bounded cursor over the input. A subsystem (D5): it owns its position.
+// A7.2: cold struct, size guard waived
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -443,11 +458,11 @@ impl<'a> Reader<'a> {
     }
 
     fn strs(&mut self, n: usize, what: &'static str) -> Result<Vec<StrIx>, SnapshotError> {
-        Ok(self.u32s(n, what)?.into_iter().map(StrIx).collect())
+        Ok(self.u32s(n, what)?.into_iter().map(StrIx::new).collect())
     }
 
     fn points(&mut self, n: usize, what: &'static str) -> Result<Vec<PointIx>, SnapshotError> {
-        Ok(self.u32s(n, what)?.into_iter().map(PointIx).collect())
+        Ok(self.u32s(n, what)?.into_iter().map(PointIx::new).collect())
     }
 
     fn spans<I>(
@@ -589,8 +604,8 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         name: r.strs(n, "BNDS")?,
         floor_ft: r.i32s(n, "BNDS")?,
         ceiling_ft: r.i32s(n, "BNDS")?,
-        vertices: r.spans(n, "BNDS", VertexIx)?,
-        segs: r.spans(n, "BNDS", SegIx)?,
+        vertices: r.spans(n, "BNDS", VertexIx::new)?,
+        segs: r.spans(n, "BNDS", SegIx::new)?,
         floor_agl: r.bits(n, "BNDS")?,
         ceiling_agl: r.bits(n, "BNDS")?,
     };
@@ -610,7 +625,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
     let airways = Airways {
         designator: r.strs(n, "AWYS")?,
         location: r.bytes(n, "AWYS")?,
-        legs: r.spans(n, "AWYS", AirwayLegIx)?,
+        legs: r.spans(n, "AWYS", AirwayLegIx::new)?,
     };
 
     let n = r.table(TAG_AWLG, "AWLG", 4 * 5 + 2, 3)?;
@@ -633,7 +648,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         airport: r.points(n, "PROC")?,
         ident: r.strs(n, "PROC")?,
         name: r.strs(n, "PROC")?,
-        routes: r.spans(n, "PROC", RouteIx)?,
+        routes: r.spans(n, "PROC", RouteIx::new)?,
         src_nasr: r.bits(n, "PROC")?,
         src_cifp: r.bits(n, "PROC")?,
         coded: r.bits(n, "PROC")?,
@@ -643,7 +658,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
     let routes = Routes {
         route_type: r.bytes(n, "RTES")?,
         transition: r.strs(n, "RTES")?,
-        legs: r.spans(n, "RTES", LegIx)?,
+        legs: r.spans(n, "RTES", LegIx::new)?,
     };
 
     let n = r.table(TAG_LEGS, "LEGS", 4 * 2 + 2 + 2 + 4 + 1 + 8 + 2, 1)?;
@@ -711,4 +726,21 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
     };
     validate_model(&m).map_err(SnapshotError::Model)?;
     Ok(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-ASP-012
+    #[test]
+    fn the_writer_refuses_a_length_the_reader_refuses() {
+        assert!(check_len(MAX_SNAPSHOT_BYTES).is_ok());
+        assert_eq!(
+            check_len(MAX_SNAPSHOT_BYTES + 1),
+            Err(SnapshotError::FileTooLarge {
+                len: MAX_SNAPSHOT_BYTES + 1
+            })
+        );
+    }
 }

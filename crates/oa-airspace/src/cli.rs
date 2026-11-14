@@ -9,7 +9,7 @@
 //!
 //! `build` writes `<snapshot>` and `<snapshot>.report.txt`. `diff` prints to standard output.
 
-use crate::build::{build_model, BuildParams, MAX_BUFFER_M, NM_M};
+use crate::build::{build_model, BuildParams, MAX_ARTCC_LEN, MAX_BUFFER_M, NM_M};
 use crate::diff::{diff_models, render_diff};
 use crate::load::{load_files, parse_expectation, Expectation};
 use crate::report::{render_report, ReportInput};
@@ -54,6 +54,7 @@ fn failed(step: &str, e: impl fmt::Display) -> CliError {
 
 /// Parsed `build` arguments.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct BuildArgs {
     pub nasr: PathBuf,
     pub cifp: PathBuf,
@@ -83,6 +84,28 @@ fn need<T>(v: Option<T>, flag: &str) -> Result<T, CliError> {
     v.ok_or_else(|| CliError::Usage(format!("missing {flag}")))
 }
 
+/// Stores a flag's value; a flag given twice is an error, not "the last one wins".
+fn set_once<T>(slot: &mut Option<T>, flag: &str, v: T) -> Result<(), CliError> {
+    if slot.is_some() {
+        return Err(CliError::Usage(format!("{flag} given more than once")));
+    }
+    *slot = Some(v);
+    Ok(())
+}
+
+/// An ARTCC identifier: 1 to [`MAX_ARTCC_LEN`] ASCII letters or digits.
+pub fn parse_artcc(text: &str) -> Result<String, CliError> {
+    let ok = !text.is_empty()
+        && text.len() <= MAX_ARTCC_LEN
+        && text.bytes().all(|b| b.is_ascii_alphanumeric());
+    if !ok {
+        return Err(CliError::Usage(format!(
+            "--artcc {text:?} is not 1 to {MAX_ARTCC_LEN} letters or digits"
+        )));
+    }
+    Ok(text.to_string())
+}
+
 /// Parses the arguments after `build`.
 pub fn parse_build_args(args: &[String]) -> Result<BuildArgs, CliError> {
     let mut nasr = None;
@@ -93,21 +116,36 @@ pub fn parse_build_args(args: &[String]) -> Result<BuildArgs, CliError> {
     let mut out = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
-        let mut value = |what: &str| {
-            it.next()
-                .cloned()
-                .ok_or_else(|| CliError::Usage(format!("{what} needs a value")))
+        // A value is the next argument; a missing, empty or flag-looking one is an error (a
+        // forgotten value would otherwise swallow the next flag).
+        let mut value = |what: &str| match it.next() {
+            None => Err(CliError::Usage(format!("{what} needs a value"))),
+            Some(v) if v.is_empty() || v.starts_with("--") => Err(CliError::Usage(format!(
+                "{what} needs a value, found {v:?}"
+            ))),
+            Some(v) => Ok(v.clone()),
         };
         match flag.as_str() {
-            "--nasr" => nasr = Some(PathBuf::from(value("--nasr")?)),
-            "--cifp" => cifp = Some(PathBuf::from(value("--cifp")?)),
-            "--artcc" => artcc = Some(value("--artcc")?),
-            "--buffer-nm" => buffer_m = Some(parse_buffer_nm(&value("--buffer-nm")?)?),
+            "--nasr" => set_once(&mut nasr, "--nasr", PathBuf::from(value("--nasr")?))?,
+            "--cifp" => set_once(&mut cifp, "--cifp", PathBuf::from(value("--cifp")?))?,
+            "--artcc" => set_once(&mut artcc, "--artcc", parse_artcc(&value("--artcc")?)?)?,
+            "--buffer-nm" => set_once(
+                &mut buffer_m,
+                "--buffer-nm",
+                parse_buffer_nm(&value("--buffer-nm")?)?,
+            )?,
             "--expect-sha256" => {
                 let v = value("--expect-sha256")?;
-                expect.push(parse_expectation(&v).map_err(|e| CliError::Usage(e.to_string()))?);
+                let e = parse_expectation(&v).map_err(|e| CliError::Usage(e.to_string()))?;
+                if expect.iter().any(|x: &Expectation| x.file == e.file) {
+                    return Err(CliError::Usage(format!(
+                        "--expect-sha256 given twice for {:?}",
+                        e.file
+                    )));
+                }
+                expect.push(e);
             }
-            "--out" => out = Some(PathBuf::from(value("--out")?)),
+            "--out" => set_once(&mut out, "--out", PathBuf::from(value("--out")?))?,
             other => return Err(CliError::Usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -177,9 +215,17 @@ pub fn run_build(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
 
 /// `diff`: compare two snapshots and print the change list to `out`.
 pub fn run_diff(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
+    if let Some(flag) = args.iter().find(|a| a.starts_with("--")) {
+        return Err(CliError::Usage(format!("unknown argument {flag:?}")));
+    }
     let [a, b] = args else {
         return Err(CliError::Usage("diff takes two snapshot paths".into()));
     };
+    if a.is_empty() || b.is_empty() {
+        return Err(CliError::Usage(
+            "diff needs two snapshot paths, not empty ones".into(),
+        ));
+    }
     let load = |p: &String| -> Result<_, CliError> {
         let bytes = read_snapshot(Path::new(p))?;
         decode(&bytes).map_err(|e| failed(&format!("read {p}"), e))

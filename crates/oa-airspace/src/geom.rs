@@ -78,6 +78,7 @@ fn angle(a: V3, b: V3) -> f64 {
 
 /// One polygon edge with what the spherical estimate needs.
 #[derive(Clone, Debug)]
+// A7.2: cold struct, size guard waived
 struct Edge {
     a: LatLon,
     b: LatLon,
@@ -150,6 +151,12 @@ pub fn exact_edge_m(ell: &Ellipsoid, a: LatLon, b: LatLon, p: LatLon) -> Result<
 }
 
 /// Bounding box in degrees; used only to skip points that cannot be in the area.
+///
+/// The latitude range includes the poleward bulge of every geodesic edge (OA-ASP-008). The
+/// longitude range is unwrapped: `max_lon - min_lon` is the true width, and either end may lie
+/// outside [-180, 180] when the area crosses the antimeridian. Always test longitudes with
+/// [`lon_overlaps`], which compares modulo 360 degrees.
+// A7.2: cold struct, size guard waived (one per build).
 #[derive(Clone, Copy, Debug)]
 pub struct Bbox {
     pub min_lat: f64,
@@ -158,8 +165,62 @@ pub struct Bbox {
     pub max_lon: f64,
 }
 
+/// Wraps a longitude difference into [-180, 180).
+fn wrap180(d: f64) -> f64 {
+    d - 360.0 * ((d + 180.0) / 360.0).floor()
+}
+
+/// True when the longitude intervals [`a_lo`, `a_hi`] and [`b_lo`, `b_hi`] share a point
+/// modulo 360 degrees. Each interval is unwrapped (its ends may lie outside [-180, 180]) and
+/// at most 360 degrees wide, so shifts of up to two turns cover every case.
+pub fn lon_overlaps(a_lo: f64, a_hi: f64, b_lo: f64, b_hi: f64) -> bool {
+    [-720.0, -360.0, 0.0, 360.0, 720.0]
+        .iter()
+        .any(|k| a_lo <= b_hi + k && a_hi >= b_lo + k)
+}
+
+/// The longitude range of a sequence of longitudes, unwrapped around the first one: each value
+/// is placed within 180 degrees of `reference`, so the range covers every value modulo 360.
+fn lon_range(reference: f64, lons: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let mut range: Option<(f64, f64)> = None;
+    for l in lons {
+        let u = reference + wrap180(l - reference);
+        range = Some(match range {
+            Some((lo, hi)) => (lo.min(u), hi.max(u)),
+            None => (u, u),
+        });
+    }
+    range
+}
+
+/// Latitude of the geodesic's northern or southern vertex between `a` and `b`, when it lies
+/// inside the edge (the forward azimuth changes from north-going to south-going or the other
+/// way), else `None`. Clairaut's relation on the ellipsoid: `cos(beta) sin(azimuth)` is constant
+/// along the geodesic, where `beta` is the reduced latitude, so the vertex is where
+/// `cos(beta_max) = |cos(beta_a) sin(azimuth_a)|`. Returns the signed latitude of the vertex
+/// (positive for a northern one).
+fn edge_vertex_lat(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<Option<f64>, GeoError> {
+    let inv = ell.inverse(a, b)?;
+    let (c1, c2) = (
+        inv.azimuth1_deg.to_radians().cos(),
+        inv.azimuth2_deg.to_radians().cos(),
+    );
+    if c1 * c2 >= 0.0 {
+        return Ok(None);
+    }
+    let f1 = 1.0 - ell.flattening();
+    let beta_a = (f1 * a.lat().to_radians().tan()).atan();
+    let k = (beta_a.cos() * inv.azimuth1_deg.to_radians().sin())
+        .abs()
+        .min(1.0);
+    let beta_max = k.acos();
+    let lat = (beta_max.tan() / f1).atan().to_degrees();
+    Ok(Some(if c1 > 0.0 { lat } else { -lat }))
+}
+
 /// The selection area: polygons, the buffer, and prepared edges.
 #[derive(Clone, Debug)]
+// A7.2: cold struct, size guard waived
 pub struct Area {
     pub ell: Ellipsoid,
     polys: Vec<Polygon>,
@@ -168,7 +229,7 @@ pub struct Area {
     edges: Vec<Edge>,
     pub buffer_m: f64,
     /// Bounding box of the area including the buffer; `None` when the rings are too wide for a
-    /// box to be a safe filter (antimeridian, poles).
+    /// box to be a safe filter (more than 120 degrees of longitude, or near a pole).
     pub bbox: Option<Bbox>,
 }
 
@@ -179,9 +240,14 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
     let mut polys = Vec::with_capacity(rings.len());
     let mut edges = Vec::new();
     let (mut min_lat, mut max_lat) = (f64::INFINITY, f64::NEG_INFINITY);
+    let reference = rings.iter().flatten().next().map_or(0.0, |v| v.lon());
     let (mut min_lon, mut max_lon) = (f64::INFINITY, f64::NEG_INFINITY);
     for ring in &rings {
         polys.push(Polygon::new(&ell, ring)?);
+        if let Some((lo, hi)) = lon_range(reference, ring.iter().map(|v| v.lon())) {
+            min_lon = min_lon.min(lo);
+            max_lon = max_lon.max(hi);
+        }
         for (i, a) in ring.iter().enumerate() {
             let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
             let (a3, b3) = (unit(*a), unit(b));
@@ -201,8 +267,11 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
             });
             min_lat = min_lat.min(a.lat());
             max_lat = max_lat.max(a.lat());
-            min_lon = min_lon.min(a.lon());
-            max_lon = max_lon.max(a.lon());
+            // A geodesic bulges poleward between its ends (OA-ASP-008).
+            if let Some(v) = edge_vertex_lat(&ell, *a, b)? {
+                min_lat = min_lat.min(v);
+                max_lat = max_lat.max(v);
+            }
         }
     }
     let dlat = buffer_m / 110_000.0 + 0.01;
@@ -233,8 +302,7 @@ fn in_bbox(area: &Area, p: LatLon) -> bool {
         Some(b) => {
             p.lat() >= b.min_lat
                 && p.lat() <= b.max_lat
-                && p.lon() >= b.min_lon
-                && p.lon() <= b.max_lon
+                && lon_overlaps(p.lon(), p.lon(), b.min_lon, b.max_lon)
         }
         None => true,
     }
@@ -316,6 +384,7 @@ pub fn ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, Geo
 /// A boundary record as the sampler needs it: the via code, the point (none for a circle), the
 /// arc or circle centre and radius in metres.
 #[derive(Clone, Copy, Debug)]
+// A7.2: cold struct, size guard waived
 pub struct SegIn {
     pub via: u8,
     pub pos: Option<LatLon>,
@@ -384,19 +453,20 @@ pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoEr
         return Ok(false);
     }
     if let Some(b) = area.bbox {
-        let (mut lo_la, mut hi_la, mut lo_lo, mut hi_lo) = (
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        );
+        let (mut lo_la, mut hi_la) = (f64::INFINITY, f64::NEG_INFINITY);
         for s in samples {
             lo_la = lo_la.min(s.lat());
             hi_la = hi_la.max(s.lat());
-            lo_lo = lo_lo.min(s.lon());
-            hi_lo = hi_lo.max(s.lon());
         }
-        if hi_la < b.min_lat || lo_la > b.max_lat || hi_lo < b.min_lon || lo_lo > b.max_lon {
+        // Samples are points, not the edges between them; their spacing is far below the
+        // buffer margin, so the sample extent stands for the outline.
+        let reference = samples.first().map_or(0.0, |s| s.lon());
+        let (lo_lo, hi_lo) =
+            lon_range(reference, samples.iter().map(|s| s.lon())).unwrap_or((reference, reference));
+        if hi_la < b.min_lat
+            || lo_la > b.max_lat
+            || !lon_overlaps(lo_lo, hi_lo, b.min_lon, b.max_lon)
+        {
             return Ok(false);
         }
     }
@@ -405,11 +475,16 @@ pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoEr
             return Ok(true);
         }
     }
-    if let Ok(outline) = Polygon::new(&area.ell, samples) {
-        for ring in &area.rings {
-            if ring.iter().any(|v| outline.contains(*v)) {
-                return Ok(true);
-            }
+    // Fewer than three distinct samples enclose nothing; any other failure to form the outline
+    // is a fault in the input and goes to the caller (never read as "not touching").
+    let outline = match Polygon::new(&area.ell, samples) {
+        Ok(o) => o,
+        Err(GeoError::BadPolygon("fewer than 3 distinct vertices")) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    for ring in &area.rings {
+        if ring.iter().any(|v| outline.contains(*v)) {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -420,15 +495,17 @@ pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoEr
 pub fn cell_overlaps_area(area: &Area, lat: i32, lon: i32) -> Result<bool, GeoError> {
     let (la, lo) = (f64::from(lat), f64::from(lon));
     if let Some(b) = area.bbox {
-        if la + 1.0 < b.min_lat || la > b.max_lat || lo + 1.0 < b.min_lon || lo > b.max_lon {
+        if la + 1.0 < b.min_lat
+            || la > b.max_lat
+            || !lon_overlaps(lo, lo + 1.0, b.min_lon, b.max_lon)
+        {
             return Ok(false);
         }
     }
     for ring in &area.rings {
-        if ring
-            .iter()
-            .any(|v| v.lat() >= la && v.lat() <= la + 1.0 && v.lon() >= lo && v.lon() <= lo + 1.0)
-        {
+        if ring.iter().any(|v| {
+            v.lat() >= la && v.lat() <= la + 1.0 && lon_overlaps(v.lon(), v.lon(), lo, lo + 1.0)
+        }) {
             return Ok(true);
         }
     }
@@ -448,6 +525,7 @@ pub fn cell_overlaps_area(area: &Area, lat: i32, lon: i32) -> Result<bool, GeoEr
 
 /// The largest geodesic-versus-rhumb separation over a ring's edges (closing edge included).
 #[derive(Clone, Copy, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct RingSeparation {
     /// Largest separation, metres.
     pub max_m: f64,

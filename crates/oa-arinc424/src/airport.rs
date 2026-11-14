@@ -10,6 +10,7 @@ use crate::types::{Altitude, Meta, Position};
 
 /// Airport reference point record, section P subsection A (cols 13).
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Airport {
     pub meta: Meta,
     /// Cols 7-10. ICAO identifier, or the FAA identifier when there is none (FAA readme).
@@ -67,7 +68,11 @@ pub(crate) fn parse_airport(r: &Rec, meta: Meta) -> Result<Airport, ErrorKind> {
         longest_runway_ft: r
             .uint("longest runway", 28, 30)?
             .map(|h| h.saturating_mul(100)),
-        ifr_capable: r.ch(31) == 'Y',
+        ifr_capable: match r.ch(31) {
+            'Y' => true,
+            'N' | ' ' => false,
+            _ => return Err(r.bad("IFR capability", 31, 31, "expected Y or N")),
+        },
         longest_runway_surface: r.opt_ch(32),
         position,
         magnetic_variation: r.variation("magnetic variation", 52)?,
@@ -91,6 +96,7 @@ pub(crate) fn check_primary(r: &Rec, col: usize) -> Result<(), ErrorKind> {
 
 /// Runway record (section P subsection G): the landing threshold.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Runway {
     pub meta: Meta,
     /// Cols 7-10 / 11-12: the airport this runway belongs to.
@@ -149,7 +155,7 @@ pub(crate) fn parse_runway(r: &Rec, meta: Meta) -> Result<Runway, ErrorKind> {
         airport_region: r.text(11, 12),
         ident: r.text(14, 18),
         length_ft: r.req_uint("runway length", 23, 27)?,
-        magnetic_bearing: r.scaled("runway bearing", 28, 31, 10.0)?,
+        magnetic_bearing: r.bearing("runway bearing", 28, 31)?,
         threshold,
         ellipsoid_height_m: r.signed_scaled("ellipsoid height", 61, 66, 10.0)?,
         threshold_elevation_ft: r.signed("threshold elevation", 67, 71)?,
@@ -169,6 +175,7 @@ pub fn runway_designator(r: &Runway) -> &str {
 
 /// Localizer and glide slope record (section P subsection I).
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Localizer {
     pub meta: Meta,
     /// Cols 7-10 / 11-12: the airport.
@@ -228,7 +235,7 @@ pub(crate) fn parse_localizer(r: &Rec, meta: Meta) -> Result<Localizer, ErrorKin
         runway_ident: r.text(28, 32),
         localizer_position,
         bearing: r
-            .scaled("localizer bearing", 52, 55, 10.0)?
+            .bearing("localizer bearing", 52, 55)?
             .ok_or_else(|| r.bad("localizer bearing", 52, 55, "required but blank"))?,
         glide_slope_position: r.position("glide slope position", 56)?,
         localizer_width_deg: r

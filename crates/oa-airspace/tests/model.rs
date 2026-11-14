@@ -1,5 +1,11 @@
 //! The model's own checks: validation catches every kind of inconsistency, lookups answer
 //! absent keys with `None`, and the bitset and string table behave at their edges.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 
@@ -32,10 +38,14 @@ fn validation_catches_every_kind_of_inconsistency() {
         m.points.elev_ft.pop();
     });
     rejects("long column", |m| m.legs.alt1_ft.push(0));
-    rejects("string index", |m| m.points.name[0] = StrIx(u32::MAX - 1));
-    rejects("point index", |m| m.legs.fix[0] = PointIx(u32::MAX - 1));
+    rejects("string index", |m| {
+        m.points.name[0] = StrIx::new(u32::MAX - 1)
+    });
+    rejects("point index", |m| {
+        m.legs.fix[0] = PointIx::new(u32::MAX - 1)
+    });
     rejects("airway point", |m| {
-        m.airway_legs.from[0] = PointIx(m.points.kind.len() as u32)
+        m.airway_legs.from[0] = PointIx::new(m.points.kind.len() as u32)
     });
     rejects("point code", |m| m.points.kind[0] = 0);
     rejects("point code high", |m| {
@@ -61,12 +71,14 @@ fn validation_catches_every_kind_of_inconsistency() {
         m.points.scope[1] = m.points.scope[0];
         m.points.kind[1] = m.points.kind[0];
     });
-    rejects("span gap", |m| m.procs.routes[0].start = RouteIx(1));
+    rejects("span gap", |m| m.procs.routes[0].start = RouteIx::new(1));
     rejects("span overrun", |m| {
         let n = m.procs.routes.len();
         m.procs.routes[n - 1].len += 1;
     });
-    rejects("span overlap", |m| m.airways.legs[1].start = AirwayLegIx(0));
+    rejects("span overlap", |m| {
+        m.airways.legs[1].start = AirwayLegIx::new(0)
+    });
     rejects("vertex span", |m| m.boundaries.vertices[0].len += 1);
     rejects("bitset length", |m| {
         m.points.in_area.len -= 1;
@@ -105,13 +117,13 @@ fn lookups_find_present_keys_and_answer_none_for_absent_ones() {
     assert!(find_boundary(&m, boundary_source::NASR_ARB, stratum::ARTCC_HIGH, "ZZZ", 0).is_none());
     // Out-of-range handles never panic.
     assert!(point_key(&m, PointIx::NONE).is_none());
-    assert!(point_key(&m, PointIx(m.points.kind.len() as u32)).is_none());
+    assert!(point_key(&m, PointIx::new(m.points.kind.len() as u32)).is_none());
     assert_eq!(at(&m.points.lat, u32::MAX), None);
-    assert_eq!(str_at(&m.strings, StrIx(u32::MAX - 1)), None);
+    assert_eq!(str_at(&m.strings, StrIx::new(u32::MAX - 1)), None);
     assert_eq!(str_or_empty(&m.strings, StrIx::NONE), "");
     // Binary search agrees with a linear scan for every point.
     for i in 0..m.points.kind.len() {
-        let ix = PointIx(i as u32);
+        let ix = PointIx::new(i as u32);
         let k = point_key(&m, ix).expect("key");
         assert_eq!(find_point(&m, k), Some(ix));
     }
@@ -167,4 +179,58 @@ fn code_names_cover_every_code_and_flag_unknown_ones() {
     assert_eq!(path_term::name(path_term::MAX), "VR");
     assert_eq!(path_term::name(path_term::MAX + 1), "--");
     assert_eq!(path_term::NAMES.len(), usize::from(path_term::MAX));
+}
+
+// REQ: OA-ASP-012
+#[test]
+fn validation_checks_the_range_of_every_column_value() {
+    // Altitudes and elevations.
+    rejects("elevation too high", |m| m.points.elev_ft[0] = 2_000_000);
+    rejects("elevation too low", |m| m.points.elev_ft[0] = -5_000);
+    rejects("boundary floor", |m| m.boundaries.floor_ft[0] = 5_000_000);
+    rejects("airway MEA", |m| m.airway_legs.mea_ft[0] = -9_999);
+    rejects("leg altitude", |m| m.legs.alt1_ft[0] = 7_000_000);
+    // Bearings.
+    rejects("leg course", |m| m.legs.course_mag_cdeg[0] = 36_001);
+    rejects("segment bearing", |m| m.segments.bearing_cdeg[0] = 40_000);
+    // Codes.
+    rejects("turn code", |m| m.legs.turn[0] = 9);
+    rejects("altitude description", |m| m.legs.alt_desc[0] = 7);
+    rejects("MEA direction", |m| m.airway_legs.mea_dir[0] = 9);
+    rejects("boundary multiple code", |m| m.boundaries.multiple[0] = 7);
+    rejects("airway location", |m| m.airways.location[0] = 0);
+    // MORA cells.
+    rejects("MORA latitude", |m| m.mora.lat[0] = 95);
+    rejects("MORA longitude", |m| m.mora.lon[0] = 190);
+    rejects("MORA value", |m| m.mora.hundreds_ft[0] = 5_000);
+    rejects("MORA negative", |m| m.mora.hundreds_ft[0] = -5);
+    // Segment shape: a circle or arc needs a centre and a radius; other rows need a point.
+    rejects("arc without a radius", |m| {
+        let i = (0..m.segments.via.len())
+            .find(|&i| m.segments.via[i] == via::ARC_CW)
+            .expect("an arc");
+        m.segments.radius_m[i] = 0;
+    });
+    rejects("arc without a centre", |m| {
+        let i = (0..m.segments.via.len())
+            .find(|&i| m.segments.via[i] == via::ARC_CW)
+            .expect("an arc");
+        m.segments.arc_lat[i] = POS_NONE;
+        m.segments.arc_lon[i] = POS_NONE;
+    });
+    rejects("edge without a point", |m| {
+        let i = (0..m.segments.via.len())
+            .find(|&i| m.segments.via[i] == via::GEODESIC)
+            .expect("a geodesic edge");
+        m.segments.lat[i] = POS_NONE;
+        m.segments.lon[i] = POS_NONE;
+    });
+    // The sentinels and the extremes of every range stay valid.
+    let mut m = base();
+    m.points.elev_ft[0] = ELEV_NONE;
+    m.legs.course_mag_cdeg[0] = 36_000;
+    m.legs.alt1_ft[0] = ALT_UNLIMITED;
+    m.mora.hundreds_ft[0] = MORA_UNKNOWN;
+    m.mora.hundreds_ft[1] = 1_000;
+    validate_model(&m).expect("sentinels and limits are valid");
 }

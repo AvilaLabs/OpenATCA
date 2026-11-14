@@ -13,6 +13,7 @@ use std::fmt::Write;
 
 /// One differing field: its name and its rendering on each side (`None` where absent).
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct FieldChange {
     pub field: String,
     pub from: Option<String>,
@@ -32,6 +33,7 @@ pub enum Change {
 
 /// One diff entry: object class, stable key and what changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct DiffEntry {
     pub class: &'static str,
     pub key: String,
@@ -40,6 +42,7 @@ pub struct DiffEntry {
 
 /// The result of comparing two models.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Diff {
     /// Differences in the headers (cycle, ARTCC, buffer, input hashes).
     pub header: Vec<FieldChange>,
@@ -55,6 +58,42 @@ fn s(m: &Model, ix: StrIx) -> &str {
     str_or_empty(&m.strings, ix)
 }
 
+/// Column `col` at `row`. A validated model has every column the same length, so a miss is a
+/// defect in this crate or an unvalidated model; it is an error, never a default (E5).
+fn g<T: Copy>(col: &[T], row: usize) -> Result<T, ModelError> {
+    col.get(row).copied().ok_or_else(|| ModelError {
+        table: "diff",
+        what: format!("column too short for row {row}"),
+    })
+}
+
+/// The rows `start .. start + len` of a child table as a range, or an error when they overflow.
+fn span_rows(start: usize, len: u32) -> Result<std::ops::Range<usize>, ModelError> {
+    let end = start.checked_add(len as usize).ok_or_else(|| ModelError {
+        table: "diff",
+        what: "span overflows".to_string(),
+    })?;
+    Ok(start..end)
+}
+
+/// Adds an object under `key`. Two objects with one key would hide a change behind the second
+/// (OA-ASP-007), so a duplicate is an error that names the key.
+fn add(
+    out: &mut Objects,
+    class: &'static str,
+    key: String,
+    fields: Fields,
+) -> Result<(), ModelError> {
+    if out.contains_key(&key) {
+        return Err(ModelError {
+            table: class,
+            what: format!("two objects share the diff key {key:?}"),
+        });
+    }
+    out.insert(key, fields);
+    Ok(())
+}
+
 fn point_ref(m: &Model, ix: PointIx) -> String {
     match point_key(m, ix) {
         None => "-".to_string(),
@@ -68,6 +107,15 @@ fn point_ref(m: &Model, ix: PointIx) -> String {
             }
             r
         }
+    }
+}
+
+/// A point's full identity for use in a key: the class of kind plus [`point_ref`]. Two points
+/// with one identifier and region but different classes (a fix and a VOR) are different objects.
+fn point_identity(m: &Model, ix: PointIx) -> String {
+    match point_key(m, ix) {
+        None => "-".to_string(),
+        Some(k) => format!("{} {}", point_kind::name(k.class), point_ref(m, ix)),
     }
 }
 
@@ -107,28 +155,24 @@ fn sources(nasr: bool, cifp: bool) -> String {
     .to_string()
 }
 
-fn point_objects(m: &Model) -> Objects {
+fn point_objects(m: &Model) -> Result<Objects, ModelError> {
     let p = &m.points;
     let mut out = Objects::new();
     for row in 0..p.kind.len() {
-        let ix = PointIx(row as u32);
+        let ix = PointIx::new(row as u32);
         let Some(k) = point_key(m, ix) else { continue };
-        let mut key = format!(
-            "{} {}",
-            point_kind::name(point_kind::class(p.kind[row])),
-            k.ident
-        );
+        let mut key = format!("{} {}", point_kind::name(k.class), k.ident);
         let _ = write!(key, " {}", if k.region.is_empty() { "-" } else { k.region });
         if !k.scope.is_empty() {
             let _ = write!(key, " {}", k.scope);
         }
         let flags = |b: &BitSet| bit_get(b, row).to_string();
         let f: Fields = vec![
-            ("kind".into(), point_kind::name(p.kind[row]).into()),
-            ("position".into(), pos(p.lat[row], p.lon[row])),
-            ("elevation".into(), alt(p.elev_ft[row])),
-            ("alt_ident".into(), s(m, p.alt_ident[row]).into()),
-            ("name".into(), s(m, p.name[row]).into()),
+            ("kind".into(), point_kind::name(g(&p.kind, row)?).into()),
+            ("position".into(), pos(g(&p.lat, row)?, g(&p.lon, row)?)),
+            ("elevation".into(), alt(g(&p.elev_ft, row)?)),
+            ("alt_ident".into(), s(m, g(&p.alt_ident, row)?).into()),
+            ("name".into(), s(m, g(&p.name, row)?).into()),
             (
                 "sources".into(),
                 sources(bit_get(&p.src_nasr, row), bit_get(&p.src_cifp, row)),
@@ -139,35 +183,38 @@ fn point_objects(m: &Model) -> Objects {
             ("class_d".into(), flags(&p.cls_d)),
             ("class_e".into(), flags(&p.cls_e)),
         ];
-        out.insert(key, f);
+        add(&mut out, "point", key, f)?;
     }
-    out
+    Ok(out)
 }
 
-fn boundary_objects(m: &Model) -> Objects {
+fn boundary_objects(m: &Model) -> Result<Objects, ModelError> {
     let b = &m.boundaries;
     let mut out = Objects::new();
     for row in 0..b.source.len() {
-        let source = match b.source[row] {
+        let source = match g(&b.source, row)? {
             boundary_source::NASR_ARB => "NASR-ARB",
             boundary_source::CIFP_UC => "CIFP-UC",
             _ => "CIFP-UR",
         };
+        let multiple = g(&b.multiple, row)?;
+        let name = s(m, g(&b.name, row)?);
         let mut key = format!(
             "{source} {} {}",
-            stratum::name(b.stratum[row]),
-            s(m, b.facility[row])
+            stratum::name(g(&b.stratum, row)?),
+            s(m, g(&b.facility, row)?)
         );
-        if b.multiple[row] != 0 {
-            let _ = write!(key, " {}", char::from(b.multiple[row]));
+        if multiple != 0 {
+            let _ = write!(key, " {}", char::from(multiple));
         }
-        if !s(m, b.name[row]).is_empty() {
-            let _ = write!(key, " {}", s(m, b.name[row]));
+        if !name.is_empty() {
+            let _ = write!(key, " {name}");
         }
+        let agl = |flag: &BitSet| if bit_get(flag, row) { " AGL" } else { "" };
         let mut f: Fields = vec![
             (
                 "edge_interp".into(),
-                if b.edge_interp[row] == edge_interp::UNKNOWN {
+                if g(&b.edge_interp, row)? == edge_interp::UNKNOWN {
                     "unknown"
                 } else {
                     "per segment"
@@ -176,74 +223,56 @@ fn boundary_objects(m: &Model) -> Objects {
             ),
             (
                 "floor".into(),
-                format!(
-                    "{}{}",
-                    alt(b.floor_ft[row]),
-                    if bit_get(&b.floor_agl, row) {
-                        " AGL"
-                    } else {
-                        ""
-                    }
-                ),
+                format!("{}{}", alt(g(&b.floor_ft, row)?), agl(&b.floor_agl)),
             ),
             (
                 "ceiling".into(),
-                format!(
-                    "{}{}",
-                    alt(b.ceiling_ft[row]),
-                    if bit_get(&b.ceiling_agl, row) {
-                        " AGL"
-                    } else {
-                        ""
-                    }
-                ),
+                format!("{}{}", alt(g(&b.ceiling_ft, row)?), agl(&b.ceiling_agl)),
             ),
         ];
-        let vs = b.vertices[row];
-        let verts = m
-            .vertices
-            .get(vs.start.0 as usize..(vs.start.0 + vs.len) as usize)
-            .unwrap_or(&[]);
+        let vs = g(&b.vertices, row)?;
+        let vr = span_rows(vs.start.row(), vs.len)?;
+        let verts = m.vertices.get(vr).unwrap_or(&[]);
         f.push(("vertex_count".into(), verts.len().to_string()));
         for (i, v) in verts.iter().enumerate() {
             f.push((format!("vertex {i:04}"), pos(v.lat, v.lon)));
         }
-        let ss = b.segs[row];
-        let g = &m.segments;
+        let ss = g(&b.segs, row)?;
+        let gs = &m.segments;
         f.push(("segment_count".into(), ss.len.to_string()));
-        for i in ss.start.0 as usize..(ss.start.0 + ss.len) as usize {
+        for (n, i) in span_rows(ss.start.row(), ss.len)?.enumerate() {
             f.push((
-                format!("segment {:04}", i - ss.start.0 as usize),
+                format!("segment {n:04}"),
                 format!(
                     "via {} at {} centre {} radius {} m bearing {}",
-                    g.via[i],
-                    pos(g.lat[i], g.lon[i]),
-                    pos(g.arc_lat[i], g.arc_lon[i]),
-                    g.radius_m[i],
-                    opt_u16(g.bearing_cdeg[i])
+                    g(&gs.via, i)?,
+                    pos(g(&gs.lat, i)?, g(&gs.lon, i)?),
+                    pos(g(&gs.arc_lat, i)?, g(&gs.arc_lon, i)?),
+                    g(&gs.radius_m, i)?,
+                    opt_u16(g(&gs.bearing_cdeg, i)?)
                 ),
             ));
         }
-        out.insert(key, f);
+        add(&mut out, "boundary", key, f)?;
     }
-    out
+    Ok(out)
 }
 
-fn airway_objects(m: &Model) -> Objects {
+fn airway_objects(m: &Model) -> Result<Objects, ModelError> {
     let a = &m.airways;
     let l = &m.airway_legs;
     let mut out = Objects::new();
     for row in 0..a.designator.len() {
         let key = format!(
             "airway {} ({})",
-            s(m, a.designator[row]),
-            char::from(a.location[row])
+            s(m, g(&a.designator, row)?),
+            char::from(g(&a.location, row)?)
         );
-        let sp = a.legs[row];
+        let sp = g(&a.legs, row)?;
         let mut f: Fields = vec![("leg_count".into(), sp.len.to_string())];
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-        for i in sp.start.0 as usize..(sp.start.0 + sp.len) as usize {
-            let from = point_ref(m, l.from[i]);
+        for i in span_rows(sp.start.row(), sp.len)? {
+            let from = point_ref(m, g(&l.from, i)?);
             let n = seen.entry(from.clone()).or_insert(0);
             *n += 1;
             let name = if *n == 1 {
@@ -255,36 +284,36 @@ fn airway_objects(m: &Model) -> Objects {
                 name,
                 format!(
                     "to {} MEA {} opposite {} GPS {} dir {}/{} flags gap={} signal_gap={} dogleg={}",
-                    point_ref(m, l.to[i]),
-                    alt(l.mea_ft[i]),
-                    alt(l.mea_opp_ft[i]),
-                    alt(l.gps_mea_ft[i]),
-                    l.mea_dir[i],
-                    l.gps_mea_dir[i],
+                    point_ref(m, g(&l.to, i)?),
+                    alt(g(&l.mea_ft, i)?),
+                    alt(g(&l.mea_opp_ft, i)?),
+                    alt(g(&l.gps_mea_ft, i)?),
+                    g(&l.mea_dir, i)?,
+                    g(&l.gps_mea_dir, i)?,
                     bit_get(&l.gap, i),
                     bit_get(&l.signal_gap, i),
                     bit_get(&l.dogleg, i)
                 ),
             ));
         }
-        out.insert(key, f);
+        add(&mut out, "airway", key, f)?;
     }
-    out
+    Ok(out)
 }
 
-fn proc_objects(m: &Model) -> Objects {
+fn proc_objects(m: &Model) -> Result<Objects, ModelError> {
     let pr = &m.procs;
     let mut out = Objects::new();
     for row in 0..pr.kind.len() {
         let key = format!(
             "{} {} at {}",
-            proc_kind::name(pr.kind[row]),
-            s(m, pr.ident[row]),
-            point_ref(m, pr.airport[row])
+            proc_kind::name(g(&pr.kind, row)?),
+            s(m, g(&pr.ident, row)?),
+            point_ref(m, g(&pr.airport, row)?)
         );
-        let rs = pr.routes[row];
+        let rs = g(&pr.routes, row)?;
         let mut f: Fields = vec![
-            ("name".into(), s(m, pr.name[row]).into()),
+            ("name".into(), s(m, g(&pr.name, row)?).into()),
             (
                 "sources".into(),
                 sources(bit_get(&pr.src_nasr, row), bit_get(&pr.src_cifp, row)),
@@ -292,8 +321,8 @@ fn proc_objects(m: &Model) -> Objects {
             ("coded".into(), bit_get(&pr.coded, row).to_string()),
             ("route_count".into(), rs.len.to_string()),
         ];
-        for r in rs.start.0 as usize..(rs.start.0 + rs.len) as usize {
-            let rt = m.routes.route_type[r];
+        for r in span_rows(rs.start.row(), rs.len)? {
+            let rt = g(&m.routes.route_type, r)?;
             let rname = format!(
                 "route {}/{}",
                 if rt == 0 {
@@ -301,104 +330,120 @@ fn proc_objects(m: &Model) -> Objects {
                 } else {
                     char::from(rt).to_string()
                 },
-                s(m, m.routes.transition[r])
+                s(m, g(&m.routes.transition, r)?)
             );
-            let ls = m.routes.legs[r];
+            let ls = g(&m.routes.legs, r)?;
             f.push((format!("{rname} leg_count"), ls.len.to_string()));
-            for i in ls.start.0 as usize..(ls.start.0 + ls.len) as usize {
-                let g = &m.legs;
-                let dist = if g.dist_or_time[i] == NONE_U32 {
+            for (n, i) in span_rows(ls.start.row(), ls.len)?.enumerate() {
+                let lg = &m.legs;
+                let dist_raw = g(&lg.dist_or_time, i)?;
+                let dist = if dist_raw == NONE_U32 {
                     "-".to_string()
-                } else if bit_get(&g.dist_is_time, i) {
-                    format!("{} s", g.dist_or_time[i])
+                } else if bit_get(&lg.dist_is_time, i) {
+                    format!("{dist_raw} s")
                 } else {
-                    format!("{} m", g.dist_or_time[i])
+                    format!("{dist_raw} m")
                 };
                 f.push((
-                    format!("{rname} leg {:03}", i - ls.start.0 as usize),
+                    format!("{rname} leg {n:03}"),
                     format!(
                         "{} fix {} centre {} turn {} course {} dist {} alt_desc {} alt1 {} alt2 {} speed {}",
-                        path_term::name(g.path_term[i]),
-                        point_ref(m, g.fix[i]),
-                        point_ref(m, g.center[i]),
-                        g.turn[i],
-                        opt_u16(g.course_mag_cdeg[i]),
+                        path_term::name(g(&lg.path_term, i)?),
+                        point_ref(m, g(&lg.fix, i)?),
+                        point_ref(m, g(&lg.center, i)?),
+                        g(&lg.turn, i)?,
+                        opt_u16(g(&lg.course_mag_cdeg, i)?),
                         dist,
-                        g.alt_desc[i],
-                        alt(g.alt1_ft[i]),
-                        alt(g.alt2_ft[i]),
-                        opt_u16(g.speed_kt[i])
+                        g(&lg.alt_desc, i)?,
+                        alt(g(&lg.alt1_ft, i)?),
+                        alt(g(&lg.alt2_ft, i)?),
+                        opt_u16(g(&lg.speed_kt, i)?)
                     ),
                 ));
             }
         }
-        out.insert(key, f);
+        add(&mut out, "procedure", key, f)?;
     }
-    out
+    Ok(out)
 }
 
-fn mora_objects(m: &Model) -> Objects {
+fn mora_objects(m: &Model) -> Result<Objects, ModelError> {
     let mo = &m.mora;
     let mut out = Objects::new();
     for i in 0..mo.lat.len() {
-        let v = if mo.hundreds_ft[i] == MORA_UNKNOWN {
+        let h = g(&mo.hundreds_ft, i)?;
+        let v = if h == MORA_UNKNOWN {
             "UNK".to_string()
         } else {
-            format!("{} ft", i32::from(mo.hundreds_ft[i]) * 100)
+            format!("{} ft", i32::from(h) * 100)
         };
-        out.insert(
-            format!("MORA cell {},{}", mo.lat[i], mo.lon[i]),
+        add(
+            &mut out,
+            "mora",
+            format!("MORA cell {},{}", g(&mo.lat, i)?, g(&mo.lon, i)?),
             vec![("MORA".into(), v)],
-        );
+        )?;
     }
-    out
+    Ok(out)
 }
 
-fn unresolved_objects(m: &Model) -> Objects {
+fn unresolved_objects(m: &Model) -> Result<Objects, ModelError> {
     let u = &m.unresolved;
     let mut out = Objects::new();
     for i in 0..u.role.len() {
+        // The identifier and region that could not be found are part of the identity: the NASR
+        // procedure ordinals restart in every route, so owner, scope, ordinal and role alone
+        // can name two different references.
         let key = format!(
-            "unresolved {} {} {} #{} {}",
-            if u.owner_kind[i] == owner_kind::AIRWAY {
+            "unresolved {} {} {} #{} {} {:?} {:?}",
+            if g(&u.owner_kind, i)? == owner_kind::AIRWAY {
                 "airway"
             } else {
                 "procedure"
             },
-            s(m, u.owner[i]),
-            s(m, u.scope[i]),
-            u.ordinal[i],
-            unresolved_role::name(u.role[i])
+            s(m, g(&u.owner, i)?),
+            s(m, g(&u.scope, i)?),
+            g(&u.ordinal, i)?,
+            unresolved_role::name(g(&u.role, i)?),
+            s(m, g(&u.name, i)?),
+            s(m, g(&u.region, i)?),
         );
-        out.insert(
+        add(
+            &mut out,
+            "unresolved",
             key,
             vec![
-                ("name".into(), s(m, u.name[i]).into()),
-                ("region".into(), s(m, u.region[i]).into()),
-                ("wanted".into(), s(m, u.wanted[i]).into()),
+                ("name".into(), s(m, g(&u.name, i)?).into()),
+                ("region".into(), s(m, g(&u.region, i)?).into()),
+                ("wanted".into(), s(m, g(&u.wanted, i)?).into()),
             ],
-        );
+        )?;
     }
-    out
+    Ok(out)
 }
 
-fn disagreement_objects(m: &Model) -> Objects {
+fn disagreement_objects(m: &Model) -> Result<Objects, ModelError> {
     let d = &m.disagreements;
     let mut out = Objects::new();
     for i in 0..d.point.len() {
-        let key = format!("disagreement {}", point_ref(m, d.point[i]));
-        out.insert(
+        let key = format!("disagreement {}", point_identity(m, g(&d.point, i)?));
+        add(
+            &mut out,
+            "disagreement",
             key,
             vec![
-                ("nasr_position".into(), pos(d.nasr_lat[i], d.nasr_lon[i])),
+                (
+                    "nasr_position".into(),
+                    pos(g(&d.nasr_lat, i)?, g(&d.nasr_lon, i)?),
+                ),
                 (
                     "distance".into(),
-                    format!("{:.3} m", f64::from(d.dist_mm[i]) / 1000.0),
+                    format!("{:.3} m", f64::from(g(&d.dist_mm, i)?) / 1000.0),
                 ),
             ],
-        );
+        )?;
     }
-    out
+    Ok(out)
 }
 
 fn compare(class: &'static str, a: &Objects, b: &Objects, out: &mut Vec<DiffEntry>) {
@@ -489,42 +534,47 @@ fn header_changes(a: &Model, b: &Model) -> Vec<FieldChange> {
 }
 
 /// Compares two models: added, removed and changed objects by stable key, with the changed
-/// fields (OA-ASP-007). Deterministic order. Both models are validated first, so the table
-/// walks below read by index safely; an inconsistent model is an error, not a diff.
+/// fields (OA-ASP-007). Deterministic order. Both models are validated first; an inconsistent
+/// model is an error, not a diff, and so is a model in which two objects share a key.
 pub fn diff_models(a: &Model, b: &Model) -> Result<Diff, ModelError> {
     validate_model(a)?;
     validate_model(b)?;
     let mut entries = Vec::new();
-    compare("point", &point_objects(a), &point_objects(b), &mut entries);
+    compare(
+        "point",
+        &point_objects(a)?,
+        &point_objects(b)?,
+        &mut entries,
+    );
     compare(
         "boundary",
-        &boundary_objects(a),
-        &boundary_objects(b),
+        &boundary_objects(a)?,
+        &boundary_objects(b)?,
         &mut entries,
     );
     compare(
         "airway",
-        &airway_objects(a),
-        &airway_objects(b),
+        &airway_objects(a)?,
+        &airway_objects(b)?,
         &mut entries,
     );
     compare(
         "procedure",
-        &proc_objects(a),
-        &proc_objects(b),
+        &proc_objects(a)?,
+        &proc_objects(b)?,
         &mut entries,
     );
-    compare("mora", &mora_objects(a), &mora_objects(b), &mut entries);
+    compare("mora", &mora_objects(a)?, &mora_objects(b)?, &mut entries);
     compare(
         "unresolved",
-        &unresolved_objects(a),
-        &unresolved_objects(b),
+        &unresolved_objects(a)?,
+        &unresolved_objects(b)?,
         &mut entries,
     );
     compare(
         "disagreement",
-        &disagreement_objects(a),
-        &disagreement_objects(b),
+        &disagreement_objects(a)?,
+        &disagreement_objects(b)?,
         &mut entries,
     );
     let mut notes = Vec::new();

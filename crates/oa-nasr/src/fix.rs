@@ -9,6 +9,7 @@ use std::io::BufRead;
 
 /// A row of `FIX_BASE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Fix {
     /// 1-based line in the file.
     pub line: u64,
@@ -51,6 +52,7 @@ pub struct Fix {
 
 /// A row of `FIX_NAV`: a navaid-relative definition of a fix.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct FixNav {
     /// 1-based line in the file.
     pub line: u64,

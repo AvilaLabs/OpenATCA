@@ -11,6 +11,7 @@ use std::io::BufRead;
 
 /// An altitude with the direction it applies to (`NORTH`, `EAST`, ...), as published.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct AltDir {
     /// Altitude, feet.
     pub alt: Option<i64>,
@@ -20,6 +21,7 @@ pub struct AltDir {
 
 /// A row of `AWY_BASE`.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct AirwayBase {
     /// 1-based line in the file.
     pub line: u64,
@@ -48,6 +50,7 @@ pub struct AirwayBase {
 /// the minimum enroute altitudes (MEA), their GPS and DME/IRU variants, minimum crossing and
 /// reception altitudes, all in feet with their directions.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct AirwaySegment {
     /// 1-based line in the file.
     pub line: u64,
@@ -134,6 +137,7 @@ pub struct AirwaySegment {
 
 /// An airway with its segments in `POINT_SEQ` order.
 #[derive(Clone, Debug, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Airway {
     /// The airway's `AWY_BASE` row.
     pub base: AirwayBase,
@@ -229,17 +233,22 @@ pub fn parse_airways<R1: BufRead, R2: BufRead>(
     let bases = parse_airway_bases(base_source, base_reader)?;
     let segs = parse_airway_segments(seg_source, seg_reader)?;
     let mut rejected = bases.rejected;
+    let mut dropped = bases.rejected_dropped.saturating_add(segs.rejected_dropped);
     let mut airways: Vec<Airway> = Vec::with_capacity(bases.records.len());
     let mut index: HashMap<(String, String), usize> = HashMap::new();
     for base in bases.records {
         let key = (base.awy_id.clone(), base.awy_location.clone());
         if index.contains_key(&key) {
-            rejected.push(RowError {
-                file: base_source.to_string(),
-                line: base.line,
-                column: "AWY_ID".to_string(),
-                kind: RowErrorKind::DuplicateKey(format!("{}/{}", key.0, key.1)),
-            });
+            crate::reject(
+                &mut rejected,
+                &mut dropped,
+                RowError {
+                    file: base_source.to_string(),
+                    line: base.line,
+                    column: "AWY_ID".to_string(),
+                    kind: RowErrorKind::DuplicateKey(format!("{}/{}", key.0, key.1)),
+                },
+            );
             continue;
         }
         index.insert(key, airways.len());
@@ -248,17 +257,23 @@ pub fn parse_airways<R1: BufRead, R2: BufRead>(
             segments: Vec::new(),
         });
     }
-    rejected.extend(segs.rejected);
+    for e in segs.rejected {
+        crate::reject(&mut rejected, &mut dropped, e);
+    }
     for seg in segs.records {
         let key = (seg.awy_id.clone(), seg.awy_location.clone());
         match index.get(&key).and_then(|&i| airways.get_mut(i)) {
             Some(a) => a.segments.push(seg),
-            None => rejected.push(RowError {
-                file: seg_source.to_string(),
-                line: seg.line,
-                column: "AWY_ID".to_string(),
-                kind: RowErrorKind::OrphanRecord(format!("{}/{}", key.0, key.1)),
-            }),
+            None => crate::reject(
+                &mut rejected,
+                &mut dropped,
+                RowError {
+                    file: seg_source.to_string(),
+                    line: seg.line,
+                    column: "AWY_ID".to_string(),
+                    kind: RowErrorKind::OrphanRecord(format!("{}/{}", key.0, key.1)),
+                },
+            ),
         }
     }
     for a in &mut airways {
@@ -266,15 +281,19 @@ pub fn parse_airways<R1: BufRead, R2: BufRead>(
         let mut kept: Vec<AirwaySegment> = Vec::with_capacity(a.segments.len());
         for s in std::mem::take(&mut a.segments) {
             if kept.last().is_some_and(|k| k.point_seq == s.point_seq) {
-                rejected.push(RowError {
-                    file: seg_source.to_string(),
-                    line: s.line,
-                    column: "POINT_SEQ".to_string(),
-                    kind: RowErrorKind::DuplicateKey(format!(
-                        "{}/{}/{}",
-                        s.awy_id, s.awy_location, s.point_seq
-                    )),
-                });
+                crate::reject(
+                    &mut rejected,
+                    &mut dropped,
+                    RowError {
+                        file: seg_source.to_string(),
+                        line: s.line,
+                        column: "POINT_SEQ".to_string(),
+                        kind: RowErrorKind::DuplicateKey(format!(
+                            "{}/{}/{}",
+                            s.awy_id, s.awy_location, s.point_seq
+                        )),
+                    },
+                );
             } else {
                 kept.push(s);
             }
@@ -284,5 +303,6 @@ pub fn parse_airways<R1: BufRead, R2: BufRead>(
     Ok(Parsed {
         records: airways,
         rejected,
+        rejected_dropped: dropped,
     })
 }

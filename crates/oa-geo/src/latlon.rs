@@ -9,6 +9,9 @@ pub struct LatLon {
     lat: f64,
     lon: f64,
 }
+// Budget: two f64, no padding. Held in quantity (every polygon vertex, every sample point).
+// Raising it needs a recorded justification (A7.1).
+const _: () = assert!(core::mem::size_of::<LatLon>() == 16);
 
 impl LatLon {
     /// OA-GEO-001: rejects non-finite values and values outside the geographic ranges.
@@ -86,6 +89,7 @@ fn hemisphere_axis_limit(h: Hemisphere) -> f64 {
 
 /// One coordinate in degrees, minutes, seconds and hemisphere, as the FAA publishes it.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Dms {
     pub degrees: f64,
     pub minutes: f64,
@@ -139,6 +143,12 @@ pub fn dms_char_to_decimal(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

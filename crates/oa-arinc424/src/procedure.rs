@@ -93,6 +93,7 @@ pub type NavRef = FixRef;
 
 /// One leg of a procedure (one primary record).
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Leg {
     pub meta: Meta,
     /// Cols 7-10: airport identifier (`KORD`, `KMSP`).
@@ -185,6 +186,7 @@ pub struct Leg {
 
 /// A continuation record of a leg.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct LegContinuation {
     pub meta: Meta,
     /// Col 39: continuation record number (`2` first).
@@ -197,6 +199,7 @@ pub struct LegContinuation {
 
 /// A level of service from an approach continuation (`LPV`, `LNAV/VNAV`, `LNAV`, ...).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct LevelOfService {
     /// `A` in the first column of the pair: authorized.
     pub authorized: bool,
@@ -248,11 +251,12 @@ pub(crate) fn parse_leg(r: &Rec, meta: Meta, kind: ProcedureKind) -> Result<Leg,
     let fix = if r.is_blank(30, 38) {
         None
     } else {
+        let (section, subsection) = r.section_codes("fix section", 37, 38)?;
         Some(FixRef {
-            ident: r.text(30, 34),
+            ident: r.ident("fix identifier", 30, 34)?,
             icao_region: r.text(35, 36),
-            section: r.ch(37),
-            subsection: r.ch(38),
+            section,
+            subsection,
         })
     };
     let recommended_navaid = if r.is_blank(51, 56) {
@@ -317,9 +321,9 @@ pub(crate) fn parse_leg(r: &Rec, meta: Meta, kind: ProcedureKind) -> Result<Leg,
         path_terminator,
         recommended_navaid,
         arc_radius_nm: r.scaled("arc radius", 57, 62, 1000.0)?,
-        theta_deg: r.scaled("theta", 63, 66, 10.0)?,
+        theta_deg: r.bearing("theta", 63, 66)?,
         rho_nm: r.scaled("rho", 67, 70, 10.0)?,
-        course_deg: r.scaled("magnetic course", 71, 74, 10.0)?,
+        course_deg: r.bearing("magnetic course", 71, 74)?,
         distance_or_time,
         altitude_description,
         altitude1: r.altitude("altitude 1", 85, 89)?,
@@ -338,6 +342,7 @@ pub(crate) fn parse_leg(r: &Rec, meta: Meta, kind: ProcedureKind) -> Result<Leg,
 
 /// One route of a procedure: a transition identifier and its legs in sequence order.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Route {
     /// Route type (col 20).
     pub route_type: char,
@@ -348,6 +353,7 @@ pub struct Route {
 
 /// A SID, STAR or approach at one airport: its routes in file order.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Procedure {
     pub customer_area: String,
     pub airport_ident: String,

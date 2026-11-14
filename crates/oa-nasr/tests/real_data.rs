@@ -1,6 +1,12 @@
 //! Integration tests over the full FAA NASR files. They read the directory named by the
 //! `OPENATCA_DATA` environment variable (the extracted CSV directory) and skip when it is unset.
 //! Run with `--nocapture` to see the schema-violation and DMS-discrepancy report.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_nasr::schema::{self, parse_schemas, validate, Schemas, Validation, ViolationKind};
 use oa_nasr::{apt, arb, awy, cls, fix, nav, open, position, procedure, Parsed, Position};

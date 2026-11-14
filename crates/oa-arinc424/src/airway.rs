@@ -7,6 +7,7 @@ use crate::types::{Altitude, FixRef, Meta};
 
 /// One fix on an airway, with the data for the leg that leaves it toward the next fix.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct AirwayFix {
     pub meta: Meta,
     /// Cols 14-18. Route identifier (`V9`, `J80`, `Q1`). Verified: `V9` matches NASR `AWY_SEG_ALT.AWY_ID`.
@@ -57,18 +58,21 @@ pub(crate) fn parse_airway_fix(r: &Rec, meta: Meta) -> Result<AirwayFix, ErrorKi
         meta,
         route_ident: r.text(14, 18),
         sequence,
-        fix: FixRef {
-            ident: r.text(30, 34),
-            icao_region: r.text(35, 36),
-            section: r.ch(37),
-            subsection: r.ch(38),
+        fix: {
+            let (section, subsection) = r.section_codes("fix section", 37, 38)?;
+            FixRef {
+                ident: r.ident("fix identifier", 30, 34)?,
+                icao_region: r.text(35, 36),
+                section,
+                subsection,
+            }
         },
         description,
         route_type: r.ch(45),
         level: r.opt_ch(46),
-        outbound_course: r.scaled("outbound course", 71, 74, 10.0)?,
+        outbound_course: r.bearing("outbound course", 71, 74)?,
         distance_nm: r.scaled("route distance", 75, 78, 10.0)?,
-        inbound_course: r.scaled("inbound course", 79, 82, 10.0)?,
+        inbound_course: r.bearing("inbound course", 79, 82)?,
         min_altitude: r.altitude("minimum altitude", 84, 88)?,
         min_altitude_2: r.altitude("minimum altitude 2", 89, 93)?,
         max_altitude: r.altitude("maximum altitude", 94, 98)?,
@@ -77,6 +81,7 @@ pub(crate) fn parse_airway_fix(r: &Rec, meta: Meta) -> Result<AirwayFix, ErrorKi
 
 /// An airway: all fixes of one route identifier, in sequence order.
 #[derive(Debug, Clone, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Airway {
     /// Customer/area code of its records (`USA`, `CAN`, ...).
     pub customer_area: String,

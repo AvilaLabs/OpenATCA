@@ -118,6 +118,7 @@ impl fmt::Display for ErrorKind {
 
 /// An [`ErrorKind`] with its source name and 1-based line number.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Error {
     pub source: String,
     pub line: usize,

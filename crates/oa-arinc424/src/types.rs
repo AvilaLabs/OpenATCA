@@ -4,6 +4,7 @@ use std::fmt;
 
 /// An AIRAC-style cycle: two-digit year and release number (`2611` = release 11 of 2026).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+// A7.2: cold struct, size guard waived
 pub struct Cycle {
     pub year: u8,
     pub release: u8,
@@ -53,6 +54,7 @@ impl fmt::Display for Cycle {
 
 /// A WGS-84 position in signed decimal degrees (north and east positive).
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
 pub struct Position {
     pub lat: f64,
     pub lon: f64,
@@ -61,6 +63,7 @@ pub struct Position {
 /// Fields every record carries: its line, customer/area code (cols 2-4), file record
 /// number (cols 124-128, may be alphanumeric or blank) and cycle (cols 129-132).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct Meta {
     pub line: usize,
     pub customer_area: String,
@@ -71,6 +74,7 @@ pub struct Meta {
 /// A reference from one record to another by identifier, ICAO region, section and
 /// subsection (e.g. a leg's fix, or an airway's fix).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct FixRef {
     pub ident: String,
     /// ICAO region code, trimmed (`K5`, or `K`/`P` for offshore fixes).
@@ -132,6 +136,7 @@ pub enum AltitudeUnit {
 
 /// A lower or upper airspace limit with its unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 pub struct AltitudeLimit {
     pub altitude: Altitude,
     pub unit: AltitudeUnit,

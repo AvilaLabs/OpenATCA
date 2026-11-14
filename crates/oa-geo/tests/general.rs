@@ -1,4 +1,10 @@
 //! Crate-wide rules: no unsafe, no dependencies, and no panics on arbitrary input.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_geo::{
     dms_char_to_decimal, dms_to_decimal, hemisphere_from_char, wgs84, Hemisphere, LatLon, Polygon,

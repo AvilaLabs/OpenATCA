@@ -1,5 +1,11 @@
 //! Whole-file test against the real FAA CIFP. Needs `OPENATCA_CIFP` (path to `FAACIFP18`);
 //! skips with a message when it is unset.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::collections::BTreeMap;
 use std::fs::File;

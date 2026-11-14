@@ -1,5 +1,11 @@
 //! Geometry: fixed-point conversion, the selection area, the spherical estimate against the exact
 //! distance, and the geodesic-versus-rhumb separation.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_airspace::geom::*;
 use oa_geo::{wgs84, LatLon};
@@ -234,4 +240,80 @@ fn segment_samples_follow_circles_arcs_and_edges() {
     ];
     let pts = segment_samples(&ell, &edge).expect("samples");
     assert!(pts.len() >= 5, "{}", pts.len());
+}
+
+// REQ: OA-ASP-008
+#[test]
+fn the_bounding_filter_keeps_points_on_both_sides_of_the_antimeridian() {
+    let ring = vec![
+        ll(40.0, 179.0),
+        ll(40.0, -179.0),
+        ll(42.0, -179.0),
+        ll(42.0, 179.0),
+    ];
+    let area = build_area(vec![ring], 0.0).expect("area");
+    for lon in [179.5, 180.0, -180.0, -179.5] {
+        let p = ll(41.0, lon);
+        assert!(area_inside(&area, p), "inside at {lon}");
+        assert!(area_contains(&area, p).expect("contains"), "contains {lon}");
+    }
+    assert!(!area_inside(&area, ll(41.0, 170.0)));
+    assert!(!area_inside(&area, ll(41.0, -170.0)));
+    assert!(!area_inside(&area, ll(41.0, 0.0)));
+    // A volume outline crossing the antimeridian touches the area; one on the far side does not.
+    let crossing = [
+        ll(41.0, 179.5),
+        ll(41.1, 179.9),
+        ll(41.0, -179.9),
+        ll(41.1, -179.5),
+    ];
+    assert!(samples_touch_area(&area, &crossing).expect("touch"));
+    let far = [ll(41.0, 10.0), ll(41.1, 11.0), ll(41.2, 10.5)];
+    assert!(!samples_touch_area(&area, &far).expect("touch"));
+    // Cells on either side of the antimeridian overlap.
+    assert!(cell_overlaps_area(&area, 40, 179).expect("cell"));
+    assert!(cell_overlaps_area(&area, 40, -180).expect("cell"));
+    assert!(!cell_overlaps_area(&area, 40, 100).expect("cell"));
+}
+
+// REQ: OA-ASP-008
+#[test]
+fn the_bounding_filter_includes_the_poleward_bulge_of_a_long_edge() {
+    // The geodesic from 65N 30W to 65N 30E rises to about 68N at the meridian 0, three degrees
+    // above both of its vertices.
+    let ring = vec![
+        ll(65.0, -30.0),
+        ll(65.0, 30.0),
+        ll(50.0, 30.0),
+        ll(50.0, -30.0),
+    ];
+    let area = build_area(vec![ring], 0.0).expect("area");
+    let p = ll(67.5, 0.0);
+    assert!(area_inside(&area, p), "inside the polygon, below the bulge");
+    assert!(area_contains(&area, p).expect("contains"));
+    let b = area.bbox.expect("narrow enough for a box");
+    assert!(b.max_lat > 67.9, "{}", b.max_lat);
+    // The same ring mirrored south bulges toward the south pole.
+    let south = vec![
+        ll(-65.0, -30.0),
+        ll(-50.0, -30.0),
+        ll(-50.0, 30.0),
+        ll(-65.0, 30.0),
+    ];
+    let area = build_area(vec![south], 0.0).expect("area");
+    assert!(area_inside(&area, ll(-67.5, 0.0)));
+}
+
+// REQ: OA-ASP-008
+#[test]
+fn an_outline_that_cannot_be_formed_is_an_error_not_a_miss() {
+    let area = build_area(vec![square()], 0.0).expect("area");
+    // The first sample is just outside the area but inside its box; the outline has an edge
+    // far longer than any polygon edge may be, so no polygon can be built from it.
+    let samples = [ll(43.005, -88.0), ll(10.0, -100.0), ll(10.0, 100.0)];
+    let r = samples_touch_area(&area, &samples);
+    assert!(r.is_err(), "{r:?}");
+    // Two samples enclose nothing; that is an ordinary "not touching".
+    let two = [ll(43.005, -88.0), ll(43.006, -88.0)];
+    assert_eq!(samples_touch_area(&area, &two), Ok(false));
 }
