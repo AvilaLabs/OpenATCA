@@ -588,10 +588,14 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   whichever end is first, clipped like any line, and pinned by a golden hash.
 - **OA-DSP-025** The map hides detail by default and says so. Every layer (own boundary, neighbour
   boundaries, high airways J and Q, low airways V and T, VOR-class navaids, airports, fixes,
-  labels, rings) can be switched off, fixes show within 60 NM, airports above 60 NM only with a
-  coded instrument procedure, VOR, VORTAC and VOR-DME always, NDB, DME and TACAN within 60 NM,
-  labels within 60 NM, each threshold configurable, and a `HIDDEN:` legend line names everything
-  left out by a layer switch or a threshold at the current range.
+  labels, rings) can be switched off. Every range threshold keys on the display range (the zoom,
+  nautical miles from the centre to the nearest edge of the map area), never on a symbol's
+  distance from the centre, and each is configurable. Defaults: fixes and labels of fixes, minor
+  navaids and other airports at a range of 40 NM or less; terminal waypoints 20 NM or less;
+  runway thresholds and localizers 15 NM or less; airports without a coded instrument procedure
+  and NDB, DME and TACAN 40 NM or less; VOR, VORTAC and VOR-DME and airports with a coded
+  instrument procedure always, with their labels out to 100 NM. A `HIDDEN:` legend line names
+  everything left out by a layer switch or a threshold at the current range.
 - **OA-DSP-026** The own facility's boundary is drawn 2 pixels wide in its stratum colour;
   neighbouring facilities' boundaries are 1 pixel wide in a dimmer colour under it.
 - **OA-DSP-027** The alert colour is used only for conditions that need attention, never for
@@ -609,3 +613,12 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
 - **OA-DSP-031** The frame hash is computed only on request (`--hash`, or in tests), not on every
   frame; the command line takes `--hide` and the range thresholds, and a bad layer name is a usage
   error.
+- **OA-DSP-032** Labels are placed deterministically with collision culling. Candidates are sorted
+  by priority (VOR-class navaids, airports with instrument procedures, other airports, fixes and
+  minor navaids, terminal waypoints), then ident, then position, then table row. Each takes the
+  first of four fixed offsets (north-east, south-east, north-west, south-west of its symbol) that
+  overlaps no placed label, ring label, the legend strip or the screen edge; otherwise it is
+  dropped and counted, and the legend shows `LABELS DROPPED: N` in the normal colour. Placement
+  uses a fixed-capacity grid of cells with a bounded list each, allocated once; a full cell drops
+  the label and counts it. No two drawn labels overlap, a label is dropped only where every offset
+  is taken by a label of equal or higher priority, and the result does not depend on point order.

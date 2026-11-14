@@ -244,7 +244,14 @@ fn build(m: &Model, range: f64, tweak: impl Fn(&mut View)) -> (DisplayList, Scen
     let mut view = view_new(ORD.0, ORD.1, range, 800, 600).unwrap();
     tweak(&mut view);
     let mut l = list_new(scene_caps(m));
-    let st = build_scene(&mut l, m, &scene_index(m), &view).unwrap();
+    let st = build_scene(
+        &mut l,
+        m,
+        &scene_index(m),
+        &view,
+        &mut scratch_for(m, &view),
+    )
+    .unwrap();
     assert!(!l.faulted);
     (l, st, view)
 }
@@ -271,13 +278,24 @@ fn count_colour(buf: &[u8], colour: u8) -> usize {
         .count()
 }
 
+/// Every range threshold wide open: all that the model has is shown.
+fn all_open(v: &mut View) {
+    v.fix_max_nm = 1e9;
+    v.terminal_wpt_max_nm = 1e9;
+    v.runway_max_nm = 1e9;
+    v.non_ifr_airport_max_nm = 1e9;
+    v.minor_navaid_max_nm = 1e9;
+    v.label_max_nm = 1e9;
+    v.major_label_max_nm = 1e9;
+}
+
 // REQ: OA-DSP-017
 #[test]
 fn the_map_draws_boundaries_airways_symbols_rings_and_legend_in_their_colours() {
     let m = model(Tail::None);
     validate_model(&m).unwrap();
-    let (l, st, view) = build(&m, 50.0, |_| {});
-    // At 50 NM everything is within its range threshold.
+    let (l, st, view) = build(&m, 50.0, all_open);
+    // With every threshold open everything is drawn.
     assert_eq!((st.own_boundaries, st.neighbour_boundaries), (2, 1));
     assert_eq!((st.fixes, st.navaids, st.airports), (2, 2, 2));
     assert_eq!(st.airway_legs, 2);
@@ -388,13 +406,20 @@ fn the_map_draws_boundaries_airways_symbols_rings_and_legend_in_their_colours() 
 fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what_is_hidden() {
     let m = model(Tail::None);
     let (l, st, _) = build(&m, 80.0, |_| {});
-    // Above 60 NM: no fixes, no airport without an instrument procedure, no NDB, no labels. The
-    // VOR and the airport with a coded approach remain.
-    assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (0, 1, 1, 0));
+    // Above 40 NM: no fixes, no airport without an instrument procedure, no NDB, and labels only
+    // for the VOR and the airport with a coded approach, which remain drawn.
+    assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (0, 1, 1, 2));
     let t = texts(&l);
-    assert!(t.contains(&"HIDDEN: FIXES>60NM, NON-IFR APTS>60NM, NDB/DME/TACAN>60NM, LABELS>60NM"));
-    // Labels are on at 50 NM, one per drawn symbol.
-    let (l, st, _) = build(&m, 50.0, |_| {});
+    assert!(t.contains(&"HIDDEN: FIXES>40NM, TERMINAL WPTS>20NM, RWY/LOC>15NM, NON-IFR APTS>40NM, NDB/DME/TACAN>40NM, LABELS>40NM"));
+    assert!(t.contains(&"DPA") && t.contains(&"KORD"));
+    // Beyond the wider label range those two go as well, and the line says so.
+    let (l, st, _) = build(&m, 120.0, |_| {});
+    assert_eq!(st.labels, 0);
+    assert!(texts(&l)
+        .iter()
+        .any(|t| t.ends_with("LABELS>40NM, VOR/IFR APT LABELS>100NM")));
+    // Labels are on at 50 NM with the thresholds open, one per drawn symbol.
+    let (l, st, _) = build(&m, 50.0, all_open);
     assert_eq!(st.labels, 6);
     let t = texts(&l);
     for name in ["1C5", "AAAAA", "BBBBB", "DPA", "KORD", "ZNB"] {
@@ -407,8 +432,10 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
         v.minor_navaid_max_nm = 100.0;
         v.label_max_nm = 70.0;
     });
-    assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (2, 2, 2, 0));
-    assert!(texts(&l).contains(&"HIDDEN: LABELS>70NM"));
+    assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (2, 2, 2, 2));
+    assert!(texts(&l)
+        .iter()
+        .any(|t| t.ends_with("RWY/LOC>15NM, LABELS>70NM")));
     let (_, st, _) = build(&m, 80.0, |v| v.fix_max_nm = 79.0);
     assert_eq!(st.fixes, 0);
     let (_, st, _) = build(&m, 80.0, |v| v.fix_max_nm = 80.0);
@@ -419,9 +446,12 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
 #[test]
 fn every_layer_can_be_switched_off_and_the_legend_says_so() {
     let m = model(Tail::None);
-    let (_, base, _) = build(&m, 50.0, |_| {});
+    let (_, base, _) = build(&m, 50.0, all_open);
     for name in LAYER_NAMES {
-        let (l, st, _) = build(&m, 50.0, |v| assert!(layer_set(&mut v.layers, name, false)));
+        let (l, st, _) = build(&m, 50.0, |v| {
+            all_open(v);
+            assert!(layer_set(&mut v.layers, name, false));
+        });
         let want = format!("HIDDEN: {} OFF", name.to_ascii_uppercase());
         assert!(
             texts(&l).contains(&want.as_str()),
@@ -446,6 +476,7 @@ fn every_layer_can_be_switched_off_and_the_legend_says_so() {
     assert_eq!(layers_flags(&ls), [true; 9]);
     // Several at once are all named.
     let (l, _, _) = build(&m, 50.0, |v| {
+        all_open(v);
         layer_set(&mut v.layers, "fixes", false);
         layer_set(&mut v.layers, "rings", false);
     });
@@ -586,7 +617,14 @@ fn the_legend_strip_hides_no_map_data_and_its_rows_never_overlap() {
     for range in [20.0, 50.0, 250.0] {
         let view = view_new(ORD.0, ORD.1, range, 1920, 1080).unwrap();
         let mut l = list_new(scene_caps(&m));
-        build_scene(&mut l, &m, &scene_index(&m), &view).unwrap();
+        build_scene(
+            &mut l,
+            &m,
+            &scene_index(&m),
+            &view,
+            &mut scratch_for(&m, &view),
+        )
+        .unwrap();
         // The strip: everything of the map within the range is below it.
         let strip = LEGEND_STRIP_PX as i64;
         let (_, y) = project(&view.proj, ORD.0 + (range / 60.5 * 1e7) as i32, ORD.1).unwrap();
@@ -654,7 +692,14 @@ fn ring_labels_sit_on_the_diagonal_and_never_overlap_at_any_spacing() {
             let mut view = view_new(ORD.0, ORD.1, range, w, h).unwrap();
             view.label_max_nm = 0.0;
             let mut l = list_new(scene_caps(&m));
-            let st = build_scene(&mut l, &m, &scene_index(&m), &view).unwrap();
+            let st = build_scene(
+                &mut l,
+                &m,
+                &scene_index(&m),
+                &view,
+                &mut scratch_for(&m, &view),
+            )
+            .unwrap();
             let labels: Vec<_> = boxes(&l)
                 .into_iter()
                 .filter(|b| b.4 == pal::DIM_TEXT && b.5 == LAYER_TEXT)
@@ -681,6 +726,453 @@ fn ring_labels_sit_on_the_diagonal_and_never_overlap_at_any_spacing() {
     assert!(checked > 100, "only {checked} labels checked");
 }
 
+/// A valid model of bare points `(kind, ident, lat_e7, lon_e7)` only.
+fn points_model(pts: &[(u8, String, i32, i32)]) -> Model {
+    let mut m = empty_model(Meta {
+        nasr_effective: 20_261_029,
+        cifp_cycle: 2611,
+        artcc: "ZAU".into(),
+        buffer_m: 0,
+        nasr_sha256: [1; 32],
+        cifp_sha256: [2; 32],
+    });
+    let mut s = Strings(StrTable::default());
+    let region = s.add("K5");
+    let empty = s.add("");
+    for (kind, ident, lat, lon) in pts {
+        let ix = s.add(ident);
+        let p = &mut m.points;
+        p.kind.push(*kind);
+        p.lat.push(*lat);
+        p.lon.push(*lon);
+        p.elev_ft.push(ELEV_NONE);
+        p.ident.push(ix);
+        p.alt_ident.push(StrIx::NONE);
+        p.region.push(region);
+        p.scope.push(empty);
+        p.name.push(StrIx::NONE);
+    }
+    let n = pts.len();
+    m.points.src_nasr = bit_zeros(n);
+    m.points.src_cifp = bit_zeros(n);
+    m.points.in_area = bit_zeros(n);
+    m.points.cls_b = bit_zeros(n);
+    m.points.cls_c = bit_zeros(n);
+    m.points.cls_d = bit_zeros(n);
+    m.points.cls_e = bit_zeros(n);
+    m.procs.src_nasr = bit_zeros(0);
+    m.procs.src_cifp = bit_zeros(0);
+    m.procs.coded = bit_zeros(0);
+    m.boundaries.floor_agl = bit_zeros(0);
+    m.boundaries.ceiling_agl = bit_zeros(0);
+    m.airway_legs.gap = bit_zeros(0);
+    m.airway_legs.signal_gap = bit_zeros(0);
+    m.airway_legs.dogleg = bit_zeros(0);
+    m.strings = s.0;
+    m
+}
+
+fn lcg(seed: &mut u64) -> u32 {
+    *seed = seed
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    (*seed >> 33) as u32
+}
+
+/// Detail by zoom: each kind appears at its own range and not before, whatever its distance from
+/// the centre.
+// REQ: OA-DSP-025
+#[test]
+fn terminal_waypoints_runways_and_localizers_follow_the_display_range_not_the_distance() {
+    let at = |d: f64| e7(41.9786 + d, -87.9048);
+    // The same three symbols near the centre and 0.1 degree (6 NM) north of it.
+    let mut pts = Vec::new();
+    for (i, d) in [0.0, 0.1].into_iter().enumerate() {
+        pts.push((
+            point_kind::TERMINAL_WAYPOINT,
+            format!("TW{i}"),
+            at(d).0,
+            at(d).1,
+        ));
+        pts.push((
+            point_kind::THRESHOLD,
+            format!("RW{i}"),
+            at(d + 0.001).0,
+            at(d + 0.001).1,
+        ));
+        pts.push((
+            point_kind::LOCALIZER,
+            format!("IL{i}"),
+            at(d + 0.002).0,
+            at(d + 0.002).1,
+        ));
+        pts.push((
+            point_kind::FIX,
+            format!("FX{i}"),
+            at(d + 0.003).0,
+            at(d + 0.003).1,
+        ));
+    }
+    pts.sort_by(|a, b| a.1.cmp(&b.1));
+    let m = points_model(&pts);
+    validate_model(&m).unwrap();
+    // (range, terminal waypoints, runway symbols, fixes) with the default thresholds.
+    for (range, tw, rw, fx) in [
+        (10.0, 2, 4, 2),
+        (15.0, 2, 4, 2),
+        (18.0, 2, 0, 2),
+        (20.0, 2, 0, 2),
+        (30.0, 0, 0, 2),
+        (40.0, 0, 0, 2),
+        (41.0, 0, 0, 0),
+    ] {
+        let (l, st, _) = build(&m, range, |_| {});
+        // Both of each kind, or none: the position on screen does not matter.
+        let _ = l;
+        assert_eq!(
+            (st.terminal_waypoints, st.runway_symbols, st.fixes),
+            (tw, rw, fx),
+            "range {range}"
+        );
+    }
+    // The line says what a range hides, and the thresholds are configurable.
+    let (l, _, _) = build(&m, 30.0, |_| {});
+    assert!(texts(&l)
+        .iter()
+        .any(|t| t.starts_with("HIDDEN: TERMINAL WPTS>20NM, RWY/LOC>15NM")));
+    let (_, st, _) = build(&m, 30.0, |v| {
+        v.terminal_wpt_max_nm = 30.0;
+        v.runway_max_nm = 30.0;
+    });
+    assert_eq!((st.terminal_waypoints, st.runway_symbols), (2, 4));
+}
+
+/// Label boxes of the list in pixels, text layer only (point labels and ring labels).
+fn label_boxes(l: &DisplayList) -> Vec<(i64, i64, i64, i64, u8, u8, String)> {
+    let size = i64::from(LABEL_SIZE_PX);
+    let t = texts(l);
+    (0..t.len())
+        .filter(|&i| l.texts.layer[i] == LAYER_TEXT)
+        .map(|i| {
+            let w = ((t[i].chars().count() as i64) * 6 - 2) * size / 8;
+            let (x, y) = (i64::from(l.texts.x[i]) / 16, i64::from(l.texts.y[i]) / 16);
+            let x0 = match l.texts.align[i] {
+                ALIGN_LEFT => x,
+                _ => x - w,
+            };
+            (
+                x0,
+                y,
+                x0 + w,
+                y + size,
+                l.texts.colour[i],
+                l.texts.layer[i],
+                t[i].to_string(),
+            )
+        })
+        .collect()
+}
+
+const LABEL_SIZE_PX: u8 = 12;
+
+// REQ: OA-DSP-032
+#[test]
+fn labels_in_a_dense_scene_never_overlap_keep_clear_of_the_legend_and_are_counted_when_dropped() {
+    let mut seed = 7;
+    let mut pts = Vec::new();
+    for i in 0..600 {
+        let kind = [
+            point_kind::FIX,
+            point_kind::TERMINAL_WAYPOINT,
+            point_kind::AIRPORT,
+            point_kind::VOR,
+            point_kind::NDB,
+        ][lcg(&mut seed) as usize % 5];
+        let lat = 41.9786 + (f64::from(lcg(&mut seed) % 1000) - 500.0) / 2500.0;
+        let lon = -87.9048 + (f64::from(lcg(&mut seed) % 1000) - 500.0) / 1800.0;
+        let (la, lo) = e7(lat, lon);
+        pts.push((kind, format!("P{i:03}"), la, lo));
+    }
+    let m = points_model(&pts);
+    validate_model(&m).unwrap();
+    for (w, h, range) in [
+        (1920u32, 1080u32, 20.0),
+        (1920, 1080, 12.0),
+        (800, 600, 15.0),
+        (1200, 900, 30.0),
+    ] {
+        let mut view = view_new(ORD.0, ORD.1, range, w, h).unwrap();
+        all_open(&mut view);
+        let mut l = list_new(scene_caps(&m));
+        let st = build_scene(
+            &mut l,
+            &m,
+            &scene_index(&m),
+            &view,
+            &mut scratch_for(&m, &view),
+        )
+        .unwrap();
+        let shown = st.fixes + st.terminal_waypoints + st.navaids + st.airports;
+        assert!(shown > 100 && st.labels_dropped > 0, "{st:?}");
+        assert_eq!(
+            st.labels + st.labels_dropped,
+            shown,
+            "every shown symbol had a candidate"
+        );
+        // Every label, the ring labels included, is clear of every other, of the strip and of
+        // the screen edge.
+        let bx = label_boxes(&l);
+        assert!(bx.len() as u32 >= st.labels);
+        for (i, a) in bx.iter().enumerate() {
+            assert!(
+                a.0 >= 0 && a.2 <= i64::from(w) && a.3 <= i64::from(h),
+                "{a:?} leaves the screen"
+            );
+            if a.4 != pal::DIM_TEXT {
+                assert!(a.1 >= i64::from(LEGEND_STRIP_PX), "{a:?} is in the strip");
+            }
+            for b in &bx[i + 1..] {
+                assert!(!overlap(a, b), "{w}x{h} {range}: {a:?} overlaps {b:?}");
+            }
+        }
+        // The dropped count is on the legend, in the normal colour.
+        let t = texts(&l);
+        let want = format!("LABELS DROPPED: {}", st.labels_dropped);
+        let i = t.iter().position(|s| *s == want).unwrap();
+        assert_eq!(l.texts.colour[i], pal::TEXT);
+    }
+}
+
+// REQ: OA-DSP-032
+#[test]
+fn a_navaid_label_is_drawn_ahead_of_every_lower_priority_label_it_overlaps() {
+    // A VOR with 40 fixes and 10 airports piled on it, away from the centre.
+    let (la, lo) = e7(41.99, -87.80);
+    let mut pts = vec![(point_kind::VOR, "ZZVOR".to_string(), la, lo)];
+    for i in 0..40 {
+        pts.push((
+            point_kind::FIX,
+            format!("AAF{i:02}"),
+            la + i * 20,
+            lo + (i % 5) * 20,
+        ));
+    }
+    for i in 0..10 {
+        pts.push((
+            point_kind::AIRPORT,
+            format!("AAA{i}"),
+            la - i * 30,
+            lo - 100,
+        ));
+    }
+    let m = points_model(&pts);
+    let (l, st, _) = build(&m, 10.0, all_open);
+    let t = texts(&l);
+    // Named last by ident and with the lowest number priority: placed first, so it is drawn.
+    assert!(t.contains(&"ZZVOR"), "the VOR label was dropped: {t:?}");
+    assert!(st.labels_dropped > 20, "{st:?}");
+    // Every drawn label is clear of the VOR's, which is first in the list.
+    let bx = label_boxes(&l);
+    let v = bx.iter().find(|b| b.6 == "ZZVOR").unwrap();
+    for b in bx.iter().filter(|b| b.6 != "ZZVOR") {
+        assert!(!overlap(v, b), "{b:?} overlaps the VOR label");
+    }
+    // The labels are in priority order in the list: the VOR before any airport before any fix.
+    let pos = |name: &str| t.iter().position(|s| *s == name).unwrap();
+    let first_fix = t.iter().position(|s| s.starts_with("AAF"));
+    let first_apt = t.iter().position(|s| s.starts_with("AAA"));
+    assert!(pos("ZZVOR") < first_apt.unwrap_or(usize::MAX));
+    if let (Some(a), Some(f)) = (first_apt, first_fix) {
+        assert!(a < f);
+    }
+}
+
+/// Padded overlap, as the placer sees it.
+fn padded_overlap(a: &[i32; 4], b: &[i32; 4]) -> bool {
+    let p = LABEL_PAD16;
+    a[0] - p < b[2] + p && b[0] - p < a[2] + p && a[1] - p < b[3] + p && b[1] - p < a[3] + p
+}
+
+/// Random candidates in a 1920 by 1080 map area, a scratch holding them, placed.
+fn random_scratch(seed: &mut u64, n: usize) -> Scratch {
+    let pts: Vec<_> = (0..n)
+        .map(|i| (point_kind::FIX, format!("P{i}"), 0, 0))
+        .collect();
+    let m = points_model(&pts);
+    let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
+    let mut s = scratch_for(&m, &view);
+    s.bounds = [0, LEGEND_STRIP_PX as i32 * 16, 1920 * 16, 1080 * 16];
+    for i in 0..n {
+        let chars = 2 + lcg(seed) as usize % 7;
+        s.prio.push(1 + (lcg(seed) % 5) as u8);
+        s.x.push((lcg(seed) % (1920 * 16)) as i32);
+        s.y.push((lcg(seed) % (1080 * 16)) as i32);
+        s.gap.push(8 * 16);
+        s.w.push(((chars * 6 - 2) * 24) as i32);
+        s.point.push(i as u32);
+    }
+    // Priority, then the candidate number as the stable key.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_by_key(|&i| (s.prio[i as usize], i));
+    s.order = order;
+    s
+}
+
+// REQ: OA-DSP-032
+#[test]
+fn placement_property_no_overlap_and_a_drop_means_every_offset_is_blocked_by_an_equal_or_higher_priority_label(
+) {
+    let mut seed = 99;
+    let mut dropped_total = 0;
+    for round in 0..60 {
+        let n = 20 + round * 9;
+        let mut s = random_scratch(&mut seed, n);
+        let placed_n = place_labels(&mut s);
+        let boxes_of =
+            |s: &Scratch, i: usize, k: u8| label_geom(s.gap[i], s.w[i], s.x[i], s.y[i], k).2;
+        let placed: Vec<usize> = (0..n).filter(|&i| s.outcome[i] < 4).collect();
+        assert_eq!(placed.len() as u32, placed_n);
+        // No two placed labels overlap, padding included.
+        for (a, &i) in placed.iter().enumerate() {
+            let bi = boxes_of(&s, i, s.outcome[i]);
+            let bd = s.bounds;
+            assert!(bi[0] >= bd[0] && bi[1] >= bd[1] && bi[2] <= bd[2] && bi[3] <= bd[3]);
+            for &j in &placed[a + 1..] {
+                assert!(
+                    !padded_overlap(&bi, &boxes_of(&s, j, s.outcome[j])),
+                    "round {round}: {i} and {j}"
+                );
+            }
+        }
+        // Every drop (with room in the grid) is justified at all four offsets: out of bounds or
+        // overlapping a label placed earlier, which has equal or higher priority.
+        let pos: Vec<usize> = {
+            let mut p = vec![0; n];
+            for (o, &i) in s.order.iter().enumerate() {
+                p[i as usize] = o;
+            }
+            p
+        };
+        for i in (0..n).filter(|&i| s.outcome[i] >= 4) {
+            assert_eq!(
+                s.outcome[i], DROPPED_NO_ROOM,
+                "cells never fill at this density"
+            );
+            dropped_total += 1;
+            for k in 0..4 {
+                let b = boxes_of(&s, i, k);
+                let bd = s.bounds;
+                let p = LABEL_PAD16;
+                let outside =
+                    b[0] - p < bd[0] || b[1] - p < bd[1] || b[2] + p > bd[2] || b[3] + p > bd[3];
+                // Some label placed earlier, so of equal or higher priority, takes the offset.
+                let blocker = placed.iter().find(|&&j| {
+                    pos[j] < pos[i] && padded_overlap(&b, &boxes_of(&s, j, s.outcome[j]))
+                });
+                if let Some(&j) = blocker {
+                    assert!(s.prio[j] <= s.prio[i]);
+                } else {
+                    assert!(outside, "round {round}: {i} dropped with offset {k} free");
+                }
+            }
+        }
+    }
+    assert!(
+        dropped_total > 100,
+        "the property was never exercised: {dropped_total}"
+    );
+}
+
+// REQ: OA-DSP-032
+#[test]
+fn a_full_grid_cell_drops_the_label_and_counts_it_without_overflowing() {
+    // Thin labels in one 64 pixel cell: more fit by space than the cell holds.
+    let n = 90;
+    let pts: Vec<_> = (0..n)
+        .map(|i| (point_kind::FIX, format!("P{i}"), 0, 0))
+        .collect();
+    let m = points_model(&pts);
+    let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
+    let mut s = scratch_for(&m, &view);
+    s.bounds = [0, 104 * 16, 1920 * 16, 1080 * 16];
+    for i in 0..n {
+        s.prio.push(4);
+        s.x.push((i as i32 % 12) * 5 * 16 + 64 * 16 * 3);
+        s.y.push((i as i32 / 12) * 16 * 16 + 64 * 16 * 3);
+        s.gap.push(0);
+        s.w.push(16);
+        s.point.push(i as u32);
+    }
+    s.order = (0..n as u32).collect();
+    let placed = place_labels(&mut s);
+    let full = s
+        .outcome
+        .iter()
+        .filter(|&&o| o == DROPPED_CELL_FULL)
+        .count();
+    assert!(full > 0, "no cell filled");
+    assert_eq!(
+        placed as usize + full + s.outcome.iter().filter(|&&o| o == DROPPED_NO_ROOM).count(),
+        n
+    );
+    for c in &s.cell_n {
+        assert!(usize::from(*c) <= CELL_CAP);
+    }
+    // The cells are all the allocation there was: nothing grew.
+    assert_eq!(s.cell_box.len(), s.cols * s.rows * CELL_CAP);
+}
+
+// REQ: OA-DSP-032
+#[test]
+fn label_placement_is_deterministic_and_does_not_depend_on_the_order_of_the_points() {
+    let mut seed = 5;
+    let mut pts = Vec::new();
+    for i in 0..300 {
+        let kind =
+            [point_kind::FIX, point_kind::AIRPORT, point_kind::VOR][lcg(&mut seed) as usize % 3];
+        let (la, lo) = e7(
+            41.9786 + (f64::from(lcg(&mut seed) % 600) - 300.0) / 3000.0,
+            -87.9048 + (f64::from(lcg(&mut seed) % 600) - 300.0) / 2200.0,
+        );
+        pts.push((kind, format!("N{i:03}"), la, lo));
+    }
+    let labels_of = |pts: &[(u8, String, i32, i32)]| {
+        let m = points_model(pts);
+        let mut view = view_new(ORD.0, ORD.1, 20.0, 1920, 1080).unwrap();
+        all_open(&mut view);
+        let index = scene_index(&m);
+        let mut sc = scratch_for(&m, &view);
+        let mut l = list_new(scene_caps(&m));
+        let st = build_scene(&mut l, &m, &index, &view, &mut sc).unwrap();
+        // The same scratch, a second frame: the same list.
+        let mut l2 = list_new(scene_caps(&m));
+        build_scene(&mut l2, &m, &index, &view, &mut sc).unwrap();
+        assert_eq!(l, l2);
+        let mut v: Vec<_> = (0..l.texts.x.len())
+            .filter(|&i| l.texts.layer[i] == LAYER_TEXT)
+            .map(|i| {
+                (
+                    l.texts.x[i],
+                    l.texts.y[i],
+                    l.texts.align[i],
+                    l.texts.colour[i],
+                    texts(&l)[i].to_string(),
+                )
+            })
+            .collect();
+        v.sort();
+        (v, st.labels, st.labels_dropped)
+    };
+    let first = labels_of(&pts);
+    assert!(first.1 > 50 && first.2 > 0);
+    let mut shuffled = pts.clone();
+    for i in (1..shuffled.len()).rev() {
+        shuffled.swap(i, lcg(&mut seed) as usize % (i + 1));
+    }
+    assert_eq!(labels_of(&shuffled), first);
+    assert_eq!(labels_of(&pts), first);
+}
+
 // REQ: OA-DSP-030
 #[test]
 fn rejecting_positions_by_bounding_box_changes_nothing_on_screen() {
@@ -700,9 +1192,9 @@ fn rejecting_positions_by_bounding_box_changes_nothing_on_screen() {
             let index = scene_index(&m);
             let mut a = list_new(scene_caps(&m));
             let mut b = list_new(scene_caps(&m));
-            let sa = build_scene(&mut a, &m, &index, &view).unwrap();
+            let sa = build_scene(&mut a, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
             view.bbox = None;
-            let sb = build_scene(&mut b, &m, &index, &view).unwrap();
+            let sb = build_scene(&mut b, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
             assert_eq!(a, b, "{lat},{lon} range {range}: the box changed the list");
             assert_eq!(
                 (sa.fixes, sa.navaids, sa.airports, sa.airway_legs, sa.labels),
@@ -721,7 +1213,7 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
     let full = scene_caps(&m);
     // Each table, one row short of what the scene needs, fails by name.
     let mut l = list_new(full);
-    build_scene(&mut l, &m, &index, &view).unwrap();
+    build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
     let used = (
         l.lines.x0.len(),
         l.circles.x.len(),
@@ -776,7 +1268,7 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
         ("rects", ListCaps { rects: 0, ..full }),
     ] {
         let mut l = list_new(caps);
-        match build_scene(&mut l, &m, &index, &view) {
+        match build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)) {
             Err(DisplayError::Full { table, .. }) => assert_eq!(table, what),
             other => panic!("{what}: {other:?}"),
         }
@@ -808,8 +1300,11 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
                 view.non_ifr_airport_max_nm = 1e9;
                 view.minor_navaid_max_nm = 1e9;
                 view.label_max_nm = 1e9;
+                view.terminal_wpt_max_nm = 1e9;
+                view.runway_max_nm = 1e9;
+                view.major_label_max_nm = 1e9;
                 let mut l = list_new(full);
-                build_scene(&mut l, &m, &index, &view)
+                build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view))
                     .unwrap_or_else(|e| panic!("{lat},{lon} {range}: {e}"));
                 let mut buf = vec![0u8; 640 * 480 * 4];
                 rasterize(&l, &spec(640, 480), &mut buf).unwrap();
@@ -830,7 +1325,7 @@ fn frames_are_identical_and_never_change_the_lists_capacity() {
     let mut digests = Vec::new();
     for range in [60.0, 250.0, 5.0, 60.0, 1000.0, 60.0] {
         let view = view_new(ORD.0, ORD.1, range, 800, 600).unwrap();
-        build_scene(&mut l, &m, &index, &view).unwrap();
+        build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
         let d = render(&l, &sp, &mut buf).unwrap();
         assert_eq!(
             list_capacities(&l),
@@ -845,8 +1340,8 @@ fn frames_are_identical_and_never_change_the_lists_capacity() {
     assert_ne!(digests[0], digests[1]);
     let view = view_new(ORD.0, ORD.1, 60.0, 800, 600).unwrap();
     let mut fresh = list_new(scene_caps(&m));
-    build_scene(&mut fresh, &m, &index, &view).unwrap();
-    build_scene(&mut l, &m, &index, &view).unwrap();
+    build_scene(&mut fresh, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+    build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
     assert_eq!(fresh, l);
 }
 
@@ -869,7 +1364,7 @@ fn the_hand_built_map_renders_to_a_pinned_hash() {
     }
     assert_eq!(
         to_hex(&d),
-        "4bb814a8216026b30f898e1f3fda6628805cb5a08e1f74f467c28beb7e2f4a5d"
+        "c9cbf36a26347be8bcac7541a6a9805516556b6046ebf3555307b1b8b4137003"
     );
 }
 
@@ -924,7 +1419,14 @@ fn the_command_line_renders_a_snapshot_to_a_ppm_whose_hash_it_reports() {
     let view = view_new(ORD.0, ORD.1, 60.0, 800, 600).unwrap();
     let m = decode(&bytes).unwrap();
     let mut l = list_new(scene_caps(&m));
-    build_scene(&mut l, &m, &scene_index(&m), &view).unwrap();
+    build_scene(
+        &mut l,
+        &m,
+        &scene_index(&m),
+        &view,
+        &mut scratch_for(&m, &view),
+    )
+    .unwrap();
     let sp = spec(800, 600);
     let mut buf = vec![0u8; frame_len(&sp)];
     rasterize(&l, &sp, &mut buf).unwrap();

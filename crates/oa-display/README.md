@@ -26,8 +26,9 @@ Core versus shell (RULESET B1):
 
 ```text
 oa-scope render --snapshot <file> --centre <lat,lon> --range-nm <n> --size <WxH> --out <file.ppm>
-                [--hide <layer,...>] [--fix-max-nm <n>] [--airport-max-nm <n>]
-                [--navaid-max-nm <n>] [--label-max-nm <n>] [--hash]
+                [--hide <layer,...>] [--fix-max-nm <n>] [--terminal-max-nm <n>]
+                [--runway-max-nm <n>] [--airport-max-nm <n>] [--navaid-max-nm <n>]
+                [--label-max-nm <n>] [--major-label-max-nm <n>] [--hash]
 ```
 
 Draws a snapshot built by `oa-adapt` as a static scope picture. `--range-nm` is the range as a
@@ -36,24 +37,33 @@ was drawn, what could not be placed, and the time of each stage. The frame's SHA
 only with `--hash`: hashing costs more than drawing, so it is for tests and checks, not for every
 frame.
 
-Defaults, which declutter the picture (all configurable):
+**Detail follows the display range (the zoom), never a symbol's distance from the centre.** Every
+threshold below is compared with `--range-nm`, so at one zoom the same kinds of symbol show over
+the whole screen. Defaults, which declutter the picture (all configurable):
 
-| layer name (`--hide`)  | shown by default                                                  |
-|------------------------|-------------------------------------------------------------------|
-| `own-boundary`         | the facility's HIGH and LOW boundaries, 2 px wide                 |
-| `neighbour-boundaries` | other facilities' boundaries, 1 px wide, dimmer                   |
-| `high-airways`         | J and Q airways                                                   |
-| `low-airways`          | V and T airways                                                   |
-| `vors`                 | VOR, VORTAC, VOR-DME, always                                      |
-| `airports`             | within 60 NM; beyond that only with a coded instrument procedure  |
-| `fixes`                | within 60 NM (`--fix-max-nm`)                                     |
-| `labels`               | within 60 NM (`--label-max-nm`)                                   |
-| `rings`                | range rings, labelled on the 45 degree north-east diagonal        |
+| layer name (`--hide`)  | shown by default                                                   |
+|------------------------|--------------------------------------------------------------------|
+| `own-boundary`         | the facility's HIGH and LOW boundaries, 2 px wide                  |
+| `neighbour-boundaries` | other facilities' boundaries, 1 px wide, dimmer                    |
+| `high-airways`         | J and Q airways                                                    |
+| `low-airways`          | V and T airways                                                    |
+| `vors`                 | VOR, VORTAC, VOR-DME always; NDB, DME, TACAN at range <= 40 NM (`--navaid-max-nm`) |
+| `airports`             | airports with a coded instrument procedure always; others at range <= 40 NM (`--airport-max-nm`); runway thresholds and localizers at range <= 15 NM (`--runway-max-nm`) |
+| `fixes`                | fixes at range <= 40 NM (`--fix-max-nm`); terminal waypoints at range <= 20 NM (`--terminal-max-nm`) |
+| `labels`               | labels of fixes, minor navaids, other airports and terminal waypoints at range <= 40 NM (`--label-max-nm`); labels of VORs and instrument airports at range <= 100 NM (`--major-label-max-nm`) |
+| `rings`                | range rings, labelled on the 45 degree north-east diagonal         |
 
-NDB, DME and TACAN show within 60 NM (`--navaid-max-nm`); airports without a procedure show
-within `--airport-max-nm` (60). A legend line `HIDDEN: ...` names every layer switched off and
-every threshold that is hiding something at the current range, so a clean picture never hides
-that it is clean.
+A legend line `HIDDEN: ...` names every layer switched off and every threshold that is hiding
+something at the current range, so a clean picture never hides that it is clean.
+
+Labels are placed deterministically. Candidates are sorted by priority (VOR-class navaids, then
+airports with instrument procedures, other airports, fixes and minor navaids, terminal waypoints),
+then ident, then position, then table row. Each takes the first of four fixed offsets (north-east,
+south-east, north-west, south-west of its symbol) whose box overlaps no placed label, no ring
+label, the legend strip nor the screen edge. A label with no free offset is dropped and counted:
+the legend shows `LABELS DROPPED: N` in the normal colour. The placed boxes are kept in a coarse
+grid of 64 px cells with a bounded list each, allocated once; a full cell drops the label and
+counts it, it never overflows. The same input gives the same labels on every machine.
 
 The legend is a fixed 104 px strip at the top of the screen that the projection leaves out of the
 map area. The alternative, a legend without a background drawn over the map, can still cover

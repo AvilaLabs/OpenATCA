@@ -12,7 +12,7 @@ use oa_airspace::model::{stratum, validate_model};
 use oa_airspace::snapshot::decode;
 use oa_display::list::{list_capacities, list_clear, list_new};
 use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
-use oa_display::scene::{build_scene, scene_caps, scene_index, view_new};
+use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_sha256::to_hex;
 use std::time::Instant;
 
@@ -60,13 +60,18 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
     let mut list = list_new(scene_caps(&model));
     let mut buf = vec![0u8; frame_len(&spec)];
     let caps = list_capacities(&list);
+    let mut scratch = scratch_for(
+        &model,
+        &view_new(419_800_000, -879_000_000, 250.0, 1920, 1080).unwrap(),
+    );
     let mut wide = None;
     for (lat, lon, range) in [
         (419_800_000, -879_000_000, 250.0),
         (419_786_000, -879_048_000, 60.0),
+        (419_786_000, -879_048_000, 20.0),
     ] {
         let view = view_new(lat, lon, range, 1920, 1080).unwrap();
-        let stats = build_scene(&mut list, &model, &index, &view).unwrap();
+        let stats = build_scene(&mut list, &model, &index, &view, &mut scratch).unwrap();
         // Nothing the data cannot place; the border legs are expected data, not a fault.
         assert_eq!(
             (
@@ -82,8 +87,17 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
             assert!(stats.legs_at_border > 0, "{stats:?}");
             assert!(stats.neighbour_boundaries > 0 && stats.airports > 10);
             wide = Some(view);
+        } else if range > 40.0 {
+            // The zoom hides fixes and every label but the VORs' and the instrument airports'.
+            assert!(
+                stats.fixes == 0 && stats.terminal_waypoints == 0,
+                "{stats:?}"
+            );
+            assert!(stats.navaids > 10 && stats.labels > 5, "{stats:?}");
         } else {
             assert!(stats.fixes > 100 && stats.labels > 100, "{stats:?}");
+            assert!(stats.terminal_waypoints > 0, "{stats:?}");
+            assert!(stats.labels_dropped > 0 || stats.labels > 100);
         }
         rasterize(&list, &spec, &mut buf).unwrap();
         let first = frame_digest(&spec, &buf).unwrap();
@@ -91,7 +105,7 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         let (mut build_ms, mut raster_ms) = (Vec::new(), Vec::new());
         for _ in 0..30 {
             let t0 = Instant::now();
-            build_scene(&mut list, &model, &index, &view).unwrap();
+            build_scene(&mut list, &model, &index, &view, &mut scratch).unwrap();
             let t1 = Instant::now();
             rasterize(&list, &spec, &mut buf).unwrap();
             let t2 = Instant::now();
@@ -115,7 +129,7 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         );
     }
     let view = wide.unwrap();
-    build_scene(&mut list, &model, &index, &view).unwrap();
+    build_scene(&mut list, &model, &index, &view, &mut scratch).unwrap();
 
     // Where the raster time goes: the same list with one kind of primitive removed.
     let mut probe = |name: &str, f: &dyn Fn(&mut oa_display::list::DisplayList)| {

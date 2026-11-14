@@ -13,7 +13,6 @@ members = [
     "crates/oa-feed",
     "crates/oa-fixm",
     "crates/oa-tbfm",
-
     "crates/oa-display",
     "tools/oa-trace",
 ]

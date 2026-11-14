@@ -13,18 +13,37 @@
 //! * Airway legs as thin lines: high airways (designators J and Q) and low airways (every other
 //!   designator, V and T among them).
 //! * Navaids: VOR, VORTAC and VOR-DME (always), NDB, DME and TACAN (within a range threshold), as a
-//!   small ring and dot. Fixes as a triangle (within a range threshold). Airports as a ring and
-//!   dot: those with at least one coded instrument procedure in the model always, the others
-//!   within a range threshold.
-//! * Labels for symbols within a range threshold, a range-ring scale with each ring labelled where
-//!   it meets the 45 degree north-east ray (so no two labels can meet), and a centre mark.
+//!   small ring and dot. Fixes as a triangle, terminal waypoints as a smaller one, runway
+//!   thresholds as a plus and localizers as a diamond (each within a range threshold). Airports as
+//!   a ring and dot: those with at least one coded instrument procedure in the model always, the
+//!   others within a range threshold.
+//! * Labels, placed without collisions (see below), a range-ring scale with each ring labelled
+//!   where it meets the 45 degree north-east ray (so no two ring labels can meet), and a centre
+//!   mark.
 //! * A legend strip along the top of the screen: facility and cycles, range and ring spacing, the
 //!   boundary colours, a `HIDDEN:` line naming every range threshold or layer switch that is hiding
 //!   something, the count of airway legs that end at a published border crossing, and, only when
 //!   something truly could not be placed, an alert line.
 //!
 //! Every layer can be switched off ([`Layers`]) and every threshold set ([`View`]); the defaults
-//! are in the crate README.
+//! are in the crate README. Every threshold keys on the display range (the zoom: nautical miles
+//! from the centre to the nearest edge of the map area), never on a symbol's distance from the
+//! centre: a given zoom shows the same kinds of symbol across the whole screen.
+//!
+//! # Label placement
+//!
+//! Labels are candidates first. Each shown symbol with an ident is a candidate with a priority:
+//! 1 VOR, VORTAC and VOR-DME, 2 airports with a coded instrument procedure, 3 other airports,
+//! 4 fixes and the minor navaids, 5 terminal waypoints. Candidates are sorted by priority, then
+//! ident, then position, then table row, which is a total order, so the same input gives the same
+//! labels on every machine. Each is placed at the first of four fixed offsets (north-east,
+//! south-east, north-west, south-west of its symbol) whose box overlaps no placed label, no ring
+//! label, the legend strip nor the screen edge; if none fits it is dropped and counted
+//! ([`SceneStats::labels_dropped`], shown in the legend). Placed boxes live in a coarse grid
+//! of cells with a bounded list each, allocated once in [`Scratch`]: a full cell drops the label,
+//! it never overflows. Because candidates are placed in priority order, a label is only ever
+//! dropped for want of room taken by a label of equal or higher priority. VOR and airport
+//! labels with a procedure (priorities 1 and 2) show out to a wider range than the rest.
 //!
 //! # The legend strip
 //!
@@ -51,7 +70,7 @@
 use crate::font::{text_width_units, CAP_HEIGHT};
 use crate::list::{
     begin_polyline_w, list_clear, push_circle, push_line, push_rect, push_text, push_vertex,
-    DisplayError, DisplayList, ListCaps, ALIGN_LEFT,
+    DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
 };
 use crate::palette as pal;
 use crate::project::{
@@ -78,10 +97,14 @@ pub const LAYER_LEGEND: u8 = 8;
 pub const LEGEND_STRIP_PX: u32 = 104;
 
 /// Default range thresholds, nautical miles from the centre to the nearest edge of the map.
-pub const DEFAULT_FIX_MAX_NM: f64 = 60.0;
-pub const DEFAULT_NON_IFR_AIRPORT_MAX_NM: f64 = 60.0;
-pub const DEFAULT_MINOR_NAVAID_MAX_NM: f64 = 60.0;
-pub const DEFAULT_LABEL_MAX_NM: f64 = 60.0;
+pub const DEFAULT_FIX_MAX_NM: f64 = 40.0;
+pub const DEFAULT_TERMINAL_WPT_MAX_NM: f64 = 20.0;
+pub const DEFAULT_RUNWAY_MAX_NM: f64 = 15.0;
+pub const DEFAULT_NON_IFR_AIRPORT_MAX_NM: f64 = 40.0;
+pub const DEFAULT_MINOR_NAVAID_MAX_NM: f64 = 40.0;
+pub const DEFAULT_LABEL_MAX_NM: f64 = 40.0;
+/// Labels of VORs and of airports with a procedure.
+pub const DEFAULT_MAJOR_LABEL_MAX_NM: f64 = 100.0;
 
 const SUBDIV_BOUNDARY: u32 = 64;
 const SUBDIV_AIRWAY: u32 = 16;
@@ -190,14 +213,21 @@ pub struct View {
     /// Latitude and longitude box of the map, for rejecting positions before projecting them.
     pub bbox: Option<Bbox>,
     pub layers: Layers,
+    /// Every threshold is compared with the display range, not with a distance from the centre.
     /// Fixes are drawn only when the range is at most this many nautical miles.
     pub fix_max_nm: f64,
+    /// Terminal waypoints: likewise.
+    pub terminal_wpt_max_nm: f64,
+    /// Runway thresholds and localizers: likewise.
+    pub runway_max_nm: f64,
     /// Airports without a coded instrument procedure: likewise.
     pub non_ifr_airport_max_nm: f64,
     /// NDB, DME and TACAN: likewise.
     pub minor_navaid_max_nm: f64,
-    /// Labels: likewise.
+    /// Labels of fixes, minor navaids, other airports and terminal waypoints: likewise.
     pub label_max_nm: f64,
+    /// Labels of VORs and of airports with a coded instrument procedure: likewise.
+    pub major_label_max_nm: f64,
 }
 
 /// A view with every layer on and the default thresholds.
@@ -221,9 +251,12 @@ pub fn view_new(
         proj,
         layers: layers_all(),
         fix_max_nm: DEFAULT_FIX_MAX_NM,
+        terminal_wpt_max_nm: DEFAULT_TERMINAL_WPT_MAX_NM,
+        runway_max_nm: DEFAULT_RUNWAY_MAX_NM,
         non_ifr_airport_max_nm: DEFAULT_NON_IFR_AIRPORT_MAX_NM,
         minor_navaid_max_nm: DEFAULT_MINOR_NAVAID_MAX_NM,
         label_max_nm: DEFAULT_LABEL_MAX_NM,
+        major_label_max_nm: DEFAULT_MAJOR_LABEL_MAX_NM,
     })
 }
 
@@ -236,9 +269,14 @@ pub struct SceneStats {
     pub airway_legs: u32,
     pub airway_legs_off_screen: u32,
     pub fixes: u32,
+    pub terminal_waypoints: u32,
+    /// Runway thresholds and localizers.
+    pub runway_symbols: u32,
     pub navaids: u32,
     pub airports: u32,
     pub labels: u32,
+    /// Labels that had a candidate and found no room: expected on a busy screen, counted.
+    pub labels_dropped: u32,
     pub rings: u32,
     /// Airway legs with an end at a published border crossing: expected, not drawable.
     pub legs_at_border: u32,
@@ -387,7 +425,7 @@ pub fn scene_caps(m: &Model) -> ListCaps {
             .from
             .len()
             .saturating_mul(SUBDIV_AIRWAY as usize)
-            .saturating_add(points.saturating_mul(3))
+            .saturating_add(points.saturating_mul(4))
             .saturating_add(FURNITURE),
         rects: 1,
         circles: points.saturating_add(FURNITURE),
@@ -396,6 +434,241 @@ pub fn scene_caps(m: &Model) -> ListCaps {
         texts: points.saturating_add(FURNITURE),
         text_bytes: ident_bytes.saturating_add(FURNITURE * 32),
     }
+}
+
+/// Label candidates and the occupancy grid, allocated once by [`scratch_for`] and reused by every
+/// frame (C1): a frame allocates nothing for placement.
+// A7.2: cold struct, size guard waived (one per display).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scratch {
+    /// Candidate capacity: the number of points in the model.
+    pub cap: usize,
+    /// Per candidate, filled by the frame: priority (1 first), symbol centre and gap to the label,
+    /// label width (all 1/16 pixel), model point row.
+    pub prio: Vec<u8>,
+    pub x: Vec<i32>,
+    pub y: Vec<i32>,
+    pub gap: Vec<i32>,
+    pub w: Vec<i32>,
+    pub point: Vec<u32>,
+    /// Candidate indexes in placement order.
+    pub order: Vec<u32>,
+    /// Per candidate: the offset 0 to 3 it was placed at, or [`DROPPED_NO_ROOM`] or
+    /// [`DROPPED_CELL_FULL`].
+    pub outcome: Vec<u8>,
+    /// Candidates beyond `cap` (cannot happen for a scratch made for the model).
+    pub overflow: u32,
+    /// Grid size in cells of 64 by 64 pixels, and per cell the number of boxes and the boxes
+    /// (`CELL_CAP` per cell) as left, top, right, bottom.
+    pub cols: usize,
+    pub rows: usize,
+    pub cell_n: Vec<u8>,
+    pub cell_box: Vec<[i32; 4]>,
+    /// Where a label may lie: left, top, right, bottom, 1/16 pixel.
+    pub bounds: [i32; 4],
+}
+
+/// The label found no offset free of other labels, the legend strip and the screen edge.
+pub const DROPPED_NO_ROOM: u8 = 254;
+/// An offset was free of other labels but a grid cell it touches is full.
+pub const DROPPED_CELL_FULL: u8 = 255;
+/// Boxes per grid cell; 64 by 64 pixels holds at most a few 12 pixel labels anyway.
+pub const CELL_CAP: usize = 24;
+const CELL_SHIFT: u32 = 10;
+/// Space kept around a label, 1/16 pixel each side.
+pub const LABEL_PAD16: i32 = 2 * 16;
+
+/// A scratch for `m` drawn at the size of `v`.
+pub fn scratch_for(m: &Model, v: &View) -> Scratch {
+    let n = m.points.kind.len();
+    let cols = (v.proj.width as usize).div_ceil(64).max(1);
+    let rows = (v.proj.height as usize).div_ceil(64).max(1);
+    Scratch {
+        cap: n,
+        prio: Vec::with_capacity(n),
+        x: Vec::with_capacity(n),
+        y: Vec::with_capacity(n),
+        gap: Vec::with_capacity(n),
+        w: Vec::with_capacity(n),
+        point: Vec::with_capacity(n),
+        order: Vec::with_capacity(n),
+        outcome: Vec::with_capacity(n),
+        overflow: 0,
+        cols,
+        rows,
+        cell_n: vec![0; cols * rows],
+        cell_box: vec![[0; 4]; cols * rows * CELL_CAP],
+        bounds: [0; 4],
+    }
+}
+
+/// Empties the candidates and the grid and sets where labels may lie.
+fn scratch_clear(s: &mut Scratch, p: &Projection) {
+    s.prio.clear();
+    s.x.clear();
+    s.y.clear();
+    s.gap.clear();
+    s.w.clear();
+    s.point.clear();
+    s.order.clear();
+    s.outcome.clear();
+    s.overflow = 0;
+    s.cell_n.fill(0);
+    let px16 = |v: u32| i32::try_from(i64::from(v) * 16).unwrap_or(i32::MAX);
+    s.bounds = [0, px16(p.top_inset), px16(p.width), px16(p.height)];
+}
+
+fn boxes_overlap(a: &[i32; 4], b: &[i32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+/// The grid cells a box touches, clamped to the grid.
+fn cell_span(s: &Scratch, b: &[i32; 4]) -> (usize, usize, usize, usize) {
+    let col = |x: i32| ((x.max(0) >> CELL_SHIFT) as usize).min(s.cols.saturating_sub(1));
+    let row = |y: i32| ((y.max(0) >> CELL_SHIFT) as usize).min(s.rows.saturating_sub(1));
+    (
+        col(b[0]),
+        row(b[1]),
+        col(b[2].saturating_sub(1)),
+        row(b[3].saturating_sub(1)),
+    )
+}
+
+enum Fit {
+    Free,
+    Blocked,
+    CellFull,
+}
+
+/// Whether a padded box is inside the bounds, free of placed boxes and has room in its cells.
+fn grid_fit(s: &Scratch, b: &[i32; 4]) -> Fit {
+    let bd = &s.bounds;
+    if b[0] < bd[0] || b[1] < bd[1] || b[2] > bd[2] || b[3] > bd[3] {
+        return Fit::Blocked;
+    }
+    let (c0, r0, c1, r1) = cell_span(s, b);
+    let mut full = false;
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            let cell = r * s.cols + c;
+            let n = usize::from(s.cell_n.get(cell).copied().unwrap_or(CELL_CAP as u8));
+            full |= n >= CELL_CAP;
+            for k in 0..n.min(CELL_CAP) {
+                if s.cell_box
+                    .get(cell * CELL_CAP + k)
+                    .is_some_and(|o| boxes_overlap(b, o))
+                {
+                    return Fit::Blocked;
+                }
+            }
+        }
+    }
+    if full {
+        Fit::CellFull
+    } else {
+        Fit::Free
+    }
+}
+
+/// Records a padded box in every cell it touches (the caller has checked there is room).
+fn grid_insert(s: &mut Scratch, b: &[i32; 4]) {
+    let (c0, r0, c1, r1) = cell_span(s, b);
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            let cell = r * s.cols + c;
+            let n = usize::from(s.cell_n.get(cell).copied().unwrap_or(CELL_CAP as u8));
+            if n < CELL_CAP {
+                if let Some(slot) = s.cell_box.get_mut(cell * CELL_CAP + n) {
+                    *slot = *b;
+                    if let Some(c) = s.cell_n.get_mut(cell) {
+                        *c += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reserves the space of a box the scene itself draws (a ring label), padded, if it fits.
+fn grid_reserve(s: &mut Scratch, text_box: &[i32; 4]) {
+    let b = pad_box(text_box);
+    if matches!(grid_fit(s, &b), Fit::Free) {
+        grid_insert(s, &b);
+    }
+}
+
+fn pad_box(b: &[i32; 4]) -> [i32; 4] {
+    [
+        b[0].saturating_sub(LABEL_PAD16),
+        b[1].saturating_sub(LABEL_PAD16),
+        b[2].saturating_add(LABEL_PAD16),
+        b[3].saturating_add(LABEL_PAD16),
+    ]
+}
+
+/// The text anchor, the alignment and the text box of a label of width `w` at offset `k` (0 north
+/// east, 1 south east, 2 north west, 3 south west) of a symbol at (`cx`, `cy`) with room `gap`.
+pub fn label_geom(gap: i32, w: i32, cx: i32, cy: i32, k: u8) -> ((i32, i32), u8, [i32; 4]) {
+    let h = i32::from(LABEL_SIZE) * 16;
+    let east = k == 0 || k == 1;
+    let north = k == 0 || k == 2;
+    let ax = if east {
+        cx.saturating_add(gap)
+    } else {
+        cx.saturating_sub(gap)
+    };
+    let ay = if north {
+        cy.saturating_sub(gap).saturating_sub(h)
+    } else {
+        cy.saturating_add(gap)
+    };
+    let x0 = if east { ax } else { ax.saturating_sub(w) };
+    let align = if east { ALIGN_LEFT } else { ALIGN_RIGHT };
+    (
+        (ax, ay),
+        align,
+        [x0, ay, x0.saturating_add(w), ay.saturating_add(h)],
+    )
+}
+
+/// Places every candidate in `s.order` at its first free offset and records the outcome per
+/// candidate. Returns the number placed.
+pub fn place_labels(s: &mut Scratch) -> u32 {
+    s.outcome.clear();
+    s.outcome.resize(s.prio.len(), DROPPED_NO_ROOM);
+    let mut placed = 0;
+    for oi in 0..s.order.len() {
+        let Some(&i) = s.order.get(oi) else { break };
+        let i = i as usize;
+        let (Some(&cx), Some(&cy), Some(&gap), Some(&w)) =
+            (s.x.get(i), s.y.get(i), s.gap.get(i), s.w.get(i))
+        else {
+            continue;
+        };
+        let mut result = DROPPED_NO_ROOM;
+        let mut full = false;
+        for k in 0..4u8 {
+            let (_, _, tb) = label_geom(gap, w, cx, cy, k);
+            let b = pad_box(&tb);
+            match grid_fit(s, &b) {
+                Fit::Free => {
+                    grid_insert(s, &b);
+                    result = k;
+                    placed += 1;
+                    break;
+                }
+                Fit::Blocked => {}
+                Fit::CellFull => full = true,
+            }
+        }
+        if result == DROPPED_NO_ROOM && full {
+            result = DROPPED_CELL_FULL;
+        }
+        if let Some(o) = s.outcome.get_mut(i) {
+            *o = result;
+        }
+    }
+    placed
 }
 
 /// A short string built on the stack, so a frame allocates nothing for its labels.
@@ -575,15 +848,17 @@ pub fn build_scene(
     m: &Model,
     idx: &SceneIndex,
     v: &View,
+    sc: &mut Scratch,
 ) -> Result<SceneStats, DisplayError> {
     list_clear(l);
+    scratch_clear(sc, &v.proj);
     let mut st = SceneStats::default();
     if v.layers.rings {
-        rings(l, &v.proj, &mut st)?;
+        rings(l, &v.proj, sc, &mut st)?;
     }
     boundaries(l, m, idx, v, &mut st)?;
     airways(l, m, idx, v, &mut st)?;
-    points(l, m, idx, v, &mut st)?;
+    points(l, m, idx, v, sc, &mut st)?;
     legend(l, m, v, &st)?;
     Ok(st)
 }
@@ -591,7 +866,12 @@ pub fn build_scene(
 /// The ring labels sit where each ring meets the ray 45 degrees east of north from the centre.
 /// Rings are at least [`MIN_RING_PX`] apart along every ray, so along this one successive label
 /// anchors are at least 63 pixels apart in both x and y, more than a label is tall or wide.
-fn rings(l: &mut DisplayList, p: &Projection, st: &mut SceneStats) -> Result<(), DisplayError> {
+fn rings(
+    l: &mut DisplayList,
+    p: &Projection,
+    sc: &mut Scratch,
+    st: &mut SceneStats,
+) -> Result<(), DisplayError> {
     let centre = (p.cx16.round() as i32, p.cy16.round() as i32);
     let step = ring_step_nm(p);
     let map_h = f64::from(p.height - p.top_inset);
@@ -615,6 +895,20 @@ fn rings(l: &mut DisplayList, p: &Projection, st: &mut SceneStats) -> Result<(),
         if lx < w16 && ly > top16 {
             let mut t = label();
             put_nm(&mut t, nm);
+            // Point labels keep clear of this one.
+            let (wd, ht) = (
+                legend_width16(label_str(&t).len()),
+                i64::from(LABEL_SIZE) * 16,
+            );
+            grid_reserve(
+                sc,
+                &[
+                    lx as i32,
+                    ly as i32,
+                    (lx as i32).saturating_add(wd),
+                    (ly + ht) as i32,
+                ],
+            );
             push_text(
                 l,
                 (lx as i32, ly as i32),
@@ -769,24 +1063,26 @@ fn points(
     m: &Model,
     idx: &SceneIndex,
     v: &View,
+    sc: &mut Scratch,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
     let p = &v.proj;
     let range = p.range_nm;
-    let labels_on = v.layers.labels && range <= v.label_max_nm;
     let pts = &m.points;
     let rows = pts.kind.iter().zip(&pts.lat).zip(&pts.lon).zip(&pts.ident);
     for (i, (((kind, lat), lon), ident)) in rows.enumerate() {
+        let ifr = idx.point_ifr.get(i) == Some(&1);
         let shown = match *kind {
             point_kind::FIX => v.layers.fixes && range <= v.fix_max_nm,
+            point_kind::TERMINAL_WAYPOINT => v.layers.fixes && range <= v.terminal_wpt_max_nm,
+            point_kind::THRESHOLD | point_kind::LOCALIZER => {
+                v.layers.airports && range <= v.runway_max_nm
+            }
             point_kind::VOR | point_kind::VORTAC | point_kind::VOR_DME => v.layers.vors,
             point_kind::DME | point_kind::TACAN | point_kind::NDB => {
                 v.layers.vors && range <= v.minor_navaid_max_nm
             }
-            point_kind::AIRPORT => {
-                v.layers.airports
-                    && (range <= v.non_ifr_airport_max_nm || idx.point_ifr.get(i) == Some(&1))
-            }
+            point_kind::AIRPORT => v.layers.airports && (range <= v.non_ifr_airport_max_nm || ifr),
             _ => false,
         };
         if !shown {
@@ -808,7 +1104,8 @@ fn points(
         if !on_screen(p, c) {
             continue;
         }
-        let dx = match *kind {
+        // The label's priority and the room it keeps from the symbol; 0 for no label.
+        let (prio, gap) = match *kind {
             point_kind::FIX => {
                 // Triangle, apex up.
                 let top = add(c, 0, -SYM);
@@ -818,41 +1115,141 @@ fn points(
                 push_line(l, bl, br, pal::FIX, LAYER_SYMBOL)?;
                 push_line(l, br, top, pal::FIX, LAYER_SYMBOL)?;
                 st.fixes += 1;
-                SYM + 4 * 16
+                (4, SYM + 4 * 16)
+            }
+            point_kind::TERMINAL_WAYPOINT => {
+                let h = SYM * 3 / 4;
+                let top = add(c, 0, -h);
+                let bl = add(c, -h, h * 3 / 4);
+                let br = add(c, h, h * 3 / 4);
+                push_line(l, top, bl, pal::FIX, LAYER_SYMBOL)?;
+                push_line(l, bl, br, pal::FIX, LAYER_SYMBOL)?;
+                push_line(l, br, top, pal::FIX, LAYER_SYMBOL)?;
+                st.terminal_waypoints += 1;
+                (5, h + 4 * 16)
+            }
+            point_kind::THRESHOLD => {
+                let h = SYM / 2;
+                push_line(l, add(c, -h, 0), add(c, h, 0), pal::DIM_TEXT, LAYER_SYMBOL)?;
+                push_line(l, add(c, 0, -h), add(c, 0, h), pal::DIM_TEXT, LAYER_SYMBOL)?;
+                st.runway_symbols += 1;
+                (0, 0)
+            }
+            point_kind::LOCALIZER => {
+                let h = SYM * 3 / 4;
+                let (n, e, s_, w) = (add(c, 0, -h), add(c, h, 0), add(c, 0, h), add(c, -h, 0));
+                for (a, b) in [(n, e), (e, s_), (s_, w), (w, n)] {
+                    push_line(l, a, b, pal::DIM_TEXT, LAYER_SYMBOL)?;
+                }
+                st.runway_symbols += 1;
+                (0, 0)
             }
             point_kind::AIRPORT => {
                 push_circle(l, c, SYM * 5 / 4, pal::AIRPORT, LAYER_SYMBOL)?;
                 push_line(l, c, c, pal::AIRPORT, LAYER_SYMBOL)?;
                 st.airports += 1;
-                SYM * 5 / 4 + 4 * 16
+                (if ifr { 2 } else { 3 }, SYM * 5 / 4 + 4 * 16)
             }
-            _ => {
+            kind => {
                 push_circle(l, c, SYM, pal::FIX, LAYER_SYMBOL)?;
                 push_line(l, c, c, pal::FIX, LAYER_SYMBOL)?;
                 st.navaids += 1;
-                SYM + 4 * 16
+                let vor = matches!(
+                    kind,
+                    point_kind::VOR | point_kind::VORTAC | point_kind::VOR_DME
+                );
+                (if vor { 1 } else { 4 }, SYM + 4 * 16)
             }
         };
-        if labels_on {
-            let name = str_or_empty(&m.strings, *ident);
-            if !name.is_empty() {
-                let colour = if *kind == point_kind::AIRPORT {
-                    pal::AIRPORT
+        let wanted = v.layers.labels
+            && prio != 0
+            && range
+                <= if prio <= 2 {
+                    v.major_label_max_nm
                 } else {
-                    pal::TEXT
+                    v.label_max_nm
                 };
-                push_text(
-                    l,
-                    add(c, dx, -6 * 16),
-                    LABEL_SIZE,
-                    ALIGN_LEFT,
-                    colour,
-                    LAYER_TEXT,
-                    name,
-                )?;
-                st.labels += 1;
+        let name = str_or_empty(&m.strings, *ident);
+        if wanted && !name.is_empty() {
+            if sc.prio.len() < sc.cap {
+                sc.prio.push(prio);
+                sc.x.push(c.0);
+                sc.y.push(c.1);
+                sc.gap.push(gap);
+                sc.w.push(legend_width16(name.chars().count()));
+                sc.point.push(i as u32);
+            } else {
+                sc.overflow += 1;
             }
         }
+    }
+    labels(l, m, sc, st)
+}
+
+/// Sorts the candidates (priority, ident, position, row), places them and draws the placed ones.
+fn labels(
+    l: &mut DisplayList,
+    m: &Model,
+    sc: &mut Scratch,
+    st: &mut SceneStats,
+) -> Result<(), DisplayError> {
+    let n = sc.prio.len();
+    sc.order.clear();
+    sc.order.extend(0..n as u32);
+    let key = |s: &Scratch, c: u32| {
+        let c = c as usize;
+        let row = s.point.get(c).copied().unwrap_or(0) as usize;
+        let ident = m
+            .points
+            .ident
+            .get(row)
+            .map_or("", |i| str_or_empty(&m.strings, *i));
+        (
+            s.prio.get(c).copied().unwrap_or(u8::MAX),
+            ident,
+            m.points.lat.get(row).copied().unwrap_or(0),
+            m.points.lon.get(row).copied().unwrap_or(0),
+            row,
+        )
+    };
+    // Unstable sorting is deterministic here: the key ends with the table row, so the order is total.
+    let mut order = std::mem::take(&mut sc.order);
+    order.sort_unstable_by(|a, b| key(sc, *a).cmp(&key(sc, *b)));
+    sc.order = order;
+    let placed = place_labels(sc);
+    st.labels = placed;
+    st.labels_dropped = (n as u32 - placed).saturating_add(sc.overflow);
+    for oi in 0..sc.order.len() {
+        let Some(&c) = sc.order.get(oi) else { break };
+        let c = c as usize;
+        let Some(&k) = sc.outcome.get(c) else {
+            continue;
+        };
+        if k >= DROPPED_NO_ROOM {
+            continue;
+        }
+        let (Some(&cx), Some(&cy), Some(&gap), Some(&w), Some(&prio), Some(&row)) = (
+            sc.x.get(c),
+            sc.y.get(c),
+            sc.gap.get(c),
+            sc.w.get(c),
+            sc.prio.get(c),
+            sc.point.get(c),
+        ) else {
+            continue;
+        };
+        let ((ax, ay), align, _) = label_geom(gap, w, cx, cy, k);
+        let name = m
+            .points
+            .ident
+            .get(row as usize)
+            .map_or("", |i| str_or_empty(&m.strings, *i));
+        let colour = if prio == 2 || prio == 3 {
+            pal::AIRPORT
+        } else {
+            pal::TEXT
+        };
+        push_text(l, (ax, ay), LABEL_SIZE, align, colour, LAYER_TEXT, name)?;
     }
     Ok(())
 }
@@ -885,6 +1282,12 @@ fn hidden_line(v: &View) -> Label {
     if lay.fixes && range > v.fix_max_nm {
         item(&mut t, "FIXES", Some(v.fix_max_nm));
     }
+    if lay.fixes && range > v.terminal_wpt_max_nm {
+        item(&mut t, "TERMINAL WPTS", Some(v.terminal_wpt_max_nm));
+    }
+    if lay.airports && range > v.runway_max_nm {
+        item(&mut t, "RWY/LOC", Some(v.runway_max_nm));
+    }
     if lay.airports && range > v.non_ifr_airport_max_nm {
         item(&mut t, "NON-IFR APTS", Some(v.non_ifr_airport_max_nm));
     }
@@ -893,6 +1296,9 @@ fn hidden_line(v: &View) -> Label {
     }
     if lay.labels && range > v.label_max_nm {
         item(&mut t, "LABELS", Some(v.label_max_nm));
+    }
+    if lay.labels && range > v.major_label_max_nm {
+        item(&mut t, "VOR/IFR APT LABELS", Some(v.major_label_max_nm));
     }
     for (name, on) in LAYER_NAMES.iter().zip(layers_flags(lay)) {
         if !on {
@@ -995,12 +1401,30 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
     )?;
     y += pitch;
 
+    let mut nx = x;
     if st.legs_at_border > 0 {
         let mut t = label();
         let _ = write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border);
         push_text(
             l,
-            (x, y),
+            (nx, y),
+            LEGEND_SIZE,
+            ALIGN_LEFT,
+            pal::TEXT,
+            LAYER_LEGEND,
+            label_str(&t),
+        )?;
+        nx = nx
+            .saturating_add(legend_width16(t.len))
+            .saturating_add(legend_width16(3));
+    }
+    // Normal colour: a dropped label is expected on a busy screen, not a fault.
+    if st.labels + st.labels_dropped > 0 {
+        let mut t = label();
+        let _ = write!(t, "LABELS DROPPED: {}", st.labels_dropped);
+        push_text(
+            l,
+            (nx, y),
             LEGEND_SIZE,
             ALIGN_LEFT,
             pal::TEXT,

@@ -10,7 +10,9 @@
 
 use crate::list::{list_new, DisplayError};
 use crate::raster::{frame_digest, frame_len, rasterize, FrameSpec, RenderError};
-use crate::scene::{build_scene, layer_set, scene_caps, scene_index, view_new, LAYER_NAMES};
+use crate::scene::{
+    build_scene, layer_set, scene_caps, scene_index, scratch_for, view_new, LAYER_NAMES,
+};
 use oa_airspace::geom::deg_to_e7;
 use oa_airspace::snapshot::{decode, MAX_SNAPSHOT_BYTES};
 use oa_sha256::to_hex;
@@ -27,7 +29,8 @@ pub const MIN_SIDE: u32 = 64;
 const USAGE: &str = "usage: oa-scope render --snapshot <file> --centre <lat,lon> \
 --range-nm <n> --size <WxH> --out <file.ppm> \
 [--hide <layer,...>] [--fix-max-nm <n>] [--airport-max-nm <n>] [--navaid-max-nm <n>] \
-[--label-max-nm <n>] [--hash]";
+[--terminal-max-nm <n>] [--runway-max-nm <n>] [--label-max-nm <n>] \
+[--major-label-max-nm <n>] [--hash]";
 
 // A7.2: cold struct, size guard waived (errors are rare).
 #[derive(Debug)]
@@ -68,6 +71,9 @@ pub struct RenderArgs {
     pub airport_max_nm: Option<f64>,
     pub navaid_max_nm: Option<f64>,
     pub label_max_nm: Option<f64>,
+    pub terminal_max_nm: Option<f64>,
+    pub runway_max_nm: Option<f64>,
+    pub major_label_max_nm: Option<f64>,
     /// Compute and print the frame's SHA-256.
     pub hash: bool,
 }
@@ -130,6 +136,7 @@ pub fn parse_render_args(args: &[String]) -> Result<RenderArgs, CliError> {
     let (mut snapshot, mut centre, mut range, mut size, mut out) = (None, None, None, None, None);
     let (mut hide, mut hash) = (Vec::new(), false);
     let (mut fix, mut airport, mut navaid, mut label) = (None, None, None, None);
+    let (mut terminal, mut runway, mut major) = (None, None, None);
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut value = || {
@@ -163,6 +170,9 @@ pub fn parse_render_args(args: &[String]) -> Result<RenderArgs, CliError> {
             "--fix-max-nm" => set_once(&mut fix, flag, parse_nm(flag, value()?)?)?,
             "--airport-max-nm" => set_once(&mut airport, flag, parse_nm(flag, value()?)?)?,
             "--navaid-max-nm" => set_once(&mut navaid, flag, parse_nm(flag, value()?)?)?,
+            "--terminal-max-nm" => set_once(&mut terminal, flag, parse_nm(flag, value()?)?)?,
+            "--runway-max-nm" => set_once(&mut runway, flag, parse_nm(flag, value()?)?)?,
+            "--major-label-max-nm" => set_once(&mut major, flag, parse_nm(flag, value()?)?)?,
             "--label-max-nm" => set_once(&mut label, flag, parse_nm(flag, value()?)?)?,
             other => return Err(CliError::Usage(format!("unknown argument {other:?}"))),
         }
@@ -183,6 +193,9 @@ pub fn parse_render_args(args: &[String]) -> Result<RenderArgs, CliError> {
         airport_max_nm: airport,
         navaid_max_nm: navaid,
         label_max_nm: label,
+        terminal_max_nm: terminal,
+        runway_max_nm: runway,
+        major_label_max_nm: major,
         hash,
     })
 }
@@ -224,6 +237,9 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
     view.non_ifr_airport_max_nm = a.airport_max_nm.unwrap_or(view.non_ifr_airport_max_nm);
     view.minor_navaid_max_nm = a.navaid_max_nm.unwrap_or(view.minor_navaid_max_nm);
     view.label_max_nm = a.label_max_nm.unwrap_or(view.label_max_nm);
+    view.terminal_wpt_max_nm = a.terminal_max_nm.unwrap_or(view.terminal_wpt_max_nm);
+    view.runway_max_nm = a.runway_max_nm.unwrap_or(view.runway_max_nm);
+    view.major_label_max_nm = a.major_label_max_nm.unwrap_or(view.major_label_max_nm);
     let spec = FrameSpec {
         width: a.width,
         height: a.height,
@@ -232,9 +248,10 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
     // All allocation happens here, once.
     let index = scene_index(&model);
     let mut list = list_new(scene_caps(&model));
+    let mut scratch = scratch_for(&model, &view);
     let mut buf = vec![0u8; frame_len(&spec)];
     let t0 = Instant::now();
-    let stats = build_scene(&mut list, &model, &index, &view).map_err(display_err)?;
+    let stats = build_scene(&mut list, &model, &index, &view, &mut scratch).map_err(display_err)?;
     let t1 = Instant::now();
     rasterize(&list, &spec, &mut buf).map_err(render_err)?;
     let t2 = Instant::now();
@@ -265,16 +282,19 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
     }
     let _ = writeln!(
         out,
-        "drawn    {} own and {} neighbour boundaries, {} airway legs ({} off screen, {} at border crossings), {} fixes, {} navaids, {} airports, {} labels, {} rings, not placed: {} points {} legs {} edges",
+        "drawn    {} own and {} neighbour boundaries, {} airway legs ({} off screen, {} at border crossings), {} fixes, {} terminal waypoints, {} runway symbols, {} navaids, {} airports, {} labels ({} dropped), {} rings, not placed: {} points {} legs {} edges",
         stats.own_boundaries,
         stats.neighbour_boundaries,
         stats.airway_legs,
         stats.airway_legs_off_screen,
         stats.legs_at_border,
         stats.fixes,
+        stats.terminal_waypoints,
+        stats.runway_symbols,
         stats.navaids,
         stats.airports,
         stats.labels,
+        stats.labels_dropped,
         stats.rings,
         stats.points_unplaced,
         stats.legs_unplaced,
