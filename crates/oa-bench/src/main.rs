@@ -311,10 +311,6 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         "leg callsigns are the most frequent callsign of the decoded reports of the leg (oa-truth carries none)"
             .to_string(),
     );
-    notes.push(
-        "TruthQuery mapping: oa-truth NoBracket (outside every leg) is reported as 'gap between legs'; oa-truth Gap (inside a leg, no report within the bracket) as 'no bracketing reports'"
-            .to_string(),
-    );
     match &lookup {
         Some(l) => {
             let (f, a, u) = l.counts();

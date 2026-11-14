@@ -415,9 +415,9 @@ fn truth_that_is_missing_is_counted_by_reason_and_never_filled_in() {
         callsign: None,
     }];
     let q = |_: u32, t: i64| match (t - T0_MS) / 12_000 {
-        0 => Err(NoTruth::NoBracket),
+        0 => Err(NoTruth::NoNearbyReport),
         1 => Err(NoTruth::TooUncertain),
-        2 => Err(NoTruth::Gap),
+        2 => Err(NoTruth::OutsideLegs),
         3 => Err(NoTruth::UnknownAircraft),
         4 => Ok(TruthSample {
             sigma95_h_m: 80.0,
@@ -433,8 +433,8 @@ fn truth_that_is_missing_is_counted_by_reason_and_never_filled_in() {
         .collect();
     let (_, p, ex) = small_world_pairs(&legs, &q, &samples, b"X", Some(0xABC001));
     assert_eq!(p.t_ms.len(), 3);
-    assert_eq!(ex[&("pairing", "no bracketing reports")], 1);
-    assert_eq!(ex[&("pairing", "gap between legs")], 1);
+    assert_eq!(ex[&("pairing", "no nearby report")], 1);
+    assert_eq!(ex[&("pairing", "outside legs")], 1);
     assert_eq!(ex[&("pairing", "unknown aircraft")], 1);
     // One from the truth function, one from the 50 m gate applied here.
     assert_eq!(ex[&("pairing", "truth too uncertain")], 2);
@@ -468,7 +468,7 @@ fn the_benchmark_runs_the_same_on_a_truth_built_from_a_plain_table() {
             .iter()
             .find(|(x, tt, _)| *x == a && *tt == t)
             .map(|(_, _, s)| *s)
-            .ok_or(NoTruth::Gap)
+            .ok_or(NoTruth::OutsideLegs)
     };
     let truth = Truth {
         query: &q,

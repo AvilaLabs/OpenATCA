@@ -109,7 +109,7 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
         return TruthQuery::UnknownAircraft;
     }
     let Some(t) = t_ms.checked_mul(NS_PER_MS) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     // The leg with the latest start at or before t.
     let (lo_leg, hi_leg) = (range.first.0, range.first.0 + range.count);
@@ -122,32 +122,32 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
         }
     }
     let Some(leg) = a.checked_sub(1).filter(|&l| l >= lo_leg) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let Some((lo, hi)) = leg_points(truth, leg) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let Some(v) = view_of(truth, lo, hi) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let Some(&end) = v.t_ns.last() else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     if t > end {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     }
     // k: last report at or before t. Right: the report at t itself, or the next one.
     let k = v.t_ns.partition_point(|&x| x <= t).saturating_sub(1);
     let (Some(&tl), Some(&tk1)) = (v.t_ns.get(k), v.t_ns.get(k + 1).or(v.t_ns.get(k))) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let (k_r, tr) = if tl == t { (k, tl) } else { (k + 1, tk1) };
     let bracket = truth.cfg.bracket_ms * NS_PER_MS;
     if t - tl > bracket || tr - t > bracket {
-        return TruthQuery::Gap;
+        return TruthQuery::NoNearbyReport;
     }
     let Some((x, p)) = interp(&v, k, t, truth.cfg.accel_q) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let sigma95 = SIGMA95 * p[0].max(0.0).sqrt();
     if sigma95.is_nan() || sigma95 > truth.cfg.max_sigma95_h_m {
@@ -157,7 +157,7 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
         truth.leg_lat0.get(leg as usize),
         truth.leg_lon0.get(leg as usize),
     ) else {
-        return TruthQuery::NoBracket;
+        return TruthQuery::OutsideLegs;
     };
     let frame = frame_new(lat0, lon0);
     let [e, ve, _, n, vn, _] = x;

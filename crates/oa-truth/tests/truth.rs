@@ -475,18 +475,33 @@ fn there_is_no_extrapolation_and_every_refusal_has_a_reason() {
         TruthQuery::Ok(_)
     ));
     // Edges: nothing before the first or after the last report, even by a millisecond.
-    assert_eq!(truth_at(&truth, ADDR, ms(0.0) - 1), TruthQuery::NoBracket);
-    assert_eq!(truth_at(&truth, ADDR, ms(200.0) + 1), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&truth, ADDR, ms(0.0) - 1), TruthQuery::OutsideLegs);
+    assert_eq!(
+        truth_at(&truth, ADDR, ms(200.0) + 1),
+        TruthQuery::OutsideLegs
+    );
     assert!(matches!(truth_at(&truth, ADDR, ms(0.0)), TruthQuery::Ok(_)));
     assert!(matches!(
         truth_at(&truth, ADDR, ms(200.0)),
         TruthQuery::Ok(_)
     ));
     // The hole (100 to 130 s): a real report within 10 s on both sides is needed.
-    assert_eq!(truth_at(&truth, ADDR, ms(115.0)), TruthQuery::Gap);
-    assert_eq!(truth_at(&truth, ADDR, ms(105.0)), TruthQuery::Gap); // 5 s from 100, 25 s from 130
-    assert_eq!(truth_at(&truth, ADDR, ms(125.0)), TruthQuery::Gap);
-    assert_eq!(truth_at(&truth, ADDR, ms(100.0) + 1), TruthQuery::Gap);
+    assert_eq!(
+        truth_at(&truth, ADDR, ms(115.0)),
+        TruthQuery::NoNearbyReport
+    );
+    assert_eq!(
+        truth_at(&truth, ADDR, ms(105.0)),
+        TruthQuery::NoNearbyReport
+    ); // 5 s from 100, 25 s from 130
+    assert_eq!(
+        truth_at(&truth, ADDR, ms(125.0)),
+        TruthQuery::NoNearbyReport
+    );
+    assert_eq!(
+        truth_at(&truth, ADDR, ms(100.0) + 1),
+        TruthQuery::NoNearbyReport
+    );
     // A bracket of exactly 20 s (10 s each side) is enough.
     let mut r = Reports::default();
     for t in [
@@ -497,8 +512,8 @@ fn there_is_no_extrapolation_and_every_refusal_has_a_reason() {
     }
     let (t20, _) = build(&r);
     assert!(matches!(truth_at(&t20, ADDR, ms(20.0)), TruthQuery::Ok(_)));
-    assert_eq!(truth_at(&t20, ADDR, ms(19.0)), TruthQuery::Gap);
-    assert_eq!(truth_at(&t20, ADDR, ms(21.0)), TruthQuery::Gap);
+    assert_eq!(truth_at(&t20, ADDR, ms(19.0)), TruthQuery::NoNearbyReport);
+    assert_eq!(truth_at(&t20, ADDR, ms(21.0)), TruthQuery::NoNearbyReport);
     // Unknown aircraft, and an address that differs only by the non-ICAO bit.
     assert_eq!(
         truth_at(&truth, 0xabcdef, ms(50.0)),
@@ -517,11 +532,11 @@ fn there_is_no_extrapolation_and_every_refusal_has_a_reason() {
     }
     let (two, s) = build(&r);
     assert_eq!(s.legs, 2);
-    assert_eq!(truth_at(&two, ADDR, ms(100.0)), TruthQuery::NoBracket);
-    assert_eq!(truth_at(&two, ADDR, ms(35.0)), TruthQuery::NoBracket);
-    assert_eq!(truth_at(&two, ADDR, ms(-50.0)), TruthQuery::NoBracket);
-    assert_eq!(truth_at(&two, ADDR, ms(500.0)), TruthQuery::NoBracket);
-    assert_eq!(truth_at(&two, ADDR, i64::MAX), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&two, ADDR, ms(100.0)), TruthQuery::OutsideLegs);
+    assert_eq!(truth_at(&two, ADDR, ms(35.0)), TruthQuery::OutsideLegs);
+    assert_eq!(truth_at(&two, ADDR, ms(-50.0)), TruthQuery::OutsideLegs);
+    assert_eq!(truth_at(&two, ADDR, ms(500.0)), TruthQuery::OutsideLegs);
+    assert_eq!(truth_at(&two, ADDR, i64::MAX), TruthQuery::OutsideLegs);
     let q = sample(truth_at(&two, ADDR, ms(210.0)));
     assert_eq!(q.leg, LegIx(legs_of(&two, ADDR).first.0 + 1));
 }
@@ -764,7 +779,7 @@ fn real_clip_builds_a_balanced_deterministic_calibrated_truth() {
             if i == 0 {
                 assert_eq!(
                     truth_at(&truth, a, (st - 1) / 1_000_000 - 1),
-                    TruthQuery::NoBracket
+                    TruthQuery::OutsideLegs
                 );
                 asked += 1;
             }

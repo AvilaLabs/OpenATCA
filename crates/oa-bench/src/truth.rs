@@ -35,12 +35,12 @@ pub struct TruthSample {
 pub enum NoTruth {
     /// No leg of this aircraft address exists.
     UnknownAircraft,
-    /// Real reports do not lie within the bracket on both sides of the time.
-    NoBracket,
+    /// Inside a leg, but no real report lies within the bracket on one side of the time.
+    NoNearbyReport,
     /// The smoothed position is less certain than the gate.
     TooUncertain,
-    /// The time falls in a gap between legs, or outside every leg.
-    Gap,
+    /// No leg of the aircraft covers the time: before its first report, after its last, or between legs.
+    OutsideLegs,
 }
 
 /// Number of [`NoTruth`] values.
@@ -48,9 +48,9 @@ pub const NO_TRUTH_COUNT: usize = 4;
 /// Display names, indexed by `NoTruth as usize`.
 pub const NO_TRUTH_NAMES: [&str; NO_TRUTH_COUNT] = [
     "unknown aircraft",
-    "no bracketing reports",
+    "no nearby report",
     "truth too uncertain",
-    "gap between legs",
+    "outside legs",
 ];
 
 /// One truth leg: a continuous stretch of one aircraft.

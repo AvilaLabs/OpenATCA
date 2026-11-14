@@ -309,7 +309,7 @@ pub fn truth_at(acs: &[SynthAc], addr: u32, t_ms: i64) -> Result<TruthSample, No
     };
     let s = (t_ms - T0_MS) as f64 / 1000.0;
     if s < a.start_s || s > a.end_s {
-        return Err(NoTruth::Gap);
+        return Err(NoTruth::OutsideLegs);
     }
     let (x, y, vx, vy, alt, vr) = path_state(&a.path, s - a.start_s);
     let (lat, lon) = from_enu(LAT0, LON0, x, y);

@@ -1630,9 +1630,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-027** The address hint associates a flight that has no aircraftAddress, is stored as its own
   method, and a hint with no truth aircraft is not retried by callsign.
 - **OA-BENCH-028** `oa-truth` query answers map onto the benchmark's truth interface reason for reason:
-  unknown aircraft to unknown aircraft, too uncertain to too uncertain, and the two bracket refusals by
-  meaning (`oa-truth` NoBracket, outside every leg, is "gap between legs"; its Gap, inside a leg with no
-  report within the bracket, is "no bracketing reports"); a sample keeps its position, velocity,
+  unknown aircraft, outside legs, no nearby report and too uncertain each map to the same-named
+  benchmark reason with the same meaning; a sample keeps its position, velocity,
   uncertainty and leg, with altitude and vertical rate rounded to whole units.
 - **OA-BENCH-029** Truth legs are `oa-truth`'s legs in index order with their first and last whole
   millisecond; the leg callsign is the most frequent callsign among the decoded reports of the address
