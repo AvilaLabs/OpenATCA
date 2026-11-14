@@ -1375,3 +1375,94 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-AWC-017** `oa-awc-summary [dir]` scans a directory tree, parses each recognised file by its
   name, reports records, refusals by reason, duplicates, the altimeter cross-check and station
   availability, lists files refused whole and skipped names, and exits 1 if any file was refused whole.
+
+## M2 — Benchmark harness (oa-bench)
+
+Built on `docs/M2_DESIGN.md` sections 2 to 6. Truth comes through a plain query and leg list (`Truth`),
+so `oa-truth` is wired in later without changing the metric code; until then the binary runs the
+synthetic world only. Tests use hand-made fixtures; the real-sample test reads
+`OPENATCA_DATA/scds/{sfdps,tbfm,tfms}-20261114T*` and skips when absent.
+
+- **OA-BENCH-001** Every statistic reports N, the signed mean, the RMS, and the median, 95th and 99th
+  percentile and maximum of the absolute values, by the nearest-rank method (rank `ceil(p*n/100)`, 1-based,
+  no interpolation); the result does not depend on the order of the values, non-finite values are skipped,
+  and an empty set gives N = 0.
+- **OA-BENCH-002** Every paired-sample metric is split by flight phase (climb, cruise, descent, unknown
+  from the truth vertical rate, 500 fpm), altitude band (breaks at 10,000, 18,000, 29,000 and 41,000 ft),
+  coast flag and association method; each split partitions the samples.
+- **OA-BENCH-003** Truth is consumed as `Truth { query(addr, t_ms) -> Result<TruthSample, NoTruth>, legs }`
+  with `TruthSample` (lat, lon, baro altitude, east and north velocity, vertical rate, 95% horizontal
+  uncertainty, leg) and `NoTruth` (unknown aircraft, no bracket, too uncertain, gap); a time with no truth
+  is counted in the exclusions table by reason and never filled in, and a sample whose uncertainty exceeds
+  the gate (50 m) is excluded as too uncertain.
+- **OA-BENCH-004** SFDPS extraction reads ERAM track samples (flight key, aircraft identification,
+  position time, receive time, position, reported altitude, track velocity, coast flag), the aircraft
+  address and the address hint, handoff events with their event kind and both units, and expanded-route
+  points (fix, time, coordinates where given) into struct-of-arrays tables, using the `oa-fixm` decoder.
+- **OA-BENCH-005** TBFM extraction keeps ETA at the meter fix and runway and STA at the scheduling fix and
+  runway with the meter fix, flight plan identifier and issue time; TFMS extraction keeps estimated
+  arrival and departure times with the flight plan identifier, airports and issue time.
+- **OA-BENCH-006** Every table has a stated capacity; a row past it is dropped and counted by table, and a
+  document the parser or decoder refuses is counted by feed and not ingested.
+- **OA-BENCH-007** Association takes `aircraftAddress` first, the address hint second and the callsign with
+  the gate last; ambiguous flights (two aircraft pass the gate) are not associated and are counted; every
+  flight has one outcome, the outcomes are counted, and the samples of unassociated flights are excluded
+  by reason.
+- **OA-BENCH-008** The callsign gate keeps a candidate only if at least 80% of the shared times have the
+  ERAM position within 3 NM horizontally and 1,000 ft vertically; the address needs no gate; the method
+  is stored per pair and every metric can be split by it.
+- **OA-BENCH-009** Cross-track error (T1, positive to the right of the truth track) recovers an injected
+  bias and noise; along-track error (T2) is reported raw and after fitting one constant time offset by
+  least squares (`along = tau * speed`), the offset is published, and the corrected error recovers the
+  injected noise.
+- **OA-BENCH-010** The fitted offset drifts when a time bin (or, after trimming 5% either side, an
+  aircraft group) of at least 30 samples differs from the overall offset by more than 1 s; a drifting
+  offset withholds the corrected along-track numbers with the reason while the offset and the raw numbers
+  stay published; a large steady offset is not drift.
+- **OA-BENCH-011** Speed error (T3), heading error (T3, truth speed above 30 kt) and altitude error (T4)
+  recover injected biases.
+- **OA-BENCH-012** Publication interval (T5, consecutive position times of one flight, repeats and
+  intervals over 600 s counted apart) and staleness (T6, receive time minus position time, withheld with
+  the reason when the recording has no receive time) are measured from the stream.
+- **OA-BENCH-013** Presence (T7: share of truth flight time in the zone with an ERAM position within
+  30 s, legs with no associated flight counting as absent) and initiation delay (T8: first ERAM position
+  minus zone entry or takeoff, signed) match the construction.
+- **OA-BENCH-014** Association errors (T9: the ERAM position closer to another aircraft's truth than to its
+  own for 3 or more consecutive tested samples) find the deliberate track swap, list it with both
+  aircraft, and report none where there is none.
+- **OA-BENCH-015** Meter-fix ETA error (F1) and scheduled-time error (F2) against the truth crossing of
+  the fix (closest approach within 2 NM, not at the end of a truth leg) are reported by look-ahead in
+  5-minute bins to 60 minutes; a fix never approached and an estimate issued after the crossing are
+  excluded and counted.
+- **OA-BENCH-016** TFMS arrival-estimate error against the truth landing (last truth point on the ground
+  within 1 NM of a destination threshold) and departure-estimate error against the truth takeoff are
+  reported by look-ahead.
+- **OA-BENCH-017** Route conformance (R1) reports the truth distance from ERAM's expanded route in force at
+  each sample, the share of flight time beyond 2 NM, and lists each flight with time beyond it (bounded,
+  the rest counted).
+- **OA-BENCH-018** Handoff timing (H1) compares the initiation and acceptance event times with the truth
+  crossing of the boundary between the transferring and receiving unit, signed, by event.
+- **OA-BENCH-019** Samples and estimates that cannot be scored are counted in an exclusions table keyed by
+  scope and reason (no truth by kind, not associated by outcome, no meter fix, never within 2 NM, no
+  route, and others); nothing is dropped silently.
+- **OA-BENCH-020** The report carries the input file hashes, the code version, the replay state hash, the
+  extraction counts, the scope statement (published track, not internal), the statistics definitions, every
+  metric with N and its withheld reason if any, and the exclusions table, in plain text and CSV.
+- **OA-BENCH-021** The same inputs give byte-identical text and CSV reports.
+- **OA-BENCH-022** A directory of raw `.msg` files (name order, no receive time, no replay hash) or of
+  `.oaf` recordings (receive times, replay pipeline state hash, identical on repeat) loads; the input hash
+  of one file is its SHA-256 and of several is the SHA-256 of the `name:sha256` lines.
+- **OA-BENCH-023** The `oa-bench` binary refuses `--adsb` with a message that truth is not wired in yet
+  (exit 2), runs the synthetic world with `--synthetic --out <dir>` writing `report.txt` and `report.csv`
+  with every self-test check passing and identical bytes on a repeat, and prints extraction counts with
+  `--extract-only`.
+- **OA-BENCH-024** On the real 2026-11-14 sample (skipped when absent) extraction yields the expected
+  counts: 13,268 ERAM track samples, 2,807 handoff events, 265 expanded routes with 1,397 points, 165
+  flights with `aircraftAddress`, no capacity drops, and no refused TBFM or TFMS document.
+- **OA-BENCH-025** The synthetic self-test (closed-form truth; injected bias, noise, time offset,
+  decimation, receive delay, coasting, dropout, start delay, estimate errors, handoff times, an off-route
+  stretch and a track swap) is recovered by every metric within its stated tolerance (24 checks).
+- **OA-BENCH-026** A truth built from a plain lookup table and the same legs gives the same paired samples
+  and metrics as the closed-form truth, so the interface needs nothing but the query and the legs.
+- **OA-BENCH-027** The address hint associates a flight that has no aircraftAddress, is stored as its own
+  method, and a hint with no truth aircraft is not retried by callsign.
