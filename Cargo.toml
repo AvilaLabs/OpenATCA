@@ -29,6 +29,7 @@ members = [
     "crates/oa-truth",
     "crates/oa-bench",
     "crates/oa-wind",
+    "crates/oa-asterix",
     "tools/oa-trace",
 ]
 

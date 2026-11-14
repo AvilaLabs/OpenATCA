@@ -1720,3 +1720,76 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
 - **OA-WIND-017** `oa-wind-check adsb` refuses a bad `--gap-s` (exit 2), skips with a note and exit 0
   when there are no RAP files, does not scan an archive whose day does not overlap the RAP hours, and on
   the real data (skipped when absent) exits 0 with either the comparison or the no-overlap statement.
+
+## M3 — ASTERIX codecs (oa-asterix)
+
+Encoder and decoder for EUROCONTROL ASTERIX category 021 (ADS-B target reports, Ed 2.7), 048 (monoradar
+target reports, Ed 1.32) and 062 (system track data, Ed 1.21), written from the specifications (Part 1
+Ed 3.1 for the general structure). A generic core (data block, FSPEC, item kinds, driven by one constant
+UAP table per category) and a typed layer for the items the tracker needs; every other item round-trips as
+raw bytes. The decisions where the specification leaves room are listed in the `wire` module docs.
+
+- **OA-AST-001** A data block is CAT, a two-octet LEN that counts the header and every record (at most
+  65 535), and records that tile the block exactly; several blocks in one buffer decode one after another,
+  and a stream whose last block is cut short is refused.
+- **OA-AST-002** The FSPEC is read and written bit 8 first with the LSB as FX: FRN 1 to 7 in the first
+  octet, 8 to 14 in the second, and so on; the encoder writes the shortest FSPEC and sets FX only between
+  octets.
+- **OA-AST-003** Every item kind (fixed, extended, repetitive, explicit-length SP and RE, compound with
+  extended and repetitive subitems) is walked from its constant table entry, and the untyped items of a
+  record come back as exactly the bytes that were put in.
+- **OA-AST-004** A block that is shorter than its header, has a LEN below three or past the input, holds no
+  record, or is of a category other than 021, 048 and 062 is refused with a typed error naming the
+  category and byte offset; an error in the second record names record index 1 and a stream-absolute
+  offset.
+- **OA-AST-005** An FSPEC that is empty, ends with an all-zero octet that is not the only one, runs past
+  the block or past the longest FSPEC the UAP can address, sets the bit of a slot the UAP leaves unused
+  (CAT062 FRN 2 and 29 to 33, CAT021 FRN 43 to 47), or omits the data source identifier is refused.
+- **OA-AST-006** An item whose FX chain does not end inside the record or within 32 octets, a repetitive
+  item with a factor of zero or that runs past the block, an explicit-length field shorter than two octets
+  or past the block, a compound item with no subitem, with a subitem the category does not define (naming
+  the subitem), with FX on its last defined primary octet or with a trailing all-zero primary octet, and a
+  fixed item or subitem cut short are refused with the item number and byte offset.
+- **OA-AST-007** A bit that the specification fixes to zero (a spare bit) is refused in every fixed and
+  extended item and compound subitem whose table entry lists it, at the extension the specification puts it
+  in (bits that are assigned in another extension of the same item are accepted); reserved enumeration
+  codes are accepted.
+- **OA-AST-008** A CAT021 record built by hand from the specification (data source, target report
+  descriptor, high-resolution position, target address, quality indicators with an extension, Mode 3/A,
+  flight level) decodes to the expected values and encodes to the expected bytes, the bytes derived from
+  the LSBs in the test.
+- **OA-AST-009** The same for a CAT048 record (time of day, descriptor, polar position, Mode 3/A, flight
+  level, plot characteristics, aircraft address and identification, track number, Cartesian position, track
+  status).
+- **OA-AST-010** The same for a CAT062 record (time, WGS-84 and Cartesian position, velocity, Mode 3/A,
+  aircraft derived data with address, identification and selected altitude, track number, track status,
+  system track update ages, measured flight level, geometric altitude, rate of climb).
+- **OA-AST-011** `encode(decode(bytes))` equals the bytes for every block the decoder accepts, and
+  `decode(encode(record))` equals the record, for blocks with every typed item and every untyped item.
+- **OA-AST-012** Untyped items, including SP and RE and compound, repetitive and extended items, are
+  written back in FRN order to the same bytes whatever order they are given in.
+- **OA-AST-013** The unit LSBs are named constants that cite the specification section; positions convert
+  between raw counts and 1e-7 degree with at most half an LSB of error and the count survives the round trip
+  through e-7 degree exactly; times convert between 1/128 s counts and milliseconds.
+- **OA-AST-014** The encoder refuses a value that does not fit its element, a character outside the
+  six-bit set, a latitude beyond 90 degrees, an item given twice, a raw item that is not exactly one
+  well-formed item or whose slot does not exist, an empty block, too many records and a block over 65 535
+  octets, with the record, item and kind.
+- **OA-AST-015** Truncating every block of the corpus at every byte never panics: with LEN left alone every
+  cut is refused, and with LEN made to match every cut is refused except those on a record boundary, which
+  are valid blocks.
+- **OA-AST-016** 4000 random mutations of the corpus (and 4000 arbitrary byte strings) never panic, and
+  every mutation that is accepted re-encodes to exactly the bytes it was decoded from.
+- **OA-AST-017** The bounds are named constants (block length 65 535, records per block, extension chain 32,
+  repetitions 255, primary subfield 8) and hold at the edge: a block of exactly 65 535 octets and 255
+  repetitions are accepted, one more is not.
+- **OA-AST-018** Six-bit characters code A to Z, space and 0 to 9 and nothing else; a latitude of exactly
+  +-90 degrees is accepted and one count more is refused.
+- **OA-AST-019** A CAT021 record built from an `oa-adsb` row (position, address, NACp, NIC, SIL, MOPS version,
+  Mode 3/A, callsign, altitudes, ground vector, vertical rate) round-trips, with every quantised field within
+  half its LSB: position 9 mm (1e-7 degree after conversion), flight level 12.5 ft, geometric height
+  3.125 ft, speed 0.11 kt, track 0.0028 degree, vertical rate 3.1 ft/min.
+- **OA-AST-020** On real adsb.lol rows (skipped when `OPENATCA_DATA` is absent) the same round trip holds
+  for tens of thousands of rows within the same bounds.
+- **OA-AST-021** A refusal renders as text naming the category, the record, the data item (and subitem) and
+  the byte, and leaves out the parts that do not apply.
