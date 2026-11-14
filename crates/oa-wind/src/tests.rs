@@ -672,6 +672,164 @@ fn comparison_with_a_reference_field_pair() {
     assert!(c.diff_unrotated.unwrap().max > 1.0);
 }
 
+fn adsb_report(rows: &[(i64, i32, u8, u16, u16, i16)]) -> oa_adsb::Reports {
+    use oa_adsb::{reports_push, Reports, ROW_EMPTY};
+    let mut r = Reports::default();
+    for &(t_s, alt, flags, ws, wd, oat) in rows {
+        reports_push(
+            &mut r,
+            &oa_adsb::Row {
+                time_ns: t_s * 1_000_000_000,
+                lat_e7: 400_000_000,
+                lon_e7: -900_000_000,
+                baro_alt_ft: alt,
+                flags,
+                ws_kt: ws,
+                wd_deg: wd,
+                oat_c: oat,
+                roll_cdeg: -1_500,
+                ..ROW_EMPTY
+            },
+        );
+    }
+    r
+}
+
+// REQ: OA-WIND-015
+#[test]
+fn adsb_observations_need_altitude_and_a_wind_or_temperature_and_are_thinned() {
+    use crate::adsb::*;
+    use oa_adsb::{F_GROUND, NONE_I16, NONE_U16};
+    let r = adsb_report(&[
+        (0, 35_000, 0, 40, 270, NONE_I16),         // wind only: kept
+        (10, 35_000, 0, 40, 270, NONE_I16),        // within the gap: thinned
+        (40, 35_000, 0, NONE_U16, NONE_U16, -50),  // temperature only: kept
+        (80, 35_000, 0, 40, NONE_U16, NONE_I16),   // speed without direction: nothing
+        (120, 35_000, F_GROUND, 40, 270, -50),     // on the ground: skipped
+        (160, oa_adsb::NONE_I32, 0, 40, 270, -50), // no altitude: skipped
+        (200, 12_000, 0, 5, 359, -9),              // both: kept
+    ]);
+    let mut out = Vec::new();
+    assert_eq!(adsb_obs(&r, 30.0, &mut out), 0);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].wind, Some((270.0, 40.0)));
+    assert_eq!(out[0].oat_c, None);
+    assert_eq!(out[1].oat_c, Some(-50.0));
+    assert_eq!(out[1].wind, None);
+    assert_eq!(
+        (out[2].alt_ft, out[2].wind, out[2].oat_c),
+        (12_000.0, Some((359.0, 5.0)), Some(-9.0))
+    );
+    close(out[2].lat, 40.0, 1e-9);
+    close(out[2].lon, -90.0, 1e-9);
+    close(out[2].time_s, 200.0, 1e-9);
+    close(out[2].roll_deg.unwrap(), -15.0, 1e-9);
+    // With no gap every kept row stays.
+    let mut all = Vec::new();
+    adsb_obs(&r, 0.0, &mut all);
+    assert_eq!(all.len(), 4);
+}
+
+fn obs_at(
+    alt_ft: f64,
+    wind: Option<(f64, f64)>,
+    oat_c: Option<f64>,
+    roll: Option<f64>,
+) -> crate::adsb::AdsbObs {
+    crate::adsb::AdsbObs {
+        lat: 40.0,
+        lon: -90.0,
+        alt_ft,
+        time_s: valid(12) as f64 + 600.0,
+        wind,
+        oat_c,
+        roll_deg: roll,
+        track_rate_dps: None,
+    }
+}
+
+// REQ: OA-WIND-016
+#[test]
+fn adsb_comparison_groups_by_altitude_and_turning_and_compares_temperature() {
+    use crate::adsb::*;
+    // RAP: 10 m/s from the west everywhere, 250 K.
+    let (a, b) = (const_u_hour(12, 10.0), const_u_hour(13, 10.0));
+    let (lat, lon) = ij_to_latlon(&a.grid, 8.0, 6.0).unwrap();
+    let kt = |ms: f64| ms * 3600.0 / 1852.0;
+    let mut sampler = |q: &Query| {
+        let q = Query { lat, lon, ..*q };
+        sample_hours(&[&a, &b], &q).map_err(QueryError::Refused)
+    };
+    // Band edges and turn states.
+    assert_eq!(band_of(9_999.0), 0);
+    assert_eq!(band_of(10_000.0), 1);
+    assert_eq!(band_of(18_000.0), 2);
+    assert_eq!(band_of(45_000.0), 3);
+    assert_eq!(
+        turn_state(&obs_at(1.0, None, None, Some(-10.5))),
+        Turn::Turning
+    );
+    assert_eq!(
+        turn_state(&obs_at(1.0, None, None, Some(9.0))),
+        Turn::Straight
+    );
+    assert_eq!(turn_state(&obs_at(1.0, None, None, None)), Turn::Unknown);
+    let mut o = obs_at(1.0, None, None, None);
+    o.track_rate_dps = Some(0.6);
+    assert_eq!(turn_state(&o), Turn::Turning);
+    // Exact agreement; a calm readsb wind (RAP 10 m/s too fast); a wind from the south at the
+    // same speed (vector difference 10 sqrt 2); temperature equal and 10 K colder in readsb.
+    let mut late = obs_at(35_000.0, Some((270.0, kt(10.0))), Some(-23.15), Some(1.0));
+    late.time_s = valid(14) as f64 + 5.0; // after the last hour: refused
+    let obs = [
+        obs_at(35_000.0, Some((270.0, kt(10.0))), Some(-23.15), Some(1.0)),
+        obs_at(35_000.0, Some((270.0, 0.0)), Some(-33.15), Some(15.0)),
+        obs_at(5_000.0, Some((180.0, kt(10.0))), None, None),
+        obs_at(20_000.0, None, Some(-23.15), None),
+        late,
+    ];
+    let c = compare_adsb(&obs, &mut sampler).unwrap();
+    assert_eq!((c.offered, c.rows.len()), (5, 4));
+    assert_eq!(c.refused, vec![("outside-time", 1)]);
+    let g = all_groups(&c);
+    assert_eq!(g.len(), 8);
+    let all = &g[0];
+    let w = all.wind.unwrap();
+    assert_eq!(w.n, 3);
+    close(w.median, 10.0, 1e-6); // vectors: 0, 10, 10 sqrt 2
+    close(w.max, 10.0 * 2f64.sqrt(), 1e-6);
+    close(all.speed_bias, (0.0 + 10.0 + 0.0) / 3.0, 1e-6);
+    let t = all.temp_abs.unwrap();
+    assert_eq!(t.n, 3);
+    close(all.temp_bias, 10.0 / 3.0, 1e-9);
+    // By band: below 10000 ft one wind, none with temperature; 30000 and above two winds.
+    assert_eq!((g[1].wind.unwrap().n, g[1].temp_abs.is_none()), (1, true));
+    assert!(g[2].wind.is_none());
+    assert_eq!((g[3].wind.is_none(), g[3].temp_abs.unwrap().n), (true, 1));
+    assert_eq!((g[4].wind.unwrap().n, g[4].temp_abs.unwrap().n), (2, 2));
+    close(g[4].temp_bias, 5.0, 1e-9);
+    // By turn: straight (roll 1), turning (roll 15), unknown (the other two).
+    assert_eq!(g[5].name, "straight");
+    assert_eq!(g[5].wind.unwrap().n, 1);
+    close(g[5].wind.unwrap().median, 0.0, 1e-6);
+    assert_eq!(g[6].wind.unwrap().n, 1);
+    close(g[6].wind.unwrap().median, 10.0, 1e-6);
+    assert_eq!(g[7].wind.unwrap().n, 1);
+    // A failed file load stops the comparison with its error.
+    let e = compare_adsb(&obs, &mut |_| {
+        Err(QueryError::Load(LoadError::Io {
+            path: "x".into(),
+            kind: std::io::ErrorKind::NotFound,
+        }))
+    });
+    assert!(matches!(e, Err(LoadError::Io { .. })));
+    // Nothing offered: empty statistics, no panic.
+    let empty = compare_adsb(&[], &mut sampler).unwrap();
+    assert!(all_groups(&empty)
+        .iter()
+        .all(|g| g.wind.is_none() && g.temp_abs.is_none()));
+}
+
 fn data_dir() -> Option<PathBuf> {
     match std::env::var_os("OPENATCA_DATA") {
         Some(d) if PathBuf::from(&d).join("raw/rap").is_dir() => Some(PathBuf::from(d)),

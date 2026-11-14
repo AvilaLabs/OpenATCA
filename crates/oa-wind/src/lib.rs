@@ -10,6 +10,7 @@
 //! * [`sample`]: the query. Core.
 //! * [`archive`]: files on disk, a bounded cache of hours ([`MAX_HOURS_HELD`]) and the query
 //!   over a set of hours. Shell (owns the files).
+//! * [`adsb`]: RAP against the winds and temperatures aircraft report over ADS-B. Core.
 //! * [`check`]: the validation statistics used by `oa-wind-check`. Core.
 //!
 //! Model of the query:
@@ -37,6 +38,7 @@
 //!
 //! Every input is bounded by the constants below (RULESET E5).
 
+pub mod adsb;
 pub mod archive;
 pub mod check;
 pub mod error;

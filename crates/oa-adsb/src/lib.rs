@@ -37,12 +37,55 @@
 //! | 13 | roll angle degrees or `null` |
 //! | 14 | (only in builds with TRACKS_UUID) receiver id string |
 //!
-//! Files from before 2022 have only columns 0 to 8. Columns 11 to 14 are read and ignored.
+//! Files from before 2022 have only columns 0 to 8. Columns 11 and 14 are ignored; column 12
+//! (`ias`) and 13 (`roll`) are kept as measurements (below).
 //! The aircraft object is printed only on some rows; its keys are those of `aircraft.json`
 //! minus `hex`, `lat`, `lon`: `type`, `flight` (callsign, space padded to eight), `squawk`
 //! (four octal digits as text), `category` (two hex digits as text, e.g. `"A3"`), `nic`, `rc`,
 //! `version`, `nic_baro`, `nac_p`, `nac_v`, `sil`, `sil_type` (`unknown`, `perhour`,
-//! `persample`), `gva`, `sda`, `alert`, `spi` and more; unknown keys are ignored.
+//! `persample`), `gva`, `sda`, `alert`, `spi` and more; unknown keys are ignored. The measurement
+//! keys `ws`, `wd`, `oat`, `tat`, `tas`, `ias`, `mach`, `mag_heading`, `true_heading`, `roll` and
+//! `track_rate` are kept (next section).
+//!
+//! # Measurements and what readsb's wind means
+//!
+//! readsb (`json_out.c`, `sprintAircraftObject`; `track.c`, `calc_wind`, `calc_temp`,
+//! `updateDeclination`; `README-json.md`) prints these keys in the aircraft object. Raw from
+//! the aircraft's Mode S Comm-B replies (and ADS-B velocity messages): `tas` (knots),
+//! `ias` (knots), `mach`, `mag_heading` (degrees from magnetic north), `roll` (degrees, negative
+//! left), `track_rate` (degrees per second), `true_heading` (degrees from true north; in the air
+//! readsb derives it from `mag_heading` plus the declination of the WMM model at the
+//! aircraft's position, altitude and date, refreshed every 5 s, and only when the heading
+//! is within 45 degrees of the track). Derived by readsb:
+//!
+//! * `ws`, `wd`: wind speed (knots) and direction (degrees true, the direction the wind blows
+//!   **from**, whole numbers printed with `%.0f`). Computed from true heading, true airspeed,
+//!   ground speed and ground track: with `crab = heading - track`, headwind component
+//!   `hw = tas - gs * cos(crab)` and crosswind `cw = gs * sin(crab)`, `ws = hypot(hw, cw)`,
+//!   `wd = heading + atan2(cw, hw)`. Computed whenever a new true heading, track or TAS
+//!   arrives, but only if the aircraft is not on the ground, TAS and ground speed are less
+//!   than 2.5 s old and true heading and track less than 1.25 s old, the roll (if known)
+//!   is at most 10 degrees and the track rate (if known) at most 0.5 degree per second in
+//!   magnitude (readsb notes that wind computed in a turn is often bad), at most once per
+//!   0.7 s, and the result is at most 250 kt. A value is printed for up to 60 s after it was
+//!   computed, provided the barometric altitude is within 500 ft of the altitude it was
+//!   computed at, so a row can show a wind up to a minute old, and rows between computations
+//!   repeat it (this crate keeps it per row as printed; it never copies it to rows without it).
+//!   The `tas` is rejected when below 0.7 of the indicated airspeed (a wrong register).
+//! * `oat`, `tat`: static and total air temperature, whole degrees C, from Mach and TAS:
+//!   `oat = 288.15 * (tas / (661.47 * mach))^2 - 273.15`, and
+//!   `tat = (oat + 273.15) * (1 + 0.2 * mach^2) - 273.15`. Not computed below Mach 0.395, and results outside -100 to 60 C are
+//!   discarded. readsb says the result is typically somewhat inaccurate at lower altitudes
+//!   and Mach numbers below 0.5.
+//!
+//! Known limits: the true heading, hence the wind, inherits the declination model's error;
+//! the wind error is roughly `tas * sin(heading error)` plus the speed errors, which add
+//! directly, so a wind (a small difference of two large vectors) is relatively worst at low
+//! speed (at 450 kt one degree of heading is about 8 kt of wind); a turn or sideslip biases the
+//! derived wind and the roll and track-rate gate catches only a turn that is known; heading,
+//! TAS and track come from different messages and are not simultaneous (ages above); and the
+//! pressure of the aircraft is not given, only its barometric altitude. Values are
+//! per-observation and are not smoothed here.
 //!
 //! # Output
 //!
@@ -51,7 +94,11 @@
 //! sources have 10 ms resolution), altitudes and rates in feet and feet per minute, ground
 //! speed in 0.1 kt, track in 0.1 degree. An absent value is the column's `NONE_*` constant.
 //! `baro_alt_ft` is absent when the row's altitude is `"ground"` (flag [`F_GROUND`] is set) or
-//! geometric (flag bit 3). Fields from the aircraft object are absent on rows without one.
+//! geometric (flag bit 3). Fields from the aircraft object are absent on rows without one. The
+//! measurements have their own fixed-point units (see [`Reports`]); `ias` and `roll` also come
+//! from the row's columns 12 and 13, the aircraft object overriding them with its extra digits.
+//! A malformed measurement is left absent and counted in [`Stats::bad_measurements`]; unlike
+//! an aircraft-object field of the older kind, it does not refuse the row.
 //!
 //! # Bounds and refusal
 //!
@@ -73,8 +120,9 @@ mod trace;
 
 pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
 pub use frames::{
-    decode_payload, encode_payload, frame_ranges, PayloadError, DEFAULT_FRAME_MS, MAX_FRAME_MS,
-    MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
+    decode_payload, encode_payload, frame_ranges, PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS,
+    LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN, MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS,
+    PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
 };
 pub use summary::{summarize, Summary, MAX_JUMP_KT, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};
@@ -99,6 +147,8 @@ pub const MAX_GZIP_RATIO: u64 = 200;
 pub const NONE_I32: i32 = i32::MIN;
 /// Absent `u16` value (speed, track, squawk).
 pub const NONE_U16: u16 = u16::MAX;
+/// Absent `i16` value (temperatures, roll, track rate).
+pub const NONE_I16: i16 = i16::MIN;
 /// Absent `u8` value (the aircraft-object integers, source type). Category uses 0 for absent.
 pub const NONE_U8: u8 = u8::MAX;
 
@@ -189,6 +239,30 @@ pub struct Reports {
     pub gva: Vec<u8>,
     /// System design assurance, 0 to 3.
     pub sda: Vec<u8>,
+    // Per-observation values: printed on rows with an aircraft object (and `ias`, `roll` also in
+    // the row's own columns), never carried forward.
+    /// Wind speed derived by readsb, knots; [`NONE_U16`] if absent.
+    pub ws_kt: Vec<u16>,
+    /// Wind direction derived by readsb, degrees true the wind blows from, 0 to 359; [`NONE_U16`] if absent.
+    pub wd_deg: Vec<u16>,
+    /// True airspeed, knots; [`NONE_U16`] if absent.
+    pub tas_kt: Vec<u16>,
+    /// Indicated airspeed, knots; [`NONE_U16`] if absent.
+    pub ias_kt: Vec<u16>,
+    /// Mach number in 0.001; [`NONE_U16`] if absent.
+    pub mach_milli: Vec<u16>,
+    /// Magnetic heading, 0.01 degree in [0, 36000); [`NONE_U16`] if absent.
+    pub mag_heading_cdeg: Vec<u16>,
+    /// True heading, 0.01 degree in [0, 36000); [`NONE_U16`] if absent.
+    pub true_heading_cdeg: Vec<u16>,
+    /// Outer (static) air temperature derived by readsb, whole degrees C; [`NONE_I16`] if absent.
+    pub oat_c: Vec<i16>,
+    /// Total air temperature derived by readsb, whole degrees C; [`NONE_I16`] if absent.
+    pub tat_c: Vec<i16>,
+    /// Roll angle, 0.01 degree, negative is left; [`NONE_I16`] if absent.
+    pub roll_cdeg: Vec<i16>,
+    /// Rate of change of track, 0.01 degree per second; [`NONE_I16`] if absent.
+    pub track_rate_cdps: Vec<i16>,
 }
 
 /// One report, assembled by the decoder before it is filtered and appended (A1: plain fields).
@@ -217,9 +291,20 @@ pub struct Row {
     pub version: u8,
     pub gva: u8,
     pub sda: u8,
+    pub ws_kt: u16,
+    pub wd_deg: u16,
+    pub tas_kt: u16,
+    pub ias_kt: u16,
+    pub mach_milli: u16,
+    pub mag_heading_cdeg: u16,
+    pub true_heading_cdeg: u16,
+    pub oat_c: i16,
+    pub tat_c: i16,
+    pub roll_cdeg: i16,
+    pub track_rate_cdps: i16,
 }
-// Budget: one per decoded row, transient: 8 + 6 * 4 + 3 * 2 + 2 + 8 + 9 = 57, padded to 64.
-const _: () = assert!(core::mem::size_of::<Row>() == 64);
+// Budget: one per decoded row, transient: 8 + 6 * 4 + 10 * 2 + 4 * 2 + 19 = 79, padded to 80.
+const _: () = assert!(core::mem::size_of::<Row>() == 80);
 
 /// A [`Row`] with every optional field absent; the decoder fills in what the row has.
 pub const ROW_EMPTY: Row = Row {
@@ -245,6 +330,17 @@ pub const ROW_EMPTY: Row = Row {
     version: NONE_U8,
     gva: NONE_U8,
     sda: NONE_U8,
+    ws_kt: NONE_U16,
+    wd_deg: NONE_U16,
+    tas_kt: NONE_U16,
+    ias_kt: NONE_U16,
+    mach_milli: NONE_U16,
+    mag_heading_cdeg: NONE_U16,
+    true_heading_cdeg: NONE_U16,
+    oat_c: NONE_I16,
+    tat_c: NONE_I16,
+    roll_cdeg: NONE_I16,
+    track_rate_cdps: NONE_I16,
 };
 
 /// Number of reports.
@@ -276,6 +372,17 @@ pub fn reports_clear(r: &mut Reports) {
     r.version.clear();
     r.gva.clear();
     r.sda.clear();
+    r.ws_kt.clear();
+    r.wd_deg.clear();
+    r.tas_kt.clear();
+    r.ias_kt.clear();
+    r.mach_milli.clear();
+    r.mag_heading_cdeg.clear();
+    r.true_heading_cdeg.clear();
+    r.oat_c.clear();
+    r.tat_c.clear();
+    r.roll_cdeg.clear();
+    r.track_rate_cdps.clear();
 }
 
 /// Appends one report.
@@ -302,6 +409,17 @@ pub fn reports_push(r: &mut Reports, row: &Row) {
     r.version.push(row.version);
     r.gva.push(row.gva);
     r.sda.push(row.sda);
+    r.ws_kt.push(row.ws_kt);
+    r.wd_deg.push(row.wd_deg);
+    r.tas_kt.push(row.tas_kt);
+    r.ias_kt.push(row.ias_kt);
+    r.mach_milli.push(row.mach_milli);
+    r.mag_heading_cdeg.push(row.mag_heading_cdeg);
+    r.true_heading_cdeg.push(row.true_heading_cdeg);
+    r.oat_c.push(row.oat_c);
+    r.tat_c.push(row.tat_c);
+    r.roll_cdeg.push(row.roll_cdeg);
+    r.track_rate_cdps.push(row.track_rate_cdps);
 }
 
 /// Report `i` as a [`Row`], or `None` if out of range.
@@ -329,6 +447,17 @@ pub fn reports_row(r: &Reports, i: usize) -> Option<Row> {
         version: *r.version.get(i)?,
         gva: *r.gva.get(i)?,
         sda: *r.sda.get(i)?,
+        ws_kt: *r.ws_kt.get(i)?,
+        wd_deg: *r.wd_deg.get(i)?,
+        tas_kt: *r.tas_kt.get(i)?,
+        ias_kt: *r.ias_kt.get(i)?,
+        mach_milli: *r.mach_milli.get(i)?,
+        mag_heading_cdeg: *r.mag_heading_cdeg.get(i)?,
+        true_heading_cdeg: *r.true_heading_cdeg.get(i)?,
+        oat_c: *r.oat_c.get(i)?,
+        tat_c: *r.tat_c.get(i)?,
+        roll_cdeg: *r.roll_cdeg.get(i)?,
+        track_rate_cdps: *r.track_rate_cdps.get(i)?,
     })
 }
 
@@ -400,6 +529,9 @@ pub struct Stats {
     pub outside_time: u64,
     /// Rows kept.
     pub kept: u64,
+    /// Rows kept in which an optional measurement (wind, temperature, speeds, headings, roll)
+    /// was malformed or out of range and was left absent instead of refusing the row.
+    pub bad_measurements: u64,
 }
 
 /// Adds the counts of `b` into `a`.
@@ -413,4 +545,5 @@ pub fn stats_add(a: &mut Stats, b: &Stats) {
     a.outside_box += b.outside_box;
     a.outside_time += b.outside_time;
     a.kept += b.kept;
+    a.bad_measurements += b.bad_measurements;
 }

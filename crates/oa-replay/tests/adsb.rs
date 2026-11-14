@@ -337,7 +337,7 @@ fn malformed_adsb_payloads_are_counted_by_type_and_never_applied() {
     m[8..12].copy_from_slice(&60_001u32.to_le_bytes());
     cases.push((m, ErrKind::AdsbTooManyRows));
     // Record 1: latitude out of range; flag bits 5 to 7; a reserved byte; an unknown source.
-    for (at, v) in [(4usize, 0x7fu8), (38, 0x20), (57, 1), (39, 14)] {
+    for (at, v) in [(4usize, 0x7fu8), (38, 0x20), (79, 1), (39, 14)] {
         let mut m = good.clone();
         let o = 16 + RECORD_LEN + at;
         m[o] = v;
@@ -617,4 +617,41 @@ fn a_one_second_frame_adsb_clip_interleaves_with_a_swim_feed_at_one_second() {
     }
     assert!(runs.iter().all(|&n| n <= 3), "{runs:?}");
     assert_eq!(runs.iter().sum::<i32>() + run, 30);
+}
+
+// REQ: OA-ADSB-022
+#[test]
+fn an_ads1_clip_and_the_same_reports_as_ads2_replay_to_the_same_hash() {
+    // The measurements of an ADS2 record are not in the table or its hash, and an ADS1 payload
+    // (64-byte records, written by the first clips) decodes to the same reports.
+    let rows: Vec<Row> = (1..=6u32)
+        .map(|n| row(0x400000 + n * 37, T0 + i64::from(n) * NS))
+        .collect();
+    let legacy = |r: &Row| {
+        let p = payload(&[*r]);
+        let mut v = b"ADS1".to_vec();
+        v.extend_from_slice(&64u16.to_le_bytes());
+        v.extend_from_slice(&[0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+        v.extend_from_slice(&p[16..16 + 57]);
+        v.extend_from_slice(&[0; 7]);
+        v
+    };
+    let hash_with = |mk: &dyn Fn(&Row) -> Vec<u8>| {
+        let mut p = small_pipeline(8);
+        let frames: Vec<_> = rows.iter().map(|r| (FeedKind::Adsb, T0, mk(r))).collect();
+        run_frames(&mut p, &frames);
+        assert_eq!(errors_total(&p.errors), 0);
+        assert_eq!(p.adsb.live, rows.len());
+        replay_hash(&p)
+    };
+    let new = hash_with(&|r| payload(&[*r]));
+    assert_eq!(hash_with(&legacy), new);
+    let measured = hash_with(&|r| {
+        let mut m = *r;
+        m.ws_kt = 40;
+        m.wd_deg = 300;
+        m.oat_c = -50;
+        payload(&[m])
+    });
+    assert_eq!(measured, new);
 }

@@ -206,6 +206,7 @@ dependencies = [
 name = "oa-wind"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb",
  "oa-awc",
  "oa-grib2",
 ]

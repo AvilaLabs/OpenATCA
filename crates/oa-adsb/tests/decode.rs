@@ -490,3 +490,86 @@ fn damaged_traces_never_panic() {
         }
     }
 }
+
+const WIND_OBJ: &str = r#"{"type":"adsb_icao","ias":267,"tas":484,"mach":0.796,"wd":297,"ws":40,"oat":-30,"tat":1,"track":309.00,"track_rate":-0.53,"roll":-10.72,"mag_heading":304.28,"true_heading":308.02}"#;
+
+// REQ: OA-ADSB-023
+#[test]
+fn wind_temperature_and_speed_measurements_are_per_row_and_never_carried() {
+    let json = wrap(&[
+        &format!("[1.0,40.0,-88.0,25125,446.5,309.0,0,-2176,{WIND_OBJ},\"adsb_icao\",25875,-2208,335,-10.7]"),
+        "[2.0,40.1,-88.1,25000,446.0,309.0,0,-2176,null,\"adsb_icao\",25800,-2208,336,-9.5]",
+        "[3.0,40.2,-88.2,24900,446.0,309.0,0,-2176,null,\"adsb_icao\"]",
+    ]);
+    let (res, out, st) = run(&json, &WIDE);
+    res.unwrap();
+    assert_eq!((st.kept, st.bad_measurements), (3, 0));
+    let a = reports_row(&out, 0).unwrap();
+    // The object's values override the row columns and carry more digits.
+    assert_eq!((a.ws_kt, a.wd_deg), (40, 297));
+    assert_eq!((a.tas_kt, a.ias_kt, a.mach_milli), (484, 267, 796));
+    assert_eq!((a.oat_c, a.tat_c), (-30, 1));
+    assert_eq!((a.mag_heading_cdeg, a.true_heading_cdeg), (30_428, 30_802));
+    assert_eq!((a.roll_cdeg, a.track_rate_cdps), (-1_072, -53));
+    // Second row: no object, so only the columns' indicated airspeed and roll; no wind carried.
+    let b = reports_row(&out, 1).unwrap();
+    assert_eq!((b.ias_kt, b.roll_cdeg), (336, -950));
+    assert_eq!(
+        (b.ws_kt, b.wd_deg, b.tas_kt),
+        (NONE_U16, NONE_U16, NONE_U16)
+    );
+    assert_eq!(
+        (b.oat_c, b.tat_c, b.track_rate_cdps),
+        (NONE_I16, NONE_I16, NONE_I16)
+    );
+    assert_eq!((b.mach_milli, b.mag_heading_cdeg), (NONE_U16, NONE_U16));
+    // Third row: a nine-column row has none of them.
+    let c = reports_row(&out, 2).unwrap();
+    assert_eq!(
+        (c.ias_kt, c.roll_cdeg, c.ws_kt),
+        (NONE_U16, NONE_I16, NONE_U16)
+    );
+}
+
+// REQ: OA-ADSB-024
+#[test]
+fn malformed_measurements_are_left_absent_and_counted_without_refusing_the_row() {
+    let obj = r#"{"ws":"fast","wd":361,"tas":-5,"oat":-300,"mach":9.9,"roll":181,"true_heading":400,"mag_heading":null,"tat":3,"ias":100}"#;
+    let json = wrap(&[
+        &format!(
+            "[1.0,40.0,-88.0,25125,446.5,309.0,0,-2176,{obj},\"adsb_icao\",25875,-2208,\"x\",null]"
+        ),
+        r#"[2.0,40.0,-88.0,25125,446.5,309.0,0,-2176,{"wd":360,"true_heading":360,"mag_heading":359.996}]"#,
+    ]);
+    let (res, out, st) = run(&json, &WIDE);
+    res.unwrap();
+    // Both rows kept; the first counted once however many of its values were bad.
+    assert_eq!((st.kept, st.bad_measurements), (2, 1));
+    assert_eq!(st.rejected, [0; REJECT_KINDS]);
+    let a = reports_row(&out, 0).unwrap();
+    assert_eq!(
+        (a.ws_kt, a.wd_deg, a.tas_kt),
+        (NONE_U16, NONE_U16, NONE_U16)
+    );
+    assert_eq!(
+        (a.oat_c, a.mach_milli, a.roll_cdeg),
+        (NONE_I16, NONE_U16, NONE_I16)
+    );
+    assert_eq!(
+        (a.true_heading_cdeg, a.mag_heading_cdeg),
+        (NONE_U16, NONE_U16)
+    );
+    // The good ones in the same object survive.
+    assert_eq!((a.tat_c, a.ias_kt), (3, 100));
+    // 360 wraps to 0 and 359.996 rounds to 360.00, which wraps to 0.
+    let b = reports_row(&out, 1).unwrap();
+    assert_eq!(
+        (b.wd_deg, b.true_heading_cdeg, b.mag_heading_cdeg),
+        (0, 0, 0)
+    );
+    // Stats add.
+    let mut t = Stats::default();
+    stats_add(&mut t, &st);
+    stats_add(&mut t, &st);
+    assert_eq!(t.bad_measurements, 2);
+}
