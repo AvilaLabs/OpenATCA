@@ -1,0 +1,160 @@
+# Open ATC Automation — Scope
+
+Status: scoping, 2026-11-13. Owner: Connor Avila (Avila Labs).
+
+## 1. What this is
+
+An open-source air traffic control automation platform aimed at the same job as the FAA's
+planned **Common Automation Platform (CAP)**: one system that replaces ERAM (en route, 20
+centers) and STARS (terminal radar approach control and towers).
+
+CAP is the largest unfunded software item in the administration's air traffic control rebuild,
+estimated at about $10B of the roughly $19–20B still being requested on top of the $12.5B
+already appropriated. The appropriated money is mostly hardware (telecom, radar, radios,
+facilities). CAP is software.
+
+We cannot deploy into the National Airspace System (NAS) ourselves. The goal is a platform good
+enough, and assured well enough, that qualified people would want to test it. Everything is built
+for that possibility from the first commit.
+
+### Why now
+
+On 2026-11-13 the FAA stopped every departure in the country for about 4–5 hours after a
+communications failure across multiple en route centers. By the officials' accounts, new equipment
+pushed more data into old network routers, the routers overloaded and sent inconsistent data, and
+radar and communications between facilities became unstable. That is a migration failure: new and
+old systems joined with no flow control, no load shedding and no fault isolation. This project
+treats safe migration and overload behaviour as core requirements, not afterthoughts.
+
+## 2. What the FAA asked for (CAP RFI, 2025-11-19)
+
+Source: FAA CAP Request for Information, responses were due 2025-12-19 (copy in `refs/`).
+The questions that define the target:
+
+- **Coverage:** "the majority of the operational capability already provided today across its
+  en-route, and terminal domains."
+- **Transition:** real-time data exchange with ERAM and STARS during transition; phased
+  deployment; "zero-downtime transitions and legacy system coexistence."
+- **Reliability:** high availability, fault tolerance, rapid recovery; real-time detection and
+  reporting of safety-critical events.
+- **Data quality:** normalization across heterogeneous sources; handling of gaps and
+  inconsistencies in weather, surveillance and flight data.
+- **Scale:** about 30 million square miles of domestic and oceanic airspace; over 45,000 flights a
+  day.
+- **Assurance:** development assurance levels, DO-278A / DO-178C / ED-109, hazard analysis,
+  traceability, independent verification and validation, formal methods where applicable.
+- **Architecture (Automation Evolution Strategy):** layered, service-based; separate compute,
+  platform and mission applications; modules developed and replaced independently; Zero Trust.
+- **No vendor lock-in:** open standards and data models, data export in non-proprietary formats,
+  exit planning, source code escrow, API use without proprietary connectors, and periodic
+  "portability fire drills."
+- **Future users:** UAS, advanced air mobility and space operations without major redesign.
+
+An open-source platform meets the lock-in section by construction, and most of the transition
+section is what we intend to build first.
+
+## 3. Design principles
+
+1. **Migration first.** Every function can run in shadow beside a legacy system, be compared
+   against it, be cut over on its own, and be rolled back. Coexistence is a mode the platform
+   runs in, not a project phase.
+2. **Overload is designed, not discovered.** Every queue is bounded. Every message carries a
+   priority class. When load exceeds capacity the platform sheds in a written order and says so;
+   it never passes on corrupted or inconsistent data silently. A fault in one site or one adapter
+   cannot spread past its boundary.
+3. **Deterministic replay.** Every input is recorded with its time. Any run can be replayed bit
+   for bit. This is how we test, how we compare against legacy output, and how an outage is
+   investigated after the fact.
+4. **Assurance built in.** Requirements are numbered and traced to code and tests from the first
+   commit. Structural coverage is measured from the start. The DO-278A evidence is a by-product of
+   how we work, not something added at the end.
+5. **Open data model.** Every internal message has a published schema. External formats
+   (ASTERIX, ARINC 424, AIXM, FIXM, the SWIM feeds) are handled at the edge by adapters, so the
+   core never depends on any one source.
+6. **Minimal dependencies.** Core logic is written in-house. Outside code only for proven
+   cryptography and entropy, each exception recorded with its reason.
+
+Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
+already in use across Avila Labs). The core targets the standard library only.
+
+## 4. Architecture
+
+```
+  ingest adapters        normalized bus           core services                outputs
+  ---------------        --------------           -------------                -------
+  ADS-B (Beast/SBS)  ->                      ->  surveillance tracker     ->  controller display
+  ASTERIX (radar)    ->   typed, versioned   ->  flight data processing   ->  shadow comparator
+  SWIM FDPS/STDDS    ->   messages, bounded  ->  plan/track correlation   ->  safety event log
+  NASR / CIFP        ->   priority queues,   ->  conflict alert           ->  replay archive
+  weather (NOAA)     ->   recorded for       ->  terrain/obstacle (MSAW)  ->  legacy-format
+  legacy adapters    ->   replay             ->  sector/handoff logic     ->    output adapters
+                                              ->  airspace/adaptation
+```
+
+- **Adaptation data** (airspace, sectors, fixes, routes, procedures) comes from public NASR and
+  CIFP data and is versioned on the 28-day AIRAC cycle.
+- **The comparator** takes any two streams (ours against a legacy system, or ours against
+  ground truth) and reports differences by function.
+- **Health and load** of every service and queue are first-class outputs, so overload is visible
+  before it becomes a failure.
+
+## 5. Data we can get
+
+| Source | Gives us | Access |
+|---|---|---|
+| NASR (28-day subscription) | Airspace, sector boundaries, fixes, airways, airports, navaids | Public download |
+| CIFP | Every published procedure (SIDs, STARs, approaches) in ARINC 424 | Public download |
+| SWIM via SCDS (FDPS, STDDS, TFMData, TBFM) | Live flight plans, terminal surveillance and flight data, flow management | Free, needs an FAA SWIM account |
+| ADS-B (OpenSky Network, or our own receiver) | Live positions for most IFR traffic (mandated since 2020) | OpenSky research access, or a low-cost SDR receiver |
+| NOAA MRMS and aviation weather | Weather for display and data-quality tests | Public |
+| ASTERIX specifications | Radar data formats, so legacy-style feeds can be simulated | Public (Eurocontrol) |
+
+Account sign-ups and any hardware purchase go to Connor first.
+
+## 6. Gaps we cannot close alone
+
+These are written down so the outreach later is specific.
+
+| Gap | Why it matters | What we do meanwhile | Who could close it |
+|---|---|---|---|
+| Primary and secondary radar feeds | Non-ADS-B traffic; real radar error behaviour | Simulate radar from ADS-B truth with published error models; full ASTERIX support | FAA, an ANSP, or a research lab with radar access |
+| ERAM and STARS interface control documents | Real legacy coexistence | Build clean adapter interfaces; test against our own simulated legacy | FAA (William J. Hughes Technical Center) |
+| Real adaptation data | Exact sector configurations, local procedures | Derive from NASR/CIFP; note every assumption | FAA facilities |
+| Controller evaluation | Display usability, workload | Prototype display; test with simulator users | Retired controllers, university ATC programs, NATCA |
+| Assigned assurance levels | Which functions need which DO-278A level | Assume the highest plausible level per function | FAA safety assessment |
+
+The assurance-level question is the main open one. Conflict alert and terrain warning are
+safety-critical; until a safety assessment assigns levels, we hold them to the strictest level we
+can justify and record the assumption.
+
+## 7. Milestones
+
+Region for M0–M5: Chicago Center (ZAU), where the 2026-11-13 failure began, and its TRACONs.
+
+- **M0 — Airspace foundation.** NASR and CIFP parsers; ZAU airspace, sectors, routes and
+  procedures in the internal model; requirements register and traceability tooling.
+- **M1 — Record and replay.** ADS-B and SWIM ingest; a recorded day of ZAU traffic; bit-exact
+  replay harness.
+- **M2 — Tracking.** Surveillance tracker; flight-plan-to-track correlation; track quality
+  metrics against ADS-B truth.
+- **M3 — Safety alerts.** Conflict alert and minimum safe altitude warning, with published
+  thresholds and test cases.
+- **M4 — Shadow mode.** Live operation on the real feeds with the comparator running; per-function
+  difference reports.
+- **M5 — Overload and fault demonstration.** Reproduce the 2026-11-13 failure mode in replay:
+  a new high-rate source added to a legacy-style network. Show the platform shedding load and
+  isolating the fault while surveillance and alerts stay consistent.
+- **M6 — Controller display.** Working display for en route and terminal positions.
+
+After M4 the platform is far enough along for outreach to close the gaps in section 6.
+
+## 8. Prior work to learn from
+
+- BlueSky (TU Delft): open air traffic simulator; traffic generation and conflict detection
+  algorithms.
+- OpenSky Network: ADS-B data and published research on its quality.
+- readsb / dump1090: ADS-B decoding.
+- Eurocontrol specifications: ASTERIX, and the published SESAR material on service-based ATM.
+- Commercial platforms named by the RFI's "Operationally Proven Platform" path (for example the
+  systems used by other air navigation service providers): their public documentation sets the
+  bar for function coverage.

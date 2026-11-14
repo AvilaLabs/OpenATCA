@@ -1,0 +1,543 @@
+                            Request for Information
+     Introduction/Purpose
+
+     The FAA seeks information pertaining to President Trump’s and Secretary Duffy’s
+     initiative to implement a brand-new Air Traf c Control System (ATC). See here for more
+     information: U.S. Transportation Secretary Sean P. Duffy Unveils Plan to Build Brand
+     New State-of-the-Art Air Traf c Control System | US Department of Transportation.
+
+     Speci cally, the FAA is seeking information for a Common Automation Platform
+     (CAP) solution. This CAP aims to replace the legacy systems—ERAM (En Route
+     Automation Modernization), STARS (Standard Terminal Automation Replacement
+     System) —with a uni ed, state-of-the-art platform.
+
+     The FAA is open to new ideas, new technologies, new procurement strategies, new
+     implementation structures, and any other considerations that will enhance the Common
+     Automation Platform solution. In particular, the FAA is open to an Enterprise Re-
+     Architecture approach that extends and re-architects existing FAA automation assets
+     (e.g., ERAM and STARS) as well as an Operationally Proven Platform approach based
+     on a platform with documented operational use by other ANSPs in domestic or
+     international ATC environments; responses that describe both approaches separately or
+     hybrid solutions that combine elements of both approaches are acceptable. The FAA is
+     seeking responses from vendors that can deliver the majority of the operational
+     capability already provided today across its en-route, and terminal domains.
+
+     Nature of this RFI
+
+        (a)        This is not a commitment to issue a further screening information request or
+                   request for proposals;
+
+        (b)        The FAA is not seeking or accepting unsolicited proposals;
+
+        (c)        The FAA will not pay for any information received or costs incurred in
+                   preparing any response to this RFI; and
+
+        (d)        Any costs associated with any response to this RFI are solely at the
+                   interested vendor’s expense.
+
+
+
+     A. CAP-Solution Approach, Business and Schedule Questions
+
+                                                                                                  1
+
+
+
+                                      fi
+                       fi
+              fi
+fi
+             1. What is your vision/approach to implementing a CAP solution within the
+                timeframe outlined by the Secretary of Transportation?
+
+             2. What business model would you propose and why would it work best for the FAA
+                in this instance? The FAA is willing to consider innovative and unconventional
+                approaches.
+
+             3. How should the FAA approach data rights under CAP and what are the trade
+                spaces that should be considered for the different approaches?
+
+             4. What do you think are the FAA’s top three obstacles in achieving the stated goal
+                of a CAP and how would you propose to overcome them?
+
+
+
+          B. CAP-Speci c Questions for Effective System Capability
+
+          1. Do you currently have a Common Automation Platform for automation for Air
+          Traf c management and control?
+
+             a) If your product deployed operationally or is it in an initial prototype phase.
+
+
+
+             b) How widely used is your product in the global market?
+
+          2. System Integration and Interoperability
+
+          Describe how your system or service enables ef cient and exible interoperability with
+          third-party solutions and evolving technologies throughout the full lifecycle of the
+          National Airspace System (NAS).
+
+             a)   How will your CAP solution ensure seamless integration and real-time data
+                  exchange with existing and legacy systems (ERAM, STARS) during transition
+                  and after full deployment?
+
+             b)   Support for Future Integration: What architectural choices, standards compliance
+                  (such as open APIs or data models), and interface management strategies do
+                  you employ to ensure continued compatibility with new entrants, technologies, or
+                  regulatory changes in the NAS over the system’s expected lifespan?
+
+
+
+             c)   Adaptability to Emerging Use Cases: How does your solution facilitate seamless
+                  integration of future operational capabilities—such as UAS, advanced air
+                  mobility, space operations, or other new NAS functions—without requiring major
+                  redesign?
+
+                                                                                                   2
+
+
+
+                                                         fl
+                                             fi
+     fi
+fi
+   d)   Sustained Interoperability Commitment: What processes are in place to
+        proactively assess, plan for, and implement interoperability upgrades or
+        enhancements in line with FAA’s ongoing NAS modernization and Automation
+        Evolution Strategy (AES) objectives?
+
+
+
+   e)   Historical or Ongoing Future-Proo ng Examples: Where possible, provide
+        examples demonstrating your organization’s success in supporting long-term
+        interoperability, interoperability upgrades, or migration efforts in comparable
+        complex aviation or large government environments.
+
+3. Functional Coverage and Adaptability
+
+   a)   What domains does your CAP platform fully support? Please explain if your
+        system currently meets all required airspace domains and operational scenarios
+        fully or partially.
+
+   b)   How does the system accommodate evolving requirements, such as new
+        airspace users (e.g., unmanned aircraft, urban air mobility)?
+
+   c)   How does the system introduce, integrate and deploy new enhancements. What
+        does the lifecycle look like for air traf c capability enhancements introduced by
+        the user community.
+
+4. Reliability, Safety, and Resilience
+
+   a)   What mechanisms are in place to ensure high availability, fault tolerance, and
+        rapid recovery from failures?
+
+   b)   How does the CAP solution detect, mitigate, and report safety-critical events and
+        anomalies in real time?
+
+5. Data Harmonization and Quality
+
+   a)   What strategies does the system employ for data normalization, harmonization,
+        and quality assurance across heterogeneous sources?
+
+   b)   How does the solution handle inconsistencies or gaps in date, how does it
+        ensure data integrity. For example, in weather, surveillance and ight data?
+
+6. Advanced Automation and AI/ML Capabilities
+
+   a)   Does your CAP system utilize AI or Machine Learning features? If so, how are
+        they used and what are the realized operational bene ts?
+
+                                                                                            3
+
+
+
+                                                    fl
+                                         fi
+                          fi
+                     fi
+        b)   How are these features validated for safety and operational effectiveness?
+
+     7. User Experience and Usability
+
+        a)   How is system usability measured and improved for controllers and operators?
+
+        b)   What feedback mechanisms are available for continuous improvement of user
+             work ows and interfaces?
+
+        c)   Explain the training experience, concept and tools that your system has available
+             for users in both the initial learning experience and changes or enhancements
+             that follow.
+
+     8. Deployment Strategy and Transition Risk
+
+        a)   How would you propose to deploy your solution across terminal and enroute
+             facilities within the NAS today.
+
+        b)   What is the proposed phased deployment and migration plan to minimize
+             operational disruption?
+
+        c)   How will the solution support zero-downtime transitions and legacy system
+             coexistence?
+
+        d)   How will the solutions account for limited space in existing facilities?
+
+     9. Security and Compliance
+
+        a)   What cybersecurity frameworks and controls are implemented to protect critical
+             infrastructure and sensitive data?
+
+        b)   Does the system comply with relevant FAA, federal, and international standards?
+             How would the system stay up to date by adhering to current standards?
+
+     10. Performance, Ef ciency, and Scalability
+
+        a)   Scalability to the NAS: How does your architecture support ef cient operation
+             across the vast expanse of nearly 30 million square miles of U.S. domestic and
+             oceanic airspace, with networked management of high numbers of airports and
+             ATC facilities?
+
+        b)   Handling Complex Airspace: In what ways does your solution adapt to the highly
+             complex, multilayered airspace con gurations (e.g., controlled/uncontrolled
+             zones, special use areas, and varying altitude sectors) and support dynamic
+             changes in airspace use on demand?
+
+        c)   Peak Performance for Unmatched Traf c Volume: How does your system ensure
+             high availability, reliability, and real-time performance in environments that
+
+                                                                                              4
+
+
+
+                                                        fi
+                                 fi
+                            fi
+             fi
+fl
+               manage an unparalleled volume of air traf c—handling over 45,000 ights daily,
+               with U.S. operational loads signi cantly outpacing those of any other Air
+               Navigation Service Provider (ANSP) worldwide? Include speci c performance
+               metrics, benchmarks, or case studies where your system has demonstrated
+               successful operation under comparable transaction or data loads.
+
+          d)   Future-Proo ng for Growth: What capabilities are included to accommodate
+               continued traf c growth, integration of new aircraft types, and evolving
+               operational scenarios, as anticipated in the FAA’s ongoing modernization efforts
+
+     11. Cost and Value
+
+          a)   What is the proposed cost-recovery or pricing model for CAP deployment and
+               sustainment?
+
+          b)   How does the solution demonstrate value for money compared to exiting FAA
+               software and system development and sustainment models?
+
+     12. System Safety Assurance
+
+          a) Describe your organization’s approach to development assurance and how you
+             ensure your solution complies with the FAA’s safety assurance requirements for
+             safety-critical systems.
+
+
+
+          b) Describe your organization’s approach to development assurance and how you
+             ensure your solution complies with the FAA’s safety assurance requirements for
+             safety-critical systems.
+
+          c) Development Assurance Ratings and Process: What development assurance
+             levels (DALs) or ratings do you apply to safety-critical software and hardware
+             components, and which industry standards (e.g., DO-178C, DO-278A, ED-109)
+             are followed? Outline the processes, veri cation activities, and documentation
+             used to satisfy those requirements.
+
+          d) Safety Criticality Assessment: How have you determined the safety criticality
+             and failure condition classi cation of system components? Describe the methods
+             and criteria you use to identify and categorize components according to their
+             impact on system safety, failure modes, and operational consequences.
+
+          e) System Assurance Assessments: What system safety assurance assessment
+             processes and methodologies are applied to ensure compliance for safety-critical
+             and essential components? Please provide details on hazard analysis, design
+             assurance, traceability, risk controls, independent veri cation and validation, and
+             use of formal methods, where applicable.
+
+                                                                                                  5
+
+
+
+                                                              fl
+                                                        fi
+                                                fi
+                                        fi
+                                   fi
+                          fi
+                     fi
+     fi
+fi
+   f) Explain how your service-based solution (including cloud, SaaS, or
+      modular hosted platforms) ensures ongoing compliance with FAA safety
+      assurance processes and goals.
+
+              a. How do you support the FAA’s Safety Assurance System (SAS), including
+                 real-time operational monitoring, data collection, and risk-based oversight
+                 for service-based offerings?
+
+              b. What processes are in place to demonstrate continuous adherence to FAA
+                 safety objectives, address incident response and corrective actions, and
+                 provide transparent safety performance reporting throughout the lifecycle
+                 of the service?
+
+              c. In what ways do you apply required federal security and authorization
+                 standards (such as FedRAMP for cloud/SaaS), and ensure that Service
+                 Level Agreements (SLAs) cover safety-critical aspects for software as a
+                 service or other hosted environments?
+
+
+C. CAP – Corporate Experience and Operational Product Availability
+
+1. Operational Deployments
+
+   a)   Please list if any ANSPs are currently using your automation solutions and in
+        what domain (including en route and terminal domains). For each, specify the
+        system name, operational status, domain, and the date of initial deployment.
+
+   b)   Can you provide references or case studies demonstrating successful transition,
+        deployment and sustained operation of your automation systems in live ANSP
+        environments? Please provide points of contact at these ANSPs.
+
+2. Scope and Scale of Experience
+
+   a)   What is the total number of operational sites (e.g., ACCs, TRACONs, towers)
+        where your automation platform is in use today?
+
+   b)   Please describe the airspace complexity, traf c volume, systems architectural
+        complexity, and geographic diversity of these deployments.
+
+3. Product Maturity and Evolution
+
+   a)   How long have your automation products been in continuous operational use
+        within ANSPs?
+
+   b)   What major upgrades or enhancements have been delivered to operational
+        customers in the past ve years? What was the timeframe from concept to
+
+                                                                                           6
+
+
+
+                                   fi
+         fi
+        operational delivery for these enhancements? If your solutions are in a prototype
+        phase, what is the level of maturity currently and what is the timeline for
+        operational delivery?
+
+   c)   For prototypes or solutions still in development, is there an increased risk for
+        solutions already in operational use at ANSPs and industry today? How can
+        those risks be managed and possibly reduced?
+
+4. Interoperability and Integration
+
+   a) Describe your experience integrating your automation systems with legacy
+      platforms (such as ERAM, STARS, or international equivalents). Provide
+      examples of successful coexistence and transition strategies.
+
+5. Performance and Reliability
+
+   a)   What are the measured operational performance metrics (e.g., system
+        availability, outage rates, recovery times) from current ANSP deployments?
+
+   b)   How do your solutions support productivity, resilience, and ef ciency in real-world
+        operations?
+
+6. Innovation and Digital Transformation
+
+   a)   What innovative features (e.g., AI/ML, digital towers, advanced decision support)
+        have been implemented and are currently operational in ANSPs using your
+        products?
+
+   b)   Can you share lessons learned from digital transformation initiatives with ANSP
+        customers?
+
+7. Customer Support and Collaboration
+
+   a)   What ongoing support, training, and collaborative mechanisms do you provide to
+        ANSPs using your systems?
+
+   b)   How do you engage with operational stakeholders (controllers, engineers,
+        management) to ensure continuous improvement?
+
+
+
+D CAP- Alignment with FAA Automation Evolution Strategy (AES) Principles
+
+These questions are designed to ensure that the critical AES objectives addressed for
+interoperability, agility, modularity, rapid capability deployment, and alignment with FAA’s
+vision for future automation.
+
+
+                                                                                           7
+
+
+
+                                                  fi
+1. Alignment with FAA AES Principles
+
+        a)    How does your architecture support a layered, service-based design, including
+              separation between computing resources, standards-based software platforms,
+              and mission-speci c applications/services?
+
+        b)    In what ways does your approach maximize the use of reusable components,
+              enable independent development/sustainment of modules, and facilitate
+              integration with other NAS services?
+
+        c)    Describe your use of or compatibility with cloud technologies, microservices, and
+              enterprise integration practices as promoted by AES.
+
+        d)    How do you enable rapid development, integration, and deployment of new
+              capabilities, and what processes are in place to accelerate delivery and reduce
+              operational risk?
+
+        e)    Provide examples that demonstrate adherence to commercial best practices,
+              scalable infrastructure, and a exible security approach (e.g., adoption of Zero
+              Trust concepts).
+
+
+
+2. Addressing Vendor Lock-In
+
+How will you ensure by design, action, and contract that the FAA will always retain
+practical, technical, and legal freedom to integrate, transition, and interoperate.
+
+              1. Describe, with technical evidence, how your solution supports open,
+                 standards-based interoperability and modularity. Include:
+
+                    a) Lists of supported open standards, protocols, and data models.
+
+                    b) Documentation/examples of how external third-party modules or
+                       services have been successfully integrated into your system in other
+                       aviation/government deployments.
+
+                    c)        How your architecture enables or requires the use of interchangeable
+                              modules/components from multiple vendors (plug-and-play,
+                              containerization, microservices marketplaces, etc.).
+
+                    d) How do you ensure backward and forward compatibility for evolving
+                       interfaces. Speci cally, explain the mechanisms, design choices, or
+                       contractual terms that ensure the FAA retains exibility and
+                       management over its data, systems, and future solution options. How
+
+
+
+                                                                                                 8
+
+
+
+                                            fl
+                         fl
+         fi
+   fi
+                   does your solution support portability, interoperability, and ease of
+                   migration to alternative vendors or platforms?
+
+
+
+        2. Provide detailed descriptions and evidence of the following measures.
+
+               a) Data Portability: Contract clauses and technical procedures for FAA to
+                  export all data (including logs, con gurations, transaction records) in
+                  common, non-proprietary formats at any time and without additional
+                  costs or penalties.
+
+               b) Exit Planning: Describe how your solution would manage migration to
+                  another provider or to in-house operations, and the support you would
+                  provide.
+
+               c) Source Code/Escrow: If proprietary software is involved, what source
+                  code escrow, documentation, or re-hosting options are available?
+
+               d) API Documentation: Explain how your solution leverages APIs for
+                  integration, including whether FAA and third parties can use these
+                  APIs without requiring your company’s proprietary connectors or
+                  gateways.
+
+        3. How will your company support ongoing, independent veri cation of
+           interoperability, data extraction, and module exchange throughout the
+           contract lifecycle?
+
+                a) For instance, will you allow periodic “portability re drills” or simulated
+                   integrations, in partnership with FAA or its designated third parties, to
+                   prove that protections are maintained in practice?
+
+3. Support for Modularity and Third-Party Services Integration
+
+   a)   Describe how your solution supports modularity and the integration of third-party
+        services. Include details regarding your system’s architecture, APIs, support for
+        open standards, and historical examples (if any) of successful third-party
+        integrations. Discuss how you enable the FAA to add, remove, or replace system
+        modules and integrate external technologies with minimal disruption.
+
+   b)   As a solutions provider how would you also act and preform in order to integrate
+        existing and new software and services from other vendors into your products
+        and solutions. How would success for this integration be incentivized.
+
+4. Describe how your solution helps the FAA realize both operational and
+sustainment cost savings over the lifecycle of the system.
+
+                                                                                           9
+
+
+
+                                              fi
+                                   fi
+                     fi
+     What mechanisms, design features, or service models do you offer to optimize ongoing
+     operations and maintenance costs?
+
+        a)   How does your solution enable ef cient scaling, resource utilization, or
+             automation to reduce expenses?
+
+        b)   In what ways do you support transparency of costs, budget predictability, and
+             cost control for the FAA?
+
+        c)   Provide examples or case studies (where applicable) demonstrating realized cost
+             ef ciencies and long-term value.
+
+
+
+
+     Point of Contact
+
+     To contact the FAA relating to this RFI, use this email address:
+     David.L.Reynolds@faa.gov
+
+
+
+     Submittal Requirements
+
+     Respondents should provide:
+        •    Detailed technical responses to each question, including architecture diagrams
+             and case studies where applicable.
+        •    Quantitative and qualitative evidence of capability, such as performance metrics,
+             reliability statistics, and user satisfaction data.
+        •    Descriptions of innovation, adaptability, and lessons learned from previous large-
+             scale automation deployments.
+        •    Contact information
+
+
+
+     Responses must be submitted to the Government at the email address above no later
+     than 4 p.m. eastern standard time on December 19th, 2025. Please note FAA will
+     hold vendor responses con dential and they will not be publicly disclosed.
+
+
+
+
+                                                                                              10
+
+
+
+                          fi
+                   fi
+fi
+
