@@ -1,6 +1,6 @@
 # M2 — Benchmark harness and legacy baseline: design
 
-Status: draft 2026-11-14, for Connor's review before building.
+Status: approved by Connor 2026-11-14 (publishing: results stay private until the SCDS terms are read for derived aggregates; truth gates as stated, tuned from the leave-one-out result with the reason recorded).
 
 ## Goal
 
