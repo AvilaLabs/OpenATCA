@@ -2,7 +2,15 @@
 //! sized once in [`Parser::new`]; every push is preceded by a limit check, so none reallocates.
 
 use crate::decode::{off, parse_entity};
-use crate::{AttrIx, Binding, Doc, ElemIx, Frame, LimitKind, Limits, Span, XmlError};
+use crate::{
+    validate_limits, AttrIx, BindIx, Binding, Doc, ElemIx, Frame, LimitKind, Limits, NsIx, Span,
+    XmlError,
+};
+
+/// The XML namespace, bound to the `xml` prefix and to nothing else (Namespaces section 3).
+const XML_NS: &[u8] = b"http://www.w3.org/XML/1998/namespace";
+/// The namespace of the `xmlns` prefix, which no declaration may bind.
+const XMLNS_NS: &[u8] = b"http://www.w3.org/2000/xmlns/";
 
 /// Parser with its preallocated tables. Create once, call [`Parser::parse`] per message.
 pub struct Parser {
@@ -21,38 +29,70 @@ pub struct Parser {
     text_span: Vec<Span>,
     text_owner: Vec<ElemIx>,
     text_entity: Vec<u64>,
+    elem_ns_head: Vec<NsIx>,
+    ns_prefix: Vec<Span>,
+    ns_uri: Vec<Span>,
+    ns_next: Vec<NsIx>,
     stack: Vec<Frame>,
     bindings: Vec<Binding>,
-    binding_cap: usize,
+    // Per-element scratch: the namespace URI of each attribute of the element being parsed
+    // (empty for an unprefixed, `xml` or `xmlns` attribute), for the expanded-name check.
+    attr_uri: Vec<Span>,
+}
+
+/// A table of capacity `cap` made with `try_reserve_exact`, so an allocation failure is an
+/// error and not an abort.
+fn table<T>(cap: usize, limit: LimitKind) -> Result<Vec<T>, XmlError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(cap)
+        .map_err(|_| XmlError::LimitsInvalid { limit, at: 0 })?;
+    Ok(v)
+}
+
+/// A zeroed bitset of `bits` bits, allocated the same way.
+fn bitset(bits: usize, limit: LimitKind) -> Result<Vec<u64>, XmlError> {
+    let words = bits.div_ceil(64);
+    let mut v = table(words, limit)?;
+    v.resize(words, 0);
+    Ok(v)
 }
 
 impl Parser {
     /// Allocates every table at `limits`. This is the only allocation the parser makes. The
-    /// input limit is capped at `u32::MAX` because spans use 32-bit offsets.
-    pub fn new(limits: Limits) -> Parser {
-        let mut limits = limits;
-        limits.max_input_bytes = limits.max_input_bytes.min(u32::MAX as usize);
-        let binding_cap = limits.max_depth.saturating_mul(limits.max_attrs_per_elem);
-        Parser {
-            elem_name: Vec::with_capacity(limits.max_elements),
-            elem_prefix: Vec::with_capacity(limits.max_elements),
-            elem_parent: Vec::with_capacity(limits.max_elements),
-            elem_first_attr: Vec::with_capacity(limits.max_elements),
-            elem_attr_count: Vec::with_capacity(limits.max_elements),
-            elem_first_child: Vec::with_capacity(limits.max_elements),
-            elem_next_sibling: Vec::with_capacity(limits.max_elements),
-            attr_name: Vec::with_capacity(limits.max_attributes),
-            attr_prefix: Vec::with_capacity(limits.max_attributes),
-            attr_value: Vec::with_capacity(limits.max_attributes),
-            attr_entity: vec![0; limits.max_attributes.div_ceil(64)],
-            text_span: Vec::with_capacity(limits.max_text_nodes),
-            text_owner: Vec::with_capacity(limits.max_text_nodes),
-            text_entity: vec![0; limits.max_text_nodes.div_ceil(64)],
-            stack: Vec::with_capacity(limits.max_depth),
-            bindings: Vec::with_capacity(binding_cap),
-            binding_cap,
+    /// limits are checked first ([`validate_limits`]: a zero where zero cannot work, or a value
+    /// above its [`Limits::CEILING`], is `LimitsInvalid`), and the tables are reserved with
+    /// `try_reserve_exact`, so a limit too large for the machine's memory is also
+    /// `LimitsInvalid` (naming the limit whose table failed), never an abort.
+    pub fn new(limits: Limits) -> Result<Parser, XmlError> {
+        validate_limits(&limits)?;
+        let el = LimitKind::Elements;
+        let at = LimitKind::Attributes;
+        let tx = LimitKind::TextNodes;
+        Ok(Parser {
+            elem_name: table(limits.max_elements, el)?,
+            elem_prefix: table(limits.max_elements, el)?,
+            elem_parent: table(limits.max_elements, el)?,
+            elem_first_attr: table(limits.max_elements, el)?,
+            elem_attr_count: table(limits.max_elements, el)?,
+            elem_first_child: table(limits.max_elements, el)?,
+            elem_next_sibling: table(limits.max_elements, el)?,
+            attr_name: table(limits.max_attributes, at)?,
+            attr_prefix: table(limits.max_attributes, at)?,
+            attr_value: table(limits.max_attributes, at)?,
+            attr_entity: bitset(limits.max_attributes, at)?,
+            text_span: table(limits.max_text_nodes, tx)?,
+            text_owner: table(limits.max_text_nodes, tx)?,
+            text_entity: bitset(limits.max_text_nodes, tx)?,
+            elem_ns_head: table(limits.max_elements, el)?,
+            // Every namespace declaration is an attribute, so rows never outnumber them.
+            ns_prefix: table(limits.max_attributes, at)?,
+            ns_uri: table(limits.max_attributes, at)?,
+            ns_next: table(limits.max_attributes, at)?,
+            stack: table(limits.max_depth, LimitKind::Depth)?,
+            bindings: table(limits.max_ns_bindings, LimitKind::NsBindings)?,
+            attr_uri: table(limits.max_attrs_per_elem, LimitKind::AttributesPerElement)?,
             limits,
-        }
+        })
     }
 
     /// Total capacity, in rows and words, of every table. It is fixed at construction; tests use
@@ -72,8 +112,13 @@ impl Parser {
             + self.text_span.capacity()
             + self.text_owner.capacity()
             + self.text_entity.capacity()
+            + self.elem_ns_head.capacity()
+            + self.ns_prefix.capacity()
+            + self.ns_uri.capacity()
+            + self.ns_next.capacity()
             + self.stack.capacity()
             + self.bindings.capacity()
+            + self.attr_uri.capacity()
     }
 
     /// The limits in force.
@@ -102,6 +147,10 @@ impl Parser {
             text_span: &self.text_span,
             text_owner: &self.text_owner,
             text_entity: &self.text_entity,
+            elem_ns_head: &self.elem_ns_head,
+            ns_prefix: &self.ns_prefix,
+            ns_uri: &self.ns_uri,
+            ns_next: &self.ns_next,
         })
     }
 
@@ -127,8 +176,13 @@ impl Parser {
         self.attr_value.clear();
         self.text_span.clear();
         self.text_owner.clear();
+        self.elem_ns_head.clear();
+        self.ns_prefix.clear();
+        self.ns_uri.clear();
+        self.ns_next.clear();
         self.stack.clear();
         self.bindings.clear();
+        self.attr_uri.clear();
     }
 }
 
@@ -140,6 +194,12 @@ const C_CTRL: u8 = 3; // control character outside the Char production
 const C_EF: u8 = 4; // 0xEF: lead byte of U+FFFE and U+FFFF
 const C_RBRACKET: u8 = 5;
 const C_QUOTE: u8 = 6; // `"` or `'`
+const C_CR: u8 = 7; // carriage return: normalised to a line feed (text) or space (attribute)
+const C_NL: u8 = 8; // tab or line feed: normalised to a space in an attribute value only
+
+// Flags returned by `scan_run`: what a value needs from `decode_into`.
+const F_REF: u8 = 1; // contains an entity or character reference
+const F_NORM: u8 = 2; // contains a byte that normalisation changes
 
 // Const-evaluated: an out-of-range index here is a compile error, not a runtime panic.
 #[allow(clippy::indexing_slicing)]
@@ -158,11 +218,15 @@ const fn class_table() -> [u8; 256] {
     t[b']' as usize] = C_RBRACKET;
     t[b'"' as usize] = C_QUOTE;
     t[b'\'' as usize] = C_QUOTE;
+    t[b'\r' as usize] = C_CR;
+    t[b'\t' as usize] = C_NL;
+    t[b'\n' as usize] = C_NL;
     t
 }
 static CLASS: [u8; 256] = class_table();
 
-// Name byte classes: 0 not a name byte, 1 name byte but not a start, 2 name start, 3 colon.
+// Name byte classes: 0 not a name byte, 1 name byte but not a start, 2 name start, 3 colon,
+// 4 a byte of a multi-byte character (judged by `nonascii_name`; the input is valid UTF-8).
 // Const-evaluated: an out-of-range index here is a compile error, not a runtime panic.
 #[allow(clippy::indexing_slicing)]
 const fn name_table() -> [u8; 256] {
@@ -170,7 +234,9 @@ const fn name_table() -> [u8; 256] {
     let mut i = 0;
     while i < 256 {
         let b = i as u8;
-        t[i] = if b.is_ascii_alphabetic() || b == b'_' || b >= 0x80 {
+        t[i] = if b >= 0x80 {
+            4
+        } else if b.is_ascii_alphabetic() || b == b'_' {
             2
         } else if b.is_ascii_digit() || b == b'-' || b == b'.' {
             1
@@ -184,6 +250,63 @@ const fn name_table() -> [u8; 256] {
     t
 }
 static NAME: [u8; 256] = name_table();
+
+/// Decodes the UTF-8 character at `input[i]` into (code point, length). `None` on anything
+/// malformed (cannot happen after validation; refused rather than assumed).
+fn decode_cp(input: &[u8], i: usize) -> Option<(u32, usize)> {
+    let b0 = u32::from(*input.get(i)?);
+    let cont = |k: usize| input.get(i + k).map(|&b| u32::from(b & 0x3F));
+    match b0 {
+        0xC2..=0xDF => Some((((b0 & 0x1F) << 6) | cont(1)?, 2)),
+        0xE0..=0xEF => Some((((b0 & 0x0F) << 12) | (cont(1)? << 6) | cont(2)?, 3)),
+        0xF0..=0xF4 => Some((
+            ((b0 & 0x07) << 18) | (cont(1)? << 12) | (cont(2)? << 6) | cont(3)?,
+            4,
+        )),
+        _ => None,
+    }
+}
+
+/// XML 1.0 (fifth edition) `NameStartChar`, minus `:` and the ASCII range (which the byte
+/// table decides); applied to code points from U+0080 up.
+fn is_name_start_cp(c: u32) -> bool {
+    matches!(c,
+        0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x2FF | 0x370..=0x37D | 0x37F..=0x1FFF
+        | 0x200C..=0x200D | 0x2070..=0x218F | 0x2C00..=0x2FEF | 0x3001..=0xD7FF
+        | 0xF900..=0xFDCF | 0xFDF0..=0xFFFD | 0x10000..=0xEFFFF)
+}
+
+/// XML 1.0 (fifth edition) `NameChar` for code points from U+0080 up: a start character, or
+/// U+00B7, U+0300-U+036F, U+203F-U+2040.
+fn is_name_cp(c: u32) -> bool {
+    is_name_start_cp(c) || matches!(c, 0xB7 | 0x300..=0x36F | 0x203F..=0x2040)
+}
+
+/// Whether the non-ASCII character at `input[i]` is a name character (`start`: a name-start
+/// character); returns its byte length when it is.
+fn nonascii_name(input: &[u8], i: usize, start: bool) -> Option<usize> {
+    let (c, len) = decode_cp(input, i)?;
+    let ok = if start {
+        is_name_start_cp(c)
+    } else {
+        is_name_cp(c)
+    };
+    ok.then_some(len)
+}
+
+/// Whether a name-start character (not a colon) is at `input[i]`.
+fn name_start_at(input: &[u8], i: usize) -> bool {
+    match at(input, i).map_or(0, |b| NAME.get(usize::from(b)).copied().unwrap_or(0)) {
+        2 => true,
+        4 => nonascii_name(input, i, true).is_some(),
+        _ => false,
+    }
+}
+
+/// Whether `rest` is a proper prefix of `pat` (input that stops where `pat` would go on).
+fn cut_short(rest: &[u8], pat: &[u8]) -> bool {
+    rest.len() < pat.len() && pat.starts_with(rest)
+}
 
 fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
@@ -244,30 +367,31 @@ fn check_special(input: &[u8], i: usize, class: u8) -> Result<(), XmlError> {
 }
 
 /// Scans text (`quote == 0`, ends at `<`) or an attribute value (ends at `quote`), validating
-/// characters and references. Returns the end offset and whether a reference was seen. Hitting
-/// the end of the input returns `input.len()`; the caller decides what that means.
-fn scan_run(input: &[u8], start: usize, quote: u8) -> Result<(usize, bool), XmlError> {
+/// characters and references. Returns the end offset and the `F_*` flags of what `decode_into`
+/// will have to do with the value. Hitting the end of the input returns `input.len()`; the
+/// caller decides what that means.
+fn scan_run(input: &[u8], start: usize, quote: u8) -> Result<(usize, u8), XmlError> {
     let mut i = start;
-    let mut ent = false;
+    let mut flags = 0u8;
     while let Some(&b) = input.get(i) {
         let c = CLASS.get(usize::from(b)).copied().unwrap_or(C_PLAIN);
         match c {
             C_PLAIN => {}
             C_LT => {
                 if quote == 0 {
-                    return Ok((i, ent));
+                    return Ok((i, flags));
                 }
                 return Err(syntax(i, "'<' in attribute value"));
             }
             C_AMP => {
                 let (_, used) = parse_entity(input, i)?;
-                ent = true;
+                flags |= F_REF;
                 i += used;
                 continue;
             }
             C_QUOTE => {
                 if b == quote {
-                    return Ok((i, ent));
+                    return Ok((i, flags));
                 }
             }
             C_RBRACKET => {
@@ -275,39 +399,62 @@ fn scan_run(input: &[u8], start: usize, quote: u8) -> Result<(usize, bool), XmlE
                     return Err(syntax(i, "']]>' in text"));
                 }
             }
+            C_CR => flags |= F_NORM,
+            C_NL => {
+                if quote != 0 {
+                    flags |= F_NORM;
+                }
+            }
             _ => check_special(input, i, c)?,
         }
         i += 1;
     }
-    Ok((input.len(), ent))
+    Ok((input.len(), flags))
 }
 
 /// Reads a qualified name at `start`. Returns the end offset and the colon offset (or
-/// `usize::MAX`). Enforces the name length limit.
+/// `usize::MAX`). Enforces the name length limit. Names are the fifth-edition productions:
+/// ASCII by the byte table, anything else by decoding the code point.
 fn read_qname(limits: &Limits, input: &[u8], start: usize) -> Result<(usize, usize), XmlError> {
-    let first = at(input, start).map_or(0, |b| NAME.get(usize::from(b)).copied().unwrap_or(0));
-    if first != 2 {
+    if !name_start_at(input, start) {
+        if at(input, start).is_none() {
+            return Err(XmlError::UnexpectedEof { at: off(start) });
+        }
+        if at(input, start) == Some(0xEF) {
+            check_special(input, start, C_EF)?;
+        }
         return Err(syntax(start, "name expected"));
     }
-    let mut i = start + 1;
+    let mut i = start;
     let mut colon = usize::MAX;
     while let Some(&b) = input.get(i) {
         match NAME.get(usize::from(b)).copied().unwrap_or(0) {
-            1 | 2 => {}
+            1 | 2 => i += 1,
             3 => {
                 if colon != usize::MAX {
                     return Err(syntax(i, "second colon in name"));
                 }
                 colon = i;
-                let next =
-                    at(input, i + 1).map_or(0, |n| NAME.get(usize::from(n)).copied().unwrap_or(0));
-                if next != 2 {
+                if at(input, i + 1).is_none() {
+                    return Err(XmlError::UnexpectedEof { at: off(i + 1) });
+                }
+                if !name_start_at(input, i + 1) {
                     return Err(syntax(i + 1, "name expected after colon"));
                 }
+                i += 1;
             }
+            4 => match nonascii_name(input, i, false) {
+                Some(len) => i += len,
+                None => {
+                    // U+FFFE and U+FFFF are not characters at all: say so.
+                    if b == 0xEF {
+                        check_special(input, i, C_EF)?;
+                    }
+                    break;
+                }
+            },
             _ => break,
         }
-        i += 1;
     }
     if i - start > limits.max_name_len {
         return Err(XmlError::Limit {
@@ -336,11 +483,34 @@ fn run(p: &mut Parser, input: &[u8]) -> Result<(), XmlError> {
     } else {
         0
     };
+    // Input that stops inside the opening of an XML declaration is cut short, not a PI.
+    if input.get(pos..).is_some_and(|r| cut_short(r, b"<?xml ")) && pos < input.len() {
+        return Err(XmlError::UnexpectedEof {
+            at: off(input.len()),
+        });
+    }
     if starts(input, pos, b"<?xml") && at(input, pos + 5).is_some_and(is_ws) {
         pos = xml_decl(input, pos)?;
     }
     pos = prolog(input, pos)?;
     content(p, input, pos)
+}
+
+/// The error for a malformed XML declaration at `p`: `UnexpectedEof` if the input simply stops
+/// there or inside the next keyword, otherwise `BadXmlDecl`.
+fn decl_err(input: &[u8], p: usize) -> XmlError {
+    let rest = input.get(p..).unwrap_or(&[]);
+    let stops = rest.is_empty()
+        || [&b"version"[..], b"encoding", b"standalone", b"?>"]
+            .iter()
+            .any(|k| cut_short(rest, k));
+    if stops {
+        XmlError::UnexpectedEof {
+            at: off(input.len()),
+        }
+    } else {
+        XmlError::BadXmlDecl { at: off(p) }
+    }
 }
 
 /// Reads one pseudo-attribute (`key = "value"`) of the XML declaration if the next one is
@@ -359,12 +529,12 @@ fn decl_pair<'a>(
     }
     let mut p = skip_ws(input, p0 + key.len());
     if at(input, p) != Some(b'=') {
-        return Err(XmlError::BadXmlDecl { at: off(p) });
+        return Err(decl_err(input, p));
     }
     p = skip_ws(input, p + 1);
     let q = match at(input, p) {
         Some(q @ (b'"' | b'\'')) => q,
-        _ => return Err(XmlError::BadXmlDecl { at: off(p) }),
+        _ => return Err(decl_err(input, p)),
     };
     let vstart = p + 1;
     let Some(len) = input
@@ -386,11 +556,7 @@ fn xml_decl(input: &[u8], pos: usize) -> Result<usize, XmlError> {
     match decl_pair(input, &mut p, b"version")? {
         Some((_, b"1.0")) => {}
         Some((v, _)) => return Err(XmlError::UnsupportedVersion { at: off(v) }),
-        None => {
-            return Err(XmlError::BadXmlDecl {
-                at: off(skip_ws(input, p)),
-            })
-        }
+        None => return Err(decl_err(input, skip_ws(input, p))),
     }
     if let Some((v, enc)) = decl_pair(input, &mut p, b"encoding")? {
         if !enc.eq_ignore_ascii_case(b"utf-8") {
@@ -406,13 +572,18 @@ fn xml_decl(input: &[u8], pos: usize) -> Result<usize, XmlError> {
     if starts(input, p, b"?>") {
         Ok(p + 2)
     } else {
-        Err(XmlError::BadXmlDecl { at: off(p) })
+        Err(decl_err(input, p))
     }
 }
 
 /// Handles markup that may appear outside the root: a comment (returns the offset after it),
 /// otherwise an error for DOCTYPE, a processing instruction, or anything else.
 fn misc_markup(input: &[u8], pos: usize) -> Result<usize, XmlError> {
+    if input.get(pos..).is_some_and(|r| cut_short(r, b"<!--")) {
+        return Err(XmlError::UnexpectedEof {
+            at: off(input.len()),
+        });
+    }
     if starts(input, pos, b"<!--") {
         return comment(input, pos);
     }
@@ -432,10 +603,11 @@ fn prolog(input: &[u8], mut pos: usize) -> Result<usize, XmlError> {
         match at(input, pos) {
             None => return Err(XmlError::NoRoot { at: off(pos) }),
             Some(b'<') => {
-                let next = at(input, pos + 1)
-                    .map_or(0, |b| NAME.get(usize::from(b)).copied().unwrap_or(0));
-                if next == 2 {
+                if name_start_at(input, pos + 1) {
                     return Ok(pos);
+                }
+                if at(input, pos + 1) == Some(0xEF) {
+                    check_special(input, pos + 1, C_EF)?;
                 }
                 if at(input, pos + 1).is_none() {
                     return Err(XmlError::UnexpectedEof { at: off(pos + 1) });
@@ -473,10 +645,13 @@ fn comment(input: &[u8], pos: usize) -> Result<usize, XmlError> {
     let mut i = pos + 4;
     while let Some(&b) = input.get(i) {
         if b == b'-' && at(input, i + 1) == Some(b'-') {
-            if at(input, i + 2) == Some(b'>') {
-                return Ok(i + 3);
-            }
-            return Err(syntax(i, "'--' inside comment"));
+            return match at(input, i + 2) {
+                Some(b'>') => Ok(i + 3),
+                Some(_) => Err(syntax(i, "'--' inside comment")),
+                None => Err(XmlError::UnexpectedEof {
+                    at: off(input.len()),
+                }),
+            };
         }
         let c = CLASS.get(usize::from(b)).copied().unwrap_or(C_PLAIN);
         check_special(input, i, c)?;
@@ -529,10 +704,10 @@ fn push_text(p: &mut Parser, input_pos: usize, s: Span, ent: bool) -> Result<(),
 }
 
 fn text(p: &mut Parser, input: &[u8], pos: usize) -> Result<usize, XmlError> {
-    let (end, ent) = scan_run(input, pos, 0)?;
-    // Whitespace-only runs between markup are layout, not data.
-    if ent || !sub(input, pos, end).iter().all(|&b| is_ws(b)) {
-        push_text(p, pos, span(pos, end), ent)?;
+    let (end, flags) = scan_run(input, pos, 0)?;
+    // Whitespace-only runs between markup are layout, not data (unless a reference is in it).
+    if flags & F_REF != 0 || !sub(input, pos, end).iter().all(|&b| is_ws(b)) {
+        push_text(p, pos, span(pos, end), flags != 0)?;
     }
     Ok(end)
 }
@@ -563,6 +738,12 @@ fn bang(p: &mut Parser, input: &[u8], pos: usize) -> Result<usize, XmlError> {
     if starts_nocase(input, pos, b"<!DOCTYPE") {
         return Err(XmlError::Doctype { at: off(pos) });
     }
+    let rest = input.get(pos..).unwrap_or(&[]);
+    if cut_short(rest, b"<!--") || cut_short(rest, b"<![CDATA[") {
+        return Err(XmlError::UnexpectedEof {
+            at: off(input.len()),
+        });
+    }
     Err(syntax(pos, "unknown markup declaration"))
 }
 
@@ -576,28 +757,47 @@ fn end_tag(p: &mut Parser, input: &[u8], pos: usize) -> Result<usize, XmlError> 
         top.qname_start as usize,
         (top.qname_start as usize).saturating_add(top.qname_len as usize),
     );
-    if sub(input, pos + 2, q_end) != open {
+    let name = sub(input, pos + 2, q_end);
+    if name != open {
+        // A name that runs into the end of the input and is a start of the open name is a cut.
+        if q_end >= input.len() && open.starts_with(name) {
+            return Err(XmlError::UnexpectedEof {
+                at: off(input.len()),
+            });
+        }
         return Err(XmlError::MismatchedTag { at: off(pos) });
     }
     let i = skip_ws(input, q_end);
-    if at(input, i) != Some(b'>') {
-        return Err(syntax(i, "'>' expected"));
+    match at(input, i) {
+        Some(b'>') => {}
+        Some(_) => return Err(syntax(i, "'>' expected")),
+        None => {
+            return Err(XmlError::UnexpectedEof {
+                at: off(input.len()),
+            })
+        }
     }
     p.stack.pop();
-    p.bindings.truncate(top.ns_mark as usize);
+    p.bindings.truncate(top.ns_mark.0 as usize);
     Ok(i + 1)
 }
 
-/// Finds the namespace declaration for `prefix` (empty = default) among the bindings in scope.
-fn bound(bindings: &[Binding], input: &[u8], prefix: &[u8]) -> bool {
-    bindings.iter().rev().any(|b| {
-        let bp = sub(
-            input,
-            b.prefix.start as usize,
-            (b.prefix.start + b.prefix.len) as usize,
-        );
-        bp == prefix
-    })
+/// The URI of the innermost in-scope declaration for `prefix` (empty = default), if any. At
+/// most `max_ns_bindings` comparisons.
+fn bound(bindings: &[Binding], input: &[u8], prefix: &[u8]) -> Option<Span> {
+    bindings
+        .iter()
+        .rev()
+        .find(|b| bytes_eq(input, b.prefix, prefix))
+        .map(|b| b.uri)
+}
+
+fn bytes_eq(input: &[u8], s: Span, want: &[u8]) -> bool {
+    sub(
+        input,
+        s.start as usize,
+        (s.start as usize).saturating_add(s.len as usize),
+    ) == want
 }
 
 fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError> {
@@ -616,7 +816,7 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
     let q_start = lt + 1;
     let (q_end, colon) = read_qname(&p.limits, input, q_start)?;
     let first_attr = p.attr_name.len();
-    let mark = p.bindings.len();
+    let mark = BindIx(off(p.bindings.len()));
     let mut i = q_end;
     let self_close;
     loop {
@@ -629,8 +829,14 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
                 break;
             }
             Some(b'/') => {
-                if at(input, i + 1) != Some(b'>') {
-                    return Err(syntax(i, "'>' expected after '/'"));
+                match at(input, i + 1) {
+                    Some(b'>') => {}
+                    Some(_) => return Err(syntax(i, "'>' expected after '/'")),
+                    None => {
+                        return Err(XmlError::UnexpectedEof {
+                            at: off(input.len()),
+                        })
+                    }
                 }
                 i += 2;
                 self_close = true;
@@ -650,8 +856,17 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
         }
     }
 
-    // Namespace declarations take effect for the element's own name and attributes.
+    // Namespace declarations take effect for the element's own name and attributes. Each goes
+    // on the in-scope stack (limit `max_ns_bindings`) and on the document's chain.
     let attr_end = p.attr_name.len();
+    let mut head = match p.stack.last() {
+        Some(top) => p
+            .elem_ns_head
+            .get(top.elem.0 as usize)
+            .copied()
+            .unwrap_or(NsIx::NONE),
+        None => NsIx::NONE,
+    };
     for a in first_attr..attr_end {
         let (Some(&ap), Some(&an), Some(&av)) = (
             p.attr_prefix.get(a),
@@ -662,12 +877,24 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
         };
         let name = sub(input, an.start as usize, (an.start + an.len) as usize);
         let pre = sub(input, ap.start as usize, (ap.start + ap.len) as usize);
+        let uri = sub(input, av.start as usize, (av.start + av.len) as usize);
         let binding = if pre == b"xmlns" {
             if name == b"xmlns" {
                 return Err(syntax(ap.start as usize, "reserved prefix 'xmlns'"));
             }
             if av.len == 0 {
                 return Err(syntax(av.start as usize, "empty namespace URI"));
+            }
+            if name == b"xml" {
+                // `xml` may be declared, but only as the XML namespace; there is nothing to
+                // record, it is always in scope.
+                if uri != XML_NS {
+                    return Err(syntax(
+                        av.start as usize,
+                        "prefix 'xml' bound to another URI",
+                    ));
+                }
+                continue;
             }
             Binding {
                 prefix: an,
@@ -684,33 +911,67 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
         } else {
             continue;
         };
-        if p.bindings.len() >= p.binding_cap {
+        if uri == XML_NS {
+            return Err(syntax(
+                av.start as usize,
+                "XML namespace bound to another prefix",
+            ));
+        }
+        if uri == XMLNS_NS {
+            return Err(syntax(
+                av.start as usize,
+                "the 'xmlns' namespace cannot be bound",
+            ));
+        }
+        if p.bindings.len() >= p.limits.max_ns_bindings {
             return Err(XmlError::Limit {
-                limit: LimitKind::AttributesPerElement,
+                limit: LimitKind::NsBindings,
                 at: ap.start,
             });
         }
         p.bindings.push(binding);
+        let row = NsIx(off(p.ns_prefix.len()));
+        p.ns_prefix.push(binding.prefix);
+        p.ns_uri.push(binding.uri);
+        p.ns_next.push(head);
+        head = row;
     }
     // Every prefix used must be declared (`xml` is predefined).
     if colon != usize::MAX {
         let pre = sub(input, q_start, colon);
-        if pre != b"xml" && !bound(&p.bindings, input, pre) {
+        if pre != b"xml" && bound(&p.bindings, input, pre).is_none() {
             return Err(XmlError::UndeclaredPrefix { at: off(q_start) });
         }
     }
+    // Attribute prefixes, and their URIs for the expanded-name check below.
+    let mut prefixed = 0usize;
     for a in first_attr..attr_end {
         let Some(&ap) = p.attr_prefix.get(a) else {
             continue;
         };
-        if ap.len == 0 {
-            continue;
+        let mut uri = Span::default();
+        if ap.len > 0 {
+            let pre = sub(input, ap.start as usize, (ap.start + ap.len) as usize);
+            if pre != b"xml" && pre != b"xmlns" {
+                match bound(&p.bindings, input, pre) {
+                    Some(u) => {
+                        uri = u;
+                        prefixed += 1;
+                    }
+                    None => return Err(XmlError::UndeclaredPrefix { at: ap.start }),
+                }
+            }
         }
-        let pre = sub(input, ap.start as usize, (ap.start + ap.len) as usize);
-        if pre != b"xml" && pre != b"xmlns" && !bound(&p.bindings, input, pre) {
-            return Err(XmlError::UndeclaredPrefix { at: ap.start });
-        }
+        p.attr_uri.push(uri);
     }
+    // Two attributes with the same local name in the same namespace are duplicates even under
+    // different prefixes (Namespaces in XML 1.0, section 6.3). Quadratic in the attributes of
+    // one element, which are at most `max_attrs_per_elem` (64 by default); only prefixed
+    // attributes take part, and only when there are two or more.
+    if prefixed >= 2 {
+        check_expanded_duplicates(p, input, first_attr)?;
+    }
+    p.attr_uri.clear();
 
     let e = ElemIx(off(p.elem_name.len()));
     let (name, prefix) = if colon == usize::MAX {
@@ -746,19 +1007,55 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
     p.elem_attr_count.push(off(attr_end - first_attr));
     p.elem_first_child.push(ElemIx::NONE);
     p.elem_next_sibling.push(ElemIx::NONE);
+    p.elem_ns_head.push(head);
 
     if self_close {
-        p.bindings.truncate(mark);
+        p.bindings.truncate(mark.0 as usize);
     } else {
         p.stack.push(Frame {
             elem: e,
             last_child: ElemIx::NONE,
             qname_start: off(q_start),
             qname_len: off(q_end - q_start),
-            ns_mark: off(mark),
+            ns_mark: mark,
         });
     }
     Ok(i)
+}
+
+/// Rejects two prefixed attributes of the element whose attributes start at `first_attr` that
+/// share a local name and a namespace URI. `p.attr_uri` holds each attribute's URI (empty for
+/// an attribute that takes no part).
+fn check_expanded_duplicates(p: &Parser, input: &[u8], first_attr: usize) -> Result<(), XmlError> {
+    for (j, &uj) in p.attr_uri.iter().enumerate() {
+        if uj.len == 0 {
+            continue;
+        }
+        let Some(&nj) = p.attr_name.get(first_attr + j) else {
+            continue;
+        };
+        for (i, &ui) in p.attr_uri.iter().enumerate().take(j) {
+            if ui.len != uj.len {
+                continue;
+            }
+            let Some(&ni) = p.attr_name.get(first_attr + i) else {
+                continue;
+            };
+            if ni.len == nj.len
+                && sub(input, ni.start as usize, (ni.start + ni.len) as usize)
+                    == sub(input, nj.start as usize, (nj.start + nj.len) as usize)
+                && sub(input, ui.start as usize, (ui.start + ui.len) as usize)
+                    == sub(input, uj.start as usize, (uj.start + uj.len) as usize)
+            {
+                let at = p
+                    .attr_prefix
+                    .get(first_attr + j)
+                    .map_or(nj.start, |pre| pre.start);
+                return Err(XmlError::DuplicateAttribute { at });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parses one attribute starting at `i`; returns the offset after its closing quote.
@@ -782,16 +1079,19 @@ fn attribute(
     }
     let (q_end, colon) = read_qname(&p.limits, input, start)?;
     let mut i = skip_ws(input, q_end);
-    if at(input, i) != Some(b'=') {
-        return Err(syntax(i, "'=' expected after attribute name"));
+    match at(input, i) {
+        Some(b'=') => {}
+        Some(_) => return Err(syntax(i, "'=' expected after attribute name")),
+        None => return Err(XmlError::UnexpectedEof { at: off(i) }),
     }
     i = skip_ws(input, i + 1);
     let quote = match at(input, i) {
         Some(q @ (b'"' | b'\'')) => q,
-        _ => return Err(syntax(i, "quoted attribute value expected")),
+        Some(_) => return Err(syntax(i, "quoted attribute value expected")),
+        None => return Err(XmlError::UnexpectedEof { at: off(i) }),
     };
     let vstart = i + 1;
-    let (vend, ent) = scan_run(input, vstart, quote)?;
+    let (vend, flags) = scan_run(input, vstart, quote)?;
     if at(input, vend) != Some(quote) {
         return Err(XmlError::UnexpectedEof {
             at: off(input.len()),
@@ -808,7 +1108,9 @@ fn attribute(
     } else {
         (span(colon + 1, q_end), span(start, colon))
     };
-    // Duplicates are by qualified name; at most `max_attrs_per_elem` earlier rows to compare.
+    // Duplicates by qualified name here (cheap, needs no namespace); by expanded name once the
+    // element's declarations are known (`check_expanded_duplicates`). At most
+    // `max_attrs_per_elem` earlier rows to compare.
     let this_q = sub(input, start, q_end);
     for a in first_attr..p.attr_name.len() {
         let (Some(&an), Some(&ap)) = (p.attr_name.get(a), p.attr_prefix.get(a)) else {
@@ -822,7 +1124,7 @@ fn attribute(
             }
         }
     }
-    if ent {
+    if flags != 0 {
         set_bit(&mut p.attr_entity, p.attr_name.len());
     }
     p.attr_name.push(name);

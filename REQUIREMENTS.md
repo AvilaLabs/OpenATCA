@@ -157,32 +157,48 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-XML-002** Accepts elements, attributes in either quote style, namespace declarations,
   comments, CDATA sections and whitespace, and produces a flat struct-of-arrays document in which
   every name, value and text is a span into the input; whitespace-only text between markup is
-  not stored.
-- **OA-XML-003** Accepts character references (decimal and hexadecimal) and the five predefined
-  entities, and flags the attribute values and text that contain them.
+  not stored. `Parser::new` returns a `Result` (OA-XML-027).
+- **OA-XML-003** Accepts character references (decimal and hexadecimal, with any number of digits
+  including leading zeros: the body is scanned to its `;`, bounded only by the input) and the
+  five predefined entities, and flags the attribute values and text that contain them. A value
+  above U+10FFFF is `BadChar` however it is written.
 - **OA-XML-004** Rejects any DOCTYPE, wherever it appears, with a dedicated error, so that
   entity-expansion (billion laughs) and external-entity (XXE) documents are refused.
 - **OA-XML-005** Rejects processing instructions other than the XML declaration.
 - **OA-XML-006** Rejects undefined entities and malformed or out-of-range references, with the
   offset of the reference.
 - **OA-XML-007** Rejects input that is not valid UTF-8, with the offset of the first bad byte.
-- **OA-XML-008** Rejects characters outside the XML 1.0 `Char` production, whether raw or
-  written as a character reference.
+- **OA-XML-008** Rejects characters outside the XML 1.0 `Char` production, whether raw (in text,
+  attribute values, comments, CDATA and names) or written as a character reference; U+FFFE
+  and U+FFFF are `BadChar` everywhere.
 - **OA-XML-009** Rejects mismatched end tags, unclosed elements, input that ends inside markup,
-  and malformed tags, names and attributes.
-- **OA-XML-010** Rejects duplicate attributes on one element.
+  and malformed tags, names and attributes. Every truncation of a valid message is reported
+  at the end offset: `UnexpectedEof` when the input stops inside markup (a tag, attribute, end
+  tag, comment, CDATA section, reference, the XML declaration or the opening of one),
+  `Unclosed` when it stops between complete markup with elements open, `NoRoot` before any
+  root, `Utf8` inside a multi-byte character.
+- **OA-XML-010** Rejects duplicate attributes on one element, by qualified name and by expanded
+  name (namespace URI and local name, Namespaces in XML 1.0 section 6.3: `a:x` and `b:x`
+  bound to one URI are duplicates, wherever on the element the declarations sit). The cost
+  per element is O(a^2) in its attributes, `a` at most `max_attrs_per_elem` (64 by default).
 - **OA-XML-011** Rejects text, elements and other markup before or after the root element;
   whitespace and comments are allowed there.
 - **OA-XML-012** Rejects an undeclared namespace prefix on an element or attribute, honouring
   declaration scope; `xml` is predefined.
 - **OA-XML-013** Resolves an element's or attribute's prefix to its namespace URI span through
   the in-scope declarations, with a free function, including default namespaces, `xmlns=""` and
-  unprefixed attributes.
+  unprefixed attributes. Each element carries the head of a chain of its in-scope
+  declarations, so a call follows at most `max_ns_bindings` links (OA-XML-022).
 - **OA-XML-014** Decodes a span's references into a caller-supplied buffer and fails, without
-  writing past it, when the buffer is too small.
-- **OA-XML-015** Compares a span to a string, decoding references on the fly without allocating.
+  writing past it, when the buffer is too small. All or nothing: on any error (too small, bad
+  reference, span out of range) the buffer is unchanged. It validates and measures in a first
+  pass and writes in a second, because restoring would need a saved copy of the buffer, which
+  cannot be had without allocating.
+- **OA-XML-015** Compares a span to a string, decoding references on the fly without allocating,
+  and returns the error `decode_into` would return for the same span: it does not stop at the
+  first mismatch, so the rest of the span is validated either way.
 - **OA-XML-016** Enforces every limit (input bytes, depth, elements, attributes, attributes per
-  element, name length, text nodes): a message at the limit parses and one unit over is refused
+  element, name length, text nodes, namespace bindings in scope): a message at the limit parses and one unit over is refused
   with an error naming the limit and the byte offset.
 - **OA-XML-017** Never panics: every truncation, every single-byte replacement, deletion and
   duplication of valid messages, and arbitrary byte strings, give a document or an error.
@@ -195,6 +211,33 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   variable is unset.
 - **OA-XML-021** The element table is a consistent tree: parents, first children and next
   siblings agree, and a walk from the root visits every element once.
+- **OA-XML-022** The namespace bindings in scope at any point (the sum of the declarations over
+  the open elements) are limited by `max_ns_bindings`, default 64, and the binding table has
+  exactly that capacity, so every prefix lookup, while parsing and in `resolve_elem_ns` and
+  `resolve_attr_ns`, is at most that many comparisons. The real corpus (19,025 messages)
+  peaks at 15 bindings in scope; 64 is 4x that, rounded up to a power of two. In the worst
+  case the default admits (64 live, the prefix found last) parsing costs under 10x the
+  time per byte of the same message without the prefix.
+- **OA-XML-023** Names follow the XML 1.0 fifth-edition `NameStartChar` and `NameChar`
+  productions exactly, decoding UTF-8 code points, with an ASCII fast path; a colon only
+  separates one prefix from a local name, and neither part may be empty.
+- **OA-XML-024** Rejects the reserved namespace bindings: `xmlns:xml` bound to anything but the
+  XML namespace, any other prefix or the default namespace bound to the XML namespace, and
+  any binding of `http://www.w3.org/2000/xmlns/`.
+- **OA-XML-025** Normalises on decode, not in the spans: `decode_into` and `span_eq_str` take a
+  `SpanKind`. Text: `\r\n` and a lone `\r` become `\n` (XML 1.0 section 2.11). Attribute
+  value: a literal tab, `\n`, `\r` or `\r\n` each become one space (section 3.3.3, CDATA
+  type); character references are never normalised. A value that needs decoding for either
+  reason is flagged; the fast path allocates nothing. CDATA sections are not flagged and
+  keep their line ends raw (a recorded deviation).
+- **OA-XML-026** A span that does not lie inside the input is `SpanOutOfRange` in every public
+  function that takes a span, never an empty value.
+- **OA-XML-027** `Parser::new` returns a `Result`. Every limit has a hard ceiling
+  (`Limits::CEILING`: input bytes `u32::MAX`; elements, attributes and text nodes 16,777,216;
+  depth and name length 65,536; attributes per element and namespace bindings 1,024), and
+  input bytes, depth, elements and name length must be at least 1; a violation is
+  `LimitsInvalid` naming the limit. Tables are reserved with `try_reserve_exact`, so a limit
+  too large to allocate is `LimitsInvalid` too, never an abort.
 
 ### SCDS feed frames (oa-feed)
 

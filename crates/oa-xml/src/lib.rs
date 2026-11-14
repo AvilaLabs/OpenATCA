@@ -21,18 +21,23 @@
 //!   namespace prefixes.
 //!
 //! Decisions where the specification leaves room: whitespace-only text between markup is not
-//! stored as a text node; line endings and attribute whitespace are not normalised (spans are
-//! raw bytes); name characters are ASCII letters, digits, `_ - .` and any non-ASCII character
-//! (a superset of the XML 1.0 name productions, applied after UTF-8 validation); a namespace
-//! URI is the raw attribute value; duplicate attributes are detected by qualified name, not by
-//! expanded name. Entity-bearing values are decoded on demand by [`decode_into`] and
-//! [`span_eq_str`].
+//! stored as a text node; spans are raw input bytes, and line-end and attribute-value
+//! normalisation (XML 1.0 sections 2.11 and 3.3.3) happen when a span is decoded, by
+//! [`decode_into`] and [`span_eq_str`], selected by a [`SpanKind`]; a value that needs
+//! decoding (a reference, or a byte that normalisation changes) is flagged in the `*_entity`
+//! bitsets; CDATA sections are the one deviation: they are never flagged and keep their line
+//! ends raw. Names follow the XML 1.0 fifth-edition `NameStartChar` and `NameChar` productions
+//! exactly, with an ASCII fast path; a namespace URI is the raw attribute value; duplicate
+//! attributes are rejected both by qualified name and by expanded name (Namespaces in XML 1.0,
+//! section 6.3); the reserved `xml` and `xmlns` prefixes and namespaces are enforced
+//! (section 3). Input that ends inside markup is `UnexpectedEof`; input that ends between
+//! complete markup with elements still open is `Unclosed`.
 
 mod decode;
 mod ns;
 mod parse;
 
-pub use decode::{decode_into, span_eq_str};
+pub use decode::{decode_into, span_eq_str, SpanKind};
 pub use ns::{resolve_attr_ns, resolve_elem_ns, Ns};
 pub use parse::Parser;
 
@@ -64,6 +69,23 @@ impl ElemIx {
 pub struct AttrIx(pub u32);
 const _: () = assert!(core::mem::size_of::<AttrIx>() == 4);
 
+/// Index of a namespace declaration row (the namespace chain of a [`Doc`]).
+/// `NONE` ends a chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct NsIx(pub u32);
+const _: () = assert!(core::mem::size_of::<NsIx>() == 4);
+
+impl NsIx {
+    pub const NONE: NsIx = NsIx(u32::MAX);
+}
+
+/// Index into the parser's stack of in-scope namespace bindings (never leaves the parser).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct BindIx(pub u32);
+const _: () = assert!(core::mem::size_of::<BindIx>() == 4);
+
 /// Index of a text row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -79,12 +101,12 @@ pub(crate) struct Frame {
     pub last_child: ElemIx,
     pub qname_start: u32,
     pub qname_len: u32,
-    pub ns_mark: u32,
+    pub ns_mark: BindIx,
 }
 const _: () = assert!(core::mem::size_of::<Frame>() == 20);
 
 /// A namespace declaration in scope during parsing.
-// Budget: at most `max_depth * max_attrs_per_elem` live at once; two spans.
+// Budget: at most `max_ns_bindings` live at once; two spans.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub(crate) struct Binding {
@@ -96,7 +118,14 @@ const _: () = assert!(core::mem::size_of::<Binding>() == 16);
 /// Hard bounds on one message. Defaults come from the measured SWIM feeds (60 s samples,
 /// 2026-11-14: median 0.5-4 KB, p99 337 KB, max 367 KB), with the input limit about 3x the
 /// largest message seen. The element, attribute and text limits are above what 1 MiB of real
-/// data produces.
+/// data produces. `max_ns_bindings` counts the namespace declarations in scope at any point
+/// (the sum over the open elements); the real corpus (19,025 messages) peaks at 15, and the
+/// default 64 is 4x that rounded up to a power of two. It bounds every prefix lookup, while
+/// parsing and in [`resolve_elem_ns`], to that many comparisons.
+///
+/// [`Parser::new`] refuses a value above its [`Limits::CEILING`] entry, and a zero in a field
+/// where zero cannot work (input bytes, depth, elements, name length), with
+/// [`XmlError::LimitsInvalid`].
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -107,6 +136,25 @@ pub struct Limits {
     pub max_attrs_per_elem: usize,
     pub max_name_len: usize,
     pub max_text_nodes: usize,
+    pub max_ns_bindings: usize,
+}
+
+impl Limits {
+    /// The hard ceiling of every limit. Input bytes: spans are 32-bit. Rows (elements,
+    /// attributes, text nodes): 16,777,216, about 0.6 GB of tables at the worst. Depth: 65,536
+    /// open elements. Attributes per element: 1,024 (duplicate detection is quadratic in it).
+    /// Name length: 65,536 bytes. Namespace bindings: 1,024 (every prefix lookup is linear in
+    /// it).
+    pub const CEILING: Limits = Limits {
+        max_input_bytes: u32::MAX as usize,
+        max_depth: 65_536,
+        max_elements: 16_777_216,
+        max_attributes: 16_777_216,
+        max_attrs_per_elem: 1_024,
+        max_name_len: 65_536,
+        max_text_nodes: 16_777_216,
+        max_ns_bindings: 1_024,
+    };
 }
 
 impl Default for Limits {
@@ -119,8 +167,45 @@ impl Default for Limits {
             max_attrs_per_elem: 64,
             max_name_len: 256,
             max_text_nodes: 50_000,
+            max_ns_bindings: 64,
         }
     }
+}
+
+/// Checks `l` against the ceilings and the zero rules; the first offending field is reported.
+pub fn validate_limits(l: &Limits) -> Result<(), XmlError> {
+    let c = Limits::CEILING;
+    let fields = [
+        (
+            LimitKind::InputBytes,
+            l.max_input_bytes,
+            c.max_input_bytes,
+            1,
+        ),
+        (LimitKind::Depth, l.max_depth, c.max_depth, 1),
+        (LimitKind::Elements, l.max_elements, c.max_elements, 1),
+        (LimitKind::Attributes, l.max_attributes, c.max_attributes, 0),
+        (
+            LimitKind::AttributesPerElement,
+            l.max_attrs_per_elem,
+            c.max_attrs_per_elem,
+            0,
+        ),
+        (LimitKind::NameLength, l.max_name_len, c.max_name_len, 1),
+        (LimitKind::TextNodes, l.max_text_nodes, c.max_text_nodes, 0),
+        (
+            LimitKind::NsBindings,
+            l.max_ns_bindings,
+            c.max_ns_bindings,
+            0,
+        ),
+    ];
+    for (limit, v, ceiling, floor) in fields {
+        if v < floor || v > ceiling {
+            return Err(XmlError::LimitsInvalid { limit, at: 0 });
+        }
+    }
+    Ok(())
 }
 
 /// Which limit was exceeded.
@@ -133,6 +218,7 @@ pub enum LimitKind {
     AttributesPerElement,
     NameLength,
     TextNodes,
+    NsBindings,
 }
 
 /// Every way parsing or decoding can fail. Every variant carries the byte offset in the input
@@ -178,6 +264,11 @@ pub enum XmlError {
     Syntax { at: u32, what: &'static str },
     /// The caller's output buffer is too small (decode only).
     OutputTooSmall { at: u32 },
+    /// A span that does not lie inside the input; `at` is its start.
+    SpanOutOfRange { at: u32 },
+    /// A limit that is zero where zero cannot work, above its ceiling, or too large to allocate
+    /// (configuration error: there is no input offset, `at` is 0).
+    LimitsInvalid { limit: LimitKind, at: u32 },
 }
 
 /// The display name of a limit.
@@ -190,6 +281,7 @@ pub fn limit_name(k: LimitKind) -> &'static str {
         LimitKind::AttributesPerElement => "max attributes per element",
         LimitKind::NameLength => "max name length",
         LimitKind::TextNodes => "max text nodes",
+        LimitKind::NsBindings => "max namespace bindings",
     }
 }
 
@@ -214,7 +306,9 @@ pub fn error_offset(e: &XmlError) -> u32 {
         | XmlError::NoRoot { at }
         | XmlError::OutsideRoot { at }
         | XmlError::Syntax { at, .. }
-        | XmlError::OutputTooSmall { at } => at,
+        | XmlError::OutputTooSmall { at }
+        | XmlError::SpanOutOfRange { at }
+        | XmlError::LimitsInvalid { at, .. } => at,
     }
 }
 
@@ -258,6 +352,12 @@ impl fmt::Display for XmlError {
             }
             XmlError::Syntax { what, .. } => write!(f, "{what} at byte {at}"),
             XmlError::OutputTooSmall { .. } => write!(f, "output buffer too small at byte {at}"),
+            XmlError::SpanOutOfRange { .. } => {
+                write!(f, "span outside the input (starts at byte {at})")
+            }
+            XmlError::LimitsInvalid { limit, .. } => {
+                write!(f, "invalid limit: {}", limit_name(*limit))
+            }
         }
     }
 }
@@ -268,8 +368,16 @@ impl std::error::Error for XmlError {}
 /// Row `i` of every `elem_*` slice describes element `i` (document order, root is 0); likewise
 /// `attr_*` and `text_*`. An element's attributes are rows `first_attr .. first_attr + count`.
 /// For a prefixed name, `name` is the local part and `prefix` the part before the colon (empty
-/// span when absent). The `*_entity` bitsets (RULESET A6) mark values containing references
-/// that need decoding; CDATA text never does.
+/// span when absent). The `*_entity` bitsets (RULESET A6) mark values that need decoding:
+/// they contain a reference, or a byte that line-end or attribute-value normalisation changes
+/// (carriage return in text; tab, line feed or carriage return in an attribute value). CDATA
+/// text is never flagged.
+///
+/// Namespace declarations are also kept as a chain per element: `elem_ns_head[e]` is the
+/// latest declaration in scope at element `e` (its own, else its nearest ancestor's), and
+/// `ns_next[n]` the one it shadows; rows `ns_prefix`/`ns_uri` hold the spans (an empty prefix
+/// is the default namespace). A chain is at most [`Limits::max_ns_bindings`] long.
+// A7.2: cold struct, size guard waived (a borrowing view of the parser's tables, one per parse)
 #[derive(Clone, Copy, Debug)]
 pub struct Doc<'a> {
     pub input: &'a [u8],
@@ -287,13 +395,24 @@ pub struct Doc<'a> {
     pub text_span: &'a [Span],
     pub text_owner: &'a [ElemIx],
     pub text_entity: &'a [u64],
+    pub elem_ns_head: &'a [NsIx],
+    pub ns_prefix: &'a [Span],
+    pub ns_uri: &'a [Span],
+    pub ns_next: &'a [NsIx],
 }
 
-/// The bytes a span covers (empty if the span is out of range, which parsed spans never are).
-pub fn span_bytes(input: &[u8], s: Span) -> &[u8] {
+/// The bytes a span covers, or `SpanOutOfRange` if the span does not lie inside `input`
+/// (parsed spans always do; a stale span from another message may not).
+pub fn span_bytes(input: &[u8], s: Span) -> Result<&[u8], XmlError> {
+    bytes_of(input, s).ok_or(XmlError::SpanOutOfRange { at: s.start })
+}
+
+/// The bytes a span covers, `None` if out of range (crate-internal, for callers that hold only
+/// parser-made spans).
+pub(crate) fn bytes_of(input: &[u8], s: Span) -> Option<&[u8]> {
     let a = s.start as usize;
-    let b = a.saturating_add(s.len as usize);
-    input.get(a..b).unwrap_or(&[])
+    let b = a.checked_add(s.len as usize)?;
+    input.get(a..b)
 }
 
 /// Whether bit `i` of a bitset is set.

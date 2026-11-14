@@ -8,23 +8,28 @@
 
 use oa_xml::{
     attr_needs_decode, decode_into, error_offset, resolve_attr_ns, resolve_elem_ns, span_bytes,
-    span_eq_str, text_needs_decode, AttrIx, Doc, ElemIx, LimitKind, Limits, Ns, Parser, TextIx,
-    XmlError,
+    span_eq_str, text_needs_decode, AttrIx, Doc, ElemIx, LimitKind, Limits, Ns, Parser, SpanKind,
+    TextIx, XmlError,
 };
 
+/// The bytes of a span of a parsed document (always in range).
+fn sb(input: &[u8], s: oa_xml::Span) -> &[u8] {
+    span_bytes(input, s).unwrap()
+}
+
 fn parse_ok(src: &str) -> (Parser, Vec<u8>) {
-    let mut p = Parser::new(Limits::default());
+    let mut p = Parser::new(Limits::default()).unwrap();
     p.parse(src.as_bytes()).unwrap();
     (p, src.as_bytes().to_vec())
 }
 
 fn err(src: &[u8]) -> XmlError {
-    let mut p = Parser::new(Limits::default());
+    let mut p = Parser::new(Limits::default()).unwrap();
     p.parse(src).unwrap_err()
 }
 
 fn name<'a>(d: &Doc<'a>, e: usize) -> &'a [u8] {
-    span_bytes(d.input, d.elem_name[e])
+    sb(d.input, d.elem_name[e])
 }
 
 const FLIGHT: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -48,7 +53,7 @@ fn xml_declaration_accepted_forms() {
         "<a/>",
         "\u{feff}<?xml version=\"1.0\"?><a/>",
     ] {
-        let mut p = Parser::new(Limits::default());
+        let mut p = Parser::new(Limits::default()).unwrap();
         assert!(p.parse(src.as_bytes()).is_ok(), "{src}");
     }
     assert!(matches!(
@@ -76,23 +81,23 @@ fn xml_declaration_accepted_forms() {
 // REQ: OA-XML-002
 #[test]
 fn accepts_elements_attributes_comments_cdata_whitespace() {
-    let mut p = Parser::new(Limits::default());
+    let mut p = Parser::new(Limits::default()).unwrap();
     let d = p.parse(FLIGHT.as_bytes()).unwrap();
     assert_eq!(d.elem_name.len(), 5);
     assert_eq!(name(&d, 0), b"Message");
     assert_eq!(name(&d, 1), b"Flight");
     assert_eq!(name(&d, 2), b"Origin");
     assert_eq!(name(&d, 4), b"Empty");
-    assert_eq!(span_bytes(d.input, d.elem_prefix[1]), b"fx");
+    assert_eq!(sb(d.input, d.elem_prefix[1]), b"fx");
     // Root: two namespace declarations plus id, in order, quote styles preserved.
     assert_eq!(d.elem_attr_count[0], 3);
     let a = d.elem_first_attr[0].0 as usize;
-    assert_eq!(span_bytes(d.input, d.attr_name[a + 2]), b"id");
-    assert_eq!(span_bytes(d.input, d.attr_value[a + 2]), b"m1");
+    assert_eq!(sb(d.input, d.attr_name[a + 2]), b"id");
+    assert_eq!(sb(d.input, d.attr_value[a + 2]), b"m1");
     // Text nodes: KORD and the CDATA; layout whitespace and comments are not stored.
     assert_eq!(d.text_span.len(), 2);
-    assert_eq!(span_bytes(d.input, d.text_span[0]), b"KORD");
-    assert_eq!(span_bytes(d.input, d.text_span[1]), b"<K&D>");
+    assert_eq!(sb(d.input, d.text_span[0]), b"KORD");
+    assert_eq!(sb(d.input, d.text_span[1]), b"<K&D>");
     assert!(!text_needs_decode(&d, TextIx(1)), "CDATA is literal");
     assert_eq!(d.text_owner[0], ElemIx(2));
     assert_eq!(d.text_owner[1], ElemIx(3));
@@ -101,7 +106,7 @@ fn accepts_elements_attributes_comments_cdata_whitespace() {
 // REQ: OA-XML-021
 #[test]
 fn tree_links_are_consistent() {
-    let mut p = Parser::new(Limits::default());
+    let mut p = Parser::new(Limits::default()).unwrap();
     let d = p.parse(FLIGHT.as_bytes()).unwrap();
     assert_eq!(d.elem_parent[0], ElemIx::NONE);
     assert_eq!(d.elem_parent[1], ElemIx(0));
@@ -137,9 +142,9 @@ fn character_references_and_predefined_entities() {
     assert!(attr_needs_decode(&d, AttrIx(0)));
     assert!(text_needs_decode(&d, TextIx(0)));
     let mut out = [0u8; 64];
-    let n = decode_into(d.attr_value[0], d.input, &mut out).unwrap();
+    let n = decode_into(d.attr_value[0], d.input, &mut out, SpanKind::AttrValue).unwrap();
     assert_eq!(&out[..n], "<>&\"'A\u{1F600}".as_bytes());
-    let n = decode_into(d.text_span[0], d.input, &mut out).unwrap();
+    let n = decode_into(d.text_span[0], d.input, &mut out, SpanKind::Text).unwrap();
     assert_eq!(&out[..n], b"<B");
     // A plain value carries no flag.
     let (mut p, bytes) = parse_ok("<a v=\"plain\">text</a>");
@@ -280,10 +285,7 @@ fn mismatched_and_unclosed_tags_are_rejected() {
     assert!(matches!(err(b"<a><b></b>"), XmlError::Unclosed { at: 10 }));
     assert!(matches!(err(b"<a"), XmlError::UnexpectedEof { .. }));
     assert!(matches!(err(b"<a b=\"x"), XmlError::UnexpectedEof { .. }));
-    assert!(matches!(
-        err(b"<a></a"),
-        XmlError::Syntax { .. } | XmlError::UnexpectedEof { .. }
-    ));
+    assert!(matches!(err(b"<a></a"), XmlError::UnexpectedEof { at: 6 }));
     assert!(matches!(err(b"</a>"), XmlError::OutsideRoot { at: 0 }));
     assert!(matches!(err(b""), XmlError::NoRoot { at: 0 }));
     assert!(matches!(err(b"  \n"), XmlError::NoRoot { .. }));
@@ -373,7 +375,7 @@ fn undeclared_prefix_is_rejected() {
         "<a xml:lang=\"en\"/>",
         "<a p:x=\"1\" xmlns:p=\"u\"/>",
     ] {
-        let mut p = Parser::new(Limits::default());
+        let mut p = Parser::new(Limits::default()).unwrap();
         assert!(p.parse(src.as_bytes()).is_ok(), "{src}");
     }
     assert!(matches!(err(b"<a xmlns:p=\"\"/>"), XmlError::Syntax { .. }));
@@ -391,7 +393,7 @@ fn namespace_resolution_follows_scope() {
     let (mut parser, bytes) = parse_ok(src);
     let d = parser.parse(&bytes).unwrap();
     let uri = |ns: Ns| match ns {
-        Ns::Uri(s) => span_bytes(d.input, s).to_vec(),
+        Ns::Uri(s) => sb(d.input, s).to_vec(),
         Ns::None => b"<none>".to_vec(),
         Ns::Xml => b"<xml>".to_vec(),
     };
@@ -420,26 +422,29 @@ fn decode_into_fills_caller_buffer() {
     let (mut p, bytes) = parse_ok("<a v=\"x&amp;y&#xe9;z\"/>");
     let d = p.parse(&bytes).unwrap();
     let mut out = [0u8; 16];
-    let n = decode_into(d.attr_value[0], d.input, &mut out).unwrap();
+    let n = decode_into(d.attr_value[0], d.input, &mut out, SpanKind::AttrValue).unwrap();
     assert_eq!(&out[..n], "x&y\u{e9}z".as_bytes());
     // Exact fit works; one byte short fails and names an offset inside the span.
     let mut exact = [0u8; 6];
     assert_eq!(
-        decode_into(d.attr_value[0], d.input, &mut exact).unwrap(),
+        decode_into(d.attr_value[0], d.input, &mut exact, SpanKind::AttrValue).unwrap(),
         6
     );
     let mut small = [0u8; 5];
-    match decode_into(d.attr_value[0], d.input, &mut small) {
+    match decode_into(d.attr_value[0], d.input, &mut small, SpanKind::AttrValue) {
         Err(XmlError::OutputTooSmall { at }) => assert!(at >= d.attr_value[0].start),
         other => panic!("{other:?}"),
     }
     let mut none = [0u8; 0];
-    assert_eq!(decode_into(oa_xml_empty(), &bytes, &mut none).unwrap(), 0);
+    assert_eq!(
+        decode_into(oa_xml_empty(), &bytes, &mut none, SpanKind::AttrValue).unwrap(),
+        0
+    );
     // A span holding a bad reference reports the input-relative offset.
     let bad = b"xx&foo;";
     let span = oa_xml_span(0, 7);
     assert!(matches!(
-        decode_into(span, bad, &mut out),
+        decode_into(span, bad, &mut out, SpanKind::AttrValue),
         Err(XmlError::UndefinedEntity { at: 2 })
     ));
 }
@@ -457,14 +462,29 @@ fn span_eq_str_decodes_on_the_fly() {
     let (mut p, bytes) = parse_ok("<a v=\"A&amp;B&#x42;&lt;\"/>");
     let d = p.parse(&bytes).unwrap();
     let s = d.attr_value[0];
-    assert_eq!(span_eq_str(s, d.input, "A&BB<"), Ok(true));
-    assert_eq!(span_eq_str(s, d.input, "A&BB"), Ok(false));
-    assert_eq!(span_eq_str(s, d.input, "A&BB<x"), Ok(false));
-    assert_eq!(span_eq_str(s, d.input, "A&BBX"), Ok(false));
-    assert_eq!(span_eq_str(s, d.input, ""), Ok(false));
-    assert_eq!(span_eq_str(oa_xml_empty(), d.input, ""), Ok(true));
     assert_eq!(
-        span_eq_str(oa_xml_span(0, 7), b"xx&foo;", "xx"),
+        span_eq_str(s, d.input, "A&BB<", SpanKind::AttrValue),
+        Ok(true)
+    );
+    assert_eq!(
+        span_eq_str(s, d.input, "A&BB", SpanKind::AttrValue),
+        Ok(false)
+    );
+    assert_eq!(
+        span_eq_str(s, d.input, "A&BB<x", SpanKind::AttrValue),
+        Ok(false)
+    );
+    assert_eq!(
+        span_eq_str(s, d.input, "A&BBX", SpanKind::AttrValue),
+        Ok(false)
+    );
+    assert_eq!(span_eq_str(s, d.input, "", SpanKind::AttrValue), Ok(false));
+    assert_eq!(
+        span_eq_str(oa_xml_empty(), d.input, "", SpanKind::AttrValue),
+        Ok(true)
+    );
+    assert_eq!(
+        span_eq_str(oa_xml_span(0, 7), b"xx&foo;", "xx", SpanKind::AttrValue),
         Err(XmlError::UndefinedEntity { at: 2 })
     );
 }
@@ -481,7 +501,7 @@ fn nested(depth: usize) -> String {
 }
 
 fn limit_of(src: &[u8], l: Limits) -> Result<(), (LimitKind, u32)> {
-    let mut p = Parser::new(l);
+    let mut p = Parser::new(l).unwrap();
     match p.parse(src) {
         Ok(_) => Ok(()),
         Err(XmlError::Limit { limit, at }) => Err((limit, at)),
@@ -593,6 +613,44 @@ fn every_limit_triggers_at_limit_plus_one_and_passes_at_limit() {
         Err((LimitKind::TextNodes, _))
     ));
 
+    // Namespace bindings in scope: n declarations on the root.
+    let decls = |n: usize| {
+        let mut s = String::from("<r");
+        for i in 0..n {
+            s.push_str(&format!(" xmlns:p{i}=\"u\""));
+        }
+        s.push_str("/>");
+        s
+    };
+    let l = Limits {
+        max_ns_bindings: 4,
+        ..base
+    };
+    assert_eq!(limit_of(decls(4).as_bytes(), l), Ok(()));
+    assert_eq!(
+        limit_of(decls(5).as_bytes(), l),
+        Err((LimitKind::NsBindings, 2 + 4 * 13 + 1))
+    );
+    // The sum over open elements counts: 2 + 2 passes, 2 + 3 does not; siblings do not add up.
+    assert_eq!(
+        limit_of(
+            b"<r xmlns:a=\"u\" xmlns:b=\"u\"><e xmlns:c=\"u\" xmlns:d=\"u\"/></r>",
+            l
+        ),
+        Ok(())
+    );
+    assert!(matches!(
+        limit_of(
+            b"<r xmlns:a=\"u\" xmlns:b=\"u\"><e xmlns:c=\"u\" xmlns:d=\"u\" xmlns:e=\"u\"/></r>",
+            l
+        ),
+        Err((LimitKind::NsBindings, _))
+    ));
+    assert_eq!(
+        limit_of(b"<r><e xmlns:a=\"u\" xmlns:b=\"u\" xmlns:c=\"u\" xmlns:d=\"u\"/><e xmlns:a=\"u\" xmlns:b=\"u\" xmlns:c=\"u\" xmlns:d=\"u\"/></r>", l),
+        Ok(())
+    );
+
     // The defaults themselves: depth 64 passes, 65 fails.
     assert_eq!(limit_of(nested(64).as_bytes(), base), Ok(()));
     assert!(matches!(
@@ -616,14 +674,14 @@ fn every_error_carries_its_offset() {
         max_depth: 1,
         ..Limits::default()
     };
-    let e = Parser::new(l).parse(b"<a><b/></a>").unwrap_err();
+    let e = Parser::new(l).unwrap().parse(b"<a><b/></a>").unwrap_err();
     assert!(e.to_string().contains("max depth"));
 }
 
 // REQ: OA-XML-019
 #[test]
 fn parser_reuse_keeps_tables_fixed_and_results_independent() {
-    let mut p = Parser::new(Limits::default());
+    let mut p = Parser::new(Limits::default()).unwrap();
     let cap = p.table_capacity();
     for _ in 0..3 {
         let d = p.parse(FLIGHT.as_bytes()).unwrap();
@@ -644,6 +702,20 @@ fn parser_reuse_keeps_tables_fixed_and_results_independent() {
     assert_eq!(p.table_capacity(), cap);
 }
 
+/// What a truncated valid message may report: input that ends inside markup is
+/// `UnexpectedEof`; between complete markup with elements open, `Unclosed`; before any root,
+/// `NoRoot`; inside a multi-byte character, `Utf8` at that character. Always at the end offset.
+fn is_clean_truncation(e: &XmlError, cut: &[u8]) -> bool {
+    let end = cut.len() as u32;
+    match *e {
+        XmlError::UnexpectedEof { at } | XmlError::Unclosed { at } | XmlError::NoRoot { at } => {
+            at == end
+        }
+        XmlError::Utf8 { at } => std::str::from_utf8(cut).unwrap_err().valid_up_to() == at as usize,
+        _ => false,
+    }
+}
+
 fn corpus() -> Vec<Vec<u8>> {
     let mut v = vec![
         FLIGHT.as_bytes().to_vec(),
@@ -654,6 +726,17 @@ fn corpus() -> Vec<Vec<u8>> {
         b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<!-- c --><a/>".to_vec(),
     ];
     v.push(nested(10).into_bytes());
+    v.push(
+        b"\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<!-- c -->\r\n\
+<p:a xmlns:p=\"urn:u\" xmlns=\"urn:d\" b='&#x41;&amp;\t'><p:b>x&lt;&#0000065;y</p:b><![CDATA[z]]>\
+<q></q></p:a>\r\n<!-- end -->\r\n"
+            .to_vec(),
+    );
+    v.push(
+        "<\u{e9}:\u{20ac} xmlns:\u{e9}=\"u\" \u{3b1}=\"1\"><\u{e9}:b/></\u{e9}:\u{20ac}>"
+            .as_bytes()
+            .to_vec(),
+    );
     v
 }
 
@@ -668,7 +751,9 @@ fn no_panic_on_truncation_and_byte_flips() {
         max_attrs_per_elem: 8,
         max_name_len: 32,
         max_text_nodes: 64,
-    });
+        max_ns_bindings: 8,
+    })
+    .unwrap();
     let flips: [u8; 12] = [
         0x00, 0x01, b'<', b'>', b'&', b'"', b'\'', b'/', b'!', b'?', 0xC3, 0xFF,
     ];
@@ -678,8 +763,13 @@ fn no_panic_on_truncation_and_byte_flips() {
         assert!(p.parse(&msg).is_ok(), "corpus message must be valid");
         for cut in 0..=msg.len() {
             runs += 1;
-            if p.parse(&msg[..cut]).is_ok() {
-                oks += 1;
+            match p.parse(&msg[..cut]) {
+                Ok(_) => oks += 1,
+                Err(e) => assert!(
+                    is_clean_truncation(&e, &msg[..cut]),
+                    "cut {cut} of {:?}: {e:?}",
+                    String::from_utf8_lossy(&msg)
+                ),
             }
         }
         for i in 0..msg.len() {

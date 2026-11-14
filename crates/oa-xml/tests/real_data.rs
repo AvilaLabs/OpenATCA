@@ -8,7 +8,7 @@
     clippy::panic
 )]
 
-use oa_xml::{Limits, Parser};
+use oa_xml::{Limits, NsIx, Parser};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -44,16 +44,27 @@ fn every_real_swim_message_parses() {
     let data: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     let total: usize = data.iter().map(Vec::len).sum();
 
-    let mut parser = Parser::new(Limits::default());
+    let mut parser = Parser::new(Limits::default()).unwrap();
     let mut failed = 0usize;
     let mut max_depth = 0u32;
     let mut max_elems = 0usize;
     let mut depth: Vec<u32> = Vec::new();
+    // Namespace bindings in scope at an element: the length of its declaration chain.
+    let mut max_ns = 0usize;
     for (f, bytes) in files.iter().zip(&data) {
         match parser.parse(bytes) {
             Ok(d) => {
                 max_elems = max_elems.max(d.elem_name.len());
                 depth.clear();
+                for head in d.elem_ns_head {
+                    let mut n = 0usize;
+                    let mut row = *head;
+                    while row != NsIx::NONE {
+                        n += 1;
+                        row = d.ns_next[row.0 as usize];
+                    }
+                    max_ns = max_ns.max(n);
+                }
                 for p in d.elem_parent {
                     let v = if p.0 == u32::MAX {
                         1
@@ -88,10 +99,15 @@ fn every_real_swim_message_parses() {
     let mbps = (total * rounds) as f64 / 1e6 / secs;
     eprintln!(
         "real data: {} files, {} bytes, failed {failed}, max depth {max_depth}, \
-         max elements {max_elems}, {mbps:.0} MB/s ({} msg/s) [{sink}]",
+         max elements {max_elems}, max ns bindings {max_ns}, {mbps:.0} MB/s ({} msg/s) [{sink}]",
         files.len(),
         total,
         ((files.len() * rounds) as f64 / secs) as u64,
     );
     assert_eq!(failed, 0, "{failed} real messages failed to parse");
+    // The default binding limit stays at least 4x the corpus maximum.
+    assert!(
+        4 * max_ns <= Limits::default().max_ns_bindings,
+        "max ns bindings {max_ns} is within 4x of the default limit"
+    );
 }
