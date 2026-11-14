@@ -1,10 +1,10 @@
-# Open ATC Automation — Scope
+# OpenATCA — Scope
 
 Status: scoping, 2026-11-13. Owner: Connor Avila (Avila Labs).
 
 ## 1. What this is
 
-An open-source air traffic control automation platform aimed at the same job as the FAA's
+OpenATCA (Open Air Traffic Control Automation) is an open-source platform aimed at the same job as the FAA's
 planned **Common Automation Platform (CAP)**: one system that replaces ERAM (en route, 20
 centers) and STARS (terminal radar approach control and towers).
 
