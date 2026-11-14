@@ -1554,3 +1554,51 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-034** On the real ADS-B clip and the SCDS sample (skipped when `OPENATCA_DATA` or
   `OPENATCA_ADSB_CLIP` is unset), whose times do not overlap, the run completes with no paired samples and
   an exclusions table.
+
+## Winds aloft (oa-wind)
+
+Wind and temperature at any (latitude, longitude, pressure altitude, time) from NOAA RAP analyses decoded
+by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell in `archive`, and the
+`oa-wind-check` validation tool. Nothing is extrapolated.
+
+- **OA-WIND-001** Pressure altitude becomes pressure by the ICAO standard atmosphere (exact, since
+  pressure altitude is defined on the ISA): 1013.25 hPa at 0 ft, 506.0 at FL180, 300.9 at FL300, 226.32 at
+  the tropopause, continuous across it, and the inverse round-trips. Non-finite input and altitudes outside
+  -5000 m to 20 000 m are refused.
+- **OA-WIND-002** Horizontal interpolation is bilinear in the grid's own coordinates; a field linear in
+  the grid indexes is reproduced exactly at any position inside the grid.
+- **OA-WIND-003** Vertical interpolation is linear in log-pressure between the bracketing isobaric levels;
+  a field linear in ln p is reproduced exactly between levels, and the aircraft's pressure altitude is
+  converted through the ISA pressure.
+- **OA-WIND-004** U and V stored grid-relative (the grid's component flag) are rotated to east and north
+  by the convergence angle at the query longitude; a uniform earth-relative wind stored grid-relative is
+  recovered, is wrong without the rotation, and a grid that is already earth-relative is not rotated.
+- **OA-WIND-005** Time is linear between the two bracketing analysis hours; the answer reports the hours
+  used and the weight; on an hour the weight is 0 (or 1 against the previous hour for the last).
+- **OA-WIND-006** A query is refused with a typed `Refusal` outside the grid, above or below the level
+  range (the limits themselves are answered), outside the time span by even one second, outside the ISA
+  range, for non-finite input, and with no hours; never extrapolated.
+- **OA-WIND-007** A missing value at a grid corner or level that the query uses is refused as
+  `MissingValue`, never filled; a query that does not touch it is answered.
+- **OA-WIND-008** An hour is built only from complete, consistent fields: a level lacking U, V, T or
+  height, a repeated field, differing grids, point counts or valid times, a fractional level, an unusable
+  time unit, fewer than two levels and more than 64 levels are refused with typed errors; other
+  parameters and non-isobaric levels are ignored; the arrays are level-major in ascending pressure.
+- **OA-WIND-009** Bytes that are not a GRIB2 file with the needed fields are refused, and an hour is
+  loaded by decoding only the isobaric UGRD, VGRD, TMP and HGT messages (the rest are only inspected).
+- **OA-WIND-010** The `.idx` byte ranges of exactly the isobaric UGRD, VGRD, TMP and HGT messages are
+  selected (layer labels such as `500-1000 mb` and other variables excluded) and adjacent ranges joined.
+- **OA-WIND-011** The archive refuses two files with one valid time and too many files, sorts by time,
+  refuses queries before reading any file where it can, reports an unreadable file as a typed error, and
+  holds at most three hours.
+- **OA-WIND-012** The validation statistics (median, 95th percentile, mean, maximum), the conversion of a
+  reported "from" direction and speed in knots to east and north, the vector comparison with a reference
+  field pair (a rotation-correct model agrees, an unrotated one does not) and the observation comparison
+  (refused queries counted by reason, not compared) behave as stated.
+- **OA-WIND-013** On the real RAP t12z hour (skipped when absent) the hour has 37 levels on the 451 x 337
+  grid, 90.0 MB of arrays, equals the hour built by `load_hour` from the whole file, its stored values
+  equal `oa-grib2`'s decoded values exactly, and the query at grid points agrees with `oa-grib2`'s
+  `wind_at` and bilinear sampling to rounding.
+- **OA-WIND-014** On the real data (skipped when absent) RAP agrees with the HRRR 250 hPa wind at t12z with
+  a median vector difference under 2 m/s (and is worse without the rotation), and a half-hourly sweep over
+  all hours never holds more than three and refuses a time after the last hour.

@@ -68,6 +68,8 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-mva` | FAA Minimum Vectoring Altitude and center MIA charts (AIXM 5.1) as a queryable model, and the `oa-mva-check` validation tool |
 | `crates/oa-awc` | Aviation Weather Center JSON (METAR altimeter lookup, PIREP, SIGMET/AIRMET/G-AIRMET, TAF) and `oa-awc-summary` |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, truth and airspace wiring (`oa-truth`, M0 model), report writer, and the `oa-bench` binary |
+| `crates/oa-wind` | Wind and temperature aloft at (lat, lon, pressure altitude, time) from RAP analyses, never extrapolated, and the `oa-wind-check` validation tool |
+| `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, report writer, and the `oa-bench` binary |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing
