@@ -5,11 +5,9 @@
 //!
 //! * **Query.** `oa_truth::truth_at` is mapped reason for reason: `Ok` to a sample (altitude
 //!   and vertical rate rounded to whole feet and feet per minute), `UnknownAircraft` to
-//!   [`NoTruth::UnknownAircraft`], and the two bracket refusals by meaning, not by name:
-//!   `oa-truth` says `NoBracket` for a time outside every leg of the aircraft (before the
-//!   first report, after the last, between legs), which is this crate's [`NoTruth::Gap`], and
-//!   `Gap` for a time inside a leg with no report within the bracket on one side, which is
-//!   this crate's [`NoTruth::NoBracket`]. `TooUncertain` maps to `TooUncertain`.
+//!   [`NoTruth::UnknownAircraft`], `OutsideLegs` to [`NoTruth::OutsideLegs`], `NoNearbyReport`
+//!   to [`NoTruth::NoNearbyReport`] and `TooUncertain` to [`NoTruth::TooUncertain`]: the same
+//!   names with the same meanings in both crates.
 //! * **Legs.** One [`TruthLeg`] per `oa-truth` leg, in `LegIx` order, so
 //!   [`TruthSample::leg`] indexes the list. The address is the truth's address word: a
 //!   non-ICAO address has bit 24 set and so never equals a 24-bit SFDPS address. Start and end
@@ -45,8 +43,8 @@ pub fn map_query(q: TruthQuery) -> Result<TruthSample, NoTruth> {
             leg: s.leg.0,
         }),
         TruthQuery::UnknownAircraft => Err(NoTruth::UnknownAircraft),
-        TruthQuery::NoBracket => Err(NoTruth::Gap),
-        TruthQuery::Gap => Err(NoTruth::NoBracket),
+        TruthQuery::OutsideLegs => Err(NoTruth::OutsideLegs),
+        TruthQuery::NoNearbyReport => Err(NoTruth::NoNearbyReport),
         TruthQuery::TooUncertain => Err(NoTruth::TooUncertain),
     }
 }

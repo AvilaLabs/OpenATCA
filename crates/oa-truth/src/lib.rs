@@ -310,10 +310,10 @@ pub enum TruthQuery {
     UnknownAircraft,
     /// The time is outside every leg of the aircraft (before its first report, after its last,
     /// or between legs): nothing to bracket, no extrapolation.
-    NoBracket,
+    OutsideLegs,
     /// The time is inside a leg but the nearest report on at least one side is more than the
     /// bracket (10 s) away.
-    Gap,
+    NoNearbyReport,
     /// Bracketed, but the 95 % horizontal radius exceeds the gate (50 m).
     TooUncertain,
 }

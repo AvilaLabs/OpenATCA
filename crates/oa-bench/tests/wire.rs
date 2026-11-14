@@ -138,10 +138,15 @@ fn truth_refusals_map_by_meaning_and_samples_keep_their_values() {
         map_query(TruthQuery::UnknownAircraft),
         Err(NoTruth::UnknownAircraft)
     );
-    // oa-truth NoBracket (outside every leg) is this crate's gap between legs, and oa-truth Gap
-    // (inside a leg, no report within the bracket) is this crate's no bracketing reports.
-    assert_eq!(map_query(TruthQuery::NoBracket), Err(NoTruth::Gap));
-    assert_eq!(map_query(TruthQuery::Gap), Err(NoTruth::NoBracket));
+    // The same names, with the same meanings, in both crates.
+    assert_eq!(
+        map_query(TruthQuery::OutsideLegs),
+        Err(NoTruth::OutsideLegs)
+    );
+    assert_eq!(
+        map_query(TruthQuery::NoNearbyReport),
+        Err(NoTruth::NoNearbyReport)
+    );
     assert_eq!(
         map_query(TruthQuery::TooUncertain),
         Err(NoTruth::TooUncertain)
@@ -171,7 +176,7 @@ fn truth_refusals_map_by_meaning_and_samples_keep_their_values() {
     );
     assert_eq!(
         query(&b.truth, ADDR, (T0_S - 600) * 1000),
-        Err(NoTruth::Gap)
+        Err(NoTruth::OutsideLegs)
     );
     let ok = query(&b.truth, ADDR, (T0_S + 60) * 1000).unwrap();
     assert!((ok.lat - LAT0).abs() < 1e-5 && (ok.vel_east_mps - SPEED_MPS).abs() < 0.5);
