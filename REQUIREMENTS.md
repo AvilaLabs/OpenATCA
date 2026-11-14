@@ -1117,3 +1117,142 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
   the first 8 MiB, or all of it with `OPENATCA_ADSB_FULL`) no trace is refused and no row is
   rejected, reports are kept in the ZAU box, and under 0.1 % of consecutive pairs are position
   jumps; the test prints the counts and skips when the data is absent.
+## Weather aloft (oa-grib2)
+
+GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO
+Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; not yet wired into
+`oa-replay`.
+
+- **OA-GRIB-001** Reads sections 0 to 8 of GRIB Edition 2: several messages back to back in one
+  file, several fields in one message (sections 4 to 7 repeated, section 3 optionally omitted so
+  the previous grid holds), and the local-use section is skipped.
+- **OA-GRIB-002** Every input is bounded and inconsistent input is refused with a typed error:
+  message length (`MAX_MESSAGE_BYTES`), grid points (`MAX_GRID_POINTS`, `MAX_MESSAGE_POINTS`),
+  fields per message (`MAX_FIELDS_PER_MESSAGE`), section lengths, section order, end marker
+  `7777`, truncation, a point count that disagrees with the grid, and group lengths that do not
+  add up. Damage to the message framing stops the file walk and is reported without losing the
+  messages before it.
+- **OA-GRIB-003** Grid template 3.30 (Lambert conformal) is read on a spherical earth. The
+  projection maps latitude and longitude to fractional grid indexes and back (round trip under
+  1e-6 of a cell, both hemispheres, tangent and secant cones), the first grid point maps to
+  index (0, 0), and grid length at LaD is carried to the map plane.
+- **OA-GRIB-004** Grid template 3.0 (regular latitude/longitude) is read, with the stated far
+  corner checked against Ni, Nj and the increments; longitude wraps on a global grid.
+- **OA-GRIB-005** Anything else is refused with its own typed error: scanning modes other than
+  0x00 and 0x40, earth shape codes other than the spherical 0, 1, 6 and 8, and grid templates
+  other than 3.0 and 3.30.
+- **OA-GRIB-006** Product templates 4.0, 4.1, 4.8 and 4.11 give parameter (named for TMP, RH,
+  UGRD, VGRD, VVEL, HGT and PRES; the raw discipline, category and number are always kept), fixed
+  surface type and scaled value (isobaric in Pa, height above ground in m), reference time and
+  forecast lead; other templates are refused.
+- **OA-GRIB-007** Data representation template 5.0 (simple packing) decodes exactly
+  `(R + X * 2^E) / 10^D` for every bit width from 0 to 32, and a field of zero bits per value is
+  constant.
+- **OA-GRIB-008** Template 5.2 (complex packing) decodes groups of any width and length from
+  the group tables (NG entries in each table, the last length taken from the template), and
+  honours missing-value management 1 and 2 for single points and for whole groups.
+- **OA-GRIB-009** Template 5.3 (complex packing with spatial differencing) decodes orders 1 and 2
+  with descriptors of any width and a negative minimum; with missing-value management the
+  differencing runs over the non-missing points only.
+- **OA-GRIB-010** Section 6 indicators 0 (bitmap follows), 254 (previous bitmap) and 255 (none)
+  are honoured; the number of set bits must equal the number of data values; missing points are
+  NaN and counted.
+- **OA-GRIB-011** Data representation templates other than 5.0, 5.2, 5.3 and 5.40 (5.41 PNG,
+  and the unassigned numbers) are refused with `UnsupportedPacking(template)`; the message is
+  recorded as skipped and the next message of the file is still decoded.
+- **OA-GRIB-012** Bilinear interpolation at a latitude and longitude reproduces a bilinear
+  field exactly, returns nothing outside the grid or when any of the four surrounding points is
+  missing, and wraps across the seam of a global grid.
+- **OA-GRIB-013** Earth-relative wind at a point: when the resolution and component flags say
+  u and v follow the grid axes, they are rotated by the Lambert convergence angle
+  `n (lon - LoV)`; the rotation is checked against true east and north found independently by
+  projecting small steps, and against the sign convention on both sides of the orientation
+  longitude. A grid whose components are already east and north is left alone.
+- **OA-GRIB-014** The `.idx` inventory parser reads `msg:offset:d=YYYYMMDDHH:VAR:level:forecast:`
+  lines including `N.M` message numbers for several fields in one message, refuses malformed or
+  non-increasing lines and over-long input, finds rows by variable and level, and gives the
+  inclusive byte range of a message.
+- **OA-GRIB-015** No input makes the decoder panic: every truncation of a message and thousands
+  of randomly mutated messages produce a value or a typed error.
+- **OA-GRIB-016** Every RAP and HRRR file under `OPENATCA_DATA/raw` has its inventory read
+  without unpacking (`inspect_stream`): grid first point equals the stated one, parameter and
+  level names and order agree with the file's `.idx`; the test reports which packing templates
+  the files use and skips when the data is absent.
+- **OA-GRIB-017** On every decodable real field: TMP lies in 180 to 330 K, wind speed is below
+  120 m/s, there are no missing points, and geopotential height rises as pressure falls at every
+  grid point; skips when the data is absent.
+- **OA-GRIB-018** RAP and HRRR 250 mb winds of the same analysis time, sampled at 1,000 points
+  inside the HRRR domain, agree as earth-relative vectors with median below 4 m/s and 95th
+  percentile below 12 m/s, and agree better than the same comparison of unrotated grid-relative
+  components; skips when the data is absent.
+- **OA-GRIB-019** Public ECMWF ecCodes test files (`OPENATCA_DATA/raw/grib2-testdata`) decode
+  to physical fields: 5.0 temperature, 5.3 order 1 with a bitmap, 5.3 order 2 with a bitmap, 5.3
+  order 2 with missing-value management, with exact missing counts and smooth neighbours;
+  refusals (rotated grid) are typed; skips when the data is absent.
+- **OA-GRIB-020** `inspect_stream` reads sections 1 to 6 of every field, including fields
+  whose packing is not supported, and names the packing template number.
+- **OA-GRIB-021** Template 5.40 (JPEG 2000), decoded by `oa-j2k`, gives exactly the packed
+  integers of the independent oracle: every field of every `OPENATCA_DATA/raw/rap` file (2,516
+  fields, 382,399,292 points) is compared sample by sample, before the `R`, `E`, `D` scaling, with
+  the same field re-encoded as simple packing after decoding with OpenJPEG outside this
+  repository (`derived/grib2-repack/rap`, whose scaling parameters must also be identical); no
+  mismatch is allowed, and the test reports the decode time per field; skips when the data is
+  absent.
+- **OA-GRIB-022** The public NCEP GEFS file (`raw/grib2-testdata/gep10.t12z.pgrb2af78.grib2`, 43
+  messages, 51 fields, all template 5.40) decodes with no field skipped, and its fields are
+  physical: temperature 180 to 330 K, relative humidity 0 to 100, wind below 120 m/s, geopotential
+  height rising as pressure falls at every point; skips when the data is absent.
+- **OA-GRIB-023** Template 5.40 decodes a hand-built message: the codestream's samples are the
+  packed integers and are scaled by `(R + X * 2^E) / 10^D`; a bitmap spreads the values over the
+  grid; a field of 0 bits per value is constant and has no codestream.
+- **OA-GRIB-024** Template 5.40 refuses what does not hold together: a compression type other than
+  lossless, a sample depth or point count that differs from the section, a section that is not 23
+  octets, and a damaged codestream (typed `Jpeg2000(error)`); the next message of a file is
+  still decoded.
+
+## JPEG 2000 decoder (oa-j2k)
+
+JPEG 2000 Part 1 codestream decoder for exactly the profile of NOAA's GRIB2 template 5.40, written
+from ITU-T T.800 (08/2002) (`raw/standards/itu-t800`) with no outside code: a raw codestream with
+one tile, one component, LRCP, the reversible 5-3 wavelet, no quantization and code-block style 0.
+Everything else is refused with a typed error. Pure core. The real-data check against another
+decoder is OA-GRIB-021.
+
+- **OA-J2K-001** The MQ arithmetic decoder (T.800 Annex C) reproduces the 256-bit test sequence of
+  the identical coder in JBIG2 (T.88 H.2) from its published encoding, and decodes what an
+  independently written MQ encoder produces over all 19 contexts, with the initial context states
+  of Table D.7. Past the end of a segment it is fed 1-bits and never fails.
+- **OA-J2K-002** Tag trees (B.10.2) decode a hand-written bit string, and round-trip random trees
+  from 1 x 1 to 9 x 9 leaves queried in random order at rising thresholds. Decoding is iterative
+  with a bounded depth.
+- **OA-J2K-003** Packet headers are read with the bit stuffing of B.10.1: after 0xFF the next byte
+  carries seven bits and its top bit must be 0, and a header ending on 0xFF is followed by one
+  stuffed byte.
+- **OA-J2K-004** The inverse reversible 5-3 transform (Annex F) is integer exact: known vectors
+  (including the floor of a negative sum), a single sample of either parity, every length 1 to 40
+  at both parities, and 2-D reconstruction with odd sizes and odd image origins over up to 4
+  levels, horizontal then vertical as F.3.2 requires.
+- **OA-J2K-005** The EBCOT block decoder (Annex D) reproduces what an independently written block
+  encoder codes, for all four sub-band orientations (zero-coding contexts of Table D.1), blocks of
+  1 x 1 to 64 x 64 and sparse, dense and signed data; more coding passes than bit-planes allow are
+  refused.
+- **OA-J2K-006** Whole codestreams round-trip exactly: 1 x 1 to 451 x 33 images of 1 to 16 bits
+  with 0 to 6 levels, code blocks of 4 x 4 to 1024 x 4, signed samples, odd image offsets,
+  one to eleven quality layers, constant and extreme images.
+- **OA-J2K-007** Two frozen byte-for-byte codestreams decode to their known samples, and the test
+  encoder still produces the first of them.
+- **OA-J2K-008** Everything outside the profile is refused with its own typed error: a missing SOC,
+  the markers POC, PPM, PPT and RGN (informative TLM, PLM, PLT, CRG and COM are skipped), other
+  progression orders, a multiple component transform, code-block styles other than 0, the 9-7
+  wavelet, precincts, SOP and EPH markers, quantization other than none, subsampling, several
+  components, tiles or tile-parts, bit depth above 16, a missing EOC or bytes after it, and a
+  Psot beyond the stream.
+- **OA-J2K-009** Packet damage is refused: a packet running past the data, bytes after the last
+  packet, and exponents that leave a band no magnitude bit-planes.
+- **OA-J2K-010** No input makes the decoder panic: every truncation of a codestream, four thousand
+  randomly mutated ones and garbage after valid headers produce an image or a typed error (release
+  builds check overflow as well, RULESET E3).
+- **OA-J2K-011** Bounds are enforced before allocation: image sides (`MAX_DIM`), samples
+  (`MAX_SAMPLES`), code blocks (`MAX_CODE_BLOCKS`), levels, layers and coding passes.
+- **OA-J2K-012** COC and QCC override COD and QCD for component 0 in either order; a COC, QCC or
+  second COD that names another component or repeats is refused.

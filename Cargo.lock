@@ -75,6 +75,17 @@ name = "oa-geo"
 version = "0.0.1"
 
 [[package]]
+name = "oa-grib2"
+version = "0.0.1"
+dependencies = [
+ "oa-j2k",
+]
+
+[[package]]
+name = "oa-j2k"
+version = "0.0.1"
+
+[[package]]
 name = "oa-json"
 version = "0.0.1"
 

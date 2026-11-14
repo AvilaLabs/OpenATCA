@@ -62,6 +62,8 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
+| `crates/oa-grib2` | GRIB2 decoder for NOAA RAP and HRRR winds and temperatures aloft |
+| `crates/oa-j2k` | JPEG 2000 decoder for the profile of GRIB2 template 5.40 (NOAA RAP packing) |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing
