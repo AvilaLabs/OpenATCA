@@ -4,8 +4,9 @@
 Common Automation Platform is meant to do: one system for en route and terminal air traffic
 control automation, replacing ERAM and STARS.
 
-OpenATCA is early. The first milestone, a validated model of the airspace built from the FAA's
-public data, is in progress. Nothing here is certified or approved for operational use.
+OpenATCA is early. The first milestone, a validated model of Chicago Center's airspace built
+from the FAA's public data, is complete ([report](docs/M0_REPORT.md)); recording and replay of
+live FAA data is in progress. Nothing here is certified or approved for operational use.
 
 ## Why
 
@@ -39,6 +40,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements register; every requirement has a test |
 | [docs/RULESET.md](docs/RULESET.md) | The engineering law every change is reviewed against |
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
+| [docs/M0_REPORT.md](docs/M0_REPORT.md) | Milestone 0 result: the ZAU model, checks, defects found, limits |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why and the next step |
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How we talk to systems we do not control, so we never cause or amplify their failures |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
@@ -49,6 +51,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-sha256` | SHA-256, verified against NIST CAVP vectors |
 | `crates/oa-zip` | ZIP and DEFLATE reader with hard limits |
 | `crates/oa-airspace` | The airspace model and the `oa-adapt` tool |
+| `crates/oa-xml` | Bounded XML 1.0 parser for FAA SWIM messages |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing
