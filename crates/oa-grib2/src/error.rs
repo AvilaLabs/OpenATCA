@@ -39,11 +39,13 @@ pub enum Grib2Error {
     UnsupportedProductTemplate(u16),
     /// A product definition value is impossible.
     BadProduct(&'static str),
-    /// Data representation template other than 5.0, 5.2 and 5.3. Templates 5.40 (JPEG 2000)
-    /// and 5.41 (PNG) are named so the report can say what the file used.
+    /// Data representation template other than 5.0, 5.2, 5.3 and 5.40. Template 5.41 (PNG) and
+    /// others are named so the report can say what the file used.
     UnsupportedPacking(u16),
     /// A data representation or data section value is impossible.
     BadPacking(&'static str),
+    /// The JPEG 2000 codestream of a template 5.40 field was refused.
+    Jpeg2000(oa_j2k::J2kError),
     /// A bitmap is impossible or disagrees with the point count.
     BadBitmap(&'static str),
     /// The two fields given to a wind query do not share one grid.
@@ -87,6 +89,7 @@ impl fmt::Display for Grib2Error {
                 write!(f, "data representation template 5.{t} is not supported")
             }
             Grib2Error::BadPacking(why) => write!(f, "bad data packing: {why}"),
+            Grib2Error::Jpeg2000(e) => write!(f, "JPEG 2000 data: {e}"),
             Grib2Error::BadBitmap(why) => write!(f, "bad bitmap: {why}"),
             Grib2Error::GridMismatch => write!(f, "fields are on different grids"),
             Grib2Error::BadIdx { line, why } => write!(f, "idx line {line}: {why}"),

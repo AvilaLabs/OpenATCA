@@ -1,10 +1,10 @@
 //! Real NOAA and ECMWF files, read from `OPENATCA_DATA` (the openatca-data directory). Every
 //! test skips with a printed note when the variable or the files are absent.
 //!
-//! RAP files are entirely JPEG 2000 (template 5.40), which oa-grib2 refuses. Their grid,
-//! product and inventory are still checked here through `inspect_stream`; their values are
-//! checked through `derived/grib2-repack/rap/`, the same files with the packed integers decoded
-//! by OpenJPEG outside this crate and re-wrapped as simple packing (`MAKE.py` beside them).
+//! RAP files are entirely JPEG 2000 (template 5.40), decoded by `oa-j2k`. Their grid, product
+//! and inventory are checked through `inspect_stream`; their packed integers are compared with
+//! `derived/grib2-repack/rap/`, the same files with the integers decoded by OpenJPEG outside
+//! this repository and re-wrapped as simple packing (`MAKE.py` beside them).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -144,13 +144,10 @@ fn wrap(d: f64) -> f64 {
     }
 }
 
-/// Fields that decode: raw files that this crate can read, plus the repacked RAP copies.
+/// Every field of the raw RAP and HRRR files (RAP through JPEG 2000).
 fn load_fields(dir: &Path) -> Vec<(String, Field)> {
     let mut out = Vec::new();
-    let mut dirs = vec![dir.join("raw/rap"), dir.join("raw/hrrr")];
-    dirs.push(dir.join("derived/grib2-repack/rap"));
-    dirs.push(dir.join("derived/grib2-repack/hrrr"));
-    for d in dirs {
+    for d in [dir.join("raw/rap"), dir.join("raw/hrrr")] {
         for path in files_in(&d) {
             let data = std::fs::read(&path).unwrap();
             let t0 = std::time::Instant::now();
@@ -165,12 +162,7 @@ fn load_fields(dir: &Path) -> Vec<(String, Field)> {
             }
             assert!(dec.stopped.is_none(), "{path:?}: {:?}", dec.stopped);
             for f in dec.fields {
-                let tag = if path.starts_with(dir.join("derived")) {
-                    "rap-repacked"
-                } else {
-                    "native"
-                };
-                let name = format!("{tag}:{}", path.file_name().unwrap().to_string_lossy());
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
                 out.push((name, f));
             }
         }
@@ -293,7 +285,7 @@ fn real_rap_and_hrrr_250mb_winds_agree() {
         pick("rap", Parameter::Ugrd),
         pick("rap", Parameter::Vgrd),
     ) else {
-        println!("need HRRR and RAP 250 mb u and v at 12z (RAP via the repacked copies): skipping");
+        println!("need HRRR and RAP 250 mb u and v at 12z: skipping");
         return;
     };
     assert_eq!(hu.ref_time, ru.ref_time, "different analysis times");
@@ -441,19 +433,6 @@ fn public_ecmwf_test_files_decode_to_physical_fields() {
         let r = decode_stream(&d);
         assert_eq!(r.skipped[0].error, Grib2Error::UnsupportedGridTemplate(1));
     }
-    if let Some(d) = read_test_file(&dir, "gep10.t12z.pgrb2af78.grib2") {
-        let r = decode_stream(&d);
-        assert_eq!(r.messages, 43);
-        assert!(r.fields.is_empty());
-        assert!(r
-            .skipped
-            .iter()
-            .all(|s| s.error == Grib2Error::UnsupportedPacking(40)));
-        assert!(
-            r.stopped.is_some(),
-            "file ends with bytes that are not a message"
-        );
-    }
 }
 
 /// True when at most 1% of adjacent point pairs differ by more than `frac` of the field's range
@@ -480,4 +459,142 @@ fn smooth(f: &Field, frac: f32) -> bool {
     }
     println!("smoothness: {bad} of {n} adjacent pairs jump by more than {frac} of range");
     bad * 100 <= n
+}
+
+/// (section number, whole section) of every section of a message after section 0.
+fn sections(msg: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut out = Vec::new();
+    let mut pos = 16;
+    while pos + 5 <= msg.len() - 4 {
+        let len = u32::from_be_bytes(msg[pos..pos + 4].try_into().unwrap()) as usize;
+        out.push((msg[pos + 4], &msg[pos..pos + len]));
+        pos += len;
+    }
+    out
+}
+
+// REQ: OA-GRIB-021
+#[test]
+fn rap_jpeg2000_integers_equal_the_openjpeg_repack_exactly() {
+    skip_unless_data!(dir);
+    let raw = files_in(&dir.join("raw/rap"));
+    let (mut files, mut fields, mut points) = (0u32, 0u64, 0u64);
+    let (mut total, mut worst) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let mut depths = std::collections::BTreeMap::<u8, u32>::new();
+    for path in &raw {
+        let name = path.file_name().unwrap();
+        let rp_path = dir.join("derived/grib2-repack/rap").join(name);
+        let Ok(repacked) = std::fs::read(&rp_path) else {
+            println!("{rp_path:?} absent: skipping this file");
+            continue;
+        };
+        let data = std::fs::read(path).unwrap();
+        let (a, b) = (
+            scan_messages(&data).unwrap(),
+            scan_messages(&repacked).unwrap(),
+        );
+        assert_eq!(a.len(), b.len(), "{path:?}: message count");
+        for (ma, mb) in a.iter().zip(&b) {
+            let sa = sections(&data[ma.offset..ma.offset + ma.length]);
+            let sb = sections(&repacked[mb.offset..mb.offset + mb.length]);
+            let five_a: Vec<_> = sa.iter().filter(|s| s.0 == 5).collect();
+            let seven_a: Vec<_> = sa.iter().filter(|s| s.0 == 7).collect();
+            let five_b: Vec<_> = sb.iter().filter(|s| s.0 == 5).collect();
+            let seven_b: Vec<_> = sb.iter().filter(|s| s.0 == 7).collect();
+            assert_eq!(five_a.len(), five_b.len());
+            assert_eq!(five_a.len(), seven_a.len());
+            assert_eq!(five_b.len(), seven_b.len());
+            for k in 0..five_a.len() {
+                let ra = oa_grib2::pack::parse_repr(five_a[k].1).unwrap();
+                let rb = oa_grib2::pack::parse_repr(five_b[k].1).unwrap();
+                assert_eq!((ra.template, rb.template), (40, 0), "{path:?}");
+                assert_eq!(
+                    (ra.r.to_bits(), ra.e, ra.d, ra.nbits, ra.ndata),
+                    (rb.r.to_bits(), rb.e, rb.d, rb.nbits, rb.ndata),
+                    "{path:?}: scaling parameters differ"
+                );
+                let t0 = std::time::Instant::now();
+                let xa = oa_grib2::pack::unpack_ints(&ra, &seven_a[k].1[5..]).unwrap();
+                let dt = t0.elapsed();
+                let xb = oa_grib2::pack::unpack_ints(&rb, &seven_b[k].1[5..]).unwrap();
+                assert_eq!(xa.len(), xb.len());
+                if let Some(i) = (0..xa.len()).find(|&i| xa[i] != xb[i]) {
+                    panic!(
+                        "{path:?} field {k}: sample {i} is {} but the OpenJPEG repack has {}",
+                        xa[i], xb[i]
+                    );
+                }
+                total += dt;
+                worst = worst.max(dt);
+                fields += 1;
+                points += xa.len() as u64;
+                *depths.entry(ra.nbits).or_insert(0) += 1;
+            }
+        }
+        files += 1;
+    }
+    if fields == 0 {
+        println!("no RAP files with repacked copies: nothing to compare");
+        return;
+    }
+    println!(
+        "JPEG 2000 vs OpenJPEG repack: {files} files, {fields} fields, {points} points, 0 mismatches; \
+         decode time per field mean {:?}, worst {:?}; fields by bit depth {depths:?}",
+        total / fields as u32,
+        worst
+    );
+}
+
+// REQ: OA-GRIB-022
+#[test]
+fn gefs_jpeg2000_file_decodes_to_physical_fields() {
+    skip_unless_data!(dir);
+    let Some(d) = read_test_file(&dir, "gep10.t12z.pgrb2af78.grib2") else {
+        return;
+    };
+    let t0 = std::time::Instant::now();
+    let r = decode_stream(&d);
+    let dt = t0.elapsed();
+    assert_eq!(r.messages, 43);
+    assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+    assert!(
+        r.stopped.is_some(),
+        "file ends with bytes that are not a message"
+    );
+    assert_eq!(r.fields.len(), 51);
+    let (mut ntmp, mut nrh, mut nwind) = (0, 0, 0);
+    let mut hgt: Vec<&Field> = Vec::new();
+    for f in &r.fields {
+        assert_eq!(f.packing_template, 40);
+        assert_eq!(grid_dims(&f.grid), (360, 181));
+        assert_eq!(f.missing_count, 0);
+        assert!(f.values.iter().all(|v| v.is_finite()));
+        let (lo, hi) = range(f);
+        match f.parameter {
+            Parameter::Tmp => {
+                assert!(lo > 180.0 && hi < 330.0, "TMP [{lo}, {hi}]");
+                ntmp += 1;
+            }
+            Parameter::Rh => {
+                assert!(lo >= 0.0 && hi <= 100.5, "RH [{lo}, {hi}]");
+                nrh += 1;
+            }
+            Parameter::Ugrd | Parameter::Vgrd => {
+                assert!(lo > -120.0 && hi < 120.0, "wind [{lo}, {hi}]");
+                nwind += 1;
+            }
+            Parameter::Hgt if f.level.kind == LEVEL_ISOBARIC => hgt.push(f),
+            _ => {}
+        }
+    }
+    // Height rises as pressure falls, at every point.
+    hgt.sort_by(|a, b| b.level.value.partial_cmp(&a.level.value).unwrap());
+    assert_eq!(hgt.len(), 7);
+    for w in hgt.windows(2) {
+        assert!(w[0].values.iter().zip(&w[1].values).all(|(a, b)| b > a));
+    }
+    println!(
+        "GEFS 5.40: {} fields decoded in {dt:?}; TMP {ntmp}, RH {nrh}, wind components {nwind}; HGT monotonic over 7 levels",
+        r.fields.len()
+    );
 }

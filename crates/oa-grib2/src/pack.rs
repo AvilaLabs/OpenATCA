@@ -1,7 +1,8 @@
 //! Data representation (section 5), data (section 7) and bitmap (section 6). Core (pure).
 //!
 //! * 5.0 simple packing; 5.2 complex packing (groups); 5.3 complex packing with spatial
-//!   differencing of order 1 or 2. 5.40 (JPEG 2000) and 5.41 (PNG) are refused by number.
+//!   differencing of order 1 or 2; 5.40 JPEG 2000 (lossless, decoded by `oa-j2k`). 5.41 (PNG)
+//!   is refused by number.
 //! * Value of a packed integer `X`: `(R + X * 2^E) / 10^D`, computed in f64 and stored as f32.
 //! * Complex packing missing-value management 1 and 2: in a group of width `w > 0` the code
 //!   `2^w - 1` is the primary missing value and, with management 2, `2^w - 2` is the secondary;
@@ -63,6 +64,7 @@ pub fn parse_repr(sect: &[u8]) -> Result<Repr, Grib2Error> {
         0 => 21,
         2 => 47,
         3 => 49,
+        40 => 23,
         other => return Err(Grib2Error::UnsupportedPacking(other)),
     };
     if sect.len() < need {
@@ -84,7 +86,15 @@ pub fn parse_repr(sect: &[u8]) -> Result<Repr, Grib2Error> {
     if !(-400..=400).contains(&e) || !(-40..=40).contains(&d) {
         return Err(Grib2Error::BadPacking("scale factor out of range"));
     }
-    let complex = if template == 0 {
+    if template == 40 {
+        // Octet 22: type of original field values (any); 23: compression type, 0 = lossless.
+        // The codestream says what it holds, but a section that admits to lossy compression
+        // is not a field this decoder vouches for.
+        if u8_at(sect, 21).ok_or_else(|| t.clone())? != 0 {
+            return Err(Grib2Error::BadPacking("lossy JPEG 2000 compression"));
+        }
+    }
+    let complex = if template == 0 || template == 40 {
         None
     } else {
         if u8_at(sect, 21).ok_or_else(|| t.clone())? != 1 {
@@ -166,12 +176,29 @@ fn scale_value(rp: &Repr, x: i64) -> f32 {
 pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
     let n = rp.ndata as usize;
     match rp.complex {
-        None => unpack_simple(rp, payload, n),
+        None => {
+            let ints = unpack_ints(rp, payload)?;
+            Ok(ints
+                .iter()
+                .map(|&x| scale_value(rp, i64::from(x)))
+                .collect())
+        }
         Some(c) => unpack_complex(rp, &c, payload, n),
     }
 }
 
-fn unpack_simple(rp: &Repr, payload: &[u8], n: usize) -> Result<Vec<f32>, Grib2Error> {
+/// The packed integers `X` of a template 5.0 or 5.40 field, before the `R`, `E`, `D` scaling.
+/// This is what two packings of the same field must agree on exactly.
+pub fn unpack_ints(rp: &Repr, payload: &[u8]) -> Result<Vec<u32>, Grib2Error> {
+    let n = rp.ndata as usize;
+    match rp.template {
+        0 => unpack_simple(rp, payload, n),
+        40 => unpack_jpeg2000(rp, payload, n),
+        other => Err(Grib2Error::UnsupportedPacking(other)),
+    }
+}
+
+fn unpack_simple(rp: &Repr, payload: &[u8], n: usize) -> Result<Vec<u32>, Grib2Error> {
     let bits = u64::from(rp.nbits);
     let need = (n as u64 * bits).div_ceil(8);
     if (payload.len() as u64) < need {
@@ -185,9 +212,31 @@ fn unpack_simple(rp: &Repr, payload: &[u8], n: usize) -> Result<Vec<f32>, Grib2E
         let x = br
             .read(u32::from(rp.nbits))
             .ok_or(Grib2Error::BadPacking("data ran out"))?;
-        out.push(scale_value(rp, i64::from(x)));
+        out.push(x);
     }
     Ok(out)
+}
+
+/// Template 5.40: the data section is one JPEG 2000 codestream of `ndata` samples, one per
+/// packed value in scan order, `nbits` deep. A field of 0 bits per value is constant and has
+/// no codestream to read.
+fn unpack_jpeg2000(rp: &Repr, payload: &[u8], n: usize) -> Result<Vec<u32>, Grib2Error> {
+    if rp.nbits == 0 {
+        return Ok(vec![0; n]);
+    }
+    let img = oa_j2k::decode(payload).map_err(Grib2Error::Jpeg2000)?;
+    if img.signed || img.bits != rp.nbits {
+        return Err(Grib2Error::BadPacking(
+            "JPEG 2000 sample depth differs from the bits per value",
+        ));
+    }
+    if u64::from(img.width) * u64::from(img.height) != n as u64 {
+        return Err(Grib2Error::BadPacking(
+            "JPEG 2000 image size differs from the point count",
+        ));
+    }
+    // The decoder has clipped to 0 .. 2^bits - 1, so every sample is a valid packed value.
+    Ok(img.samples.iter().map(|&s| s as u32).collect())
 }
 
 fn unpack_complex(

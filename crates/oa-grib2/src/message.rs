@@ -215,7 +215,7 @@ pub struct Inspected {
 }
 
 /// Reads sections 1-6 of every field of every message and skips the data, so a file whose
-/// packing is not supported (JPEG 2000, PNG) can still be inventoried. The data section's
+/// packing is not supported (PNG) can still be inventoried. The data section's
 /// framing is still checked. Framing faults stop the walk as in [`decode_stream`].
 pub fn inspect_stream(data: &[u8]) -> Inspected {
     let mut out = Inspected {

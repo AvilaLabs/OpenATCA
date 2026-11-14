@@ -10,3 +10,4 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-j2k = { path = "../oa-j2k" }

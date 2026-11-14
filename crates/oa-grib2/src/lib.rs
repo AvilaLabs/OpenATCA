@@ -4,16 +4,16 @@
 //! documentation. Core (pure): bytes in, plain values out; the caller reads the files. The
 //! pages followed are listed in `openatca-data/raw/grib2-docs/SOURCE.md`.
 //!
-//! Known limit: NOAA writes RAP (all fields) and many other products with JPEG 2000 packing
-//! (template 5.40), which is refused; `inspect_stream` still reads such a file's inventory. HRRR
-//! UGRD/VGRD at 250 mb are template 5.3 and decode.
+//! NOAA writes RAP (all fields) and many other products (GEFS) with JPEG 2000 packing
+//! (template 5.40); those decode through `oa-j2k`, and a field's packed integers can be read
+//! before scaling with [`pack::unpack_ints`]. HRRR UGRD/VGRD at 250 mb are template 5.3.
 //!
 //! * [`message`]: sections 0-8, several messages per file, several fields per message.
 //! * [`grid`]: templates 3.30 (Lambert conformal) and 3.0 (latitude/longitude), the projection,
 //!   and the grid-relative to earth-relative vector rotation.
 //! * [`product`]: templates 4.0 and 4.8, parameter names, fixed surfaces, times.
-//! * [`pack`]: templates 5.0, 5.2 and 5.3, and the section 6 bitmap. Templates 5.40 and 5.41
-//!   are refused with [`Grib2Error::UnsupportedPacking`].
+//! * [`pack`]: templates 5.0, 5.2, 5.3 and 5.40, and the section 6 bitmap. Template 5.41 and
+//!   others are refused with [`Grib2Error::UnsupportedPacking`].
 //! * [`sample`]: bilinear interpolation and [`wind_at`].
 //! * [`idx`]: the `.idx` inventory parser for byte-range requests.
 //!

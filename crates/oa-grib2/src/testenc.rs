@@ -259,6 +259,26 @@ pub fn encode_simple(x: &[u64], r: f32, e: i64, d: i64) -> Packed {
     }
 }
 
+/// Template 5.40 around an existing JPEG 2000 codestream: `ndata` values of `nbits` bits, with
+/// compression type `compression` (0 lossless) and no target ratio.
+pub fn encode_jpeg2000(
+    codestream: &[u8],
+    ndata: u32,
+    r: f32,
+    e: i64,
+    d: i64,
+    nbits: u32,
+    compression: u8,
+) -> Packed {
+    let mut b = sect5_head(40, ndata, r, e, d, nbits);
+    b.push(compression);
+    b.push(255);
+    Packed {
+        sect5: section(5, &b),
+        sect7: section(7, codestream),
+    }
+}
+
 pub struct ComplexOpts {
     /// Lengths of every group; they must add up to the number of points.
     pub group_lens: Vec<usize>,

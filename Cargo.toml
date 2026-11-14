@@ -18,6 +18,7 @@ members = [
     "crates/oa-tfms",
     "crates/oa-display",
     "crates/oa-grib2",
+    "crates/oa-j2k",
     "tools/oa-trace",
 ]
 

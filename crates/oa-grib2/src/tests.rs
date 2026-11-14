@@ -528,10 +528,10 @@ fn point_and_field_limits_refuse() {
 
 // REQ: OA-GRIB-011
 #[test]
-fn jpeg2000_and_png_are_refused_by_number_and_the_file_continues() {
+fn png_and_other_templates_are_refused_by_number_and_the_file_continues() {
     let p = encode_simple(&[1; 12], 0.0, 0, 0);
     let ok = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
-    for tmpl in [40u16, 41] {
+    for tmpl in [41u16, 1, 50] {
         let mut q = p.clone();
         q.sect5[9..11].copy_from_slice(&tmpl.to_be_bytes());
         let bad = simple_message(small_grid(), temp_product(500), &q, sect6(None, false));
@@ -550,12 +550,126 @@ fn jpeg2000_and_png_are_refused_by_number_and_the_file_continues() {
     }
 }
 
+/// Frozen codestreams of oa-j2k's tests: 4 x 3 samples 10, 20 .. 120 (8 bits, 1 level), and
+/// 3 x 2 samples 200, 3, 150, 0, 255, 77.
+const J2K_A: [u8; 109] = [
+    0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x01, 0xFF, 0x52, 0x00,
+    0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x04, 0x00, 0x01, 0xFF, 0x5C, 0x00, 0x07, 0x40,
+    0x40, 0x48, 0x48, 0x50, 0xFF, 0x64, 0x00, 0x08, 0x00, 0x01, 0x74, 0x65, 0x73, 0x74, 0xFF, 0x90,
+    0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1D, 0x00, 0x01, 0xFF, 0x93, 0xCF, 0xB4, 0x14, 0x06,
+    0x48, 0x82, 0x44, 0x99, 0xC0, 0xF9, 0x01, 0x80, 0x0C, 0xFF, 0x5F, 0xFF, 0xD9,
+];
+const J2K_B: [u8; 115] = [
+    0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x01, 0xFF, 0x52, 0x00,
+    0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x04, 0x00, 0x01, 0xFF, 0x5C, 0x00, 0x07, 0x40,
+    0x40, 0x48, 0x48, 0x50, 0xFF, 0x64, 0x00, 0x08, 0x00, 0x01, 0x74, 0x65, 0x73, 0x74, 0xFF, 0x90,
+    0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x00, 0x01, 0xFF, 0x93, 0xC3, 0xE7, 0x04, 0x07,
+    0x1A, 0xC1, 0xF3, 0x82, 0x8F, 0xB4, 0x0E, 0x7E, 0x60, 0x40, 0x03, 0x1F, 0x0B, 0x11, 0x95, 0x01,
+    0xF7, 0xFF, 0xD9,
+];
+
+// REQ: OA-GRIB-023
+#[test]
+fn template_5_40_decodes_through_oa_j2k_with_scaling_and_bitmap() {
+    // Packed X = 10, 20 .. 120; value = (100 + X * 2^1) / 10^1.
+    let p = encode_jpeg2000(&J2K_A, 12, 100.0, 1, 1, 8, 0);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let f = &decode_message(&m).unwrap()[0];
+    assert_eq!(f.packing_template, 40);
+    for (k, v) in f.values.iter().enumerate() {
+        assert_eq!(*v, expected(10 * (k as i64 + 1), 100.0, 1, 1), "point {k}");
+    }
+    // The integers before scaling.
+    let rp = pack::parse_repr(&p.sect5).unwrap();
+    assert_eq!(rp.template, 40);
+    assert_eq!(
+        pack::unpack_ints(&rp, &p.sect7[5..]).unwrap(),
+        [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]
+    );
+    // Six values spread over twelve points by a bitmap.
+    let bm: Vec<bool> = (0..12).map(|k| k % 2 == 1).collect();
+    let p = encode_jpeg2000(&J2K_B, 6, 0.0, 0, 0, 8, 0);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(Some(&bm), false));
+    let f = &decode_message(&m).unwrap()[0];
+    assert_eq!(f.missing_count, 6);
+    let got: Vec<f32> = f.values.iter().copied().filter(|v| !v.is_nan()).collect();
+    assert_eq!(got, [200.0, 3.0, 150.0, 0.0, 255.0, 77.0]);
+    assert!(f.values[0].is_nan() && f.values[1] == 200.0);
+    // A field of zero bits per value is constant and carries no codestream.
+    let p = encode_jpeg2000(&[], 12, 273.5, 0, 0, 0, 0);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let f = &decode_message(&m).unwrap()[0];
+    assert!(f.values.iter().all(|&v| v == 273.5));
+}
+
+// REQ: OA-GRIB-024
+#[test]
+fn template_5_40_refuses_inconsistent_sections_and_damaged_codestreams() {
+    let run = |p: &Packed| {
+        decode_message(&simple_message(
+            small_grid(),
+            temp_product(500),
+            p,
+            sect6(None, false),
+        ))
+    };
+    // Lossy compression type.
+    let r = run(&encode_jpeg2000(&J2K_A, 12, 0.0, 0, 0, 8, 1));
+    assert!(matches!(r, Err(Grib2Error::BadPacking(_))), "{r:?}");
+    // Bit depth, then point count, that disagree with the codestream.
+    let r = run(&encode_jpeg2000(&J2K_A, 12, 0.0, 0, 0, 7, 0));
+    assert!(matches!(r, Err(Grib2Error::BadPacking(_))), "{r:?}");
+    let r = run(&encode_jpeg2000(&J2K_A, 6, 0.0, 0, 0, 8, 0));
+    assert!(
+        matches!(
+            r,
+            Err(Grib2Error::BadPacking(_) | Grib2Error::GridPoints(_))
+        ),
+        "{r:?}"
+    );
+    // A damaged codestream is a typed JPEG 2000 error.
+    let mut bad = J2K_A;
+    bad[0] = 0;
+    let r = run(&encode_jpeg2000(&bad, 12, 0.0, 0, 0, 8, 0));
+    assert_eq!(
+        r,
+        Err(Grib2Error::Jpeg2000(oa_j2k::J2kError::NotCodestream))
+    );
+    let r = run(&encode_jpeg2000(&J2K_A[..60], 12, 0.0, 0, 0, 8, 0));
+    assert!(matches!(r, Err(Grib2Error::Jpeg2000(_))), "{r:?}");
+    // The section must be 23 octets.
+    let mut p = encode_jpeg2000(&J2K_A, 12, 0.0, 0, 0, 8, 0);
+    p.sect5.truncate(p.sect5.len() - 2);
+    p.sect5[3] -= 2;
+    assert!(matches!(run(&p), Err(Grib2Error::BadSectionLength { .. })));
+    // One field refused does not stop the next message of a file.
+    let ok = simple_message(
+        small_grid(),
+        temp_product(500),
+        &encode_simple(&[1; 12], 0.0, 0, 0),
+        sect6(None, false),
+    );
+    let mut file = simple_message(
+        small_grid(),
+        temp_product(500),
+        &encode_jpeg2000(&bad, 12, 0.0, 0, 0, 8, 0),
+        sect6(None, false),
+    );
+    file.extend(&ok);
+    let d = decode_stream(&file);
+    assert_eq!((d.fields.len(), d.skipped.len()), (1, 1));
+}
+
 // REQ: OA-GRIB-020
 #[test]
 fn inspect_reads_the_inventory_without_unpacking() {
     let p = encode_simple(&[1; 12], 0.0, 0, 0);
     let mut q = p.clone();
-    q.sect5[9..11].copy_from_slice(&40u16.to_be_bytes());
+    q.sect5[9..11].copy_from_slice(&41u16.to_be_bytes());
     let jp2 = simple_message(
         small_grid(),
         sect4(0, 2, 2, 100, 0, 25_000),
@@ -570,7 +684,7 @@ fn inspect_reads_the_inventory_without_unpacking() {
     assert!(i.stopped.is_none());
     assert_eq!(
         (i.fields[0].parameter, i.fields[0].packing_template),
-        (Parameter::Ugrd, 40)
+        (Parameter::Ugrd, 41)
     );
     assert_eq!(
         (i.fields[1].parameter, i.fields[1].packing_template),
