@@ -65,6 +65,17 @@ oa-adapt diff  <snapshot-a> <snapshot-b>                                  # what
   great-circle or rhumb lines. Until confirmed (FAA Order JO 7400 / the ARB data layout PDF),
   the model stores both and reports the maximum separation between them per boundary. This is a
   recorded Unknown, not a silent choice.
+- **Limits of public boundary data.** The FAA's Aeronautical Charting Meeting 24-02 briefing
+  ("ARTCC Boundary Data") says the NASR boundaries serve three purposes: NOTAMs, flight filing
+  and charting. Operational boundaries the FAA uses for other purposes are not in NASR, some
+  boundaries rest on letters of agreement and cannot be captured there, and the FAA plans to
+  redefine the NASR LOW boundary as the ground boundary (a shift users will see), with a
+  long-term aim of aligning everything to ERAM data. So: NASR gives us the published ARTCC
+  outline, not ERAM's operational boundaries or sector boundaries. Sectors stay on the gap list
+  (SCOPE.md section 6) and the model keeps the source of every boundary explicit, so operational
+  boundaries can be loaded beside the published ones when we obtain them. Each cycle's report
+  flags any change in the LOW boundary so the planned redefinition is caught when it lands.
+  Source: https://www.faa.gov/air_traffic/flight_info/aeronav/acf/media/Briefings/ARTCC_Boundary_Data.pdf
 - **Determinism:** the snapshot serializes in a fixed order with no hash-map iteration order
   leaking in. The same inputs always give a byte-identical snapshot and the same SHA-256.
 - **Input bounds:** every record, field, count and string has a stated maximum. Exceeding one is
