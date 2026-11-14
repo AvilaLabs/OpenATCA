@@ -79,6 +79,31 @@ FAA separation context (JO 7110.65BB §5-5-4): ERAM 5 NM below FL600, 3 NM up to
 40 NM of the preferred radar (60 NM with MSSR) or in track-based mode; ADS-B "allows expanded use
 of 3 NM". JO 7210.3EE §3-6: WAM targets may not be used for 3 NM in ERAM.
 
+#### Simulated sensor inputs (M3, `oa-sensorsim`)
+
+Error models for simulated radar and multilateration (docs/M3_DESIGN.md §1). These are inputs to
+the simulation, not bars. Most are stated requirements or assumptions, not measurements; each
+simulation run records which row it used. Grades as in §2; "P (quoting X)" means read in the
+cited document, which itself quotes X.
+
+| Parameter | Value | Source | Grade |
+|---|---|---|---|
+| MSSR random error, range / azimuth (σ) | 70 m / 0.08° | NLR-CR-2004-472, *Wide Area Multilateration* v1.1 (EATMP TRS 131/04), §7.1 Table 4, quoting EUROCONTROL SUR.ET1.ST01.1000-STD-01-01 | P (quoting the 1997 standard) |
+| Mode S sensor (FAA test assumption), range / azimuth (σ) | 7.6 m (25 ft) / 1 mrad (0.057°) | MIT LL ATC-302, Gertz and Kaminsky 2002, §4.1 | P (assumed, not measured) |
+| Older SSR CD-2 (FAA test assumption), range / azimuth (σ) | 30.5 m (100 ft), 1/8 NM quantum / 3 mrad | MIT LL ATC-302 §4.1 | P (assumed) |
+| ASR-9 primary radar, azimuth accuracy; range | 0.16° rms; 1/32 NM with 200 ft rms | Stone and Anderson, *Advances in Primary-Radar Technology*, Lincoln Laboratory Journal 2(3), Table 1 | P (requirement) |
+| Scan period, terminal / en route | 4.8 s / 12 s | Stone and Anderson Table 1; ATC-302 §2 | P |
+| SSR detection; false target reports; split reports; Mode A / Mode C code detection | >97%; <0.1%; <0.3%; >98% / >96% | ICAO SURICG/6 IP/04 (ROK, 2021) Table 1, quoting the 1997 EUROCONTROL standard | S |
+| PSR detection; false reports | >90%; <20 per scan | same | S |
+| Altitude resolution, Mode C / Mode S | 100 ft / 25 ft | NLR-CR-2004-472 §3 | P |
+| WAM position accuracy (measured, 5 receivers, RTK reference) | about 6–7 m RMS (ADS-B about 20 m, Mode S radar about 200 m in the same test) | ICAO SURICG/7 IP14 (China, 2022) §2.3 | P |
+
+Gaps: radar range and azimuth **bias** before registration (ATC-302 says azimuth bias dominated
+real registration error but gives no usable value), time-stamp error, the primary 1997 standard
+and ESASSP annex sensor tables, FAA ASR-11 / ARSR-4 / Mode S specifications, and any published
+absolute accuracy of ARTAS or another tracker against ESASSP. Until a bias value is sourced,
+simulations sweep bias over a stated range and report results per value rather than pick one.
+
 ### 3.2 Flight data and trajectory prediction (M4)
 
 | Metric | Floor | Legacy (to measure) | Best published | Notes |
