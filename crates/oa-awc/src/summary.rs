@@ -365,6 +365,13 @@ pub fn format_summary(s: &Summary) -> String {
             st.accepted
         );
         let _ = writeln!(o, "  refused: {}", refused_line(&st.refused));
+        if st.points > 0 {
+            let _ = writeln!(
+                o,
+                "  points={} rawSigmet position checked={} disagree={}",
+                st.points, st.point_raw_checked, st.point_raw_disagree
+            );
+        }
         let mut by_hazard: Vec<(String, usize)> = Vec::new();
         for r in 0..hazard_len(t) {
             let n = hazard_name(t, r);

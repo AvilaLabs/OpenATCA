@@ -605,6 +605,129 @@ fn hazards_dedupe_activity_and_coverage() {
     assert!(!hazard_covers(&t, 0, 15.0, 15.0, None));
 }
 
+const NZ_RAW: &str = "WSNZ21 NZKL 141800 NZZC SIGMET 22 VALID 141800/142200 NZKL- NZZC NEW ZEALAND FIR SEV TURB OBS AT 2007Z S4452 E16900 SFC/4000FT=";
+
+fn with_raw(base: String, raw: &str) -> String {
+    base.replacen('{', &format!(r#"{{"rawSigmet":"{raw}","#), 1)
+}
+
+// REQ: OA-AWC-018
+#[test]
+fn single_coordinate_area_is_a_point_hazard() {
+    let pt = r#"[{"lon":169.0,"lat":-44.8667}]"#;
+    let items = [with_raw(
+        sigmet("NZKL", "22", V0, pt, "AREA", "0", "4000"),
+        NZ_RAW,
+    )];
+    let (t, s, _) = load_hazard(SRC_SIGMET, &[arr(&items)]);
+    assert_eq!((s.records, s.accepted, s.points), (1, 1, 1));
+    assert_eq!(t.geom[0], GEOM_POINT);
+    assert_eq!(hazard_rings(&t, 0).len(), 1);
+    assert_eq!(ring_points(&t, 0).len(), 1);
+    assert_eq!((t.lat_e5[0], t.lon_e5[0]), (-4_486_670, 16_900_000));
+    // A point covers nothing, at its own position too.
+    assert!(!hazard_covers(&t, 0, -44.8667, 169.0, None));
+}
+
+// REQ: OA-AWC-018
+#[test]
+fn two_coordinate_area_is_refused() {
+    let two = r#"[{"lon":1,"lat":1},{"lon":2,"lat":2}]"#;
+    let items = [sigmet("NZKL", "23", V0, two, "AREA", "null", "null")];
+    let (t, s, _) = load_hazard(SRC_SIGMET, &[arr(&items)]);
+    assert_eq!((s.records, s.accepted, s.points), (1, 0, 0));
+    assert_eq!(s.refused[Reason::BadGeometry as usize], 1);
+    assert_eq!(hazard_len(&t), 0);
+    // Only an international SIGMET may be a point; a one-coordinate G-AIRMET area is refused.
+    let one = r#"[{"lon":"1","lat":"1"}]"#;
+    let g = gairmet("TURB-HI", "AREA", "\"040\"", "\"080\"", "null", one);
+    let (_, s, _) = load_hazard(SRC_GAIRMET, &[arr(&[g])]);
+    assert_eq!(s.refused[Reason::BadGeometry as usize], 1);
+    let why = describe_hazard_refusals(arr(&items).as_slice(), SRC_SIGMET).unwrap();
+    assert_eq!(why, ["record 0 NZKL 23: bad-geometry (coords)"]);
+}
+
+// REQ: OA-AWC-019
+#[test]
+fn point_position_is_cross_checked_against_raw_sigmet() {
+    let at = |lat: f64, lon: f64, raw: &str, series: &str| {
+        let c = format!(r#"[{{"lon":{lon},"lat":{lat}}}]"#);
+        with_raw(sigmet("NZKL", series, V0, &c, "AREA", "null", "null"), raw)
+    };
+    let items = [
+        at(-44.8667, 169.0, NZ_RAW, "1"),
+        // Minutes form, west and north, no time token.
+        at(4.5, -17.25, "X FCST AT N0430 W01715 Y", "2"),
+        // Whole-degree form.
+        at(45.0, 120.0, "X OBS AT 1200Z N45 E120 Y", "3"),
+        // Disagreements: latitude sign, and minutes beyond one.
+        at(44.8667, 169.0, NZ_RAW, "4"),
+        at(-44.5, 169.0, NZ_RAW, "5"),
+        // No stated position, or not in the ICAO form: not checked.
+        at(1.0, 1.0, "X SEV TURB OBS Y", "6"),
+        at(1.0, 1.0, "X OBS AT 1200Z NEAR SOMEWHERE Y", "7"),
+        sigmet("NZKL", "8", V0, r#"[{"lon":1,"lat":1}]"#, "AREA", "0", "10"),
+    ];
+    let (t, s, _) = load_hazard(SRC_SIGMET, &[arr(&items)]);
+    assert_eq!(
+        (s.accepted, s.points),
+        (8, 8),
+        "a disagreement is not a refusal"
+    );
+    assert_eq!((s.point_raw_checked, s.point_raw_disagree), (5, 2));
+    assert_eq!(hazard_len(&t), 8);
+}
+
+// REQ: OA-AWC-020
+#[test]
+fn point_hazards_are_found_by_distance_not_coverage() {
+    let p = |lat: f64, lon: f64, series: &str, base: &str, top: &str| {
+        let c = format!(r#"[{{"lon":{lon},"lat":{lat}}}]"#);
+        sigmet("NZKL", series, V0, &c, "AREA", base, top)
+    };
+    let items = [
+        p(-44.8667, 169.0, "1", "0", "4000"),
+        p(-42.8333, 172.55, "2", "12000", "15000"),
+        p(10.0, -179.9, "3", "null", "null"), // across the antimeridian from lon 179.9
+        sigmet("WAAA", "4", V0, SQUARE, "AREA", "null", "null"),
+    ];
+    let (t, s, _) = load_hazard(SRC_SIGMET, &[arr(&items)]);
+    assert_eq!((s.accepted, s.points), (4, 3));
+    let label_at = |out: &[u32]| -> Vec<String> {
+        out.iter()
+            .map(|&i| hazard_label(&t, i as usize).to_string())
+            .collect()
+    };
+    let mut out = Vec::new();
+    // Within 1 km of the first point only; the distance is the caller's.
+    point_hazards_near(&t, -44.87, 169.0, 1_000.0, None, &mut out);
+    assert_eq!(label_at(&out), ["NZKL 1"]);
+    point_hazards_near(&t, -44.87, 169.0, 10.0, None, &mut out);
+    assert!(out.is_empty());
+    // Both New Zealand points, within 400 km; an altitude outside a band excludes it.
+    point_hazards_near(&t, -43.8, 170.8, 400_000.0, None, &mut out);
+    assert_eq!(label_at(&out), ["NZKL 1", "NZKL 2"]);
+    point_hazards_near(&t, -43.8, 170.8, 400_000.0, Some(13_000), &mut out);
+    assert_eq!(label_at(&out), ["NZKL 2"]);
+    // Across the antimeridian: 0.2 degrees of longitude at 10 N is about 22 km.
+    point_hazards_near(&t, 10.0, 179.9, 25_000.0, None, &mut out);
+    assert_eq!(label_at(&out), ["NZKL 3"]);
+    // The polygon is not a point, and no point covers.
+    point_hazards_near(&t, 15.0, 15.0, 1e9, None, &mut out);
+    assert_eq!(out.len(), 3);
+    for i in 0..hazard_len(&t) {
+        if t.geom[i] == GEOM_POINT {
+            let (la, lo) = (f64::from(t.lat_e5[i]) / 1e5, f64::from(t.lon_e5[i]) / 1e5);
+            assert!(!hazard_covers(&t, i, la, lo, None));
+        }
+    }
+    // Bad distances return nothing; `out` is replaced.
+    point_hazards_near(&t, 0.0, 0.0, -1.0, None, &mut out);
+    assert!(out.is_empty());
+    point_hazards_near(&t, 0.0, 0.0, f64::NAN, None, &mut out);
+    assert!(out.is_empty());
+}
+
 const TAF: &str = r#"{"icaoId":"KRNH","dbPopTime":"2026-11-14T17:38:21.102Z","bulletinTime":"2026-11-14T17:38:00.000Z","issueTime":"2026-11-14T17:38:00.000Z","validTimeFrom":1794679200,"validTimeTo":1794765600,"rawTAF":"TAF KRNH 141738Z 1418/1518 00000KT P6SM FEW250 FM151500 18005G15KT 3SM BKN008 OVC015","mostRecent":1,"remarks":"","lat":45.14764,"lon":-92.53352,"elev":302,"prior":4,"name":"New Richmond Muni","fcsts":[{"timeFrom":1794679200,"timeTo":1794754800,"timeBec":null,"fcstChange":null,"probability":null,"wdir":0,"wspd":0,"wgst":null,"visib":"6+","altim":null,"clouds":[{"cover":"FEW","base":25000,"type":null}]},{"timeFrom":1794754800,"timeTo":1794765600,"timeBec":null,"fcstChange":"FM","probability":null,"wdir":"180","wspd":5,"wgst":15,"visib":3,"altim":null,"clouds":[{"cover":"OVC","base":1500,"type":null},{"cover":"BKN","base":800,"type":null}]},{"timeFrom":1794760000,"timeTo":1794765600,"fcstChange":"PROB","probability":30,"wdir":"VRB","wspd":3,"visib":"","clouds":[]}]}"#;
 
 // REQ: OA-AWC-014

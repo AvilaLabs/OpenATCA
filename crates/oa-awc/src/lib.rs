@@ -11,7 +11,7 @@
 //! * [`pirep`]: pilot reports (position, time, level, aircraft type, turbulence, icing, wind,
 //!   temperature) for trajectory-prediction validation.
 //! * [`hazard`]: international SIGMET, US SIGMET/AIRMET and G-AIRMET polygons with altitude bands
-//!   and validity times ([`active_hazards_at`], [`hazard_covers`]).
+//!   and validity times ([`active_hazards_at`], [`hazard_covers`], [`point_hazards_near`]).
 //! * [`taf`]: terminal forecasts.
 //! * [`units`]: unit conversions and bounds, [`error`]: typed refusals, [`summary`]: the offline
 //!   validation scan behind `oa-awc-summary`.
@@ -39,9 +39,9 @@ pub use error::{
     REASON_NAMES,
 };
 pub use hazard::{
-    active_hazards_at, finalize_hazard, hazard_covers, hazard_label, hazard_len, hazard_name,
-    hazard_rings, new_hazard_table, parse_airsigmet, parse_gairmet, parse_sigmet, ring_points,
-    HazardDedupe, HazardStats, HazardTable,
+    active_hazards_at, describe_hazard_refusals, finalize_hazard, hazard_covers, hazard_label,
+    hazard_len, hazard_name, hazard_rings, new_hazard_table, parse_airsigmet, parse_gairmet,
+    parse_sigmet, point_hazards_near, ring_points, HazardDedupe, HazardStats, HazardTable,
 };
 pub use metar::{
     altimeter_at, finalize_metar, metar_altim_hpa, metar_len, metar_raw, metar_station_count,
