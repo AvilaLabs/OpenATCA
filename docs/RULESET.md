@@ -182,7 +182,7 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
 The M0 parsers (oa-csv, oa-nasr, oa-arinc424) are shell/offline code run once per 28-day cycle:
 cold under A7.2 and C6. They still obey A1, A4, E3 and F1. The airspace model produced by M0 is
 the first core data structure and must meet A3, A4, A7 and A9 before M0 is called done. The
-tracker (M2) is the first fully real-time core and is held to every rule from its first commit.
+tracker (M3) is the first fully real-time core and is held to every rule from its first commit.
 
 ## Checklist
 

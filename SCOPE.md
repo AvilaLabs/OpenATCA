@@ -1,6 +1,6 @@
 # OpenATCA — Scope
 
-Status: scoping, 2026-11-13. Owner: Connor Avila (Avila Labs).
+Status: scoping, 2026-11-13; milestones and benchmarks revised 2026-11-14. Owner: Connor Avila (Avila Labs).
 
 ## 1. What this is
 
@@ -98,6 +98,33 @@ The questions that define the target:
 An open-source platform meets the lock-in section by construction, and most of the transition
 section is what we intend to build first.
 
+### 2a. Where CAP stands (public sources, 2026-11-14)
+
+- CAP is phase 2 of the FAA's "Brand New Air Traffic Control System" programme. Phase 1 (the
+  $12.5B appropriated in July 2025) is mostly hardware; Peraton is its prime integrator
+  (December 2025, $1.5B ceiling). GAO-26-107992 puts phase 2 at about $10.2B and says the FAA
+  has no start or finish date for it. The FY2027 request holds $100M "to begin the transition
+  toward CAP"; a further $7–10B is being sought.
+- Shortlist (The Air Current, 2026-04-10): Collins Aerospace (RTX, maker of STARS), Leidos
+  (maker of ERAM), Thales, Indra and Frequentis, down-selected to four by late August 2026
+  (names not all public). Thales is offering TopSky-America, a cloud-hosted adaptation of its
+  TopSky-ATC.
+- No public commitment to source code ownership, escrow or open release has been found.
+
+So CAP is not new code being written from scratch. It will almost certainly be one of these
+companies' existing platforms, adapted to the US. **The bar is therefore the best of TopSky-ATC,
+Indra's iTEC/AirCon, Frequentis, Collins AutoTrac and ERAM itself,** function by function, plus
+the failures documented in docs/LEGACY_SHORTCOMINGS.md. Matching CAP is not enough; the target
+is to beat what any of the bidders can show.
+
+Functions the best platforms advertise that ERAM and STARS lack or keep separate: one 4D
+trajectory shared by every tool (conflict probe, arrival and departure management, data link);
+route and level conformance monitoring (Indra's Route Adherence Monitoring); controller–pilot
+data link; stripless working. NASA notes that ERAM's conflict probe and the trajectory-based
+tools were "developed completely independently" with "incompatible requirements" (NTRS
+20130010914). One shared trajectory is therefore a design requirement here (M4), not an
+add-on.
+
 ## 3. Design principles
 
 1. **Migration first.** Every function can run in shadow beside a legacy system, be compared
@@ -187,6 +214,12 @@ and the metric that proves it is better.
 
 Any row we cannot yet beat gets a diagnosis and a next step, not a lowered bar.
 
+How each row is measured is in docs/BENCHMARKS.md: a published floor (the Recommended value of
+the standard, not the Mandatory one), the legacy system measured by us on the same recorded
+traffic, and the best published research result. SWIM carries ERAM's, TBFM's and TFMS's own
+outputs, so the legacy number for tracking, arrival times and trajectory estimates is something
+we measure, not something we quote.
+
 ## 4. Architecture
 
 ```
@@ -208,18 +241,39 @@ Any row we cannot yet beat gets a diagnosis and a next step, not a lowered bar.
 - **Health and load** of every service and queue are first-class outputs, so overload is visible
   before it becomes a failure.
 
-## 5. Data we can get
+## 5. Data inventory
 
-| Source | Gives us | Access |
-|---|---|---|
-| NASR (28-day subscription) | Airspace, sector boundaries, fixes, airways, airports, navaids | Public download |
-| CIFP | Every published procedure (SIDs, STARs, approaches) in ARINC 424 | Public download |
-| SWIM via SCDS (FDPS, STDDS, TFMData, TBFM) | Live flight plans, terminal surveillance and flight data, flow management | Free, needs an FAA SWIM account |
-| ADS-B (OpenSky Network, or our own receiver) | Live positions for most IFR traffic (mandated since 2020) | OpenSky research access, or a low-cost SDR receiver |
-| NOAA MRMS and aviation weather | Weather for display and data-quality tests | Public |
-| ASTERIX specifications | Radar data formats, so legacy-style feeds can be simulated | Public (Eurocontrol) |
+What each function needs, and whether we have it. "Have" means downloaded or recording and
+decoded by our own code.
 
-Account sign-ups and any hardware purchase go to Connor first.
+| Data | Used by | Source and licence | Status |
+|---|---|---|---|
+| Airspace, fixes, airways, airports, navaids, ARTCC boundaries | All | NASR 28-day subscription, public | **Have** (M0) |
+| Procedures (SIDs, STARs, approaches) | M4, M5 | CIFP, ARINC 424, public | **Have** (M0) |
+| ERAM flight data and track positions | M2 baseline, M4 | SWIM SFDPS, FAA account | **Have**, recording; about 60 s late (UK-004) |
+| TBFM schedules and estimates | M2 baseline, M4 | SWIM TBFM | **Have**, recording |
+| TFMS flight data, traffic management programmes | M2 baseline, M4 | SWIM TFMS | **Have**, recording |
+| NOTAMs | M4, M5 (temporary restrictions) | SWIM FNS | **Have**, recording |
+| Terminal surveillance and flight data | M3 terminal | SWIM STDDS | Account not approved |
+| ADS-B history (truth, tracker input) | M2, M3 | adsb.lol history, ODbL | To fetch: the recorded day, Chicago box |
+| ADS-B live, independent of the FAA | M3, M7 | Own receiver (about $40) | Purchase needs Connor |
+| ADS-B history, research grade | M3 | OpenSky, research licence, non-redistributable | Application pending |
+| Winds and temperature aloft | M4 | NOAA HRRR and RAP, GRIB2, open (AWS open data) | To fetch; needs our own GRIB2 decoder |
+| METAR, TAF, PIREP, SIGMET, G-AIRMET | M4, M8 | aviationweather.gov API, public | To fetch. **Kept only 30 days**: the recorded day must be captured before 2026-12-14 |
+| Aircraft performance | M4 | OpenAP, LGPL-3.0 (read at run time, not copied into this Apache-2.0 repository); BADA is licensed and excluded | To fetch |
+| Aircraft registry and types | M3, M4 | FAA releasable registry, public, daily | To fetch |
+| Terrain | M5 | USGS 3DEP 1 arc-second (public domain, bare earth) preferred; Copernicus GLO-30 (surface model) as check | To fetch, about 0.5–1 GB for the region |
+| Obstacles | M5 | FAA Digital Obstacle File, public, 56-day cycle | To fetch, a few MB |
+| Minimum vectoring and instrument altitudes | M5 | FAA MVA/MIA charts, PDF plus AIXM 5.1 and KMZ | To fetch for C90 and neighbours |
+| Encounter models | M5 | MIT LL Airspace-Encounter-Models, reportedly BSD-2 | To fetch after the licence check |
+| Radar formats | M3 | ASTERIX specifications, EUROCONTROL, public | To fetch |
+| Raw radar returns | M3 | Not public | Simulated from ADS-B truth with published error models |
+| ERAM sector boundaries (high and low) | M4, M8 | Not public | Derived from SFDPS ownership changes in our recordings; gap recorded |
+| TBFM adaptation meter points | M4 | Not public (12 of ZAU's do not resolve) | Gap recorded |
+| ERAM and STARS interface documents | M7 | Partly: ERAM–non-US ACC interface document v4 is hosted by ICAO; NAS-MD-311 status unknown | Fetch the ICAO copy; outreach for the rest |
+| Letters of agreement, local procedures | M4, M8 | Not public | Outreach |
+
+Account sign-ups, purchases and every download in this table go to Connor first.
 
 ## 6. Gaps we cannot close alone
 
@@ -239,26 +293,178 @@ can justify and record the assumption.
 
 ## 7. Milestones
 
-Region for M0–M5: Chicago Center (ZAU), where the 2026-11-13 failure began, and its TRACONs.
+Region for M0–M8: Chicago Center (ZAU), where the 2026-11-13 failure began, and its TRACONs
+(C90 first). M9 widens to the whole NAS.
 
-- **M0 — Airspace foundation.** NASR and CIFP parsers; ZAU airspace, sectors, routes and
-  procedures in the internal model; requirements register and traceability tooling.
-- **M1 — Record and replay.** ADS-B and SWIM ingest; a recorded day of ZAU traffic; bit-exact
-  replay harness.
-- **M2 — Tracking.** Surveillance tracker; flight-plan-to-track correlation; track quality
-  metrics against ADS-B truth.
-- **M3 — Safety alerts.** Conflict alert and minimum safe altitude warning, with published
-  thresholds and test cases.
-- **M4 — Shadow mode.** Live operation on the real feeds with the comparator running; per-function
-  difference reports.
-- **M5 — Overload and fault demonstration.** Reproduce the 2026-11-13 failure mode in replay:
-  a new high-rate source added to a legacy-style network. Show the platform shedding load and
-  isolating the fault while surveillance and alerts stay consistent.
-- **M6 — Controller display.** Working display for en route and terminal positions.
+Each milestone lists what it builds and the exit criteria that close it. Exit criteria use the
+three bars in docs/BENCHMARKS.md. A milestone does not close on a missed bar; it closes on a
+beaten bar or on a written diagnosis with a next step that Connor accepts. Every exit result is
+reproducible from a recording, a scoring-code version and a replay state hash.
 
-After M3 the public benchmark (rung 1) can be published. After M4 the platform runs as a
-safety monitor in shadow on live data (rung 3 in miniature), and is far enough along for outreach
-to close the gaps in section 6. M6 makes it usable for training and research (rung 2).
+Relative size is given as S, M or L against M0 (S). No calendar estimates: the decoders went fast
+because each had a published format; the tracker, flight data processing and safety nets need
+design judgment and validation against real behaviour.
+
+### M0 — Airspace foundation (done, 2026-11-14)
+
+NASR and CIFP parsers, ZAU airspace model, requirements register and traceability tooling.
+Report: docs/M0_REPORT.md.
+
+### M1 — Record and replay (S, mostly done)
+
+Built: SCDS adapter; decoders for SFDPS, TBFM, TFMS and FNS; recorder with per-feed health;
+streaming deterministic replay (constant memory, same state hash every run).
+
+To close:
+- The 24-hour four-feed recording of 2026-11-14/15 completes and replays to a stable hash.
+- ADS-B history for the same 24 hours and region (adsb.lol) decoded into the same replay.
+- Weather for the same day captured (HRRR winds, aviationweather.gov products) before it ages
+  out.
+- STDDS added when the account is approved (does not block closing).
+
+Exit: one command replays the day with all sources merged; two runs give the same hash; feed
+health shows no unexplained gaps.
+
+### M2 — Benchmark harness and legacy baseline (M)
+
+Before building any function, measure the system it must beat, on the same traffic, with the
+code that will later score us. This milestone is new: it turns "best in class" from a claim into
+a number for every later milestone.
+
+Builds:
+- Smoothed reference trajectories from ADS-B (NACp 8 or better), with event extraction:
+  meter-fix crossings, runway thresholds, top of climb and descent.
+- Scoring code for every metric in BENCHMARKS §3, written once and used for legacy and ours.
+- The legacy baseline from our recording:
+  - ERAM track positions (SFDPS) against truth: position and velocity error, probability of
+    update, gaps, at ERAM's own timestamps so the 60 s delivery delay does not count against it;
+  - TBFM estimated times against actual meter-fix crossings, by look-ahead;
+  - TFMS estimated times against actual departure and arrival;
+  - ERAM route conversion against the route actually flown.
+- The missing standards: ESASSP Vol 1 tables, EUROCONTROL STCA specification, JO 7110.65 and
+  JO 7210.3 sections, ACAS X validation report, ERAM conflict probe accuracy studies.
+
+Exit: BENCHMARKS §3 has a measured legacy value for every row where SWIM carries the legacy
+output, and a sourced floor for every row a standard covers. This is the first public result
+(rung 1): a reproducible measurement of ERAM and TBFM against independent truth.
+
+### M3 — Surveillance tracking (L)
+
+Builds:
+- Multi-sensor tracker: interacting multiple models, ADS-B weighted by its own reported
+  integrity (NACp, NIC, SIL), radar and multilateration as independent checks.
+- ASTERIX categories 021 (ADS-B), 048 (radar) and 062 (system tracks), in and out.
+- Simulated radar from ADS-B truth using published error models, so radar-only and mixed
+  traffic can be tested without real radar.
+- ADS-B integrity checking: kinematic plausibility, cross-sensor agreement, and receiver timing
+  where we have our own receivers.
+- Flight-plan-to-track correlation with every uncorrelated track shown.
+
+Exit:
+- Every ESASSP indicator meets the Recommended value on the recorded day.
+- Position RMS, velocity RMS, probability of update and gaps all better than ERAM's measured
+  values (M2) on the same traffic.
+- Zero falsely confirmed tracks near true tracks over the day; track swaps and initiation delay
+  reported.
+- Injected spoofs: detection at least 95% with false positives at most 1e-3, confusion matrix
+  published.
+- Capacity: all 20 centres' peak traffic (ERAM: 1,900 tracks and 64 radars per centre) tracked
+  in real time on one ordinary machine, with measured latency.
+- Shortcomings LS-101 to LS-104 each have a passing test.
+
+### M4 — Flight data processing and trajectory (L)
+
+The largest part of ERAM, missing from the earlier plan.
+
+Builds:
+- Flight plan model and lifecycle: filing, amendment, cancellation, departure, arrival, with
+  FIXM input and ICAO flight plan format; duplicate-plan detection.
+- Route conversion against NASR and CIFP, including preferred routes and procedures, with
+  duplicate waypoint names resolved and tested (LS-007).
+- One 4D trajectory per flight, shared by every function: OpenAP performance, HRRR winds,
+  published procedures and restrictions, with uncertainty carried along.
+- Track and sector ownership, handoffs and point-outs as a state machine with properties proved.
+- Conformance monitoring: route, cleared level and speed adherence, with route changes delivered
+  to every affected sector (LS-201).
+- Conflict probe (medium term, up to 20 minutes) on the shared trajectory.
+- Arrival time estimates at meter fixes.
+
+Exit:
+- Trajectory error at 5, 10 and 20 minutes (along-track, cross-track, vertical) better than the
+  legacy estimates measured in M2.
+- Meter-fix time error smaller in spread than TBFM's measured on the same day; top of climb and
+  descent errors at or better than the best published (5.2 s / 6.6 s mean absolute error).
+- Route conversion agrees with ERAM's or each disagreement is explained.
+- Conflict probe missed and false alert rates both reported against the legacy floor.
+- Every input message type has a stated work bound; the U-2 plan (LS-001) and the duplicate
+  waypoint plan (LS-007) pass as replays.
+
+### M5 — Safety nets (L)
+
+Builds: conflict alert (short term), minimum safe altitude warning, approach path monitoring and
+area proximity warning (special use and temporary restricted airspace from NASR and NOTAMs),
+on 3DEP terrain, the FAA obstacle file and MVA/MIA data.
+
+Exit:
+- Monte Carlo evaluation over the MIT LL encounter models: risk ratio, missed alerts and
+  nuisance alerts against a baseline run of legacy-style logic; nuisance alerts reduced without
+  any increase in missed alerts.
+- Warning time at least the EUROCONTROL specification value, and at least ERAM/STARS
+  parameters where published.
+- Recorded traffic: every recorded loss of separation and low-altitude event is alerted;
+  nuisance alerts counted and each one classified.
+- The geometric core of each safety net proved correct, and its implementation shown free of
+  overflow, in the DAIDALUS manner.
+
+After M5 the full public benchmark (rung 1) is published: tracking, prediction and alerting,
+ours against legacy, on open data.
+
+### M6 — Resilience and overload (M)
+
+Builds: active-active replicas running the same deterministic state machine; staged updates
+with automatic rollback; load shedding in a written order; feed degradation detection; legacy
+interface emulators that misbehave on purpose (INTERFACES IF-P2).
+
+Exit:
+- Every incident in docs/LEGACY_SHORTCOMINGS.md replays as a scenario and passes: we neither
+  cause nor amplify the failure, and surveillance and alerts stay consistent. That includes the
+  2026-11-13 failure mode (a new high-rate source into a legacy-style network).
+- Failover with no lost state and no gap in surveillance updates, under fault injection.
+- Availability argued against 0.99999 for safety-critical services from measured failover and
+  fault-injection results, not asserted.
+
+### M7 — Live shadow (M)
+
+Live operation on SWIM and our own ADS-B receivers with the comparator running, producing a
+daily difference report against ERAM by function. This is rung 3 in miniature, and the point
+at which outreach for the gaps in section 6 starts, with results in hand.
+
+Exit: 30 consecutive days live without an unexplained difference or an unhandled feed event;
+daily reports published.
+
+### M8 — Controller display (M)
+
+En route and terminal positions on the KMS backend: data blocks placed without overlap in
+holding and on final (LS-401), alerts on the data block (LS-302), settings that persist per
+position (LS-402), degraded modes with the same display and commands (LS-005).
+
+Exit: evaluation by people who have worked ERAM or STARS positions, on recorded traffic, with
+their findings recorded and acted on. This makes the platform usable for training and research
+(rung 2).
+
+### M9 — Whole NAS (M)
+
+Adaptation for all 20 centres and the TRACONs generated from NASR and CIFP each AIRAC cycle,
+with an automatic diff of what changed; whole-NAS replay and live shadow at real time on one
+machine.
+
+Exit: every centre and TRACON adapts with no hand edits, or each hand edit is recorded with its
+reason; whole-NAS peak load runs in real time with measured headroom.
+
+### Dependencies
+
+M1 → M2 → M3 → M4 → M5 → M6 → M7, with M8 alongside from M3 onward (the display already exists in
+early form) and M9 after M7. M3 and M4 can overlap once M2's scoring code exists.
 
 ## 8. Prior work to learn from
 

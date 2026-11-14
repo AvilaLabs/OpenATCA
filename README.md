@@ -36,7 +36,9 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 
 | Path | What |
 |---|---|
-| [SCOPE.md](SCOPE.md) | What the project is, how it would be used, what is in and out of scope |
+| [SCOPE.md](SCOPE.md) | What the project is, how it would be used, what is in and out of scope, data inventory, milestones |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | How "best in class" is measured: published floor, legacy measured on the same traffic, best published result |
+| [docs/LEGACY_SHORTCOMINGS.md](docs/LEGACY_SHORTCOMINGS.md) | Documented ERAM and STARS failures, each turned into a requirement or test scenario |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements register; every requirement has a test |
 | [docs/RULESET.md](docs/RULESET.md) | The engineering law every change is reviewed against |
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
