@@ -104,6 +104,14 @@ pub enum QueryError {
     TooManyTiles,
     /// The region would visit more than [`MAX_QUERY_SAMPLES`] samples.
     TooManySamples,
+    /// A conservative circle reaches a pole or would cross the antimeridian, where longitude is
+    /// not a plane; the query is refused rather than answered from one side only.
+    LongitudeWraps,
+    /// A conservative query was given a tile set with no tiles.
+    NoTiles,
+    /// A conservative query was given tiles that do not share one lattice (spacing equal to a
+    /// part in 1e9, positions a whole number of steps apart to a thousandth of a step).
+    TilesNotAligned,
 }
 
 impl std::fmt::Display for QueryError {
@@ -114,6 +122,9 @@ impl std::fmt::Display for QueryError {
             QueryError::BadPolygon => write!(f, "polygon needs 3 to {MAX_POLYGON_VERTICES} vertices within 180 degrees of longitude"),
             QueryError::TooManyTiles => write!(f, "more than {MAX_TILES} tiles"),
             QueryError::TooManySamples => write!(f, "query region too large"),
+            QueryError::LongitudeWraps => write!(f, "area reaches a pole or crosses the antimeridian"),
+            QueryError::NoTiles => write!(f, "tile set is empty"),
+            QueryError::TilesNotAligned => write!(f, "tiles do not share one sample lattice"),
         }
     }
 }
@@ -130,7 +141,7 @@ pub fn grid_sample(g: &Grid, col: u32, row: u32) -> Option<f32> {
         .copied()
 }
 
-fn valid_coord(lat: f64, lon: f64) -> bool {
+pub(crate) fn valid_coord(lat: f64, lon: f64) -> bool {
     lat.is_finite()
         && lon.is_finite()
         && (-90.0..=90.0).contains(&lat)
@@ -411,7 +422,7 @@ fn max_in_radius(
 }
 
 /// True when (`lat`, `lon`) is inside the polygon, even-odd rule in the latitude/longitude plane.
-fn in_polygon(poly: &[(f64, f64)], lat: f64, lon: f64) -> bool {
+pub(crate) fn in_polygon(poly: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     let mut inside = false;
     let mut j = poly.len().saturating_sub(1);
     for (i, &(yi, xi)) in poly.iter().enumerate() {
@@ -424,7 +435,7 @@ fn in_polygon(poly: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     inside
 }
 
-fn check_polygon(poly: &[(f64, f64)]) -> Result<(f64, f64, f64, f64), QueryError> {
+pub(crate) fn check_polygon(poly: &[(f64, f64)]) -> Result<(f64, f64, f64, f64), QueryError> {
     if poly.len() < 3 || poly.len() > MAX_POLYGON_VERTICES {
         return Err(QueryError::BadPolygon);
     }

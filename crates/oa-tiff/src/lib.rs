@@ -29,6 +29,7 @@
 //!
 //! Every input is bounded by the constants below and refused with a typed error beyond them.
 
+mod conservative;
 mod geotiff;
 mod grid;
 mod lzw;
@@ -37,8 +38,14 @@ mod tiff;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_conservative;
+#[cfg(test)]
 mod testutil;
 
+pub use conservative::{
+    grid_max_in_polygon_conservative, grid_max_in_radius_conservative,
+    max_elevation_in_polygon_conservative, max_elevation_in_radius_conservative, TerrainMax,
+};
 pub use grid::{
     elevation_at, grid_elevation_at, grid_max_in_polygon, grid_max_in_radius, grid_sample,
     max_elevation_in_polygon, max_elevation_in_radius, tileset_covers, Elevation, Grid, MaxQuery,
