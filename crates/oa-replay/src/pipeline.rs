@@ -8,9 +8,13 @@
 //!    already seen is counted as a time regression and the clock stays), the table's eviction
 //!    cadence runs ([`advance_time`]), and a checkpoint is recorded if one is due;
 //! 2. only MESSAGE frames carry feed data; REJECT and STATUS frames are counted;
-//! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS) or oa-tbfm (TBFM);
-//!    every failure is counted under its [`ErrKind`];
-//! 4. each decoded row is applied to the flight table ([`apply_sfdps`], [`apply_tbfm`]).
+//! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS) or oa-tbfm (TBFM), or
+//!    decoded with `oa_adsb::decode_payload` (ADS-B, refused whole when malformed); every failure
+//!    is counted under its [`ErrKind`];
+//! 4. each decoded row is applied to the flight table ([`apply_sfdps`], [`apply_tbfm`]) or, for
+//!    ADS-B, to the aircraft table ([`apply_adsb`]).
+//!
+//! The ADS-B table is part of the state hash only once an ADS-B frame has been fed ([`replay_hash`]).
 //!
 //! Checkpoints fall on multiples of `checkpoint_ns` of replay time: the first frame at or after
 //! a boundary records the state as it stood before that frame (after the table's own sweep at
@@ -21,12 +25,16 @@
 //! [`new_pipeline`]. The checkpoint list grows with the length of the run (one entry per
 //! interval of replay time), the stated exception for an offline harness (C6).
 
+use oa_adsb::{decode_payload, reports_clear, reports_len, PayloadError, Reports};
 use oa_feed::Kind;
 use oa_fixm::{clear_events, new_events, Decoder, Events, FixmError, Limits, REJECT_COUNT};
-use oa_sha256::Digest;
+use oa_sha256::{Digest, Sha256};
 use oa_tbfm::{clear_rows, decode_doc, new_rows, rows_len, DocError, Rows, MSG_KIND_COUNT};
 use oa_xml::Parser;
 
+use crate::adsb::{
+    adsb_hash_into, apply_adsb, new_adsb_table, AdsbApplied, AdsbTable, ADSB_CAPACITY,
+};
 use crate::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 use crate::hash::state_hash;
@@ -44,13 +52,16 @@ pub enum FeedKind {
     Tfms = 2,
     /// SWIM FNS notices. Not decoded yet: frames are counted in `not_applied`.
     Fns = 3,
+    /// ADS-B position reports (`docs/ADSB_PAYLOAD.md`). Sorts after every SWIM feed in the merge
+    /// tie-break (OA-RPL-021): at an equal receive time, SWIM frames come first.
+    Adsb = 4,
 }
 
 /// Number of [`FeedKind`] values.
-pub const FEED_COUNT: usize = 4;
+pub const FEED_COUNT: usize = 5;
 
 /// Display names, indexed by `FeedKind as usize`.
-pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns"];
+pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns", "adsb"];
 
 /// Default spacing of checkpoints: 10 s of replay time.
 pub const DEFAULT_CHECKPOINT_NS: i64 = 10 * NS_PER_S;
@@ -113,10 +124,14 @@ pub struct Pipeline {
     pub cfg: PipelineConfig,
     /// The flight state.
     pub table: FlightTable,
+    /// The ADS-B aircraft table (empty, and left out of the state hash, until an ADS-B frame is
+    /// fed).
+    pub adsb: AdsbTable,
     parser: Parser,
     fixm: Decoder,
     events: Events,
     rows: Rows,
+    reports: Reports,
     /// Replay time now, ns; `i64::MIN` before the first frame.
     pub replay_ns: i64,
     next_checkpoint_ns: i64,
@@ -157,10 +172,12 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
     Ok(Pipeline {
         cfg,
         table,
+        adsb: new_adsb_table(ADSB_CAPACITY),
         parser,
         fixm: Decoder::new(Limits::default()),
         events: new_events(DOC_ROW_CAPACITY, DOC_STRING_BYTES),
         rows: new_rows(DOC_ROW_CAPACITY),
+        reports: Reports::default(),
         replay_ns: i64::MIN,
         next_checkpoint_ns: i64::MIN,
         checkpoints: Vec::new(),
@@ -195,8 +212,24 @@ pub fn snapshot(p: &Pipeline) -> Checkpoint {
         frames: frames_total(p),
         rows_applied: rows_applied_total(p),
         flights: p.table.live as u64,
-        hash: state_hash(&p.table),
+        hash: replay_hash(p),
     }
+}
+
+/// The hash of the whole replay state. Until an ADS-B frame has been fed this is exactly
+/// [`state_hash`] of the flight table, so replays without ADS-B hash as they always did. After
+/// that it is SHA-256 over the tag `OATSA`, the flight-table hash and the ADS-B table's
+/// serialisation ([`adsb_hash_into`]).
+pub fn replay_hash(p: &Pipeline) -> Digest {
+    let flights = state_hash(&p.table);
+    if p.frames.get(FeedKind::Adsb as usize).copied().unwrap_or(0) == 0 {
+        return flights;
+    }
+    let mut h = Sha256::new();
+    let _ = h.update(b"OATSA");
+    let _ = h.update(&flights);
+    adsb_hash_into(&mut h, &p.adsb);
+    h.finalize()
 }
 
 /// Adds `n` to an error count (for failures found before the pipeline, such as frame errors).
@@ -251,6 +284,7 @@ pub fn process_frame(
     match feed {
         FeedKind::Sfdps => process_sfdps(p, payload, now),
         FeedKind::Tbfm => process_tbfm(p, payload, now),
+        FeedKind::Adsb => process_adsb(p, payload),
         FeedKind::Tfms | FeedKind::Fns => bump(&mut p.not_applied, feed, 1),
     }
 }
@@ -318,6 +352,32 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
         let a = apply_sfdps(&mut p.table, &p.events, i, now);
         bump(&mut p.rows_seen, FeedKind::Sfdps, 1);
         note(p, FeedKind::Sfdps, a);
+    }
+}
+
+fn process_adsb(p: &mut Pipeline, payload: &[u8]) {
+    reports_clear(&mut p.reports);
+    if let Err(e) = decode_payload(payload, &mut p.reports) {
+        let k = match e {
+            PayloadError::Length => ErrKind::AdsbLength,
+            PayloadError::Magic => ErrKind::AdsbMagic,
+            PayloadError::Layout => ErrKind::AdsbLayout,
+            PayloadError::TooManyRows => ErrKind::AdsbTooManyRows,
+            PayloadError::BadRecord(_) => ErrKind::AdsbBadRecord,
+            PayloadError::Range => ErrKind::AdsbInternal,
+        };
+        count_error(&mut p.errors, k, 1);
+        return;
+    }
+    for i in 0..reports_len(&p.reports) {
+        let a = apply_adsb(&mut p.adsb, &p.reports, i);
+        bump(&mut p.rows_seen, FeedKind::Adsb, 1);
+        match a {
+            AdsbApplied::New | AdsbApplied::Updated => bump(&mut p.rows_applied, FeedKind::Adsb, 1),
+            AdsbApplied::OutOfOrder => bump(&mut p.rows_out_of_order, FeedKind::Adsb, 1),
+            AdsbApplied::TableFull => bump(&mut p.rows_refused_full, FeedKind::Adsb, 1),
+            AdsbApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
+        }
     }
 }
 

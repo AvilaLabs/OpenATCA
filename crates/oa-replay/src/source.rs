@@ -8,7 +8,9 @@
 //!   file is inflated as it is read, so only a small piece of decoded output is ever pending.
 //! * [`merge_streams`] merges the streams with a fixed-capacity min-heap holding each stream's
 //!   next frame, keyed by `(recv_unix_ns, feed kind, seq, stream index, byte offset)`. The first
-//!   three are the order of OA-RPL-021; the last two make it total for any input.
+//!   three are the order of OA-RPL-021; the last two make it total for any input. The feed kind
+//!   order is SFDPS, TBFM, TFMS, FNS, ADS-B, so at an equal receive time ADS-B comes after every
+//!   SWIM feed.
 //! * **Frames that go backwards in time inside one stream are not reordered.** A recording is in
 //!   receive order except for rare regressions (a bridge clock step, a redelivery). Putting such
 //!   a frame in its place would need unbounded lookahead: the frame could belong arbitrarily far

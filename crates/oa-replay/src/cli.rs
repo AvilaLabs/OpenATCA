@@ -1,8 +1,8 @@
 //! Command-line parsing for `oa-replay`. Core (pure): a function from arguments to a command.
 //!
 //! ```text
-//! oa-replay (--sfdps | --tbfm | --tfms | --fns <file> | --sfdps-dir | --tbfm-dir | --tfms-dir
-//!           | --fns-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
+//! oa-replay (--sfdps | --tbfm | --tfms | --fns | --adsb <file> | --sfdps-dir | --tbfm-dir
+//!           | --tfms-dir | --fns-dir | --adsb-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
 //!           [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
 //!           [--quiet]
 //! ```
@@ -49,8 +49,8 @@ pub struct Command {
 }
 
 /// The usage text.
-pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns <file> | \
---sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir <dir>)... \
+pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <file> | \
+--sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir|--adsb-dir <dir>)... \
 [--checkpoint-secs <n>] [--max-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
 [--chunk-bytes <n>] [--progress-minutes <n>] [--quiet]";
 
@@ -72,8 +72,8 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--sfdps" | "--tbfm" | "--tfms" | "--fns" | "--sfdps-dir" | "--tbfm-dir"
-            | "--tfms-dir" | "--fns-dir" => {
+            "--sfdps" | "--tbfm" | "--tfms" | "--fns" | "--adsb" | "--sfdps-dir" | "--tbfm-dir"
+            | "--tfms-dir" | "--fns-dir" | "--adsb-dir" => {
                 let v = it.next().ok_or_else(|| format!("missing value for {a}"))?;
                 let name = a.trim_start_matches("--");
                 let (name, dir) = match name.strip_suffix("-dir") {
@@ -84,6 +84,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
                     "sfdps" => FeedKind::Sfdps,
                     "tbfm" => FeedKind::Tbfm,
                     "tfms" => FeedKind::Tfms,
+                    "adsb" => FeedKind::Adsb,
                     _ => FeedKind::Fns,
                 };
                 inputs.push(Input {

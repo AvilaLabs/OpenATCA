@@ -881,6 +881,43 @@ the FAA event extension).
 - **OA-RPL-029** TFMS and FNS frames are counted per feed in a "not yet applied" bucket until their
   decoders exist; they change no flight state and raise no error.
 
+### ADS-B in the replay (oa-replay)
+
+ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one time-ordered stream
+(input path of the M2 benchmark, `docs/M2_DESIGN.md`).
+
+- **OA-RPL-030** The ADS-B aircraft table keeps, per address (the 24-bit address, with the
+  non-ICAO bit making a separate key), the latest report (time, latitude, longitude, barometric
+  altitude, ground speed, track, flags, source type) and counts; callsign, squawk, category and the
+  quality fields (NIC, NACp, NACv, SIL, SIL type, version, GVA, SDA) are carried forward from
+  reports that have them.
+- **OA-RPL-031** The ADS-B table is a struct-of-arrays of fixed capacity (65,536 aircraft) allocated
+  once; a new address when it is full is refused and counted (per table and per feed), known
+  aircraft keep updating, and no column moves or grows.
+- **OA-RPL-032** An ADS-B report older than the aircraft's held report is refused whole and counted
+  (per aircraft, in total and per feed); an equal time applies.
+- **OA-RPL-033** The ADS-B table is part of the replay state hash (`replay_hash`, used by every
+  checkpoint and the final hash) in address order, so the hash does not depend on the order
+  aircraft were first seen, and changes with any column or count.
+- **OA-RPL-034** Until an ADS-B frame has been fed the replay hash equals the flight-table hash, so
+  the checkpoints and final hash of every replay without ADS-B are unchanged (pinned to the value the
+  code gave before ADS-B existed).
+- **OA-RPL-035** An ADS-B payload that `oa_adsb::decode_payload` refuses (length, magic, layout,
+  too many records, a record out of range) is counted under its own error kind and applies none of
+  its reports; no corruption of a payload panics or half-applies it.
+- **OA-RPL-036** ADS-B is a feed kind of its own that sorts after TFMS and FNS in the merge key, so
+  at an equal receive time SWIM frames come first and ADS-B last, whatever order the streams were
+  named in; the merged order is still the global sort of the total key (OA-RPL-021).
+- **OA-RPL-037** A mixed SFDPS, TBFM and ADS-B replay of hand-made recordings gives the same
+  checkpoints, counters and final hash in every stream order and read size, with the right frame,
+  row, aircraft and error counts.
+- **OA-RPL-038** `--adsb <file>` and `--adsb-dir <dir>` give a file or a directory of rotated
+  recordings the ADS-B feed kind; the binary prints the ADS-B feed line, an `adsb` table line and
+  the errors, identical run to run and across read sizes and rotation.
+- **OA-RPL-039** Replaying a real ADS-B clip written by `oa-adsb-clip` (`OPENATCA_ADSB_CLIP`) twice
+  and with another read size gives identical checkpoints and final hash, with no error and no refused
+  aircraft (skipped if unset).
+
 ## M5 — Terrain and obstacles
 
 ### GeoTIFF elevation (oa-tiff)

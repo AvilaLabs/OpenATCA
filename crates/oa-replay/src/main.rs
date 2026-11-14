@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `oa-replay`: merges recorded SWIM feeds into one ordered stream, replays it through the
+//! `oa-replay`: merges recorded SWIM feeds and ADS-B clips into one ordered stream, replays it through the
 //! flight-state pipeline and prints the checkpoints and a final summary. Shell (B1): reads
 //! files, reads a clock for the throughput line, writes stdout.
 //!
@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use oa_replay::cli::{parse_args, USAGE};
 use oa_replay::{
-    errors_total, frames_total, list_recordings, new_pipeline, rows_applied_total, run_streams,
-    snapshot, spec_from_paths, state_hash, Checkpoint, Pipeline, ERR_COUNT, ERR_NAMES, FEED_NAMES,
-    NS_PER_S,
+    errors_total, frames_total, list_recordings, new_pipeline, replay_hash, rows_applied_total,
+    run_streams, snapshot, spec_from_paths, Checkpoint, FeedKind, Pipeline, ERR_COUNT, ERR_NAMES,
+    FEED_NAMES, NS_PER_S,
 };
 use oa_sha256::to_hex;
 
@@ -127,6 +127,10 @@ fn checkpoint_line(c: &Checkpoint) -> String {
     )
 }
 
+fn adsb_used(p: &Pipeline) -> bool {
+    p.frames.get(FeedKind::Adsb as usize).copied().unwrap_or(0) > 0
+}
+
 fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
     let mut s = String::new();
     s.push_str(&format!(
@@ -164,6 +168,13 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
         st.conflicts,
         st.key_reassigned
     ));
+    if adsb_used(p) {
+        let a = &p.adsb.stats;
+        s.push_str(&format!(
+            "adsb aircraft={} capacity={} applied={} out_of_order={} refused_full={}\n",
+            p.adsb.live, p.adsb.capacity, a.applied, a.out_of_order, a.refused_full
+        ));
+    }
     if errors_total(&p.errors) == 0 {
         s.push_str("errors none\n");
     } else {
@@ -184,7 +195,7 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
         "final t_ns={} flights={} state_hash={}\n",
         fin.replay_ns,
         fin.flights,
-        to_hex(&state_hash(&p.table))
+        to_hex(&replay_hash(p))
     ));
     s
 }

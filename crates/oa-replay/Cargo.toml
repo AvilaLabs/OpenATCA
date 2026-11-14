@@ -17,6 +17,7 @@ oa-fixm = { path = "../oa-fixm" }
 oa-tbfm = { path = "../oa-tbfm" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-zip = { path = "../oa-zip" }
+oa-adsb = { path = "../oa-adsb" }
 
 [dev-dependencies]
 # Workspace crate: compresses test recordings to .oaf.gz.
