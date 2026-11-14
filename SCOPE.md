@@ -421,7 +421,11 @@ Exit:
 
 Builds: conflict alert (short term), minimum safe altitude warning, approach path monitoring and
 area proximity warning (special use and temporary restricted airspace from NASR and NOTAMs),
-on 3DEP terrain, the FAA obstacle file and MVA/MIA data.
+on 3DEP terrain, the FAA obstacle file and MVA/MIA data. Terrain maxima used for warnings must be
+conservative: every terrain cell that touches a protection volume counts (not only samples whose
+centres fall inside it), and the possible height of terrain between samples is bounded, not
+interpolated away. The current `oa-tiff` radius query counts sample centres only and is
+therefore not yet the warning-grade query.
 
 Exit:
 - Monte Carlo evaluation over the MIT LL encounter models: risk ratio, missed alerts and
