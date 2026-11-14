@@ -283,8 +283,9 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
         b.to_str().unwrap(),
         out.to_str().unwrap(),
     );
-    // Both parts: complete, 9 reports, sorted by time.
-    let o = run(&["--out", so, sa, sb]);
+    // Both parts: complete, 9 reports, sorted by time (60 s frames: the clusters at +2 s and
+    // +1000 s are two frames).
+    let o = run(&["--out", so, "--frame-ms", "60000", sa, sb]);
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(o.status.success(), "{err}");
     assert!(
@@ -293,7 +294,7 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     );
     assert!(err.contains("traces_refused=2"), "{err}");
     let (_, r, frames) = read_frames(&out);
-    assert_eq!((reports_len(&r), frames), (9, 1));
+    assert_eq!((reports_len(&r), frames), (9, 2));
     assert!(r.time_ns.windows(2).all(|w| w[0] <= w[1]));
     // ffffff's good row is at +2 s, before the others' first report at +1000 s.
     assert_eq!(r.icao[0], 0xffffff);
@@ -324,10 +325,11 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     let o = run(&["--out", so, "--allow-truncated", sa]);
     assert!(o.status.success());
     // Frames to standard output with `--out -`, and nothing else there.
-    let o = run(&["--out", "-", sa, sb]);
+    let o = run(&["--out", "-", "--frame-ms", "60000", sa, sb]);
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).unwrap();
     rd.push(&o.stdout);
+    assert!(rd.next().unwrap().is_ok());
     assert!(rd.next().unwrap().is_ok());
     assert!(rd.next().is_none());
     // Argument errors exit 2.
@@ -342,6 +344,103 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     }
     let o = run(&["--out", so, "/nonexistent/part.tar"]);
     assert_eq!(o.status.code(), Some(1));
+}
+
+/// A tar with one trace of `n` rows at one-second steps, and the path it is written to.
+fn one_trace_tar(name: &str, n: usize) -> String {
+    let mut t = Vec::new();
+    let rows = in_box(n, 41.0);
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    tar_entry(
+        &mut t,
+        "./traces/aa/trace_full_aaaaaa.json",
+        trace_json("aaaaaa", &rows).as_bytes(),
+    );
+    t.resize(t.len() + 2 * BLOCK, 0);
+    let p = tmp(name);
+    std::fs::write(&p, &t).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+// REQ: OA-ADSB-017
+#[test]
+fn clip_frames_split_by_report_time_and_keep_every_report_once_in_order() {
+    let tar = one_trace_tar("span.tar", 25);
+    let out = tmp("span.oaf");
+    let so = out.to_str().unwrap();
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let clip = |extra: &[&str]| {
+        let mut a = vec!["--out", so];
+        a.extend_from_slice(extra);
+        a.push(&tar);
+        let o = Command::new(exe).args(&a).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        read_frames(&out)
+    };
+    // Reports are one second apart; the default 1000 ms span puts each in its own frame.
+    let (_, r, frames) = clip(&[]);
+    assert_eq!((reports_len(&r), frames), (25, 25));
+    let times = r.time_ns.clone();
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000_000_000));
+    // 5000 ms: reports 0..5, 5..10, ... (the sixth is exactly 5 s after the first).
+    let (bytes, r, frames) = clip(&["--frame-ms", "5000"]);
+    assert_eq!((reports_len(&r), frames), (25, 5));
+    assert_eq!(r.time_ns, times);
+    // Each frame's receive time is its first report's time and it holds five reports.
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let mut rd = FrameReader::new(&mut buf).unwrap();
+    rd.push(&bytes);
+    let mut k = 0;
+    while let Some(f) = rd.next() {
+        let f = f.unwrap();
+        assert_eq!(f.recv_unix_ns, times[k * 5]);
+        let mut one = Reports::default();
+        assert_eq!(decode_payload(f.payload, &mut one).unwrap(), 5);
+        k += 1;
+    }
+    // 2500 ms: 3 reports per frame (0, 1, 2 s), the fourth is 3 s later.
+    let (_, r, frames) = clip(&["--frame-ms", "2500"]);
+    assert_eq!((reports_len(&r), frames), (25, 9));
+    assert_eq!(r.time_ns, times);
+    // The largest span holds all of them.
+    let (_, r, frames) = clip(&["--frame-ms", "60000"]);
+    assert_eq!((reports_len(&r), frames), (25, 1));
+    assert_eq!(r.time_ns, times);
+}
+
+// REQ: OA-ADSB-018
+#[test]
+fn clip_refuses_a_frame_span_outside_1_to_60000_ms() {
+    let tar = one_trace_tar("flag.tar", 3);
+    let out = tmp("flag.oaf");
+    let so = out.to_str().unwrap();
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    for bad in [
+        &["--frame-ms", "0"][..],
+        &["--frame-ms", "60001"],
+        &["--frame-ms", "-5"],
+        &["--frame-ms", "1.5"],
+        &["--frame-ms", "soon"],
+        &["--frame-ms"],
+    ] {
+        let mut a = vec!["--out", so];
+        a.extend_from_slice(bad);
+        a.push(&tar);
+        // `--frame-ms` last in the list takes the part as its value and then has no parts.
+        let o = Command::new(exe).args(&a).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{bad:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("usage"),
+            "{bad:?}"
+        );
+    }
+    for ok in ["1", "60000"] {
+        let o = Command::new(exe)
+            .args(["--out", so, "--frame-ms", ok, &tar])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{ok}");
+    }
 }
 
 // REQ: OA-ADSB-016

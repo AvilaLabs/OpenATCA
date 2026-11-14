@@ -21,7 +21,12 @@ of ADS-B reports is a feed of its own kind: one file per feed, as with SFDPS, TB
   milliseconds.
 * Reports are sorted by `(time, address)` across the whole file, so `recv_unix_ns` never
   decreases from one frame to the next.
-* At most 60 000 reports per frame (header plus records stay under the 4 MiB payload limit).
+* A frame holds the reports from its first report up to, but not including, the first report
+  that is at least `--frame-ms` (default 1000) after it, so each frame spans under one second
+  of report time by default and `oa-replay` merges ADS-B with the SWIM feeds at that
+  granularity. A frame also ends at 60 000 reports (header plus records stay under the 4 MiB
+  payload limit). Readers do not depend on this: a clip with any grouping, such as the earlier
+  one of 60 000 reports per frame, decodes the same.
 
 ## Payload
 
@@ -78,12 +83,13 @@ whose source is not 0 to 13 or 255 is refused whole (`PayloadError`) and yields 
 
 ```
 oa-adsb-clip --out <file|-> [--box lat_min,lat_max,lon_min,lon_max]
-             [--from <time>] [--to <time>] [--allow-truncated] <part>...
+             [--from <time>] [--to <time>] [--frame-ms <n>] [--allow-truncated] <part>...
 ```
 
 Streams the parts of one archive in order (or a single tar), keeps reports inside the box
 (default: ZAU, 38.5 to 46.5 N, 83.5 to 93.5 W, edges included) and the window `[from, to)`,
-sorts by time and writes frames. Reports are held in memory until the end (at most 40 Mi; the
+sorts by time and writes frames of at most `--frame-ms` milliseconds of report time (1 to 60000,
+default 1000; anything else is refused with exit 2). Reports are held in memory until the end (at most 40 Mi; the
 tool stops with an error rather than dropping any). Counts, the number of distinct aircraft, the
 `nac_p` figures and the position-jump check go to standard error. Exit codes: 0 done, 1 error, 2
 bad arguments, 3 the parts ended early (only the first part of a split archive, for instance) and
