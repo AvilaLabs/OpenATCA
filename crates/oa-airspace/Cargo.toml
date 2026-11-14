@@ -1,0 +1,16 @@
+[package]
+name = "oa-airspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oa-csv = { path = "../oa-csv" }
+oa-geo = { path = "../oa-geo" }
+oa-nasr = { path = "../oa-nasr" }
+oa-arinc424 = { path = "../oa-arinc424" }

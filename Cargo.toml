@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oa-csv",
+    "crates/oa-geo",
+    "crates/oa-nasr",
+    "crates/oa-arinc424",
+    "crates/oa-airspace",
+    "tools/oa-trace",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.89"
+authors = ["Avila Labs"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1

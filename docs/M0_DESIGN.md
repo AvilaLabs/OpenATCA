@@ -1,0 +1,84 @@
+# M0 — Airspace foundation: design
+
+Status: approved to build 2026-11-13.
+
+## Goal
+
+Turn the FAA's public aeronautical data for one 28-day cycle into a validated, deterministic
+in-memory model of an ARTCC's airspace, starting with Chicago Center (ZAU). Every later
+milestone (tracking, alerts, shadow mode) reads its adaptation data from this model.
+
+This is the "site adaptation generated from source data" row of SCOPE.md section 3a: what
+legacy systems maintain by hand per facility, we generate, check, hash and diff every cycle.
+
+## Inputs (cycle 2026-10-29)
+
+| Source | File | What we take |
+|---|---|---|
+| NASR CSV | `ARB_BASE.csv`, `ARB_SEG.csv` | ARTCC HIGH and LOW boundaries, FIR/CTA/UTA |
+| NASR CSV | `FIX_BASE.csv`, `FIX_NAV.csv` | Named fixes and their navaid references |
+| NASR CSV | `NAV_BASE.csv` | VOR, VORTAC, NDB, TACAN, DME |
+| NASR CSV | `APT_BASE.csv`, `APT_RWY.csv`, `APT_RWY_END.csv` | Airports, runways, thresholds, elevations |
+| NASR CSV | `AWY_BASE.csv`, `AWY_SEG_ALT.csv` | Airways with MEAs and segment data |
+| NASR CSV | `STAR_*.csv`, `DP_*.csv` | Arrival and departure route structure |
+| NASR CSV | `CLS_ARSP.csv` | Which airports have class B/C/D/E |
+| NASR CSV | `*_CSV_DATA_STRUCTURE.csv` | The FAA's own schema: max lengths, types, nullability |
+| CIFP | `FAACIFP18` (ARINC 424-18, FAA exceptions in the CIFP Readme) | Airports, runways, navaids, waypoints, airways, SIDs/STARs/approaches as coded legs, class B/C/D shapes (UC), special use airspace (UR), Grid MORA (AS) |
+
+Raw downloads live outside the repo in `../openatca-data/raw/<source>-<cycle>/`, with SHA-256
+recorded in `DATA.md`. Tests that need full files read the directory named by the
+`OPENATCA_DATA` environment variable and skip with a clear message when it is unset. Unit tests
+use small excerpts of the real files committed as fixtures (FAA aeronautical data is public).
+
+## Crates
+
+All crates: Rust 2021 edition, `#![forbid(unsafe_code)]`, **no dependencies of any kind**
+(including dev-dependencies). Clippy clean with `-D warnings`.
+
+| Crate | Role |
+|---|---|
+| `oa-csv` | RFC 4180 reader. Streaming, header-indexed access, hard limits on record and field size, errors carry line numbers. |
+| `oa-geo` | WGS-84 geodesy: validated `LatLon`, DMS parsing, ellipsoidal inverse and direct problems (Karney's method or Vincenty with a convergence guard), great-circle and rhumb segments, point-in-polygon on the ellipsoid surface. |
+| `oa-nasr` | Typed NASR CSV records for the files above. Columns are resolved by header name, never position. Every file is validated against the FAA's `*_CSV_DATA_STRUCTURE.csv`. |
+| `oa-arinc424` | CIFP parser. Fixed-width 132-column records, continuation records, header records, the record-number and cycle trailer. Field positions are tested against real records. |
+| `oa-airspace` | The model: facilities, points, airways, procedures, class airspace, SUA, MORA grid. Builder, cross-source validation, deterministic serialization, hash and cycle diff. |
+| `oa-trace` | Requirements traceability checker (tool, not part of the runtime). |
+
+Binary: `oa-adapt` in `oa-airspace`:
+
+```
+oa-adapt build --data <dir> --cycle 2026-10-29 --artcc ZAU --out <file>   # snapshot + report
+oa-adapt diff  <snapshot-a> <snapshot-b>                                  # what changed
+```
+
+## Model rules
+
+- **Coordinates are computed from degrees/minutes/seconds ourselves**, then compared with the
+  FAA's published decimal value. A disagreement beyond rounding is a data defect and is reported.
+- **Every point has one identity** across NASR and CIFP (identifier plus ICAO region plus type).
+  Where both sources carry a point, their positions are compared and any difference over 1 m is
+  reported, with the distance.
+- **Selection:** everything whose position lies inside the ARTCC's HIGH or LOW boundary, plus a
+  configurable buffer (default 50 NM) so handoff and boundary-crossing traffic has context, plus
+  every procedure for every airport inside.
+- **Boundary segment geometry:** NASR does not say whether boundary points are joined by
+  great-circle or rhumb lines. Until confirmed (FAA Order JO 7400 / the ARB data layout PDF),
+  the model stores both and reports the maximum separation between them per boundary. This is a
+  recorded Unknown, not a silent choice.
+- **Determinism:** the snapshot serializes in a fixed order with no hash-map iteration order
+  leaking in. The same inputs always give a byte-identical snapshot and the same SHA-256.
+- **Input bounds:** every record, field, count and string has a stated maximum. Exceeding one is
+  an error naming the file, line and limit, never a crash or unbounded allocation.
+
+## Report
+
+`build` writes a human-readable report beside the snapshot: counts per object type, every
+cross-source disagreement, every schema violation, every unresolved reference (an airway or
+procedure that names a point we do not have), and the boundary-geometry Unknown.
+
+## Obligations from the data
+
+The CIFP customer agreement requires that anyone redistributing CIFP-derived data notify their
+users of reported errors, and that discovered CIFP errors be reported to FAA Aeronautical
+Information Services. Defects our validation finds are collected in the report and handled under
+the Avila Labs defect reporting policy (held and batched, Connor approves anything sent).
