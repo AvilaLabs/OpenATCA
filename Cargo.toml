@@ -11,6 +11,7 @@ members = [
     "crates/oa-xml",
     "crates/oa-airspace",
     "crates/oa-feed",
+    "crates/oa-fixm",
     "tools/oa-trace",
 ]
 

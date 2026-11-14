@@ -338,3 +338,52 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   allocates only in `new`.
 - **OA-DEF-012** An error returned by the output closure is returned unchanged by `write`,
   `flush` and `finish`; the compressor works again after `reset`.
+
+### SFDPS flight messages (oa-fixm)
+
+- **OA-FIXM-001** Decodes a FIXM 3.0 + FAA NAS 3.0 `MessageCollection` of flight messages into one
+  row per `message`, in document order, with source, centre, message time (Unix ms), GUFI,
+  callsign, computer id, flight plan id, departure and arrival points, status, flight type,
+  assigned and reported altitude, position and position time, ground speed, track velocity,
+  aircraft type, route text, operator, beacon code, controlling and handoff units, runway
+  times and sequence numbers; verified on hand-written messages of source types TH, HZ, FH, AH,
+  OH, DH, CL, BA and LH.
+- **OA-FIXM-002** Parses timestamps as strict ISO-8601 UTC (`Z` only, real calendar dates, no
+  leap second, 1970 to 9999) to Unix milliseconds, GUFIs as strict UUIDs and decimals without
+  rounding surprises; anything else is refused.
+- **OA-FIXM-003** A field that is present but malformed is a counted field error: the row is kept,
+  the field is absent and its bit is set in the row's error word, nothing is defaulted.
+- **OA-FIXM-004** Altitudes are range-checked (-2,000 to 100,000 ft) and converted from their
+  `uom`; an unknown or missing `uom` is a field error.
+- **OA-FIXM-005** Positions are range-checked (latitude +-90, longitude +-180) and read as
+  EPSG:4326 latitude then longitude only; any other reference system is a field error.
+- **OA-FIXM-006** Ground speed and track velocity are converted from their `uom` to 0.1 knot and
+  range-checked; the ground track is derived from the velocity components by a free function.
+- **OA-FIXM-007** A message with a missing or invalid GUFI, a missing or invalid timestamp, a
+  type other than `FlightMessageType`, or a second `flight` element is refused whole, counted
+  by reason, and appends no row; neighbouring messages are unaffected.
+- **OA-FIXM-008** `Events` has a stated row capacity and string-table capacity; a document that
+  does not fit is refused with the rows and string table exactly as before, never partly
+  appended (IF-R1).
+- **OA-FIXM-009** Elements and attributes outside the structure seen in real data are counted per
+  path in a bounded table (overflow is counted too); they are never errors, and only the
+  topmost unknown element of a subtree is counted.
+- **OA-FIXM-010** A document whose root is not a `MessageCollection` in the FAA NAS 3.0 namespace,
+  one over the element limit, or an input that is not the parsed bytes, is refused with an
+  error.
+- **OA-FIXM-011** A single-valued field given twice in one message is a field error, not a silent
+  first-wins.
+- **OA-FIXM-012** The decoder never panics: every deletion, duplication, truncation and
+  replacement of a byte of valid fixtures, and random multi-byte damage, give rows or an error,
+  with every present column inside its model range.
+- **OA-FIXM-013** A decoder is reusable: tables keep their construction-time capacity, no state
+  leaks from one document to the next, including after a failed decode.
+- **OA-FIXM-014** Every real SFDPS message in the local sample (`OPENATCA_SCDS`) decodes; the test
+  reports messages, rows, rejections with reasons, field errors by field, top unknown paths,
+  distinct GUFIs and callsigns, rows with a position and throughput (at least 20,000
+  messages/s in a release build), and skips when the variable is unset.
+- **OA-FIXM-015** Route text is kept in the bounded string table, entity-decoded; a route longer
+  than the limit, or empty, is a field error and takes no table space.
+- **OA-FIXM-016** Field names, bits and display tables agree, and short codes read back as text.
+- **OA-FIXM-017** A document with several messages gives one row per message, in order, and
+  counts each message.
