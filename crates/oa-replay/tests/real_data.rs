@@ -11,7 +11,7 @@
 )]
 
 use oa_replay::{
-    errors_total, load_files, merge_order, new_pipeline, run_loaded, snapshot, ErrKind, FeedKind,
+    errors_total, new_pipeline, run_streams, snapshot, spec_from_paths, ErrKind, FeedKind,
     Pipeline, PipelineConfig, ERR_NAMES,
 };
 use oa_sha256::to_hex;
@@ -26,21 +26,20 @@ struct Run {
 }
 
 fn replay(files: &[(FeedKind, PathBuf)], chunk: usize) -> Run {
-    let mut l = load_files(files, chunk).unwrap();
-    merge_order(&mut l);
+    let specs = files
+        .iter()
+        .map(|(f, p)| spec_from_paths(*f, vec![p.clone()]))
+        .collect();
     let mut p = new_pipeline(PipelineConfig::default()).unwrap();
-    for k in 0..oa_replay::ERR_COUNT {
-        p.errors[k] += l.errors[k];
-    }
     let t = Instant::now();
-    run_loaded(&mut p, &l);
+    let report = run_streams(&mut p, specs, chunk, &mut |_| {}).unwrap();
     let elapsed = t.elapsed().as_secs_f64();
     let final_hash = to_hex(&snapshot(&p).hash);
     Run {
         p,
         final_hash,
         elapsed,
-        bytes: l.bytes,
+        bytes: report.bytes,
     }
 }
 
@@ -104,6 +103,11 @@ fn the_real_recordings_replay_to_the_same_state_every_time() {
         a.final_hash, b.final_hash, c.final_hash
     );
 
+    // The hash of the earlier all-in-memory replay of these recordings.
+    assert_eq!(
+        a.final_hash,
+        "c0d81e68b7a4ec71bcf8f1c2aa17262ee93c551c1392f019ed94508132e3e4c6"
+    );
     assert_eq!(a.final_hash, b.final_hash);
     assert_eq!(a.final_hash, c.final_hash);
     assert_eq!(a.p.checkpoints, b.p.checkpoints);

@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use oa_replay::cli::{parse_args, USAGE};
 use oa_replay::{
-    add_errors, errors_total, frames_total, load_files, merge_order, new_pipeline,
-    rows_applied_total, run_loaded, snapshot, state_hash, Checkpoint, ErrKind, Pipeline, ERR_COUNT,
-    ERR_NAMES, FEED_NAMES, NS_PER_S,
+    errors_total, frames_total, list_recordings, new_pipeline, rows_applied_total, run_streams,
+    snapshot, spec_from_paths, state_hash, Checkpoint, Pipeline, ERR_COUNT, ERR_NAMES, FEED_NAMES,
+    NS_PER_S,
 };
 use oa_sha256::to_hex;
 
@@ -29,14 +29,21 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut loaded = match load_files(&cmd.files, cmd.chunk) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("oa-replay: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    merge_order(&mut loaded);
+    let mut specs = Vec::with_capacity(cmd.inputs.len());
+    for i in &cmd.inputs {
+        let paths = if i.dir {
+            match list_recordings(&i.path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("oa-replay: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        } else {
+            vec![i.path.clone()]
+        };
+        specs.push(spec_from_paths(i.feed, paths));
+    }
     let mut p = match new_pipeline(cmd.cfg) {
         Ok(p) => p,
         Err(e) => {
@@ -44,41 +51,68 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    for k in [
-        ErrKind::FrameBadMagic,
-        ErrKind::FrameUnknownKind,
-        ErrKind::FrameOversize,
-        ErrKind::FrameCrc,
-        ErrKind::FrameTruncated,
-        ErrKind::GzipDamaged,
-        ErrKind::GzipTruncated,
-    ] {
-        add_errors(
-            &mut p,
-            k,
-            loaded.errors.get(k as usize).copied().unwrap_or(0),
-        );
-    }
     let t0 = Instant::now();
-    run_loaded(&mut p, &loaded);
-    let elapsed = t0.elapsed();
-
     let mut out = std::io::stdout().lock();
-    if !cmd.quiet {
-        for c in &p.checkpoints {
-            let _ = writeln!(out, "{}", checkpoint_line(c));
+    let mut printed = 0usize;
+    let mut first_ns = i64::MIN;
+    let mut next_progress = i64::MIN;
+    let quiet = cmd.quiet;
+    let progress_ns = cmd.progress_ns;
+    let mut hook = |p: &Pipeline| {
+        if !quiet {
+            while let Some(c) = p.checkpoints.get(printed) {
+                let _ = writeln!(out, "{}", checkpoint_line(c));
+                printed += 1;
+            }
         }
-    }
-    let _ = write!(out, "{}", summary(&p, loaded.files, loaded.bytes));
+        if first_ns == i64::MIN {
+            first_ns = p.replay_ns;
+            next_progress = p.replay_ns.saturating_add(progress_ns);
+        } else if p.replay_ns >= next_progress {
+            next_progress = p.replay_ns.saturating_add(progress_ns);
+            let wall = t0.elapsed().as_secs_f64().max(1e-9);
+            let replayed = (p.replay_ns - first_ns) as f64 / NS_PER_S as f64;
+            eprintln!(
+                "progress replay_s={} frames={} frames_per_s={:.0} speed={:.0}x rss_mb={:.0}",
+                p.replay_ns.div_euclid(NS_PER_S),
+                frames_total(p),
+                frames_total(p) as f64 / wall,
+                replayed / wall,
+                status_kb("VmRSS:") as f64 / 1024.0
+            );
+        }
+    };
+    let report = match run_streams(&mut p, specs, cmd.chunk, &mut hook) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("oa-replay: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let elapsed = t0.elapsed();
+    let _ = write!(out, "{}", summary(&p, report.files, report.bytes));
     let secs = elapsed.as_secs_f64().max(1e-9);
     let rows = rows_applied_total(&p);
     let _ = writeln!(
         out,
-        "timing elapsed_s={secs:.3} frames_per_s={:.0} rows_per_s={:.0}",
+        "timing elapsed_s={secs:.3} frames_per_s={:.0} rows_per_s={:.0} peak_rss_kb={}",
         frames_total(&p) as f64 / secs,
-        rows as f64 / secs
+        rows as f64 / secs,
+        status_kb("VmHWM:")
     );
     ExitCode::SUCCESS
+}
+
+/// A `kB` figure from `/proc/self/status` (0 where there is none): resident or peak memory.
+fn status_kb(key: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 fn checkpoint_line(c: &Checkpoint) -> String {
@@ -103,10 +137,11 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
     for (i, name) in FEED_NAMES.iter().enumerate() {
         let g = |a: &[u64]| a.get(i).copied().unwrap_or(0);
         s.push_str(&format!(
-            "feed {name} frames={} messages={} other_frames={} rows={} applied={} out_of_order={} refused_full={}\n",
+            "feed {name} frames={} messages={} other_frames={} not_applied={} rows={} applied={} out_of_order={} refused_full={}\n",
             g(&p.frames),
             g(&p.messages),
             g(&p.other_frames),
+            g(&p.not_applied),
             g(&p.rows_seen),
             g(&p.rows_applied),
             g(&p.rows_out_of_order),

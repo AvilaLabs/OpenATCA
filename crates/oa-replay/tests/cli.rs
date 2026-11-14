@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use oa_replay::cli::{parse_args, DEFAULT_CHUNK};
+use oa_replay::cli::{parse_args, Input, DEFAULT_CHUNK};
 use oa_replay::{FeedKind, NS_PER_S};
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,14 +25,49 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
         "--sfdps", "a.oaf", "--tbfm", "b.oaf.gz", "--sfdps", "c.oaf",
     ]))
     .unwrap();
+    let inp = |feed, p: &str, dir| Input {
+        feed,
+        path: PathBuf::from(p),
+        dir,
+    };
     assert_eq!(
-        c.files,
+        c.inputs,
         vec![
-            (FeedKind::Sfdps, PathBuf::from("a.oaf")),
-            (FeedKind::Tbfm, PathBuf::from("b.oaf.gz")),
-            (FeedKind::Sfdps, PathBuf::from("c.oaf")),
+            inp(FeedKind::Sfdps, "a.oaf", false),
+            inp(FeedKind::Tbfm, "b.oaf.gz", false),
+            inp(FeedKind::Sfdps, "c.oaf", false),
         ]
     );
+    let d = parse_args(&args(&[
+        "--sfdps-dir",
+        "s",
+        "--tbfm-dir",
+        "t",
+        "--tfms-dir",
+        "f",
+        "--fns-dir",
+        "n",
+        "--tfms",
+        "x",
+        "--fns",
+        "y",
+        "--progress-minutes",
+        "3",
+    ]))
+    .unwrap();
+    assert_eq!(
+        d.inputs,
+        vec![
+            inp(FeedKind::Sfdps, "s", true),
+            inp(FeedKind::Tbfm, "t", true),
+            inp(FeedKind::Tfms, "f", true),
+            inp(FeedKind::Fns, "n", true),
+            inp(FeedKind::Tfms, "x", false),
+            inp(FeedKind::Fns, "y", false),
+        ]
+    );
+    assert_eq!(d.progress_ns, 180 * NS_PER_S);
+    assert_eq!(c.progress_ns, 600 * NS_PER_S);
     assert_eq!(c.cfg.checkpoint_ns, 10 * NS_PER_S);
     assert_eq!(c.cfg.table.max_age_ns, 30 * 60 * NS_PER_S);
     assert_eq!(c.cfg.table.capacity, 32_768);
@@ -65,6 +100,8 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
         vec!["--sfdps", "a", "--checkpoint-secs", "x"],
         vec!["--sfdps", "a", "--max-age-secs"],
         vec!["--sfdps", "a", "--bogus"],
+        vec!["--sfdps-dir"],
+        vec!["--sfdps", "a", "--progress-minutes", "0"],
         vec!["--sfdps", "a", "--checkpoint-secs", "99999999999999999999"],
     ] {
         assert!(parse_args(&args(&bad)).is_err(), "{bad:?}");
@@ -146,6 +183,47 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
         .filter(|l| !l.starts_with("checkpoint ") && !l.starts_with("timing"))
         .collect();
     assert_eq!(stable(&out4).lines().collect::<Vec<_>>(), body);
+    // The same recordings as rotated files in a directory, one compressed, named in order:
+    // chained into one stream, the same replay (OA-RPL-028). Another directory for TBFM.
+    let (sdir, tdir) = (dir.join("sf"), dir.join("tb"));
+    std::fs::create_dir_all(&sdir).unwrap();
+    std::fs::create_dir_all(&tdir).unwrap();
+    let cut = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let mut parts = Vec::new();
+        let (mut at, mut start, mut n) = (0usize, 0usize, 0);
+        while at < bytes.len() {
+            at += 40 + u32::from_le_bytes(bytes[at + 32..at + 36].try_into().unwrap()) as usize;
+            n += 1;
+            if n % 20 == 0 || at == bytes.len() {
+                parts.push(bytes[start..at].to_vec());
+                start = at;
+            }
+        }
+        parts
+    };
+    for (d, bytes) in [(&sdir, &s), (&tdir, &t)] {
+        for (i, part) in cut(bytes).iter().enumerate() {
+            std::fs::write(d.join(format!("scds-x-{:04}.oaf", i + 1)), part).unwrap();
+        }
+    }
+    std::fs::write(sdir.join("notes.txt"), b"not a recording").unwrap();
+    let (_, outd, _) = run_bin(&[
+        "--sfdps-dir",
+        sdir.to_str().unwrap(),
+        "--tbfm-dir",
+        tdir.to_str().unwrap(),
+    ]);
+    let norm = |o: &str| -> Vec<String> {
+        stable(o)
+            .lines()
+            .filter(|l| !l.starts_with("summary "))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(norm(&out), norm(&outd));
+    let (code, _, err) = run_bin(&["--sfdps-dir", dir.join("nodir").to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("nodir"));
     // Usage and read errors.
     let (code, _, err) = run_bin(&[]);
     assert_eq!(code, 2);

@@ -8,8 +8,8 @@
 //!   fixed capacity, and its eviction), [`apply`] ([`apply_sfdps`], [`apply_tbfm`]), [`hash`]
 //!   ([`state_hash`]), [`errors`] and [`pipeline`] (frames in, state and counters out; replay
 //!   time is each frame's `recv_unix_ns`).
-//! * Shell: [`source`] (reads `.oaf` and `.oaf.gz` recordings and merges them into one total
-//!   order), [`cli`] and the `oa-replay` binary (arguments, files, clock for the throughput
+//! * Shell: [`source`] (reads `.oaf` and `.oaf.gz` recordings as streams and merges them into one
+//!   total order in constant memory), [`cli`] and the `oa-replay` binary (arguments, files, clock for the throughput
 //!   line, stdout).
 //!
 //! Replaying the same recordings gives the same checkpoints and the same final state hash on
@@ -34,7 +34,8 @@ pub use pipeline::{
     Checkpoint, FeedKind, Pipeline, PipelineConfig, PipelineError, FEED_COUNT, FEED_NAMES,
 };
 pub use source::{
-    load_files, load_sources, merge_key, merge_order, payload, run_loaded, Loaded, Rec,
+    list_recordings, merge_key, merge_streams, run_streams, spec_from_bytes, spec_from_paths,
+    MergeReport, Merged, StreamSpec,
 };
 pub use table::{
     advance_time, flights_live, new_table, slot_of_gufi, sweep, ConfigError, FlightTable,

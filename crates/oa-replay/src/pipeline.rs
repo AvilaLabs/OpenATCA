@@ -40,13 +40,17 @@ pub enum FeedKind {
     Sfdps = 0,
     /// SWIM TBFM metering publication.
     Tbfm = 1,
+    /// SWIM TFMS flow data. Not decoded yet: frames are counted in `not_applied`.
+    Tfms = 2,
+    /// SWIM FNS notices. Not decoded yet: frames are counted in `not_applied`.
+    Fns = 3,
 }
 
 /// Number of [`FeedKind`] values.
-pub const FEED_COUNT: usize = 2;
+pub const FEED_COUNT: usize = 4;
 
 /// Display names, indexed by `FeedKind as usize`.
-pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm"];
+pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns"];
 
 /// Default spacing of checkpoints: 10 s of replay time.
 pub const DEFAULT_CHECKPOINT_NS: i64 = 10 * NS_PER_S;
@@ -124,6 +128,8 @@ pub struct Pipeline {
     pub messages: [u64; FEED_COUNT],
     /// REJECT and STATUS frames per feed (carry no feed data).
     pub other_frames: [u64; FEED_COUNT],
+    /// MESSAGE frames of feeds with no decoder yet (TFMS, FNS): counted, not applied.
+    pub not_applied: [u64; FEED_COUNT],
     /// Rows decoded per feed.
     pub rows_seen: [u64; FEED_COUNT],
     /// Rows applied per feed.
@@ -161,6 +167,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         frames: [0; FEED_COUNT],
         messages: [0; FEED_COUNT],
         other_frames: [0; FEED_COUNT],
+        not_applied: [0; FEED_COUNT],
         rows_seen: [0; FEED_COUNT],
         rows_applied: [0; FEED_COUNT],
         rows_out_of_order: [0; FEED_COUNT],
@@ -244,6 +251,7 @@ pub fn process_frame(
     match feed {
         FeedKind::Sfdps => process_sfdps(p, payload, now),
         FeedKind::Tbfm => process_tbfm(p, payload, now),
+        FeedKind::Tfms | FeedKind::Fns => bump(&mut p.not_applied, feed, 1),
     }
 }
 

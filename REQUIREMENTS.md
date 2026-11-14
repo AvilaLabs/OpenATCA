@@ -686,13 +686,15 @@ deterministic flight state comes out.
 - **OA-RPL-018** Replay time never goes backwards; a frame earlier than one already seen is
   counted as a time regression.
 - **OA-RPL-019** Replaying the same recordings twice, or with the input read in any chunking
-  (1 byte to 16 MiB), or with the files named in another order, gives identical checkpoints,
+  (1 byte to 16 MiB), or with the streams named in another order, gives identical checkpoints,
   counters and final state hash.
 - **OA-RPL-020** A `.oaf.gz` recording replays identically to its raw `.oaf` (chosen by the
   file's first bytes); a gzip file cut short is counted and its frames up to the cut replay.
-- **OA-RPL-021** Several recordings, each with a feed kind, merge into one stream ordered by
-  `(recv_unix_ns, feed kind, seq)`, then file position and byte offset: a total order, so any
-  permutation of the same frames sorts to the same sequence.
+- **OA-RPL-021** Recordings are read as streams and merged with a fixed-capacity min-heap, one
+  head frame per stream, ordered by `(recv_unix_ns, feed kind, seq, stream index, byte offset)`: a
+  total order, equal to a global sort of the same frames whenever each stream is in receive order.
+  Memory is bounded by the number of streams times a fixed per-stream buffer, not by the input
+  length (peak resident memory on the real recordings is reported by the binary's `timing` line).
 - **OA-RPL-022** Corrupted recordings (every single-byte flip, truncations, random garbage and
   damage) and corrupted XML payloads never panic; a damaged frame leaves a count, and a cut inside
   a frame is a counted truncation.
@@ -701,11 +703,14 @@ deterministic flight state comes out.
   missing, zero, non-numeric and unknown arguments.
 - **OA-RPL-024** The `oa-replay` binary prints the checkpoints and a final summary (frames and
   rows per feed, TBFM linking, table totals, errors by kind, flights live and the final state
-  hash); every line except the `timing` line is identical from run to run, whatever the flag
-  order or read size; exit status is 2 for usage errors and 1 for an unreadable file.
+  hash); checkpoints are printed as they are recorded; a progress line (replay time, frames per
+  second, replay-time to wall-time ratio, resident memory) goes to stderr every N minutes of
+  replay time (default 10); every stdout line except the `timing` line is identical from run to
+  run, whatever the flag order or read size; exit status is 2 for usage errors and 1 for an unreadable file.
 - **OA-RPL-025** Replaying the real SCDS recordings under `OPENATCA_REC` (SFDPS and TBFM) twice
   and with another read size gives identical checkpoints and the same final state hash, with no
-  frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset).
+  frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset). The final
+  hash equals that of the earlier all-in-memory replay.
 - **OA-RPL-026** The canonical serialisation of a fixed table state has a pinned golden hash, so
   a change of the serialisation or of what the state holds is a deliberate, visible edit.
 
@@ -794,3 +799,12 @@ the FAA event extension).
   (high and low) by geodesic containment of vertices and boundary samples, and how many circle
   centres are inside it; polygons oa-geo refuses and boundaries oa-geo refuses are counted, not
   errors.
+
+- **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
+  (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time
+  regression.
+- **OA-RPL-028** Rotated recordings of one feed chain in name order (`--sfdps-dir`, `--tbfm-dir`,
+  `--tfms-dir`, `--fns-dir`, or several files in one stream, raw or gzip, any mix) and replay
+  identically to the unsplit recording, with the same checkpoints and final state hash.
+- **OA-RPL-029** TFMS and FNS frames are counted per feed in a "not yet applied" bucket until their
+  decoders exist; they change no flight state and raise no error.

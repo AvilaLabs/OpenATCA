@@ -12,12 +12,11 @@ mod common;
 use common::*;
 use oa_deflate::GzipWriter;
 use oa_feed::Kind;
-use oa_replay::source::{load_sources, merge_key, merge_order, payload, run_loaded, Rec};
 use oa_replay::{
-    errors_total, new_pipeline, process_frame, snapshot, state_hash, Checkpoint, ErrKind, FeedKind,
-    Pipeline, PipelineConfig, ERR_NAMES,
+    errors_total, new_pipeline, process_frame, rows_applied_total, snapshot, state_hash,
+    Checkpoint, ErrKind, FeedKind, Pipeline, PipelineConfig, ERR_NAMES,
 };
-use std::io::Cursor;
+use oa_replay::{merge_key, merge_streams, run_streams, spec_from_bytes};
 
 const T0: i64 = DAY * 1_000_000 + 3_500_000_000; // DAY in ns, plus 3.5 s: not on a boundary.
 
@@ -88,29 +87,32 @@ fn recordings(n: i64) -> (Vec<u8>, Vec<u8>) {
 struct Outcome {
     checkpoints: Vec<Checkpoint>,
     last: Checkpoint,
-    frames: [u64; 2],
-    rows_applied: [u64; 2],
+    frames: [u64; 4],
+    rows_applied: [u64; 4],
     errors: [u64; oa_replay::ERR_COUNT],
     bytes: u64,
     flights: usize,
 }
 
 fn run_sources(srcs: Vec<(FeedKind, Vec<u8>)>, chunk: usize) -> Outcome {
-    let cursors = srcs.into_iter().map(|(f, b)| (f, Cursor::new(b))).collect();
-    let mut l = load_sources(cursors, chunk).unwrap();
-    merge_order(&mut l);
+    run_chains(srcs.into_iter().map(|(f, b)| (f, vec![b])).collect(), chunk)
+}
+
+/// Each stream is a feed and its chain of files (rotated recordings).
+fn run_chains(streams: Vec<(FeedKind, Vec<Vec<u8>>)>, chunk: usize) -> Outcome {
+    let specs = streams
+        .into_iter()
+        .map(|(f, files)| spec_from_bytes(f, files))
+        .collect();
     let mut p = pipeline();
-    for k in 0..oa_replay::ERR_COUNT {
-        p.errors[k] += l.errors[k];
-    }
-    run_loaded(&mut p, &l);
+    let r = run_streams(&mut p, specs, chunk, &mut |_| {}).unwrap();
     Outcome {
         checkpoints: p.checkpoints.clone(),
         last: snapshot(&p),
         frames: p.frames,
         rows_applied: p.rows_applied,
         errors: p.errors,
-        bytes: l.bytes,
+        bytes: r.bytes,
         flights: p.table.live,
     }
 }
@@ -234,9 +236,9 @@ fn every_failure_is_counted_by_kind() {
     assert_eq!(n(ErrKind::TbfmField), 1);
     assert_eq!(n(ErrKind::SfdpsField), 1);
     assert_eq!(errors_total(&p.errors), 8, "{:?}", p.errors);
-    assert_eq!(p.other_frames, [1, 1]);
-    assert_eq!(p.frames, [6, 4]);
-    assert_eq!(p.messages, [5, 3]);
+    assert_eq!(p.other_frames, [1, 1, 0, 0]);
+    assert_eq!(p.frames, [6, 4, 0, 0]);
+    assert_eq!(p.messages, [5, 3, 0, 0]);
     // The row with the bad field was kept without it.
     assert_eq!(p.rows_applied[0], 1);
     assert_eq!(ERR_NAMES.len(), oa_replay::ERR_COUNT);
@@ -333,80 +335,183 @@ fn compressed_and_raw_recordings_replay_identically() {
     assert!(cut.frames[0] > 0 && cut.frames[0] < raw.frames[0]);
 }
 
-fn rec(feed: FeedKind, recv_ns: i64, seq: u64, file: u32, offset: u64) -> Rec {
-    Rec {
-        recv_ns,
-        seq,
-        offset,
-        start: 0,
-        len: 0,
-        file,
-        feed,
-        kind: Kind::Message,
-    }
-}
-
 // REQ: OA-RPL-021
 #[test]
 fn merge_order_is_total_and_stable() {
-    use FeedKind::{Sfdps, Tbfm};
-    // Equal times across feeds: SFDPS before TBFM; equal time and feed: by seq; equal all three
-    // (two bridge runs with restarted counters, or one file given twice): by file, then offset.
-    let want = vec![
-        rec(Tbfm, 5, 0, 1, 0),
-        rec(Sfdps, 10, 3, 0, 0),
-        rec(Sfdps, 10, 7, 0, 40),
-        rec(Sfdps, 10, 7, 2, 0),
-        rec(Sfdps, 10, 7, 2, 40),
-        rec(Tbfm, 10, 1, 1, 0),
-        rec(Tbfm, 11, 0, 1, 80),
+    // Four streams of frames with many equal receive times; each stream is in receive order, as
+    // a recording is. The merged order must be exactly the global sort of the total key.
+    let feeds = [
+        FeedKind::Sfdps,
+        FeedKind::Tbfm,
+        FeedKind::Sfdps,
+        FeedKind::Tbfm,
     ];
-    let keys: Vec<_> = want.iter().map(merge_key).collect();
-    assert!(
-        keys.windows(2).all(|w| w[0] < w[1]),
-        "strictly ascending: total, no ties"
-    );
-    for seed in 1..=50u64 {
-        let mut v = want.clone();
-        Rng(seed * 7919).shuffle(&mut v);
-        let mut l = oa_replay::Loaded {
-            recs: v,
-            arena: Vec::new(),
-            files: 3,
-            bytes: 0,
-            errors: [0; oa_replay::ERR_COUNT],
-            frame_errors: Vec::new(),
-        };
-        merge_order(&mut l);
-        assert_eq!(l.recs, want, "seed {seed}");
+    for seed in 1..=20u64 {
+        let mut rng = Rng(seed * 7919);
+        let mut files: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..4 {
+            let mut t = 0i64;
+            let mut bytes = Vec::new();
+            for seq in 0..(10 + rng.below(30)) as u64 {
+                t += rng.below(3) as i64;
+                bytes.extend(frame(1, seq, t, b"x"));
+            }
+            files.push(bytes);
+        }
+        let specs = files
+            .iter()
+            .zip(feeds)
+            .map(|(b, f)| spec_from_bytes(f, vec![b.clone()]))
+            .collect();
+        let mut got = Vec::new();
+        merge_streams(specs, 17, &mut |m| {
+            got.push(merge_key(m.recv_ns, m.feed, m.seq, m.stream, m.offset));
+        })
+        .unwrap();
+        let mut want = got.clone();
+        want.sort_unstable();
+        assert_eq!(got, want, "seed {seed}");
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "total: no ties");
+        let n: usize = files
+            .iter()
+            .map(|f| f.len() / frame(1, 0, 0, b"x").len())
+            .sum();
+        assert_eq!(got.len(), n);
     }
-    // Through real files: frames of two recordings at the same instant come out SFDPS first.
-    let a = frame(1, 5, T0, sf_doc(&[sf(1, 0)]).as_bytes());
-    let b = frame(
-        1,
-        1,
-        T0,
-        tb_doc(
-            0,
-            "ZTT",
-            &[tb(0, Some("KA000001AB"), "T00001").flt("B38M/L")],
-        )
-        .as_bytes(),
-    );
-    let mut l = load_sources(
-        vec![
-            (FeedKind::Tbfm, Cursor::new(b)),
-            (FeedKind::Sfdps, Cursor::new(a)),
-        ],
-        100,
-    )
+    // Equal time across feeds: SFDPS first, whatever order the streams were named in.
+    let a = frame(1, 5, T0, b"a");
+    let b = frame(1, 1, T0, b"b");
+    for order in [[0usize, 1], [1, 0]] {
+        let mk = |i: usize| {
+            if i == 0 {
+                spec_from_bytes(FeedKind::Tbfm, vec![b.clone()])
+            } else {
+                spec_from_bytes(FeedKind::Sfdps, vec![a.clone()])
+            }
+        };
+        let mut feeds = Vec::new();
+        merge_streams(vec![mk(order[0]), mk(order[1])], 100, &mut |m| {
+            feeds.push(m.feed)
+        })
+        .unwrap();
+        assert_eq!(feeds, [FeedKind::Sfdps, FeedKind::Tbfm]);
+    }
+}
+
+// REQ: OA-RPL-027
+#[test]
+fn a_frame_going_backwards_inside_a_file_is_not_reordered_and_is_counted() {
+    // Reordering would need unbounded lookahead, so the merge keeps file order within a stream.
+    let mut a = Vec::new();
+    for (seq, t) in [10i64, 20, 5, 30].into_iter().enumerate() {
+        a.extend(frame(
+            1,
+            seq as u64,
+            T0 + t * 1_000_000_000,
+            sfdps_payload(t).as_bytes(),
+        ));
+    }
+    let mut b = Vec::new();
+    for (seq, t) in [15i64, 25].into_iter().enumerate() {
+        b.extend(frame(
+            1,
+            seq as u64,
+            T0 + t * 1_000_000_000,
+            tbfm_payload(t).as_bytes(),
+        ));
+    }
+    let specs = vec![
+        spec_from_bytes(FeedKind::Sfdps, vec![a.clone()]),
+        spec_from_bytes(FeedKind::Tbfm, vec![b.clone()]),
+    ];
+    let mut order = Vec::new();
+    merge_streams(specs, 64, &mut |m| {
+        order.push((m.recv_ns - T0) / 1_000_000_000)
+    })
     .unwrap();
-    merge_order(&mut l);
-    assert_eq!(
-        l.recs.iter().map(|r| r.feed).collect::<Vec<_>>(),
-        [Sfdps, Tbfm]
+    assert_eq!(order, [10, 15, 20, 5, 25, 30]);
+    let o = run_sources(vec![(FeedKind::Sfdps, a), (FeedKind::Tbfm, b)], 64);
+    assert_eq!(o.errors[ErrKind::TimeRegression as usize], 1);
+    assert_eq!(o.frames[..2], [4, 2]);
+}
+
+// REQ: OA-RPL-028
+#[test]
+fn rotated_files_chain_to_the_same_replay_as_one_file() {
+    let (s, t) = recordings(80);
+    let whole = run_sources(
+        vec![(FeedKind::Sfdps, s.clone()), (FeedKind::Tbfm, t.clone())],
+        4096,
     );
-    assert!(payload(&l, &l.recs[0]).starts_with(b"<?xml"));
+    // Cut each recording on frame boundaries into several files, one of them compressed.
+    let split = |bytes: &[u8], parts: usize| -> Vec<Vec<u8>> {
+        let mut bounds = vec![0usize];
+        let mut at = 0;
+        while at < bytes.len() {
+            let len = u32::from_le_bytes(bytes[at + 32..at + 36].try_into().unwrap()) as usize;
+            at += 40 + len;
+            bounds.push(at);
+        }
+        let per = (bounds.len() - 1).div_ceil(parts);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bounds.len() - 1 {
+            let j = (i + per).min(bounds.len() - 1);
+            out.push(bytes[bounds[i]..bounds[j]].to_vec());
+            i = j;
+        }
+        out
+    };
+    for parts in [2usize, 3, 7] {
+        let mut sf_files = split(&s, parts);
+        let tb_files = split(&t, parts);
+        assert_eq!(sf_files.len(), tb_files.len());
+        assert!(sf_files.len() > 1);
+        let o = run_chains(
+            vec![
+                (FeedKind::Sfdps, sf_files.clone()),
+                (FeedKind::Tbfm, tb_files.clone()),
+            ],
+            1000,
+        );
+        same(&whole, &o);
+        // One of the files compressed.
+        sf_files[1] = gzip(&sf_files[1]);
+        let o = run_chains(
+            vec![(FeedKind::Sfdps, sf_files), (FeedKind::Tbfm, tb_files)],
+            333,
+        );
+        same(&whole, &o);
+    }
+}
+
+// REQ: OA-RPL-029
+#[test]
+fn tfms_and_fns_frames_are_counted_as_not_yet_applied() {
+    let mut p = pipeline();
+    for k in 0..5i64 {
+        process_frame(
+            &mut p,
+            FeedKind::Tfms,
+            Kind::Message,
+            T0 + k,
+            b"<anything/>",
+        );
+    }
+    process_frame(&mut p, FeedKind::Fns, Kind::Message, T0 + 9, b"<notam/>");
+    process_frame(
+        &mut p,
+        FeedKind::Fns,
+        Kind::Status,
+        T0 + 10,
+        b"state=connected",
+    );
+    assert_eq!(p.not_applied, [0, 0, 5, 1]);
+    assert_eq!(p.frames, [0, 0, 5, 2]);
+    assert_eq!(p.other_frames, [0, 0, 0, 1]);
+    assert_eq!(errors_total(&p.errors), 0);
+    assert_eq!(rows_applied_total(&p), 0);
+    assert_eq!(p.table.live, 0);
 }
 
 // REQ: OA-RPL-022

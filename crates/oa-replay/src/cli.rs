@@ -1,12 +1,16 @@
 //! Command-line parsing for `oa-replay`. Core (pure): a function from arguments to a command.
 //!
 //! ```text
-//! oa-replay (--sfdps <file> | --tbfm <file>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
-//!           [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--quiet]
+//! oa-replay (--sfdps | --tbfm | --tfms | --fns <file> | --sfdps-dir | --tbfm-dir | --tfms-dir
+//!           | --fns-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
+//!           [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
+//!           [--quiet]
 //! ```
 //!
 //! Each file is `.oaf` or `.oaf.gz` (told apart by its first bytes) and is given a feed kind by
-//! the flag that names it; the order of the flags is the file order used to break merge ties.
+//! the flag that names it. A file flag is one stream; a directory flag is one stream made of the
+//! directory's recordings chained in name order (rotated files). The order of the flags is the
+//! stream order used to break merge ties.
 
 use std::path::PathBuf;
 
@@ -16,12 +20,26 @@ use crate::table::NS_PER_S;
 /// Default read size for recordings.
 pub const DEFAULT_CHUNK: usize = 64 * 1024;
 
+/// One input named on the command line.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Input {
+    /// The feed the recordings are decoded as.
+    pub feed: FeedKind,
+    /// A recording, or a directory of rotated recordings.
+    pub path: PathBuf,
+    /// True when `path` is a directory.
+    pub dir: bool,
+}
+
 /// A parsed command line (cold: A7.2).
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
-    /// Recordings with their feed kind, in command-line order.
-    pub files: Vec<(FeedKind, PathBuf)>,
+    /// Inputs in command-line order.
+    pub inputs: Vec<Input>,
+    /// A progress line (stderr) every this many minutes of replay time.
+    pub progress_ns: i64,
     /// Pipeline settings.
     pub cfg: PipelineConfig,
     /// Read size in bytes.
@@ -31,9 +49,10 @@ pub struct Command {
 }
 
 /// The usage text.
-pub const USAGE: &str = "usage: oa-replay (--sfdps <file> | --tbfm <file>)... \
+pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns <file> | \
+--sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir <dir>)... \
 [--checkpoint-secs <n>] [--max-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
-[--chunk-bytes <n>] [--quiet]";
+[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet]";
 
 fn number(flag: &str, v: Option<&String>) -> Result<u64, String> {
     let v = v.ok_or_else(|| format!("missing value for {flag}"))?;
@@ -45,21 +64,37 @@ fn number(flag: &str, v: Option<&String>) -> Result<u64, String> {
 
 /// Parses the arguments after the program name.
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
-    let mut files = Vec::new();
+    let mut inputs = Vec::new();
+    let mut progress_ns = 10 * 60 * NS_PER_S;
     let mut cfg = PipelineConfig::default();
     let mut chunk = DEFAULT_CHUNK;
     let mut quiet = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--sfdps" | "--tbfm" => {
+            "--sfdps" | "--tbfm" | "--tfms" | "--fns" | "--sfdps-dir" | "--tbfm-dir"
+            | "--tfms-dir" | "--fns-dir" => {
                 let v = it.next().ok_or_else(|| format!("missing value for {a}"))?;
-                let feed = if a == "--sfdps" {
-                    FeedKind::Sfdps
-                } else {
-                    FeedKind::Tbfm
+                let name = a.trim_start_matches("--");
+                let (name, dir) = match name.strip_suffix("-dir") {
+                    Some(n) => (n, true),
+                    None => (name, false),
                 };
-                files.push((feed, PathBuf::from(v)));
+                let feed = match name {
+                    "sfdps" => FeedKind::Sfdps,
+                    "tbfm" => FeedKind::Tbfm,
+                    "tfms" => FeedKind::Tfms,
+                    _ => FeedKind::Fns,
+                };
+                inputs.push(Input {
+                    feed,
+                    path: PathBuf::from(v),
+                    dir,
+                });
+            }
+            "--progress-minutes" => {
+                let n = number(a, it.next())?;
+                progress_ns = secs_to_ns(a, n.saturating_mul(60))?;
             }
             "--checkpoint-secs" => {
                 let n = number(a, it.next())?;
@@ -85,11 +120,12 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    if files.is_empty() {
+    if inputs.is_empty() {
         return Err("no recordings given".to_string());
     }
     Ok(Command {
-        files,
+        inputs,
+        progress_ns,
         cfg,
         chunk,
         quiet,
