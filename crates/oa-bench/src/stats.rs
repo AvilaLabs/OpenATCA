@@ -5,6 +5,10 @@
 //! nearest-rank method: sort the `n` absolute values ascending and take the value at 1-based
 //! rank `ceil(p * n / 100)`, clamped to `1..=n`; the median is `p = 50`. The method has no
 //! interpolation, so the same values always give the same result, whatever their order.
+//!
+//! **Nothing is not zero.** The statistics of an empty set are `n = 0` and NaN in every other
+//! field, never 0.0, which would read as a perfect result. The report prints such a row as
+//! "no data" and the CSV as `NA`.
 
 /// Phase codes of a paired sample, from the truth vertical rate.
 pub mod phase {
@@ -50,12 +54,21 @@ pub mod method {
     pub const CALLSIGN: u8 = 2;
     /// The address came from the `ADSB_02M` name-value pair, not `aircraftAddress`.
     pub const ADDRESS_HINT: u8 = 3;
-    pub const NAMES: [&str; 4] = ["none", "address", "callsign", "address hint"];
+    /// Associated by callsign but the ERAM positions fail the 3 NM / 1,000 ft check: kept (the
+    /// selection must not depend on the error being measured) and scored under its own method.
+    pub const CALLSIGN_GATE_FAILED: u8 = 4;
+    pub const NAMES: [&str; 5] = [
+        "none",
+        "address",
+        "callsign",
+        "address hint",
+        "callsign (failed 3 NM / 1000 ft check)",
+    ];
 }
 
 /// The statistics of one set of values.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Stats {
     pub n: u64,
     pub mean: f64,
@@ -66,14 +79,50 @@ pub struct Stats {
     pub max: f64,
 }
 
+impl Stats {
+    /// The statistics of no values: `n = 0`, everything else NaN.
+    pub const EMPTY: Stats = Stats {
+        n: 0,
+        mean: f64::NAN,
+        rms: f64::NAN,
+        median: f64::NAN,
+        p95: f64::NAN,
+        p99: f64::NAN,
+        max: f64::NAN,
+    };
+}
+
+impl Default for Stats {
+    fn default() -> Stats {
+        Stats::EMPTY
+    }
+}
+
+/// Bitwise equality, so two empty results (NaN fields) are equal.
+impl PartialEq for Stats {
+    fn eq(&self, o: &Stats) -> bool {
+        self.n == o.n
+            && [
+                (self.mean, o.mean),
+                (self.rms, o.rms),
+                (self.median, o.median),
+                (self.p95, o.p95),
+                (self.p99, o.p99),
+                (self.max, o.max),
+            ]
+            .iter()
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+}
+
 /// The nearest-rank percentile of an ascending slice of absolute values.
 pub fn nearest_rank(sorted: &[f64], p: u64) -> f64 {
     let n = sorted.len() as u64;
     if n == 0 {
-        return 0.0;
+        return f64::NAN;
     }
     let k = (p * n).div_ceil(100).clamp(1, n);
-    sorted.get((k - 1) as usize).copied().unwrap_or(0.0)
+    sorted.get((k - 1) as usize).copied().unwrap_or(f64::NAN)
 }
 
 /// The statistics of `values`; non-finite values are skipped (the caller counts them).
@@ -89,7 +138,7 @@ pub fn stats_of(values: &[f64]) -> Stats {
         }
     }
     if abs.is_empty() {
-        return Stats::default();
+        return Stats::EMPTY;
     }
     abs.sort_by(f64::total_cmp);
     let n = abs.len() as f64;
@@ -100,7 +149,7 @@ pub fn stats_of(values: &[f64]) -> Stats {
         median: nearest_rank(&abs, 50),
         p95: nearest_rank(&abs, 95),
         p99: nearest_rank(&abs, 99),
-        max: abs.last().copied().unwrap_or(0.0),
+        max: abs.last().copied().unwrap_or(f64::NAN),
     }
 }
 

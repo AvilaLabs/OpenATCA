@@ -48,7 +48,22 @@ fn every_injected_value_is_recovered_within_its_tolerance() {
     }
 }
 
+/// The world without the 20 km error of the callsign-only aircraft that fails the 3 NM check:
+/// that aircraft stays in the headline numbers (association must not depend on ERAM's error), so
+/// the recovery of the other injected values needs the world without its error.
+fn clean() -> Injected {
+    Injected {
+        gate_failed_offset_m: 0.0,
+        ..Injected::default()
+    }
+}
+
 fn baseline() -> oa_bench::run::RunOutput {
+    run_world(&clean(), &self_test_config()).1
+}
+
+/// The full world, with the gate-failed aircraft's 20 km error.
+fn full_baseline() -> oa_bench::run::RunOutput {
     run_world(&Injected::default(), &self_test_config()).1
 }
 
@@ -78,7 +93,7 @@ fn cross_track_and_offset_corrected_along_track_recover_the_injection() {
 fn a_drifting_offset_withholds_the_corrected_along_track_numbers_with_the_reason() {
     let inj = Injected {
         tau_ramp: 0.004,
-        ..Injected::default()
+        ..clean()
     };
     let (_, out) = run_world(&inj, &self_test_config());
     let t2 = find(&out, "T2-offset").unwrap();
@@ -92,7 +107,7 @@ fn a_drifting_offset_withholds_the_corrected_along_track_numbers_with_the_reason
     // A steady offset of any size is not drift: the offset is recovered, nothing withheld.
     let big = Injected {
         tau_s: 4.0,
-        ..Injected::default()
+        ..clean()
     };
     let (_, out) = run_world(&big, &self_test_config());
     let t2 = find(&out, "T2-offset").unwrap();
@@ -357,10 +372,14 @@ fn the_callsign_gate_needs_80_percent_within_3_nm_and_1000_ft() {
     assert!(p.method.iter().all(|&m| m == method::CALLSIGN));
     // 7 of 10 within 3 NM: not associated.
     let (a, p, ex) = small_world_pairs(&legs, &q, &mk(3, 0), b"GATE01", None);
+    // The selection does not depend on ERAM's error: the flight is kept under its own method
+    // and its errors are scored (it used to be dropped here, flattering ERAM).
     assert_eq!(a.status[0], astatus::GATE_FAILED);
-    assert_eq!(a.addr[0], NONE);
-    assert!(p.t_ms.is_empty());
-    assert_eq!(ex[&("pairing", "callsign candidates failed the gate")], 10);
+    assert_eq!(a.addr[0], 0xABC001);
+    assert_eq!(a.method[0], method::CALLSIGN_GATE_FAILED);
+    assert_eq!(p.t_ms.len(), 10);
+    assert!(p.method.iter().all(|&m| m == method::CALLSIGN_GATE_FAILED));
+    assert!(!ex.keys().any(|(scope, _)| *scope == "pairing"));
     // One sample 6 NM out and one 1,500 ft off: 8 of 10 pass. A second altitude failure: 7 of 10.
     assert_eq!(
         small_world_pairs(&legs, &q, &mk(1, 1), b"GATE01", None)
@@ -374,8 +393,9 @@ fn the_callsign_gate_needs_80_percent_within_3_nm_and_1000_ft() {
             .status[0],
         astatus::GATE_FAILED
     );
-    // The address wins without a gate, and is stored as the method.
-    let (a, p, _) = small_world_pairs(&legs, &q, &mk(3, 0), b"OTHER", Some(0xABC001));
+    // The address wins without the 3 NM check (a contradicting callsign would flag it instead, see
+    // the fairness tests), and is stored as the method.
+    let (a, p, _) = small_world_pairs(&legs, &q, &mk(3, 0), b"GATE01", Some(0xABC001));
     assert_eq!(a.status[0], astatus::ADDRESS);
     assert!(p.method.iter().all(|&m| m == method::ADDRESS));
 }
@@ -383,7 +403,7 @@ fn the_callsign_gate_needs_80_percent_within_3_nm_and_1000_ft() {
 // REQ: OA-BENCH-007
 #[test]
 fn association_counts_address_callsign_ambiguous_and_unknown_cases() {
-    let out = baseline();
+    let out = full_baseline();
     let c = &out.assoc.counts;
     assert_eq!(c[astatus::ADDRESS as usize], 5);
     assert_eq!(c[astatus::CALLSIGN as usize], 2);
@@ -399,10 +419,18 @@ fn association_counts_address_callsign_ambiguous_and_unknown_cases() {
     let t1 = find(&out, "T1").unwrap();
     assert!(row(t1, "method=address").n > 0);
     assert!(row(t1, "method=callsign").n > 0);
+    // The gate-failed aircraft is kept: its samples are in "all" under their own method.
+    let gf = row(t1, "method=callsign (failed 3 NM / 1000 ft check)").n;
+    assert!(gf > 0);
     assert_eq!(
-        row(t1, "method=address").n + row(t1, "method=callsign").n,
+        row(t1, "method=address").n + row(t1, "method=callsign").n + gf,
         row(t1, "all").n
     );
+    // Each such flight is listed, with its error shown in the separate split.
+    assert!(m
+        .cases
+        .iter()
+        .any(|c| c.contains("GATEFL") && c.contains("kept")));
 }
 
 // REQ: OA-BENCH-003
@@ -557,11 +585,12 @@ fn the_address_hint_associates_when_no_aircraft_address_is_given_and_is_its_own_
 // REQ: OA-BENCH-019
 #[test]
 fn nothing_that_cannot_be_scored_is_dropped_silently() {
-    let out = baseline();
+    let out = full_baseline();
     let ex = &out.exclusions;
     // Samples of flights that are not associated, by outcome.
     assert_eq!(ex[&("pairing", "address has no truth")], 5);
-    assert!(ex[&("pairing", "callsign candidates failed the gate")] > 0);
+    // The callsign flight that fails the 3 NM check is scored, not excluded.
+    assert!(!ex.keys().any(|(_, r)| r.contains("failed the 3 NM")));
     // TBFM and TFMS rows that cannot be scored, by reason.
     assert_eq!(ex[&("F1", "truth never within 2 NM of the meter fix")], 1);
     assert!(ex.contains_key(&(

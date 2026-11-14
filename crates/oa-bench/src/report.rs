@@ -62,7 +62,31 @@ pub fn code_version() -> String {
     format!("{METRICS_VERSION}; crate {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// A scalar for the text report: "no data" for NaN.
+fn scalar_text(v: f64) -> String {
+    if v.is_nan() {
+        "no data".to_string()
+    } else {
+        format!("{v:.6}")
+    }
+}
+
+/// A scalar for the CSV: `NA` for NaN.
+fn scalar_csv(v: f64) -> String {
+    if v.is_nan() {
+        CSV_EMPTY.to_string()
+    } else {
+        format!("{v:.6}")
+    }
+}
+
+/// The CSV marker for a statistic or scalar of an empty set.
+pub const CSV_EMPTY: &str = "NA";
+
 fn stats_line(label: &str, s: &Stats) -> String {
+    if s.n == 0 {
+        return format!("  {label:<34} n=0         no data\n");
+    }
     format!(
         "  {label:<34} n={:<9} mean={:>12.4} rms={:>12.4} median={:>12.4} p95={:>12.4} p99={:>12.4} max={:>12.4}\n",
         s.n, s.mean, s.rms, s.median, s.p95, s.p99, s.max
@@ -78,7 +102,7 @@ fn metric_text(m: &MetricResult, out: &mut String) {
         out.push_str(&stats_line(&r.label, &r.stats));
     }
     for (k, v) in &m.scalars {
-        let _ = writeln!(out, "  {k} = {v:.6}");
+        let _ = writeln!(out, "  {k} = {}", scalar_text(*v));
     }
     for n in &m.notes {
         let _ = writeln!(out, "  note: {n}");
@@ -175,20 +199,20 @@ pub fn render_csv(h: &Header, run: &RunOutput) -> String {
             let s = &r.stats;
             let _ = writeln!(
                 o,
-                "stat,{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+                "stat,{},{},{},{},{},{},{},{},{}",
                 m.id,
                 csv_field(&r.label),
                 s.n,
-                s.mean,
-                s.rms,
-                s.median,
-                s.p95,
-                s.p99,
-                s.max
+                scalar_csv(s.mean),
+                scalar_csv(s.rms),
+                scalar_csv(s.median),
+                scalar_csv(s.p95),
+                scalar_csv(s.p99),
+                scalar_csv(s.max)
             );
         }
         for (k, v) in &m.scalars {
-            let _ = writeln!(o, "scalar,{},{},{v:.6}", m.id, csv_field(k));
+            let _ = writeln!(o, "scalar,{},{},{}", m.id, csv_field(k), scalar_csv(*v));
         }
         for n in &m.notes {
             let _ = writeln!(o, "note,{},{}", m.id, csv_field(n));

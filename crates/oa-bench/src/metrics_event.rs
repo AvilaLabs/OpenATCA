@@ -585,10 +585,13 @@ pub fn r1_route_conformance(
         if t_all > 0 {
             t_off as f64 / t_all as f64
         } else {
-            0.0
+            f64::NAN
         },
     ));
-    r.scalars.push(("max_flight_share".into(), max_share));
+    r.scalars.push((
+        "max_flight_share".into(),
+        if flights > 0 { max_share } else { f64::NAN },
+    ));
     cases.sort();
     r.scalars.push((
         "cases_not_listed".into(),

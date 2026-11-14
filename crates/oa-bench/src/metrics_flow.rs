@@ -214,7 +214,7 @@ pub fn t7_t8_presence(
     r7.scalars.push((
         "presence".into(),
         if n_in == 0 {
-            0.0
+            f64::NAN
         } else {
             n_present as f64 / n_in as f64
         },

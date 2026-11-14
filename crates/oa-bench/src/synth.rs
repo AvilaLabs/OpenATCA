@@ -153,6 +153,10 @@ pub struct Injected {
     pub tfms_etd_err_s: f64,
     /// Whether the crossing pair swaps tracks.
     pub swap: bool,
+    /// Along-track error of the callsign-only aircraft that fails the 3 NM check, metres. It stays
+    /// in the headline numbers by design, so the recovery of the other injected values runs with
+    /// 0.0 here and the aircraft is checked on its own.
+    pub gate_failed_offset_m: f64,
 }
 
 impl Default for Injected {
@@ -181,6 +185,7 @@ impl Default for Injected {
             tfms_eta_err_s: [30.0, 90.0],
             tfms_etd_err_s: -120.0,
             swap: false,
+            gate_failed_offset_m: 20_000.0,
         }
     }
 }
@@ -510,7 +515,7 @@ fn emit_sample(
     }
     // The 20 km offset of the gate-failure aircraft.
     let far = if a.callsign == "GATEFL" {
-        20_000.0
+        inj.gate_failed_offset_m
     } else {
         0.0
     };
@@ -740,7 +745,12 @@ pub fn self_test_config() -> RunConfig {
 /// Runs the self-test on the baseline scenario and lists every recovery check. The swap and the
 /// drift scenarios are separate runs (see the tests).
 pub fn self_test() -> Vec<Check> {
-    let inj = Injected::default();
+    // The callsign-only aircraft with a gross error is part of the headline numbers, so the
+    // recovery of every other injected value runs without that error; it is checked below.
+    let inj = Injected {
+        gate_failed_offset_m: 0.0,
+        ..Injected::default()
+    };
     let cfg = self_test_config();
     let (_, out) = run_world(&inj, &cfg);
     let mut v = Vec::new();
@@ -845,6 +855,38 @@ pub fn self_test() -> Vec<Check> {
             scalar(m, "association_errors"),
             0.0,
         );
+    }
+    // The same world with the 20 km error: the aircraft is kept, scored under its own method,
+    // and counted in the headline.
+    let full = Injected::default();
+    let (_, fout) = run_world(&full, &cfg);
+    let gf = "method=callsign (failed 3 NM / 1000 ft check)";
+    if let Some(m) = find(&fout, "T2-raw") {
+        if let Some(s) = row(m, gf) {
+            add(
+                "T2",
+                "gate-failed aircraft along-track error is scored (mean, m)",
+                full.gate_failed_offset_m + full.tau_s * 200.0,
+                s.mean,
+                // The world's flat frame stretches longitude by about 1.4% at this latitude
+                // offset, so a 20 km east error measures as about 20.3 km; allow 2%.
+                0.02 * full.gate_failed_offset_m,
+            );
+        }
+        if let (Some(a), Some(g)) = (row(m, "all"), row(m, gf)) {
+            let others: u64 = ["method=address", "method=callsign"]
+                .iter()
+                .filter_map(|l| row(m, l))
+                .map(|r| r.n)
+                .sum();
+            add(
+                "T2",
+                "gate-failed samples are inside the headline row (n)",
+                a.n as f64,
+                (g.n + others) as f64,
+                0.0,
+            );
+        }
     }
     for (i, bin) in ["0 to 5 min", "5 to 10 min", "25 to 30 min", "50 to 55 min"]
         .iter()

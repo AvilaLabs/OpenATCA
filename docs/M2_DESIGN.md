@@ -70,18 +70,43 @@ and published.
 **Timing.** At 450 kt, one second of clock offset is 230 m of along-track error. adsb.lol
 timestamps come from its feeders' clocks; ERAM's position time from ERAM. So:
 - **cross-track error is the primary horizontal metric**: it does not depend on time offset;
-- along-track error is reported twice: raw, and after fitting one constant time offset over the
-  whole day (the fitted offset is itself published);
-- the fitted offset must be stable across the day and across feeders; if it drifts, along-track
-  numbers are withheld with the reason.
+- along-track error is reported twice: raw (the primary number) and after fitting one constant time
+  offset over the whole day (secondary: the fit cannot tell a clock offset from real ERAM lag, so it
+  could absorb a real ERAM error). The fitted offset is published with its standard errors (samples,
+  and between aircraft) and a 95% half-width; every scored source, OpenATCA's tracker included, takes
+  the same path and the same treatment;
+- the fitted offset must be stable across the day and across feeders; if it drifts, the corrected
+  along-track numbers are withheld with the reason. The aircraft-group test trims the lowest and
+  highest 5% of groups so a few mismatched tracks do not decide it; the untrimmed largest deviation and
+  the worst groups are published as well.
+- the statistics of an empty set are `n = 0` with no value ("no data" in the report, `NA` in the CSV),
+  never 0.0.
 
 ## 2. Association: which ADS-B aircraft is which ERAM flight
 
-1. The flight plan's `aircraftAddress` (24-bit address) where SFDPS carries it.
-2. Otherwise callsign match (ADS-B flight ID against ERAM aircraft identification) plus gating:
-   the ERAM position must be within 3 NM and 1,000 ft of that aircraft's truth for at least 80%
-   of shared times.
-3. Ambiguous candidates (two aircraft pass the gate) are not associated; they are counted.
+Selection never depends on the error being measured. A flight is kept or dropped on identity and
+time overlap, never on how accurate ERAM's position is. The earlier rule (callsign candidates kept only
+if ERAM was within 3 NM and 1,000 ft for 80% of shared times) removed ERAM's worst flights as "gate
+failed", which flattered ERAM, and trusted an address with no check, which could penalise ERAM for a
+wrong match. Both are changed as a hazard-driven revision of this approved section.
+
+1. The flight plan's `aircraftAddress` (24-bit address) where SFDPS carries it; failing that, the
+   address hint in the `ADSB_02M` name-value pair of track messages (its own method).
+2. An address is checked for plausibility with tests that do not use ERAM's accuracy: the callsigns
+   must not contradict (ERAM's against the truth legs', when both are known), and ERAM's positions must
+   lie within 50 NM of the truth aircraft for at least 80% of the shared times, when there are at least 5.
+   The 50 NM region is far beyond any tracking error: it tells a different aircraft from a worse
+   track. With too few shared times the address is trusted and counted as unchecked. An implausible
+   pair is flagged: it is not in the primary rows, and its cross-track, raw along-track and altitude
+   errors are published in separate flagged tables, each flight listed with its reason.
+3. Otherwise callsign match (ADS-B flight ID against ERAM aircraft identification). A candidate needs at
+   least 5 shared times and the 50 NM region test; exactly one such candidate is associated, two or
+   more are ambiguous (not associated, counted). Departure and destination are not used: the truth
+   legs carry only an address, a callsign and times.
+4. A callsign flight whose positions are not within 3 NM and 1,000 ft for 80% of shared times is
+   associated all the same, under its own method (callsign, failed the check). It stays in the headline
+   rows, shows as its own split of the method column, and is listed as a case with its share inside the
+   check. A callsign candidate outside the region is flagged like an implausible address.
 
 The association method is stored per pair, and every metric can be split by it.
 

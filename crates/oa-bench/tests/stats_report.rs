@@ -41,7 +41,8 @@ fn percentiles_are_nearest_rank_and_independent_of_order() {
     // Non-finite values are skipped, not propagated.
     let s = stats_of(&[1.0, f64::NAN, f64::INFINITY, 3.0]);
     assert_eq!((s.n, s.mean), (2, 2.0));
-    assert_eq!(nearest_rank(&[], 50), 0.0);
+    // Nothing is not zero: the percentile of an empty set is NaN (see OA-BENCH-037).
+    assert!(nearest_rank(&[], 50).is_nan());
     // The same values in two orders give identical results bit for bit.
     let a = stats_of(&[0.1, 0.7, -0.3, 2.2, 5.5, 0.01]);
     let b = stats_of(&[5.5, 0.01, 2.2, 0.7, -0.3, 0.1]);

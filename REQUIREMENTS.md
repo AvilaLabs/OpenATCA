@@ -1595,9 +1595,11 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   the gate last; ambiguous flights (two aircraft pass the gate) are not associated and are counted; every
   flight has one outcome, the outcomes are counted, and the samples of unassociated flights are excluded
   by reason.
-- **OA-BENCH-008** The callsign gate keeps a candidate only if at least 80% of the shared times have the
-  ERAM position within 3 NM horizontally and 1,000 ft vertically; the address needs no gate; the method
-  is stored per pair and every metric can be split by it.
+- **OA-BENCH-008** The callsign check compares the ERAM position with the truth: a flight with at least
+  80% of the shared times within 3 NM horizontally and 1,000 ft vertically is associated as method
+  callsign; one that fails the check is still associated, under its own method, so it never leaves the
+  results; the address needs no such check; the method is stored per pair and every metric can be split
+  by it.
 - **OA-BENCH-009** Cross-track error (T1, positive to the right of the truth track) recovers an injected
   bias and noise; along-track error (T2) is reported raw and after fitting one constant time offset by
   least squares (`along = tau * speed`), the offset is published, and the corrected error recovers the
@@ -1648,7 +1650,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   flights with `aircraftAddress`, no capacity drops, and no refused TBFM or TFMS document.
 - **OA-BENCH-025** The synthetic self-test (closed-form truth; injected bias, noise, time offset,
   decimation, receive delay, coasting, dropout, start delay, estimate errors, handoff times, an off-route
-  stretch and a track swap) is recovered by every metric within its stated tolerance (24 checks).
+  stretch and a track swap) is recovered by every metric within its stated tolerance (26 checks, the last two on the callsign-only aircraft with a 20 km error that stays in the headline).
 - **OA-BENCH-026** A truth built from a plain lookup table and the same legs gives the same paired samples
   and metrics as the closed-form truth, so the interface needs nothing but the query and the legs.
 - **OA-BENCH-027** The address hint associates a flight that has no aircraftAddress, is stored as its own
@@ -1675,6 +1677,31 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-034** On the real ADS-B clip and the SCDS sample (skipped when `OPENATCA_DATA` or
   `OPENATCA_ADSB_CLIP` is unset), whose times do not overlap, the run completes with no paired samples and
   an exclusions table.
+- **OA-BENCH-035** Association never depends on the error being measured. A callsign flight is kept when
+  truth overlaps it in time (at least 5 shared times) and lies within 50 NM of its positions for 80% of
+  them; a flight that fails the 3 NM / 1,000 ft check is associated all the same under its own method
+  (callsign, failed the check), counted in the headline rows, split out by the method split, and listed
+  as a case. Two or more callsign candidates are ambiguous.
+- **OA-BENCH-036** An address or address-hint association is checked without using ERAM's accuracy:
+  callsigns that contradict (both known, none of the truth legs agrees) or ERAM positions beyond the 50 NM
+  region for more than 20% of the shared times make it implausible; with too few shared times it is
+  trusted and counted as unchecked. An implausible flight is not in the primary rows and its cross-track,
+  raw along-track and altitude errors are published in separate flagged tables, each flight listed with
+  its reason; an address with a believable error is trusted as before.
+- **OA-BENCH-037** The statistics of an empty set have n = 0 and NaN in every other field, never 0.0; the
+  text report prints such a row as "no data" and the CSV as `NA`; scalars of an empty set (presence, share
+  of time beyond the route limit, largest per-flight share, offset deviations with nothing tested) are NaN
+  and print the same way; no report contains the text `NaN`.
+- **OA-BENCH-038** Raw along-track error is the primary along-track result and the offset-corrected one
+  is secondary, and says that the fitted offset cannot be told apart from real ERAM lag. The offset is
+  published with its sample standard error, its between-aircraft standard error and a 95% half-width
+  (1.96 times the larger); the drift test keeps its 5% trim and also publishes the untrimmed largest
+  group deviation and the five worst aircraft groups.
+- **OA-BENCH-039** A tracker's output columns are scored by the same code path as ERAM's samples: the
+  tracker entry point is the legacy-table adapter followed by the one benchmark function, gives a
+  report identical to calling the two directly, and yields the same metrics, in the same order, with the
+  same offset scalars and notes as an ERAM run; a tracker that lags the truth shows the lag in the raw
+  along-track error.
 
 ## Winds aloft (oa-wind)
 

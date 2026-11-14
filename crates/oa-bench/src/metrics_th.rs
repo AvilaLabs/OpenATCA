@@ -14,6 +14,15 @@
 //! differs from the overall `tau` by more than [`OffsetConfig::drift_limit_s`]. A drifting
 //! offset withholds the corrected numbers with the reason; the fitted offset is still published.
 //! With fewer than two usable time bins the time stability cannot be tested; that is stated.
+//!
+//! **Raw is primary.** The fitted offset cannot tell a clock offset from real ERAM lag, so the
+//! raw along-track error is the primary number and the corrected one is secondary. The offset is
+//! published with two standard errors: the sample one (`sqrt(rss / (n - 1) / sum(v * v))`, which
+//! treats samples as independent and is too small for tracks) and the between-aircraft one
+//! (spread of the aircraft group offsets over the square root of their number), and a 95%
+//! half-width of 1.96 times the larger. The trim of the drift test is kept (a few mismatched
+//! tracks should not decide it) but the untrimmed largest deviation and the worst groups are
+//! published too. Every scored source takes this one path.
 
 use std::collections::BTreeMap;
 
@@ -63,13 +72,28 @@ pub struct OffsetFit {
     pub max_group_dev_s: f64,
     /// The reason the offset drifts, if it does.
     pub drift: Option<String>,
+    /// Standard error of the offset treating samples as independent, seconds.
+    pub se_s: f64,
+    /// Standard error from the spread of the aircraft group offsets, seconds; NaN with fewer than
+    /// two groups.
+    pub between_se_s: f64,
+    /// Largest deviation of a tested aircraft group with nothing trimmed, seconds; NaN when no
+    /// group was tested.
+    pub max_group_dev_untrimmed_s: f64,
+    /// The worst groups by deviation: `(address, samples, offset, deviation)`, at most
+    /// [`WORST_GROUPS`].
+    pub worst_groups: Vec<(u32, u64, f64, f64)>,
 }
+
+/// Aircraft groups listed in the untrimmed report.
+pub const WORST_GROUPS: usize = 5;
 
 #[derive(Default)]
 struct Acc {
     n: u64,
     sev: f64,
     svv: f64,
+    see: f64,
 }
 
 fn tau_of(a: &Acc) -> Option<f64> {
@@ -104,6 +128,7 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
             acc.n += 1;
             acc.sev += e * v;
             acc.svv += v * v;
+            acc.see += e * e;
         }
     }
     let mut fit = OffsetFit {
@@ -111,28 +136,57 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
         tau_s: tau_of(&all),
         bins_tested: 0,
         groups_tested: 0,
-        max_bin_dev_s: 0.0,
-        max_group_dev_s: 0.0,
+        max_bin_dev_s: f64::NAN,
+        max_group_dev_s: f64::NAN,
         drift: None,
+        se_s: f64::NAN,
+        between_se_s: f64::NAN,
+        max_group_dev_untrimmed_s: f64::NAN,
+        worst_groups: Vec::new(),
     };
     let Some(tau) = fit.tau_s else { return fit };
+    if all.n > 1 {
+        let rss = (all.see - tau * all.sev).max(0.0);
+        fit.se_s = (rss / (all.n - 1) as f64 / all.svv).sqrt();
+    }
+    let mut max_bin = 0.0f64;
     for b in bins.values().filter(|b| b.n >= cfg.min_group_n) {
         if let Some(t) = tau_of(b) {
             fit.bins_tested += 1;
-            fit.max_bin_dev_s = fit.max_bin_dev_s.max((t - tau).abs());
+            max_bin = max_bin.max((t - tau).abs());
         }
     }
-    let mut gt: Vec<f64> = groups
-        .values()
-        .filter(|g| g.n >= cfg.min_group_n)
-        .filter_map(tau_of)
-        .collect();
-    gt.sort_by(f64::total_cmp);
-    fit.groups_tested = gt.len() as u64;
-    let trim = gt.len() / 20;
-    for &t in gt.get(trim..gt.len().saturating_sub(trim)).unwrap_or(&[]) {
-        fit.max_group_dev_s = fit.max_group_dev_s.max((t - tau).abs());
+    if fit.bins_tested > 0 {
+        fit.max_bin_dev_s = max_bin;
     }
+    let mut gl: Vec<(u32, u64, f64)> = groups
+        .iter()
+        .filter(|(_, g)| g.n >= cfg.min_group_n)
+        .filter_map(|(&a, g)| tau_of(g).map(|t| (a, g.n, t)))
+        .collect();
+    gl.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)));
+    fit.groups_tested = gl.len() as u64;
+    let trim = gl.len() / 20;
+    let mut max_trim = 0.0f64;
+    for &(_, _, t) in gl.get(trim..gl.len().saturating_sub(trim)).unwrap_or(&[]) {
+        max_trim = max_trim.max((t - tau).abs());
+    }
+    if fit.groups_tested > 0 {
+        fit.max_group_dev_s = max_trim;
+        fit.max_group_dev_untrimmed_s = gl.iter().map(|g| (g.2 - tau).abs()).fold(0.0f64, f64::max);
+    }
+    if gl.len() > 1 {
+        let m = gl.iter().map(|g| g.2).sum::<f64>() / gl.len() as f64;
+        let var = gl.iter().map(|g| (g.2 - m).powi(2)).sum::<f64>() / (gl.len() - 1) as f64;
+        fit.between_se_s = (var / gl.len() as f64).sqrt();
+    }
+    let mut worst: Vec<(u32, u64, f64, f64)> = gl
+        .iter()
+        .map(|&(a, n, t)| (a, n, t, (t - tau).abs()))
+        .collect();
+    worst.sort_by(|a, b| b.3.total_cmp(&a.3).then(a.0.cmp(&b.0)));
+    worst.truncate(WORST_GROUPS);
+    fit.worst_groups = worst;
     if fit.max_bin_dev_s > cfg.drift_limit_s {
         fit.drift = Some(format!(
             "the offset drifts across the run: a time bin differs from the overall {tau:.3} s by {:.3} s (limit {:.3} s)",
@@ -188,7 +242,7 @@ pub fn t1_cross_track(p: &PairTable) -> MetricResult {
 /// T2 raw: along-track error, metres (positive when ERAM is ahead of the truth).
 pub fn t2_along_raw(p: &PairTable) -> MetricResult {
     let c = collect(p, |i| at(&p.along_m, i));
-    result_of("T2-raw", "along-track error, raw", "m", &c)
+    result_of("T2-raw", "along-track error, raw (primary)", "m", &c)
 }
 
 /// T2 corrected: along-track error after removing the fitted constant time offset. The offset,
@@ -198,21 +252,40 @@ pub fn t2_along_corrected(p: &PairTable, cfg: &OffsetConfig) -> MetricResult {
     let Some(tau) = fit.tau_s else {
         return withheld_result(
             "T2-offset",
-            "along-track error, offset corrected",
+            "along-track error, offset corrected (secondary)",
             "m",
             "no sample with a defined along-track error and truth speed above the fit minimum",
         );
     };
     let mut r = if let Some(why) = &fit.drift {
-        withheld_result("T2-offset", "along-track error, offset corrected", "m", why)
+        withheld_result(
+            "T2-offset",
+            "along-track error, offset corrected (secondary)",
+            "m",
+            why,
+        )
     } else {
         let c = collect(p, |i| {
             at(&p.along_m, i) - (tau as f32) * at(&p.truth_speed_mps, i)
         });
-        result_of("T2-offset", "along-track error, offset corrected", "m", &c)
+        result_of(
+            "T2-offset",
+            "along-track error, offset corrected (secondary)",
+            "m",
+            &c,
+        )
     };
     r.scalars.push(("fitted_offset_s".to_string(), tau));
     r.scalars.push(("fit_n".to_string(), fit.n as f64));
+    r.scalars.push(("fitted_offset_se_s".to_string(), fit.se_s));
+    r.scalars.push((
+        "fitted_offset_between_aircraft_se_s".to_string(),
+        fit.between_se_s,
+    ));
+    r.scalars.push((
+        "fitted_offset_u95_s".to_string(),
+        1.96 * fit.se_s.max(fit.between_se_s),
+    ));
     r.scalars
         .push(("bins_tested".to_string(), fit.bins_tested as f64));
     r.scalars
@@ -221,6 +294,27 @@ pub fn t2_along_corrected(p: &PairTable, cfg: &OffsetConfig) -> MetricResult {
         .push(("max_bin_dev_s".to_string(), fit.max_bin_dev_s));
     r.scalars
         .push(("max_group_dev_s".to_string(), fit.max_group_dev_s));
+    r.scalars.push((
+        "max_group_dev_untrimmed_s".to_string(),
+        fit.max_group_dev_untrimmed_s,
+    ));
+    let worst: Vec<String> = fit
+        .worst_groups
+        .iter()
+        .map(|(a, n, t, d)| format!("{a:06X} (n={n}, offset {t:.3} s, deviation {d:.3} s)"))
+        .collect();
+    r.notes.push(format!(
+        "worst aircraft groups, untrimmed: {}",
+        if worst.is_empty() {
+            "none tested".to_string()
+        } else {
+            worst.join("; ")
+        }
+    ));
+    r.notes.push(
+        "the fitted offset cannot be told apart from real ERAM lag: the raw along-track error is the primary number and this corrected one is secondary"
+            .to_string(),
+    );
     if fit.bins_tested < 2 {
         r.notes.push(
             "time stability not tested: fewer than two time bins have enough samples".to_string(),
