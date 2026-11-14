@@ -234,7 +234,7 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   regressions.
 - **OA-FEED-014** Health puts latency (receive time minus JMS timestamp) in a fixed-bin
   histogram, counts negative values as clock skew apart from the histogram, counts messages with
-  no timestamp, and reports quantile bins.
+  no timestamp, and reports p50 and p95 (bin upper edge, ms) and the exact maximum.
 - **OA-FEED-015** STATUS frames set the connected or disconnected state and count reconnect
   attempts with their announced delay.
 - **OA-FEED-016** Time since the last frame is computed from the injected clock and never
@@ -254,3 +254,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-023** The `oa-feed` binary in `--stdin` mode reads frames, prints a health line,
   records the input byte for byte, and `oa-feed replay` of the recording prints the same figures
   on every run.
+- **OA-FEED-024** The latency histogram has 10 ms bins to 100 ms, 100 ms bins to 1 s, 1 s bins to
+  60 s, 10 s bins to 600 s and one overflow bin; each bin's upper edge is the next bin's start,
+  and a p50, p95 or maximum in the overflow bin prints as `>=600000`.
+- **OA-FEED-025** Latencies of 7 to 10.5 s (as measured on the live TBFM feed) fall in distinct
+  1 s bins, and p50, p95 and the maximum come out as numbers in that range.

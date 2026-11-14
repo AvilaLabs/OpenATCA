@@ -30,6 +30,12 @@ final class EnvFile {
     return e;
   }
 
+  /** The value for `key`, or null if absent or empty. */
+  String optional(String key) {
+    String v = values.get(key);
+    return v == null || v.isEmpty() ? null : v;
+  }
+
   /** The value for `key`; the error names the key, never a value. */
   String require(String key) throws IOException {
     String v = values.get(key);

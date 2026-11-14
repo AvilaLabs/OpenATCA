@@ -67,8 +67,38 @@ produced by the bridge's Java encoder.
   exponential backoff from 2 s doubling to a 5 min cap, with random spread (delay drawn uniformly
   between 250 ms and the current ceiling), and the backoff restarts after a connection that
   stayed up for a minute (IF-S3). Each attempt is logged and announced in a STATUS frame.
-* A message over 4 MiB is not framed: it is logged, acknowledged and answered with a REJECT.
-  Any message type other than text or bytes gets a REJECT.
+* A message whose payload is over 4 MiB is not framed: it is logged, acknowledged and answered
+  with a REJECT. For a text message the test is on the real UTF-8 byte length (a 4 Mi-character
+  message can be up to 12 MiB of UTF-8): the length is counted without copying, so an oversize
+  message is refused before it is encoded, and one that fits is encoded exactly once. Any
+  message type other than text or bytes gets a REJECT.
 * Build: `mvn package` in `adapters/scds-bridge` makes `target/scds-bridge.jar` (shaded; every
   plugin version is pinned in the pom). The Solace client is fetched by Maven and never stored
   in this repository.
+
+## What the Solace client buffers, and how it is bounded
+
+sol-jms 10.30.2 exposes the guaranteed-delivery receive window on the connection factory
+(`setReceiveADWindowSize`, the consumer flow's window; the Solace default is 255). Its other
+receive setters are `setReceiveAdAckThreshold`, `setReceiveADAckTimerInMillis` and
+`setReceiveBufferSize` (the socket receive buffer). There is no separate prefetch setting.
+
+The window is the most messages the broker will send before the client acknowledges one. With
+CLIENT_ACKNOWLEDGE and the bridge acknowledging only after a frame is written and flushed, the
+messages the client library holds unacknowledged are therefore at most the window, and the
+bridge itself holds one more (the one being written). Nothing else queues in the bridge.
+
+Choice: the bridge sets the window to **32** by default (key `SCDS_ACK_WINDOW` in the env file
+overrides it, 1 to 255) and logs it on connect. Not 1: with a window of 1 the broker sends the
+next message only after the previous acknowledgement arrives, so throughput is about one message
+per round trip to the broker. TBFM peaks near 262 msg/s, which needs a round trip under about
+3.8 ms; a host reaching `ems2.swim.faa.gov` over the internet will be well above that. A window
+of W sustains about W / round trip, so 32 sustains 262 msg/s up to a round trip of about 120 ms.
+Worst-case memory held by the client is 32 times the largest message (observed maximum 579 KB,
+so about 19 MB; the JVM heap is capped at 512 MB by `oa-feed`).
+
+Not yet measured: the live run that produced the first recording used the default window of 255,
+and the throughput at 32 has not been confirmed against the real broker. Whether the client
+sends an acknowledgement immediately on `acknowledge()` or batches it by `ReceiveAdAckThreshold`
+and the ack timer is likewise unverified; if a live run at 32 falls short of the feed's rate, the
+first things to try are a larger window, then those two settings.

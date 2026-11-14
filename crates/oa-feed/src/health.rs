@@ -17,7 +17,9 @@
 //!   the expectation restarts from that value.
 //! * Latency is `recv_unix_ns / 1e6 - jms_timestamp_ms` in whole milliseconds, for MESSAGE
 //!   frames with a JMS timestamp; negative values are clock skew and are counted apart from the
-//!   histogram.
+//!   histogram. Bins resolve 10 ms up to 100 ms, 100 ms up to 1 s, 1 s up to 60 s, 10 s up to
+//!   600 s, then overflow. The summary prints p50 and p95 as the bin's upper edge in ms and the
+//!   exact maximum; anything in the overflow bin prints as `>=600000`.
 
 use std::fmt::Write;
 
@@ -28,11 +30,40 @@ pub const RING_SLOTS: usize = 61;
 /// Payload-size histogram bins: bin `i` holds sizes whose bit length is `i` (bin 0: empty,
 /// bin 1: 1 byte, bin 2: 2..3, ... bin 23: 4 MiB).
 pub const SIZE_BINS: usize = 24;
-/// Latency histogram bins (see [`LAT_EDGES_MS`]).
-pub const LAT_BINS: usize = 14;
-/// Upper edges (exclusive) of latency bins 0..13, in milliseconds; the last bin is open.
-pub const LAT_EDGES_MS: [i64; LAT_BINS - 1] =
-    [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
+/// Latency histogram bins: 10 ms steps to 100 ms (10 bins), 100 ms steps to 1 s (9), 1 s steps
+/// to 60 s (59), 10 s steps to 600 s (54), then one overflow bin; see [`lat_bin`].
+pub const LAT_BINS: usize = 133;
+/// Latencies at or above this (ms) land in the overflow bin.
+pub const LAT_OVERFLOW_MS: i64 = 600_000;
+
+/// The latency histogram bin for a non-negative latency in milliseconds.
+pub fn lat_bin(ms: i64) -> usize {
+    let ms = ms.max(0);
+    let b = if ms < 100 {
+        ms / 10
+    } else if ms < 1000 {
+        10 + (ms - 100) / 100
+    } else if ms < 60_000 {
+        19 + (ms - 1000) / 1000
+    } else if ms < LAT_OVERFLOW_MS {
+        78 + (ms - 60_000) / 10_000
+    } else {
+        (LAT_BINS - 1) as i64
+    };
+    b as usize
+}
+
+/// Exclusive upper edge in ms of a latency bin; `None` for the overflow bin.
+pub fn lat_bin_upper_ms(bin: usize) -> Option<i64> {
+    let b = bin as i64;
+    match b {
+        0..=9 => Some((b + 1) * 10),
+        10..=18 => Some(100 + (b - 9) * 100),
+        19..=77 => Some(1000 + (b - 18) * 1000),
+        78..=131 => Some(60_000 + (b - 77) * 10_000),
+        _ => None,
+    }
+}
 
 /// Connection state before any STATUS frame.
 pub const STATE_UNKNOWN: u8 = 0;
@@ -63,6 +94,8 @@ pub struct FeedHealth {
     pub first_recv_ns: i64,
     /// Receive time of the most recent frame (ns).
     pub last_recv_ns: i64,
+    /// Largest latency sample (ms); -1 until there is one.
+    pub lat_max_ms: i64,
     /// Frames of every kind accepted.
     pub frames: u64,
     /// MESSAGE frames.
@@ -112,9 +145,9 @@ pub struct FeedHealth {
     /// Per-second ring for the rates.
     pub ring: [Slot; RING_SLOTS],
 }
-// Budget: 19 u64/i64 fields (152) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 14 * 8 + 61 * 16
-// = 1448. One per feed, updated per frame; the rings dominate and have no padding.
-const _: () = assert!(core::mem::size_of::<FeedHealth>() == 1448);
+// Budget: 20 u64/i64 fields (160) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
+// = 2408. One per feed, updated per frame; the rings dominate and have no padding.
+const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2408);
 
 impl FeedHealth {
     /// An empty health record.
@@ -122,6 +155,7 @@ impl FeedHealth {
         FeedHealth {
             first_recv_ns: 0,
             last_recv_ns: 0,
+            lat_max_ms: -1,
             frames: 0,
             messages: 0,
             payload_bytes: 0,
@@ -234,8 +268,8 @@ fn observe_message(h: &mut FeedHealth, f: &Frame<'_>, now_ns: i64) {
     if lat_ms < 0 {
         h.skew += 1;
     } else {
-        let bin = LAT_EDGES_MS.partition_point(|&e| e <= lat_ms);
-        if let Some(c) = h.lat_hist.get_mut(bin) {
+        h.lat_max_ms = h.lat_max_ms.max(lat_ms);
+        if let Some(c) = h.lat_hist.get_mut(lat_bin(lat_ms)) {
             *c += 1;
         }
     }
@@ -297,7 +331,7 @@ pub fn rates_milli(h: &FeedHealth, now_ns: i64) -> (u64, u64) {
 }
 
 /// Upper edge in ms (exclusive) of the bin holding quantile `num/den` of the latency samples;
-/// `None` if there are no samples or the quantile falls in the open last bin.
+/// `None` if there are no samples or the quantile falls in the overflow bin.
 pub fn latency_quantile_ms(h: &FeedHealth, num: u64, den: u64) -> Option<i64> {
     let total: u64 = h.lat_hist.iter().sum();
     if total == 0 || den == 0 {
@@ -308,7 +342,7 @@ pub fn latency_quantile_ms(h: &FeedHealth, num: u64, den: u64) -> Option<i64> {
     for (i, c) in h.lat_hist.iter().enumerate() {
         cum += c;
         if cum >= target {
-            return LAT_EDGES_MS.get(i).copied();
+            return lat_bin_upper_ms(i);
         }
     }
     None
@@ -329,16 +363,23 @@ pub fn format_summary(h: &FeedHealth, now_ns: i64) -> String {
         now_ns.saturating_sub(h.last_recv_ns).max(0) / 1_000_000
     };
     let size_min = if h.messages == 0 { 0 } else { h.size_min };
-    let q = |n: u64, d: u64| match (latency_quantile_ms(h, n, d), h.lat_hist.iter().sum::<u64>()) {
-        (_, 0) => "-".to_string(),
-        (Some(e), _) => format!("<{e}"),
-        (None, _) => format!(">={}", LAT_EDGES_MS.last().copied().unwrap_or(0)),
+    let overflow = format!(">={LAT_OVERFLOW_MS}");
+    let samples: u64 = h.lat_hist.iter().sum();
+    let q = |n: u64, d: u64| match latency_quantile_ms(h, n, d) {
+        _ if samples == 0 => "-".to_string(),
+        Some(e) => e.to_string(),
+        None => overflow.clone(),
+    };
+    let lat_max = match h.lat_max_ms {
+        _ if samples == 0 => "-".to_string(),
+        m if m >= LAT_OVERFLOW_MS => overflow.clone(),
+        m => m.to_string(),
     };
     let mut s = String::with_capacity(256);
     let _ = write!(
         s,
         "state={state} msgs={} rate_1s={}.{:03} rate_60s={}.{:03} bytes={} size_min={size_min} \
-         size_max={} lat_p50_ms={} lat_p95_ms={} skew={} gaps={} missing={} dups={} regress={} \
+         size_max={} lat_p50_ms={} lat_p95_ms={} lat_max_ms={lat_max} skew={} gaps={} missing={} dups={} regress={} \
          redelivered={} rejects={} reconnects={} errors={} skipped={} since_last_ms={since_ms}",
         h.messages,
         r1 / 1000,

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use crate::cli::{self, Command, Source};
 use crate::frame::{encode_frame, ErrorKind, Frame, FrameError, Kind};
 use crate::health::{
-    format_summary, latency_quantile_ms, observe_frame, rates_milli, FeedHealth, STATE_CONNECTED,
-    STATE_DISCONNECTED,
+    format_summary, lat_bin, lat_bin_upper_ms, latency_quantile_ms, observe_frame, rates_milli,
+    FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED,
 };
 use crate::reader::FrameReader;
 use crate::record::{utc_stamp, Outcome, Recorder};
@@ -681,16 +681,18 @@ fn latency_histogram_and_clock_skew() {
     assert_eq!(h.skew, 2);
     assert_eq!(h.no_timestamp, 1);
     assert_eq!(
-        (h.lat_hist[0], h.lat_hist[2], h.lat_hist[4], h.lat_hist[13]),
-        (1, 1, 1, 1)
+        (h.lat_hist[0], h.lat_hist[1], h.lat_hist[lat_bin(20_000)]),
+        (2, 1, 1)
     );
     assert_eq!(h.lat_hist.iter().sum::<u64>(), 4);
-    assert_eq!(latency_quantile_ms(&h, 1, 2), Some(5)); // 2nd of 4 samples is in [2,5)
-    assert_eq!(latency_quantile_ms(&h, 19, 20), None); // top sample is in the open bin
+    assert_eq!(latency_quantile_ms(&h, 1, 2), Some(10)); // 2nd of 4 samples is in [0,10)
+    assert_eq!(latency_quantile_ms(&h, 19, 20), Some(21_000)); // top sample is in [20 s,21 s)
     assert_eq!(latency_quantile_ms(&FeedHealth::new(), 1, 2), None);
     let s = format_summary(&h, recv_ns);
     assert!(
-        s.contains("skew=2") && s.contains("lat_p50_ms=<5") && s.contains("lat_p95_ms=>=10000"),
+        s.contains("skew=2")
+            && s.contains("lat_p50_ms=10 ")
+            && s.contains("lat_p95_ms=21000 lat_max_ms=20000 "),
         "{s}"
     );
 }
@@ -746,9 +748,83 @@ fn hot_structs_keep_their_budgeted_sizes() {
     use core::mem::size_of;
     assert_eq!(size_of::<Frame<'static>>(), 80);
     assert_eq!(size_of::<crate::health::Slot>(), 16);
-    assert_eq!(size_of::<FeedHealth>(), 1448);
+    assert_eq!(size_of::<FeedHealth>(), 2408);
     // The size budget has no hidden padding: fields sum to the struct size.
-    assert_eq!(19 * 8 + 2 * 4 + 8 + 24 * 8 + 14 * 8 + 61 * 16, 1448);
+    assert_eq!(20 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2408);
+}
+
+// REQ: OA-FEED-024
+#[test]
+fn latency_bins_have_the_documented_edges_and_an_overflow_bin() {
+    use crate::health::{LAT_BINS, LAT_OVERFLOW_MS};
+    let cases = [
+        (0i64, 0usize),
+        (9, 0),
+        (10, 1),
+        (99, 9),
+        (100, 10),
+        (199, 10),
+        (999, 18),
+        (1000, 19),
+        (59_999, 77),
+        (60_000, 78),
+        (599_999, 131),
+        (600_000, 132),
+        (i64::MAX, 132),
+    ];
+    for (ms, bin) in cases {
+        assert_eq!(lat_bin(ms), bin, "{ms} ms");
+    }
+    assert_eq!(LAT_BINS, 133);
+    assert_eq!(LAT_OVERFLOW_MS, 600_000);
+    // Every bin's upper edge is where the next bin starts, and the last bin is open.
+    for bin in 0..LAT_BINS - 1 {
+        let up = lat_bin_upper_ms(bin).unwrap();
+        assert_eq!(lat_bin(up - 1), bin);
+        assert_eq!(lat_bin(up), bin + 1);
+    }
+    assert_eq!(lat_bin_upper_ms(LAT_BINS - 1), None);
+    // A sample in the overflow bin prints as ">=600000" for p50, p95 and max.
+    let mut h = FeedHealth::new();
+    let recv_ms = 1_700_000_000_000i64;
+    let ns = recv_ms * 1_000_000;
+    observe_frame(
+        &mut h,
+        &fr(Kind::Message, 0, 0, ns, recv_ms - 700_000, b"x"),
+        ns,
+    );
+    let s = format_summary(&h, ns);
+    assert!(
+        s.contains("lat_p50_ms=>=600000 lat_p95_ms=>=600000 lat_max_ms=>=600000 "),
+        "{s}"
+    );
+}
+
+// REQ: OA-FEED-025
+#[test]
+fn latencies_of_seven_to_ten_seconds_are_resolved() {
+    // The shape measured on the live TBFM feed: 7.3 s minimum, 8.7 s median, 10.5 s maximum.
+    let mut h = FeedHealth::new();
+    let recv_ms = 1_700_000_000_000i64;
+    let ns = recv_ms * 1_000_000;
+    let lats = [7_276i64, 7_900, 8_100, 8_664, 8_700, 9_500, 10_000, 10_500];
+    for (i, lat) in lats.into_iter().enumerate() {
+        observe_frame(
+            &mut h,
+            &fr(Kind::Message, 0, i as u64, ns, recv_ms - lat, b"x"),
+            ns,
+        );
+    }
+    assert_eq!(h.lat_hist[lat_bin(7_276)], 2); // [7 s,8 s): 7276, 7900
+    assert_eq!(h.lat_hist[lat_bin(8_664)], 3); // [8 s,9 s)
+    assert_eq!(h.lat_max_ms, 10_500);
+    assert_eq!(latency_quantile_ms(&h, 1, 2), Some(9_000)); // 4th of 8 is 8664 ms
+    assert_eq!(latency_quantile_ms(&h, 19, 20), Some(11_000));
+    let s = format_summary(&h, ns);
+    assert!(
+        s.contains("lat_p50_ms=9000 lat_p95_ms=11000 lat_max_ms=10500 "),
+        "{s}"
+    );
 }
 
 // ---------------------------------------------------------------- replay and recording

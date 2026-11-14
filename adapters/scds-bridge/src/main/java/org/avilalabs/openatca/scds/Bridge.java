@@ -37,6 +37,14 @@ public final class Bridge {
   /** Credential values, kept only to scrub library error text before it is logged. */
   private static volatile String[] secrets = new String[0];
 
+  /**
+   * Default consumer ack window: the most messages the broker may send before we acknowledge
+   * one. Bounds what the client holds unacknowledged. Not 1: at a window of 1 the rate is one
+   * message per round trip to the broker, far below TBFM's ~262 msg/s peak unless the round trip
+   * is under ~4 ms. 32 sustains 262 msg/s up to a ~120 ms round trip.
+   */
+  static final int DEFAULT_ACK_WINDOW = 32;
+
   private final OutputStream out;
   private long seq = 0;
 
@@ -60,6 +68,7 @@ public final class Bridge {
       for (String k : new String[] {"SCDS_JMS_URL", "SCDS_VPN", "SCDS_USERNAME", "SCDS_PASSWORD", "SCDS_QUEUE"}) {
         env.require(k);
       }
+      ackWindow(env); // validates the optional window before any connection
     } catch (IOException e) {
       log("event=fatal reason=env detail=\"" + clean(e.getMessage()) + "\"");
       System.exit(2);
@@ -108,6 +117,19 @@ public final class Bridge {
     }
   }
 
+  /** Ack window from the optional SCDS_ACK_WINDOW key (1 to 255), else the default. */
+  static int ackWindow(EnvFile env) throws IOException {
+    String v = env.optional("SCDS_ACK_WINDOW");
+    if (v == null) return DEFAULT_ACK_WINDOW;
+    try {
+      int w = Integer.parseInt(v);
+      if (w >= 1 && w <= 255) return w;
+    } catch (NumberFormatException ignored) {
+      // falls through to the error below
+    }
+    throw new IOException("env file value for SCDS_ACK_WINDOW must be a whole number 1 to 255");
+  }
+
   /** One connection's lifetime; returns or throws when it is lost. */
   private void session(EnvFile env) throws IOException, JMSException {
     SolConnectionFactory cf;
@@ -125,13 +147,14 @@ public final class Bridge {
     // Our own loop owns reconnection, so the client library must not retry behind our back.
     cf.setConnectRetries(0);
     cf.setReconnectRetries(0);
+    cf.setReceiveADWindowSize(ackWindow(env));
     Connection c = cf.createConnection();
     try {
       Session s = c.createSession(false, Session.CLIENT_ACKNOWLEDGE);
       MessageConsumer mc = s.createConsumer(s.createQueue(env.require("SCDS_QUEUE")));
       c.start();
       status("state=connected");
-      log("event=connected");
+      log("event=connected ack_window=" + ackWindow(env));
       while (true) {
         Message m = mc.receive(RECEIVE_TIMEOUT_MS);
         if (m == null) continue;
@@ -155,9 +178,11 @@ public final class Bridge {
     byte[] payload;
     if (m instanceof TextMessage tm) {
       String text = tm.getText() == null ? "" : tm.getText();
-      // UTF-8 is never shorter than the char count, so this catches oversize before encoding.
-      if (text.length() > Frame.MAX_PAYLOAD) {
-        reject("oversize", text.length(), id, flags, ts, recvNs);
+      // The real UTF-8 length (up to 3 bytes per char), counted without a copy, so an oversize
+      // message is refused before it is encoded; a message that fits is encoded exactly once.
+      long utf8 = utf8Length(text);
+      if (utf8 > Frame.MAX_PAYLOAD) {
+        reject("oversize", utf8, id, flags, ts, recvNs);
         return;
       }
       payload = text.getBytes(StandardCharsets.UTF_8);
@@ -179,6 +204,27 @@ public final class Bridge {
       return;
     }
     write(Frame.KIND_MESSAGE, flags, ts, recvNs, payload);
+  }
+
+  /** Length of `s` in UTF-8, matching String.getBytes (a lone surrogate encodes as '?'). */
+  static long utf8Length(String s) {
+    long n = 0;
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      if (c < 0x80) {
+        n += 1;
+      } else if (c < 0x800) {
+        n += 2;
+      } else if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+        n += 4;
+        i++;
+      } else if (Character.isSurrogate(c)) {
+        n += 1;
+      } else {
+        n += 3;
+      }
+    }
+    return n;
   }
 
   private void reject(String reason, long size, String id, int flags, long ts, long recvNs) throws IOException {
