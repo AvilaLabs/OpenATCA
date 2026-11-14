@@ -1,0 +1,181 @@
+//! The ADSB payload carried in OAF1 MESSAGE frames (docs/ADSB_PAYLOAD.md). Core (pure).
+
+use std::fmt;
+
+use crate::{
+    reports_len, reports_push, reports_row, Reports, Row, F_GROUND, NONE_U8, SOURCE_NAMES,
+};
+
+/// First four payload bytes.
+pub const PAYLOAD_MAGIC: [u8; 4] = *b"ADS1";
+/// Bytes before the first record.
+pub const PAYLOAD_HEADER_LEN: usize = 16;
+/// Bytes of one record.
+pub const RECORD_LEN: usize = 64;
+/// Most records in one frame: the largest count that keeps the payload (header plus records)
+/// under the 4 MiB OAF1 limit, rounded down to a round number.
+pub const MAX_ROWS_PER_FRAME: usize = 60_000;
+const _: () = assert!(PAYLOAD_HEADER_LEN + MAX_ROWS_PER_FRAME * RECORD_LEN <= 4 * 1024 * 1024);
+
+/// Why a payload was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadError {
+    /// Shorter than the header, or the length is not header + count * record.
+    Length,
+    /// Not `ADS1`.
+    Magic,
+    /// Record length field is not 64, or a reserved field is not zero.
+    Layout,
+    /// More than [`MAX_ROWS_PER_FRAME`] records.
+    TooManyRows,
+    /// Record `n` (0-based) has a value outside its range.
+    BadRecord(usize),
+    /// A row range outside the reports, or empty.
+    Range,
+}
+
+impl fmt::Display for PayloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PayloadError::Length => write!(f, "adsb payload: wrong length"),
+            PayloadError::Magic => write!(f, "adsb payload: bad magic"),
+            PayloadError::Layout => write!(f, "adsb payload: unsupported layout"),
+            PayloadError::TooManyRows => write!(f, "adsb payload: too many records"),
+            PayloadError::BadRecord(n) => write!(f, "adsb payload: record {n} out of range"),
+            PayloadError::Range => write!(f, "adsb payload: bad row range"),
+        }
+    }
+}
+
+impl std::error::Error for PayloadError {}
+
+fn put(dst: &mut [u8; RECORD_LEN], at: usize, bytes: &[u8]) {
+    if let Some(d) = dst.get_mut(at..at + bytes.len()) {
+        d.copy_from_slice(bytes);
+    }
+}
+
+fn encode_row(r: &Row) -> [u8; RECORD_LEN] {
+    let mut b = [0u8; RECORD_LEN];
+    put(&mut b, 0, &r.icao.to_le_bytes());
+    put(&mut b, 4, &r.lat_e7.to_le_bytes());
+    put(&mut b, 8, &r.lon_e7.to_le_bytes());
+    put(&mut b, 12, &r.baro_alt_ft.to_le_bytes());
+    put(&mut b, 16, &r.geom_alt_ft.to_le_bytes());
+    put(&mut b, 20, &r.vrate_fpm.to_le_bytes());
+    put(&mut b, 24, &r.time_ns.to_le_bytes());
+    put(&mut b, 32, &r.gs_dkt.to_le_bytes());
+    put(&mut b, 34, &r.track_ddeg.to_le_bytes());
+    put(&mut b, 36, &r.squawk.to_le_bytes());
+    put(&mut b, 38, &[r.flags, r.source]);
+    put(&mut b, 40, &r.callsign);
+    put(
+        &mut b,
+        48,
+        &[
+            r.category, r.nic, r.nac_p, r.nac_v, r.sil, r.sil_type, r.version, r.gva, r.sda,
+        ],
+    );
+    b
+}
+
+fn rd<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
+    b.get(at..at + N)?.try_into().ok()
+}
+
+fn decode_row(b: &[u8]) -> Option<Row> {
+    let u8s: [u8; 9] = rd(b, 48)?;
+    let [category, nic, nac_p, nac_v, sil, sil_type, version, gva, sda] = u8s;
+    if b.get(57..RECORD_LEN)?.iter().any(|&x| x != 0) {
+        return None;
+    }
+    let row = Row {
+        icao: u32::from_le_bytes(rd(b, 0)?),
+        lat_e7: i32::from_le_bytes(rd(b, 4)?),
+        lon_e7: i32::from_le_bytes(rd(b, 8)?),
+        baro_alt_ft: i32::from_le_bytes(rd(b, 12)?),
+        geom_alt_ft: i32::from_le_bytes(rd(b, 16)?),
+        vrate_fpm: i32::from_le_bytes(rd(b, 20)?),
+        time_ns: i64::from_le_bytes(rd(b, 24)?),
+        gs_dkt: u16::from_le_bytes(rd(b, 32)?),
+        track_ddeg: u16::from_le_bytes(rd(b, 34)?),
+        squawk: u16::from_le_bytes(rd(b, 36)?),
+        flags: *b.get(38)?,
+        source: *b.get(39)?,
+        callsign: rd(b, 40)?,
+        category,
+        nic,
+        nac_p,
+        nac_v,
+        sil,
+        sil_type,
+        version,
+        gva,
+        sda,
+    };
+    let ok = (-900_000_000..=900_000_000).contains(&row.lat_e7)
+        && (-1_800_000_000..=1_800_000_000).contains(&row.lon_e7)
+        && row.flags & !(F_GROUND | 15) == 0
+        && (row.source == NONE_U8 || usize::from(row.source) < SOURCE_NAMES.len());
+    ok.then_some(row)
+}
+
+/// Appends one payload holding reports `from..to` of `r` to `out`. The range must be non-empty
+/// and inside the reports, with at most [`MAX_ROWS_PER_FRAME`] rows.
+pub fn encode_payload(
+    out: &mut Vec<u8>,
+    r: &Reports,
+    from: usize,
+    to: usize,
+) -> Result<(), PayloadError> {
+    if from >= to || to > reports_len(r) {
+        return Err(PayloadError::Range);
+    }
+    if to - from > MAX_ROWS_PER_FRAME {
+        return Err(PayloadError::TooManyRows);
+    }
+    out.extend_from_slice(&PAYLOAD_MAGIC);
+    out.extend_from_slice(&(RECORD_LEN as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&((to - from) as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for i in from..to {
+        let row = reports_row(r, i).ok_or(PayloadError::Range)?;
+        out.extend_from_slice(&encode_row(&row));
+    }
+    Ok(())
+}
+
+/// Parses one payload, appending its reports to `out`. Returns the count. A bad payload
+/// appends nothing.
+pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadError> {
+    if bytes.len() < PAYLOAD_HEADER_LEN {
+        return Err(PayloadError::Length);
+    }
+    if bytes.get(..4) != Some(&PAYLOAD_MAGIC[..]) {
+        return Err(PayloadError::Magic);
+    }
+    let rec = u16::from_le_bytes(rd(bytes, 4).ok_or(PayloadError::Length)?);
+    let res1 = u16::from_le_bytes(rd(bytes, 6).ok_or(PayloadError::Length)?);
+    let count = u32::from_le_bytes(rd(bytes, 8).ok_or(PayloadError::Length)?) as usize;
+    let res2 = u32::from_le_bytes(rd(bytes, 12).ok_or(PayloadError::Length)?);
+    if usize::from(rec) != RECORD_LEN || res1 != 0 || res2 != 0 {
+        return Err(PayloadError::Layout);
+    }
+    if count > MAX_ROWS_PER_FRAME {
+        return Err(PayloadError::TooManyRows);
+    }
+    if bytes.len() != PAYLOAD_HEADER_LEN + count * RECORD_LEN {
+        return Err(PayloadError::Length);
+    }
+    let mut rows = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = PAYLOAD_HEADER_LEN + i * RECORD_LEN;
+        let rec = bytes.get(at..at + RECORD_LEN).ok_or(PayloadError::Length)?;
+        rows.push(decode_row(rec).ok_or(PayloadError::BadRecord(i))?);
+    }
+    for row in &rows {
+        reports_push(out, row);
+    }
+    Ok(count)
+}

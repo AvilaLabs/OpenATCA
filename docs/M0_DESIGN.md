@@ -27,7 +27,7 @@ legacy systems maintain by hand per facility, we generate, check, hash and diff 
 
 Raw downloads live outside the repo in `../openatca-data/raw/<source>-<cycle>/`, with SHA-256
 recorded in `DATA.md`. Tests that need full files read the directory named by the
-`OPENATCA_DATA` environment variable and skip with a clear message when it is unset. Unit tests
+`OPENATCA_NASR` environment variable (renamed 2026-11-14; `OPENATCA_DATA` now names the whole `openatca-data` directory) and skip with a clear message when it is unset. Unit tests
 use small excerpts of the real files committed as fixtures (FAA aeronautical data is public).
 
 ## Crates

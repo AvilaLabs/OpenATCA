@@ -11,6 +11,7 @@ committed. Each entry records where it came from and its SHA-256.
 | n/a | NIST CAVP SHA byte-oriented test vectors | `shabytetestvectors.zip` | `929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8` | https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip |
 | 2026-10-01 | NASR 28-day subscription, CSV edition | `NASR_CSV_01_Oct_2026.zip` | `8e42286d8af8350097397e6337a1b0d922f22b0c0e331f6142e8e1210f6828f4` | https://nfdc.faa.gov/webContent/28DaySub/extra/01_Oct_2026_CSV.zip |
 | 2026-10-01 | CIFP (ARINC 424-18) | `CIFP_261001.zip` | `6a84a58d92c598b8effe7daabb85443e90ac216ccc148890df8f13590e5c1b8b` | https://aeronav.faa.gov/Upload_313-d/cifp/CIFP_261001.zip |
+| n/a | JSONTestSuite `test_parsing` (MIT, N. Seriot), repository commit `1ef36fa01286573e846ac449e8683f8833c5b26a` | `raw/jsontestsuite/test_parsing/` (extracted; archive SHA-256 `8de9d8a03e96d7f242f8043341537594d20c922f35e972f089a0f4f345a9a1b0`) | see SOURCE.md there | https://codeload.github.com/nst/JSONTestSuite/tar.gz/refs/heads/master |
 
 The NASR server returns 503 to clients without a browser-like User-Agent.
 

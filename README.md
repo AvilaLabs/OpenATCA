@@ -44,6 +44,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
 | [docs/M0_REPORT.md](docs/M0_REPORT.md) | Milestone 0 result: the ZAU model, checks, defects found, limits |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why and the next step |
+| [docs/ADSB_PAYLOAD.md](docs/ADSB_PAYLOAD.md) | ADS-B history reports carried in OAF1 frames |
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How we talk to systems we do not control, so we never cause or amplify their failures |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 | `crates/oa-csv` | RFC 4180 reader |
@@ -54,6 +55,9 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-zip` | ZIP and DEFLATE reader with hard limits |
 | `crates/oa-airspace` | The airspace model and the `oa-adapt` tool |
 | `crates/oa-xml` | Bounded XML 1.0 parser for FAA SWIM messages |
+| `crates/oa-json` | Strict bounded RFC 8259 JSON parser |
+| `crates/oa-tar` | Streaming ustar/GNU tar reader, split archives, typed truncation |
+| `crates/oa-adsb` | adsb.lol / readsb trace decoder and the `oa-adsb-clip` tool |
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |

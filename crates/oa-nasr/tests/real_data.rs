@@ -1,5 +1,5 @@
 //! Integration tests over the full FAA NASR files. They read the directory named by the
-//! `OPENATCA_DATA` environment variable (the extracted CSV directory) and skip when it is unset.
+//! `OPENATCA_NASR` environment variable (the extracted NASR CSV directory) and skip when it is unset.
 //! Run with `--nocapture` to see the schema-violation and DMS-discrepancy report.
 #![allow(
     clippy::unwrap_used,
@@ -14,10 +14,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn data_dir() -> Option<PathBuf> {
-    match std::env::var_os("OPENATCA_DATA") {
+    match std::env::var_os("OPENATCA_NASR") {
         Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
         _ => {
-            eprintln!("OPENATCA_DATA is not set; skipping real-data test");
+            eprintln!("OPENATCA_NASR is not set; skipping real-data test");
             None
         }
     }
