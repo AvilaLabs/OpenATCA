@@ -23,6 +23,13 @@ name = "oa-csv"
 version = "0.0.1"
 
 [[package]]
+name = "oa-feed"
+version = "0.0.1"
+dependencies = [
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-geo"
 version = "0.0.1"
 

@@ -2,3 +2,6 @@ target/
 *.snapshot
 NETWORK.md
 DEFECTS.md
+*.jar
+*.env
+*.oaf

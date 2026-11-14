@@ -1,0 +1,18 @@
+[package]
+name = "oa-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crate (CRC-32 for frame checks); not an outside dependency (RULESET F1).
+oa-zip = { path = "../oa-zip" }
+
+[[bin]]
+name = "oa-feed"
+path = "src/main.rs"

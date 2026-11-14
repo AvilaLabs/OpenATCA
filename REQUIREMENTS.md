@@ -195,3 +195,62 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   variable is unset.
 - **OA-XML-021** The element table is a consistent tree: parents, first children and next
   siblings agree, and a walk from the root visits every element once.
+
+### SCDS feed frames (oa-feed)
+
+Format: `docs/FEED_FRAMES.md`. The bridge itself (`adapters/scds-bridge`, Java) is outside code
+under RULESET F6 and is verified by its live run, not by the cargo tests.
+
+- **OA-FEED-001** A frame of any kind round-trips every field exactly (kind, flags, seq, receive
+  time, JMS timestamp, payload, raw bytes, stream offset), including empty and 300-byte payloads
+  and extreme integer values.
+- **OA-FEED-002** The reader decodes the golden vector produced by the bridge's Java encoder,
+  and the Rust encoder produces the same bytes.
+- **OA-FEED-003** Frames are identical however the stream is chunked: every two-way split point
+  at the start and end of a mixed stream, and chunk sizes from 1 byte up.
+- **OA-FEED-004** A CRC mismatch is reported as a CRC error at the frame's byte offset; the
+  reader resynchronises to the next good frame and counts the skipped bytes exactly, at every
+  chunk split.
+- **OA-FEED-005** Bytes that are not a magic are reported as a bad-magic error at their offset
+  and skipped exactly up to the next frame.
+- **OA-FEED-006** A length above 4 MiB is refused as an oversize error as soon as the header is
+  present, without waiting for the payload, and the reader resynchronises.
+- **OA-FEED-007** An unknown kind (including 0) is refused with its own error and the frame is
+  skipped.
+- **OA-FEED-008** A stream that ends inside a frame gives a truncated-tail error with the bytes
+  present; leftover bytes during resynchronisation are counted as skipped and not reported
+  twice.
+- **OA-FEED-009** Never panics: every byte flip, truncation, insertion and deletion of a valid
+  stream, and 200 000 bytes of seeded noise in several chunkings, give frames and errors; every
+  input byte is either in a delivered frame or counted as skipped.
+- **OA-FEED-010** The reader runs in a fixed caller-supplied buffer of one maximum frame, refuses
+  a smaller one, accepts a frame with a 4 MiB payload, takes only what fits on a push and never
+  stalls; a payload above 4 MiB cannot be encoded.
+- **OA-FEED-011** Health counts frames, messages, payload bytes, minimum and maximum payload size,
+  the payload-size histogram, redelivered messages and rejects.
+- **OA-FEED-012** Health reports message rates over the last complete second and the last 60
+  seconds, from fixed ring buffers, with injected times; a stale ring reads as empty.
+- **OA-FEED-013** Health counts sequence gaps (and the frames missing), duplicates and
+  regressions.
+- **OA-FEED-014** Health puts latency (receive time minus JMS timestamp) in a fixed-bin
+  histogram, counts negative values as clock skew apart from the histogram, counts messages with
+  no timestamp, and reports quantile bins.
+- **OA-FEED-015** STATUS frames set the connected or disconnected state and count reconnect
+  attempts with their announced delay.
+- **OA-FEED-016** Time since the last frame is computed from the injected clock and never
+  negative.
+- **OA-FEED-017** The hot structs (frame view, rate slot, health record) keep their budgeted
+  sizes with no hidden padding (RULESET A7).
+- **OA-FEED-018** Replaying recorded files gives an identical health record and summary every
+  time, equal to reading the same bytes as one stream, from frame fields only (never the clock).
+- **OA-FEED-019** Recording rotates at the size limit on frame boundaries, names files
+  `<feed>-<UTC start>.oaf`, counts existing recordings toward the total cap, stops once with a
+  warning at the cap and never deletes a file.
+- **OA-FEED-020** UTC file names and timestamps are correct calendar times, including leap days
+  and times before 1970.
+- **OA-FEED-021** Every frame error carries and prints the byte offset of the problem.
+- **OA-FEED-022** The command line accepts the documented forms and refuses missing or malformed
+  arguments, exclusive options and unknown flags.
+- **OA-FEED-023** The `oa-feed` binary in `--stdin` mode reads frames, prints a health line,
+  records the input byte for byte, and `oa-feed replay` of the recording prints the same figures
+  on every run.
