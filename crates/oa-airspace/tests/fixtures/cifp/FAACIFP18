@@ -1,0 +1,839 @@
+HDR01FAACIFP18      001P013200008342611  07-OCT-202615:55:03  U.S.A. DOT FAA                                                9D60747B
+HDR02                                 FEDERAL AVIATION ADMINISTRATION                                                               
+HDR03                                 AERONAUTICAL INFORMATION SERVICES                                                             
+HDR04                                 CODED INSTRUMENT FLIGHT PROCEDURES VOLUME 2611  EFFECTIVE 29 OCT 2026                         
+HDR05                                 REPORT DATA ERRORS TO FAA                 TEL 800 638 8972                                    
+S   AS       N41W090          032032035031028029032031032037046053054050051065047042027020017UNKUNKUNKUNKUNKUNKUNKUNKUNK   001062610
+S   AS       N41W120          111118121127135129129121122126120121134143122097081069057050045041048039040033041031034032   001072610
+S   AS       N42W090          037028027025031031031028031033050049052048050063061061049021UNKUNKUNKUNKUNKUNKUNKUNKUNKUNK   001102610
+S   AS       N42W120          103120101107112112127116124137156146124115126085076059057050052039039045034035030036041030   001112610
+SUSAP KJFKK6AJFK     0     145YHN40382374W073464329W013000013         1800018000C    MNAR    JOHN F KENNEDY INTL           303911912
+SUSAP KJFKK6CAROKE K60    R     N40282056W073540760                       W0125     NAR           AROKE                    303922504
+SUSAP KJFKK6CBARJR K60    W     N40400265W073450039                       W0126     NAR           BARJR                    303932507
+SUSAP KJFKK6CBOTON K60    R     N39245210W074271708                       W0121     NAR           BOTON                    303942506
+SUSAP KJFKK6CBUZON K60    W     N40425434W073590299                       W0125     NAR           BUZON                    303952504
+SUSAP KJFKK6CCAPIT K60    C     N40453799W073374946                       W0127     NAR           CAPIT                    303962504
+SUSAP KJFKK6CCATOD K60    C     N40323338W073321404                       W0127     NAR           CATOD                    303972504
+SUSAP KJFKK6CCAXUN K60    R     N40414117W073521918                       W0125     NAR           CAXUN                    303982605
+SUSAP KJFKK6CCEEGL K60    W     N40320080W073354530                       W0126     NAR           CEEGL                    303992605
+SUSAP KJFKK6CCESID K60    W     N40322484W073512504                       W0125     NAR           CESID                    304002605
+SUSAP KJFKK6CCFLNN K60    W     N40384700W073452503                       W0126     NAR           CFLNN(CNF)               304012504
+SUSAP KJFKK6CCHANT K60    C     N40185829W073452499                       W0125     NAR           CHANT                    304022605
+SUSAP KJFKK6CCIMBL K60    W     N40451125W074001913                       W0125     NAR           CIMBL                    304032504
+SUSAP KJFKK6CCORVT K60    R     N40475941W073392833                       W0126     NAR           CORVT                    304042605
+SUSAP KJFKK6CCOVIR K60    W     N40264664W074013590                       W0124     NAR           COVIR                    304052605
+SUSAP KJFKK6CCRAIL K60    W     N40411308W073203628                       W0128     NAR           CRAIL                    304062504
+SUSAP KJFKK6CCUVKU K60    W     N40350967W073404576                       W0126     NAR           CUVKU                    304072504
+SUSAP KJFKK6CDETGY K60    W     N40410170W073274630                       W0127     NAR           DETGY                    304082605
+SUSAP KJFKK6CDMYHL K60    C     N40385852W073515871                       W0125     NAR           DMYHL                    304092605
+SUSAP KJFKK6CDUFFY K60    C     N40472800W073312139                       W0127     NAR           DUFFY                    304102605
+SUSAP KJFKK6CEBBEE K60    C     N40333892W073491475                       W0125     NAR           EBBEE                    304112605
+SUSAP KJFKK6CENEEE K60    W     N40423904W073405916                       W0126     NAR           ENEEE                    304122605
+SUSAP KJFKK6CFOLER K60    W     N40360807W073471841                       W0126     NAR           FOLER                    304132504
+SUSAP KJFKK6CFRNKY K60    W     N40244764W073441573                       W0125     NAR           FRNKY                    304142605
+SUSAP KJFKK6CGAALO K60    W     N40400945W073440980                       W0126     NAR           GAALO                    304152507
+SUSAP KJFKK6CGIGPE K60    W     N40484477W073343087                       W0127     NAR           GIGPE                    304162504
+SUSAP KJFKK6CHAIRR K60    W     N40400457W073513287                       W0125     NAR           HAIRR                    304172605
+SUSAP KJFKK6CHAUPT K60    W     N40460260W073243553                       W0128     NAR           HAUPT                    304182504
+SUSAP KJFKK6CHELOG K60    W     N40324818W073593975                       W0125     NAR           HELOG                    304192504
+SUSAP KJFKK6CHENEB K60    W     N40432401W073422271                       W0126     NAR           HENEB                    304202605
+SUSAP KJFKK6CHIRBO K60    C     N40472568W073181049                       W0128     NAR           HIRBO                    304212504
+SUSAP KJFKK6CIGIDE K60    W     N40354502W073391397                       W0126     NAR           IGIDE                    304222605
+SUSAP KJFKK6CKMCHI K60    W     N40373116W074023828                       W0124     NAR           KMCHI                    304232605
+SUSAP KJFKK6CKRSTL K60    C     N40333140W073500590                       W0125     NAR           KRSTL                    304242605
+SUSAP KJFKK6CLEFER K60    W     N40492724W073315794                       W0127     NAR           LEFER                    304252605
+SUSAP KJFKK6CMALDE K60    R     N40335357W073350963                       W0126     NAR           MALDE                    304262605
+SUSAP KJFKK6CMATTR K60    R     N40433582W073423501                       W0126     NAR           MATTR                    304272605
+SUSAP KJFKK6CMEALS K60    R     N40351035W073404725                       W0126     NAR           MEALS                    304282504
+SUSAP KJFKK6CMETSS K60    W     N40334824W073560471                       W0125     NAR           METSS                    304292603
+SUSAP KJFKK6CNAYIK K60    W     N40482862W073373830                       W0127     NAR           NAYIK                    304302504
+SUSAP KJFKK6CNRTON K60    W     N40083474W073440757                       W0125     NAR           NRTON                    304312504
+SUSAP KJFKK6CPIDTO K60    W     N40364958W073473130                       W0126     NAR           PIDTO                    304322504
+SUSAP KJFKK6CPONAE K60    W     N40401997W073444686                       W0126     NAR           PONAE                    304332603
+SUSAP KJFKK6CPZULU K60    W     N40371539W073234407                       W0127     NAR           PZULU                    304342605
+SUSAP KJFKK6CREPRE K60    W     N40275583W073542697                       W0125     NAR           REPRE                    304352504
+SUSAP KJFKK6CRISSY K60    W     N40235217W073351379                       W0126     NAR           RISSY                    304362605
+SUSAP KJFKK6CRIVRA K60    W     N40483348W073381975                       W0127     NAR           RIVRA                    304372504
+SUSAP KJFKK6CRNGRR K60    C     N40134859W074122069                       W0123     NAR           RNGRR                    304382504
+SUSAP KJFKK6CROSLY K60    C     N40474997W073380868                       W0127     NAR           ROSLY                    304392504
+SUSAP KJFKK6CSAJUL K60    W     N40193856W073330012                       W0126     NAR           SAJUL                    304402605
+SUSAP KJFKK6CSESKE K60    W     N40392446W073255665                       W0127     NAR           SESKE                    304412605
+SUSAP KJFKK6CSKORR K60    W     N40354701W073532184                       W0125     NAR           SKORR                    304422605
+SUSAP KJFKK6CTAPPR K60    W     N40382511W073293903                       W0127     NAR           TAPPR                    304432504
+SUSAP KJFKK6CTELEX K60    R     N40424247W073543485                       W0125     NAR           TELEX                    304442605
+SUSAP KJFKK6CUXHUB K60    R     N40402477W073493029                       W0126     NAR           UXHUB                    304452504
+SUSAP KJFKK6CVERRU K60    W     N40282958W073531547                       W0125     NAR           VERRU                    304462504
+SUSAP KJFKK6CVIDIO K60    W     N40233596W073332792                       W0126     NAR           VIDIO                    304472605
+SUSAP KJFKK6CWERIN K60    W     N40295324W074003599                       W0124     NAR           WERIN                    304482605
+SUSAP KJFKK6CWIKOL K60    W     N40522410W073303715                       W0127     NAR           WIKOL                    304492605
+SUSAP KJFKK6CYNKEE K60    W     N40290090W073505718                       W0125     NAR           YNKEE                    304502605
+SUSAP KJFKK6CZALPO K60    C     N40432384W073413756                       W0126     NAR           ZALPO                    304512605
+SUSAP KJFKK6CZETAL K60    C     N40292380W073523333                       W0125     NAR           ZETAL                    304522504
+SUSAP KJFKK6CZOSDO K60    W     N40403119W073432573                       W0126     NAR           ZOSDO                    304532504
+SUSAP KJFKK6CZULAB K60    C     N40354732W073391903                       W0126     NAR           ZULAB                    304542605
+SUSAP KJFKK6ECAMRN52ALL   010SIE  K6D 0V       IF                                             18000                        304822506
+SUSAP KJFKK6ECAMRN52ALL   020BOTONK6PC0E       TF                                                                          304832506
+SUSAP KJFKK6ECAMRN52ALL   030HOGGSK6EA0E       TF                                                                          304842506
+SUSAP KJFKK6ECAMRN52ALL   040PANZEK6EA0E       TF                                                                          304852506
+SUSAP KJFKK6ECAMRN52ALL   050KARRSK6EA0E       TF                                                                          304862506
+SUSAP KJFKK6ECAMRN52ALL   060CAMRNK6EA0EE      TF                                                                          304872506
+SUSAP KJFKK6GRW04L   0120790440 N40372318W073470505         -0028300012046057200IIHIQ1                                     308521709
+SUSAP KJFKK6GRW04R   0084000440 N40373154W073461324         -0028400012000053200IIJFK3                                     308532308
+SUSAP KJFKK6GRW13L   0100001340 N40392337W073471475         -0027900013090758200IITLK2                                     308542504
+SUSAP KJFKK6GRW13R   0145111340 N40384378W073483739         -0028100013204455200R                                          308552506
+SUSAP KJFKK6GRW22L   0084002240 N40384285W073451750         -0028300012000053200IIIWY3                                     308562308
+SUSAP KJFKK6GRW22R   0120792240 N40383276W073461069         -0028100013342459200IIJOC1                                     308572308
+SUSAP KJFKK6GRW31L   0145113140 N40375728W073465479         -0028100013326458200IIMOH1                                     308582308
+SUSAP KJFKK6GRW31R   0100003140 N40384260W073454483         -0028100013102742200IIRTH1                                     308592504
+SUSAP KJFKK6IIHIQ1   011090RW04LN40390697W0734543940438N40373109W0734654890605 10890328300W01305700010                     308602308
+SUSAP KJFKK6IIIWY3   011090RW22LN40372749W0734616412238N40383293W0734519980477 09600452300W01305300013                     308612308
+SUSAP KJFKK6IIJFK3   010950RW04RN40385159W0734510670438N40374210W0734611031029 10050425300W01305300013                     308622308
+SUSAP KJFKK6IIJOC1   010950RW22RN40374448W0734643112212N40382128W0734613933177-11260550300W01305900009                     308632308
+SUSAP KJFKK6IIMOH1   011135RW31LN40385966W0734912453138N40375987W0734709411101 11030327300W01305800009                     308642308
+SUSAP KJFKK6IIRTH1   011150RW31RN40393079W0734731123138N40385033W0734551020561 08100420300W01304200010                     308652308
+SUSAP KJFKK6IITLK2   011150RW13LN40383069W0734518581338N40391475W0734704861328 11010390300W01305800010                     308662308
+SUSAP KMDWK5AMDW     0     065YHN41470832W087450982W004000620         1800018000C    MNAR    CHICAGO MIDWAY INTL           533482506
+SUSAP KMDWK5CAAMEE K50    W     N41491162W087534480                       W0040     NAR           AAMEE                    533492605
+SUSAP KMDWK5CAGONY K30    W     N41512467W090323296                       W0020     NAR           AGONY                    533502605
+SUSAP KMDWK5CALQUE K50    C     N41340992W088012617                       W0038     NAR           ALQUE                    533512508
+SUSAP KMDWK5CAZUMO K50    W     N41272794W087001727                       W0046     NAR           AZUMO                    533522403
+SUSAP KMDWK5CBANER K50    C     N41363818W087581939                       W0039     NAR           BANER                    533532403
+SUSAP KMDWK5CBOCAH K50    W     N41510078W087201549                       W0044     NAR           BOCAH                    533542403
+SUSAP KMDWK5CBOOKK K50    W     N40421565W090184700                       W0021     NAR           BOOKK                    533552605
+SUSAP KMDWK5CBURUU K50    W     N40322641W090100441                       W0022     NAR           BURUU                    533562605
+SUSAP KMDWK5CCADON K50    C     N41390658W087551263                       W0039     NAR           CADON                    533572304
+SUSAP KMDWK5CCFBDJ K50    A     N41424690W087460552                       W0041     NAR           CFBDJ(CNF)               533582605
+SUSAP KMDWK5CCFBDK K50    A     N41480301W087412143                       W0041     NAR           CFBDK(CNF)               533592403
+SUSAP KMDWK5CCFBDL K50    A     N41480394W087402446                       W0041     NAR           CFBDL(CNF)               533602304
+SUSAP KMDWK5CCFBDN K50    A     N41471393W087391412                       W0041     NAR           CFBDN(CNF)               533612304
+SUSAP KMDWK5CCFBDP K50    A     N41425585W087555302                       W0039     NAR           CFBDP(CNF)               533622304
+SUSAP KMDWK5CCFBKN K50    A     N41424875W087434923                       W0041     NAR           CFBKN(CNF)               533632605
+SUSAP KMDWK5CCFCUO K50    A     N41474435W087504469                       W0040     NAR           CFCUO(CNF)               533642403
+SUSAP KMDWK5CCHUMP K50    W     N41223521W089592606                       W0024     NAR           CHUMP                    533652605
+SUSAP KMDWK5CCIDIG K50    W     N41491064W087424576                       W0041     NAR           CIDIG                    533662403
+SUSAP KMDWK5CCITGO K50    C     N41425182W087502852                       W0040     NAR           CITGO                    533672403
+SUSAP KMDWK5CDAJON K50    W     N40272796W089061964                       W0029     NAR           DAJON                    533682506
+SUSAP KMDWK5CDARKK K50    W     N40151258W090295996                       W0019     NAR           DARKK                    533692504
+SUSAP KMDWK5CDROSE K50    W     N40313941W086032882                       W0052     NAR           DROSE                    533702605
+SUSAP KMDWK5CDULTE K50    W     N41493055W087482992                       W0040     NAR           DULTE                    533712304
+SUSAP KMDWK5CDXXON K50    W     N41505130W087362562                       W0042     NAR           DXXON                    533722403
+SUSAP KMDWK5CEGLUQ K50    W     N41495735W087402835                       W0041     NAR           EGLUQ                    533732304
+SUSAP KMDWK5CELLJO K50    W     N41345303W087225246                       W0043     NAR           ELLJO                    533742506
+SUSAP KMDWK5CENDEE K50    W     N41222660W088303230                       W0035     NAR           ENDEE                    533752605
+SUSAP KMDWK5CENNZO K50    W     N40213820W091261100                       W0012     NAR           ENNZO                    533762403
+SUSAP KMDWK5CFARCE K50    W     N41381616W090172573                       W0022     NAR           FARCE                    533772605
+SUSAP KMDWK5CFENCK K50    W     N41452721W087410864                       W0041     NAR           FENCK                    533782403
+SUSAP KMDWK5CFISSK K50    W     N41025700W086255800                       W0050     NAR           FISSK                    533792605
+SUSAP KMDWK5CFUDDD K50    W     N40284658W091031949                       W0015     NAR           FUDDD                    533802504
+SUSAP KMDWK5CGAGGA K50    W     N41333200W087423300                       W0041     NAR           GAGGA                    533812605
+SUSAP KMDWK5CGERMN K50    W     N41420660W087150658                       W0044     NAR           GERMN                    533822304
+SUSAP KMDWK5CGIKLE K50    W     N41460963W087590466                       W0039     NAR           GIKLE                    533832403
+SUSAP KMDWK5CGLEAM K50    C     N41393561W087343583                       W0042     NAR           GLEAM                    533842403
+SUSAP KMDWK5CGORLC K50    W     N41385096W088082556                       W0038     NAR           GORLC                    533852605
+SUSAP KMDWK5CGOTNE K50    W     N40574058W086025295                       W0052     NAR           GOTNE                    533862304
+SUSAP KMDWK5CHAXOM K50    W     N41561704W087334349                       W0042     NAR           HAXOM                    533872304
+SUSAP KMDWK5CHEBKU K50    C     N41542696W087552806                       W0040     NAR           HEBKU                    533882605
+SUSAP KMDWK5CHEDOC K50    W     N41133793W089491941                       W0025     NAR           HEDOC                    533892605
+SUSAP KMDWK5CHHALL K50    W     N41484799W087473000                       W0040     NAR           HHALL                    533902304
+SUSAP KMDWK5CHILLS K50    C     N41372540W087313418                       W0042     NAR           HILLS                    533912403
+SUSAP KMDWK5CHILND K50    W     N41410060W087481992                       W0040     NAR           HILND                    533922403
+SUSAP KMDWK5CHINSN K50    W     N41473740W087442715                       W0041     NAR           HINSN                    533932605
+SUSAP KMDWK5CHISKO K50    C     N41490989W087480082                       W0040     NAR           HISKO                    533942304
+SUSAP KMDWK5CHITOB K50    C     N41502125W087494132                       W0040     NAR           HITOB                    533952403
+SUSAP KMDWK5CHOBEL K50    C     N41443481W087413443                       W0041     NAR           HOBEL                    533962403
+SUSAP KMDWK5CIGECY K50    C     N41360687W087460424                       W0040     NAR           IGECY                    533972304
+SUSAP KMDWK5CILIAD K50    W     N40453700W089542400                       W0024     NAR           ILIAD                    533982605
+SUSAP KMDWK5CJALAP K30    W     N40501800W093334800                       E0003     NAR           JALAP                    533992605
+SUSAP KMDWK5CJIBBB K50    W     N41500497W087405200                       W0041     NAR           JIBBB                    534002304
+SUSAP KMDWK5CJILLZ K50    W     N41124635W088580504                       W0031     NAR           JILLZ                    534012403
+SUSAP KMDWK5CJNSNN K30    W     N42011806W090440347                       W0019     NAR           JNSNN                    534022605
+SUSAP KMDWK5CJUPIR K50    W     N41494211W087524104                       W0040     NAR           JUPIR                    534032504
+SUSAP KMDWK5CKAMBL K50    W     N41035101W090423262                       W0018     NAR           KAMBL                    534042504
+SUSAP KMDWK5CKOOKS K50    W     N41103765W089073128                       W0030     NAR           KOOKS                    534052504
+SUSAP KMDWK5CLLVSS K50    W     N40520800W089451800                       W0025     NAR           LLVSS                    534062504
+SUSAP KMDWK5CLNANE K50    W     N41451838W087164292                       W0044     NAR           LNANE                    534072304
+SUSAP KMDWK5CMAGOO K50    W     N40012973W090454260                       W0017     NAR           MAGOO                    534082605
+SUSAP KMDWK5CMIGGS K50    W     N41050618W090265419                       W0020     NAR           MIGGS                    534092504
+SUSAP KMDWK5CMIING K50    W     N41451610W087450868                       W0041     NAR           MIING                    534102605
+SUSAP KMDWK5CMMEGG K50    W     N41110153W088380197                       W0034     NAR           MMEGG                    534112605
+SUSAP KMDWK5CMNDOE K50    W     N41504419W087384951                       W0042     NAR           MNDOE                    534122605
+SUSAP KMDWK5CNAANN K50    W     N41492933W087482819                       W0040     NAR           NAANN                    534132304
+SUSAP KMDWK5CNANEE K50    W     N40520281W088502556                       W0032     NAR           NANEE                    534142605
+SUSAP KMDWK5CNIDEE K50    W     N41500599W087495501                       W0040     NAR           NIDEE                    534152403
+SUSAP KMDWK5COCCHO K50    W     N41092921W089245921                       W0028     NAR           OCCHO                    534162605
+SUSAP KMDWK5COLCYK K50    W     N41322469W087361606                       W0042     NAR           OLCYK                    534172605
+SUSAP KMDWK5COLOXE K50    C     N41445978W087474674                       W0040     NAR           OLOXE                    534182304
+SUSAP KMDWK5COOPLA K50    W     N41400820W087594429                       W0039     NAR           OOPLA                    534192605
+SUSAP KMDWK5COZZEY K50    W     N41235700W086560060                       W0046     NAR           OZZEY                    534202304
+SUSAP KMDWK5CPEALE K50    W     N40593548W089282282                       W0027     NAR           PEALE                    534212403
+SUSAP KMDWK5CPHEEB K50    W     N40155083W089162404                       W0028     NAR           PHEEB                    534222504
+SUSAP KMDWK5CPKACH K50    W     N41344914W088075416                       W0038     NAR           PKACH                    534232605
+SUSAP KMDWK5CPLOPP K50    W     N41433464W087493744                       W0040     NAR           PLOPP                    534242403
+SUSAP KMDWK5CPOOGY K50    W     N40235342W089083715                       W0029     NAR           POOGY                    534252403
+SUSAP KMDWK5CPRIUS K50    W     N41411016W087412473                       W0041     NAR           PRIUS                    534262403
+SUSAP KMDWK5CPURTY K50    W     N41081916W089431622                       W0025     NAR           PURTY                    534272403
+SUSAP KMDWK5CRUDDY K50    W     N41502465W087501657                       W0040     NAR           RUDDY                    534282403
+SUSAP KMDWK5CRUGGO K50    W     N41524487W087381370                       W0042     NAR           RUGGO                    534292605
+SUSAP KMDWK5CRUNTS K50    C     N41425079W087390871                       W0041     NAR           RUNTS                    534302304
+SUSAP KMDWK5CSAILZ K50    W     N41510049W087325819                       W0042     NAR           SAILZ                    534312304
+SUSAP KMDWK5CSAVEE K50    W     N41512707W087265647                       W0043     NAR           SAVEE                    534322403
+SUSAP KMDWK5CSAVRD K50    W     N41382363W087443907                       W0041     NAR           SAVRD                    534332605
+SUSAP KMDWK5CSTERE K50    W     N41510076W087193535                       W0044     NAR           STERE                    534342403
+SUSAP KMDWK5CSTKNY K50    W     N41302441W088172560                       W0036     NAR           STKNY                    534352304
+SUSAP KMDWK5CTACTT K50    W     N41510082W087261677                       W0043     NAR           TACTT                    534362403
+SUSAP KMDWK5CTINLY K50    W     N41331908W087505756                       W0040     NAR           TINLY                    534372605
+SUSAP KMDWK5CTMRAA K50    W     N41162757W088473810                       W0032     NAR           TMRAA                    534382506
+SUSAP KMDWK5CTOLCA K50    W     N41084944W089071278                       W0030     NAR           TOLCA                    534392504
+SUSAP KMDWK5CTOYUL K50    W     N41424418W088041355                       W0038     NAR           TOYUL                    534402403
+SUSAP KMDWK5CTUURN K50    W     N41451612W087450967                       W0041     NAR           TUURN                    534412605
+SUSAP KMDWK5CTWEEN K50    W     N41382606W087444390                       W0041     NAR           TWEEN                    534422605
+SUSAP KMDWK5CUGGLY K30    W     N42104337W090550591                       W0017     NAR           UGGLY                    534432403
+SUSAP KMDWK5CWADLL K50    W     N41453680W087374503                       W0042     NAR           WADLL                    534442605
+SUSAP KMDWK5CWNNRS K50    W     N41324420W087513874                       W0040     NAR           WNNRS                    534452605
+SUSAP KMDWK5CWUPOR K50    W     N41245867W088125508                       W0037     NAR           WUPOR                    534462403
+SUSAP KMDWK5CYACHT K50    W     N41492206W087421442                       W0041     NAR           YACHT                    534472403
+SUSAP KMDWK5CYIPEE K50    W     N41442763W087482741                       W0040     NAR           YIPEE                    534482304
+SUSAP KMDWK5CYUCAN K50    W     N41455804W087525933                       W0040     NAR           YUCAN                    534492605
+SUSAP KMDWK5CZASIV K50    W     N41480637W087375287                       W0042     NAR           ZASIV                    534502605
+SUSAP KMDWK5CZUDVI K50    W     N41483407W087424482                       W0041     NAR           ZUDVI                    534512403
+SUSAP KMDWK5EENDEE84CHUMP 010CHUMPK5PC0E       IF                                 B FL2101700018000                        534522508
+SUSAP KMDWK5EENDEE84CHUMP 020HEDOCK5PC0E       TF                                                                          534532508
+SUSAP KMDWK5EENDEE84CHUMP 030PURTYK5PC0E       TF                                 B FL19015000                             534542508
+SUSAP KMDWK5EENDEE84CHUMP 040OCCHOK5PC0E       TF                                 B 1600014000                             534552508
+SUSAP KMDWK5EENDEE84CHUMP 050KOOKSK5PC0E       TF                                 B 1300010000                             534562508
+SUSAP KMDWK5EENDEE84CHUMP 060JILLZK5PC0E       TF                                   10000                                  534572508
+SUSAP KMDWK5EENDEE84CHUMP 070TMRAAK5PC0E       TF                                                                          534582508
+SUSAP KMDWK5EENDEE84CHUMP 080ENDEEK5PC0EE      TF                                 B 0700006000     250                     534592508
+SUSAP KMDWK5EENDEE84DARKK 010DARKKK5PC0E       IF                                   FL310     18000                        534602508
+SUSAP KMDWK5EENDEE84DARKK 020BURUUK5PC0E       TF                                 B FL290FL240                             534612508
+SUSAP KMDWK5EENDEE84DARKK 030ILIADK5PC0E       TF                                                                          534622508
+SUSAP KMDWK5EENDEE84DARKK 040LLVSSK5PC0E       TF                                 B FL210FL190                             534632508
+SUSAP KMDWK5EENDEE84DARKK 050PEALEK5PC0E       TF                                 B FL19016000                             534642508
+SUSAP KMDWK5EENDEE84DARKK 060TOLCAK5PC0E       TF                                 B 1300010000                             534652508
+SUSAP KMDWK5EENDEE84DARKK 070JILLZK5PC0E       TF                                   10000                                  534662508
+SUSAP KMDWK5EENDEE84DARKK 080TMRAAK5PC0E       TF                                                                          534672508
+SUSAP KMDWK5EENDEE84DARKK 090ENDEEK5PC0EE      TF                                 B 0700006000     250                     534682508
+SUSAP KMDWK5EENDEE84EDENS 010EDENSK5EA0E       IF                                 B FL210FL19018000                        534692508
+SUSAP KMDWK5EENDEE84EDENS 020PURTYK5PC0E       TF                                 B FL19015000                             534702508
+SUSAP KMDWK5EENDEE84EDENS 030OCCHOK5PC0E       TF                                 B 1600014000                             534712508
+SUSAP KMDWK5EENDEE84EDENS 040KOOKSK5PC0E       TF                                 B 1300010000                             534722508
+SUSAP KMDWK5EENDEE84EDENS 050JILLZK5PC0E       TF                                   10000                                  534732508
+SUSAP KMDWK5EENDEE84EDENS 060TMRAAK5PC0E       TF                                                                          534742508
+SUSAP KMDWK5EENDEE84EDENS 070ENDEEK5PC0EE      TF                                 B 0700006000     250                     534752508
+SUSAP KMDWK5EENDEE84FUDDD 010FUDDDK5PC0E       IF                                   FL310     18000                        534762508
+SUSAP KMDWK5EENDEE84FUDDD 020BOOKKK5PC0E       TF                                 B FL290FL240                             534772508
+SUSAP KMDWK5EENDEE84FUDDD 030LLVSSK5PC0E       TF                                 B FL210FL190                             534782508
+SUSAP KMDWK5EENDEE84FUDDD 040PEALEK5PC0E       TF                                 B FL19016000                             534792508
+SUSAP KMDWK5EENDEE84FUDDD 050TOLCAK5PC0E       TF                                 B 1300010000                             534802508
+SUSAP KMDWK5EENDEE84FUDDD 060JILLZK5PC0E       TF                                   10000                                  534812508
+SUSAP KMDWK5EENDEE84FUDDD 070TMRAAK5PC0E       TF                                                                          534822508
+SUSAP KMDWK5EENDEE84FUDDD 080ENDEEK5PC0EE      TF                                 B 0700006000     250                     534832508
+SUSAP KMDWK5EENDEE84IRK   010IRK  K3D 0V       IF                                             18000                        534842508
+SUSAP KMDWK5EENDEE84IRK   020ENNZOK5PC0E       TF                                                                          534852508
+SUSAP KMDWK5EENDEE84IRK   030FUDDDK5PC0E       TF                                   FL310                                  534862508
+SUSAP KMDWK5EENDEE84IRK   040BOOKKK5PC0E       TF                                 B FL290FL240                             534872508
+SUSAP KMDWK5EENDEE84IRK   050LLVSSK5PC0E       TF                                 B FL210FL190                             534882508
+SUSAP KMDWK5EENDEE84IRK   060PEALEK5PC0E       TF                                 B FL19016000                             534892508
+SUSAP KMDWK5EENDEE84IRK   070TOLCAK5PC0E       TF                                 B 1300010000                             534902508
+SUSAP KMDWK5EENDEE84IRK   080JILLZK5PC0E       TF                                   10000                                  534912508
+SUSAP KMDWK5EENDEE84IRK   090TMRAAK5PC0E       TF                                                                          534922508
+SUSAP KMDWK5EENDEE84IRK   100ENDEEK5PC0EE      TF                                 B 0700006000     250                     534932508
+SUSAP KMDWK5EENDEE84JALAP 010JALAPK3PC0E       IF                                             18000                        534942508
+SUSAP KMDWK5EENDEE84JALAP 020KAMBLK5PC0E       TF                                 B FL270FL240                             534952508
+SUSAP KMDWK5EENDEE84JALAP 030MIGGSK5PC0E       TF                                 B FL230FL210                             534962508
+SUSAP KMDWK5EENDEE84JALAP 040EDENSK5EA0E       TF                                 B FL210FL190                             534972508
+SUSAP KMDWK5EENDEE84JALAP 050PURTYK5PC0E       TF                                 B FL19015000                             534982508
+SUSAP KMDWK5EENDEE84JALAP 060OCCHOK5PC0E       TF                                 B 1600014000                             534992508
+SUSAP KMDWK5EENDEE84JALAP 070KOOKSK5PC0E       TF                                 B 1300010000                             535002508
+SUSAP KMDWK5EENDEE84JALAP 080JILLZK5PC0E       TF                                   10000                                  535012508
+SUSAP KMDWK5EENDEE84JALAP 090TMRAAK5PC0E       TF                                                                          535022508
+SUSAP KMDWK5EENDEE84JALAP 100ENDEEK5PC0EE      TF                                 B 0700006000     250                     535032508
+SUSAP KMDWK5EENDEE84KAMBL 010KAMBLK5PC0E       IF                                 B FL270FL24018000                        535042508
+SUSAP KMDWK5EENDEE84KAMBL 020MIGGSK5PC0E       TF                                 B FL230FL210                             535052508
+SUSAP KMDWK5EENDEE84KAMBL 030EDENSK5EA0E       TF                                 B FL210FL190                             535062508
+SUSAP KMDWK5EENDEE84KAMBL 040PURTYK5PC0E       TF                                 B FL19015000                             535072508
+SUSAP KMDWK5EENDEE84KAMBL 050OCCHOK5PC0E       TF                                 B 1600014000                             535082508
+SUSAP KMDWK5EENDEE84KAMBL 060KOOKSK5PC0E       TF                                 B 1300010000                             535092508
+SUSAP KMDWK5EENDEE84KAMBL 070JILLZK5PC0E       TF                                   10000                                  535102508
+SUSAP KMDWK5EENDEE84KAMBL 080TMRAAK5PC0E       TF                                                                          535112508
+SUSAP KMDWK5EENDEE84KAMBL 090ENDEEK5PC0EE      TF                                 B 0700006000     250                     535122508
+SUSAP KMDWK5EENDEE84LLVSS 010LLVSSK5PC0E       IF                                 B FL210FL19018000                        535132508
+SUSAP KMDWK5EENDEE84LLVSS 020PEALEK5PC0E       TF                                 B FL19016000                             535142508
+SUSAP KMDWK5EENDEE84LLVSS 030TOLCAK5PC0E       TF                                 B 1300010000                             535152508
+SUSAP KMDWK5EENDEE84LLVSS 040JILLZK5PC0E       TF                                   10000                                  535162508
+SUSAP KMDWK5EENDEE84LLVSS 050TMRAAK5PC0E       TF                                                                          535172508
+SUSAP KMDWK5EENDEE84LLVSS 060ENDEEK5PC0EE      TF                                 B 0700006000     250                     535182508
+SUSAP KMDWK5EENDEE84MAGOO 010MAGOOK5PC0E       IF                                             18000                        535192508
+SUSAP KMDWK5EENDEE84MAGOO 020DARKKK5PC0E       TF                                   FL310                                  535202508
+SUSAP KMDWK5EENDEE84MAGOO 030BURUUK5PC0E       TF                                 B FL290FL240                             535212508
+SUSAP KMDWK5EENDEE84MAGOO 040ILIADK5PC0E       TF                                                                          535222508
+SUSAP KMDWK5EENDEE84MAGOO 050LLVSSK5PC0E       TF                                 B FL210FL190                             535232508
+SUSAP KMDWK5EENDEE84MAGOO 060PEALEK5PC0E       TF                                 B FL19016000                             535242508
+SUSAP KMDWK5EENDEE84MAGOO 070TOLCAK5PC0E       TF                                 B 1300010000                             535252508
+SUSAP KMDWK5EENDEE84MAGOO 080JILLZK5PC0E       TF                                   10000                                  535262508
+SUSAP KMDWK5EENDEE84MAGOO 090TMRAAK5PC0E       TF                                                                          535272508
+SUSAP KMDWK5EENDEE84MAGOO 100ENDEEK5PC0EE      TF                                 B 0700006000     250                     535282508
+SUSAP KMDWK5EENDEE84NANEE 010NANEEK5PC0E       IF                                 B 160001400018000                        535292508
+SUSAP KMDWK5EENDEE84NANEE 020MMEGGK5PC0E       TF                                 - 09000                                  535302508
+SUSAP KMDWK5EENDEE84NANEE 030ENDEEK5PC0EE      TF                                 B 0700006000     250                     535312508
+SUSAP KMDWK5EENDEE84OHHMY 010OHHMYK3EA0E       IF                                             18000                        535322611
+SUSAP KMDWK5EENDEE84OHHMY 020UGGLYK3PC0E       TF                                   FL240                                  535332508
+SUSAP KMDWK5EENDEE84OHHMY 030JNSNNK3PC0E       TF                                   FL240                                  535342508
+SUSAP KMDWK5EENDEE84OHHMY 040AGONYK3PC0E       TF                                 B FL230FL210                             535352508
+SUSAP KMDWK5EENDEE84OHHMY 050FARCEK5PC0E       TF                                                                          535362508
+SUSAP KMDWK5EENDEE84OHHMY 060CHUMPK5PC0E       TF                                 B FL21017000                             535372508
+SUSAP KMDWK5EENDEE84OHHMY 070HEDOCK5PC0E       TF                                                                          535382508
+SUSAP KMDWK5EENDEE84OHHMY 080PURTYK5PC0E       TF                                 B FL19015000                             535392508
+SUSAP KMDWK5EENDEE84OHHMY 090OCCHOK5PC0E       TF                                 B 1600014000                             535402508
+SUSAP KMDWK5EENDEE84OHHMY 100KOOKSK5PC0E       TF                                 B 1300010000                             535412508
+SUSAP KMDWK5EENDEE84OHHMY 110JILLZK5PC0E       TF                                   10000                                  535422508
+SUSAP KMDWK5EENDEE84OHHMY 120TMRAAK5PC0E       TF                                                                          535432508
+SUSAP KMDWK5EENDEE84OHHMY 130ENDEEK5PC0EE      TF                                 B 0700006000     250                     535442508
+SUSAP KMDWK5EENDEE84PHEEB 010PHEEBK5PC0E       IF                                             18000                        535452508
+SUSAP KMDWK5EENDEE84PHEEB 020POOGYK5PC0E       TF                                   FL240                                  535462508
+SUSAP KMDWK5EENDEE84PHEEB 030DAJONK5PC0E       TF                                 - FL230                                  535472508
+SUSAP KMDWK5EENDEE84PHEEB 040NANEEK5PC0E       TF                                 B 1600014000                             535482508
+SUSAP KMDWK5EENDEE84PHEEB 050MMEGGK5PC0E       TF                                 - 09000                                  535492508
+SUSAP KMDWK5EENDEE84PHEEB 060ENDEEK5PC0EE      TF                                 B 0700006000     250                     535502508
+SUSAP KMDWK5EENDEE84POOGY 010POOGYK5PC0E       IF                                   FL240     18000                        535512508
+SUSAP KMDWK5EENDEE84POOGY 020DAJONK5PC0E       TF                                 - FL230                                  535522508
+SUSAP KMDWK5EENDEE84POOGY 030NANEEK5PC0E       TF                                 B 1600014000                             535532508
+SUSAP KMDWK5EENDEE84POOGY 040MMEGGK5PC0E       TF                                 - 09000                                  535542508
+SUSAP KMDWK5EENDEE84POOGY 050ENDEEK5PC0EE      TF                                 B 0700006000     250                     535552508
+SUSAP KMDWK5EENDEE84UGGLY 010UGGLYK3PC0E       IF                                   FL240     18000                        535562508
+SUSAP KMDWK5EENDEE84UGGLY 020JNSNNK3PC0E       TF                                   FL240                                  535572508
+SUSAP KMDWK5EENDEE84UGGLY 030AGONYK3PC0E       TF                                 B FL230FL210                             535582508
+SUSAP KMDWK5EENDEE84UGGLY 040FARCEK5PC0E       TF                                                                          535592508
+SUSAP KMDWK5EENDEE84UGGLY 050CHUMPK5PC0E       TF                                 B FL21017000                             535602508
+SUSAP KMDWK5EENDEE84UGGLY 060HEDOCK5PC0E       TF                                                                          535612508
+SUSAP KMDWK5EENDEE84UGGLY 070PURTYK5PC0E       TF                                 B FL19015000                             535622508
+SUSAP KMDWK5EENDEE84UGGLY 080OCCHOK5PC0E       TF                                 B 1600014000                             535632508
+SUSAP KMDWK5EENDEE84UGGLY 090KOOKSK5PC0E       TF                                 B 1300010000                             535642508
+SUSAP KMDWK5EENDEE84UGGLY 100JILLZK5PC0E       TF                                   10000                                  535652508
+SUSAP KMDWK5EENDEE84UGGLY 110TMRAAK5PC0E       TF                                                                          535662508
+SUSAP KMDWK5EENDEE84UGGLY 120ENDEEK5PC0EE      TF                                 B 0700006000     250                     535672508
+SUSAP KMDWK5EENDEE85      010ENDEEK5PC0E       IF                                 B 070000600018000250                     535682508
+SUSAP KMDWK5EENDEE85      020STKNYK5PC0EE      TF                                   06000                                  535692508
+SUSAP KMDWK5EENDEE86RW04R 010STKNYK5PC0E       IF                                   06000     18000                        535702508
+SUSAP KMDWK5EENDEE86RW04R 020ALQUEK5PC0EY      TF                                   06000                                  535712508
+SUSAP KMDWK5EENDEE86RW04R 030ALQUEK5PC0EE      FM VIO K5      241913430470    D                                            535722508
+SUSAP KMDWK5EENDEE86RW13L 010STKNYK5PC0E       IF                                   06000     18000                        535732508
+SUSAP KMDWK5EENDEE86RW13L 020GORLCK5PC0EY      TF                                                                          535742508
+SUSAP KMDWK5EENDEE86RW13L 030GORLCK5PC0EE      FM VIO K5      244813620426    D                                            535752508
+SUSAP KMDWK5EENDEE86RW22L 010STKNYK5PC0E       IF                                   06000     18000                        535762508
+SUSAP KMDWK5EENDEE86RW22L 020PKACHK5PC0E       TF                                   06000                                  535772508
+SUSAP KMDWK5EENDEE86RW22L 030TUURNK5PC0E       TF                                                                          535782508
+SUSAP KMDWK5EENDEE86RW22L 040WADLLK5PC0EY      TF                                                                          535792508
+SUSAP KMDWK5EENDEE86RW22L 050WADLLK5PC0EE      FM VIO K5      241811320950    D                                            535802508
+SUSAP KMDWK5EENDEE86RW31R 010STKNYK5PC0E       IF                                   06000     18000                        535812508
+SUSAP KMDWK5EENDEE86RW31R 020WNNRSK5PC0E       TF                                                                          535822508
+SUSAP KMDWK5EENDEE86RW31R 030GAGGAK5PC0EY      TF                                                                          535832508
+SUSAP KMDWK5EENDEE86RW31R 040GAGGAK5PC0EE      FM VIO K5      238012310910    D                                            535842508
+SUSAP KMDWK5FI04R  AALQUE 010ALQUEK5PC0E  A    IF                                   06000     18000                 0 NS   537152012
+SUSAP KMDWK5FI04R  AALQUE 020BANERK5PC0E       TF                                 + 05000                           0 NS   537162012
+SUSAP KMDWK5FI04R  AALQUE 030CADONK5PC0EE B    CF IHKHK5      2275011604750034PI  + 04000                           0 NS   537172012
+SUSAP KMDWK5FI04R  I      010CADONK5PC0E  I    IF IHKHK5      22750116        PI  J 040000240018000                 0 NS   537181408
+SUSAP KMDWK5FI04R  I      020CITGOK5PC0E  F    CF IHKHK5      2275006504700052PI  H 0240002400            CGT   K5D 0 NS   537192012
+SUSAP KMDWK5FI04R  I      030RW04RK5PG0GY M    CF IHKHK5      2275001104700054PI    00669             -300          0 NS   537202506
+SUSAP KMDWK5FI04R  I      040         0  M     CA                     0475        + 01100                           0 NS   537211408
+SUSAP KMDWK5FI04R  I      050         0    R   VIY                    2300                                          0 NS   537221301
+SUSAP KMDWK5FI04R  I      060IGECYK5PC0E       CF EON K5      0010020018100080D     02100                           0 NS   537231310
+SUSAP KMDWK5FI04R  I      070EON  K5D 0VY      TF                                 + 02600                           0 NS   537241301
+SUSAP KMDWK5FI04R  I      080EON  K5D 0VE  R   HM                     1810T010    + 02600                           0 NS   537251301
+SUSAP KMDWK5GRW04L   0055070470 N41465836W087453342         +0154700617075855150R                                          538461705
+SUSAP KMDWK5GRW04R   0064450470 N41464870W087452885         +0155300619051850150IIHKH1                                     538471705
+SUSAP KMDWK5GRW13L   0065221380 N41472651W087453542         +0151900609046346150IIMDW1                                     538482512
+SUSAP KMDWK5GRW13R   0038591380 N41471705W087453170         +0151600607000050060D                                          538491705
+SUSAP KMDWK5GRW22L   0064452270 N41472664W087444078         +0151300606063550150R                                          538501705
+SUSAP KMDWK5GRW22R   0055072270 N41472612W087445827         +0151200606087855150R                                          538511705
+SUSAP KMDWK5GRW31L   0038593180 N41465078W087445479         +0153400613000050060D                                          538521705
+SUSAP KMDWK5GRW31R   0065223180 N41465000W087444412         +0153100613069648150IIMXT1                                     538532512
+SUSAP KMDWK5IIHKH1   011150RW04RN41473334W0874432290475N41465905W0874523620300 10330600300W00405000612                     538541408
+SUSAP KMDWK5IIMDW1   010990RW13LN41464358W0874435101376N41471793W0874530450248 08710600300W00404600607                     538552506
+SUSAP KMDWK5IIMXT1   010990RW31RN41473144W0874542343176N41465349W0874456100261 09000600300W00404800611                     538562506
+SUSAP KORDK5AORD     0     130YHN41583699W087542934W003000680         1800018000C    MNAR    CHICAGO O'HARE INTL           788452112
+SUSAP KORDK5CADAME K50    C     N41580890W087390850                       W0042     NAR           ADAME                    788462605
+SUSAP KORDK5CADLMN K50    W     N41585600W088304345                       W0035     NAR           ADLMN                    788472403
+SUSAP KORDK5CAGZED K50    W     N41575708W087490644                       W0040     NAR           AGZED                    788482304
+SUSAP KORDK5CAHSTN K50    W     N41424558W088212641                       W0036     NAR           AHSTN                    788492403
+SUSAP KORDK5CALKYL K50    C     N41572629W087513629                       W0040     NAR           ALKYL                    788502403
+SUSAP KORDK5CALYEA K50    C     N41572564W087580505                       W0039     NAR           ALYEA                    788512304
+SUSAP KORDK5CANACO K50    W     N41580793W087593068                       W0039     NAR           ANACO                    788522403
+SUSAP KORDK5CARIST K50    C     N41575929W088304236                       W0035     NAR           ARIST                    788532403
+SUSAP KORDK5CBAIRY K50    C     N41574745W088304232                       W0035     NAR           BAIRY                    788542403
+SUSAP KORDK5CBAMBB K50    W     N42052750W088163134                       W0037     NAR           BAMBB                    788552403
+SUSAP KORDK5CBASHH K50    C     N41590054W087345640                       W0042     NAR           BASHH                    788562304
+SUSAP KORDK5CBENNR K30    W     N42313528W090491438                       W0018     NAR           BENNR                    788572403
+SUSAP KORDK5CBFORD K50    W     N41093633W089351468                       W0026     NAR           BFORD                    788582403
+SUSAP KORDK5CBHAWK K50    W     N42310649W089463681                       W0026     NAR           BHAWK                    788592403
+SUSAP KORDK5CBITTR K50    W     N43071768W085563818                       W0056     NAR           BITTR                    788602607
+SUSAP KORDK5CBLUTO K50    C     N41580766W087263093                       W0043     NAR           BLUTO                    788612304
+SUSAP KORDK5CBNITO K50    C     N41572137W088180519                       W0037     NAR           BNITO                    788622605
+SUSAP KORDK5CBONZO K50    C     N42000900W087390844                       W0042     NAR           BONZO                    788632605
+SUSAP KORDK5CBOOTR K50    C     N41572256W088135229                       W0037     NAR           BOOTR                    788642304
+SUSAP KORDK5CBOOWW K50    C     N41591566W087304366                       W0043     NAR           BOOWW                    788652605
+SUSAP KORDK5CBOWNN K50    W     N43350847W088404099                       W0036     NAR           BOWNN                    788662605
+SUSAP KORDK5CBTKUS K50    W     N41483106W088041337                       W0038     NAR           BTKUS                    788672304
+SUSAP KORDK5CBUGSE K50    C     N41580747W088023057                       W0039     NAR           BUGSE                    788682605
+SUSAP KORDK5CBURKE K50    C     N41580246W088221742                       W0036     NAR           BURKE                    788692304
+SUSAP KORDK5CBYLAW K50    W     N41171086W089163304                       W0029     NAR           BYLAW                    788702605
+SUSAP KORDK5CCABIJ K50    W     N41531803W087363685                       W0042     NAR           CABIJ                    788712403
+SUSAP KORDK5CCAKOS K50    C     N41572654W087390850                       W0042     NAR           CAKOS                    788722605
+SUSAP KORDK5CCARLE K50    C     N41580605W088094074                       W0038     NAR           CARLE                    788732403
+SUSAP KORDK5CCARVR K50    W     N41000180W085325100                       W0056     NAR           CARVR                    788742403
+SUSAP KORDK5CCASHN K50    W     N39573200W090153400                       W0021     NAR           CASHN                    788752605
+SUSAP KORDK5CCENAK K50    W     N41594600W086583100                       W0047     NAR           CENAK                    788762605
+SUSAP KORDK5CCERMI K50    C     N41591474W087263103                       W0043     NAR           CERMI                    788772304
+SUSAP KORDK5CCFDZQ K50    W     N41572719W087540097                       W0040     NAR           CFDZQ(CNF)               788782605
+SUSAP KORDK5CCFLCC K50    W     N41572698W087554037                       W0040     NAR           CFLCC(CNF)               788792605
+SUSAP KORDK5CCHDRR K50    W     N43201089W087521944                       W0042     NAR           CHDRR                    788802605
+SUSAP KORDK5CCHILR K50    C     N41590023W088135293                       W0037     NAR           CHILR                    788812304
+SUSAP KORDK5CCHMPN K50    W     N42254755W089033169                       W0032     NAR           CHMPN                    788822605
+SUSAP KORDK5CCLSBY K50    W     N42243280W088533747                       W0033     NAR           CLSBY                    788832605
+SUSAP KORDK5CCLUSO K50    W     N41391704W087294162                       W0042     NAR           CLUSO                    788842304
+SUSAP KORDK5CCOGSS K50    W     N42203938W088234165                       W0037     NAR           COGSS                    788852605
+SUSAP KORDK5CCOUPR K50    C     N41574911W088262986                       W0036     NAR           COUPR                    788862605
+SUSAP KORDK5CCRICO K50    C     N41591368W087221840                       W0044     NAR           CRICO                    788872605
+SUSAP KORDK5CCSTLO K50    W     N43105036W085223267                       W0060     NAR           CSTLO                    788882201
+SUSAP KORDK5CCUUPP K50    W     N42261646W089071742                       W0031     NAR           CUUPP                    788892403
+SUSAP KORDK5CDAYZE K50    C     N41572003W088221781                       W0036     NAR           DAYZE                    788902403
+SUSAP KORDK5CDEGAN K50    R     N41410051W088130259                       W0037     NAR           DEGAN                    788912403
+SUSAP KORDK5CDEVON K50    C     N41590090W088094037                       W0038     NAR           DEVON                    788922403
+SUSAP KORDK5CDITCA K50    W     N42444617W085432387                       W0057     NAR           DITCA                    788932508
+SUSAP KORDK5CDOOGY K50    C     N42000934W088094057                       W0038     NAR           DOOGY                    788942403
+SUSAP KORDK5CDRAMS K50    W     N40493323W090355378                       W0019     NAR           DRAMS                    788952605
+SUSAP KORDK5CDRSCL K50    C     N41591774W087470791                       W0041     NAR           DRSCL                    788962605
+SUSAP KORDK5CDWEEB K50    W     N41515700W086494600                       W0048     NAR           DWEEB                    788972605
+SUSAP KORDK5CEBENS K50    C     N41590115W087390902                       W0042     NAR           EBENS                    788982605
+SUSAP KORDK5CERNNY K50    W     N42201939W087320306                       W0043     NAR           ERNNY                    788992403
+SUSAP KORDK5CESSPO K50    W     N41345425W087143870                       W0044     NAR           ESSPO                    789002304
+SUSAP KORDK5CESSSS K50    C     N42000576W088263094                       W0036     NAR           ESSSS                    789012605
+SUSAP KORDK5CEVRSN K50    W     N41564118W087571662                       W0039     NAR           EVRSN                    789022304
+SUSAP KORDK5CEZELL K50    C     N41591757W088023077                       W0039     NAR           EZELL                    789032605
+SUSAP KORDK5CEZZRA K50    W     N41154270W089272318                       W0028     NAR           EZZRA                    789042605
+SUSAP KORDK5CFAALZ K50    W     N43460703W087505553                       W0042     NAR           FAALZ                    789052304
+SUSAP KORDK5CFERLL K50    C     N41560927W088304232                       W0035     NAR           FERLL                    789062403
+SUSAP KORDK5CFFRAN K50    C     N41591606W088135297                       W0037     NAR           FFRAN                    789072304
+SUSAP KORDK5CFGHRN K50    W     N44060800W087480900                       W0043     NAR           FGHRN                    789082304
+SUSAP KORDK5CFIDAK K50    W     N41580878W087510881                       W0040     NAR           FIDAK                    789092403
+SUSAP KORDK5CFITAR K50    C     N41572632W087345600                       W0042     NAR           FITAR                    789102403
+SUSAP KORDK5CFIYER K50    W     N42235197W087191621                       W0045     NAR           FIYER                    789112605
+SUSAP KORDK5CFLLYN K50    C     N41571320W088021513                       W0039     NAR           FLLYN                    789122605
+SUSAP KORDK5CFNBAR K50    W     N41170500W089142800                       W0029     NAR           FNBAR                    789132403
+SUSAP KORDK5CFNUCH K50    C     N42164781W087345627                       W0043     NAR           FNUCH                    789142605
+SUSAP KORDK5CFORTZ K50    W     N41534200W087580647                       W0039     NAR           FORTZ                    789152403
+SUSAP KORDK5CFOTTR K50    W     N41585729W088263082                       W0036     NAR           FOTTR                    789162605
+SUSAP KORDK5CFRIDG K50    W     N40454380W085470120                       W0054     NAR           FRIDG                    789172403
+SUSAP KORDK5CFYTTE K50    W     N42224822W088400405                       W0035     NAR           FYTTE                    789182605
+SUSAP KORDK5CGAULT K50    W     N44043679W085053713                       W0063     NAR           GAULT                    789192504
+SUSAP KORDK5CGEMMS K50    C     N41585940W088180557                       W0037     NAR           GEMMS                    789202605
+SUSAP KORDK5CGIBNS K50    W     N41550798W088573808                       W0032     NAR           GIBNS                    789212605
+SUSAP KORDK5CGOOZY K50    C     N41564792W088135321                       W0037     NAR           GOOZY                    789222304
+SUSAP KORDK5CGRABL K50    C     N41585887W087263117                       W0043     NAR           GRABL                    789232304
+SUSAP KORDK5CGROOV K50    W     N39255271W090340870                       W0018     NAR           GROOV                    789242605
+SUSAP KORDK5CGURNN K50    W     N43302614W087493677                       W0042     NAR           GURNN                    789252304
+SUSAP KORDK5CHANNI K50    W     N41301137W087213231                       W0043     NAR           HANNI                    789262304
+SUSAP KORDK5CHANSO K50    C     N41572594W087304351                       W0043     NAR           HANSO                    789272605
+SUSAP KORDK5CHAREE K50    C     N42000858W087345537                       W0042     NAR           HAREE                    789282304
+SUSAP KORDK5CHARRL K50    R     N41470551W088055403                       W0038     NAR           HARRL                    789292403
+SUSAP KORDK5CHAUPO K50    W     N41203327W086323516                       W0049     NAR           HAUPO                    789302403
+SUSAP KORDK5CHAZIL K50    C     N41575710W087390847                       W0042     NAR           HAZIL                    789312605
+SUSAP KORDK5CHEALY K50    W     N41455548W088071644                       W0038     NAR           HEALY                    789322403
+SUSAP KORDK5CHIHRY K50    W     N41365453W088191305                       W0036     NAR           HIHRY                    789332403
+SUSAP KORDK5CHIMGO K50    W     N42052784W087303189                       W0043     NAR           HIMGO                    789342403
+SUSAP KORDK5CHOPSS K50    W     N42421925W088164779                       W0038     NAR           HOPSS                    789352605
+SUSAP KORDK5CHULLS K50    W     N41392400W086473600                       W0048     NAR           HULLS                    789362605
+SUSAP KORDK5CHUNKA K50    W     N42315723W088171351                       W0038     NAR           HUNKA                    789372605
+SUSAP KORDK5CHYYDE K50    W     N43111090W088511050                       W0034     NAR           HYYDE                    789382403
+SUSAP KORDK5CILIUM K50    C     N42000778W088180568                       W0037     NAR           ILIUM                    789392403
+SUSAP KORDK5CIYLEK K50    C     N42000691W087263008                       W0043     NAR           IYLEK                    789402304
+SUSAP KORDK5CIZARD K50    W     N41471306W087295169                       W0043     NAR           IZARD                    789412605
+SUSAP KORDK5CJAKSA K50    W     N42503805W089024267                       W0032     NAR           JAKSA                    789422403
+SUSAP KORDK5CJAVON K50    C     N41572541W087263103                       W0043     NAR           JAVON                    789432304
+SUSAP KORDK5CJBAGS K50    W     N42312269W090190057                       W0022     NAR           JBAGS                    789442403
+SUSAP KORDK5CJHONN K50    C     N42000451W088304354                       W0035     NAR           JHONN                    789452403
+SUSAP KORDK5CJLOWW K50    C     N41590187W087470735                       W0041     NAR           JLOWW                    789462605
+SUSAP KORDK5CJMBBO K50    C     N41591702W087390893                       W0042     NAR           JMBBO                    789472605
+SUSAP KORDK5CJODEE K50    W     N45164330W084420377                       W0068     NAR           JODEE                    789482504
+SUSAP KORDK5CJOEBO K50    C     N41585780W087221856                       W0044     NAR           JOEBO                    789492605
+SUSAP KORDK5CJOKKR K50    C     N42000583W087221746                       W0044     NAR           JOKKR                    789502605
+SUSAP KORDK5CJUMPN K50    W     N41490222W089032881                       W0031     NAR           JUMPN                    789512403
+SUSAP KORDK5CKALZO K50    C     N41580095W088262990                       W0036     NAR           KALZO                    789522605
+SUSAP KORDK5CKAYTO K50    W     N41435578W087345888                       W0042     NAR           KAYTO                    789532403
+SUSAP KORDK5CKEGNE K50    C     N41572472W087221858                       W0044     NAR           KEGNE                    789542605
+SUSAP KORDK5CKELTS K50    W     N41072723W089161022                       W0029     NAR           KELTS                    789552605
+SUSAP KORDK5CKENIL K50    C     N42065214W087422793                       W0041     NAR           KENIL                    789562304
+SUSAP KORDK5CKEOKK K30    W     N40331225W091241320                       W0013     NAR           KEOKK                    789572605
+SUSAP KORDK5CKOENN K50    C     N41575591W087263090                       W0043     NAR           KOENN                    789582304
+SUSAP KORDK5CKOHLL K50    W     N43381697W087502901                       W0042     NAR           KOHLL                    789592304
+SUSAP KORDK5CKOOSS K50    C     N41591309W088263086                       W0036     NAR           KOOSS                    789602605
+SUSAP KORDK5CKURKK K50    W     N42053061W088013792                       W0039     NAR           KURKK                    789612403
+SUSAP KORDK5CKUULA K50    C     N41572504W088021552                       W0039     NAR           KUULA                    789622605
+SUSAP KORDK5CKVENN K50    C     N41565721W088094070                       W0038     NAR           KVENN                    789632403
+SUSAP KORDK5CKYLAA K50    C     N41575061W088221738                       W0036     NAR           KYLAA                    789642403
+SUSAP KORDK5CLAACY K50    W     N41415902W087240037                       W0043     NAR           LAACY                    789652304
+SUSAP KORDK5CLAIKE K50    C     N42022432W087474705                       W0041     NAR           LAIKE                    789662605
+SUSAP KORDK5CLEATH K50    C     N41563851W088180488                       W0037     NAR           LEATH                    789672605
+SUSAP KORDK5CLIARR K50    W     N41404411W088132181                       W0037     NAR           LIARR                    789682403
+SUSAP KORDK5CLNDUH K50    C     N41575435W087180593                       W0044     NAR           LNDUH                    789692304
+SUSAP KORDK5CLTOUR K50    W     N42505769W084550590                       W0063     NAR           LTOUR                    789702304
+SUSAP KORDK5CLYNNI K50    W     N42500457W087345320                       W0043     NAR           LYNNI                    789712304
+SUSAP KORDK5CLYSIN K50    C     N41572388W087180613                       W0044     NAR           LYSIN                    789722304
+SUSAP KORDK5CMADII K50    W     N42180347W088184973                       W0037     NAR           MADII                    789732403
+SUSAP KORDK5CMCDEE K50    W     N39330600W090545600                       W0016     NAR           MCDEE                    789742605
+SUSAP KORDK5CMEMAW K50    C     N41575646W087304341                       W0043     NAR           MEMAW                    789752605
+SUSAP KORDK5CMEOWW K50    C     N41590169W088023134                       W0039     NAR           MEOWW                    789762605
+SUSAP KORDK5CMIETH K50    C     N41591674W088094034                       W0038     NAR           MIETH                    789772403
+SUSAP KORDK5CMITEE K50    W     N42420572W090164599                       W0023     NAR           MITEE                    789782605
+SUSAP KORDK5CMKITA K50    W     N41240000W086413400                       W0048     NAR           MKITA                    789792403
+SUSAP KORDK5CMLSEN K50    C     N41561917W088262986                       W0036     NAR           MLSEN                    789802605
+SUSAP KORDK5CMOOPS K50    W     N42392692W088533306                       W0033     NAR           MOOPS                    789812403
+SUSAP KORDK5CMOTRR K50    W     N42213057W088301035                       W0036     NAR           MOTRR                    789822605
+SUSAP KORDK5CMOTTT K50    C     N41580607W087180596                       W0044     NAR           MOTTT                    789832304
+SUSAP KORDK5CMRRFF K50    C     N41591642W087345629                       W0042     NAR           MRRFF                    789842304
+SUSAP KORDK5CMUELL K50    C     N41591522W088180561                       W0037     NAR           MUELL                    789852504
+SUSAP KORDK5CMYRRS K30    W     N42312602W092033573                       W0009     NAR           MYRRS                    789862605
+SUSAP KORDK5CMYTCH K50    R     N42442504W089441043                       W0027     NAR           MYTCH                    789872605
+SUSAP KORDK5CNAPER K50    R     N41492719W088030730                       W0039     NAR           NAPER                    789882605
+SUSAP KORDK5CNCHLS K50    C     N41591245W087180577                       W0044     NAR           NCHLS                    789892304
+SUSAP KORDK5CNEWRK K50    W     N41335805W088341603                       W0034     NAR           NEWRK                    789902508
+SUSAP KORDK5CNIRRA K50    C     N41572360W088093938                       W0038     NAR           NIRRA                    789912403
+SUSAP KORDK5CNOLEN K50    C     N42112879W087405251                       W0042     NAR           NOLEN                    789922605
+SUSAP KORDK5CNORDL K50    C     N41591179W088304349                       W0035     NAR           NORDL                    789932403
+SUSAP KORDK5CNRMAH K50    C     N41585658W087180595                       W0044     NAR           NRMAH                    789942304
+SUSAP KORDK5CNUNWS K50    W     N41550700W088573902                       W0032     NAR           NUNWS                    789952605
+SUSAP KORDK5CNYLEN K50    W     N40520000W085490000                       W0054     NAR           NYLEN                    789962403
+SUSAP KORDK5COBSTR K50    W     N43414220W085125353                       W0062     NAR           OBSTR                    789972102
+SUSAP KORDK5COGSIE K50    C     N42001007W088000160                       W0039     NAR           OGSIE                    789982403
+SUSAP KORDK5COLLGA K50    C     N41562892W088221738                       W0036     NAR           OLLGA                    789992403
+SUSAP KORDK5COVETE K50    W     N44511520W087411637                       W0045     NAR           OVETE                    790002304
+SUSAP KORDK5CPAITN K50    W     N42333971W086432138                       W0049     NAR           PAITN                    790012607
+SUSAP KORDK5CPALIE K50    C     N42010986W087521990                       W0040     NAR           PALIE                    790022403
+SUSAP KORDK5CPECOK K50    C     N44002767W085431471                       W0059     NAR           PECOK                    790032607
+SUSAP KORDK5CPEPAW K50    C     N41575196W088180488                       W0037     NAR           PEPAW                    790042605
+SUSAP KORDK5CPETAH K50    W     N41530786W088090021                       W0038     NAR           PETAH                    790052403
+SUSAP KORDK5CPHRLY K50    W     N42432698W087312572                       W0043     NAR           PHRLY                    790062304
+SUSAP KORDK5CPINKK K50    W     N41495426W087414055                       W0041     NAR           PINKK                    790072403
+SUSAP KORDK5CPIRPL K50    W     N44170417W087462997                       W0043     NAR           PIRPL                    790082102
+SUSAP KORDK5CPONCC K50    C     N41572650W087474553                       W0041     NAR           PONCC                    790092605
+SUSAP KORDK5CPOPME K50    R     N41580814W087575416                       W0039     NAR           POPME                    790102304
+SUSAP KORDK5CPOPOF K50    C     N41571853W088263043                       W0036     NAR           POPOF                    790112605
+SUSAP KORDK5CPOSSM K50    W     N41522878W088163063                       W0037     NAR           POSSM                    790122403
+SUSAP KORDK5CPRADY K50    W     N41584128W086453505                       W0048     NAR           PRADY                    790132304
+SUSAP KORDK5CPRATT K50    C     N41580501W088135325                       W0037     NAR           PRATT                    790142304
+SUSAP KORDK5CPRISE K50    W     N41320800W086465300                       W0048     NAR           PRISE                    790152605
+SUSAP KORDK5CPRONK K50    W     N41104176W085283841                       W0057     NAR           PRONK                    790162605
+SUSAP KORDK5CRAGSS K50    W     N41432803W089062434                       W0031     NAR           RAGSS                    790172605
+SUSAP KORDK5CRAHNN K50    R     N41344866W088201722                       W0036     NAR           RAHNN                    790182403
+SUSAP KORDK5CRANDI K50    C     N41591780W087584339                       W0039     NAR           RANDI                    790192304
+SUSAP KORDK5CRAYYY K50    C     N41575561W088023139                       W0039     NAR           RAYYY                    790202605
+SUSAP KORDK5CREKKS K50    R     N41535462W087575154                       W0039     NAR           REKKS                    790212304
+SUSAP KORDK5CRHIVR K50    W     N42384544W086161415                       W0053     NAR           RHIVR                    790222403
+SUSAP KORDK5CRICKV K50    C     N41580694W087221844                       W0044     NAR           RICKV                    790232605
+SUSAP KORDK5CRIDGE K50    C     N42032966W087494514                       W0040     NAR           RIDGE                    790242304
+SUSAP KORDK5CRINNO K50    W     N41481956W088053616                       W0038     NAR           RINNO                    790252403
+SUSAP KORDK5CRIPPR K50    C     N41585978W087304379                       W0043     NAR           RIPPR                    790262605
+SUSAP KORDK5CROCSE K50    C     N41580823W087304344                       W0043     NAR           ROCSE                    790272605
+SUSAP KORDK5CROYKO K50    W     N41011200W085530000                       W0054     NAR           ROYKO                    790282605
+SUSAP KORDK5CRREGY K50    W     N41522614W087292310                       W0043     NAR           RREGY                    790292605
+SUSAP KORDK5CRRUDA K50    C     N41575419W088094070                       W0038     NAR           RRUDA                    790302403
+SUSAP KORDK5CRYELY K50    W     N41020000W089582100                       W0024     NAR           RYELY                    790312605
+SUSAP KORDK5CRZUKO K50    C     N41575686W087345593                       W0042     NAR           RZUKO                    790322403
+SUSAP KORDK5CSAAYY K30    W     N42313744W091254457                       W0014     NAR           SAAYY                    790332605
+SUSAP KORDK5CSAFLY K50    C     N41571688W088304304                       W0035     NAR           SAFLY                    790342403
+SUSAP KORDK5CSEIKA K50    C     N41575714W087464773                       W0041     NAR           SEIKA                    790352605
+SUSAP KORDK5CSHAIN K50    W     N41383700W089080900                       W0030     NAR           SHAIN                    790362403
+SUSAP KORDK5CSHARN K50    C     N41575315W088135321                       W0037     NAR           SHARN                    790372304
+SUSAP KORDK5CSIBLY K50    C     N42000992W087474229                       W0041     NAR           SIBLY                    790382605
+SUSAP KORDK5CSIKLR K50    C     N41591423W088221824                       W0036     NAR           SIKLR                    790392304
+SUSAP KORDK5CSIRCO K50    C     N41375414W088164067                       W0037     NAR           SIRCO                    790402605
+SUSAP KORDK5CSNTOE K50    C     N41575521W087221841                       W0044     NAR           SNTOE                    790412605
+SUSAP KORDK5CSOOLU K50    W     N42114695W088085170                       W0038     NAR           SOOLU                    790422403
+SUSAP KORDK5CSTASH K50    W     N41461508W086192331                       W0051     NAR           STASH                    790432304
+SUSAP KORDK5CSTNLE K50    W     N42282204W089241454                       W0029     NAR           STNLE                    790442403
+SUSAP KORDK5CSWIIS K50    W     N42313021W087303420                       W0043     NAR           SWIIS                    790452304
+SUSAP KORDK5CSYNTH K50    W     N41561536W087180856                       W0044     NAR           SYNTH                    790462304
+SUSAP KORDK5CSYSCO K50    C     N41580381W088180492                       W0037     NAR           SYSCO                    790472605
+SUSAP KORDK5CTAFFS K50    W     N41590187W087470771                       W0041     NAR           TAFFS                    790482605
+SUSAP KORDK5CTAGPE K50    W     N41562436W087222066                       W0044     NAR           TAGPE                    790492605
+SUSAP KORDK5CTEEOO K50    W     N42512762W090430184                       W0019     NAR           TEEOO                    790502403
+SUSAP KORDK5CTONIE K50    W     N41530137W087292675                       W0043     NAR           TONIE                    790512605
+SUSAP KORDK5CTOWNE K50    W     N41531450W086373852                       W0049     NAR           TOWNE                    790522304
+SUSAP KORDK5CTRICH K50    W     N41123394W088482719                       W0032     NAR           TRICH                    790532403
+SUSAP KORDK5CTRTLL K50    W     N41221403W088364180                       W0034     NAR           TRTLL                    790542504
+SUSAP KORDK5CTRUFL K50    C     N41572198W087580496                       W0039     NAR           TRUFL                    790552304
+SUSAP KORDK5CTRYXI K50    C     N42000875W088135365                       W0037     NAR           TRYXI                    790562304
+SUSAP KORDK5CTUBEZ K50    W     N42105131W087420289                       W0042     NAR           TUBEZ                    790572605
+SUSAP KORDK5CUCXOR K50    W     N41563320W087263277                       W0043     NAR           UCXOR                    790582304
+SUSAP KORDK5CUFDUH K50    W     N43423591W085474697                       W0058     NAR           UFDUH                    790592607
+SUSAP KORDK5CUKUNE K50    C     N42093004W088115662                       W0038     NAR           UKUNE                    790602605
+SUSAP KORDK5CVIIKS K50    W     N44164700W087073800                       W0048     NAR           VIIKS                    790612102
+SUSAP KORDK5CVINCA K50    W     N40204325W089492467                       W0024     NAR           VINCA                    790622504
+SUSAP KORDK5CVINYY K50    C     N42000459W087180485                       W0044     NAR           VINYY                    790632304
+SUSAP KORDK5CVIOLS K50    W     N41564190W087304493                       W0043     NAR           VIOLS                    790642605
+SUSAP KORDK5CVNDER K50    C     N42000685W088221832                       W0036     NAR           VNDER                    790652304
+SUSAP KORDK5CVOGLR K50    W     N41564200W086550700                       W0047     NAR           VOGLR                    790662403
+SUSAP KORDK5CVULCN K50    W     N42053034W087473902                       W0041     NAR           VULCN                    790672605
+SUSAP KORDK5CWASCO K50    C     N41585842W088221820                       W0036     NAR           WASCO                    790682304
+SUSAP KORDK5CWAVIE K50    C     N41580864W087345596                       W0042     NAR           WAVIE                    790692304
+SUSAP KORDK5CWELCM K30    W     N43030468W091161337                       W0015     NAR           WELCM                    790702403
+SUSAP KORDK5CWELEV K50    C     N42000784W087304272                       W0043     NAR           WELEV                    790712605
+SUSAP KORDK5CWILLT K50    C     N41580897W087464380                       W0041     NAR           WILLT                    790722605
+SUSAP KORDK5CWLTER K50    C     N42411139W086030394                       W0054     NAR           WLTER                    790732607
+SUSAP KORDK5CWODRO K50    W     N41565011W087345703                       W0042     NAR           WODRO                    790742403
+SUSAP KORDK5CWUGIX K50    R     N41572586W087561289                       W0040     NAR           WUGIX                    790752605
+SUSAP KORDK5CWYNDE K50    W     N42272073W087063663                       W0046     NAR           WYNDE                    790762304
+SUSAP KORDK5CXOGDY K50    W     N41565856W087390926                       W0042     NAR           XOGDY                    790772605
+SUSAP KORDK5CXURXU K50    W     N41580892W087491291                       W0040     NAR           XURXU                    790782304
+SUSAP KORDK5CYONUT K50    C     N41590192W087584362                       W0039     NAR           YONUT                    790792304
+SUSAP KORDK5CYOYUK K50    W     N41571538W087474581                       W0041     NAR           YOYUK                    790802605
+SUSAP KORDK5CYVONE K50    C     N41591790W087513040                       W0040     NAR           YVONE                    790812403
+SUSAP KORDK5CZANDI K50    W     N42494203W088142717                       W0038     NAR           ZANDI                    790822304
+SUSAP KORDK5CZANLA K50    W     N41112300W084504700                       W0061     NAR           ZANLA                    790832304
+SUSAP KORDK5CZENAH K50    C     N42001000W088021455                       W0039     NAR           ZENAH                    790842504
+SUSAP KORDK5CZOSRO K50    R     N41590202W087513009                       W0040     NAR           ZOSRO                    790852403
+SUSAP KORDK5CZUPTI K50    C     N41575694W087510575                       W0040     NAR           ZUPTI                    790862403
+SUSAP KORDK5CZURSO K50    C     N41575628W087580217                       W0039     NAR           ZURSO                    790872304
+SUSAP KORDK5EBENKY64BFORD 010BFORDK5PC0E       IF                                 + FL220     18000                        790882012
+SUSAP KORDK5EBENKY64BFORD 020BYLAWK5PC0E       TF                                 B FL230FL200                             790892012
+SUSAP KORDK5EBENKY64BFORD 030BENKYK5EA0EE      TF                                   12000                                  790902012
+SUSAP KORDK5EBENKY64BYLAW 010BYLAWK5PC0E       IF                                 B FL230FL20018000                        790912012
+SUSAP KORDK5EBENKY64BYLAW 020BENKYK5EA0EE      TF                                   12000                                  790922012
+SUSAP KORDK5EBENKY64CASHN 010CASHNK5PC0E       IF                                             18000                        790932012
+SUSAP KORDK5EBENKY64CASHN 020BFORDK5PC0E       TF                                 + FL220                                  790942012
+SUSAP KORDK5EBENKY64CASHN 030BYLAWK5PC0E       TF                                 B FL230FL200                             790952012
+SUSAP KORDK5EBENKY64CASHN 040BENKYK5EA0EE      TF                                   12000                                  790962012
+SUSAP KORDK5EBENKY64DRAMS 010DRAMSK5PC0E       IF                                             18000                        790972012
+SUSAP KORDK5EBENKY64DRAMS 020RYELYK5PC0E       TF                                 + FL240                                  790982012
+SUSAP KORDK5EBENKY64DRAMS 030BFORDK5PC0E       TF                                 + FL220                                  790992012
+SUSAP KORDK5EBENKY64DRAMS 040BYLAWK5PC0E       TF                                 B FL230FL200                             791002012
+SUSAP KORDK5EBENKY64DRAMS 050BENKYK5EA0EE      TF                                   12000                                  791012012
+SUSAP KORDK5EBENKY64IRK   010IRK  K3D 0V       IF                                             18000                        791022012
+SUSAP KORDK5EBENKY64IRK   020LOAMYK3EA0E       TF                                                                          791032012
+SUSAP KORDK5EBENKY64IRK   030KEOKKK3PC0E       TF                                                                          791042508
+SUSAP KORDK5EBENKY64IRK   040DRAMSK5PC0E       TF                                                                          791052012
+SUSAP KORDK5EBENKY64IRK   050RYELYK5PC0E       TF                                 + FL240                                  791062012
+SUSAP KORDK5EBENKY64IRK   060BFORDK5PC0E       TF                                 + FL220                                  791072012
+SUSAP KORDK5EBENKY64IRK   070BYLAWK5PC0E       TF                                 B FL230FL200                             791082012
+SUSAP KORDK5EBENKY64IRK   080BENKYK5EA0EE      TF                                   12000                                  791092012
+SUSAP KORDK5EBENKY64LOAMY 010LOAMYK3EA0E       IF                                             18000                        791102012
+SUSAP KORDK5EBENKY64LOAMY 020KEOKKK3PC0E       TF                                                                          791112508
+SUSAP KORDK5EBENKY64LOAMY 030DRAMSK5PC0E       TF                                                                          791122012
+SUSAP KORDK5EBENKY64LOAMY 040RYELYK5PC0E       TF                                 + FL240                                  791132012
+SUSAP KORDK5EBENKY64LOAMY 050BFORDK5PC0E       TF                                 + FL220                                  791142012
+SUSAP KORDK5EBENKY64LOAMY 060BYLAWK5PC0E       TF                                 B FL230FL200                             791152012
+SUSAP KORDK5EBENKY64LOAMY 070BENKYK5EA0EE      TF                                   12000                                  791162012
+SUSAP KORDK5EBENKY64TRICH 010TRICHK5PC0E       IF                                 B 150001400018000                        791172012
+SUSAP KORDK5EBENKY64TRICH 020BENKYK5EA0EE      TF                                   12000                                  791182012
+SUSAP KORDK5EBENKY65      010BENKYK5EA0E       IF                                   12000     18000                        791192012
+SUSAP KORDK5EBENKY65      020NEWRKK5PC0E       TF                                                                          791202012
+SUSAP KORDK5EBENKY65      030AHSTNK5PC0E       TF                                                                          791212012
+SUSAP KORDK5EBENKY65      040PETAHK5PC0EE      TF                                                                          791222012
+SUSAP KORDK5EBENKY66RW04B 010PETAHK5PC0E       IF                                             18000                        791232012
+SUSAP KORDK5EBENKY66RW04B 020JORJOK5EA0E       TF                                                                          791242012
+SUSAP KORDK5EBENKY66RW04B 030MONKZK5EA0E       TF                                                                          791252012
+SUSAP KORDK5EBENKY66RW04B 040TONIEK5PC0EY      TF                                                                          791262012
+SUSAP KORDK5EBENKY66RW04B 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791272012
+SUSAP KORDK5EBENKY66RW09B 010PETAHK5PC0E       IF                                             18000                        791282012
+SUSAP KORDK5EBENKY66RW09B 020JORJOK5EA0E       TF                                                                          791292012
+SUSAP KORDK5EBENKY66RW09B 030MONKZK5EA0E       TF                                                                          791302012
+SUSAP KORDK5EBENKY66RW09B 040TONIEK5PC0EY      TF                                                                          791312012
+SUSAP KORDK5EBENKY66RW09B 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791322012
+SUSAP KORDK5EBENKY66RW10B 010PETAHK5PC0E       IF                                             18000                        791332012
+SUSAP KORDK5EBENKY66RW10B 020JORJOK5EA0E       TF                                                                          791342012
+SUSAP KORDK5EBENKY66RW10B 030MONKZK5EA0E       TF                                                                          791352012
+SUSAP KORDK5EBENKY66RW10B 040TONIEK5PC0EY      TF                                                                          791362012
+SUSAP KORDK5EBENKY66RW10B 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791372012
+SUSAP KORDK5EBENKY66RW22B 010PETAHK5PC0E       IF                                             18000                        791382012
+SUSAP KORDK5EBENKY66RW22B 020JORJOK5EA0E       TF                                                                          791392012
+SUSAP KORDK5EBENKY66RW22B 030MONKZK5EA0E       TF                                                                          791402012
+SUSAP KORDK5EBENKY66RW22B 040TONIEK5PC0EY      TF                                                                          791412012
+SUSAP KORDK5EBENKY66RW22B 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791422012
+SUSAP KORDK5EBENKY66RW27C 010PETAHK5PC0E       IF                                             18000                        791432012
+SUSAP KORDK5EBENKY66RW27C 020JORJOK5EA0E       TF                                                                          791442012
+SUSAP KORDK5EBENKY66RW27C 030MONKZK5EA0E       TF                                                                          791452012
+SUSAP KORDK5EBENKY66RW27C 040TONIEK5PC0EY      TF                                                                          791462012
+SUSAP KORDK5EBENKY66RW27C 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791472012
+SUSAP KORDK5EBENKY66RW27L 010PETAHK5PC0E       IF                                             18000                        791482012
+SUSAP KORDK5EBENKY66RW27L 020JORJOK5EA0E       TF                                                                          791492012
+SUSAP KORDK5EBENKY66RW27L 030MONKZK5EA0E       TF                                                                          791502012
+SUSAP KORDK5EBENKY66RW27L 040TONIEK5PC0EY      TF                                                                          791512012
+SUSAP KORDK5EBENKY66RW27L 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791522012
+SUSAP KORDK5EBENKY66RW27R 010PETAHK5PC0E       IF                                             18000                        791532012
+SUSAP KORDK5EBENKY66RW27R 020KURKKK5PC0E       TF                                                                          791542012
+SUSAP KORDK5EBENKY66RW27R 030VULCNK5PC0E       TF                                                                          791552012
+SUSAP KORDK5EBENKY66RW27R 040HIMGOK5PC0EY      TF                                                                          791562012
+SUSAP KORDK5EBENKY66RW27R 050HIMGOK5PC0EE      FM MZZ K5      322812660931    D                                            791572012
+SUSAP KORDK5EBENKY66RW28C 010PETAHK5PC0E       IF                                             18000                        791582012
+SUSAP KORDK5EBENKY66RW28C 020JORJOK5EA0E       TF                                                                          791592012
+SUSAP KORDK5EBENKY66RW28C 030MONKZK5EA0E       TF                                                                          791602012
+SUSAP KORDK5EBENKY66RW28C 040TONIEK5PC0EY      TF                                                                          791612012
+SUSAP KORDK5EBENKY66RW28C 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791622012
+SUSAP KORDK5EBENKY66RW28L 010PETAHK5PC0E       IF                                             18000                        791632012
+SUSAP KORDK5EBENKY66RW28L 020JORJOK5EA0E       TF                                                                          791642012
+SUSAP KORDK5EBENKY66RW28L 030MONKZK5EA0E       TF                                                                          791652012
+SUSAP KORDK5EBENKY66RW28L 040RREGYK5PC0EY      TF                                                                          791662012
+SUSAP KORDK5EBENKY66RW28L 050RREGYK5PC0EE      FM MZZ K5      318911650955    D                                            791672012
+SUSAP KORDK5EBENKY66RW28R 010PETAHK5PC0E       IF                                             18000                        791682012
+SUSAP KORDK5EBENKY66RW28R 020JORJOK5EA0E       TF                                                                          791692012
+SUSAP KORDK5EBENKY66RW28R 030MONKZK5EA0E       TF                                                                          791702012
+SUSAP KORDK5EBENKY66RW28R 040TONIEK5PC0EY      TF                                                                          791712012
+SUSAP KORDK5EBENKY66RW28R 050TONIEK5PC0EE      FM MZZ K5      319011700931    D                                            791722012
+SUSAP KORDK5FI09L  AGIBNS 010GIBNSK5PC0E  A    IF                                             18000                 0 PS   799721511
+SUSAP KORDK5FI09L  AGIBNS 020JHONNK5PC0E    010TF                                 + 09000                           0 PS   799731707
+SUSAP KORDK5FI09L  AGIBNS 030ESSSSK5PC0E       TF                                 + 08000                           0 PS   799741511
+SUSAP KORDK5FI09L  AGIBNS 040VNDERK5PC0E       TF                                 + 07000                           0 PS   799751511
+SUSAP KORDK5FI09L  AGIBNS 050ILIUMK5PC0E       TF                                 + 06000                           0 PS   799761511
+SUSAP KORDK5FI09L  AGIBNS 060TRYXIK5PC0EE B    CF ISAJK5      2730015009300031PI  + 05000                           0 PS   799771707
+SUSAP KORDK5FI09L  I      010TRYXIK5PC0E  I    IF ISAJK5      27300150        PI  J 050000230018000                 0 NS   799781707
+SUSAP KORDK5FI09L  I      011DOOGYK5PC0E       CF ISAJK5      2730011909300031PI  + 04000                           0 NS   799791707
+SUSAP KORDK5FI09L  I      020ZENAHK5PC0E  F    CF ISAJK5      2730006409300055PI  H 0230002300            KORD  K5PA0 NS   799802107
+SUSAP KORDK5FI09L  I      030RW09LK5PG0GY M    CF ISAJK5      2730001409300050PI    00723             -300          0 NS   799811511
+SUSAP KORDK5FI09L  I      040         0  M     CA                     0930        + 01100                           0 NS   799821206
+SUSAP KORDK5FI09L  I      050OBK  K5D 0VY  L   DF                                 + 04000                           0 NS   799831305
+SUSAP KORDK5FI09L  I      060OBK  K5D 0VE  R   HM                     0920T010    + 04000                           0 NS   799841206
+SUSAP KORDK5GRW04L   0075000420 N41585396W087545010         +0166200656000050150D                                          805972106
+SUSAP KORDK5GRW04R   0080750450 N41571198W087535791         +0168000661000052150RIFJU1                                     805982508
+SUSAP KORDK5GRW09C   0112450930 N41591789W087555366         +0171600673000055200IIOYG3                                     805992012
+SUSAP KORDK5GRW09L   0075000930 N42001020W087553603         +0170000668000055150RISAJ3                                     806002508
+SUSAP KORDK5GRW09R   0112600930 N41590202W087555365         +0170000668000058150IIJAV3                                     806012607
+SUSAP KORDK5GRW10C   0108000930 N41575653W087555348         +0170400669000055200RISXH3                                     806022508
+SUSAP KORDK5GRW10L   0130000930 N41580838W087555351         +0171300672000056150RIMED3                                     806032508
+SUSAP KORDK5GRW10R   0075000930 N41572592W087554030         +0173700680000055150IIBYW1    IIZJ3                            806042012
+SUSAP KORDK5GRW22L   0080752250 N41581172W087524708         +0165800654000055150IILQQ1                                     806052508
+SUSAP KORDK5GRW22R   0075002220 N41595113W087534694         +0163700648000049150IIRXZ1                                     806061901
+SUSAP KORDK5GRW27C   0112452730 N41591792W087532476         +0165200652000056200IIUYJ3                                     806072201
+SUSAP KORDK5GRW27L   0112602730 N41590204W087532456         +0164500650000057150IIIAC3                                     806082508
+SUSAP KORDK5GRW27R   0075002730 N42001019W087535670         +0168600664000055150RIABU3                                     806092508
+SUSAP KORDK5GRW28C   0108002730 N41575676W087533052         +0164600650000055200RIVZE3                                     806102508
+SUSAP KORDK5GRW28L   0075002730 N41572609W087540104         +0167000658000055150RIVQX3                                     806112508
+SUSAP KORDK5GRW28R   0130002730 N41580865W087530142         +0164900651000053150IITSL3                                     806122607
+SUSAP KORDK5IIABU3   011175RW27RN42001019W0875550202730N42001421W0875411741070 11360468300W00305500648                     806131901
+SUSAP KORDK5IIBYW1   011090RW10RN41573161W0875326370914N41572191W0875525572620 11120396300W00405500672                     806141905
+SUSAP KORDK5IIFJU1   011010RW04RN41581620W0875241760445N41571686W0875344350605 10490462300W00305200654                     806151901
+SUSAP KORDK5IIIAC3   011050RW27LN41590201W0875607262730N41590698W0875338671028 10660326300W00305700648                     806162413
+SUSAP KORDK5IIIZJ3   011075RW10RN41572613W0875332540939N41572211W0875525562153 11130415300W00405500672                     806171901
+SUSAP KORDK5IIJAV3   011050RW09RN41590204W0875310750930N41590696W0875538381043 11530326300W00305800662                     806182607
+SUSAP KORDK5IILQQ1   011010RW22LN41570561W0875405452245N41580080W0875252610860 11050450300W00305500646                     806191901
+SUSAP KORDK5IIMED3   011110RW10LN41580868W0875239700929N41580439W0875538771642 11130274300W00305600665                     806201511
+SUSAP KORDK5IIOYG3   011190RW09CN41591792W0875310940930N41592188W0875538911043 11140326300W00305500667                     806212306
+SUSAP KORDK5IIRXZ1   011130RW22RN41584773W0875456992225N41594651W0875359030817 09420482300W00304900645                     806222108
+SUSAP KORDK5IISAJ3   011175RW09LN42001019W0875343330930N42001422W0875520671010 11600471300W00305500651                     806231511
+SUSAP KORDK5IISXH3   010895RW10CN41575680W0875257290929N41575285W0875539022510 10910301300W00305500663                     806241311
+SUSAP KORDK5IITSL3   011110RW28RN41580836W0875606882729N41580447W0875315051010 10300286300W00305300648                     806251511
+SUSAP KORDK5IIUYJ3   011190RW27CN41591789W0875607072730N41592190W0875338921013 10700327300W00305600646                     806262306
+SUSAP KORDK5IIVQX3   011075RW28LN41572590W0875553712739N41572203W0875414181013 09940471300W00405500654                     806271511
+SUSAP KORDK5IIVZE3   010895RW28CN41575650W0875606882729N41575303W0875344321013 10440339300W00305500642                     806281901
+SUSAUCK5TKORD PAB  A00100     R N42041100W087553100N41591600W08754170000503494   GND  A10000MCHICAGO AREA A                666351811
+SUSAUCK5TKORD PAB  A00200     G N41591500W087473500                                                                        666361811
+SUSAUCK5TKORD PAB  A00300     R N41591500W087461500N41591600W08754170000600901                                             666371703
+SUSAUCK5TKORD PAB  A00400     G N41571600W088015200                                                                        666381811
+SUSAUCK5TKORD PAB  A00500     G N41572587W088013894                                                                        666391811
+SUSAUCK5TKORD PAB  A00600     G N41574570W088013482                                                                        666401811
+SUSAUCK5TKORD PAB  A00700     G N41584397W088012470                                                                        666411811
+SUSAUCK5TKORD PAB  A00800     G N41592543W088012423                                                                        666421811
+SUSAUCK5TKORD PAB  A00900     G N41594405W088012752                                                                        666431811
+SUSAUCK5TKORD PAB  A01000     G N42005396W088014937                                                                        666441811
+SUSAUCK5TKORD PAB  A01100     G N42011318W088015203                                                                        666451811
+SUSAUCK5TKORD PAB  A01200     R N42011700W088015200N41591600W08754170000602897                                             666461811
+SUSAUCK5TKORD PAB  A01300     G N42050300W087562500                                                                        666471811
+SUSAUCK5TKORD PAB  A01400     GEN42043693W087555184                                                                        666481811
+SUSAUCK5TKORD PAB  B01500     G N42035700W087515500                              01900M10000MCHICAGO AREA B                666491811
+SUSAUCK5TKORD PAB  B01600     G N42062000W087493800                                                                        666501811
+SUSAUCK5TKORD PAB  B01700     G N42061894W087471582                                                                        666511811
+SUSAUCK5TKORD PAB  B01800     G N42061689W087470879                                                                        666521811
+SUSAUCK5TKORD PAB  B01900     G N42060825W087465904                                                                        666531811
+SUSAUCK5TKORD PAB  B02000     G N42060585W087465236                                                                        666541811
+SUSAUCK5TKORD PAB  B02100     G N42060447W087453242                                                                        666551811
+SUSAUCK5TKORD PAB  B02200     G N42060474W087453245                                                                        666561811
+SUSAUCK5TKORD PAB  B02300     R N42060400W087442600N41591600W08754170001000471                                             666571811
+SUSAUCK5TKORD PAB  B02400     L N41493400W087510000N41470950W08745087000502988                                             666581811
+SUSAUCK5TKORD PAB  B02500     R N41485900W087512200N41591600W08754170001051680                                             666591811
+SUSAUCK5TKORD PAB  B02600     R N41491100W087581400N41470950W08745087001002818                                             666601811
+SUSAUCK5TKORD PAB  B02700     R N41494000W087580500N41591600W08754170001001965                                             666611811
+SUSAUCK5TKORD PAB  B02800     G N42080100W088004600                                                                        666621811
+SUSAUCK5TKORD PAB  B02900     G N42075408W088002721                                                                        666631811
+SUSAUCK5TKORD PAB  B03000     G N42072692W087595114                                                                        666641811
+SUSAUCK5TKORD PAB  B03100     G N42053452W087570422                                                                        666651811
+SUSAUCK5TKORD PAB  B03200     L N42050300W087562500N41591600W08754170000603446                                             666661811
+SUSAUCK5TKORD PAB  B03300     G N42011700W088015200                                                                        666671811
+SUSAUCK5TKORD PAB  B03400     G N42011318W088015203                                                                        666681811
+SUSAUCK5TKORD PAB  B03500     G N42005396W088014937                                                                        666691811
+SUSAUCK5TKORD PAB  B03600     G N41594405W088012752                                                                        666701811
+SUSAUCK5TKORD PAB  B03700     G N41592543W088012423                                                                        666711811
+SUSAUCK5TKORD PAB  B03800     G N41584397W088012470                                                                        666721811
+SUSAUCK5TKORD PAB  B03900     G N41574570W088013482                                                                        666731811
+SUSAUCK5TKORD PAB  B04000     G N41572587W088013894                                                                        666741811
+SUSAUCK5TKORD PAB  B04100     L N41571600W088015200N41591600W08754170000602506                                             666751811
+SUSAUCK5TKORD PAB  B04200     G N41591500W087461500                                                                        666761811
+SUSAUCK5TKORD PAB  B04300     LEN41591500W087473500N41591600W08754170000500902                                             666771811
+SUSAUCK5TKORD PAB  C04400     R N42075200W088104700N41591600W08754170001503051   03000M10000MCHICAGO AREA C                666781811
+SUSAUCK5TKORD PAB  C04500     REN41495300W088095900N41591600W08754170001502314                                             666791811
+SUSAUCK5TKORD PAB  D04600     G N42075200W088104700                              03600M10000MCHICAGO AREA D                666801811
+SUSAUCK5TKORD PAB  D04700     R N42154000W088193900N41591600W08754170002503111                                             666811811
+SUSAUCK5TKORD PAB  D04800     G N41420300W088183400                                                                        666821811
+SUSAUCK5TKORD PAB  D04900     LEN41495300W088095900N41591600W08754170001502314                                             666831811
+SUSAUCK5TKORD PAB  E05000     G N42111100W087244600                              04000M10000MCHICAGO AREA E                666841811
+SUSAUCK5TKORD PAB  E05100     R N42103900W087170100N41591600W08754170003000675                                             666851811
+SUSAUCK5TKORD PAB  E05200     G N41463800W087175100                                                                        666861811
+SUSAUCK5TKORD PAB  E05300     LEN41464000W087252200N41591600W08754170002501201                                             666871811
+SUSAUCK5TKORD PAB  F05400     L N42075200W088104700N41591600W08754170001503051   04000M10000MCHICAGO AREA F                666881811
+SUSAUCK5TKORD PAB  F05500     G N41495300W088095900                                                                        666891811
+SUSAUCK5TKORD PAB  F05600     R N41420300W088183400N41591600W08754170002502267                                             666901811
+SUSAUCK5TKORD PAB  F05700     G N41503900W088254300                                                                        666911811
+SUSAUCK5TKORD PAB  F05800     G N41503813W088271474                                                                        666921811
+SUSAUCK5TKORD PAB  F05900     G N41502923W088275174                                                                        666931811
+SUSAUCK5TKORD PAB  F06000     G N41502840W088291212                                                                        666941811
+SUSAUCK5TKORD PAB  F06100     G N41501273W088305799                                                                        666951811
+SUSAUCK5TKORD PAB  F06200     G N41495534W088315509                                                                        666961811
+SUSAUCK5TKORD PAB  F06300     R N41494900W088322700N41591600W08754170003002519                                             666971811
+SUSAUCK5TKORD PAB  F06400     G N42072100W088330500                                                                        666981811
+SUSAUCK5TKORD PAB  F06500     R N42072200W088260100N41591600W08754170002502891                                             666991811
+SUSAUCK5TKORD PAB  F06600     GEN42154000W088193900                                                                        667001811
+SUSAUCK5TKORD PAB  G06700     L N42041500W087545600N41591600W08754170000503544   02500M10000MCHICAGO AREA G                667011811
+SUSAUCK5TKORD PAB  G06800     G N42041100W087553100                                                                        667021811
+SUSAUCK5TKORD PAB  G06900     G N42043693W087555184                                                                        667031811
+SUSAUCK5TKORD PAB  G07000     G N42050300W087562500                                                                        667041811
+SUSAUCK5TKORD PAB  G07100     G N42053452W087570422                                                                        667051811
+SUSAUCK5TKORD PAB  G07200     G N42072692W087595114                                                                        667061811
+SUSAUCK5TKORD PAB  G07300     G N42075408W088002721                                                                        667071811
+SUSAUCK5TKORD PAB  G07400     R N42080100W088004600N41591600W08754170001003311                                             667081811
+SUSAUCK5TKORD PAB  G07500     GEN42090000W087572200                                                                        667091811
+SUSAUCK5TKORD PAB  H07600     G N42062000W087493800                              02500M10000MCHICAGO AREA H                667101811
+SUSAUCK5TKORD PAB  H07700     G N42075649W087480615                                                                        667111811
+SUSAUCK5TKORD PAB  H07800     R N42080600W087480000N41591600W08754170001000279                                             667121811
+SUSAUCK5TKORD PAB  H07900     G N42060400W087442600                                                                        667131811
+SUSAUCK5TKORD PAB  H08000     G N42060447W087453242                                                                        667141811
+SUSAUCK5TKORD PAB  H08100     G N42060585W087465236                                                                        667151811
+SUSAUCK5TKORD PAB  H08200     G N42060825W087465904                                                                        667161811
+SUSAUCK5TKORD PAB  H08300     G N42061689W087470879                                                                        667171811
+SUSAUCK5TKORD PAB  H08400     GEN42061894W087471582                                                                        667181811
+SUSAURK5MBIG BEAR  A00101L    G N46370000W089400100                              00500A17999MBIG BEAR MOA                  870861703
+SUSAURK5MBIG BEAR  A00102C                                                                         FAA MINNEAPOLIS ARTCC   870871703
+SUSAURK5MBIG BEAR  A00200L    G N46563000W088510000                                                                        870881703
+SUSAURK5MBIG BEAR  A00300L    G N46520000W088320000                                                                        870891703
+SUSAURK5MBIG BEAR  A00400L    H N46050000W088180000                                                                        870901703
+SUSAURK5MBIG BEAR  A00500L    L N46050000W088335030N46044400W08838080000300849                                             870911703
+SUSAURK5MBIG BEAR  A00600L    G N46062238W088414383                                                                        870921703
+SUSAURK5MBIG BEAR  A00700L    GEN46210000W089220100                                                                        870931703
+SUSAURK5MBIG BEAR  B00800L    R N46062238W088414383N46044400W08838080000303033   01501A17999MBIG BEAR MOA                  870941703
+SUSAURK5MBIG BEAR  B00900L    H N46050000W088335030                                                                        870951703
+SUSAURK5MBIG BEAR  B01000L    GEN46050000W088380000                                                                        870961703
+SUSAD        EON   K5011320VTLW N41161068W087472779    N41161068W087472779E0020006891     NARPEOTONE                       251872004
+SUSAD        IRK   K3011460VTHW N40080606W092353017    N40080606W092353017E0060009862     NARKIRKSVILLE                    254002004
+SUSAD        MZZ   K5010860VDLW N40293599W085404530    N40293599W085404530W0030008541     NARMARION                        255762609
+SUSAD        OBK   K5011300VDHW N42131696W087570601    N42131696W087570601W0020007082     NARNORTHBROOK                    256152108
+SUSAD        SIE   K6011480VTHW N39054383W074480124    N39054383W074480124W0090000082     NARSEA ISLE                      257882609
+SUSAD        VIO   K5011595VDHW N42471218W085294946    N42471218W085294946W0040008022     NARVICTORY                       259031803
+SUSAD KMDWK5 IHKH  K5011150 ITWN                   IHKHN41465891W087452335W0040006120     NARCHICAGO MIDWAY INTL           264291703
+SUSAD KORDK5 ISAJ  K5011175 ITWN                   ISAJN42001410W087554823W0030006700     NARCHICAGO O'HARE INTL           265531703
+SUSAEAENRT   BENKY K50    C   L N41304259W088423246                       W0033     NAR           BENKY                    287962403
+SUSAEAENRT   CAMRN K60    C   B N40010229W073513981                       W0124     NAR           CAMRN                    300942605
+SUSAEAENRT   EDENS K50    W     N41065901W090025470                       W0023     NAR           EDENS                    338222504
+SUSAEAENRT   HOGGS K60    C   L N39345825W074161407                       W0122     NAR           HOGGS                    379272504
+SUSAEAENRT   JORJO K50    W     N41530414W087591878                       W0039     NAR           JORJO                    403062403
+SUSAEAENRT   KARRS K60    C   L N39502714W073590956                       W0123     NAR           KARRS                    408122605
+SUSAEAENRT   LOAMY K30    C   L N40252831W091470384                       W0010     NAR           LOAMY                    432402605
+SUSAEAENRT   MONKZ K50    W     N41530359W087480647                       W0040     NAR           MONKZ                    446832304
+SUSAEAENRT   OHHMY K30    W     N42525300W091453000                       W0011     NAR           OHHMY                    459222611
+SUSAEAENRT   PANZE K60    C   L N39403358W074100545                       W0122     NAR           PANZE                    466762605

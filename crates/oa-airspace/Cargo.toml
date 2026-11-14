@@ -14,3 +14,9 @@ oa-csv = { path = "../oa-csv" }
 oa-geo = { path = "../oa-geo" }
 oa-nasr = { path = "../oa-nasr" }
 oa-arinc424 = { path = "../oa-arinc424" }
+oa-sha256 = { path = "../oa-sha256" }
+oa-zip = { path = "../oa-zip" }
+
+[[bin]]
+name = "oa-adapt"
+path = "src/bin/oa-adapt.rs"

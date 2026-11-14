@@ -10,6 +10,8 @@ dependencies = [
  "oa-csv",
  "oa-geo",
  "oa-nasr",
+ "oa-sha256",
+ "oa-zip",
 ]
 
 [[package]]
