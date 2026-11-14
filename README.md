@@ -61,6 +61,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
+| `crates/oa-mva` | FAA Minimum Vectoring Altitude and center MIA charts (AIXM 5.1) as a queryable model, and the `oa-mva-check` validation tool |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

@@ -1080,3 +1080,62 @@ the FAA event extension).
   the first 8 MiB, or all of it with `OPENATCA_ADSB_FULL`) no trace is refused and no row is
   rejected, reports are kept in the ZAU box, and under 0.1 % of consecutive pairs are position
   jumps; the test prints the counts and skips when the data is absent.
+
+## M5 — Minimum vectoring and IFR altitudes (oa-mva)
+
+- **OA-MVA-001** Loads one FAA AIXM 5.1 chart message (MVA FUS3, MVA FUS5 or the center MIA
+  "TAV") into struct-of-arrays sectors: facility and set taken from the message name, sector id,
+  minimum altitude in feet MSL, and vertices stored as exact 1e-7 degrees.
+- **OA-MVA-002** A sector holds its exterior ring first and its holes after it; rings are ranges
+  of one shared vertex table (closing vertex kept as given) and a hole flag is a bitset.
+- **OA-MVA-003** Anything outside the documented accepted structure is refused with a typed
+  error naming the element (an upper limit, a curve segment, a second patch or time slice) or
+  attribute, and a refused message leaves the model unchanged.
+- **OA-MVA-004** A value outside what is accepted is refused naming the field: a unit other
+  than FT, a limit reference other than MSL, a coordinate reference other than CRS84, non-planar
+  interpolation, a time period that ends, an interpretation other than BASELINE, a sector name
+  that is not 1 to 8 letters and digits, an altitude outside 0 to 18,000 ft, a longitude or
+  latitude out of range, an odd or short coordinate list, three-dimensional coordinates, and a
+  ring that does not close.
+- **OA-MVA-005** Every count is bounded by a named constant: file bytes, sectors per chart,
+  rings per sector, vertices per ring, sector extent, charts and vertices in the model; a
+  duplicate sector in a chart and a duplicate chart are refused.
+- **OA-MVA-006** Decimal degrees are converted to 1e-7 degrees with integer arithmetic only;
+  more than 7 decimals, signs other than a leading minus, exponents and empty parts are refused.
+- **OA-MVA-007** `min_altitude_at` returns the highest minimum altitude of the sectors of the
+  requested set that contain the point, with how many contain it, and `None` where no sector
+  does; sets are never mixed.
+- **OA-MVA-008** Point containment is exact (128-bit integer arithmetic): a point on a sector's
+  edge or vertex is inside it, a point strictly inside a hole is outside it, a point on a hole's
+  edge is inside it, and a point one unit (1e-7 degree) off an edge is outside.
+- **OA-MVA-009** `sectors_within_radius` lists every sector of the set whose polygon (edge or
+  interior, holes included) comes within the radius, not only those with a vertex within it,
+  using a distance metric that never exceeds the true WGS-84 distance.
+- **OA-MVA-010** Queries refuse a latitude or longitude that is out of range or not finite and a
+  radius that is not positive, finite and at most 200 nm; an empty model answers `None`.
+- **OA-MVA-011** Ring integrity is counted and never repaired: open rings, proper crossings,
+  touching edge pairs, zero-width spikes, repeated vertices, zero-area rings, clockwise
+  exteriors, and holes outside their exterior.
+- **OA-MVA-012** Coverage of a chart is rasterised and reports gaps (uncovered pockets inside
+  the union of its sectors) and overlaps (cells claimed by two sectors) with areas, with sectors
+  that share an edge neither overlapping nor leaving a gap.
+- **OA-MVA-013** Sector labels are read from `pdftotext -raw` text and compared with the XML:
+  matched, mismatched, missing from the PDF and extra on the PDF are reported separately.
+- **OA-MVA-014** Terrain maxima take only the samples whose centres lie inside the sector
+  polygon, count no-data samples separately, and the margin is the minimum altitude less the
+  higher of the terrain and obstacle maxima.
+- **OA-MVA-015** On the real FAA files (`OPENATCA_DATA/raw/mva`; the test prints the counts and
+  skips when the data is absent) all 35 messages load with no refusal: 423 sectors, 604 rings,
+  altitudes 2,000 to 4,300 ft, and queries at known places answer.
+- **OA-MVA-016** On the real files every ring closes, no polygon crosses itself, and there are
+  no spikes, zero-area rings or holes outside their exterior.
+- **OA-MVA-017** On the real files no gap between the sectors of a chart is 10 raster cells
+  (about 0.1 nm2) or larger, and no overlap is 2 nm2 or larger.
+- **OA-MVA-018** On the real files every sector altitude that appears on its PDF plot equals the
+  XML value, except the two charts recorded as findings (CVG FUS3 and TOL FUS5); the test skips
+  when `pdftotext` is absent.
+- **OA-MVA-019** On the real Rockford FUS3 chart (every chart with `OPENATCA_MVA_FULL`) the
+  3DEP terrain and DOF obstacle maxima are found for every sector and every margin is positive;
+  the test skips when the terrain or DOF files are absent.
+- **OA-MVA-020** `oa-mva-check` prints the load, ring, coverage, PDF and clearance sections,
+  exits 0 when every file loads, 1 when a file is refused (naming it), and 2 on bad arguments.

@@ -1,0 +1,19 @@
+[package]
+name = "oa-mva"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1: path dependencies inside this workspace. oa-xml reads the AIXM messages; oa-tiff, oa-dof
+# and oa-zip serve the offline terrain and obstacle clearance check (`check`, `oa-mva-check`),
+# which the core model and queries do not touch.
+oa-xml = { path = "../oa-xml" }
+oa-tiff = { path = "../oa-tiff" }
+oa-dof = { path = "../oa-dof" }
+oa-zip = { path = "../oa-zip" }
