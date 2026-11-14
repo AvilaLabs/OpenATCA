@@ -77,6 +77,31 @@ section is what we intend to build first.
 Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
 already in use across Avila Labs). The core targets the standard library only.
 
+## 3a. Standard: best in class, not parity
+
+Connor, 2026-11-13: matching ERAM and STARS is not the goal. Every function must beat the
+current state of the art, the way ACTINV replaced FISPACT's old solver with CRAM instead of
+copying it. For each function we name the legacy method, the modern method that replaces it,
+and the metric that proves it is better.
+
+| Function | Legacy approach | Our approach | Proven by |
+|---|---|---|---|
+| Surveillance tracking | Single-model filters tuned per site; the DOT OIG found the same tracker problems in both ERAM and STARS | Multi-sensor fusion with interacting multiple models, weighting ADS-B by its own reported integrity (NIC/NACp), radar as cross-check | Position and velocity error against ADS-B truth; track swaps; track drops |
+| ADS-B integrity | ADS-B largely trusted as reported | Every report checked for spoofing and faults: kinematic plausibility, cross-sensor agreement, signal timing where available | Detection rate on injected spoofs; false-flag rate on real traffic |
+| Trajectory prediction | Mostly straight-line extrapolation plus flight-plan route | Physics-based prediction from flight plan, published procedures, open aircraft performance models (OpenAP, not licensed BADA) and live NOAA winds | Prediction error at 2, 5 and 20 minutes against what the aircraft actually flew |
+| Conflict alert | Fixed geometric buffers; nuisance alerts are a known controller complaint | Intent-aware, probability-based alerting on top of a geometric core whose properties are proved (DAIDALUS-style formal verification) | Missed alerts and nuisance alerts on recorded traffic, both reported, neither traded silently for the other |
+| Terrain warning (MSAW) | Site-tuned terrain and obstacle buffers | Terrain and obstacle data from public sources, with procedure-aware suppression instead of hand-drawn exclusion areas | Missed and nuisance warnings on recorded approaches |
+| Site adaptation | Built and maintained by hand per facility | Generated from NASR, CIFP and AIXM each AIRAC cycle, with an automatic diff of what changed | Time to adapt a new facility; adaptation defects found by diff |
+| Input safety | The 2014 Los Angeles Center ERAM outage came from one unusual flight plan (a U-2) exhausting memory | Every input bounded and validated at the edge; every parser fuzzed; no input can exhaust a shared resource | Fuzzing hours with zero crashes; stated bounds on every input |
+| Overload | The 2026-11-13 routers passed inconsistent data under load | Written load-shedding order; inconsistent data is refused and flagged, never passed on | Replay of overload scenarios with surveillance and alerts staying consistent |
+| Redundancy | Hot-standby channels | Active-active replicas running the same deterministic state machine; failover with no lost state | Failover time; state divergence under fault injection |
+| Migration | Big-bang site cutovers over years | Per-function shadow, comparison, cutover and rollback | Difference reports during shadow; rollback time |
+| Performance | Large dedicated hardware per facility | Whole-NAS real-time on one ordinary machine (peak airborne traffic is in the thousands; this is a small compute load) | Latency and throughput at full NAS load on a laptop |
+| Verification | DO-278A process evidence | DO-278A evidence plus formal proofs of safety-critical cores, property-based testing, mutation testing and MC/DC coverage | Proof count; coverage; surviving mutants |
+| New airspace users | Bolted on | Drones, advanced air mobility and space launch corridors as first-class object types from day one | Same metrics applied to mixed traffic |
+
+Any row we cannot yet beat gets a diagnosis and a next step, not a lowered bar.
+
 ## 4. Architecture
 
 ```
