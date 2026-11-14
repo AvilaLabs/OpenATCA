@@ -164,3 +164,125 @@ fn a_real_adsb_clip_replays_to_the_same_state_every_time() {
     assert_eq!(a.final_hash, b.final_hash);
     assert_eq!(a.p.checkpoints, b.p.checkpoints);
 }
+
+/// The `.msg` files of `OPENATCA_DATA/scds/<dir>`, in name order; `None` (with a note) when the
+/// variable is unset or the directory is absent.
+fn scds_msgs(dir: &str) -> Option<Vec<Vec<u8>>> {
+    let Some(root) = std::env::var_os("OPENATCA_DATA") else {
+        eprintln!("OPENATCA_DATA is not set: skipping the real {dir} replay");
+        return None;
+    };
+    let d = PathBuf::from(root).join("scds").join(dir);
+    let Ok(rd) = std::fs::read_dir(&d) else {
+        eprintln!("{} is absent: skipping the real {dir} replay", d.display());
+        return None;
+    };
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "msg"))
+        .collect();
+    files.sort();
+    Some(files.iter().map(|f| std::fs::read(f).unwrap()).collect())
+}
+
+/// Raw `.msg` files carry no receive time (oa-bench reads them the same way), so the test gives
+/// message `i` of a feed the replay time `start_ns + i` seconds. An adapter for the test only.
+fn feed_msgs(p: &mut Pipeline, f: FeedKind, msgs: &[Vec<u8>], start_ns: i64) -> i64 {
+    let mut t = start_ns;
+    for m in msgs {
+        oa_replay::process_frame(p, f, oa_feed::Kind::Message, t, m);
+        t += 1_000_000_000;
+    }
+    t
+}
+
+// REQ: OA-RPL-059
+#[test]
+fn real_tfms_and_fns_samples_replay_to_the_same_state_every_time() {
+    // The early SCDS samples of 2026-11-14: TFMS from 14:09:43Z, FNS from 14:10:45Z and, to give
+    // the TFMS flights something to link to, the SFDPS sample that ends before them.
+    let (Some(tfms), Some(fns)) = (
+        scds_msgs("tfms-20261114T140943Z"),
+        scds_msgs("fns-20261114T141045Z"),
+    ) else {
+        return;
+    };
+    let sfdps = scds_msgs("sfdps-20261114T135147Z").unwrap_or_default();
+    const SFDPS_START: i64 = 1_794_664_307 * 1_000_000_000; // 2026-11-14T13:51:47Z
+    const TFMS_START: i64 = 1_794_665_383 * 1_000_000_000; // 2026-11-14T14:09:43Z
+    const FNS_START: i64 = 1_794_665_445 * 1_000_000_000; // 2026-11-14T14:10:45Z
+    let run = || {
+        // Ten-minute checkpoints: each one hashes every table, which is slow in a debug build.
+        let cfg = PipelineConfig {
+            checkpoint_ns: 600 * 1_000_000_000,
+            ..PipelineConfig::default()
+        };
+        let mut p = new_pipeline(cfg).unwrap();
+        let end = feed_msgs(&mut p, FeedKind::Sfdps, &sfdps, SFDPS_START);
+        let end = feed_msgs(&mut p, FeedKind::Tfms, &tfms, TFMS_START.max(end));
+        // The FNS sample starts after the TFMS one in wall time; replay time does not go back.
+        feed_msgs(&mut p, FeedKind::Fns, &fns, FNS_START.max(end));
+        p
+    };
+    let t = Instant::now();
+    let p = run();
+    let elapsed = t.elapsed().as_secs_f64();
+    let q = run();
+    let (tf, fnx) = (FeedKind::Tfms as usize, FeedKind::Fns as usize);
+    let st = &p.tfms.stats;
+    eprintln!(
+        "sfdps files={} flights={} | tfms files={} rows={} applied={} out_of_order={} \
+         refused_full={} flights={} created={} linked_plan={} linked_acid={} ambiguous={} \
+         linked_now={} conflicts={} | programmes live={} applied={} by_program={:?}",
+        sfdps.len(),
+        p.table.live,
+        tfms.len(),
+        p.rows_seen[tf],
+        p.rows_applied[tf],
+        p.rows_out_of_order[tf],
+        p.rows_refused_full[tf],
+        oa_replay::tfms_live(&p.tfms),
+        st.created,
+        st.linked_plan,
+        st.linked_acid,
+        st.ambiguous,
+        oa_replay::tfms_linked(&p.tfms),
+        st.conflicts,
+        oa_replay::flow_live(&p.flows),
+        p.flows.stats.applied,
+        p.flows.stats.by_program,
+    );
+    let fs = &p.fns.stats;
+    eprintln!(
+        "fns files={} rows={} applied={} active={} in_force={} created={} replaced={} \
+         cancelled={} cancel_unmatched={} replace_unmatched={} expired={} out_of_order={} \
+         no_key={} in {:.3} s",
+        fns.len(),
+        p.rows_seen[fnx],
+        p.rows_applied[fnx],
+        oa_replay::fns_live(&p.fns),
+        oa_replay::fns_in_force(&p.fns, p.replay_ns / 1_000_000),
+        fs.created,
+        fs.replaced,
+        fs.cancelled,
+        fs.cancel_unmatched,
+        fs.replace_unmatched,
+        fs.expired,
+        fs.out_of_order,
+        fs.no_key,
+        elapsed
+    );
+    for (k, n) in p.errors.iter().enumerate() {
+        if *n > 0 {
+            eprintln!("error {}={n}", ERR_NAMES[k]);
+        }
+    }
+    assert!(p.rows_applied[tf] > 0 && p.rows_applied[fnx] > 0);
+    assert!(oa_replay::tfms_live(&p.tfms) > 0 && oa_replay::fns_live(&p.fns) > 0);
+    assert_eq!(snapshot(&p).hash, snapshot(&q).hash);
+    assert_eq!(p.checkpoints, q.checkpoints);
+    assert_eq!(p.errors, q.errors);
+    for k in [ErrKind::BadRow, ErrKind::TimeRegression, ErrKind::FnsNoKey] {
+        assert_eq!(p.errors[k as usize], 0, "{}", ERR_NAMES[k as usize]);
+    }
+}

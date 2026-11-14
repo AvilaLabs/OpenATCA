@@ -147,8 +147,10 @@ dependencies = [
  "oa-deflate",
  "oa-feed",
  "oa-fixm",
+ "oa-notam",
  "oa-sha256",
  "oa-tbfm",
+ "oa-tfms",
  "oa-xml",
  "oa-zip",
 ]

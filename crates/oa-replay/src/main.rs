@@ -175,6 +175,53 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
             p.adsb.live, p.adsb.capacity, a.applied, a.out_of_order, a.refused_full
         ));
     }
+    let fed = |f: FeedKind| p.frames.get(f as usize).copied().unwrap_or(0) > 0;
+    if fed(FeedKind::Tfms) {
+        let t = &p.tfms.stats;
+        s.push_str(&format!(
+            "tfms flights={} capacity={} applied={} out_of_order={} refused_full={} no_ref={} \
+             linked_plan={} linked_acid={} ambiguous={} conflicts={} evicted={}\n",
+            p.tfms.slots.live,
+            p.tfms.slots.capacity,
+            t.applied,
+            t.out_of_order,
+            t.refused_full,
+            t.no_ref,
+            t.linked_plan,
+            t.linked_acid,
+            t.ambiguous,
+            t.conflicts,
+            t.evicted
+        ));
+        let w = &p.flows.stats;
+        s.push_str(&format!(
+            "tfms programmes={} capacity={} applied={} out_of_order={} refused_full={} evicted={}\n",
+            p.flows.slots.live,
+            p.flows.slots.capacity,
+            w.applied,
+            w.out_of_order,
+            w.refused_full,
+            w.evicted
+        ));
+    }
+    if fed(FeedKind::Fns) {
+        let n = &p.fns.stats;
+        s.push_str(&format!(
+            "fns notams={} capacity={} applied={} created={} replaced={} cancelled={} \
+             cancel_unmatched={} out_of_order={} refused_full={} no_key={} expired={}\n",
+            p.fns.slots.live,
+            p.fns.slots.capacity,
+            n.applied,
+            n.created,
+            n.replaced,
+            n.cancelled,
+            n.cancel_unmatched,
+            n.out_of_order,
+            n.refused_full,
+            n.no_key,
+            n.expired
+        ));
+    }
     if errors_total(&p.errors) == 0 {
         s.push_str("errors none\n");
     } else {

@@ -69,10 +69,31 @@ pub enum ErrKind {
     AdsbBadRecord,
     /// An ADS-B payload the decoder could not range-check (an internal inconsistency).
     AdsbInternal,
+    /// A TFMS payload was not well-formed XML within the limits.
+    TfmsXml,
+    /// A TFMS document whose root is not a `tfmDataService` element.
+    TfmsNotTfms,
+    /// A TFMS document with a refused field (the whole message was refused).
+    TfmsField,
+    /// A TFMS document with more rows or text than the row tables hold.
+    TfmsCapacity,
+    /// An FNS payload was not well-formed XML within the limits.
+    FnsXml,
+    /// An FNS message the decoder refused whole (not AIXM, no or several events, no or bad
+    /// event id, no NOTAM element).
+    FnsRejected,
+    /// An FNS document with more elements than the decoder's limit.
+    FnsTooManyElements,
+    /// An FNS document the row tables could not hold.
+    FnsCapacity,
+    /// An FNS row with no usable series, number and year: not applied.
+    FnsNoKey,
+    /// A field of an accepted FNS row that was malformed (the field was treated as absent).
+    FnsField,
 }
 
 /// Number of [`ErrKind`] values.
-pub const ERR_COUNT: usize = 32;
+pub const ERR_COUNT: usize = 42;
 
 /// Display names, indexed by `ErrKind as usize`.
 pub const ERR_NAMES: [&str; ERR_COUNT] = [
@@ -108,6 +129,16 @@ pub const ERR_NAMES: [&str; ERR_COUNT] = [
     "adsb-too-many-rows",
     "adsb-bad-record",
     "adsb-internal",
+    "tfms-xml",
+    "tfms-not-tfms",
+    "tfms-field",
+    "tfms-capacity",
+    "fns-xml",
+    "fns-rejected",
+    "fns-too-many-elements",
+    "fns-capacity",
+    "fns-no-key",
+    "fns-field",
 ];
 
 /// Counts by [`ErrKind`].

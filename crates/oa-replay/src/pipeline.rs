@@ -8,13 +8,15 @@
 //!    already seen is counted as a time regression and the clock stays), the table's eviction
 //!    cadence runs ([`advance_time`]), and a checkpoint is recorded if one is due;
 //! 2. only MESSAGE frames carry feed data; REJECT and STATUS frames are counted;
-//! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS) or oa-tbfm (TBFM), or
-//!    decoded with `oa_adsb::decode_payload` (ADS-B, refused whole when malformed); every failure
-//!    is counted under its [`ErrKind`];
+//! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS), oa-tbfm (TBFM),
+//!    oa-tfms (TFMS) or oa-notam (FNS), or decoded with `oa_adsb::decode_payload` (ADS-B, refused
+//!    whole when malformed); every failure is counted under its [`ErrKind`];
 //! 4. each decoded row is applied to the flight table ([`apply_sfdps`], [`apply_tbfm`]) or, for
-//!    ADS-B, to the aircraft table ([`apply_adsb`]).
+//!    ADS-B, TFMS and FNS, to the table of its own ([`apply_adsb`], [`apply_tfms_flight`],
+//!    [`apply_tfms_flow`], [`apply_fns`]).
 //!
-//! The ADS-B table is part of the state hash only once an ADS-B frame has been fed ([`replay_hash`]).
+//! The ADS-B, TFMS and FNS tables are part of the state hash only once a frame of their feed has
+//! been fed ([`replay_hash`]).
 //!
 //! Checkpoints fall on multiples of `checkpoint_ns` of replay time: the first frame at or after
 //! a boundary records the state as it stood before that frame (after the table's own sweep at
@@ -28,8 +30,17 @@
 use oa_adsb::{decode_payload, reports_clear, reports_len, PayloadError, Reports};
 use oa_feed::Kind;
 use oa_fixm::{clear_events, new_events, Decoder, Events, FixmError, Limits, REJECT_COUNT};
+use oa_notam::{
+    clear_notams, new_decoder, new_stats, notams_len, DocError as FnsDocError,
+    Limits as NotamLimits, Notams,
+};
 use oa_sha256::{Digest, Sha256};
 use oa_tbfm::{clear_rows, decode_doc, new_rows, rows_len, DocError, Rows, MSG_KIND_COUNT};
+use oa_tfms::{
+    clear_rows as clear_tfms_rows, decode_doc as decode_tfms_doc, flights_len, flows_len,
+    new_rows as new_tfms_rows, DocError as TfmsDocError, Rows as TfmsRows, DEFAULT_FLIGHT_CAPACITY,
+    DEFAULT_FLOW_CAPACITY, DEFAULT_STRING_BYTES,
+};
 use oa_xml::Parser;
 
 use crate::adsb::{
@@ -37,8 +48,16 @@ use crate::adsb::{
 };
 use crate::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
+use crate::fns::{
+    apply_fns, fns_hash_into, fns_sweep, new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
+};
 use crate::hash::state_hash;
 use crate::table::{advance_time, new_table, ConfigError, FlightTable, TableConfig, NS_PER_S};
+use crate::tfms::{
+    apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_sweep, new_flow_table, new_tfms_table,
+    tfms_due, tfms_hash_into, tfms_sweep, FlowApplied, FlowTable, TfmsApplied, TfmsTable,
+    FLOW_CAPACITY, TFMS_CAPACITY,
+};
 
 /// Which feed a frame came from; chosen by the caller, never guessed from the payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,9 +67,9 @@ pub enum FeedKind {
     Sfdps = 0,
     /// SWIM TBFM metering publication.
     Tbfm = 1,
-    /// SWIM TFMS flow data. Not decoded yet: frames are counted in `not_applied`.
+    /// SWIM TFMS flight and flow data (`oa-tfms`).
     Tfms = 2,
-    /// SWIM FNS notices. Not decoded yet: frames are counted in `not_applied`.
+    /// SWIM FNS notices (`oa-notam`).
     Fns = 3,
     /// ADS-B position reports (`docs/ADSB_PAYLOAD.md`). Sorts after every SWIM feed in the merge
     /// tie-break (OA-RPL-021): at an equal receive time, SWIM frames come first.
@@ -127,11 +146,21 @@ pub struct Pipeline {
     /// The ADS-B aircraft table (empty, and left out of the state hash, until an ADS-B frame is
     /// fed).
     pub adsb: AdsbTable,
+    /// The TFMS flight table (empty, and left out of the state hash, until a TFMS frame is fed).
+    pub tfms: TfmsTable,
+    /// The TFMS programme table (same rule as `tfms`).
+    pub flows: FlowTable,
+    /// The NOTAMs in force (empty, and left out of the state hash, until an FNS frame is fed).
+    pub fns: FnsTable,
     parser: Parser,
     fixm: Decoder,
     events: Events,
     rows: Rows,
     reports: Reports,
+    tfms_rows: TfmsRows,
+    notam_dec: oa_notam::Decoder,
+    notam_stats: oa_notam::Stats,
+    notams: Notams,
     /// Replay time now, ns; `i64::MIN` before the first frame.
     pub replay_ns: i64,
     next_checkpoint_ns: i64,
@@ -143,7 +172,8 @@ pub struct Pipeline {
     pub messages: [u64; FEED_COUNT],
     /// REJECT and STATUS frames per feed (carry no feed data).
     pub other_frames: [u64; FEED_COUNT],
-    /// MESSAGE frames of feeds with no decoder yet (TFMS, FNS): counted, not applied.
+    /// MESSAGE frames of feeds with no decoder: always 0 now that every feed has one; kept so the
+    /// summary line keeps its shape.
     pub not_applied: [u64; FEED_COUNT],
     /// Rows decoded per feed.
     pub rows_seen: [u64; FEED_COUNT],
@@ -154,7 +184,8 @@ pub struct Pipeline {
     pub rows_out_of_order: [u64; FEED_COUNT],
     /// Rows refused because the table was full, per feed.
     pub rows_refused_full: [u64; FEED_COUNT],
-    /// TBFM rows with no usable key.
+    /// TBFM rows with no usable key, TFMS flight rows with no flight reference, and FNS
+    /// cancellations that name no NOTAM held.
     pub rows_unlinked: u64,
     /// TBFM messages by `oa_tbfm::MsgKind`.
     pub tbfm_kinds: [u64; MSG_KIND_COUNT],
@@ -173,11 +204,22 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         cfg,
         table,
         adsb: new_adsb_table(ADSB_CAPACITY),
+        tfms: new_tfms_table(TFMS_CAPACITY),
+        flows: new_flow_table(FLOW_CAPACITY),
+        fns: new_fns_table(FNS_CAPACITY),
         parser,
         fixm: Decoder::new(Limits::default()),
         events: new_events(DOC_ROW_CAPACITY, DOC_STRING_BYTES),
         rows: new_rows(DOC_ROW_CAPACITY),
         reports: Reports::default(),
+        tfms_rows: new_tfms_rows(
+            DEFAULT_FLIGHT_CAPACITY,
+            DEFAULT_FLOW_CAPACITY,
+            DEFAULT_STRING_BYTES,
+        ),
+        notam_dec: new_decoder(NotamLimits::default()),
+        notam_stats: new_stats(0),
+        notams: default_notams_small(),
         replay_ns: i64::MIN,
         next_checkpoint_ns: i64::MIN,
         checkpoints: Vec::new(),
@@ -193,6 +235,12 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         tbfm_kinds: [0; MSG_KIND_COUNT],
         errors: [0; ERR_COUNT],
     })
+}
+
+/// The NOTAM row buffer: one message yields one row, so a few rows suffice; the string and
+/// vertex tables hold the largest message the decoder accepts by default.
+fn default_notams_small() -> Notams {
+    oa_notam::new_notams(4, 64 * 1024, 64, 16 * 1024)
 }
 
 /// Total frames fed, all feeds.
@@ -216,19 +264,41 @@ pub fn snapshot(p: &Pipeline) -> Checkpoint {
     }
 }
 
-/// The hash of the whole replay state. Until an ADS-B frame has been fed this is exactly
-/// [`state_hash`] of the flight table, so replays without ADS-B hash as they always did. After
-/// that it is SHA-256 over the tag `OATSA`, the flight-table hash and the ADS-B table's
-/// serialisation ([`adsb_hash_into`]).
+/// The hash of the whole replay state. Until an ADS-B, TFMS or FNS frame has been fed this is
+/// exactly [`state_hash`] of the flight table, so replays of SFDPS and TBFM alone hash as they
+/// always did. With ADS-B frames only it is SHA-256 over the tag `OATSA`, the flight-table hash
+/// and the ADS-B table's serialisation ([`adsb_hash_into`]), as before TFMS and FNS were applied.
+/// With TFMS or FNS frames it is SHA-256 over the tag `OATSX`, the flight-table hash, one byte
+/// with bit 0 set for ADS-B, bit 1 for TFMS and bit 2 for FNS, and then the serialisation of each
+/// table whose bit is set, in that order ([`adsb_hash_into`], [`tfms_hash_into`] with
+/// [`flow_hash_into`], [`fns_hash_into`]).
 pub fn replay_hash(p: &Pipeline) -> Digest {
     let flights = state_hash(&p.table);
-    if p.frames.get(FeedKind::Adsb as usize).copied().unwrap_or(0) == 0 {
+    let fed = |f: FeedKind| p.frames.get(f as usize).copied().unwrap_or(0) > 0;
+    let (adsb, tfms, fns) = (fed(FeedKind::Adsb), fed(FeedKind::Tfms), fed(FeedKind::Fns));
+    if !adsb && !tfms && !fns {
         return flights;
     }
     let mut h = Sha256::new();
-    let _ = h.update(b"OATSA");
+    if !tfms && !fns {
+        let _ = h.update(b"OATSA");
+        let _ = h.update(&flights);
+        adsb_hash_into(&mut h, &p.adsb);
+        return h.finalize();
+    }
+    let _ = h.update(b"OATSX");
     let _ = h.update(&flights);
-    adsb_hash_into(&mut h, &p.adsb);
+    let _ = h.update(&[u8::from(adsb) | u8::from(tfms) << 1 | u8::from(fns) << 2]);
+    if adsb {
+        adsb_hash_into(&mut h, &p.adsb);
+    }
+    if tfms {
+        tfms_hash_into(&mut h, &p.tfms);
+        flow_hash_into(&mut h, &p.flows);
+    }
+    if fns {
+        fns_hash_into(&mut h, &p.fns);
+    }
     h.finalize()
 }
 
@@ -261,6 +331,11 @@ pub fn process_frame(
     }
     let now = p.replay_ns;
     advance_time(&mut p.table, now);
+    if tfms_due(&mut p.tfms.next_sweep_ns, now) {
+        tfms_sweep(&mut p.tfms, now);
+        flow_sweep(&mut p.flows, now);
+        fns_sweep(&mut p.fns, now);
+    }
     if p.next_checkpoint_ns == i64::MIN {
         p.next_checkpoint_ns = next_boundary(now, p.cfg.checkpoint_ns);
     } else if now >= p.next_checkpoint_ns {
@@ -285,7 +360,8 @@ pub fn process_frame(
         FeedKind::Sfdps => process_sfdps(p, payload, now),
         FeedKind::Tbfm => process_tbfm(p, payload, now),
         FeedKind::Adsb => process_adsb(p, payload),
-        FeedKind::Tfms | FeedKind::Fns => bump(&mut p.not_applied, feed, 1),
+        FeedKind::Tfms => process_tfms(p, payload, now),
+        FeedKind::Fns => process_fns(p, payload, now),
     }
 }
 
@@ -412,5 +488,86 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
         let a = apply_tbfm(&mut p.table, &p.rows, i, now);
         bump(&mut p.rows_seen, FeedKind::Tbfm, 1);
         note(p, FeedKind::Tbfm, a);
+    }
+}
+
+fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
+    clear_tfms_rows(&mut p.tfms_rows);
+    let doc = match p.parser.parse(payload) {
+        Ok(d) => d,
+        Err(_) => {
+            count_error(&mut p.errors, ErrKind::TfmsXml, 1);
+            return;
+        }
+    };
+    if let Err(e) = decode_tfms_doc(&doc, &mut p.tfms_rows) {
+        let k = match e {
+            TfmsDocError::Xml(_) => ErrKind::TfmsXml,
+            TfmsDocError::NotTfms { .. } => ErrKind::TfmsNotTfms,
+            TfmsDocError::Field(_) => ErrKind::TfmsField,
+            TfmsDocError::Capacity(_) => ErrKind::TfmsCapacity,
+        };
+        count_error(&mut p.errors, k, 1);
+        return;
+    }
+    for i in 0..flights_len(&p.tfms_rows.flights) {
+        let a = apply_tfms_flight(&mut p.tfms, &p.table, &p.tfms_rows, i, now);
+        bump(&mut p.rows_seen, FeedKind::Tfms, 1);
+        match a {
+            TfmsApplied::New | TfmsApplied::Updated => bump(&mut p.rows_applied, FeedKind::Tfms, 1),
+            TfmsApplied::OutOfOrder => bump(&mut p.rows_out_of_order, FeedKind::Tfms, 1),
+            TfmsApplied::TableFull => bump(&mut p.rows_refused_full, FeedKind::Tfms, 1),
+            TfmsApplied::NoRef => p.rows_unlinked += 1,
+            TfmsApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
+        }
+    }
+    for i in 0..flows_len(&p.tfms_rows.flows) {
+        let a = apply_tfms_flow(&mut p.flows, &p.tfms_rows, i, now);
+        bump(&mut p.rows_seen, FeedKind::Tfms, 1);
+        match a {
+            FlowApplied::New | FlowApplied::Updated => bump(&mut p.rows_applied, FeedKind::Tfms, 1),
+            FlowApplied::OutOfOrder => bump(&mut p.rows_out_of_order, FeedKind::Tfms, 1),
+            FlowApplied::TableFull => bump(&mut p.rows_refused_full, FeedKind::Tfms, 1),
+            FlowApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
+        }
+    }
+}
+
+fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
+    clear_notams(&mut p.notams);
+    let doc = match p.parser.parse(payload) {
+        Ok(d) => d,
+        Err(_) => {
+            count_error(&mut p.errors, ErrKind::FnsXml, 1);
+            return;
+        }
+    };
+    match oa_notam::decode_doc(&mut p.notam_dec, &doc, &mut p.notams, &mut p.notam_stats) {
+        Ok(o) => count_error(&mut p.errors, ErrKind::FnsField, u64::from(o.field_errors)),
+        Err(e) => {
+            let k = match e {
+                FnsDocError::Xml(_) => ErrKind::FnsXml,
+                FnsDocError::Rejected(_) => ErrKind::FnsRejected,
+                FnsDocError::TooManyElements { .. } => ErrKind::FnsTooManyElements,
+                FnsDocError::Capacity(_) => ErrKind::FnsCapacity,
+            };
+            count_error(&mut p.errors, k, 1);
+            return;
+        }
+    }
+    for i in 0..notams_len(&p.notams) {
+        let a = apply_fns(&mut p.fns, &p.notams, i, now);
+        bump(&mut p.rows_seen, FeedKind::Fns, 1);
+        match a {
+            FnsApplied::New
+            | FnsApplied::Reissued
+            | FnsApplied::Replaced
+            | FnsApplied::Cancelled => bump(&mut p.rows_applied, FeedKind::Fns, 1),
+            FnsApplied::CancelUnmatched => p.rows_unlinked += 1,
+            FnsApplied::OutOfOrder => bump(&mut p.rows_out_of_order, FeedKind::Fns, 1),
+            FnsApplied::TableFull => bump(&mut p.rows_refused_full, FeedKind::Fns, 1),
+            FnsApplied::NoKey => count_error(&mut p.errors, ErrKind::FnsNoKey, 1),
+            FnsApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
+        }
     }
 }

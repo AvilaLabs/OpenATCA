@@ -878,8 +878,9 @@ the FAA event extension).
 - **OA-RPL-028** Rotated recordings of one feed chain in name order (`--sfdps-dir`, `--tbfm-dir`,
   `--tfms-dir`, `--fns-dir`, or several files in one stream, raw or gzip, any mix) and replay
   identically to the unsplit recording, with the same checkpoints and final state hash.
-- **OA-RPL-029** TFMS and FNS frames are counted per feed in a "not yet applied" bucket until their
-  decoders exist; they change no flight state and raise no error.
+- **OA-RPL-029** TFMS and FNS payloads are decoded (OA-RPL-041 to OA-RPL-059); a payload of the wrong
+  kind of document is counted under its typed error, and nothing is left in a "not applied" bucket
+  (the `not_applied` count stays in the summary line and is always 0).
 
 ### ADS-B in the replay (oa-replay)
 
@@ -919,6 +920,62 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
   aircraft (skipped if unset).
 - **OA-RPL-040** An `oa-replay` merge of a one-second-frame ADS-B clip and a SWIM feed gives the
   frames in receive-time order, interleaved at about one-second granularity.
+
+### TFMS and FNS in the replay (oa-replay)
+
+TFMS flight and flow messages (`oa-tfms`) and FNS NOTAMs (`oa-notam`) are applied to tables of their
+own beside the flight table. Both are bounded, struct-of-arrays, and left out of the state hash until a
+frame of their feed has been fed (as the ADS-B table is).
+
+- **OA-RPL-041** The TFMS flight table keeps, per flight reference, the latest value of each estimate and
+  time the messages carried (estimated and actual departure and arrival, original, runway, gate, fix and
+  coordination times, estimate flags and types, status), leaving a value alone when a later row lacks it;
+  identity (acid, departure, arrival, identifier) fills an empty column and a disagreement is counted.
+- **OA-RPL-042** A TFMS flight row older (by `sourceTimeStamp`) than the flight's latest is refused whole
+  and counted; an equal time applies.
+- **OA-RPL-043** A TFMS flight links to the SFDPS flight whose flight-plan identifier equals its
+  identifier, or, with no identifier, to the single SFDPS flight with its acid, departure and arrival;
+  an ambiguous key and an identifier that matches nothing leave it unlinked; the link is the SFDPS GUFI,
+  retried while unlinked (the identifier every row, the acid key on the 1st, 2nd, 4th, 8th ... row) and counted by method.
+- **OA-RPL-044** TFMS programme rows (restrictions, advisories, FCA/FEA, airport configurations) keep one
+  row per programme key with the latest row, count rows by program type, refuse an older row, and leave
+  the table at the first sweep after the programme's end time.
+- **OA-RPL-045** A TMI flight list entry sets the flight's TMI update type, flight-list entry count, first
+  FCA identifier, TMI update time and status.
+- **OA-RPL-046** The TFMS flight table has a fixed capacity: a new flight with no free slot is refused and
+  counted, a held flight still updates, a flight silent for six hours of replay time is evicted at a
+  sweep and its slot is reused.
+- **OA-RPL-047** A TFMS payload that is not well-formed XML, not a TFMS document, has a refused field or
+  holds more rows than the row tables is counted under its own typed error and applies nothing; the next
+  good payload applies.
+- **OA-RPL-048** A TFMS flight row with no flight reference is not applied and is counted.
+- **OA-RPL-049** FNS new, replacement and cancellation NOTAMs are keyed by series, number and year (a
+  local-format NOTAM, which has no series, by its location in the series' place): a
+  replacement removes the NOTAM it names and is stored, a cancellation removes the NOTAM it names and is
+  not stored, and a replacement or cancellation naming nothing held is counted.
+- **OA-RPL-050** A NOTAM re-issued under a held identity replaces it whole, unless it was issued earlier
+  than the held one, which is refused whole and counted.
+- **OA-RPL-051** A NOTAM leaves the table at the first sweep after its end or cancelled time in replay
+  time; one with no end time leaves after thirty days without an update; a reader can ask how many are in
+  force at a time.
+- **OA-RPL-052** A NOTAM keeps its circle, altitude limits and references, affected feature, polygon and
+  vertex counts and the bounding box of its polygon vertices.
+- **OA-RPL-053** An FNS payload that is not well-formed XML or is refused by the decoder, and a row with
+  no usable identity, are counted under typed errors and applied to nothing; a malformed
+  field is counted and treated as absent.
+- **OA-RPL-054** The NOTAM table has a fixed capacity and refuses and counts a new NOTAM when full.
+- **OA-RPL-055** Until a TFMS or an FNS frame has been fed the replay hash is the one it was before they
+  were applied, so SFDPS and TBFM replays (with or without ADS-B) hash unchanged.
+- **OA-RPL-056** Once fed, the TFMS flight, TFMS programme and FNS tables are in the replay hash, each
+  table's change moves it, and the same frames give the same hash.
+- **OA-RPL-057** A mixed SFDPS, TFMS, FNS replay from hand-made recordings gives the same checkpoints,
+  errors and final hash whatever the order the files are named in and however they are chunked.
+- **OA-RPL-058** TFMS and FNS STATUS and REJECT frames are counted as other frames and apply nothing.
+- **OA-RPL-059** Replaying the real 2026-11-14 SCDS TFMS and FNS samples (`OPENATCA_DATA`, `.msg` files
+  given synthetic one-second receive times by the test) twice gives identical checkpoints, errors and
+  final hash (skipped if absent).
+- **OA-RPL-060** The TFMS, programme and NOTAM tables allocate nothing after construction: every buffer
+  keeps its address and capacity through applying, sweeping and reusing slots.
 
 ## M5 — Terrain and obstacles
 
