@@ -258,4 +258,4 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   60 s, 10 s bins to 600 s and one overflow bin; each bin's upper edge is the next bin's start,
   and a p50, p95 or maximum in the overflow bin prints as `>=600000`.
 - **OA-FEED-025** Latencies of 7 to 10.5 s (as measured on the live TBFM feed) fall in distinct
-  1 s bins, and p50, p95 and the maximum come out as numbers in that range.
+  1 s bins, and p50, p95 and the maximum come out as numbers in that range; a printed quantile never exceeds the maximum.

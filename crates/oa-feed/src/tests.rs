@@ -692,7 +692,7 @@ fn latency_histogram_and_clock_skew() {
     assert!(
         s.contains("skew=2")
             && s.contains("lat_p50_ms=10 ")
-            && s.contains("lat_p95_ms=21000 lat_max_ms=20000 "),
+            && s.contains("lat_p95_ms=20000 lat_max_ms=20000 "), // clamped to the maximum
         "{s}"
     );
 }
@@ -822,7 +822,7 @@ fn latencies_of_seven_to_ten_seconds_are_resolved() {
     assert_eq!(latency_quantile_ms(&h, 19, 20), Some(11_000));
     let s = format_summary(&h, ns);
     assert!(
-        s.contains("lat_p50_ms=9000 lat_p95_ms=11000 lat_max_ms=10500 "),
+        s.contains("lat_p50_ms=9000 lat_p95_ms=10500 lat_max_ms=10500 "),
         "{s}"
     );
 }

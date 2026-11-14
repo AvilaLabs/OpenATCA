@@ -18,8 +18,8 @@
 //! * Latency is `recv_unix_ns / 1e6 - jms_timestamp_ms` in whole milliseconds, for MESSAGE
 //!   frames with a JMS timestamp; negative values are clock skew and are counted apart from the
 //!   histogram. Bins resolve 10 ms up to 100 ms, 100 ms up to 1 s, 1 s up to 60 s, 10 s up to
-//!   600 s, then overflow. The summary prints p50 and p95 as the bin's upper edge in ms and the
-//!   exact maximum; anything in the overflow bin prints as `>=600000`.
+//!   600 s, then overflow. The summary prints p50 and p95 as the bin's upper edge in ms, never above the
+//!   exact maximum, which is also printed; anything in the overflow bin prints as `>=600000`.
 
 use std::fmt::Write;
 
@@ -367,7 +367,9 @@ pub fn format_summary(h: &FeedHealth, now_ns: i64) -> String {
     let samples: u64 = h.lat_hist.iter().sum();
     let q = |n: u64, d: u64| match latency_quantile_ms(h, n, d) {
         _ if samples == 0 => "-".to_string(),
-        Some(e) => e.to_string(),
+        // A bin's upper edge can exceed the largest sample seen; the quantile is never above
+        // the maximum, so clamp to it.
+        Some(e) => e.min(h.lat_max_ms).to_string(),
         None => overflow.clone(),
     };
     let lat_max = match h.lat_max_ms {
