@@ -69,12 +69,8 @@ Information Services.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option. Unless you state otherwise, any contribution you submit for inclusion is dual
-licensed as above, without additional terms.
+Licensed under the Apache License, Version 2.0 ([LICENSE](LICENSE)). Unless you state
+otherwise, any contribution you submit for inclusion is licensed under the same terms, without
+additional terms or conditions.
 
 Copyright 2026 Avila Labs.
