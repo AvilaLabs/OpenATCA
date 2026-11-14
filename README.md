@@ -58,6 +58,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-json` | Strict bounded RFC 8259 JSON parser |
 | `crates/oa-tar` | Streaming ustar/GNU tar reader, split archives, typed truncation |
 | `crates/oa-adsb` | adsb.lol / readsb trace decoder and the `oa-adsb-clip` tool |
+| `crates/oa-truth` | Reference trajectories from ADS-B for the M2 benchmark: quality selection, legs, RTS smoother, no-extrapolation queries, leave-one-out accuracy, and the `oa-truth-check` tool |
 | `crates/oa-replay` | Replay of recorded SWIM feeds (SFDPS, TBFM, TFMS, FNS) and ADS-B clips (`--adsb`, `--adsb-dir`) in one time-ordered stream; flight and aircraft state with a deterministic hash; the `oa-replay` tool |
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |

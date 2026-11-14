@@ -1375,3 +1375,57 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-AWC-017** `oa-awc-summary [dir]` scans a directory tree, parses each recognised file by its
   name, reports records, refusals by reason, duplicates, the altimeter cross-check and station
   availability, lists files refused whole and skipped names, and exits 1 if any file was refused whole.
+
+## M2 — Benchmark truth (oa-truth)
+
+### ADS-B reference trajectories (oa-truth)
+
+- **OA-TRUTH-001** Reports are selected on NACp >= 8 (and at most 11), NIC >= 7, SIL 3 and, where
+  the version is present, ADS-B version >= 2; a row failing one of these, carrying readsb's stale
+  flag, or with a source other than ADS-B (MLAT, TIS-B, ADS-R, ...) is removed and counted under
+  one named reason, and rows in always equal rows kept plus rows removed.
+- **OA-TRUTH-002** Quality fields are carried forward within an aircraft for at most 60 s; a row
+  with no NACp, NIC or SIL value that young is not truth and is counted as such.
+- **OA-TRUTH-003** A report implying more than 700 kt from the last kept one (plus a 200 m
+  allowance) is removed and counted as a jump and does not affect the track; five jumps in a
+  row start a new leg instead of rejecting the rest of the flight.
+- **OA-TRUTH-004** An aircraft splits into legs at readsb's new-leg flag (also when the flagged
+  row is itself removed) and at a gap of more than 120 s between kept reports, not at exactly
+  120 s; leg start, end, report count and address are readable.
+- **OA-TRUTH-005** On a straight track with known noise (5 m per axis, 10 minutes) the
+  smoothed position is under 4 m RMS from the true path and the velocity under 1.5 m/s RMS, the
+  velocity points the right way, and the reported 95 % radius is above the real error and under 50 m.
+- **OA-TRUTH-006** On a constant-rate turn (8 km radius, 200 m/s, 5 m noise) the smoothed
+  position is under 6 m RMS and 20 m worst, and the velocity within 5 m/s.
+- **OA-TRUTH-007** A leg 400 km long stays within 4 m RMS of the true path: the local frame adds
+  no position error, and velocity is true east and north.
+- **OA-TRUTH-008** Barometric altitude is not smoothed: exact at a report time, the linear
+  interpolation between the bracketing reports otherwise, absent if either lacks it; vertical
+  rate is the reported rate interpolated, else the altitude difference over a bracket of 2 s or more.
+- **OA-TRUTH-009** There is no extrapolation: no truth before a leg's first or after its last
+  report or between legs (no bracket), none inside a leg unless a real report lies within 10 s on
+  both sides (gap; exactly 10 s is allowed), none for an unknown address, and an address differing
+  only in the non-ICAO bit is a different aircraft.
+- **OA-TRUTH-010** Truth whose 95 % horizontal radius exceeds the gate (50 m) is refused as too
+  uncertain; the same track with precise reports, or a looser gate, is answered.
+- **OA-TRUTH-011** Leave-one-out hides every fifth report of each leg, predicts it from the rest
+  under the bracket rule and publishes N, mean, RMS, median, p95, p99 and max of the horizontal,
+  cross-track, along-track and altitude residuals, the share of predictions under the gate and the
+  share of hidden reports inside their predicted 95 % radius; on known noise the residuals have
+  the expected size and the radius is honest; the measurement can be switched off.
+- **OA-TRUTH-012** The same input gives the same truth and statistics bit for bit, in any input
+  order, and one changed report changes the SHA-256 digest of the model.
+- **OA-TRUTH-013** Aircraft are keyed by the full address word, so non-ICAO addresses stay
+  separate from ICAO ones with the same 24 bits.
+- **OA-TRUTH-014** Columns of different lengths and out-of-range configuration values are refused
+  with a typed error, out-of-range coordinates are removed and counted, empty input gives an empty
+  truth, and the gates are the design's values (NACp 8, NIC 7, SIL 3, version 2, 60 s, 120 s,
+  10 s, 50 m).
+- **OA-TRUTH-015** On the real ZAU ADS-B clip (skipped when `OPENATCA_ADSB_CLIP` is unset) the
+  accounting balances, the model's 95 % radius covers 85 to 99.5 % of hidden reports, the
+  leave-one-out horizontal p95 is under the 50 m gate, nothing is answered before an aircraft's
+  first report, and two builds are identical.
+- **OA-TRUTH-016** `oa-truth-check <clip.oaf>` reads OAF1 ADS-B frames and prints the legs, rows
+  kept and removed by reason, the leave-one-out table, the share of query times under the
+  uncertainty gate, the build time and the model digest (equal to the library's); `--accel-q`,
+  `--sigma-scale` and `--no-loo` are honoured; usage errors and unreadable input exit 2.
