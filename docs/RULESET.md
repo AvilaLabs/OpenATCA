@@ -19,6 +19,13 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 
 ---
 
+## A0. Unsafe code
+
+- **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the single display-presentation
+  crate, which needs raw OS calls for KMS/DRM (ioctl, mmap). There, every `unsafe` block is as
+  small as possible, carries a `// SAFETY:` comment stating the invariant it relies on, and is
+  reviewed line by line. No other crate may gain an exception without amending this rule.
+
 ## A. Data layout
 
 - **A1 [MUST]** Data is plain. A record type has fields and nothing else: no methods carrying

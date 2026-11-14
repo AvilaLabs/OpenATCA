@@ -131,11 +131,13 @@ section is what we intend to build first.
    visible. General GUI toolkits (egui and similar) are acceptable only for internal engineering
    tools, never the controller display, because of their dependency trees and the layout
    decisions they make on our behalf.
-   Planned presentation path: our renderer draws into a plain pixel buffer (pure, testable byte
-   for byte against reference images); presenting it is a swappable backend. X11 over its socket
-   protocol first (no dependencies, no unsafe, works under Xwayland), a headless image backend for
-   tests, and Linux KMS/DRM direct-to-display for dedicated controller consoles later, so no
-   desktop stack sits between the data and the pixels.
+   Presentation path (Connor, 2026-11-13: start with KMS, no throwaway backend): our renderer
+   draws into a plain pixel buffer (pure, testable byte for byte against reference images).
+   Linux KMS/DRM direct-to-display is the real backend from the start: no desktop stack between
+   the data and the pixels, and page flipping guarantees every displayed frame is complete, never
+   half old and half new. A headless image backend serves tests, CI and demo material. Input is
+   read from Linux input devices directly. KMS needs a few raw OS calls (ioctl, mmap); they live
+   in one isolated module under a recorded exception to the no-unsafe rule (RULESET.md A0).
 
 Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
 already in use across Avila Labs). The core targets the standard library only.
