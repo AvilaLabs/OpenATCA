@@ -17,6 +17,51 @@ We cannot deploy into the National Airspace System (NAS) ourselves. The goal is 
 enough, and assured well enough, that qualified people would want to test it. Everything is built
 for that possibility from the first commit.
 
+### How it gets used if it succeeds
+
+We build for the operational end state, but adoption comes in rungs. Each rung needs less approval
+than the next, and the same core serves all of them.
+
+1. **Independent benchmark.** A public yardstick: the same recorded traffic run through our
+   platform with published tracking, prediction and alerting metrics. Vendor bids and the FAA's
+   own systems can be measured against it. Needs no approval.
+2. **Training and research.** Controller training simulators and research testbeds (FAA Technical
+   Center, NASA, universities, controller training programs). Simulation does not need
+   operational certification, and it needs exactly our core plus the display.
+3. **Independent safety monitor.** Runs beside ERAM/STARS on the same feeds as a dissimilar
+   second system. It flags disagreements, and it keeps a coherent traffic picture when the primary
+   or its network degrades, as on 2026-11-13. Advisory only, so the approval bar is lower than for
+   a control system.
+4. **Contingency system.** Takes over a defined set of functions when the primary fails.
+5. **Primary platform.** CAP itself, carried by an integrator under the RFI's Enterprise
+   Re-Architecture path, with the code owned by the public. Smaller ANSPs abroad, who cannot
+   afford the big vendors' platforms, are a second home for it.
+
+Precedent for open government-adjacent software becoming the standard: NASA's open-source
+DAIDALUS is the reference implementation of the RTCA DO-365 detect-and-avoid standard.
+
+Design consequence: live feeds, recorded feeds and simulated traffic enter the core through the
+same interface and are indistinguishable to it. One core, five uses.
+
+### In scope
+
+- What ERAM and STARS do: surveillance processing and tracking, flight data processing,
+  flight-plan/track correlation, conflict alert, terrain warning, sector and handoff logic,
+  controller display, for en route and terminal airspace.
+- Migration machinery: shadow mode, comparator, per-function cutover and rollback, adapters to
+  legacy formats.
+- The simulation and replay that rungs 1 and 2 need.
+
+### Out of scope
+
+- Hardware: radars, radios, network routers, the telecom network itself.
+- Voice communications.
+- Traffic flow management (TFMS, the SMART tool) and NOTAMs: separate FAA systems, though our
+  interfaces must exchange data with them.
+- Tower surface surveillance (ASDE-X) and airborne systems.
+- Oceanic airspace (ATOP): later. The RFI mentions oceanic scale, so the data model must not
+  rule it out.
+
 ### Why now
 
 On 2026-11-13 the FAA stopped every departure in the country for about 4–5 hours after a
@@ -171,7 +216,9 @@ Region for M0–M5: Chicago Center (ZAU), where the 2026-11-13 failure began, an
   isolating the fault while surveillance and alerts stay consistent.
 - **M6 — Controller display.** Working display for en route and terminal positions.
 
-After M4 the platform is far enough along for outreach to close the gaps in section 6.
+After M3 the public benchmark (rung 1) can be published. After M4 the platform runs as a
+safety monitor in shadow on live data (rung 3 in miniature), and is far enough along for outreach
+to close the gaps in section 6. M6 makes it usable for training and research (rung 2).
 
 ## 8. Prior work to learn from
 
