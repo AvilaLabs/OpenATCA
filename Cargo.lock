@@ -175,6 +175,15 @@ name = "oa-trace"
 version = "0.0.1"
 
 [[package]]
+name = "oa-truth"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-feed",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-xml"
 version = "0.0.1"
 

@@ -1,0 +1,777 @@
+//! Truth construction on synthetic traffic with known errors, the query rules, determinism and
+//! the real-data run (skipped when the clip is absent).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use oa_adsb::{
+    reports_len, reports_push, Reports, Row, F_NEW_LEG, F_STALE, NONE_I32, NONE_U8, NON_ICAO,
+    ROW_EMPTY,
+};
+use oa_sha256::Sha256;
+use oa_truth::*;
+
+const LAT0: f64 = 41.0;
+const LON0: f64 = -88.0;
+const T0: i64 = 1_700_000_000_000_000_000;
+const M_PER_DEG: f64 = 111_195.0;
+const ADDR: u32 = 0xa12345;
+
+/// Deterministic standard normal numbers (LCG plus Box-Muller).
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+    fn normal(&mut self) -> f64 {
+        let (a, b) = (self.unit(), self.unit());
+        (-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()
+    }
+}
+
+/// East/north metres about the origin to degrees (flat; the tests compare in the same terms).
+fn to_deg(e: f64, n: f64) -> (f64, f64) {
+    let lat = LAT0 + n / M_PER_DEG;
+    (lat, LON0 + e / (M_PER_DEG * LAT0.to_radians().cos()))
+}
+
+/// Distance in metres between two degree positions near the origin.
+fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dn = (a.0 - b.0) * M_PER_DEG;
+    let de = (a.1 - b.1) * M_PER_DEG * LAT0.to_radians().cos();
+    (dn * dn + de * de).sqrt()
+}
+
+fn good(addr: u32, t_s: f64, lat: f64, lon: f64) -> Row {
+    let mut r = ROW_EMPTY;
+    r.icao = addr;
+    r.time_ns = T0 + (t_s * 1e9).round() as i64;
+    r.lat_e7 = (lat * 1e7).round() as i32;
+    r.lon_e7 = (lon * 1e7).round() as i32;
+    r.nic = 8;
+    r.nac_p = 10;
+    r.sil = 3;
+    r.version = 2;
+    r.source = 0;
+    r
+}
+
+fn ms(t_s: f64) -> i64 {
+    T0 / 1_000_000 + (t_s * 1000.0).round() as i64
+}
+
+fn ns(t_s: f64) -> i64 {
+    T0 + (t_s * 1e9).round() as i64
+}
+
+/// A straight track at 200 m/s toward 045 degrees, one report every `dt` s for `dur` s, with
+/// Gaussian noise of `sigma` m per axis.
+fn straight(addr: u32, dt: f64, dur: f64, sigma: f64, seed: u64) -> Reports {
+    let mut rng = Rng(seed);
+    let mut r = Reports::default();
+    let v = 200.0 / 2f64.sqrt();
+    let mut t = 0.0;
+    while t <= dur + 1e-9 {
+        let (lat, lon) = to_deg(v * t + sigma * rng.normal(), v * t + sigma * rng.normal());
+        reports_push(&mut r, &good(addr, t, lat, lon));
+        t += dt;
+    }
+    r
+}
+
+fn straight_pos(t: f64) -> (f64, f64) {
+    let v = 200.0 / 2f64.sqrt();
+    to_deg(v * t, v * t)
+}
+
+fn build(r: &Reports) -> (Truth, TruthStats) {
+    build_truth(r, &DEFAULT_CONFIG).unwrap()
+}
+
+fn sample(q: TruthQuery) -> TruthSample {
+    match q {
+        TruthQuery::Ok(s) => s,
+        other => panic!("expected a sample, got {other:?}"),
+    }
+}
+
+fn digest(t: &Truth) -> [u8; 32] {
+    let mut h = Sha256::new();
+    truth_hash_into(&mut h, t);
+    h.finalize()
+}
+
+fn removed(s: &TruthStats, kind: usize) -> u64 {
+    s.removed[kind]
+}
+
+fn balanced(s: &TruthStats) -> bool {
+    s.rows_in == s.rows_kept + s.removed.iter().sum::<u64>()
+}
+
+// REQ: OA-TRUTH-001
+#[test]
+fn quality_gates_remove_and_count_each_reason() {
+    let mut r = Reports::default();
+    let mut t = 0.0;
+    let mut push = |r: &mut Reports, f: &dyn Fn(&mut Row)| {
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        f(&mut row);
+        reports_push(r, &row);
+        t += 2.0;
+    };
+    for _ in 0..30 {
+        push(&mut r, &|_| {});
+    }
+    push(&mut r, &|w| w.nac_p = 7);
+    push(&mut r, &|w| w.nac_p = 12);
+    push(&mut r, &|w| w.nic = 6);
+    push(&mut r, &|w| w.sil = 2);
+    push(&mut r, &|w| w.version = 1);
+    push(&mut r, &|w| w.flags |= F_STALE);
+    push(&mut r, &|w| w.source = 5); // mlat
+    push(&mut r, &|w| w.source = 10); // tisb_trackfile
+    for _ in 0..30 {
+        push(&mut r, &|_| {});
+    }
+    let (truth, s) = build(&r);
+    assert_eq!(removed(&s, REM_NACP), 2);
+    assert_eq!(removed(&s, REM_NIC), 1);
+    assert_eq!(removed(&s, REM_SIL), 1);
+    assert_eq!(removed(&s, REM_VERSION), 1);
+    assert_eq!(removed(&s, REM_STALE), 1);
+    assert_eq!(removed(&s, REM_SOURCE), 2);
+    assert_eq!(s.rows_kept, 60);
+    assert!(balanced(&s));
+    // The 16 s hole is one leg (under the 120 s gap), not two.
+    assert_eq!(s.legs, 1);
+    assert_eq!(leg_count(&truth), 1);
+    // A version that does not exist in the row is not a reason to refuse it.
+    let mut r2 = Reports::default();
+    for k in 0..10 {
+        let (la, lo) = straight_pos(f64::from(k));
+        let mut row = good(ADDR, f64::from(k), la, lo);
+        row.version = NONE_U8;
+        row.source = NONE_U8;
+        reports_push(&mut r2, &row);
+    }
+    assert_eq!(build(&r2).1.rows_kept, 10);
+}
+
+// REQ: OA-TRUTH-002
+#[test]
+fn quality_is_carried_forward_for_at_most_sixty_seconds() {
+    let mut r = Reports::default();
+    for k in 0..200 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        // The aircraft object appears on report 0 and report 100 only.
+        if k != 0 && k != 100 {
+            row.nic = NONE_U8;
+            row.nac_p = NONE_U8;
+            row.sil = NONE_U8;
+            row.version = NONE_U8;
+        }
+        reports_push(&mut r, &row);
+    }
+    let (_, s) = build(&r);
+    // Rows at 0..=60 s (31) and 200..=260 s (31) are kept; the 138 rows between and after
+    // have no quality value younger than 60 s. The 140 s between the kept groups splits the leg.
+    assert_eq!(s.rows_kept, 62);
+    assert_eq!(removed(&s, REM_NO_QUALITY), 138);
+    assert_eq!(s.quality_carried, 60);
+    assert_eq!((s.legs, s.splits[SPLIT_GAP]), (2, 1));
+    assert!(balanced(&s));
+}
+
+// REQ: OA-TRUTH-003
+#[test]
+fn jumps_are_removed_and_counted() {
+    let mut r = Reports::default();
+    for k in 0..60 {
+        let t = f64::from(k) * 2.0;
+        let (mut la, mut lo) = straight_pos(t);
+        if k == 30 {
+            (la, lo) = (la + 0.5, lo - 0.5); // about 70 km away
+        }
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    let (truth, s) = build(&r);
+    assert_eq!(removed(&s, REM_JUMP), 1);
+    assert_eq!(s.rows_kept, 59);
+    assert_eq!(s.legs, 1);
+    let q = sample(truth_at(&truth, ADDR, ms(60.0)));
+    assert!(dist((q.lat_deg, q.lon_deg), straight_pos(60.0)) < 5.0);
+    // A real turn-around of the data (the jump persists) starts a new leg after the
+    // resync count instead of rejecting the rest of the flight.
+    let mut r = Reports::default();
+    for k in 0..60 {
+        let t = f64::from(k) * 2.0;
+        let (mut la, mut lo) = straight_pos(t);
+        if k >= 30 {
+            (la, lo) = (la + 0.5, lo - 0.5);
+        }
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    let (_, s) = build(&r);
+    assert_eq!(removed(&s, REM_JUMP), u64::from(JUMP_RESYNC) - 1);
+    assert_eq!(s.splits[SPLIT_JUMP], 1);
+    assert_eq!(s.legs, 2);
+    assert!(balanced(&s));
+}
+
+// REQ: OA-TRUTH-004
+#[test]
+fn legs_split_at_the_new_leg_flag_and_at_gaps_over_120_seconds() {
+    let mut r = Reports::default();
+    // 0..=100 s, a 130 s gap, 230..=330 s, then a new-leg flag at 340 s with no gap.
+    for k in 0..51 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    for k in 0..51 {
+        let t = 230.0 + f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    for k in 0..30 {
+        let t = 332.0 + f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        if k == 4 {
+            row.flags |= F_NEW_LEG;
+        }
+        reports_push(&mut r, &row);
+    }
+    let (truth, s) = build(&r);
+    assert_eq!(s.legs, 3);
+    assert_eq!((s.splits[SPLIT_GAP], s.splits[SPLIT_NEW_LEG]), (1, 1));
+    let lr = legs_of(&truth, ADDR);
+    assert_eq!((lr.addr, lr.count), (ADDR, 3));
+    let l = |i: u32| LegIx(lr.first.0 + i);
+    assert_eq!(leg_addr(&truth, l(0)), Some(ADDR));
+    assert_eq!(leg_start_ms(&truth, l(0)), Some(ms(0.0)));
+    assert_eq!(leg_end_ms(&truth, l(0)), Some(ms(100.0)));
+    assert_eq!(leg_start_ms(&truth, l(1)), Some(ms(230.0)));
+    assert_eq!(leg_reports(&truth, l(1)), Some(55));
+    assert_eq!(leg_end_ms(&truth, l(1)), Some(ms(338.0)));
+    assert_eq!(leg_reports(&truth, l(2)), Some(30 - 4));
+    assert_eq!(leg_start_ms(&truth, l(2)), Some(ms(340.0)));
+    // A gap of exactly 120 s is not a split.
+    let mut r = Reports::default();
+    for t in [0.0, 2.0, 4.0, 124.0, 126.0, 128.0] {
+        let (la, lo) = straight_pos(t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    assert_eq!(build(&r).1.legs, 1);
+    // A new-leg flag on a row that is itself removed still splits at the next kept row.
+    let mut r = Reports::default();
+    for k in 0..10 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        if k == 5 {
+            row.flags |= F_NEW_LEG | F_STALE;
+        }
+        reports_push(&mut r, &row);
+    }
+    let (_, s) = build(&r);
+    assert_eq!(
+        (s.legs, s.splits[SPLIT_NEW_LEG], removed(&s, REM_STALE)),
+        (2, 1, 1)
+    );
+    assert_eq!(s.rows_kept, 9);
+}
+
+// REQ: OA-TRUTH-005
+#[test]
+fn smoother_recovers_a_straight_track_within_the_stated_tolerance() {
+    // 10 minutes, one report every 2 s, 5 m noise per axis (NACp 10 claims 4.1 m).
+    let sigma = 5.0;
+    let r = straight(ADDR, 2.0, 600.0, sigma, 7);
+    let (truth, s) = build(&r);
+    assert_eq!(s.legs, 1);
+    let (mut sum2, mut vsum2, mut n) = (0.0, 0.0, 0.0);
+    let v = 200.0 / 2f64.sqrt();
+    // Query between reports (odd seconds) away from the leg ends.
+    let mut t = 11.0;
+    while t < 590.0 {
+        let q = sample(truth_at(&truth, ADDR, ms(t)));
+        let e = dist((q.lat_deg, q.lon_deg), straight_pos(t));
+        sum2 += e * e;
+        let dv = ((q.vel_east_mps - v).powi(2) + (q.vel_north_mps - v).powi(2)).sqrt();
+        vsum2 += dv * dv;
+        n += 1.0;
+        t += 6.0;
+    }
+    let rms = (sum2 / n).sqrt();
+    let vrms = (vsum2 / n).sqrt();
+    // The raw reports have RMS horizontal error sigma * sqrt(2) = 7.1 m. Tolerance: the
+    // smoothed position under 4 m RMS (the model must stay free to manoeuvre, so it does not
+    // average the noise away) and velocity under 1.5 m/s RMS (differencing raw reports gives 3.5).
+    assert!(rms < 4.0, "position RMS {rms}");
+    assert!(vrms < 1.5, "velocity RMS {vrms}");
+    // The model's own 95 % radius is believable: above the actual error scale, below the gate.
+    let q = sample(truth_at(&truth, ADDR, ms(301.0)));
+    assert!(
+        q.sigma95_h_m > rms && q.sigma95_h_m < MAX_SIGMA95_H_M,
+        "{}",
+        q.sigma95_h_m
+    );
+    // Heading 045: east and north speeds equal.
+    assert!((q.vel_east_mps - q.vel_north_mps).abs() < 1.0);
+}
+
+// REQ: OA-TRUTH-006
+#[test]
+fn smoother_follows_a_constant_rate_turn() {
+    // 200 m/s on an 8 km radius circle (1.43 deg/s, 5 m/s^2 lateral), about one lap, 5 m noise.
+    let sigma = 5.0;
+    let (radius, speed) = (8000.0, 200.0);
+    let w = speed / radius;
+    let pos = |t: f64| to_deg(radius * (w * t).sin(), radius * (1.0 - (w * t).cos()));
+    let mut rng = Rng(11);
+    let mut r = Reports::default();
+    let mut t = 0.0;
+    while t <= 250.0 {
+        let (e, n) = (radius * (w * t).sin(), radius * (1.0 - (w * t).cos()));
+        let (la, lo) = to_deg(e + sigma * rng.normal(), n + sigma * rng.normal());
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+        t += 2.0;
+    }
+    let (truth, _) = build(&r);
+    let (mut sum2, mut n) = (0.0, 0.0);
+    let mut worst = 0.0f64;
+    let mut vworst = 0.0f64;
+    let mut t = 11.0;
+    while t < 240.0 {
+        let q = sample(truth_at(&truth, ADDR, ms(t)));
+        let e = dist((q.lat_deg, q.lon_deg), pos(t));
+        sum2 += e * e;
+        worst = worst.max(e);
+        let (ve, vn) = (speed * (w * t).cos(), speed * (w * t).sin());
+        vworst =
+            vworst.max(((q.vel_east_mps - ve).powi(2) + (q.vel_north_mps - vn).powi(2)).sqrt());
+        n += 1.0;
+        t += 6.0;
+    }
+    let rms = (sum2 / n).sqrt();
+    // Tolerances: RMS under 6 m (raw noise is 7.1 m), worst under 20 m, velocity under 5 m/s.
+    assert!(rms < 6.0, "turn RMS {rms}");
+    assert!(worst < 20.0, "turn worst {worst}");
+    assert!(vworst < 5.0, "turn velocity worst {vworst}");
+}
+
+// REQ: OA-TRUTH-007
+#[test]
+fn a_long_leg_stays_accurate_in_the_local_frame() {
+    // 400 km due north along a meridian at 250 m/s, 3 m noise, a report every 4 s. Positions
+    // are placed on a 6,371 km sphere (111,195 m per degree), the units `dist` measures in.
+    let sigma = 3.0;
+    let mut rng = Rng(23);
+    let mut r = Reports::default();
+    let path = |t: f64| (LAT0 - 1.0 + 250.0 * t / M_PER_DEG, LON0);
+    let mut t = 0.0;
+    while t <= 1600.0 {
+        let (la, lo) = path(t);
+        let lat = la + sigma * rng.normal() / M_PER_DEG;
+        let lon = lo + sigma * rng.normal() / (M_PER_DEG * la.to_radians().cos());
+        reports_push(&mut r, &good(ADDR, t, lat, lon));
+        t += 4.0;
+    }
+    let (truth, s) = build(&r);
+    assert_eq!((s.legs, s.splits[SPLIT_FRAME]), (1, 0));
+    let (mut sum2, mut n) = (0.0, 0.0);
+    let mut t = 50.0;
+    while t < 1550.0 {
+        let q = sample(truth_at(&truth, ADDR, ms(t)));
+        let e = dist((q.lat_deg, q.lon_deg), path(t));
+        sum2 += e * e;
+        n += 1.0;
+        // Speed is measured on the ellipsoid, the track was laid on a sphere: 0.1 % apart.
+        assert!((q.vel_north_mps - 250.0).abs() < 2.0, "{}", q.vel_north_mps);
+        assert!(q.vel_east_mps.abs() < 1.0, "{}", q.vel_east_mps);
+        t += 17.0;
+    }
+    let rms = (sum2 / n).sqrt();
+    assert!(rms < 4.0, "long-leg RMS {rms}");
+}
+
+// REQ: OA-TRUTH-008
+#[test]
+fn altitude_is_passed_through_and_interpolated_only_between_the_bracketing_reports() {
+    // A climb at 1,500 fpm sampled every 2 s, altitude quantised to 25 ft.
+    let mut r = Reports::default();
+    for k in 0..100 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        row.baro_alt_ft = (((10_000.0 + 25.0 * t) / 25.0).round() * 25.0) as i32;
+        row.vrate_fpm = 1500;
+        // Reports 50 and 51 have no barometric altitude (a geometric-only row).
+        if k == 50 || k == 51 {
+            row.baro_alt_ft = NONE_I32;
+            row.vrate_fpm = NONE_I32;
+        }
+        reports_push(&mut r, &row);
+    }
+    let (truth, _) = build(&r);
+    // At a report time the altitude is exactly the reported value (no smoothing).
+    let q = sample(truth_at(&truth, ADDR, ms(40.0)));
+    assert_eq!(q.baro_alt_ft, Some(11_000.0));
+    // Between two reports it is their linear interpolation.
+    let q = sample(truth_at(&truth, ADDR, ms(41.0)));
+    assert_eq!(q.baro_alt_ft, Some(11_025.0));
+    assert_eq!(q.vert_rate_fpm, Some(1500.0));
+    // Next to reports without altitude (100 s and 102 s) there is none, and none is invented.
+    let q = sample(truth_at(&truth, ADDR, ms(99.0)));
+    assert_eq!(q.baro_alt_ft, None);
+    assert_eq!(q.vert_rate_fpm, None);
+    let q = sample(truth_at(&truth, ADDR, ms(101.0)));
+    assert_eq!(q.baro_alt_ft, None);
+    // Without a reported rate the altitude difference over a bracket of 2 s or more gives it.
+    let mut r2 = Reports::default();
+    for k in 0..20 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        row.baro_alt_ft = 10_000 + 50 * k;
+        reports_push(&mut r2, &row);
+    }
+    let (t2, _) = build(&r2);
+    let q = sample(truth_at(&t2, ADDR, ms(11.0)));
+    assert!((q.vert_rate_fpm.unwrap() - 1500.0).abs() < 1e-6);
+}
+
+// REQ: OA-TRUTH-009
+#[test]
+fn there_is_no_extrapolation_and_every_refusal_has_a_reason() {
+    // Reports every 2 s from 0 to 100 s, a 30 s hole, then 130 to 200 s: one leg.
+    let mut r = Reports::default();
+    for t in (0..=50).chain(65..=100).map(|k| f64::from(k) * 2.0) {
+        let (la, lo) = straight_pos(t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    let (truth, s) = build(&r);
+    assert_eq!(s.legs, 1);
+    // Inside, between reports and exactly on one: truth.
+    assert!(matches!(
+        truth_at(&truth, ADDR, ms(41.0)),
+        TruthQuery::Ok(_)
+    ));
+    assert!(matches!(
+        truth_at(&truth, ADDR, ms(100.0)),
+        TruthQuery::Ok(_)
+    ));
+    // Edges: nothing before the first or after the last report, even by a millisecond.
+    assert_eq!(truth_at(&truth, ADDR, ms(0.0) - 1), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&truth, ADDR, ms(200.0) + 1), TruthQuery::NoBracket);
+    assert!(matches!(truth_at(&truth, ADDR, ms(0.0)), TruthQuery::Ok(_)));
+    assert!(matches!(
+        truth_at(&truth, ADDR, ms(200.0)),
+        TruthQuery::Ok(_)
+    ));
+    // The hole (100 to 130 s): a real report within 10 s on both sides is needed.
+    assert_eq!(truth_at(&truth, ADDR, ms(115.0)), TruthQuery::Gap);
+    assert_eq!(truth_at(&truth, ADDR, ms(105.0)), TruthQuery::Gap); // 5 s from 100, 25 s from 130
+    assert_eq!(truth_at(&truth, ADDR, ms(125.0)), TruthQuery::Gap);
+    assert_eq!(truth_at(&truth, ADDR, ms(100.0) + 1), TruthQuery::Gap);
+    // A bracket of exactly 20 s (10 s each side) is enough.
+    let mut r = Reports::default();
+    for t in [
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 30.0, 32.0, 34.0, 36.0, 38.0, 40.0,
+    ] {
+        let (la, lo) = straight_pos(t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+    }
+    let (t20, _) = build(&r);
+    assert!(matches!(truth_at(&t20, ADDR, ms(20.0)), TruthQuery::Ok(_)));
+    assert_eq!(truth_at(&t20, ADDR, ms(19.0)), TruthQuery::Gap);
+    assert_eq!(truth_at(&t20, ADDR, ms(21.0)), TruthQuery::Gap);
+    // Unknown aircraft, and an address that differs only by the non-ICAO bit.
+    assert_eq!(
+        truth_at(&truth, 0xabcdef, ms(50.0)),
+        TruthQuery::UnknownAircraft
+    );
+    assert_eq!(
+        truth_at(&truth, ADDR | NON_ICAO, ms(50.0)),
+        TruthQuery::UnknownAircraft
+    );
+    assert_eq!(legs_of(&truth, 0xabcdef).count, 0);
+    // Between legs, and before and after all of them: no bracket (not extrapolated).
+    let mut r = Reports::default();
+    for t in (0..30).chain(200..230) {
+        let (la, lo) = straight_pos(f64::from(t));
+        reports_push(&mut r, &good(ADDR, f64::from(t), la, lo));
+    }
+    let (two, s) = build(&r);
+    assert_eq!(s.legs, 2);
+    assert_eq!(truth_at(&two, ADDR, ms(100.0)), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&two, ADDR, ms(35.0)), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&two, ADDR, ms(-50.0)), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&two, ADDR, ms(500.0)), TruthQuery::NoBracket);
+    assert_eq!(truth_at(&two, ADDR, i64::MAX), TruthQuery::NoBracket);
+    let q = sample(truth_at(&two, ADDR, ms(210.0)));
+    assert_eq!(q.leg, LegIx(legs_of(&two, ADDR).first.0 + 1));
+}
+
+// REQ: OA-TRUTH-010
+#[test]
+fn truth_that_is_too_uncertain_is_refused() {
+    // NACp 8 reports whose noise is taken at five times its bound (sigma_scale 5), 10 s apart:
+    // the smoothed position is not good enough for 50 m.
+    let make = |nacp: u8| {
+        let mut r = Reports::default();
+        for k in 0..6 {
+            let t = f64::from(k) * 10.0;
+            let (la, lo) = straight_pos(t);
+            let mut row = good(ADDR, t, la, lo);
+            row.nac_p = nacp;
+            reports_push(&mut r, &row);
+        }
+        r
+    };
+    let cfg = DEFAULT_CONFIG;
+    let mut loose = cfg;
+    loose.sigma_scale = 5.0;
+    let (truth, _) = build_truth(&make(8), &loose).unwrap();
+    assert_eq!(truth_at(&truth, ADDR, ms(25.0)), TruthQuery::TooUncertain);
+    // The same reports with NACp 11 are fine.
+    let (truth, _) = build_truth(&make(11), &cfg).unwrap();
+    let q = sample(truth_at(&truth, ADDR, ms(25.0)));
+    assert!(q.sigma95_h_m < MAX_SIGMA95_H_M);
+    // And a stricter gate turns that into a refusal.
+    let mut tight = cfg;
+    tight.max_sigma95_h_m = 0.5;
+    let (truth, _) = build_truth(&make(11), &tight).unwrap();
+    assert_eq!(truth_at(&truth, ADDR, ms(25.0)), TruthQuery::TooUncertain);
+}
+
+// REQ: OA-TRUTH-011
+#[test]
+fn leave_one_out_measures_the_residuals_on_known_noise() {
+    // A straight track with 5 m noise per axis, a report every 2 s: every fifth is hidden.
+    let sigma = 5.0;
+    let r = straight(ADDR, 2.0, 1000.0, sigma, 99);
+    let (_, s) = build(&r);
+    let l = s.loo;
+    assert_eq!(l.stride, 5);
+    assert_eq!(l.hidden, 100);
+    assert!(l.horizontal.n >= 95, "{}", l.horizontal.n);
+    // The hidden report's own noise (7.1 m RMS) plus the prediction's: RMS between 6 and 11 m.
+    let d = l.horizontal;
+    assert!(d.rms > 6.0 && d.rms < 11.0, "RMS {}", d.rms);
+    assert!(d.median <= d.p95 && d.p95 <= d.p99 && d.p99 <= d.max);
+    // Cross and along track carry the same noise per axis, about 5.4 m each, and no bias.
+    for c in [l.cross, l.along] {
+        assert!(c.rms > 4.0 && c.rms < 8.0, "{c:?}");
+        assert!(c.mean.abs() < 2.0, "{c:?}");
+    }
+    // No altitude was given.
+    assert_eq!(l.alt.n, 0);
+    // The model's 95 % radius is honest: the hidden report falls inside it about 95 % of the
+    // time (the NACp 10 claim of 4.1 m is a little optimistic for 5 m noise).
+    let cov = l.coverage95.hit as f64 / l.coverage95.n as f64;
+    assert!(cov > 0.85 && cov <= 1.0, "coverage {cov}");
+    assert_eq!(l.under_gate.hit, l.under_gate.n);
+    assert_eq!(s.unc_at_reports.hit, s.unc_at_reports.n);
+    assert_eq!(s.unc_at_midpoints.n, 500);
+    // Altitude residual: a linear climb in whole feet is recovered exactly.
+    let mut r = Reports::default();
+    for k in 0..100 {
+        let t = f64::from(k) * 2.0;
+        let (la, lo) = straight_pos(t);
+        let mut row = good(ADDR, t, la, lo);
+        row.baro_alt_ft = 10_000 + 50 * k;
+        reports_push(&mut r, &row);
+    }
+    let (_, s) = build(&r);
+    assert_eq!(s.loo.alt.n, 20);
+    assert!(s.loo.alt.max < 1e-6 && s.loo.alt.mean.abs() < 1e-6);
+    // Switching it off leaves zeros.
+    let mut cfg = DEFAULT_CONFIG;
+    cfg.loo = false;
+    let (_, s) = build_truth(&r, &cfg).unwrap();
+    assert_eq!(s.loo, LooStats::default());
+}
+
+// REQ: OA-TRUTH-012
+#[test]
+fn the_same_input_gives_the_same_bytes_in_any_input_order() {
+    let mut r = straight(ADDR, 2.0, 300.0, 5.0, 5);
+    oa_adsb::reports_extend(&mut r, &straight(0xa00001, 3.0, 300.0, 5.0, 6));
+    oa_adsb::reports_extend(&mut r, &straight(0xa00001 | NON_ICAO, 3.0, 300.0, 5.0, 8));
+    let (t1, s1) = build(&r);
+    let (t2, s2) = build(&r);
+    assert_eq!(digest(&t1), digest(&t2));
+    assert_eq!(t1, t2);
+    assert_eq!(format!("{s1:?}"), format!("{s2:?}"));
+    // Reversed input gives the same model: reports are put in a total order before use.
+    let mut rev = Reports::default();
+    for i in (0..reports_len(&r)).rev() {
+        reports_push(&mut rev, &oa_adsb::reports_row(&r, i).unwrap());
+    }
+    let (t3, s3) = build(&rev);
+    assert_eq!(digest(&t1), digest(&t3));
+    assert_eq!(format!("{s1:?}"), format!("{s3:?}"));
+    // A change of one unit in one report changes the digest.
+    r.lat_e7[10] += 1;
+    let (t4, _) = build(&r);
+    assert_ne!(digest(&t1), digest(&t4));
+}
+
+// REQ: OA-TRUTH-013
+#[test]
+fn non_icao_addresses_are_separate_aircraft() {
+    let mut r = straight(0xa00001, 2.0, 100.0, 3.0, 1);
+    oa_adsb::reports_extend(&mut r, &straight(0xa00001 | NON_ICAO, 2.0, 100.0, 3.0, 2));
+    let (truth, s) = build(&r);
+    assert_eq!((s.aircraft_in, s.aircraft_out, s.legs), (2, 2, 2));
+    assert_eq!(aircraft_addrs(&truth), &[0xa00001, 0xa00001 | NON_ICAO]);
+    assert_eq!(legs_of(&truth, 0xa00001).count, 1);
+    assert_eq!(legs_of(&truth, 0xa00001 | NON_ICAO).count, 1);
+    assert_eq!(leg_count(&truth), 2);
+}
+
+// REQ: OA-TRUTH-014
+#[test]
+fn bad_input_is_refused_with_a_typed_error() {
+    let mut r = straight(ADDR, 2.0, 20.0, 3.0, 1);
+    r.sda.pop();
+    assert_eq!(
+        build_truth(&r, &DEFAULT_CONFIG).unwrap_err(),
+        TruthError::ColumnLength
+    );
+    let r = straight(ADDR, 2.0, 20.0, 3.0, 1);
+    let bad = |f: &dyn Fn(&mut TruthConfig)| {
+        let mut c = DEFAULT_CONFIG;
+        f(&mut c);
+        build_truth(&r, &c).unwrap_err()
+    };
+    assert!(matches!(bad(&|c| c.min_nacp = 0), TruthError::BadConfig(_)));
+    assert!(matches!(
+        bad(&|c| c.accel_q = f64::NAN),
+        TruthError::BadConfig(_)
+    ));
+    assert!(matches!(
+        bad(&|c| c.sigma_scale = -1.0),
+        TruthError::BadConfig(_)
+    ));
+    assert!(matches!(
+        bad(&|c| c.bracket_ms = 0),
+        TruthError::BadConfig(_)
+    ));
+    assert!(matches!(
+        bad(&|c| c.leg_gap_ms = i64::MAX),
+        TruthError::BadConfig(_)
+    ));
+    assert!(matches!(
+        bad(&|c| c.min_leg_points = 2),
+        TruthError::BadConfig(_)
+    ));
+    assert!(matches!(
+        bad(&|c| c.loo_stride = 1),
+        TruthError::BadConfig(_)
+    ));
+    // Out-of-range coordinates are removed and counted, not passed on.
+    let mut r = straight(ADDR, 2.0, 20.0, 3.0, 1);
+    r.lat_e7[3] = 950_000_000;
+    let (_, s) = build(&r);
+    assert_eq!(removed(&s, REM_INVALID), 1);
+    assert!(balanced(&s));
+    // Empty input is an empty truth.
+    let (truth, s) = build(&Reports::default());
+    assert_eq!((s.rows_in, s.legs, leg_count(&truth)), (0, 0, 0));
+    assert_eq!(truth_at(&truth, ADDR, 0), TruthQuery::UnknownAircraft);
+    // The gate values are the design's.
+    assert_eq!(
+        (
+            MIN_NACP,
+            MIN_NIC,
+            REQUIRED_SIL,
+            MIN_VERSION,
+            QUALITY_CARRY_MS,
+            LEG_GAP_MS,
+            BRACKET_MS
+        ),
+        (8, 7, 3, 2, 60_000, 120_000, 10_000)
+    );
+    assert_eq!(MAX_SIGMA95_H_M, 50.0);
+    assert_eq!(ns(0.0), T0);
+}
+
+/// The ZAU clip, if the environment names it and it exists.
+fn clip() -> Option<Reports> {
+    use oa_adsb::decode_payload;
+    use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
+    let path = std::env::var("OPENATCA_ADSB_CLIP").ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let mut rd = FrameReader::new(&mut buf).unwrap();
+    let mut out = Reports::default();
+    let mut at = 0;
+    while at < bytes.len() {
+        let end = (at + (1 << 20)).min(bytes.len());
+        let took = rd.push(&bytes[at..end]);
+        at += took;
+        while let Some(f) = rd.next() {
+            let f = f.unwrap();
+            if f.kind == Kind::Message {
+                decode_payload(f.payload, &mut out).unwrap();
+            }
+        }
+        assert!(took > 0);
+    }
+    Some(out)
+}
+
+// REQ: OA-TRUTH-015
+#[test]
+fn real_clip_builds_a_balanced_deterministic_calibrated_truth() {
+    let Some(r) = clip() else {
+        eprintln!("skipped: OPENATCA_ADSB_CLIP not set or unreadable");
+        return;
+    };
+    let (truth, s) = build(&r);
+    eprintln!("{s:#?}");
+    assert!(balanced(&s));
+    assert!(s.legs > 100 && s.rows_kept > s.rows_in / 2);
+    assert!(s.loo.hidden > 0);
+    // The model's uncertainty is honest to within a few points of 95 %.
+    let cov = s.loo.coverage95.hit as f64 / s.loo.coverage95.n as f64;
+    assert!(cov > 0.85 && cov < 0.995, "coverage {cov}");
+    // Truth is far better than the 50 m gate on the real data.
+    assert!(s.loo.horizontal.p95 < 50.0, "{:?}", s.loo.horizontal);
+    // No query outside a leg is answered: one millisecond before each leg's first report is
+    // never truth (it is before the first report of the leg, whatever precedes it).
+    let mut asked = 0;
+    for &a in aircraft_addrs(&truth) {
+        let lr = legs_of(&truth, a);
+        for i in 0..lr.count {
+            let l = LegIx(lr.first.0 + i);
+            let st = leg_start_ns(&truth, l).unwrap();
+            if i == 0 {
+                assert_eq!(
+                    truth_at(&truth, a, (st - 1) / 1_000_000 - 1),
+                    TruthQuery::NoBracket
+                );
+                asked += 1;
+            }
+        }
+    }
+    assert!(asked > 100);
+    let (t2, s2) = build(&r);
+    assert_eq!(digest(&truth), digest(&t2));
+    assert_eq!(format!("{s:?}"), format!("{s2:?}"));
+}
