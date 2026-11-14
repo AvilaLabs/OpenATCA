@@ -1517,8 +1517,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-022** A directory of raw `.msg` files (name order, no receive time, no replay hash) or of
   `.oaf` recordings (receive times, replay pipeline state hash, identical on repeat) loads; the input hash
   of one file is its SHA-256 and of several is the SHA-256 of the `name:sha256` lines.
-- **OA-BENCH-023** The `oa-bench` binary refuses `--adsb` with a message that truth is not wired in yet
-  (exit 2), runs the synthetic world with `--synthetic --out <dir>` writing `report.txt` and `report.csv`
+- **OA-BENCH-023** The `oa-bench` binary refuses `--adsb` without `--out` and a non-positive truth gate
+  override (exit 2), runs the synthetic world with `--synthetic --out <dir>` writing `report.txt` and `report.csv`
   with every self-test check passing and identical bytes on a repeat, and prints extraction counts with
   `--extract-only`.
 - **OA-BENCH-024** On the real 2026-11-14 sample (skipped when absent) extraction yields the expected
@@ -1531,3 +1531,26 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   and metrics as the closed-form truth, so the interface needs nothing but the query and the legs.
 - **OA-BENCH-027** The address hint associates a flight that has no aircraftAddress, is stored as its own
   method, and a hint with no truth aircraft is not retried by callsign.
+- **OA-BENCH-028** `oa-truth` query answers map onto the benchmark's truth interface reason for reason:
+  unknown aircraft to unknown aircraft, too uncertain to too uncertain, and the two bracket refusals by
+  meaning (`oa-truth` NoBracket, outside every leg, is "gap between legs"; its Gap, inside a leg with no
+  report within the bracket, is "no bracketing reports"); a sample keeps its position, velocity,
+  uncertainty and leg, with altitude and vertical rate rounded to whole units.
+- **OA-BENCH-029** Truth legs are `oa-truth`'s legs in index order with their first and last whole
+  millisecond; the leg callsign is the most frequent callsign among the decoded reports of the address
+  inside the leg's span, and `None` when no report carries one.
+- **OA-BENCH-030** The truth gates come from `oa-truth`'s configuration (design: 10 s bracket, 50 m); the
+  bracket and uncertainty overrides change it, and the report's truth section carries the gates, the
+  statistics, the removals by reason, the leave-one-out table and the truth digest.
+- **OA-BENCH-031** An OAF1 ADS-B clip is read through `oa-feed` and `oa-adsb` into reports, counting
+  frames that did not decode, and its SHA-256 is the input hash.
+- **OA-BENCH-032** The airspace lookups come from the M0 model: fixes and navaids by identifier (not
+  airports), airports by ICAO and FAA identifier with elevation and thresholds, the model's ARTCC as the
+  zone, and the containing ARTCC as the unit.
+- **OA-BENCH-033** `oa-bench --adsb <clip.oaf>` runs end to end: on a hand-made clip and SFDPS fixture
+  whose track is 500 m left of the truth, T1 recovers -500 m (cross-track, positive right) within 2 m with
+  every sample paired; the report holds the truth section, the clip hash and the gate values, a repeat gives
+  identical bytes, and an override of the gates is recorded in the header with its reason.
+- **OA-BENCH-034** On the real ADS-B clip and the SCDS sample (skipped when `OPENATCA_DATA` or
+  `OPENATCA_ADSB_CLIP` is unset), whose times do not overlap, the run completes with no paired samples and
+  an exclusions table.

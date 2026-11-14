@@ -11,12 +11,16 @@
 //!   callsign and a gate), [`pair`] (paired samples), [`stats`] (the exact percentile method),
 //!   [`metrics_th`] (T1 to T4), [`metrics_flow`] (T5 to T9), [`metrics_event`] (F1 to F3, R1,
 //!   H1), [`run`], [`synth`] (the synthetic self-test) and [`report`] (text and CSV).
-//! * Shell: [`input`] (reads the recorded message directories, hashes the input files) and the
+//! * Shell: [`input`] (reads the recorded message directories and the ADS-B clip, hashes the
+//!   input files) and the
 //!   `oa-bench` binary.
 //!
-//! Truth is not built here. Until `oa-truth` is wired in, the binary runs on the synthetic world
-//! only and refuses a recorded ADS-B clip with a message saying so.
+//! Truth is not built here: [`adsb_truth`] adapts `oa-truth` to the [`truth`] interface and
+//! [`airspace_env`] fills the airspace lookups from the M0 model. `oa-bench --adsb <clip.oaf>`
+//! runs the recorded benchmark; `--synthetic` runs the self-test world.
 
+pub mod adsb_truth;
+pub mod airspace_env;
 pub mod assoc;
 pub mod geo;
 pub mod ingest;

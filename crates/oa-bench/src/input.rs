@@ -192,3 +192,56 @@ pub fn load(feeds: &[FeedInput]) -> io::Result<Loaded> {
         notes,
     })
 }
+
+/// An ADS-B clip read for truth construction.
+// A7.2: cold struct, size guard waived
+pub struct AdsbClip {
+    pub reports: oa_adsb::Reports,
+    /// Frames that did not decode (bad frame or bad payload), counted not hidden.
+    pub bad_frames: u64,
+    pub hash: InputHash,
+}
+
+/// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
+/// and hashes the file.
+pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
+    let err = |m: String| io::Error::other(format!("{}: {m}", path.display()));
+    let mut f = fs::File::open(path).map_err(|e| err(e.to_string()))?;
+    let mut buf = vec![0u8; oa_feed::MAX_FRAME_LEN];
+    let mut rd = oa_feed::FrameReader::new(&mut buf).map_err(|e| err(format!("{e:?}")))?;
+    let mut reports = oa_adsb::Reports::default();
+    let mut bad = 0u64;
+    let mut chunk = vec![0u8; 1 << 20];
+    loop {
+        let n = io::Read::read(&mut f, &mut chunk).map_err(|e| err(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        let mut at = 0usize;
+        while at < n {
+            let Some(rest) = chunk.get(at..n) else { break };
+            let took = rd.push(rest);
+            at += took;
+            while let Some(fr) = rd.next() {
+                match fr {
+                    Ok(fr) if fr.kind == oa_feed::Kind::Message => {
+                        if oa_adsb::decode_payload(fr.payload, &mut reports).is_err() {
+                            bad += 1;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => bad += 1,
+                }
+            }
+            if took == 0 {
+                break;
+            }
+        }
+    }
+    let hash = hash_files(&format!("adsb ({})", path.display()), &[path.to_path_buf()])?;
+    Ok(AdsbClip {
+        reports,
+        bad_frames: bad,
+        hash,
+    })
+}
