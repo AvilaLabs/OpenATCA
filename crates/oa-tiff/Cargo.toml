@@ -1,0 +1,21 @@
+[package]
+name = "oa-tiff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1: path dependency inside this workspace, for the DEFLATE inflater (TIFF Deflate is zlib).
+oa-zip = { path = "../oa-zip" }
+
+[dev-dependencies]
+# F1: path dependencies inside this workspace. oa-deflate makes Deflate test fixtures; oa-nasr and
+# oa-dof feed the real-data validation (airport and obstacle elevations against the terrain).
+oa-deflate = { path = "../oa-deflate" }
+oa-nasr = { path = "../oa-nasr" }
+oa-dof = { path = "../oa-dof" }

@@ -39,6 +39,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-dof"
+version = "0.0.1"
+dependencies = [
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-feed"
 version = "0.0.1"
 dependencies = [
@@ -104,6 +111,16 @@ version = "0.0.1"
 dependencies = [
  "oa-fixm",
  "oa-xml",
+]
+
+[[package]]
+name = "oa-tiff"
+version = "0.0.1"
+dependencies = [
+ "oa-deflate",
+ "oa-dof",
+ "oa-nasr",
+ "oa-zip",
 ]
 
 [[package]]
