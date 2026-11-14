@@ -207,8 +207,8 @@ fn spare_bits_fixed_to_zero_are_refused() {
 // REQ: OA-AST-018
 #[test]
 fn six_bit_characters_and_latitude_range() {
-    // Character code 0 is not in the table.
-    let e = dec(&blk(21, &[rec(&[(1, &SRC), (29, &[0; 6])])]));
+    // Character code 0 is not in the table (six octets of zero are kept raw, see captures.rs).
+    let e = dec(&blk(21, &[rec(&[(1, &SRC), (29, &[0, 0, 0, 0, 0, 1])])]));
     assert_eq!((e.kind, e.item), (ErrorKind::InvalidValue, 170));
     // Every valid code round-trips: A to Z, space, 0 to 9.
     for s in ["ABCDEFGH", "IJKLMNOP", "QRSTUVWX", "YZ 01234", "56789   "] {

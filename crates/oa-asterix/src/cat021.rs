@@ -366,7 +366,10 @@ pub(crate) fn decode_item(rec: &mut Cat021, frn: u8, b: &[u8]) -> Result<bool, E
             if b.len() != 6 {
                 return Err(ErrorKind::InvalidValue);
             }
-            rec.target_id = Some(decode_ident(b)?);
+            match decode_ident_opt(b)? {
+                Some(id) => rec.target_id = Some(id),
+                None => return Ok(false),
+            }
         }
         30 => rec.emitter_category = Some(one_octet(b)?),
         32 => rec.selected_altitude = Some(decode_selected_altitude(b)?),

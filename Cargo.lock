@@ -33,6 +33,7 @@ name = "oa-asterix"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
+ "oa-json",
 ]
 
 [[package]]

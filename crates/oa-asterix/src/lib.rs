@@ -18,7 +18,8 @@
 //! Input that breaks a rule is refused with an [`AsterixError`] naming category, record index,
 //! data item, subitem and byte offset. Refused: a LEN that is below three or past the input, a
 //! block without records, an FSPEC that runs past its record or the UAP, a trailing all-zero
-//! FSPEC octet, an FSPEC bit for a slot the UAP leaves unused, a record without its data source
+//! FSPEC octet (and, in an item the typed layer decodes, a trailing all-zero compound primary
+//! octet), an FSPEC bit for a slot the UAP leaves unused, a record without its data source
 //! identifier, an item that runs past the block, an FX chain that never ends, a repetition
 //! factor of zero, an explicit length below two, an empty compound item, a compound subitem the
 //! category does not define, and a spare bit that the specification fixes to zero. Reserved
@@ -33,7 +34,8 @@
 //!
 //! `encode_block(decode_block(x))` equals `x` for every block the decoder accepts: the decoder
 //! refuses what the encoder would write differently (non-minimal FSPEC and compound primary
-//! subfields, spare bits). `decode(encode(r))` equals `r` for records the encoder accepts, except
+//! subfields of decoded items, spare bits); items kept raw (including a compound primary with a
+//! trailing zero octet, and six zero octets for an identification) go back as they came. `decode(encode(r))` equals `r` for records the encoder accepts, except
 //! that the encoder writes raw items (and the untyped subitems of I062/380) in FRN order and the
 //! decoder returns them in that order.
 

@@ -8,11 +8,15 @@
 //! * A record with an empty FSPEC (no bit set) is refused ([`ErrorKind::EmptyFspec`]); so is a
 //!   record without the data source identifier (the FRNs of [`Uap::mandatory`]), which the three
 //!   categories say shall be present in every record.
-//! * An FSPEC or a compound primary subfield that ends with an all-zero octet that is not the
-//!   only octet is refused: Part 1 5.2.7 uses the extension "when the Data Fields with FRNs
-//!   greater than seven have to be transmitted", and a compound item "shall only be included if
-//!   at least one bit is set". Refusing makes `encode(decode(x)) == x` hold for everything
-//!   accepted.
+//! * An FSPEC that ends with an all-zero octet that is not the only octet is refused: Part 1
+//!   5.2.7 uses the extension "when the Data Fields with FRNs greater than seven have to be
+//!   transmitted". A compound primary subfield that ends with an all-zero octet is accepted in
+//!   an item kept as raw bytes (it round-trips as it came) because real trackers send it (an
+//!   I062/390 with its primary extended to a third octet that sets no bit; Part 1 does not ask
+//!   for the shortest primary subfield, only that a compound item "shall only be included if at
+//!   least one bit is set", which still holds and is still refused); in an item the typed layer
+//!   decodes it is refused ([`check_compound_minimal`]), because re-encoding would drop the
+//!   octet. Either way `encode(decode(x)) == x` holds for everything accepted.
 //! * A repetition factor of zero is refused (Part 1 5.2.5.1.4: "N consecutive subitems", and
 //!   every repetitive item here says "at least one").
 //! * An explicit-length item (SP, RE) must have a length octet of at least two: a field with no
@@ -22,7 +26,7 @@
 //!   unterminated.
 
 use crate::error::{AsterixError, ErrorKind, NO_ITEM, NO_RECORD};
-use crate::uap::{slot_of, uap_for, Field, Kind, Slot, Uap};
+use crate::uap::{compound_subs, slot_of, uap_for, Field, Kind, Slot, Uap};
 
 /// Part 1 5.2.2: the LEN field has two octets, so a block is at most 65 535 octets.
 pub const MAX_BLOCK_LEN: usize = 65_535;
@@ -155,9 +159,6 @@ fn walk_compound(buf: &[u8], start: usize, subs: &[Field]) -> Result<usize, Fail
         octets += 1;
         at += 1;
         if b & 1 == 0 {
-            if octets > 1 && b & 0xFE == 0 {
-                return Err(fail(ErrorKind::CompoundNotMinimal, at - 1));
-            }
             break;
         }
         if octets >= defined_octets || octets >= MAX_PRIMARY_OCTETS {
@@ -203,6 +204,26 @@ fn walk_compound(buf: &[u8], start: usize, subs: &[Field]) -> Result<usize, Fail
     }
     debug_assert!(at >= primary_end);
     Ok(at)
+}
+
+/// Refuses a compound item (slot `frn` of `uap`) whose primary subfield ends with an all-zero
+/// octet that is not the only octet. The typed layer calls it for the compound items it decodes
+/// into fields, since the encoder writes the shortest primary subfield.
+/// The error is the index of the offending octet within the item.
+pub(crate) fn check_compound_minimal(uap: &Uap, frn: u8, bytes: &[u8]) -> Result<(), usize> {
+    if compound_subs(uap, frn).is_empty() {
+        return Ok(());
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        if b & 1 == 0 {
+            return if i > 0 && b & 0xFE == 0 {
+                Err(i)
+            } else {
+                Ok(())
+            };
+        }
+    }
+    Ok(())
 }
 
 /// The subitems of a compound item: `(zero-based subitem index, start, end)` in `buf`, which
