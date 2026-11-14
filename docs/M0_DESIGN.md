@@ -81,6 +81,51 @@ oa-adapt diff  <snapshot-a> <snapshot-b>                                  # what
 - **Input bounds:** every record, field, count and string has a stated maximum. Exceeding one is
   an error naming the file, line and limit, never a crash or unbounded allocation.
 
+## Model layout (RULESET A3, A4, A7, A9)
+
+The model is the first core data structure. It is built by shell code (loading, matching,
+reporting) but its in-memory form is held to the full ruleset, because the tracker and alerts
+will read it every update.
+
+**Units (A9).** Latitude and longitude are `i32` in units of 1e-7 degree (about 1.1 cm at the
+equator; conversion from the parsed f64 rounds to nearest and the rounding error is reported).
+Altitudes are `i32` feet. Distances are `u32` metres. Bearings are `u16` in units of 1/100
+degree true. Speeds are `u16` knots.
+
+**Strings.** One string table per model: a byte buffer plus offsets. Identifiers, names and
+region codes are `StrIx(u32)`. Identical strings are interned once.
+
+**Typed indexes (A4).** `PointIx`, `BoundaryIx`, `AirwayIx`, `ProcIx`, `LegIx`, `StrIx`, each a
+`u32` newtype. A sentinel `NONE` value (`u32::MAX`) replaces `Option` in hot arrays.
+
+**Tables, each struct-of-arrays (A3):**
+
+| Table | Columns |
+|---|---|
+| Points | kind (fix, VOR, VORTAC, VOR/DME, DME, TACAN, NDB, airport, runway threshold, terminal waypoint, localizer), lat, lon, elevation (airports, thresholds), ident, ICAO region, name, sources (bitset: NASR, CIFP) |
+| Boundary vertices | lat, lon (shared vertex array) |
+| Boundaries | facility ident, stratum (HIGH, LOW, FIR, CTA, UTA, class B/C/D, SUA), floor and ceiling, vertex span (start, length), edge interpretation, source |
+| Airways | designator, leg span |
+| Airway legs | from point, to point, MEA, MEA opposite, GPS MEA, flags (gap, signal gap, dogleg) as bitsets (A6) |
+| Procedures | kind (SID, STAR, approach), airport point, name, route span, source, coded (bool as bitset) |
+| Routes | procedure, transition name, route type, leg span |
+| Legs | path terminator, fix point, turn direction, course, distance or time, altitude description and two altitudes, speed limit, arc centre point |
+| Airspace boundary segments | via code (circle, geodesic, rhumb, clockwise arc, counter-clockwise arc), lat, lon, arc centre, radius, bearing |
+| MORA grid | `i16` hundreds of feet per 1° cell, with an explicit unknown value |
+
+Any struct used as an array element (for example a leg, if stored array-of-structs for
+locality) carries an exact `size_of` guard (A7).
+
+**Source of every object.** Every row records which source(s) it came from. Where NASR and CIFP
+both supply an object, the model takes position from CIFP if the two agree within 1 m, and
+otherwise takes CIFP and reports the disagreement (CIFP is the coded navigation data aircraft
+fly; NASR is the registry). The rule is stated in the report so it can be changed deliberately.
+
+**Snapshot format.** Little-endian binary: magic `OATCA-ADAPT`, format version, cycle, ARTCC,
+selection parameters, the SHA-256 of each input archive, then each table in fixed order with
+its row count. The snapshot's identity is the SHA-256 of the whole file (A8). No table is
+written in hash-map order.
+
 ## Report
 
 `build` writes a human-readable report beside the snapshot: counts per object type, every
