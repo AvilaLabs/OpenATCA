@@ -40,6 +40,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | [docs/RULESET.md](docs/RULESET.md) | The engineering law every change is reviewed against |
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why and the next step |
+| [docs/INTERFACES.md](docs/INTERFACES.md) | How we talk to systems we do not control, so we never cause or amplify their failures |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 | `crates/oa-csv` | RFC 4180 reader |
 | `crates/oa-geo` | WGS-84 geodesy (Karney), rhumb lines, point-in-polygon |
