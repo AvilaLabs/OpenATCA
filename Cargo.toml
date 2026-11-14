@@ -15,6 +15,7 @@ members = [
     "crates/oa-tbfm",
     "crates/oa-replay",
     "crates/oa-notam",
+    "crates/oa-tfms",
     "crates/oa-display",
     "tools/oa-trace",
 ]

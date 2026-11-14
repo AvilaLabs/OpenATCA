@@ -517,6 +517,78 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   to a runway threshold), counts distinct identifiers and rows per role and per scope (all
   centres, the model's own centre) and lists the identifiers that do not resolve.
 
+### TFMS data service (oa-tfms)
+
+Built on the survey in `docs/TFMS_SURVEY.md` (4,237 real documents, flight data, flow
+information and feed status). Decision: the decoder follows the oa-fixm and oa-tbfm pattern; flow
+messages are a separate row type; the TFMS `gufi` is linked to the SFDPS plan identifier, not to
+the SFDPS `gufi` (they are different kinds of value, survey).
+
+- **OA-TFMS-001** Times are parsed from strict ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SS`, an optional
+  fraction of one to nine digits, `Z`) into Unix milliseconds (`i64`); any other shape, digit,
+  fraction or range is refused with its own error.
+- **OA-TFMS-002** Scalar fields have strict parsers: names (bounded, upper-case letters, digits
+  and a few separators), unsigned integers, altitudes (hundreds of feet with an optional letter),
+  decimal and degrees-minutes-seconds angles to 1e-7 degree, booleans, vocabularies and whole
+  words; each refuses anything else.
+- **OA-TFMS-003** Rows are caller-owned structs of arrays with a stated capacity and exact size
+  guards; every value has an explicit absent form (`NO_TIME`, `NO_NUM`, `NO_COORD`, `NO_STR`, a
+  zero code or a zero name).
+- **OA-TFMS-004** Every flight message becomes one row whose identity (message kind, trigger,
+  aircraft identification, flight reference, GUFI, departure and arrival, source facility and
+  time, computer id, categories) comes from the message attributes and the qualified aircraft
+  identifier, which must agree; an unknown message type is a row of kind `other`.
+- **OA-TFMS-005** Positions (degrees-minutes-seconds and decimal), time at position, altitudes
+  in feet, speeds and the next position are stored as fixed point in 1e-7 degree, feet and knots.
+- **OA-TFMS-006** Estimated, actual, scheduled, proposed and metered times with their types,
+  fixes with times, coordination, boundary crossing, departure and arrival, the airline's
+  out/off/on/in, runway and gate times and the original times are stored as Unix ms.
+- **OA-TFMS-007** Route text is kept in the bounded string table, entity-decoded, with the legacy
+  format preferred over the element text in either order, and with remarks and the departure and
+  arrival procedure names.
+- **OA-TFMS-008** A traffic management initiative flight list becomes one flight row per entry,
+  with the entry's status, update type and time, FCA identifier and the number of `fxaFlight`
+  elements; the message's own time and facility go to every entry.
+- **OA-TFMS-009** Restrictions, advisories, FCA/FEA definitions and airport configurations become
+  flow rows with program type, scope, element, start, end, rates, identifiers and text; the
+  program of an advisory is read from whole words of its title and a cancellation is flagged.
+- **OA-TFMS-010** The identity attributes of a message and the identity in its body must agree
+  (refused as inconsistent otherwise); the aircraft identification, flight reference, source
+  time and message type are required.
+- **OA-TFMS-011** Every field has its own refusal naming the field and the kind (missing, too
+  long, bad character, format, time, vocabulary, range, duplicate, inconsistent, not a leaf,
+  text), with the offset of the value.
+- **OA-TFMS-012** A document is accepted whole or not at all: a refused field, a capacity
+  overrun or a text-table overrun in any message leaves the caller's rows and text table exactly
+  as they were before the document.
+- **OA-TFMS-013** A document that is not well-formed, whose root is not `tfmDataService` in the
+  service namespace, or whose content is refused is rejected with a reason; status documents,
+  empty documents and mixed documents are classified.
+- **OA-TFMS-014** Capacity of flight rows, flow rows and text bytes is stated and never exceeded;
+  reaching it is a reject reason, never a growth; after construction no column or table grows.
+- **OA-TFMS-015** Unknown elements (a whole subtree counts once), unknown attributes and unknown
+  namespaces are counted, not errors, and elements are matched by namespace and local name
+  whatever the prefix; known elements that are deliberately not stored are counted separately.
+- **OA-TFMS-016** The decoder never panics: every truncation, byte replacement, deletion and
+  insertion of flight and flow documents is decoded or refused, and the columns stay
+  consistent.
+- **OA-TFMS-017** Every message of the real TFMS sample (`OPENATCA_SCDS`, directories named
+  `tfms*`) decodes with no reject and no unknown path; the test reports messages, rows by
+  type, rejects by reason, field errors by field, distinct flights and throughput, which must be
+  at least 20,000 messages per second (parse and decode, one thread, release builds); it skips
+  when the variable is unset.
+- **OA-TFMS-018** Against the real SFDPS sample, TFMS flights are linked by GUFI and the overlap
+  is reported as found; no TFMS GUFI equals an SFDPS GUFI and the two matching routes never
+  name different flights; the test skips when the variable is unset.
+- **OA-TFMS-019** Counters over many documents (accepted, messages, rows by kind, rejects by
+  reason, field errors by field, unknown and ignored paths) are folded by a free function.
+- **OA-TFMS-020** The linkage matches a TFMS flight to the SFDPS flights by its GUFI (equal to
+  the SFDPS flight plan identifier) and, when it has no GUFI, by aircraft identification plus
+  departure plus arrival, and cross-checks flights found both ways.
+- **OA-TFMS-021** The linkage report counts, as found, the flights with and without a GUFI,
+  UUID-shaped GUFIs, keys that name more than one SFDPS flight and empty inputs.
+- **OA-TFMS-022** The default capacities and the vocabulary tables agree with the codes.
+
 ## M1 — Controller display
 
 ### Display list, projection, font, rasterizer (oa-display)

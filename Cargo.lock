@@ -99,6 +99,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-tfms"
+version = "0.0.1"
+dependencies = [
+ "oa-fixm",
+ "oa-xml",
+]
+
+[[package]]
 name = "oa-trace"
 version = "0.0.1"
 
