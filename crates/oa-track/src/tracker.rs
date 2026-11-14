@@ -718,3 +718,21 @@ pub fn tracker_live(t: &Tracker) -> Vec<(u32, i64)> {
         .map(|s| (col(&t.key, s, NO_ADDR), col(&t.last_ns, s, 0)))
         .collect()
 }
+
+/// A live track as the fusion layer sees it: the track keyed `key` predicted to `at_ns`, whether
+/// it is confirmed, and its newest update time. `None` if there is no such track. Nothing is
+/// stored; the filter is predicted on a copy, as for an output row.
+pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, bool, i64)> {
+    let slot = lookup(t, key)?;
+    if col(&t.state, slot, FREE) == FREE {
+        return None;
+    }
+    let f = col(&t.cur, slot, blank_filter());
+    let mut row = filter_output(&f, at_ns.max(f.t_ns));
+    row.addr = key;
+    Some((
+        row,
+        col(&t.state, slot, FREE) == CONFIRMED,
+        col(&t.last_ns, slot, 0),
+    ))
+}

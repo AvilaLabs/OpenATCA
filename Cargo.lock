@@ -219,6 +219,7 @@ dependencies = [
  "oa-bench",
  "oa-feed",
  "oa-geo",
+ "oa-sensorsim",
  "oa-sha256",
  "oa-truth",
 ]
