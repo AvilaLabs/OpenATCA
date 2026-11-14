@@ -311,8 +311,12 @@ can justify and record the assumption.
 
 ## 7. Milestones
 
-Region for M0–M8: Chicago Center (ZAU), where the 2026-11-13 failure began, and its TRACONs
-(C90 first). M9 widens to the whole NAS.
+Region for M0–M6 and M8: Chicago Center (ZAU), where the 2026-11-13 failure began, and its
+TRACONs (C90 first), worked from recordings. Region for M7: Jacksonville Center (ZJX) and
+Orlando TRACON (F11), because a live shadow needs our own ADS-B receiver and ours is in
+Oviedo, Florida, under F11; a receiver only hears aircraft within about 150 to 250 NM. Before
+M7 the M0 model, MVA charts and terrain are built for ZJX and F11 with the same code. M9
+widens to the whole NAS.
 
 Each milestone lists what it builds and the exit criteria that close it. Exit criteria use the
 three bars in docs/BENCHMARKS.md. A milestone does not close on a missed bar; it closes on a
@@ -457,8 +461,8 @@ Exit:
 
 ### M7 — Live shadow (M)
 
-Live operation on SWIM and our own ADS-B receivers with the comparator running, producing a
-daily difference report against ERAM by function. This is rung 3 in miniature, and the point
+Live operation in ZJX and F11 on SWIM and our own ADS-B receiver with the comparator running,
+producing a daily difference report against ERAM by function. This is rung 3 in miniature, and the point
 at which outreach for the gaps in section 6 starts, with results in hand.
 
 Exit: 30 consecutive days live without an unexplained difference or an unhandled feed event;
