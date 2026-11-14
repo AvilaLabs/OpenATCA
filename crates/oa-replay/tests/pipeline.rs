@@ -487,7 +487,7 @@ fn rotated_files_chain_to_the_same_replay_as_one_file() {
 
 // REQ: OA-RPL-029
 #[test]
-fn tfms_and_fns_frames_are_counted_as_not_yet_applied() {
+fn tfms_and_fns_payloads_are_decoded_and_a_foreign_document_is_a_typed_error() {
     let mut p = pipeline();
     for k in 0..5i64 {
         process_frame(
@@ -506,10 +506,13 @@ fn tfms_and_fns_frames_are_counted_as_not_yet_applied() {
         T0 + 10,
         b"state=connected",
     );
-    assert_eq!(p.not_applied, [0, 0, 5, 1, 0]);
+    // Every feed has a decoder now: nothing is left uncounted as "not applied".
+    assert_eq!(p.not_applied, [0; 5]);
     assert_eq!(p.frames, [0, 0, 5, 2, 0]);
     assert_eq!(p.other_frames, [0, 0, 0, 1, 0]);
-    assert_eq!(errors_total(&p.errors), 0);
+    assert_eq!(p.errors[ErrKind::TfmsNotTfms as usize], 5);
+    assert_eq!(p.errors[ErrKind::FnsRejected as usize], 1);
+    assert_eq!(errors_total(&p.errors), 6);
     assert_eq!(rows_applied_total(&p), 0);
     assert_eq!(p.table.live, 0);
 }
