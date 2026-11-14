@@ -163,6 +163,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-sensorsim"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-asterix",
+ "oa-feed",
+ "oa-truth",
+]
+
+[[package]]
 name = "oa-sha256"
 version = "0.0.1"
 
