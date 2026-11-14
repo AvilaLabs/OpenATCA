@@ -1,0 +1,16 @@
+SUSAUCK5TKORD PAB  A00100     R N42041100W087553100N41591600W08754170000503494   GND  A10000MCHICAGO AREA A                666351811
+SUSAUCK5TKORD PAB  A00200     G N41591500W087473500                                                                        666361811
+SUSAUCK5TKORD PAB  A00300     R N41591500W087461500N41591600W08754170000600901                                             666371703
+SUSAUCK5TKORD PAB  A00400     G N41571600W088015200                                                                        666381811
+SUSAUCK5TKORD PAB  A00500     G N41572587W088013894                                                                        666391811
+SUSAUCK5TKORD PAB  A00600     G N41574570W088013482                                                                        666401811
+SUSAUCK5TKORD PAB  A00700     G N41584397W088012470                                                                        666411811
+SUSAUCK5TKORD PAB  A00800     G N41592543W088012423                                                                        666421811
+SUSAUCK5TKORD PAB  A00900     G N41594405W088012752                                                                        666431811
+SUSAUCK5TKORD PAB  A01000     G N42005396W088014937                                                                        666441811
+SUSAUCK5TKORD PAB  A01100     G N42011318W088015203                                                                        666451811
+SUSAUCK5TKORD PAB  A01200     R N42011700W088015200N41591600W08754170000602897                                             666461811
+SUSAUCK5TKORD PAB  A01300     G N42050300W087562500                                                                        666471811
+SUSAUCK5TKORD PAB  A01400     GEN42043693W087555184                                                                        666481811
+SUSAUCK5TKORD PAB  C04400     R N42075200W088104700N41591600W08754170001503051   03000M10000MCHICAGO AREA C                666781811
+SUSAUCK5TKORD PAB  C04500     REN41495300W088095900N41591600W08754170001502314                                             666791811

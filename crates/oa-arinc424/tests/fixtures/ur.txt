@@ -1,0 +1,10 @@
+SUSAURK1MBOARDMAN  A00101L    G N45525900W119310400                              04000M17999MBOARDMAN MOA                  710221703
+SUSAURK1MBOARDMAN  A00102C                                                                         FAA SEATTLE ARTCC       710231703
+SUSAURK1MBOARDMAN  A00200L    G N45514700W119310400                                                                        710241703
+SUSAURK1MBOARDMAN  A00300L    G N45515700W119302800                                                                        710251703
+SUSAURK1MBOARDMAN  A00400L    G N45520400W119222300                                                                        710261703
+SUSAURK1A680       A00100L    CE                   N48105900W1223805000030       GND  A03000MA-680                         710211703
+SUSAURK5R3401A     A00101B    G N39213000W086060000                              GND  A40000MR-3401A                       874651703
+SUSAURK5R3401A     A00102C                                                                         FAA INDIANAPOLIS ARTCC  874661703
+SUSAURK5R3401A     A00200B    G N39213000W085593000                                                                        874671703
+SUSAURK5R3401A     A00300B    G N39130000W085593000                                                                        874681703

@@ -1,0 +1,12 @@
+SUSAP KORDK5EBENKY64BFORD 010BFORDK5PC0E       IF                                 + FL220     18000                        790882012
+SUSAP KORDK5EBENKY64BFORD 020BYLAWK5PC0E       TF                                 B FL230FL200                             790892012
+SUSAP KORDK5EBENKY64BFORD 030BENKYK5EA0EE      TF                                   12000                                  790902012
+SUSAP KORDK5EBENKY64BYLAW 010BYLAWK5PC0E       IF                                 B FL230FL20018000                        790912012
+SUSAP KORDK5EBENKY64BYLAW 020BENKYK5EA0EE      TF                                   12000                                  790922012
+SUSAP KORDK5EBENKY64CASHN 010CASHNK5PC0E       IF                                             18000                        790932012
+SUSAP KORDK5EBENKY64CASHN 020BFORDK5PC0E       TF                                 + FL220                                  790942012
+SUSAP KORDK5EBENKY64CASHN 030BYLAWK5PC0E       TF                                 B FL230FL200                             790952012
+SUSAP KORDK5EBENKY64CASHN 040BENKYK5EA0EE      TF                                   12000                                  790962012
+SUSAP KORDK5EBENKY64DRAMS 010DRAMSK5PC0E       IF                                             18000                        790972012
+SUSAP KORDK5EBENKY64DRAMS 020RYELYK5PC0E       TF                                 + FL240                                  790982012
+SUSAP KORDK5EBENKY64DRAMS 030BFORDK5PC0E       TF                                 + FL220                                  790992012

@@ -1,0 +1,20 @@
+SUSAP KORDK5FI04R  ARAHNN 010RAHNNK5PC0E  A    IF                                 + 11000     18000                 0 NS   799471707
+SUSAP KORDK5FI04R  ARAHNN 020DEGANK5PC0E       TF                                 + 08000                           0 NS   799481707
+SUSAP KORDK5FI04R  ARAHNN 030HARRLK5PC0EE B    CF IFJUK5      2245014904450081PI  + 05000                           0 NS   799491707
+SUSAP KORDK5FI04R  I      010HARRLK5PC0E  I    IF IFJUK5      22450149        PI  J 050000220018000                 0 NS   799501707
+SUSAP KORDK5FI04R  I      011NAPERK5PC0E       CF IFJUK5      2245011804500031PI  + 04000                           0 NS   799511707
+SUSAP KORDK5FI04R  I      020REKKSK5PC0E  F    CF IFJUK5      2245005804500059PI  H 0220002128        -300KORD  K5PA0 NS   799521907
+SUSAP KORDK5FI04R  I      030RW04RK5PG0GY M    CF IFJUK5      2245001404500044PI    00713             -300          0 NS   799531707
+SUSAP KORDK5FI04R  I      040         0  M     CA                     0445        + 01200                           0 NS   799541707
+SUSAP KORDK5FI04R  I      050         0        VI                     0600                                          0 NS   799551707
+SUSAP KORDK5FI04R  I      060LAIRDK5EA0EY      CF OBK K5      1336021413360070D   + 04000                           0 NS   799561707
+SUSAP KORDK5FI04R  I      070LAIRDK5EA0EE  R   HM                     3136T010    + 04000                           0 NS   799571707
+SUSAP KORDK5FR28C  R      010RZUKOK5PC0E  I    IF                                 + 05000     18000                 A JS   805441311
+SUSAP KORDK5FR28C  R      011HAZILK5PC0E    010TF                                 + 04000                           A JS   805452012
+SUSAP KORDK5FR28C  R      020SEIKAK5PC1E  F 010TF                                 + 02300                 RW28C K5PGA JS   805462012
+SUSAP KORDK5FR28C  R      020SEIKAK5PC2WALPV       ALNAV/VNAV ALNAV                                                   JS   805471312
+SUSAP KORDK5FR28C  R      021ZUPTIK5PC0E S  031TF                                 V 0126001278        -300          A JS   805482012
+SUSAP KORDK5FR28C  R      030RW28CK5PG0GY M 031TF                                   00705             -300          A JS   805492012
+SUSAP KORDK5FR28C  R      040         0  M     CA                     2730        + 01100                           A JS   805501311
+SUSAP KORDK5FR28C  R      050DPA  K5D 0VY  L010DF                                 + 04000                           A JS   805512012
+SUSAP KORDK5FR28C  R      060DPA  K5D 0VE  R   HM                     06800040    + 04000                           A JS   805521311

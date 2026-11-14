@@ -1,0 +1,3 @@
+SUSAEAENRT   AAARG K 0    W   B N32413827W078030466                       W0094     NAR           AAARG                    271282605
+SUSAEAENRT   AABBZ K50    W     N37522460W086183136                       W0047     NAR           AABBZ                    271292407
+SUSAEAENRT   BITEZ K30    W     N44585524W093453449                       E0003     NAR           BITEZ                    290592611

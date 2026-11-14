@@ -1,0 +1,6 @@
+SUSAP KMSPK3DBITEZ15ALL   010HHOBAK3EA0E       IF                                 + 04000     18000       KMSP  K3PA       658972611
+SUSAP KMSPK3DBITEZ15ALL   020BITEZK3EA0EE      TF                                                                          658982611
+SUSAP KMSPK3DBITEZ16DKOTA 010BITEZK3EA0E       IF                                             18000                        658992611
+SUSAP KMSPK3DBITEZ16DKOTA 020SKITOK3EA0E       TF                                                                          659002611
+SUSAP KMSPK3DBITEZ16DKOTA 030TICKKK3EA0E       TF                                                                          659012611
+SUSAP KMSPK3DBITEZ16DKOTA 040HHCEEK3EA0E       TF                                                                          659022611

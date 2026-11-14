@@ -1,0 +1,10 @@
+SUSAER       V9          0100LEV  K4D 0V    OL                        35440100     02000     17500                         717772405
+SUSAER       V9          0110PEPSIK4EA0E    OL                        354401103534 02000     17500                         717782405
+SUSAER       V9          0120GOINGK4EA0E    OL                        354401753534 02000     17500                         717792405
+SUSAER       V9          0130SAFESK4EA0E    OL                        354402383534 04000     17500                         717802405
+SUSAER       V9          0140RAYOPK4EA0E    OL                        354400593534 04000     17500                         717812405
+SUSAER       V9          0150WAVEZK4EA0E    OL                        354400963534 03000     17500                         717822405
+SUSAER       Q1          0100PYE  K2D 0V    RH                        33540619     18000     45000                         584362605
+SUSAER       Q1          0110ETCHYK2EA0E    RH                        345405213350 18000     45000                         584372605
+SUSAER       Q1          0120TOCOSK2EA0E    RH                        345408263431 18000     45000                         584382605
+SUSAER       J1          0100TIJ  MMD 0V    OH                        30440050     UNKNN                                   561592104

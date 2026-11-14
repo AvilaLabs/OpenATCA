@@ -1,0 +1,4 @@
+SCANDB       ADK   PA005300H  W N51521876W176403356                       E0070           NARMOUNT MOFFETT                 003551605
+SCANDB       ANI   PA003590H  W N61352456W159355241                       E0140           NARANIAK                         003562002
+SUSADB       AA    K3003650HOLW N47003259W096485466                       E0040           NARKENIE                         268111805
+SUSADB       AA    K7003410H MW N33315982W082365173                       W0040           NARCEDAR                         268121703

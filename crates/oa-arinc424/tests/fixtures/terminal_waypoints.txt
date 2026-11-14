@@ -1,0 +1,3 @@
+SUSAP KORDK5CADAME K50    C     N41580890W087390850                       W0042     NAR           ADAME                    788462605
+SUSAP KORDK5CADLMN K50    W     N41585600W088304345                       W0035     NAR           ADLMN                    788472403
+SUSAP KORDK5CAGZED K50    W     N41575708W087490644                       W0040     NAR           AGZED                    788482304
