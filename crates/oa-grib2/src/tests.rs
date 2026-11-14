@@ -1,0 +1,1154 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use crate::bits::{sign_mag, BitReader};
+use crate::grid::{lambert_setup, LambertInput};
+use crate::pack::BitmapSpec;
+use crate::testenc::*;
+use crate::*;
+
+fn expected(x: i64, r: f32, e: i64, d: i64) -> f32 {
+    ((f64::from(r) + x as f64 * 2f64.powi(e as i32)) / 10f64.powi(d as i32)) as f32
+}
+
+/// A small Lambert grid with the HRRR projection and a 4 x 3 size.
+fn small_grid() -> Vec<u8> {
+    sect3_lambert(&hrrr_spec(4, 3))
+}
+
+fn temp_product(level_hpa: u32) -> Vec<u8> {
+    sect4(0, 0, 0, 100, 0, level_hpa * 100)
+}
+
+fn lambert_field(values: Vec<f32>, flags: u8) -> Field {
+    let mut spec = hrrr_spec(4, 3);
+    spec.flags = flags;
+    let g = parse_grid(&sect3_lambert(&spec)).unwrap();
+    Field {
+        discipline: 0,
+        category: 2,
+        number: 2,
+        parameter: Parameter::Ugrd,
+        level: Level {
+            kind: 100,
+            value: 25_000.0,
+        },
+        ref_time: RefTime {
+            year: 2026,
+            month: 11,
+            day: 14,
+            hour: 18,
+            minute: 0,
+            second: 0,
+        },
+        time_unit: 1,
+        forecast_time: 0,
+        product_template: 0,
+        packing_template: 0,
+        grid: g,
+        missing_count: values.iter().filter(|v| v.is_nan()).count() as u32,
+        values,
+    }
+}
+
+// REQ: OA-GRIB-001
+#[test]
+fn bit_reader_and_sign_magnitude() {
+    let mut w = BitWriter::new();
+    let vals: Vec<(u64, u32)> = (0..200u64)
+        .map(|k| {
+            (
+                (k * 2_654_435_761) & ((1u64 << (k as u32 % 33)) - 1),
+                k as u32 % 33,
+            )
+        })
+        .collect();
+    for &(v, n) in &vals {
+        w.put(v, n);
+    }
+    let mut r = BitReader::new(&w.bytes);
+    for &(v, n) in &vals {
+        assert_eq!(u64::from(r.read(n).unwrap()), v, "width {n}");
+    }
+    assert_eq!(sign_mag(&[0x80, 0x05], 0, 2), Some(-5));
+    assert_eq!(sign_mag(&[0x00, 0x05], 0, 2), Some(5));
+    assert_eq!(sign_mag(&[0x80, 0x00], 0, 2), Some(0));
+    assert!(BitReader::new(&[0xff]).read(9).is_none());
+}
+
+// REQ: OA-GRIB-001, OA-GRIB-007
+#[test]
+fn simple_packing_round_trips_every_width() {
+    for nbits in 0..=32u32 {
+        let top = if nbits == 0 { 0 } else { (1u64 << nbits) - 1 };
+        let x: Vec<u64> = vec![
+            0,
+            top,
+            top / 2,
+            1.min(top),
+            top / 3,
+            top,
+            0,
+            1.min(top),
+            top,
+            top / 5,
+            2.min(top),
+            top,
+        ];
+        let p = encode_simple(&x, 100.0, -3, 2);
+        let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+        let f = decode_message(&m).unwrap();
+        assert_eq!(f.len(), 1);
+        for (k, &v) in x.iter().enumerate() {
+            assert_eq!(
+                f[0].values[k],
+                expected(v as i64, 100.0, -3, 2),
+                "nbits {nbits} k {k}"
+            );
+        }
+        assert_eq!(f[0].packing_template, 0);
+    }
+}
+
+// REQ: OA-GRIB-007
+#[test]
+fn simple_packing_scaling_and_constant_field() {
+    let x: Vec<u64> = (0..12).collect();
+    let p = encode_simple(&x, -5.0, 1, 1);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let f = decode_message(&m).unwrap();
+    for (k, v) in f[0].values.iter().enumerate() {
+        assert_eq!(*v, expected(k as i64, -5.0, 1, 1));
+    }
+    // nbits = 0: every value is R / 10^D.
+    let p = encode_simple(&[0; 12], 273.15, 0, 0);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let f = decode_message(&m).unwrap();
+    assert!(f[0].values.iter().all(|&v| v == 273.15));
+}
+
+fn ramp(n: usize, f: impl Fn(usize) -> i64) -> Vec<Option<i64>> {
+    (0..n).map(|k| Some(f(k))).collect()
+}
+
+fn complex_msg(
+    x: &[Option<i64>],
+    o: &ComplexOpts,
+    r: f32,
+    e: i64,
+    d: i64,
+) -> Result<Vec<Field>, Grib2Error> {
+    let p = encode_complex(x, r, e, d, o);
+    let bm = sect6(None, false);
+    let m = simple_message(small_grid(), temp_product(500), &p, bm);
+    decode_message(&m)
+}
+
+// REQ: OA-GRIB-008
+#[test]
+fn complex_packing_groups_widths_and_lengths() {
+    let x = ramp(12, |k| {
+        [5, 5, 5, 9, 1000, 1003, 1001, 1002, 0, 70000, 3, 80000][k]
+    });
+    let o = ComplexOpts {
+        group_lens: vec![3, 1, 4, 2, 2],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 0,
+    };
+    let f = complex_msg(&x, &o, 2.5, -1, 1).unwrap();
+    assert_eq!(f[0].packing_template, 2);
+    for (k, v) in x.iter().enumerate() {
+        assert_eq!(f[0].values[k], expected(v.unwrap(), 2.5, -1, 1));
+    }
+    // One group, all groups equal length, single-value groups.
+    for lens in [vec![12], vec![4, 4, 4], vec![1; 12]] {
+        let o = ComplexOpts {
+            group_lens: lens,
+            order: 0,
+            missing_mgmt: 0,
+            extra_octets: 0,
+        };
+        let f = complex_msg(&x, &o, 0.0, 0, 0).unwrap();
+        for (k, v) in x.iter().enumerate() {
+            assert_eq!(f[0].values[k], v.unwrap() as f32);
+        }
+    }
+}
+
+// REQ: OA-GRIB-008
+#[test]
+fn complex_packing_missing_value_management() {
+    let x: Vec<Option<i64>> = vec![
+        Some(3),
+        None,
+        Some(4),
+        Some(5),
+        None,
+        None,
+        None,
+        Some(7),
+        Some(7),
+        Some(7),
+        Some(100),
+        None,
+    ];
+    for mgmt in [1u8, 2] {
+        let o = ComplexOpts {
+            group_lens: vec![3, 4, 3, 2],
+            order: 0,
+            missing_mgmt: mgmt,
+            extra_octets: 0,
+        };
+        let f = complex_msg(&x, &o, 0.0, 0, 0).unwrap();
+        assert_eq!(f[0].missing_count, 5, "mgmt {mgmt}");
+        for (k, v) in x.iter().enumerate() {
+            match v {
+                Some(v) => assert_eq!(f[0].values[k], *v as f32),
+                None => assert!(f[0].values[k].is_nan()),
+            }
+        }
+    }
+}
+
+// REQ: OA-GRIB-009
+#[test]
+fn spatial_differencing_orders_one_and_two() {
+    let smooth = ramp(12, |k| 1000 + (k as i64) * 7 + (k as i64 * k as i64) / 2);
+    let rough = ramp(12, |k| [90, 4, 800, 2, 55, 12000, 3, 3, 3, 40, 1, 999][k]);
+    for order in [1u8, 2] {
+        for (name, x) in [("smooth", &smooth), ("rough", &rough)] {
+            for octets in [2usize, 4] {
+                let o = ComplexOpts {
+                    group_lens: vec![4, 4, 4],
+                    order,
+                    missing_mgmt: 0,
+                    extra_octets: octets,
+                };
+                let f = complex_msg(x, &o, 10.0, -2, 1).unwrap();
+                assert_eq!(f[0].packing_template, 3);
+                for (k, v) in x.iter().enumerate() {
+                    assert_eq!(
+                        f[0].values[k],
+                        expected(v.unwrap(), 10.0, -2, 1),
+                        "{name} order {order} k {k}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// REQ: OA-GRIB-009
+#[test]
+fn spatial_differencing_with_missing_points_skips_them() {
+    let x: Vec<Option<i64>> = vec![
+        Some(500),
+        Some(510),
+        None,
+        Some(530),
+        Some(525),
+        None,
+        Some(560),
+        Some(561),
+        Some(570),
+        None,
+        Some(571),
+        Some(573),
+    ];
+    for order in [1u8, 2] {
+        let o = ComplexOpts {
+            group_lens: vec![6, 6],
+            order,
+            missing_mgmt: 1,
+            extra_octets: 2,
+        };
+        let f = complex_msg(&x, &o, 0.0, 0, 0).unwrap();
+        for (k, v) in x.iter().enumerate() {
+            match v {
+                Some(v) => assert_eq!(f[0].values[k], *v as f32, "order {order} k {k}"),
+                None => assert!(f[0].values[k].is_nan()),
+            }
+        }
+    }
+}
+
+// REQ: OA-GRIB-010
+#[test]
+fn bitmap_present_absent_and_previous() {
+    let x: Vec<u64> = vec![10, 20, 30, 40, 50];
+    let bits = [
+        true, false, true, true, false, false, true, false, true, false, false, false,
+    ];
+    let p = encode_simple(&x, 0.0, 0, 0);
+    let m = simple_message(
+        small_grid(),
+        temp_product(500),
+        &p,
+        sect6(Some(&bits), false),
+    );
+    let f = decode_message(&m).unwrap();
+    assert_eq!(f[0].missing_count, 7);
+    let mut it = x.iter();
+    for (k, &b) in bits.iter().enumerate() {
+        if b {
+            assert_eq!(f[0].values[k], *it.next().unwrap() as f32);
+        } else {
+            assert!(f[0].values[k].is_nan());
+        }
+    }
+    // Two fields; the second uses indicator 254 and omits section 3.
+    let p2 = encode_simple(&[1, 2, 3, 4, 5], 0.0, 0, 0);
+    let m = message(
+        0,
+        &[
+            sect1(2026, 11, 14, 18),
+            small_grid(),
+            temp_product(500),
+            p.sect5.clone(),
+            sect6(Some(&bits), false),
+            p.sect7.clone(),
+            temp_product(250),
+            p2.sect5.clone(),
+            sect6(None, true),
+            p2.sect7.clone(),
+        ],
+    );
+    let f = decode_message(&m).unwrap();
+    assert_eq!(f.len(), 2);
+    assert_eq!(f[1].level.value, 25_000.0);
+    assert_eq!(f[1].values[0], 1.0);
+    assert!(f[1].values[1].is_nan());
+    assert_eq!(f[1].missing_count, 7);
+    // 254 with nothing before it is refused; a bitmap whose set bits differ from the data too.
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, true));
+    assert!(matches!(decode_message(&m), Err(Grib2Error::BadBitmap(_))));
+    let few = [
+        true, false, false, false, false, false, false, false, false, false, false, false,
+    ];
+    let m = simple_message(
+        small_grid(),
+        temp_product(500),
+        &p,
+        sect6(Some(&few), false),
+    );
+    assert!(matches!(decode_message(&m), Err(Grib2Error::BadBitmap(_))));
+    // Predefined bitmap indicator.
+    let spec = crate::pack::parse_bitmap(&sect6(Some(&bits), false), 12).unwrap();
+    assert!(matches!(spec, BitmapSpec::Present(_)));
+}
+
+// REQ: OA-GRIB-001
+#[test]
+fn files_with_several_messages_and_fields() {
+    let a = simple_message(
+        small_grid(),
+        temp_product(500),
+        &encode_simple(&[1; 12], 0.0, 0, 0),
+        sect6(None, false),
+    );
+    let p = encode_simple(&(0..12).collect::<Vec<u64>>(), 0.0, 0, 0);
+    let b = simple_message(
+        small_grid(),
+        sect4(0, 2, 2, 100, 0, 25_000),
+        &p,
+        sect6(None, false),
+    );
+    // Multi-field message: second field repeats section 3.
+    let c = message(
+        0,
+        &[
+            sect1(2026, 11, 14, 18),
+            small_grid(),
+            sect4(0, 2, 3, 100, 0, 25_000),
+            p.sect5.clone(),
+            sect6(None, false),
+            p.sect7.clone(),
+            small_grid(),
+            sect4(0, 3, 5, 103, 0, 10),
+            p.sect5.clone(),
+            sect6(None, false),
+            p.sect7.clone(),
+        ],
+    );
+    let mut file = a.clone();
+    file.extend(&b);
+    file.extend(&c);
+    let spans = scan_messages(&file).unwrap();
+    assert_eq!(spans.len(), 3);
+    assert_eq!(spans[1].offset, a.len());
+    let d = decode_stream(&file);
+    assert_eq!(d.messages, 3);
+    assert!(d.skipped.is_empty());
+    let params: Vec<Parameter> = d.fields.iter().map(|f| f.parameter).collect();
+    assert_eq!(
+        params,
+        vec![
+            Parameter::Tmp,
+            Parameter::Ugrd,
+            Parameter::Vgrd,
+            Parameter::Hgt
+        ]
+    );
+    assert_eq!(
+        d.fields[3].level,
+        Level {
+            kind: 103,
+            value: 10.0
+        }
+    );
+    assert_eq!(d.fields[0].ref_time.hour, 18);
+}
+
+// REQ: OA-GRIB-002
+#[test]
+fn framing_errors_are_typed() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let good = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    assert!(decode_message(&good).is_ok());
+    // Truncated anywhere: never a panic, always an error.
+    for cut in 0..good.len() {
+        let d = decode_stream(&good[..cut]);
+        assert!(d.stopped.is_some() || cut == 0, "cut {cut}");
+        assert!(d.fields.is_empty());
+    }
+    let mut bad = good.clone();
+    let n = bad.len();
+    bad[n - 1] = b'8';
+    assert_eq!(decode_message(&bad), Err(Grib2Error::BadEndMarker));
+    let mut bad = good.clone();
+    bad[7] = 1;
+    assert_eq!(
+        message_length(&bad, 0),
+        Err(Grib2Error::UnsupportedEdition(1))
+    );
+    let mut bad = good.clone();
+    bad[0] = b'X';
+    assert_eq!(
+        message_length(&bad, 0),
+        Err(Grib2Error::NotGrib { offset: 0 })
+    );
+    // Absurd length.
+    let mut bad = good.clone();
+    bad[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert!(matches!(
+        message_length(&bad, 0),
+        Err(Grib2Error::BadMessageLength(_))
+    ));
+    let mut bad = good.clone();
+    bad[8..16].copy_from_slice(&((MAX_MESSAGE_BYTES + 1).to_be_bytes()));
+    assert!(matches!(
+        message_length(&bad, 0),
+        Err(Grib2Error::BadMessageLength(_))
+    ));
+    // Garbage after the last message.
+    let mut bad = good.clone();
+    bad.extend(b"junk");
+    let d = decode_stream(&bad);
+    assert_eq!(d.fields.len(), 1);
+    assert_eq!(
+        d.stopped.map(|s| s.error),
+        Some(Grib2Error::Truncated("indicator section"))
+    );
+    // Section order: data before grid.
+    let m = message(0, &[sect1(2026, 11, 14, 18), p.sect7.clone()]);
+    assert_eq!(
+        decode_message(&m),
+        Err(Grib2Error::SectionOrder { section: 7 })
+    );
+    let m = message(0, &[sect1(2026, 11, 14, 18), temp_product(500)]);
+    assert_eq!(
+        decode_message(&m),
+        Err(Grib2Error::MissingSection("grid definition"))
+    );
+    // Section length running past the message.
+    let mut bad = good.clone();
+    bad[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(matches!(
+        decode_message(&bad),
+        Err(Grib2Error::BadSectionLength { .. })
+    ));
+}
+
+// REQ: OA-GRIB-002
+#[test]
+fn point_and_field_limits_refuse() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    // Grid larger than the limit.
+    let mut spec = hrrr_spec(5000, 5000);
+    spec.nx = 5000;
+    let m = simple_message(
+        sect3_lambert(&spec),
+        temp_product(500),
+        &p,
+        sect6(None, false),
+    );
+    assert!(matches!(decode_message(&m), Err(Grib2Error::GridPoints(_))));
+    // Count disagreeing with the dimensions.
+    let mut g = small_grid();
+    g[6..10].copy_from_slice(&13u32.to_be_bytes());
+    let m = simple_message(g, temp_product(500), &p, sect6(None, false));
+    assert!(matches!(decode_message(&m), Err(Grib2Error::BadGrid(_))));
+    // Too many fields.
+    let mut secs = vec![sect1(2026, 11, 14, 18), small_grid()];
+    for _ in 0..=MAX_FIELDS_PER_MESSAGE {
+        secs.extend([
+            temp_product(500),
+            p.sect5.clone(),
+            sect6(None, false),
+            p.sect7.clone(),
+        ]);
+    }
+    assert_eq!(
+        decode_message(&message(0, &secs)),
+        Err(Grib2Error::TooManyFields)
+    );
+    // Value count differing from the grid.
+    let short = encode_simple(&[1; 5], 0.0, 0, 0);
+    let m = simple_message(small_grid(), temp_product(500), &short, sect6(None, false));
+    assert!(matches!(decode_message(&m), Err(Grib2Error::BadPacking(_))));
+    // Group lengths that do not add up.
+    let x = ramp(12, |k| k as i64);
+    let o = ComplexOpts {
+        group_lens: vec![6, 6],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 0,
+    };
+    let mut c = encode_complex(&x, 0.0, 0, 0, &o);
+    let n = c.sect5.len();
+    c.sect5[n - 5..n - 1].copy_from_slice(&7u32.to_be_bytes()); // last group length 7 of 6
+    let m = simple_message(small_grid(), temp_product(500), &c, sect6(None, false));
+    assert!(matches!(decode_message(&m), Err(Grib2Error::BadPacking(_))));
+}
+
+// REQ: OA-GRIB-011
+#[test]
+fn jpeg2000_and_png_are_refused_by_number_and_the_file_continues() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let ok = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    for tmpl in [40u16, 41] {
+        let mut q = p.clone();
+        q.sect5[9..11].copy_from_slice(&tmpl.to_be_bytes());
+        let bad = simple_message(small_grid(), temp_product(500), &q, sect6(None, false));
+        assert_eq!(
+            decode_message(&bad),
+            Err(Grib2Error::UnsupportedPacking(tmpl))
+        );
+        let mut file = bad.clone();
+        file.extend(&ok);
+        let d = decode_stream(&file);
+        assert_eq!(d.messages, 2);
+        assert_eq!(d.fields.len(), 1);
+        assert_eq!(d.skipped.len(), 1);
+        assert_eq!(d.skipped[0].offset, 0);
+        assert_eq!(d.skipped[0].error, Grib2Error::UnsupportedPacking(tmpl));
+    }
+}
+
+// REQ: OA-GRIB-020
+#[test]
+fn inspect_reads_the_inventory_without_unpacking() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let mut q = p.clone();
+    q.sect5[9..11].copy_from_slice(&40u16.to_be_bytes());
+    let jp2 = simple_message(
+        small_grid(),
+        sect4(0, 2, 2, 100, 0, 25_000),
+        &q,
+        sect6(None, false),
+    );
+    let ok = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let mut file = jp2.clone();
+    file.extend(&ok);
+    let i = inspect_stream(&file);
+    assert_eq!((i.messages, i.fields.len(), i.skipped.len()), (2, 2, 0));
+    assert!(i.stopped.is_none());
+    assert_eq!(
+        (i.fields[0].parameter, i.fields[0].packing_template),
+        (Parameter::Ugrd, 40)
+    );
+    assert_eq!(
+        (i.fields[1].parameter, i.fields[1].packing_template),
+        (Parameter::Tmp, 0)
+    );
+    assert_eq!(
+        i.fields[0].level,
+        Level {
+            kind: LEVEL_ISOBARIC,
+            value: 25_000.0
+        }
+    );
+    // Framing is still checked.
+    file.truncate(file.len() - 3);
+    assert!(inspect_stream(&file).stopped.is_some());
+}
+
+// REQ: OA-GRIB-006
+#[test]
+fn product_templates_parameters_and_levels() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let cases = [
+        (0u8, 0u8, Parameter::Tmp),
+        (1, 1, Parameter::Rh),
+        (2, 2, Parameter::Ugrd),
+        (2, 3, Parameter::Vgrd),
+        (2, 8, Parameter::Vvel),
+        (3, 5, Parameter::Hgt),
+        (3, 0, Parameter::Pres),
+        (7, 7, Parameter::Other),
+    ];
+    for (cat, num, want) in cases {
+        for template in [0u16, 8] {
+            let m = simple_message(
+                small_grid(),
+                sect4(template, cat, num, 100, 0, 85_000),
+                &p,
+                sect6(None, false),
+            );
+            let f = decode_message(&m).unwrap();
+            assert_eq!(f[0].parameter, want);
+            assert_eq!((f[0].category, f[0].number), (cat, num));
+            assert_eq!(f[0].product_template, template);
+            assert_eq!(
+                f[0].level,
+                Level {
+                    kind: LEVEL_ISOBARIC,
+                    value: 85_000.0
+                }
+            );
+            assert_eq!(f[0].forecast_time, 6);
+        }
+    }
+    // Scale factor: 2 m given as 20 with scale 1; sign-magnitude negative scale.
+    let m = simple_message(
+        small_grid(),
+        sect4(0, 0, 0, 103, 1, 20),
+        &p,
+        sect6(None, false),
+    );
+    assert_eq!(
+        decode_message(&m).unwrap()[0].level,
+        Level {
+            kind: LEVEL_HEIGHT_ABOVE_GROUND,
+            value: 2.0
+        }
+    );
+    let m = simple_message(
+        small_grid(),
+        sect4(0, 0, 0, 100, -2, 5),
+        &p,
+        sect6(None, false),
+    );
+    assert_eq!(decode_message(&m).unwrap()[0].level.value, 500.0);
+    // Missing surface.
+    let m = simple_message(
+        small_grid(),
+        sect4(0, 0, 0, 255, 0, 0),
+        &p,
+        sect6(None, false),
+    );
+    assert_eq!(decode_message(&m).unwrap()[0].level.kind, 255);
+    // Other product templates refused (4.2 derived forecast).
+    let m = simple_message(
+        small_grid(),
+        sect4(2, 0, 0, 100, 0, 1),
+        &p,
+        sect6(None, false),
+    );
+    assert_eq!(
+        decode_message(&m),
+        Err(Grib2Error::UnsupportedProductTemplate(2))
+    );
+    // Ensemble forms 4.1 and 4.11 share the first 34 octets.
+    for template in [1u16, 11] {
+        let mut sec = sect4(0, 3, 5, 100, 0, 5000);
+        sec[7..9].copy_from_slice(&template.to_be_bytes());
+        let extra = if template == 1 { 3 } else { 27 };
+        sec.extend(std::iter::repeat_n(0u8, extra));
+        let n = sec.len() as u32;
+        sec[0..4].copy_from_slice(&n.to_be_bytes());
+        let m = simple_message(small_grid(), sec, &p, sect6(None, false));
+        let f = decode_message(&m).unwrap();
+        assert_eq!(
+            (f[0].parameter, f[0].product_template),
+            (Parameter::Hgt, template)
+        );
+    }
+    assert_eq!(parameter_name(Parameter::Ugrd), Some("UGRD"));
+    assert_eq!(parameter_name(Parameter::Other), None);
+}
+
+// REQ: OA-GRIB-006
+#[test]
+fn times() {
+    let t = RefTime {
+        year: 2026,
+        month: 11,
+        day: 14,
+        hour: 18,
+        minute: 0,
+        second: 0,
+    };
+    assert_eq!(ref_unix_seconds(&t), 1_794_679_200);
+    let epoch = RefTime {
+        year: 1970,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    };
+    assert_eq!(ref_unix_seconds(&epoch), 0);
+    let leap = RefTime {
+        year: 2024,
+        month: 3,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    };
+    assert_eq!(ref_unix_seconds(&leap), 1_709_251_200);
+    assert_eq!(forecast_seconds(1, 6), Some(21_600));
+    assert_eq!(forecast_seconds(10, 1), Some(10_800));
+    assert_eq!(forecast_seconds(9, 1), None);
+}
+
+fn hrrr_grid() -> Grid {
+    parse_grid(&sect3_lambert(&hrrr_spec(1799, 1059))).unwrap()
+}
+
+// REQ: OA-GRIB-003
+#[test]
+fn lambert_template_is_read() {
+    let Grid::Lambert(l) = hrrr_grid() else {
+        panic!()
+    };
+    assert_eq!((l.nx, l.ny), (1799, 1059));
+    assert!((l.la1 - 21.138123).abs() < 1e-9);
+    assert!((l.lo1 - 237.280472).abs() < 1e-9);
+    assert!((l.lov - 262.5).abs() < 1e-9);
+    assert_eq!(l.dx, 3000.0);
+    assert_eq!(l.radius, 6_371_229.0);
+    // Tangent cone at 38.5: n = sin(38.5 deg).
+    assert!((l.n - 38.5f64.to_radians().sin()).abs() < 1e-12);
+    assert_eq!(l.flags, 0x08);
+    assert!(components_grid_relative(&Grid::Lambert(l)));
+}
+
+// REQ: OA-GRIB-003
+#[test]
+fn lambert_projection_round_trips_and_hits_the_first_point() {
+    let g = hrrr_grid();
+    // First point maps to (0, 0) and back to the stated latitude and longitude.
+    let (i, j) = latlon_to_ij(&g, 21.138123, 237.280472 - 360.0).unwrap();
+    assert!(i.abs() < 1e-6 && j.abs() < 1e-6, "{i} {j}");
+    let (la, lo) = ij_to_latlon(&g, 0.0, 0.0).unwrap();
+    assert!((la - 21.138123).abs() < 1e-9 && (lo - (237.280472 - 360.0)).abs() < 1e-9);
+    // Round trip over the whole grid, including the corners.
+    for &(i, j) in &[
+        (0.0, 0.0),
+        (1798.0, 0.0),
+        (0.0, 1058.0),
+        (1798.0, 1058.0),
+        (899.5, 529.25),
+        (12.3, 987.6),
+    ] {
+        let (la, lo) = ij_to_latlon(&g, i, j).unwrap();
+        let (i2, j2) = latlon_to_ij(&g, la, lo).unwrap();
+        assert!(
+            (i - i2).abs() < 1e-6 && (j - j2).abs() < 1e-6,
+            "{i},{j} -> {la},{lo} -> {i2},{j2}"
+        );
+    }
+    // Longitudes given as 0..360 or -180..180 agree.
+    assert_eq!(latlon_to_ij(&g, 40.0, 270.0), latlon_to_ij(&g, 40.0, -90.0));
+    // Grid length: neighbouring points are 3000 m apart on the sphere (at the standard parallel).
+    let (la_a, lo_a) = ij_to_latlon(&g, 899.0, 500.0).unwrap();
+    let (la_b, lo_b) = ij_to_latlon(&g, 900.0, 500.0).unwrap();
+    let d = great_circle(la_a, lo_a, la_b, lo_b, 6_371_229.0);
+    // Row 500 is at about 38.5 degrees north only roughly; the map factor is within a few percent.
+    assert!((d - 3000.0).abs() < 90.0, "{d}");
+    // The standard parallel is where the scale is exact: find j with latitude 38.5 on LoV.
+    let (i0, j0) = latlon_to_ij(&g, 38.5, 262.5).unwrap();
+    let (la_a, lo_a) = ij_to_latlon(&g, i0, j0).unwrap();
+    let (la_b, lo_b) = ij_to_latlon(&g, i0 + 1.0, j0).unwrap();
+    let d = great_circle(la_a, lo_a, la_b, lo_b, 6_371_229.0);
+    assert!((d - 3000.0).abs() < 0.5, "{d}");
+}
+
+fn great_circle(la1: f64, lo1: f64, la2: f64, lo2: f64, r: f64) -> f64 {
+    let (p1, p2) = (la1.to_radians(), la2.to_radians());
+    let dl = (lo2 - lo1).to_radians();
+    let a = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * r * a.sqrt().asin()
+}
+
+// REQ: OA-GRIB-003
+#[test]
+fn lambert_secant_and_southern_hemisphere() {
+    // RAP 13 km style: secant cone, 25 N both parallels (tangent) and a two-parallel case.
+    let mk = |latin1, latin2, la1, lad| {
+        lambert_setup(LambertInput {
+            nx: 100,
+            ny: 80,
+            la1,
+            lo1: -100.0,
+            lad,
+            lov: -95.0,
+            dx: 10_000.0,
+            dy: 10_000.0,
+            latin1,
+            latin2,
+            radius: 6_371_229.0,
+            flags: 0,
+            scan: 0x40,
+        })
+        .unwrap()
+    };
+    for g in [
+        mk(25.0, 25.0, 20.0, 25.0),
+        mk(30.0, 60.0, 35.0, 40.0),
+        mk(-30.0, -60.0, -50.0, -45.0),
+    ] {
+        let g = Grid::Lambert(g);
+        for &(i, j) in &[(0.0, 0.0), (99.0, 79.0), (40.5, 20.25)] {
+            let (la, lo) = ij_to_latlon(&g, i, j).unwrap();
+            let (i2, j2) = latlon_to_ij(&g, la, lo).unwrap();
+            assert!((i - i2).abs() < 1e-6 && (j - j2).abs() < 1e-6, "{i},{j}");
+        }
+    }
+    // Southern cone constant is negative; parallels on opposite sides are refused.
+    assert!(mk(-30.0, -60.0, -50.0, -45.0).n < 0.0);
+    let bad = lambert_setup(LambertInput {
+        nx: 2,
+        ny: 2,
+        la1: 0.0,
+        lo1: 0.0,
+        lad: 10.0,
+        lov: 0.0,
+        dx: 1.0,
+        dy: 1.0,
+        latin1: 10.0,
+        latin2: -10.0,
+        radius: 6e6,
+        flags: 0,
+        scan: 0,
+    });
+    assert!(matches!(bad, Err(Grib2Error::BadGrid(_))));
+}
+
+// REQ: OA-GRIB-004
+#[test]
+fn latlon_template_gfs() {
+    let m = parse_grid(&sect3_latlon(&gfs_spec())).unwrap();
+    let Grid::LatLon(l) = m else { panic!() };
+    assert!(l.global && l.j_dir == -1);
+    assert_eq!(latlon_to_ij(&m, 90.0, 0.0), Some((0.0, 0.0)));
+    let (i, j) = latlon_to_ij(&m, 40.0, -105.0).unwrap();
+    assert!((i - 1020.0).abs() < 1e-9 && (j - 200.0).abs() < 1e-9);
+    assert_eq!(ij_to_latlon(&m, 1020.0, 200.0), Some((40.0, -105.0)));
+    // South-to-north variant.
+    let mut s = gfs_spec();
+    s.scan = 0x40;
+    s.la1_micro = -90_000_000;
+    s.la2_micro = 90_000_000;
+    let m = parse_grid(&sect3_latlon(&s)).unwrap();
+    let (_, j) = latlon_to_ij(&m, -89.75, 0.0).unwrap();
+    assert!((j - 1.0).abs() < 1e-9);
+    // Disagreeing far corner refused.
+    let mut s = gfs_spec();
+    s.la2_micro = -80_000_000;
+    assert!(matches!(
+        parse_grid(&sect3_latlon(&s)),
+        Err(Grib2Error::BadGrid(_))
+    ));
+}
+
+// REQ: OA-GRIB-005
+#[test]
+fn unsupported_grid_features_are_refused() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    for scan in [0x80u8, 0xC0, 0x20, 0x10, 0x41] {
+        let mut spec = hrrr_spec(4, 3);
+        spec.scan = scan;
+        let m = simple_message(
+            sect3_lambert(&spec),
+            temp_product(500),
+            &p,
+            sect6(None, false),
+        );
+        assert_eq!(
+            decode_message(&m),
+            Err(Grib2Error::UnsupportedScanMode(scan))
+        );
+        let mut s = gfs_spec();
+        s.scan = scan;
+        assert_eq!(
+            parse_grid(&sect3_latlon(&s)),
+            Err(Grib2Error::UnsupportedScanMode(scan))
+        );
+    }
+    for shape in [2u8, 3, 4, 5, 7, 9] {
+        let mut spec = hrrr_spec(4, 3);
+        spec.shape = shape;
+        assert_eq!(
+            parse_grid(&sect3_lambert(&spec)),
+            Err(Grib2Error::UnsupportedEarthShape(shape))
+        );
+    }
+    for shape in [0u8, 6, 8] {
+        let mut spec = hrrr_spec(4, 3);
+        spec.shape = shape;
+        assert!(parse_grid(&sect3_lambert(&spec)).is_ok());
+    }
+    // Other grid templates (polar stereographic 3.20, rotated 3.1).
+    let mut g = small_grid();
+    g[12..14].copy_from_slice(&20u16.to_be_bytes());
+    assert_eq!(parse_grid(&g), Err(Grib2Error::UnsupportedGridTemplate(20)));
+}
+
+// REQ: OA-GRIB-012
+#[test]
+fn bilinear_interpolation() {
+    // v = 2 i + 3 j + 1 on the grid, so any bilinear sample of grid indexes is exact.
+    let vals: Vec<f32> = (0..3)
+        .flat_map(|j| (0..4).map(move |i| 2.0 * i as f32 + 3.0 * j as f32 + 1.0))
+        .collect();
+    let f = lambert_field(vals, 0x08);
+    for &(i, j) in &[
+        (0.0, 0.0),
+        (3.0, 2.0),
+        (1.5, 0.5),
+        (2.25, 1.75),
+        (3.0, 0.0),
+        (0.0, 2.0),
+    ] {
+        let (la, lo) = ij_to_latlon(&f.grid, i, j).unwrap();
+        let v = sample_bilinear(&f, la, lo).unwrap();
+        assert!(
+            (f64::from(v) - (2.0 * i + 3.0 * j + 1.0)).abs() < 1e-4,
+            "{i},{j}: {v}"
+        );
+    }
+    // Outside.
+    let (la, lo) = ij_to_latlon(&f.grid, 3.2, 1.0).unwrap();
+    assert_eq!(sample_bilinear(&f, la, lo), None);
+    let (la, lo) = ij_to_latlon(&f.grid, 1.0, -0.2).unwrap();
+    assert_eq!(sample_bilinear(&f, la, lo), None);
+    assert_eq!(sample_bilinear(&f, f64::NAN, 0.0), None);
+    // Missing neighbour spoils the cell but not cells that avoid it.
+    let mut vals = f.values.clone();
+    vals[5] = f32::NAN; // (i=1, j=1)
+    let g = lambert_field(vals, 0x08);
+    let (la, lo) = ij_to_latlon(&g.grid, 1.5, 0.5).unwrap();
+    assert_eq!(sample_bilinear(&g, la, lo), None);
+    let (la, lo) = ij_to_latlon(&g.grid, 2.5, 1.5).unwrap();
+    assert!(sample_bilinear(&g, la, lo).is_some());
+}
+
+// REQ: OA-GRIB-012
+#[test]
+fn bilinear_wraps_on_a_global_grid() {
+    // A 4 x 3 global grid with 90 degree spacing.
+    let s = LatLonSpec {
+        ni: 4,
+        nj: 3,
+        la1_micro: 90_000_000,
+        lo1_micro: 0,
+        la2_micro: -90_000_000,
+        lo2_micro: 270_000_000,
+        di_micro: 90_000_000,
+        dj_micro: 90_000_000,
+        scan: 0,
+    };
+    let grid = parse_grid(&sect3_latlon(&s)).unwrap();
+    let mut f = lambert_field(
+        vec![
+            0.0, 10.0, 20.0, 30.0, 0.0, 10.0, 20.0, 30.0, 0.0, 10.0, 20.0, 30.0,
+        ],
+        0,
+    );
+    f.grid = grid;
+    // Between column 3 (270 E = 30) and column 0 (360 E = 0): halfway is 15 mixing 30 and 0.
+    assert!((sample_bilinear(&f, 0.0, 315.0).unwrap() - 15.0).abs() < 1e-5);
+    assert!((sample_bilinear(&f, 0.0, -45.0).unwrap() - 15.0).abs() < 1e-5);
+    assert!((sample_bilinear(&f, 0.0, 45.0).unwrap() - 5.0).abs() < 1e-5);
+}
+
+/// Direction vectors of true east and true north at a point, in grid (x, y) axes, found by
+/// projecting small steps. Independent of the closed-form rotation angle.
+fn local_axes(g: &Grid, lat: f64, lon: f64) -> ((f64, f64), (f64, f64)) {
+    let h = 1e-4;
+    let (i0, j0) = latlon_to_ij(g, lat, lon).unwrap();
+    let (ie, je) = latlon_to_ij(g, lat, lon + h).unwrap();
+    let (inn, jn) = latlon_to_ij(g, lat + h, lon).unwrap();
+    // +j is north in a 0x40 grid, so index steps are metric up to one scale shared by both axes.
+    let e = (ie - i0, je - j0);
+    let n = (inn - i0, jn - j0);
+    let ne = e.0.hypot(e.1);
+    let nn = n.0.hypot(n.1);
+    ((e.0 / ne, e.1 / ne), (n.0 / nn, n.1 / nn))
+}
+
+// REQ: OA-GRIB-013
+#[test]
+fn wind_rotation_matches_finite_difference_axes() {
+    let g = hrrr_grid();
+    let pts = [
+        (38.5, -97.5),
+        (40.0, -75.0),
+        (45.0, -110.0),
+        (30.0, -120.0),
+        (48.0, -62.0),
+        (25.0, -85.0),
+    ];
+    for &(lat, lon) in &pts {
+        let (east, north) = local_axes(&g, lat, lon);
+        // A grid is turned: east is not along +x unless on the central meridian.
+        for &(ue, ve) in &[(10.0, 0.0), (0.0, 10.0), (-7.0, 12.0), (25.0, -30.0)] {
+            // Construct the grid-relative components from the earth-relative wind.
+            let ug = ue * east.0 + ve * north.0;
+            let vg = ue * east.1 + ve * north.1;
+            let (e2, n2) = to_earth_relative(&g, lon, ug, vg);
+            assert!(
+                (e2 - ue).abs() < 2e-3 && (n2 - ve).abs() < 2e-3,
+                "{lat},{lon}: {e2},{n2} vs {ue},{ve}"
+            );
+        }
+        // The convergence angle is the angle of true north from the grid's +y.
+        let th = grid_rotation(&g, lon);
+        assert!((north.0 + th.sin()).abs() < 1e-3 && (north.1 - th.cos()).abs() < 1e-3);
+    }
+}
+
+// REQ: OA-GRIB-013
+#[test]
+fn wind_rotation_signs_and_end_to_end() {
+    let g = hrrr_grid();
+    // On the central meridian grid and earth axes agree.
+    let (e, n) = to_earth_relative(&g, -97.5, 10.0, 5.0);
+    assert!((e - 10.0).abs() < 1e-9 && (n - 5.0).abs() < 1e-9);
+    // East of the central meridian (northern hemisphere) a grid-relative +y vector (grid north)
+    // points east of true north: it has a positive east component. West of it, negative.
+    let (e, _) = to_earth_relative(&g, -75.0, 0.0, 10.0);
+    assert!(e > 0.0);
+    let (e, _) = to_earth_relative(&g, -120.0, 0.0, 10.0);
+    assert!(e < 0.0);
+    // Magnitude is preserved.
+    let (e, n) = to_earth_relative(&g, -70.0, 3.0, 4.0);
+    assert!((e.hypot(n) - 5.0).abs() < 1e-9);
+    // A grid already earth-relative is left alone.
+    let mut spec = hrrr_spec(4, 3);
+    spec.flags = 0;
+    let g2 = parse_grid(&sect3_lambert(&spec)).unwrap();
+    assert_eq!(to_earth_relative(&g2, -70.0, 3.0, 4.0), (3.0, 4.0));
+    // End to end on a small grid: a uniform grid-relative wind (0, 10) is a different earth wind
+    // at different longitudes; with the flag clear the same field is returned unrotated.
+    let u = lambert_field(vec![0.0; 12], 0x08);
+    let v = lambert_field(vec![10.0; 12], 0x08);
+    let (la, lo) = ij_to_latlon(&u.grid, 3.0, 1.0).unwrap();
+    let w = wind_at(&u, &v, la, lo).unwrap().unwrap();
+    let th = grid_rotation(&u.grid, lo);
+    assert!((f64::from(w.east) - 10.0 * th.sin()).abs() < 1e-4);
+    assert!((f64::from(w.north) - 10.0 * th.cos()).abs() < 1e-4);
+    assert!(
+        th.abs() > 0.05,
+        "test grid is far enough from LoV to rotate"
+    );
+    let (u0, v0) = (
+        lambert_field(vec![0.0; 12], 0),
+        lambert_field(vec![10.0; 12], 0),
+    );
+    let w0 = wind_at(&u0, &v0, la, lo).unwrap().unwrap();
+    assert_eq!((w0.east, w0.north), (0.0, 10.0));
+    // Mismatched grids and outside positions.
+    assert_eq!(wind_at(&u, &v0, la, lo), Err(Grib2Error::GridMismatch));
+    assert_eq!(wind_at(&u, &v, 0.0, 0.0), Ok(None));
+}
+
+// REQ: OA-GRIB-014
+#[test]
+fn idx_parses_and_finds_byte_ranges() {
+    let text = "1:0:d=2026111418:HGT:500 mb:anl:\n2:1000:d=2026111418:TMP:500 mb:anl:\n3:2500:d=2026111418:UGRD:250 mb:anl:\r\n\n4:4000:d=2026111418:VGRD:250 mb:anl:\n5:5000:d=2026111418:UGRD:250 mb:6 hour fcst:ens:x:\n";
+    let i = parse_idx(text).unwrap();
+    assert_eq!(idx_len(&i), 5);
+    assert_eq!(i.date[0], 2026111418);
+    let rows = find_rows(&i, "UGRD", &isobaric_label(250));
+    assert_eq!(rows, vec![2, 4]);
+    assert_eq!(byte_range(&i, 2, None), Some((2500, Some(3999))));
+    assert_eq!(byte_range(&i, 4, None), Some((5000, None)));
+    assert_eq!(byte_range(&i, 4, Some(9000)), Some((5000, Some(8999))));
+    assert_eq!(byte_range(&i, 9, None), None);
+    // Two fields in one message share an offset and one range.
+    let multi = "1:0:d=2026111418:UGRD:250 mb:anl:\n2.1:700:d=2026111418:UGRD:300 mb:anl:\n2.2:700:d=2026111418:VGRD:300 mb:anl:\n3:900:d=2026111418:TMP:300 mb:anl:\n";
+    let m = parse_idx(multi).unwrap();
+    assert_eq!(
+        (m.msg.clone(), m.sub.clone()),
+        (vec![1, 2, 2, 3], vec![0, 1, 2, 0])
+    );
+    assert_eq!(byte_range(&m, 1, None), Some((700, Some(899))));
+    assert_eq!(byte_range(&m, 2, None), Some((700, Some(899))));
+    assert!(parse_idx("2.1:5:d=2026111418:A:b:c:\n2.2:6:d=2026111418:A:b:c:").is_err());
+    assert!(parse_idx("2.2:5:d=2026111418:A:b:c:\n2.1:5:d=2026111418:A:b:c:").is_err());
+    assert!(find_rows(&i, "UGRD", "300 mb").is_empty());
+    for (bad, why) in [
+        ("x:0:d=2026111418:A:b:c:", "message number"),
+        ("1:y:d=2026111418:A:b:c:", "byte offset"),
+        ("1:0:2026111418:A:b:c:", "missing d="),
+        ("1:0:d=20261114:A:b:c:", "date is not YYYYMMDDHH"),
+        ("1:0:d=2026111418::b:c:", "missing variable"),
+        ("1:0:d=2026111418:A:b", "missing forecast"),
+        (
+            "2:5:d=2026111418:A:b:c:\n3:5:d=2026111418:A:b:c:",
+            "message number or offset does not increase",
+        ),
+    ] {
+        match parse_idx(bad) {
+            Err(Grib2Error::BadIdx { why: w, .. }) => assert_eq!(w, why, "{bad}"),
+            other => panic!("{bad}: {other:?}"),
+        }
+    }
+    let long = format!("1:0:d=2026111418:A:{}:c:", "x".repeat(2000));
+    assert!(matches!(
+        parse_idx(&long),
+        Err(Grib2Error::BadIdx { line: 1, .. })
+    ));
+}
+
+// REQ: OA-GRIB-015
+#[test]
+fn mutated_messages_never_panic() {
+    let x = ramp(12, |k| 100 + (k as i64 * 37) % 11);
+    let o = ComplexOpts {
+        group_lens: vec![4, 4, 4],
+        order: 2,
+        missing_mgmt: 1,
+        extra_octets: 2,
+    };
+    let p = encode_complex(&x, 1.0, 0, 0, &o);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    let mut state = 0x1234_5678_9abc_def0u64;
+    let mut decoded = 0;
+    for _ in 0..20_000 {
+        let mut b = m.clone();
+        for _ in 0..1 + (state % 3) {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let pos = (state >> 33) as usize % b.len();
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            b[pos] = (state >> 40) as u8;
+        }
+        if !decode_stream(&b).fields.is_empty() {
+            decoded += 1;
+        }
+    }
+    assert!(decoded > 0);
+}
