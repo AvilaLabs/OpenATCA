@@ -135,6 +135,11 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
 - **F3 [MUST NOT]** No hidden control flow or cost: no operator overloading that hides work, no
   `Deref` tricks, no implicit conversions that allocate, no macros that hide control flow.
 - **F4 [DEFAULT]** Do not abstract early. No generic or trait until repeated real use shows the cut.
+- **F6 [MUST]** The core has zero dependencies beyond the Rust standard library. Any outside code
+  that is unavoidable (TLS, a vendor messaging client such as SWIM's Solace transport, a radio
+  driver) runs in its own adapter process and talks to the core through our own plain message
+  format over a bounded socket. It is never linked into the core. If it fails, only its input
+  degrades, visibly (E2).
 - **F5 [MUST]** Get the data model right early; apply layout optimization (struct-of-arrays,
   packing, size guards) at hardening, once usage is known. A slice is not done until A3 and A7
   are met.
