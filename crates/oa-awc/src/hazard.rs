@@ -8,6 +8,15 @@
 //!   antimeridian polygon runs to, say, 180.667); [`hazard_covers`] tries the point at
 //!   -360, 0 and +360 degrees. A `LINE` (G-AIRMET freezing-level contours, including closed
 //!   ones; the API's `geom` is used, not `geometryType`) is stored but covers nothing.
+//! * Points: an international SIGMET located at one spot (a volcano, an observed turbulence
+//!   report) comes from the API as `geom` `AREA` with a single coordinate. It is stored as
+//!   [`GEOM_POINT`] with that one vertex. ICAO gives such a report no extent, so a point never
+//!   covers anything ([`hazard_covers`] is false); [`point_hazards_near`] returns the points
+//!   within a distance the caller chooses. When `rawSigmet` states the position after `OBS AT` or
+//!   `FCST AT` (`S4452 E16900`), it is compared with the coordinate and the agreement counted
+//!   in [`HazardStats`]; a disagreement is counted, never a refusal. Two coordinates on an `AREA`
+//!   are neither an area nor a point (the AWC API schema documents no such meaning) and are
+//!   refused as `bad-geometry`.
 //! * Altitude: feet above mean sea level, the lower bound `base_ft` and upper bound `top_ft`,
 //!   `NO_ALT` where the product states none (an open end). `SFC` is 0. G-AIRMET altitudes are in
 //!   hundreds of feet in the API and are converted; a G-AIRMET base of `FZL` ("the freezing
@@ -22,7 +31,9 @@
 //! * De-duplication key: (source, label, hazard, valid from, valid to, base, top, point count, first
 //!   point; the issue time is left out because `sigmet` and `isigmet` give it differently); the copy kept has the greatest receipt time. Counted.
 
-use crate::error::{count_refusal, refuse, ParseError, Reason, Refusal, RefusedCounts};
+use crate::error::{
+    count_refusal, refuse, ParseError, Reason, Refusal, RefusedCounts, REASON_NAMES,
+};
 use crate::json::{opt_int, opt_str, req_array, req_int, req_str, require_object};
 use crate::metar::deg_e5;
 use crate::pool::{new_pool, pool_get, pool_push, pool_select, select, top_array, Pool, StrIx};
@@ -46,6 +57,8 @@ pub const GEOM_AREA: u8 = 0;
 pub const GEOM_LINE: u8 = 1;
 /// `geom` value: several areas (international SIGMET `AREAS`).
 pub const GEOM_AREAS: u8 = 2;
+/// `geom` value: one position with no stated extent (an `AREA` of one coordinate).
+pub const GEOM_POINT: u8 = 3;
 /// Flag bit: the lower bound is the freezing level (G-AIRMET `FZL`).
 pub const FLAG_BASE_FZL: u8 = 1;
 /// Bound: points in one ring.
@@ -99,6 +112,13 @@ pub struct HazardStats {
     pub records: u32,
     pub accepted: u32,
     pub refused: RefusedCounts,
+    /// Point hazards accepted (`GEOM_POINT`).
+    pub points: u32,
+    /// Points whose `rawSigmet` states a position (`OBS AT`/`FCST AT`) that was compared.
+    pub point_raw_checked: u32,
+    /// Compared points whose stated position differs from the coordinate by more than the
+    /// stated precision.
+    pub point_raw_disagree: u32,
 }
 
 /// What [`finalize_hazard`] removed.
@@ -191,7 +211,13 @@ struct Rec {
     geom: u8,
     flags: u8,
     rings: Vec<Vec<(i32, i32)>>,
+    /// For a point: [`RAW_NONE`], [`RAW_AGREE`] or [`RAW_DISAGREE`].
+    raw_check: u8,
 }
+
+const RAW_NONE: u8 = 0;
+const RAW_AGREE: u8 = 1;
+const RAW_DISAGREE: u8 = 2;
 
 fn alt_ft(v: i64, field: &'static str) -> Result<i32, Refusal> {
     if (ALT_RANGE_FT.0..=ALT_RANGE_FT.1).contains(&v) {
@@ -305,6 +331,91 @@ fn rings_of(doc: &Doc<'_>, o: NodeIx, geom: u8) -> Result<Vec<Vec<(i32, i32)>>, 
     }
 }
 
+type Rings = Vec<Vec<(i32, i32)>>;
+
+/// The geometry of an international SIGMET: an `AREA` of exactly one coordinate is a point.
+fn sigmet_geometry(doc: &Doc<'_>, o: NodeIx, geom: u8) -> Result<(u8, Rings), Refusal> {
+    let coords = req_array(doc, o, "coords")?;
+    if geom == GEOM_AREA && doc.len(coords) == 1 {
+        return Ok((GEOM_POINT, vec![ring(doc, coords, 1)?]));
+    }
+    Ok((geom, rings_of(doc, o, geom)?))
+}
+
+/// A latitude or longitude token of an ICAO position (`S4452`, `E16900`, `N45`): hemisphere letter,
+/// `deg_digits` of degrees and optional two digits of minutes. Returns signed degrees and the
+/// stated precision in degrees (a minute or a whole degree).
+fn icao_angle(tok: &str, pos: u8, neg: u8, deg_digits: usize) -> Option<(f64, f64)> {
+    let b = tok.as_bytes();
+    let hemi = *b.first()?;
+    let digits = b.get(1..)?;
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<f64> {
+        std::str::from_utf8(digits.get(a..z)?)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+    };
+    let (v, prec) = if digits.len() == deg_digits {
+        (num(0, deg_digits)?, 1.0)
+    } else if digits.len() == deg_digits + 2 {
+        (
+            num(0, deg_digits)? + num(deg_digits, deg_digits + 2)? / 60.0,
+            1.0 / 60.0,
+        )
+    } else {
+        return None;
+    };
+    if hemi == pos {
+        Some((v, prec))
+    } else if hemi == neg {
+        Some((-v, prec))
+    } else {
+        None
+    }
+}
+
+/// The position stated after `OBS AT` or `FCST AT` in a SIGMET text (an optional `hhmmZ` first),
+/// as (lat, lon, lat precision, lon precision) in degrees; `None` if the text has no such form.
+fn raw_position(raw: &str) -> Option<(f64, f64, f64, f64)> {
+    let toks: Vec<&str> = raw.split_ascii_whitespace().take(512).collect();
+    for i in 1..toks.len() {
+        if toks.get(i) != Some(&"AT") || !matches!(toks.get(i - 1), Some(&"OBS" | &"FCST")) {
+            continue;
+        }
+        let mut j = i + 1;
+        if toks
+            .get(j)
+            .is_some_and(|t| t.len() == 5 && t.ends_with('Z'))
+        {
+            j += 1;
+        }
+        let (la, lo) = (toks.get(j)?, toks.get(j + 1)?);
+        let (lat, pa) = icao_angle(la, b'N', b'S', 2)?;
+        let (lon, po) = icao_angle(lo, b'E', b'W', 3)?;
+        return Some((lat, lon, pa, po));
+    }
+    None
+}
+
+/// Compares a point with the position `rawSigmet` states; the allowed difference is the stated
+/// precision (a minute or a degree) plus the 1e-5 degree storage step.
+fn raw_check(raw: Option<&str>, lat_e5: i32, lon_e5: i32) -> u8 {
+    let Some((lat, lon, pa, po)) = raw.and_then(raw_position) else {
+        return RAW_NONE;
+    };
+    let dlat = (f64::from(lat_e5) / 1e5 - lat).abs();
+    let dlon = (f64::from(lon_e5) / 1e5 - lon).rem_euclid(360.0);
+    let dlon = dlon.min(360.0 - dlon);
+    if dlat <= pa + 1e-4 && dlon <= po + 1e-4 {
+        RAW_AGREE
+    } else {
+        RAW_DISAGREE
+    }
+}
+
 fn iso_ms(doc: &Doc<'_>, o: NodeIx, key: &'static str) -> Result<i64, Refusal> {
     match parse_iso_ms(req_str(doc, o, key)?) {
         Some(v) => Ok(v),
@@ -356,6 +467,11 @@ fn read_sigmet(doc: &Doc<'_>, o: NodeIx) -> Result<Rec, Refusal> {
     window(from, to)?;
     let (base_ft, top_ft) = (opt_alt_int(doc, o, "base")?, opt_alt_int(doc, o, "top")?);
     ordered(base_ft, top_ft)?;
+    let (geom, rings) = sigmet_geometry(doc, o, geom)?;
+    let raw_check = match (geom, rings.first().and_then(|r| r.first())) {
+        (GEOM_POINT, Some(&(lat, lon))) => raw_check(opt_str(doc, o, "rawSigmet")?, lat, lon),
+        _ => RAW_NONE,
+    };
     Ok(Rec {
         source: SRC_SIGMET,
         hazard: hazard_word(req_str(doc, o, "hazard")?, "hazard")?,
@@ -372,7 +488,8 @@ fn read_sigmet(doc: &Doc<'_>, o: NodeIx) -> Result<Rec, Refusal> {
         severity: 255,
         geom,
         flags: 0,
-        rings: rings_of(doc, o, geom)?,
+        rings,
+        raw_check,
     })
 }
 
@@ -420,6 +537,7 @@ fn read_airsigmet(doc: &Doc<'_>, o: NodeIx) -> Result<Rec, Refusal> {
         geom: GEOM_AREA,
         flags: 0,
         rings: rings_of(doc, o, GEOM_AREA)?,
+        raw_check: RAW_NONE,
     })
 }
 
@@ -466,6 +584,7 @@ fn read_gairmet(doc: &Doc<'_>, o: NodeIx) -> Result<Rec, Refusal> {
         geom,
         flags,
         rings: rings_of(doc, o, geom)?,
+        raw_check: RAW_NONE,
     })
 }
 
@@ -525,12 +644,52 @@ fn parse_with(
     stats.files += 1;
     stats.records = stats.records.saturating_add(n as u32);
     for o in doc.elements(arr) {
-        match read(&doc, o).and_then(|r| push_rec(table, &r)) {
-            Ok(()) => stats.accepted += 1,
+        match read(&doc, o).and_then(|r| push_rec(table, &r).map(|()| r)) {
+            Ok(r) => {
+                stats.accepted += 1;
+                if r.geom == GEOM_POINT {
+                    stats.points += 1;
+                }
+                if r.raw_check != RAW_NONE {
+                    stats.point_raw_checked += 1;
+                }
+                if r.raw_check == RAW_DISAGREE {
+                    stats.point_raw_disagree += 1;
+                }
+            }
             Err(e) => count_refusal(&mut stats.refused, e),
         }
     }
     Ok(())
+}
+
+/// Describes every record of a hazard file the parser refuses, one line each:
+/// `record N <icao> <series>: <reason> (<field>)`, so a refusal can be read against the source
+/// record. `src` is [`SRC_SIGMET`], [`SRC_AIRSIGMET`] or [`SRC_GAIRMET`]. Whole-file errors as
+/// [`parse_sigmet`].
+pub fn describe_hazard_refusals(input: &[u8], src: u8) -> Result<Vec<String>, ParseError> {
+    let read: fn(&Doc<'_>, NodeIx) -> Result<Rec, Refusal> = match src {
+        SRC_AIRSIGMET => read_airsigmet,
+        SRC_GAIRMET => read_gairmet,
+        _ => read_sigmet,
+    };
+    let doc = parse(input, &DEFAULT_LIMITS)?;
+    let (arr, _) = top_array(&doc, 0, MAX_RECORDS_PER_FILE, MAX_TABLE_ROWS)?;
+    let mut scratch = new_hazard_table();
+    let mut out = Vec::new();
+    for (n, o) in doc.elements(arr).enumerate() {
+        if let Err(e) = read(&doc, o).and_then(|r| push_rec(&mut scratch, &r)) {
+            let id = |k: &'static str| opt_str(&doc, o, k).ok().flatten().unwrap_or("?");
+            out.push(format!(
+                "record {n} {} {}: {} ({})",
+                id("icaoId"),
+                id("seriesId"),
+                REASON_NAMES.get(e.reason as usize).copied().unwrap_or("?"),
+                e.field
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Parses an international SIGMET file (`sigmet` or `isigmet`). All or nothing at file level; a
@@ -717,22 +876,69 @@ fn inside(t: &HazardTable, ring: usize, lat: f64, lon: f64) -> bool {
     c
 }
 
+fn in_band(t: &HazardTable, i: usize, alt_ft: Option<i32>) -> bool {
+    let Some(a) = alt_ft else { return true };
+    let (b, tp) = (
+        t.base_ft.get(i).copied().unwrap_or(NO_ALT),
+        t.top_ft.get(i).copied().unwrap_or(NO_ALT),
+    );
+    !((b != NO_ALT && a < b) || (tp != NO_ALT && a > tp))
+}
+
+/// Great-circle distance between two positions in degrees, metres (spherical Earth, 6 371 km).
+fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dl = (lon2 - lon1).to_radians();
+    let a = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 6_371_000.0 * a.sqrt().min(1.0).asin()
+}
+
+/// Replaces `out` with the point hazards ([`GEOM_POINT`]) within `max_dist_m` metres
+/// (great circle, inclusive) of the position and, when `alt_ft` is given, whose band contains it
+/// (as [`hazard_covers`]). ICAO states no extent for a point report, so how far counts as near is
+/// the caller's choice; a negative or non-finite distance returns nothing. Not time-aware;
+/// combine with [`active_hazards_at`].
+pub fn point_hazards_near(
+    t: &HazardTable,
+    lat: f64,
+    lon: f64,
+    max_dist_m: f64,
+    alt_ft: Option<i32>,
+    out: &mut Vec<u32>,
+) {
+    out.clear();
+    if !max_dist_m.is_finite() || max_dist_m < 0.0 {
+        return;
+    }
+    for i in 0..hazard_len(t) {
+        if t.geom.get(i) != Some(&GEOM_POINT) || !in_band(t, i, alt_ft) {
+            continue;
+        }
+        let Some(p) = hazard_rings(t, i)
+            .next()
+            .and_then(|r| ring_points(t, r).next())
+        else {
+            continue;
+        };
+        let (Some(&la), Some(&lo)) = (t.lat_e5.get(p), t.lon_e5.get(p)) else {
+            continue;
+        };
+        if distance_m(lat, lon, f64::from(la) / 1e5, f64::from(lo) / 1e5) <= max_dist_m {
+            out.push(i as u32);
+        }
+    }
+}
+
 /// Whether hazard row `i` covers the point: inside one of its rings (even-odd rule, planar in
 /// degrees) and, when `alt_ft` is given, within `base_ft..=top_ft` (an absent bound is open;
 /// a G-AIRMET base of `FZL` is treated as open because the freezing level varies). A `LINE`
 /// covers nothing. Not time-aware; combine with [`active_hazards_at`].
 pub fn hazard_covers(t: &HazardTable, i: usize, lat: f64, lon: f64, alt_ft: Option<i32>) -> bool {
-    if t.geom.get(i).copied() == Some(GEOM_LINE) || i >= hazard_len(t) {
+    if matches!(t.geom.get(i), Some(&(GEOM_LINE | GEOM_POINT))) || i >= hazard_len(t) {
         return false;
     }
-    if let Some(a) = alt_ft {
-        let (b, tp) = (
-            t.base_ft.get(i).copied().unwrap_or(NO_ALT),
-            t.top_ft.get(i).copied().unwrap_or(NO_ALT),
-        );
-        if (b != NO_ALT && a < b) || (tp != NO_ALT && a > tp) {
-            return false;
-        }
+    if !in_band(t, i, alt_ft) {
+        return false;
     }
     hazard_rings(t, i).any(|r| {
         [lon, lon + 360.0, lon - 360.0]

@@ -1475,7 +1475,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   600 is refused and counted; duplicates are removed and counted.
 - **OA-AWC-010** International SIGMET records give a polygon (one ring, or several for `AREAS`) in
   degrees, base and top in feet with absent ends open, and validity times; a ring of under three
-  points, an unknown geometry or a base above the top is refused and counted.
+  points (other than the one-coordinate `AREA`, OA-AWC-018), an unknown geometry or a base above
+  the top is refused and counted.
 - **OA-AWC-011** US SIGMET/AIRMET records take the base as the smallest `altitudeLow*` and the top as
   the largest `altitudeHi*` given, and the creation time as the issue time.
 - **OA-AWC-012** G-AIRMET records read text coordinates and hundreds-of-feet altitude text into feet,
@@ -1490,12 +1491,24 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-AWC-015** No input panics: every prefix of a sample for each product and 400 seeded random byte
   mutations of each give tables or typed errors.
 - **OA-AWC-016** On the real captured files (`OPENATCA_DATA/raw/awc`; skipped with a note when absent)
-  every file parses, every record is accepted, `altim` and `rawOb` never disagree, de-duplication
+  every file parses, every METAR, PIREP and TAF record is accepted, every hazard record is accepted
+  or refused for `reversed-band` only (any other refusal fails the test, and each refused record is
+  printed), a point never disagrees with its `rawSigmet` position, `altim` and `rawOb` never disagree, de-duplication
   counts balance, and at least 90 % of the stations in the ZAU box have a trusted altimeter in at
   least 95 % of the hours; the test prints the counts.
 - **OA-AWC-017** `oa-awc-summary [dir]` scans a directory tree, parses each recognised file by its
   name, reports records, refusals by reason, duplicates, the altimeter cross-check and station
   availability, lists files refused whole and skipped names, and exits 1 if any file was refused whole.
+- **OA-AWC-018** An international SIGMET `AREA` with exactly one coordinate is accepted as a point
+  hazard (`GEOM_POINT`, one vertex) that covers nothing; an `AREA` of two coordinates, and a
+  one-coordinate area from any other product, is refused as `bad-geometry` (the AWC API schema
+  documents no other meaning); `describe_hazard_refusals` lists each refused record of a file.
+- **OA-AWC-019** A point's coordinate is compared with the position `rawSigmet` states after
+  `OBS AT` or `FCST AT` (minutes or whole-degree form, optional time); checked and disagreeing
+  points are counted, and a disagreement is never a refusal.
+- **OA-AWC-020** `point_hazards_near` returns the point hazards within a caller-chosen great-circle
+  distance of a position (and, optionally, whose altitude band contains an altitude), across the
+  antimeridian; it returns nothing for a negative or non-finite distance and never returns areas.
 
 ## M2 — Benchmark truth (oa-truth)
 

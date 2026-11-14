@@ -9,7 +9,7 @@
 )]
 
 use oa_awc::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn awc_dir() -> Option<PathBuf> {
     let Some(d) = std::env::var_os("OPENATCA_DATA") else {
@@ -25,6 +25,64 @@ fn awc_dir() -> Option<PathBuf> {
         return None;
     }
     Some(dir)
+}
+
+/// Hazard files may legitimately hold records we refuse, so the rule is explicit. Every record is
+/// accounted for (records = accepted + refused), and each refused record is printed with its file.
+/// Only a refusal of a `reversed-band` (the source's own contradictory altitudes) is tolerated.
+/// Every other reason (a bad geometry, an unknown code, a missing field, a bad type or time) means
+/// either the format changed or a valid kind of record is not handled yet, which is a defect of
+/// the parser, so the test fails once, loudly, until the parser handles it. A point hazard whose
+/// `rawSigmet` states another position is also a failure.
+fn hazard_records_are_accounted_for(dir: &Path, s: &summary::Summary) {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    for p in &files {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        let src = if name.contains("airsigmet") {
+            hazard::SRC_AIRSIGMET
+        } else if name.contains("gairmet") {
+            hazard::SRC_GAIRMET
+        } else if name.contains("sigmet") {
+            hazard::SRC_SIGMET
+        } else {
+            continue;
+        };
+        for line in describe_hazard_refusals(&std::fs::read(p).unwrap(), src).unwrap() {
+            eprintln!("REFUSED {name}: {line}");
+        }
+    }
+    for (i, st) in s.hazard_stats.iter().enumerate() {
+        let refused: u32 = st.refused.iter().sum();
+        assert_eq!(st.records, st.accepted + refused, "hazard source {i}");
+        for (r, &n) in st.refused.iter().enumerate() {
+            assert!(
+                n == 0 || r == Reason::ReversedBand as usize,
+                "hazard source {i}: {n} records refused as {} (see the REFUSED lines)",
+                REASON_NAMES[r]
+            );
+        }
+        assert_eq!(
+            st.point_raw_disagree, 0,
+            "hazard source {i}: point vs rawSigmet"
+        );
+    }
+    let p = &s.hazard_stats[0];
+    eprintln!(
+        "international SIGMET points={} checked against rawSigmet={}",
+        p.points, p.point_raw_checked
+    );
 }
 
 // REQ: OA-AWC-016
@@ -43,12 +101,7 @@ fn real_awc_files_parse_cleanly() {
         assert!(records > 0, "{name}: no records");
         assert_eq!(records, accepted, "{name}: refused records");
     }
-    for i in 0..3 {
-        assert_eq!(
-            s.hazard_stats[i].records, s.hazard_stats[i].accepted,
-            "hazard source {i}"
-        );
-    }
+    hazard_records_are_accounted_for(&dir, &s);
     // The two altimeter sources agree, with no withheld altimeter.
     assert_eq!(s.metar_stats.altim_disagree, 0);
     assert!(s.metar_stats.altim_checked > 0);
