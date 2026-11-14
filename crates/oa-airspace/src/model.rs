@@ -323,7 +323,11 @@ pub mod unresolved_role {
     pub const LEG_FIX: u8 = 3;
     pub const LEG_CENTER: u8 = 4;
     pub const ROUTE_POINT: u8 = 5;
-    pub const MAX: u8 = 5;
+    /// A NASR airway pseudo-point `U.S. CANADIAN BORDER-n` / `U.S. MEXICAN BORDER-n`: the
+    /// airway crosses the border there and the point has no position. Expected, not an error:
+    /// reports list these apart from real unresolved references.
+    pub const BORDER_CROSSING: u8 = 6;
+    pub const MAX: u8 = 6;
 
     /// Display name of a role.
     pub fn name(r: u8) -> &'static str {
@@ -333,6 +337,7 @@ pub mod unresolved_role {
             LEG_FIX => "procedure leg fix",
             LEG_CENTER => "procedure arc/MSA centre",
             ROUTE_POINT => "NASR route point",
+            BORDER_CROSSING => "airway border crossing",
             _ => "unknown role",
         }
     }
@@ -617,7 +622,8 @@ pub struct Mora {
     pub hundreds_ft: Vec<i16>,
 }
 
-/// A reference that names a point neither source has (OA-ASP-004).
+/// A reference that names a point neither source has (OA-ASP-004), plus the airway border
+/// crossings, which are expected and carry the role [`unresolved_role::BORDER_CROSSING`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Unresolved {
     pub role: Vec<u8>,
@@ -1286,4 +1292,19 @@ pub fn find_boundary(
         })
         .and_then(|i| u32::try_from(i).ok())
         .map(BoundaryIx)
+}
+
+/// True for the NASR airway pseudo-point naming a border crossing, such as
+/// `U.S. CANADIAN BORDER-2`.
+pub fn is_border_crossing_name(name: &str) -> bool {
+    name.starts_with("U.S. ") && name.contains(" BORDER-")
+}
+
+/// Number of unresolved references that are real errors (not border crossings).
+pub fn unresolved_error_count(m: &Model) -> usize {
+    m.unresolved
+        .role
+        .iter()
+        .filter(|&&r| r != unresolved_role::BORDER_CROSSING)
+        .count()
 }

@@ -471,8 +471,8 @@ fn a_moved_airport_and_a_moved_runway_end_are_caught_too() {
 // REQ: OA-ASP-004
 #[test]
 fn a_reference_to_a_point_neither_source_has_is_listed() {
-    // In the unmodified fixture the CIFP terminal NDB (section PN, not parsed by oa-arinc424)
-    // that approach I04R names is such a reference.
+    // In the unmodified fixture the navaid CGT that approach I04R names is such a reference: the
+    // fixture cut holds neither a CIFP nor a NASR record for it.
     let m = fixture_build().model;
     let u = &m.unresolved;
     assert!(!u.role.is_empty());
@@ -482,6 +482,92 @@ fn a_reference_to_a_point_neither_source_has_is_listed() {
         assert!(!s(&m, u.name[i]).is_empty());
         assert!(u.owner_kind[i] == owner_kind::AIRWAY || u.owner_kind[i] == owner_kind::PROCEDURE);
     }
+}
+
+/// The fixture CIFP text with the header's record count following `edit`.
+fn cifp_edited(edit: impl FnOnce(String) -> String) -> Vec<u8> {
+    let text = edit(String::from_utf8(cifp_file()).expect("latin-1 fixture is ascii"));
+    let n = text.lines().filter(|l| !l.starts_with("HDR")).count();
+    let h = text.lines().next().expect("header").to_string();
+    let patched = format!("{}{:07}{}", &h[..28], n, &h[35..]);
+    text.replacen(&h, &patched, 1).into_bytes()
+}
+
+/// Rewrites the KMDW I04R leg that names CITGO to name the terminal NDB `IK` instead.
+fn name_terminal_ndb(text: String) -> String {
+    let from = "SUSAP KMDWK5FI04R  I      020CITGOK5PC0E";
+    assert_eq!(text.matches(from).count(), 1);
+    text.replacen(from, "SUSAP KMDWK5FI04R  I      020IK   K5PN0E", 1)
+}
+
+/// A terminal NDB (PN) record: the real `IK` record of KIKK moved to KMDW.
+const MDW_TERMINAL_NDB: &str = "SUSAPNKMDWK5 IK    K5002720HO W N41010417W087541357                       W0040           NARLUKOW                         581802412\n";
+
+// REQ: OA-ASP-004, OA-424-002
+#[test]
+fn a_leg_naming_a_terminal_ndb_resolves_to_it_by_airport() {
+    // Without the PN record the leg's fix is unresolved and says it wanted a terminal NDB.
+    let without = cifp_edited(name_terminal_ndb);
+    let src = sources_from(&nasr_files(), &without);
+    let m = build_model(&src, &params("ZAU", 92_600))
+        .expect("build")
+        .model;
+    let u = &m.unresolved;
+    let rows: Vec<usize> = (0..u.role.len())
+        .filter(|&i| s(&m, u.name[i]) == "IK")
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(s(&m, u.wanted[rows[0]]), "P/N");
+    // With it, the leg resolves and the NDB is a point scoped to its airport.
+    let with = cifp_edited(|t| name_terminal_ndb(t) + MDW_TERMINAL_NDB);
+    let src = sources_from(&nasr_files(), &with);
+    let m2 = build_model(&src, &params("ZAU", 92_600))
+        .expect("build")
+        .model;
+    validate_model(&m2).expect("valid");
+    let u2 = &m2.unresolved;
+    assert!((0..u2.role.len()).all(|i| s(&m2, u2.name[i]) != "IK"));
+    assert_eq!(unresolved_error_count(&m2) + 1, unresolved_error_count(&m));
+    let ik = find_point(&m2, key("IK", "K5", "KMDW", point_kind::NDB)).expect("IK at KMDW");
+    // 41 01 04.17 N, 087 54 13.57 W in 1e-7 degrees.
+    let (lat, lon) = (m2.points.lat[ik.0 as usize], m2.points.lon[ik.0 as usize]);
+    assert!((lat - 410_178_250).abs() < 100 && (lon + 879_037_700).abs() < 100);
+}
+
+// REQ: OA-ASP-004
+#[test]
+fn airway_border_crossings_are_their_own_category_not_unresolved_errors() {
+    let base = fixture_build().model;
+    let mut files = nasr_files();
+    edit_nasr(
+        &mut files,
+        "AWY_SEG_ALT.csv",
+        "\"V156\",20,\"REZIE\",\"RP   \"",
+        "\"V156\",20,\"U.S. CANADIAN BORDER-1\",\"\"",
+    );
+    let src = sources_from(&files, &cifp_file());
+    let m = build_model(&src, &params("ZAU", 92_600))
+        .expect("build")
+        .model;
+    validate_model(&m).expect("valid");
+    let u = &m.unresolved;
+    let rows: Vec<usize> = (0..u.role.len())
+        .filter(|&i| u.role[i] == unresolved_role::BORDER_CROSSING)
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let i = rows[0];
+    assert_eq!(s(&m, u.name[i]), "U.S. CANADIAN BORDER-1");
+    assert_eq!(s(&m, u.owner[i]), "V156");
+    assert_eq!(u.owner_kind[i], owner_kind::AIRWAY);
+    assert_eq!(u.ordinal[i], 1);
+    assert_eq!(unresolved_role::name(u.role[i]), "airway border crossing");
+    // It does not count as an unresolved error, and the report lists it in its own section.
+    assert_eq!(unresolved_error_count(&m), unresolved_error_count(&base));
+    assert!(is_border_crossing_name("U.S. MEXICAN BORDER-3"));
+    assert!(!is_border_crossing_name("BORDER"));
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let report = report_for(&out, &src);
+    assert!(report.contains("## Airway border crossings"));
 }
 
 // REQ: OA-ASP-004

@@ -278,3 +278,22 @@ fn rhumb_length_equals_the_sum_of_geodesic_chords() {
         );
     }
 }
+
+// REQ: OA-GEO-007
+#[test]
+fn the_zau_high_edge_12_separation_is_unchanged_to_a_millimetre() {
+    // The edge of the ZAU HIGH boundary with the largest separation. The value is the one the
+    // 64-interval scan with golden-section refinement gave before the Newton-type solver
+    // replaced it (592.4280445927 m); the two agree to under a nanometre.
+    let e = wgs84();
+    let sep = e
+        .geodesic_rhumb_separation(pt(43.69167, -87.16944), pt(43.58667, -84.96361), 64)
+        .expect("separation");
+    assert!(
+        (sep.max_m - 592.428_044_592_7).abs() < 1e-3,
+        "{}",
+        sep.max_m
+    );
+    assert!((sep.geodesic_m - 178_366.501_858_1).abs() < 1e-3);
+    assert!((sep.at_fraction - 0.4998).abs() < 1e-3);
+}

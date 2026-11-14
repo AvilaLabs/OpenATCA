@@ -1,0 +1,5 @@
+SUSAPNKAZOK5 AZ    K5003710HO W N42075214W085314708                       W0030           NARAUSTN                         581112611
+SUSAPNKIKKK5 IK    K5002720HO W N41010417W087541357                       W0040           NARLUKOW                         581802412
+SUSAPNKPIAK5 PI    K5003560HO W N40362023W089353570                       W0020           NARTUNGG                         582272108
+SLAMPNTISXTI ST    TI002410HO W N17413108W064530509                       W0130           NARPESTE                         194452411
+SLAMPNTJSJTJ SJ    TJ003300HO W N18243207W066052241                       W0110           NARPATTY                         194462108

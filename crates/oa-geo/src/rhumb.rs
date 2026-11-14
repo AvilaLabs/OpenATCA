@@ -15,6 +15,12 @@ use crate::geodesic::{ang_normalize, atan2d, sincosd, sq, Ellipsoid};
 use crate::latlon::LatLon;
 
 const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
+/// Newton-type steps allowed before the scan is used, and the step size taken as converged.
+const NEWTON_STEPS: usize = 40;
+const NEWTON_TOL_M: f64 = 1e-8;
+/// Golden-section steps on the separation: the 2/samples bracket shrinks to below 1e-10 of the
+/// line, far finer than the separation's own rounding noise allows to resolve.
+const GOLDEN_STEPS: usize = 40;
 const GOLDEN: f64 = 0.618_033_988_749_894_9;
 
 /// Distance and constant course of a rhumb line.
@@ -216,9 +222,45 @@ impl Ellipsoid {
     }
 
     /// Shortest distance from `p` to the geodesic segment that starts at `start` with azimuth
-    /// `azi1` and length `s12`. A 64-interval scan along the segment brackets the nearest
-    /// point and golden-section search refines it.
+    /// `azi1` and length `s12`, and the distance along the segment at which it occurs.
+    ///
+    /// The nearest point is where the geodesic is perpendicular to the geodesic to `p`. From a
+    /// guess `s` (the previous sample's answer, or the sample's own fraction) each step moves
+    /// along the geodesic by `d cos(theta)`, with `d` the distance to `p` and `theta` the angle
+    /// between the segment's direction there and the direction to `p`, both from the direct and
+    /// inverse problems. The step converges quadratically for the short offsets of boundary
+    /// edges; the result is stationary in `s`, so its error is second order in the position
+    /// error. If the iteration does not settle (a very long offset) the 64-interval scan with
+    /// golden-section refinement ([`Ellipsoid::distance_to_geodesic_scan`]) answers instead.
     fn distance_to_geodesic(
+        &self,
+        p: LatLon,
+        start: LatLon,
+        azi1: f64,
+        s12: f64,
+        guess: f64,
+    ) -> Result<(f64, f64), GeoError> {
+        let mut s = guess.clamp(0.0, s12);
+        for _ in 0..NEWTON_STEPS {
+            let q = self.direct(start, azi1, s)?;
+            let inv = self.inverse(q.position, p)?;
+            let theta = ang_normalize(inv.azimuth1_deg - q.azimuth2_deg).to_radians();
+            let next = (s + inv.distance_m * theta.cos()).clamp(0.0, s12);
+            if (next - s).abs() < NEWTON_TOL_M {
+                // Distance from the last evaluated point; it differs from the distance at
+                // `next` by less than the tolerance, second order.
+                return Ok((inv.distance_m, next));
+            }
+            s = next;
+        }
+        let d = self.distance_to_geodesic_scan(p, start, azi1, s12)?;
+        Ok((d, s))
+    }
+
+    /// Reference method for [`Ellipsoid::distance_to_geodesic`]: a 64-interval scan along the
+    /// segment brackets the nearest point and golden-section search refines it. Slow (hundreds
+    /// of direct and inverse solutions) but needs no starting guess.
+    fn distance_to_geodesic_scan(
         &self,
         p: LatLon,
         start: LatLon,
@@ -268,10 +310,10 @@ impl Ellipsoid {
     ///
     /// Method: the rhumb line is sampled at `samples` equal fractions of its length. For each
     /// sample the true shortest distance to the geodesic segment is found (not the distance to
-    /// the point at the same fraction): a 64-interval scan along the geodesic followed by
-    /// golden-section refinement to about 1e-10 m in position along the geodesic. The sample
+    /// the point at the same fraction) by Newton-type steps along the geodesic until the step
+    /// is below 1e-8 m (the 64-interval scan with golden-section refinement is the fallback). The sample
     /// with the largest distance is then refined by golden-section search over the two
-    /// neighbouring intervals (80 iterations), because the separation is a smooth single-hump
+    /// neighbouring intervals (40 iterations), because the separation is a smooth single-hump
     /// function of the fraction. Accuracy: a few micrometres for lines up to several thousand
     /// kilometres (checked against the closed-form spherical answer in the tests); the result
     /// is a lower bound that converges as `samples` grows, and the refinement makes it
@@ -288,9 +330,21 @@ impl Ellipsoid {
         }
         let geo = self.inverse(p1, p2)?;
         let rhumb = self.rhumb_inverse(p1, p2)?;
+        // The nearest geodesic point moves smoothly with the sample, so each solve starts from
+        // the previous answer.
+        let foot = std::cell::Cell::new(f64::NAN);
         let sep_at = |frac: f64| -> Result<f64, GeoError> {
-            let q = self.rhumb_point_at_fraction(p1, p2, frac)?;
-            self.distance_to_geodesic(q, p1, geo.azimuth1_deg, geo.distance_m)
+            // The rhumb line was solved once above; only the direct problem varies per sample.
+            let q = self.rhumb_direct(p1, rhumb.course_deg, rhumb.distance_m * frac)?;
+            let guess = if foot.get().is_nan() {
+                frac * geo.distance_m
+            } else {
+                foot.get()
+            };
+            let (d, s) =
+                self.distance_to_geodesic(q, p1, geo.azimuth1_deg, geo.distance_m, guess)?;
+            foot.set(s);
+            Ok(d)
         };
         let mut best = (0usize, 0.0f64);
         for i in 1..samples {
@@ -307,7 +361,7 @@ impl Ellipsoid {
         let mut f1 = sep_at(x1)?;
         let mut f2 = sep_at(x2)?;
         let mut top = (best.0 as f64 / n, best.1);
-        for _ in 0..80 {
+        for _ in 0..GOLDEN_STEPS {
             if f1 > top.1 {
                 top = (x1, f1);
             }

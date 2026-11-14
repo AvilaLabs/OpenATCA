@@ -25,6 +25,8 @@ pub enum Record {
     Localizer(Localizer),
     VhfNavaid(VhfNavaid),
     Ndb(Ndb),
+    /// Terminal NDB (`PN`): the same layout as [`Record::Ndb`] with the airport filled in.
+    TerminalNdb(Ndb),
     Waypoint(Waypoint),
     AirwayFix(AirwayFix),
     Leg(Leg),
@@ -33,7 +35,7 @@ pub enum Record {
     Airspace(Airspace),
     AirspaceContinuation(AirspaceContinuation),
     GridMora(GridMora),
-    /// A section/subsection this crate does not decode (`HA`, `PN`, `PP`, `PS`, ...).
+    /// A section/subsection this crate does not decode (`HA`, `PP`, `PS`, ...).
     Other {
         code: String,
         meta: Meta,
@@ -47,7 +49,7 @@ pub fn record_meta(record: &Record) -> &Meta {
         Record::Runway(x) => &x.meta,
         Record::Localizer(x) => &x.meta,
         Record::VhfNavaid(x) => &x.meta,
-        Record::Ndb(x) => &x.meta,
+        Record::Ndb(x) | Record::TerminalNdb(x) => &x.meta,
         Record::Waypoint(x) => &x.meta,
         Record::AirwayFix(x) => &x.meta,
         Record::Leg(x) => &x.meta,
@@ -123,6 +125,7 @@ pub fn parse_record(line: usize, text: &str) -> Result<Record, ErrorKind> {
         ('E', 'R') => Record::AirwayFix(parse_airway_fix(&r, meta)?),
         ('D', ' ') => Record::VhfNavaid(parse_vhf(&r, meta)?),
         ('D', 'B') => Record::Ndb(parse_ndb(&r, meta)?),
+        ('P', 'N') => Record::TerminalNdb(parse_ndb(&r, meta)?),
         ('U', 'C' | 'R') => {
             let kind = if sub == 'C' {
                 AirspaceKind::Controlled

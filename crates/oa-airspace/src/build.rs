@@ -369,6 +369,8 @@ struct Maps {
     nasr_nav_by_id: HashMap<String, Vec<usize>>,
     /// NASR navaid index to candidate (`usize::MAX` when not carried).
     nasr_nav_cand: Vec<usize>,
+    /// (airport candidate, identifier) of a terminal NDB (PN) to candidate.
+    tndb: HashMap<(usize, String), usize>,
     apt_cifp: HashMap<String, usize>,
     apt_faa: HashMap<String, usize>,
     thr: HashMap<(usize, String), usize>,
@@ -376,6 +378,24 @@ struct Maps {
 }
 
 const NO_CAND: usize = usize::MAX;
+
+/// Records a CIFP navaid under its lookup key; a terminal NDB also under its airport.
+fn register_cifp_nav(
+    maps: &mut Maps,
+    sub: char,
+    ident: &str,
+    region: &str,
+    airport: Option<&str>,
+    cand: usize,
+) {
+    if sub != 'N' {
+        maps.nav_cifp
+            .insert((ident.to_string(), region.to_string(), sub), cand);
+    }
+    if let Some(a) = airport.and_then(|a| maps.apt_cifp.get(a).copied()) {
+        maps.tndb.insert((a, ident.to_string()), cand);
+    }
+}
 
 /// The CIFP-side data needed to compare navaid classes.
 fn pair_navaids(
@@ -391,6 +411,8 @@ fn pair_navaids(
         ident: String,
         region: String,
         sub: char,
+        /// The airport of a terminal NDB.
+        airport: Option<String>,
         pos: (f64, f64),
         name: String,
         elev: Option<i32>,
@@ -404,6 +426,7 @@ fn pair_navaids(
                 ident: v.ident.clone(),
                 region: v.icao_region.clone(),
                 sub: ' ',
+                airport: None,
                 pos: (p.lat, p.lon),
                 name: v.name.clone(),
                 elev: v.dme_elevation_ft,
@@ -411,12 +434,14 @@ fn pair_navaids(
             None => no_position += 1,
         }
     }
-    for n in &src.cifp.ndbs {
+    let terminal = src.cifp.terminal_ndbs.iter().map(|n| ('N', n));
+    for (sub, n) in src.cifp.ndbs.iter().map(|n| ('B', n)).chain(terminal) {
         cnavs.push(CNav {
             kind: point_kind::NDB,
             ident: n.ident.clone(),
             region: n.icao_region.clone(),
-            sub: 'B',
+            sub,
+            airport: n.airport_ident.clone(),
             pos: (n.position.lat, n.position.lon),
             name: n.name.clone(),
             elev: None,
@@ -485,8 +510,7 @@ fn pair_navaids(
                         ));
                     }
                     let i = reg.add(ell, cand, false, "navaid");
-                    maps.nav_cifp
-                        .insert((c.ident.clone(), c.region.clone(), c.sub), i);
+                    register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i);
                     if let Some(slot) = maps.nasr_nav_cand.get_mut(ni) {
                         *slot = i;
                     }
@@ -525,11 +549,28 @@ fn pair_navaids(
         cand.region = Some(c.region.clone());
         cand.name = Some(c.name.clone());
         cand.elev = c.elev;
+        if c.sub == 'N' {
+            // A terminal NDB is often the same NDB as an enroute one (same identifier, region
+            // and position): it then shares that point. A different NDB with the same
+            // identifier is told apart by its airport, kept as the point's scope.
+            let same = reg.by_key.get(&key_of(&cand, false)).copied().filter(|&e| {
+                reg.cands
+                    .get(e)
+                    .is_some_and(|o| pos_distance(ell, o.pos, c.pos) <= TERMINAL_NDB_SAME_M)
+            });
+            if let Some(e) = same {
+                register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), e);
+                continue;
+            }
+            cand.scope = c.airport.clone();
+        }
         let i = reg.add(ell, cand, false, "navaid");
-        maps.nav_cifp
-            .insert((c.ident.clone(), c.region.clone(), c.sub), i);
+        register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i);
     }
 }
+
+/// Two NDB records of one identifier and region closer than this are one NDB, metres.
+const TERMINAL_NDB_SAME_M: f64 = 1.0;
 
 fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (Registry, Maps) {
     let mut reg = Registry {
@@ -544,6 +585,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         nasr_nav: HashMap::new(),
         nasr_nav_by_id: HashMap::new(),
         nasr_nav_cand: Vec::new(),
+        tndb: HashMap::new(),
         apt_cifp: HashMap::new(),
         apt_faa: HashMap::new(),
         thr: HashMap::new(),
@@ -987,6 +1029,7 @@ fn resolve_cifp(maps: &Maps, f: &c424::FixRef, airport: Option<usize>) -> Option
             maps.thr.get(&(airport?, desig)).copied()
         }
         ('P', 'I') => maps.loc.get(&(airport?, f.ident.clone())).copied(),
+        ('P', 'N') => maps.tndb.get(&(airport?, f.ident.clone())).copied(),
         ('D', sub) => maps
             .nav_cifp
             .get(&(
@@ -1730,7 +1773,9 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             let has_next = s.to_point.is_some();
             if found(i).is_none() {
                 unresolved.push(UnresolvedOut {
-                    role: if has_next {
+                    role: if is_border_crossing_name(&s.from_point) {
+                        unresolved_role::BORDER_CROSSING
+                    } else if has_next {
                         unresolved_role::AIRWAY_FROM
                     } else {
                         unresolved_role::AIRWAY_TO

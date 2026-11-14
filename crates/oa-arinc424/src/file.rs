@@ -30,6 +30,8 @@ pub struct Cifp {
     pub localizers: Vec<Localizer>,
     pub vhf_navaids: Vec<VhfNavaid>,
     pub ndbs: Vec<Ndb>,
+    /// Terminal NDBs (PN), each carrying its airport.
+    pub terminal_ndbs: Vec<Ndb>,
     pub enroute_waypoints: Vec<Waypoint>,
     pub terminal_waypoints: Vec<Waypoint>,
     pub airways: Vec<Airway>,
@@ -323,6 +325,7 @@ impl<'s> Builder<'s> {
             Record::Localizer(x) => self.out.localizers.push(x),
             Record::VhfNavaid(x) => self.out.vhf_navaids.push(x),
             Record::Ndb(x) => self.out.ndbs.push(x),
+            Record::TerminalNdb(x) => self.out.terminal_ndbs.push(x),
             Record::Waypoint(x) => match x.kind {
                 WaypointKind::Enroute => self.out.enroute_waypoints.push(x),
                 WaypointKind::Terminal => self.out.terminal_waypoints.push(x),

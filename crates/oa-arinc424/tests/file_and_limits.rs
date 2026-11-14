@@ -203,6 +203,7 @@ fn every_fixture_parses_as_one_file_with_counts_and_lookups() {
         "localizers.txt",
         "vhf.txt",
         "ndb.txt",
+        "terminal_ndb.txt",
         "enroute_waypoints.txt",
         "terminal_waypoints.txt",
         "airways.txt",
@@ -220,6 +221,7 @@ fn every_fixture_parses_as_one_file_with_counts_and_lookups() {
     assert_eq!(c.localizers.len(), 4);
     assert_eq!(c.vhf_navaids.len(), 4);
     assert_eq!(c.ndbs.len(), 4);
+    assert_eq!(c.terminal_ndbs.len(), 5);
     assert_eq!(c.enroute_waypoints.len(), 3);
     assert_eq!(c.terminal_waypoints.len(), 3);
     assert_eq!(c.airways.len(), 3);
@@ -654,6 +656,7 @@ fn all_fixture_lines() -> Vec<String> {
         "localizers.txt",
         "vhf.txt",
         "ndb.txt",
+        "terminal_ndb.txt",
         "enroute_waypoints.txt",
         "terminal_waypoints.txt",
         "airways.txt",

@@ -138,7 +138,16 @@ fn navaids_match_nasr() {
     // NASR gives a navaid position and, for DME/TACAN, a second position; CIFP carries both
     // a VOR and a DME position, so either CIFP position may match either NASR position.
     let mut by_id: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+    // Terminal NDB identifiers are two letters and recur across the country, so they are
+    // paired with NASR by identifier and name together; a CIFP-only NDB (such as ADDMO `AI`
+    // at KADM, while NASR's `AI` is VIDEO in Indiana) is then not in NASR rather than a
+    // position disagreement.
+    let mut term_names: HashMap<String, Vec<String>> = HashMap::new();
     for r in read_csv(&nasr, "NAV_BASE.csv") {
+        term_names
+            .entry(r["NAV_ID"].clone())
+            .or_default()
+            .push(r["NAME"].clone());
         let v = by_id.entry(r["NAV_ID"].clone()).or_default();
         for (la, lo) in [
             ("LAT_DECIMAL", "LONG_DECIMAL"),
@@ -171,7 +180,13 @@ fn navaids_match_nasr() {
         let ps: Vec<_> = v.vor_position.into_iter().chain(v.dme_position).collect();
         check(v.meta.line, &v.meta.customer_area, &v.ident, ps);
     }
-    for n in &cifp.ndbs {
+    let (terminal, not_in_nasr): (Vec<_>, Vec<_>) = cifp.terminal_ndbs.iter().partition(|n| {
+        term_names
+            .get(&n.ident)
+            .is_some_and(|v| v.contains(&n.name))
+    });
+    let terminal = terminal.into_iter();
+    for n in cifp.ndbs.iter().chain(terminal) {
         check(
             n.meta.line,
             &n.meta.customer_area,
@@ -179,6 +194,7 @@ fn navaids_match_nasr() {
             vec![n.position],
         );
     }
+    missing += not_in_nasr.len();
     eprintln!(
         "navaids: {matched} match NASR, {missing} not in NASR NAV_BASE, {} USA disagree, {} non-USA disagree {bad_other:?}",
         bad_usa.len(),
@@ -441,11 +457,23 @@ fn scalar_fields_match_nasr() {
             vf.add(any, || format!("{}: {f}", v.ident));
         }
     }
-    for n in cifp.ndbs.iter().filter(|n| n.meta.customer_area == "USA") {
+    let terminal = cifp.terminal_ndbs.iter().map(|n| (true, n));
+    for (is_terminal, n) in cifp.ndbs.iter().map(|n| (false, n)).chain(terminal) {
+        if n.meta.customer_area != "USA" {
+            continue;
+        }
         let (Some(f), Some(rows)) = (n.frequency_khz, navs.get(&n.ident)) else {
             continue;
         };
-        let any = rows
+        // Terminal NDB identifiers recur, so only the NASR row of the same name counts.
+        let same: Vec<_> = rows
+            .iter()
+            .filter(|r| !is_terminal || r.get("NAME") == Some(&n.name))
+            .collect();
+        if same.is_empty() {
+            continue;
+        }
+        let any = same
             .iter()
             .any(|r| num(r, "FREQ").is_some_and(|x| (x - f).abs() < 0.05));
         nf.add(any, || format!("{}: {f}", n.ident));

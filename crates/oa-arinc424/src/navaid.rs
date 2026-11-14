@@ -1,4 +1,4 @@
-//! VHF navaid (D) and NDB (DB) records.
+//! VHF navaid (D), enroute NDB (DB) and terminal NDB (PN) records.
 
 use crate::airport::check_primary;
 use crate::error::ErrorKind;
@@ -75,10 +75,17 @@ pub(crate) fn parse_vhf(r: &Rec, meta: Meta) -> Result<VhfNavaid, ErrorKind> {
     })
 }
 
-/// NDB record (section D, subsection B).
+/// NDB record: enroute (section D, subsection B) or terminal (section P, subsection N).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ndb {
     pub meta: Meta,
+    /// Cols 7-10 / 11-12. The airport a terminal NDB (`PN`) belongs to; blank for enroute
+    /// NDBs. Verified: `KIKK` / `K5` on the NDB `IK` (LUKOW) at Kankakee, whose I04R approach
+    /// legs name it. Verified over the whole file: 180 of the 181 terminal NDBs are found in
+    /// `NAV_BASE` by identifier and name with the same position and frequency (ADDMO `AI` at
+    /// KADM is not in NASR; NASR's `AI` is a different NDB in Indiana).
+    pub airport_ident: Option<String>,
+    pub airport_region: Option<String>,
     /// Cols 14-17. Verified: `AA` equals NASR `NAV_BASE.NAV_ID` for the NDB KENIE at Fargo.
     pub ident: String,
     /// Cols 20-21. ICAO region code.
@@ -106,6 +113,8 @@ pub(crate) fn parse_ndb(r: &Rec, meta: Meta) -> Result<Ndb, ErrorKind> {
         .ok_or_else(|| r.bad("NDB position", 33, 51, "required but blank"))?;
     Ok(Ndb {
         meta,
+        airport_ident: r.opt_text(7, 10),
+        airport_region: r.opt_text(11, 12),
         ident: r.text(14, 17),
         icao_region: r.text(20, 21),
         frequency_khz: r.scaled("NDB frequency", 23, 27, 10.0)?,

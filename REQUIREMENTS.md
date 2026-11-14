@@ -61,8 +61,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   the cycle of their last change, so earlier cycles are expected; a record whose cycle is later
   than the header's is rejected. (Amended 2026-11-14: the original text, "rejecting a file that
   mixes cycles", contradicted how the FAA codes CIFP.)
-- **OA-424-002** Parses airport (PA), runway (PG), VHF navaid (D), NDB (DB), enroute waypoint
-  (EA), terminal waypoint (PC) and localizer/glide slope (PI) records.
+- **OA-424-002** Parses airport (PA), runway (PG), VHF navaid (D), NDB (DB), terminal NDB (PN),
+  enroute waypoint (EA), terminal waypoint (PC) and localizer/glide slope (PI) records.
+  (Amended 2026-11-14: PN added; approach legs name terminal NDBs.)
 - **OA-424-003** Parses airway (ER) records into ordered fixes with route type and altitudes.
 - **OA-424-004** Parses SID (PD), STAR (PE) and approach (PF) records into ordered legs with
   path-terminator, fix, altitude and speed constraints, keeping continuation records attached

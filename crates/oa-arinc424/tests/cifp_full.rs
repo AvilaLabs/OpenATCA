@@ -92,6 +92,7 @@ fn the_real_cifp_parses_with_zero_errors_and_expected_content() {
     assert_eq!(c.localizers.len(), 1278);
     assert_eq!(c.vhf_navaids.len(), 2085);
     assert_eq!(c.ndbs.len(), 373);
+    assert_eq!(c.terminal_ndbs.len(), 181);
     assert_eq!(c.enroute_waypoints.len(), 32_547);
     assert_eq!(c.terminal_waypoints.len(), 37_509);
     assert_eq!(c.mora.len(), 241);

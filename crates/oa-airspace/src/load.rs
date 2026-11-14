@@ -50,6 +50,8 @@ pub enum LoadError {
     Nasr(NasrError),
     /// The CIFP file failed to parse in a way that stops the stream.
     Cifp(cifp_lib::Error),
+    /// A loader thread ended without a result (it panicked); the text names the work.
+    Worker(&'static str),
 }
 
 impl fmt::Display for LoadError {
@@ -84,6 +86,7 @@ impl fmt::Display for LoadError {
             }
             LoadError::Nasr(e) => write!(f, "{e}"),
             LoadError::Cifp(e) => write!(f, "{e}"),
+            LoadError::Worker(what) => write!(f, "{what} ended without a result"),
         }
     }
 }
@@ -173,11 +176,35 @@ pub fn load_bytes(
             return Err(LoadError::ExpectationUnused(e.file.clone()));
         }
     }
-    let nasr_archive = archive_info(nasr_name, nasr_zip, expect)?;
-    let cifp_archive = archive_info(cifp_name, cifp_zip, expect)?;
-    let mut diag = Diagnostics::default();
-    let nasr = load_nasr(nasr_name, nasr_zip, &mut diag)?;
-    let cifp = load_cifp(cifp_name, cifp_zip, &mut diag)?;
+    // The two archives are independent: hash both, then parse both, each pair on two threads.
+    // Both hashes are checked before either archive is parsed, and the NASR result and error
+    // are taken first, so the outcome is the same as running them one after the other.
+    let (nasr_archive, cifp_archive) = std::thread::scope(|sc| {
+        let cifp_hash = sc.spawn(|| archive_info(cifp_name, cifp_zip, expect));
+        let nasr_archive = archive_info(nasr_name, nasr_zip, expect);
+        let cifp_archive = cifp_hash
+            .join()
+            .unwrap_or(Err(LoadError::Worker("CIFP archive hash")));
+        (nasr_archive, cifp_archive)
+    });
+    let (nasr_archive, cifp_archive) = (nasr_archive?, cifp_archive?);
+    let (nasr_result, cifp_result) = std::thread::scope(|sc| {
+        let cifp_load = sc.spawn(|| {
+            let mut diag = Diagnostics::default();
+            load_cifp(cifp_name, cifp_zip, &mut diag).map(|c| (c, diag))
+        });
+        let mut diag = Diagnostics::default();
+        let nasr = load_nasr(nasr_name, nasr_zip, &mut diag).map(|n| (n, diag));
+        let cifp = cifp_load
+            .join()
+            .unwrap_or(Err(LoadError::Worker("CIFP loader")));
+        (nasr, cifp)
+    });
+    let (nasr, mut diag) = nasr_result?;
+    let (cifp, cifp_diag) = cifp_result?;
+    diag.cifp_errors = cifp_diag.cifp_errors;
+    diag.cifp_errors_dropped = cifp_diag.cifp_errors_dropped;
+    diag.cifp_counts = cifp_diag.cifp_counts;
     Ok(Sources {
         nasr_archive,
         cifp_archive,

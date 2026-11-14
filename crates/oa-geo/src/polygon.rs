@@ -4,8 +4,9 @@
 //! north pole is outside any polygon this type accepts, so a point is inside exactly when the
 //! half meridian running north from it crosses the boundary an odd number of times. Longitude
 //! is strictly monotone along a geodesic that is not a meridian, so for each edge the point
-//! where it crosses the test longitude is unique; it is found by bisection on the arc length
-//! using the direct problem (about 64 evaluations, converged far below a micrometre), and the
+//! where it crosses the test longitude is unique; it is found on the arc length with the direct
+//! problem by a bracketed secant (Illinois) iteration, about six evaluations, converged to a few
+//! nanometres, and the
 //! edge counts when that crossing lies north of the test point. Vertices that sit exactly on
 //! the test meridian follow a half-open rule (a vertex belongs to the eastern side), so a
 //! vertex is never counted twice or missed. Edges that cross the antimeridian are handled
@@ -125,21 +126,54 @@ impl Polygon {
 
     /// Latitude at which `edge` crosses the test meridian, where `a` is the longitude of the
     /// edge start relative to that meridian.
+    ///
+    /// Solves `lon(s) + a = 0` for the arc length `s`, where `lon(s)` rises (or falls) steadily
+    /// along the edge, by the Illinois form of regula falsi inside the bracket `[0, s12]`: the
+    /// longitude is nearly linear in `s`, so about six direct problems reach 1e-14 degrees (a
+    /// few nanometres) where bisection needed 64. Stops on a longitude residual under 1e-14
+    /// degrees, a bracket narrower than 1e-9 m, or after 100 steps.
     fn crossing_latitude(&self, edge: &Edge, a: f64) -> f64 {
         let dir = if edge.span < 0.0 { -1.0 } else { 1.0 };
+        let f = |s: f64| {
+            let (_, lon12, _) = self.ell.direct_unrolled(edge.start.lat(), edge.azi1, s);
+            dir * (lon12 + a)
+        };
         let (mut lo, mut hi) = (0.0, edge.s12);
-        for _ in 0..64 {
-            let mid = 0.5 * (lo + hi);
-            let (_, lon12, _) = self.ell.direct_unrolled(edge.start.lat(), edge.azi1, mid);
-            if dir * (lon12 + a) <= 0.0 {
-                lo = mid;
+        // The bracket ends are known without a solve: lon(0) = 0 and lon(s12) = span.
+        let (mut flo, mut fhi) = (dir * a, dir * (a + edge.span));
+        let mut side = 0i8;
+        let mut s = 0.5 * (lo + hi);
+        for _ in 0..100 {
+            s = if fhi != flo && flo <= 0.0 && fhi > 0.0 {
+                (lo * fhi - hi * flo) / (fhi - flo)
             } else {
-                hi = mid;
+                0.5 * (lo + hi)
+            };
+            // Rounding can put the secant point on or outside the bracket; bisect then.
+            if !(s > lo && s < hi) {
+                s = 0.5 * (lo + hi);
+            }
+            let fs = f(s);
+            if fs.abs() < 1e-14 || hi - lo < 1e-9 {
+                break;
+            }
+            if fs <= 0.0 {
+                lo = s;
+                flo = fs;
+                if side == -1 {
+                    fhi *= 0.5;
+                }
+                side = -1;
+            } else {
+                hi = s;
+                fhi = fs;
+                if side == 1 {
+                    flo *= 0.5;
+                }
+                side = 1;
             }
         }
-        let (lat, _, _) = self
-            .ell
-            .direct_unrolled(edge.start.lat(), edge.azi1, 0.5 * (lo + hi));
+        let (lat, _, _) = self.ell.direct_unrolled(edge.start.lat(), edge.azi1, s);
         lat
     }
 }

@@ -282,6 +282,46 @@ fn ndb_records_decode() {
     assert_eq!(adk.icao_region, "PA");
 }
 
+// REQ: OA-424-002, OA-424-007
+#[test]
+fn terminal_ndb_records_decode() {
+    let n: Vec<Ndb> = records("terminal_ndb.txt")
+        .into_iter()
+        .map(|r| match r {
+            Record::TerminalNdb(x) => x,
+            o => panic!("not a terminal NDB: {o:?}"),
+        })
+        .collect();
+    assert_eq!(n.len(), 5);
+    // PN carries the subsection in col 6 and leaves col 13 blank; the airport is in cols 7-12.
+    let ik = n.iter().find(|x| x.ident == "IK").expect("IK");
+    assert_eq!(ik.airport_ident.as_deref(), Some("KIKK")); // Kankakee; the I04R approach names IK
+    assert_eq!(ik.airport_region.as_deref(), Some("K5"));
+    assert_eq!(ik.icao_region, "K5");
+    assert_eq!(ik.name, "LUKOW"); // NASR NAV_BASE NAME
+    assert_eq!(ik.frequency_khz, Some(272.0)); // NASR FREQ 272
+    assert!(close(ik.position, 41.01782488, -87.90376841)); // NASR
+    assert_eq!(ik.magnetic_variation, Some(-4.0)); // NASR 4 W
+    assert_eq!(ik.class, "HO W");
+    assert_eq!(ik.datum, "NAR");
+    let pi = n.iter().find(|x| x.ident == "PI").expect("PI");
+    assert_eq!(pi.airport_ident.as_deref(), Some("KPIA"));
+    assert_eq!(pi.name, "TUNGG"); // NASR NAME; a different NDB (CAPOK, Florida) also has ident PI
+    assert_eq!(pi.frequency_khz, Some(356.0)); // NASR FREQ 356
+    assert!(close(pi.position, 40.60561797, -89.59324977)); // NASR
+    let az = n.iter().find(|x| x.ident == "AZ").expect("AZ");
+    assert_eq!(az.airport_ident.as_deref(), Some("KAZO"));
+    assert_eq!(az.name, "AUSTN"); // NASR NAME
+    assert_eq!(az.frequency_khz, Some(371.0)); // NASR FREQ 371
+    assert!(close(az.position, 42.13114933, -85.52974447)); // NASR
+    assert_eq!(az.magnetic_variation, Some(-3.0)); // NASR 3 W
+    let st = n.iter().find(|x| x.ident == "ST").expect("ST");
+    assert_eq!(st.meta.customer_area, "LAM"); // coded under the Caribbean customer area
+    assert_eq!(st.airport_ident.as_deref(), Some("TISX"));
+    // Enroute NDBs carry no airport.
+    assert!(ndbs().iter().all(|x| x.airport_ident.is_none()));
+}
+
 fn waypoints(name: &str) -> Vec<Waypoint> {
     records(name)
         .into_iter()

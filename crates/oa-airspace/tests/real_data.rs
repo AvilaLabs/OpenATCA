@@ -140,8 +140,18 @@ fn zau_builds_from_the_2026_10_29_cycle() {
         .pairs_over
         .iter()
         .all(|(_, label)| !label.contains("TDD")));
-    // Unresolved references exist (border pseudo-points, terminal NDBs) and each names its owner.
-    assert!(!m.unresolved.role.is_empty());
+    // The airway border pseudo-points are their own category. What is left unresolved are two
+    // defects in the FAA data: ELANR9 at KDPA gives the airport KDPA the section code of an
+    // enroute waypoint (E/A; the airport is coded P/A), and R36 at KDAF
+    // names the NDB CMY, which neither CIFP (no D/DB record) nor NASR (no NAV_BASE row) holds.
+    let border = m
+        .unresolved
+        .role
+        .iter()
+        .filter(|&&r| r == unresolved_role::BORDER_CROSSING)
+        .count();
+    assert_eq!(border, 36);
+    assert_eq!(unresolved_error_count(m), 2);
     // Counts for the report.
     eprintln!(
         "points {} vertices {} boundaries {} segments {} airways {} airway legs {} procs {} routes {} legs {} mora {} unresolved {} disagreements {}",

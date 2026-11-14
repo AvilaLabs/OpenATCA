@@ -164,7 +164,7 @@ pub fn table_sizes(m: &Model) -> Vec<TableSize> {
         ),
         t("MORA cells", m.mora.lat.len(), 6, 0),
         t(
-            "unresolved references",
+            "unresolved references and border crossings",
             m.unresolved.role.len(),
             2 + 6 * 4,
             0,
@@ -521,13 +521,14 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     schema_section(&mut o, r.diag);
 
     let u = &m.unresolved;
+    let is_border = |i: usize| u.role.get(i) == Some(&unresolved_role::BORDER_CROSSING);
     let _ = writeln!(o, "## Unresolved references (OA-ASP-004)\n");
     let _ = writeln!(
         o,
         "references to a point neither source has: {}",
-        u.role.len()
+        unresolved_error_count(m)
     );
-    for i in 0..u.role.len() {
+    let line = |o: &mut String, i: usize| {
         let g = |c: &[StrIx]| c.get(i).map_or("", |s| str_or_empty(&m.strings, *s));
         let owner = if u.owner_kind.get(i) == Some(&owner_kind::AIRWAY) {
             format!("airway {} ({})", g(&u.owner), g(&u.scope))
@@ -543,6 +544,19 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
             g(&u.region),
             g(&u.wanted)
         );
+    };
+    for i in (0..u.role.len()).filter(|&i| !is_border(i)) {
+        line(&mut o, i);
+    }
+    o.push('\n');
+    let _ = writeln!(o, "## Airway border crossings\n");
+    let _ = writeln!(
+        o,
+        "airway points that are not points but border crossings (expected, no position): {}",
+        (0..u.role.len()).filter(|&i| is_border(i)).count()
+    );
+    for i in (0..u.role.len()).filter(|&i| is_border(i)) {
+        line(&mut o, i);
     }
     o.push('\n');
 
