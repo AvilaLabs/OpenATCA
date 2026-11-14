@@ -444,3 +444,75 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FIXM-016** Field names, bits and display tables agree, and short codes read back as text.
 - **OA-FIXM-017** A document with several messages gives one row per message, in order, and
   counts each message.
+
+### TBFM metering publication (oa-tbfm)
+
+Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
+
+- **OA-TBFM-001** Times are parsed from strict ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SS`, an optional
+  fraction of one to three digits, `Z`) to exact Unix milliseconds, including leap days, the
+  century rules and the year range 1970 to 9999.
+- **OA-TBFM-002** A timestamp that is not exactly that form is refused with its own error:
+  wrong shape (offsets, lower case, spaces, date only, compact form, trailing bytes), a
+  non-digit, a fraction of more than three digits, or a value out of range (month, day of
+  month, hour, minute, second `:60`, year before 1970).
+- **OA-TBFM-003** The output is a caller-owned struct-of-arrays with a stated capacity, one
+  `Vec` per column sharing an index, reserved once; rows round-trip through the columns, a push
+  at capacity writes nothing and says so, and the staged row keeps its budgeted size
+  (RULESET A3, A7, C2).
+- **OA-TBFM-004** A `flt` section becomes one row with the flight identity (`aid`, `apt`,
+  `dap`, `gufi`, `cid`, `tmaId`), the envelope and message fields, and the flight-plan fields
+  (status, type, engine, beacon code, speed, altitudes, runways, coordination fix and times);
+  the repeats of `aid`, `apt` and `dap` inside `flt` must agree with the `air` attributes or
+  fill an attribute `air` lacks, and a disagreement is refused. The route and crossing text
+  fields are known and not stored.
+- **OA-TBFM-005** An `mrp` section becomes one row with its own `mrpType` and the meter route
+  names: TRACON, meter fix, delay and scheduling fixes, the four arcs, gate, runway,
+  configuration, category and scenario.
+- **OA-TBFM-006** Each `eta` and `sta` section becomes one row, and each time is filed under its
+  place (delay fix, scheduling fix, meter fix, the four arcs, runway) in the `eta_ms` or
+  `sta_ms` column for that place; several `eta` or `mrp` sections in one `air` are several
+  rows.
+- **OA-TBFM-007** The `sch` flags (`man`, `rfz`, `sfz`, `sus`) are stored as two bits each:
+  absent, `NO`, `YES`; any other word is refused.
+- **OA-TBFM-008** Every message is classified: `air` (flight data), adaptation, control, other,
+  empty, and the `mis` heartbeat and sync markers; non-flight kinds produce no rows and are
+  counted, and the centre and envelope time are reported for all of them.
+- **OA-TBFM-009** A message is accepted whole or not at all: a refused field, a wrong root or
+  namespace, an XML error or a capacity overrun leaves the caller's rows exactly as they were,
+  and a refused field carries the byte offset of its element or attribute value.
+- **OA-TBFM-010** Every field has its own refusal: a missing required attribute (`envSrce`,
+  `envTime`, `msgTime`, `msgId`, `tmaId`, `aid`, `airType`), a name longer than its column, a
+  character outside printable ASCII, a malformed number, transponder code, centre or time, a
+  word outside the vocabulary, a field twice in one element, a value element with children or
+  with text in several nodes; each is reported with the field and the reason. An element sent
+  empty is not an error: it is recorded in the row's `cleared` mask.
+- **OA-TBFM-011** Reaching the row capacity is the reject reason `capacity`, never a
+  reallocation or a partial message, and rows already held count against it.
+- **OA-TBFM-012** Unknown elements (a whole subtree counts once), unknown attributes and
+  elements outside the TBFM namespace are counted and do not affect the rows or the decision to
+  accept; namespace declarations and `targetNamespace` are not counted; known elements that
+  are deliberately not stored are counted separately; statistics add both up over accepted
+  messages and count rejects by reason and by field.
+- **OA-TBFM-013** The decoder never panics: every truncation, deletion, insertion and
+  replacement of each byte of a message with every section kind, and seeded random
+  corruption, give either rows or an error, and a refused message leaves every column the same
+  length as before.
+- **OA-TBFM-014** Character references and CDATA are decoded before a value is validated, an
+  attribute value is normalised as XML requires, and a decoded value longer than the 64-byte
+  working buffer is refused as too long.
+- **OA-TBFM-015** After construction decoding does not grow any column or any parser table,
+  across accepted messages, refused messages and capacity overruns.
+- **OA-TBFM-016** Every message of the real TBFM sample (`OPENATCA_SCDS`, directories named
+  `tbfm*`) decodes with no reject and no unknown path; the test reports messages, rows and
+  rejects by reason, field errors by field, distinct flights, GUFIs, airports and meter fixes,
+  and throughput, which must be at least 20,000 messages per second (parse and decode, one
+  thread, release builds); it skips when the variable is unset.
+- **OA-TBFM-017** Against an airspace snapshot of one ARTCC (`OPENATCA_SNAPSHOT`) the real rows'
+  meter fixes and airports are resolved to model points, and the distinct identifiers and rows
+  that resolve are reported for all centres and for the model's own centre; the test skips
+  when either variable is unset.
+- **OA-TBFM-018** The cross-check resolves a meter fix to a model fix, navaid or terminal
+  waypoint and an airport to a model airport by its identifier or alternate identifier (never
+  to a runway threshold), counts distinct identifiers and rows per role and per scope (all
+  centres, the model's own centre) and lists the identifiers that do not resolve.

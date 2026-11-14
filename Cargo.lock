@@ -60,6 +60,14 @@ name = "oa-sha256"
 version = "0.0.1"
 
 [[package]]
+name = "oa-tbfm"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-xml",
+]
+
+[[package]]
 name = "oa-trace"
 version = "0.0.1"
 
