@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.89 --profile minimal --component clippy,rustfmt && rustup default 1.89
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --release --locked
+      - name: Requirements traceability
+        run: cargo run --locked -p oa-trace
+      - name: No external dependencies
+        run: |
+          if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi
