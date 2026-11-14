@@ -255,17 +255,17 @@ decoded by our own code.
 | TFMS flight data, traffic management programmes | M2 baseline, M4 | SWIM TFMS | **Have**, recording |
 | NOTAMs | M4, M5 (temporary restrictions) | SWIM FNS | **Have**, recording |
 | Terminal surveillance and flight data | M3 terminal | SWIM STDDS | Account not approved |
-| ADS-B history (truth, tracker input) | M2, M3 | adsb.lol history, ODbL | To fetch: the recorded day, Chicago box |
+| ADS-B history (truth, tracker input) | M2, M3 | adsb.lol history, ODbL | Format sample (2026-11-13, first part) **have**; the recorded days publish about 03:30Z the next day |
 | ADS-B live, independent of the FAA | M3, M7 | Own receiver (about $40) | Purchase needs Connor |
 | ADS-B history, research grade | M3 | OpenSky, research licence, non-redistributable | Application pending |
-| Winds and temperature aloft | M4 | NOAA HRRR and RAP, GRIB2, open (AWS open data) | To fetch; needs our own GRIB2 decoder |
-| METAR, TAF, PIREP, SIGMET, G-AIRMET | M4, M8 | aviationweather.gov API, public | To fetch. **Kept only 30 days**: the recorded day must be captured before 2026-12-14 |
-| Aircraft performance | M4 | OpenAP, LGPL-3.0 (read at run time, not copied into this Apache-2.0 repository); BADA is licensed and excluded | To fetch |
-| Aircraft registry and types | M3, M4 | FAA releasable registry, public, daily | To fetch |
-| Terrain | M5 | USGS 3DEP 1 arc-second (public domain, bare earth) preferred; Copernicus GLO-30 (surface model) as check | To fetch, about 0.5–1 GB for the region |
-| Obstacles | M5 | FAA Digital Obstacle File, public, 56-day cycle | To fetch, a few MB |
-| Minimum vectoring and instrument altitudes | M5 | FAA MVA/MIA charts, PDF plus AIXM 5.1 and KMZ | To fetch for C90 and neighbours |
-| Encounter models | M5 | MIT LL Airspace-Encounter-Models, reportedly BSD-2 | To fetch after the licence check |
+| Winds and temperature aloft | M4 | NOAA RAP 13 km (and HRRR sample), GRIB2, public domain | **Have** 2026-11-14 00–16Z; rest after the window; decoder building |
+| METAR, TAF, PIREP, SIGMET, G-AIRMET | M4, M8 | aviationweather.gov API, public | METAR and PIREP **have** to 17Z and queryable for 30 days; TAF, SIGMET and G-AIRMET have no historical query, so an hourly snapshot runs until the window ends |
+| Aircraft performance | M4 | OpenAP v2.6.2: code LGPL-3.0, **data files GPL-3.0**; read at run time from `openatca-data`, never copied into this Apache-2.0 repository. BADA is licensed and excluded | **Have** |
+| Aircraft registry and types | M3, M4 | FAA releasable registry, public, daily | **Have** |
+| Terrain | M5 | USGS 3DEP 1 arc-second, public domain | **Have** 73 of 99 tiles (3.5 GB, the ZAU core); 26 edge tiles (1.3 GB) deferred for space |
+| Obstacles | M5 | FAA Digital Obstacle File, public, 56-day cycle | **Have** (cycle 260927) |
+| Minimum vectoring and instrument altitudes | M5 | FAA MVA/MIA charts, AIXM 5.1 and PDF | **Have** C90, ZAU and 16 nearby TRACONs (FWA links broken at the FAA) |
+| Encounter models | M5 | MIT LL em-model-manned-bayes v2.1.0, BSD-2-Clause, approved for public release | **Have** |
 | Radar formats | M3 | ASTERIX specifications, EUROCONTROL, public | To fetch |
 | Raw radar returns | M3 | Not public | Simulated from ADS-B truth with published error models |
 | ERAM sector boundaries (high and low) | M4, M8 | Not public | Derived from SFDPS ownership changes in our recordings; gap recorded |
@@ -273,7 +273,25 @@ decoded by our own code.
 | ERAM and STARS interface documents | M7 | Partly: ERAM–non-US ACC interface document v4 is hosted by ICAO; NAS-MD-311 status unknown | Fetch the ICAO copy; outreach for the rest |
 | Letters of agreement, local procedures | M4, M8 | Not public | Outreach |
 
+| LADD list (aircraft whose owners asked that their data not be displayed or distributed) | All outputs | FAA ADX portal (adx.faa.gov), "IndustryLADD", monthly | **Needed**: an ADX account for Connor |
+
 Account sign-ups, purchases and every download in this table go to Connor first.
+
+### Obligations that come with the SWIM data (FAA Terms of Service, accepted per feed)
+
+- **Compressed consumption only, JMS only.** The bridge connects over Solace JMS with compression
+  level 9 (fixed 2026-11-14; before that it ran uncompressed).
+- **LADD blocking.** No data, including historical data, may be displayed or distributed for an
+  aircraft registration or call sign on the FAA LADD list, except at the owner's direction; we
+  must update within five business days of each monthly list. So every display, report, replay
+  export and screenshot filters LADD aircraft, and the filter is a tested platform function, not
+  a manual step. Until we have the list, nothing that names individual aircraft leaves the
+  laptop.
+- **Not FAA data.** Anything we redistribute may not be characterised as FAA data: published
+  results say "derived from SWIM data", never "FAA data".
+- **Not NAS-impacting, not a sole safety source.** Consistent with every adoption rung before
+  certification.
+- Each feed's Service Description Document §4.5 may add terms; to be read for each feed.
 
 ## 6. Gaps we cannot close alone
 

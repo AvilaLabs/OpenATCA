@@ -45,20 +45,39 @@ means not found yet.
 
 ### 3.1 Surveillance tracking (M3)
 
-| Metric | Floor | Legacy (to measure, M2) | Best published | Notes |
-|---|---|---|---|---|
-| Probability of update per aircraft (ESASSP I-4) | ≥97% Recommended for 5 NM, measurement interval ≤6 s Recommended (≤8 s Mandatory) (P: EUROCONTROL ESASSP slides, ICAO APAC 2024; Airways NZ WP13 2025) | ERAM via SFDPS | — | Measured per aircraft, not pooled |
-| Long gaps (ESASSP 5N_N-R3) | Per ESASSP Vol 1, value to fetch | ERAM | — | The metric that failed a new radar in Airways NZ's evaluation (P) |
-| Horizontal position RMS (I-6) | ESASSP Vol 1, value to fetch | ERAM track vs truth | IMM: −59% position error vs constant-velocity Kalman (U, 2024, no absolute value) | Absolute metres on our data is what counts |
-| Velocity RMS, speed and heading (I-16) | ESASSP Vol 1, value to fetch | ERAM | IMM: −77% vs CV Kalman (U) | Hardest metric in the one real evaluation found (P: WP13) |
-| False tracks near true tracks (I-18) | ESASSP Vol 1, value to fetch | — | — | Target zero on the recorded day |
-| Track swaps | — | — | — | Our own definition, published with the code |
-| Track initiation delay | — | ERAM | — | From first truth report to first confirmed track |
-| Spoof detection | — | ERAM's behaviour unknown | ≥95% detection (NDSS 2021); false positive rate 0 to 1.06e-3 on open datasets (LoVe, 2023) (S, abstracts) | Injected spoofs over real traffic; publish the confusion matrix |
-| Capacity | ERAM: 1,900 simultaneous tracks, 64 radars per centre (S: FAA ERAM page, archived) | — | — | Ours: all 20 centres at once, real time, one machine |
+Floor: EUROCONTROL ESASSP, EUROCONTROL-SPEC-0147 Edition 1.3 (21 March 2024), Volume 1, Table 3
+(5 NM) and Table 4 (3 NM), cooperative surveillance (P, read 2026-11-14; copy in
+`openatca-data/raw/standards/esassp-vol1/`). We target the 3 NM Recommended column throughout,
+since terminal airspace needs it and en route benefits from it.
 
-The ESASSP numeric tables have not been read yet: the Volume 1 PDF (edition 26 June 2023) is free
-from EUROCONTROL. **Fetching it is the first step of M2.**
+| Metric (ESASSP id) | 5 NM Mand. / Rec. | **3 NM Mand. / Rec. (our floor)** | Legacy (M2) | Best published |
+|---|---|---|---|---|
+| Measurement interval (R1) | ≤8 s / ≤6 s | ≤5 s / **≤4 s** | SFDPS publication interval only | — |
+| Probability of update, data age ≤7 s (R2) | ≥97% per flight and global / ≥99% global | ≥97% per flight / **≥99% global** | not measurable from SFDPS | — |
+| Missed positions in long gaps (R3) | ≤0.5% | **≤0.5%** | — | — |
+| Horizontal position RMS (R4) | ≤500 m / ≤350 m global | ≤300 m / **≤210 m global, <230 m per flight** | ERAM published track vs truth | IMM −59% vs CV Kalman (U, no absolute value) |
+| Correlated errors, 3+ reports (R5) | — / ≤0.03% over 926 m | — / **≤0.03% over 555 m** | ERAM | — |
+| Relative time of applicability, nearby aircraft (R6) | — / ≤0.3 s RMS | — / **≤0.3 s RMS within 6 NM** | — | — |
+| Pressure altitude: update ≥96% (R7), mean age ≤4 s (R8), incorrect ≤0.1% (R10), error ≤200/300 ft in 99.9% level, ≤300 ft in 98.5% climbing (R11) | same | **same** | ERAM vs ADS-B barometric | — |
+| Emergency/SPI change delay (R12), identity change delay (R13) | ≤12 s, ≤24 s | **≤7.5 s, ≤15 s** | — | — |
+| Identity correct (R14), incorrect identity (R15) | ≥98%, ≤0.1% | **>98% per flight, ≤0.1%** | ERAM association errors | — |
+| Vertical rate RMS (R16) | ≤250 ft/min level, ≤500 climbing | **same** | ERAM | — |
+| Speed RMS (R17) | ≤6 / ≤4 m/s straight; ≤11 / ≤8 turning | **≤4 m/s straight, ≤8 m/s turning** | ERAM track velocity | IMM −77% vs CV Kalman (U) |
+| Heading RMS (R18) | ≤10° straight, ≤25° turning | **same** | ERAM | — |
+| False target density (R19) | — / <10 per 900 NM² over 450 intervals | — / **≤2 per 100 NM² over 720 intervals** | — | — |
+| Falsely confirmed tracks near true tracks (R20) | — / ≤2 per hour within 7 NM | — / **≤1 per hour within 9 NM**; our target zero on the recorded day | ERAM swaps (T9) | — |
+| Continuity (R21) | — / ≤2.5×10⁻⁵ critical failures per hour | **same** | — | — |
+| Spoof detection | — | — | unknown | ≥95% detection (NDSS 2021); false positives 0 to 1.06×10⁻³ (LoVe 2023) (S, abstracts) |
+| Capacity | — | — | ERAM: 1,900 tracks, 64 radars per centre (S) | ours: all 20 centres in real time on one machine |
+
+ESASSP notes: any flight failing R2, R4, R12 or R13 must be investigated (R22). Track initiation
+has no numeric requirement ("verified by design"). A valid sample is at least 36,000 measurement
+intervals; trajectories under 50 intervals may be excluded (§4.1.3.3.1). Non-cooperative
+(primary radar) floors are lower (3 NM: interval ≤5 s, update >90%, RMS ≤300 m, Annex D).
+
+FAA separation context (JO 7110.65BB §5-5-4): ERAM 5 NM below FL600, 3 NM up to FL230 within
+40 NM of the preferred radar (60 NM with MSSR) or in track-based mode; ADS-B "allows expanded use
+of 3 NM". JO 7210.3EE §3-6: WAM targets may not be used for 3 NM in ERAM.
 
 ### 3.2 Flight data and trajectory prediction (M4)
 
@@ -69,26 +88,52 @@ from EUROCONTROL. **Fetching it is the first step of M2.**
 | Same, distance error | — | — | 3.9 nmi climb, 4.3 nmi descent (same paper) | |
 | Along-track, cross-track and vertical error at 5, 10 and 20 minutes | — | ERAM conflict probe: published Tech Center studies exist (Paglione et al.) but are scans without a text layer | — | Read the scans; until then legacy is measured from TFMS and TBFM estimates only |
 | Route conversion agreement | — | ERAM's converted route in SFDPS | — | Every disagreement explained |
-| Conflict probe missed and false alerts | — | — | MTCD about 0.8% missed, 3.6% false (U: workshop slides, labels ambiguous); "less than 5%" false (S: Czech ATC paper) | Placeholders until a primary source is read |
+| Conflict probe missed and false alerts | ERAM factory acceptance limits: aircraft-to-aircraft missed alert rate 0.025; aircraft-to-airspace 0.02; warning time 854 s for conflicts over 10 min out, 104 s under (P: Vivona, Paglione, Cate, Enea, AIAA, Table 2; ERAM met them by November 2008). ERAM's basic function requires at least 75 s warning (P: Paglione, Oaks, Ryan) | Probe in Chicago Center, Tech Center study: hit rate 0.939, false alarm rate 0.126, positive predictive value 0.120 (baseline) (P: Rein et al., DOT/FAA/TC-TN-12/65, Tables 2–4) | MTCD about 0.8% missed, 3.6% false (U) | ZAU numbers are on our own centre: a direct target |
 
 ### 3.3 Safety alerts (M5)
 
-Few numbers are public, so this section is mostly method. The method is the one ACAS X used
-to replace TCAS II: Monte Carlo runs over published encounter models, scored by risk ratio
-(collision or near-miss risk with the alert divided by risk without), alert rate and nuisance
-rate, against a baseline run of the legacy logic.
+The method is the one ACAS X used to replace TCAS II: Monte Carlo runs over published encounter
+models, scored by risk ratio, alert rate and missed alerts against a baseline run of the legacy
+logic, plus recorded traffic.
 
-| Metric | Floor | Legacy | Best published | Notes |
-|---|---|---|---|---|
-| Conflict alert warning time | EUROCONTROL-SPEC-122 §4.3.2, value to fetch; STCA look-ahead about 2 min (U) | ERAM and STARS conflict alert: FAA orders, value to fetch | — | |
-| Nuisance alert rate | Definition: "correctly generated according to the rule set but … operationally inappropriate"; alerts lasting a few seconds are generally nuisances (S: EUROCONTROL STCA guidance) | NTSB A-06-44 to A-06-47 (2006, 10 terrain accidents and 1 midair) asked for fewer unwarranted MSAW alerts and better attention capture (P) | ACAS X vs TCAS II: about 52% fewer alerts per aircraft, about 33% fewer 500 ft corrective alerts (U: review paper table, headers unclear) | Missed and nuisance rates always reported together |
-| Missed alerts | — | — | — | Scored on encounter models and on recorded losses of separation |
-| Risk ratio | — | — | ACAS X validation reports (MIT LL ATC-408), to read | Applied to ground safety nets as a new benchmark |
-| Formal proof | — | None published for ERAM or STARS | DAIDALUS (DO-365 reference): algorithms proved in PVS; 2023 NASA/TU Wien work verified the floating-point C code and proved absence of overflow (P) | We prove the geometric core and its implementation |
+**Floor: EUROCONTROL safety-net guidelines** (GUID-159 STCA, GUID-160 MSAW, GUID-161 APW,
+GUID-162 APM, 18 January 2017; Part II performance table, identical for all four; P). Encounters
+are classed 1 (alert necessary), 2 (desirable), 3 (unnecessary but understandable), 4
+(undesirable), 5 (void). We target the **Preferred** column:
 
-Encounter models: MIT Lincoln Laboratory's manned correlated and uncorrelated models are public
-on GitHub (Airspace-Encounter-Models), reportedly BSD-2 licensed; confirm the licence file
-before use.
+| Indicator | Required | **Preferred (our floor)** |
+|---|---|---|
+| Category 1 encounters alerted | ≥95% | **100%** |
+| Category 2 encounters alerted | ≥80% | **≥90%** |
+| Alerts that are category 3, 4 or 5 | ≤75% | **≤50%** |
+| Category 3 encounters alerted | — | **≤30%** |
+| Category 4 encounters alerted | — | **≤1%** |
+| Cat 1/2 with adequate time available but less warning given | ≤45% | **≤35%** |
+| Mean warning time where adequate time exists | ≥90% of adequate | **≥95%** |
+| Mean warning time where it does not | ≥70% of objective | **≥75%** |
+
+Parameters and test scenarios (GUID-159/160 Part III): STCA warning time up to 2 min; converging
+in both planes, alert at least 80 s before collision (ideally 90 s); same-level crossing at least
+50 s (ideally over 60 s). MSAW with digital terrain: prediction 40–60 s, warning 30–50 s,
+imminent 20–30 s; obstacles prediction 50–60 s, imminent 20–30 s; minimum terrain clearance
+300–1,000 ft; test scenarios alert at least 10–20 s before infringement.
+
+FAA orders (JO 7110.65BB, 7210.3EE, changes to 9 July 2026) give **no** numeric conflict alert or
+MSAW parameters; they refer to the ERAM Site Adaptation Manual and the NAS Configuration
+Management Document, which are not public. Facility managers may inhibit alerts and must
+"minimize" nuisance alarms (7210.3 §12-6-7). So the legacy alerting parameters are an outreach
+item; legacy alert *behaviour* we can only observe where it is reported (LEGACY_SHORTCOMINGS).
+
+**Best published (collision-avoidance analogue):** ACAS X vs TCAS II over 5×10⁵ encounters from
+the US encounter model (MIT LL, Asmar and Kochenderfer 2013, Table 5; P): risk ratio 3.26×10⁻³ vs
+8.81×10⁻³ with alert probability 0.284 vs 0.532 — 63% less risk with 47% fewer alerts. That is
+the shape of result we want for ground safety nets: lower risk *and* fewer alerts, both measured.
+
+**Formal proof:** DAIDALUS (DO-365 reference) algorithms proved in PVS, and its floating-point C
+code verified free of overflow (NASA/TU Wien 2023; P). None published for ERAM or STARS.
+
+Encounter models: MIT LL em-model-manned-bayes v2.1.0, BSD-2-Clause, "Distribution Statement A,
+approved for public release" (fetched 2026-11-14).
 
 ### 3.4 Platform (M6, M9)
 
@@ -103,12 +148,9 @@ before use.
 
 | Need | Where | Next step |
 |---|---|---|
-| ESASSP Vol 1 numeric requirements | EUROCONTROL website, free | Fetch the PDF (small) |
-| ERAM conflict probe trajectory accuracy | FAA Tech Center reports by Paglione and others; scans | Read the scanned PDFs page by page |
-| TBFM ETA error by look-ahead | NASA ATD-2 material | Find a working copy; meanwhile measure it ourselves |
+| ERAM and STARS conflict alert and MSAW parameters | ERAM Site Adaptation Manual, NAS Configuration Management Document (not public) | Outreach |
+| ERAM conflict probe trajectory error by look-ahead | Tech Center reports; data in figures only (ICAS 2002 R45) | Measure legacy estimates ourselves in M2 |
+| TBFM ETA error by look-ahead | NASA ATD-2 material | Measure ourselves in M2 |
 | OpenAP validation numbers | Sun, Hoekstra, Ellerbroek, Aerospace 2020 | Retry the publisher page |
-| ESASSP 3 NM values | ESASSP Vol 1 | With the PDF |
-| ERAM and STARS failover time | Not public | Outreach question |
-| STCA warning time and alert-rate targets | EUROCONTROL-SPEC-122, GUID-123 | Fetch the current editions |
-| FAA conflict alert and MSAW parameters | JO 7110.65, JO 7210.3 (public; faa.gov refused automated fetch) | Download by hand |
-| ACAS X risk ratio, induced risk | MIT LL ATC-408 (a copy is already saved locally) | Read it |
+| ERAM and STARS failover time | Not public | Outreach |
+| Interfacility message set (ERAM to adjacent centres) | NAM Common Coordination ICD Rev E (NAS-IC-21009205); the public ERAM–non-US ICD covers only transport: TCP over VPN, 4-byte hex length header, ≤1,800 bytes, 95th-percentile latency ≤225 ms, recovery within 60 s, availability goal 0.9999 | Look for a public copy of Rev E |
