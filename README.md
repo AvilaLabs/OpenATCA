@@ -61,6 +61,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
+| `crates/oa-awc` | Aviation Weather Center JSON (METAR altimeter lookup, PIREP, SIGMET/AIRMET/G-AIRMET, TAF) and `oa-awc-summary` |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

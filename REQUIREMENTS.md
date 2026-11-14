@@ -1080,3 +1080,63 @@ the FAA event extension).
   the first 8 MiB, or all of it with `OPENATCA_ADSB_FULL`) no trace is refused and no row is
   rejected, reports are kept in the ZAU box, and under 0.1 % of consecutive pairs are position
   jumps; the test prints the counts and skips when the data is absent.
+
+## M2 — Weather inputs
+
+### Aviation Weather Center data (oa-awc)
+
+Built on the captured files in `raw/awc` (18 hourly METAR and PIREP files, snapshots of TAF, SIGMET,
+US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory's `SOURCE.md`.
+
+- **OA-AWC-001** Timestamps are strict ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`, optional fraction of one
+  to three digits, years 2000 to 2099); other forms, impossible dates and `:60` are refused.
+  Station and aircraft identifiers are 3 to 4 (aircraft type 2 to 4) upper-case letters or digits.
+- **OA-AWC-002** A METAR row carries station, observation time, position, altimeter (tenths of hPa),
+  temperature and dew point (tenths of a degree), wind (`VRB` coded), gust, visibility in hundredths
+  of a mile with the "or more" flag for `"10+"` (strings and numbers both read), flight category and
+  the raw text; absent and null fields give the `NONE` sentinels.
+- **OA-AWC-003** The altimeter group is read from `rawOb` (`A3014` as inHg times 100, `Q1021` as hPa,
+  nothing after `RMK`) and compared with `altim`; compared, disagreeing (over 0.4 hPa), missing and
+  no-group records are counted, and a disagreeing row keeps its fields but has its altimeter withheld.
+- **OA-AWC-004** Duplicate METARs (same station, observation time and type, as in overlapping hourly
+  files) are removed by `finalize_metar`, keeping the greatest receipt time then text; duplicates and
+  keys whose copies differ are counted, and the table is identical whatever the order of the files.
+- **OA-AWC-005** `altimeter_at(table, station, t, max_age)` returns the latest trusted altimeter at or
+  before `t` with its age, never a later one, skipping withheld altimeters, and refuses with a typed
+  error an unknown station, no observation yet, no trusted altimeter, or an age over `max_age`.
+- **OA-AWC-006** `indicated_altitude_ft` converts pressure altitude and a setting in hPa to indicated
+  altitude with the ISA relation (identity at 1013.25 hPa; about 270 ft at 1023.1 hPa), and returns
+  nothing for a setting or altitude outside its bounds.
+- **OA-AWC-007** A METAR record that is not an object, lacks a required field, has a bad identifier,
+  time, type or code, or a value out of its bound is refused alone, appends nothing and is counted by
+  reason; the other records of the file are kept.
+- **OA-AWC-008** A file that is not valid JSON, not an array, or holds more records than the limit is
+  refused whole with a typed error and leaves the table and counts unchanged; a file that would
+  exceed the table row limit is refused before anything is appended.
+- **OA-AWC-009** A PIREP row carries time, position, flight level (hundreds of feet; none for during
+  descent or climb), aircraft type, temperature, wind, and two icing and two turbulence layers with
+  coded intensity, type and frequency; a reversed base and top, an unknown code or a flight level over
+  600 is refused and counted; duplicates are removed and counted.
+- **OA-AWC-010** International SIGMET records give a polygon (one ring, or several for `AREAS`) in
+  degrees, base and top in feet with absent ends open, and validity times; a ring of under three
+  points, an unknown geometry or a base above the top is refused and counted.
+- **OA-AWC-011** US SIGMET/AIRMET records take the base as the smallest `altitudeLow*` and the top as
+  the largest `altitudeHi*` given, and the creation time as the issue time.
+- **OA-AWC-012** G-AIRMET records read text coordinates and hundreds-of-feet altitude text into feet,
+  `SFC` as 0, a base of `FZL` as a flag, the freezing-level band and level, validity from `validTime`
+  to `expireTime`, and refuse a bad altitude text or a base above the top.
+- **OA-AWC-013** Duplicate hazard areas across snapshots are removed and counted independently of file
+  order; `active_hazards_at` selects the rows valid at a time; `hazard_covers` tests a point and an
+  optional altitude against the rings (open bounds, antimeridian longitudes, and a line covers nothing).
+- **OA-AWC-014** TAF records give a header (station, issue, validity, position) and periods (change
+  group, probability, wind, gust, visibility, lowest broken or overcast ceiling); a period with an
+  end before its start refuses the whole forecast; duplicate issuances are removed and counted.
+- **OA-AWC-015** No input panics: every prefix of a sample for each product and 400 seeded random byte
+  mutations of each give tables or typed errors.
+- **OA-AWC-016** On the real captured files (`OPENATCA_DATA/raw/awc`; skipped with a note when absent)
+  every file parses, every record is accepted, `altim` and `rawOb` never disagree, de-duplication
+  counts balance, and at least 90 % of the stations in the ZAU box have a trusted altimeter in at
+  least 95 % of the hours; the test prints the counts.
+- **OA-AWC-017** `oa-awc-summary [dir]` scans a directory tree, parses each recognised file by its
+  name, reports records, refusals by reason, duplicates, the altimeter cross-check and station
+  availability, lists files refused whole and skipped names, and exits 1 if any file was refused whole.

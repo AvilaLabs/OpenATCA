@@ -22,6 +22,7 @@ members = [
     "crates/oa-display",
     "crates/oa-tiff",
     "crates/oa-dof",
+    "crates/oa-awc",
     "tools/oa-trace",
 ]
 
