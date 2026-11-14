@@ -103,6 +103,7 @@ fn header() -> Header {
         replay_hash: "cd".repeat(32),
         counts: vec![("flights".into(), 3)],
         notes: vec!["a note, with a comma".into()],
+        truth: Vec::new(),
     }
 }
 
@@ -192,15 +193,19 @@ fn scratch(name: &str) -> std::path::PathBuf {
 
 // REQ: OA-BENCH-023
 #[test]
-fn the_binary_refuses_adsb_for_now_and_runs_the_synthetic_world() {
+fn the_binary_runs_the_synthetic_world_and_refuses_bad_arguments() {
     let exe = env!("CARGO_BIN_EXE_oa-bench");
+    // An ADS-B run needs --out; a gate override must be a positive number.
     let out = std::process::Command::new(exe)
-        .args(["--adsb", "clip.oaf", "--out", "x"])
+        .args(["--adsb", "clip.oaf"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("oa-truth"), "{err}");
+    let out = std::process::Command::new(exe)
+        .args(["--truth-bracket-s", "-3", "--out", "x"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
 
     let dir = scratch("synthetic");
     let run = |d: &std::path::Path| {

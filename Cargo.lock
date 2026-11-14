@@ -39,12 +39,16 @@ dependencies = [
 name = "oa-bench"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb",
+ "oa-airspace",
  "oa-feed",
  "oa-fixm",
+ "oa-geo",
  "oa-replay",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
+ "oa-truth",
  "oa-xml",
 ]
 

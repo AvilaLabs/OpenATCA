@@ -52,6 +52,9 @@ pub struct Header {
     pub counts: Vec<(String, u64)>,
     /// Free notes (truth source, limits).
     pub notes: Vec<String>,
+    /// The truth section as `(name, value)` rows (gates, statistics, leave-one-out table,
+    /// digest); empty when truth is closed-form (synthetic) and nothing is printed.
+    pub truth: Vec<(String, String)>,
 }
 
 /// The code version string for this build.
@@ -99,6 +102,12 @@ pub fn render_text(h: &Header, run: &RunOutput) -> String {
             i.label, i.files, i.bytes, i.sha256
         );
     }
+    if !h.truth.is_empty() {
+        let _ = writeln!(o, "\nTruth (ADS-B reference trajectories)");
+        for (k, v) in &h.truth {
+            let _ = writeln!(o, "  {k}: {v}");
+        }
+    }
     let _ = writeln!(o, "\nExtraction counts");
     for (k, v) in &h.counts {
         let _ = writeln!(o, "  {k}: {v}");
@@ -128,7 +137,7 @@ fn csv_field(s: &str) -> String {
 }
 
 /// The machine-readable report: one record per line, the first field names the record kind
-/// (`header`, `input`, `count`, `stat`, `scalar`, `withheld`, `note`, `case`, `exclusion`).
+/// (`header`, `input`, `truth`, `count`, `stat`, `scalar`, `withheld`, `note`, `case`, `exclusion`).
 pub fn render_csv(h: &Header, run: &RunOutput) -> String {
     let mut o = String::new();
     let _ = writeln!(o, "kind,metric,label,n,mean,rms,median,p95,p99,max");
@@ -148,6 +157,9 @@ pub fn render_csv(h: &Header, run: &RunOutput) -> String {
             i.bytes,
             i.sha256
         );
+    }
+    for (k, v) in &h.truth {
+        let _ = writeln!(o, "truth,,{},{}", csv_field(k), csv_field(v));
     }
     for (k, v) in &h.counts {
         let _ = writeln!(o, "count,,{},{v}", csv_field(k));
