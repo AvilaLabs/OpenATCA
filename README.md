@@ -69,6 +69,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-awc` | Aviation Weather Center JSON (METAR altimeter lookup, PIREP, SIGMET/AIRMET/G-AIRMET, TAF) and `oa-awc-summary` |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, truth and airspace wiring (`oa-truth`, M0 model), report writer, and the `oa-bench` binary |
 | `crates/oa-wind` | Wind and temperature aloft at (lat, lon, pressure altitude, time) from RAP analyses, never extrapolated, and the `oa-wind-check` validation tool |
+| `crates/oa-asterix` | ASTERIX category 021, 048 and 062 encoder and decoder: generic core (data block, FSPEC, item kinds, constant UAP tables) and typed items for the tracker |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, report writer, and the `oa-bench` binary |
 | `tools/oa-trace` | Requirements traceability checker |
 

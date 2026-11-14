@@ -1,0 +1,15 @@
+[package]
+name = "oa-asterix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Workspace crate only, not an outside dependency (RULESET F1): the test that builds a
+# CAT021 record from a real oa-adsb row.
+oa-adsb = { path = "../oa-adsb" }
