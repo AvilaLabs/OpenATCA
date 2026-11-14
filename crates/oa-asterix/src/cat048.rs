@@ -224,7 +224,10 @@ pub(crate) fn decode_item(rec: &mut Cat048, frn: u8, b: &[u8]) -> Result<bool, E
             if b.len() != 6 {
                 return Err(ErrorKind::InvalidValue);
             }
-            rec.ident = Some(decode_ident(b)?);
+            match decode_ident_opt(b)? {
+                Some(id) => rec.ident = Some(id),
+                None => return Ok(false),
+            }
         }
         10 => {
             let n = usize::from(first(b)?);

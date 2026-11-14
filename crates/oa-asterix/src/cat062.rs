@@ -154,7 +154,7 @@ fn decode_derived(b: &[u8]) -> Result<AircraftDerived, ErrorKind> {
         let sub = b.get(s..e).ok_or(ErrorKind::Truncated)?;
         match i {
             0 => d.address = Some(fixed(sub, 3)?),
-            1 => d.ident = Some(decode_ident(sub)?),
+            1 if sub.iter().any(|&x| x != 0) => d.ident = Some(decode_ident(sub)?),
             5 => d.selected_altitude = Some(decode_selected_altitude(sub)?),
             _ => d.other.push(RawSub {
                 number: u8::try_from(i + 1).map_err(|_| ErrorKind::UnknownSubitem)?,
@@ -288,7 +288,7 @@ fn encode_derived(d: &AircraftDerived) -> Result<Vec<u8>, ErrorKind> {
         let i = usize::from(r.number)
             .checked_sub(1)
             .ok_or(ErrorKind::UnknownSubitem)?;
-        if matches!(i, 0 | 1 | 5) {
+        if matches!(i, 0 | 5) || (i == 1 && d.ident.is_some()) {
             return Err(ErrorKind::DuplicateItem);
         }
         parts.push((i, r.bytes.clone()));

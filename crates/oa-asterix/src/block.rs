@@ -9,8 +9,8 @@ use crate::common::{ItemError, Items, RawItem};
 use crate::error::{AsterixError, ErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
 use crate::uap::{uap_for, Uap};
 use crate::wire::{
-    assemble_record, check_item, item_number, parse_block, RawBlock, BLOCK_HEADER_LEN,
-    MAX_BLOCK_LEN, MAX_RECORDS_PER_BLOCK,
+    assemble_record, check_compound_minimal, check_item, item_number, parse_block, RawBlock,
+    BLOCK_HEADER_LEN, MAX_BLOCK_LEN, MAX_RECORDS_PER_BLOCK,
 };
 
 /// A decoded data block: the category and its records.
@@ -57,13 +57,31 @@ fn type_block(buf: &[u8], base: usize, raw: &RawBlock) -> Result<Block, AsterixE
         let mut raws: Vec<RawItem> = Vec::new();
         for s in &rec.spans {
             let bytes = buf.get(s.start..s.end).unwrap_or(&[]);
+            // A compound primary subfield that is not the shortest is fine in a raw item and
+            // refused in a typed one (see `wire`); the primary is the first thing wrong.
+            let minimal = check_compound_minimal(uap, s.frn, bytes);
+            let not_minimal = |i: usize| {
+                at(
+                    cat,
+                    ri,
+                    s.frn,
+                    uap,
+                    base + s.start + i,
+                    ErrorKind::CompoundNotMinimal,
+                )
+            };
             let typed = match cat {
                 21 => cat021::decode_item(&mut c21, s.frn, bytes),
                 48 => cat048::decode_item(&mut c48, s.frn, bytes),
                 _ => cat062::decode_item(&mut c62, s.frn, bytes),
             }
-            .map_err(|k| at(cat, ri, s.frn, uap, base + s.start, k))?;
-            if !typed {
+            .map_err(|k| match minimal {
+                Err(i) => not_minimal(i),
+                Ok(()) => at(cat, ri, s.frn, uap, base + s.start, k),
+            })?;
+            if typed {
+                minimal.map_err(not_minimal)?;
+            } else {
                 raws.push(RawItem {
                     frn: s.frn,
                     bytes: bytes.to_vec(),

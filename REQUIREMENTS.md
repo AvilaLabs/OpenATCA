@@ -1761,8 +1761,8 @@ raw bytes. The decisions where the specification leaves room are listed in the `
 - **OA-AST-006** An item whose FX chain does not end inside the record or within 32 octets, a repetitive
   item with a factor of zero or that runs past the block, an explicit-length field shorter than two octets
   or past the block, a compound item with no subitem, with a subitem the category does not define (naming
-  the subitem), with FX on its last defined primary octet or with a trailing all-zero primary octet, and a
-  fixed item or subitem cut short are refused with the item number and byte offset.
+  the subitem), with FX on its last defined primary octet or (in an item decoded into fields) with a trailing all-zero
+  primary octet, and a fixed item or subitem cut short are refused with the item number and byte offset.
 - **OA-AST-007** A bit that the specification fixes to zero (a spare bit) is refused in every fixed and
   extended item and compound subitem whose table entry lists it, at the extension the specification puts it
   in (bits that are assigned in another extension of the same item are accepted); reserved enumeration
@@ -1796,7 +1796,8 @@ raw bytes. The decisions where the specification leaves room are listed in the `
 - **OA-AST-017** The bounds are named constants (block length 65 535, records per block, extension chain 32,
   repetitions 255, primary subfield 8) and hold at the edge: a block of exactly 65 535 octets and 255
   repetitions are accepted, one more is not.
-- **OA-AST-018** Six-bit characters code A to Z, space and 0 to 9 and nothing else; a latitude of exactly
+- **OA-AST-018** Six-bit characters code A to Z, space and 0 to 9 and nothing else (six octets of zero in an
+  identification are the one exception, see OA-AST-026); a latitude of exactly
   +-90 degrees is accepted and one count more is refused.
 - **OA-AST-019** A CAT021 record built from an `oa-adsb` row (position, address, NACp, NIC, SIL, MOPS version,
   Mode 3/A, callsign, altitudes, ground vector, vertical rate) round-trips, with every quantised field within
@@ -1862,3 +1863,30 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   of the profile's.
 - **OA-SIM-019** The `oa-sensorsim` binary writes the plots (CSV and CAT048) of an OAF1 clip, gives the same
   bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.
+- **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
+  libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
+  fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
+  version, a link type other than Ethernet, a truncated file or packet, a packet cut by the snaplen, a captured
+  length over 262 144, an Ethernet type other than IPv4, a bad IP header or length, a fragment, a protocol
+  other than UDP and a bad UDP length.
+- **OA-AST-023** On real captures from another organisation's system (skipped when `OPENATCA_DATA` is absent):
+  every block of CAT021, CAT048 and CAT062 in the eight sample files decodes (none refused except the
+  pre-standard file of OA-AST-028), re-encodes to the same bytes, and the blocks of categories 001, 002, 034
+  and 065 are counted by category with their framing checked; the counts per file are pinned.
+- **OA-AST-024** On the same files our decoded values agree with the upstream decoder's expected output: block
+  category and length, record bytes, every item's bytes and identity, and the CAT048 and CAT062 field values
+  (position, time, Mode 3/A, flight level, address, identification, track number, plot characteristics,
+  track status, velocity, ages, altitudes), with zero differences; the container times of the GPS file
+  equal the upstream time stamps and the CAT001/002 frames match its block list.
+- **OA-AST-025** A compound item kept as raw bytes may have a primary subfield whose last octet sets no bit
+  (real trackers write one in I062/390) and goes back as it came; a compound item with no subitem is still
+  refused; in a compound item decoded into fields the trailing zero octet is refused, naming its byte.
+- **OA-AST-026** An identification (I021/170, I048/240, I062/380 subitem 2) of six zero octets, which real
+  radars send for "none", is kept raw and round-trips with the typed field empty; any other code outside the
+  six-bit set is still refused.
+- **OA-AST-027** The Reserved Expansion Field and the Special Purpose Field of CAT021, CAT048 and CAT062 are
+  kept as raw bytes and round-trip, and a length past the record is refused.
+- **OA-AST-028** A CAT062 record written in a pre-standard layout (the Ed 0.17 UAP, the 100 datagrams of the
+  sample `asterix.pcap`) is refused by the Ed 1.21 decoder and not misread; on the real file all 100 are
+  refused and all 100 tile their blocks exactly under the Ed 0.17 layout with a constant data source and a
+  time of track that never runs backwards.

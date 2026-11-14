@@ -158,6 +158,16 @@ pub(crate) fn decode_ident(b: &[u8]) -> Result<Ident, ErrorKind> {
     Ok(out)
 }
 
+/// Like [`decode_ident`], but six octets of all zero bits give `None`. Real radars and trackers
+/// send them for "no identification" (every character the unassigned code 0); the item is then
+/// kept as raw bytes so that it round-trips, and the typed field stays empty.
+pub(crate) fn decode_ident_opt(b: &[u8]) -> Result<Option<Ident>, ErrorKind> {
+    if b.len() == 6 && b.iter().all(|&x| x == 0) {
+        return Ok(None);
+    }
+    decode_ident(b).map(Some)
+}
+
 /// Six octets from eight characters.
 pub(crate) fn encode_ident(id: &Ident, out: &mut Vec<u8>) -> Result<(), ErrorKind> {
     let mut v = 0u64;
