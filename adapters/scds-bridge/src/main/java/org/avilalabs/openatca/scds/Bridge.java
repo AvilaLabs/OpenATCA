@@ -31,6 +31,8 @@ public final class Bridge {
   private static final SecureRandom RNG = new SecureRandom();
   private static final PrintStream ERR = System.err;
   private static final long RECEIVE_TIMEOUT_MS = 5_000;
+  /** Solace stream compression level (1-9); SCDS requires compressed consumption. */
+  private static final int COMPRESSION_LEVEL = 9;
   /** A connection that stayed up this long resets the backoff. */
   private static final long STABLE_MS = 60_000;
 
@@ -148,13 +150,16 @@ public final class Bridge {
     cf.setConnectRetries(0);
     cf.setReconnectRetries(0);
     cf.setReceiveADWindowSize(ackWindow(env));
+    // SCDS usage standards: "Keep Data Compression enabled. Consuming compressed data is the only
+    // authorized method for obtaining SCDS data products."
+    cf.setCompressionLevel(COMPRESSION_LEVEL);
     Connection c = cf.createConnection();
     try {
       Session s = c.createSession(false, Session.CLIENT_ACKNOWLEDGE);
       MessageConsumer mc = s.createConsumer(s.createQueue(env.require("SCDS_QUEUE")));
       c.start();
       status("state=connected");
-      log("event=connected ack_window=" + ackWindow(env));
+      log("event=connected ack_window=" + ackWindow(env) + " compression=" + COMPRESSION_LEVEL);
       while (true) {
         Message m = mc.receive(RECEIVE_TIMEOUT_MS);
         if (m == null) continue;
