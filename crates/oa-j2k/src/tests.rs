@@ -759,3 +759,41 @@ fn coc_and_qcc_override_cod_and_qcd_in_either_order() {
     m.splice(at..at, seg);
     assert!(matches!(decode(&m), Err(J2kError::BadMarker(_))));
 }
+
+// REQ: OA-J2K-013
+#[test]
+fn tier_1_work_is_counted_and_bounded_before_any_block_is_decoded() {
+    use crate::{header, tile, work_budget, WORK_FLOOR, WORK_PER_BYTE};
+    let mut rng = Rng(77);
+    // One 64 x 64 block: the work is its passes times its samples.
+    let samples = image(&mut rng, 64 * 64, 16, false);
+    let cs = encode(&samples, &Opts::new(64, 64, 16, 0));
+    let p = header::parse(&cs).unwrap();
+    let mut t = tile::build(&p).unwrap();
+    tile::read_packets(&mut t, p.body, p.layers).unwrap();
+    let passes = u64::from(t.blocks.passes[0]);
+    assert!(passes > 30);
+    assert_eq!(tile::work(&t), passes * 64 * 64);
+    assert_eq!(decode(&cs).unwrap().samples, samples);
+    // The same stream declaring 1 bit per sample (exponents unchanged) asks for far more
+    // passes than a 1-bit image can have: refused, with the numbers in the error.
+    let mut lie = cs.clone();
+    let siz = find(&lie, 0xFF51);
+    lie[siz + 4 + 36] = 0;
+    let Err(J2kError::WorkBudget { work, budget }) = decode(&lie) else {
+        panic!("not refused");
+    };
+    assert_eq!(work, passes * 64 * 64);
+    assert_eq!(budget, work_budget(64 * 64, 1, p.body.len()));
+    assert!(work > budget);
+    // The budget: per sample at most 3 * (bits + 8) passes, and no more than the data backs.
+    assert_eq!(work_budget(1000, 8, usize::MAX), 1000 * 48);
+    assert_eq!(
+        work_budget(u64::MAX, 16, 100),
+        WORK_FLOOR + WORK_PER_BYTE * 100
+    );
+    // 16 Mi samples of 16 bits in a 12 KB stream: about 0.1 G visits, not 1.4 G.
+    assert!(work_budget(16 << 20, 16, 12_000) < 110_000_000);
+    // A real NOAA field (451 x 337, 15 bits, about 50 KB) has margin of at least 4 times.
+    assert!(work_budget(451 * 337, 15, 36_000) > 4 * 2_200_000);
+}

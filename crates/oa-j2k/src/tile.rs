@@ -367,6 +367,37 @@ fn read_packet(
     Ok(())
 }
 
+/// Tier-1 work the tile asks for: samples visited over all coding passes of all included
+/// blocks. Counted from the packet headers alone, before any block is decoded.
+pub fn work(t: &Tile) -> u64 {
+    let (cw, ch) = (1u64 << t.xcb, 1u64 << t.ycb);
+    let mut total = 0u64;
+    for s in 0..t.bands.orient.len() {
+        let g = |v: &[u32]| u64::from(v.get(s).copied().unwrap_or(0));
+        let (nbx, nby, first) = (g(&t.bands.nbx), g(&t.bands.nby), g(&t.bands.first));
+        let (bx0, by0, bx1, by1) = (
+            g(&t.bands.x0),
+            g(&t.bands.y0),
+            g(&t.bands.x1),
+            g(&t.bands.y1),
+        );
+        let (gx0, gy0) = (g(&t.gx0), g(&t.gy0));
+        for by in 0..nby {
+            for bx in 0..nbx {
+                let blk = (first + by * nbx + bx) as usize;
+                let passes = u64::from(t.blocks.passes.get(blk).copied().unwrap_or(0));
+                if passes == 0 {
+                    continue;
+                }
+                let w = (((gx0 + bx + 1) * cw).min(bx1)).saturating_sub(((gx0 + bx) * cw).max(bx0));
+                let h = (((gy0 + by + 1) * ch).min(by1)).saturating_sub(((gy0 + by) * ch).max(by0));
+                total = total.saturating_add(passes * w * h);
+            }
+        }
+    }
+    total
+}
+
 /// Decodes every included block (tier-1) and stores its coefficients in `coef`
 /// (`width` samples per row, bands placed as [`crate::dwt`] expects).
 pub fn decode_blocks(

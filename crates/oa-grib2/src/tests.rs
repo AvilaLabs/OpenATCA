@@ -1266,3 +1266,65 @@ fn mutated_messages_never_panic() {
     }
     assert!(decoded > 0);
 }
+
+/// A message whose section 5 claims `ndata` values, patched into an otherwise valid field.
+fn with_ndata(mut p: Packed, ndata: u32, bitmap: Vec<u8>) -> Vec<u8> {
+    p.sect5[5..9].copy_from_slice(&ndata.to_be_bytes());
+    simple_message(small_grid(), temp_product(500), &p, bitmap)
+}
+
+// REQ: OA-GRIB-025
+#[test]
+fn value_count_is_checked_against_the_grid_before_anything_is_allocated() {
+    // A section 5 that claims 4,294,967,295 values at zero bits each would have the unpacker
+    // reserve 16 GiB (4 bytes per value, more for the complex templates) while the data section
+    // is empty. Every template must be refused first, with nothing sized from the claim.
+    let huge = u32::MAX;
+    let refused = |m: &[u8]| {
+        matches!(
+            decode_message(m),
+            Err(Grib2Error::BadPacking(_) | Grib2Error::BadBitmap(_))
+        )
+    };
+    // 5.0 simple packing, zero bits per value, no bitmap.
+    let p = encode_simple(&[0; 12], 1.0, 0, 0);
+    assert!(refused(&with_ndata(p, huge, sect6(None, false))));
+    // 5.40 JPEG 2000, zero bits per value (the "constant field" path sizes a vector by ndata).
+    let p = encode_jpeg2000(&[], 12, 273.5, 0, 0, 0, 0);
+    assert!(refused(&with_ndata(p, huge, sect6(None, false))));
+    // 5.2 and 5.3 with one group whose stated length is the same enormous count.
+    for order in [0u8, 2] {
+        let o = ComplexOpts {
+            group_lens: vec![12],
+            order,
+            missing_mgmt: 0,
+            extra_octets: 2,
+        };
+        let mut p = encode_complex(&[Some(7); 12], 1.0, 0, 0, &o);
+        p.sect5[42..46].copy_from_slice(&huge.to_be_bytes());
+        assert!(refused(&with_ndata(p, huge, sect6(None, false))));
+    }
+    // With a bitmap the count must equal the set bits, not merely fit the grid.
+    let mask: Vec<bool> = (0..12).map(|k| k % 2 == 0).collect();
+    let p = encode_simple(&[1, 2, 3, 4, 5, 6], 0.0, 0, 0);
+    assert!(refused(&with_ndata(
+        p.clone(),
+        huge,
+        sect6(Some(&mask), false)
+    )));
+    assert!(refused(&with_ndata(
+        p.clone(),
+        7,
+        sect6(Some(&mask), false)
+    )));
+    // A claim within the grid but past what the data section holds is refused too.
+    let p = encode_simple(&[1, 2, 3], 0.0, 0, 0);
+    assert!(refused(&with_ndata(p, 12, sect6(None, false))));
+    // The unpackers refuse a count beyond the grid limit when called directly.
+    let rp = crate::pack::parse_repr(&encode_simple(&[0; 12], 1.0, 0, 0).sect5).unwrap();
+    let big = crate::pack::Repr { ndata: huge, ..rp };
+    assert!(matches!(
+        crate::pack::unpack(&big, &[]),
+        Err(Grib2Error::GridPoints(_))
+    ));
+}

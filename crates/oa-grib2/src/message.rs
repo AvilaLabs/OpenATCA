@@ -412,21 +412,30 @@ fn finish_field(
     if !want_data {
         return Ok((info, None));
     }
+    // The value count of section 5 must match the grid (or the bitmap's set bits) before any
+    // unpacker sizes a vector from it.
+    let bitmap_used = match bitmap {
+        BitmapSpec::None => None,
+        BitmapSpec::Present(bm) => Some(bm),
+        BitmapSpec::Previous => Some(st.last_bitmap.as_ref().ok_or(Grib2Error::BadBitmap(
+            "indicator 254 with no earlier bitmap",
+        ))?),
+    };
+    match bitmap_used {
+        None if u64::from(repr.ndata) != npoints => {
+            return Err(Grib2Error::BadPacking("value count differs from the grid"));
+        }
+        Some(bm) if repr.ndata != bm.set => {
+            return Err(Grib2Error::BadBitmap(
+                "set bits differ from the number of data values",
+            ));
+        }
+        _ => {}
+    }
     let packed = unpack(&repr, payload)?;
-    let values = match bitmap {
-        BitmapSpec::None => {
-            if packed.len() as u64 != npoints {
-                return Err(Grib2Error::BadPacking("value count differs from the grid"));
-            }
-            packed
-        }
-        BitmapSpec::Present(bm) => apply_bitmap(bm, &packed)?,
-        BitmapSpec::Previous => {
-            let bm = st.last_bitmap.as_ref().ok_or(Grib2Error::BadBitmap(
-                "indicator 254 with no earlier bitmap",
-            ))?;
-            apply_bitmap(bm, &packed)?
-        }
+    let values = match bitmap_used {
+        None => packed,
+        Some(bm) => apply_bitmap(bm, &packed)?,
     };
     Ok((info, Some(values)))
 }
