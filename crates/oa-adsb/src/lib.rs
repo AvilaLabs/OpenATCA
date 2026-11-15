@@ -127,6 +127,7 @@
 
 mod archive;
 mod category;
+pub mod cli;
 mod frames;
 mod speed;
 mod summary;

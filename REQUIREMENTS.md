@@ -1415,6 +1415,39 @@ frame of their feed has been fed (as the ADS-B table is).
   consecutive printed categories agree, and a reserved code is ignored and never raises the cap above
   the ordinary one. The summary applies it, and a report that is itself a jump does not count.
 
+- **OA-ADSB-150** The hard cap of an emitter category is 2,000 kt for `A0`, `A6`, `B0`, `B6` and no category
+  (never below a configured ordinary cap), 4,088 kt for `B7`, and the ordinary cap for every other code, reserved
+  codes included; the no-speed ceiling is 600 kt for `A1` and `A7`, 450 kt for `B1` to `B4`, 800 kt for `A2` to
+  `A5` and `B6`, 200 kt for `C1` to `C3`, 4,088 kt for `B7` and 2,000 kt for every other code.
+- **OA-ADSB-151** A pair beyond the position allowance whose time gap is not a positive number (NaN, zero,
+  negative) or whose distance is not a number is a jump of the cap kind; within the allowance it is plausible
+  whatever the gap; the allowance widens the cap and the ceiling alike.
+- **OA-ADSB-152** With a ground speed on either or both reports, a displacement is plausible up to 1.2 times the
+  larger speed plus 40 kt plus 2 kt per second of the gap and not beyond it, whatever the class ceiling; the hard
+  cap still applies first, and with no ground speed the class ceiling applies.
+- **OA-ADSB-153** `is_jump` is true exactly when `jump_verdict` is not `Plausible`.
+- **OA-ADSB-154** Every field of an `ADS2` record (geometric altitude, vertical rate, category, NIC, NACp, NACv,
+  SIL, SIL type, version, GVA, SDA and the rest) is encoded at its documented offset and decoded back unchanged.
+- **OA-ADSB-155** Every field of an `ADS1` record that the layout has decodes unchanged, the measurements of
+  the later layout are absent, and a non-zero reserved byte is counted and ignored.
+- **OA-ADSB-156** A payload of exactly the most records of its layout is accepted and one more is refused; the
+  length must be exactly header plus count records; `encode_payload` writes `to - from` records and refuses
+  an empty, reversed or past-the-end range and one over the most; `frame_ranges` starts a frame at the first
+  report that is a full span after the frame's first, or after the most rows, and clamps the span to 1 to 60000 ms.
+- **OA-ADSB-157** A record with an unknown source, a bad measurement and a set reserved byte at once is kept,
+  and each of the three counts shows it; any two of them show as two.
+- **OA-ADSB-158** Unknown values are counted per field and per value, cut at 24 bytes on a character boundary,
+  kept for 32 distinct pairs with the rest in the overflow count; adding two `Stats` sums every count and merges
+  their value tables (a pair both have is summed, one the table cannot hold goes to the overflow count).
+- **OA-ADSB-159** The archive scan counts trace and other entries (a cut entry is not a trace entry), keeps
+  at most 16 refusal messages while counting every refusal, refuses an entry over the trace size limit unread,
+  and applies the gzip ratio limit only above 1 MiB of output.
+- **OA-ADSB-160** `parse_iso` reads `YYYY-MM-DDTHH:MM:SSZ` to the exact Unix second and refuses an out-of-range
+  month, day, hour, minute or second (a leap second 60 is the next minute) and any other shape.
+- **OA-ADSB-161** The clip command line reads every flag (`--out`, `--box`, `--from`, `--to`, `--frame-ms`,
+  `--allow-truncated`, `--help`, `-h`, parts), with times as Unix seconds or ISO, and refuses a missing value, an
+  unknown option, a bad box, a frame span outside 1 to 60000 ms, a missing output or no parts.
+
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
