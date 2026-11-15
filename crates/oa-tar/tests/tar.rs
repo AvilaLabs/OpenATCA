@@ -509,3 +509,74 @@ fn a_long_run_of_extension_headers_is_refused() {
     let (_, end) = read_all(vec![Cursor::new(t)], bytes);
     assert!(matches!(end, Err(TarError::TooManyMeta { .. })), "{end:?}");
 }
+
+fn pax_rec(k: &str, v: &str) -> String {
+    let body = format!(" {k}={v}\n");
+    let mut n = body.len() + 1;
+    if n.to_string().len() + body.len() != n {
+        n += 1;
+    }
+    format!("{n}{body}")
+}
+
+fn ext(out: &mut Vec<u8>, typeflag: u8, payload: &[u8]) {
+    let magic: &[u8] = if typeflag == b'x' {
+        b"ustar\x0000"
+    } else {
+        b"ustar  \0"
+    };
+    out.extend_from_slice(&header("ext", payload.len() as u64, typeflag, "", magic));
+    data_blocks(out, payload);
+}
+
+// REQ: OA-TAR-059
+#[test]
+fn a_pending_pax_size_applies_to_the_next_entry_not_to_the_extension_record_after_it() {
+    // Local PAX size=0, then PAX path=target, then an empty regular file.
+    let mut t = Vec::new();
+    ext(&mut t, b'x', pax_rec("size", "0").as_bytes());
+    ext(&mut t, b'x', pax_rec("path", "target").as_bytes());
+    t.extend_from_slice(&header("plain", 0, b'0', "", b"ustar\x0000"));
+    finish(&mut t);
+    let (seen, end) = read_all(vec![Cursor::new(t)], DEFAULT_LIMITS);
+    assert_eq!(end.unwrap(), Next::End);
+    assert_eq!(names(&seen), ["target"]);
+    assert!(seen[0].2.is_empty());
+}
+
+// REQ: OA-TAR-059
+#[test]
+fn a_pax_size_is_not_applied_to_gnu_long_name_or_long_link_records() {
+    let long = format!("{}/{}", "d".repeat(150), "f".repeat(120));
+    let mut nm = long.clone().into_bytes();
+    nm.push(0);
+    let mut link = b"some/link/target".to_vec();
+    link.push(0);
+    // PAX size=3, then a long name and a long link, then a file whose header says 0.
+    for order in [*b"LK", *b"KL"] {
+        let mut t = Vec::new();
+        ext(&mut t, b'x', pax_rec("size", "3").as_bytes());
+        for f in order {
+            ext(&mut t, f, if f == b'L' { &nm } else { &link });
+        }
+        t.extend_from_slice(&header("plain", 0, b'0', "", b"ustar\x0000"));
+        data_blocks(&mut t, b"abc");
+        finish(&mut t);
+        let (seen, end) = read_all(vec![Cursor::new(t)], DEFAULT_LIMITS);
+        assert_eq!(end.unwrap(), Next::End);
+        assert_eq!(names(&seen), [long.as_str()]);
+        assert_eq!(seen[0].2, b"abc");
+    }
+    // A long name first, then PAX size and path, then the file.
+    let mut t = Vec::new();
+    ext(&mut t, b'L', &nm);
+    let both = format!("{}{}", pax_rec("size", "2"), pax_rec("path", "p/q"));
+    ext(&mut t, b'x', both.as_bytes());
+    t.extend_from_slice(&header("plain", 0, b'0', "", b"ustar\x0000"));
+    data_blocks(&mut t, b"hi");
+    finish(&mut t);
+    let (seen, end) = read_all(vec![Cursor::new(t)], DEFAULT_LIMITS);
+    assert_eq!(end.unwrap(), Next::End);
+    assert_eq!(names(&seen), ["p/q"]);
+    assert_eq!(seen[0].2, b"hi");
+}

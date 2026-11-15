@@ -104,6 +104,8 @@ pub enum QueryError {
     TooManyTiles,
     /// The region would visit more than [`MAX_QUERY_SAMPLES`] samples.
     TooManySamples,
+    /// The cells times the polygon vertices, plus the tiles, are over [`MAX_QUERY_WORK`].
+    TooMuchWork,
     /// A conservative circle reaches a pole or would cross the antimeridian, where longitude is
     /// not a plane; the query is refused rather than answered from one side only.
     LongitudeWraps,
@@ -122,6 +124,7 @@ impl std::fmt::Display for QueryError {
             QueryError::BadPolygon => write!(f, "polygon needs 3 to {MAX_POLYGON_VERTICES} vertices within 180 degrees of longitude"),
             QueryError::TooManyTiles => write!(f, "more than {MAX_TILES} tiles"),
             QueryError::TooManySamples => write!(f, "query region too large"),
+            QueryError::TooMuchWork => write!(f, "query would do too much work"),
             QueryError::LongitudeWraps => write!(f, "area reaches a pole or crosses the antimeridian"),
             QueryError::NoTiles => write!(f, "tile set is empty"),
             QueryError::TilesNotAligned => write!(f, "tiles do not share one sample lattice"),

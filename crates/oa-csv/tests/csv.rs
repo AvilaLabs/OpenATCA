@@ -469,3 +469,70 @@ fn crate_has_no_dependencies() {
     assert!(section.is_empty(), "unexpected dependencies: {section:?}");
     assert!(!toml.contains("[dev-dependencies]") && !toml.contains("[build-dependencies]"));
 }
+
+/// Reads `text` through a `BufReader` of `cap` bytes: the header, the records and the first error.
+fn through_bufreader(
+    text: &[u8],
+    cap: Option<usize>,
+) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    let src = match cap {
+        Some(c) => io::BufReader::with_capacity(c, text),
+        None => io::BufReader::new(text),
+    };
+    let r = Reader::new("test.csv", src).map_err(|e| e.to_string())?;
+    let header: Vec<String> = r.header().names().to_vec();
+    let mut recs = Vec::new();
+    for rec in r {
+        let rec = rec.map_err(|e| e.to_string())?;
+        recs.push(rec.fields().map(str::to_string).collect());
+    }
+    Ok((header, recs))
+}
+
+// REQ: OA-CSV-005
+#[test]
+fn a_byte_order_mark_is_skipped_however_the_reader_splits_it() {
+    let text = b"\xEF\xBB\xBFh\nv\n";
+    let want = (vec!["h".to_string()], vec![vec!["v".to_string()]]);
+    for cap in [None, Some(1), Some(2), Some(3), Some(4)] {
+        assert_eq!(
+            through_bufreader(text, cap),
+            Ok(want.clone()),
+            "cap {cap:?}"
+        );
+    }
+    // A mark and nothing else, and a mark cut short by the end of the input.
+    for cap in [None, Some(1), Some(2)] {
+        assert!(through_bufreader(b"\xEF\xBB\xBF", cap).is_err());
+        assert!(through_bufreader(b"\xEF\xBB", cap).is_err());
+    }
+}
+
+// REQ: OA-CSV-005
+#[test]
+fn bytes_that_start_like_a_byte_order_mark_but_are_not_one_are_delivered_intact() {
+    // EF BB BE is U+FEFE, a valid character that is not the mark: it stays in the header.
+    let text = b"\xEF\xBB\xBEh\nv\n";
+    let want = (vec!["\u{FEFE}h".to_string()], vec![vec!["v".to_string()]]);
+    for cap in [None, Some(1), Some(2), Some(3), Some(4)] {
+        assert_eq!(
+            through_bufreader(text, cap),
+            Ok(want.clone()),
+            "cap {cap:?}"
+        );
+    }
+    // EF BB then an ASCII byte, and EF then an ASCII byte, are invalid UTF-8 however they split.
+    for text in [&b"\xEF\xBBXh\nv\n"[..], &b"\xEFXh\nv\n"[..]] {
+        let first = through_bufreader(text, None);
+        assert!(first.is_err());
+        for cap in [Some(1), Some(2), Some(3)] {
+            assert_eq!(through_bufreader(text, cap), first, "cap {cap:?}");
+        }
+    }
+    // A mark-like prefix inside a quoted header is plain data too.
+    let text = b"\xEF\xBB\xBE\"a,b\"\nv\n";
+    let first = through_bufreader(text, None);
+    for cap in [Some(1), Some(2)] {
+        assert_eq!(through_bufreader(text, cap), first);
+    }
+}

@@ -118,7 +118,7 @@ pub(crate) fn smooth(t_ns: &[i64], ze: &[f64], zn: &[f64], sigma: &[f64], q: f64
                 ],
             )
         } else {
-            let dt = secs(t - prev_t);
+            let dt = secs(t.saturating_sub(prev_t));
             let f = trans(dt);
             let (Some(xf), Some(pf)) = (out.xf.last(), out.pf.last()) else {
                 break;
@@ -146,7 +146,7 @@ pub(crate) fn smooth(t_ns: &[i64], ze: &[f64], zn: &[f64], sigma: &[f64], q: f64
         let (Some(&ta), Some(&tb)) = (t_ns.get(k), t_ns.get(k + 1)) else {
             continue;
         };
-        let f = trans(secs(tb - ta));
+        let f = trans(secs(tb.saturating_sub(ta)));
         let (Some(xf), Some(pf), Some(xs1), Some(ps1), Some(xp1), Some(pp1)) = (
             out.xf.get(k),
             out.pf.get(k),
@@ -214,7 +214,7 @@ pub(crate) fn interp(v: &LegView<'_>, k: usize, t_ns: i64, q: f64) -> Option<([f
         };
         return Some((*v.xs.get(k1)?, *v.ps.get(k1)?));
     }
-    let (tau, d) = (secs(t_ns - ta), secs(tb - t_ns));
+    let (tau, d) = (secs(t_ns.saturating_sub(ta)), secs(tb.saturating_sub(t_ns)));
     let xf = v.xf.get(k)?;
     let pf = unpack(v.pf.get(k)?);
     let f1 = trans(tau);

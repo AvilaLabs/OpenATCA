@@ -83,6 +83,10 @@ pub const MAX_RADIUS_NM: f64 = 500.0;
 /// Limit: most samples one query may visit (a 500 nm radius at 1 arc-second is about 2.4e9, so
 /// the radius limit is the practical one; this guards a polygon the size of a continent).
 pub const MAX_QUERY_SAMPLES: u64 = 1 << 31;
+/// Limit: most work one conservative query may do, counted as lattice cells times the larger of 1
+/// and the polygon vertices, plus the tiles. The largest query the tests and the real-data runs
+/// make is about 4e6 (a 5 nm radius on a 1/3 arc-second lattice); this allows over 500 times that.
+pub const MAX_QUERY_WORK: u64 = 1 << 31;
 
 /// Metres per foot, exact.
 pub const METRES_PER_FOOT: f64 = 0.3048;

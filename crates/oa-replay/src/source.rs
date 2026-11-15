@@ -344,12 +344,25 @@ pub fn try_merge_streams(
     chunk: usize,
     sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
 ) -> io::Result<MergeReport> {
+    let (report, end) = merge_counted(specs, chunk, sink);
+    end.map(|()| report)
+}
+
+/// The merge itself: what was counted up to the point it stopped, and how it ended.
+fn merge_counted(
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
+) -> (MergeReport, io::Result<()>) {
     let n = specs.len();
     let mut bufs: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; MAX_FRAME_LEN]).collect();
     let mut streams: Vec<Stream<'_>> = Vec::with_capacity(n);
     for (spec, buf) in specs.into_iter().zip(bufs.iter_mut()) {
         let Ok(reader) = FrameReader::new(buf) else {
-            return Err(io::Error::other("reader buffer too small"));
+            return (
+                empty_report(),
+                Err(io::Error::other("reader buffer too small")),
+            );
         };
         streams.push(Stream {
             feed: spec.feed,
@@ -377,38 +390,36 @@ pub fn try_merge_streams(
     }
     // Capacity n, never more: one entry per stream that still has a frame.
     let mut heap: BinaryHeap<Reverse<(MergeKey, usize)>> = BinaryHeap::with_capacity(n);
-    for (i, s) in streams.iter_mut().enumerate() {
-        if s.advance()? {
-            heap.push(Reverse((
-                merge_key(s.head.recv_ns, s.feed, s.head.seq, i as u32, s.head.offset),
-                i,
-            )));
+    let end = (|| -> io::Result<()> {
+        for (i, s) in streams.iter_mut().enumerate() {
+            if s.advance()? {
+                heap.push(Reverse((
+                    merge_key(s.head.recv_ns, s.feed, s.head.seq, i as u32, s.head.offset),
+                    i,
+                )));
+            }
         }
-    }
-    while let Some(Reverse((_, i))) = heap.pop() {
-        let Some(s) = streams.get_mut(i) else { break };
-        sink(&Merged {
-            feed: s.feed,
-            kind: s.head.kind,
-            recv_ns: s.head.recv_ns,
-            seq: s.head.seq,
-            stream: i as u32,
-            offset: s.head.offset,
-            payload: &s.head.payload,
-        })?;
-        if s.advance()? {
-            heap.push(Reverse((
-                merge_key(s.head.recv_ns, s.feed, s.head.seq, i as u32, s.head.offset),
-                i,
-            )));
+        while let Some(Reverse((_, i))) = heap.pop() {
+            let Some(s) = streams.get_mut(i) else { break };
+            sink(&Merged {
+                feed: s.feed,
+                kind: s.head.kind,
+                recv_ns: s.head.recv_ns,
+                seq: s.head.seq,
+                stream: i as u32,
+                offset: s.head.offset,
+                payload: &s.head.payload,
+            })?;
+            if s.advance()? {
+                heap.push(Reverse((
+                    merge_key(s.head.recv_ns, s.feed, s.head.seq, i as u32, s.head.offset),
+                    i,
+                )));
+            }
         }
-    }
-    let mut report = MergeReport {
-        files: 0,
-        bytes: 0,
-        errors: [0; ERR_COUNT],
-        frame_errors: Vec::new(),
-    };
+        Ok(())
+    })();
+    let mut report = empty_report();
     for (i, s) in streams.iter().enumerate() {
         report.files += s.files;
         report.bytes += s.bytes;
@@ -421,7 +432,16 @@ pub fn try_merge_streams(
             }
         }
     }
-    Ok(report)
+    (report, end)
+}
+
+fn empty_report() -> MergeReport {
+    MergeReport {
+        files: 0,
+        bytes: 0,
+        errors: [0; ERR_COUNT],
+        frame_errors: Vec::new(),
+    }
 }
 
 /// Merges the streams into the pipeline. The frame and gzip error counts go straight into the
@@ -447,12 +467,13 @@ pub fn run_streams_with(
     chunk: usize,
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
 ) -> io::Result<MergeReport> {
-    let report = try_merge_streams(specs, chunk, &mut |m| {
+    let (report, end) = merge_counted(specs, chunk, &mut |m| {
         process_frame(p, m.feed, m.kind, m.recv_ns, m.payload);
         after_frame(p)
-    })?;
+    });
+    // The counts go in first, so they are there whether the run ended or a hook failed.
     for (a, b) in p.errors.iter_mut().zip(report.errors.iter()) {
         *a = a.saturating_add(*b);
     }
-    Ok(report)
+    end.map(|()| report)
 }

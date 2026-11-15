@@ -381,13 +381,17 @@ fn process_aircraft(
                 if t <= lt {
                     return false;
                 }
-                if pending_new_leg || t - lt > gap_ns {
+                // A difference past the range of an i64 is a gap.
+                let Some(dt) = t.checked_sub(lt).filter(|&d| d <= gap_ns) else {
+                    return true;
+                };
+                if pending_new_leg {
                     return true;
                 }
                 let mut c = *cat;
                 let pair = JumpPair {
                     dist_m: dist_m(la, lo, row.lat_e7, row.lon_e7),
-                    dt_s: (t - lt) as f64 / 1.0e9,
+                    dt_s: dt as f64 / 1.0e9,
                     slack_m: cfg.jump_slack_m,
                     category: category_observe(&mut c, row.category),
                     gs_a_dkt: last_gs,
@@ -417,12 +421,10 @@ fn process_aircraft(
             if let (Some(lt), Some((la, lo))) = (last, last_pos) {
                 if pending_new_leg {
                     split = Some(SPLIT_NEW_LEG);
-                } else if t - lt > gap_ns {
-                    split = Some(SPLIT_GAP);
-                } else {
+                } else if let Some(dt) = t.checked_sub(lt).filter(|&d| d <= gap_ns) {
                     let pair = JumpPair {
                         dist_m: dist_m(la, lo, row.lat_e7, row.lon_e7),
-                        dt_s: (t - lt) as f64 / 1.0e9,
+                        dt_s: dt as f64 / 1.0e9,
                         slack_m: cfg.jump_slack_m,
                         category,
                         gs_a_dkt: last_gs,
@@ -437,6 +439,8 @@ fn process_aircraft(
                             continue;
                         }
                     }
+                } else {
+                    split = Some(SPLIT_GAP);
                 }
             }
             if split.is_none() {
@@ -529,8 +533,8 @@ fn flush_leg(
                 }
             }
             if let (Some(&ta), Some(&tb)) = (buf.t.get(k), buf.t.get(k + 1)) {
-                if tb - ta <= bracket2 {
-                    if let Some((_, p)) = interp(&view, k, ta + (tb - ta) / 2, cfg.accel_q) {
+                if let Some(d) = tb.checked_sub(ta).filter(|&d| d <= bracket2) {
+                    if let Some((_, p)) = interp(&view, k, ta + d / 2, cfg.accel_q) {
                         at_mid.n += 1;
                         if sigma95_h_m(p[0]).is_some_and(|s| s <= gate) {
                             at_mid.hit += 1;

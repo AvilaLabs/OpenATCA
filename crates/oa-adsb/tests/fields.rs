@@ -197,12 +197,22 @@ fn every_anomaly_in_one_record_shows_in_its_own_count() {
     );
 }
 
+/// Gives every record of a payload of `rec`-byte records the earliest accepted time.
+fn with_times(mut p: Vec<u8>, rec: usize) -> Vec<u8> {
+    for at in (16..p.len()).step_by(rec) {
+        if let Some(b) = p.get_mut(at + 24..at + 32) {
+            b.copy_from_slice(&TIME_MIN_NS.to_le_bytes());
+        }
+    }
+    p
+}
+
 fn sample(n: usize, time: impl Fn(usize) -> i64) -> Reports {
     let mut r = Reports::default();
     for i in 0..n {
         let mut row = ROW_EMPTY;
         row.icao = 0xa00001;
-        row.time_ns = time(i);
+        row.time_ns = TIME_MIN_NS + time(i);
         row.lat_e7 = 400_000_000;
         row.lon_e7 = -900_000_000;
         reports_push(&mut r, &row);
@@ -216,6 +226,7 @@ fn payload_size_limits_are_exact_for_both_layouts() {
     // At the limit is accepted, one over is refused, for the header alone and with records.
     let mut ok = header(b"ADS2", 80, MAX_ROWS_PER_FRAME as u32);
     ok.resize(PAYLOAD_HEADER_LEN + MAX_ROWS_PER_FRAME * RECORD_LEN, 0);
+    let ok = with_times(ok, RECORD_LEN);
     let mut out = Reports::default();
     let c = decode_payload_lenient(&ok, &mut out).unwrap();
     assert_eq!(
@@ -229,6 +240,7 @@ fn payload_size_limits_are_exact_for_both_layouts() {
     );
     let mut ok = header(b"ADS1", 64, LEGACY_MAX_ROWS as u32);
     ok.resize(PAYLOAD_HEADER_LEN + LEGACY_MAX_ROWS * LEGACY_RECORD_LEN, 0);
+    let ok = with_times(ok, LEGACY_RECORD_LEN);
     let c = decode_payload_lenient(&ok, &mut Reports::default()).unwrap();
     assert_eq!(c.kept, LEGACY_MAX_ROWS);
     let over = header(b"ADS1", 64, LEGACY_MAX_ROWS as u32 + 1);
@@ -240,6 +252,7 @@ fn payload_size_limits_are_exact_for_both_layouts() {
     for (magic, rec) in [(b"ADS2", 80usize), (b"ADS1", 64)] {
         let mut p = header(magic, rec as u16, 3);
         p.resize(16 + 3 * rec, 0);
+        let p = with_times(p, rec);
         assert!(decode_payload(&p, &mut Reports::default()).is_ok());
         let mut long = p.clone();
         long.push(0);
@@ -305,7 +318,7 @@ fn encode_payload_counts_its_rows_and_refuses_bad_ranges() {
     assert_eq!(p.len(), 16 + 7 * 80);
     let mut back = Reports::default();
     assert_eq!(decode_payload(&p, &mut back).unwrap(), 7);
-    assert_eq!(back.time_ns, [3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(back.time_ns, [3, 4, 5, 6, 7, 8, 9].map(|i| TIME_MIN_NS + i));
     // Empty, reversed and past-the-end ranges; the end may equal the length.
     let r = sample(5, |i| i as i64);
     for (a, b) in [(2, 2), (3, 2), (0, 6), (5, 5), (6, 7)] {

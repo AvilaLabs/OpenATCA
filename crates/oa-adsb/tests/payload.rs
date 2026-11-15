@@ -358,7 +358,10 @@ fn legacy_ads1_payloads_still_decode_with_measurements_absent() {
     let mut m = p[..16].to_vec();
     m[8..12].copy_from_slice(&(MAX_ROWS_PER_FRAME as u32 + 1).to_le_bytes());
     m.resize(16 + (MAX_ROWS_PER_FRAME + 1) * LEGACY_RECORD_LEN, 0);
-    // Zero records are valid ADS1 records only if in range: latitude 0 is, so this decodes.
+    for at in (16..m.len()).step_by(LEGACY_RECORD_LEN) {
+        m[at + 24..at + 32].copy_from_slice(&TIME_MIN_NS.to_le_bytes());
+    }
+    // Records are valid ADS1 records only if in range: latitude 0 and the earliest time are, so this decodes.
     assert_eq!(
         decode_payload(&m, &mut out).unwrap(),
         MAX_ROWS_PER_FRAME + 1
@@ -398,6 +401,7 @@ fn a_bad_record_does_not_refuse_the_frame_the_valid_ones_are_kept_and_the_bad_on
             dropped: 2,
             first_dropped: Some(1),
             unknown_source: 1,
+            bad_time: 0,
             bad_measurement: 1,
             reserved_set: 1,
         }
@@ -586,4 +590,38 @@ fn a_cap_raising_category_must_persist_and_a_reserved_code_never_raises_the_cap(
     }
     // The jump out and the jump back; with B7 taken on the spot only the jump back counted.
     assert_eq!(summarize(&r).jumps, 2);
+}
+
+/// Replaces the report time of record `i` of a payload.
+fn set_time(p: &mut [u8], i: usize, t: i64) {
+    let at = 16 + i * RECORD_LEN + 24;
+    p[at..at + 8].copy_from_slice(&t.to_le_bytes());
+}
+
+// REQ: OA-ADSB-171
+#[test]
+fn a_report_time_outside_2000_to_2100_is_refused_and_counted() {
+    let r = sample_rows(5);
+    let mut p = Vec::new();
+    encode_payload(&mut p, &r, 0, 5).unwrap();
+    set_time(&mut p, 1, -4_700_000_000_000_000_000);
+    set_time(&mut p, 2, 4_700_000_000_000_000_000);
+    set_time(&mut p, 3, TIME_MIN_NS - 1);
+    set_time(&mut p, 4, TIME_MAX_NS);
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&p, &mut out).unwrap();
+    assert_eq!((c.records, c.kept, c.dropped, c.bad_time), (5, 1, 4, 4));
+    assert_eq!(c.first_dropped, Some(1));
+    // The limits themselves are in range; the strict decoder refuses the whole payload.
+    set_time(&mut p, 1, TIME_MIN_NS);
+    set_time(&mut p, 2, TIME_MAX_NS - 1);
+    set_time(&mut p, 3, 1_700_000_000_000_000_000);
+    set_time(&mut p, 4, 1_700_000_000_000_000_001);
+    let mut ok = Reports::default();
+    assert_eq!(decode_payload(&p, &mut ok).unwrap(), 5);
+    set_time(&mut p, 4, i64::MAX);
+    assert_eq!(
+        decode_payload(&p, &mut ok).unwrap_err(),
+        PayloadError::BadRecord(4)
+    );
 }
