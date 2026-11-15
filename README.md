@@ -46,6 +46,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | [docs/M0_REPORT.md](docs/M0_REPORT.md) | Milestone 0 result: the ZAU model, checks, defects found, limits |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why and the next step |
 | [docs/ADSB_PAYLOAD.md](docs/ADSB_PAYLOAD.md) | ADS-B history reports carried in OAF1 frames |
+| [docs/FUZZING.md](docs/FUZZING.md) | Coverage-guided fuzzing of the decoders: the one dependency exception, how to run, results, limits |
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How we talk to systems we do not control, so we never cause or amplify their failures |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 | `crates/oa-csv` | RFC 4180 reader |

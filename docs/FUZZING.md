@@ -1,0 +1,191 @@
+# Fuzzing
+
+Status: first pass, 2026-11-15. Coverage-guided fuzzing (libFuzzer, through `cargo-fuzz`) of the
+byte-level decoders, to look for the inputs the hand-written tests did not think of. OA-GEN-004
+says no parser panics on any input; this is the first search for a counter-example that does not
+depend on us imagining it.
+
+## The dependency exception
+
+The project has zero external crates (RULESET F6, OA-GEN-002). Fuzzing needs a libFuzzer entry
+point, and writing one ourselves is not sensible (it is the C++ LLVM runtime plus its glue). The
+one exception, decided by the project owner:
+
+- The only helper crate is `libfuzzer-sys`, and it lives only in `fuzz/`.
+- `fuzz/` is its own Cargo workspace (`[workspace]` in `fuzz/Cargo.toml`) and is listed in the root
+  workspace's `exclude`. `cargo build`, `cargo test` and `cargo clippy` at the root never see it.
+- No shipped crate depends on it. The fuzz crate depends on ours (by path), never the reverse.
+- `fuzz/Cargo.lock` is committed, so the exact versions are pinned and reviewable.
+
+Everything in `fuzz/Cargo.lock` that is not one of our crates (10 packages; `libfuzzer-sys` pulls
+the rest in, `arbitrary` is a non-optional dependency of it):
+
+| Package | Version | Why it is there |
+|---|---|---|
+| libfuzzer-sys | 0.4.13 | the harness, builds the bundled libFuzzer |
+| arbitrary | 1.5.0 | required by libfuzzer-sys; our targets take raw bytes and do not use it |
+| cc | 1.11.2 | libfuzzer-sys build script (compiles libFuzzer) |
+| find-msvc-tools | 0.1.15 | build dependency of `cc` |
+| shlex | 2.0.1 | build dependency of `cc` |
+| jobserver | 0.1.35 | build dependency of `cc` |
+| libc | 0.2.191 | `jobserver` |
+| getrandom | 0.4.3 | `jobserver` |
+| cfg-if | 1.0.5 | `getrandom` |
+| r-efi | 6.0.0 | `getrandom` (UEFI targets only, not built on Linux) |
+
+The fuzz binaries are test tools. They are never built into a release artifact.
+
+## Layout
+
+```
+fuzz/Cargo.toml          own [workspace]; path dependencies on the oa-* crates
+fuzz/Cargo.lock          committed
+fuzz/fuzz_targets/*.rs   one target per decoder entry point
+fuzz/seeds/<target>/     small synthetic seeds (about 130 KB in all), safe to commit
+fuzz/make_corpora.py     builds the local corpora from the raw data (stays out of the repo)
+```
+
+Corpora and crash artifacts live outside the repository, because the real samples are not ours to
+redistribute (the ASTERIX captures are GPL-2.0, adsb.lol is ODbL, the rest has its own terms) and
+the repository is Apache-2.0:
+
+```
+$OPENATCA_DATA/fuzz/<target>/corpus/       grows as libFuzzer finds new coverage
+$OPENATCA_DATA/fuzz/<target>/artifacts/    crashes, timeouts, OOMs, slow units
+$OPENATCA_DATA/fuzz/<target>/fuzz-0-<secs>.log   the libFuzzer log of the last run
+```
+
+## Running
+
+Needs `cargo-fuzz` and a nightly toolchain (the sanitizer flags are nightly only). The first build
+compiles libFuzzer; later ones are incremental.
+
+```
+cd fuzz
+export OPENATCA_DATA=/path/to/openatca-data
+python3 -I make_corpora.py                       # once, to fill the corpora
+T=asterix                                        # one of the targets below
+mkdir -p $OPENATCA_DATA/fuzz/$T/artifacts
+CARGO_BUILD_JOBS=1 cargo +nightly fuzz run $T $OPENATCA_DATA/fuzz/$T/corpus -- \
+  -artifact_prefix=$OPENATCA_DATA/fuzz/$T/artifacts/ \
+  -rss_limit_mb=2048 -max_total_time=900 -jobs=1 -workers=1
+```
+
+To replay one input (a crash from `artifacts/`) under the sanitizers:
+`cargo +nightly fuzz run $T path/to/input`. To shrink it: `cargo +nightly fuzz tmin $T path/to/input`.
+To reduce a corpus that has grown large:
+`fuzz/target/x86_64-unknown-linux-gnu/release/$T -merge=1 new_dir corpus_dir`.
+
+The fuzz profile keeps `overflow-checks = true` (as the workspace release profile does) and
+cargo-fuzz adds debug assertions and AddressSanitizer, so an arithmetic overflow, a slice index out
+of range or an assertion is a finding, as is a timeout, an out-of-memory (2 GiB RSS limit) or a
+memory error.
+
+## Targets
+
+Every target takes raw bytes into the public decoder and must never panic. A refusal with a typed
+error is the correct outcome for bad input and is not a finding. Where a decoder keeps state
+(the XML parser tables, the row tables) it is built once per process and reused, as in production.
+
+| Target | Entry points | Notes |
+|---|---|---|
+| `asterix` | `oa_asterix::decode_block`, `decode_stream`, then `encode_block` of every decoded block | categories 21, 48, 62 and the generic block walker |
+| `adsb-payload` | `oa_adsb::decode_payload_lenient`, `decode_payload`, then `reports_row` | the OAF1 history payload |
+| `adsb-trace` | `oa_adsb::decode_trace` (readsb / adsb.lol trace JSON), with the ZAU box and with a keep-everything filter | this is the bytes-to-row entry for readsb rows; there is no separate row decoder |
+| `feed-frame` | `oa_feed::FrameReader` push/next/finish | whole input and 7-byte chunks, so the resynchronising path and partial frames are both exercised |
+| `grib2` | `scan_messages`, `decode_stream`, `inspect_stream`, `decode_message`, `sample_bilinear`, `parse_idx` | decode_stream runs template 5.40 through `oa-j2k` as well |
+| `j2k` | `oa_j2k::decode` | JPEG 2000 codestreams |
+| `tiff` | `oa_tiff::read_geotiff`, then `grid_elevation_at` | classic TIFF / GeoTIFF; there is no separate `open` |
+| `xml` | `oa_xml::Parser::parse`, then namespace resolution of every element | default limits |
+| `tbfm` | `oa_tbfm::decode_bytes` and `decode_doc_prefix`, then `row_at` | |
+| `tfms` | `oa_tfms::decode_bytes` and `decode_doc_prefix`, then `flight_at` | |
+| `fixm` | `oa_fixm::Decoder::decode` and `decode_prefix` | SFDPS messages |
+| `tar` | `oa_tar::TarReader` `next_entry` / `read_entry_to_vec` | |
+| `zip` | `oa_zip::Archive::parse_with_limits` (default and tight limits), `extract_entry`, `is_safe_path` | |
+| `gzip` | `oa_zip::GzipReader`, `oa_zip::Inflater`, `oa_zip::inflate` | gzip members and raw DEFLATE, 64 MiB output cap |
+| `awc` | first byte selects METAR, TAF, PIREP, SIGMET, AIRSIGMET or G-AIRMET; the rest is the file; parse then finalize | |
+| `json` | `oa_json::parse`, then every node accessor | the parser under `oa-awc` and `oa-adsb` |
+
+Not fuzzed in this pass: `oa-notam`, `oa-dof`, `oa-mva`, `oa-nasr`, `oa-arinc424`, `oa-csv`,
+`oa-airspace`, `oa-replay`, `oa-wind`. They were not on the list; the nearest to a network input
+is `oa-notam` (AIXM over the same XML parser) and should be next.
+
+## Seed corpora
+
+| Target | Seeds (local corpus only unless noted) |
+|---|---|
+| asterix | the GPL-2.0 captures in `raw/asterix-samples`, split into packets and blocks. Local only, never committed. |
+| adsb-payload | three synthetic payloads (committed) |
+| adsb-trace | 232 real adsb.lol trace files (ODbL), from the first part of the 2026-11-13 archive |
+| feed-frame | 200 real frames and 20 five-frame runs from the SWIM recordings, plus one synthetic stream (committed) |
+| grib2 | the ecCodes and NCEP files in `raw/grib2-testdata`, whole and split into messages |
+| j2k | the JPEG 2000 section-7 bodies cut out of the template 5.40 messages above |
+| tiff | four synthetic GeoTIFFs (committed): little and big endian, raw and deflate |
+| xml | SWIM messages of each kind (TBFM, TFMS, SFDPS, FNS) and five synthetic documents (committed) |
+| tbfm, tfms, fixm | 600 real messages each from the 2026-11-14 SWIM dumps |
+| tar, zip, gzip | synthetic archives from Python's standard library (committed) |
+| awc | the AWC files in `raw/awc`, each prefixed with its selector byte |
+| json | the JSONTestSuite files, adsb.lol traces and AWC files |
+
+Each seed is under 400 KB and each corpus was under 50 MB at the start; after a run the `awc` and
+`adsb-trace` corpora had grown past it and were merged back down (`-merge=1`).
+
+## Results
+
+First run, 2026-11-15: every target for 15 minutes (`-max_total_time=900`), one after the other, one
+worker, 2 GiB RSS limit. Coverage is libFuzzer's count of covered edges (`cov`) and of distinct
+features (`ft`) at the end of the run. The corpus column is the number of inputs libFuzzer kept at
+the end of the run (not the size of the starting seed set).
+
+| Target | Executions | exec/s | cov | ft | Kept inputs | Crashes, OOM, timeouts |
+|---|---|---|---|---|---|---|
+| asterix | 6,296,720 | 6,988 | 2,155 | 9,266 | 961 | none |
+| adsb-payload | 13,352,743 | 14,819 | 525 | 1,512 | 54 | none |
+| adsb-trace | 163,851 | 181 | 1,105 | 4,697 | 593 | none |
+| feed-frame | 209,342 | 232 | 111 | 545 | 114 | none |
+| grib2 | 4,040 | 4 | 1,771 | 7,202 | 212 | none (one slow unit, below) |
+| j2k | 16,344 | 18 | 1,014 | 2,757 | 306 | none |
+| tiff | 4,981,334 | 5,528 | 1,050 | 2,731 | 572 | none |
+| xml | 6,475,522 | 7,187 | 1,038 | 4,388 | 1,478 | none |
+| tbfm | 13,245,488 | 14,700 | 2,235 | 5,705 | 1,741 | none |
+| tfms | 2,537,879 | 2,816 | 2,601 | 8,087 | 1,345 | none |
+| fixm | 974,046 | 1,081 | 2,004 | 7,115 | 1,356 | none |
+| tar | 19,385,062 | 21,515 | 521 | 1,122 | 266 | none |
+| zip | 10,525,309 | 11,681 | 637 | 2,074 | 514 | none |
+| gzip | 1,052,480 | 1,168 | 672 | 2,819 | 466 | none |
+| awc | 306,709 | 340 | 4,022 | 14,896 | 1,424 | none |
+| json | 5,861,705 | 6,505 | 557 | 2,669 | 766 | none |
+
+No target found a panic, an arithmetic overflow, an out-of-bounds access, an out-of-memory or a
+timeout. The only artifact is a `slow-unit` of the `grib2` target: a 1 MiB prefix of the public
+NCEP GEFS file (27 messages), which takes about 6 s under the sanitizer and coverage build. It is
+real, bounded work, not a defect: the whole GEFS file in the corpus takes about 10 s in the same
+build for the same target, which runs the stream, inspect and single-message decoders over it,
+and the work is capped by `MAX_MESSAGE_POINTS` and the J2K work budget. It is the reason the grib2
+and j2k targets execute so few inputs per second.
+
+Because nothing crashed, no regression tests were added and no code changed (the requirement
+numbers for such tests would have started at each crate's highest plus 60).
+
+## What fuzzing does not show
+
+- Absence of bugs. Fifteen minutes per target, one core, one run is a sample. In every target
+  but `feed-frame` new coverage was still being found in the last ten percent of the run (the last
+  new input came after 12% of the executions for `feed-frame`, at least 90% for the others), and
+  `grib2` and `j2k` execute only a few inputs per second, so a longer run, or a second run from the
+  grown corpus, will reach further.
+- Correctness. The targets check that decoding does not panic, overflow or run away. They do not
+  check that a successful decode is right; that is what the tests against the public reference
+  files, the round trips and the formal proofs are for. The `asterix` target does feed every
+  decoded block back through `encode_block`, but only to look for panics.
+- Anything the targets do not call: only the entry points listed above, with default or stated
+  limits. The limits themselves (a 1 MiB XML document, a 32 MiB JSON file) bound the work, so a
+  failure that needs a larger input than the fuzzer's `-max_len` (4 KiB, raised to the largest
+  seed) is not reachable here.
+- Resource behaviour of the full system, I/O errors, or timing. Each target is a pure function of
+  one buffer.
+- State across calls beyond what each target reuses (parser tables, row tables). A sequence of
+  calls that corrupts shared state is not searched for.
+- Real-time behaviour: the 2 GiB RSS limit catches runaway memory, and libFuzzer's 20-minute
+  per-input timeout catches a hang, but a decode that takes seconds instead of milliseconds is
+  not flagged. The slow-unit note above is the one place that was looked at by hand.
