@@ -350,6 +350,40 @@ fn the_airspace_lookups_come_from_the_model() {
     assert_eq!(l.counts(), (1, 2, 2));
 }
 
+fn push_fix(m: &mut oa_airspace::model::Model, ident: &str, lat: f64, lon: f64, region: &str) {
+    let (id, rg) = (s_t(m, ident), s_t(m, region));
+    m.points.kind.push(point_kind::FIX);
+    m.points.lat.push((lat * 1e7_f64).round() as i32);
+    m.points.lon.push((lon * 1e7_f64).round() as i32);
+    m.points.elev_ft.push(i32::MIN);
+    m.points.ident.push(id);
+    m.points.alt_ident.push(StrIx::NONE);
+    m.points.region.push(rg);
+    m.points.scope.push(StrIx::NONE);
+    m.points.name.push(StrIx::NONE);
+}
+
+// REQ: OA-BENCH-051
+#[test]
+fn an_identifier_naming_two_places_is_ambiguous_not_the_first_row() {
+    let mut m = model_with_zone();
+    push_fix(&mut m, "DUPX", 41.2, -88.1, "K2");
+    push_fix(&mut m, "DUPX", 44.0, -80.0, "K7");
+    // The same navaid listed twice at one place is one place.
+    push_fix(&mut m, "SAMEE", 41.3, -88.3, "K2");
+    push_fix(&mut m, "SAMEE", 41.3, -88.3, "K2");
+    let l = lookup_from_model(&m);
+    assert_eq!(l.fix("DUPX"), None, "two places: no single answer");
+    let two = l.fix_all("DUPX");
+    assert_eq!(two.len(), 2);
+    assert!((two[0].0 - 41.2).abs() < 1e-6 && (two[1].0 - 44.0).abs() < 1e-6);
+    assert_eq!(l.fix("SAMEE"), Some((41.3, -88.3)));
+    assert_eq!(l.fix_all("SAMEE").len(), 1);
+    assert_eq!(l.fix("FIXXX"), Some((41.5, -88.0)));
+    assert_eq!(l.ambiguous_fixes, 1);
+    assert!(l.fix_all("NOPE").is_empty());
+}
+
 // REQ: OA-BENCH-033
 #[test]
 fn the_binary_scores_a_known_cross_track_error_end_to_end() {

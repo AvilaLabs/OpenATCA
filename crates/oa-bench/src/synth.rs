@@ -371,6 +371,12 @@ pub fn fix_xy(name: &str) -> Option<(f64, f64)> {
 pub fn env() -> Env<'static> {
     Env {
         fix: &|n| fix_xy(n).map(|(x, y)| from_enu(LAT0, LON0, x, y)),
+        fix_all: &|n| {
+            fix_xy(n)
+                .map(|(x, y)| from_enu(LAT0, LON0, x, y))
+                .into_iter()
+                .collect()
+        },
         airport: &|n| match n {
             "KLND" => Some(AirportRef {
                 elev_ft: 600,

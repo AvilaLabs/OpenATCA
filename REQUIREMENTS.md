@@ -2056,6 +2056,23 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   empty stand-in.
 - **OA-BENCH-045** Reading an ADS-B clip drops only a record that cannot be read (position or flags out of
   range), counts it apart from refused frames, and keeps the other records of its frame.
+- **OA-BENCH-050** A route is never joined across a point that cannot be placed: an expanded route with an
+  unplaced point between two others is excluded and counted (a dogleg whose middle fix is unknown is not
+  scored as the straight line, whatever the truth does), while unplaced points at either end only shorten it.
+- **OA-BENCH-051** A fix identifier that names more than one place is never resolved by row order: the airspace
+  lookup lists every distinct place (rows at one place are one place), answers a single place only when
+  there is one, and counts the ambiguous identifiers; a route chooses the place clearly nearest to the
+  previous placed point and otherwise is excluded and counted; a meter fix is the one place inside the zone
+  or the estimate is excluded and counted.
+- **OA-BENCH-052** Meter-fix crossings, takeoffs and landings are taken from the one truth leg that overlaps the
+  flight plan's active interval the most (the 60 minutes after issue when the plan has no ERAM sample) and
+  cached per leg: one aircraft flying two trips with a perfect estimate for each scores zero error on both.
+- **OA-BENCH-053** A truth leg that begins or ends near a runway threshold with no barometric altitude is not a
+  takeoff or landing: the estimate is excluded and counted with that reason.
+- **OA-BENCH-054** The common-time comparison scores two systems at the same truth times: two systems with the
+  same error at every instant but different publication rates have different native RMS and equal
+  common-time RMS, a grid time counts only when both have a paired sample within the tolerance, and the
+  grid times left out are counted.
 
 ## Winds aloft (oa-wind)
 

@@ -94,8 +94,11 @@ pub struct AirportRef {
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy)]
 pub struct Env<'a> {
-    /// Fix or navaid identifier to `(lat, lon)`.
+    /// Fix or navaid identifier to `(lat, lon)`; `None` when the identifier is unknown or names
+    /// more than one place (use [`Env::fix_all`] and a context to choose).
     pub fix: &'a dyn Fn(&str) -> Option<(f64, f64)>,
+    /// Every distinct place the identifier names, in a fixed order; empty when unknown.
+    pub fix_all: &'a dyn Fn(&str) -> Vec<(f64, f64)>,
     /// Airport identifier to its reference data.
     pub airport: &'a dyn Fn(&str) -> Option<AirportRef>,
     /// Whether a point is inside the zone the presence and initiation metrics cover (ZAU).
@@ -109,6 +112,7 @@ pub struct Env<'a> {
 pub fn empty_env() -> Env<'static> {
     Env {
         fix: &|_| None,
+        fix_all: &|_| Vec::new(),
         airport: &|_| None,
         in_zone: &|_, _| false,
         unit_at: &|_, _, _| None,
