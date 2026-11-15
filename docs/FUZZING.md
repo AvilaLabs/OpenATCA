@@ -17,7 +17,7 @@ one exception, decided by the project owner:
 - No shipped crate depends on it. The fuzz crate depends on ours (by path), never the reverse.
 - `fuzz/Cargo.lock` is committed, so the exact versions are pinned and reviewable.
 
-Everything in `fuzz/Cargo.lock` that is not one of our crates (9 packages; `libfuzzer-sys` pulls
+Everything in `fuzz/Cargo.lock` that is not one of our crates (10 packages; `libfuzzer-sys` pulls
 the rest in, `arbitrary` is a non-optional dependency of it):
 
 | Package | Version | Why it is there |
