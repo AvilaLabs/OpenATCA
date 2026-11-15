@@ -2293,7 +2293,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.
 - **OA-SIM-020** Reading a clip drops only a record that cannot be read (position or flags out of range) and
   counts it; the other records of its frame are kept.
-- **OA-SIM-021** Reading a clip that ends inside a frame (a partial header or a partial body) keeps the valid
+- **OA-SIM-023** Reading a clip that ends inside a frame (a partial header or a partial body) keeps the valid
   frames and counts the partial frame with the frames that did not decode.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
