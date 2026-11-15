@@ -1169,6 +1169,81 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 const GOLDEN_NIS_BITS: u64 = 0x40a4_38e3_6693_06a4;
 const GOLDEN_DIGEST: &str = "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc";
 
+/// Aircraft that start, stop and start again with long gaps between: one that stops early (and
+/// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
+fn gappy_world() -> Vec<Measurement> {
+    let mut all: Vec<Measurement> = Vec::new();
+    for (addr, start_s, n, dt, seed) in [
+        (0x1A1A1Au32, 0i64, 40u32, 1.0, 71u64),
+        (0x2B2B2B, 0, 300, 1.0, 72),
+        (0x3C3C3C, 1_000, 60, 1.0, 73),
+        (0x4D4D4D, 20_000, 5, 1.0, 74),
+        (0x5E5E5E, 20_000, 120, 2.0, 75),
+    ] {
+        for mut m in base_measurements(addr, n, dt, seed) {
+            m.toa_ns += start_s * 1_000_000_000;
+            all.push(m);
+        }
+    }
+    all.sort_by_key(|m| m.toa_ns);
+    all
+}
+
+// REQ: OA-TRK-173
+#[test]
+fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
+    // The digest was recorded when the jump over a long gap found the newest live update by
+    // scanning every slot; the tracker now keeps it, and the rows are the same bit for bit.
+    let cfg = big_config();
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    for (i, m) in gappy_world().iter().enumerate() {
+        tracker_update(&mut t, m, &mut out);
+        if i % 50 == 0 {
+            // Time also passes between measurements.
+            tracker_advance(&mut t, m.toa_ns + 3_000_000_000, &mut out);
+        }
+    }
+    tracker_advance(&mut t, 30_000_000_000_000, &mut out);
+    tracker_flush(&mut t, 30_000_000_000_000, &mut out);
+    let s = tracker_stats(&t);
+    println!(
+        "gappy: rows {} ended {:?} digest {}",
+        out.t_ns.len(),
+        s.ended,
+        hash_of(&out)
+    );
+    assert!(s.ended[usize::from(END_DROPPED)] >= 4, "{:?}", s.ended);
+    assert_eq!(out.overflow, 0);
+    assert_eq!(hash_of(&out), GAPPY_DIGEST);
+}
+
+// REQ: OA-TRK-173
+#[test]
+fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
+    let cfg = big_config();
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    assert_eq!(oa_track::tracker_newest_update_ns(&t), i64::MIN);
+    let mut newest = i64::MIN;
+    for m in gappy_world().iter().take(200) {
+        tracker_update(&mut t, m, &mut out);
+        newest = newest.max(m.toa_ns);
+        let kept = oa_track::tracker_newest_update_ns(&t);
+        assert!(kept <= newest, "{kept} > {newest}");
+        for (_, last) in tracker_live(&t) {
+            assert!(
+                last <= kept,
+                "a live track's update {last} is newer than {kept}"
+            );
+        }
+    }
+    // The last update of an aircraft still flying is the newest there is.
+    assert!(oa_track::tracker_newest_update_ns(&t) > newest - 2_000_000_000);
+}
+
+const GAPPY_DIGEST: &str = "5cbeb052deda04a2f6ebf9a7e1e34fa8f94955283f59bd03cec60ceb8cbcd86f";
+
 // REQ: OA-TRK-041
 #[test]
 fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() {

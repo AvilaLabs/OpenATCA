@@ -11,19 +11,23 @@
 //! 1. **Association, per radar, from the state at the start of the bucket.** A plot with a Mode S
 //!    address goes to the track with that key (a hard constraint; the filter's own jump gate
 //!    still counts a contradiction). Any other plot is converted (`radar.rs`) with the radar's
-//!    current registration correction, gated against every live track by a coarse window and then
-//!    by the exact Mahalanobis distance (horizontal against the track's predicted position and
+//!    current registration correction, gated against the live tracks by a coarse window (applied
+//!    to the tracks in the cells of a latitude and longitude grid the plot can reach, `coarse.rs`,
+//!    which finds exactly what testing every track finds; the radars' plots are gated in turn,
+//!    the radar that has spent least work first, against one work limit per bucket) and then by
+//!    the exact Mahalanobis distance (horizontal against the track's predicted position and
 //!    covariance, vertical against its altitude), and the gated pairs are assigned by global
 //!    nearest neighbour (`assoc.rs`). **A Mode A code never takes part**: it is copied to the
 //!    measurement and read by nothing. A plot whose assigned track has a competitor within
 //!    [`AMBIGUITY_MARGIN`] is **held**, not applied: kinematics alone never decides between two
 //!    close tracks, and a track coasts through a crossing. A track whose last [`HOLD_MAX_RUN`]
-//!    plots were all held takes the next one on the assignment's own evidence (counted in
-//!    [`FusionStats::held_forced`]): two aircraft that stay together would otherwise never
-//!    update their tracks, which would coast off while every plot started tracks beside them.
-//!    A Mode S plot is applied to the track of its address only inside a wide gate
-//!    ([`HARD_GATE_CHI2`]; a gross mismatch is counted, not applied), and **a track takes at
-//!    most one plot per radar and bucket**: of several Mode S plots of one address the nearest,
+//!    plots of one radar were all held takes the next one on the assignment's own evidence
+//!    (counted in [`FusionStats::held_forced`]): two aircraft that stay together would otherwise
+//!    never update their tracks, which would coast off while every plot started tracks beside
+//!    them. A Mode S plot is applied to the track of its address only inside a wide gate
+//!    ([`HARD_GATE_CHI2`]; a gross mismatch is counted, not applied, and flags the track's rows
+//!    with [`crate::types::O_RADAR_DISAGREES`] for [`RADAR_DISAGREE_SCANS`] scans of that radar), and **a
+//!    track takes at most one plot per radar and bucket**: of several Mode S plots of one address the nearest,
 //!    and no anonymous plot at all once a Mode S plot has taken the track. Plots keep their
 //!    scoring label through the run and nothing reads it.
 //! 2. **Application, in time order.** The bucket's ADS-B measurements and assigned plots are
@@ -54,28 +58,32 @@ use crate::assoc::{
     assoc_scratch_buffers, assoc_scratch_new, gnn, nearest, AssocScratch, GnnStats, Pair,
     NONE as NO_TRACK,
 };
+use crate::coarse::{
+    coarse_buffer, coarse_build, coarse_new, coarse_passes, coarse_query, CoarseIndex,
+};
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_MAX_ACCEL_MPS2,
     CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M, GATE_H_CHI2,
     GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2,
     HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
     MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
-    MAX_TRACK_RECS, RADAR_INIT_M, RADAR_INIT_N, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS,
-    REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_PUBLISH_NS,
+    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, REG_HISTORY_MAX,
+    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
+    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
     RESCUED_COST_FRACTION,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
-    plot_check, plot_convert, polar_of, radar_geom, site_check, Converted, RadarError, RadarGeom,
-    RadarPlot, RadarSite, FT_M, NONE_ALT, NO_BIAS,
+    plot_check, plot_convert, polar_of, radar_geom, site_check, Bias, Converted, RadarError,
+    RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT, NO_BIAS,
 };
 use crate::registration::{
-    reg_bias, reg_new, reg_offer, reg_predict, reg_residual, reg_sample, RegSample, RegState,
+    reg_bias, reg_new_with, reg_offer, reg_predict, reg_residual, reg_sample, RegSample, RegState,
     Residual,
 };
 use crate::tracker::{
-    tracker_advance, tracker_flush, tracker_live, tracker_new, tracker_predict, tracker_stats,
-    tracker_update, Tracker,
+    tracker_advance, tracker_flush, tracker_live, tracker_new, tracker_note_radar_disagreement,
+    tracker_predict, tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput,
@@ -140,6 +148,8 @@ pub struct FusionConfig {
     pub use_address: bool,
     pub init_m: u8,
     pub init_n: u8,
+    /// Reference aircraft slots of each radar's registration estimator (allocated at start).
+    pub reg_ref_slots: usize,
     /// Record which plot went to which key (scoring runs).
     pub log_assign: bool,
 }
@@ -155,6 +165,7 @@ pub fn fusion_config(tracker: TrackerConfig) -> FusionConfig {
         use_address: true,
         init_m: RADAR_INIT_M,
         init_n: RADAR_INIT_N,
+        reg_ref_slots: REG_REF_SLOTS,
         log_assign: false,
     }
 }
@@ -207,19 +218,29 @@ pub struct FusionStats {
     /// Hard-constraint plots outside [`HARD_GATE_CHI2`] of their address's track: counted, not
     /// applied.
     pub hard_mismatch: u64,
+    /// Hard-constraint plots outside the wide gate that raised (or kept) the track's
+    /// [`crate::types::O_RADAR_DISAGREES`] flag; a subset of `hard_mismatch` (a track that is not live has no
+    /// flag to raise).
+    pub radar_disagree: u64,
     /// Hard-constraint plots left out because the track took a better plot in the bucket (a
     /// track takes at most one plot per radar bucket).
     pub hard_extra: u64,
+    /// Hold runs dropped to make room in a full table: the entry that was touched longest ago.
+    pub hold_evicted: u64,
     /// Plots applied on the assignment's own evidence because the track's last
     /// [`HOLD_MAX_RUN`] plots were all held.
     pub held_forced: u64,
     /// Plots beyond [`MAX_BUCKET_PLOTS`] of one radar in one bucket: dropped.
     pub bucket_plot_overflow: u64,
-    /// Associations cut short at [`MAX_BUCKET_TESTS`] exact tests or [`MAX_BUCKET_PAIRS`] pairs.
+    /// Associations cut short at [`MAX_BUCKET_TESTS`] units of work (coarse candidates and exact
+    /// tests, shared by the radars of a bucket) or [`MAX_BUCKET_PAIRS`] pairs.
     pub bucket_work_capped: u64,
     /// Assignments the solver refused (an invalid gate or too large an input): every plot of
     /// that solve is then unassigned.
     pub assoc_refused: u64,
+    /// Candidates the coarse window was applied to, taken from the grid cells a plot reaches
+    /// (charged to the bucket's work limit like the exact tests).
+    pub coarse_visits: u64,
     /// Pairs tested by the exact gate, and those inside it.
     pub pairs_tested: u64,
     pub pairs_gated: u64,
@@ -291,6 +312,14 @@ struct Cand {
     label: [u32; 4],
 }
 
+/// A run of held plots of one radar on one track. A7.2: cold, per-key.
+#[derive(Debug, Clone, Copy)]
+struct HoldRun {
+    run: u8,
+    /// The bucket that last held a plot of it.
+    bucket: i64,
+}
+
 /// A pending plot with its radar.
 #[derive(Debug, Clone, Copy)]
 struct PendPlot {
@@ -327,9 +356,11 @@ pub struct Fusion {
     reg_pub_ns: Vec<i64>,
     pend_adsb: Vec<Measurement>,
     pend_plots: Vec<PendPlot>,
-    /// Per key: consecutive plots held for ambiguity since the track last took one (a small
-    /// map: entries exist only while a run is going).
-    hold_run: BTreeMap<u32, u8>,
+    /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
+    /// took one of its plots (a small map: entries exist only while a run is going).
+    hold_run: BTreeMap<(u32, u8), HoldRun>,
+    /// Entries of `hold_run` kept at most (a field so a test can lower it).
+    hold_run_max: usize,
     /// The earliest bucket of any pending input; `i64::MAX` with none (so a call that finds
     /// nothing ready is constant time, not a scan of a long queue).
     pend_min_bucket: i64,
@@ -338,8 +369,21 @@ pub struct Fusion {
     /// The candidate pairs of one association and their by-products, kept between buckets so a
     /// bucket allocates only to grow past the largest before it (never past the pair limit).
     pairs_buf: Vec<Pair>,
-    infos_buf: Vec<PairInfo>,
     ms_buf: Vec<Measurement>,
+    /// Per radar, the gated pairs of its association and their by-products (kept between buckets
+    /// as above).
+    pairs_bufs: Vec<Vec<Pair>>,
+    infos_bufs: Vec<Vec<PairInfo>>,
+    /// Per radar, the grid of the live tracks, and the candidates of one plot: all allocated at
+    /// start for the tracker's capacity.
+    grids: Vec<CoarseIndex>,
+    cand_buf: Vec<u32>,
+    /// Work (coarse candidates and exact gates) one bucket's associations may spend in all (a
+    /// field so a test can lower it).
+    bucket_tests_max: usize,
+    /// Test only: test every track against the coarse window, as before the grid.
+    #[cfg(test)]
+    brute_coarse: bool,
     /// Per address: what registration needs of its ADS-B. Holds only keys the tracker holds (cut
     /// back to them whenever it reaches the tracker's capacity).
     keyinfo: BTreeMap<u32, KeyInfo>,
@@ -369,6 +413,9 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
     if cfg.init_m == 0 || cfg.init_n < cfg.init_m || cfg.init_n > 4 {
         return Err(FusionError::BadConfig("init_m or init_n"));
     }
+    if cfg.reg_ref_slots < REG_MIN_REFS || cfg.reg_ref_slots > REG_REF_SLOTS_MAX {
+        return Err(FusionError::BadConfig("reg_ref_slots"));
+    }
     if cfg.assoc > ASSOC_NEAREST {
         return Err(FusionError::BadConfig("assoc"));
     }
@@ -381,17 +428,30 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         tracker,
         sites: sites.to_vec(),
         geoms: sites.iter().map(radar_geom).collect(),
-        reg: sites.iter().map(|_| reg_new()).collect(),
+        reg: sites
+            .iter()
+            .map(|s| reg_new_with(cfg.reg_ref_slots, s.period_ns))
+            .collect(),
         reg_hist: sites.iter().map(|_| Vec::new()).collect(),
         reg_pub_ns: sites.iter().map(|_| i64::MIN).collect(),
         pend_adsb: Vec::new(),
         pend_plots: Vec::new(),
         hold_run: BTreeMap::new(),
+        hold_run_max: MAX_ASSOC_TRACKS,
         pend_min_bucket: i64::MAX,
         assoc: assoc_scratch_new(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS),
         pairs_buf: Vec::new(),
-        infos_buf: Vec::new(),
         ms_buf: Vec::new(),
+        pairs_bufs: sites.iter().map(|_| Vec::new()).collect(),
+        infos_bufs: sites.iter().map(|_| Vec::new()).collect(),
+        grids: sites
+            .iter()
+            .map(|_| coarse_new(cfg.tracker.max_tracks))
+            .collect(),
+        cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
+        bucket_tests_max: MAX_BUCKET_TESTS,
+        #[cfg(test)]
+        brute_coarse: false,
         keyinfo: BTreeMap::new(),
         cands: Vec::new(),
         next_serial: 0,
@@ -429,7 +489,11 @@ pub fn fusion_registration(f: &Fusion, radar: usize) -> Option<(&RegState, &[Reg
 /// nothing was reallocated there (RULESET C5, checked on the buffers because a counting
 /// allocator needs `unsafe`, which A0 forbids here).
 pub fn fusion_assoc_buffers(f: &Fusion) -> Vec<(usize, usize)> {
-    assoc_scratch_buffers(&f.assoc)
+    let mut v = assoc_scratch_buffers(&f.assoc);
+    // The grid of each radar and the candidates of a plot.
+    v.extend(f.grids.iter().map(coarse_buffer));
+    v.push((f.cand_buf.as_ptr() as usize, f.cand_buf.capacity()));
+    v
 }
 
 /// The plot-to-key log (empty unless `log_assign`).
@@ -627,6 +691,10 @@ fn d2_vertical(row: &OutRow, plot: &RadarPlot, quant_ft: u16, since_update_ns: i
 #[derive(Debug, Clone, Copy)]
 struct TrackAt {
     key: u32,
+    lat: f64,
+    lon: f64,
+    /// Height above the radar, metres.
+    dh: f64,
     rho: f64,
     az: f64,
     ground: f64,
@@ -654,6 +722,9 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64) -> Vec<TrackAt> {
         let c = cov_f64(row.pos_cov_m2);
         v.push(TrackAt {
             key,
+            lat,
+            lon,
+            dh,
             rho,
             az,
             ground,
@@ -661,10 +732,6 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64) -> Vec<TrackAt> {
         });
     }
     v
-}
-
-fn az_diff(a: f64, b: f64) -> f64 {
-    (a - b + 180.0).rem_euclid(360.0) - 180.0
 }
 
 /// Whether a reference track may register a radar (see the module documentation).
@@ -675,7 +742,7 @@ fn reg_eligible(f: &Fusion, key: u32, row: &OutRow, plot: &RadarPlot) -> bool {
     let c = cov_f64(row.pos_cov_m2);
     k.high_integrity
         && k.adsb_n >= REG_MIN_ADSB_UPDATES
-        && plot.time_ns - k.last_adsb_ns <= REG_MAX_ADSB_AGE_NS
+        && plot.time_ns.saturating_sub(k.last_adsb_ns) <= REG_MAX_ADSB_AGE_NS
         && row.flags & O_HAS_ALT != 0
         && c[0].max(c[2]).max(0.0).sqrt() <= REG_MAX_TRACK_SIGMA_M
         && plot.range_m >= REG_MIN_RANGE_M
@@ -715,7 +782,7 @@ fn pair_cost(
     quant_ft: u16,
     last_ns: i64,
 ) -> PairCost {
-    let dt_s = ((plot.time_ns - last_ns).max(0) as f64) / NS_PER_S as f64;
+    let dt_s = (plot.time_ns.saturating_sub(last_ns).max(0) as f64) / NS_PER_S as f64;
     let man_dt = dt_s.min(GATE_MANEUVER_MAX_DT_S);
     let man = 0.5 * GATE_MANEUVER_MPS2 * man_dt * man_dt;
     let (plat, plon) = (
@@ -733,15 +800,52 @@ fn pair_cost(
         plon,
         [zc[0] + man * man, zc[1], zc[2] + man * man],
     );
-    let dv = d2_vertical(row, plot, quant_ft, plot.time_ns - last_ns);
+    let dv = d2_vertical(row, plot, quant_ft, plot.time_ns.saturating_sub(last_ns));
     PairCost { dh, dh_gate, dv }
 }
 
-/// The decisions for one radar's plots of a bucket (see the module documentation, step 1).
-fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Decision> {
+/// One radar's association in progress: what the first part (hard-constraint plots, the tracks,
+/// the conversions) made and the second (the coarse and exact gates) and third (the assignment)
+/// need. A7.2: transient.
+struct RadarAssoc<'a> {
+    radar: usize,
+    r8: u8,
+    g: RadarGeom,
+    s: RadarSite,
+    bias: Bias,
+    plots: &'a [RadarPlot],
+    dec: Vec<Decision>,
+    tracks: Vec<TrackAt>,
+    /// The tracks that took a hard plot, which take no anonymous one.
+    skip: Vec<bool>,
+    /// Indices of the anonymous plots, to map back from the solver's compact plot numbers.
+    anon: Vec<usize>,
+    conv_own: Vec<Option<Converted>>,
+    grid: CoarseIndex,
+    /// The widest coarse window of the tracks and the tallest of them above or below the radar.
+    width: f64,
+    dh_max: f64,
+    pairs: Vec<Pair>,
+    infos: Vec<PairInfo>,
+    /// Anonymous plots gated so far, in order.
+    next: usize,
+    /// Work spent (coarse candidates visited and exact gates tested) by this radar's plots.
+    work: usize,
+    capped: bool,
+}
+
+/// The first part of one radar's association of a bucket (see the module documentation, step 1):
+/// the hard-constraint plots are decided and the tracks, the conversions and the grid made.
+fn assoc_prepare<'a>(
+    f: &mut Fusion,
+    radar: usize,
+    plots: &'a [RadarPlot],
+) -> Option<RadarAssoc<'a>> {
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
-        return Vec::new();
+        return None;
     };
+    // Radars are numbered below MAX_RADARS.
+    let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
     let blank = Measurement {
         toa_ns: 0,
         pos_cov_m2: [1.0, 0.0, 1.0],
@@ -777,7 +881,6 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
         NO_BIAS
     };
     let tracks = tracks_at(f, radar, t0);
-    // Plots per anonymous index, to map back from the solver's compact plot numbers.
     let mut anon: Vec<usize> = Vec::new();
     // Hard-constraint plots: the track with the plot's key, or none. A plot must lie inside the
     // wide gate of that track, and a track takes one plot per bucket: the nearest.
@@ -802,6 +905,13 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
         let cost = pc.dh_gate + pc.dv;
         if cost.is_nan() || cost > HARD_GATE_CHI2 {
             f.stats.hard_mismatch += 1;
+            // A radar contradicts the track: flag its rows for a few scans (no position moves).
+            let until = p
+                .time_ns
+                .saturating_add(RADAR_DISAGREE_SCANS.saturating_mul(s.period_ns));
+            if tracker_note_radar_disagreement(&mut f.tracker, p.addr, until) {
+                f.stats.radar_disagree += 1;
+            }
             if let Some(d) = dec.get_mut(j) {
                 d.kind = D_MISMATCH;
             }
@@ -835,7 +945,7 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
             continue;
         }
         taken.push(*key);
-        f.hold_run.remove(key);
+        f.hold_run.remove(&(*key, r8));
         if let Some(slot) = dec.get_mut(*j) {
             *slot = *d;
         }
@@ -856,63 +966,157 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
                 .and_then(|p| plot_convert(&g, &s, p, &bias, None, NO_ADDR).ok())
         })
         .collect();
-    let mut pairs = std::mem::take(&mut f.pairs_buf);
-    let mut infos = std::mem::take(&mut f.infos_buf);
+    let mut grid = std::mem::take(f.grids.get_mut(radar)?);
+    coarse_build(
+        &mut grid,
+        (s.lat_deg, s.lon_deg),
+        tracks.len(),
+        |i| {
+            tracks
+                .get(i)
+                .filter(|t| t.rho.is_finite() && t.az.is_finite() && t.ground.is_finite())
+                .map(|t| (t.lat, t.lon))
+        },
+        |i| skip.get(i).copied().unwrap_or(false),
+    );
+    let live = |i: usize| !skip.get(i).copied().unwrap_or(false);
+    let dh_max = tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| live(*i))
+        .map(|(_, t)| t.dh.abs())
+        .fold(0.0, f64::max);
+    let width = tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| live(*i))
+        .map(|(_, t)| COARSE_M + 8.0 * t.sigma)
+        .fold(0.0, f64::max);
+    let mut pairs = std::mem::take(f.pairs_bufs.get_mut(radar)?);
+    let mut infos = std::mem::take(f.infos_bufs.get_mut(radar)?);
     pairs.clear();
     infos.clear();
-    let mut tests = 0usize;
-    let mut capped = false;
-    'plots: for (a, &j) in anon.iter().enumerate() {
-        let Some(p) = plots.get(j) else { continue };
-        let prho = p.range_m - bias.range_m;
-        let paz = (p.az_deg - bias.az_deg).rem_euclid(360.0);
-        for (ti, t) in tracks.iter().enumerate() {
-            if skip.get(ti).copied().unwrap_or(false) {
-                continue;
-            }
-            let coarse = COARSE_M + 8.0 * t.sigma;
-            if (prho - t.rho).abs() > coarse
-                || az_diff(paz, t.az).to_radians().abs() * t.ground > coarse
-            {
-                continue;
-            }
-            // A flooded bucket costs a bounded amount: past the limits the rest are not tested.
-            if tests >= MAX_BUCKET_TESTS || pairs.len() >= MAX_BUCKET_PAIRS {
-                capped = true;
-                break 'plots;
-            }
-            let Some((row, _, last_ns)) = tracker_predict(&f.tracker, t.key, p.time_ns) else {
-                continue;
-            };
-            let conv = match conv_own.get(a).copied().flatten() {
-                Some(c) => c,
-                None => match plot_convert(&g, &s, p, &bias, track_height(&row), t.key) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        f.stats.no_height_pairs += 1;
-                        continue;
-                    }
-                },
-            };
-            tests += 1;
-            f.stats.pairs_tested += 1;
-            let pc = pair_cost(&row, &conv, p, s.alt_quantum_ft, last_ns);
-            if pc.dh_gate <= GATE_H_CHI2
-                && pc.dv <= GATE_V_CHI2
-                && pc.dh_gate + pc.dv <= GATE_TOTAL_CHI2
-            {
-                f.stats.pairs_gated += 1;
-                let mut m = conv.m;
-                m.addr = t.key;
-                let cost = (pc.dh + pc.dv).min(RESCUED_COST_FRACTION * GATE_TOTAL_CHI2);
-                pairs.push(Pair {
-                    track: ti as u32,
-                    plot: a as u32,
-                    cost,
-                });
-                infos.push(PairInfo { m, row });
-            }
+    Some(RadarAssoc {
+        radar,
+        r8,
+        g,
+        s,
+        bias,
+        plots,
+        dec,
+        tracks,
+        skip,
+        anon,
+        conv_own,
+        grid,
+        width,
+        dh_max,
+        pairs,
+        infos,
+        next: 0,
+        work: 0,
+        capped: false,
+    })
+}
+
+/// Gates the anonymous plot `a` of `ra` against the tracks near it: the coarse window (on the
+/// tracks of the grid cells it can reach, in ascending track order, each charged to `budget`) and
+/// then the exact gate. Returns the work spent; a plot that finds the budget or the pair limit
+/// spent stops and marks the association capped.
+fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc<'_>, a: usize, budget: usize) -> usize {
+    let Some(&j) = ra.anon.get(a) else { return 0 };
+    let Some(p) = ra.plots.get(j) else { return 0 };
+    let (g, s, bias) = (ra.g, ra.s, ra.bias);
+    let prho = p.range_m - bias.range_m;
+    let paz = (p.az_deg - bias.az_deg).rem_euclid(360.0);
+    let mut cand = std::mem::take(&mut f.cand_buf);
+    #[cfg(test)]
+    let brute = f.brute_coarse;
+    #[cfg(not(test))]
+    let brute = false;
+    if brute {
+        cand.clear();
+        cand.extend(0..ra.tracks.len() as u32);
+    } else {
+        coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, ra.width);
+    }
+    // Visiting a candidate is work: charged, counted, and the plot stops where the budget does.
+    let visits = if brute { 0 } else { cand.len().min(budget) };
+    f.stats.coarse_visits += visits as u64;
+    let mut spent = visits;
+    if !brute && visits < cand.len() {
+        cand.truncate(visits);
+        ra.capped = true;
+    }
+    for &ti in &cand {
+        let ti = ti as usize;
+        let (Some(t), false) = (ra.tracks.get(ti), ra.skip.get(ti).copied().unwrap_or(false))
+        else {
+            continue;
+        };
+        if !coarse_passes(COARSE_M, (prho, paz), (t.rho, t.az, t.ground, t.sigma)) {
+            continue;
         }
+        // A flooded bucket costs a bounded amount: past the limits the rest are not tested.
+        if spent >= budget || ra.pairs.len() >= MAX_BUCKET_PAIRS {
+            ra.capped = true;
+            break;
+        }
+        let Some((row, _, last_ns)) = tracker_predict(&f.tracker, t.key, p.time_ns) else {
+            continue;
+        };
+        let conv = match ra.conv_own.get(a).copied().flatten() {
+            Some(c) => c,
+            None => match plot_convert(&g, &s, p, &bias, track_height(&row), t.key) {
+                Ok(c) => c,
+                Err(_) => {
+                    f.stats.no_height_pairs += 1;
+                    continue;
+                }
+            },
+        };
+        spent += 1;
+        f.stats.pairs_tested += 1;
+        let pc = pair_cost(&row, &conv, p, s.alt_quantum_ft, last_ns);
+        if pc.dh_gate <= GATE_H_CHI2
+            && pc.dv <= GATE_V_CHI2
+            && pc.dh_gate + pc.dv <= GATE_TOTAL_CHI2
+        {
+            f.stats.pairs_gated += 1;
+            let mut m = conv.m;
+            m.addr = t.key;
+            let cost = (pc.dh + pc.dv).min(RESCUED_COST_FRACTION * GATE_TOTAL_CHI2);
+            ra.pairs.push(Pair {
+                track: ti as u32,
+                plot: a as u32,
+                cost,
+            });
+            ra.infos.push(PairInfo { m, row });
+        }
+    }
+    f.cand_buf = cand;
+    ra.work += spent;
+    spent
+}
+
+/// The third part of one radar's association: the assignment of the gated pairs, and the
+/// decision for each plot.
+fn assoc_finish(f: &mut Fusion, ra: RadarAssoc<'_>) -> Vec<Decision> {
+    let RadarAssoc {
+        radar,
+        r8,
+        plots,
+        mut dec,
+        tracks,
+        anon,
+        grid,
+        pairs,
+        infos,
+        capped,
+        ..
+    } = ra;
+    if let Some(slot) = f.grids.get_mut(radar) {
+        *slot = grid;
     }
     if capped {
         f.stats.bucket_work_capped += 1;
@@ -953,12 +1157,9 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
         };
         let key = info.m.addr;
         if hold && assoc_ambiguous(&f.assoc).get(a).copied().unwrap_or(false) {
-            let run = f.hold_run.get(&key).copied().unwrap_or(0);
+            let run = f.hold_run.get(&(key, r8)).map_or(0, |h| h.run);
             if run < HOLD_MAX_RUN {
-                if f.hold_run.len() >= MAX_ASSOC_TRACKS {
-                    f.hold_run.pop_first();
-                }
-                f.hold_run.insert(key, run + 1);
+                hold_note(f, key, r8, run + 1);
                 f.stats.held += 1;
                 if let Some(d) = dec.get_mut(j) {
                     d.kind = D_HELD;
@@ -968,7 +1169,7 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
             // The track has been starved of plots by ambiguity: it takes this one.
             f.stats.held_forced += 1;
         }
-        f.hold_run.remove(&key);
+        f.hold_run.remove(&(key, r8));
         let resid = (f.cfg.registration && reg_eligible(f, key, &info.row, p))
             .then(|| residual_for(f, radar, &info.row, p))
             .flatten();
@@ -983,9 +1184,86 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
         }
         f.stats.applied_assoc += 1;
     }
-    f.pairs_buf = pairs;
-    f.infos_buf = infos;
+    if let Some(slot) = f.pairs_bufs.get_mut(radar) {
+        *slot = pairs;
+    }
+    if let Some(slot) = f.infos_bufs.get_mut(radar) {
+        *slot = infos;
+    }
     dec
+}
+
+/// The decisions for the plots of every radar of a bucket (`groups`: a radar and its plots, in
+/// time order). The hard-constraint plots are decided first; the anonymous plots are then gated
+/// one at a time, always for the radar that has spent the least work so far (the lowest radar on
+/// a tie), so when the bucket's work limit is reached every radar has had its share and one
+/// radar's flood does not leave the others' plots ungated; the assignments follow.
+fn associate_bucket(
+    f: &mut Fusion,
+    groups: &[(usize, Vec<RadarPlot>)],
+) -> Vec<(usize, Vec<Decision>)> {
+    let mut ras: Vec<Option<RadarAssoc<'_>>> = groups
+        .iter()
+        .map(|(r, v)| assoc_prepare(f, *r, v))
+        .collect();
+    let budget = f.bucket_tests_max;
+    let mut total = 0usize;
+    loop {
+        let pick = ras
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                r.as_ref()
+                    .filter(|ra| !ra.capped && ra.next < ra.anon.len())
+                    .map(|ra| (ra.work, i))
+            })
+            .min();
+        let Some((_, i)) = pick else { break };
+        if total >= budget {
+            // Out of work for the bucket: the plots still waiting are not gated.
+            for ra in ras.iter_mut().flatten() {
+                ra.capped |= ra.next < ra.anon.len();
+            }
+            break;
+        }
+        let Some(ra) = ras.get_mut(i).and_then(Option::as_mut) else {
+            break;
+        };
+        let a = ra.next;
+        ra.next += 1;
+        total += assoc_plot(f, ra, a, budget - total);
+    }
+    groups
+        .iter()
+        .zip(ras)
+        .map(|((r, _), ra)| (*r, ra.map(|ra| assoc_finish(f, ra)).unwrap_or_default()))
+        .collect()
+}
+
+/// Records a run of `run` held plots of `radar` on `key`, in the bucket being processed. In a full
+/// table the entry touched longest ago goes (the lowest key among those), counted.
+fn hold_note(f: &mut Fusion, key: u32, radar: u8, run: u8) {
+    let at = (key, radar);
+    if !f.hold_run.contains_key(&at) && f.hold_run.len() >= f.hold_run_max {
+        let oldest = f
+            .hold_run
+            .iter()
+            .fold(None::<((u32, u8), i64)>, |best, (k, h)| match best {
+                Some((_, b)) if b <= h.bucket => best,
+                _ => Some((*k, h.bucket)),
+            });
+        if let Some((k, _)) = oldest {
+            f.hold_run.remove(&k);
+            f.stats.hold_evicted += 1;
+        }
+    }
+    f.hold_run.insert(
+        at,
+        HoldRun {
+            run,
+            bucket: f.done_bucket,
+        },
+    );
 }
 
 fn add_gnn(a: &mut GnnStats, b: &GnnStats) {
@@ -1067,10 +1345,7 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
             v.truncate(MAX_BUCKET_PLOTS);
         }
     }
-    let decisions: Vec<(usize, Vec<Decision>)> = groups
-        .iter()
-        .map(|(r, v)| (*r, associate_radar(f, *r, v)))
-        .collect();
+    let decisions = associate_bucket(f, &groups);
     // Events in time order.
     let mut evs: Vec<Ev> = Vec::new();
     for (i, m) in adsb.iter().enumerate() {
@@ -1146,7 +1421,7 @@ fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
     if st.used == 0 {
         return;
     }
-    if *last == i64::MIN || t_ns - *last >= REG_PUBLISH_NS {
+    if *last == i64::MIN || t_ns.saturating_sub(*last) >= REG_PUBLISH_NS {
         if hist.len() < REG_HISTORY_MAX {
             hist.push(reg_sample(st, t_ns));
         }
@@ -1161,7 +1436,7 @@ fn scan_of(f: &Fusion, radar: usize, t_ns: i64) -> i64 {
         .sites
         .get(radar)
         .map_or((NS_PER_S, 0), |s| (s.period_ns, s.epoch_ns));
-    (t_ns - e).div_euclid(p)
+    t_ns.saturating_sub(e).div_euclid(p)
 }
 
 /// Normalised cost of a plot joining a candidate: the distance from the candidate's straight-line
@@ -1173,7 +1448,7 @@ fn cand_cost(c: &Cand, m: &Measurement, plot_scan: i64) -> Option<f64> {
     }
     let n = usize::from(c.n);
     let last = c.meas.get(n.checked_sub(1)?)?;
-    let dt = (m.toa_ns - last.toa_ns) as f64 / 1.0e9;
+    let dt = m.toa_ns.saturating_sub(last.toa_ns) as f64 / 1.0e9;
     if dt <= 0.0 {
         return None;
     }
@@ -1194,7 +1469,7 @@ fn cand_cost(c: &Cand, m: &Measurement, plot_scan: i64) -> Option<f64> {
             f64::from(prev.lat_e7) / 1.0e7,
             f64::from(prev.lon_e7) / 1.0e7,
         );
-        let dtp = (last.toa_ns - prev.toa_ns) as f64 / 1.0e9;
+        let dtp = last.toa_ns.saturating_sub(prev.toa_ns) as f64 / 1.0e9;
         if dtp <= 0.0 {
             return None;
         }
@@ -1383,7 +1658,7 @@ fn initiate(
         if c.n >= f.cfg.init_m {
             f.cands.remove(i);
             confirm(f, radar, &c, out);
-        } else if now_scan - c.first_scan >= i64::from(f.cfg.init_n) {
+        } else if now_scan.saturating_sub(c.first_scan) >= i64::from(f.cfg.init_n) {
             f.cands.remove(i);
             f.stats.cand_expired += 1;
         } else {
@@ -1496,7 +1771,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) {
 mod tests {
     use super::*;
     use crate::radar::NONE_CODE;
-    use crate::types::{output_len, DEFAULT_CONFIG};
+    use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
     use oa_sensorsim::prng::Rng;
 
     pub(crate) const SITE: RadarSite = RadarSite {
@@ -1974,6 +2249,100 @@ mod tests {
         );
     }
 
+    /// A stationary ADS-B fix of `addr` at the position of [`adsb_fix`] moved `dlat_e7` north.
+    fn adsb_moved(addr: u32, t_ns: i64, dlat_e7: i32) -> Measurement {
+        let mut m = adsb_fix(addr, t_ns);
+        m.lat_e7 += dlat_e7;
+        m
+    }
+
+    /// A Mode S plot of `addr` for an aircraft at `adsb_fix` moved `dlat_e7` north.
+    fn mode_s_plot_at(addr: u32, t_ns: i64, dlat_e7: i32) -> RadarPlot {
+        let lat = f64::from(421_500_000 + dlat_e7) / 1.0e7;
+        let (rho, az) = polar_of(&radar_geom(&SITE), lat, -87.9, 20_000.0 * FT_M);
+        RadarPlot {
+            time_ns: t_ns,
+            range_m: rho,
+            az_deg: az,
+            alt_ft: 20_000,
+            addr,
+            label: addr,
+            mode_a: NONE_CODE,
+        }
+    }
+
+    // REQ: OA-TRK-176
+    #[test]
+    fn radar_contradicting_an_adsb_track_flags_it_for_three_scans_and_moves_nothing() {
+        // 0xA00001's ADS-B says 5 km north of where two radars see its Mode S plots for five
+        // scans (10 s to 30 s), after which the plots agree with the track. 0xA00002 is
+        // honest throughout. Scans are 4.8 s.
+        const DISPLACED: i32 = 450_000;
+        let mut f = make_fusion_radars(2);
+        let mut out = output_new(1 << 18);
+        for s in 0..70i64 {
+            let t = s * NS_PER_S;
+            fusion_adsb(&mut f, &adsb_moved(0xA00001, t, DISPLACED));
+            fusion_adsb(&mut f, &adsb_moved(0xA00002, t, 0));
+            for r in 0..2usize {
+                for k in 0..10i64 {
+                    let tp = 10 * NS_PER_S + k * 4_800_000_000 + (r as i64) * 500_000_000;
+                    if tp / NS_PER_S != s {
+                        continue;
+                    }
+                    let off = if k < 5 { 0 } else { DISPLACED };
+                    fusion_plots(&mut f, r, &[mode_s_plot_at(0xA00001, tp, off)]);
+                    fusion_plots(&mut f, r, &[mode_s_plot_at(0xA00002, tp, 0)]);
+                }
+            }
+            fusion_advance(&mut f, (s + 1) * NS_PER_S, &mut out);
+        }
+        fusion_finish(&mut f, 70 * NS_PER_S, &mut out);
+        let flagged = |addr: u32, from_s: f64, to_s: f64| -> usize {
+            (0..out.t_ns.len())
+                .filter(|&i| {
+                    let ts = out.t_ns[i] as f64 / 1.0e9;
+                    out.addr[i] == addr
+                        && ts >= from_s
+                        && ts <= to_s
+                        && out.flags[i] & O_RADAR_DISAGREES != 0
+                })
+                .count()
+        };
+        let rows = |addr: u32, from_s: f64, to_s: f64| -> usize {
+            (0..out.t_ns.len())
+                .filter(|&i| {
+                    let ts = out.t_ns[i] as f64 / 1.0e9;
+                    out.addr[i] == addr && ts >= from_s && ts <= to_s
+                })
+                .count()
+        };
+        // The last contradicting plot is at 29.7 s: flagged from the first scan to three scans
+        // (14.4 s) after the last, and clear after.
+        assert_eq!(flagged(0xA00001, 0.0, 9.9), 0);
+        let during = rows(0xA00001, 11.0, 44.0);
+        assert!(during > 30, "{during} rows");
+        assert_eq!(flagged(0xA00001, 11.0, 44.0), during);
+        assert_eq!(flagged(0xA00001, 45.0, 70.0), 0);
+        assert!(rows(0xA00001, 45.0, 70.0) > 20);
+        // The honest aircraft never carries it.
+        assert!(rows(0xA00002, 0.0, 70.0) > 60);
+        assert_eq!(flagged(0xA00002, 0.0, 70.0), 0);
+        let st = fusion_stats(&f);
+        assert_eq!(st.radar_disagree, 10, "{st:?}");
+        assert_eq!(st.hard_mismatch, 10, "{st:?}");
+        // Nothing moved: the track stayed where ADS-B put it (5 km north of the plots).
+        let i = (0..out.t_ns.len())
+            .rev()
+            .find(|&i| out.addr[i] == 0xA00001)
+            .unwrap();
+        assert!(
+            (out.lat_e7[i] - 421_500_000 - DISPLACED).abs() < 200,
+            "{}",
+            out.lat_e7[i]
+        );
+    }
+
     // REQ: OA-TRK-072
     #[test]
     fn a_track_takes_at_most_one_plot_per_radar_bucket() {
@@ -2061,6 +2430,345 @@ mod tests {
             // The plots were held, and then applied on the assignment's own evidence.
             assert!(st.held_forced > 0, "seed {seed}: {st:?}");
         }
+    }
+
+    /// A fusion over `n` radars, all at [`SITE`] (differing in sensor number only).
+    fn make_fusion_radars(n: usize) -> Fusion {
+        let sites: Vec<RadarSite> = (0..n)
+            .map(|i| RadarSite {
+                sensor: 1 + i as u16,
+                ..SITE
+            })
+            .collect();
+        let tc = fusion_tracker_config(
+            &TrackerConfig {
+                out_capacity: 1 << 18,
+                ..DEFAULT_CONFIG
+            },
+            &sites,
+        );
+        let mut c = fusion_config(tc);
+        c.registration = false;
+        c.log_assign = true;
+        fusion_new(&c, &sites).unwrap()
+    }
+
+    /// Two ADS-B aircraft 60 m apart (tracks after ten reports) and, from each of `radars`
+    /// radars in the next second, one plot of each, between them in range and exact in azimuth:
+    /// every plot is within the ambiguity margin of both tracks.
+    fn ambiguous_pair_seen_by(radars: usize) -> Fusion {
+        let mut f = make_fusion_radars(radars);
+        let mut out = output_new(1 << 18);
+        for k in 0..10i64 {
+            for (addr, dlat) in [(0xA00001, 0), (0xA00002, 5_400)] {
+                let mut m = adsb_fix(addr, k * NS_PER_S);
+                m.lat_e7 += dlat;
+                fusion_adsb(&mut f, &m);
+            }
+            fusion_advance(&mut f, k * NS_PER_S, &mut out);
+        }
+        let g = radar_geom(&SITE);
+        for r in 0..radars {
+            let plots: Vec<RadarPlot> = [(0xA00001u32, 0), (0xA00002, 5_400)]
+                .iter()
+                .enumerate()
+                .map(|(i, &(label, dlat))| {
+                    let lat = f64::from(421_500_000 + dlat) / 1.0e7;
+                    let (rho, az) = polar_of(&g, lat, -87.9, 20_000.0 * FT_M);
+                    RadarPlot {
+                        time_ns: 10 * NS_PER_S + (r * 2 + i) as i64 * 10_000_000,
+                        range_m: rho + 20.0,
+                        az_deg: az,
+                        alt_ft: 20_000,
+                        addr: NO_ADDR,
+                        label,
+                        mode_a: NONE_CODE,
+                    }
+                })
+                .collect();
+            fusion_plots(&mut f, r, &plots);
+        }
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
+        f
+    }
+
+    // REQ: OA-TRK-175
+    #[test]
+    fn each_radar_has_its_own_hold_run_on_a_track() {
+        // Three radars see the same ambiguous pair in one bucket. A run counted per track alone
+        // would be used up by the first two radars and the third's plots applied at once.
+        let f = ambiguous_pair_seen_by(3);
+        let st = fusion_stats(&f);
+        assert_eq!(st.held, 6, "{st:?}");
+        assert_eq!(st.held_forced, 0, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-175
+    #[test]
+    fn a_full_hold_table_drops_the_entry_touched_longest_ago_and_counts_it() {
+        let mut f = make_fusion(|_| {});
+        f.hold_run_max = 3;
+        for (bucket, key, radar) in [(5, 0x30, 0), (4, 0x20, 1), (4, 0x10, 0)] {
+            f.done_bucket = bucket;
+            hold_note(&mut f, key, radar, 1);
+        }
+        assert_eq!(f.stats.hold_evicted, 0);
+        // Touching an entry already there is not an insertion: nothing goes.
+        f.done_bucket = 6;
+        hold_note(&mut f, 0x30, 0, 2);
+        assert_eq!(f.stats.hold_evicted, 0);
+        // Full: of the two touched in bucket 4, the lower key goes (not the lowest key overall,
+        // which is what the first of the table would be).
+        f.done_bucket = 7;
+        hold_note(&mut f, 0x05, 0, 1);
+        assert_eq!(f.stats.hold_evicted, 1);
+        let keys: Vec<(u32, u8)> = f.hold_run.keys().copied().collect();
+        assert_eq!(keys, vec![(0x05, 0), (0x20, 1), (0x30, 0)]);
+        // The next to go is the one in bucket 4 that is left.
+        f.done_bucket = 8;
+        hold_note(&mut f, 0x06, 0, 1);
+        let keys: Vec<(u32, u8)> = f.hold_run.keys().copied().collect();
+        assert_eq!(keys, vec![(0x05, 0), (0x06, 0), (0x30, 0)]);
+        assert_eq!(f.stats.hold_evicted, 2);
+    }
+
+    /// A fusion over `sites` with room for `max_tracks`, without registration.
+    fn make_fusion_sites(sites: &[RadarSite], max_tracks: usize) -> Fusion {
+        let tc = fusion_tracker_config(
+            &TrackerConfig {
+                out_capacity: 1 << 18,
+                max_tracks,
+                ..DEFAULT_CONFIG
+            },
+            sites,
+        );
+        let mut c = fusion_config(tc);
+        c.registration = false;
+        c.log_assign = true;
+        fusion_new(&c, sites).unwrap()
+    }
+
+    /// Offers `n` stationary ADS-B tracks at 20,000 ft, scattered over a square of `side_m` round
+    /// `site` (addresses from `addr0`), four seconds of reports; returns their places (latitude,
+    /// longitude). The caller advances time.
+    fn feed_tracks(
+        f: &mut Fusion,
+        site: &RadarSite,
+        n: usize,
+        side_m: f64,
+        seed: u64,
+        addr0: u32,
+    ) -> Vec<(f64, f64)> {
+        let frame = oa_geo::aeqd::frame_new(site.lat_deg, site.lon_deg);
+        let mut rng = Rng::from_seed(seed);
+        let at: Vec<(f64, f64)> = (0..n)
+            .map(|_| {
+                oa_geo::aeqd::unproject(
+                    &frame,
+                    side_m * (rng.unit() - 0.5),
+                    side_m * (rng.unit() - 0.5),
+                )
+            })
+            .collect();
+        for k in 0..4i64 {
+            for (i, &(lat, lon)) in at.iter().enumerate() {
+                let mut m = adsb_fix(addr0 + i as u32, k * NS_PER_S);
+                m.lat_e7 = (lat * 1.0e7).round() as i32;
+                m.lon_e7 = (lon * 1.0e7).round() as i32;
+                fusion_adsb(f, &m);
+            }
+        }
+        at
+    }
+
+    /// A plot of `site` for each of the first `n` places, `noise_m` off in range and a little
+    /// in azimuth, in the bucket after the reports, in time order.
+    fn plots_on(
+        site: &RadarSite,
+        at: &[(f64, f64)],
+        n: usize,
+        noise_m: f64,
+        seed: u64,
+    ) -> Vec<RadarPlot> {
+        let g = radar_geom(site);
+        let mut rng = Rng::from_seed(seed);
+        at.iter()
+            .take(n)
+            .enumerate()
+            .map(|(i, &(lat, lon))| {
+                let (rho, az) = polar_of(&g, lat, lon, 20_000.0 * FT_M);
+                RadarPlot {
+                    time_ns: 5 * NS_PER_S + (i as i64) * 10_000,
+                    range_m: rho + noise_m * rng.normal(),
+                    az_deg: (az + noise_m / 40_000.0 * rng.normal()).rem_euclid(360.0),
+                    alt_ft: 20_000,
+                    addr: NO_ADDR,
+                    label: i as u32,
+                    mode_a: NONE_CODE,
+                }
+            })
+            .collect()
+    }
+
+    // REQ: OA-TRK-177
+    #[test]
+    fn ten_thousand_plots_over_twenty_thousand_tracks_associate_in_seconds() {
+        // A busy bucket of one radar over a whole airspace of tracks: every plot used to be
+        // tested against every track (2e8 window tests).
+        let mut f = make_fusion_sites(&[SITE], 20_000);
+        let at = feed_tracks(&mut f, &SITE, 20_000, 800_000.0, 12, 0x100000);
+        let mut out = output_new(1 << 18);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        let plots = plots_on(&SITE, &at, 10_000, 0.0, 3);
+        let started = std::time::Instant::now();
+        fusion_plots(&mut f, 0, &plots);
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let took = started.elapsed().as_secs_f64();
+        let st = fusion_stats(&f);
+        assert_eq!(st.bucket_work_capped, 0, "{st:?}");
+        assert!(st.applied_assoc + st.held >= 9_900, "{st:?}");
+        assert_eq!(st.plots_refused, 0, "{st:?}");
+        eprintln!("associated in {took} s");
+        // A debug build on a loaded machine; the scan of every pair took several times this.
+        assert!(took < 12.0, "{took} s: {st:?}");
+    }
+
+    /// Everything a run decided, to compare two runs of the same inputs.
+    fn outcome(f: &Fusion, out: &TrackOutput) -> (FusionStats, AssignLog, String) {
+        let mut h = oa_sha256::Sha256::new();
+        crate::types::output_hash_into(&mut h, out);
+        let mut st = *fusion_stats(f);
+        st.coarse_visits = 0;
+        (
+            st,
+            fusion_assign_log(f).clone(),
+            oa_sha256::to_hex(&h.finalize()),
+        )
+    }
+
+    // REQ: OA-TRK-177
+    #[test]
+    fn the_grid_gives_the_associations_of_testing_every_track() {
+        // Radars on the +-180 degree seam, at the pole's limit and ordinary; 600 tracks round
+        // each, plots a few hundred metres off them (some with their addresses) and random ones.
+        let site = |lat_deg: f64, lon_deg: f64, sensor: u16| RadarSite {
+            lat_deg,
+            lon_deg,
+            sensor,
+            ..SITE
+        };
+        let sites = [
+            site(0.0, 179.95, 1),
+            site(85.0, 20.0, 2),
+            site(41.98, -87.91, 3),
+        ];
+        let run_once = |brute: bool| {
+            let mut f = make_fusion_sites(&sites, 2_000);
+            f.brute_coarse = brute;
+            let mut out = output_new(1 << 18);
+            let mut places = Vec::new();
+            for (r, s) in sites.iter().enumerate() {
+                places.push(feed_tracks(
+                    &mut f,
+                    s,
+                    600,
+                    300_000.0,
+                    40 + r as u64,
+                    0x100000 * (r as u32 + 1),
+                ));
+            }
+            fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+            let mut rng = Rng::from_seed(9);
+            for (r, s) in sites.iter().enumerate() {
+                let mut plots = plots_on(s, &places[r], 600, 300.0, 50 + r as u64);
+                for (i, p) in plots.iter_mut().enumerate() {
+                    if i % 7 == 0 {
+                        p.addr = 0x100000 * (r as u32 + 1) + i as u32;
+                    }
+                }
+                for k in 0..200i64 {
+                    plots.push(RadarPlot {
+                        time_ns: 5 * NS_PER_S + 7_000_000 + k * 10_000,
+                        range_m: 1_000.0 + 400_000.0 * rng.unit(),
+                        az_deg: 360.0 * rng.unit(),
+                        alt_ft: 20_000,
+                        addr: NO_ADDR,
+                        label: 9_000 + k as u32,
+                        mode_a: NONE_CODE,
+                    });
+                }
+                fusion_plots(&mut f, r, &plots);
+            }
+            fusion_advance(&mut f, 12 * NS_PER_S, &mut out);
+            fusion_finish(&mut f, 12 * NS_PER_S, &mut out);
+            let visits = fusion_stats(&f).coarse_visits;
+            (outcome(&f, &out), visits)
+        };
+        let (grid, visits) = run_once(false);
+        let (brute, none) = run_once(true);
+        assert_eq!(none, 0);
+        assert!(grid.0.pairs_gated > 600, "{:?}", grid.0);
+        assert!(grid.0.applied_hard > 50, "{:?}", grid.0);
+        assert!(grid.0.held > 0 || grid.0.unassigned > 100, "{:?}", grid.0);
+        assert!(visits > 0);
+        assert_eq!(grid.0, brute.0);
+        assert_eq!(grid.1, brute.1);
+        assert_eq!(grid.2, brute.2);
+    }
+
+    // REQ: OA-TRK-177
+    #[test]
+    fn a_flood_from_one_radar_does_not_stop_another_radars_plots() {
+        // 100 tracks in a 3 km cluster and a flood of 2,000 plots from radar 0 over it, every
+        // one a candidate for every track; twenty isolated tracks 50 km away seen by radar 1.
+        // The bucket's work limit is cut to 40,000 so the flood runs into it: the flood is cut
+        // (and counted), radar 1's plots, though they come second, are all gated.
+        let sites = [
+            RadarSite { sensor: 1, ..SITE },
+            RadarSite { sensor: 2, ..SITE },
+        ];
+        let mut f = make_fusion_sites(&sites, 200);
+        f.bucket_tests_max = 40_000;
+        let mut out = output_new(1 << 18);
+        let cluster = feed_tracks(&mut f, &SITE, 100, 3_000.0, 1, 0x100000);
+        // The isolated ones, 50 km east of the cluster.
+        let frame = oa_geo::aeqd::frame_new(SITE.lat_deg, SITE.lon_deg);
+        let mut isolated = Vec::new();
+        for i in 0..20u32 {
+            let (lat, lon) =
+                oa_geo::aeqd::unproject(&frame, 50_000.0 + 1_000.0 * f64::from(i), 0.0);
+            for k in 0..4i64 {
+                let mut m = adsb_fix(0x300000 + i, k * NS_PER_S);
+                m.lat_e7 = (lat * 1.0e7).round() as i32;
+                m.lon_e7 = (lon * 1.0e7).round() as i32;
+                fusion_adsb(&mut f, &m);
+            }
+            isolated.push((lat, lon));
+        }
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        let mut rng = Rng::from_seed(4);
+        let flood: Vec<RadarPlot> = (0..2_000)
+            .map(|i| {
+                let (lat, lon) = cluster[(rng.unit() * 100.0) as usize % 100];
+                RadarPlot {
+                    label: 5_000 + i,
+                    time_ns: 5 * NS_PER_S + i64::from(i) * 10_000,
+                    ..plots_on(&SITE, &[(lat, lon)], 1, 100.0, u64::from(i))[0]
+                }
+            })
+            .collect();
+        let victim = plots_on(&sites[1], &isolated, 20, 0.0, 8);
+        fusion_plots(&mut f, 0, &flood);
+        fusion_plots(&mut f, 1, &victim);
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.bucket_work_capped, 1, "{st:?}");
+        let log = fusion_assign_log(&f);
+        let second = log.radar.iter().filter(|&&r| r == 1).count();
+        assert_eq!(second, 20, "radar 1 plots applied: {second}; {st:?}");
+        // The flood was cut, not all of it gated: well under the 2,000 x 100 tests it asks for.
+        assert!(st.pairs_tested + st.coarse_visits <= 40_000 + 200, "{st:?}");
     }
 
     // REQ: OA-TRK-071
@@ -2157,6 +2865,68 @@ mod tests {
             ident: crate::types::NO_IDENT,
             flags: crate::types::M_HAS_VEL,
             category: 0,
+        }
+    }
+
+    // REQ: OA-TRK-172
+    #[test]
+    fn a_plot_time_outside_the_trackers_limit_is_refused_and_counted_without_a_panic() {
+        use crate::types::TIME_LIMIT_NS;
+        let mut f = make_fusion(|_| {});
+        let mut out = output_new(1 << 18);
+        for k in 0..10i64 {
+            fusion_adsb(&mut f, &adsb_fix(0xA00001, k * NS_PER_S));
+            fusion_advance(&mut f, k * NS_PER_S, &mut out);
+        }
+        let (row, _, _) = tracker_predict(fusion_tracker(&f), 0xA00001, 9 * NS_PER_S).unwrap();
+        let times = [i64::MIN, i64::MAX, TIME_LIMIT_NS + 1, -TIME_LIMIT_NS - 1];
+        let mut plots = Vec::new();
+        for &t in &times {
+            // One with the track's address (the hard path) and one anonymous, both where the
+            // track is.
+            for addr in [0xA00001, NO_ADDR] {
+                plots.push(RadarPlot {
+                    time_ns: t,
+                    range_m: 20_000.0,
+                    az_deg: 10.0,
+                    alt_ft: 20_000,
+                    addr,
+                    label: 1,
+                    mode_a: NONE_CODE,
+                });
+            }
+        }
+        fusion_plots(&mut f, 0, &plots);
+        fusion_advance(&mut f, 12 * NS_PER_S, &mut out);
+        fusion_finish(&mut f, 12 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.plots_in, 8);
+        assert_eq!(st.plots_refused, 8, "{st:?}");
+        // The limit itself is a time the tracker takes, so a plot there is not refused.
+        let at = RadarPlot {
+            time_ns: TIME_LIMIT_NS,
+            ..plots[0]
+        };
+        assert!(plot_check(&at).is_ok());
+        assert!(plot_check(&RadarPlot {
+            time_ns: -TIME_LIMIT_NS,
+            ..at
+        })
+        .is_ok());
+        // The cost takes a time difference that would overflow if it were not saturating.
+        let (g, bias) = (radar_geom(&SITE), NO_BIAS);
+        let ok = RadarPlot {
+            time_ns: 9 * NS_PER_S,
+            ..plots[0]
+        };
+        let c = plot_convert(&g, &SITE, &ok, &bias, None, 0xA00001).unwrap();
+        for (t, last) in [(i64::MIN, i64::MAX), (i64::MAX, i64::MIN), (i64::MIN, 5)] {
+            let p = RadarPlot {
+                time_ns: t,
+                ..plots[0]
+            };
+            let pc = pair_cost(&row, &c, &p, 100, last);
+            assert!(!pc.dh.is_nan() && !pc.dv.is_nan());
         }
     }
 

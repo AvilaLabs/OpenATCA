@@ -47,7 +47,7 @@
 //! before the conversion and the estimate's variance is added to the plot's, so a radar with an
 //! unknown bias is weighted as the uncertainty says.
 
-use crate::types::{Measurement, NONE_I32, NO_ADDR, NO_IDENT};
+use crate::types::{Measurement, NONE_I32, NO_ADDR, NO_IDENT, TIME_LIMIT_NS};
 
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
@@ -421,6 +421,11 @@ pub fn polar_cov_local(
 
 /// Checks a plot (E5).
 pub fn plot_check(p: &RadarPlot) -> Result<(), RadarError> {
+    // The tracker's own limit on a time of applicability, so every time difference taken of a
+    // plot's time is within range.
+    if p.time_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {
+        return Err(RadarError::BadPlot("time"));
+    }
     if !(p.range_m.is_finite() && (MIN_PLOT_RANGE_M..=MAX_PLOT_RANGE_M).contains(&p.range_m)) {
         return Err(RadarError::BadPlot("range"));
     }

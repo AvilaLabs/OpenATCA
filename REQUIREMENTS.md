@@ -2550,3 +2550,34 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   tracks equally good for one plot give it to the lower, whatever the order of the pairs.
 - **OA-TRK-160** A report received before its sensor time is counted as clock skew
   (`LatencyLog::sensor_negative`); its signed difference is stored as it is.
+- **OA-TRK-170** The runs of the tracker and of the fusion layer on the real ZAU ADS-B clip (radar plots
+  simulated from its trajectories, one and two radars, with and without ADS-B and registration) have
+  fixed output digests: a change of how work is found or bounded does not change what is decided.
+- **OA-TRK-171** The tracker run on the same clip, at report times, has a fixed output digest.
+- **OA-TRK-172** A radar plot whose time is outside the tracker's own limit on a time of
+  applicability (about 146 years either side of the epoch) is refused by validation and counted with the
+  other refused plots; plots at the smallest and largest times and one past the limit either way are
+  refused, and no time difference taken of a plot's time can overflow.
+- **OA-TRK-173** The tracker keeps the newest update time any track has had and uses it, not a scan of
+  every slot, to jump over the ticks that no track could still use: the rows of a run with drops and gaps
+  of hours are those the full scan gave, bit for bit, and the kept time is never older than any live
+  track's.
+- **OA-TRK-174** A radar's registration estimator has a configured number of reference slots (256 by
+  default, allocated at start). A reference keeps its slot while its aircraft makes residuals and gives it
+  up only after six scans without one; an aircraft that finds every slot held is ignored and counted. With
+  300 aircraft eligible in every scan registration starts within a few scans and the estimate is as good as
+  with twelve.
+- **OA-TRK-175** The run of plots held for ambiguity is kept per track and radar, so each of several
+  overlapping radars holds its own plots before one is applied on the assignment's evidence; a full table
+  drops the entry touched longest ago (the lowest key among those) and counts it.
+- **OA-TRK-176** A track is marked (a flag on its output rows) while a Mode S plot of its address has
+  fallen outside the wide gate of its position within the last three scans of a radar, and the mark is
+  counted; the position, the filter and the assignment are not changed. An ADS-B track 5 km from where two
+  radars see its Mode S plots carries the flag, an honest one does not, and the flag clears after three
+  scans without a contradiction.
+- **OA-TRK-177** The coarse window of a plot is applied only to the tracks in the latitude and longitude
+  grid cells it can reach, in ascending track order, and finds exactly the associations that testing every
+  track finds (across the +-180 degree seam and at the poles); 10,000 plots over 20,000 tracks associate
+  in seconds in a debug build; candidates visited are charged to the bucket's work limit and counted; when
+  the limit is reached the radars of a bucket have each had an equal share, so one radar's flood does not
+  leave another radar's plots ungated.

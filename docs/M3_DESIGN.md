@@ -77,6 +77,24 @@ rate (1 s) for consumers.
   scan. A Mode S address on the plot is a hard constraint inside a wide gate (a gross mismatch is
   counted, not applied), and a track takes at most one plot per scan; a Mode A code alone never assigns
   a plot (LS-609).
+- **A radar contradicting an address's track is flagged, not obeyed.** A Mode S plot outside the wide
+  gate of its address's track changes no position (the address is evidence, not proof, and which of the
+  two is wrong is not for the filter to say), but it sets a flag bit on the track's output rows
+  (`O_RADAR_DISAGREES`, "a radar disagrees with this address's track") that stays while such a plot has
+  been seen within the last three scans of any radar and clears after three scans without one. The
+  marks are counted (`radar_disagree`, with `hard_mismatch`) and printed in the report. A spoofed ADS-B
+  position that radar does not see is thus visible to a consumer, and an honest track never carries it
+  while the radar agrees with it.
+- Plots held for ambiguity are counted per track and per radar, so several radars overlapping a pair
+  each hold their own plots. The coarse window of a plot is applied only to the tracks in the cells of a
+  latitude and longitude grid (a quarter degree) that it can reach, in ascending track order, which
+  finds exactly what testing every track finds; the candidates visited and the exact tests are charged to
+  one work limit per bucket, and plots are gated for the radar that has spent least first, so a flood
+  from one radar does not leave the others' plots ungated.
+- Registration keeps up to 256 reference aircraft per radar (a configuration value). A reference
+  keeps its slot while its aircraft makes residuals and gives it up after six scans without one; with
+  every slot held a new aircraft is ignored and counted, so registration starts in busy airspace
+  instead of replacing references faster than they can make the residuals they need.
 - **Identity is held under ambiguity.** When two tracks share a gate, kinematics alone never swap
   their identities; a swap needs identity evidence (address). This is the direct answer to track
   jumps (LS-102, LS-604) and is tested with crossing and parallel traffic. A track whose last two plots

@@ -498,7 +498,7 @@ pub fn run_variant(
     append_out(&mut acc, &scratch);
     let overflow = scratch.overflow;
     let reg = (0..sites.len())
-        .filter_map(|r| fusion_registration(&f, r).map(|(s, h)| (*s, h.to_vec())))
+        .filter_map(|r| fusion_registration(&f, r).map(|(s, h)| (s.clone(), h.to_vec())))
         .collect();
     Ok(RunOut {
         out: acc,
