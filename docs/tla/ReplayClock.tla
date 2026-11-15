@@ -238,10 +238,10 @@ NeverResumed ==
 
 Termination == <>AllDone
 
-\* 4. No ping-pong: steps are bounded by the number of genuine within-stream jumps
-\* (a regression, or a forward pause larger than TOL).  NoPingPong is the bound as stated;
-\* NoPingPong2 is the tight bound found by checking (a jump can cost a step back and a step
-\* forward for the other feed).
+\* No ping-pong, counted per stream: steps against the within-stream jumps (a regression, or
+\* a forward pause larger than TOL).  Both NoPingPong and NoPingPong2 (twice the bound) fail
+\* in the merged order, because a feed that starts far from the others costs a step without
+\* any jump inside a stream; see README.md.
 RECURSIVE SumJ(_)
 SumJ(S) == IF S = {} THEN 0
            ELSE LET f == CHOOSE x \in S : TRUE IN Jumps(stream[f]) + SumJ(S \ {f})
