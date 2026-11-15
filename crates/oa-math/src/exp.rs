@@ -84,9 +84,13 @@ pub(crate) fn exp_fast_core(zh: f64, zl: f64) -> (f64, f64, i32) {
 /// to even) and leaves the integer in the low bits of the sum.
 const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
 
-/// exp(x) for a plain double `x`, |x| < 700, as `(h, l, k)` like [`exp_fast_core`] and within the
-/// same [`EXP_FAST_ERR`], computed with a shorter dependency chain (the argument has no low
-/// part, which lets the reduction skip its normalising sum). Differences from the general core:
+/// Absolute error bound of [`exp_fast_plain`] (the result `d` is in [0.99, 2.02]): 2^-59, see there.
+const EXP_PLAIN_ERR: f64 = 1.734_723_475_976_807e-18; // 2^-59
+
+/// exp(x) for a plain double `x`, |x| < 700, as `(h, l, k)` like [`exp_fast_core`] and with the
+/// error of the same derivation, computed with a shorter dependency chain (the argument has no
+/// low part, which lets the reduction skip its normalising sum). Differences from the general
+/// core:
 /// * m is x / (ln 2 / 64) rounded to an integer by the magic-number sum (ties to even), so
 ///   |r| <= ln 2 / 128 (1 + 2^-50) as before;
 /// * `x - m L1` is exact: m L1 is an exact product of at most 52 bits, a multiple of 2^-41, x
@@ -95,12 +99,18 @@ const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
 ///   |x| >= ln 2 / 128 > 2^-8) and the difference equals x when m is 0;
 /// * the sum with `-m L2` stays a `two_sum` (the exact value of the difference may cancel);
 /// * the remainder `rl = s2.lo - m L3` is not renormalised against `rh`: it is below
-///   2^-60 + 2^-61 (the low part of a sum at most half an ulp of `rh` < 2^-7.5, and
-///   m L3 < 2^-60), so the neglected cross term `rl (exp(rh) - 1)` is below 2^-59 * 0.0055 < 2^-66
-///   and the square (rh + rl)^2 differs from rh^2 by less than 2 rh rl < 2^-66 (halved: 2^-67);
-///   both are well below the dominant 2^-60 term of the bound and inside its margin;
-/// * the tail `p` is evaluated in the order of Estrin (same terms, the rounding of each of the
-///   five coefficients' products is below 2^-76, immaterial to the bound).
+///   2^-60 + 2^-61 (the low part of a sum, at most half an ulp of `rh` < 2^-7.5, and
+///   m L3 < 2^-60), so the neglected cross term `rl (exp(rh) - 1)` is below 2^-60 * 2^-7.5, which
+///   with the table value below 2 is 2^-66.5; the same size comes from the difference between
+///   (rh + rl)^2 and rh^2 (halved, doubled by the table value);
+/// * the tail `p` is evaluated in the order of Estrin (same terms; the roundings of p are
+///   below 2^-72 of the result).
+///
+/// The error is then that of [`exp_fast_core`] plus 2^-66 (the cross terms) and 2^-72: the
+/// rounding of the product `t.hi q.hi` (below 2^-60, the dominant term), the evaluation of
+/// r^2 (0.5 + r p) (2^-65) and the Taylor cut-off (2^-74) sum to below 2^-59.8. The bound used
+/// is 2^-59, a factor 1.7 above that (the largest error seen against the double-double path
+/// over 20 million arguments is 1.01 2^-60).
 pub(crate) fn exp_fast_plain(x: f64) -> (f64, f64, i32) {
     let t = x * INV_LN2_64 + ROUND_MAGIC;
     let m = t.to_bits().wrapping_sub(ROUND_MAGIC.to_bits()) as i64;
@@ -129,7 +139,7 @@ pub(crate) fn exp_fast(x: f64) -> Option<f64> {
     }
     let (h, l, k) = exp_fast_plain(x);
     // -1011 <= k <= 1010, so 2^k is a normal number and the scaling is exact
-    round_test(h, l, EXP_FAST_ERR).map(|a| a * f64::from_bits(((k + 1023) as u64) << 52))
+    round_test(h, l, EXP_PLAIN_ERR).map(|a| a * f64::from_bits(((k + 1023) as u64) << 52))
 }
 
 /// e raised to `x`. Domain: all doubles. Result is faithfully rounded (measured maximum error

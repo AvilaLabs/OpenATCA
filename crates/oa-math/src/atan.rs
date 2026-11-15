@@ -191,14 +191,14 @@ const fn base_tab() -> [Dd; 68] {
     }
     t
 }
-const BASE_TAB: [Dd; 68] = base_tab();
+pub(crate) const BASE_TAB: [Dd; 68] = base_tab();
 
 /// `(hi, lo)` with `hi + lo == c * x` exactly and `hi = fl(c * x)`, for `c` a multiple of 1/16 in
 /// [0, 1] (at most 5 significant bits): `x` is cut into 26 and at most 27 bits, so `c xh` and
 /// `c xl` are exact, `c xh - hi` is exact (the two agree to 2^-25), and their sum is the exact
 /// rounding error, a double.
 #[inline]
-fn two_prod_c(c: f64, x: f64) -> (f64, f64) {
+pub(crate) fn two_prod_c(c: f64, x: f64) -> (f64, f64) {
     let p = c * x;
     let xh = f64::from_bits(x.to_bits() & !0x7ff_ffff);
     (p, (c * xh - p) + c * (x - xh))

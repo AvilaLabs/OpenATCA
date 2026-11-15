@@ -313,8 +313,8 @@ const fn pair_tab(first: &[Dd; 15], second: &[Dd; 15]) -> [Dd; 30] {
     }
     t
 }
-const START_TAB: [Dd; 30] = pair_tab(&SIN_TAB, &COS_TAB);
-const SLOPE_TAB: [Dd; 30] = pair_tab(&COS_TAB, &SIN_TAB);
+pub(crate) const START_TAB: [Dd; 30] = pair_tab(&SIN_TAB, &COS_TAB);
+pub(crate) const SLOPE_TAB: [Dd; 30] = pair_tab(&COS_TAB, &SIN_TAB);
 
 /// The table index and the short series for sin and cos of `|y| = a + b`, a = j/16, |b| <= 1/32.
 struct Part {
@@ -354,7 +354,7 @@ fn part(ayh: f64, ayl: f64) -> Part {
 /// partial product are exact; the last is rounded, below 2^-107 relative, and the sums of
 /// partial products round at most by 2^-79 relative).
 #[inline]
-fn two_prod_cut(a: f64, b: f64) -> Dd {
+pub(crate) fn two_prod_cut(a: f64, b: f64) -> Dd {
     let p = a * b;
     let ah = f64::from_bits(a.to_bits() & !0x7ff_ffff);
     let bh = f64::from_bits(b.to_bits() & !0x7ff_ffff);
@@ -415,13 +415,13 @@ fn finish(hl: (f64, f64), rel: f64, negative: u64) -> Option<f64> {
 /// Whether sin(x) is negative (0 or 1), given the quadrant n, the sign bit of y and of x:
 /// the quadrants 0 to 3 give y, never, not y, always.
 #[inline]
-fn sin_sign(n: u64, neg_y: u64, neg_x: u64) -> u64 {
+pub(crate) fn sin_sign(n: u64, neg_y: u64, neg_x: u64) -> u64 {
     (((n >> 1) & 1) ^ (neg_y & !n & 1)) ^ neg_x
 }
 
 /// Whether cos(x) is negative (0 or 1): cos is the sine of the next quadrant.
 #[inline]
-fn cos_sign(n: u64, neg_y: u64) -> u64 {
+pub(crate) fn cos_sign(n: u64, neg_y: u64) -> u64 {
     ((n >> 1) ^ n ^ (neg_y & n)) & 1
 }
 
