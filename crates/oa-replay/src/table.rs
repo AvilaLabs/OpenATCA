@@ -174,6 +174,14 @@ pub struct TableStats {
     /// A flight-plan identifier or `(centre, tmaId)` taken over by a newer flight, because the
     /// FAA reused it.
     pub key_reassigned: u64,
+    /// SFDPS rows older (by the message's own timestamp) than the newest already applied to the
+    /// flight: status, controlling unit, computer id and plan ownership were left as they were.
+    pub stale_amendments: u64,
+    /// Flight-plan identifiers an older SFDPS message did not take from a flight whose newest
+    /// message is newer.
+    pub plan_refused_old: u64,
+    /// SFDPS rows with no usable timestamp, applied as before (no ordering by source time).
+    pub no_source_time: u64,
 }
 
 /// The flight table. Plain data (A1, A3); behaviour is in the free functions of this crate.
@@ -239,6 +247,9 @@ pub struct FlightTable {
     pub vy_dkt: Vec<i16>,
     /// Time of the last position, Unix ms, or [`NO_TIME`].
     pub pos_time_ms: Vec<i64>,
+    /// Source time (the message's own timestamp) of the newest SFDPS message applied, Unix ms,
+    /// or [`NO_TIME`].
+    pub src_ms: Vec<i64>,
 
     /// Replay time of the last applied update, ns.
     pub last_update_ns: Vec<i64>,
@@ -279,10 +290,10 @@ pub struct FlightTable {
 
 /// Bytes of column data per flight (A7 budget, stated): identity 16 + 8 + 4 + 12 + 12 + 4 + 12,
 /// position 4 + 4 + 4 + 2 + 2 + 2 + 8, update 8 + 2 + 1 + 8, TBFM 4 + 8 + 8 + 8 + 8 + 4 + 8, flags
-/// and counters 1 + 4 + 4 + 4. The three indexes add 3 x 2 x 4 = 24 bytes per flight (two 4-byte
+/// and counters 1 + 4 + 4 + 4, SFDPS source time 8. The three indexes add 3 x 2 x 4 = 24 bytes per flight (two 4-byte
 /// cells per flight each, at the 1/2 load sizing, before rounding up to a power of two), so a
 /// default table is about 6.5 MB.
-pub const BYTES_PER_FLIGHT: usize = 174;
+pub const BYTES_PER_FLIGHT: usize = 182;
 
 /// Borrowed view of one slot's columns, read-only.
 pub(crate) struct SlotRef<'a> {
@@ -300,6 +311,7 @@ pub(crate) struct SlotRef<'a> {
     pub vx_dkt: &'a i16,
     pub vy_dkt: &'a i16,
     pub pos_time_ms: &'a i64,
+    pub src_ms: &'a i64,
     pub last_update_ns: &'a i64,
     pub last_source: &'a [u8; 2],
     pub last_feed: &'a u8,
@@ -333,6 +345,7 @@ pub(crate) struct SlotMut<'a> {
     pub vx_dkt: &'a mut i16,
     pub vy_dkt: &'a mut i16,
     pub pos_time_ms: &'a mut i64,
+    pub src_ms: &'a mut i64,
     pub last_update_ns: &'a mut i64,
     pub stale: &'a mut bool,
     pub last_source: &'a mut [u8; 2],
@@ -397,6 +410,7 @@ pub fn new_table(cfg: TableConfig) -> Result<FlightTable, ConfigError> {
         vx_dkt: vec![0; n],
         vy_dkt: vec![0; n],
         pos_time_ms: vec![NO_TIME; n],
+        src_ms: vec![NO_TIME; n],
         last_update_ns: vec![0; n],
         stale: vec![false; n],
         last_source: vec![[0; 2]; n],
@@ -452,6 +466,7 @@ pub(crate) fn slot_ref(t: &FlightTable, s: Slot) -> Option<SlotRef<'_>> {
         vx_dkt: t.vx_dkt.get(i)?,
         vy_dkt: t.vy_dkt.get(i)?,
         pos_time_ms: t.pos_time_ms.get(i)?,
+        src_ms: t.src_ms.get(i)?,
         last_update_ns: t.last_update_ns.get(i)?,
         last_source: t.last_source.get(i)?,
         last_feed: t.last_feed.get(i)?,
@@ -488,6 +503,7 @@ pub(crate) fn slot_mut(t: &mut FlightTable, s: Slot) -> Option<SlotMut<'_>> {
         vx_dkt: t.vx_dkt.get_mut(i)?,
         vy_dkt: t.vy_dkt.get_mut(i)?,
         pos_time_ms: t.pos_time_ms.get_mut(i)?,
+        src_ms: t.src_ms.get_mut(i)?,
         last_update_ns: t.last_update_ns.get_mut(i)?,
         stale: t.stale.get_mut(i)?,
         last_source: t.last_source.get_mut(i)?,
@@ -523,6 +539,7 @@ fn blank(c: &mut SlotMut<'_>) {
     *c.vx_dkt = 0;
     *c.vy_dkt = 0;
     *c.pos_time_ms = NO_TIME;
+    *c.src_ms = NO_TIME;
     *c.last_update_ns = 0;
     *c.stale = false;
     *c.last_source = [0; 2];
@@ -613,11 +630,22 @@ pub(crate) fn rekey_flight(t: &mut FlightTable, s: Slot, new: u128) -> bool {
 /// Sets the flight-plan identifier of `s` and indexes it. If another flight already holds the
 /// identifier, the newer flight takes it over (the FAA reuses identifiers) and the other loses
 /// it; this is counted in `stats.key_reassigned`.
-pub(crate) fn claim_plan(t: &mut FlightTable, s: Slot, p: &[u8; 12]) {
+///
+/// `src_ms` is the source time of the SFDPS message making the claim, or [`NO_TIME`] for a claim
+/// with none (TBFM, or an SFDPS row with no timestamp), which always takes the identifier. A
+/// claim with a source time takes it from another flight only if that flight's newest SFDPS
+/// message is older (a flight with none held counts as older); otherwise the claim is refused and
+/// counted in `stats.plan_refused_old`, and `false` is returned.
+pub(crate) fn claim_plan(t: &mut FlightTable, s: Slot, p: &[u8; 12], src_ms: i64) -> bool {
     if t.plan_id.get(s.0 as usize) == Some(p) {
-        return;
+        return true;
     }
     if let Some(other) = find_plan(t, p) {
+        let owner_src = t.src_ms.get(other.0 as usize).copied().unwrap_or(NO_TIME);
+        if src_ms != NO_TIME && owner_src != NO_TIME && owner_src >= src_ms {
+            t.stats.plan_refused_old += 1;
+            return false;
+        }
         drop_plan(t, other);
         t.stats.key_reassigned += 1;
     }
@@ -626,6 +654,7 @@ pub(crate) fn claim_plan(t: &mut FlightTable, s: Slot, p: &[u8; 12]) {
         *d = *p;
     }
     index_insert(&mut t.by_plan, hash_bytes(p), s.0);
+    true
 }
 
 /// Removes the flight-plan identifier of `s` from the index and the column.

@@ -10,6 +10,17 @@
 //!   position with no `positionTime` is ordered by the message timestamp.) A TBFM row older than
 //!   the flight's last TBFM `msgTime` is refused whole and counted the same way; a refused row
 //!   is not an update and does not keep the flight alive.
+//! * **Position time.** The position time is written only together with a position: a row whose
+//!   position is missing or malformed leaves the held position time as it was, whatever
+//!   `positionTime` it carries.
+//! * **Source time.** Each flight keeps the timestamp of the newest SFDPS message applied to it
+//!   (`flight@timestamp`). A message older than that is a stale amendment, counted: it does not
+//!   change the flight's status, controlling unit or computer id and does not claim a flight-plan
+//!   identifier (identity fields that only fill an empty column still apply, as does a position
+//!   by its own rule above). A claim on a flight-plan identifier another flight holds succeeds
+//!   only if that flight's newest message is older than the claiming one; otherwise it is refused
+//!   and counted, so a late message of a flight that lost a reused identifier cannot take it
+//!   back. A message with no usable timestamp is applied as before and counted separately.
 //! * **Identity.** Callsign, departure, arrival and aircraft type fill an empty column. A
 //!   different non-empty value is a field conflict: counted, and the value held is kept
 //!   (INTERFACES IF-R5: refuse and flag, do not quietly change identity). The computer id is not
@@ -184,20 +195,34 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
     };
 
     let has_pos = has_field(ev, i, Field::Position);
-    let ptime = if has_field(ev, i, Field::PositionTime) {
-        ev.pos_time_ms.get(i).copied()
-    } else if has_pos {
-        Some(ts_ms)
-    } else {
+    // The position time travels with a position: a row whose position is missing or malformed
+    // has no position time either, so it cannot make a later, older but valid position stale.
+    let ptime = if !has_pos {
         None
+    } else if has_field(ev, i, Field::PositionTime) {
+        ev.pos_time_ms.get(i).copied()
+    } else {
+        Some(ts_ms)
     };
     // A position older than the one held is not applied; the rest of the row still is.
     let stale = match (ptime, slot_ref(t, slot)) {
         (Some(pt), Some(c)) => *c.pos_time_ms != NO_TIME && pt < *c.pos_time_ms,
         _ => false,
     };
-    if let Some(p) = plan {
-        claim_plan(t, slot, &p);
+    // The message's own timestamp orders SFDPS messages for one flight. A message older than the
+    // newest one applied to the flight must not roll back its status, controlling unit, computer
+    // id or flight-plan ownership.
+    let src_ms = if ts_ms > 0 { ts_ms } else { NO_TIME };
+    let stale_amend = src_ms != NO_TIME
+        && slot_ref(t, slot).is_some_and(|c| *c.src_ms != NO_TIME && src_ms < *c.src_ms);
+    if src_ms == NO_TIME {
+        t.stats.no_source_time += 1;
+    }
+    if stale_amend {
+        t.stats.stale_amendments += 1;
+    }
+    if let (Some(p), false) = (plan, stale_amend) {
+        claim_plan(t, slot, &p, src_ms);
     }
 
     let mut conflicts = 0u64;
@@ -209,7 +234,11 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
         if let (true, Some(v)) = (has_field(ev, i, Field::Callsign), ev.callsign.get(i)) {
             conflicts += ident(c.callsign, v, &mut conf);
         }
-        if let (true, Some(v)) = (has_field(ev, i, Field::ComputerId), ev.computer_id.get(i)) {
+        if let (true, false, Some(v)) = (
+            has_field(ev, i, Field::ComputerId),
+            stale_amend,
+            ev.computer_id.get(i),
+        ) {
             // Each centre's host assigns its own id, so a flight's id changes as it crosses
             // centres: the latest is kept, and a change is not a conflict.
             *c.computer_id = *v;
@@ -232,6 +261,9 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
                 *c.lat_e7 = la;
                 *c.lon_e7 = lo;
                 *c.flags |= HAS_POS;
+                if let Some(pt) = ptime {
+                    *c.pos_time_ms = pt;
+                }
             }
         }
         if let (true, false, Some(&v)) = (
@@ -260,24 +292,29 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
             *c.vy_dkt = y;
             *c.flags |= HAS_VEL;
         }
-        if let (Some(pt), false) = (ptime, stale) {
-            *c.pos_time_ms = pt;
-        }
         if stale {
             *c.out_of_order = c.out_of_order.saturating_add(1);
         }
-        if let (true, Some(v)) = (has_field(ev, i, Field::ControllingUnit), ev.ctrl.get(i)) {
+        if let (true, false, Some(v)) = (
+            has_field(ev, i, Field::ControllingUnit),
+            stale_amend,
+            ev.ctrl.get(i),
+        ) {
             *c.ctrl = *v;
         }
-        if let (true, Some(&st)) = (has_field(ev, i, Field::Status), ev.status.get(i)) {
+        let status = has_field(ev, i, Field::Status) && !stale_amend;
+        if let (true, Some(&st)) = (status, ev.status.get(i)) {
             *c.flags = (*c.flags & !CLASS_MASK) | class_of_status(st);
+        }
+        if src_ms != NO_TIME && src_ms > *c.src_ms {
+            *c.src_ms = src_ms;
         }
         let source = if has_field(ev, i, Field::Source) {
             ev.source.get(i).copied().unwrap_or([0; 2])
         } else {
             [0; 2]
         };
-        let heard = !stale && (has_pos || has_field(ev, i, Field::Status));
+        let heard = !stale && (has_pos || status);
         touch(&mut c, now_ns, FEED_SFDPS, source, heard);
     }
     t.stats.conflicts += conflicts;
@@ -308,7 +345,7 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
                     if let Some(c) = slot_mut(t, s) {
                         *c.flags |= TBFM_ORIGIN;
                     }
-                    claim_plan(t, s, &row.gufi);
+                    claim_plan(t, s, &row.gufi, NO_TIME);
                     t.stats.tbfm_created += 1;
                     s
                 }

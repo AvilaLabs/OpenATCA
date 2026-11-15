@@ -604,8 +604,11 @@ fn canonical_serialisation_has_a_pinned_golden_hash() {
     );
     let hex = oa_sha256::to_hex(&state_hash(&t));
     assert_eq!(oa_replay::HASH_TAG, b"OATS1");
+    // Re-pinned when each SFDPS flight began to hold the timestamp of its newest message, which
+    // is hashed in a block after the flights (OA-RPL-201); the serialisation of the columns is
+    // unchanged, so HASH_TAG keeps its version.
     assert_eq!(
         hex,
-        "13c288ecc323a7b0c378b5bef91d79be2ef7d5b00af281ad7c26f709d8f761dc"
+        "5ba94b361871858c42cfc9c6bb86b2c63db90dd192c7d834517fd44ba0eff530"
     );
 }

@@ -483,6 +483,128 @@ fn tfms_programmes_are_kept_one_per_key_with_the_latest_row_and_expire_at_their_
     assert_eq!(flow_sweep(&mut t, at(9, 0, 0)), 0);
 }
 
+/// A feaFca message for FCA `id` named `name`, sent at 03:00:00.
+fn fxa(id: &str, name: &str) -> String {
+    fi(
+        "FXA",
+        (3, 0, 0),
+        &format!(
+            r#"<ns12:feaFca><ns11:endTime>2030-01-02T09:00:00Z</ns11:endTime><ns11:fcaId>{id}</ns11:fcaId><ns11:fcaName>{name}</ns11:fcaName><ns11:startTime>2030-01-02T04:00:00Z</ns11:startTime></ns12:feaFca>"#
+        ),
+    )
+}
+
+// REQ: OA-RPL-206
+#[test]
+fn programmes_whose_identities_differ_only_after_byte_24_are_kept_apart() {
+    let mut p = pl();
+    let head = "fca.tst.lxstn01.20300101"; // 24 bytes
+    assert_eq!(head.len(), 24);
+    let (a, b) = (format!("{head}0000AAAA"), format!("{head}0000BBBB"));
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 0),
+        &wrap_fi(&fxa(&a, "SAME NAME")),
+    );
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 1),
+        &wrap_fi(&fxa(&b, "SAME NAME")),
+    );
+    assert_eq!(flow_live(&p.flows), 2);
+    assert_eq!(p.flows.stats.created, 2);
+    // The same identity again updates its programme.
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 2),
+        &wrap_fi(&fxa(&a, "SAME NAME")),
+    );
+    assert_eq!(flow_live(&p.flows), 2);
+    assert_eq!((p.flows.stats.applied, p.flows.stats.created), (3, 2));
+    // Names that differ after byte 24 are apart too.
+    let long_name = |tail: &str| format!("{}{tail}", "N".repeat(24));
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 3),
+        &wrap_fi(&fxa("X", &long_name("one"))),
+    );
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 4),
+        &wrap_fi(&fxa("X", &long_name("two"))),
+    );
+    assert_eq!(flow_live(&p.flows), 4);
+    // A pool cell is freed when its programme goes (past its 09:00 end).
+    jump(&mut p, at(10, 0, 0));
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(10, 0, 0),
+        &wrap_fi(&aptc((10, 0, 0), "KTBB", 60)),
+    );
+    assert_eq!(flow_live(&p.flows), 1);
+    assert_eq!(p.flows.long_free.len(), p.flows.long_len.len());
+}
+
+// REQ: OA-RPL-206
+#[test]
+fn a_long_programme_identity_works_up_to_the_pool_limit_and_is_refused_beyond_it() {
+    let mut p = pl();
+    let ok = "I".repeat(oa_replay::tfms::FLOW_LONG_BYTES);
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 0),
+        &wrap_fi(&fxa(&ok, "N")),
+    );
+    assert_eq!(flow_live(&p.flows), 1);
+    let ok2 = format!("{}J", &ok[1..]);
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 1),
+        &wrap_fi(&fxa(&ok2, "N")),
+    );
+    assert_eq!(flow_live(&p.flows), 2);
+    let too_long = "I".repeat(oa_replay::tfms::FLOW_LONG_BYTES + 1);
+    feed(
+        &mut p,
+        FeedKind::Tfms,
+        at(3, 0, 2),
+        &wrap_fi(&fxa(&too_long, "N")),
+    );
+    assert_eq!(flow_live(&p.flows), 2);
+    assert_eq!(p.flows.stats.refused_long, 1);
+    assert_eq!(p.rows_refused_full[FeedKind::Tfms as usize], 1);
+    // With no free cell a new long programme is refused and the held ones stay apart.
+    let mut t = oa_replay::tfms::new_flow_table_with(8, 1);
+    let mut parser = oa_xml::Parser::new(oa_tfms::default_limits()).unwrap();
+    let mut rows = new_tfms_rows(4, 4, 1 << 16);
+    for (n, id) in ["L".repeat(30) + "1", "L".repeat(30) + "2"]
+        .iter()
+        .enumerate()
+    {
+        let x = wrap_fi(&fxa(id, "N"));
+        oa_tfms::rows::clear_rows(&mut rows);
+        oa_tfms::decode_bytes(&mut parser, x.as_bytes(), &mut rows).unwrap();
+        let a = oa_replay::apply_tfms_flow(&mut t, &rows, 0, at(3, 0, 0));
+        assert_eq!(
+            a,
+            if n == 0 {
+                oa_replay::tfms::FlowApplied::New
+            } else {
+                oa_replay::tfms::FlowApplied::TableFull
+            }
+        );
+    }
+    assert_eq!((flow_live(&t), t.stats.refused_long), (1, 1));
+}
+
 // REQ: OA-RPL-045
 #[test]
 fn tmi_flight_list_entries_set_the_flights_programme_fields() {
@@ -904,6 +1026,183 @@ fn the_notam_table_is_bounded_and_refuses_when_full() {
     );
     assert_eq!((t.stats.created, t.stats.refused_full), (2, 1));
     assert_eq!(fns_live(&t), 2);
+}
+
+// ---- FNS: tombstones --------------------------------------------------------------------------
+
+/// Applies one NOTAM document straight to a table.
+fn fns_apply(t: &mut oa_replay::fns::FnsTable, n: &Nt, now: i64) -> FnsApplied {
+    let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
+    let mut dec = new_decoder(Limits::default());
+    let mut stats = new_stats(0);
+    let mut notams = new_notams(4, 1 << 16, 16, 1 << 12);
+    let x = notam(n);
+    let doc = parser.parse(x.as_bytes()).unwrap();
+    oa_notam::decode_doc(&mut dec, &doc, &mut notams, &mut stats).unwrap();
+    apply_fns(t, &notams, 0, now)
+}
+
+fn nt_at(series: &'static str, number: u32, issued: &'static str) -> Nt {
+    let mut n = nt(series, number);
+    n.issued = issued;
+    n
+}
+
+const I9: &str = "2030-03-05T09:00:00.000Z";
+const I10: &str = "2030-03-05T10:00:00.000Z";
+const I11: &str = "2030-03-05T11:00:00.000Z";
+
+// REQ: OA-RPL-203
+#[test]
+fn a_redelivered_notam_does_not_come_back_after_it_was_cancelled() {
+    let mut t = new_fns_table(8);
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(9)),
+        FnsApplied::New
+    );
+    let mut c = nt_at("Z", 9, I10);
+    c.ntype = "C";
+    c.refd = Some(("Z", 1));
+    assert_eq!(fns_apply(&mut t, &c, mar5(10)), FnsApplied::Cancelled);
+    assert_eq!(fns_live(&t), 0);
+    // The old NEW is delivered again: refused and counted, not stored.
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+    assert_eq!(fns_live(&t), 0);
+    assert_eq!((t.stats.tomb_refused, t.stats.created), (1, 1));
+    // Issued at the cancellation's time is no later than it: refused too.
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I10), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+    // A genuinely later notice with that identity is a new NOTAM.
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I11), mar5(12)),
+        FnsApplied::New
+    );
+    assert_eq!(fns_live(&t), 1);
+}
+
+// REQ: OA-RPL-203
+#[test]
+fn a_redelivered_notam_does_not_come_back_after_it_was_replaced() {
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(9));
+    let mut r = nt_at("Z", 2, I10);
+    r.ntype = "R";
+    r.refd = Some(("Z", 1));
+    assert_eq!(fns_apply(&mut t, &r, mar5(10)), FnsApplied::Replaced);
+    assert!(fns_slot_of(&t, &key("Z", 1)).is_none());
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+    assert!(fns_slot_of(&t, &key("Z", 1)).is_none());
+    assert!(fns_slot_of(&t, &key("Z", 2)).is_some());
+    assert_eq!(t.stats.tomb_refused, 1);
+}
+
+// REQ: OA-RPL-203
+#[test]
+fn a_cancellation_that_arrives_before_its_notam_still_holds() {
+    let mut t = new_fns_table(8);
+    let mut c = nt_at("Z", 9, I10);
+    c.ntype = "C";
+    c.refd = Some(("Z", 1));
+    assert_eq!(fns_apply(&mut t, &c, mar5(10)), FnsApplied::CancelUnmatched);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 1);
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+    assert_eq!(fns_live(&t), 0);
+    // A replacement naming a NOTAM not held leaves a tombstone of that NOTAM too.
+    let mut r = nt_at("Z", 3, I10);
+    r.ntype = "R";
+    r.refd = Some(("Z", 2));
+    fns_apply(&mut t, &r, mar5(10));
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 2, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+}
+
+// REQ: OA-RPL-204
+#[test]
+fn a_tombstone_is_kept_until_the_cancelled_notams_end_or_seven_days() {
+    let day = 86_400 * 1_000_000_000;
+    // Unknown notice: seven days from the cancellation.
+    let mut t = new_fns_table(8);
+    let mut c = nt_at("Z", 9, I10);
+    c.ntype = "C";
+    c.refd = Some(("Z", 1));
+    fns_apply(&mut t, &c, mar5(10));
+    fns_sweep(&mut t, mar5(10) + 6 * day);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 1);
+    fns_sweep(&mut t, mar5(10) + 7 * day + 1_000_000);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 0);
+    assert_eq!(t.stats.tomb_expired, 1);
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(10) + 8 * day),
+        FnsApplied::New
+    );
+    // Held notice with an end (2030-03-06 18:30): kept to that end, not for seven days.
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(9));
+    fns_apply(&mut t, &c, mar5(10));
+    fns_sweep(&mut t, mar5(9) + 24 * 3_600 * 1_000_000_000);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 1);
+    fns_sweep(&mut t, 1_899_052_200_001 * MS_NS);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 0);
+}
+
+// REQ: OA-RPL-205
+#[test]
+fn a_full_tombstone_table_evicts_the_oldest_and_counts_it() {
+    let mut t = oa_replay::fns::new_fns_table_with(8, 2);
+    for n in 1..=3u32 {
+        let mut c = nt_at("Z", 10 + n, I10);
+        c.ntype = "C";
+        c.refd = Some(("Z", n));
+        fns_apply(&mut t, &c, mar5(10));
+    }
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 2);
+    assert_eq!(t.stats.tomb_evicted, 1);
+    // The oldest (Z1) is forgotten; Z2 and Z3 are still refused.
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(11)),
+        FnsApplied::New
+    );
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 2, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 3, I9), mar5(11)),
+        FnsApplied::OutOfOrder
+    );
+}
+
+// REQ: OA-RPL-205
+#[test]
+fn tombstones_are_hashed_only_when_there_are_some() {
+    let hash = |t: &oa_replay::fns::FnsTable| {
+        let mut h = oa_sha256::Sha256::new();
+        oa_replay::fns::fns_hash_into(&mut h, t);
+        oa_sha256::to_hex(&h.finalize())
+    };
+    let mut a = new_fns_table(8);
+    let mut b = new_fns_table(8);
+    fns_apply(&mut a, &nt_at("Z", 1, I9), mar5(9));
+    fns_apply(&mut b, &nt_at("Z", 1, I9), mar5(9));
+    assert_eq!(hash(&a), hash(&b));
+    let mut c = nt_at("Z", 9, I10);
+    c.ntype = "C";
+    c.refd = Some(("Y", 5));
+    fns_apply(&mut a, &c, mar5(10));
+    assert_ne!(hash(&a), hash(&b));
 }
 
 // ---- the state hash ---------------------------------------------------------------------------

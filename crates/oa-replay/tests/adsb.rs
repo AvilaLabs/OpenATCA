@@ -579,10 +579,12 @@ fn a_mixed_swim_and_adsb_replay_is_deterministic_in_any_order_and_chunking() {
         &mut |_| {},
     )
     .unwrap();
-    // Pinned from the code before ADS-B existed: the same two recordings gave this hash then.
+    // Pinned from the code before ADS-B existed, and re-pinned when each flight began to hold the
+    // timestamp of its newest SFDPS message (hashed after the flights, OA-RPL-201): the same two
+    // recordings differ from the earlier hash only by that block.
     assert_eq!(
         oa_sha256::to_hex(&snapshot(&q).hash),
-        "fa8d94b079bf7f4c69aae2db5b1077fddfa633838f7bd3c363bdc3b968ac459e"
+        "740b9747393e586486d29fc3ab7b7a4430f3c038eac3a0a177832a085a94b461"
     );
     assert_ne!(snapshot(&q).hash, want.hash);
     assert_eq!(q.table.live, p.table.live);

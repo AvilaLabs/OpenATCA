@@ -941,8 +941,9 @@ deterministic flight state comes out.
   last-update time, last source and controlling unit, and counts the update.
 - **OA-RPL-003** A position older than the flight's last position time never overwrites it: the
   row's position fields are dropped and the row is counted as out of order (per flight and in
-  total), while its other fields still apply. An equal or newer position applies. A row without
-  a position is never out of order.
+  total), while its other fields still apply, with the exceptions of OA-RPL-201. An equal or newer
+  position applies. A row without a usable position (absent or malformed) is never out of order,
+  and leaves the position time as it was (OA-RPL-200).
 - **OA-RPL-004** Identity fields fill when empty and confirm when equal; a different non-empty
   callsign, departure, arrival or aircraft type is a counted field conflict and the held value
   is kept. The computer id is not identity (each centre assigns its own) and takes the latest.
@@ -1315,6 +1316,33 @@ frame of their feed has been fed (as the ADS-B table is).
   stale so a replay with none hashes as it did.
 - **OA-RPL-174** A confirmed step whose size does not fit in 64 bits is not applied: the clock and every age
   are kept, the candidate state is kept as it was, and the step is counted under `clock-step-overflow`.
+- **OA-RPL-200** The position time is written only together with a position: a row whose position is absent or
+  malformed leaves the flight's position time as it was, whatever `positionTime` it carries, so a later valid
+  position older than that row's time (but not older than the held one) is applied.
+- **OA-RPL-201** Each flight keeps the timestamp of the newest SFDPS message applied to it. A message older than
+  that does not change the flight's status, controlling unit or computer id and is counted as a stale amendment
+  (`stale_amendments`). A message with no usable timestamp is
+  applied as before and counted (`no_source_time`). The source times and the counters are part of the state
+  hash, written only when some flight has a source time or a counter is not zero.
+- **OA-RPL-202** A claim on a flight-plan identifier held by another flight succeeds only if that flight's
+  newest SFDPS message is older than the claiming message; otherwise the old message does not take the
+  identifier, and is counted (`plan_refused_old`). A TBFM update for the identifier links to the owner. A claim
+  with no source time (TBFM, or an SFDPS message with no timestamp) takes the identifier as before.
+- **OA-RPL-203** A cancelled or replaced NOTAM leaves a tombstone (identity, and the `issued` time of the
+  cancelling or replacing notice). A new or replacing notice whose identity has a tombstone and whose `issued`
+  time is not later than the tombstone's is refused and counted (`tomb_refused`, an out-of-order row), so a
+  redelivery cannot bring it back; a cancellation or replacement of a NOTAM not held still leaves a tombstone,
+  so a cancellation that arrives first holds.
+- **OA-RPL-204** A tombstone is kept until the cancelled NOTAM's end (or cancelled) time if it was held and had
+  one, else for seven days of replay time from the cancellation (a redelivery arrives within hours; a week is far
+  past any seen), then dropped at the next sweep (`tomb_expired`).
+- **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
+  the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
+  part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
+- **OA-RPL-206** Programmes whose title or element differ after byte 24 are different programmes: a longer
+  identity is kept whole in a fixed pool of cells made at init and compared whole on lookup. A new programme whose
+  title or element is over 512 bytes, or for which no cell is free, is refused and counted (`refused_long`,
+  reported as a full table); two different identities are never merged.
 
 - **OA-RPL-180** Frames reach the clock in merged receive order, so a stream whose times run ahead cannot move
   the clock ahead of another stream that still has frames: a stream walking 119 s per frame beside a stream
