@@ -218,10 +218,16 @@ fn push_record(t: &mut PirepTable, doc: &Doc<'_>, o: NodeIx) -> Result<(), Refus
         },
     };
     let fl = level(doc, o, "fltLvl")?;
-    let fl = if fl == 0 { NONE_U16 } else { fl };
     let s = req_str(doc, o, "fltLvlType")?;
     let Some(fl_type) = FL_TYPE_NAMES.iter().position(|&n| n == s) else {
         return refuse(Reason::UnknownCode, "fltLvlType");
+    };
+    // A climb or descent has no single level (the table keeps no range for it): whatever
+    // level the upstream row carries with that type is dropped.
+    let fl = if fl == 0 || s == "DURD" || s == "DURC" {
+        NONE_U16
+    } else {
+        fl
     };
     let s = req_str(doc, o, "pirepType")?;
     let Some(ptype) = PIREP_TYPE_NAMES.iter().position(|&n| n == s) else {

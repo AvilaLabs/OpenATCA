@@ -995,3 +995,144 @@ fn bracket_refuses_duplicate_and_unsorted_times() {
     assert!(bracket(&[100, 300, 200], 150.0).is_err());
     assert_eq!(bracket(&[100, 200, 400], 300.0).unwrap(), (1, 2, 0.5));
 }
+
+/// `linear_hour` with the given U points blanked (NaN) on the level at `level_pa`.
+fn blanked(hour: u8, level_pa: f32, points: &[(u32, u32)]) -> Hour {
+    let mut f = fields(0, hour, linear);
+    for fld in &mut f {
+        if fld.parameter == Parameter::Ugrd && fld.level.value == level_pa {
+            for &(i, j) in points {
+                if let Some(v) = fld.values.get_mut((j * NX + i) as usize) {
+                    *v = f32::NAN;
+                }
+            }
+        }
+    }
+    build_hour(f).unwrap()
+}
+
+// REQ: OA-WIND-052
+#[test]
+fn zero_weight_neighbours_do_not_refuse_a_query() {
+    let full = linear_hour(12);
+    // Exact grid node: the three other corners carry no weight.
+    let (la, lo) = ij_to_latlon(&full.grid, 8.0, 6.0).unwrap();
+    let want = sample_hour_pressure(&full, la, lo, 500.0).unwrap();
+    let h = blanked(12, 50_000.0, &[(9, 6), (8, 7), (9, 7)]);
+    assert_eq!(sample_hour_pressure(&h, la, lo, 500.0).unwrap(), want);
+    // Exact last column and row: the inner corners carry no weight.
+    let (la, lo) = ij_to_latlon(&full.grid, f64::from(NX - 1), f64::from(NY - 1)).unwrap();
+    let want = sample_hour_pressure(&full, la, lo, 500.0).unwrap();
+    let h = blanked(
+        12,
+        50_000.0,
+        &[(NX - 2, NY - 2), (NX - 1, NY - 2), (NX - 2, NY - 1)],
+    );
+    assert_eq!(sample_hour_pressure(&h, la, lo, 500.0).unwrap(), want);
+    // Exact bottom level: the level above it carries no weight.
+    let (la, lo) = ij_to_latlon(&full.grid, 8.2, 6.2).unwrap();
+    let want = sample_hour_pressure(&full, la, lo, 1000.0).unwrap();
+    let all: Vec<(u32, u32)> = (0..NX).flat_map(|i| (0..NY).map(move |j| (i, j))).collect();
+    let h = blanked(12, 85_000.0, &all);
+    assert_eq!(sample_hour_pressure(&h, la, lo, 1000.0).unwrap(), want);
+    // A weighted input that is missing is still refused.
+    let h = blanked(12, 50_000.0, &[(8, 6)]);
+    let (la, lo) = ij_to_latlon(&h.grid, 8.0, 6.0).unwrap();
+    assert_eq!(
+        sample_hour_pressure(&h, la, lo, 500.0),
+        Err(Refusal::MissingValue)
+    );
+    let (la, lo) = ij_to_latlon(&h.grid, 8.3, 6.0).unwrap();
+    assert_eq!(
+        sample_hour_pressure(&h, la, lo, 500.0),
+        Err(Refusal::MissingValue)
+    );
+}
+
+// REQ: OA-WIND-052
+#[test]
+fn an_exact_hour_does_not_need_the_other_bracketing_hour() {
+    let all: Vec<(u32, u32)> = (0..NX).flat_map(|i| (0..NY).map(move |j| (i, j))).collect();
+    let a = blanked(12, 50_000.0, &all);
+    let b = linear_hour(13);
+    let (la, lo) = ij_to_latlon(&b.grid, 8.2, 6.2).unwrap();
+    let want = sample_hour_pressure(&b, la, lo, 500.0).unwrap();
+    let q = |t: i64| Query {
+        lat: la,
+        lon: lo,
+        alt_ft: altitude_ft_from_pressure_hpa(500.0).unwrap(),
+        time_s: t as f64,
+    };
+    // Exactly the later hour: the earlier one has missing values and carries no weight.
+    let s = sample_hours(&[&a, &b], &q(valid(13))).unwrap();
+    assert_eq!((s.u_ms, s.v_ms, s.temp_k), (want.u, want.v, want.t));
+    // Between them it is used and refused.
+    assert_eq!(
+        sample_hours(&[&a, &b], &q(valid(13) - 1800)),
+        Err(Refusal::MissingValue)
+    );
+}
+
+// REQ: OA-WIND-052
+#[test]
+fn an_exact_hour_does_not_read_the_unused_archive_file() {
+    let hf = |name: &str, h: u8| HourFile {
+        path: PathBuf::from(name),
+        valid_s: valid(h),
+    };
+    let new_a = || archive_files(vec![hf("a", 12), hf("b", 13), hf("c", 14)]).unwrap();
+    let q = |t: i64| Query {
+        lat: ij_to_latlon(&linear_hour(12).grid, 8.2, 6.2).unwrap().0,
+        lon: ij_to_latlon(&linear_hour(12).grid, 8.2, 6.2).unwrap().1,
+        alt_ft: 18_000.0,
+        time_s: t as f64,
+    };
+    let mut reads = Vec::new();
+    let mut load = |p: &std::path::Path| -> Result<Hour, LoadError> {
+        let name = p.display().to_string();
+        reads.push(name.clone());
+        match name.as_str() {
+            "a" => Ok(linear_hour(12)),
+            "c" => Ok(linear_hour(14)),
+            _ => Err(LoadError::Io {
+                path: name,
+                kind: std::io::ErrorKind::NotFound,
+            }),
+        }
+    };
+    // Exactly the first hour: the next file (unreadable) carries no weight.
+    let mut a = new_a();
+    let s = archive_sample_with(&mut a, &q(valid(12)), &mut load).unwrap();
+    assert_eq!(
+        (s.hour0_s, s.hour1_s, s.time_weight),
+        (valid(12), valid(13), 0.0)
+    );
+    // Exactly the last hour: the earlier file (unreadable) carries no weight.
+    let mut a = new_a();
+    let s = archive_sample_with(&mut a, &q(valid(14)), &mut load).unwrap();
+    assert_eq!(
+        (s.hour0_s, s.hour1_s, s.time_weight),
+        (valid(13), valid(14), 1.0)
+    );
+    // Between the first and second hours the unreadable file is needed.
+    let mut a = new_a();
+    assert!(matches!(
+        archive_sample_with(&mut a, &q(valid(12) + 900), &mut load),
+        Err(QueryError::Load(LoadError::Io { .. }))
+    ));
+    assert_eq!(reads, ["a", "c", "a", "b"]);
+}
+
+// REQ: OA-WIND-053
+#[test]
+fn whole_file_reads_stop_at_their_limit() {
+    let dir = std::env::temp_dir().join(format!("oa_wind_cap_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("f.idx");
+    std::fs::write(&p, [b'x'; 100]).unwrap();
+    assert_eq!(read_file_capped(&p, 100).unwrap().len(), 100);
+    let big = read_file_capped(&p, 99);
+    assert_eq!(big.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    assert!(read_file_capped(&dir.join("missing"), 100).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

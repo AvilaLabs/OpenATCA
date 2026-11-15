@@ -2035,7 +2035,7 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   refused whole with a typed error and leaves the table and counts unchanged; a file that would
   exceed the table row limit is refused before anything is appended.
 - **OA-AWC-009** A PIREP row carries time, position, flight level (hundreds of feet; none for during
-  descent or climb), aircraft type, temperature, wind, and two icing and two turbulence layers with
+  descent or climb, OA-AWC-021), aircraft type, temperature, wind, and two icing and two turbulence layers with
   coded intensity, type and frequency; a reversed base and top, an unknown code or a flight level over
   600 is refused and counted; duplicates are removed and counted.
 - **OA-AWC-010** International SIGMET records give a polygon (one ring, or several for `AREAS`) in
@@ -2074,6 +2074,10 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-AWC-020** `point_hazards_near` returns the point hazards within a caller-chosen great-circle
   distance of a position (and, optionally, whose altitude band contains an altitude), across the
   antimeridian; it returns nothing for a negative or non-finite distance and never returns areas.
+- **OA-AWC-021** A PIREP with flight-level type `DURD` or `DURC` has no single flight level whatever
+  `fltLvl` says: the level is stored as none and `pirep_alt_ft` gives none; its layers are kept.
+- **OA-AWC-022** The scan reads each file with a length check and a capped read (`MAX_FILE_BYTES`, the
+  `oa-json` input limit); a larger file is listed as refused whole without being read.
 
 ## M2 — Benchmark truth (oa-truth)
 
@@ -2437,7 +2441,7 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
   range (the limits themselves are answered), outside the time span by even one second, outside the ISA
   range, for non-finite input, and with no hours; never extrapolated.
 - **OA-WIND-007** A missing value at a grid corner or level that the query uses is refused as
-  `MissingValue`, never filled; a query that does not touch it is answered.
+  `MissingValue`, never filled; a query that does not touch it is answered (OA-WIND-052).
 - **OA-WIND-008** An hour is built only from complete, consistent fields: a level lacking U, V, T or
   height, a repeated field, differing grids, point counts or valid times, a fractional level, an unusable
   time unit, fewer than two levels and more than 64 levels are refused with typed errors; other
@@ -2476,6 +2480,13 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
   point or sample that would not be finite, instead of returning it.
 - **OA-WIND-051** `bracket` refuses valid times that are not strictly increasing (a duplicate would
   give a NaN weight), as well as an empty list and a time outside the span.
+- **OA-WIND-052** A query uses only the inputs with non-zero interpolation weight: at an exact hour,
+  pressure level, grid node or edge, a missing value or unreadable file of a zero-weight neighbour does
+  not refuse it; a missing value at a weighted input is still refused.
+- **OA-WIND-053** Whole-file reads are bounded: a GRIB file by `MAX_FILE_BYTES` and an `.idx` sidecar by
+  `MAX_IDX_BYTES` (1 MiB; the largest real one is 32 596 bytes), checked by length before reading
+  and again by a read that stops one byte past the limit; an oversize `.idx` is ignored and the file
+  read whole.
 ## M3 — ASTERIX codecs (oa-asterix)
 
 Encoder and decoder for EUROCONTROL ASTERIX category 021 (ADS-B target reports, Ed 2.7), 048 (monoradar

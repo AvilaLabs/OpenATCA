@@ -115,6 +115,19 @@ struct Cell {
     fy: f64,
 }
 
+/// A weight within rounding of 0 or 1 is that value, so a position that is a grid node or a
+/// level only by round-tripping through other units still uses only the inputs at it.
+fn snap(w: f64) -> f64 {
+    let tol = 1e-9;
+    if w.abs() <= tol {
+        0.0
+    } else if (w - 1.0).abs() <= tol {
+        1.0
+    } else {
+        w
+    }
+}
+
 fn locate(h: &Hour, lat: f64, lon: f64) -> Result<Cell, Refusal> {
     if !lat.is_finite() || !lon.is_finite() || !(-90.0..=90.0).contains(&lat) {
         return Err(Refusal::BadInput(
@@ -138,16 +151,34 @@ fn locate(h: &Hour, lat: f64, lon: f64) -> Result<Cell, Refusal> {
         o10: base + 1,
         o01: base + nx,
         o11: base + nx + 1,
-        fx: i - f64::from(i0),
-        fy: j - f64::from(j0),
+        fx: snap(i - f64::from(i0)),
+        fy: snap(j - f64::from(j0)),
     })
+}
+
+/// `a * (1 - w) + b * w`, evaluating only the input that carries weight: at `w` 0 or 1 the
+/// other one is neither read nor allowed to refuse the query.
+fn lerp<A, B>(w: f64, a: A, b: B) -> Result<f64, Refusal>
+where
+    A: FnOnce() -> Result<f64, Refusal>,
+    B: FnOnce() -> Result<f64, Refusal>,
+{
+    if w == 0.0 {
+        a()
+    } else if w == 1.0 {
+        b()
+    } else {
+        Ok(a()? * (1.0 - w) + b()? * w)
+    }
 }
 
 fn bilinear(a: &[f32], k: usize, npts: usize, c: &Cell) -> Result<f64, Refusal> {
     let g = |o: usize| at(a, k, npts, o)?.ok_or(Refusal::MissingValue);
-    let top = g(c.o00)? * (1.0 - c.fx) + g(c.o10)? * c.fx;
-    let bot = g(c.o01)? * (1.0 - c.fx) + g(c.o11)? * c.fx;
-    Ok(top * (1.0 - c.fy) + bot * c.fy)
+    lerp(
+        c.fy,
+        || lerp(c.fx, || g(c.o00), || g(c.o10)),
+        || lerp(c.fx, || g(c.o01), || g(c.o11)),
+    )
 }
 
 /// Index of the lower-pressure of the two bracketing levels and the weight (in ln p) of the
@@ -185,7 +216,7 @@ fn vertical(h: &Hour, p_hpa: f64) -> Result<(usize, f64), Refusal> {
         .min(n.saturating_sub(2));
     let a = f64::from(h.levels_pa.get(k).copied().unwrap_or(top)) / 100.0;
     let b = f64::from(h.levels_pa.get(k + 1).copied().unwrap_or(bottom)) / 100.0;
-    let w = ((p_hpa.ln() - a.ln()) / (b.ln() - a.ln())).clamp(0.0, 1.0);
+    let w = snap(((p_hpa.ln() - a.ln()) / (b.ln() - a.ln())).clamp(0.0, 1.0));
     Ok((k, w))
 }
 
@@ -194,13 +225,12 @@ fn sample_inner(h: &Hour, lat: f64, lon: f64, p_hpa: f64, rotate: bool) -> Resul
     let (k, w) = vertical(h, p_hpa)?;
     let npts = h.nx as usize * h.ny as usize;
     let two = |a: &[f32]| -> Result<f64, Refusal> {
-        let lo = bilinear(a, k, npts, &c)?;
-        // At w == 0 the upper level is not needed, so a missing value there is not a refusal.
-        if w == 0.0 {
-            return Ok(lo);
-        }
-        let hi = bilinear(a, k + 1, npts, &c)?;
-        Ok(lo * (1.0 - w) + hi * w)
+        // A level with no weight is not read, so a missing value there is not a refusal.
+        lerp(
+            w,
+            || bilinear(a, k, npts, &c),
+            || bilinear(a, k + 1, npts, &c),
+        )
     };
     let (gu, gv) = (two(&h.u)?, two(&h.v)?);
     let (u, v) = if rotate {
@@ -245,6 +275,10 @@ pub fn sample_blend(
     lon: f64,
     p_hpa: f64,
 ) -> Result<Point, Refusal> {
+    // An hour with no weight is not sampled: its missing values do not refuse the query.
+    if w == 1.0 {
+        return sample_hour_pressure(b, lat, lon, p_hpa);
+    }
     let pa = sample_hour_pressure(a, lat, lon, p_hpa)?;
     if w == 0.0 {
         return Ok(pa);

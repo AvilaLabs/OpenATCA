@@ -893,3 +893,54 @@ fn summary_scans_a_directory_and_reports() {
     assert!(text.contains("PIREP"));
     assert!(text.contains("GAIRMET"));
 }
+
+// REQ: OA-AWC-021
+#[test]
+fn a_climb_or_descent_report_has_no_single_level() {
+    let climb = |lvl: &str, ty: &str| {
+        PIREP.replace(
+            "\"fltLvl\":350,\"fltLvlType\":\"OTHER\"",
+            &format!("\"fltLvl\":{lvl},\"fltLvlType\":\"{ty}\""),
+        )
+    };
+    let items = [climb("350", "DURC"), climb("120", "DURD")];
+    let items = [
+        items[0].replace("\"lat\":39.8147", "\"lat\":39.9"),
+        items[1].replace("\"lat\":39.8147", "\"lat\":39.8"),
+    ];
+    let (t, s, _) = load_pirep(&items);
+    assert_eq!((s.records, s.accepted), (2, 2));
+    for i in 0..pirep_len(&t) {
+        assert_eq!(pirep_alt_ft(&t, i), None);
+        assert_eq!(t.fl[i], NONE_U16);
+    }
+    // The turbulence layer of the report is kept.
+    assert_eq!((t.turb_base[0], t.turb_top[0]), (330, 350));
+    // A stated level stays a level.
+    let (t, _, _) = load_pirep(&[climb("350", "OTHER")]);
+    assert_eq!(pirep_alt_ft(&t, 0), Some(35_000));
+}
+
+// REQ: OA-AWC-022
+#[test]
+fn files_are_read_only_up_to_their_limit() {
+    let dir = std::env::temp_dir().join(format!("oa-awc-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("pirep_big.json");
+    std::fs::write(&p, [b' '; 100]).unwrap();
+    assert_eq!(summary::read_file_capped(&p, 100).unwrap().len(), 100);
+    let e = summary::read_file_capped(&p, 99).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    // A sparse file over the limit is refused by the scan before it is read.
+    let f = std::fs::File::create(&p).unwrap();
+    f.set_len(summary::MAX_FILE_BYTES + 1).unwrap();
+    drop(f);
+    let s = summary::scan_dir(&dir).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(s.file_errors.len(), 1);
+    assert!(
+        s.file_errors[0].1.starts_with("read:"),
+        "{:?}",
+        s.file_errors
+    );
+}
