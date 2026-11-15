@@ -166,8 +166,11 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     let [e, ve, _, n, vn, _] = x;
     let (lat, lon) = unproject(&frame, e, n);
     let (vel_e, vel_n) = frame_velocity(&frame, e, n, ve, vn);
-    // A state the frame cannot convert (overflow past the chart) is unusable, not a position.
-    if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite()) {
+    // A state the frame cannot convert (overflow past the chart), or one moving faster than any
+    // ADS-B emitter class can report, is unusable, not a position: finite is not the same as valid.
+    if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite())
+        || vel_e.hypot(vel_n) > oa_adsb::SPEED_ENVELOPE_MPS
+    {
         return TruthQuery::TooUncertain;
     }
     // Altitude and vertical rate from the bracketing reports.
