@@ -430,7 +430,7 @@ pub fn clip_world(path: &str) -> Result<BuiltTruth, String> {
 mod tests {
     use super::*;
 
-    // REQ: OA-TRK-049
+    // REQ: OA-TRK-057
     #[test]
     fn the_base_set_has_the_stated_mix_and_no_close_encounters() {
         for kind in [Kind::Terminal, Kind::EnRoute] {
@@ -453,7 +453,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-050
+    // REQ: OA-TRK-058
     #[test]
     fn pair_geometries_have_their_stated_closest_approach() {
         for kind in [Kind::Terminal, Kind::EnRoute] {
@@ -493,7 +493,7 @@ mod tests {
         true
     }
 
-    // REQ: OA-TRK-051
+    // REQ: OA-TRK-059
     #[test]
     fn synthetic_worlds_build_into_exact_truths() {
         let b = base_world(Kind::Terminal, 1).unwrap();

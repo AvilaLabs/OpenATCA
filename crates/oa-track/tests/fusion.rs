@@ -73,7 +73,7 @@ fn blank_run(out: TrackOutput, assign: AssignLog) -> RunOut {
     }
 }
 
-// REQ: OA-TRK-052
+// REQ: OA-TRK-060
 #[test]
 fn a_copy_of_truth_scores_zero_and_a_shifted_copy_scores_its_shift() {
     // Three aircraft: straight, turning at 6 deg/s, climbing. The "tracker output" is the truth
@@ -205,7 +205,7 @@ fn a_copy_of_truth_scores_zero_and_a_shifted_copy_scores_its_shift() {
     );
 }
 
-// REQ: OA-TRK-053
+// REQ: OA-TRK-061
 #[test]
 fn identity_accounting_counts_swaps_wrong_plots_false_and_duplicate_tracks() {
     let mut a = AssignLog::default();
@@ -263,7 +263,7 @@ fn identity_accounting_counts_swaps_wrong_plots_false_and_duplicate_tracks() {
     assert!(!id.truth_of.contains_key(&(b + 3)));
 }
 
-// REQ: OA-TRK-054
+// REQ: OA-TRK-062
 #[test]
 fn simulated_adsb_has_the_stated_noise_and_resolution() {
     let trajs = [Traj {
@@ -343,7 +343,7 @@ fn digest(o: &TrackOutput) -> String {
     oa_sha256::to_hex(&h.finalize())
 }
 
-// REQ: OA-TRK-055
+// REQ: OA-TRK-063
 #[test]
 fn a_run_is_reproducible_and_radar_only_tracking_is_clean_and_accurate() {
     let built = small_world(Kind::Terminal, 8);
@@ -384,7 +384,7 @@ fn a_run_is_reproducible_and_radar_only_tracking_is_clean_and_accurate() {
     assert!(r1.timing.events as usize >= plots.len() / 2);
 }
 
-// REQ: OA-TRK-056
+// REQ: OA-TRK-064
 #[test]
 fn registration_removes_a_radar_bias_from_radar_only_aircraft_that_adsb_aircraft_reveal() {
     let built = small_world(Kind::Terminal, 12);
@@ -435,7 +435,7 @@ fn registration_removes_a_radar_bias_from_radar_only_aircraft_that_adsb_aircraft
     assert!(eq_c <= eq_b * 1.05 + 0.5, "equipped {eq_c} vs {eq_b}");
 }
 
-// REQ: OA-TRK-057
+// REQ: OA-TRK-065
 #[test]
 fn the_binary_writes_the_report_and_refuses_bad_usage() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fusion_out");

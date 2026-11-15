@@ -1389,7 +1389,7 @@ mod tests {
             .collect()
     }
 
-    // REQ: OA-TRK-040
+    // REQ: OA-TRK-048
     #[test]
     fn a_radar_only_track_is_confirmed_by_three_plots_in_four_scans() {
         let lines = easting(&[Line {
@@ -1421,7 +1421,7 @@ mod tests {
         assert_eq!(fusion_stats(&f).cand_confirmed, 1);
     }
 
-    // REQ: OA-TRK-040
+    // REQ: OA-TRK-048
     #[test]
     fn two_isolated_false_plots_never_make_a_track() {
         // Many scans of random isolated false plots, one every scan: 3 of 4 cannot be met.
@@ -1445,7 +1445,7 @@ mod tests {
         assert!(fusion_stats(&f).cand_expired > 40);
     }
 
-    // REQ: OA-TRK-041
+    // REQ: OA-TRK-049
     #[test]
     fn a_mode_a_code_alone_never_assigns_a_plot() {
         // Two aircraft far apart that squawk the same code stay two tracks; a plot whose code
@@ -1492,7 +1492,7 @@ mod tests {
         assert!(!log.label.contains(&0xBAD));
     }
 
-    // REQ: OA-TRK-042
+    // REQ: OA-TRK-050
     #[test]
     fn a_mode_s_address_is_a_hard_constraint_and_keys_the_track() {
         let lines = easting(&[Line {
@@ -1515,7 +1515,7 @@ mod tests {
         assert!(log.how.contains(&HOW_HARD));
     }
 
-    // REQ: OA-TRK-043
+    // REQ: OA-TRK-051
     #[test]
     fn labels_are_never_read_by_a_decision() {
         let lines = easting(&[
@@ -1557,7 +1557,7 @@ mod tests {
         assert_eq!(fusion_stats(&f1), fusion_stats(&f2));
     }
 
-    // REQ: OA-TRK-044
+    // REQ: OA-TRK-052
     #[test]
     fn crossing_tracks_at_one_altitude_are_held_not_swapped() {
         // Two aircraft crossing at 60 degrees at the same altitude, passing within 150 m: the
@@ -1601,7 +1601,7 @@ mod tests {
         assert!(fusion_stats(&f).held > 0, "nothing was held");
     }
 
-    // REQ: OA-TRK-045
+    // REQ: OA-TRK-053
     #[test]
     fn registration_learns_the_bias_from_adsb_tracks_and_corrects_radar_only_ones() {
         // An ADS-B aircraft and a radar-only aircraft; the radar has a 150 m / 0.15 deg bias.
@@ -1690,7 +1690,7 @@ mod tests {
         let _ = (g, polar_to_geodetic);
     }
 
-    // REQ: OA-TRK-046
+    // REQ: OA-TRK-054
     #[test]
     fn invalid_configuration_and_inputs_are_refused() {
         let tc = fusion_tracker_config(&DEFAULT_CONFIG, &[SITE]);

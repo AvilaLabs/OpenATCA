@@ -269,7 +269,7 @@ mod tests {
         ]
     }
 
-    // REQ: OA-TRK-047
+    // REQ: OA-TRK-055
     #[test]
     fn interpolation_stays_within_a_centimetre_of_the_analytic_path() {
         let epoch = 1_700_000_000_000_000_000i64;
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-TRK-047
+    // REQ: OA-TRK-055
     #[test]
     fn legs_and_addresses_are_ordered_and_bounded() {
         let truth = build_synthetic_truth(SITE.0, SITE.1, 0, &demo()).unwrap();
@@ -338,7 +338,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-TRK-048
+    // REQ: OA-TRK-056
     #[test]
     fn invalid_synthetic_input_is_refused() {
         let mut dup = demo();

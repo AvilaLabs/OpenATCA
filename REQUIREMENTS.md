@@ -2009,41 +2009,41 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   that is honest (the error is within 3 sigma over repeated runs).
 - **OA-TRK-038** A residual beyond 4 sigma is rejected and the estimate is clamped to its limits.
 - **OA-TRK-039** A reference with a larger position uncertainty moves the estimate less.
-- **OA-TRK-040** Radar-only initiation needs 3 plots in 4 scans of one radar, consistent in position,
+- **OA-TRK-048** Radar-only initiation needs 3 plots in 4 scans of one radar, consistent in position,
   speed, acceleration and altitude; one or two plots never make a track.
-- **OA-TRK-041** Two isolated false plots never make a track.
-- **OA-TRK-042** A Mode A code alone never assigns a plot, on any track.
-- **OA-TRK-043** A plot carrying a Mode S address goes to the track keyed by that address (created if need
+- **OA-TRK-049** Two isolated false plots never make a track.
+- **OA-TRK-050** A Mode A code alone never assigns a plot, on any track.
+- **OA-TRK-051** A plot carrying a Mode S address goes to the track keyed by that address (created if need
   be) and to no other, whatever the kinematics say.
-- **OA-TRK-044** No decision reads the simulator's truth label: scrambling every label leaves the tracker's
+- **OA-TRK-052** No decision reads the simulator's truth label: scrambling every label leaves the tracker's
   output byte-identical.
-- **OA-TRK-045** Two tracks crossing at one altitude are held (the plot is not applied) while an assignment
+- **OA-TRK-053** Two tracks crossing at one altitude are held (the plot is not applied) while an assignment
   is ambiguous; identity is never swapped on kinematics alone.
-- **OA-TRK-046** Registration learns a radar bias from ADS-B tracks of NACp 9 or better (at least 3 updates,
+- **OA-TRK-054** Registration learns a radar bias from ADS-B tracks of NACp 9 or better (at least 3 updates,
   newest at most 5 s old, predicted position sigma at most 15 m, altitude known, range at least 5 km),
   applies it to radar-only plots and publishes per-radar estimates over time. Invalid configuration and
   input are refused.
-- **OA-TRK-047** Synthetic truth is exact by construction: a smooth analytic path (straight legs, turns,
+- **OA-TRK-055** Synthetic truth is exact by construction: a smooth analytic path (straight legs, turns,
   climbs) written as one-second knots, interpolated by `oa_truth::truth_at` within a centimetre of the
   analytic path.
-- **OA-TRK-048** Synthetic paths are ordered and bounded (addresses, legs, times); invalid input is refused.
-- **OA-TRK-049** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
+- **OA-TRK-056** Synthetic paths are ordered and bounded (addresses, legs, times); invalid input is refused.
+- **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
-- **OA-TRK-050** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
+- **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
   the stress geometries) has its stated closest approach.
-- **OA-TRK-051** Every world builds into an exact truth that `oa-bench` accepts.
-- **OA-TRK-052** Scoring a copy of the truth through `oa-bench` metrics gives no error beyond the 1e-7 degree
+- **OA-TRK-059** Every world builds into an exact truth that `oa-bench` accepts.
+- **OA-TRK-060** Scoring a copy of the truth through `oa-bench` metrics gives no error beyond the 1e-7 degree
   representation; the same copy shifted 100 m scores 100 m; straight and turning rows are both populated.
-- **OA-TRK-053** Identity accounting from simulator labels counts swaps (a label change within a track),
+- **OA-TRK-061** Identity accounting from simulator labels counts swaps (a label change within a track),
   wrong plots, false plots applied, false tracks (false plots at least as many as true) and duplicate tracks
   on hand-made logs.
-- **OA-TRK-054** The simulated ADS-B has the NACp 10 error (a 2-D RMS of 5.8 m), 25 ft altitude steps,
+- **OA-TRK-062** The simulated ADS-B has the NACp 10 error (a 2-D RMS of 5.8 m), 25 ft altitude steps,
   millisecond stamps, only equipped aircraft, and is the same for the same seed.
-- **OA-TRK-055** A run is reproducible (output digest, assignments, counters). Radar-only, on a small world
+- **OA-TRK-063** A run is reproducible (output digest, assignments, counters). Radar-only, on a small world
   with the MSSR profile: every aircraft is tracked, no swap, no false track, no duplicate, and the position
   error of the track is below the raw plots' error against the same exact truth.
-- **OA-TRK-056** Under a 150 m and 0.15 degree bias the registration estimate is within 20 m and 0.03 degree
+- **OA-TRK-064** Under a 150 m and 0.15 degree bias the registration estimate is within 20 m and 0.03 degree
   of the bias, radar-only aircraft score more than 40 % better with registration than without, and
   ADS-B-equipped aircraft are not made worse.
-- **OA-TRK-057** `oa-track-fusion --out <dir>` writes `report.txt` and `tables.csv` stating the truth, its own
+- **OA-TRK-065** `oa-track-fusion --out <dir>` writes `report.txt` and `tables.csv` stating the truth, its own
   error (zero), the baselines on identical plots and each table's ESASSP bars; usage errors exit 2.
