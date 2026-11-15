@@ -138,18 +138,44 @@ fn has_within(times: &[i64], t: i64, window: i64) -> bool {
     times.get(k).is_some_and(|&x| x <= t + window)
 }
 
-/// T7 presence and T8 initiation delay. T7: over a grid on every truth leg, the share of truth
-/// flight time inside the zone for which an ERAM position of the associated flight lies within
-/// the window; a leg with no associated flight counts as absent. T8: first ERAM position time
-/// minus the truth entry into the zone (or takeoff), seconds, signed.
-pub fn t7_t8_presence(
+/// The sums T7 and T8 are made of, so legs can be taken in address ranges and added up (the
+/// chunked scoring of a tracker's output). Cold record (A7.2).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PresenceParts {
+    pub n_in: u64,
+    pub n_present: u64,
+    pub n_unassoc: u64,
+    /// `(index of the leg in the truth legs, delay in seconds)`, in leg order.
+    pub delays: Vec<(usize, f64)>,
+    pub started_inside: u64,
+    pub never_zone: u64,
+    pub never_tracked: u64,
+}
+
+/// Adds `b` to `a`.
+pub fn presence_add(a: &mut PresenceParts, b: PresenceParts) {
+    a.n_in += b.n_in;
+    a.n_present += b.n_present;
+    a.n_unassoc += b.n_unassoc;
+    a.delays.extend(b.delays);
+    a.started_inside += b.started_inside;
+    a.never_zone += b.never_zone;
+    a.never_tracked += b.never_tracked;
+}
+
+/// The T7 and T8 sums over the truth legs whose address is in `lo..=hi`, against the flights of
+/// `leg` associated with truth aircraft (their times are all the legs of the range can see, so a
+/// range must hold every flight associated with an address in it).
+pub fn presence_parts(
     leg: &Legacy,
     ix: &ThIndex,
     assoc: &Assoc,
     truth: &Truth<'_>,
     env: &Env<'_>,
     cfg: &PresenceConfig,
-) -> (MetricResult, MetricResult) {
+    range: (u32, u32),
+) -> PresenceParts {
     let mut times: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
     for f in 0..leg.flights.gufi.len() {
         let a = assoc.addr.get(f).copied().unwrap_or(NONE);
@@ -164,22 +190,23 @@ pub fn t7_t8_presence(
     for v in times.values_mut() {
         v.sort_unstable();
     }
-    let (mut n_in, mut n_present, mut n_unassoc) = (0u64, 0u64, 0u64);
-    let mut delays = Vec::new();
-    let (mut started_inside, mut never_zone, mut never_tracked) = (0u64, 0u64, 0u64);
-    for l in truth.legs {
+    let mut p = PresenceParts::default();
+    for (li, l) in truth.legs.iter().enumerate() {
+        if l.addr < range.0 || l.addr > range.1 {
+            continue;
+        }
         let ts = times.get(&l.addr);
         let mut t_in: Option<(i64, bool)> = None;
         let mut t = l.start_ms;
         while t <= l.end_ms {
             if let Ok(s) = (truth.query)(l.addr, t) {
                 if (env.in_zone)(s.lat, s.lon) {
-                    n_in += 1;
+                    p.n_in += 1;
                     match ts {
-                        None => n_unassoc += 1,
+                        None => p.n_unassoc += 1,
                         Some(v) => {
                             if has_within(v, t, cfg.window_ms) {
-                                n_present += 1;
+                                p.n_present += 1;
                             }
                         }
                     }
@@ -192,36 +219,46 @@ pub fn t7_t8_presence(
             t += cfg.grid_ms.max(1);
         }
         match t_in {
-            None => never_zone += 1,
-            Some((_, true)) => started_inside += 1,
+            None => p.never_zone += 1,
+            Some((_, true)) => p.started_inside += 1,
             Some((tin, false)) => {
                 let first = ts.and_then(|v| {
                     let k = v.partition_point(|&x| x < tin - 600_000);
                     v.get(k).copied().filter(|&x| x <= l.end_ms)
                 });
                 match first {
-                    Some(f) => delays.push((f - tin) as f64 / 1000.0),
-                    None => never_tracked += 1,
+                    Some(f) => p.delays.push((li, (f - tin) as f64 / 1000.0)),
+                    None => p.never_tracked += 1,
                 }
             }
         }
     }
+    p
+}
+
+/// T7 and T8 from the sums (the delays in truth-leg order).
+pub fn presence_results(
+    mut p: PresenceParts,
+    cfg: &PresenceConfig,
+) -> (MetricResult, MetricResult) {
+    p.delays.sort_by_key(|d| d.0);
+    let delays: Vec<f64> = p.delays.iter().map(|d| d.1).collect();
     let mut r7 = new_result("T7", "presence in the zone", "share");
     r7.scalars
-        .push(("truth_grid_points_in_zone".into(), n_in as f64));
+        .push(("truth_grid_points_in_zone".into(), p.n_in as f64));
     r7.scalars
-        .push(("with_eram_position".into(), n_present as f64));
+        .push(("with_eram_position".into(), p.n_present as f64));
     r7.scalars.push((
         "presence".into(),
-        if n_in == 0 {
+        if p.n_in == 0 {
             0.0
         } else {
-            n_present as f64 / n_in as f64
+            p.n_present as f64 / p.n_in as f64
         },
     ));
     r7.scalars.push((
         "points_of_legs_with_no_associated_flight".into(),
-        n_unassoc as f64,
+        p.n_unassoc as f64,
     ));
     r7.notes.push(format!(
         "grid {} s, window {} s",
@@ -239,13 +276,29 @@ pub fn t7_t8_presence(
     }];
     r8.scalars.push((
         "legs_starting_inside_zone_not_a_takeoff".into(),
-        started_inside as f64,
+        p.started_inside as f64,
     ));
     r8.scalars
-        .push(("legs_never_in_zone".into(), never_zone as f64));
+        .push(("legs_never_in_zone".into(), p.never_zone as f64));
     r8.scalars
-        .push(("entries_never_tracked".into(), never_tracked as f64));
+        .push(("entries_never_tracked".into(), p.never_tracked as f64));
     (r7, r8)
+}
+
+/// T7 presence and T8 initiation delay. T7: over a grid on every truth leg, the share of truth
+/// flight time inside the zone for which an ERAM position of the associated flight lies within
+/// the window; a leg with no associated flight counts as absent. T8: first ERAM position time
+/// minus the truth entry into the zone (or takeoff), seconds, signed.
+pub fn t7_t8_presence(
+    leg: &Legacy,
+    ix: &ThIndex,
+    assoc: &Assoc,
+    truth: &Truth<'_>,
+    env: &Env<'_>,
+    cfg: &PresenceConfig,
+) -> (MetricResult, MetricResult) {
+    let p = presence_parts(leg, ix, assoc, truth, env, cfg, (0, u32::MAX));
+    presence_results(p, cfg)
 }
 
 /// T9 settings (cold: A7.2).

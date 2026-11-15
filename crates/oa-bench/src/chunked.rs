@@ -1,0 +1,400 @@
+//! The benchmark of a tracker's output, one address range at a time. Core (pure).
+//!
+//! [`crate::run::run_benchmark`] holds every sample of the run at once, which for a tracker's
+//! one-second output grows with the run (about 900 bytes per output row once the legacy table,
+//! its index, the pair table and the extraction columns are counted). Here the rows are taken in
+//! address ranges (an aircraft is never split), each range is scored with the same functions
+//! (`associate`, `build_pairs`, T9, F, R, H), and the pieces that are sums or sample lists are
+//! added up in a [`ChunkAcc`]. Memory is the largest range plus what the result itself needs:
+//!
+//! * the paired samples of T1 to T4 are kept (about 60 bytes per paired sample, a quarter of the
+//!   output rows): their statistics need every value, and the percentiles are exact, from the
+//!   same sort over the same values in the same order as the one-shot run;
+//! * T5 (the publication interval) is kept as a histogram of whole milliseconds (the position
+//!   times are whole milliseconds), at most 600,001 bins per split, and its percentiles are read
+//!   exactly from the counts; the mean and RMS come from exact integer sums, which equal the
+//!   one-shot floating point sums when the values are whole seconds and differ only in the last
+//!   bits otherwise;
+//! * T7 and T8 are counts and one delay per truth leg;
+//! * T6 is withheld for a tracker's output (no receive time); a chunk that has one is refused;
+//! * F1 to F3, R1 and H1 have no data in a tracker's legacy table; a chunk where one is not empty
+//!   is refused.
+//!
+//! A range must hold every flight associated with a truth address in it (true for a tracker's
+//! output, which is associated by address).
+
+use std::collections::BTreeMap;
+
+use crate::assoc::{associate, astatus, index_truth, Assoc, TruthIndex};
+use crate::legacy::{plan_index, Legacy, NO_ALT, NO_TIME};
+use crate::metrics_event::{f1_f2_tbfm, f3_tfms, h1_handoffs, r1_route_conformance, EventCtx};
+use crate::metrics_flow::{
+    presence_add, presence_parts, presence_results, t9_association_errors, PresenceParts,
+    MAX_INTERVAL_S,
+};
+use crate::metrics_th::{
+    t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
+};
+use crate::pair::{build_pairs, PairTable};
+use crate::run::{RunConfig, RunOutput};
+use crate::stats::{
+    band, new_result, Exclusions, MetricResult, Row, Stats, COAST_NAMES, MAX_CASES,
+};
+use crate::thindex::{build_th_index, samples_of};
+use crate::truth::{Env, Truth};
+
+/// Why a chunk or the merge was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkError(pub String);
+
+impl std::fmt::Display for ChunkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ChunkError {}
+
+/// A multiset of whole-millisecond values with exact sums, for statistics in seconds. Cold
+/// record (A7.2).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MsHist {
+    pub n: u64,
+    pub sum_ms: i128,
+    pub sumsq_ms: u128,
+    /// Absolute value in ms to count.
+    pub by_abs: BTreeMap<u64, u64>,
+}
+
+impl MsHist {
+    /// Counts one value.
+    pub fn add(&mut self, ms: i64) {
+        self.n += 1;
+        self.sum_ms += i128::from(ms);
+        self.sumsq_ms += (i128::from(ms) * i128::from(ms)) as u128;
+        *self.by_abs.entry(ms.unsigned_abs()).or_insert(0) += 1;
+    }
+
+    /// Adds `o` to this histogram.
+    pub fn merge(&mut self, o: &MsHist) {
+        self.n += o.n;
+        self.sum_ms += o.sum_ms;
+        self.sumsq_ms += o.sumsq_ms;
+        for (k, c) in &o.by_abs {
+            *self.by_abs.entry(*k).or_insert(0) += c;
+        }
+    }
+
+    /// Nearest-rank percentile of the absolute values, seconds.
+    fn rank(&self, p: u64) -> f64 {
+        let k = (p * self.n).div_ceil(100).clamp(1, self.n.max(1));
+        let mut seen = 0u64;
+        for (v, c) in &self.by_abs {
+            seen += c;
+            if seen >= k {
+                return *v as f64 / 1000.0;
+            }
+        }
+        0.0
+    }
+
+    /// The statistics in seconds, as `stats_of` gives them for the same values.
+    pub fn stats(&self) -> Stats {
+        if self.n == 0 {
+            return Stats::default();
+        }
+        let n = self.n as f64;
+        Stats {
+            n: self.n,
+            mean: self.sum_ms as f64 / 1000.0 / n,
+            rms: (self.sumsq_ms as f64 / 1.0e6 / n).sqrt(),
+            median: self.rank(50),
+            p95: self.rank(95),
+            p99: self.rank(99),
+            max: self
+                .by_abs
+                .keys()
+                .next_back()
+                .map_or(0.0, |&v| v as f64 / 1000.0),
+        }
+    }
+}
+
+/// T5's values split as `group_rows` splits them: all, by altitude band, by coast flag.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct T5Hists {
+    pub all: MsHist,
+    pub band: [MsHist; band::COUNT],
+    pub coast: [MsHist; 2],
+    pub repeats: u64,
+    pub long: u64,
+}
+
+fn t5_add(h: &mut T5Hists, leg: &Legacy, ix: &crate::thindex::ThIndex) {
+    for f in 0..leg.flights.gufi.len() {
+        let s = samples_of(ix, f as u32);
+        for w in s.windows(2) {
+            let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else {
+                continue;
+            };
+            let (ta, tb) = (
+                leg.th.pos_ms.get(a as usize).copied().unwrap_or(0),
+                leg.th.pos_ms.get(b as usize).copied().unwrap_or(0),
+            );
+            if tb == ta {
+                h.repeats += 1;
+                continue;
+            }
+            if (tb - ta) as f64 / 1000.0 > MAX_INTERVAL_S {
+                h.long += 1;
+                continue;
+            }
+            let dt = tb - ta;
+            let coast = usize::from(leg.th.coast.get(b as usize).copied().unwrap_or(0));
+            let bd = usize::from(band::of(
+                leg.th
+                    .alt_ft
+                    .get(b as usize)
+                    .copied()
+                    .filter(|&a| a != NO_ALT),
+            ));
+            h.all.add(dt);
+            if let Some(x) = h.band.get_mut(bd) {
+                x.add(dt);
+            }
+            if let Some(x) = h.coast.get_mut(coast) {
+                x.add(dt);
+            }
+        }
+    }
+}
+
+fn t5_result(h: &T5Hists) -> MetricResult {
+    let mut r = new_result("T5", "publication interval per flight", "s");
+    let mut rows = vec![Row {
+        label: "all".to_string(),
+        stats: h.all.stats(),
+    }];
+    for (name, x) in band::NAMES.iter().zip(h.band.iter()) {
+        if x.n > 0 {
+            rows.push(Row {
+                label: format!("altitude={name}"),
+                stats: x.stats(),
+            });
+        }
+    }
+    for (name, x) in COAST_NAMES.iter().zip(h.coast.iter()) {
+        if x.n > 0 {
+            rows.push(Row {
+                label: format!("coast={name}"),
+                stats: x.stats(),
+            });
+        }
+    }
+    r.rows = rows;
+    r.scalars
+        .push(("repeated_position_times".into(), h.repeats as f64));
+    r.scalars
+        .push(("intervals_over_limit_excluded".into(), h.long as f64));
+    r.notes.push(format!(
+        "intervals above {MAX_INTERVAL_S} s are excluded and counted"
+    ));
+    r
+}
+
+/// What one address range gave. Cold record (A7.2).
+// A7.2: cold struct, size guard waived
+pub struct ChunkOut {
+    pub pairs: PairTable,
+    pub exclusions: Exclusions,
+    pub assoc_counts: [u64; astatus::COUNT],
+    pub t5: T5Hists,
+    pub t6_none: u64,
+    pub t6_with: u64,
+    pub presence: PresenceParts,
+    pub t9: MetricResult,
+    /// F1, F2, F3 arrival, F3 departure, R1, H1.
+    pub flows: Vec<MetricResult>,
+}
+
+/// Scores the rows of `leg` (the flights of the address range `range`, inclusive) with the
+/// benchmark's own functions. `tix` is `index_truth(truth.legs)`.
+pub fn benchmark_chunk(
+    leg: &Legacy,
+    truth: &Truth<'_>,
+    tix: &TruthIndex,
+    env: &Env<'_>,
+    cfg: &RunConfig,
+    range: (u32, u32),
+) -> ChunkOut {
+    let ix = build_th_index(&leg.th, leg.flights.gufi.len());
+    let assoc = associate(leg, &ix, truth, tix, &cfg.assoc);
+    let (pairs, mut ex) = build_pairs(leg, &ix, &assoc, truth, &cfg.pair);
+    let plan = plan_index(leg);
+    let ctx = EventCtx {
+        assoc: &assoc,
+        truth,
+        tix,
+        env,
+        cfg: &cfg.event,
+    };
+    let t9 = t9_association_errors(leg, &pairs, truth, &cfg.swap);
+    let presence = presence_parts(leg, &ix, &assoc, truth, env, &cfg.presence, range);
+    let (f1, f2) = f1_f2_tbfm(leg, &plan, &ctx, &mut ex);
+    let (f3a, f3d) = f3_tfms(leg, &plan, &ctx, &mut ex);
+    let r1 = r1_route_conformance(leg, &pairs, truth, env, &cfg.event, &mut ex);
+    let h1 = h1_handoffs(leg, &assoc, truth, env, &cfg.event, &mut ex);
+    let mut t5 = T5Hists::default();
+    t5_add(&mut t5, leg, &ix);
+    let with = leg.th.recv_ms.iter().filter(|&&r| r != NO_TIME).count() as u64;
+    ChunkOut {
+        pairs,
+        exclusions: ex,
+        assoc_counts: assoc.counts,
+        t5,
+        t6_none: leg.th.pos_ms.len() as u64 - with,
+        t6_with: with,
+        presence,
+        t9,
+        flows: vec![f1, f2, f3a, f3d, r1, h1],
+    }
+}
+
+/// The sums of the chunks so far.
+// A7.2: cold struct, size guard waived
+#[derive(Default)]
+pub struct ChunkAcc {
+    pairs: PairTable,
+    exclusions: Exclusions,
+    assoc_counts: [u64; astatus::COUNT],
+    t5: T5Hists,
+    t6_none: u64,
+    presence: PresenceParts,
+    t9: Option<MetricResult>,
+    flows: Option<Vec<MetricResult>>,
+}
+
+fn flow_is_empty(r: &MetricResult) -> bool {
+    r.rows.iter().all(|x| x.stats.n == 0)
+        && r.scalars.iter().all(|(_, v)| *v == 0.0)
+        && r.cases.is_empty()
+}
+
+/// Adds one chunk to the sums.
+pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
+    if c.t6_with > 0 {
+        return Err(ChunkError(
+            "chunked scoring is for a tracker's output, which has no receive time".to_string(),
+        ));
+    }
+    if let Some(r) = c.flows.iter().find(|r| !flow_is_empty(r)) {
+        return Err(ChunkError(format!(
+            "chunked scoring is for a tracker's output, which has no plan data, but {} is not empty",
+            r.id
+        )));
+    }
+    let (a, b) = (&mut acc.pairs, &c.pairs);
+    a.addr.extend_from_slice(&b.addr);
+    a.t_ms.extend_from_slice(&b.t_ms);
+    a.cross_m.extend_from_slice(&b.cross_m);
+    a.along_m.extend_from_slice(&b.along_m);
+    a.speed_err_kt.extend_from_slice(&b.speed_err_kt);
+    a.hdg_err_deg.extend_from_slice(&b.hdg_err_deg);
+    a.alt_err_ft.extend_from_slice(&b.alt_err_ft);
+    a.truth_speed_mps.extend_from_slice(&b.truth_speed_mps);
+    a.method.extend_from_slice(&b.method);
+    a.phase.extend_from_slice(&b.phase);
+    a.band.extend_from_slice(&b.band);
+    a.coast.extend_from_slice(&b.coast);
+    for (k, v) in c.exclusions {
+        *acc.exclusions.entry(k).or_insert(0) += v;
+    }
+    for (a, b) in acc.assoc_counts.iter_mut().zip(c.assoc_counts.iter()) {
+        *a += b;
+    }
+    acc.t5.all.merge(&c.t5.all);
+    for (a, b) in acc.t5.band.iter_mut().zip(c.t5.band.iter()) {
+        a.merge(b);
+    }
+    for (a, b) in acc.t5.coast.iter_mut().zip(c.t5.coast.iter()) {
+        a.merge(b);
+    }
+    acc.t5.repeats += c.t5.repeats;
+    acc.t5.long += c.t5.long;
+    acc.t6_none += c.t6_none;
+    presence_add(&mut acc.presence, c.presence);
+    match &mut acc.t9 {
+        None => acc.t9 = Some(c.t9),
+        Some(t) => {
+            for (a, b) in t.scalars.iter_mut().zip(c.t9.scalars.iter()) {
+                a.1 += b.1;
+            }
+            for case in c.t9.cases {
+                if t.cases.len() < MAX_CASES {
+                    t.cases.push(case);
+                }
+            }
+        }
+    }
+    if acc.flows.is_none() {
+        acc.flows = Some(c.flows);
+    }
+    Ok(())
+}
+
+/// The finished benchmark and the paired samples it was made from (for the ESASSP-style split).
+/// `presence` is the T7 and T8 configuration of `cfg`. A run with no chunk is refused.
+pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTable), ChunkError> {
+    let (Some(t9), Some(flows)) = (acc.t9, acc.flows) else {
+        return Err(ChunkError("no chunk was scored".to_string()));
+    };
+    let pairs = acc.pairs;
+    let mut m = vec![
+        t1_cross_track(&pairs),
+        t2_along_raw(&pairs),
+        t2_along_corrected(&pairs, &cfg.offset),
+        t3_speed(&pairs),
+        t3_heading(&pairs),
+        t4_altitude(&pairs),
+        t5_result(&acc.t5),
+    ];
+    let mut t6 = new_result("T6", "staleness (receive time minus position time)", "s");
+    t6.withheld =
+        Some("the recordings carry no receive time (raw .msg files); use .oaf recordings".into());
+    t6.scalars
+        .push(("samples_without_receive_time".into(), acc.t6_none as f64));
+    m.push(t6);
+    let (t7, t8) = presence_results(acc.presence, &cfg.presence);
+    m.push(t7);
+    m.push(t8);
+    m.push(t9);
+    m.extend(flows);
+    let mut a = new_result("ASSOC", "association of ERAM flights with truth", "flights");
+    for (i, n) in astatus::NAMES.iter().enumerate() {
+        a.scalars.push((
+            (*n).to_string(),
+            acc.assoc_counts.get(i).copied().unwrap_or(0) as f64,
+        ));
+    }
+    m.push(a);
+    let n_pairs = pairs.t_ms.len();
+    Ok((
+        RunOutput {
+            metrics: m,
+            exclusions: acc.exclusions,
+            assoc: Assoc {
+                counts: acc.assoc_counts,
+                ..Assoc::default()
+            },
+            pairs: n_pairs,
+        },
+        pairs,
+    ))
+}
+
+/// `index_truth`, so a caller needs only this module.
+pub fn truth_index(truth: &Truth<'_>) -> TruthIndex {
+    index_truth(truth.legs)
+}

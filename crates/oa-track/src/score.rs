@@ -33,21 +33,22 @@
 //! thinned input and are not an ESASSP exit result.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use oa_adsb::{reports_len, reports_push, reports_row, Reports, NONE_U8, ZAU_BOX};
 use oa_bench::adsb_truth::{self, BuiltTruth};
-use oa_bench::assoc::{associate, index_truth};
+use oa_bench::chunked::{benchmark_chunk, chunk_add, chunk_finish, truth_index, ChunkAcc};
 use oa_bench::legacy::NO_ALT;
-use oa_bench::pair::{build_pairs, PairTable};
-use oa_bench::run::{run_benchmark, RunConfig, RunOutput};
+use oa_bench::pair::PairTable;
+use oa_bench::run::{RunConfig, RunOutput};
 use oa_bench::stats::{stats_of, Stats};
-use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples, TrackSamples};
 use oa_bench::truth::{Env, Truth};
 use oa_sha256::{to_hex, Sha256};
 use oa_truth::{quality_check, QualityState, TruthConfig, DEFAULT_CONFIG};
 
 use crate::params::NS_PER_S;
+use crate::spill::{spill_append, spill_counts, spill_finish, spill_new, spill_rows, SpilledRun};
 use crate::tracker::{
     tracker_advance, tracker_flush, tracker_log, tracker_new, tracker_stats, tracker_update,
 };
@@ -438,72 +439,156 @@ pub enum RowSet {
     Updates,
 }
 
+/// Most output rows scored at once: an address range is closed when adding the next aircraft
+/// would pass this (an aircraft is never split, so one with more rows is a range of its own).
+/// Peak memory of scoring is a few hundred bytes per row of the range, so about 100 MB at the
+/// most whatever the length of the run, plus the paired samples ([`oa_bench::chunked`]).
+pub const SCORE_CHUNK_ROWS: usize = 1 << 17;
+
+/// The columns of the rows of one address range in one [`RowSet`], in time order, as
+/// `oa-bench`'s adapter takes them. Plain columns (A3); A7.2: transient.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScoreRows {
+    pub addr: Vec<u32>,
+    pub t_ns: Vec<i64>,
+    pub lat_e7: Vec<i32>,
+    pub lon_e7: Vec<i32>,
+    pub alt_ft: Vec<i32>,
+    pub vel_east_mps: Vec<f32>,
+    pub vel_north_mps: Vec<f32>,
+    pub coast: Vec<bool>,
+}
+
+/// Where scoring reads a run's output rows from: memory ([`TrackRun`]) or disk
+/// ([`SpilledRun`]).
+pub trait RowSource {
+    /// Rows per address in `rows`.
+    fn row_counts(&self, rows: RowSet) -> Result<BTreeMap<u32, u64>, ScoreError>;
+    /// The rows in `rows` with an address in `lo..=hi`.
+    fn rows_in(&self, rows: RowSet, lo: u32, hi: u32) -> Result<ScoreRows, ScoreError>;
+}
+
+fn alt_of(flags: u8, alt: f32) -> i32 {
+    if flags & O_HAS_ALT != 0 {
+        alt.round() as i32
+    } else {
+        NO_ALT
+    }
+}
+
+impl RowSource for TrackRun {
+    fn row_counts(&self, rows: RowSet) -> Result<BTreeMap<u32, u64>, ScoreError> {
+        let mut m = BTreeMap::new();
+        for (a, f) in self.out.addr.iter().zip(self.out.flags.iter()) {
+            if (f & O_TICK != 0) == (rows == RowSet::Ticks) {
+                *m.entry(*a).or_insert(0u64) += 1;
+            }
+        }
+        Ok(m)
+    }
+
+    fn rows_in(&self, rows: RowSet, lo: u32, hi: u32) -> Result<ScoreRows, ScoreError> {
+        let o = &self.out;
+        let mut r = ScoreRows::default();
+        for i in 0..o.t_ns.len() {
+            let (Some(&a), Some(&f)) = (o.addr.get(i), o.flags.get(i)) else {
+                continue;
+            };
+            if (f & O_TICK != 0) != (rows == RowSet::Ticks) || a < lo || a > hi {
+                continue;
+            }
+            r.addr.push(a);
+            r.t_ns.push(o.t_ns.get(i).copied().unwrap_or(0));
+            r.lat_e7.push(o.lat_e7.get(i).copied().unwrap_or(0));
+            r.lon_e7.push(o.lon_e7.get(i).copied().unwrap_or(0));
+            r.alt_ft
+                .push(alt_of(f, o.alt_ft.get(i).copied().unwrap_or(f32::NAN)));
+            r.vel_east_mps
+                .push(o.vel_east_mps.get(i).copied().unwrap_or(f32::NAN));
+            r.vel_north_mps
+                .push(o.vel_north_mps.get(i).copied().unwrap_or(f32::NAN));
+            r.coast.push(f & O_COAST != 0);
+        }
+        Ok(r)
+    }
+}
+
+fn io_err(e: std::io::Error) -> ScoreError {
+    ScoreError(format!("spilled output: {e}"))
+}
+
+impl RowSource for SpilledRun {
+    fn row_counts(&self, rows: RowSet) -> Result<BTreeMap<u32, u64>, ScoreError> {
+        spill_counts(self, rows == RowSet::Ticks).map_err(io_err)
+    }
+
+    fn rows_in(&self, rows: RowSet, lo: u32, hi: u32) -> Result<ScoreRows, ScoreError> {
+        let (addr, t_ns, lat_e7, lon_e7, alt, ve, vn, flags) =
+            spill_rows(self, rows == RowSet::Ticks, lo, hi).map_err(io_err)?;
+        Ok(ScoreRows {
+            alt_ft: alt
+                .iter()
+                .zip(flags.iter())
+                .map(|(&a, &f)| alt_of(f, a))
+                .collect(),
+            coast: flags.iter().map(|&f| f & O_COAST != 0).collect(),
+            addr,
+            t_ns,
+            lat_e7,
+            lon_e7,
+            vel_east_mps: ve,
+            vel_north_mps: vn,
+        })
+    }
+}
+
+/// Splits the address space into the ranges scored one at a time: consecutive addresses of
+/// `counts` grouped while the rows stay within `chunk_rows`, the first range starting at 0 and
+/// the last ending at `u32::MAX`, so every truth leg falls in exactly one range.
+pub fn score_ranges(counts: &BTreeMap<u32, u64>, chunk_rows: usize) -> Vec<(u32, u32)> {
+    let mut starts: Vec<u32> = vec![0];
+    let mut acc = 0u64;
+    for (&a, &c) in counts {
+        if acc > 0 && acc + c > chunk_rows as u64 {
+            starts.push(a);
+            acc = 0;
+        }
+        acc += c;
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (s, starts.get(i + 1).map_or(u32::MAX, |&n| n - 1)))
+        .collect()
+}
+
 /// Scores the rows of `run` in `rows` against `built` (truth built from set B) with the
 /// unchanged `oa-bench` metrics. `tcfg` is the truth configuration `built` was made with: its
-/// uncertainty gate is also the pairing gate, as in the M2 run.
+/// uncertainty gate is also the pairing gate, as in the M2 run. Rows are scored in address
+/// ranges of at most [`SCORE_CHUNK_ROWS`] (see [`score_source`]).
 pub fn score(
     run: &TrackRun,
     built: &BuiltTruth,
     tcfg: &TruthConfig,
     rows: RowSet,
 ) -> Result<Scored, ScoreError> {
-    let o = &run.out;
-    let ticks: Vec<usize> = (0..o.t_ns.len())
-        .filter(|&i| {
-            o.flags
-                .get(i)
-                .is_some_and(|f| (f & O_TICK != 0) == (rows == RowSet::Ticks))
-        })
-        .collect();
-    let pick = |f: &dyn Fn(usize) -> Option<i64>| -> Vec<i64> {
-        ticks.iter().map(|&i| f(i).unwrap_or(0)).collect()
-    };
-    let t_ns = pick(&|i| o.t_ns.get(i).copied());
-    let addr: Vec<u32> = ticks
-        .iter()
-        .filter_map(|&i| o.addr.get(i).copied())
-        .collect();
-    let lat: Vec<i32> = ticks
-        .iter()
-        .filter_map(|&i| o.lat_e7.get(i).copied())
-        .collect();
-    let lon: Vec<i32> = ticks
-        .iter()
-        .filter_map(|&i| o.lon_e7.get(i).copied())
-        .collect();
-    let alt: Vec<i32> = ticks
-        .iter()
-        .map(|&i| {
-            if o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0) {
-                o.alt_ft.get(i).map_or(NO_ALT, |&a| a.round() as i32)
-            } else {
-                NO_ALT
-            }
-        })
-        .collect();
-    let ve: Vec<f32> = ticks
-        .iter()
-        .filter_map(|&i| o.vel_east_mps.get(i).copied())
-        .collect();
-    let vn: Vec<f32> = ticks
-        .iter()
-        .filter_map(|&i| o.vel_north_mps.get(i).copied())
-        .collect();
-    let coast: Vec<bool> = ticks
-        .iter()
-        .map(|&i| o.flags.get(i).is_some_and(|f| f & O_COAST != 0))
-        .collect();
-    let legacy = legacy_from_track_samples(&TrackSamples {
-        addr: &addr,
-        t_ns: &t_ns,
-        lat_e7: &lat,
-        lon_e7: &lon,
-        alt_ft: &alt,
-        vel_east_mps: &ve,
-        vel_north_mps: &vn,
-        coast: &coast,
-    })
-    .map_err(|e| ScoreError(format!("track samples: {e:?}")))?;
+    score_source(run, built, tcfg, rows, SCORE_CHUNK_ROWS)
+}
+
+/// [`score`] over any row source with the range size given. The numbers do not depend on it:
+/// flights are independent in every metric, the ranges are taken in ascending address order (the
+/// order of the flights of a one-shot run), and the sample lists the percentiles are read from
+/// are rebuilt in that order. See [`oa_bench::chunked`] for the exact statement per metric.
+pub fn score_source(
+    src: &dyn RowSource,
+    built: &BuiltTruth,
+    tcfg: &TruthConfig,
+    rows: RowSet,
+    chunk_rows: usize,
+) -> Result<Scored, ScoreError> {
+    let counts = src.row_counts(rows)?;
+    let tick_rows: u64 = counts.values().sum();
     let q = |a: u32, t: i64| adsb_truth::query(&built.truth, a, t);
     let truth = Truth {
         query: &q,
@@ -520,17 +605,65 @@ pub fn score(
     env.in_zone = &in_zone;
     let mut rcfg = RunConfig::default();
     rcfg.pair.max_sigma_m = tcfg.max_sigma95_h_m;
-    let bench = run_benchmark(&legacy, &truth, &env, &rcfg);
-    // The paired samples again, for the ESASSP split (run_benchmark does not return them).
-    let ix = build_th_index(&legacy.th, legacy.flights.gufi.len());
-    let tix = index_truth(truth.legs);
-    let assoc = associate(&legacy, &ix, &truth, &tix, &rcfg.assoc);
-    let (pairs, _) = build_pairs(&legacy, &ix, &assoc, &truth, &rcfg.pair);
+    let tix = truth_index(&truth);
+    let mut acc = ChunkAcc::default();
+    for range in score_ranges(&counts, chunk_rows) {
+        let r = src.rows_in(rows, range.0, range.1)?;
+        let legacy = legacy_from_track_samples(&TrackSamples {
+            addr: &r.addr,
+            t_ns: &r.t_ns,
+            lat_e7: &r.lat_e7,
+            lon_e7: &r.lon_e7,
+            alt_ft: &r.alt_ft,
+            vel_east_mps: &r.vel_east_mps,
+            vel_north_mps: &r.vel_north_mps,
+            coast: &r.coast,
+        })
+        .map_err(|e| ScoreError(format!("track samples: {e:?}")))?;
+        drop(r);
+        let c = benchmark_chunk(&legacy, &truth, &tix, &env, &rcfg, range);
+        chunk_add(&mut acc, c).map_err(|e| ScoreError(e.0))?;
+    }
+    let (bench, pairs) = chunk_finish(acc, &rcfg).map_err(|e| ScoreError(e.0))?;
     let esassp = esassp_of(&pairs, &built.truth);
     Ok(Scored {
         bench,
         esassp,
-        tick_rows: ticks.len(),
+        tick_rows: tick_rows as usize,
         pairs: pairs.t_ms.len(),
     })
+}
+
+/// Runs the tracker like [`run_tracker`] but writes its output to files under `dir` as it goes,
+/// so the run's memory is the tracker's tables and one drain buffer whatever its length. The
+/// digest is the same as [`run_tracker`]'s for the same input.
+pub fn run_tracker_spilled(
+    meas: &[Measurement],
+    cfg: &TrackerConfig,
+    dir: &Path,
+) -> Result<SpilledRun, ScoreError> {
+    let io = |e: std::io::Error| ScoreError(format!("spilled output: {e}"));
+    let mut t = tracker_new(cfg).map_err(|e| ScoreError(e.to_string()))?;
+    let mut scratch = output_new(cfg.out_capacity);
+    let mut w = spill_new(dir).map_err(io)?;
+    for m in meas {
+        tracker_update(&mut t, m, &mut scratch);
+        if output_len(&scratch) > DRAIN_ROWS.min(cfg.out_capacity / 2) {
+            spill_append(&mut w, &scratch).map_err(io)?;
+            output_clear(&mut scratch);
+        }
+    }
+    let end = meas.last().map_or(0, |m| m.toa_ns);
+    tracker_advance(&mut t, end, &mut scratch);
+    tracker_flush(&mut t, end, &mut scratch);
+    spill_append(&mut w, &scratch).map_err(io)?;
+    let overflow = scratch.overflow;
+    spill_finish(
+        w,
+        overflow,
+        *tracker_stats(&t),
+        tracker_log(&t).clone(),
+        meas.len() as u64,
+    )
+    .map_err(io)
 }

@@ -7,19 +7,28 @@
 //! # Memory
 //!
 //! Every table is allocated once in [`tracker_new`] for `max_tracks` tracks: the per-track
-//! columns, the filter of each track, a ring of the last [`RING_DEPTH`] updates of each track
-//! (the measurement and the filter state after it) and the key index. After that nothing
+//! columns, the filter of each track, a ring of the last [`RING_DEPTH`] applied measurements of
+//! each track, one anchor filter state per track and the key index. After that nothing
 //! allocates: output rows go to a [`TrackOutput`] and track records to a [`TrackLog`], both
 //! preallocated and bounded, overflow counted.
+//!
+//! The anchor is the filter state after the oldest measurement in the ring. The state after any
+//! newer ring entry is the anchor with the ring's measurements applied again in order, which
+//! gives exactly the state the filter had then (a measurement in the ring was applied, and
+//! applying is a pure function of the state and the measurement). So the ring holds
+//! `RING_DEPTH` measurements and one filter state instead of `RING_DEPTH` of each: the memory of
+//! a track falls from about 8.9 kB to about 2.1 kB. Keeping the anchor costs one more filter
+//! application per update once the ring is full (the oldest entry's successor is applied to it).
 //!
 //! # Time ordering
 //!
 //! The tracker's clock is the newest time of applicability seen. A measurement older than the
 //! clock by more than the out-of-order window is counted and dropped. A measurement older than
 //! its own track's newest update but inside the window is applied by re-filtering: the ring
-//! gives the stored state at or before its time, the measurement is applied to it, and the
-//! stored measurements that followed are applied again in order. One older than every stored
-//! state of its track is counted and dropped.
+//! gives the newest stored update at or before its time, the state after it is rebuilt from the
+//! anchor, the measurement is applied to that, and the stored measurements that followed are
+//! applied again in order. One older than every stored update of its track is counted and
+//! dropped.
 //!
 //! # Initiation, coasting, dropping
 //!
@@ -38,7 +47,7 @@
 //! advances time; the row is the filter predicted to the tick time. A late measurement changes
 //! the ticks after it, not those already emitted.
 
-use crate::filter::{filter_apply, filter_init, filter_output, Applied, Filter};
+use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
 use crate::hfilter::HFilter;
 use crate::params::{MAX_PLAUSIBLE_KT, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
 use crate::types::{
@@ -81,8 +90,9 @@ pub struct Tracker {
     cur: Vec<Filter>,
     ring_len: Vec<u8>,
     ring_head: Vec<u8>,
-    /// `max_tracks * RING_DEPTH` stored filter states and measurements.
-    ring_f: Vec<Filter>,
+    /// The filter state after the oldest measurement of each track's ring.
+    anchor: Vec<Filter>,
+    /// `max_tracks * RING_DEPTH` stored measurements.
     ring_m: Vec<Measurement>,
     /// Free slots (a stack, so reuse order is fixed).
     free: Vec<u32>,
@@ -161,7 +171,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         cur: vec![blank_filter(); n],
         ring_len: vec![0; n],
         ring_head: vec![0; n],
-        ring_f: vec![blank_filter(); n * RING_DEPTH],
+        anchor: vec![blank_filter(); n],
         ring_m: vec![blank_measurement(); n * RING_DEPTH],
         // Popped from the end: slot 0 first.
         free: (0..n as u32).rev().collect(),
@@ -202,7 +212,7 @@ pub fn tracker_counts(t: &Tracker) -> (usize, usize) {
 pub fn tracker_bytes(t: &Tracker) -> usize {
     let n = t.cfg.max_tracks;
     n * (4 + 1 + 8 * 3 + 4 + 1 + core::mem::size_of::<Filter>() + 2 + 4)
-        + t.ring_f.len() * core::mem::size_of::<Filter>()
+        + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
         + t.index.len() * 4
 }
@@ -225,7 +235,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.cur),
         of(&t.ring_len),
         of(&t.ring_head),
-        of(&t.ring_f),
+        of(&t.anchor),
         of(&t.ring_m),
         of(&t.free),
         of(&t.index),
@@ -332,10 +342,20 @@ fn ring_clear(t: &mut Tracker, slot: usize) {
     put(&mut t.ring_head, slot, 0);
 }
 
-/// Stores the filter state after an update and the measurement that made it.
+/// Stores a measurement that was applied; the track's filter (`cur`) is the state after it. The
+/// first entry of an empty ring sets the anchor from `cur`; when the ring is full the oldest
+/// entry is dropped and the anchor moves on by applying the next one to it.
 fn ring_push(t: &mut Tracker, slot: usize, m: &Measurement) {
     let len = ring_len(t, slot);
+    if len == 0 {
+        put(&mut t.anchor, slot, col(&t.cur, slot, blank_filter()));
+    }
     if len == RING_DEPTH {
+        let next = col(&t.ring_m, ring_ix(t, slot, 1), blank_measurement());
+        let mut a = col(&t.anchor, slot, blank_filter());
+        // The counters were taken when the measurement was first applied.
+        let _ = filter_replay(&mut a, &next, &mut TrackerStats::default());
+        put(&mut t.anchor, slot, a);
         let head = usize::from(col(&t.ring_head, slot, 0));
         put(&mut t.ring_head, slot, ((head + 1) % RING_DEPTH) as u8);
     } else {
@@ -343,9 +363,19 @@ fn ring_push(t: &mut Tracker, slot: usize, m: &Measurement) {
     }
     let k = ring_len(t, slot).saturating_sub(1);
     let at = ring_ix(t, slot, k);
-    let f = col(&t.cur, slot, blank_filter());
-    put(&mut t.ring_f, at, f);
     put(&mut t.ring_m, at, *m);
+}
+
+/// The filter state after ring entry `k` (0 is the oldest): the anchor with entries `1..=k`
+/// applied again, counters discarded.
+fn ring_state(t: &Tracker, slot: usize, k: usize) -> Filter {
+    let mut f = col(&t.anchor, slot, blank_filter());
+    let mut scratch = TrackerStats::default();
+    for j in 1..=k {
+        let m = col(&t.ring_m, ring_ix(t, slot, j), blank_measurement());
+        let _ = filter_replay(&mut f, &m, &mut scratch);
+    }
+    f
 }
 
 // ---- measurement validation -----------------------------------------------------------
@@ -520,11 +550,12 @@ fn emit_if_confirmed(t: &Tracker, slot: usize, out: &mut TrackOutput) {
 /// Applies a measurement older than the track's newest update by re-filtering from the ring.
 fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
     let len = ring_len(t, slot);
-    // The newest stored state at or before the measurement.
+    // The newest stored update at or before the measurement (the state after an update is at
+    // the update's own time).
     let mut base: Option<usize> = None;
     for k in 0..len {
         let at = ring_ix(t, slot, k);
-        if col(&t.ring_f, at, blank_filter()).t_ns <= m.toa_ns {
+        if col(&t.ring_m, at, blank_measurement()).toa_ns <= m.toa_ns {
             base = Some(k);
         } else {
             break;
@@ -535,8 +566,8 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         return;
     };
     let be = ring_ix(t, slot, e);
-    let bf = col(&t.ring_f, be, blank_filter());
-    if bf.t_ns == m.toa_ns && col(&t.ring_m, be, blank_measurement()).sensor == m.sensor {
+    let bm = col(&t.ring_m, be, blank_measurement());
+    if bm.toa_ns == m.toa_ns && bm.sensor == m.sensor {
         t.stats.duplicates += 1;
         return;
     }
@@ -550,6 +581,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
             n_later += 1;
         }
     }
+    let bf = ring_state(t, slot, e);
     put(&mut t.ring_len, slot, (e + 1) as u8);
     put(&mut t.cur, slot, bf);
     let mut f = bf;

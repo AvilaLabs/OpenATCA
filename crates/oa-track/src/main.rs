@@ -3,49 +3,65 @@
 //! Shell (B3): arguments, files, the clock and stdout.
 //!
 //! ```text
-//! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare]
+//! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]
 //! ```
 //!
 //! The clip's reports are split into two disjoint halves (`oa_track::score::SPLIT_TEXT`); the
 //! tracker runs on half A, `oa-truth` is built from half B, and the tracker's one-second output
 //! is scored by `oa-bench`'s metrics. `report.txt` and `report.csv` are `oa-bench`'s report with
 //! the tracker section appended; `tracks.csv` lists every track and `esassp.csv` the straight
-//! and turning table. `--no-compare` skips the single-filter baselines.
+//! and turning table. `--no-compare` skips the single-filter baselines. `--no-score` runs the
+//! tracker core and the latency replay only (no truth, no scoring, no files but `core.txt`), to
+//! measure the tracker's own memory and speed apart from the scoring harness.
+//!
+//! The tracker's output goes to column files under `<dir>/spill-<pid>` as it is produced and
+//! scoring reads it back one address range at a time, so memory does not grow with the run. The
+//! shell owns the clocks: wall time for throughput, a monotonic clock for the per-stage latency
+//! (`oa_track::latency`), and `/proc/self/status` for the resident memory of each phase.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use oa_adsb::reports_len;
+use oa_adsb::{decode_payload, reports_len, Reports};
 use oa_bench::adsb_truth;
-use oa_bench::input::load_adsb;
+use oa_bench::input::{for_each_adsb_frame, load_adsb};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
 use oa_track::adsb::{adsb_measurements, AdsbConfig, AdsbStats};
-use oa_track::score::{
-    initiation_delays, interval_stats, run_tracker, score, scoring_config, split_reports, Esassp,
-    IntervalStats, RowSet, Scored, SplitStats, TrackRun, BASIS_TEXT, CLASS_NAMES, R4_PER_FLIGHT_M,
-    SPLIT_TEXT,
+use oa_track::latency::{
+    latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
+    LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
+use oa_track::score::{
+    initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
+    split_reports, Esassp, IntervalStats, RowSet, Scored, SplitStats, BASIS_TEXT, CLASS_NAMES,
+    R4_PER_FLIGHT_M, SPLIT_TEXT,
+};
+use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
 use oa_track::{
-    output_clear, output_new, tracker_bytes, tracker_new, tracker_update, Measurement,
-    TrackerConfig, DEFAULT_CONFIG, END_NAMES, O_TICK, REFUSE_NAMES,
+    output_clear, output_len, output_new, tracker_advance, tracker_bytes, tracker_flush,
+    tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
+    TrackerConfig, DEFAULT_CONFIG, END_NAMES, REFUSE_NAMES,
 };
 use oa_truth::{DEFAULT_CONFIG as TRUTH_DEFAULT, REMOVE_NAMES};
 
-const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare]";
+const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]";
 
 fn main() -> ExitCode {
     let mut adsb: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut compare = true;
+    let mut score_it = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-compare" => compare = false,
+            "--no-score" => score_it = false,
             "--adsb" | "--out" => match args.next() {
                 Some(v) if a == "--adsb" => adsb = Some(PathBuf::from(v)),
                 Some(v) => out = Some(PathBuf::from(v)),
@@ -64,7 +80,7 @@ fn main() -> ExitCode {
         eprintln!("oa-track-run: --adsb and --out are required\n{USAGE}");
         return ExitCode::from(2);
     };
-    match run(&adsb, &out, compare) {
+    match run(&adsb, &out, compare, score_it) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oa-track-run: {e}");
@@ -117,26 +133,248 @@ fn percentile(sorted: &[f64], p: usize) -> f64 {
     sorted.get(k - 1).copied().unwrap_or(0.0)
 }
 
-/// Per-call latency of `tracker_update` over the measurements, ns: `(p50, p99, p999, max)`.
-fn latency(meas: &[Measurement], cfg: &TrackerConfig) -> Option<(f64, f64, f64, f64)> {
-    let mut t = tracker_new(cfg).ok()?;
+/// The monotonic clock of the shell: nanoseconds since the run started.
+struct SystemClock(Instant);
+
+impl Clock for SystemClock {
+    fn now_ns(&mut self) -> u64 {
+        self.0.elapsed().as_nanos() as u64
+    }
+}
+
+/// `(VmRSS, VmHWM)` of this process in kB, from `/proc/self/status` (None where it is absent).
+fn rss_kb() -> Option<(u64, u64)> {
+    let s = fs::read_to_string("/proc/self/status").ok()?;
+    let get = |k: &str| {
+        s.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    Some((get("VmRSS:")?, get("VmHWM:")?))
+}
+
+/// Resident memory at the end of each phase of the run, kB: `(phase, VmRSS, VmHWM so far)`.
+#[derive(Default)]
+struct Phases(Vec<(String, u64, u64)>);
+
+impl Phases {
+    fn mark(&mut self, name: &str) {
+        if let Some((r, h)) = rss_kb() {
+            self.0.push((name.to_string(), r, h));
+        }
+    }
+}
+
+/// What the tracker core alone costs: the run with its rows discarded.
+struct CoreRun {
+    secs: f64,
+    rows: usize,
+}
+
+/// Runs the tracker over `meas` and throws the output away as it goes.
+fn core_run(meas: &[Measurement], cfg: &TrackerConfig) -> Result<CoreRun, String> {
+    let mut t = tracker_new(cfg).map_err(|e| e.to_string())?;
     let mut out = output_new(cfg.out_capacity);
-    let mut d: Vec<f64> = Vec::with_capacity(meas.len());
+    let mut rows = 0usize;
+    let started = Instant::now();
     for m in meas {
-        let s = Instant::now();
         tracker_update(&mut t, m, &mut out);
-        d.push(s.elapsed().as_nanos() as f64);
-        if out.t_ns.len() > cfg.out_capacity / 2 {
+        if output_len(&out) > cfg.out_capacity.min(1 << 17) / 2 {
+            rows += output_len(&out);
             output_clear(&mut out);
         }
     }
-    d.sort_by(f64::total_cmp);
-    Some((
-        percentile(&d, 50),
-        percentile(&d, 99),
-        percentile(&d, 999 * 100 / 1000),
-        d.last().copied().unwrap_or(0.0),
-    ))
+    let end = meas.last().map_or(0, |m| m.toa_ns);
+    tracker_advance(&mut t, end, &mut out);
+    tracker_flush(&mut t, end, &mut out);
+    rows += output_len(&out);
+    Ok(CoreRun {
+        secs: secs(started),
+        rows,
+    })
+}
+
+/// The replay with stamps: frames are read from the file, decoded, and the measurements of set A
+/// in them offered to the tracker one by one through [`update_timed`]; the output rows go to
+/// the spill as the consumer. Returns the log, the run (for its digest: it must equal the
+/// scoring run's), the seconds taken, and the measurements no frame produced.
+fn replay_timed(
+    path: &Path,
+    meas: &[Measurement],
+    cfg: &TrackerConfig,
+    dir: &Path,
+) -> Result<(LatencyLog, SpilledRun, f64, usize), String> {
+    let mut by_key: BTreeMap<(u32, i64), VecDeque<usize>> = BTreeMap::new();
+    for (i, m) in meas.iter().enumerate() {
+        by_key.entry((m.addr, m.toa_ns)).or_default().push_back(i);
+    }
+    let mut t = tracker_new(cfg).map_err(|e| e.to_string())?;
+    let mut out = output_new(cfg.out_capacity);
+    let mut w = spill_new(dir).map_err(|e| e.to_string())?;
+    let mut log = latency_new(LATENCY_CAPACITY);
+    let mut clock = SystemClock(Instant::now());
+    let mut failed: Option<String> = None;
+    let started = Instant::now();
+    for_each_adsb_frame(path, &mut |recv_ns, payload| {
+        if failed.is_some() {
+            return;
+        }
+        let received = clock.now_ns();
+        let mut fr = Reports::default();
+        let ok = decode_payload(payload, &mut fr).is_ok();
+        let decoded = clock.now_ns();
+        if !ok {
+            return;
+        }
+        let stamps = FrameStamps {
+            recv_ns,
+            received,
+            decoded,
+        };
+        for i in 0..reports_len(&fr) {
+            let key = (
+                fr.icao.get(i).copied().unwrap_or(0),
+                fr.time_ns.get(i).copied().unwrap_or(0),
+            );
+            let Some(idx) = by_key.get_mut(&key).and_then(VecDeque::pop_front) else {
+                continue;
+            };
+            let Some(m) = meas.get(idx) else { continue };
+            let mut emit = |o: &mut TrackOutput| {
+                if let Err(e) = spill_append(&mut w, o) {
+                    failed = Some(e.to_string());
+                }
+                output_clear(o);
+            };
+            update_timed(
+                &mut t, m, &stamps, &mut out, &mut clock, &mut emit, &mut log,
+            );
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let end = meas.last().map_or(0, |m| m.toa_ns);
+    tracker_advance(&mut t, end, &mut out);
+    tracker_flush(&mut t, end, &mut out);
+    spill_append(&mut w, &out).map_err(|e| e.to_string())?;
+    let elapsed = secs(started);
+    let unmatched = by_key.values().map(VecDeque::len).sum();
+    let run = spill_finish(
+        w,
+        out.overflow,
+        *tracker_stats(&t),
+        tracker_log(&t).clone(),
+        meas.len() as u64,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((log, run, elapsed, unmatched))
+}
+
+/// Everything measured about speed, latency and memory, for the report.
+struct Perf {
+    /// Tracker core with the one-second output, rows discarded.
+    with_ticks: CoreRun,
+    /// Tracker core with the one-second output off.
+    no_ticks: CoreRun,
+    /// The scoring run: output written to the spill files, digest computed.
+    spill_secs: f64,
+    latency: Option<(LatencyLog, f64, bool, usize)>,
+    tracker_bytes: usize,
+    phases: Phases,
+}
+
+fn us(ns: i64) -> f64 {
+    ns as f64 / 1e3
+}
+
+fn perf_text(o: &mut String, p: &Perf, offered: u64, rows: u64, cfg: &TrackerConfig) {
+    let _ = writeln!(
+        o,
+        "\nPerformance (release build assumed; every number measured on this run, not estimated; wall clock of the shell)"
+    );
+    let rate = |n: u64, s: f64| n as f64 / s.max(1e-9);
+    let _ = writeln!(
+        o,
+        "  tracker core, {} measurements, one-second output on, rows discarded: {:.3} s, {:.0} updates/s ({} rows, about {:.1} rows per update)",
+        offered,
+        p.with_ticks.secs,
+        rate(offered, p.with_ticks.secs),
+        p.with_ticks.rows,
+        p.with_ticks.rows as f64 / offered.max(1) as f64
+    );
+    let _ = writeln!(
+        o,
+        "  tracker core, one-second output off: {:.3} s, {:.0} updates/s ({} update rows)",
+        p.no_ticks.secs,
+        rate(offered, p.no_ticks.secs),
+        p.no_ticks.rows
+    );
+    let _ = writeln!(
+        o,
+        "  scoring run (output written to column files, digest computed): {:.3} s, {:.0} updates/s ({} rows)",
+        p.spill_secs,
+        rate(offered, p.spill_secs),
+        rows
+    );
+    let _ = writeln!(
+        o,
+        "  tracker tables: {:.1} MiB for {} tracks ({} stored measurements and one anchor filter state per track for re-filtering)",
+        p.tracker_bytes as f64 / (1024.0 * 1024.0),
+        cfg.max_tracks,
+        oa_track::params::RING_DEPTH
+    );
+    if let Some((log, secs, digest_ok, unmatched)) = &p.latency {
+        let _ = writeln!(
+            o,
+            "\nLatency by stage, replay of the clip's frames through decode, tracker and output (monotonic clock of the shell, {} measurements, {} not stored, {} unmatched; exact nearest-rank percentiles; stamps in a core module, clock injected)",
+            latency_count(log),
+            log.overflow,
+            unmatched
+        );
+        let _ = writeln!(
+            o,
+            "  the replay took {secs:.3} s; its output digest {} the scoring run's",
+            if *digest_ok { "equals" } else { "DIFFERS FROM" }
+        );
+        for i in 0..STAGES {
+            let s = latency_stats(log, i);
+            let name = STAGE_NAMES.get(i).copied().unwrap_or("?");
+            if i == 0 {
+                let _ = writeln!(
+                    o,
+                    "  {name:<76} min {:>9.3} ms  p50 {:>9.3} ms  p95 {:>9.3} ms  p99 {:>9.3} ms  max {:>9.3} ms",
+                    us(s.min) / 1e3, us(s.p50) / 1e3, us(s.p95) / 1e3, us(s.p99) / 1e3, us(s.max) / 1e3
+                );
+            } else {
+                let _ = writeln!(
+                    o,
+                    "  {name:<76} p50 {:>10.2} us  p95 {:>10.2} us  p99 {:>10.2} us  max {:>10.2} us",
+                    us(s.p50), us(s.p95), us(s.p99), us(s.max)
+                );
+            }
+        }
+        let _ = writeln!(
+            o,
+            "  stage differences that saturated a 32-bit ns field {}, monotonic differences that were negative (stored as 0) {}",
+            log.saturated, log.negative
+        );
+        let _ = writeln!(
+            o,
+            "  a replay is not live: the clip has no receive wall clock (a frame's receive stamp is its first report's time, so the first stage is frame grouping, not a network), frames come from a file at once, and the output consumer is a buffered file, not a socket"
+        );
+    }
+    if !p.phases.0.is_empty() {
+        let _ = writeln!(
+            o,
+            "\nResident memory (VmRSS now, VmHWM peak so far, from /proc/self/status, kB)"
+        );
+        for (n, r, h) in &p.phases.0 {
+            let _ = writeln!(o, "  {n:<58} rss {r:>9}  peak {h:>9}");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,13 +383,11 @@ fn tracker_section(
     ad: &AdsbStats,
     cfg: &TrackerConfig,
     iv: &IntervalStats,
-    run: &TrackRun,
+    run: &SpilledRun,
     scored: &Scored,
     updates: &Scored,
     baselines: &[(String, Esassp, Esassp)],
-    secs: (f64, f64, usize),
-    lat: Option<(f64, f64, f64, f64)>,
-    mem_bytes: usize,
+    perf: &Perf,
 ) -> String {
     let mut o = String::new();
     let s = &run.stats;
@@ -242,10 +478,7 @@ fn tracker_section(
     let _ = writeln!(
         o,
         "  output: {} rows ({} one-second ticks scored), digest {}, rows lost to table capacity {}",
-        run.out.t_ns.len(),
-        scored.tick_rows,
-        run.digest,
-        run.overflow
+        run.rows, scored.tick_rows, run.digest, run.overflow
     );
     let _ = writeln!(
         o,
@@ -299,41 +532,7 @@ fn tracker_section(
             o.push_str(&line(n, e, u));
         }
     }
-    let _ = writeln!(
-        o,
-        "\nPerformance (release build assumed; measured on this run, not estimated)"
-    );
-    let (secs_run, secs_upd, upd_rows) = secs;
-    let _ = writeln!(
-        o,
-        "  {} measurements in {:.3} s: {:.0} updates/s with the one-second output ({} rows, about {:.1} rows per update; adapter excluded; includes the output digest and the accumulation of rows)",
-        run.offered,
-        secs_run,
-        run.offered as f64 / secs_run.max(1e-9),
-        run.out.t_ns.len(),
-        run.out.t_ns.len() as f64 / run.offered.max(1) as f64
-    );
-    let _ = writeln!(
-        o,
-        "  the same measurements with the one-second output off: {:.3} s, {:.0} updates/s ({} update rows)",
-        secs_upd,
-        run.offered as f64 / secs_upd.max(1e-9),
-        upd_rows
-    );
-    if let Some((p50, p99, p999, max)) = lat {
-        let _ = writeln!(
-            o,
-            "  per-call latency of tracker_update (includes tick bursts): p50 {:.2} us, p99 {:.2} us, p99.9 {:.2} us, max {:.2} us",
-            p50 / 1e3, p99 / 1e3, p999 / 1e3, max / 1e3
-        );
-    }
-    let _ = writeln!(
-        o,
-        "  tracker tables: {:.1} MiB for {} tracks ({} stored updates per track for re-filtering)",
-        mem_bytes as f64 / (1024.0 * 1024.0),
-        cfg.max_tracks,
-        oa_track::params::RING_DEPTH
-    );
+    perf_text(&mut o, perf, run.offered, run.rows, cfg);
     o
 }
 
@@ -357,7 +556,7 @@ fn esassp_csv(rows: &[(String, &Esassp)]) -> String {
     o
 }
 
-fn tracks_csv(run: &TrackRun) -> String {
+fn tracks_csv(run: &SpilledRun) -> String {
     let mut o = String::from("address_hex,first_s,confirmed_s,last_s,updates,end_reason\n");
     let l = &run.log;
     for i in 0..l.addr.len() {
@@ -384,10 +583,17 @@ fn tracks_csv(run: &TrackRun) -> String {
     o
 }
 
-fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
+fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Result<(), String> {
+    let mut phases = Phases::default();
+    phases.mark("start");
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    phases.mark("clip decoded (all reports in memory)");
     let (set_a, set_b, split) = split_reports(&clip.reports);
+    let (clip_reports, clip_bad, clip_hash) =
+        (reports_len(&clip.reports), clip.bad_frames, clip.hash);
+    drop(clip.reports);
     let (meas, ad) = adsb_measurements(&set_a, &AdsbConfig::default());
+    drop(set_a);
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: 1_000_000_000,
@@ -395,23 +601,63 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
         p99_ns: 1_000_000_000,
     });
     let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
-    let started = Instant::now();
-    let run = run_tracker(&meas, &cfg).map_err(|e| e.to_string())?;
-    let secs_run = secs(started);
-    // The same measurements with no one-second output: the cost of the updates alone.
+    phases.mark("split and measurements built");
+    // The tracker core alone, rows discarded: with the one-second output and without it.
+    let with_ticks = core_run(&meas, &cfg)?;
+    phases.mark("tracker core run (one-second output on, rows discarded)");
     let upd_cfg = TrackerConfig {
         tick_ns: i64::MAX / 4,
         ..cfg
     };
+    let no_ticks = core_run(&meas, &upd_cfg)?;
+    phases.mark("tracker core run (one-second output off)");
+    let tracker_mem = tracker_bytes(&tracker_new(&cfg).map_err(|e| e.to_string())?);
+    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    let spill_root = out_dir.join(format!("spill-{}", std::process::id()));
     let started = Instant::now();
-    let upd_only = run_tracker(&meas, &upd_cfg).map_err(|e| e.to_string())?;
-    let secs_upd = secs(started);
-    let lat = latency(&meas, &cfg);
-    let mem = tracker_bytes(&tracker_new(&cfg).map_err(|e| e.to_string())?);
+    let run =
+        run_tracker_spilled(&meas, &cfg, &spill_root.join("run")).map_err(|e| e.to_string())?;
+    let spill_secs = secs(started);
+    phases.mark("scoring run (output spilled to files)");
+    let latency = match replay_timed(clip_path, &meas, &cfg, &spill_root.join("replay")) {
+        Ok((log, replay, elapsed, unmatched)) => {
+            let ok = replay.digest == run.digest;
+            Some((log, elapsed, ok, unmatched))
+        }
+        Err(e) => return Err(format!("latency replay: {e}")),
+    };
+    phases.mark("latency replay (frames to output)");
+    if !score_it {
+        let mut perf = Perf {
+            with_ticks,
+            no_ticks,
+            spill_secs,
+            latency,
+            tracker_bytes: tracker_mem,
+            phases,
+        };
+        perf.phases.mark("end");
+        let mut text = format!(
+            "oa-track-run --no-score: {} measurements, {} tracks, output digest {}\n",
+            run.offered, run.stats.started, run.digest
+        );
+        perf_text(&mut text, &perf, run.offered, run.rows, &cfg);
+        print!("{text}");
+        fs::write(out_dir.join("core.txt"), text)
+            .map_err(|e| format!("{}: {e}", out_dir.join("core.txt").display()))?;
+        drop(run);
+        let _ = fs::remove_dir_all(&spill_root);
+        return Ok(());
+    }
     let tcfg = TRUTH_DEFAULT;
     let built = adsb_truth::build(&set_b, &tcfg).map_err(|e| format!("truth: {e}"))?;
-    let scored = score(&run, &built, &tcfg, RowSet::Ticks).map_err(|e| e.to_string())?;
-    let updates = score(&run, &built, &tcfg, RowSet::Updates).map_err(|e| e.to_string())?;
+    let sc = |r: &SpilledRun, rows| {
+        score_source(r, &built, &tcfg, rows, oa_track::score::SCORE_CHUNK_ROWS)
+            .map_err(|e| e.to_string())
+    };
+    let scored = sc(&run, RowSet::Ticks)?;
+    let updates = sc(&run, RowSet::Updates)?;
+    phases.mark("truth built, run scored (ticks and updates)");
     let mut baselines: Vec<(String, Esassp, Esassp)> = Vec::new();
     if compare {
         for (mode, name) in [
@@ -423,12 +669,14 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
                 h_mode: mode,
                 ..cfg
             };
-            let r = run_tracker(&meas, &c).map_err(|e| e.to_string())?;
-            let s = score(&r, &built, &tcfg, RowSet::Ticks).map_err(|e| e.to_string())?;
-            let u = score(&r, &built, &tcfg, RowSet::Updates).map_err(|e| e.to_string())?;
+            let r = run_tracker_spilled(&meas, &c, &spill_root.join("baseline"))
+                .map_err(|e| e.to_string())?;
+            let s = sc(&r, RowSet::Ticks)?;
+            let u = sc(&r, RowSet::Updates)?;
             baselines.push((name.to_string(), s.esassp, u.esassp));
         }
     }
+    phases.mark("single-filter baselines scored");
     let mut notes = vec![
         format!("tracker: oa-track on set A, truth from set B ({SPLIT_TEXT})"),
         format!("basis: {BASIS_TEXT}"),
@@ -441,13 +689,12 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
     ];
     notes.push(format!(
         "clip: {} reports decoded, {} frames refused",
-        reports_len(&clip.reports),
-        clip.bad_frames
+        clip_reports, clip_bad
     ));
     let header = Header {
         mode: "tracker (split ADS-B)".to_string(),
         code_version: code_version(),
-        inputs: vec![clip.hash.clone()],
+        inputs: vec![clip_hash],
         replay_hash: "not applicable (tracker run)".to_string(),
         counts: vec![
             ("set_a_reports".to_string(), split.set_a),
@@ -460,18 +707,17 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
         notes,
         truth: adsb_truth::truth_section(&built, &tcfg),
     };
+    let perf = Perf {
+        with_ticks,
+        no_ticks,
+        spill_secs,
+        latency,
+        tracker_bytes: tracker_mem,
+        phases,
+    };
+    let with_ticks_secs = perf.with_ticks.secs;
     let section = tracker_section(
-        &split,
-        &ad,
-        &cfg,
-        &iv,
-        &run,
-        &scored,
-        &updates,
-        &baselines,
-        (secs_run, secs_upd, upd_only.out.t_ns.len()),
-        lat,
-        mem,
+        &split, &ad, &cfg, &iv, &run, &scored, &updates, &baselines, &perf,
     );
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut text = render_text(&header, &scored.bench);
@@ -496,14 +742,16 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool) -> Result<(), String> {
         rows.push((format!("{n},report_times"), u));
     }
     w("esassp.csv", esassp_csv(&rows))?;
-    let ticks = run.out.flags.iter().filter(|&&f| f & O_TICK != 0).count();
+    let ticks = scored.tick_rows;
     println!(
         "wrote report.txt, report.csv, tracks.csv and esassp.csv to {}; {} measurements, {} tracks, {} one-second rows, {:.0} updates/s",
         out_dir.display(),
         run.offered,
         run.stats.started,
         ticks,
-        run.offered as f64 / secs_run.max(1e-9)
+        run.offered as f64 / with_ticks_secs.max(1e-9)
     );
+    drop(run);
+    let _ = fs::remove_dir_all(&spill_root);
     Ok(())
 }

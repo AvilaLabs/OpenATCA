@@ -1984,3 +1984,28 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-029** On the real ZAU hour (skipped when `OPENATCA_ADSB_CLIP` is unset) the tracker runs with no
   capacity refusals or lost rows, is reproducible, confirms more than 80 % of its tracks and scores under
   60 m RMS at report times against the other half's truth.
+- **OA-TRK-040** Re-filtering keeps one anchor filter state and a ring of the last 12 measurements per
+  track and rebuilds the state at a late measurement by applying the ring's measurements to the anchor; on
+  three aircraft whose reports arrive scrambled by up to 14 positions, with wild positions and exact and
+  different-sensor repeats, every output bit and every counter equals those recorded from the
+  implementation that stored a full filter state in each ring slot.
+- **OA-TRK-041** A tracker filled to `MAX_TRACKS` aircraft with more reports each than the ring holds
+  refuses the next aircraft under its own counter, re-filters a late report of a track in the full table,
+  and reallocates no buffer.
+- **OA-TRK-042** Tracker memory is linear in the track capacity and under 2.2 kB per track (4,096 tracks:
+  8.8 MB; 38,000 tracks: 81.7 MB; it was 8.9 kB and 339 MB with a filter state in every ring slot).
+- **OA-TRK-043** The chunked benchmark's millisecond histogram gives the statistics of the values it was
+  made from: count, median, p95, p99 and maximum exactly, mean and RMS to rounding (bit for bit for whole
+  seconds), and adding two histograms gives the histogram of the union.
+- **OA-TRK-044** Scoring a tracker's output in address ranges (one aircraft per range, a few, or all)
+  gives exactly the metrics, exclusions, pair count, association counts and ESASSP-style split of scoring
+  it in one piece with `run_benchmark`; the ranges tile the address space.
+- **OA-TRK-045** A run whose output is written to column files as it is produced has the digest of the
+  same rows held in memory, the same counters and the same rows and scores when read back in ranges, and
+  removes its files when dropped.
+- **OA-TRK-046** The latency stages are stamped from an injected clock: with a fixed-step clock every
+  stage difference, percentile and the capacity overflow count are exact, a clock that goes backwards is
+  counted, and the tracker's output is the output without a clock.
+- **OA-TRK-047** `oa-track-run --no-score` runs the tracker core and the latency replay without truth or
+  scoring, writes `core.txt` with throughput with and without the one-second output, per-stage latency,
+  and resident memory per phase, and the replay's output digest equals the scoring run's.

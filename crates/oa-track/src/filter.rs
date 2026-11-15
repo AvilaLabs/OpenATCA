@@ -51,7 +51,7 @@ pub struct Filter {
     pub h_mode: u8,
 }
 // Budget: 496 (horizontal) + 96 (vertical) + 8 (time) + 8 (origin) + 4 counters/flags = 612
-// packed; 616 with alignment. Stored once per track and per stored update (RING_DEPTH).
+// packed; 616 with alignment. Stored twice per track: the current state and the ring anchor.
 const _: () = assert!(core::mem::size_of::<Filter>() == 616);
 
 /// What [`filter_apply`] did with a measurement.
@@ -135,29 +135,42 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
 
 /// Applies `m` (at `m.toa_ns >= f.t_ns`) to `f`. Counters go to `stats`.
 pub(crate) fn filter_apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats) -> Applied {
+    apply(f, m, stats, true)
+}
+
+/// Applies again a measurement that [`filter_apply`] applied to the same state (the ring's
+/// replay): the same state results, bit for bit, without computing the position gate and the
+/// innovation statistic, which only decide whether to apply and feed counters.
+pub(crate) fn filter_replay(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats) -> Applied {
+    apply(f, m, stats, false)
+}
+
+fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool) -> Applied {
     let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
     let frame = frame_new(deg(f.lat_e7), deg(f.lon_e7));
     let pred = h_predict(&f.h, dt, f.h_mode);
     let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
     let r = pos_cov(m);
-    let nis = h_pos_nis(&pred, &[zx, zy], &r);
-    let gate = if f.h_mode == 0 {
-        h_gate_d2(&pred, &[zx, zy], &r)
-    } else {
-        nis
-    };
-    if gate.is_nan() || gate > GATE_CHI2 {
-        stats.jump_rejected += 1;
-        f.rej_h = f.rej_h.saturating_add(1);
-        if f.rej_h >= RESYNC_AFTER {
-            *f = filter_init(m, f.h_mode);
-            stats.resyncs += 1;
-            return Applied::Resync;
+    if gated {
+        let nis = h_pos_nis(&pred, &[zx, zy], &r);
+        let gate = if f.h_mode == 0 {
+            h_gate_d2(&pred, &[zx, zy], &r)
+        } else {
+            nis
+        };
+        if gate.is_nan() || gate > GATE_CHI2 {
+            stats.jump_rejected += 1;
+            f.rej_h = f.rej_h.saturating_add(1);
+            if f.rej_h >= RESYNC_AFTER {
+                *f = filter_init(m, f.h_mode);
+                stats.resyncs += 1;
+                return Applied::Resync;
+            }
+            return Applied::Rejected;
         }
-        return Applied::Rejected;
+        stats.nis_sum += nis;
+        stats.nis_n += 1;
     }
-    stats.nis_sum += nis;
-    stats.nis_n += 1;
     let mut h = h_update(&pred, &[zx, zy], &r, vel_of(m, &frame), f.h_mode);
     // Re-centre on the filtered position.
     let (x, _) = h_combine(&h);

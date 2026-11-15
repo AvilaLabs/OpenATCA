@@ -65,7 +65,9 @@ aircraft is turning or leaving its level.
 
 **Time.** Every measurement is applied at its time of applicability, not its arrival time.
 Out-of-order measurements inside a bounded window are applied by re-filtering from a stored
-state; older ones are counted and dropped. Output is the track at each update and at a fixed
+state (a ring of the last 12 measurements of the track and one anchor filter state, the state
+after the oldest of them; the state after any newer entry is the anchor with the ring's
+measurements applied again, bit for bit what the filter had); older ones are counted and dropped. Output is the track at each update and at a fixed
 rate (1 s) for consumers.
 
 **Association.**
@@ -124,6 +126,25 @@ tracks. At one ADS-B update per second per track plus radar, that is roughly 50,
 second. A two-model IMM update should take a few microseconds (an estimate, to be measured), so the budget should fit one core with room to
 spare; gating uses a uniform grid index, and all tables are struct-of-arrays with fixed
 capacity. Latency (measurement time to track output) is measured and published, not estimated.
+
+**Memory.** A track is about 2.1 kB (the columns, the current filter state, one anchor filter
+state and 12 stored measurements), so 38,000 tracks are about 78 MiB; keeping a full filter state
+in every ring slot, as the first version did, was 8.9 kB a track, 323 MiB at that size. The
+price of the anchor is one more filter application per update once the ring is full (measured in
+the M3 report). The scoring harness does not hold the run: the tracker's output goes to column
+files as it is produced and scoring reads it back one address range at a time (a range is closed
+at 131,072 rows; an aircraft is never split), so harness memory is the largest range plus the paired
+samples (about 60 bytes per paired sample, kept because the percentiles of T1 to T4 are exact
+over all of them) and a histogram of the publication interval (whole milliseconds, exact). Peak
+memory still grows with the run through the paired samples, at a few percent of the slope it had.
+
+**Latency instrumentation.** Each measurement carries the stamps of the stages it passes: sensor
+time of applicability, receive time (the frame's), and the shell's monotonic readings at frame
+received, decoded, update called, update returned and output emitted. The clock is the shell's
+and is injected (`oa_track::latency::Clock`; the tests use a fixed-step clock); the tracker never
+sees it. Per-stage p50, p95, p99 and max are published with the per-update processing time. A
+replay is not live: a recording's frame stamp is its first report's time and frames come from a
+file, so replay latency is the code's cost per stage, not what a deployment would see.
 
 ## 8. Code
 

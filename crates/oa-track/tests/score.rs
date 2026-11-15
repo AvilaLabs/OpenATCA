@@ -21,9 +21,9 @@ use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 use oa_geo::aeqd::{frame_velocity, unproject};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    esassp_of, initiation_delays, interval_stats, run_tracker, score, scoring_config,
-    split_reports, transversal_accel, RowSet, CLASS_STRAIGHT, CLASS_TURN, SCORE_DROP_AFTER_NS,
-    TURN_ACCEL_MPS2,
+    esassp_of, initiation_delays, interval_stats, run_tracker, run_tracker_spilled, score,
+    score_ranges, score_source, scoring_config, split_reports, transversal_accel, RowSet,
+    RowSource, CLASS_STRAIGHT, CLASS_TURN, SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
 use oa_track::{DEFAULT_CONFIG, END_FLUSHED};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
@@ -394,4 +394,289 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
     assert!(sc.pairs > 10_000);
     assert!(sc.esassp.position_m[0].rms < 60.0);
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
+}
+
+/// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
+/// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.
+fn one_shot(
+    run: &oa_track::score::TrackRun,
+    built: &adsb_truth::BuiltTruth,
+    rows: RowSet,
+) -> (oa_bench::run::RunOutput, oa_track::score::Esassp) {
+    use oa_bench::assoc::{associate, index_truth};
+    use oa_bench::pair::build_pairs;
+    use oa_bench::thindex::build_th_index;
+    use oa_bench::tracker_input::{legacy_from_track_samples, TrackSamples};
+    use oa_bench::truth::{Env, Truth};
+    let r = run.rows_in(rows, 0, u32::MAX).unwrap();
+    let legacy = legacy_from_track_samples(&TrackSamples {
+        addr: &r.addr,
+        t_ns: &r.t_ns,
+        lat_e7: &r.lat_e7,
+        lon_e7: &r.lon_e7,
+        alt_ft: &r.alt_ft,
+        vel_east_mps: &r.vel_east_mps,
+        vel_north_mps: &r.vel_north_mps,
+        coast: &r.coast,
+    })
+    .unwrap();
+    let q = |a: u32, t: i64| adsb_truth::query(&built.truth, a, t);
+    let truth = Truth {
+        query: &q,
+        legs: &built.legs,
+    };
+    let in_zone = |la: f64, lo: f64| {
+        let b = oa_adsb::ZAU_BOX;
+        la >= f64::from(b.lat_min_e7) * 1e-7
+            && la <= f64::from(b.lat_max_e7) * 1e-7
+            && lo >= f64::from(b.lon_min_e7) * 1e-7
+            && lo <= f64::from(b.lon_max_e7) * 1e-7
+    };
+    let mut env: Env<'_> = oa_bench::truth::empty_env();
+    env.in_zone = &in_zone;
+    let mut rcfg = oa_bench::run::RunConfig::default();
+    rcfg.pair.max_sigma_m = TRUTH.max_sigma95_h_m;
+    let bench = oa_bench::run::run_benchmark(&legacy, &truth, &env, &rcfg);
+    let ix = build_th_index(&legacy.th, legacy.flights.gufi.len());
+    let tix = index_truth(truth.legs);
+    let assoc = associate(&legacy, &ix, &truth, &tix, &rcfg.assoc);
+    let (pairs, _) = build_pairs(&legacy, &ix, &assoc, &truth, &rcfg.pair);
+    (bench, esassp_of(&pairs, &built.truth))
+}
+
+fn synthetic_run() -> (
+    Vec<oa_track::Measurement>,
+    oa_track::TrackerConfig,
+    adsb_truth::BuiltTruth,
+) {
+    let (a, b, _) = split_reports(&synthetic_reports());
+    let (meas, _) = adsb_measurements(&a, &AdsbConfig::default());
+    let cfg = scoring_config(&DEFAULT_CONFIG, &interval_stats(&meas).unwrap());
+    (meas, cfg, adsb_truth::build(&b, &TRUTH).unwrap())
+}
+
+// REQ: OA-TRK-044
+#[test]
+fn scoring_in_address_ranges_gives_the_numbers_of_scoring_in_one_piece() {
+    let (meas, cfg, built) = synthetic_run();
+    let run = run_tracker(&meas, &cfg).unwrap();
+    for rows in [RowSet::Ticks, RowSet::Updates] {
+        let (bench, es) = one_shot(&run, &built, rows);
+        // One row per range, a few aircraft per range, and everything in one: all the same.
+        for chunk_rows in [1usize, 700, 1 << 30] {
+            let counts = run.row_counts(rows).unwrap();
+            let ranges = score_ranges(&counts, chunk_rows);
+            // The ranges tile the address space exactly.
+            assert_eq!(ranges.first().unwrap().0, 0);
+            assert_eq!(ranges.last().unwrap().1, u32::MAX);
+            assert!(ranges.windows(2).all(|w| w[0].1 + 1 == w[1].0));
+            if chunk_rows == 1 {
+                assert_eq!(ranges.len(), counts.len());
+            }
+            let sc = score_source(&run, &built, &TRUTH, rows, chunk_rows).unwrap();
+            println!("{rows:?} chunk_rows {chunk_rows}: {} ranges", ranges.len());
+            assert_eq!(sc.bench.metrics, bench.metrics, "{rows:?} {chunk_rows}");
+            assert_eq!(sc.bench.exclusions, bench.exclusions);
+            assert_eq!(sc.bench.pairs, bench.pairs);
+            assert_eq!(sc.bench.assoc.counts, bench.assoc.counts);
+            assert_eq!(sc.esassp, es);
+        }
+    }
+    // The size of a range of the default is what the documentation says.
+    assert_eq!(SCORE_CHUNK_ROWS, 1 << 17);
+}
+
+// REQ: OA-TRK-045
+#[test]
+fn a_run_spilled_to_files_has_the_digest_scores_and_counters_of_the_run_in_memory() {
+    let (meas, cfg, built) = synthetic_run();
+    let mem = run_tracker(&meas, &cfg).unwrap();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("track_spill_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let spilled = run_tracker_spilled(&meas, &cfg, &dir).unwrap();
+    // The digest is the one of the same rows in memory, bit for bit.
+    assert_eq!(spilled.digest, mem.digest);
+    assert_eq!(spilled.rows as usize, mem.out.t_ns.len());
+    assert_eq!(spilled.stats, mem.stats);
+    assert_eq!(spilled.overflow, mem.overflow);
+    assert_eq!(spilled.offered, mem.offered);
+    for rows in [RowSet::Ticks, RowSet::Updates] {
+        assert_eq!(
+            spilled.row_counts(rows).unwrap(),
+            mem.row_counts(rows).unwrap()
+        );
+        assert_eq!(
+            spilled.rows_in(rows, 0, u32::MAX).unwrap(),
+            mem.rows_in(rows, 0, u32::MAX).unwrap()
+        );
+        // A narrower range reads the same rows as a filter of the whole.
+        let mid = mem
+            .row_counts(rows)
+            .unwrap()
+            .keys()
+            .nth(1)
+            .copied()
+            .unwrap();
+        assert_eq!(
+            spilled.rows_in(rows, mid, mid).unwrap(),
+            mem.rows_in(rows, mid, mid).unwrap()
+        );
+        let (a, b) = (
+            score_source(&spilled, &built, &TRUTH, rows, 700).unwrap(),
+            score_source(&mem, &built, &TRUTH, rows, 700).unwrap(),
+        );
+        assert_eq!(a.bench.metrics, b.bench.metrics);
+        assert_eq!(a.esassp, b.esassp);
+    }
+    // The files are removed with the run.
+    assert!(dir.join("flags").exists());
+    drop(spilled);
+    assert!(!dir.exists());
+}
+
+// REQ: OA-TRK-046
+#[test]
+fn the_latency_stages_are_stamped_from_an_injected_clock_and_never_change_the_output() {
+    use oa_track::latency::{
+        latency_count, latency_new, latency_stats, update_timed, FrameStamps, StepClock,
+        ST_DECODED_TO_UPDATED, ST_END_TO_END, ST_RECEIVE_TO_DECODED, ST_SENSOR_TO_RECEIVE,
+        ST_UPDATED_TO_EMITTED, ST_UPDATE_CALL,
+    };
+    use oa_track::{output_clear, output_new, tracker_new, tracker_update};
+    let (meas, cfg, _) = synthetic_run();
+    let mut plain = tracker_new(&cfg).unwrap();
+    let mut out_plain = output_new(cfg.out_capacity);
+    for m in &meas {
+        tracker_update(&mut plain, m, &mut out_plain);
+    }
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    let mut log = latency_new(100);
+    // Each reading of the clock advances it by 10 ns: update start 0, update done 10, emitted 20
+    // from the call's own start; the frame was received at 1000 and decoded at 1100.
+    let mut clock = StepClock {
+        now: 1_200,
+        step_ns: 10,
+    };
+    let mut all = oa_track::TrackOutput {
+        capacity: usize::MAX,
+        ..oa_track::TrackOutput::default()
+    };
+    for m in &meas {
+        let frame = FrameStamps {
+            recv_ns: m.toa_ns - 500_000_000,
+            received: 1_000,
+            decoded: 1_100,
+        };
+        let mut emit = |o: &mut oa_track::TrackOutput| {
+            all.t_ns.extend_from_slice(&o.t_ns);
+            output_clear(o);
+        };
+        update_timed(&mut t, m, &frame, &mut out, &mut clock, &mut emit, &mut log);
+    }
+    // The clock is read three times per measurement and the tracker saw none of it: the same
+    // rows come out as without it.
+    assert!(out.t_ns.is_empty());
+    assert_eq!(all.t_ns, out_plain.t_ns);
+    assert_eq!(latency_count(&log), 100);
+    assert_eq!(log.overflow as usize, meas.len() - 100);
+    assert_eq!(clock.now, 1_200 + 30 * meas.len() as u64);
+    let st = |i| latency_stats(&log, i);
+    // recv minus sensor time is -0.5 s for every measurement.
+    assert_eq!(st(ST_SENSOR_TO_RECEIVE).p50, -500_000_000);
+    assert_eq!(st(ST_SENSOR_TO_RECEIVE).max, -500_000_000);
+    assert_eq!(st(ST_RECEIVE_TO_DECODED).p50, 100);
+    assert_eq!(st(ST_UPDATE_CALL).p99, 10);
+    assert_eq!(st(ST_UPDATED_TO_EMITTED).max, 10);
+    // Measurement k is updated at 1210 + 30 k and emitted at 1220 + 30 k; its frame was decoded
+    // at 1100 and received at 1000: the wait after decoding is 110 + 30 k, end to end 220 + 30 k.
+    let w = st(ST_DECODED_TO_UPDATED);
+    assert_eq!((w.min, w.max), (110, 110 + 99 * 30));
+    assert_eq!(st(ST_END_TO_END).max, 220 + 99 * 30);
+    assert_eq!(st(ST_END_TO_END).n, 100);
+    // A clock that goes backwards is counted, not hidden.
+    let mut log2 = latency_new(4);
+    let mut back = StepClock { now: 5, step_ns: 0 };
+    let frame = FrameStamps {
+        recv_ns: 0,
+        received: 100,
+        decoded: 50,
+    };
+    let mut t2 = tracker_new(&cfg).unwrap();
+    let mut o2 = output_new(cfg.out_capacity);
+    update_timed(
+        &mut t2,
+        &meas[0],
+        &frame,
+        &mut o2,
+        &mut back,
+        &mut |_| {},
+        &mut log2,
+    );
+    assert_eq!(
+        log2.negative, 3,
+        "decoded < received, updated < decoded, emitted < received"
+    );
+}
+
+// REQ: OA-TRK-047
+#[test]
+fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let clip = dir.join("track_noscore.oaf");
+    // A recording is in (time, address) order, which the replay relies on; the synthetic reports
+    // are built one aircraft after the other.
+    let src = synthetic_reports();
+    let mut order: Vec<(i64, u32, usize)> = (0..reports_len(&src))
+        .map(|i| (src.time_ns[i], src.icao[i], i))
+        .collect();
+    order.sort_unstable();
+    let mut sorted = Reports::default();
+    for (_, _, i) in order {
+        reports_push(&mut sorted, &reports_row(&src, i).unwrap());
+    }
+    write_clip(&clip, &sorted);
+    let out = dir.join("track_noscore_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
+        .args([
+            "--adsb",
+            clip.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--no-score",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(out.join("core.txt")).unwrap();
+    assert_eq!(text, String::from_utf8_lossy(&o.stdout));
+    for needle in [
+        "tracker core,",
+        "one-second output off",
+        "its output digest equals the scoring run's",
+        "receive to decode done",
+        "decode done to update done",
+        "receive to output emitted (end to end)",
+        "tracker update call",
+        "a replay is not live",
+        "0 unmatched",
+        "Resident memory",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?}\n{text}");
+    }
+    // No scoring happened: no report, and the spill is gone.
+    assert!(!out.join("report.txt").exists());
+    assert_eq!(
+        std::fs::read_dir(&out)
+            .unwrap()
+            .filter(|e| e
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("spill"))
+            .count(),
+        0
+    );
 }
