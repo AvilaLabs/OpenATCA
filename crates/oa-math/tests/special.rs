@@ -414,6 +414,82 @@ fn hypot_cbrt_powi_special_values() {
     assert!(powi(f64::NAN, 3).is_nan() && powi(f64::NAN, -3).is_nan());
 }
 
+// REQ: OA-MATH-024
+#[test]
+fn powi_negative_powers_are_not_lost_to_the_opposite_overflow() {
+    let bits = |x: f64| x.to_bits();
+    assert_eq!(bits(powi(2.0, -1022)), 1u64 << 52, "2^-1022");
+    assert_eq!(bits(powi(2.0, -1023)), 1u64 << 51, "2^-1023");
+    assert_eq!(bits(powi(2.0, -1024)), 1u64 << 50, "2^-1024");
+    assert_eq!(bits(powi(2.0, -1025)), 1u64 << 49, "2^-1025");
+    assert_eq!(bits(powi(2.0, -1074)), 1, "2^-1074");
+    // exactly half the smallest subnormal: a tie, which goes to the even neighbour, zero
+    assert_eq!(bits(powi(2.0, -1075)), 0, "2^-1075");
+    assert_eq!(bits(powi(-2.0, -1075)), 1u64 << 63, "(-2)^-1075");
+    assert_eq!(bits(powi(-2.0, -1074)), 1, "(-2)^-1074");
+    assert_eq!(bits(powi(-2.0, -1073)), (1u64 << 63) | 2, "(-2)^-1073");
+    assert_eq!(bits(powi(0.5, 1074)), 1, "0.5^1074");
+    assert_eq!(bits(powi(0.5, 1075)), 0, "0.5^1075");
+    assert_eq!(bits(powi(4.0, -537)), 1, "4^-537 = 2^-1074");
+    // large positive powers up to the overflow limit
+    assert_eq!(bits(powi(2.0, 1023)), 0x7fe0_0000_0000_0000, "2^1023");
+    assert_eq!(powi(2.0, 1024), INF, "2^1024");
+    assert_eq!(bits(powi(0.5, -1023)), 0x7fe0_0000_0000_0000, "0.5^-1023");
+    assert_eq!(powi(0.5, -1024), INF, "0.5^-1024");
+    assert_eq!(
+        bits(powi(4.0, 511)),
+        0x7fd0_0000_0000_0000,
+        "4^511 = 2^1022"
+    );
+    assert_eq!(powi(-2.0, 1024), INF, "(-2)^1024");
+    assert_eq!(powi(-2.0, 1025), NINF, "(-2)^1025");
+    assert_eq!(bits(powi(-2.0, 1023)), 0xffe0_0000_0000_0000, "(-2)^1023");
+    assert_eq!(bits(powi(MIN_SUB, -1)), INF.to_bits(), "min subnormal ^ -1");
+    let p512 = f64::from_bits(1535u64 << 52);
+    assert_eq!(powi(f64::from_bits(511u64 << 52), -1), p512, "2^-512 ^ -1");
+    assert_eq!(powi(f64::from_bits(511u64 << 52), -2), INF, "2^-512 ^ -2");
+    assert_eq!(
+        bits(powi(0.125, -341)),
+        0x7fe0_0000_0000_0000,
+        "8^341 = 2^1023"
+    );
+}
+
+// REQ: OA-MATH-025
+#[test]
+fn powi_of_a_nan_is_one_for_zero_and_the_canonical_nan_otherwise() {
+    for x in nans() {
+        same(powi(x, 0), 1.0, "powi(NaN, 0)");
+        for n in [1, -1, 2, 3, -4, i32::MAX, i32::MIN] {
+            nan(powi(x, n), "powi(NaN, n)");
+        }
+    }
+    nan(
+        powi(f64::from_bits(0x7ff8_0000_0000_1234), 1),
+        "powi(payload NaN, 1)",
+    );
+}
+
+// REQ: OA-MATH-027
+#[test]
+fn hypot_just_below_a_subnormal_tie_rounds_down() {
+    // A^2 - 2 B^2 = -1, so sqrt(2) A B = A sqrt(A^2 + 1) = u + 1/2 - 1/(8 A^2) + ...: just below
+    // the half-way point between u and u + 1 (units of the operand's ulp)
+    let (a, b) = (54_608_393u64, 38_613_965u64);
+    let (u, v) = (a * a, a * b);
+    assert!(
+        u % 2 == 1 && (1u64 << 51..1u64 << 52).contains(&u),
+        "u = {u}"
+    );
+    assert_eq!(2 * (b as i128) * (b as i128) - (a as i128) * (a as i128), 1);
+    let x = f64::from_bits(v);
+    assert_eq!(
+        hypot(x, x).to_bits(),
+        u,
+        "hypot(x, x) for x = from_bits({v})"
+    );
+}
+
 // REQ: OA-MATH-020
 #[test]
 fn every_nan_result_has_the_one_fixed_bit_pattern() {
@@ -449,6 +525,12 @@ fn every_nan_result_has_the_one_fixed_bit_pattern() {
                 assert_eq!(r.to_bits(), CANON_NAN, "unary function at {x:e}");
             }
         }
+        for n in [1, -1, 2, -3, 1000, i32::MAX, i32::MIN] {
+            let r = powi(x, n);
+            if r.is_nan() {
+                assert_eq!(r.to_bits(), CANON_NAN, "powi at ({x:e}, {n})");
+            }
+        }
         let (s, c) = sin_cos(x);
         for r in [s, c] {
             if r.is_nan() {
@@ -461,4 +543,7 @@ fn every_nan_result_has_the_one_fixed_bit_pattern() {
     nan(pow(inputs[1], 2.0), "pow(NaN, 2)");
     nan(atan2(inputs[2], 1.0), "atan2(NaN, 1)");
     nan(hypot(inputs[3], 1.0), "hypot(NaN, 1)");
+    nan(powi(inputs[0], 1), "powi(NaN, 1)");
+    nan(powi(inputs[2], -3), "powi(NaN, -3)");
+    same(powi(inputs[3], 0), 1.0, "powi(NaN, 0)");
 }

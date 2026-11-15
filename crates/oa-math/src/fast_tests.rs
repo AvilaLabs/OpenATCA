@@ -545,3 +545,23 @@ fn hypot_fast_rate() {
 fn cbrt_fast_rate() {
     rate(&CBRT, 0.97, 0.99);
 }
+
+// REQ: OA-MATH-026
+#[test]
+fn scale_round_decides_a_subnormal_tie_with_the_low_term() {
+    use crate::dd::dd;
+    use crate::util::scale_round;
+    const TWO_M55: f64 = 1.0 / 36_028_797_018_963_968.0; // 2^-55
+                                                         // 1.5 - 2^-55 in units of 2^-1074: just below the tie between 1 and 2 units
+    let below = dd(1.5, -(TWO_M55));
+    assert_eq!(scale_round(below, -1074).to_bits(), 1);
+    // 1.5 + 2^-55 is just above it
+    let above = dd(1.5, TWO_M55);
+    assert_eq!(scale_round(above, -1074).to_bits(), 2);
+    // exactly 1.5: ties to even (2); exactly 2.5: ties to even (2)
+    assert_eq!(scale_round(dd(1.5, 0.0), -1074).to_bits(), 2);
+    assert_eq!(scale_round(dd(2.5, 0.0), -1074).to_bits(), 2);
+    // negative values mirror
+    let neg_below = dd(-1.5, TWO_M55);
+    assert_eq!(scale_round(neg_below, -1074).to_bits(), (1u64 << 63) | 1);
+}
