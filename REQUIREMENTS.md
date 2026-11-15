@@ -185,8 +185,37 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ASP-064** A special-use boundary keeps its source time code and level: `time_code` is
   continuous, part-time (blank in the source) or unknown, and `level` is high, low, both or
   unknown; a boundary from NASR or a controlled-airspace volume, and any other source letter,
-  is unknown, never a default. The columns are in the snapshot (format version 2); a version 1
+  is unknown, never a default. The columns are in the snapshot (format version 2 and later); a version 1
   snapshot is refused with a typed version error.
+
+- **OA-ASP-065** A CIFP or NASR boundary touches the selection area exactly when a point of its
+  outline is in the area (inside a polygon or within the buffer of an edge), an outline edge crosses
+  an edge of the area, a vertex of the area is within the buffer of an outline edge, or a vertex of
+  the area is inside the outline. The outline is the stored boundary as a dense polyline: geodesic
+  and rhumb edges as what they are, within 5 km of a point, arcs within 0.2 m of the arc. Two
+  boundaries that overlap with no vertex of either inside the other are selected.
+- **OA-ASP-066** A MORA cell is selected exactly when it overlaps the area: a polygon vertex lies
+  in the cell, or the cell's outline (meridians and parallels) has a point in the area, crosses an
+  edge of the area, or comes within the buffer of a vertex of the area; a strip thinner than the
+  spacing of any sample grid is not missed.
+- **OA-ASP-067** A NASR runway end with a displaced threshold (length above zero) and no
+  displaced-threshold coordinate makes no THRESHOLD point (the physical end is not the threshold);
+  the report lists its airport and runway as "threshold unknown: displaced, no coordinate". A CIFP
+  threshold for the same runway takes precedence and the end is not listed; a displacement of zero
+  uses the physical end.
+- **OA-ASP-068** Selection uses an arc as stored: the coded radius around the stored centre. The
+  report lists, per selected volume, every arc whose coded radius differs from the distance between
+  its centre and either end point by more than 93.6 m (0.05 NM, half the 0.1 NM coding unit, plus
+  1 m for whole-metre storage and 1e-7 degree positions).
+- **OA-ASP-069** A CIFP volume whose records end without the boundary-end marker and whose first
+  and last points differ is stored marked incomplete (`Boundaries::incomplete`; the source does
+  not say how it closes, so the outline is not precise) and is still selected; a volume that ends
+  with the marker, or returns to its first point, or is a single circle, and every NASR boundary,
+  is complete. `boundary_is_complete` returns the mark, the diff lists it, and the report lists
+  every selected incomplete volume.
+- **OA-ASP-070** The snapshot format version is 3 (per-volume completeness added); a snapshot of an
+  earlier version is refused with an error that names the version and says to rebuild, never read
+  with a default completeness.
 
 
 ### Traceability (oa-trace)

@@ -27,8 +27,9 @@
 //! and `B`, the TCH indicator, the header CRC and southern-hemisphere MORA rows.
 
 use crate::geom::{
-    area_contains, area_inside, build_area, cell_overlaps_area, deg_to_e7, distance_m, latlon_e7,
-    ring_samples, samples_touch_area, segment_samples, Area, SegIn,
+    arc_radius_gap_m, area_contains, area_inside, build_area, cell_overlaps_area, deg_to_e7,
+    distance_m, latlon_e7, ring_samples, samples_touch_area, segment_samples, Area, SegIn,
+    ARC_RADIUS_TOLERANCE_M,
 };
 use crate::model::*;
 use crate::source::Sources;
@@ -185,6 +186,16 @@ pub struct BuildInfo {
     pub unverified_alt_desc: usize,
     /// Boundaries that could not be used for the area test, with the reason.
     pub boundary_notes: Vec<String>,
+    /// Selected CIFP volumes with an arc whose coded radius differs from the distance between
+    /// its centre and an end point by more than [`ARC_RADIUS_TOLERANCE_M`], one line per volume.
+    pub arc_radius_mismatches: Vec<String>,
+    /// NASR runway ends with a displaced threshold but no coordinate for it and no CIFP
+    /// threshold: no threshold point is made (OA-ASP-067); one entry per runway end.
+    pub threshold_unknown: Vec<String>,
+    /// Runway ends where NASR gives a displaced threshold without a coordinate and the CIFP
+    /// threshold, which is taken, lies at the NASR physical end (within [`DISAGREE_M`]): the
+    /// displacement is probably missing from the CIFP position as well.
+    pub threshold_doubtful: Vec<String>,
     /// Airway legs whose end point is not the next row of the same airway (OA-ASP-010): the leg
     /// is kept with no end point, and the reason is listed here.
     pub airway_breaks: Vec<String>,
@@ -1137,6 +1148,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
 
     // Runway thresholds.
     let (mut no_airport, mut no_position) = (0usize, 0usize);
+    let mut unknown_thr: BTreeMap<(usize, String), UnknownThreshold> = BTreeMap::new();
     for r in &src.nasr.runway_ends {
         let Some(&ai) = maps.apt_faa.get(&r.arpt_id) else {
             no_airport += 1;
@@ -1149,6 +1161,20 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         let displaced = r.displaced_thr_len.is_some_and(|l| l > 0.0);
         let (pos, elev, posrec) = match (&r.displaced_thr_position, displaced) {
             (Some(d), true) => (nasr_pos(d), r.displaced_thr_elev.or(r.rwy_end_elev), d),
+            // A displaced threshold with no coordinate is somewhere along the runway, not at
+            // its physical end: no point is made (OA-ASP-067). A CIFP threshold for the same
+            // runway still supplies one below.
+            (None, true) => {
+                unknown_thr.insert(
+                    (ai, r.rwy_end_id.clone()),
+                    (
+                        format!("{} {}", r.arpt_id, r.rwy_end_id),
+                        nasr_pos(p),
+                        r.displaced_thr_len.unwrap_or(0.0),
+                    ),
+                );
+                continue;
+            }
             _ => (nasr_pos(p), r.rwy_end_elev, p),
         };
         let Some(airport) = reg.cands.get(ai) else {
@@ -1172,6 +1198,14 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         };
         let desig = c424::runway_designator(r).to_string();
         let pos = (r.threshold.lat, r.threshold.lon);
+        if let Some((label, physical, feet)) = unknown_thr.remove(&(ai, desig.clone())) {
+            // The CIFP threshold is taken, but at the NASR physical end it is the end NASR says
+            // is displaced: the displacement is missing from CIFP too, so say so.
+            if pos_distance(ell, pos, physical) <= DISAGREE_M {
+                info.threshold_doubtful
+                    .push(format!("{label} (displaced {feet} ft)"));
+            }
+        }
         if let Some(&i) = maps.thr.get(&(ai, desig.clone())) {
             if let Some(c) = reg.cands.get_mut(i) {
                 if c.cifp {
@@ -1208,6 +1242,12 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
             no_position,
         ));
     }
+    info.threshold_unknown = unknown_thr
+        .into_values()
+        .map(|(label, _, _)| label)
+        .collect();
+    info.threshold_doubtful.sort();
+    info.threshold_unknown.sort();
     // Localizers (CIFP only).
     for l in &src.cifp.localizers {
         let Some(&ai) = maps.apt_cifp.get(&l.airport_ident) else {
@@ -1470,9 +1510,14 @@ struct BoundaryOut {
     ceiling_agl: bool,
     time_code: u8,
     level: u8,
+    /// A CIFP volume whose boundary has no end marker (OA-ASP-069).
+    incomplete: bool,
     verts: Vec<PosE7>,
     segs: Vec<SegOut>,
 }
+
+/// A displaced threshold with no coordinate: label, the physical end, displacement (ft).
+type UnknownThreshold = (String, (f64, f64), f64);
 
 fn path_term_code(p: c424::PathTerminator) -> u8 {
     use c424::PathTerminator as P;
@@ -2265,6 +2310,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             ceiling_agl: false,
             time_code: time_code::UNKNOWN,
             level: level::UNKNOWN,
+            incomplete: false,
             verts,
             segs: Vec::new(),
         });
@@ -2344,15 +2390,28 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                 ));
                 continue;
             }
-            if !c424::is_closed(v) {
-                open_volumes += 1;
-            }
+            let incomplete = !c424::is_closed(v);
             let samples =
                 segment_samples(&ell, &ins).map_err(geo("sampling an airspace volume"))?;
             if !samples_touch_area(&area, &samples)
                 .map_err(geo("testing an airspace volume against the area"))?
             {
                 continue;
+            }
+            if incomplete {
+                open_volumes += 1;
+                info.boundary_notes.push(format!(
+                    "CIFP {} {}: no end marker; stored marked incomplete (selection closed it with an edge from the last point to the first)",
+                    v.designation, v.multiple_code
+                ));
+            }
+            let gap = arc_radius_gap_m(&ell, &ins).map_err(geo("measuring an airspace arc"))?;
+            if gap > ARC_RADIUS_TOLERANCE_M {
+                info.arc_radius_mismatches.push(format!(
+                    "CIFP {} {}: an arc's coded radius differs from its centre-to-point distance \
+                     by {gap:.0} m (tolerance {ARC_RADIUS_TOLERANCE_M:.1} m); the coded radius is stored and used",
+                    v.designation, v.multiple_code
+                ));
             }
             let (floor, floor_agl) = limit_ft(v.lower, &mut unverified_limits);
             let (ceiling, ceiling_agl) = limit_ft(v.upper, &mut unverified_limits);
@@ -2389,6 +2448,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                 } else {
                     time_code::UNKNOWN
                 },
+                incomplete,
                 level: match (is_sua, v.level) {
                     (true, Some('H')) => level::HIGH,
                     (true, Some('L')) => level::LOW,
@@ -2401,7 +2461,9 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         }
     }
     if open_volumes > 0 {
-        info.boundary_notes.push(format!("{open_volumes} selected CIFP volumes are not closed (no end marker); closed implicitly"));
+        info.boundary_notes.push(format!(
+            "{open_volumes} selected CIFP volumes are incomplete (no end marker); each is stored marked incomplete"
+        ));
     }
     if unverified_limits > 0 {
         info.boundary_notes.push(format!("{unverified_limits} airspace limits have an unrecognised altitude unit; stored as unknown"));
@@ -2627,6 +2689,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         let b = &mut model.boundaries;
         b.floor_agl = bit_zeros(boundaries.len());
         b.ceiling_agl = bit_zeros(boundaries.len());
+        b.incomplete = bit_zeros(boundaries.len());
         for (row, bo) in boundaries.iter().enumerate() {
             b.source.push(bo.source);
             b.stratum.push(bo.stratum);
@@ -2663,6 +2726,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             }
             bit_set(&mut b.floor_agl, row, bo.floor_agl);
             bit_set(&mut b.ceiling_agl, row, bo.ceiling_agl);
+            bit_set(&mut b.incomplete, row, bo.incomplete);
             b.time_code.push(bo.time_code);
             b.level.push(bo.level);
         }

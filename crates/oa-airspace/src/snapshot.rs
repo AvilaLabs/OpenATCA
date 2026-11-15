@@ -26,7 +26,7 @@ use std::fmt;
 /// File magic.
 pub const MAGIC: &[u8; 11] = b"OATCA-ADAPT";
 /// Format version written and accepted.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 /// Limit: largest snapshot the reader accepts, 512 MiB. A ZAU model is a few MiB; the whole
 /// national data set would stay under about 100 MiB.
 pub const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -85,7 +85,10 @@ impl fmt::Display for SnapshotError {
                 write!(f, "snapshot: {len} bytes exceeds limit MAX_SNAPSHOT_BYTES")
             }
             SnapshotError::BadMagic => write!(f, "snapshot: not an OATCA-ADAPT file"),
-            SnapshotError::BadVersion(v) => write!(f, "snapshot: unsupported format version {v}"),
+            SnapshotError::BadVersion(v) => write!(
+                f,
+                "snapshot: format version {v} is not supported (this reader reads version {FORMAT_VERSION} only); rebuild the snapshot with oa-adapt build"
+            ),
             SnapshotError::Truncated(w) => write!(f, "snapshot: truncated in {w}"),
             SnapshotError::BadTag { expected } => write!(f, "snapshot: expected table {expected}"),
             SnapshotError::CountExceedsFile { table, rows } => {
@@ -248,6 +251,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_bits(&mut out, &b.ceiling_agl);
     out.extend_from_slice(&b.time_code);
     out.extend_from_slice(&b.level);
+    put_bits(&mut out, &b.incomplete);
 
     let g = &m.segments;
     put_header(&mut out, TAG_SEGS, count("segments", g.via.len())?);
@@ -596,7 +600,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         })
         .collect();
 
-    let n = r.table(TAG_BNDS, "BNDS", 4 + 4 * 4 + 16 + 2, 2)?;
+    let n = r.table(TAG_BNDS, "BNDS", 4 + 4 * 4 + 16 + 2, 3)?;
     let boundaries = Boundaries {
         source: r.bytes(n, "BNDS")?,
         stratum: r.bytes(n, "BNDS")?,
@@ -612,6 +616,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         ceiling_agl: r.bits(n, "BNDS")?,
         time_code: r.bytes(n, "BNDS")?,
         level: r.bytes(n, "BNDS")?,
+        incomplete: r.bits(n, "BNDS")?,
     };
 
     let n = r.table(TAG_SEGS, "SEGS", 1 + 4 * 5 + 2, 0)?;

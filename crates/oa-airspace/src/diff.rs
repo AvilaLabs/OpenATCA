@@ -230,6 +230,15 @@ fn boundary_objects(m: &Model) -> Result<Objects, ModelError> {
                 format!("{}{}", alt(g(&b.ceiling_ft, row)?), agl(&b.ceiling_agl)),
             ),
             (
+                "outline".into(),
+                if bit_get(&b.incomplete, row) {
+                    "incomplete (no end marker)"
+                } else {
+                    "complete"
+                }
+                .into(),
+            ),
+            (
                 "time_code".into(),
                 match g(&b.time_code, row)? {
                     time_code::CONTINUOUS => "continuous",

@@ -672,6 +672,21 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     list(&mut o, "boundary notes", &info.boundary_notes);
     list(
         &mut o,
+        "arcs whose coded radius disagrees with their end points (selected volumes)",
+        &info.arc_radius_mismatches,
+    );
+    list(
+        &mut o,
+        "threshold unknown: displaced, no coordinate (no point made; whole cycle, NASR runway ends)",
+        &info.threshold_unknown,
+    );
+    list(
+        &mut o,
+        "threshold doubtful: CIFP threshold taken, at the NASR physical end although NASR gives a displaced threshold without a coordinate (whole cycle)",
+        &info.threshold_doubtful,
+    );
+    list(
+        &mut o,
         "airway legs without a joined end point",
         &info.airway_breaks,
     );

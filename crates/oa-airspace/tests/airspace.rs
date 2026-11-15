@@ -1588,3 +1588,202 @@ fn special_use_time_code_and_level_are_carried_into_the_model() {
     }
     validate_model(&m).unwrap();
 }
+
+/// The CIFP fixture without the lines that start with any of `prefixes` (the header's record
+/// count follows).
+fn cifp_without(prefixes: &[&str]) -> Vec<u8> {
+    cifp_edited(|text| {
+        let mut out = String::new();
+        for line in text.lines() {
+            if !prefixes.iter().any(|p| line.starts_with(p)) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    })
+}
+
+/// MDW runway 04L: a 758 ft displaced threshold, published as a coordinate in NASR and as the
+/// CIFP runway threshold; with `no_coordinate` the NASR displaced coordinate is blank.
+fn mdw_04l(no_coordinate: bool, displacement: &str, cifp: &[u8]) -> (Model, String) {
+    let mut files = nasr_files();
+    let from = "41,46,58.3561,\"N\",41.78287669,87,45,33.4156,\"W\",-87.75928211,617.1,758";
+    let blank = ",,,,,,,,,,617.1,758";
+    let to = if no_coordinate { blank } else { from };
+    let to = format!("{}{displacement}", to.trim_end_matches("758"));
+    edit_nasr(&mut files, "APT_RWY_END.csv", from, &to);
+    let src = sources_from(&files, cifp);
+    let out = build_model(&src, &params("ZAU", 92_600)).unwrap();
+    let report = report_for(&out, &src);
+    (out.model, report)
+}
+
+fn mdw_04l_point(m: &Model) -> Option<(i32, i32)> {
+    let ix = find_point(m, key("04L", "K5", "KMDW", point_kind::THRESHOLD))?;
+    Some((m.points.lat[ix.row()], m.points.lon[ix.row()]))
+}
+
+// REQ: OA-ASP-067
+#[test]
+fn a_displaced_threshold_without_a_coordinate_is_unknown_not_the_physical_end() {
+    // No coordinate and no CIFP runway: no threshold point, and the report names the runway.
+    let no_cifp = cifp_without(&["SUSAP KMDWK5GRW04L "]);
+    let (m, report) = mdw_04l(true, "758", &no_cifp);
+    assert_eq!(mdw_04l_point(&m), None, "no point at the physical end");
+    assert!(
+        report.contains("threshold unknown: displaced, no coordinate")
+            && report.contains("MDW 04L"),
+        "{report}"
+    );
+    validate_model(&m).unwrap();
+    // The complete record still gives the displaced coordinate (NASR 41.78287669, -87.75928211).
+    let (m, report) = mdw_04l(false, "758", &no_cifp);
+    let (lat, lon) = mdw_04l_point(&m).expect("point");
+    assert_eq!((lat, lon), (417_828_767, -877_592_821));
+    assert!(!report.contains("MDW 04L"), "{report}");
+    // A displacement of zero is the physical end (NASR 41.7813685, -87.76119458), coordinate or not.
+    for no_coordinate in [true, false] {
+        let (m, report) = mdw_04l(no_coordinate, "0", &no_cifp);
+        assert_eq!(mdw_04l_point(&m), Some((417_813_685, -877_611_946)));
+        assert!(!report.contains("MDW 04L"), "{report}");
+    }
+}
+
+// REQ: OA-ASP-067
+#[test]
+fn a_cifp_threshold_takes_precedence_over_a_missing_displaced_coordinate() {
+    // The CIFP runway (N41 46 58.36 W087 45 33.42) supplies the threshold; nothing is unknown.
+    let (m, report) = mdw_04l(true, "758", &cifp_file());
+    let (lat, lon) = mdw_04l_point(&m).expect("CIFP threshold");
+    assert!(
+        (lat - 417_828_778).abs() < 40 && (lon + 877_592_833).abs() < 40,
+        "{lat} {lon}"
+    );
+    let ix = find_point(&m, key("04L", "K5", "KMDW", point_kind::THRESHOLD)).unwrap();
+    assert!(bit_get(&m.points.src_cifp, ix.row()) && !bit_get(&m.points.src_nasr, ix.row()));
+    assert!(!report.contains("MDW 04L"), "{report}");
+}
+
+fn kord_volume(m: &Model, multiple: u8) -> BoundaryIx {
+    find_boundary(
+        m,
+        boundary_source::CIFP_UC,
+        stratum::CLASS_B,
+        "KORD",
+        multiple,
+    )
+    .expect("volume")
+}
+
+// REQ: OA-ASP-069
+#[test]
+fn a_cifp_volume_without_its_end_marker_is_stored_marked_incomplete() {
+    // Drop the last two records of KORD volume B (the end marker is on the last one).
+    let cut = cifp_without(&["SUSAUCK5TKORD PAB  B04200", "SUSAUCK5TKORD PAB  B04300"]);
+    let src = sources_from(&nasr_files(), &cut);
+    let out = build_model(&src, &params("ZAU", 92_600)).unwrap();
+    let m = &out.model;
+    validate_model(m).unwrap();
+    let (b, a) = (kord_volume(m, b'B'), kord_volume(m, b'A'));
+    assert_eq!(boundary_is_complete(m, b), Some(false), "B is incomplete");
+    assert_eq!(boundary_is_complete(m, a), Some(true), "A is complete");
+    // Still selected (kept rather than dropped), and every other boundary is complete.
+    let n_incomplete = (0..m.boundaries.source.len())
+        .filter(|&i| bit_get(&m.boundaries.incomplete, i))
+        .count();
+    assert_eq!(n_incomplete, 1);
+    let nasr = find_boundary(m, boundary_source::NASR_ARB, stratum::ARTCC_HIGH, "ZAU", 0).unwrap();
+    assert_eq!(boundary_is_complete(m, nasr), Some(true));
+    assert_eq!(boundary_is_complete(m, BoundaryIx::new(9_999)), None);
+    let report = report_for(&out, &src);
+    assert!(
+        report.contains("CIFP KORD B: no end marker; stored marked incomplete"),
+        "{report}"
+    );
+    // The mark survives the snapshot and shows in the diff.
+    let back = decode(&encode(m).unwrap()).unwrap();
+    assert_eq!(&back, m);
+    assert_eq!(boundary_is_complete(&back, b), Some(false));
+    let whole = fixture_build().model;
+    assert_eq!(
+        boundary_is_complete(&whole, kord_volume(&whole, b'B')),
+        Some(true)
+    );
+    let d = diff_models(&whole, m).unwrap();
+    assert!(
+        oa_airspace::diff::render_diff(&d, "whole", "cut").contains("outline"),
+        "the diff names the changed completeness"
+    );
+}
+
+// REQ: OA-ASP-069
+#[test]
+fn a_volume_closed_by_repeating_its_first_point_is_complete() {
+    // The last record of volume B names the first record's point and carries no end marker:
+    // an explicit closure, not an incomplete volume.
+    let closed = cifp_edited(|t| {
+        let from = "SUSAUCK5TKORD PAB  B04300     LEN41591500W087473500";
+        assert_eq!(t.matches(from).count(), 1);
+        t.replacen(
+            from,
+            "SUSAUCK5TKORD PAB  B04300     L N42035700W087515500",
+            1,
+        )
+    });
+    let src = sources_from(&nasr_files(), &closed);
+    let m = build_model(&src, &params("ZAU", 92_600)).unwrap().model;
+    assert_eq!(boundary_is_complete(&m, kord_volume(&m, b'B')), Some(true));
+}
+
+// REQ: OA-ASP-068
+#[test]
+fn an_arc_whose_coded_radius_disagrees_with_its_points_is_reported_per_volume() {
+    let clean = fixture_sources();
+    let report = report_for(
+        &build_model(&clean, &params("ZAU", 92_600)).unwrap(),
+        &clean,
+    );
+    assert!(!report.contains("coded radius differs"), "{report}");
+    // KORD A's first arc is coded 5.0 NM from its centre; make it 15.0 NM.
+    let mut text = String::from_utf8(cifp_file()).unwrap();
+    let from = "N41591600W08754170000503494";
+    assert_eq!(text.matches(from).count(), 1);
+    text = text.replacen(from, "N41591600W08754170001503494", 1);
+    let src = sources_from(&nasr_files(), text.as_bytes());
+    let out = build_model(&src, &params("ZAU", 92_600)).unwrap();
+    let report = report_for(&out, &src);
+    assert!(
+        report.contains("CIFP KORD A: an arc's coded radius differs"),
+        "{report}"
+    );
+    assert_eq!(
+        out.info.arc_radius_mismatches.len(),
+        1,
+        "one volume, one line"
+    );
+    // The coded radius is what the model keeps: 15 NM.
+    let m = &out.model;
+    let sp = m.boundaries.segs[kord_volume(m, b'A').row()];
+    let first = sp.start.row();
+    assert_eq!(m.segments.radius_m[first], 27_780);
+}
+
+// REQ: OA-ASP-067
+#[test]
+fn a_cifp_threshold_at_the_physical_end_of_a_displaced_runway_is_listed_as_doubtful() {
+    // CIFP's MDW 04L threshold is moved to the NASR physical end (41 46 52.93 N, 87 45 40.30 W):
+    // it is taken, but the report says the displacement is missing from it as well.
+    let moved = cifp_edited(|t| t.replacen("N41465836W087453342", "N41465293W087454030", 1));
+    let mut files = nasr_files();
+    let from = "41,46,58.3561,\"N\",41.78287669,87,45,33.4156,\"W\",-87.75928211,617.1,758";
+    edit_nasr(&mut files, "APT_RWY_END.csv", from, ",,,,,,,,,,617.1,758");
+    let src = sources_from(&files, &moved);
+    let out = build_model(&src, &params("ZAU", 92_600)).unwrap();
+    assert!(mdw_04l_point(&out.model).is_some());
+    let report = report_for(&out, &src);
+    assert!(report.contains("MDW 04L (displaced 758 ft)"), "{report}");
+    // At its real (displaced) position it is not doubtful.
+    let (_, report) = mdw_04l(true, "758", &cifp_file());
+    assert!(!report.contains("MDW 04L (displaced"), "{report}");
+}

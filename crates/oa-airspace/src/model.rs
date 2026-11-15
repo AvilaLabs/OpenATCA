@@ -566,6 +566,11 @@ pub struct Boundaries {
     pub time_code: Vec<u8>,
     /// Special-use level ([`level`]); unknown for every other boundary.
     pub level: Vec<u8>,
+    /// The boundary is a CIFP volume whose records end without the end marker (ARINC 424
+    /// boundary via, second character `E`) and whose first and last points differ: the source
+    /// does not say how the outline closes, so the shape is not precise (OA-ASP-069). Clear for
+    /// a complete volume and for every NASR boundary. Use [`boundary_is_complete`].
+    pub incomplete: BitSet,
 }
 
 /// Boundary segments of CIFP-sourced boundaries: one row per ARINC 424 boundary record. The
@@ -1108,6 +1113,7 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     code_ok("boundaries", "level", &b.level, level::MAX, true)?;
     bits_ok("boundaries", "floor_agl", &b.floor_agl, nb)?;
     bits_ok("boundaries", "ceiling_agl", &b.ceiling_agl, nb)?;
+    bits_ok("boundaries", "incomplete", &b.incomplete, nb)?;
     code_ok(
         "boundaries",
         "source",
@@ -1515,6 +1521,14 @@ pub fn find_boundary(
         })
         .and_then(|i| u32::try_from(i).ok())
         .map(BoundaryIx)
+}
+
+/// Whether a boundary's outline is complete (OA-ASP-069): `false` for a CIFP volume whose
+/// records end without the end marker, so its outline is not precise and a consumer must not
+/// treat it as such; `None` when `ix` is not a boundary of the model.
+pub fn boundary_is_complete(m: &Model, ix: BoundaryIx) -> Option<bool> {
+    let row = ix.row();
+    (row < m.boundaries.source.len()).then(|| !bit_get(&m.boundaries.incomplete, row))
 }
 
 /// True for the NASR airway pseudo-point naming a border crossing, such as

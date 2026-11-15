@@ -317,3 +317,187 @@ fn an_outline_that_cannot_be_formed_is_an_error_not_a_miss() {
     let two = [ll(43.005, -88.0), ll(43.006, -88.0)];
     assert_eq!(samples_touch_area(&area, &two), Ok(false));
 }
+
+fn rect(lat0: f64, lat1: f64, lon0: f64, lon1: f64) -> Vec<LatLon> {
+    vec![
+        ll(lat0, lon0),
+        ll(lat0, lon1),
+        ll(lat1, lon1),
+        ll(lat1, lon0),
+    ]
+}
+
+/// Rotates every vertex about the origin by `deg` in the (lon, lat) plane and then shifts it;
+/// near the equator one degree is about the same length either way.
+fn moved(ring: &[LatLon], deg: f64, dlat: f64, dlon: f64) -> Vec<LatLon> {
+    let (s, c) = deg.to_radians().sin_cos();
+    ring.iter()
+        .map(|p| {
+            ll(
+                p.lon() * s + p.lat() * c + dlat,
+                p.lon() * c - p.lat() * s + dlon,
+            )
+        })
+        .collect()
+}
+
+/// True when the closed outline `ring`, with its edges sampled as the build samples them,
+/// touches the zero-buffer area `area_ring`.
+fn volume_selected(area_ring: &[LatLon], volume: &[LatLon], buffer_m: f64) -> bool {
+    let area = build_area(vec![area_ring.to_vec()], buffer_m).expect("area");
+    let samples = dense_ring_samples(&wgs84(), volume).expect("samples");
+    samples_touch_area(&area, &samples).expect("touch")
+}
+
+// REQ: OA-ASP-065
+#[test]
+fn a_volume_that_crosses_the_area_without_a_vertex_in_either_is_selected() {
+    // Area: a tall thin rectangle; volume: a wide flat one across it. They overlap by about
+    // one square kilometre, neither holds a vertex of the other, and the samples of either
+    // outline are up to 20 km apart.
+    let area = rect(-0.18, 0.18, 0.0405, 0.0495);
+    let vol = rect(0.009, 0.018, -0.18, 0.18);
+    assert!(volume_selected(&area, &vol, 0.0));
+    assert!(volume_selected(&vol, &area, 0.0), "symmetric");
+    // Moved and turned together, the pair still overlaps.
+    for (deg, dlat, dlon) in [
+        (0.0, 0.0, 0.0),
+        (0.0, 3.0, -7.0),
+        (0.0, -12.0, 40.0),
+        (30.0, 0.0, 0.0),
+        (90.0, 5.0, 5.0),
+        (123.0, -4.0, 60.0),
+        (-45.0, 20.0, -100.0),
+    ] {
+        let a = moved(&area, deg, dlat, dlon);
+        let v = moved(&vol, deg, dlat, dlon);
+        assert!(volume_selected(&a, &v, 0.0), "{deg} {dlat} {dlon}");
+    }
+    // The same volume lifted 10 m clear of the area's northern edge is not selected at zero
+    // buffer, is at a buffer larger than the gap, and is not at one smaller.
+    let lifted = rect(0.18 + 0.0000905, 0.18 + 0.009, -0.18, 0.18);
+    assert!(!volume_selected(&area, &lifted, 0.0));
+    assert!(!volume_selected(&area, &lifted, 5.0));
+    assert!(volume_selected(&area, &lifted, 20.0));
+    // A normal buffer: a volume 30 km north of the area is in at 50 km and out at 10 km.
+    let far = rect(0.18 + 0.27, 0.18 + 0.30, -0.18, 0.18);
+    assert!(volume_selected(&area, &far, 50_000.0));
+    assert!(!volume_selected(&area, &far, 10_000.0));
+}
+
+// REQ: OA-ASP-066
+#[test]
+fn a_cell_crossed_by_a_thin_area_is_selected_wherever_the_strip_lies() {
+    // The strip is 0.01 degrees (about 1.1 km) tall and lies between the rows of the old
+    // 81-point grid of the cell (every 0.125 degrees).
+    let strip = rect(0.060, 0.070, -0.10, 1.10);
+    let area = build_area(vec![strip], 0.0).expect("area");
+    assert!(cell_overlaps_area(&area, 0, 0).expect("cell"));
+    for k in 0..8 {
+        let la = f64::from(k) * 0.125 + 0.05;
+        let area = build_area(vec![rect(la, la + 0.01, -0.10, 1.10)], 0.0).expect("area");
+        assert!(cell_overlaps_area(&area, 0, 0).expect("cell"), "row {k}");
+        // The same strip in longitude, between the columns of the grid.
+        let area = build_area(vec![rect(-0.10, 1.10, la, la + 0.01)], 0.0).expect("area");
+        assert!(cell_overlaps_area(&area, 0, 0).expect("cell"), "column {k}");
+    }
+    // A strip that does not reach the cell is not selected, and a normal buffer still adds.
+    let off = build_area(vec![rect(-0.30, -0.20, -0.10, 1.10)], 0.0).expect("area");
+    assert!(!cell_overlaps_area(&off, 0, 0).expect("cell"));
+    let near = build_area(vec![rect(-0.30, -0.20, -0.10, 1.10)], 30_000.0).expect("area");
+    assert!(cell_overlaps_area(&near, 0, 0).expect("cell"));
+    let wide = build_area(vec![rect(-0.30, -0.20, -0.10, 1.10)], 10_000.0).expect("area");
+    assert!(!cell_overlaps_area(&wide, 0, 0).expect("cell"));
+}
+
+fn arc_pair(ell: &oa_geo::Ellipsoid, centre: LatLon, ends_m: f64, coded_m: f64) -> [SegIn; 2] {
+    use oa_airspace::model::via;
+    let at = |brg: f64| ell.direct(centre, brg, ends_m).expect("direct").position;
+    [
+        SegIn {
+            via: via::ARC_CW,
+            pos: Some(at(0.0)),
+            centre: Some(centre),
+            radius_m: coded_m,
+        },
+        SegIn {
+            via: via::GEODESIC,
+            pos: Some(at(90.0)),
+            centre: None,
+            radius_m: 0.0,
+        },
+    ]
+}
+
+/// A 200 m square `r_m` from `centre` on bearing 45.
+fn square_at(ell: &oa_geo::Ellipsoid, centre: LatLon, r_m: f64) -> Vec<LatLon> {
+    let c = ell.direct(centre, 45.0, r_m).expect("direct").position;
+    let (dlat, dlon) = (
+        100.0 / 111_000.0,
+        100.0 / (111_320.0 * c.lat().to_radians().cos()),
+    );
+    rect(
+        c.lat() - dlat,
+        c.lat() + dlat,
+        c.lon() - dlon,
+        c.lon() + dlon,
+    )
+}
+
+// REQ: OA-ASP-068
+#[test]
+fn arc_selection_uses_the_coded_radius_not_the_distance_to_the_start() {
+    let ell = wgs84();
+    let centre = ll(42.0, -88.0);
+    let touches = |segs: &[SegIn], r_m: f64| {
+        let area = build_area(vec![square_at(&ell, centre, r_m)], 0.0).expect("area");
+        let samples = segment_samples(&ell, segs).expect("samples");
+        samples_touch_area(&area, &samples).expect("touch")
+    };
+    // Ends 5 km out, coded 10 km: the stored arc is the 10 km one, so an area on it is hit
+    // (the old derived radius, 5 km, missed it) and one beyond it is not.
+    let wide = arc_pair(&ell, centre, 5_000.0, 10_000.0);
+    assert!(touches(&wide, 10_000.0), "area on the coded radius");
+    assert!(!touches(&wide, 12_500.0), "area beyond the coded radius");
+    // Ends 10 km out, coded 5 km: the other way round. An area at 10 km, where the derived
+    // radius put the arc, is clear of the stored one; an area on the coded radius is hit.
+    let narrow = arc_pair(&ell, centre, 10_000.0, 5_000.0);
+    assert!(touches(&narrow, 5_000.0), "area on the coded radius");
+    assert!(!touches(&narrow, 10_000.0), "area on the derived radius");
+    assert!(!touches(&narrow, 7_500.0), "area between the two radii");
+    // The gap the build reports is the one between the coded radius and the end points.
+    assert!((arc_radius_gap_m(&ell, &wide).expect("gap") - 5_000.0).abs() < 1.0);
+    assert!((arc_radius_gap_m(&ell, &narrow).expect("gap") - 5_000.0).abs() < 1.0);
+    let sound = arc_pair(&ell, centre, 7_000.0, 7_000.0);
+    assert!(arc_radius_gap_m(&ell, &sound).expect("gap") < 1.0);
+    // A coded radius one tenth of a nautical mile off is within the tolerance, 0.2 NM is not.
+    let near = arc_pair(&ell, centre, 7_000.0, 7_000.0 + 92.6);
+    assert!(arc_radius_gap_m(&ell, &near).expect("gap") <= ARC_RADIUS_TOLERANCE_M);
+    let off = arc_pair(&ell, centre, 7_000.0, 7_000.0 + 185.2);
+    assert!(arc_radius_gap_m(&ell, &off).expect("gap") > ARC_RADIUS_TOLERANCE_M);
+}
+
+// REQ: OA-ASP-065
+#[test]
+fn a_rhumb_edge_is_sampled_as_the_rhumb_line_it_is() {
+    use oa_airspace::model::via;
+    let ell = wgs84();
+    // 60 N, 30 degrees of longitude: the rhumb line stays on the parallel, the geodesic rises
+    // about 0.85 degrees (95 km) above it at mid-way.
+    let seg = |v: u8, lon: f64| SegIn {
+        via: v,
+        pos: Some(ll(60.0, lon)),
+        centre: None,
+        radius_m: 0.0,
+    };
+    let rhumb = segment_samples(&ell, &[seg(via::RHUMB, 0.0), seg(via::RHUMB, 30.0)]).expect("s");
+    let geod =
+        segment_samples(&ell, &[seg(via::GEODESIC, 0.0), seg(via::GEODESIC, 30.0)]).expect("s");
+    // The samples run to the second vertex and back along the closing edge, so look at the
+    // first half: the outbound edge.
+    let mid_rhumb = rhumb.iter().map(|p| p.lat()).fold(f64::MIN, f64::max);
+    let mid_geod = geod.iter().map(|p| p.lat()).fold(f64::MIN, f64::max);
+    assert!((mid_rhumb - 60.0).abs() < 1e-6, "{mid_rhumb}");
+    assert!(mid_geod > 60.8, "{mid_geod}");
+    assert!(rhumb.len() > 600, "{}", rhumb.len());
+}

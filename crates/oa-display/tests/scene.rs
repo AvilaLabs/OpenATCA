@@ -169,6 +169,7 @@ fn model(tail: Tail) -> Model {
     }
     b.floor_agl = bit_zeros(rings.len());
     b.ceiling_agl = bit_zeros(rings.len());
+    b.incomplete = bit_zeros(rings.len());
 
     let p = PointIx::new;
     let mut legs = vec![(p(1), p(3)), (p(3), p(2))];
