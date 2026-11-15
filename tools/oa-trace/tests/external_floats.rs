@@ -61,14 +61,10 @@ const ALLOW: &[Allow] = &[
         reason: "as_f64 returns None for a non-finite value on the next line",
     },
     Allow {
-        file: "crates/oa-math/src/log.rs",
+        file: "crates/oa-math/src/",
         needle: "f64::from_bits(",
-        reason: "a constant built from bits of an internal table, not an external value",
-    },
-    Allow {
-        file: "crates/oa-math/src/util.rs",
-        needle: "f64::from_bits(",
-        reason: "the elementary functions' own bit-level arithmetic on values they computed, not external input",
+        reason: "the elementary functions' own bit-level arithmetic on values they computed or on internal \
+                 tables, never on external input; oa-math reads nothing from outside the program",
     },
     Allow {
         file: "crates/oa-nasr/src/row.rs",

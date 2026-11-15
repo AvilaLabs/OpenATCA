@@ -28,7 +28,8 @@ pub const PATTERNS: &[&str] = &[
 /// One reviewed raw read: any line of `file` that contains `needle` is allowed.
 // A7.2: cold struct, size guard waived
 pub struct Allow {
-    /// Path relative to the workspace root, with `/` separators.
+    /// Path relative to the workspace root, with `/` separators; one ending in `/` covers every
+    /// file under that directory.
     pub file: &'static str,
     pub needle: &'static str,
     /// Why the value cannot reach the program as NaN, infinity or an out-of-range number.
@@ -122,7 +123,8 @@ pub fn scan(root: &Path, allow: &[Allow]) -> (Vec<Finding>, Vec<String>) {
             }
             let mut ok = false;
             for (k, a) in allow.iter().enumerate() {
-                if a.file == rel && line.contains(a.needle) {
+                let in_scope = a.file == rel || (a.file.ends_with('/') && rel.starts_with(a.file));
+                if in_scope && line.contains(a.needle) {
                     if let Some(u) = used.get_mut(k) {
                         *u = true;
                     }
@@ -191,6 +193,27 @@ mod tests {
         let (found, stale) = scan(&root, &allow);
         assert_eq!(found.len(), 3, "{found:?}");
         assert_eq!(stale.len(), 1, "{stale:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // REQ: OA-TRC-103
+    #[test]
+    fn a_directory_entry_covers_every_file_under_it_and_nothing_else() {
+        let root = tmp("d");
+        fs::create_dir_all(root.join("crates/oa-y/src")).unwrap();
+        let src = "fn c(u: u64) -> f64 { f64::from_bits(u) }\n";
+        fs::write(root.join("crates/oa-x/src/a.rs"), src).unwrap();
+        fs::write(root.join("crates/oa-x/src/b.rs"), src).unwrap();
+        fs::write(root.join("crates/oa-y/src/lib.rs"), src).unwrap();
+        let allow = [Allow {
+            file: "crates/oa-x/src/",
+            needle: "f64::from_bits(",
+            reason: "test",
+        }];
+        let (found, stale) = scan(&root, &allow);
+        let files: Vec<&str> = found.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(files, ["crates/oa-y/src/lib.rs"], "{found:?}");
+        assert!(stale.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 }
