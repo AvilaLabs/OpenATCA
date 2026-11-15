@@ -10,9 +10,10 @@
 //! altitudes feet, velocity is converted to the table's 0.1 knot east and north, and the coast
 //! flag is carried so the coast split of the metrics applies.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::legacy::{flight_ix, new_legacy, push_th, set_addr, Legacy, NO_ALT, NO_TIME};
+use crate::truth::TruthLeg;
 
 const MPS_PER_KT: f64 = 0.514_444_444_444;
 
@@ -40,8 +41,43 @@ pub enum SamplesError {
     ColumnLength,
 }
 
-/// The legacy table of a tracker's output. Refuses columns of different lengths (E5).
+/// The legacy table of a tracker's output. Refuses columns of different lengths (E5). All rows
+/// of an address are one flight; see [`legacy_from_track_samples_by_leg`] for one flight per trip.
 pub fn legacy_from_track_samples(s: &TrackSamples<'_>) -> Result<Legacy, SamplesError> {
+    adapt(s, &BTreeMap::new())
+}
+
+/// As [`legacy_from_track_samples`], but one flight per truth leg of an address: a row belongs
+/// to the latest leg of its address that starts at or before its time (to the first leg if it
+/// precedes them all; an address with no leg is one flight). Intervals between rows are then
+/// never taken across two trips of one aircraft. Flights are ordered by (address, leg).
+pub fn legacy_from_track_samples_by_leg(
+    s: &TrackSamples<'_>,
+    legs: &[TruthLeg],
+) -> Result<Legacy, SamplesError> {
+    let mut starts: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    for l in legs {
+        starts.entry(l.addr).or_default().push(l.start_ms);
+    }
+    for v in starts.values_mut() {
+        v.sort_unstable();
+    }
+    adapt(s, &starts)
+}
+
+/// The trip of a row: the number of leg starts of its address at or before `t_ms`, less one.
+fn trip_of(starts: &BTreeMap<u32, Vec<i64>>, addr: u32, t_ms: i64) -> u32 {
+    starts.get(&addr).map_or(0, |v| {
+        u32::try_from(v.partition_point(|&x| x <= t_ms).saturating_sub(1)).unwrap_or(u32::MAX)
+    })
+}
+
+/// The flight key of an address and trip.
+fn flight_key(addr: u32, trip: u32) -> u128 {
+    u128::from(addr) | (1u128 << 100) | (u128::from(trip) << 40)
+}
+
+fn adapt(s: &TrackSamples<'_>, starts: &BTreeMap<u32, Vec<i64>>) -> Result<Legacy, SamplesError> {
     let n = s.addr.len();
     if [
         s.t_ns.len(),
@@ -58,24 +94,25 @@ pub fn legacy_from_track_samples(s: &TrackSamples<'_>) -> Result<Legacy, Samples
         return Err(SamplesError::ColumnLength);
     }
     let mut leg = new_legacy();
-    let addrs: BTreeSet<u32> = s.addr.iter().copied().collect();
-    let mut flight_of = std::collections::BTreeMap::new();
-    for a in addrs {
-        if let Some(f) = flight_ix(&mut leg, u128::from(a) | (1u128 << 100)) {
+    let trip_at = |i: usize| -> Option<(u32, u32)> {
+        let (&a, &t) = (s.addr.get(i)?, s.t_ns.get(i)?);
+        Some((a, trip_of(starts, a, t.div_euclid(1_000_000))))
+    };
+    let keys: BTreeSet<(u32, u32)> = (0..n).filter_map(trip_at).collect();
+    let mut flight_of = BTreeMap::new();
+    for (a, trip) in keys {
+        if let Some(f) = flight_ix(&mut leg, flight_key(a, trip)) {
             set_addr(&mut leg, f, a);
-            flight_of.insert(a, f);
+            flight_of.insert((a, trip), f);
         }
     }
     for i in 0..n {
-        let (Some(&a), Some(&t), Some(&la), Some(&lo)) = (
-            s.addr.get(i),
-            s.t_ns.get(i),
-            s.lat_e7.get(i),
-            s.lon_e7.get(i),
-        ) else {
+        let (Some(&t), Some(&la), Some(&lo), Some(key)) =
+            (s.t_ns.get(i), s.lat_e7.get(i), s.lon_e7.get(i), trip_at(i))
+        else {
             continue;
         };
-        let Some(&f) = flight_of.get(&a) else {
+        let Some(&f) = flight_of.get(&key) else {
             continue;
         };
         let alt = s.alt_ft.get(i).copied().unwrap_or(NO_ALT);

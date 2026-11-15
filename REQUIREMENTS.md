@@ -1407,6 +1407,10 @@ frame of their feed has been fed (as the ADS-B table is).
   past the seven days).
 - **OA-RPL-264** When a merge or an after-frame hook ends the run with an error, the frame and gzip error
   counts found so far are already in the pipeline's own counts, and the error is still returned.
+- **OA-RPL-265** `replay_state_digest` covers the basis of each live NOTAM tombstone's time (a span of replay
+  time, or the notice's own end), which decides whether a step of the replay clock moves it: two states
+  that differ only in that flag have different digests. Nothing is added while no tombstone is held, and
+  `replay_hash` is unchanged.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
@@ -2264,7 +2268,15 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-042** A `--accel-q` or `--sigma-scale` value of `oa-truth-check` that is not a finite number
   above zero is a usage error, before the clip is read.
 - **OA-TRUTH-043** A difference of two report times that does not fit an `i64` never panics: the builder
-  splits the leg there, and queries and the smoother saturate it.
+  splits the leg there, queries refuse it as no nearby report, and interpolation and the leave-one-out
+  bracket treat it as no interval.
+- **OA-TRUTH-044** A time difference is never saturated: where it can exceed an `i64` (the quality carry
+  age, the query bracket, interpolation) the overflow reads as "not within", and the steps of one leg the
+  smoother subtracts without a check never exceed `leg_gap_ms`.
+- **OA-TRUTH-045** `oa-truth-check` refuses a clip over 4 GiB before reading it, and a clip whose frame
+  headers claim more than 50 million rows before decoding the frame that crosses the cap (typed
+  `ClipError`). Ten times the largest real day (330 MB, 4.07 million rows).
+
 
 ## M2 — Benchmark harness (oa-bench)
 
@@ -2547,6 +2559,12 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-117** T8 is the time of the first associated position of the leg minus the zone entry. A value of zero
   or less is not a delay: it is counted as `established_before_entry` and left out of the distribution; a pop-up
   20 s after entry gives 20 s.
+- **OA-BENCH-118** `legacy_from_track_samples_by_leg` makes one flight per truth leg of an address (a row goes
+  to the latest leg of its address starting at or before its time), so the publication interval (T5) is never
+  taken between two trips of one aircraft.
+- **OA-BENCH-119** `check_split` refuses a split of the ADS-B reports into the tracker's set A and the truth's
+  set B when an (address, time) is in both sets or a set holds two reports of the same address, time and
+  content: a typed violation, a hard error of the run and not a warning.
 
 ## Winds aloft (oa-wind)
 

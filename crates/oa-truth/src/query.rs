@@ -93,11 +93,12 @@ fn view_of(truth: &Truth, lo: usize, hi: usize) -> Option<LegView<'_>> {
     })
 }
 
-fn lerp(a0: f64, a1: f64, t0: i64, t1: i64, t: i64) -> f64 {
+fn lerp(a0: f64, a1: f64, t0: i64, t1: i64, t: i64) -> Option<f64> {
     if t1 == t0 {
-        return a0;
+        return Some(a0);
     }
-    a0 + (a1 - a0) * (t.saturating_sub(t0) as f64 / t1.saturating_sub(t0) as f64)
+    let (num, den) = (t.checked_sub(t0)?, t1.checked_sub(t0)?);
+    Some(a0 + (a1 - a0) * (num as f64 / den as f64))
 }
 
 /// Truth for `addr` at `t_ms` (Unix milliseconds): position and velocity from the smoother,
@@ -143,7 +144,9 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     };
     let (k_r, tr) = if tl == t { (k, tl) } else { (k + 1, tk1) };
     let bracket = truth.cfg.bracket_ms * NS_PER_MS;
-    if t.saturating_sub(tl) > bracket || tr.saturating_sub(t) > bracket {
+    // A difference past the range of an i64 is no nearby report.
+    let near = |a: i64, b: i64| b.checked_sub(a).is_some_and(|d| d <= bracket);
+    if !near(tl, t) || !near(t, tr) {
         return TruthQuery::NoNearbyReport;
     }
     let Some((x, p)) = interp(&v, k, t, truth.cfg.accel_q) else {
@@ -180,14 +183,15 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     let (a_l, a_r) = (v.alt_ft.get(k).copied(), v.alt_ft.get(k_r).copied());
     let baro_alt_ft = match (a_l, a_r) {
         (Some(a0), Some(a1)) if a0 != NONE_I32 && a1 != NONE_I32 => {
-            Some(lerp(f64::from(a0), f64::from(a1), tl, tr, t))
+            lerp(f64::from(a0), f64::from(a1), tl, tr, t)
         }
         _ => None,
     };
+    // Invariant: both distances passed the bracket check, so `tr - tl` is at most twice the bracket.
     let (r_l, r_r) = (v.vrate_fpm.get(k).copied(), v.vrate_fpm.get(k_r).copied());
     let vert_rate_fpm = match (r_l, r_r) {
         (Some(r0), Some(r1)) if r0 != NONE_I32 && r1 != NONE_I32 => {
-            Some(lerp(f64::from(r0), f64::from(r1), tl, tr, t))
+            lerp(f64::from(r0), f64::from(r1), tl, tr, t)
         }
         _ => match (a_l, a_r) {
             (Some(a0), Some(a1))

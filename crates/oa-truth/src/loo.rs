@@ -88,7 +88,9 @@ pub(crate) fn loo_leg(
             acc.no_bracket += 1;
             continue;
         };
-        if tk.saturating_sub(t_l) > bracket || t_r.saturating_sub(tk) > bracket {
+        // A difference past the range of an i64 is no bracket.
+        let near = |a: i64, b: i64| b.checked_sub(a).is_some_and(|d| d <= bracket);
+        if !near(t_l, tk) || !near(tk, t_r) {
             acc.no_bracket += 1;
             continue;
         }
