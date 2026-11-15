@@ -109,6 +109,9 @@ const D_REFUSED: u8 = 3;
 /// A Mode S plot not applied: outside the wide gate of its address's track, or a second plot of
 /// that track in the bucket. Kept out of initiation like a refused plot.
 const D_MISMATCH: u8 = 4;
+/// An anonymous plot the bucket's work limit left ungated: it is neither a hit nor evidence that
+/// no track holds it, so initiation leaves it alone.
+const D_DEFERRED: u8 = 5;
 
 /// Why the fusion layer refused its configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,11 +1099,28 @@ struct RadarAssoc {
     dh_max: f64,
     pairs: Vec<Pair>,
     infos: Vec<PairInfo>,
-    /// Anonymous plots gated so far, in order.
+    /// Where the loop over the anonymous plots starts (see [`loop_start`]), the number gated so
+    /// far, counted from there, and how many pairs the plots before the wrap had made.
+    start: usize,
     next: usize,
+    wrap_pairs: Option<usize>,
     /// Work spent (coarse candidates visited and exact gates tested) by this radar's plots.
     work: usize,
     capped: bool,
+}
+
+/// The plot the association loop of `radar` starts at in `bucket`, of `n` anonymous plots: a hash
+/// of the bucket and the radar, so the plots a cut bucket leaves ungated are not always the same
+/// stretch of the scan. Deterministic (the same inputs give the same start).
+fn loop_start(bucket: i64, radar: usize, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let mut z = (bucket as u64) ^ ((radar as u64) << 56) ^ 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z % n as u64) as usize
 }
 
 /// The first part of one radar's association of a bucket (see the module documentation, step 1):
@@ -1286,6 +1306,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
     let mut infos = std::mem::take(f.infos_bufs.get_mut(radar)?);
     pairs.clear();
     infos.clear();
+    let anon_len = anon.len();
     if let Some(slot) = f.rscratch.get_mut(radar) {
         slot.hard = hard;
         slot.taken = taken;
@@ -1307,7 +1328,9 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         dh_max,
         pairs,
         infos,
+        start: loop_start(f.done_bucket, radar, anon_len),
         next: 0,
+        wrap_pairs: None,
         work: 0,
         capped: false,
     })
@@ -1422,10 +1445,12 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         anon,
         conv_own,
         grid,
-        pairs,
-        infos,
+        mut pairs,
+        mut infos,
         capped,
         next,
+        start,
+        wrap_pairs,
         ..
     } = ra;
     if let Some(slot) = f.grids.get_mut(radar) {
@@ -1435,6 +1460,16 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         f.stats.bucket_work_capped += 1;
         f.stats.anon_plots_ungated += anon.len().saturating_sub(next) as u64;
     }
+    // The plots were gated from `start` round the end and on from the first: put the pairs back in
+    // plot order, which is the order a loop from the first plot makes them in.
+    if let Some(w) = wrap_pairs {
+        let (np, ni) = (pairs.len(), infos.len());
+        pairs.rotate_left(w.min(np));
+        infos.rotate_left(w.min(ni));
+    }
+    // The plots the loop never reached: after `next` of them from `start`, round the ring.
+    let n_anon = anon.len();
+    let ungated = |a: usize| capped && (a + n_anon - start) % n_anon.max(1) >= next;
     let solved = if f.cfg.assoc == ASSOC_GNN {
         gnn(
             &mut f.assoc,
@@ -1462,7 +1497,13 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             .copied()
             .unwrap_or(NO_TRACK);
         if t == NO_TRACK {
-            f.stats.unassigned += 1;
+            if ungated(a) {
+                if let Some(d) = dec.get_mut(j) {
+                    d.kind = D_DEFERRED;
+                }
+            } else {
+                f.stats.unassigned += 1;
+            }
             continue;
         }
         let k = assoc_pair_of(&f.assoc).get(a).copied().unwrap_or(NO_TRACK);
@@ -1551,8 +1592,15 @@ fn associate_bucket(f: &mut Fusion) {
         let Some(ra) = ras.get_mut(i).and_then(Option::as_mut) else {
             break;
         };
-        let a = ra.next;
+        // The plots in a rotation from the start; where it wraps past the last plot, note the
+        // pairs made so far so that they can be put back in plot order.
+        let k = ra.next;
         ra.next += 1;
+        let n = ra.anon.len();
+        if ra.start + k == n && ra.start > 0 {
+            ra.wrap_pairs = Some(ra.pairs.len());
+        }
+        let a = (ra.start + k) % n.max(1);
         total += assoc_plot(f, ra, a, budget - total);
     }
     for ra in &mut ras {
@@ -3061,6 +3109,19 @@ mod tests {
         seed: u64,
         addr0: u32,
     ) -> Vec<(f64, f64)> {
+        feed_tracks_at(f, site, n, side_m, seed, addr0, 0)
+    }
+
+    /// The same, the reports starting at `t0_ns`.
+    fn feed_tracks_at(
+        f: &mut Fusion,
+        site: &RadarSite,
+        n: usize,
+        side_m: f64,
+        seed: u64,
+        addr0: u32,
+        t0_ns: i64,
+    ) -> Vec<(f64, f64)> {
         let frame = oa_geo::aeqd::frame_new(site.lat_deg, site.lon_deg);
         let mut rng = Rng::from_seed(seed);
         let at: Vec<(f64, f64)> = (0..n)
@@ -3075,7 +3136,7 @@ mod tests {
             .collect();
         for k in 0..4i64 {
             for (i, &(lat, lon)) in at.iter().enumerate() {
-                let mut m = adsb_fix(addr0 + i as u32, k * NS_PER_S);
+                let mut m = adsb_fix(addr0 + i as u32, t0_ns + k * NS_PER_S);
                 m.lat_e7 = (lat * 1.0e7).round() as i32;
                 m.lon_e7 = (lon * 1.0e7).round() as i32;
                 fusion_adsb(f, &m);
@@ -4110,5 +4171,128 @@ mod tests {
         );
         let keys: std::collections::BTreeSet<u32> = out.addr.iter().copied().collect();
         assert_eq!(keys.len(), 1, "{keys:?}");
+    }
+
+    /// Plots over 200 stationary tracks, the bucket's work limit cut to 500 so the tail of the
+    /// bucket is never gated.
+    fn capped_fusion() -> (Fusion, Vec<(f64, f64)>) {
+        let mut f = make_fusion_sites(&[SITE], 400);
+        f.bucket_tests_max = 500;
+        let mut out = output_new(1 << 18);
+        let at = feed_tracks(&mut f, &SITE, 200, 20_000.0, 7, 0x100000);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        (f, at)
+    }
+
+    /// The plots of the radar's last bucket that were left ungated.
+    fn deferred(f: &Fusion) -> Vec<usize> {
+        f.rscratch[0]
+            .dec
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.kind == D_DEFERRED)
+            .map(|(j, _)| j)
+            .collect()
+    }
+
+    // REQ: OA-TRK-299
+    #[test]
+    fn plots_the_work_limit_left_ungated_start_no_candidate() {
+        let (mut f, at) = capped_fusion();
+        let mut out = output_new(1 << 18);
+        fusion_plots(&mut f, 0, &plots_on(&SITE, &at, 100, 0.0, 3));
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let st = *fusion_stats(&f);
+        assert_eq!(st.bucket_work_capped, 1, "{st:?}");
+        assert!(st.anon_plots_ungated > 0, "{st:?}");
+        // Every one of those plots lies on a track: none is evidence of a new aircraft.
+        assert_eq!(st.cand_started, 0, "{st:?}");
+        assert_eq!(deferred(&f).len() as u64, st.anon_plots_ungated, "{st:?}");
+        assert_eq!(st.unassigned, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-299
+    #[test]
+    fn the_ungated_tail_is_not_the_same_plots_in_the_next_bucket() {
+        let (mut f, at) = capped_fusion();
+        let mut out = output_new(1 << 18);
+        let plots = plots_on(&SITE, &at, 100, 0.0, 3);
+        fusion_plots(&mut f, 0, &plots);
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let first = deferred(&f);
+        let later: Vec<RadarPlot> = plots
+            .iter()
+            .map(|p| RadarPlot {
+                time_ns: p.time_ns + 2 * NS_PER_S,
+                ..*p
+            })
+            .collect();
+        fusion_plots(&mut f, 0, &later);
+        fusion_advance(&mut f, 9 * NS_PER_S, &mut out);
+        let second = deferred(&f);
+        assert!(!first.is_empty() && !second.is_empty());
+        assert_ne!(first, second);
+        // The plots that were gated are other plots too.
+        let gated = |d: &Vec<usize>| {
+            (0..plots.len())
+                .filter(|j| !d.contains(j))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(gated(&first), gated(&second));
+    }
+
+    // REQ: OA-TRK-299
+    #[test]
+    fn where_the_loop_starts_changes_nothing_when_nothing_is_cut() {
+        // The same plots in buckets 5, 6, 7 and 8 (so with other starting points): the same
+        // keys take the same plots.
+        let run_at = |shift_s: i64| {
+            let mut f = make_fusion_sites(&[SITE], 400);
+            let mut out = output_new(1 << 18);
+            let at = feed_tracks_at(
+                &mut f,
+                &SITE,
+                200,
+                20_000.0,
+                7,
+                0x100000,
+                shift_s * NS_PER_S,
+            );
+            fusion_advance(&mut f, (4 + shift_s) * NS_PER_S, &mut out);
+            let mut plots = plots_on(&SITE, &at, 150, 150.0, 3);
+            for p in &mut plots {
+                p.time_ns += shift_s * NS_PER_S;
+            }
+            fusion_plots(&mut f, 0, &plots);
+            fusion_advance(&mut f, (8 + shift_s) * NS_PER_S, &mut out);
+            let st = *fusion_stats(&f);
+            assert_eq!(st.bucket_work_capped, 0, "{st:?}");
+            let log = fusion_assign_log(&f);
+            let v: Vec<(u32, u32)> = log
+                .key
+                .iter()
+                .copied()
+                .zip(log.label.iter().copied())
+                .collect();
+            (v, st.pairs_gated, st.held, st.unassigned)
+        };
+        let base = run_at(0);
+        assert!(base.1 > 100, "{base:?}");
+        for shift in 1..4 {
+            let r = run_at(shift);
+            assert_eq!(r.0.len(), base.0.len(), "shift {shift}");
+            let d: Vec<_> =
+                r.0.iter()
+                    .zip(&base.0)
+                    .filter(|(x, y)| x != y)
+                    .take(5)
+                    .collect();
+            assert_eq!(
+                (&r.1, &r.2, &r.3),
+                (&base.1, &base.2, &base.3),
+                "shift {shift} {d:?}"
+            );
+            assert!(d.is_empty(), "shift {shift} {d:?}");
+        }
     }
 }

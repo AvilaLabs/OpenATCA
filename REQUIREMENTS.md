@@ -3117,6 +3117,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   same bucket by any radar included; if it gates, no track is made and `cand_merged_on_confirm` counts it. When
   a track is confirmed, the anonymous candidates of the other radars that gate with it are cancelled and
   counted in `cand_cancelled_by_track`; `confirm_gate_tests` counts the tests.
+- **OA-TRK-299** A plot the bucket's work limit left ungated is deferred: it is not unassigned, so it starts
+  no candidate and joins none, and `anon_plots_ungated` counts it. The association loop starts at a plot that
+  depends deterministically on the bucket and the radar, so the plots left out are not always the same
+  sector of the scan; when nothing is cut the result does not depend on where the loop started.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
