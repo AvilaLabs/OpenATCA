@@ -41,6 +41,10 @@ pub struct CapCfg {
     pub max_tracks: usize,
     /// Stop feeding when this much wall time has passed (the run says so).
     pub max_wall_s: f64,
+    /// Stop after 15 s of traffic if the run is taking more than twice real time, or after 2 s
+    /// if more than thirty times (it is far past the knee and the rest would only take long to
+    /// say so).
+    pub early_stop: bool,
 }
 
 /// What a capacity run measured.
@@ -55,6 +59,8 @@ pub struct CapResult {
     /// Measured seconds actually fed (fewer if the wall limit stopped the run).
     pub measure_s_done: i64,
     pub truncated: bool,
+    /// Stopped by the early-stop rule (see [`CapCfg::early_stop`]).
+    pub stopped_early: bool,
     pub max_tracks: usize,
     /// Wall time of the measured seconds' timed calls, seconds.
     pub wall_measured_s: f64,
@@ -93,6 +99,8 @@ pub struct CapResult {
     pub rss_before_kb: u64,
     pub rss_after_new_kb: u64,
     pub rss_end_kb: u64,
+    /// Resident memory at the end of the warm-up (0 if the run stopped inside it).
+    pub rss_warm_kb: u64,
     pub hwm_kb: u64,
     pub load_start: String,
     pub load_end: String,
@@ -105,6 +113,7 @@ impl CapResult {
     /// advance was under the advance interval (1 s). The knee is the largest `n` where this holds.
     pub fn keeps_up(&self) -> bool {
         !self.truncated
+            && !self.stopped_early
             && self.realtime_ratio < 1.0
             && self.advance_ms.p99 < 1000.0
             && self.fusion.pending_overflow == 0
@@ -255,8 +264,10 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let (mut sum_adsb, mut sum_plots, mut sum_rows) = (0usize, 0usize, 0usize);
     let total_s = cfg.warmup_s + cfg.measure_s;
     let started = Instant::now();
-    let mut truncated = false;
+    let (mut truncated, mut stopped_early) = (false, false);
     let mut measure_done = 0i64;
+    let mut seconds_done = 0i64;
+    let mut rss_warm_kb = 0u64;
     for k in 0..total_s {
         if started.elapsed().as_secs_f64() > cfg.max_wall_s {
             truncated = true;
@@ -334,6 +345,18 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             warm_ms.push(ms);
         }
         output_clear(&mut out);
+        if k + 1 == cfg.warmup_s {
+            rss_warm_kb = status_kb("VmRSS").unwrap_or(0);
+        }
+        if cfg.early_stop
+            && ((k >= 14 && wall_total > 2.0 * (k + 1) as f64)
+                || (k >= 1 && wall_total > 30.0 * (k + 1) as f64))
+        {
+            stopped_early = true;
+            seconds_done = k + 1;
+            break;
+        }
+        seconds_done = k + 1;
         if k % 10 == 9 {
             // A long-running caller hands the radar-only track records on regularly.
             recs_taken += fusion_take_radar_tracks(&mut f).len() as u64;
@@ -352,10 +375,15 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         measure_s_asked: cfg.measure_s,
         measure_s_done: measure_done,
         truncated,
+        stopped_early,
         max_tracks: cfg.max_tracks,
         wall_measured_s: wall_measured,
         wall_total_s: wall_total,
-        realtime_ratio: wall_measured / md,
+        realtime_ratio: if measure_done > 0 {
+            wall_measured / md
+        } else {
+            wall_total / seconds_done.max(1) as f64
+        },
         seconds_over_1s: adv_ms.iter().filter(|&&m| m >= 1000.0).count(),
         advance_ms,
         warmup_advance_ms: dist_of(&warm_ms),
@@ -382,6 +410,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         rss_before_kb,
         rss_after_new_kb,
         rss_end_kb: status_kb("VmRSS").unwrap_or(0),
+        rss_warm_kb,
         hwm_kb: status_kb("VmHWM").unwrap_or(0),
         load_start,
         load_end: loadavg3(),
@@ -401,6 +430,7 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("measure_s_asked", r.measure_s_asked);
     kv.put("measure_s_done", r.measure_s_done);
     kv.put("truncated", u8::from(r.truncated));
+    kv.put("stopped_early", u8::from(r.stopped_early));
     kv.put("max_tracks", r.max_tracks);
     kv.put("wall_measured_s", fmt_f(r.wall_measured_s));
     kv.put("wall_total_s", fmt_f(r.wall_total_s));
@@ -438,6 +468,7 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("rss_before_kb", r.rss_before_kb);
     kv.put("rss_after_new_kb", r.rss_after_new_kb);
     kv.put("rss_end_kb", r.rss_end_kb);
+    kv.put("rss_warm_kb", r.rss_warm_kb);
     kv.put("vmhwm_kb", r.hwm_kb);
     kv.put("load_start", &r.load_start);
     kv.put("load_end", &r.load_end);
@@ -483,7 +514,13 @@ pub fn cap_text(r: &CapResult) -> String {
         r.warmup_s,
         r.measure_s_done,
         r.measure_s_asked,
-        if r.truncated { " (STOPPED by the wall limit)" } else { "" },
+        if r.truncated {
+            " (STOPPED by the wall limit)"
+        } else if r.stopped_early {
+            " (STOPPED EARLY: far slower than real time)"
+        } else {
+            ""
+        },
         r.adsb_per_s,
         r.plots_per_s,
         r.rows_per_s
@@ -574,10 +611,11 @@ pub fn cap_text(r: &CapResult) -> String {
         r.buffers_stable, r.radar_track_recs_taken
     ));
     s.push_str(&format!(
-        "  memory: RSS {:.0} MB before the layer, {:.0} MB after it is made (tracker tables {:.0} MB), {:.0} MB at the end; peak VmHWM {:.0} MB\n",
+        "  memory: RSS {:.0} MB before the layer, {:.0} MB after it is made (tracker tables {:.0} MB), {:.0} MB at the end of the warm-up, {:.0} MB at the end; peak VmHWM {:.0} MB\n",
         r.rss_before_kb as f64 / 1024.0,
         r.rss_after_new_kb as f64 / 1024.0,
         r.tracker_table_mb,
+        r.rss_warm_kb as f64 / 1024.0,
         r.rss_end_kb as f64 / 1024.0,
         r.hwm_kb as f64 / 1024.0
     ));
@@ -619,6 +657,7 @@ mod tests {
             measure_s: meas,
             max_tracks: 4096,
             max_wall_s: 120.0,
+            early_stop: false,
         }
     }
 

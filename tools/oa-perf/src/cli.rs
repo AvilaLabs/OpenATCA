@@ -37,7 +37,8 @@ flags (defaults in brackets):
   --max-tracks N     tracker capacity [65536]
   --refine K         bisection steps between the knee and the first failing size [2]
   --seed N           traffic seed [1]
-  --no-clip --no-overload   leave a part out";
+  --no-clip --no-overload   leave a part out
+  --no-early-stop    feed the whole run even when it is far slower than real time";
 
 /// Parsed flags.
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ pub struct Opts {
     pub seed: u64,
     pub no_clip: bool,
     pub no_overload: bool,
+    pub no_early_stop: bool,
 }
 
 impl Default for Opts {
@@ -81,6 +83,7 @@ impl Default for Opts {
             seed: 1,
             no_clip: false,
             no_overload: false,
+            no_early_stop: false,
         }
     }
 }
@@ -130,6 +133,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--seed" => o.seed = num(a, it.next())?,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
+            "--no-early-stop" => o.no_early_stop = true,
             other => return Err(format!("unknown flag '{other}'")),
         }
     }
@@ -158,6 +162,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         measure_s: o.duration,
         max_tracks: o.max_tracks,
         max_wall_s: o.max_wall,
+        early_stop: !o.no_early_stop,
     })
 }
 
@@ -182,6 +187,9 @@ fn one(o: &Opts, n: usize) -> Result<(), String> {
 
 /// Starts this binary as `one` for `n` and returns the result file it wrote.
 fn child(o: &Opts, n: usize) -> Result<Kv, String> {
+    let mut o = o.clone();
+    o.no_early_stop = o.no_early_stop || o.cmd == "overload";
+    let o = &o;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let st = Command::new(exe)
         .arg("one")
@@ -195,6 +203,11 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
         .args(["--max-wall", &o.max_wall.to_string()])
         .args(["--max-tracks", &o.max_tracks.to_string()])
         .args(["--seed", &o.seed.to_string()])
+        .args(if o.no_early_stop {
+            vec!["--no-early-stop"]
+        } else {
+            vec![]
+        })
         .status()
         .map_err(|e| e.to_string())?;
     if !st.success() {
@@ -231,7 +244,13 @@ fn row_line(n: usize, kv: &Kv) -> String {
         fmt_f(f("age_tick_rows.p99_ms")),
         f("vmhwm_kb") / 1024.0,
         if flag(kv, "keeps_up") { "yes" } else { "NO" },
-        if flag(kv, "truncated") { "cut" } else { "" },
+        if flag(kv, "truncated") {
+            "cut"
+        } else if flag(kv, "stopped_early") {
+            "early"
+        } else {
+            ""
+        },
         if moved.is_empty() {
             "-".to_string()
         } else {
@@ -308,7 +327,9 @@ fn sweep(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
         if let Some(k) = knee {
             let n2 = 2 * k;
             s.push_str(&format!("\n== overload: twice the knee, n={n2} ==\n"));
-            let kv2 = child(o, n2)?;
+            let mut oo = o.clone();
+            oo.cmd = "overload".to_string();
+            let kv2 = child(&oo, n2)?;
             s.push_str(TABLE_HEAD);
             if let Some((_, kv1)) = results.iter().find(|r| r.0 == k) {
                 s.push_str(&row_line(k, kv1));
@@ -489,6 +510,7 @@ mod tests {
             (vec![10, 20], Layout::Nas, 5, 0)
         );
         assert!(parse_args(&a("sweep --sizes 0")).is_err());
+        assert!(parse_args(&a("one --no-early-stop")).unwrap().no_early_stop);
         assert!(parse_args(&a("sweep --bogus")).is_err());
         assert!(parse_args(&a("nothing")).is_err());
         assert!(parse_args(&a("one --radars e,x")).is_err());
