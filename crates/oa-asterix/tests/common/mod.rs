@@ -159,7 +159,8 @@ pub fn cat021_full() -> Cat021 {
         }),
         position_hr: Some(RawPosition {
             lat: 536_870_912,
-            lon: -2_147_483_648,
+            // Exactly -180 degrees: the widest longitude the item may carry.
+            lon: -1_073_741_824,
         }),
         toa_velocity: Some(1),
         air_speed: Some(FlagU15 {

@@ -2368,6 +2368,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-AST-106** (proof) For every `i32`, the longitude check at 25 bits accepts exactly +-2^25 counts, and
   `raw_to_e7` at that width gives a position within 180 degrees or nothing, nothing only for a count the check
   refuses; neither panics.
+- **OA-AST-107** A CAT021 high-resolution position (I021/131, LSB 180/2^30 degrees) with a longitude beyond
+  180 degrees is refused by the decoder and by the encoder as an invalid value of that item; exactly +-180
+  degrees is accepted. The three-octet I021/130 cannot hold a longitude beyond 180 degrees.
 
 ## M3 — Surveillance tracking (oa-track)
 
