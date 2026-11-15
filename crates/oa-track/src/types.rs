@@ -83,9 +83,10 @@ pub const REF_TIME: usize = 5;
 /// epoch, ns (a little over 146 years either side): further out is refused, so rounding to a tick
 /// and stepping from tick to tick cannot overflow.
 pub const TIME_LIMIT_NS: i64 = i64::MAX / 2;
-/// Shortest and longest tick, ns (1 ms and a quarter of the range): a tick of 1 ns would make
+/// Shortest and longest tick, ns (100 ms and a quarter of the range): a tick of 1 ns would make
 /// every second of catching up a billion rows of work.
-pub const MIN_TICK_NS: i64 = 1_000_000;
+/// The shortest is 100 ms because display and output updates are at least that coarse.
+pub const MIN_TICK_NS: i64 = 100_000_000;
 pub const MAX_TICK_NS: i64 = i64::MAX / 4;
 
 /// Why a track ended. Indexes [`TrackerStats::ended`] and [`TrackLog::reason`].
@@ -191,7 +192,7 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
         return bad("tick_ns, expected_interval_ns or init_interval_ns");
     }
     if !(MIN_TICK_NS..=MAX_TICK_NS).contains(&c.tick_ns) {
-        return bad("tick_ns outside 1 ms to a quarter of the range");
+        return bad("tick_ns outside 100 ms to a quarter of the range");
     }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
@@ -442,6 +443,9 @@ pub struct TrackerStats {
     /// Ticks skipped, not emitted, because every track had already expired by then: the tick
     /// grid jumped over them (the gap after a confirmed time step, or a long `tracker_advance`).
     pub ticks_skipped: u64,
+    /// Output rows computed (a row is computed before the table can refuse it): the work of the
+    /// emitter, which a full table must not keep growing.
+    pub rows_computed: u64,
     /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
     /// counted and not applied.
     pub time_held: u64,

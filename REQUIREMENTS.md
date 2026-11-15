@@ -3003,6 +3003,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-289** The tracker configuration the fusion layer derives from a site passes the tracker's
   validation for every rotation period a site accepts (100 ms to 600 s, both ends included): the drop
   time is never below the clock-step limit it must exceed.
+- **OA-TRK-290** Once the output table is full, an advance computes no further row: the rows it could not
+  emit (the remaining ticks of each confirmed track, to the tick at which the track is dropped) are
+  counted in the table's overflow count in one pass over the tracks, with no work per tick. One
+  confirmed track, a one-row table, 100 ms ticks and an advance of one hour compute at most two rows
+  (36,001 before) and count exactly the rows left out.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
@@ -3040,7 +3045,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   skipped ticks. `tracker_advance` is not subject to the limit (its caller, the replay clock, has its own
   confirmed rules).
 - **OA-TRK-069** A time of applicability or an advance beyond about 146 years either side of the epoch
-  is refused and counted under its own reason, and a tick must be between 1 ms and a quarter of the
+  is refused and counted under its own reason, and a tick must be between 100 ms and a quarter of the
   range, so rounding to a tick and stepping from tick to tick cannot overflow or stop advancing.
 - **OA-TRK-070** The assignment solver refuses a gate that is not a finite positive number, with a typed
   error and every plot left unassigned (a NaN or infinite penalty makes the padded problem meaningless);

@@ -788,8 +788,8 @@ fn extreme_times_are_refused_and_tick_arithmetic_cannot_overflow_or_stall() {
     assert_eq!(tracker_stats(&t).refused[REF_TIME], 5);
     assert_eq!(tracker_stats(&t).started, 1);
     assert!(tracker_stats(&t).ticks <= 2);
-    // A tick of one nanosecond, or one beyond a quarter of the range, is a bad configuration.
-    for tick_ns in [1, 999_999, i64::MAX / 4 + 1, i64::MAX] {
+    // A tick under 100 ms, or one beyond a quarter of the range, is a bad configuration.
+    for tick_ns in [1, 999_999, 99_999_999, i64::MAX / 4 + 1, i64::MAX] {
         let c = TrackerConfig {
             tick_ns,
             ..big_config()
@@ -798,15 +798,86 @@ fn extreme_times_are_refused_and_tick_arithmetic_cannot_overflow_or_stall() {
     }
     // The shortest tick near the top of the range still advances and ends.
     let c = TrackerConfig {
-        tick_ns: 1_000_000,
+        tick_ns: 100_000_000,
         ..big_config()
     };
     let mut t = tracker_new(&c).unwrap();
     let mut m = ms[0];
-    m.toa_ns = TIME_LIMIT_NS - 5_000_000;
+    m.toa_ns = TIME_LIMIT_NS - 500_000_000;
     tracker_update(&mut t, &m, &mut out);
     tracker_advance(&mut t, TIME_LIMIT_NS, &mut out);
     assert!(tracker_stats(&t).ticks + tracker_stats(&t).ticks_skipped <= 6);
+}
+
+// REQ: OA-TRK-290
+#[test]
+fn a_full_output_table_stops_row_computation_and_counts_the_rows_it_could_not_take() {
+    // One confirmed track, 100 ms ticks, a drop age of two hours and an advance of one hour into a
+    // one-row table.
+    let cfg = TrackerConfig {
+        tick_ns: 100_000_000,
+        drop_after_ns: 7_200_000_000_000,
+        ..big_config()
+    };
+    let ms = base_measurements(0xA00001, 30, 1.0, 2);
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut big = output_new(1 << 20);
+    for m in &ms {
+        tracker_update(&mut t, m, &mut big);
+    }
+    assert_eq!(tracker_live(&t).len(), 1);
+    let last = ms.last().unwrap().toa_ns;
+    let before = tracker_stats(&t).rows_computed;
+    let mut one = output_new(1);
+    tracker_advance(&mut t, last + 3_600_000_000_000, &mut one);
+    let computed = tracker_stats(&t).rows_computed - before;
+    println!("row computations for the hour: {computed}");
+    // Ticks from `last` to `last` + 3600 s inclusive, one row each; one fits.
+    assert_eq!(one.t_ns.len(), 1);
+    assert_eq!(one.overflow, 36_001 - 1);
+    assert!(computed <= 2, "{computed} rows computed");
+    assert_eq!(tracker_live(&t).len(), 1);
+}
+
+// REQ: OA-TRK-290
+#[test]
+fn rows_lost_to_a_full_table_equal_the_rows_a_large_table_takes_when_tracks_drop_mid_advance() {
+    let cfg = TrackerConfig {
+        tick_ns: 100_000_000,
+        drop_after_ns: 60_000_000_000,
+        ..big_config()
+    };
+    // Two tracks that stop 7 s apart, so they are dropped at different ticks of the advance.
+    let mut ms = base_measurements(0xA00001, 30, 1.0, 2);
+    ms.extend(base_measurements(0xA00002, 37, 1.0, 3));
+    ms.sort_by_key(|m| m.toa_ns);
+    let last = ms.last().unwrap().toa_ns;
+    let go = |capacity: usize| {
+        let mut t = tracker_new(&cfg).unwrap();
+        let mut big = output_new(1 << 20);
+        for m in &ms {
+            tracker_update(&mut t, m, &mut big);
+        }
+        let before = tracker_stats(&t).rows_computed;
+        let mut out = output_new(capacity);
+        tracker_advance(&mut t, last + 300_000_000_000, &mut out);
+        let computed = tracker_stats(&t).rows_computed - before;
+        (t, out, computed)
+    };
+    let (t_big, big, computed_big) = go(1 << 20);
+    let (t_one, one, computed_one) = go(1);
+    assert_eq!(big.overflow, 0);
+    assert_eq!(one.t_ns.len(), 1);
+    assert_eq!(one.overflow + 1, big.t_ns.len() as u64);
+    // The tracker ends in the same state.
+    assert_eq!(tracker_live(&t_one), tracker_live(&t_big));
+    assert_eq!(tracker_stats(&t_one).ticks, tracker_stats(&t_big).ticks);
+    assert_eq!(
+        tracker_stats(&t_one).ended[usize::from(END_DROPPED)],
+        tracker_stats(&t_big).ended[usize::from(END_DROPPED)]
+    );
+    assert_eq!(computed_big, big.t_ns.len() as u64);
+    assert!(computed_one <= 2, "{computed_one} rows computed");
 }
 
 // REQ: OA-TRK-012
