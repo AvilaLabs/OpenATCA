@@ -22,6 +22,10 @@ pub const LEGACY_RECORD_LEN: usize = 64;
 /// Most records in one frame: the largest count that keeps the payload (header plus records)
 /// under the 4 MiB OAF1 limit, rounded down to a round number.
 pub const MAX_ROWS_PER_FRAME: usize = 50_000;
+/// The earliest report time a record may carry: 2000-01-01T00:00Z, ns since the Unix epoch.
+pub const TIME_MIN_NS: i64 = 946_684_800_000_000_000;
+/// The first time past the accepted range: 2100-01-01T00:00Z, ns since the Unix epoch.
+pub const TIME_MAX_NS: i64 = 4_102_444_800_000_000_000;
 /// Most records in one frame of the first layout, which has the shorter record.
 pub const LEGACY_MAX_ROWS: usize = 60_000;
 const _: () = assert!(PAYLOAD_HEADER_LEN + LEGACY_MAX_ROWS * LEGACY_RECORD_LEN <= 4 * 1024 * 1024);
@@ -193,7 +197,7 @@ fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<u8> {
     Some(anom)
 }
 
-/// Decodes one record. `None` if its position or flags cannot be read (the record has no
+/// Decodes one record. `None` if its time, position or flags cannot be read (the record has no
 /// meaning); otherwise the row with every minor field that was out of range made absent or
 /// `unknown`, and the anomaly bits saying what was changed.
 fn decode_row(b: &[u8], legacy: bool) -> Option<(Row, u8)> {
@@ -226,7 +230,8 @@ fn decode_row(b: &[u8], legacy: bool) -> Option<(Row, u8)> {
     };
     let mut anom = decode_measurements(b, &mut row, legacy)?;
     // Without a readable position or flags (stale, new leg) the record has no meaning.
-    let ok = (-900_000_000..=900_000_000).contains(&row.lat_e7)
+    let ok = (TIME_MIN_NS..TIME_MAX_NS).contains(&row.time_ns)
+        && (-900_000_000..=900_000_000).contains(&row.lat_e7)
         && (-1_800_000_000..=1_800_000_000).contains(&row.lon_e7)
         && row.flags & !(F_GROUND | 15) == 0;
     if !ok {
@@ -279,6 +284,8 @@ pub struct PayloadCounts {
     pub first_dropped: Option<usize>,
     /// Kept records whose source type was not a known one (stored as `unknown`).
     pub unknown_source: usize,
+    /// Of the dropped records, those whose report time was outside `TIME_MIN_NS..TIME_MAX_NS`.
+    pub bad_time: usize,
     /// Kept records with a measurement out of range (left absent).
     pub bad_measurement: usize,
     /// Kept records with a reserved byte that was not zero (ignored).
@@ -343,6 +350,9 @@ pub fn decode_payload_lenient(
             }
             None => {
                 c.dropped += 1;
+                let t = rd(rec, 24).map(i64::from_le_bytes);
+                c.bad_time +=
+                    usize::from(t.is_some_and(|t| !(TIME_MIN_NS..TIME_MAX_NS).contains(&t)));
                 c.first_dropped.get_or_insert(i);
             }
         }

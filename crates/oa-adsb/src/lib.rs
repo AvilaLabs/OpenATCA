@@ -139,6 +139,7 @@ pub use frames::{
     decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
     PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN,
     MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
+    TIME_MAX_NS, TIME_MIN_NS,
 };
 pub use speed::{
     category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,

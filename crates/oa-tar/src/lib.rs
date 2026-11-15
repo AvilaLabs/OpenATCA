@@ -425,11 +425,13 @@ impl<R: Read> TarReader<R> {
                 Ok(p) => p,
                 Err(e) => return self.fail(e),
             };
+            let is_ext = matches!(parsed.typeflag, b'L' | b'K' | b'x' | b'g');
+            // A pending PAX size belongs to the next entry that is not itself an extension record.
             let mut size = parsed.size;
-            if let Some(s) = pax_size {
+            if let Some(s) = pax_size.filter(|_| !is_ext) {
                 size = s;
             }
-            if matches!(parsed.typeflag, b'L' | b'K' | b'x' | b'g') {
+            if is_ext {
                 // A record over the per-record limit is refused by `read_meta` with its own error.
                 meta_records += 1;
                 meta_bytes = meta_bytes.saturating_add(size.min(usize::MAX as u64) as usize);

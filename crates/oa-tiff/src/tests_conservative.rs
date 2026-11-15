@@ -6,6 +6,8 @@
 )]
 //! Tests of the warning-grade terrain maxima.
 
+use crate::conservative::collect;
+use crate::grid::check_polygon;
 use crate::*;
 
 const D: f64 = 0.01;
@@ -714,4 +716,74 @@ fn infinite_samples_make_a_conservative_maximum_incomplete() {
         }
         other => panic!("not incomplete: {other:?}"),
     }
+}
+
+/// A flat grid on a one arc-second lattice, four samples across, with its corner at (40, -90).
+fn one_arc_second() -> Grid {
+    let mut g = flat(4, 4, 100.0);
+    g.dlat = 1.0 / 3600.0;
+    g.dlon = 1.0 / 3600.0;
+    g
+}
+
+// REQ: OA-TIFF-087
+#[test]
+fn a_polygon_too_large_for_the_work_budget_is_refused_before_any_cell_is_visited() {
+    let g = one_arc_second();
+    // 12 by 12 degrees: about 1.87e9 cells, under the sample limit, times the vertices.
+    let poly = [(40.0, -90.0), (40.0, -78.0), (28.0, -78.0), (28.0, -90.0)];
+    let visits = std::cell::Cell::new(0u64);
+    let hit = |_: f64, _: f64| {
+        visits.set(visits.get() + 1);
+        true
+    };
+    let bbox = check_polygon(&poly).unwrap();
+    assert_eq!(
+        collect(std::slice::from_ref(&g), bbox, poly.len(), &hit),
+        Err(QueryError::TooMuchWork)
+    );
+    assert_eq!(visits.get(), 0);
+    // The public entry point refuses the same query, and a polygon of many vertices with it.
+    assert_eq!(
+        grid_max_in_polygon_conservative(&g, &poly),
+        Err(QueryError::TooMuchWork)
+    );
+    let many: Vec<(f64, f64)> = (0..10_000)
+        .map(|i| {
+            let a = f64::from(i) * std::f64::consts::TAU / 10_000.0;
+            (34.0 + 6.0 * a.sin(), -84.0 + 6.0 * a.cos())
+        })
+        .collect();
+    assert_eq!(
+        grid_max_in_polygon_conservative(&g, &many),
+        Err(QueryError::TooMuchWork)
+    );
+    // The same cells with a constant-cost test are within the budget and are visited.
+    let visits_ok = std::cell::Cell::new(0u64);
+    let small = (40.0 - 0.01, 40.0, -90.0, -90.0 + 0.01);
+    let hit_ok = |_: f64, _: f64| {
+        visits_ok.set(visits_ok.get() + 1);
+        false
+    };
+    assert!(collect(std::slice::from_ref(&g), small, 0, &hit_ok).is_ok());
+    assert!(visits_ok.get() > 0);
+}
+
+// REQ: OA-TIFF-087
+#[test]
+fn an_ordinary_sector_sized_query_is_within_the_work_budget() {
+    // A 20-vertex sector 3 nm across on a one arc-second lattice, and a 1 nm radius on a 1/3
+    // arc-second one: well under the budget, and they answer.
+    let g = one_arc_second();
+    let sector: Vec<(f64, f64)> = (0..20)
+        .map(|i| {
+            let a = f64::from(i) * std::f64::consts::TAU / 20.0;
+            (39.95 + 0.025 * a.sin(), -89.95 + 0.025 * a.cos())
+        })
+        .collect();
+    assert!(grid_max_in_polygon_conservative(&g, &sector).is_ok());
+    let mut fine = flat(2, 2, 100.0);
+    fine.dlat = 1.0 / 10_800.0;
+    fine.dlon = 1.0 / 10_800.0;
+    assert!(grid_max_in_radius_conservative(&fine, 39.99, -89.99, 1.0).is_ok());
 }

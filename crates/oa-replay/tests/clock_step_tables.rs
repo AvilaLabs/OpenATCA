@@ -250,7 +250,8 @@ fn the_stale_mark_is_part_of_the_state_hash() {
 #[test]
 fn a_step_too_large_to_measure_is_refused_counted_and_leaves_the_clock() {
     let mut p = small_pipeline(64);
-    let now = i64::MAX / 2;
+    // The latest report time the ADS-B decoder accepts is just under 4.1e18 ns.
+    let now = 4_000_000_000_000_000_000;
     for k in 0..10 {
         tick(&mut p, now + k);
     }

@@ -97,7 +97,7 @@ fn lerp(a0: f64, a1: f64, t0: i64, t1: i64, t: i64) -> f64 {
     if t1 == t0 {
         return a0;
     }
-    a0 + (a1 - a0) * ((t - t0) as f64 / (t1 - t0) as f64)
+    a0 + (a1 - a0) * (t.saturating_sub(t0) as f64 / t1.saturating_sub(t0) as f64)
 }
 
 /// Truth for `addr` at `t_ms` (Unix milliseconds): position and velocity from the smoother,
@@ -143,7 +143,7 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     };
     let (k_r, tr) = if tl == t { (k, tl) } else { (k + 1, tk1) };
     let bracket = truth.cfg.bracket_ms * NS_PER_MS;
-    if t - tl > bracket || tr - t > bracket {
+    if t.saturating_sub(tl) > bracket || tr.saturating_sub(t) > bracket {
         return TruthQuery::NoNearbyReport;
     }
     let Some((x, p)) = interp(&v, k, t, truth.cfg.accel_q) else {

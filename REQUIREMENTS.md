@@ -28,6 +28,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-CSV-002** Fields are accessed by header name; a missing column is an error naming it.
 - **OA-CSV-003** Errors report the 1-based physical line number of the offending record.
 - **OA-CSV-004** Rejects a record whose field count differs from the header's.
+- **OA-CSV-005** A UTF-8 byte order mark is skipped however the reader splits it across reads, and bytes that
+  start like one but are not one are read as data.
 
 ### Geodesy (oa-geo)
 
@@ -1391,6 +1393,8 @@ frame of their feed has been fed (as the ADS-B table is).
   never moved by a clock step; the seven-day span of replay time is moved by it, forward or back, so a step
   never shortens a tombstone's protection (a redelivered old NEW is still refused after a forward correction
   past the seven days).
+- **OA-RPL-264** When a merge or an after-frame hook ends the run with an error, the frame and gzip error
+  counts found so far are already in the pipeline's own counts, and the error is still returned.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
@@ -1568,6 +1572,9 @@ frame of their feed has been fed (as the ADS-B table is).
   value at the point it is read, not a coordinate.
 - **OA-TIFF-086** A `GDAL_NODATA` text that parses to an infinity (`inf`, `1e999`) is refused; only a
   finite number or the text `nan` is a nodata value.
+- **OA-TIFF-087** A conservative query whose work (lattice cells times the larger of 1 and the polygon
+  vertices, plus the tiles) is over `MAX_QUERY_WORK` is refused with `TooMuchWork` before any cell is
+  visited.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -1655,6 +1662,8 @@ frame of their feed has been fed (as the ADS-B table is).
   content; a chain longer than either is refused with a typed `TooManyMeta` error carrying the
   offset and the reader then refuses further calls, so a caller never waits on an unbounded run
   of extension headers. The default ceilings are 64 records and 1 MiB.
+- **OA-TAR-059** A pending PAX `size` override applies only to the next header that is not an extension
+  record: a long-name, long-link or PAX record that follows keeps the size in its own header.
 
 ### ADS-B history (oa-adsb)
 
@@ -1796,6 +1805,9 @@ frame of their feed has been fed (as the ADS-B table is).
   plain digits, with no sign.
 - **OA-ADSB-170** The supported speed envelope `SPEED_ENVELOPE_KT` is the highest hard cap of any category
   (4,088 kt) and `SPEED_ENVELOPE_MPS` is the same in metres per second.
+- **OA-ADSB-171** A payload record whose report time is before 2000-01-01T00:00Z or at or after
+  2100-01-01T00:00Z (`TIME_MIN_NS`, `TIME_MAX_NS`) is dropped and counted (`dropped`, `bad_time`); the strict
+  decoder refuses the payload.
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
@@ -2239,6 +2251,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   frame's chart) is refused as too uncertain, never returned as a sample.
 - **OA-TRUTH-042** A `--accel-q` or `--sigma-scale` value of `oa-truth-check` that is not a finite number
   above zero is a usage error, before the clip is read.
+- **OA-TRUTH-043** A difference of two report times that does not fit an `i64` never panics: the builder
+  splits the leg there, and queries and the smoother saturate it.
 
 ## M2 — Benchmark harness (oa-bench)
 

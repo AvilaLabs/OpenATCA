@@ -65,7 +65,9 @@
 
 use crate::grid::{check_polygon, grid_sample, in_polygon, valid_coord};
 use crate::METRES_PER_NM;
-use crate::{Grid, Peak, QueryError, TileSet, MAX_QUERY_SAMPLES, MAX_RADIUS_NM, MAX_TILES};
+use crate::{
+    Grid, Peak, QueryError, TileSet, MAX_QUERY_SAMPLES, MAX_QUERY_WORK, MAX_RADIUS_NM, MAX_TILES,
+};
 use std::collections::BTreeSet;
 
 /// WGS 84 semi-major axis, metres.
@@ -166,10 +168,12 @@ fn place(tiles: &[Grid]) -> Result<Vec<Placed<'_>>, QueryError> {
 }
 
 /// Visits every sample of the reference lattice inside the bounding box (widened by one step)
-/// that `hit` accepts, and looks each up across the tiles.
-fn collect(
+/// that `hit` accepts, and looks each up across the tiles. `vertices` is the cost of one `hit`
+/// call (zero for a test of constant cost); the work is checked before any cell is visited.
+pub(crate) fn collect(
     tiles: &[Grid],
     bbox: (f64, f64, f64, f64),
+    vertices: usize,
     hit: &dyn Fn(f64, f64) -> bool,
 ) -> Result<TerrainMax, QueryError> {
     let placed = place(tiles)?;
@@ -182,6 +186,11 @@ fn collect(
     let cells = (c_hi - c_lo + 1.0) * (r_hi - r_lo + 1.0);
     if !(cells.is_finite() && cells <= MAX_QUERY_SAMPLES as f64) {
         return Err(QueryError::TooManySamples);
+    }
+    // Every cell runs `hit` once, which for a polygon walks every edge.
+    let work = cells * vertices.max(1) as f64 + tiles.len() as f64;
+    if work > MAX_QUERY_WORK as f64 {
+        return Err(QueryError::TooMuchWork);
     }
     let (c_lo, c_hi, r_lo, r_hi) = (c_lo as i64, c_hi as i64, r_lo as i64, r_hi as i64);
     // Only tiles that reach the node range are looked at.
@@ -340,6 +349,7 @@ fn radius_conservative(
             lon - dlon_box,
             lon + dlon_box,
         ),
+        0,
         &hit,
     )
 }
@@ -371,7 +381,7 @@ fn polygon_conservative(tiles: &[Grid], poly: &[(f64, f64)]) -> Result<TerrainMa
     let hit = |la: f64, lo: f64| {
         rect_touches_polygon(poly, la - sdlat, la + sdlat, lo - sdlon, lo + sdlon)
     };
-    collect(tiles, bbox, &hit)
+    collect(tiles, bbox, poly.len(), &hit)
 }
 
 /// True when the closed rectangle (latitude `y0..=y1`, longitude `x0..=x1`) shares a point with

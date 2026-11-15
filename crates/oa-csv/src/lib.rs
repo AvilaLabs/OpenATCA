@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 
 /// Largest accepted record, in raw bytes, counting quotes, delimiters and embedded newlines.
 /// The longest real NASR record is a few kilobytes; 1 MiB leaves a wide margin while bounding
@@ -262,7 +262,7 @@ enum State {
 /// A streaming CSV reader over any `BufRead`.
 // A7.2: cold struct, size guard waived
 pub struct Reader<R: BufRead> {
-    reader: R,
+    reader: Replay<R>,
     source: String,
     limits: Limits,
     header: Header,
@@ -291,8 +291,7 @@ impl<R: BufRead> Reader<R> {
         limits: Limits,
     ) -> Result<Self, CsvError> {
         let source = source.into();
-        let mut reader = reader;
-        skip_bom(&mut reader).map_err(|e| io_error(&source, 1, &e))?;
+        let mut reader = skip_bom(reader).map_err(|e| io_error(&source, 1, &e))?;
         let mut next_line = 1;
         let raw =
             read_raw(&mut reader, &source, &limits, &mut next_line)?.ok_or_else(|| CsvError {
@@ -414,20 +413,74 @@ fn io_error(source: &str, line: u64, e: &io::Error) -> CsvError {
     }
 }
 
-fn skip_bom<R: BufRead>(reader: &mut R) -> io::Result<()> {
-    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-    loop {
-        match reader.fill_buf() {
-            Ok(buf) => {
-                if buf.len() >= BOM.len() && buf.starts_with(&BOM) {
-                    reader.consume(BOM.len());
-                }
-                return Ok(());
+/// A reader with a few bytes put back in front of it.
+struct Replay<R> {
+    held: [u8; 2],
+    pos: usize,
+    len: usize,
+    inner: R,
+}
+
+impl<R: Read> Read for Replay<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if let Some(rest) = self.held.get(self.pos..self.len).filter(|r| !r.is_empty()) {
+            let n = rest.len().min(out.len());
+            if let (Some(dst), Some(src)) = (out.get_mut(..n), rest.get(..n)) {
+                dst.copy_from_slice(src);
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+            self.pos += n;
+            return Ok(n);
+        }
+        self.inner.read(out)
+    }
+}
+
+impl<R: BufRead> BufRead for Replay<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos < self.len {
+            return Ok(self.held.get(self.pos..self.len).unwrap_or(&[]));
+        }
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        if self.pos < self.len {
+            self.pos = (self.pos + amt).min(self.len);
+        } else {
+            self.inner.consume(amt);
         }
     }
+}
+
+/// Skips a UTF-8 byte order mark however the reader splits it across fills. Bytes that start
+/// like a mark but are not one are put back in front of the reader, so they are read as data.
+fn skip_bom<R: BufRead>(mut reader: R) -> io::Result<Replay<R>> {
+    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+    let mut held = [0u8; 2];
+    let mut matched = 0;
+    while matched < BOM.len() {
+        let next = match reader.fill_buf() {
+            Ok(buf) => buf.first().copied(),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if next.is_none() || next != BOM.get(matched).copied() {
+            break;
+        }
+        reader.consume(1);
+        if let Some(h) = held.get_mut(matched) {
+            *h = BOM.get(matched).copied().unwrap_or(0);
+        }
+        matched += 1;
+    }
+    // A whole mark is dropped; a partial one is replayed.
+    let len = if matched == BOM.len() { 0 } else { matched };
+    Ok(Replay {
+        held,
+        pos: 0,
+        len,
+        inner: reader,
+    })
 }
 
 /// Validates UTF-8 per field and returns (start line, text, field end offsets).

@@ -1336,3 +1336,46 @@ fn a_state_that_converts_to_a_non_finite_position_is_never_returned_as_truth() {
     let ok = two_knots([1.0e4, 100.0, 0.0, 2.0e4, 50.0, 0.0], p);
     assert!(matches!(truth_at(&ok, ADDR, t_ms), TruthQuery::Ok(_)));
 }
+
+fn at_ns(t: i64) -> Row {
+    let mut r = good(ADDR, 0.0, LAT0, LON0);
+    r.time_ns = t;
+    r
+}
+
+// REQ: OA-TRUTH-043
+#[test]
+fn reports_whose_times_differ_by_more_than_an_i64_do_not_overflow_the_builder() {
+    let mut r = Reports::default();
+    reports_push(&mut r, &at_ns(-4_700_000_000_000_000_000));
+    reports_push(&mut r, &at_ns(4_700_000_000_000_000_000));
+    let (t, s) = build(&r);
+    assert!(balanced(&s));
+    assert_eq!(s.rows_in, 2);
+    // The two reports are far apart in time: they are two short legs, not one.
+    assert_eq!(leg_count(&t), 0);
+    // Queries at the extremes of the clock refuse and do not overflow.
+    for t_ms in [i64::MIN, i64::MAX, 4_700_000_000_000] {
+        assert!(!matches!(truth_at(&t, ADDR, t_ms), TruthQuery::Ok(_)));
+    }
+}
+
+// REQ: OA-TRUTH-043
+#[test]
+fn a_leg_of_reports_at_the_extremes_of_the_clock_is_built_without_overflow() {
+    let mut r = Reports::default();
+    let mut cfg = DEFAULT_CONFIG;
+    cfg.min_leg_points = 3;
+    for k in 0..4 {
+        reports_push(&mut r, &at_ns(i64::MAX - 4_000_000_000 + k * 1_000_000_000));
+    }
+    for k in 0..4 {
+        reports_push(&mut r, &at_ns(i64::MIN + k * 1_000_000_000));
+    }
+    let (t, s) = build_truth(&r, &cfg).unwrap();
+    assert!(balanced(&s));
+    assert_eq!(leg_count(&t), 2);
+    for t_ms in [i64::MIN, i64::MAX, 0] {
+        let _ = truth_at(&t, ADDR, t_ms);
+    }
+}

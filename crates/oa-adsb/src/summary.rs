@@ -102,7 +102,7 @@ pub fn summarize(r: &Reports) -> Summary {
                         continue;
                     };
                     let nm = distance_nm(plat, plon, lat, lon);
-                    let hours = (t - pt) as f64 / 3.6e12;
+                    let hours = t.saturating_sub(pt) as f64 / 3.6e12;
                     // Same instant: any displacement is infinite speed; the distance floor
                     // decides whether it is noise.
                     let kt = if hours > 0.0 {

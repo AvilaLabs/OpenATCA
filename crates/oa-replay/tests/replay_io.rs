@@ -15,7 +15,7 @@ use oa_feed::Kind;
 use oa_replay::report::{drain_checkpoint_lines, summary, write_failure_message, write_summary};
 use oa_replay::{
     new_pipeline, pipeline_drain_checkpoints, process_frame, replay_hash, replay_state_digest,
-    run_streams_with, spec_from_bytes, FeedKind, Pipeline, PipelineConfig, PipelineError,
+    run_streams_with, spec_from_bytes, ErrKind, FeedKind, Pipeline, PipelineConfig, PipelineError,
 };
 
 const T0: i64 = DAY * 1_000_000;
@@ -257,6 +257,30 @@ fn a_failing_hook_stops_the_run_at_that_frame() {
     );
     assert_eq!(r.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(p.frames[FeedKind::Sfdps as usize], 5);
+}
+
+// REQ: OA-RPL-264
+#[test]
+fn a_failing_hook_still_leaves_the_framing_error_counts_in_the_pipeline() {
+    // Damaged framing before a valid frame, then a hook that fails after that frame.
+    let mut bytes = b"JUNKJUNKJUNK".to_vec();
+    for k in 0..3i64 {
+        bytes.extend(frame(3, k as u64, T0 + k * NS, b"state=up\n"));
+    }
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    let r = run_streams_with(
+        &mut p,
+        vec![spec_from_bytes(FeedKind::Sfdps, vec![bytes])],
+        64,
+        &mut |_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
+    );
+    assert_eq!(r.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(p.frames[FeedKind::Sfdps as usize], 1);
+    assert!(
+        p.errors[ErrKind::FrameBadMagic as usize] >= 1,
+        "{:?}",
+        p.errors
+    );
 }
 
 // REQ: OA-RPL-255
