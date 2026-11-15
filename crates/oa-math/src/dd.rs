@@ -17,7 +17,7 @@ pub(crate) const fn dd(hi: f64, lo: f64) -> Dd {
 }
 
 /// Veltkamp splitter, 2^27 + 1.
-const SPLITTER: f64 = 134_217_729.0;
+pub(crate) const SPLITTER: f64 = 134_217_729.0;
 
 /// Exact sum: `hi + lo == a + b`, `hi = fl(a + b)`.
 pub(crate) fn two_sum(a: f64, b: f64) -> Dd {

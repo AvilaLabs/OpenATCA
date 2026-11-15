@@ -109,3 +109,22 @@ pub(crate) fn scale_round(d: Dd, k: i32) -> f64 {
     };
     negate_if(r, neg)
 }
+
+/// The rounding test of Ziv's method, shared by every fast path. The true value is known to lie
+/// within `err` (absolute) of `h + l`, where `|l|` is at most a few ulps of `h`. Returns the
+/// double nearest to `h + l` when that double is also the one nearest to every point of the
+/// interval, and `None` when a rounding boundary may lie inside it (the caller then runs the
+/// double-double path). `fl` is monotone, so `fl(h + l - err) == fl(h + l + err)` pins
+/// `fl(v)` for every `v` between them; `l + err` and `l - err` each round once, by at most
+/// 2^-53 of a quantity of the size of an ulp of `h`, which every caller's `err` (at least
+/// 2^-90 of `h`, in practice 2^-60) dwarfs: the bounds are written with a factor of two or more
+/// to spare. A NaN anywhere makes the comparison false, so it also returns `None`.
+pub(crate) fn round_test(h: f64, l: f64, err: f64) -> Option<f64> {
+    let a = h + (l + err);
+    let b = h + (l - err);
+    if a == b {
+        Some(a)
+    } else {
+        None
+    }
+}

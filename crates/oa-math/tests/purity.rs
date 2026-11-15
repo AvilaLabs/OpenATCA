@@ -59,6 +59,9 @@ const BANNED: &[&str] = &[
     "next_down",
 ];
 
+/// The lines that use `%` on integers (bit positions in the Payne-Hanek code).
+const INTEGER_REM: &[&str] = &["let s = pos % 64;", "let s = lo % 64;", "let s = lz % 64;"];
+
 fn sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
@@ -99,6 +102,22 @@ fn sources_call_no_platform_maths_function() {
                     }
                 }
             }
+            // A bare `f64::sin` used as a value (`.map(f64::sin)`) reaches libm too.
+            for b in BANNED {
+                for ty in ["f64::", "f32::"] {
+                    let pat = format!("{ty}{b}");
+                    for (at, _) in code.match_indices(&pat) {
+                        let next = code[at + pat.len()..].chars().next();
+                        if !next.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                            hits.push(format!("{name}:{}: {pat} as a value or call", n + 1));
+                        }
+                    }
+                }
+            }
+            // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below.
+            if code.contains('%') && !INTEGER_REM.contains(&code.trim()) {
+                hits.push(format!("{name}:{}: `%` (float remainder is fmod)", n + 1));
+            }
             for word in [
                 "libm",
                 "intrinsics::",
@@ -131,6 +150,19 @@ fn the_check_itself_finds_a_planted_call() {
         .filter(|b| planted.contains(&format!(".{b}(")) || planted.contains(&format!("f64::{b}(")))
         .collect();
     assert_eq!(found.len(), 2);
+}
+
+// REQ: OA-MATH-019
+#[test]
+fn the_check_also_finds_a_bare_path_and_a_float_remainder() {
+    let value = "let v: Vec<f64> = xs.iter().copied().map(f64::sin).collect();";
+    // the same matcher as the source scan: `f64::sin` followed by a non-identifier character
+    let found = value.match_indices("f64::sin").any(|(at, m)| {
+        let next = value[at + m.len()..].chars().next();
+        !next.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    });
+    assert!(found);
+    assert!(!INTEGER_REM.contains(&"let r = x % 2.0;"));
 }
 
 // REQ: OA-MATH-019
