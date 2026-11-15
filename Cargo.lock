@@ -49,6 +49,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-airspace",
+ "oa-awc",
  "oa-feed",
  "oa-fixm",
  "oa-geo",

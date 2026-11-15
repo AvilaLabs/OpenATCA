@@ -34,7 +34,7 @@ use crate::legacy::{
 };
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
-use crate::truth::{AirportRef, Env, Truth, TruthSample};
+use crate::truth::{AirportRef, Env, Truth, TruthSample, STANDARD_INHG};
 
 /// Look-ahead bin names, 5 minutes each to 60.
 pub const LOOKAHEAD_NAMES: [&str; 12] = [
@@ -501,6 +501,9 @@ enum Ground {
     No,
     /// Near a threshold but no barometric altitude to say whether it is low.
     AltitudeUnknown,
+    /// Near a threshold with a pressure altitude but no altimeter setting for the field within
+    /// 60 minutes to bring it to the field elevation's reference (feet above mean sea level).
+    NoAltimeter,
 }
 
 /// A truth landing or takeoff.
@@ -511,18 +514,33 @@ pub enum GroundEvent {
     /// The leg ends (starts) near a threshold, but with no barometric altitude: nothing shows the
     /// aircraft was on the ground.
     AltitudeUnknown,
+    /// The leg ends (starts) near a threshold with a pressure altitude, but the field has no
+    /// altimeter setting within 60 minutes: the altitude cannot be compared with the field
+    /// elevation.
+    NoAltimeter,
     /// No such event in the leg.
     NotFound,
 }
 
-fn on_ground_at_airport(s: &TruthSample, ap: &AirportRef, cfg: &EventConfig) -> Ground {
+/// Whether the truth sample at `t_ms` is on the ground at the airport. The sample's altitude is
+/// pressure altitude; the field elevation is feet above mean sea level, so the altitude is first
+/// brought to feet above mean sea level with the field's altimeter setting nearest in time:
+/// `pressure_alt + (inHg - 29.92) * 1000`. Without a setting the two are never compared.
+fn on_ground_at_airport(s: &TruthSample, t_ms: i64, ap: &AirportRef, cfg: &EventConfig) -> Ground {
     if !near_threshold(ap, s.lat, s.lon, cfg.runway_radius_m) {
         return Ground::No;
     }
-    match s.baro_alt_ft {
-        None => Ground::AltitudeUnknown,
-        Some(a) if a <= ap.elev_ft + cfg.ground_margin_ft => Ground::Yes,
-        Some(_) => Ground::No,
+    let Some(a) = s.baro_alt_ft else {
+        return Ground::AltitudeUnknown;
+    };
+    let Some(inhg) = ap.altimeter_near(t_ms) else {
+        return Ground::NoAltimeter;
+    };
+    let msl_ft = f64::from(a) + (inhg - STANDARD_INHG) * 1000.0;
+    if msl_ft <= f64::from(ap.elev_ft) + f64::from(cfg.ground_margin_ft) {
+        Ground::Yes
+    } else {
+        Ground::No
     }
 }
 
@@ -530,6 +548,7 @@ fn ground_event(g: Ground, t: i64) -> GroundEvent {
     match g {
         Ground::Yes => GroundEvent::At(t),
         Ground::AltitudeUnknown => GroundEvent::AltitudeUnknown,
+        Ground::NoAltimeter => GroundEvent::NoAltimeter,
         Ground::No => GroundEvent::NotFound,
     }
 }
@@ -552,7 +571,7 @@ pub fn landing_time(
             break;
         }
         if let Ok(s) = (truth.query)(l.addr, t) {
-            return ground_event(on_ground_at_airport(&s, ap, cfg), t);
+            return ground_event(on_ground_at_airport(&s, t, ap, cfg), t);
         }
     }
     GroundEvent::NotFound
@@ -576,7 +595,7 @@ pub fn takeoff_time(
             break;
         }
         if let Ok(s) = (truth.query)(l.addr, t) {
-            return ground_event(on_ground_at_airport(&s, ap, cfg), t);
+            return ground_event(on_ground_at_airport(&s, t, ap, cfg), t);
         }
     }
     GroundEvent::NotFound
@@ -655,6 +674,10 @@ pub fn f3_tfms(
                         "truth altitude unknown at the takeoff point, ground not confirmed"
                     },
                 );
+                continue;
+            }
+            GroundEvent::NoAltimeter => {
+                exclude(ex, scope, "no altimeter setting for the field");
                 continue;
             }
             GroundEvent::NotFound => {
@@ -1002,6 +1025,9 @@ enum NoCrossing {
     /// known (no truth between the two sides for longer than [`oa_truth::LEG_GAP_MS`], or no unit
     /// at a probe inside the interval).
     TruthGap,
+    /// A truth position in the window lies in the areas of more than one unit: the unit there
+    /// is not known and no name order decides it.
+    Ambiguous,
 }
 
 /// The truth crossing of the boundary from unit `from` to unit `to` nearest the time `around`,
@@ -1018,9 +1044,16 @@ fn boundary_crossing(
     around: i64,
     cfg: &EventConfig,
 ) -> Result<i64, NoCrossing> {
+    // An ambiguous probe (inside several units' areas) is unknown for the search, and the
+    // handoff is excluded as ambiguous whatever else the window holds.
+    let ambiguous = std::cell::Cell::new(false);
     let unit = |t: i64| -> Option<[u8; 8]> {
         let s = (truth.query)(addr, t).ok()?;
-        (env.unit_at)(s.lat, s.lon, s.baro_alt_ft)
+        let u = (env.unit_at)(s.lat, s.lon, s.baro_alt_ft);
+        if u.is_none() && (env.unit_ambiguous)(s.lat, s.lon) {
+            ambiguous.set(true);
+        }
+        u
     };
     let step = cfg.handoff_step_ms.max(1);
     let mut t = around - cfg.handoff_window_ms;
@@ -1046,6 +1079,7 @@ fn boundary_crossing(
         t += step;
     }
     match (best, seen_gap) {
+        _ if ambiguous.get() => Err(NoCrossing::Ambiguous),
         (Some(c), _) => Ok(c),
         (None, true) => Err(NoCrossing::TruthGap),
         (None, false) => Err(NoCrossing::NotSeen),
@@ -1125,6 +1159,11 @@ pub fn h1_handoffs(
             Err(NoCrossing::NotSeen) => {
                 exclude(ex, "H1", "no boundary crossing in truth near the event")
             }
+            Err(NoCrossing::Ambiguous) => exclude(
+                ex,
+                "H1",
+                "truth position inside more than one ARTCC area, unit ambiguous",
+            ),
         }
     }
     let mut r = new_result(

@@ -1,10 +1,12 @@
-//! Flat-earth helpers for error vectors. Core (pure). Errors between an ERAM position and the
-//! truth position are at most a few kilometres, so a local east-north tangent plane at the truth
-//! point is exact to better than 1e-4 of the error; `enu` and `from_enu` are exact inverses of
-//! each other, which the synthetic self-test relies on.
+//! Geodesic helpers for error vectors and distances. Core (pure). Distances come from the
+//! WGS-84 inverse problem of `oa-geo`, so they hold near the poles and over long baselines;
+//! `enu` is the local east-north frame at a point (geodesic azimuth and distance from it), and
+//! `enu` and `from_enu` are inverses of each other, which the synthetic self-test relies on.
 
-/// Mean earth radius, metres.
-pub const EARTH_R_M: f64 = 6_371_008.8;
+use std::sync::OnceLock;
+
+use oa_geo::{wgs84, Ellipsoid, LatLon};
+
 /// Metres per nautical mile.
 pub const NM_M: f64 = 1852.0;
 /// Metres per second per knot.
@@ -23,29 +25,48 @@ pub fn wrap180(deg: f64) -> f64 {
     d
 }
 
-/// East and north metres of `(lat, lon)` in the tangent plane at `(lat0, lon0)`.
+/// The WGS-84 ellipsoid with its series tables, built once.
+fn ellipsoid() -> &'static Ellipsoid {
+    static E: OnceLock<Ellipsoid> = OnceLock::new();
+    E.get_or_init(wgs84)
+}
+
+/// East and north metres of `(lat, lon)` in the local frame at `(lat0, lon0)`: the WGS-84
+/// geodesic distance and azimuth from the origin, split into east and north (an azimuthal
+/// equidistant frame, so the length of `(e, n)` is the geodesic distance). `(NaN, NaN)` when
+/// either position is not a valid latitude and longitude.
 pub fn enu(lat0: f64, lon0: f64, lat: f64, lon: f64) -> (f64, f64) {
-    let e = EARTH_R_M * lat0.to_radians().cos() * wrap180(lon - lon0).to_radians();
-    let n = EARTH_R_M * (lat - lat0).to_radians();
-    (e, n)
-}
-
-/// The inverse of [`enu`].
-pub fn from_enu(lat0: f64, lon0: f64, e: f64, n: f64) -> (f64, f64) {
-    let lat = lat0 + (n / EARTH_R_M).to_degrees();
-    let c = lat0.to_radians().cos();
-    let lon = if c.abs() < 1e-9 {
-        lon0
-    } else {
-        lon0 + (e / (EARTH_R_M * c)).to_degrees()
+    let (Ok(a), Ok(b)) = (LatLon::new(lat0, lon0), LatLon::new(lat, lon)) else {
+        return (f64::NAN, f64::NAN);
     };
-    (lat, lon)
+    match ellipsoid().inverse(a, b) {
+        Ok(r) => {
+            let az = r.azimuth1_deg.to_radians();
+            (r.distance_m * az.sin(), r.distance_m * az.cos())
+        }
+        Err(_) => (f64::NAN, f64::NAN),
+    }
 }
 
-/// Distance in metres between two points that are not far apart (tangent plane at the first).
+/// The inverse of [`enu`]: the position at east `e` and north `n` metres of `(lat0, lon0)`.
+/// `(NaN, NaN)` when the origin or an offset is not valid.
+pub fn from_enu(lat0: f64, lon0: f64, e: f64, n: f64) -> (f64, f64) {
+    let Ok(a) = LatLon::new(lat0, lon0) else {
+        return (f64::NAN, f64::NAN);
+    };
+    match ellipsoid().direct(a, e.atan2(n).to_degrees(), e.hypot(n)) {
+        Ok(d) => (d.position.lat(), d.position.lon()),
+        Err(_) => (f64::NAN, f64::NAN),
+    }
+}
+
+/// Geodesic distance in metres on WGS-84; NaN when a position is not a valid latitude and
+/// longitude.
 pub fn dist_m(lat_a: f64, lon_a: f64, lat_b: f64, lon_b: f64) -> f64 {
-    let (e, n) = enu(lat_a, lon_a, lat_b, lon_b);
-    e.hypot(n)
+    let (Ok(a), Ok(b)) = (LatLon::new(lat_a, lon_a), LatLon::new(lat_b, lon_b)) else {
+        return f64::NAN;
+    };
+    ellipsoid().inverse(a, b).map_or(f64::NAN, |r| r.distance_m)
 }
 
 /// Heading in degrees clockwise from north of the vector (east, north), 0 to 360.

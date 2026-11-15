@@ -2280,7 +2280,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   excluded and counted.
 - **OA-BENCH-016** TFMS arrival-estimate error against the truth landing (last truth point on the ground
   within 1 NM of a destination threshold) and departure-estimate error against the truth takeoff are
-  reported by look-ahead.
+  reported by look-ahead. On the ground is judged in feet above mean sea level (OA-BENCH-110).
 - **OA-BENCH-017** Route conformance (R1) reports the truth distance from ERAM's expanded route in force at
   each sample, the share of flight time beyond 2 NM, and lists each flight with time beyond it (bounded,
   the rest counted).
@@ -2325,7 +2325,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   frames that did not decode, and its SHA-256 is the input hash.
 - **OA-BENCH-032** The airspace lookups come from the M0 model: fixes and navaids by identifier (not
   airports), airports by ICAO and FAA identifier with elevation and thresholds, the model's ARTCC as the
-  zone, and the containing ARTCC as the unit.
+  zone, and the containing ARTCC as the unit where exactly one contains the point (OA-BENCH-111).
 - **OA-BENCH-033** `oa-bench --adsb <clip.oaf>` runs end to end: on a hand-made clip and SFDPS fixture
   whose track is 500 m left of the truth, T1 recovers -500 m (cross-track, positive right) within 2 m with
   every sample paired; the report holds the truth section, the clip hash and the gate values, a repeat gives
@@ -2470,6 +2470,21 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-103** A fix passage whose stretch inside the radius begins or ends at a hole in the truth has no
   closest-approach time. The sum of squared milliseconds behind a histogram RMS that leaves the range of a
   `u128` gives an RMS of NaN, not a wrapped or panicking one.
+- **OA-BENCH-110** The takeoff and landing ground test never compares pressure altitude with field elevation
+  (feet above mean sea level). The truth altitude becomes `pressure_alt + (altimeter inHg - 29.92) * 1000`
+  with the field's METAR altimeter setting nearest in time and within 60 minutes (the earlier of two equally
+  near; a value outside 27 to 32 inHg is no setting). A field with no such setting excludes the event as
+  "no altimeter setting for the field" and counts it; nothing is assumed (`oa-bench --metar <dir>` supplies
+  the settings, and without it every such event is excluded).
+- **OA-BENCH-111** A point inside the areas of more than one ARTCC has no unit: facility-name order never
+  chooses. A handoff whose truth window holds such a point is excluded from H1 as "truth position inside more
+  than one ARTCC area, unit ambiguous" and counted, and the report lists each overlapping facility pair with
+  the number of such positions examined.
+- **OA-BENCH-112** Distances and east-north error components use the WGS-84 geodesic inverse and direct
+  solutions of `oa-geo`, not a small-distance tangent plane: 89.99 N at 0 E and 180 E are 2233.9 m apart
+  with the other point due north, 90 degrees along the equator is 10 018 754 m, and a mid-latitude pair
+  agrees with the old tangent plane to a tenth of a percent. An invalid position gives NaN, which the pairing
+  excludes and counts.
 
 ## Winds aloft (oa-wind)
 

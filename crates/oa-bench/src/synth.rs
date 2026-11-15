@@ -367,6 +367,12 @@ pub fn fix_xy(name: &str) -> Option<(f64, f64)> {
     })
 }
 
+/// The standard setting every 30 minutes for a day from the start: the made-up world flies on
+/// pressure altitude equal to altitude above mean sea level.
+fn standard_altimeters() -> Vec<(i64, f64)> {
+    (0..48).map(|k| (T0_MS + k * 1_800_000, 29.92)).collect()
+}
+
 /// The airspace lookups of the world.
 pub fn env() -> Env<'static> {
     Env {
@@ -381,10 +387,12 @@ pub fn env() -> Env<'static> {
             "KLND" => Some(AirportRef {
                 elev_ft: 600,
                 thresholds: vec![from_enu(LAT0, LON0, 50_000.0, 50_000.0)],
+                altimeters: standard_altimeters(),
             }),
             "KDEP" => Some(AirportRef {
                 elev_ft: 400,
                 thresholds: vec![from_enu(LAT0, LON0, -50_000.0, -50_000.0)],
+                altimeters: standard_altimeters(),
             }),
             _ => None,
         },
@@ -392,6 +400,7 @@ pub fn env() -> Env<'static> {
             let (x, y) = enu(LAT0, LON0, lat, lon);
             x.abs() <= ZONE_M && y.abs() <= ZONE_M
         },
+        unit_ambiguous: &|_, _| false,
         unit_at: &|lat, lon, _| {
             let (x, _) = enu(LAT0, LON0, lat, lon);
             Some(if x < 40_000.0 {

@@ -802,3 +802,28 @@ fn a_plan_identifier_joins_in_any_case_or_padding_on_every_path() {
     let (m, ex) = score(&t, &two_trips(), Some(500), &env());
     assert!(m.iter().all(|r| total_n(r) == 2), "{ex:?}");
 }
+
+// REQ: OA-BENCH-110
+#[test]
+fn an_event_at_a_field_with_no_altimeter_setting_is_excluded_and_counted() {
+    let t = trips(true);
+    let base = env();
+    let airport = |n: &str| {
+        (base.airport)(n).map(|mut a| {
+            a.altimeters.clear();
+            a
+        })
+    };
+    let e = Env {
+        airport: &airport,
+        ..base
+    };
+    let (m, ex) = score(&t, &two_trips(), Some(500), &e);
+    assert_eq!(total_n(&m[1]) + total_n(&m[2]), 0);
+    for scope in ["F3-arrival", "F3-departure"] {
+        assert_eq!(
+            ex_count(&ex, scope, "no altimeter setting for the field"),
+            2
+        );
+    }
+}

@@ -559,3 +559,40 @@ fn fix_and_airport_names_look_up_in_any_case_or_padding() {
         assert!(l.airport(form).is_some(), "{form:?}");
     }
 }
+
+/// `model_with_zone` with ZBB widened to overlap ZAA between 88.5 W and 88 W, and named so that
+/// name order picks ZAA in the overlap.
+fn model_with_overlap() -> oa_airspace::model::Model {
+    let mut m = model_with_zone();
+    let start = m.vertices.len() as u32;
+    // Rows 4..8 of the vertex list are ZBB's square; move its west edge to -88.5.
+    let zbb_start = start as usize - 4;
+    for k in [0usize, 3] {
+        m.vertices[zbb_start + k].lon = (-88.5_f64 * 1e7).round() as i32;
+    }
+    m
+}
+
+// REQ: OA-BENCH-111
+#[test]
+fn a_point_inside_two_artcc_areas_is_ambiguous_not_the_first_by_name() {
+    let l = lookup_from_model(&model_with_overlap());
+    assert_eq!(l.unit_at(41.5, -88.7), Some(*b"ZAA\0\0\0\0\0"), "ZAA only");
+    assert_eq!(l.unit_at(41.5, -87.5), Some(*b"ZBB\0\0\0\0\0"), "ZBB only");
+    assert_eq!(l.unit_at(41.5, -88.25), None, "in both: no unit");
+}
+
+// REQ: OA-BENCH-111
+#[test]
+fn ambiguous_positions_are_counted_by_facility_pair_and_do_not_depend_on_the_names() {
+    let l = lookup_from_model(&model_with_overlap());
+    assert!(!l.unit_ambiguous(41.5, -88.7));
+    assert!(!l.unit_ambiguous(41.5, -87.5));
+    assert!(l.overlap_counts().is_empty());
+    assert!(l.unit_ambiguous(41.5, -88.25));
+    assert!(l.unit_ambiguous(41.6, -88.1));
+    assert_eq!(
+        l.overlap_counts(),
+        vec![(("ZAA".to_string(), "ZBB".to_string()), 2)]
+    );
+}
