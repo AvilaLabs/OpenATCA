@@ -1,7 +1,8 @@
 //! Geodesic inverse and direct problems against GeographicLib's GeodTest data (OA-GEO-003/4/5).
 //!
 //! `fixtures/geodtest_sample.dat` is a 31-line excerpt that always runs. If the environment
-//! variable OPENATCA_GEODTEST names `GeodTest-short.dat` (10,000 lines) the whole set runs too.
+//! variable OPENATCA_GEODTEST names `GeodTest-short.dat` (10,000 lines) or the full `GeodTest.dat`
+//! (500,000 lines, CC0, DOI 10.5281/zenodo.32156) the whole set runs too.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -55,6 +56,7 @@ struct Maxima {
     inv_az_well_conditioned: f64,
     dir_pos: f64,
     dir_az2: f64,
+    dir_az2_excess: f64,
 }
 
 /// Azimuth tolerance for the inverse problem. Near the end of the geodesic's conjugate point
@@ -63,14 +65,21 @@ struct Maxima {
 /// the azimuth by about noise / gap, where gap is the distance short of the conjugate point.
 /// The tolerance is 1e-8 degrees plus that term with noise = 5e-9 m (the ulp of a longitude
 /// near 180 degrees is 3.2e-9 m), with the gap floored at 1 micrometre.
+///
+/// A very short geodesic is ill-conditioned the same way at the near end: rounding the end
+/// points to doubles (the ulp of a latitude near 90 degrees is 1.4e-14 degrees, 1.6e-9 m) moves
+/// the azimuth by about noise / s12, which is 2.7e-8 degrees at s12 = 3.4 m (the full GeodTest
+/// set has geodesics that short; GeodTest-short has none). The same noise term with the
+/// distance floored at 1 micrometre is added.
 fn azimuth_tolerance(e: &Ellipsoid, c: &Case) -> f64 {
+    let short = (5e-9 / c.s12.max(1e-6)).to_degrees();
     if c.a12 >= 180.0 {
         // Printed as exactly 180: the symmetric family (azimuths 90 and 90), which is not
         // ill-conditioned and must meet the plain tolerance.
-        return 1e-8;
+        return 1e-8 + short;
     }
     let gap = ((180.0 - c.a12).to_radians() * e.equatorial_radius()).max(1e-6);
-    1e-8 + (5e-9 / gap).to_degrees()
+    1e-8 + (5e-9 / gap).to_degrees() + short
 }
 
 fn run(e: &Ellipsoid, cases: &[Case]) -> Maxima {
@@ -102,7 +111,17 @@ fn run(e: &Ellipsoid, cases: &[Case]) -> Maxima {
         m.dir_pos = m.dir_pos.max(dpos);
         m.dir_az2 = m.dir_az2.max(daz);
         assert!(dpos < 1e-3, "line {i}: direct position error {dpos} m");
-        assert!(daz < 1e-8, "line {i}: direct azimuth error {daz} deg");
+        // Azimuth is measured from the meridian, which turns quickly near a pole: a position
+        // error of dpos metres at a distance r from the pole moves the azimuth by about
+        // dpos / r. The full GeodTest set has end points about 20 m from a pole (GeodTest-short
+        // has none). The plain 1e-8 degrees applies away from the poles.
+        let pole_m = (90.0 - c.p2.lat().abs()).to_radians() * e.equatorial_radius();
+        let daz_tol = 1e-8 + (dpos.max(5e-9) / pole_m.max(1e-6)).to_degrees();
+        m.dir_az2_excess = m.dir_az2_excess.max(daz - daz_tol);
+        assert!(
+            daz < daz_tol,
+            "line {i}: direct azimuth error {daz} deg (tol {daz_tol})"
+        );
     }
     m
 }
@@ -114,7 +133,9 @@ fn full_set() -> Option<Vec<Case>> {
             Some(parse(&text))
         }
         Err(_) => {
-            eprintln!("OPENATCA_GEODTEST not set: skipping the full 10,000-line GeodTest run");
+            eprintln!(
+                "OPENATCA_GEODTEST not set: skipping the GeodTest-short or full GeodTest run"
+            );
             None
         }
     }
@@ -149,10 +170,14 @@ fn direct_matches_geodtest_sample() {
 #[test]
 fn full_geodtest_short() {
     let Some(cases) = full_set() else { return };
-    assert_eq!(cases.len(), 10_000);
+    assert!(
+        cases.len() == 10_000 || cases.len() == 500_000,
+        "GeodTest-short (10,000 lines) or GeodTest (500,000 lines), got {}",
+        cases.len()
+    );
     let e = wgs84();
     let m = run(&e, &cases);
-    eprintln!("GeodTest-short maxima over {} lines: {m:?}", cases.len());
+    eprintln!("GeodTest maxima over {} lines: {m:?}", cases.len());
     assert!(m.inv_s < 1e-3 && m.dir_pos < 1e-3);
     assert!(m.inv_az_well_conditioned < 1e-8);
 }
