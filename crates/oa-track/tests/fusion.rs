@@ -670,10 +670,15 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // 6,039 to 6,039, 2,080 to 2,080 (none changed in these), 8,110 to 8,109 (1 dropped, none gained,
 // none with another way). Applied and jump-rejected counts are the same except one fewer applied in
 // the two-radar run; the mean normalised innovation moved by 2e-5 to 2e-4 of itself.
+// Re-pinned when the simulator's sub-millisecond advance of a plot moved from a flat offset on
+// a sphere to the WGS-84 meridian and prime-vertical radii (OA-SIM-028): each simulated plot moves
+// by well under a centimetre, so only the bits of the inputs changed. Checked by building this
+// commit with the simulator alone put back: the earlier digests return. Rows per run: 38,970,
+// 31,741, 151,234, 156,929; plots 6,261 and 2,214, none refused.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "74244208e302c7249a21ec6838d5bbc32f5531cad9a0001d983913e990df5cc1",
-    "2ec144c347f90ac5dee17c2fb966c2a60fad5c6efca7cc282e2893679614a18b",
-    "9fe0b7190212d49c651a5e90274ed441eca1cb32c4a695d0d7ab42861a22aa1c",
-    "e3ab1ae5c579b69aa7faa8cf70f1c822e464378d9905c6fbc7c2ab8bc8217816",
-    "43363471167164753e8146b434106526a99a9fb1b1bf1d345ac2d9f7bcb03315",
+    "1defbdcd8816da21f41a72b99b1e81f10f234bff5a708e2f92b1969ae0c72286",
+    "af68018747f343ae23ecf15d84522a4686859e5aa2baa5364b9dbb44418680e7",
+    "d3ab56575470e50b6a4940180bc6aa38fcd6681df485b10de8acad89405be646",
+    "13705015723c6542e606035cbf53cfcce197eefc1a517118dd1ce168dee19ac3",
+    "a124b85e6d38e83ac24d1050b65bc27936d163fafcf89b6b87637efaa2ece0ab",
 ];
