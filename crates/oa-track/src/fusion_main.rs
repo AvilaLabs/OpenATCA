@@ -370,7 +370,7 @@ fn section_base(
             if sensors == Sensors::Mixed && v.registration {
                 if let Some((st, hist)) = cell.run.reg.first() {
                     reg_lines.push(format!(
-                        "    world {}: est range {:+.1} m (sigma {:.1}), az {:+.4} deg (sigma {:.4}); true {:+.1} m, {:+.4} deg; used {} of {} eligible-or-rejected residuals; {} published estimates",
+                        "    world {}: est range {:+.1} m (sigma {:.1}), az {:+.4} deg (sigma {:.4}); true {:+.1} m, {:+.4} deg; used {} of {} eligible-or-rejected residuals ({} awaiting references, {} disagreeing with the other references, {} restarts on a shift); {} published estimates",
                         1 + w,
                         st.range_m,
                         st.var_range_m2.sqrt(),
@@ -380,6 +380,9 @@ fn section_base(
                         bias.1,
                         st.used,
                         st.used + st.rejected,
+                        st.building,
+                        st.inconsistent,
+                        st.resets,
                         hist.len()
                     ));
                 }
@@ -412,6 +415,20 @@ fn section_base(
         if si == 0 {
             esassp_row("raw plots (no tracker)", &raw, rep, &format!("{tag}|raw"));
         }
+        // No RMS table stands alone: the run's duplicate and false tracks go beside it.
+        let counts: Vec<String> = variants
+            .iter()
+            .enumerate()
+            .filter_map(|(vi, v)| {
+                let a = accs.get(vi).and_then(|r| r.first())?;
+                Some(format!("{} {}/{}", &v.name[..2], a.dups, a.false_tracks))
+            })
+            .collect();
+        let _ = writeln!(
+            rep.txt,
+            "  duplicate / false tracks of the same runs (dupT/falseT, all aircraft, not only those scored above): {}",
+            counts.join(", ")
+        );
     }
     let _ = writeln!(
         rep.txt,
@@ -493,7 +510,7 @@ fn section_sweep(
     };
     let _ = writeln!(
         rep.txt,
-        "\nBIAS SWEEP  {name}  (1 world, position RMS m over all aircraft{}; truth exact)",
+        "\nBIAS SWEEP  {name}  (1 world, position RMS m over all aircraft, each with its duplicate / false track counts dupT/falseT{}; truth exact)",
         if sensors == Sensors::Mixed {
             "; then radar-only aircraft only"
         } else {
@@ -502,7 +519,11 @@ fn section_sweep(
     );
     let mut line = format!("  {:>8} {:>8}", "rng bias", "az bias");
     for v in &variants {
-        let _ = write!(line, " | {:>15}", v.name);
+        let _ = write!(
+            line,
+            " | {:>22}",
+            format!("{} (RMS dupT/falseT)", &v.name[..2])
+        );
     }
     if sensors == Sensors::Mixed {
         for v in &variants {
@@ -543,7 +564,16 @@ fn section_sweep(
                 let c = run_cell(&built, &radar, sensors, v, 0, &plots, &kinds, &adsb)?;
                 let mut p = Pools::default();
                 add_table(&mut p, &c.all, false);
-                let _ = write!(line, " | {:>15}", fmt_rms(p.pos[0].rms()));
+                let _ = write!(
+                    line,
+                    " | {:>22}",
+                    format!(
+                        "{} {}/{}",
+                        fmt_rms(p.pos[0].rms()),
+                        c.id.duplicates,
+                        c.id.false_tracks
+                    )
+                );
                 if let Some(r) = &c.rad {
                     let mut pr = Pools::default();
                     add_table(&mut pr, r, false);
@@ -563,9 +593,11 @@ fn section_sweep(
                 }
                 let _ = writeln!(
                     rep.csv,
-                    "sweep|{name},{},{br},{ba},{:.2}",
+                    "sweep|{name},{},{br},{ba},{:.2},{},{}",
                     v.name,
-                    p.pos[0].rms()
+                    p.pos[0].rms(),
+                    c.id.duplicates,
+                    c.id.false_tracks
                 );
             }
             let _ = writeln!(rep.txt, "{line}{rad_cols}{est}");
@@ -850,6 +882,16 @@ fn section_clip(rep: &mut Report, path: &str) -> Result<(), String> {
             if si == 0 {
                 esassp_row("raw plots (no tracker)", &raw, rep, &format!("{tag}|raw"));
             }
+            let counts: Vec<String> = variants
+                .iter()
+                .zip(cells.iter())
+                .map(|(v, c)| format!("{} {}/{}", &v.name[..2], c.id.duplicates, c.id.false_tracks))
+                .collect();
+            let _ = writeln!(
+                rep.txt,
+                "  duplicate / false tracks of the same runs (dupT/falseT, all aircraft, not only those scored above): {}",
+                counts.join(", ")
+            );
         }
         let _ = writeln!(
             rep.txt,

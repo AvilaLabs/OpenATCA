@@ -74,11 +74,14 @@ rate (1 s) for consumers.
 - ADS-B reports are keyed by 24-bit address. The address is evidence, not proof: two aircraft on
   one address, a jump, or a position contradicting other sensors are integrity events (§4).
 - Radar plots: global nearest neighbour over Mahalanobis-gated candidates, solved jointly per
-  scan. A Mode S address on the plot is a hard constraint; a Mode A code alone never assigns a
-  plot (LS-609).
+  scan. A Mode S address on the plot is a hard constraint inside a wide gate (a gross mismatch is
+  counted, not applied), and a track takes at most one plot per scan; a Mode A code alone never assigns
+  a plot (LS-609).
 - **Identity is held under ambiguity.** When two tracks share a gate, kinematics alone never swap
   their identities; a swap needs identity evidence (address). This is the direct answer to track
-  jumps (LS-102, LS-604) and is tested with crossing and parallel traffic. If the swap rate on the
+  jumps (LS-102, LS-604) and is tested with crossing and parallel traffic. A track whose last two plots
+  were all held takes the next one on kinematics (counted): without that, two aircraft that stay together
+  would never update their tracks. If the swap rate on the
   recorded day is not zero, JPDA for closely spaced radar-only targets is the next step.
 
 **Initiation, coasting, drop.** Tentative to confirmed by M-of-N: 2 of 3 for ADS-B with a
@@ -89,7 +92,14 @@ parameter is a named constant with the measurement behind it.
 **Fusion.** Measurement-level: every sensor's measurements go into one track, which gives better
 accuracy than fusing per-sensor tracks and keeps errors uncorrelated (ESASSP R5). Radar
 registration: each radar's range and azimuth biases are estimated continuously against ADS-B
-tracks of high integrity, and the estimates are published per radar.
+tracks of high integrity, and the estimates are published per radar. One reference is never trusted
+alone: several distinct references must agree (median of the others), so a spoofed ADS-B track cannot
+shift a radar, and a persistent shift of the agreed residuals (a realigned radar) restarts the estimate,
+counted and published. Only reports the tracker accepted count toward a reference. Time is part of
+the layer's input: advancing it with nothing pending still runs the tracker (coasting, dropping), and a
+bucket once processed is closed to later inputs, which are counted late. The layer's bookkeeping is
+bounded by the tracker's capacity (the association covers every live track up to the limit the layer
+refuses a larger tracker at).
 
 ## 4. ADS-B integrity and spoofing
 

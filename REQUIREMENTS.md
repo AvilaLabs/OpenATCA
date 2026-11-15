@@ -2207,7 +2207,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   track and rebuilds the state at a late measurement by applying the ring's measurements to the anchor; on
   three aircraft whose reports arrive scrambled by up to 14 positions, with wild positions and exact and
   different-sensor repeats, every output bit and every counter equals those recorded from the
-  implementation that stored a full filter state in each ring slot.
+  implementation that stored a full filter state in each ring slot (recorded again at OA-TRK-077 and
+  OA-TRK-078, which changed five duplicate counts).
 - **OA-TRK-041** A tracker filled to `MAX_TRACKS` aircraft with more reports each than the ring holds
   refuses the next aircraft under its own counter, re-filters a late report of a track in the full table,
   and reallocates no buffer.
@@ -2308,3 +2309,68 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-069** A time of applicability or an advance beyond about 146 years either side of the epoch
   is refused and counted under its own reason, and a tick must be between 1 ms and a quarter of the
   range, so rounding to a tick and stepping from tick to tick cannot overflow or stop advancing.
+- **OA-TRK-070** The assignment solver refuses a gate that is not a finite positive number, with a typed
+  error and every plot left unassigned (a NaN or infinite penalty makes the padded problem meaningless);
+  the same solver then works on a valid gate.
+- **OA-TRK-071** The assignment (union-find, component grouping, Hungarian method, greedy fallback, the
+  pair lookup and the ambiguity pass) runs in buffers allocated at start: their addresses and capacities
+  are the same after solves of every shape, and an input with more tracks, plots or pairs than the buffers
+  hold is refused with a typed error (counted by the fusion layer), never grown into. Fusion's own
+  association buffers are likewise unchanged across a run with holds and forced resolutions.
+- **OA-TRK-072** A plot with a Mode S address is applied to the track of that address only inside a wide
+  gate (chi-square, 3 degrees of freedom, tail about 8e-11); a gross mismatch is counted and not applied. A
+  track takes at most one plot per radar and bucket: of several Mode S plots the nearest, and no anonymous
+  plot once a Mode S plot has taken the track.
+- **OA-TRK-073** A flooded bucket costs a bounded amount: plots of one radar beyond 16,384 in a bucket,
+  pairs beyond the pair limit and exact gate tests beyond the test limit are counted and not processed;
+  the ambiguity and pair-lookup passes are one pass over the pairs, so 20,000 plots over 20,000 tracks are
+  associated in under 3 s in a debug build (the quadratic scans took over 3 s of that alone and grow with
+  the square), and a call that finds no input ready does not scan the queue.
+- **OA-TRK-074** Radar registration uses a reference aircraft only after it has made several residuals and
+  at least four distinct references are current, and only when its mean residual agrees with the median of
+  the others'; a few references that misreport their position (two of twelve, 250 m) do not move the
+  estimate, which stays within 10 m and 0.015 degree of the truth, and two references alone teach nothing.
+  Through the fusion layer, two of eight ADS-B aircraft displaced 200 m leave the estimate within 20 m.
+- **OA-TRK-075** A step change of a radar's bias (a realignment, 50 m and 0.05 degree to 200 m and 0.2
+  degree) is followed within a few scans of the references: a CUSUM over the residuals that passed the
+  agreement test restarts the estimate at their mean, counted and published with each estimate; an honest
+  steady radar over 9,600 residuals is never restarted.
+- **OA-TRK-076** Two aircraft flying together 90 m apart, every plot of which is ambiguous, are not starved:
+  a track whose last two plots were held takes the next on the assignment's evidence (counted), where the
+  plain hold applied none of the 74; both tracks are confirmed and no third track is made.
+- **OA-TRK-077** A report is a duplicate when any report in the track's ring has its time and sensor, not
+  only the newest or the one just before it: a repeat of one sensor's report after another sensor's report
+  at the same instant is counted and not applied again, in order and out of order.
+- **OA-TRK-078** A late report applied by re-filtering keeps the track's run of rejected reports, so the
+  rejection that would have re-initialised the filter still does.
+- **OA-TRK-079** A spill refuses a directory that exists and has anything in it, creates its column files
+  new, and on drop removes only those files (by name) and then the directory if it is empty; a file put
+  into the directory meanwhile survives.
+- **OA-TRK-080** Reading a spilled run checks every column file's size against the row count and refuses a
+  truncated or extended column of any of the 15, with a typed error naming the column and the bytes found
+  and expected.
+- **OA-TRK-081** A plot in the overhead cone (within about three degrees of the vertical, where the
+  height barely depends on the elevation) is converted, by bisection on the elevation, to within 5 mm of
+  the point it was made from; a plot whose altitude is higher than its range reaches by up to 500 m (the
+  range error of a radar) converts to the point under the vertical, and only a larger discrepancy is
+  refused, with its own error.
+- **OA-TRK-082** Time passes for the tracks when every sensor is quiet: advancing the fusion layer to a
+  time with nothing pending still runs the tracker to the end of the last completed bucket, so a track
+  with no reports gets its fixed-rate rows, is marked coasting and is dropped at the drop time.
+- **OA-TRK-083** The antipode of a frame's origin is not projected onto the origin: it is placed half the
+  sphere's circumference away, so a report of a position on the far side of the earth is a jump the
+  tracker refuses, not a coherent update.
+- **OA-TRK-084** The fusion layer's bookkeeping does not grow with the run: the per-address registration
+  table is cut back to the tracks the tracker holds whenever it reaches the tracker's capacity (an
+  address the tracker refused is not recorded), and the radar-only track records stop at a limit, counted,
+  and can be drained by the caller.
+- **OA-TRK-085** Every live track up to the configured capacity takes part in association: the
+  association's limit is not below the tracker's capacity, and a tracker configured for more than the
+  limit is refused when the fusion layer is made.
+- **OA-TRK-086** The digest of a spilled run equals the digest of the same rows in memory when rows have
+  no altitude: the altitude columns of such a row hash as zero in both.
+- **OA-TRK-087** A report the tracker did not take (a repeat, or one refused for its covariance) does not
+  count toward a track's eligibility as a registration reference.
+- **OA-TRK-088** A bucket already processed is not processed again: inputs for it that arrive after the
+  advance past it are counted late and dropped, so batching the calls does not change what is
+  associated.

@@ -67,10 +67,15 @@ fn parts(f: &Frame, lat: f64, lon: f64) -> (f64, f64, f64) {
     (s_e, s_n, cosc)
 }
 
-/// Degrees to `(east_m, north_m)`.
+/// Degrees to `(east_m, north_m)`. The origin maps to zero. The origin's antipode, where every
+/// direction is the same distance away, maps to half the sphere's circumference due east: far
+/// from the origin, as it is, and not onto it (a point there would pass every distance check).
 pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     let (s_e, s_n, cosc) = parts(f, lat_deg.to_radians(), lon_deg.to_radians());
     let sinc = (s_e * s_e + s_n * s_n).sqrt();
+    if sinc < 1e-12 && cosc < 0.0 {
+        return (f.r * std::f64::consts::PI, 0.0);
+    }
     let k = if sinc < 1e-12 {
         1.0
     } else {
@@ -149,6 +154,31 @@ mod tests {
             let (la2, lo2) = unproject(&f, x, y);
             assert!((la - la2).abs() < 1e-9 && (lo - lo2).abs() < 1e-9);
         }
+    }
+
+    // REQ: OA-TRK-083
+    #[test]
+    fn the_antipode_of_the_origin_is_far_from_it_not_on_it() {
+        let f = frame_new(0.0, 0.0);
+        let half = std::f64::consts::PI * f.r;
+        for (la, lo) in [(0.0, 180.0), (0.0, -180.0)] {
+            let (x, y) = project(&f, la, lo);
+            assert!((x.hypot(y) - half).abs() < 1.0, "{la} {lo}: {x} {y}");
+        }
+        // Near it the distance is the right one too, and the origin itself is still zero.
+        let (x, y) = project(&f, 0.0, 179.9);
+        assert!(
+            (x.hypot(y) - half).abs() < 0.2 * f.r.to_radians(),
+            "{x} {y}"
+        );
+        assert_eq!(project(&f, 0.0, 0.0), (0.0, 0.0));
+        // The same away from the equator.
+        let g = frame_new(41.9, -88.3);
+        let (x, y) = project(&g, -41.9, 91.7);
+        assert!(
+            (x.hypot(y) - std::f64::consts::PI * g.r).abs() < 1.0,
+            "{x} {y}"
+        );
     }
 
     #[test]
