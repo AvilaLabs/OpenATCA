@@ -11,7 +11,7 @@
 //! The report also checks the plan-identifier hypothesis against the fallback: for flights found
 //! both ways, the SFDPS flight must be the same one.
 
-use crate::rows::{flights_len, name_str, Rows};
+use crate::rows::{flag, flights_len, name_str, Rows};
 use oa_fixm::{code_str, has_field, Events, Field};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -25,8 +25,11 @@ pub struct LinkReport {
     /// SFDPS flights that carry a flight plan identifier.
     pub sfdps_with_plan_id: u64,
     pub tfms_rows: u64,
-    /// Distinct TFMS flight reference numbers.
+    /// Distinct TFMS flight reference numbers, plus one for each row that carries none.
     pub tfms_flights: u64,
+    /// TFMS rows with no `flightRef`: each is its own flight (nothing says which flight it
+    /// belongs to), never folded into the flight whose reference is 0.
+    pub tfms_rows_without_ref: u64,
     pub tfms_with_gufi: u64,
     pub tfms_without_gufi: u64,
     /// TFMS `gufi`s shaped like a UUID (the only form that could equal an SFDPS `gufi`).
@@ -128,10 +131,11 @@ pub fn link_flights(ev: &Events, rows: &Rows) -> LinkReport {
 
     // TFMS flights, one per flight reference, folded over their rows.
     let fl = &rows.flights;
-    let mut flights: BTreeMap<u64, Flight> = BTreeMap::new();
+    let mut flights: BTreeMap<(bool, u64), Flight> = BTreeMap::new();
     for i in 0..flights_len(fl) {
-        let (Some(&r), Some(acid), Some(gufi), Some(dep), Some(arr)) = (
+        let (Some(&r), Some(&flags), Some(acid), Some(gufi), Some(dep), Some(arr)) = (
             fl.flight_ref.get(i),
+            fl.flags.get(i),
             fl.acid.get(i),
             fl.gufi.get(i),
             fl.dep.get(i),
@@ -139,7 +143,15 @@ pub fn link_flights(ev: &Events, rows: &Rows) -> LinkReport {
         ) else {
             continue;
         };
-        let f = flights.entry(r).or_default();
+        // A reference of 0 is a real one when the message carried it; a row without one is
+        // keyed by its own index so rows of different flights are not merged.
+        let key = if flags & flag::FLIGHT_REF != 0 {
+            (true, r)
+        } else {
+            rep.tfms_rows_without_ref += 1;
+            (false, i as u64)
+        };
+        let f = flights.entry(key).or_default();
         for (dst, src) in [
             (&mut f.gufi, gufi.as_slice()),
             (&mut f.acid, acid.as_slice()),

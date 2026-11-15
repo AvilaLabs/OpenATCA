@@ -158,7 +158,11 @@ qualifier, airports and remarks in the text table.
   decimal attributes. A latitude without a longitude is refused.
 * The altitude `simpleAltitude` is in hundreds of feet with an optional trailing letter in
   track messages (read as a status letter; kept as a code); the decoder stores feet.
-* `speed` in track messages is knots; `filedTrueAirSpeed` is knots.
+* `speed` in track messages is knots; `filedTrueAirSpeed` is knots. The sample has whole numbers
+  only, but the decoder does not assume it: it stores a speed in thousandths with its unit read
+  from the form (a whole number or `ddd.d` is knots, `d.dd` and `Mddd` are Mach, `Nddd`-style is
+  knots), keeps any other digit-and-dot shape with unit unknown and counts it, and refuses the
+  message only for a byte that cannot be part of a speed.
 * The three `rvsmData` attributes are booleans (`true` / `false`); stored with a third state for
   absent.
 * The empty-leaf convention: an empty element such as an unset runway configuration is the

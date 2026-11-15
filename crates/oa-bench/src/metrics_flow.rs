@@ -7,7 +7,9 @@ use crate::assoc::Assoc;
 use crate::geo::dist_m;
 use crate::legacy::{name, Legacy, NONE, NO_TIME};
 use crate::pair::PairTable;
-use crate::stats::{band, group_rows, new_result, MetricResult, Row, COAST_NAMES, MAX_CASES};
+use crate::stats::{
+    band, group_rows, new_result, sort_cases, KeyedCase, MetricResult, Row, COAST_NAMES,
+};
 use crate::thindex::{samples_of, ThIndex};
 use crate::truth::{Env, Truth};
 
@@ -16,57 +18,13 @@ use crate::truth::{Env, Truth};
 pub const MAX_INTERVAL_S: f64 = 600.0;
 
 /// T5: seconds between consecutive position times of one flight, over every flight (no truth
-/// needed). Equal position times (repeats) are counted, not measured.
+/// needed). Equal position times (repeats) are counted, not measured. The intervals are whole
+/// milliseconds and are summed as integers ([`crate::chunked::T5Hists`]), the same way the
+/// chunked scoring sums them, so the two agree to the last bit.
 pub fn t5_publication_interval(leg: &Legacy, ix: &ThIndex) -> MetricResult {
-    let mut vals = Vec::new();
-    let (mut coast, mut bands) = (Vec::new(), Vec::new());
-    let (mut repeats, mut long) = (0u64, 0u64);
-    for f in 0..leg.flights.gufi.len() {
-        let s = samples_of(ix, f as u32);
-        for w in s.windows(2) {
-            let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else {
-                continue;
-            };
-            let (ta, tb) = (
-                leg.th.pos_ms.get(a as usize).copied().unwrap_or(0),
-                leg.th.pos_ms.get(b as usize).copied().unwrap_or(0),
-            );
-            if tb == ta {
-                repeats += 1;
-                continue;
-            }
-            let dt = (tb - ta) as f64 / 1000.0;
-            if dt > MAX_INTERVAL_S {
-                long += 1;
-                continue;
-            }
-            vals.push(dt);
-            coast.push(leg.th.coast.get(b as usize).copied().unwrap_or(0));
-            bands.push(band::of(
-                leg.th
-                    .alt_ft
-                    .get(b as usize)
-                    .copied()
-                    .filter(|&a| a != crate::legacy::NO_ALT),
-            ));
-        }
-    }
-    let mut r = new_result("T5", "publication interval per flight", "s");
-    r.rows = group_rows(
-        &vals,
-        &[
-            ("altitude", &bands, &band::NAMES),
-            ("coast", &coast, &COAST_NAMES),
-        ],
-    );
-    r.scalars
-        .push(("repeated_position_times".into(), repeats as f64));
-    r.scalars
-        .push(("intervals_over_limit_excluded".into(), long as f64));
-    r.notes.push(format!(
-        "intervals above {MAX_INTERVAL_S} s are excluded and counted"
-    ));
-    r
+    let mut h = crate::chunked::T5Hists::default();
+    crate::chunked::t5_add(&mut h, leg, ix);
+    crate::chunked::t5_result(&h)
 }
 
 /// T6: receive time minus position time, seconds (UK-004).
@@ -333,6 +291,22 @@ pub fn t9_association_errors(
     truth: &Truth<'_>,
     cfg: &SwapConfig,
 ) -> MetricResult {
+    let (mut r, mut cases) = t9_keyed(leg, p, truth, cfg);
+    sort_cases(&mut cases);
+    r.cases = cases.into_iter().map(|c| c.1).collect();
+    r
+}
+
+/// [`t9_association_errors`] with its case lines unsorted and uncapped, each with its place in
+/// the list (truth address, then time of the first mismatch), and none in the result. The
+/// chunked scoring merges the lines of its ranges and sorts them once.
+pub fn t9_keyed(
+    leg: &Legacy,
+    p: &PairTable,
+    truth: &Truth<'_>,
+    cfg: &SwapConfig,
+) -> (MetricResult, Vec<KeyedCase>) {
+    let mut cases: Vec<KeyedCase> = Vec::new();
     let mut r = new_result("T9", "association errors (track swaps)", "count");
     let (mut tested, mut mism, mut events, mut flights) = (0u64, 0u64, 0u64, 0u64);
     let mut i = 0usize;
@@ -345,18 +319,21 @@ pub fn t9_association_errors(
         }
         flights += 1;
         let mut run: Vec<(i64, u32, f64)> = Vec::new();
-        let flush = |run: &mut Vec<(i64, u32, f64)>, events: &mut u64, r: &mut MetricResult| {
+        let flush = |run: &mut Vec<(i64, u32, f64)>,
+                     events: &mut u64,
+                     cases: &mut Vec<KeyedCase>| {
             if run.len() >= cfg.min_run {
                 *events += 1;
-                if r.cases.len() < MAX_CASES {
-                    let cs = leg.flights.callsign.get(f as usize).map_or("", |c| name(c));
-                    let (t0, other, d) = run.first().copied().unwrap_or((0, 0, 0.0));
-                    let own = p.addr.get(i).copied().unwrap_or(0);
-                    r.cases.push(format!(
+                let cs = leg.flights.callsign.get(f as usize).map_or("", |c| name(c));
+                let (t0, other, d) = run.first().copied().unwrap_or((0, 0, 0.0));
+                let own = p.addr.get(i).copied().unwrap_or(0);
+                cases.push((
+                    (0, own, t0),
+                    format!(
                         "flight {cs} own {own:06X} follows {other:06X} from {t0} ms for {} samples, {d:.0} m from the other",
                         run.len()
-                    ));
-                }
+                    ),
+                ));
             }
             run.clear();
         };
@@ -399,10 +376,10 @@ pub fn t9_association_errors(
                     mism += 1;
                     run.push((t, a, d));
                 }
-                _ => flush(&mut run, &mut events, &mut r),
+                _ => flush(&mut run, &mut events, &mut cases),
             }
         }
-        flush(&mut run, &mut events, &mut r);
+        flush(&mut run, &mut events, &mut cases);
         i = j;
     }
     r.scalars.push(("flights_tested".into(), flights as f64));
@@ -413,5 +390,5 @@ pub fn t9_association_errors(
         "every {}th paired sample; {} consecutive mismatches make an error; own error above {} m",
         cfg.stride, cfg.min_run, cfg.min_own_error_m
     ));
-    r
+    (r, cases)
 }

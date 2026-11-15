@@ -115,6 +115,80 @@ impl PartialEq for Stats {
     }
 }
 
+/// A floating point sum that is exactly rounded, so it does not depend on the order the values
+/// are added in (Shewchuk's expansion sum, the method of Python's `math.fsum`): the same values
+/// in any order give the same bits. That is what lets a report built from address ranges equal
+/// the one built in one piece. Cold record (A7.2).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExactSum {
+    /// Non-overlapping partial sums, smallest first.
+    partials: Vec<f64>,
+}
+
+impl ExactSum {
+    /// Adds one finite value; a non-finite value is ignored (callers count those).
+    pub fn add(&mut self, mut x: f64) {
+        if !x.is_finite() {
+            return;
+        }
+        let mut k = 0usize;
+        for i in 0..self.partials.len() {
+            let Some(mut y) = self.partials.get(i).copied() else {
+                break;
+            };
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                if let Some(p) = self.partials.get_mut(k) {
+                    *p = lo;
+                }
+                k += 1;
+            }
+            x = hi;
+        }
+        self.partials.truncate(k);
+        self.partials.push(x);
+    }
+
+    /// The sum, correctly rounded.
+    pub fn value(&self) -> f64 {
+        let p = &self.partials;
+        let mut n = p.len();
+        let Some(&top) = p.last() else { return 0.0 };
+        let mut hi = top;
+        let mut lo = 0.0;
+        n -= 1;
+        while n > 0 {
+            let x = hi;
+            n -= 1;
+            let y = p.get(n).copied().unwrap_or(0.0);
+            hi = x + y;
+            lo = y - (hi - x);
+            if lo != 0.0 {
+                break;
+            }
+        }
+        // Round half to even across the discarded partials.
+        let below = n
+            .checked_sub(1)
+            .and_then(|i| p.get(i))
+            .copied()
+            .unwrap_or(0.0);
+        if n > 0 && ((lo < 0.0 && below < 0.0) || (lo > 0.0 && below > 0.0)) {
+            let y = lo * 2.0;
+            let x = hi + y;
+            if y == x - hi {
+                hi = x;
+            }
+        }
+        hi
+    }
+}
+
 /// The nearest-rank percentile of an ascending slice of absolute values.
 pub fn nearest_rank(sorted: &[f64], p: u64) -> f64 {
     let n = sorted.len() as u64;
@@ -128,15 +202,16 @@ pub fn nearest_rank(sorted: &[f64], p: u64) -> f64 {
 /// The statistics of `values`; non-finite values are skipped (the caller counts them).
 pub fn stats_of(values: &[f64]) -> Stats {
     let mut abs: Vec<f64> = Vec::with_capacity(values.len());
-    let mut sum = 0.0;
-    let mut sumsq = 0.0;
+    let mut sum = ExactSum::default();
+    let mut sumsq = ExactSum::default();
     for &v in values {
         if v.is_finite() {
-            sum += v;
-            sumsq += v * v;
+            sum.add(v);
+            sumsq.add(v * v);
             abs.push(v.abs());
         }
     }
+    let (sum, sumsq) = (sum.value(), sumsq.value());
     if abs.is_empty() {
         return Stats::EMPTY;
     }
@@ -179,6 +254,21 @@ pub struct MetricResult {
 
 /// Most cases listed per metric; the rest are counted in a scalar.
 pub const MAX_CASES: usize = 200;
+
+/// The order of a metric's case list: severity (0 is the worst), truth address, time in Unix ms.
+/// The same cases in any order of discovery list the same way, so a run in address ranges lists
+/// what a run in one piece lists.
+pub type CaseKey = (u8, u32, i64);
+
+/// A case line with its place in the list.
+pub type KeyedCase = (CaseKey, String);
+
+/// Sorts `cases` by key (then by text, so equal keys are ordered too) and keeps the first
+/// [`MAX_CASES`].
+pub fn sort_cases(cases: &mut Vec<KeyedCase>) {
+    cases.sort();
+    cases.truncate(MAX_CASES);
+}
 
 /// An empty result for a metric.
 pub fn new_result(id: &'static str, name: &'static str, unit: &'static str) -> MetricResult {

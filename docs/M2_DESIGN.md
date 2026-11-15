@@ -110,6 +110,24 @@ wrong match. Both are changed as a hazard-driven revision of this approved secti
 
 The association method is stored per pair, and every metric can be split by it.
 
+Flagged flights and the headline. The flagged flights are left out of the headline tables T1, T2-raw
+and T4 for whichever system is scored (ERAM or a tracker), because an identity that fails the check
+is not a position error of that system. They could still be where the worst errors are, so the
+headline tables themselves say what was left out: a scalar `flagged_flights_excluded` (flights) and
+`flagged_points_excluded` (paired samples of that table), and a last row, "all associated including
+flagged", over the headline samples and the flagged ones together. The other rows are unchanged. A
+reader gets both numbers from the same table: the one that trusts the identity check and the one
+that does not. The offset-corrected T2 table is a secondary result and has no such row.
+
+A run scored in address ranges (a tracker's output, which is too long to hold at once) gives the same
+report as a run in one piece. The ranges must not overlap and must together cover every key from 0 to
+0xFFFFFFFF, the radar-only tracks keyed from 0x40000000 included; a flight keyed or associated outside
+its range is refused, so no flight is counted twice or left out. Case lists are cut after sorting by
+severity (flagged before kept), truth address and time, and sums are exactly rounded, so neither the
+order the ranges are added in nor the order of the flights changes a byte of the report. A plan-data
+result (F1 to F3, R1, H1) is accepted in a range only when it is exactly what no data gives; a NaN
+is accepted only where the metric had no data to give a number from.
+
 ## 3. Metrics
 
 All metrics are free functions over struct-of-arrays tables of paired samples. Each reports N,

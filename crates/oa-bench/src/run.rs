@@ -2,7 +2,7 @@
 //! the same legacy tables, truth and settings give the same results.
 
 use crate::assoc::{associate, astatus, index_truth, Assoc, AssocConfig};
-use crate::legacy::{plan_index, Legacy};
+use crate::legacy::{plan_index, Legacy, NONE};
 use crate::metrics_event::{
     f1_f2_tbfm, f3_tfms, h1_handoffs, r1_route_conformance, EventConfig, EventCtx,
 };
@@ -10,12 +10,13 @@ use crate::metrics_flow::{
     t5_publication_interval, t6_staleness, t7_t8_presence, t9_association_errors, PresenceConfig,
     SwapConfig,
 };
+use crate::metrics_th::add_flagged_view;
 use crate::metrics_th::{
     t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
     OffsetConfig,
 };
 use crate::pair::{build_pairs, PairConfig};
-use crate::stats::{Exclusions, MetricResult};
+use crate::stats::{sort_cases, Exclusions, KeyedCase, MetricResult};
 use crate::thindex::build_th_index;
 use crate::truth::{Env, Truth};
 
@@ -56,6 +57,8 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         env,
         cfg: &cfg.event,
     };
+    let flagged = flagged_assoc(&assoc);
+    let (fpairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
     let mut m = vec![
         t1_cross_track(&pairs),
         t2_along_raw(&pairs),
@@ -66,6 +69,7 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         t5_publication_interval(leg, &ix),
         t6_staleness(leg),
     ];
+    flagged_views(&mut m, &pairs, &fpairs, &assoc.counts);
     let (t7, t8) = t7_t8_presence(leg, &ix, &assoc, truth, env, &cfg.presence);
     m.push(t7);
     m.push(t8);
@@ -82,8 +86,6 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
     m.push(h1_handoffs(leg, &assoc, truth, env, &cfg.event, &mut ex));
     // Flights whose address association is implausible (or whose only callsign candidate is far
     // away) are not in the primary rows; their errors are published here, never dropped.
-    let flagged = flagged_assoc(&assoc);
-    let (fpairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
     m.extend(flagged_metrics(&fpairs));
     let mut reasons = [0u64; astatus::REASON_NAMES.len()];
     for &r in &assoc.flag_reason {
@@ -92,13 +94,49 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         }
     }
     let mut a = assoc_result(&assoc.counts, &reasons, assoc.unchecked, &cfg.assoc);
-    association_cases(leg, &assoc, &mut a);
+    association_cases(leg, &ix, &assoc, &mut a);
     m.push(a);
     RunOutput {
         metrics: m,
         exclusions: ex,
         assoc,
         pairs: pairs.t_ms.len(),
+    }
+}
+
+/// Flights flagged as implausible (address, address hint or callsign), from the status counts.
+pub(crate) fn flagged_flights(counts: &[u64]) -> u64 {
+    [
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::HINT_IMPLAUSIBLE,
+        astatus::CALLSIGN_IMPLAUSIBLE,
+    ]
+    .iter()
+    .map(|&s| counts.get(usize::from(s)).copied().unwrap_or(0))
+    .sum()
+}
+
+/// The column of a pair table a headline table is of.
+type Pick = fn(&crate::pair::PairTable) -> &[f32];
+
+/// Adds the flagged-flight counts and the "all associated including flagged" row to the headline
+/// tables T1, T2-raw and T4 of `m`.
+pub(crate) fn flagged_views(
+    m: &mut [MetricResult],
+    pairs: &crate::pair::PairTable,
+    fpairs: &crate::pair::PairTable,
+    counts: &[u64],
+) {
+    let n = flagged_flights(counts);
+    let picks: [(&str, Pick); 3] = [
+        ("T1", |p| &p.cross_m),
+        ("T2-raw", |p| &p.along_m),
+        ("T4", |p| &p.alt_err_ft),
+    ];
+    for (id, pick) in picks {
+        if let Some(r) = m.iter_mut().find(|r| r.id == id) {
+            add_flagged_view(r, pairs, fpairs, n, pick);
+        }
     }
 }
 
@@ -173,8 +211,16 @@ fn flagged_table(mut r: MetricResult, id: &'static str, name: &'static str) -> M
     r
 }
 
-/// Lists the flights kept despite failing the tight check and the flagged flights.
-pub(crate) fn association_cases(leg: &Legacy, a: &Assoc, r: &mut MetricResult) {
+/// The case lines of the association: the flights kept despite failing the tight check and the
+/// flagged flights, each with its place in the list (flagged first, then by truth address, then
+/// by the time of the flight's first sample), so the list does not depend on the order of the
+/// flights in the table.
+pub(crate) fn association_case_lines(
+    leg: &Legacy,
+    ix: &crate::thindex::ThIndex,
+    a: &Assoc,
+) -> Vec<KeyedCase> {
+    let mut v = Vec::new();
     for f in 0..a.status.len() {
         let st = a.status.get(f).copied().unwrap_or(0);
         let cs = leg
@@ -182,28 +228,52 @@ pub(crate) fn association_cases(leg: &Legacy, a: &Assoc, r: &mut MetricResult) {
             .callsign
             .get(f)
             .map_or_else(String::new, |c| crate::legacy::name(c).to_string());
-        let line = match st {
-            astatus::GATE_FAILED => format!(
-                "flight {cs}: kept (callsign, {} shared times), {:.0}% inside the 3 NM / 1000 ft check; scored under method 'callsign (failed 3 NM / 1000 ft check)'",
-                a.shared.get(f).copied().unwrap_or(0),
-                a.gate_share.get(f).copied().unwrap_or(f64::NAN) * 100.0
+        let (sev, addr, line) = match st {
+            astatus::GATE_FAILED => (
+                1u8,
+                a.addr.get(f).copied().unwrap_or(NONE),
+                format!(
+                    "flight {cs}: kept (callsign, {} shared times), {:.0}% inside the 3 NM / 1000 ft check; scored under method 'callsign (failed 3 NM / 1000 ft check)'",
+                    a.shared.get(f).copied().unwrap_or(0),
+                    a.gate_share.get(f).copied().unwrap_or(f64::NAN) * 100.0
+                ),
             ),
             astatus::ADDRESS_IMPLAUSIBLE
             | astatus::HINT_IMPLAUSIBLE
-            | astatus::CALLSIGN_IMPLAUSIBLE => format!(
-                "flight {cs}: flagged ({}): {}",
-                astatus::NAMES.get(usize::from(st)).copied().unwrap_or(""),
-                astatus::REASON_NAMES
-                    .get(usize::from(a.flag_reason.get(f).copied().unwrap_or(0)))
-                    .copied()
-                    .unwrap_or("")
+            | astatus::CALLSIGN_IMPLAUSIBLE => (
+                0u8,
+                a.flag_addr.get(f).copied().unwrap_or(NONE),
+                format!(
+                    "flight {cs}: flagged ({}): {}",
+                    astatus::NAMES.get(usize::from(st)).copied().unwrap_or(""),
+                    astatus::REASON_NAMES
+                        .get(usize::from(a.flag_reason.get(f).copied().unwrap_or(0)))
+                        .copied()
+                        .unwrap_or("")
+                ),
             ),
             _ => continue,
         };
-        if r.cases.len() < crate::stats::MAX_CASES {
-            r.cases.push(line);
-        }
+        let t = crate::thindex::samples_of(ix, f as u32)
+            .first()
+            .and_then(|&s| leg.th.pos_ms.get(s as usize).copied())
+            .unwrap_or(0);
+        v.push(((sev, addr, t), line));
     }
+    v
+}
+
+/// Lists the flights kept despite failing the tight check and the flagged flights, in the order
+/// of [`association_case_lines`], at most [`crate::stats::MAX_CASES`].
+pub(crate) fn association_cases(
+    leg: &Legacy,
+    ix: &crate::thindex::ThIndex,
+    a: &Assoc,
+    r: &mut MetricResult,
+) {
+    let mut v = association_case_lines(leg, ix, a);
+    sort_cases(&mut v);
+    r.cases = v.into_iter().map(|c| c.1).collect();
 }
 
 /// Scores a tracker's output columns: the columns become the legacy table

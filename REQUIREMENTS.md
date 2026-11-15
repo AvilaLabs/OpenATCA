@@ -626,6 +626,13 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   digits are refused. The replay tables key on them and hash ordinary values as before.
 - **OA-TFMS-026** Text split by a comment or CDATA section is joined, for values and for the text table,
   with the size bounds applied to the total.
+- **OA-TFMS-027** A speed is stored in thousandths with its unit (`speed_unit`, `tas_unit`: none, knots, Mach,
+  unknown): a whole number, `ddd.d` and `Nddddd` are knots, `d.dd` and `Mddd` are Mach; any other shape of
+  digits, `.`, `M` and `N` is kept with unit unknown (the value when it reads as a number) and counted
+  (`unknown_units`), and the message is kept; a byte that is none of those refuses the message as before.
+- **OA-TFMS-028** Whether a message carried a flight reference is its own flag (`flag::FLIGHT_REF`), so a reference
+  of 0 ("0000000000") is told from none; the linkage counts a row without one in `tfms_rows_without_ref` and
+  treats it as a flight of its own, never as part of the flight whose reference is 0.
 
 ## M1 — Controller display
 
@@ -1835,6 +1842,25 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   report identical to calling the two directly, and yields the same metrics, in the same order, with the
   same offset scalars and notes as an ERAM run; a tracker that lags the truth shows the lag in the raw
   along-track error.
+- **OA-BENCH-040** A tracker's output scored in address ranges gives the report of the same rows scored
+  in one piece, byte for byte in the text and the CSV, whatever order the flights are in the table and
+  whatever order the ranges are added in: the case lists (association, T9) are sorted by severity, truth
+  address and time before they are cut to 200, and every sum behind a statistic (means, RMS, the along-track
+  offset fit) is exactly rounded, so the order of the values cannot change a bit. T5 is summed from whole
+  milliseconds in both paths.
+- **OA-BENCH-041** Scoring in address ranges refuses ranges that overlap, ranges that together leave any
+  key from 0 to 0xFFFFFFFF uncovered (the radar-only tracks keyed from 0x40000000 included), and a chunk with
+  a flight keyed or associated outside its range; no flight or truth leg is counted twice or dropped.
+- **OA-BENCH-042** The headline tables T1, T2-raw and T4 carry the number of flagged flights and of their paired
+  samples that they leave out (`flagged_flights_excluded`, `flagged_points_excluded`) and a last row, "all
+  associated including flagged", over the headline and the flagged samples together; the other rows are
+  unchanged, and the run in ranges gives the same.
+- **OA-BENCH-043** A chunk scored in address ranges is accepted only when its plan-data results (F1 to F3, R1,
+  H1) equal exactly what a table with no data gives, NaN included; a result that differs only in a NaN is
+  refused, not read as empty.
+- **OA-BENCH-044** The association of a run in address ranges is the real one, one entry per flight with the
+  chunks' associations in range order, and its counts equal those of the run in one piece; it is never an
+  empty stand-in.
 
 ## Winds aloft (oa-wind)
 

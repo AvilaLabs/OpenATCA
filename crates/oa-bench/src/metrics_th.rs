@@ -27,7 +27,9 @@
 use std::collections::BTreeMap;
 
 use crate::pair::PairTable;
-use crate::stats::{new_result, split_result, withheld_result, MetricResult, Splits};
+use crate::stats::{
+    new_result, split_result, stats_of, withheld_result, ExactSum, MetricResult, Row, Splits,
+};
 
 /// Offset fit settings (cold: A7.2).
 // A7.2: cold struct, size guard waived
@@ -91,13 +93,14 @@ pub const WORST_GROUPS: usize = 5;
 #[derive(Default)]
 struct Acc {
     n: u64,
-    sev: f64,
-    svv: f64,
-    see: f64,
+    sev: ExactSum,
+    svv: ExactSum,
+    see: ExactSum,
 }
 
 fn tau_of(a: &Acc) -> Option<f64> {
-    (a.svv > 0.0).then(|| a.sev / a.svv)
+    let svv = a.svv.value();
+    (svv > 0.0).then(|| a.sev.value() / svv)
 }
 
 /// Fits the offset and tests its stability.
@@ -126,9 +129,9 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
             groups.entry(a).or_default(),
         ] {
             acc.n += 1;
-            acc.sev += e * v;
-            acc.svv += v * v;
-            acc.see += e * e;
+            acc.sev.add(e * v);
+            acc.svv.add(v * v);
+            acc.see.add(e * e);
         }
     }
     let mut fit = OffsetFit {
@@ -146,8 +149,8 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
     };
     let Some(tau) = fit.tau_s else { return fit };
     if all.n > 1 {
-        let rss = (all.see - tau * all.sev).max(0.0);
-        fit.se_s = (rss / (all.n - 1) as f64 / all.svv).sqrt();
+        let rss = (all.see.value() - tau * all.sev.value()).max(0.0);
+        fit.se_s = (rss / (all.n - 1) as f64 / all.svv.value()).sqrt();
     }
     let mut max_bin = 0.0f64;
     for b in bins.values().filter(|b| b.n >= cfg.min_group_n) {
@@ -231,6 +234,45 @@ fn result_of(id: &'static str, name: &'static str, unit: &'static str, c: &Cols)
 
 fn at(v: &[f32], i: usize) -> f32 {
     v.get(i).copied().unwrap_or(f32::NAN)
+}
+
+/// Label of the headline row that holds every associated flight, the flagged ones too.
+pub const ALL_WITH_FLAGGED: &str = "all associated including flagged";
+
+/// Adds to a headline table (T1, T2-raw, T4) what the identity check took out of it: the number
+/// of flagged flights and of their points, and a row over the primary and the flagged points
+/// together. The headline rows themselves are unchanged. `pick` is the column the table is of.
+pub fn add_flagged_view(
+    r: &mut MetricResult,
+    p: &PairTable,
+    flagged: &PairTable,
+    flagged_flights: u64,
+    pick: fn(&PairTable) -> &[f32],
+) {
+    let finite = |t: &PairTable| -> Vec<f64> {
+        pick(t)
+            .iter()
+            .filter(|v| v.is_finite())
+            .map(|&v| f64::from(v))
+            .collect()
+    };
+    let mut all = finite(p);
+    let fv = finite(flagged);
+    r.scalars.push((
+        "flagged_flights_excluded".to_string(),
+        flagged_flights as f64,
+    ));
+    r.scalars
+        .push(("flagged_points_excluded".to_string(), fv.len() as f64));
+    all.extend(fv);
+    r.rows.push(Row {
+        label: ALL_WITH_FLAGGED.to_string(),
+        stats: stats_of(&all),
+    });
+    r.notes.push(
+        "the rows above leave out flights whose identity check failed (their count and points are the scalars); the last row adds them back, so nothing is hidden"
+            .to_string(),
+    );
 }
 
 /// T1: cross-track position error, metres (positive to the right of the truth track).
