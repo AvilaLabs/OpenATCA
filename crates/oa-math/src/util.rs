@@ -1,0 +1,111 @@
+//! Bit-level helpers: sign, absolute value, exact powers of two and correct rounding of a
+//! double-double scaled by a power of two. Nothing here calls the platform maths library.
+
+use crate::dd::Dd;
+
+const SIGN: u64 = 0x8000_0000_0000_0000;
+const MANT_MASK: u64 = 0x000f_ffff_ffff_ffff;
+
+/// The one NaN this crate returns, so output bits do not depend on the machine's default NaN.
+pub(crate) const NAN: f64 = f64::from_bits(0x7ff8_0000_0000_0000);
+
+pub(crate) fn abs(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & !SIGN)
+}
+
+/// True when the sign bit is set (including -0 and negative NaN).
+pub(crate) fn is_neg(x: f64) -> bool {
+    x.to_bits() & SIGN != 0
+}
+
+/// `mag` with the sign of `sgn`.
+pub(crate) fn with_sign_of(mag: f64, sgn: f64) -> f64 {
+    f64::from_bits((mag.to_bits() & !SIGN) | (sgn.to_bits() & SIGN))
+}
+
+/// `x` negated when `neg` is true.
+pub(crate) fn negate_if(x: f64, neg: bool) -> f64 {
+    if neg {
+        -x
+    } else {
+        x
+    }
+}
+
+/// Exactly 2^k for -1074 <= k <= 1023; 0 below, infinity above.
+pub(crate) fn pow2(k: i32) -> f64 {
+    if k > 1023 {
+        f64::INFINITY
+    } else if k < -1074 {
+        0.0
+    } else if k < -1022 {
+        f64::from_bits(1u64 << (k + 1074))
+    } else {
+        f64::from_bits(((k + 1023) as u64) << 52)
+    }
+}
+
+/// `x * 2^k` in two exact steps, for |k| up to about 2040 (the product is exact whenever the
+/// result is a normal number).
+pub(crate) fn mul_pow2(x: f64, k: i32) -> f64 {
+    let k1 = k / 2;
+    x * pow2(k1) * pow2(k - k1)
+}
+
+/// Unbiased binary exponent of a positive finite nonzero double (subnormals included).
+pub(crate) fn exponent(x: f64) -> i32 {
+    let bits = x.to_bits();
+    let be = ((bits >> 52) & 0x7ff) as i32;
+    if be == 0 {
+        63 - (bits & MANT_MASK).leading_zeros() as i32 - 1074
+    } else {
+        be - 1023
+    }
+}
+
+/// Splits a positive finite double into `(e, m)` with `x = m * 2^e` and `m` in [1, 2).
+pub(crate) fn frexp1(x: f64) -> (i32, f64) {
+    let (y, adj) = if x < f64::MIN_POSITIVE {
+        (x * pow2(54), -54)
+    } else {
+        (x, 0)
+    };
+    let bits = y.to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i32 - 1023 + adj;
+    let m = f64::from_bits((bits & MANT_MASK) | (0x3ff << 52));
+    (e, m)
+}
+
+/// Rounds `d * 2^k` to the nearest double (ties to even) in a single rounding, including the
+/// subnormal range, overflow to infinity and underflow to zero. `d` must be normalised
+/// (`hi == fl(hi + lo)`) and nonzero.
+pub(crate) fn scale_round(d: Dd, k: i32) -> f64 {
+    let neg = is_neg(d.hi);
+    let hi = abs(d.hi);
+    let lo = if neg { -d.lo } else { d.lo };
+    let e = exponent(hi);
+    let r = if e + k > 1023 {
+        f64::INFINITY
+    } else if e + k >= -1022 {
+        mul_pow2(hi, k)
+    } else if e + k < -1100 {
+        0.0
+    } else {
+        // Subnormal result: count in units of 2^-1074, round hi + lo to an integer once.
+        let s = k + 1074;
+        let w = mul_pow2(hi, s);
+        let lw = mul_pow2(lo, s);
+        let magic = 4_503_599_627_370_496.0; // 2^52
+        let n = (w + magic) - magic;
+        let t = (w - n) + lw;
+        let n = if t > 0.5 {
+            n + 1.0
+        } else if t < -0.5 {
+            n - 1.0
+        } else {
+            n
+        };
+        f64::from_bits(n as u64)
+    };
+    negate_if(r, neg)
+}

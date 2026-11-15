@@ -5,6 +5,7 @@ exclude = ["fuzz"]
 members = [
     "crates/oa-csv",
     "crates/oa-geo",
+    "crates/oa-math",
     "crates/oa-nasr",
     "crates/oa-arinc424",
     "crates/oa-sha256",

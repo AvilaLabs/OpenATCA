@@ -44,6 +44,66 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-GEO-007** Computes the maximum separation between a geodesic and a rhumb line joining the
   same two points.
 
+### Elementary functions (oa-math)
+
+- **OA-MATH-001** `sin`, `cos` and `tan` are faithfully rounded (error below 1 ulp, measured
+  against a correctly rounded mpmath reference) for every finite argument tested, including
+  arguments near multiples of pi/2, the hardest known cases for argument reduction, subnormals and
+  magnitudes up to the largest finite double.
+- **OA-MATH-002** `atan`, `asin`, `acos` and `atan2` are faithfully rounded over their whole
+  domains against the same kind of reference, including arguments near 1, subnormals and ratios
+  beyond 2^60.
+- **OA-MATH-003** `exp` and `ln` are faithfully rounded over their whole domains, including the
+  subnormal results of `exp`, the overflow and underflow limits, subnormal arguments of `ln` and
+  arguments near 1.
+- **OA-MATH-004** `pow` is faithfully rounded wherever the result is finite or subnormal, including
+  where |y ln x| is near the overflow limit, huge exponents with x near 1, negative x with integer
+  y, and subnormal results.
+- **OA-MATH-005** `hypot` and `cbrt` are faithfully rounded over their whole domains: `hypot` with
+  no intermediate overflow or underflow and the result overflowing only when it does not fit,
+  `cbrt` for both signs and subnormals.
+- **OA-MATH-006** `sin`, `cos`, `sin_cos` and `tan` return the IEEE special values: signed zeros
+  are preserved by `sin` and `tan`, an infinite argument gives NaN, a NaN argument gives NaN,
+  subnormal arguments return `x` (`sin`, `tan`) or 1 (`cos`), and the largest finite argument is
+  reduced rather than rejected.
+- **OA-MATH-007** `atan`, `asin` and `acos` return the IEEE special values: `atan(+-inf) = +-pi/2`,
+  signed zeros preserved by `atan` and `asin`, `acos(1) = +0`, `acos(-1) = pi`, an argument
+  outside [-1, 1] or NaN gives NaN.
+- **OA-MATH-008** `atan2` follows C99 Annex F for every combination of zeros (of either sign),
+  finite values, infinities and NaN, and returns the correctly signed result for ratios that
+  underflow or overflow.
+- **OA-MATH-009** `exp` and `ln` return the IEEE special values: `exp(+-0) = 1`, `exp(+inf) = +inf`,
+  `exp(-inf) = +0`, overflow to `+inf` above 709.782712893384, underflow to `+0` below
+  -745.1332191019411; `ln(+-0) = -inf`, `ln(x<0) = NaN`, `ln(+inf) = +inf`, `ln(1) = +0`.
+- **OA-MATH-010** `pow` follows C99 Annex F for every combination of zeros, ones, negative bases,
+  odd and even integer exponents, non-integer exponents, infinities and NaN, including
+  `pow(x, +-0) = 1` and `pow(1, y) = 1` for NaN operands.
+- **OA-MATH-011** `hypot` returns `+inf` when either argument is infinite even if the other is NaN,
+  and `cbrt` and `powi` return the IEEE special values for zeros, infinities, NaN and the extreme
+  exponents `i32::MIN` and `i32::MAX`.
+- **OA-MATH-012** Over 200,000 inputs of every magnitude, `sin(x)^2 + cos(x)^2` is within 4.5e-16 of 1.
+- **OA-MATH-013** `sin_cos(x)` equals `(sin(x), cos(x))` bit for bit for every input tested,
+  including NaN and infinity bit patterns.
+- **OA-MATH-014** `atan2` returns a result in the half-plane of the sign of y and in the correct
+  half of it for the sign of x, is odd in y bit for bit, and satisfies atan2(y, -x) = pi - atan2(y, x)
+  and agreement with `atan(y/x)`.
+- **OA-MATH-015** `exp(ln(x))` returns `x` to within the conditioning of the round trip, and
+  `asin(sin t)`, `acos(cos t)`, `atan(tan t)`, `cbrt(x)^3`, `hypot` and `pow(x, y) * pow(x, -y)`
+  agree with their identities to within a few ulps.
+- **OA-MATH-016** `powi(x, n)` equals the documented multiplication chain (right-to-left repeated
+  squaring, one division for a negative `n`) bit for bit for every input tested, and gives exact
+  results where the exact result is representable.
+- **OA-MATH-017** `tan(x)` agrees with `sin(x) / cos(x)`, and `pow` agrees with `sqrt` and with
+  `x * x` for the exponents 1/2 and 2, to within a few ulps.
+- **OA-MATH-018** A hash of the output bits of one million evaluations across all functions on a
+  fixed pseudo-random input sequence equals a pinned value; the same value is produced on every
+  target the crate is built for (x86-64 and wasm32 checked).
+- **OA-MATH-019** The crate sources contain no call to a platform maths function (`sin`, `exp`,
+  `powf`, `floor`, `mul_add` and the rest of a fixed list, as methods or `f64::` paths), no
+  `unsafe`, and the manifest lists no dependency; the check is itself tested against a planted call.
+- **OA-MATH-020** Every NaN returned has one fixed bit pattern (positive quiet NaN), whatever the
+  NaN bits of the input.
+
 ### NASR (oa-nasr)
 
 - **OA-NASR-001** Validates each NASR CSV file against the FAA's `*_CSV_DATA_STRUCTURE.csv`:
