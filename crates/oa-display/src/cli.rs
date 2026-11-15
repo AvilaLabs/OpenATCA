@@ -9,6 +9,7 @@
 //! times and the SHA-256 of the frame.
 
 use crate::list::{list_new, DisplayError};
+use crate::project::{MAX_RANGE_NM, MIN_RANGE_NM};
 use crate::raster::{frame_digest, frame_len, rasterize, FrameSpec, RenderError};
 use crate::scene::{
     build_scene, layer_set, scene_caps, scene_index, scratch_for, view_new, LAYER_LEGEND,
@@ -79,6 +80,12 @@ pub struct RenderArgs {
     pub hash: bool,
 }
 
+/// A decimal text as `f64`; `None` if it is not a number or is NaN or infinite. Every number the
+/// command line gives goes through this.
+fn parse_finite(text: &str) -> Option<f64> {
+    text.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
 /// `lat,lon` in decimal degrees to 1e-7 degree.
 pub fn parse_centre(text: &str) -> Result<(i32, i32), CliError> {
     let bad = || {
@@ -87,8 +94,8 @@ pub fn parse_centre(text: &str) -> Result<(i32, i32), CliError> {
         ))
     };
     let (a, b) = text.split_once(',').ok_or_else(bad)?;
-    let lat: f64 = a.trim().parse().map_err(|_| bad())?;
-    let lon: f64 = b.trim().parse().map_err(|_| bad())?;
+    let lat = parse_finite(a.trim()).ok_or_else(bad)?;
+    let lon = parse_finite(b.trim()).ok_or_else(bad)?;
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
         return Err(CliError::Usage(format!(
             "--centre {text:?} is outside latitude -90 to 90, longitude -180 to 180"
@@ -116,10 +123,23 @@ pub fn parse_size(text: &str) -> Result<(u32, u32), CliError> {
 
 /// A threshold in nautical miles: a finite number, not negative.
 fn parse_nm(flag: &str, text: &str) -> Result<f64, CliError> {
-    match text.parse::<f64>() {
-        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+    match parse_finite(text) {
+        Some(v) if v >= 0.0 => Ok(v),
         _ => Err(CliError::Usage(format!(
             "{flag} {text:?} is not a number of nautical miles"
+        ))),
+    }
+}
+
+/// The display range in nautical miles: finite and within the projection's limits.
+fn parse_range_nm(text: &str) -> Result<f64, CliError> {
+    match parse_finite(text) {
+        Some(v) if (MIN_RANGE_NM..=MAX_RANGE_NM).contains(&v) => Ok(v),
+        Some(_) => Err(CliError::Usage(format!(
+            "--range-nm {text} is outside {MIN_RANGE_NM} to {MAX_RANGE_NM} nautical miles"
+        ))),
+        None => Err(CliError::Usage(format!(
+            "--range-nm {text:?} is not a number"
         ))),
     }
 }
@@ -148,10 +168,7 @@ pub fn parse_render_args(args: &[String]) -> Result<RenderArgs, CliError> {
             "--snapshot" => set_once(&mut snapshot, flag, PathBuf::from(value()?))?,
             "--centre" => set_once(&mut centre, flag, parse_centre(value()?)?)?,
             "--range-nm" => {
-                let t = value()?;
-                let r: f64 = t
-                    .parse()
-                    .map_err(|_| CliError::Usage(format!("--range-nm {t:?} is not a number")))?;
+                let r = parse_range_nm(value()?)?;
                 set_once(&mut range, flag, r)?;
             }
             "--size" => set_once(&mut size, flag, parse_size(value()?)?)?,

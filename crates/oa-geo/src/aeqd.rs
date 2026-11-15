@@ -77,11 +77,16 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     (f.r * k * s_e, f.r * k * s_n)
 }
 
-/// `(east_m, north_m)` to `(lat_deg, lon_deg)`, longitude in [-180, 180].
-pub fn unproject(f: &Frame, x: f64, y: f64) -> (f64, f64) {
-    let rho = (x * x + y * y).sqrt();
+/// `(east_m, north_m)` to `(lat_deg, lon_deg)`, longitude in [-180, 180]. `None` for a point whose
+/// distance from the origin is not finite or is past half the sphere's circumference: the chart
+/// does not reach there, and a larger distance would wrap round onto some other place.
+pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
+    let rho = x.hypot(y);
+    if !rho.is_finite() || rho > f.r * std::f64::consts::PI * (1.0 + 1e-12) {
+        return None;
+    }
     if rho < 1e-9 {
-        return (f.lat0.to_degrees(), wrap_deg(f.lon0.to_degrees()));
+        return Some((f.lat0.to_degrees(), wrap_deg(f.lon0.to_degrees())));
     }
     let c = rho / f.r;
     let (sc, cc) = (c.sin(), c.cos());
@@ -89,7 +94,7 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> (f64, f64) {
         .clamp(-1.0, 1.0)
         .asin();
     let lon = f.lon0 + (x * sc).atan2(rho * f.cos0 * cc - y * f.sin0 * sc);
-    (lat.to_degrees(), wrap_deg(lon.to_degrees()))
+    Some((lat.to_degrees(), wrap_deg(lon.to_degrees())))
 }
 
 fn wrap_deg(d: f64) -> f64 {
@@ -296,9 +301,26 @@ mod tests {
         let f = frame_new(41.9, -88.3);
         for (la, lo) in [(41.9, -88.3), (42.4, -87.1), (40.2, -90.0)] {
             let (x, y) = project(&f, la, lo);
-            let (la2, lo2) = unproject(&f, x, y);
+            let (la2, lo2) = unproject(&f, x, y).unwrap();
             assert!((la - la2).abs() < 1e-9 && (lo - lo2).abs() < 1e-9);
         }
+    }
+
+    // REQ: OA-GEO-013
+    #[test]
+    fn unproject_refuses_distances_that_overflow_or_pass_half_the_circumference() {
+        let f = frame_new(41.9, -88.3);
+        let half = std::f64::consts::PI * f.r;
+        assert_eq!(unproject(&f, 1e200, 1e200), None);
+        assert_eq!(unproject(&f, f64::MAX, f64::MAX), None);
+        assert_eq!(unproject(&f, f64::NAN, 0.0), None);
+        assert_eq!(unproject(&f, 0.0, f64::INFINITY), None);
+        assert_eq!(unproject(&f, 20_037_509.0 * 2.0, 0.0), None);
+        assert_eq!(unproject(&f, half * 1.001, 0.0), None);
+        // The far edge of the chart, and a point reached by project, still convert.
+        assert!(unproject(&f, half, 0.0).is_some());
+        let (x, y) = project(&f, -41.9, 91.7);
+        assert!(unproject(&f, x, y).is_some());
     }
 
     // REQ: OA-TRK-083
@@ -373,8 +395,8 @@ mod tests {
     fn numeric_to_true(f: &Frame, x: f64, y: f64, h: f64) -> Mat2 {
         let mut j = [[0.0; 2]; 2];
         for (c, d) in [(1.0, 0.0), (0.0, 1.0)].iter().enumerate() {
-            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1);
-            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1);
+            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1).unwrap();
+            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1).unwrap();
             let mut dlon = lo1 - lo0;
             if dlon > 180.0 {
                 dlon -= 360.0;
@@ -488,7 +510,7 @@ mod tests {
             assert!(close(&i, &[[1.0, 0.0], [0.0, 1.0]], 1e-12), "{i:?}");
             // The same vector, seen from a frame centred on the point: the true east and north
             // of that physical vector do not depend on the frame.
-            let (la, lo) = unproject(&f, x, y);
+            let (la, lo) = unproject(&f, x, y).unwrap();
             let g = frame_new(la, lo);
             let (x2, y2) = project(&g, la, lo);
             let d = frame_change(&f, x, y, &g, x2, y2);

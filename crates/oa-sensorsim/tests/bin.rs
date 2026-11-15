@@ -176,3 +176,43 @@ fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial
         );
     }
 }
+
+// REQ: OA-SIM-027
+#[test]
+fn a_non_finite_numeric_option_is_refused() {
+    let path = tmp("sensorsim-nonfinite.oaf");
+    std::fs::write(&path, clip()).unwrap();
+    let exe = env!("CARGO_BIN_EXE_oa-sensorsim");
+    let base = [
+        ("--lat", "41"),
+        ("--lon", "-88"),
+        ("--height-m", "30"),
+        ("--period-s", "4.8"),
+        ("--coverage-nm", "100"),
+        ("--bias-range-m", "50"),
+        ("--bias-az-deg", "0.1"),
+        ("--split-dr-m", "300"),
+        ("--split-daz-deg", "0.3"),
+        ("--earth-k", "1.33"),
+    ];
+    for (opt, v) in [
+        ("--lat", "nan"),
+        ("--lon", "inf"),
+        ("--height-m", "-inf"),
+        ("--period-s", "1e999"),
+        ("--bias-az-deg", "NaN"),
+        ("--earth-k", "inf"),
+    ] {
+        let mut c = Command::new(exe);
+        c.arg(&path)
+            .arg(tmp("sim_nonfinite"))
+            .args(["--site", "custom"]);
+        for (k, w) in base {
+            c.arg(k).arg(if k == opt { v } else { w });
+        }
+        let o = c.output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success(), "{opt} {v}");
+        assert!(err.contains("not a finite number"), "{opt} {v}: {err}");
+    }
+}

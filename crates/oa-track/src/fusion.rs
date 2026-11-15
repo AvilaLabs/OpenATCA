@@ -1837,7 +1837,7 @@ mod tests {
             for (li, l) in lines.iter().enumerate() {
                 let t_s = (k as f64) * 4.8 + (li as f64) * 0.1;
                 let (x, y) = (l.x0 + l.vx * t_s, l.y0 + l.vy * t_s);
-                let (lat, lon) = oa_geo::aeqd::unproject(&frame, x, y);
+                let (lat, lon) = oa_geo::aeqd::unproject(&frame, x, y).unwrap();
                 let h = f64::from(l.alt_ft) * FT_M;
                 let (rho, az) = polar_of(&g, lat, lon, h);
                 v.push(RadarPlot {
@@ -2173,7 +2173,8 @@ mod tests {
                 };
                 let (x, y) = (l.x0 + l.vx * ts + lie, l.y0 + l.vy * ts);
                 let (lat, lon) =
-                    oa_geo::aeqd::unproject(&frame, x + 4.1 * rng.normal(), y + 4.1 * rng.normal());
+                    oa_geo::aeqd::unproject(&frame, x + 4.1 * rng.normal(), y + 4.1 * rng.normal())
+                        .unwrap();
                 adsb.push(Measurement {
                     toa_ns: stamp,
                     pos_cov_m2: [16.7, 0.0, 16.7],
@@ -2600,6 +2601,7 @@ mod tests {
                     side_m * (rng.unit() - 0.5),
                     side_m * (rng.unit() - 0.5),
                 )
+                .unwrap()
             })
             .collect();
         for k in 0..4i64 {
@@ -2806,7 +2808,7 @@ mod tests {
         let mut isolated = Vec::new();
         for i in 0..20u32 {
             let (lat, lon) =
-                oa_geo::aeqd::unproject(&frame, 50_000.0 + 1_000.0 * f64::from(i), 0.0);
+                oa_geo::aeqd::unproject(&frame, 50_000.0 + 1_000.0 * f64::from(i), 0.0).unwrap();
             for k in 0..4i64 {
                 let mut m = adsb_fix(0x300000 + i, k * NS_PER_S);
                 m.lat_e7 = (lat * 1.0e7).round() as i32;

@@ -70,7 +70,7 @@ pub fn measure(
 ) -> Measurement {
     let e = tr.e + sigma_pos * rng.normal();
     let n = tr.n + sigma_pos * rng.normal();
-    let (lat, lon) = unproject(f, e, n);
+    let (lat, lon) = unproject(f, e, n).unwrap();
     let pv = (sigma_pos * sigma_pos) as f32;
     let mut m = Measurement {
         toa_ns: (t_s * 1.0e9).round() as i64,

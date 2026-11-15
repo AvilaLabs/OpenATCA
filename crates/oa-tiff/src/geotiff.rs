@@ -3,6 +3,7 @@
 //! Only geographic (latitude/longitude) rasters with axis-aligned pixels are accepted. The
 //! result is the position of the *centre* of sample (0, 0) and the sample spacing, in degrees.
 
+use crate::tiff::parse_f64_finite;
 use crate::TiffError;
 
 const KEY_MODEL_TYPE: u64 = 1024;
@@ -167,8 +168,8 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
         Some(s) => match s.to_ascii_lowercase().as_str() {
             "nan" => Some(f64::NAN),
             _ => Some(
-                s.parse::<f64>()
-                    .map_err(|_| TiffError::GeoRef("GDAL_NODATA is not a number"))?,
+                parse_f64_finite(s)
+                    .ok_or(TiffError::GeoRef("GDAL_NODATA is not a finite number"))?,
             ),
         },
     };

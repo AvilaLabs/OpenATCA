@@ -207,7 +207,11 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
         stats.resyncs += 1;
         return Applied::Resync;
     }
-    let (la, lo) = unproject(&frame, px, py);
+    let Some((la, lo)) = unproject(&frame, px, py) else {
+        *f = filter_init(m, f.h_mode);
+        stats.resyncs += 1;
+        return Applied::Resync;
+    };
     let (lat_e7, lon_e7) = (to_e7(la), to_e7(lo));
     let frame2 = frame_new(deg(lat_e7), deg(lon_e7));
     let (sx, sy) = project(&frame2, la, lo);
@@ -274,7 +278,8 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
     let (x, p) = h_combine(&h);
     let xg = |i: usize| x.get(i).copied().unwrap_or(0.0);
     let pg = |i: usize, j: usize| p.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.0);
-    let (la, lo) = unproject(&frame, xg(0), xg(1));
+    // A state past the chart has no position; the NaN saturates to zero in the row.
+    let (la, lo) = unproject(&frame, xg(0), xg(1)).unwrap_or((f64::NAN, f64::NAN));
     // The state is in the plane of the frame; the output is in east and north at the point.
     let jt = frame_to_true(&frame, xg(0), xg(1));
     let (ve, vn) = oa_geo::aeqd::mat2_apply(&jt, (xg(2), xg(3)));
@@ -338,8 +343,8 @@ mod tests {
         let h = 0.01;
         let mut j = [[0.0; 2]; 2];
         for (c, d) in [(1.0, 0.0), (0.0, 1.0)].iter().enumerate() {
-            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1);
-            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1);
+            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1).unwrap();
+            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1).unwrap();
             let mut dlon = lo1 - lo0;
             if dlon > 180.0 {
                 dlon -= 360.0;
@@ -426,7 +431,8 @@ mod tests {
             let (pp, _) = h_pos_moments(&pred);
             // 30 m along the target's own east, at the predicted position.
             let u = inv(&num_to_true(&frame, pp[0], pp[1]));
-            let (la, lo) = unproject(&frame, pp[0] + 30.0 * u[0][0], pp[1] + 30.0 * u[1][0]);
+            let (la, lo) =
+                unproject(&frame, pp[0] + 30.0 * u[0][0], pp[1] + 30.0 * u[1][0]).unwrap();
             let m = meas(la, lo, 2, [10000.0, 0.0, 1.0]);
             let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
             let jz = inv(&num_to_true(&frame, zx, zy));
@@ -468,7 +474,7 @@ mod tests {
                 jt[1][0] * x[2] + jt[1][1] * x[3],
             );
             // A plot too coarse to move the estimate recentres the frame on it.
-            let (la, lo) = unproject(&frame, x[0], x[1]);
+            let (la, lo) = unproject(&frame, x[0], x[1]).unwrap();
             let m = meas(la, lo, 2, [1.0e10, 0.0, 1.0e10]);
             let mut f = f0;
             let mut stats = TrackerStats::default();

@@ -23,6 +23,12 @@ fn usage() -> &'static str {
     "usage: oa-truth-check <clip.oaf> [--accel-q <v>] [--sigma-scale <v>] [--no-loo]"
 }
 
+/// The value of a numeric option: a finite number above zero (the config check holds the caps).
+fn finite_positive(v: Option<&String>) -> Option<f64> {
+    let x: f64 = v?.parse().ok()?;
+    (x.is_finite() && x > 0.0).then_some(x)
+}
+
 /// Reads every ADS-B payload frame of an OAF1 file into one set of reports. Returns the reports
 /// the number of frames that did not decode and the number of records dropped from frames that
 /// did (a bad record does not refuse its frame).
@@ -135,10 +141,10 @@ fn run() -> Result<(), String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--accel-q" => {
-                cfg.accel_q = it.next().and_then(|v| v.parse().ok()).ok_or(usage())?;
+                cfg.accel_q = finite_positive(it.next()).ok_or(usage())?;
             }
             "--sigma-scale" => {
-                cfg.sigma_scale = it.next().and_then(|v| v.parse().ok()).ok_or(usage())?;
+                cfg.sigma_scale = finite_positive(it.next()).ok_or(usage())?;
             }
             "--no-loo" => cfg.loo = false,
             s if s.starts_with("--") => return Err(usage().to_string()),

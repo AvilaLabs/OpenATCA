@@ -45,10 +45,10 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn num(args: &[String], name: &str) -> Result<Option<f64>, String> {
     match flag(args, name) {
         None => Ok(None),
-        Some(v) => v
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| format!("{name}: not a number: {v}")),
+        Some(v) => match v.parse::<f64>() {
+            Ok(x) if x.is_finite() => Ok(Some(x)),
+            _ => Err(format!("{name}: not a finite number: {v}")),
+        },
     }
 }
 

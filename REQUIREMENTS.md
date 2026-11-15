@@ -58,6 +58,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   agrees with the true-axes differentials of the two frames and its round trip is the identity, at
   midlatitude and near a pole.
 - **OA-GEO-012** A covariance is carried through a linear map as `M S M^T`.
+- **OA-GEO-013** The inverse projection refuses (returns no point for) a distance from the origin that
+  is not finite or is past half the sphere's circumference; a huge finite east or north does not
+  overflow into a NaN position.
 
 ### Elementary functions (oa-math)
 
@@ -273,6 +276,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   says "verified" or "proved", and a harness whose body asserts false is still "proof harness linked".
 - **OA-TRC-102** The last line of the text report says it is a traceability result (every requirement linked,
   ids unique, no test or proof run) and ends in `PASS` or `FAIL`.
+- **OA-TRC-103** No source file under `crates/*/src` builds a float from text or bytes (`parse::<f64>`, `from_bits`,
+  `from_le_bytes`, an untyped `parse` into a float and the `f32` forms) except where a per-line allowlist gives the
+  reason the value cannot reach the program as NaN, infinity or an out-of-range number; an allowlist entry that
+  matches no line is itself a failure.
 
 ### Hashing (oa-sha256)
 
@@ -961,6 +968,8 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   is marked there with a two-pixel bar in the text colour and counted (`legend_cut`), and the command line prints the whole
   legend, so the cycles, range and HIDDEN list are never cut without notice. A wide enough screen prints
   nothing extra (the default HIDDEN line already runs past 800 pixels). The legend stays in its fixed strip (it is marked, not wrapped).
+- **OA-DSP-035** A command-line number of `oa-scope render` (centre, range, thresholds) that is NaN, infinite,
+  or for the range outside 0.05 to 20000 NM is a usage error when it is parsed, not a value passed on to the view.
 
 ### Replay and flight state (oa-replay)
 
@@ -1553,6 +1562,10 @@ frame of their feed has been fed (as the ADS-B table is).
   `Metres(NaN)` or an infinite peak.
 - **OA-TIFF-084** A conservative maximum over samples that are non-finite is `Incomplete`
   with those samples counted as nodata, never `Complete`.
+- **OA-TIFF-085** A NaN or infinite double in a tag (pixel scale, tie points, transformation) is a bad
+  value at the point it is read, not a coordinate.
+- **OA-TIFF-086** A `GDAL_NODATA` text that parses to an infinity (`inf`, `1e999`) is refused; only a
+  finite number or the text `nan` is a nodata value.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -2219,6 +2232,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   non-finite state or variance counts as not predicted. It is never zero uncertainty.
 - **OA-TRUTH-041** A query whose converted latitude, longitude or velocity is not finite (a state past the
   frame's chart) is refused as too uncertain, never returned as a sample.
+- **OA-TRUTH-042** A `--accel-q` or `--sigma-scale` value of `oa-truth-check` that is not a finite number
+  above zero is a usage error, before the clip is read.
 
 ## M2 — Benchmark harness (oa-bench)
 
@@ -2702,6 +2717,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   error; the code is never masked to its low 12 bits.
 - **OA-SIM-026** A detection whose measured range or azimuth is not finite (an oversized profile sigma) gets
   no plot and is counted in `non_finite`.
+- **OA-SIM-027** A numeric option of `oa-sensorsim` that is NaN, infinite or not a number is refused with an
+  error naming it.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
