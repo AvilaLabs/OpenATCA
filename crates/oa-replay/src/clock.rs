@@ -51,21 +51,25 @@
 //!    decoder threads deliver them, still count), or, ahead of it, not more than `TOL` before the
 //!    previous candidate and not more than `GAP` after it (a slow feed after a pause). Any other
 //!    frame restarts the run, so scattered wild frames never move the clock.
-//! 5. **Confirmation by vote.** A run of [`CLOCK_CONFIRM_FRAMES`] (3) candidates is a step only if
-//!    the recording's other feeds do not contradict it. The new time is backed by the feed itself
-//!    and by every other feed with an open candidate on the same side within `TOL` of this frame
+//! 5. **Confirmation.** A run of [`CLOCK_CONFIRM_FRAMES`] (3) candidates ahead of the clock is a
+//!    step with no vote: in merged order a forward candidate means no other stream has a frame
+//!    between the clock and its time (the merge would have emitted it first), so the other feeds
+//!    are silent over the gap, not in disagreement. A run behind the clock is a step only if the
+//!    other feeds do not contradict it, because feeds whose last frame is within `TOL` of the
+//!    clock have actually spoken at the current time. The new time is backed by the feed itself and
+//!    by every other feed with an open candidate on the same side within `TOL` of this frame
 //!    (`new`); the old clock is backed by every other feed that has an accepted frame, no
-//!    candidate and a last frame within `TOL` of the clock (`old`). A **forward** step needs
-//!    `new > old`; a **backward** step needs `new >= old`. The tie goes to the earlier time
-//!    because a clock that is ahead evicts and refuses data, and one that is behind only delays
-//!    it; with a strict rule for forward steps two feeds in disagreement cannot step the clock
-//!    back and forth. A step that fails the vote is held and counted in
-//!    [`Clock::steps_outvoted`]; the run stays at three so the feed's next candidate asks again.
-//! 6. **Step.** On a carried vote the clock takes the third frame's time and every age the tables
+//!    candidate and a last frame within `TOL` of the clock (`old`). A backward step needs
+//!    `new >= old`: the tie goes to the earlier time because a clock that is ahead evicts and
+//!    refuses data, and one that is behind only delays it. A step that fails the vote is held and
+//!    counted in [`Clock::steps_outvoted`]; the run stays at three so the feed's next candidate
+//!    asks again.
+//! 6. **Step.** On a confirmed run the clock takes the third frame's time and every age the tables
 //!    hold is shifted by the same amount ([`Tick::Step`]), so a step of the recorder's clock,
 //!    forward or back, neither evicts every flight nor leaves them stranded in the future: the
 //!    time since each flight was last heard is what it was before the step. The feeds that backed
-//!    the new time keep their records (last frame no later than the new clock), every other
+//!    the new time keep their records (each one's last frame is its candidate or the new clock,
+//!    whichever is earlier, so it is never after the clock), every other
 //!    feed's last frame is forgotten, so its next frames are compared with the new clock. The
 //!    eviction and checkpoint cadences are due at once, so a sweep and a checkpoint run at the new
 //!    time. A real pause in a recording gets the same treatment, and flights then age from the
@@ -82,10 +86,10 @@
 //! check a feed alone: in a single-feed recording one wild forward frame less than `GAP` after
 //! the previous one is accepted, because a gap and a glitch cannot be told apart with one feed.
 //! Two feeds that are both sparse (gaps over `TOL` in each) are never near their own last frame or
-//! the clock: the first to speak is alone while the other has had no accepted frame, so the clock
-//! follows its frames (rule 3); the other feed's runs of three candidates are refused by the vote
-//! (the first backs the old clock), so its frames are held and counted, and the clock is the
-//! first feed's.
+//! the clock once both are known: the first to speak is alone while the other has had no accepted
+//! frame, so the clock follows it (rule 3); then each feed's run of three forward candidates is a
+//! step, so the clock moves in steps, trailing the newest frame by up to a run of frames, and the
+//! tables' ages are shifted at each step, not run.
 //!
 //! # The tolerance
 //!
@@ -142,7 +146,8 @@ pub struct Clock {
     pub forward_steps: u64,
     /// Backward steps confirmed.
     pub backward_steps: u64,
-    /// Runs of three candidates refused by the vote of the other feeds (each is also in `held`).
+    /// Backward runs of three candidates refused by the vote of the other feeds (each is also in
+    /// `held`).
     pub steps_outvoted: u64,
 }
 
@@ -257,7 +262,7 @@ pub fn clock_observe(c: &mut Clock, feed: usize, now: i64, t: i64) -> Tick {
                 old += 1;
             }
         }
-        if (back && new >= old) || (!back && new > old) {
+        if !back || new >= old {
             if back {
                 c.backward_steps += 1;
             } else {
@@ -427,21 +432,30 @@ mod proofs {
         if let Tick::Step { .. } = tick {
             assert!(before.feeds[feed].cand_n >= CLOCK_CONFIRM_FRAMES - 1);
             if back {
+                // A backward step is voted: ties go to the earlier time.
                 assert!(new >= old);
                 assert_eq!(c.backward_steps, before.backward_steps + 1);
             } else {
-                assert!(new > old);
+                // A forward step needs the candidates and nothing else.
                 assert_eq!(c.forward_steps, before.forward_steps + 1);
             }
         }
-        // A refused step is a held frame, counted, with the run kept at the limit.
+        // A refused step is a held backward frame, counted, with the run kept at the limit and
+        // the vote against it; no forward step is ever refused.
         if c.steps_outvoted > before.steps_outvoted {
-            assert!(matches!(tick, Tick::Held { .. }));
+            assert!(matches!(tick, Tick::Held { back: true }));
+            assert!(back);
             assert_eq!(c.feeds[feed].cand_n, CLOCK_CONFIRM_FRAMES);
-            if back {
-                assert!(new < old);
-            } else {
-                assert!(new <= old);
+            assert!(new < old);
+        }
+        if !back && before.feeds[feed].cand_n >= CLOCK_CONFIRM_FRAMES - 1 {
+            // Three forward candidates in a row are a step, whoever else has spoken.
+            let g = before.feeds[feed];
+            let continues = g.cand_n > 0 && !g.cand_back && forward_continues(t, g.cand_last_ns);
+            let lone = !others_ever(&before, feed) && g.seen && t > g.last_ns;
+            let accepted = within(t, now) || (g.seen && within(t, g.last_ns)) || lone;
+            if continues && !accepted && t != i64::MIN {
+                assert!(matches!(tick, Tick::Step { .. }));
             }
         }
         kani::cover!(matches!(tick, Tick::Step { .. }) && !back);

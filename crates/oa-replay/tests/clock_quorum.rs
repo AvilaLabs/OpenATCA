@@ -92,31 +92,45 @@ fn a_stream_that_runs_ahead_cannot_move_the_clock_past_the_others_through_the_me
 
 // REQ: OA-RPL-181
 #[test]
-fn two_feeds_in_disagreement_do_not_step_the_clock_back_and_forth() {
-    // A talks at real time; B is ten minutes ahead, in runs of three frames. B's run is a
-    // forward step only if more feeds back it than back the old clock; A alone does, so the
-    // clock never steps (a tie would let each feed in turn move it).
+fn a_backward_run_is_a_step_only_when_the_feeds_at_the_clock_do_not_outnumber_it() {
+    // Observed directly. Three feeds talk at the clock; a fourth runs three frames ten minutes
+    // behind: two feeds' worth of votes are not needed, three back the old clock, so the run is
+    // refused and counted, and asks again on its next candidate.
     let mut c = Clock::default();
-    let mut now = i64::MIN;
-    let mut t = T0;
-    let tick = |c: &mut Clock, now: &mut i64, f: usize, t: i64| match clock_observe(c, f, *now, t) {
-        Tick::Advance => *now = t,
-        Tick::Step { .. } => *now = t,
-        _ => {}
-    };
-    tick(&mut c, &mut now, 0, t);
-    tick(&mut c, &mut now, 1, t);
-    for _ in 0..10 {
-        for _ in 0..3 {
-            t += NS;
-            tick(&mut c, &mut now, 1, t + 10 * MIN);
-        }
-        t += NS;
-        tick(&mut c, &mut now, 0, t);
+    let now = T0;
+    assert_eq!(clock_observe(&mut c, 0, i64::MIN, T0), Tick::Advance);
+    for f in 1..4 {
+        assert_eq!(clock_observe(&mut c, f, now, now), Tick::Advance);
     }
-    assert_eq!((c.forward_steps, c.backward_steps), (0, 0));
-    assert!(outvoted(&c) > 0);
-    assert_eq!(now, t, "the clock follows A");
+    for k in 1..=4 {
+        let t = T0 - 10 * MIN + k * NS;
+        let tick = clock_observe(&mut c, 3, now, t);
+        assert_eq!(tick, Tick::Held { back: true });
+    }
+    assert_eq!(c.backward_steps, 0);
+    assert_eq!(c.steps_outvoted, 2, "the third and the fourth frame asked");
+    // With only one feed at the clock the tie goes to the earlier time: the run is a step.
+    let mut c = Clock::default();
+    assert_eq!(clock_observe(&mut c, 0, i64::MIN, T0), Tick::Advance);
+    assert_eq!(clock_observe(&mut c, 1, T0, T0), Tick::Advance);
+    let mut last = Tick::Keep;
+    for k in 1..=3 {
+        last = clock_observe(&mut c, 1, T0, T0 - 10 * MIN + k * NS);
+    }
+    assert!(matches!(last, Tick::Step { delta } if delta < 0));
+    assert_eq!((c.forward_steps, c.backward_steps), (0, 1));
+    // A forward run is a step whoever else spoke at the clock: the others are silent over the gap.
+    let mut c = Clock::default();
+    assert_eq!(clock_observe(&mut c, 0, i64::MIN, T0), Tick::Advance);
+    for f in 1..4 {
+        assert_eq!(clock_observe(&mut c, f, T0, T0), Tick::Advance);
+    }
+    for k in 1..=3 {
+        last = clock_observe(&mut c, 4, T0, T0 + 10 * MIN + k * NS);
+    }
+    assert!(matches!(last, Tick::Step { delta } if delta > 0));
+    assert_eq!((c.forward_steps, c.backward_steps), (1, 0));
+    assert_eq!(c.steps_outvoted, 0);
 }
 
 // REQ: OA-RPL-182
@@ -242,12 +256,14 @@ fn a_lone_feed_with_a_gap_over_the_limit_is_a_confirmed_step() {
 
 // REQ: OA-RPL-187
 #[test]
-fn two_sparse_feeds_interleaved_do_not_freeze_the_clock_it_follows_the_first_one() {
+fn two_sparse_feeds_interleaved_do_not_freeze_the_clock_it_moves_by_steps() {
     // Each feed is 5 minutes between frames, offset by 2.5 minutes: no frame is within the
-    // tolerance of its own feed's last or of the clock. The first feed to speak is alone while the
-    // other has had no accepted frame, so its frames are lone-forward and the clock follows them;
-    // the other feed's runs of three are refused by the vote (the first feed backs the old
-    // clock), so its frames are held and the clock never steps.
+    // tolerance of its own feed's last or of the clock. The first feed to speak is alone while
+    // the other has had no accepted frame, so the clock follows it; once the second feed's runs
+    // of three confirm as forward steps (no vote), both feeds are known and neither is accepted
+    // by proximity again, so from then on the clock moves in steps, each feed's run of three in
+    // turn, and trails the newest frame by up to the time of a run. Observed: 11 forward steps
+    // over 30 frames of each feed, the clock 450 s behind the first feed's last frame.
     let a: Vec<i64> = (0..30).map(|k| T0 + k * 5 * MIN).collect();
     let b: Vec<i64> = (0..30).map(|k| T0 + 150 * NS + k * 5 * MIN).collect();
     let mut p = small_pipeline(64);
@@ -258,10 +274,11 @@ fn two_sparse_feeds_interleaved_do_not_freeze_the_clock_it_follows_the_first_one
             (FeedKind::Tbfm, status_stream(&b)),
         ],
     );
-    assert_eq!(p.replay_ns, *a.last().unwrap());
-    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (0, 0));
-    assert!(outvoted(&p.clock) > 20);
-    assert_eq!(p.clock.held, 30);
+    let last = *a.last().unwrap().max(b.last().unwrap());
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (11, 0));
+    assert!(p.replay_ns > T0 + 100 * MIN, "the clock froze");
+    assert!(last - p.replay_ns <= 15 * MIN);
+    assert_eq!(p.clock.steps_outvoted, 0);
 }
 
 // REQ: OA-RPL-189
@@ -280,4 +297,32 @@ fn a_single_wild_forward_frame_in_a_single_feed_recording_is_accepted_within_the
     process_frame(&mut p, FeedKind::Sfdps, Kind::Status, far, &[]);
     assert_eq!(p.replay_ns, wild);
     assert_eq!(p.clock.held, 1);
+}
+
+// REQ: OA-RPL-190
+#[test]
+fn a_feed_resuming_alone_after_another_ended_is_a_forward_step_after_a_pause() {
+    // Feed X's last frame is at T0 + 9 s; feed Y, which has spoken once before, alone resumes an
+    // hour later. In merged order X has nothing in between, so Y's three frames are one forward
+    // step: the flights of both feeds keep their ages (shifted) and are marked stale.
+    let first: Vec<i64> = (0..10).map(|k| T0 + k * NS).collect();
+    let second: Vec<i64> = (0..10).map(|k| T0 + 60 * MIN + k * NS).collect();
+    let mut p = small_pipeline(64);
+    let mut xs = flight_stream(1, &first[..1]);
+    for (seq, &t) in first[1..].iter().enumerate() {
+        xs.extend(frame(3, 1 + seq as u64, t, b""));
+    }
+    let mut ys = status_stream(&first[..1]);
+    for (seq, &t) in second.iter().enumerate() {
+        ys.extend(frame(3, 1 + seq as u64, t, b""));
+    }
+    run(&mut p, vec![(FeedKind::Sfdps, xs), (FeedKind::Adsb, ys)]);
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (1, 0));
+    assert_eq!(p.clock.steps_outvoted, 0);
+    assert_eq!(p.replay_ns, T0 + 60 * MIN + 9 * NS);
+    assert!(
+        slot_of_gufi(&p.table, gufi(1)).is_some(),
+        "the pause evicted the flight"
+    );
+    assert!(p.stale_marked > 0);
 }

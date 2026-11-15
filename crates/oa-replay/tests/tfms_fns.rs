@@ -1203,7 +1203,9 @@ fn the_tfms_and_fns_tables_never_move_or_grow_after_init() {
         feed(
             &mut p,
             FeedKind::Fns,
-            mar5(9) + k * NS,
+            // The frames of both feeds share one receive time line (merged order); the NOTAMs'
+            // own times are in March, so they stay live.
+            at(3, 0, k),
             &notam(&nt("Z", 1 + k as u32)),
         );
     }
@@ -1272,12 +1274,9 @@ fn tfms_flights_and_notams_last_heard_before_a_confirmed_step_are_stale_until_up
     feed(&mut p, FeedKind::Tfms, at(3, 0, 1), &flight((3, 0, 0)));
     feed(&mut p, FeedKind::Fns, at(3, 0, 1), &notam(&nt("Z", 1)));
     assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (0, 0));
-    // Three frames in a row three hours on, on both feeds (the NOTAM feed, heard just before,
-    // would otherwise back the old clock and refuse a step by one feed): the clock steps and the
-    // ages are shifted.
+    // Three frames in a row three hours on: the clock steps and the ages are shifted.
     for k in 0..3 {
         process_frame(&mut p, FeedKind::Tfms, Kind::Status, at(6, 0, 10 + k), &[]);
-        process_frame(&mut p, FeedKind::Fns, Kind::Status, at(6, 0, 10 + k), &[]);
     }
     assert_eq!(p.clock.forward_steps, 1);
     assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (1, 1));
