@@ -1291,8 +1291,8 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
         let full = scene_caps(&m);
         for (lat, lon) in [
             ORD,
-            (900_000_000, 0),
-            (-900_000_000, 1_800_000_000),
+            (899_000_000, 0),
+            (-899_000_000, 1_800_000_000),
             (0, -1_800_000_000),
             (0, 0),
         ] {

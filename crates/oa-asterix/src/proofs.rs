@@ -1,7 +1,9 @@
 //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
 #![allow(clippy::indexing_slicing)]
 
-use crate::common::{decode_ident, encode_ident, ms_to_time128, rd, sext, take, time128_to_ms};
+use crate::common::{
+    check_lon, decode_ident, encode_ident, ms_to_time128, raw_to_e7, rd, sext, take, time128_to_ms,
+};
 use crate::wire::parse_block;
 
 // REQ: OA-AST-100
@@ -89,5 +91,19 @@ fn parse_block_any_bytes_up_to_3() {
     let input = &buf[..len];
     if let Ok(raw) = parse_block(input, 0) {
         assert!(raw.len > 0 && raw.len <= len);
+    }
+}
+
+// REQ: OA-AST-106
+#[kani::proof]
+fn position_conversion_is_geographic_or_refused() {
+    let raw: i32 = kani::any();
+    // CAT062 width: the longitude check accepts exactly +-2^25 counts, and any count it
+    // accepts converts to a position within 180 degrees.
+    let ok = check_lon(raw, 25).is_ok();
+    assert_eq!(ok, (-(1i32 << 25)..=1 << 25).contains(&raw));
+    match raw_to_e7(raw, 25) {
+        Some(e) => assert!((-1_800_000_000..=1_800_000_000).contains(&e)),
+        None => assert!(!ok),
     }
 }

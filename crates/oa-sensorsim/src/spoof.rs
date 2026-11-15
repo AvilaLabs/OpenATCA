@@ -110,13 +110,23 @@ fn has_addr(l: &Labelled, addr: u32) -> bool {
     l.reports.icao.contains(&addr)
 }
 
-fn e7(deg: f64) -> Result<i32, SimError> {
+/// Degrees to 1e-7 degree, refused past `limit_e7` (900 000 000 for a latitude, 1 800 000 000
+/// for a longitude) or not finite.
+fn e7_within(deg: f64, limit_e7: i32) -> Result<i32, SimError> {
     let v = (deg * 1.0e7).round();
-    if v.is_finite() && v.abs() <= 1_800_000_000.0 {
+    if v.is_finite() && v.abs() <= f64::from(limit_e7) {
         Ok(v as i32)
     } else {
         Err(SimError::BadSpoof("position out of range"))
     }
+}
+
+fn e7_lat(deg: f64) -> Result<i32, SimError> {
+    e7_within(deg, 900_000_000)
+}
+
+fn e7_lon(deg: f64) -> Result<i32, SimError> {
+    e7_within(deg, 1_800_000_000)
 }
 
 /// A ghost aircraft: a new address and a straight constant-speed track. All fields explicit.
@@ -150,7 +160,7 @@ pub struct GhostParams {
 }
 
 /// Adds a ghost aircraft. Refuses an address that already reports, an address past 24 bits, an
-/// interval of zero or less, a count outside its bounds, a speed outside 0 to 1500 kt and a
+/// interval of zero or less, a count outside its bounds, a duration or last time that overflows, a speed outside 0 to 1500 kt and a
 /// position out of range.
 pub fn inject_ghost(base: &Labelled, g: &GhostParams) -> Result<Labelled, SimError> {
     check(base)?;
@@ -170,6 +180,16 @@ pub fn inject_ghost(base: &Labelled, g: &GhostParams) -> Result<Labelled, SimErr
     {
         return Err(SimError::BadSpoof("ghost speed, track or position"));
     }
+    e7_lat(g.lat_deg)?;
+    e7_lon(g.lon_deg)?;
+    // The whole duration and the last timestamp must fit before any row is made.
+    let span_ms = i64::from(g.count - 1)
+        .checked_mul(g.interval_ms)
+        .ok_or(SimError::BadSpoof("ghost duration overflows"))?;
+    span_ms
+        .checked_mul(1_000_000)
+        .and_then(|ns| g.start_ns.checked_add(ns))
+        .ok_or(SimError::BadSpoof("ghost duration overflows"))?;
     let v_mps = g.speed_kt * 1852.0 / 3600.0;
     let (sin_t, cos_t) = g.track_deg.to_radians().sin_cos();
     let trk = g.track_deg.rem_euclid(360.0);
@@ -181,8 +201,8 @@ pub fn inject_ghost(base: &Labelled, g: &GhostParams) -> Result<Labelled, SimErr
         let mut r = ROW_EMPTY;
         r.icao = g.addr;
         r.time_ns = g.start_ns.saturating_add(dt_ms.saturating_mul(1_000_000));
-        r.lat_e7 = e7(lat)?;
-        r.lon_e7 = e7(lon)?;
+        r.lat_e7 = e7_lat(lat)?;
+        r.lon_e7 = e7_lon(lon)?;
         r.baro_alt_ft = g.alt_ft;
         r.gs_dkt = (g.speed_kt * 10.0).round() as u16;
         r.track_ddeg = ((trk * 10.0).round() as u16) % 3600;
@@ -253,8 +273,8 @@ pub fn inject_drift(base: &Labelled, d: &DriftParams) -> Result<Labelled, SimErr
             out.label.get_mut(i),
             out.victim.get_mut(i),
         ) {
-            *x = e7(lat)?;
-            *y = e7(lon)?;
+            *x = e7_lat(lat)?;
+            *y = e7_lon(lon)?;
             *l = LABEL_DRIFT;
             *v = d.victim;
             hit += 1;

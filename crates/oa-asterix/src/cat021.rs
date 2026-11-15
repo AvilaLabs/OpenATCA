@@ -275,11 +275,10 @@ fn position(b: &[u8], bits: usize, lat_bits: u32) -> Result<RawPosition, ErrorKi
     let lon = rd(b, &mut p, bits / 8)?;
     done(b, p)?;
     let lat = sext(lat, bits as u32);
+    let lon = sext(lon, bits as u32);
     check_lat(lat, lat_bits)?;
-    Ok(RawPosition {
-        lat,
-        lon: sext(lon, bits as u32),
-    })
+    check_lon(lon, lat_bits)?;
+    Ok(RawPosition { lat, lon })
 }
 
 fn put_position(
@@ -289,6 +288,7 @@ fn put_position(
     out: &mut Vec<u8>,
 ) -> Result<(), ErrorKind> {
     check_lat(pos.lat, lat_bits)?;
+    check_lon(pos.lon, lat_bits)?;
     put(out, pack_s(pos.lat, bits as u32)?, bits / 8);
     put(out, pack_s(pos.lon, bits as u32)?, bits / 8);
     Ok(())

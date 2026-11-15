@@ -159,7 +159,8 @@ pub fn cat021_full() -> Cat021 {
         }),
         position_hr: Some(RawPosition {
             lat: 536_870_912,
-            lon: -2_147_483_648,
+            // Exactly -180 degrees: the widest longitude the item may carry.
+            lon: -1_073_741_824,
         }),
         toa_velocity: Some(1),
         air_speed: Some(FlagU15 {
@@ -308,7 +309,7 @@ pub fn cat062_full() -> Cat062 {
         time: Some(0xFF_FFFF),
         position: Some(RawPosition {
             lat: -16_777_216,
-            lon: 2_147_483_647,
+            lon: 33_554_432,
         }),
         cartesian: Some(CartPosition {
             x: -8_388_608,

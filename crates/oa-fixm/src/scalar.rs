@@ -34,7 +34,7 @@ fn digits(s: &[u8], at: usize, n: usize) -> Option<i64> {
         if !b.is_ascii_digit() {
             return None;
         }
-        v = v * 10 + i64::from(b - b'0');
+        v = v.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
     }
     Some(v)
 }
@@ -112,7 +112,7 @@ pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
         if !b.is_ascii_digit() {
             return None;
         }
-        v = v * 10 + i64::from(b - b'0');
+        v = v.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
     }
     let mut round_up = false;
     for (i, &b) in frac.iter().enumerate() {
@@ -120,16 +120,16 @@ pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
             return None;
         }
         if (i as u32) < scale {
-            v = v * 10 + i64::from(b - b'0');
+            v = v.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
         } else if i as u32 == scale {
             round_up = b >= b'5';
         }
     }
     for _ in frac.len()..scale as usize {
-        v *= 10;
+        v = v.checked_mul(10)?;
     }
     if round_up {
-        v += 1;
+        v = v.checked_add(1)?;
     }
     Some(if neg { -v } else { v })
 }

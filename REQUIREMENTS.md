@@ -524,6 +524,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FIXM-016** Field names, bits and display tables agree, and short codes read back as text.
 - **OA-FIXM-017** A document with several messages gives one row per message, in order, and
   counts each message.
+- **OA-FIXM-018** A decimal too large for the scaler (twelve integer digits at 1e-7, or a sum past `i64`) is
+  refused, not wrapped: the position is a field error, counted, and a following message still decodes.
 
 ### TBFM metering publication (oa-tbfm)
 
@@ -808,6 +810,9 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   uses a fixed-capacity grid of cells with a bounded list each, allocated once; a full cell drops
   the label and counts it. No two drawn labels overlap, a label is dropped only where every offset
   is taken by a label of equal or higher priority, and the result does not depend on point order.
+- **OA-DSP-033** A view whose projection constants are not finite (a centre at either pole) is refused
+  with the typed `BadView`; a view one count of 1e-7 degree from a pole is accepted, with finite constants,
+  and projects its centre and nearby points on the screen.
 
 ### Replay and flight state (oa-replay)
 
@@ -987,6 +992,9 @@ the FAA event extension).
   (high and low) by geodesic containment of vertices and boundary samples, and how many circle
   centres are inside it; polygons oa-geo refuses and boundaries oa-geo refuses are counted, not
   errors.
+- **OA-NOTAM-022** A ring coordinate too large for the scaler (twelve integer digits at 1e-7, or a sum past
+  `i64`) is refused, not wrapped: the polygons field is a counted error with nothing kept, and a following
+  message still decodes.
 
 - **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
   (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time
@@ -2268,6 +2276,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.
 - **OA-SIM-020** Reading a clip drops only a record that cannot be read (position or flags out of range) and
   counts it; the other records of its frame are kept.
+- **OA-SIM-021** A ghost or drifted position is checked as a geographic position: latitude within 90 degrees
+  (a count past it is refused, for the start and for every row of the track) and longitude within 180, as a
+  typed `BadSpoof`; the pole and the antimeridian are accepted.
+- **OA-SIM-022** A ghost whose duration (`(count - 1) * interval`, in milliseconds and in nanoseconds) or last
+  timestamp does not fit in `i64` is refused with the typed `BadSpoof` before any row is made.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -2325,6 +2338,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   number zero is refused, and so is a record with no subitem.
 - **OA-AST-088** A position count converts to 1e-7 degree rounded to nearest with ties away from zero,
   for both signs and for each width, and the conversion back rounds the same way.
+  A raw count that is past 180 degrees (or a width beyond 32 bits) gives no position instead of a wrapped
+  one.
 - **OA-AST-089** A compound primary subfield is refused as not the shortest only when an all-zero octet
   ends it after the first octet, naming that octet; a single zero octet at the start is left to the empty
   compound refusal, and an item that is not compound is never refused.
@@ -2347,6 +2362,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-AST-104** (proof) Every six octets that decode as an identification encode back to the same six octets;
   a 24-bit time of day survives 1/128 s to milliseconds and back exactly, and neither conversion overflows for
   any `u32`.
+- **OA-AST-105** A CAT062 position (I062/105) with a longitude beyond 180 degrees (2^25 counts) is refused by
+  the decoder and by the encoder as an invalid value of that item, as a latitude beyond 90 degrees is; exactly
+  +-180 degrees is accepted, and a raw longitude that would wrap in the unit conversion (0x40000000) is refused.
+- **OA-AST-106** (proof) For every `i32`, the longitude check at 25 bits accepts exactly +-2^25 counts, and
+  `raw_to_e7` at that width gives a position within 180 degrees or nothing, nothing only for a count the check
+  refuses; neither panics.
+- **OA-AST-107** A CAT021 high-resolution position (I021/131, LSB 180/2^30 degrees) with a longitude beyond
+  180 degrees is refused by the decoder and by the encoder as an invalid value of that item; exactly +-180
+  degrees is accepted. The three-octet I021/130 cannot hold a longitude beyond 180 degrees.
+
 ## M3 — Surveillance tracking (oa-track)
 
 ### ADS-B-only tracker and its scoring (oa-track, oa-bench adapter)

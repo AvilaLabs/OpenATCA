@@ -329,3 +329,85 @@ fn transforms_compose_and_score_as_a_confusion_matrix() {
     assert!(confusion(&d.label, &flagged[1..]).is_err());
     assert!(confusion(&[9], &[true]).is_err());
 }
+
+// REQ: OA-SIM-021
+#[test]
+fn ghost_and_drift_positions_are_geographic() {
+    let base = traffic();
+    let bad = |g: &GhostParams| matches!(inject_ghost(&base, g), Err(SimError::BadSpoof(_)));
+    // A latitude past 90 degrees is refused, including one e-7 count past it, both signs.
+    for lat in [100.0, -100.0, 90.0000001, -90.0000001, 179.0] {
+        let mut g = ghost();
+        g.lat_deg = lat;
+        g.speed_kt = 0.0;
+        assert!(bad(&g), "{lat}");
+    }
+    let mut g = ghost();
+    g.lon_deg = 180.0000001;
+    g.speed_kt = 0.0;
+    assert!(bad(&g));
+    // Legitimate extremes still work: the pole and the antimeridian, standing still.
+    for (lat, lon) in [
+        (90.0, 0.0),
+        (-90.0, 0.0),
+        (0.0, 180.0),
+        (0.0, -180.0),
+        (89.9999999, 179.9999999),
+    ] {
+        let mut g = ghost();
+        g.lat_deg = lat;
+        g.lon_deg = lon;
+        g.speed_kt = 0.0;
+        let out = inject_ghost(&base, &g).unwrap();
+        let i = (0..reports_len(&out.reports))
+            .find(|&i| out.label[i] == LABEL_GHOST)
+            .unwrap();
+        assert_eq!(out.reports.lat_e7[i], (lat * 1e7).round() as i32);
+    }
+    // A track that leaves the latitude range part way is refused as a whole.
+    let mut g = ghost();
+    g.lat_deg = 89.0;
+    g.speed_kt = 1500.0;
+    g.track_deg = 0.0;
+    g.interval_ms = 60_000;
+    assert!(bad(&g));
+    // Drift that carries the victim past a pole is refused.
+    let d = DriftParams {
+        victim: A,
+        start_ns: T0 + 100_000_000_000,
+        end_ns: T0 + 400_000_000_000,
+        rate_mps: 1.0e6,
+        bearing_deg: 0.0,
+    };
+    assert!(matches!(
+        inject_drift(&base, &d),
+        Err(SimError::BadSpoof(_))
+    ));
+}
+
+// REQ: OA-SIM-022
+#[test]
+fn ghost_duration_overflow_is_refused_up_front() {
+    let base = traffic();
+    let bad = |g: &GhostParams| matches!(inject_ghost(&base, g), Err(SimError::BadSpoof(_)));
+    // Standing still, so nothing but the arithmetic can refuse it.
+    let mut g = ghost();
+    g.speed_kt = 0.0;
+    g.count = 3;
+    g.interval_ms = i64::MAX / 2 + 1;
+    assert!(bad(&g));
+    // The product fits in milliseconds but not in nanoseconds.
+    g.interval_ms = i64::MAX / 1_000_000 + 1;
+    g.count = 2;
+    assert!(bad(&g));
+    // The last timestamp overflows although the span does not.
+    g = ghost();
+    g.speed_kt = 0.0;
+    g.start_ns = i64::MAX - 1_000_000_000;
+    assert!(bad(&g));
+    // Count one has no span: any interval is fine, one row.
+    g = ghost();
+    g.count = 1;
+    g.interval_ms = i64::MAX;
+    assert_eq!(count(&inject_ghost(&base, &g).unwrap(), LABEL_GHOST), 1);
+}

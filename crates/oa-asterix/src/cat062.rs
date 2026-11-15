@@ -202,6 +202,7 @@ pub(crate) fn decode_item(rec: &mut Cat062, frn: u8, b: &[u8]) -> Result<bool, E
             let lon = sext(rd(b, &mut p, 4)?, 32);
             done(b, p)?;
             check_lat(lat, 25)?;
+            check_lon(lon, 25)?;
             rec.position = Some(RawPosition { lat, lon });
         }
         6 => {
@@ -345,6 +346,7 @@ pub(crate) fn encode_items(rec: &Cat062) -> Result<Items, ItemError> {
     if let Some(p) = &rec.position {
         one(&mut o, 5, |v| {
             check_lat(p.lat, 25)?;
+            check_lon(p.lon, 25)?;
             emit_s(v, p.lat, 32, 4)?;
             emit_s(v, p.lon, 32, 4)
         })?;
