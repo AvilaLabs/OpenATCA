@@ -52,10 +52,18 @@ fn ok(xml: &str) -> (Outcome, Rows) {
     (r.unwrap(), rows)
 }
 
+/// Decodes a message expected to be refused: either the message itself (structure, capacity) or
+/// its one flight (the field error). Nothing of it may be left in the rows.
 fn err(xml: &str) -> DocError {
     let (r, rows) = run(xml, 16);
     assert_eq!(rows_len(&rows), 0, "a refused message left rows behind");
-    r.unwrap_err()
+    match r {
+        Ok(o) => {
+            assert_eq!(o.rejected, 1, "accepted: {o:?}");
+            DocError::Field(o.first_reject.unwrap())
+        }
+        Err(e) => e,
+    }
 }
 
 fn n<const N: usize>(s: &str) -> [u8; N] {
@@ -198,7 +206,7 @@ fn rows_round_trip_through_the_columns() {
     assert_eq!(BLANK_ROW.spd_milli, NO_NUM);
     assert_eq!(BLANK_ROW.env_ms, NO_TIME);
     // The size guard is in the definition (a compile-time assert); this states the figure.
-    assert_eq!(std::mem::size_of::<oa_tbfm::Row>(), 480);
+    assert_eq!(std::mem::size_of::<oa_tbfm::Row>(), 488);
 }
 
 // REQ: OA-TBFM-004
@@ -414,17 +422,20 @@ fn messages_are_classified_and_non_flight_kinds_make_no_rows() {
 
 // REQ: OA-TBFM-009
 #[test]
-fn a_refused_message_yields_no_rows_at_all() {
+fn a_refused_flight_yields_no_rows_at_all() {
     // The first section is fine, the second is bad: nothing from the first survives.
     let xml = air(&format!("{FLT}{ETA}<sta><sta_rwy>garbage</sta_rwy></sta>"));
     let (r, rows) = run(&xml, 16);
-    assert!(matches!(
-        r,
-        Err(DocError::Field(FieldError {
+    let o = r.unwrap();
+    assert_eq!((o.rows, o.rejected), (0, 1));
+    assert_eq!(
+        o.first_reject,
+        Some(FieldError {
             field: Field::StaRwy,
-            ..
-        }))
-    ));
+            kind: FieldErrorKind::Time(oa_tbfm::TimeError::Shape),
+            at: xml.find("sta_rwy>garbage").unwrap() as u32,
+        })
+    );
     assert_eq!(rows_len(&rows), 0);
     // Rows already held by the caller are left exactly as they were.
     let mut rows = new_rows(16);
@@ -432,19 +443,12 @@ fn a_refused_message_yields_no_rows_at_all() {
     decode_bytes(&mut p, air(FLT).as_bytes(), &mut rows).unwrap();
     let before = row_at(&rows, 0).unwrap();
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-    assert!(r.is_err());
+    assert_eq!(r.unwrap().rejected, 1);
     assert_eq!(rows_len(&rows), 1);
     assert_eq!(row_at(&rows, 0), Some(before));
     // Every column has the same length after a refusal.
     assert_eq!(rows.eta_ms[3].len(), 1);
     assert_eq!(rows.cfx.len(), 1);
-    // Errors carry the byte offset of the value.
-    // (a refused time or name points at its element's name; a refused attribute at its value).
-    let at = xml.find("sta_rwy>garbage").unwrap() as u32;
-    match r {
-        Err(DocError::Field(f)) => assert_eq!(f.at, at),
-        other => panic!("{other:?}"),
-    }
 }
 
 // REQ: OA-TBFM-009
@@ -653,6 +657,19 @@ fn every_field_has_a_refusal_with_its_own_error() {
             continue;
         }
         let (xml, kind) = bad_case(*f);
+        if matches!(*f, Field::Man | Field::Rfz | Field::Sfz | Field::Sus) {
+            // A schedule flag with another word is kept as unknown, not refused.
+            let (o, rows) = ok(&xml);
+            assert_eq!((o.rows, o.rejected, o.unknown_words), (1, 0, 1));
+            let flag = match *f {
+                Field::Man => sch_flag::MAN,
+                Field::Rfz => sch_flag::RFZ,
+                Field::Sfz => sch_flag::SFZ,
+                _ => sch_flag::SUS,
+            };
+            assert_eq!(sch_get(rows.sch[0], flag), sch_flag::UNKNOWN);
+            continue;
+        }
         match err(&xml) {
             DocError::Field(e) => {
                 assert_eq!((e.field, e.kind), (*f, kind), "{}", field_name(*f));
@@ -662,7 +679,7 @@ fn every_field_has_a_refusal_with_its_own_error() {
         }
         covered.insert(i);
     }
-    assert_eq!(covered.len(), FIELD_COUNT - 1);
+    assert_eq!(covered.len(), FIELD_COUNT - 1 - 4);
     assert_eq!(names.len(), FIELD_COUNT, "field names are distinct");
 }
 
@@ -720,22 +737,10 @@ fn required_attributes_and_other_field_error_kinds() {
         field_err(&air("<flt><typ>A&#9;B</typ></flt>")),
         (Field::Typ, K::BadChar)
     );
-    assert_eq!(
-        field_err(&air("<flt><typ> A</typ></flt>")),
-        (Field::Typ, K::BadChar)
-    );
-    // Not a leaf, text split over nodes, undecodable reference.
+    // Not a leaf.
     assert_eq!(
         field_err(&air("<flt><fps><x/></fps></flt>")),
         (Field::Fps, K::NotLeaf)
-    );
-    assert_eq!(
-        field_err(&air("<flt><fps>AB<!-- c -->CD</fps></flt>")),
-        (Field::Fps, K::Text)
-    );
-    assert_eq!(
-        field_err(&air("<flt><fps>AB<![CDATA[CD]]></fps></flt>")),
-        (Field::Fps, K::Text)
     );
     // Numbers: signs, spaces, empty fraction, too many digits, overflow.
     for (tag, v) in [
@@ -762,13 +767,19 @@ fn required_attributes_and_other_field_error_kinds() {
         )),
         (Field::Bcn, K::Duplicate)
     );
-    // msgId: digits only, at most ten, within u32.
-    for v in ["", "-1", "4294967296", "12345678901", "1 2"] {
+    // msgId: digits only, at most ten.
+    for v in ["", "-1", "12345678901", "1 2", "1.5"] {
         let xml = air(FLT).replace("msgId=\"4711\"", &format!("msgId=\"{v}\""));
         assert_eq!(field_err(&xml), (Field::MsgId, K::Format), "{v:?}");
     }
-    let xml = air(FLT).replace("msgId=\"4711\"", "msgId=\"4294967295\"");
-    assert_eq!(ok(&xml).1.msg_id[0], u32::MAX);
+    for (v, want) in [
+        ("4294967295", u64::from(u32::MAX)),
+        ("4294967296", 4_294_967_296),
+        ("9999999999", 9_999_999_999),
+    ] {
+        let xml = air(FLT).replace("msgId=\"4711\"", &format!("msgId=\"{v}\""));
+        assert_eq!(ok(&xml).1.msg_id[0], want);
+    }
     // envSrce shapes.
     for v in [
         "TMA.Z.FAA.GOV",
@@ -882,11 +893,17 @@ fn unknown_paths_are_counted_not_refused() {
         let (r, rows) = run(&xml, 4);
         observe(&mut stats, &r, &rows.section);
     }
-    assert_eq!((stats.messages, stats.accepted), (3, 2));
+    // The message with a refused flight is accepted: it has no rows, and the refusal is counted.
+    assert_eq!((stats.messages, stats.accepted), (3, 3));
     assert_eq!(stats.unknown_paths, 1);
     assert_eq!(stats.ignored_paths, 8);
-    assert_eq!(stats.rejects, [0, 0, 1, 0]);
+    assert_eq!(stats.rejects, [0, 0, 0, 0]);
+    assert_eq!(stats.rejected_flights, 1);
     assert_eq!(stats.field_errors[Field::Fps as usize], 1);
+    assert_eq!(
+        stats.reject_kinds[oa_tbfm::error_kind_index(FieldErrorKind::BadChar)],
+        1
+    );
 }
 
 // REQ: OA-TBFM-013
@@ -1101,4 +1118,263 @@ fn cross_check_counts_resolved_and_unresolved_identifiers() {
     // No rows, no counts.
     let none = cross_check(&m, &new_rows(1));
     assert_eq!(none.all.meter_fix, oa_tbfm::Tally::default());
+}
+
+// ---- OA-TBFM-019 .. 023: flights refused alone, speed units, unknown words, labels, text ----
+
+/// A message of several flights: `air` elements with their own identities.
+fn airs(bodies: &[&str]) -> String {
+    let body: String = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| format!("<air tmaId=\"T{i:05}\" aid=\"TST{i:03}\" airType=\"AMD\">{b}</air>"))
+        .collect();
+    env("", &body)
+}
+
+// REQ: OA-TBFM-019
+#[test]
+fn a_refused_flight_leaves_its_sibling_flights() {
+    use oa_tbfm::error_kind_index;
+    let good = "<flt><spd>250.5</spd><fps>ACTIVE</fps></flt>";
+    let dup = "<flt><fps>ACTIVE</fps><unseen/><spd>1.5</spd><spd>2.5</spd></flt><eta><eta_mfx>2026-11-14T14:30:00Z</eta_mfx></eta>";
+    let bad_time = "<eta><eta_mfx>soon</eta_mfx></eta>";
+    let (o, rows) = ok(&airs(&[good, dup, bad_time, good]));
+    assert_eq!((o.kind, o.rows, o.rejected), (MsgKind::Air, 2, 2));
+    assert_eq!(rows.aid, [n::<8>("TST000"), n::<8>("TST003")]);
+    let first = o.first_reject.unwrap();
+    assert_eq!(
+        (first.field, first.kind),
+        (Field::Spd, FieldErrorKind::Duplicate)
+    );
+    assert_eq!(o.reject_fields[Field::Spd as usize], 1);
+    assert_eq!(o.reject_fields[Field::EtaMfx as usize], 1);
+    assert_eq!(o.reject_fields.iter().sum::<u32>(), 2);
+    assert_eq!(
+        o.reject_kinds[error_kind_index(FieldErrorKind::Duplicate)],
+        1
+    );
+    assert_eq!(o.reject_kinds.iter().sum::<u32>(), 2);
+    // the path counters are back to what the good flights alone give
+    let (clean, _) = ok(&airs(&[good, good]));
+    assert_eq!(
+        (o.unknown_paths, o.ignored_paths),
+        (clean.unknown_paths, clean.ignored_paths)
+    );
+    assert_eq!(clean.rejected, 0);
+    assert_eq!(clean.first_reject, None);
+    // a flight without its identity is refused alone; so is a tma with a bad message number
+    let nameless = env(
+        "",
+        &format!(
+            "<air tmaId=\"T9\" airType=\"AMD\"><flt/></air>{}",
+            air_one()
+        ),
+    );
+    let (o, rows) = ok(&nameless);
+    assert_eq!((o.rows, o.rejected), (1, 1));
+    assert_eq!(rows_len(&rows), 1);
+    let two_tma = format!(
+        "<env xmlns=\"{NS}\" targetNamespace=\"{NS}\" envTime=\"2026-11-14T14:11:42.420Z\" envSrce=\"TMA.ZTT.FAA.GOV\">\
+         <tma msgTime=\"2026-11-14T14:11:42.420Z\" msgId=\"x\">{}</tma>\
+         <tma msgTime=\"2026-11-14T14:11:42.420Z\" msgId=\"5\">{}</tma></env>",
+        air_one(),
+        air_one()
+    );
+    let (o, rows) = ok(&two_tma);
+    assert_eq!((o.rows, o.rejected, o.kind), (1, 1, MsgKind::Air));
+    assert_eq!(rows.msg_id, [5]);
+    assert_eq!(o.first_reject.map(|e| e.field), Some(Field::MsgId));
+    // a bad envelope still refuses the whole message
+    assert!(matches!(
+        err(&air(FLT).replace("TMA.ZTT.FAA.GOV", "ZTT")),
+        DocError::Field(FieldError {
+            field: Field::EnvSrce,
+            ..
+        })
+    ));
+    // and a capacity overrun still refuses it, leaving the rows alone
+    let (r, rows) = run(&airs(&[good, good, good]), 2);
+    assert_eq!(r.unwrap_err(), DocError::Capacity);
+    assert_eq!(rows_len(&rows), 0);
+}
+
+fn air_one() -> String {
+    "<air tmaId=\"T1\" aid=\"TST1\" airType=\"AMD\"><flt><fps>ACTIVE</fps></flt></air>".to_string()
+}
+
+// REQ: OA-TBFM-020
+#[test]
+fn the_speed_unit_is_stored_with_the_value() {
+    use oa_tbfm::spd_unit;
+    for (v, milli, unit) in [
+        ("441.0", 441_000, spd_unit::KNOTS),
+        ("140.0", 140_000, spd_unit::KNOTS),
+        ("99.5", 99_500, spd_unit::KNOTS),
+        ("1000.0", 1_000_000, spd_unit::KNOTS),
+        ("0.84", 840, spd_unit::MACH),
+        ("0.77", 770, spd_unit::MACH),
+        ("1.20", 1_200, spd_unit::MACH),
+        // forms that are neither: kept, with the unknown unit
+        ("250", 250_000, spd_unit::UNKNOWN),
+        ("0.8", 800, spd_unit::UNKNOWN),
+        ("5.0", 5_000, spd_unit::UNKNOWN),
+        ("250.55", 250_550, spd_unit::UNKNOWN),
+        ("12345.0", 12_345_000, spd_unit::UNKNOWN),
+        ("99999.999", 99_999_999, spd_unit::UNKNOWN),
+    ] {
+        let (o, rows) = ok(&air(&format!("<flt><spd>{v}</spd></flt>")));
+        assert_eq!(rows.spd_milli[0], milli, "{v}");
+        assert_eq!(rows.spd_unit[0], unit, "{v}");
+        assert_eq!(o.unknown_units, u32::from(unit == spd_unit::UNKNOWN), "{v}");
+        assert_eq!(o.rejected, 0, "{v}");
+    }
+    // no speed, no unit; an empty speed is cleared, with no unit either
+    let (_, rows) = ok(&air("<flt><fps>A</fps></flt>"));
+    assert_eq!(
+        (rows.spd_milli[0], rows.spd_unit[0]),
+        (NO_NUM, spd_unit::NONE)
+    );
+    let (_, rows) = ok(&air("<flt><spd/></flt>"));
+    assert_eq!(
+        (rows.spd_milli[0], rows.spd_unit[0]),
+        (NO_NUM, spd_unit::NONE)
+    );
+    assert_eq!(BLANK_ROW.spd_unit, spd_unit::NONE);
+    assert_eq!(spd_unit::NAMES[usize::from(spd_unit::MACH)], "mach");
+    // the unit survives the columns
+    let (_, rows) = ok(&air("<flt><spd>0.84</spd></flt>"));
+    assert_eq!(row_at(&rows, 0).unwrap().spd_unit, spd_unit::MACH);
+    // and the statistics count the speeds that could not be placed
+    let mut stats = new_stats();
+    for v in ["441.0", "250", "0.84", "7"] {
+        let (r, rows) = run(&air(&format!("<flt><spd>{v}</spd></flt>")), 4);
+        observe(&mut stats, &r, &rows.section);
+    }
+    assert_eq!(stats.unknown_units, 2);
+}
+
+// REQ: OA-TBFM-021
+#[test]
+fn a_schedule_flag_with_another_word_is_kept_as_unknown() {
+    let (o, rows) = ok(&air(
+        "<sch><mfx>FIXA</mfx><man>YES</man><rfz>MAYBE</rfz><sfz>no</sfz><sus>NO</sus></sch>",
+    ));
+    assert_eq!((o.rows, o.rejected, o.unknown_words), (1, 0, 2));
+    let s = rows.sch[0];
+    assert_eq!(sch_get(s, sch_flag::MAN), sch_flag::YES);
+    assert_eq!(sch_get(s, sch_flag::RFZ), sch_flag::UNKNOWN);
+    assert_eq!(sch_get(s, sch_flag::SFZ), sch_flag::UNKNOWN);
+    assert_eq!(sch_get(s, sch_flag::SUS), sch_flag::NO);
+    assert_eq!(rows.mfx[0], n::<8>("FIXA"));
+    // a change type is not a flag: an unknown one still refuses the flight
+    assert_eq!(
+        err(&air("<mrp mrpType=\"XYZ\"/>")),
+        DocError::Field(FieldError {
+            field: Field::MrpType,
+            kind: FieldErrorKind::Vocabulary,
+            at: air("<mrp mrpType=\"XYZ\"/>").find("XYZ").unwrap() as u32,
+        })
+    );
+    let mut stats = new_stats();
+    let (r, rows) = run(&air("<sch><man>X</man></sch>"), 4);
+    observe(&mut stats, &r, &rows.section);
+    assert_eq!((stats.unknown_words, stats.rejected_flights), (1, 0));
+}
+
+// REQ: OA-TBFM-022
+#[test]
+fn labels_may_hold_spaces_and_values_are_trimmed() {
+    let (_, rows) = ok(&air(
+        "<mrp mrpType=\"NEW\"><cfg>RWY 17 L</cfg><scn>SCENARIO  2</scn><cat>HEAVY JET ARR</cat><gat>GATE A 1</gat><tra> ZTT </tra></mrp>",
+    ));
+    assert_eq!(name_str(&rows.cfg[0]), "RWY 17 L");
+    assert_eq!(name_str(&rows.scn[0]), "SCENARIO  2");
+    assert_eq!(name_str(&rows.cat[0]), "HEAVY JET ARR");
+    assert_eq!(name_str(&rows.gat[0]), "GATE A 1");
+    assert_eq!(name_str(&rows.tra[0]), "ZTT");
+    // only the outer whitespace goes, wherever it comes from
+    let (_, rows) = ok(&air("<mrp><cfg>&#32;&#9;A B&#10; </cfg></mrp>"));
+    assert_eq!(name_str(&rows.cfg[0]), "A B");
+    let xml = air(FLT).replace("aid=\"TST123\"", "aid=\" TST123 \"");
+    assert_eq!(name_str(&ok(&xml).1.aid[0]), "TST123");
+    // trimmed numbers and times parse; a value that is only whitespace is an empty element
+    let (_, rows) = ok(&air(
+        "<flt><spd> 441.0 </spd><etd>&#32;2026-11-14T14:00:00Z </etd></flt>",
+    ));
+    assert_eq!(rows.spd_milli[0], 441_000);
+    assert_eq!(rows.etd_ms[0], t(14, 0, 0));
+    let (_, rows) = ok(&air("<mrp><cfg>&#32;&#32;</cfg></mrp>"));
+    assert_eq!(rows.cfg[0], [0; 20]);
+    assert!(is_cleared(rows.cleared[0], Field::Cfg));
+    // identifiers and fixes still refuse an interior space, and a label a control character
+    for body in [
+        "<flt><aid>TS T</aid></flt>",
+        "<mrp><mfx>FI XA</mfx></mrp>",
+        "<flt><typ>A B</typ></flt>",
+    ] {
+        assert!(matches!(
+            err(&air(body)),
+            DocError::Field(FieldError {
+                kind: FieldErrorKind::BadChar,
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        err(&air("<mrp><cfg>A&#9;B</cfg></mrp>")),
+        DocError::Field(FieldError {
+            field: Field::Cfg,
+            kind: FieldErrorKind::BadChar,
+            ..
+        })
+    ));
+    // the width bound counts the spaces
+    assert!(matches!(
+        err(&air(&format!("<mrp><cfg>{}</cfg></mrp>", "A B ".repeat(6)))),
+        DocError::Field(FieldError {
+            field: Field::Cfg,
+            kind: FieldErrorKind::TooLong,
+            ..
+        })
+    ));
+}
+
+// REQ: OA-TBFM-023
+#[test]
+fn text_split_by_a_comment_or_cdata_is_joined() {
+    for (v, want) in [
+        ("25<!--x-->0.5", 250_500),
+        ("<![CDATA[25]]>0.5", 250_500),
+        ("2<!--a-->5<![CDATA[0]]>.5", 250_500),
+    ] {
+        let (o, rows) = ok(&air(&format!("<flt><spd>{v}</spd></flt>")));
+        assert_eq!((rows.spd_milli[0], o.rejected), (want, 0), "{v}");
+    }
+    let (_, rows) = ok(&air("<flt><fps>AB<!-- c -->CD</fps></flt>"));
+    assert_eq!(name_str(&rows.fps[0]), "ABCD");
+    let (_, rows) = ok(&air(
+        "<flt><fps>AB<![CDATA[CD]]></fps><aid>TS<!---->T123</aid></flt>",
+    ));
+    assert_eq!(name_str(&rows.fps[0]), "ABCD");
+    assert_eq!(name_str(&rows.aid[0]), "TST123");
+    // pieces joined are validated as one value
+    assert!(matches!(
+        err(&air("<flt><bcn>07<!--x-->8<!--y-->9</bcn></flt>")),
+        DocError::Field(FieldError {
+            field: Field::Bcn,
+            kind: FieldErrorKind::Format,
+            ..
+        })
+    ));
+    // the 64-byte working bound applies to the total
+    let half = "A".repeat(40);
+    assert!(matches!(
+        err(&air(&format!("<flt><fps>{half}<!--x-->{half}</fps></flt>"))),
+        DocError::Field(FieldError {
+            field: Field::Fps,
+            kind: FieldErrorKind::TooLong,
+            ..
+        })
+    ));
 }

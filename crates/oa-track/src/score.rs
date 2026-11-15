@@ -429,6 +429,17 @@ impl std::fmt::Display for ScoreError {
 
 impl std::error::Error for ScoreError {}
 
+/// The altitude a row is scored with, feet: its rounded value, or [`NO_ALT`] when the row has
+/// none (flag clear, or a column that is not a number), so an absent altitude is never scored
+/// as 0 ft.
+pub fn scored_altitude_ft(flags: u8, alt_ft: f32) -> i32 {
+    if flags & O_HAS_ALT != 0 && alt_ft.is_finite() {
+        alt_ft.round() as i32
+    } else {
+        NO_ALT
+    }
+}
+
 /// Which rows of a run are scored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowSet {
@@ -470,11 +481,7 @@ pub trait RowSource {
 }
 
 fn alt_of(flags: u8, alt: f32) -> i32 {
-    if flags & O_HAS_ALT != 0 {
-        alt.round() as i32
-    } else {
-        NO_ALT
-    }
+    scored_altitude_ft(flags, alt)
 }
 
 impl RowSource for TrackRun {

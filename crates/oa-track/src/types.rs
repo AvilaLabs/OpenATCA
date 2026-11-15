@@ -192,7 +192,8 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
 
 /// [`TrackOutput::flags`]: the track is coasting.
 pub const O_COAST: u8 = 1;
-/// The altitude columns are meaningful.
+/// The altitude columns are meaningful. Without it `alt_ft`, `alt_var_ft2` and `vrate_fpm` are
+/// NaN (absent, not 0 ft).
 pub const O_HAS_ALT: u8 = 2;
 /// The row is a fixed-rate tick, not an update.
 pub const O_TICK: u8 = 4;
@@ -219,10 +220,11 @@ pub struct TrackOutput {
     pub vel_cov_m2s2: Vec<[f32; 3]>,
     /// Turn rate (positive clockwise seen from above), rad/s.
     pub turn_rate_rps: Vec<f32>,
-    /// Barometric altitude, feet, and its variance, ft^2.
+    /// Barometric altitude, feet, and its variance, ft^2; NaN when the row has no altitude
+    /// ([`O_HAS_ALT`] clear).
     pub alt_ft: Vec<f32>,
     pub alt_var_ft2: Vec<f32>,
-    /// Vertical rate, feet per minute.
+    /// Vertical rate, feet per minute; NaN when the row has no altitude.
     pub vrate_fpm: Vec<f32>,
     /// Horizontal model probabilities `[straight, turn]`.
     pub mu_h: Vec<[f32; 2]>,
@@ -432,11 +434,17 @@ pub fn output_hash_into(h: &mut oa_sha256::Sha256, o: &TrackOutput) {
         .iter()
         .chain(o.vel_north_mps.iter())
         .chain(o.turn_rate_rps.iter())
-        .chain(o.alt_ft.iter())
-        .chain(o.alt_var_ft2.iter())
-        .chain(o.vrate_fpm.iter())
     {
         put(h, &v.to_bits().to_le_bytes());
+    }
+    // The altitude columns of a row without an altitude are hashed as zero, which is what they
+    // held before absence was written as NaN: the flags (hashed below) already say "absent", and
+    // digests recorded earlier stay valid.
+    for col in [&o.alt_ft, &o.alt_var_ft2, &o.vrate_fpm] {
+        for (i, v) in col.iter().enumerate() {
+            let has = o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0);
+            put(h, &(if has { *v } else { 0.0 }).to_bits().to_le_bytes());
+        }
     }
     for c in o.pos_cov_m2.iter().chain(o.vel_cov_m2s2.iter()) {
         for v in c {

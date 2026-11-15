@@ -8,7 +8,8 @@
 //! per-flight state is the consumer's job (it needs the message order, which the feed owns).
 //!
 //! Absent values: a name column is all zero bytes, a time column is [`NO_TIME`], a number column
-//! is its `NONE` constant and a code column is 0.
+//! is its `NONE` constant and a code column is 0. A speed always carries its unit
+//! ([`spd_unit`]).
 
 /// A short ASCII name, zero-padded on the right; all zero means absent. Widths come from the
 /// longest value in the 12,760-message survey (docs/TBFM_SURVEY.md) plus headroom; a longer
@@ -58,7 +59,22 @@ pub mod pt {
     pub const COUNT: usize = 8;
 }
 
-/// Schedule flag positions in [`Row::sch`]: two bits each, 0 absent, 1 `NO`, 2 `YES`.
+/// The unit of [`Row::spd_milli`], stored in [`Row::spd_unit`]. The feed has one `spd` element
+/// for both units and no marker, so the unit is read from the value's form
+/// (docs/TBFM_SURVEY.md): `ddd.d` is knots, `d.dd` is a Mach number; a value of any other form
+/// is stored with unit [`UNKNOWN`](spd_unit::UNKNOWN) and counted, never guessed.
+pub mod spd_unit {
+    /// No speed in the row.
+    pub const NONE: u8 = 0;
+    pub const KNOTS: u8 = 1;
+    pub const MACH: u8 = 2;
+    pub const UNKNOWN: u8 = 3;
+    pub const COUNT: usize = 4;
+    pub const NAMES: [&str; COUNT] = ["-", "knots", "mach", "unknown"];
+}
+
+/// Schedule flag positions in [`Row::sch`]: two bits each, 0 absent, 1 `NO`, 2 `YES`, 3 a word
+/// that is neither (kept as unknown).
 pub mod sch_flag {
     pub const MAN: u8 = 0;
     pub const RFZ: u8 = 1;
@@ -67,13 +83,16 @@ pub mod sch_flag {
     pub const ABSENT: u8 = 0;
     pub const NO: u8 = 1;
     pub const YES: u8 = 2;
+    pub const UNKNOWN: u8 = 3;
 }
 
 /// One metering row. See the module comment; the columns are named for the wire elements and
 /// attributes they come from (docs/TBFM_SURVEY.md says what each appears to mean).
 // Budget: one per metering section, held in quantity (the SoA columns below store the same
-// fields); the exact packed size of its fields. A7.1: the name widths were chosen so that no
-// padding is hidden (480 is a multiple of 8).
+// fields); the packed size of its fields. A7.1: the name widths were chosen so that no padding
+// is hidden (480 was a multiple of 8). `msg_id` grew from u32 to u64 (a ten-digit message
+// number overflows u32) and `spd_unit` was added: 485 packed bytes, 488 with three bytes of
+// tail padding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Row {
@@ -91,16 +110,19 @@ pub struct Row {
     /// changes, so empty and absent differ: an empty element in an amendment appears to clear
     /// the value (unconfirmed, docs/TBFM_SURVEY.md); the value column itself stays absent.
     pub cleared: u64,
-    /// Speed in thousandths of the (unconfirmed) unit.
+    /// `msgId` of the message (up to ten digits).
+    pub msg_id: u64,
+    /// Speed in thousandths of the unit in [`Row::spd_unit`].
     pub spd_milli: i32,
     pub ina: i32,
-    pub msg_id: u32,
     /// Transponder code as the number its four octal digits spell.
     pub bcn: u16,
     pub section: u8,
     pub air_type: u8,
     pub sect_type: u8,
     pub sch: u8,
+    /// What `spd_milli` is, see [`spd_unit`]; never mixed in one column without it.
+    pub spd_unit: u8,
     /// Centre identifier from `envSrce` (`TMA.<centre>.FAA.GOV`).
     pub center: Name4,
     pub tma_id: Name8,
@@ -132,7 +154,7 @@ pub struct Row {
     pub tds: Name4,
     pub cfx: Name14,
 }
-const _: () = assert!(core::mem::size_of::<Row>() == 480);
+const _: () = assert!(core::mem::size_of::<Row>() == 488);
 
 /// A row with every value absent.
 pub const BLANK_ROW: Row = Row {
@@ -144,14 +166,15 @@ pub const BLANK_ROW: Row = Row {
     etd_ms: NO_TIME,
     std_ms: NO_TIME,
     cleared: 0,
+    msg_id: 0,
     spd_milli: NO_NUM,
     ina: NO_NUM,
-    msg_id: 0,
     bcn: NO_BCN,
     section: 0,
     air_type: change::NONE,
     sect_type: change::NONE,
     sch: 0,
+    spd_unit: spd_unit::NONE,
     center: [0; 4],
     tma_id: [0; 8],
     gufi: [0; 12],
@@ -199,14 +222,15 @@ pub struct Rows {
     pub etd_ms: Vec<i64>,
     pub std_ms: Vec<i64>,
     pub cleared: Vec<u64>,
+    pub msg_id: Vec<u64>,
     pub spd_milli: Vec<i32>,
     pub ina: Vec<i32>,
-    pub msg_id: Vec<u32>,
     pub bcn: Vec<u16>,
     pub section: Vec<u8>,
     pub air_type: Vec<u8>,
     pub sect_type: Vec<u8>,
     pub sch: Vec<u8>,
+    pub spd_unit: Vec<u8>,
     pub center: Vec<Name4>,
     pub tma_id: Vec<Name8>,
     pub gufi: Vec<Name12>,
@@ -259,14 +283,15 @@ pub fn new_rows(cap: usize) -> Rows {
         etd_ms: v(cap),
         std_ms: v(cap),
         cleared: v(cap),
+        msg_id: v(cap),
         spd_milli: v(cap),
         ina: v(cap),
-        msg_id: v(cap),
         bcn: v(cap),
         section: v(cap),
         air_type: v(cap),
         sect_type: v(cap),
         sch: v(cap),
+        spd_unit: v(cap),
         center: v(cap),
         tma_id: v(cap),
         gufi: v(cap),
@@ -320,14 +345,15 @@ pub fn truncate_rows(r: &mut Rows, n: usize) {
     r.etd_ms.truncate(n);
     r.std_ms.truncate(n);
     r.cleared.truncate(n);
+    r.msg_id.truncate(n);
     r.spd_milli.truncate(n);
     r.ina.truncate(n);
-    r.msg_id.truncate(n);
     r.bcn.truncate(n);
     r.section.truncate(n);
     r.air_type.truncate(n);
     r.sect_type.truncate(n);
     r.sch.truncate(n);
+    r.spd_unit.truncate(n);
     r.center.truncate(n);
     r.tma_id.truncate(n);
     r.gufi.truncate(n);
@@ -376,14 +402,15 @@ pub fn push_row(r: &mut Rows, row: &Row) -> bool {
     r.etd_ms.push(row.etd_ms);
     r.std_ms.push(row.std_ms);
     r.cleared.push(row.cleared);
+    r.msg_id.push(row.msg_id);
     r.spd_milli.push(row.spd_milli);
     r.ina.push(row.ina);
-    r.msg_id.push(row.msg_id);
     r.bcn.push(row.bcn);
     r.section.push(row.section);
     r.air_type.push(row.air_type);
     r.sect_type.push(row.sect_type);
     r.sch.push(row.sch);
+    r.spd_unit.push(row.spd_unit);
     r.center.push(row.center);
     r.tma_id.push(row.tma_id);
     r.gufi.push(row.gufi);
@@ -431,14 +458,15 @@ pub fn row_at(r: &Rows, i: usize) -> Option<Row> {
     o.etd_ms = *r.etd_ms.get(i)?;
     o.std_ms = *r.std_ms.get(i)?;
     o.cleared = *r.cleared.get(i)?;
+    o.msg_id = *r.msg_id.get(i)?;
     o.spd_milli = *r.spd_milli.get(i)?;
     o.ina = *r.ina.get(i)?;
-    o.msg_id = *r.msg_id.get(i)?;
     o.bcn = *r.bcn.get(i)?;
     o.section = *r.section.get(i)?;
     o.air_type = *r.air_type.get(i)?;
     o.sect_type = *r.sect_type.get(i)?;
     o.sch = *r.sch.get(i)?;
+    o.spd_unit = *r.spd_unit.get(i)?;
     o.center = *r.center.get(i)?;
     o.tma_id = *r.tma_id.get(i)?;
     o.gufi = *r.gufi.get(i)?;

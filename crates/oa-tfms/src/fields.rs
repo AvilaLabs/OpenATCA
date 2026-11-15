@@ -279,7 +279,9 @@ pub enum CapKind {
     Strings,
 }
 
-/// Why a whole message was refused (all or nothing: it yields no rows).
+/// Why a whole document was refused (it yields no rows). A refused field no longer refuses the
+/// document: the message is dropped and counted in [`crate::Outcome::rejected`]; `Field` is the
+/// reason carried by those counts and by [`crate::Outcome::first_reject`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocError {
     /// The XML parser refused the bytes (only from [`crate::decode_bytes`]).
@@ -320,6 +322,26 @@ pub fn reject_reason(e: &DocError) -> usize {
         DocError::Capacity(CapKind::Flights) => REJECT_CAP_FLIGHTS,
         DocError::Capacity(CapKind::Flows) => REJECT_CAP_FLOWS,
         DocError::Capacity(CapKind::Strings) => REJECT_CAP_STRINGS,
+    }
+}
+
+/// Number of [`FieldErrorKind`] values.
+pub const ERROR_KIND_COUNT: usize = 11;
+
+/// The index of a field error kind (for per-reason counts), in declaration order.
+pub fn error_kind_index(k: FieldErrorKind) -> usize {
+    match k {
+        FieldErrorKind::Missing => 0,
+        FieldErrorKind::TooLong => 1,
+        FieldErrorKind::BadChar => 2,
+        FieldErrorKind::Format => 3,
+        FieldErrorKind::Time(_) => 4,
+        FieldErrorKind::Vocabulary => 5,
+        FieldErrorKind::Range => 6,
+        FieldErrorKind::Duplicate => 7,
+        FieldErrorKind::Inconsistent => 8,
+        FieldErrorKind::NotLeaf => 9,
+        FieldErrorKind::Text => 10,
     }
 }
 

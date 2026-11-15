@@ -664,21 +664,36 @@ fn comment(input: &[u8], pos: usize) -> Result<usize, XmlError> {
 
 fn content(p: &mut Parser, input: &[u8], start: usize) -> Result<(), XmlError> {
     let mut pos = start;
+    // Whether the content just before `pos` ended in stored text (a text run or a CDATA
+    // section, comments aside), so that a whitespace run next to it is data, not layout.
+    let mut data = false;
     loop {
         let Some(b) = at(input, pos) else {
             return Err(XmlError::Unclosed {
                 at: off(input.len()),
             });
         };
+        let before = p.text_span.len();
         if b != b'<' {
-            pos = text(p, input, pos)?;
+            pos = text(p, input, pos, data)?;
+            data |= p.text_span.len() > before;
             continue;
         }
         pos = match at(input, pos + 1) {
-            Some(b'/') => end_tag(p, input, pos)?,
-            Some(b'!') => bang(p, input, pos)?,
+            Some(b'/') => {
+                data = false;
+                end_tag(p, input, pos)?
+            }
+            Some(b'!') => {
+                let next = bang(p, input, pos)?;
+                data |= p.text_span.len() > before;
+                next
+            }
             Some(b'?') => return Err(XmlError::ProcessingInstruction { at: off(pos) }),
-            Some(_) => start_tag(p, input, pos)?,
+            Some(_) => {
+                data = false;
+                start_tag(p, input, pos)?
+            }
             None => return Err(XmlError::UnexpectedEof { at: off(pos + 1) }),
         };
         if p.stack.is_empty() {
@@ -703,13 +718,39 @@ fn push_text(p: &mut Parser, input_pos: usize, s: Span, ent: bool) -> Result<(),
     Ok(())
 }
 
-fn text(p: &mut Parser, input: &[u8], pos: usize) -> Result<usize, XmlError> {
+fn text(p: &mut Parser, input: &[u8], pos: usize, after_data: bool) -> Result<usize, XmlError> {
     let (end, flags) = scan_run(input, pos, 0)?;
-    // Whitespace-only runs between markup are layout, not data (unless a reference is in it).
-    if flags & F_REF != 0 || !sub(input, pos, end).iter().all(|&b| is_ws(b)) {
+    // Whitespace-only runs between markup are layout, not data (unless a reference is in it, or
+    // the run sits next to text or a CDATA section of the same element: `a<!--c--> <!--d-->b`).
+    let layout = flags & F_REF == 0
+        && sub(input, pos, end).iter().all(|&b| is_ws(b))
+        && !after_data
+        && !data_follows(input, end);
+    if !layout {
         push_text(p, pos, span(pos, end), flags != 0)?;
     }
     Ok(end)
+}
+
+/// Whether the next content after `pos`, skipping comments and further whitespace, is text or a
+/// CDATA section. (Whitespace in a run that ends at a comment is judged with the run after it.)
+fn data_follows(input: &[u8], mut pos: usize) -> bool {
+    loop {
+        if starts(input, pos, b"<!--") {
+            match comment(input, pos) {
+                Ok(next) => pos = next,
+                Err(_) => return false,
+            }
+        } else if starts(input, pos, b"<![CDATA[") {
+            return true;
+        } else {
+            match at(input, pos) {
+                Some(b) if is_ws(b) => pos += 1,
+                Some(b'<') | None => return false,
+                Some(_) => return true,
+            }
+        }
+    }
 }
 
 /// `<!...` inside an element: a comment or CDATA section.

@@ -271,9 +271,15 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
         // The model's turn rate is counter-clockwise; the output is the heading rate (clockwise
         // positive, as a pilot reads it).
         turn_rate_rps: -xg(4) as f32,
-        alt_ft: if has_alt { xv[0] as f32 } else { 0.0 },
-        alt_var_ft2: if has_alt { pv[0] as f32 } else { 0.0 },
-        vrate_fpm: if has_alt { (xv[1] * 60.0) as f32 } else { 0.0 },
+        // An absent altitude is NaN, never 0 ft: a consumer that forgets the flag gets a value
+        // that cannot be mistaken for sea level (and that propagates through any arithmetic).
+        alt_ft: if has_alt { xv[0] as f32 } else { f32::NAN },
+        alt_var_ft2: if has_alt { pv[0] as f32 } else { f32::NAN },
+        vrate_fpm: if has_alt {
+            (xv[1] * 60.0) as f32
+        } else {
+            f32::NAN
+        },
         mu_h: [h.mu[0] as f32, h.mu[1] as f32],
         mu_v: [vf.mu[0] as f32, vf.mu[1] as f32],
         flags: if has_alt { O_HAS_ALT } else { 0 },

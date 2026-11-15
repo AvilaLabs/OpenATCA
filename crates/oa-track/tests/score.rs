@@ -22,10 +22,11 @@ use oa_geo::aeqd::{frame_velocity, unproject};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     esassp_of, initiation_delays, interval_stats, run_tracker, run_tracker_spilled, score,
-    score_ranges, score_source, scoring_config, split_reports, transversal_accel, RowSet,
-    RowSource, CLASS_STRAIGHT, CLASS_TURN, SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
+    score_ranges, score_source, scored_altitude_ft, scoring_config, split_reports,
+    transversal_accel, RowSet, RowSource, CLASS_STRAIGHT, CLASS_TURN, SCORE_CHUNK_ROWS,
+    SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
-use oa_track::{DEFAULT_CONFIG, END_FLUSHED};
+use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
 
 const T0: i64 = 1_700_000_000_000_000_000;
@@ -710,4 +711,19 @@ fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages()
             .count(),
         0
     );
+}
+
+// REQ: OA-TRK-066
+#[test]
+fn an_absent_altitude_is_never_scored_as_zero_feet() {
+    use oa_bench::legacy::NO_ALT;
+    assert_eq!(scored_altitude_ft(O_TICK | O_HAS_ALT, 35_000.4), 35_000);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, -1_200.6), -1_201);
+    // a real sea-level altitude is 0, an absent one is not
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, 0.0), 0);
+    assert_eq!(scored_altitude_ft(O_TICK, f32::NAN), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_TICK, 0.0), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::NAN), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::INFINITY), NO_ALT);
+    assert_eq!(scored_altitude_ft(0, 12_000.0), NO_ALT);
 }

@@ -199,6 +199,16 @@ fn every_real_tfms_message_decodes_and_is_reported() {
         stats.unknown_paths, 0,
         "the survey says every path is known"
     );
+    eprintln!(
+        "  messages refused alone {}, vocabulary words kept as unknown {}",
+        stats.rejected_messages, stats.unknown_words
+    );
+    assert_eq!(
+        (stats.rejected_messages, stats.unknown_words),
+        (0, 0),
+        "field errors: {:?}",
+        stats.field_errors
+    );
     assert!(stats.flight_rows > 0 && stats.flow_rows > 0);
 
     // Pass 2, timing only (the files are already in memory; rows are discarded per message).

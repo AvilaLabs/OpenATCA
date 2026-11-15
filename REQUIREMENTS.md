@@ -271,6 +271,12 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   input bytes, depth, elements and name length must be at least 1; a violation is
   `LimitsInvalid` naming the limit. Tables are reserved with `try_reserve_exact`, so a limit
   too large to allocate is `LimitsInvalid` too, never an abort.
+- **OA-XML-028** The pieces of an element's text that a comment or CDATA section splits are several
+  text nodes of one owner, and `decode_text_run` joins them as XML 1.0 defines the element's
+  character data (`12<!--x-->34` and `<![CDATA[12]]>34` are `1234`), decoding each as text and
+  bounded by the output buffer (`OutputTooSmall` past it). Whitespace-only text is still layout
+  and not stored, except next to text or a CDATA section of the same element (`a<!--c--> <!--d-->b`),
+  where it is data.
 
 ### SCDS feed frames (oa-feed)
 
@@ -483,7 +489,7 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
 - **OA-TBFM-008** Every message is classified: `air` (flight data), adaptation, control, other,
   empty, and the `mis` heartbeat and sync markers; non-flight kinds produce no rows and are
   counted, and the centre and envelope time are reported for all of them.
-- **OA-TBFM-009** A message is accepted whole or not at all: a refused field, a wrong root or
+- **OA-TBFM-009** A flight (see OA-TBFM-019) is accepted whole or not at all; a wrong root or
   namespace, an XML error or a capacity overrun leaves the caller's rows exactly as they were,
   and a refused field carries the byte offset of its element or attribute value.
 - **OA-TBFM-010** Every field has its own refusal: a missing required attribute (`envSrce`,
@@ -521,6 +527,23 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   waypoint and an airport to a model airport by its identifier or alternate identifier (never
   to a runway threshold), counts distinct identifiers and rows per role and per scope (all
   centres, the model's own centre) and lists the identifiers that do not resolve.
+- **OA-TBFM-019** A flight is decoded all or nothing, not the message: an `air` with a refused field
+  is rolled back (rows and counters) and counted with its field and reason (`rejected`,
+  `first_reject`, per field and per reason), its sibling flights are kept, and a `tma` with bad
+  attributes goes the same way; a bad envelope, a wrong root, an XML error and a capacity overrun
+  still refuse the whole message. Statistics and the replay pipeline count the refused flights.
+- **OA-TBFM-020** `spd` carries its unit with the value (`spd_unit`: none, knots, Mach, unknown), read
+  from the value's form because the feed has no marker: `ddd.d` is knots, `d.dd` is Mach (all
+  jets in the recorded sample), any other form is stored with the unknown unit and counted
+  (`unknown_units`); units are never mixed in a column without it.
+- **OA-TBFM-021** A schedule flag with a word other than `YES` or `NO` keeps the flight, stores the flag
+  as unknown and is counted (`unknown_words`); an unknown change type still refuses the flight.
+  `msgId` (ten digits) is stored as `u64`.
+- **OA-TBFM-022** Values are trimmed of outer whitespace; the site-adapted labels (`gat`, `cfg`, `scn`,
+  `cat`) may hold interior spaces (printable ASCII), identifiers and fixes may not. The TBFM schema
+  is not in the repository, so that labels allow spaces is a decision, not a confirmed rule.
+- **OA-TBFM-023** Text split by a comment or CDATA section is joined before validation, and the 64-byte
+  working bound applies to the total.
 
 ### TFMS data service (oa-tfms)
 
@@ -563,8 +586,8 @@ the SFDPS `gufi` (they are different kinds of value, survey).
 - **OA-TFMS-011** Every field has its own refusal naming the field and the kind (missing, too
   long, bad character, format, time, vocabulary, range, duplicate, inconsistent, not a leaf,
   text), with the offset of the value.
-- **OA-TFMS-012** A document is accepted whole or not at all: a refused field, a capacity
-  overrun or a text-table overrun in any message leaves the caller's rows and text table exactly
+- **OA-TFMS-012** A message is accepted whole or not at all (OA-TFMS-023); a capacity
+  overrun or a text-table overrun leaves the caller's rows and text table exactly
   as they were before the document.
 - **OA-TFMS-013** A document that is not well-formed, whose root is not `tfmDataService` in the
   service namespace, or whose content is refused is rejected with a reason; status documents,
@@ -593,6 +616,16 @@ the SFDPS `gufi` (they are different kinds of value, survey).
 - **OA-TFMS-021** The linkage report counts, as found, the flights with and without a GUFI,
   UUID-shaped GUFIs, keys that name more than one SFDPS flight and empty inputs.
 - **OA-TFMS-022** The default capacities and the vocabulary tables agree with the codes.
+- **OA-TFMS-023** A refused field refuses its message, not the document: the message (or TMI flight list
+  entry) is rolled back with the text table and counters, counted with its field and reason, and
+  its siblings are kept; only an unreadable document or a capacity overrun is refused whole.
+- **OA-TFMS-024** A word outside a vocabulary (trigger, status, categories, time types, program, scope,
+  true/false flags) keeps the message with the column marked unknown (`UNKNOWN_WORD`,
+  `flag::UNKNOWN`) and counted; the direction of a position still refuses the message.
+- **OA-TFMS-025** Ten-digit identifiers (`flightRef`, restriction id, reference id, number) are `u64`; eleven
+  digits are refused. The replay tables key on them and hash ordinary values as before.
+- **OA-TFMS-026** Text split by a comment or CDATA section is joined, for values and for the text table,
+  with the size bounds applied to the total.
 
 ## M1 — Controller display
 
@@ -1026,6 +1059,9 @@ frame of their feed has been fed (as the ADS-B table is).
   (`--active-age-secs`, `--proposed-age-secs`, `--terminal-age-secs`).
 - **OA-RPL-075** A flight's age limit follows its latest status: a message with no status leaves it, a
   new status replaces it.
+- **OA-RPL-076** Ten-digit TFMS flight references and restriction identifiers that differ by a multiple of 2^32
+  are different flights and programmes; the state hash writes an identifier below `u32::MAX` as four
+  bytes as before and a larger one as an escape plus eight bytes.
 
 ## M5 — Terrain and obstacles
 
@@ -2196,3 +2232,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   ADS-B-equipped aircraft are not made worse.
 - **OA-TRK-065** `oa-track-fusion --out <dir>` writes `report.txt` and `tables.csv` stating the truth, its own
   error (zero), the baselines on identical plots and each table's ESASSP bars; usage errors exit 2.
+- **OA-TRK-066** An output row without an altitude has NaN in the altitude, altitude variance and vertical
+  rate columns (not 0 ft) and the flag clear; the scorer takes the altitude through
+  `scored_altitude_ft`, which gives the absent value for a clear flag or a non-finite column; the
+  output digest hashes absent columns as zero, so it equals the earlier digest of the same run.

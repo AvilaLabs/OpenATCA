@@ -1212,3 +1212,38 @@ fn the_tfms_and_fns_tables_never_move_or_grow_after_init() {
     assert!(p.tfms.stats.evicted > 0 && p.flows.stats.evicted > 0);
     assert!(fns_live(&p.fns) > 0);
 }
+
+// REQ: OA-RPL-076
+#[test]
+fn ten_digit_flight_references_and_restriction_ids_are_applied_and_kept_apart() {
+    let mut p = pl();
+    // 5000000001 and 705032705 differ by 2^32: they must not share a slot.
+    for (k, fref) in ["5000000001", "705032705"].iter().enumerate() {
+        let x = wrap_flight(&departure(
+            7001,
+            "TST1",
+            None,
+            (3, 0, k as i64),
+            (5, 0, 0),
+            (2, 0, 0),
+        ))
+        .replace("\"7001\"", &format!("\"{fref}\""));
+        feed(&mut p, FeedKind::Tfms, at(3, 0, k as i64), &x);
+    }
+    assert_eq!(err(&p, ErrKind::TfmsField), 0);
+    assert_eq!(tfms_live(&p.tfms), 2);
+    let a = tfms_slot_of(&p.tfms, 5_000_000_001).unwrap();
+    let b = tfms_slot_of(&p.tfms, 705_032_705).unwrap();
+    assert_ne!(a, b);
+    // two restrictions whose ids differ by 2^32 are two programmes
+    let ids = ["5000000001", "705032705"];
+    for (k, id) in ids.iter().enumerate() {
+        let x = wrap_fi(&rstr((3, 1, k as i64), 1, 10, 9)).replace(
+            "<ns11:restrictionId>1<",
+            &format!("<ns11:restrictionId>{id}<"),
+        );
+        feed(&mut p, FeedKind::Tfms, at(3, 1, k as i64), &x);
+    }
+    assert_eq!(errors_total(&p.errors), 0, "{:?}", p.errors);
+    assert_eq!(flow_live(&p.flows), 2);
+}
