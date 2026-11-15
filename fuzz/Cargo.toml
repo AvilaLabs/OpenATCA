@@ -28,6 +28,11 @@ oa-tar = { path = "../crates/oa-tar" }
 oa-zip = { path = "../crates/oa-zip" }
 oa-awc = { path = "../crates/oa-awc" }
 oa-json = { path = "../crates/oa-json" }
+oa-csv = { path = "../crates/oa-csv" }
+oa-arinc424 = { path = "../crates/oa-arinc424" }
+oa-nasr = { path = "../crates/oa-nasr" }
+oa-notam = { path = "../crates/oa-notam" }
+oa-mva = { path = "../crates/oa-mva" }
 
 [profile.release]
 debug = 1
@@ -141,6 +146,41 @@ bench = false
 [[bin]]
 name = "json"
 path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csv"
+path = "fuzz_targets/csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arinc424"
+path = "fuzz_targets/arinc424.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nasr"
+path = "fuzz_targets/nasr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notam"
+path = "fuzz_targets/notam.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mva"
+path = "fuzz_targets/mva.rs"
 test = false
 doc = false
 bench = false

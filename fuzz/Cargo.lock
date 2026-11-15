@@ -103,6 +103,7 @@ version = "0.0.1"
 name = "oa-awc"
 version = "0.0.1"
 dependencies = [
+ "oa-geo",
  "oa-json",
 ]
 
@@ -116,6 +117,10 @@ version = "0.0.1"
 dependencies = [
  "oa-zip",
 ]
+
+[[package]]
+name = "oa-dof"
+version = "0.0.1"
 
 [[package]]
 name = "oa-feed"
@@ -138,13 +143,18 @@ version = "0.0.1"
 dependencies = [
  "libfuzzer-sys",
  "oa-adsb",
+ "oa-arinc424",
  "oa-asterix",
  "oa-awc",
+ "oa-csv",
  "oa-feed",
  "oa-fixm",
  "oa-grib2",
  "oa-j2k",
  "oa-json",
+ "oa-mva",
+ "oa-nasr",
+ "oa-notam",
  "oa-tar",
  "oa-tbfm",
  "oa-tfms",
@@ -156,6 +166,9 @@ dependencies = [
 [[package]]
 name = "oa-geo"
 version = "0.0.1"
+dependencies = [
+ "oa-math",
+]
 
 [[package]]
 name = "oa-grib2"
@@ -173,10 +186,33 @@ name = "oa-json"
 version = "0.0.1"
 
 [[package]]
+name = "oa-math"
+version = "0.0.1"
+
+[[package]]
+name = "oa-mva"
+version = "0.0.1"
+dependencies = [
+ "oa-dof",
+ "oa-tiff",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
+]
+
+[[package]]
+name = "oa-notam"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-geo",
+ "oa-xml",
 ]
 
 [[package]]
