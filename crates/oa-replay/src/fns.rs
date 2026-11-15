@@ -40,6 +40,7 @@ use oa_notam::{
 };
 use oa_sha256::Sha256;
 
+use crate::hash::stale_hash_into;
 use crate::index::hash_bytes;
 use crate::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release, Slots};
 
@@ -625,7 +626,7 @@ pub fn fns_hash_into(h: &mut Sha256, t: &FnsTable) {
     ] {
         put(h, &v.to_le_bytes());
     }
-    for (k, s) in order {
+    for &(k, s) in &order {
         put(h, &k.0);
         put(h, &k.1.to_le_bytes());
         put(h, &k.2.to_le_bytes());
@@ -694,6 +695,9 @@ pub fn fns_hash_into(h: &mut Sha256, t: &FnsTable) {
                 put(h, &x.to_le_bytes());
             }
         }
+    }
+    if fns_stale_count(t) > 0 {
+        stale_hash_into(h, &t.stale, order.iter().map(|&(_, s)| s));
     }
 }
 

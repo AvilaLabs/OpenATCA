@@ -645,9 +645,10 @@ fn sequence_gaps_duplicates_and_regressions() {
     for s in [0u64, 1, 2, 5, 5, 6, 3, 4, 5] {
         observe_frame(&mut h, &fr(Kind::Message, 0, s, SEC, 0, b"x"), SEC);
     }
+    // 3 and 4 came late inside the gap, so nothing is missing; the second 5 is past the gap.
     assert_eq!(
-        (h.gaps, h.missing, h.duplicates, h.regressions),
-        (1, 2, 1, 1)
+        (h.gaps, h.missing, h.duplicates, h.regressions, h.reordered),
+        (1, 0, 1, 1, 2)
     );
     // A feed may start anywhere; the first frame is never a gap.
     let mut h = FeedHealth::new();
@@ -748,9 +749,9 @@ fn hot_structs_keep_their_budgeted_sizes() {
     use core::mem::size_of;
     assert_eq!(size_of::<Frame<'static>>(), 80);
     assert_eq!(size_of::<crate::health::Slot>(), 16);
-    assert_eq!(size_of::<FeedHealth>(), 2408);
+    assert_eq!(size_of::<FeedHealth>(), 2432);
     // The size budget has no hidden padding: fields sum to the struct size.
-    assert_eq!(20 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2408);
+    assert_eq!(23 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2432);
 }
 
 // REQ: OA-FEED-024
@@ -1455,10 +1456,11 @@ fn flush_and_file_name_follow_local_clock_not_frame_stamp() {
 fn sequence_gap_total_saturates() {
     let mut h = FeedHealth::new();
     let t = 1000 * SEC;
-    for seq in [0, u64::MAX - 1, 5, u64::MAX] {
+    // The second 0 is a restart (a regression); the jump after it adds to a nearly full count.
+    for seq in [0, u64::MAX - 1, 0, u64::MAX] {
         observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"<a/>"), t);
     }
-    assert!(h.missing >= u64::MAX - 2);
+    assert_eq!(h.missing, u64::MAX);
 }
 
 // REQ: OA-FEED-050
@@ -1560,15 +1562,148 @@ fn a_failed_idle_flush_or_finish_also_fails_the_recording() {
     assert!(rec.idle_flush(1005).is_err());
     assert!(rec.failure().is_some());
     assert_eq!(rec.write_frame(&f, 1006, 1006).unwrap(), Outcome::Failed);
-    assert_eq!(rec.lost_frames(), 1);
+    // The frame the compressor still held when the flush failed is lost too.
+    assert_eq!(rec.lost_frames(), 2);
     // A failure only at the final finish counts as well.
     let (mut rec, sw) = switched_recorder("failfinish", Format::Gzip);
     assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Written);
     fail_now(&sw);
     assert!(rec.finish().is_err());
+    assert_eq!(rec.lost_frames(), 1);
     assert_eq!(rec.failure(), Some("no space left on device"));
     assert!(format_recording("f", &rec).contains("FAILED"));
     // The first error is the one kept.
     assert!(rec.write_frame(&f, 1001, 1001).is_ok());
     assert_eq!(rec.failure(), Some("no space left on device"));
+}
+
+// REQ: OA-FEED-170
+#[test]
+fn frames_the_compressor_held_are_lost_when_a_flush_or_finish_fails() {
+    let f = msg(0, b"<a/>");
+    // Three frames inside one second sit unflushed; the fourth, a second later, flushes and fails.
+    let (mut rec, sw) = switched_recorder("lostflush", Format::Gzip);
+    for t in [1000, 1000, 1000] {
+        assert_eq!(rec.write_frame(&f, t, t).unwrap(), Outcome::Written);
+    }
+    fail_now(&sw);
+    assert!(rec.write_frame(&f, 1001, 1001).is_err());
+    assert_eq!(
+        rec.lost_frames(),
+        4,
+        "three held and the one that hit the error"
+    );
+    // A flush that succeeds empties the count: only the frames after it are at risk.
+    let (mut rec, sw) = switched_recorder("lostafterflush", Format::Gzip);
+    for t in [1000, 1000] {
+        rec.write_frame(&f, t, t).unwrap();
+    }
+    rec.idle_flush(1005).unwrap();
+    for t in [1005, 1005] {
+        rec.write_frame(&f, t, t).unwrap();
+    }
+    fail_now(&sw);
+    assert!(rec.finish().is_err());
+    assert_eq!(rec.lost_frames(), 2);
+    // A failed idle flush loses what it held; a later frame adds one.
+    let (mut rec, sw) = switched_recorder("lostidle", Format::Gzip);
+    for t in [1000, 1000, 1000] {
+        rec.write_frame(&f, t, t).unwrap();
+    }
+    fail_now(&sw);
+    assert!(rec.idle_flush(1005).is_err());
+    assert_eq!(rec.lost_frames(), 3);
+    assert_eq!(rec.write_frame(&f, 1006, 1006).unwrap(), Outcome::Failed);
+    assert_eq!(rec.lost_frames(), 4);
+    // Raw frames go straight to the file: nothing is held back.
+    let (mut rec, sw) = switched_recorder("lostraw", Format::Raw);
+    for t in [1000, 1000] {
+        rec.write_frame(&f, t, t).unwrap();
+    }
+    fail_now(&sw);
+    assert!(rec.finish().is_ok());
+    assert_eq!(rec.lost_frames(), 0);
+    assert!(rec.failure().is_none());
+}
+
+// REQ: OA-FEED-171
+#[test]
+fn a_stop_at_the_size_cap_gives_an_exit_reason_and_a_healthy_recording_gives_none() {
+    let dir = tmpdir("capexit");
+    let f = msg(0, b"<a/>");
+    let mut rec = Recorder::open(&dir, "f", u64::MAX, 100, Format::Raw).unwrap();
+    assert_eq!(rec.exit_reason(), None);
+    assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Written);
+    assert_eq!(rec.exit_reason(), None);
+    loop {
+        if rec.write_frame(&f, 1000, 1000).unwrap() == Outcome::StoppedNow {
+            break;
+        }
+    }
+    let reason = rec.exit_reason().unwrap();
+    assert!(
+        reason.contains("size cap") && reason.contains("--max-bytes 100"),
+        "{reason}"
+    );
+    // A failure takes precedence over the cap.
+    let (mut failing, sw) = switched_recorder("capfail", Format::Raw);
+    fail_now(&sw);
+    assert!(failing.write_frame(&f, 1000, 1000).is_err());
+    assert!(failing
+        .exit_reason()
+        .unwrap()
+        .contains("no space left on device"));
+    rec.finish().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn seqs(list: &[u64]) -> FeedHealth {
+    let mut h = FeedHealth::new();
+    for &s in list {
+        observe_frame(&mut h, &fr(Kind::Message, 0, s, SEC, 0, b"x"), SEC);
+    }
+    h
+}
+
+// REQ: OA-FEED-172
+#[test]
+fn a_pair_swapped_on_the_wire_is_one_reordered_frame_and_nothing_missing() {
+    let h = seqs(&[3, 5, 4]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (0, 1, 0));
+    // The expectation did not move: the next frame in order is normal.
+    let h = seqs(&[3, 5, 4, 6]);
+    assert_eq!(
+        (h.gaps, h.missing, h.reordered, h.regressions),
+        (1, 0, 1, 0)
+    );
+    // A frame arriving late out of a wider gap takes one off what is missing.
+    let h = seqs(&[3, 6, 4]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (1, 1, 0));
+    let h = seqs(&[3, 6, 4, 5]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (0, 2, 0));
+    // From the far end, and from the middle of a gap.
+    let h = seqs(&[3, 7, 6, 4]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (1, 2, 0));
+    let h = seqs(&[3, 8, 5]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (3, 1, 0));
+    // The same late frame twice is filled once and then past the gap.
+    let h = seqs(&[3, 6, 4, 4]);
+    assert_eq!(
+        (h.missing, h.reordered, h.duplicates, h.regressions),
+        (1, 1, 0, 1)
+    );
+}
+
+// REQ: OA-FEED-172
+#[test]
+fn a_true_regression_still_counts_and_forgets_the_gap() {
+    // A bridge restart: counting from 0 again is a regression, not a late frame.
+    let h = seqs(&[10, 15, 0]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (4, 0, 1));
+    // The old gap is gone, so the restart does not fill it later.
+    let h = seqs(&[10, 15, 0, 1, 12]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (4 + 10, 0, 1));
+    // A frame below an earlier gap than the last one is a regression.
+    let h = seqs(&[0, 3, 4, 8, 2]);
+    assert_eq!((h.missing, h.reordered, h.regressions), (2 + 3, 0, 1));
 }

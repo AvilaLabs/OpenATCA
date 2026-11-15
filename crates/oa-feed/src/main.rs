@@ -268,8 +268,13 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
         if let Err(e) = r.finish() {
             eprintln!("oa-feed: ERROR feed={} recording failed: {e}", cfg.feed);
         }
-        // A recording that failed at any point (write, flush or finish) fails the run.
-        if r.failure().is_some() {
+        // A recording that failed at any point (write, flush or finish), or stopped at the size
+        // cap, fails the run.
+        if let Some(reason) = r.exit_reason() {
+            eprintln!(
+                "oa-feed: ERROR feed={} {reason}; exit status is failure",
+                cfg.feed
+            );
             exit = ExitCode::FAILURE;
         }
     }

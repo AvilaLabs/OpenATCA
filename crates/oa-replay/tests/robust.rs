@@ -478,8 +478,17 @@ fn flights_last_heard_before_a_confirmed_step_are_stale_until_they_are_heard_aga
     let stale = |p: &Pipeline, n| is_stale(&p.table, slot_of_gufi(&p.table, gufi(n)).unwrap());
     assert!(stale(&p, 1) && stale(&p, 2));
     assert_eq!((pipeline_stale_count(&p), p.stale_marked), (2, 2));
-    // A fresh update of one clears its mark and only its mark.
-    flight_at(&mut p, 1, T0 + step + 30 * NS, None);
+    // An update that carries a position clears its mark and only its mark (one that carries
+    // neither a position nor a state does not hear the flight again).
+    flight_at(&mut p, 2, T0 + step + 29 * NS, None);
+    assert!(stale(&p, 2));
+    let t = T0 + step + 30 * NS;
+    let m = sf(1, (t - DAY * 1_000_000) / 1_000_000).pos(
+        41.0,
+        -88.0,
+        (t - DAY * 1_000_000) / 1_000_000,
+    );
+    feed(&mut p, FeedKind::Sfdps, t, &sf_doc(&[m]));
     assert!(!stale(&p, 1) && stale(&p, 2));
     assert_eq!((pipeline_stale_count(&p), p.stale_marked), (1, 2));
     // A flight first heard after the step is never stale; an evicted one is no longer counted.

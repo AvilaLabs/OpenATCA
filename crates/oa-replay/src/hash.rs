@@ -9,6 +9,10 @@
 //! 1. the tag `OATS1`, the live count, `next_sweep_ns` and every [`TableStats`] counter;
 //! 2. for each live flight in ascending GUFI order, every column (see [`serialise_flight`]).
 //!
+//! A flight marked stale by a step of the clock (see [`crate::FlightTable::stale`]) is written
+//! after the flights, as the tag `OAST1` and one byte per flight in the same order, and only when
+//! some flight is stale, so a table with none hashes as before.
+//!
 //! `capacity`, `max_age_ns` and `sweep_ns` are settings, not state, and are not hashed (two runs
 //! with the same input and different settings differ through the state itself).
 //!
@@ -25,6 +29,19 @@ pub const HASH_TAG: &[u8; 5] = b"OATS1";
 fn put(h: &mut Sha256, b: &[u8]) {
     // The only failure is a message over 2^61 bytes; a table is a few megabytes.
     let _ = h.update(b);
+}
+
+/// Tag of the stale marks, written after a table's rows when any row is stale.
+pub const STALE_TAG: &[u8; 5] = b"OAST1";
+
+/// Writes the stale mark of each of `slots`, in the order given (a table's rows in key order),
+/// after the tag [`STALE_TAG`]. Callers write it only when some row is stale, so a replay with no
+/// stale row hashes as it did before the marks were hashed.
+pub(crate) fn stale_hash_into(h: &mut Sha256, stale: &[bool], slots: impl Iterator<Item = usize>) {
+    put(h, STALE_TAG);
+    for s in slots {
+        put(h, &[u8::from(stale.get(s).copied().unwrap_or(false))]);
+    }
 }
 
 fn put_stats(h: &mut Sha256, s: &TableStats) {
@@ -96,10 +113,13 @@ pub fn state_hash(t: &FlightTable) -> Digest {
     put(&mut h, &(order.len() as u64).to_le_bytes());
     put(&mut h, &t.next_sweep_ns.to_le_bytes());
     put_stats(&mut h, &t.stats);
-    for (_, i) in order {
+    for &(_, i) in &order {
         if let Some(c) = slot_ref(t, Slot(i)) {
             serialise_flight(&mut h, &c);
         }
+    }
+    if crate::table::stale_count(t) > 0 {
+        stale_hash_into(&mut h, &t.stale, order.iter().map(|&(_, i)| i as usize));
     }
     h.finalize()
 }

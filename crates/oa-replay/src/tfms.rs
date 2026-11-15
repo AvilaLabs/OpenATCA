@@ -38,6 +38,7 @@ use oa_sha256::Sha256;
 use oa_tfms::rows::flag;
 use oa_tfms::{flag_get, flight_at, flow_at, text, Rows, StrRef, NO_NUM, NO_TIME};
 
+use crate::hash::stale_hash_into;
 use crate::index::{hash_bytes, mix64};
 use crate::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release, Slots};
 use crate::table::{find_plan, is_occupied, slot_of_gufi, FlightTable, Slot};
@@ -647,7 +648,7 @@ pub fn tfms_hash_into(h: &mut Sha256, t: &TfmsTable) {
     ] {
         put(h, &v.to_le_bytes());
     }
-    for (k, s) in order {
+    for &(k, s) in &order {
         put_id(h, k);
         if let Some(v) = t.last_src_ms.get(s) {
             put(h, &v.to_le_bytes());
@@ -697,6 +698,9 @@ pub fn tfms_hash_into(h: &mut Sha256, t: &TfmsTable) {
         if let Some(v) = t.out_of_order.get(s) {
             put(h, &v.to_le_bytes());
         }
+    }
+    if tfms_stale_count(t) > 0 {
+        stale_hash_into(h, &t.stale, order.iter().map(|&(_, s)| s));
     }
 }
 
@@ -1003,7 +1007,7 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
     for v in st.by_program {
         put(h, &v.to_le_bytes());
     }
-    for (k, s) in order {
+    for &(k, s) in &order {
         put(h, &[k.0, k.1]);
         put_id(h, k.2);
         put_id(h, k.3);
@@ -1043,5 +1047,8 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
         if let Some(v) = t.rows.get(s) {
             put(h, &v.to_le_bytes());
         }
+    }
+    if flow_stale_count(t) > 0 {
+        stale_hash_into(h, &t.stale, order.iter().map(|&(_, s)| s));
     }
 }
