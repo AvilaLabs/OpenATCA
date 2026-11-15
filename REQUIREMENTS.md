@@ -397,7 +397,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   (feed consumption may continue, and the log says so). Tested with a writer that fails on demand.
 - **OA-FEED-100** (proof) For every sequence number and every reachable health counter, `observe_seq` never
   panics or overflows; a forward jump adds exactly one gap event and the saturated number of missing frames,
-  and any other frame changes neither.
+  a late frame inside the last gap takes exactly one off `missing` and counts as reordered, and no other frame
+  changes `gaps` or `missing`; the open gap stays inside `missing`, and `missing` never exceeds the sum of the
+  gap lengths added.
 - **OA-FEED-150** Every refused frame (each error kind) adds one to the health `frame_errors`
   figure and moves nothing else; the skipped-byte figure is set from the reader's running total;
   both show as `errors=` and `skipped=` in the summary line.
@@ -406,7 +408,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   600000 ms in the overflow bin.
 - **OA-FEED-152** A frame repeating the last `seq` is a duplicate (not a regression, also for the
   first frame) and leaves the expectation unchanged; the expected `seq` is never a gap; one ahead
-  is one gap of one missing frame; one below the last is a regression.
+  is one gap of one missing frame; one below the last is a regression unless it fills the
+  most recent open gap (OA-FEED-172).
 - **OA-FEED-153** Latency is the receive time in whole milliseconds minus the JMS time: exact
   values land in the maximum and the histogram, equal times are zero (not skew), a stamp ahead by
   one millisecond is skew.
@@ -426,6 +429,16 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   after a truncated end.
 - **OA-FEED-159** The recording defaults are a 2 GiB total cap and 256 MiB rotation size, kept
   when only the other option is given.
+- **OA-FEED-170** When a flush or the finish of a compressed recording fails, the frames written since the last
+  successful flush, which the compressor still held, are counted as lost with the frame that hit the error
+  (`lost_frames`); a raw recording holds none back. Tested with a writer that fails on demand.
+- **OA-FEED-171** A recording that stopped at its size cap makes the run exit non-zero with the reason printed
+  (`Recorder::exit_reason`; a failure takes precedence over the cap); a healthy recording has no reason. Tested on
+  the mapping function.
+- **OA-FEED-172** A frame whose `seq` is below the next expected but inside the most recent open gap is counted
+  as reordered (`reordered`) and takes one off that gap's missing count, without moving the expectation: 3, 5, 4
+  gives missing 0, reordered 1 and regressions 0, and 3, 6, 4 gives missing 1. Only the last gap is kept (start
+  and length, fixed size). Any other lower value is still a regression and forgets the gap.
 
 ### Compression (oa-deflate)
 
@@ -1152,6 +1165,19 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-150** A feed's candidate frames continue one run only when each is within the tolerance of the
   one before, in either direction: a genuine step back whose three frames arrive up to a second out of order
   confirms on the third, and candidates a day apart each start a new run and never confirm.
+- **OA-RPL-170** A confirmed step shifts every ADS-B report time by the step as it does the other tables'
+  ages, and marks each aircraft stale (counted in `stale_marked`, counted by `adsb_stale_count`): a forward
+  step of an hour keeps every aircraft that was live, and a backward step of ten minutes accepts the next
+  genuine reports.
+- **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
+  report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
+  a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.
+- **OA-RPL-172** A TBFM row clears the stale mark only when it carries metering state (a delete, a meter fix,
+  a runway, a time or a freeze flag); a row of identity alone does not.
+- **OA-RPL-173** The stale marks are part of the state hash, in every table, written only when some row is
+  stale so a replay with none hashes as it did.
+- **OA-RPL-174** A confirmed step whose size does not fit in 64 bits is not applied: the clock and every age
+  are kept, the candidate state is kept as it was, and the step is counted under `clock-step-overflow`.
 
 ## M5 — Terrain and obstacles
 

@@ -50,7 +50,8 @@ use oa_tfms::{
 use oa_xml::Parser;
 
 use crate::adsb::{
-    adsb_advance, adsb_hash_into, apply_adsb, new_adsb_table, AdsbApplied, AdsbTable, ADSB_CAPACITY,
+    adsb_advance, adsb_hash_into, adsb_shift_times, adsb_stale_count, apply_adsb, new_adsb_table,
+    AdsbApplied, AdsbTable, ADSB_CAPACITY,
 };
 use crate::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::clock::{clock_observe, Clock, Tick};
@@ -347,6 +348,7 @@ pub fn pipeline_stale_count(p: &Pipeline) -> usize {
         + tfms_stale_count(&p.tfms)
         + flow_stale_count(&p.flows)
         + fns_stale_count(&p.fns)
+        + adsb_stale_count(&p.adsb)
 }
 
 /// Adds `n` to an error count (for failures found before the pipeline, such as frame errors).
@@ -369,6 +371,7 @@ pub fn process_frame(
 ) {
     let f = feed as usize;
     // 1. Clock, eviction cadence, checkpoint.
+    let clock_before = p.clock;
     match clock_observe(&mut p.clock, f, p.replay_ns, recv_unix_ns) {
         Tick::Advance => p.replay_ns = recv_unix_ns,
         Tick::Keep => {}
@@ -378,7 +381,17 @@ pub fn process_frame(
                 count_error(&mut p.errors, ErrKind::TimeRegression, 1);
             }
         }
-        Tick::Step { delta } => step_clock(p, recv_unix_ns, delta),
+        Tick::Step { .. } => {
+            // The step is applied only if its size is exact: the ages are shifted by it, and a
+            // saturated size would leave them wrong against the clock that takes the new time.
+            match recv_unix_ns.checked_sub(p.replay_ns) {
+                Some(delta) => step_clock(p, recv_unix_ns, delta),
+                None => {
+                    p.clock = clock_before;
+                    count_error(&mut p.errors, ErrKind::ClockStepOverflow, 1);
+                }
+            }
+        }
     }
     let now = p.replay_ns;
     advance_time(&mut p.table, now);
@@ -417,7 +430,7 @@ pub fn process_frame(
     }
 }
 
-/// A confirmed step of the clock: take the new time, shift the ages the tables hold by the same
+/// A confirmed step of the clock: take the new time, shift the ages the tables hold (every table, ADS-B included) by the same
 /// amount so nothing is evicted or stranded by it (and mark every row as stale until it is heard
 /// again, since its age is no longer the time since it was heard), and restart the sweep and checkpoint cadences
 /// from the new time.
@@ -426,7 +439,8 @@ fn step_clock(p: &mut Pipeline, to_ns: i64, delta: i64) {
     let marked = shift_times(&mut p.table, delta)
         + tfms_shift_times(&mut p.tfms, delta)
         + flow_shift_times(&mut p.flows, delta)
-        + fns_shift_times(&mut p.fns, delta);
+        + fns_shift_times(&mut p.fns, delta)
+        + adsb_shift_times(&mut p.adsb, delta);
     p.stale_marked += marked as u64;
     // Each cadence is due now: a sweep and a checkpoint at the new time, as after any long gap.
     p.table.next_sweep_ns = to_ns;

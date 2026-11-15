@@ -41,9 +41,9 @@ pub mod table;
 pub mod tfms;
 
 pub use adsb::{
-    adsb_advance, adsb_slot_of, adsb_sweep, apply_adsb, new_adsb_table, AdsbApplied, AdsbStats,
-    AdsbTable, ADSB_CAPACITY, ADSB_HASH_TAG, ADSB_HASH_TAG_EVICT, ADSB_MAX_AGE_NS,
-    ADSB_MAX_AHEAD_NS, ADSB_SWEEP_NS,
+    adsb_advance, adsb_shift_times, adsb_slot_of, adsb_stale_count, adsb_sweep, apply_adsb,
+    new_adsb_table, AdsbApplied, AdsbStats, AdsbTable, ADSB_CAPACITY, ADSB_HASH_TAG,
+    ADSB_HASH_TAG_EVICT, ADSB_MAX_AGE_NS, ADSB_MAX_AHEAD_NS, ADSB_SWEEP_NS,
 };
 pub use apply::{apply_sfdps, apply_tbfm, Applied};
 pub use clock::{clock_observe, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_TOLERANCE_NS};

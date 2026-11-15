@@ -12,9 +12,13 @@
 //!   oldest second of the 60 s window. A slot carries its second as a tag; a stale slot reads
 //!   as empty.
 //! * Sequence: `seq` equal to the next expected is normal; above it is a gap (one gap event,
-//!   `missing` counts the frames); equal to the last seen is a duplicate; any other lower value
-//!   is a regression (reordering, or a bridge restart, which counts from 0 again), after which
-//!   the expectation restarts from that value.
+//!   `missing` counts the frames); equal to the last seen is a duplicate; a lower value inside
+//!   the most recent gap is a late frame (`reordered`): that gap's missing count falls by one and
+//!   the expectation is unchanged, so a pair swapped on the wire (3, 5, 4) counts nothing
+//!   missing. Only that last gap is remembered (its start and length; a late frame at either
+//!   end shrinks it, one in the middle keeps the upper part). Any other lower value is a
+//!   regression (a bridge restart, which counts from 0 again, or a frame later than the last
+//!   gap), after which the expectation restarts from that value and the gap is forgotten.
 //! * Latency is `recv_unix_ns / 1e6 - jms_timestamp_ms` in whole milliseconds, for MESSAGE
 //!   frames with a JMS timestamp; negative values are clock skew and are counted apart from the
 //!   histogram. Bins resolve 10 ms up to 100 ms, 100 ms up to 1 s, 1 s up to 60 s, 10 s up to
@@ -112,8 +116,15 @@ pub struct FeedHealth {
     pub missing: u64,
     /// Frames repeating the previous `seq`.
     pub duplicates: u64,
-    /// Frames with a lower `seq` than the last (reorder or bridge restart).
+    /// Frames with a lower `seq` than the last that filled no gap (bridge restart, or late past
+    /// the last gap).
     pub regressions: u64,
+    /// Frames that arrived late inside the most recent gap: each took one frame off `missing`.
+    pub reordered: u64,
+    /// First `seq` of the most recent gap still open.
+    pub gap_start: u64,
+    /// Frames of that gap not yet seen; zero when none is open.
+    pub gap_len: u64,
     /// MESSAGE frames flagged JMS-redelivered.
     pub redelivered: u64,
     /// REJECT frames.
@@ -145,9 +156,9 @@ pub struct FeedHealth {
     /// Per-second ring for the rates.
     pub ring: [Slot; RING_SLOTS],
 }
-// Budget: 20 u64/i64 fields (160) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
-// = 2408. One per feed, updated per frame; the rings dominate and have no padding.
-const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2408);
+// Budget: 23 u64/i64 fields (184) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
+// = 2432. One per feed, updated per frame; the rings dominate and have no padding.
+const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2432);
 
 impl FeedHealth {
     /// An empty health record.
@@ -165,6 +176,9 @@ impl FeedHealth {
             missing: 0,
             duplicates: 0,
             regressions: 0,
+            reordered: 0,
+            gap_start: 0,
+            gap_len: 0,
             redelivered: 0,
             rejects: 0,
             reconnects: 0,
@@ -222,11 +236,26 @@ fn observe_seq(h: &mut FeedHealth, seq: u64) {
     } else if seq > h.seq_next {
         h.gaps = h.gaps.saturating_add(1);
         h.missing = h.missing.saturating_add(seq - h.seq_next);
+        h.gap_start = h.seq_next;
+        h.gap_len = seq - h.seq_next;
     } else if seq == h.seq_last {
         h.duplicates += 1;
         return;
+    } else if seq >= h.gap_start && seq - h.gap_start < h.gap_len {
+        // A late frame of the last gap: it is not missing after all. The expectation stays.
+        h.missing = h.missing.saturating_sub(1);
+        h.reordered = h.reordered.saturating_add(1);
+        let end = h.gap_start + h.gap_len;
+        if seq == h.gap_start || seq + 1 < end {
+            h.gap_start = seq + 1;
+            h.gap_len = end - h.gap_start;
+        } else {
+            h.gap_len -= 1;
+        }
+        return;
     } else {
         h.regressions += 1;
+        h.gap_len = 0;
     }
     h.seq_last = seq;
     h.seq_next = seq.saturating_add(1);
@@ -381,7 +410,7 @@ pub fn format_summary(h: &FeedHealth, now_ns: i64) -> String {
     let _ = write!(
         s,
         "state={state} msgs={} rate_1s={}.{:03} rate_60s={}.{:03} bytes={} size_min={size_min} \
-         size_max={} lat_p50_ms={} lat_p95_ms={} lat_max_ms={lat_max} skew={} gaps={} missing={} dups={} regress={} \
+         size_max={} lat_p50_ms={} lat_p95_ms={} lat_max_ms={lat_max} skew={} gaps={} missing={} dups={} regress={} reordered={} \
          redelivered={} rejects={} reconnects={} errors={} skipped={} since_last_ms={since_ms}",
         h.messages,
         r1 / 1000,
@@ -397,6 +426,7 @@ pub fn format_summary(h: &FeedHealth, now_ns: i64) -> String {
         h.missing,
         h.duplicates,
         h.regressions,
+        h.reordered,
         h.redelivered,
         h.rejects,
         h.reconnects,
@@ -422,22 +452,56 @@ mod proofs {
         h.missing = kani::any();
         h.duplicates = kani::any();
         h.regressions = kani::any();
+        h.reordered = kani::any();
+        h.gap_start = kani::any();
+        h.gap_len = kani::any();
         // The counters count frames of one feed: 2^64 - 1 of them is not reachable.
         kani::assume(h.duplicates < u64::MAX && h.regressions < u64::MAX);
+        kani::assume(h.reordered < u64::MAX);
+        // Reachable gap record: the open gap lies below the next expected number and is part of
+        // what is counted missing, and what is counted missing is part of what the gaps added up
+        // to (`total`, a ghost of the sum of every gap length so far).
+        kani::assume(h.gap_len == 0 || h.gap_start <= u64::MAX - h.gap_len);
+        kani::assume(h.gap_len == 0 || h.gap_start + h.gap_len <= h.seq_next);
+        kani::assume(h.gap_len <= h.missing);
+        kani::assume(h.frames != 0 || h.gap_len == 0);
+        let total: u64 = kani::any();
+        kani::assume(h.missing <= total);
         let seq: u64 = kani::any();
         let (frames, next, gaps, missing) = (h.frames, h.seq_next, h.gaps, h.missing);
+        let (reordered, regressions, gap_len) = (h.reordered, h.regressions, h.gap_len);
+        let in_gap = frames != 0
+            && seq < next
+            && seq != h.seq_last
+            && seq >= h.gap_start
+            && seq - h.gap_start < gap_len;
         observe_seq(&mut h, seq);
-        assert!(h.gaps >= gaps && h.missing >= missing);
+        assert!(h.gaps >= gaps);
         assert!(h.gaps - gaps <= 1);
-        if frames != 0 && seq > next {
+        let total = if frames != 0 && seq > next {
             assert_eq!(h.gaps, gaps.saturating_add(1));
             assert_eq!(h.missing, missing.saturating_add(seq - next));
+            assert_eq!(h.gap_len, seq - next);
+            total.saturating_add(seq - next)
         } else {
-            assert!(h.gaps == gaps && h.missing == missing);
+            total
+        };
+        if in_gap {
+            // A late frame of the last gap takes one frame off missing, counts as reordered, not
+            // as a regression, and leaves the expectation where it was.
+            assert_eq!(h.missing, missing - 1);
+            assert_eq!(h.reordered, reordered + 1);
+            assert_eq!(h.regressions, regressions);
+            assert_eq!(h.seq_next, next);
+            assert!(h.gap_len < gap_len);
+        } else if frames == 0 || seq <= next {
+            assert!(h.gaps == gaps && h.missing == missing && h.reordered == reordered);
         }
-        // The next expected number is never behind the last one seen.
-        if h.seq_last == seq {
-            assert!(h.seq_next >= seq);
-        }
+        // The invariants hold again: the open gap is part of what is missing and below the
+        // expectation, and what is missing never exceeds the sum of the gap lengths.
+        assert!(h.gap_len <= h.missing);
+        assert!(h.gap_len == 0 || h.gap_start <= u64::MAX - h.gap_len);
+        assert!(h.gap_len == 0 || h.gap_start + h.gap_len <= h.seq_next);
+        assert!(h.missing <= total);
     }
 }

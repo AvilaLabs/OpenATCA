@@ -20,7 +20,8 @@
 //! A write, flush or finish that fails (a full disk) is a persistent failed state, not a
 //! warning: the recorder keeps the first error, stops writing, and counts every frame handed to
 //! it afterwards as lost ([`Recorder::failure`], [`Recorder::lost_frames`], [`format_recording`]),
-//! so the shell can report it and exit non-zero.
+//! so the shell can report it and exit non-zero. A stop at the size cap exits non-zero too
+//! ([`Recorder::exit_reason`]): the run did not record what it was asked to.
 
 use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
@@ -82,6 +83,9 @@ pub struct Recorder {
     /// The first error that failed the recording; once set, nothing more is written.
     failed: Option<String>,
     lost_frames: u64,
+    /// Frames given to the compressor since its last successful flush: on disk only once the next
+    /// flush or finish succeeds, and lost if that one fails.
+    unflushed: u64,
 }
 
 /// A frame stamp this many seconds from local time is counted as implausible.
@@ -146,6 +150,7 @@ impl Recorder {
             opener,
             failed: None,
             lost_frames: 0,
+            unflushed: 0,
         })
     }
 
@@ -210,6 +215,8 @@ impl Recorder {
             return Ok(Outcome::Written);
         };
         self.scratch.clear();
+        let mut flushed = false;
+        let compressed = cur.gz.is_some();
         match cur.gz.as_mut() {
             Some(gz) => {
                 let mut sink = |b: &[u8]| -> Result<(), Infallible> {
@@ -220,6 +227,7 @@ impl Recorder {
                 if r.is_ok() && now_unix_secs >= cur.flushed_secs.saturating_add(1) {
                     cur.flushed_secs = now_unix_secs;
                     r = gz.flush(&mut sink);
+                    flushed = true;
                 }
                 if let Err(never) = r {
                     match never {}
@@ -231,6 +239,11 @@ impl Recorder {
         let n = self.scratch.len() as u64;
         cur.disk += n;
         self.total += n;
+        if flushed {
+            self.unflushed = 0;
+        } else if compressed {
+            self.unflushed = self.unflushed.saturating_add(1);
+        }
         Ok(Outcome::Written)
     }
 
@@ -268,6 +281,7 @@ impl Recorder {
         let n = self.scratch.len() as u64;
         cur.disk += n;
         self.total += n;
+        self.unflushed = 0;
         Ok(())
     }
 
@@ -299,7 +313,9 @@ impl Recorder {
             cur.file.write_all(&self.scratch)?;
             self.total += self.scratch.len() as u64;
         }
-        cur.file.flush()
+        cur.file.flush()?;
+        self.unflushed = 0;
+        Ok(())
     }
 
     /// Bytes recorded in the directory so far (on disk, so compressed for `.oaf.gz`), including
@@ -314,10 +330,28 @@ impl Recorder {
         self.failed.as_deref()
     }
 
-    /// Frames handed to the recorder that were not saved because it had failed (the frame that
-    /// hit the error counts too).
+    /// Frames handed to the recorder that were not saved because it had failed: the frame that
+    /// hit the error, and the frames of the open file that the compressor held and had not yet
+    /// flushed to it (a flush or finish that fails loses those too).
     pub fn lost_frames(&self) -> u64 {
         self.lost_frames
+    }
+
+    /// Why the recording means the run did not do what it was asked, if it did not: the failure,
+    /// or the stop at the size cap (frames after it were not saved). The shell exits non-zero
+    /// and prints this when it is `Some`.
+    pub fn exit_reason(&self) -> Option<String> {
+        if let Some(e) = &self.failed {
+            return Some(format!("recording failed: {e}"));
+        }
+        if self.stopped {
+            return Some(format!(
+                "recording stopped at the size cap (--max-bytes {}, {} bytes recorded); \
+                 later frames were not saved",
+                self.max_bytes, self.total
+            ));
+        }
+        None
     }
 
     /// Files created by this recorder.
@@ -330,8 +364,11 @@ impl Recorder {
         self.implausible_stamps
     }
 
-    /// Records `e` as the failure (keeping the first), abandons the open file, passes `e` on.
+    /// Records `e` as the failure (keeping the first), abandons the open file, passes `e` on. The
+    /// frames the compressor still held, not yet flushed to the file, are lost with it.
     fn fail(&mut self, e: io::Error) -> io::Error {
+        self.lost_frames = self.lost_frames.saturating_add(self.unflushed);
+        self.unflushed = 0;
         if self.failed.is_none() {
             self.failed = Some(e.to_string());
         }

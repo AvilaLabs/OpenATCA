@@ -93,10 +93,13 @@ pub enum ErrKind {
     FnsField,
     /// A frame's reserved header bytes were not zero.
     FrameReserved,
+    /// A confirmed step of the clock whose size does not fit in 64 bits: not applied, the clock
+    /// is kept.
+    ClockStepOverflow,
 }
 
 /// Number of [`ErrKind`] values.
-pub const ERR_COUNT: usize = 43;
+pub const ERR_COUNT: usize = 44;
 
 /// Display names, indexed by `ErrKind as usize`.
 pub const ERR_NAMES: [&str; ERR_COUNT] = [
@@ -143,6 +146,7 @@ pub const ERR_NAMES: [&str; ERR_COUNT] = [
     "fns-no-key",
     "fns-field",
     "frame-reserved",
+    "clock-step-overflow",
 ];
 
 /// Counts by [`ErrKind`].

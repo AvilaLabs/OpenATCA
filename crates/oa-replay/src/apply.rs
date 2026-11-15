@@ -28,6 +28,13 @@
 //!   as unlinked and not applied.
 //! * **TBFM `DEL`.** A `DEL` change type, on the `air` or on the `mrp` section, clears the
 //!   metering columns (meter fix, STA, ETA, runway, frozen). It does not remove the flight.
+//! * **Heard again.** A row marked stale by a step of the replay clock stays stale until an
+//!   accepted update carries what the row shows. For SFDPS that is an update whose position was
+//!   not refused as older and that carries a position or a flight status; a refused older
+//!   position, or an amendment with neither, updates the other fields and the update time but does
+//!   not clear the mark. For TBFM it is an update that carries metering state (a `DEL`, a meter
+//!   fix, a runway, a time, or a freeze flag); a row of identity alone (callsign, type) does not.
+//!   A row refused whole as older is not an update at all.
 //! * **Full table.** A new flight with no free slot is refused and counted; nothing is evicted
 //!   to make room.
 //! * **Flight state.** An SFDPS row that carries a flight status sets the flight's state class
@@ -110,8 +117,9 @@ fn ident<const N: usize>(held: &mut [u8; N], new: &[u8; N], conflicts: &mut u32)
     0
 }
 
-/// Records an applied update: count, last update time and source (largest time wins).
-fn touch(c: &mut SlotMut<'_>, now_ns: i64, feed: u8, source: [u8; 2]) {
+/// Records an applied update: count, last update time and source (largest time wins). The stale
+/// mark is cleared only when the update `heard` the row, that is, carried what the row shows.
+fn touch(c: &mut SlotMut<'_>, now_ns: i64, feed: u8, source: [u8; 2], heard: bool) {
     let newer = *c.last_feed == 0
         || now_ns > *c.last_update_ns
         || (now_ns == *c.last_update_ns && (feed, source) > (*c.last_feed, *c.last_source));
@@ -121,7 +129,9 @@ fn touch(c: &mut SlotMut<'_>, now_ns: i64, feed: u8, source: [u8; 2]) {
         *c.last_source = source;
     }
     *c.updates = c.updates.saturating_add(1);
-    *c.stale = false;
+    if heard {
+        *c.stale = false;
+    }
 }
 
 fn refuse_out_of_order(t: &mut FlightTable, s: Slot) -> Applied {
@@ -267,7 +277,8 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
         } else {
             [0; 2]
         };
-        touch(&mut c, now_ns, FEED_SFDPS, source);
+        let heard = !stale && (has_pos || has_field(ev, i, Field::Status));
+        touch(&mut c, now_ns, FEED_SFDPS, source, heard);
     }
     t.stats.conflicts += conflicts;
     t.stats.sfdps_applied += 1;
@@ -359,6 +370,9 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
 
         let deleted = row.air_type == change::DEL
             || (row.section == section::MRP && row.sect_type == change::DEL);
+        // Whether the row carried metering state (a delete, a meter fix, a runway, a time or a
+        // freeze flag) and so says the row is current, as opposed to identity alone.
+        let mut metering = deleted || row.mfx != [0; 8];
         if deleted {
             *c.meter_fix = [0; 8];
             *c.sta_ms = NO_TIME;
@@ -373,11 +387,13 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
                 section::MRP => {
                     if row.rwy != [0; 4] {
                         *c.runway = row.rwy;
+                        metering = true;
                     }
                 }
                 section::ETA => {
                     if let Some(&v) = row.eta_ms.get(pt::MFX).filter(|&&v| v != NO_TIME) {
                         *c.eta_ms = v;
+                        metering = true;
                     }
                 }
                 section::STA => {
@@ -388,11 +404,18 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
                         .find(|&v| v != NO_TIME);
                     if let Some(v) = v {
                         *c.sta_ms = v;
+                        metering = true;
                     }
                 }
                 section::SCH => match sch_get(row.sch, sch_flag::SFZ) {
-                    sch_flag::YES => *c.flags |= FROZEN,
-                    sch_flag::NO => *c.flags &= !FROZEN,
+                    sch_flag::YES => {
+                        *c.flags |= FROZEN;
+                        metering = true;
+                    }
+                    sch_flag::NO => {
+                        *c.flags &= !FROZEN;
+                        metering = true;
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -401,7 +424,7 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
         if row.msg_ms != NO_TIME && row.msg_ms > *c.tbfm_msg_ms {
             *c.tbfm_msg_ms = row.msg_ms;
         }
-        touch(&mut c, now_ns, FEED_TBFM, [0; 2]);
+        touch(&mut c, now_ns, FEED_TBFM, [0; 2], metering);
     }
     t.stats.conflicts += conflicts;
     t.stats.tbfm_applied += 1;

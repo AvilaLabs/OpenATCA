@@ -27,12 +27,17 @@
 //! than the held one is refused whole and counted (an equal time applies); this is the ADS-B
 //! counterpart of OA-RPL-003.
 //!
+//! A confirmed step of the replay clock shifts every held report time by the step
+//! ([`adsb_shift_times`]), so the age of each aircraft, and its place against the clock, are what
+//! they were before the step, and marks each aircraft stale until a report is accepted for it.
+//!
 //! The state is hashed by [`adsb_hash_into`] in address order, so it does not depend on the order
 //! aircraft were first seen.
 
 use oa_adsb::{reports_row, Reports, NONE_I32, NONE_U16, NONE_U8};
 use oa_sha256::Sha256;
 
+use crate::hash::stale_hash_into;
 use crate::index::{index_find, index_insert, index_remove, mix64, new_index, Index};
 
 /// Aircraft the table holds: 65,536. One centre's box sees a few thousand aircraft a day.
@@ -124,6 +129,10 @@ pub struct AdsbTable {
     pub reports: Vec<u32>,
     /// Reports for this aircraft refused as older than the held one.
     pub out_of_order: Vec<u32>,
+    /// Whether the held report was last updated before a confirmed step of the replay clock and
+    /// no accepted report has come since: its time is the time it was shifted to, not the time it
+    /// was heard.
+    pub stale: Vec<bool>,
     /// Whether slot `i` is in use.
     pub occupied: Vec<bool>,
     /// Free slots, a stack: the next to be used is the last; initially the lowest slot on top.
@@ -158,6 +167,7 @@ pub fn new_adsb_table(capacity: usize) -> AdsbTable {
         quality: vec![[NONE_U8; 8]; n],
         reports: vec![0; n],
         out_of_order: vec![0; n],
+        stale: vec![false; n],
         occupied: vec![false; n],
         free: (0..n as u32).rev().collect(),
         next_sweep_ns: i64::MIN,
@@ -222,6 +232,7 @@ pub fn apply_adsb(t: &mut AdsbTable, r: &Reports, i: usize, now_ns: i64) -> Adsb
         return AdsbApplied::OutOfOrder;
     }
     set(&mut t.time_ns, slot, row.time_ns);
+    set(&mut t.stale, slot, false);
     set(&mut t.lat_e7, slot, row.lat_e7);
     set(&mut t.lon_e7, slot, row.lon_e7);
     set(&mut t.baro_alt_ft, slot, row.baro_alt_ft);
@@ -290,6 +301,7 @@ fn evict(t: &mut AdsbTable, s: usize) {
     set(&mut t.quality, s, [NONE_U8; 8]);
     set(&mut t.reports, s, 0);
     set(&mut t.out_of_order, s, 0);
+    set(&mut t.stale, s, false);
     set(&mut t.occupied, s, false);
     t.free.push(s as u32);
     t.live = t.live.saturating_sub(1);
@@ -330,6 +342,35 @@ pub fn adsb_advance(t: &mut AdsbTable, now_ns: i64) -> usize {
     }
     let n = adsb_sweep(t, now_ns);
     t.next_sweep_ns = next;
+    n
+}
+
+/// The number of aircraft that are stale: last updated before a confirmed step of the replay
+/// clock and not updated since.
+pub fn adsb_stale_count(t: &AdsbTable) -> usize {
+    (0..t.capacity)
+        .filter(|&s| {
+            t.occupied.get(s).copied().unwrap_or(false) && t.stale.get(s).copied().unwrap_or(false)
+        })
+        .count()
+}
+
+/// Moves every aircraft's report time by `delta_ns`, for a step of the replay clock: the time
+/// since each was heard stays what it was. Every aircraft is marked stale until a report is
+/// accepted for it; returns the number marked.
+pub fn adsb_shift_times(t: &mut AdsbTable, delta_ns: i64) -> usize {
+    let mut n = 0;
+    for s in 0..t.capacity {
+        if t.occupied.get(s).copied().unwrap_or(false) {
+            if let Some(v) = t.time_ns.get_mut(s) {
+                *v = v.saturating_add(delta_ns);
+            }
+            if let Some(v) = t.stale.get_mut(s) {
+                *v = true;
+                n += 1;
+            }
+        }
+    }
     n
 }
 
@@ -376,7 +417,7 @@ pub fn adsb_hash_into(h: &mut Sha256, t: &AdsbTable) {
         put(h, &t.stats.evicted.to_le_bytes());
         put(h, &t.stats.future_refused.to_le_bytes());
     }
-    for (k, s) in order {
+    for &(k, s) in &order {
         put(h, &k.to_le_bytes());
         if let Some(v) = t.time_ns.get(s) {
             put(h, &v.to_le_bytes());
@@ -420,5 +461,8 @@ pub fn adsb_hash_into(h: &mut Sha256, t: &AdsbTable) {
         if let Some(v) = t.out_of_order.get(s) {
             put(h, &v.to_le_bytes());
         }
+    }
+    if adsb_stale_count(t) > 0 {
+        stale_hash_into(h, &t.stale, order.iter().map(|&(_, s)| s));
     }
 }
