@@ -47,6 +47,19 @@ pub(crate) fn two_prod(a: f64, b: f64) -> Dd {
     dd(p, err)
 }
 
+/// Exact square: `hi + lo == a * a`, `hi = fl(a * a)`. One splitting instead of two; the pieces
+/// `ah` (26 bits) and `al` (at most 26 bits) make `ah ah`, `ah al` and `al al` exact.
+#[inline]
+pub(crate) fn two_sqr(a: f64) -> Dd {
+    let p = a * a;
+    let t = SPLITTER * a;
+    let ah = t - (t - a);
+    let al = a - ah;
+    let ahl = ah * al;
+    let err = ((ah * ah - p) + (ahl + ahl)) + al * al;
+    dd(p, err)
+}
+
 pub(crate) fn neg(a: Dd) -> Dd {
     dd(-a.hi, -a.lo)
 }

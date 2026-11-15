@@ -3,7 +3,7 @@
 use crate::consts::{EXP_C, EXP_TAB, INV_LN2_64, LN2_64_1, LN2_64_2, LN2_64_3};
 use crate::dd::{self, dd, Dd};
 use crate::dd::{fast_two_sum, two_sum};
-use crate::util::{pow2, round_test, scale_round, NAN};
+use crate::util::{abs, round_test, scale_round, NAN};
 
 /// exp(z) for a double-double `z` with |z| below about 800, as `(d, k)` with exp(z) = d * 2^k
 /// and `d` normalised, relative error about 2^-75.
@@ -80,15 +80,56 @@ pub(crate) fn exp_fast_core(zh: f64, zl: f64) -> (f64, f64, i32) {
     (s.hi, s.lo + (t.lo * (1.0 + q.hi) + t.hi * q.lo), k)
 }
 
+/// 1.5 * 2^52: adding it to a double of size below 2^51 rounds that double to an integer (ties
+/// to even) and leaves the integer in the low bits of the sum.
+const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
+
+/// exp(x) for a plain double `x`, |x| < 700, as `(h, l, k)` like [`exp_fast_core`] and within the
+/// same [`EXP_FAST_ERR`], computed with a shorter dependency chain (the argument has no low
+/// part, which lets the reduction skip its normalising sum). Differences from the general core:
+/// * m is x / (ln 2 / 64) rounded to an integer by the magic-number sum (ties to even), so
+///   |r| <= ln 2 / 128 (1 + 2^-50) as before;
+/// * `x - m L1` is exact: m L1 is an exact product of at most 52 bits, a multiple of 2^-41, x
+///   is a multiple of ulp(x) <= 2^-43 (|x| < 700), and the difference is below 2^-7 in size, so
+///   it has at most 2^-7 / ulp(x) <= 2^53 units, with ulp(x) >= 2^-60 when m is not 0 (then
+///   |x| >= ln 2 / 128 > 2^-8) and the difference equals x when m is 0;
+/// * the sum with `-m L2` stays a `two_sum` (the exact value of the difference may cancel);
+/// * the remainder `rl = s2.lo - m L3` is not renormalised against `rh`: it is below
+///   2^-60 + 2^-61 (the low part of a sum at most half an ulp of `rh` < 2^-7.5, and
+///   m L3 < 2^-60), so the neglected cross term `rl (exp(rh) - 1)` is below 2^-59 * 0.0055 < 2^-66
+///   and the square (rh + rl)^2 differs from rh^2 by less than 2 rh rl < 2^-66 (halved: 2^-67);
+///   both are well below the dominant 2^-60 term of the bound and inside its margin;
+/// * the tail `p` is evaluated in the order of Estrin (same terms, the rounding of each of the
+///   five coefficients' products is below 2^-76, immaterial to the bound).
+pub(crate) fn exp_fast_plain(x: f64) -> (f64, f64, i32) {
+    let t = x * INV_LN2_64 + ROUND_MAGIC;
+    let m = t.to_bits().wrapping_sub(ROUND_MAGIC.to_bits()) as i64;
+    let mf = t - ROUND_MAGIC;
+    let d = x - mf * LN2_64_1;
+    let s2 = two_sum(d, -(mf * LN2_64_2));
+    let rh = s2.hi;
+    let rl = s2.lo - mf * LN2_64_3;
+    let [k3, k4, k5, k6, k7, _] = EXP_C;
+    let r2 = rh * rh;
+    let p = ((k3 + rh * k4) + r2 * (k5 + rh * k6)) + (r2 * r2) * k7;
+    let q = two_sum(rh, rl + r2 * (0.5 + rh * p));
+    let j = (m & 63) as usize;
+    let k = (m >> 6) as i32;
+    let t = EXP_TAB.get(j).copied().unwrap_or(dd(1.0, 0.0));
+    let w = t.hi * q.hi;
+    let s = fast_two_sum(t.hi, w);
+    (s.hi, s.lo + (t.lo * (1.0 + q.hi) + t.hi * q.lo), k)
+}
+
 /// The fast path of [`exp`]: `None` unless the argument is in (-700, 700) and the rounding of
 /// the result is certain (then the result is what [`exp_slow`] returns).
 pub(crate) fn exp_fast(x: f64) -> Option<f64> {
-    if !(x > -700.0 && x < 700.0) {
+    if !(0.0..700.0).contains(&abs(x)) {
         return None;
     }
-    let (h, l, k) = exp_fast_core(x, 0.0);
-    // |k| <= 1010, so the scaling by 2^k is exact for a normal result
-    round_test(h, l, EXP_FAST_ERR).map(|a| a * pow2(k))
+    let (h, l, k) = exp_fast_plain(x);
+    // -1011 <= k <= 1010, so 2^k is a normal number and the scaling is exact
+    round_test(h, l, EXP_FAST_ERR).map(|a| a * f64::from_bits(((k + 1023) as u64) << 52))
 }
 
 /// e raised to `x`. Domain: all doubles. Result is faithfully rounded (measured maximum error
