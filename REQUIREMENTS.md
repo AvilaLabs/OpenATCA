@@ -2264,7 +2264,15 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-042** A `--accel-q` or `--sigma-scale` value of `oa-truth-check` that is not a finite number
   above zero is a usage error, before the clip is read.
 - **OA-TRUTH-043** A difference of two report times that does not fit an `i64` never panics: the builder
-  splits the leg there, and queries and the smoother saturate it.
+  splits the leg there, queries refuse it as no nearby report, and interpolation and the leave-one-out
+  bracket treat it as no interval.
+- **OA-TRUTH-044** A time difference is never saturated: where it can exceed an `i64` (the quality carry
+  age, the query bracket, interpolation) the overflow reads as "not within", and the steps of one leg the
+  smoother subtracts without a check never exceed `leg_gap_ms`.
+- **OA-TRUTH-045** `oa-truth-check` refuses a clip over 4 GiB before reading it, and a clip whose frame
+  headers claim more than 50 million rows before decoding the frame that crosses the cap (typed
+  `ClipError`). Ten times the largest real day (330 MB, 4.07 million rows).
+
 
 ## M2 — Benchmark harness (oa-bench)
 

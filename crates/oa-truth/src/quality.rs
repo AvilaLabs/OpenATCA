@@ -111,7 +111,8 @@ fn held_value(h: &mut Held, own: u8, t_ns: i64, carry_ns: i64, carried: &mut boo
         h.at_ns = t_ns;
         return Some(own);
     }
-    if h.at_ns != i64::MIN && t_ns.saturating_sub(h.at_ns) <= carry_ns {
+    // A difference past the range of an i64 is not within the carry age.
+    if h.at_ns != i64::MIN && t_ns.checked_sub(h.at_ns).is_some_and(|d| d <= carry_ns) {
         *carried = true;
         return Some(h.v);
     }

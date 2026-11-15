@@ -1379,3 +1379,73 @@ fn a_leg_of_reports_at_the_extremes_of_the_clock_is_built_without_overflow() {
         let _ = truth_at(&t, ADDR, t_ms);
     }
 }
+
+// REQ: OA-TRUTH-044
+#[test]
+fn a_report_time_far_before_the_held_time_does_not_carry_quality() {
+    let cfg = DEFAULT_CONFIG;
+    let mut st = QualityState::default();
+    let first = at_ns(1);
+    let v = quality_check(&mut st, &first, 1, &cfg);
+    assert_eq!(v.removal, None);
+    // A row with no quality values of its own, a time whose difference from the held one does not
+    // fit an i64: not within the carry age, so nothing is carried.
+    let mut bare = at_ns(i64::MIN);
+    bare.nic = NONE_U8;
+    bare.nac_p = NONE_U8;
+    bare.sil = NONE_U8;
+    bare.version = NONE_U8;
+    let v = quality_check(&mut st, &bare, i64::MIN, &cfg);
+    assert!(!v.carried, "{v:?}");
+    assert_eq!(v.removal, Some(REM_NO_QUALITY));
+}
+
+// REQ: OA-TRUTH-044
+#[test]
+fn a_query_whose_distance_to_a_report_does_not_fit_an_i64_is_not_near_one() {
+    let mut r = Reports::default();
+    for k in 0..4 {
+        reports_push(&mut r, &at_ns(T0 + k * 1_000_000_000));
+    }
+    let (mut t, _) = build(&r);
+    assert_eq!(leg_count(&t), 1);
+    // A leg that spans more than an i64 of nanoseconds cannot be built (legs split at gaps), so
+    // the columns are set by hand to reach the query's time arithmetic.
+    t.pt_t_ns = vec![i64::MIN + 1, i64::MIN + 2, i64::MAX - 1, i64::MAX];
+    assert_eq!(
+        truth_at(&t, ADDR, 1_000_000_000_000),
+        TruthQuery::NoNearbyReport
+    );
+}
+
+// REQ: OA-TRUTH-044
+#[test]
+fn no_leg_has_a_step_longer_than_the_leg_gap() {
+    // The smoother and the queries subtract report times of one leg without a check; this is the
+    // invariant that makes that safe.
+    let mut r = Reports::default();
+    let gap = DEFAULT_CONFIG.leg_gap_ms * 1_000_000;
+    for base in [T0, i64::MIN + 5_000_000_000, i64::MAX - 1_000_000_000_000] {
+        let mut t = base;
+        for k in 0..8i64 {
+            reports_push(&mut r, &at_ns(t));
+            // Steps of exactly the gap, then one just over it.
+            t = t.saturating_add(if k == 4 { gap + 1 } else { gap });
+        }
+    }
+    let mut cfg = DEFAULT_CONFIG;
+    cfg.min_leg_points = 3;
+    let (t, s) = build_truth(&r, &cfg).unwrap();
+    assert!(balanced(&s));
+    assert!(leg_count(&t) > 0);
+    for l in 0..leg_count(&t) {
+        let (Some(&lo), Some(&hi)) = (t.leg_first_pt.get(l), t.leg_first_pt.get(l + 1)) else {
+            panic!("leg offsets");
+        };
+        let pts = &t.pt_t_ns[lo as usize..hi as usize];
+        for w in pts.windows(2) {
+            let d = w[1].checked_sub(w[0]).unwrap();
+            assert!(d > 0 && d <= gap, "{d}");
+        }
+    }
+}
