@@ -59,7 +59,8 @@ use crate::assoc::{
     NONE as NO_TRACK,
 };
 use crate::coarse::{
-    coarse_buffer, coarse_build, coarse_new, coarse_passes, coarse_query, CoarseIndex,
+    coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
+    CoarseIndex,
 };
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_MAX_ACCEL_MPS2,
@@ -1023,7 +1024,7 @@ fn assoc_prepare<'a>(
 }
 
 /// Gates the anonymous plot `a` of `ra` against the tracks near it: the coarse window (on the
-/// tracks of the grid cells it can reach, in ascending track order, each charged to `budget`) and
+/// tracks of the grid cells it can reach, the nearest first if the budget is short, each charged to `budget`) and
 /// then the exact gate. Returns the work spent; a plot that finds the budget or the pair limit
 /// spent stops and marks the association capped.
 fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc<'_>, a: usize, budget: usize) -> usize {
@@ -1044,10 +1045,26 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc<'_>, a: usize, budget: usize) 
         coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, ra.width);
     }
     // Visiting a candidate is work: charged, counted, and the plot stops where the budget does.
-    let visits = if brute { 0 } else { cand.len().min(budget) };
+    // A plot with more candidates than budget visits three quarters of the budget and leaves the
+    // rest for the exact gates of the nearest of them.
+    let visits = if brute {
+        0
+    } else if cand.len() <= budget {
+        cand.len()
+    } else {
+        budget - budget / 4
+    };
     f.stats.coarse_visits += visits as u64;
     let mut spent = visits;
     if !brute && visits < cand.len() {
+        // Keep the nearest, not the lowest numbered (sorted in place: nothing is allocated).
+        let key = |ti: u32| match (ra.tracks.get(ti as usize), ra.skip.get(ti as usize)) {
+            (Some(t), Some(false)) => {
+                coarse_distance((prho, paz), (t.rho, t.az, t.ground, t.sigma))
+            }
+            _ => f64::INFINITY,
+        };
+        cand.sort_unstable_by(|&x, &y| key(x).total_cmp(&key(y)).then(x.cmp(&y)));
         cand.truncate(visits);
         ra.capped = true;
     }
@@ -2718,6 +2735,44 @@ mod tests {
         assert_eq!(grid.0, brute.0);
         assert_eq!(grid.1, brute.1);
         assert_eq!(grid.2, brute.2);
+    }
+
+    // REQ: OA-TRK-222
+    #[test]
+    fn a_short_budget_keeps_the_nearest_candidates_not_the_lowest_numbered() {
+        // 5,000 tracks inside one grid cell (42.0 to 42.25 N, 88.0 to 87.75 W, 20 to 40 km from
+        // the radar), the plot's own track numbered last; the plot may spend 100 (75 visits, then
+        // the exact gates).
+        let mut f = make_fusion_sites(&[SITE], 5_000);
+        f.bucket_tests_max = 100;
+        let mut out = output_new(1 << 18);
+        let mut rng = Rng::from_seed(31);
+        let at: Vec<(f64, f64)> = (0..5_000)
+            .map(|_| (42.005 + 0.24 * rng.unit(), -87.995 + 0.24 * rng.unit()))
+            .collect();
+        for k in 0..4i64 {
+            for (i, &(lat, lon)) in at.iter().enumerate() {
+                let mut m = adsb_fix(0x100000 + i as u32, k * NS_PER_S);
+                m.lat_e7 = (lat * 1.0e7).round() as i32;
+                m.lon_e7 = (lon * 1.0e7).round() as i32;
+                fusion_adsb(&mut f, &m);
+            }
+        }
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        let plots = plots_on(&SITE, &at[4_999..], 1, 0.0, 3);
+        fusion_plots(&mut f, 0, &plots);
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.bucket_work_capped, 1, "{st:?}");
+        let log = fusion_assign_log(&f);
+        let i = log.label.iter().position(|&l| l == 0);
+        assert!(i.is_some(), "the plot was not associated: {st:?}");
+        assert_eq!(
+            log.key.get(i.unwrap_or(0)).copied(),
+            Some(0x100000 + 4_999),
+            "{:?}",
+            log.how
+        );
     }
 
     // REQ: OA-TRK-177

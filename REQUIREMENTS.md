@@ -2984,3 +2984,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-212** The simulated ADS-B noise of a sample depends only on the seed, the address and the
   sample's time, so the two legs of one aircraft do not repeat each other's draws and a simulation of a
   subrange reproduces exactly the samples of the full run that it covers.
+- **OA-TRK-220** A pole inside the coarse search rectangle (judged in the rectangle's plane, with a margin)
+  makes the grid take every longitude up to that pole, so a track beyond a pole that the window passes is
+  a candidate at any index size, including where the sampled points are all far from the pole.
+- **OA-TRK-221** At 80 N with the plot 1,100 km north, tracks in rings of 3 and 10 km round the pole are
+  all candidates the window test can pass, at index sizes either side of the scan fallback.
+- **OA-TRK-222** When the visit budget is shorter than the candidates, the nearest by coarse distance
+  (then lowest track number) are kept, not the lowest numbered; the plot is still marked capped.

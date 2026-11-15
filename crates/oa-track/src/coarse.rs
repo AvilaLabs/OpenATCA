@@ -19,7 +19,8 @@
 //!   sphere against the ellipsoid, and the height of the aircraft) with room.
 //!
 //! The box is the latitude and longitude extent of nine points of the rectangle, with a margin.
-//! A box that reaches a pole is every longitude; longitudes are taken relative to the box's
+//! A pole that lies inside the rectangle (judged in the rectangle's own plane, with a margin, not
+//! from the nine points) makes the box run to that pole and take every longitude; longitudes are taken relative to the box's
 //! centre and wrapped, so a box across the +-180 degree seam is two runs of cells; a latitude
 //! beyond the poles is clamped to the last cell.
 //!
@@ -29,7 +30,7 @@
 //! place (the comparison with a NaN is false), so they have a cell of their own that every query
 //! includes.
 
-use oa_geo::aeqd::{frame_new, unproject, Frame};
+use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
 /// Side of a cell, degrees (about 28 km of latitude).
 pub const CELL_DEG: f64 = 0.25;
@@ -42,6 +43,8 @@ const EXTRA_FIXED_M: f64 = 2_000.0;
 const EXTRA_PER_RANGE: f64 = 0.01;
 /// Margin added to the latitude and longitude box, degrees.
 const PAD_DEG: f64 = 0.02;
+/// Metres of a degree of latitude, for the margin in the plane.
+const M_PER_DEG: f64 = 111_200.0;
 
 /// The index. A subsystem (D5): fields private, interface the free functions below.
 // A7.2: cold struct (one per radar)
@@ -121,6 +124,21 @@ pub fn coarse_passes(
     !((prho - rho).abs() > coarse || az_diff(paz, az).to_radians().abs() * ground > coarse)
 }
 
+/// How far a track is from the plot, metres: the slant range difference and the cross-range
+/// together. A NaN term gives 0 (such a track passes the window whatever its place). Orders the
+/// candidates of a plot that cannot visit them all.
+pub fn coarse_distance(
+    (prho, paz): (f64, f64),
+    (rho, az, ground, _sigma): (f64, f64, f64, f64),
+) -> f64 {
+    let d = (prho - rho).hypot(az_diff(paz, az).to_radians() * ground);
+    if d.is_nan() {
+        0.0
+    } else {
+        d
+    }
+}
+
 /// The tracks of one cell, appended to `cand`.
 fn push_cell(keys: &[u64], cand: &mut Vec<u32>, cell: u32) {
     let lo = u64::from(cell) << 32;
@@ -185,8 +203,23 @@ pub fn coarse_query(
     if pts.iter().any(|p| !(p.0.is_finite() && p.1.is_finite())) {
         return push_all(ix, out);
     }
-    let lat_lo = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - PAD_DEG;
-    let lat_hi = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + PAD_DEG;
+    let mut lat_lo = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - PAD_DEG;
+    let mut lat_hi = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + PAD_DEG;
+    // A pole inside the rectangle (in its plane, with a margin), whatever the nine points show.
+    let pole_in = |pole: f64| {
+        let (x, y) = project(&frame, pole, 0.0);
+        let (a, c) = (x * st + y * ct, x * ct - y * st);
+        let pad = 2.0 * PAD_DEG * M_PER_DEG;
+        !(a.is_finite() && c.is_finite())
+            || (a >= a_lo - pad && a <= g_hi + pad && c.abs() <= w + pad)
+    };
+    let (north, south) = (pole_in(90.0), pole_in(-90.0));
+    if north {
+        lat_hi = 90.0;
+    }
+    if south {
+        lat_lo = -90.0;
+    }
     let lon_c = pts.get(4).map_or(0.0, |p| p.1);
     let wrap = |d: f64| (d + 180.0).rem_euclid(360.0) - 180.0;
     let (mut d_lo, mut d_hi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -195,7 +228,7 @@ pub fn coarse_query(
         d_lo = d_lo.min(d);
         d_hi = d_hi.max(d);
     }
-    let reaches_pole = lat_hi >= 90.0 - 2.0 * PAD_DEG || lat_lo <= -90.0 + 2.0 * PAD_DEG;
+    let reaches_pole = north || south;
     let lat_edge = lat_lo.abs().max(lat_hi.abs()).min(89.0);
     let pad_lon = PAD_DEG / lat_edge.to_radians().cos().max(1.0e-3);
     let (lon_from, lon_to) = (lon_c + d_lo - pad_lon, lon_c + d_hi + pad_lon);
@@ -268,7 +301,7 @@ mod tests {
             let (rho, az) = polar_of(&g, geo.lat_deg, geo.lon_deg, h);
             let dh = h - g.height_m;
             let ground = (rho * rho - dh * dh).max(1.0).sqrt();
-            let sigma = 300.0 * rng.unit();
+            let sigma = 3_400.0 * rng.unit();
             v.push(T {
                 lat: geo.lat_deg,
                 lon: geo.lon_deg,
@@ -417,5 +450,96 @@ mod tests {
         assert!(visited < 20_000 * 400, "{visited} candidates visited");
         // A debug build on a loaded machine; the scan of every pair took longer than this.
         assert!(took < 10.0, "{took} s");
+    }
+
+    /// A track at `(lat, lon)` at the radar's own height, seen from `s`, with standard deviation
+    /// `sigma`.
+    fn track_at(s: &RadarSite, lat: f64, lon: f64, sigma: f64) -> T {
+        let g = radar_geom(s);
+        let (rho, az) = polar_of(&g, lat, lon, g.height_m);
+        T {
+            lat,
+            lon,
+            polar: (rho, az, rho, sigma),
+        }
+    }
+
+    /// `n` tracks at the radar's height round it, then `extra`, as an index; checks that the
+    /// query for the plot keeps every track the window passes, and that the window passes `want`
+    /// or more of the extras.
+    fn finds_extras(
+        s: &RadarSite,
+        n: usize,
+        extra: Vec<T>,
+        plot: (f64, f64),
+        width: f64,
+        want: usize,
+    ) {
+        let mut rng = Rng::from_seed(n as u64);
+        let g = radar_geom(s);
+        let mut t = Vec::new();
+        while t.len() < n {
+            let (rho, az) = (1_000.0 + 599_000.0 * rng.unit(), 360.0 * rng.unit());
+            let Ok(geo) = polar_to_geodetic(&g, rho, az, g.height_m) else {
+                continue;
+            };
+            t.push(track_at(s, geo.lat_deg, geo.lon_deg, 0.0));
+        }
+        let first = t.len();
+        t.extend(extra);
+        let (ix, _, _) = built(s, &t);
+        let mut cand = Vec::with_capacity(t.len());
+        coarse_query(&ix, &mut cand, plot.0, plot.1, 0.0, width);
+        let passes = |i: u32| coarse_passes(COARSE_M, plot, t[i as usize].polar);
+        let brute: Vec<u32> = (0..t.len() as u32).filter(|&i| passes(i)).collect();
+        let narrowed: Vec<u32> = cand.iter().copied().filter(|&i| passes(i)).collect();
+        let hit = brute.iter().filter(|&&i| i as usize >= first).count();
+        assert!(
+            hit >= want,
+            "{n} tracks: the window passes {hit} extras, wanted {want}"
+        );
+        assert_eq!(narrowed, brute, "{n} tracks, {} candidates", cand.len());
+    }
+
+    // REQ: OA-TRK-220
+    #[test]
+    fn a_track_beyond_the_pole_is_found_when_no_sample_point_is_near_it() {
+        // Index about (85 N, 20 E); the track at (89.99 N, 170 E) is 550 km over the pole, the
+        // rectangle (30 km wide) holds the pole and every sampled point is 5 degrees or more
+        // from it. Sizes on both sides of the point where the cells outnumber the tracks.
+        let s = site(85.0, 20.0);
+        for n in [200, 1_000, 3_000, 5_000, 10_000, 20_000] {
+            let target = track_at(&s, 89.99, 170.0, 3_375.0);
+            finds_extras(&s, n, vec![target], (550_000.0, 0.0), 30_000.0, 1);
+        }
+    }
+
+    // REQ: OA-TRK-221
+    #[test]
+    fn a_ring_of_tracks_round_a_pole_inside_the_rectangle_is_found() {
+        // Site 80 N, plot at 1,100 km north: the pole (about 1,112 km) is inside the rectangle
+        // (20 km wide) and the sampled points are all more than a degree from it.
+        let s = site(80.0, 10.0);
+        let frame = frame_new(s.lat_deg, s.lon_deg);
+        let (px, py) = oa_geo::aeqd::project(&frame, 90.0, 0.0);
+        let (along, cross) = (py, px);
+        let w = 20_000.0 + EXTRA_FIXED_M + EXTRA_PER_RANGE * 1_100_000.0;
+        assert!(
+            along < 1_100_000.0 + w && cross.abs() < w,
+            "{along} {cross}"
+        );
+        let ring = |r_m: f64| -> Vec<T> {
+            (0..36)
+                .map(|k| {
+                    let lat = 90.0 - r_m / 111_200.0;
+                    track_at(&s, lat, 10.0 * f64::from(k) - 180.0, 2_125.0)
+                })
+                .collect()
+        };
+        for n in [200, 1_000, 3_000, 5_000, 10_000, 20_000] {
+            let mut extra = ring(3_000.0);
+            extra.extend(ring(10_000.0));
+            finds_extras(&s, n, extra, (1_100_000.0, 0.0), 20_000.0, 10);
+        }
     }
 }
