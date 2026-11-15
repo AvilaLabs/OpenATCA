@@ -560,6 +560,17 @@ pub fn fns_sweep(t: &mut FnsTable, now_ns: i64) -> usize {
     n
 }
 
+/// Moves the last-update time of every NOTAM by `delta_ns`, for a step of the replay clock.
+pub fn fns_shift_times(t: &mut FnsTable, delta_ns: i64) {
+    for i in 0..t.slots.capacity {
+        if slot_live(&t.slots, i) {
+            if let Some(v) = t.last_update_ns.get_mut(i) {
+                *v = v.saturating_add(delta_ns);
+            }
+        }
+    }
+}
+
 fn put(h: &mut Sha256, b: &[u8]) {
     // The only failure is a message over 2^61 bytes.
     let _ = h.update(b);

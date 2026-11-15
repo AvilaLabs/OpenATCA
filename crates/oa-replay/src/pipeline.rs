@@ -4,13 +4,17 @@
 //!
 //! A frame goes through four steps, each counted and none skipped silently:
 //!
-//! 1. the replay clock moves to the frame's time (never backwards; a frame earlier than one
-//!    already seen is counted as a time regression and the clock stays), the table's eviction
-//!    cadence runs ([`advance_time`]), and a checkpoint is recorded if one is due;
+//! 1. the replay clock moves to the frame's time under the step rules of [`crate::clock`] (a
+//!    frame earlier than one already seen is counted as a time regression and the clock stays;
+//!    a time more than 10 minutes from the clock is held until three frames in a row confirm
+//!    it), the tables' eviction cadences run ([`advance_time`]), and a checkpoint is recorded
+//!    if one is due;
 //! 2. only MESSAGE frames carry feed data; REJECT and STATUS frames are counted;
 //! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS), oa-tbfm (TBFM),
 //!    oa-tfms (TFMS) or oa-notam (FNS), or decoded with `oa_adsb::decode_payload` (ADS-B, refused
-//!    whole when malformed); every failure is counted under its [`ErrKind`];
+//!    whole when malformed); every failure is counted under its [`ErrKind`]. A document with more
+//!    rows or route text than the row tables hold is decoded as far as it fits and the rest is
+//!    counted (SFDPS, TBFM and TFMS; FNS decoding is as it was);
 //! 4. each decoded row is applied to the flight table ([`apply_sfdps`], [`apply_tbfm`]) or, for
 //!    ADS-B, TFMS and FNS, to the table of its own ([`apply_adsb`], [`apply_tfms_flight`],
 //!    [`apply_tfms_flow`], [`apply_fns`]).
@@ -35,28 +39,32 @@ use oa_notam::{
     Limits as NotamLimits, Notams,
 };
 use oa_sha256::{Digest, Sha256};
-use oa_tbfm::{clear_rows, decode_doc, new_rows, rows_len, DocError, Rows, MSG_KIND_COUNT};
+use oa_tbfm::{clear_rows, decode_doc_prefix, new_rows, rows_len, DocError, Rows, MSG_KIND_COUNT};
 use oa_tfms::{
-    clear_rows as clear_tfms_rows, decode_doc as decode_tfms_doc, flights_len, flows_len,
+    clear_rows as clear_tfms_rows, decode_doc_prefix as decode_tfms_doc, flights_len, flows_len,
     new_rows as new_tfms_rows, DocError as TfmsDocError, Rows as TfmsRows, DEFAULT_FLIGHT_CAPACITY,
     DEFAULT_FLOW_CAPACITY, DEFAULT_STRING_BYTES,
 };
 use oa_xml::Parser;
 
 use crate::adsb::{
-    adsb_hash_into, apply_adsb, new_adsb_table, AdsbApplied, AdsbTable, ADSB_CAPACITY,
+    adsb_advance, adsb_hash_into, apply_adsb, new_adsb_table, AdsbApplied, AdsbTable, ADSB_CAPACITY,
 };
 use crate::apply::{apply_sfdps, apply_tbfm, Applied};
+use crate::clock::{clock_observe, Clock, Tick};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 use crate::fns::{
-    apply_fns, fns_hash_into, fns_sweep, new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
+    apply_fns, fns_hash_into, fns_shift_times, fns_sweep, new_fns_table, FnsApplied, FnsTable,
+    FNS_CAPACITY,
 };
 use crate::hash::state_hash;
-use crate::table::{advance_time, new_table, ConfigError, FlightTable, TableConfig, NS_PER_S};
+use crate::table::{
+    advance_time, new_table, shift_times, ConfigError, FlightTable, TableConfig, NS_PER_S,
+};
 use crate::tfms::{
-    apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_sweep, new_flow_table, new_tfms_table,
-    tfms_due, tfms_hash_into, tfms_sweep, FlowApplied, FlowTable, TfmsApplied, TfmsTable,
-    FLOW_CAPACITY, TFMS_CAPACITY,
+    apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_sweep,
+    new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times, tfms_sweep,
+    FlowApplied, FlowTable, TfmsApplied, TfmsTable, FLOW_CAPACITY, TFMS_CAPACITY,
 };
 
 /// Which feed a frame came from; chosen by the caller, never guessed from the payload.
@@ -85,9 +93,17 @@ pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns", "ads
 /// Default spacing of checkpoints: 10 s of replay time.
 pub const DEFAULT_CHECKPOINT_NS: i64 = 10 * NS_PER_S;
 /// Rows the SFDPS event table and the TBFM row table hold for one document. The measured feeds
-/// carry at most 100 messages per SFDPS document; a document with more is refused whole and
-/// counted ([`ErrKind::SfdpsRowCapacity`], [`ErrKind::TbfmCapacity`]).
+/// carry at most 100 messages per SFDPS document. A document with more is decoded as far as it
+/// fits, never refused whole, and the messages or rows past that point are counted
+/// ([`ErrKind::SfdpsRowCapacity`], [`ErrKind::SfdpsStringCapacity`], [`ErrKind::TbfmCapacity`],
+/// [`ErrKind::TfmsCapacity`]).
 pub const DOC_ROW_CAPACITY: usize = 4096;
+/// Elements, and text nodes, of one document. A frame carries at most `oa_feed::MAX_PAYLOAD`
+/// (4 MiB), so the parser accepts any payload a frame can hold, and the largest document the
+/// measured feeds have shown (3,000 elements) is a hundredth of this.
+pub const DOC_MAX_ELEMENTS: usize = 262_144;
+/// Attributes of one document.
+pub const DOC_MAX_ATTRIBUTES: usize = 524_288;
 /// Bytes of route text one SFDPS document may add.
 pub const DOC_STRING_BYTES: usize = 1 << 20;
 
@@ -163,6 +179,8 @@ pub struct Pipeline {
     notams: Notams,
     /// Replay time now, ns; `i64::MIN` before the first frame.
     pub replay_ns: i64,
+    /// The clock's step rules: frames held and steps confirmed ([`clock_observe`]).
+    pub clock: Clock,
     next_checkpoint_ns: i64,
     /// Checkpoints recorded.
     pub checkpoints: Vec<Checkpoint>,
@@ -199,7 +217,14 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         return Err(PipelineError::Checkpoint(cfg.checkpoint_ns));
     }
     let table = new_table(cfg.table).map_err(PipelineError::Config)?;
-    let parser = Parser::new(oa_xml::Limits::default()).map_err(|_| PipelineError::Parser)?;
+    let limits = oa_xml::Limits {
+        max_input_bytes: oa_feed::MAX_PAYLOAD,
+        max_elements: DOC_MAX_ELEMENTS,
+        max_attributes: DOC_MAX_ATTRIBUTES,
+        max_text_nodes: DOC_MAX_ELEMENTS,
+        ..oa_xml::Limits::default()
+    };
+    let parser = Parser::new(limits).map_err(|_| PipelineError::Parser)?;
     Ok(Pipeline {
         cfg,
         table,
@@ -208,7 +233,10 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         flows: new_flow_table(FLOW_CAPACITY),
         fns: new_fns_table(FNS_CAPACITY),
         parser,
-        fixm: Decoder::new(Limits::default()),
+        fixm: Decoder::new(Limits {
+            max_elements: DOC_MAX_ELEMENTS,
+            ..Limits::default()
+        }),
         events: new_events(DOC_ROW_CAPACITY, DOC_STRING_BYTES),
         rows: new_rows(DOC_ROW_CAPACITY),
         reports: Reports::default(),
@@ -221,6 +249,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         notam_stats: new_stats(0),
         notams: default_notams_small(),
         replay_ns: i64::MIN,
+        clock: Clock::default(),
         next_checkpoint_ns: i64::MIN,
         checkpoints: Vec::new(),
         frames: [0; FEED_COUNT],
@@ -322,15 +351,19 @@ pub fn process_frame(
 ) {
     let f = feed as usize;
     // 1. Clock, eviction cadence, checkpoint.
-    if p.replay_ns == i64::MIN {
-        p.replay_ns = recv_unix_ns;
-    } else if recv_unix_ns < p.replay_ns {
-        count_error(&mut p.errors, ErrKind::TimeRegression, 1);
-    } else {
-        p.replay_ns = recv_unix_ns;
+    match clock_observe(&mut p.clock, p.replay_ns, recv_unix_ns) {
+        Tick::Advance => p.replay_ns = recv_unix_ns,
+        Tick::Regress => count_error(&mut p.errors, ErrKind::TimeRegression, 1),
+        Tick::Held { back } => {
+            if back {
+                count_error(&mut p.errors, ErrKind::TimeRegression, 1);
+            }
+        }
+        Tick::Step { delta } => step_clock(p, recv_unix_ns, delta),
     }
     let now = p.replay_ns;
     advance_time(&mut p.table, now);
+    adsb_advance(&mut p.adsb, now);
     if tfms_due(&mut p.tfms.next_sweep_ns, now) {
         tfms_sweep(&mut p.tfms, now);
         flow_sweep(&mut p.flows, now);
@@ -359,10 +392,26 @@ pub fn process_frame(
     match feed {
         FeedKind::Sfdps => process_sfdps(p, payload, now),
         FeedKind::Tbfm => process_tbfm(p, payload, now),
-        FeedKind::Adsb => process_adsb(p, payload),
+        FeedKind::Adsb => process_adsb(p, payload, now),
         FeedKind::Tfms => process_tfms(p, payload, now),
         FeedKind::Fns => process_fns(p, payload, now),
     }
+}
+
+/// A confirmed step of the clock: take the new time, shift the ages the tables hold by the same
+/// amount so nothing is evicted or stranded by it, and restart the sweep and checkpoint cadences
+/// from the new time.
+fn step_clock(p: &mut Pipeline, to_ns: i64, delta: i64) {
+    p.replay_ns = to_ns;
+    shift_times(&mut p.table, delta);
+    tfms_shift_times(&mut p.tfms, delta);
+    flow_shift_times(&mut p.flows, delta);
+    fns_shift_times(&mut p.fns, delta);
+    // Each cadence is due now: a sweep and a checkpoint at the new time, as after any long gap.
+    p.table.next_sweep_ns = to_ns;
+    p.adsb.next_sweep_ns = to_ns;
+    p.tfms.next_sweep_ns = to_ns;
+    p.next_checkpoint_ns = to_ns;
 }
 
 fn bump(a: &mut [u64; FEED_COUNT], feed: FeedKind, n: u64) {
@@ -395,7 +444,7 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     };
     let before_rejected = p.fixm.stats().rejected;
-    let result = p.fixm.decode(&doc, payload, &mut p.events);
+    let result = p.fixm.decode_prefix(&doc, payload, &mut p.events);
     let summary = match result {
         Ok(s) => s,
         Err(e) => {
@@ -424,6 +473,13 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
         ErrKind::SfdpsField,
         u64::from(summary.field_errors),
     );
+    // Messages past the point where the event table filled up (rows or route text).
+    let full = if p.events.len >= p.events.capacity {
+        ErrKind::SfdpsRowCapacity
+    } else {
+        ErrKind::SfdpsStringCapacity
+    };
+    count_error(&mut p.errors, full, u64::from(summary.not_decoded));
     for i in 0..p.events.len {
         let a = apply_sfdps(&mut p.table, &p.events, i, now);
         bump(&mut p.rows_seen, FeedKind::Sfdps, 1);
@@ -431,7 +487,7 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
     }
 }
 
-fn process_adsb(p: &mut Pipeline, payload: &[u8]) {
+fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
     reports_clear(&mut p.reports);
     if let Err(e) = decode_payload(payload, &mut p.reports) {
         let k = match e {
@@ -446,12 +502,14 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8]) {
         return;
     }
     for i in 0..reports_len(&p.reports) {
-        let a = apply_adsb(&mut p.adsb, &p.reports, i);
+        let a = apply_adsb(&mut p.adsb, &p.reports, i, now);
         bump(&mut p.rows_seen, FeedKind::Adsb, 1);
         match a {
             AdsbApplied::New | AdsbApplied::Updated => bump(&mut p.rows_applied, FeedKind::Adsb, 1),
             AdsbApplied::OutOfOrder => bump(&mut p.rows_out_of_order, FeedKind::Adsb, 1),
             AdsbApplied::TableFull => bump(&mut p.rows_refused_full, FeedKind::Adsb, 1),
+            // Counted in the table's own `future_refused`.
+            AdsbApplied::TooFarAhead => {}
             AdsbApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
         }
     }
@@ -466,8 +524,9 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
             return;
         }
     };
-    match decode_doc(&doc, &mut p.rows) {
+    match decode_doc_prefix(&doc, &mut p.rows) {
         Ok(out) => {
+            count_error(&mut p.errors, ErrKind::TbfmCapacity, u64::from(out.dropped));
             let k = out.kind as usize;
             if let Some(c) = p.tbfm_kinds.get_mut(k) {
                 *c += 1;
@@ -500,15 +559,18 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
             return;
         }
     };
-    if let Err(e) = decode_tfms_doc(&doc, &mut p.tfms_rows) {
-        let k = match e {
-            TfmsDocError::Xml(_) => ErrKind::TfmsXml,
-            TfmsDocError::NotTfms { .. } => ErrKind::TfmsNotTfms,
-            TfmsDocError::Field(_) => ErrKind::TfmsField,
-            TfmsDocError::Capacity(_) => ErrKind::TfmsCapacity,
-        };
-        count_error(&mut p.errors, k, 1);
-        return;
+    match decode_tfms_doc(&doc, &mut p.tfms_rows) {
+        Ok(out) => count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped)),
+        Err(e) => {
+            let k = match e {
+                TfmsDocError::Xml(_) => ErrKind::TfmsXml,
+                TfmsDocError::NotTfms { .. } => ErrKind::TfmsNotTfms,
+                TfmsDocError::Field(_) => ErrKind::TfmsField,
+                TfmsDocError::Capacity(_) => ErrKind::TfmsCapacity,
+            };
+            count_error(&mut p.errors, k, 1);
+            return;
+        }
     }
     for i in 0..flights_len(&p.tfms_rows.flights) {
         let a = apply_tfms_flight(&mut p.tfms, &p.table, &p.tfms_rows, i, now);

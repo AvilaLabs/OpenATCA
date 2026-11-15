@@ -370,6 +370,7 @@ fn eviction_is_by_age_at_the_sweep_cadence_in_slot_order() {
         capacity: 8,
         max_age_ns: 100 * NS,
         sweep_ns: 10 * NS,
+        ..TableConfig::default()
     })
     .unwrap();
     for n in 1..=4u32 {
@@ -416,6 +417,7 @@ fn sweep_visits_slots_in_order_and_age_is_configurable() {
         capacity: 4,
         max_age_ns: 10 * NS,
         sweep_ns: NS,
+        ..TableConfig::default()
     })
     .unwrap();
     for n in [5u32, 3, 9] {

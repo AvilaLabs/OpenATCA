@@ -729,8 +729,9 @@ deterministic flight state comes out.
 - **OA-RPL-008** A TBFM `DEL` change type, on the `air` or on the `mrp` section, clears the
   metering columns and the frozen flag. It does not delete the flight, and metering can start
   again.
-- **OA-RPL-009** A flight is evicted only when its last update is more than the age limit
-  (default 30 minutes, configurable) older than the replay time, at a sweep that runs on a fixed
+- **OA-RPL-009** A flight is evicted only when its last update is more than its age limit
+  (default 30 minutes, configurable, for a flight with no status seen; see OA-RPL-067 for the others)
+  older than the replay time, at a sweep that runs on a fixed
   cadence of replay time (multiples of the sweep spacing, default one minute). Exactly the limit
   is not older than it. Nothing is evicted between sweeps.
 - **OA-RPL-010** A sweep visits slots in slot order and returns the evicted slots to a free stack,
@@ -755,8 +756,9 @@ deterministic flight state comes out.
 - **OA-RPL-017** Every parse, decode and apply failure is counted under its own kind (XML,
   unsupported root, bad GUFI, bad timestamp, malformed field, TBFM field, and the rest); REJECT
   and STATUS frames are counted and not decoded. Nothing is silently skipped.
-- **OA-RPL-018** Replay time never goes backwards; a frame earlier than one already seen is
-  counted as a time regression.
+- **OA-RPL-018** A frame earlier than one already seen, by no more than the clock's step tolerance
+  (10 minutes), does not move replay time back and is counted as a time regression; a larger
+  difference follows OA-RPL-061 to OA-RPL-063.
 - **OA-RPL-019** Replaying the same recordings twice, or with the input read in any chunking
   (1 byte to 16 MiB), or with the streams named in another order, gives identical checkpoints,
   counters and final state hash.
@@ -894,7 +896,8 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
   reports that have them.
 - **OA-RPL-031** The ADS-B table is a struct-of-arrays of fixed capacity (65,536 aircraft) allocated
   once; a new address when it is full is refused and counted (per table and per feed), known
-  aircraft keep updating, and no column moves or grows.
+  aircraft keep updating, and no column moves or grows. Aircraft not heard for a while are freed
+  (OA-RPL-065).
 - **OA-RPL-032** An ADS-B report older than the aircraft's held report is refused whole and counted
   (per aircraft, in total and per feed); an equal time applies.
 - **OA-RPL-033** The ADS-B table is part of the replay state hash (`replay_hash`, used by every
@@ -946,8 +949,8 @@ frame of their feed has been fed (as the ADS-B table is).
   counted, a held flight still updates, a flight silent for six hours of replay time is evicted at a
   sweep and its slot is reused.
 - **OA-RPL-047** A TFMS payload that is not well-formed XML, not a TFMS document, has a refused field or
-  holds more rows than the row tables is counted under its own typed error and applies nothing; the next
-  good payload applies.
+  is counted under its own typed error and applies nothing; the next good payload applies. A payload
+  with more rows than the row tables hold applies the rows that fit (OA-RPL-073).
 - **OA-RPL-048** A TFMS flight row with no flight reference is not applied and is counted.
 - **OA-RPL-049** FNS new, replacement and cancellation NOTAMs are keyed by series, number and year (a
   local-format NOTAM, which has no series, by its location in the series' place): a
@@ -976,6 +979,48 @@ frame of their feed has been fed (as the ADS-B table is).
   final hash (skipped if absent).
 - **OA-RPL-060** The TFMS, programme and NOTAM tables allocate nothing after construction: every buffer
   keeps its address and capacity through applying, sweeping and reusing slots.
+
+### Clock, ages and oversized documents (oa-replay)
+
+- **OA-RPL-061** One frame whose receive time is more than 10 minutes ahead of the replay clock does
+  not move the clock, is processed at the old time and is counted as held, and nothing is evicted
+  because of it.
+- **OA-RPL-062** A forward step of the receive times confirmed by three consecutive frames (each no
+  earlier than the one before, all more than 10 minutes ahead) moves the clock to the third frame and
+  shifts the last-update times in the flight, TFMS, programme and NOTAM tables by the same amount, so
+  no flight is evicted by the step and eviction goes on from the new time.
+- **OA-RPL-063** The same for a step back: three consecutive frames more than 10 minutes behind the
+  clock move it back (the earlier ones are counted as time regressions as before), the tables' times
+  shift with it, and time is not frozen.
+- **OA-RPL-064** A replay whose frames are never more than 10 minutes from the clock (small
+  regressions included) hashes exactly as it did before the step rules, so the existing hashes hold.
+- **OA-RPL-065** The ADS-B table frees an aircraft whose held report is more than 30 minutes older than
+  the replay clock, at a sweep each minute of replay time, and reuses the slot; a long run or a flood
+  of addresses therefore fills the table only while it lasts, and the hash does not depend on slot
+  assignment.
+- **OA-RPL-066** An ADS-B report whose time is more than 2 minutes after the replay clock is refused
+  and counted before it takes a slot or becomes the held report, so it cannot make the real reports of
+  that aircraft look out of order.
+- **OA-RPL-067** A flight stays as long as its latest SFDPS flight status allows without a message:
+  active 2 hours, proposed 4 hours, completed, cancelled or dropped 10 minutes, no status seen 30
+  minutes (each configurable), judged at the sweep.
+- **OA-RPL-068** An SFDPS document with more messages than the event table has rows applies the first
+  messages that fit; the others are counted, one each, as row-capacity errors.
+- **OA-RPL-069** An SFDPS document whose route text does not fit the string table applies the messages
+  before the first that does not fit; the others are counted, one each, as string-capacity errors.
+- **OA-RPL-070** A TBFM document with more rows than the row table applies the rows that fit; the
+  others are counted, one each, as capacity errors.
+- **OA-RPL-071** Wild frames that are scattered, or that disagree in direction or order, never confirm
+  a step and each is counted as held; confirmed forward and backward steps are counted separately.
+- **OA-RPL-072** ADS-B evictions and refusals for time are counted, appear in the replay hash from the
+  first of either (under a new tag; a replay with neither hashes as before), and the same history
+  gives the same hash.
+- **OA-RPL-073** A TFMS document with more flight or programme rows than the row tables applies the
+  rows that fit; the others are counted, one each, as capacity errors.
+- **OA-RPL-074** The three state ages are settings that must be positive and have command-line flags
+  (`--active-age-secs`, `--proposed-age-secs`, `--terminal-age-secs`).
+- **OA-RPL-075** A flight's age limit follows its latest status: a message with no status leaves it, a
+  new status replaces it.
 
 ## M5 — Terrain and obstacles
 

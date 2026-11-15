@@ -564,6 +564,29 @@ impl Decoder {
         input: &[u8],
         out: &mut Events,
     ) -> Result<Summary, FixmError> {
+        self.decode_with(doc, input, out, false)
+    }
+
+    /// Like [`Decoder::decode`], but a document that does not fit `out` (rows or route text) is
+    /// decoded as far as it fits instead of being refused: the messages before the first one that
+    /// does not fit are appended whole, and [`Summary::not_decoded`] counts the others. The
+    /// other errors still leave `out` as it was.
+    pub fn decode_prefix(
+        &mut self,
+        doc: &Doc<'_>,
+        input: &[u8],
+        out: &mut Events,
+    ) -> Result<Summary, FixmError> {
+        self.decode_with(doc, input, out, true)
+    }
+
+    fn decode_with(
+        &mut self,
+        doc: &Doc<'_>,
+        input: &[u8],
+        out: &mut Events,
+        prefix: bool,
+    ) -> Result<Summary, FixmError> {
         self.stats.docs = self.stats.docs.saturating_add(1);
         if doc.input.len() != input.len() || doc.input.as_ptr() != input.as_ptr() {
             return Err(FixmError::InputMismatch);
@@ -590,7 +613,7 @@ impl Decoder {
                 messages += 1;
             }
         }
-        if out.len.saturating_add(messages) > out.capacity {
+        if !prefix && out.len.saturating_add(messages) > out.capacity {
             return Err(FixmError::RowCapacity {
                 capacity: out.capacity,
             });
@@ -599,9 +622,19 @@ impl Decoder {
         let start_strings = out.strings_used;
         let mut sum = Summary::default();
         let r = self.walk(doc, out, &mut sum);
-        if let Err(e) = r {
-            truncate_events(out, start_len, start_strings);
-            return Err(e);
+        match r {
+            // Every row appended so far was committed whole, with its route text.
+            Err(FixmError::RowCapacity { .. } | FixmError::StringCapacity { .. }) if prefix => {
+                let done = sum.rows.saturating_add(sum.rejected);
+                sum.not_decoded = u32::try_from(messages)
+                    .unwrap_or(u32::MAX)
+                    .saturating_sub(done);
+            }
+            Err(e) => {
+                truncate_events(out, start_len, start_strings);
+                return Err(e);
+            }
+            Ok(()) => {}
         }
         Ok(sum)
     }

@@ -69,6 +69,8 @@ pub struct Sf {
     pub ctype: Option<String>,
     pub cid: Option<String>,
     pub unit: Option<(String, String)>,
+    /// `flightStatus@fdpsFlightStatus`, e.g. `ACTIVE`.
+    pub status: Option<String>,
 }
 
 pub fn sf(id: u32, ts_ms: i64) -> Sf {
@@ -85,6 +87,7 @@ pub fn sf(id: u32, ts_ms: i64) -> Sf {
         ctype: None,
         cid: None,
         unit: None,
+        status: None,
     }
 }
 
@@ -119,6 +122,10 @@ impl Sf {
     }
     pub fn unit(mut self, u: &str, s: &str) -> Sf {
         self.unit = Some((u.into(), s.into()));
+        self
+    }
+    pub fn status(mut self, s: &str) -> Sf {
+        self.status = Some(s.into());
         self
     }
     pub fn alt(mut self, a: i32) -> Sf {
@@ -162,6 +169,11 @@ fn sf_message(m: &Sf) -> String {
         }
         body += &format!(
             r#"<flightIdentification xsi:type="ns5:NasFlightIdentificationType"{attrs}/>"#
+        );
+    }
+    if let Some(st) = &m.status {
+        body += &format!(
+            r#"<flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="{st}"/>"#
         );
     }
     if let Some(t) = &m.ctype {

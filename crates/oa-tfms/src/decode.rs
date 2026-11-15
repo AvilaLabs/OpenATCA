@@ -65,6 +65,9 @@ pub struct Outcome {
     pub flow_rows: u32,
     pub unknown_paths: u32,
     pub ignored_paths: u32,
+    /// Flight and flow rows read but not appended because `Rows` was full
+    /// ([`decode_doc_prefix`] only; always 0 from [`decode_doc`]).
+    pub dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -87,6 +90,18 @@ pub fn default_limits() -> Limits {
 
 /// Decodes one parsed document into `rows`. On `Err` the rows and the text table are unchanged.
 pub fn decode_doc(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocError> {
+    decode_with(doc, rows, false)
+}
+
+/// Like [`decode_doc`], but a document with more flight or flow rows than `rows` has room for is
+/// decoded as far as it fits instead of being refused: the rows that fit are appended and
+/// [`Outcome::dropped`] counts the others. Every other error, including a full text table, still
+/// leaves `rows` as it was.
+pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocError> {
+    decode_with(doc, rows, true)
+}
+
+fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, DocError> {
     let f0 = flights_len(&rows.flights);
     let w0 = flows_len(&rows.flows);
     let s0 = rows.strings_used;
@@ -95,7 +110,7 @@ pub fn decode_doc(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocError> {
         unknown: 0,
         ignored: 0,
     };
-    let r = decode_root(doc, &mut acc, rows);
+    let r = decode_root(doc, &mut acc, rows, prefix);
     if r.is_err() {
         truncate_rows(rows, f0, w0, s0);
     }
@@ -130,6 +145,9 @@ struct Ctx<'r> {
     seen: u128,
     lat: Dms,
     lon: Dms,
+    /// A row that does not fit is counted in `dropped` instead of failing the document.
+    prefix: bool,
+    dropped: u32,
 }
 
 fn ferr(field: Field, kind: FieldErrorKind, at: u32) -> DocError {
@@ -773,6 +791,9 @@ fn push_staged_flight(c: &mut Ctx<'_>) -> Result<(), DocError> {
     let row = c.f;
     if push_flight(&mut c.rows.flights, &row) {
         Ok(())
+    } else if c.prefix {
+        c.dropped = c.dropped.saturating_add(1);
+        Ok(())
     } else {
         Err(DocError::Capacity(CapKind::Flights))
     }
@@ -866,6 +887,9 @@ fn decode_flow_message(
     let row = c.w;
     if push_flow(&mut c.rows.flows, &row) {
         Ok(())
+    } else if c.prefix {
+        c.dropped = c.dropped.saturating_add(1);
+        Ok(())
     } else {
         Err(DocError::Capacity(CapKind::Flows))
     }
@@ -941,7 +965,12 @@ fn merge(old: Option<DocKind>, new: DocKind) -> DocKind {
     }
 }
 
-fn decode_root(doc: &Doc<'_>, acc: &mut Acc, rows: &mut Rows) -> Result<Outcome, DocError> {
+fn decode_root(
+    doc: &Doc<'_>,
+    acc: &mut Acc,
+    rows: &mut Rows,
+    prefix: bool,
+) -> Result<Outcome, DocError> {
     let root = ElemIx(0);
     let at = elem_at(doc, root);
     if doc.elem_name.is_empty()
@@ -966,6 +995,8 @@ fn decode_root(doc: &Doc<'_>, acc: &mut Acc, rows: &mut Rows) -> Result<Outcome,
         seen: 0,
         lat: Dms::default(),
         lon: Dms::default(),
+        prefix,
+        dropped: 0,
     };
     let mut kind = None;
     let mut messages = 0u32;
@@ -1015,5 +1046,6 @@ fn decode_root(doc: &Doc<'_>, acc: &mut Acc, rows: &mut Rows) -> Result<Outcome,
         flow_rows: u32::try_from(w1 - w0).unwrap_or(u32::MAX),
         unknown_paths: acc.unknown,
         ignored_paths: acc.ignored,
+        dropped: c.dropped,
     })
 }

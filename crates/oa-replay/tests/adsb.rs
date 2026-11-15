@@ -57,7 +57,9 @@ fn payload(rows: &[Row]) -> Vec<u8> {
 
 fn apply_all(t: &mut oa_replay::AdsbTable, rows: &[Row]) -> Vec<AdsbApplied> {
     let r = reports(rows);
-    (0..reports_len(&r)).map(|i| apply_adsb(t, &r, i)).collect()
+    (0..reports_len(&r))
+        .map(|i| apply_adsb(t, &r, i, i64::MAX))
+        .collect()
 }
 
 // REQ: OA-RPL-030

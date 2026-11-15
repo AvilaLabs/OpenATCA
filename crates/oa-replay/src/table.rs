@@ -10,9 +10,16 @@
 //! * Capacity is fixed at [`new_table`] (default [`DEFAULT_CAPACITY`], 32,768). A flight that
 //!   does not fit is refused and counted, never made room for by an early eviction (INTERFACES
 //!   IF-R1, C2).
-//! * Eviction is by age only: a flight whose last update is more than `max_age_ns` older than
-//!   the replay time goes at a sweep, which runs at a fixed cadence of replay time and visits
-//!   slots in slot order ([`advance_time`]).
+//! * Eviction is by age and state: a flight whose last update is older than its state allows
+//!   goes at a sweep, which runs at a fixed cadence of replay time and visits slots in slot
+//!   order ([`advance_time`]). The state is the class of the latest SFDPS flight status
+//!   ([`CLASS_ACTIVE`], [`CLASS_PROPOSED`], [`CLASS_FINISHED`], or none yet, kept in `flags`),
+//!   and the age allowed is [`TableConfig::active_age_ns`] (2 hours: the measured active flight
+//!   is heard every 8 s, but a flight over the ocean or in a quiet sector reports far less
+//!   often), [`TableConfig::proposed_age_ns`] (4 hours: a filed flight is amended rarely and
+//!   departs hours later), [`TableConfig::terminal_age_ns`] (10 minutes: a completed, cancelled
+//!   or dropped flight has nothing more to say) and, for a flight with no status seen (first
+//!   seen by TBFM, say), [`TableConfig::max_age_ns`] (30 minutes).
 //! * A3: every column is a `Vec` allocated once at `capacity` and indexed by [`Slot`]. A4/A5: a
 //!   [`Slot`] never leaves this crate's table modules.
 
@@ -26,8 +33,15 @@ use crate::index::{
 /// the air at the busiest moment and SFDPS also publishes proposed flights for the next hours;
 /// 32,768 is about six times the airborne peak, and costs under 10 MB of columns.
 pub const DEFAULT_CAPACITY: usize = 32_768;
-/// Default age, in replay time, after which a silent flight is evicted: 30 minutes.
+/// Default age, in replay time, after which a silent flight whose state is not known is evicted:
+/// 30 minutes.
 pub const DEFAULT_MAX_AGE_NS: i64 = 30 * 60 * NS_PER_S;
+/// Default silence allowed an active flight: 2 hours.
+pub const DEFAULT_ACTIVE_AGE_NS: i64 = 2 * 3600 * NS_PER_S;
+/// Default silence allowed a proposed flight: 4 hours.
+pub const DEFAULT_PROPOSED_AGE_NS: i64 = 4 * 3600 * NS_PER_S;
+/// Default silence allowed a completed, cancelled or dropped flight: 10 minutes.
+pub const DEFAULT_TERMINAL_AGE_NS: i64 = 10 * 60 * NS_PER_S;
 /// Default spacing of eviction sweeps in replay time: one minute.
 pub const DEFAULT_SWEEP_NS: i64 = 60 * NS_PER_S;
 /// Nanoseconds per second.
@@ -51,6 +65,26 @@ pub const FROZEN: u8 = 16;
 /// `flags` bit: the flight was first seen in TBFM, so its key is a tagged flight-plan id, not a
 /// GUFI. SFDPS replaces the key with the real GUFI when it sees the same flight plan.
 pub const TBFM_ORIGIN: u8 = 32;
+/// `flags` bits 6 and 7: the state class of the latest SFDPS flight status. 0 is none seen.
+pub const CLASS_MASK: u8 = 192;
+/// State class: the flight is active.
+pub const CLASS_ACTIVE: u8 = 64;
+/// State class: the flight is proposed.
+pub const CLASS_PROPOSED: u8 = 128;
+/// State class: the flight is completed, cancelled or dropped.
+pub const CLASS_FINISHED: u8 = 192;
+
+/// The state class of an `oa_fixm` `STATUS_*` code (0 for a code that is none of them).
+pub fn class_of_status(status: u8) -> u8 {
+    match status {
+        oa_fixm::STATUS_ACTIVE => CLASS_ACTIVE,
+        oa_fixm::STATUS_PROPOSED => CLASS_PROPOSED,
+        oa_fixm::STATUS_COMPLETED | oa_fixm::STATUS_CANCELLED | oa_fixm::STATUS_DROPPED => {
+            CLASS_FINISHED
+        }
+        _ => 0,
+    }
+}
 
 /// `last_feed` values.
 pub const FEED_NONE: u8 = 0;
@@ -65,8 +99,15 @@ pub const FEED_TBFM: u8 = 2;
 pub struct TableConfig {
     /// Flights the table can hold.
     pub capacity: usize,
-    /// A flight is evicted when `now - last_update` exceeds this, in nanoseconds.
+    /// A flight with no known state is evicted when `now - last_update` exceeds this, in
+    /// nanoseconds.
     pub max_age_ns: i64,
+    /// The same for an active flight.
+    pub active_age_ns: i64,
+    /// The same for a proposed flight.
+    pub proposed_age_ns: i64,
+    /// The same for a completed, cancelled or dropped flight.
+    pub terminal_age_ns: i64,
     /// Replay-time spacing of eviction sweeps, in nanoseconds.
     pub sweep_ns: i64,
 }
@@ -76,6 +117,9 @@ impl Default for TableConfig {
         TableConfig {
             capacity: DEFAULT_CAPACITY,
             max_age_ns: DEFAULT_MAX_AGE_NS,
+            active_age_ns: DEFAULT_ACTIVE_AGE_NS,
+            proposed_age_ns: DEFAULT_PROPOSED_AGE_NS,
+            terminal_age_ns: DEFAULT_TERMINAL_AGE_NS,
             sweep_ns: DEFAULT_SWEEP_NS,
         }
     }
@@ -88,6 +132,8 @@ pub enum ConfigError {
     Capacity(usize),
     /// `max_age_ns` is not positive.
     MaxAge(i64),
+    /// `active_age_ns`, `proposed_age_ns` or `terminal_age_ns` is not positive.
+    StateAge(i64),
     /// `sweep_ns` is not positive.
     Sweep(i64),
 }
@@ -137,8 +183,14 @@ pub struct TableStats {
 pub struct FlightTable {
     /// Flights the table can hold.
     pub capacity: usize,
-    /// Age limit, ns.
+    /// Age limit of a flight with no known state, ns.
     pub max_age_ns: i64,
+    /// Age limit of an active flight, ns.
+    pub active_age_ns: i64,
+    /// Age limit of a proposed flight, ns.
+    pub proposed_age_ns: i64,
+    /// Age limit of a completed, cancelled or dropped flight, ns.
+    pub terminal_age_ns: i64,
     /// Sweep spacing, ns.
     pub sweep_ns: i64,
     /// Replay time of the next sweep, or [`SWEEP_UNSET`].
@@ -303,6 +355,11 @@ pub fn new_table(cfg: TableConfig) -> Result<FlightTable, ConfigError> {
     if cfg.max_age_ns <= 0 {
         return Err(ConfigError::MaxAge(cfg.max_age_ns));
     }
+    for a in [cfg.active_age_ns, cfg.proposed_age_ns, cfg.terminal_age_ns] {
+        if a <= 0 {
+            return Err(ConfigError::StateAge(a));
+        }
+    }
     if cfg.sweep_ns <= 0 {
         return Err(ConfigError::Sweep(cfg.sweep_ns));
     }
@@ -310,6 +367,9 @@ pub fn new_table(cfg: TableConfig) -> Result<FlightTable, ConfigError> {
     Ok(FlightTable {
         capacity: n,
         max_age_ns: cfg.max_age_ns,
+        active_age_ns: cfg.active_age_ns,
+        proposed_age_ns: cfg.proposed_age_ns,
+        terminal_age_ns: cfg.terminal_age_ns,
         sweep_ns: cfg.sweep_ns,
         next_sweep_ns: SWEEP_UNSET,
         live: 0,
@@ -643,8 +703,30 @@ fn evict_slot(t: &mut FlightTable, s: Slot) {
     t.stats.evicted += 1;
 }
 
-/// Evicts every flight whose last update is more than `max_age_ns` before `now_ns`, visiting
-/// slots in slot order. Returns the number evicted.
+/// How long a flight with `flags` may stay silent, ns.
+fn age_limit(t: &FlightTable, flags: u8) -> i64 {
+    match flags & CLASS_MASK {
+        CLASS_ACTIVE => t.active_age_ns,
+        CLASS_PROPOSED => t.proposed_age_ns,
+        CLASS_FINISHED => t.terminal_age_ns,
+        _ => t.max_age_ns,
+    }
+}
+
+/// Moves every flight's last-update time by `delta_ns`, for a step of the replay clock: the time
+/// since each flight was last heard stays what it was.
+pub fn shift_times(t: &mut FlightTable, delta_ns: i64) {
+    for i in 0..t.capacity {
+        if is_occupied(t, Slot(i as u32)) {
+            if let Some(v) = t.last_update_ns.get_mut(i) {
+                *v = v.saturating_add(delta_ns);
+            }
+        }
+    }
+}
+
+/// Evicts every flight whose last update is older than its state allows (see the module
+/// documentation) before `now_ns`, visiting slots in slot order. Returns the number evicted.
 pub fn sweep(t: &mut FlightTable, now_ns: i64) -> usize {
     let mut n = 0;
     for i in 0..t.capacity as u32 {
@@ -653,7 +735,8 @@ pub fn sweep(t: &mut FlightTable, now_ns: i64) -> usize {
             continue;
         }
         let last = t.last_update_ns.get(i as usize).copied().unwrap_or(0);
-        if now_ns.saturating_sub(last) > t.max_age_ns {
+        let flags = t.flags.get(i as usize).copied().unwrap_or(0);
+        if now_ns.saturating_sub(last) > age_limit(t, flags) {
             evict_slot(t, s);
             n += 1;
         }

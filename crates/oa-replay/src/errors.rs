@@ -27,9 +27,9 @@ pub enum ErrKind {
     SfdpsUnsupportedRoot,
     /// An SFDPS document with more elements than the decoder's limit.
     SfdpsTooManyElements,
-    /// An SFDPS document the event table could not hold.
+    /// SFDPS messages past the point where the event table filled up (one count each).
     SfdpsRowCapacity,
-    /// An SFDPS document whose route text the string table could not hold.
+    /// SFDPS messages past the point where the route text table filled up (one count each).
     SfdpsStringCapacity,
     /// An SFDPS decoder internal check failed.
     SfdpsInternal,
@@ -53,7 +53,7 @@ pub enum ErrKind {
     TbfmNotTbfm,
     /// A TBFM document with a refused field (the whole message was refused).
     TbfmField,
-    /// A TBFM document with more rows than the row table holds.
+    /// TBFM rows past the point where the row table filled up (one count each).
     TbfmCapacity,
     /// A row index the apply step could not resolve.
     BadRow,

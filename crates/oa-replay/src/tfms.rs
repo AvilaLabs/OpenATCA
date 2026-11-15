@@ -524,6 +524,29 @@ pub fn tfms_sweep(t: &mut TfmsTable, now_ns: i64) -> usize {
     n
 }
 
+/// Moves the last-update time of every flight by `delta_ns`, for a step of the replay clock (the
+/// time since each was heard stays what it was).
+pub fn tfms_shift_times(t: &mut TfmsTable, delta_ns: i64) {
+    for i in 0..t.slots.capacity {
+        if slot_live(&t.slots, i) {
+            if let Some(v) = t.last_update_ns.get_mut(i) {
+                *v = v.saturating_add(delta_ns);
+            }
+        }
+    }
+}
+
+/// The same for the programme table.
+pub fn flow_shift_times(t: &mut FlowTable, delta_ns: i64) {
+    for i in 0..t.slots.capacity {
+        if slot_live(&t.slots, i) {
+            if let Some(v) = t.last_update_ns.get_mut(i) {
+                *v = v.saturating_add(delta_ns);
+            }
+        }
+    }
+}
+
 fn next_boundary(now: i64, step: i64) -> i64 {
     now.div_euclid(step).saturating_add(1).saturating_mul(step)
 }

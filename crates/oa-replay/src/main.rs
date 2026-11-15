@@ -152,6 +152,13 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
             g(&p.rows_refused_full),
         ));
     }
+    let c = &p.clock;
+    if c.held > 0 || c.forward_steps > 0 || c.backward_steps > 0 {
+        s.push_str(&format!(
+            "clock held={} forward_steps={} backward_steps={}\n",
+            c.held, c.forward_steps, c.backward_steps
+        ));
+    }
     let st = &p.table.stats;
     s.push_str(&format!(
         "tbfm linked_gufi={} linked_tma={} created={} unlinked={} promoted={}\n",
@@ -174,6 +181,12 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
             "adsb aircraft={} capacity={} applied={} out_of_order={} refused_full={}\n",
             p.adsb.live, p.adsb.capacity, a.applied, a.out_of_order, a.refused_full
         ));
+        if a.evicted > 0 || a.future_refused > 0 {
+            s.push_str(&format!(
+                "adsb evicted={} future_refused={}\n",
+                a.evicted, a.future_refused
+            ));
+        }
     }
     let fed = |f: FeedKind| p.frames.get(f as usize).copied().unwrap_or(0) > 0;
     if fed(FeedKind::Tfms) {

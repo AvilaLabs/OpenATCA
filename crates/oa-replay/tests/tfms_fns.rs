@@ -46,6 +46,16 @@ fn ts(h: i64, m: i64, s: i64) -> String {
     format!("2030-01-02T{h:02}:{m:02}:{s:02}Z")
 }
 
+/// Moves the replay clock to just before `t` in steps of 9 minutes, with frames that carry no feed
+/// data: the clock takes a bigger step only on the third frame that agrees (and then shifts every
+/// age with it), and these tests are about expiry over elapsed time.
+fn jump(p: &mut Pipeline, t: i64) {
+    while p.replay_ns + 9 * 60 * NS < t {
+        let next = p.replay_ns + 9 * 60 * NS;
+        oa_replay::process_frame(p, FeedKind::Tfms, oa_feed::Kind::Status, next, &[]);
+    }
+}
+
 // ---- TFMS fixtures ----------------------------------------------------------------------------
 
 fn wrap_flight(msgs: &str) -> String {
@@ -446,6 +456,7 @@ fn tfms_programmes_are_kept_one_per_key_with_the_latest_row_and_expire_at_their_
     assert_eq!(p.flows.stats.by_program[prog::MIT as usize], 2);
     assert_eq!(p.flows.stats.by_program[prog::AIRPORT_CONFIG as usize], 3);
     // The restriction ends at 06:00; airport configurations have no end and stay for a day.
+    jump(&mut p, at(5, 59, 30));
     feed(
         &mut p,
         FeedKind::Tfms,
@@ -583,24 +594,33 @@ fn malformed_tfms_payloads_are_counted_by_kind_and_never_applied() {
         at(3, 0, 3),
         &good.replace("2030-01-02T05:00:00Z", "yesterday"),
     );
-    // A document with more flights than the row table holds.
-    let many: String = (0..300)
-        .map(|n| departure(9000 + n, "TST1", None, (3, 0, 0), (5, 0, 0), (2, 0, 0)))
-        .collect();
-    feed(&mut p, FeedKind::Tfms, at(3, 0, 4), &wrap_flight(&many));
     assert_eq!(err(&p, ErrKind::TfmsXml), 1);
     assert_eq!(err(&p, ErrKind::TfmsNotTfms), 1);
     assert_eq!(err(&p, ErrKind::TfmsField), 1);
-    assert_eq!(err(&p, ErrKind::TfmsCapacity), 1);
-    assert_eq!(errors_total(&p.errors), 4);
+    assert_eq!(errors_total(&p.errors), 3);
     assert_eq!(tfms_live(&p.tfms), 0);
     assert_eq!(p.rows_applied[FeedKind::Tfms as usize], 0);
-    assert_eq!(p.messages[FeedKind::Tfms as usize], 4);
+    assert_eq!(p.messages[FeedKind::Tfms as usize], 3);
     // The pipeline goes on: a good document after the bad ones applies.
     feed(&mut p, FeedKind::Tfms, at(3, 0, 5), &good);
     assert_eq!(tfms_live(&p.tfms), 1);
     assert_eq!(ERR_NAMES[ErrKind::TfmsCapacity as usize], "tfms-capacity");
     assert_eq!(ERR_NAMES[ErrKind::FnsNoKey as usize], "fns-no-key");
+}
+
+// REQ: OA-RPL-073
+#[test]
+fn a_tfms_document_over_the_row_limit_loses_only_the_rows_past_it() {
+    let mut p = pl();
+    let many: String = (0..300)
+        .map(|n| departure(9000 + n, "TST1", None, (3, 0, 0), (5, 0, 0), (2, 0, 0)))
+        .collect();
+    feed(&mut p, FeedKind::Tfms, at(3, 0, 4), &wrap_flight(&many));
+    let rows = oa_tfms::DEFAULT_FLIGHT_CAPACITY;
+    assert_eq!(tfms_live(&p.tfms), rows);
+    assert_eq!(p.rows_applied[FeedKind::Tfms as usize], rows as u64);
+    assert_eq!(err(&p, ErrKind::TfmsCapacity), 300 - rows as u64);
+    assert_eq!(errors_total(&p.errors), 300 - rows as u64);
 }
 
 // REQ: OA-RPL-048
@@ -738,6 +758,7 @@ fn notams_expire_by_replay_time_and_open_ended_ones_after_thirty_days() {
     assert_eq!(in_force(&p, 1_898_935_200_000), 2);
     assert_eq!(in_force(&p, 1_899_052_200_001), 1);
     // A frame of any feed after the end moves the clock and the sweep runs.
+    jump(&mut p, mar5(9) + 3 * 86_400 * 1_000_000_000);
     feed(
         &mut p,
         FeedKind::Fns,
@@ -750,6 +771,7 @@ fn notams_expire_by_replay_time_and_open_ended_ones_after_thirty_days() {
     let mut t = new_fns_table(4);
     assert_eq!(fns_sweep(&mut t, mar5(0)), 0);
     // Thirty days with no update.
+    jump(&mut p, mar5(9) + 31 * 86_400 * 1_000_000_000);
     feed(
         &mut p,
         FeedKind::Fns,
@@ -761,6 +783,7 @@ fn notams_expire_by_replay_time_and_open_ended_ones_after_thirty_days() {
     // A cancelled time in the past ends a NOTAM at the next sweep.
     let mut c = nt("Z", 9);
     c.ext = "<fnse:canceled>2030-03-06T00:00:00.000Z</fnse:canceled>";
+    jump(&mut p, mar5(9) + 40 * 86_400 * 1_000_000_000);
     feed(
         &mut p,
         FeedKind::Fns,
@@ -1178,6 +1201,7 @@ fn the_tfms_and_fns_tables_never_move_or_grow_after_init() {
         );
     }
     // Hours later everything has expired and the slots go back on the free stacks.
+    jump(&mut p, at(23, 0, 0));
     feed(
         &mut p,
         FeedKind::Tfms,

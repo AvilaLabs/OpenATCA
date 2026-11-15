@@ -22,7 +22,7 @@ pub mod stats;
 pub mod time;
 pub mod xcheck;
 
-pub use decode::{decode_bytes, decode_doc, default_limits, Outcome, NAMESPACE};
+pub use decode::{decode_bytes, decode_doc, decode_doc_prefix, default_limits, Outcome, NAMESPACE};
 pub use fields::{
     error_kind_name, field_name, reject_reason, DocError, Field, FieldError, FieldErrorKind,
     MsgKind, FIELD_COUNT, MSG_KIND_COUNT, MSG_KIND_NAMES, REJECT_CAPACITY, REJECT_COUNT,

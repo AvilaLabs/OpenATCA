@@ -3,7 +3,7 @@
 //! ```text
 //! oa-replay (--sfdps | --tbfm | --tfms | --fns | --adsb <file> | --sfdps-dir | --tbfm-dir
 //!           | --tfms-dir | --fns-dir | --adsb-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
-//!           [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
+//!           [--active-age-secs <n>] [--proposed-age-secs <n>] [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
 //!           [--quiet]
 //! ```
 //!
@@ -51,7 +51,8 @@ pub struct Command {
 /// The usage text.
 pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <file> | \
 --sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir|--adsb-dir <dir>)... \
-[--checkpoint-secs <n>] [--max-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
+[--checkpoint-secs <n>] [--max-age-secs <n>] [--active-age-secs <n>] [--proposed-age-secs <n>] \
+[--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
 [--chunk-bytes <n>] [--progress-minutes <n>] [--quiet]";
 
 fn number(flag: &str, v: Option<&String>) -> Result<u64, String> {
@@ -104,6 +105,18 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--max-age-secs" => {
                 let n = number(a, it.next())?;
                 cfg.table.max_age_ns = secs_to_ns(a, n)?;
+            }
+            "--active-age-secs" => {
+                let n = number(a, it.next())?;
+                cfg.table.active_age_ns = secs_to_ns(a, n)?;
+            }
+            "--proposed-age-secs" => {
+                let n = number(a, it.next())?;
+                cfg.table.proposed_age_ns = secs_to_ns(a, n)?;
+            }
+            "--terminal-age-secs" => {
+                let n = number(a, it.next())?;
+                cfg.table.terminal_age_ns = secs_to_ns(a, n)?;
             }
             "--sweep-secs" => {
                 let n = number(a, it.next())?;

@@ -49,6 +49,9 @@ pub struct Outcome {
     pub center: Name4,
     /// Envelope time (`envTime` or `misTime`), Unix ms.
     pub env_ms: i64,
+    /// Rows read but not appended because `Rows` was full ([`decode_doc_prefix`] only; always 0
+    /// from [`decode_doc`]).
+    pub dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -70,11 +73,24 @@ pub fn default_limits() -> Limits {
 
 /// Decodes one parsed message into `rows`. On `Err` the rows are unchanged.
 pub fn decode_doc(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocError> {
+    decode_with(doc, rows, false)
+}
+
+/// Like [`decode_doc`], but a document with more rows than `rows` has room for is decoded as far
+/// as it fits instead of being refused: the rows that fit are appended and [`Outcome::dropped`]
+/// counts the others. Every other error still leaves `rows` as it was.
+pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocError> {
+    decode_with(doc, rows, true)
+}
+
+fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, DocError> {
     let start = rows_len(rows);
     let mut acc = Acc {
         t: 0,
         unknown: 0,
         ignored: 0,
+        prefix,
+        dropped: 0,
     };
     let r = decode_root(doc, &mut acc, rows);
     if r.is_err() {
@@ -88,6 +104,9 @@ struct Acc {
     t: usize,
     unknown: u32,
     ignored: u32,
+    /// Count rows that do not fit instead of failing.
+    prefix: bool,
+    dropped: u32,
 }
 
 fn ferr(field: Field, kind: FieldErrorKind, at: u32) -> DocError {
@@ -622,6 +641,7 @@ fn decode_mis(doc: &Doc<'_>, acc: &mut Acc, root: ElemIx) -> Result<Outcome, Doc
         ignored_paths: acc.ignored,
         center: env.center,
         env_ms: env.time_ms,
+        dropped: 0,
     })
 }
 
@@ -653,6 +673,7 @@ fn decode_env(
         ignored_paths: acc.ignored,
         center: env.center,
         env_ms: env.time_ms,
+        dropped: acc.dropped,
     })
 }
 
@@ -817,7 +838,10 @@ fn decode_air(
                 }
                 read_section(doc, acc, c, table, &mut row)?;
                 if !push_row(rows, &row) {
-                    return Err(DocError::Capacity);
+                    if !acc.prefix {
+                        return Err(DocError::Capacity);
+                    }
+                    acc.dropped = acc.dropped.saturating_add(1);
                 }
             }
             None => acc.unknown += 1,

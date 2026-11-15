@@ -30,6 +30,10 @@
 //!   metering columns (meter fix, STA, ETA, runway, frozen). It does not remove the flight.
 //! * **Full table.** A new flight with no free slot is refused and counted; nothing is evicted
 //!   to make room.
+//! * **Flight state.** An SFDPS row that carries a flight status sets the flight's state class
+//!   (`flags` bits [`CLASS_MASK`]: active, proposed, finished; none until one is seen), which
+//!   the sweep reads for how long the flight may stay silent ([`crate::TableConfig`]). A row
+//!   without a status leaves the class as it was.
 //! * **Update time.** `last_update_ns` is the largest replay time applied and `last_source` the
 //!   source at that time (ties broken by the larger source), so the table state does not depend
 //!   on the order in which commuting updates arrive.
@@ -42,9 +46,9 @@ use oa_tbfm::rows::{change, pt, sch_flag, section};
 use oa_tbfm::{row_at, sch_get, Rows, NO_TIME};
 
 use crate::table::{
-    claim_plan, claim_tma, create_flight, find_gufi, find_plan, find_tma, rekey_flight, slot_mut,
-    slot_ref, FlightTable, Slot, SlotMut, FEED_SFDPS, FEED_TBFM, FROZEN, HAS_ALT, HAS_GS, HAS_POS,
-    HAS_VEL, TBFM_ORIGIN,
+    claim_plan, claim_tma, class_of_status, create_flight, find_gufi, find_plan, find_tma,
+    rekey_flight, slot_mut, slot_ref, FlightTable, Slot, SlotMut, CLASS_MASK, FEED_SFDPS,
+    FEED_TBFM, FROZEN, HAS_ALT, HAS_GS, HAS_POS, HAS_VEL, TBFM_ORIGIN,
 };
 
 /// What applying one row did.
@@ -253,6 +257,9 @@ pub fn apply_sfdps(t: &mut FlightTable, ev: &Events, i: usize, now_ns: i64) -> A
         }
         if let (true, Some(v)) = (has_field(ev, i, Field::ControllingUnit), ev.ctrl.get(i)) {
             *c.ctrl = *v;
+        }
+        if let (true, Some(&st)) = (has_field(ev, i, Field::Status), ev.status.get(i)) {
+            *c.flags = (*c.flags & !CLASS_MASK) | class_of_status(st);
         }
         let source = if has_field(ev, i, Field::Source) {
             ev.source.get(i).copied().unwrap_or([0; 2])

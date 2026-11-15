@@ -278,6 +278,9 @@ pub struct Summary {
     pub field_errors: u32,
     pub unknown_elements: u32,
     pub unknown_attributes: u32,
+    /// Messages not decoded because `Events` filled up ([`Decoder::decode_prefix`] only; always
+    /// 0 from [`Decoder::decode`]).
+    pub not_decoded: u32,
 }
 
 /// Why a document was refused.
