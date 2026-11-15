@@ -3107,10 +3107,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-296** The `oa-track` run checks the split of the clip with `oa_bench::split_check::check_split`
   right after `split_reports`; a violation is a hard error of the run. The scorer builds the legacy table by
   truth leg (the chunk ranges are by address, so all legs of an address are in one chunk).
-- **OA-TRK-297** The fusion layer records where a bucket's time goes and what its work limit leaves out: the
+- **OA-TRK-297** The fusion layer records where a bucket's work goes and what its work limit leaves out: the
   tracks predicted for association, the coarse window width, the anonymous plots never gated because the
-  limit was reached, the initiation tests and candidates alive at most, and (apart from the counters, in
-  `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
+  limit was reached, the coarse visits, exact tests and initiation tests, the candidates alive at most and the
+  buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

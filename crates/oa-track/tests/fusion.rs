@@ -596,6 +596,35 @@ fn run_digest(r: &RunOut) -> String {
     oa_sha256::to_hex(&h.finalize())
 }
 
+/// The counts reported when a pin moves: tracks created, identity errors, coast rows, and what
+/// the initiation and the work limit did.
+fn clip_counts(r: &RunOut) -> String {
+    let id = identify(r);
+    let coast = r
+        .out
+        .flags
+        .iter()
+        .filter(|f| *f & oa_track::O_COAST != 0)
+        .count();
+    let s = &r.fstats;
+    format!(
+        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {}",
+        r.out.t_ns.len(),
+        s.plots_in,
+        s.plots_refused,
+        r.tstats.started,
+        s.cand_confirmed,
+        id.duplicates,
+        id.false_tracks,
+        id.swaps,
+        id.wrong_plots,
+        id.false_applied,
+        coast,
+        s.bucket_work_capped,
+        s.anon_plots_ungated
+    )
+}
+
 // REQ: OA-TRK-170
 #[test]
 fn the_real_clip_runs_give_the_pinned_digests() {
@@ -637,6 +666,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
             r.fstats.plots_in,
             r.fstats.plots_refused
         );
+        println!("clip counts {kind:?} mixed={mixed}: {}", clip_counts(&r));
         got.push(d);
     }
     // The two radars together on one run.
@@ -647,6 +677,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     let adsb = simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0).unwrap();
     let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
     println!("clip digest two radars: {}", run_digest(&r));
+    println!("clip counts two radars: {}", clip_counts(&r));
     got.push(run_digest(&r));
     assert_eq!(got, PINNED_CLIP_DIGESTS);
 }

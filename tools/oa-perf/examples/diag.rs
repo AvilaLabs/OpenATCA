@@ -19,7 +19,7 @@ use oa_perf::capacity::tracker_cfg;
 use oa_perf::gen::{Layout, Traffic, TrafficCfg, ADDR_BASE};
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_config, fusion_new, fusion_plots,
-    fusion_stats, fusion_timers, fusion_tracker, fusion_tracker_config, fusion_tracker_stats,
+    fusion_stats, fusion_tracker, fusion_tracker_config, fusion_tracker_stats,
 };
 use oa_track::fusion_params::KEY_RADAR_BASE;
 use oa_track::fusion_score::EPOCH_NS;
@@ -76,13 +76,14 @@ fn main() {
         }
         let until = EPOCH_NS + (k + 1) * NS;
         let before: HashMap<u32, i64> = tracker_live_iter(fusion_tracker(&f)).collect();
-        let t0 = Instant::now();
         for m in &adsb {
             fusion_adsb(&mut f, m);
         }
         for (r, p) in plots.iter().enumerate() {
             fusion_plots(&mut f, r, p);
         }
+        // Only the whole `fusion_advance` call is timed (the layer reads no clock).
+        let t0 = Instant::now();
         fusion_advance(&mut f, until, &mut out);
         wall.push(t0.elapsed().as_secs_f64() * 1e3);
         if k % 10 == 9 {
@@ -98,7 +99,7 @@ fn main() {
             prev_ung = u;
         }
         if k + 1 == warm {
-            snap = Some((*fusion_stats(&f), *fusion_timers(&f)));
+            snap = Some(*fusion_stats(&f));
         }
         if k >= warm {
             newest.clear();
@@ -202,7 +203,6 @@ fn main() {
         println!("tracks with sigma > 1 km: {big}");
     }
     let st = fusion_stats(&f);
-    let tm = fusion_timers(&f);
     println!(
         "== n={n} adsb_frac={frac} radars={} secs={secs} seed={seed}",
         a[3]
@@ -370,7 +370,7 @@ fn main() {
         "tracker: started {} confirmed {} jump_rejected {} resyncs {} ended {:?}",
         ts.started, ts.confirmed, ts.jump_rejected, ts.resyncs, ts.ended
     );
-    let (s0, t0s) = snap.unwrap_or_default();
+    let s0 = snap.unwrap_or_default();
     let ds = |x: u64, y: u64| x - y;
     let post = (secs - warm).max(1) as f64;
     println!("POST-WARM-UP ({post} s) per second: plots {:.0} tracks_at {:.0} coarse_visits {:.0} pairs_tested {:.0} pairs_gated {:.0} init_tests {:.0} cand_started {:.1} cand_confirmed {:.1} cand_expired {:.1} held {:.1} held_forced {:.1} unassigned {:.1} ungated {:.1} work_capped {:.2} init_capped {:.2}",
@@ -378,12 +378,10 @@ fn main() {
         ds(st.cand_started, s0.cand_started) as f64 / post, ds(st.cand_confirmed, s0.cand_confirmed) as f64 / post, ds(st.cand_expired, s0.cand_expired) as f64 / post, ds(st.held, s0.held) as f64 / post, ds(st.held_forced, s0.held_forced) as f64 / post, ds(st.unassigned, s0.unassigned) as f64 / post, ds(st.anon_plots_ungated, s0.anon_plots_ungated) as f64 / post, ds(st.bucket_work_capped, s0.bucket_work_capped) as f64 / post, ds(st.init_capped, s0.init_capped) as f64 / post);
     let runs = ds(st.assoc_runs, s0.assoc_runs).max(1) as f64;
     println!("POST-WARM-UP coarse width: mean {:.0} m, max-ever {} m; coarse visits per plot {:.0}; live cands at end {}", ds(st.coarse_width_sum_m, s0.coarse_width_sum_m) as f64 / runs, st.coarse_width_max_m, ds(st.coarse_visits, s0.coarse_visits) as f64 / ds(st.plots_in, s0.plots_in).max(1) as f64, st.cand_started - st.cand_confirmed - st.cand_expired);
-    let pm = |x: u64, y: u64| ds(x, y) as f64 * 1e-6 / post;
-    println!("POST-WARM-UP ms per traffic second (loaded machine): prepare {:.1} gate {:.1} finish {:.2} apply {:.1} reg {:.1} init {:.1} (confirm {:.2}) tracker_advance {:.1} | whole process_pending {:.1} | mean advance wall {:.1}", pm(tm.assoc_prepare_ns, t0s.assoc_prepare_ns), pm(tm.assoc_gate_ns, t0s.assoc_gate_ns), pm(tm.assoc_finish_ns, t0s.assoc_finish_ns), pm(tm.apply_ns, t0s.apply_ns), pm(tm.reg_ns, t0s.reg_ns), pm(tm.init_ns, t0s.init_ns), pm(tm.confirm_ns, t0s.confirm_ns), pm(tm.advance_ns, t0s.advance_ns), pm(tm.pending_ns, t0s.pending_ns), mean);
-    let b = tm.buckets.max(1) as f64;
-    let ms = |x: u64| x as f64 * 1e-6;
-    println!("timers (total ms over all {} seconds, loaded machine): pending(all stages) {:.0} | prepare {:.0} gate {:.0} finish {:.0} | apply {:.0} reg {:.0} init {:.0} (confirm {:.0}) | tracker_advance {:.0}", secs, ms(tm.pending_ns), ms(tm.assoc_prepare_ns), ms(tm.assoc_gate_ns), ms(tm.assoc_finish_ns), ms(tm.apply_ns), ms(tm.reg_ns), ms(tm.init_ns), ms(tm.confirm_ns), ms(tm.advance_ns));
-    println!("per bucket ms: prepare {:.2} gate {:.2} finish {:.2} apply {:.2} reg {:.2} init {:.2} advance/s {:.2}", ms(tm.assoc_prepare_ns)/b, ms(tm.assoc_gate_ns)/b, ms(tm.assoc_finish_ns)/b, ms(tm.apply_ns)/b, ms(tm.reg_ns)/b, ms(tm.init_ns)/b, ms(tm.advance_ns)/secs as f64);
+    println!("POST-WARM-UP work units per traffic second: coarse_visits {:.0} exact_tests {:.0} init_tests {:.0} applied {:.0} confirmed {:.1} buckets {:.1}",
+        ds(st.coarse_visits, s0.coarse_visits) as f64 / post, ds(st.pairs_tested, s0.pairs_tested) as f64 / post, ds(st.init_tests, s0.init_tests) as f64 / post, (ds(st.applied_assoc, s0.applied_assoc) + ds(st.applied_hard, s0.applied_hard)) as f64 / post, ds(st.cand_confirmed, s0.cand_confirmed) as f64 / post, ds(st.buckets, s0.buckets) as f64 / post);
+    let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    println!("shell-timed fusion_advance, mean ms per traffic second, post-warm-up (loaded machine, load average {}): {:.1}", load.split_whitespace().take(3).collect::<Vec<_>>().join(" "), mean);
     // ages (radar-only tick rows, non-coast) by dup
     let mut ages: [Vec<f64>; 3] = [vec![], vec![], vec![]];
     let mut coast_rows = [0u32; 2];

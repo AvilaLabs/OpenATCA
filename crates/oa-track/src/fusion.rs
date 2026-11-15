@@ -50,8 +50,6 @@
 //! The per-key bookkeeping is two fixed-capacity hash tables (`fixed_map.rs`, [`KEY_TABLE_SLOTS`]
 //! slots each, made at start); the tracker allocates nothing after construction.
 
-use std::time::Instant;
-
 use oa_geo::aeqd::{frame_new, project};
 
 use crate::assoc::{
@@ -305,34 +303,8 @@ pub struct FusionStats {
     pub assoc_runs: u64,
     pub coarse_width_sum_m: u64,
     pub coarse_width_max_m: u64,
-}
-
-/// Wall time spent in the stages of the layer, ns (shell instrumentation: read from the clock,
-/// never read back by the layer, so it cannot change an output). Kept apart from
-/// [`FusionStats`], which is compared for equality between runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FusionTimers {
-    /// All of `process_pending`: the stages below plus sorting the inputs into buckets.
-    pub pending_ns: u64,
-    /// Association: hard plots, tracks and grid (prepare), coarse and exact gates, the solve.
-    pub assoc_prepare_ns: u64,
-    pub assoc_gate_ns: u64,
-    pub assoc_finish_ns: u64,
-    /// Ordering the events and applying them to the tracker.
-    pub apply_ns: u64,
-    /// Registration offers and publishing.
-    pub reg_ns: u64,
-    /// Initiation, of which `confirm_ns` is the confirmation replays.
-    pub init_ns: u64,
-    pub confirm_ns: u64,
-    /// The tracker's advance to the end of the bucket (ticks, coasting, expiry, emission).
-    pub advance_ns: u64,
     /// Buckets processed.
     pub buckets: u64,
-}
-
-fn lap(t: Instant) -> u64 {
-    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -526,7 +498,6 @@ pub struct Fusion {
     cands: Vec<Cand>,
     next_serial: u32,
     stats: FusionStats,
-    timers: FusionTimers,
     log: AssignLog,
     tracks: Vec<RadarTrackRec>,
     /// Records kept at most (a field so a test can lower it).
@@ -621,7 +592,6 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         cands: Vec::with_capacity(MAX_CANDIDATES),
         next_serial: 0,
         stats: FusionStats::default(),
-        timers: FusionTimers::default(),
         log: if cfg.log_assign {
             assign_log_new()
         } else {
@@ -637,11 +607,6 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
 /// The counters.
 pub fn fusion_stats(f: &Fusion) -> &FusionStats {
     &f.stats
-}
-
-/// The stage timers.
-pub fn fusion_timers(f: &Fusion) -> &FusionTimers {
-    &f.timers
 }
 
 /// The tracker's counters.
@@ -787,18 +752,14 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
 /// pending: with every sensor quiet, time still passes for the tracks.
 pub fn fusion_advance(f: &mut Fusion, until_ns: i64, out: &mut TrackOutput) {
     let complete = until_ns.div_euclid(f.cfg.bucket_ns);
-    let t0 = Instant::now();
     process_pending(f, complete, out);
-    f.timers.pending_ns += lap(t0);
     // Every bucket before `complete` is closed, whether or not it held an event: a plot timed
     // inside one is late (OA-TRK-088).
     f.done_bucket = f.done_bucket.max(complete.saturating_sub(1));
     // Up to the last instant before the boundary, as a measurement at the boundary would: the
     // tracker emits a tick at a measurement's own time only after applying it.
     let boundary = complete.saturating_mul(f.cfg.bucket_ns);
-    let t1 = Instant::now();
     tracker_advance(&mut f.tracker, boundary.saturating_sub(1), out);
-    f.timers.advance_ns += lap(t1);
 }
 
 /// Processes everything pending, then runs the tracker to `now_ns` and flushes it.
@@ -1516,15 +1477,12 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
 /// the assignments follow.
 fn associate_bucket(f: &mut Fusion) {
     // At most `MAX_RADARS` radars (checked by `fusion_new`).
-    let t_prep = Instant::now();
     let mut ras: [Option<RadarAssoc>; MAX_RADARS] = std::array::from_fn(|_| None);
     for (r, slot) in ras.iter_mut().enumerate() {
         if f.rscratch.get(r).is_some_and(|rs| !rs.plots.is_empty()) {
             *slot = assoc_prepare(f, r);
         }
     }
-    f.timers.assoc_prepare_ns += lap(t_prep);
-    let t_gate = Instant::now();
     let budget = f.bucket_tests_max;
     let mut total = 0usize;
     loop {
@@ -1552,14 +1510,11 @@ fn associate_bucket(f: &mut Fusion) {
         ra.next += 1;
         total += assoc_plot(f, ra, a, budget - total);
     }
-    f.timers.assoc_gate_ns += lap(t_gate);
-    let t_fin = Instant::now();
     for ra in &mut ras {
         if let Some(ra) = ra.take() {
             assoc_finish(f, ra);
         }
     }
-    f.timers.assoc_finish_ns += lap(t_fin);
 }
 
 /// Records a run of `run` held plots of `radar` on `key`, in the bucket being processed. In a full
@@ -1671,9 +1626,8 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
             f.stats.bucket_plot_overflow += 1;
         }
     }
-    f.timers.buckets += 1;
+    f.stats.buckets += 1;
     associate_bucket(f);
-    let t_apply = Instant::now();
     // Events in time order.
     let mut evs = std::mem::take(&mut f.evs);
     evs.clear();
@@ -1726,7 +1680,6 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
         }
     }
     f.evs = evs;
-    f.timers.apply_ns += lap(t_apply);
     // Registration, then initiation, per radar.
     for r in 0..f.rscratch.len() {
         let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
@@ -1734,7 +1687,6 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
         };
         if !rs.plots.is_empty() {
             if f.cfg.registration {
-                let t_reg = Instant::now();
                 for (j, dj) in rs.dec.iter().enumerate() {
                     if let (Some(z), Some(p)) = (dj.resid, rs.plots.get(j)) {
                         if let Some(st) = f.reg.get_mut(r) {
@@ -1743,11 +1695,8 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
                     }
                 }
                 publish_registration(f, r, rs.plots.last().map_or(0, |p| p.time_ns));
-                f.timers.reg_ns += lap(t_reg);
             }
-            let t_init = Instant::now();
             initiate(f, r, &rs.plots, &rs.dec, out);
-            f.timers.init_ns += lap(t_init);
         }
         if let Some(slot) = f.rscratch.get_mut(r) {
             *slot = rs;
@@ -2030,9 +1979,7 @@ fn initiate(
         }
         if c.n >= f.cfg.init_m {
             f.cands.remove(i);
-            let t_conf = Instant::now();
             confirm(f, radar, &c, out);
-            f.timers.confirm_ns += lap(t_conf);
         } else if now_scan
             .and_then(|n| n.checked_sub(c.first_scan))
             .is_some_and(|d| d >= i64::from(f.cfg.init_n))
@@ -3142,10 +3089,10 @@ mod tests {
 
     // REQ: OA-TRK-297
     #[test]
-    fn the_stage_counters_and_timers_count_what_a_cut_association_leaves_ungated() {
+    fn the_stage_counters_count_what_a_cut_association_leaves_ungated() {
         // 200 tracks within 20 km, 100 plots over them, the bucket's work limit cut to 500: the
         // plots after the limit are not gated and are counted as such; the width of the coarse
-        // window and the stage timers are recorded.
+        // window and the buckets are recorded.
         let mut f = make_fusion_sites(&[SITE], 400);
         f.bucket_tests_max = 500;
         let mut out = output_new(1 << 18);
@@ -3164,11 +3111,9 @@ mod tests {
         assert_eq!(st.tracks_at_sum, 200, "{st:?}");
         assert!(st.coarse_width_max_m >= COARSE_M as u64, "{st:?}");
         assert_eq!(st.coarse_width_sum_m, st.coarse_width_max_m, "{st:?}");
-        let tm = fusion_timers(&f);
         // Four buckets of ADS-B and the one with the plots.
-        assert_eq!(tm.buckets, 5);
-        assert!(tm.pending_ns > 0 && tm.assoc_gate_ns > 0, "{tm:?}");
-        // The timers are a record only: a second run gives the same counters.
+        assert_eq!(st.buckets, 5, "{st:?}");
+        // The counters are a record only: a second run gives the same ones.
         let mut g = make_fusion_sites(&[SITE], 400);
         g.bucket_tests_max = 500;
         feed_tracks(&mut g, &SITE, 200, 20_000.0, 7, 0x100000);
