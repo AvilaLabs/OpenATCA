@@ -4,7 +4,7 @@
 //! ```text
 //! oa-bench --out <dir> --synthetic
 //! oa-bench --out <dir> [--sfdps-dir <dir>] [--tbfm-dir <dir>] [--tfms-dir <dir>] --adsb <clip.oaf>
-//!          [--airspace <snapshot>] [--truth-bracket-s <s>] [--truth-max-sigma-m <m>]
+//!          [--airspace <snapshot>] [--metar <dir>] [--truth-bracket-s <s>] [--truth-max-sigma-m <m>]
 //!          [--truth-reason <text>] [--no-loo]
 //! ```
 //!
@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use oa_bench::adsb_truth::{self, config_with, truth_section};
 use oa_bench::airspace_env::lookup_from_model;
+use oa_bench::altimeters::load_metar_dir;
 use oa_bench::input::{load, load_adsb, read_capped_file, FeedInput};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::{run_benchmark, RunConfig, RunOutput};
@@ -31,7 +32,7 @@ use oa_bench::synth::{
 use oa_bench::truth::{empty_env, Env, Truth};
 use oa_replay::FeedKind;
 
-const USAGE: &str = "usage: oa-bench --out <dir> --synthetic\n       oa-bench --extract-only [--sfdps-dir <dir>] [--tbfm-dir <dir>] [--tfms-dir <dir>]\n       oa-bench --out <dir> [--sfdps-dir <dir>] [--tbfm-dir <dir>] [--tfms-dir <dir>] --adsb <clip.oaf> [--airspace <snapshot>] [--truth-bracket-s <s>] [--truth-max-sigma-m <m>] [--truth-reason <text>] [--no-loo]";
+const USAGE: &str = "usage: oa-bench --out <dir> --synthetic\n       oa-bench --extract-only [--sfdps-dir <dir>] [--tbfm-dir <dir>] [--tfms-dir <dir>]\n       oa-bench --out <dir> [--sfdps-dir <dir>] [--tbfm-dir <dir>] [--tfms-dir <dir>] --adsb <clip.oaf> [--airspace <snapshot>] [--metar <dir>] [--truth-bracket-s <s>] [--truth-max-sigma-m <m>] [--truth-reason <text>] [--no-loo]";
 
 /// Parses a positive finite number option value.
 fn positive(name: &str, v: Option<String>) -> Result<f64, String> {
@@ -47,6 +48,7 @@ fn main() -> ExitCode {
     let mut feeds: Vec<FeedInput> = Vec::new();
     let mut adsb: Option<PathBuf> = None;
     let mut airspace: Option<PathBuf> = None;
+    let mut metar: Option<PathBuf> = None;
     let (mut bracket_s, mut max_sigma_m): (Option<f64>, Option<f64>) = (None, None);
     let mut reason: Option<String> = None;
     let mut no_loo = false;
@@ -74,6 +76,10 @@ fn main() -> ExitCode {
             },
             "--airspace" => match val("--airspace") {
                 Some(v) => airspace = Some(v),
+                None => return ExitCode::from(2),
+            },
+            "--metar" => match val("--metar") {
+                Some(v) => metar = Some(v),
                 None => return ExitCode::from(2),
             },
             "--truth-reason" => match val("--truth-reason") {
@@ -116,6 +122,7 @@ fn main() -> ExitCode {
         let opts = RecordedOpts {
             clip,
             airspace,
+            metar,
             bracket_s,
             max_sigma_m,
             reason,
@@ -229,6 +236,7 @@ fn write_reports(out: &Path, header: &Header, result: &RunOutput) -> std::io::Re
 struct RecordedOpts {
     clip: PathBuf,
     airspace: Option<PathBuf>,
+    metar: Option<PathBuf>,
     bracket_s: Option<f64>,
     max_sigma_m: Option<f64>,
     reason: Option<String>,
@@ -255,6 +263,10 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         }
         None => None,
     };
+    let metar = match &o.metar {
+        Some(d) => Some(load_metar_dir(d).map_err(|e| format!("{}: {e}", d.display()))?),
+        None => None,
+    };
     let q = |a: u32, t: i64| adsb_truth::query(&built.truth, a, t);
     let truth = Truth {
         query: &q,
@@ -262,10 +274,18 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     };
     let fix = |n: &str| lookup.as_ref().and_then(|l| l.fix(n));
     let fix_all = |n: &str| lookup.as_ref().map_or_else(Vec::new, |l| l.fix_all(n));
-    let airport = |n: &str| lookup.as_ref().and_then(|l| l.airport(n));
+    let airport = |n: &str| {
+        let mut a = lookup.as_ref().and_then(|l| l.airport(n))?;
+        if let Some((m, _)) = &metar {
+            a.altimeters = m.at_field(n);
+        }
+        Some(a)
+    };
     let in_zone = |la: f64, lo: f64| lookup.as_ref().is_some_and(|l| l.in_zone(la, lo));
     let unit_at =
         |la: f64, lo: f64, _alt: Option<i32>| lookup.as_ref().and_then(|l| l.unit_at(la, lo));
+    let unit_ambiguous =
+        |la: f64, lo: f64| lookup.as_ref().is_some_and(|l| l.unit_ambiguous(la, lo));
     let env: Env<'_> = if lookup.is_some() {
         Env {
             fix: &fix,
@@ -273,6 +293,7 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
             airport: &airport,
             in_zone: &in_zone,
             unit_at: &unit_at,
+            unit_ambiguous: &unit_ambiguous,
         }
     } else {
         empty_env()
@@ -317,6 +338,16 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         "leg callsigns are the most frequent callsign of the decoded reports of the leg (oa-truth carries none)"
             .to_string(),
     );
+    match &metar {
+        Some((m, _)) => notes.push(format!(
+            "METAR: {} files ({} refused), {} observations; the altimeter setting nearest in time within 60 minutes brings truth pressure altitude to feet above mean sea level for the F3 takeoff and landing ground test, and an event with none is excluded",
+            m.files, m.refused_files, m.rows
+        )),
+        None => notes.push(
+            "METAR: none given (--metar); no field has an altimeter setting, so F3 takeoff and landing truth is excluded (no altimeter setting for the field)"
+                .to_string(),
+        ),
+    }
     match &lookup {
         Some(l) => {
             let (f, a, u) = l.counts();
@@ -334,12 +365,30 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
                 .to_string(),
         ),
     }
+    if let Some(l) = &lookup {
+        let ov = l.overlap_counts();
+        if ov.is_empty() {
+            notes.push("ARTCC areas: no truth position was inside more than one area".to_string());
+        } else {
+            let list: Vec<String> = ov
+                .iter()
+                .map(|((a, b), n)| format!("{a}/{b} {n}"))
+                .collect();
+            notes.push(format!(
+                "ARTCC areas: truth positions inside more than one area, counted per overlapping facility pair (handoffs with one are excluded): {}",
+                list.join(", ")
+            ));
+        }
+    }
     notes.push(
         "ADS-B clip digest: hashed from the frames read to build the truth, in the same read"
             .to_string(),
     );
     let mut inputs = loaded.inputs.clone();
     inputs.push(clip.hash.clone());
+    if let Some((_, h)) = &metar {
+        inputs.push(h.clone());
+    }
     let header = Header {
         mode: "recorded".to_string(),
         code_version: code_version(),

@@ -19,6 +19,7 @@ oa-tfms = { path = "../oa-tfms" }
 oa-replay = { path = "../oa-replay" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-adsb = { path = "../oa-adsb" }
+oa-awc = { path = "../oa-awc" }
 oa-truth = { path = "../oa-truth" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }

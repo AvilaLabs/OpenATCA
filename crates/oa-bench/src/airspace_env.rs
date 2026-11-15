@@ -13,11 +13,15 @@
 //!   airport with no published elevation is not offered (nothing is made up).
 //! * Zone: the model's own ARTCC (`Meta::artcc`), its HIGH and LOW boundaries together.
 //! * Unit: the ARTCC boundary containing the point (any ARTCC in the model, HIGH or LOW), as the
-//!   ARTCC identifier in bytes 0 to 3 with the sector bytes zero. NASR carries no sector
+//!   ARTCC identifier in bytes 0 to 3 with the sector bytes zero. A point inside the areas of
+//!   more than one ARTCC has no unit (the model has no altitude to choose by, and facility-name
+//!   order is not a reason): [`AirspaceLookup::unit_ambiguous`] reports it and counts the
+//!   facility pairs, listed by [`AirspaceLookup::overlap_counts`]. NASR carries no sector
 //!   geometry and ARTCC boundaries carry no altitude, so the sector and the altitude are not
 //!   used; a handoff between sectors of one ARTCC therefore has no truth crossing and H1 counts
 //!   it as unresolved.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use oa_airspace::geom::{area_inside, build_area, e7_to_deg, latlon_e7, Area};
@@ -44,6 +48,8 @@ pub struct AirspaceLookup {
     airports: BTreeMap<String, AirportRef>,
     units: Vec<Unit>,
     zone: Option<usize>,
+    /// Ambiguous positions examined, by the pair of facilities whose areas both contain them.
+    overlaps: RefCell<BTreeMap<(String, String), u64>>,
     /// The model's ARTCC identifier.
     pub artcc: String,
     /// Fix rows whose identifier occurs in an earlier row.
@@ -105,6 +111,7 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
                 let r = AirportRef {
                     elev_ft: elev,
                     thresholds: Vec::new(),
+                    altimeters: Vec::new(),
                 };
                 airports
                     .entry(ident.to_string())
@@ -187,6 +194,7 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
         airports,
         units,
         zone,
+        overlaps: RefCell::new(BTreeMap::new()),
         artcc: m.meta.artcc.clone(),
         duplicate_fixes,
         ambiguous_fixes,
@@ -240,15 +248,55 @@ impl AirspaceLookup {
         area_inside(&z.area, p)
     }
 
-    /// The ARTCC containing the point, in the `oa-fixm` unit format (sector bytes zero).
+    /// Every ARTCC whose area contains the point, in facility-name order.
+    fn containing(&self, lat: f64, lon: f64) -> Vec<&Unit> {
+        let Ok(p) = LatLon::new(lat, lon) else {
+            return Vec::new();
+        };
+        self.units
+            .iter()
+            .filter(|u| area_inside(&u.area, p))
+            .collect()
+    }
+
+    /// The ARTCC containing the point, in the `oa-fixm` unit format (sector bytes zero). `None`
+    /// outside every area and also where the areas of several ARTCCs contain the point: no
+    /// unit is chosen by name order (see [`AirspaceLookup::unit_ambiguous`]).
     pub fn unit_at(&self, lat: f64, lon: f64) -> Option<[u8; 8]> {
-        let p = LatLon::new(lat, lon).ok()?;
-        let u = self.units.iter().find(|u| area_inside(&u.area, p))?;
+        let [u] = self.containing(lat, lon)[..] else {
+            return None;
+        };
         let mut out = [0u8; 8];
         for (o, b) in out.iter_mut().take(4).zip(u.id.bytes()) {
             *o = b;
         }
         Some(out)
+    }
+
+    /// Whether the areas of more than one ARTCC contain the point. Each such answer is counted
+    /// under every pair of those facilities ([`AirspaceLookup::overlap_counts`]).
+    pub fn unit_ambiguous(&self, lat: f64, lon: f64) -> bool {
+        let hits = self.containing(lat, lon);
+        if hits.len() < 2 {
+            return false;
+        }
+        let mut counts = self.overlaps.borrow_mut();
+        for (i, a) in hits.iter().enumerate() {
+            for b in hits.iter().skip(i + 1) {
+                *counts.entry((a.id.clone(), b.id.clone())).or_insert(0) += 1;
+            }
+        }
+        true
+    }
+
+    /// The facility pairs whose areas overlapped at an ambiguous position, with the number of
+    /// such positions examined, in pair order.
+    pub fn overlap_counts(&self) -> Vec<((String, String), u64)> {
+        self.overlaps
+            .borrow()
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect()
     }
 
     /// Number of fixes, airports (identifier keys) and ARTCC polygons groups loaded, for the report.

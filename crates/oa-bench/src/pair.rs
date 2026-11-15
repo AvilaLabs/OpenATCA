@@ -121,6 +121,14 @@ pub fn build_pairs(
                 continue;
             }
             let (e, n) = enu(ts.lat, ts.lon, f64::from(lat) * 1e-7, f64::from(lon) * 1e-7);
+            if !(e.is_finite() && n.is_finite()) {
+                exclude(
+                    &mut ex,
+                    "pairing",
+                    "position not a valid latitude and longitude",
+                );
+                continue;
+            }
             let v = ts.vel_east_mps.hypot(ts.vel_north_mps);
             let (mut cross, mut along) = (f32::NAN, f32::NAN);
             if v >= cfg.min_speed_mps {

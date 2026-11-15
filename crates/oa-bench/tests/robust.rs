@@ -206,3 +206,73 @@ fn a_fix_passage_is_not_placed_inside_a_hole_in_the_truth() {
     assert!(!p.is_empty());
     assert!(p.iter().all(|x| x.cross_ms.is_none()), "{p:?}");
 }
+
+// REQ: OA-BENCH-111
+#[test]
+fn a_handoff_whose_truth_passes_through_an_ambiguous_area_is_excluded_and_counted() {
+    // Over A (latitude 5) until 20 s before the event, in the overlap of A and B (latitude 15)
+    // for 10 s, then over B. Name order would put the overlap in A and score a crossing 10 s
+    // late; here no unit is known there and the handoff is excluded.
+    let q = |a: u32, t: i64| -> Result<TruthSample, NoTruth> {
+        if a != ADDR {
+            return Err(NoTruth::UnknownAircraft);
+        }
+        let lat = if t < TS - 20_000 {
+            5.0
+        } else if t < TS - 10_000 {
+            15.0
+        } else {
+            25.0
+        };
+        Ok(sample(lat, -88.0))
+    };
+    let legs = [TruthLeg {
+        addr: ADDR,
+        start_ms: 0,
+        end_ms: 2 * TS,
+        callsign: None,
+    }];
+    let truth = Truth {
+        query: &q,
+        legs: &legs,
+    };
+    let unit = |lat: f64, _lon: f64, _alt: Option<i32>| -> Option<[u8; 8]> {
+        if lat < 10.0 {
+            Some(pad::<8>(b"AAA"))
+        } else if lat > 20.0 {
+            Some(pad::<8>(b"BBB"))
+        } else {
+            None
+        }
+    };
+    let ambiguous = |lat: f64, _lon: f64| (10.0..=20.0).contains(&lat);
+    let mut env = empty_env();
+    env.unit_at = &unit;
+    env.unit_ambiguous = &ambiguous;
+    let mut leg = new_legacy();
+    let f = flight_ix(&mut leg, 1).unwrap();
+    push_handoff(
+        &mut leg,
+        f,
+        TS,
+        hev::ACCEPTANCE,
+        pad::<8>(b"AAA"),
+        pad::<8>(b"BBB"),
+    );
+    let assoc = Assoc {
+        addr: vec![ADDR],
+        ..Assoc::default()
+    };
+    let mut ex = Exclusions::new();
+    let r = h1_handoffs(&leg, &assoc, &truth, &env, &EventConfig::default(), &mut ex);
+    assert_eq!(r.rows[0].stats.n, 0);
+    assert_eq!(
+        ex_count(
+            &ex,
+            "H1",
+            "truth position inside more than one ARTCC area, unit ambiguous"
+        ),
+        1,
+        "{ex:?}"
+    );
+}

@@ -88,6 +88,29 @@ pub struct AirportRef {
     pub elev_ft: i32,
     /// Runway thresholds `(lat, lon)` in degrees.
     pub thresholds: Vec<(f64, f64)>,
+    /// Altimeter settings observed at the field: `(observation time Unix ms, inches of
+    /// mercury)`, in any order. Empty when none is known.
+    pub altimeters: Vec<(i64, f64)>,
+}
+
+/// An altimeter setting further than this from the event is not used, milliseconds (60 min).
+pub const ALTIMETER_WINDOW_MS: i64 = 3_600_000;
+/// Standard altimeter setting, inches of mercury: pressure altitude is indicated altitude here.
+pub const STANDARD_INHG: f64 = 29.92;
+
+impl AirportRef {
+    /// The altimeter setting, inches of mercury, observed nearest in time to `t_ms` and within
+    /// [`ALTIMETER_WINDOW_MS`] of it (the earlier of two equally near); `None` when there is
+    /// none. A setting outside 27 to 32 inHg is not an altimeter setting and is skipped.
+    pub fn altimeter_near(&self, t_ms: i64) -> Option<f64> {
+        self.altimeters
+            .iter()
+            .filter(|&&(_, v)| v.is_finite() && (27.0..=32.0).contains(&v))
+            .map(|&(o, v)| ((o - t_ms).abs(), o, v))
+            .filter(|&(d, _, _)| d <= ALTIMETER_WINDOW_MS)
+            .min_by_key(|&(d, o, _)| (d, o))
+            .map(|(_, _, v)| v)
+    }
 }
 
 /// Airspace lookups as function values (cold: filled from the M0 model by the shell).
@@ -106,6 +129,9 @@ pub struct Env<'a> {
     /// The unit and sector owning a point and altitude, in the `oa-fixm` format (unit in bytes 0
     /// to 3, sector in bytes 4 to 7, zero padded); `None` outside every modelled unit.
     pub unit_at: &'a dyn Fn(f64, f64, Option<i32>) -> Option<[u8; 8]>,
+    /// Whether a point lies in the areas of more than one unit, so `unit_at` has none for it
+    /// although the point is inside the model; asked only when `unit_at` answers `None`.
+    pub unit_ambiguous: &'a dyn Fn(f64, f64) -> bool,
 }
 
 /// An [`Env`] that knows nothing: every lookup is empty and no point is in the zone.
@@ -116,5 +142,6 @@ pub fn empty_env() -> Env<'static> {
         airport: &|_| None,
         in_zone: &|_, _| false,
         unit_at: &|_, _, _| None,
+        unit_ambiguous: &|_, _| false,
     }
 }
