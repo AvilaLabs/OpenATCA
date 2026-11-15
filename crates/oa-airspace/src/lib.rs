@@ -8,6 +8,7 @@
 //! |------------|-------|-------------------------------------------------------------------|
 //! | `model`    | core  | tables, index types, codes, validation, lookups                    |
 //! | `geom`     | core  | fixed-point conversion, selection area, geodesic tests             |
+//! | `airac`    | core  | a date to its 28-day AIRAC cycle                                   |
 //! | `build`    | core  | parsed sources to a model: matching, selection, unresolved lists   |
 //! | `snapshot` | core  | model to bytes and back, bounded reader                            |
 //! | `report`   | core  | the build report text and boundary-geometry unknowns               |
@@ -15,6 +16,7 @@
 //! | `source`   | data  | plain data passed from the shell to the core                       |
 //! | `load`     | shell | reads the archives, verifies hashes, parses with oa-nasr/oa-arinc424 |
 //! | `cli`      | shell | the `oa-adapt` command line, file reads and writes                 |
+pub mod airac;
 pub mod build;
 pub mod cli;
 pub mod diff;

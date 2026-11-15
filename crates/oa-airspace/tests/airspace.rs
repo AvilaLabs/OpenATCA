@@ -1787,3 +1787,154 @@ fn a_cifp_threshold_at_the_physical_end_of_a_displaced_runway_is_listed_as_doubt
     let (_, report) = mdw_04l(true, "758", &cifp_file());
     assert!(!report.contains("MDW 04L (displaced"), "{report}");
 }
+
+/// A terminal waypoint (PC) record `ident` at `airport`, region K5, at the given CIFP position.
+fn terminal_waypoint_record(ident: &str, airport: &str, pos: &str) -> String {
+    format!("SUSAP {airport}K5C{ident:<5} K50    W     {pos}                       W0125     NAR           {ident:<25}303922504\n")
+}
+
+/// The KMDW I04R leg that names CITGO names the terminal waypoint `ZZFIX` instead.
+fn name_terminal_waypoint(text: String) -> String {
+    let from = "SUSAP KMDWK5FI04R  I      020CITGOK5PC0E";
+    assert_eq!(text.matches(from).count(), 1);
+    text.replacen(from, "SUSAP KMDWK5FI04R  I      020ZZFIXK5PC0E", 1)
+}
+
+// REQ: OA-ASP-071
+#[test]
+fn a_procedure_resolves_its_own_airports_terminal_fix_not_another_airports() {
+    // `ZZFIX`, region K5, at KORD (listed first) and at KMDW, at different positions.
+    let cifp = cifp_edited(|t| {
+        name_terminal_waypoint(t)
+            + &terminal_waypoint_record("ZZFIX", "KORD", "N41585000W087540000")
+            + &terminal_waypoint_record("ZZFIX", "KMDW", "N41470000W087450000")
+    });
+    let src = sources_from(&nasr_files(), &cifp);
+    let out = build_model(&src, &params("ZAU", 92_600)).expect("build");
+    let m = &out.model;
+    validate_model(m).expect("valid");
+    // Two airports each have their own point; neither is called a duplicate.
+    assert!(
+        out.info.duplicates.iter().all(|d| !d.contains("ZZFIX")),
+        "{:?}",
+        out.info.duplicates
+    );
+    let refs: Vec<PointIx> = m
+        .legs
+        .fix
+        .iter()
+        .copied()
+        .filter(|&p| p != PointIx::NONE && point_key(m, p).is_some_and(|k| k.ident == "ZZFIX"))
+        .collect();
+    assert_eq!(refs.len(), 1);
+    let r = refs[0].row();
+    // 41 47 00 N 087 45 00 W (KMDW), not 41 58 50 N 087 54 00 W (KORD), in 1e-7 degrees.
+    assert!(
+        (m.points.lat[r] - 417_833_333).abs() < 100,
+        "{}",
+        m.points.lat[r]
+    );
+    assert!(
+        (m.points.lon[r] + 877_500_000).abs() < 100,
+        "{}",
+        m.points.lon[r]
+    );
+    let u = &m.unresolved;
+    assert!((0..u.role.len()).all(|i| s(m, u.name[i]) != "ZZFIX"));
+}
+
+// REQ: OA-ASP-072
+#[test]
+fn a_date_maps_to_its_airac_cycle() {
+    use oa_airspace::airac::airac_cycle;
+    // Published dates: CIFP 2610 is effective 2026-10-01 and 2611 on 2026-10-29 (the headers of
+    // the files in openatca-data/raw); the 28-day steps run back to 2601 on 2026-01-22.
+    for (date, cycle) in [
+        (20_261_001, 2610),
+        (20_261_028, 2610),
+        (20_261_029, 2611),
+        (20_261_125, 2611),
+        (20_261_126, 2612),
+        (20_260_122, 2601),
+        (20_260_121, 2513),
+        (20_250_123, 2501),
+        (20_261_224, 2613),
+        (20_270_120, 2613),
+        (20_270_121, 2701),
+    ] {
+        assert_eq!(airac_cycle(date), Some(cycle), "{date}");
+    }
+    for bad in [
+        0, 20_261_301, 20_260_230, 20_261_000, 19_991_231, 21_000_101,
+    ] {
+        assert_eq!(airac_cycle(bad), None, "{bad}");
+    }
+    // The fixtures' own cycle: the NASR date in the files and the CIFP header agree.
+    let m = fixture_build().model;
+    assert_eq!(airac_cycle(m.meta.nasr_effective), Some(m.meta.cifp_cycle));
+}
+
+/// The fixture NASR files with every 2026/10/29 date moved to the previous cycle (2026/10/01).
+fn previous_cycle_nasr() -> Vec<(String, Vec<u8>)> {
+    let mut files = nasr_files();
+    for (_, bytes) in files.iter_mut() {
+        let text = String::from_utf8(std::mem::take(bytes)).expect("utf-8");
+        *bytes = text.replace("2026/10/29", "2026/10/01").into_bytes();
+    }
+    files
+}
+
+// REQ: OA-ASP-072
+#[test]
+fn matching_nasr_and_cifp_cycles_build_without_a_note() {
+    let out = fixture_build();
+    assert_eq!(out.model.cycle_override, None);
+    assert_eq!(out.model.meta.cifp_cycle, 2611);
+}
+
+// REQ: OA-ASP-072
+#[test]
+fn mismatched_nasr_and_cifp_cycles_are_refused_naming_both() {
+    let src = sources_from(&previous_cycle_nasr(), &cifp_file());
+    let err = build_model(&src, &params("ZAU", 92_600)).expect_err("mismatch");
+    assert!(
+        matches!(
+            err,
+            BuildError::CycleMismatch {
+                nasr_effective: 20_261_001,
+                nasr_cycle: 2610,
+                cifp_cycle: 2611
+            }
+        ),
+        "{err:?}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("2610") && msg.contains("2611"), "{msg}");
+}
+
+// REQ: OA-ASP-072
+#[test]
+fn an_explicit_override_builds_and_the_snapshot_records_the_mismatch() {
+    let src = sources_from(&previous_cycle_nasr(), &cifp_file());
+    let mut p = params("ZAU", 92_600);
+    p.allow_cycle_mismatch = true;
+    let out = build_model(&src, &p).expect("override builds");
+    let note = out.model.cycle_override.clone().expect("note");
+    assert!(note.contains("2610") && note.contains("2611"), "{note}");
+    validate_model(&out.model).expect("valid");
+    // The note survives the snapshot, changes its identity, and shows in the report and diff.
+    let bytes = encode(&out.model).expect("encode");
+    assert_eq!(decode(&bytes).expect("decode"), out.model);
+    assert!(report_for(&out, &src).contains("WARNING: NASR effective 20261001"));
+    let plain = fixture_build().model;
+    let d = diff_models(&plain, &out.model).expect("diff");
+    assert!(d.header.iter().any(|h| h.field == "cycle override"));
+    // A matching build with the override allowed still carries no note.
+    let src = fixture_sources();
+    let mut p = params("ZAU", 92_600);
+    p.allow_cycle_mismatch = true;
+    assert_eq!(
+        build_model(&src, &p).expect("build").model.cycle_override,
+        None
+    );
+}

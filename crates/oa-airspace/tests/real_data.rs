@@ -68,6 +68,7 @@ fn build(
         &BuildParams {
             artcc: "ZAU".into(),
             buffer_m: 92_600,
+            allow_cycle_mismatch: false,
         },
     )
     .expect("build")
@@ -205,6 +206,7 @@ fn zau_builds_from_the_2026_10_29_cycle() {
                 &BuildParams {
                     artcc: "ZAU".into(),
                     buffer_m: 92_600,
+                    allow_cycle_mismatch: false,
                 },
             )
             .expect("build")

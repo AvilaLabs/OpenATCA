@@ -261,6 +261,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ASP-070** The snapshot format version is 3 (per-volume completeness added); a snapshot of an
   earlier version is refused with an error that names the version and says to rebuild, never read
   with a default completeness.
+- **OA-ASP-071** A procedure resolves a CIFP terminal waypoint (P/C) first to the terminal waypoint
+  of its own airport, then to an enroute fix; a terminal waypoint of another airport is never used,
+  and a reference that matches neither is unresolved and counted. Two airports' terminal waypoints
+  with one identifier and region at different positions are two points (the second scoped to its
+  airport) and are not reported as duplicates; a terminal waypoint repeated at one airport with
+  different positions is. Runways, localizers and terminal NDBs are already looked up by airport.
+- **OA-ASP-072** The build computes the AIRAC cycle (28-day, epoch 2026-01-22 is cycle 2601) of the
+  NASR effective date and requires it to equal the CIFP header cycle; otherwise it refuses with
+  `BuildError::CycleMismatch` naming both cycles. With `allow_cycle_mismatch` (`oa-adapt build
+  --allow-cycle-mismatch`) it builds and the model carries the mismatch text (`cycle_override`),
+  which is written in the snapshot (format version 4; a snapshot without a mismatch stays version
+  3 and byte-identical), shown in the report and listed by the diff.
 
 
 ### Traceability (oa-trace)

@@ -729,7 +729,13 @@ pub struct Model {
     pub mora: Mora,
     pub unresolved: Unresolved,
     pub disagreements: Disagreements,
+    /// Set when the model was built from a NASR and a CIFP file of different AIRAC cycles with
+    /// the mismatch allowed explicitly; says which cycles (OA-ASP-072). `None` otherwise.
+    pub cycle_override: Option<String>,
 }
+
+/// Longest `cycle_override` text, bytes.
+pub const MAX_CYCLE_OVERRIDE_BYTES: usize = 512;
 
 /// Why a model failed validation: which table and what is wrong.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -771,6 +777,7 @@ pub fn empty_model(meta: Meta) -> Model {
         mora: Mora::default(),
         unresolved: Unresolved::default(),
         disagreements: Disagreements::default(),
+        cycle_override: None,
     }
 }
 

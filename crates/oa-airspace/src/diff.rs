@@ -542,6 +542,11 @@ fn header_changes(a: &Model, b: &Model) -> Vec<FieldChange> {
         a.meta.cifp_cycle.to_string(),
         b.meta.cifp_cycle.to_string(),
     );
+    push(
+        "cycle override",
+        a.cycle_override.clone().unwrap_or_default(),
+        b.cycle_override.clone().unwrap_or_default(),
+    );
     push("ARTCC", a.meta.artcc.clone(), b.meta.artcc.clone());
     push(
         "buffer (m)",

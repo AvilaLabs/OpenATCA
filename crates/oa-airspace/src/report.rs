@@ -310,6 +310,9 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
         date_str(m.meta.nasr_effective),
         m.meta.cifp_cycle
     );
+    if let Some(note) = &m.cycle_override {
+        let _ = writeln!(o, "WARNING: {note}");
+    }
     if info.nasr_dates.len() > 1 {
         let _ = writeln!(
             o,

@@ -120,6 +120,7 @@ pub fn params(artcc: &str, buffer_m: u32) -> BuildParams {
     BuildParams {
         artcc: artcc.to_string(),
         buffer_m,
+        allow_cycle_mismatch: false,
     }
 }
 
