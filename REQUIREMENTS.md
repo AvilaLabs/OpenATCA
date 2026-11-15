@@ -90,9 +90,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-MATH-015** `exp(ln(x))` returns `x` to within the conditioning of the round trip, and
   `asin(sin t)`, `acos(cos t)`, `atan(tan t)`, `cbrt(x)^3`, `hypot` and `pow(x, y) * pow(x, -y)`
   agree with their identities to within a few ulps.
-- **OA-MATH-016** `powi(x, n)` equals the documented multiplication chain (right-to-left repeated
-  squaring, one division for a negative `n`) bit for bit for every input tested, and gives exact
-  results where the exact result is representable.
+- **OA-MATH-016** `powi(x, n)` gives exact results where the exact result is representable: every
+  power of two from 2^-1074 to 2^1023 (subnormals included) from either sign of `n`, and small
+  integer powers.
 - **OA-MATH-017** `tan(x)` agrees with `sin(x) / cos(x)`, and `pow` agrees with `sqrt` and with
   `x * x` for the exponents 1/2 and 2, to within a few ulps.
 - **OA-MATH-018** A hash of the output bits of one million evaluations across all functions on a
@@ -118,6 +118,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   case, a result within 2^-70 of a midpoint); the check fails when one result is moved by one ulp;
   the 600 arguments below 2^19 closest to a multiple of pi/2 give correctly rounded sin, cos and
   tan.
+- **OA-MATH-024** `powi(x, n)` never forms the power of opposite sign first: it is `m^|n|` in
+  double-double (reciprocal for negative `n`) times `2^(e n)` with `x = m 2^e`, rounded once, so
+  `powi(2, -1024)` is the subnormal 2^-1024 and `powi(2, -1075)` the tie 2^-1075, which rounds to zero.
+- **OA-MATH-025** `powi(NaN, 0) = 1`; every other NaN result of `powi` is the canonical NaN, whatever
+  the payload or sign of the input.
+- **OA-MATH-026** `scale_round` decides a subnormal half-way case from both parts of the
+  double-double: a low term below (above) the tie rounds down (up) even when the sum of both rounds
+  to the tie.
+- **OA-MATH-027** `hypot(x, x)` for `x = from_bits(A*B)`, `A = 54,608,393`, `B = 38,613,965`
+  returns `A*A` as bits, the exact value being just below a half-way case.
+- **OA-MATH-028** `powi(x, n)` agrees with `pow(x, n)` to within two ulps over random bases and
+  exponents up to 10,000 in magnitude.
 
 ### NASR (oa-nasr)
 

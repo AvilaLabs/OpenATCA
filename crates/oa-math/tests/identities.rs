@@ -174,49 +174,59 @@ fn exp_ln_round_trip_and_inverse_functions() {
     }
 }
 
-/// The defined chain, written out as a table of squares: acc multiplies b_k for each set bit k
-/// of |n| in increasing k, b_0 = x, b_{k+1} = b_k * b_k; a negative n returns 1 / acc.
-fn powi_chain(x: f64, n: i32) -> f64 {
-    let m = n.unsigned_abs();
-    let mut squares = [0.0f64; 32];
-    let mut b = x;
-    for s in squares.iter_mut() {
-        *s = b;
-        b *= b;
-    }
-    let mut acc = 1.0;
-    for (k, sq) in squares.iter().enumerate() {
-        if m >> k & 1 == 1 {
-            acc *= sq;
-        }
-    }
-    if n < 0 {
-        1.0 / acc
-    } else {
-        acc
-    }
+/// Distance in units in the last place between two finite doubles of the same sign.
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    a.to_bits().abs_diff(b.to_bits())
 }
 
-// REQ: OA-MATH-016
+// REQ: OA-MATH-028
 #[test]
-fn powi_equals_the_defined_multiplication_chain() {
+fn powi_agrees_with_pow_to_within_two_ulps() {
     let mut r = Rng(0x5555_aaaa_1357_9bdf);
+    let mut compared = 0;
     for i in 0..N {
         let x = match i % 3 {
             0 => r.uniform(0.5, 2.0),
             1 => r.log_signed(-20, 20),
-            _ => f64::from_bits(r.next()),
+            _ => r.uniform(-3.0, 3.0),
         };
         let n = match i % 4 {
             0 => (r.next() % 41) as i32 - 20,
             1 => (r.next() % 2001) as i32 - 1000,
-            2 => r.next() as i32,
+            2 => (r.next() % 20_001) as i32 - 10_000,
             _ => (r.next() % 9) as i32 - 4,
         };
-        let (got, want) = (powi(x, n), powi_chain(x, n));
+        let (got, want) = (powi(x, n), pow(x, f64::from(n)));
+        if want.is_nan() || got.is_nan() {
+            assert!(got.is_nan() == want.is_nan(), "powi({x:e}, {n}) = {got:e}");
+            continue;
+        }
+        // pow is faithful (under 1 ulp) and powi within a fraction of an ulp of the true value
         assert!(
-            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
-            "powi({x:e}, {n}) = {got:e}, chain {want:e}"
+            got.to_bits() >> 63 == want.to_bits() >> 63 && ulps_apart(got, want) <= 2,
+            "powi({x:e}, {n}) = {got:e}, pow {want:e}"
+        );
+        compared += 1;
+    }
+    assert!(compared > N / 2);
+}
+
+// REQ: OA-MATH-016
+#[test]
+fn powi_is_exact_where_the_exact_result_is_representable() {
+    // every power of two over the whole range, subnormals included, from either side
+    for k in -1074..=1023i32 {
+        let want = f64::from_bits(if k >= -1022 {
+            ((k + 1023) as u64) << 52
+        } else {
+            1u64 << (k + 1074)
+        });
+        assert_eq!(powi(2.0, k).to_bits(), want.to_bits(), "2^{k}");
+        assert_eq!(powi(0.5, -k).to_bits(), want.to_bits(), "0.5^{}", -k);
+        assert_eq!(
+            powi(-2.0, k).to_bits(),
+            (want.to_bits() | (u64::from(k & 1 == 1) << 63)),
+            "(-2)^{k}"
         );
     }
     // small cases whose exact result needs no rounding

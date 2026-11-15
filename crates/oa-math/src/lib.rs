@@ -71,8 +71,8 @@
 //! | [`hypot`] | 0.5000 | all finite pairs |
 //! | [`cbrt`] | 0.499995 | all finite, both signs, subnormals |
 //!
-//! [`powi`] is not faithfully rounded: its result carries the rounding of each of the
-//! multiplications in its documented chain (see its docs).
+//! [`powi`] is within one ulp, not faithfully rounded: its double-double chain carries a relative
+//! error of about `|n|` 2^-104 before the one final rounding (see its docs).
 //!
 //! | function | method |
 //! |---|---|
@@ -81,7 +81,7 @@
 //! | [`exp`] | ln 2 / 64 reduction, table 2^(j/64), Taylor tail |
 //! | [`ln`] | table of reciprocals, log1p series |
 //! | [`pow`] | double-double ln and exp, valid to the overflow limit |
-//! | [`powi`] | exact repeated squaring in a documented order |
+//! | [`powi`] | double-double repeated squaring of the mantissa, one final scaled rounding |
 //! | [`hypot`], [`cbrt`] | scaled double-double square root; Newton with a double-double step |
 //!
 //! Speed: roughly 1.7 to 6 times the platform library per call with the fast path, 2 to 12 times

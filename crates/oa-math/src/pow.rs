@@ -5,10 +5,10 @@
 //! even when |y ln x| is near the overflow limit of about 709.78 (where a plain-double
 //! product would already carry an error of several ulps).
 
-use crate::dd::{self, two_prod, two_sum};
+use crate::dd::{self, two_prod, two_sum, Dd};
 use crate::exp::{exp_dd, exp_fast_core, EXP_FAST_ERR};
 use crate::log::{ln_dd, ln_fast_core};
-use crate::util::{abs, is_neg, pow2, round_test, scale_round, with_sign_of, NAN};
+use crate::util::{abs, frexp1, is_neg, pow2, round_test, scale_round, with_sign_of, NAN};
 
 /// (is an integer, is an odd integer) for a finite y.
 fn int_kind(y: f64) -> (bool, bool) {
@@ -79,7 +79,8 @@ pub(crate) fn pow_fast(x: f64, y: f64) -> Option<f64> {
 /// |x| > 1 the reverse; pow(+-0, y) is +-inf (divide-by-zero) for y < 0 and +-0 for y > 0, with
 /// the sign of x only when y is an odd integer, else +inf or +0; pow(+inf, y) is +0 for y < 0
 /// and +inf for y > 0; pow(-inf, y) is the odd-integer-signed 0 or inf of the same rule;
-/// a negative finite x with a finite non-integer y gives NaN.
+/// a negative finite x with a finite non-integer y gives NaN. A power-of-two base with an integer
+/// y of at most 2^31 in magnitude is exact (it is [`powi`]).
 pub fn pow(x: f64, y: f64) -> f64 {
     match pow_fast(x, y) {
         Some(r) => r,
@@ -119,6 +120,10 @@ pub(crate) fn pow_slow(x: f64, y: f64) -> f64 {
     if is_neg(x) && !is_int {
         return NAN;
     }
+    // a power of two to an integer power is exact (and its half-way cases are true ties)
+    if is_int && abs(y) <= 2_147_483_647.0 && frexp1(ax).1 == 1.0 {
+        return powi(x, y as i32);
+    }
     let l = ln_dd(ax);
     let zh = y * l.hi;
     let r = if zh > 800.0 {
@@ -132,29 +137,75 @@ pub(crate) fn pow_slow(x: f64, y: f64) -> f64 {
     with_sign_of(r, if neg_result { -1.0 } else { 1.0 })
 }
 
-/// `x` raised to the integer power `n` by repeated squaring, in this fixed order (the result is
-/// reproducible bit for bit): `acc = 1; b = x;` then while `m = |n|` is not zero: if `m` is odd
-/// `acc = acc * b`; `m = m >> 1`; if `m` is not zero `b = b * b`. A negative `n` returns
-/// `1 / acc`. Every operation is one IEEE-754 multiplication or division, so the result is
-/// deterministic, but the error grows with the number of multiplications (about `log2(n)`
-/// roundings in `b`, magnified by the exponent: roughly `n` ulps in the worst case); it is not
-/// faithfully rounded for large `|n|`. `powi(x, 0) = 1` for every x including NaN.
-pub fn powi(x: f64, n: i32) -> f64 {
-    let mut m = n.unsigned_abs();
-    let mut acc = 1.0;
-    let mut b = x;
-    while m != 0 {
-        if m & 1 == 1 {
-            acc *= b;
-        }
-        m >>= 1;
-        if m != 0 {
-            b *= b;
-        }
-    }
-    if n < 0 {
-        1.0 / acc
+/// Product of two normalised double-doubles in [1, 2) with binary exponents `ka` and `kb`,
+/// returned in [1, 2) with the exponents added.
+fn mul_scaled(a: Dd, ka: i64, b: Dd, kb: i64) -> (Dd, i64) {
+    let d = dd::mul(a, b);
+    if d.hi >= 2.0 {
+        (dd::dd(d.hi * 0.5, d.lo * 0.5), ka + kb + 1)
     } else {
-        acc
+        (d, ka + kb)
+    }
+}
+
+/// `x` raised to the integer power `n`. `x = m 2^e` with `m` in [1, 2); `m^|n|` is formed in
+/// double-double by repeated squaring (`acc = 1; b = m;` then while `p = |n|` is not zero: if
+/// `p` is odd `acc = acc * b`; `p = p >> 1`; if `p` is not zero `b = b * b`), every product
+/// renormalised into [1, 2) with the power of two carried in an integer, so nothing overflows
+/// or underflows for any `n`; a negative `n` takes the double-double reciprocal of that. The
+/// result is `d 2^k` with `k = +-(e |n|) + carried`, rounded once by `scale_round`, so a
+/// representable power (2^-1074 for instance) is never lost to the overflow of the power of the
+/// opposite sign. The relative error before the final rounding is about `|n| 2^-104` (at most
+/// 2^-72 for any `i32`), so the result is within one ulp, and exact whenever the exact power
+/// is representable (the double-double chain is then exact). Zeros and infinities follow the
+/// sign rule of an odd `n`; `powi(x, 0) = 1` for every x including NaN, any other NaN gives the
+/// canonical NaN.
+pub fn powi(x: f64, n: i32) -> f64 {
+    if n == 0 {
+        return 1.0;
+    }
+    if x.is_nan() {
+        return NAN;
+    }
+    let neg_result = is_neg(x) && n & 1 == 1;
+    let r = if x == 0.0 || x.is_infinite() {
+        if (x == 0.0) == (n < 0) {
+            f64::INFINITY
+        } else {
+            0.0
+        }
+    } else {
+        let (e, m) = frexp1(abs(x));
+        let mut p = n.unsigned_abs();
+        let (mut acc, mut ka) = (dd::dd(1.0, 0.0), 0i64);
+        let (mut b, mut kb) = (dd::dd(m, 0.0), 0i64);
+        while p != 0 {
+            if p & 1 == 1 {
+                (acc, ka) = mul_scaled(acc, ka, b, kb);
+            }
+            p >>= 1;
+            if p != 0 {
+                (b, kb) = mul_scaled(b, kb, b, kb);
+            }
+        }
+        let mut k = i64::from(e) * i64::from(n.unsigned_abs()) + ka;
+        if n < 0 {
+            acc = dd::div(dd::dd(1.0, 0.0), acc);
+            k = -k;
+        }
+        // |d| is in (1/2, 2): beyond this the result is surely infinite or zero
+        let k = if k > 4000 {
+            4000
+        } else if k < -4000 {
+            -4000
+        } else {
+            k as i32
+        };
+        scale_round(acc, k)
+    };
+    if neg_result {
+        -r
+    } else {
+        r
     }
 }

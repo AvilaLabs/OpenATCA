@@ -13,8 +13,11 @@ use oa_math::{acos, asin, atan, atan2, cbrt, cos, exp, hypot, ln, pow, powi, sin
 /// Total number of function evaluations hashed.
 pub const INPUTS: usize = 1_000_000;
 
-/// The pinned fingerprint of the first `INPUTS` evaluations.
-pub const PINNED: u64 = 0x9be8_ff0f_022d_36d3;
+/// The pinned fingerprint of the first `INPUTS` evaluations. Re-pinned when `powi` became a
+/// double-double power rounded once (it was a chain of double multiplications) and `pow` of a
+/// power-of-two base to an integer power became exact; `scale_round` also now decides subnormal
+/// half-way cases with the low term. Every other function's output is unchanged.
+pub const PINNED: u64 = 0xe26f_d614_f7a7_14bc;
 
 struct Rng(u64);
 

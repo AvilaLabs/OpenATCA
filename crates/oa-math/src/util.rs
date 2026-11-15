@@ -97,10 +97,14 @@ pub(crate) fn scale_round(d: Dd, k: i32) -> f64 {
         let lw = mul_pow2(lo, s);
         let magic = 4_503_599_627_370_496.0; // 2^52
         let n = (w + magic) - magic;
-        let t = (w - n) + lw;
-        let n = if t > 0.5 {
+        // r = w - n is exact and in [-1/2, 1/2]. The sign of one rounded sum of two doubles is
+        // the sign of the exact sum, so r - 1/2 + lw > 0 is exactly "hi + lo is above the
+        // half-way point" and r + 1/2 + lw < 0 "below the lower one"; at r = +-1/2 the low term
+        // alone decides, and with lw = 0 the tie stays at n (even, as w was rounded to even).
+        let r = w - n;
+        let n = if (r - 0.5) + lw > 0.0 {
             n + 1.0
-        } else if t < -0.5 {
+        } else if (r + 0.5) + lw < 0.0 {
             n - 1.0
         } else {
             n
