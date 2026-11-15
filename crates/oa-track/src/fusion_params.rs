@@ -37,8 +37,14 @@ pub const COARSE_M: f64 = 3_000.0;
 /// its assigned track. About one standard deviation of the cost difference of two tracks 2
 /// sigma apart; set from the swap counts of the crossing runs.
 pub const AMBIGUITY_MARGIN: f64 = 4.0;
-/// Limit: live tracks considered for one radar's association, 8,192.
-pub const MAX_ASSOC_TRACKS: usize = 8_192;
+/// Limit: live tracks considered for one radar's association, 65,536 (the whole-NAS capacity
+/// of 38,000 with room). [`crate::fusion::fusion_new`] refuses a tracker holding more, so no live
+/// track is ever left out of an association.
+pub const MAX_ASSOC_TRACKS: usize = 65_536;
+/// Limit: records of radar-only tracks the fusion layer keeps for its caller, 65,536. Past it
+/// new records are counted and dropped; a long-running caller drains them
+/// ([`crate::fusion::fusion_take_radar_tracks`]).
+pub const MAX_TRACK_RECS: usize = 65_536;
 
 // ---- Radar-only initiation ------------------------------------------------------------
 
@@ -98,12 +104,69 @@ pub const REG_HISTORY_MAX: usize = 1 << 20;
 pub const REG_LIMIT_RANGE_M: f64 = 2_000.0;
 pub const REG_LIMIT_AZ_DEG: f64 = 2.0;
 
+/// Reference aircraft a radar's estimator remembers (a slot each; the stalest is replaced).
+pub const REG_REF_SLOTS: usize = 32;
+/// A reference's mean residual averages at most this many residuals (older ones fade).
+pub const REG_REF_MEMORY: u32 = 10;
+/// Residuals a reference must have made before it counts or is counted on: five plots of 70 m
+/// scatter average to 31 m, so a 150 m disagreement is five standard deviations of the mean.
+pub const REG_REF_MIN_SAMPLES: u32 = 5;
+/// Distinct current references needed before any residual is used: the median of the others
+/// then has two or more members besides a lone liar, so one spoofed or faulty reference is
+/// outvoted. Set from how many ADS-B aircraft a radar sees; raise it where there are many.
+pub const REG_MIN_REFS: usize = 4;
+/// A reference is current if it made a residual within this long, ns (two minutes: several scans
+/// of an en route radar).
+pub const REG_REF_WINDOW_NS: i64 = 120 * NS_PER_S;
+/// A reference's mean must be within this many standard deviations of the difference to the
+/// median of the others' means: chi-square-ish 3 sigma, so a lone honest reference is refused
+/// about 0.3 % of the time and a 150 m liar among 70 m plots after five residuals is refused.
+pub const REG_AGREE_SIGMAS: f64 = 3.0;
+/// CUSUM allowance, in standard deviations: shifts under twice this are not chased.
+pub const REG_CUSUM_K: f64 = 0.5;
+/// CUSUM decision threshold, in standard deviations: with the allowance above, a false restart
+/// of an honest radar is about once in a million residuals; a 2 sigma shift (150 m at 70 m of
+/// plot scatter) is found in about eight.
+pub const REG_CUSUM_H: f64 = 12.0;
+/// Each standardised residual enters the CUSUM clipped to this many standard deviations, so a
+/// few wild plots cannot count as a shift.
+pub const REG_CUSUM_CLIP: f64 = 3.0;
+
 // ---- Capacity -------------------------------------------------------------------------
 
 /// Limit: radars.
 pub const MAX_RADARS: usize = 8;
 /// Radar-only tracks are keyed above every 24-bit address (and the non-ICAO bit 24).
 pub const KEY_RADAR_BASE: u32 = 0x4000_0000;
+/// Limit: plots of one radar associated in one bucket; later ones are counted and dropped (a
+/// flooded bucket must cost a bounded amount). Far above any real scan: a radar delivers a few
+/// hundred plots a scan, a bucket is one second of it.
+pub const MAX_BUCKET_PLOTS: usize = 16_384;
+/// Limit: gated candidate pairs of one association; pairs beyond are counted and not formed.
+pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
+/// Limit: (plot, track) pairs given the exact gate in one association, 1 Mi: at about two
+/// microseconds a pair this is the longest a bucket can take.
+pub const MAX_BUCKET_TESTS: usize = 1 << 20;
+/// Limit: tracks (and candidates) in one association solve.
+pub const MAX_SOLVE_TRACKS: usize = if MAX_ASSOC_TRACKS > MAX_CANDIDATES {
+    MAX_ASSOC_TRACKS
+} else {
+    MAX_CANDIDATES
+};
+/// A plot with a Mode S address is applied to the track of that address only if its distance
+/// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3
+/// degrees of freedom, tail about 8e-11. Far wider than the ordinary gate (an address is strong
+/// evidence, and the filter's own jump gate still counts and tests it), so only a gross
+/// mismatch (another aircraft on the address, a corrupt plot) is refused.
+pub const HARD_GATE_CHI2: f64 = 50.0;
+/// A track whose last this many plots were all held for ambiguity takes the next one on the
+/// assignment's own evidence. Isolated holds (a plot without Mode C between two aircraft at one
+/// place and two altitudes) never reach it, so identity is still not decided by kinematics where
+/// the ambiguity is brief; two aircraft that stay together (a formation, a close parallel pair)
+/// would otherwise never be updated, their tracks would coast off, and every plot would start
+/// new tracks beside them. Set from the pair worlds: 2 keeps their swap counts at the held
+/// design's (docs/BENCHMARKS.md, M3 step 2 report).
+pub const HOLD_MAX_RUN: u8 = 2;
 /// Limit: assignment log rows (scoring runs).
 pub const ASSIGN_LOG_MAX: usize = 4 << 20;
 

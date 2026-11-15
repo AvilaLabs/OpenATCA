@@ -378,6 +378,17 @@ fn ring_state(t: &Tracker, slot: usize, k: usize) -> Filter {
     f
 }
 
+/// Whether the ring holds a measurement with this time of applicability from this sensor: a
+/// repeat of a report already applied. Any entry counts, not just the newest or the one before
+/// the measurement's time: two sensors may report at one instant, and the repeat of the first's
+/// report then arrives after the second's.
+fn ring_has(t: &Tracker, slot: usize, toa_ns: i64, sensor: u16) -> bool {
+    (0..ring_len(t, slot)).any(|k| {
+        let m = col(&t.ring_m, ring_ix(t, slot, k), blank_measurement());
+        m.toa_ns == toa_ns && m.sensor == sensor
+    })
+}
+
 // ---- measurement validation -----------------------------------------------------------
 
 /// Checks a measurement (E5): the first failing rule's `REF_*` index.
@@ -565,9 +576,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         t.stats.late_ring += 1;
         return;
     };
-    let be = ring_ix(t, slot, e);
-    let bm = col(&t.ring_m, be, blank_measurement());
-    if bm.toa_ns == m.toa_ns && bm.sensor == m.sensor {
+    if ring_has(t, slot, m.toa_ns, m.sensor) {
         t.stats.duplicates += 1;
         return;
     }
@@ -581,6 +590,10 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
             n_later += 1;
         }
     }
+    // The run of rejected reports since the newest update belongs to the live filter, not to a
+    // state rebuilt from the ring (whose counters are zero): it is put back at the end.
+    let live = col(&t.cur, slot, blank_filter());
+    let (rej_h, rej_v) = (live.rej_h, live.rej_v);
     let bf = ring_state(t, slot, e);
     put(&mut t.ring_len, slot, (e + 1) as u8);
     put(&mut t.cur, slot, bf);
@@ -611,6 +624,10 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         }
     }
     put(&mut t.last_ns, slot, newest);
+    let mut f = col(&t.cur, slot, blank_filter());
+    f.rej_h = rej_h;
+    f.rej_v = rej_v;
+    put(&mut t.cur, slot, f);
 }
 
 /// Offers one measurement. Counters say what became of it; rows for a confirmed track go to
@@ -660,15 +677,7 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
             let last = col(&t.last_ns, slot, 0);
             if toa > last {
                 update_in_order(t, slot, m, out);
-            } else if toa == last
-                && col(
-                    &t.ring_m,
-                    ring_ix(t, slot, ring_len(t, slot).saturating_sub(1)),
-                    blank_measurement(),
-                )
-                .sensor
-                    == m.sensor
-            {
+            } else if toa == last && ring_has(t, slot, toa, m.sensor) {
                 t.stats.duplicates += 1;
             } else if toa == last {
                 update_in_order(t, slot, m, out);

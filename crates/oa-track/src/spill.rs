@@ -6,6 +6,16 @@
 //! the digest of the run is the same as the digest of the same rows held in memory, computed at
 //! the end by reading the files back in the digest's order. Scoring reads back only the columns
 //! it needs, in blocks, one address range at a time (`crate::score::RowSource`).
+//!
+//! # What it touches
+//!
+//! A spill makes its own directory: [`spill_new`] refuses one that exists and has anything in
+//! it, and creates each column file new (never over an existing file). Dropping the finished run
+//! removes the column files it made, by name, and then the directory only if that left it empty;
+//! it never removes a directory tree, so a path handed in wrongly costs nothing but its own
+//! files. Every read checks every column's size against the row count first, so a truncated or
+//! extended column is a typed error ([`SpillMismatch`], inside the `io::Error`), not rows that
+//! quietly disagree.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -14,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use oa_sha256::{to_hex, Sha256};
 
-use crate::types::{TrackLog, TrackOutput, TrackerStats, OUTPUT_HASH_TAG, O_TICK};
+use crate::types::{TrackLog, TrackOutput, TrackerStats, OUTPUT_HASH_TAG, O_HAS_ALT, O_TICK};
 
 /// The column files in the order the digest hashes them.
 const COLS: [&str; 15] = [
@@ -29,6 +39,8 @@ const VE: usize = 4;
 const VN: usize = 5;
 const ALT: usize = 7;
 const FLAGS: usize = 14;
+/// Bytes per row of each column file, in [`COLS`] order.
+const WIDTHS: [u64; 15] = [8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 8, 8, 1];
 /// Rows read per block when scoring reads the files back.
 const BLOCK_ROWS: usize = 1 << 13;
 
@@ -40,15 +52,78 @@ pub struct SpillWriter {
     rows: u64,
 }
 
-/// Starts a spill in the new directory `dir` (created, with its parents).
+/// A column file whose size is not the row count times the column's width. Plain data (A1);
+/// carried inside an `io::Error` of kind `InvalidData`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpillMismatch {
+    pub column: &'static str,
+    pub found_bytes: u64,
+    pub expected_bytes: u64,
+}
+
+impl std::fmt::Display for SpillMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "spill column {} has {} bytes, the row count says {}",
+            self.column, self.found_bytes, self.expected_bytes
+        )
+    }
+}
+
+impl std::error::Error for SpillMismatch {}
+
+/// Checks every column file of `dir` against `rows` rows.
+fn check_columns(dir: &Path, rows: u64) -> io::Result<()> {
+    for (c, w) in COLS.iter().zip(WIDTHS.iter()) {
+        let found = fs::metadata(dir.join(c))?.len();
+        let expected = rows * w;
+        if found != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                SpillMismatch {
+                    column: c,
+                    found_bytes: found,
+                    expected_bytes: expected,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Removes the column files `dir` holds (only those) and then `dir` if that left it empty.
+fn remove_columns(dir: &Path) {
+    for c in COLS {
+        let _ = fs::remove_file(dir.join(c));
+    }
+    let _ = fs::remove_dir(dir);
+}
+
+/// Starts a spill in `dir`: created (with its parents) if absent; refused if it exists and has
+/// anything in it. The column files are created new.
 pub fn spill_new(dir: &Path) -> io::Result<SpillWriter> {
+    if dir.exists() && fs::read_dir(dir)?.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("spill directory {} is not empty", dir.display()),
+        ));
+    }
     fs::create_dir_all(dir)?;
     let mut files = Vec::with_capacity(COLS.len());
     for c in COLS {
-        files.push(BufWriter::with_capacity(
-            1 << 16,
-            File::create(dir.join(c))?,
-        ));
+        let made = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(c));
+        match made {
+            Ok(f) => files.push(BufWriter::with_capacity(1 << 16, f)),
+            Err(e) => {
+                // Only the files this call made so far (the directory was empty).
+                remove_columns(dir);
+                return Err(e);
+            }
+        }
     }
     Ok(SpillWriter {
         dir: dir.to_path_buf(),
@@ -95,8 +170,8 @@ pub fn spill_append(w: &mut SpillWriter, o: &TrackOutput) -> io::Result<()> {
     Ok(())
 }
 
-/// A finished run whose rows are on disk. Removes its directory when dropped. Cold record
-/// (A7.2).
+/// A finished run whose rows are on disk. Removes its column files (and its directory, if that
+/// leaves it empty) when dropped. Cold record (A7.2).
 // A7.2: cold struct, size guard waived
 pub struct SpilledRun {
     pub dir: PathBuf,
@@ -113,8 +188,22 @@ pub struct SpilledRun {
 
 impl Drop for SpilledRun {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        remove_columns(&self.dir);
     }
+}
+
+/// Reads into `buf` until it is full or the file ends; the bytes read.
+fn fill(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+    let mut at = 0usize;
+    while at < buf.len() {
+        let Some(dst) = buf.get_mut(at..) else { break };
+        let n = f.read(dst)?;
+        if n == 0 {
+            break;
+        }
+        at += n;
+    }
+    Ok(at)
 }
 
 /// Flushes the files, computes the digest and returns the run.
@@ -128,14 +217,44 @@ pub fn spill_finish(
     for f in &mut w.files {
         f.flush()?;
     }
+    check_columns(&w.dir, w.rows)?;
     let mut h = Sha256::new();
     let mut put = |b: &[u8]| h.update(b).map_err(io::Error::other);
     put(OUTPUT_HASH_TAG)?;
     put(&w.rows.to_le_bytes())?;
     put(&overflow.to_le_bytes())?;
     let mut buf = vec![0u8; 1 << 16];
-    for c in COLS {
+    for (ci, c) in COLS.iter().enumerate() {
         let mut f = File::open(w.dir.join(c))?;
+        if (ALT..ALT + 3).contains(&ci) {
+            // The altitude columns hash as zero for a row with no altitude, as in memory.
+            let mut flags = File::open(w.dir.join(COLS.get(FLAGS).copied().unwrap_or("flags")))?;
+            let mut fbuf = vec![0u8; buf.len() / 4];
+            loop {
+                let n = fill(&mut f, &mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let rows = n / 4;
+                let got = fill(&mut flags, fbuf.get_mut(..rows).unwrap_or(&mut []))?;
+                if got != rows {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "short flags"));
+                }
+                for (v, fl) in buf
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .take(rows)
+                    .zip(fbuf.iter())
+                {
+                    if fl & O_HAS_ALT == 0 {
+                        *v = [0; 4];
+                    }
+                }
+                put(buf.get(..rows * 4).unwrap_or(&[]))?;
+            }
+            continue;
+        }
         loop {
             let n = f.read(&mut buf)?;
             if n == 0 {
@@ -272,6 +391,7 @@ impl BlockReader {
 
 /// The rows of a spilled run in `rows` (ticks or updates) per address.
 pub fn spill_counts(run: &SpilledRun, ticks: bool) -> io::Result<BTreeMap<u32, u64>> {
+    check_columns(&run.dir, run.rows)?;
     let mut m = BTreeMap::new();
     let mut a = ColReader::open(&run.dir, ADDR, 4)?;
     let mut f = ColReader::open(&run.dir, FLAGS, 1)?;
@@ -305,6 +425,7 @@ pub type SpillRows = (
 
 /// Reads the rows of a spilled run in `ticks`-or-updates with an address in `lo..=hi`.
 pub fn spill_rows(run: &SpilledRun, ticks: bool, lo: u32, hi: u32) -> io::Result<SpillRows> {
+    check_columns(&run.dir, run.rows)?;
     let mut out: SpillRows = Default::default();
     let mut r = block_reader(&run.dir)?;
     while let Some(b) = r.next()? {

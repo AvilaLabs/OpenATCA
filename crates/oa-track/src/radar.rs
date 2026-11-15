@@ -23,6 +23,16 @@
 //!    atmospheric refraction (the simulator does not model it either; a real radar's refraction
 //!    correction belongs in front of this function) and the pressure-altitude to geometric-height
 //!    difference.
+//!    **The overhead cone.** Within about three degrees of the vertical (`cos E` under
+//!    [`CONE_COS_ELEV`]) the height barely depends on `E` (`d height / dE = rho cos E` goes to
+//!    zero), so Newton's step is unusable and a height tolerance of 0.1 mm would still allow a
+//!    metre of position error. There the height is a monotonic function of `E` and the root is
+//!    found by bisection on `E` to 1e-12 rad (the arithmetic's own floor, a few millimetres
+//!    of position at 10 km range). A radar's range error makes range and altitude disagree there
+//!    about half the time, the target seeming higher than the range can reach: if the shortfall
+//!    is within [`UNREACHABLE_SLACK_M`] the plot converts to the point under the vertical
+//!    (the nearest point consistent with the range), and only a larger one is refused
+//!    ([`RadarError::Unreachable`]): then the plot's range and altitude are not of one aircraft.
 //! 3. The covariance is first order. With `s` the ground arc, `a = R + h_r` and `b = R + h`, at
 //!    fixed height `ds/drho = R / (a cos E)` and at fixed range
 //!    `ds/dh = -(rho / a + sin E) R / (b cos E)`; the cross-range error is `s * sigma_theta`.
@@ -47,6 +57,15 @@ pub const FT_M: f64 = 0.3048;
 pub const HEIGHT_TOL_M: f64 = 1.0e-4;
 /// Limit: Newton steps in the conversion.
 pub const MAX_NEWTON: u32 = 8;
+/// The conversion solves for the elevation by bisection, not Newton's method, when `cos E` is
+/// under this (E above about 87 degrees; equal to [`MIN_COS_ELEV`]).
+pub const CONE_COS_ELEV: f64 = 0.05;
+/// A plot whose altitude is higher than its slant range can reach (looking straight up) by no
+/// more than this is converted to the point under the vertical; by more it is refused.
+/// Metres: seven standard deviations of a 70 m range error.
+pub const UNREACHABLE_SLACK_M: f64 = 500.0;
+/// Bisection on the elevation stops when the bracket is this narrow, radians.
+const BISECT_WIDTH_RAD: f64 = 1.0e-12;
 /// Limit: plot range accepted, metres (the CAT048 range element reaches 256 NM; 600 km).
 pub const MAX_PLOT_RANGE_M: f64 = 600_000.0;
 /// Plots closer than this to the antenna are refused: the cone of silence, where the elevation
@@ -72,6 +91,10 @@ pub enum RadarError {
     NoHeight,
     /// The conversion did not converge (cannot happen for a valid plot; counted if it does).
     NoConvergence,
+    /// The plot's altitude is higher (or lower) than its slant range can reach even looking
+    /// straight up (or down), by more than [`UNREACHABLE_SLACK_M`]: range and altitude are not
+    /// of one aircraft.
+    Unreachable,
 }
 
 impl std::fmt::Display for RadarError {
@@ -81,6 +104,9 @@ impl std::fmt::Display for RadarError {
             RadarError::BadPlot(w) => write!(f, "bad radar plot: {w}"),
             RadarError::NoHeight => write!(f, "plot has no altitude and none was supplied"),
             RadarError::NoConvergence => write!(f, "polar conversion did not converge"),
+            RadarError::Unreachable => {
+                write!(f, "plot altitude is out of reach of its slant range")
+            }
         }
     }
 }
@@ -288,8 +314,8 @@ pub fn polar_to_geodetic(
     }
     let (r, a) = (g.r_mean_m, g.r_mean_m + g.height_m);
     let b = r + h_m;
-    let sin_e = ((b * b - a * a - rho_m * rho_m) / (2.0 * a * rho_m)).clamp(-1.0, 1.0);
-    let mut e = sin_e.asin();
+    let sin_e_raw = (b * b - a * a - rho_m * rho_m) / (2.0 * a * rho_m);
+    let mut e = sin_e_raw.clamp(-1.0, 1.0).asin();
     let (st, ct) = az_deg.to_radians().sin_cos();
     let at = |e: f64| -> (f64, f64, f64) {
         let (se, ce) = e.sin_cos();
@@ -302,27 +328,64 @@ pub fn polar_to_geodetic(
         }
         geodetic_of_ecef(&p)
     };
-    let mut res = at(e);
-    for _ in 0..MAX_NEWTON {
-        let err = res.2 - h_m;
-        if err.abs() <= HEIGHT_TOL_M {
-            let cos_e = e.cos();
-            let phi = (rho_m * cos_e).atan2(a + rho_m * e.sin());
-            return Ok(Geo {
-                lat_deg: res.0,
-                lon_deg: res.1,
-                elev_rad: e,
-                ground_m: r * phi,
-            });
+    let geo_of = |e: f64, res: (f64, f64, f64)| {
+        let phi = (rho_m * e.cos()).atan2(a + rho_m * e.sin());
+        Geo {
+            lat_deg: res.0,
+            lon_deg: res.1,
+            elev_rad: e,
+            ground_m: r * phi,
         }
-        let d = rho_m * e.cos();
-        if d.abs() < 1.0e-6 {
+    };
+    if e.cos() >= CONE_COS_ELEV {
+        let mut res = at(e);
+        for _ in 0..MAX_NEWTON {
+            let err = res.2 - h_m;
+            if err.abs() <= HEIGHT_TOL_M {
+                return Ok(geo_of(e, res));
+            }
+            let d = rho_m * e.cos();
+            if d.abs() < 1.0e-6 {
+                break;
+            }
+            e -= err / d;
+            res = at(e);
+        }
+    }
+    // The overhead cone, or Newton's method did not settle: the height is monotonic in the
+    // elevation, so bracket and bisect (see the module documentation).
+    let half_pi = core::f64::consts::FRAC_PI_2;
+    let (mut lo, mut hi) = (-half_pi, half_pi);
+    let top = at(hi);
+    if top.2 < h_m {
+        // Higher than the range reaches: the point under the vertical, if not absurdly so.
+        return if h_m - top.2 <= UNREACHABLE_SLACK_M {
+            Ok(geo_of(hi, top))
+        } else {
+            Err(RadarError::Unreachable)
+        };
+    }
+    let bottom = at(lo);
+    if bottom.2 > h_m {
+        return if bottom.2 - h_m <= UNREACHABLE_SLACK_M {
+            Ok(geo_of(lo, bottom))
+        } else {
+            Err(RadarError::Unreachable)
+        };
+    }
+    for _ in 0..80 {
+        if hi - lo < BISECT_WIDTH_RAD {
             break;
         }
-        e -= err / d;
-        res = at(e);
+        let mid = 0.5 * (lo + hi);
+        if at(mid).2 > h_m {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
     }
-    Err(RadarError::NoConvergence)
+    let e = 0.5 * (lo + hi);
+    Ok(geo_of(e, at(e)))
 }
 
 /// The local east-north covariance `[ee, en, nn]`, m^2, of a plot at slant range `rho_m`,
@@ -525,6 +588,68 @@ mod tests {
             worst = worst.max(dn.hypot(de));
         }
         assert!(worst < 1.0e-3, "{worst}");
+    }
+
+    // REQ: OA-TRK-078
+    #[test]
+    fn an_aircraft_nearly_overhead_is_converted_not_refused() {
+        // The cone above the antenna: the line of sight is within a degree or two of vertical,
+        // where the height barely depends on the elevation angle. A plot there carries a range
+        // error (70 m of scatter) that makes range and altitude disagree, half the time with a
+        // target higher than the range can reach: it must still convert, to the point under
+        // the vertical. Where range and height agree the inverse is exact to a few millimetres
+        // (the limit of the arithmetic at this geometry).
+        let g = radar_geom(&SITE);
+        let mut refused = Vec::new();
+        let mut worst: f64 = 0.0;
+        let mut converted = 0;
+        for &h in &[1_500.0, 3_000.0, 6_000.0, 11_000.0, 15_000.0] {
+            for &off in &[0.0, 0.01, 0.5, 5.0, 50.0, 300.0, 1_500.0] {
+                for k in 0..8 {
+                    let az = f64::from(k) * 45.0 + 11.0;
+                    // A point `off` metres from the vertical through the antenna.
+                    let (st, ct) = az.to_radians().sin_cos();
+                    let lat = SITE.lat_deg + (off * ct / 6.36e6).to_degrees();
+                    let lon = SITE.lon_deg
+                        + (off * st / (6.38e6 * SITE.lat_deg.to_radians().cos())).to_degrees();
+                    let (rho, paz) = polar_of(&g, lat, lon, h);
+                    if rho < MIN_PLOT_RANGE_M {
+                        continue;
+                    }
+                    for &dr in &[-150.0, -70.0, -5.0, 0.0, 5.0, 70.0, 150.0] {
+                        let r = rho + dr;
+                        match polar_to_geodetic(&g, r, paz, h) {
+                            Ok(geo) => {
+                                converted += 1;
+                                assert!(geo.lat_deg.is_finite() && geo.lon_deg.is_finite());
+                                assert!(
+                                    geo.elev_rad > 0.0
+                                        && geo.elev_rad <= core::f64::consts::FRAC_PI_2 + 1e-12
+                                );
+                                if dr == 0.0 {
+                                    // Against the point the plot was made from (a metre of
+                                    // azimuth error is the mirror branch of the elevation).
+                                    let dn = (geo.lat_deg - lat).to_radians() * 6.36e6;
+                                    let de = (geo.lon_deg - lon).to_radians()
+                                        * 6.38e6
+                                        * lat.to_radians().cos();
+                                    worst = worst.max(dn.hypot(de));
+                                }
+                            }
+                            Err(e) => refused.push((h, off, dr, e)),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "refused {} of {}: {:?}",
+            refused.len(),
+            refused.len() + converted,
+            refused.first()
+        );
+        assert!(worst < 5.0e-3, "worst position error {worst} m");
     }
 
     // REQ: OA-TRK-031

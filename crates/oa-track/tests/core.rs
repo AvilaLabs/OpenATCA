@@ -922,9 +922,9 @@ fn scrambled_world() -> Vec<Measurement> {
 // REQ: OA-TRK-040
 #[test]
 fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_replaced() {
-    // The digest and counters below were recorded from the implementation that kept a full filter
-    // state per ring slot; the anchor-and-replay ring must reproduce every output bit and
-    // counter (re-filtering, duplicates, ring and window drops included).
+    // The digest and counters below were first recorded from the implementation that kept a full
+    // filter state per ring slot, which the anchor-and-replay ring reproduced bit for bit; they
+    // lock the current behaviour (re-filtering, duplicates, ring and window drops included).
     let ms = scrambled_world();
     let (t, out) = run(&big_config(), &ms, 200.0);
     let s = tracker_stats(&t);
@@ -952,9 +952,15 @@ fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_r
     assert_eq!(digest, GOLDEN_DIGEST);
 }
 
-const GOLDEN_COUNTERS: &str = "579 477 30 53 4 288 869 14 0 1343";
-const GOLDEN_NIS_BITS: u64 = 0x40a4_9f6c_7a87_a22b;
-const GOLDEN_DIGEST: &str = "6ea4de8c2647f225e2b723d0422fb68eef0b81dea5a641f733827844421c6cd5";
+// Re-recorded when the repeat check began to look at every stored report (OA-TRK-074) and a late
+// re-filter began to keep the run of rejected reports (OA-TRK-075): five more repeats are now
+// counted as duplicates instead of applied again (30 became 35, applied 477 became 472). The
+// earlier values were:
+// "579 477 30 53 4 288 869 14 0 1343", 0x40a4_9f6c_7a87_a22b and
+// "6ea4de8c2647f225e2b723d0422fb68eef0b81dea5a641f733827844421c6cd5".
+const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
+const GOLDEN_NIS_BITS: u64 = 0x40a4_38e3_6693_06a4;
+const GOLDEN_DIGEST: &str = "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc";
 
 // REQ: OA-TRK-041
 #[test]
@@ -1054,4 +1060,107 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
     // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track.
     assert!(per(b, 38_000) < 2_200.0);
+}
+
+// REQ: OA-TRK-074
+#[test]
+fn a_repeat_of_a_report_is_a_duplicate_even_after_another_sensor_reported_at_the_same_time() {
+    let ms = base_measurements(0x777777, 30, 1.0, 6);
+    let cfg = big_config();
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    for m in &ms {
+        tracker_update(&mut t, m, &mut out);
+    }
+    // A second sensor reports at the very instant of the newest report: applied, not a repeat.
+    let mut other = ms[29];
+    other.sensor = 5;
+    tracker_update(&mut t, &other, &mut out);
+    assert_eq!(tracker_stats(&t).duplicates, 0);
+    let applied = tracker_stats(&t).applied;
+    // The first sensor's report arrives again (a replayed frame): a duplicate, though the newest
+    // stored report is the other sensor's.
+    tracker_update(&mut t, &ms[29], &mut out);
+    assert_eq!(tracker_stats(&t).duplicates, 1);
+    assert_eq!(tracker_stats(&t).applied, applied);
+    // The same inside the window: the other sensor reports at the time of an older report, then
+    // that older report repeats.
+    let mut o25 = ms[25];
+    o25.sensor = 5;
+    tracker_update(&mut t, &o25, &mut out);
+    assert_eq!(tracker_stats(&t).refiltered, 1);
+    let applied = tracker_stats(&t).applied;
+    tracker_update(&mut t, &ms[25], &mut out);
+    assert_eq!(tracker_stats(&t).duplicates, 2);
+    assert_eq!(tracker_stats(&t).applied, applied);
+}
+
+// REQ: OA-TRK-075
+#[test]
+fn a_late_report_does_not_erase_the_run_of_rejected_reports() {
+    let ms = base_measurements(0x888888, 40, 1.0, 7);
+    let cfg = big_config();
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    for m in &ms[..30] {
+        tracker_update(&mut t, m, &mut out);
+    }
+    // Three reports 55 km off: rejected, a run of three.
+    let wild = |k: usize| {
+        let mut m = ms[k];
+        m.lat_e7 += 5_000_000;
+        m
+    };
+    for k in 30..33 {
+        tracker_update(&mut t, &wild(k), &mut out);
+    }
+    assert_eq!(tracker_stats(&t).jump_rejected, 3);
+    // A late report from another sensor, between two of the track's own reports, is applied by
+    // re-filtering.
+    let half = base_measurements(0x888888, 80, 0.5, 7);
+    let mut late = half[57];
+    late.sensor = 9;
+    tracker_update(&mut t, &late, &mut out);
+    assert_eq!(tracker_stats(&t).refiltered, 1);
+    // Two more wild reports make the fifth in a row: the filter must start again at the fifth.
+    for k in 33..35 {
+        tracker_update(&mut t, &wild(k), &mut out);
+    }
+    assert_eq!(tracker_stats(&t).jump_rejected, 5);
+    assert_eq!(tracker_stats(&t).resyncs, 1);
+}
+
+// REQ: OA-TRK-080
+#[test]
+fn a_position_on_the_far_side_of_the_earth_is_a_jump_not_a_coherent_update() {
+    // A stationary aircraft at the frame origin of its own filter, reported at (0, 0) every
+    // second; then a report of the same address at (0, 180) with ordinary covariance and a
+    // consistent zero velocity. The antipode used to project onto the origin.
+    let cfg = big_config();
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    let m_at = |k: i64, lon_e7: i32| Measurement {
+        toa_ns: k * 1_000_000_000,
+        pos_cov_m2: [100.0, 0.0, 100.0],
+        vel_cov_m2s2: [1.0, 0.0, 1.0],
+        vel_east_mps: 0.0,
+        vel_north_mps: 0.0,
+        lat_e7: 0,
+        lon_e7,
+        alt_ft: NONE_I32,
+        vrate_fpm: NONE_I32,
+        addr: 0x5A5A5A,
+        alt_quant_ft: 0,
+        sensor: 1,
+        ident: oa_track::NO_IDENT,
+        flags: M_HAS_VEL,
+    };
+    for k in 0..10 {
+        tracker_update(&mut t, &m_at(k, 0), &mut out);
+    }
+    let before = *tracker_stats(&t);
+    tracker_update(&mut t, &m_at(10, 1_800_000_000), &mut out);
+    let after = *tracker_stats(&t);
+    assert_eq!(after.jump_rejected, before.jump_rejected + 1);
+    assert_eq!(after.applied, before.applied);
 }
