@@ -81,8 +81,14 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
 /// distance from the origin is not finite or is past half the sphere's circumference: the chart
 /// does not reach there, and a larger distance would wrap round onto some other place.
 pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
-    let rho = x.hypot(y);
-    if !rho.is_finite() || rho > f.r * std::f64::consts::PI * (1.0 + 1e-12) {
+    // Each component is bounded before squaring, so the sum cannot overflow; `sqrt` is exactly
+    // rounded on every platform, unlike a library `hypot`.
+    let half = f.r * std::f64::consts::PI * (1.0 + 1e-12);
+    if !(x.abs() <= half && y.abs() <= half) {
+        return None;
+    }
+    let rho = (x * x + y * y).sqrt();
+    if rho > half {
         return None;
     }
     if rho < 1e-9 {
