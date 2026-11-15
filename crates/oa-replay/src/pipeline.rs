@@ -527,6 +527,8 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
     match decode_doc_prefix(&doc, &mut p.rows) {
         Ok(out) => {
             count_error(&mut p.errors, ErrKind::TbfmCapacity, u64::from(out.dropped));
+            // Flights refused for a field are dropped alone; the rest of the message applies.
+            count_error(&mut p.errors, ErrKind::TbfmField, u64::from(out.rejected));
             let k = out.kind as usize;
             if let Some(c) = p.tbfm_kinds.get_mut(k) {
                 *c += 1;
@@ -560,7 +562,11 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     };
     match decode_tfms_doc(&doc, &mut p.tfms_rows) {
-        Ok(out) => count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped)),
+        Ok(out) => {
+            count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped));
+            // Messages refused for a field are dropped alone; their siblings apply.
+            count_error(&mut p.errors, ErrKind::TfmsField, u64::from(out.rejected));
+        }
         Err(e) => {
             let k = match e {
                 TfmsDocError::Xml(_) => ErrKind::TfmsXml,

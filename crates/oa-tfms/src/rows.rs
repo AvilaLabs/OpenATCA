@@ -27,6 +27,11 @@ pub const NO_TIME: i64 = i64::MIN;
 pub const NO_NUM: i32 = i32::MIN;
 /// Absent latitude or longitude (1e-7 degree units).
 pub const NO_COORD: i32 = i32::MIN;
+/// A word the decoder does not know in a vocabulary column (a trigger, a status, a category, a
+/// time type, a program, a scope): the message is kept and the column holds this code, which
+/// is never a valid index into the field's `NAMES`. The tri-state flags use
+/// [`flag::UNKNOWN`].
+pub const UNKNOWN_WORD: u8 = u8::MAX;
 
 /// A piece of free text in the string table: byte offset and length. The empty reference
 /// (length 0) means absent.
@@ -245,7 +250,7 @@ pub mod trig {
 }
 
 /// Tri-state flag positions in [`FlightRow::flags`]: two bits each, 0 absent, 1 `false`,
-/// 2 `true`; and one plain bit.
+/// 2 `true`, 3 a word that is neither (kept as unknown); and one plain bit.
 pub mod flag {
     pub const CDM_PART: u8 = 0;
     pub const TOD_EST: u8 = 2;
@@ -256,6 +261,7 @@ pub mod flag {
     pub const ABSENT: u16 = 0;
     pub const FALSE: u16 = 1;
     pub const TRUE: u16 = 2;
+    pub const UNKNOWN: u16 = 3;
     /// The route text came from `routeOfFlight@legacyFormat` (bit 12), not from the element
     /// text of `ncsmRouteData/routeOfFlight`.
     pub const ROUTE_LEGACY: u16 = 1 << 12;
@@ -373,6 +379,8 @@ soa! {
     remarks: StrRef = NO_STR,
     /// `tmi/fcaId` of a TMI flight list entry (the first one).
     fca: StrRef = NO_STR,
+    /// `flightRef` (a flight reference number, nine digits in the sample, ten allowed).
+    flight_ref: u64 = 0,
     /// Latitude and longitude, 1e-7 degree (from degrees, minutes and optional seconds:
     /// rounded to the nearest unit).
     lat_e7: i32 = NO_COORD,
@@ -390,8 +398,6 @@ soa! {
     speed_kt: i32 = NO_NUM,
     /// `filedTrueAirSpeed`.
     tas_kt: i32 = NO_NUM,
-    /// `flightRef` (a flight reference number, nine digits in the sample).
-    flight_ref: u32 = 0,
     /// Fix and sector counts are not stored; this counts the `fxaFlight` entries of a TMI
     /// flight list entry.
     n_fxa: u16 = 0,
@@ -441,7 +447,9 @@ soa! {
 }
 // Budget: one per flight message, held in quantity; the exact packed size of its fields
 // (the columns above store the same fields). A7.1: the name widths were chosen so that no
-// padding is hidden.
+// padding is hidden. `flight_ref` grew from u32 to u64 (a ten-digit reference overflows u32);
+// placed on an 8-byte boundary it fits the four bytes the columns after it left free, so the
+// size is unchanged.
 const _: () = assert!(core::mem::size_of::<FlightRow>() == 408);
 
 soa! {
@@ -466,6 +474,12 @@ soa! {
     airports: StrRef = NO_STR,
     /// `remarks`.
     remarks: StrRef = NO_STR,
+    /// `restrictionId`.
+    id: u64 = 0,
+    /// `referenceRestrictionId`.
+    ref_id: u64 = 0,
+    /// `mitNumber` of a restriction, `advisoryNumber` of an advisory.
+    number: u64 = 0,
     /// Miles in trail of a restriction (`mitValue`), the arrival rate of an airport
     /// configuration (`arrRate`).
     rate: i32 = NO_NUM,
@@ -473,12 +487,6 @@ soa! {
     rate_dep: i32 = NO_NUM,
     /// `stratAar`.
     rate_strat: i32 = NO_NUM,
-    /// `restrictionId`.
-    id: u32 = 0,
-    /// `referenceRestrictionId`.
-    ref_id: u32 = 0,
-    /// `mitNumber` of a restriction, `advisoryNumber` of an advisory.
-    number: u32 = 0,
     /// `action`, a one or two digit code (meaning unconfirmed).
     action: u16 = 0,
     kind: u8 = 0,
@@ -495,8 +503,10 @@ soa! {
     /// `origin` of an advisory.
     origin: Name16 = [0; 16],
 }
-// Budget: one per flow information message; the exact packed size of its fields.
-const _: () = assert!(core::mem::size_of::<FlowRow>() == 128);
+// Budget: one per flow information message; the packed size of its fields. A7.1: `id`, `ref_id`
+// and `number` grew from u32 to u64 (ten-digit identifiers overflow u32), which takes the 128
+// packed bytes to 140 and the size to 144, four bytes of tail padding.
+const _: () = assert!(core::mem::size_of::<FlowRow>() == 144);
 
 /// The rows and the text table, owned by the caller. Created once by [`new_rows`] with stated
 /// capacities (RULESET C2) and reused after [`clear_rows`]; every column and the text table are

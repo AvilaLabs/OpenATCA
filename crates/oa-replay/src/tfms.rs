@@ -165,7 +165,7 @@ pub struct TfmsTable {
     /// Totals.
     pub stats: TfmsStats,
     /// Flight reference.
-    pub flight_ref: Vec<u32>,
+    pub flight_ref: Vec<u64>,
     /// Largest `sourceTimeStamp` applied, Unix ms.
     pub last_src_ms: Vec<i64>,
     /// Replay time of the last applied row, ns.
@@ -239,12 +239,12 @@ pub fn new_tfms_table(capacity: usize) -> TfmsTable {
     }
 }
 
-fn ref_hash(r: u32) -> u64 {
-    mix64(u64::from(r))
+fn ref_hash(r: u64) -> u64 {
+    mix64(r)
 }
 
 /// The slot of flight reference `r`, if held.
-pub fn tfms_slot_of(t: &TfmsTable, r: u32) -> Option<usize> {
+pub fn tfms_slot_of(t: &TfmsTable, r: u64) -> Option<usize> {
     slots_find(&t.slots, ref_hash(r), |s| t.flight_ref.get(s) == Some(&r))
 }
 
@@ -571,12 +571,26 @@ fn put(h: &mut Sha256, b: &[u8]) {
     let _ = h.update(b);
 }
 
+/// Writes an identifier that can be ten digits wide. A value below `u32::MAX` is its four bytes
+/// little-endian, exactly as when the identifiers were `u32` (so a checkpoint of ordinary data
+/// keeps its hash); a larger one is `u32::MAX` as an escape followed by its eight bytes, which
+/// keeps the encoding prefix-free (no value can be confused with the start of another).
+fn put_id(h: &mut Sha256, v: u64) {
+    match u32::try_from(v) {
+        Ok(n) if n != u32::MAX => put(h, &n.to_le_bytes()),
+        _ => {
+            put(h, &u32::MAX.to_le_bytes());
+            put(h, &v.to_le_bytes());
+        }
+    }
+}
+
 /// Writes the flight table's canonical serialisation to the hasher: the tag, the live count, the
 /// totals, then every flight in ascending flight-reference order with every column, integers
 /// little-endian at fixed width. Independent of slot assignment. Sorting allocates; this runs at
 /// checkpoints only (C6).
 pub fn tfms_hash_into(h: &mut Sha256, t: &TfmsTable) {
-    let mut order: Vec<(u32, usize)> = (0..t.slots.capacity)
+    let mut order: Vec<(u64, usize)> = (0..t.slots.capacity)
         .filter(|&s| slot_live(&t.slots, s))
         .filter_map(|s| t.flight_ref.get(s).map(|&k| (k, s)))
         .collect();
@@ -599,7 +613,7 @@ pub fn tfms_hash_into(h: &mut Sha256, t: &TfmsTable) {
         put(h, &v.to_le_bytes());
     }
     for (k, s) in order {
-        put(h, &k.to_le_bytes());
+        put_id(h, k);
         if let Some(v) = t.last_src_ms.get(s) {
             put(h, &v.to_le_bytes());
         }
@@ -701,9 +715,9 @@ pub struct FlowTable {
     /// See `key_kind`.
     pub key_program: Vec<u8>,
     /// See `key_kind`.
-    pub key_id: Vec<u32>,
+    pub key_id: Vec<u64>,
     /// See `key_kind`.
-    pub key_number: Vec<u32>,
+    pub key_number: Vec<u64>,
     /// Key: title and element text, first 24 bytes each, zero padded.
     pub title: Vec<[u8; 24]>,
     /// See `title`.
@@ -721,7 +735,7 @@ pub struct FlowTable {
     /// `rate`, `rate_dep`, `rate_strat`; `NO_NUM` if absent.
     pub rates: Vec<[i32; 3]>,
     /// `referenceRestrictionId`.
-    pub ref_id: Vec<u32>,
+    pub ref_id: Vec<u64>,
     /// `action`.
     pub action: Vec<u16>,
     /// `scope`, `status`, `flags` (`oa_tfms::rows::fflag`).
@@ -761,16 +775,16 @@ pub fn new_flow_table(capacity: usize) -> FlowTable {
     }
 }
 
-type FlowKey = (u8, u8, u32, u32, [u8; 24], [u8; 24]);
+type FlowKey = (u8, u8, u64, u64, [u8; 24], [u8; 24]);
 
 fn flow_hash(k: &FlowKey) -> u64 {
-    let mut b = [0u8; 58];
+    let mut b = [0u8; 66];
     b[0] = k.0;
     b[1] = k.1;
-    b[2..6].copy_from_slice(&k.2.to_le_bytes());
-    b[6..10].copy_from_slice(&k.3.to_le_bytes());
-    b[10..34].copy_from_slice(&k.4);
-    b[34..58].copy_from_slice(&k.5);
+    b[2..10].copy_from_slice(&k.2.to_le_bytes());
+    b[10..18].copy_from_slice(&k.3.to_le_bytes());
+    b[18..42].copy_from_slice(&k.4);
+    b[42..66].copy_from_slice(&k.5);
     hash_bytes(&b)
 }
 
@@ -950,8 +964,8 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
     }
     for (k, s) in order {
         put(h, &[k.0, k.1]);
-        put(h, &k.2.to_le_bytes());
-        put(h, &k.3.to_le_bytes());
+        put_id(h, k.2);
+        put_id(h, k.3);
         put(h, &k.4);
         put(h, &k.5);
         for col in [
@@ -970,8 +984,8 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
                 put(h, &x.to_le_bytes());
             }
         }
-        if let Some(v) = t.ref_id.get(s) {
-            put(h, &v.to_le_bytes());
+        if let Some(&v) = t.ref_id.get(s) {
+            put_id(h, v);
         }
         if let Some(v) = t.action.get(s) {
             put(h, &v.to_le_bytes());

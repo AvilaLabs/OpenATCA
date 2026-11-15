@@ -4,8 +4,20 @@
 //! * One row per `flt`, `mrp`, `eta`, `sta` or `sch` section of each `air` (see
 //!   [`crate::Row`]). `adp`, `con` and `oth` messages (adaptation, rates and configurations,
 //!   interface status) produce no rows; they are classified ([`MsgKind`]) and counted.
-//! * All or nothing per document: any refused field, a capacity overrun or a wrong root rejects
-//!   the whole message and leaves the rows exactly as they were (RULESET E5, INTERFACES IF-R5).
+//! * All or nothing per flight, not per document: an `air` with a refused field (a repeated
+//!   leaf, a bad number, a missing attribute) is rolled back to nothing and counted in
+//!   [`Outcome::rejected`] with its reason, and the other `air` elements of the message are kept;
+//!   a `tma` whose own attributes are refused goes the same way. Only a message whose
+//!   structure is unreadable (wrong root, bad envelope attributes) or that overruns the
+//!   capacity is refused whole, leaving the rows exactly as they were (RULESET E5, INTERFACES
+//!   IF-R5).
+//! * A schedule flag (`man`, `rfz`, `sfz`, `sus`) with a word other than `YES` or `NO` does not
+//!   refuse the flight: the flag is stored as unknown ([`crate::sch_flag::UNKNOWN`]) and counted in
+//!   [`Outcome::unknown_words`]. A speed whose form is neither knots nor Mach is stored with
+//!   unit [`crate::spd_unit::UNKNOWN`] and counted in [`Outcome::unknown_units`].
+//! * Text split by a comment or a CDATA section is joined (XML 1.0) before it is validated, and
+//!   whitespace around a value is trimmed. The site-adapted labels (`gat`, `cfg`, `scn`, `cat`)
+//!   may hold interior spaces; identifiers and fixes may not.
 //! * An element that is present but empty is recorded in [`crate::Row::cleared`] (TBFM sends
 //!   changes, so "sent empty" and "not sent" differ); its value column stays absent.
 //! * Strict field parsers: names are printable ASCII within their column width, numbers are
@@ -18,15 +30,18 @@
 //!   stack buffer (a longer decoded value is a [`FieldErrorKind::TooLong`] or `Text` error).
 //!   Nothing recurses; the tree is walked at the fixed depth of the schema.
 
-use crate::fields::{DocError, Field, FieldError, FieldErrorKind, MsgKind};
+use crate::fields::{
+    error_kind_index, DocError, Field, FieldError, FieldErrorKind, MsgKind, ERROR_KIND_COUNT,
+    FIELD_COUNT,
+};
 use crate::rows::{
-    change, pt, push_row, rows_len, sch_flag, section, truncate_rows, Name12, Name14, Name16,
-    Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW,
+    change, pt, push_row, rows_len, sch_flag, section, spd_unit, truncate_rows, Name12, Name14,
+    Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW,
 };
 use crate::time::parse_iso_ms;
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_elem_ns, span_bytes, text_needs_decode, Doc, ElemIx,
-    Limits, Ns, Parser, Span, SpanKind,
+    attr_needs_decode, decode_into, decode_text_run, resolve_elem_ns, span_bytes,
+    text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind,
 };
 
 /// The TBFM metering publication namespace the sampled feed declares.
@@ -52,6 +67,18 @@ pub struct Outcome {
     /// Rows read but not appended because `Rows` was full ([`decode_doc_prefix`] only; always 0
     /// from [`decode_doc`]).
     pub dropped: u32,
+    /// `air` (or `tma`) elements refused for a field and rolled back; they add no rows.
+    pub rejected: u32,
+    /// The first refused field of the message, with its reason and offset.
+    pub first_reject: Option<FieldError>,
+    /// Refusals by [`Field`] (index `field as usize`) and by reason ([`error_kind_index`]); each
+    /// sums to `rejected`.
+    pub reject_fields: [u32; FIELD_COUNT],
+    pub reject_kinds: [u32; ERROR_KIND_COUNT],
+    /// Schedule-flag words kept as unknown instead of refusing the flight.
+    pub unknown_words: u32,
+    /// Speeds whose form is neither knots nor Mach, stored with the unknown unit.
+    pub unknown_units: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -91,6 +118,12 @@ fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, 
         ignored: 0,
         prefix,
         dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
     };
     let r = decode_root(doc, &mut acc, rows);
     if r.is_err() {
@@ -107,6 +140,52 @@ struct Acc {
     /// Count rows that do not fit instead of failing.
     prefix: bool,
     dropped: u32,
+    rejected: u32,
+    first_reject: Option<FieldError>,
+    reject_fields: [u32; FIELD_COUNT],
+    reject_kinds: [u32; ERROR_KIND_COUNT],
+    unknown_words: u32,
+    unknown_units: u32,
+}
+
+/// Runs `f` (the decode of one flight or one `tma`); a refused field rolls the rows and the
+/// counters back to where the element started and records the refusal, so its siblings are
+/// kept. Any other error (a capacity overrun) passes through and refuses the message. `None`
+/// means the element was refused.
+fn guarded<T>(
+    acc: &mut Acc,
+    rows: &mut Rows,
+    f: impl FnOnce(&mut Acc, &mut Rows) -> Result<T, DocError>,
+) -> Result<Option<T>, DocError> {
+    let start = rows_len(rows);
+    let (unknown, ignored, dropped, words, units) = (
+        acc.unknown,
+        acc.ignored,
+        acc.dropped,
+        acc.unknown_words,
+        acc.unknown_units,
+    );
+    match f(acc, rows) {
+        Ok(v) => Ok(Some(v)),
+        Err(DocError::Field(fe)) => {
+            truncate_rows(rows, start);
+            acc.unknown = unknown;
+            acc.ignored = ignored;
+            acc.dropped = dropped;
+            acc.unknown_words = words;
+            acc.unknown_units = units;
+            acc.rejected = acc.rejected.saturating_add(1);
+            acc.first_reject.get_or_insert(fe);
+            if let Some(x) = acc.reject_fields.get_mut(fe.field as usize) {
+                *x = x.saturating_add(1);
+            }
+            if let Some(x) = acc.reject_kinds.get_mut(error_kind_index(fe.kind)) {
+                *x = x.saturating_add(1);
+            }
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn ferr(field: Field, kind: FieldErrorKind, at: u32) -> DocError {
@@ -199,7 +278,16 @@ fn attr_val<'x>(
     buf: &'x mut [u8; MAX_VALUE],
 ) -> Result<&'x [u8], DocError> {
     value_bytes(doc, a.span, a.flagged, SpanKind::AttrValue, buf)
+        .map(trim)
         .map_err(|k| ferr(field, k, a.span.start))
+}
+
+/// The value without the whitespace (space, tab, line ends) around it.
+fn trim(v: &[u8]) -> &[u8] {
+    let is_ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    let start = v.iter().position(|b| !is_ws(b)).unwrap_or(v.len());
+    let end = v.iter().rposition(|b| !is_ws(b)).map_or(start, |i| i + 1);
+    v.get(start..end).unwrap_or(&[])
 }
 
 fn value_bytes<'x>(
@@ -219,7 +307,7 @@ fn value_bytes<'x>(
     }
 }
 
-/// The text of leaf element `e`, `""` when it has none. Elements must be asked for in document
+/// The text of leaf element `e` (whitespace-trimmed), `""` when it has none. Elements must be asked for in document
 /// order; the cursor in `acc` skips the text nodes of everything visited before.
 fn leaf_text<'x>(
     doc: &Doc<'x>,
@@ -240,16 +328,22 @@ fn leaf_text<'x>(
     while acc.t < n && doc.text_owner.get(acc.t) == Some(&e) {
         acc.t += 1;
     }
-    match acc.t - first {
-        0 => Ok(&[]),
+    let count = acc.t - first;
+    let span = doc.text_span.get(first).copied().unwrap_or_default();
+    let v = match count {
+        0 => return Ok(&[]),
         1 => {
-            let span = doc.text_span.get(first).copied().unwrap_or_default();
             let flagged = text_needs_decode(doc, oa_xml::TextIx(first as u32));
             value_bytes(doc, span, flagged, SpanKind::Text, buf)
-                .map_err(|k| ferr(field, k, span.start))
         }
-        _ => Err(ferr(field, FieldErrorKind::Text, at)),
-    }
+        // A comment or CDATA section split the text: the pieces are one value.
+        _ => match decode_text_run(doc, first, count, buf) {
+            Ok(n) => buf.get(..n).ok_or(FieldErrorKind::Text),
+            Err(oa_xml::XmlError::OutputTooSmall { .. }) => Err(FieldErrorKind::TooLong),
+            Err(_) => Err(FieldErrorKind::Text),
+        },
+    };
+    v.map(trim).map_err(|k| ferr(field, k, span.start))
 }
 
 // ---- field parsers -------------------------------------------------------------------------
@@ -268,18 +362,42 @@ fn parse_name<const N: usize>(v: &[u8]) -> Result<[u8; N], FieldErrorKind> {
     Ok(out)
 }
 
-fn parse_digits(v: &[u8], max_len: usize) -> Result<u32, FieldErrorKind> {
+/// Plain decimal digits, at most `max_len` of them (ten for a message number, which does not
+/// fit `u32`).
+fn parse_digits(v: &[u8], max_len: usize) -> Result<u64, FieldErrorKind> {
     if v.is_empty() || v.len() > max_len || !v.iter().all(u8::is_ascii_digit) {
         return Err(FieldErrorKind::Format);
     }
-    let mut n = 0u32;
+    let mut n = 0u64;
     for &b in v {
         n = n
             .checked_mul(10)
-            .and_then(|n| n.checked_add(u32::from(b - b'0')))
+            .and_then(|n| n.checked_add(u64::from(b - b'0')))
             .ok_or(FieldErrorKind::Format)?;
     }
     Ok(n)
+}
+
+/// A speed: `digits{1,5}` with an optional `.digits{1,3}`, in thousandths, with its unit.
+///
+/// The feed has one `spd` element for two units and no marker (no attribute, no sibling; the
+/// survey and the recorded sample are the evidence, docs/TBFM_SURVEY.md): knots arrive as
+/// `ddd.d` (140.0 to 508.0 in the sample, piston and turboprop aircraft included) and Mach
+/// numbers as `d.dd` (0.77 to 0.85, jets only). The unit is read from that form: two to four
+/// integer digits with one decimal is knots, one integer digit with two decimals is Mach, and
+/// any other form is [`spd_unit::UNKNOWN`] (the value is kept, the unit is not guessed).
+fn parse_speed(v: &[u8]) -> Result<(i32, u8), FieldErrorKind> {
+    let milli = parse_milli(v)?;
+    let (int, frac) = match v.iter().position(|&b| b == b'.') {
+        Some(i) => (i, v.len() - i - 1),
+        None => (v.len(), 0),
+    };
+    let unit = match (int, frac) {
+        (2..=4, 1) => spd_unit::KNOTS,
+        (1, 2) => spd_unit::MACH,
+        _ => spd_unit::UNKNOWN,
+    };
+    Ok((milli, unit))
 }
 
 /// `digits{1,5}` with an optional `.digits{1,3}`, in thousandths.
@@ -294,11 +412,26 @@ fn parse_milli(v: &[u8]) -> Result<i32, FieldErrorKind> {
     }
     let i = parse_digits(int, 5)?;
     let f = if dot {
-        parse_digits(frac, 3)? * 10u32.pow(3 - frac.len() as u32)
+        parse_digits(frac, 3)? * 10u64.pow(3 - frac.len() as u32)
     } else {
         0
     };
     i32::try_from(i * 1000 + f).map_err(|_| FieldErrorKind::Format)
+}
+
+/// A site-adapted label: printable ASCII with interior spaces allowed (the value was trimmed).
+fn parse_label<const N: usize>(v: &[u8]) -> Result<[u8; N], FieldErrorKind> {
+    let mut out = [0u8; N];
+    if v.len() > N {
+        return Err(FieldErrorKind::TooLong);
+    }
+    for (d, &b) in out.iter_mut().zip(v) {
+        if !(0x20..=0x7e).contains(&b) {
+            return Err(FieldErrorKind::BadChar);
+        }
+        *d = b;
+    }
+    Ok(out)
 }
 
 fn parse_bcn(v: &[u8]) -> Result<u16, FieldErrorKind> {
@@ -346,9 +479,10 @@ enum Slot {
     N8(fn(&mut Row) -> &mut Name8),
     N12(fn(&mut Row) -> &mut Name12),
     N14(fn(&mut Row) -> &mut Name14),
-    N16(fn(&mut Row) -> &mut Name16),
-    N20(fn(&mut Row) -> &mut Name20),
-    N24(fn(&mut Row) -> &mut Name24),
+    /// Labels adapted per site, which may hold interior spaces.
+    L16(fn(&mut Row) -> &mut Name16),
+    L20(fn(&mut Row) -> &mut Name20),
+    L24(fn(&mut Row) -> &mut Name24),
     /// A name that repeats an `air` attribute: equal to it, or sets it when `air` lacks it.
     Same4(fn(&mut Row) -> &mut Name4),
     Same8(fn(&mut Row) -> &mut Name8),
@@ -410,11 +544,11 @@ const MRP: &[Ent] = &[
     ent(b"ooa", Field::Ooa, Slot::N12(|r| &mut r.ooa)),
     ent(b"o3a", Field::O3a, Slot::N12(|r| &mut r.o3a)),
     ent(b"o4a", Field::O4a, Slot::N12(|r| &mut r.o4a)),
-    ent(b"gat", Field::Gat, Slot::N16(|r| &mut r.gat)),
+    ent(b"gat", Field::Gat, Slot::L16(|r| &mut r.gat)),
     ent(b"rwy", Field::Rwy, Slot::N4(|r| &mut r.rwy)),
-    ent(b"cfg", Field::Cfg, Slot::N20(|r| &mut r.cfg)),
-    ent(b"cat", Field::Cat, Slot::N24(|r| &mut r.cat)),
-    ent(b"scn", Field::Scn, Slot::N20(|r| &mut r.scn)),
+    ent(b"cfg", Field::Cfg, Slot::L20(|r| &mut r.cfg)),
+    ent(b"cat", Field::Cat, Slot::L24(|r| &mut r.cat)),
+    ent(b"scn", Field::Scn, Slot::L20(|r| &mut r.scn)),
 ];
 
 const SCH: &[Ent] = &[
@@ -448,15 +582,18 @@ const STA: &[Ent] = &[
     ent(b"sta_rwy", Field::StaRwy, Slot::Sta(pt::RWY)),
 ];
 
-fn store(slot: Slot, row: &mut Row, v: &[u8]) -> Result<(), FieldErrorKind> {
+/// Stores `v` through `slot`. `Ok(Stored::Unknown)` is a schedule flag with an unknown word,
+/// kept as unknown; `Ok(Stored::UnknownUnit)` a speed of unknown unit.
+fn store(slot: Slot, row: &mut Row, v: &[u8]) -> Result<Stored, FieldErrorKind> {
+    let mut out = Stored::Plain;
     match slot {
         Slot::N4(f) => *f(row) = parse_name(v)?,
         Slot::N8(f) => *f(row) = parse_name(v)?,
         Slot::N12(f) => *f(row) = parse_name(v)?,
         Slot::N14(f) => *f(row) = parse_name(v)?,
-        Slot::N16(f) => *f(row) = parse_name(v)?,
-        Slot::N20(f) => *f(row) = parse_name(v)?,
-        Slot::N24(f) => *f(row) = parse_name(v)?,
+        Slot::L16(f) => *f(row) = parse_label(v)?,
+        Slot::L20(f) => *f(row) = parse_label(v)?,
+        Slot::L24(f) => *f(row) = parse_label(v)?,
         Slot::Same4(f) => {
             let n: Name4 = parse_name(v)?;
             let d = f(row);
@@ -479,7 +616,14 @@ fn store(slot: Slot, row: &mut Row, v: &[u8]) -> Result<(), FieldErrorKind> {
         Slot::Eta(i) => *row.eta_ms.get_mut(i).ok_or(FieldErrorKind::Format)? = parse_time(v)?,
         Slot::Sta(i) => *row.sta_ms.get_mut(i).ok_or(FieldErrorKind::Format)? = parse_time(v)?,
         Slot::Bcn => row.bcn = parse_bcn(v)?,
-        Slot::Speed => row.spd_milli = parse_milli(v)?,
+        Slot::Speed => {
+            let (milli, unit) = parse_speed(v)?;
+            row.spd_milli = milli;
+            row.spd_unit = unit;
+            if unit == spd_unit::UNKNOWN {
+                out = Stored::UnknownUnit;
+            }
+        }
         Slot::Altitude => {
             row.ina = i32::try_from(parse_digits(v, 6)?).map_err(|_| FieldErrorKind::Format)?;
         }
@@ -487,13 +631,24 @@ fn store(slot: Slot, row: &mut Row, v: &[u8]) -> Result<(), FieldErrorKind> {
             let code = match v {
                 b"NO" => sch_flag::NO,
                 b"YES" => sch_flag::YES,
-                _ => return Err(FieldErrorKind::Vocabulary),
+                _ => {
+                    out = Stored::Unknown;
+                    sch_flag::UNKNOWN
+                }
             };
             row.sch = (row.sch & !(3 << (pos * 2))) | (code << (pos * 2));
         }
         Slot::Skip => {}
     }
-    Ok(())
+    Ok(out)
+}
+
+/// What [`store`] kept besides the plain value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    Plain,
+    Unknown,
+    UnknownUnit,
 }
 
 /// Reads the children of section element `e` through `table` into `row`.
@@ -529,7 +684,11 @@ fn read_section(
                     if v.is_empty() {
                         row.cleared |= 1u64 << (t.field as u32);
                     } else {
-                        store(t.slot, row, v).map_err(|k| ferr(t.field, k, at))?;
+                        match store(t.slot, row, v).map_err(|k| ferr(t.field, k, at))? {
+                            Stored::Plain => {}
+                            Stored::Unknown => acc.unknown_words += 1,
+                            Stored::UnknownUnit => acc.unknown_units += 1,
+                        }
                     }
                 }
                 count_attrs(doc, acc, c);
@@ -642,6 +801,12 @@ fn decode_mis(doc: &Doc<'_>, acc: &mut Acc, root: ElemIx) -> Result<Outcome, Doc
         center: env.center,
         env_ms: env.time_ms,
         dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
     })
 }
 
@@ -657,9 +822,10 @@ fn decode_env(
     let mut c = first_child(doc, root);
     while c != ElemIx::NONE {
         if in_tbfm(doc, c) && elem_name(doc, c) == b"tma" {
-            let k = decode_tma(doc, acc, c, &env, rows)?;
-            if (k as u8) < (kind as u8) || kind == MsgKind::Empty {
-                kind = k;
+            if let Some(k) = guarded(acc, rows, |acc, rows| decode_tma(doc, acc, c, &env, rows))? {
+                if (k as u8) < (kind as u8) || kind == MsgKind::Empty {
+                    kind = k;
+                }
             }
         } else {
             acc.unknown += 1;
@@ -674,6 +840,12 @@ fn decode_env(
         center: env.center,
         env_ms: env.time_ms,
         dropped: acc.dropped,
+        rejected: acc.rejected,
+        first_reject: acc.first_reject,
+        reject_fields: acc.reject_fields,
+        reject_kinds: acc.reject_kinds,
+        unknown_words: acc.unknown_words,
+        unknown_units: acc.unknown_units,
     })
 }
 
@@ -732,7 +904,8 @@ fn decode_tma(
         let this = if in_tbfm(doc, c) {
             match elem_name(doc, c) {
                 b"air" => {
-                    decode_air(doc, acc, c, &base, rows)?;
+                    // One flight is one message: a refused `air` goes alone.
+                    guarded(acc, rows, |acc, rows| decode_air(doc, acc, c, &base, rows))?;
                     Some(MsgKind::Air)
                 }
                 b"adp" => Some(MsgKind::Adaptation),

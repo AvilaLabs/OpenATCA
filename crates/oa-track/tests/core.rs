@@ -15,7 +15,7 @@ use oa_track::{
     measurement_check, output_hash_into, output_new, tracker_advance, tracker_flush, tracker_live,
     tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
     TrackerConfig, DEFAULT_CONFIG, END_DROPPED, END_TENTATIVE, M_HAS_VEL, NONE_I32, NO_ADDR,
-    O_COAST, O_TICK,
+    O_COAST, O_HAS_ALT, O_TICK,
 };
 
 /// Error summary of a scenario in a time window.
@@ -403,6 +403,72 @@ fn hash_of(o: &TrackOutput) -> String {
     let mut h = Sha256::new();
     output_hash_into(&mut h, o);
     to_hex(&h.finalize())
+}
+
+// REQ: OA-TRK-030
+#[test]
+fn an_absent_altitude_is_not_a_number_in_the_output_columns() {
+    let with = base_measurements(0x515151, 60, 1.0, 11);
+    assert!(with.iter().all(|m| m.alt_ft != NONE_I32));
+    let without: Vec<Measurement> = with
+        .iter()
+        .map(|m| Measurement {
+            alt_ft: NONE_I32,
+            vrate_fpm: NONE_I32,
+            ..*m
+        })
+        .collect();
+    let (_, out) = run(&big_config(), &without, 70.0);
+    assert!(out.t_ns.len() > 30);
+    for i in 0..out.t_ns.len() {
+        assert_eq!(out.flags[i] & O_HAS_ALT, 0, "row {i}");
+        // Not 0 ft: the columns say "no altitude" by themselves, as well as the flag.
+        assert!(out.alt_ft[i].is_nan(), "row {i}: {}", out.alt_ft[i]);
+        assert!(out.alt_var_ft2[i].is_nan(), "row {i}");
+        assert!(out.vrate_fpm[i].is_nan(), "row {i}");
+    }
+    // With an altitude the columns are numbers and the flag is set.
+    let (_, out) = run(&big_config(), &with, 70.0);
+    for i in 0..out.t_ns.len() {
+        assert_ne!(out.flags[i] & O_HAS_ALT, 0, "row {i}");
+        assert!(out.alt_ft[i].is_finite() && out.alt_var_ft2[i].is_finite());
+        assert!(out.vrate_fpm[i].is_finite());
+    }
+}
+
+// REQ: OA-TRK-030
+#[test]
+fn the_digest_does_not_depend_on_how_an_absent_altitude_is_written() {
+    let without: Vec<Measurement> = base_measurements(0x525252, 40, 1.0, 12)
+        .iter()
+        .map(|m| Measurement {
+            alt_ft: NONE_I32,
+            vrate_fpm: NONE_I32,
+            ..*m
+        })
+        .collect();
+    let (_, out) = run(&big_config(), &without, 50.0);
+    assert!(out.alt_ft.iter().all(|a| a.is_nan()));
+    // The same rows with the absent altitude written as 0.0, as the tracker used to: same digest.
+    let mut zeroed = out.clone();
+    for col in [
+        &mut zeroed.alt_ft,
+        &mut zeroed.alt_var_ft2,
+        &mut zeroed.vrate_fpm,
+    ] {
+        col.iter_mut().for_each(|v| *v = 0.0);
+    }
+    assert_eq!(hash_of(&out), hash_of(&zeroed));
+    // A different altitude on a row that has one changes it.
+    let with = base_measurements(0x525252, 40, 1.0, 12);
+    let (_, out) = run(&big_config(), &with, 50.0);
+    let mut moved = out.clone();
+    moved.alt_ft[3] += 1.0;
+    assert_ne!(hash_of(&out), hash_of(&moved));
+    // and a row that has none keeps hashing as absent whatever its columns hold
+    let mut flagged_off = out.clone();
+    flagged_off.flags[3] &= !O_HAS_ALT;
+    assert_ne!(hash_of(&out), hash_of(&flagged_off));
 }
 
 // REQ: OA-TRK-009

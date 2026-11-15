@@ -2,7 +2,9 @@
 //! result of one decode. Core (pure).
 
 use crate::decode::Outcome;
-use crate::fields::{reject_reason, DocError, DOC_KIND_COUNT, FIELD_COUNT, REJECT_COUNT};
+use crate::fields::{
+    reject_reason, DocError, DOC_KIND_COUNT, ERROR_KIND_COUNT, FIELD_COUNT, REJECT_COUNT,
+};
 use crate::rows::{fkind, kind};
 
 /// Totals over a run of documents.
@@ -23,8 +25,15 @@ pub struct Stats {
     pub flow_kinds: [u64; fkind::COUNT],
     /// Refused documents by reason ([`crate::REJECT_XML`] and its neighbours).
     pub rejects: [u64; REJECT_COUNT],
-    /// Refused fields by [`crate::Field`] (only documents refused for a field).
+    /// Refused messages (and TMI list entries) by the [`crate::Field`] that refused them, in
+    /// accepted documents.
     pub field_errors: [u64; FIELD_COUNT],
+    /// Messages refused for a field in accepted documents (their siblings were kept).
+    pub rejected_messages: u64,
+    /// The same refusals by reason ([`crate::error_kind_index`]).
+    pub reject_kinds: [u64; ERROR_KIND_COUNT],
+    /// Vocabulary words kept as unknown instead of refusing the message.
+    pub unknown_words: u64,
     /// Elements, attributes and namespaces the decoder does not know, in accepted documents.
     pub unknown_paths: u64,
     /// Known elements it deliberately does not store, in accepted documents.
@@ -44,6 +53,9 @@ pub const fn new_stats() -> Stats {
         flow_kinds: [0; fkind::COUNT],
         rejects: [0; REJECT_COUNT],
         field_errors: [0; FIELD_COUNT],
+        rejected_messages: 0,
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
         unknown_paths: 0,
         ignored_paths: 0,
     }
@@ -70,6 +82,14 @@ pub fn observe(
             }
             s.unknown_paths += u64::from(o.unknown_paths);
             s.ignored_paths += u64::from(o.ignored_paths);
+            s.rejected_messages += u64::from(o.rejected);
+            s.unknown_words += u64::from(o.unknown_words);
+            for (t, &n) in s.field_errors.iter_mut().zip(&o.reject_fields) {
+                *t += u64::from(n);
+            }
+            for (t, &n) in s.reject_kinds.iter_mut().zip(&o.reject_kinds) {
+                *t += u64::from(n);
+            }
             for &k in flight_kinds {
                 if let Some(x) = s.flight_kinds.get_mut(usize::from(k)) {
                     *x += 1;

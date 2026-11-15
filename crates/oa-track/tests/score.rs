@@ -21,11 +21,11 @@ use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 use oa_geo::aeqd::{frame_velocity, unproject};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    esassp_of, initiation_delays, interval_stats, run_tracker, score, scoring_config,
-    split_reports, transversal_accel, RowSet, CLASS_STRAIGHT, CLASS_TURN, SCORE_DROP_AFTER_NS,
-    TURN_ACCEL_MPS2,
+    esassp_of, initiation_delays, interval_stats, run_tracker, score, scored_altitude_ft,
+    scoring_config, split_reports, transversal_accel, RowSet, CLASS_STRAIGHT, CLASS_TURN,
+    SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
-use oa_track::{DEFAULT_CONFIG, END_FLUSHED};
+use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
 
 const T0: i64 = 1_700_000_000_000_000_000;
@@ -394,4 +394,19 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
     assert!(sc.pairs > 10_000);
     assert!(sc.esassp.position_m[0].rms < 60.0);
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
+}
+
+// REQ: OA-TRK-030
+#[test]
+fn an_absent_altitude_is_never_scored_as_zero_feet() {
+    use oa_bench::legacy::NO_ALT;
+    assert_eq!(scored_altitude_ft(O_TICK | O_HAS_ALT, 35_000.4), 35_000);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, -1_200.6), -1_201);
+    // a real sea-level altitude is 0, an absent one is not
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, 0.0), 0);
+    assert_eq!(scored_altitude_ft(O_TICK, f32::NAN), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_TICK, 0.0), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::NAN), NO_ALT);
+    assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::INFINITY), NO_ALT);
+    assert_eq!(scored_altitude_ft(0, 12_000.0), NO_ALT);
 }

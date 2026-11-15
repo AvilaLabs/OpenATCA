@@ -7,9 +7,9 @@
 )]
 
 use oa_xml::{
-    attr_needs_decode, decode_into, error_offset, resolve_attr_ns, resolve_elem_ns, span_bytes,
-    span_eq_str, text_needs_decode, AttrIx, Doc, ElemIx, LimitKind, Limits, Ns, Parser, SpanKind,
-    TextIx, XmlError,
+    attr_needs_decode, decode_into, decode_text_run, error_offset, resolve_attr_ns,
+    resolve_elem_ns, span_bytes, span_eq_str, text_needs_decode, AttrIx, Doc, ElemIx, LimitKind,
+    Limits, Ns, Parser, SpanKind, TextIx, XmlError,
 };
 
 /// The bytes of a span of a parsed document (always in range).
@@ -806,4 +806,74 @@ fn no_panic_on_truncation_and_byte_flips() {
         }
         let _ = p.parse(&m);
     }
+}
+
+/// The joined text of the first element's text nodes, through `decode_text_run`.
+fn run_text(src: &str, cap: usize) -> Result<String, XmlError> {
+    let mut p = Parser::new(Limits::default()).unwrap();
+    let d = p.parse(src.as_bytes()).unwrap();
+    let mut out = vec![0u8; cap];
+    let n = decode_text_run(&d, 0, d.text_span.len(), &mut out)?;
+    Ok(String::from_utf8(out[..n].to_vec()).unwrap())
+}
+
+// REQ: OA-XML-028
+#[test]
+fn comments_and_cdata_split_text_into_pieces_that_join() {
+    for (src, want) in [
+        ("<a>12<!--x-->34</a>", "1234"),
+        ("<a><![CDATA[12]]>34</a>", "1234"),
+        ("<a>12<![CDATA[34]]></a>", "1234"),
+        ("<a>1&amp;<![CDATA[<]]>2&#x41;</a>", "1&<2A"),
+        ("<a>x<!--c--><![CDATA[y]]><!--d-->z</a>", "xyz"),
+        ("<a>a\r\nb<!--c-->d</a>", "a\nbd"),
+    ] {
+        assert_eq!(run_text(src, 64).unwrap(), want, "{src}");
+    }
+    // The pieces are separate nodes of one owner.
+    let (mut p, src) = parse_ok("<a>12<!--x-->34</a>");
+    let d = p.parse(&src).unwrap();
+    assert_eq!(d.text_span.len(), 2);
+    assert_eq!(d.text_owner[0], d.text_owner[1]);
+}
+
+// REQ: OA-XML-028
+#[test]
+fn joined_text_is_bounded_by_the_output_and_stays_all_or_nothing_per_piece() {
+    assert_eq!(run_text("<a>12<!--x-->34</a>", 4).unwrap(), "1234");
+    assert!(matches!(
+        run_text("<a>12<!--x-->34</a>", 3),
+        Err(XmlError::OutputTooSmall { .. })
+    ));
+    assert!(matches!(
+        run_text("<a><![CDATA[12]]>34</a>", 0),
+        Err(XmlError::OutputTooSmall { .. })
+    ));
+    let (mut p, src) = parse_ok("<a>1</a>");
+    let d = p.parse(&src).unwrap();
+    let mut out = [0u8; 4];
+    assert!(matches!(
+        decode_text_run(&d, 0, 2, &mut out),
+        Err(XmlError::SpanOutOfRange { .. })
+    ));
+    assert_eq!(decode_text_run(&d, 0, 0, &mut out).unwrap(), 0);
+}
+
+// REQ: OA-XML-028
+#[test]
+fn whitespace_next_to_text_or_cdata_is_data_and_layout_is_still_dropped() {
+    for (src, want) in [
+        ("<a>12<!--x--> <!--y-->34</a>", "12 34"),
+        ("<a> <![CDATA[x]]></a>", " x"),
+        ("<a><![CDATA[x]]> </a>", "x "),
+        ("<a><!--c--> <!--d-->34</a>", " 34"),
+        ("<a>x<!--c-->\n</a>", "x\n"),
+    ] {
+        assert_eq!(run_text(src, 64).unwrap(), want, "{src}");
+    }
+    // Layout between elements is not stored, before, between and after children.
+    let (mut p, src) = parse_ok("<a>\n  <b>t</b>\n  <!--c-->\n  <c/>\n</a>");
+    let d = p.parse(&src).unwrap();
+    assert_eq!(d.text_span.len(), 1);
+    assert_eq!(sb(d.input, d.text_span[0]), b"t");
 }

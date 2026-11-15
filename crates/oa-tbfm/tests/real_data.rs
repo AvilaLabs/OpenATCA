@@ -159,6 +159,38 @@ fn every_real_tbfm_message_decodes_and_is_reported() {
         stats.unknown_paths, 0,
         "the survey says every path is known"
     );
+    eprintln!(
+        "  flights refused alone {}, schedule-flag words kept as unknown {}, speeds of unknown unit {}",
+        stats.rejected_flights, stats.unknown_words, stats.unknown_units
+    );
+    assert_eq!(
+        (
+            stats.rejected_flights,
+            stats.unknown_words,
+            stats.unknown_units
+        ),
+        (0, 0, 0),
+        "field errors: {:?}",
+        stats.field_errors
+    );
+    // Every stored speed has a unit, and the sample has both knots and Mach.
+    let mut units = [0u64; oa_tbfm::spd_unit::COUNT];
+    for i in 0..rows_len(&rows) {
+        assert_eq!(
+            rows.spd_milli[i] == oa_tbfm::NO_NUM,
+            rows.spd_unit[i] == oa_tbfm::spd_unit::NONE,
+            "row {i}: a speed and its unit go together"
+        );
+        units[usize::from(rows.spd_unit[i])] += 1;
+    }
+    eprintln!(
+        "  speeds by unit: knots {}, mach {}, unknown {}",
+        units[usize::from(oa_tbfm::spd_unit::KNOTS)],
+        units[usize::from(oa_tbfm::spd_unit::MACH)],
+        units[usize::from(oa_tbfm::spd_unit::UNKNOWN)]
+    );
+    assert!(units[usize::from(oa_tbfm::spd_unit::KNOTS)] > 0);
+    assert!(units[usize::from(oa_tbfm::spd_unit::MACH)] > 0);
     assert!(stats.rows > 0);
     assert!(stats.kinds[MsgKind::Air as usize] > 0);
 

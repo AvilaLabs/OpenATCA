@@ -121,7 +121,9 @@ pub struct FieldError {
     pub at: u32,
 }
 
-/// Why a whole message was refused (all or nothing: it yields no rows).
+/// Why a whole message was refused (it yields no rows). A refused field no longer refuses the
+/// message: the `air` (or `tma`) is dropped and counted in [`crate::Outcome::rejected`]; `Field`
+/// is the reason carried by [`crate::Outcome::first_reject`] and by a refused envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocError {
     /// The XML parser refused the bytes (only from [`crate::decode_bytes`]).
@@ -191,6 +193,25 @@ pub const MSG_KIND_NAMES: [&str; MSG_KIND_COUNT] = [
     "sync",
     "mis-other",
 ];
+
+/// Number of [`FieldErrorKind`] values.
+pub const ERROR_KIND_COUNT: usize = 10;
+
+/// The index of a field error kind (for per-reason counts), in declaration order.
+pub fn error_kind_index(k: FieldErrorKind) -> usize {
+    match k {
+        FieldErrorKind::Missing => 0,
+        FieldErrorKind::TooLong => 1,
+        FieldErrorKind::BadChar => 2,
+        FieldErrorKind::Format => 3,
+        FieldErrorKind::Time(_) => 4,
+        FieldErrorKind::Vocabulary => 5,
+        FieldErrorKind::Duplicate => 6,
+        FieldErrorKind::Inconsistent => 7,
+        FieldErrorKind::NotLeaf => 8,
+        FieldErrorKind::Text => 9,
+    }
+}
 
 /// Display names of the field error kinds, for reports.
 pub fn error_kind_name(k: FieldErrorKind) -> &'static str {

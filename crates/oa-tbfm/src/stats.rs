@@ -2,7 +2,9 @@
 //! result of one decode. Core (pure).
 
 use crate::decode::Outcome;
-use crate::fields::{reject_reason, DocError, FIELD_COUNT, MSG_KIND_COUNT, REJECT_COUNT};
+use crate::fields::{
+    reject_reason, DocError, ERROR_KIND_COUNT, FIELD_COUNT, MSG_KIND_COUNT, REJECT_COUNT,
+};
 use crate::rows::section;
 
 /// Totals over a run of messages.
@@ -18,8 +20,17 @@ pub struct Stats {
     pub sections: [u64; 6],
     /// Refused messages by reason ([`crate::REJECT_XML`] and its neighbours).
     pub rejects: [u64; REJECT_COUNT],
-    /// Refused fields by [`crate::Field`] (only messages refused for a field).
+    /// Refused flights (`air` or `tma` elements) by the [`crate::Field`] that refused them, in
+    /// accepted messages, plus the messages refused whole for a field (an envelope attribute).
     pub field_errors: [u64; FIELD_COUNT],
+    /// Flights refused for a field in accepted messages (their siblings were kept).
+    pub rejected_flights: u64,
+    /// The same refusals by reason ([`crate::error_kind_index`]).
+    pub reject_kinds: [u64; ERROR_KIND_COUNT],
+    /// Schedule-flag words kept as unknown instead of refusing the flight.
+    pub unknown_words: u64,
+    /// Speeds stored with the unknown unit (neither knots nor Mach in form).
+    pub unknown_units: u64,
     /// Elements, attributes and namespaces the decoder does not know, in accepted messages.
     pub unknown_paths: u64,
     /// Known elements it deliberately does not store (long free text, adaptation and control
@@ -37,6 +48,10 @@ pub const fn new_stats() -> Stats {
         sections: [0; 6],
         rejects: [0; REJECT_COUNT],
         field_errors: [0; FIELD_COUNT],
+        rejected_flights: 0,
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
         unknown_paths: 0,
         ignored_paths: 0,
     }
@@ -55,6 +70,15 @@ pub fn observe(s: &mut Stats, result: &Result<Outcome, DocError>, sections_added
             }
             s.unknown_paths += u64::from(o.unknown_paths);
             s.ignored_paths += u64::from(o.ignored_paths);
+            s.rejected_flights += u64::from(o.rejected);
+            s.unknown_words += u64::from(o.unknown_words);
+            s.unknown_units += u64::from(o.unknown_units);
+            for (t, &n) in s.field_errors.iter_mut().zip(&o.reject_fields) {
+                *t += u64::from(n);
+            }
+            for (t, &n) in s.reject_kinds.iter_mut().zip(&o.reject_kinds) {
+                *t += u64::from(n);
+            }
             for &c in sections_added {
                 if let Some(x) = s.sections.get_mut(usize::from(c.min(section::SCH))) {
                     *x += 1;

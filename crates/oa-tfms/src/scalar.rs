@@ -56,6 +56,22 @@ pub fn parse_digits(v: &[u8], max_len: usize) -> Result<u32, FieldErrorKind> {
     Ok(n)
 }
 
+/// Like [`parse_digits`], for an identifier of up to 19 digits that does not fit `u32` (the
+/// flight reference and the restriction identifiers are ten digits wide).
+pub fn parse_digits64(v: &[u8], max_len: usize) -> Result<u64, FieldErrorKind> {
+    if v.is_empty() || v.len() > max_len || !v.iter().all(u8::is_ascii_digit) {
+        return Err(FieldErrorKind::Format);
+    }
+    let mut n = 0u64;
+    for &b in v {
+        n = n
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(u64::from(b - b'0')))
+            .ok_or(FieldErrorKind::Format)?;
+    }
+    Ok(n)
+}
+
 /// A timestamp, [`parse_iso_ms`].
 pub fn parse_time(v: &[u8]) -> Result<i64, FieldErrorKind> {
     parse_iso_ms(v).map_err(FieldErrorKind::Time)

@@ -13,8 +13,9 @@
 //! * Shell/offline: [`link`], which reports how many TFMS flights match SFDPS flights
 //!   ([`oa_fixm::Events`]).
 //!
-//! The decoder follows the interface rules (INTERFACES.md): one document is decoded all or
-//! nothing, a refused field rejects the document and says which field and where (IF-R5), the
+//! The decoder follows the interface rules (INTERFACES.md): one message is decoded all or
+//! nothing, a refused field rejects that message (its siblings are kept) and says which field and
+//! where (IF-R5), a document whose structure is unreadable is refused whole, the
 //! output has a stated capacity and reaching it is a reported reject (IF-R1), and unknown
 //! elements are counted, not fatal, so a new FAA field neither breaks the adapter nor goes
 //! unseen (IF-R6).
@@ -30,10 +31,10 @@ pub mod time;
 
 pub use decode::{decode_bytes, decode_doc, decode_doc_prefix, default_limits, Outcome, NAMESPACE};
 pub use fields::{
-    error_kind_name, field_name, reject_reason, CapKind, DocError, DocKind, Field, FieldError,
-    FieldErrorKind, DOC_KIND_COUNT, DOC_KIND_NAMES, FIELD_COUNT, REJECT_CAP_FLIGHTS,
-    REJECT_CAP_FLOWS, REJECT_CAP_STRINGS, REJECT_COUNT, REJECT_FIELD, REJECT_NAMES,
-    REJECT_NOT_TFMS, REJECT_XML,
+    error_kind_index, error_kind_name, field_name, reject_reason, CapKind, DocError, DocKind,
+    Field, FieldError, FieldErrorKind, DOC_KIND_COUNT, DOC_KIND_NAMES, ERROR_KIND_COUNT,
+    FIELD_COUNT, REJECT_CAP_FLIGHTS, REJECT_CAP_FLOWS, REJECT_CAP_STRINGS, REJECT_COUNT,
+    REJECT_FIELD, REJECT_NAMES, REJECT_NOT_TFMS, REJECT_XML,
 };
 pub use link::{format_link_report, link_flights, LinkReport};
 pub use rows::{

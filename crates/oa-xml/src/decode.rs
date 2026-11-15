@@ -1,7 +1,7 @@
 //! Entity and character-reference decoding, with line-end and attribute-value normalisation.
 //! Core (pure); allocates nothing.
 
-use crate::{span_bytes, Span, XmlError};
+use crate::{span_bytes, text_needs_decode, Doc, Span, TextIx, XmlError};
 
 pub(crate) fn off(i: usize) -> u32 {
     u32::try_from(i).unwrap_or(u32::MAX)
@@ -169,6 +169,42 @@ pub fn decode_into(
         w += piece.len();
     })
     .map_err(|e| shift(e, span.start))?;
+    Ok(n)
+}
+
+/// Concatenates the text nodes `first .. first + count` of `doc` (the pieces of one element's
+/// text, which a comment or a CDATA section splits into several nodes) into `out`, decoding
+/// each as element text, and returns the number of bytes written. XML 1.0 defines the character
+/// data of an element as the pieces joined, so `12<!--x-->34` and `<![CDATA[12]]>34` are both
+/// `1234`. `out` bounds the total: a longer value is `OutputTooSmall` at the piece that does
+/// not fit. A node outside the document is `SpanOutOfRange`. On error the contents of `out`
+/// are unspecified (the pieces already written stay), so callers discard it.
+pub fn decode_text_run(
+    doc: &Doc<'_>,
+    first: usize,
+    count: usize,
+    out: &mut [u8],
+) -> Result<usize, XmlError> {
+    let mut n = 0usize;
+    for t in first..first.saturating_add(count) {
+        let span = doc
+            .text_span
+            .get(t)
+            .copied()
+            .ok_or(XmlError::SpanOutOfRange { at: 0 })?;
+        let dst = out.get_mut(n..).unwrap_or(&mut []);
+        let w = if text_needs_decode(doc, TextIx(u32::try_from(t).unwrap_or(u32::MAX))) {
+            decode_into(span, doc.input, dst, SpanKind::Text)?
+        } else {
+            let src = span_bytes(doc.input, span)?;
+            let Some(d) = dst.get_mut(..src.len()) else {
+                return Err(XmlError::OutputTooSmall { at: span.start });
+            };
+            d.copy_from_slice(src);
+            src.len()
+        };
+        n += w;
+    }
     Ok(n)
 }
 

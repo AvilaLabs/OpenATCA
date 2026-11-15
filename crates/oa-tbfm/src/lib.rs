@@ -9,8 +9,9 @@
 //! * Shell/offline: [`xcheck`], which resolves the rows' meter fixes and airports against an
 //!   [`oa_airspace::model::Model`].
 //!
-//! The decoder follows the interface rules (INTERFACES.md): one message is decoded all or
-//! nothing, a refused field rejects the message and says which field and where (IF-R5), the
+//! The decoder follows the interface rules (INTERFACES.md): one flight is decoded all or
+//! nothing, a refused field rejects that flight (its siblings are kept) and says which field and
+//! where (IF-R5), a message whose structure is unreadable is refused whole, the
 //! output has a stated capacity and reaching it is a reported reject (IF-R1), and unknown
 //! elements are counted, not fatal, so a new FAA field neither breaks the adapter nor goes
 //! unseen (IF-R6).
@@ -24,13 +25,13 @@ pub mod xcheck;
 
 pub use decode::{decode_bytes, decode_doc, decode_doc_prefix, default_limits, Outcome, NAMESPACE};
 pub use fields::{
-    error_kind_name, field_name, reject_reason, DocError, Field, FieldError, FieldErrorKind,
-    MsgKind, FIELD_COUNT, MSG_KIND_COUNT, MSG_KIND_NAMES, REJECT_CAPACITY, REJECT_COUNT,
-    REJECT_FIELD, REJECT_NAMES, REJECT_NOT_TBFM, REJECT_XML,
+    error_kind_index, error_kind_name, field_name, reject_reason, DocError, Field, FieldError,
+    FieldErrorKind, MsgKind, ERROR_KIND_COUNT, FIELD_COUNT, MSG_KIND_COUNT, MSG_KIND_NAMES,
+    REJECT_CAPACITY, REJECT_COUNT, REJECT_FIELD, REJECT_NAMES, REJECT_NOT_TBFM, REJECT_XML,
 };
 pub use rows::{
-    clear_rows, is_cleared, name_str, new_rows, push_row, row_at, rows_len, sch_get, truncate_rows,
-    Row, Rows, BLANK_ROW, DEFAULT_ROW_CAPACITY, NO_BCN, NO_NUM, NO_TIME,
+    clear_rows, is_cleared, name_str, new_rows, push_row, row_at, rows_len, sch_get, spd_unit,
+    truncate_rows, Row, Rows, BLANK_ROW, DEFAULT_ROW_CAPACITY, NO_BCN, NO_NUM, NO_TIME,
 };
 pub use stats::{new_stats, observe, Stats};
 pub use time::{parse_iso_ms, TimeError};

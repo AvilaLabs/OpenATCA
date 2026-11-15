@@ -21,7 +21,9 @@
 //!   namespace prefixes.
 //!
 //! Decisions where the specification leaves room: whitespace-only text between markup is not
-//! stored as a text node; spans are raw input bytes, and line-end and attribute-value
+//! stored as a text node (unless it sits next to text or a CDATA section of the same element,
+//! where it is data); the pieces of an element's text that a comment or CDATA section splits are
+//! several text nodes, joined by [`decode_text_run`]; spans are raw input bytes, and line-end and attribute-value
 //! normalisation (XML 1.0 sections 2.11 and 3.3.3) happen when a span is decoded, by
 //! [`decode_into`] and [`span_eq_str`], selected by a [`SpanKind`]; a value that needs
 //! decoding (a reference, or a byte that normalisation changes) is flagged in the `*_entity`
@@ -37,7 +39,7 @@ mod decode;
 mod ns;
 mod parse;
 
-pub use decode::{decode_into, span_eq_str, SpanKind};
+pub use decode::{decode_into, decode_text_run, span_eq_str, SpanKind};
 pub use ns::{resolve_attr_ns, resolve_elem_ns, Ns};
 pub use parse::Parser;
 

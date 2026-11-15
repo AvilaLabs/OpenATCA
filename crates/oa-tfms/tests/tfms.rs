@@ -219,7 +219,8 @@ fn ok(xml: &str) -> (Outcome, Rows) {
     (r.unwrap(), rows)
 }
 
-/// Decodes a document expected to be refused; the rows and the text table must be untouched.
+/// Decodes a document expected to be refused: either the document itself (capacity, structure)
+/// or its one message (the field error). Nothing of it may be left in the rows or the table.
 fn err(xml: &str) -> DocError {
     let (r, rows) = run(xml);
     assert_eq!(
@@ -233,7 +234,13 @@ fn err(xml: &str) -> DocError {
         "a refused document left flow rows"
     );
     assert_eq!(rows.strings_used, 0, "a refused document left text");
-    r.unwrap_err()
+    match r {
+        Ok(o) => {
+            assert_eq!(o.rejected, 1, "accepted: {o:?}");
+            DocError::Field(o.first_reject.unwrap())
+        }
+        Err(e) => e,
+    }
 }
 
 fn one_flight(msg: &str) -> (Outcome, Rows, FlightRow) {
@@ -439,7 +446,7 @@ fn scalar_parsers_are_strict() {
 #[test]
 fn rows_are_plain_struct_of_arrays_with_absent_values() {
     assert_eq!(std::mem::size_of::<FlightRow>(), 408);
-    assert_eq!(std::mem::size_of::<FlowRow>(), 128);
+    assert_eq!(std::mem::size_of::<FlowRow>(), 144);
     assert_eq!(std::mem::size_of::<oa_tfms::StrRef>(), 8);
     // The blank rows hold only absent values.
     let b = BLANK_FLIGHT;
@@ -1078,9 +1085,11 @@ fn track_field_err(from: &str, to: &str) -> FieldError {
     let doc = wrap_flight(&track());
     assert!(doc.contains(from), "fixture lacks {from}");
     let (r, rows) = run(&doc.replacen(from, to, 1));
-    assert!(r.is_err(), "accepted: {from} -> {to}");
     assert_eq!(flights_len(&rows.flights), 0);
-    field_err(r.unwrap_err())
+    match r {
+        Ok(o) if o.rejected == 1 => o.first_reject.unwrap(),
+        other => panic!("not refused: {from} -> {to}: {other:?}"),
+    }
 }
 
 // REQ: OA-TFMS-011
@@ -1119,30 +1128,6 @@ fn every_field_error_names_the_field_and_the_kind() {
             Field::FlightRef,
             K::Format,
         ),
-        (
-            "cdmPart=\"false\"",
-            "cdmPart=\"maybe\"",
-            Field::CdmPart,
-            K::Vocabulary,
-        ),
-        (
-            "fdTrigger=\"HCS_TRACK_MSG\"",
-            "fdTrigger=\"NO_SUCH_TRIGGER\"",
-            Field::Trigger,
-            K::Vocabulary,
-        ),
-        (
-            "aircraftCategory=\"JET\"",
-            "aircraftCategory=\"ROCKET\"",
-            Field::AcCat,
-            K::Vocabulary,
-        ),
-        (
-            "userCategory=\"COMMERCIAL\"",
-            "userCategory=\"PIRATE\"",
-            Field::UserCat,
-            K::Vocabulary,
-        ),
         // times
         (
             "sourceTimeStamp=\"2030-01-02T03:04:05Z\"",
@@ -1167,12 +1152,6 @@ fn every_field_error_names_the_field_and_the_kind() {
             "arrTime=\"2030-01-02T0a:00:00Z\"",
             Field::ArrFixTime,
             K::Time(TimeError::Digit),
-        ),
-        (
-            "etaType=\"ESTIMATED\"",
-            "etaType=\"GUESSED\"",
-            Field::EtaType,
-            K::Vocabulary,
         ),
         (
             "timeValue=\"2030-01-02T04:30:00Z\"",
@@ -1249,12 +1228,6 @@ fn every_field_error_names_the_field_and_the_kind() {
             K::BadChar,
         ),
         // flags
-        (
-            "equipped=\"true\"",
-            "equipped=\"yes\"",
-            Field::RvsmEq,
-            K::Vocabulary,
-        ),
     ];
     let mut wrong = Vec::new();
     for (from, to, field, kind) in cases {
@@ -1265,7 +1238,12 @@ fn every_field_error_names_the_field_and_the_kind() {
             doc.replacen(from, to, 1).as_bytes(),
             &mut new_rows(4, 4, 1 << 12),
         ) {
-            Err(DocError::Field(e)) if (e.field, e.kind) == (*field, *kind) => {
+            Ok(Outcome {
+                rejected: 1,
+                first_reject: Some(e),
+                flight_rows: 0,
+                ..
+            }) if (e.field, e.kind) == (*field, *kind) => {
                 assert!(!field_name(e.field).is_empty());
             }
             other => wrong.push(format!("{from} -> {to}: {other:?}")),
@@ -1281,10 +1259,10 @@ fn every_field_error_names_the_field_and_the_kind() {
         (e.field, e.kind),
         (Field::Position, FieldErrorKind::Missing)
     );
-    // a vocabulary error carries the offset of the offending value
+    // a field error carries the offset of the offending value
     let doc = wrap_flight(&track());
-    let at = doc.find("HCS_TRACK_MSG").unwrap() as u32;
-    let e = field_err(err(&doc.replace("HCS_TRACK_MSG", "NO_SUCH_TRIGGER")));
+    let at = doc.find("100000001").unwrap() as u32;
+    let e = field_err(err(&doc.replace("100000001", "1x")));
     assert_eq!(e.at, at);
     for k in [
         FieldErrorKind::Missing,
@@ -1341,21 +1319,56 @@ fn duplicates_nesting_and_text_errors_are_refused() {
 
 // REQ: OA-TFMS-012
 #[test]
-fn one_bad_message_refuses_the_whole_document_and_leaves_nothing() {
-    let bad = track().replace("HCS_TRACK_MSG", "NO_SUCH_TRIGGER");
-    // good, bad, good: nothing from the good ones is kept
-    let msgs = [track(), bad.clone(), modify()].concat();
-    let e = field_err(err(&wrap_flight(&msgs)));
-    assert_eq!(
-        (e.field, e.kind),
-        (Field::Trigger, FieldErrorKind::Vocabulary)
+fn one_bad_message_is_rolled_back_and_its_siblings_are_kept() {
+    use oa_tfms::error_kind_index;
+    let dup = track().replace(
+        "<nxcm:speed>276</nxcm:speed>",
+        "<nxcm:speed>276</nxcm:speed><nxcm:speed>277</nxcm:speed><nxcm:unseen/>",
     );
-    // a text-table overflow in the last message undoes the earlier rows too
+    let bad_text = track_route().replace(
+        "<nxcm:remarksKeywords>NRP</nxcm:remarksKeywords>",
+        "<nxcm:remarksKeywords>NRP</nxcm:remarksKeywords><nxcm:remarksKeywords>X</nxcm:remarksKeywords>",
+    );
+    // good, bad, bad (after its text was stored), good: only the two good ones are kept
+    let (o, rows) = ok(&wrap_flight(&[track(), dup, bad_text, modify()].concat()));
+    let (clean, clean_rows) = ok(&wrap_flight(&[track(), modify()].concat()));
+    assert_eq!((o.messages, o.flight_rows, o.rejected), (4, 2, 2));
+    assert_eq!(rows.flights.kind, [kind::TRACK, kind::MODIFY]);
+    assert_eq!(rows.flights.acid, clean_rows.flights.acid);
+    // the text table and the path counters are back to what the good messages alone give
+    assert_eq!(rows.strings_used, clean_rows.strings_used);
+    assert_eq!(
+        (o.unknown_paths, o.ignored_paths),
+        (clean.unknown_paths, clean.ignored_paths)
+    );
+    let first = o.first_reject.unwrap();
+    assert_eq!(
+        (first.field, first.kind),
+        (Field::Speed, FieldErrorKind::Duplicate)
+    );
+    assert_eq!(o.reject_fields[Field::Speed as usize], 1);
+    assert_eq!(o.reject_fields[Field::Remarks as usize], 1);
+    assert_eq!(o.reject_fields.iter().sum::<u32>(), 2);
+    assert_eq!(
+        o.reject_kinds[error_kind_index(FieldErrorKind::Duplicate)],
+        2
+    );
+    assert_eq!(o.reject_kinds.iter().sum::<u32>(), 2);
+    assert_eq!(clean.rejected, 0);
+    assert_eq!(clean.first_reject, None);
+    // an unreadable message element (no message type) is one refused message too
+    let nomsg = fm("trackInformation", "<fdm:trackInformation/>")
+        .replace(r#" msgType="trackInformation""#, "");
+    let (o, rows) = ok(&wrap_flight(&[nomsg, track()].concat()));
+    assert_eq!((o.flight_rows, o.rejected), (1, 1));
+    assert_eq!(flights_len(&rows.flights), 1);
+    // a text-table overflow is a capacity error of the document, which undoes earlier rows too
     let (r, rows) = run_with(&wrap_flight(&[track_route(), plan()].concat()), 16, 8, 40);
     assert_eq!(r.unwrap_err(), DocError::Capacity(CapKind::Strings));
     assert_eq!(flights_len(&rows.flights), 0);
     assert_eq!(rows.strings_used, 0);
-    // rows already in the caller's table from earlier documents survive a refused document
+    // rows already in the caller's table from earlier documents survive a document whose only
+    // message is refused
     let mut rows = new_rows(16, 8, 1 << 16);
     let mut p = Parser::new(default_limits()).unwrap();
     decode_bytes(&mut p, wrap_flight(&track_route()).as_bytes(), &mut rows).unwrap();
@@ -1365,8 +1378,9 @@ fn one_bad_message_refuses_the_whole_document_and_leaves_nothing() {
         rows.strings_used,
     );
     assert_eq!((f, w), (1, 0));
-    let e = decode_bytes(&mut p, wrap_flight(&bad).as_bytes(), &mut rows).unwrap_err();
-    assert!(matches!(e, DocError::Field(_)));
+    let bad = track().replace("100000001", "1x");
+    let o = decode_bytes(&mut p, wrap_flight(&bad).as_bytes(), &mut rows).unwrap();
+    assert_eq!((o.rejected, o.flight_rows), (1, 0));
     assert_eq!(
         (
             flights_len(&rows.flights),
@@ -1379,16 +1393,16 @@ fn one_bad_message_refuses_the_whole_document_and_leaves_nothing() {
         text(&rows, flight_at(&rows.flights, 0).unwrap().route),
         "KTAA./.ABC..DEF.STAR1.KTBB/0100"
     );
-    // the same holds for a flow document
+    // the same holds for a flow document: the refused message goes, the other stays
     let bad_flow = rstr().replace(
-        "<ns11:restrictionCategory>MIT<",
-        "<ns11:restrictionCategory>XYZ<",
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        r#"sourceTimeStamp="soon""#,
     );
-    let e = field_err(err(&wrap_fi(&[rstr(), bad_flow].concat())));
-    assert_eq!(
-        (e.field, e.kind),
-        (Field::Category, FieldErrorKind::Vocabulary)
-    );
+    let (o, rows) = ok(&wrap_fi(&[rstr(), bad_flow].concat()));
+    assert_eq!((o.flow_rows, o.rejected), (1, 1));
+    assert_eq!(flows_len(&rows.flows), 1);
+    let first = o.first_reject.unwrap();
+    assert_eq!(first.field, Field::SrcTime);
 }
 
 // REQ: OA-TFMS-013
@@ -1415,7 +1429,7 @@ fn documents_that_are_not_tfms_or_not_xml_are_refused_by_reason() {
         assert!(matches!(e, DocError::NotTfms { .. }), "{doc}");
         assert_eq!(reject_reason(&e), REJECT_NOT_TFMS);
     }
-    let e = err(&wrap_flight(&track()).replace("HCS_TRACK_MSG", "X"));
+    let e = err(&wrap_flight(&track()).replace("100000001", "1x"));
     assert_eq!(reject_reason(&e), REJECT_FIELD);
     assert_eq!(
         [
@@ -1671,7 +1685,7 @@ fn stats_fold_outcomes_rejects_and_field_errors() {
     let docs = [
         wrap_flight(&[track(), modify()].concat()),
         wrap_fi(&rstr()),
-        wrap_flight(&track().replace("HCS_TRACK_MSG", "X")),
+        wrap_flight(&track().replace("100000001", "1x")),
         "<broken".to_string(),
         format!(r#"<a:other xmlns:a="{SVC}"/>"#),
     ];
@@ -1681,19 +1695,26 @@ fn stats_fold_outcomes_rejects_and_field_errors() {
         let r = decode_bytes(&mut p, d.as_bytes(), &mut rows);
         observe(&mut s, &r, &rows.flights.kind[f0..], &rows.flows.kind[w0..]);
     }
-    assert_eq!((s.documents, s.accepted), (5, 2));
-    assert_eq!((s.messages, s.flight_rows, s.flow_rows), (3, 2, 1));
+    // the document with the one refused message is accepted (it has no rows)
+    assert_eq!((s.documents, s.accepted), (5, 3));
+    assert_eq!((s.messages, s.flight_rows, s.flow_rows), (4, 2, 1));
+    assert_eq!(s.rejected_messages, 1);
     assert_eq!(s.flight_kinds[usize::from(kind::TRACK)], 1);
     assert_eq!(s.flight_kinds[usize::from(kind::MODIFY)], 1);
     assert_eq!(s.flow_kinds[usize::from(fkind::RSTR)], 1);
-    assert_eq!(s.doc_kinds[DocKind::Flight as usize], 1);
+    assert_eq!(s.doc_kinds[DocKind::Flight as usize], 2);
     assert_eq!(s.doc_kinds[DocKind::FlowInfo as usize], 1);
-    assert_eq!(s.rejects.iter().sum::<u64>(), 3);
+    assert_eq!(s.rejects.iter().sum::<u64>(), 2);
     assert_eq!(s.rejects[oa_tfms::REJECT_XML], 1);
     assert_eq!(s.rejects[oa_tfms::REJECT_NOT_TFMS], 1);
-    assert_eq!(s.rejects[oa_tfms::REJECT_FIELD], 1);
-    assert_eq!(s.field_errors[Field::Trigger as usize], 1);
+    assert_eq!(s.rejects[oa_tfms::REJECT_FIELD], 0);
+    assert_eq!(s.field_errors[Field::FlightRef as usize], 1);
     assert_eq!(s.field_errors.iter().sum::<u64>(), 1);
+    assert_eq!(
+        s.reject_kinds[oa_tfms::error_kind_index(FieldErrorKind::Format)],
+        1
+    );
+    assert_eq!(s.unknown_words, 0);
     assert_eq!(FIELD_COUNT, s.field_errors.len());
 }
 
@@ -1727,7 +1748,7 @@ fn sfdps(ev: &mut oa_fixm::Events, gufi: u128, plan: &str, acid: &str, dep: &str
 }
 
 /// A TFMS flight row for the linkage.
-fn tfms(rows: &mut Rows, flight_ref: u32, gufi: &str, acid: &str, dep: &str, arr: &str) {
+fn tfms(rows: &mut Rows, flight_ref: u64, gufi: &str, acid: &str, dep: &str, arr: &str) {
     let mut r = BLANK_FLIGHT;
     r.flight_ref = flight_ref;
     for (dst, src) in [
@@ -1850,4 +1871,178 @@ fn the_default_capacities_and_the_vocabularies_are_consistent() {
     const { assert!(MAX_DEPTH >= 8) };
     assert!(!BODIES.is_empty() && !FLOW_BODIES.is_empty());
     let _ = FLIGHT_DATA;
+}
+
+// ---- OA-TFMS-023 .. 026: messages refused alone, unknown words, wide ids, split text -------
+
+// REQ: OA-TFMS-023
+#[test]
+fn a_tmi_flight_list_keeps_its_valid_entries_when_one_is_refused() {
+    let list = |entries: &[String]| {
+        fi(
+            "TMI_FLIGHT_LIST",
+            &format!(
+                "<ns12:tmiFlightDataList>{}</ns12:tmiFlightDataList>",
+                entries.concat()
+            ),
+        )
+    };
+    let bad = tmi_entry(
+        "TST2",
+        "100000011",
+        "<ns9:flightReference>5</ns9:flightReference>",
+    );
+    let (o, rows) = ok(&wrap_fi(&list(&[
+        tmi_entry("TST1", "100000010", ""),
+        bad,
+        tmi_entry("TST3", "100000012", ""),
+    ])));
+    assert_eq!((o.messages, o.flight_rows, o.rejected), (1, 2, 1));
+    assert_eq!(rows.flights.flight_ref, [100_000_010, 100_000_012]);
+    assert_eq!(
+        o.first_reject.map(|e| (e.field, e.kind)),
+        Some((Field::FlightRef, FieldErrorKind::Duplicate))
+    );
+    // an entry without a flight reference is refused alone too
+    let bare = "<ns12:flightData><ns9:flight><ns7:aircraftId>TST4</ns7:aircraftId></ns9:flight></ns12:flightData>".to_string();
+    let (o, rows) = ok(&wrap_fi(&list(&[bare, tmi_entry("TST1", "100000010", "")])));
+    assert_eq!((o.flight_rows, o.rejected), (1, 1));
+    assert_eq!(rows.flights.flight_ref, [100_000_010]);
+}
+
+// REQ: OA-TFMS-024
+#[test]
+fn a_word_outside_a_vocabulary_is_kept_as_unknown_and_counted() {
+    use oa_tfms::rows::UNKNOWN_WORD;
+    let doc = wrap_flight(&track())
+        .replace("HCS_TRACK_MSG", "BRAND_NEW_TRIGGER")
+        .replace("aircraftCategory=\"JET\"", "aircraftCategory=\"ROCKET\"")
+        .replace("userCategory=\"COMMERCIAL\"", "userCategory=\"PIRATE\"")
+        .replace("cdmPart=\"false\"", "cdmPart=\"maybe\"")
+        .replace("etaType=\"ESTIMATED\"", "etaType=\"GUESSED\"")
+        .replace("equipped=\"true\"", "equipped=\"yes\"");
+    let (o, rows) = ok(&doc);
+    assert_eq!((o.flight_rows, o.rejected, o.unknown_words), (1, 0, 6));
+    let r = flight_at(&rows.flights, 0).unwrap();
+    assert_eq!(r.trigger, UNKNOWN_WORD);
+    assert_eq!(
+        (r.ac_cat, r.user_cat, r.eta_type),
+        (UNKNOWN_WORD, UNKNOWN_WORD, UNKNOWN_WORD)
+    );
+    assert_eq!(flag_get(r.flags, flag::CDM_PART), flag::UNKNOWN);
+    assert_eq!(flag_get(r.flags, flag::RVSM_EQ), flag::UNKNOWN);
+    // everything else in the message is read as usual
+    assert_eq!(nm(&r.acid), "TST123");
+    assert_eq!(r.speed_kt, 276);
+    assert_eq!(r.lat_e7, 417_733_333);
+    // the other vocabulary fields: a restriction category and scope, a general flow status
+    let flow = wrap_fi(&rstr())
+        .replace(
+            "<ns11:restrictionCategory>MIT<",
+            "<ns11:restrictionCategory>XYZ<",
+        )
+        .replace(
+            "<ns11:restrictionType>ARRIVAL<",
+            "<ns11:restrictionType>SIDEWAYS<",
+        );
+    let (o, rows) = ok(&flow);
+    assert_eq!((o.flow_rows, o.rejected, o.unknown_words), (1, 0, 2));
+    assert_eq!(rows.flows.program[0], UNKNOWN_WORD);
+    assert_eq!(rows.flows.scope[0], UNKNOWN_WORD);
+    // the direction of a position cannot be unknown: the message is refused
+    let e = field_err(err(
+        &wrap_flight(&track()).replace("direction=\"NORTH\"", "direction=\"UP\"")
+    ));
+    assert_eq!(
+        (e.field, e.kind),
+        (Field::LatDir, FieldErrorKind::Vocabulary)
+    );
+    // a known word is still stored as itself, and the count adds up in the statistics
+    let mut s = new_stats();
+    let r = decode_bytes(
+        &mut Parser::new(default_limits()).unwrap(),
+        doc.as_bytes(),
+        &mut new_rows(4, 4, 1 << 12),
+    );
+    observe(&mut s, &r, &[], &[]);
+    assert_eq!(s.unknown_words, 6);
+    assert_eq!(s.rejected_messages, 0);
+}
+
+// REQ: OA-TFMS-025
+#[test]
+fn ten_digit_identifiers_do_not_overflow() {
+    let (_, _, r) = one_flight(&track().replace("100000001", "9999999999"));
+    assert_eq!(r.flight_ref, 9_999_999_999);
+    let (_, _, r) = one_flight(&track().replace("100000001", "4294967296"));
+    assert_eq!(r.flight_ref, 4_294_967_296);
+    let big = rstr()
+        .replace(
+            "<ns11:restrictionId>20300101<",
+            "<ns11:restrictionId>5000000000<",
+        )
+        .replace("<ns11:mitNumber>278529<", "<ns11:mitNumber>9999999999<")
+        .replace(
+            "<ns11:referenceRestrictionId>7<",
+            "<ns11:referenceRestrictionId>4294967295<",
+        );
+    let (_, _, w) = one_flow(&big);
+    assert_eq!(
+        (w.id, w.number, w.ref_id),
+        (5_000_000_000, 9_999_999_999, 4_294_967_295)
+    );
+    // eleven digits is still too many
+    let e = field_err(err(&wrap_flight(
+        &track().replace("100000001", "10000000000"),
+    )));
+    assert_eq!(
+        (e.field, e.kind),
+        (Field::FlightRef, FieldErrorKind::Format)
+    );
+    assert_eq!(
+        oa_tfms::scalar::parse_digits64(b"18446744073709551615", 20),
+        Ok(u64::MAX)
+    );
+    assert_eq!(
+        oa_tfms::scalar::parse_digits64(b"18446744073709551616", 20),
+        Err(FieldErrorKind::Format)
+    );
+    assert_eq!(
+        oa_tfms::scalar::parse_digits64(b"", 10),
+        Err(FieldErrorKind::Format)
+    );
+}
+
+// REQ: OA-TFMS-026
+#[test]
+fn text_split_by_a_comment_or_cdata_is_joined() {
+    let (_, _, r) = one_flight(&track().replace(
+        "<nxcm:speed>276</nxcm:speed>",
+        "<nxcm:speed>2<!--note-->7<![CDATA[6]]></nxcm:speed>",
+    ));
+    assert_eq!(r.speed_kt, 276);
+    // a name, and free text that goes into the text table
+    let route = track_route().replace(
+        "<nxcm:routeOfFlight>KTAA./.ABC..DEF.STAR1.KTBB/0100</nxcm:routeOfFlight>",
+        "<nxcm:routeOfFlight>KTAA./.ABC<!--x-->..DEF.<![CDATA[STAR1]]>.KTBB/0100</nxcm:routeOfFlight>",
+    );
+    let (_, rows, r) = one_flight(&route);
+    assert_eq!(text(&rows, r.route), "KTAA./.ABC..DEF.STAR1.KTBB/0100");
+    let a = track().replace(
+        "<nxce:aircraftId>TST123</nxce:aircraftId>",
+        "<nxce:aircraftId>TST<!--x-->123</nxce:aircraftId>",
+    );
+    let (_, _, r) = one_flight(&a);
+    assert_eq!(nm(&r.acid), "TST123");
+    // the bound still applies to the joined value: 40 + 40 bytes do not fit a name
+    let long = format!("{0}<!--x-->{0}", "A".repeat(40));
+    let x = track().replace(
+        "<nxce:aircraftId>TST123</nxce:aircraftId>",
+        &format!("<nxce:aircraftId>{long}</nxce:aircraftId>"),
+    );
+    let e = field_err(err(&wrap_flight(&x)));
+    assert_eq!((e.field, e.kind), (Field::Acid, FieldErrorKind::TooLong));
+    // and a string table that is too small for joined free text is the capacity reject
+    let (r, _) = run_with(&wrap_flight(&route), 4, 4, 8);
+    assert_eq!(r.unwrap_err(), DocError::Capacity(CapKind::Strings));
 }

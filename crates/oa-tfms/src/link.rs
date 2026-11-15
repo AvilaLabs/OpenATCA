@@ -128,7 +128,7 @@ pub fn link_flights(ev: &Events, rows: &Rows) -> LinkReport {
 
     // TFMS flights, one per flight reference, folded over their rows.
     let fl = &rows.flights;
-    let mut flights: BTreeMap<u32, Flight> = BTreeMap::new();
+    let mut flights: BTreeMap<u64, Flight> = BTreeMap::new();
     for i in 0..flights_len(fl) {
         let (Some(&r), Some(acid), Some(gufi), Some(dep), Some(arr)) = (
             fl.flight_ref.get(i),

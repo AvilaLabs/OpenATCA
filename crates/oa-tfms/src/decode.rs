@@ -5,9 +5,19 @@
 //! * One flight row per `fltdMessage` of a `fltdOutput`, and one per `flightData` entry of a
 //!   `TMI_FLIGHT_LIST`; one flow row per `RSTR`, `GADV`, `FXA` or `APTC` message. Interface
 //!   status documents (`tfmsStatusOutput`) produce no rows and are counted.
-//! * All or nothing per document: any refused field, a capacity overrun or a wrong root rejects
-//!   the whole document and leaves the rows and the text table exactly as they were (RULESET
-//!   E5, INTERFACES IF-R5).
+//! * All or nothing per message, not per document: a message with a refused field (a repeated
+//!   leaf, a bad number, a missing identity) is rolled back to nothing and counted in
+//!   [`Outcome::rejected`] with its reason, and its valid sibling messages are kept (a TMI
+//!   flight list keeps its other entries the same way). Only a document whose structure is
+//!   unreadable (XML error, wrong root) or that overruns a capacity is refused whole, leaving
+//!   the rows and the text table exactly as they were (RULESET E5, INTERFACES IF-R5).
+//! * A word outside a vocabulary (a trigger, a status, a category, a time type, a program, a
+//!   scope, a true/false flag) does not refuse the message: the column holds the unknown code
+//!   ([`crate::rows::UNKNOWN_WORD`], [`crate::rows::flag::UNKNOWN`]) and the word is counted in
+//!   [`Outcome::unknown_words`]. The one exception is the direction of a position, which the
+//!   position cannot be read without.
+//! * Element text split by a comment or a CDATA section is joined (XML 1.0) before it is
+//!   validated; the size bounds apply to the joined value.
 //! * The walk is driven by the static tables of [`crate::schema`]: each message type has a body
 //!   table, elements are matched by namespace URI and local name, and each visited element's
 //!   attributes and text go to the field the table names. Strict field parsers: names are
@@ -26,23 +36,26 @@
 //!   recurses), skips ignored subtrees without entering them, and decodes a value into a 64-byte
 //!   stack buffer; free text goes straight into the caller's text table.
 
-use crate::fields::{CapKind, DocError, DocKind, Field, FieldError, FieldErrorKind};
+use crate::fields::{
+    error_kind_index, CapKind, DocError, DocKind, Field, FieldError, FieldErrorKind,
+    ERROR_KIND_COUNT, FIELD_COUNT,
+};
 use crate::rows::{
     accat, divert, fkind, flag, flights_len, flows_len, kind, prog, push_flight, push_flow, scope,
     status, text, trig, truncate_rows, ttype, ucat, FlightRow, FlowRow, Rows, StrRef, BLANK_FLIGHT,
-    BLANK_FLOW, NO_TIME,
+    BLANK_FLOW, NO_TIME, UNKNOWN_WORD,
 };
 use crate::scalar::{
     contains_word, dms_e7, parse_altitude, parse_bool, parse_decimal_e7, parse_digits,
-    parse_letter, parse_name, parse_speed, parse_time, parse_vocab, parse_words,
+    parse_digits64, parse_letter, parse_name, parse_speed, parse_time, parse_vocab, parse_words,
 };
 use crate::schema::{
     ns_uri, At, El, Nsx, BODIES, EMPTY, FI_MESSAGE, FLIGHT_DATA, FLOW_BODIES, FLTD_MESSAGE,
     MAX_DEPTH, TMI_LIST_BODY, TMI_LIST_TYPE,
 };
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_elem_ns, span_bytes, text_needs_decode, Doc, ElemIx,
-    Limits, Ns, Parser, Span, SpanKind, XmlError,
+    attr_needs_decode, decode_into, decode_text_run, resolve_elem_ns, span_bytes,
+    text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind, XmlError,
 };
 
 /// The TFM data service namespace, of the root and its outputs.
@@ -68,6 +81,17 @@ pub struct Outcome {
     /// Flight and flow rows read but not appended because `Rows` was full
     /// ([`decode_doc_prefix`] only; always 0 from [`decode_doc`]).
     pub dropped: u32,
+    /// Messages (or TMI flight list entries) refused for a field and rolled back; they are
+    /// counted in `messages` too, and add no rows.
+    pub rejected: u32,
+    /// The first refused field of the document, with its reason and offset.
+    pub first_reject: Option<FieldError>,
+    /// Refused messages by [`Field`] (index `field as usize`) and by reason
+    /// ([`error_kind_index`]); each sums to `rejected`.
+    pub reject_fields: [u32; FIELD_COUNT],
+    pub reject_kinds: [u32; ERROR_KIND_COUNT],
+    /// Words outside a vocabulary that were kept as unknown instead of refusing the message.
+    pub unknown_words: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -109,6 +133,10 @@ fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, 
         t: 0,
         unknown: 0,
         ignored: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
     };
     let r = decode_root(doc, &mut acc, rows, prefix);
     if r.is_err() {
@@ -122,6 +150,10 @@ struct Acc {
     t: usize,
     unknown: u32,
     ignored: u32,
+    rejected: u32,
+    first_reject: Option<FieldError>,
+    reject_fields: [u32; FIELD_COUNT],
+    reject_kinds: [u32; ERROR_KIND_COUNT],
 }
 
 /// Degrees, minutes, seconds and hemisphere of one coordinate, collected from four attributes.
@@ -148,6 +180,19 @@ struct Ctx<'r> {
     /// A row that does not fit is counted in `dropped` instead of failing the document.
     prefix: bool,
     dropped: u32,
+    /// Vocabulary words kept as unknown.
+    unknown_words: u32,
+}
+
+/// Where a value's bytes are: one span (an attribute value, or a text node), or a run of text
+/// nodes that a comment or CDATA section split (`count` of them from `first`; 0 for a span).
+#[derive(Clone, Copy)]
+struct Val {
+    span: Span,
+    flagged: bool,
+    kind: SpanKind,
+    first: usize,
+    count: usize,
 }
 
 fn ferr(field: Field, kind: FieldErrorKind, at: u32) -> DocError {
@@ -228,29 +273,46 @@ fn attr_ref<'a>(doc: &Doc<'a>, e: ElemIx, i: u32) -> AttrRef<'a> {
 
 fn value_bytes<'x>(
     doc: &Doc<'x>,
-    span: Span,
-    needs_decode: bool,
-    kind: SpanKind,
+    v: Val,
     buf: &'x mut [u8; MAX_VALUE],
 ) -> Result<&'x [u8], FieldErrorKind> {
-    if !needs_decode {
-        return span_bytes(doc.input, span).map_err(|_| FieldErrorKind::Text);
+    if v.count > 1 {
+        return match decode_text_run(doc, v.first, v.count, buf) {
+            Ok(n) => buf.get(..n).ok_or(FieldErrorKind::Text),
+            Err(XmlError::OutputTooSmall { .. }) => Err(FieldErrorKind::TooLong),
+            Err(_) => Err(FieldErrorKind::Text),
+        };
     }
-    match decode_into(span, doc.input, buf, kind) {
+    if !v.flagged {
+        return span_bytes(doc.input, v.span).map_err(|_| FieldErrorKind::Text);
+    }
+    match decode_into(v.span, doc.input, buf, v.kind) {
         Ok(n) => buf.get(..n).ok_or(FieldErrorKind::Text),
         Err(XmlError::OutputTooSmall { .. }) => Err(FieldErrorKind::TooLong),
         Err(_) => Err(FieldErrorKind::Text),
     }
 }
 
-/// The text span of leaf element `e`, `None` when it has none. Elements must be asked for in
-/// document order; the cursor in `acc` skips the text nodes of everything visited before.
+/// An attribute value as a [`Val`].
+fn attr_val(a: &AttrRef<'_>) -> Val {
+    Val {
+        span: a.span,
+        flagged: a.flagged,
+        kind: SpanKind::AttrValue,
+        first: 0,
+        count: 0,
+    }
+}
+
+/// The text of leaf element `e`, `None` when it has none. Elements must be asked for in
+/// document order; the cursor in `acc` skips the text nodes of everything visited before. Text
+/// that a comment or CDATA section split is one value over several nodes.
 fn leaf_text(
     doc: &Doc<'_>,
     acc: &mut Acc,
     e: ElemIx,
     field: Field,
-) -> Result<Option<(Span, bool)>, DocError> {
+) -> Result<Option<Val>, DocError> {
     let at = elem_at(doc, e);
     if first_child(doc, e) != ElemIx::NONE {
         return Err(ferr(field, FieldErrorKind::NotLeaf, at));
@@ -263,15 +325,19 @@ fn leaf_text(
     while acc.t < n && doc.text_owner.get(acc.t) == Some(&e) {
         acc.t += 1;
     }
-    match acc.t - first {
-        0 => Ok(None),
-        1 => {
-            let span = doc.text_span.get(first).copied().unwrap_or_default();
-            let flagged = text_needs_decode(doc, oa_xml::TextIx(first as u32));
-            Ok(Some((span, flagged)))
-        }
-        _ => Err(ferr(field, FieldErrorKind::Text, at)),
+    let count = acc.t - first;
+    if count == 0 {
+        return Ok(None);
     }
+    let span = doc.text_span.get(first).copied().unwrap_or_default();
+    let flagged = text_needs_decode(doc, oa_xml::TextIx(first as u32));
+    Ok(Some(Val {
+        span,
+        flagged,
+        kind: SpanKind::Text,
+        first,
+        count,
+    }))
 }
 
 // ---- storing a value -----------------------------------------------------------------------
@@ -353,7 +419,7 @@ fn store_small(c: &mut Ctx<'_>, field: Field, v: &[u8]) -> Result<(), FieldError
     match field {
         F::MsgType => {}
         F::Acid => same_name(&mut c.f.acid, v)?,
-        F::FlightRef => c.f.flight_ref = parse_digits(v, 10)?,
+        F::FlightRef => c.f.flight_ref = parse_digits64(v, 10)?,
         F::Airline => c.f.airline = parse_name(v)?,
         F::Major => c.f.major = parse_name(v)?,
         F::Dep => same_name(&mut c.f.dep, v)?,
@@ -464,9 +530,9 @@ fn store_small(c: &mut Ctx<'_>, field: Field, v: &[u8]) -> Result<(), FieldError
                 _ => return Err(FieldErrorKind::Vocabulary),
             };
         }
-        F::FId => c.w.id = parse_digits(v, 10)?,
-        F::FNumber => c.w.number = parse_digits(v, 10)?,
-        F::FRefId => c.w.ref_id = parse_digits(v, 10)?,
+        F::FId => c.w.id = parse_digits64(v, 10)?,
+        F::FNumber => c.w.number = parse_digits64(v, 10)?,
+        F::FRefId => c.w.ref_id = parse_digits64(v, 10)?,
         F::FAction => {
             c.w.action = u16::try_from(parse_digits(v, 3)?).map_err(|_| FieldErrorKind::Format)?;
         }
@@ -518,11 +584,16 @@ fn put_text(
     doc: &Doc<'_>,
     c: &mut Ctx<'_>,
     field: Field,
-    span: Span,
-    flagged: bool,
-    kind: SpanKind,
+    val: Val,
     at: u32,
 ) -> Result<(), DocError> {
+    let Val {
+        span,
+        flagged,
+        kind,
+        first,
+        count,
+    } = val;
     if field == Field::Route && c.f.flags & flag::ROUTE_LEGACY != 0 {
         return Ok(());
     }
@@ -530,7 +601,15 @@ fn put_text(
     let Some(dst) = c.rows.strings.get_mut(used..) else {
         return Err(DocError::Capacity(CapKind::Strings));
     };
-    let n = if flagged {
+    let n = if count > 1 {
+        match decode_text_run(doc, first, count, dst) {
+            Ok(n) => n,
+            Err(XmlError::OutputTooSmall { .. }) => {
+                return Err(DocError::Capacity(CapKind::Strings));
+            }
+            Err(_) => return Err(ferr(field, FieldErrorKind::Text, at)),
+        }
+    } else if flagged {
         match decode_into(span, doc.input, dst, kind) {
             Ok(n) => n,
             Err(XmlError::OutputTooSmall { .. }) => {
@@ -580,9 +659,7 @@ fn store_value(
     doc: &Doc<'_>,
     c: &mut Ctx<'_>,
     field: Field,
-    span: Span,
-    flagged: bool,
-    kind: SpanKind,
+    val: Val,
     at: u32,
 ) -> Result<(), DocError> {
     if !is_same(field) {
@@ -593,11 +670,47 @@ fn store_value(
         c.seen |= bit;
     }
     if is_text(field) {
-        return put_text(doc, c, field, span, flagged, kind, at);
+        return put_text(doc, c, field, val, at);
     }
     let mut buf = [0u8; MAX_VALUE];
-    let v = value_bytes(doc, span, flagged, kind, &mut buf).map_err(|k| ferr(field, k, at))?;
-    store_small(c, field, v).map_err(|k| ferr(field, k, at))
+    let v = value_bytes(doc, val, &mut buf).map_err(|k| ferr(field, k, at))?;
+    match store_small(c, field, v) {
+        Ok(()) => Ok(()),
+        Err(FieldErrorKind::Vocabulary) if mark_unknown(c, field) => {
+            c.unknown_words = c.unknown_words.saturating_add(1);
+            Ok(())
+        }
+        Err(k) => Err(ferr(field, k, at)),
+    }
+}
+
+/// Records that `field` held a word outside its vocabulary, in the field's column. False for a
+/// field whose message cannot be kept without the word (the direction of a position).
+fn mark_unknown(c: &mut Ctx<'_>, field: Field) -> bool {
+    use Field as F;
+    match field {
+        F::Trigger => c.f.trigger = UNKNOWN_WORD,
+        F::CdmPart => set_flag(&mut c.f.flags, flag::CDM_PART, flag::UNKNOWN),
+        F::RvsmEq => set_flag(&mut c.f.flags, flag::RVSM_EQ, flag::UNKNOWN),
+        F::RvsmCur => set_flag(&mut c.f.flags, flag::RVSM_CUR, flag::UNKNOWN),
+        F::RvsmFut => set_flag(&mut c.f.flags, flag::RVSM_FUT, flag::UNKNOWN),
+        F::TodEst => set_flag(&mut c.f.flags, flag::TOD_EST, flag::UNKNOWN),
+        F::ToaEst => set_flag(&mut c.f.flags, flag::TOA_EST, flag::UNKNOWN),
+        F::AcCat => c.f.ac_cat = UNKNOWN_WORD,
+        F::UserCat => c.f.user_cat = UNKNOWN_WORD,
+        F::EtaType => c.f.eta_type = UNKNOWN_WORD,
+        F::EtdType => c.f.etd_type = UNKNOWN_WORD,
+        F::Status | F::TmiStatus => c.f.status = UNKNOWN_WORD,
+        F::EngClass => c.f.eng_class = UNKNOWN_WORD,
+        F::Diversion => c.f.diversion = UNKNOWN_WORD,
+        F::CoordType => c.f.coord_type = UNKNOWN_WORD,
+        F::TmiUpdate => c.f.tmi_update = UNKNOWN_WORD,
+        F::Category | F::FcaType => c.w.program = UNKNOWN_WORD,
+        F::Scope => c.w.scope = UNKNOWN_WORD,
+        F::FStatus => c.w.status = UNKNOWN_WORD,
+        _ => return false,
+    }
+    true
 }
 
 // ---- the walk ------------------------------------------------------------------------------
@@ -628,15 +741,7 @@ fn enter(
         };
         match known {
             Some(&At { f: Some(f), .. }) => {
-                store_value(
-                    doc,
-                    c,
-                    f,
-                    a.span,
-                    a.flagged,
-                    SpanKind::AttrValue,
-                    a.span.start,
-                )?;
+                store_value(doc, c, f, attr_val(&a), a.span.start)?;
             }
             Some(_) => acc.ignored += 1,
             None => acc.unknown += 1,
@@ -646,8 +751,8 @@ fn enter(
         bump(c, f);
     }
     if let Some(f) = def.text {
-        if let Some((span, flagged)) = leaf_text(doc, acc, e, f)? {
-            store_value(doc, c, f, span, flagged, SpanKind::Text, span.start)?;
+        if let Some(v) = leaf_text(doc, acc, e, f)? {
+            store_value(doc, c, f, v, v.span.start)?;
         }
     }
     Ok(())
@@ -739,7 +844,7 @@ fn msg_type<'x>(
     for i in 0..attr_count(doc, m) {
         let a = attr_ref(doc, m, i);
         if a.name == b"msgType" {
-            return value_bytes(doc, a.span, a.flagged, SpanKind::AttrValue, buf)
+            return value_bytes(doc, attr_val(&a), buf)
                 .map_err(|k| ferr(Field::MsgType, k, a.span.start));
         }
     }
@@ -748,6 +853,60 @@ fn msg_type<'x>(
         FieldErrorKind::Missing,
         elem_at(doc, m),
     ))
+}
+
+/// The state a message starts from, to roll back to when the message is refused.
+#[derive(Clone, Copy)]
+struct Mark {
+    flights: usize,
+    flows: usize,
+    strings: usize,
+    unknown: u32,
+    ignored: u32,
+    words: u32,
+    dropped: u32,
+}
+
+fn mark(acc: &Acc, c: &Ctx<'_>) -> Mark {
+    Mark {
+        flights: flights_len(&c.rows.flights),
+        flows: flows_len(&c.rows.flows),
+        strings: c.rows.strings_used,
+        unknown: acc.unknown,
+        ignored: acc.ignored,
+        words: c.unknown_words,
+        dropped: c.dropped,
+    }
+}
+
+/// Runs `f` (the decode of one message); a refused field rolls the rows, the text table and the
+/// counters back to the start of the message and records the refusal, so the sibling messages
+/// are kept. Any other error (a capacity overrun) passes through and refuses the document.
+fn guarded(
+    acc: &mut Acc,
+    c: &mut Ctx<'_>,
+    f: impl FnOnce(&mut Acc, &mut Ctx<'_>) -> Result<(), DocError>,
+) -> Result<(), DocError> {
+    let m = mark(acc, c);
+    match f(acc, c) {
+        Err(DocError::Field(fe)) => {
+            truncate_rows(c.rows, m.flights, m.flows, m.strings);
+            acc.unknown = m.unknown;
+            acc.ignored = m.ignored;
+            c.unknown_words = m.words;
+            c.dropped = m.dropped;
+            acc.rejected = acc.rejected.saturating_add(1);
+            acc.first_reject.get_or_insert(fe);
+            if let Some(x) = acc.reject_fields.get_mut(fe.field as usize) {
+                *x = x.saturating_add(1);
+            }
+            if let Some(x) = acc.reject_kinds.get_mut(error_kind_index(fe.kind)) {
+                *x = x.saturating_add(1);
+            }
+            Ok(())
+        }
+        r => r,
+    }
 }
 
 fn reset(c: &mut Ctx<'_>) {
@@ -916,12 +1075,16 @@ fn decode_tmi_list(
             let mut fd = first_child(doc, ch);
             while fd != ElemIx::NONE {
                 if elem_name(doc, fd) == FLIGHT_DATA.name && in_ns(doc, fd, FLIGHT_DATA.ns) {
-                    c.f = base;
-                    c.f.kind = kind::TMI_LIST;
-                    reset(c);
-                    walk(doc, acc, c, fd, &FLIGHT_DATA)?;
-                    require_flight(c, elem_at(doc, fd), false)?;
-                    push_staged_flight(c)?;
+                    // One entry is one message of the list: a refused entry is rolled back
+                    // alone and the others stay.
+                    guarded(acc, c, |acc, c| {
+                        c.f = base;
+                        c.f.kind = kind::TMI_LIST;
+                        reset(c);
+                        walk(doc, acc, c, fd, &FLIGHT_DATA)?;
+                        require_flight(c, elem_at(doc, fd), false)?;
+                        push_staged_flight(c)
+                    })?;
                 } else {
                     acc.unknown += 1;
                 }
@@ -997,6 +1160,7 @@ fn decode_root(
         lon: Dms::default(),
         prefix,
         dropped: 0,
+        unknown_words: 0,
     };
     let mut kind = None;
     let mut messages = 0u32;
@@ -1010,7 +1174,7 @@ fn decode_root(
             while m != ElemIx::NONE {
                 if elem_name(doc, m) == FLTD_MESSAGE.name && in_ns(doc, m, Nsx::Fd) {
                     messages += 1;
-                    decode_fltd_message(doc, acc, &mut c, m)?;
+                    guarded(acc, &mut c, |acc, c| decode_fltd_message(doc, acc, c, m))?;
                 } else {
                     acc.unknown += 1;
                 }
@@ -1022,7 +1186,7 @@ fn decode_root(
             while m != ElemIx::NONE {
                 if elem_name(doc, m) == FI_MESSAGE.name && in_ns(doc, m, Nsx::Fi) {
                     messages += 1;
-                    decode_fi_message(doc, acc, &mut c, m)?;
+                    guarded(acc, &mut c, |acc, c| decode_fi_message(doc, acc, c, m))?;
                 } else {
                     acc.unknown += 1;
                 }
@@ -1047,5 +1211,10 @@ fn decode_root(
         unknown_paths: acc.unknown,
         ignored_paths: acc.ignored,
         dropped: c.dropped,
+        rejected: acc.rejected,
+        first_reject: acc.first_reject,
+        reject_fields: acc.reject_fields,
+        reject_kinds: acc.reject_kinds,
+        unknown_words: c.unknown_words,
     })
 }

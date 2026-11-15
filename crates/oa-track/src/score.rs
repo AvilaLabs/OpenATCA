@@ -428,6 +428,17 @@ impl std::fmt::Display for ScoreError {
 
 impl std::error::Error for ScoreError {}
 
+/// The altitude a row is scored with, feet: its rounded value, or [`NO_ALT`] when the row has
+/// none (flag clear, or a column that is not a number), so an absent altitude is never scored
+/// as 0 ft.
+pub fn scored_altitude_ft(flags: u8, alt_ft: f32) -> i32 {
+    if flags & O_HAS_ALT != 0 && alt_ft.is_finite() {
+        alt_ft.round() as i32
+    } else {
+        NO_ALT
+    }
+}
+
 /// Which rows of a run are scored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowSet {
@@ -474,11 +485,10 @@ pub fn score(
     let alt: Vec<i32> = ticks
         .iter()
         .map(|&i| {
-            if o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0) {
-                o.alt_ft.get(i).map_or(NO_ALT, |&a| a.round() as i32)
-            } else {
-                NO_ALT
-            }
+            scored_altitude_ft(
+                o.flags.get(i).copied().unwrap_or(0),
+                o.alt_ft.get(i).copied().unwrap_or(f32::NAN),
+            )
         })
         .collect();
     let ve: Vec<f32> = ticks
