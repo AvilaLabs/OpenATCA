@@ -65,7 +65,7 @@ use crate::fusion_params::{
     REG_AGREE_SIGMAS, REG_CUSUM_CLIP, REG_CUSUM_H, REG_CUSUM_K, REG_DEFAULT_SCAN_NS,
     REG_GATE_SIGMAS, REG_LIMIT_AZ_DEG, REG_LIMIT_RANGE_M, REG_MIN_REFS, REG_PRIOR_SIGMA_AZ_DEG,
     REG_PRIOR_SIGMA_RANGE_M, REG_Q_AZ_DEG2_PER_S, REG_Q_RANGE_M2_PER_S, REG_REF_MEMORY,
-    REG_REF_MIN_SAMPLES, REG_REF_SLOTS, REG_REF_STALE_SCANS, REG_REF_WINDOW_NS,
+    REG_REF_MIN_SAMPLES, REG_REF_SLOTS, REG_REF_SLOTS_MAX, REG_REF_STALE_SCANS, REG_REF_WINDOW_NS,
 };
 use crate::radar::{polar_of, Bias, RadarGeom, RadarPlot, RadarSite, FT_M};
 
@@ -179,7 +179,7 @@ pub fn reg_new() -> RegState {
 /// The estimator at the prior with `slots` reference slots (at least one) for a radar whose scan
 /// takes `scan_ns`: a slot is given up after [`REG_REF_STALE_SCANS`] scans without a residual.
 pub fn reg_new_with(slots: usize, scan_ns: i64) -> RegState {
-    let slots = slots.max(1);
+    let slots = slots.clamp(1, REG_REF_SLOTS_MAX);
     RegState {
         range_m: 0.0,
         var_range_m2: REG_PRIOR_SIGMA_RANGE_M * REG_PRIOR_SIGMA_RANGE_M,

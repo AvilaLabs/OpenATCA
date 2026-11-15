@@ -143,6 +143,9 @@ pub fn build_synthetic_truth(
     trajs: &[Traj],
 ) -> Result<Truth, SynthError> {
     let bad = |w: &str| Err(SynthError(w.to_string()));
+    if !(lat_deg.is_finite() && lat_deg.abs() <= 90.0 && lon_deg.is_finite()) {
+        return bad("origin");
+    }
     if trajs.is_empty() || trajs.len() > MAX_TRAJ {
         return bad("aircraft count");
     }
@@ -175,9 +178,18 @@ pub fn build_synthetic_truth(
             return bad("segment values");
         }
         let dur = duration_s(t);
-        let knots = (dur / KNOT_S).floor() as usize + 1;
-        if !(2..=MAX_KNOTS).contains(&knots) {
+        // Compared before the +1 and the cast: a huge or infinite duration saturates.
+        let steps = (dur / KNOT_S).floor();
+        if !(steps.is_finite() && (1.0..MAX_KNOTS as f64).contains(&steps)) {
             return bad("path duration");
+        }
+        let knots = steps as usize + 1;
+        // Every knot time (between the first and the last) must fit the clock.
+        let ends = [t.t0_s * 1.0e9, (t.t0_s + steps * KNOT_S) * 1.0e9];
+        if !ends.iter().all(|&e| {
+            e.is_finite() && e.abs() < 4.0e18 && epoch_ns.checked_add(e.round() as i64).is_some()
+        }) {
+            return bad("start time");
         }
         tr.ac_addr.push(t.addr);
         tr.ac_first_leg.push(tr.leg_addr.len() as u32);

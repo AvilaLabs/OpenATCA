@@ -3107,3 +3107,18 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   all candidates the window test can pass, at index sizes either side of the scan fallback.
 - **OA-TRK-222** When the visit budget is shorter than the candidates, the nearest by coarse distance
   (then lowest track number) are kept, not the lowest numbered; the plot is still marked capped.
+- **OA-TRK-250** A fusion configuration whose radars share a sensor id is refused, because the tracker
+  identifies a report by time and sensor id and would drop the second radar's report as a duplicate. The
+  study radars carry distinct ids (terminal 1, en route 2); with distinct ids every report of both radars
+  is offered and none is dropped as a duplicate.
+- **OA-TRK-251** The ADS-B simulation refuses, before allocating, a reporting period that is zero or
+  negative, a NACp or NACv without a bound, and a run of more than 2^25 samples (a 1 ns period over seconds);
+  the study's one-hour clip at one report per second is 657,824 samples and runs.
+- **OA-TRK-252** A synthetic truth refuses a path whose duration is too long to count (including an
+  infinite sum), a start time that overflows the clock with the epoch, and an origin that is not a finite
+  latitude and longitude, with an error and not a panic.
+- **OA-TRK-253** Interval statistics of measurements at the extremes of the clock, and the fusion tracker
+  configuration for a radar period at the largest value, saturate and do not overflow.
+- **OA-TRK-254** A tracker configuration whose output or log table exceeds 2^24 rows is refused; the
+  registration estimator and the association scratch size their buffers at a stated maximum (4,096
+  reference slots; 2^22 tracks, plots or pairs) whatever is asked for.

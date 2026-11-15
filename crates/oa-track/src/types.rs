@@ -171,13 +171,20 @@ impl fmt::Display for TrackError {
 
 impl std::error::Error for TrackError {}
 
+/// Largest output or log table a configuration may ask for, rows.
+pub const MAX_TABLE_ROWS: usize = 1 << 24;
+
 /// Checks a configuration; the error names the first bad value.
 pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     let bad = |w: &'static str| Err(TrackError::BadConfig(w));
     if c.max_tracks == 0 || c.max_tracks > (1 << 24) {
         return bad("max_tracks");
     }
-    if c.out_capacity == 0 || c.log_capacity == 0 {
+    if c.out_capacity == 0
+        || c.log_capacity == 0
+        || c.out_capacity > MAX_TABLE_ROWS
+        || c.log_capacity > MAX_TABLE_ROWS
+    {
         return bad("out_capacity or log_capacity");
     }
     if c.tick_ns <= 0 || c.expected_interval_ns <= 0 || c.init_interval_ns <= 0 {

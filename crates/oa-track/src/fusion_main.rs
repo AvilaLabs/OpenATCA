@@ -352,7 +352,7 @@ fn section_base(
                 first,
                 first + 1_000_000_000_000,
                 &equipped,
-            )
+            )?
         } else {
             Vec::new()
         };
@@ -569,7 +569,7 @@ fn section_sweep(
                     first,
                     first + 1_000_000_000_000,
                     &equipped,
-                )
+                )?
             } else {
                 Vec::new()
             };
@@ -723,7 +723,7 @@ fn section_pairs(rep: &mut Report, kind: Kind, opts: &Opts) -> Result<(), String
                 first,
                 first + 1_000_000_000_000,
                 &|a| a == 0xA0_0001,
-            );
+            )?;
             for (vi, v) in mixed_variants.iter().enumerate() {
                 let run =
                     run_variant(v, &[radar.trk], &[&plots], &adsb).map_err(|e| e.to_string())?;
@@ -842,7 +842,7 @@ fn section_clip(rep: &mut Report, path: &str) -> Result<(), String> {
         let t1 = Instant::now();
         let (plots, kinds, st) = simulate_plots(&built.truth, &radar, 500, lo, hi + 1)?;
         let adsb = if sensors == Sensors::Mixed {
-            simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &equipped)
+            simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &equipped)?
         } else {
             Vec::new()
         };

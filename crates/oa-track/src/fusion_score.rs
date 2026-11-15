@@ -152,7 +152,10 @@ pub fn make_radar(
         alt_quantum_ft: profile.alt_quantum_ft as u16,
         period_ns: (d.period_s * 1.0e9).round() as i64,
         epoch_ns: EPOCH_NS,
-        sensor: 1,
+        sensor: match kind {
+            Kind::Terminal => 1,
+            Kind::EnRoute => 2,
+        },
     };
     StudyRadar { sim, trk }
 }
@@ -220,12 +223,17 @@ pub const ADSB_STUDY: AdsbSim = AdsbSim {
     period_ns: 1_000_000_000,
 };
 
+/// Most samples [`simulate_adsb`] will produce: 2^25. The study's one-hour clip at one report
+/// per second gives 657,824, so the limit is 51 times that.
+pub const MAX_ADSB_SAMPLES: u64 = 1 << 25;
+
 /// ADS-B measurements from the truth for the aircraft `equip` accepts: position and velocity
 /// with white Gaussian noise at the NACp and NACv 95 % bounds over 2.448 per axis (an assumption:
 /// real receivers beat the bound and their error is correlated), altitude quantised to 25 ft,
 /// vertical rate in 64 fpm steps. Each aircraft's phase within the second is random. A sample's
 /// noise is keyed by the seed, the address and the sample time, so it is the same whichever leg or
-/// subrange produces the sample.
+/// subrange produces the sample. Refuses, before allocating, a period that is not positive, a
+/// NACp or NACv without a bound and more than [`MAX_ADSB_SAMPLES`] samples.
 pub fn simulate_adsb(
     truth: &Truth,
     cfg: &AdsbSim,
@@ -233,10 +241,42 @@ pub fn simulate_adsb(
     from_ns: i64,
     to_ns: i64,
     equip: &dyn Fn(u32) -> bool,
-) -> Vec<Measurement> {
+) -> Result<Vec<Measurement>, String> {
     let sp = nacp_epu_m(cfg.nacp) / SIGMA95;
     let sv = nacv_epu_mps(cfg.nacv) / SIGMA95;
-    let mut out = Vec::new();
+    if cfg.period_ns <= 0 {
+        return Err(format!("ADS-B period {} ns is not positive", cfg.period_ns));
+    }
+    if !(sp.is_finite() && sv.is_finite()) {
+        return Err("NACp or NACv has no bound".to_string());
+    }
+    // The count first, from the legs' covered spans, so a small period or a long range is
+    // refused before anything is allocated.
+    let mut count = 0u64;
+    for &addr in aircraft_addrs(truth) {
+        if !equip(addr) {
+            continue;
+        }
+        let range = legs_of(truth, addr);
+        for l in 0..range.count {
+            let leg = LegIx(range.first.0 + l);
+            let (Some(ls), Some(le)) = (leg_start_ns(truth, leg), leg_end_ns(truth, leg)) else {
+                continue;
+            };
+            let (lo, hi) = (ls.max(from_ns), le.min(to_ns));
+            if lo <= hi {
+                let span = (i128::from(hi) - i128::from(lo)) / i128::from(cfg.period_ns) + 1;
+                count = count.saturating_add(u64::try_from(span).unwrap_or(u64::MAX));
+            }
+        }
+    }
+    if count > MAX_ADSB_SAMPLES {
+        return Err(format!(
+            "ADS-B period {} ns would give {count} samples, over {MAX_ADSB_SAMPLES}",
+            cfg.period_ns
+        ));
+    }
+    let mut out = Vec::with_capacity(count as usize);
     for &addr in aircraft_addrs(truth) {
         if !equip(addr) {
             continue;
@@ -285,12 +325,15 @@ pub fn simulate_adsb(
                         category: 0,
                     });
                 }
-                t += cfg.period_ns;
+                let Some(next) = t.checked_add(cfg.period_ns) else {
+                    break;
+                };
+                t = next;
             }
         }
     }
     out.sort_by_key(|m| (m.toa_ns, m.addr));
-    out
+    Ok(out)
 }
 
 /// A tracker variant under test. Plain data (A1); A7.2: cold struct.
