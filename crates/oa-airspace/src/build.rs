@@ -1468,6 +1468,8 @@ struct BoundaryOut {
     ceiling: i32,
     floor_agl: bool,
     ceiling_agl: bool,
+    time_code: u8,
+    level: u8,
     verts: Vec<PosE7>,
     segs: Vec<SegOut>,
 }
@@ -2261,6 +2263,8 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             ceiling: ALT_NONE,
             floor_agl: false,
             ceiling_agl: false,
+            time_code: time_code::UNKNOWN,
+            level: level::UNKNOWN,
             verts,
             segs: Vec::new(),
         });
@@ -2376,6 +2380,21 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                 ceiling,
                 floor_agl,
                 ceiling_agl,
+                time_code: if is_sua {
+                    match v.time_code {
+                        Some('C') => time_code::CONTINUOUS,
+                        None => time_code::PART_TIME,
+                        _ => time_code::UNKNOWN,
+                    }
+                } else {
+                    time_code::UNKNOWN
+                },
+                level: match (is_sua, v.level) {
+                    (true, Some('H')) => level::HIGH,
+                    (true, Some('L')) => level::LOW,
+                    (true, Some('B')) => level::BOTH,
+                    _ => level::UNKNOWN,
+                },
                 verts: Vec::new(),
                 segs,
             });
@@ -2644,6 +2663,8 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             }
             bit_set(&mut b.floor_agl, row, bo.floor_agl);
             bit_set(&mut b.ceiling_agl, row, bo.ceiling_agl);
+            b.time_code.push(bo.time_code);
+            b.level.push(bo.level);
         }
     }
 

@@ -26,7 +26,7 @@ use std::fmt;
 /// File magic.
 pub const MAGIC: &[u8; 11] = b"OATCA-ADAPT";
 /// Format version written and accepted.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 /// Limit: largest snapshot the reader accepts, 512 MiB. A ZAU model is a few MiB; the whole
 /// national data set would stay under about 100 MiB.
 pub const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -246,6 +246,8 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_spans(&mut out, &b.segs, |i| i.get());
     put_bits(&mut out, &b.floor_agl);
     put_bits(&mut out, &b.ceiling_agl);
+    out.extend_from_slice(&b.time_code);
+    out.extend_from_slice(&b.level);
 
     let g = &m.segments;
     put_header(&mut out, TAG_SEGS, count("segments", g.via.len())?);
@@ -594,7 +596,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         })
         .collect();
 
-    let n = r.table(TAG_BNDS, "BNDS", 4 + 4 * 4 + 16, 2)?;
+    let n = r.table(TAG_BNDS, "BNDS", 4 + 4 * 4 + 16 + 2, 2)?;
     let boundaries = Boundaries {
         source: r.bytes(n, "BNDS")?,
         stratum: r.bytes(n, "BNDS")?,
@@ -608,6 +610,8 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         segs: r.spans(n, "BNDS", SegIx::new)?,
         floor_agl: r.bits(n, "BNDS")?,
         ceiling_agl: r.bits(n, "BNDS")?,
+        time_code: r.bytes(n, "BNDS")?,
+        level: r.bytes(n, "BNDS")?,
     };
 
     let n = r.table(TAG_SEGS, "SEGS", 1 + 4 * 5 + 2, 0)?;

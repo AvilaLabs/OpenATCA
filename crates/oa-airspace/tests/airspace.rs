@@ -1542,3 +1542,49 @@ fn ambiguous_and_over_cap_navaid_matches_pair_nobody_and_are_reported() {
         "{report}"
     );
 }
+
+// REQ: OA-ASP-064
+#[test]
+fn special_use_time_code_and_level_are_carried_into_the_model() {
+    // The fixture's one special-use volume (two parts) lies far from ZAU; move it to Chicago and
+    // give the second part a continuous time code.
+    let text = String::from_utf8(cifp_file()).unwrap();
+    let mut out = String::new();
+    for line in text.lines() {
+        let mut l = line.to_string();
+        if l.starts_with("SUSAURK5MBIG BEAR") {
+            l = l.replace("N46", "N41").replace("W089", "W088");
+            if l.as_bytes().get(19) == Some(&b'B') {
+                l.replace_range(26..27, "C");
+            }
+        }
+        out.push_str(&l);
+        out.push('\n');
+    }
+    let src = sources_from(&nasr_files(), out.as_bytes());
+    let m = oa_airspace::build::build_model(&src, &params("ZAU", 92_600))
+        .unwrap()
+        .model;
+    let b = &m.boundaries;
+    let rows: Vec<usize> = (0..b.source.len())
+        .filter(|&i| b.source[i] == boundary_source::CIFP_UR)
+        .collect();
+    assert_eq!(rows.len(), 2, "both parts selected");
+    for &i in &rows {
+        assert_eq!(b.level[i], level::LOW);
+        let want = if b.multiple[i] == b'B' {
+            time_code::CONTINUOUS
+        } else {
+            time_code::PART_TIME
+        };
+        assert_eq!(b.time_code[i], want, "part {}", char::from(b.multiple[i]));
+    }
+    // Everything else is unknown, not a default.
+    for i in (0..b.source.len()).filter(|i| !rows.contains(i)) {
+        assert_eq!(
+            (b.time_code[i], b.level[i]),
+            (time_code::UNKNOWN, level::UNKNOWN)
+        );
+    }
+    validate_model(&m).unwrap();
+}

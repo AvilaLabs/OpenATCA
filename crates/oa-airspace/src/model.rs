@@ -191,6 +191,27 @@ pub mod boundary_source {
     pub const MAX: u8 = 3;
 }
 
+/// Special-use time code (`Boundaries::time_code`), from the source's UR column 27.
+pub mod time_code {
+    /// Not given: NASR and controlled-airspace boundaries, or a letter this reader does not know.
+    pub const UNKNOWN: u8 = 0;
+    /// `C`: continuous (FAA readme).
+    pub const CONTINUOUS: u8 = 1;
+    /// Blank: part-time (FAA readme); the schedule itself is not in the source.
+    pub const PART_TIME: u8 = 2;
+    pub const MAX: u8 = 2;
+}
+
+/// Special-use level (`Boundaries::level`), from the source's UR column 26.
+pub mod level {
+    /// Not given (NASR, controlled airspace, blank or unrecognised).
+    pub const UNKNOWN: u8 = 0;
+    pub const HIGH: u8 = 1;
+    pub const LOW: u8 = 2;
+    pub const BOTH: u8 = 3;
+    pub const MAX: u8 = 3;
+}
+
 /// Boundary stratum (`Boundaries::stratum`).
 pub mod stratum {
     pub const ARTCC_HIGH: u8 = 1;
@@ -541,6 +562,10 @@ pub struct Boundaries {
     /// The floor is above ground level (otherwise mean sea level).
     pub floor_agl: BitSet,
     pub ceiling_agl: BitSet,
+    /// Special-use time code ([`time_code`]); unknown for every other boundary.
+    pub time_code: Vec<u8>,
+    /// Special-use level ([`level`]); unknown for every other boundary.
+    pub level: Vec<u8>,
 }
 
 /// Boundary segments of CIFP-sourced boundaries: one row per ARINC 424 boundary record. The
@@ -1069,8 +1094,18 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
             ("ceiling_ft", b.ceiling_ft.len()),
             ("vertices", b.vertices.len()),
             ("segs", b.segs.len()),
+            ("time_code", b.time_code.len()),
+            ("level", b.level.len()),
         ],
     )?;
+    code_ok(
+        "boundaries",
+        "time_code",
+        &b.time_code,
+        time_code::MAX,
+        true,
+    )?;
+    code_ok("boundaries", "level", &b.level, level::MAX, true)?;
     bits_ok("boundaries", "floor_agl", &b.floor_agl, nb)?;
     bits_ok("boundaries", "ceiling_agl", &b.ceiling_agl, nb)?;
     code_ok(

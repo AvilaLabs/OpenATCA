@@ -461,3 +461,51 @@ fn damaged_archives_never_panic() {
         let _ = read_all(vec![Cursor::new(g)], DEFAULT_LIMITS);
     }
 }
+
+// REQ: OA-TAR-058
+#[test]
+fn a_long_run_of_extension_headers_is_refused() {
+    let run = |n: usize, lim: Limits| {
+        let mut t = Vec::new();
+        for _ in 0..n {
+            t.extend_from_slice(&header("pax", 0, b'g', "", b"ustar\x0000"));
+        }
+        entry(&mut t, "a", b"hi");
+        finish(&mut t);
+        read_all(vec![Cursor::new(t)], lim)
+    };
+    // At the default ceiling the entry is still found.
+    let (seen, end) = run(64, DEFAULT_LIMITS);
+    assert_eq!((seen.len(), end.unwrap()), (1, Next::End));
+    // One more is refused before the entry is reached, at the offset of the record over the cap.
+    let (seen, end) = run(65, DEFAULT_LIMITS);
+    assert!(seen.is_empty());
+    assert!(
+        matches!(end, Err(TarError::TooManyMeta { offset: 32768, .. })),
+        "{end:?}"
+    );
+    // A lowered record ceiling applies; so does a lowered byte ceiling.
+    let tight = Limits {
+        max_meta_records: 2,
+        ..DEFAULT_LIMITS
+    };
+    let (_, end) = run(3, tight);
+    assert!(
+        matches!(end, Err(TarError::TooManyMeta { offset: 1024, .. })),
+        "{end:?}"
+    );
+    // Content bytes count: three 600-byte PAX records (1536 padded) over a 1000-byte ceiling.
+    let mut t = Vec::new();
+    for _ in 0..3 {
+        t.extend_from_slice(&header("pax", 600, b'g', "", b"ustar\x0000"));
+        data_blocks(&mut t, &[b'x'; 600]);
+    }
+    entry(&mut t, "a", b"hi");
+    finish(&mut t);
+    let bytes = Limits {
+        max_meta_total_bytes: 1000,
+        ..DEFAULT_LIMITS
+    };
+    let (_, end) = read_all(vec![Cursor::new(t)], bytes);
+    assert!(matches!(end, Err(TarError::TooManyMeta { .. })), "{end:?}");
+}

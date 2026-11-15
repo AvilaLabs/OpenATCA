@@ -122,6 +122,12 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   the cap, or one CIFP navaid wanted by two NASR navaids, pair nobody and are reported; a
   farther same-ident navaid is reported with its distance. A CIFP reference resolves by its
   own ident, region, section and airport, never to another station's point.
+- **OA-ASP-064** A special-use boundary keeps its source time code and level: `time_code` is
+  continuous, part-time (blank in the source) or unknown, and `level` is high, low, both or
+  unknown; a boundary from NASR or a controlled-airspace volume, and any other source letter,
+  is unknown, never a default. The columns are in the snapshot (format version 2); a version 1
+  snapshot is refused with a typed version error.
+
 
 ### Traceability (oa-trace)
 
@@ -183,6 +189,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   streams, and seeded noise in several chunkings, give output and errors for the streaming
   inflater and the gzip reader; the streaming inflater gives the same output and error for every
   chunking of the same input.
+- **OA-ZIP-061** A repeated entry name is refused with `DuplicateName` (the first repeat in
+  directory order), exactly and at any length; the check costs time proportional to the total
+  name bytes, not to the square of the entry count: ten thousand 4,096-byte names sharing a
+  4,093-byte prefix parse in seconds.
+
 
 ## M1 — SWIM input adapters
 
@@ -1212,6 +1223,8 @@ frame of their feed has been fed (as the ADS-B table is).
   a few hundred bytes declaring 8192 by 8192 is refused with a typed error and nothing allocated.
 - **OA-TIFF-030** The Orientation tag is honoured by refusal: absent or 1 (top-left) is read, any
   other value is refused with a typed `Unsupported` error rather than placing terrain wrongly.
+- **OA-TIFF-080** A point at exactly +180 or -180 degrees longitude (the same meridian) gets the
+  same elevation answer from a tile that holds either alias.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -1294,6 +1307,11 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-TAR-007** A reader error is reported with the stream offset and an interrupted read is
   retried.
 - **OA-TAR-008** Seeded random byte damage and garbage of several lengths never panic.
+- **OA-TAR-058** One `next_entry` call consumes at most `max_meta_records` long-name, long-link
+  and PAX header records (zero-length ones included) and `max_meta_total_bytes` of their
+  content; a chain longer than either is refused with a typed `TooManyMeta` error carrying the
+  offset and the reader then refuses further calls, so a caller never waits on an unbounded run
+  of extension headers. The default ceilings are 64 records and 1 MiB.
 
 ### ADS-B history (oa-adsb)
 
@@ -1636,6 +1654,10 @@ decoder is OA-GRIB-021.
   returns the higher of the set's answer and the facility's own sub-area charts at the point.
 - **OA-MVA-024** On the real `raw/mva-zjx` files (skipped when absent) all 20 messages load,
   including `SAV_LHW_MVA` as a sub-area chart with 17 sectors.
+- **OA-MVA-074** The meridian at 180 degrees east and west is one place: containment, sector
+  distance and radius queries give the same answer for a point at +180 and at -180, and a sector
+  on either side of the seam is found from either alias (a sector whose own extent crosses the
+  seam is refused at load by the extent limit).
 
 ## M2 — Weather inputs
 

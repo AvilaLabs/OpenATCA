@@ -111,6 +111,8 @@ fn sentinels_and_all_value_ranges_survive_a_round_trip() {
         }],
         floor_agl: bit_zeros(1),
         ceiling_agl: bit_zeros(1),
+        time_code: vec![time_code::UNKNOWN],
+        level: vec![level::UNKNOWN],
     };
     m.mora = Mora {
         lat: vec![-90, 89],
@@ -257,8 +259,11 @@ fn damaged_headers_trailing_bytes_and_truncation_are_errors() {
     bad[0] ^= 1;
     assert_eq!(decode(&bad), Err(SnapshotError::BadMagic));
     let mut bad = good.clone();
-    bad[11] = 2;
-    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(2)));
+    bad[11] = 3;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(3)));
+    // The first format (no special-use time code or level) is refused, not misread.
+    bad[11] = 1;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(1)));
     let mut bad = good.clone();
     bad.push(0);
     assert_eq!(decode(&bad), Err(SnapshotError::TrailingBytes { extra: 1 }));

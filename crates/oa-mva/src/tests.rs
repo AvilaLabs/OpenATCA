@@ -1167,3 +1167,48 @@ fn sub_area_charts_are_queried_apart_and_joined_conservatively() {
         std::path::Path::new("d/SAV_LHW_MVA.pdf")
     );
 }
+
+// REQ: OA-MVA-074
+#[test]
+fn the_antimeridian_aliases_answer_alike() {
+    // East of the seam (-180..-179.9, 5000 ft), a neighbour past it (-179.89..-179.8, 6000 ft)
+    // and a sector on the west side (179.9..180, 4000 ft).
+    let mk = |x0, x1, alt, name| Fix {
+        name,
+        alt,
+        rings: vec![sq(x0, 50.0, x1, 50.1)],
+    };
+    let m = load(
+        "XYZ_MVA_FUS3_2024_v1",
+        &[
+            mk(-180.0, -179.9, 5000, "A"),
+            mk(-179.89, -179.8, 6000, "B"),
+            mk(179.9, 180.0, 4000, "C"),
+        ],
+    )
+    .unwrap()
+    .0;
+    for lon in [-180.0, 180.0] {
+        let r = min_altitude_at(&m, 50.05, lon, SetKind::Fus3)
+            .unwrap()
+            .unwrap();
+        // On A's edge and C's edge: the higher wins, two sectors.
+        assert_eq!((r.min_alt_ft, r.sectors), (5000, 2), "lon {lon}");
+        let mut v = Vec::new();
+        sectors_containing(&m, 50.05, lon, SetKind::Fus3, &mut v).unwrap();
+        assert_eq!(v, vec![SectorIx(0), SectorIx(2)], "lon {lon}");
+        assert_eq!(sector_distance_nm(&m, SectorIx(0), 50.05, lon), Ok(0.0));
+        assert_eq!(sector_distance_nm(&m, SectorIx(2), 50.05, lon), Ok(0.0));
+        // B lies 0.11 degrees of longitude (about 4 NM at 50 N) from the seam.
+        let d = sector_distance_nm(&m, SectorIx(1), 50.05, lon).unwrap();
+        assert!(d > 3.0 && d < 5.0, "lon {lon} d {d}");
+        let near = sectors_within_radius(&m, 50.05, lon, 6.0, SetKind::Fus3).unwrap();
+        assert_eq!(
+            near,
+            vec![SectorIx(0), SectorIx(1), SectorIx(2)],
+            "lon {lon}"
+        );
+        let far = sectors_within_radius(&m, 50.05, lon, 2.0, SetKind::Fus3).unwrap();
+        assert_eq!(far, vec![SectorIx(0), SectorIx(2)], "lon {lon}");
+    }
+}
