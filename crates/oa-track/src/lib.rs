@@ -28,6 +28,7 @@ pub mod adsb;
 pub mod assoc;
 pub mod coarse;
 mod filter;
+pub mod fixed_map;
 pub mod fusion;
 pub mod fusion_params;
 pub mod fusion_score;

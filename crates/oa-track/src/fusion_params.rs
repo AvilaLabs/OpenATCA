@@ -41,6 +41,14 @@ pub const AMBIGUITY_MARGIN: f64 = 4.0;
 /// of 38,000 with room). [`crate::fusion::fusion_new`] refuses a tracker holding more, so no live
 /// track is ever left out of an association.
 pub const MAX_ASSOC_TRACKS: usize = 65_536;
+/// Limit: slots of each per-key table of the fusion layer (hold runs per track and radar, and
+/// what registration remembers of each address), 131,072. Each is bounded by an entry count of
+/// at most [`MAX_ASSOC_TRACKS`] (the hold table evicts at that count, the address table is cut
+/// back to the tracker's capacity, itself at most that); open addressing wants a load of one
+/// half or less for short probes, so twice the bound, a power of two. A new key into a full table
+/// is refused and counted; the table never grows.
+pub const KEY_TABLE_SLOTS: usize = 2 * MAX_ASSOC_TRACKS;
+const _: () = assert!(KEY_TABLE_SLOTS.is_power_of_two() && KEY_TABLE_SLOTS >= 2 * MAX_ASSOC_TRACKS);
 /// Limit: records of radar-only tracks the fusion layer keeps for its caller, 65,536. Past it
 /// new records are counted and dropped; a long-running caller drains them
 /// ([`crate::fusion::fusion_take_radar_tracks`]).

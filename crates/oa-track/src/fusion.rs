@@ -47,10 +47,8 @@
 //!
 //! The queues, the scratch of a bucket, the candidates, the track records and the histories are
 //! vectors made at start with the capacities of `fusion_params.rs` and reused (RULESET C2, C3).
-//! The per-key bookkeeping (two `BTreeMap`s, a fixed order) still allocates a node per new key;
-//! the tracker allocates nothing after construction.
-
-use std::collections::BTreeMap;
+//! The per-key bookkeeping is two fixed-capacity hash tables (`fixed_map.rs`, [`KEY_TABLE_SLOTS`]
+//! slots each, made at start); the tracker allocates nothing after construction.
 
 use oa_geo::aeqd::{frame_new, project};
 
@@ -63,16 +61,17 @@ use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
     CoarseIndex,
 };
+use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
     GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM,
-    GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
-    MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
-    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX,
-    REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES,
-    REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
-    RESCUED_COST_FRACTION,
+    GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS,
+    MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS,
+    MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
+    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
+    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
+    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
@@ -448,7 +447,7 @@ pub struct Fusion {
     cand_ix: Vec<usize>,
     /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
     /// took one of its plots (a small map: entries exist only while a run is going).
-    hold_run: BTreeMap<(u32, u8), HoldRun>,
+    hold_run: FixedMap<(u32, u8), HoldRun>,
     /// Entries of `hold_run` kept at most (a field so a test can lower it).
     hold_run_max: usize,
     /// The earliest bucket of any pending input; `i64::MAX` with none (so a call that finds
@@ -476,7 +475,7 @@ pub struct Fusion {
     brute_coarse: bool,
     /// Per address: what registration needs of its ADS-B. Holds only keys the tracker holds (cut
     /// back to them whenever it reaches the tracker's capacity).
-    keyinfo: BTreeMap<u32, KeyInfo>,
+    keyinfo: FixedMap<u32, KeyInfo>,
     cands: Vec<Cand>,
     next_serial: u32,
     stats: FusionStats,
@@ -548,7 +547,7 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         init_free: Vec::with_capacity(RADAR_PLOTS_MAX),
         init_anon: Vec::with_capacity(RADAR_PLOTS_MAX),
         cand_ix: Vec::with_capacity(CAND_IX_MAX),
-        hold_run: BTreeMap::new(),
+        hold_run: FixedMap::new(KEY_TABLE_SLOTS),
         hold_run_max: MAX_ASSOC_TRACKS,
         pend_min_bucket: i64::MAX,
         assoc: assoc_scratch_new(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS),
@@ -570,7 +569,7 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         bucket_tests_max: MAX_BUCKET_TESTS,
         #[cfg(test)]
         brute_coarse: false,
-        keyinfo: BTreeMap::new(),
+        keyinfo: FixedMap::new(KEY_TABLE_SLOTS),
         cands: Vec::with_capacity(MAX_CANDIDATES),
         next_serial: 0,
         stats: FusionStats::default(),
@@ -645,6 +644,8 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.ms_buf),
         of(&f.cands),
         of(&f.tracks),
+        f.hold_run.buffer(),
+        f.keyinfo.buffer(),
     ]);
     v.extend(f.pairs_bufs.iter().map(of));
     v.extend(f.infos_bufs.iter().map(of));
@@ -1496,11 +1497,12 @@ fn associate_bucket(f: &mut Fusion) {
 fn hold_note(f: &mut Fusion, key: u32, radar: u8, run: u8) {
     let at = (key, radar);
     if !f.hold_run.contains_key(&at) && f.hold_run.len() >= f.hold_run_max {
+        // The oldest bucket, the lowest key among equals: the order the table once iterated in.
         let oldest = f
             .hold_run
             .iter()
             .fold(None::<((u32, u8), i64)>, |best, (k, h)| match best {
-                Some((_, b)) if b <= h.bucket => best,
+                Some((bk, b)) if (b, bk) <= (h.bucket, *k) => best,
                 _ => Some((*k, h.bucket)),
             });
         if let Some((k, _)) = oldest {
@@ -1508,6 +1510,7 @@ fn hold_note(f: &mut Fusion, key: u32, radar: u8, run: u8) {
             f.stats.hold_evicted += 1;
         }
     }
+    // Room is made above (the count is held under the table's slots), so this is not refused.
     f.hold_run.insert(
         at,
         HoldRun {
@@ -1558,7 +1561,7 @@ fn note_adsb(f: &mut Fusion, m: &Measurement) {
             return;
         }
     }
-    let e = f.keyinfo.entry(m.addr).or_insert(KeyInfo {
+    let mut e = f.keyinfo.get(&m.addr).copied().unwrap_or(KeyInfo {
         last_adsb_ns: i64::MIN,
         adsb_n: 0,
         high_integrity: false,
@@ -1566,6 +1569,9 @@ fn note_adsb(f: &mut Fusion, m: &Measurement) {
     e.last_adsb_ns = m.toa_ns;
     e.adsb_n = e.adsb_n.saturating_add(1);
     e.high_integrity = sigma_ok;
+    if !f.keyinfo.insert(m.addr, e) {
+        f.stats.keyinfo_overflow += 1;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2065,6 +2071,7 @@ mod tests {
     use crate::tracker::tracker_live;
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
     use oa_sensorsim::prng::Rng;
+    use std::collections::BTreeMap;
 
     pub(crate) const SITE: RadarSite = RadarSite {
         lat_deg: 41.976_940_27,
@@ -2816,12 +2823,14 @@ mod tests {
         f.done_bucket = 7;
         hold_note(&mut f, 0x05, 0, 1);
         assert_eq!(f.stats.hold_evicted, 1);
-        let keys: Vec<(u32, u8)> = f.hold_run.keys().copied().collect();
+        let mut keys: Vec<(u32, u8)> = f.hold_run.iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
         assert_eq!(keys, vec![(0x05, 0), (0x20, 1), (0x30, 0)]);
         // The next to go is the one in bucket 4 that is left.
         f.done_bucket = 8;
         hold_note(&mut f, 0x06, 0, 1);
-        let keys: Vec<(u32, u8)> = f.hold_run.keys().copied().collect();
+        let mut keys: Vec<(u32, u8)> = f.hold_run.iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
         assert_eq!(keys, vec![(0x05, 0), (0x06, 0), (0x30, 0)]);
         assert_eq!(f.stats.hold_evicted, 2);
     }
