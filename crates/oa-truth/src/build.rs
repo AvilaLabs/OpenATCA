@@ -2,20 +2,30 @@
 
 use oa_adsb::{
     category_observe, is_reserved_address, jump_verdict, reports_len, reports_row, CategoryState,
-    JumpPair, JumpVerdict, Reports, F_NEW_LEG, F_STALE, NONE_U16, NONE_U8,
+    JumpPair, JumpVerdict, Reports, F_NEW_LEG, NONE_U16,
 };
 
 use crate::frame::{frame_angle, frame_new, project, Frame};
 use crate::loo::{loo_finish, loo_leg, LooAcc};
-use crate::quality::{nacp_epu_m, quality_check, QualityState};
+use crate::quality::{nacp_epu_m, quality_eval, QualityState};
 use crate::smooth::{interp, smooth, LegView, SIGMA95};
 use crate::{
     Fraction, Truth, TruthConfig, TruthError, TruthStats, MAX_FRAME_ARC_RAD, MAX_REPORTS,
-    REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_SHORT_LEG, SPLIT_FRAME, SPLIT_GAP, SPLIT_JUMP,
-    SPLIT_NEW_LEG,
+    MAX_SAME_TIME_DISTINCT, REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_NO_QUALITY, REM_OVERSIZED,
+    REM_SHORT_LEG, SAME_TIME_CHI2, SPLIT_FRAME, SPLIT_GAP, SPLIT_JUMP, SPLIT_NEW_LEG,
 };
 
 const NS_PER_MS: i64 = 1_000_000;
+
+thread_local! {
+    static PAIR_EVALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Distance evaluations made by same-time conflict checks on this thread so far (a test hook).
+#[doc(hidden)]
+pub fn pair_evals_this_thread() -> u64 {
+    PAIR_EVALS.with(std::cell::Cell::get)
+}
 const EARTH_R_M: f64 = 6_371_008.8;
 /// Checks a configuration; the error names the first bad value.
 fn check_config(c: &TruthConfig) -> Result<(), TruthError> {
@@ -204,14 +214,6 @@ fn count_split(b: &mut Builder<'_>, kind: usize) {
     }
 }
 
-/// An aircraft's rows with those equal in time put in a canonical order, and the rows of every
-/// equal-time group that disagrees about the position.
-struct Canon {
-    rows: Vec<(u32, i64, u32)>,
-    /// Input indexes of the rows to remove, sorted.
-    quarantined: Vec<u32>,
-}
-
 /// Content of a row that the selection reads, as a sort key: the order between rows equal in
 /// time, so that it does not depend on where they were in the input.
 fn tie_key(r: &Reports, i: u32) -> [i64; 17] {
@@ -239,56 +241,70 @@ fn tie_key(r: &Reports, i: u32) -> [i64; 17] {
     ]
 }
 
-/// Two reports of one aircraft at one instant that are further apart than the 95 % radius the
-/// truth is allowed to have ([`crate::MAX_SIGMA95_H_M`], 50 m) cannot both be right: the whole
-/// group is quarantined (counted as duplicate times). Closer ones are one position measured twice;
-/// the first of them in the canonical order (lowest content key) is the one tried first, so the
-/// same reports in any input order give the same truth.
-fn canonical_ties(r: &Reports, rows: &[(u32, i64, u32)]) -> Canon {
+/// An aircraft's rows in time order, those equal in time put in the order of their content (then
+/// input index), so that the result does not depend on where they were in the input.
+fn canonical_rows(r: &Reports, rows: &[(u32, i64, u32)]) -> Vec<(u32, i64, u32)> {
     let mut rows: Vec<(u32, i64, u32)> = rows.to_vec();
     rows.sort_by_key(|&(_, t, i)| (t, tie_key(r, i), i));
-    let mut quarantined = Vec::new();
-    let mut at = 0usize;
-    while at < rows.len() {
-        let t = rows.get(at).map_or(0, |e| e.1);
-        let end = at
-            + rows
-                .get(at..)
-                .map_or(0, |s| s.iter().take_while(|e| e.1 == t).count());
-        let group = rows.get(at..end).unwrap_or(&[]);
-        // Only rows the selection could use count: a stale row or one from another source is
-        // removed on its own account and is no evidence about the ADS-B position.
-        let eligible: Vec<(u32, i64, u32)> = group
-            .iter()
-            .copied()
-            .filter(|e| {
-                let src = r.source.get(e.2 as usize).copied().unwrap_or(NONE_U8);
-                let fl = r.flags.get(e.2 as usize).copied().unwrap_or(0);
-                fl & F_STALE == 0 && (src == NONE_U8 || crate::ADSB_SOURCES.contains(&src))
-            })
-            .collect();
-        let group = eligible.as_slice();
-        if group.len() > 1 {
-            let pos = |i: u32| {
-                (
-                    r.lat_e7.get(i as usize).copied().unwrap_or(0),
-                    r.lon_e7.get(i as usize).copied().unwrap_or(0),
-                )
-            };
-            let conflict = group.iter().any(|a| {
-                group.iter().any(|b| {
-                    let ((la, oa), (lb, ob)) = (pos(a.2), pos(b.2));
-                    dist_m(la, oa, lb, ob) > crate::MAX_SIGMA95_H_M
-                })
-            });
-            if conflict {
-                quarantined.extend(group.iter().map(|e| e.2));
+    rows
+}
+
+/// What to do with the rows of one aircraft at one instant, as (input index, removal reason)
+/// sorted by index; rows not listed go on to the ordinary walk.
+///
+/// A row is eligible if the full selection ([`quality_eval`]: coordinates, NACp, NIC, SIL,
+/// version, stale flag, source) passes against `snap`, the carried quality before the group, so
+/// the order of the group cannot change who is eligible. An ineligible row is removed for its own
+/// reason. Eligible rows with the same position and NACp are one report and are collapsed; if more
+/// than [`MAX_SAME_TIME_DISTINCT`] distinct ones remain the group is refused (counted as
+/// oversized). Otherwise two reports conflict when their squared horizontal distance exceeds
+/// [`SAME_TIME_CHI2`] times the sum of their squared per-axis sigmas (NACp 95 % radius over
+/// [`SIGMA95`]; independent errors assumed) and then all eligible rows of the group are
+/// quarantined (counted as duplicate times). Closer ones are one position measured twice.
+fn same_time_check(
+    r: &Reports,
+    group: &[(u32, i64, u32)],
+    snap: &QualityState,
+    cfg: &TruthConfig,
+) -> Vec<(u32, usize)> {
+    let mut out: Vec<(u32, usize)> = Vec::new();
+    // (lat, lon, NACp, input index) of the eligible rows.
+    let mut elig: Vec<(i32, i32, u8, u32)> = Vec::new();
+    for &(_, t, i) in group {
+        let Some(row) = reports_row(r, i as usize) else {
+            continue;
+        };
+        let (v, _) = quality_eval(snap, &row, t, cfg);
+        match (v.removal, v.nacp) {
+            (Some(kind), _) => out.push((i, kind)),
+            (None, Some(n)) => elig.push((row.lat_e7, row.lon_e7, n, i)),
+            (None, None) => out.push((i, REM_NO_QUALITY)),
+        }
+    }
+    elig.sort_unstable();
+    let mut distinct: Vec<(i32, i32, u8)> = elig.iter().map(|e| (e.0, e.1, e.2)).collect();
+    distinct.dedup();
+    let refuse = if distinct.len() > MAX_SAME_TIME_DISTINCT {
+        Some(REM_OVERSIZED)
+    } else {
+        let sig2 = |n: u8| (nacp_epu_m(n) / SIGMA95).powi(2);
+        let mut conflict = false;
+        for (k, a) in distinct.iter().enumerate() {
+            for b in distinct.iter().skip(k + 1) {
+                PAIR_EVALS.with(|c| c.set(c.get() + 1));
+                let d = dist_m(a.0, a.1, b.0, b.1);
+                if d * d > SAME_TIME_CHI2 * (sig2(a.2) + sig2(b.2)) {
+                    conflict = true;
+                }
             }
         }
-        at = end.max(at + 1);
+        conflict.then_some(REM_DUPLICATE)
+    };
+    if let Some(kind) = refuse {
+        out.extend(elig.iter().map(|e| (e.3, kind)));
     }
-    quarantined.sort_unstable();
-    Canon { rows, quarantined }
+    out.sort_unstable();
+    out
 }
 
 /// Selects, splits and builds the legs of one aircraft; `rows` are in time order.
@@ -307,8 +323,7 @@ fn process_aircraft(
         }
         return Ok(());
     }
-    let canon = canonical_ties(r, rows);
-    let (rows, quarantined) = (canon.rows.as_slice(), canon.quarantined.as_slice());
+    let rows = canonical_rows(r, rows);
     let gap_ns = cfg.leg_gap_ms * NS_PER_MS;
     let mut q = QualityState::default();
     // Ground speed of the last kept report, and the emitter category trusted for the aircraft
@@ -320,88 +335,134 @@ fn process_aircraft(
     let mut frame: Option<Frame> = None;
     let mut pending_new_leg = false;
     let mut consecutive_jumps = 0u32;
-    for &(_, t, i) in rows {
-        let Some(row) = reports_row(r, i as usize) else {
-            count_removed(b, REM_INVALID);
-            continue;
+    let mut at = 0usize;
+    while at < rows.len() {
+        let t_group = rows.get(at).map_or(0, |e| e.1);
+        let end = at
+            + rows.get(at..).map_or(1, |s| {
+                s.iter().take_while(|e| e.1 == t_group).count().max(1)
+            });
+        let group = rows.get(at..end).unwrap_or(&[]);
+        at = end;
+        // Same-time rows are judged together against the carried quality as it was before them.
+        let forced = if group.len() > 1 {
+            same_time_check(r, group, &q, cfg)
+        } else {
+            Vec::new()
         };
-        if row.flags & F_NEW_LEG != 0 {
-            pending_new_leg = true;
-        }
-        if quarantined.binary_search(&i).is_ok() {
-            count_removed(b, REM_DUPLICATE);
-            continue;
-        }
-        let verdict = quality_check(&mut q, &row, t, cfg);
-        let (fail, carried, nacp) = (verdict.removal, verdict.carried, verdict.nacp);
-        if let Some(kind) = fail {
-            count_removed(b, kind);
-            continue;
-        }
-        // Past this point the row has passed the quality rules. It is judged by the category as
-        // it would leave the state, which is kept only if the row is.
-        let mut trial = cat;
-        let category = category_observe(&mut trial, row.category);
-        let last = buf.t.last().copied();
-        let last_pos = buf.lat_e7.last().copied().zip(buf.lon_e7.last().copied());
-        if last.is_some_and(|lt| t <= lt) {
-            count_removed(b, REM_DUPLICATE);
-            continue;
-        }
-        let mut split: Option<usize> = None;
-        if let (Some(lt), Some((la, lo))) = (last, last_pos) {
-            if pending_new_leg {
-                split = Some(SPLIT_NEW_LEG);
-            } else if t - lt > gap_ns {
-                split = Some(SPLIT_GAP);
-            } else {
+        for &(_, t, i) in group {
+            let Some(row) = reports_row(r, i as usize) else {
+                count_removed(b, REM_INVALID);
+                continue;
+            };
+            if row.flags & F_NEW_LEG != 0 {
+                pending_new_leg = true;
+            }
+            if let Ok(k) = forced.binary_search_by_key(&i, |e| e.0) {
+                count_removed(b, forced.get(k).map_or(REM_DUPLICATE, |e| e.1));
+                continue;
+            }
+            let (verdict, q_next) = quality_eval(&q, &row, t, cfg);
+            let (fail, carried, nacp) = (verdict.removal, verdict.carried, verdict.nacp);
+            let last = buf.t.last().copied();
+            let last_pos = buf.lat_e7.last().copied().zip(buf.lon_e7.last().copied());
+            let judged = |cat: &CategoryState| -> bool {
+                // Whether the row is where the last kept report allows; a row that would start a new
+                // leg cannot be judged and counts as fine.
+                let (Some(lt), Some((la, lo))) = (last, last_pos) else {
+                    return true;
+                };
+                if t <= lt {
+                    return false;
+                }
+                if pending_new_leg || t - lt > gap_ns {
+                    return true;
+                }
+                let mut c = *cat;
                 let pair = JumpPair {
                     dist_m: dist_m(la, lo, row.lat_e7, row.lon_e7),
                     dt_s: (t - lt) as f64 / 1.0e9,
                     slack_m: cfg.jump_slack_m,
-                    category,
+                    category: category_observe(&mut c, row.category),
                     gs_a_dkt: last_gs,
                     gs_b_dkt: row.gs_dkt,
                 };
-                if jump_verdict(&pair, cfg.max_jump_kt) != JumpVerdict::Plausible {
-                    consecutive_jumps += 1;
-                    if consecutive_jumps >= cfg.jump_resync {
-                        split = Some(SPLIT_JUMP);
-                    } else {
-                        count_removed(b, REM_JUMP);
-                        continue;
+                jump_verdict(&pair, cfg.max_jump_kt) == JumpVerdict::Plausible
+            };
+            if let Some(kind) = fail {
+                count_removed(b, kind);
+                // A row that fails on quality still says what the transponder prints (a NACp of 7
+                // must not be forgotten by the reports after it), unless it is a jump or one of
+                // several rows of the instant.
+                if group.len() == 1 && judged(&cat) {
+                    q = q_next;
+                }
+                continue;
+            }
+            // Past this point the row has passed the quality rules. It is judged by the category as
+            // it would leave the state, which is kept only if the row is.
+            let mut trial = cat;
+            let category = category_observe(&mut trial, row.category);
+            if last.is_some_and(|lt| t <= lt) {
+                count_removed(b, REM_DUPLICATE);
+                continue;
+            }
+            let mut split: Option<usize> = None;
+            if let (Some(lt), Some((la, lo))) = (last, last_pos) {
+                if pending_new_leg {
+                    split = Some(SPLIT_NEW_LEG);
+                } else if t - lt > gap_ns {
+                    split = Some(SPLIT_GAP);
+                } else {
+                    let pair = JumpPair {
+                        dist_m: dist_m(la, lo, row.lat_e7, row.lon_e7),
+                        dt_s: (t - lt) as f64 / 1.0e9,
+                        slack_m: cfg.jump_slack_m,
+                        category,
+                        gs_a_dkt: last_gs,
+                        gs_b_dkt: row.gs_dkt,
+                    };
+                    if jump_verdict(&pair, cfg.max_jump_kt) != JumpVerdict::Plausible {
+                        consecutive_jumps += 1;
+                        if consecutive_jumps >= cfg.jump_resync {
+                            split = Some(SPLIT_JUMP);
+                        } else {
+                            count_removed(b, REM_JUMP);
+                            continue;
+                        }
                     }
                 }
             }
-        }
-        if split.is_none() {
-            if let (Some(f), true) = (frame.as_ref(), last.is_some()) {
-                if frame_angle(f, deg(row.lat_e7), deg(row.lon_e7)) > MAX_FRAME_ARC_RAD {
-                    split = Some(SPLIT_FRAME);
+            if split.is_none() {
+                if let (Some(f), true) = (frame.as_ref(), last.is_some()) {
+                    if frame_angle(f, deg(row.lat_e7), deg(row.lon_e7)) > MAX_FRAME_ARC_RAD {
+                        split = Some(SPLIT_FRAME);
+                    }
                 }
             }
+            if let Some(kind) = split {
+                flush_leg(b, addr, &mut buf, frame.take())?;
+                count_split(b, kind);
+            }
+            consecutive_jumps = 0;
+            q = q_next;
+            cat = trial;
+            pending_new_leg = false;
+            last_gs = row.gs_dkt;
+            if buf.t.is_empty() {
+                frame = Some(frame_new(deg(row.lat_e7), deg(row.lon_e7)));
+            }
+            if carried {
+                b.stats.quality_carried += 1;
+            }
+            let epu = nacp.map_or(f64::INFINITY, nacp_epu_m);
+            buf.t.push(t);
+            buf.lat_e7.push(row.lat_e7);
+            buf.lon_e7.push(row.lon_e7);
+            buf.alt.push(row.baro_alt_ft);
+            buf.vrate.push(row.vrate_fpm);
+            buf.sigma.push(epu / SIGMA95 * cfg.sigma_scale);
         }
-        if let Some(kind) = split {
-            flush_leg(b, addr, &mut buf, frame.take())?;
-            count_split(b, kind);
-        }
-        consecutive_jumps = 0;
-        cat = trial;
-        pending_new_leg = false;
-        last_gs = row.gs_dkt;
-        if buf.t.is_empty() {
-            frame = Some(frame_new(deg(row.lat_e7), deg(row.lon_e7)));
-        }
-        if carried {
-            b.stats.quality_carried += 1;
-        }
-        let epu = nacp.map_or(f64::INFINITY, nacp_epu_m);
-        buf.t.push(t);
-        buf.lat_e7.push(row.lat_e7);
-        buf.lon_e7.push(row.lon_e7);
-        buf.alt.push(row.baro_alt_ft);
-        buf.vrate.push(row.vrate_fpm);
-        buf.sigma.push(epu / SIGMA95 * cfg.sigma_scale);
     }
     flush_leg(b, addr, &mut buf, frame.take())?;
     Ok(())

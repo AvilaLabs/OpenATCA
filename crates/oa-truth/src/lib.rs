@@ -11,7 +11,7 @@
 //!    rows, so each is carried forward within an aircraft for at most 60 s; a row with no value
 //!    in that age is not truth. Rows with readsb's stale flag (position older than 20 s, the
 //!    only fault flag a trace row has), rows whose source is not ADS-B (MLAT, TIS-B, ADS-R and
-//!    the rest carry no meaningful NACp), duplicate times, reports of the reserved addresses
+//!    the rest carry no meaningful NACp), duplicate times (same-time reports that disagree beyond their NACp radii, or more than 16 distinct), reports of the reserved addresses
 //!    (all zeros and all ones, under `invalid`) and kinematic jumps are removed. A jump is a
 //!    displacement the speed rule (`oa_adsb::jump_verdict`) calls impossible: over the hard cap of
 //!    the emitter category, or inconsistent with the aircraft's own ground speed and the gap. Every
@@ -67,9 +67,10 @@ mod quality;
 mod query;
 mod smooth;
 
-pub use build::build_truth;
+pub use build::{build_truth, pair_evals_this_thread};
 pub use quality::{
-    nacp_epu_m, nacv_epu_mps, quality_check, Held, QualityState, QualityVerdict, HELD_NONE,
+    nacp_epu_m, nacv_epu_mps, quality_check, quality_eval, Held, QualityState, QualityVerdict,
+    HELD_NONE,
 };
 pub use query::{
     aircraft_addrs, leg_addr, leg_count, leg_end_ms, leg_end_ns, leg_reports, leg_start_ms,
@@ -139,9 +140,10 @@ pub const REMOVE_NAMES: [&str; REMOVE_KINDS] = [
     "duplicate_time",
     "jump",
     "short_leg",
+    "oversized_same_time_group",
 ];
 /// Number of removal reasons.
-pub const REMOVE_KINDS: usize = 11;
+pub const REMOVE_KINDS: usize = 12;
 pub const REM_INVALID: usize = 0;
 pub const REM_STALE: usize = 1;
 pub const REM_SOURCE: usize = 2;
@@ -153,6 +155,13 @@ pub const REM_VERSION: usize = 7;
 pub const REM_DUPLICATE: usize = 8;
 pub const REM_JUMP: usize = 9;
 pub const REM_SHORT_LEG: usize = 10;
+pub const REM_OVERSIZED: usize = 11;
+/// Same-time reports of one aircraft: the 2-degree-of-freedom chi-square value at 99.9 %, the
+/// per-axis sigma of a NACp 95 % radius is `radius / SIGMA95`.
+pub const SAME_TIME_CHI2: f64 = 13.82;
+/// Same-time reports of one aircraft: most distinct eligible reports tested pairwise; a larger
+/// group is refused.
+pub const MAX_SAME_TIME_DISTINCT: usize = 16;
 
 /// Why a leg was started, indexing [`TruthStats::splits`]. The first leg of an aircraft is not
 /// a split.

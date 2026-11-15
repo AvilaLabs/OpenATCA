@@ -409,7 +409,7 @@ fn rows_equal_in_time_give_the_same_truth_in_any_input_order() {
     assert_eq!(digest(&t1), digest(&t2));
     assert_eq!(s1.removed, s2.removed);
     assert_eq!(removed(&s1, REM_DUPLICATE), 1);
-    // Two rows of one instant 400 m apart contradict each other: both are removed, in any order.
+    // Two rows of one instant 600 m apart contradict each other: both are removed, in any order.
     let far = |swap: bool| {
         let mut r = Reports::default();
         for k in 0..30 {
@@ -417,7 +417,7 @@ fn rows_equal_in_time_give_the_same_truth_in_any_input_order() {
             let (la, lo) = to_deg(0.0, 231.5 * t);
             let a = good(ADDR, t, la, lo);
             if k == 10 {
-                let (la2, lo2) = to_deg(400.0, 231.5 * t);
+                let (la2, lo2) = to_deg(600.0, 231.5 * t);
                 let b = good(ADDR, t, la2, lo2);
                 let pair = if swap { [b, a] } else { [a, b] };
                 for x in pair {
@@ -435,6 +435,229 @@ fn rows_equal_in_time_give_the_same_truth_in_any_input_order() {
     assert_eq!((removed(&s1, REM_DUPLICATE), s1.rows_kept), (2, 29));
     assert_eq!(s1.removed, s2.removed);
     assert!(balanced(&s1));
+}
+
+/// A 60 s track at 2 s spacing, north at 231.5 m/s; `extra(k, t, row_of_k)` returns the rows to
+/// add at report `k` (its own row is pushed first).
+fn track_with(extra: &dyn Fn(usize, f64) -> Vec<Row>) -> Reports {
+    let mut r = Reports::default();
+    for k in 0..30usize {
+        let t = k as f64 * 2.0;
+        let (la, lo) = to_deg(0.0, 231.5 * t);
+        reports_push(&mut r, &good(ADDR, t, la, lo));
+        for x in extra(k, t) {
+            reports_push(&mut r, &x);
+        }
+    }
+    r
+}
+
+fn pair_row(t: f64, east: f64, nacp: u8) -> Row {
+    let (la, lo) = to_deg(east, 231.5 * t);
+    let mut x = good(ADDR, t, la, lo);
+    x.nac_p = nacp;
+    x
+}
+
+// REQ: OA-TRUTH-024
+#[test]
+fn an_unusable_same_time_row_does_not_veto_a_usable_one() {
+    for kind in 0..2 {
+        let r = track_with(&|k, t| {
+            if k != 10 {
+                return vec![];
+            }
+            let mut x = pair_row(t, 100.0, 10);
+            if kind == 0 {
+                x.nac_p = 7;
+            } else {
+                x.lat_e7 = 910_000_000;
+            }
+            vec![x]
+        });
+        let (_, s) = build(&r);
+        let reason = if kind == 0 { REM_NACP } else { REM_INVALID };
+        assert_eq!(removed(&s, reason), 1, "kind {kind}: {s:?}");
+        assert_eq!(removed(&s, REM_DUPLICATE), 0, "kind {kind}: {s:?}");
+        assert_eq!(s.rows_kept, 30, "kind {kind}");
+        assert!(balanced(&s));
+    }
+}
+
+// REQ: OA-TRUTH-025
+#[test]
+fn same_time_eligibility_ignores_group_order() {
+    // The unusable row carries a high NACp of its own; the usable one has none and would
+    // inherit it. Both input orders give the same truth and counts.
+    let run = |swap: bool| {
+        let r = track_with(&|k, t| {
+            if k != 10 {
+                return vec![];
+            }
+            let mut bad = pair_row(t, 100.0, 7);
+            bad.nic = 3;
+            vec![bad]
+        });
+        let mut rows = Reports::default();
+        let n = reports_len(&r);
+        let order: Vec<usize> = if swap {
+            (0..n).rev().collect()
+        } else {
+            (0..n).collect()
+        };
+        for i in order {
+            reports_push(&mut rows, &oa_adsb::reports_row(&r, i).unwrap());
+        }
+        build(&rows)
+    };
+    let (t1, s1) = run(false);
+    let (t2, s2) = run(true);
+    assert_eq!(digest(&t1), digest(&t2));
+    assert_eq!(s1.removed, s2.removed);
+}
+
+// REQ: OA-TRUTH-026
+#[test]
+fn identical_same_time_rows_are_processed_in_linear_work() {
+    let r = track_with(&|k, t| {
+        if k == 10 {
+            vec![pair_row(t, 0.0, 10); 999]
+        } else {
+            vec![]
+        }
+    });
+    let before = pair_evals_this_thread();
+    let (_, s) = build(&r);
+    let work = pair_evals_this_thread() - before;
+    assert!(work <= reports_len(&r) as u64, "pair evaluations {work}");
+    assert_eq!(removed(&s, REM_DUPLICATE), 999);
+    assert_eq!(s.rows_kept, 30);
+}
+
+// REQ: OA-TRUTH-027
+#[test]
+fn a_group_of_more_than_16_distinct_same_time_rows_is_refused_and_counted() {
+    let group = |n: usize| {
+        track_with(&|k, t| {
+            if k == 10 {
+                (1..n).map(|j| pair_row(t, j as f64 * 0.5, 10)).collect()
+            } else {
+                vec![]
+            }
+        })
+    };
+    let (_, s) = build(&group(16));
+    assert_eq!(removed(&s, REM_OVERSIZED), 0, "{s:?}");
+    assert_eq!(removed(&s, REM_DUPLICATE), 15);
+    let (_, s) = build(&group(17));
+    assert_eq!(removed(&s, REM_OVERSIZED), 17, "{s:?}");
+    assert_eq!(removed(&s, REM_DUPLICATE), 0);
+    assert_eq!(s.rows_kept, 29);
+    assert!(balanced(&s));
+}
+
+/// One pair of same-time rows at report 10: the track's row (NACp `na`) and one `d` m east
+/// (NACp `nb`).
+fn pair_at(d: f64, na: u8, nb: u8) -> TruthStats {
+    let r = track_with(&|k, t| {
+        if k == 10 {
+            vec![pair_row(t, d, nb)]
+        } else {
+            vec![]
+        }
+    });
+    // Rewrite the track row's NACp for the pair.
+    let mut r2 = Reports::default();
+    for i in 0..reports_len(&r) {
+        let mut row = oa_adsb::reports_row(&r, i).unwrap();
+        if i == 10 {
+            row.nac_p = na;
+        }
+        reports_push(&mut r2, &row);
+    }
+    build(&r2).1
+}
+
+// REQ: OA-TRUTH-028
+#[test]
+fn two_nacp_8_reports_70_m_apart_are_one_position_measured_twice() {
+    let s = pair_at(70.0, 8, 8);
+    assert_eq!(removed(&s, REM_DUPLICATE), 1, "{s:?}");
+    assert_eq!(s.rows_kept, 30);
+}
+
+// REQ: OA-TRUTH-029
+#[test]
+fn a_pair_far_beyond_the_admitted_uncertainty_is_quarantined() {
+    let s = pair_at(400.0, 8, 8);
+    assert_eq!((removed(&s, REM_DUPLICATE), s.rows_kept), (2, 29), "{s:?}");
+}
+
+// REQ: OA-TRUTH-030
+#[test]
+fn a_mixed_nacp_pair_is_judged_at_its_own_bound() {
+    // NACp 8 with NACp 10: the bound is sqrt(13.82 (37.83^2 + 4.085^2)) = 141.5 m.
+    let inside = pair_at(139.0, 8, 10);
+    assert_eq!(removed(&inside, REM_DUPLICATE), 1, "{inside:?}");
+    let outside = pair_at(144.0, 8, 10);
+    assert_eq!(removed(&outside, REM_DUPLICATE), 2, "{outside:?}");
+}
+
+/// A 40-report track at 2 s: the first and the 31st report print quality (NACp 10 and 8), the
+/// others none; with an optional far-away row at 60.5 s that prints `jump_nacp`.
+fn carry_track(jump_nacp: Option<u8>) -> Reports {
+    let mut r = Reports::default();
+    for k in 0..40usize {
+        let t = k as f64 * 2.0;
+        let (la, lo) = to_deg(0.0, 231.5 * t);
+        let mut row = good(ADDR, t, la, lo);
+        if k > 0 {
+            (row.nac_p, row.nic, row.sil, row.version) = (NONE_U8, NONE_U8, NONE_U8, NONE_U8);
+        }
+        if k == 30 {
+            // Renewed here, so the reports after it depend on what the row at 60.5 s leaves.
+            row.nac_p = 8;
+            row.nic = 8;
+            row.sil = 3;
+        }
+        reports_push(&mut r, &row);
+        if k == 30 {
+            if let Some(nacp) = jump_nacp {
+                let (la, lo) = to_deg(0.0, 231.5 * (t + 0.5) + 60_000.0);
+                let mut j = good(ADDR, t + 0.5, la, lo);
+                j.nac_p = nacp;
+                reports_push(&mut r, &j);
+            }
+        }
+    }
+    r
+}
+
+// REQ: OA-TRUTH-031
+#[test]
+fn a_rejected_jump_row_does_not_change_the_carried_quality() {
+    let (t0, s0) = build(&carry_track(None));
+    let (t1, s1) = build(&carry_track(Some(11)));
+    assert_eq!(removed(&s1, REM_JUMP), 1, "{s1:?}");
+    assert_eq!(s0.rows_kept, s1.rows_kept);
+    assert_eq!(digest(&t0), digest(&t1), "weights differ");
+}
+
+// REQ: OA-TRUTH-032
+#[test]
+fn a_low_quality_jump_row_does_not_remove_later_usable_reports() {
+    let (_, s0) = build(&carry_track(None));
+    let (_, s1) = build(&carry_track(Some(7)));
+    assert_eq!(removed(&s1, REM_NACP), 1, "{s1:?}");
+    assert_eq!(s1.rows_kept, s0.rows_kept, "{s1:?}");
+    // A low-quality row on the track does still make the reports after it fail.
+    let mut r = carry_track(None);
+    let (la, lo) = to_deg(0.0, 231.5 * 60.5);
+    let mut j = good(ADDR, 60.5, la, lo);
+    j.nac_p = 7;
+    reports_push(&mut r, &j);
+    let (_, s2) = build(&r);
+    assert!(removed(&s2, REM_NACP) >= 1, "{s2:?}");
 }
 
 // REQ: OA-TRUTH-019

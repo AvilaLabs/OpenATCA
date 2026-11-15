@@ -118,14 +118,29 @@ fn held_value(h: &mut Held, own: u8, t_ns: i64, carry_ns: i64, carried: &mut boo
     None
 }
 
-/// Applies the truth selection rules to one row at `t_ns`, updating the carried values (only for a row that is in range, not stale and from an ADS-B
-/// source). The first failing rule is the reason.
+/// Applies the truth selection rules to one row at `t_ns` and commits the carried values (only
+/// for a row that is in range, not stale and from an ADS-B source). The first failing rule is the
+/// reason. [`quality_eval`] is the same without the commit.
 pub fn quality_check(
     st: &mut QualityState,
     row: &Row,
     t_ns: i64,
     cfg: &TruthConfig,
 ) -> QualityVerdict {
+    let (verdict, next) = quality_eval(st, row, t_ns, cfg);
+    *st = next;
+    verdict
+}
+
+/// The rules of [`quality_check`] against `st`, which is not changed; returns the verdict and the
+/// carried values to commit if the caller keeps the row (equal to `st` for a row that is out of
+/// range, stale or from another source).
+pub fn quality_eval(
+    st: &QualityState,
+    row: &Row,
+    t_ns: i64,
+    cfg: &TruthConfig,
+) -> (QualityVerdict, QualityState) {
     let carry_ns = cfg.quality_carry_ms * NS_PER_MS;
     // The carried values are updated on a copy and kept only if the row is a usable ADS-B row:
     // one that is stale, out of range or from another source (which prints no meaningful quality)
@@ -166,16 +181,21 @@ pub fn quality_check(
     } else {
         None
     };
-    if !matches!(removal, Some(REM_INVALID | REM_STALE | REM_SOURCE)) {
-        *st = trial;
-    }
-    QualityVerdict {
-        removal,
-        carried,
-        nacp,
-        nacv,
-        nic,
-        sil,
-        version: ver,
-    }
+    let next = if matches!(removal, Some(REM_INVALID | REM_STALE | REM_SOURCE)) {
+        *st
+    } else {
+        trial
+    };
+    (
+        QualityVerdict {
+            removal,
+            carried,
+            nacp,
+            nacv,
+            nic,
+            sil,
+            version: ver,
+        },
+        next,
+    )
 }
