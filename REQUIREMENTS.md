@@ -162,6 +162,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   returns `A*A` as bits, the exact value being just below a half-way case.
 - **OA-MATH-028** `powi(x, n)` agrees with `pow(x, n)` to within two ulps over random bases and
   exponents up to 10,000 in magnitude.
+- **OA-MATH-029** The helpers the fast paths build on are exact where they say so: the square, the
+  cut product and the product with a multiple of 1/16 equal the exact double-double product (the
+  cut product up to 2^-77), the multipliers of the `ln` table have at most 12 significant bits, the
+  quadrant sign bits of `sin` and `cos` follow the quadrant table, and the case tables built at
+  compile time equal the same double-double sums made at run time.
 
 ### NASR (oa-nasr)
 

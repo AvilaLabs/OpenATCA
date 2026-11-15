@@ -1,6 +1,6 @@
 //! hypot and cbrt.
 
-use crate::dd::{self, dd, fast_two_sum, two_prod, two_sum, Dd};
+use crate::dd::{self, dd, fast_two_sum, two_prod, two_sqr, two_sum, Dd};
 use crate::util::{
     abs, exponent, frexp1, mul_pow2, pow2, round_test, scale_round, with_sign_of, NAN,
 };
@@ -62,13 +62,44 @@ pub(crate) fn cbrt_slow(x: f64) -> f64 {
 /// about 2^-100 (see the derivations below); the constant is 2^-80.
 const ROOT_FAST_REL: f64 = 8.271_806_125_530_277e-25;
 
-/// The fast path of [`hypot`]: for finite operands with 2^-60 |big| <= |small|, a nonzero
-/// `big` and a normal result, `a^2 + b^2` (a, b scaled by 2^-e into [1, 2) and [2^-60, 2)) as
-/// a double-double from two exact products and a sum (rounding of the low parts below
-/// 2^-104), a double square root and one correction with the exact square: `r = sqrt(sh)`,
-/// `rem = sh + sl - r^2`, `cl = rem / 2r`. The error is the rounding of `cl` and of the low
-/// sum (below 2^-103 relative) plus the second-order term `cl^2 / 2r`: below 2^-102.
-pub(crate) fn hypot_fast(x: f64, y: f64) -> Option<f64> {
+/// Operand range of the fast hypot: 2^-380 <= big < 2^500. Inside it, with small >= 2^-60 big,
+/// no square, split or low part under- or overflows (the low parts of `small^2` stay above
+/// 2^-986), so the computation needs no scaling by a power of two.
+const HYPOT_LO: f64 = 1.0e-114;
+const HYPOT_HI: f64 = 1.0e150;
+
+/// The fast path of [`hypot`] for the common range: for operands with 1e-114 <= |big| < 1e150 and 2^-60 |big| <=
+/// |small|, `a^2 + b^2` as a double-double from two exact squares and a sum (rounding of the low
+/// parts below 2^-104), a double square root and one correction with the exact square:
+/// `r = sqrt(sh)`, `rem = sh + sl - r^2`, `cl = rem * (1 / 2r)`. The error is the rounding of
+/// `cl` (the reciprocal and the product, below 2^-105 of `r` as `cl` is below 2^-52 `r`) and of
+/// the low sum (below 2^-103 relative) plus the second-order term `cl^2 / 2r`: below 2^-102. The
+/// sum of the squares is used as `s.hi` plus the low terms without renormalising: `s.hi - r^2` is
+/// exact (the two agree to 2^-52), and `cl` stays below 1.5 2^-52 `r`.
+/// The operands are ordered by their bit patterns (equal to the order of magnitudes) and used
+/// as they are (by [`hypot_fast`], which checks the range and the ratio): the derivation does
+/// not depend on the scale, only on the ratio.
+#[inline]
+fn hypot_fast_plain(big: f64, small: f64) -> Option<f64> {
+    let pa = two_sqr(big);
+    let pb = two_sqr(small);
+    // pa.hi >= pb.hi, as the squares round monotonically
+    let s = fast_two_sum(pa.hi, pb.hi);
+    let r = s.hi.sqrt();
+    let half_inv = 0.5 / r;
+    let sq = two_sqr(r);
+    let cl = (((s.hi - sq.hi) - sq.lo) + (s.lo + (pa.lo + pb.lo))) * half_inv;
+    round_test(r, cl, r * ROOT_FAST_REL)
+}
+
+/// The fast path of [`hypot`] for the rest of the range: for finite operands with 2^-60 |big| <=
+/// |small|, a nonzero `big` and a normal result, `a^2 + b^2` (a, b scaled by 2^-e into [1, 2)
+/// and [2^-60, 2)) as a double-double from two exact products and a sum (rounding of the low
+/// parts below 2^-104), a double square root and one correction with the exact square:
+/// `r = sqrt(sh)`, `rem = sh + sl - r^2`, `cl = rem / 2r`. The error is the rounding of `cl`
+/// and of the low sum (below 2^-103 relative) plus the second-order term `cl^2 / 2r`: below
+/// 2^-102.
+fn hypot_fast_scaled(x: f64, y: f64) -> Option<f64> {
     if !(x.is_finite() && y.is_finite()) {
         return None;
     }
@@ -88,6 +119,24 @@ pub(crate) fn hypot_fast(x: f64, y: f64) -> Option<f64> {
     let sq = two_prod(r, r);
     let cl = (((f.hi - sq.hi) - sq.lo) + f.lo) / (2.0 * r);
     round_test(r, cl, r * ROOT_FAST_REL).map(|v| v * pow2(e))
+}
+
+/// The fast path of [`hypot`]: `None` unless the rounding of the result is certain (then the
+/// result is what [`hypot_slow`] returns).
+#[inline]
+pub(crate) fn hypot_fast(x: f64, y: f64) -> Option<f64> {
+    // Operands ordered by their bit patterns (the order of the magnitudes). NaN and infinity fail
+    // the range test and go the scaled way, which refuses them.
+    let (bx, by) = (abs(x).to_bits(), abs(y).to_bits());
+    let (hi_bits, lo_bits) = if by > bx { (by, bx) } else { (bx, by) };
+    let (big, small) = (f64::from_bits(hi_bits), f64::from_bits(lo_bits));
+    if (HYPOT_LO..HYPOT_HI).contains(&big) {
+        if small < big * 8.673_617_379_884_035e-19 {
+            return None;
+        }
+        return hypot_fast_plain(big, small);
+    }
+    hypot_fast_scaled(x, y)
 }
 
 /// The fast path of [`cbrt`]: for a normal nonzero finite argument. With the mantissa scaled

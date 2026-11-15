@@ -11,7 +11,7 @@ use crate::consts::{
     COS_C, COS_TAB, INV6_DD, PIO2_1, PIO2_2, PIO2_3, PIO2_4, PIO2_DD, PIO4_HI, SIN_C, SIN_TAB,
     TWO_OVER_PI, TWO_OVER_PI_BITS,
 };
-use crate::dd::{self, dd, two_prod, two_sum, Dd};
+use crate::dd::{self, dd, fast_two_sum, two_sum, Dd};
 use crate::fast::ratio;
 use crate::util::{abs, is_neg, negate_if, pow2, round_test, NAN};
 
@@ -258,34 +258,67 @@ const MIN_Y: f64 = 1.525_878_906_25e-5; // 2^-16
 const SIN_COS_FAST_REL: f64 = 1.734_723_475_976_807e-18; // 2^-59
 const TAN_FAST_REL: f64 = 3.469_446_951_953_614e-18; // 2^-58
 
-/// Cody-Waite reduction in doubles: `Some((n, yh, yl))` with ax = n pi/2 + yh + yl, |yl| <= 2^-54
-/// |yh|, for 2^-27 <= ax < 2^19 and, when n is not 0, |yh| >= 2^-16. Error: n pi/2 is
-/// subtracted in pieces of which the first two (33 bits, n < 2^19) give exact products and
-/// exact `two_sum`s; the third product is rounded (error below 2^-103); what is dropped is
-/// n times the remainder of pi/2 after three pieces, 8.5e-32 n < 2^-84.9 for n < 2^18.4.
-/// So `yh + yl` is within 2^-84 of the true remainder, below 2^-68 relative for |y| >= 2^-16.
-fn reduce_fast(ax: f64) -> Option<(u32, f64, f64)> {
-    if ax < PIO4_HI {
-        return Some((0, ax, 0.0));
-    }
-    if ax >= CW_LIMIT {
-        return None;
-    }
-    let n = (ax * TWO_OVER_PI + 0.5) as i64;
-    let nf = n as f64;
-    let s1 = two_sum(ax, -(nf * PIO2_1));
-    let s2 = two_sum(s1.hi, -(nf * PIO2_2));
-    let y = two_sum(s2.hi, (s2.lo + s1.lo) - nf * PIO2_3);
-    if abs(y.hi) < MIN_Y {
-        return None;
-    }
-    Some(((n & 3) as u32, y.hi, y.lo))
+/// 1.5 * 2^52: adding it to a double of size below 2^51 rounds that double to an integer (ties
+/// to even) and leaves the integer in the low bits of the sum.
+const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
+
+/// The integer held in the low bits of `t = v + ROUND_MAGIC` (as a wrapped difference of bit
+/// patterns, so a negative integer is read as a two's-complement `u64`).
+fn magic_int(t: f64) -> u64 {
+    t.to_bits().wrapping_sub(ROUND_MAGIC.to_bits())
 }
 
-/// Table index and the short series for sin and cos of `|y| = a + b`, a = j/16, |b| <= 1/32.
+const SIGN_BIT: u64 = 0x8000_0000_0000_0000;
+
+/// Cody-Waite reduction in doubles: `Some((n, yh, yl))` with ax = n pi/2 + yh + yl, |yl| <= 2^-54
+/// |yh|, for 2^-27 <= ax < 2^19 and, when n is not 0, |yh| >= 2^-16. n is ax 2/pi rounded to an
+/// integer by the magic-number sum (ties to even); n is 0 below about pi/4, where `yh` is ax and
+/// `yl` is 0, and |yh| is at most pi/4 + 2^-50 in any case. Error: n pi/2 is subtracted in
+/// pieces of which the first two (33 bits, n < 2^19) give exact products. The first difference
+/// `ax - n PIO2_1` is exact: both terms are multiples of ulp(ax) (at most 2^-34 below 2^19, the
+/// product a multiple of 2^-32), and the result is below 1 in size while ulp(ax) >= 2^-53 for
+/// ax >= 1/2 (n = 0 gives ax itself), so it has fewer than 2^53 units. The second is a `two_sum`
+/// (the result may be small enough to cancel); the third product is rounded (error below
+/// 2^-103), and the final sum is a `fast_two_sum`: when it matters, |yh| >= 2^-16 exceeds the
+/// remaining terms (below 2^-62), and otherwise the result is refused below. What is dropped is
+/// n times the remainder of pi/2 after three pieces, 8.5e-32 n < 2^-84.9 for n < 2^18.4. So
+/// `yh + yl` is within 2^-84 of the true remainder, below 2^-68 relative for |y| >= 2^-16.
+#[inline]
+fn reduce_fast(ax: f64) -> Option<(u64, f64, f64)> {
+    let t = ax * TWO_OVER_PI + ROUND_MAGIC;
+    let n = magic_int(t);
+    let nf = t - ROUND_MAGIC;
+    let s1 = ax - nf * PIO2_1;
+    let s2 = two_sum(s1, -(nf * PIO2_2));
+    let y = fast_two_sum(s2.hi, s2.lo - nf * PIO2_3);
+    if n != 0 && abs(y.hi) < MIN_Y {
+        return None;
+    }
+    Some((n & 3, y.hi, y.lo))
+}
+
+/// sin and cos of j/16 as `[sin, cos]` for each j, and the same with the roles swapped: the
+/// value an offset starts from and the value that multiplies the offset, for sin |y| (index 0)
+/// and cos |y| (index 1).
+const fn pair_tab(first: &[Dd; 15], second: &[Dd; 15]) -> [Dd; 30] {
+    let mut t = [dd(0.0, 0.0); 30];
+    let mut j = 0;
+    while j < 15 {
+        #[allow(clippy::indexing_slicing)]
+        {
+            t[2 * j] = first[j];
+            t[2 * j + 1] = second[j];
+        }
+        j += 1;
+    }
+    t
+}
+pub(crate) const START_TAB: [Dd; 30] = pair_tab(&SIN_TAB, &COS_TAB);
+pub(crate) const SLOPE_TAB: [Dd; 30] = pair_tab(&COS_TAB, &SIN_TAB);
+
+/// The table index and the short series for sin and cos of `|y| = a + b`, a = j/16, |b| <= 1/32.
 struct Part {
-    sa: Dd,
-    ca: Dd,
+    j: usize,
     b: f64,
     /// sin b - b (with the low part of the argument): bl + b^3 S(b^2)
     sinb_l: f64,
@@ -293,114 +326,129 @@ struct Part {
     c2: f64,
 }
 
-/// The series for the reduced argument `ay = ayh + ayl >= 0`, `ayh <= pi/4 + 2^-50`.
+/// The series for the reduced argument `ay = ayh + ayl >= 0`, `ayh <= pi/4 + 2^-50`. j is
+/// ayh 16 rounded to an integer (ties to even); the series are evaluated in the order of
+/// Estrin, which changes their roundings by far less than the bound allows (the terms past the
+/// leading ones are below 2^-24).
+#[inline]
 fn part(ayh: f64, ayl: f64) -> Part {
-    let j = (ayh * 16.0 + 0.5) as usize;
-    let a = j as f64 * 0.0625;
-    let sa = SIN_TAB.get(j).copied().unwrap_or(dd(0.0, 0.0));
-    let ca = COS_TAB.get(j).copied().unwrap_or(dd(1.0, 0.0));
+    let t = ayh * 16.0 + ROUND_MAGIC;
+    let j = magic_int(t) as usize;
+    let a = (t - ROUND_MAGIC) * 0.0625;
     // exact: for j = 0 it is ayh; otherwise a is within a factor 2 of ayh (Sterbenz)
     let b = ayh - a;
     let b2 = b * b;
+    let b4 = b2 * b2;
     let [s5, s7, s9, s11] = SIN_C;
     let [c4, c6, c8, c10, _] = COS_C;
-    let sp = -INV6_DD.hi + b2 * (s5 + b2 * (s7 + b2 * (s9 + b2 * s11)));
+    let sp = -INV6_DD.hi + b2 * ((s5 + b2 * s7) + b4 * (s9 + b2 * s11));
     let sinb_l = ayl + (b * b2) * sp;
-    let cp = c4 + b2 * (c6 + b2 * (c8 + b2 * c10));
+    let cp = (c4 + b2 * c6) + b4 * (c8 + b2 * c10);
     // cos(b + bl) - 1 = c2 - bl sin b, so the low part of the argument enters here as well
-    let c2 = (-0.5 * b2 + (b2 * b2) * cp) - ayl * b;
-    Part {
-        sa,
-        ca,
-        b,
-        sinb_l,
-        c2,
-    }
+    let c2 = (-0.5 * b2 + b4 * cp) - ayl * b;
+    Part { j, b, sinb_l, c2 }
 }
 
-/// sin |y| as `(h, l)`. sin(a + b) = sa + sa c2 + ca (b + sinb_l). Error (relative to the
-/// result, which is at least 2^-5 for a nonzero table index and is b itself otherwise, u = 2^-53):
-/// the series cut-offs (b^13 / 13! and b^12 / 12!, below 2^-80); the roundings in `sinb_l`
-/// and `c2` (about 3 u of terms of size b^3 / 6 and b^2 / 2), whose products with the table
-/// values are below 2^-64 sa; the roundings of the sum of the small terms, whose size is at
-/// most 2^-11.5 sa + 2^-17.6, giving below 2^-61 of the result; the neglected products of the
-/// low table parts with the small terms (2^-65 relative) and of the low part of the argument
-/// with c2 (below 2^-63.4 relative). Total below 2^-60.3, the bound used is 2^-59.
-fn sin_of(p: &Part) -> (f64, f64) {
-    let q = two_prod(p.ca.hi, p.b);
-    let s = two_sum(p.sa.hi, q.hi);
-    let lw = p.sa.lo + (q.lo + (p.ca.lo * p.b + (p.ca.hi * p.sinb_l + p.sa.hi * p.c2)));
-    let f = two_sum(s.hi, s.lo + lw);
-    (f.hi, f.lo)
+/// Exact product up to 2^-78 relative: `hi + lo == a * b`, `hi = fl(a * b)`, the operands split
+/// by clearing the low 27 mantissa bits (pieces of 26 and at most 27 bits, so all but the last
+/// partial product are exact; the last is rounded, below 2^-107 relative, and the sums of
+/// partial products round at most by 2^-79 relative).
+#[inline]
+pub(crate) fn two_prod_cut(a: f64, b: f64) -> Dd {
+    let p = a * b;
+    let ah = f64::from_bits(a.to_bits() & !0x7ff_ffff);
+    let bh = f64::from_bits(b.to_bits() & !0x7ff_ffff);
+    let (al, bl) = (a - ah, b - bh);
+    let err = (((ah * bh - p) + ah * bl) + al * bh) + al * bl;
+    dd(p, err)
 }
 
-/// cos |y| as `(h, l)`; cos(a + b) = ca + ca c2 - sa (b + sinb_l). Same analysis as `sin_of`,
-/// with the result at least cos(pi/4) = 0.7 so the relative error is below 2^-61.
-fn cos_of(p: &Part) -> (f64, f64) {
-    let q = two_prod(p.sa.hi, p.b);
-    let s = two_sum(p.ca.hi, -q.hi);
-    let lw = p.ca.lo + (p.ca.hi * p.c2 - (q.lo + (p.sa.lo * p.b + p.sa.hi * p.sinb_l)));
-    let f = two_sum(s.hi, s.lo + lw);
-    (f.hi, f.lo)
+/// sin |y| (`k` = 0) or cos |y| (`k` = 1) as `(h, l)`. With T the value the offset starts from
+/// (sin a or cos a) and V the one that multiplies it (cos a or sin a), and the sign `s` of the
+/// slope (+1 for sin, -1 for cos): sin(a + b) = sa + sa c2 + ca (b + sinb_l) and
+/// cos(a + b) = ca + ca c2 - sa (b + sinb_l) are both `T + T c2 + V s (b + sinb_l)`. Error
+/// (relative to the result, which is at least 2^-5 for a nonzero table index and is b itself
+/// otherwise, u = 2^-53): the series cut-offs (b^13 / 13! and b^12 / 12!, below 2^-80); the
+/// roundings in `sinb_l` and `c2` (about 3 u of terms of size b^3 / 6 and b^2 / 2), whose
+/// products with the table values are below 2^-64 T; the roundings of the sum of the small
+/// terms, whose size is at most 2^-11.5 T + 2^-17.6, giving below 2^-61 of the result; the
+/// neglected products of the low table parts with the small terms (2^-65 relative) and of the
+/// low part of the argument with c2 (below 2^-63.4 relative). Total below 2^-60.3, the bound
+/// used is 2^-59 (the same for sin and cos: the terms differ only in sign). The sums are
+/// `fast_two_sum`s: |T.hi| >= |V.hi b| (T >= 0.0624 or 0 where b is the whole result, V.hi |b|
+/// <= 0.78 / 32 < 0.0624). The pair returned is not renormalised: `l = s.lo + lw` is below
+/// 2^-10 of `h`, so `round_test` rounds `l + err` with an error below 2^-63 of `h`, which the
+/// factor 2.5 between the total and the bound used (2^-59) covers.
+#[inline]
+fn eval(p: &Part, k: usize) -> (f64, f64) {
+    let t = START_TAB.get(2 * p.j + k).copied().unwrap_or(dd(0.0, 0.0));
+    let v = SLOPE_TAB.get(2 * p.j + k).copied().unwrap_or(dd(0.0, 0.0));
+    let flip = (k as u64) << 63;
+    let bs = f64::from_bits(p.b.to_bits() ^ flip);
+    let ls = f64::from_bits(p.sinb_l.to_bits() ^ flip);
+    let q = two_prod_cut(v.hi, bs);
+    let s = fast_two_sum(t.hi, q.hi);
+    let lw = t.lo + (q.lo + (v.lo * bs + (v.hi * ls + t.hi * p.c2)));
+    (s.hi, s.lo + lw)
 }
 
-/// The reduced argument as a `Part` of |y| and whether y is negative.
-fn reduced(x: f64) -> Option<(u32, bool, Part)> {
+/// The quadrant, the sign bit of y and the part of the reduced |y|.
+#[inline]
+fn reduced(x: f64) -> Option<(u64, u64, Part)> {
     let ax = abs(x);
     if !(TINY..CW_LIMIT).contains(&ax) {
         return None;
     }
     let (n, yh, yl) = reduce_fast(ax)?;
-    let neg_y = is_neg(yh);
-    let (ayh, ayl) = if neg_y { (-yh, -yl) } else { (yh, yl) };
-    Some((n, neg_y, part(ayh, ayl)))
+    let neg_y = yh.to_bits() & SIGN_BIT;
+    let (ayh, ayl) = (abs(yh), f64::from_bits(yl.to_bits() ^ neg_y));
+    Some((n, neg_y >> 63, part(ayh, ayl)))
 }
 
-/// Rounds a fast `(h, l)` with the relative bound `rel`, negated when `negative`.
-fn finish(hl: (f64, f64), rel: f64, negative: bool) -> Option<f64> {
+/// Rounds a fast `(h, l)` (positive) with the relative bound `rel`, negated when `negative` is 1.
+#[inline]
+fn finish(hl: (f64, f64), rel: f64, negative: u64) -> Option<f64> {
     let r = round_test(hl.0, hl.1, abs(hl.0) * rel)?;
-    Some(negate_if(r, negative))
+    Some(f64::from_bits(r.to_bits() ^ (negative << 63)))
 }
 
-/// Whether sin(x) is negative, given the quadrant, the sign of y and of x.
-fn sin_sign(n: u32, neg_y: bool, neg_x: bool) -> bool {
-    let neg = match n & 3 {
-        0 => neg_y,
-        1 => false,
-        2 => !neg_y,
-        _ => true,
-    };
-    neg != neg_x
+/// Whether sin(x) is negative (0 or 1), given the quadrant n, the sign bit of y and of x:
+/// the quadrants 0 to 3 give y, never, not y, always.
+#[inline]
+pub(crate) fn sin_sign(n: u64, neg_y: u64, neg_x: u64) -> u64 {
+    (((n >> 1) & 1) ^ (neg_y & !n & 1)) ^ neg_x
 }
 
-/// Whether cos(x) is negative, given the quadrant and the sign of y.
-fn cos_sign(n: u32, neg_y: bool) -> bool {
-    match n & 3 {
-        0 => false,
-        1 => !neg_y,
-        2 => true,
-        _ => neg_y,
-    }
+/// Whether cos(x) is negative (0 or 1): cos is the sine of the next quadrant.
+#[inline]
+pub(crate) fn cos_sign(n: u64, neg_y: u64) -> u64 {
+    ((n >> 1) ^ n ^ (neg_y & n)) & 1
 }
 
 pub(crate) fn sin_fast(x: f64) -> Option<f64> {
     let (n, neg_y, p) = reduced(x)?;
-    let hl = if n & 1 == 0 { sin_of(&p) } else { cos_of(&p) };
-    finish(hl, SIN_COS_FAST_REL, sin_sign(n, neg_y, is_neg(x)))
+    finish(
+        eval(&p, (n & 1) as usize),
+        SIN_COS_FAST_REL,
+        sin_sign(n, neg_y, x.to_bits() >> 63),
+    )
 }
 
 pub(crate) fn cos_fast(x: f64) -> Option<f64> {
     let (n, neg_y, p) = reduced(x)?;
-    let hl = if n & 1 == 0 { cos_of(&p) } else { sin_of(&p) };
-    finish(hl, SIN_COS_FAST_REL, cos_sign(n, neg_y))
+    finish(
+        eval(&p, ((n & 1) ^ 1) as usize),
+        SIN_COS_FAST_REL,
+        cos_sign(n, neg_y),
+    )
 }
 
 pub(crate) fn sin_cos_fast(x: f64) -> Option<(f64, f64)> {
     let (n, neg_y, p) = reduced(x)?;
-    let (s, c) = (sin_of(&p), cos_of(&p));
-    let (sx, cx) = if n & 1 == 0 { (s, c) } else { (c, s) };
+    let k = (n & 1) as usize;
+    let (sx, cx) = (eval(&p, k), eval(&p, k ^ 1));
     Some((
-        finish(sx, SIN_COS_FAST_REL, sin_sign(n, neg_y, is_neg(x)))?,
+        finish(sx, SIN_COS_FAST_REL, sin_sign(n, neg_y, x.to_bits() >> 63))?,
         finish(cx, SIN_COS_FAST_REL, cos_sign(n, neg_y))?,
     ))
 }
@@ -410,16 +458,20 @@ pub(crate) fn sin_cos_fast(x: f64) -> Option<(f64, f64)> {
 /// bound used is 2^-58.
 pub(crate) fn tan_fast(x: f64) -> Option<f64> {
     let (n, neg_y, p) = reduced(x)?;
-    let (s, c) = (sin_of(&p), cos_of(&p));
+    let norm = |hl: (f64, f64)| {
+        let f = fast_two_sum(hl.0, hl.1);
+        (f.hi, f.lo)
+    };
+    let (s, c) = (norm(eval(&p, 0)), norm(eval(&p, 1)));
     let negative;
     let q = if n & 1 == 0 {
         negative = neg_y;
         ratio(s.0, s.1, c.0, c.1)
     } else {
-        negative = !neg_y;
+        negative = neg_y ^ 1;
         ratio(c.0, c.1, s.0, s.1)
     };
-    finish((q.hi, q.lo), TAN_FAST_REL, negative != is_neg(x))
+    finish((q.hi, q.lo), TAN_FAST_REL, negative ^ (x.to_bits() >> 63))
 }
 
 /// Sine and cosine of `x` together, computed from one argument reduction. Domain: all finite

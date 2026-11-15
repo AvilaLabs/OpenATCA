@@ -2,7 +2,7 @@
 //! (so the remainder u is below 2^-6 and exact to form), then a log1p series in double-double.
 
 use crate::consts::{INV3_DD, LN2_DD, LN_C, LN_NEG_LN_R, LN_R};
-use crate::dd::{self, dd, two_prod, two_sum, Dd};
+use crate::dd::{self, dd, fast_two_sum, Dd};
 use crate::util::{abs, frexp1, round_test, NAN};
 
 /// ln of a positive finite double as a double-double, relative error about 2^-70.
@@ -64,35 +64,52 @@ const LN2_MID: f64 = LN2_DD.hi - LN2_HI;
 ///
 /// The absolute total is below 3 u * u^2 + 2^-85; the returned `err` is `u^2 2^-49 + 2^-80 |h|`
 /// with u^2 2^-49 = 16 * 2^-53 u^2, a factor of 5 above the bound.
+#[inline]
 pub(crate) fn ln_fast_core(x: f64) -> Option<(f64, f64, f64)> {
     if !(f64::MIN_POSITIVE..f64::INFINITY).contains(&x) {
         return None;
     }
-    let (mut e, mut m) = frexp1(x);
-    if m >= 1.5 {
-        m *= 0.5;
-        e += 1;
-    }
-    let j = ((m * 64.0) as usize).wrapping_sub(48);
+    // m in [0.75, 1.5) and the bin j = floor(64 m) - 48 from the bits, without a branch: when the
+    // top mantissa bit is set (m >= 1.5) the exponent field is lowered by one, which halves m.
+    let bits = x.to_bits();
+    let mant = bits & 0x000f_ffff_ffff_ffff;
+    let c = (bits >> 51) & 1;
+    let e = (bits >> 52) as i32 - 1023 + c as i32;
+    let m = f64::from_bits(mant | ((0x3ff - c) << 52));
+    let j = if c == 1 {
+        (mant >> 47).wrapping_sub(16)
+    } else {
+        16 + (mant >> 46)
+    } as usize;
     let r = LN_R.get(j).copied().unwrap_or(1.0);
     let nl = LN_NEG_LN_R.get(j).copied().unwrap_or(dd(0.0, 0.0));
-    let (uh, ul) = if r == 1.0 {
-        (m - 1.0, 0.0)
-    } else {
-        let p = two_prod(m, r);
-        let s = two_sum(p.hi - 1.0, p.lo);
-        (s.hi, s.lo)
-    };
-    // log1p(u) = u + u^2 (-1/2 + u (1/3 + u P(u))), P = -1/4 + u/5 - ... down to u^7/11
+    // u = m r - 1, exactly. r has at most 12 significant bits, so with the top 41 bits `mh` of m
+    // the products `mh r` and `(m - mh) r` are exact, and `p = fl(m r)` differs from their sum by
+    // `lo = (mh r - p) + (m - mh) r`, itself a double. `p - 1` is exact (p within 2^-5 of 1), and
+    // |p - 1| >= |lo| unless it is 0 (|lo| <= 2^-54, p - 1 is a multiple of 2^-53), so the
+    // `fast_two_sum` is exact. In the two bins around 1, r = 1 and u = m - 1 with `lo` = 0.
+    let mh = f64::from_bits(m.to_bits() & !0xfff);
+    let p = m * r;
+    let lo = (mh * r - p) + (m - mh) * r;
+    let us = fast_two_sum(p - 1.0, lo);
+    let (uh, ul) = (us.hi, us.lo);
+    // log1p(u) = u + u^2 (-1/2 + u (1/3 + u P(u))), P = -1/4 + u/5 - ... down to u^7/11, the
+    // polynomial P in the order of Estrin (its rounding is far below the bound: P enters
+    // multiplied by u^4).
     let [c0, c1, c2, c3, c4, c5, c6, c7, _, _, _] = LN_C;
-    let p = c0 + uh * (c1 + uh * (c2 + uh * (c3 + uh * (c4 + uh * (c5 + uh * (c6 + uh * c7))))));
+    let u2 = uh * uh;
+    let p =
+        ((c0 + uh * c1) + u2 * (c2 + uh * c3)) + (u2 * u2) * ((c4 + uh * c5) + u2 * (c6 + uh * c7));
     let t = uh * (uh + (ul + ul));
     let b = t * (-0.5 + uh * (INV3_DD.hi + uh * p)) + (t * uh) * INV3_DD.lo;
     let ef = e as f64;
-    let s = two_sum(ef * LN2_HI, nl.hi);
-    let s2 = two_sum(s.hi, uh);
-    let lw = ((((ef * LN2_MID + ef * LN2_DD.lo) + nl.lo) + ul) + b) + (s.lo + s2.lo);
-    let f = two_sum(s2.hi, lw);
+    // |ef LN2_HI| is 0 or at least 0.69 > |nl.hi|; |s.hi| >= |uh| (see the table: |nl.hi| >= 0.0157
+    // when it is not 0, and |u| < 2^-7 there); |s2.hi| >= |lw|: the two `fast_two_sum` are exact.
+    let s = fast_two_sum(ef * LN2_HI, nl.hi);
+    let s2 = fast_two_sum(s.hi, uh);
+    let early = (((ef * LN2_MID + ef * LN2_DD.lo) + nl.lo) + ul) + (s.lo + s2.lo);
+    let lw = early + b;
+    let f = fast_two_sum(s2.hi, lw);
     let err = (uh * uh) * 1.776_356_839_400_250_5e-15 + abs(f.hi) * 8.271_806_125_530_277e-25;
     Some((f.hi, f.lo, err))
 }

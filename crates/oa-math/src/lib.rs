@@ -39,7 +39,7 @@
 //! rounding test of Ziv's method (`util::round_test`) checks that `h + (l + err)` and
 //! `h + (l - err)` round to the same double; when they do, the true value cannot lie on the
 //! other side of a rounding boundary and that double is returned. Otherwise (about one call in
-//! 20 to 50 in the typical ranges, more near the hard cases, and every argument the fast path
+//! 20 to 100 in the typical ranges, more near the hard cases, and every argument the fast path
 //! does not handle: huge arguments, subnormals, special values) the double-double path
 //! described below runs. As that path returns the correctly rounded double wherever the fast path answers (the
 //! fast path's margin covers the slow path's own error, which for `pow` grows with |y ln x|), the
@@ -84,7 +84,7 @@
 //! | [`powi`] | double-double repeated squaring of the mantissa, one final scaled rounding |
 //! | [`hypot`], [`cbrt`] | scaled double-double square root; Newton with a double-double step |
 //!
-//! Speed: roughly 1.7 to 6 times the platform library per call with the fast path, 2 to 12 times
+//! Speed: roughly 1.2 to 4 times the platform library per call with the fast path, 2 to 12 times
 //! without it (an `examples/speed.rs` run prints the table); the price of the determinism and
 //! the extra accuracy.
 
@@ -101,6 +101,8 @@ mod util;
 
 #[cfg(test)]
 mod fast_tests;
+#[cfg(test)]
+mod helper_tests;
 
 pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;

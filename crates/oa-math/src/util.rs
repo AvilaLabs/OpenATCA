@@ -115,7 +115,8 @@ pub(crate) fn scale_round(d: Dd, k: i32) -> f64 {
 }
 
 /// The rounding test of Ziv's method, shared by every fast path. The true value is known to lie
-/// within `err` (absolute) of `h + l`, where `|l|` is at most a few ulps of `h`. Returns the
+/// within `err` (absolute) of `h + l`, where `|l|` is at most a few ulps of `h` (the sin, cos and
+/// atan fast paths pass `|l|` up to 2^-10 of `h` and allow for the larger rounding in their `err`). Returns the
 /// double nearest to `h + l` when that double is also the one nearest to every point of the
 /// interval, and `None` when a rounding boundary may lie inside it (the caller then runs the
 /// double-double path). `fl` is monotone, so `fl(h + l - err) == fl(h + l + err)` pins

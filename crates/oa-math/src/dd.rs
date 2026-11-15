@@ -20,7 +20,7 @@ pub(crate) const fn dd(hi: f64, lo: f64) -> Dd {
 pub(crate) const SPLITTER: f64 = 134_217_729.0;
 
 /// Exact sum: `hi + lo == a + b`, `hi = fl(a + b)`.
-pub(crate) fn two_sum(a: f64, b: f64) -> Dd {
+pub(crate) const fn two_sum(a: f64, b: f64) -> Dd {
     let s = a + b;
     let bb = s - a;
     let err = (a - (s - bb)) + (b - bb);
@@ -28,7 +28,7 @@ pub(crate) fn two_sum(a: f64, b: f64) -> Dd {
 }
 
 /// Exact sum when `|a| >= |b|` (or `a == 0`).
-pub(crate) fn fast_two_sum(a: f64, b: f64) -> Dd {
+pub(crate) const fn fast_two_sum(a: f64, b: f64) -> Dd {
     let s = a + b;
     let err = b - (s - a);
     dd(s, err)
@@ -47,12 +47,25 @@ pub(crate) fn two_prod(a: f64, b: f64) -> Dd {
     dd(p, err)
 }
 
-pub(crate) fn neg(a: Dd) -> Dd {
+/// Exact square: `hi + lo == a * a`, `hi = fl(a * a)`. One splitting instead of two; the pieces
+/// `ah` (26 bits) and `al` (at most 26 bits) make `ah ah`, `ah al` and `al al` exact.
+#[inline]
+pub(crate) fn two_sqr(a: f64) -> Dd {
+    let p = a * a;
+    let t = SPLITTER * a;
+    let ah = t - (t - a);
+    let al = a - ah;
+    let ahl = ah * al;
+    let err = ((ah * ah - p) + (ahl + ahl)) + al * al;
+    dd(p, err)
+}
+
+pub(crate) const fn neg(a: Dd) -> Dd {
     dd(-a.hi, -a.lo)
 }
 
 /// Sum of two double-doubles (relative error about 2^-104).
-pub(crate) fn add(a: Dd, b: Dd) -> Dd {
+pub(crate) const fn add(a: Dd, b: Dd) -> Dd {
     let s = two_sum(a.hi, b.hi);
     let t = two_sum(a.lo, b.lo);
     let e = s.lo + t.hi;
@@ -61,7 +74,7 @@ pub(crate) fn add(a: Dd, b: Dd) -> Dd {
     fast_two_sum(u.hi, e2)
 }
 
-pub(crate) fn sub(a: Dd, b: Dd) -> Dd {
+pub(crate) const fn sub(a: Dd, b: Dd) -> Dd {
     add(a, neg(b))
 }
 
