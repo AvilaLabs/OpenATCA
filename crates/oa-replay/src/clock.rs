@@ -25,11 +25,12 @@
 //!    counted as held ([`Clock::held`]; a frame that is behind the clock is also counted as a
 //!    regression), and becomes a candidate step of its feed. The clock does not move.
 //! 4. **Confirmation.** A feed's step is confirmed by [`CLOCK_CONFIRM_FRAMES`] (3) consecutive
-//!    candidates of that feed in the same direction whose times do not decrease. The third is
-//!    applied at the new clock. A frame that is not a candidate, a candidate in the other
-//!    direction or one earlier than the previous one drops (or restarts) the candidate, so one
-//!    wild frame, or scattered wild frames, never move the clock; the held count says how many
-//!    there were. A feed that is steadily more than `TOL` behind the others is held for the same
+//!    candidates of that feed in the same direction, each within `TOL` of the one before (either
+//!    way, so frames a little out of order, as two decoder threads deliver them, still
+//!    confirm). The third is applied at the new clock. A frame that is not a candidate, a
+//!    candidate in the other direction or one more than `TOL` from the previous candidate drops
+//!    (or restarts) the candidate, so one wild frame, or scattered wild frames, or candidates
+//!    far from each other, never move the clock; the held count says how many there were. A feed that is steadily more than `TOL` behind the others is held for the same
 //!    reason and never confirms, as long as the others' frames keep refuting it.
 //! 5. **Step.** On confirmation the clock takes the third frame's time and every age the tables
 //!    hold is shifted by the same amount ([`Tick::Step`]), so a step of the recorder's clock,
@@ -160,7 +161,7 @@ pub fn clock_observe(c: &mut Clock, feed: usize, now: i64, t: i64) -> Tick {
     let back = t < now;
     let mut confirmed = false;
     if let Some(f) = c.feeds.get_mut(feed) {
-        if f.cand_n > 0 && f.cand_back == back && t >= f.cand_last_ns {
+        if f.cand_n > 0 && f.cand_back == back && within(t, f.cand_last_ns) {
             f.cand_n += 1;
         } else {
             f.cand_n = 1;
@@ -305,7 +306,7 @@ mod proofs {
         if let Tick::Step { .. } = d {
             // Three frames of one feed, all far from the clock, on one side, in time order.
             assert!(matches!(a, Tick::Held { .. }) && matches!(b, Tick::Held { .. }));
-            assert!(t1 <= t2 && t2 <= t3);
+            assert!(within(t1, t2) && within(t2, t3));
             assert_eq!(t1 < now, t3 < now);
         }
     }

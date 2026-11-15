@@ -358,8 +358,8 @@ fn perf_text(o: &mut String, p: &Perf, offered: u64, rows: u64, cfg: &TrackerCon
         }
         let _ = writeln!(
             o,
-            "  stage differences that saturated a 32-bit ns field {}, monotonic differences that were negative (stored as 0) {}",
-            log.saturated, log.negative
+            "  stage differences that saturated a 32-bit ns field {}, monotonic differences that were negative (stored as 0) {}, received before the sensor time (clock skew) {}",
+            log.saturated, log.negative, log.sensor_negative
         );
         let _ = writeln!(
             o,

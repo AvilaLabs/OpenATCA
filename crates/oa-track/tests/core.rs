@@ -662,6 +662,53 @@ fn one_report_claiming_a_fast_category_does_not_excuse_a_jump_in_the_tracker() {
     assert_eq!(tracker_stats(&t).init_implausible, 1);
 }
 
+/// Reports of an uncategorised aircraft flying east at `kt` with no ground speed (a radar-only
+/// track), one per second at the given times; the last is displaced by `jump_kt` instead of `kt`.
+fn radar_only_run(addr: u32, kt: f64, times: &[f64], last_kt: f64) -> oa_track::Tracker {
+    let f = frame0();
+    let v = kt * 0.514_444_444_444;
+    let mut rng = Rng(9);
+    let cfg = TrackerConfig {
+        init_m: 3,
+        ..big_config()
+    };
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(1 << 12);
+    for (i, &s) in times.iter().enumerate() {
+        let e = if i + 1 == times.len() && i > 0 {
+            v * times[i - 1] + last_kt * 0.514_444_444_444 * (s - times[i - 1])
+        } else {
+            v * s
+        };
+        let tr = Truth {
+            e,
+            n: 0.0,
+            ve: v,
+            vn: 0.0,
+            alt_ft: 30000.0,
+            vrate_fpm: 0.0,
+        };
+        let m = measure(&f, addr, s, &tr, 1.0, None, false, &mut rng);
+        tracker_update(&mut t, &m, &mut out);
+    }
+    t
+}
+
+// REQ: OA-TRK-150
+#[test]
+fn an_uncategorised_track_without_ground_speed_is_judged_by_its_own_estimated_speed() {
+    // 300 kt for two reports, then a report displaced as a 1,500 kt move: under the class ceiling
+    // of no category (2,000 kt) but nothing the track could have done.
+    let t = radar_only_run(0x515151, 300.0, &[0.0, 1.0, 2.0], 1500.0);
+    assert_eq!(tracker_stats(&t).init_implausible, 1);
+    // A 900 kt track that keeps flying 900 kt is not restarted by its own next report.
+    let t = radar_only_run(0x515152, 900.0, &[0.0, 1.0, 2.0], 900.0);
+    assert_eq!(tracker_stats(&t).init_implausible, 0);
+    // With one update there is no velocity estimate: the second report is judged as before.
+    let t = radar_only_run(0x515153, 300.0, &[0.0, 1.0], 1500.0);
+    assert_eq!(tracker_stats(&t).init_implausible, 0);
+}
+
 /// A tracker that has followed the aircraft `addr` for four seconds.
 fn tracker_with_one_track(addr: u32) -> (oa_track::Tracker, TrackOutput, Vec<Measurement>) {
     let ms = base_measurements(addr, 8, 1.0, 3);
