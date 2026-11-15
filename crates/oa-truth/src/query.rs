@@ -164,7 +164,10 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     };
     let frame = frame_new(lat0, lon0);
     let [e, ve, _, n, vn, _] = x;
-    let (lat, lon) = unproject(&frame, e, n);
+    // A state past the chart is unusable, not a position.
+    let Some((lat, lon)) = unproject(&frame, e, n) else {
+        return TruthQuery::TooUncertain;
+    };
     let (vel_e, vel_n) = frame_velocity(&frame, e, n, ve, vn);
     // A state the frame cannot convert (overflow past the chart), or one moving faster than any
     // ADS-B emitter class can report, is unusable, not a position: finite is not the same as valid.

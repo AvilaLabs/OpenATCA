@@ -144,3 +144,21 @@ fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial
         );
     }
 }
+
+// REQ: OA-TRUTH-042
+#[test]
+fn a_non_finite_or_non_positive_tuning_value_is_a_usage_error() {
+    let exe = env!("CARGO_BIN_EXE_oa-truth-check");
+    for opt in ["--accel-q", "--sigma-scale"] {
+        for v in ["nan", "inf", "-inf", "1e999", "0", "-1", "x"] {
+            // The clip does not exist: a usage error comes before it is read.
+            let o = Command::new(exe)
+                .args(["/nonexistent/clip.oaf", opt, v])
+                .output()
+                .unwrap();
+            let err = String::from_utf8_lossy(&o.stderr);
+            assert_eq!(o.status.code(), Some(2), "{opt} {v}");
+            assert!(err.contains("usage:"), "{opt} {v}: {err}");
+        }
+    }
+}

@@ -323,7 +323,11 @@ fn georeferencing_is_validated() {
     assert!(refuse(&s));
     let mut s = base.clone();
     s.scale = (f64::NAN, 0.01);
-    assert!(refuse(&s));
+    // A NaN in the tag is refused where it is read.
+    assert!(matches!(
+        read_geotiff(&build(&s)),
+        Err(TiffError::BadValue(_))
+    ));
     let mut s = base.clone();
     s.tie = (0.0, 0.0, 179.9999, 40.0); // runs past 180 degrees east
     s.scale = (0.01, 0.01);
@@ -881,4 +885,30 @@ fn infinite_samples_in_a_grid_are_nodata_in_queries() {
     .unwrap();
     assert_eq!((q.samples, q.nodata), (3, 1), "{q:?}");
     assert_eq!(q.peak.map(|p| p.metres), Some(5.0));
+}
+
+// REQ: OA-TIFF-085
+#[test]
+fn a_non_finite_double_in_a_tag_is_a_bad_value() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut s = Spec::new(2, 2, vec![1.0; 4]);
+        s.scale = (bad, 0.001);
+        let e = read_geotiff(&build(&s)).unwrap_err();
+        assert!(matches!(e, TiffError::BadValue(_)), "scale {bad}: {e:?}");
+        let mut s = Spec::new(2, 2, vec![1.0; 4]);
+        s.tie = (0.0, 0.0, bad, 40.0);
+        let e = read_geotiff(&build(&s)).unwrap_err();
+        assert!(matches!(e, TiffError::BadValue(_)), "tie {bad}: {e:?}");
+    }
+}
+
+// REQ: OA-TIFF-086
+#[test]
+fn a_non_finite_gdal_nodata_text_is_refused() {
+    for text in ["inf", "-inf", "Infinity", "1e999", "-1e999"] {
+        let mut s = Spec::new(2, 2, vec![1.0; 4]);
+        s.nodata = Some(text.into());
+        let r = read_geotiff(&build(&s));
+        assert!(matches!(r, Err(TiffError::GeoRef(_))), "{text}: {r:?}");
+    }
 }

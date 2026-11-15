@@ -209,7 +209,8 @@ fn synthetic_reports() -> Reports {
                 &f,
                 tr.e + SIGMA_POS * rng.normal(),
                 tr.n + SIGMA_POS * rng.normal(),
-            );
+            )
+            .unwrap();
             let (te, tn) = frame_velocity(&f, tr.e, tr.n, tr.ve, tr.vn);
             let mut row = base_row(*addr, t);
             row.lat_e7 = (lat * 1e7).round() as i32;

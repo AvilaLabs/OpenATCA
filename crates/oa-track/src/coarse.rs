@@ -195,7 +195,9 @@ pub fn coarse_query(
     for a in [a_lo, 0.5 * (a_lo + g_hi), g_hi] {
         for c in [-w, 0.0, w] {
             if let Some(p) = pts.get_mut(i) {
-                *p = unproject(&frame, a * st + c * ct, a * ct - c * st);
+                // A point the chart cannot reach is a NaN, which the check below sends to the full scan.
+                *p = unproject(&frame, a * st + c * ct, a * ct - c * st)
+                    .unwrap_or((f64::NAN, f64::NAN));
             }
             i += 1;
         }

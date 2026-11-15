@@ -1646,3 +1646,39 @@ fn every_legend_text_past_the_edge_gets_a_bar_at_the_narrowest_width() {
         .count();
     assert_eq!(bars, st.legend_cut as usize);
 }
+
+// REQ: OA-DSP-035
+#[test]
+fn a_non_finite_or_out_of_range_command_line_number_is_refused_when_parsed() {
+    let ok = [
+        "--snapshot",
+        "a",
+        "--centre",
+        "41.9,-87.9",
+        "--range-nm",
+        "50",
+        "--size",
+        "640x480",
+        "--out",
+        "o",
+    ];
+    let with = |flag: &str, value: &str| {
+        let mut v = args(&ok);
+        let i = v.iter().position(|a| a == flag).unwrap();
+        v[i + 1] = value.to_string();
+        cli::parse_render_args(&v)
+    };
+    for bad in ["nan", "inf", "-inf", "1e999", "0", "0.01", "20001", "-5"] {
+        let e = with("--range-nm", bad).unwrap_err().to_string();
+        assert!(e.contains("--range-nm"), "{bad}: {e}");
+    }
+    assert!(with("--range-nm", "0.05").is_ok());
+    assert!(with("--range-nm", "20000").is_ok());
+    for bad in ["nan,0", "0,inf", "inf,-inf", "1e999,0"] {
+        let e = with("--centre", bad).unwrap_err().to_string();
+        assert!(e.contains("--centre"), "{bad}: {e}");
+    }
+    let mut v = args(&ok);
+    v.extend(args(&["--fix-max-nm", "nan"]));
+    assert!(cli::parse_render_args(&v).is_err());
+}

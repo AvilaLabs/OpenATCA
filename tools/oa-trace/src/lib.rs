@@ -6,6 +6,8 @@
 //! above `#[kani::proof]` (with an optional `#[kani::unwind(n)]` on either side of it) and
 //! counts as a proof, reported apart from tests. [`analyze`] joins the two.
 
+pub mod floatscan;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

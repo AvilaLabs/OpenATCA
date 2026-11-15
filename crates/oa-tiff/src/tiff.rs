@@ -85,13 +85,29 @@ fn u32_at(s: Src<'_>, off: usize, what: &'static str) -> Result<u32, TiffError> 
     })
 }
 
+/// One IEEE double of the file; a NaN or infinity is a bad value, never data.
 fn f64_at(s: Src<'_>, off: usize, what: &'static str) -> Result<f64, TiffError> {
     let b = get::<8>(s, off, what)?;
-    Ok(f64::from_bits(if s.big {
+    let v = f64::from_bits(if s.big {
         u64::from_be_bytes(b)
     } else {
         u64::from_le_bytes(b)
-    }))
+    });
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(TiffError::BadValue("double value is not finite"))
+    }
+}
+
+/// A decimal text as `f64`; `None` if it is not a number or is NaN or infinite.
+pub(crate) fn parse_f64_finite(text: &str) -> Option<f64> {
+    text.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// A decimal text as `f32`; `None` if it is not a number or is NaN or infinite.
+pub(crate) fn parse_f32_finite(text: &str) -> Option<f32> {
+    text.parse::<f32>().ok().filter(|v| v.is_finite())
 }
 
 /// Size in bytes of one value of TIFF data type `typ`, for the types classic TIFF defines.
@@ -538,7 +554,7 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
     let nd_f32 = geo_tags
         .nodata
         .as_deref()
-        .and_then(|t| t.trim().parse::<f32>().ok());
+        .and_then(|t| parse_f32_finite(t.trim()));
     for v in elev.iter_mut() {
         let declared = match format {
             Format::F32 => nd_f32 == Some(*v),
