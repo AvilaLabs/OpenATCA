@@ -376,6 +376,33 @@ fn a_frame_minutes_ahead_does_not_move_the_clock_without_confirmation() {
     assert_eq!(p.replay_ns, T0 + 159 * NS);
 }
 
+// REQ: OA-RPL-081
+#[test]
+fn a_frame_time_equal_to_the_no_clock_value_is_refused() {
+    // i64::MIN is the clock's "no frame yet" value. Three frames of one feed stamped with it
+    // used to confirm a step back to it, after which the next frame of any time was taken as a
+    // first frame, with no confirmation.
+    let mut p = small_pipeline(64);
+    for k in 0..10 {
+        tick(&mut p, T0 + k * NS);
+    }
+    for _ in 0..5 {
+        tick(&mut p, i64::MIN);
+    }
+    assert_eq!(p.replay_ns, T0 + 9 * NS);
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (0, 0));
+    assert_eq!(p.clock.held, 5);
+    // A frame a day ahead is still held, not taken as a first frame.
+    tick(&mut p, T0 + 86_400 * NS);
+    assert_eq!(p.replay_ns, T0 + 9 * NS);
+    // Before the first frame too: the value never becomes the clock.
+    let mut q = small_pipeline(64);
+    tick(&mut q, i64::MIN);
+    assert_eq!(q.clock.held, 1);
+    tick(&mut q, T0);
+    assert_eq!(q.replay_ns, T0);
+}
+
 // REQ: OA-RPL-079
 #[test]
 fn feeds_with_a_constant_skew_under_the_tolerance_do_not_regress_each_other() {

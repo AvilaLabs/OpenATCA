@@ -126,6 +126,12 @@ pub fn clock_observe(c: &mut Clock, feed: usize, now: i64, t: i64) -> Tick {
     let Some(own) = c.feeds.get(feed).copied() else {
         return Tick::Held { back: t < now };
     };
+    if t == i64::MIN {
+        // The "no frame yet" value is never a frame time: as the clock it would make the next
+        // frame of any time a first frame, accepted without confirmation.
+        c.held += 1;
+        return Tick::Held { back: true };
+    }
     if now == i64::MIN {
         if let Some(f) = c.feeds.get_mut(feed) {
             f.last_ns = t;
@@ -193,21 +199,38 @@ mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
 
-    fn any_clock() -> Clock {
-        let c = Clock {
+    fn any_feed() -> FeedClock {
+        let f = FeedClock {
+            last_ns: kani::any(),
+            seen: kani::any(),
             cand_last_ns: kani::any(),
             cand_n: kani::any(),
             cand_back: kani::any(),
+        };
+        // Reachable: a confirmation resets the count when it reaches the limit.
+        kani::assume(f.cand_n < CLOCK_CONFIRM_FRAMES);
+        f
+    }
+
+    fn any_clock() -> Clock {
+        let c = Clock {
+            feeds: [any_feed(), any_feed(), any_feed(), any_feed(), any_feed()],
             held: kani::any(),
             forward_steps: kani::any(),
             backward_steps: kani::any(),
         };
-        // Reachable states: a confirmation resets the count before it reaches the limit, and
-        // the three counters count frames, which cannot reach 2^64 - 1.
-        kani::assume(c.cand_n < CLOCK_CONFIRM_FRAMES);
+        // The three counters count frames, which cannot reach 2^64 - 1.
         kani::assume(c.held < u64::MAX);
         kani::assume(c.forward_steps < u64::MAX && c.backward_steps < u64::MAX);
         c
+    }
+
+    /// The clock state the pipeline keeps: every feed with an accepted frame has its last frame
+    /// at or before the clock (`now`), and before the first frame no feed has one.
+    fn consistent(c: &Clock, now: i64) -> bool {
+        c.feeds
+            .iter()
+            .all(|f| !f.seen || (now != i64::MIN && f.last_ns <= now))
     }
 
     // REQ: OA-RPL-100
@@ -215,42 +238,75 @@ mod proofs {
     fn clock_observe_total_and_confirms() {
         let mut c = any_clock();
         let before = c;
+        let feed: usize = kani::any();
         let (now, t): (i64, i64) = (kani::any(), kani::any());
-        let tick = clock_observe(&mut c, now, t);
-        // The candidate count stays below the confirmation limit.
-        assert!(c.cand_n < CLOCK_CONFIRM_FRAMES);
+        let tick = clock_observe(&mut c, feed, now, t);
+        let own = feed.min(FEED_COUNT - 1);
+        // Every candidate count stays below the confirmation limit.
+        assert!(c.feeds.iter().all(|f| f.cand_n < CLOCK_CONFIRM_FRAMES));
         if let Tick::Step { delta } = tick {
-            // A step needs CLOCK_CONFIRM_FRAMES consecutive candidates: this frame is the
-            // last of them, so there were at least CLOCK_CONFIRM_FRAMES - 1 before it.
+            // A step needs CLOCK_CONFIRM_FRAMES consecutive candidates of one feed: this frame
+            // is the last of them, so that feed had at least CLOCK_CONFIRM_FRAMES - 1 before it.
             assert!(now != i64::MIN);
-            assert!(before.cand_n >= CLOCK_CONFIRM_FRAMES - 1);
+            assert!(before.feeds[own].cand_n >= CLOCK_CONFIRM_FRAMES - 1);
             assert_eq!(delta, t.saturating_sub(now));
-            assert_eq!(c.cand_n, 0);
+            assert!(c.feeds.iter().all(|f| f.cand_n == 0));
         }
-        if before.cand_n == 0 && now != i64::MIN {
+        if before.feeds[own].cand_n == 0 {
             assert!(!matches!(tick, Tick::Step { .. }));
         }
+        // Only this frame's feed gains candidates; the others' counts never grow.
+        for i in 0..FEED_COUNT {
+            if i != own {
+                assert!(c.feeds[i].cand_n <= before.feeds[i].cand_n);
+            }
+        }
+    }
+
+    // REQ: OA-RPL-101
+    #[kani::proof]
+    fn clock_moves_forward_unconfirmed_by_at_most_the_tolerance() {
+        let mut c = any_clock();
+        let feed: usize = kani::any();
+        let (now, t): (i64, i64) = (kani::any(), kani::any());
+        kani::assume(consistent(&c, now));
+        let tick = clock_observe(&mut c, feed, now, t);
+        // A single frame moves a running clock forward by at most the tolerance unless it
+        // completes a confirmation.
+        if now != i64::MIN && tick == Tick::Advance {
+            assert!(t >= now && t - now <= CLOCK_TOLERANCE_NS);
+        }
+        // The state stays consistent with the clock the caller now holds.
+        let next = match tick {
+            Tick::Advance | Tick::Step { .. } => t,
+            _ => now,
+        };
+        assert!(consistent(&c, next));
     }
 
     // REQ: OA-RPL-100
     #[kani::proof]
     fn clock_observe_three_candidates_before_a_step() {
         let mut c = any_clock();
-        kani::assume(c.cand_n == 0);
+        let feed: usize = kani::any();
+        kani::assume(feed < FEED_COUNT);
+        kani::assume(c.feeds[feed].cand_n == 0);
         // Room for three more counts.
         kani::assume(c.held < u64::MAX - 3);
         let now: i64 = kani::any();
         kani::assume(now != i64::MIN);
         let (t1, t2, t3): (i64, i64, i64) = (kani::any(), kani::any(), kani::any());
         // The clock does not move between candidates (a refused frame leaves it alone).
-        let a = clock_observe(&mut c, now, t1);
-        let b = clock_observe(&mut c, now, t2);
+        let a = clock_observe(&mut c, feed, now, t1);
+        let b = clock_observe(&mut c, feed, now, t2);
         let was_step = matches!(a, Tick::Step { .. }) || matches!(b, Tick::Step { .. });
         assert!(!was_step);
-        let d = clock_observe(&mut c, now, t3);
+        let d = clock_observe(&mut c, feed, now, t3);
         if let Tick::Step { .. } = d {
-            // Three frames all far from the clock, on one side, not going backward in time.
+            // Three frames of one feed, all far from the clock, on one side, in time order.
             assert!(matches!(a, Tick::Held { .. }) && matches!(b, Tick::Held { .. }));
+            assert!(t1 <= t2 && t2 <= t3);
+            assert_eq!(t1 < now, t3 < now);
         }
     }
 }

@@ -1099,10 +1099,17 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-080** A confirmed step marks every flight, programme and NOTAM row as stale until it is
   updated; the marked rows are counted (`stale_marked`) and the rows still stale can be counted at any
   time (`pipeline_stale_count`); eviction ages are as before.
-- **OA-RPL-100** (proof) `clock_observe` never panics or overflows for any clock and frame time (any `i64`,
-  including the extremes) from any reachable candidate state; a step is returned only on the frame that
-  completes `CLOCK_CONFIRM_FRAMES` consecutive candidates, with the saturated difference as its delta, and no
-  step is returned from an empty candidate state.
+- **OA-RPL-081** A frame time equal to `i64::MIN`, the clock's "no frame yet" value, is held and counted,
+  never taken as the clock or as a candidate: five such frames neither step the clock nor let a later
+  frame a day ahead be taken as a first frame, and before the first frame it is held as well.
+- **OA-RPL-100** (proof) `clock_observe` never panics or overflows for any clock state, feed index (any
+  `usize`) and frame time (any `i64`, including the extremes) from any reachable candidate state; a step is
+  returned only on the frame that completes `CLOCK_CONFIRM_FRAMES` consecutive candidates of that frame's
+  feed, with the saturated difference as its delta, every candidate count is then cleared, no step is returned
+  from an empty candidate state, and a frame never adds candidates to another feed.
+- **OA-RPL-101** (proof) From any state the pipeline can hold (every feed with an accepted frame has it at or
+  before the clock), one frame that does not complete a confirmation moves a running clock forward by at most
+  `CLOCK_TOLERANCE_NS` (2 minutes), and the state stays consistent with the clock that results.
 
 ## M5 — Terrain and obstacles
 

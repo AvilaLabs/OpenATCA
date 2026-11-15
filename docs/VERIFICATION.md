@@ -62,8 +62,9 @@ peak resident size of the run. Every harness below verified successfully (no cou
 | `payload_records_ads2_4` | `decode_payload_lenient` and `decode_payload`: no panic or overflow, kept + dropped = records, each anomaly count at most kept, strict reports only a record below the count | valid header, exactly 4 records, `ADS2`; `decode_row` and `reports_push` stubbed (see below) | proved | 3:32 | 3.2 GB |
 | `payload_records_ads1_4` | same | same, `ADS1` (64-octet records) | proved | 2:49 | 3.2 GB |
 | `observe_seq_accumulation_saturates` (oa-feed) | `observe_seq`: no panic or overflow; a forward jump adds one gap and the saturated missing count, anything else changes neither | every `seq`, every `frames`, `seq_next`, `seq_last`, `gaps`, `missing`; `duplicates` and `regressions` below `u64::MAX` | proved | 0:05 | 208 MB |
-| `clock_observe_total_and_confirms` (oa-replay) | `clock_observe`: no panic or overflow for any `now` and `t`; a step carries the saturated difference, comes only from a candidate count of at least `CLOCK_CONFIRM_FRAMES - 1`, resets it, and none comes from an empty candidate state | every `i64` pair, every state with `cand_n` below `CLOCK_CONFIRM_FRAMES` and the counters below `u64::MAX` | proved | 0:14 | 249 MB |
-| `clock_observe_three_candidates_before_a_step` | from an empty candidate state, a step is not returned on the first two frames, and on the third only after two held frames | every three frame times, clock fixed, `i64::MIN` excluded | proved | 0:05 | 232 MB |
+| `clock_observe_total_and_confirms` (oa-replay) | `clock_observe` over the per-feed clock: no panic or overflow for any feed index, `now` and `t`; a step carries the saturated difference, comes only from a candidate count of at least `CLOCK_CONFIRM_FRAMES - 1` in the frame's own feed, clears every count, and none comes from an empty candidate state; a frame never adds candidates to another feed | any `usize` feed, every `i64` pair, five feeds each with `cand_n` below `CLOCK_CONFIRM_FRAMES`, counters below `u64::MAX` | proved | 0:08 | 239 MB |
+| `clock_moves_forward_unconfirmed_by_at_most_the_tolerance` | from a state the pipeline keeps (every feed with an accepted frame has it at or before the clock), one frame that does not complete a confirmation moves a running clock forward by at most `CLOCK_TOLERANCE_NS`, and the state stays consistent with the resulting clock | same, plus that state | proved | 0:16 | 236 MB |
+| `clock_observe_three_candidates_before_a_step` | from an empty candidate state of one feed, no step on the first two frames; a step on the third only after two held frames, in time order and on one side of the clock | every three frame times, clock fixed, `i64::MIN` excluded as the clock | proved | 0:15 | 585 MB |
 
 ### Bounds and how they were chosen
 
@@ -73,10 +74,18 @@ longer input the proofs say nothing.
 
 Assumptions a harness makes about state are stated in the harness and are:
 
-* `clock_observe`: `cand_n < CLOCK_CONFIRM_FRAMES` (the function keeps it so; a state with `cand_n`
+* `clock_observe`: each feed's `cand_n < CLOCK_CONFIRM_FRAMES` (the function keeps it so; a state with `cand_n`
   at `u32::MAX` would overflow the increment, and the type does not prevent one being built), and
   the counters `held`, `forward_steps`, `backward_steps` below `u64::MAX` (2^64 frames).
 * `observe_seq`: `duplicates` and `regressions` below `u64::MAX`.
+
+### Found by the proofs
+
+* A frame time equal to `i64::MIN`, the clock's "no frame yet" value, could complete a backward
+  step to it in three frames, after which the next frame of any time was taken as a first frame
+  and accepted with no confirmation (the consistency check of
+  `clock_moves_forward_unconfirmed_by_at_most_the_tolerance` failed on it). Such a time is now held
+  and counted, never taken as the clock (OA-RPL-081).
 
 ### Stubs
 
