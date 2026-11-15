@@ -2468,11 +2468,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   aircraft reporting 950 kt is not restarted, a 300 kt one that moves as far is, and one report
   printing a fast category does not excuse a 2,782 kt displacement. The category is the track's
   trusted one under `oa_adsb::category_observe`. The output digest of the ZAU clip is unchanged.
-- **OA-TRK-068** A measurement more than 5 minutes ahead of the tracker clock does not move the clock
-  or touch any track until three in a row, none earlier than the one before, agree (the others are
-  counted as held); a confirmed step, and `tracker_advance` over a long gap, emit ticks only while a
-  track could still be live and jump the tick grid over the rest in one sweep, counting the skipped
-  ticks.
+- **OA-TRK-068** A measurement more than the step limit (10 s, the out-of-order window, a configured
+  value) ahead of the tracker clock does not move the clock or touch any track until a run of three in a
+  row, none earlier than the one before by more than the window, confirms it (the others are counted as
+  held; see OA-TRK-191, OA-TRK-192); a confirmed step, and `tracker_advance` over a long gap, emit ticks
+  only while a track could still be live and jump the tick grid over the rest in one sweep, counting the
+  skipped ticks. `tracker_advance` is not subject to the limit (its caller, the replay clock, has its own
+  confirmed rules).
 - **OA-TRK-069** A time of applicability or an advance beyond about 146 years either side of the epoch
   is refused and counted under its own reason, and a tick must be between 1 ms and a quarter of the
   range, so rounding to a tick and stepping from tick to tick cannot overflow or stop advancing.
@@ -2581,3 +2583,37 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   in seconds in a debug build; candidates visited are charged to the bucket's work limit and counted; when
   the limit is reached the radars of a bucket have each had an equal share, so one radar's flood does not
   leave another radar's plots ungated.
+- **OA-TRK-190** The step limit is a configuration value (`clock_step_limit_ns`, default the
+  out-of-order window); a configuration with a limit below the window or not below the drop age is
+  refused.
+- **OA-TRK-191** No single measurement moves the tracker clock by more than the step limit once tracks are
+  live: one measurement 299 s ahead is held, the clock does not move and no track is swept; repeated
+  measurements 299 s, 598 s and so on ahead from one address and one sensor never move it, and the real
+  measurements that follow are all applied.
+- **OA-TRK-192** A measurement more than the limit ahead is held unless it completes a run of three
+  consecutive far-ahead measurements (each no earlier than the one before by more than the window) from at
+  least min(2, live sensors) distinct sensors and min(3, live tracks) distinct addresses, the run kept in a
+  bounded buffer of the last 8; with no live track it is applied at once. A run from one sensor does not
+  step while two are live and steps when a second joins; a whole-feed pause of 30 s steps after three
+  measurements and the tracks continue; one aircraft from one sensor after a 15 s gap steps after three.
+  A live sensor is one with a measurement accepted within the drop age of the clock, kept in a table of 64
+  (a full table reuses the least recently accepted place and counts it).
+- **OA-TRK-193** Proved (Kani, `gate_decide_is_total`): the clock gate is total and free of overflow and
+  out-of-bounds access for every time (the clock `i64::MIN` included), address, sensor and track count.
+- **OA-TRK-194** Proved (Kani, `gate_step_forward_needs_a_confirmed_run`): a forward step needs a far-ahead
+  measurement and, with live tracks, at least three consecutive ones from the distinct sensors and
+  addresses of OA-TRK-192.
+- **OA-TRK-195** Proved (Kani, `gate_step_back_needs_span_count_and_spread`): a step back needs at least six
+  late refusals with no accepted measurement between, spanning at least the out-of-order window of their
+  own times, from at least min(2, live sensors) sensors and min(3, live tracks) addresses, and moves the
+  clock to the newest of them.
+- **OA-TRK-196** A tracker clock moved ahead of real time (a confirmed step from colluding sensors) comes
+  back: after a run of late refusals as in OA-TRK-195 the clock takes the newest late time, the tick grid
+  restarts after it, every track updated after the new clock is dropped and counted
+  (`time_future_dropped`), the step is counted (`time_steps_back`), the measurement that completed the run
+  is applied at the new clock, real tracks are rebuilt and output continues. Output rows after a step back
+  carry earlier times than rows before it.
+- **OA-TRK-197** A stale batch from one slow sensor while another delivers in-window data never steps the
+  clock back (an accepted measurement ends the run of late refusals).
+- **OA-TRK-198** Proved (Kani, `gate_accept_is_within_window_and_limit`): an accepted measurement is never
+  more than the step limit ahead of the clock nor older than the out-of-order window.

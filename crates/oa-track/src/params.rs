@@ -86,11 +86,15 @@ pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
 /// comparisons were anchored to was probably the bad one). The value of `oa_truth::JUMP_RESYNC`.
 pub const RESYNC_AFTER: u8 = oa_truth::JUMP_RESYNC as u8;
-/// A measurement more than this ahead of the tracker clock (5 minutes, five times the time after
-/// which a silent track is dropped) does not move the clock until three in a row, each no earlier
-/// than the one before, agree; until then it is counted and not applied.
-pub const CLOCK_STEP_LIMIT_NS: i64 = 300 * NS_PER_S;
-/// Consecutive far-ahead measurements that confirm a step of the clock.
+/// A measurement more than this ahead of the tracker clock does not move the clock until a run
+/// of them from enough distinct sensors and addresses confirms it (`crate::time_gate`); until
+/// then it is counted and not applied. Equal to the out-of-order window and below the drop age:
+/// no single measurement may move the clock by as much as the age at which a silent track is
+/// dropped, or one forged or faulty report would sweep every live track and make every real
+/// measurement after it late.
+pub const CLOCK_STEP_LIMIT_NS: i64 = OOO_WINDOW_NS;
+/// Consecutive far-ahead measurements that confirm a step of the clock forward (and, doubled, the
+/// late refusals that confirm a step back).
 pub const CLOCK_STEP_CONFIRM: u32 = 3;
 /// Allowance added to the plausibility distance, metres (`oa_truth::JUMP_SLACK_M`).
 pub const PLAUSIBLE_SLACK_M: f64 = oa_truth::JUMP_SLACK_M;

@@ -53,6 +53,9 @@ fn scenario(man: &Manoeuvre, dt: f64, dur: f64, mode: u8, seed: u64, w: (f64, f6
         expected_interval_ns: (dt * 1.0e9) as i64,
         init_interval_ns: (dt * 1.0e9) as i64,
         drop_after_ns: 600_000_000_000,
+        // A feed slower than the step limit needs a limit above its interval (the default 10 s
+        // would hold two of every three 17 s reports as far ahead).
+        clock_step_limit_ns: ((dt * 1.5e9) as i64).max(big_config().ooo_window_ns),
         ..big_config()
     };
     let (_t, out) = run(&cfg, &ms, dur);
@@ -522,6 +525,9 @@ fn measurements_older_than_the_window_or_the_stored_states_are_counted_and_dropp
     // Window of 60 s but a ring of only 12 updates: 30 s old is inside the window and outside
     // the ring.
     cfg.ooo_window_ns = 60_000_000_000;
+    // The step limit is at least the window and the drop age above the limit.
+    cfg.clock_step_limit_ns = 60_000_000_000;
+    cfg.drop_after_ns = 120_000_000_000;
     let mut t = tracker_new(&cfg).unwrap();
     let mut out = output_new(cfg.out_capacity);
     for m in &ms {

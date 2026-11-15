@@ -40,6 +40,7 @@ pub mod registration;
 pub mod score;
 pub mod spill;
 pub mod synth_truth;
+mod time_gate;
 mod tracker;
 pub mod types;
 mod vfilter;
