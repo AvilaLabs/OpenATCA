@@ -233,3 +233,14 @@ fn is_jump_is_true_exactly_when_the_verdict_is_not_plausible() {
     }
     assert_eq!(seen, [true; 4], "the sample must reach every verdict");
 }
+
+// REQ: OA-ADSB-170
+#[test]
+fn the_speed_envelope_is_the_highest_category_cap() {
+    let highest = (0..=255u8)
+        .map(|c| category_hard_cap_kt(c, CAP_ORDINARY_KT))
+        .fold(0.0, f64::max);
+    assert_eq!(SPEED_ENVELOPE_KT, highest);
+    assert_eq!(SPEED_ENVELOPE_KT, 4088.0);
+    assert!((SPEED_ENVELOPE_MPS - 4088.0 * MPS_PER_KT).abs() < 1e-9);
+}

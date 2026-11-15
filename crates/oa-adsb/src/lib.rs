@@ -143,7 +143,7 @@ pub use frames::{
 pub use speed::{
     category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,
     JumpPair, JumpVerdict, CAP_HIGH_KT, CAP_ORDINARY_KT, CAP_SPACE_KT, CONSISTENCY_ACCEL_KT_S,
-    CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR,
+    CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR, SPEED_ENVELOPE_KT, SPEED_ENVELOPE_MPS,
 };
 pub use summary::{summarize, Summary, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};

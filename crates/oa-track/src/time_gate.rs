@@ -76,6 +76,7 @@ struct Run {
     last_ns: i64,
     first_ns: i64,
     newest_ns: i64,
+    toa: [i64; RUN_BUF],
     sensor: [u16; RUN_BUF],
     addr: [u32; RUN_BUF],
     head: usize,
@@ -94,6 +95,7 @@ const EMPTY_RUN: Run = Run {
     last_ns: 0,
     first_ns: 0,
     newest_ns: 0,
+    toa: [0; RUN_BUF],
     sensor: [0; RUN_BUF],
     addr: [0; RUN_BUF],
     head: 0,
@@ -112,6 +114,9 @@ impl Run {
         // Written through a loop over fixed indices, not a computed one: cheaper to prove.
         for i in 0..RUN_BUF {
             if i == self.head {
+                if let Some(x) = self.toa.get_mut(i) {
+                    *x = toa;
+                }
                 if let Some(s) = self.sensor.get_mut(i) {
                     *s = sensor;
                 }
@@ -124,6 +129,22 @@ impl Run {
             }
         }
         self.head = (self.head + 1) % RUN_BUF;
+    }
+
+    /// The run already holds this exact measurement (time, address and sensor): a repeat of it
+    /// is not another member.
+    fn has(&self, toa: i64, addr: u32, sensor: u16) -> bool {
+        let mut found = false;
+        for i in 0..RUN_BUF {
+            if self.used.get(i) == Some(&true)
+                && self.toa.get(i) == Some(&toa)
+                && self.addr.get(i) == Some(&addr)
+                && self.sensor.get(i) == Some(&sensor)
+            {
+                found = true;
+            }
+        }
+        found
     }
 
     fn distinct_sensors(&self) -> usize {
@@ -382,7 +403,9 @@ fn runs_decide(
         return Verdict::Accept;
     }
     if toa < clock_ns.saturating_sub(cfg.ooo_ns) {
-        r.back.push(toa, addr, sensor);
+        if !r.back.has(toa, addr, sensor) {
+            r.back.push(toa, addr, sensor);
+        }
         let span = r.back.newest_ns.saturating_sub(r.back.first_ns);
         if r.back.n >= BACK_CONFIRM
             && span >= cfg.ooo_ns
@@ -404,7 +427,10 @@ fn runs_decide(
         r.fwd = EMPTY_RUN;
         r.restarted = true;
     }
-    r.fwd.push(toa, addr, sensor);
+    // An exact repeat of a member adds nothing: a run is of distinct measurements.
+    if !r.fwd.has(toa, addr, sensor) {
+        r.fwd.push(toa, addr, sensor);
+    }
     // With no live track nothing can be expired by it; with only its own track (and its own
     // sensor) live, only that aircraft is affected: nothing to protect, no run needed.
     if live.tracks == 0
