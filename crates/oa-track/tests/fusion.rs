@@ -295,7 +295,8 @@ fn simulated_adsb_has_the_stated_noise_and_resolution() {
         f,
         f + 2_000_000_000_000,
         &|a| a == 0xA00001,
-    );
+    )
+    .unwrap();
     assert!((1_490..=1_501).contains(&m.len()), "{}", m.len());
     assert!(m.iter().all(|x| x.addr == 0xA00001), "equipage filter");
     let mut sum2 = 0.0;
@@ -324,7 +325,8 @@ fn simulated_adsb_has_the_stated_noise_and_resolution() {
         f,
         f + 2_000_000_000_000,
         &|a| a == 0xA00001,
-    );
+    )
+    .unwrap();
     assert_eq!(m, again);
     let other_seed = simulate_adsb(
         &built.truth,
@@ -333,7 +335,8 @@ fn simulated_adsb_has_the_stated_noise_and_resolution() {
         f,
         f + 2_000_000_000_000,
         &|a| a == 0xA00001,
-    );
+    )
+    .unwrap();
     assert_ne!(m, other_seed);
 }
 
@@ -379,7 +382,9 @@ fn two_leg_truth() -> BuiltTruth {
 fn simulated_adsb_noise_is_not_repeated_between_legs_or_restarted_by_a_subrange() {
     let built = two_leg_truth();
     let f = first_ns(&built);
-    let all = |from: i64, to: i64| simulate_adsb(&built.truth, &ADSB_STUDY, 9, from, to, &|_| true);
+    let all = |from: i64, to: i64| {
+        simulate_adsb(&built.truth, &ADSB_STUDY, 9, from, to, &|_| true).unwrap()
+    };
     let full = all(f, f + 2_000_000_000_000);
     let noise = |x: &oa_track::Measurement| {
         let TruthQuery::Ok(q) = truth_at(&built.truth, x.addr, x.toa_ns / 1_000_000) else {
@@ -505,7 +510,8 @@ fn registration_removes_a_radar_bias_from_radar_only_aircraft_that_adsb_aircraft
         f,
         f + 1_000_000_000_000,
         &equipped,
-    );
+    )
+    .unwrap();
     let run = |v| run_variant(v, &[radar.trk], &[&plots], &adsb).unwrap();
     let (a1, b, c) = (run(&V_BASE_Q1), run(&V_OURS_NOREG), run(&V_OURS_REG));
     let rms = |r: &RunOut, want_equipped: bool| {
@@ -618,7 +624,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
         let radar = make_radar(kind, MSSR_EUROCONTROL_1997, 50.0, 0.05);
         let (plots, _, _) = simulate_plots(&built.truth, &radar, 500, lo, hi + 1).unwrap();
         let adsb = if mixed {
-            simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0)
+            simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0).unwrap()
         } else {
             Vec::new()
         };
@@ -638,7 +644,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     let rb = make_radar(Kind::EnRoute, MSSR_EUROCONTROL_1997, 0.0, 0.0);
     let (pa, _, _) = simulate_plots(&built.truth, &ra, 500, lo, hi + 1).unwrap();
     let (pb, _, _) = simulate_plots(&built.truth, &rb, 502, lo, hi + 1).unwrap();
-    let adsb = simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0);
+    let adsb = simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0).unwrap();
     let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
     println!("clip digest two radars: {}", run_digest(&r));
     got.push(run_digest(&r));

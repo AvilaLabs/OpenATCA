@@ -186,12 +186,16 @@ pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> Track
     let period = sites.iter().map(|s| s.period_ns).max().unwrap_or(NS_PER_S);
     let ooo = base
         .ooo_window_ns
-        .max(i64::from(RADAR_INIT_N) * period + 2 * BUCKET_NS)
+        .max(
+            i64::from(RADAR_INIT_N)
+                .saturating_mul(period)
+                .saturating_add(2 * BUCKET_NS),
+        )
         .max(OOO_WINDOW_NS);
     TrackerConfig {
         expected_interval_ns: period,
         init_interval_ns: period,
-        drop_after_ns: DROP_PERIODS * period,
+        drop_after_ns: DROP_PERIODS.saturating_mul(period),
         ooo_window_ns: ooo,
         // The step limit is never below the window it must not be smaller than.
         clock_step_limit_ns: base.clock_step_limit_ns.max(ooo),
@@ -409,6 +413,13 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
     }
     for (i, s) in sites.iter().enumerate() {
         site_check(s).map_err(|e| FusionError::BadSite(i, e))?;
+    }
+    // The tracker identifies a report by time and sensor id: two radars with one id would lose
+    // the second report of a bucket as a duplicate.
+    for (i, s) in sites.iter().enumerate() {
+        if sites.iter().take(i).any(|o| o.sensor == s.sensor) {
+            return Err(FusionError::BadConfig("radar sensor ids must be unique"));
+        }
     }
     if cfg.bucket_ns <= 0 || cfg.bucket_ns > 10 * NS_PER_S {
         return Err(FusionError::BadConfig("bucket_ns"));

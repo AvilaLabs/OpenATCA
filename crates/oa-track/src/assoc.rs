@@ -51,6 +51,11 @@ pub const NONE: u32 = u32::MAX;
 /// 160 rows and columns, about 4e6 operations worst case. Larger components are assigned
 /// greedily and counted.
 pub const MAX_COMPONENT: usize = 160;
+/// Limit: tracks or plots a scratch is built for; a larger request is built at this size (a solve
+/// asking for more is refused as too large).
+pub const MAX_SCRATCH_ITEMS: usize = 1 << 22;
+/// Limit: pairs a scratch is built for, the same way.
+pub const MAX_SCRATCH_PAIRS: usize = 1 << 22;
 /// Cost standing for "forbidden" inside the padded matrix; every real cost is far below it.
 const FORBIDDEN: f64 = 1.0e12;
 
@@ -141,8 +146,14 @@ pub struct AssocScratch {
     hung: HungBufs,
 }
 
-/// A scratch for up to `max_tracks` tracks, `max_plots` plots and `max_pairs` pairs per solve.
+/// A scratch for up to `max_tracks` tracks, `max_plots` plots and `max_pairs` pairs per solve,
+/// each limited to [`MAX_SCRATCH_ITEMS`] (pairs [`MAX_SCRATCH_PAIRS`]).
 pub fn assoc_scratch_new(max_tracks: usize, max_plots: usize, max_pairs: usize) -> AssocScratch {
+    let (max_tracks, max_plots) = (
+        max_tracks.min(MAX_SCRATCH_ITEMS),
+        max_plots.min(MAX_SCRATCH_ITEMS),
+    );
+    let max_pairs = max_pairs.min(MAX_SCRATCH_PAIRS);
     let hn = MAX_COMPONENT + 1;
     AssocScratch {
         max_tracks,

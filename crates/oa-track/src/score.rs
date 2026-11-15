@@ -152,7 +152,7 @@ pub fn interval_stats(meas: &[Measurement]) -> Option<IntervalStats> {
     let mut d: Vec<i64> = by
         .windows(2)
         .filter_map(|w| match (w.first(), w.get(1)) {
-            (Some(a), Some(b)) if a.0 == b.0 => Some(b.1 - a.1),
+            (Some(a), Some(b)) if a.0 == b.0 => Some(b.1.saturating_sub(a.1)),
             _ => None,
         })
         .filter(|&x| x > 0 && x <= MAX_INTERVAL_NS)
