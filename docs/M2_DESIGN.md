@@ -143,7 +143,7 @@ cruise, descent from the truth vertical rate), altitude band and coast indicator
 | T5 | Publication interval per flight | consecutive TH position times |
 | T6 | Staleness | receive time minus position time (UK-004) |
 | T7 | Presence | fraction of truth flight-time inside ZAU with an ERAM position within 30 s |
-| T8 | Initiation delay | first ERAM position vs truth entry into ZAU or takeoff |
+| T8 | Initiation delay | first ERAM position of the truth leg minus its entry into ZAU or takeoff; a track already present at or before entry is counted as established before entry, not scored |
 | T9 | Association errors | ERAM position closer to another aircraft's truth than to its own for 3+ consecutive samples |
 | F1 | Meter-fix time error | TBFM estimate vs truth crossing time, by look-ahead in 5-minute bins to 60 min |
 | F2 | Schedule delivery | TBFM scheduled time vs truth crossing time |
