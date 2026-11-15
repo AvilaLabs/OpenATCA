@@ -33,13 +33,19 @@
 //!    is within [`UNREACHABLE_SLACK_M`] the plot converts to the point under the vertical
 //!    (the nearest point consistent with the range), and only a larger one is refused
 //!    ([`RadarError::Unreachable`]): then the plot's range and altitude are not of one aircraft.
-//! 3. The covariance is first order. With `s` the ground arc, `a = R + h_r` and `b = R + h`, at
-//!    fixed height `ds/drho = R / (a cos E)` and at fixed range
-//!    `ds/dh = -(rho / a + sin E) R / (b cos E)`; the cross-range error is `s * sigma_theta`.
-//!    The local covariance is `sigma_s^2 u u' + sigma_c^2 v v'` with `u` the radial and `v` the
-//!    tangential unit vector. The neglected terms are second order in `sigma_theta` (a bias of
-//!    `s sigma_theta^2 / 2`, 0.1 m at 100 km and 0.08 degree) and in the earth-curvature ratio
-//!    `s / R` (a relative error of a few parts in 1e3 of the radial term at 250 km).
+//! 3. The covariance is first order and is computed in the target's own east-north frame, not
+//!    the antenna's (the two differ by the meridian convergence, `sin(latitude)` times the
+//!    longitude difference: 25 degrees at 80 N and 500 km east). The three error sources move the
+//!    target along three ECEF vectors, each with the elevation `E` adjusting so the point stays on
+//!    its height surface (the ellipsoid normal `n` at the target has no component in the
+//!    displacement): a range error `d rho` along the line of sight `u`, an azimuth error
+//!    `d theta` along `rho * d u / d theta`, a height error `dh` along `u_E / (n . u_E)`, with
+//!    `u_E = d u / d E` and the first two corrected by `-(n . v) / (n . u_E) * u_E`. Each vector
+//!    is rotated into the target's east and north and the 2x2 block is
+//!    `sum_i sigma_i^2 w_i w_i'`. Near the vertical `n . u_E` goes to zero and is floored at
+//!    [`MIN_COS_ELEV`]. The neglected terms are second order in `sigma_theta` (a bias of
+//!    `s sigma_theta^2 / 2`, 0.1 m at 100 km and 0.08 degree) and in the error ratio; the tests
+//!    compare against a central finite-difference Jacobian of [`polar_to_geodetic`].
 //!
 //! The range quantum of the sensor adds `q^2 / 12` to the range variance and the altitude
 //! quantum `q^2 / 12` to the height variance. A radar's registration estimate
@@ -188,6 +194,12 @@ pub struct RadarGeom {
     /// Gaussian mean radius of curvature at the antenna, metres.
     pub r_mean_m: f64,
     pub height_m: f64,
+}
+
+/// `a + k b`.
+fn axpy(a: &[f64; 3], k: f64, b: &[f64; 3]) -> [f64; 3] {
+    let ([a0, a1, a2], [b0, b1, b2]) = (*a, *b);
+    [a0 + k * b0, a1 + k * b1, a2 + k * b2]
 }
 
 fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
@@ -389,33 +401,66 @@ pub fn polar_to_geodetic(
 }
 
 /// The local east-north covariance `[ee, en, nn]`, m^2, of a plot at slant range `rho_m`,
-/// azimuth `az_deg`, elevation `elev_rad` and ground arc `ground_m`, with range variance
-/// `var_rho_m2`, azimuth variance `var_az_rad2` and height variance `var_h_m2` (first order; see
-/// the module documentation).
-// Eight plain scalars of one formula; a struct would only rename them.
+/// azimuth `az_deg`, elevation `elev_rad` and target position `(lat_deg, lon_deg)` (the
+/// converted plot), with range variance `var_rho_m2`, azimuth variance `var_az_rad2` and height
+/// variance `var_h_m2` (first order; see the module documentation). The axes are the target's
+/// own east and north, not the antenna's.
+// Nine plain scalars of one formula; a struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 pub fn polar_cov_local(
     g: &RadarGeom,
     rho_m: f64,
     az_deg: f64,
     elev_rad: f64,
-    ground_m: f64,
+    lat_deg: f64,
+    lon_deg: f64,
     var_rho_m2: f64,
     var_az_rad2: f64,
     var_h_m2: f64,
 ) -> [f64; 3] {
-    let (a, r) = (g.r_mean_m + g.height_m, g.r_mean_m);
-    let b = a + rho_m * elev_rad.sin();
-    let cos_e = elev_rad.cos().max(MIN_COS_ELEV);
-    let dsdrho = r / (a * cos_e);
-    let dsdh = (rho_m / a + elev_rad.sin()) * r / (b * cos_e);
-    let var_s = dsdrho * dsdrho * var_rho_m2 + dsdh * dsdh * var_h_m2;
-    let var_c = ground_m * ground_m * var_az_rad2;
     let (st, ct) = az_deg.to_radians().sin_cos();
+    let (se, ce) = elev_rad.sin_cos();
+    let comb = |e: f64, n: f64, u: f64| -> [f64; 3] {
+        let mut v = [0.0; 3];
+        for (i, c) in v.iter_mut().enumerate() {
+            *c = e * g.east.get(i).copied().unwrap_or(0.0)
+                + n * g.north.get(i).copied().unwrap_or(0.0)
+                + u * g.up.get(i).copied().unwrap_or(0.0);
+        }
+        v
+    };
+    // The line of sight, and its partial derivatives with respect to elevation and azimuth
+    // (the derivative with respect to azimuth is `cos E` times the horizontal tangent).
+    let dir = comb(ce * st, ce * ct, se);
+    let d_el = comb(-se * st, -se * ct, ce);
+    let d_az = comb(ce * ct, -ce * st, 0.0);
+    // The ellipsoid's normal at the target and the target's own east and north.
+    let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
+    let (sl, cl, so, co) = (lat.sin(), lat.cos(), lon.sin(), lon.cos());
+    let up_t = [cl * co, cl * so, sl];
+    let east_t = [-so, co, 0.0];
+    let north_t = [-sl * co, -sl * so, cl];
+    // The height is held fixed, so the elevation moves to keep the point on its height
+    // surface: the normal's component of the displacement is zero. Near the vertical the
+    // elevation's own effect on the height vanishes and the divisor is floored at the model's
+    // `MIN_COS_ELEV`.
+    let nd = dot(&up_t, &d_el);
+    let nd = if nd.abs() < MIN_COS_ELEV {
+        MIN_COS_ELEV.copysign(nd)
+    } else {
+        nd
+    };
+    // Displacement per metre of range at fixed height, per radian of azimuth at fixed height
+    // (both times `rho` for the arc), and per metre of height at fixed range.
+    let dp_rho = axpy(&dir, -dot(&up_t, &dir) / nd, &d_el);
+    let dp_az = axpy(&d_az, -dot(&up_t, &d_az) / nd, &d_el).map(|c| rho_m * c);
+    let dp_h = d_el.map(|c| c / nd);
+    let en = |d: &[f64; 3]| (dot(d, &east_t), dot(d, &north_t));
+    let (r, a, h) = (en(&dp_rho), en(&dp_az), en(&dp_h));
     [
-        var_s * st * st + var_c * ct * ct,
-        (var_s - var_c) * st * ct,
-        var_s * ct * ct + var_c * st * st,
+        var_rho_m2 * r.0 * r.0 + var_az_rad2 * a.0 * a.0 + var_h_m2 * h.0 * h.0,
+        var_rho_m2 * r.0 * r.1 + var_az_rad2 * a.0 * a.1 + var_h_m2 * h.0 * h.1,
+        var_rho_m2 * r.1 * r.1 + var_az_rad2 * a.1 * a.1 + var_h_m2 * h.1 * h.1,
     ]
 }
 
@@ -480,7 +525,8 @@ pub fn plot_convert(
         rho,
         az,
         geo.elev_rad,
-        geo.ground_m,
+        geo.lat_deg,
+        geo.lon_deg,
         var_rho,
         var_az,
         sigma_h * sigma_h,
@@ -694,7 +740,8 @@ mod tests {
                 rho,
                 az,
                 base.elev_rad,
-                base.ground_m,
+                base.lat_deg,
+                base.lon_deg,
                 sr * sr,
                 saz * saz,
                 sh * sh,
@@ -712,6 +759,187 @@ mod tests {
                 cov[1]
             );
         }
+    }
+
+    fn site_at(lat: f64, lon: f64) -> RadarSite {
+        RadarSite {
+            lat_deg: lat,
+            lon_deg: lon,
+            ..SITE
+        }
+    }
+
+    /// The covariance the model gives, through the one call the converter makes.
+    fn model_cov(g: &RadarGeom, rho: f64, az: f64, h: f64, v: [f64; 3]) -> [f64; 3] {
+        let geo = polar_to_geodetic(g, rho, az, h).unwrap();
+        polar_cov_local(
+            g,
+            rho,
+            az,
+            geo.elev_rad,
+            geo.lat_deg,
+            geo.lon_deg,
+            v[0],
+            v[1],
+            v[2],
+        )
+    }
+
+    /// Target east/north displacement (metres) between two geodetic points, in the frame at `a`.
+    fn en_between(a: &Geo, b: &Geo, h: f64) -> [f64; 2] {
+        let lat = a.lat_deg.to_radians();
+        let w = (1.0 - WGS84_E2 * lat.sin() * lat.sin()).sqrt();
+        let n = WGS84_A / w;
+        let m = WGS84_A * (1.0 - WGS84_E2) / (w * w * w);
+        let dlon = ((b.lon_deg - a.lon_deg + 180.0).rem_euclid(360.0) - 180.0).to_radians();
+        [
+            dlon * (n + h) * lat.cos(),
+            (b.lat_deg - a.lat_deg).to_radians() * (m + h),
+        ]
+    }
+
+    /// Central finite-difference Jacobian columns of the converter in (east, north) metres, for
+    /// range, azimuth (radians) and height.
+    fn fd_jacobian(g: &RadarGeom, rho: f64, az: f64, h: f64) -> [[f64; 2]; 3] {
+        let base = polar_to_geodetic(g, rho, az, h).unwrap();
+        let col = |dr: f64, da_rad: f64, dh: f64| {
+            let f = |s: f64| {
+                polar_to_geodetic(g, rho + s * dr, az + (s * da_rad).to_degrees(), h + s * dh)
+                    .unwrap()
+            };
+            let (p, m) = (f(1.0), f(-1.0));
+            let d = en_between(&base, &p, h);
+            let e = en_between(&base, &m, h);
+            [(d[0] - e[0]) / 2.0, (d[1] - e[1]) / 2.0]
+        };
+        // Steps: 1 m of range, 1e-6 rad of azimuth, 1 m of height.
+        [
+            col(1.0, 0.0, 0.0),
+            {
+                let c = col(0.0, 1.0e-6, 0.0);
+                [c[0] / 1.0e-6, c[1] / 1.0e-6]
+            },
+            col(0.0, 0.0, 1.0),
+        ]
+    }
+
+    fn fd_cov(j: &[[f64; 2]; 3], v: [f64; 3]) -> [f64; 3] {
+        let mut c = [0.0; 3];
+        for (col, var) in j.iter().zip(v) {
+            c[0] += var * col[0] * col[0];
+            c[1] += var * col[0] * col[1];
+            c[2] += var * col[1] * col[1];
+        }
+        c
+    }
+
+    /// Orientation of the major axis, degrees clockwise from north, modulo 180.
+    fn major_axis_deg(c: &[f64; 3]) -> f64 {
+        // The major axis is at 0.5 atan2(2 en, ee - nn) counter-clockwise from east.
+        let from_east = 0.5 * (2.0 * c[1]).atan2(c[0] - c[2]);
+        (90.0 - from_east.to_degrees()).rem_euclid(180.0)
+    }
+
+    // REQ: OA-TRK-210
+    #[test]
+    fn covariance_matches_the_finite_difference_jacobian_at_any_latitude() {
+        let (sr, saz) = (70.0_f64, 0.08_f64.to_radians());
+        let sh = 8.8;
+        let v = [sr * sr, saz * saz, sh * sh];
+        let mut worst_rel: f64 = 0.0;
+        let mut worst_deg: f64 = 0.0;
+        let mut n = 0;
+        for &(lat, lon) in &[
+            (0.0, 10.0),
+            (41.976_940_27, -87.908_149_72),
+            (-33.0, 151.0),
+            (60.0, 100.0),
+            (80.0, -60.0),
+            (85.0, 170.0),
+            (-85.0, 0.0),
+        ] {
+            let g = radar_geom(&site_at(lat, lon));
+            for &rho in &[50_000.0, 120_000.0, 250_000.0, 400_000.0, 600_000.0] {
+                for &az in &[90.0, 270.0, 0.0, 180.0, 45.0, 315.0] {
+                    for &h in &[6_000.0, 12_000.0] {
+                        if polar_to_geodetic(&g, rho, az, h).is_err() {
+                            continue;
+                        }
+                        let j = fd_jacobian(&g, rho, az, h);
+                        let want = fd_cov(&j, v);
+                        let got = model_cov(&g, rho, az, h, v);
+                        let scale = want[0] + want[2];
+                        for (a, b) in got.iter().zip(want) {
+                            worst_rel = worst_rel.max((a - b).abs() / scale);
+                        }
+                        // A near-circular ellipse has no meaningful axis.
+                        let (lo, hi) = (want[0].min(want[2]), want[0].max(want[2]));
+                        if hi > 2.0 * lo {
+                            let d = (major_axis_deg(&got) - major_axis_deg(&want) + 90.0)
+                                .rem_euclid(180.0)
+                                - 90.0;
+                            worst_deg = worst_deg.max(d.abs());
+                        }
+                        n += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{n} cases, worst orientation error {worst_deg:.3} deg, worst rel {worst_rel:.2e}"
+        );
+        assert!(n > 150);
+        assert!(worst_deg < 0.001, "orientation error {worst_deg} deg");
+        assert!(worst_rel < 1.0e-6, "relative error {worst_rel}");
+    }
+
+    // REQ: OA-TRK-211
+    #[test]
+    fn long_range_high_latitude_covariance_is_oriented_at_the_target() {
+        // 80 N, a target 500 km east: the meridians converge by about 25 degrees between the
+        // antenna and the target, so the antenna's east axis is not the target's.
+        let s = RadarSite {
+            sigma_range_m: 700.0,
+            sigma_az_deg: 0.01,
+            ..site_at(80.0, 0.0)
+        };
+        let g = radar_geom(&s);
+        let (rho, az, h) = (500_000.0, 90.0, 11_000.0);
+        let p = RadarPlot {
+            time_ns: 0,
+            range_m: rho,
+            az_deg: az,
+            alt_ft: (h / FT_M) as i32,
+            addr: NO_ADDR,
+            label: NO_ADDR,
+            mode_a: 0o1200,
+        };
+        let c = plot_convert(&g, &s, &p, &NO_BIAS, None, 5).unwrap();
+        let hh = f64::from(p.alt_ft) * FT_M;
+        let j = fd_jacobian(&g, rho, az, hh);
+        let r = j[0];
+        let rn = r[0].hypot(r[1]);
+        let axis = [r[0] / rn, r[1] / rn];
+        let cross = [-axis[1], axis[0]];
+        let cv = [
+            f64::from(c.m.pos_cov_m2[0]),
+            f64::from(c.m.pos_cov_m2[1]),
+            f64::from(c.m.pos_cov_m2[2]),
+        ];
+        let d2 = |u: [f64; 2], len: f64| {
+            let det = cv[0] * cv[2] - cv[1] * cv[1];
+            let (x, y) = (u[0] * len, u[1] * len);
+            (cv[2] * x * x - 2.0 * cv[1] * x * y + cv[0] * y * y) / det
+        };
+        // 1500 m is 2.1 sigma along the range axis (sigma 700 m) and 17 sigma across it
+        // (cross-range sigma about 87 m).
+        let along = d2(axis, 1_500.0);
+        let across = d2(cross, 1_500.0);
+        assert!(
+            along < crate::params::GATE_CHI2,
+            "along the range axis {along}"
+        );
+        assert!(across > crate::params::GATE_CHI2, "across it {across}");
     }
 
     // REQ: OA-TRK-032

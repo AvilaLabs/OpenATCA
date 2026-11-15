@@ -223,7 +223,9 @@ pub const ADSB_STUDY: AdsbSim = AdsbSim {
 /// ADS-B measurements from the truth for the aircraft `equip` accepts: position and velocity
 /// with white Gaussian noise at the NACp and NACv 95 % bounds over 2.448 per axis (an assumption:
 /// real receivers beat the bound and their error is correlated), altitude quantised to 25 ft,
-/// vertical rate in 64 fpm steps. Each aircraft's phase within the second is random.
+/// vertical rate in 64 fpm steps. Each aircraft's phase within the second is random. A sample's
+/// noise is keyed by the seed, the address and the sample time, so it is the same whichever leg or
+/// subrange produces the sample.
 pub fn simulate_adsb(
     truth: &Truth,
     cfg: &AdsbSim,
@@ -249,10 +251,9 @@ pub fn simulate_adsb(
             };
             let (lo, hi) = (ls.max(from_ns), le.min(to_ns));
             let mut t = round_ms(lo + (phase - lo).rem_euclid(cfg.period_ns));
-            let mut k = 0u64;
             while t <= hi {
                 if let TruthQuery::Ok(s) = truth_at(truth, addr, t.div_euclid(1_000_000)) {
-                    let mut rng = Rng::from_stream(seed, u64::from(addr), k);
+                    let mut rng = Rng::from_stream(seed, u64::from(addr), t as u64);
                     let (ne, nn, nve, nvn) = (
                         rng.normal() * sp,
                         rng.normal() * sp,
@@ -285,7 +286,6 @@ pub fn simulate_adsb(
                     });
                 }
                 t += cfg.period_ns;
-                k += 1;
             }
         }
     }

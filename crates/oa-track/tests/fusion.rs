@@ -337,6 +337,104 @@ fn simulated_adsb_has_the_stated_noise_and_resolution() {
     assert_ne!(m, other_seed);
 }
 
+/// One aircraft with two legs (the same path, 1000 s apart), joined from two synthetic truths.
+fn two_leg_truth() -> BuiltTruth {
+    let leg = |t0_s: f64| Traj {
+        addr: 0xA00001,
+        t0_s,
+        x0: 20_000.0,
+        y0: 15_000.0,
+        heading_deg: 250.0,
+        speed_mps: 130.0,
+        alt_ft: 10_010.0,
+        segs: vec![Seg {
+            dur_s: 600.0,
+            turn_dps: 0.0,
+            vrate_fpm: 0.0,
+        }],
+    };
+    let mut a = build_synthetic_truth(SITE.0, SITE.1, EPOCH_NS, &[leg(0.0)]).unwrap();
+    let b = build_synthetic_truth(SITE.0, SITE.1, EPOCH_NS, &[leg(1_000.0)]).unwrap();
+    let n_pts = a.pt_t_ns.len() as u32;
+    a.ac_first_leg.pop();
+    a.leg_first_pt.pop();
+    a.leg_addr.extend(&b.leg_addr);
+    a.leg_first_pt.push(n_pts);
+    a.leg_lat0.extend(&b.leg_lat0);
+    a.leg_lon0.extend(&b.leg_lon0);
+    a.pt_t_ns.extend(&b.pt_t_ns);
+    a.pt_alt_ft.extend(&b.pt_alt_ft);
+    a.pt_vrate_fpm.extend(&b.pt_vrate_fpm);
+    a.pt_xf.extend(&b.pt_xf);
+    a.pt_pf.extend(&b.pt_pf);
+    a.pt_xs.extend(&b.pt_xs);
+    a.pt_ps.extend(&b.pt_ps);
+    a.ac_first_leg.push(2);
+    a.leg_first_pt.push(a.pt_t_ns.len() as u32);
+    built_of(a)
+}
+
+// REQ: OA-TRK-212
+#[test]
+fn simulated_adsb_noise_is_not_repeated_between_legs_or_restarted_by_a_subrange() {
+    let built = two_leg_truth();
+    let f = first_ns(&built);
+    let all = |from: i64, to: i64| simulate_adsb(&built.truth, &ADSB_STUDY, 9, from, to, &|_| true);
+    let full = all(f, f + 2_000_000_000_000);
+    let noise = |x: &oa_track::Measurement| {
+        let TruthQuery::Ok(q) = truth_at(&built.truth, x.addr, x.toa_ns / 1_000_000) else {
+            panic!();
+        };
+        oa_bench::geo::enu(
+            q.lat_deg,
+            q.lon_deg,
+            f64::from(x.lat_e7) * 1e-7,
+            f64::from(x.lon_e7) * 1e-7,
+        )
+    };
+    let split = f + 800_000_000_000;
+    let (first, second): (Vec<_>, Vec<_>) = full.iter().partition(|x| x.toa_ns < split);
+    assert!(
+        first.len() > 590 && second.len() > 590,
+        "{} {}",
+        first.len(),
+        second.len()
+    );
+    // The same index in each leg: the draws differ.
+    let pairs: Vec<((f64, f64), (f64, f64))> = first
+        .iter()
+        .zip(&second)
+        .map(|(a, b)| (noise(a), noise(b)))
+        .collect();
+    let same = pairs
+        .iter()
+        .filter(|(a, b)| (a.0 - b.0).abs() < 0.02 && (a.1 - b.1).abs() < 0.02)
+        .count();
+    assert_eq!(same, 0, "identical draws at matching indices");
+    let n = pairs.len() as f64;
+    let (ma, mb) = pairs
+        .iter()
+        .fold((0.0, 0.0), |s, (a, b)| (s.0 + a.0 / n, s.1 + b.0 / n));
+    let (mut cab, mut va, mut vb) = (0.0, 0.0, 0.0);
+    for (a, b) in &pairs {
+        cab += (a.0 - ma) * (b.0 - mb);
+        va += (a.0 - ma).powi(2);
+        vb += (b.0 - mb).powi(2);
+    }
+    let r = cab / (va * vb).sqrt();
+    assert!(r.abs() < 0.2, "east noise correlation between legs {r}");
+    // A subrange reproduces exactly the samples of the full run that it covers.
+    let (lo, hi) = (f + 150_000_000_000, f + 1_300_000_000_000);
+    let sub = all(lo, hi);
+    let want: Vec<_> = full
+        .iter()
+        .filter(|x| x.toa_ns >= lo && x.toa_ns <= hi)
+        .copied()
+        .collect();
+    assert!(want.len() > 400);
+    assert_eq!(sub, want);
+}
+
 fn digest(o: &TrackOutput) -> String {
     let mut h = oa_sha256::Sha256::new();
     output_hash_into(&mut h, o);
@@ -547,14 +645,21 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     assert_eq!(got, PINNED_CLIP_DIGESTS);
 }
 
-// The first two (radar only) are the digests of the code before the grid, the newest-update bound
-// and the hold and flag changes. The three with ADS-B and registration were re-pinned when
-// registration took 256 reference slots kept while their aircraft make residuals (they used
-// 2,487, 723 and 2,469 residuals before and use 3,108, 1,008 and 3,107 now).
+// Earlier pins: the radar-only pair predated the grid, the newest-update bound and the hold and
+// flag changes; the three with ADS-B and registration were re-pinned when registration took 256
+// reference slots.
+// Re-pinned when the radar covariance moved to the target's own east-north frame (it had been
+// oriented by the antenna's) and the simulated ADS-B noise became keyed by sample time (it
+// restarted at every leg). Plots logged in the assignment log, old code to new, per run
+// (terminal, en-route, terminal mixed, en-route mixed, two radars): 6,036 to 6,036 with none
+// changed, 2,002 to 2,009 (4 dropped, 11 gained, 14 with another way of being applied),
+// 6,039 to 6,039 none changed, 2,082 to 2,080 (2 dropped), 8,111 to 8,110 (3 dropped, 2
+// gained, 3 with another way). Everything else in the digests is the covariance and position
+// of the output rows.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "1cdbbcf99e55c40595ef48cd8560f3c3ac98ebedb805f12d7ce6070e0d30214e",
-    "0949ca7ec907774fd73328bbb567e3d2c5b0c8c2cd53af02348cabfca02addd7",
-    "90100f80d69750006b206a5df9770b64b7668a8f73a1a92296b1d841428e77e1",
-    "b577f949668860e962255391923e328a80e25377c49b1168d130a9b76215d9d2",
-    "da355beedf3d921fc87462703f02375632d57a93dabc69a38767315dbb5f1b21",
+    "726ff3415356fdef7e8735428c5360222fd64b8c25b3cb0af0104e219636fcbd",
+    "47b02c94245abd261cfe8b6909d2a6377ec258346806b6ad2943dbb61337484c",
+    "a7e81f4ab3a4c53dda19fb565b318427e960442c4c74cf9c9a209346a8e7f9c8",
+    "49ac1ff33c9f5e40dda9a2e0bde7cce9d9173a5242016ced0be0c143b34f82a8",
+    "22337761a8dc1e32ad3f680a12f4d3cfe8594fed515e2f00276019d43ddbe14d",
 ];
