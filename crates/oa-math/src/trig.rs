@@ -1,17 +1,19 @@
 //! sin, cos, sin_cos, tan.
 //!
 //! The argument is reduced to y = x - n * pi/2 with |y| <= pi/4 as a double-double. Below 2^19
-//! the reduction is Cody-Waite (pi/2 in four pieces, n times a piece exact); above it is
-//! Payne-Hanek with 1408 stored bits of 2/pi, so every finite argument is reduced with a
-//! relative error far below 2^-100 even where x is within 2^-60 of a multiple of pi/2. sin y
-//! and cos y then come from a table at j/16 and a short series in the remainder.
+//! the reduction is Cody-Waite (pi/2 in four pieces, n times a piece exact), measured at a
+//! relative error of the reduced argument below 2^-87 on the 21,553 arguments below 2^19 closest
+//! to a multiple of pi/2 (the closest has |y| near 2^-60.5; mpmath, `tests/reference.rs` keeps the
+//! 600 hardest); above it is Payne-Hanek with 1408 stored bits of 2/pi. sin y and cos y then
+//! come from a table at j/16 and a short series in the remainder.
 
 use crate::consts::{
     COS_C, COS_TAB, INV6_DD, PIO2_1, PIO2_2, PIO2_3, PIO2_4, PIO2_DD, PIO4_HI, SIN_C, SIN_TAB,
     TWO_OVER_PI, TWO_OVER_PI_BITS,
 };
-use crate::dd::{self, dd, Dd};
-use crate::util::{abs, is_neg, negate_if, pow2, NAN};
+use crate::dd::{self, dd, two_prod, two_sum, Dd};
+use crate::fast::ratio;
+use crate::util::{abs, is_neg, negate_if, pow2, round_test, NAN};
 
 /// Below this |x|, sin x rounds to x, cos x to 1 and tan x to x.
 const TINY: f64 = 7.450_580_596_923_828e-9; // 2^-27
@@ -200,10 +202,8 @@ fn sin_cos_dd(x: f64) -> Option<(Dd, Dd)> {
     Some((if is_neg(x) { dd::neg(s) } else { s }, c))
 }
 
-/// Sine and cosine of `x` together, computed from one argument reduction. Domain: all finite
-/// doubles (any magnitude). Each result is faithfully rounded; see [`sin`] and [`cos`] for the
-/// special values. The pair equals `(sin(x), cos(x))` bit for bit.
-pub fn sin_cos(x: f64) -> (f64, f64) {
+/// The double-double path of [`sin_cos`] (also the test hook for the fast path).
+pub(crate) fn sin_cos_slow(x: f64) -> (f64, f64) {
     if !x.is_finite() {
         return (NAN, NAN);
     }
@@ -213,23 +213,18 @@ pub fn sin_cos(x: f64) -> (f64, f64) {
     }
 }
 
-/// Sine of `x` (radians). Domain: all finite doubles, however large (Payne-Hanek reduction).
-/// Faithfully rounded (measured maximum error in `crates/oa-math/tests/reference.rs`).
-/// sin(+-0) = +-0, sin(+-inf) = NaN, NaN gives NaN; subnormal arguments return `x`.
-pub fn sin(x: f64) -> f64 {
-    sin_cos(x).0
+/// The double-double path of [`sin`] (also the test hook for the fast path).
+pub(crate) fn sin_slow(x: f64) -> f64 {
+    sin_cos_slow(x).0
 }
 
-/// Cosine of `x` (radians). Domain: all finite doubles. Faithfully rounded.
-/// cos(+-0) = 1, cos(+-inf) = NaN, NaN gives NaN.
-pub fn cos(x: f64) -> f64 {
-    sin_cos(x).1
+/// The double-double path of [`cos`] (also the test hook for the fast path).
+pub(crate) fn cos_slow(x: f64) -> f64 {
+    sin_cos_slow(x).1
 }
 
-/// Tangent of `x` (radians). Domain: all finite doubles. Faithfully rounded.
-/// tan(+-0) = +-0, tan(+-inf) = NaN, NaN gives NaN. Near odd multiples of pi/2 the result is
-/// large but finite (at most about 1.6e16).
-pub fn tan(x: f64) -> f64 {
+/// The double-double path of [`tan`] (also the test hook for the fast path).
+pub(crate) fn tan_slow(x: f64) -> f64 {
     if !x.is_finite() {
         return NAN;
     }
@@ -245,4 +240,223 @@ pub fn tan(x: f64) -> f64 {
         dd::neg(dd::div(c, s))
     };
     negate_if(t.hi, is_neg(x))
+}
+
+// ---- fast paths -------------------------------------------------------------------------
+//
+// Each fast path computes in plain doubles (error-free transformations only where the error
+// matters), proves an absolute error bound, and returns the rounded result only when
+// `round_test` says the rounding is certain; everything else (|x| < 2^-27, |x| >= 2^19, an
+// argument within 2^-16 of a multiple of pi/2, a doubtful rounding) is left to the
+// double-double path.
+
+/// Below this reduced magnitude (after a nonzero quadrant) the fast path gives up: the
+/// reduction error of about 2^-84 absolute would no longer be below 2^-68 relative.
+const MIN_Y: f64 = 1.525_878_906_25e-5; // 2^-16
+
+/// Relative error bound of the fast sin and cos (see `sin_of` and `cos_of`) and of the fast tan.
+const SIN_COS_FAST_REL: f64 = 1.734_723_475_976_807e-18; // 2^-59
+const TAN_FAST_REL: f64 = 3.469_446_951_953_614e-18; // 2^-58
+
+/// Cody-Waite reduction in doubles: `Some((n, yh, yl))` with ax = n pi/2 + yh + yl, |yl| <= 2^-54
+/// |yh|, for 2^-27 <= ax < 2^19 and, when n is not 0, |yh| >= 2^-16. Error: n pi/2 is
+/// subtracted in pieces of which the first two (33 bits, n < 2^19) give exact products and
+/// exact `two_sum`s; the third product is rounded (error below 2^-103); what is dropped is
+/// n times the remainder of pi/2 after three pieces, 8.5e-32 n < 2^-84.9 for n < 2^18.4.
+/// So `yh + yl` is within 2^-84 of the true remainder, below 2^-68 relative for |y| >= 2^-16.
+fn reduce_fast(ax: f64) -> Option<(u32, f64, f64)> {
+    if ax < PIO4_HI {
+        return Some((0, ax, 0.0));
+    }
+    if ax >= CW_LIMIT {
+        return None;
+    }
+    let n = (ax * TWO_OVER_PI + 0.5) as i64;
+    let nf = n as f64;
+    let s1 = two_sum(ax, -(nf * PIO2_1));
+    let s2 = two_sum(s1.hi, -(nf * PIO2_2));
+    let y = two_sum(s2.hi, (s2.lo + s1.lo) - nf * PIO2_3);
+    if abs(y.hi) < MIN_Y {
+        return None;
+    }
+    Some(((n & 3) as u32, y.hi, y.lo))
+}
+
+/// Table index and the short series for sin and cos of `|y| = a + b`, a = j/16, |b| <= 1/32.
+struct Part {
+    sa: Dd,
+    ca: Dd,
+    b: f64,
+    /// sin b - b (with the low part of the argument): bl + b^3 S(b^2)
+    sinb_l: f64,
+    /// cos(b + bl) - 1
+    c2: f64,
+}
+
+/// The series for the reduced argument `ay = ayh + ayl >= 0`, `ayh <= pi/4 + 2^-50`.
+fn part(ayh: f64, ayl: f64) -> Part {
+    let j = (ayh * 16.0 + 0.5) as usize;
+    let a = j as f64 * 0.0625;
+    let sa = SIN_TAB.get(j).copied().unwrap_or(dd(0.0, 0.0));
+    let ca = COS_TAB.get(j).copied().unwrap_or(dd(1.0, 0.0));
+    // exact: for j = 0 it is ayh; otherwise a is within a factor 2 of ayh (Sterbenz)
+    let b = ayh - a;
+    let b2 = b * b;
+    let [s5, s7, s9, s11] = SIN_C;
+    let [c4, c6, c8, c10, _] = COS_C;
+    let sp = -INV6_DD.hi + b2 * (s5 + b2 * (s7 + b2 * (s9 + b2 * s11)));
+    let sinb_l = ayl + (b * b2) * sp;
+    let cp = c4 + b2 * (c6 + b2 * (c8 + b2 * c10));
+    // cos(b + bl) - 1 = c2 - bl sin b, so the low part of the argument enters here as well
+    let c2 = (-0.5 * b2 + (b2 * b2) * cp) - ayl * b;
+    Part {
+        sa,
+        ca,
+        b,
+        sinb_l,
+        c2,
+    }
+}
+
+/// sin |y| as `(h, l)`. sin(a + b) = sa + sa c2 + ca (b + sinb_l). Error (relative to the
+/// result, which is at least 2^-5 for a nonzero table index and is b itself otherwise, u = 2^-53):
+/// the series cut-offs (b^13 / 13! and b^12 / 12!, below 2^-80); the roundings in `sinb_l`
+/// and `c2` (about 3 u of terms of size b^3 / 6 and b^2 / 2), whose products with the table
+/// values are below 2^-64 sa; the roundings of the sum of the small terms, whose size is at
+/// most 2^-11.5 sa + 2^-17.6, giving below 2^-61 of the result; the neglected products of the
+/// low table parts with the small terms (2^-65 relative) and of the low part of the argument
+/// with c2 (below 2^-63.4 relative). Total below 2^-60.3, the bound used is 2^-59.
+fn sin_of(p: &Part) -> (f64, f64) {
+    let q = two_prod(p.ca.hi, p.b);
+    let s = two_sum(p.sa.hi, q.hi);
+    let lw = p.sa.lo + (q.lo + (p.ca.lo * p.b + (p.ca.hi * p.sinb_l + p.sa.hi * p.c2)));
+    let f = two_sum(s.hi, s.lo + lw);
+    (f.hi, f.lo)
+}
+
+/// cos |y| as `(h, l)`; cos(a + b) = ca + ca c2 - sa (b + sinb_l). Same analysis as `sin_of`,
+/// with the result at least cos(pi/4) = 0.7 so the relative error is below 2^-61.
+fn cos_of(p: &Part) -> (f64, f64) {
+    let q = two_prod(p.sa.hi, p.b);
+    let s = two_sum(p.ca.hi, -q.hi);
+    let lw = p.ca.lo + (p.ca.hi * p.c2 - (q.lo + (p.sa.lo * p.b + p.sa.hi * p.sinb_l)));
+    let f = two_sum(s.hi, s.lo + lw);
+    (f.hi, f.lo)
+}
+
+/// The reduced argument as a `Part` of |y| and whether y is negative.
+fn reduced(x: f64) -> Option<(u32, bool, Part)> {
+    let ax = abs(x);
+    if !(TINY..CW_LIMIT).contains(&ax) {
+        return None;
+    }
+    let (n, yh, yl) = reduce_fast(ax)?;
+    let neg_y = is_neg(yh);
+    let (ayh, ayl) = if neg_y { (-yh, -yl) } else { (yh, yl) };
+    Some((n, neg_y, part(ayh, ayl)))
+}
+
+/// Rounds a fast `(h, l)` with the relative bound `rel`, negated when `negative`.
+fn finish(hl: (f64, f64), rel: f64, negative: bool) -> Option<f64> {
+    let r = round_test(hl.0, hl.1, abs(hl.0) * rel)?;
+    Some(negate_if(r, negative))
+}
+
+/// Whether sin(x) is negative, given the quadrant, the sign of y and of x.
+fn sin_sign(n: u32, neg_y: bool, neg_x: bool) -> bool {
+    let neg = match n & 3 {
+        0 => neg_y,
+        1 => false,
+        2 => !neg_y,
+        _ => true,
+    };
+    neg != neg_x
+}
+
+/// Whether cos(x) is negative, given the quadrant and the sign of y.
+fn cos_sign(n: u32, neg_y: bool) -> bool {
+    match n & 3 {
+        0 => false,
+        1 => !neg_y,
+        2 => true,
+        _ => neg_y,
+    }
+}
+
+pub(crate) fn sin_fast(x: f64) -> Option<f64> {
+    let (n, neg_y, p) = reduced(x)?;
+    let hl = if n & 1 == 0 { sin_of(&p) } else { cos_of(&p) };
+    finish(hl, SIN_COS_FAST_REL, sin_sign(n, neg_y, is_neg(x)))
+}
+
+pub(crate) fn cos_fast(x: f64) -> Option<f64> {
+    let (n, neg_y, p) = reduced(x)?;
+    let hl = if n & 1 == 0 { cos_of(&p) } else { sin_of(&p) };
+    finish(hl, SIN_COS_FAST_REL, cos_sign(n, neg_y))
+}
+
+pub(crate) fn sin_cos_fast(x: f64) -> Option<(f64, f64)> {
+    let (n, neg_y, p) = reduced(x)?;
+    let (s, c) = (sin_of(&p), cos_of(&p));
+    let (sx, cx) = if n & 1 == 0 { (s, c) } else { (c, s) };
+    Some((
+        finish(sx, SIN_COS_FAST_REL, sin_sign(n, neg_y, is_neg(x)))?,
+        finish(cx, SIN_COS_FAST_REL, cos_sign(n, neg_y))?,
+    ))
+}
+
+/// tan |y| = s / c (or c / s for an odd quadrant) as a double-double quotient: the relative
+/// errors of the two series add (2 * 2^-60.3), the quotient's own error is below 2^-100; the
+/// bound used is 2^-58.
+pub(crate) fn tan_fast(x: f64) -> Option<f64> {
+    let (n, neg_y, p) = reduced(x)?;
+    let (s, c) = (sin_of(&p), cos_of(&p));
+    let negative;
+    let q = if n & 1 == 0 {
+        negative = neg_y;
+        ratio(s.0, s.1, c.0, c.1)
+    } else {
+        negative = !neg_y;
+        ratio(c.0, c.1, s.0, s.1)
+    };
+    finish((q.hi, q.lo), TAN_FAST_REL, negative != is_neg(x))
+}
+
+/// Sine and cosine of `x` together, computed from one argument reduction. Domain: all finite
+/// doubles (any magnitude). Each result is faithfully rounded; see [`sin`] and [`cos`] for the
+/// special values. The pair equals `(sin(x), cos(x))` bit for bit.
+pub fn sin_cos(x: f64) -> (f64, f64) {
+    match sin_cos_fast(x) {
+        Some(r) => r,
+        None => sin_cos_slow(x),
+    }
+}
+
+/// Sine of `x` (radians). Domain: all finite doubles, however large (Payne-Hanek reduction).
+/// Faithfully rounded (measured maximum error in `crates/oa-math/tests/reference.rs`).
+/// sin(+-0) = +-0, sin(+-inf) = NaN, NaN gives NaN; subnormal arguments return `x`.
+pub fn sin(x: f64) -> f64 {
+    match sin_fast(x) {
+        Some(r) => r,
+        None => sin_slow(x),
+    }
+}
+
+/// Cosine of `x` (radians). Domain: all finite doubles. Faithfully rounded.
+/// cos(+-0) = 1, cos(+-inf) = NaN, NaN gives NaN.
+pub fn cos(x: f64) -> f64 {
+    match cos_fast(x) {
+        Some(r) => r,
+        None => cos_slow(x),
+    }
+}
+
+/// Tangent of `x` (radians). Domain: all finite doubles. Faithfully rounded.
+/// tan(+-0) = +-0, tan(+-inf) = NaN, NaN gives NaN. Near odd multiples of pi/2 the result is
+/// large but finite (at most about 1.6e16).
+pub fn tan(x: f64) -> f64 {
+    match tan_fast(x) {
+        Some(r) => r,
+        None => tan_slow(x),
+    }
 }

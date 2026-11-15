@@ -99,10 +99,25 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   fixed pseudo-random input sequence equals a pinned value; the same value is produced on every
   target the crate is built for (x86-64 and wasm32 checked).
 - **OA-MATH-019** The crate sources contain no call to a platform maths function (`sin`, `exp`,
-  `powf`, `floor`, `mul_add` and the rest of a fixed list, as methods or `f64::` paths), no
-  `unsafe`, and the manifest lists no dependency; the check is itself tested against a planted call.
+  `powf`, `floor`, `mul_add` and the rest of a fixed list, as methods, `f64::` calls or bare
+  `f64::` paths used as values), no float `%` (only the listed integer shifts), no `unsafe`, and the
+  manifest lists no dependency; the check is itself tested against planted calls.
 - **OA-MATH-020** Every NaN returned has one fixed bit pattern (positive quiet NaN), whatever the
   NaN bits of the input.
+- **OA-MATH-021** Every function has a fast path in plain double arithmetic whose error bound is
+  derived in the source; it answers only when the rounding of the result is certain, and otherwise
+  the double-double path answers. Over at least one million random inputs per function (typical
+  ranges, the full range of exponents, near 1, exact results) and the edge values, the public
+  function and the fast path (when it answers) equal the double-double path bit for bit.
+- **OA-MATH-022** The fast path answers for at least a stated fraction of the committed reference
+  inputs and of 300,000 random inputs of a typical range, per function (sin/cos 0.97, `sin_cos`
+  and `tan` 0.94, atan, atan2, asin, acos 0.97, exp 0.95, ln and hypot and cbrt 0.99, pow 0.91
+  on the random inputs; 0.38 to 0.97 on the committed inputs, which are mostly extreme).
+- **OA-MATH-023** On the committed reference data the maximum error of every function is at most
+  0.5 ulp plus 1e-5 and no result differs from the correctly rounded double (`pow`: at most one
+  case, a result within 2^-70 of a midpoint); the check fails when one result is moved by one ulp;
+  the 600 arguments below 2^19 closest to a multiple of pi/2 give correctly rounded sin, cos and
+  tan.
 
 ### NASR (oa-nasr)
 
