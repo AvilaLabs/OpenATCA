@@ -1,8 +1,9 @@
 # OpenATCA requirements register
 
-Every requirement has a stable ID. Every requirement must be verified by at least one test that
-carries the tag `// REQ: <ID>` on the line above the test function. `oa-trace` fails the build if
-a requirement has no test, or a test names an ID that does not exist.
+Every requirement has a stable ID. Every requirement must be linked to at least one test or Kani
+harness that carries the tag `// REQ: <ID>` on the line above it. `oa-trace` fails the build if a
+requirement has nothing linked, or a tag names an ID that does not exist. It checks the links
+only; whether the tests pass and the proofs hold comes from running them.
 
 IDs are never reused. A withdrawn requirement stays in the register marked WITHDRAWN.
 

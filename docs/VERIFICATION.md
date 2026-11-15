@@ -20,8 +20,9 @@ Harnesses are compiled only under `#[cfg(kani)]`. They are not in any shipped bu
 `crates/oa-replay/src/clock.rs` and `crates/oa-track/src/time_gate.rs` (each at the end, in a `proofs`
 module).
 
-Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` counts that
-as verification of the requirement and lists it as a proof, apart from tests.
+Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` links the
+harness to the requirement and lists it as a proof harness, apart from tests. It does not run
+Kani; the results are the table below.
 
 ## How to run
 
