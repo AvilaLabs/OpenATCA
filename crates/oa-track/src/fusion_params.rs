@@ -104,8 +104,22 @@ pub const REG_HISTORY_MAX: usize = 1 << 20;
 pub const REG_LIMIT_RANGE_M: f64 = 2_000.0;
 pub const REG_LIMIT_AZ_DEG: f64 = 2.0;
 
-/// Reference aircraft a radar's estimator remembers (a slot each; the stalest is replaced).
-pub const REG_REF_SLOTS: usize = 32;
+/// Reference aircraft a radar's estimator holds by default (a slot each; a configuration value,
+/// `FusionConfig::reg_ref_slots`). A scan of a busy radar has a few hundred eligible aircraft,
+/// and a reference needs [`REG_REF_MIN_SAMPLES`] residuals in its own slot before it counts, so
+/// the slots must outnumber the aircraft that are eligible together.
+pub const REG_REF_SLOTS: usize = 256;
+/// Limit: the slots a radar's estimator may be configured with (each residual is compared with
+/// every slot).
+pub const REG_REF_SLOTS_MAX: usize = 4096;
+/// A reference's slot is given up when its aircraft has made no residual for this many scans of
+/// the radar: long enough for an aircraft to miss a few scans (a dropped plot, a moment out of
+/// the reference rules) and keep what it has averaged; short enough that a departed aircraft
+/// frees its slot within half a minute at a terminal radar and a minute and a quarter en route.
+pub const REG_REF_STALE_SCANS: u32 = 6;
+/// The scan period assumed for an estimator made without one, ns (a terminal radar's 4.8 s,
+/// rounded up).
+pub const REG_DEFAULT_SCAN_NS: i64 = 5 * NS_PER_S;
 /// A reference's mean residual averages at most this many residuals (older ones fade).
 pub const REG_REF_MEMORY: u32 = 10;
 /// Residuals a reference must have made before it counts or is counted on: five plots of 70 m
@@ -144,8 +158,9 @@ pub const KEY_RADAR_BASE: u32 = 0x4000_0000;
 pub const MAX_BUCKET_PLOTS: usize = 16_384;
 /// Limit: gated candidate pairs of one association; pairs beyond are counted and not formed.
 pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
-/// Limit: (plot, track) pairs given the exact gate in one association, 1 Mi: at about two
-/// microseconds a pair this is the longest a bucket can take.
+/// Limit: work in the associations of one bucket, all radars together, 1 Mi: a (plot, track) pair
+/// given the exact gate costs one unit (about two microseconds) and so does a candidate the coarse
+/// window is applied to (much less), so this is about the longest a bucket can take.
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
 /// Limit: tracks (and candidates) in one association solve.
 pub const MAX_SOLVE_TRACKS: usize = if MAX_ASSOC_TRACKS > MAX_CANDIDATES {
@@ -167,6 +182,11 @@ pub const HARD_GATE_CHI2: f64 = 50.0;
 /// new tracks beside them. Set from the pair worlds: 2 keeps their swap counts at the held
 /// design's (docs/BENCHMARKS.md, M3 step 2 report).
 pub const HOLD_MAX_RUN: u8 = 2;
+/// A Mode S plot outside the wide gate of its address's track marks the track as contradicted by
+/// radar for this many scans of that radar after the plot, so the mark stays through a scan or two
+/// that happen to miss the aircraft and clears after this many clean ones. Three scans: a
+/// terminal radar's ten seconds, an en route radar's thirty-six.
+pub const RADAR_DISAGREE_SCANS: i64 = 3;
 /// Limit: assignment log rows (scoring runs).
 pub const ASSIGN_LOG_MAX: usize = 4 << 20;
 

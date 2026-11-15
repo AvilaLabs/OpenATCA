@@ -213,6 +213,11 @@ pub const O_COAST: u8 = 1;
 pub const O_HAS_ALT: u8 = 2;
 /// The row is a fixed-rate tick, not an update.
 pub const O_TICK: u8 = 4;
+/// A radar disagrees with this address's track: a Mode S plot with the address fell outside the
+/// wide gate of the track within the last few scans of a radar. The track's position is not
+/// changed by it; a consumer reads it as "this track's position is contradicted by radar" (a
+/// spoofed or faulty ADS-B position, or another aircraft on the address).
+pub const O_RADAR_DISAGREES: u8 = 8;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
@@ -246,7 +251,7 @@ pub struct TrackOutput {
     pub mu_h: Vec<[f32; 2]>,
     /// Vertical model probabilities `[level, climb or descent]`.
     pub mu_v: Vec<[f32; 2]>,
-    /// [`O_COAST`], [`O_HAS_ALT`], [`O_TICK`].
+    /// [`O_COAST`], [`O_HAS_ALT`], [`O_TICK`], [`O_RADAR_DISAGREES`].
     pub flags: Vec<u8>,
 }
 

@@ -23,8 +23,8 @@
 //! A residual is offered with the key of the reference aircraft that made it ([`reg_offer`]).
 //! One reference is never trusted alone: a spoofed ADS-B position (or a bad GNSS fix) shifts
 //! every residual of that aircraft, and used directly it would shift the estimate for every
-//! plot of the radar. The estimator keeps, for each of up to [`REG_REF_SLOTS`] recent
-//! references, the mean of its last residuals ([`REG_REF_MEMORY`] of them at most) with the
+//! plot of the radar. The estimator keeps, for each of up to a configured number of slots
+//! ([`REG_REF_SLOTS`] by default) of references, the mean of its last residuals ([`REG_REF_MEMORY`] of them at most) with the
 //! variance of that mean, and uses a residual only when
 //!
 //! 1. its reference has at least [`REG_REF_MIN_SAMPLES`] residuals (so the mean is no longer
@@ -51,12 +51,21 @@
 //! The estimate is *subtracted* from the radar's plots and its variance added to theirs
 //! (`radar::plot_convert`), so a radar that is not yet registered is weighted as the
 //! uncertainty says. [`RegSample`] rows are the published history per radar over time.
+//!
+//! # Reference slots
+//!
+//! A reference keeps its slot for as long as its aircraft keeps producing residuals. A slot is
+//! given up only when its aircraft has produced none for [`REG_REF_STALE_SCANS`] scans of the
+//! radar (it left coverage, or stopped being eligible); an aircraft that finds every slot held
+//! by a live reference is ignored and counted in [`RegState::ignored`]. Replacing the stalest
+//! slot on demand instead would, with more aircraft than slots, give each a fresh slot before
+//! it had made the residuals it needs, and registration would never start in busy airspace.
 
 use crate::fusion_params::{
-    REG_AGREE_SIGMAS, REG_CUSUM_CLIP, REG_CUSUM_H, REG_CUSUM_K, REG_GATE_SIGMAS, REG_LIMIT_AZ_DEG,
-    REG_LIMIT_RANGE_M, REG_MIN_REFS, REG_PRIOR_SIGMA_AZ_DEG, REG_PRIOR_SIGMA_RANGE_M,
-    REG_Q_AZ_DEG2_PER_S, REG_Q_RANGE_M2_PER_S, REG_REF_MEMORY, REG_REF_MIN_SAMPLES, REG_REF_SLOTS,
-    REG_REF_WINDOW_NS,
+    REG_AGREE_SIGMAS, REG_CUSUM_CLIP, REG_CUSUM_H, REG_CUSUM_K, REG_DEFAULT_SCAN_NS,
+    REG_GATE_SIGMAS, REG_LIMIT_AZ_DEG, REG_LIMIT_RANGE_M, REG_MIN_REFS, REG_PRIOR_SIGMA_AZ_DEG,
+    REG_PRIOR_SIGMA_RANGE_M, REG_Q_AZ_DEG2_PER_S, REG_Q_RANGE_M2_PER_S, REG_REF_MEMORY,
+    REG_REF_MIN_SAMPLES, REG_REF_SLOTS, REG_REF_STALE_SCANS, REG_REF_WINDOW_NS,
 };
 use crate::radar::{polar_of, Bias, RadarGeom, RadarPlot, RadarSite, FT_M};
 
@@ -99,7 +108,7 @@ struct Cusum {
 }
 
 /// One radar's bias estimate. Plain data (A1); A7.2: cold struct (one per radar).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegState {
     pub range_m: f64,
     pub var_range_m2: f64,
@@ -119,7 +128,14 @@ pub struct RegState {
     pub inconsistent: u64,
     /// Times the estimate restarted on a persistent shift.
     pub resets: u64,
-    refs: [RegRef; REG_REF_SLOTS],
+    /// Residuals from aircraft that found every reference slot held by a live reference.
+    pub ignored: u64,
+    /// The reference slots, all allocated when the estimator is made.
+    refs: Vec<RegRef>,
+    /// Scratch of the agreement test (four columns of one slot count each).
+    scratch: Vec<f64>,
+    /// A slot is free for another aircraft when its own has made no residual for this long, ns.
+    stale_ns: i64,
     cs_r: Cusum,
     cs_a: Cusum,
     /// Residuals, and their sums, since the sums last left zero.
@@ -155,8 +171,15 @@ pub struct Residual {
     pub var_az_deg2: f64,
 }
 
-/// The estimator at the prior.
+/// The estimator at the prior, with the default slot count and scan period.
 pub fn reg_new() -> RegState {
+    reg_new_with(REG_REF_SLOTS, REG_DEFAULT_SCAN_NS)
+}
+
+/// The estimator at the prior with `slots` reference slots (at least one) for a radar whose scan
+/// takes `scan_ns`: a slot is given up after [`REG_REF_STALE_SCANS`] scans without a residual.
+pub fn reg_new_with(slots: usize, scan_ns: i64) -> RegState {
+    let slots = slots.max(1);
     RegState {
         range_m: 0.0,
         var_range_m2: REG_PRIOR_SIGMA_RANGE_M * REG_PRIOR_SIGMA_RANGE_M,
@@ -169,7 +192,10 @@ pub fn reg_new() -> RegState {
         building: 0,
         inconsistent: 0,
         resets: 0,
-        refs: [EMPTY_REF; REG_REF_SLOTS],
+        ignored: 0,
+        refs: vec![EMPTY_REF; slots],
+        scratch: vec![0.0; 4 * slots],
+        stale_ns: i64::from(REG_REF_STALE_SCANS).saturating_mul(scan_ns.max(1)),
         cs_r: Cusum { pos: 0.0, neg: 0.0 },
         cs_a: Cusum { pos: 0.0, neg: 0.0 },
         cs_n: 0,
@@ -306,6 +332,9 @@ pub enum RegOutcome {
     Inconsistent,
     /// The residual was part of a persistent shift: the estimate restarted (and then used it).
     Reset,
+    /// Not used: every reference slot is held by an aircraft that is still making residuals, so
+    /// this aircraft was not taken as a reference (counted in [`RegState::ignored`]).
+    Ignored,
 }
 
 /// The median of `v[..n]` (reordered); `n` at least 1.
@@ -327,20 +356,24 @@ fn mean_var(s: &RegRef) -> (f64, f64) {
     (s.var_range_m2 / m, s.var_az_deg2 / m)
 }
 
-/// Folds `z` into the slot of reference `key` (taking an empty slot, else the stalest).
-fn note_reference(r: &mut RegState, t_ns: i64, key: u32, z: &Residual) -> usize {
+/// Folds `z` into the slot of reference `key`: its own, else an empty one, else the stalest
+/// whose aircraft has made no residual for the stale time. `None` when every slot is held by a
+/// live reference (the residual is ignored).
+fn note_reference(r: &mut RegState, t_ns: i64, key: u32, z: &Residual) -> Option<usize> {
+    let stale_before = t_ns.saturating_sub(r.stale_ns);
     let at = r
         .refs
         .iter()
         .position(|s| s.key == key)
         .or_else(|| r.refs.iter().position(|s| s.key == crate::types::NO_ADDR))
-        .unwrap_or_else(|| {
+        .or_else(|| {
             r.refs
                 .iter()
                 .enumerate()
+                .filter(|(_, s)| s.t_ns < stale_before)
                 .min_by_key(|(_, s)| s.t_ns)
-                .map_or(0, |(i, _)| i)
-        });
+                .map(|(i, _)| i)
+        })?;
     if let Some(s) = r.refs.get_mut(at) {
         if s.key != key {
             *s = RegRef { key, ..EMPTY_REF };
@@ -362,17 +395,26 @@ fn note_reference(r: &mut RegState, t_ns: i64, key: u32, z: &Residual) -> usize 
         }
         s.t_ns = t_ns;
     }
-    at
+    Some(at)
 }
 
 /// The reference in slot `at` agrees with the median of the other current references (at least
 /// `REG_MIN_REFS - 1` of them, each with enough residuals): `None` if there are too few others
 /// to say, else whether it agrees.
-fn agrees(r: &RegState, t_ns: i64, at: usize) -> Option<bool> {
-    let mut rs = [0.0f64; REG_REF_SLOTS];
-    let mut az = [0.0f64; REG_REF_SLOTS];
-    let mut vr = [0.0f64; REG_REF_SLOTS];
-    let mut va = [0.0f64; REG_REF_SLOTS];
+fn agrees(r: &mut RegState, t_ns: i64, at: usize) -> Option<bool> {
+    // The columns are views of the scratch allocated with the slots (taken out so the slots can
+    // be read beside them, and put back: no allocation).
+    let mut scratch = std::mem::take(&mut r.scratch);
+    let verdict = agrees_in(r, &mut scratch, t_ns, at);
+    r.scratch = scratch;
+    verdict
+}
+
+fn agrees_in(r: &RegState, scratch: &mut [f64], t_ns: i64, at: usize) -> Option<bool> {
+    let slots = r.refs.len();
+    let (rs, rest) = scratch.split_at_mut(slots);
+    let (az, rest) = rest.split_at_mut(slots);
+    let (vr, va) = rest.split_at_mut(slots);
     let mut n = 0usize;
     for (i, s) in r.refs.iter().enumerate() {
         if i == at
@@ -399,10 +441,10 @@ fn agrees(r: &RegState, t_ns: i64, at: usize) -> Option<bool> {
     for a in az.iter_mut().take(n) {
         *a = me.az_deg + wrap180(*a - me.az_deg);
     }
-    let (mr, ma) = (median(&mut rs, n), median(&mut az, n));
+    let (mr, ma) = (median(rs, n), median(az, n));
     // The median of n means has about pi/2 times the variance of one mean over n.
     let k = core::f64::consts::FRAC_PI_2 / n as f64;
-    let (vmr, vma) = (median(&mut vr, n) * k, median(&mut va, n) * k);
+    let (vmr, vma) = (median(vr, n) * k, median(va, n) * k);
     let (mvr, mva) = mean_var(me);
     let tr = REG_AGREE_SIGMAS * (mvr + vmr).sqrt();
     let ta = REG_AGREE_SIGMAS * (mva + vma).sqrt();
@@ -422,7 +464,10 @@ pub fn reg_offer(r: &mut RegState, t_ns: i64, key: u32, z: &Residual) -> RegOutc
         return RegOutcome::Gated;
     }
     reg_predict(r, t_ns);
-    let at = note_reference(r, t_ns, key, z);
+    let Some(at) = note_reference(r, t_ns, key, z) else {
+        r.ignored += 1;
+        return RegOutcome::Ignored;
+    };
     let enough = r.refs.get(at).is_some_and(|s| s.n >= REG_REF_MIN_SAMPLES);
     let verdict = if enough { agrees(r, t_ns, at) } else { None };
     match verdict {
@@ -622,18 +667,119 @@ mod tests {
         rounds: std::ops::Range<i64>,
         bias: impl Fn(i64) -> (f64, f64),
     ) {
+        run_rounds_spaced(st, rng, refs, liars, lie, rounds, bias, 100_000_000);
+    }
+
+    /// [`run_rounds`] with `stride_ns` between the references of a round (rounds are 5 s).
+    #[allow(clippy::too_many_arguments)]
+    fn run_rounds_spaced(
+        st: &mut RegState,
+        rng: &mut Rng,
+        refs: u32,
+        liars: u32,
+        lie: (f64, f64),
+        rounds: std::ops::Range<i64>,
+        bias: impl Fn(i64) -> (f64, f64),
+        stride_ns: i64,
+    ) {
         for round in rounds {
             for k in 0..refs {
                 let l = if k < liars { lie } else { (0.0, 0.0) };
                 let z = residual(rng, bias(round), l);
                 feed(
                     st,
-                    round * 5_000_000_000 + i64::from(k) * 100_000_000,
+                    round * 5_000_000_000 + i64::from(k) * stride_ns,
                     0xA00000 + k,
                     &z,
                 );
             }
         }
+    }
+
+    // REQ: OA-TRK-174
+    #[test]
+    fn registration_starts_in_busy_airspace_with_hundreds_of_eligible_aircraft_a_scan() {
+        // 300 aircraft make a residual every scan, two of them misreporting. With the 32 slots
+        // and replacement of the stalest this replaced, no reference ever held its five
+        // residuals; now each keeps its slot.
+        let mut rng = Rng::from_seed(3);
+        let mut st = reg_new();
+        run_rounds_spaced(
+            &mut st,
+            &mut rng,
+            300,
+            2,
+            (250.0, 0.25),
+            0..8,
+            |_| (120.0, 0.12),
+            10_000_000,
+        );
+        assert!(
+            st.used > 0,
+            "nothing used in 8 scans: building {}",
+            st.building
+        );
+        run_rounds_spaced(
+            &mut st,
+            &mut rng,
+            300,
+            2,
+            (250.0, 0.25),
+            8..120,
+            |_| (120.0, 0.12),
+            10_000_000,
+        );
+        // The same estimate quality as with twelve references.
+        assert!(
+            (st.range_m - 120.0).abs() < 10.0,
+            "range est {}",
+            st.range_m
+        );
+        assert!((st.az_deg - 0.12).abs() < 0.015, "az est {}", st.az_deg);
+        assert!(st.inconsistent > 100, "inconsistent {}", st.inconsistent);
+        assert!(st.used > 800, "used {}", st.used);
+        assert_eq!(st.resets, 0);
+    }
+
+    // REQ: OA-TRK-174
+    #[test]
+    fn a_slot_is_held_while_its_aircraft_makes_residuals_and_freed_after_six_scans() {
+        let mut rng = Rng::from_seed(9);
+        let z = |rng: &mut Rng| residual(rng, (120.0, 0.12), (0.0, 0.0));
+        let mut st = reg_new_with(4, 5_000_000_000);
+        // Six aircraft every scan for five scans: the first four hold the slots throughout
+        // and the other two are ignored and counted every time.
+        for round in 0..5i64 {
+            for k in 0..6u32 {
+                let r = z(&mut rng);
+                let out = reg_offer(
+                    &mut st,
+                    round * 5_000_000_000 + i64::from(k) * 1_000_000,
+                    0xA00000 + k,
+                    &r,
+                );
+                assert_eq!(
+                    out == RegOutcome::Ignored,
+                    k >= 4,
+                    "round {round} aircraft {k}"
+                );
+            }
+        }
+        assert_eq!(st.ignored, 10);
+        assert!(st.refs.iter().all(|s| s.n == 5 && s.key < 0xA00004));
+        // The four stop; two others turn up. Until six scans (30 s) pass since the last residual
+        // of an aircraft its slot is held (the first of them made its last at `last`), then the new ones take them.
+        let last = 4 * 5_000_000_000; // the oldest of the four residuals made last
+        let r = z(&mut rng);
+        assert_eq!(
+            reg_offer(&mut st, last + 30_000_000_000, 0xB00000, &r),
+            RegOutcome::Ignored
+        );
+        assert_ne!(
+            reg_offer(&mut st, last + 30_000_000_000 + 1, 0xB00000, &r),
+            RegOutcome::Ignored
+        );
+        assert!(st.refs.iter().any(|s| s.key == 0xB00000 && s.n == 1));
     }
 
     // REQ: OA-TRK-074
@@ -729,7 +875,7 @@ mod tests {
         for k in 0..60 {
             reg_update(&mut r, k * 1_000_000_000, &ok);
         }
-        let before = r;
+        let before = r.clone();
         // A residual 3 km away (a wrong association) is rejected, estimate unchanged.
         let wild = Residual {
             range_m: 3_000.0,

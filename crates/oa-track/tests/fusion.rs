@@ -478,3 +478,83 @@ fn the_binary_writes_the_report_and_refuses_bad_usage() {
         assert_eq!(o.status.code(), Some(2), "{args:?}");
     }
 }
+
+/// A digest of everything a run decided: its output rows and which key took which plot.
+fn run_digest(r: &RunOut) -> String {
+    let mut h = oa_sha256::Sha256::new();
+    output_hash_into(&mut h, &r.out);
+    for i in 0..r.assign.t_ns.len() {
+        h.update(&r.assign.t_ns[i].to_le_bytes()).unwrap();
+        h.update(&r.assign.key[i].to_le_bytes()).unwrap();
+        h.update(&r.assign.label[i].to_le_bytes()).unwrap();
+        h.update(&[r.assign.radar[i], r.assign.how[i]]).unwrap();
+    }
+    oa_sha256::to_hex(&h.finalize())
+}
+
+// REQ: OA-TRK-170
+#[test]
+fn the_real_clip_runs_give_the_pinned_digests() {
+    let (Ok(path), Ok(_)) = (
+        std::env::var("OPENATCA_ADSB_CLIP"),
+        std::env::var("OPENATCA_DATA"),
+    ) else {
+        eprintln!("skipped: OPENATCA_ADSB_CLIP or OPENATCA_DATA not set");
+        return;
+    };
+    let built = oa_track::fusion_world::clip_world(&path).unwrap();
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for l in 0..built.legs.len() {
+        lo = lo.min(oa_truth::leg_start_ns(&built.truth, oa_truth::LegIx(l as u32)).unwrap());
+        hi = hi.max(oa_truth::leg_end_ns(&built.truth, oa_truth::LegIx(l as u32)).unwrap());
+    }
+    // The first ten minutes of the clip: the whole of it takes minutes more and adds no shape.
+    hi = hi.min(lo + 600_000_000_000);
+    let mut got = Vec::new();
+    for (kind, mixed) in [
+        (Kind::Terminal, false),
+        (Kind::EnRoute, false),
+        (Kind::Terminal, true),
+        (Kind::EnRoute, true),
+    ] {
+        let radar = make_radar(kind, MSSR_EUROCONTROL_1997, 50.0, 0.05);
+        let (plots, _, _) = simulate_plots(&built.truth, &radar, 500, lo, hi + 1).unwrap();
+        let adsb = if mixed {
+            simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0)
+        } else {
+            Vec::new()
+        };
+        let v = if mixed { &V_OURS_REG } else { &V_OURS_NOREG };
+        let r = run_variant(v, &[radar.trk], &[&plots], &adsb).unwrap();
+        let d = run_digest(&r);
+        println!(
+            "clip digest {kind:?} mixed={mixed}: {d} rows {} plots {} refused {}",
+            r.out.t_ns.len(),
+            r.fstats.plots_in,
+            r.fstats.plots_refused
+        );
+        got.push(d);
+    }
+    // The two radars together on one run.
+    let ra = make_radar(Kind::Terminal, MSSR_EUROCONTROL_1997, 50.0, 0.05);
+    let rb = make_radar(Kind::EnRoute, MSSR_EUROCONTROL_1997, 0.0, 0.0);
+    let (pa, _, _) = simulate_plots(&built.truth, &ra, 500, lo, hi + 1).unwrap();
+    let (pb, _, _) = simulate_plots(&built.truth, &rb, 502, lo, hi + 1).unwrap();
+    let adsb = simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0);
+    let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
+    println!("clip digest two radars: {}", run_digest(&r));
+    got.push(run_digest(&r));
+    assert_eq!(got, PINNED_CLIP_DIGESTS);
+}
+
+// The first two (radar only) are the digests of the code before the grid, the newest-update bound
+// and the hold and flag changes. The three with ADS-B and registration were re-pinned when
+// registration took 256 reference slots kept while their aircraft make residuals (they used
+// 2,487, 723 and 2,469 residuals before and use 3,108, 1,008 and 3,107 now).
+const PINNED_CLIP_DIGESTS: [&str; 5] = [
+    "1cdbbcf99e55c40595ef48cd8560f3c3ac98ebedb805f12d7ce6070e0d30214e",
+    "0949ca7ec907774fd73328bbb567e3d2c5b0c8c2cd53af02348cabfca02addd7",
+    "90100f80d69750006b206a5df9770b64b7668a8f73a1a92296b1d841428e77e1",
+    "b577f949668860e962255391923e328a80e25377c49b1168d130a9b76215d9d2",
+    "da355beedf3d921fc87462703f02375632d57a93dabc69a38767315dbb5f1b21",
+];

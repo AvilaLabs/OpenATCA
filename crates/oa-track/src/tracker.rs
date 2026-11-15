@@ -59,8 +59,8 @@ use crate::params::{
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
     TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL, NONE_I32,
-    NO_ADDR, O_COAST, O_TICK, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME,
-    REF_VELOCITY, TIME_LIMIT_NS,
+    NO_ADDR, O_COAST, O_RADAR_DISAGREES, O_TICK, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION,
+    REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -84,6 +84,9 @@ pub struct Tracker {
     /// Consecutive far-ahead measurements so far (a step candidate), and the latest one's time.
     step_n: u32,
     step_last_ns: i64,
+    /// The newest `last_ns` any track has had, ever (`i64::MIN` before the first): an upper bound
+    /// on the newest live update, kept so a tick need not scan every slot to find it.
+    newest_update_ns: i64,
     /// The next tick to emit; `i64::MIN` until the first measurement.
     next_tick_ns: i64,
     /// One past the highest slot ever used (the scan bound).
@@ -95,6 +98,8 @@ pub struct Tracker {
     first_ns: Vec<i64>,
     confirmed_ns: Vec<i64>,
     last_ns: Vec<i64>,
+    /// Rows of the track up to this time carry [`O_RADAR_DISAGREES`]; `i64::MIN` for none.
+    disagree_until_ns: Vec<i64>,
     updates: Vec<u32>,
     hits: Vec<u8>,
     cur: Vec<Filter>,
@@ -173,6 +178,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         clock_ns: i64::MIN,
         step_n: 0,
         step_last_ns: 0,
+        newest_update_ns: i64::MIN,
         next_tick_ns: i64::MIN,
         high: 0,
         active: 0,
@@ -181,6 +187,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         first_ns: vec![0; n],
         confirmed_ns: vec![i64::MIN; n],
         last_ns: vec![0; n],
+        disagree_until_ns: vec![i64::MIN; n],
         updates: vec![0; n],
         hits: vec![0; n],
         cur: vec![blank_filter(); n],
@@ -490,6 +497,30 @@ fn end_track(t: &mut Tracker, slot: usize, reason: u8) {
     t.active = t.active.saturating_sub(1);
 }
 
+/// Sets a track's newest update time, and the tracker's bound on all of them.
+fn set_last(t: &mut Tracker, slot: usize, ns: i64) {
+    put(&mut t.last_ns, slot, ns);
+    t.newest_update_ns = t.newest_update_ns.max(ns);
+}
+
+/// Marks the track of `key` as contradicted by a radar until `until_ns`: its rows at or before
+/// then carry [`O_RADAR_DISAGREES`] (a later call can only extend it). Nothing about the track's
+/// state changes. Returns whether there is such a track.
+pub fn tracker_note_radar_disagreement(t: &mut Tracker, key: u32, until_ns: i64) -> bool {
+    let Some(slot) = lookup(t, key) else {
+        return false;
+    };
+    let until = until_ns.max(col(&t.disagree_until_ns, slot, i64::MIN));
+    put(&mut t.disagree_until_ns, slot, until);
+    true
+}
+
+/// The newest update time any track has had (`i64::MIN` before any): at least that of the newest
+/// live track, and equal to it until the track that had it ends.
+pub fn tracker_newest_update_ns(t: &Tracker) -> i64 {
+    t.newest_update_ns
+}
+
 /// Starts (or restarts) a tentative track in `slot` from `m`.
 fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
@@ -498,10 +529,11 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
     ring_clear(t, slot);
     ring_push(t, slot, m);
     put(&mut t.first_ns, slot, m.toa_ns);
-    put(&mut t.last_ns, slot, m.toa_ns);
+    set_last(t, slot, m.toa_ns);
     put(&mut t.updates, slot, 1);
     put(&mut t.hits, slot, 1);
     put(&mut t.confirmed_ns, slot, i64::MIN);
+    put(&mut t.disagree_until_ns, slot, i64::MIN);
     put(&mut t.state, slot, TENTATIVE);
     maybe_confirm(t, slot, m.toa_ns);
 }
@@ -519,6 +551,9 @@ fn emit(t: &Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) 
     let mut row: OutRow = filter_output(&f, at_ns);
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
+    if at_ns <= col(&t.disagree_until_ns, slot, i64::MIN) {
+        row.flags |= O_RADAR_DISAGREES;
+    }
     output_push(out, &row);
 }
 
@@ -617,7 +652,7 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
             put(&mut t.cur, slot, f);
             note_category(t, slot, m);
             ring_push(t, slot, m);
-            put(&mut t.last_ns, slot, m.toa_ns);
+            set_last(t, slot, m.toa_ns);
             let u = col(&t.updates, slot, 0).saturating_add(1);
             put(&mut t.updates, slot, u);
             let h = col(&t.hits, slot, 0).saturating_add(1);
@@ -632,7 +667,7 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
             note_category(t, slot, m);
             ring_clear(t, slot);
             ring_push(t, slot, m);
-            put(&mut t.last_ns, slot, m.toa_ns);
+            set_last(t, slot, m.toa_ns);
             put(&mut t.hits, slot, 1);
             put(&mut t.updates, slot, 1);
             t.stats.applied += 1;
@@ -711,7 +746,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
             newest = lm.toa_ns;
         }
     }
-    put(&mut t.last_ns, slot, newest);
+    set_last(t, slot, newest);
     let mut f = col(&t.cur, slot, blank_filter());
     f.rej_h = rej_h;
     f.rej_v = rej_v;
@@ -823,12 +858,13 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
         .saturating_mul(t.cfg.expected_interval_ns);
     // Past the newest update plus the drop age every track is gone and a tick emits nothing: the
     // ticks after that are jumped over, with one sweep, so a long gap costs no more than the
-    // drop age does.
-    let newest = (0..t.high)
-        .filter(|&s| col(&t.state, s, FREE) != FREE)
-        .map(|s| col(&t.last_ns, s, 0))
-        .max();
-    let useful = newest.map_or(i64::MIN, |n| n.saturating_add(t.cfg.drop_after_ns));
+    // drop age does. The newest update is the kept bound, not a scan of the slots: it can be
+    // newer than any live track's (that one ended), which jumps less, never over a live row.
+    let useful = if t.newest_update_ns == i64::MIN {
+        i64::MIN
+    } else {
+        t.newest_update_ns.saturating_add(t.cfg.drop_after_ns)
+    };
     let emit_to = limit_ns.min(useful);
     while t.next_tick_ns <= emit_to {
         let tick = t.next_tick_ns;

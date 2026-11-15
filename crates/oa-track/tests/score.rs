@@ -397,6 +397,31 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
 }
 
+// REQ: OA-TRK-171
+#[test]
+fn the_real_clip_tracker_run_has_the_pinned_digest() {
+    let Ok(path) = std::env::var("OPENATCA_ADSB_CLIP") else {
+        eprintln!("skipped: OPENATCA_ADSB_CLIP not set");
+        return;
+    };
+    let Ok(clip) = oa_bench::input::load_adsb(std::path::Path::new(&path)) else {
+        eprintln!("skipped: {path} unreadable");
+        return;
+    };
+    let (a, _, _) = split_reports(&clip.reports);
+    let (meas, _) = adsb_measurements(&a, &AdsbConfig::default());
+    let iv = interval_stats(&meas).unwrap();
+    let run = run_tracker(&meas, &scoring_config(&DEFAULT_CONFIG, &iv)).unwrap();
+    println!(
+        "tracker clip digest {} rows {} ticks {} skipped {}",
+        run.digest, run.stats.applied, run.stats.ticks, run.stats.ticks_skipped
+    );
+    assert_eq!(run.digest, PINNED_TRACKER_CLIP_DIGEST);
+}
+
+const PINNED_TRACKER_CLIP_DIGEST: &str =
+    "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962";
+
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.
 fn one_shot(

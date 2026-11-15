@@ -370,7 +370,7 @@ fn section_base(
             if sensors == Sensors::Mixed && v.registration {
                 if let Some((st, hist)) = cell.run.reg.first() {
                     reg_lines.push(format!(
-                        "    world {}: est range {:+.1} m (sigma {:.1}), az {:+.4} deg (sigma {:.4}); true {:+.1} m, {:+.4} deg; used {} of {} eligible-or-rejected residuals ({} awaiting references, {} disagreeing with the other references, {} restarts on a shift); {} published estimates",
+                        "    world {}: est range {:+.1} m (sigma {:.1}), az {:+.4} deg (sigma {:.4}); true {:+.1} m, {:+.4} deg; used {} of {} eligible-or-rejected residuals ({} awaiting references, {} disagreeing with the other references, {} ignored for want of a reference slot, {} restarts on a shift); {} published estimates",
                         1 + w,
                         st.range_m,
                         st.var_range_m2.sqrt(),
@@ -382,8 +382,24 @@ fn section_base(
                         st.used + st.rejected,
                         st.building,
                         st.inconsistent,
+                        st.ignored,
                         st.resets,
                         hist.len()
+                    ));
+                    let fs = &cell.run.fstats;
+                    let flagged = cell
+                        .run
+                        .out
+                        .flags
+                        .iter()
+                        .filter(|f| **f & oa_track::O_RADAR_DISAGREES != 0)
+                        .count();
+                    reg_lines.push(format!(
+                        "    world {}: radar contradicts an ADS-B track: {} Mode S plots outside the wide gate of their address's track ({} marked a live track), {} output rows carry the flag",
+                        1 + w,
+                        fs.hard_mismatch,
+                        fs.radar_disagree,
+                        flagged
                     ));
                 }
             }
