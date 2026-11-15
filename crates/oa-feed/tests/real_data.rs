@@ -29,8 +29,8 @@ fn convert(src: &Path, dir: &Path, feed: &str) -> Vec<PathBuf> {
         off += took;
         while let Some(ev) = reader.next() {
             if let Ok(f) = ev {
-                rec.write_frame(f.raw, f.recv_unix_ns.div_euclid(1_000_000_000))
-                    .unwrap();
+                let secs = f.recv_unix_ns.div_euclid(1_000_000_000);
+                rec.write_frame(f.raw, secs, secs).unwrap();
             }
         }
         assert!(took > 0);

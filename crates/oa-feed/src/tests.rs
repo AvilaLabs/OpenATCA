@@ -884,7 +884,10 @@ fn recorder_rotates_caps_and_never_deletes() {
     let mut rec = Recorder::open(&dir, "scds-test", 250, 150 + 700, Format::Raw).unwrap();
     let mut outcomes = Vec::new();
     for i in 0..10 {
-        outcomes.push(rec.write_frame(&f, 1_700_000_000 + i / 3).unwrap());
+        outcomes.push(
+            rec.write_frame(&f, 1_700_000_000 + i / 3, 1_700_000_000 + i / 3)
+                .unwrap(),
+        );
     }
     assert_eq!(
         outcomes.iter().filter(|o| **o == Outcome::Written).count(),
@@ -1044,7 +1047,7 @@ fn compressed_recording_names_and_content() {
     let all: Vec<u8> = frames.iter().flat_map(|f| f.1.clone()).collect();
     let mut rec = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
     for (secs, f) in &frames {
-        assert_eq!(rec.write_frame(f, *secs).unwrap(), Outcome::Written);
+        assert_eq!(rec.write_frame(f, *secs, *secs).unwrap(), Outcome::Written);
     }
     rec.finish().unwrap();
     assert_eq!(
@@ -1067,10 +1070,13 @@ fn compressed_recording_names_and_content() {
     // A second recorder in the same second gets the next number, and name order is creation
     // order (OA-FEED-019); raw files keep `.oaf`.
     let mut again = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
-    again.write_frame(&frames[0].1, 1_700_000_000).unwrap();
+    again
+        .write_frame(&frames[0].1, 1_700_000_000, 1_700_000_000)
+        .unwrap();
     again.finish().unwrap();
     let mut raw = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Raw).unwrap();
-    raw.write_frame(&frames[0].1, 1_700_000_000).unwrap();
+    raw.write_frame(&frames[0].1, 1_700_000_000, 1_700_000_000)
+        .unwrap();
     raw.finish().unwrap();
     assert_eq!(
         files_in(&dir),
@@ -1098,7 +1104,7 @@ fn compressed_recording_is_flushed_every_second_and_on_exit() {
     let mut written: Vec<u8> = Vec::new();
     let mut last_flush_idx = 0usize;
     for (i, (secs, f)) in frames.iter().enumerate() {
-        rec.write_frame(f, *secs).unwrap();
+        rec.write_frame(f, *secs, *secs).unwrap();
         written.extend(f);
         // A crash now leaves this file: read it as it lies on disk, without finishing.
         let on_disk = std::fs::read(path(&dir)).unwrap();
@@ -1177,7 +1183,7 @@ fn compressed_rotation_and_cap_count_bytes_on_disk() {
     assert_eq!(rec.total_bytes(), 1500);
     let mut stopped_at = None;
     for (i, (secs, f)) in frames.iter().enumerate() {
-        match rec.write_frame(f, *secs).unwrap() {
+        match rec.write_frame(f, *secs, *secs).unwrap() {
             Outcome::Written => {}
             Outcome::StoppedNow => {
                 assert!(stopped_at.is_none());
@@ -1260,7 +1266,7 @@ fn record_gz(
     for &t in secs {
         let len = u32::from_le_bytes(frames[off + 32..off + 36].try_into().unwrap()) as usize;
         let n = HEADER_LEN + len + TRAILER_LEN;
-        rec.write_frame(&frames[off..off + n], t).unwrap();
+        rec.write_frame(&frames[off..off + n], t, t).unwrap();
         off += n;
     }
     assert_eq!(off, frames.len());
@@ -1355,7 +1361,7 @@ fn crashed_and_damaged_compressed_files_replay_what_is_good() {
     for &t in &secs {
         let len = u32::from_le_bytes(stream[off + 32..off + 36].try_into().unwrap()) as usize;
         let n = HEADER_LEN + len + TRAILER_LEN;
-        rec.write_frame(&stream[off..off + n], t).unwrap();
+        rec.write_frame(&stream[off..off + n], t, t).unwrap();
         off += n;
         lens.push(off);
     }
@@ -1416,4 +1422,40 @@ fn crashed_and_damaged_compressed_files_replay_what_is_good() {
     ));
     assert_eq!(r.health.messages, 150);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-033
+#[test]
+fn flush_and_file_name_follow_local_clock_not_frame_stamp() {
+    let dir = tmpdir("localclock");
+    let mut rec = Recorder::open(&dir, "f", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    let local = 1_700_000_000i64;
+    let far = local + 10_000_000;
+    let frames = timed_frames(4, local, 1000);
+    // The first frame carries a stamp far in the future; local time is sane.
+    rec.write_frame(&frames[0].1, far, local).unwrap();
+    for (i, (_, f)) in frames.iter().enumerate().skip(1) {
+        rec.write_frame(f, local + i as i64, local + i as i64)
+            .unwrap();
+    }
+    let names = files_in(&dir);
+    assert!(names[0].contains(&utc_stamp(local)), "{names:?}");
+    let on_disk = std::fs::read(dir.join(&names[0])).unwrap();
+    let (out, _) = gunzip_all(&on_disk);
+    let all: Vec<u8> = frames.iter().flat_map(|(_, f)| f.clone()).collect();
+    assert_eq!(out.len(), all.len(), "the last second's frame was flushed");
+    assert_eq!(rec.implausible_stamps(), 1);
+    rec.finish().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-FEED-034
+#[test]
+fn sequence_gap_total_saturates() {
+    let mut h = FeedHealth::new();
+    let t = 1000 * SEC;
+    for seq in [0, u64::MAX - 1, 5, u64::MAX] {
+        observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"<a/>"), t);
+    }
+    assert!(h.missing >= u64::MAX - 2);
 }

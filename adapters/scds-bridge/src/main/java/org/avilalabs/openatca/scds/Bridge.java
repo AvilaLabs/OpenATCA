@@ -3,6 +3,7 @@ package org.avilalabs.openatca.scds;
 
 import com.solacesystems.jms.SolConnectionFactory;
 import com.solacesystems.jms.SolJmsUtility;
+import com.solacesystems.jms.message.SolMessage;
 import java.io.BufferedOutputStream;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -64,6 +65,7 @@ public final class Bridge {
     System.setOut(ERR);
     // The Solace client logs through java.util.logging at INFO; keep stderr to our own events.
     java.util.logging.Logger.getLogger("").setLevel(java.util.logging.Level.WARNING);
+    scrubLibraryLogs();
     EnvFile env;
     try {
       env = EnvFile.read(Path.of(args[0]));
@@ -182,7 +184,22 @@ public final class Bridge {
     String id = clean(m.getJMSMessageID());
     byte[] payload;
     if (m instanceof TextMessage tm) {
-      String text = tm.getText() == null ? "" : tm.getText();
+      // getText() builds the whole string, so an oversize message is refused from its received
+      // size first; the exact UTF-8 check below then covers the rest.
+      long wire = receivedSize(m);
+      if (wire > Frame.MAX_PAYLOAD + HEADER_ALLOWANCE) {
+        reject("oversize", wire, id, flags, ts, recvNs);
+        return;
+      }
+      String text;
+      try {
+        text = tm.getText() == null ? "" : tm.getText();
+      } catch (OutOfMemoryError e) {
+        // Still refused and acknowledged by the caller, so the broker does not redeliver it
+        // into another out-of-memory restart.
+        reject("oversize", wire, id, flags, ts, recvNs);
+        return;
+      }
       // The real UTF-8 length (up to 3 bytes per char), counted without a copy, so an oversize
       // message is refused before it is encoded; a message that fits is encoded exactly once.
       long utf8 = utf8Length(text);
@@ -209,6 +226,54 @@ public final class Bridge {
       return;
     }
     write(Frame.KIND_MESSAGE, flags, ts, recvNs, payload);
+  }
+
+  /** Bytes of message framing and headers that may sit on top of the body in the received size. */
+  static final long HEADER_ALLOWANCE = 64 * 1024;
+
+  /** Size of the received message as the client counts it, without reading the body; -1 if unknown. */
+  private static long receivedSize(Message m) {
+    if (m instanceof SolMessage sm) {
+      try {
+        return sm.getMessageSize();
+      } catch (JMSException | RuntimeException e) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Replaces the client library's log handlers with one that writes through {@link #clean}, so a
+   * connection property or credential in library text never reaches stderr.
+   */
+  private static void scrubLibraryLogs() {
+    java.util.logging.Logger root = java.util.logging.Logger.getLogger("");
+    for (java.util.logging.Handler h : root.getHandlers()) root.removeHandler(h);
+    java.util.logging.Handler scrub =
+        new java.util.logging.Handler() {
+          @Override
+          public void publish(java.util.logging.LogRecord r) {
+            if (r == null || !isLoggable(r)) return;
+            String msg;
+            try {
+              msg = new java.util.logging.SimpleFormatter().formatMessage(r);
+            } catch (RuntimeException e) {
+              msg = "";
+            }
+            String thrown = r.getThrown() == null ? "" : r.getThrown().getClass().getSimpleName();
+            log("event=library level=" + r.getLevel() + " logger=" + clean(r.getLoggerName()) + " detail=\""
+                + clean(msg) + "\" thrown=" + thrown);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    scrub.setLevel(java.util.logging.Level.WARNING);
+    root.addHandler(scrub);
   }
 
   /** Length of `s` in UTF-8, matching String.getBytes (a lone surrogate encodes as '?'). */

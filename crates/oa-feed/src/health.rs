@@ -220,8 +220,8 @@ fn observe_seq(h: &mut FeedHealth, seq: u64) {
     if h.frames == 0 || seq == h.seq_next {
         // First frame, or exactly the expected one.
     } else if seq > h.seq_next {
-        h.gaps += 1;
-        h.missing += seq - h.seq_next;
+        h.gaps = h.gaps.saturating_add(1);
+        h.missing = h.missing.saturating_add(seq - h.seq_next);
     } else if seq == h.seq_last {
         h.duplicates += 1;
         return;
