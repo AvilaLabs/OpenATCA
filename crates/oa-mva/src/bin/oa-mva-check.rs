@@ -248,6 +248,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// Tag for a sector whose terrain scan met a gap.
+fn incomplete_note(c: &clearance::SectorClearance) -> &'static str {
+    match (c.tiles_missing > 0, c.terrain_nodata > 0) {
+        (true, true) => " [tiles missing, nodata: margin an upper bound]",
+        (true, false) => " [tiles missing]",
+        (false, true) => " [nodata: margin an upper bound]",
+        (false, false) => "",
+    }
+}
+
 fn run_clearance(
     m: &Model,
     tdir: &std::path::Path,
@@ -277,7 +287,7 @@ fn run_clearance(
         let mut mg: Vec<f64> = res
             .iter()
             .filter(|c| c.set == set.name())
-            .filter(|c| c.tiles_missing == 0)
+            .filter(|c| c.terrain_complete())
             .filter_map(clearance::margin_ft)
             .collect();
         mg.sort_by(f64::total_cmp);
@@ -294,13 +304,34 @@ fn run_clearance(
             .filter(|&&x| x < clearance::REQUIRED_CLEARANCE_FT - clearance::ROUNDING_TOLERANCE_FT)
             .count();
         println!(
-            "  {} margin over highest terrain/obstacle, ft, {} sectors with full terrain: min {:.0}, p5 {:.0}, p25 {:.0}, median {:.0}, p75 {:.0}, p95 {:.0}, max {:.0}; under 1000 ft: {under}; under 950 ft: {under950}; negative: {}",
+            "  {} margin over highest terrain/obstacle, ft, {} sectors with complete terrain: min {:.0}, p5 {:.0}, p25 {:.0}, median {:.0}, p75 {:.0}, p95 {:.0}, max {:.0}; under 1000 ft: {under}; under 950 ft: {under950}; negative: {}",
             set.name(), mg.len(), p(0.0), p(0.05), p(0.25), p(0.5), p(0.75), p(0.95), p(1.0),
             mg.iter().filter(|&&x| x < 0.0).count()
         );
     }
-    let incomplete = res.iter().filter(|c| c.tiles_missing > 0).count();
-    println!("  sectors with missing terrain tiles (margin not trusted): {incomplete}");
+    let missing = res.iter().filter(|c| c.tiles_missing > 0).count();
+    println!("  sectors with missing terrain tiles (margin not trusted): {missing}");
+    let holed: Vec<&clearance::SectorClearance> =
+        res.iter().filter(|c| c.terrain_nodata > 0).collect();
+    println!(
+        "  sectors with terrain nodata samples (terrain max is a lower bound, margin an upper bound): {}",
+        holed.len()
+    );
+    for c in holed {
+        println!(
+            "    {} {} {}: {} nodata samples, margin {} ft (upper bound){}",
+            c.facility,
+            c.set,
+            c.sector_id,
+            c.terrain_nodata,
+            clearance::margin_ft(c).map_or("none".to_string(), |x| format!("{x:.0}")),
+            if c.tiles_missing > 0 {
+                " [tiles missing]"
+            } else {
+                ""
+            }
+        );
+    }
     let nodata: u64 = res.iter().map(|c| c.terrain_nodata).sum();
     println!("  terrain nodata samples inside sectors: {nodata}");
     let mut neg: Vec<&clearance::SectorClearance> = res
@@ -325,11 +356,7 @@ fn run_clearance(
             c.obstacle_max_ft
                 .map_or("none".to_string(), |t| t.to_string()),
             clearance::margin_ft(c).unwrap_or(0.0),
-            if c.tiles_missing > 0 {
-                " [tiles missing]"
-            } else {
-                ""
-            }
+            incomplete_note(c)
         );
     }
     let tol = clearance::ROUNDING_TOLERANCE_FT;
@@ -378,11 +405,7 @@ fn run_clearance(
             c.obstacle_peak
                 .as_ref()
                 .map_or(String::new(), |p| format!("{} {}", p.0, p.1.trim())),
-            if c.tiles_missing > 0 {
-                " [tiles missing]"
-            } else {
-                ""
-            }
+            incomplete_note(c)
         );
     }
     Ok(())

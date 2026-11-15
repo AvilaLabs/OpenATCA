@@ -3,8 +3,8 @@
 //! small or negative margin is a finding about the data (or about the datums), not a bug here.
 //!
 //! * Terrain: every 3DEP 1 arc-second sample whose centre is inside the sector (holes
-//!   excluded), found by scanning each grid row between the sector's edges, one tile in memory
-//!   at a time. Elevations are metres on NAVD88 and are taken as MSL (the difference is under
+//!   and non-finite samples excluded and counted as nodata), found by scanning each grid row
+//!   between the sector's edges, one tile in memory at a time. Elevations are metres on NAVD88 and are taken as MSL (the difference is under
 //!   a metre at these latitudes). 3DEP is bare earth: structures come from the DOF.
 //! * Obstacles: every DOF obstacle inside the sector (an edge counts as inside), by its AMSL
 //!   height in feet, verified or not.
@@ -52,8 +52,16 @@ pub struct SectorClearance {
     pub obstacles: u32,
 }
 
+impl SectorClearance {
+    /// The terrain scan met no gap: no missing tile and no nodata sample. Otherwise the terrain
+    /// maximum is a lower bound and [`margin_ft`] an upper bound.
+    pub fn terrain_complete(&self) -> bool {
+        self.tiles_missing == 0 && self.terrain_nodata == 0
+    }
+}
+
 /// Margin of a sector, feet: minimum altitude less the highest terrain or obstacle. `None` when
-/// the sector had neither.
+/// the sector had neither. An upper bound when [`SectorClearance::terrain_complete`] is false.
 pub fn margin_ft(c: &SectorClearance) -> Option<f64> {
     let t = c.terrain_max_ft;
     let o = c.obstacle_max_ft.map(f64::from);
@@ -150,7 +158,7 @@ pub(crate) fn scan_grid(g: &oa_tiff::Grid, edges: &[(f64, f64, f64, f64)], acc: 
             let mut c = ca;
             while c <= cb {
                 match g.elev.get(base + c as usize) {
-                    Some(&v) if v.is_nan() => acc.nodata += 1,
+                    Some(&v) if !v.is_finite() => acc.nodata += 1,
                     Some(&v) => {
                         acc.samples += 1;
                         if v > acc.max_m {

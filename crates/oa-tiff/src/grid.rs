@@ -131,14 +131,15 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-/// The sample at (`col`, `row`); NaN is nodata. `None` outside the grid.
+/// The sample at (`col`, `row`); NaN is nodata, and a non-finite sample reads as NaN. `None`
+/// outside the grid.
 pub fn grid_sample(g: &Grid, col: u32, row: u32) -> Option<f32> {
     if col >= g.width || row >= g.height {
         return None;
     }
     g.elev
         .get(row as usize * g.width as usize + col as usize)
-        .copied()
+        .map(|&v| if v.is_finite() { v } else { f32::NAN })
 }
 
 pub(crate) fn valid_coord(lat: f64, lon: f64) -> bool {
@@ -195,7 +196,7 @@ fn grid_elevation_here(g: &Grid, lat: f64, lon: f64) -> Elevation {
     let corner = |dc: u32, dr: u32| grid_sample(g, c0 + dc, r0 + dr);
     match (corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)) {
         (Some(a), Some(b), Some(c), Some(d))
-            if !(a.is_nan() || b.is_nan() || c.is_nan() || d.is_nan()) =>
+            if a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite() =>
         {
             let top = f64::from(a) * (1.0 - tx) + f64::from(b) * tx;
             let bot = f64::from(c) * (1.0 - tx) + f64::from(d) * tx;
@@ -277,7 +278,7 @@ fn elevation_here(tiles: &[Grid], lat: f64, lon: f64) -> Elevation {
     };
     match (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0), at(1.0, 1.0)) {
         (Some(a), Some(b), Some(c), Some(d)) => {
-            if a.is_nan() || b.is_nan() || c.is_nan() || d.is_nan() {
+            if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
                 return Elevation::NoData;
             }
             let top = f64::from(a) * (1.0 - tx) + f64::from(b) * tx;
@@ -337,7 +338,7 @@ fn scan(
                 continue;
             }
             match grid_sample(g, c, r) {
-                Some(v) if !v.is_nan() => {
+                Some(v) if v.is_finite() => {
                     acc.samples += 1;
                     if acc.peak.is_none_or(|p| v > p.metres) {
                         acc.peak = Some(Peak {

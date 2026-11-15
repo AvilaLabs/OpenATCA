@@ -1444,8 +1444,8 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-TIFF-008** Accepts only geographic rasters in NAD83 (4269) or WGS 84 (4326) with axis-aligned
   pixels, one tiepoint and a positive finite pixel scale inside the valid latitude and longitude
   range; missing or inconsistent georeferencing and `ModelTransformation` are refused.
-- **OA-TIFF-009** Turns the `GDAL_NODATA` value and any NaN into NaN samples and counts them; an
-  unparsable nodata text is refused.
+- **OA-TIFF-009** Turns the `GDAL_NODATA` value and any non-finite sample (NaN, infinity) into
+  NaN samples and counts them; an unparsable nodata text is refused.
 - **OA-TIFF-010** Enforces stated limits (file, dimension, pixel count, segment, tag value count,
   IFD entries, ASCII length) and never panics: every truncation, byte inversion and seeded random
   input gives a grid or an error; a repeated tag is refused.
@@ -1521,6 +1521,15 @@ frame of their feed has been fed (as the ADS-B table is).
   other value is refused with a typed `Unsupported` error rather than placing terrain wrongly.
 - **OA-TIFF-080** A point at exactly +180 or -180 degrees longitude (the same meridian) gets the
   same elevation answer from a tile that holds either alias.
+- **OA-TIFF-081** A Float32 `GDAL_NODATA` sentinel is parsed to f32 and compared with the samples
+  in that type, so a sample equal to the sentinel is nodata (`-123.456`, `-3.4028235e38`).
+- **OA-TIFF-082** A non-finite sample in a file (+/-infinity) is nodata and counted, and a
+  bilinear query next to it answers `NoData`, never a known elevation.
+- **OA-TIFF-083** A non-finite sample in a `Grid` built by a caller reads as NaN through
+  `grid_sample`, and the point and polygon queries treat it as nodata; no query returns
+  `Metres(NaN)` or an infinite peak.
+- **OA-TIFF-084** A conservative maximum over samples that are non-finite is `Incomplete`
+  with those samples counted as nodata, never `Complete`.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -1971,7 +1980,8 @@ decoder is OA-GRIB-021.
   matched, mismatched, missing from the PDF and extra on the PDF are reported separately.
 - **OA-MVA-014** Terrain maxima take only the samples whose centres lie inside the sector
   polygon, count no-data samples separately, and the margin is the minimum altitude less the
-  higher of the terrain and obstacle maxima.
+  higher of the terrain and obstacle maxima; it is an upper bound when the sector has a nodata
+  sample or a missing tile (OA-MVA-075).
 - **OA-MVA-015** On the real FAA files (`OPENATCA_DATA/raw/mva`; the test prints the counts and
   skips when the data is absent) all 35 messages load with no refusal: 423 sectors, 604 rings,
   altitudes 2,000 to 4,300 ft, and queries at known places answer.
@@ -2001,6 +2011,11 @@ decoder is OA-GRIB-021.
   distance and radius queries give the same answer for a point at +180 and at -180, and a sector
   on either side of the seam is found from either alias (a sector whose own extent crosses the
   seam is refused at load by the extent limit).
+- **OA-MVA-075** A sector whose terrain scan met any nodata sample or missing tile is incomplete
+  (`terrain_complete` is false): its margin is kept as an upper bound, it is left out of the
+  complete-terrain distribution, and `oa-mva-check` lists each such sector with its nodata count.
+- **OA-MVA-076** A non-finite terrain sample is counted as nodata in the sector scan, never as a
+  known elevation; a sector with only such samples has no terrain maximum.
 
 ## M2 — Weather inputs
 

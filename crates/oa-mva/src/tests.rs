@@ -1029,6 +1029,81 @@ fn terrain_scan_takes_samples_inside_the_polygon_only() {
     assert_eq!(clearance::margin_ft(&mk(None, None, 2500)), None);
 }
 
+// REQ: OA-MVA-075
+#[test]
+fn sector_with_nodata_is_incomplete_and_margin_is_upper_bound() {
+    let mut c = clearance::SectorClearance {
+        sector: SectorIx(0),
+        facility: String::new(),
+        set: "FUS3",
+        sector_id: String::new(),
+        min_alt_ft: 5000,
+        terrain_max_ft: Some(1000.0),
+        terrain_peak: None,
+        terrain_samples: 8,
+        terrain_nodata: 1,
+        tiles_missing: 0,
+        obstacle_max_ft: None,
+        obstacle_peak: None,
+        obstacles: 0,
+    };
+    assert!(!c.terrain_complete(), "nodata {}", c.terrain_nodata);
+    // The known maximum is kept: the margin is an upper bound.
+    assert_eq!(clearance::margin_ft(&c), Some(4000.0));
+    c.terrain_nodata = 0;
+    assert!(c.terrain_complete());
+    c.tiles_missing = 1;
+    assert!(!c.terrain_complete());
+}
+
+// REQ: OA-MVA-076
+#[test]
+fn non_finite_terrain_samples_are_nodata_in_the_scan() {
+    let w = 10u32;
+    let g = oa_tiff::Grid {
+        width: w,
+        height: 10,
+        lon0: 20.0,
+        lat0: 10.0,
+        dlon: 0.1,
+        dlat: 0.1,
+        elev: (0..100)
+            .map(|i| match i {
+                23 => f32::NEG_INFINITY,
+                24 => f32::INFINITY,
+                _ => i as f32,
+            })
+            .collect(),
+        nodata_count: 0,
+        point_registered: true,
+        crs: 4326,
+        vertical_cs: None,
+    };
+    let edges = vec![(20.15, 9.65, 20.15, 9.95), (20.45, 9.65, 20.45, 9.95)];
+    let mut acc = clearance::Acc {
+        max_m: f32::MIN,
+        peak: (0.0, 0.0),
+        samples: 0,
+        nodata: 0,
+    };
+    clearance::scan_grid(&g, &edges, &mut acc);
+    assert_eq!((acc.samples, acc.nodata), (7, 2));
+    assert!(acc.max_m.is_finite());
+    // A sector of only -inf has no known terrain.
+    let g2 = oa_tiff::Grid {
+        elev: vec![f32::NEG_INFINITY; 100],
+        ..g
+    };
+    let mut acc = clearance::Acc {
+        max_m: f32::MIN,
+        peak: (0.0, 0.0),
+        samples: 0,
+        nodata: 0,
+    };
+    clearance::scan_grid(&g2, &edges, &mut acc);
+    assert_eq!((acc.samples, acc.nodata), (0, 9));
+}
+
 fn one_sq(name: &'static str, alt: i32, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Fix> {
     vec![Fix {
         name,
