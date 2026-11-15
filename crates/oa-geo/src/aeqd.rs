@@ -14,6 +14,10 @@
 //! from the origin keeps its scale, the tangential one is scaled by `sin c / c`, and the axes
 //! are turned by the meridian convergence, which is large near a pole).
 
+use crate::small::{
+    angle_from_sin_cos, atan_small, sin_cos_near_zero, sin_cos_small, ATAN_LIMIT, SIN_COS_LIMIT,
+};
+
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
 
@@ -28,32 +32,100 @@ pub struct Frame {
     r: f64,
 }
 
+/// The sphere's radius at a latitude with sine `s`: `sqrt(M N) = a sqrt(1 - e2) / w2`.
+fn radius_at(s: f64) -> f64 {
+    let w2 = 1.0 - WGS84_E2 * s * s;
+    WGS84_A * (1.0 - WGS84_E2).sqrt() / w2
+}
+
 /// A frame about `(lat_deg, lon_deg)`.
 pub fn frame_new(lat_deg: f64, lon_deg: f64) -> Frame {
     let lat0 = lat_deg.to_radians();
     let s = oa_math::sin(lat0);
-    let w2 = 1.0 - WGS84_E2 * s * s;
-    // sqrt(M N) = a sqrt(1 - e2) / w2.
-    let r = WGS84_A * (1.0 - WGS84_E2).sqrt() / w2;
     Frame {
         lat0,
         lon0: lon_deg.to_radians(),
         sin0: s,
         cos0: oa_math::cos(lat0),
-        r,
+        r: radius_at(s),
     }
+}
+
+/// The sine and cosine of a frame's origin latitude, `[sin lat, cos lat]`, for
+/// [`frame_from_trig`].
+pub fn frame_trig(f: &Frame) -> [f64; 2] {
+    [f.sin0, f.cos0]
+}
+
+/// A frame about `(lat_deg, lon_deg)` from the sine and cosine of its latitude, as [`frame_trig`]
+/// gave them: the frame a caller that keeps them rebuilds without a library call.
+pub fn frame_from_trig(lat_deg: f64, lon_deg: f64, t: [f64; 2]) -> Frame {
+    Frame {
+        lat0: lat_deg.to_radians(),
+        lon0: lon_deg.to_radians(),
+        sin0: t[0],
+        cos0: t[1],
+        r: radius_at(t[0]),
+    }
+}
+
+/// A point on the earth as [`unproject_fix`] found it: its degrees, and (where the chart's
+/// common case was taken) the sine and cosine of its latitude, which carry over to a frame made
+/// at a nearby origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fix {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    /// The latitude in radians, as computed (not through the degrees).
+    lat_rad: f64,
+    lat_trig: Option<(f64, f64)>,
+}
+
+/// A frame about `(lat_deg, lon_deg)`, an origin within a quarter radian of `fix` in latitude: the
+/// origin's sine and cosine are turned from the fix's by the small difference of angle, with no
+/// library call. A fix without them, or a distant origin, takes [`frame_new`].
+pub fn frame_at_fix(fix: &Fix, lat_deg: f64, lon_deg: f64) -> Frame {
+    if let Some((s, c)) = fix.lat_trig {
+        // The angle is taken in radians as found: a trip through degrees and back is not exact,
+        // and its fixed bias would add up over many recentrings.
+        let e = lat_deg.to_radians() - fix.lat_rad;
+        if e.abs() <= SIN_COS_LIMIT {
+            let (se, ce) = sin_cos_small(e);
+            let sin0 = s * ce + c * se;
+            return Frame {
+                lat0: lat_deg.to_radians(),
+                lon0: lon_deg.to_radians(),
+                sin0,
+                cos0: c * ce - s * se,
+                r: radius_at(sin0),
+            };
+        }
+    }
+    frame_new(lat_deg, lon_deg)
 }
 
 /// The angle at the sphere's centre between the origin and a point, radians.
 pub fn frame_angle(f: &Frame, lat_deg: f64, lon_deg: f64) -> f64 {
     let (s_e, s_n, cosc) = parts(f, lat_deg.to_radians(), lon_deg.to_radians());
-    oa_math::atan2((s_e * s_e + s_n * s_n).sqrt(), cosc)
+    angle_from_sin_cos((s_e * s_e + s_n * s_n).sqrt(), cosc)
+}
+
+/// Sine and cosine of a latitude, turned from the origin's by the small difference of angle
+/// where the origin is clear of the poles (the cosine stays well above rounding).
+fn lat_trig(f: &Frame, lat: f64) -> (f64, f64) {
+    let d = lat - f.lat0;
+    if d.abs() <= SIN_COS_LIMIT && f.sin0.abs() <= 0.9 {
+        let (sd, cd) = sin_cos_small(d);
+        (f.sin0 * cd + f.cos0 * sd, f.cos0 * cd - f.sin0 * sd)
+    } else {
+        oa_math::sin_cos(lat)
+    }
 }
 
 fn parts(f: &Frame, lat: f64, lon: f64) -> (f64, f64, f64) {
     let dl = lon - f.lon0;
-    let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
-    let (sd, cd) = (oa_math::sin(dl), oa_math::cos(dl));
+    let (sl, cl) = lat_trig(f, lat);
+    let (sd, cd) = sin_cos_near_zero(dl);
     let s_e = cl * sd;
     let s_n = f.cos0 * sl - f.sin0 * cl * cd;
     let cosc = f.sin0 * sl + f.cos0 * cl * cd;
@@ -72,7 +144,7 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     let k = if sinc < 1e-12 {
         1.0
     } else {
-        oa_math::atan2(sinc, cosc) / sinc
+        angle_from_sin_cos(sinc, cosc) / sinc
     };
     (f.r * k * s_e, f.r * k * s_n)
 }
@@ -81,6 +153,18 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
 /// distance from the origin is not finite or is past half the sphere's circumference: the chart
 /// does not reach there, and a larger distance would wrap round onto some other place.
 pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
+    unproject_fix(f, x, y).map(|p| (p.lat_deg, p.lon_deg))
+}
+
+/// [`unproject`] keeping what the computation knew about the point's latitude and longitude, for
+/// [`frame_at_fix`].
+///
+/// Within a quarter radian of the origin (about 1,600 km) and clear of the poles, the point's
+/// latitude is the origin's plus a small angle, found from its sine and cosine by the half-angle
+/// arctangent series, and the longitude's offset likewise from `tan(d / 2) = X / (Y + h)` (`h` the
+/// length of `(X, Y)`); the point's `sin` and `cos` come out of the same quantities. Elsewhere
+/// the library `asin` and `atan2` are used. The results agree to rounding.
+pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
     // Each component is bounded before squaring, so the sum cannot overflow; `sqrt` is exactly
     // rounded on every platform, unlike a library `hypot`.
     let half = f.r * std::f64::consts::PI * (1.0 + 1e-12);
@@ -92,13 +176,47 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
         return None;
     }
     if rho < 1e-9 {
-        return Some((f.lat0.to_degrees(), wrap_deg(f.lon0.to_degrees())));
+        return Some(Fix {
+            lat_deg: f.lat0.to_degrees(),
+            lon_deg: wrap_deg(f.lon0.to_degrees()),
+            lat_rad: f.lat0,
+            lat_trig: Some((f.sin0, f.cos0)),
+        });
     }
     let c = rho / f.r;
-    let (sc, cc) = (oa_math::sin(c), oa_math::cos(c));
-    let lat = oa_math::asin((cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0));
-    let lon = f.lon0 + oa_math::atan2(x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
-    Some((lat.to_degrees(), wrap_deg(lon.to_degrees())))
+    let (sc, cc) = sin_cos_near_zero(c);
+    let sl = (cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0);
+    let (xs, ys) = (x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
+    if c <= SIN_COS_LIMIT && f.sin0.abs() <= 0.9 {
+        // `h = rho cos(lat)`; the latitude's offset from the origin's has sine
+        // `sl cos0 - cl sin0` and cosine `cl cos0 + sl sin0`.
+        let h = (xs * xs + ys * ys).sqrt();
+        let cl = h / rho;
+        let sd = sl * f.cos0 - cl * f.sin0;
+        let cd = cl * f.cos0 + sl * f.sin0;
+        let lat = f.lat0 + 2.0 * atan_small(sd / (1.0 + cd));
+        let t = xs / (ys + h);
+        let dlon = if ys > 0.0 && t.abs() <= ATAN_LIMIT {
+            2.0 * atan_small(t)
+        } else {
+            oa_math::atan2(xs, ys)
+        };
+        let lon = f.lon0 + dlon;
+        return Some(Fix {
+            lat_deg: lat.to_degrees(),
+            lon_deg: wrap_deg(lon.to_degrees()),
+            lat_rad: lat,
+            lat_trig: Some((sl, cl)),
+        });
+    }
+    let lat = oa_math::asin(sl);
+    let lon = f.lon0 + oa_math::atan2(xs, ys);
+    Some(Fix {
+        lat_deg: lat.to_degrees(),
+        lon_deg: wrap_deg(lon.to_degrees()),
+        lat_rad: lat,
+        lat_trig: None,
+    })
 }
 
 fn wrap_deg(d: f64) -> f64 {
@@ -128,13 +246,17 @@ fn cross(a: &V3, b: &V3) -> V3 {
     ]
 }
 
-/// The frame origin's east, north and up unit vectors in earth-fixed axes.
-fn basis(f: &Frame) -> [V3; 3] {
-    let (sl, cl) = oa_math::sin_cos(f.lon0);
+/// The rotation from the east, north, up axes at `from`'s origin to those at `to`'s: row `k`,
+/// column `j` is the dot product of `to`'s axis `k` with `from`'s axis `j`, which depends on the
+/// two latitudes and the difference of longitude only (the axes of the first at longitude 0 are
+/// `(0, 1, 0)`, `(-s, 0, c)`, `(c, 0, s)` for the sine `s` and cosine `c` of its latitude).
+fn axes_rotation(from: &Frame, to: &Frame) -> [V3; 3] {
+    let (s1, c1, s2, c2) = (from.sin0, from.cos0, to.sin0, to.cos0);
+    let (sd, cd) = sin_cos_near_zero(to.lon0 - from.lon0);
     [
-        [-sl, cl, 0.0],
-        [-f.sin0 * cl, -f.sin0 * sl, f.cos0],
-        [f.cos0 * cl, f.cos0 * sl, f.sin0],
+        [cd, sd * s1, -sd * c1],
+        [-s2 * sd, s1 * s2 * cd + c1 * c2, s1 * c2 - c1 * s2 * cd],
+        [c2 * sd, c1 * s2 - s1 * c2 * cd, c1 * c2 * cd + s1 * s2],
     ]
 }
 
@@ -144,14 +266,20 @@ fn basis(f: &Frame) -> [V3; 3] {
 /// along plane y. The radial direction is preserved by the projection and the tangential one is
 /// scaled by `sin c / c` (`c` the angle from the origin), so the displacements are exact.
 fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
-    let rho = oa_math::hypot(x, y);
+    // The plane position is bounded in every use (a chart point, a filter state); `hypot` only
+    // guards a component whose square could overflow.
+    let rho = if x.abs() < 1e150 && y.abs() < 1e150 {
+        (x * x + y * y).sqrt()
+    } else {
+        oa_math::hypot(x, y)
+    };
     let c = rho / f.r;
     let (sa, ca) = if rho < 1e-9 {
         (0.0, 1.0)
     } else {
         (x / rho, y / rho)
     };
-    let (sc, cc) = oa_math::sin_cos(c);
+    let (sc, cc) = sin_cos_near_zero(c);
     // Floored: the factor vanishes only at the origin's antipode, which the projection
     // does not map to one place.
     let k = if c < 1e-8 { 1.0 } else { (sc / c).max(1e-6) };
@@ -218,7 +346,7 @@ pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64
     let (_, cols2, _) = local(to, x2, y2);
     // `cols2` are the images of the plane steps; the plane components of a displacement `w`
     // are the solution of the 2 x 2 system through them (they are not orthonormal).
-    let (b1, b2) = (basis(from), basis(to));
+    let rot = axes_rotation(from, to);
     let g = |a: &V3, b: &V3| dot(a, b);
     let (g00, g01, g11) = (
         g(&cols2[0], &cols2[0]),
@@ -227,17 +355,8 @@ pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64
     );
     let det = g00 * g11 - g01 * g01;
     let column = |c: &V3| {
-        // The displacement in earth-fixed axes, then in the other frame's axes.
-        let w_ecef = [
-            c[0] * b1[0][0] + c[1] * b1[1][0] + c[2] * b1[2][0],
-            c[0] * b1[0][1] + c[1] * b1[1][1] + c[2] * b1[2][1],
-            c[0] * b1[0][2] + c[1] * b1[1][2] + c[2] * b1[2][2],
-        ];
-        let w = [
-            dot(&w_ecef, &b2[0]),
-            dot(&w_ecef, &b2[1]),
-            dot(&w_ecef, &b2[2]),
-        ];
+        // The displacement, in the other frame's axes.
+        let w = [dot(&rot[0], c), dot(&rot[1], c), dot(&rot[2], c)];
         let (h0, h1) = (dot(&cols2[0], &w), dot(&cols2[1], &w));
         ((g11 * h0 - g01 * h1) / det, (g00 * h1 - g01 * h0) / det)
     };
@@ -555,5 +674,144 @@ mod tests {
         assert!((c[0] - 1.0).abs() < 1e-9 && c[1].abs() < 1e-9 && (c[2] - 10000.0).abs() < 1e-9);
         let c = mat2_congruence(&[[2.0, 0.0], [0.0, 3.0]], &[1.0, 0.5, 4.0]);
         assert_eq!(c, [4.0, 3.0, 36.0]);
+    }
+
+    /// The chart's forward and inverse as they were before the small-angle series, from the
+    /// library functions only.
+    fn reference_project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
+        let (lat, dl) = (lat_deg.to_radians(), lon_deg.to_radians() - f.lon0);
+        let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
+        let (sd, cd) = (oa_math::sin(dl), oa_math::cos(dl));
+        let s_e = cl * sd;
+        let s_n = f.cos0 * sl - f.sin0 * cl * cd;
+        let cosc = f.sin0 * sl + f.cos0 * cl * cd;
+        let sinc = (s_e * s_e + s_n * s_n).sqrt();
+        let k = if sinc < 1e-12 {
+            1.0
+        } else {
+            oa_math::atan2(sinc, cosc) / sinc
+        };
+        (f.r * k * s_e, f.r * k * s_n)
+    }
+
+    fn reference_unproject(f: &Frame, x: f64, y: f64) -> (f64, f64) {
+        let rho = (x * x + y * y).sqrt();
+        let c = rho / f.r;
+        let (sc, cc) = (oa_math::sin(c), oa_math::cos(c));
+        let lat = oa_math::asin((cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0));
+        let lon = f.lon0 + oa_math::atan2(x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
+        (lat.to_degrees(), wrap_deg(lon.to_degrees()))
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn the_chart_agrees_with_the_library_form_at_every_latitude_and_range() {
+        let mut worst_deg = 0.0f64;
+        let mut worst_m = 0.0f64;
+        for lat0 in [-80.0, -64.0, -41.9, 0.0, 12.5, 41.9, 63.0, 66.0, 85.0, 89.9] {
+            for lon0 in [-179.9, -88.3, 0.0, 120.0, 179.95] {
+                let f = frame_new(lat0, lon0);
+                for k in 0..200 {
+                    // Positions out to 12,000 km, in every direction, past the series' range.
+                    let rho = 1.0 + 300.0 * f64::from(k * k);
+                    let a = 0.37 * f64::from(k);
+                    let (x, y) = (rho * a.cos(), rho * a.sin());
+                    let got = unproject(&f, x, y).unwrap();
+                    let want = reference_unproject(&f, x, y);
+                    let dlon = (got.1 - want.1 + 180.0).rem_euclid(360.0) - 180.0;
+                    worst_deg = worst_deg.max((got.0 - want.0).abs()).max(dlon.abs());
+                    let (px, py) = project(&f, got.0, got.1);
+                    let (qx, qy) = reference_project(&f, got.0, got.1);
+                    worst_m = worst_m.max((px - qx).abs()).max((py - qy).abs());
+                }
+            }
+        }
+        assert!(worst_deg < 2.0e-12, "{worst_deg} deg");
+        assert!(worst_m < 2.0e-6, "{worst_m} m");
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn a_frame_carried_through_a_hundred_thousand_recentrings_keeps_its_sines_and_cosines() {
+        let mut f = frame_new(41.9, -88.3);
+        let mut worst = 0.0f64;
+        let mut label = (419_000_000i32, -883_000_000i32);
+        for i in 0..100_000u32 {
+            let (a, b) = (1.3 * f64::from(i), 0.7 * f64::from(i));
+            let (x, y) = (300.0 * a.cos(), 300.0 * b.sin());
+            let fix = unproject_fix(&f, x, y).unwrap();
+            let lat_e7 = (fix.lat_deg * 1.0e7).round() as i32;
+            let lon_e7 = (fix.lon_deg * 1.0e7).round() as i32;
+            f = frame_at_fix(&fix, f64::from(lat_e7) / 1.0e7, f64::from(lon_e7) / 1.0e7);
+            label = (lat_e7, lon_e7);
+            if i % 500 == 0 {
+                let t = frame_trig(&f);
+                let (sa, ca) = oa_math::sin_cos((f64::from(label.0) / 1.0e7).to_radians());
+                for (g, w) in t.iter().zip([sa, ca]) {
+                    worst = worst.max((g - w).abs());
+                }
+            }
+        }
+        assert!(worst < 1.0e-13, "{worst}");
+        // The carried frame is the frame of that origin: a point projects the same.
+        let g = frame_new(f64::from(label.0) / 1.0e7, f64::from(label.1) / 1.0e7);
+        let (lat, lon) = (
+            f64::from(label.0) / 1.0e7 + 0.2,
+            f64::from(label.1) / 1.0e7 - 0.3,
+        );
+        let (a, b) = (project(&f, lat, lon), project(&g, lat, lon));
+        assert!(
+            (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5,
+            "{a:?} {b:?}"
+        );
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn a_fix_that_cannot_carry_its_sine_makes_the_frame_the_long_way() {
+        // Past the poles' margin and beyond the series' range, the frame built at a fix is the
+        // one frame_new makes.
+        let f = frame_new(80.0, 10.0);
+        let fix = unproject_fix(&f, 1_000.0, 2_000.0).unwrap();
+        assert_eq!(
+            frame_at_fix(&fix, fix.lat_deg, fix.lon_deg),
+            frame_new(fix.lat_deg, fix.lon_deg)
+        );
+        // Across the antimeridian the longitudes are the wrapped ones; the frame is the label's.
+        let f = frame_new(0.0, 179.99);
+        let fix = unproject_fix(&f, 5_000.0, 0.0).unwrap();
+        let g = frame_at_fix(&fix, 0.0, -179.99);
+        assert_eq!(g.lon0, (-179.99_f64).to_radians());
+        let far = frame_at_fix(&fix, 40.0, 60.0);
+        assert_eq!(far, frame_new(40.0, 60.0));
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn the_rotation_between_two_frames_is_the_dot_products_of_their_earth_fixed_axes() {
+        let axes = |f: &Frame| {
+            let (sl, cl) = (f.lon0.sin(), f.lon0.cos());
+            [
+                [-sl, cl, 0.0],
+                [-f.sin0 * cl, -f.sin0 * sl, f.cos0],
+                [f.cos0 * cl, f.cos0 * sl, f.sin0],
+            ]
+        };
+        for (a, b) in [
+            ((41.9, -88.3), (41.9, -88.2)),
+            ((41.9, -88.3), (-33.0, 120.0)),
+            ((89.0, 10.0), (-89.5, -170.0)),
+            ((0.0, 179.99), (0.0, -179.99)),
+        ] {
+            let (f, g) = (frame_new(a.0, a.1), frame_new(b.0, b.1));
+            let (b1, b2) = (axes(&f), axes(&g));
+            let r = axes_rotation(&f, &g);
+            for k in 0..3 {
+                for j in 0..3 {
+                    let want = dot(&b2[k], &b1[j]);
+                    assert!((r[k][j] - want).abs() < 4e-16, "{a:?} {b:?} {k}{j}");
+                }
+            }
+        }
     }
 }

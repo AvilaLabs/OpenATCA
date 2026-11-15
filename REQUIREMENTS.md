@@ -67,6 +67,14 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `hypot`, `powf`, `mul_add` and the rest of a fixed list); the elementary functions are
   `oa-math`'s, so a result is the same bits on every IEEE-754 machine. The check is itself tested
   against a planted call.
+- **OA-GEO-015** The small-angle kernels (sine and cosine to 0.25 rad, arctangent to 0.2, the angle
+  of a sine and cosine pair) agree with `oa-math` to a few units in the last place over their
+  range, and hand over to `oa-math` outside it.
+- **OA-GEO-016** The local frame's forward and inverse projection agree with the library-function
+  form to 2e-12 degrees and 2 micrometres at every origin latitude and out to 12,000 km; a frame
+  recentred a hundred thousand times from the sine and cosine of its latitude carried with it keeps
+  them within 1e-13 of those of its origin, and a point that cannot carry them (near a pole, across the
+  antimeridian, far from the origin) takes the frame `frame_new` makes.
 
 ### Elementary functions (oa-math)
 
@@ -3061,6 +3069,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   production code (`sin`, `atan2`, `exp`, `ln`, `hypot`, `powi`, `mul_add` and the rest of a fixed
   list); the elementary functions are `oa-math`'s, so a run is the same bits on every IEEE-754
   machine (RULESET B6). The check is itself tested against a planted call.
+- **OA-TRK-294** The model probabilities after an update equal the softmax of the log weights
+  `ln(prior) - q/2 - ln(det)/2` to 1e-12 in every regime (large and small innovations, overflowing
+  determinants, a singular model, an infinite form), the larger being exactly 1 before the floor;
+  the stay probabilities of the Markov transition are `exp(-dt/tau)` for each dwell time.
+- **OA-TRK-295** A filter's carried sine and cosine of its frame origin's latitude stay within 1e-13 of
+  those of the origin it labels through thousands of updates, and the frame rebuilt from them
+  projects as `frame_new`'s does.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

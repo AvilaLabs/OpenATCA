@@ -6,7 +6,8 @@
 //!   geodesic-versus-rhumb separation, and point-in-polygon on the ellipsoid via [`Polygon`].
 //!
 //! * [`aeqd`]: the local east-north frame (spherical azimuthal equidistant projection about an
-//!   origin) used by the truth builder and the tracker.
+//!   origin) used by the truth builder and the tracker; [`small`] has the small-angle series it
+//!   uses so its common case needs no library call.
 //!
 //! No dependencies; no operation panics on any input (invalid input is an error).
 
@@ -17,6 +18,7 @@ mod geodesic;
 mod latlon;
 mod polygon;
 mod rhumb;
+pub mod small;
 
 pub use error::GeoError;
 pub use geodesic::{wgs84, Direct, Ellipsoid, Inverse};

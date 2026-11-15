@@ -25,9 +25,11 @@
 use crate::linalg::{
     add, ident, matvec, mul, outer, sandwich, scale, symmetrise, transpose, M5, V5, ZERO,
 };
+use oa_geo::small::sin_cos_near_zero;
+
 use crate::params::{
     cv_only_q, CT_OMEGA_STD_FLOOR, H_MU0_CV, H_PRIOR_VEL_STD, H_Q_CT, H_Q_CV, H_Q_OMEGA,
-    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX,
+    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX, V_TAU_CLIMB_S, V_TAU_LEVEL_S,
 };
 
 /// One model's state and covariance. Hot (A7): 5 + 25 doubles.
@@ -99,10 +101,34 @@ fn set_block(p: &mut M5, i: usize, j: usize, aa: f64, ab: f64, bb: f64) {
 
 /// The model transition probabilities over `dt` seconds: `[[cv to cv, cv to ct], [ct to cv,
 /// ct to ct]]`.
-pub(crate) fn h_transition(dt: f64) -> [[f64; 2]; 2] {
-    let s0 = oa_math::exp(-dt / H_TAU_CV_S);
-    let s1 = oa_math::exp(-dt / H_TAU_CT_S);
+///
+/// `u` is [`dwell_decay`] of the step. The unit is a whole multiple of both dwell times, so the
+/// stay probabilities are powers of `u`: `exp(-dt / tau) = u^n` for `n = unit / tau`.
+pub(crate) fn h_transition(u: f64) -> [[f64; 2]; 2] {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    let u4 = u2 * u2;
+    let u6 = u4 * u2;
+    let u12 = u6 * u6;
+    let s0 = u6;
+    let s1 = u12 * u3;
     [[s0, 1.0 - s0], [1.0 - s1, s1]]
+}
+
+/// The time of which every model dwell time is a whole part, seconds: [`H_TAU_CV_S`] is a sixth of
+/// it, [`H_TAU_CT_S`] a fifteenth and each vertical dwell time a tenth.
+pub(crate) const DWELL_UNIT_S: f64 = 600.0;
+const _: () = assert!(
+    H_TAU_CV_S * 6.0 == DWELL_UNIT_S
+        && H_TAU_CT_S * 15.0 == DWELL_UNIT_S
+        && V_TAU_LEVEL_S * 10.0 == DWELL_UNIT_S
+        && V_TAU_CLIMB_S * 10.0 == DWELL_UNIT_S
+);
+
+/// `exp(-dt / DWELL_UNIT_S)`: the one exponential from which the horizontal and vertical model
+/// transitions of a step of `dt` seconds are taken.
+pub(crate) fn dwell_decay(dt: f64) -> f64 {
+    oa_math::exp(-dt / DWELL_UNIT_S)
 }
 
 /// Adds the white-acceleration noise of density `q` over `dt` to the position and velocity
@@ -144,8 +170,9 @@ fn cv_predict(m: &HModel, dt: f64, q: f64) -> HModel {
 }
 
 /// `(sin t / t, (1 - cos t) / t)` and the derivatives of `sin t / w` and `(1 - cos t) / w` with
-/// respect to `w = t / dt`, divided by `dt^2`: `((a1, b1), (da, db))`.
-fn ct_terms(theta: f64) -> ((f64, f64), (f64, f64)) {
+/// respect to `w = t / dt`, divided by `dt^2`: `((a1, b1), (da, db))`; `s` and `c` are `sin t`
+/// and `cos t`.
+fn ct_terms(theta: f64, s: f64, c: f64) -> ((f64, f64), (f64, f64)) {
     if theta.abs() < 1.0e-4 {
         let t2 = theta * theta;
         (
@@ -153,7 +180,6 @@ fn ct_terms(theta: f64) -> ((f64, f64), (f64, f64)) {
             (-theta / 3.0, 0.5 - t2 / 8.0),
         )
     } else {
-        let (s, c) = oa_math::sin_cos(theta);
         (
             (s / theta, (1.0 - c) / theta),
             (
@@ -173,10 +199,10 @@ fn ct_predict(m: &HModel, dt: f64) -> HModel {
     let (x, y, vx, vy) = (g(&m.x, 0), g(&m.x, 1), g(&m.x, 2), g(&m.x, 3));
     let w = g(&m.x, 4).clamp(-OMEGA_MAX, OMEGA_MAX);
     let theta = w * dt;
-    let ((a1, b1), (da, db)) = ct_terms(theta);
+    let (s, c) = sin_cos_near_zero(theta);
+    let ((a1, b1), (da, db)) = ct_terms(theta, s, c);
     let (a, b) = (dt * a1, dt * b1);
     let (da, db) = (dt * dt * da, dt * dt * db);
-    let (s, c) = oa_math::sin_cos(theta);
     let xn = [
         x + vx * a - vy * b,
         y + vx * b + vy * a,
@@ -208,7 +234,7 @@ fn ct_predict(m: &HModel, dt: f64) -> HModel {
 
 /// Mixes the two models for the next step and predicts each over `dt`. The returned filter's
 /// `mu` is the predicted model probability.
-pub(crate) fn h_predict(h: &HFilter, dt: f64, mode: u8) -> HFilter {
+pub(crate) fn h_predict(h: &HFilter, dt: f64, u: f64, mode: u8) -> HFilter {
     if mode != 0 {
         // Single straight-model filter (the comparison baseline): no mixing, no turn model.
         return HFilter {
@@ -216,7 +242,7 @@ pub(crate) fn h_predict(h: &HFilter, dt: f64, mode: u8) -> HFilter {
             mu: [1.0, 0.0],
         };
     }
-    let pi = h_transition(dt);
+    let pi = h_transition(u);
     let mut mixed = [h.m[0], h.m[1]];
     let mut c = [0.0f64; 2];
     for j in 0..2 {
@@ -313,9 +339,17 @@ pub(crate) fn h_gate_d2(pred: &HFilter, z: &[f64; 2], r: &[f64; 3]) -> f64 {
 }
 
 /// One two-component measurement of the states `i0` and `i1` (`z = x[i0], x[i1]` plus noise of
-/// covariance `r`): updates `x` and `p` and returns the log likelihood (without the constant
-/// shared by every model).
-fn update_sel(x: &mut V5, p: &mut M5, i: [usize; 2], z: &[f64; 2], r: &[f64; 3]) -> f64 {
+/// covariance `r`): updates `x` and `p` and returns the quadratic form and the determinant of
+/// the innovation covariance, from which the log likelihood is `-d2 / 2 - ln(det) / 2` (without
+/// the constant shared by every model); `None`, with `x` and `p` unchanged, if the innovation
+/// covariance is singular.
+fn update_sel(
+    x: &mut V5,
+    p: &mut M5,
+    i: [usize; 2],
+    z: &[f64; 2],
+    r: &[f64; 3],
+) -> Option<(f64, f64)> {
     let [i0, i1] = i;
     let pe =
         |p: &M5, a: usize, b: usize| p.get(a).and_then(|row| row.get(b)).copied().unwrap_or(0.0);
@@ -326,11 +360,10 @@ fn update_sel(x: &mut V5, p: &mut M5, i: [usize; 2], z: &[f64; 2], r: &[f64; 3])
     let s11 = pe(p, i1, i1) + r[2];
     let det = s00 * s11 - s01 * s01;
     if det.is_nan() || det <= 0.0 {
-        return f64::NEG_INFINITY;
+        return None;
     }
     let (n00, n01, n11) = (s11 / det, -s01 / det, s00 / det);
     let d2 = y0 * (n00 * y0 + n01 * y1) + y1 * (n01 * y0 + n11 * y1);
-    let ll = -0.5 * d2 - 0.5 * oa_math::ln(det);
     let old = *p;
     let mut k = [[0.0f64; 2]; 5];
     for (row, kr) in k.iter_mut().enumerate() {
@@ -354,7 +387,47 @@ fn update_sel(x: &mut V5, p: &mut M5, i: [usize; 2], z: &[f64; 2], r: &[f64; 3])
         }
     }
     *p = symmetrise(&pn);
-    ll
+    Some((d2, det))
+}
+
+/// The model probabilities after a measurement, before the floor and the normalisation: the
+/// prior `prior[j]` times the likelihood, scaled so the larger is 1. Each model's `fit[j]` is
+/// the sum `q` of the quadratic forms and the product `det` of the innovation determinants of
+/// its updates (`None` if one was singular), so its log weight is
+/// `lw[j] = ln(prior[j]) - q / 2 - ln(det) / 2`, and the result is `exp(lw[j] - max(lw))`.
+///
+/// The two models need only the difference `t = lw[1] - lw[0]`, which is
+/// `ln((prior[1] / prior[0]) sqrt(det0 / det1)) - (q1 - q0) / 2` in real arithmetic: one `ln`
+/// of one quotient where the log weights took four to six, and one `exp` of `-|t|` where they
+/// took two. `t >= 0` gives `[exp(-t), 1]`, otherwise `[1, exp(t)]`, which are those same
+/// numbers. A quotient or difference that is not finite (a determinant that over- or underflows,
+/// an infinite quadratic form) takes the log weights themselves, as does a singular model.
+/// A prior is floored at 1e-300 first. If no log weight is finite the prior comes back.
+pub(crate) fn imm_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64; 2] {
+    let p = [prior[0].max(1.0e-300), prior[1].max(1.0e-300)];
+    if let [Some((q0, d0)), Some((q1, d1))] = fit {
+        let ratio = p[1] / p[0] * (d0 / d1).sqrt();
+        if ratio.is_finite() && ratio > 0.0 {
+            let t = oa_math::ln(ratio) - 0.5 * (q1 - q0);
+            if t.is_finite() {
+                return if t >= 0.0 {
+                    [oa_math::exp(-t), 1.0]
+                } else {
+                    [1.0, oa_math::exp(t)]
+                };
+            }
+        }
+    }
+    let lw = [0, 1].map(|j| {
+        let ll = fit[j].map_or(f64::NEG_INFINITY, |(q, d)| -0.5 * q - 0.5 * oa_math::ln(d));
+        oa_math::ln(p[j]) + ll
+    });
+    let mx = lw[0].max(lw[1]);
+    if mx.is_finite() {
+        [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
+    } else {
+        prior
+    }
 }
 
 /// Updates the predicted filter with a position (and a velocity if given), then the model
@@ -376,12 +449,14 @@ pub(crate) fn h_update(
         m.x[4] = 0.0;
         return out;
     }
-    let mut lw = [0.0f64; 2];
+    let mut fit = [None; 2];
     for (j, m) in out.m.iter_mut().enumerate() {
-        let mut ll = update_sel(&mut m.x, &mut m.p, [0, 1], z, r);
+        let mut f = update_sel(&mut m.x, &mut m.p, [0, 1], z, r);
         if let Some((v, vr)) = vel {
-            ll += update_sel(&mut m.x, &mut m.p, [2, 3], &v, &vr);
+            let g = update_sel(&mut m.x, &mut m.p, [2, 3], &v, &vr);
+            f = f.zip(g).map(|((q, d), (q2, d2))| (q + q2, d * d2));
         }
+        fit[j] = f;
         if let Some(w) = m.x.get_mut(4) {
             *w = w.clamp(-OMEGA_MAX, OMEGA_MAX);
         }
@@ -391,14 +466,8 @@ pub(crate) fn h_update(
                 *w = 0.0;
             }
         }
-        lw[j] = oa_math::ln(pred.mu.get(j).copied().unwrap_or(0.0).max(1.0e-300)) + ll;
     }
-    let mx = lw[0].max(lw[1]);
-    let mut mu = if mx.is_finite() {
-        [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
-    } else {
-        pred.mu
-    };
+    let mut mu = imm_weights(pred.mu, fit);
     let s = mu[0] + mu[1];
     mu = [mu[0] / s, mu[1] / s];
     mu = [mu[0].max(MU_FLOOR), mu[1].max(MU_FLOOR)];
@@ -473,6 +542,91 @@ mod tests {
             );
             assert!((a.p[1][3] - b.p[0][2]).abs() < 1e-12);
             assert!((a.p[0][3] + b.p[1][2]).abs() < 1e-12);
+        }
+    }
+
+    /// The model probabilities from the log weights themselves, as the filter took them before
+    /// the difference form.
+    fn imm_by_log_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64; 2] {
+        let lw = [0, 1].map(|j| {
+            let ll = fit[j].map_or(f64::NEG_INFINITY, |(q, d)| -0.5 * q - 0.5 * oa_math::ln(d));
+            oa_math::ln(prior[j].max(1.0e-300)) + ll
+        });
+        let mx = lw[0].max(lw[1]);
+        if mx.is_finite() {
+            [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
+        } else {
+            prior
+        }
+    }
+
+    // REQ: OA-TRK-294
+    #[test]
+    fn the_model_probabilities_are_the_log_weight_softmax_in_every_regime() {
+        let mut worst = 0.0f64;
+        let mut n = 0;
+        for p0 in [0.9, 0.5, 0.01, 1.0e-3, 0.0] {
+            let prior = [p0, 1.0 - p0];
+            for (q0, q1) in [
+                (0.0, 0.0),
+                (1.0, 40.0),
+                (900.0, 3.0),
+                (2.0e3, 1.0e-3),
+                (1.0e5, 0.5),
+            ] {
+                for (d0, d1) in [
+                    (1.0, 1.0),
+                    (4.0e6, 9.0e3),
+                    (2.0e-9, 5.0e3),
+                    (1.0e-30, 3.0e12),
+                ] {
+                    let fit = [Some((q0, d0)), Some((q1, d1))];
+                    let (a, b) = (imm_weights(prior, fit), imm_by_log_weights(prior, fit));
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        worst = worst.max((x - y).abs() / y.abs().max(1.0e-300));
+                    }
+                    // The larger of the two is exactly 1.
+                    assert!(a[0].max(a[1]) == 1.0 && a[0].min(a[1]) >= 0.0, "{a:?}");
+                    n += 1;
+                }
+            }
+        }
+        assert!(worst < 1.0e-12, "{worst} over {n}");
+        // A singular model, both singular, an infinite form, and a determinant that overflows.
+        for (prior, fit) in [
+            ([0.5, 0.5], [None, Some((1.0, 2.0))]),
+            ([0.5, 0.5], [Some((1.0, 2.0)), None]),
+            ([0.5, 0.5], [None, None]),
+            ([0.3, 0.7], [Some((f64::INFINITY, 2.0)), Some((1.0, 2.0))]),
+            ([0.3, 0.7], [Some((1.0, f64::MAX)), Some((1.0, 1.0e-300))]),
+            ([0.3, 0.7], [Some((f64::NAN, 2.0)), Some((1.0, 2.0))]),
+        ] {
+            let (a, b) = (imm_weights(prior, fit), imm_by_log_weights(prior, fit));
+            assert!(
+                a == b || (a[0].is_nan() && b[0].is_nan()),
+                "{fit:?}: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    // REQ: OA-TRK-294
+    #[test]
+    fn the_stay_probabilities_are_the_exponentials_of_the_dwell_times() {
+        for k in 0..400 {
+            let dt = 0.25 * f64::from(k);
+            let u = dwell_decay(dt);
+            let (pi, pv) = (h_transition(u), crate::vfilter::v_transition(u));
+            let (e0, e1) = ((-dt / H_TAU_CV_S).exp(), (-dt / H_TAU_CT_S).exp());
+            let e2 = (-dt / V_TAU_LEVEL_S).exp();
+            assert!(
+                (pi[0][0] - e0).abs() <= 4.0e-15 && (pi[1][1] - e1).abs() <= 4.0e-15,
+                "{dt}"
+            );
+            assert!(
+                (pv[0][0] - e2).abs() <= 4.0e-15 && pv[1][1] == pv[0][0],
+                "{dt}"
+            );
+            assert_eq!(pi[0][1], 1.0 - pi[0][0]);
         }
     }
 }
