@@ -2106,16 +2106,38 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-021** The quality values carried forward within an aircraft come only from rows that
   are in range, not stale and from an ADS-B source: a row from another source does not vouch for the
   ADS-B rows after it.
-- **OA-TRUTH-022** Rows of one aircraft at one instant do not make the truth depend on input order: those
-  further apart than the 50 m truth radius contradict each other and are all removed (counted as
-  duplicate times), closer ones are tried in the order of their content, so the same reports in any
-  input order give the same truth and statistics.
+- **OA-TRUTH-022** Rows of one aircraft at one instant do not make the truth depend on input order. Two
+  eligible reports (see OA-TRUTH-024) conflict when their squared horizontal distance exceeds 13.82
+  (the 2-degree-of-freedom chi-square value at 99.9 %) times the sum of their squared per-axis
+  sigmas, each the NACp 95 % radius over 2.4477; errors are assumed independent. A conflicting
+  group is removed whole (counted as duplicate times); the rest are tried in the order of their
+  content, so the same reports in any input order give the same truth and statistics. The 50 m
+  limit gates the reference's output uncertainty only (OA-TRUTH-010), not this pair rule.
 - **OA-TRUTH-020** The emitter category that sets the jump cap is taken only from reports that pass
   the quality rules and are kept, and a cap-raising one must persist (`oa_adsb::category_observe`):
   one report printing B7 or a reserved code does not let a 2,782 kt jump into truth, and a category
   printed by every report does raise the cap after three.
 - **OA-TRUTH-023** `oa-truth-check` on a clip that ends inside a frame (a partial header or a partial body)
   keeps the valid frames and counts the partial frame in the frames it prints as refused.
+- **OA-TRUTH-024** Whether a same-time row takes part in the conflict check is decided by the full
+  selection (coordinates, NACp, NIC, SIL, version, stale flag, source) against the carried quality as
+  it was before the instant; an ineligible row is removed for its own reason and cannot veto a
+  usable one.
+- **OA-TRUTH-025** The result for same-time rows does not depend on their order in the input,
+  including when one of them is ineligible.
+- **OA-TRUTH-026** Same-time rows identical in position and NACp are collapsed before the conflict
+  check, so 1,000 identical rows cost no pair evaluations beyond the rows themselves.
+- **OA-TRUTH-027** More than 16 distinct eligible same-time rows of one aircraft are refused and
+  counted under `oversized_same_time_group`; 16 are tested pairwise.
+- **OA-TRUTH-028** Two NACp 8 reports 70 m apart at one instant (each inside its 92.6 m 95 % radius)
+  are kept as one position measured twice.
+- **OA-TRUTH-029** Two same-time reports far beyond the bound of OA-TRUTH-022 are quarantined.
+- **OA-TRUTH-030** A mixed-NACp same-time pair is judged at its own bound: NACp 8 with NACp 10 is
+  kept at 139 m and quarantined at 144 m (bound 141.5 m).
+- **OA-TRUTH-031** A row removed as a jump does not change the carried quality: a following report
+  that prints none gets the same selection and weight with or without the jump row.
+- **OA-TRUTH-032** A low-quality row that is also a jump does not remove later usable reports; a
+  low-quality row on the track still does.
 
 ## M2 — Benchmark harness (oa-bench)
 
