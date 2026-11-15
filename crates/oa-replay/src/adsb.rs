@@ -27,9 +27,24 @@
 //! than the held one is refused whole and counted (an equal time applies); this is the ADS-B
 //! counterpart of OA-RPL-003.
 //!
-//! A confirmed step of the replay clock shifts every held report time by the step
-//! ([`adsb_shift_times`]), so the age of each aircraft, and its place against the clock, are what
-//! they were before the step, and marks each aircraft stale until a report is accepted for it.
+//! A report's time is in the reports' own time domain, which is not necessarily the clock the
+//! recorder steps: for a feed of history from an aggregator it is the aggregator's clock, for a
+//! local receiver stamped by the same host it is the recorder's. The table keeps `offset_ns`, the
+//! replay clock minus the reports' time domain (0 at the start), and every comparison of a report
+//! time with the replay clock is made against `now - offset_ns`.
+//!
+//! A confirmed step of the replay clock cannot say which it was. [`adsb_shift_times`] records the
+//! step as `pending_ns` (steps add), marks each aircraft stale until a report is accepted for it,
+//! and moves no report time. Until the next report is seen, ages are measured against
+//! `now - offset_ns - pending_ns`: both readings keep every age what it was before the step, so
+//! no aircraft is evicted or stranded by it. The next report settles it. With
+//! `lag_a = (now - offset_ns) - time` (the report followed the recorder) and
+//! `lag_b = lag_a - pending_ns` (the report kept its own clock), a reading fits when
+//! `-ADSB_MAX_AHEAD_NS <= lag <= ADSB_MAX_AGE_NS`. If only the first fits, or both do and the
+//! first lag is no larger in size, every held report time is shifted by the step (the reports
+//! followed the recorder). Otherwise, if the second fits, `offset_ns` takes the step and the held
+//! times stay. If neither fits the report is refused as [`AdsbApplied::TooFarAhead`] and the step
+//! stays pending for the next one. Either resolution is counted in [`AdsbStats`].
 //!
 //! The state is hashed by [`adsb_hash_into`] in address order, so it does not depend on the order
 //! aircraft were first seen.
@@ -74,6 +89,10 @@ pub struct AdsbStats {
     /// Reports refused because their time was more than [`ADSB_MAX_AHEAD_NS`] past the replay
     /// clock.
     pub future_refused: u64,
+    /// Steps resolved as the report times having followed the recorder's clock.
+    pub domain_follows_clock: u64,
+    /// Steps resolved as the report times having kept their own clock.
+    pub domain_kept_own: u64,
 }
 
 /// What became of one report.
@@ -143,6 +162,12 @@ pub struct AdsbTable {
     pub live: usize,
     /// Slots in total.
     pub capacity: usize,
+    /// Replay clock minus the reports' time domain, ns; 0 until a step is resolved as the
+    /// reports having kept their own clock.
+    pub offset_ns: i64,
+    /// A confirmed step of the replay clock not yet attributed to the reports' domain, ns; 0
+    /// when none.
+    pub pending_ns: i64,
     /// Totals.
     pub stats: AdsbStats,
     index: Index,
@@ -173,6 +198,8 @@ pub fn new_adsb_table(capacity: usize) -> AdsbTable {
         next_sweep_ns: i64::MIN,
         live: 0,
         capacity: n,
+        offset_ns: 0,
+        pending_ns: 0,
         stats: AdsbStats::default(),
         index: new_index(n),
     }
@@ -195,7 +222,16 @@ pub fn apply_adsb(t: &mut AdsbTable, r: &Reports, i: usize, now_ns: i64) -> Adsb
     let Some(row) = reports_row(r, i) else {
         return AdsbApplied::BadRow;
     };
-    if row.time_ns > now_ns.saturating_add(ADSB_MAX_AHEAD_NS) {
+    if t.pending_ns != 0 {
+        if !settle_pending(t, row.time_ns, now_ns) {
+            t.stats.future_refused += 1;
+            return AdsbApplied::TooFarAhead;
+        }
+    } else if row.time_ns
+        > now_ns
+            .saturating_sub(t.offset_ns)
+            .saturating_add(ADSB_MAX_AHEAD_NS)
+    {
         t.stats.future_refused += 1;
         return AdsbApplied::TooFarAhead;
     }
@@ -277,6 +313,38 @@ pub fn apply_adsb(t: &mut AdsbTable, r: &Reports, i: usize, now_ns: i64) -> Adsb
     }
 }
 
+/// Whether `lag_ns`, the replay clock minus a report time in some reading, is one an honest
+/// report has: at most [`ADSB_MAX_AHEAD_NS`] ahead and at most [`ADSB_MAX_AGE_NS`] behind.
+fn lag_fits(lag_ns: i64) -> bool {
+    (-ADSB_MAX_AHEAD_NS..=ADSB_MAX_AGE_NS).contains(&lag_ns)
+}
+
+/// Attributes the pending step using a report at `time_ns`, as in the module docs. Returns false,
+/// with the step still pending, when the report fits neither reading.
+fn settle_pending(t: &mut AdsbTable, time_ns: i64, now_ns: i64) -> bool {
+    let lag_a = now_ns.saturating_sub(t.offset_ns).saturating_sub(time_ns);
+    let lag_b = lag_a.saturating_sub(t.pending_ns);
+    let (fit_a, fit_b) = (lag_fits(lag_a), lag_fits(lag_b));
+    if fit_a && (!fit_b || lag_a.unsigned_abs() <= lag_b.unsigned_abs()) {
+        let d = t.pending_ns;
+        for s in 0..t.capacity {
+            if t.occupied.get(s).copied().unwrap_or(false) {
+                if let Some(v) = t.time_ns.get_mut(s) {
+                    *v = v.saturating_add(d);
+                }
+            }
+        }
+        t.stats.domain_follows_clock += 1;
+    } else if fit_b {
+        t.offset_ns = t.offset_ns.saturating_add(t.pending_ns);
+        t.stats.domain_kept_own += 1;
+    } else {
+        return false;
+    }
+    t.pending_ns = 0;
+    true
+}
+
 /// Frees slot `s`: out of the index, columns blank, back on the free stack.
 fn evict(t: &mut AdsbTable, s: usize) {
     let Some(&k) = t.key.get(s) else {
@@ -311,13 +379,17 @@ fn evict(t: &mut AdsbTable, s: usize) {
 /// Frees every aircraft whose held report is more than [`ADSB_MAX_AGE_NS`] older than `now_ns`,
 /// visiting slots in slot order. Returns the number freed.
 pub fn adsb_sweep(t: &mut AdsbTable, now_ns: i64) -> usize {
+    // The clock in the reports' domain, as it was read before any pending step.
+    let clock = now_ns
+        .saturating_sub(t.offset_ns)
+        .saturating_sub(t.pending_ns);
     let mut n = 0;
     for s in 0..t.capacity {
         if !t.occupied.get(s).copied().unwrap_or(false) {
             continue;
         }
         let last = t.time_ns.get(s).copied().unwrap_or(0);
-        if now_ns.saturating_sub(last) > ADSB_MAX_AGE_NS {
+        if clock.saturating_sub(last) > ADSB_MAX_AGE_NS {
             evict(t, s);
             n += 1;
         }
@@ -355,16 +427,16 @@ pub fn adsb_stale_count(t: &AdsbTable) -> usize {
         .count()
 }
 
-/// Moves every aircraft's report time by `delta_ns`, for a step of the replay clock: the time
-/// since each was heard stays what it was. Every aircraft is marked stale until a report is
-/// accepted for it; returns the number marked.
+/// Records a step of the replay clock by `delta_ns` as pending (steps add) and marks every
+/// aircraft stale until a report is accepted for it; returns the number marked. No report time
+/// moves: the next report says whether they follow the recorder's clock (see the module docs),
+/// and until then ages are measured against the clock as it was before the step, so they stay
+/// what they were.
 pub fn adsb_shift_times(t: &mut AdsbTable, delta_ns: i64) -> usize {
+    t.pending_ns = t.pending_ns.saturating_add(delta_ns);
     let mut n = 0;
     for s in 0..t.capacity {
         if t.occupied.get(s).copied().unwrap_or(false) {
-            if let Some(v) = t.time_ns.get_mut(s) {
-                *v = v.saturating_add(delta_ns);
-            }
             if let Some(v) = t.stale.get_mut(s) {
                 *v = true;
                 n += 1;
@@ -416,6 +488,10 @@ pub fn adsb_hash_into(h: &mut Sha256, t: &AdsbTable) {
     if extra {
         put(h, &t.stats.evicted.to_le_bytes());
         put(h, &t.stats.future_refused.to_le_bytes());
+    }
+    if t.offset_ns != 0 || t.pending_ns != 0 {
+        put(h, &t.offset_ns.to_le_bytes());
+        put(h, &t.pending_ns.to_le_bytes());
     }
     for &(k, s) in &order {
         put(h, &k.to_le_bytes());

@@ -1245,10 +1245,23 @@ frame of their feed has been fed (as the ADS-B table is).
   second out of order confirms on the third; candidates ahead of the clock continue a run when each is not
   more than the tolerance before the one before and not more than 30 minutes after it. Candidates a day apart
   each start a new run and never confirm.
-- **OA-RPL-170** A confirmed step shifts every ADS-B report time by the step as it does the other tables'
-  ages, and marks each aircraft stale (counted in `stale_marked`, counted by `adsb_stale_count`): a forward
+- **OA-RPL-170** A confirmed step shifts every ADS-B report time by the step (when the report times follow the recorder, see
+  OA-RPL-250) as it does the other tables' ages, and marks each aircraft stale (counted in `stale_marked`, counted by `adsb_stale_count`): a forward
   step of an hour keeps every aircraft that was live, and a backward step of ten minutes accepts the next
   genuine reports.
+- **OA-RPL-250** A confirmed step is held by the ADS-B table as pending, without moving any report time, until
+  the next report settles whether the report times follow the recorder's clock or keep their own: the report's
+  lag behind the clock is read both ways, and a reading fits when the report is at most 2 minutes ahead and at
+  most 30 minutes behind. If only the first fits, or both and its lag is no larger in size, the held times shift
+  by the step; otherwise if the second fits the table's `offset_ns` takes the step and the held times stay. A
+  report stamped by a clock that did not step, after a forward or backward step, is applied, not refused out of
+  order or too far ahead. Each resolution is counted (`domain_follows_clock`, `domain_kept_own`). The
+  offset and the pending step are hashed only when either is non-zero.
+- **OA-RPL-251** Ages are measured against the clock minus the offset and the pending step, so a sweep while a
+  step is pending evicts nobody the step did not age, however long no ADS-B frame comes.
+- **OA-RPL-252** A report that fits neither reading while a step is pending is refused as too far ahead and
+  counted, and the step stays pending until a report that fits.
+- **OA-RPL-253** Steps before the first report add; the resolution uses their sum.
 - **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
   report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
   a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.
