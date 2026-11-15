@@ -12,10 +12,10 @@ use common::*;
 use oa_geo::aeqd::project;
 use oa_sha256::{to_hex, Sha256};
 use oa_track::{
-    measurement_check, output_hash_into, output_new, tracker_advance, tracker_flush, tracker_live,
-    tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
-    TrackerConfig, DEFAULT_CONFIG, END_DROPPED, END_TENTATIVE, M_HAS_VEL, NONE_I32, NO_ADDR,
-    O_COAST, O_TICK,
+    measurement_check, output_hash_into, output_new, tracker_advance, tracker_buffers,
+    tracker_bytes, tracker_flush, tracker_live, tracker_log, tracker_new, tracker_stats,
+    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, END_DROPPED,
+    END_TENTATIVE, M_HAS_VEL, NONE_I32, NO_ADDR, O_COAST, O_TICK,
 };
 
 /// Error summary of a scenario in a time window.
@@ -821,4 +821,171 @@ fn nothing_allocates_after_the_tracker_is_built() {
             out.mu_h.capacity()
         )
     );
+}
+
+/// Three aircraft whose reports arrive scrambled by up to 14 positions (past the 12-deep window
+/// for some), with a different-sensor repeat of some reports and a wild position now and then.
+fn scrambled_world() -> Vec<Measurement> {
+    let mut all: Vec<(f64, Measurement)> = Vec::new();
+    let mut rng = Rng(0xF00D);
+    for (a, addr) in [0x1A1A1Au32, 0x2B2B2B, 0x3C3C3C].into_iter().enumerate() {
+        for (k, m) in base_measurements(addr, 160, 1.0, 20 + a as u64)
+            .into_iter()
+            .enumerate()
+        {
+            let mut m = m;
+            if k % 37 == 21 {
+                m.lat_e7 += 90_000; // about a kilometre of jump: rejected by the gate
+            }
+            let arrival = k as f64 + rng.uniform() * 14.0;
+            all.push((arrival, m));
+            if k % 9 == 4 {
+                let mut d = m;
+                d.sensor = 3;
+                all.push((arrival + 0.5, d));
+            }
+            if k % 11 == 5 {
+                all.push((arrival + 2.5, m)); // the exact same report again
+            }
+        }
+    }
+    all.sort_by(|x, y| x.0.total_cmp(&y.0));
+    all.into_iter().map(|x| x.1).collect()
+}
+
+// REQ: OA-TRK-040
+#[test]
+fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_replaced() {
+    // The digest and counters below were recorded from the implementation that kept a full filter
+    // state per ring slot; the anchor-and-replay ring must reproduce every output bit and
+    // counter (re-filtering, duplicates, ring and window drops included).
+    let ms = scrambled_world();
+    let (t, out) = run(&big_config(), &ms, 200.0);
+    let s = tracker_stats(&t);
+    let counters = format!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        s.offered,
+        s.applied,
+        s.duplicates,
+        s.late_window,
+        s.late_ring,
+        s.refiltered,
+        s.replayed,
+        s.jump_rejected,
+        s.resyncs,
+        s.nis_n
+    );
+    let digest = hash_of(&out);
+    println!(
+        "scrambled: {counters} nis_sum {:016x} digest {digest}",
+        s.nis_sum.to_bits()
+    );
+    assert!(s.refiltered > 20 && s.late_ring > 0 && s.duplicates > 0 && s.jump_rejected > 0);
+    assert_eq!(counters, GOLDEN_COUNTERS);
+    assert_eq!(s.nis_sum.to_bits(), GOLDEN_NIS_BITS);
+    assert_eq!(digest, GOLDEN_DIGEST);
+}
+
+const GOLDEN_COUNTERS: &str = "579 477 30 53 4 288 869 14 0 1343";
+const GOLDEN_NIS_BITS: u64 = 0x40a4_9f6c_7a87_a22b;
+const GOLDEN_DIGEST: &str = "6ea4de8c2647f225e2b723d0422fb68eef0b81dea5a641f733827844421c6cd5";
+
+// REQ: OA-TRK-041
+#[test]
+fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() {
+    let n = oa_track::params::MAX_TRACKS;
+    let cfg = TrackerConfig {
+        max_tracks: n,
+        out_capacity: 1 << 16,
+        log_capacity: 16,
+        ..DEFAULT_CONFIG
+    };
+    let mut t = tracker_new(&cfg).unwrap();
+    let before = tracker_buffers(&t);
+    let mut out = output_new(cfg.out_capacity);
+    let man = Manoeuvre::straight(200.0, 45.0);
+    let f = frame0();
+    let mut rng = Rng(77);
+    // Every aircraft gets 16 reports, more than the ring holds, so every anchor is advanced.
+    for k in 0..16 {
+        for a in 0..n {
+            let m = measure(
+                &f,
+                0x100000 + a as u32,
+                f64::from(k),
+                &man.at(f64::from(k), 0.0, 0.0),
+                SIGMA_POS,
+                Some(SIGMA_VEL),
+                true,
+                &mut rng,
+            );
+            tracker_update(&mut t, &m, &mut out);
+            if out.t_ns.len() > cfg.out_capacity / 2 {
+                oa_track::output_clear(&mut out);
+            }
+        }
+    }
+    let s = *tracker_stats(&t);
+    assert_eq!(s.started as usize, n);
+    assert_eq!(s.capacity_refused, 0);
+    // One aircraft too many.
+    let extra = measure(
+        &f,
+        0x900000,
+        15.0,
+        &man.at(15.0, 0.0, 0.0),
+        SIGMA_POS,
+        Some(SIGMA_VEL),
+        true,
+        &mut rng,
+    );
+    tracker_update(&mut t, &extra, &mut out);
+    assert_eq!(tracker_stats(&t).capacity_refused, 1);
+    assert_eq!(tracker_stats(&t).started as usize, n);
+    assert_eq!(tracker_buffers(&t), before, "a buffer was reallocated");
+    // A late report for a track in the full table is still re-filtered from its anchor.
+    let mut late = measure(
+        &f,
+        0x100007,
+        14.5,
+        &man.at(14.5, 0.0, 0.0),
+        SIGMA_POS,
+        Some(SIGMA_VEL),
+        true,
+        &mut rng,
+    );
+    late.sensor = 4;
+    tracker_update(&mut t, &late, &mut out);
+    assert_eq!(tracker_stats(&t).refiltered, 1);
+    let bytes = tracker_bytes(&t);
+    println!(
+        "tracker_bytes at {n} tracks: {bytes} ({} per track)",
+        bytes / n
+    );
+    // The columns, one current and one anchor filter and the measurement ring: under 2.2 kB each
+    // (it was 8.9 kB with a filter state in every ring slot).
+    assert!(bytes / n < 2_200, "{} bytes per track", bytes / n);
+}
+
+// REQ: OA-TRK-042
+#[test]
+fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ring() {
+    let mk = |n: usize| {
+        tracker_bytes(
+            &tracker_new(&TrackerConfig {
+                max_tracks: n,
+                out_capacity: 16,
+                log_capacity: 16,
+                ..DEFAULT_CONFIG
+            })
+            .unwrap(),
+        )
+    };
+    let (a, b) = (mk(4096), mk(38_000));
+    println!("tracker_bytes: 4096 tracks {a}, 38000 tracks {b}");
+    // The index is the only part that is not exactly linear (a power of two entries).
+    let per = |x: usize, n: usize| x as f64 / n as f64;
+    assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
+    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track.
+    assert!(per(b, 38_000) < 2_200.0);
 }

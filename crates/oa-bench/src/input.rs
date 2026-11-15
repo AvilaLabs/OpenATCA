@@ -202,18 +202,17 @@ pub struct AdsbClip {
     pub hash: InputHash,
 }
 
-/// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
-/// and hashes the file.
-pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
+/// Calls `f(recv_unix_ns, payload)` for every message frame of an OAF1 file, in file order, and
+/// returns the number of frames that were damaged (bad CRC or length; counted, not hidden).
+pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Result<u64> {
     let err = |m: String| io::Error::other(format!("{}: {m}", path.display()));
-    let mut f = fs::File::open(path).map_err(|e| err(e.to_string()))?;
+    let mut file = fs::File::open(path).map_err(|e| err(e.to_string()))?;
     let mut buf = vec![0u8; oa_feed::MAX_FRAME_LEN];
     let mut rd = oa_feed::FrameReader::new(&mut buf).map_err(|e| err(format!("{e:?}")))?;
-    let mut reports = oa_adsb::Reports::default();
     let mut bad = 0u64;
     let mut chunk = vec![0u8; 1 << 20];
     loop {
-        let n = io::Read::read(&mut f, &mut chunk).map_err(|e| err(e.to_string()))?;
+        let n = io::Read::read(&mut file, &mut chunk).map_err(|e| err(e.to_string()))?;
         if n == 0 {
             break;
         }
@@ -224,11 +223,7 @@ pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
             at += took;
             while let Some(fr) = rd.next() {
                 match fr {
-                    Ok(fr) if fr.kind == oa_feed::Kind::Message => {
-                        if oa_adsb::decode_payload(fr.payload, &mut reports).is_err() {
-                            bad += 1;
-                        }
-                    }
+                    Ok(fr) if fr.kind == oa_feed::Kind::Message => f(fr.recv_unix_ns, fr.payload),
                     Ok(_) => {}
                     Err(_) => bad += 1,
                 }
@@ -238,6 +233,20 @@ pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
             }
         }
     }
+    Ok(bad)
+}
+
+/// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
+/// and hashes the file.
+pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
+    let mut reports = oa_adsb::Reports::default();
+    let mut undecodable = 0u64;
+    let damaged = for_each_adsb_frame(path, &mut |_, payload| {
+        if oa_adsb::decode_payload(payload, &mut reports).is_err() {
+            undecodable += 1;
+        }
+    })?;
+    let bad = damaged + undecodable;
     let hash = hash_files(&format!("adsb ({})", path.display()), &[path.to_path_buf()])?;
     Ok(AdsbClip {
         reports,
