@@ -2217,6 +2217,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-034** A variance that is NaN or infinite has no horizontal radius: the query refuses it as too
   uncertain, the uncertainty statistics count it as a miss, and a leave-one-out prediction with a
   non-finite state or variance counts as not predicted. It is never zero uncertainty.
+- **OA-TRUTH-041** A query whose converted latitude, longitude or velocity is not finite (a state past the
+  frame's chart) is refused as too uncertain, never returned as a sample.
 
 ## M2 — Benchmark harness (oa-bench)
 
@@ -2666,7 +2668,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the aircraft address on the plot and non-Mode S profiles do not.
 - **OA-SIM-011** An invalid site or profile (latitude, period, azimuth, coverage past the CAT048 range
   element, earth factor, non-finite bias, probability above one) is refused with a typed error, and a plot
-  range past the CAT048 element is refused at encoding.
+  range past the CAT048 element is refused at encoding (see OA-SIM-024 and OA-SIM-025).
 - **OA-SIM-012** The ghost transform adds an aircraft with a new address on a straight track at the stated
   speed and track, labels exactly those rows, and leaves every original row intact and in order.
 - **OA-SIM-013** The drift transform moves the victim's reports in the window by the stated rate times the
@@ -2694,6 +2696,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   timestamp does not fit in `i64` is refused with the typed `BadSpoof` before any row is made.
 - **OA-SIM-023** Reading a clip that ends inside a frame (a partial header or a partial body) keeps the valid
   frames and counts the partial frame with the frames that did not decode.
+- **OA-SIM-024** Encoding a plot whose azimuth is not finite or is outside 0 to 360 degrees, or whose range is
+  not finite, is refused with a typed error; it is never encoded as north or zero. 360 degrees wraps to 0.
+- **OA-SIM-025** Encoding a Mode A code above 0o7777 (other than the absent marker) is refused with a typed
+  error; the code is never masked to its low 12 bits.
+- **OA-SIM-026** A detection whose measured range or azimuth is not finite (an oversized profile sigma) gets
+  no plot and is counted in `non_finite`.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -2948,6 +2956,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   climbs) written as one-second knots, interpolated by `oa_truth::truth_at` within a centimetre of the
   analytic path.
 - **OA-TRK-056** Synthetic paths are ordered and bounded (addresses, legs, times); invalid input is refused.
+- **OA-TRK-285** A synthetic path is refused when its start or any knot position is not finite or lies more
+  than 20,037,508 m (half the Earth's circumference) from the plane origin, or when an altitude or vertical
+  rate is past 204,800 ft or 262,144 fpm; no truth is built from it.
+- **OA-TRK-286** A row whose only altitude is geometric passes it flagged geometric whether the source flag
+  or the geometric column carried it, so the tracker counts it as a skipped altitude either way.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

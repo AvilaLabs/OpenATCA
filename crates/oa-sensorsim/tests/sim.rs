@@ -11,7 +11,8 @@ use oa_adsb::{reports_push, Reports, ROW_EMPTY};
 use oa_asterix::{decode_stream, Block};
 use oa_sensorsim::geom::{az_diff, frame_at, offset_deg, polar_of, FT_M, NM_M};
 use oa_sensorsim::plots::{
-    plots_len, to_cat048, Plots, KIND_FALSE, KIND_SPLIT, KIND_TRUE, NONE_ADDR, NONE_ALT, NONE_CODE,
+    plots_len, plots_push, to_cat048, Plot, Plots, KIND_FALSE, KIND_SPLIT, KIND_TRUE, NONE_ADDR,
+    NONE_ALT, NONE_CODE,
 };
 use oa_sensorsim::profile::*;
 use oa_sensorsim::radar::{beam_az_deg, period_ns, scan_start_ns, simulate_radar, RadarSite};
@@ -666,4 +667,87 @@ fn invalid_sites_are_refused() {
         to_cat048(&p, oa_asterix::SourceId::default()),
         Err(SimError::Encode(_))
     ));
+}
+
+/// A one-plot table that encodes, for the encoder tests to spoil one column.
+fn one_plot() -> Plots {
+    let mut p = Plots::default();
+    plots_push(
+        &mut p,
+        &Plot {
+            time_ns: T0,
+            scan: 0,
+            kind: KIND_TRUE,
+            range_m: 50_000.0,
+            az_deg: 123.0,
+            alt_ft: NONE_ALT,
+            mode_a: 0o1234,
+            addr: NONE_ADDR,
+            truth_addr: NONE_ADDR,
+            truth_range_m: 0.0,
+            truth_az_deg: 0.0,
+        },
+    );
+    p
+}
+
+// REQ: OA-SIM-024
+#[test]
+fn a_bearing_that_is_not_a_bearing_is_refused_not_encoded_as_north() {
+    let sid = oa_asterix::SourceId { sac: 7, sic: 9 };
+    assert!(to_cat048(&one_plot(), sid).is_ok());
+    for az in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 361.0] {
+        let mut p = one_plot();
+        p.az_deg[0] = az;
+        assert!(
+            matches!(to_cat048(&p, sid), Err(SimError::Encode(_))),
+            "azimuth {az} was encoded"
+        );
+    }
+    for rg in [f64::NAN, f64::INFINITY, -1000.0] {
+        let mut p = one_plot();
+        p.range_m[0] = rg;
+        assert!(
+            matches!(to_cat048(&p, sid), Err(SimError::Encode(_))),
+            "{rg}"
+        );
+    }
+}
+
+// REQ: OA-SIM-025
+#[test]
+fn a_mode_a_code_past_twelve_bits_is_refused_not_truncated() {
+    let sid = oa_asterix::SourceId { sac: 7, sic: 9 };
+    for code in [0o7777u16, 0] {
+        let mut p = one_plot();
+        p.mode_a[0] = code;
+        assert!(to_cat048(&p, sid).is_ok(), "{code:o}");
+    }
+    for code in [0x1001u16, 0o10000, 0xFFFE] {
+        let mut p = one_plot();
+        p.mode_a[0] = code;
+        assert!(
+            matches!(to_cat048(&p, sid), Err(SimError::Encode(_))),
+            "{code:#x} was encoded"
+        );
+    }
+}
+
+// REQ: OA-SIM-026
+#[test]
+fn a_non_finite_generated_measurement_is_dropped_and_counted() {
+    let truth = truth_of(&stationary_field(100.0));
+    let mut s = site(clean(MODE_S_ATC302));
+    s.profile.az_sigma_deg = f64::MAX;
+    let (plots, stats) = run(&truth, &s, 3);
+    assert!(stats.non_finite > 0, "{stats:?}");
+    for i in 0..plots_len(&plots) {
+        assert!(plots.az_deg[i].is_finite() && (0.0..360.0).contains(&plots.az_deg[i]));
+        assert!(plots.range_m[i].is_finite());
+    }
+    // Every detection is either a plot or counted as non-finite.
+    assert_eq!(
+        stats.detected + stats.non_finite,
+        stats.in_coverage - stats.missed
+    );
 }

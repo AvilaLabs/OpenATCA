@@ -133,14 +133,18 @@ fn columns_match(p: &Plots) -> bool {
     .all(|&l| l == n)
 }
 
-/// One plot as a CAT048 record. Refuses a range past the 16-bit element, an altitude past the
+/// One plot as a CAT048 record. Refuses a range past the 16-bit element, a bearing that is not finite or outside one turn, a
+/// Mode A code past 12 bits, an altitude past the
 /// 14-bit flight level and an address past 24 bits.
 fn record_of(r: &Plot, source: SourceId) -> Result<Cat048, SimError> {
     let rho = (r.range_m / NM_M / CAT048_RHO_NM).round();
     if !(0.0..=65_535.0).contains(&rho) {
         return Err(SimError::Encode("I048/040 range"));
     }
-    // 65 536 counts of azimuth wrap to 0.
+    // A bearing is finite and within one turn; 360 degrees (65 536 counts) wraps to 0.
+    if !(0.0..=360.0).contains(&r.az_deg) {
+        return Err(SimError::Encode("I048/040 azimuth"));
+    }
     let theta = ((r.az_deg / CAT048_THETA_DEG).round() as u32 % 65_536) as u16;
     let ms_of_day = r.time_ns.div_euclid(1_000_000).rem_euclid(86_400_000) as u32;
     let typ = if r.addr != NONE_ADDR { 5 } else { 2 };
@@ -159,8 +163,11 @@ fn record_of(r: &Plot, source: SourceId) -> Result<Cat048, SimError> {
         ..Cat048::default()
     };
     if r.mode_a != NONE_CODE {
+        if r.mode_a > 0o7777 {
+            return Err(SimError::Encode("I048/070 Mode 3/A code"));
+        }
         rec.mode3a = Some(Mode3a {
-            code: r.mode_a & 0xFFF,
+            code: r.mode_a,
             ..Mode3a::default()
         });
     }

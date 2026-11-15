@@ -166,6 +166,10 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     let [e, ve, _, n, vn, _] = x;
     let (lat, lon) = unproject(&frame, e, n);
     let (vel_e, vel_n) = frame_velocity(&frame, e, n, ve, vn);
+    // A state the frame cannot convert (overflow past the chart) is unusable, not a position.
+    if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite()) {
+        return TruthQuery::TooUncertain;
+    }
     // Altitude and vertical rate from the bracketing reports.
     let (a_l, a_r) = (v.alt_ft.get(k).copied(), v.alt_ft.get(k_r).copied());
     let baro_alt_ft = match (a_l, a_r) {

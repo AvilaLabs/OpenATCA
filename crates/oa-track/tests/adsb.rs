@@ -6,7 +6,9 @@
     clippy::indexing_slicing
 )]
 
-use oa_adsb::{reports_push, Reports, Row, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY};
+use oa_adsb::{
+    reports_push, Reports, Row, F_ALT_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY,
+};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::{M_ALT_GEOMETRIC, M_HAS_VEL};
 use oa_truth::{build_truth, DEFAULT_CONFIG, REMOVE_NAMES};
@@ -109,6 +111,28 @@ fn quality_carry_forward_defaults_and_geometric_altitude() {
     e.gs_dkt = NONE_U16;
     let (m, _) = adsb_measurements(&reports(&[e]), &AdsbConfig::default());
     assert_eq!(m[0].flags & M_HAS_VEL, 0);
+}
+
+// REQ: OA-TRK-286
+#[test]
+fn a_geometric_flagged_altitude_passes_flagged_like_a_geometric_column() {
+    // The readsb form: the altitude column is geometric (flag set), no barometric altitude.
+    let mut flagged = row(0, 5, 41.9, -88.3);
+    flagged.baro_alt_ft = NONE_I32;
+    flagged.geom_alt_ft = 35_000;
+    flagged.flags |= F_ALT_GEOM;
+    // The same report with the flag clear and the geometric column set.
+    let mut plain = flagged;
+    plain.flags &= !F_ALT_GEOM;
+    plain.icao = 6;
+    let (m, s) = adsb_measurements(&reports(&[flagged, plain]), &AdsbConfig::default());
+    assert_eq!(s.passed, 2, "{s:?}");
+    for x in &m {
+        assert!(
+            x.flags & M_ALT_GEOMETRIC != 0 && x.alt_ft == 35_000,
+            "{x:?}"
+        );
+    }
 }
 
 // REQ: OA-TRK-020

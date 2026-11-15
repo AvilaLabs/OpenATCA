@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use oa_adsb::{reports_len, reports_row, Reports, F_ALT_GEOM, F_RATE_GEOM, NONE_I32, NONE_U16};
+use oa_adsb::{reports_len, reports_row, Reports, F_RATE_GEOM, NONE_I32, NONE_U16};
 use oa_truth::{
     nacp_epu_m, nacv_epu_mps, quality_check, QualityState, TruthConfig, DEFAULT_CONFIG,
     REMOVE_KINDS, SIGMA95,
@@ -162,7 +162,7 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
                 m.vrate_fpm = row.vrate_fpm;
                 stats.with_vrate += 1;
             }
-        } else if row.geom_alt_ft != NONE_I32 && row.flags & F_ALT_GEOM == 0 {
+        } else if row.geom_alt_ft != NONE_I32 {
             // No barometric altitude: pass the geometric one, flagged, so the interface is
             // exercised and the tracker counts what it does not use.
             m.alt_ft = row.geom_alt_ft;
