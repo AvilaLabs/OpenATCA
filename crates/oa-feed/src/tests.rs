@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use crate::cli::{self, Command, Source};
 use crate::frame::{encode_frame, ErrorKind, Frame, FrameError, Kind};
 use crate::health::{
-    format_summary, lat_bin, lat_bin_upper_ms, latency_quantile_ms, observe_frame, rates_milli,
-    FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED,
+    format_summary, lat_bin, lat_bin_upper_ms, latency_quantile_ms, observe_error, observe_frame,
+    observe_skipped, rates_milli, FeedHealth, LAT_BINS, STATE_CONNECTED, STATE_DISCONNECTED,
 };
 use crate::reader::FrameReader;
 use crate::record::{format_recording, utc_stamp, Format, Opener, Outcome, Recorder};
@@ -1571,4 +1571,388 @@ fn a_failed_idle_flush_or_finish_also_fails_the_recording() {
     // The first error is the one kept.
     assert!(rec.write_frame(&f, 1001, 1001).is_ok());
     assert_eq!(rec.failure(), Some("no space left on device"));
+}
+
+// ---------------------------------------------------------------- pinned behaviour
+
+// REQ: OA-FEED-150
+#[test]
+fn refused_frames_and_skipped_bytes_are_counted_and_summarised() {
+    let kinds = [
+        ErrorKind::BadMagic { found: *b"XXXX" },
+        ErrorKind::UnknownKind { kind: 9 },
+        ErrorKind::Oversize { len: u32::MAX },
+        ErrorKind::Reserved { value: 1 },
+        ErrorKind::Crc {
+            expected: 1,
+            actual: 2,
+        },
+        ErrorKind::Truncated { have: 5 },
+    ];
+    let mut h = FeedHealth::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        observe_error(
+            &mut h,
+            &FrameError {
+                offset: 0,
+                kind: *kind,
+            },
+        );
+        assert_eq!(h.frame_errors, i as u64 + 1);
+        // An error is not a frame: nothing else moves.
+        assert_eq!((h.frames, h.messages, h.rejects), (0, 0, 0));
+    }
+    assert_eq!(h.skipped_bytes, 0);
+    // The skipped figure is the reader's running total: set, not added.
+    observe_skipped(&mut h, 7);
+    assert_eq!(h.skipped_bytes, 7);
+    observe_skipped(&mut h, 12);
+    assert_eq!(h.skipped_bytes, 12);
+    assert_eq!(h.frame_errors, 6);
+    let s = format_summary(&h, 0);
+    assert!(s.contains(" errors=6 skipped=12 "), "{s}");
+    let s = format_summary(&FeedHealth::new(), 0);
+    assert!(s.contains(" errors=0 skipped=0 "), "{s}");
+}
+
+// REQ: OA-FEED-151
+#[test]
+fn every_latency_bin_edge_is_exact() {
+    // (first value of the bin, bin); the value one below belongs to the bin before.
+    let mut edges: Vec<(i64, usize)> = Vec::new();
+    for b in 0..10 {
+        edges.push((b * 10, b as usize));
+    }
+    for b in 0..9 {
+        edges.push((100 + b * 100, 10 + b as usize));
+    }
+    for b in 0..59 {
+        edges.push((1000 + b * 1000, 19 + b as usize));
+    }
+    for b in 0..54 {
+        edges.push((60_000 + b * 10_000, 78 + b as usize));
+    }
+    edges.push((600_000, LAT_BINS - 1));
+    assert_eq!(edges.len(), LAT_BINS);
+    for (i, &(at, bin)) in edges.iter().enumerate() {
+        assert_eq!(lat_bin(at), bin, "at {at}");
+        assert_eq!(lat_bin(at + 1), bin, "at {at} + 1");
+        if i > 0 {
+            assert_eq!(lat_bin(at - 1), bin - 1, "at {at} - 1");
+            assert_eq!(lat_bin_upper_ms(bin - 1), Some(at));
+        }
+    }
+    assert_eq!(lat_bin(-5), 0);
+    assert_eq!(lat_bin(i64::MAX), LAT_BINS - 1);
+    assert_eq!(lat_bin_upper_ms(LAT_BINS - 1), None);
+}
+
+// REQ: OA-FEED-152
+#[test]
+fn a_repeat_of_the_last_seq_is_a_duplicate_and_the_expected_one_is_not_a_gap() {
+    let mut h = FeedHealth::new();
+    let t = 100 * SEC;
+    for seq in [4u64, 5, 5, 6] {
+        observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"x"), t);
+    }
+    assert_eq!(
+        (h.gaps, h.missing, h.duplicates, h.regressions),
+        (0, 0, 1, 0)
+    );
+    // The duplicate leaves the expectation alone.
+    assert_eq!((h.seq_last, h.seq_next), (6, 7));
+    // The first frame repeated is a duplicate too, not a regression.
+    let mut h = FeedHealth::new();
+    for seq in [0u64, 0, 1] {
+        observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"x"), t);
+    }
+    assert_eq!((h.gaps, h.duplicates, h.regressions), (0, 1, 0));
+    // One ahead of the expected is a gap of exactly one missing frame.
+    observe_frame(&mut h, &fr(Kind::Message, 0, 3, t, 0, b"x"), t);
+    assert_eq!((h.gaps, h.missing, h.seq_next), (1, 1, 4));
+    // One below the last (not equal to it) is a regression.
+    observe_frame(&mut h, &fr(Kind::Message, 0, 2, t, 0, b"x"), t);
+    assert_eq!((h.duplicates, h.regressions, h.seq_next), (1, 1, 3));
+}
+
+// REQ: OA-FEED-153
+#[test]
+fn latency_is_the_receive_time_minus_the_jms_time_in_whole_milliseconds() {
+    let mut h = FeedHealth::new();
+    // Receive time 1_000_000_250.9 ms, JMS stamp 1_000_000_000 ms: 250 ms.
+    let recv = 1_000_000_250_900_000;
+    observe_frame(
+        &mut h,
+        &fr(Kind::Message, 0, 0, recv, 1_000_000_000, b"x"),
+        5 * SEC,
+    );
+    assert_eq!(h.lat_max_ms, 250);
+    assert_eq!(h.lat_hist[lat_bin(250)], 1);
+    assert_eq!(h.lat_hist.iter().sum::<u64>(), 1);
+    assert_eq!((h.skew, h.no_timestamp), (0, 0));
+    // The same stamp as the receive time: zero, not skew.
+    observe_frame(
+        &mut h,
+        &fr(Kind::Message, 0, 1, 7_000_000, 7, b"x"),
+        5 * SEC,
+    );
+    assert_eq!((h.skew, h.lat_hist[0]), (0, 1));
+    assert_eq!(h.lat_max_ms, 250);
+    // A stamp ahead of the receive time by one ms is skew.
+    observe_frame(
+        &mut h,
+        &fr(Kind::Message, 0, 2, 7_000_000, 8, b"x"),
+        5 * SEC,
+    );
+    assert_eq!(h.skew, 1);
+}
+
+// REQ: OA-FEED-154
+#[test]
+fn latency_quantile_needs_samples_and_a_denominator() {
+    let mut h = FeedHealth::new();
+    // No samples: nothing, whatever the denominator.
+    assert_eq!(latency_quantile_ms(&h, 1, 2), None);
+    assert_eq!(latency_quantile_ms(&h, 1, 0), None);
+    h.lat_hist[lat_bin(250)] = 4;
+    // Samples but a zero denominator: nothing, and no division by zero.
+    assert_eq!(latency_quantile_ms(&h, 1, 0), None);
+    assert_eq!(latency_quantile_ms(&h, 0, 0), None);
+    // Samples and a denominator: the bin's upper edge.
+    assert_eq!(latency_quantile_ms(&h, 1, 2), Some(300));
+    assert_eq!(latency_quantile_ms(&h, 19, 20), Some(300));
+}
+
+// REQ: OA-FEED-155
+#[test]
+fn summary_text_for_a_disconnected_feed_and_for_no_latency_samples() {
+    let mut h = FeedHealth::new();
+    let s = format_summary(&h, 0);
+    assert!(s.starts_with("state=unknown "), "{s}");
+    observe_frame(
+        &mut h,
+        &fr(Kind::Status, 0, 0, SEC, 0, b"state=disconnected\n"),
+        SEC,
+    );
+    let s = format_summary(&h, SEC);
+    assert!(s.starts_with("state=disconnected "), "{s}");
+    // No latency samples: all three quantities print a dash, never a number or the overflow.
+    assert!(
+        s.contains(" lat_p50_ms=- lat_p95_ms=- lat_max_ms=- "),
+        "{s}"
+    );
+    // A message without a JMS stamp is still no sample.
+    observe_frame(&mut h, &fr(Kind::Message, 0, 1, SEC, 0, b"x"), SEC);
+    let s = format_summary(&h, SEC);
+    assert!(
+        s.contains(" lat_p50_ms=- lat_p95_ms=- lat_max_ms=- "),
+        "{s}"
+    );
+    // A skewed sample is kept out of the histogram, so it is no sample either.
+    observe_frame(&mut h, &fr(Kind::Message, 0, 2, SEC, 5_000, b"x"), SEC);
+    let s = format_summary(&h, SEC);
+    assert!(s.contains(" skew=1 "), "{s}");
+    assert!(
+        s.contains(" lat_p50_ms=- lat_p95_ms=- lat_max_ms=- "),
+        "{s}"
+    );
+    // One real sample replaces the dashes.
+    observe_frame(&mut h, &fr(Kind::Message, 0, 3, SEC, 1_000 - 25, b"x"), SEC);
+    let s = format_summary(&h, SEC);
+    assert!(
+        s.contains(" lat_p50_ms=25 lat_p95_ms=25 lat_max_ms=25 "),
+        "{s}"
+    );
+}
+
+// REQ: OA-FEED-156
+#[test]
+fn push_takes_exactly_what_fits_and_compacts_when_room_is_short() {
+    let mut buf = big_buf();
+    let cap = buf.len();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    // Exactly full, then one byte over.
+    let junk = vec![0u8; cap + 1];
+    assert_eq!(r.push(&junk), cap);
+    assert_eq!(r.push(b"x"), 0);
+
+    // Consumed bytes are reclaimed: an emptied buffer takes a full buffer again.
+    let a = msg(0, &[1u8; 100]);
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    assert_eq!(r.push(&a), a.len());
+    assert!(r.next().unwrap().is_ok());
+    assert!(r.next().is_none());
+    assert_eq!(r.push(&junk), cap);
+
+    // Frame A is consumed, the first four bytes of a maximum frame C remain.
+    let a = msg(0, &[1u8; 1000]);
+    let c = msg(1, &vec![2u8; MAX_PAYLOAD]);
+    assert_eq!(c.len(), cap);
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    assert_eq!(r.push(&cat(&[&a, &c[..4]])), a.len() + 4);
+    assert!(r.next().unwrap().is_ok());
+    assert!(r.next().is_none());
+    assert_eq!(r.offset(), a.len() as u64);
+    // The rest of C does not fit behind the consumed A, but fits once compacted: all of it is
+    // taken, one byte more is not.
+    let mut rest = c[4..].to_vec();
+    rest.push(0);
+    assert_eq!(r.push(&rest), cap - 4);
+    let f = r.next().unwrap().unwrap();
+    assert_eq!(
+        (f.seq, f.offset, f.payload.len()),
+        (1, a.len() as u64, MAX_PAYLOAD)
+    );
+    assert!(f.payload.iter().all(|&b| b == 2));
+
+    // Room that is exactly enough needs no compaction and loses nothing.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    let b = msg(2, &[3u8; 500]);
+    assert_eq!(r.push(&cat(&[&a, &b[..10]])), a.len() + 10);
+    assert!(r.next().unwrap().is_ok());
+    assert!(r.next().is_none());
+    let room = cap - (a.len() + 10);
+    let fill = vec![0u8; room];
+    assert_eq!(r.push(&b[10..]), b.len() - 10);
+    assert_eq!(
+        r.push(&fill[..room - (b.len() - 10)]),
+        room - (b.len() - 10)
+    );
+    let f = r.next().unwrap().unwrap();
+    assert_eq!((f.seq, f.payload.len()), (2, 500));
+    assert!(f.payload.iter().all(|&b| b == 3));
+}
+
+// REQ: OA-FEED-157
+#[test]
+fn a_frame_is_available_exactly_when_all_of_its_bytes_are() {
+    let f = msg(7, b"hello");
+    let n = f.len();
+    let next_start = *b"OAF1";
+    let mut buf = big_buf();
+    // One byte short: not yet.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&f[..n - 1]);
+    assert!(r.next().is_none());
+    assert_eq!(r.offset(), 0);
+    // Exactly one frame.
+    r.push(&f[n - 1..]);
+    let g = r.next().unwrap().unwrap();
+    assert_eq!((g.seq, g.payload, g.raw.len()), (7, &b"hello"[..], n));
+    assert!(r.next().is_none());
+    // One byte over, and the whole magic of the next frame over.
+    for extra in [&next_start[..1], &next_start[..]] {
+        let mut r = FrameReader::new(&mut buf).unwrap();
+        r.push(&cat(&[&f, extra]));
+        let g = r.next().unwrap().unwrap();
+        assert_eq!((g.seq, g.raw.len()), (7, n));
+        assert!(r.next().is_none());
+        assert_eq!(r.offset(), n as u64);
+        assert_eq!(r.skipped_total(), 0);
+    }
+    // An empty payload is the smallest frame, and is delivered at HEADER_LEN + TRAILER_LEN.
+    let e = msg(1, b"");
+    assert_eq!(e.len(), HEADER_LEN + TRAILER_LEN);
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&e[..HEADER_LEN]);
+    assert!(r.next().is_none());
+    r.push(&e[HEADER_LEN..]);
+    assert_eq!(r.next().unwrap().unwrap().payload.len(), 0);
+    // Magic: three bytes wait, four are judged.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(b"XXX");
+    assert!(r.next().is_none());
+    r.push(b"X");
+    let err = r.next().unwrap().unwrap_err();
+    assert_eq!(err.kind, ErrorKind::BadMagic { found: *b"XXXX" });
+    // Header: a bad kind is judged at the full header, not before.
+    let mut bad = e.clone();
+    bad[4] = 9;
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&bad[..HEADER_LEN - 1]);
+    assert!(r.next().is_none());
+    r.push(&bad[HEADER_LEN - 1..HEADER_LEN]);
+    let err = r.next().unwrap().unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownKind { kind: 9 });
+}
+
+// REQ: OA-FEED-158
+#[test]
+fn offset_is_the_absolute_stream_position_through_resync_and_compaction() {
+    let mut buf = big_buf();
+    let a = msg(0, b"aaaa");
+    let b = msg(1, b"bbbbbbbb");
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    assert_eq!(r.offset(), 0);
+    r.push(&cat(&[&a, &b]));
+    assert!(r.next().unwrap().is_ok());
+    assert_eq!(r.offset(), a.len() as u64);
+    assert!(r.next().unwrap().is_ok());
+    assert_eq!(r.offset(), (a.len() + b.len()) as u64);
+    assert!(r.next().is_none());
+    assert_eq!(r.offset(), (a.len() + b.len()) as u64);
+
+    // Seven bytes of garbage with no magic, then a frame.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&cat(&[b"garbage", &a]));
+    let err = r.next().unwrap().unwrap_err();
+    assert_eq!(err.offset, 0);
+    assert_eq!(r.offset(), 1);
+    let g = r.next().unwrap().unwrap();
+    assert_eq!((g.offset, g.skipped_before), (7, 7));
+    assert_eq!(r.offset(), 7 + a.len() as u64);
+    assert_eq!(r.skipped_total(), 7);
+
+    // Garbage alone: all but a possible partial magic at the tail is dropped.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(b"xxxxxxxxxx");
+    assert!(r.next().unwrap().is_err());
+    assert_eq!(r.offset(), 1);
+    assert!(r.next().is_none());
+    assert_eq!(r.offset(), 7);
+    assert_eq!(r.skipped_total(), 7);
+
+    // Compaction moves bytes inside the buffer but not the stream position.
+    let c = msg(2, &vec![5u8; MAX_PAYLOAD]);
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&cat(&[&a, &c[..4]]));
+    assert!(r.next().unwrap().is_ok());
+    assert!(r.next().is_none());
+    assert_eq!(r.offset(), a.len() as u64);
+    assert_eq!(r.push(&c[4..]), c.len() - 4);
+    assert_eq!(r.offset(), a.len() as u64);
+    let f = r.next().unwrap().unwrap();
+    assert_eq!(f.offset, a.len() as u64);
+    assert_eq!(r.offset(), (a.len() + c.len()) as u64);
+    // A truncated end is skipped bytes, and the offset moves past them.
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&b[..10]);
+    assert!(r.next().is_none());
+    let e = r.finish().unwrap();
+    assert_eq!(e.offset, 0);
+    assert_eq!(r.offset(), 10);
+}
+
+// REQ: OA-FEED-159
+#[test]
+fn recording_size_defaults_are_two_gib_and_256_mib() {
+    assert_eq!(cli::DEFAULT_MAX_BYTES, 2_147_483_648);
+    assert_eq!(cli::DEFAULT_ROTATE_BYTES, 268_435_456);
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let live = |v: &[&str]| match cli::parse(&args(v)).unwrap() {
+        Command::Live(l) => l,
+        other => panic!("{other:?}"),
+    };
+    let l = live(&["--stdin"]);
+    assert_eq!(l.max_bytes, 2 * 1024 * 1024 * 1024);
+    assert_eq!(l.rotate_bytes, 256 * 1024 * 1024);
+    // Each default holds when only the other is given.
+    let l = live(&["--stdin", "--max-bytes", "1000"]);
+    assert_eq!(
+        (l.max_bytes, l.rotate_bytes),
+        (1000, cli::DEFAULT_ROTATE_BYTES)
+    );
+    let l = live(&["--stdin", "--rotate-bytes", "500"]);
+    assert_eq!((l.max_bytes, l.rotate_bytes), (cli::DEFAULT_MAX_BYTES, 500));
+    assert_eq!(cli::DEFAULT_SUMMARY_SECS, 10);
 }
