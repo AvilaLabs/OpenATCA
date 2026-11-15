@@ -61,3 +61,8 @@ indexing_slicing = "deny"
 debug = 1
 # RULESET E3: overflow is checked in release builds too; it panics rather than wraps.
 overflow-checks = true
+
+[profile.dev]
+# Tests and debug builds are optimised: the real-data suites are compute-bound and took most of
+# each full test run unoptimised. Debug assertions and overflow checks stay on (dev defaults).
+opt-level = 1
