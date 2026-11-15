@@ -110,8 +110,8 @@ fn the_real_recordings_replay_to_the_same_state_every_time() {
     );
     assert_eq!(a.final_hash, b.final_hash);
     assert_eq!(a.final_hash, c.final_hash);
-    assert_eq!(a.p.checkpoints, b.p.checkpoints);
-    assert_eq!(a.p.checkpoints, c.p.checkpoints);
+    assert_eq!(a.p.checkpoints.to_vec(), b.p.checkpoints.to_vec());
+    assert_eq!(a.p.checkpoints.to_vec(), c.p.checkpoints.to_vec());
     assert!(p.frames[0] > 0 && p.frames[1] > 0);
     assert!(p.rows_applied[0] > 0 && p.rows_applied[1] > 0);
     assert!(p.table.live > 0);
@@ -163,7 +163,7 @@ fn a_real_adsb_clip_replays_to_the_same_state_every_time() {
     assert_eq!(errors_total(&p.errors), 0);
     assert_eq!(p.adsb.stats.refused_full, 0);
     assert_eq!(a.final_hash, b.final_hash);
-    assert_eq!(a.p.checkpoints, b.p.checkpoints);
+    assert_eq!(a.p.checkpoints.to_vec(), b.p.checkpoints.to_vec());
 }
 
 /// The `.msg` files of `OPENATCA_DATA/scds/<dir>`, in name order; `None` (with a note) when the
@@ -281,7 +281,7 @@ fn real_tfms_and_fns_samples_replay_to_the_same_state_every_time() {
     assert!(p.rows_applied[tf] > 0 && p.rows_applied[fnx] > 0);
     assert!(oa_replay::tfms_live(&p.tfms) > 0 && oa_replay::fns_live(&p.fns) > 0);
     assert_eq!(snapshot(&p).hash, snapshot(&q).hash);
-    assert_eq!(p.checkpoints, q.checkpoints);
+    assert_eq!(p.checkpoints.to_vec(), q.checkpoints.to_vec());
     assert_eq!(p.errors, q.errors);
     for k in [ErrKind::BadRow, ErrKind::TimeRegression, ErrKind::FnsNoKey] {
         assert_eq!(p.errors[k as usize], 0, "{}", ERR_NAMES[k as usize]);

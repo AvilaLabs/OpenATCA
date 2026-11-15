@@ -1120,7 +1120,7 @@ fn a_mixed_swim_replay_from_recordings_is_the_same_however_it_is_read() {
     for (order, chunk) in [([2usize, 1, 0], 1), ([1, 0, 2], 37), ([0, 2, 1], 4097)] {
         let q = run(&order, chunk);
         assert_eq!(snapshot(&q), want, "{order:?} {chunk}");
-        assert_eq!(q.checkpoints, p.checkpoints);
+        assert_eq!(q.checkpoints.to_vec(), p.checkpoints.to_vec());
         assert_eq!(q.errors, p.errors);
     }
 }

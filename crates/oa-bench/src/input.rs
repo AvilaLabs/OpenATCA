@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use oa_replay::{
-    list_recordings, merge_streams, new_pipeline, process_frame, replay_hash, FeedKind,
-    PipelineConfig, StreamSpec,
+    list_recordings, merge_streams, new_pipeline, pipeline_drain_checkpoints, process_frame,
+    replay_hash, FeedKind, PipelineConfig, StreamSpec,
 };
 use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 
@@ -252,6 +252,9 @@ pub fn load_with(feeds: &[FeedInput], open: &Opener) -> io::Result<Loaded> {
             .collect();
         let mut sink = |m: &oa_replay::Merged<'_>| {
             process_frame(&mut p, m.feed, m.kind, m.recv_ns, m.payload);
+            // Only the final hash is kept: the checkpoints are taken out as they are recorded, so
+            // none is ever dropped for want of room.
+            pipeline_drain_checkpoints(&mut p, |_| {});
             if m.kind == oa_feed::Kind::Message {
                 ingest_one(
                     &mut leg,

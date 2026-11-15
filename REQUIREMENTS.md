@@ -1309,6 +1309,23 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-190** A feed that resumes alone after a pause, with another feed's last frame just before the pause
   (merged order), takes a forward step after three frames: the ages of both feeds' rows are shifted and the
   rows marked stale, not refused.
+- **OA-RPL-230** The pipeline's checkpoints are held in a ring allocated at construction (`checkpoint_ring`,
+  default 8,640, 24 hours at the default 10 s); when it is full the oldest undrained checkpoint is dropped
+  and counted (`checkpoints_dropped` in the summary) and the ring never grows, however many checkpoints
+  are recorded.
+- **OA-RPL-231** Consumers take checkpoints out with `pipeline_drain_checkpoints`: a run that drains as it
+  goes (the `oa-replay` binary, the benchmark loader) drops none, even with a ring of one.
+- **OA-RPL-232** `checkpoint_ring` of 0 and a checkpoint spacing under 1 second are refused when the
+  pipeline is built (a checkpoint hashes every table, so a shorter spacing would hash on every frame).
+- **OA-RPL-233** `replay_hash` is the hash of the table contents; `replay_state_digest` adds the replay
+  time, every field of the clock and the sweep and checkpoint cadence state: two pipelines with equal
+  content hashes but different clocks (one holding a candidate step) have different digests, and the
+  same further frames then step one and not the other. `replay_hash` is unchanged.
+- **OA-RPL-234** A failed write of a checkpoint line, the summary or the timing line stops `oa-replay`,
+  prints one line on stderr (a closed pipe is named) and exits with status 1; the checkpoint whose line
+  failed is not counted as printed.
+- **OA-RPL-235** A failing after-frame hook stops `run_streams_with` at that frame and its error is
+  returned; no later frame is read.
 
 ## M5 — Terrain and obstacles
 

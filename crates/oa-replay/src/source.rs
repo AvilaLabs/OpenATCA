@@ -331,6 +331,19 @@ pub fn merge_streams(
     chunk: usize,
     sink: &mut dyn FnMut(&Merged<'_>),
 ) -> io::Result<MergeReport> {
+    try_merge_streams(specs, chunk, &mut |m| {
+        sink(m);
+        Ok(())
+    })
+}
+
+/// [`merge_streams`] with a sink that can fail: the first error it returns stops the merge (no
+/// further frame is read or handed on) and is returned.
+pub fn try_merge_streams(
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
+) -> io::Result<MergeReport> {
     let n = specs.len();
     let mut bufs: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; MAX_FRAME_LEN]).collect();
     let mut streams: Vec<Stream<'_>> = Vec::with_capacity(n);
@@ -382,7 +395,7 @@ pub fn merge_streams(
             stream: i as u32,
             offset: s.head.offset,
             payload: &s.head.payload,
-        });
+        })?;
         if s.advance()? {
             heap.push(Reverse((
                 merge_key(s.head.recv_ns, s.feed, s.head.seq, i as u32, s.head.offset),
@@ -419,9 +432,24 @@ pub fn run_streams(
     chunk: usize,
     after_frame: &mut dyn FnMut(&Pipeline),
 ) -> io::Result<MergeReport> {
-    let report = merge_streams(specs, chunk, &mut |m| {
-        process_frame(p, m.feed, m.kind, m.recv_ns, m.payload);
+    run_streams_with(p, specs, chunk, &mut |p| {
         after_frame(p);
+        Ok(())
+    })
+}
+
+/// [`run_streams`] with a hook that may take checkpoints out of the pipeline
+/// ([`crate::pipeline_drain_checkpoints`]) and may fail: its first error stops the run and is
+/// returned, with the frames before it processed.
+pub fn run_streams_with(
+    p: &mut Pipeline,
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
+) -> io::Result<MergeReport> {
+    let report = try_merge_streams(specs, chunk, &mut |m| {
+        process_frame(p, m.feed, m.kind, m.recv_ns, m.payload);
+        after_frame(p)
     })?;
     for (a, b) in p.errors.iter_mut().zip(report.errors.iter()) {
         *a = a.saturating_add(*b);

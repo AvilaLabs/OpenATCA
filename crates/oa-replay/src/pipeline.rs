@@ -29,9 +29,11 @@
 //! that time), stamped with that frame's replay time. A long gap with no frames records one
 //! checkpoint, since the state did not change inside it.
 //!
-//! Memory: the parser, decoders, event and row tables and the flight table are all allocated in
-//! [`new_pipeline`]. The checkpoint list grows with the length of the run (one entry per
-//! interval of replay time), the stated exception for an offline harness (C6).
+//! Memory: the parser, decoders, event and row tables, the flight table and the checkpoint ring
+//! are all allocated in [`new_pipeline`]; nothing grows with the length of the run (C5). The
+//! ring holds `checkpoint_ring` checkpoints for the consumer to take with
+//! [`pipeline_drain_checkpoints`]; when it is full the oldest undrained one is dropped and
+//! counted ([`CheckpointRing::dropped`]).
 
 use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, PayloadError, Reports};
 use oa_feed::Kind;
@@ -97,6 +99,13 @@ pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns", "ads
 
 /// Default spacing of checkpoints: 10 s of replay time.
 pub const DEFAULT_CHECKPOINT_NS: i64 = 10 * NS_PER_S;
+/// Smallest checkpoint spacing: 1 s. Each checkpoint hashes every table, so a spacing under the
+/// gap between frames (the SFDPS feed's frames come at most 0.5 s apart) would hash the whole
+/// state on every frame; a second is below any spacing the measurements want and keeps a run's
+/// cost bounded by its replay time.
+pub const MIN_CHECKPOINT_NS: i64 = NS_PER_S;
+/// Default checkpoints the ring holds: 24 hours at the default spacing.
+pub const DEFAULT_CHECKPOINT_RING: usize = 8_640;
 /// Rows the SFDPS event table and the TBFM row table hold for one document. The measured feeds
 /// carry at most 100 messages per SFDPS document. A document with more is decoded as far as it
 /// fits, never refused whole, and the messages or rows past that point are counted
@@ -161,6 +170,8 @@ pub struct PipelineConfig {
     pub table: TableConfig,
     /// Replay-time spacing of checkpoints, ns.
     pub checkpoint_ns: i64,
+    /// Checkpoints the ring holds before the oldest undrained one is dropped; at least 1.
+    pub checkpoint_ring: usize,
 }
 
 impl Default for PipelineConfig {
@@ -168,6 +179,7 @@ impl Default for PipelineConfig {
         PipelineConfig {
             table: TableConfig::default(),
             checkpoint_ns: DEFAULT_CHECKPOINT_NS,
+            checkpoint_ring: DEFAULT_CHECKPOINT_RING,
         }
     }
 }
@@ -187,13 +199,119 @@ pub struct Checkpoint {
     pub hash: Digest,
 }
 
+/// A fixed ring of checkpoints, allocated once. Pushing onto a full ring drops the oldest
+/// undrained checkpoint and counts it. Plain data (A1).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug)]
+pub struct CheckpointRing {
+    buf: Vec<Checkpoint>,
+    head: usize,
+    len: usize,
+    dropped: u64,
+    recorded: u64,
+}
+
+fn empty_checkpoint() -> Checkpoint {
+    Checkpoint {
+        replay_ns: 0,
+        frames: 0,
+        rows_applied: 0,
+        flights: 0,
+        hash: [0; 32],
+    }
+}
+
+impl CheckpointRing {
+    fn new(capacity: usize) -> CheckpointRing {
+        CheckpointRing {
+            buf: vec![empty_checkpoint(); capacity],
+            head: 0,
+            len: 0,
+            dropped: 0,
+            recorded: 0,
+        }
+    }
+
+    /// Checkpoints held now, not yet drained.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether no checkpoint is held.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Checkpoints the ring can hold; fixed at construction.
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Checkpoints dropped because the ring was full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Checkpoints recorded in all, drained, dropped or held.
+    pub fn recorded(&self) -> u64 {
+        self.recorded
+    }
+
+    /// The `i`th held checkpoint, oldest first.
+    pub fn get(&self, i: usize) -> Option<&Checkpoint> {
+        if i >= self.len || self.buf.is_empty() {
+            return None;
+        }
+        self.buf.get((self.head + i) % self.buf.len())
+    }
+
+    /// The held checkpoints, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &Checkpoint> + '_ {
+        (0..self.len).filter_map(|i| self.get(i))
+    }
+
+    /// A copy of the held checkpoints, oldest first (allocates: for tests and reports).
+    pub fn to_vec(&self) -> Vec<Checkpoint> {
+        self.iter().copied().collect()
+    }
+
+    fn push(&mut self, c: Checkpoint) {
+        let cap = self.buf.len();
+        if cap == 0 {
+            self.dropped += 1;
+            self.recorded += 1;
+            return;
+        }
+        if self.len == cap {
+            self.head = (self.head + 1) % cap;
+            self.len -= 1;
+            self.dropped += 1;
+        }
+        let at = (self.head + self.len) % cap;
+        if let Some(slot) = self.buf.get_mut(at) {
+            *slot = c;
+            self.len += 1;
+        }
+        self.recorded += 1;
+    }
+
+    fn pop_oldest(&mut self) {
+        if self.len > 0 && !self.buf.is_empty() {
+            self.head = (self.head + 1) % self.buf.len();
+            self.len -= 1;
+        }
+    }
+}
+
 /// Why a pipeline could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PipelineError {
     /// The table settings were refused.
     Config(ConfigError),
-    /// `checkpoint_ns` is not positive.
+    /// `checkpoint_ns` is below [`MIN_CHECKPOINT_NS`].
     Checkpoint(i64),
+    /// `checkpoint_ring` is 0.
+    CheckpointRing(usize),
     /// The XML parser could not be built.
     Parser,
 }
@@ -232,8 +350,8 @@ pub struct Pipeline {
     /// are).
     pub stale_marked: u64,
     next_checkpoint_ns: i64,
-    /// Checkpoints recorded.
-    pub checkpoints: Vec<Checkpoint>,
+    /// Checkpoints recorded and not yet drained ([`pipeline_drain_checkpoints`]).
+    pub checkpoints: CheckpointRing,
     /// Frames fed per feed (every kind of frame).
     pub frames: [u64; FEED_COUNT],
     /// MESSAGE frames per feed.
@@ -263,8 +381,11 @@ pub struct Pipeline {
 
 /// Builds a pipeline. Everything is allocated here.
 pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
-    if cfg.checkpoint_ns <= 0 {
+    if cfg.checkpoint_ns < MIN_CHECKPOINT_NS {
         return Err(PipelineError::Checkpoint(cfg.checkpoint_ns));
+    }
+    if cfg.checkpoint_ring == 0 {
+        return Err(PipelineError::CheckpointRing(cfg.checkpoint_ring));
     }
     let table = new_table(cfg.table).map_err(PipelineError::Config)?;
     let parser = Parser::new(doc_xml_limits()).map_err(|_| PipelineError::Parser)?;
@@ -288,7 +409,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         clock: Clock::default(),
         stale_marked: 0,
         next_checkpoint_ns: i64::MIN,
-        checkpoints: Vec::new(),
+        checkpoints: CheckpointRing::new(cfg.checkpoint_ring),
         frames: [0; FEED_COUNT],
         messages: [0; FEED_COUNT],
         other_frames: [0; FEED_COUNT],
@@ -330,7 +451,31 @@ pub fn snapshot(p: &Pipeline) -> Checkpoint {
     }
 }
 
-/// The hash of the whole replay state. Until an ADS-B, TFMS or FNS frame has been fed this is
+/// Hands every held checkpoint, oldest first, to `f` and removes it from the ring.
+pub fn pipeline_drain_checkpoints(p: &mut Pipeline, mut f: impl FnMut(&Checkpoint)) {
+    let _ = pipeline_try_drain_checkpoints(p, |c| {
+        f(c);
+        Ok::<(), ()>(())
+    });
+}
+
+/// [`pipeline_drain_checkpoints`] with a consumer that can fail: a checkpoint is removed only
+/// after `f` returned `Ok` for it, so the first error stops the drain with that checkpoint
+/// still held.
+pub fn pipeline_try_drain_checkpoints<E>(
+    p: &mut Pipeline,
+    mut f: impl FnMut(&Checkpoint) -> Result<(), E>,
+) -> Result<(), E> {
+    while let Some(c) = p.checkpoints.get(0) {
+        f(c)?;
+        p.checkpoints.pop_oldest();
+    }
+    Ok(())
+}
+
+/// The hash of the table contents: the flight table and, once a frame of their feed has been fed,
+/// the ADS-B, TFMS and FNS tables. It does not cover the replay clock ([`replay_state_digest`]
+/// does), so two pipelines with equal contents hash equal whatever their clocks hold. Until an ADS-B, TFMS or FNS frame has been fed this is
 /// exactly [`state_hash`] of the flight table, so replays of SFDPS and TBFM alone hash as they
 /// always did. With ADS-B frames only it is SHA-256 over the tag `OATSA`, the flight-table hash
 /// and the ADS-B table's serialisation ([`adsb_hash_into`]), as before TFMS and FNS were applied.
@@ -365,6 +510,42 @@ pub fn replay_hash(p: &Pipeline) -> Digest {
     if fns {
         fns_hash_into(&mut h, &p.fns);
     }
+    h.finalize()
+}
+
+/// The digest of the whole replay state: SHA-256 over the tag `OATSD`, the content hash
+/// ([`replay_hash`]), the replay time, and then every field of the clock (each feed's `last_ns`,
+/// `seen`, `ever`, `cand_last_ns`, `cand_n` and `cand_back`, then `held`, `forward_steps`,
+/// `backward_steps` and `steps_outvoted`) and the cadence state (the next checkpoint time and
+/// the next sweep time of the flight, ADS-B and TFMS tables), integers as eight little-endian
+/// bytes and flags as one byte. Two pipelines with equal digests behave alike on any further
+/// input; equal [`replay_hash`] alone does not say so, as a held candidate step changes what the
+/// next frames do without changing a table.
+pub fn replay_state_digest(p: &Pipeline) -> Digest {
+    let mut h = Sha256::new();
+    let _ = h.update(b"OATSD");
+    let _ = h.update(&replay_hash(p));
+    let i = |h: &mut Sha256, v: i64| {
+        let _ = h.update(&v.to_le_bytes());
+    };
+    let u = |h: &mut Sha256, v: u64| {
+        let _ = h.update(&v.to_le_bytes());
+    };
+    i(&mut h, p.replay_ns);
+    for f in &p.clock.feeds {
+        i(&mut h, f.last_ns);
+        i(&mut h, f.cand_last_ns);
+        u(&mut h, u64::from(f.cand_n));
+        let _ = h.update(&[u8::from(f.seen), u8::from(f.ever), u8::from(f.cand_back)]);
+    }
+    u(&mut h, p.clock.held);
+    u(&mut h, p.clock.forward_steps);
+    u(&mut h, p.clock.backward_steps);
+    u(&mut h, p.clock.steps_outvoted);
+    i(&mut h, p.next_checkpoint_ns);
+    i(&mut h, p.table.next_sweep_ns);
+    i(&mut h, p.adsb.next_sweep_ns);
+    i(&mut h, p.tfms.next_sweep_ns);
     h.finalize()
 }
 
