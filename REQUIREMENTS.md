@@ -1836,10 +1836,19 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   integer past the f32 range) is refused with a typed error for every packing; only a point the
   field marks missing comes out as NaN. `oa-wind` refuses an infinite cell when building an hour.
 - **OA-GRIB-051** A complex-packed field's scratch memory (group tables, packed integers and the
-  decoded values) is checked against a budget derived from the point count and the data
-  section's size before anything is allocated: one length-one group per point with zero-bit
-  tables and no data is refused, the limits are small enough to test with modelled values, and the
-  real RAP, HRRR and GEFS fields pass.
+  decoded values) is computed exactly and checked against a cap before anything is allocated:
+  one length-one group per point with zero-bit tables and no data is refused when it exceeds the
+  cap, and the limits are small enough to test with modelled values. The real RAP, HRRR and GEFS
+  fields pass.
+- **OA-GRIB-052** The cap is `Limits::scratch_bytes`, default 128 MiB, and does not depend on the
+  size of the data section. A 16 Mi-point grid of length-one groups needs 448 MiB and is refused;
+  a test builds the same construction at 300,000 points under a 1 MiB cap and sees
+  `ScratchBudget` with the exact byte counts.
+- **OA-GRIB-053** Scratch is 28 bytes per point-and-group (16 per group, 12 per point): the RAP 130
+  grid (151,987 points) needs under 5 MB even with a group per point and HRRR CONUS (1,905,141
+  points) 53 MB, so an ordinary field, including a constant one, decodes under the default.
+- **OA-GRIB-054** A complex field that declares more groups than points is refused with a typed
+  error before its tables are read.
 
 ## JPEG 2000 decoder (oa-j2k)
 
