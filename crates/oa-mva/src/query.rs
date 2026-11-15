@@ -35,6 +35,25 @@ fn to_e7(lat: f64, lon: f64) -> Result<(i32, i32), MvaError> {
     Ok(((lat * f).round() as i32, (lon * f).round() as i32))
 }
 
+/// The longitude of a point as seen from a sector whose bounding box spans `lo0..=lo1`: the
+/// alias of `lon` (360 degrees apart) nearest the box centre, so +180 and -180 are the same
+/// meridian. A sector never crosses the seam (the loader's extent limit), so its own vertices
+/// need no unwrapping. An alias outside the i32 range is more than 34 degrees past the seam and
+/// far from every sector, so the plain value stands.
+fn unwrap_lon(lon: i32, lo0: i32, lo1: i32) -> i32 {
+    let full = 360 * E7;
+    let centre = (i64::from(lo0) + i64::from(lo1)) / 2;
+    let d = i64::from(lon) - centre;
+    let shifted = if d > full / 2 {
+        i64::from(lon) - full
+    } else if d < -(full / 2) {
+        i64::from(lon) + full
+    } else {
+        return lon;
+    };
+    i32::try_from(shifted).unwrap_or(lon)
+}
+
 /// Whether sector `s` contains the point (`lat`, `lon`), 1e-7 degrees. The sector is the closed
 /// set: its exterior ring and every hole's ring belong to it. A point strictly inside a hole is
 /// outside the sector. A sector that does not exist contains nothing.
@@ -48,6 +67,7 @@ pub fn sector_contains(m: &Model, s: SectorIx, lat: i32, lon: i32) -> bool {
     ) else {
         return false;
     };
+    let lon = unwrap_lon(lon, lo0, lo1);
     if lat < la0 || lat > la1 || lon < lo0 || lon > lo1 {
         return false;
     }
@@ -208,6 +228,7 @@ fn dist_nm(m: &Model, s: SectorIx, la: i32, lo: i32, limit_nm: f64) -> f64 {
     ) else {
         return f64::INFINITY;
     };
+    let lo = unwrap_lon(lo, lo0, lo1);
     let f = E7 as f64;
     let (pla, plo) = (f64::from(la) / f, f64::from(lo) / f);
     let top = pla

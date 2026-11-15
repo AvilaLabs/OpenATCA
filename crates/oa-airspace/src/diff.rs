@@ -229,6 +229,25 @@ fn boundary_objects(m: &Model) -> Result<Objects, ModelError> {
                 "ceiling".into(),
                 format!("{}{}", alt(g(&b.ceiling_ft, row)?), agl(&b.ceiling_agl)),
             ),
+            (
+                "time_code".into(),
+                match g(&b.time_code, row)? {
+                    time_code::CONTINUOUS => "continuous",
+                    time_code::PART_TIME => "part-time",
+                    _ => "unknown",
+                }
+                .into(),
+            ),
+            (
+                "level".into(),
+                match g(&b.level, row)? {
+                    level::HIGH => "high",
+                    level::LOW => "low",
+                    level::BOTH => "both",
+                    _ => "unknown",
+                }
+                .into(),
+            ),
         ];
         let vs = g(&b.vertices, row)?;
         let vr = span_rows(vs.start.row(), vs.len)?;

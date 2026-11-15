@@ -45,6 +45,11 @@ pub const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_NAME_BYTES: usize = 4096;
 /// Limit: bytes of one GNU long-name/long-link record or PAX header.
 pub const MAX_META_BYTES: usize = 64 * 1024;
+/// Limit: long-name, long-link and PAX records consumed by one `next_entry` call (a run of
+/// zero-length ones counts), so a caller's per-call work is bounded.
+pub const MAX_META_RECORDS: usize = 64;
+/// Limit: bytes of content of those records, together, in one `next_entry` call.
+pub const MAX_META_TOTAL_BYTES: usize = 1024 * 1024;
 
 /// The enforced limits, gathered so tests (and callers with tighter needs) can lower them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +58,8 @@ pub struct Limits {
     pub max_entry_bytes: u64,
     pub max_name_bytes: usize,
     pub max_meta_bytes: usize,
+    pub max_meta_records: usize,
+    pub max_meta_total_bytes: usize,
 }
 
 /// The limits above, as one value.
@@ -60,6 +67,8 @@ pub const DEFAULT_LIMITS: Limits = Limits {
     max_entry_bytes: MAX_ENTRY_BYTES,
     max_name_bytes: MAX_NAME_BYTES,
     max_meta_bytes: MAX_META_BYTES,
+    max_meta_records: MAX_META_RECORDS,
+    max_meta_total_bytes: MAX_META_TOTAL_BYTES,
 };
 
 /// One entry's header, after long names and PAX overrides are applied.
@@ -140,6 +149,10 @@ pub enum TarError {
     NameTooLong { offset: u64, len: u64 },
     /// A long-name or PAX record is above [`Limits::max_meta_bytes`].
     MetaTooLarge { offset: u64, size: u64 },
+    /// One call met more extension records, or more of their content, than
+    /// [`Limits::max_meta_records`] or [`Limits::max_meta_total_bytes`] allow; the offset is the
+    /// record over the cap.
+    TooManyMeta { offset: u64, records: u64 },
     /// The underlying reader failed.
     Io { offset: u64, error: io::Error },
     /// An earlier error ended this reader.
@@ -168,6 +181,12 @@ impl fmt::Display for TarError {
                 write!(
                     f,
                     "tar: extension record at byte {offset} is {size} bytes, over the limit"
+                )
+            }
+            TarError::TooManyMeta { offset, records } => {
+                write!(
+                    f,
+                    "tar: extension record {records} at byte {offset} is over the per-entry cap"
                 )
             }
             TarError::Io { offset, error } => {
@@ -380,6 +399,8 @@ impl<R: Read> TarReader<R> {
         let mut pax_path: Option<String> = None;
         let mut pax_size: Option<u64> = None;
         let first_offset = self.pos;
+        let mut meta_records = 0usize;
+        let mut meta_bytes = 0usize;
         loop {
             let offset = self.pos;
             match self.fill_block()? {
@@ -407,6 +428,20 @@ impl<R: Read> TarReader<R> {
             let mut size = parsed.size;
             if let Some(s) = pax_size {
                 size = s;
+            }
+            if matches!(parsed.typeflag, b'L' | b'K' | b'x' | b'g') {
+                // A record over the per-record limit is refused by `read_meta` with its own error.
+                meta_records += 1;
+                meta_bytes = meta_bytes.saturating_add(size.min(usize::MAX as u64) as usize);
+                if size <= self.limits.max_meta_bytes as u64
+                    && (meta_records > self.limits.max_meta_records
+                        || meta_bytes > self.limits.max_meta_total_bytes)
+                {
+                    return self.fail(TarError::TooManyMeta {
+                        offset,
+                        records: meta_records as u64,
+                    });
+                }
             }
             match parsed.typeflag {
                 b'L' | b'K' => {

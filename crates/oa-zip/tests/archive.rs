@@ -621,3 +621,72 @@ fn a_zip64_extra_field_must_match_the_fields_that_ask_for_it() {
     // The unmodified fixture is still accepted.
     assert!(Archive::parse(ZIP64).unwrap().entries()[0].is_zip64());
 }
+
+/// A stored archive of empty entries with the given names (no data, CRC 0).
+fn empty_entries_zip(names: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut offsets = Vec::new();
+    for n in names {
+        offsets.push(out.len() as u32);
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // version, flags, method, time, date
+        out.extend_from_slice(&[0u8; 12]); // crc, sizes
+        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(n);
+    }
+    let cd_start = out.len();
+    for (n, off) in names.iter().zip(&offsets) {
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&[0u8; 12]);
+        out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0u8; 8]); // extra, comment, disk, internal attributes
+        out.extend_from_slice(&[0u8; 4]); // external attributes
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(n);
+    }
+    let cd_len = (out.len() - cd_start) as u32;
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(names.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(names.len() as u16).to_le_bytes());
+    out.extend_from_slice(&cd_len.to_le_bytes());
+    out.extend_from_slice(&(cd_start as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+// REQ: OA-ZIP-061
+#[test]
+fn duplicate_names_are_found_exactly_and_cheaply() {
+    let n = |s: &str| s.as_bytes().to_vec();
+    // Exact repeats are refused, the first in directory order; near names are not repeats.
+    let d = empty_entries_zip(&[n("a"), n("b"), n("A"), n("a "), n("b"), n("a")]);
+    assert!(matches!(Archive::parse(&d), Err(ZipError::DuplicateName(x)) if x == "b"));
+    let d = empty_entries_zip(&[n("a"), n("b"), n("A"), n("a ")]);
+    assert_eq!(Archive::parse(&d).unwrap().entries().len(), 4);
+    // Ten thousand long names with a common prefix, distinct only in the last three bytes.
+    let mut names = Vec::new();
+    for i in 0..10_000usize {
+        let mut v = vec![b'p'; 4093];
+        v.extend_from_slice(&[
+            b'a' + (i % 26) as u8,
+            b'a' + (i / 26 % 26) as u8,
+            b'a' + (i / 676) as u8,
+        ]);
+        names.push(v);
+    }
+    let d = empty_entries_zip(&names);
+    let t = std::time::Instant::now();
+    let a = Archive::parse(&d).unwrap();
+    assert_eq!(a.entries().len(), 10_000);
+    assert!(t.elapsed().as_secs_f64() < 3.0, "took {:?}", t.elapsed());
+    // And one repeat at the very end is still found.
+    names[9_999] = names[0].clone();
+    let d = empty_entries_zip(&names);
+    assert!(matches!(
+        Archive::parse(&d),
+        Err(ZipError::DuplicateName(_))
+    ));
+}

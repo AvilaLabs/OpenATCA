@@ -661,3 +661,26 @@ fn property_against_brute_force_polygon() {
         assert!(peak_of(&got) <= all);
     }
 }
+
+// REQ: OA-TIFF-080
+#[test]
+fn the_antimeridian_aliases_give_one_elevation() {
+    // A tile whose west edge is -180 and one whose east edge is +180, both flat.
+    let mut west = flat(11, 11, 120.0);
+    west.lon0 = -180.0;
+    let mut east = flat(11, 11, 120.0);
+    east.lon0 = 179.9;
+    for tile in [west, east] {
+        let set = TileSet { tiles: vec![tile] };
+        for lon in [-180.0, 180.0] {
+            let e = elevation_at(&set, 39.95, lon);
+            assert_eq!(e, Elevation::Metres(120.0), "lon {lon}");
+            assert!(tileset_covers(&set, 39.95, lon), "lon {lon}");
+            assert_eq!(
+                grid_elevation_at(&set.tiles[0], 39.95, lon),
+                Elevation::Metres(120.0),
+                "lon {lon}"
+            );
+        }
+    }
+}

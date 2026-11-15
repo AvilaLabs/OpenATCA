@@ -27,6 +27,7 @@ pub use inflate::{
     inflate, Consumed, InflateError, InflateLimits, Inflater, StreamError, WINDOW_LEN,
 };
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
@@ -427,9 +428,12 @@ impl<'a> Archive<'a> {
         let mut entries: Vec<Entry> = Vec::with_capacity(count);
         let mut total: u64 = 0;
         let mut p = 0usize;
+        // Names seen so far: a hash set, so the check is linear in the total name bytes rather
+        // than quadratic in the entry count (names may share very long prefixes).
+        let mut seen: HashSet<String> = HashSet::with_capacity(count);
         for _ in 0..count {
             let (entry, next) = read_central(cd, p, &limits)?;
-            if entries.iter().any(|e| e.name == entry.name) {
+            if !seen.insert(entry.name.clone()) {
                 return Err(ZipError::DuplicateName(entry.name));
             }
             total = total.saturating_add(entry.uncompressed_size);

@@ -165,6 +165,20 @@ fn in_lattice(g: &Grid, fx: f64, fy: f64) -> bool {
 /// the outermost sample centres; [`Elevation::NoData`] when any of the four surrounding samples
 /// is nodata (a partial average would hide the gap, RULESET E5).
 pub fn grid_elevation_at(g: &Grid, lat: f64, lon: f64) -> Elevation {
+    let e = grid_elevation_here(g, lat, lon);
+    match other_side(e == Elevation::Outside, lon) {
+        Some(alias) => grid_elevation_here(g, lat, alias),
+        None => e,
+    }
+}
+
+/// The other name of the meridian at exactly +180 or -180 degrees, when `outside` says the
+/// first name found nothing.
+fn other_side(outside: bool, lon: f64) -> Option<f64> {
+    (outside && lon.abs() == 180.0).then_some(-lon)
+}
+
+fn grid_elevation_here(g: &Grid, lat: f64, lon: f64) -> Elevation {
     if !valid_coord(lat, lon) {
         return Elevation::Outside;
     }
@@ -224,6 +238,14 @@ pub fn elevation_at(set: &TileSet, lat: f64, lon: f64) -> Elevation {
 }
 
 fn elevation_in(tiles: &[Grid], lat: f64, lon: f64) -> Elevation {
+    let e = elevation_here(tiles, lat, lon);
+    match other_side(e == Elevation::Outside, lon) {
+        Some(alias) => elevation_here(tiles, lat, alias),
+        None => e,
+    }
+}
+
+fn elevation_here(tiles: &[Grid], lat: f64, lon: f64) -> Elevation {
     if !valid_coord(lat, lon) {
         return Elevation::Outside;
     }

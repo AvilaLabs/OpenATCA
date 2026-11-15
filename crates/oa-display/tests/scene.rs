@@ -149,6 +149,8 @@ fn model(tail: Tail) -> Model {
         b.name.push(StrIx::NONE);
         b.floor_ft.push(ALT_NONE);
         b.ceiling_ft.push(ALT_NONE);
+        b.time_code.push(time_code::UNKNOWN);
+        b.level.push(level::UNKNOWN);
         b.vertices.push(Span {
             start: VertexIx::new(next),
             len: ring.len() as u32,
