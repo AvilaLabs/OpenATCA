@@ -281,7 +281,7 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         .tbfm
         .plan_id
         .iter()
-        .filter(|p| plan.contains_key(*p))
+        .filter(|p| crate::legacy::plan_known(&plan, p))
         .count() as u64;
     let tfms_match = l
         .tfms
@@ -289,7 +289,7 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         .iter()
         .filter(|p| {
             let k: [u8; 12] = crate::legacy::pad(crate::legacy::name(*p).as_bytes());
-            plan.contains_key(&k)
+            crate::legacy::plan_known(&plan, &k)
         })
         .count() as u64;
     let n = |v: usize| v as u64;
@@ -303,6 +303,14 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         ),
         ("TBFM documents refused".into(), c.doc_errors[1]),
         ("TFMS documents refused".into(), c.doc_errors[2]),
+        (
+            "documents the extraction refused, all feeds (the replay refuses the same ones)".into(),
+            c.doc_errors.iter().sum(),
+        ),
+        (
+            "messages or rows past a document's table size, not decoded (all feeds)".into(),
+            c.rows_not_decoded,
+        ),
         (
             "SFDPS messages rejected by the decoder".into(),
             c.sfdps_rejected,
@@ -353,6 +361,10 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         (
             "TFMS values whose flight plan id matches an SFDPS flight".into(),
             tfms_match,
+        ),
+        (
+            "flights past the per-identifier limit of the plan index (not joinable)".into(),
+            plan.overflow,
         ),
         (
             "rows dropped at capacity (flights, TH, handoffs, routes, TBFM, TFMS)".into(),

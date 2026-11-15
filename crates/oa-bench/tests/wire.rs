@@ -512,3 +512,37 @@ fn real_clip_with_no_overlap_gives_no_pairs_and_a_full_exclusions_table() {
     assert!(txt.contains("Exclusions"), "{txt}");
     let _ = std::fs::remove_dir_all(out);
 }
+
+/// Two frames that between them carry `clip_reports` whole, and the bytes of one more frame.
+fn clip_frames() -> (Vec<u8>, Vec<u8>) {
+    let r = clip_reports(&[b"TST123\0\0"]);
+    let n = reports_len(&r);
+    let one = |from: usize, to: usize, seq: u64| {
+        let mut payload = Vec::new();
+        encode_payload(&mut payload, &r, from, to).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let len = encode_frame(&mut buf, 1, FLAG_BYTES, seq, 0, 0, &payload).unwrap();
+        buf[..len].to_vec()
+    };
+    let mut whole = one(0, 60, 0);
+    whole.extend(one(60, n, 1));
+    (whole, one(0, 5, 2))
+}
+
+// REQ: OA-BENCH-057
+#[test]
+fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial_frame() {
+    let d = scratch("tail");
+    let (whole, extra) = clip_frames();
+    // Valid only, then a partial header, then a partial body.
+    for (name, cut, bad) in [("whole", 0, 0), ("header", 10, 1), ("body", 60, 1)] {
+        let mut bytes = whole.clone();
+        bytes.extend_from_slice(&extra[..cut]);
+        let path = d.join(format!("{name}.oaf"));
+        std::fs::write(&path, &bytes).unwrap();
+        let l = load_adsb(&path).unwrap();
+        assert_eq!(reports_len(&l.reports), 131, "{name}");
+        assert_eq!((l.bad_frames, l.dropped_records), (bad, 0), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(d);
+}

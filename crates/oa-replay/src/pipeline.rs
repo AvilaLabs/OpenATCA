@@ -112,6 +112,47 @@ pub const DOC_MAX_ATTRIBUTES: usize = 524_288;
 /// Bytes of route text one SFDPS document may add.
 pub const DOC_STRING_BYTES: usize = 1 << 20;
 
+/// The XML parser limits of one feed document. The one definition of what a document may hold:
+/// the pipeline and the benchmark's legacy extraction both build their parser from it, so the
+/// two accept the same files.
+pub fn doc_xml_limits() -> oa_xml::Limits {
+    oa_xml::Limits {
+        max_input_bytes: oa_feed::MAX_PAYLOAD,
+        max_elements: DOC_MAX_ELEMENTS,
+        max_attributes: DOC_MAX_ATTRIBUTES,
+        max_text_nodes: DOC_MAX_ELEMENTS,
+        ..oa_xml::Limits::default()
+    }
+}
+
+/// The SFDPS decoder limits of one document (see [`doc_xml_limits`]).
+pub fn doc_fixm_limits() -> Limits {
+    Limits {
+        max_elements: DOC_MAX_ELEMENTS,
+        ..Limits::default()
+    }
+}
+
+/// The SFDPS event table of one document (see [`doc_xml_limits`]). Documents are decoded with
+/// `decode_prefix`: as far as this table fits, the rest counted.
+pub fn new_doc_events() -> Events {
+    new_events(DOC_ROW_CAPACITY, DOC_STRING_BYTES)
+}
+
+/// The TBFM row table of one document.
+pub fn new_doc_tbfm_rows() -> Rows {
+    new_rows(DOC_ROW_CAPACITY)
+}
+
+/// The TFMS row tables of one document.
+pub fn new_doc_tfms_rows() -> TfmsRows {
+    new_tfms_rows(
+        DEFAULT_FLIGHT_CAPACITY,
+        DEFAULT_FLOW_CAPACITY,
+        DEFAULT_STRING_BYTES,
+    )
+}
+
 /// Pipeline settings (cold: A7.2).
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,14 +267,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         return Err(PipelineError::Checkpoint(cfg.checkpoint_ns));
     }
     let table = new_table(cfg.table).map_err(PipelineError::Config)?;
-    let limits = oa_xml::Limits {
-        max_input_bytes: oa_feed::MAX_PAYLOAD,
-        max_elements: DOC_MAX_ELEMENTS,
-        max_attributes: DOC_MAX_ATTRIBUTES,
-        max_text_nodes: DOC_MAX_ELEMENTS,
-        ..oa_xml::Limits::default()
-    };
-    let parser = Parser::new(limits).map_err(|_| PipelineError::Parser)?;
+    let parser = Parser::new(doc_xml_limits()).map_err(|_| PipelineError::Parser)?;
     Ok(Pipeline {
         cfg,
         table,
@@ -242,18 +276,11 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         flows: new_flow_table(FLOW_CAPACITY),
         fns: new_fns_table(FNS_CAPACITY),
         parser,
-        fixm: Decoder::new(Limits {
-            max_elements: DOC_MAX_ELEMENTS,
-            ..Limits::default()
-        }),
-        events: new_events(DOC_ROW_CAPACITY, DOC_STRING_BYTES),
-        rows: new_rows(DOC_ROW_CAPACITY),
+        fixm: Decoder::new(doc_fixm_limits()),
+        events: new_doc_events(),
+        rows: new_doc_tbfm_rows(),
         reports: Reports::default(),
-        tfms_rows: new_tfms_rows(
-            DEFAULT_FLIGHT_CAPACITY,
-            DEFAULT_FLOW_CAPACITY,
-            DEFAULT_STRING_BYTES,
-        ),
+        tfms_rows: new_doc_tfms_rows(),
         notam_dec: new_decoder(NotamLimits::default()),
         notam_stats: new_stats(0),
         notams: default_notams_small(),

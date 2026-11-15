@@ -1,48 +1,26 @@
 //! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports. Shell: owns the file.
 
 use std::fs::File;
-use std::io::Read;
 
 use oa_adsb::{decode_payload_lenient, Reports};
-use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
+use oa_feed::{read_frames, Kind};
 
 /// Every ADS-B payload frame of the file at `path` as one set of reports, the number of frames
 /// that did not decode and the number of records dropped from frames that did (a bad record does
 /// not refuse its frame).
 pub fn read_clip(path: &str) -> Result<(Reports, u64, u64), String> {
     let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut buf = vec![0u8; MAX_FRAME_LEN];
-    let mut rd = FrameReader::new(&mut buf).map_err(|e| format!("{e:?}"))?;
     let mut out = Reports::default();
-    let mut bad = 0u64;
     let mut dropped = 0u64;
-    let mut chunk = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut chunk).map_err(|e| format!("{path}: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        let mut at = 0usize;
-        while at < n {
-            let Some(rest) = chunk.get(at..n) else { break };
-            let took = rd.push(rest);
-            at += took;
-            while let Some(fr) = rd.next() {
-                match fr {
-                    Ok(fr) if fr.kind == Kind::Message => {
-                        match decode_payload_lenient(fr.payload, &mut out) {
-                            Ok(c) => dropped += c.dropped as u64,
-                            Err(_) => bad += 1,
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => bad += 1,
-                }
-            }
-            if took == 0 {
-                break;
+    let mut undecodable = 0u64;
+    let damaged = read_frames(&mut f, &mut |fr| {
+        if fr.kind == Kind::Message {
+            match decode_payload_lenient(fr.payload, &mut out) {
+                Ok(c) => dropped += c.dropped as u64,
+                Err(_) => undecodable += 1,
             }
         }
-    }
-    Ok((out, bad, dropped))
+    })
+    .map_err(|e| format!("{path}: {e}"))?;
+    Ok((out, damaged + undecodable, dropped))
 }

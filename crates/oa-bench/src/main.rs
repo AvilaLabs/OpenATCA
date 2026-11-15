@@ -333,6 +333,10 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
                 .to_string(),
         ),
     }
+    notes.push(
+        "ADS-B clip digest: hashed from the frames read to build the truth, in the same read"
+            .to_string(),
+    );
     let mut inputs = loaded.inputs.clone();
     inputs.push(clip.hash.clone());
     let header = Header {

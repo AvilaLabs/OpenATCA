@@ -3,7 +3,7 @@
 //! decoders: `oa-fixm` for SFDPS flight data and track positions (with [`crate::scan`] for the
 //! few fields it does not decode), `oa-tbfm` for TBFM, `oa-tfms` for TFMS.
 
-use oa_fixm::{clear_events, code_str, new_events, Decoder, Events, Field, Limits as FixmLimits};
+use oa_fixm::{clear_events, code_str, Decoder, Events, Field};
 use oa_tbfm::rows::{pt, section};
 use oa_tbfm::NO_TIME as TBFM_NO_TIME;
 use oa_tfms::rows::ttype;
@@ -16,10 +16,9 @@ use crate::legacy::{
 };
 use crate::scan::scan_doc;
 
-/// Rows one SFDPS document may add (the sample holds at most 100 messages per document).
-pub const DOC_ROWS: usize = 4096;
-/// Route text bytes one SFDPS document may add.
-pub const DOC_STRING_BYTES: usize = 1 << 20;
+// The parser limits, decode mode (decode as far as the tables fit, count the rest) and table
+// sizes are the replay pipeline's own (`oa_replay::doc_xml_limits` and the others), so a document
+// is accepted here exactly when the replay accepts it.
 
 /// Reusable decoder state for the three feeds (cold: A7.2).
 // A7.2: cold struct, size guard waived
@@ -44,19 +43,15 @@ impl std::fmt::Display for ReaderError {
 
 impl std::error::Error for ReaderError {}
 
-/// A reader with the decoders' default limits.
+/// A reader with the replay pipeline's parser limits and table sizes.
 pub fn new_reader() -> Result<Reader, ReaderError> {
-    let parser = Parser::new(oa_xml::Limits::default()).map_err(|_| ReaderError)?;
+    let parser = Parser::new(oa_replay::doc_xml_limits()).map_err(|_| ReaderError)?;
     Ok(Reader {
         parser,
-        fixm: Decoder::new(FixmLimits::default()),
-        events: new_events(DOC_ROWS, DOC_STRING_BYTES),
-        tbfm_rows: oa_tbfm::new_rows(oa_tbfm::DEFAULT_ROW_CAPACITY),
-        tfms_rows: oa_tfms::new_rows(
-            oa_tfms::DEFAULT_FLIGHT_CAPACITY,
-            oa_tfms::DEFAULT_FLOW_CAPACITY,
-            oa_tfms::DEFAULT_STRING_BYTES,
-        ),
+        fixm: Decoder::new(oa_replay::doc_fixm_limits()),
+        events: oa_replay::new_doc_events(),
+        tbfm_rows: oa_replay::new_doc_tbfm_rows(),
+        tfms_rows: oa_replay::new_doc_tfms_rows(),
         text: Vec::new(),
     })
 }
@@ -69,8 +64,11 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
         leg.counts.doc_errors[0] += 1;
         return;
     };
-    match r.fixm.decode(&doc, bytes, &mut r.events) {
-        Ok(sum) => leg.counts.sfdps_rejected += u64::from(sum.rejected),
+    match r.fixm.decode_prefix(&doc, bytes, &mut r.events) {
+        Ok(sum) => {
+            leg.counts.sfdps_rejected += u64::from(sum.rejected);
+            leg.counts.rows_not_decoded += u64::from(sum.not_decoded);
+        }
         Err(_) => {
             leg.counts.doc_errors[0] += 1;
             return;
@@ -139,9 +137,16 @@ fn tb_time(t: i64) -> Option<i64> {
 pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     leg.counts.docs[1] += 1;
     oa_tbfm::clear_rows(&mut r.tbfm_rows);
-    if oa_tbfm::decode_bytes(&mut r.parser, bytes, &mut r.tbfm_rows).is_err() {
+    let Ok(doc) = r.parser.parse(bytes) else {
         leg.counts.doc_errors[1] += 1;
         return;
+    };
+    match oa_tbfm::decode_doc_prefix(&doc, &mut r.tbfm_rows) {
+        Ok(out) => leg.counts.rows_not_decoded += u64::from(out.dropped),
+        Err(_) => {
+            leg.counts.doc_errors[1] += 1;
+            return;
+        }
     }
     let rows = &r.tbfm_rows;
     for i in 0..oa_tbfm::rows_len(rows) {
@@ -194,9 +199,16 @@ fn code_bytes(b: &[u8]) -> &[u8] {
 pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     leg.counts.docs[2] += 1;
     oa_tfms::clear_rows(&mut r.tfms_rows);
-    if oa_tfms::decode_bytes(&mut r.parser, bytes, &mut r.tfms_rows).is_err() {
+    let Ok(doc) = r.parser.parse(bytes) else {
         leg.counts.doc_errors[2] += 1;
         return;
+    };
+    match oa_tfms::decode_doc_prefix(&doc, &mut r.tfms_rows) {
+        Ok(out) => leg.counts.rows_not_decoded += u64::from(out.dropped),
+        Err(_) => {
+            leg.counts.doc_errors[2] += 1;
+            return;
+        }
     }
     for i in 0..oa_tfms::flights_len(&r.tfms_rows.flights) {
         let Some(f) = oa_tfms::flight_at(&r.tfms_rows.flights, i) else {

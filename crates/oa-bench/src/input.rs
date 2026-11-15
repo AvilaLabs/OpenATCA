@@ -6,16 +6,25 @@
 //! is no replay state hash) or **`.oaf` / `.oaf.gz` recordings** (frames with receive times,
 //! merged in the replay order of `oa-replay`; the replay pipeline runs over the same frames and
 //! its state hash goes in the report).
+//!
+//! **One read per file.** The digest of an input file is computed from the bytes that are
+//! ingested, in the same read ([`HashRead`] wraps the reader the ingestion pulls from), so a file
+//! that changes between listing and reading, or while it is read, cannot give a digest that does
+//! not describe what was scored. The `.msg` files, the `.oaf` and `.oaf.gz` recordings (through
+//! the replay merge) and the ADS-B clip all go this way; a file that is not read to its end is an
+//! error, not a digest. [`hash_files`] reads separately and is for stand-alone use only.
 
+use std::cell::RefCell;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use oa_replay::{
-    list_recordings, merge_streams, new_pipeline, process_frame, replay_hash, spec_from_paths,
-    FeedKind, PipelineConfig, StreamSpec,
+    list_recordings, merge_streams, new_pipeline, process_frame, replay_hash, FeedKind,
+    PipelineConfig, StreamSpec,
 };
-use oa_sha256::{sha256, sha256_reader, to_hex};
+use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 
 use crate::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader, Reader};
 use crate::legacy::{new_legacy, Legacy, NO_TIME};
@@ -50,16 +59,13 @@ pub fn list_inputs(dir: &Path) -> io::Result<(DirKind, Vec<PathBuf>)> {
 
 /// The hash of a set of files: for one file, its SHA-256; for several, the SHA-256 of the lines
 /// `<file name>:<sha256>\n` in the given order. Also the file count and total size.
-pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
+fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64)]) -> InputHash {
     let mut bytes = 0u64;
     let mut manifest = String::new();
     let mut single = String::new();
-    for p in files {
-        bytes += fs::metadata(p)?.len();
-        let f = fs::File::open(p)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
-        let d = sha256_reader(io::BufReader::new(f)).map_err(io::Error::other)?;
-        let h = to_hex(&d);
+    for (p, (d, len)) in files.iter().zip(sums) {
+        bytes += len;
+        let h = to_hex(d);
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         manifest.push_str(&format!("{name}:{h}\n"));
         single = h;
@@ -69,12 +75,125 @@ pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     } else {
         to_hex(&sha256(manifest.as_bytes()))
     };
-    Ok(InputHash {
+    InputHash {
         label: label.to_string(),
         files: files.len() as u64,
         bytes,
         sha256: sha,
+    }
+}
+
+/// The hash of a set of files by a read of its own (see [`manifest_hash`] for the form). Not what
+/// [`load`] uses: that hashes the bytes it ingests.
+pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
+    let mut sums = Vec::with_capacity(files.len());
+    for p in files {
+        let len = fs::metadata(p)?.len();
+        let f = fs::File::open(p)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
+        let d = sha256_reader(io::BufReader::new(f)).map_err(io::Error::other)?;
+        sums.push((d, len));
+    }
+    Ok(manifest_hash(label, files, &sums))
+}
+
+/// Opens one input file for reading. The seam for [`load_with`] and [`load_adsb_with`]: the real
+/// one opens the file; a test hands back other bytes than the disk holds, as a file that changed
+/// after it was listed.
+pub type Opener = Rc<dyn Fn(&Path) -> io::Result<Box<dyn Read>>>;
+
+/// The opener that reads files from disk.
+pub fn file_opener() -> Opener {
+    Rc::new(|p: &Path| {
+        fs::File::open(p)
+            .map(|f| Box::new(f) as Box<dyn Read>)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))
     })
+}
+
+/// Where a [`HashRead`] leaves its result once the file is read to its end: digest and length.
+type Done = Rc<RefCell<Option<Result<(Digest, u64), String>>>>;
+
+fn new_done() -> Done {
+    Rc::new(RefCell::new(None))
+}
+
+/// A reader that hashes every byte it passes on. At the end of the file (a read of zero bytes) the
+/// digest and the length go to `done`; a reader dropped before that leaves `done` empty.
+// A7.2: cold struct, size guard waived
+struct HashRead<R: Read> {
+    inner: R,
+    h: Option<Sha256>,
+    bytes: u64,
+    failed: bool,
+    done: Done,
+}
+
+impl<R: Read> HashRead<R> {
+    fn new(inner: R, done: Done) -> HashRead<R> {
+        HashRead {
+            inner,
+            h: Some(Sha256::new()),
+            bytes: 0,
+            failed: false,
+            done,
+        }
+    }
+}
+
+impl<R: Read> Read for HashRead<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(out)?;
+        if n == 0 && !out.is_empty() {
+            if let Some(h) = self.h.take() {
+                let r = if self.failed {
+                    Err("the file is too long to hash".to_string())
+                } else {
+                    Ok((h.finalize(), self.bytes))
+                };
+                *self.done.borrow_mut() = Some(r);
+            }
+            return Ok(0);
+        }
+        if let (Some(h), Some(chunk)) = (self.h.as_mut(), out.get(..n)) {
+            self.failed |= h.update(chunk).is_err();
+        }
+        self.bytes += n as u64;
+        Ok(n)
+    }
+}
+
+/// The digest and length of a file whose reader reached its end.
+fn finished(path: &Path, done: &Done) -> io::Result<(Digest, u64)> {
+    match done.borrow_mut().take() {
+        Some(Ok(s)) => Ok(s),
+        Some(Err(e)) => Err(io::Error::other(format!("{}: {e}", path.display()))),
+        None => Err(io::Error::other(format!(
+            "{}: not read to its end, so its digest does not describe what was read",
+            path.display()
+        ))),
+    }
+}
+
+/// The [`InputHash`] of files all read through [`HashRead`] with the given `done` cells.
+fn input_hash(label: &str, files: &[PathBuf], dones: &[Done]) -> io::Result<InputHash> {
+    let mut sums = Vec::with_capacity(files.len());
+    for (p, d) in files.iter().zip(dones) {
+        sums.push(finished(p, d)?);
+    }
+    Ok(manifest_hash(label, files, &sums))
+}
+
+/// A stream over `files`, each opened with `open` and hashed into its `done` cell as it is read.
+fn hashed_spec(feed: FeedKind, files: Vec<PathBuf>, dones: Vec<Done>, open: Opener) -> StreamSpec {
+    let mut it = files.into_iter().zip(dones);
+    StreamSpec {
+        feed,
+        open: Box::new(move || {
+            let (p, done) = it.next()?;
+            Some(open(&p).map(|r| Box::new(HashRead::new(r, done)) as Box<dyn Read>))
+        }),
+    }
 }
 
 /// One feed's input directory.
@@ -106,33 +225,30 @@ fn ingest_one(leg: &mut Legacy, r: &mut Reader, feed: FeedKind, bytes: &[u8], re
 
 /// Loads the given feed directories into the legacy tables.
 pub fn load(feeds: &[FeedInput]) -> io::Result<Loaded> {
+    load_with(feeds, &file_opener())
+}
+
+/// One feed's listed files, what they are, and where each digest will land.
+type Listed = (FeedKind, DirKind, Vec<PathBuf>, Vec<Done>);
+
+/// [`load`] with the files opened by `open`.
+pub fn load_with(feeds: &[FeedInput], open: &Opener) -> io::Result<Loaded> {
     let mut leg = new_legacy();
     let mut reader = new_reader().map_err(io::Error::other)?;
-    let mut inputs = Vec::new();
-    let mut listed: Vec<(FeedKind, DirKind, Vec<PathBuf>)> = Vec::new();
+    let mut listed: Vec<Listed> = Vec::new();
     for fi in feeds {
         let (kind, files) = list_inputs(&fi.dir)?;
-        inputs.push(hash_files(
-            &format!(
-                "{} ({})",
-                oa_replay::FEED_NAMES
-                    .get(fi.feed as usize)
-                    .copied()
-                    .unwrap_or("?"),
-                fi.dir.display()
-            ),
-            &files,
-        )?);
-        listed.push((fi.feed, kind, files));
+        let dones = files.iter().map(|_| new_done()).collect();
+        listed.push((fi.feed, kind, files, dones));
     }
-    let all_oaf = !listed.is_empty() && listed.iter().all(|(_, k, _)| *k == DirKind::Oaf);
+    let all_oaf = !listed.is_empty() && listed.iter().all(|(_, k, _, _)| *k == DirKind::Oaf);
     let mut notes = Vec::new();
     let replay = if all_oaf {
         let mut p = new_pipeline(PipelineConfig::default())
             .map_err(|e| io::Error::other(format!("{e:?}")))?;
         let specs: Vec<StreamSpec> = listed
             .iter()
-            .map(|(f, _, files)| spec_from_paths(*f, files.clone()))
+            .map(|(f, _, files, dones)| hashed_spec(*f, files.clone(), dones.clone(), open.clone()))
             .collect();
         let mut sink = |m: &oa_replay::Merged<'_>| {
             process_frame(&mut p, m.feed, m.kind, m.recv_ns, m.payload);
@@ -155,18 +271,25 @@ pub fn load(feeds: &[FeedInput]) -> io::Result<Loaded> {
         }
         to_hex(&replay_hash(&p))
     } else {
-        for (feed, kind, files) in &listed {
+        for (feed, kind, files, dones) in &listed {
             match kind {
                 DirKind::Msg => {
-                    for f in files {
-                        let b = fs::read(f).map_err(|e| {
+                    for (f, done) in files.iter().zip(dones) {
+                        let mut hr = HashRead::new(open(f)?, done.clone());
+                        let mut b = Vec::new();
+                        hr.read_to_end(&mut b).map_err(|e| {
                             io::Error::new(e.kind(), format!("{}: {e}", f.display()))
                         })?;
                         ingest_one(&mut leg, &mut reader, *feed, &b, NO_TIME);
                     }
                 }
                 DirKind::Oaf => {
-                    let specs = vec![spec_from_paths(*feed, files.clone())];
+                    let specs = vec![hashed_spec(
+                        *feed,
+                        files.clone(),
+                        dones.clone(),
+                        open.clone(),
+                    )];
                     let mut sink = |m: &oa_replay::Merged<'_>| {
                         if m.kind == oa_feed::Kind::Message {
                             ingest_one(
@@ -185,6 +308,22 @@ pub fn load(feeds: &[FeedInput]) -> io::Result<Loaded> {
         notes.push("raw .msg input carries no frame headers: no receive time (T6 withheld) and no replay state hash".to_string());
         "not available: the inputs are not all .oaf recordings".to_string()
     };
+    notes.push(
+        "input digests: each file is hashed from the bytes ingested, in the same read (.msg files as read, recordings through the replay merge)"
+            .to_string(),
+    );
+    let mut inputs = Vec::new();
+    for (fi, (_, _, files, dones)) in feeds.iter().zip(&listed) {
+        let label = format!(
+            "{} ({})",
+            oa_replay::FEED_NAMES
+                .get(fi.feed as usize)
+                .copied()
+                .unwrap_or("?"),
+            fi.dir.display()
+        );
+        inputs.push(input_hash(&label, files, dones)?);
+    }
     Ok(Loaded {
         legacy: leg,
         inputs,
@@ -207,57 +346,50 @@ pub struct AdsbClip {
 }
 
 /// Calls `f(recv_unix_ns, payload)` for every message frame of an OAF1 file, in file order, and
-/// returns the number of frames that were damaged (bad CRC or length; counted, not hidden).
+/// returns the number of frames that were damaged (bad CRC or length, or a partial frame at the
+/// end of the file; counted, not hidden).
 pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Result<u64> {
-    let err = |m: String| io::Error::other(format!("{}: {m}", path.display()));
-    let mut file = fs::File::open(path).map_err(|e| err(e.to_string()))?;
-    let mut buf = vec![0u8; oa_feed::MAX_FRAME_LEN];
-    let mut rd = oa_feed::FrameReader::new(&mut buf).map_err(|e| err(format!("{e:?}")))?;
-    let mut bad = 0u64;
-    let mut chunk = vec![0u8; 1 << 20];
-    loop {
-        let n = io::Read::read(&mut file, &mut chunk).map_err(|e| err(e.to_string()))?;
-        if n == 0 {
-            break;
+    let mut file = fs::File::open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    oa_feed::read_frames(&mut file, &mut |fr| {
+        if fr.kind == oa_feed::Kind::Message {
+            f(fr.recv_unix_ns, fr.payload);
         }
-        let mut at = 0usize;
-        while at < n {
-            let Some(rest) = chunk.get(at..n) else { break };
-            let took = rd.push(rest);
-            at += took;
-            while let Some(fr) = rd.next() {
-                match fr {
-                    Ok(fr) if fr.kind == oa_feed::Kind::Message => f(fr.recv_unix_ns, fr.payload),
-                    Ok(_) => {}
-                    Err(_) => bad += 1,
-                }
-            }
-            if took == 0 {
-                break;
-            }
-        }
-    }
-    Ok(bad)
+    })
+    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
 /// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
-/// and hashes the file. A bad record loses only itself (`decode_payload_lenient`).
+/// and hashes the file, in the same read. A bad record loses only itself
+/// (`decode_payload_lenient`).
 pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
+    load_adsb_with(path, &file_opener())
+}
+
+/// [`load_adsb`] with the file opened by `open`.
+pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
     let mut reports = oa_adsb::Reports::default();
     let mut undecodable = 0u64;
     let mut dropped_records = 0u64;
-    let damaged = for_each_adsb_frame(
-        path,
-        &mut |_, payload| match oa_adsb::decode_payload_lenient(payload, &mut reports) {
-            Ok(c) => dropped_records += c.dropped as u64,
-            Err(_) => undecodable += 1,
-        },
+    let done = new_done();
+    let mut src = HashRead::new(open(path)?, done.clone());
+    let damaged = oa_feed::read_frames(&mut src, &mut |fr| {
+        if fr.kind == oa_feed::Kind::Message {
+            match oa_adsb::decode_payload_lenient(fr.payload, &mut reports) {
+                Ok(c) => dropped_records += c.dropped as u64,
+                Err(_) => undecodable += 1,
+            }
+        }
+    })
+    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    let hash = input_hash(
+        &format!("adsb ({})", path.display()),
+        &[path.to_path_buf()],
+        &[done],
     )?;
-    let bad = damaged + undecodable;
-    let hash = hash_files(&format!("adsb ({})", path.display()), &[path.to_path_buf()])?;
     Ok(AdsbClip {
         reports,
-        bad_frames: bad,
+        bad_frames: damaged + undecodable,
         dropped_records,
         hash,
     })
