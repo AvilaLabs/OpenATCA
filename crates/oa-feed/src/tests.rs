@@ -645,10 +645,11 @@ fn sequence_gaps_duplicates_and_regressions() {
     for s in [0u64, 1, 2, 5, 5, 6, 3, 4, 5] {
         observe_frame(&mut h, &fr(Kind::Message, 0, s, SEC, 0, b"x"), SEC);
     }
-    // 3 and 4 came late inside the gap, so nothing is missing; the second 5 is past the gap.
+    // 3 and 4 came late inside the gap, so nothing is missing; the last 5 repeats a frame
+    // already seen inside the gap's range, so it is a duplicate, not a restart (OA-FEED-174).
     assert_eq!(
         (h.gaps, h.missing, h.duplicates, h.regressions, h.reordered),
-        (1, 0, 1, 1, 2)
+        (1, 0, 2, 0, 2)
     );
     // A feed may start anywhere; the first frame is never a gap.
     let mut h = FeedHealth::new();
@@ -749,9 +750,9 @@ fn hot_structs_keep_their_budgeted_sizes() {
     use core::mem::size_of;
     assert_eq!(size_of::<Frame<'static>>(), 80);
     assert_eq!(size_of::<crate::health::Slot>(), 16);
-    assert_eq!(size_of::<FeedHealth>(), 2432);
+    assert_eq!(size_of::<FeedHealth>(), 2440);
     // The size budget has no hidden padding: fields sum to the struct size.
-    assert_eq!(23 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2432);
+    assert_eq!(24 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2440);
 }
 
 // REQ: OA-FEED-024
@@ -2076,11 +2077,11 @@ fn a_pair_swapped_on_the_wire_is_one_reordered_frame_and_nothing_missing() {
     assert_eq!((h.missing, h.reordered, h.regressions), (1, 2, 0));
     let h = seqs(&[3, 8, 5]);
     assert_eq!((h.missing, h.reordered, h.regressions), (3, 1, 0));
-    // The same late frame twice is filled once and then past the gap.
+    // The same late frame twice is filled once and then a repeat (OA-FEED-174), not a restart.
     let h = seqs(&[3, 6, 4, 4]);
     assert_eq!(
         (h.missing, h.reordered, h.duplicates, h.regressions),
-        (1, 1, 0, 1)
+        (1, 1, 1, 0)
     );
 }
 
@@ -2120,4 +2121,27 @@ fn read_frames_counts_a_frame_cut_short_at_the_end_of_the_stream() {
     // A partial header, then a partial body: the frames before are kept, the partial one counted.
     assert_eq!(run(&a[..10]), (whole.clone(), 1));
     assert_eq!(run(&a[..HEADER_LEN + 2]), (whole, 1));
+}
+
+// REQ: OA-FEED-174
+#[test]
+fn a_repeat_or_unremembered_late_frame_inside_the_last_gap_range_makes_no_false_gap() {
+    // A redelivered late frame: 4 fills the gap, the second 4 is a repeat, 6 is the next expected.
+    let h = seqs(&[3, 5, 4, 4, 6]);
+    assert_eq!(
+        (h.gaps, h.missing, h.duplicates, h.regressions, h.reordered),
+        (1, 0, 1, 0, 1)
+    );
+    assert_eq!(h.seq_next, 7);
+    // A middle fill keeps only the upper part of the gap; a late frame of the forgotten lower part
+    // must not restart the expectation (it would count 5..7 missing again when 8 arrives).
+    let h = seqs(&[3, 7, 5, 4, 8]);
+    assert_eq!((h.gaps, h.regressions, h.seq_next), (1, 0, 9));
+    assert!(h.missing <= 2, "missing {}", h.missing);
+    // Below the last gap's range is still a regression (a bridge restart counts from 0 again).
+    let h = seqs(&[3, 5, 4, 0, 1]);
+    assert_eq!((h.regressions, h.seq_next), (1, 2));
+    // Before any gap, a lower frame is a regression as before.
+    let h = seqs(&[10, 11, 5]);
+    assert_eq!((h.regressions, h.duplicates), (1, 0));
 }

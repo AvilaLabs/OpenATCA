@@ -16,7 +16,9 @@
 //!   the most recent gap is a late frame (`reordered`): that gap's missing count falls by one and
 //!   the expectation is unchanged, so a pair swapped on the wire (3, 5, 4) counts nothing
 //!   missing. Only that last gap is remembered (its start and length; a late frame at either
-//!   end shrinks it, one in the middle keeps the upper part). Any other lower value is a
+//!   end shrinks it, one in the middle keeps the upper part). A lower value that is not below
+//!   where that gap began (as opened) but outside its open part is a repeat or a late frame the
+//!   record no longer covers: a duplicate, the expectation unchanged. Any other lower value is a
 //!   regression (a bridge restart, which counts from 0 again, or a frame later than the last
 //!   gap), after which the expectation restarts from that value and the gap is forgotten.
 //! * Latency is `recv_unix_ns / 1e6 - jms_timestamp_ms` in whole milliseconds, for MESSAGE
@@ -125,6 +127,10 @@ pub struct FeedHealth {
     pub gap_start: u64,
     /// Frames of that gap not yet seen; zero when none is open.
     pub gap_len: u64,
+    /// First `seq` of the most recent gap as it was opened (late frames do not move it). From here
+    /// up to the expectation every number was either seen or is counted missing, so a lower frame
+    /// in that range is a repeat or a late frame, never a restart.
+    pub gap_lo: u64,
     /// MESSAGE frames flagged JMS-redelivered.
     pub redelivered: u64,
     /// REJECT frames.
@@ -156,9 +162,9 @@ pub struct FeedHealth {
     /// Per-second ring for the rates.
     pub ring: [Slot; RING_SLOTS],
 }
-// Budget: 23 u64/i64 fields (184) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
-// = 2432. One per feed, updated per frame; the rings dominate and have no padding.
-const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2432);
+// Budget: 24 u64/i64 fields (192) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
+// = 2440. One per feed, updated per frame; the rings dominate and have no padding.
+const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2440);
 
 impl FeedHealth {
     /// An empty health record.
@@ -179,6 +185,7 @@ impl FeedHealth {
             reordered: 0,
             gap_start: 0,
             gap_len: 0,
+            gap_lo: 0,
             redelivered: 0,
             rejects: 0,
             reconnects: 0,
@@ -231,13 +238,17 @@ pub fn observe_frame(h: &mut FeedHealth, f: &Frame<'_>, now_ns: i64) {
 }
 
 fn observe_seq(h: &mut FeedHealth, seq: u64) {
-    if h.frames == 0 || seq == h.seq_next {
-        // First frame, or exactly the expected one.
+    if h.frames == 0 {
+        // First frame: nothing below it has been seen, so the late range is empty.
+        h.gap_lo = seq.saturating_add(1);
+    } else if seq == h.seq_next {
+        // Exactly the expected one.
     } else if seq > h.seq_next {
         h.gaps = h.gaps.saturating_add(1);
         h.missing = h.missing.saturating_add(seq - h.seq_next);
         h.gap_start = h.seq_next;
         h.gap_len = seq - h.seq_next;
+        h.gap_lo = h.seq_next;
     } else if seq == h.seq_last {
         h.duplicates += 1;
         return;
@@ -253,9 +264,16 @@ fn observe_seq(h: &mut FeedHealth, seq: u64) {
             h.gap_len -= 1;
         }
         return;
+    } else if seq >= h.gap_lo {
+        // Below the expectation but inside the last gap's range and outside its open part: a
+        // repeat of a late frame, or a late frame of a part the record no longer covers. Neither
+        // restarts the count (that would open a false gap at the next frame).
+        h.duplicates += 1;
+        return;
     } else {
         h.regressions += 1;
         h.gap_len = 0;
+        h.gap_lo = seq.saturating_add(1);
     }
     h.seq_last = seq;
     h.seq_next = seq.saturating_add(1);
@@ -455,6 +473,7 @@ mod proofs {
         h.reordered = kani::any();
         h.gap_start = kani::any();
         h.gap_len = kani::any();
+        h.gap_lo = kani::any();
         // The counters count frames of one feed: 2^64 - 1 of them is not reachable.
         kani::assume(h.duplicates < u64::MAX && h.regressions < u64::MAX);
         kani::assume(h.reordered < u64::MAX);
@@ -465,11 +484,15 @@ mod proofs {
         kani::assume(h.gap_len == 0 || h.gap_start + h.gap_len <= h.seq_next);
         kani::assume(h.gap_len <= h.missing);
         kani::assume(h.frames != 0 || h.gap_len == 0);
+        // The late range starts no later than the open gap and the expectation.
+        kani::assume(h.gap_len == 0 || h.gap_lo <= h.gap_start);
+        kani::assume(h.gap_lo <= h.seq_next);
         let total: u64 = kani::any();
         kani::assume(h.missing <= total);
         let seq: u64 = kani::any();
         let (frames, next, gaps, missing) = (h.frames, h.seq_next, h.gaps, h.missing);
         let (reordered, regressions, gap_len) = (h.reordered, h.regressions, h.gap_len);
+        let (gap_lo, last, duplicates) = (h.gap_lo, h.seq_last, h.duplicates);
         let in_gap = frames != 0
             && seq < next
             && seq != h.seq_last
@@ -503,5 +526,14 @@ mod proofs {
         assert!(h.gap_len == 0 || h.gap_start <= u64::MAX - h.gap_len);
         assert!(h.gap_len == 0 || h.gap_start + h.gap_len <= h.seq_next);
         assert!(h.missing <= total);
+        // A lower frame in the late range outside the open gap is a duplicate: it moves neither the
+        // expectation nor missing nor the gap count.
+        if frames != 0 && seq < next && seq != last && !in_gap && seq >= gap_lo {
+            assert_eq!(h.duplicates, duplicates + 1);
+            assert_eq!((h.seq_next, h.missing, h.gaps), (next, missing, gaps));
+            assert_eq!(h.regressions, regressions);
+        }
+        assert!(h.gap_len == 0 || h.gap_lo <= h.gap_start);
+        assert!(h.gap_lo <= h.seq_next);
     }
 }
