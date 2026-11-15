@@ -440,6 +440,9 @@ pub struct TrackerStats {
     pub time_held: u64,
     /// Forward steps of the tracker clock confirmed by consecutive far-ahead measurements.
     pub time_steps: u64,
+    /// Held measurements applied after the step that confirmed them (confirmation delays data, it
+    /// does not lose it). `time_held` minus this is what a refuted run or a full buffer discarded.
+    pub time_held_applied: u64,
     /// Steps of the tracker clock back, confirmed by a run of late refusals (the clock had been
     /// moved ahead of the real time). Output rows after one carry earlier times than rows before.
     pub time_steps_back: u64,

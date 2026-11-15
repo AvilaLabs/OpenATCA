@@ -59,7 +59,10 @@ use oa_adsb::{
 use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
 use crate::hfilter::{h_combine, HFilter};
 use crate::params::{NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
-use crate::time_gate::{gate_decide, gate_new, GateCfg, GateState, Verdict};
+use crate::time_gate::{
+    gate_decide, gate_new, gate_note_applied, gate_run_restarted, GateCfg, GateState, Verdict,
+    RUN_BUF,
+};
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
     TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL, NONE_I32,
@@ -87,6 +90,10 @@ pub struct Tracker {
     clock_ns: i64,
     /// The clock decision: runs of far-ahead and of late measurements, the sensor table.
     gate: GateState,
+    /// The far-ahead measurements of the run being confirmed, oldest first (the last `RUN_BUF`),
+    /// and how many: applied when the run confirms, discarded when it is refuted.
+    held: Vec<Measurement>,
+    held_n: usize,
     /// The newest `last_ns` any track has had, ever (`i64::MIN` before the first): an upper bound
     /// on the newest live update, kept so a tick need not scan every slot to find it.
     newest_update_ns: i64,
@@ -180,6 +187,8 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         log: log_new(cfg.log_capacity),
         clock_ns: i64::MIN,
         gate: gate_new(),
+        held: vec![blank_measurement(); RUN_BUF],
+        held_n: 0,
         newest_update_ns: i64::MIN,
         next_tick_ns: i64::MIN,
         high: 0,
@@ -809,6 +818,8 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
         ooo_ns: t.cfg.ooo_window_ns,
         drop_ns: t.cfg.drop_after_ns,
     };
+    // Every live track is this address (or there is none): only its own track is at stake.
+    let own_addr_only = t.active == 0 || (t.active == 1 && lookup(t, m.addr).is_some());
     let verdict = gate_decide(
         &mut t.gate,
         &gate_cfg,
@@ -817,29 +828,69 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
         m.addr,
         m.sensor,
         t.active,
+        own_addr_only,
     );
     t.stats.time_sensor_evicted = t.gate.evicted;
     match verdict {
         Verdict::Late => {
             t.stats.late_window += 1;
-            return;
         }
         // A far-ahead measurement alone could expire every other track and make the tick loop run
-        // over the whole gap: it waits for the run that confirms it.
+        // over the whole gap: it waits, with the others of its run, for the run that confirms it.
         Verdict::Held => {
             t.stats.time_held += 1;
-            return;
-        }
-        Verdict::StepForward => t.stats.time_steps += 1,
-        Verdict::StepBack { to_ns } => {
-            step_back(t, to_ns);
-            // At the new clock the measurement may itself be older than the window.
-            if toa < to_ns.saturating_sub(t.cfg.ooo_window_ns) {
-                t.stats.late_window += 1;
-                return;
+            if gate_run_restarted(&t.gate) {
+                t.held_n = 0;
             }
+            held_push(t, m);
         }
-        Verdict::Accept => {}
+        Verdict::StepForward => {
+            t.stats.time_steps += 1;
+            if gate_run_restarted(&t.gate) {
+                t.held_n = 0;
+            }
+            // Confirmation delays the measurements of the run, it does not lose them: they are
+            // applied in arrival order at the new clock, before this one.
+            let n = t.held_n;
+            t.held_n = 0;
+            for i in 0..n {
+                let h = col(&t.held, i, blank_measurement());
+                gate_note_applied(&mut t.gate, h.sensor, h.toa_ns);
+                t.stats.time_held_applied += 1;
+                apply(t, &h, out);
+            }
+            apply(t, m, out);
+        }
+        Verdict::StepBack { to_ns } => {
+            t.held_n = 0;
+            step_back(t, to_ns);
+            apply(t, m, out);
+        }
+        Verdict::Accept => {
+            t.held_n = 0;
+            apply(t, m, out);
+        }
+    }
+}
+
+/// Keeps a held measurement; past the buffer the oldest is discarded.
+fn held_push(t: &mut Tracker, m: &Measurement) {
+    if t.held_n >= t.held.len() {
+        t.held.rotate_left(1);
+        t.held_n = t.held.len() - 1;
+    }
+    put(&mut t.held, t.held_n, *m);
+    t.held_n += 1;
+}
+
+/// Applies a measurement the gate let through: moves the clock forward if it is newer, then the
+/// track's own ordering rules (in order, duplicate, late) decide.
+fn apply(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
+    let toa = m.toa_ns;
+    // After a step the measurement (or a held one) may be older than the new clock's window.
+    if t.clock_ns != i64::MIN && toa < t.clock_ns.saturating_sub(t.cfg.ooo_window_ns) {
+        t.stats.late_window += 1;
+        return;
     }
     if toa > t.clock_ns {
         if t.next_tick_ns == i64::MIN {

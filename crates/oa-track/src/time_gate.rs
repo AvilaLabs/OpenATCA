@@ -12,9 +12,12 @@
 //! below it): a measurement that did would expire every live track, and the real measurements
 //! after it would all be late. Farther than the limit, a step needs a run of consecutive
 //! far-ahead measurements from enough distinct sensors and addresses that one faulty or forged
-//! source cannot make it. The way back from a clock that is wrong-ahead is the same idea
-//! mirrored: a run of late refusals that spans time, is long, and is not one sensor's or one
-//! aircraft's.
+//! source cannot make it; when only the measurement's own track and sensor are live there is
+//! nothing to protect and it steps at once. The way back from a clock that is wrong-ahead is the
+//! same idea mirrored: a run of late refusals that spans time, is long, and is not one sensor's or
+//! one aircraft's; sensors live only because of data ahead of that run's real time do not count
+//! towards the sensors it needs. The tracker keeps the held measurements of a run and applies
+//! them when it confirms: confirmation delays data, it does not lose it.
 
 use crate::params::CLOCK_STEP_CONFIRM;
 
@@ -83,6 +86,7 @@ struct Run {
 const EMPTY_RUNS: Runs = Runs {
     fwd: EMPTY_RUN,
     back: EMPTY_RUN,
+    restarted: false,
 };
 
 const EMPTY_RUN: Run = Run {
@@ -156,6 +160,22 @@ fn distinct<T: Copy + PartialEq>(v: &[T; RUN_BUF], used: &[bool; RUN_BUF]) -> us
     n
 }
 
+/// What the decision is told of the live tracks and sensors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Live {
+    /// Live tracks.
+    tracks: usize,
+    /// Live sensors (accepted within the drop age of the clock).
+    sensors: usize,
+    /// Live sensors that count towards a step back: those whose newest accepted time is no later
+    /// than the late run's newest time plus the window. A sensor live only because of data ahead
+    /// of the real time is the suspect, and must not raise the bar for the real ones.
+    sensors_back: usize,
+    /// Every live track is the measurement's own address (or there is none) and every live
+    /// sensor is its own sensor (or there is none): only its own track is at stake.
+    alone: bool,
+}
+
 /// The two runs the decision keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Runs {
@@ -164,6 +184,8 @@ struct Runs {
     fwd: Run,
     /// Late refusals since the last accepted measurement.
     back: Run,
+    /// The last far-ahead measurement started a new run (the run before it, if any, was refuted).
+    restarted: bool,
 }
 
 /// The gate's state: the two runs and the sensor table.
@@ -200,6 +222,49 @@ pub fn gate_live_sensors(g: &GateState, clock_ns: i64, drop_ns: i64) -> usize {
         }
     }
     n
+}
+
+/// Live sensors as [`gate_live_sensors`], counting only those whose newest accepted time is at
+/// most `cap_ns`.
+fn live_sensors_upto(g: &GateState, clock_ns: i64, drop_ns: i64, cap_ns: i64) -> usize {
+    let floor = clock_ns.saturating_sub(drop_ns);
+    let mut n = 0;
+    for i in 0..SENSOR_TABLE {
+        if g.sensor_used.get(i) == Some(&true)
+            && g.sensor_ns
+                .get(i)
+                .is_some_and(|&ns| ns >= floor && ns <= cap_ns)
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Whether `sensor` is one of the live sensors.
+fn sensor_is_live(g: &GateState, clock_ns: i64, drop_ns: i64, sensor: u16) -> bool {
+    let floor = clock_ns.saturating_sub(drop_ns);
+    let mut live = false;
+    for i in 0..SENSOR_TABLE {
+        if g.sensor_used.get(i) == Some(&true)
+            && g.sensor_id.get(i) == Some(&sensor)
+            && g.sensor_ns.get(i).is_some_and(|&ns| ns >= floor)
+        {
+            live = true;
+        }
+    }
+    live
+}
+
+/// Notes that `sensor` delivered a measurement at `toa` that the caller applied without asking
+/// the gate (a held one, after its run confirmed).
+pub fn gate_note_applied(g: &mut GateState, sensor: u16, toa: i64) {
+    sensor_note(g, sensor, toa);
+}
+
+/// Whether the last decision started a new run of far-ahead measurements.
+pub fn gate_run_restarted(g: &GateState) -> bool {
+    g.runs.restarted
 }
 
 /// Notes that `sensor` delivered an accepted measurement at `toa`.
@@ -248,9 +313,10 @@ fn sensor_note(g: &mut GateState, sensor: u16, toa: i64) {
 }
 
 /// Decides what becomes of a measurement at `toa` from `sensor` for `addr`, given the tracker
-/// clock (`i64::MIN` before the first measurement) and the number of live tracks. Records what
-/// it needs of the measurement; the caller moves the clock for every verdict but `Late` and
-/// `Held`.
+/// clock (`i64::MIN` before the first measurement), the number of live tracks and whether every
+/// live track is the measurement's own address. Records what it needs of the measurement; the
+/// caller moves the clock for every verdict but `Late` and `Held`.
+#[allow(clippy::too_many_arguments)]
 pub fn gate_decide(
     g: &mut GateState,
     cfg: &GateCfg,
@@ -259,18 +325,28 @@ pub fn gate_decide(
     addr: u32,
     sensor: u16,
     live_tracks: usize,
+    own_addr_only: bool,
 ) -> Verdict {
     let live_sensors = gate_live_sensors(g, clock_ns, cfg.drop_ns);
-    let v = runs_decide(
-        &mut g.runs,
-        cfg,
-        clock_ns,
-        toa,
-        addr,
-        sensor,
-        live_tracks,
-        live_sensors,
-    );
+    let own_sensor_only = live_sensors == 0
+        || (live_sensors == 1 && sensor_is_live(g, clock_ns, cfg.drop_ns, sensor));
+    let back_newest = if g.runs.back.n > 0 {
+        g.runs.back.newest_ns.max(toa)
+    } else {
+        toa
+    };
+    let live = Live {
+        tracks: live_tracks,
+        sensors: live_sensors,
+        sensors_back: live_sensors_upto(
+            g,
+            clock_ns,
+            cfg.drop_ns,
+            back_newest.saturating_add(cfg.ooo_ns),
+        ),
+        alone: own_addr_only && own_sensor_only,
+    };
+    let v = runs_decide(&mut g.runs, cfg, clock_ns, toa, addr, sensor, &live);
     match v {
         Verdict::Late | Verdict::Held => {}
         Verdict::Accept | Verdict::StepForward => sensor_note(g, sensor, toa),
@@ -289,9 +365,8 @@ pub fn gate_decide(
     v
 }
 
-/// The decision itself, given the number of live sensors: the runs and nothing else, so the
-/// proofs of the step rules do not carry the sensor table.
-#[allow(clippy::too_many_arguments)]
+/// The decision itself, given what is live: the runs and nothing else, so the proofs of the step
+/// rules do not carry the sensor table.
 fn runs_decide(
     r: &mut Runs,
     cfg: &GateCfg,
@@ -299,9 +374,9 @@ fn runs_decide(
     toa: i64,
     addr: u32,
     sensor: u16,
-    live_tracks: usize,
-    live_sensors: usize,
+    live: &Live,
 ) -> Verdict {
+    r.restarted = false;
     if clock_ns == i64::MIN {
         *r = EMPTY_RUNS;
         return Verdict::Accept;
@@ -311,7 +386,7 @@ fn runs_decide(
         let span = r.back.newest_ns.saturating_sub(r.back.first_ns);
         if r.back.n >= BACK_CONFIRM
             && span >= cfg.ooo_ns
-            && r.back.spread_ok(live_sensors, live_tracks)
+            && r.back.spread_ok(live.sensors_back, live.tracks)
         {
             let to_ns = r.back.newest_ns;
             *r = EMPTY_RUNS;
@@ -323,16 +398,22 @@ fn runs_decide(
         *r = EMPTY_RUNS;
         return Verdict::Accept;
     }
-    // Far ahead. With no live track nothing can be expired by it.
+    // Far ahead.
     let continues = r.fwd.n > 0 && toa >= r.fwd.last_ns.saturating_sub(cfg.ooo_ns);
     if !continues {
         r.fwd = EMPTY_RUN;
+        r.restarted = true;
     }
     r.fwd.push(toa, addr, sensor);
-    if live_tracks == 0
-        || (r.fwd.n >= CLOCK_STEP_CONFIRM && r.fwd.spread_ok(live_sensors, live_tracks))
+    // With no live track nothing can be expired by it; with only its own track (and its own
+    // sensor) live, only that aircraft is affected: nothing to protect, no run needed.
+    if live.tracks == 0
+        || live.alone
+        || (r.fwd.n >= CLOCK_STEP_CONFIRM && r.fwd.spread_ok(live.sensors, live.tracks))
     {
+        let restarted = r.restarted;
         *r = EMPTY_RUNS;
+        r.restarted = restarted;
         return Verdict::StepForward;
     }
     Verdict::Held
@@ -401,7 +482,16 @@ mod proofs {
         for _ in 0..6 {
             let toa: i64 = kani::any();
             let live: usize = kani::any();
-            let v = gate_decide(&mut g, &cfg, clock, toa, kani::any(), kani::any(), live);
+            let v = gate_decide(
+                &mut g,
+                &cfg,
+                clock,
+                toa,
+                kani::any(),
+                kani::any(),
+                live,
+                kani::any(),
+            );
             clock = next_clock(clock, toa, v);
         }
     }
@@ -419,7 +509,16 @@ mod proofs {
         let toa: i64 = kani::any();
         kani::assume(toa.unsigned_abs() < BOUND);
         let live: usize = kani::any();
-        let v = gate_decide(&mut g, &cfg, clock, toa, kani::any(), kani::any(), live);
+        let v = gate_decide(
+            &mut g,
+            &cfg,
+            clock,
+            toa,
+            kani::any(),
+            kani::any(),
+            live,
+            kani::any(),
+        );
         if let Verdict::Accept = v {
             if clock != i64::MIN {
                 assert!(toa - clock <= cfg.limit_ns);
@@ -437,10 +536,14 @@ mod proofs {
         let mut r = EMPTY_RUNS;
         let clock: i64 = kani::any();
         kani::assume(clock.unsigned_abs() < BOUND);
-        let live_s: usize = kani::any();
-        let live_t: usize = kani::any();
+        let live = Live {
+            tracks: kani::any(),
+            sensors: kani::any(),
+            sensors_back: kani::any(),
+            alone: kani::any(),
+        };
         // With no live track a far-ahead measurement steps at once (nothing can be expired).
-        kani::assume(live_t > 0);
+        kani::assume(live.tracks > 0);
         let mut addrs = [0u32; 3];
         let mut sensors = [0u32; 3];
         let mut prev = i64::MIN;
@@ -454,15 +557,19 @@ mod proofs {
             prev = toa;
             addrs[k] = a;
             sensors[k] = u32::from(s);
-            let v = runs_decide(&mut r, &cfg, clock, toa, a, s, live_t, live_s);
+            let v = runs_decide(&mut r, &cfg, clock, toa, a, s, &live);
             // Far ahead: held or stepped, nothing else.
             assert!(matches!(v, Verdict::Held | Verdict::StepForward));
-            if k < 2 {
+            if live.alone {
+                // Only the measurement's own track and sensor are live: it steps at once.
+                assert!(v == Verdict::StepForward);
+                kani::cover!(k == 0, "a lone step is reachable");
+            } else if k < 2 {
                 // Fewer than three in a row never steps.
                 assert!(v == Verdict::Held);
             } else if v == Verdict::StepForward {
-                assert!(count_distinct(&addrs, 3) >= WANT_ADDRS.min(live_t));
-                assert!(count_distinct(&sensors, 3) >= WANT_SENSORS.min(live_s));
+                assert!(count_distinct(&addrs, 3) >= WANT_ADDRS.min(live.tracks));
+                assert!(count_distinct(&sensors, 3) >= WANT_SENSORS.min(live.sensors));
                 kani::cover!(true, "a confirmed step is reachable");
             }
         }
@@ -477,8 +584,12 @@ mod proofs {
         let mut r = EMPTY_RUNS;
         let clock: i64 = kani::any();
         kani::assume(clock.unsigned_abs() < BOUND);
-        let live_s: usize = kani::any();
-        let live_t: usize = kani::any();
+        let live = Live {
+            tracks: kani::any(),
+            sensors: kani::any(),
+            sensors_back: kani::any(),
+            alone: kani::any(),
+        };
         let mut addrs = [0u32; 6];
         let mut sensors = [0u32; 6];
         let (mut first, mut newest) = (0i64, i64::MIN);
@@ -494,7 +605,7 @@ mod proofs {
                 first = toa;
             }
             newest = newest.max(toa);
-            let v = runs_decide(&mut r, &cfg, clock, toa, a, s, live_t, live_s);
+            let v = runs_decide(&mut r, &cfg, clock, toa, a, s, &live);
             if k < 5 {
                 // Fewer than six refusals never step back.
                 assert!(v == Verdict::Late);
@@ -503,8 +614,8 @@ mod proofs {
                     Verdict::StepBack { to_ns } => {
                         assert_eq!(to_ns, newest);
                         assert!(newest - first >= cfg.ooo_ns);
-                        assert!(count_distinct(&addrs, 6) >= WANT_ADDRS.min(live_t));
-                        assert!(count_distinct(&sensors, 6) >= WANT_SENSORS.min(live_s));
+                        assert!(count_distinct(&addrs, 6) >= WANT_ADDRS.min(live.tracks));
+                        assert!(count_distinct(&sensors, 6) >= WANT_SENSORS.min(live.sensors_back));
                         kani::cover!(true, "a step back is reachable");
                     }
                     Verdict::Late => {}

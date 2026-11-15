@@ -74,10 +74,14 @@ The tracker clock is the newest time seen, decided by a pure gate (`time_gate`, 
 measurement may move it forward by at most the step limit (10 s, the out-of-order window; always below
 the 60 s drop age, so one forged or faulty time cannot sweep the live tracks). A measurement farther
 ahead is held (counted, not applied) until three in a row come from at least min(2, live sensors)
-distinct sensors and min(3, live tracks) distinct addresses; with no live track it is applied at once.
+distinct sensors and min(3, live tracks) distinct addresses; with no live track, or only its own track and
+sensor live, it steps at once. The far-ahead measurements of a run are kept (the last 8) and applied after the
+step that confirms them: confirmation delays data, it does not lose it; a refuted run discards them (counted
+as held).
 If the clock is wrong-ahead, every real measurement is refused as late; a run of at least six such
 refusals spanning the out-of-order window, from the same spread of sensors and addresses, steps the clock
-back to the newest of them, drops the tracks built on the wrong clock and counts both. **A consumer must
+back to the newest of them (sensors live only because of data ahead of that run do not count towards the
+sensors it needs), drops the tracks built on the wrong clock and counts both. **A consumer must
 expect that, after a step back, output rows carry earlier times than rows already emitted** (the time of
 the output goes back once, by as much as the clock had been forged ahead); `time_steps_back` counts it.
 

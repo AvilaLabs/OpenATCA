@@ -130,6 +130,7 @@ fn a_far_ahead_run_from_one_sensor_waits_for_a_second_sensor_while_two_are_live(
     tracker_update(&mut t, &far(3, 4, 11.0, 414, &mut rng), &mut out);
     assert_eq!(tracker_stats(&t).time_steps, 1);
     assert_eq!(tracker_stats(&t).time_held, 4);
+    assert_eq!(tracker_stats(&t).time_held_applied, 4);
 }
 
 // REQ: OA-TRK-192
@@ -140,6 +141,9 @@ fn a_whole_feed_pause_of_30_seconds_steps_after_three_measurements_and_tracks_co
     let st = tracker_stats(&t);
     assert_eq!(st.time_held, 2);
     assert_eq!(st.time_steps, 1);
+    // Confirmation delays the two held measurements, it does not lose them.
+    assert_eq!(st.time_held_applied, 2);
+    assert_eq!(st.applied, st.offered);
     assert_eq!(st.started, 6, "a track was restarted");
     assert_eq!(tracker_live(&t).len(), 6);
     assert!(tracker_live(&t).iter().all(|l| l.1 >= 49 * S));
@@ -148,7 +152,7 @@ fn a_whole_feed_pause_of_30_seconds_steps_after_three_measurements_and_tracks_co
 
 // REQ: OA-TRK-192
 #[test]
-fn one_aircraft_one_sensor_and_a_15_second_gap_steps_after_three() {
+fn one_aircraft_one_sensor_and_a_15_second_gap_steps_at_once() {
     let mut t = tracker_new(&big_config()).unwrap();
     let mut out = output_new(1 << 20);
     let mut rng = Rng(9);
@@ -156,10 +160,50 @@ fn one_aircraft_one_sensor_and_a_15_second_gap_steps_after_three() {
         tracker_update(&mut t, &meas(0, 1, s as f64, &mut rng), &mut out);
     }
     let st = tracker_stats(&t);
-    assert_eq!(st.time_held, 2);
+    // Only its own track and sensor are live: nothing to protect, no run to wait for.
+    assert_eq!(st.time_held, 0);
     assert_eq!(st.time_steps, 1);
     assert_eq!(st.started, 1);
+    assert_eq!(st.applied, st.offered);
     assert_eq!(tracker_live(&t).len(), 1);
+}
+
+// REQ: OA-TRK-199
+#[test]
+fn one_aircraft_one_sensor_at_17_second_intervals_has_every_report_applied_and_none_held() {
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 20);
+    let mut rng = Rng(11);
+    for k in 0..=10 {
+        tracker_update(&mut t, &meas(0, 1, f64::from(k * 17), &mut rng), &mut out);
+    }
+    let st = tracker_stats(&t);
+    assert_eq!(st.time_held, 0);
+    assert_eq!(st.late_window, 0);
+    assert_eq!(st.applied, 11);
+    assert_eq!(st.time_steps, 10);
+}
+
+// REQ: OA-TRK-199
+#[test]
+fn two_aircraft_reporting_together_17_seconds_apart_lose_no_report_to_a_confirmation() {
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 20);
+    let mut rng = Rng(13);
+    // Both aircraft, one sensor, at 0, 17 and 34 s: the two at 17 s are held until the first at
+    // 34 s confirms the step, and are then applied.
+    for k in 0..=2 {
+        for a in 0..2 {
+            tracker_update(&mut t, &meas(a, 1, f64::from(k * 17), &mut rng), &mut out);
+        }
+    }
+    let st = tracker_stats(&t);
+    assert_eq!(st.offered, 6);
+    assert_eq!(st.time_held, 2);
+    assert_eq!(st.time_held_applied, 2);
+    assert_eq!(st.time_steps, 1);
+    assert_eq!(st.late_window, 0);
+    assert_eq!(st.applied, 6);
 }
 
 // REQ: OA-TRK-196
@@ -180,8 +224,9 @@ fn a_clock_forged_ahead_by_two_sensors_steps_back_on_real_data_and_the_tracks_ar
     feed(&mut t, &mut out, &mut rng, 21, 45);
     let st = tracker_stats(&t);
     assert_eq!(st.time_steps_back, 1); // NEW-STAT
-                                       // Only the measurement that confirmed the step was applied: one forged track to drop.
-    assert_eq!(st.time_future_dropped, 1); // NEW-STAT
+                                       // The two held forged measurements were applied with the one that confirmed the step: three
+                                       // forged tracks to drop.
+    assert_eq!(st.time_future_dropped, 3); // NEW-STAT
     let live = tracker_live(&t);
     assert_eq!(live.len(), 6, "{live:?}");
     assert!(live.iter().all(|l| (0xA00000..0xA00006).contains(&l.0)));
@@ -190,6 +235,32 @@ fn a_clock_forged_ahead_by_two_sensors_steps_back_on_real_data_and_the_tracks_ar
     assert!(out.t_ns.len() > rows_before + 100);
     assert!(out.t_ns[rows_before..].iter().any(|&x| x < max_before));
     tracker_flush(&mut t, 50 * S, &mut out);
+}
+
+// REQ: OA-TRK-200
+#[test]
+fn forged_sensors_do_not_lock_out_one_real_sensor_from_stepping_the_clock_back() {
+    let (mut t, mut out, mut rng) = fleet_until(20);
+    for (k, (a, sensor)) in [(0xF1u32, 7u16), (0xF2, 8), (0xF3, 7)].iter().enumerate() {
+        let mut m = far(0, *sensor, 21.0, 400 + k as i64, &mut rng);
+        m.addr = *a;
+        tracker_update(&mut t, &m, &mut out);
+    }
+    assert_eq!(tracker_stats(&t).time_steps, 1);
+    // The second forging sensor delivers once more at the forged time: both are live there.
+    let mut m = far(0, 8, 21.0, 403, &mut rng);
+    m.addr = 0xF4;
+    tracker_update(&mut t, &m, &mut out);
+    // From here one real sensor only, many aircraft.
+    for s in 21..=45 {
+        for a in 0..6 {
+            tracker_update(&mut t, &meas(a, 1, s as f64, &mut rng), &mut out);
+        }
+    }
+    assert_eq!(tracker_stats(&t).time_steps_back, 1); // NEW-STAT
+    let live = tracker_live(&t);
+    assert_eq!(live.len(), 6, "{live:?}");
+    assert!(live.iter().all(|l| l.1 >= 44 * S));
 }
 
 // REQ: OA-TRK-197
