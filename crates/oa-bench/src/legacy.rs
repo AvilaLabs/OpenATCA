@@ -474,6 +474,8 @@ pub const MAX_FLIGHTS_PER_PLAN: usize = 8;
 pub struct PlanSlot {
     pub flights: [u32; MAX_FLIGHTS_PER_PLAN],
     pub len: u8,
+    /// More flights used the identifier than fit: the list is not all of them.
+    pub overflowed: bool,
 }
 
 /// Plan identifier to the flights that used it, for joining TBFM and TFMS rows. Built once, sized
@@ -505,7 +507,10 @@ pub fn plan_index(leg: &Legacy) -> PlanIndex {
                 *s = i as u32;
                 slot.len += 1;
             }
-            None => idx.overflow = idx.overflow.saturating_add(1),
+            None => {
+                slot.overflowed = true;
+                idx.overflow = idx.overflow.saturating_add(1);
+            }
         }
     }
     idx
@@ -517,6 +522,11 @@ pub fn plan_candidates<'a>(idx: &'a PlanIndex, key: &[u8; 12]) -> &'a [u32] {
         .get(key)
         .and_then(|s| s.flights.get(..usize::from(s.len)))
         .unwrap_or(&[])
+}
+
+/// Whether more flights used `key` than [`plan_candidates`] lists.
+pub fn plan_overflowed(idx: &PlanIndex, key: &[u8; 12]) -> bool {
+    idx.slots.get(key).is_some_and(|s| s.overflowed)
 }
 
 /// Whether plan identifier `key` names any flight.

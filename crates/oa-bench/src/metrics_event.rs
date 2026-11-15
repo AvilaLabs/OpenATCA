@@ -26,8 +26,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::assoc::{Assoc, TruthIndex};
 use crate::geo::{dist_m, enu, NM_M};
 use crate::legacy::{
-    hev, name, pad, plan_candidates, tbfm_kind, tfms_kind, Legacy, PlanIndex, NONE, NO_COORD,
-    NO_TIME,
+    hev, name, pad, plan_candidates, plan_overflowed, tbfm_kind, tfms_kind, Legacy, PlanIndex,
+    NONE, NO_COORD, NO_TIME,
 };
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
@@ -140,13 +140,25 @@ const NONE_ACTIVE: &str = "plan identifier used by several flights, none active 
 const SEVERAL_ACTIVE: &str =
     "plan identifier used by several flights, more than one fits the estimate";
 
+const LONE_OTHER: &str = "plan identifier's one flight has another aircraft identification";
+const OVERFLOWED: &str = "plan identifier used by more flights than the index keeps";
+
 /// The flight an estimate belongs to. `est` is its issue time, its estimated time and the aircraft
-/// identification it carries (all zero when it has none). A plan identifier used by one flight
-/// names it. One used by several (a reused identifier) names the flight whose active interval
-/// ([`estimate_window`], the interval that picks the truth leg) contains the issue time and whose
-/// callsign does not contradict the estimate's identification (a flight with no callsign is not
-/// contradicted); no such flight, or more than one, is `Err` with the reason to count. An estimate
-/// with no issue time is placed by its estimated time.
+/// identification it carries (all zero when it has none).
+///
+/// * An identifier that more flights used than the index keeps names none: the estimate cannot be
+///   told from the flights left out.
+/// * One flight: it, unless both it and the estimate carry an identification and the two differ
+///   (the identifier was reused by a flight outside the recording). No time check, so an estimate
+///   issued before the flight's first ERAM sample still joins.
+/// * Several flights: the one whose callsign equals the estimate's identification, when exactly
+///   one does (even if the issue time is outside its interval); otherwise the one whose active
+///   interval ([`estimate_window`], the interval that picks the truth leg, with its 60-minute
+///   rule for a flight with no ERAM sample) contains the issue time among those whose callsign
+///   does not contradict the identification. A flight with no callsign is not contradicted. None
+///   or more than one is `Err` with the reason to count.
+///
+/// An estimate with no issue time is placed by its estimated time.
 fn resolve_plan(
     leg: &Legacy,
     plan: &PlanIndex,
@@ -156,25 +168,39 @@ fn resolve_plan(
     cfg: &EventConfig,
 ) -> Result<u32, &'static str> {
     let (issue, time, aid) = est;
+    if plan_overflowed(plan, key) {
+        return Err(OVERFLOWED);
+    }
     let cands = plan_candidates(plan, key);
+    let has_aid = aid.iter().any(|&b| b != 0);
+    let call_of = |f: u32| {
+        leg.flights
+            .callsign
+            .get(f as usize)
+            .copied()
+            .unwrap_or([0; 8])
+    };
+    let has_call = |f: u32| call_of(f).iter().any(|&b| b != 0);
     let (&only, rest) = match cands.split_first() {
         None => return Err(NOT_MATCHED),
         Some(x) => x,
     };
     if rest.is_empty() {
+        if has_aid && has_call(only) && call_of(only) != aid {
+            return Err(LONE_OTHER);
+        }
         return Ok(only);
     }
+    if has_aid {
+        let mut named = cands.iter().copied().filter(|&f| call_of(f) == aid);
+        if let (Some(f), None) = (named.next(), named.next()) {
+            return Ok(f);
+        }
+    }
     let probe = if issue == NO_TIME { time } else { issue };
-    let has_aid = aid.iter().any(|&b| b != 0);
     let mut fits = cands.iter().copied().filter(|&f| {
         let (lo, hi) = estimate_window(windows, f, issue, time, cfg);
-        let call = leg
-            .flights
-            .callsign
-            .get(f as usize)
-            .copied()
-            .unwrap_or([0; 8]);
-        let call_ok = !has_aid || call.iter().all(|&b| b == 0) || call == aid;
+        let call_ok = !has_aid || !has_call(f) || call_of(f) == aid;
         probe >= lo && probe <= hi && call_ok
     });
     match (fits.next(), fits.next()) {

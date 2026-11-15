@@ -496,17 +496,18 @@ fn a_reused_plan_identifier_joins_the_estimate_to_the_flight_active_at_its_issue
 // REQ: OA-BENCH-056
 #[test]
 fn a_reused_plan_identifier_is_excluded_when_no_flight_fits_the_estimate() {
-    // Issued at the end of the second trip's day: after both flights ended.
-    let t = reused_plan(false, b"CALLB", 10_000_000);
+    // Carrying no identification and issued at the end of the day: after both flights ended.
+    let t = reused_plan(false, b"", 10_000_000);
     let (m, ex) = score(&t, &two_trips(), Some(500), &env());
     assert_eq!(total_n(&m[0]), 0);
     assert_eq!(ex_count(&ex, "F1", NO_ACTIVE), 1, "{ex:?}");
     assert_eq!(ex_count(&ex, "F3-arrival", NO_ACTIVE), 1, "{ex:?}");
-    // Issued during B's trip but naming A: A is not active then and B is not named.
+    // Issued during B's trip but naming A: the callsign names A alone, so it is A's estimate
+    // (scored against A's trip, where it is far off in time and excluded), never B's.
     let t = reused_plan(false, b"CALLA", 0);
     let (m, ex) = score(&t, &two_trips(), Some(500), &env());
     assert_eq!(total_n(&m[0]), 0);
-    assert_eq!(ex_count(&ex, "F1", NO_ACTIVE), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F1", NO_ACTIVE), 0, "{ex:?}");
 }
 
 // REQ: OA-BENCH-056
@@ -540,4 +541,103 @@ fn the_plan_index_keeps_every_flight_of_an_identifier_up_to_its_bound_and_counts
     let c = plan_candidates(&idx, &pad(PLAN_P));
     assert_eq!(c, (0..MAX_FLIGHTS_PER_PLAN as u32).collect::<Vec<_>>());
     assert_eq!(idx.overflow, 2);
+}
+
+const LONE_OTHER: &str = "plan identifier's one flight has another aircraft identification";
+const OVERFLOWED: &str = "plan identifier used by more flights than the index keeps";
+
+// REQ: OA-BENCH-059
+#[test]
+fn a_lone_flight_with_another_identification_is_not_the_estimates_flight() {
+    // PLAN0's estimates carry `AID`; its one recorded flight is `OTHER`, so the identifier was
+    // reused by a flight outside the recording. PLAN1's flight has no callsign: not contradicted.
+    let mut t = trips(true);
+    t.leg.flights.callsign[0] = pad(b"OTHER");
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    for r in &m {
+        assert_eq!(total_n(r), 1, "{}: {ex:?}", r.id);
+    }
+    assert_eq!(ex_count(&ex, "F1", LONE_OTHER), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F3-arrival", LONE_OTHER), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F3-departure", LONE_OTHER), 1, "{ex:?}");
+    // The same identification joins, and an estimate with none joins too.
+    t.leg.flights.callsign[0] = pad(b"AID");
+    let (m, _) = score(&t, &two_trips(), Some(500), &env());
+    assert!(m.iter().all(|r| total_n(r) == 2));
+    t.leg.flights.callsign[0] = pad(b"OTHER");
+    for a in t.leg.tbfm.aid.iter_mut().chain(t.leg.tfms.acid.iter_mut()) {
+        *a = [0; 8];
+    }
+    let (m, _) = score(&t, &two_trips(), Some(500), &env());
+    assert!(m.iter().all(|r| total_n(r) == 2));
+}
+
+// REQ: OA-BENCH-060
+#[test]
+fn an_identifier_used_by_more_flights_than_the_index_keeps_excludes_its_estimates() {
+    use oa_bench::legacy::MAX_FLIGHTS_PER_PLAN;
+    let mut t = reused_plan(false, b"CALLB", 0);
+    // Nine more flights on the same identifier: B is no longer among the first eight.
+    for g in 0..MAX_FLIGHTS_PER_PLAN as u128 + 1 {
+        let f = flight_ix(&mut t.leg, 100 + g).unwrap();
+        t.leg.flights.plan_id[f as usize] = pad(PLAN_P);
+        t.leg.flights.callsign[f as usize] = pad(b"CALLX");
+        t.assoc.addr.push(ADDR);
+    }
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert_eq!(total_n(&m[0]), 0);
+    assert_eq!(total_n(&m[1]), 0);
+    assert_eq!(ex_count(&ex, "F1", OVERFLOWED), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F3-arrival", OVERFLOWED), 1, "{ex:?}");
+    // And it is in the benchmark output's counts.
+    let counts = oa_bench::report::extraction_counts(&t.leg);
+    let line = counts
+        .iter()
+        .find(|(k, _)| k.contains("past the per-identifier limit"))
+        .unwrap();
+    assert_eq!(line.1, 3);
+}
+
+// REQ: OA-BENCH-061
+#[test]
+fn an_estimate_issued_before_its_flights_first_sample_is_not_handed_to_the_neighbour() {
+    // B's estimates issued 3,000 s before the day's second trip, while flight A's active
+    // interval (stretched here to cover that time) is still open: the callsign names B.
+    let mut t = reused_plan(false, b"CALLB", -3_000_000);
+    push_th(
+        &mut t.leg,
+        0,
+        T0_MS + 2_600_000,
+        NO_TIME,
+        0,
+        0,
+        30_000,
+        None,
+        false,
+    );
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    for r in [&m[0], &m[1]] {
+        assert_eq!(total_n(r), 1, "{}: {ex:?}", r.id);
+        assert!(worst(r) < 0.5, "{} error {}", r.id, worst(r));
+    }
+    // With no identification on the estimate the interval decides, and A's interval is the one
+    // that is open: the estimate is A's by the same definition OA-BENCH-052 uses.
+    let mut u = reused_plan(false, b"", -3_000_000);
+    push_th(
+        &mut u.leg,
+        0,
+        T0_MS + 2_600_000,
+        NO_TIME,
+        0,
+        0,
+        30_000,
+        None,
+        false,
+    );
+    let (_, ex) = score(&u, &two_trips(), Some(500), &env());
+    assert_eq!(
+        ex_count(&ex, "F1", NO_ACTIVE) + ex_count(&ex, "F1", SEVERAL),
+        0,
+        "{ex:?}"
+    );
 }

@@ -2243,6 +2243,19 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   never of another copy. `.msg` files are hashed as they are read, `.oaf` and `.oaf.gz` recordings as the replay
   merge reads them and the ADS-B clip as its frame loop reads it; a file whose read does not reach its end is an
   error, not a digest. The report notes this for the feed inputs and for the clip.
+- **OA-BENCH-059** An estimate whose plan identifier names one recorded flight joins it unless both carry an
+  aircraft identification and the two differ (the identifier was reused by a flight outside the recording): then
+  it is excluded with a named reason. There is no time check for a lone flight, so an estimate issued before the
+  flight's first ERAM sample still joins.
+- **OA-BENCH-060** An estimate whose plan identifier was used by more flights than the plan index keeps is
+  excluded with a named reason, never resolved against the flights kept; the overflow count is in the report.
+- **OA-BENCH-061** Among several flights of one plan identifier, an estimate goes to the one flight whose callsign
+  equals its aircraft identification when exactly one does, even if its issue time is outside that flight's
+  active interval (an estimate issued before the flight's first ERAM sample is not handed to the neighbouring
+  flight or dropped); otherwise the active interval of OA-BENCH-052, with its 60-minute rule for a flight with
+  no ERAM sample, decides.
+- **OA-BENCH-062** The digest covers every byte of every read, including reads after a zero-length read; the
+  digest of a file whose last read was not a zero-length read is an error, not a digest.
 
 ## Winds aloft (oa-wind)
 
