@@ -641,3 +641,71 @@ fn an_estimate_issued_before_its_flights_first_sample_is_not_handed_to_the_neigh
         "{ex:?}"
     );
 }
+
+/// One truth leg that flies east 500 m north of `MFXA` at 200 s, goes round a loop 8 km north of
+/// it and comes back through `MFXA` itself at 1,155 s (a hold), at 100 m/s: the later pass is the
+/// closer one.
+fn hold_leg() -> Vec<LegPath> {
+    let path = vec![
+        (-20_000.0, 500.0),
+        (20_000.0, 500.0),
+        (20_000.0, 8_000.0),
+        (-20_000.0, 8_000.0),
+        (-20_000.0, 0.0),
+        (20_000.0, 0.0),
+    ];
+    vec![(T0_MS, T0_MS + 1_355_000, path)]
+}
+
+/// Meter-fix estimates `(estimated time s, issue s)` of one flight with no ERAM sample, scored
+/// against [`hold_leg`]: the count and mean error in whole seconds, with the exclusions.
+fn hold_f1(estimates: &[(i64, i64)]) -> (Vec<f64>, Exclusions) {
+    let mut leg = new_legacy();
+    let mut assoc = Assoc::default();
+    let f = flight_ix(&mut leg, 1).unwrap();
+    leg.flights.plan_id[f as usize] = pad(b"PLANH");
+    assoc.addr.push(ADDR);
+    for &(eta, issue) in estimates {
+        push_tbfm(
+            &mut leg,
+            pad(b"PLANH"),
+            pad(b"AID"),
+            pad(b"MFXA"),
+            tbfm_kind::ETA_MFX,
+            T0_MS + eta * 1000,
+            T0_MS + issue * 1000,
+        );
+    }
+    let t = Trips { leg, assoc };
+    let (m, ex) = score(&t, &hold_leg(), Some(30_000), &env());
+    let errs = m[0]
+        .rows
+        .iter()
+        .find(|r| r.label == "all")
+        .map_or(vec![], |r| vec![r.stats.n as f64, r.stats.mean.round()]);
+    (errs, ex)
+}
+
+// REQ: OA-BENCH-071
+#[test]
+fn each_pass_of_a_fix_in_one_leg_is_scored_by_the_issue_time_of_the_estimate() {
+    // A correct 200 s estimate issued at 100 s and a correct 1155 s estimate issued at 700 s,
+    // after the first pass is over: both are zero error, none excluded.
+    let (r, ex) = hold_f1(&[(200, 100), (1155, 700)]);
+    assert_eq!(r, vec![2.0, 0.0], "{ex:?}");
+    // The second alone, whatever the 200 s pass is.
+    let (r, ex) = hold_f1(&[(1155, 700)]);
+    assert_eq!(r, vec![1.0, 0.0], "{ex:?}");
+}
+
+// REQ: OA-BENCH-071
+#[test]
+fn an_estimate_issued_inside_the_first_stretch_belongs_to_that_pass() {
+    // Issued at 180 s, about 2 km before the fix and inside its 2 NM radius.
+    let (r, ex) = hold_f1(&[(200, 180)]);
+    assert_eq!(r, vec![1.0, 0.0], "{ex:?}");
+    // A wrong estimate issued in the first stretch is scored against it, not the later pass:
+    // the 1155 s time is 955 s late for the 200 s passage.
+    let (r, _) = hold_f1(&[(1155, 180)]);
+    assert_eq!(r, vec![1.0, 955.0]);
+}

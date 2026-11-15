@@ -2336,13 +2336,13 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   or the estimate is excluded and counted.
 - **OA-BENCH-052** Meter-fix crossings, takeoffs and landings are taken from the one truth leg that overlaps the
   flight plan's active interval the most (the 60 minutes after issue when the plan has no ERAM sample) and
-  cached per leg: one aircraft flying two trips with a perfect estimate for each scores zero error on both.
+  cached per leg (a meter fix per passage, OA-BENCH-071): one aircraft flying two trips with a perfect estimate for each scores zero error on both.
 - **OA-BENCH-053** A truth leg that begins or ends near a runway threshold with no barometric altitude is not a
   takeoff or landing: the estimate is excluded and counted with that reason.
 - **OA-BENCH-054** The common-time comparison scores two systems at the same truth times: two systems with the
   same error at every instant but different publication rates have different native RMS and equal
   common-time RMS, a grid time counts only when both have a paired sample within the tolerance, and the
-  grid times left out are counted.
+  grid times left out are counted (duplicate tracks: OA-BENCH-070).
 - **OA-BENCH-055** The legacy extraction accepts exactly the documents the replay pipeline accepts: both build
   their parser and decoders from the replay's one definition of the limits (`doc_xml_limits`, `doc_fixm_limits`,
   the table sizes) and both decode as far as the tables fit, so a 2 MiB SFDPS document with ignored text, and
@@ -2375,6 +2375,19 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   no ERAM sample, decides.
 - **OA-BENCH-062** The digest covers every byte of every read, including reads after a zero-length read; the
   digest of a file whose last read was not a zero-length read is an error, not a digest.
+- **OA-BENCH-070** The common-time comparison never picks a row by its error: among rows of one system for one
+  aircraft at one time (several flight records), it uses the row of the flight with the most paired samples
+  for that aircraft over the whole run, the lowest flight index on a tie, whatever the grid phase; every other
+  row at that time is counted as a duplicate-track sample and reported beside C1 for each system.
+- **OA-BENCH-071** Each contiguous stretch of a truth leg inside the 2 NM radius of a meter fix is one passage,
+  its time the closest approach within the stretch. An estimate is scored against the first passage that ends
+  after its issue time (the passage it is issued in, when issued inside one); the estimated time never chooses
+  it. A leg crossing a fix at 11:30 and again at 12:30 scores an estimate issued at 12:05 against 12:30.
+  Passages are cached per (leg, fix, passage). F3 takes one takeoff (leg start) and one landing (leg end) per
+  leg, so it has no second occurrence in a leg to choose between.
+- **OA-BENCH-072** The report header carries metrics version 2 and a scoring-code digest: SHA-256, in hex, over
+  the name, length and text of the metric modules (included at build, hashed at run time), plus the build's
+  `OPENATCA_SOURCE_REV` when set. A change to those modules changes the digest.
 
 ## Winds aloft (oa-wind)
 
