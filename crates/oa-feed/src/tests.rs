@@ -2097,3 +2097,27 @@ fn a_true_regression_still_counts_and_forgets_the_gap() {
     let h = seqs(&[0, 3, 4, 8, 2]);
     assert_eq!((h.missing, h.reordered, h.regressions), (2 + 3, 0, 1));
 }
+
+// REQ: OA-FEED-173
+#[test]
+fn read_frames_counts_a_frame_cut_short_at_the_end_of_the_stream() {
+    use crate::stream::read_frames;
+    let a = frame(1, FLAG_BYTES, 0, 10, 0, b"first");
+    let b = frame(1, FLAG_BYTES, 1, 20, 0, b"second");
+    let run = |tail: &[u8]| {
+        let mut bytes = a.clone();
+        bytes.extend_from_slice(&b);
+        bytes.extend_from_slice(tail);
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let bad = read_frames(&mut bytes.as_slice(), &mut |f| {
+            seen.push(f.payload.to_vec())
+        })
+        .unwrap();
+        (seen, bad)
+    };
+    let whole = vec![b"first".to_vec(), b"second".to_vec()];
+    assert_eq!(run(&[]), (whole.clone(), 0));
+    // A partial header, then a partial body: the frames before are kept, the partial one counted.
+    assert_eq!(run(&a[..10]), (whole.clone(), 1));
+    assert_eq!(run(&a[..HEADER_LEN + 2]), (whole, 1));
+}

@@ -439,6 +439,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   as reordered (`reordered`) and takes one off that gap's missing count, without moving the expectation: 3, 5, 4
   gives missing 0, reordered 1 and regressions 0, and 3, 6, 4 gives missing 1. Only the last gap is kept (start
   and length, fixed size). Any other lower value is still a regression and forgets the gap.
+- **OA-FEED-173** Reading a whole stream (`read_frames`, the loop the ADS-B clip loaders share) ends with
+  `FrameReader::finish`: the frames before a partial frame at the end are all delivered, and the partial frame,
+  whether it stops inside the header or inside the body, is counted once with the damaged frames.
 
 ### Compression (oa-deflate)
 
@@ -1896,6 +1899,9 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   the quality rules and are kept, and a cap-raising one must persist (`oa_adsb::category_observe`):
   one report printing B7 or a reserved code does not let a 2,782 kt jump into truth, and a category
   printed by every report does raise the cap after three.
+- **OA-TRUTH-023** `oa-truth-check` on a clip that ends inside a frame (a partial header or a partial body)
+  keeps the valid frames and counts the partial frame in the frames it prints as refused.
+
 ## M2 — Benchmark harness (oa-bench)
 
 Built on `docs/M2_DESIGN.md` sections 2 to 6. Truth comes through a plain query and leg list (`Truth`),
@@ -2073,6 +2079,25 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   same error at every instant but different publication rates have different native RMS and equal
   common-time RMS, a grid time counts only when both have a paired sample within the tolerance, and the
   grid times left out are counted.
+- **OA-BENCH-055** The legacy extraction accepts exactly the documents the replay pipeline accepts: both build
+  their parser and decoders from the replay's one definition of the limits (`doc_xml_limits`, `doc_fixm_limits`,
+  the table sizes) and both decode as far as the tables fit, so a 2 MiB SFDPS document with ignored text, and
+  SFDPS, TBFM and TFMS documents with more rows than a table holds, give the same accepted row counts in both,
+  not a whole refused document in one and a kept prefix in the other. The rows past the table are counted
+  (`rows_not_decoded`) and the report shows the documents the extraction refused over all feeds.
+- **OA-BENCH-056** A flight plan identifier that more than one flight used never joins an estimate to the first
+  flight: the plan index keeps every flight of an identifier (bounded; flights past the bound are counted), and
+  an estimate resolves to the one flight whose active interval (the interval of OA-BENCH-052) contains its issue
+  time and whose callsign does not contradict the aircraft identification the estimate carries. No such flight,
+  or more than one, excludes the estimate with a named reason. The result does not depend on the order the
+  flights were ingested in.
+- **OA-BENCH-057** An ADS-B clip that ends inside a frame (a partial header or a partial body) keeps its valid
+  frames and counts the partial frame with the frames it refused.
+- **OA-BENCH-058** The digest of an input file is computed from the bytes that are ingested, in the same read:
+  a file that changes between listing and reading, or while it is read, gives the digest of the bytes scored,
+  never of another copy. `.msg` files are hashed as they are read, `.oaf` and `.oaf.gz` recordings as the replay
+  merge reads them and the ADS-B clip as its frame loop reads it; a file whose read does not reach its end is an
+  error, not a digest. The report notes this for the feed inputs and for the clip.
 
 ## Winds aloft (oa-wind)
 
@@ -2268,6 +2293,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.
 - **OA-SIM-020** Reading a clip drops only a record that cannot be read (position or flags out of range) and
   counts it; the other records of its frame are kept.
+- **OA-SIM-021** Reading a clip that ends inside a frame (a partial header or a partial body) keeps the valid
+  frames and counts the partial frame with the frames that did not decode.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or

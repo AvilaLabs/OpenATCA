@@ -109,3 +109,38 @@ fn check_binary_prints_the_summary_and_the_library_digest() {
         assert_eq!(o.status.code(), Some(2), "{args:?}");
     }
 }
+
+// REQ: OA-TRUTH-023
+#[test]
+fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial_frame() {
+    let r = track();
+    let n = reports_len(&r);
+    let frame = |from: usize, to: usize, seq: u64| {
+        let mut payload = Vec::new();
+        encode_payload(&mut payload, &r, from, to).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let len = encode_frame(&mut buf, 1, FLAG_BYTES, seq, 0, 0, &payload).unwrap();
+        buf[..len].to_vec()
+    };
+    let mut whole = frame(0, n / 2, 0);
+    whole.extend(frame(n / 2, n, 1));
+    let extra = frame(0, 5, 2);
+    let exe = env!("CARGO_BIN_EXE_oa-truth-check");
+    for (name, cut, bad) in [("whole", 0, 0), ("header", 10, 1), ("body", 60, 1)] {
+        let mut bytes = whole.clone();
+        bytes.extend_from_slice(&extra[..cut]);
+        let path = tmp(&format!("truth_tail_{name}.oaf"));
+        std::fs::write(&path, &bytes).unwrap();
+        let o = Command::new(exe)
+            .arg(&path)
+            .arg("--no-loo")
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{name}: {out}");
+        assert!(
+            out.contains(&format!("300 reports decoded, {bad} frames refused")),
+            "{name}: {out}"
+        );
+    }
+}

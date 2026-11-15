@@ -154,3 +154,25 @@ fn binary_writes_plots_for_a_clip_and_demands_the_biases() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("--bias-range-m is required"));
 }
+
+// REQ: OA-SIM-021
+#[test]
+fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial_frame() {
+    let whole = clip();
+    // The clip is whole frames; cut the last one to a partial header and to a partial body.
+    let frame_len = whole.len() / 4;
+    let extra = &whole[..frame_len];
+    for (name, cut, bad) in [("whole", 0, 0), ("header", 10, 1), ("body", 60, 1)] {
+        let mut bytes = whole.clone();
+        bytes.extend_from_slice(&extra[..cut]);
+        let path = tmp(&format!("sensorsim-tail-{name}.oaf"));
+        std::fs::write(&path, &bytes).unwrap();
+        let (reports, nbad, dropped) =
+            oa_sensorsim::clip::read_clip(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            (reports_len(&reports), nbad, dropped),
+            (400, bad, 0),
+            "{name}"
+        );
+    }
+}

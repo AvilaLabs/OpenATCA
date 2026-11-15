@@ -54,7 +54,8 @@ pub use fns::{
 };
 pub use hash::{state_hash, HASH_TAG};
 pub use pipeline::{
-    add_errors, frames_total, new_pipeline, pipeline_stale_count, process_frame, replay_hash,
+    add_errors, doc_fixm_limits, doc_xml_limits, frames_total, new_doc_events, new_doc_tbfm_rows,
+    new_doc_tfms_rows, new_pipeline, pipeline_stale_count, process_frame, replay_hash,
     rows_applied_total, snapshot, Checkpoint, FeedKind, Pipeline, PipelineConfig, PipelineError,
     FEED_COUNT, FEED_NAMES,
 };

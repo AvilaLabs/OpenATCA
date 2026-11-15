@@ -8,8 +8,6 @@
     clippy::panic
 )]
 
-use std::collections::HashMap;
-
 use oa_bench::assoc::{index_truth, Assoc};
 use oa_bench::geo::from_enu;
 use oa_bench::legacy::{
@@ -311,7 +309,7 @@ fn score(
         env,
         cfg: &cfg,
     };
-    let plan: HashMap<[u8; 12], u32> = plan_index(&t.leg);
+    let plan = plan_index(&t.leg);
     let mut ex = Exclusions::new();
     let (f1, _) = f1_f2_tbfm(&t.leg, &plan, &ctx, &mut ex);
     let (fa, fd) = f3_tfms(&t.leg, &plan, &ctx, &mut ex);
@@ -419,4 +417,127 @@ fn a_meter_fix_named_twice_is_the_one_inside_the_zone_or_excluded() {
         ex_count(&ex, "F1", "meter fix names more than one place"),
         2
     );
+}
+
+const PLAN_P: &[u8] = b"PLANP";
+const NO_ACTIVE: &str = "plan identifier used by several flights, none active at the issue time";
+const SEVERAL: &str = "plan identifier used by several flights, more than one fits the estimate";
+
+/// Two flights of the one aircraft that both used plan `PLANP`, with their ERAM samples over
+/// each trip: flight A (callsign `CALLA`) flies the first trip, B (`CALLB`) the second. The
+/// flights are ingested in the given order. The estimates are B's, issued during B's trip, with
+/// the given aircraft identification and times shifted to be perfect for B.
+fn reused_plan(b_first: bool, aid: &[u8], issue_shift_ms: i64) -> Trips {
+    let mut leg = new_legacy();
+    let mut assoc = Assoc::default();
+    let order: [(u128, &[u8], i64); 2] = if b_first {
+        [(2, b"CALLB", 5_000_000), (1, b"CALLA", 0)]
+    } else {
+        [(1, b"CALLA", 0), (2, b"CALLB", 5_000_000)]
+    };
+    for (g, call, off) in order {
+        let f = flight_ix(&mut leg, g).unwrap();
+        leg.flights.plan_id[f as usize] = pad(PLAN_P);
+        leg.flights.callsign[f as usize] = pad(call);
+        assoc.addr.push(ADDR);
+        for s in 0..10i64 {
+            push_th(
+                &mut leg,
+                f,
+                T0_MS + off + s * 100_000,
+                NO_TIME,
+                0,
+                0,
+                30_000,
+                None,
+                false,
+            );
+        }
+    }
+    let t0 = T0_MS + 5_000_000;
+    push_tbfm(
+        &mut leg,
+        pad(PLAN_P),
+        pad(aid),
+        pad(b"MFXA"),
+        tbfm_kind::ETA_MFX,
+        t0 + 500_000,
+        t0 + 200_000 + issue_shift_ms,
+    );
+    push_tfms(
+        &mut leg,
+        &TfmsIn {
+            plan_id: pad(PLAN_P),
+            acid: pad(aid),
+            dep: pad(b"KDEP"),
+            arr: pad(b"KLND"),
+            kind: tfms_kind::ETA,
+            time_ms: t0 + 1_000_000,
+            issue_ms: t0 + 500_000 + issue_shift_ms,
+        },
+    );
+    Trips { leg, assoc }
+}
+
+// REQ: OA-BENCH-056
+#[test]
+fn a_reused_plan_identifier_joins_the_estimate_to_the_flight_active_at_its_issue_time() {
+    for b_first in [false, true] {
+        let t = reused_plan(b_first, b"CALLB", 0);
+        let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+        // The TBFM ETA and the TFMS ETA are B's and perfect for B's trip.
+        for r in [&m[0], &m[1]] {
+            assert_eq!(total_n(r), 1, "{} b_first {b_first}: {ex:?}", r.id);
+            assert!(worst(r) < 0.5, "{} error {}", r.id, worst(r));
+        }
+    }
+}
+
+// REQ: OA-BENCH-056
+#[test]
+fn a_reused_plan_identifier_is_excluded_when_no_flight_fits_the_estimate() {
+    // Issued at the end of the second trip's day: after both flights ended.
+    let t = reused_plan(false, b"CALLB", 10_000_000);
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert_eq!(total_n(&m[0]), 0);
+    assert_eq!(ex_count(&ex, "F1", NO_ACTIVE), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F3-arrival", NO_ACTIVE), 1, "{ex:?}");
+    // Issued during B's trip but naming A: A is not active then and B is not named.
+    let t = reused_plan(false, b"CALLA", 0);
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert_eq!(total_n(&m[0]), 0);
+    assert_eq!(ex_count(&ex, "F1", NO_ACTIVE), 1, "{ex:?}");
+}
+
+// REQ: OA-BENCH-056
+#[test]
+fn a_reused_plan_identifier_that_fits_two_flights_is_excluded_as_ambiguous() {
+    // Both flights have the same callsign and are active over the same period.
+    let mut t = reused_plan(false, b"CALLB", 0);
+    t.leg.flights.callsign[0] = pad(b"CALLB");
+    for (f, pos) in t.leg.th.flight.iter().zip(t.leg.th.pos_ms.iter_mut()) {
+        if *f == 0 {
+            *pos += 5_000_000;
+        }
+    }
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert_eq!(total_n(&m[0]), 0);
+    assert_eq!(total_n(&m[1]), 0);
+    assert_eq!(ex_count(&ex, "F1", SEVERAL), 1, "{ex:?}");
+    assert_eq!(ex_count(&ex, "F3-arrival", SEVERAL), 1, "{ex:?}");
+}
+
+// REQ: OA-BENCH-056
+#[test]
+fn the_plan_index_keeps_every_flight_of_an_identifier_up_to_its_bound_and_counts_the_rest() {
+    use oa_bench::legacy::{plan_candidates, MAX_FLIGHTS_PER_PLAN};
+    let mut leg = new_legacy();
+    for g in 0..(MAX_FLIGHTS_PER_PLAN as u128 + 2) {
+        let f = flight_ix(&mut leg, g + 1).unwrap();
+        leg.flights.plan_id[f as usize] = pad(PLAN_P);
+    }
+    let idx = plan_index(&leg);
+    let c = plan_candidates(&idx, &pad(PLAN_P));
+    assert_eq!(c, (0..MAX_FLIGHTS_PER_PLAN as u32).collect::<Vec<_>>());
+    assert_eq!(idx.overflow, 2);
 }

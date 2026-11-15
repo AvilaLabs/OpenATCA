@@ -232,6 +232,9 @@ pub struct Counts {
     pub doc_errors: [u64; 3],
     /// SFDPS messages rejected by the decoder (no usable GUFI or timestamp).
     pub sfdps_rejected: u64,
+    /// Messages or rows of accepted documents past the replay's per-document table size (SFDPS
+    /// messages, TBFM rows, TFMS rows); decoded as far as they fit, the rest counted here.
+    pub rows_not_decoded: u64,
     /// Rows of every table that did not fit, by table.
     pub overflow_flights: u64,
     pub overflow_th: u64,
@@ -460,16 +463,65 @@ pub fn pad<const N: usize>(s: &[u8]) -> [u8; N] {
     out
 }
 
-/// A flight's plan identifier to flight index, for joining TBFM and TFMS rows. Flights with no
-/// plan identifier are left out; a duplicate identifier keeps the first flight.
-pub fn plan_index(leg: &Legacy) -> HashMap<[u8; 12], u32> {
-    let mut m = HashMap::new();
+/// Most flights kept per plan identifier. An identifier is reused by a handful of flights at
+/// most (a re-filed plan, a recycled number); a flight past this is not indexed and is counted in
+/// [`PlanIndex::overflow`].
+pub const MAX_FLIGHTS_PER_PLAN: usize = 8;
+
+/// The flights that used one plan identifier, in flight order.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlanSlot {
+    pub flights: [u32; MAX_FLIGHTS_PER_PLAN],
+    pub len: u8,
+}
+
+/// Plan identifier to the flights that used it, for joining TBFM and TFMS rows. Built once, sized
+/// at init from the flight table; flights with no plan identifier are left out. An identifier
+/// can name several flights (it is reused), so a join must choose among them
+/// ([`plan_candidates`]) and never take the first.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default)]
+pub struct PlanIndex {
+    slots: HashMap<[u8; 12], PlanSlot>,
+    /// Flights past [`MAX_FLIGHTS_PER_PLAN`] for their identifier, left out of the index.
+    pub overflow: u64,
+}
+
+/// Builds the plan index of the flights.
+pub fn plan_index(leg: &Legacy) -> PlanIndex {
+    let mut idx = PlanIndex {
+        slots: HashMap::with_capacity(leg.flights.plan_id.len()),
+        overflow: 0,
+    };
     for (i, p) in leg.flights.plan_id.iter().enumerate() {
-        if p.iter().any(|&b| b != 0) {
-            m.entry(*p).or_insert(i as u32);
+        if p.iter().all(|&b| b == 0) {
+            continue;
+        }
+        let slot = idx.slots.entry(*p).or_default();
+        let n = usize::from(slot.len);
+        match slot.flights.get_mut(n) {
+            Some(s) => {
+                *s = i as u32;
+                slot.len += 1;
+            }
+            None => idx.overflow = idx.overflow.saturating_add(1),
         }
     }
-    m
+    idx
+}
+
+/// The flights that used plan identifier `key`, in flight order.
+pub fn plan_candidates<'a>(idx: &'a PlanIndex, key: &[u8; 12]) -> &'a [u32] {
+    idx.slots
+        .get(key)
+        .and_then(|s| s.flights.get(..usize::from(s.len)))
+        .unwrap_or(&[])
+}
+
+/// Whether plan identifier `key` names any flight.
+pub fn plan_known(idx: &PlanIndex, key: &[u8; 12]) -> bool {
+    idx.slots.contains_key(key)
 }
 
 /// A summary of which `Field`s an `Events` row has, for the SFDPS ingest.

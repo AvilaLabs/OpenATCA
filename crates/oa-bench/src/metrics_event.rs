@@ -25,7 +25,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::assoc::{Assoc, TruthIndex};
 use crate::geo::{dist_m, enu, NM_M};
-use crate::legacy::{hev, name, pad, tbfm_kind, tfms_kind, Legacy, NONE, NO_COORD, NO_TIME};
+use crate::legacy::{
+    hev, name, pad, plan_candidates, tbfm_kind, tfms_kind, Legacy, PlanIndex, NONE, NO_COORD,
+    NO_TIME,
+};
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
 use crate::truth::{AirportRef, Env, Truth, TruthSample};
@@ -129,6 +132,55 @@ fn estimate_window(
         (time_ms.saturating_sub(span), time_ms)
     } else {
         (issue_ms, issue_ms.saturating_add(span))
+    }
+}
+
+const NOT_MATCHED: &str = "not matched to an SFDPS flight";
+const NONE_ACTIVE: &str = "plan identifier used by several flights, none active at the issue time";
+const SEVERAL_ACTIVE: &str =
+    "plan identifier used by several flights, more than one fits the estimate";
+
+/// The flight an estimate belongs to. `est` is its issue time, its estimated time and the aircraft
+/// identification it carries (all zero when it has none). A plan identifier used by one flight
+/// names it. One used by several (a reused identifier) names the flight whose active interval
+/// ([`estimate_window`], the interval that picks the truth leg) contains the issue time and whose
+/// callsign does not contradict the estimate's identification (a flight with no callsign is not
+/// contradicted); no such flight, or more than one, is `Err` with the reason to count. An estimate
+/// with no issue time is placed by its estimated time.
+fn resolve_plan(
+    leg: &Legacy,
+    plan: &PlanIndex,
+    windows: &HashMap<u32, (i64, i64)>,
+    key: &[u8; 12],
+    est: (i64, i64, [u8; 8]),
+    cfg: &EventConfig,
+) -> Result<u32, &'static str> {
+    let (issue, time, aid) = est;
+    let cands = plan_candidates(plan, key);
+    let (&only, rest) = match cands.split_first() {
+        None => return Err(NOT_MATCHED),
+        Some(x) => x,
+    };
+    if rest.is_empty() {
+        return Ok(only);
+    }
+    let probe = if issue == NO_TIME { time } else { issue };
+    let has_aid = aid.iter().any(|&b| b != 0);
+    let mut fits = cands.iter().copied().filter(|&f| {
+        let (lo, hi) = estimate_window(windows, f, issue, time, cfg);
+        let call = leg
+            .flights
+            .callsign
+            .get(f as usize)
+            .copied()
+            .unwrap_or([0; 8]);
+        let call_ok = !has_aid || call.iter().all(|&b| b == 0) || call == aid;
+        probe >= lo && probe <= hi && call_ok
+    });
+    match (fits.next(), fits.next()) {
+        (Some(f), None) => Ok(f),
+        (None, _) => Err(NONE_ACTIVE),
+        _ => Err(SEVERAL_ACTIVE),
     }
 }
 
@@ -251,7 +303,7 @@ fn bin_result(id: &'static str, title: &'static str, vals: &[f64], bins: &[u8]) 
 /// (docs/TBFM_SURVEY.md), so F2 carries that note.
 pub fn f1_f2_tbfm(
     leg: &Legacy,
-    plan: &HashMap<[u8; 12], u32>,
+    plan: &PlanIndex,
     ctx: &EventCtx<'_>,
     ex: &mut Exclusions,
 ) -> (MetricResult, MetricResult) {
@@ -273,9 +325,16 @@ pub fn f1_f2_tbfm(
             tbfm_kind::STA_SFX => "F2",
             _ => continue,
         };
-        let Some(&f) = t.plan_id.get(i).and_then(|p| plan.get(p)) else {
-            exclude(ex, scope, "not matched to an SFDPS flight");
-            continue;
+        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
+        let key = t.plan_id.get(i).copied().unwrap_or([0; 12]);
+        let aid = t.aid.get(i).copied().unwrap_or([0; 8]);
+        let est = (issue, t.time_ms.get(i).copied().unwrap_or(NO_TIME), aid);
+        let f = match resolve_plan(leg, plan, &windows, &key, est, cfg) {
+            Ok(f) => f,
+            Err(why) => {
+                exclude(ex, scope, why);
+                continue;
+            }
         };
         let addr = assoc.addr.get(f as usize).copied().unwrap_or(NONE);
         if addr == NONE {
@@ -294,14 +353,7 @@ pub fn f1_f2_tbfm(
                 continue;
             }
         };
-        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
-        let window = estimate_window(
-            &windows,
-            f,
-            issue,
-            t.time_ms.get(i).copied().unwrap_or(NO_TIME),
-            cfg,
-        );
+        let window = estimate_window(&windows, f, issue, est.1, cfg);
         let Some(li) = occurrence_leg(truth, tix, addr, window) else {
             exclude(ex, scope, NO_LEG);
             continue;
@@ -451,7 +503,7 @@ pub fn takeoff_time(
 /// shared flight plan identifier (`gufi`).
 pub fn f3_tfms(
     leg: &Legacy,
-    plan: &HashMap<[u8; 12], u32>,
+    plan: &PlanIndex,
     ctx: &EventCtx<'_>,
     ex: &mut Exclusions,
 ) -> (MetricResult, MetricResult) {
@@ -478,9 +530,15 @@ pub fn f3_tfms(
             .get(i)
             .map(|p| pad(name(p).as_bytes()))
             .unwrap_or([0; 12]);
-        let Some(&f) = plan.get(&key) else {
-            exclude(ex, scope, "not matched to an SFDPS flight");
-            continue;
+        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
+        let acid = t.acid.get(i).copied().unwrap_or([0; 8]);
+        let est = (issue, t.time_ms.get(i).copied().unwrap_or(NO_TIME), acid);
+        let f = match resolve_plan(leg, plan, &windows, &key, est, cfg) {
+            Ok(f) => f,
+            Err(why) => {
+                exclude(ex, scope, why);
+                continue;
+            }
         };
         let addr = assoc.addr.get(f as usize).copied().unwrap_or(NONE);
         if addr == NONE {
@@ -493,14 +551,7 @@ pub fn f3_tfms(
             exclude(ex, scope, "airport not in the model");
             continue;
         };
-        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
-        let window = estimate_window(
-            &windows,
-            f,
-            issue,
-            t.time_ms.get(i).copied().unwrap_or(NO_TIME),
-            cfg,
-        );
+        let window = estimate_window(&windows, f, issue, est.1, cfg);
         let Some(li) = occurrence_leg(truth, tix, addr, window) else {
             exclude(ex, scope, NO_LEG);
             continue;

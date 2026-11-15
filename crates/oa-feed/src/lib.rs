@@ -10,7 +10,8 @@
 //!   and format it; time is always an input, B4).
 //! * Shell: [`record`] (rotating, capped frame files), [`replay`] (recorded files back through
 //!   the same reader and health code), [`cli`] and the `oa-feed` binary (process, threads,
-//!   clock, stdout).
+//!   clock, stdout). [`stream`] reads a whole stream through the reader, counting a frame cut
+//!   short at its end.
 //!
 //! A frame that fails validation is refused and flagged, never passed on (INTERFACES IF-R5): the
 //! reader reports the error with its byte offset, then scans for the next magic and counts the
@@ -23,6 +24,7 @@ pub mod health;
 pub mod reader;
 pub mod record;
 pub mod replay;
+pub mod stream;
 
 pub use frame::{
     encode_frame, ErrorKind, Frame, FrameError, Kind, FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN,
@@ -32,6 +34,7 @@ pub use health::{
     format_summary, observe_error, observe_frame, observe_skipped, rates_milli, FeedHealth,
 };
 pub use reader::{BufferTooSmall, FrameReader};
+pub use stream::read_frames;
 
 #[cfg(test)]
 mod tests;
