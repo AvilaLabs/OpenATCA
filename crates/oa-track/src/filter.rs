@@ -7,8 +7,11 @@
 //! update the frame origin moves to the filtered position (rounded to 1e-7 degree, the unit the
 //! output uses), the positions are shifted to it and the velocity block is rotated by the change
 //! of the frame's axes (the meridian convergence, about 0.03 degree per 4 km of east travel at
-//! mid latitudes) through the true-velocity mapping of the frame. The position covariance is not
-//! rotated: the rotation is under 1e-3 rad. The filter state is stored as `f64` metres in that
+//! mid latitudes, and large near a pole). The whole state covariance, position and velocity
+//! blocks and their cross terms, is carried through the differential of the change of frame
+//! at the point. A measurement's covariance is in the target's own east-north axes and is
+//! mapped into the frame's plane as `J R J^T` (J the differential of the projection at the
+//! plot); the output covariances are mapped back to east-north at the output point. The filter state is stored as `f64` metres in that
 //! local frame, an exception to A9 recorded here: fixed point would force a conversion at every
 //! step of a calculation that is all products and sums; the positions that leave the module
 //! (the output) are 1e-7 degree integers.
@@ -16,11 +19,13 @@
 //! The vertical filter keeps barometric altitude only; it is advanced to every update time
 //! whether or not the update carries an altitude.
 
-use oa_geo::aeqd::{frame_from_true_velocity, frame_new, frame_velocity, project, unproject};
+use oa_geo::aeqd::{
+    frame_change, frame_from_true, frame_from_true_velocity_at, frame_new, frame_to_true,
+    mat2_congruence, project, unproject, Frame,
+};
 
 use crate::hfilter::{
-    h_combine, h_gate_d2, h_init, h_pos_nis, h_predict, h_rotate_velocity, h_shift, h_update,
-    HFilter,
+    h_change_frame, h_combine, h_gate_d2, h_init, h_pos_nis, h_predict, h_update, HFilter,
 };
 use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, RESYNC_AFTER, VRATE_SIGMA_FPS,
@@ -74,19 +79,34 @@ fn to_e7(d: f64) -> i32 {
     (d * 1.0e7).round() as i32
 }
 
-fn pos_cov(m: &Measurement) -> [f64; 3] {
+/// The measurement's position covariance in the plane of `frame` at the plot's plane position
+/// `(x, y)`: its east-north covariance carried through the plane-from-true differential there.
+fn pos_cov(m: &Measurement, frame: &Frame, x: f64, y: f64) -> [f64; 3] {
     let [a, b, c] = m.pos_cov_m2;
-    [f64::from(a), f64::from(b), f64::from(c)]
+    mat2_congruence(
+        &frame_from_true(frame, x, y),
+        &[f64::from(a), f64::from(b), f64::from(c)],
+    )
 }
 
-fn vel_of(m: &Measurement, frame: &oa_geo::aeqd::Frame) -> Option<([f64; 2], [f64; 3])> {
+/// The measurement's velocity and its covariance in the plane of `frame` at `(x, y)`.
+fn vel_of(m: &Measurement, frame: &Frame, x: f64, y: f64) -> Option<([f64; 2], [f64; 3])> {
     if m.flags & M_HAS_VEL == 0 {
         return None;
     }
-    let (vx, vy) =
-        frame_from_true_velocity(frame, f64::from(m.vel_east_mps), f64::from(m.vel_north_mps));
+    let (vx, vy) = frame_from_true_velocity_at(
+        frame,
+        x,
+        y,
+        f64::from(m.vel_east_mps),
+        f64::from(m.vel_north_mps),
+    );
     let [a, b, c] = m.vel_cov_m2s2;
-    Some(([vx, vy], [f64::from(a), f64::from(b), f64::from(c)]))
+    let cov = mat2_congruence(
+        &frame_from_true(frame, x, y),
+        &[f64::from(a), f64::from(b), f64::from(c)],
+    );
+    Some(([vx, vy], cov))
 }
 
 /// Altitude variance: quantisation `step^2 / 12` plus the base term.
@@ -121,7 +141,11 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
         mu: [1.0, 0.0],
     };
     Filter {
-        h: h_init(&pos_cov(m), vel_of(m, &frame), mode),
+        h: h_init(
+            &pos_cov(m, &frame, 0.0, 0.0),
+            vel_of(m, &frame, 0.0, 0.0),
+            mode,
+        ),
         v: if has_alt { vertical_init(m) } else { zero },
         t_ns: m.toa_ns,
         lat_e7: m.lat_e7,
@@ -150,7 +174,7 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
     let frame = frame_new(deg(f.lat_e7), deg(f.lon_e7));
     let pred = h_predict(&f.h, dt, f.h_mode);
     let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
-    let r = pos_cov(m);
+    let r = pos_cov(m, &frame, zx, zy);
     if gated {
         let nis = h_pos_nis(&pred, &[zx, zy], &r);
         let gate = if f.h_mode == 0 {
@@ -171,7 +195,7 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
         stats.nis_sum += nis;
         stats.nis_n += 1;
     }
-    let mut h = h_update(&pred, &[zx, zy], &r, vel_of(m, &frame), f.h_mode);
+    let mut h = h_update(&pred, &[zx, zy], &r, vel_of(m, &frame, zx, zy), f.h_mode);
     // Re-centre on the filtered position.
     let (x, _) = h_combine(&h);
     let (px, py) = (
@@ -187,13 +211,8 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
     let (lat_e7, lon_e7) = (to_e7(la), to_e7(lo));
     let frame2 = frame_new(deg(lat_e7), deg(lon_e7));
     let (sx, sy) = project(&frame2, la, lo);
-    h_shift(&mut h, sx - px, sy - py);
-    let img = |ex: f64, ey: f64| {
-        let (te, tn) = frame_velocity(&frame, px, py, ex, ey);
-        frame_from_true_velocity(&frame2, te, tn)
-    };
-    let (c0, c1) = (img(1.0, 0.0), img(0.0, 1.0));
-    h_rotate_velocity(&mut h, &[[c0.0, c1.0], [c0.1, c1.1]]);
+    let d = frame_change(&frame, px, py, &frame2, sx, sy);
+    h_change_frame(&mut h, [px, py], [sx, sy], &d);
     // Vertical: always advanced to the update time; updated when the report has an altitude.
     let mut v = f.v;
     let mut has_alt = f.has_alt;
@@ -256,7 +275,11 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
     let xg = |i: usize| x.get(i).copied().unwrap_or(0.0);
     let pg = |i: usize, j: usize| p.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.0);
     let (la, lo) = unproject(&frame, xg(0), xg(1));
-    let (ve, vn) = frame_velocity(&frame, xg(0), xg(1), xg(2), xg(3));
+    // The state is in the plane of the frame; the output is in east and north at the point.
+    let jt = frame_to_true(&frame, xg(0), xg(1));
+    let (ve, vn) = oa_geo::aeqd::mat2_apply(&jt, (xg(2), xg(3)));
+    let pc = mat2_congruence(&jt, &[pg(0, 0), pg(0, 1), pg(1, 1)]);
+    let vc = mat2_congruence(&jt, &[pg(2, 2), pg(2, 3), pg(3, 3)]);
     let (xv, pv) = v_combine(&vf);
     let has_alt = f.has_alt != 0;
     OutRow {
@@ -266,8 +289,8 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
         lon_e7: to_e7(lo),
         vel_east_mps: ve as f32,
         vel_north_mps: vn as f32,
-        pos_cov_m2: [pg(0, 0) as f32, pg(0, 1) as f32, pg(1, 1) as f32],
-        vel_cov_m2s2: [pg(2, 2) as f32, pg(2, 3) as f32, pg(3, 3) as f32],
+        pos_cov_m2: [pc[0] as f32, pc[1] as f32, pc[2] as f32],
+        vel_cov_m2s2: [vc[0] as f32, vc[1] as f32, vc[2] as f32],
         // The model's turn rate is counter-clockwise; the output is the heading rate (clockwise
         // positive, as a pilot reads it).
         turn_rate_rps: -xg(4) as f32,
@@ -283,5 +306,233 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
         mu_h: [h.mu[0] as f32, h.mu[1] as f32],
         mu_v: [vf.mu[0] as f32, vf.mu[1] as f32],
         flags: if has_alt { O_HAS_ALT } else { 0 },
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use crate::hfilter::h_pos_moments;
+    use crate::types::NO_ADDR;
+    use oa_geo::aeqd::Frame;
+
+    const A: f64 = 6_378_137.0;
+    const E2: f64 = 0.006_694_379_990_141_316;
+
+    /// WGS-84 prime-vertical and meridian radii at a latitude, degrees.
+    fn radii_at(lat_deg: f64) -> (f64, f64) {
+        let s = lat_deg.to_radians().sin();
+        let w2 = 1.0 - E2 * s * s;
+        (A / w2.sqrt(), A * (1.0 - E2) / (w2 * w2.sqrt()))
+    }
+
+    /// The map from plane displacement to true east-north metres at `(x, y)` by central
+    /// differences of `unproject` over 1 cm, independent of the closed form.
+    fn num_to_true(f: &Frame, x: f64, y: f64) -> [[f64; 2]; 2] {
+        let h = 0.01;
+        let mut j = [[0.0; 2]; 2];
+        for (c, d) in [(1.0, 0.0), (0.0, 1.0)].iter().enumerate() {
+            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1);
+            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1);
+            let mut dlon = lo1 - lo0;
+            if dlon > 180.0 {
+                dlon -= 360.0;
+            } else if dlon < -180.0 {
+                dlon += 360.0;
+            }
+            let mid = (la0 + la1) / 2.0;
+            let (n, m) = radii_at(mid);
+            j[0][c] = dlon.to_radians() * n * mid.to_radians().cos() / (2.0 * h);
+            j[1][c] = (la1 - la0).to_radians() * m / (2.0 * h);
+        }
+        j
+    }
+
+    fn inv(j: &[[f64; 2]; 2]) -> [[f64; 2]; 2] {
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        [
+            [j[1][1] / det, -j[0][1] / det],
+            [-j[1][0] / det, j[0][0] / det],
+        ]
+    }
+
+    /// `j s j^T` for `s = [a, b, c]`.
+    fn cong(j: &[[f64; 2]; 2], s: &[f64; 3]) -> [f64; 3] {
+        let m = [[s[0], s[1]], [s[1], s[2]]];
+        let mut jm = [[0.0; 2]; 2];
+        for i in 0..2 {
+            for k in 0..2 {
+                jm[i][k] = j[i][0] * m[0][k] + j[i][1] * m[1][k];
+            }
+        }
+        let e = |i: usize, k: usize| jm[i][0] * j[k][0] + jm[i][1] * j[k][1];
+        [e(0, 0), e(0, 1), e(1, 1)]
+    }
+
+    fn meas(lat: f64, lon: f64, t_s: i64, pos_cov: [f32; 3]) -> Measurement {
+        Measurement {
+            toa_ns: t_s * NS_PER_S,
+            pos_cov_m2: pos_cov,
+            vel_cov_m2s2: [0.0; 3],
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            lat_e7: to_e7(lat),
+            lon_e7: to_e7(lon),
+            alt_ft: NONE_I32,
+            vrate_fpm: NONE_I32,
+            addr: NO_ADDR,
+            alt_quant_ft: 0,
+            sensor: 0,
+            ident: crate::types::NO_IDENT,
+            flags: 0,
+            category: 0,
+        }
+    }
+
+    /// A track at `(lat, 0)` with the true velocity that takes it to `(lat, lon_t)` in `dt` s
+    /// along its frame's straight line, with the given position and velocity covariances.
+    fn moving_track(lat: f64, lon_t: f64, dt: f64, pc: [f32; 3], vc: [f32; 3]) -> Filter {
+        let frame = frame_new(lat, 0.0);
+        let (zx, zy) = project(&frame, lat, lon_t);
+        let (n, m) = radii_at(lat);
+        let mut m0 = meas(lat, 0.0, 0, pc);
+        m0.flags = M_HAS_VEL;
+        m0.vel_east_mps = (zx / dt * n / r_of(lat)) as f32;
+        m0.vel_north_mps = (zy / dt * m / r_of(lat)) as f32;
+        m0.vel_cov_m2s2 = vc;
+        filter_init(&m0, 0)
+    }
+
+    /// The frame's sphere radius at a latitude (the Gaussian mean radius of curvature).
+    fn r_of(lat_deg: f64) -> f64 {
+        let (n, m) = radii_at(lat_deg);
+        (n * m).sqrt()
+    }
+
+    // REQ: OA-TRK-260
+    #[test]
+    fn the_gate_uses_the_plot_covariance_in_the_frame_of_the_projection() {
+        for (lat, lon_t) in [(89.99, 90.0), (89.99, 45.0), (-89.99, 90.0), (45.0, 0.05)] {
+            let dt = 2.0;
+            let f0 = moving_track(lat, lon_t, dt, [1.0, 0.0, 1.0], [1e-4, 0.0, 1e-4]);
+            let frame = frame_new(lat, 0.0);
+            let pred = h_predict(&f0.h, dt, 0);
+            let (pp, _) = h_pos_moments(&pred);
+            // 30 m along the target's own east, at the predicted position.
+            let u = inv(&num_to_true(&frame, pp[0], pp[1]));
+            let (la, lo) = unproject(&frame, pp[0] + 30.0 * u[0][0], pp[1] + 30.0 * u[1][0]);
+            let m = meas(la, lo, 2, [10000.0, 0.0, 1.0]);
+            let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
+            let jz = inv(&num_to_true(&frame, zx, zy));
+            let r = cong(&jz, &[10000.0, 0.0, 1.0]);
+            let want = h_pos_nis(&pred, &[zx, zy], &r);
+            let mut f = f0;
+            let mut stats = TrackerStats::default();
+            let got = filter_apply(&mut f, &m, &mut stats);
+            assert_eq!(got, Applied::Yes, "{lat} {lon_t}: nis {want}");
+            assert!(
+                (stats.nis_sum - want).abs() < 2e-3 * want.max(1.0),
+                "{lat} {lon_t}: {} vs {want}",
+                stats.nis_sum
+            );
+        }
+    }
+
+    // REQ: OA-TRK-261
+    #[test]
+    fn a_known_ellipse_is_the_same_ellipse_after_recentring() {
+        for (lat, lon_t) in [
+            (89.99, 90.0),
+            (89.99, 45.0),
+            (-89.99, 90.0),
+            (89.9, 90.0),
+            (45.0, 0.05),
+        ] {
+            let dt = 2.0;
+            let f0 = moving_track(lat, lon_t, dt, [10000.0, 0.0, 1.0], [4.0, 0.0, 0.25]);
+            let frame = frame_new(lat, 0.0);
+            let pred = h_predict(&f0.h, dt, 0);
+            let (x, p) = h_combine(&pred);
+            // The same physical ellipse in the target's own east-north axes.
+            let jt = num_to_true(&frame, x[0], x[1]);
+            let want_pos = cong(&jt, &[p[0][0], p[0][1], p[1][1]]);
+            let want_vel = cong(&jt, &[p[2][2], p[2][3], p[3][3]]);
+            let want_v = (
+                jt[0][0] * x[2] + jt[0][1] * x[3],
+                jt[1][0] * x[2] + jt[1][1] * x[3],
+            );
+            // A plot too coarse to move the estimate recentres the frame on it.
+            let (la, lo) = unproject(&frame, x[0], x[1]);
+            let m = meas(la, lo, 2, [1.0e10, 0.0, 1.0e10]);
+            let mut f = f0;
+            let mut stats = TrackerStats::default();
+            assert_eq!(filter_apply(&mut f, &m, &mut stats), Applied::Yes);
+            assert!(f.lon_e7 != f0.lon_e7 || f.lat_e7 != f0.lat_e7);
+            let o = filter_output(&f, 2 * NS_PER_S);
+            let rel = |a: &[f64; 3], b: [f32; 3]| {
+                let scale = a[0].abs().max(a[2].abs());
+                (0..3)
+                    .map(|i| (a[i] - f64::from(b[i])).abs() / scale)
+                    .fold(0.0, f64::max)
+            };
+            assert!(
+                rel(&want_pos, o.pos_cov_m2) < 3e-3,
+                "{lat} {lon_t}: pos {want_pos:?} vs {:?}",
+                o.pos_cov_m2
+            );
+            assert!(
+                rel(&want_vel, o.vel_cov_m2s2) < 3e-3,
+                "{lat} {lon_t}: vel {want_vel:?} vs {:?}",
+                o.vel_cov_m2s2
+            );
+            let sp = want_v.0.hypot(want_v.1);
+            assert!(
+                (want_v.0 - f64::from(o.vel_east_mps)).abs() < 3e-3 * sp
+                    && (want_v.1 - f64::from(o.vel_north_mps)).abs() < 3e-3 * sp,
+                "{lat} {lon_t}: v {want_v:?} vs {} {}",
+                o.vel_east_mps,
+                o.vel_north_mps
+            );
+        }
+    }
+
+    // REQ: OA-TRK-263
+    #[test]
+    fn a_new_track_returns_its_covariance_and_velocity_in_east_and_north() {
+        for lat in [45.0, 41.9, 89.9999, -89.99, 89.99] {
+            let mut m = meas(lat, 20.0, 0, [10000.0, 30.0, 1.0]);
+            m.flags = M_HAS_VEL;
+            m.vel_east_mps = 100.0;
+            m.vel_north_mps = -40.0;
+            m.vel_cov_m2s2 = [4.0, 0.5, 0.25];
+            let f = filter_init(&m, 0);
+            let o = filter_output(&f, 0);
+            for (a, b) in o.pos_cov_m2.iter().zip([10000.0, 30.0, 1.0]) {
+                assert!(
+                    (f64::from(*a) - b).abs() < 1e-4 * 10000.0,
+                    "{lat}: {:?}",
+                    o.pos_cov_m2
+                );
+            }
+            for (a, b) in o.vel_cov_m2s2.iter().zip([4.0, 0.5, 0.25]) {
+                assert!(
+                    (f64::from(*a) - b).abs() < 1e-4 * 4.0,
+                    "{lat}: {:?}",
+                    o.vel_cov_m2s2
+                );
+            }
+            assert!(
+                (o.vel_east_mps - 100.0).abs() < 1e-3 && (o.vel_north_mps + 40.0).abs() < 1e-3,
+                "{lat}: {} {}",
+                o.vel_east_mps,
+                o.vel_north_mps
+            );
+        }
     }
 }

@@ -429,10 +429,15 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
     assert_eq!(run.digest, PINNED_TRACKER_CLIP_DIGEST);
 }
 
-// Re-pinned: the split now removes copies of one observation and keeps conflicting reports of one
-// time on one side; the counts are in the test output (`split ...`).
+// Re-pinned twice on 2026-11-15. (1) The split removes copies of one observation and keeps
+// conflicting reports of one time on one side; the counts are in the test output (`split ...`).
+// (2) The covariance mapping and the exact velocity differential (OA-TRK-260 to OA-TRK-263): on
+// the old split, the same 108,644 reports applied and 1,125 jump-rejected, the normalised
+// innovation sum 142,114.4 to 142,128.2 (1e-4 of itself); rows differ in covariance and velocity
+// at the 0.3 % and 1e-3 m/s scale. The value before both was
+// "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "2432d72c5c6833ea64d4dc0c407fa19beeca123e1eb67bcc7a5c3ebc5c21f5a8";
+    "c4fdb7d84f7a18180befdba24c239de7b94f4b3bfad44007fef67794b141a5cd";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

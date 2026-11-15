@@ -9,20 +9,13 @@
 //! inverse are closed form and exact inverses of each other, so the positions mapped back out
 //! carry no projection error; the projection only has to be smooth for the smoother's motion
 //! model to hold, and its scale error (about 0.3 % from the sphere, under 0.1 % across 400 km
-//! tangentially) is far below the noise. Velocity is converted back to true east and north
-//! components by mapping a one-second displacement out and measuring it on the ellipsoid.
+//! tangentially) is far below the noise. Velocities and covariances are converted to and from
+//! true east and north by the exact local differential of the projection (the radial direction
+//! from the origin keeps its scale, the tangential one is scaled by `sin c / c`, and the axes
+//! are turned by the meridian convergence, which is large near a pole).
 
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
-
-/// Metres of one radian of latitude and of longitude at `lat_rad` on WGS-84.
-fn radii(lat_rad: f64) -> (f64, f64) {
-    let s = lat_rad.sin();
-    let w = (1.0 - WGS84_E2 * s * s).sqrt();
-    let n = WGS84_A / w;
-    let m = WGS84_A * (1.0 - WGS84_E2) / (w * w * w);
-    (m, n * lat_rad.cos())
-}
 
 /// A projection about an origin. Plain data (A1, private fields: A1.1); A7.2: cold struct, size
 /// guard waived.
@@ -108,32 +101,184 @@ fn wrap_deg(d: f64) -> f64 {
     }
 }
 
+/// A 2 x 2 matrix, rows first.
+pub type Mat2 = [[f64; 2]; 2];
+
+/// A vector or a basis row in three dimensions.
+type V3 = [f64; 3];
+
+fn dot(a: &V3, b: &V3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: &V3, b: &V3) -> V3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The frame origin's east, north and up unit vectors in earth-fixed axes.
+fn basis(f: &Frame) -> [V3; 3] {
+    let (sl, cl) = f.lon0.sin_cos();
+    [
+        [-sl, cl, 0.0],
+        [-f.sin0 * cl, -f.sin0 * sl, f.cos0],
+        [f.cos0 * cl, f.cos0 * sl, f.sin0],
+    ]
+}
+
+/// The projection's local geometry at plane position `(x, y)`, in the frame's own
+/// (east, north, up at the origin) axes: the unit position vector of the point on the sphere and
+/// the two sphere displacements, in radians per plane metre, of a unit step along plane x and
+/// along plane y. The radial direction is preserved by the projection and the tangential one is
+/// scaled by `sin c / c` (`c` the angle from the origin), so the displacements are exact.
+fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
+    let rho = x.hypot(y);
+    let c = rho / f.r;
+    let (sa, ca) = if rho < 1e-9 {
+        (0.0, 1.0)
+    } else {
+        (x / rho, y / rho)
+    };
+    let (sc, cc) = c.sin_cos();
+    // Floored: the factor vanishes only at the origin's antipode, which the projection
+    // does not map to one place.
+    let k = if c < 1e-8 { 1.0 } else { (sc / c).max(1e-6) };
+    let u = [cc * sa, cc * ca, -sc];
+    let t = [ca, -sa, 0.0];
+    let col = |p: f64, q: f64| {
+        [
+            (p * u[0] + q * k * t[0]) / f.r,
+            (p * u[1] + q * k * t[1]) / f.r,
+            (p * u[2] + q * k * t[2]) / f.r,
+        ]
+    };
+    ([sc * sa, sc * ca, cc], [col(sa, ca), col(ca, -sa)], k)
+}
+
+/// The point's unit east and north vectors and the WGS-84 radii `(N, M)` there, in the frame's
+/// axes. At a pole east and north are undefined; the convention is the limit along the frame
+/// origin's own meridian: east is the origin's east, north the direction on from the point
+/// along that meridian (past the north pole, towards the origin's longitude plus 180 degrees).
+fn enu(f: &Frame, p: &V3) -> (V3, V3, f64, f64) {
+    let z = [0.0, f.cos0, f.sin0];
+    let e = cross(&z, p);
+    let cos_lat = dot(&e, &e).sqrt();
+    let east = if cos_lat < 1e-9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [e[0] / cos_lat, e[1] / cos_lat, e[2] / cos_lat]
+    };
+    let north = cross(p, &east);
+    let s = dot(&z, p);
+    let w2 = 1.0 - WGS84_E2 * s * s;
+    let w = w2.sqrt();
+    (
+        east,
+        north,
+        WGS84_A / w,
+        WGS84_A * (1.0 - WGS84_E2) / (w2 * w),
+    )
+}
+
+/// The local differential of the projection at plane position `(x, y)`: the matrix taking a
+/// small plane displacement (or velocity) to the true `(east, north)` displacement in metres on
+/// the ellipsoid at that point. Exact; the east and north at a pole follow [`enu`]'s convention.
+pub fn frame_to_true(f: &Frame, x: f64, y: f64) -> Mat2 {
+    let (p, cols, _) = local(f, x, y);
+    let (east, north, n, m) = enu(f, &p);
+    let row = |v: &V3, radius: f64| [radius * dot(v, &cols[0]), radius * dot(v, &cols[1])];
+    [row(&east, n), row(&north, m)]
+}
+
+/// The inverse of [`frame_to_true`]: true `(east, north)` metres at `(x, y)` to plane metres.
+pub fn frame_from_true(f: &Frame, x: f64, y: f64) -> Mat2 {
+    let [[a, b], [c, d]] = frame_to_true(f, x, y);
+    let det = a * d - b * c;
+    [[d / det, -b / det], [-c / det, a / det]]
+}
+
+/// The differential of the change of frame at one physical point: the matrix taking a small
+/// displacement (or velocity) in the plane of `from` at `(x1, y1)` to the same displacement in
+/// the plane of `to` at `(x2, y2)`, where `(x2, y2)` is the same point in `to`'s plane. Needs
+/// no east or north, so it is the same at a pole.
+pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64) -> Mat2 {
+    let (_, cols, _) = local(from, x1, y1);
+    let (_, cols2, _) = local(to, x2, y2);
+    // `cols2` are the images of the plane steps; the plane components of a displacement `w`
+    // are the solution of the 2 x 2 system through them (they are not orthonormal).
+    let (b1, b2) = (basis(from), basis(to));
+    let g = |a: &V3, b: &V3| dot(a, b);
+    let (g00, g01, g11) = (
+        g(&cols2[0], &cols2[0]),
+        g(&cols2[0], &cols2[1]),
+        g(&cols2[1], &cols2[1]),
+    );
+    let det = g00 * g11 - g01 * g01;
+    let column = |c: &V3| {
+        // The displacement in earth-fixed axes, then in the other frame's axes.
+        let w_ecef = [
+            c[0] * b1[0][0] + c[1] * b1[1][0] + c[2] * b1[2][0],
+            c[0] * b1[0][1] + c[1] * b1[1][1] + c[2] * b1[2][1],
+            c[0] * b1[0][2] + c[1] * b1[1][2] + c[2] * b1[2][2],
+        ];
+        let w = [
+            dot(&w_ecef, &b2[0]),
+            dot(&w_ecef, &b2[1]),
+            dot(&w_ecef, &b2[2]),
+        ];
+        let (h0, h1) = (dot(&cols2[0], &w), dot(&cols2[1], &w));
+        ((g11 * h0 - g01 * h1) / det, (g00 * h1 - g01 * h0) / det)
+    };
+    let (a, c) = (column(&cols[0]), column(&cols[1]));
+    [[a.0, c.0], [a.1, c.1]]
+}
+
+/// `m * v`.
+pub fn mat2_apply(m: &Mat2, v: (f64, f64)) -> (f64, f64) {
+    (m[0][0] * v.0 + m[0][1] * v.1, m[1][0] * v.0 + m[1][1] * v.1)
+}
+
+/// `m * [a b; b c] * m^T` for the symmetric `[a, b, c]`: a covariance carried through the
+/// linear map `m`.
+pub fn mat2_congruence(m: &Mat2, s: &[f64; 3]) -> [f64; 3] {
+    let [a, b, c] = *s;
+    let (p, q) = (m[0], m[1]);
+    [
+        p[0] * (p[0] * a + p[1] * b) + p[1] * (p[0] * b + p[1] * c),
+        q[0] * (p[0] * a + p[1] * b) + q[1] * (p[0] * b + p[1] * c),
+        q[0] * (q[0] * a + q[1] * b) + q[1] * (q[0] * b + q[1] * c),
+    ]
+}
+
 /// True `(east, north)` velocity in m/s at frame position `(x, y)` for a frame velocity
-/// `(vx, vy)`, by mapping a one-second displacement out and measuring it on the ellipsoid.
+/// `(vx, vy)`: the exact local differential of the projection ([`frame_to_true`]), not a
+/// finite displacement, so it holds up to the poles.
 pub fn frame_velocity(f: &Frame, x: f64, y: f64, vx: f64, vy: f64) -> (f64, f64) {
-    let (la0, lo0) = unproject(f, x, y);
-    let (la1, lo1) = unproject(f, x + vx, y + vy);
-    let mut dlon = lo1 - lo0;
-    if dlon > 180.0 {
-        dlon -= 360.0;
-    } else if dlon < -180.0 {
-        dlon += 360.0;
-    }
-    let mid = ((la0 + la1) / 2.0).to_radians();
-    let (m, e) = radii(mid);
-    (dlon.to_radians() * e, (la1 - la0).to_radians() * m)
+    mat2_apply(&frame_to_true(f, x, y), (vx, vy))
 }
 
 /// Frame velocity `(vx, vy)` in frame metres per second for a true `(east, north)` velocity in
-/// metres per second at the frame origin: the inverse of [`frame_velocity`] there. The frame
-/// metre is the sphere's, the true metre the ellipsoid's, so the two differ by up to 0.3 %
-/// (east and north differently); a filter that works in the frame converts its velocity
-/// measurements with this and its outputs back with [`frame_velocity`].
+/// metres per second at frame position `(x, y)`: the inverse of [`frame_velocity`] there. The
+/// frame metre is the sphere's, the true metre the ellipsoid's, so the two differ by up to 0.3 %
+/// (east and north differently), and away from the origin the axes are turned by the meridian
+/// convergence; a filter that works in the frame converts its velocity measurements with this
+/// and its outputs back with [`frame_velocity`].
+pub fn frame_from_true_velocity_at(
+    f: &Frame,
+    x: f64,
+    y: f64,
+    east_mps: f64,
+    north_mps: f64,
+) -> (f64, f64) {
+    mat2_apply(&frame_from_true(f, x, y), (east_mps, north_mps))
+}
+
+/// [`frame_from_true_velocity_at`] at the frame origin.
 pub fn frame_from_true_velocity(f: &Frame, east_mps: f64, north_mps: f64) -> (f64, f64) {
-    let w2 = 1.0 - WGS84_E2 * f.sin0 * f.sin0;
-    let n = WGS84_A / w2.sqrt();
-    let m = WGS84_A * (1.0 - WGS84_E2) / (w2 * w2.sqrt());
-    (east_mps * f.r / n, north_mps * f.r / m)
+    frame_from_true_velocity_at(f, 0.0, 0.0, east_mps, north_mps)
 }
 
 #[cfg(test)]
@@ -190,5 +335,199 @@ mod tests {
             (e - 130.0).abs() < 0.01 && (n + 80.0).abs() < 0.01,
             "{e} {n}"
         );
+    }
+
+    /// WGS-84 prime-vertical and meridian radii at a latitude, degrees.
+    fn radii_at(lat_deg: f64) -> (f64, f64) {
+        let s = lat_deg.to_radians().sin();
+        let w2 = 1.0 - WGS84_E2 * s * s;
+        (
+            WGS84_A / w2.sqrt(),
+            WGS84_A * (1.0 - WGS84_E2) / (w2 * w2.sqrt()),
+        )
+    }
+
+    // REQ: OA-GEO-008
+    #[test]
+    fn velocity_at_the_origin_is_the_analytic_differential_up_to_the_poles() {
+        for lat in [45.0, 89.0, 89.99, 89.9999, -45.0, -89.0, -89.99, -89.9999] {
+            let f = frame_new(lat, 20.0);
+            let (n, m) = radii_at(lat);
+            for (e, nn) in [(100.0, 0.0), (0.0, 100.0), (70.0, -30.0)] {
+                let (vx, vy) = frame_from_true_velocity(&f, e, nn);
+                assert!(
+                    (vx - e * f.r / n).abs() < 1e-9 && (vy - nn * f.r / m).abs() < 1e-9,
+                    "{lat}: {vx} {vy}"
+                );
+                let (e2, n2) = frame_velocity(&f, 0.0, 0.0, vx, vy);
+                assert!(
+                    (e2 - e).abs() < 1e-6 && (n2 - nn).abs() < 1e-6,
+                    "{lat}: ({e},{nn}) -> ({e2},{n2})"
+                );
+            }
+        }
+    }
+
+    /// The differential by central differences of `unproject` over `h` metres, in true
+    /// east-north metres, independent of the closed form.
+    fn numeric_to_true(f: &Frame, x: f64, y: f64, h: f64) -> Mat2 {
+        let mut j = [[0.0; 2]; 2];
+        for (c, d) in [(1.0, 0.0), (0.0, 1.0)].iter().enumerate() {
+            let (la1, lo1) = unproject(f, x + h * d.0, y + h * d.1);
+            let (la0, lo0) = unproject(f, x - h * d.0, y - h * d.1);
+            let mut dlon = lo1 - lo0;
+            if dlon > 180.0 {
+                dlon -= 360.0;
+            } else if dlon < -180.0 {
+                dlon += 360.0;
+            }
+            let mid = (la0 + la1) / 2.0;
+            let (n, m) = radii_at(mid);
+            j[0][c] = dlon.to_radians() * n * mid.to_radians().cos() / (2.0 * h);
+            j[1][c] = (la1 - la0).to_radians() * m / (2.0 * h);
+        }
+        j
+    }
+
+    fn close(a: &Mat2, b: &Mat2, tol: f64) -> bool {
+        let scale = b.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+        (0..2).all(|i| (0..2).all(|k| (a[i][k] - b[i][k]).abs() <= tol * scale))
+    }
+
+    // REQ: OA-GEO-009
+    #[test]
+    fn the_differential_matches_a_fine_difference_of_the_inverse_at_every_latitude() {
+        // (origin latitude, point offsets in metres, step, tolerance): the pole is within
+        // 1.1 km of the 89.99 origin and 11 m of the 89.9999 one, so the points and steps shrink.
+        let cases = [
+            (45.0, [(3000.0, -2000.0), (-40_000.0, 25_000.0)], 0.5, 1e-5),
+            (89.0, [(3000.0, -2000.0), (60_000.0, 90_000.0)], 0.5, 1e-5),
+            (89.99, [(600.0, 400.0), (-300.0, 800.0)], 0.01, 1e-3),
+            (89.9999, [(4.0, 3.0), (-2.0, 6.0)], 0.2, 1e-2),
+            (-89.99, [(600.0, 400.0), (-300.0, 800.0)], 0.01, 1e-3),
+            (-45.0, [(3000.0, -2000.0), (0.0, 0.0)], 0.5, 1e-5),
+        ];
+        for (lat, pts, h, tol) in cases {
+            let f = frame_new(lat, 20.0);
+            for (x, y) in pts {
+                let got = frame_to_true(&f, x, y);
+                let want = numeric_to_true(&f, x, y, h);
+                assert!(
+                    close(&got, &want, tol),
+                    "{lat} ({x},{y}): {got:?} vs {want:?}"
+                );
+                // The frame velocity is that matrix, and its inverse undoes it.
+                let (e, n) = frame_velocity(&f, x, y, 30.0, -70.0);
+                assert!(
+                    (e - (got[0][0] * 30.0 - got[0][1] * 70.0)).abs() < 1e-9
+                        && (n - (got[1][0] * 30.0 - got[1][1] * 70.0)).abs() < 1e-9
+                );
+                let (vx, vy) = frame_from_true_velocity_at(&f, x, y, e, n);
+                assert!(
+                    (vx - 30.0).abs() < 1e-6 && (vy + 70.0).abs() < 1e-6,
+                    "{vx} {vy}"
+                );
+            }
+        }
+    }
+
+    // REQ: OA-GEO-010
+    #[test]
+    fn at_the_pole_east_and_north_are_those_of_the_frame_origins_meridian() {
+        let pole = |lat: f64| frame_new(lat, 30.0);
+        // The frame about the north pole: plane +x is the origin's east, +y continues the
+        // origin's meridian through the pole.
+        let f = pole(90.0);
+        let (n, m) = radii_at(90.0);
+        let j = frame_to_true(&f, 0.0, 0.0);
+        assert!(close(&j, &[[n / f.r, 0.0], [0.0, m / f.r]], 1e-12), "{j:?}");
+        // On the far side of the pole (plane +y), moving outward is moving south and plane +x
+        // is moving west.
+        let c = 1000.0 / f.r;
+        let k = c.sin() / c;
+        let j = frame_to_true(&f, 0.0, 1000.0);
+        assert!(
+            close(&j, &[[-n / f.r * k, 0.0], [0.0, -m / f.r]], 1e-9),
+            "{j:?}"
+        );
+        // A frame near the pole and a point exactly on it: the same convention, finite.
+        let g = pole(89.9);
+        let (px, py) = project(&g, 90.0, 123.0);
+        let j = frame_to_true(&g, px, py);
+        let c = px.hypot(py) / g.r;
+        let k = c.sin() / c;
+        assert!(j.iter().flatten().all(|v| v.is_finite()));
+        assert!(
+            close(&j, &[[n / g.r * k, 0.0], [0.0, m / g.r]], 1e-3),
+            "{j:?}"
+        );
+        // The south pole mirrors it.
+        let s = pole(-90.0);
+        let j = frame_to_true(&s, 0.0, 0.0);
+        assert!(close(&j, &[[n / s.r, 0.0], [0.0, m / s.r]], 1e-12), "{j:?}");
+    }
+
+    // REQ: OA-GEO-011
+    #[test]
+    fn the_inverse_differential_undoes_it_and_the_change_of_frame_is_consistent() {
+        for (lat, lon_t) in [(45.0, 0.05), (89.99, 90.0), (89.99, 45.0), (-89.99, 90.0)] {
+            let f = frame_new(lat, 0.0);
+            let (x, y) = project(&f, lat, lon_t);
+            let a = frame_to_true(&f, x, y);
+            let b = frame_from_true(&f, x, y);
+            let i = [
+                [
+                    a[0][0] * b[0][0] + a[0][1] * b[1][0],
+                    a[0][0] * b[0][1] + a[0][1] * b[1][1],
+                ],
+                [
+                    a[1][0] * b[0][0] + a[1][1] * b[1][0],
+                    a[1][0] * b[0][1] + a[1][1] * b[1][1],
+                ],
+            ];
+            assert!(close(&i, &[[1.0, 0.0], [0.0, 1.0]], 1e-12), "{i:?}");
+            // The same vector, seen from a frame centred on the point: the true east and north
+            // of that physical vector do not depend on the frame.
+            let (la, lo) = unproject(&f, x, y);
+            let g = frame_new(la, lo);
+            let (x2, y2) = project(&g, la, lo);
+            let d = frame_change(&f, x, y, &g, x2, y2);
+            let c = frame_to_true(&g, x2, y2);
+            let via = [
+                [
+                    c[0][0] * d[0][0] + c[0][1] * d[1][0],
+                    c[0][0] * d[0][1] + c[0][1] * d[1][1],
+                ],
+                [
+                    c[1][0] * d[0][0] + c[1][1] * d[1][0],
+                    c[1][0] * d[0][1] + c[1][1] * d[1][1],
+                ],
+            ];
+            assert!(close(&via, &a, 1e-9), "{lat} {lon_t}: {via:?} vs {a:?}");
+            // Round trip back.
+            let e = frame_change(&g, x2, y2, &f, x, y);
+            let id = [
+                [
+                    d[0][0] * e[0][0] + d[0][1] * e[1][0],
+                    d[0][0] * e[0][1] + d[0][1] * e[1][1],
+                ],
+                [
+                    d[1][0] * e[0][0] + d[1][1] * e[1][0],
+                    d[1][0] * e[0][1] + d[1][1] * e[1][1],
+                ],
+            ];
+            assert!(close(&id, &[[1.0, 0.0], [0.0, 1.0]], 1e-9), "{id:?}");
+        }
+    }
+
+    // REQ: OA-GEO-012
+    #[test]
+    fn a_covariance_carried_by_a_rotation_keeps_its_trace_and_turns_its_axes() {
+        let r = std::f64::consts::FRAC_PI_2;
+        let m = [[r.cos(), -r.sin()], [r.sin(), r.cos()]];
+        let c = mat2_congruence(&m, &[10000.0, 0.0, 1.0]);
+        assert!((c[0] - 1.0).abs() < 1e-9 && c[1].abs() < 1e-9 && (c[2] - 10000.0).abs() < 1e-9);
+        let c = mat2_congruence(&[[2.0, 0.0], [0.0, 3.0]], &[1.0, 0.5, 4.0]);
+        assert_eq!(c, [4.0, 3.0, 36.0]);
     }
 }
