@@ -2480,7 +2480,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-100** A handoff crossing time is derived from truth only where the truth is continuous across the
   boundary: the last sample over the transferring unit and the first over the receiving unit are no further
   apart than the truth leg gap (`oa_truth::LEG_GAP_MS`) and the unit is known at every refinement probe.
-  Otherwise the handoff is excluded as "truth missing across the boundary crossing" and counted. With
+  Otherwise the handoff is excluded as "crossing inside a truth gap" and counted. With
   several crossings in the window the one nearest the event is used.
 - **OA-BENCH-101** Mean and RMS are summed on values scaled by a power of two near the largest magnitude, so
   finite input gives no overflow or underflow to a perfect value: `[1e200]` has RMS 1e200, values near
@@ -2515,6 +2515,12 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-115** The bench publishes `T3-heading-grid`: the heading error regressed on `(lon - mean lon) * sin(lat)`,
   with slope, standard error, count and the reference longitude; slope 1 for an injected error equal to that term, 0
   for none.
+- **OA-BENCH-116** A handoff crossing time is given only where the truth is available and definite at every probe of
+  the search and on both sides of the bracket; a crossing that may lie inside a gap in the truth is excluded and
+  counted as "crossing inside a truth gap". Without a gap it is located to 1 s.
+- **OA-BENCH-117** T8 is the time of the first associated position of the leg minus the zone entry. A value of zero
+  or less is not a delay: it is counted as `established_before_entry` and left out of the distribution; a pop-up
+  20 s after entry gives 20 s.
 
 ## Winds aloft (oa-wind)
 
