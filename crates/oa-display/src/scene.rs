@@ -69,8 +69,8 @@
 
 use crate::font::{text_width_units, CAP_HEIGHT};
 use crate::list::{
-    begin_polyline_w, list_clear, push_circle, push_line, push_rect, push_text, push_vertex,
-    DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
+    begin_polyline_w, list_clear, push_circle, push_line, push_line_w, push_rect, push_text,
+    push_vertex, DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
 };
 use crate::palette as pal;
 use crate::project::{
@@ -286,6 +286,9 @@ pub struct SceneStats {
     pub legs_unplaced: u32,
     /// Boundary vertices and edges that cannot be projected, and rings that do not index.
     pub edges_unplaced: u32,
+    /// Legend texts that run past the right edge of a narrow screen: each is marked at the edge
+    /// and the command line prints the whole legend.
+    pub legend_cut: u32,
 }
 
 /// What the scene needs to know about a model beyond its tables as stored, found once at
@@ -859,7 +862,7 @@ pub fn build_scene(
     boundaries(l, m, idx, v, &mut st)?;
     airways(l, m, idx, v, &mut st)?;
     points(l, m, idx, v, sc, &mut st)?;
-    legend(l, m, v, &st)?;
+    legend(l, m, v, &mut st)?;
     Ok(st)
 }
 
@@ -1316,7 +1319,40 @@ fn hidden_line(v: &View) -> Label {
     t
 }
 
-fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(), DisplayError> {
+/// One legend text. When it runs past the right edge of the screen it is marked there with a
+/// bar in the text colour (the alert colour is for unplaced data) and counted in `legend_cut`, so a narrow screen never cuts it silently.
+fn legend_text(
+    l: &mut DisplayList,
+    st: &mut SceneStats,
+    width16: i32,
+    at: (i32, i32),
+    colour: u8,
+    text: &str,
+) -> Result<(), DisplayError> {
+    push_text(l, at, LEGEND_SIZE, ALIGN_LEFT, colour, LAYER_LEGEND, text)?;
+    let end = at.0.saturating_add(legend_width16(text.chars().count()));
+    if end > width16 {
+        st.legend_cut += 1;
+        // A two-pixel bar the height of the text, inside the last pixels of the screen.
+        let bx = width16.saturating_sub(16);
+        push_line_w(
+            l,
+            (bx, at.1),
+            (bx, at.1.saturating_add(i32::from(LEGEND_SIZE) * 16)),
+            pal::TEXT,
+            LAYER_LEGEND,
+            2,
+        )?;
+    }
+    Ok(())
+}
+
+fn legend(
+    l: &mut DisplayList,
+    m: &Model,
+    v: &View,
+    st: &mut SceneStats,
+) -> Result<(), DisplayError> {
     let p = &v.proj;
     let x = 8 * 16;
     let pitch = 18 * 16;
@@ -1349,15 +1385,7 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
     let _ = write!(t, " NM  RINGS ");
     put_nm(&mut t, ring_step_nm(p));
     let _ = write!(t, " NM");
-    push_text(
-        l,
-        (x, y),
-        LEGEND_SIZE,
-        ALIGN_LEFT,
-        pal::TEXT,
-        LAYER_LEGEND,
-        label_str(&t),
-    )?;
+    legend_text(l, st, width16, (x, y), pal::TEXT, label_str(&t))?;
     y += pitch;
 
     // The boundary key: own facility two pixels, neighbours dimmer.
@@ -1374,15 +1402,7 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
         } else {
             let _ = write!(k, "{name}");
         }
-        push_text(
-            l,
-            (kx, y),
-            LEGEND_SIZE,
-            ALIGN_LEFT,
-            colour,
-            LAYER_LEGEND,
-            label_str(&k),
-        )?;
+        legend_text(l, st, width16, (kx, y), colour, label_str(&k))?;
         kx = kx
             .saturating_add(legend_width16(k.len))
             .saturating_add(legend_width16(2));
@@ -1390,30 +1410,14 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
     y += pitch;
 
     let h = hidden_line(v);
-    push_text(
-        l,
-        (x, y),
-        LEGEND_SIZE,
-        ALIGN_LEFT,
-        pal::TEXT,
-        LAYER_LEGEND,
-        label_str(&h),
-    )?;
+    legend_text(l, st, width16, (x, y), pal::TEXT, label_str(&h))?;
     y += pitch;
 
     let mut nx = x;
     if st.legs_at_border > 0 {
         let mut t = label();
         let _ = write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border);
-        push_text(
-            l,
-            (nx, y),
-            LEGEND_SIZE,
-            ALIGN_LEFT,
-            pal::TEXT,
-            LAYER_LEGEND,
-            label_str(&t),
-        )?;
+        legend_text(l, st, width16, (nx, y), pal::TEXT, label_str(&t))?;
         nx = nx
             .saturating_add(legend_width16(t.len))
             .saturating_add(legend_width16(3));
@@ -1422,15 +1426,7 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
     if st.labels + st.labels_dropped > 0 {
         let mut t = label();
         let _ = write!(t, "LABELS DROPPED: {}", st.labels_dropped);
-        push_text(
-            l,
-            (nx, y),
-            LEGEND_SIZE,
-            ALIGN_LEFT,
-            pal::TEXT,
-            LAYER_LEGEND,
-            label_str(&t),
-        )?;
+        legend_text(l, st, width16, (nx, y), pal::TEXT, label_str(&t))?;
     }
     y += pitch;
 
@@ -1442,15 +1438,7 @@ fn legend(l: &mut DisplayList, m: &Model, v: &View, st: &SceneStats) -> Result<(
             "NOT PLACED {} PTS {} LEGS {} EDGES",
             st.points_unplaced, st.legs_unplaced, st.edges_unplaced
         );
-        push_text(
-            l,
-            (x, y),
-            LEGEND_SIZE,
-            ALIGN_LEFT,
-            pal::ALERT,
-            LAYER_LEGEND,
-            label_str(&t),
-        )?;
+        legend_text(l, st, width16, (x, y), pal::ALERT, label_str(&t))?;
     }
     Ok(())
 }

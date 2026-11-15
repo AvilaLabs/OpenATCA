@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use oa_sha256::{to_hex, Sha256};
 use oa_track::spill::{
-    spill_append, spill_counts, spill_finish, spill_new, spill_rows, SpillMismatch, SpilledRun,
+    spill_append, spill_counts, spill_create, spill_finish, spill_new, spill_rows, SpillMismatch,
+    SpilledRun,
 };
 use oa_track::{log_new, output_hash_into, output_new, TrackerStats, O_HAS_ALT};
 
@@ -145,4 +146,39 @@ fn rows_without_an_altitude_have_one_digest_in_memory_and_on_disk() {
     spill_append(&mut w, &o).unwrap();
     let run = spill_finish(w, 0, TrackerStats::default(), log_new(4), 8).unwrap();
     assert_eq!(run.digest, memory);
+}
+
+// REQ: OA-TRK-280
+#[test]
+fn a_writer_that_loses_the_race_for_a_directory_leaves_the_winners_files() {
+    let dir = scratch("race");
+    // Both passed the emptiness check; the first made its files, the second fails at the first
+    // column it makes.
+    let a = spill_create(&dir).unwrap();
+    assert!(spill_create(&dir).is_err());
+    for c in ["t_ns", "addr", "flags", "muv"] {
+        assert!(dir.join(c).exists(), "winner's {c} was removed");
+    }
+    drop(a);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// REQ: OA-TRK-280
+#[test]
+fn a_failed_start_removes_only_the_files_it_made_and_keeps_a_directory_it_did_not() {
+    let dir = scratch("fail_existing");
+    fs::create_dir_all(&dir).unwrap();
+    // A column name taken by a directory makes the creation fail partway.
+    fs::create_dir(dir.join("lat")).unwrap();
+    assert!(spill_create(&dir).is_err());
+    assert!(dir.join("lat").is_dir());
+    assert!(!dir.join("t_ns").exists() && !dir.join("addr").exists());
+    // An empty directory that was there before the call is still there.
+    let dir2 = scratch("fail_empty");
+    fs::create_dir_all(&dir2).unwrap();
+    fs::write(dir2.join("t_ns"), b"x").unwrap();
+    assert!(spill_create(&dir2).is_err());
+    assert_eq!(fs::read(dir2.join("t_ns")).unwrap(), b"x");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir2);
 }

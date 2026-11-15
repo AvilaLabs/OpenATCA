@@ -27,7 +27,7 @@
 //! size ([`new_fns_table_with`], by default the size of the NOTAM table); when it is full the
 //! oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are hashed, after the
 //! NOTAMs, only when there are some or a tombstone counter is not zero. They are not moved by a
-//! step of the replay clock (their time is feed time, not a time since heard).
+//! step of the replay clock when their time is the notice's own; a span of replay time moves with it.
 //!
 //! A row with no usable identity is not applied. A field that the decoder marked
 //! malformed ([`oa_notam::field_error`]) is treated as absent.
@@ -209,6 +209,9 @@ pub struct FnsTable {
     pub tomb_issued: Vec<i64>,
     /// Time (Unix ms) after which the tombstone is dropped.
     pub tomb_until: Vec<i64>,
+    /// Whether `tomb_until` is a span of replay time (the notice had no end of its own), so a step
+    /// of the replay clock moves it; false when it is the notice's own end or cancelled time.
+    pub tomb_replay: Vec<bool>,
     /// Order of creation, for evicting the oldest.
     pub tomb_seq: Vec<u64>,
     /// The next creation number.
@@ -255,6 +258,7 @@ pub fn new_fns_table_with(capacity: usize, tombstones: usize) -> FnsTable {
         tomb_key: vec![([0; 12], 0, 0); tombstones],
         tomb_issued: vec![FNS_NO_TIME; tombstones],
         tomb_until: vec![FNS_NO_TIME; tombstones],
+        tomb_replay: vec![false; tombstones],
         tomb_seq: vec![0; tombstones],
         tomb_next_seq: 0,
     }
@@ -288,14 +292,17 @@ pub fn fns_tombstones(t: &FnsTable) -> usize {
 }
 
 /// Records that NOTAM `k` was cancelled or replaced by a notice issued at `issued_ms`, to be kept
-/// until `until_ms`. A tombstone already held for `k` keeps the later of each time.
-fn tomb_put(t: &mut FnsTable, k: FnsKey, issued_ms: i64, until_ms: i64) {
+/// until `until_ms` (a span of replay time if `replay`, see [`tomb_until`]). A tombstone already held for `k` keeps the later of each time.
+fn tomb_put(t: &mut FnsTable, k: FnsKey, issued_ms: i64, (until_ms, replay): (i64, bool)) {
     if let Some(s) = tomb_of(t, &k) {
         if let Some(v) = t.tomb_issued.get_mut(s) {
             *v = (*v).max(issued_ms);
         }
         if let Some(v) = t.tomb_until.get_mut(s) {
-            *v = (*v).max(until_ms);
+            if until_ms > *v {
+                *v = until_ms;
+                set(&mut t.tomb_replay, s, replay);
+            }
         }
         return;
     }
@@ -316,6 +323,7 @@ fn tomb_put(t: &mut FnsTable, k: FnsKey, issued_ms: i64, until_ms: i64) {
     set(&mut t.tomb_key, s, k);
     set(&mut t.tomb_issued, s, issued_ms);
     set(&mut t.tomb_until, s, until_ms);
+    set(&mut t.tomb_replay, s, replay);
     set(&mut t.tomb_seq, s, t.tomb_next_seq);
     t.tomb_next_seq += 1;
 }
@@ -515,13 +523,18 @@ fn issued_of(n: &Notams, i: usize, r: &oa_notam::Row) -> i64 {
 }
 
 /// When the tombstone of a NOTAM held in `hit` (if it was) may be dropped, Unix ms: its end or
-/// cancelled time if it has one, else [`FNS_TOMBSTONE_AGE_MS`] after the replay time `now_ns`.
-fn tomb_until(t: &FnsTable, hit: Option<usize>, now_ns: i64) -> i64 {
-    hit.and_then(|s| leaves_at(t, s)).unwrap_or_else(|| {
-        now_ns
-            .div_euclid(1_000_000)
-            .saturating_add(FNS_TOMBSTONE_AGE_MS)
-    })
+/// cancelled time if it has one (feed time, false), else [`FNS_TOMBSTONE_AGE_MS`] after the
+/// replay time `now_ns` (replay time, true: a step of the clock moves it).
+fn tomb_until(t: &FnsTable, hit: Option<usize>, now_ns: i64) -> (i64, bool) {
+    match hit.and_then(|s| leaves_at(t, s)) {
+        Some(at) => (at, false),
+        None => (
+            now_ns
+                .div_euclid(1_000_000)
+                .saturating_add(FNS_TOMBSTONE_AGE_MS),
+            true,
+        ),
+    }
 }
 
 /// Writes the row's values to slot `s` (the key is already there). Values the row lacks are
@@ -706,8 +719,18 @@ pub fn fns_sweep(t: &mut FnsTable, now_ns: i64) -> usize {
 }
 
 /// Moves the last-update time of every NOTAM by `delta_ns`, for a step of the replay clock, and
-/// marks each stale until it is updated; returns the number marked.
+/// marks each stale until it is updated; returns the number marked. A tombstone held for a span
+/// of replay time moves with the clock, so a step never shortens it; one held to the notice's own
+/// end or cancelled time (feed time) stays.
 pub fn fns_shift_times(t: &mut FnsTable, delta_ns: i64) -> usize {
+    let delta_ms = delta_ns.div_euclid(1_000_000);
+    for i in 0..t.tomb.capacity {
+        if slot_live(&t.tomb, i) && t.tomb_replay.get(i).copied().unwrap_or(false) {
+            if let Some(v) = t.tomb_until.get_mut(i) {
+                *v = v.saturating_add(delta_ms);
+            }
+        }
+    }
     let mut n = 0;
     for i in 0..t.slots.capacity {
         if slot_live(&t.slots, i) {

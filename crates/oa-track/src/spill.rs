@@ -12,7 +12,7 @@
 //! A spill makes its own directory: [`spill_new`] refuses one that exists and has anything in
 //! it, and creates each column file new (never over an existing file). Dropping the finished run
 //! removes the column files it made, by name, and then the directory only if that left it empty;
-//! it never removes a directory tree, so a path handed in wrongly costs nothing but its own
+//! a start that fails partway removes only the files that call made; it never removes a directory tree, so a path handed in wrongly costs nothing but its own
 //! files. Every read checks every column's size against the row count first, so a truncated or
 //! extended column is a typed error ([`SpillMismatch`], inside the `io::Error`), not rows that
 //! quietly disagree.
@@ -109,18 +109,39 @@ pub fn spill_new(dir: &Path) -> io::Result<SpillWriter> {
             format!("spill directory {} is not empty", dir.display()),
         ));
     }
+    spill_create(dir)
+}
+
+/// Creates the column files in `dir` without looking at what else is there: [`spill_new`] after
+/// its check, and the point where two callers that both passed the check race. A failure removes
+/// only what this call made. Public for tests of that race.
+#[doc(hidden)]
+pub fn spill_create(dir: &Path) -> io::Result<SpillWriter> {
+    let made_dir = !dir.exists();
     fs::create_dir_all(dir)?;
     let mut files = Vec::with_capacity(COLS.len());
+    let mut made: Vec<PathBuf> = Vec::with_capacity(COLS.len());
     for c in COLS {
-        let made = fs::OpenOptions::new()
+        let path = dir.join(c);
+        match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(dir.join(c));
-        match made {
-            Ok(f) => files.push(BufWriter::with_capacity(1 << 16, f)),
+            .open(&path)
+        {
+            Ok(f) => {
+                made.push(path);
+                files.push(BufWriter::with_capacity(1 << 16, f));
+            }
             Err(e) => {
-                // Only the files this call made so far (the directory was empty).
-                remove_columns(dir);
+                // Only the files this call made (a failed create_new made nothing), and the
+                // directory only if this call made it and it is now empty.
+                drop(files);
+                for p in &made {
+                    let _ = fs::remove_file(p);
+                }
+                if made_dir {
+                    let _ = fs::remove_dir(dir);
+                }
                 return Err(e);
             }
         }

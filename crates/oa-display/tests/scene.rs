@@ -1365,9 +1365,11 @@ fn the_hand_built_map_renders_to_a_pinned_hash() {
         oa_display::ppm::write_ppm(&mut out, &sp, &buf).unwrap();
         std::fs::write(std::path::Path::new(&dir).join("hand-built-map.ppm"), out).unwrap();
     }
+    // Re-pinned: the HIDDEN row is wider than 800 pixels at 50 NM, so its cut is now marked at
+    // the right edge by a bar.
     assert_eq!(
         to_hex(&d),
-        "c9cbf36a26347be8bcac7541a6a9805516556b6046ebf3555307b1b8b4137003"
+        "512d78c017fd4a704103ba5f7c1de14769e5ba70e26fd97df022190cdc2ab70d"
     );
 }
 
@@ -1563,4 +1565,84 @@ fn the_frame_hash_is_computed_only_on_request_and_layers_come_from_the_command_l
         &mut Vec::new(),
     );
     assert!(e.unwrap_err().to_string().contains("bogus"));
+}
+
+/// Renders the hand-built model through the command line at `size` with some layers hidden.
+fn render_text(name: &str, size: &str) -> String {
+    let snap = tmp(&format!("{name}.snapshot"));
+    let ppm = tmp(&format!("{name}.ppm"));
+    std::fs::write(&snap, encode(&model(Tail::Border)).unwrap()).unwrap();
+    let mut out = Vec::new();
+    cli::run(
+        &args(&[
+            "render",
+            "--snapshot",
+            snap.to_str().unwrap(),
+            "--centre",
+            "41.9786,-87.9048",
+            "--range-nm",
+            "60",
+            "--size",
+            size,
+            "--out",
+            ppm.to_str().unwrap(),
+            "--hide",
+            "fixes",
+            "--hide",
+            "labels",
+        ]),
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+// REQ: OA-DSP-034
+#[test]
+fn a_legend_cut_by_a_narrow_screen_is_marked_and_given_whole_in_the_text_output() {
+    let hidden =
+        "HIDDEN: RWY/LOC>15NM, NON-IFR APTS>40NM, NDB/DME/TACAN>40NM, FIXES OFF, LABELS OFF";
+    let narrow = render_text("legend-narrow", "64x120");
+    assert!(narrow.contains(hidden), "{narrow}");
+    assert!(narrow.contains("RANGE 60 NM"), "{narrow}");
+    assert!(narrow.contains("legend   "), "{narrow}");
+    // A screen wide enough for every row says nothing about the legend.
+    let wide = render_text("legend-wide", "1600x600");
+    assert!(!wide.contains("legend   "), "{wide}");
+    assert!(!wide.contains(hidden), "{wide}");
+}
+
+// REQ: OA-DSP-034
+#[test]
+fn every_legend_text_past_the_edge_gets_a_bar_at_the_narrowest_width() {
+    let m = model(Tail::Border);
+    let mut view = view_new(ORD.0, ORD.1, 60.0, 64, 120).unwrap();
+    layer_set(&mut view.layers, "fixes", false);
+    let mut l = list_new(scene_caps(&m));
+    let st = build_scene(
+        &mut l,
+        &m,
+        &scene_index(&m),
+        &view,
+        &mut scratch_for(&m, &view),
+    )
+    .unwrap();
+    assert!(!l.faulted);
+    let over = |l: &DisplayList| {
+        let t = texts(l);
+        (0..t.len())
+            .filter(|&i| l.texts.layer[i] == LAYER_LEGEND)
+            .filter(|&i| l.texts.x[i] / 16 + 12 * t[i].chars().count() as i32 - 4 > 64)
+            .count()
+    };
+    assert!(st.legend_cut > 0);
+    assert_eq!(st.legend_cut as usize, over(&l));
+    let bars = l
+        .lines
+        .layer
+        .iter()
+        .zip(&l.lines.x0)
+        .filter(|(&la, &x)| la == LAYER_LEGEND && x == 63 * 16)
+        .count();
+    assert_eq!(bars, st.legend_cut as usize);
 }
