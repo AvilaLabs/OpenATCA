@@ -5,9 +5,14 @@
 //! # The split, defined exactly
 //!
 //! For each aircraft (the 24-bit address with `oa_adsb::NON_ICAO`, the same key as `oa-truth`),
-//! its decoded reports are put in the total order (time, input index) and numbered from 0. The
-//! even-numbered reports are **set A** (the tracker's input) and the odd-numbered ones **set B**
-//! (the truth's input). The two sets are disjoint, together they are every decoded report, and
+//! its decoded reports are put in the total order (time, input index). Copies are first removed:
+//! a report with the address, time, position, altitudes, velocity and quality fields of one
+//! already kept is the same observation (counted in [`SplitStats::duplicates_removed`]). The
+//! distinct observations are then grouped by (address, time) and the groups numbered from 0; a
+//! group of reports with different content at one time (a conflict, counted) stays whole. The
+//! even-numbered groups are **set A** (the tracker's input) and the odd-numbered ones **set B**
+//! (the truth's input). The two sets share no observation, together they are every distinct
+//! decoded report, and
 //! the quality fields (NACp, NIC, SIL, version, NACv) are carried forward over the whole
 //! aircraft sequence before the split, by the same 60 s rule and code as the truth gates
 //! (`oa_truth::quality_check`), and written into the rows of both sets. readsb prints them on a
@@ -58,7 +63,7 @@ use crate::types::{
 };
 
 /// The split, in words, for every report.
-pub const SPLIT_TEXT: &str = "per aircraft, reports in (time, input index) order numbered from 0: even to set A (tracker), odd to set B (truth)";
+pub const SPLIT_TEXT: &str = "per aircraft, copies of one observation removed, then distinct (time, input index) groups numbered from 0: even to set A (tracker), odd to set B (truth); reports of different content at one time stay on one side";
 /// The basis every scored number carries.
 pub const BASIS_TEXT: &str = "on thinned ~17 s input split in two; not an ESASSP exit result; GNSS error correlated over seconds is shared between the sets";
 /// A track is dropped after this long without an update in the scoring run, ns: the gap at which
@@ -89,6 +94,36 @@ pub struct SplitStats {
     pub aircraft: u64,
     pub set_a: u64,
     pub set_b: u64,
+    /// Copies removed: a report with the address, time and content of one already kept.
+    pub duplicates_removed: u64,
+    /// (address, time) groups holding reports of different content; all of one group are kept
+    /// on one side.
+    pub conflict_groups: u64,
+    /// Reports in those groups.
+    pub conflict_rows: u64,
+    /// Rows that could not be read back and were left out.
+    pub rows_invalid: u64,
+}
+
+/// What makes two reports of one address and time the same observation: position, altitudes,
+/// velocity and the quality fields.
+type ObsKey = (i32, i32, i32, i32, u16, u16, i32, u8, u8, u8, u8, u8);
+
+fn obs_key(r: &oa_adsb::Row) -> ObsKey {
+    (
+        r.lat_e7,
+        r.lon_e7,
+        r.baro_alt_ft,
+        r.geom_alt_ft,
+        r.gs_dkt,
+        r.track_ddeg,
+        r.vrate_fpm,
+        r.nic,
+        r.nac_p,
+        r.nac_v,
+        r.sil,
+        r.version,
+    )
 }
 
 /// Splits `r` into the two disjoint sets (see the module documentation). Rows keep every field.
@@ -107,21 +142,48 @@ pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
     let mut cur = None;
     let mut k = 0u64;
     let mut q = QualityState::default();
-    for &(addr, t, i) in &order {
+    let mut g = 0;
+    while let Some(&(addr, t, _)) = order.get(g) {
+        let end = order.get(g..).map_or(g, |s| {
+            g + s.iter().take_while(|x| x.0 == addr && x.1 == t).count()
+        });
         if cur != Some(addr) {
             cur = Some(addr);
             k = 0;
             q = QualityState::default();
             st.aircraft += 1;
         }
-        if let Some(mut row) = reports_row(r, i as usize) {
+        // The distinct observations of this (address, time), in input order.
+        let mut group: Vec<oa_adsb::Row> = Vec::new();
+        for &(_, _, i) in order.get(g..end).unwrap_or(&[]) {
+            let Some(row) = reports_row(r, i as usize) else {
+                st.rows_invalid += 1;
+                continue;
+            };
+            if group.iter().any(|x| obs_key(x) == obs_key(&row)) {
+                st.duplicates_removed += 1;
+            } else {
+                group.push(row);
+            }
+        }
+        g = end;
+        if group.len() > 1 {
+            st.conflict_groups += 1;
+            st.conflict_rows += group.len() as u64;
+        }
+        if group.is_empty() {
+            continue;
+        }
+        // The whole group goes to one side: no physical observation is in both sets.
+        let to_a = k.is_multiple_of(2);
+        for mut row in group {
             let v = quality_check(&mut q, &row, t, &DEFAULT_CONFIG);
             row.nac_p = v.nacp.unwrap_or(NONE_U8);
             row.nic = v.nic.unwrap_or(NONE_U8);
             row.sil = v.sil.unwrap_or(NONE_U8);
             row.version = v.version.unwrap_or(NONE_U8);
             row.nac_v = v.nacv.unwrap_or(NONE_U8);
-            if k.is_multiple_of(2) {
+            if to_a {
                 reports_push(&mut a, &row);
                 st.set_a += 1;
             } else {
@@ -326,13 +388,30 @@ fn push_class(v: &mut [Vec<f64>; 3], class: Option<usize>, x: f64) {
     }
 }
 
+/// The trip a sample belongs to: the index of the truth leg of `addr` with the latest start at
+/// or before `t_ms` (the leg `truth_at` answers from), or `u32::MAX` when none.
+fn trip_of(truth: &oa_truth::Truth, addr: u32, t_ms: i64) -> u32 {
+    let range = oa_truth::legs_of(truth, addr);
+    let t_ns = t_ms.saturating_mul(1_000_000);
+    let mut k = range.first.0;
+    let mut found = u32::MAX;
+    while k < range.first.0.saturating_add(range.count) {
+        match oa_truth::leg_start_ns(truth, oa_truth::LegIx(k)) {
+            Some(s) if s <= t_ns => found = k,
+            _ => break,
+        }
+        k += 1;
+    }
+    found
+}
+
 /// The ESASSP-style split of a paired-sample table (see the module documentation).
 pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
     let mut coasting = 0u64;
     let mut pos: [Vec<f64>; 3] = Default::default();
     let mut spd: [Vec<f64>; 3] = Default::default();
     let mut hdg: [Vec<f64>; 3] = Default::default();
-    let mut per_flight: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
+    let mut per_flight: BTreeMap<(u32, u32), Vec<f64>> = BTreeMap::new();
     let (mut unclassified, mut no_position) = (0u64, 0u64);
     for i in 0..p.t_ms.len() {
         let (Some(&addr), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
@@ -371,7 +450,10 @@ pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
         let hd = f64::from(p.hdg_err_deg.get(i).copied().unwrap_or(f32::NAN));
         if e.is_finite() {
             push_class(&mut pos, class, e);
-            per_flight.entry(addr).or_default().push(e);
+            per_flight
+                .entry((addr, trip_of(truth, addr, t)))
+                .or_default()
+                .push(e);
         } else {
             no_position += 1;
         }

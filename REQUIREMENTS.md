@@ -2804,9 +2804,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `tracker_input`: a 100 m error in a known direction is recovered from T1 and T2, 2 m/s in speed from T3,
   50 ft from T4, and a copy of truth scores zero.
 - **OA-TRK-022** Track sample columns of different lengths are refused with a typed error.
-- **OA-TRK-023** The scoring split is exact: per aircraft, reports in (time, input index) order numbered
-  from 0, even to set A (the tracker) and odd to set B (truth); the sets are disjoint, together every
-  report, and independent of input order except between same-time reports.
+- **OA-TRK-023** The scoring split is exact: per aircraft, copies of one observation removed, then the
+  distinct (time, input index) groups numbered from 0, even to set A (the tracker) and odd to set B
+  (truth); the sets share no observation, together every distinct report, and independent of input order.
 - **OA-TRK-024** The quality fields are carried forward over the whole aircraft sequence before the split
   (the same 60 s rule and code) and written into both sets, so splitting does not starve the tracker of
   NACp.
@@ -3137,3 +3137,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-254** A tracker configuration whose output or log table exceeds 2^24 rows is refused; the
   registration estimator and the association scratch size their buffers at a stated maximum (4,096
   reference slots; 2^22 tracks, plots or pairs) whatever is asked for.
+- **OA-TRK-270** Reports of one address with the same time and the same position, altitudes, velocity
+  and quality fields are one observation: one copy is kept, the removed copies are counted and shown in
+  the report. The split of [r0,r0,r2,r2,r4,r4] has no observation in both sets.
+- **OA-TRK-271** Duplicating a whole recording gives the same two sets and the same split counts except
+  the number of copies removed.
+- **OA-TRK-272** Reports of one address and time with different content are a conflict: all stay on the
+  side of the first, and the conflicting times and reports are counted. A row that cannot be read is
+  left out and counted.
+- **OA-TRK-273** The per-flight position RMS is per truth leg: two trips of one address are two flights,
+  so a failing short trip is not pooled with a good long one and counts above the R4 value.

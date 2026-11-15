@@ -76,9 +76,14 @@ fn the_split_is_alternate_reports_per_aircraft_disjoint_and_complete() {
     };
     assert_eq!(times_of(&a, 0x100001), vec![0, 2, 4, 6]);
     assert_eq!(times_of(&b, 0x100001), vec![1, 3, 5]);
-    // Aircraft 2 has eight reports: 0,1,2,3,3',4,5,6 -> A gets positions 0,2,4,6 = 0,2,3',5.
-    assert_eq!(times_of(&a, 0x100002), vec![0, 2, 3, 5]);
-    assert_eq!(times_of(&b, 0x100002), vec![1, 3, 4, 6]);
+    // Aircraft 2 has eight reports in seven times; the two at 3 s differ in content and stay
+    // together: times 0,1,2,3(2 reports),4,5,6 -> A gets groups 0,2,4,6 = 0,2,4,6.
+    assert_eq!(times_of(&a, 0x100002), vec![0, 2, 4, 6]);
+    assert_eq!(times_of(&b, 0x100002), vec![1, 3, 3, 5]);
+    assert_eq!(
+        (st.duplicates_removed, st.conflict_groups, st.conflict_rows),
+        (0, 1, 2)
+    );
     // The two halves are disjoint and together every input row (by position and time).
     let key = |s: &Reports| -> Vec<(u32, i64, i32)> {
         (0..reports_len(s))
@@ -100,9 +105,7 @@ fn the_split_is_alternate_reports_per_aircraft_disjoint_and_complete() {
     let (mut ka, mut ka2) = (key(&a), key(&a2));
     ka.sort_unstable();
     ka2.sort_unstable();
-    // Only the two same-time reports can swap sides (input order breaks that tie).
-    let diff = ka.iter().filter(|x| !ka2.contains(x)).count();
-    assert!(diff <= 1, "{diff}");
+    assert_eq!(ka, ka2);
 }
 
 // REQ: OA-TRK-024
@@ -392,6 +395,12 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
         "real clip at report times: {} pairs, position rms {:.1} m, speed rms straight {:.2} m/s; {} tracks, {} confirmed",
         sc.pairs, sc.esassp.position_m[0].rms, sc.esassp.speed_mps[CLASS_STRAIGHT].rms, run.stats.started, run.stats.confirmed
     );
+    println!(
+        "real clip split: {st:?}; {} flights (truth legs) of {} aircraft, {} above the R4 value",
+        sc.esassp.flights,
+        built.truth.ac_addr.len(),
+        sc.esassp.flights_over_r4
+    );
     assert!(sc.pairs > 10_000);
     assert!(sc.esassp.position_m[0].rms < 60.0);
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
@@ -408,10 +417,11 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
         eprintln!("skipped: {path} unreadable");
         return;
     };
-    let (a, _, _) = split_reports(&clip.reports);
+    let (a, _, st) = split_reports(&clip.reports);
     let (meas, _) = adsb_measurements(&a, &AdsbConfig::default());
     let iv = interval_stats(&meas).unwrap();
     let run = run_tracker(&meas, &scoring_config(&DEFAULT_CONFIG, &iv)).unwrap();
+    println!("split {st:?}");
     println!(
         "tracker clip digest {} rows {} ticks {} skipped {}",
         run.digest, run.stats.applied, run.stats.ticks, run.stats.ticks_skipped
@@ -419,8 +429,10 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
     assert_eq!(run.digest, PINNED_TRACKER_CLIP_DIGEST);
 }
 
+// Re-pinned: the split now removes copies of one observation and keeps conflicting reports of one
+// time on one side; the counts are in the test output (`split ...`).
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962";
+    "2432d72c5c6833ea64d4dc0c407fa19beeca123e1eb67bcc7a5c3ebc5c21f5a8";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.
@@ -774,4 +786,123 @@ fn an_absent_altitude_is_never_scored_as_zero_feet() {
     assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::NAN), NO_ALT);
     assert_eq!(scored_altitude_ft(O_HAS_ALT, f32::INFINITY), NO_ALT);
     assert_eq!(scored_altitude_ft(0, 12_000.0), NO_ALT);
+}
+
+fn obs_keys(s: &Reports) -> Vec<(u32, i64, i32, i32)> {
+    (0..reports_len(s))
+        .map(|i| (s.icao[i], s.time_ns[i], s.lat_e7[i], s.lon_e7[i]))
+        .collect()
+}
+
+fn doubled(times: &[f64]) -> Reports {
+    let mut r = Reports::default();
+    for &t in times {
+        let mut row = base_row(0x100001, t);
+        row.lat_e7 = 410_000_000 + (t as i32) * 10;
+        reports_push(&mut r, &row);
+        reports_push(&mut r, &row);
+    }
+    r
+}
+
+// REQ: OA-TRK-270
+#[test]
+fn copies_of_one_observation_never_land_in_both_sets() {
+    let (a, b, st) = split_reports(&doubled(&[0.0, 2.0, 4.0]));
+    let (ka, kb) = (obs_keys(&a), obs_keys(&b));
+    assert!(ka.iter().all(|k| !kb.contains(k)), "{ka:?} {kb:?}");
+    assert_eq!((ka.len(), kb.len()), (2, 1));
+    assert_eq!((st.rows_in, st.duplicates_removed), (6, 3));
+    assert_eq!(st.set_a + st.set_b, 3);
+}
+
+// REQ: OA-TRK-271
+#[test]
+fn duplicating_a_whole_recording_gives_the_same_split() {
+    let times = [0.0, 1.0, 2.0, 3.0, 4.0];
+    let mut single = Reports::default();
+    for &t in &times {
+        let mut row = base_row(0x100001, t);
+        row.lat_e7 = 410_000_000 + (t as i32) * 10;
+        reports_push(&mut single, &row);
+    }
+    let mut twice = single.clone();
+    for i in 0..reports_len(&single) {
+        reports_push(&mut twice, &reports_row(&single, i).unwrap());
+    }
+    let (a1, b1, s1) = split_reports(&single);
+    let (a2, b2, s2) = split_reports(&twice);
+    assert_eq!((&a1, &b1), (&a2, &b2));
+    assert_eq!((s1.set_a, s1.set_b), (s2.set_a, s2.set_b));
+    assert_eq!((s1.duplicates_removed, s2.duplicates_removed), (0, 5));
+}
+
+// REQ: OA-TRK-272
+#[test]
+fn conflicting_reports_stay_on_one_side_and_are_counted() {
+    let mut r = Reports::default();
+    for (t, lat) in [(0.0, 1), (1.0, 2), (1.0, 3), (1.0, 3), (2.0, 4)] {
+        let mut row = base_row(0x100001, t);
+        row.lat_e7 = lat;
+        reports_push(&mut r, &row);
+    }
+    let (a, b, st) = split_reports(&r);
+    assert_eq!((reports_len(&a), reports_len(&b)), (2, 2));
+    assert!(b.lat_e7 == vec![2, 3] || b.lat_e7 == vec![3, 2]);
+    assert_eq!(
+        (st.duplicates_removed, st.conflict_groups, st.conflict_rows),
+        (1, 1, 2)
+    );
+}
+
+// REQ: OA-TRK-273
+#[test]
+fn two_trips_of_one_address_are_two_flights_and_the_bad_one_fails() {
+    // One address flies two legs (a gap over the leg gap between them), 1 s reports.
+    let addr = 0x100001u32;
+    let mut r = Reports::default();
+    let mut starts = [0.0, 0.0];
+    for (leg, t0) in [0.0, 400.0].into_iter().enumerate() {
+        starts[leg] = t0;
+        for k in 0..60 {
+            let mut row = base_row(addr, t0 + f64::from(k));
+            row.lat_e7 = 410_000_000 + (leg as i32) * 1_000_000 + k * 50;
+            row.lon_e7 = -880_000_000;
+            row.gs_dkt = 4_000;
+            row.track_ddeg = 0;
+            reports_push(&mut r, &row);
+        }
+    }
+    let tcfg = TRUTH;
+    let built = adsb_truth::build(&r, &tcfg).unwrap();
+    assert_eq!(oa_truth::legs_of(&built.truth, addr).count, 2);
+    let mut p = oa_bench::pair::PairTable::default();
+    let mut push = |t_s: f64, e: f32| {
+        p.th.push(0);
+        p.flight.push(0);
+        p.addr.push(addr);
+        p.t_ms.push((T0 / 1_000_000) + (t_s * 1000.0) as i64);
+        p.cross_m.push(e);
+        p.along_m.push(0.0);
+        p.speed_err_kt.push(0.0);
+        p.hdg_err_deg.push(0.0);
+        p.alt_err_ft.push(0.0);
+        p.truth_speed_mps.push(100.0);
+        p.method.push(0);
+        p.phase.push(0);
+        p.band.push(0);
+        p.coast.push(0);
+    };
+    // Trip one: 50 samples of 0 m. Trip two: 12 samples of 1,000 m (pooled RMS is about 480 m
+    // over the two trips: about 440 m, still over 230 m, but a bigger pool hides it).
+    for k in 5..55 {
+        push(starts[0] + f64::from(k), 0.0);
+    }
+    for k in 5..17 {
+        push(starts[1] + f64::from(k), 1000.0);
+    }
+    let e = esassp_of(&p, &built.truth);
+    assert_eq!(e.flights, 2);
+    assert_eq!(e.flights_over_r4, 1);
+    assert!((e.flight_rms_max_m - 1000.0).abs() < 1e-9);
 }
