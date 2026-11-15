@@ -405,7 +405,7 @@ fn hash_of(o: &TrackOutput) -> String {
     to_hex(&h.finalize())
 }
 
-// REQ: OA-TRK-030
+// REQ: OA-TRK-066
 #[test]
 fn an_absent_altitude_is_not_a_number_in_the_output_columns() {
     let with = base_measurements(0x515151, 60, 1.0, 11);
@@ -436,7 +436,7 @@ fn an_absent_altitude_is_not_a_number_in_the_output_columns() {
     }
 }
 
-// REQ: OA-TRK-030
+// REQ: OA-TRK-066
 #[test]
 fn the_digest_does_not_depend_on_how_an_absent_altitude_is_written() {
     let without: Vec<Measurement> = base_measurements(0x525252, 40, 1.0, 12)

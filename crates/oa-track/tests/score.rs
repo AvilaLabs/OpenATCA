@@ -396,7 +396,7 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
 }
 
-// REQ: OA-TRK-030
+// REQ: OA-TRK-066
 #[test]
 fn an_absent_altitude_is_never_scored_as_zero_feet() {
     use oa_bench::legacy::NO_ALT;

@@ -2123,7 +2123,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-029** On the real ZAU hour (skipped when `OPENATCA_ADSB_CLIP` is unset) the tracker runs with no
   capacity refusals or lost rows, is reproducible, confirms more than 80 % of its tracks and scores under
   60 m RMS at report times against the other half's truth.
-- **OA-TRK-030** An output row without an altitude has NaN in the altitude, altitude variance and vertical
+- **OA-TRK-066** An output row without an altitude has NaN in the altitude, altitude variance and vertical
   rate columns (not 0 ft) and the flag clear; the scorer takes the altitude through
   `scored_altitude_ft`, which gives the absent value for a clear flag or a non-finite column; the
   output digest hashes absent columns as zero, so it equals the earlier digest of the same run.
