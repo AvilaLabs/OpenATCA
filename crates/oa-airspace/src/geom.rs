@@ -10,8 +10,13 @@
 //!   rest are measured exactly (geodesic inverse and direct problems along the edge).
 //! * [`edge_separations`]: per boundary, the largest geodesic-versus-rhumb separation over its
 //!   edges (OA-ASP-005).
-//! * Sampling helpers turn boundary descriptions (vertices, arcs, circles) into point lists
-//!   used only for the "does it touch the area" tests; the model keeps the exact description.
+//! * Sampling helpers turn boundary descriptions (vertices, arcs, circles) into dense point
+//!   lists used only for the "does it touch the area" tests; the model keeps the exact
+//!   description. A volume touches the area when a point of its outline is in the area (inside
+//!   a polygon or within the buffer of an edge), when an outline edge crosses an edge of the
+//!   area, when a vertex of the area is within the buffer of an outline edge, or when a vertex
+//!   of the area is inside the outline (OA-ASP-065). The outline is dense enough that each
+//!   chord lies within [`ARC_CHORD_M`] of the curve it stands for.
 //!
 //! Coordinates enter as the model's 1e-7 degree integers, so selection is a function of the
 //! values the snapshot stores.
@@ -27,6 +32,22 @@ const R_MEAN_M: f64 = 6_371_008.8;
 const GREY: f64 = 0.01;
 /// Spacing of the points sampled along a long edge for intersection tests, metres.
 pub const SAMPLE_STEP_M: f64 = 20_000.0;
+/// Spacing of the points of a densified geodesic, rhumb or parallel edge, metres. Each point
+/// is on the edge, and the great-circle chord between neighbours leaves the geodesic by far
+/// less than a millimetre (the chord of a parallel by under a metre at 80 degrees).
+pub const DENSE_STEP_M: f64 = 5_000.0;
+/// Largest distance between a densified arc and the arc itself, metres.
+pub const ARC_CHORD_M: f64 = 0.2;
+/// Spacing along a parallel of latitude, where the chord leaves the parallel by about
+/// `step^2 * tan(latitude) / (8 * R)`, metres.
+const PARALLEL_STEP_M: f64 = 1_000.0;
+/// Most points of one densified arc.
+const MAX_ARC_POINTS: usize = 20_000;
+/// How far an arc's coded radius may differ from the distance between its centre and either
+/// end before the build reports the volume, metres. The radius is coded in tenths of a
+/// nautical mile (ARINC 424 cols 71-74), so rounding alone moves it by up to 0.05 NM
+/// (92.6 m); one more metre covers the whole-metre storage and the 1e-7 degree positions.
+pub const ARC_RADIUS_TOLERANCE_M: f64 = 92.6 + 1.0;
 
 /// Degrees from a model unit value.
 pub fn e7_to_deg(v: i32) -> f64 {
@@ -86,6 +107,36 @@ struct Edge {
     b3: V3,
     /// Unit normal of the great-circle plane through the edge; zero for a degenerate edge.
     n3: V3,
+    /// Unit vector to the middle of the edge, and half its angular length, radians.
+    c3: V3,
+    half: f64,
+}
+
+fn edge_of(a: LatLon, b: LatLon) -> Edge {
+    let (a3, b3) = (unit(a), unit(b));
+    let c = cross(a3, b3);
+    let n = norm(c);
+    let n3 = if n > 1e-12 {
+        [c[0] / n, c[1] / n, c[2] / n]
+    } else {
+        [0.0; 3]
+    };
+    let m = [a3[0] + b3[0], a3[1] + b3[1], a3[2] + b3[2]];
+    let mn = norm(m);
+    let c3 = if mn > 1e-9 {
+        [m[0] / mn, m[1] / mn, m[2] / mn]
+    } else {
+        a3
+    };
+    Edge {
+        a,
+        b,
+        a3,
+        b3,
+        n3,
+        c3,
+        half: angle(a3, b3) / 2.0,
+    }
 }
 
 /// Spherical estimate of the distance from `p` to the edge, metres.
@@ -227,6 +278,10 @@ pub struct Area {
     /// The rings the polygons were built from (their vertices, for containment tests).
     pub rings: Vec<Vec<LatLon>>,
     edges: Vec<Edge>,
+    /// The same rings as dense chords (see [`DENSE_STEP_M`]), for the crossing tests.
+    dense: Vec<Edge>,
+    /// The longest half-length among `dense`, radians.
+    dense_half: f64,
     pub buffer_m: f64,
     /// Bounding box of the area including the buffer; `None` when the rings are too wide for a
     /// box to be a safe filter (more than 120 degrees of longitude, or near a pole).
@@ -250,21 +305,7 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
         }
         for (i, a) in ring.iter().enumerate() {
             let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
-            let (a3, b3) = (unit(*a), unit(b));
-            let c = cross(a3, b3);
-            let n = norm(c);
-            let n3 = if n > 1e-12 {
-                [c[0] / n, c[1] / n, c[2] / n]
-            } else {
-                [0.0; 3]
-            };
-            edges.push(Edge {
-                a: *a,
-                b,
-                a3,
-                b3,
-                n3,
-            });
+            edges.push(edge_of(*a, b));
             min_lat = min_lat.min(a.lat());
             max_lat = max_lat.max(a.lat());
             // A geodesic bulges poleward between its ends (OA-ASP-008).
@@ -274,6 +315,12 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
             }
         }
     }
+    let mut dense = Vec::new();
+    for ring in &rings {
+        let pts = dense_ring_samples(&ell, ring)?;
+        dense.extend(closed_edges(&pts));
+    }
+    let dense_half = dense.iter().fold(0.0_f64, |m, e| m.max(e.half));
     let dlat = buffer_m / 110_000.0 + 0.01;
     let worst_lat = (min_lat.abs().max(max_lat.abs()) + dlat).min(89.0);
     let dlon = buffer_m / (111_000.0 * worst_lat.to_radians().cos().max(0.05)) + 0.01;
@@ -292,6 +339,8 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
         polys,
         rings,
         edges,
+        dense,
+        dense_half,
         buffer_m,
         bbox,
     })
@@ -381,6 +430,35 @@ pub fn ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, Geo
     Ok(out)
 }
 
+/// Samples of a ring joined by geodesics, dense enough for exact edge tests (closing edge
+/// included): the points are [`DENSE_STEP_M`] apart.
+pub fn dense_ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, GeoError> {
+    let mut out = Vec::new();
+    for (i, a) in ring.iter().enumerate() {
+        let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
+        out.extend(edge_samples(ell, *a, b, DENSE_STEP_M)?);
+    }
+    Ok(out)
+}
+
+/// Points along the rhumb line from `a` to `b`, from `a` up to but not including `b`, at most
+/// `step_m` apart.
+fn rhumb_samples(
+    ell: &Ellipsoid,
+    a: LatLon,
+    b: LatLon,
+    step_m: f64,
+) -> Result<Vec<LatLon>, GeoError> {
+    let inv = ell.rhumb_inverse(a, b)?;
+    let n = ((inv.distance_m / step_m).ceil() as usize).clamp(1, 10_000);
+    let mut out = Vec::with_capacity(n);
+    out.push(a);
+    for i in 1..n {
+        out.push(ell.rhumb_point_at_fraction(a, b, i as f64 / n as f64)?);
+    }
+    Ok(out)
+}
+
 /// A boundary record as the sampler needs it: the via code, the point (none for a circle), the
 /// arc or circle centre and radius in metres.
 #[derive(Clone, Copy, Debug)]
@@ -392,6 +470,9 @@ pub struct SegIn {
     pub radius_m: f64,
 }
 
+/// Points of an arc of the circle of radius `radius_m` around `centre`, from bearing
+/// `from_deg` through `sweep_deg`, up to but not including the far end. The spacing keeps each
+/// chord within [`ARC_CHORD_M`] of the arc.
 fn arc_samples(
     ell: &Ellipsoid,
     centre: LatLon,
@@ -399,7 +480,9 @@ fn arc_samples(
     from_deg: f64,
     sweep_deg: f64,
 ) -> Result<Vec<LatLon>, GeoError> {
-    let n = ((sweep_deg.abs() / 5.0).ceil() as usize).clamp(1, 72);
+    let r = radius_m.max(2.0 * ARC_CHORD_M);
+    let max_step_deg = (2.0 * (1.0 - ARC_CHORD_M / r).acos()).to_degrees();
+    let n = ((sweep_deg.abs() / max_step_deg).ceil() as usize).clamp(1, MAX_ARC_POINTS);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let brg = from_deg + sweep_deg * i as f64 / n as f64;
@@ -408,9 +491,26 @@ fn arc_samples(
     Ok(out)
 }
 
-/// Samples of an ARINC 424 style boundary: geodesic and rhumb edges are sampled as geodesics
-/// (the difference is far below the sample spacing), arcs and circles around their centres.
-/// Only used to test whether the volume touches the area.
+/// The sweep of an arc segment from its start to the next point: bearings from the centre to
+/// each end, positive clockwise, negative for a counter-clockwise arc.
+fn arc_sweep(
+    ell: &Ellipsoid,
+    via: u8,
+    centre: LatLon,
+    a: LatLon,
+    b: LatLon,
+) -> Result<(f64, f64), GeoError> {
+    use crate::model::via as v;
+    let from = ell.inverse(centre, a)?.azimuth1_deg;
+    let to = ell.inverse(centre, b)?.azimuth1_deg;
+    let cw = (to - from).rem_euclid(360.0);
+    Ok((from, if via == v::ARC_CW { cw } else { cw - 360.0 }))
+}
+
+/// Dense points of an ARINC 424 style boundary: geodesic edges as geodesics and rhumb edges as
+/// rhumb lines, [`DENSE_STEP_M`] apart; arcs and circles at their coded radius around their
+/// centres, with the arc's ends at the stored points. Only used to test whether the volume
+/// touches the area; the model keeps the exact description.
 pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, GeoError> {
     use crate::model::via;
     let mut out = Vec::new();
@@ -424,19 +524,27 @@ pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, G
             }
             via::ARC_CW | via::ARC_CCW => {
                 if let (Some(a), Some(b), Some(c)) = (s.pos, next, s.centre) {
-                    let from = ell.inverse(c, a)?.azimuth1_deg;
-                    let to = ell.inverse(c, b)?.azimuth1_deg;
-                    let cw = (to - from).rem_euclid(360.0);
-                    let sweep = if s.via == via::ARC_CW { cw } else { cw - 360.0 };
-                    let r = ell.inverse(c, a)?.distance_m;
-                    out.extend(arc_samples(ell, c, r, from, sweep)?);
+                    let (from, sweep) = arc_sweep(ell, s.via, c, a, b)?;
+                    let mut arc = arc_samples(ell, c, s.radius_m, from, sweep)?;
+                    // The stored start point, not the point at the coded radius on its bearing.
+                    if let Some(first) = arc.first_mut() {
+                        *first = a;
+                    }
+                    out.extend(arc);
+                } else if let Some(a) = s.pos {
+                    out.push(a);
+                }
+            }
+            via::RHUMB => {
+                if let (Some(a), Some(b)) = (s.pos, next) {
+                    out.extend(rhumb_samples(ell, a, b, DENSE_STEP_M)?);
                 } else if let Some(a) = s.pos {
                     out.push(a);
                 }
             }
             _ => {
                 if let (Some(a), Some(b)) = (s.pos, next) {
-                    out.extend(edge_samples(ell, a, b, SAMPLE_STEP_M)?);
+                    out.extend(edge_samples(ell, a, b, DENSE_STEP_M)?);
                 } else if let Some(a) = s.pos {
                     out.push(a);
                 }
@@ -446,8 +554,113 @@ pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, G
     Ok(out)
 }
 
-/// True when a set of boundary samples touches the area: some sample is in the area, or some
-/// vertex of the area lies inside the sampled outline (a volume that encloses the area).
+/// The largest amount, metres, by which an arc's coded radius differs from the distance between
+/// its centre and either of its two stored end points; 0 when the boundary has no arc with both
+/// ends. The sampler uses the coded radius (what the model stores), so a gap here is a volume
+/// whose stored description disagrees with itself.
+pub fn arc_radius_gap_m(ell: &Ellipsoid, segs: &[SegIn]) -> Result<f64, GeoError> {
+    use crate::model::via;
+    let mut worst = 0.0_f64;
+    for (i, s) in segs.iter().enumerate() {
+        if !matches!(s.via, via::ARC_CW | via::ARC_CCW) {
+            continue;
+        }
+        let next = segs.get((i + 1) % segs.len()).and_then(|n| n.pos);
+        if let (Some(a), Some(b), Some(c)) = (s.pos, next, s.centre) {
+            for end in [a, b] {
+                worst = worst.max((ell.inverse(c, end)?.distance_m - s.radius_m).abs());
+            }
+        }
+    }
+    Ok(worst)
+}
+
+/// The edges of a closed polyline: each point to the next, and the last back to the first.
+/// A single point has one degenerate edge.
+fn closed_edges(pts: &[LatLon]) -> Vec<Edge> {
+    pts.iter()
+        .enumerate()
+        .map(|(i, a)| edge_of(*a, pts.get((i + 1) % pts.len()).copied().unwrap_or(*a)))
+        .collect()
+}
+
+/// True when the short great-circle arcs `p` and `q` share a point. Arcs are far shorter than a
+/// quarter turn here: each lies in one plane, and they cross when each one's ends fall on
+/// opposite sides of the other's plane and the plane-intersection point nearer to both is
+/// between the ends of both. Two arcs on one circle meet when one holds an end of the other.
+fn arcs_cross(p: &Edge, q: &Edge) -> bool {
+    if norm(p.n3) < 0.5 || norm(q.n3) < 0.5 {
+        return false;
+    }
+    let side = |n: V3, v: V3| dot(n, v);
+    let (s1, s2) = (side(q.n3, p.a3), side(q.n3, p.b3));
+    let (t1, t2) = (side(p.n3, q.a3), side(p.n3, q.b3));
+    if (s1 > 0.0 && s2 > 0.0) || (s1 < 0.0 && s2 < 0.0) {
+        return false;
+    }
+    if (t1 > 0.0 && t2 > 0.0) || (t1 < 0.0 && t2 < 0.0) {
+        return false;
+    }
+    let x = cross(p.n3, q.n3);
+    let xn = norm(x);
+    if xn < 1e-9 {
+        // One circle (or nearly): overlap when an end of either arc is within the other.
+        let within = |e: &Edge, v: V3| angle(e.a3, v) + angle(v, e.b3) <= 2.0 * e.half + 1e-10;
+        return within(p, q.a3) || within(p, q.b3) || within(q, p.a3) || within(q, p.b3);
+    }
+    let x = [x[0] / xn, x[1] / xn, x[2] / xn];
+    let sign = if dot(x, p.c3) >= 0.0 { 1.0 } else { -1.0 };
+    let x = [sign * x[0], sign * x[1], sign * x[2]];
+    dot(x, q.c3) > 0.0
+}
+
+/// True when `p` is within the area's buffer of the short edge `e`.
+fn within_buffer_of_edge(area: &Area, e: &Edge, p: LatLon) -> Result<bool, GeoError> {
+    let est = approx_edge_m(e, unit(p));
+    if est < area.buffer_m * (1.0 - GREY) {
+        return Ok(true);
+    }
+    if est > area.buffer_m * (1.0 + GREY) {
+        return Ok(false);
+    }
+    Ok(exact_edge_m(&area.ell, e.a, e.b, p)? <= area.buffer_m)
+}
+
+/// True when the closed polyline `pts` has an edge crossing a (dense) edge of the area, or an
+/// edge within the buffer of a vertex of the area. Together with "a point of the polyline is in
+/// the area" and "a vertex of the area is inside the polyline" these are all the ways the
+/// polyline can touch the buffered area: two edges that do not cross are nearest at an end of
+/// one of them.
+fn polyline_meets_area(area: &Area, pts: &[LatLon]) -> Result<bool, GeoError> {
+    let edges = closed_edges(pts);
+    for e in &edges {
+        let reach = (e.half + area.dense_half + 1e-7).cos();
+        if area
+            .dense
+            .iter()
+            .any(|d| dot(e.c3, d.c3) >= reach && arcs_cross(e, d))
+        {
+            return Ok(true);
+        }
+    }
+    if area.buffer_m > 0.0 {
+        for v in area.rings.iter().flatten() {
+            for e in &edges {
+                if within_buffer_of_edge(area, e, *v)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// True when a set of boundary samples touches the area. The samples are the points of a closed
+/// outline in order, dense enough that each chord stands for the edge it replaces (see
+/// [`segment_samples`] and [`dense_ring_samples`]). The outline touches the area when some
+/// sample is in the area, some edge of the outline crosses an edge of the area or comes within
+/// the buffer of a vertex of the area, or some vertex of the area lies inside the outline (a
+/// volume that encloses the area).
 pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoError> {
     if samples.is_empty() {
         return Ok(false);
@@ -458,8 +671,7 @@ pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoEr
             lo_la = lo_la.min(s.lat());
             hi_la = hi_la.max(s.lat());
         }
-        // Samples are points, not the edges between them; their spacing is far below the
-        // buffer margin, so the sample extent stands for the outline.
+        // The samples are dense, so their extent stands for the outline's.
         let reference = samples.first().map_or(0.0, |s| s.lon());
         let (lo_lo, hi_lo) =
             lon_range(reference, samples.iter().map(|s| s.lon())).unwrap_or((reference, reference));
@@ -478,20 +690,46 @@ pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoEr
     // Fewer than three distinct samples enclose nothing; any other failure to form the outline
     // is a fault in the input and goes to the caller (never read as "not touching").
     let outline = match Polygon::new(&area.ell, samples) {
-        Ok(o) => o,
-        Err(GeoError::BadPolygon("fewer than 3 distinct vertices")) => return Ok(false),
+        Ok(o) => Some(o),
+        Err(GeoError::BadPolygon("fewer than 3 distinct vertices")) => None,
         Err(e) => return Err(e),
     };
-    for ring in &area.rings {
-        if ring.iter().any(|v| outline.contains(*v)) {
-            return Ok(true);
+    if polyline_meets_area(area, samples)? {
+        return Ok(true);
+    }
+    if let Some(outline) = outline {
+        for ring in &area.rings {
+            if ring.iter().any(|v| outline.contains(*v)) {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
 }
 
-/// True when the one-degree cell with southwest corner (`lat`, `lon`) overlaps the area: any
-/// of 81 sample points of the cell is in the area, or a polygon vertex lies in the cell.
+/// The closed outline of the one-degree cell with southwest corner (`lat`, `lon`): meridians
+/// are geodesics (two points), parallels are sampled [`PARALLEL_STEP_M`] apart.
+fn cell_outline(lat: i32, lon: i32) -> Result<Vec<LatLon>, GeoError> {
+    let (la, lo) = (f64::from(lat), f64::from(lon));
+    let mut out = Vec::new();
+    for (row, from, to) in [(la, lo, lo + 1.0), (la + 1.0, lo + 1.0, lo)] {
+        let row = row.min(90.0);
+        let len_m = 111_000.0 * row.to_radians().cos().abs();
+        let n = ((len_m / PARALLEL_STEP_M).ceil() as usize).clamp(1, 400);
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            out.push(LatLon::new(
+                row,
+                (from + (to - from) * t).clamp(-180.0, 180.0),
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// True when the one-degree cell with southwest corner (`lat`, `lon`) overlaps the area: a
+/// polygon vertex lies in the cell, or the cell's outline (meridians and parallels) has a point
+/// in the area, crosses an edge of the area, or comes within the buffer of a vertex of the area.
 pub fn cell_overlaps_area(area: &Area, lat: i32, lon: i32) -> Result<bool, GeoError> {
     let (la, lo) = (f64::from(lat), f64::from(lon));
     if let Some(b) = area.bbox {
@@ -509,18 +747,13 @@ pub fn cell_overlaps_area(area: &Area, lat: i32, lon: i32) -> Result<bool, GeoEr
             return Ok(true);
         }
     }
-    for i in 0..=8 {
-        for j in 0..=8 {
-            let p = LatLon::new(
-                (la + f64::from(i) / 8.0).min(90.0),
-                (lo + f64::from(j) / 8.0).min(180.0),
-            )?;
-            if area_contains(area, p)? {
-                return Ok(true);
-            }
+    let outline = cell_outline(lat, lon)?;
+    for p in &outline {
+        if area_contains(area, *p)? {
+            return Ok(true);
         }
     }
-    Ok(false)
+    polyline_meets_area(area, &outline)
 }
 
 /// The largest geodesic-versus-rhumb separation over a ring's edges (closing edge included).

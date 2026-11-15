@@ -111,6 +111,7 @@ fn sentinels_and_all_value_ranges_survive_a_round_trip() {
         }],
         floor_agl: bit_zeros(1),
         ceiling_agl: bit_zeros(1),
+        incomplete: bit_zeros(1),
         time_code: vec![time_code::UNKNOWN],
         level: vec![level::UNKNOWN],
     };
@@ -250,7 +251,7 @@ fn the_reader_rejects_input_over_its_stated_limits() {
     }
 }
 
-// REQ: OA-ASP-006
+// REQ: OA-ASP-006, OA-ASP-070
 #[test]
 fn damaged_headers_trailing_bytes_and_truncation_are_errors() {
     let good = fixture_bytes();
@@ -259,11 +260,19 @@ fn damaged_headers_trailing_bytes_and_truncation_are_errors() {
     bad[0] ^= 1;
     assert_eq!(decode(&bad), Err(SnapshotError::BadMagic));
     let mut bad = good.clone();
-    bad[11] = 3;
-    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(3)));
-    // The first format (no special-use time code or level) is refused, not misread.
+    bad[11] = 4;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(4)));
+    // The earlier formats (no special-use time code or level; no per-volume completeness) are
+    // refused, not misread, and the message says what to do.
     bad[11] = 1;
     assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(1)));
+    bad[11] = 2;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(2)));
+    let msg = decode(&bad).unwrap_err().to_string();
+    assert!(
+        msg.contains("version 2") && msg.contains("rebuild"),
+        "{msg}"
+    );
     let mut bad = good.clone();
     bad.push(0);
     assert_eq!(decode(&bad), Err(SnapshotError::TrailingBytes { extra: 1 }));
