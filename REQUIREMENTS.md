@@ -266,7 +266,7 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   and a reference that matches neither is unresolved and counted. Two airports' terminal waypoints
   with one identifier and region at different positions are two points (the second scoped to its
   airport) and are not reported as duplicates; a terminal waypoint repeated at one airport with
-  different positions is. Runways, localizers and terminal NDBs are already looked up by airport.
+  different positions is. Runways, localizers and terminal NDBs are looked up by airport the same way.
 - **OA-ASP-072** The build computes the AIRAC cycle (28-day, epoch 2026-01-22 is cycle 2601) of the
   NASR effective date and requires it to equal the CIFP header cycle; otherwise it refuses with
   `BuildError::CycleMismatch` naming both cycles. With `allow_cycle_mismatch` (`oa-adapt build
