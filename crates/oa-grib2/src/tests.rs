@@ -1328,3 +1328,78 @@ fn value_count_is_checked_against_the_grid_before_anything_is_allocated() {
         Err(Grib2Error::GridPoints(_))
     ));
 }
+
+// REQ: OA-GRIB-050
+#[test]
+fn scaling_that_leaves_the_f32_range_is_refused() {
+    // R = 0, E = 400, D = -40, X = 1 scales to about 2.6e160, and 1e40 (E = 0) is past f32 too.
+    for (e, d) in [(400i64, -40i64), (0, -40)] {
+        let p = encode_simple(&[1, 0], 0.0, e, d);
+        let rp = crate::pack::parse_repr(&p.sect5).unwrap();
+        let payload = &p.sect7[5..];
+        let r = crate::pack::unpack(&rp, payload);
+        assert_eq!(r, Err(Grib2Error::NonFinite { index: 0 }), "E {e} D {d}");
+        assert!(r.unwrap_err().to_string().contains("finite"));
+    }
+    // Complex packing goes through the same scaling.
+    let o = ComplexOpts {
+        group_lens: vec![2],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 2,
+    };
+    let p = encode_complex(&[Some(1), Some(1)], 0.0, 400, -40, &o);
+    let rp = crate::pack::parse_repr(&p.sect5).unwrap();
+    assert!(crate::pack::unpack(&rp, &p.sect7[5..]).is_err());
+    // A whole message with such a field is refused by the decoder, not returned.
+    let p = encode_simple(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 0.0, 400, -40);
+    let m = simple_message(small_grid(), temp_product(500), &p, sect6(None, false));
+    assert!(decode_message(&m).is_err());
+    // Large but representable values still decode.
+    let p = encode_simple(&[1, 0], 0.0, 0, -30);
+    let rp = crate::pack::parse_repr(&p.sect5).unwrap();
+    let v = crate::pack::unpack(&rp, &p.sect7[5..]).unwrap();
+    assert_eq!(v[0], 1e30f32);
+}
+
+// REQ: OA-GRIB-051
+#[test]
+fn zero_bit_group_tables_cannot_amplify_a_tiny_section() {
+    // 100,000 groups of one point each, every table zero bits wide, no payload at all: the
+    // descriptor vectors would be sized from a few hundred bytes of metadata.
+    let n = 100_000usize;
+    let o = ComplexOpts {
+        group_lens: vec![1; n],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 2,
+    };
+    let x: Vec<Option<i64>> = vec![Some(0); n];
+    let p = encode_complex(&x, 1.0, 0, 0, &o);
+    assert!(p.sect7.len() <= 5, "no data octets");
+    let rp = crate::pack::parse_repr(&p.sect5).unwrap();
+    let r = crate::pack::unpack(&rp, &p.sect7[5..]);
+    assert!(
+        matches!(r, Err(Grib2Error::ScratchBudget { .. })),
+        "{:?}",
+        r.map(|v| v.len())
+    );
+    // The budget with modelled limits: the points always fit; groups beyond FREE_GROUPS need one
+    // bit of data section each, and the check runs on the numbers alone (nothing allocated).
+    use crate::pack::{check_scratch, scratch_budget, scratch_bytes, FREE_GROUPS};
+    let n = 10u64;
+    assert!(check_scratch(n, 1, 0).is_ok());
+    assert!(check_scratch(n, FREE_GROUPS, 0).is_ok());
+    assert!(check_scratch(n, FREE_GROUPS + 1, 0).is_err());
+    assert!(check_scratch(n, FREE_GROUPS + 800, 100).is_ok());
+    assert!(check_scratch(n, FREE_GROUPS + 801, 100).is_err());
+    // The largest field the crate admits, one group per point, with no data: refused without
+    // sizing anything (the numbers are the audit's 16 Mi-point case).
+    let max = crate::MAX_GRID_POINTS;
+    let Err(Grib2Error::ScratchBudget { needed, budget }) = check_scratch(max, max, 0) else {
+        panic!("not refused");
+    };
+    assert_eq!(needed, scratch_bytes(max, max));
+    assert_eq!(budget, scratch_budget(max, 0));
+    assert!(needed > 2 * budget);
+}

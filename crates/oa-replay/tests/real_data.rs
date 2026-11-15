@@ -124,6 +124,7 @@ fn the_real_recordings_replay_to_the_same_state_every_time() {
         ErrKind::FrameOversize,
         ErrKind::FrameCrc,
         ErrKind::FrameTruncated,
+        ErrKind::FrameReserved,
         ErrKind::GzipDamaged,
         ErrKind::GzipTruncated,
         ErrKind::TimeRegression,

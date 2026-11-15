@@ -63,6 +63,11 @@ pub fn bracket(times: &[i64], t: f64) -> Result<(usize, usize, f64), Refusal> {
     let (Some(&first), Some(&last)) = (times.first(), times.last()) else {
         return Err(Refusal::NoHours);
     };
+    // Strictly increasing: a duplicate would make the weight 0 / 0, and an unsorted list has no
+    // bracket.
+    if times.windows(2).any(|w| matches!(w, [a, b] if a >= b)) {
+        return Err(Refusal::BadInput("valid times are not strictly increasing"));
+    }
     if t < first as f64 || t > last as f64 {
         return Err(Refusal::OutsideTime {
             time_s: t,
@@ -86,12 +91,17 @@ pub fn bracket(times: &[i64], t: f64) -> Result<(usize, usize, f64), Refusal> {
     Ok((k, k + 1, ((t - a) / (b - a)).clamp(0.0, 1.0)))
 }
 
-fn at(a: &[f32], k: usize, npts: usize, off: usize) -> Option<f64> {
-    let v = *a.get(k * npts + off)?;
+/// A corner value: `Ok(None)` where the file has none (NaN), an error for an infinite one.
+fn at(a: &[f32], k: usize, npts: usize, off: usize) -> Result<Option<f64>, Refusal> {
+    let Some(&v) = a.get(k * npts + off) else {
+        return Ok(None);
+    };
     if v.is_nan() {
-        None
+        Ok(None)
+    } else if v.is_infinite() {
+        Err(Refusal::NonFinite)
     } else {
-        Some(f64::from(v))
+        Ok(Some(f64::from(v)))
     }
 }
 
@@ -134,7 +144,7 @@ fn locate(h: &Hour, lat: f64, lon: f64) -> Result<Cell, Refusal> {
 }
 
 fn bilinear(a: &[f32], k: usize, npts: usize, c: &Cell) -> Result<f64, Refusal> {
-    let g = |o: usize| at(a, k, npts, o).ok_or(Refusal::MissingValue);
+    let g = |o: usize| at(a, k, npts, o)?.ok_or(Refusal::MissingValue);
     let top = g(c.o00)? * (1.0 - c.fx) + g(c.o10)? * c.fx;
     let bot = g(c.o01)? * (1.0 - c.fx) + g(c.o11)? * c.fx;
     Ok(top * (1.0 - c.fy) + bot * c.fy)
@@ -198,12 +208,21 @@ fn sample_inner(h: &Hour, lat: f64, lon: f64, p_hpa: f64, rotate: bool) -> Resul
     } else {
         (gu, gv)
     };
-    Ok(Point {
+    finite_point(Point {
         u,
         v,
         t: two(&h.t)?,
         z: two(&h.z)?,
     })
+}
+
+/// The point if every number in it is finite; no answer leaves this module otherwise.
+fn finite_point(p: Point) -> Result<Point, Refusal> {
+    if [p.u, p.v, p.t, p.z].iter().all(|x| x.is_finite()) {
+        Ok(p)
+    } else {
+        Err(Refusal::NonFinite)
+    }
 }
 
 /// Earth-relative wind, temperature and height at a position and a pressure (hPa) in one hour.
@@ -232,7 +251,7 @@ pub fn sample_blend(
     }
     let pb = sample_hour_pressure(b, lat, lon, p_hpa)?;
     let mix = |x: f64, y: f64| x * (1.0 - w) + y * w;
-    Ok(Point {
+    finite_point(Point {
         u: mix(pa.u, pb.u),
         v: mix(pa.v, pb.v),
         t: mix(pa.t, pb.t),
@@ -251,6 +270,10 @@ pub fn sample_hours(hours: &[&Hour], q: &Query) -> Result<Sample, Refusal> {
         return Err(Refusal::NoHours);
     };
     let pt = sample_blend(a, b, w, q.lat, q.lon, p)?;
+    // sample_blend checks the point; the weight and pressure are checked here with the rest.
+    if !(w.is_finite() && p.is_finite()) {
+        return Err(Refusal::NonFinite);
+    }
     Ok(Sample {
         u_ms: pt.u,
         v_ms: pt.v,

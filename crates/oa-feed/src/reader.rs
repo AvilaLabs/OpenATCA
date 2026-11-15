@@ -119,6 +119,10 @@ impl<'b> FrameReader<'b> {
                 3 => Kind::Status,
                 k => return Some(Err(self.fail(ErrorKind::UnknownKind { kind: k }))),
             };
+            let reserved = u16::from_le_bytes([*data.get(6)?, *data.get(7)?]);
+            if reserved != 0 {
+                return Some(Err(self.fail(ErrorKind::Reserved { value: reserved })));
+            }
             let len = le_u32(data, 32)?;
             if len as usize > MAX_PAYLOAD {
                 return Some(Err(self.fail(ErrorKind::Oversize { len })));

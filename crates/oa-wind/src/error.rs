@@ -19,6 +19,8 @@ pub enum LoadError {
     MissingField { field: &'static str, level_pa: u32 },
     /// The same parameter appears twice on one level.
     DuplicateField { field: &'static str, level_pa: u32 },
+    /// A field holds an infinite value (NaN marks a missing value and is allowed).
+    NonFinite { field: &'static str, level_pa: u32 },
     /// A level is not a positive whole number of Pa.
     BadLevel,
     /// Two fields do not share one grid, point count or valid time.
@@ -49,6 +51,9 @@ impl fmt::Display for LoadError {
             }
             LoadError::DuplicateField { field, level_pa } => {
                 write!(f, "{field} appears twice at {level_pa} Pa")
+            }
+            LoadError::NonFinite { field, level_pa } => {
+                write!(f, "{field} at {level_pa} Pa holds an infinite value")
             }
             LoadError::BadLevel => write!(f, "isobaric level is not a positive whole Pa"),
             LoadError::Inconsistent(w) => write!(f, "fields disagree: {w}"),
@@ -94,6 +99,8 @@ pub enum Refusal {
     NoHours,
     /// A value needed at a grid corner is missing in the file.
     MissingValue,
+    /// A grid corner holds an infinite value, or the interpolated answer would not be finite.
+    NonFinite,
 }
 
 impl fmt::Display for Refusal {
@@ -125,6 +132,7 @@ impl fmt::Display for Refusal {
             } => write!(f, "time {time_s:.0} outside {first_s}..{last_s}"),
             Refusal::NoHours => write!(f, "no analysis hours"),
             Refusal::MissingValue => write!(f, "missing value at a grid corner"),
+            Refusal::NonFinite => write!(f, "a value in the answer is not finite"),
         }
     }
 }

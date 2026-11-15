@@ -163,13 +163,63 @@ pub fn parse_repr(sect: &[u8]) -> Result<Repr, Grib2Error> {
 /// Integer used internally for a missing point; never a legal packed value.
 const MISS: i64 = i64::MIN;
 
-fn scale_value(rp: &Repr, x: i64) -> f32 {
+/// The value of a packed integer, or a refusal when it leaves the `f32` range (R, E and D are
+/// each in range, but their combination need not be). A missing point stays NaN: that NaN is
+/// the marker, never a result of the arithmetic.
+fn scale_value(rp: &Repr, x: i64, index: usize) -> Result<f32, Grib2Error> {
     if x == MISS {
-        return MISSING;
+        return Ok(MISSING);
     }
     let v =
         (f64::from(rp.r) + x as f64 * 2f64.powi(i32::from(rp.e))) * 10f64.powi(-i32::from(rp.d));
-    v as f32
+    let v = v as f32;
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(Grib2Error::NonFinite {
+            index: index as u32,
+        })
+    }
+}
+
+/// Group-table bytes per group while a complex field is unpacked: reference (u32), width (u32)
+/// and length (usize).
+const GROUP_BYTES: u64 = 4 + 4 + std::mem::size_of::<usize>() as u64;
+
+/// Per-point bytes of a complex field's working set: the packed integers (i64) and the decoded
+/// value (f32). Fixed by the point count, which the grid already bounds.
+const POINT_BYTES: u64 = 8 + 4;
+
+/// Groups a field may declare beyond what its data section pays for: a constant or nearly
+/// constant field has a handful of groups and tables of zero bits.
+pub const FREE_GROUPS: u64 = 4096;
+
+/// The memory a complex-packed field with `n` points and `ng` groups needs while it is
+/// unpacked: the group tables, the integers and the decoded values.
+pub fn scratch_bytes(n: u64, ng: u64) -> u64 {
+    ng.saturating_mul(GROUP_BYTES)
+        .saturating_add(n.saturating_mul(POINT_BYTES))
+}
+
+/// What the same field may use: the integers and decoded values for its points, and group tables
+/// for [`FREE_GROUPS`] groups plus one group per bit of the data section (a real group costs at
+/// least a bit of table, so a field whose tables are real stays within it). One length-one
+/// group per point with zero-bit tables and no data has no such backing and is refused.
+pub fn scratch_budget(n: u64, payload_len: usize) -> u64 {
+    scratch_bytes(
+        n,
+        FREE_GROUPS.saturating_add((payload_len as u64).saturating_mul(8)),
+    )
+}
+
+/// Refuses a complex field whose scratch exceeds its budget, before anything is allocated.
+pub fn check_scratch(n: u64, ng: u64, payload_len: usize) -> Result<(), Grib2Error> {
+    let needed = scratch_bytes(n, ng);
+    let budget = scratch_budget(n, payload_len);
+    if needed > budget {
+        return Err(Grib2Error::ScratchBudget { needed, budget });
+    }
+    Ok(())
 }
 
 /// No field has more values than a grid may have points; checked before any vector is sized from
@@ -188,10 +238,10 @@ pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
     match rp.complex {
         None => {
             let ints = unpack_ints(rp, payload)?;
-            Ok(ints
-                .iter()
-                .map(|&x| scale_value(rp, i64::from(x)))
-                .collect())
+            ints.iter()
+                .enumerate()
+                .map(|(k, &x)| scale_value(rp, i64::from(x), k))
+                .collect()
         }
         Some(c) => unpack_complex(rp, &c, payload, n),
     }
@@ -279,6 +329,9 @@ fn unpack_complex(
             br.read(8).ok_or_else(|| short.clone())?;
         }
     }
+    // The scratch must be justified by the grid and the data section before it is allocated:
+    // the three tables below can be zero bits wide, which costs the input nothing.
+    check_scratch(n as u64, u64::from(c.ngroups), payload.len())?;
     // The three group tables must fit before anything is allocated for them.
     let table_bits = (ng as u64)
         .saturating_mul(u64::from(rp.nbits) + u64::from(c.width_bits) + u64::from(c.length_bits));
@@ -354,7 +407,10 @@ fn unpack_complex(
     if c.diff_order > 0 {
         undo_differencing(&mut ints, c.diff_order, &first, dmin)?;
     }
-    Ok(ints.iter().map(|&x| scale_value(rp, x)).collect())
+    ints.iter()
+        .enumerate()
+        .map(|(k, &x)| scale_value(rp, x, k))
+        .collect()
 }
 
 fn undo_differencing(

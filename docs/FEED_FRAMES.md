@@ -47,6 +47,10 @@ produced by the bridge's Java encoder.
 
 * A bad magic, an unknown kind, a length above 4 MiB or a CRC mismatch is an error reported with
   the byte offset of the frame start. The frame is never passed on (IF-R5).
+* Nonzero reserved bytes (offsets 6 and 7) are an error too (`Reserved`), reported with the frame's
+  offset and counted like the others: the writers (the bridge and `encode_frame`) always write
+  zero, so a nonzero value is a frame variant this reader does not know, not one to pass on.
+  Unknown flag bits are different: they are carried (see the table).
 * After an error the reader discards one byte and scans for the next `OAF1`, counting every byte
   it discards; the count is part of health. A stream that ends inside a frame is a separate
   `Truncated` error.
@@ -63,6 +67,16 @@ produced by the bridge's Java encoder.
 * Acknowledgement is CLIENT_ACKNOWLEDGE and happens only after the frame has been written and
   flushed. If the reader is slow, stdout blocks, the bridge stops receiving, and the broker holds
   the backlog; the bridge buffers nothing.
+* The acknowledgement means "the frame reached `oa-feed` through the pipe", nothing more. It
+  follows the bridge's own stdout flush, which precedes `oa-feed`'s read and the recorder's
+  write (and, for `.oaf.gz`, the compressor's flush within about a second). It is not a
+  durable-recording acknowledgement: if the recording fails (a full disk), the bridge keeps
+  acknowledging and the broker discards those messages. `oa-feed` therefore keeps a failed
+  recording as a persistent state: it logs the first error, counts every later frame as lost,
+  prints `FAILED lost_frames=<n> first_error="..."` on the final `recorded` line, and exits
+  non-zero. It keeps consuming the feed so that health and the other outputs stay live, which
+  also means the lost frames are gone for good: a run that exits non-zero for this reason has an
+  incomplete recording.
 * The Solace client's own connect and reconnect retries are off. The bridge retries itself with
   exponential backoff from 2 s doubling to a 5 min cap, with random spread (delay drawn uniformly
   between 250 ms and the current ceiling), and the backoff restarts after a connection that

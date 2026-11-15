@@ -142,6 +142,13 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
             if valid_time(&f)? != valid_s {
                 return Err(LoadError::Inconsistent("valid time"));
             }
+            // NaN marks a missing value and is kept; an infinite cell is a corrupt field.
+            if f.values.iter().any(|v| v.is_infinite()) {
+                return Err(LoadError::NonFinite {
+                    field: NAMES.get(s).copied().unwrap_or(""),
+                    level_pa,
+                });
+            }
             let dst = match s {
                 0 => &mut h.u,
                 1 => &mut h.v,

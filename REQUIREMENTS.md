@@ -370,6 +370,16 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   whose stamp is over an hour from local time are counted and reported.
 - **OA-FEED-034** The sequence-gap total saturates instead of overflowing when sequence numbers
   jump by more than the counter can hold.
+- **OA-FEED-050** A frame whose reserved header bytes (offsets 6 and 7) are not zero is refused
+  with its own error kind (`Reserved`) even when its CRC matches, counted by `oa-feed` health and by
+  `oa-replay`, and the reader resynchronises after it; `docs/FEED_FRAMES.md` states the rule, and
+  every frame the encoder or the bridge writes has zero there (the real recordings replay without
+  one).
+- **OA-FEED-051** A recording that fails while writing (a write, an idle flush or the final
+  finish) is a persistent failed state of the recorder: the failure is kept with its first error,
+  every later frame is counted as lost rather than silently dropped, the final summary prints the
+  failure and the lost count, and `oa-feed` exits non-zero when a requested recording failed
+  (feed consumption may continue, and the log says so). Tested with a writer that fails on demand.
 
 ### Compression (oa-deflate)
 
@@ -1441,6 +1451,14 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   5.40, and the unpackers refuse a count beyond `MAX_GRID_POINTS` when called directly; a message
   claiming 4,294,967,295 values with zero bits each, or one group of that length, is refused with
   a typed error and nothing is sized from the claim.
+- **OA-GRIB-050** A decoded value that is not finite after scaling (R, E and D can push a packed
+  integer past the f32 range) is refused with a typed error for every packing; only a point the
+  field marks missing comes out as NaN. `oa-wind` refuses an infinite cell when building an hour.
+- **OA-GRIB-051** A complex-packed field's scratch memory (group tables, packed integers and the
+  decoded values) is checked against a budget derived from the point count and the data
+  section's size before anything is allocated: one length-one group per point with zero-bit
+  tables and no data is refused, the limits are small enough to test with modelled values, and the
+  real RAP, HRRR and GEFS fields pass.
 
 ## JPEG 2000 decoder (oa-j2k)
 
@@ -1493,6 +1511,10 @@ decoder is OA-GRIB-021.
   it exceeds `work_budget`: at most `3 * (bits + 8)` visits per sample and at most `WORK_FLOOR`
   plus `WORK_PER_BYTE` per byte of tile body, which every real RAP, HRRR and GEFS field passes with
   margin.
+- **OA-J2K-050** Magnitude bit-planes are bounded by the SIZ precision at header parse (each
+  quantization exponent is at most the sample bits plus the sub-band gain: 0 for LL, 1 for HL and
+  LH, 2 for HH), and the inverse lifting uses checked arithmetic, so no coefficient can overflow
+  32 bits: an inconsistent stream or an overflowing line is refused with a typed error.
 
 ## M5 — Minimum vectoring and IFR altitudes (oa-mva)
 
@@ -1894,6 +1916,11 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
   when there are no RAP files, does not scan an archive whose day does not overlap the RAP hours, and on
   the real data (skipped when absent) exits 0 with either the comparison or the no-overlap statement.
 
+- **OA-WIND-050** No answer carries a non-finite number: `build_hour` refuses an infinite cell (a
+  NaN is a missing value and stays), and the sampler refuses an infinite corner value, and any
+  point or sample that would not be finite, instead of returning it.
+- **OA-WIND-051** `bracket` refuses valid times that are not strictly increasing (a duplicate would
+  give a NaN weight), as well as an empty list and a time outside the span.
 ## M3 — ASTERIX codecs (oa-asterix)
 
 Encoder and decoder for EUROCONTROL ASTERIX category 021 (ADS-B target reports, Ed 2.7), 048 (monoradar

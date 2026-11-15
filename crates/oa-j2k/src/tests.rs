@@ -188,26 +188,26 @@ fn header_bits_stuff_after_ff_and_end_on_a_byte() {
 fn inverse_5_3_on_known_vectors() {
     // A linear ramp has zero high-pass; the low-pass samples are the even-indexed ones.
     let mut s = [1, 0, 3, 0, 5];
-    lift_line(&mut s, 0);
+    lift_line(&mut s, 0).unwrap();
     assert_eq!(s, [1, 2, 3, 4, 5]);
     // [5, 1, 5, 1] analyses to [3, -4, 3, -4]: the update step floors -6/4 to -2.
     let mut s = [3, -4, 3, -4];
-    lift_line(&mut s, 0);
+    lift_line(&mut s, 0).unwrap();
     assert_eq!(s, [5, 1, 5, 1]);
     // Odd origin: the first sample is high-pass.
     let mut s = [0, 3, 0, 5];
-    lift_line(&mut s, 1);
+    lift_line(&mut s, 1).unwrap();
     let mut t = [0, 3, 0, 5];
     analyze_line(&mut t, 1);
     let mut back = t;
-    lift_line(&mut back, 1);
+    lift_line(&mut back, 1).unwrap();
     assert_eq!(back, [0, 3, 0, 5]);
     // A single sample: even coordinate unchanged, odd coordinate halved.
     let mut s = [7];
-    lift_line(&mut s, 0);
+    lift_line(&mut s, 0).unwrap();
     assert_eq!(s, [7]);
     let mut s = [14];
-    lift_line(&mut s, 1);
+    lift_line(&mut s, 1).unwrap();
     assert_eq!(s, [7]);
 }
 
@@ -220,7 +220,7 @@ fn inverse_5_3_undoes_the_forward_transform_for_every_length_and_parity() {
             let x: Vec<i32> = (0..n).map(|_| rng.below(4096) as i32 - 2048).collect();
             let mut y = x.clone();
             analyze_line(&mut y, p);
-            lift_line(&mut y, p);
+            lift_line(&mut y, p).unwrap();
             assert_eq!(y, x, "n {n} parity {p}");
         }
     }
@@ -257,7 +257,7 @@ fn two_dimensional_inverse_matches_the_forward_transform_with_odd_origins() {
                 (res[r].x1 - res[r].x0, res[r].y1 - res[r].y0)
             );
         }
-        inverse(&mut a, w, &res);
+        inverse(&mut a, w, &res).unwrap();
         assert_eq!(a, x, "{w}x{h} at ({x0},{y0}) levels {levels}");
     }
 }
@@ -775,11 +775,16 @@ fn tier_1_work_is_counted_and_bounded_before_any_block_is_decoded() {
     assert!(passes > 30);
     assert_eq!(tile::work(&t), passes * 64 * 64);
     assert_eq!(decode(&cs).unwrap().samples, samples);
-    // The same stream declaring 1 bit per sample (exponents unchanged) asks for far more
-    // passes than a 1-bit image can have: refused, with the numbers in the error.
+    // The same stream declaring 1 bit per sample (exponents unchanged) is inconsistent: its
+    // quantization exponent is beyond what one bit allows.
     let mut lie = cs.clone();
     let siz = find(&lie, 0xFF51);
     lie[siz + 4 + 36] = 0;
+    assert!(matches!(decode(&lie), Err(J2kError::BadMarker(_))));
+    // With the exponent made consistent too (one bit, no decomposition) it asks for far more
+    // passes than a 1-bit image can have: refused, with the numbers in the error.
+    let q = find(&lie, 0xFF5C);
+    lie[q + 5] = 1 << 3;
     let Err(J2kError::WorkBudget { work, budget }) = decode(&lie) else {
         panic!("not refused");
     };
@@ -796,4 +801,60 @@ fn tier_1_work_is_counted_and_bounded_before_any_block_is_decoded() {
     assert!(work_budget(16 << 20, 16, 12_000) < 110_000_000);
     // A real NOAA field (451 x 337, 15 bits, about 50 KB) has margin of at least 4 times.
     assert!(work_budget(451 * 337, 15, 36_000) > 4 * 2_200_000);
+}
+
+// REQ: OA-J2K-050
+#[test]
+fn lifting_is_widened_and_refuses_a_result_that_overflows_32_bits() {
+    // Width two, even origin: the high sample reflects to both neighbours, so the update step
+    // sums 2 * 0x3fffffff + 2 = 2^31. That overflowed an i32 sum; widened it lifts exactly.
+    let mut s = [0, 0x3fff_ffff];
+    lift_line(&mut s, 0).unwrap();
+    assert_eq!(s, [-(1 << 29), 0x3fff_ffff - (1 << 29)]);
+    // A coefficient pair whose lifted sample itself leaves i32 is refused, not wrapped.
+    let mut s = [i32::MAX, i32::MAX];
+    assert!(lift_line(&mut s, 0).is_err());
+    let mut s = [i32::MIN, i32::MIN];
+    assert!(lift_line(&mut s, 1).is_err());
+    // And through the whole two-dimensional inverse.
+    let res = [
+        Rect {
+            x0: 0,
+            y0: 0,
+            x1: 1,
+            y1: 1,
+        },
+        Rect {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 1,
+        },
+    ];
+    let mut a = [i32::MAX, i32::MAX];
+    assert!(inverse(&mut a, 2, &res).is_err());
+    // The same line in range lifts exactly as before.
+    let mut s = [3, -4, 3, -4];
+    lift_line(&mut s, 0).unwrap();
+    assert_eq!(s, [5, 1, 5, 1]);
+}
+
+// REQ: OA-J2K-050
+#[test]
+fn a_quantization_exponent_beyond_the_sample_precision_is_refused() {
+    // A 16-bit stream whose exponents allow 30 magnitude planes (guard 0, exponent 31).
+    let cs = encode(&[1000; 16], &Opts::new(4, 4, 16, 1));
+    let q = find(&cs, 0xFF5C);
+    let mut bad = cs.clone();
+    bad[q + 4] = 0; // guard 0
+    for b in &mut bad[q + 5..q + 5 + 4] {
+        *b = 31 << 3;
+    }
+    assert!(matches!(decode(&bad), Err(J2kError::BadMarker(_))));
+    // One exponent just past precision plus its sub-band gain is refused; the exact value is the
+    // encoder's own and decodes.
+    let mut one = cs.clone();
+    one[q + 5] = (16 + 1) << 3; // LL gain is 0: precision + 1 is too much
+    assert!(matches!(decode(&one), Err(J2kError::BadMarker(_))));
+    assert!(decode(&cs).is_ok());
 }

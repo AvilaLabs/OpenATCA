@@ -194,7 +194,21 @@ fn parse_sp(r: &mut Reader, precincts: bool) -> Result<Style, J2kError> {
     })
 }
 
-fn parse_quant(seg: &[u8], levels: u8) -> Result<Quant, J2kError> {
+/// Sub-band gain (log2) of the sub-band at index `idx` of the exponent list: LL 0, HL and LH 1,
+/// HH 2 (T.800 Table E.1).
+fn band_gain(idx: usize) -> u8 {
+    match idx {
+        0 => 0,
+        i if (i - 1) % 3 == 2 => 2,
+        _ => 1,
+    }
+}
+
+/// Reads QCD / QCC for reversible coding. For a reversible stream the exponent of a sub-band is
+/// the sample precision plus the sub-band gain, so an exponent above that is not a stream this
+/// precision can have produced; refused here, which keeps every coefficient's magnitude planes
+/// (guard bits at most 7 above it) within what the 32-bit wavelet arithmetic holds.
+fn parse_quant(seg: &[u8], levels: u8, bits: u8) -> Result<Quant, J2kError> {
     let s = *seg.first().ok_or(J2kError::Truncated("quantization"))?;
     if s & 0x1F != 0 {
         return Err(J2kError::UnsupportedQuantization(s & 0x1F));
@@ -205,6 +219,13 @@ fn parse_quant(seg: &[u8], levels: u8) -> Result<Quant, J2kError> {
         return Err(J2kError::BadMarker(
             "quantization exponents do not match the decomposition levels",
         ));
+    }
+    for (idx, b) in body.iter().enumerate() {
+        if b >> 3 > bits + band_gain(idx) {
+            return Err(J2kError::BadMarker(
+                "quantization exponent exceeds the sample precision plus the sub-band gain",
+            ));
+        }
     }
     Ok(Quant {
         guard: s >> 5,
@@ -316,7 +337,7 @@ pub fn parse(data: &[u8]) -> Result<Parsed<'_>, J2kError> {
     // COC and QCC override COD and QCD for their component, whatever their order.
     let style = coc.unwrap_or(cod_style);
     let qseg = qcc.or(qcd).ok_or(J2kError::MissingMarker("QCD"))?;
-    let quant = parse_quant(&qseg, style.levels)?;
+    let quant = parse_quant(&qseg, style.levels, siz.bits)?;
     // Tile-part: SOT, its header, SOD, data.
     let sot_at = r.pos;
     if r.u16("SOT")? != SOT {

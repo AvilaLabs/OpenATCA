@@ -46,6 +46,12 @@ pub enum Grib2Error {
     BadPacking(&'static str),
     /// The JPEG 2000 codestream of a template 5.40 field was refused.
     Jpeg2000(oa_j2k::J2kError),
+    /// A decoded value is not finite: the packed integer scaled by `R`, `E` and `D` leaves the
+    /// `f32` range. The payload is the index of the first such point.
+    NonFinite { index: u32 },
+    /// A complex-packed field would need more scratch memory than its size section justifies
+    /// (see [`crate::pack::check_scratch`]); `needed` and `budget` are in bytes.
+    ScratchBudget { needed: u64, budget: u64 },
     /// A bitmap is impossible or disagrees with the point count.
     BadBitmap(&'static str),
     /// The two fields given to a wind query do not share one grid.
@@ -90,6 +96,15 @@ impl fmt::Display for Grib2Error {
             }
             Grib2Error::BadPacking(why) => write!(f, "bad data packing: {why}"),
             Grib2Error::Jpeg2000(e) => write!(f, "JPEG 2000 data: {e}"),
+            Grib2Error::NonFinite { index } => {
+                write!(f, "decoded value at point {index} is not finite")
+            }
+            Grib2Error::ScratchBudget { needed, budget } => {
+                write!(
+                    f,
+                    "field needs {needed} bytes of scratch, budget is {budget}"
+                )
+            }
             Grib2Error::BadBitmap(why) => write!(f, "bad bitmap: {why}"),
             Grib2Error::GridMismatch => write!(f, "fields are on different grids"),
             Grib2Error::BadIdx { line, why } => write!(f, "idx line {line}: {why}"),
