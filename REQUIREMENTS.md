@@ -2369,7 +2369,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   a file that changes between listing and reading, or while it is read, gives the digest of the bytes scored,
   never of another copy. `.msg` files are hashed as they are read, `.oaf` and `.oaf.gz` recordings as the replay
   merge reads them and the ADS-B clip as its frame loop reads it; a file whose read does not reach its end is an
-  error, not a digest. The report notes this for the feed inputs and for the clip.
+  error, not a digest. The report notes this for the feed inputs and for the clip. A `.msg` file past the size
+  limit is refused (OA-BENCH-092).
 - **OA-BENCH-059** An estimate whose plan identifier names one recorded flight joins it unless both carry an
   aircraft identification and the two differ (the identifier was reused by a flight outside the recording): then
   it is excluded with a named reason. There is no time check for a lone flight, so an estimate issued before the
@@ -2377,7 +2378,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-060** An estimate whose plan identifier was used by more flights than the plan index keeps is
   excluded with a named reason, never resolved against the flights kept; the overflow count is in the report.
 - **OA-BENCH-061** Among several flights of one plan identifier, an estimate goes to the one flight whose callsign
-  equals its aircraft identification when exactly one does, even if its issue time is outside that flight's
+  equals its aircraft identification (OA-BENCH-090) when exactly one does, even if its issue time is outside that flight's
   active interval (an estimate issued before the flight's first ERAM sample is not handed to the neighbouring
   flight or dropped); otherwise the active interval of OA-BENCH-052, with its 60-minute rule for a flight with
   no ERAM sample, decides.
@@ -2396,6 +2397,19 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-072** The report header carries metrics version 2 and a scoring-code digest: SHA-256, in hex, over
   the name, length and text of the metric modules (included at build, hashed at run time), plus the build's
   `OPENATCA_SOURCE_REV` when set. A change to those modules changes the digest.
+- **OA-BENCH-090** Every join on an identifier compares one normal form: leading white space skipped, cut at the
+  first zero or white space, ASCII upper case, zero padded. That covers callsign against aircraft identification
+  (one flight or several), plan identifier in the plan index and in every lookup into it (TBFM, TFMS, the
+  matching counts), and fix and airport names against the airspace model. Two accepted spellings of one
+  identifier (case, padding) never score differently.
+- **OA-BENCH-091** The extraction counts list what the decoders refused: SFDPS messages rejected by reason and
+  field errors in kept rows by field, TBFM flights and TFMS messages refused for a field by field index and by
+  reason, each with its total. A row or field that did not reach scoring is in one of the counts.
+- **OA-BENCH-092** An input file is bounded before it is read. A `.msg` file is refused (the load fails, naming
+  the file) when its length is past the replay parser's document limit plus 64 KiB, before it is opened, and
+  the read is capped at the same limit so a file that grows, or reports a short length, is cut there; the
+  airspace snapshot is read the same way against the snapshot size limit. No read allocates more than the
+  limit.
 
 ## Winds aloft (oa-wind)
 

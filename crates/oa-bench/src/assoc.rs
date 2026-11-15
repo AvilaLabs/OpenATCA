@@ -143,16 +143,10 @@ pub struct TruthIndex {
     pub by_callsign: BTreeMap<[u8; 8], Vec<u32>>,
 }
 
-/// A callsign normalised for comparison: cut at the first zero or space, upper case, zero padded.
+/// A callsign normalised for comparison ([`crate::legacy::norm_id`]): leading white space
+/// skipped, cut at the first zero or white space, upper case, zero padded.
 pub fn norm_callsign(c: &[u8]) -> [u8; 8] {
-    let mut out = [0u8; 8];
-    for (o, &b) in out
-        .iter_mut()
-        .zip(c.iter().take_while(|&&b| b != 0 && b != b' '))
-    {
-        *o = b.to_ascii_uppercase();
-    }
-    out
+    crate::legacy::norm_id(c)
 }
 
 /// Indexes the truth legs.

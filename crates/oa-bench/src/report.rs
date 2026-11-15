@@ -325,12 +325,12 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         .plan_id
         .iter()
         .filter(|p| {
-            let k: [u8; 12] = crate::legacy::pad(crate::legacy::name(*p).as_bytes());
+            let k: [u8; 12] = crate::legacy::norm_id(*p);
             crate::legacy::plan_known(&plan, &k)
         })
         .count() as u64;
     let n = |v: usize| v as u64;
-    vec![
+    let mut lines = vec![
         ("SFDPS documents".into(), c.docs[0]),
         ("TBFM documents".into(), c.docs[1]),
         ("TFMS documents".into(), c.docs[2]),
@@ -351,6 +351,18 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
         (
             "SFDPS messages rejected by the decoder".into(),
             c.sfdps_rejected,
+        ),
+        (
+            "SFDPS field errors in kept rows (the field is treated as absent)".into(),
+            c.sfdps_field_errors,
+        ),
+        (
+            "TBFM flights refused for a field (siblings kept)".into(),
+            c.tbfm_rejected,
+        ),
+        (
+            "TFMS messages refused for a field (siblings kept)".into(),
+            c.tfms_rejected,
         ),
         ("flights".into(), n(l.flights.gufi.len())),
         ("flights with a track sample".into(), with_th),
@@ -412,5 +424,7 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
                 + c.overflow_tbfm
                 + c.overflow_tfms,
         ),
-    ]
+    ];
+    lines.extend(c.reasons.iter().map(|(k, &v)| (k.clone(), v)));
+    lines
 }

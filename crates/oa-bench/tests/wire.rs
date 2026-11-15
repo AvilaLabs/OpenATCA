@@ -546,3 +546,16 @@ fn a_clip_that_ends_inside_a_frame_keeps_its_valid_prefix_and_counts_the_partial
     }
     let _ = std::fs::remove_dir_all(d);
 }
+
+// REQ: OA-BENCH-090
+#[test]
+fn fix_and_airport_names_look_up_in_any_case_or_padding() {
+    let l = lookup_from_model(&model_with_zone());
+    for form in ["fixxx", "FixXX ", " FIXXX"] {
+        assert_eq!(l.fix(form), Some((41.5, -88.0)), "{form:?}");
+        assert_eq!(l.fix_all(form).len(), 1, "{form:?}");
+    }
+    for form in ["kaaa", "KAaa ", " aaa"] {
+        assert!(l.airport(form).is_some(), "{form:?}");
+    }
+}

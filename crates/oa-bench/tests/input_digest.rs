@@ -227,3 +227,91 @@ fn a_file_that_cannot_be_read_to_its_end_gives_an_error_not_a_digest() {
     let open: Opener = Rc::new(|_: &Path| Ok(Box::new(Fails(10)) as Box<dyn Read>));
     assert!(load_adsb_with(Path::new("clip.oaf"), &open).is_err());
 }
+
+/// Endless zero bytes; counts what was pulled from it.
+struct Endless {
+    pulled: Rc<RefCell<u64>>,
+    limit: u64,
+}
+
+impl Read for Endless {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let mut p = self.pulled.borrow_mut();
+        if *p >= self.limit {
+            return Ok(0);
+        }
+        out.fill(0);
+        *p += out.len() as u64;
+        Ok(out.len())
+    }
+}
+
+// REQ: OA-BENCH-092
+#[test]
+fn a_msg_file_longer_than_a_document_can_be_is_refused_by_its_length() {
+    let dir = scratch("long");
+    let f = std::fs::File::create(dir.join("000000.msg")).unwrap();
+    // A sparse file: past the largest document, no real bytes on disk.
+    f.set_len(16 * 1024 * 1024).unwrap();
+    drop(f);
+    let pulled = Rc::new(RefCell::new(0u64));
+    let p2 = pulled.clone();
+    let open: Opener = Rc::new(move |_| {
+        Ok(Box::new(Endless {
+            pulled: p2.clone(),
+            limit: 16 * 1024 * 1024,
+        }) as Box<dyn Read>)
+    });
+    let r = load_with(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: dir.clone(),
+        }],
+        &open,
+    );
+    let e = r.err().expect("an oversize file is refused");
+    assert!(e.to_string().contains("000000.msg"), "{e}");
+    assert_eq!(*pulled.borrow(), 0, "refused before any read");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-BENCH-092
+#[test]
+fn a_msg_stream_that_outgrows_its_length_is_cut_at_the_limit() {
+    let dir = scratch("grow");
+    std::fs::write(dir.join("000000.msg"), b"<x/>").unwrap();
+    let pulled = Rc::new(RefCell::new(0u64));
+    let p2 = pulled.clone();
+    let open: Opener = Rc::new(move |_| {
+        Ok(Box::new(Endless {
+            pulled: p2.clone(),
+            limit: 64 * 1024 * 1024,
+        }) as Box<dyn Read>)
+    });
+    let r = load_with(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: dir.clone(),
+        }],
+        &open,
+    );
+    let e = r.err().expect("a stream past the limit is refused");
+    assert!(e.to_string().contains("000000.msg"), "{e}");
+    let got = *pulled.borrow();
+    assert!(got <= 4 * 1024 * 1024 + 64 * 1024 + 8192, "pulled {got}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-BENCH-092
+#[test]
+fn a_whole_file_read_stops_at_its_limit() {
+    use oa_bench::input::read_capped_file;
+    let dir = scratch("cap");
+    let p = dir.join("a.bin");
+    std::fs::write(&p, vec![7u8; 100]).unwrap();
+    assert_eq!(read_capped_file(&p, 100).unwrap().len(), 100);
+    let e = read_capped_file(&p, 99).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("a.bin"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}

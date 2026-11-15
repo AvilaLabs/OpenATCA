@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::assoc::{Assoc, TruthIndex};
 use crate::geo::{dist_m, enu, NM_M};
 use crate::legacy::{
-    hev, name, pad, plan_candidates, plan_overflowed, tbfm_kind, tfms_kind, Legacy, PlanIndex,
+    hev, name, norm_id, plan_candidates, plan_overflowed, tbfm_kind, tfms_kind, Legacy, PlanIndex,
     NONE, NO_COORD, NO_TIME,
 };
 use crate::pair::PairTable;
@@ -171,17 +171,19 @@ fn resolve_plan(
     cfg: &EventConfig,
 ) -> Result<u32, &'static str> {
     let (issue, time, aid) = est;
+    let aid = norm_id::<8>(&aid);
     if plan_overflowed(plan, key) {
         return Err(OVERFLOWED);
     }
     let cands = plan_candidates(plan, key);
     let has_aid = aid.iter().any(|&b| b != 0);
     let call_of = |f: u32| {
-        leg.flights
-            .callsign
-            .get(f as usize)
-            .copied()
-            .unwrap_or([0; 8])
+        norm_id::<8>(
+            leg.flights
+                .callsign
+                .get(f as usize)
+                .map_or(&[][..], |c| &c[..]),
+        )
     };
     let has_call = |f: u32| call_of(f).iter().any(|&b| b != 0);
     let (&only, rest) = match cands.split_first() {
@@ -601,11 +603,7 @@ pub fn f3_tfms(
         } else {
             ("F3-departure", false)
         };
-        let key: [u8; 12] = t
-            .plan_id
-            .get(i)
-            .map(|p| pad(name(p).as_bytes()))
-            .unwrap_or([0; 12]);
+        let key: [u8; 12] = t.plan_id.get(i).map_or([0; 12], |p| norm_id(p));
         let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
         let acid = t.acid.get(i).copied().unwrap_or([0; 8]);
         let est = (issue, t.time_ms.get(i).copied().unwrap_or(NO_TIME), acid);

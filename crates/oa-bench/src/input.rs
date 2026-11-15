@@ -97,6 +97,72 @@ pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     Ok(manifest_hash(label, files, &sums))
 }
 
+/// Slack over the parser's own document limit for a `.msg` file (an XML declaration, a byte order
+/// mark, trailing white space); a file longer than the limit plus this is not a document.
+pub const MSG_MARGIN: u64 = 64 * 1024;
+
+/// The longest `.msg` file read: the replay parser's document limit plus [`MSG_MARGIN`].
+pub fn msg_limit() -> u64 {
+    oa_replay::doc_xml_limits().max_input_bytes as u64 + MSG_MARGIN
+}
+
+/// A reader that passes on at most `limit` bytes and then fails with `InvalidData` rather than
+/// give one more, so a file that grows or lies about its length cannot be pulled whole into memory.
+struct Capped<R: Read> {
+    inner: R,
+    left: u64,
+    limit: u64,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.left == 0 {
+            // At the limit: only a clean end is allowed (one byte is enough to tell).
+            let mut one = [0u8; 1];
+            return match self.inner.read(&mut one)? {
+                0 => Ok(0),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("longer than the limit of {} bytes", self.limit),
+                )),
+            };
+        }
+        let room = usize::try_from(self.left)
+            .unwrap_or(usize::MAX)
+            .min(out.len());
+        let n = match out.get_mut(..room) {
+            Some(w) => self.inner.read(w)?,
+            None => 0,
+        };
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+/// Reads all of `path` up to `max` bytes. A file whose length is past `max`, or that turns out
+/// longer while it is read, is refused with `InvalidData` naming the file; nothing near its size
+/// is allocated.
+pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let len = fs::metadata(path).map_err(named)?.len();
+    if len > max {
+        return Err(named(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{len} bytes, past the limit of {max} bytes"),
+        )));
+    }
+    let f = fs::File::open(path).map_err(named)?;
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    Capped {
+        inner: f,
+        left: max,
+        limit: max,
+    }
+    .read_to_end(&mut out)
+    .map_err(named)?;
+    Ok(out)
+}
+
 /// Opens one input file for reading. The seam for [`load_with`] and [`load_adsb_with`]: the real
 /// one opens the file; a test hands back other bytes than the disk holds, as a file that changed
 /// after it was listed.
@@ -236,6 +302,11 @@ type Listed = (FeedKind, DirKind, Vec<PathBuf>, Vec<Done>);
 
 /// [`load`] with the files opened by `open`.
 pub fn load_with(feeds: &[FeedInput], open: &Opener) -> io::Result<Loaded> {
+    load_with_max(feeds, open, msg_limit())
+}
+
+/// [`load_with`] with `max_msg` as the longest `.msg` file accepted.
+pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Result<Loaded> {
     let mut leg = new_legacy();
     let mut reader = new_reader().map_err(io::Error::other)?;
     let mut listed: Vec<Listed> = Vec::new();
@@ -281,8 +352,25 @@ pub fn load_with(feeds: &[FeedInput], open: &Opener) -> io::Result<Loaded> {
             match kind {
                 DirKind::Msg => {
                     for (f, done) in files.iter().zip(dones) {
-                        let mut hr = HashRead::new(open(f)?, done.clone());
-                        let mut b = Vec::new();
+                        let len = fs::metadata(f)
+                            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", f.display())))?
+                            .len();
+                        if len > max_msg {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "{}: {len} bytes, past the limit of {max_msg} bytes for a message document",
+                                    f.display()
+                                ),
+                            ));
+                        }
+                        let capped = Capped {
+                            inner: open(f)?,
+                            left: max_msg,
+                            limit: max_msg,
+                        };
+                        let mut hr = HashRead::new(capped, done.clone());
+                        let mut b = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
                         hr.read_to_end(&mut b).map_err(|e| {
                             io::Error::new(e.kind(), format!("{}: {e}", f.display()))
                         })?;

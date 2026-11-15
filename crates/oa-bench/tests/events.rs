@@ -709,3 +709,96 @@ fn an_estimate_issued_inside_the_first_stretch_belongs_to_that_pass() {
     let (r, _) = hold_f1(&[(1155, 180)]);
     assert_eq!(r, vec![1.0, 955.0]);
 }
+
+// REQ: OA-BENCH-090
+#[test]
+fn an_identification_joins_in_any_case_or_padding_where_one_flight_holds_the_plan() {
+    // PLAN0's one flight has callsign `AID`; the estimates carry it in other forms.
+    for form in [&b"aid"[..], b"Aid", b"AID ", b" aid", b"AID\0\0", b"aid  "] {
+        let mut t = trips(true);
+        t.leg.flights.callsign[0] = pad(b"AID");
+        for a in t.leg.tbfm.aid.iter_mut().chain(t.leg.tfms.acid.iter_mut()) {
+            *a = pad(form);
+        }
+        let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+        assert!(
+            m.iter().all(|r| total_n(r) == 2),
+            "{form:?}: {:?} {ex:?}",
+            m.iter().map(total_n).collect::<Vec<_>>()
+        );
+        assert_eq!(ex_count(&ex, "F1", LONE_OTHER), 0, "{form:?}");
+    }
+    // And the flight's callsign in another form than the estimate's.
+    let mut t = trips(true);
+    t.leg.flights.callsign[0] = pad(b" aid ");
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert!(m.iter().all(|r| total_n(r) == 2), "{ex:?}");
+}
+
+// REQ: OA-BENCH-090
+#[test]
+fn an_identification_names_one_of_several_flights_in_any_case_or_padding() {
+    for form in [&b"callb"[..], b"CallB ", b" CALLB"] {
+        let t = reused_plan(false, form, 0);
+        let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+        for r in [&m[0], &m[1]] {
+            assert_eq!(total_n(r), 1, "{form:?} {}: {ex:?}", r.id);
+        }
+    }
+    let mut t = reused_plan(false, b"CALLB", 0);
+    t.leg.flights.callsign[1] = pad(b"callb ");
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert_eq!(total_n(&m[0]), 1, "{ex:?}");
+}
+
+// REQ: OA-BENCH-090
+#[test]
+fn a_plan_identifier_joins_in_any_case_or_padding_on_every_path() {
+    use oa_bench::legacy::{plan_candidates, plan_known, plan_overflowed};
+    for form in [&b"plan0"[..], b"Plan0 ", b" PLAN0"] {
+        let mut t = trips(true);
+        for p in t
+            .leg
+            .tbfm
+            .plan_id
+            .iter_mut()
+            .filter(|p| p.starts_with(b"PLAN0"))
+        {
+            *p = pad(form);
+        }
+        for p in t
+            .leg
+            .tfms
+            .plan_id
+            .iter_mut()
+            .filter(|p| p.starts_with(b"PLAN0"))
+        {
+            *p = pad(form);
+        }
+        let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+        assert!(
+            m.iter().all(|r| total_n(r) == 2),
+            "{form:?}: {:?} {ex:?}",
+            m.iter().map(total_n).collect::<Vec<_>>()
+        );
+        let idx = plan_index(&t.leg);
+        assert_eq!(plan_candidates(&idx, &pad(form)), [0], "{form:?}");
+        assert!(plan_known(&idx, &pad(form)), "{form:?}");
+        assert!(!plan_overflowed(&idx, &pad(form)));
+        // The extraction count of matching estimates takes the same view.
+        let counts = oa_bench::report::extraction_counts(&t.leg);
+        for key in ["TBFM values whose", "TFMS values whose"] {
+            let line = counts.iter().find(|(k, _)| k.starts_with(key)).unwrap();
+            assert_eq!(
+                line.1,
+                if key.starts_with("TBFM") { 2 } else { 4 },
+                "{form:?} {key}"
+            );
+        }
+    }
+    // The flight's own identifier in another form than the estimates'.
+    let mut t = trips(true);
+    t.leg.flights.plan_id[0] = pad(b" plan0 ");
+    let (m, ex) = score(&t, &two_trips(), Some(500), &env());
+    assert!(m.iter().all(|r| total_n(r) == 2), "{ex:?}");
+}
