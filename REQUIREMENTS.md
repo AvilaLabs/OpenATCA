@@ -624,6 +624,15 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   a late frame of a part the gap record no longer covers: it counts as a duplicate and moves neither the
   expectation nor `missing`, so a redelivered late frame (3, 5, 4, 4, 6) makes no false gap. A frame below that
   point is a regression as before.
+- **OA-FEED-175** An `OAF2` frame (magic `OAF2`, a u64 `mono_ns` between `jms_timestamp_ms` and
+  `payload_len`) round-trips every field exactly, `Frame::mono_ns` gives the monotonic time, and an `OAF1`
+  frame in the same stream gives `None`.
+- **OA-FEED-176** `OAF2` frames decode identically however the stream is chunked, damage in one is a
+  CRC error at its offset with resynchronisation on to the next frame of either version, and every byte
+  is delivered or counted skipped.
+- **OA-FEED-177** `oa-feed --record` and `--record-raw` store each frame as an `OAF2` frame with the
+  recorder's monotonic time since start (not going back); a frame that already has one keeps it; the
+  other fields and the payload are the input's; a gzip recording of such frames replays.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1428,6 +1437,21 @@ frame of their feed has been fed (as the ADS-B table is).
   time, or the notice's own end), which decides whether a step of the replay clock moves it: two states
   that differ only in that flag have different digests. Nothing is added while no tombstone is held, and
   `replay_hash` is unchanged.
+- **OA-RPL-266** A recording with a monotonic time per frame and a genuine gap (wall and monotonic time
+  elapsed agree within 10 seconds, the frame ahead of the clock) is accepted at once at its own time
+  (`Tick::RealGap`): no age is shifted, no row is marked stale, and a flight silent for the gap expires
+  under its age limit (an ACTIVE flight after 3 hours).
+- **OA-RPL-267** A frame whose wall time is far from the clock while the monotonic time elapsed is short
+  (a step of +3 hours in 1 second, or a step back) is a step of the recorder's clock: handled by rules
+  4 to 6 as before, and counted in `Clock::mono_steps`.
+- **OA-RPL-268** A recording with no monotonic time (`OAF1` frames, or `process_frame`) replays exactly as
+  before the field existed: the same clock, tables, counters and `replay_state_digest`.
+- **OA-RPL-269** `replay_state_digest` covers every time-domain decision (counts, a running hash of each
+  decision's kind and elapsed times, and each feed's reference), written only once there is a monotonic
+  reference or a decision, so two replays that classify a gap differently differ.
+- **OA-RPL-270** The classification at its tolerance: elapsed times differing by exactly
+  `MONO_AGREE_TOL_NS` (10 seconds) agree, one nanosecond more is a step; a monotonic time that went back, a
+  frame with none, and a frame behind the clock are not classified as a real gap.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.

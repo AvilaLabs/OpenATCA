@@ -1,24 +1,30 @@
-//! OAF1 frame layout, decoded-frame and error types, and a tiny encoder. Core (pure).
+//! OAF1 and OAF2 frame layout, decoded-frame and error types, and a tiny encoder. Core (pure).
 //!
 //! Layout (all integers little-endian): magic `OAF1` (4), kind u8, flags u8, reserved u16 (0),
 //! seq u64, recv_unix_ns i64, jms_timestamp_ms i64, payload_len u32, payload, crc32 u32 over
-//! every preceding byte of the frame. See `docs/FEED_FRAMES.md`.
+//! every preceding byte of the frame. An `OAF2` frame is the same with a u64 `mono_ns` (the
+//! recorder's monotonic time since its start) between `jms_timestamp_ms` and `payload_len`. See
+//! `docs/FEED_FRAMES.md`.
 
 use std::fmt;
 
 use oa_zip::crc32;
 
-/// The four magic bytes that start every frame.
+/// The four magic bytes that start every frame the bridge writes.
 pub const MAGIC: [u8; 4] = *b"OAF1";
+/// The magic of a frame that also carries the recorder's monotonic time.
+pub const MAGIC_V2: [u8; 4] = *b"OAF2";
 /// Bytes before the payload.
 pub const HEADER_LEN: usize = 36;
+/// Bytes before the payload of an `OAF2` frame.
+pub const HEADER_LEN_V2: usize = 44;
 /// Bytes after the payload (the CRC-32).
 pub const TRAILER_LEN: usize = 4;
 /// Largest payload a frame may carry (IF-R1: bounded work per input). The bridge refuses to
 /// frame a message above this; the reader refuses a frame that claims more.
 pub const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 /// Largest whole frame.
-pub const MAX_FRAME_LEN: usize = HEADER_LEN + MAX_PAYLOAD + TRAILER_LEN;
+pub const MAX_FRAME_LEN: usize = HEADER_LEN_V2 + MAX_PAYLOAD + TRAILER_LEN;
 
 /// Flag bit 0: the JMS message was a redelivery.
 pub const FLAG_REDELIVERED: u8 = 1;
@@ -47,6 +53,9 @@ pub struct Frame<'a> {
     pub recv_unix_ns: i64,
     /// JMS timestamp in milliseconds; 0 if the broker sent none.
     pub jms_timestamp_ms: i64,
+    /// The recorder's monotonic time at receipt, ns since its start; meaningful only if
+    /// `has_mono` (read it with [`Frame::mono_ns`]).
+    mono: u64,
     /// Byte offset of this frame in the stream.
     pub offset: u64,
     /// Bytes the reader discarded immediately before this frame (resynchronisation).
@@ -59,10 +68,49 @@ pub struct Frame<'a> {
     pub kind: Kind,
     /// Flag bits ([`FLAG_REDELIVERED`], [`FLAG_BYTES`]); unknown bits are carried, not refused.
     pub flags: u8,
+    /// Whether the frame carries a monotonic time (an `OAF2` frame).
+    has_mono: bool,
 }
-// Budget: five 8-byte integers, two 16-byte slices (72), two bytes, 6 bytes tail padding = 80. A transient
+// Budget: six 8-byte integers, two 16-byte slices (80), three bytes, 5 bytes tail padding = 88. A transient
 // view built per frame, not held in quantity; the guard still pins the layout (A7).
-const _: () = assert!(core::mem::size_of::<Frame<'static>>() == 80);
+const _: () = assert!(core::mem::size_of::<Frame<'static>>() == 88);
+
+impl Frame<'_> {
+    /// The recorder's monotonic time at receipt, ns since the recorder started, or `None` for an
+    /// `OAF1` frame (a recording made before the field existed, or the bridge's own output).
+    pub fn mono_ns(&self) -> Option<u64> {
+        self.has_mono.then_some(self.mono)
+    }
+
+    /// Builds the view of a decoded frame; the reader's constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new<'a>(
+        seq: u64,
+        recv_unix_ns: i64,
+        jms_timestamp_ms: i64,
+        mono_ns: Option<u64>,
+        offset: u64,
+        skipped_before: u64,
+        payload: &'a [u8],
+        raw: &'a [u8],
+        kind: Kind,
+        flags: u8,
+    ) -> Frame<'a> {
+        Frame {
+            seq,
+            recv_unix_ns,
+            jms_timestamp_ms,
+            mono: mono_ns.unwrap_or(0),
+            offset,
+            skipped_before,
+            payload,
+            raw,
+            kind,
+            flags,
+            has_mono: mono_ns.is_some(),
+        }
+    }
+}
 
 /// Why a frame was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,13 +201,66 @@ pub fn encode_frame(
     jms_timestamp_ms: i64,
     payload: &[u8],
 ) -> Option<usize> {
+    encode_any(
+        out,
+        kind,
+        flags,
+        seq,
+        recv_unix_ns,
+        jms_timestamp_ms,
+        None,
+        payload,
+    )
+}
+
+/// As [`encode_frame`], writing an `OAF2` frame that carries `mono_ns`, the recorder's monotonic
+/// time at receipt. The recorder's shell uses it to store each frame it records.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_frame_mono(
+    out: &mut [u8],
+    kind: u8,
+    flags: u8,
+    seq: u64,
+    recv_unix_ns: i64,
+    jms_timestamp_ms: i64,
+    mono_ns: u64,
+    payload: &[u8],
+) -> Option<usize> {
+    encode_any(
+        out,
+        kind,
+        flags,
+        seq,
+        recv_unix_ns,
+        jms_timestamp_ms,
+        Some(mono_ns),
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_any(
+    out: &mut [u8],
+    kind: u8,
+    flags: u8,
+    seq: u64,
+    recv_unix_ns: i64,
+    jms_timestamp_ms: i64,
+    mono_ns: Option<u64>,
+    payload: &[u8],
+) -> Option<usize> {
     if payload.len() > MAX_PAYLOAD {
         return None;
     }
-    let body = HEADER_LEN + payload.len();
+    let header_len = if mono_ns.is_some() {
+        HEADER_LEN_V2
+    } else {
+        HEADER_LEN
+    };
+    let body = header_len + payload.len();
     let total = body + TRAILER_LEN;
     let dst = out.get_mut(..total)?;
-    let mut head = [0u8; HEADER_LEN];
+    let mut head = [0u8; HEADER_LEN_V2];
     let kf = [kind, flags];
     let reserved = 0u16.to_le_bytes();
     let (seq_b, recv_b, jms_b) = (
@@ -167,15 +268,21 @@ pub fn encode_frame(
         recv_unix_ns.to_le_bytes(),
         jms_timestamp_ms.to_le_bytes(),
     );
+    let mono_b = mono_ns.unwrap_or(0).to_le_bytes();
     let len_b = (payload.len() as u32).to_le_bytes();
-    let parts: [&[u8]; 7] = [&MAGIC, &kf, &reserved, &seq_b, &recv_b, &jms_b, &len_b];
+    let magic: &[u8] = if mono_ns.is_some() { &MAGIC_V2 } else { &MAGIC };
+    let mono_part: &[u8] = if mono_ns.is_some() { &mono_b } else { &[] };
+    let parts: [&[u8]; 8] = [
+        magic, &kf, &reserved, &seq_b, &recv_b, &jms_b, mono_part, &len_b,
+    ];
     let mut at = 0usize;
     for part in parts {
         head.get_mut(at..at + part.len())?.copy_from_slice(part);
         at += part.len();
     }
-    dst.get_mut(..HEADER_LEN)?.copy_from_slice(&head);
-    dst.get_mut(HEADER_LEN..body)?.copy_from_slice(payload);
+    dst.get_mut(..header_len)?
+        .copy_from_slice(head.get(..header_len)?);
+    dst.get_mut(header_len..body)?.copy_from_slice(payload);
     let crc = crc32(dst.get(..body)?);
     dst.get_mut(body..)?.copy_from_slice(&crc.to_le_bytes());
     Some(total)
