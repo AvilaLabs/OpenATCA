@@ -4,8 +4,8 @@
 use std::fmt;
 
 use crate::params::{
-    COAST_AFTER_INTERVALS, DROP_AFTER_NS, EXPECTED_INTERVAL_NS, INIT_M, INIT_N, LOG_CAPACITY,
-    MAX_TRACKS, OOO_WINDOW_NS, OUT_CAPACITY, RING_DEPTH, TICK_NS,
+    CLOCK_STEP_LIMIT_NS, COAST_AFTER_INTERVALS, DROP_AFTER_NS, EXPECTED_INTERVAL_NS, INIT_M,
+    INIT_N, LOG_CAPACITY, MAX_TRACKS, OOO_WINDOW_NS, OUT_CAPACITY, RING_DEPTH, TICK_NS,
 };
 
 /// Absent value of an altitude or rate column.
@@ -119,6 +119,9 @@ pub struct TrackerConfig {
     pub drop_after_ns: i64,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
+    /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
+    /// the out-of-order window and below the drop age.
+    pub clock_step_limit_ns: i64,
     /// Reports to confirm (M).
     pub init_m: u8,
     /// Window of the M, in reports (N).
@@ -139,6 +142,7 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     coast_after_intervals: COAST_AFTER_INTERVALS,
     drop_after_ns: DROP_AFTER_NS,
     ooo_window_ns: OOO_WINDOW_NS,
+    clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
     init_n: INIT_N,
     h_mode: 0,
@@ -188,6 +192,9 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     if c.init_m == 0 || c.init_n < c.init_m || c.init_n > 16 {
         return bad("init_m or init_n");
     }
+    if c.clock_step_limit_ns < c.ooo_window_ns || c.clock_step_limit_ns >= c.drop_after_ns {
+        return bad("clock_step_limit_ns below ooo_window_ns or not below drop_after_ns");
+    }
     // Times are compared in ns; keep the products far from overflow.
     if c.drop_after_ns
         .max(c.ooo_window_ns)
@@ -221,6 +228,11 @@ pub const O_RADAR_DISAGREES: u8 = 8;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
+///
+/// Time in the table is not monotonic across a step back of the tracker clock
+/// ([`TrackerStats::time_steps_back`]): rows after it carry earlier times than rows before it, by
+/// as much as the clock had been moved ahead. A consumer that orders or deduplicates by time
+/// must expect that once per step back.
 // A7.2: cold struct (a collection of columns), size guard waived
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackOutput {
@@ -428,6 +440,16 @@ pub struct TrackerStats {
     pub time_held: u64,
     /// Forward steps of the tracker clock confirmed by consecutive far-ahead measurements.
     pub time_steps: u64,
+    /// Held measurements applied after the step that confirmed them (confirmation delays data, it
+    /// does not lose it). `time_held` minus this is what a refuted run or a full buffer discarded.
+    pub time_held_applied: u64,
+    /// Steps of the tracker clock back, confirmed by a run of late refusals (the clock had been
+    /// moved ahead of the real time). Output rows after one carry earlier times than rows before.
+    pub time_steps_back: u64,
+    /// Tracks dropped by a step back because their last update was after the new clock.
+    pub time_future_dropped: u64,
+    /// Sensor table entries reused while the table was full.
+    pub time_sensor_evicted: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

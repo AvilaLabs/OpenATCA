@@ -22,8 +22,13 @@
 //!
 //! # Time ordering
 //!
-//! The tracker's clock is the newest time of applicability seen. A measurement older than the
-//! clock by more than the out-of-order window is counted and dropped. A measurement older than
+//! The tracker's clock is the newest time of applicability seen, decided by `crate::time_gate`.
+//! A measurement more than the step limit (the out-of-order window) ahead of it is held until a
+//! run of them from enough distinct sensors and addresses confirms a step forward. A measurement
+//! older than the clock by more than the out-of-order window is counted and dropped; a long run
+//! of those, from enough distinct sensors and addresses, means the clock was wrong-ahead and
+//! steps it back: the tracks updated after the new clock are dropped and counted, and the rows
+//! that follow carry earlier times than rows already emitted. A measurement older than
 //! its own track's newest update but inside the window is applied by re-filtering: the ring
 //! gives the newest stored update at or before its time, the state after it is rebuilt from the
 //! anchor, the measurement is applied to that, and the stored measurements that followed are
@@ -53,8 +58,10 @@ use oa_adsb::{
 
 use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
 use crate::hfilter::{h_combine, HFilter};
-use crate::params::{
-    CLOCK_STEP_CONFIRM, CLOCK_STEP_LIMIT_NS, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH,
+use crate::params::{NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
+use crate::time_gate::{
+    gate_decide, gate_new, gate_note_applied, gate_run_restarted, GateCfg, GateState, Verdict,
+    RUN_BUF,
 };
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
@@ -81,9 +88,12 @@ pub struct Tracker {
     log: TrackLog,
     /// Newest time of applicability seen.
     clock_ns: i64,
-    /// Consecutive far-ahead measurements so far (a step candidate), and the latest one's time.
-    step_n: u32,
-    step_last_ns: i64,
+    /// The clock decision: runs of far-ahead and of late measurements, the sensor table.
+    gate: GateState,
+    /// The far-ahead measurements of the run being confirmed, oldest first (the last `RUN_BUF`),
+    /// and how many: applied when the run confirms, discarded when it is refuted.
+    held: Vec<Measurement>,
+    held_n: usize,
     /// The newest `last_ns` any track has had, ever (`i64::MIN` before the first): an upper bound
     /// on the newest live update, kept so a tick need not scan every slot to find it.
     newest_update_ns: i64,
@@ -176,8 +186,9 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         stats: TrackerStats::default(),
         log: log_new(cfg.log_capacity),
         clock_ns: i64::MIN,
-        step_n: 0,
-        step_last_ns: 0,
+        gate: gate_new(),
+        held: vec![blank_measurement(); RUN_BUF],
+        held_n: 0,
         newest_update_ns: i64::MIN,
         next_tick_ns: i64::MIN,
         high: 0,
@@ -753,8 +764,46 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     put(&mut t.cur, slot, f);
 }
 
+/// The first tick of the grid at or after `at_ns`. `at_ns` and the tick are bounded
+/// (`TIME_LIMIT_NS`, `MAX_TICK_NS`): no overflow.
+fn first_tick_at_or_after(t: &Tracker, at_ns: i64) -> i64 {
+    at_ns.div_euclid(t.cfg.tick_ns) * t.cfg.tick_ns
+        + if at_ns.rem_euclid(t.cfg.tick_ns) == 0 {
+            0
+        } else {
+            t.cfg.tick_ns
+        }
+}
+
+/// Moves the clock back to `to_ns`, the clock having been wrong-ahead: the tick grid restarts at
+/// the first tick after it and every track updated after it, which was built on the wrong clock,
+/// is dropped and counted.
+fn step_back(t: &mut Tracker, to_ns: i64) {
+    t.clock_ns = to_ns;
+    t.next_tick_ns = first_tick_at_or_after(t, to_ns);
+    t.stats.time_steps_back += 1;
+    for slot in 0..t.high {
+        if col(&t.state, slot, FREE) != FREE && col(&t.last_ns, slot, 0) > to_ns {
+            end_track(t, slot, END_DROPPED);
+            t.stats.time_future_dropped += 1;
+        }
+    }
+    // The kept bound on the newest live update, from what is left.
+    let mut newest = i64::MIN;
+    for slot in 0..t.high {
+        if col(&t.state, slot, FREE) != FREE {
+            newest = newest.max(col(&t.last_ns, slot, 0));
+        }
+    }
+    t.newest_update_ns = newest;
+}
+
 /// Offers one measurement. Counters say what became of it; rows for a confirmed track go to
 /// `out`.
+///
+/// The clock decision is `crate::time_gate`. After a step back (counted in `time_steps_back`)
+/// the rows that follow carry earlier times than rows already emitted: a consumer must expect
+/// the time of the output to go backwards once, by as much as the clock had been moved ahead.
 pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
     t.stats.offered += 1;
     if let Err(why) = measurement_check(m) {
@@ -764,37 +813,88 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
         return;
     }
     let toa = m.toa_ns;
+    let gate_cfg = GateCfg {
+        limit_ns: t.cfg.clock_step_limit_ns,
+        ooo_ns: t.cfg.ooo_window_ns,
+        drop_ns: t.cfg.drop_after_ns,
+    };
+    // Every live track is this address (or there is none): only its own track is at stake.
+    let own_addr_only = t.active == 0 || (t.active == 1 && lookup(t, m.addr).is_some());
+    let verdict = gate_decide(
+        &mut t.gate,
+        &gate_cfg,
+        t.clock_ns,
+        toa,
+        m.addr,
+        m.sensor,
+        t.active,
+        own_addr_only,
+    );
+    t.stats.time_sensor_evicted = t.gate.evicted;
+    match verdict {
+        Verdict::Late => {
+            t.stats.late_window += 1;
+        }
+        // A far-ahead measurement alone could expire every other track and make the tick loop run
+        // over the whole gap: it waits, with the others of its run, for the run that confirms it.
+        Verdict::Held => {
+            t.stats.time_held += 1;
+            if gate_run_restarted(&t.gate) {
+                t.held_n = 0;
+            }
+            held_push(t, m);
+        }
+        Verdict::StepForward => {
+            t.stats.time_steps += 1;
+            if gate_run_restarted(&t.gate) {
+                t.held_n = 0;
+            }
+            // Confirmation delays the measurements of the run, it does not lose them: they are
+            // applied in arrival order at the new clock, before this one.
+            let n = t.held_n;
+            t.held_n = 0;
+            for i in 0..n {
+                let h = col(&t.held, i, blank_measurement());
+                gate_note_applied(&mut t.gate, h.sensor, h.toa_ns);
+                t.stats.time_held_applied += 1;
+                apply(t, &h, out);
+            }
+            apply(t, m, out);
+        }
+        Verdict::StepBack { to_ns } => {
+            t.held_n = 0;
+            step_back(t, to_ns);
+            apply(t, m, out);
+        }
+        Verdict::Accept => {
+            t.held_n = 0;
+            apply(t, m, out);
+        }
+    }
+}
+
+/// Keeps a held measurement; past the buffer the oldest is discarded.
+fn held_push(t: &mut Tracker, m: &Measurement) {
+    if t.held_n >= t.held.len() {
+        t.held.rotate_left(1);
+        t.held_n = t.held.len() - 1;
+    }
+    put(&mut t.held, t.held_n, *m);
+    t.held_n += 1;
+}
+
+/// Applies a measurement the gate let through: moves the clock forward if it is newer, then the
+/// track's own ordering rules (in order, duplicate, late) decide.
+fn apply(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
+    let toa = m.toa_ns;
+    // After a step the measurement (or a held one) may be older than the new clock's window.
     if t.clock_ns != i64::MIN && toa < t.clock_ns.saturating_sub(t.cfg.ooo_window_ns) {
         t.stats.late_window += 1;
         return;
     }
-    // A measurement far ahead of the clock is a step of the clock only if three in a row agree;
-    // alone it could expire every other track and make the tick loop run over the whole gap.
-    if t.clock_ns != i64::MIN && toa > t.clock_ns.saturating_add(CLOCK_STEP_LIMIT_NS) {
-        t.step_n = if t.step_n > 0 && toa >= t.step_last_ns {
-            t.step_n + 1
-        } else {
-            1
-        };
-        t.step_last_ns = toa;
-        if t.step_n < CLOCK_STEP_CONFIRM {
-            t.stats.time_held += 1;
-            return;
-        }
-        t.step_n = 0;
-        t.stats.time_steps += 1;
-    } else {
-        t.step_n = 0;
-    }
     if toa > t.clock_ns {
         if t.next_tick_ns == i64::MIN {
-            // `toa` and the tick are bounded (`TIME_LIMIT_NS`, `MAX_TICK_NS`): no overflow.
-            t.next_tick_ns = toa.div_euclid(t.cfg.tick_ns) * t.cfg.tick_ns
-                + if toa.rem_euclid(t.cfg.tick_ns) == 0 {
-                    0
-                } else {
-                    t.cfg.tick_ns
-                };
+            t.next_tick_ns = first_tick_at_or_after(t, toa);
         }
         emit_ticks(t, toa - 1, out);
         t.clock_ns = toa;
@@ -893,7 +993,8 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
 }
 
 /// Advances time to `now_ns` without a measurement: emits the ticks up to it and expires old
-/// tracks. Time never goes backwards; an earlier `now_ns` does nothing.
+/// tracks. Time never goes backwards; an earlier `now_ns` does nothing. The step limit does not
+/// apply here: the caller's clock (the replay clock) has its own confirmed rules.
 pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
     if now_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {
         if let Some(c) = t.stats.refused.get_mut(REF_TIME) {

@@ -522,6 +522,9 @@ fn measurements_older_than_the_window_or_the_stored_states_are_counted_and_dropp
     // Window of 60 s but a ring of only 12 updates: 30 s old is inside the window and outside
     // the ring.
     cfg.ooo_window_ns = 60_000_000_000;
+    // The step limit is at least the window and the drop age above the limit.
+    cfg.clock_step_limit_ns = 60_000_000_000;
+    cfg.drop_after_ns = 120_000_000_000;
     let mut t = tracker_new(&cfg).unwrap();
     let mut out = output_new(cfg.out_capacity);
     for m in &ms {
@@ -1208,10 +1211,12 @@ fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
     tracker_flush(&mut t, 30_000_000_000_000, &mut out);
     let s = tracker_stats(&t);
     println!(
-        "gappy: rows {} ended {:?} digest {}",
+        "gappy: rows {} ended {:?} digest {} held {} applied after {}",
         out.t_ns.len(),
         s.ended,
-        hash_of(&out)
+        hash_of(&out),
+        s.time_held,
+        s.time_held_applied
     );
     assert!(s.ended[usize::from(END_DROPPED)] >= 4, "{:?}", s.ended);
     assert_eq!(out.overflow, 0);
@@ -1242,7 +1247,13 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
     assert!(oa_track::tracker_newest_update_ns(&t) > newest - 2_000_000_000);
 }
 
-const GAPPY_DIGEST: &str = "5cbeb052deda04a2f6ebf9a7e1e34fa8f94955283f59bd03cec60ceb8cbcd86f";
+// Re-recorded when the measurements held for a far-ahead run began to be applied after the step
+// that confirms them (OA-TRK-199): the first report of the aircraft starting after the 1,000 s
+// gap and the second were lost to the confirmation, now they are applied (2 measurements changed
+// fate; a third, held at 20,000 s, is discarded because the caller's `tracker_advance` moved the
+// clock first). The earlier value was
+// "5cbeb052deda04a2f6ebf9a7e1e34fa8f94955283f59bd03cec60ceb8cbcd86f".
+const GAPPY_DIGEST: &str = "797b729ae9d90ef7a363ffd0bafbebeed9d1e1edfee527696a6df1f4b0d14290";
 
 // REQ: OA-TRK-041
 #[test]

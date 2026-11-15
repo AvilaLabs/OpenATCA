@@ -184,14 +184,17 @@ pub const DROP_PERIODS: i64 = 6;
 /// `RADAR_INIT_N` scans plus two buckets).
 pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> TrackerConfig {
     let period = sites.iter().map(|s| s.period_ns).max().unwrap_or(NS_PER_S);
+    let ooo = base
+        .ooo_window_ns
+        .max(i64::from(RADAR_INIT_N) * period + 2 * BUCKET_NS)
+        .max(OOO_WINDOW_NS);
     TrackerConfig {
         expected_interval_ns: period,
         init_interval_ns: period,
         drop_after_ns: DROP_PERIODS * period,
-        ooo_window_ns: base
-            .ooo_window_ns
-            .max(i64::from(RADAR_INIT_N) * period + 2 * BUCKET_NS)
-            .max(OOO_WINDOW_NS),
+        ooo_window_ns: ooo,
+        // The step limit is never below the window it must not be smaller than.
+        clock_step_limit_ns: base.clock_step_limit_ns.max(ooo),
         ..*base
     }
 }

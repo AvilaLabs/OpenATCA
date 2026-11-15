@@ -17,7 +17,8 @@ Harnesses are compiled only under `#[cfg(kani)]`. They are not in any shipped bu
 `cargo build`, `cargo test` and `cargo clippy` do not see them. The harness code is in
 `crates/oa-asterix/src/proofs.rs`, `crates/oa-asterix/src/proofs_wire.rs`,
 `crates/oa-adsb/src/frames.rs`, `crates/oa-feed/src/health.rs` and
-`crates/oa-replay/src/clock.rs` (each at the end, in a `proofs` module).
+`crates/oa-replay/src/clock.rs` and `crates/oa-track/src/time_gate.rs` (each at the end, in a `proofs`
+module).
 
 Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` counts that
 as verification of the requirement and lists it as a proof, apart from tests.
@@ -33,6 +34,7 @@ cargo kani -p oa-replay  --harness clock_observe_total_and_confirms
 cargo kani -p oa-feed    --harness observe_seq_accumulation_saturates
 cargo kani -p oa-adsb    --harness decode_row_total_ads2
 cargo kani -p oa-adsb    --harness payload_records_ads2_4 -Z stubbing
+cargo kani -p oa-track   --harness gate_step_back_needs_span_count_and_spread
 ```
 
 The two `payload_records_*` harnesses use `#[kani::stub]` and need `-Z stubbing`. Several
@@ -66,6 +68,10 @@ peak resident size of the run. Every harness below verified successfully (no cou
 | `clock_advances_by_at_most_the_tolerance_unless_the_feed_is_alone` | from a state the pipeline keeps (every feed with an accepted frame has it at or before the clock), an accepted frame moves a running clock forward by at most `CLOCK_TOLERANCE_NS`, or by at most `FEED_GAP_MAX_NS` when no other feed has ever had an accepted frame (`kani::cover!`: a move over the tolerance by a lone feed is reachable), and the state stays consistent with the resulting clock | same, plus that state | proved | 0:27 | 293 MB |
 | `clock_step_needs_three_candidates_and_the_vote` | a step comes only after a run of `CLOCK_CONFIRM_FRAMES` candidates; a forward step needs nothing more (three forward candidates in a row are always a step); a backward step also needs at least as many backers of the new time as of the old clock; a refused step is a held backward frame counted in `steps_outvoted`, with the run kept at the limit and the vote against it (`kani::cover!`: forward step, backward step and refusal are reachable) | any `usize` below the feed count, every `i64` pair, `i64::MIN` excluded as the clock, five feeds in any state with `cand_n` at most `CLOCK_CONFIRM_FRAMES` | proved | 0:38 | 345 MB |
 | `clock_observe_three_candidates_before_a_step` | from an empty candidate state of one feed, no step on the first two frames; a step on the third only after two held frames on one side of the clock, each within `CLOCK_TOLERANCE_NS` of the one before when behind it, or not more than the tolerance before and not more than `FEED_GAP_MAX_NS` after the one before when ahead of it | every three frame times, clock fixed, `i64::MIN` excluded as the clock | proved | 0:41 | 765 MB |
+| `gate_decide_is_total` (oa-track) | tracker clock gate (`gate_decide`): no panic, overflow or out-of-bounds access for any clock (`i64::MIN` too), time, address, sensor and live-track count (OA-TRK-193) | six consecutive calls from an empty gate, which fill the 4-place sensor table and reuse a place; any configuration with `0 <= ooo <= limit < drop <= 1 day` | proved | 1:22 | 1.5 GB |
+| `gate_accept_is_within_window_and_limit` | an `Accept` is never more than the step limit ahead of the clock nor older than the out-of-order window (OA-TRK-198) | one call (the verdict does not depend on the runs), clock and time within 2^61 ns of zero | proved | 0:08 | 302 MB |
+| `gate_step_forward_needs_a_confirmed_run` | with live tracks, a far-ahead measurement is held or steps; it steps at once when only its own track and sensor are live (`alone`); otherwise fewer than three in a row never steps and the third steps only if the three come from at least min(2, live sensors) distinct sensors and min(3, live tracks) distinct addresses; `kani::cover!` that a lone step and a confirmed step are each reachable (OA-TRK-194) | three far-ahead measurements, nondecreasing, any addresses and sensors, live sensors, live tracks (above 0) and the `alone` flag any value, time within 2^61 | proved; cover satisfied | 0:58 | 465 MB |
+| `gate_step_back_needs_span_count_and_spread` | fewer than six late refusals never step back; the sixth steps only if the run spans at least the window, to the newest time of the run, from at least min(2, live back-counted sensors) sensors (those whose newest accepted time is no later than the run's newest plus the window) and min(3, live tracks) addresses; `kani::cover!` that a step back is reachable (OA-TRK-195) | six late measurements, any addresses and sensors, any live counts, time within 2^61 | proved; cover satisfied | 1:07 | 1.1 GB |
 
 ### Bounds and how they were chosen
 
@@ -81,6 +87,15 @@ Assumptions a harness makes about state are stated in the harness and are:
   at `u32::MAX` would overflow the increment, and the type does not prevent one being built), and
   the counters `held`, `forward_steps`, `backward_steps` below `u64::MAX` (2^64 frames).
 * `observe_seq`: `duplicates`, `regressions` and `reordered` below `u64::MAX`; the open gap (start and length) lies below the next expected number and within `missing`, which is at most the sum of the gap lengths added so far.
+* The clock gate harnesses: the configuration satisfies the configuration check (window not
+  negative, limit at least the window, drop age above the limit and at most one day); times are
+  within 2^61 ns of zero except in the totality harness, which takes every `i64`. The sensor table
+  has 4 places and a run buffer holds 6 pairs under Kani (64 and 8 in the build), so a proof of
+  the table being full and of the late run that can step back fits; the logic is the same
+  code. The step rules are proved on the run decision with the live-sensor count as a free input,
+  so they hold for any table content; the table is covered by the totality proof and the tests.
+  Loops in the gate are plain index loops: iterator chains and computed buffer bounds made the
+  same proofs run out of 6 GB.
 
 ### Found by the proofs
 
