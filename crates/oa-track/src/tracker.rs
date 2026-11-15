@@ -558,7 +558,8 @@ fn maybe_confirm(t: &mut Tracker, slot: usize, at_ns: i64) {
     }
 }
 
-fn emit(t: &Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) {
+fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) {
+    t.stats.rows_computed += 1;
     let f = col(&t.cur, slot, blank_filter());
     let mut row: OutRow = filter_output(&f, at_ns);
     row.addr = col(&t.key, slot, NO_ADDR);
@@ -716,11 +717,11 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
     }
 }
 
-fn emit_if_confirmed(t: &Tracker, slot: usize, out: &mut TrackOutput) {
+fn emit_if_confirmed(t: &mut Tracker, slot: usize, out: &mut TrackOutput) {
     emit_if_confirmed_at(t, slot, col(&t.last_ns, slot, 0), out);
 }
 
-fn emit_if_confirmed_at(t: &Tracker, slot: usize, at_ns: i64, out: &mut TrackOutput) {
+fn emit_if_confirmed_at(t: &mut Tracker, slot: usize, at_ns: i64, out: &mut TrackOutput) {
     if col(&t.state, slot, FREE) == CONFIRMED {
         emit(t, slot, at_ns, 0, out);
     }
@@ -1029,6 +1030,40 @@ fn sweep(t: &mut Tracker, now_ns: i64) {
     }
 }
 
+/// The ticks from the next one to `emit_to`, when the output table is full: none of their rows
+/// can be taken, so none is computed. The rows lost are counted in the table's `overflow`, from
+/// each confirmed track's own last tick (the drop age), one pass over the tracks and no
+/// work per tick. The tracks are then swept at the last of the ticks.
+fn skip_ticks_full(t: &mut Tracker, emit_to: i64, out: &mut TrackOutput) {
+    let tick_ns = i128::from(t.cfg.tick_ns);
+    let first = i128::from(t.next_tick_ns);
+    let ticks = (i128::from(emit_to) - first) / tick_ns + 1;
+    let mut rows: i128 = 0;
+    for slot in 0..t.high {
+        if col(&t.state, slot, FREE) != CONFIRMED {
+            continue;
+        }
+        // The track is on the table through the tick at which its age is the drop age.
+        let end = (i128::from(col(&t.last_ns, slot, 0)) + i128::from(t.cfg.drop_after_ns))
+            .min(i128::from(emit_to));
+        if end >= first {
+            rows += (end - first) / tick_ns + 1;
+        }
+    }
+    out.overflow = out
+        .overflow
+        .saturating_add(u64::try_from(rows).unwrap_or(u64::MAX));
+    t.stats.ticks = t
+        .stats
+        .ticks
+        .saturating_add(u64::try_from(ticks).unwrap_or(u64::MAX));
+    let last = first + (ticks - 1) * tick_ns;
+    let next = last + tick_ns;
+    // Both are within the bounded time range (`MAX_TICK_NS`, `TIME_LIMIT_NS`).
+    t.next_tick_ns = i64::try_from(next).unwrap_or(i64::MAX);
+    sweep(t, i64::try_from(last).unwrap_or(i64::MAX));
+}
+
 /// Emits every tick up to and including `limit_ns`.
 fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
     if t.next_tick_ns == i64::MIN {
@@ -1049,10 +1084,20 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
     };
     let emit_to = limit_ns.min(useful);
     while t.next_tick_ns <= emit_to {
+        if out.t_ns.len() >= out.capacity {
+            // No row can be taken for the rest of this advance: count them, compute none.
+            skip_ticks_full(t, emit_to, out);
+            break;
+        }
         let tick = t.next_tick_ns;
         sweep(t, tick);
         for slot in 0..t.high {
             if col(&t.state, slot, FREE) != CONFIRMED {
+                continue;
+            }
+            if out.t_ns.len() >= out.capacity {
+                // Full part-way through the tick: the rest of its rows are lost, uncomputed.
+                out.overflow = out.overflow.saturating_add(1);
                 continue;
             }
             let coast = tick - col(&t.last_ns, slot, 0) > coast_ns;
@@ -1106,10 +1151,14 @@ pub fn tracker_flush(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
 /// The address and newest-update time of every live confirmed track, in slot order, for the
 /// caller's inspection (tests, reports).
 pub fn tracker_live(t: &Tracker) -> Vec<(u32, i64)> {
+    tracker_live_iter(t).collect()
+}
+
+/// [`tracker_live`] without building a vector: the runtime path walks the tracks with it.
+pub fn tracker_live_iter(t: &Tracker) -> impl Iterator<Item = (u32, i64)> + '_ {
     (0..t.high)
         .filter(|&s| col(&t.state, s, FREE) == CONFIRMED)
         .map(|s| (col(&t.key, s, NO_ADDR), col(&t.last_ns, s, 0)))
-        .collect()
 }
 
 /// A live track as the fusion layer sees it: the track keyed `key` predicted to `at_ns`, whether

@@ -168,6 +168,31 @@ pub const MAX_SOLVE_TRACKS: usize = if MAX_ASSOC_TRACKS > MAX_CANDIDATES {
 } else {
     MAX_CANDIDATES
 };
+
+// ---- Scratch capacities (RULESET C2, C3) ----------------------------------------------
+//
+// Every buffer the processing path fills is made once, at `fusion_new`, with one of the
+// capacities below or above, and cleared and reused after that. The analysis is the one the
+// limits above carry: the whole-NAS capacity is 38,000 tracks, a radar delivers a few hundred
+// plots a scan (a bucket is one second of it), and each limit is far above that. A buffer that
+// reaches its capacity refuses the item and counts it (`FusionStats::scratch_full`, or the
+// counter of the limit it is the size of); it is never grown.
+
+/// Capacity of the plots of one radar in one bucket, which is also each radar's decision,
+/// anonymous-plot, converted-plot, hard-plot and candidate-plot lists: a bucket takes at most
+/// [`MAX_BUCKET_PLOTS`] of a radar's plots, so none of them can need more.
+pub const RADAR_PLOTS_MAX: usize = MAX_BUCKET_PLOTS;
+/// Capacity of the inputs ready to process at one call, ADS-B and plots each: at most what can be
+/// pending, [`MAX_PENDING`].
+pub const READY_MAX: usize = MAX_PENDING;
+/// Capacity of the time-ordered events of one bucket: every ADS-B measurement of it (at most
+/// [`MAX_PENDING`]) and every applied plot (at most [`MAX_BUCKET_PLOTS`] of each of
+/// [`MAX_RADARS`] radars).
+pub const BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_RADARS * MAX_BUCKET_PLOTS;
+/// Capacity of the candidate indices of one radar's association: the candidates, at most
+/// [`MAX_CANDIDATES`].
+pub const CAND_IX_MAX: usize = MAX_CANDIDATES;
+
 /// A plot with a Mode S address is applied to the track of that address only if its distance
 /// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3
 /// degrees of freedom, tail about 8e-11. Far wider than the ordinary gate (an address is strong

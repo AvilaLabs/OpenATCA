@@ -3026,6 +3026,26 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   rate is past 204,800 ft or 262,144 fpm; no truth is built from it.
 - **OA-TRK-286** A row whose only altitude is geometric passes it flagged geometric whether the source flag
   or the geometric column carried it, so the tracker counts it as a skipped altitude either way.
+- **OA-TRK-287** A radar site's scan epoch must lie in [0, 4e18] ns (1970 to about 2096); any other epoch
+  is refused at configuration. A scan number is computed with checked arithmetic: a plot timed before
+  the site's epoch is refused and counted with the plots refused by validation, never given a clamped
+  scan number, so radar-only confirmation counts hits one rotation apart.
+- **OA-TRK-288** A latency record whose receive time minus sensor time does not fit a 64-bit integer is
+  refused and counted, not stored with a clamped value.
+- **OA-TRK-289** The tracker configuration the fusion layer derives from a site passes the tracker's
+  validation for every rotation period a site accepts (100 ms to 600 s, both ends included): the drop
+  time is never below the clock-step limit it must exceed.
+- **OA-TRK-290** Once the output table is full, an advance computes no further row: the rows it could not
+  emit (the remaining ticks of each confirmed track, to the tick at which the track is dropped) are
+  counted in the table's overflow count in one pass over the tracks, with no work per tick. One
+  confirmed track, a one-row table, 100 ms ticks and an advance of one hour compute at most two rows
+  (36,001 before) and count exactly the rows left out.
+- **OA-TRK-291** The fusion layer's processing path (queues, ready inputs, per-radar association lists,
+  events, initiation lists, candidates, track records, registration history, assignment log) runs in
+  buffers made at start with named capacities and cleared and reused; a buffer at its capacity
+  refuses and counts. Under three radars, registration, Mode S and radar-only plots over 384 s no
+  such buffer changes address or capacity (a check on the buffers: it does not see a temporary
+  allocated and freed within a call).
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
@@ -3063,7 +3083,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   skipped ticks. `tracker_advance` is not subject to the limit (its caller, the replay clock, has its own
   confirmed rules).
 - **OA-TRK-069** A time of applicability or an advance beyond about 146 years either side of the epoch
-  is refused and counted under its own reason, and a tick must be between 1 ms and a quarter of the
+  is refused and counted under its own reason, and a tick must be between 100 ms and a quarter of the
   range, so rounding to a tick and stepping from tick to tick cannot overflow or stop advancing.
 - **OA-TRK-070** The assignment solver refuses a gate that is not a finite positive number, with a typed
   error and every plot left unassigned (a NaN or infinite penalty makes the padded problem meaningless);
@@ -3133,7 +3153,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   count toward a track's eligibility as a registration reference.
 - **OA-TRK-088** A bucket already processed is not processed again: inputs for it that arrive after the
   advance past it are counted late and dropped, so batching the calls does not change what is
-  associated.
+  associated. An advance closes every bucket before its time, whether or not the bucket held an
+  input.
 - **OA-TRK-150** A report of a track whose newest report gives no ground speed (no category, a radar-only
   track) is judged against the filter's own estimated ground speed once the track has two updates, not
   against the 2,000 kt ceiling of "no category": a track steadily flying 300 kt is restarted by a report
