@@ -119,7 +119,7 @@ fn esassp_text(e: &Esassp) -> String {
     );
     let _ = writeln!(
         o,
-        " per-flight position RMS (flights with at least 10 samples): {} flights, p95 {:.1} m, max {:.1} m, {} above the R4 per-flight value of {R4_PER_FLIGHT_M} m",
+        " per-flight position RMS (one flight per truth leg of an aircraft, with at least 10 samples): {} flights, p95 {:.1} m, max {:.1} m, {} above the R4 per-flight value of {R4_PER_FLIGHT_M} m",
         e.flights, e.flight_rms_p95_m, e.flight_rms_max_m, e.flights_over_r4
     );
     o
@@ -401,6 +401,11 @@ fn tracker_section(
         o,
         "  split result: {} reports of {} aircraft: {} in set A (tracker), {} in set B (truth)",
         split.rows_in, split.aircraft, split.set_a, split.set_b
+    );
+    let _ = writeln!(
+        o,
+        "  split removed {} duplicate reports; {} conflicting times ({} reports) kept on one side; {} unreadable rows",
+        split.duplicates_removed, split.conflict_groups, split.conflict_rows, split.rows_invalid
     );
     let _ = writeln!(
         o,
@@ -699,6 +704,11 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
         counts: vec![
             ("set_a_reports".to_string(), split.set_a),
             ("set_b_reports".to_string(), split.set_b),
+            (
+                "split_duplicates_removed".to_string(),
+                split.duplicates_removed,
+            ),
+            ("split_conflict_groups".to_string(), split.conflict_groups),
             (
                 "tracker_one_second_rows_scored".to_string(),
                 scored.tick_rows as u64,
