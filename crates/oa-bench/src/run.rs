@@ -84,48 +84,14 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
     // away) are not in the primary rows; their errors are published here, never dropped.
     let flagged = flagged_assoc(&assoc);
     let (fpairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
-    m.push(flagged_table(
-        t1_cross_track(&fpairs),
-        "T1-flagged",
-        "cross-track position error, flagged associations (not in T1)",
-    ));
-    m.push(flagged_table(
-        t2_along_raw(&fpairs),
-        "T2-raw-flagged",
-        "along-track error, raw, flagged associations (not in T2-raw)",
-    ));
-    m.push(flagged_table(
-        t4_altitude(&fpairs),
-        "T4-flagged",
-        "altitude error, flagged associations (not in T4)",
-    ));
-    // The association table as scalars of a pseudo-metric, so the report carries it.
-    let mut a =
-        crate::stats::new_result("ASSOC", "association of ERAM flights with truth", "flights");
-    for (i, n) in astatus::NAMES.iter().enumerate() {
-        a.scalars.push((
-            (*n).to_string(),
-            assoc.counts.get(i).copied().unwrap_or(0) as f64,
-        ));
+    m.extend(flagged_metrics(&fpairs));
+    let mut reasons = [0u64; astatus::REASON_NAMES.len()];
+    for &r in &assoc.flag_reason {
+        if let Some(c) = reasons.get_mut(usize::from(r)) {
+            *c += 1;
+        }
     }
-    for (i, n) in astatus::REASON_NAMES.iter().enumerate().skip(1) {
-        let c = assoc
-            .flag_reason
-            .iter()
-            .filter(|&&r| usize::from(r) == i)
-            .count();
-        a.scalars.push((format!("flagged: {n}"), c as f64));
-    }
-    a.scalars.push((
-        "address associations not checked (too few shared times, trusted)".to_string(),
-        assoc.unchecked as f64,
-    ));
-    a.notes.push(format!(
-        "selection never uses ERAM accuracy: callsign flights are kept when truth overlaps in time and lies within {:.0} NM; the {:.0} NM / {:.0} ft check only splits the callsign method",
-        cfg.assoc.region_m / crate::geo::NM_M,
-        cfg.assoc.gate_h_m / crate::geo::NM_M,
-        cfg.assoc.gate_v_ft
-    ));
+    let mut a = assoc_result(&assoc.counts, &reasons, assoc.unchecked, &cfg.assoc);
     association_cases(leg, &assoc, &mut a);
     m.push(a);
     RunOutput {
@@ -136,8 +102,60 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
     }
 }
 
+/// The flagged tables (T1, T2-raw, T4) over the pairs of the flagged flights.
+pub(crate) fn flagged_metrics(fpairs: &crate::pair::PairTable) -> Vec<MetricResult> {
+    vec![
+        flagged_table(
+            t1_cross_track(fpairs),
+            "T1-flagged",
+            "cross-track position error, flagged associations (not in T1)",
+        ),
+        flagged_table(
+            t2_along_raw(fpairs),
+            "T2-raw-flagged",
+            "along-track error, raw, flagged associations (not in T2-raw)",
+        ),
+        flagged_table(
+            t4_altitude(fpairs),
+            "T4-flagged",
+            "altitude error, flagged associations (not in T4)",
+        ),
+    ]
+}
+
+/// The association table as scalars of a pseudo-metric, so the report carries it. `reasons` is
+/// the number of flights per [`astatus::REASON_NAMES`] entry.
+pub(crate) fn assoc_result(
+    counts: &[u64],
+    reasons: &[u64],
+    unchecked: u64,
+    cfg: &AssocConfig,
+) -> MetricResult {
+    let mut a =
+        crate::stats::new_result("ASSOC", "association of ERAM flights with truth", "flights");
+    for (i, n) in astatus::NAMES.iter().enumerate() {
+        a.scalars
+            .push(((*n).to_string(), counts.get(i).copied().unwrap_or(0) as f64));
+    }
+    for (i, n) in astatus::REASON_NAMES.iter().enumerate().skip(1) {
+        let c = reasons.get(i).copied().unwrap_or(0);
+        a.scalars.push((format!("flagged: {n}"), c as f64));
+    }
+    a.scalars.push((
+        "address associations not checked (too few shared times, trusted)".to_string(),
+        unchecked as f64,
+    ));
+    a.notes.push(format!(
+        "selection never uses ERAM accuracy: callsign flights are kept when truth overlaps in time and lies within {:.0} NM; the {:.0} NM / {:.0} ft check only splits the callsign method",
+        cfg.region_m / crate::geo::NM_M,
+        cfg.gate_h_m / crate::geo::NM_M,
+        cfg.gate_v_ft
+    ));
+    a
+}
+
 /// The flagged flights as an association of their own: the primary tables never see them.
-fn flagged_assoc(a: &Assoc) -> Assoc {
+pub(crate) fn flagged_assoc(a: &Assoc) -> Assoc {
     let mut f = a.clone();
     f.addr.clone_from(&a.flag_addr);
     f.method.clone_from(&a.flag_method);
@@ -156,7 +174,7 @@ fn flagged_table(mut r: MetricResult, id: &'static str, name: &'static str) -> M
 }
 
 /// Lists the flights kept despite failing the tight check and the flagged flights.
-fn association_cases(leg: &Legacy, a: &Assoc, r: &mut MetricResult) {
+pub(crate) fn association_cases(leg: &Legacy, a: &Assoc, r: &mut MetricResult) {
     for f in 0..a.status.len() {
         let st = a.status.get(f).copied().unwrap_or(0);
         let cs = leg

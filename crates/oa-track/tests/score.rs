@@ -455,6 +455,33 @@ fn synthetic_run() -> (
     (meas, cfg, adsb_truth::build(&b, &TRUTH).unwrap())
 }
 
+/// Metric results compared with NaN equal to NaN (an empty statistic is NaN) and every other
+/// float compared bit for bit; everything else exactly.
+fn assert_metrics_same(
+    a: &[oa_bench::stats::MetricResult],
+    b: &[oa_bench::stats::MetricResult],
+    what: &str,
+) {
+    let ids = |m: &[oa_bench::stats::MetricResult]| m.iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(ids(a), ids(b), "{what}: metric ids and order");
+    for (x, y) in a.iter().zip(b) {
+        let id = x.id;
+        assert_eq!((x.name, x.unit), (y.name, y.unit), "{what} {id}");
+        assert_eq!(x.rows, y.rows, "{what} {id} rows");
+        assert_eq!(x.scalars.len(), y.scalars.len(), "{what} {id} scalar count");
+        for ((n1, v1), (n2, v2)) in x.scalars.iter().zip(&y.scalars) {
+            assert_eq!(n1, n2, "{what} {id}");
+            assert!(
+                v1.to_bits() == v2.to_bits() || (v1.is_nan() && v2.is_nan()),
+                "{what} {id} {n1}: {v1} vs {v2}"
+            );
+        }
+        assert_eq!(x.withheld, y.withheld, "{what} {id}");
+        assert_eq!(x.cases, y.cases, "{what} {id} cases");
+        assert_eq!(x.notes, y.notes, "{what} {id} notes");
+    }
+}
+
 // REQ: OA-TRK-044
 #[test]
 fn scoring_in_address_ranges_gives_the_numbers_of_scoring_in_one_piece() {
@@ -475,7 +502,11 @@ fn scoring_in_address_ranges_gives_the_numbers_of_scoring_in_one_piece() {
             }
             let sc = score_source(&run, &built, &TRUTH, rows, chunk_rows).unwrap();
             println!("{rows:?} chunk_rows {chunk_rows}: {} ranges", ranges.len());
-            assert_eq!(sc.bench.metrics, bench.metrics, "{rows:?} {chunk_rows}");
+            assert_metrics_same(
+                &sc.bench.metrics,
+                &bench.metrics,
+                &format!("{rows:?} {chunk_rows}"),
+            );
             assert_eq!(sc.bench.exclusions, bench.exclusions);
             assert_eq!(sc.bench.pairs, bench.pairs);
             assert_eq!(sc.bench.assoc.counts, bench.assoc.counts);
@@ -525,7 +556,7 @@ fn a_run_spilled_to_files_has_the_digest_scores_and_counters_of_the_run_in_memor
             score_source(&spilled, &built, &TRUTH, rows, 700).unwrap(),
             score_source(&mem, &built, &TRUTH, rows, 700).unwrap(),
         );
-        assert_eq!(a.bench.metrics, b.bench.metrics);
+        assert_metrics_same(&a.bench.metrics, &b.bench.metrics, "spilled");
         assert_eq!(a.esassp, b.esassp);
     }
     // The files are removed with the run.

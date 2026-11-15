@@ -36,7 +36,9 @@ use crate::metrics_th::{
     t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
 };
 use crate::pair::{build_pairs, PairTable};
-use crate::run::{RunConfig, RunOutput};
+use crate::run::{
+    assoc_result, association_cases, flagged_assoc, flagged_metrics, RunConfig, RunOutput,
+};
 use crate::stats::{
     band, new_result, Exclusions, MetricResult, Row, Stats, COAST_NAMES, MAX_CASES,
 };
@@ -208,8 +210,15 @@ fn t5_result(h: &T5Hists) -> MetricResult {
 // A7.2: cold struct, size guard waived
 pub struct ChunkOut {
     pub pairs: PairTable,
+    /// Pairs of the flagged flights (the flagged tables).
+    pub flagged_pairs: PairTable,
     pub exclusions: Exclusions,
     pub assoc_counts: [u64; astatus::COUNT],
+    /// Flights per [`astatus::REASON_NAMES`] entry.
+    pub flag_reasons: [u64; astatus::REASON_NAMES.len()],
+    pub unchecked: u64,
+    /// The association's case lines, in flight order.
+    pub assoc_cases: Vec<String>,
     pub t5: T5Hists,
     pub t6_none: u64,
     pub t6_with: u64,
@@ -232,6 +241,16 @@ pub fn benchmark_chunk(
     let ix = build_th_index(&leg.th, leg.flights.gufi.len());
     let assoc = associate(leg, &ix, truth, tix, &cfg.assoc);
     let (pairs, mut ex) = build_pairs(leg, &ix, &assoc, truth, &cfg.pair);
+    let flagged = flagged_assoc(&assoc);
+    let (flagged_pairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
+    let mut flag_reasons = [0u64; astatus::REASON_NAMES.len()];
+    for &r in &assoc.flag_reason {
+        if let Some(c) = flag_reasons.get_mut(usize::from(r)) {
+            *c += 1;
+        }
+    }
+    let mut case_res = new_result("ASSOC", "", "");
+    association_cases(leg, &assoc, &mut case_res);
     let plan = plan_index(leg);
     let ctx = EventCtx {
         assoc: &assoc,
@@ -251,8 +270,12 @@ pub fn benchmark_chunk(
     let with = leg.th.recv_ms.iter().filter(|&&r| r != NO_TIME).count() as u64;
     ChunkOut {
         pairs,
+        flagged_pairs,
         exclusions: ex,
         assoc_counts: assoc.counts,
+        flag_reasons,
+        unchecked: assoc.unchecked,
+        assoc_cases: case_res.cases,
         t5,
         t6_none: leg.th.pos_ms.len() as u64 - with,
         t6_with: with,
@@ -267,6 +290,10 @@ pub fn benchmark_chunk(
 #[derive(Default)]
 pub struct ChunkAcc {
     pairs: PairTable,
+    flagged_pairs: PairTable,
+    flag_reasons: [u64; astatus::REASON_NAMES.len()],
+    unchecked: u64,
+    assoc_cases: Vec<String>,
     exclusions: Exclusions,
     assoc_counts: [u64; astatus::COUNT],
     t5: T5Hists,
@@ -278,8 +305,24 @@ pub struct ChunkAcc {
 
 fn flow_is_empty(r: &MetricResult) -> bool {
     r.rows.iter().all(|x| x.stats.n == 0)
-        && r.scalars.iter().all(|(_, v)| *v == 0.0)
+        && r.scalars.iter().all(|(_, v)| *v == 0.0 || v.is_nan())
         && r.cases.is_empty()
+}
+
+/// Appends the rows of `b` to `a`.
+fn pairs_extend(a: &mut PairTable, b: &PairTable) {
+    a.addr.extend_from_slice(&b.addr);
+    a.t_ms.extend_from_slice(&b.t_ms);
+    a.cross_m.extend_from_slice(&b.cross_m);
+    a.along_m.extend_from_slice(&b.along_m);
+    a.speed_err_kt.extend_from_slice(&b.speed_err_kt);
+    a.hdg_err_deg.extend_from_slice(&b.hdg_err_deg);
+    a.alt_err_ft.extend_from_slice(&b.alt_err_ft);
+    a.truth_speed_mps.extend_from_slice(&b.truth_speed_mps);
+    a.method.extend_from_slice(&b.method);
+    a.phase.extend_from_slice(&b.phase);
+    a.band.extend_from_slice(&b.band);
+    a.coast.extend_from_slice(&b.coast);
 }
 
 /// Adds one chunk to the sums.
@@ -295,24 +338,22 @@ pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
             r.id
         )));
     }
-    let (a, b) = (&mut acc.pairs, &c.pairs);
-    a.addr.extend_from_slice(&b.addr);
-    a.t_ms.extend_from_slice(&b.t_ms);
-    a.cross_m.extend_from_slice(&b.cross_m);
-    a.along_m.extend_from_slice(&b.along_m);
-    a.speed_err_kt.extend_from_slice(&b.speed_err_kt);
-    a.hdg_err_deg.extend_from_slice(&b.hdg_err_deg);
-    a.alt_err_ft.extend_from_slice(&b.alt_err_ft);
-    a.truth_speed_mps.extend_from_slice(&b.truth_speed_mps);
-    a.method.extend_from_slice(&b.method);
-    a.phase.extend_from_slice(&b.phase);
-    a.band.extend_from_slice(&b.band);
-    a.coast.extend_from_slice(&b.coast);
+    pairs_extend(&mut acc.pairs, &c.pairs);
+    pairs_extend(&mut acc.flagged_pairs, &c.flagged_pairs);
     for (k, v) in c.exclusions {
         *acc.exclusions.entry(k).or_insert(0) += v;
     }
     for (a, b) in acc.assoc_counts.iter_mut().zip(c.assoc_counts.iter()) {
         *a += b;
+    }
+    for (a, b) in acc.flag_reasons.iter_mut().zip(c.flag_reasons.iter()) {
+        *a += b;
+    }
+    acc.unchecked += c.unchecked;
+    for case in c.assoc_cases {
+        if acc.assoc_cases.len() < MAX_CASES {
+            acc.assoc_cases.push(case);
+        }
     }
     acc.t5.all.merge(&c.t5.all);
     for (a, b) in acc.t5.band.iter_mut().zip(c.t5.band.iter()) {
@@ -371,13 +412,14 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
     m.push(t8);
     m.push(t9);
     m.extend(flows);
-    let mut a = new_result("ASSOC", "association of ERAM flights with truth", "flights");
-    for (i, n) in astatus::NAMES.iter().enumerate() {
-        a.scalars.push((
-            (*n).to_string(),
-            acc.assoc_counts.get(i).copied().unwrap_or(0) as f64,
-        ));
-    }
+    m.extend(flagged_metrics(&acc.flagged_pairs));
+    let mut a = assoc_result(
+        &acc.assoc_counts,
+        &acc.flag_reasons,
+        acc.unchecked,
+        &cfg.assoc,
+    );
+    a.cases = acc.assoc_cases;
     m.push(a);
     let n_pairs = pairs.t_ms.len();
     Ok((
@@ -386,6 +428,7 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
             exclusions: acc.exclusions,
             assoc: Assoc {
                 counts: acc.assoc_counts,
+                unchecked: acc.unchecked,
                 ..Assoc::default()
             },
             pairs: n_pairs,
