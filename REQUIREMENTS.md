@@ -1325,6 +1325,9 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-252** A report that fits neither reading while a step is pending is refused as too far ahead and
   counted, and the step stays pending until a report that fits.
 - **OA-RPL-253** Steps before the first report add; the resolution uses their sum.
+- **OA-RPL-254** The progress line's replayed span is computed with saturating arithmetic: a stream whose
+  clock steps are each representable but whose total span is not does not stop the run.
+- **OA-RPL-255** A file is read in pieces of at most `MAX_CHUNK` bytes; its size never sets an allocation.
 - **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
   report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
   a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.
@@ -2123,7 +2126,7 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-016** `oa-truth-check <clip.oaf>` reads OAF1 ADS-B frames and prints the legs, rows
   kept and removed by reason, the leave-one-out table, the share of query times under the
   uncertainty gate, the build time and the model digest (equal to the library's); `--accel-q`,
-  `--sigma-scale` and `--no-loo` are honoured; usage errors and unreadable input exit 2.
+  `--sigma-scale` (each up to 1e6) and `--no-loo` are honoured; usage errors and unreadable input exit 2.
 - **OA-TRUTH-017** An aircraft flying 900 kt in a straight line and reporting 900 kt gives one
   continuous leg with no report removed as a jump, at 1 s and at 3 s between reports.
 - **OA-TRUTH-018** A position jump of 2,782 kt in a 450 kt track is removed and counted, whether or
@@ -2165,6 +2168,11 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   that prints none gets the same selection and weight with or without the jump row.
 - **OA-TRUTH-032** A low-quality row that is also a jump does not remove later usable reports; a
   low-quality row on the track still does.
+- **OA-TRUTH-033** A `sigma_scale` or `accel_q` above 1e6 is refused at configuration (`BadConfig`): the
+  covariance squares them and would overflow to infinity and NaN.
+- **OA-TRUTH-034** A variance that is NaN or infinite has no horizontal radius: the query refuses it as too
+  uncertain, the uncertainty statistics count it as a miss, and a leave-one-out prediction with a
+  non-finite state or variance counts as not predicted. It is never zero uncertainty.
 
 ## M2 — Benchmark harness (oa-bench)
 

@@ -7,7 +7,7 @@
 
 use oa_adsb::NONE_I32;
 
-use crate::smooth::{interp, smooth, LegView, SIGMA95};
+use crate::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
 use crate::{Dist, Fraction, LooStats, TruthConfig};
 
 const NS_PER_MS: i64 = 1_000_000;
@@ -96,6 +96,11 @@ pub(crate) fn loo_leg(
             acc.no_bracket += 1;
             continue;
         };
+        // A prediction with a non-finite state or variance is not a prediction: counted as such.
+        if !x.iter().all(|v| v.is_finite()) || !p[0].is_finite() {
+            acc.no_bracket += 1;
+            continue;
+        }
         let [pe, ve, _, pn, vn, _] = x;
         let (dx, dy) = (ek - pe, nk - pn);
         let hz = (dx * dx + dy * dy).sqrt();
@@ -108,7 +113,7 @@ pub(crate) fn loo_leg(
         }
         let var = p[0].max(0.0);
         acc.under_gate.n += 1;
-        if SIGMA95 * var.sqrt() <= cfg.max_sigma95_h_m {
+        if sigma95_h_m(var).is_some_and(|s| s <= cfg.max_sigma95_h_m) {
             acc.under_gate.hit += 1;
         }
         acc.coverage.n += 1;

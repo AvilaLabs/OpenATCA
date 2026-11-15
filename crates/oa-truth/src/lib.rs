@@ -76,7 +76,7 @@ pub use query::{
     aircraft_addrs, leg_addr, leg_count, leg_end_ms, leg_end_ns, leg_reports, leg_start_ms,
     leg_start_ns, legs_of, truth_at, truth_hash_into,
 };
-pub use smooth::SIGMA95;
+pub use smooth::{sigma95_h_m, SIGMA95};
 
 use std::fmt;
 
@@ -113,6 +113,11 @@ pub const JUMP_RESYNC: u32 = 5;
 pub const ACCEL_Q: f64 = 0.1;
 /// Multiplier on the per-axis sigma derived from NACp (1.0 takes the NACp bound at face value).
 pub const SIGMA_SCALE: f64 = 1.0;
+/// Largest accepted `sigma_scale`: with the widest NACp sigma (a few km) its square stays far
+/// inside the finite range of the covariance.
+pub const MAX_SIGMA_SCALE: f64 = 1e6;
+/// Largest accepted `accel_q`, for the same reason.
+pub const MAX_ACCEL_Q: f64 = 1e6;
 /// A leg with fewer kept reports than this is not smoothed; its reports are removed and counted.
 pub const MIN_LEG_POINTS: u32 = 3;
 /// Leave-one-out: every this-many-th report of a leg is hidden.

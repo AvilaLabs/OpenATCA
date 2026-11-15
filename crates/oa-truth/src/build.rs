@@ -8,7 +8,7 @@ use oa_adsb::{
 use crate::frame::{frame_angle, frame_new, project, Frame};
 use crate::loo::{loo_finish, loo_leg, LooAcc};
 use crate::quality::{nacp_epu_m, quality_eval, QualityState};
-use crate::smooth::{interp, smooth, LegView, SIGMA95};
+use crate::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
 use crate::{
     Fraction, Truth, TruthConfig, TruthError, TruthStats, MAX_FRAME_ARC_RAD, MAX_REPORTS,
     MAX_SAME_TIME_DISTINCT, REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_NO_QUALITY, REM_OVERSIZED,
@@ -49,7 +49,13 @@ fn check_config(c: &TruthConfig) -> Result<(), TruthError> {
         (c.accel_q, "accel_q"),
         (c.sigma_scale, "sigma_scale"),
     ] {
-        if !v.is_finite() || v <= 0.0 {
+        // The covariance squares these; past the caps it overflows to infinity and NaN.
+        let cap = match w {
+            "accel_q" => crate::MAX_ACCEL_Q,
+            "sigma_scale" => crate::MAX_SIGMA_SCALE,
+            _ => f64::MAX,
+        };
+        if !v.is_finite() || v <= 0.0 || v > cap {
             return bad(w);
         }
     }
@@ -518,7 +524,7 @@ fn flush_leg(
         for k in 0..n {
             if let Some(p) = sm.ps.get(k) {
                 at_reports.n += 1;
-                if SIGMA95 * p[0].max(0.0).sqrt() <= gate {
+                if sigma95_h_m(p[0]).is_some_and(|s| s <= gate) {
                     at_reports.hit += 1;
                 }
             }
@@ -526,7 +532,7 @@ fn flush_leg(
                 if tb - ta <= bracket2 {
                     if let Some((_, p)) = interp(&view, k, ta + (tb - ta) / 2, cfg.accel_q) {
                         at_mid.n += 1;
-                        if SIGMA95 * p[0].max(0.0).sqrt() <= gate {
+                        if sigma95_h_m(p[0]).is_some_and(|s| s <= gate) {
                             at_mid.hit += 1;
                         }
                     }
