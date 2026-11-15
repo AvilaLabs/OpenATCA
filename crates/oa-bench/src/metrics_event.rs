@@ -1165,9 +1165,7 @@ pub fn h1_handoffs(
                 vals.push((ts - c) as f64 / 1000.0);
                 kinds.push(code);
             }
-            Err(NoCrossing::TruthGap) => {
-                exclude(ex, "H1", "truth missing across the boundary crossing")
-            }
+            Err(NoCrossing::TruthGap) => exclude(ex, "H1", "crossing inside a truth gap"),
             Err(NoCrossing::NotSeen) => {
                 exclude(ex, "H1", "no boundary crossing in truth near the event")
             }

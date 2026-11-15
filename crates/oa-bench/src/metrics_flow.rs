@@ -109,6 +109,8 @@ pub struct PresenceParts {
     pub started_inside: u64,
     pub never_zone: u64,
     pub never_tracked: u64,
+    /// Entries whose first associated position is at or before the zone entry.
+    pub established_before_entry: u64,
 }
 
 /// Adds `b` to `a`.
@@ -120,6 +122,7 @@ pub fn presence_add(a: &mut PresenceParts, b: PresenceParts) {
     a.started_inside += b.started_inside;
     a.never_zone += b.never_zone;
     a.never_tracked += b.never_tracked;
+    a.established_before_entry += b.established_before_entry;
 }
 
 /// The T7 and T8 sums over the truth legs whose address is in `lo..=hi`, against the flights of
@@ -181,10 +184,11 @@ pub fn presence_parts(
             Some((_, true)) => p.started_inside += 1,
             Some((tin, false)) => {
                 let first = ts.and_then(|v| {
-                    let k = v.partition_point(|&x| x < tin - 600_000);
+                    let k = v.partition_point(|&x| x < l.start_ms);
                     v.get(k).copied().filter(|&x| x <= l.end_ms)
                 });
                 match first {
+                    Some(f) if f <= tin => p.established_before_entry += 1,
                     Some(f) => p.delays.push((li, (f - tin) as f64 / 1000.0)),
                     None => p.never_tracked += 1,
                 }
@@ -240,13 +244,19 @@ pub fn presence_results(
         .push(("legs_never_in_zone".into(), p.never_zone as f64));
     r8.scalars
         .push(("entries_never_tracked".into(), p.never_tracked as f64));
+    r8.scalars.push((
+        "established_before_entry".into(),
+        p.established_before_entry as f64,
+    ));
     (r7, r8)
 }
 
 /// T7 presence and T8 initiation delay. T7: over a grid on every truth leg, the share of truth
 /// flight time inside the zone for which an ERAM position of the associated flight lies within
-/// the window; a leg with no associated flight counts as absent. T8: first ERAM position time
-/// minus the truth entry into the zone (or takeoff), seconds, signed.
+/// the window; a leg with no associated flight counts as absent. T8: time of the first
+/// associated ERAM position of the leg minus the truth entry into the zone (or takeoff), seconds.
+/// A value of zero or less means the track was established before entry: counted as
+/// "established before entry", not in the delay distribution.
 pub fn t7_t8_presence(
     leg: &Legacy,
     ix: &ThIndex,

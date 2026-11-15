@@ -99,7 +99,7 @@ fn a_handoff_crossing_across_a_long_truth_gap_is_excluded_and_counted() {
     let (r, ex) = h1(TS - 20_000, Some((TS - 300_000, TS - 30_000)));
     assert_eq!(r.rows[0].stats.n, 0, "{:?}", r.rows[0].stats);
     assert_eq!(
-        ex_count(&ex, "H1", "truth missing across the boundary crossing"),
+        ex_count(&ex, "H1", "crossing inside a truth gap"),
         1,
         "{ex:?}"
     );
@@ -125,10 +125,41 @@ fn a_crossing_with_a_short_truth_gap_that_hides_the_crossing_is_excluded() {
     let (r, ex) = h1(TS - 20_000, Some((TS - 60_000, TS - 5_000)));
     assert_eq!(r.rows[0].stats.n, 0);
     assert_eq!(
-        ex_count(&ex, "H1", "truth missing across the boundary crossing"),
+        ex_count(&ex, "H1", "crossing inside a truth gap"),
         1,
         "{ex:?}"
     );
+}
+
+// REQ: OA-BENCH-116
+#[test]
+fn a_crossing_inside_a_truth_gap_between_probes_is_excluded_not_placed() {
+    // Over A at 90 s before the event, nothing for 20 s, then over B: with a 10 s search step
+    // the crossing is somewhere in the gap and no time may be given.
+    let (r, ex) = h1(TS - 90_000, Some((TS - 109_000, TS - 91_000)));
+    assert_eq!(
+        r.rows[0].stats.n, 0,
+        "scored a fabricated crossing: {:?}",
+        r.rows[0].stats
+    );
+    assert_eq!(
+        ex_count(&ex, "H1", "crossing inside a truth gap"),
+        1,
+        "{ex:?}"
+    );
+}
+
+// REQ: OA-BENCH-116
+#[test]
+fn a_crossing_with_no_gap_is_located_to_one_second() {
+    let (r, ex) = h1(TS - 95_000, None);
+    assert_eq!(r.rows[0].stats.n, 1, "{ex:?}");
+    assert!(
+        (r.rows[0].stats.mean - 95.0).abs() <= 1.0,
+        "{:?}",
+        r.rows[0].stats
+    );
+    assert!(ex.is_empty(), "{ex:?}");
 }
 
 // REQ: OA-BENCH-101
