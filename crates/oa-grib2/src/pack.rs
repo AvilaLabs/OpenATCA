@@ -190,32 +190,25 @@ const GROUP_BYTES: u64 = 4 + 4 + std::mem::size_of::<usize>() as u64;
 /// value (f32). Fixed by the point count, which the grid already bounds.
 const POINT_BYTES: u64 = 8 + 4;
 
-/// Groups a field may declare beyond what its data section pays for: a constant or nearly
-/// constant field has a handful of groups and tables of zero bits.
-pub const FREE_GROUPS: u64 = 4096;
-
-/// The memory a complex-packed field with `n` points and `ng` groups needs while it is
-/// unpacked: the group tables, the integers and the decoded values.
+/// The memory a complex-packed field with `n` points and `ng` groups reserves while it is
+/// unpacked: the group tables, the integers and the decoded values. Exact, not an estimate.
 pub fn scratch_bytes(n: u64, ng: u64) -> u64 {
     ng.saturating_mul(GROUP_BYTES)
         .saturating_add(n.saturating_mul(POINT_BYTES))
 }
 
-/// What the same field may use: the integers and decoded values for its points, and group tables
-/// for [`FREE_GROUPS`] groups plus one group per bit of the data section (a real group costs at
-/// least a bit of table, so a field whose tables are real stays within it). One length-one
-/// group per point with zero-bit tables and no data has no such backing and is refused.
-pub fn scratch_budget(n: u64, payload_len: usize) -> u64 {
-    scratch_bytes(
-        n,
-        FREE_GROUPS.saturating_add((payload_len as u64).saturating_mul(8)),
-    )
-}
-
-/// Refuses a complex field whose scratch exceeds its budget, before anything is allocated.
-pub fn check_scratch(n: u64, ng: u64, payload_len: usize) -> Result<(), Grib2Error> {
+/// Refuses a complex field with more groups than points, or whose scratch exceeds the cap in
+/// `limits`, before anything is allocated. The cap does not depend on the data section: a
+/// zero-width group costs a few bits of table but 16 bytes of scratch. Measured need: the RAP
+/// 130 grid (451 x 337 = 151,987 points) takes 1.8 MB plus 16 bytes a group, an HRRR CONUS grid
+/// (1799 x 1059 = 1,905,141 points) 22.9 MB plus the same, and even one group per point on HRRR
+/// is 53 MB, under the 128 MiB default.
+pub fn check_scratch(n: u64, ng: u64, limits: &Limits) -> Result<(), Grib2Error> {
+    if ng > n {
+        return Err(Grib2Error::BadPacking("more groups than points"));
+    }
     let needed = scratch_bytes(n, ng);
-    let budget = scratch_budget(n, payload_len);
+    let budget = limits.scratch_bytes;
     if needed > budget {
         return Err(Grib2Error::ScratchBudget { needed, budget });
     }
@@ -233,6 +226,26 @@ fn check_count(rp: &Repr) -> Result<(), Grib2Error> {
 
 /// Unpacks `payload` (section 7 without its 5-octet header) into `rp.ndata` values.
 pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
+    unpack_with(rp, payload, &Limits::default())
+}
+
+/// What a decode may use beyond the grid limits: `scratch_bytes` caps the group tables, packed
+/// integers and decoded values of a complex-packed field together (default 128 MiB).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub scratch_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            scratch_bytes: 128 << 20,
+        }
+    }
+}
+
+/// [`unpack`] under explicit limits.
+pub fn unpack_with(rp: &Repr, payload: &[u8], limits: &Limits) -> Result<Vec<f32>, Grib2Error> {
     check_count(rp)?;
     let n = rp.ndata as usize;
     match rp.complex {
@@ -243,7 +256,7 @@ pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
                 .map(|(k, &x)| scale_value(rp, i64::from(x), k))
                 .collect()
         }
-        Some(c) => unpack_complex(rp, &c, payload, n),
+        Some(c) => unpack_complex(rp, &c, payload, n, limits),
     }
 }
 
@@ -305,6 +318,7 @@ fn unpack_complex(
     c: &Complex,
     payload: &[u8],
     n: usize,
+    limits: &Limits,
 ) -> Result<Vec<f32>, Grib2Error> {
     let short = Grib2Error::BadPacking("data section shorter than its descriptors");
     let ng = c.ngroups as usize;
@@ -329,9 +343,9 @@ fn unpack_complex(
             br.read(8).ok_or_else(|| short.clone())?;
         }
     }
-    // The scratch must be justified by the grid and the data section before it is allocated:
-    // the three tables below can be zero bits wide, which costs the input nothing.
-    check_scratch(n as u64, u64::from(c.ngroups), payload.len())?;
+    // The tables below can be zero bits wide, which costs the input nothing, so the scratch is
+    // capped on its own before anything is allocated.
+    check_scratch(n as u64, u64::from(c.ngroups), limits)?;
     // The three group tables must fit before anything is allocated for them.
     let table_bits = (ng as u64)
         .saturating_mul(u64::from(rp.nbits) + u64::from(c.width_bits) + u64::from(c.length_bits));

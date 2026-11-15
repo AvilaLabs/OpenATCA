@@ -1378,28 +1378,112 @@ fn zero_bit_group_tables_cannot_amplify_a_tiny_section() {
     let p = encode_complex(&x, 1.0, 0, 0, &o);
     assert!(p.sect7.len() <= 5, "no data octets");
     let rp = crate::pack::parse_repr(&p.sect5).unwrap();
-    let r = crate::pack::unpack(&rp, &p.sect7[5..]);
+    let limits = crate::pack::Limits {
+        scratch_bytes: 1 << 20,
+    };
+    let r = crate::pack::unpack_with(&rp, &p.sect7[5..], &limits);
     assert!(
         matches!(r, Err(Grib2Error::ScratchBudget { .. })),
         "{:?}",
         r.map(|v| v.len())
     );
-    // The budget with modelled limits: the points always fit; groups beyond FREE_GROUPS need one
-    // bit of data section each, and the check runs on the numbers alone (nothing allocated).
-    use crate::pack::{check_scratch, scratch_budget, scratch_bytes, FREE_GROUPS};
-    let n = 10u64;
-    assert!(check_scratch(n, 1, 0).is_ok());
-    assert!(check_scratch(n, FREE_GROUPS, 0).is_ok());
-    assert!(check_scratch(n, FREE_GROUPS + 1, 0).is_err());
-    assert!(check_scratch(n, FREE_GROUPS + 800, 100).is_ok());
-    assert!(check_scratch(n, FREE_GROUPS + 801, 100).is_err());
-    // The largest field the crate admits, one group per point, with no data: refused without
-    // sizing anything (the numbers are the audit's 16 Mi-point case).
+    // The cap check runs on the numbers alone (nothing allocated): the largest grid with one
+    // group per point needs 28 bytes a point, past the default 128 MiB.
+    use crate::pack::{check_scratch, scratch_bytes, Limits};
     let max = crate::MAX_GRID_POINTS;
-    let Err(Grib2Error::ScratchBudget { needed, budget }) = check_scratch(max, max, 0) else {
+    let d = Limits::default();
+    let Err(Grib2Error::ScratchBudget { needed, budget }) = check_scratch(max, max, &d) else {
         panic!("not refused");
     };
     assert_eq!(needed, scratch_bytes(max, max));
-    assert_eq!(budget, scratch_budget(max, 0));
-    assert!(needed > 2 * budget);
+    assert_eq!(budget, 128 << 20);
+    // An HRRR-size grid with one group per point is within it.
+    assert!(check_scratch(1_905_141, 1_905_141, &d).is_ok());
+}
+
+/// A complex-packed 5.2 field of `n` points as the zero-cost construction: `ng` length-one groups
+/// with 1-bit tables of zeros (reference 0, width 0, length 1) and no value bits.
+#[cfg(test)]
+fn zero_cost_groups(n: u32, ng: u32) -> (crate::pack::Repr, Vec<u8>) {
+    let rp = crate::pack::Repr {
+        template: 2,
+        ndata: n,
+        r: 0.0,
+        e: 0,
+        d: 0,
+        nbits: 1,
+        complex: Some(crate::pack::Complex {
+            missing_mgmt: 0,
+            ngroups: ng,
+            width_ref: 0,
+            width_bits: 1,
+            length_ref: 1,
+            length_inc: 0,
+            last_length: 1,
+            length_bits: 1,
+            diff_order: 0,
+            extra_octets: 0,
+        }),
+    };
+    (rp, vec![0u8; 3 * (ng as usize).div_ceil(8)])
+}
+
+// REQ: OA-GRIB-052
+#[test]
+fn scratch_cap_refuses_one_group_per_point_before_allocating() {
+    use crate::pack::{unpack_with, Limits};
+    // The cheap construction at a few hundred thousand points: the tables are 3 bits a group,
+    // so the payload is ~110 kB, yet the working set is ~8 MB against a 1 MiB cap.
+    let n = 300_000u32;
+    let (rp, payload) = zero_cost_groups(n, n);
+    assert!(payload.len() < 120_000);
+    let limits = Limits {
+        scratch_bytes: 1 << 20,
+    };
+    let r = unpack_with(&rp, &payload, &limits);
+    let Err(Grib2Error::ScratchBudget { needed, budget }) = r else {
+        panic!("not refused: {:?}", r.map(|v| v.len()));
+    };
+    assert_eq!(budget, 1 << 20);
+    assert_eq!(
+        needed,
+        crate::pack::scratch_bytes(u64::from(n), u64::from(n))
+    );
+    assert!(needed > 8_000_000);
+    // The default cap is 128 MiB.
+    assert_eq!(Limits::default().scratch_bytes, 128 << 20);
+}
+
+// REQ: OA-GRIB-053
+#[test]
+fn ordinary_constant_field_decodes_under_the_cap() {
+    use crate::pack::{unpack_with, Limits};
+    let o = ComplexOpts {
+        group_lens: vec![1000],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 2,
+    };
+    let p = encode_complex(&vec![Some(7); 1000], 0.0, 0, 0, &o);
+    let rp = crate::pack::parse_repr(&p.sect5).unwrap();
+    let limits = Limits {
+        scratch_bytes: 1 << 20,
+    };
+    let v = unpack_with(&rp, &p.sect7[5..], &limits).unwrap();
+    assert_eq!(v.len(), 1000);
+    assert!(v.iter().all(|&x| x == 7.0));
+    assert_eq!(crate::pack::unpack(&rp, &p.sect7[5..]).unwrap(), v);
+}
+
+// REQ: OA-GRIB-054
+#[test]
+fn more_groups_than_points_is_refused() {
+    let (rp, payload) = zero_cost_groups(10, 11);
+    assert_eq!(
+        crate::pack::unpack(&rp, &payload),
+        Err(Grib2Error::BadPacking("more groups than points"))
+    );
+    // As many groups as points is allowed.
+    let (rp, payload) = zero_cost_groups(10, 10);
+    assert_eq!(crate::pack::unpack(&rp, &payload).unwrap().len(), 10);
 }
