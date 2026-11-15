@@ -398,6 +398,34 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-100** (proof) For every sequence number and every reachable health counter, `observe_seq` never
   panics or overflows; a forward jump adds exactly one gap event and the saturated number of missing frames,
   and any other frame changes neither.
+- **OA-FEED-150** Every refused frame (each error kind) adds one to the health `frame_errors`
+  figure and moves nothing else; the skipped-byte figure is set from the reader's running total;
+  both show as `errors=` and `skipped=` in the summary line.
+- **OA-FEED-151** Every latency bin edge is exact: the first value of each bin, one above it and
+  one below it (the previous bin) land where documented, negatives land in bin 0 and anything from
+  600000 ms in the overflow bin.
+- **OA-FEED-152** A frame repeating the last `seq` is a duplicate (not a regression, also for the
+  first frame) and leaves the expectation unchanged; the expected `seq` is never a gap; one ahead
+  is one gap of one missing frame; one below the last is a regression.
+- **OA-FEED-153** Latency is the receive time in whole milliseconds minus the JMS time: exact
+  values land in the maximum and the histogram, equal times are zero (not skew), a stamp ahead by
+  one millisecond is skew.
+- **OA-FEED-154** The latency quantile is `None` without samples and with a zero denominator
+  (either alone, no division by zero), otherwise the upper edge of the bin holding it.
+- **OA-FEED-155** The summary prints `state=disconnected` after a disconnect STATUS, and
+  `lat_p50_ms`, `lat_p95_ms` and `lat_max_ms` all as `-` while there are no latency samples
+  (none yet, no JMS stamp, or only clock skew).
+- **OA-FEED-156** `push` takes exactly what fits (a full buffer, then one byte over takes 0), an
+  emptied buffer takes a full buffer again, and when consumed bytes at the front are in the way it
+  compacts so all that then fits is taken and no byte is lost.
+- **OA-FEED-157** A frame is delivered exactly when all its bytes are present: one byte short
+  waits, exactly one frame and one frame plus one byte or the next magic deliver it; four magic
+  bytes and a full header are judged, one byte fewer waits.
+- **OA-FEED-158** `offset` is the absolute stream position of the next unconsumed byte after
+  several frames, after a resync over garbage (including garbage alone), after a compaction and
+  after a truncated end.
+- **OA-FEED-159** The recording defaults are a 2 GiB total cap and 256 MiB rotation size, kept
+  when only the other option is given.
 
 ### Compression (oa-deflate)
 
