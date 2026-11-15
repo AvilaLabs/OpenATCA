@@ -505,6 +505,11 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 
 ### Compression (oa-deflate)
 
+- **OA-FEED-174** A frame below the next expected `seq` but not below where the last gap began (as opened,
+  before any late frame shrank it), and outside the part of that gap still open, is a repeat of a late frame or
+  a late frame of a part the gap record no longer covers: it counts as a duplicate and moves neither the
+  expectation nor `missing`, so a redelivered late frame (3, 5, 4, 4, 6) makes no false gap. A frame below that
+  point is a regression as before.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
