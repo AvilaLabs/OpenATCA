@@ -1314,6 +1314,7 @@ fn a_position_on_the_far_side_of_the_earth_is_a_jump_not_a_coherent_update() {
         sensor: 1,
         ident: oa_track::NO_IDENT,
         flags: M_HAS_VEL,
+        category: 0,
     };
     for k in 0..10 {
         tracker_update(&mut t, &m_at(k, 0), &mut out);

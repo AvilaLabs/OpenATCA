@@ -2156,6 +2156,7 @@ mod tests {
             sensor: 7,
             ident: crate::types::NO_IDENT,
             flags: crate::types::M_HAS_VEL,
+            category: 0,
         }
     }
 
