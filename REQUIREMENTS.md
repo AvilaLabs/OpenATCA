@@ -237,10 +237,15 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 - **OA-TRC-001** Lists every requirement without a test or proof and every test or proof tag naming an
   unknown requirement, and exits non-zero if either list is non-empty. A Kani harness (`// REQ:` above
-  `#[kani::proof]`, with an optional `#[kani::unwind(n)]`) counts as a proof and the report marks it as one,
-  apart from tests.
+  `#[kani::proof]`, with an optional `#[kani::unwind(n)]`) counts as a proof harness and the report marks it
+  as one, apart from tests.
 - **OA-TRC-100** A `// REQ:` tag above `#[kani::proof]` (or an unwind bound and then the proof, in either
-  order) is accepted as a proof and listed as one; a tag above an unwind bound with no proof is malformed.
+  order) is accepted as a proof harness and listed as one; a tag above an unwind bound with no proof is malformed.
+- **OA-TRC-101** The matrix status of a requirement says only what was checked: "test linked" for a tagged
+  test, "proof harness linked" for a tagged Kani harness, "test and proof harness linked" for both. It never
+  says "verified" or "proved", and a harness whose body asserts false is still "proof harness linked".
+- **OA-TRC-102** The last line of the text report says it is a traceability result (every requirement linked,
+  ids unique, no test or proof run) and ends in `PASS` or `FAIL`.
 
 ### Hashing (oa-sha256)
 
