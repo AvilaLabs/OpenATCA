@@ -2133,3 +2133,66 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-047** `oa-track-run --no-score` runs the tracker core and the latency replay without truth or
   scoring, writes `core.txt` with throughput with and without the one-second output, per-stage latency,
   and resident memory per phase, and the replay's output digest equals the scoring run's.
+
+### Radar fusion with registration (oa-track: radar, assoc, registration, fusion; study binary oa-track-fusion)
+
+- **OA-TRK-030** A radar plot (slant range, azimuth, Mode C altitude) becomes a position in the track's local
+  plane by the exact inverse of the WGS-84 east-north-up forward model the simulator uses (spherical start
+  for the elevation, Newton on the target height), earth curvature and height included; the result inverts
+  the forward model to within a millimetre and agrees with `oa-sensorsim`'s forward model.
+- **OA-TRK-031** The plot covariance is first order in range, azimuth and height (along-range from range and
+  height error, cross-range from azimuth times the ground range) with the range and altitude quantisation
+  variance added, and matches a Monte Carlo of the conversion.
+- **OA-TRK-032** Height comes from Mode C, else from the track the plot is tested against, else the plot is
+  refused; Mode C altitude carries its quantisation noise.
+- **OA-TRK-033** A registration bias is subtracted from the raw plot and its variance added to the plot's.
+- **OA-TRK-034** An invalid site or plot (non-finite, out of range, zero period) is refused with a named
+  error and never converted.
+- **OA-TRK-035** The assignment of plots to tracks within a gate is solved exactly (components of the gate
+  graph by union-find, a padded square problem per component, Hungarian method with potentials) and equals
+  an exhaustive search on random instances; nearest neighbour is worse where two plots want one track;
+  components above 160 fall back to greedy and are counted.
+- **OA-TRK-036** A pair at or above the gate is never assigned; a plot whose assigned track has a competitor
+  within the ambiguity margin is marked ambiguous.
+- **OA-TRK-037** The per-radar range and azimuth bias estimate converges to the true bias with an uncertainty
+  that is honest (the error is within 3 sigma over repeated runs).
+- **OA-TRK-038** A residual beyond 4 sigma is rejected and the estimate is clamped to its limits.
+- **OA-TRK-039** A reference with a larger position uncertainty moves the estimate less.
+- **OA-TRK-048** Radar-only initiation needs 3 plots in 4 scans of one radar, consistent in position,
+  speed, acceleration and altitude; one or two plots never make a track.
+- **OA-TRK-049** Two isolated false plots never make a track.
+- **OA-TRK-050** A Mode A code alone never assigns a plot, on any track.
+- **OA-TRK-051** A plot carrying a Mode S address goes to the track keyed by that address (created if need
+  be) and to no other, whatever the kinematics say.
+- **OA-TRK-052** No decision reads the simulator's truth label: scrambling every label leaves the tracker's
+  output byte-identical.
+- **OA-TRK-053** Two tracks crossing at one altitude are held (the plot is not applied) while an assignment
+  is ambiguous; identity is never swapped on kinematics alone.
+- **OA-TRK-054** Registration learns a radar bias from ADS-B tracks of NACp 9 or better (at least 3 updates,
+  newest at most 5 s old, predicted position sigma at most 15 m, altitude known, range at least 5 km),
+  applies it to radar-only plots and publishes per-radar estimates over time. Invalid configuration and
+  input are refused.
+- **OA-TRK-055** Synthetic truth is exact by construction: a smooth analytic path (straight legs, turns,
+  climbs) written as one-second knots, interpolated by `oa_truth::truth_at` within a centimetre of the
+  analytic path.
+- **OA-TRK-056** Synthetic paths are ordered and bounded (addresses, legs, times); invalid input is refused.
+- **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
+  directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
+- **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
+  the stress geometries) has its stated closest approach.
+- **OA-TRK-059** Every world builds into an exact truth that `oa-bench` accepts.
+- **OA-TRK-060** Scoring a copy of the truth through `oa-bench` metrics gives no error beyond the 1e-7 degree
+  representation; the same copy shifted 100 m scores 100 m; straight and turning rows are both populated.
+- **OA-TRK-061** Identity accounting from simulator labels counts swaps (a label change within a track),
+  wrong plots, false plots applied, false tracks (false plots at least as many as true) and duplicate tracks
+  on hand-made logs.
+- **OA-TRK-062** The simulated ADS-B has the NACp 10 error (a 2-D RMS of 5.8 m), 25 ft altitude steps,
+  millisecond stamps, only equipped aircraft, and is the same for the same seed.
+- **OA-TRK-063** A run is reproducible (output digest, assignments, counters). Radar-only, on a small world
+  with the MSSR profile: every aircraft is tracked, no swap, no false track, no duplicate, and the position
+  error of the track is below the raw plots' error against the same exact truth.
+- **OA-TRK-064** Under a 150 m and 0.15 degree bias the registration estimate is within 20 m and 0.03 degree
+  of the bias, radar-only aircraft score more than 40 % better with registration than without, and
+  ADS-B-equipped aircraft are not made worse.
+- **OA-TRK-065** `oa-track-fusion --out <dir>` writes `report.txt` and `tables.csv` stating the truth, its own
+  error (zero), the baselines on identical plots and each table's ESASSP bars; usage errors exit 2.

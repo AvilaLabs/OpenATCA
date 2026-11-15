@@ -25,12 +25,20 @@
 mod linalg;
 
 pub mod adsb;
+pub mod assoc;
 mod filter;
+pub mod fusion;
+pub mod fusion_params;
+pub mod fusion_score;
+pub mod fusion_world;
 mod hfilter;
 pub mod latency;
 pub mod params;
+pub mod radar;
+pub mod registration;
 pub mod score;
 pub mod spill;
+pub mod synth_truth;
 mod tracker;
 pub mod types;
 mod vfilter;
@@ -39,8 +47,8 @@ pub use filter::Filter;
 pub use hfilter::{HFilter, HModel};
 pub use tracker::{
     measurement_check, tracker_advance, tracker_buffers, tracker_bytes, tracker_config,
-    tracker_counts, tracker_flush, tracker_live, tracker_log, tracker_new, tracker_stats,
-    tracker_update, Tracker,
+    tracker_counts, tracker_flush, tracker_live, tracker_log, tracker_new, tracker_predict,
+    tracker_stats, tracker_update, Tracker,
 };
 pub use types::*;
 pub use vfilter::{VFilter, VModel};
