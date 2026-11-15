@@ -717,6 +717,33 @@ fn a_report_received_before_its_sensor_time_is_counted_as_clock_skew() {
     assert_eq!(latency_stats(&log, 0).min, -500);
 }
 
+// REQ: OA-TRK-288
+#[test]
+fn a_sensor_time_too_far_from_the_receive_time_is_refused_and_counted_not_clamped() {
+    use oa_track::latency::{latency_count, latency_new, latency_record, Stamps};
+    let mut log = latency_new(8);
+    let at = |toa_ns: i64, recv_ns: i64| Stamps {
+        toa_ns,
+        recv_ns,
+        received: 10,
+        decoded: 20,
+        update_start: 30,
+        updated: 40,
+        emitted: 50,
+    };
+    latency_record(&mut log, &at(i64::MIN, 5));
+    latency_record(&mut log, &at(i64::MAX, -5));
+    assert_eq!(
+        latency_count(&log),
+        0,
+        "a skew that does not fit was stored"
+    );
+    assert_eq!(log.skew_refused, 2);
+    latency_record(&mut log, &at(1_000, 1_500));
+    assert_eq!(latency_count(&log), 1);
+    assert_eq!(log.skew_refused, 2);
+}
+
 // REQ: OA-TRK-047
 #[test]
 fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages() {

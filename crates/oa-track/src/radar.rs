@@ -275,8 +275,15 @@ pub fn site_check(s: &RadarSite) -> Result<(), RadarError> {
     if !(100_000_000..=600_000_000_000).contains(&s.period_ns) {
         return Err(RadarError::BadSite("rotation period"));
     }
+    if !(0..=EPOCH_MAX_NS).contains(&s.epoch_ns) {
+        return Err(RadarError::BadSite("epoch"));
+    }
     Ok(())
 }
+
+/// The latest scan epoch a site may have (the year 2096): every plot time is then within
+/// `i64` range of it.
+pub const EPOCH_MAX_NS: i64 = 4_000_000_000_000_000_000;
 
 /// The frame of a valid site.
 pub fn radar_geom(s: &RadarSite) -> RadarGeom {

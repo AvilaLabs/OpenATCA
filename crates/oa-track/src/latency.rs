@@ -103,6 +103,8 @@ pub struct LatencyLog {
     /// Stage 0 differences that were negative (a frame received before its sensor time: clock
     /// skew); the signed value is stored as it is.
     pub sensor_negative: u64,
+    /// Measurements refused because receive time minus sensor time does not fit an `i64`.
+    pub skew_refused: u64,
     /// Stage 0: receive time minus sensor time, signed, ns.
     pub sensor_to_receive: Vec<i64>,
     /// Stages 1 to 5 (index `stage - 1`), ns.
@@ -142,7 +144,10 @@ pub fn latency_record(log: &mut LatencyLog, s: &Stamps) {
         log.overflow += 1;
         return;
     }
-    let skew = s.recv_ns.saturating_sub(s.toa_ns);
+    let Some(skew) = s.recv_ns.checked_sub(s.toa_ns) else {
+        log.skew_refused += 1;
+        return;
+    };
     if skew < 0 {
         log.sensor_negative += 1;
     }

@@ -2994,6 +2994,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   rate is past 204,800 ft or 262,144 fpm; no truth is built from it.
 - **OA-TRK-286** A row whose only altitude is geometric passes it flagged geometric whether the source flag
   or the geometric column carried it, so the tracker counts it as a skipped altitude either way.
+- **OA-TRK-287** A radar site's scan epoch must lie in [0, 4e18] ns (1970 to about 2096); any other epoch
+  is refused at configuration. A scan number is computed with checked arithmetic: a plot timed before
+  the site's epoch is refused and counted with the plots refused by validation, never given a clamped
+  scan number, so radar-only confirmation counts hits one rotation apart.
+- **OA-TRK-288** A latency record whose receive time minus sensor time does not fit a 64-bit integer is
+  refused and counted, not stored with a clamped value.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
@@ -3101,7 +3107,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   count toward a track's eligibility as a registration reference.
 - **OA-TRK-088** A bucket already processed is not processed again: inputs for it that arrive after the
   advance past it are counted late and dropped, so batching the calls does not change what is
-  associated.
+  associated. An advance closes every bucket before its time, whether or not the bucket held an
+  input.
 - **OA-TRK-150** A report of a track whose newest report gives no ground speed (no category, a radar-only
   track) is judged against the filter's own estimated ground speed once the track has two updates, not
   against the 2,000 kt ceiling of "no category": a track steadily flying 300 kt is restarted by a report

@@ -551,7 +551,7 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
     }
     for p in plots {
         f.stats.plots_in += 1;
-        if plot_check(p).is_err() {
+        if plot_check(p).is_err() || scan_of(f, radar, p.time_ns).is_none() {
             f.stats.plots_refused += 1;
             continue;
         }
@@ -570,6 +570,9 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
 pub fn fusion_advance(f: &mut Fusion, until_ns: i64, out: &mut TrackOutput) {
     let complete = until_ns.div_euclid(f.cfg.bucket_ns);
     process_pending(f, complete, out);
+    // Every bucket before `complete` is closed, whether or not it held an event: a plot timed
+    // inside one is late (OA-TRK-088).
+    f.done_bucket = f.done_bucket.max(complete.saturating_sub(1));
     // Up to the last instant before the boundary, as a measurement at the boundary would: the
     // tracker emits a tick at a measurement's own time only after applying it.
     let boundary = complete.saturating_mul(f.cfg.bucket_ns);
@@ -1462,12 +1465,15 @@ fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
 
 // ---- radar-only initiation ------------------------------------------------------------
 
-fn scan_of(f: &Fusion, radar: usize, t_ns: i64) -> i64 {
+/// The scan number of a time: scans since the radar's epoch. `None` for a time before the epoch
+/// or one whose distance from it does not fit, never a clamped number.
+fn scan_of(f: &Fusion, radar: usize, t_ns: i64) -> Option<i64> {
     let (p, e) = f
         .sites
         .get(radar)
         .map_or((NS_PER_S, 0), |s| (s.period_ns, s.epoch_ns));
-    t_ns.saturating_sub(e).div_euclid(p)
+    let since = t_ns.checked_sub(e).filter(|d| *d >= 0)?;
+    Some(since.div_euclid(p))
 }
 
 /// Normalised cost of a plot joining a candidate: the distance from the candidate's straight-line
@@ -1566,7 +1572,11 @@ fn initiate(
                 f.stats.cand_no_height += 1;
                 continue;
             };
-            let scan = scan_of(f, radar, p.time_ns);
+            // Plot times were checked against the epoch when offered.
+            let Some(scan) = scan_of(f, radar, p.time_ns) else {
+                f.stats.plots_refused += 1;
+                continue;
+            };
             let at = f
                 .cands
                 .iter()
@@ -1604,7 +1614,9 @@ fn initiate(
     let mut capped = false;
     'plots: for (a, &j) in anon.iter().enumerate() {
         let Some(p) = plots.get(j) else { continue };
-        let scan = scan_of(f, radar, p.time_ns);
+        let Some(scan) = scan_of(f, radar, p.time_ns) else {
+            continue;
+        };
         for (ci, &i) in cand_ix.iter().enumerate() {
             let Some(c) = f.cands.get(i) else {
                 continue;
@@ -1651,7 +1663,9 @@ fn initiate(
     f.pairs_buf = pairs;
     for (a, &j) in anon.iter().enumerate() {
         let Some(p) = plots.get(j) else { continue };
-        let scan = scan_of(f, radar, p.time_ns);
+        let Some(scan) = scan_of(f, radar, p.time_ns) else {
+            continue;
+        };
         let ci = assoc_plot_track(&f.assoc)
             .get(a)
             .copied()
@@ -1676,7 +1690,9 @@ fn initiate(
     f.ms_buf = ms;
     joined.clear();
     // Confirm and expire.
-    let now_scan = plots.first().map_or(0, |p| scan_of(f, radar, p.time_ns));
+    let now_scan = plots
+        .first()
+        .map_or(Some(0), |p| scan_of(f, radar, p.time_ns));
     let mut i = 0usize;
     while i < f.cands.len() {
         let Some(c) = f.cands.get(i).copied() else {
@@ -1689,7 +1705,10 @@ fn initiate(
         if c.n >= f.cfg.init_m {
             f.cands.remove(i);
             confirm(f, radar, &c, out);
-        } else if now_scan.saturating_sub(c.first_scan) >= i64::from(f.cfg.init_n) {
+        } else if now_scan
+            .and_then(|n| n.checked_sub(c.first_scan))
+            .is_some_and(|d| d >= i64::from(f.cfg.init_n))
+        {
             f.cands.remove(i);
             f.stats.cand_expired += 1;
         } else {
@@ -2840,6 +2859,131 @@ mod tests {
         assert_eq!(second, 20, "radar 1 plots applied: {second}; {st:?}");
         // The flood was cut, not all of it gated: well under the 2,000 x 100 tests it asks for.
         assert!(st.pairs_tested + st.coarse_visits <= 40_000 + 200, "{st:?}");
+    }
+
+    fn try_fusion(sites: &[RadarSite]) -> Result<Fusion, FusionError> {
+        let tc = fusion_tracker_config(
+            &TrackerConfig {
+                out_capacity: 1 << 16,
+                ..DEFAULT_CONFIG
+            },
+            sites,
+        );
+        fusion_new(&fusion_config(tc), sites)
+    }
+
+    /// Three plots of one aircraft, one rotation apart, shifted by `epoch_ns`.
+    fn three_scans_after(epoch_ns: i64) -> Vec<RadarPlot> {
+        let lines = easting(&[Line {
+            x0: 30_000.0,
+            y0: 20_000.0,
+            vx: -150.0,
+            vy: 40.0,
+            alt_ft: 20_000,
+            label: 0xA00001,
+        }]);
+        let mut plots = plots_of(&lines, 3, 3, false);
+        for p in &mut plots {
+            p.time_ns += epoch_ns;
+        }
+        plots
+    }
+
+    // REQ: OA-TRK-287
+    #[test]
+    fn a_site_epoch_outside_the_supported_years_is_refused_at_config_time() {
+        for epoch_ns in [i64::MIN, -1, crate::radar::EPOCH_MAX_NS + 1, i64::MAX] {
+            let site = RadarSite { epoch_ns, ..SITE };
+            assert!(
+                matches!(try_fusion(&[site]), Err(FusionError::BadSite(0, _))),
+                "epoch {epoch_ns} accepted"
+            );
+        }
+        for epoch_ns in [0, 1_700_000_000_000_000_000, crate::radar::EPOCH_MAX_NS] {
+            let site = RadarSite { epoch_ns, ..SITE };
+            assert!(try_fusion(&[site]).is_ok(), "epoch {epoch_ns} refused");
+        }
+    }
+
+    // REQ: OA-TRK-287
+    #[test]
+    fn three_scans_under_a_valid_epoch_confirm_a_radar_only_track() {
+        let epoch_ns = 1_700_000_000_000_000_000;
+        let site = RadarSite { epoch_ns, ..SITE };
+        let mut f = try_fusion(&[site]).unwrap();
+        let mut out = output_new(1 << 16);
+        for p in three_scans_after(epoch_ns) {
+            fusion_plots(&mut f, 0, &[p]);
+            fusion_advance(&mut f, p.time_ns, &mut out);
+        }
+        fusion_finish(&mut f, epoch_ns + 20 * NS_PER_S, &mut out);
+        assert_eq!(fusion_radar_tracks(&f).len(), 1, "{:?}", fusion_stats(&f));
+    }
+
+    // REQ: OA-TRK-287
+    #[test]
+    fn a_plot_before_the_site_epoch_is_refused_and_counted_not_clamped() {
+        let epoch_ns = 100 * NS_PER_S;
+        let site = RadarSite { epoch_ns, ..SITE };
+        let mut f = try_fusion(&[site]).unwrap();
+        let mut out = output_new(1 << 16);
+        let early = three_scans_after(0);
+        fusion_plots(&mut f, 0, &early);
+        fusion_advance(&mut f, 60 * NS_PER_S, &mut out);
+        fusion_finish(&mut f, 60 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.plots_in, 3);
+        assert_eq!(st.plots_refused, 3, "{st:?}");
+        assert_eq!(st.processed, 0);
+        assert_eq!(st.cand_started, 0);
+    }
+
+    /// A plot that, if processed, would start a candidate (no address, no track near).
+    fn stray_plot(t_ns: i64) -> RadarPlot {
+        RadarPlot {
+            time_ns: t_ns,
+            range_m: 50_000.0,
+            az_deg: 100.0,
+            alt_ft: 10_000,
+            addr: NO_ADDR,
+            label: NO_ADDR,
+            mode_a: NONE_CODE,
+        }
+    }
+
+    // REQ: OA-TRK-088
+    #[test]
+    fn an_empty_advance_closes_its_buckets_so_a_plot_in_them_is_late() {
+        let mut f = make_fusion(|_| {});
+        let mut out = output_new(1 << 16);
+        fusion_advance(&mut f, 10 * NS_PER_S, &mut out);
+        fusion_plots(&mut f, 0, &[stray_plot(9_500_000_000)]);
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.late, 1, "{st:?}");
+        assert_eq!(st.processed, 0);
+        assert_eq!(st.cand_started, 0);
+    }
+
+    // REQ: OA-TRK-088
+    #[test]
+    fn an_empty_advance_closes_its_buckets_on_a_tracker_with_active_tracks() {
+        let mut f = make_fusion(|_| {});
+        let mut out = output_new(1 << 18);
+        for k in 0..20i64 {
+            fusion_adsb(&mut f, &adsb_fix(0xA00001, k * NS_PER_S));
+            fusion_advance(&mut f, k * NS_PER_S, &mut out);
+        }
+        fusion_advance(&mut f, 21 * NS_PER_S, &mut out);
+        assert_eq!(tracker_live(fusion_tracker(&f)).len(), 1);
+        let before = *fusion_stats(&f);
+        fusion_advance(&mut f, 30 * NS_PER_S, &mut out);
+        fusion_plots(&mut f, 0, &[stray_plot(29_500_000_000)]);
+        fusion_advance(&mut f, 31 * NS_PER_S, &mut out);
+        let st = fusion_stats(&f);
+        assert_eq!(st.late, before.late + 1, "{st:?}");
+        assert_eq!(st.processed, before.processed);
+        assert_eq!(st.cand_started, before.cand_started);
     }
 
     // REQ: OA-TRK-071
