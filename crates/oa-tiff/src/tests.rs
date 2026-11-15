@@ -180,7 +180,8 @@ fn predictors_two_and_three() {
             }
         }
     }
-    // Predictor 3 on awkward float values: negatives, subnormals, infinities survive bit for bit.
+    // Predictor 3 on awkward float values: negatives, subnormals and the largest finite values
+    // survive bit for bit.
     let odd = vec![
         -1.5f32,
         0.0,
@@ -188,7 +189,7 @@ fn predictors_two_and_three() {
         1.0e30,
         -1.0e-30,
         1234.5678,
-        f32::INFINITY,
+        f32::MAX,
         -0.0,
         3.4e38,
         -9999.0,
@@ -828,4 +829,56 @@ fn only_top_left_orientation_is_accepted() {
             ..
         })
     ));
+}
+
+// REQ: OA-TIFF-081
+#[test]
+fn decimal_nodata_is_compared_in_the_sample_type() {
+    for (text, v) in [
+        ("-123.456", -123.456_f32),
+        ("-3.4028235e38", f32::MIN),
+        ("-3.4028234663852886e+38", f32::MIN),
+        ("0.1", 0.1_f32),
+    ] {
+        let mut s = Spec::new(2, 2, vec![5.0, v, 7.0, 9.0]);
+        s.nodata = Some(text.into());
+        let g = grid_of(&s);
+        assert_eq!(g.nodata_count, 1, "sentinel {text}");
+        assert!(g.elev[1].is_nan(), "sentinel {text} kept as {}", g.elev[1]);
+        assert_eq!(g.elev[0], 5.0);
+    }
+}
+
+// REQ: OA-TIFF-082
+#[test]
+fn infinite_samples_are_nodata() {
+    let mut s = Spec::new(2, 2, vec![0.0, f32::INFINITY, 4.0, f32::NEG_INFINITY]);
+    s.tie = (0.0, 0.0, -90.0, 40.0);
+    let g = grid_of(&s);
+    assert_eq!(g.nodata_count, 2);
+    assert!(g.elev[1].is_nan() && g.elev[3].is_nan());
+    // The finite north-west node beside an infinite one is not a known value.
+    let e = grid_elevation_at(&g, g.lat0, g.lon0);
+    assert_eq!(e, Elevation::NoData, "{e:?}");
+}
+
+// REQ: OA-TIFF-083
+#[test]
+fn infinite_samples_in_a_grid_are_nodata_in_queries() {
+    let mut g = grid_of(&Spec::new(2, 2, vec![0.0, 1.0, 4.0, 5.0]));
+    g.elev[1] = f32::INFINITY;
+    let e = grid_elevation_at(&g, g.lat0, g.lon0);
+    assert_eq!(e, Elevation::NoData, "{e:?}");
+    let q = grid_max_in_polygon(
+        &g,
+        &[
+            (g.lat0 + 0.0005, g.lon0 - 0.0005),
+            (g.lat0 + 0.0005, g.lon0 + 0.0015),
+            (g.lat0 - 0.0015, g.lon0 + 0.0015),
+            (g.lat0 - 0.0015, g.lon0 - 0.0005),
+        ],
+    )
+    .unwrap();
+    assert_eq!((q.samples, q.nodata), (3, 1), "{q:?}");
+    assert_eq!(q.peak.map(|p| p.metres), Some(5.0));
 }

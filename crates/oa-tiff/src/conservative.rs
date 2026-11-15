@@ -220,7 +220,7 @@ fn collect(
                 };
                 if let Some(v) = grid_sample(p.g, c, rw) {
                     present = true;
-                    if !v.is_nan() && best.is_none_or(|b| v > b) {
+                    if v.is_finite() && best.is_none_or(|b| v > b) {
                         best = Some(v);
                     }
                 }

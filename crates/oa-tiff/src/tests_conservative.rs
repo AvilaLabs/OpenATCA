@@ -684,3 +684,34 @@ fn the_antimeridian_aliases_give_one_elevation() {
         }
     }
 }
+
+// REQ: OA-TIFF-084
+#[test]
+fn infinite_samples_make_a_conservative_maximum_incomplete() {
+    let mut g = flat(5, 5, 100.0);
+    for r in 0..5 {
+        for c in 0..5 {
+            set_at(&mut g, c, r, f32::NEG_INFINITY);
+        }
+    }
+    set_at(&mut g, 2, 2, 120.0);
+    set_at(&mut g, 3, 3, f32::INFINITY);
+    let (la, lo) = (lat_of(&g, 2), lon_of(&g, 2));
+    let b = 0.045;
+    let poly = [
+        (la + b, lo - b),
+        (la + b, lo + b),
+        (la - b, lo + b),
+        (la - b, lo - b),
+    ];
+    let t = grid_max_in_polygon_conservative(&g, &poly);
+    match t {
+        Ok(TerrainMax::Incomplete {
+            peak, nodata_nodes, ..
+        }) => {
+            assert_eq!(nodata_nodes, 24, "{peak:?}");
+            assert_eq!(peak.map(|p| p.metres), Some(120.0));
+        }
+        other => panic!("not incomplete: {other:?}"),
+    }
+}

@@ -533,14 +533,18 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
             }
         }
     }
-    // Nodata: the declared value, and any NaN, become NaN; counted once.
+    // Nodata: the declared value, compared in the sample type (a Float32 sentinel is parsed to
+    // f32, not rounded from f64), and any non-finite sample, become NaN; counted once.
+    let nd_f32 = geo_tags
+        .nodata
+        .as_deref()
+        .and_then(|t| t.trim().parse::<f32>().ok());
     for v in elev.iter_mut() {
-        let is_nodata = v.is_nan()
-            || match geo.nodata {
-                Some(nd) => f64::from(*v) == nd,
-                None => false,
-            };
-        if is_nodata {
+        let declared = match format {
+            Format::F32 => nd_f32 == Some(*v),
+            Format::I16 => geo.nodata == Some(f64::from(*v)),
+        };
+        if !v.is_finite() || declared {
             *v = f32::NAN;
             nodata_count += 1;
         }
