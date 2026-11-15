@@ -1151,10 +1151,14 @@ pub fn tracker_flush(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
 /// The address and newest-update time of every live confirmed track, in slot order, for the
 /// caller's inspection (tests, reports).
 pub fn tracker_live(t: &Tracker) -> Vec<(u32, i64)> {
+    tracker_live_iter(t).collect()
+}
+
+/// [`tracker_live`] without building a vector: the runtime path walks the tracks with it.
+pub fn tracker_live_iter(t: &Tracker) -> impl Iterator<Item = (u32, i64)> + '_ {
     (0..t.high)
         .filter(|&s| col(&t.state, s, FREE) == CONFIRMED)
         .map(|s| (col(&t.key, s, NO_ADDR), col(&t.last_ns, s, 0)))
-        .collect()
 }
 
 /// A live track as the fusion layer sees it: the track keyed `key` predicted to `at_ns`, whether

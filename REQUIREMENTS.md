@@ -3008,6 +3008,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted in the table's overflow count in one pass over the tracks, with no work per tick. One
   confirmed track, a one-row table, 100 ms ticks and an advance of one hour compute at most two rows
   (36,001 before) and count exactly the rows left out.
+- **OA-TRK-291** The fusion layer's processing path (queues, ready inputs, per-radar association lists,
+  events, initiation lists, candidates, track records, registration history, assignment log) runs in
+  buffers made at start with named capacities and cleared and reused; a buffer at its capacity
+  refuses and counts. Under three radars, registration, Mode S and radar-only plots over 384 s no
+  such buffer changes address or capacity (a check on the buffers: it does not see a temporary
+  allocated and freed within a call).
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

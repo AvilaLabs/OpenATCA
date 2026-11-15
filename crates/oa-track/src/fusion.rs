@@ -45,9 +45,10 @@
 //! Radar-only tracks are keyed above every address ([`KEY_RADAR_BASE`]). ADS-B tracks are keyed
 //! by address and radar plots join them, which is the fusion.
 //!
-//! The per-key bookkeeping (a `BTreeMap`, a fixed order) and the candidate list are small
-//! against the tracker's tables and live in ordinary vectors; the tracker itself allocates
-//! nothing after construction.
+//! The queues, the scratch of a bucket, the candidates, the track records and the histories are
+//! vectors made at start with the capacities of `fusion_params.rs` and reused (RULESET C2, C3).
+//! The per-key bookkeeping (two `BTreeMap`s, a fixed order) still allocates a node per new key;
+//! the tracker allocates nothing after construction.
 
 use std::collections::BTreeMap;
 
@@ -63,14 +64,14 @@ use crate::coarse::{
     CoarseIndex,
 };
 use crate::fusion_params::{
-    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_MAX_ACCEL_MPS2,
-    CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M, GATE_H_CHI2,
-    GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2,
-    HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
+    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
+    CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
+    GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM,
+    GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
     MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
-    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, REG_HISTORY_MAX,
-    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
-    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
+    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX,
+    REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES,
+    REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
     RESCUED_COST_FRACTION,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
@@ -83,8 +84,8 @@ use crate::registration::{
     Residual,
 };
 use crate::tracker::{
-    tracker_advance, tracker_flush, tracker_live, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict, tracker_stats, tracker_update, Tracker,
+    tracker_advance, tracker_buffers, tracker_flush, tracker_live_iter, tracker_new,
+    tracker_note_radar_disagreement, tracker_predict, tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput,
@@ -281,6 +282,11 @@ pub struct FusionStats {
     pub track_rec_overflow: u64,
     /// ADS-B keys not remembered for registration because the table was full of live tracks.
     pub keyinfo_overflow: u64,
+    /// Items a scratch buffer refused at its capacity (none within the limits: they are sized
+    /// from them, RULESET C2).
+    pub scratch_full: u64,
+    /// Registration estimates not published because the history was at [`REG_HISTORY_MAX`].
+    pub reg_history_full: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -294,6 +300,17 @@ pub struct AssignLog {
     pub radar: Vec<u8>,
     /// [`HOW_HARD`], [`HOW_ASSOC`] or [`HOW_INIT`].
     pub how: Vec<u8>,
+}
+
+/// An assignment log with room for [`ASSIGN_LOG_MAX`] rows (scoring runs).
+fn assign_log_new() -> AssignLog {
+    AssignLog {
+        t_ns: Vec::with_capacity(ASSIGN_LOG_MAX),
+        key: Vec::with_capacity(ASSIGN_LOG_MAX),
+        label: Vec::with_capacity(ASSIGN_LOG_MAX),
+        radar: Vec::with_capacity(ASSIGN_LOG_MAX),
+        how: Vec::with_capacity(ASSIGN_LOG_MAX),
+    }
 }
 
 /// A radar-only (or address-keyed) track made by initiation. Plain record (A1); A7.2: cold.
@@ -360,6 +377,46 @@ struct PairInfo {
     row: OutRow,
 }
 
+/// One radar's lists in the association of a bucket (see the capacities in `fusion_params.rs`):
+/// made at start, taken out for the association and put back. A7.2: transient.
+#[derive(Default)]
+struct RadarScratch {
+    /// The radar's plots of the bucket, in time order ([`RADAR_PLOTS_MAX`]).
+    plots: Vec<RadarPlot>,
+    dec: Vec<Decision>,
+    anon: Vec<usize>,
+    conv_own: Vec<Option<Converted>>,
+    hard: Vec<(u32, f64, usize, Decision)>,
+    taken: Vec<u32>,
+    /// The live tracks at the start of the bucket, and the ones that took a hard plot: the
+    /// tracker's capacity.
+    tracks: Vec<TrackAt>,
+    skip: Vec<bool>,
+}
+
+fn radar_scratch_new(max_tracks: usize) -> RadarScratch {
+    RadarScratch {
+        plots: Vec::with_capacity(RADAR_PLOTS_MAX),
+        dec: Vec::with_capacity(RADAR_PLOTS_MAX),
+        anon: Vec::with_capacity(RADAR_PLOTS_MAX),
+        conv_own: Vec::with_capacity(RADAR_PLOTS_MAX),
+        hard: Vec::with_capacity(RADAR_PLOTS_MAX),
+        taken: Vec::with_capacity(RADAR_PLOTS_MAX),
+        tracks: Vec::with_capacity(max_tracks),
+        skip: Vec::with_capacity(max_tracks),
+    }
+}
+
+/// Pushes within the capacity the vector was made with; `false`, with nothing pushed, at it.
+fn push_within<T>(v: &mut Vec<T>, x: T) -> bool {
+    if v.len() < v.capacity() {
+        v.push(x);
+        true
+    } else {
+        false
+    }
+}
+
 /// The fusion layer. A subsystem (D5): fields private, interface the free functions below.
 // A7.2: cold struct
 pub struct Fusion {
@@ -370,8 +427,25 @@ pub struct Fusion {
     reg: Vec<RegState>,
     reg_hist: Vec<Vec<RegSample>>,
     reg_pub_ns: Vec<i64>,
+    /// Inputs waiting for their bucket, made with [`MAX_PENDING`] each (a full queue counts
+    /// `pending_overflow`).
     pend_adsb: Vec<Measurement>,
     pend_plots: Vec<PendPlot>,
+    /// The inputs ready at one call, in arrival order with their place in the queue (so an
+    /// unstable sort gives the order of a stable one), and then in time order: [`READY_MAX`].
+    sort_a: Vec<(u32, Measurement)>,
+    sort_p: Vec<(u32, PendPlot)>,
+    ready_a: Vec<Measurement>,
+    ready_p: Vec<PendPlot>,
+    /// Per radar, the scratch of its association of a bucket.
+    rscratch: Vec<RadarScratch>,
+    /// The time-ordered events of a bucket: [`BUCKET_EVENTS_MAX`].
+    evs: Vec<Ev>,
+    /// Initiation's lists of plot indices ([`RADAR_PLOTS_MAX`]) and of candidate indices
+    /// ([`CAND_IX_MAX`]).
+    init_free: Vec<usize>,
+    init_anon: Vec<usize>,
+    cand_ix: Vec<usize>,
     /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
     /// took one of its plots (a small map: entries exist only while a run is going).
     hold_run: BTreeMap<(u32, u8), HoldRun>,
@@ -455,18 +529,39 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .iter()
             .map(|s| reg_new_with(cfg.reg_ref_slots, s.period_ns))
             .collect(),
-        reg_hist: sites.iter().map(|_| Vec::new()).collect(),
+        reg_hist: sites
+            .iter()
+            .map(|_| Vec::with_capacity(REG_HISTORY_MAX))
+            .collect(),
         reg_pub_ns: sites.iter().map(|_| i64::MIN).collect(),
-        pend_adsb: Vec::new(),
-        pend_plots: Vec::new(),
+        pend_adsb: Vec::with_capacity(MAX_PENDING),
+        pend_plots: Vec::with_capacity(MAX_PENDING),
+        sort_a: Vec::with_capacity(READY_MAX),
+        sort_p: Vec::with_capacity(READY_MAX),
+        ready_a: Vec::with_capacity(READY_MAX),
+        ready_p: Vec::with_capacity(READY_MAX),
+        rscratch: sites
+            .iter()
+            .map(|_| radar_scratch_new(cfg.tracker.max_tracks))
+            .collect(),
+        evs: Vec::with_capacity(BUCKET_EVENTS_MAX),
+        init_free: Vec::with_capacity(RADAR_PLOTS_MAX),
+        init_anon: Vec::with_capacity(RADAR_PLOTS_MAX),
+        cand_ix: Vec::with_capacity(CAND_IX_MAX),
         hold_run: BTreeMap::new(),
         hold_run_max: MAX_ASSOC_TRACKS,
         pend_min_bucket: i64::MAX,
         assoc: assoc_scratch_new(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS),
-        pairs_buf: Vec::new(),
-        ms_buf: Vec::new(),
-        pairs_bufs: sites.iter().map(|_| Vec::new()).collect(),
-        infos_bufs: sites.iter().map(|_| Vec::new()).collect(),
+        pairs_buf: Vec::with_capacity(MAX_BUCKET_PAIRS),
+        ms_buf: Vec::with_capacity(MAX_BUCKET_PAIRS),
+        pairs_bufs: sites
+            .iter()
+            .map(|_| Vec::with_capacity(MAX_BUCKET_PAIRS))
+            .collect(),
+        infos_bufs: sites
+            .iter()
+            .map(|_| Vec::with_capacity(MAX_BUCKET_PAIRS))
+            .collect(),
         grids: sites
             .iter()
             .map(|_| coarse_new(cfg.tracker.max_tracks))
@@ -476,11 +571,15 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         #[cfg(test)]
         brute_coarse: false,
         keyinfo: BTreeMap::new(),
-        cands: Vec::new(),
+        cands: Vec::with_capacity(MAX_CANDIDATES),
         next_serial: 0,
         stats: FusionStats::default(),
-        log: AssignLog::default(),
-        tracks: Vec::new(),
+        log: if cfg.log_assign {
+            assign_log_new()
+        } else {
+            AssignLog::default()
+        },
+        tracks: Vec::with_capacity(MAX_TRACK_RECS),
         track_rec_max: MAX_TRACK_RECS,
         scratch: output_new(SCRATCH_ROWS),
         done_bucket: i64::MIN,
@@ -519,6 +618,59 @@ pub fn fusion_assoc_buffers(f: &Fusion) -> Vec<(usize, usize)> {
     v
 }
 
+/// The address and capacity of every buffer the processing path owns (the association's, the
+/// tracker's, the queues, the scratch and the histories), in a fixed order. A test compares it
+/// before and after a run: equal means no buffer was reallocated. It does not see a temporary
+/// allocation that is freed within a call (RULESET C5 needs a counting allocator, which A0
+/// forbids here).
+#[doc(hidden)]
+pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
+    fn of<T>(v: &Vec<T>) -> (usize, usize) {
+        (v.as_ptr() as usize, v.capacity())
+    }
+    let mut v = fusion_assoc_buffers(f);
+    v.extend(tracker_buffers(&f.tracker));
+    v.extend([
+        of(&f.pend_adsb),
+        of(&f.pend_plots),
+        of(&f.sort_a),
+        of(&f.sort_p),
+        of(&f.ready_a),
+        of(&f.ready_p),
+        of(&f.evs),
+        of(&f.init_free),
+        of(&f.init_anon),
+        of(&f.cand_ix),
+        of(&f.pairs_buf),
+        of(&f.ms_buf),
+        of(&f.cands),
+        of(&f.tracks),
+    ]);
+    v.extend(f.pairs_bufs.iter().map(of));
+    v.extend(f.infos_bufs.iter().map(of));
+    v.extend(f.reg_hist.iter().map(of));
+    for r in &f.rscratch {
+        v.extend([
+            of(&r.plots),
+            of(&r.dec),
+            of(&r.anon),
+            of(&r.conv_own),
+            of(&r.hard),
+            of(&r.taken),
+            of(&r.tracks),
+            of(&r.skip),
+        ]);
+    }
+    v.extend([
+        of(&f.log.t_ns),
+        of(&f.log.key),
+        of(&f.log.label),
+        of(&f.log.radar),
+        of(&f.log.how),
+    ]);
+    v
+}
+
 /// The plot-to-key log (empty unless `log_assign`).
 pub fn fusion_assign_log(f: &Fusion) -> &AssignLog {
     &f.log
@@ -530,9 +682,12 @@ pub fn fusion_radar_tracks(f: &Fusion) -> &[RadarTrackRec] {
 }
 
 /// Hands over the records of radar-only tracks made so far, emptying the layer's list (a
-/// long-running caller does this regularly; the list is held to [`MAX_TRACK_RECS`]).
+/// long-running caller does this regularly; the list is held to [`MAX_TRACK_RECS`]). The copy
+/// handed over is the caller's; the layer keeps its own buffer.
 pub fn fusion_take_radar_tracks(f: &mut Fusion) -> Vec<RadarTrackRec> {
-    std::mem::take(&mut f.tracks)
+    let v = f.tracks.clone();
+    f.tracks.clear();
+    v
 }
 
 /// `(keys remembered for registration, radar-only track records held)`, for a test or a report.
@@ -603,26 +758,36 @@ fn process_pending(f: &mut Fusion, complete: i64, out: &mut TrackOutput) {
         // Nothing pending is ready.
         return;
     }
-    // Ready: buckets strictly before `complete`.
+    // Ready: buckets strictly before `complete`. The queues keep their order; the ready ones go,
+    // with their place in the queue, to buffers made at start.
     let b = f.cfg.bucket_ns;
-    let (mut ready_a, mut keep_a): (Vec<Measurement>, Vec<Measurement>) = (Vec::new(), Vec::new());
-    for m in f.pend_adsb.drain(..) {
-        if m.toa_ns.div_euclid(b) < complete {
-            ready_a.push(m);
-        } else {
-            keep_a.push(m);
+    let mut sort_a = std::mem::take(&mut f.sort_a);
+    let mut sort_p = std::mem::take(&mut f.sort_p);
+    let mut ready_a = std::mem::take(&mut f.ready_a);
+    let mut ready_p = std::mem::take(&mut f.ready_p);
+    sort_a.clear();
+    sort_p.clear();
+    ready_a.clear();
+    ready_p.clear();
+    let (mut seq, mut refused) = (0u32, 0u64);
+    f.pend_adsb.retain(|m| {
+        seq += 1;
+        if m.toa_ns.div_euclid(b) < complete && push_within(&mut sort_a, (seq, *m)) {
+            return false;
         }
-    }
-    f.pend_adsb = keep_a;
-    let (mut ready_p, mut keep_p): (Vec<PendPlot>, Vec<PendPlot>) = (Vec::new(), Vec::new());
-    for p in f.pend_plots.drain(..) {
-        if p.plot.time_ns.div_euclid(b) < complete {
-            ready_p.push(p);
-        } else {
-            keep_p.push(p);
+        refused += u64::from(m.toa_ns.div_euclid(b) < complete);
+        true
+    });
+    seq = 0;
+    f.pend_plots.retain(|p| {
+        seq += 1;
+        if p.plot.time_ns.div_euclid(b) < complete && push_within(&mut sort_p, (seq, *p)) {
+            return false;
         }
-    }
-    f.pend_plots = keep_p;
+        refused += u64::from(p.plot.time_ns.div_euclid(b) < complete);
+        true
+    });
+    f.stats.scratch_full += refused;
     f.pend_min_bucket = f
         .pend_adsb
         .iter()
@@ -630,8 +795,11 @@ fn process_pending(f: &mut Fusion, complete: i64, out: &mut TrackOutput) {
         .chain(f.pend_plots.iter().map(|p| bucket_of(f, p.plot.time_ns)))
         .min()
         .unwrap_or(i64::MAX);
-    ready_a.sort_by_key(|m| m.toa_ns);
-    ready_p.sort_by_key(|p| (p.plot.time_ns, p.radar));
+    // Time order, ties in arrival order (the place in the queue is the last key).
+    sort_a.sort_unstable_by_key(|(q, m)| (m.toa_ns, *q));
+    sort_p.sort_unstable_by_key(|(q, p)| (p.plot.time_ns, p.radar, *q));
+    ready_a.extend(sort_a.iter().map(|(_, m)| *m));
+    ready_p.extend(sort_p.iter().map(|(_, p)| *p));
     let (mut ai, mut pi) = (0usize, 0usize);
     while ai < ready_a.len() || pi < ready_p.len() {
         let ba = ready_a.get(ai).map(|m| bucket_of(f, m.toa_ns));
@@ -666,6 +834,10 @@ fn process_pending(f: &mut Fusion, complete: i64, out: &mut TrackOutput) {
         f.done_bucket = bucket;
         process_bucket(f, adsb, plots, out);
     }
+    f.sort_a = sort_a;
+    f.sort_p = sort_p;
+    f.ready_a = ready_a;
+    f.ready_p = ready_p;
 }
 
 // ---- one bucket -----------------------------------------------------------------------
@@ -727,12 +899,15 @@ struct TrackAt {
     sigma: f64,
 }
 
-fn tracks_at(f: &Fusion, radar: usize, at_ns: i64) -> Vec<TrackAt> {
+/// The live tracks at the start of a bucket, in `v` (cleared first); the number it had no room
+/// for (none while the tracker's capacity is the buffer's).
+fn tracks_at(f: &Fusion, radar: usize, at_ns: i64, v: &mut Vec<TrackAt>) -> u64 {
+    v.clear();
     let Some(g) = f.geoms.get(radar) else {
-        return Vec::new();
+        return 0;
     };
-    let mut v = Vec::new();
-    for (key, _) in tracker_live(&f.tracker).into_iter().take(MAX_ASSOC_TRACKS) {
+    let mut refused = 0;
+    for (key, _) in tracker_live_iter(&f.tracker).take(MAX_ASSOC_TRACKS) {
         let Some((row, true, _)) = tracker_predict(&f.tracker, key, at_ns) else {
             continue;
         };
@@ -746,7 +921,7 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64) -> Vec<TrackAt> {
         let dh = h - g.height_m;
         let ground = (rho * rho - dh * dh).max(1.0).sqrt();
         let c = cov_f64(row.pos_cov_m2);
-        v.push(TrackAt {
+        let at = TrackAt {
             key,
             lat,
             lon,
@@ -755,9 +930,12 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64) -> Vec<TrackAt> {
             az,
             ground,
             sigma: c[0].max(c[2]).max(0.0).sqrt(),
-        });
+        };
+        if !push_within(v, at) {
+            refused += 1;
+        }
     }
-    v
+    refused
 }
 
 /// Whether a reference track may register a radar (see the module documentation).
@@ -833,13 +1011,13 @@ fn pair_cost(
 /// One radar's association in progress: what the first part (hard-constraint plots, the tracks,
 /// the conversions) made and the second (the coarse and exact gates) and third (the assignment)
 /// need. A7.2: transient.
-struct RadarAssoc<'a> {
+struct RadarAssoc {
     radar: usize,
     r8: u8,
     g: RadarGeom,
     s: RadarSite,
     bias: Bias,
-    plots: &'a [RadarPlot],
+    plots: Vec<RadarPlot>,
     dec: Vec<Decision>,
     tracks: Vec<TrackAt>,
     /// The tracks that took a hard plot, which take no anonymous one.
@@ -862,14 +1040,28 @@ struct RadarAssoc<'a> {
 
 /// The first part of one radar's association of a bucket (see the module documentation, step 1):
 /// the hard-constraint plots are decided and the tracks, the conversions and the grid made.
-fn assoc_prepare<'a>(
-    f: &mut Fusion,
-    radar: usize,
-    plots: &'a [RadarPlot],
-) -> Option<RadarAssoc<'a>> {
+fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return None;
     };
+    // Everything taken below exists for a radar of the layer; checked before any is taken.
+    if f.grids.get(radar).is_none()
+        || f.pairs_bufs.get(radar).is_none()
+        || f.infos_bufs.get(radar).is_none()
+        || f.rscratch.get(radar).is_none()
+    {
+        return None;
+    }
+    let RadarScratch {
+        plots,
+        mut dec,
+        mut anon,
+        mut conv_own,
+        mut hard,
+        mut taken,
+        mut tracks,
+        mut skip,
+    } = std::mem::take(f.rscratch.get_mut(radar)?);
     // Radars are numbered below MAX_RADARS.
     let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
     let blank = Measurement {
@@ -896,7 +1088,9 @@ fn assoc_prepare<'a>(
         m: blank,
         resid: None,
     };
-    let mut dec = vec![none; plots.len()];
+    // At most `plots.len()` (below `RADAR_PLOTS_MAX`) of each list below.
+    dec.clear();
+    dec.resize(plots.len(), none);
     let t0 = plots.first().map_or(0, |p| p.time_ns);
     if let Some(r) = f.reg.get_mut(radar) {
         reg_predict(r, t0);
@@ -906,11 +1100,12 @@ fn assoc_prepare<'a>(
     } else {
         NO_BIAS
     };
-    let tracks = tracks_at(f, radar, t0);
-    let mut anon: Vec<usize> = Vec::new();
+    f.stats.scratch_full += tracks_at(f, radar, t0, &mut tracks);
+    anon.clear();
+    hard.clear();
+    taken.clear();
     // Hard-constraint plots: the track with the plot's key, or none. A plot must lie inside the
     // wide gate of that track, and a track takes one plot per bucket: the nearest.
-    let mut hard: Vec<(u32, f64, usize, Decision)> = Vec::new();
     for (j, p) in plots.iter().enumerate() {
         if !(f.cfg.use_address && p.addr != NO_ADDR) {
             anon.push(j);
@@ -961,7 +1156,6 @@ fn assoc_prepare<'a>(
     }
     hard.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
     // Keys of the tracks that took a hard plot, ascending (the list is sorted by key).
-    let mut taken: Vec<u32> = Vec::new();
     for (key, _, j, d) in &hard {
         if taken.last() == Some(key) {
             f.stats.hard_extra += 1;
@@ -978,20 +1172,21 @@ fn assoc_prepare<'a>(
         f.stats.applied_hard += 1;
     }
     // A track that took a hard plot takes no anonymous one in the same bucket.
-    let skip: Vec<bool> = tracks
-        .iter()
-        .map(|t| taken.binary_search(&t.key).is_ok())
-        .collect();
+    skip.clear();
+    for t in &tracks {
+        // `tracks` and `skip` are made with the same capacity.
+        push_within(&mut skip, taken.binary_search(&t.key).is_ok());
+    }
     // Anonymous plots: converted once if they carry Mode C.
-    let conv_own: Vec<Option<Converted>> = anon
-        .iter()
-        .map(|&j| {
+    conv_own.clear();
+    for &j in &anon {
+        conv_own.push(
             plots
                 .get(j)
                 .filter(|p| p.alt_ft != NONE_ALT)
-                .and_then(|p| plot_convert(&g, &s, p, &bias, None, NO_ADDR).ok())
-        })
-        .collect();
+                .and_then(|p| plot_convert(&g, &s, p, &bias, None, NO_ADDR).ok()),
+        );
+    }
     let mut grid = std::mem::take(f.grids.get_mut(radar)?);
     coarse_build(
         &mut grid,
@@ -1022,6 +1217,10 @@ fn assoc_prepare<'a>(
     let mut infos = std::mem::take(f.infos_bufs.get_mut(radar)?);
     pairs.clear();
     infos.clear();
+    if let Some(slot) = f.rscratch.get_mut(radar) {
+        slot.hard = hard;
+        slot.taken = taken;
+    }
     Some(RadarAssoc {
         radar,
         r8,
@@ -1049,7 +1248,7 @@ fn assoc_prepare<'a>(
 /// tracks of the grid cells it can reach, the nearest first if the budget is short, each charged to `budget`) and
 /// then the exact gate. Returns the work spent; a plot that finds the budget or the pair limit
 /// spent stops and marks the association capped.
-fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc<'_>, a: usize, budget: usize) -> usize {
+fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> usize {
     let Some(&j) = ra.anon.get(a) else { return 0 };
     let Some(p) = ra.plots.get(j) else { return 0 };
     let (g, s, bias) = (ra.g, ra.s, ra.bias);
@@ -1142,15 +1341,17 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc<'_>, a: usize, budget: usize) 
 }
 
 /// The third part of one radar's association: the assignment of the gated pairs, and the
-/// decision for each plot.
-fn assoc_finish(f: &mut Fusion, ra: RadarAssoc<'_>) -> Vec<Decision> {
+/// decision for each plot, left in the radar's scratch (`dec`, parallel to `plots`).
+fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     let RadarAssoc {
         radar,
         r8,
         plots,
         mut dec,
         tracks,
+        skip,
         anon,
+        conv_own,
         grid,
         pairs,
         infos,
@@ -1232,22 +1433,30 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc<'_>) -> Vec<Decision> {
     if let Some(slot) = f.infos_bufs.get_mut(radar) {
         *slot = infos;
     }
-    dec
+    if let Some(slot) = f.rscratch.get_mut(radar) {
+        slot.plots = plots;
+        slot.dec = dec;
+        slot.anon = anon;
+        slot.conv_own = conv_own;
+        slot.tracks = tracks;
+        slot.skip = skip;
+    }
 }
 
-/// The decisions for the plots of every radar of a bucket (`groups`: a radar and its plots, in
-/// time order). The hard-constraint plots are decided first; the anonymous plots are then gated
-/// one at a time, always for the radar that has spent the least work so far (the lowest radar on
-/// a tie), so when the bucket's work limit is reached every radar has had its share and one
-/// radar's flood does not leave the others' plots ungated; the assignments follow.
-fn associate_bucket(
-    f: &mut Fusion,
-    groups: &[(usize, Vec<RadarPlot>)],
-) -> Vec<(usize, Vec<Decision>)> {
-    let mut ras: Vec<Option<RadarAssoc<'_>>> = groups
-        .iter()
-        .map(|(r, v)| assoc_prepare(f, *r, v))
-        .collect();
+/// The decisions for the plots of every radar of a bucket (each radar's plots are in its
+/// scratch, in time order; its decisions are left there). The hard-constraint plots are decided
+/// first; the anonymous plots are then gated one at a time, always for the radar that has spent
+/// the least work so far (the lowest radar on a tie), so when the bucket's work limit is reached
+/// every radar has had its share and one radar's flood does not leave the others' plots ungated;
+/// the assignments follow.
+fn associate_bucket(f: &mut Fusion) {
+    // At most `MAX_RADARS` radars (checked by `fusion_new`).
+    let mut ras: [Option<RadarAssoc>; MAX_RADARS] = std::array::from_fn(|_| None);
+    for (r, slot) in ras.iter_mut().enumerate() {
+        if f.rscratch.get(r).is_some_and(|rs| !rs.plots.is_empty()) {
+            *slot = assoc_prepare(f, r);
+        }
+    }
     let budget = f.bucket_tests_max;
     let mut total = 0usize;
     loop {
@@ -1275,11 +1484,11 @@ fn associate_bucket(
         ra.next += 1;
         total += assoc_plot(f, ra, a, budget - total);
     }
-    groups
-        .iter()
-        .zip(ras)
-        .map(|((r, _), ra)| (*r, ra.map(|ra| assoc_finish(f, ra)).unwrap_or_default()))
-        .collect()
+    for ra in &mut ras {
+        if let Some(ra) = ra.take() {
+            assoc_finish(f, ra);
+        }
+    }
 }
 
 /// Records a run of `run` held plots of `radar` on `key`, in the bucket being processed. In a full
@@ -1371,46 +1580,51 @@ struct Ev {
 fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out: &mut TrackOutput) {
     f.stats.reg_clamped = f.reg.iter().map(|r| r.clamped).sum();
     f.stats.processed += (adsb.len() + plots.len()) as u64;
-    // Group plots by radar, keeping time order.
-    let mut groups: Vec<(usize, Vec<RadarPlot>)> = Vec::new();
+    // Group plots by radar, keeping time order, in each radar's scratch.
+    for rs in &mut f.rscratch {
+        rs.plots.clear();
+        rs.dec.clear();
+    }
     for p in plots {
-        let r = usize::from(p.radar);
-        match groups.iter_mut().find(|(g, _)| *g == r) {
-            Some((_, v)) => v.push(p.plot),
-            None => groups.push((r, vec![p.plot])),
+        let Some(rs) = f.rscratch.get_mut(usize::from(p.radar)) else {
+            continue;
+        };
+        if rs.plots.len() < RADAR_PLOTS_MAX {
+            rs.plots.push(p.plot);
+        } else {
+            f.stats.bucket_plot_overflow += 1;
         }
     }
-    groups.sort_by_key(|(r, _)| *r);
-    for (_, v) in &mut groups {
-        if v.len() > MAX_BUCKET_PLOTS {
-            f.stats.bucket_plot_overflow += (v.len() - MAX_BUCKET_PLOTS) as u64;
-            v.truncate(MAX_BUCKET_PLOTS);
-        }
-    }
-    let decisions = associate_bucket(f, &groups);
+    associate_bucket(f);
     // Events in time order.
-    let mut evs: Vec<Ev> = Vec::new();
+    let mut evs = std::mem::take(&mut f.evs);
+    evs.clear();
+    let mut full = 0u64;
     for (i, m) in adsb.iter().enumerate() {
-        evs.push(Ev {
+        let ev = Ev {
             t: m.toa_ns,
             src: 0,
             radar: 0,
             idx: i,
-        });
+        };
+        full += u64::from(!push_within(&mut evs, ev));
     }
-    for (gi, (r, d)) in decisions.iter().enumerate() {
-        for (j, dj) in d.iter().enumerate() {
+    for (r, rs) in f.rscratch.iter().enumerate() {
+        for (j, dj) in rs.dec.iter().enumerate() {
             if dj.kind == D_APPLY {
-                evs.push(Ev {
+                let ev = Ev {
                     t: dj.m.toa_ns,
                     src: 1,
-                    radar: *r,
-                    idx: gi * 1_000_000 + j,
-                });
+                    radar: r,
+                    idx: r * 1_000_000 + j,
+                };
+                full += u64::from(!push_within(&mut evs, ev));
             }
         }
     }
-    evs.sort_by_key(|e| (e.t, e.src, e.radar, e.idx));
+    f.stats.scratch_full += full;
+    // Every key is distinct, so the unstable sort gives the one order.
+    evs.sort_unstable_by_key(|e| (e.t, e.src, e.radar, e.idx));
     for e in &evs {
         if e.src == 0 {
             if let Some(m) = adsb.get(e.idx) {
@@ -1422,33 +1636,39 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
                 }
             }
         } else {
-            let (gi, j) = (e.idx / 1_000_000, e.idx % 1_000_000);
-            let (Some((_, d)), Some(g)) = (decisions.get(gi), groups.get(gi)) else {
+            let (r, j) = (e.idx / 1_000_000, e.idx % 1_000_000);
+            let Some(rs) = f.rscratch.get(r) else {
                 continue;
             };
-            let (Some(dj), Some(p)) = (d.get(j), g.1.get(j)) else {
+            let (Some(&dj), Some(&p)) = (rs.dec.get(j), rs.plots.get(j)) else {
                 continue;
             };
             tracker_update(&mut f.tracker, &dj.m, out);
             log_assign(f, p.time_ns, dj.key, p.label, e.radar as u8, dj.how);
         }
     }
+    f.evs = evs;
     // Registration, then initiation, per radar.
-    for (gi, (r, d)) in decisions.iter().enumerate() {
-        let Some((_, g)) = groups.get(gi) else {
+    for r in 0..f.rscratch.len() {
+        let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
             continue;
         };
-        if f.cfg.registration {
-            for (j, dj) in d.iter().enumerate() {
-                if let (Some(z), Some(p)) = (dj.resid, g.get(j)) {
-                    if let Some(st) = f.reg.get_mut(*r) {
-                        reg_offer(st, p.time_ns, dj.key, &z);
+        if !rs.plots.is_empty() {
+            if f.cfg.registration {
+                for (j, dj) in rs.dec.iter().enumerate() {
+                    if let (Some(z), Some(p)) = (dj.resid, rs.plots.get(j)) {
+                        if let Some(st) = f.reg.get_mut(r) {
+                            reg_offer(st, p.time_ns, dj.key, &z);
+                        }
                     }
                 }
+                publish_registration(f, r, rs.plots.last().map_or(0, |p| p.time_ns));
             }
-            publish_registration(f, *r, g.last().map_or(0, |p| p.time_ns));
+            initiate(f, r, &rs.plots, &rs.dec, out);
         }
-        initiate(f, *r, g, d, out);
+        if let Some(slot) = f.rscratch.get_mut(r) {
+            *slot = rs;
+        }
     }
 }
 
@@ -1466,6 +1686,8 @@ fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
     if *last == i64::MIN || t_ns.saturating_sub(*last) >= REG_PUBLISH_NS {
         if hist.len() < REG_HISTORY_MAX {
             hist.push(reg_sample(st, t_ns));
+        } else {
+            f.stats.reg_history_full += 1;
         }
         *last = t_ns;
     }
@@ -1567,12 +1789,20 @@ fn initiate(
         NO_BIAS
     };
     // Candidate plots: unassigned (not held, not refused).
-    let free: Vec<usize> = (0..plots.len())
-        .filter(|&j| dec.get(j).is_some_and(|d| d.kind == D_UNASSIGNED))
-        .collect();
-    let mut joined: Vec<(usize, Measurement)> = Vec::new();
+    // The lists are the layer's, made at start: at most `plots.len()` (below `RADAR_PLOTS_MAX`)
+    // plots and `MAX_CANDIDATES` candidates go in them.
+    let mut free = std::mem::take(&mut f.init_free);
+    let mut anon = std::mem::take(&mut f.init_anon);
+    let mut cand_ix = std::mem::take(&mut f.cand_ix);
+    free.clear();
+    anon.clear();
+    cand_ix.clear();
+    for j in 0..plots.len() {
+        if dec.get(j).is_some_and(|d| d.kind == D_UNASSIGNED) {
+            free.push(j);
+        }
+    }
     // Address plots: join or start the candidate of that address.
-    let mut anon: Vec<usize> = Vec::new();
     for &j in &free {
         let Some(p) = plots.get(j) else { continue };
         if f.cfg.use_address && p.addr != NO_ADDR {
@@ -1606,13 +1836,14 @@ fn initiate(
         }
     }
     // Anonymous plots against anonymous candidates of this radar: exact assignment.
-    let cand_ix: Vec<usize> = (0..f.cands.len())
-        .filter(|&i| {
-            f.cands
-                .get(i)
-                .is_some_and(|c| usize::from(c.radar) == radar && c.addr == NO_ADDR)
-        })
-        .collect();
+    for i in 0..f.cands.len() {
+        if f.cands
+            .get(i)
+            .is_some_and(|c| usize::from(c.radar) == radar && c.addr == NO_ADDR)
+        {
+            cand_ix.push(i);
+        }
+    }
     let mut pairs = std::mem::take(&mut f.pairs_buf);
     // The converted measurement of each pair, parallel to `pairs`.
     let mut ms = std::mem::take(&mut f.ms_buf);
@@ -1696,7 +1927,9 @@ fn initiate(
         }
     }
     f.ms_buf = ms;
-    joined.clear();
+    f.init_free = free;
+    f.init_anon = anon;
+    f.cand_ix = cand_ix;
     // Confirm and expire.
     let now_scan = plots
         .first()
@@ -1829,6 +2062,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) {
 mod tests {
     use super::*;
     use crate::radar::NONE_CODE;
+    use crate::tracker::tracker_live;
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
     use oa_sensorsim::prng::Rng;
 
@@ -2976,6 +3210,108 @@ mod tests {
             let c = fusion_config(fusion_tracker_config(&base, &[site]));
             assert!(fusion_new(&c, &[site]).is_ok(), "period {period_ns} ns");
         }
+    }
+
+    // REQ: OA-TRK-291
+    #[test]
+    fn the_processing_path_keeps_every_preallocated_buffer_under_a_representative_load() {
+        // Three radars (two periods), registration on, ADS-B tracks plus one radar-only aircraft,
+        // a Mode S half of the plots of two radars, 384 s of it. A buffer reallocated by the run
+        // would change its address or capacity (a temporary freed within a call would not show).
+        let sites = [
+            SITE,
+            RadarSite {
+                lat_deg: SITE.lat_deg + 0.4,
+                lon_deg: SITE.lon_deg - 0.3,
+                sensor: 2,
+                ..SITE
+            },
+            RadarSite {
+                lat_deg: SITE.lat_deg - 0.3,
+                lon_deg: SITE.lon_deg + 0.5,
+                sensor: 3,
+                period_ns: 12_000_000_000,
+                ..SITE
+            },
+        ];
+        let tc = fusion_tracker_config(
+            &TrackerConfig {
+                out_capacity: 1 << 18,
+                max_tracks: 256,
+                ..DEFAULT_CONFIG
+            },
+            &sites,
+        );
+        let mut c = fusion_config(tc);
+        c.log_assign = true;
+        let mut f = fusion_new(&c, &sites).unwrap();
+        let fresh = fusion_buffers(&f);
+        let (plots0, adsb) = registration_world(30.0, 0.05, &[], 0.0);
+        let mut rng = Rng::from_seed(99);
+        let mut events: Vec<(i64, usize, RadarPlot)> =
+            plots0.iter().map(|p| (p.time_ns, 0, *p)).collect();
+        for (r, site) in sites.iter().enumerate().skip(1) {
+            let g = radar_geom(site);
+            for (i, m) in adsb.iter().enumerate() {
+                let (lat, lon) = (f64::from(m.lat_e7) / 1.0e7, f64::from(m.lon_e7) / 1.0e7);
+                let (rho, az) = polar_of(&g, lat, lon, f64::from(m.alt_ft) * FT_M);
+                let t = m.toa_ns + 200_000_000 * r as i64;
+                events.push((
+                    t,
+                    r,
+                    RadarPlot {
+                        time_ns: t,
+                        range_m: rho + 70.0 * rng.normal(),
+                        az_deg: (az + 0.08 * rng.normal()).rem_euclid(360.0),
+                        alt_ft: m.alt_ft,
+                        addr: if i % 2 == 0 { m.addr } else { NO_ADDR },
+                        label: m.addr,
+                        mode_a: NONE_CODE,
+                    },
+                ));
+            }
+        }
+        events.sort_by_key(|e| (e.0, e.1));
+        let mut out = output_new(1 << 18);
+        let mut ai = 0;
+        let mut warm = None;
+        for (t, r, p) in &events {
+            while adsb.get(ai).is_some_and(|m| m.toa_ns <= *t) {
+                fusion_adsb(&mut f, &adsb[ai]);
+                ai += 1;
+            }
+            fusion_plots(&mut f, *r, &[*p]);
+            fusion_advance(&mut f, *t, &mut out);
+            crate::types::output_clear(&mut out);
+            if warm.is_none() && *t > 100 * NS_PER_S {
+                warm = Some(fusion_buffers(&f));
+            }
+        }
+        let end_ns = events.last().map_or(0, |e| e.0);
+        fusion_finish(&mut f, end_ns, &mut out);
+        let st = fusion_stats(&f);
+        assert!(st.applied_hard > 100 && st.applied_assoc > 100, "{st:?}");
+        assert!(st.cand_confirmed > 0, "{st:?}");
+        assert!(fusion_registration(&f, 0).unwrap().1.len() > 3);
+        assert_eq!((st.scratch_full, st.reg_history_full), (0, 0));
+        assert_eq!(st.assoc_refused, 0);
+        let warm = warm.unwrap();
+        assert_eq!(warm, fresh);
+        assert_eq!(fusion_buffers(&f), warm);
+        // Handing over the records keeps the layer's buffer.
+        let n = fusion_radar_tracks(&f).len();
+        assert_eq!(fusion_take_radar_tracks(&mut f).len(), n);
+        assert_eq!(fusion_buffers(&f), warm);
+    }
+
+    // REQ: OA-TRK-291
+    #[test]
+    fn a_scratch_buffer_at_its_capacity_refuses_and_is_not_grown() {
+        let mut v: Vec<u32> = Vec::with_capacity(4);
+        let (ptr, cap) = (v.as_ptr(), v.capacity());
+        let pushed = (0..10).filter(|&i| push_within(&mut v, i)).count();
+        assert_eq!(pushed, cap);
+        assert_eq!((v.as_ptr(), v.capacity()), (ptr, cap));
     }
 
     /// A plot that, if processed, would start a candidate (no address, no track near).
