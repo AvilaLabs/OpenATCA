@@ -3045,7 +3045,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   buffers made at start with named capacities and cleared and reused; a buffer at its capacity
   refuses and counts. Under three radars, registration, Mode S and radar-only plots over 384 s no
   such buffer changes address or capacity (a check on the buffers: it does not see a temporary
-  allocated and freed within a call).
+  allocated and freed within a call). The two per-key tables (hold runs, registration keys) are
+  among the buffers checked.
+- **OA-TRK-292** The fusion layer's per-key tables are fixed-capacity open-addressing hash tables
+  made at start (linear probing, backward-shift deletion, a fixed hash with no seed): lookup,
+  overwrite and removal agree with an ordered map; a new key into a full table is refused and
+  counted and the table never grows; removal under collisions leaves every other entry findable;
+  retention of a subset leaves exactly that subset. The order in which entries are evicted is the
+  order the ordered maps gave.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
