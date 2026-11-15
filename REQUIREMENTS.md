@@ -3377,3 +3377,26 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-263** A track's output position and velocity covariances are in east and north at the output
   point: a track started from a plot returns its covariance and velocity at the start, at 45 and 89.9999
   degrees and in the south, to 1e-4.
+
+## Speed and capacity harness (oa-perf)
+
+- **OA-PRF-001** Percentiles are by the nearest-rank rule (the 99.9th of 1,000 values is the 999th),
+  with weights (a call that processed n inputs counts n times) and in a fixed-bin histogram whose
+  maximum, mean and count are exact; a key=value file round-trips.
+- **OA-PRF-002** The synthetic traffic is a pure function of its seed and the second asked for: the
+  same seed gives the same aircraft, ADS-B reports and plots, another seed does not; one ADS-B report
+  per equipped aircraft per second; plots at the scan rates of the radars (12 s en-route, 4.8 s
+  terminal), in time order, inside the second asked for, and valid for the tracker.
+- **OA-PRF-003** A capacity run feeds the traffic to the fusion layer one second at a time, times each
+  advance, and reports the time per second of traffic, the per-advance distribution, every capacity
+  counter, the data age of the rows, the input-to-effect delay and the memory; two runs of one
+  configuration count the same things.
+- **OA-PRF-004** A run that overfills the tracker is refused and counted, not stopped: the refusal
+  counters move and the buffers are the same at the end as at the start.
+- **OA-PRF-005** Memory is read from `/proc/self/status` (`VmHWM`, `VmRSS`) in kilobytes.
+- **OA-PRF-006** A latency pass offers every input of a time-ordered feed to the fusion layer and
+  advances it to the input's time, timing each call; it reports the time of every call, of the calls
+  that processed inputs and of those shared over the inputs they processed, and the tracker alone is
+  timed per report.
+- **OA-PRF-007** The command line refuses unknown commands, flags and values, and the overload
+  comparison reads the counters of the knee run and the overload run.

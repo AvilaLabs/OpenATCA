@@ -35,6 +35,7 @@ members = [
     "crates/oa-asterix",
     "crates/oa-sensorsim",
     "crates/oa-track",
+    "tools/oa-perf",
     "tools/oa-trace",
 ]
 
