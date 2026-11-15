@@ -11,7 +11,7 @@ use crate::error::{LoadError, QueryError};
 use crate::hour::{hour_bytes, load_hour, needed_ranges_text, Hour};
 use crate::isa::pressure_hpa_from_altitude_ft;
 use crate::sample::{bracket, sample_blend, Query, Sample};
-use crate::{MAX_ARCHIVE_FILES, MAX_FILE_BYTES, MAX_HOURS_HELD};
+use crate::{MAX_ARCHIVE_FILES, MAX_FILE_BYTES, MAX_HOURS_HELD, MAX_IDX_BYTES};
 use oa_grib2::{forecast_seconds, inspect_stream, message_length, ref_unix_seconds};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -136,6 +136,21 @@ impl Archive {
     }
 }
 
+/// Reads a whole file of at most `limit` bytes: its length is checked first, and the read
+/// itself stops one byte past the limit, so a file that grows meanwhile is refused too.
+pub fn read_file_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let f = File::open(path)?;
+    if f.metadata()?.len() > limit {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let mut out = Vec::new();
+    f.take(limit.saturating_add(1)).read_to_end(&mut out)?;
+    if out.len() as u64 > limit {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(out)
+}
+
 fn read_ranges(path: &Path, ranges: &[(u64, u64)]) -> std::io::Result<Vec<u8>> {
     let mut f = File::open(path)?;
     let mut out = Vec::new();
@@ -165,7 +180,10 @@ pub fn read_hour_file(path: &Path) -> Result<Hour, LoadError> {
     }
     let mut idx_path = path.as_os_str().to_owned();
     idx_path.push(".idx");
-    if let Ok(text) = std::fs::read_to_string(&idx_path) {
+    let idx = read_file_capped(Path::new(&idx_path), MAX_IDX_BYTES)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok());
+    if let Some(text) = idx {
         if let Ok(ranges) = needed_ranges_text(&text, meta.len()) {
             let fits = ranges.last().is_some_and(|r| r.1 < meta.len());
             if fits {
@@ -177,18 +195,20 @@ pub fn read_hour_file(path: &Path) -> Result<Hour, LoadError> {
             }
         }
     }
-    let data = std::fs::read(path).map_err(|e| io_err(path, &e))?;
+    let data = read_file_capped(path, MAX_FILE_BYTES).map_err(|e| io_err(path, &e))?;
     load_hour(&data)
 }
 
-fn ensure_loaded(a: &mut Archive, k: usize) -> Result<(), LoadError> {
+type Loader<'a> = &'a mut dyn FnMut(&Path) -> Result<Hour, LoadError>;
+
+fn ensure_loaded(a: &mut Archive, k: usize, load: Loader<'_>) -> Result<(), LoadError> {
     if let Some(pos) = a.held.iter().position(|(i, _)| *i == k) {
         let entry = a.held.remove(pos);
         a.held.push(entry);
         return Ok(());
     }
     let file = a.files.get(k).ok_or(LoadError::BadTime)?;
-    let hour = read_hour_file(&file.path)?;
+    let hour = load(&file.path)?;
     if hour.valid_s != file.valid_s {
         return Err(LoadError::Inconsistent("valid time differs from its index"));
     }
@@ -206,11 +226,32 @@ fn held_hour(a: &Archive, k: usize) -> Option<&Hour> {
 /// The query over an archive: loads the (at most two) bracketing hours as needed, evicting the
 /// least recently used beyond [`MAX_HOURS_HELD`].
 pub fn archive_sample(a: &mut Archive, q: &Query) -> Result<Sample, QueryError> {
+    archive_sample_with(a, q, &mut read_hour_file)
+}
+
+/// [`archive_sample`] with the file reader supplied (the tests give it synthetic hours).
+pub(crate) fn archive_sample_with(
+    a: &mut Archive,
+    q: &Query,
+    load: Loader<'_>,
+) -> Result<Sample, QueryError> {
     let p = pressure_hpa_from_altitude_ft(q.alt_ft)?;
     let (i0, i1, w) = bracket(&a.times(), q.time_s)?;
-    ensure_loaded(a, i0)?;
-    ensure_loaded(a, i1)?;
-    let (Some(h0), Some(h1)) = (held_hour(a, i0), held_hour(a, i1)) else {
+    // Only an hour with weight is read: at a stated hour the neighbour may be unreadable.
+    if w != 1.0 {
+        ensure_loaded(a, i0, &mut *load)?;
+    }
+    if w != 0.0 {
+        ensure_loaded(a, i1, &mut *load)?;
+    }
+    let (Some(f0), Some(f1)) = (a.files.get(i0), a.files.get(i1)) else {
+        return Err(QueryError::Load(LoadError::BadTime));
+    };
+    let (t0, t1) = (f0.valid_s, f1.valid_s);
+    let (Some(h0), Some(h1)) = (
+        held_hour(a, i0).or(held_hour(a, i1)),
+        held_hour(a, i1).or(held_hour(a, i0)),
+    ) else {
         return Err(QueryError::Load(LoadError::BadTime));
     };
     let pt = sample_blend(h0, h1, w, q.lat, q.lon, p)?;
@@ -220,8 +261,8 @@ pub fn archive_sample(a: &mut Archive, q: &Query) -> Result<Sample, QueryError> 
         temp_k: pt.t,
         height_gpm: pt.z,
         pressure_hpa: p,
-        hour0_s: h0.valid_s,
-        hour1_s: h1.valid_s,
+        hour0_s: t0,
+        hour1_s: t1,
         time_weight: w,
     })
 }

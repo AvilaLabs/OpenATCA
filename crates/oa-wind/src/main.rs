@@ -16,7 +16,8 @@ use oa_awc::{finalize_pirep, new_pirep_table, parse_pirep, pirep_len, PirepStats
 use oa_grib2::{decode_stream, Field, Parameter};
 use oa_wind::check::{check_grid_points, compare_obs, compare_to_fields, ObsWind, VectorCompare};
 use oa_wind::{
-    archive_files, hour_bytes, hour_levels, index_files, read_hour_file, Hour, MAX_HOURS_HELD,
+    archive_files, hour_bytes, hour_levels, index_files, read_file_capped, read_hour_file, Hour,
+    MAX_FILE_BYTES, MAX_HOURS_HELD,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -64,7 +65,8 @@ fn load_pireps(dir: &Path) -> Result<PirepTable, String> {
     let mut t = new_pirep_table();
     let mut stats = PirepStats::default();
     for p in list(dir, "pirep_", ".json") {
-        let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let bytes = oa_awc::summary::read_file_capped(&p, oa_awc::summary::MAX_FILE_BYTES)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
         parse_pirep(&bytes, &mut t, &mut stats).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     let d = finalize_pirep(&mut t);
@@ -197,7 +199,7 @@ fn main() -> ExitCode {
 
     // 1. against oa-grib2's own values
     println!("(1) against oa-grib2 decoded values, {}", pick.display());
-    match std::fs::read(&pick) {
+    match read_file_capped(&pick, MAX_FILE_BYTES) {
         Ok(data) => {
             let dec = decode_stream(&data);
             let r = check_grid_points(&hour, &dec.fields, 4);
@@ -225,7 +227,7 @@ fn main() -> ExitCode {
                 None => println!("(2) RAP vs HRRR: no HRRR file; skipped"),
                 Some(hp) => {
                     println!("(2) RAP vs HRRR, {}", hp.display());
-                    match std::fs::read(hp) {
+                    match read_file_capped(hp, MAX_FILE_BYTES) {
                         Ok(hd) => {
                             let hf = decode_stream(&hd);
                             let pa = hf

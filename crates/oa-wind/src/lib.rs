@@ -50,7 +50,8 @@ pub mod sample;
 mod tests;
 
 pub use archive::{
-    archive_files, archive_sample, index_files, new_archive, read_hour_file, Archive, HourFile,
+    archive_files, archive_sample, index_files, new_archive, read_file_capped, read_hour_file,
+    Archive, HourFile,
 };
 pub use error::{LoadError, QueryError, Refusal};
 pub use hour::{
@@ -74,3 +75,6 @@ pub const MAX_HOUR_VALUES: u64 = 128 * 1024 * 1024;
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Limit: most hour files in one archive.
 pub const MAX_ARCHIVE_FILES: usize = 1024;
+/// Limit: largest `.idx` sidecar read, 1 MiB. The largest real one (HRRR, 7 messages per level
+/// of a subset) is 32 596 bytes; a full RAP file's is 16 497.
+pub const MAX_IDX_BYTES: u64 = 1024 * 1024;

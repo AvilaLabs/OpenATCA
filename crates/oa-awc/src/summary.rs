@@ -18,6 +18,7 @@ use crate::taf::{finalize_taf, new_taf_table, parse_taf, TafDedupe, TafStats, Ta
 use crate::units::{unpack_ident, NONE_U16};
 use crate::{ParseError, DEFAULT_MAX_ALTIMETER_AGE_S};
 use std::fmt::Write as _;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The ZAU box the hourly files were fetched with: lat 38.5 to 46.5, lon -93.5 to -83.5.
@@ -26,6 +27,25 @@ pub const ZAU_BOX: (f64, f64, f64, f64) = (38.5, 46.5, -93.5, -83.5);
 pub const AVAILABILITY_TARGET: f64 = 0.95;
 /// Bound: files read in one scan.
 pub const MAX_FILES: usize = 10_000;
+
+/// Bound: bytes of one file read, the largest document `oa_json` accepts (32 MiB). The largest
+/// real file is about 150 kB.
+pub const MAX_FILE_BYTES: u64 = oa_json::MAX_INPUT_BYTES as u64;
+
+/// Reads a whole file of at most `limit` bytes: its length is checked first, and the read
+/// itself stops one byte past the limit, so a file that grows meanwhile is refused too.
+pub fn read_file_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let f = std::fs::File::open(path)?;
+    if f.metadata()?.len() > limit {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let mut out = Vec::new();
+    f.take(limit.saturating_add(1)).read_to_end(&mut out)?;
+    if out.len() as u64 > limit {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(out)
+}
 
 /// Everything the scan learned.
 // A7.2: cold struct (one per run), size guard waived
@@ -140,7 +160,7 @@ pub fn scan_dir(dir: &Path) -> Result<Summary, String> {
             s.unrecognized.push(name);
             continue;
         };
-        let bytes = match std::fs::read(path) {
+        let bytes = match read_file_capped(path, MAX_FILE_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 s.file_errors.push((name, format!("read: {e}")));
