@@ -59,8 +59,8 @@ use crate::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::clock::{clock_observe, Clock, Tick};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 use crate::fns::{
-    apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, new_fns_table,
-    FnsApplied, FnsTable, FNS_CAPACITY,
+    apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
+    new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
 };
 use crate::hash::state_hash;
 use crate::table::{
@@ -520,7 +520,8 @@ pub fn replay_hash(p: &Pipeline) -> Digest {
 /// the next sweep time of the flight, ADS-B and TFMS tables), integers as eight little-endian
 /// bytes and flags as one byte. Two pipelines with equal digests behave alike on any further
 /// input; equal [`replay_hash`] alone does not say so, as a held candidate step changes what the
-/// next frames do without changing a table.
+/// next frames do without changing a table. The digest also covers the basis of each NOTAM
+/// tombstone's time ([`fns_tomb_basis_into`]).
 pub fn replay_state_digest(p: &Pipeline) -> Digest {
     let mut h = Sha256::new();
     let _ = h.update(b"OATSD");
@@ -546,6 +547,7 @@ pub fn replay_state_digest(p: &Pipeline) -> Digest {
     i(&mut h, p.table.next_sweep_ns);
     i(&mut h, p.adsb.next_sweep_ns);
     i(&mut h, p.tfms.next_sweep_ns);
+    fns_tomb_basis_into(&mut h, &p.fns);
     h.finalize()
 }
 

@@ -18,10 +18,10 @@ use oa_replay::tfms::{tcol, TFMS_FLIGHT_MAX_AGE_NS};
 use oa_replay::{
     apply_fns, apply_tfms_flight, errors_total, flow_live, flow_sweep, fns_in_force, fns_live,
     fns_slot_of, fns_stale_count, fns_sweep, new_flow_table, new_fns_table, new_pipeline,
-    new_table, new_tfms_table, pipeline_stale_count, process_frame, replay_hash, run_streams,
-    snapshot, spec_from_bytes, state_hash, tfms_linked, tfms_live, tfms_slot_of, tfms_stale_count,
-    tfms_sweep, ErrKind, FeedKind, FnsApplied, Pipeline, PipelineConfig, TableConfig, TfmsApplied,
-    ERR_NAMES, LINK_ACID, LINK_PLAN,
+    new_table, new_tfms_table, pipeline_stale_count, process_frame, replay_hash,
+    replay_state_digest, run_streams, snapshot, spec_from_bytes, state_hash, tfms_linked,
+    tfms_live, tfms_slot_of, tfms_stale_count, tfms_sweep, ErrKind, FeedKind, FnsApplied, Pipeline,
+    PipelineConfig, TableConfig, TfmsApplied, ERR_NAMES, LINK_ACID, LINK_PLAN,
 };
 use oa_tfms::{decode_bytes as tfms_decode, default_limits, new_rows as new_tfms_rows, NO_TIME};
 use oa_xml::Parser;
@@ -1664,4 +1664,32 @@ fn a_clock_step_leaves_a_tombstone_held_to_the_notices_own_end_where_it_is() {
     fns_shift_times(&mut t, 3 * day);
     fns_sweep(&mut t, 1_899_052_200_001 * MS_NS);
     assert_eq!(fns_tombstones(&t), 0);
+}
+
+// REQ: OA-RPL-265
+#[test]
+fn two_states_differing_only_in_a_tombstone_basis_have_different_digests() {
+    let tombstoned = || {
+        let mut t = new_fns_table(8);
+        let mut c = nt_at("Z", 9, I10);
+        c.ntype = "C";
+        c.refd = Some(("Z", 1));
+        assert_eq!(fns_apply(&mut t, &c, mar5(10)), FnsApplied::CancelUnmatched);
+        t
+    };
+    let (mut p, mut q) = (
+        new_pipeline(PipelineConfig::default()).unwrap(),
+        new_pipeline(PipelineConfig::default()).unwrap(),
+    );
+    p.fns = tombstoned();
+    q.fns = tombstoned();
+    p.frames[FeedKind::Fns as usize] = 1;
+    q.frames[FeedKind::Fns as usize] = 1;
+    assert_eq!(replay_state_digest(&p), replay_state_digest(&q));
+    // The basis of the tombstone's time: a span of replay time, or the notice's own end.
+    for v in &mut q.fns.tomb_replay {
+        *v = !*v;
+    }
+    assert_eq!(replay_hash(&p), replay_hash(&q));
+    assert_ne!(replay_state_digest(&p), replay_state_digest(&q));
 }

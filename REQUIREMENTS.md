@@ -1407,6 +1407,10 @@ frame of their feed has been fed (as the ADS-B table is).
   past the seven days).
 - **OA-RPL-264** When a merge or an after-frame hook ends the run with an error, the frame and gzip error
   counts found so far are already in the pipeline's own counts, and the error is still returned.
+- **OA-RPL-265** `replay_state_digest` covers the basis of each live NOTAM tombstone's time (a span of replay
+  time, or the notice's own end), which decides whether a step of the replay clock moves it: two states
+  that differ only in that flag have different digests. Nothing is added while no tombstone is held, and
+  `replay_hash` is unchanged.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.

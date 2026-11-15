@@ -953,6 +953,32 @@ pub fn fns_hash_into(h: &mut Sha256, t: &FnsTable) {
     }
 }
 
+/// Writes, for the replay state digest, the basis of every live tombstone's time (a span of replay
+/// time, or the notice's own end) in ascending key order. Nothing is written without tombstones.
+/// The basis decides whether a step of the replay clock moves the tombstone, so it is state, but
+/// not content: [`fns_hash_into`] does not hold it.
+pub fn fns_tomb_basis_into(h: &mut Sha256, t: &FnsTable) {
+    let mut tombs: Vec<(FnsKey, bool)> = (0..t.tomb.capacity)
+        .filter(|&s| slot_live(&t.tomb, s))
+        .filter_map(|s| {
+            let k = t.tomb_key.get(s).copied()?;
+            Some((k, t.tomb_replay.get(s).copied().unwrap_or(false)))
+        })
+        .collect();
+    if tombs.is_empty() {
+        return;
+    }
+    tombs.sort_unstable();
+    put(h, b"OATSB");
+    put(h, &(tombs.len() as u64).to_le_bytes());
+    for (k, replay) in tombs {
+        put(h, &k.0);
+        put(h, &k.1.to_le_bytes());
+        put(h, &k.2.to_le_bytes());
+        put(h, &[u8::from(replay)]);
+    }
+}
+
 /// The ICAO location text of slot `s` (for readers and reports), empty when absent.
 pub fn fns_icao_str(t: &FnsTable, s: usize) -> &str {
     t.icao.get(s).map_or("", |c| code_str(c))
