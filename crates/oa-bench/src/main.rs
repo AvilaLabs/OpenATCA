@@ -280,8 +280,10 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     let result = run_benchmark(&loaded.legacy, &truth, &env, &rcfg);
 
     let mut notes = loaded.notes.clone();
+    // Wall-clock time goes to stderr only: the report must be the same bytes on every run.
+    eprintln!("truth built in {truth_secs:.2} s");
     notes.push(format!(
-        "truth: ADS-B clip, {} reports decoded, {} frames refused, built in {truth_secs:.2} s",
+        "truth: ADS-B clip, {} reports decoded, {} frames refused",
         clip.reports.icao.len(),
         clip.bad_frames
     ));
