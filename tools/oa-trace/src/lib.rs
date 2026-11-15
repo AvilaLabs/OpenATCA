@@ -371,7 +371,7 @@ pub fn render_text(rep: &Report) -> String {
         }
     }
     o.push_str(&format!(
-        "\nResult: {}\n",
+        "\nTraceability (every requirement linked, ids unique; no test or proof run): {}\n",
         if rep.ok() { "PASS" } else { "FAIL" }
     ));
     o
@@ -403,9 +403,9 @@ pub fn render_markdown(rep: &Report) -> String {
                 tests.iter().any(|t| !t.proof),
                 tests.iter().any(|t| t.proof),
             ) {
-                (true, true) => "verified, proved",
-                (false, true) => "proved",
-                _ => "verified",
+                (true, true) => "test and proof harness linked",
+                (false, true) => "proof harness linked",
+                _ => "test linked",
             };
             o.push_str(&format!("| {id} | {status} | {cell} |\n"));
         } else if rep.withdrawn.contains(id) {
@@ -553,7 +553,7 @@ mod tests {
         let r2 = analyze(&t.0);
         assert_eq!(render_text(&r1), render_text(&r2));
         let md = render_markdown(&r1);
-        assert!(md.contains("| OA-AAA-001 | verified | `t_one` (a.rs:1)<br>`t_one` (b.rs:1) |"));
+        assert!(md.contains("| OA-AAA-001 | test linked | `t_one` (a.rs:1)<br>`t_one` (b.rs:1) |"));
         assert!(md.contains("| OA-AAA-002 | **NO TEST** |"));
         assert!(md.contains("| OA-424-003 | withdrawn |"));
     }
@@ -592,11 +592,42 @@ mod tests {
         assert_eq!(a.iter().filter(|x| !x.proof).count(), 1);
         assert!(r.covered["OA-AAA-002"].iter().all(|x| x.proof));
         let md = render_markdown(&r);
-        assert!(md.contains("| OA-AAA-001 | verified, proved |"));
+        assert!(md.contains("| OA-AAA-001 | test and proof harness linked |"));
         assert!(md.contains(
-            "| OA-AAA-002 | proved | proof `p_two` (b.rs:1)<br>proof `p_three` (c.rs:1) |"
+            "| OA-AAA-002 | proof harness linked | proof `p_two` (b.rs:1)<br>proof `p_three` (c.rs:1) |"
         ));
         assert!(render_text(&r).contains("p_two (proof)"));
+    }
+
+    // REQ: OA-TRC-101
+    #[test]
+    fn false_harness_is_only_linked() {
+        let t = Tmp::new();
+        t.write("REQUIREMENTS.md", REG);
+        t.write(
+            "a.rs",
+            "// REQ: OA-AAA-001\n#[kani::proof]\nfn p_false() { assert!(false); }\n",
+        );
+        let md = render_markdown(&analyze(&t.0));
+        assert!(md.contains("| OA-AAA-001 | proof harness linked |"), "{md}");
+        assert!(!md.contains("proved"), "{md}");
+    }
+
+    // REQ: OA-TRC-102
+    #[test]
+    fn summary_line_says_what_pass_means() {
+        let t = Tmp::new();
+        t.write("REQUIREMENTS.md", "- **OA-AAA-001** one\n");
+        t.write("a.rs", &tag("OA-AAA-001", "#[test]"));
+        let text = render_text(&analyze(&t.0));
+        let last = text.lines().last().unwrap_or("");
+        assert!(last.starts_with("Traceability"), "{last}");
+        assert!(last.ends_with("PASS"), "{last}");
+        let t = Tmp::new();
+        t.write("REQUIREMENTS.md", "- **OA-AAA-001** one\n");
+        let text = render_text(&analyze(&t.0));
+        let last = text.lines().last().unwrap_or("");
+        assert!(last.ends_with("FAIL"), "{last}");
     }
 
     // REQ: OA-TRC-001
