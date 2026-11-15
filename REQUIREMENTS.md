@@ -2039,6 +2039,8 @@ decoder is OA-GRIB-021.
   complete-terrain distribution, and `oa-mva-check` lists each such sector with its nodata count.
 - **OA-MVA-076** A non-finite terrain sample is counted as nodata in the sector scan, never as a
   known elevation; a sector with only such samples has no terrain maximum.
+- **OA-MVA-077** Coverage cell areas and overlap extents use the WGS-84 meridian and prime-vertical radii at the
+  latitude, within 1e-4 of the exact authalic zone area for a 0.1 degree cell at 45 N.
 
 ## M2 — Weather inputs
 
@@ -2116,6 +2118,7 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   `fltLvl` says: the level is stored as none and `pirep_alt_ft` gives none; its layers are kept.
 - **OA-AWC-022** The scan reads each file with a length check and a capped read (`MAX_FILE_BYTES`, the
   `oa-json` input limit); a larger file is listed as refused whole without being read.
+- **OA-AWC-023** `point_hazards_near` measures the WGS-84 geodesic distance (`oa-geo` inverse), not a spherical one.
 
 ## M2 — Benchmark truth (oa-truth)
 
@@ -2487,6 +2490,14 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   with the other point due north, 90 degrees along the equator is 10 018 754 m, and a mid-latitude pair
   agrees with the old tangent plane to a tenth of a percent. An invalid position gives NaN, which the pairing
   excludes and counts.
+- **OA-BENCH-113** `dist_to_polyline` is the exact WGS-84 geodesic distance to the nearest geodesic segment
+  (`oa_airspace::geom::exact_edge_m`), within 1 m of a dense-sampling brute force on a 600 NM segment.
+- **OA-BENCH-114** The synthetic world's truth velocity (and the velocity of its ERAM stream) is true east and north at
+  the aircraft's position, the plane velocity carried through the same geodesic map as the positions: its heading
+  equals the heading of the position track to 0.01 degrees.
+- **OA-BENCH-115** The bench publishes `T3-heading-grid`: the heading error regressed on `(lon - mean lon) * sin(lat)`,
+  with slope, standard error, count and the reference longitude; slope 1 for an injected error equal to that term, 0
+  for none.
 
 ## Winds aloft (oa-wind)
 
@@ -2702,6 +2713,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   error; the code is never masked to its low 12 bits.
 - **OA-SIM-026** A detection whose measured range or azimuth is not finite (an oversized profile sigma) gets
   no plot and is counted in `non_finite`.
+- **OA-SIM-027** Ghost and drift legs are WGS-84 geodesics from the leg start (initial azimuth, distance = speed or
+  rate times elapsed), also near a pole. The flat offset helper `offset_deg` is for sub-millisecond advances only: it
+  returns `None` for an offset above 500 m, a start within 0.1 degrees of a pole or a non-finite input.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or

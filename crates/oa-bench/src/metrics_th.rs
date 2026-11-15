@@ -382,6 +382,95 @@ pub fn t3_heading(p: &PairTable) -> MetricResult {
     result_of("T3-heading", "heading error", "deg", &c)
 }
 
+/// Least-squares line of `y` on `x` over `(x, y)` pairs given by `get` for `0..n`: `(slope,
+/// standard error of the slope, n)`, or `None` with fewer than three points or no spread in `x`.
+/// Three passes, no allocation, so a run of millions of pairs costs nothing extra.
+fn ols_slope(n: usize, get: impl Fn(usize) -> Option<(f64, f64)>) -> Option<(f64, f64, u64)> {
+    let (mut cnt, mut mx, mut my) = (0u64, 0.0, 0.0);
+    for (x, y) in (0..n).filter_map(&get) {
+        cnt += 1;
+        mx += x;
+        my += y;
+    }
+    if cnt < 3 {
+        return None;
+    }
+    let (mx, my) = (mx / cnt as f64, my / cnt as f64);
+    let (mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0);
+    for (x, y) in (0..n).filter_map(&get) {
+        let (dx, dy) = (x - mx, y - my);
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+    if sxx <= 0.0 || !sxx.is_finite() {
+        return None;
+    }
+    let slope = sxy / sxx;
+    let sse = (syy - slope * sxy).max(0.0);
+    Some((slope, (sse / (cnt - 2) as f64 / sxx).sqrt(), cnt))
+}
+
+/// T3 heading against grid convergence: the heading error (degrees) regressed on
+/// `c = (lon - lon_ref) * sin(lat)`, with `lon_ref` the mean longitude of the samples used.
+/// A slope near 1 says the scored velocity is reported in a plane grid rotated against true north
+/// by the meridian convergence rather than in true east and north; a slope near 0 says it is not.
+/// Scalars: `slope_deg_per_deg`, `slope_se` (sample standard error, treating samples as
+/// independent), `n` and `lon_ref_deg`.
+pub fn t3_heading_grid(p: &PairTable) -> MetricResult {
+    let mut r = new_result(
+        "T3-heading-grid",
+        "heading error against (lon - mean lon) * sin(lat)",
+        "deg per deg",
+    );
+    // Longitudes are taken relative to the first sample's, wrapped, so a run across the
+    // antimeridian is one block.
+    let anchor = p
+        .lon_e7
+        .iter()
+        .zip(&p.hdg_err_deg)
+        .find(|(_, h)| h.is_finite())
+        .map_or(0.0, |(&l, _)| f64::from(l) * 1e-7);
+    let sample = |i: usize| -> Option<(f64, f64, f64)> {
+        let h = f64::from(p.hdg_err_deg.get(i).copied()?);
+        let (la, lo) = (p.lat_e7.get(i).copied()?, p.lon_e7.get(i).copied()?);
+        if !h.is_finite() {
+            return None;
+        }
+        let dlon = crate::geo::wrap180(f64::from(lo) * 1e-7 - anchor);
+        Some((dlon, f64::from(la) * 1e-7, h))
+    };
+    let (mut cnt, mut sum) = (0u64, 0.0);
+    for (dlon, _, _) in (0..p.hdg_err_deg.len()).filter_map(sample) {
+        cnt += 1;
+        sum += dlon;
+    }
+    let mean = if cnt > 0 { sum / cnt as f64 } else { 0.0 };
+    let fit = ols_slope(p.hdg_err_deg.len(), |i| {
+        sample(i).map(|(dlon, lat, h)| ((dlon - mean) * lat.to_radians().sin(), h))
+    });
+    match fit {
+        Some((slope, se, n)) => {
+            r.scalars.push(("slope_deg_per_deg".to_string(), slope));
+            r.scalars.push(("slope_se".to_string(), se));
+            r.scalars.push(("n".to_string(), n as f64));
+            r.scalars.push((
+                "lon_ref_deg".to_string(),
+                crate::geo::wrap180(anchor + mean),
+            ));
+        }
+        None => {
+            r.scalars.push(("n".to_string(), cnt as f64));
+            r.notes
+                .push("slope not computed: fewer than three samples or no spread in c".to_string());
+        }
+    }
+    r.notes.push(
+        "tests whether the scored velocity is grid-relative: a slope near 1 means the heading error follows the meridian convergence, near 0 means true north".to_string(),
+    );
+    r
+}
+
 /// T4: ERAM reported altitude minus truth barometric altitude, feet.
 pub fn t4_altitude(p: &PairTable) -> MetricResult {
     let c = collect(p, |i| at(&p.alt_err_ft, i));

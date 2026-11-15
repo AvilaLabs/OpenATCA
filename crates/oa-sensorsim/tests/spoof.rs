@@ -7,7 +7,7 @@
 )]
 
 use oa_adsb::{reports_len, reports_push, reports_row, Reports, ROW_EMPTY};
-use oa_sensorsim::geom::{central_angle, EARTH_MEAN_RADIUS_M};
+use oa_geo::{wgs84, LatLon};
 use oa_sensorsim::plots::NONE_ADDR;
 use oa_sensorsim::spoof::*;
 use oa_sensorsim::SimError;
@@ -44,6 +44,17 @@ fn traffic() -> Labelled {
     }
     l.reports = out;
     l
+}
+
+/// WGS-84 geodesic distance between two positions, degrees in and metres out.
+fn geo_m(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
+    wgs84()
+        .inverse(
+            LatLon::new(la1, lo1).unwrap(),
+            LatLon::new(la2, lo2).unwrap(),
+        )
+        .unwrap()
+        .distance_m
 }
 
 fn count(l: &Labelled, lab: u8) -> usize {
@@ -98,7 +109,7 @@ fn ghost_adds_a_new_address_on_a_straight_track() {
             );
             if let Some((t, pla, plo)) = last {
                 let dt = (out.reports.time_ns[i] - t) as f64 / 1e9;
-                let d = central_angle(pla, plo, la, lo) * EARTH_MEAN_RADIUS_M;
+                let d = geo_m(pla, plo, la, lo);
                 assert!((d / dt - 250.0 * 1852.0 / 3600.0).abs() < 0.1, "{}", d / dt);
             }
             last = Some((out.reports.time_ns[i], la, lo));
@@ -204,12 +215,12 @@ fn drift_walks_the_victim_away_at_the_stated_rate() {
         if in_window {
             drifted += 1;
             assert_eq!(out.victim[i], A);
-            let off = central_angle(
+            let off = geo_m(
                 f64::from(base.reports.lat_e7[i]) / 1e7,
                 f64::from(base.reports.lon_e7[i]) / 1e7,
                 f64::from(out.reports.lat_e7[i]) / 1e7,
                 f64::from(out.reports.lon_e7[i]) / 1e7,
-            ) * EARTH_MEAN_RADIUS_M;
+            );
             let want = 2.0 * (t - d.start_ns) as f64 / 1e9;
             assert!((off - want).abs() < 0.05 + want * 1e-4, "{off} {want}");
             // Moved to the north-east: both coordinates increased.
@@ -364,14 +375,19 @@ fn ghost_and_drift_positions_are_geographic() {
             .unwrap();
         assert_eq!(out.reports.lat_e7[i], (lat * 1e7).round() as i32);
     }
-    // A track that leaves the latitude range part way is refused as a whole.
+    // A track that runs over the pole part way stays on the geodesic and in range.
     let mut g = ghost();
     g.lat_deg = 89.0;
     g.speed_kt = 1500.0;
     g.track_deg = 0.0;
     g.interval_ms = 60_000;
-    assert!(bad(&g));
-    // Drift that carries the victim past a pole is refused.
+    let out = inject_ghost(&base, &g).unwrap();
+    assert!(out
+        .reports
+        .lat_e7
+        .iter()
+        .all(|&x| (-900_000_000..=900_000_000).contains(&x)));
+    // Drift that carries the victim past a pole does the same.
     let d = DriftParams {
         victim: A,
         start_ns: T0 + 100_000_000_000,
@@ -379,10 +395,12 @@ fn ghost_and_drift_positions_are_geographic() {
         rate_mps: 1.0e6,
         bearing_deg: 0.0,
     };
-    assert!(matches!(
-        inject_drift(&base, &d),
-        Err(SimError::BadSpoof(_))
-    ));
+    let out = inject_drift(&base, &d).unwrap();
+    assert!(out
+        .reports
+        .lat_e7
+        .iter()
+        .all(|&x| (-900_000_000..=900_000_000).contains(&x)));
 }
 
 // REQ: OA-SIM-022
@@ -410,4 +428,114 @@ fn ghost_duration_overflow_is_refused_up_front() {
     g.count = 1;
     g.interval_ms = i64::MAX;
     assert_eq!(count(&inject_ghost(&base, &g).unwrap(), LABEL_GHOST), 1);
+}
+
+// REQ: OA-SIM-027
+#[test]
+fn a_long_ghost_leg_follows_the_geodesic() {
+    let base = traffic();
+    let mut g = ghost();
+    g.lat_deg = 45.0;
+    g.lon_deg = -88.0;
+    g.speed_kt = 500.0;
+    g.track_deg = 90.0;
+    g.interval_ms = 1_800_000;
+    g.count = 2; // the second row is 250 NM along the leg
+    let out = inject_ghost(&base, &g).unwrap();
+    let i = (0..reports_len(&out.reports))
+        .rev()
+        .find(|&i| out.label[i] == LABEL_GHOST)
+        .unwrap();
+    let (la, lo) = (
+        f64::from(out.reports.lat_e7[i]) / 1e7,
+        f64::from(out.reports.lon_e7[i]) / 1e7,
+    );
+    let e = wgs84();
+    let want = e
+        .direct(LatLon::new(45.0, -88.0).unwrap(), 90.0, 250.0 * 1852.0)
+        .unwrap()
+        .position;
+    let d = e
+        .inverse(LatLon::new(la, lo).unwrap(), want)
+        .unwrap()
+        .distance_m;
+    assert!(d < 1.0, "ghost end is {d} m from the geodesic");
+}
+
+// REQ: OA-SIM-027
+#[test]
+fn a_ghost_leg_near_the_pole_stays_finite() {
+    let base = traffic();
+    let mut g = ghost();
+    g.lat_deg = 89.9;
+    g.lon_deg = 0.0;
+    g.speed_kt = 400.0;
+    g.track_deg = 90.0;
+    g.interval_ms = 540_000;
+    g.count = 2; // about 100 km along the leg
+    let out = inject_ghost(&base, &g).unwrap();
+    let i = (0..reports_len(&out.reports))
+        .rev()
+        .find(|&i| out.label[i] == LABEL_GHOST)
+        .unwrap();
+    let (la, lo) = (
+        f64::from(out.reports.lat_e7[i]) / 1e7,
+        f64::from(out.reports.lon_e7[i]) / 1e7,
+    );
+    assert!(lo.abs() <= 180.0 && la <= 90.0, "{la} {lo}");
+    let e = wgs84();
+    let want = e
+        .direct(
+            LatLon::new(89.9, 0.0).unwrap(),
+            90.0,
+            400.0 * 1852.0 / 3600.0 * 540.0,
+        )
+        .unwrap()
+        .position;
+    let d = e
+        .inverse(LatLon::new(la, lo).unwrap(), want)
+        .unwrap()
+        .distance_m;
+    assert!(d < 1.0, "{d}");
+}
+
+// REQ: OA-SIM-027
+#[test]
+fn a_long_drift_follows_the_geodesic() {
+    let base = traffic();
+    let d = DriftParams {
+        victim: A,
+        start_ns: T0 + 100_000_000_000,
+        end_ns: T0 + 400_000_000_000,
+        rate_mps: 1500.0,
+        bearing_deg: 60.0,
+    };
+    let out = inject_drift(&base, &d).unwrap();
+    let e = wgs84();
+    let mut worst = 0.0_f64;
+    let mut n = 0;
+    for i in 0..reports_len(&out.reports) {
+        if out.label[i] != LABEL_DRIFT {
+            continue;
+        }
+        let t = out.reports.time_ns[i];
+        let p0 = LatLon::new(
+            f64::from(base.reports.lat_e7[i]) / 1e7,
+            f64::from(base.reports.lon_e7[i]) / 1e7,
+        )
+        .unwrap();
+        let p1 = LatLon::new(
+            f64::from(out.reports.lat_e7[i]) / 1e7,
+            f64::from(out.reports.lon_e7[i]) / 1e7,
+        )
+        .unwrap();
+        let want = e
+            .direct(p0, 60.0, 1500.0 * (t - d.start_ns) as f64 * 1e-9)
+            .unwrap()
+            .position;
+        worst = worst.max(e.inverse(p1, want).unwrap().distance_m);
+        n += 1;
+    }
+    assert!(n > 0);
+    assert!(worst < 1.0, "worst {worst} m");
 }

@@ -609,3 +609,44 @@ fn nothing_that_cannot_be_scored_is_dropped_silently() {
         .sum();
     assert_eq!(out.pairs as u64 + excluded, leg.th.flight.len() as u64);
 }
+
+// REQ: OA-BENCH-114
+#[test]
+fn truth_velocity_is_true_east_north_at_the_position() {
+    use oa_bench::geo::{enu, heading_deg, wrap180};
+    use oa_bench::synth::aircraft;
+    let acs = aircraft();
+    let mut worst = 0.0f64;
+    let mut far = 0u32;
+    for a in &acs {
+        for k in 0..10 {
+            let s = a.start_s + (a.end_s - a.start_s) * f64::from(k) / 10.0 + 0.5;
+            let t = T0_MS + (s * 1000.0) as i64;
+            // Positions 0.1 s apart, centred on the time, so a turn does not bias the chord.
+            let (Ok(p0), Ok(pa), Ok(pb)) = (
+                truth_at(&acs, a.addr, t),
+                truth_at(&acs, a.addr, t - 50),
+                truth_at(&acs, a.addr, t + 50),
+            ) else {
+                continue;
+            };
+            if p0.vel_east_mps.hypot(p0.vel_north_mps) < 1.0 {
+                continue;
+            }
+            let (e, n) = enu(pa.lat, pa.lon, pb.lat, pb.lon);
+            let want = heading_deg(e, n);
+            let got = heading_deg(p0.vel_east_mps, p0.vel_north_mps);
+            let d = wrap180(got - want).abs();
+            let (ex, _) = enu(oa_bench::synth::LAT0, oa_bench::synth::LON0, p0.lat, p0.lon);
+            if ex > 35_000.0 {
+                far += 1;
+            }
+            worst = worst.max(d);
+            // The speed is the speed over the ground too.
+            let sp = p0.vel_east_mps.hypot(p0.vel_north_mps);
+            assert!((e.hypot(n) / 0.1 - sp).abs() < 1e-3 * sp.max(1.0), "{sp}");
+        }
+    }
+    assert!(far > 0, "no sample far enough east of the origin");
+    assert!(worst < 0.01, "worst heading error {worst} deg");
+}

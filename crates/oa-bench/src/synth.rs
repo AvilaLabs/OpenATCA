@@ -2,7 +2,8 @@
 //! paths, the legacy stream from the truth with injected errors, and the metric code must
 //! recover each injected value.
 //!
-//! **The world.** Aircraft fly on a flat east-north plane around `(LAT0, LON0)`: straight and
+//! **The world.** Aircraft fly on an east-north plane around `(LAT0, LON0)` (positions are the
+//! geodesic from the origin, velocities are rotated to true east and north): straight and
 //! level, a constant-rate turn, a climb, an approach that ends on a runway threshold, a takeoff
 //! from one, a crossing pair (the track swap), a formation pair sharing one callsign, a callsign
 //! whose positions are far from its truth, and one flight with an address truth does not know.
@@ -109,6 +110,24 @@ fn path_state(p: &Path, s: f64) -> (f64, f64, f64, f64, f64, f64) {
                 0.0,
             )
         }
+    }
+}
+
+/// The plane velocity `(vx, vy)` at plane position `(x, y)` as true east and north metres per
+/// second at that position. The positions are `from_enu(LAT0, LON0, x, y)`, a geodesic from the
+/// origin, so grid north is not true north away from the origin's meridian; the velocity is
+/// taken as the displacement over a 10 ms step along the plane velocity, mapped through
+/// `from_enu` and measured back with the geodesic inverse (`enu`), which is exact for this
+/// mapping to the first order in the step.
+fn true_velocity(x: f64, y: f64, vx: f64, vy: f64) -> (f64, f64) {
+    const H: f64 = 0.01;
+    let (lat, lon) = from_enu(LAT0, LON0, x, y);
+    let (lat2, lon2) = from_enu(LAT0, LON0, x + vx * H, y + vy * H);
+    let (e, n) = enu(lat, lon, lat2, lon2);
+    if e.is_finite() && n.is_finite() {
+        (e / H, n / H)
+    } else {
+        (vx, vy)
     }
 }
 
@@ -318,12 +337,13 @@ pub fn truth_at(acs: &[SynthAc], addr: u32, t_ms: i64) -> Result<TruthSample, No
     }
     let (x, y, vx, vy, alt, vr) = path_state(&a.path, s - a.start_s);
     let (lat, lon) = from_enu(LAT0, LON0, x, y);
+    let (ve, vn) = true_velocity(x, y, vx, vy);
     Ok(TruthSample {
         lat,
         lon,
         baro_alt_ft: Some(alt.round() as i32),
-        vel_east_mps: vx,
-        vel_north_mps: vy,
+        vel_east_mps: ve,
+        vel_north_mps: vn,
         vert_rate_fpm: Some(vr.round() as i32),
         sigma95_h_m: 5.0,
         leg: i as u32,
@@ -539,7 +559,7 @@ fn emit_sample(
     let (x, y, _, _, _, _) = path_state(&follow.path, st - follow.start_s);
     // Velocity and altitude are ERAM's at the stamped time; only the position is shifted. The
     // closed-form path continues past the end of the leg, so the last samples carry the shift too.
-    let (_, _, vx, vy, alt, _) = path_state(&follow.path, s - follow.start_s);
+    let (px, py, vx, vy, alt, _) = path_state(&follow.path, s - follow.start_s);
     let sp = vx.hypot(vy);
     let (ue, un) = if sp > 0.0 {
         (vx / sp, vy / sp)
@@ -556,8 +576,10 @@ fn emit_sample(
         y - right * ue + along * un,
     );
     let (lat, lon) = from_enu(LAT0, LON0, ex, ey);
-    let spd = (sp / KT_MPS + inj.speed_bias_kt) * 10.0;
-    let hdg = (vx.atan2(vy).to_degrees() + inj.hdg_bias_deg).to_radians();
+    // ERAM's velocity is true east and north at the aircraft's position (see `true_velocity`).
+    let (ve, vn) = true_velocity(px, py, vx, vy);
+    let spd = (ve.hypot(vn) / KT_MPS + inj.speed_bias_kt) * 10.0;
+    let hdg = (ve.atan2(vn).to_degrees() + inj.hdg_bias_deg).to_radians();
     let vel = (
         (spd * hdg.sin()).round() as i16,
         (spd * hdg.cos()).round() as i16,

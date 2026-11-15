@@ -12,8 +12,8 @@ use crate::metrics_flow::{
 };
 use crate::metrics_th::add_flagged_view;
 use crate::metrics_th::{
-    t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
-    OffsetConfig,
+    t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_heading_grid, t3_speed,
+    t4_altitude, OffsetConfig,
 };
 use crate::pair::{build_pairs, PairConfig};
 use crate::stats::{sort_cases, Exclusions, KeyedCase, MetricResult};
@@ -65,6 +65,7 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         t2_along_corrected(&pairs, &cfg.offset),
         t3_speed(&pairs),
         t3_heading(&pairs),
+        t3_heading_grid(&pairs),
         t4_altitude(&pairs),
         t5_publication_interval(leg, &ix),
         t6_staleness(leg),

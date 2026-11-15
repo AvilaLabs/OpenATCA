@@ -41,6 +41,7 @@ use crate::units::{
     pack_ident, parse_iso_ms, time_in_bounds, MAX_TIME_S, MIN_TIME_S, NO_ALT, NO_TIME,
 };
 use crate::{MAX_RECORDS_PER_FILE, MAX_TABLE_ROWS};
+use oa_geo::{wgs84, Ellipsoid, LatLon};
 use oa_json::{parse, Doc, Kind, NodeIx, DEFAULT_LIMITS};
 
 /// `source` value: international SIGMET.
@@ -885,16 +886,15 @@ fn in_band(t: &HazardTable, i: usize, alt_ft: Option<i32>) -> bool {
     !((b != NO_ALT && a < b) || (tp != NO_ALT && a > tp))
 }
 
-/// Great-circle distance between two positions in degrees, metres (spherical Earth, 6 371 km).
-fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
-    let dl = (lon2 - lon1).to_radians();
-    let a = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
-    2.0 * 6_371_000.0 * a.sqrt().min(1.0).asin()
+/// WGS-84 geodesic distance between two positions in degrees, metres; `None` for a position
+/// that is not a valid latitude and longitude.
+fn distance_m(e: &Ellipsoid, lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> Option<f64> {
+    let (p1, p2) = (LatLon::new(lat1, lon1).ok()?, LatLon::new(lat2, lon2).ok()?);
+    e.inverse(p1, p2).ok().map(|d| d.distance_m)
 }
 
 /// Replaces `out` with the point hazards ([`GEOM_POINT`]) within `max_dist_m` metres
-/// (great circle, inclusive) of the position and, when `alt_ft` is given, whose band contains it
+/// (WGS-84 geodesic, inclusive) of the position and, when `alt_ft` is given, whose band contains it
 /// (as [`hazard_covers`]). ICAO states no extent for a point report, so how far counts as near is
 /// the caller's choice; a negative or non-finite distance returns nothing. Not time-aware;
 /// combine with [`active_hazards_at`].
@@ -910,6 +910,7 @@ pub fn point_hazards_near(
     if !max_dist_m.is_finite() || max_dist_m < 0.0 {
         return;
     }
+    let e = wgs84();
     for i in 0..hazard_len(t) {
         if t.geom.get(i) != Some(&GEOM_POINT) || !in_band(t, i, alt_ft) {
             continue;
@@ -923,7 +924,8 @@ pub fn point_hazards_near(
         let (Some(&la), Some(&lo)) = (t.lat_e5.get(p), t.lon_e5.get(p)) else {
             continue;
         };
-        if distance_m(lat, lon, f64::from(la) / 1e5, f64::from(lo) / 1e5) <= max_dist_m {
+        let d = distance_m(&e, lat, lon, f64::from(la) / 1e5, f64::from(lo) / 1e5);
+        if d.is_some_and(|d| d <= max_dist_m) {
             out.push(i as u32);
         }
     }

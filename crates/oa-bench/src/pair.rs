@@ -53,6 +53,9 @@ pub struct PairTable {
     pub along_m: Vec<f32>,
     pub speed_err_kt: Vec<f32>,
     pub hdg_err_deg: Vec<f32>,
+    /// ERAM position, 1e-7 degrees (the diagnostic of the heading error against longitude).
+    pub lat_e7: Vec<i32>,
+    pub lon_e7: Vec<i32>,
     pub alt_err_ft: Vec<f32>,
     /// Truth ground speed, metres per second.
     pub truth_speed_mps: Vec<f32>,
@@ -174,6 +177,8 @@ pub fn build_pairs(
             p.along_m.push(along);
             p.speed_err_kt.push(spd);
             p.hdg_err_deg.push(hdg);
+            p.lat_e7.push(lat);
+            p.lon_e7.push(lon);
             p.alt_err_ft.push(alt_err);
             p.truth_speed_mps.push(v as f32);
             p.method.push(meth);

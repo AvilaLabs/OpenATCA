@@ -40,6 +40,7 @@ dependencies = [
 name = "oa-awc"
 version = "0.0.1"
 dependencies = [
+ "oa-geo",
  "oa-json",
 ]
 
@@ -175,6 +176,7 @@ dependencies = [
  "oa-adsb",
  "oa-asterix",
  "oa-feed",
+ "oa-geo",
  "oa-truth",
 ]
 

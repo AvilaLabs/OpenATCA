@@ -944,3 +944,28 @@ fn files_are_read_only_up_to_their_limit() {
         s.file_errors
     );
 }
+
+// REQ: OA-AWC-023
+#[test]
+fn point_hazards_near_uses_the_ellipsoidal_distance() {
+    use oa_geo::{wgs84, LatLon};
+    let c = r#"[{"lon":-80.0,"lat":24.0}]"#;
+    let item = sigmet("KZMA", "1", V0, c, "AREA", "null", "null");
+    let (t, _, _) = load_hazard(SRC_SIGMET, &[arr(&[item])]);
+    assert_eq!(hazard_len(&t), 1);
+    // About 250 NM due north, where a spherical distance is about 1.9 km off.
+    let (qla, qlo) = (28.1, -80.0);
+    let g = wgs84()
+        .inverse(
+            LatLon::new(qla, qlo).unwrap(),
+            LatLon::new(24.0, -80.0).unwrap(),
+        )
+        .unwrap()
+        .distance_m;
+    assert!((g - 250.0 * 1852.0).abs() < 25_000.0, "{g}");
+    let mut out = Vec::new();
+    point_hazards_near(&t, qla, qlo, g + 0.001, None, &mut out);
+    assert_eq!(out.len(), 1, "a 1 mm margin outside the geodesic");
+    point_hazards_near(&t, qla, qlo, g - 0.001, None, &mut out);
+    assert!(out.is_empty(), "a 1 mm margin inside the geodesic");
+}
