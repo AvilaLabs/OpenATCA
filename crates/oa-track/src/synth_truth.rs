@@ -32,6 +32,13 @@ pub const KNOT_S: f64 = 1.0;
 pub const KNOT_VAR_M2: f64 = 1.0e-4;
 /// Limit: aircraft in one synthetic truth.
 pub const MAX_TRAJ: usize = 4096;
+/// Limit: distance of a path point from the plane origin, metres (half the Earth's
+/// circumference); past it the plane no longer maps to a position.
+pub const MAX_PLANE_M: f64 = 20_037_508.0;
+/// Limit: altitude and absolute vertical rate stored in a truth, feet and feet per minute (the
+/// ranges `oa-adsb` reads).
+pub const MAX_ALT_FT: f64 = 204_800.0;
+pub const MAX_VRATE_FPM: f64 = 262_144.0;
 /// Limit: knots per aircraft (a day at one per second is 86,400).
 pub const MAX_KNOTS: usize = 90_000;
 
@@ -134,8 +141,9 @@ impl std::fmt::Display for SynthError {
 impl std::error::Error for SynthError {}
 
 /// The truth of `trajs` in the plane about `(lat_deg, lon_deg)` with the clock starting at
-/// `epoch_ns`. Refuses duplicate addresses, an empty or over-long path, a non-finite value and
-/// more than [`MAX_TRAJ`] aircraft (E5).
+/// `epoch_ns`. Refuses duplicate addresses, an empty or over-long path, a non-finite value, a start or
+/// knot position farther from the origin than [`MAX_PLANE_M`], an altitude or rate past
+/// [`MAX_ALT_FT`] and [`MAX_VRATE_FPM`], and more than [`MAX_TRAJ`] aircraft (E5).
 pub fn build_synthetic_truth(
     lat_deg: f64,
     lon_deg: f64,
@@ -177,6 +185,13 @@ pub fn build_synthetic_truth(
         }) {
             return bad("segment values");
         }
+        let in_plane = |e: f64, n: f64| e.is_finite() && n.is_finite() && e.hypot(n) <= MAX_PLANE_M;
+        if !in_plane(t.x0, t.y0) {
+            return bad("start position");
+        }
+        if t.alt_ft.abs() > MAX_ALT_FT || t.segs.iter().any(|s| s.vrate_fpm.abs() > MAX_VRATE_FPM) {
+            return bad("altitude or vertical rate");
+        }
         let dur = duration_s(t);
         // Compared before the +1 and the cast: a huge or infinite duration saturates.
         let steps = (dur / KNOT_S).floor();
@@ -200,6 +215,16 @@ pub fn build_synthetic_truth(
         for k in 0..knots {
             let dt = k as f64 * KNOT_S;
             let s = state_at(t, dt);
+            // Every stored state must be a position the plane maps and an altitude that fits.
+            if !(in_plane(s.e, s.n)
+                && s.ve.is_finite()
+                && s.vn.is_finite()
+                && s.ae.is_finite()
+                && s.an.is_finite()
+                && s.alt_ft.abs() <= MAX_ALT_FT)
+            {
+                return bad("path leaves the plane domain");
+            }
             let ns = epoch_ns + ((t.t0_s + dt) * 1.0e9).round() as i64;
             tr.pt_t_ns.push(ns);
             tr.pt_alt_ft.push(s.alt_ft.round() as i32);
@@ -279,6 +304,55 @@ mod tests {
                 }],
             },
         ]
+    }
+
+    fn straight(x0: f64, y0: f64, speed: f64, alt: f64) -> Vec<Traj> {
+        vec![Traj {
+            addr: 7,
+            t0_s: 0.0,
+            x0,
+            y0,
+            heading_deg: 0.0,
+            speed_mps: speed,
+            alt_ft: alt,
+            segs: vec![Seg {
+                dur_s: 2.0,
+                turn_dps: 0.0,
+                vrate_fpm: 0.0,
+            }],
+        }]
+    }
+
+    // REQ: OA-TRK-285
+    #[test]
+    fn positions_outside_the_plane_domain_are_refused() {
+        for (x0, y0, speed) in [
+            (1.0e308, 0.0, 0.0),
+            (0.0, -1.0e308, 0.0),
+            (3.0e7, 0.0, 0.0),
+            (1.5e7, 1.5e7, 0.0),
+            (0.0, 0.0, 1.0e308),
+            (0.0, 0.0, 2.0e7),
+        ] {
+            let r = build_synthetic_truth(
+                0.0,
+                0.0,
+                1_700_000_000_000_000_000,
+                &straight(x0, y0, speed, 10_000.0),
+            );
+            assert!(r.is_err(), "({x0}, {y0}, {speed}) was accepted");
+        }
+        // Inside the bound is still built.
+        assert!(build_synthetic_truth(0.0, 0.0, 0, &straight(1.0e7, 0.0, 100.0, 10_000.0)).is_ok());
+    }
+
+    // REQ: OA-TRK-285
+    #[test]
+    fn an_altitude_or_rate_past_the_stored_range_is_refused() {
+        assert!(build_synthetic_truth(0.0, 0.0, 0, &straight(0.0, 0.0, 100.0, 1.0e12)).is_err());
+        let mut t = straight(0.0, 0.0, 100.0, 10_000.0);
+        t[0].segs[0].vrate_fpm = 1.0e12;
+        assert!(build_synthetic_truth(0.0, 0.0, 0, &t).is_err());
     }
 
     // REQ: OA-TRK-055

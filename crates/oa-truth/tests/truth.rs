@@ -1288,3 +1288,51 @@ fn a_non_finite_variance_is_never_a_radius() {
     let s = sigma95_h_m(4.0).unwrap();
     assert!((s - 2.0 * SIGMA95).abs() < 1e-12, "{s}");
 }
+
+/// A two-knot truth about (0, 0) with the given smoothed state at both knots, 1 s apart from
+/// 1e9 ms.
+fn two_knots(x: [f64; 6], p: [f64; 6]) -> Truth {
+    let mut t = Truth {
+        cfg: TruthConfig {
+            loo: false,
+            ..DEFAULT_CONFIG
+        },
+        ..Truth::default()
+    };
+    t.ac_addr.push(ADDR);
+    t.ac_first_leg = vec![0, 1];
+    t.leg_addr.push(ADDR);
+    t.leg_first_pt = vec![0, 2];
+    t.leg_lat0.push(0.0);
+    t.leg_lon0.push(0.0);
+    for k in 0..2i64 {
+        t.pt_t_ns.push(T0 + k * 1_000_000_000);
+        t.pt_alt_ft.push(10_000);
+        t.pt_vrate_fpm.push(0);
+        t.pt_xf.push(x);
+        t.pt_xs.push(x);
+        t.pt_pf.push(p);
+        t.pt_ps.push(p);
+    }
+    t
+}
+
+// REQ: OA-TRUTH-041
+#[test]
+fn a_state_that_converts_to_a_non_finite_position_is_never_returned_as_truth() {
+    let p = [1.0e-4, 0.0, 0.0, 1.0e-6, 0.0, 1.0e-6];
+    let t_ms = T0 / 1_000_000;
+    for x in [
+        [1.0e308, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, -1.0e308, 0.0, 0.0],
+        [1.0e7, 1.0e308, 0.0, 0.0, 0.0, 0.0],
+        [1.0e7, 0.0, 0.0, 1.0e7, 1.0e308, 0.0],
+    ] {
+        let t = two_knots(x, p);
+        let q = truth_at(&t, ADDR, t_ms);
+        assert!(!matches!(q, TruthQuery::Ok(_)), "{x:?} gave {q:?}");
+    }
+    // An ordinary state is still truth.
+    let ok = two_knots([1.0e4, 100.0, 0.0, 2.0e4, 50.0, 0.0], p);
+    assert!(matches!(truth_at(&ok, ADDR, t_ms), TruthQuery::Ok(_)));
+}

@@ -105,6 +105,8 @@ pub struct SimStats {
     pub detected: u64,
     pub false_plots: u64,
     pub split_plots: u64,
+    /// Detections dropped because the measured range or azimuth was not finite.
+    pub non_finite: u64,
 }
 
 fn check_site(s: &RadarSite) -> Result<(), SimError> {
@@ -369,6 +371,10 @@ pub fn simulate_radar(
                     Some(a) if has_alt => quantise_alt(a, prof.alt_quantum_ft),
                     _ => NONE_ALT,
                 };
+                if !(range_m.is_finite() && az_deg.is_finite()) {
+                    stats.non_finite += 1;
+                    continue;
+                }
                 let base = Plot {
                     time_ns: t,
                     scan: k,
