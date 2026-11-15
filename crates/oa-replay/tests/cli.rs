@@ -320,3 +320,21 @@ fn adsb_flags_name_files_and_directories_and_the_binary_replays_them() {
     assert_eq!(stable(&out), stable(&out2));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// REQ: OA-RPL-254
+#[test]
+fn progress_arithmetic_survives_the_widest_clock_span() {
+    let dir = scratch("span");
+    let mut bytes = Vec::new();
+    let times = [i64::MIN + 1, 0, 0, 0, i64::MAX, i64::MAX, i64::MAX];
+    for (i, t) in times.iter().enumerate() {
+        bytes.extend(frame(3, i as u64, *t, b"state=connected\n"));
+    }
+    let file = dir.join("span.oaf");
+    std::fs::write(&file, &bytes).unwrap();
+    let (code, out, err) = run_bin(&["--sfdps", file.to_str().unwrap(), "--quiet"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.contains("summary "), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

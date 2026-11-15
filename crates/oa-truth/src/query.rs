@@ -4,7 +4,7 @@ use oa_adsb::NONE_I32;
 use oa_sha256::Sha256;
 
 use crate::frame::{frame_new, frame_velocity, unproject};
-use crate::smooth::{interp, LegView, SIGMA95};
+use crate::smooth::{interp, sigma95_h_m, LegView};
 use crate::{LegIx, LegRange, Truth, TruthQuery, TruthSample, TRUTH_HASH_TAG};
 
 const NS_PER_MS: i64 = 1_000_000;
@@ -149,8 +149,11 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     let Some((x, p)) = interp(&v, k, t, truth.cfg.accel_q) else {
         return TruthQuery::OutsideLegs;
     };
-    let sigma95 = SIGMA95 * p[0].max(0.0).sqrt();
-    if sigma95.is_nan() || sigma95 > truth.cfg.max_sigma95_h_m {
+    // A non-finite state or covariance is unusable, never precise.
+    let Some(sigma95) = sigma95_h_m(p[0]).filter(|_| x.iter().all(|v| v.is_finite())) else {
+        return TruthQuery::TooUncertain;
+    };
+    if sigma95 > truth.cfg.max_sigma95_h_m {
         return TruthQuery::TooUncertain;
     }
     let (Some(&lat0), Some(&lon0)) = (

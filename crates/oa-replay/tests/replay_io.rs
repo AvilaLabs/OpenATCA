@@ -258,3 +258,40 @@ fn a_failing_hook_stops_the_run_at_that_frame() {
     assert_eq!(r.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(p.frames[FeedKind::Sfdps as usize], 5);
 }
+
+// REQ: OA-RPL-255
+#[test]
+fn a_file_is_read_in_bounded_pieces_whatever_its_size() {
+    use std::cell::Cell;
+    use std::io::Read;
+    use std::rc::Rc;
+    // A 12 MiB file of zeros that records the largest buffer it was asked to fill.
+    struct Zeros(usize, Rc<Cell<usize>>);
+    impl Read for Zeros {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.1.set(self.1.get().max(buf.len()));
+            let n = buf.len().min(self.0);
+            buf[..n].fill(0);
+            self.0 -= n;
+            Ok(n)
+        }
+    }
+    let biggest = Rc::new(Cell::new(0));
+    let b = Rc::clone(&biggest);
+    let mut once = Some(());
+    let spec = oa_replay::StreamSpec {
+        feed: FeedKind::Sfdps,
+        open: Box::new(move || {
+            once.take()?;
+            Some(Ok(Box::new(Zeros(12 << 20, Rc::clone(&b))) as Box<dyn Read>))
+        }),
+    };
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    let r = run_streams_with(&mut p, vec![spec], usize::MAX, &mut |_| Ok(())).unwrap();
+    assert_eq!(r.bytes, 12 << 20);
+    assert!(
+        biggest.get() <= oa_replay::source::MAX_CHUNK,
+        "{}",
+        biggest.get()
+    );
+}

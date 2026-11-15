@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         } else if p.replay_ns >= next_progress {
             next_progress = p.replay_ns.saturating_add(progress_ns);
             let wall = t0.elapsed().as_secs_f64().max(1e-9);
-            let replayed = (p.replay_ns - first_ns) as f64 / NS_PER_S as f64;
+            let replayed = p.replay_ns.saturating_sub(first_ns) as f64 / NS_PER_S as f64;
             eprintln!(
                 "progress replay_s={} frames={} frames_per_s={:.0} speed={:.0}x rss_mb={:.0}",
                 p.replay_ns.div_euclid(NS_PER_S),

@@ -1245,3 +1245,46 @@ fn real_clip_builds_a_balanced_deterministic_calibrated_truth() {
     assert_eq!(digest(&truth), digest(&t2));
     assert_eq!(format!("{s:?}"), format!("{s2:?}"));
 }
+
+// REQ: OA-TRUTH-033
+#[test]
+fn a_setting_that_can_make_the_covariance_non_finite_is_refused() {
+    let mut r = Reports::default();
+    for k in 0..3 {
+        let mut row = good(ADDR, f64::from(k), LAT0, LON0);
+        row.nac_p = 8;
+        reports_push(&mut r, &row);
+    }
+    for (name, f) in [
+        (
+            "sigma_scale",
+            (|c: &mut TruthConfig| c.sigma_scale = 1e153) as fn(&mut TruthConfig),
+        ),
+        ("accel_q", |c| c.accel_q = 1e300),
+    ] {
+        let mut c = DEFAULT_CONFIG;
+        c.loo = false;
+        f(&mut c);
+        match build_truth(&r, &c) {
+            Err(TruthError::BadConfig(w)) => assert_eq!(w, name),
+            Err(e) => panic!("{name}: wrong refusal {e:?}"),
+            Ok(_) => panic!("{name}: the setting was accepted"),
+        }
+    }
+    // The largest accepted values still build.
+    let mut c = DEFAULT_CONFIG;
+    c.sigma_scale = MAX_SIGMA_SCALE;
+    c.accel_q = MAX_ACCEL_Q;
+    assert!(build_truth(&r, &c).is_ok());
+}
+
+// REQ: OA-TRUTH-034
+#[test]
+fn a_non_finite_variance_is_never_a_radius() {
+    assert_eq!(sigma95_h_m(f64::NAN), None);
+    assert_eq!(sigma95_h_m(f64::INFINITY), None);
+    assert_eq!(sigma95_h_m(f64::NEG_INFINITY), None);
+    assert_eq!(sigma95_h_m(-1e-12), Some(0.0));
+    let s = sigma95_h_m(4.0).unwrap();
+    assert!((s - 2.0 * SIGMA95).abs() < 1e-12, "{s}");
+}
