@@ -25,6 +25,15 @@ or when a missed bar has a written diagnosis and next step (never a lowered bar)
 Every result is published with the data window, the scoring code version and the state hash of
 the replay, so anyone can reproduce it.
 
+**Comparing systems that publish at different rates.** The per-report numbers (T1 to T4) count
+each published sample once, so a system that reports often while an error lasts and rarely when
+it is easy scores worse than one that reports evenly with the same error at every instant. Those
+numbers stay as the native description of each system's own output and are labelled that way.
+A claim that one system beats another (ERAM against OpenATCA, in particular) must cite the
+common-time numbers instead: both systems scored at the same truth times, on the aircraft and
+grid times where both have a report, with the per-aircraft distribution next to the total (M2
+design, section 3). Availability and data age are reported separately and are not part of it.
+
 ## 2. Truth
 
 - **ADS-B truth** for the recorded day comes from adsb.lol history (ODbL, redistributable with

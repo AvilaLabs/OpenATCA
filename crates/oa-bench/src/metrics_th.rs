@@ -229,8 +229,13 @@ fn result_of(id: &'static str, name: &'static str, unit: &'static str, c: &Cols)
         coast: &c.3,
         method: &c.4,
     };
-    split_result(id, name, unit, &c.0, &sp)
+    let mut r = split_result(id, name, unit, &c.0, &sp);
+    r.notes.push(NATIVE_NOTE.to_string());
+    r
 }
+
+/// Marks the per-report tables: each published sample counts once.
+pub const NATIVE_NOTE: &str = "native per-report statistics: every published sample counts once, so a system that publishes more often in a stretch weights it more; to compare two systems use the common-time table (C1, oa_bench::common_time)";
 
 fn at(v: &[f32], i: usize) -> f32 {
     v.get(i).copied().unwrap_or(f32::NAN)

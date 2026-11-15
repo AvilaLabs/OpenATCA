@@ -6,6 +6,18 @@
 //! truth leg (an aircraft that appears or disappears near a fix did not pass it). A flight that
 //! never passes within the radius is excluded and counted.
 //!
+//! **One occurrence per flight.** An aircraft can fly several trips in a recording, crossing the
+//! same fix and using the same airport more than once. An estimate belongs to one flight plan,
+//! so its truth is taken from the one truth leg of that flight: the leg that overlaps the flight's
+//! active interval (first to last ERAM sample of the plan) the most, or, when the plan has no ERAM
+//! sample, the interval in which the estimate can be scored (the issue time and the 60 minutes
+//! after it). Events are never searched across all legs of the address, and the caches are keyed
+//! by the leg.
+//!
+//! **Ground evidence.** A landing or takeoff needs the aircraft near a runway threshold with a
+//! barometric altitude near the field elevation. A leg that ends or starts near a threshold with
+//! no barometric altitude is not a landing or takeoff: it is excluded and counted.
+//!
 //! **Look-ahead** is the truth event time minus the time the estimate was issued, in 5-minute
 //! bins to 60 minutes; the error is the estimate minus the truth time, signed seconds.
 
@@ -16,7 +28,7 @@ use crate::geo::{dist_m, enu, NM_M};
 use crate::legacy::{hev, name, pad, tbfm_kind, tfms_kind, Legacy, NONE, NO_COORD, NO_TIME};
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
-use crate::truth::{AirportRef, Env, Truth};
+use crate::truth::{AirportRef, Env, Truth, TruthSample};
 
 /// Look-ahead bin names, 5 minutes each to 60.
 pub const LOOKAHEAD_NAMES: [&str; 12] = [
@@ -88,44 +100,83 @@ pub struct EventCtx<'a> {
     pub cfg: &'a EventConfig,
 }
 
-fn legs_of<'a>(
-    truth: &'a Truth<'_>,
-    tix: &TruthIndex,
-    addr: u32,
-) -> Vec<&'a crate::truth::TruthLeg> {
-    tix.by_addr
-        .get(&addr)
-        .map(|v| {
-            v.iter()
-                .filter_map(|&i| truth.legs.get(i as usize))
-                .collect()
-        })
-        .unwrap_or_default()
+/// Active interval of every flight with ERAM samples: first and last position time, Unix ms.
+fn flight_windows(leg: &Legacy) -> HashMap<u32, (i64, i64)> {
+    let mut w: HashMap<u32, (i64, i64)> = HashMap::new();
+    for (&f, &t) in leg.th.flight.iter().zip(&leg.th.pos_ms) {
+        let e = w.entry(f).or_insert((t, t));
+        e.0 = e.0.min(t);
+        e.1 = e.1.max(t);
+    }
+    w
 }
 
-/// The truth crossing time of a fix by aircraft `addr`, Unix ms, or the reason there is none.
-pub fn crossing_time(
+/// The interval an estimate of flight `f` can belong to: the flight's active interval, or when
+/// it has no ERAM sample the span in which the estimate could be scored (the issue time and the
+/// look-ahead range after it; for no issue time, the range before the estimated time).
+fn estimate_window(
+    windows: &HashMap<u32, (i64, i64)>,
+    f: u32,
+    issue_ms: i64,
+    time_ms: i64,
+    cfg: &EventConfig,
+) -> (i64, i64) {
+    if let Some(&w) = windows.get(&f) {
+        return w;
+    }
+    let span = cfg.bin_ms.saturating_mul(LOOKAHEAD_NAMES.len() as i64);
+    if issue_ms == NO_TIME {
+        (time_ms.saturating_sub(span), time_ms)
+    } else {
+        (issue_ms, issue_ms.saturating_add(span))
+    }
+}
+
+/// The truth leg of aircraft `addr` that overlaps `window` the most (the earlier leg on a tie),
+/// as an index into [`Truth::legs`]; `None` when no leg of the aircraft overlaps it.
+pub fn occurrence_leg(
     truth: &Truth<'_>,
     tix: &TruthIndex,
     addr: u32,
+    window: (i64, i64),
+) -> Option<u32> {
+    let mut best: Option<(i64, u32)> = None;
+    for &i in tix.by_addr.get(&addr)? {
+        let Some(l) = truth.legs.get(i as usize) else {
+            continue;
+        };
+        let overlap = l.end_ms.min(window.1) - l.start_ms.max(window.0);
+        if overlap >= 0 && best.is_none_or(|b| overlap > b.0) {
+            best = Some((overlap, i));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The truth crossing time of a fix by the aircraft of truth leg `leg_ix` during that leg, Unix
+/// ms, or `None` when it did not pass within the fix radius.
+pub fn crossing_time(
+    truth: &Truth<'_>,
+    leg_ix: u32,
     lat: f64,
     lon: f64,
     cfg: &EventConfig,
 ) -> Option<i64> {
-    let mut best: Option<(f64, i64, i64, i64)> = None;
-    for l in legs_of(truth, tix, addr) {
-        let mut t = l.start_ms;
-        while t <= l.end_ms {
-            if let Ok(s) = (truth.query)(addr, t) {
-                let d = dist_m(lat, lon, s.lat, s.lon);
-                if best.is_none_or(|b| d < b.0) {
-                    best = Some((d, t, l.start_ms, l.end_ms));
-                }
+    let l = truth.legs.get(leg_ix as usize)?;
+    let addr = l.addr;
+    let mut best: Option<(f64, i64)> = None;
+    let mut t = l.start_ms;
+    while t <= l.end_ms {
+        if let Ok(s) = (truth.query)(addr, t) {
+            let d = dist_m(lat, lon, s.lat, s.lon);
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, t));
             }
-            t += cfg.coarse_ms.max(1);
         }
+        t += cfg.coarse_ms.max(1);
     }
-    let (d0, t0, ls, le) = best?;
+    let (d0, t0) = best?;
+    let (ls, le) = (l.start_ms, l.end_ms);
     if d0 > cfg.fix_radius_m + 2_000.0 {
         return None;
     }
@@ -148,6 +199,37 @@ pub fn crossing_time(
     }
     Some(bt)
 }
+
+/// What a fix identifier resolved to.
+enum Placed {
+    At(f64, f64),
+    /// Not in the model.
+    Missing,
+    /// Names more than one place and no context chose one.
+    Ambiguous,
+}
+
+/// The place of a meter fix. An identifier with several places is the one inside the zone when
+/// exactly one is; otherwise it is ambiguous (the feed gives no other context).
+fn place_meter_fix(env: &Env<'_>, name: &str) -> Placed {
+    if let Some((la, lo)) = (env.fix)(name) {
+        return Placed::At(la, lo);
+    }
+    let all = (env.fix_all)(name);
+    match all.as_slice() {
+        [] => Placed::Missing,
+        [(la, lo)] => Placed::At(*la, *lo),
+        many => {
+            let mut inside = many.iter().filter(|p| (env.in_zone)(p.0, p.1));
+            match (inside.next(), inside.next()) {
+                (Some(&(la, lo)), None) => Placed::At(la, lo),
+                _ => Placed::Ambiguous,
+            }
+        }
+    }
+}
+
+const NO_LEG: &str = "no truth leg of the aircraft in the flight's active interval";
 
 fn lookahead_bin(cfg: &EventConfig, ahead_ms: i64) -> Option<u8> {
     if ahead_ms < 0 {
@@ -182,6 +264,7 @@ pub fn f1_f2_tbfm(
     } = *ctx;
     let (mut v1, mut b1, mut v2, mut b2) = (vec![], vec![], vec![], vec![]);
     let mut cache: BTreeMap<(u32, [u8; 8]), Option<i64>> = BTreeMap::new();
+    let windows = flight_windows(leg);
     let t = &leg.tbfm;
     for i in 0..t.kind.len() {
         let kind = t.kind.get(i).copied().unwrap_or(0);
@@ -200,18 +283,36 @@ pub fn f1_f2_tbfm(
             continue;
         }
         let fix = t.fix.get(i).copied().unwrap_or([0; 8]);
-        let Some((lat, lon)) = (env.fix)(name(&fix)) else {
-            exclude(ex, scope, "meter fix not in the model");
+        let (lat, lon) = match place_meter_fix(env, name(&fix)) {
+            Placed::At(la, lo) => (la, lo),
+            Placed::Missing => {
+                exclude(ex, scope, "meter fix not in the model");
+                continue;
+            }
+            Placed::Ambiguous => {
+                exclude(ex, scope, "meter fix names more than one place");
+                continue;
+            }
+        };
+        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
+        let window = estimate_window(
+            &windows,
+            f,
+            issue,
+            t.time_ms.get(i).copied().unwrap_or(NO_TIME),
+            cfg,
+        );
+        let Some(li) = occurrence_leg(truth, tix, addr, window) else {
+            exclude(ex, scope, NO_LEG);
             continue;
         };
         let cross = *cache
-            .entry((addr, fix))
-            .or_insert_with(|| crossing_time(truth, tix, addr, lat, lon, cfg));
+            .entry((li, fix))
+            .or_insert_with(|| crossing_time(truth, li, lat, lon, cfg));
         let Some(cross) = cross else {
             exclude(ex, scope, "truth never within 2 NM of the meter fix");
             continue;
         };
-        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
         if issue == NO_TIME {
             exclude(ex, scope, "no issue time");
             continue;
@@ -257,64 +358,92 @@ fn near_threshold(ap: &AirportRef, lat: f64, lon: f64, radius: f64) -> bool {
         .any(|&(a, b)| dist_m(a, b, lat, lon) <= radius)
 }
 
-fn on_ground_at_airport(s: &crate::truth::TruthSample, ap: &AirportRef, cfg: &EventConfig) -> bool {
-    near_threshold(ap, s.lat, s.lon, cfg.runway_radius_m)
-        && s.baro_alt_ft
-            .is_none_or(|a| a <= ap.elev_ft + cfg.ground_margin_ft)
+/// What the truth says about being on the ground at an airport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ground {
+    Yes,
+    No,
+    /// Near a threshold but no barometric altitude to say whether it is low.
+    AltitudeUnknown,
 }
 
-/// Truth landing time at `ap`: the last truth point of a leg that ends on the ground within the
-/// radius of a threshold; looks back up to 30 s from the leg end for the last bracketed time.
+/// A truth landing or takeoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroundEvent {
+    /// The event, Unix ms.
+    At(i64),
+    /// The leg ends (starts) near a threshold, but with no barometric altitude: nothing shows the
+    /// aircraft was on the ground.
+    AltitudeUnknown,
+    /// No such event in the leg.
+    NotFound,
+}
+
+fn on_ground_at_airport(s: &TruthSample, ap: &AirportRef, cfg: &EventConfig) -> Ground {
+    if !near_threshold(ap, s.lat, s.lon, cfg.runway_radius_m) {
+        return Ground::No;
+    }
+    match s.baro_alt_ft {
+        None => Ground::AltitudeUnknown,
+        Some(a) if a <= ap.elev_ft + cfg.ground_margin_ft => Ground::Yes,
+        Some(_) => Ground::No,
+    }
+}
+
+fn ground_event(g: Ground, t: i64) -> GroundEvent {
+    match g {
+        Ground::Yes => GroundEvent::At(t),
+        Ground::AltitudeUnknown => GroundEvent::AltitudeUnknown,
+        Ground::No => GroundEvent::NotFound,
+    }
+}
+
+/// Truth landing time at `ap` in truth leg `leg_ix`: the last truth point of the leg when it
+/// ends on the ground within the radius of a threshold; looks back up to 30 s from the leg end
+/// for the last bracketed time.
 pub fn landing_time(
     truth: &Truth<'_>,
-    tix: &TruthIndex,
-    addr: u32,
+    leg_ix: u32,
     ap: &AirportRef,
     cfg: &EventConfig,
-) -> Option<i64> {
-    let mut best: Option<i64> = None;
-    for l in legs_of(truth, tix, addr) {
-        for back in 0..=30 {
-            let t = l.end_ms - back * 1000;
-            if t < l.start_ms {
-                break;
-            }
-            if let Ok(s) = (truth.query)(addr, t) {
-                if on_ground_at_airport(&s, ap, cfg) {
-                    best = best.max(Some(t));
-                }
-                break;
-            }
+) -> GroundEvent {
+    let Some(l) = truth.legs.get(leg_ix as usize) else {
+        return GroundEvent::NotFound;
+    };
+    for back in 0..=30 {
+        let t = l.end_ms - back * 1000;
+        if t < l.start_ms {
+            break;
+        }
+        if let Ok(s) = (truth.query)(l.addr, t) {
+            return ground_event(on_ground_at_airport(&s, ap, cfg), t);
         }
     }
-    best
+    GroundEvent::NotFound
 }
 
-/// Truth takeoff time at `ap`: the first truth point of a leg that begins on the ground within
-/// the radius of a threshold; looks forward up to 30 s from the leg start.
+/// Truth takeoff time at `ap` in truth leg `leg_ix`: the first truth point of the leg when it
+/// begins on the ground within the radius of a threshold; looks forward up to 30 s from the leg
+/// start.
 pub fn takeoff_time(
     truth: &Truth<'_>,
-    tix: &TruthIndex,
-    addr: u32,
+    leg_ix: u32,
     ap: &AirportRef,
     cfg: &EventConfig,
-) -> Option<i64> {
-    let mut best: Option<i64> = None;
-    for l in legs_of(truth, tix, addr) {
-        for fwd in 0..=30 {
-            let t = l.start_ms + fwd * 1000;
-            if t > l.end_ms {
-                break;
-            }
-            if let Ok(s) = (truth.query)(addr, t) {
-                if on_ground_at_airport(&s, ap, cfg) {
-                    best = Some(best.map_or(t, |b| b.min(t)));
-                }
-                break;
-            }
+) -> GroundEvent {
+    let Some(l) = truth.legs.get(leg_ix as usize) else {
+        return GroundEvent::NotFound;
+    };
+    for fwd in 0..=30 {
+        let t = l.start_ms + fwd * 1000;
+        if t > l.end_ms {
+            break;
+        }
+        if let Ok(s) = (truth.query)(l.addr, t) {
+            return ground_event(on_ground_at_airport(&s, ap, cfg), t);
         }
     }
-    best
+    GroundEvent::NotFound
 }
 
 /// F3: TFMS estimated arrival time against the truth landing, and estimated departure time
@@ -334,7 +463,8 @@ pub fn f3_tfms(
         cfg,
     } = *ctx;
     let (mut va, mut ba, mut vd, mut bd) = (vec![], vec![], vec![], vec![]);
-    let mut cache: BTreeMap<(u32, [u8; 8], u8), Option<i64>> = BTreeMap::new();
+    let mut cache: BTreeMap<(u32, [u8; 8], u8), GroundEvent> = BTreeMap::new();
+    let windows = flight_windows(leg);
     let t = &leg.tfms;
     for i in 0..t.kind.len() {
         let kind = t.kind.get(i).copied().unwrap_or(0);
@@ -363,26 +493,52 @@ pub fn f3_tfms(
             exclude(ex, scope, "airport not in the model");
             continue;
         };
-        let truth_t = *cache.entry((addr, apt, u8::from(arr))).or_insert_with(|| {
-            if arr {
-                landing_time(truth, tix, addr, &ap, cfg)
-            } else {
-                takeoff_time(truth, tix, addr, &ap, cfg)
-            }
-        });
-        let Some(truth_t) = truth_t else {
-            exclude(
-                ex,
-                scope,
-                if arr {
-                    "no truth landing at the destination"
-                } else {
-                    "no truth takeoff at the origin"
-                },
-            );
+        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
+        let window = estimate_window(
+            &windows,
+            f,
+            issue,
+            t.time_ms.get(i).copied().unwrap_or(NO_TIME),
+            cfg,
+        );
+        let Some(li) = occurrence_leg(truth, tix, addr, window) else {
+            exclude(ex, scope, NO_LEG);
             continue;
         };
-        let issue = t.issue_ms.get(i).copied().unwrap_or(NO_TIME);
+        let event = *cache.entry((li, apt, u8::from(arr))).or_insert_with(|| {
+            if arr {
+                landing_time(truth, li, &ap, cfg)
+            } else {
+                takeoff_time(truth, li, &ap, cfg)
+            }
+        });
+        let truth_t = match event {
+            GroundEvent::At(t) => t,
+            GroundEvent::AltitudeUnknown => {
+                exclude(
+                    ex,
+                    scope,
+                    if arr {
+                        "truth altitude unknown at the landing point, ground not confirmed"
+                    } else {
+                        "truth altitude unknown at the takeoff point, ground not confirmed"
+                    },
+                );
+                continue;
+            }
+            GroundEvent::NotFound => {
+                exclude(
+                    ex,
+                    scope,
+                    if arr {
+                        "no truth landing at the destination"
+                    } else {
+                        "no truth takeoff at the origin"
+                    },
+                );
+                continue;
+            }
+        };
         if issue == NO_TIME {
             exclude(ex, scope, "no issue time");
             continue;
@@ -423,25 +579,114 @@ pub fn f3_tfms(
     (ra, rd)
 }
 
-/// A route as a polyline in degrees.
-fn polyline(leg: &Legacy, route: usize, env: &Env<'_>) -> Vec<(f64, f64)> {
+/// One point of an expanded route as far as it could be placed.
+#[derive(Clone, Debug)]
+enum Slot {
+    At(f64, f64),
+    /// No coordinates and not in the model.
+    Missing,
+    /// The identifier names several places and the route has not chosen yet.
+    Many(Vec<(f64, f64)>),
+}
+
+impl Slot {
+    fn place(&self) -> Option<(f64, f64)> {
+        match self {
+            Slot::At(la, lo) => Some((*la, *lo)),
+            _ => None,
+        }
+    }
+}
+
+/// A route as a polyline in degrees, or why it is not one. A route is never joined across a
+/// point that could not be placed: that would invent a direct leg the aircraft was not cleared to
+/// fly.
+#[derive(Clone, Debug)]
+enum RouteLine {
+    Complete(Vec<(f64, f64)>),
+    /// A point between two others has no place.
+    Unresolved,
+    /// A point names several places and the neighbouring points do not choose between them.
+    Ambiguous,
+}
+
+/// The place among `cands` that is clearly nearest to `anchor` (the second nearest at least 1.5
+/// times as far), else `None`.
+fn nearest_clearly(cands: &[(f64, f64)], anchor: (f64, f64)) -> Option<(f64, f64)> {
+    let mut d: Vec<(f64, (f64, f64))> = cands
+        .iter()
+        .map(|&c| (dist_m(anchor.0, anchor.1, c.0, c.1), c))
+        .collect();
+    d.sort_by(|a, b| a.0.total_cmp(&b.0));
+    match (d.first(), d.get(1)) {
+        (Some(&(d0, c)), Some(&(d1, _))) if d1 >= 1.5 * d0 => Some(c),
+        _ => None,
+    }
+}
+
+/// Places the points of a route. A repeated identifier is resolved with the route as context: the
+/// place clearly nearest to the previous placed point (the next one for the first point).
+fn polyline(leg: &Legacy, route: usize, env: &Env<'_>) -> RouteLine {
     let first = leg.routes.first.get(route).copied().unwrap_or(0) as usize;
     let len = leg.routes.len.get(route).copied().unwrap_or(0) as usize;
-    let mut out = Vec::new();
+    let mut slots: Vec<Slot> = Vec::new();
     for k in first..first + len {
         let (lat, lon) = (
             leg.route_points.lat_e7.get(k).copied().unwrap_or(NO_COORD),
             leg.route_points.lon_e7.get(k).copied().unwrap_or(NO_COORD),
         );
         if lat != NO_COORD && lon != NO_COORD {
-            out.push((f64::from(lat) * 1e-7, f64::from(lon) * 1e-7));
-        } else if let Some(fix) = leg.route_points.fix.get(k) {
-            if let Some(p) = (env.fix)(name(fix)) {
-                out.push(p);
-            }
+            slots.push(Slot::At(f64::from(lat) * 1e-7, f64::from(lon) * 1e-7));
+            continue;
         }
+        let Some(fix) = leg.route_points.fix.get(k) else {
+            slots.push(Slot::Missing);
+            continue;
+        };
+        let nm = name(fix);
+        slots.push(if let Some((la, lo)) = (env.fix)(nm) {
+            Slot::At(la, lo)
+        } else {
+            match (env.fix_all)(nm).as_slice() {
+                [] => Slot::Missing,
+                [(la, lo)] => Slot::At(*la, *lo),
+                many => Slot::Many(many.to_vec()),
+            }
+        });
     }
-    out
+    // Points at either end that have no place (an airport is not a fix) shorten the route.
+    while matches!(slots.last(), Some(Slot::Missing)) {
+        slots.pop();
+    }
+    let lead = slots
+        .iter()
+        .take_while(|s| matches!(s, Slot::Missing))
+        .count();
+    slots.drain(..lead);
+    let mut out: Vec<Slot> = Vec::with_capacity(slots.len());
+    for (i, sl) in slots.iter().enumerate() {
+        out.push(match sl {
+            Slot::Many(c) => {
+                let anchor = out
+                    .iter()
+                    .rev()
+                    .find_map(Slot::place)
+                    .or_else(|| slots.iter().skip(i + 1).find_map(Slot::place));
+                match anchor.and_then(|a| nearest_clearly(c, a)) {
+                    Some((la, lo)) => Slot::At(la, lo),
+                    None => Slot::Many(c.clone()),
+                }
+            }
+            other => other.clone(),
+        });
+    }
+    if out.iter().any(|s| matches!(s, Slot::Missing)) {
+        RouteLine::Unresolved
+    } else if out.iter().any(|s| matches!(s, Slot::Many(_))) {
+        RouteLine::Ambiguous
+    } else {
+        RouteLine::Complete(out.iter().filter_map(Slot::place).collect())
+    }
 }
 
 /// Distance in metres from a point to a polyline (the nearest segment; one point is a point).
@@ -488,7 +733,7 @@ pub fn r1_route_conformance(
     for v in routes_of.values_mut() {
         v.sort_by_key(|&r| (leg.routes.ts_ms.get(r as usize).copied().unwrap_or(0), r));
     }
-    let mut lines: BTreeMap<u32, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut lines: BTreeMap<u32, RouteLine> = BTreeMap::new();
     let mut dists = Vec::new();
     let (mut t_all, mut t_off) = (0i64, 0i64);
     let (mut flights, mut off_flights) = (0u64, 0u64);
@@ -522,10 +767,21 @@ pub fn r1_route_conformance(
             let line = lines
                 .entry(r)
                 .or_insert_with(|| polyline(leg, r as usize, env));
-            if line.len() < 2 {
-                exclude(ex, "R1", "route has fewer than two resolved points");
-                continue;
-            }
+            let line = match &*line {
+                RouteLine::Complete(l) if l.len() >= 2 => l,
+                RouteLine::Complete(_) => {
+                    exclude(ex, "R1", "route has fewer than two resolved points");
+                    continue;
+                }
+                RouteLine::Unresolved => {
+                    exclude(ex, "R1", "route has an unresolved intermediate point");
+                    continue;
+                }
+                RouteLine::Ambiguous => {
+                    exclude(ex, "R1", "route has an ambiguous fix identifier");
+                    continue;
+                }
+            };
             let own = p.addr.get(k).copied().unwrap_or(0);
             let Ok(s) = (truth.query)(own, t) else {
                 continue;

@@ -2,9 +2,12 @@
 //! Core (pure): a function of the model.
 //!
 //! * Fixes and navaids: points of the fix, VOR, DME, TACAN, NDB and terminal-waypoint kinds by
-//!   identifier. An identifier that occurs in more than one region takes the first row of the
-//!   model's sort order (ident, region, scope), which is deterministic; the others are counted
-//!   in [`AirspaceLookup::duplicate_fixes`] so the report can say so.
+//!   identifier. An identifier that occurs more than once is kept with every distinct place it
+//!   names (rows at one place are one place); [`AirspaceLookup::fix`] answers only when there is
+//!   one place, and [`AirspaceLookup::fix_all`] lists them all so a caller can choose with the
+//!   context of a route or a flight. Repeated rows are counted in
+//!   [`AirspaceLookup::duplicate_fixes`] and identifiers with several places in
+//!   [`AirspaceLookup::ambiguous_fixes`]. No place is ever picked by row order.
 //! * Airports: the airport points by ICAO identifier and by FAA identifier; field elevation from
 //!   the point, thresholds from the runway-threshold points whose scope is the airport. An
 //!   airport with no published elevation is not offered (nothing is made up).
@@ -36,14 +39,17 @@ pub struct Unit {
 /// Lookups built once from a model.
 // A7.2: cold struct, size guard waived
 pub struct AirspaceLookup {
-    fixes: BTreeMap<String, (f64, f64)>,
+    /// Every distinct place of an identifier, sorted by (latitude, longitude).
+    fixes: BTreeMap<String, Vec<(f64, f64)>>,
     airports: BTreeMap<String, AirportRef>,
     units: Vec<Unit>,
     zone: Option<usize>,
     /// The model's ARTCC identifier.
     pub artcc: String,
-    /// Fix identifiers that occur more than once (first row used).
+    /// Fix rows whose identifier occurs in an earlier row.
     pub duplicate_fixes: usize,
+    /// Fix identifiers that name more than one distinct place.
+    pub ambiguous_fixes: usize,
     /// ARTCC boundaries that were not a usable polygon and were left out.
     pub unusable_boundaries: usize,
 }
@@ -51,7 +57,7 @@ pub struct AirspaceLookup {
 /// Builds the lookups from a model.
 pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
     let p = &m.points;
-    let mut fixes: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    let mut fixes: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     let mut duplicate_fixes = 0usize;
     let mut airports: BTreeMap<String, AirportRef> = BTreeMap::new();
     let mut thresholds: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
@@ -75,10 +81,12 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
             | point_kind::TACAN
             | point_kind::NDB
             | point_kind::TERMINAL_WAYPOINT => {
-                if fixes.contains_key(ident) {
+                let places = fixes.entry(ident.to_string()).or_default();
+                if !places.is_empty() {
                     duplicate_fixes += 1;
-                } else {
-                    fixes.insert(ident.to_string(), pos);
+                }
+                if !places.contains(&pos) {
+                    places.push(pos);
                 }
             }
             point_kind::THRESHOLD => {
@@ -169,6 +177,10 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
             Err(_) => unusable += 1,
         }
     }
+    for places in fixes.values_mut() {
+        places.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    }
+    let ambiguous_fixes = fixes.values().filter(|v| v.len() > 1).count();
     let zone = units.iter().position(|u| u.id == m.meta.artcc);
     AirspaceLookup {
         fixes,
@@ -177,14 +189,24 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
         zone,
         artcc: m.meta.artcc.clone(),
         duplicate_fixes,
+        ambiguous_fixes,
         unusable_boundaries: unusable,
     }
 }
 
 impl AirspaceLookup {
-    /// Fix or navaid identifier to `(lat, lon)`.
+    /// Fix or navaid identifier to `(lat, lon)`; `None` when unknown or when the identifier
+    /// names more than one place.
     pub fn fix(&self, name: &str) -> Option<(f64, f64)> {
-        self.fixes.get(name).copied()
+        match self.fixes.get(name).map(Vec::as_slice) {
+            Some([only]) => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// Every distinct place the identifier names.
+    pub fn fix_all(&self, name: &str) -> Vec<(f64, f64)> {
+        self.fixes.get(name).cloned().unwrap_or_default()
     }
 
     /// Airport identifier (ICAO or FAA) to its reference data.

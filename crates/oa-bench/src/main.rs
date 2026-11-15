@@ -260,6 +260,7 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         legs: &built.legs,
     };
     let fix = |n: &str| lookup.as_ref().and_then(|l| l.fix(n));
+    let fix_all = |n: &str| lookup.as_ref().map_or_else(Vec::new, |l| l.fix_all(n));
     let airport = |n: &str| lookup.as_ref().and_then(|l| l.airport(n));
     let in_zone = |la: f64, lo: f64| lookup.as_ref().is_some_and(|l| l.in_zone(la, lo));
     let unit_at =
@@ -267,6 +268,7 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     let env: Env<'_> = if lookup.is_some() {
         Env {
             fix: &fix,
+            fix_all: &fix_all,
             airport: &airport,
             in_zone: &in_zone,
             unit_at: &unit_at,
@@ -317,9 +319,10 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         Some(l) => {
             let (f, a, u) = l.counts();
             notes.push(format!(
-                "airspace: {} model, {f} fixes ({} duplicate identifiers, first row used), {a} airports, {u} ARTCC polygon groups, zone {}{}; units are ARTCCs (no sector geometry in the model)",
+                "airspace: {} model, {f} fixes ({} repeated rows, {} identifiers naming more than one place, left unresolved unless a route or the zone decides), {a} airports, {u} ARTCC polygon groups, zone {}{}; units are ARTCCs (no sector geometry in the model)",
                 l.artcc,
                 l.duplicate_fixes,
+                l.ambiguous_fixes,
                 l.artcc,
                 if l.has_zone() { "" } else { " MISSING" }
             ));

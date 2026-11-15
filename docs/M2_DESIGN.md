@@ -149,11 +149,47 @@ cruise, descent from the truth vertical rate), altitude band and coast indicator
 | F2 | Schedule delivery | TBFM scheduled time vs truth crossing time |
 | F3 | Arrival and departure time error | TFMS estimates vs truth landing and takeoff, by look-ahead |
 | R1 | Route conformance | truth cross-track distance from ERAM's expanded route; share of flight time beyond 2 NM, with each case listed (LS-201) |
+| C1 | Common-time comparison | two systems' paired samples at the same truth times (grid, both within tolerance) |
 | H1 | Handoff timing | handoff initiation and acceptance vs truth crossing of the ARTCC boundary (ERAM sector boundaries are not public, so sector-to-sector handoffs are counted but not timed) |
 
 Truth crossing of a meter fix is the time of closest approach to the fix within 2 NM; if the
 aircraft never passes within 2 NM the flight is excluded and counted. Landing is the last truth
 point before the aircraft is on the ground within 1 NM of a runway threshold of the destination.
+
+**One trip at a time.** An aircraft can fly several trips in a recording, passing the same fix and
+using the same airport more than once. Each estimate belongs to one flight plan, so its truth comes
+from one truth leg: the leg that overlaps the plan's active interval (first to last ERAM sample of
+the plan) the most, or, when the plan has no ERAM sample, the 60 minutes after the estimate was
+issued. Crossings, takeoffs and landings are found inside that leg only, and results are cached per
+leg. An estimate with no leg in its interval is excluded and counted.
+
+**Ground evidence.** A landing or takeoff needs the aircraft within 1 NM of a threshold and a
+barometric altitude within 200 ft of the field elevation. A truth leg that starts or ends near a
+threshold with no barometric altitude (coverage that simply begins or ends there) is not a
+landing or takeoff; the estimate is excluded and counted as "altitude unknown, ground not
+confirmed".
+
+**Fix names and routes.** An identifier that names more than one place in the model is never
+resolved by row order. A meter fix with several places is the one inside the zone when exactly one
+is, otherwise the estimate is excluded and counted. In an expanded route the place clearly nearest
+(the next nearest at least 1.5 times as far) to the previous placed point is used, otherwise the
+route is excluded and counted as ambiguous. A route with an unplaced point between two others
+(not at either end, where an airport is not a fix) is excluded and counted as unresolved; it is
+never drawn straight across the gap, because that would score the flight against a route nobody
+filed.
+
+**Two ways to compare publication rates.** The per-report tables (T1 to T4) count every
+published sample once, so they describe what each system emits (the native number) but weight a
+system more in the stretches where it publishes more often. ERAM's irregular SFDPS reports and a
+tracker's one-second ticks would therefore be weighted differently for the very same error at
+every instant. The common-time table (C1, `oa_bench::common_time`) scores both systems at the
+same truth times: a grid of every 10 s, counting an aircraft at a grid time only when both
+systems have a paired sample within 2 s, taking the error of the nearest sample (nothing is
+interpolated, so no system is credited with reports it did not publish). It gives the horizontal
+error over all shared grid times and the distribution over aircraft of each system's RMS. Any
+claim that one system is more accurate than another cites the C1 numbers and says which aircraft
+and how many grid times they cover; the native per-report numbers stay as the description of each
+system's own output. Availability and data age stay separate measures (T5, T6, T7).
 
 ## 4. The harness checks itself
 
