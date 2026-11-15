@@ -1,6 +1,6 @@
 //! Frame recording: frames appended to size-rotated files, gzip-compressed as they are written
 //! (`.oaf.gz`, the default) or verbatim (`.oaf`). Shell (file system); the clock is passed in as
-//! a value so naming is testable.
+//! a value so naming is testable. Frame stamps never drive flushing or naming.
 //!
 //! Files are named `<feed>-<UTC start>-<NNNN>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`;
 //! `NNNN` counts from 0001 within one second, so name order is creation order). Frames are never split across files. The total size of every `.oaf`
@@ -8,7 +8,7 @@
 //! warning, and nothing is deleted (a recording is evidence, A8).
 //!
 //! Compressed recordings (oa-deflate, level 6) are a sequence of gzip members, one per file. The
-//! compressor is sync-flushed when a frame's receive time has moved a whole second past the last
+//! compressor is sync-flushed when local time has moved a whole second past the last
 //! flush, and by [`Recorder::idle_flush`] when the feed is quiet, so a crash loses at most about
 //! one second of frames; each file is finished (final block and CRC-32 trailer) on rotation, at
 //! the cap and in [`Recorder::finish`]. Rotation and the cap count the compressed bytes that are
@@ -65,7 +65,11 @@ pub struct Recorder {
     scratch: Vec<u8>,
     stopped: bool,
     files_opened: u32,
+    implausible_stamps: u64,
 }
+
+/// A frame stamp this many seconds from local time is counted as implausible.
+const MAX_STAMP_SKEW_SECS: u64 = 3600;
 
 /// Most recordings that can be opened in one UTC second (the four-digit name counter).
 const MAX_SAME_SECOND: u32 = 9999;
@@ -105,12 +109,23 @@ impl Recorder {
             scratch: Vec::new(),
             stopped: false,
             files_opened: 0,
+            implausible_stamps: 0,
         })
     }
 
-    /// Appends one whole frame, rotating first if needed. `now_unix_secs` is the frame's receive
-    /// time: it names a new file and times the sync flush.
-    pub fn write_frame(&mut self, raw: &[u8], now_unix_secs: i64) -> io::Result<Outcome> {
+    /// Appends one whole frame, rotating first if needed. `now_unix_secs` is the local clock,
+    /// passed in by the caller: it names a new file and times the sync flush, so one frame with a
+    /// wild stamp cannot stall flushing or name a file for the wrong time. `frame_unix_secs` is
+    /// the frame's own receive stamp, used only to count stamps far from local time.
+    pub fn write_frame(
+        &mut self,
+        raw: &[u8],
+        frame_unix_secs: i64,
+        now_unix_secs: i64,
+    ) -> io::Result<Outcome> {
+        if now_unix_secs.abs_diff(frame_unix_secs) > MAX_STAMP_SKEW_SECS {
+            self.implausible_stamps = self.implausible_stamps.saturating_add(1);
+        }
         if self.stopped {
             return Ok(Outcome::Stopped);
         }
@@ -223,6 +238,11 @@ impl Recorder {
     /// Files created by this recorder.
     pub fn files_opened(&self) -> u32 {
         self.files_opened
+    }
+
+    /// Frames whose receive stamp was more than an hour from local time when written.
+    pub fn implausible_stamps(&self) -> u64 {
+        self.implausible_stamps
     }
 
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {

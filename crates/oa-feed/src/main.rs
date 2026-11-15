@@ -267,6 +267,15 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             exit = ExitCode::FAILURE;
         }
     }
+    if let Some(r) = &recorder {
+        if r.implausible_stamps() > 0 {
+            eprintln!(
+                "oa-feed: WARNING feed={} {} frames had receive stamps over an hour from local time",
+                cfg.feed,
+                r.implausible_stamps()
+            );
+        }
+    }
     print!("final ");
     print_summary(&cfg.feed, &health);
     if let Some(r) = &recorder {
@@ -291,7 +300,11 @@ fn drain(
             Ok(f) => {
                 observe_frame(health, &f, f.recv_unix_ns);
                 if let Some(r) = recorder.as_mut() {
-                    match r.write_frame(f.raw, f.recv_unix_ns.div_euclid(1_000_000_000)) {
+                    match r.write_frame(
+                        f.raw,
+                        f.recv_unix_ns.div_euclid(1_000_000_000),
+                        now_ns().div_euclid(1_000_000_000),
+                    ) {
                         Ok(Outcome::Written | Outcome::Stopped) => {}
                         Ok(Outcome::StoppedNow) => eprintln!(
                             "oa-feed: WARNING feed={feed} recording stopped: --max-bytes cap reached \

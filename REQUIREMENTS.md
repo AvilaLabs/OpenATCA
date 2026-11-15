@@ -359,6 +359,11 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-032** The real SCDS recordings under `OPENATCA_SCDS_REC` (`*.oaf`) converted to
   `.oaf.gz` replay to identical summaries; the test reports the compressed sizes and ratios and
   skips when the variable is unset.
+- **OA-FEED-033** Flush timing and recording file names follow the local clock, not frame
+  stamps: a frame stamped far in the future does not stop later flushes or name the file, and frames
+  whose stamp is over an hour from local time are counted and reported.
+- **OA-FEED-034** The sequence-gap total saturates instead of overflowing when sequence numbers
+  jump by more than the counter can hold.
 
 ### Compression (oa-deflate)
 
