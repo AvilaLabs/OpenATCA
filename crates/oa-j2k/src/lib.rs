@@ -54,6 +54,24 @@ pub const MAX_CODE_BLOCKS: u64 = 1 << 18;
 /// Limit: coding passes of one block, 3 per bit-plane over at most 30 planes, less 2.
 pub const MAX_PASSES: u32 = 88;
 
+/// Limit: tier-1 work with no data behind it, 4 Mi sample visits (the cost of one fully coded
+/// 64 x 64 block is 0.4 Mi, a few of them are all a tiny stream may ask for).
+pub const WORK_FLOOR: u64 = 1 << 22;
+/// Limit: tier-1 sample visits per byte of tile body, on top of [`WORK_FLOOR`]. Real NOAA fields
+/// (RAP, HRRR, GEFS) reach 590, so this leaves a margin of about 14.
+pub const WORK_PER_BYTE: u64 = 8192;
+
+/// The tier-1 work a codestream may ask for, in sample visits (one visit is one sample in one
+/// coding pass). A block of a `bits`-deep image has at most `3 * (bits + 8) - 2` passes (the
+/// largest sub-band gain is 2 bits and a stream has at most 7 guard bits), so no honest stream
+/// visits a sample more than `3 * (bits + 8)` times. The work must also be backed by data: at
+/// most [`WORK_PER_BYTE`] visits per byte of tile body plus [`WORK_FLOOR`].
+pub fn work_budget(samples: u64, bits: u8, body_bytes: usize) -> u64 {
+    let by_size = samples.saturating_mul(3 * (u64::from(bits) + 8));
+    let by_data = WORK_FLOOR.saturating_add(WORK_PER_BYTE.saturating_mul(body_bytes as u64));
+    by_size.min(by_data)
+}
+
 /// A decoded image: `width * height` samples, row-major, already DC-level shifted.
 // A7.2: cold struct, size guard waived
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +88,15 @@ pub fn decode(data: &[u8]) -> Result<Image, J2kError> {
     let p = header::parse(data)?;
     let mut t = tile::build(&p)?;
     tile::read_packets(&mut t, p.body, p.layers)?;
+    let budget = work_budget(
+        u64::from(p.siz.x1 - p.siz.x0) * u64::from(p.siz.y1 - p.siz.y0),
+        p.siz.bits,
+        p.body.len(),
+    );
+    let work = tile::work(&t);
+    if work > budget {
+        return Err(J2kError::WorkBudget { work, budget });
+    }
     let (w, h) = (p.siz.x1 - p.siz.x0, p.siz.y1 - p.siz.y0);
     let mut coef = vec![0i32; w as usize * h as usize];
     tile::decode_blocks(&t, p.body, &mut coef, w as usize)?;

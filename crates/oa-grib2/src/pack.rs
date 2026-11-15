@@ -172,8 +172,18 @@ fn scale_value(rp: &Repr, x: i64) -> f32 {
     v as f32
 }
 
+/// No field has more values than a grid may have points; checked before any vector is sized from
+/// the count in section 5.
+fn check_count(rp: &Repr) -> Result<(), Grib2Error> {
+    if u64::from(rp.ndata) > crate::MAX_GRID_POINTS {
+        return Err(Grib2Error::GridPoints(u64::from(rp.ndata)));
+    }
+    Ok(())
+}
+
 /// Unpacks `payload` (section 7 without its 5-octet header) into `rp.ndata` values.
 pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
+    check_count(rp)?;
     let n = rp.ndata as usize;
     match rp.complex {
         None => {
@@ -190,6 +200,7 @@ pub fn unpack(rp: &Repr, payload: &[u8]) -> Result<Vec<f32>, Grib2Error> {
 /// The packed integers `X` of a template 5.0 or 5.40 field, before the `R`, `E`, `D` scaling.
 /// This is what two packings of the same field must agree on exactly.
 pub fn unpack_ints(rp: &Repr, payload: &[u8]) -> Result<Vec<u32>, Grib2Error> {
+    check_count(rp)?;
     let n = rp.ndata as usize;
     match rp.template {
         0 => unpack_simple(rp, payload, n),

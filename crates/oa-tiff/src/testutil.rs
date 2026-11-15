@@ -38,6 +38,8 @@ pub struct Spec {
     pub model_type: u16,
     pub nodata: Option<String>,
     pub vertical: Option<u16>,
+    /// Orientation tag (274) written when set.
+    pub orientation: Option<u16>,
 }
 
 impl Spec {
@@ -60,6 +62,7 @@ impl Spec {
             model_type: 2,
             nodata: None,
             vertical: None,
+            orientation: None,
         }
     }
 }
@@ -358,6 +361,9 @@ pub fn build(s: &Spec) -> Vec<u8> {
         let mut dir: Vec<u16> = vec![1, 1, 0, keys.len() as u16];
         dir.extend(keys.iter().flatten());
         ents.push(shorts(big, 34735, &dir));
+    }
+    if let Some(o) = s.orientation {
+        ents.push(shorts(big, 274, &[o]));
     }
     if let Some(nd) = &s.nodata {
         ents.push(ascii(42113, nd));

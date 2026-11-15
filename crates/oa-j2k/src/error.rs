@@ -36,6 +36,8 @@ pub enum J2kError {
     BadPacket(&'static str),
     /// A code block's arithmetic-coded data or pass count is impossible.
     BadBlock(&'static str),
+    /// The coding passes asked for exceed the work budget ([`crate::work_budget`]).
+    WorkBudget { work: u64, budget: u64 },
     /// Bytes remain where the codestream should have ended.
     TrailingBytes(usize),
 }
@@ -65,6 +67,12 @@ impl fmt::Display for J2kError {
             J2kError::TooManyCodeBlocks(n) => write!(f, "{n} code blocks is out of bounds"),
             J2kError::BadPacket(why) => write!(f, "bad packet: {why}"),
             J2kError::BadBlock(why) => write!(f, "bad code block: {why}"),
+            J2kError::WorkBudget { work, budget } => {
+                write!(
+                    f,
+                    "tier-1 work of {work} sample visits exceeds the budget {budget}"
+                )
+            }
             J2kError::TrailingBytes(n) => write!(f, "{n} bytes after the end of the codestream"),
         }
     }

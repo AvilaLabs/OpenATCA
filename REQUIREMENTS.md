@@ -1122,6 +1122,12 @@ frame of their feed has been fed (as the ADS-B table is).
   the centre-only maximum except for the sphere-versus-ellipsoid radius difference (under 1% of
   queries); the test reports how often and by how much (in feet) it exceeds it and the query time;
   skipped when the data is absent.
+- **OA-TIFF-029** Before the elevation array is sized from the declared dimensions, every strip or
+  tile must lie inside the file and be able to hold what the declaration needs (at least its
+  uncompressed size, or its size over 1032 when compressed, the most DEFLATE can reach); a file of
+  a few hundred bytes declaring 8192 by 8192 is refused with a typed error and nothing allocated.
+- **OA-TIFF-030** The Orientation tag is honoured by refusal: absent or 1 (top-left) is read, any
+  other value is refused with a typed `Unsupported` error rather than placing terrain wrongly.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -1394,6 +1400,11 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   lossless, a sample depth or point count that differs from the section, a section that is not 23
   octets, and a damaged codestream (typed `Jpeg2000(error)`); the next message of a file is
   still decoded.
+- **OA-GRIB-025** The value count of section 5 is checked against the grid's point count (or the
+  bitmap's set bits) before anything is unpacked or allocated, for templates 5.0, 5.2, 5.3 and
+  5.40, and the unpackers refuse a count beyond `MAX_GRID_POINTS` when called directly; a message
+  claiming 4,294,967,295 values with zero bits each, or one group of that length, is refused with
+  a typed error and nothing is sized from the claim.
 
 ## JPEG 2000 decoder (oa-j2k)
 
@@ -1441,6 +1452,11 @@ decoder is OA-GRIB-021.
   (`MAX_SAMPLES`), code blocks (`MAX_CODE_BLOCKS`), levels, layers and coding passes.
 - **OA-J2K-012** COC and QCC override COD and QCD for component 0 in either order; a COC, QCC or
   second COD that names another component or repeats is refused.
+- **OA-J2K-013** Tier-1 work (samples visited over all coding passes of all included blocks) is
+  counted from the packet headers and refused with `WorkBudget` before any block is decoded when
+  it exceeds `work_budget`: at most `3 * (bits + 8)` visits per sample and at most `WORK_FLOOR`
+  plus `WORK_PER_BYTE` per byte of tile body, which every real RAP, HRRR and GEFS field passes with
+  margin.
 
 ## M5 — Minimum vectoring and IFR altitudes (oa-mva)
 

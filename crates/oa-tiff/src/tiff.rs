@@ -13,6 +13,7 @@ const TAG_WIDTH: u16 = 256;
 const TAG_HEIGHT: u16 = 257;
 const TAG_BITS: u16 = 258;
 const TAG_COMPRESSION: u16 = 259;
+const TAG_ORIENTATION: u16 = 274;
 const TAG_STRIP_OFFSETS: u16 = 273;
 const TAG_SAMPLES: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
@@ -31,6 +32,10 @@ const TAG_GEO_KEYS: u16 = 34735;
 const TAG_GEO_DOUBLES: u16 = 34736;
 const TAG_GEO_ASCII: u16 = 34737;
 const TAG_NODATA: u16 = 42113;
+
+/// Most output bytes DEFLATE can produce per input byte (258-byte matches at 2 bits each); LZW
+/// is far below it. A segment that declares more than this is not honest data.
+const MAX_COMPRESSION_RATIO: u64 = 1032;
 
 const COMPRESSION_NONE: u32 = 1;
 const COMPRESSION_LZW: u32 = 5;
@@ -326,6 +331,18 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
             })
         }
     };
+    // Samples are placed row 0 first, left to right; any other orientation would put terrain in
+    // the wrong place, so it is refused rather than guessed at.
+    let orientation = match find(&entries, TAG_ORIENTATION) {
+        Some(e) => uint1(s, e)?,
+        None => 1,
+    };
+    if orientation != 1 {
+        return Err(TiffError::Unsupported {
+            what: "orientation",
+            value: orientation,
+        });
+    }
     let compression = match find(&entries, TAG_COMPRESSION) {
         Some(e) => uint1(s, e)?,
         None => COMPRESSION_NONE,
@@ -425,6 +442,35 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         },
     };
     let geo = georeference(&geo_tags, width, height)?;
+
+    // Every segment must lie in the file and be able to hold what the declared image needs,
+    // checked before the elevation array is sized from the declaration.
+    for (idx, (&off, &cnt)) in offsets.iter().zip(counts.iter()).enumerate() {
+        let rows_stored = if tiled {
+            u64::from(seg_h)
+        } else {
+            u64::from(seg_h).min(u64::from(height) - idx as u64 * u64::from(seg_h))
+        };
+        let expected = u64::from(seg_w) * rows_stored * bps;
+        let fits_file = off.checked_add(cnt).is_some_and(|e| e <= data.len() as u64);
+        if !fits_file {
+            return Err(TiffError::Decompress {
+                segment: idx,
+                reason: "segment lies outside the file",
+            });
+        }
+        let reachable = if compression == COMPRESSION_NONE {
+            cnt >= expected
+        } else {
+            cnt.saturating_mul(MAX_COMPRESSION_RATIO) >= expected
+        };
+        if !reachable {
+            return Err(TiffError::Decompress {
+                segment: idx,
+                reason: "segment byte count cannot hold the declared image",
+            });
+        }
+    }
 
     let mut elev = vec![f32::NAN; pixels as usize];
     let mut nodata_count: u64 = 0;

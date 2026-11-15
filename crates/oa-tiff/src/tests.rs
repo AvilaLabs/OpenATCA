@@ -738,3 +738,94 @@ fn tile_set_limits() {
         Err(QueryError::BadPolygon)
     );
 }
+
+/// Overwrites the inline value of a count-1 tag of a little-endian file built by `build`.
+fn patch_tag(file: &mut [u8], tag: u16, v: u32) {
+    let ifd = u32::from_le_bytes(file[4..8].try_into().unwrap()) as usize;
+    let n = u16::from_le_bytes(file[ifd..ifd + 2].try_into().unwrap()) as usize;
+    for i in 0..n {
+        let at = ifd + 2 + i * 12;
+        if u16::from_le_bytes(file[at..at + 2].try_into().unwrap()) == tag {
+            let typ = u16::from_le_bytes(file[at + 2..at + 4].try_into().unwrap());
+            if typ == 3 {
+                file[at + 8..at + 10].copy_from_slice(&(v as u16).to_le_bytes());
+            } else {
+                file[at + 8..at + 12].copy_from_slice(&v.to_le_bytes());
+            }
+            return;
+        }
+    }
+    panic!("tag {tag} not in the file");
+}
+
+// REQ: OA-TIFF-029
+#[test]
+fn declared_size_is_checked_against_the_data_before_allocating() {
+    // A small valid file with four 64-byte strips whose dimensions are rewritten to 8192 by 8192
+    // (a 256 MiB elevation array) and 2048 rows per strip. It must be refused without sizing
+    // anything from the declaration.
+    let declare_huge = |f: &mut [u8]| {
+        patch_tag(f, 256, 8192);
+        patch_tag(f, 257, 8192);
+        patch_tag(f, 278, 2048);
+    };
+    let mut s = Spec::new(4, 16, surface(4, 16));
+    s.rows_per_strip = 4;
+    let mut f = build(&s);
+    declare_huge(&mut f);
+    assert!(f.len() < 1024);
+    let refused = Err(TiffError::Decompress {
+        segment: 0,
+        reason: "segment byte count cannot hold the declared image",
+    });
+    assert_eq!(read_geotiff(&f), refused);
+    // Compressed segments are bounded by the best ratio DEFLATE can reach (1032 to 1).
+    s.compression = 8;
+    let mut f = build(&s);
+    declare_huge(&mut f);
+    assert_eq!(read_geotiff(&f), refused);
+    // A strip that runs past the end of the file is refused with nothing allocated.
+    let mut f = build(&Spec::new(4, 4, surface(4, 4)));
+    patch_tag(&mut f, 279, 1 << 30);
+    assert_eq!(
+        read_geotiff(&f),
+        Err(TiffError::Decompress {
+            segment: 0,
+            reason: "segment lies outside the file"
+        })
+    );
+    // Honest files are unaffected, including a constant tile that compresses far below its size.
+    let mut s = Spec::new(64, 64, vec![7.0; 4096]);
+    s.compression = 8;
+    s.tile = Some((64, 64));
+    same_samples(&grid_of(&s), &s.data);
+}
+
+// REQ: OA-TIFF-030
+#[test]
+fn only_top_left_orientation_is_accepted() {
+    let mut s = Spec::new(8, 6, surface(8, 6));
+    for o in [None, Some(1)] {
+        s.orientation = o;
+        same_samples(&grid_of(&s), &s.data);
+    }
+    for o in 2..=8u16 {
+        s.orientation = Some(o);
+        assert_eq!(
+            read_geotiff(&build(&s)),
+            Err(TiffError::Unsupported {
+                what: "orientation",
+                value: u32::from(o)
+            }),
+            "orientation {o}"
+        );
+    }
+    s.orientation = Some(0);
+    assert!(matches!(
+        read_geotiff(&build(&s)),
+        Err(TiffError::Unsupported {
+            what: "orientation",
+            ..
+        })
+    ));
+}
