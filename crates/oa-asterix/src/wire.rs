@@ -529,3 +529,39 @@ pub(crate) fn assemble_record(items: &[(u8, Vec<u8>)]) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::uap::{UAP_021, UAP_062};
+
+    // REQ: OA-AST-089
+    #[test]
+    fn compound_primary_minimal_check_refuses_only_a_trailing_zero_after_the_first() {
+        // I062/290 is FRN 14, a compound item.
+        let chk = |b: &[u8]| check_compound_minimal(&UAP_062, 14, b);
+        // A single all-zero octet at index 0 is not refused here (the walk refuses an empty
+        // compound item on its own).
+        assert_eq!(chk(&[0x00]), Ok(()));
+        // The first octet with a set bit and no FX ends the primary.
+        assert_eq!(chk(&[0x80]), Ok(()));
+        // FX set, then an all-zero octet at index 1: refused, naming index 1.
+        assert_eq!(chk(&[0x01, 0x00, 0xAA]), Err(1));
+        assert_eq!(chk(&[0x81, 0x00]), Err(1));
+        // FX with FX bit only is not all-zero: `0x01` counts as a bit pattern with FX, and the
+        // chain goes on; a following octet with a set bit ends it fine.
+        assert_eq!(chk(&[0x81, 0x02]), Ok(()));
+        // The offending octet is the one that ends the chain, wherever it is.
+        assert_eq!(chk(&[0x81, 0x01, 0x00]), Err(2));
+        assert_eq!(chk(&[0x81, 0x01, 0x40]), Ok(()));
+        // The octets after the primary are not looked at.
+        assert_eq!(chk(&[0x80, 0x00, 0x00]), Ok(()));
+        // Nothing, or a chain that never ends in the bytes: nothing to refuse.
+        assert_eq!(chk(&[]), Ok(()));
+        assert_eq!(chk(&[0x81, 0x81]), Ok(()));
+        // A slot that is not a compound item is never refused.
+        assert_eq!(check_compound_minimal(&UAP_021, 2, &[0x01, 0x00]), Ok(()));
+        assert_eq!(check_compound_minimal(&UAP_062, 1, &[0x01, 0x00]), Ok(()));
+    }
+}
