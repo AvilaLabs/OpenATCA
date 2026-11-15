@@ -15,6 +15,20 @@
 //!   NOTAM itself is not stored. A cancellation naming nothing held is counted (it is ordinary
 //!   when the target expired first, or was issued before the recording began).
 //!
+//! **Tombstones.** A cancellation or replacement leaves a tombstone of the NOTAM it removed (or
+//! named, if it was not held): its identity and the `issued` time of the cancelling or replacing
+//! NOTAM. A new or replacing row whose identity has a tombstone and whose `issued` time is not
+//! later than the tombstone's is a redelivery of a NOTAM that was already cancelled or replaced,
+//! and is refused and counted (`tomb_refused`; the pipeline counts it as out of order), so a
+//! redelivery cannot bring it back; a cancellation that arrives before the NOTAM it cancels works
+//! the same way. A tombstone is kept until the cancelled NOTAM's end time (or cancelled time) if
+//! it was held and had one, else for [`FNS_TOMBSTONE_AGE_MS`] of replay time from the
+//! cancellation: after that the feed has no reason to redeliver the notice. The table is a fixed
+//! size ([`new_fns_table_with`], by default the size of the NOTAM table); when it is full the
+//! oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are hashed, after the
+//! NOTAMs, only when there are some or a tombstone counter is not zero. They are not moved by a
+//! step of the replay clock (their time is feed time, not a time since heard).
+//!
 //! A row with no usable identity is not applied. A field that the decoder marked
 //! malformed ([`oa_notam::field_error`]) is treated as absent.
 //!
@@ -49,6 +63,10 @@ use crate::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release,
 pub const FNS_CAPACITY: usize = 1 << 15;
 /// Replay time after which a NOTAM with no end time and no update is dropped: 30 days.
 pub const FNS_OPEN_AGE_NS: i64 = 30 * 24 * 3600 * 1_000_000_000;
+/// Replay time a tombstone is kept when the NOTAM it records had no end time (or was not held):
+/// 7 days. The feed redelivers a notice within minutes to hours of its first delivery; a week
+/// is far past any redelivery seen, and a tombstone costs a few dozen bytes.
+pub const FNS_TOMBSTONE_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Absent time (Unix ms), altitude, latitude and longitude.
 pub const FNS_NO_TIME: i64 = i64::MIN;
 /// Absent altitude, latitude or longitude in the table's columns.
@@ -56,6 +74,8 @@ pub const FNS_NO_NUM: i32 = i32::MIN;
 
 /// Tag and version of the FNS part of the canonical serialisation.
 pub const FNS_HASH_TAG: &[u8; 5] = b"OAFN1";
+/// Tag of the tombstones in the canonical serialisation.
+pub const FNS_TOMB_TAG: &[u8; 5] = b"OAFT1";
 
 /// Running totals of the table, kept for the whole run.
 // A7.2: cold struct, size guard waived
@@ -85,6 +105,13 @@ pub struct FnsStats {
     pub expired: u64,
     /// Sweeps run.
     pub sweeps: u64,
+    /// New or replacing rows refused because a tombstone shows the NOTAM was already cancelled
+    /// or replaced by a notice issued no earlier.
+    pub tomb_refused: u64,
+    /// Tombstones evicted, oldest first, because the tombstone table was full.
+    pub tomb_evicted: u64,
+    /// Tombstones dropped at their retention time.
+    pub tomb_expired: u64,
 }
 
 /// What became of one row.
@@ -174,10 +201,27 @@ pub struct FnsTable {
     /// Bounding box of all polygon vertices: minimum latitude, minimum longitude, maximum
     /// latitude, maximum longitude, 1e-7 degree; [`FNS_NO_NUM`] when there is no polygon.
     pub bbox: Vec<[i32; 4]>,
+    /// Tombstone bookkeeping, keyed by [`FnsKey`].
+    pub tomb: Slots,
+    /// Tombstone key.
+    pub tomb_key: Vec<FnsKey>,
+    /// Issued time (Unix ms, [`FNS_NO_TIME`] if absent) of the cancelling or replacing notice.
+    pub tomb_issued: Vec<i64>,
+    /// Time (Unix ms) after which the tombstone is dropped.
+    pub tomb_until: Vec<i64>,
+    /// Order of creation, for evicting the oldest.
+    pub tomb_seq: Vec<u64>,
+    /// The next creation number.
+    pub tomb_next_seq: u64,
 }
 
-/// An empty table of `capacity` NOTAMs (use [`FNS_CAPACITY`]).
+/// An empty table of `capacity` NOTAMs (use [`FNS_CAPACITY`]) and as many tombstones.
 pub fn new_fns_table(capacity: usize) -> FnsTable {
+    new_fns_table_with(capacity, capacity)
+}
+
+/// An empty table of `capacity` NOTAMs and `tombstones` tombstones.
+pub fn new_fns_table_with(capacity: usize, tombstones: usize) -> FnsTable {
     let n = capacity;
     FnsTable {
         slots: new_slots(n),
@@ -207,6 +251,12 @@ pub fn new_fns_table(capacity: usize) -> FnsTable {
         alt_ref: vec![[0; 2]; n],
         polys: vec![[0; 2]; n],
         bbox: vec![[FNS_NO_NUM; 4]; n],
+        tomb: new_slots(tombstones),
+        tomb_key: vec![([0; 12], 0, 0); tombstones],
+        tomb_issued: vec![FNS_NO_TIME; tombstones],
+        tomb_until: vec![FNS_NO_TIME; tombstones],
+        tomb_seq: vec![0; tombstones],
+        tomb_next_seq: 0,
     }
 }
 
@@ -225,6 +275,55 @@ fn key_of(t: &FnsTable, s: usize) -> Option<FnsKey> {
 /// The slot of NOTAM `k`, if held.
 pub fn fns_slot_of(t: &FnsTable, k: &FnsKey) -> Option<usize> {
     slots_find(&t.slots, key_hash(k), |s| key_of(t, s).as_ref() == Some(k))
+}
+
+/// The tombstone slot of NOTAM `k`, if any.
+fn tomb_of(t: &FnsTable, k: &FnsKey) -> Option<usize> {
+    slots_find(&t.tomb, key_hash(k), |s| t.tomb_key.get(s) == Some(k))
+}
+
+/// Number of tombstones held.
+pub fn fns_tombstones(t: &FnsTable) -> usize {
+    t.tomb.live
+}
+
+/// Records that NOTAM `k` was cancelled or replaced by a notice issued at `issued_ms`, to be kept
+/// until `until_ms`. A tombstone already held for `k` keeps the later of each time.
+fn tomb_put(t: &mut FnsTable, k: FnsKey, issued_ms: i64, until_ms: i64) {
+    if let Some(s) = tomb_of(t, &k) {
+        if let Some(v) = t.tomb_issued.get_mut(s) {
+            *v = (*v).max(issued_ms);
+        }
+        if let Some(v) = t.tomb_until.get_mut(s) {
+            *v = (*v).max(until_ms);
+        }
+        return;
+    }
+    if t.tomb.free.is_empty() {
+        // Full: the oldest goes (the lowest creation number; slot order breaks no ties, as
+        // numbers are unique).
+        let oldest = (0..t.tomb.capacity)
+            .filter(|&s| slot_live(&t.tomb, s))
+            .min_by_key(|&s| t.tomb_seq.get(s).copied().unwrap_or(u64::MAX));
+        if let Some(o) = oldest {
+            slots_release(&mut t.tomb, o);
+            t.stats.tomb_evicted += 1;
+        }
+    }
+    let Some(s) = slots_alloc(&mut t.tomb, key_hash(&k)) else {
+        return;
+    };
+    set(&mut t.tomb_key, s, k);
+    set(&mut t.tomb_issued, s, issued_ms);
+    set(&mut t.tomb_until, s, until_ms);
+    set(&mut t.tomb_seq, s, t.tomb_next_seq);
+    t.tomb_next_seq += 1;
+}
+
+/// Whether a tombstone shows that a notice of identity `k` issued at `issued_ms` is a redelivery
+/// of one already cancelled or replaced.
+fn tomb_refuses(t: &FnsTable, k: &FnsKey, issued_ms: i64) -> bool {
+    tomb_of(t, k).is_some_and(|s| issued_ms <= t.tomb_issued.get(s).copied().unwrap_or(FNS_NO_TIME))
 }
 
 /// Number of NOTAMs held.
@@ -324,6 +423,10 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
     };
     if ntype == TYPE_CANCEL {
         let hit = target.as_ref().and_then(|k| fns_slot_of(t, k));
+        if let Some(k) = target {
+            let until = tomb_until(t, hit, now_ns);
+            tomb_put(t, k, issued_of(n, i, &r), until);
+        }
         return match hit {
             Some(s) => {
                 remove(t, s);
@@ -337,11 +440,11 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
             }
         };
     }
-    let issued = if usable(n, i, Field::Issued) {
-        r.issued_ms
-    } else {
-        FNS_NO_TIME
-    };
+    let issued = issued_of(n, i, &r);
+    if tomb_refuses(t, &key, issued) {
+        t.stats.tomb_refused += 1;
+        return FnsApplied::OutOfOrder;
+    }
     let held = fns_slot_of(t, &key);
     if let Some(s) = held {
         let held_issued = t
@@ -361,12 +464,22 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
     if ntype == TYPE_REPLACE {
         match target.as_ref().and_then(|k| fns_slot_of(t, k)) {
             Some(old) if Some(old) != held => {
+                let until = tomb_until(t, Some(old), now_ns);
+                if let Some(k) = target {
+                    tomb_put(t, k, issued, until);
+                }
                 remove(t, old);
                 t.stats.replaced += 1;
                 out = FnsApplied::Replaced;
             }
             Some(_) => {}
-            None => t.stats.replace_unmatched += 1,
+            None => {
+                t.stats.replace_unmatched += 1;
+                if let Some(k) = target {
+                    let until = tomb_until(t, None, now_ns);
+                    tomb_put(t, k, issued, until);
+                }
+            }
         }
     }
     let s = match held {
@@ -390,6 +503,25 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
     store(t, s, n, i, now_ns, ntype);
     t.stats.applied += 1;
     out
+}
+
+/// The `issued` time of row `i`, or [`FNS_NO_TIME`] when absent or malformed.
+fn issued_of(n: &Notams, i: usize, r: &oa_notam::Row) -> i64 {
+    if usable(n, i, Field::Issued) {
+        r.issued_ms
+    } else {
+        FNS_NO_TIME
+    }
+}
+
+/// When the tombstone of a NOTAM held in `hit` (if it was) may be dropped, Unix ms: its end or
+/// cancelled time if it has one, else [`FNS_TOMBSTONE_AGE_MS`] after the replay time `now_ns`.
+fn tomb_until(t: &FnsTable, hit: Option<usize>, now_ns: i64) -> i64 {
+    hit.and_then(|s| leaves_at(t, s)).unwrap_or_else(|| {
+        now_ns
+            .div_euclid(1_000_000)
+            .saturating_add(FNS_TOMBSTONE_AGE_MS)
+    })
 }
 
 /// Writes the row's values to slot `s` (the key is already there). Values the row lacks are
@@ -563,6 +695,12 @@ pub fn fns_sweep(t: &mut FnsTable, now_ns: i64) -> usize {
             n += 1;
         }
     }
+    for i in 0..t.tomb.capacity {
+        if slot_live(&t.tomb, i) && t.tomb_until.get(i).is_some_and(|&u| now_ms > u) {
+            slots_release(&mut t.tomb, i);
+            t.stats.tomb_expired += 1;
+        }
+    }
     t.stats.sweeps += 1;
     n
 }
@@ -694,6 +832,41 @@ pub fn fns_hash_into(h: &mut Sha256, t: &FnsTable) {
             for x in v {
                 put(h, &x.to_le_bytes());
             }
+        }
+    }
+    let st = &t.stats;
+    if t.tomb.live > 0 || st.tomb_refused + st.tomb_evicted + st.tomb_expired > 0 {
+        put(h, FNS_TOMB_TAG);
+        for v in [st.tomb_refused, st.tomb_evicted, st.tomb_expired] {
+            put(h, &v.to_le_bytes());
+        }
+        let mut tombs: Vec<(FnsKey, usize)> = (0..t.tomb.capacity)
+            .filter(|&s| slot_live(&t.tomb, s))
+            .filter_map(|s| t.tomb_key.get(s).map(|&k| (k, s)))
+            .collect();
+        tombs.sort_unstable();
+        put(h, &(tombs.len() as u64).to_le_bytes());
+        for &(k, s) in &tombs {
+            put(h, &k.0);
+            put(h, &k.1.to_le_bytes());
+            put(h, &k.2.to_le_bytes());
+            put(
+                h,
+                &t.tomb_issued
+                    .get(s)
+                    .copied()
+                    .unwrap_or(FNS_NO_TIME)
+                    .to_le_bytes(),
+            );
+            put(
+                h,
+                &t.tomb_until
+                    .get(s)
+                    .copied()
+                    .unwrap_or(FNS_NO_TIME)
+                    .to_le_bytes(),
+            );
+            put(h, &t.tomb_seq.get(s).copied().unwrap_or(0).to_le_bytes());
         }
     }
     if fns_stale_count(t) > 0 {

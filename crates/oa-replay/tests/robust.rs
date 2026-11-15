@@ -166,7 +166,9 @@ fn an_ordinary_replay_hashes_as_it_always_did() {
         to_hex(&replay_hash(&p)),
         // Equal to what the code before the 2-minute tolerance gave for the same frames; the pin
         // moved only because the replay now ends on a 100 s quiet spell, not a 9 minute one.
-        "39cdf512d34a34fea093eb27c040b4bc6e7a3f992534f01b623dae345f0fd0a5"
+        // Re-pinned again when each SFDPS flight began to hold the timestamp of its newest
+        // message, hashed in a block after the flights (OA-RPL-201); nothing else changed.
+        "9a55c7888eafb01ecf69cb5c99ab642e032bfd1a2289021b6218292ba9689f31"
     );
 }
 

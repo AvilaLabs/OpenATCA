@@ -25,7 +25,13 @@
 //!
 //! **Programmes.** One slot per `(kind, program, id, number, title, element)` of a flow row, so
 //! the latest row for a restriction, advisory, FCA or airport configuration replaces the held
-//! one. Title and element are kept to their first 24 bytes (the key distinguishes only those).
+//! one. The key holds the first 24 bytes of title and element inline. The decoder bounds these
+//! strings only by the size of its text table, so a longer one is kept whole in a fixed pool
+//! of cells made at init ([`FLOW_LONG_CELLS`] cells, each holding the full title and element up to
+//! [`FLOW_LONG_BYTES`] bytes each) and compared whole on lookup: two programmes whose strings
+//! differ after byte 24 are two programmes. A new programme that needs a cell when none is free,
+//! or whose title or element is over [`FLOW_LONG_BYTES`], is refused and counted
+//! (`refused_long`, reported as a full table); a programme held is never merged with another.
 //!
 //! **Expiry.** A sweep on the replay-time cadence evicts a flight silent for
 //! [`TFMS_FLIGHT_MAX_AGE_NS`] and a programme whose end time has passed (a programme with no
@@ -51,6 +57,18 @@ pub const TFMS_CAPACITY: usize = 1 << 16;
 pub const FLOW_CAPACITY: usize = 4096;
 /// Silence after which a TFMS flight is evicted: six hours of replay time.
 pub const TFMS_FLIGHT_MAX_AGE_NS: i64 = 6 * 3600 * 1_000_000_000;
+/// Cells of the pool that holds the full title and element of a programme whose either is longer
+/// than the 24 bytes of the inline key. Real programmes have ids under 20 bytes; this is for the
+/// few that do not.
+pub const FLOW_LONG_CELLS: usize = 1024;
+/// Bytes a cell holds for each of the title and the element: a programme with either longer is
+/// refused.
+pub const FLOW_LONG_BYTES: usize = 512;
+/// Tag of the long identities in the canonical serialisation.
+pub const FLOW_LONG_TAG: &[u8; 5] = b"OAFL1";
+/// No pool cell.
+const NO_CELL: u32 = u32::MAX;
+
 /// Silence after which a programme with no end time is evicted: 24 hours of replay time.
 pub const TFMS_FLOW_MAX_AGE_NS: i64 = 24 * 3600 * 1_000_000_000;
 /// Replay-time spacing of the sweeps: one minute.
@@ -722,6 +740,9 @@ pub struct FlowStats {
     pub evicted: u64,
     /// Sweeps run.
     pub sweeps: u64,
+    /// Rows refused because the programme's title or element was too long for a pool cell, or
+    /// no cell was free.
+    pub refused_long: u64,
     /// Applied rows by `oa_tfms::rows::prog` program type.
     pub by_program: [u64; oa_tfms::rows::prog::COUNT],
 }
@@ -788,10 +809,26 @@ pub struct FlowTable {
     pub airports: Vec<[u8; 24]>,
     /// Rows applied to this programme.
     pub rows: Vec<u32>,
+    /// The pool cell holding the full title and element, or `NO_CELL` when both fit the key.
+    pub long_cell: Vec<u32>,
+    /// Free pool cells, a stack.
+    pub long_free: Vec<u32>,
+    /// Lengths of the full title and element in each cell.
+    pub long_len: Vec<[u16; 2]>,
+    /// Full titles, `FLOW_LONG_BYTES` per cell.
+    pub long_title: Vec<u8>,
+    /// Full elements, `FLOW_LONG_BYTES` per cell.
+    pub long_element: Vec<u8>,
 }
 
-/// An empty programme table of `capacity` programmes (use [`FLOW_CAPACITY`]).
+/// An empty programme table of `capacity` programmes (use [`FLOW_CAPACITY`]) with
+/// [`FLOW_LONG_CELLS`] pool cells (fewer if `capacity` is smaller: a cell is used by a programme).
 pub fn new_flow_table(capacity: usize) -> FlowTable {
+    new_flow_table_with(capacity, FLOW_LONG_CELLS.min(capacity))
+}
+
+/// An empty programme table of `capacity` programmes and `cells` pool cells.
+pub fn new_flow_table_with(capacity: usize, cells: usize) -> FlowTable {
     let n = capacity;
     FlowTable {
         slots: new_slots(n),
@@ -815,9 +852,17 @@ pub fn new_flow_table(capacity: usize) -> FlowTable {
         facility: vec![[0; 8]; n],
         airports: vec![[0; 24]; n],
         rows: vec![0; n],
+        long_cell: vec![NO_CELL; n],
+        long_free: (0..cells as u32).rev().collect(),
+        long_len: vec![[0; 2]; cells],
+        long_title: vec![0; cells * FLOW_LONG_BYTES],
+        long_element: vec![0; cells * FLOW_LONG_BYTES],
     }
 }
 
+/// The programme key as held inline: kind, program, id, number, and the first 24 bytes of title
+/// and element. It is the sort and hash key; a programme with a longer title or element is told
+/// apart by the full strings in the pool.
 type FlowKey = (u8, u8, u64, u64, [u8; 24], [u8; 24]);
 
 fn flow_hash(k: &FlowKey) -> u64 {
@@ -842,11 +887,51 @@ fn flow_key_of(t: &FlowTable, s: usize) -> Option<FlowKey> {
     ))
 }
 
-/// The slot of the programme with this key, if held.
-pub fn flow_slot_of(t: &FlowTable, k: &FlowKey) -> Option<usize> {
+/// The first `len` bytes of cell `c` of a pool column.
+fn long_part(col: &[u8], c: usize, len: u16) -> &[u8] {
+    col.get(c * FLOW_LONG_BYTES..c * FLOW_LONG_BYTES + usize::from(len))
+        .unwrap_or(&[])
+}
+
+/// The full title and element of slot `s`: the pool cell's if it has one, else the inline key's
+/// (text has no zero bytes, so the padding is trimmed).
+fn flow_full(t: &FlowTable, s: usize) -> (&[u8], &[u8]) {
+    let trim = |v: &[u8]| -> usize { v.iter().position(|&b| b == 0).unwrap_or(v.len()) };
+    let cell = t.long_cell.get(s).copied().unwrap_or(NO_CELL);
+    if cell != NO_CELL {
+        let c = cell as usize;
+        let [tl, el] = t.long_len.get(c).copied().unwrap_or([0; 2]);
+        return (
+            long_part(&t.long_title, c, tl),
+            long_part(&t.long_element, c, el),
+        );
+    }
+    let title = t
+        .title
+        .get(s)
+        .map_or(&[][..], |v| v.get(..trim(v)).unwrap_or(&[]));
+    let element = t
+        .element
+        .get(s)
+        .map_or(&[][..], |v| v.get(..trim(v)).unwrap_or(&[]));
+    (title, element)
+}
+
+/// The slot of the programme with this key and these full strings, if held.
+fn flow_find(t: &FlowTable, k: &FlowKey, title: &[u8], element: &[u8]) -> Option<usize> {
     slots_find(&t.slots, flow_hash(k), |s| {
-        flow_key_of(t, s).as_ref() == Some(k)
+        flow_key_of(t, s).as_ref() == Some(k) && flow_full(t, s) == (title, element)
     })
+}
+
+/// The slot of the programme with this key, if held, whose title and element fit the key.
+pub fn flow_slot_of(t: &FlowTable, k: &FlowKey) -> Option<usize> {
+    let trim = |v: &[u8]| -> usize { v.iter().position(|&b| b == 0).unwrap_or(v.len()) };
+    let (title, element) = (
+        k.4.get(..trim(&k.4)).unwrap_or(&[]),
+        k.5.get(..trim(&k.5)).unwrap_or(&[]),
+    );
+    flow_find(t, k, title, element)
 }
 
 /// Number of programmes held.
@@ -874,6 +959,12 @@ fn blank_flow(t: &mut FlowTable, s: usize) {
     set(&mut t.facility, s, [0; 8]);
     set(&mut t.airports, s, [0; 24]);
     set(&mut t.rows, s, 0);
+    if let Some(c) = t.long_cell.get_mut(s) {
+        if *c != NO_CELL {
+            t.long_free.push(*c);
+            *c = NO_CELL;
+        }
+    }
 }
 
 /// Applies flow row `i` of `rows` at replay time `now_ns`.
@@ -881,22 +972,43 @@ pub fn apply_tfms_flow(t: &mut FlowTable, rows: &Rows, i: usize, now_ns: i64) ->
     let Some(r) = flow_at(&rows.flows, i) else {
         return FlowApplied::BadRow;
     };
-    let key: FlowKey = (
-        r.kind,
-        r.program,
-        r.id,
-        r.number,
-        pad(text(rows, r.title).as_bytes()),
-        pad(text(rows, r.element).as_bytes()),
+    let (title, element) = (
+        text(rows, r.title).as_bytes(),
+        text(rows, r.element).as_bytes(),
     );
-    let (s, is_new) = match flow_slot_of(t, &key) {
+    let key: FlowKey = (r.kind, r.program, r.id, r.number, pad(title), pad(element));
+    let (s, is_new) = match flow_find(t, &key, title, element) {
         Some(s) => (s, false),
         None => {
+            let long = title.len() > 24 || element.len() > 24;
+            if long && (title.len() > FLOW_LONG_BYTES || element.len() > FLOW_LONG_BYTES) {
+                t.stats.refused_long += 1;
+                return FlowApplied::TableFull;
+            }
+            if long && t.long_free.is_empty() {
+                t.stats.refused_long += 1;
+                return FlowApplied::TableFull;
+            }
             let Some(s) = slots_alloc(&mut t.slots, flow_hash(&key)) else {
                 t.stats.refused_full += 1;
                 return FlowApplied::TableFull;
             };
             blank_flow(t, s);
+            let cell = if long { t.long_free.pop() } else { None };
+            if let Some(c) = cell {
+                let at = c as usize * FLOW_LONG_BYTES;
+                for (col, v) in [(&mut t.long_title, title), (&mut t.long_element, element)] {
+                    if let Some(d) = col.get_mut(at..at + v.len()) {
+                        d.copy_from_slice(v);
+                    }
+                }
+                set(
+                    &mut t.long_len,
+                    c as usize,
+                    [title.len() as u16, element.len() as u16],
+                );
+                set(&mut t.long_cell, s, c);
+            }
             set(&mut t.key_kind, s, key.0);
             set(&mut t.key_program, s, key.1);
             set(&mut t.key_id, s, key.2);
@@ -991,7 +1103,11 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
         .filter(|&s| slot_live(&t.slots, s))
         .filter_map(|s| flow_key_of(t, s).map(|k| (k, s)))
         .collect();
-    order.sort_unstable();
+    // Programmes alike in the inline key are told apart by their full strings.
+    order.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| flow_full(t, a.1).cmp(&flow_full(t, b.1)))
+    });
     put(h, FLOW_HASH_TAG);
     put(h, &(order.len() as u64).to_le_bytes());
     let st = &t.stats;
@@ -1046,6 +1162,22 @@ pub fn flow_hash_into(h: &mut Sha256, t: &FlowTable) {
         }
         if let Some(v) = t.rows.get(s) {
             put(h, &v.to_le_bytes());
+        }
+    }
+    let any_long = order
+        .iter()
+        .any(|&(_, s)| t.long_cell.get(s).is_some_and(|&c| c != NO_CELL));
+    if any_long || st.refused_long > 0 {
+        put(h, FLOW_LONG_TAG);
+        put(h, &st.refused_long.to_le_bytes());
+        for &(_, s) in &order {
+            if t.long_cell.get(s).is_some_and(|&c| c != NO_CELL) {
+                let (title, element) = flow_full(t, s);
+                put(h, &(title.len() as u32).to_le_bytes());
+                put(h, title);
+                put(h, &(element.len() as u32).to_le_bytes());
+                put(h, element);
+            }
         }
     }
     if flow_stale_count(t) > 0 {

@@ -9,6 +9,10 @@
 //! 1. the tag `OATS1`, the live count, `next_sweep_ns` and every [`TableStats`] counter;
 //! 2. for each live flight in ascending GUFI order, every column (see [`serialise_flight`]).
 //!
+//! The newest SFDPS source time of each flight and the three stale-amendment counters are written
+//! after the flights (and before the stale marks), as the tag `OASR1`, and only when some flight
+//! has a source time or a counter is not zero, so a table fed by TBFM alone hashes as before.
+//!
 //! A flight marked stale by a step of the clock (see [`crate::FlightTable::stale`]) is written
 //! after the flights, as the tag `OAST1` and one byte per flight in the same order, and only when
 //! some flight is stale, so a table with none hashes as before.
@@ -20,6 +24,7 @@
 //! a stated exception to C1 (offline harness, C6).
 
 use oa_sha256::{Digest, Sha256};
+use oa_tbfm::NO_TIME;
 
 use crate::table::{is_occupied, slot_ref, FlightTable, Slot, SlotRef, TableStats};
 
@@ -43,6 +48,9 @@ pub(crate) fn stale_hash_into(h: &mut Sha256, stale: &[bool], slots: impl Iterat
         put(h, &[u8::from(stale.get(s).copied().unwrap_or(false))]);
     }
 }
+
+/// Tag of the SFDPS source times and stale-amendment counters.
+pub const SRC_TAG: &[u8; 5] = b"OASR1";
 
 fn put_stats(h: &mut Sha256, s: &TableStats) {
     for v in [
@@ -116,6 +124,26 @@ pub fn state_hash(t: &FlightTable) -> Digest {
     for &(_, i) in &order {
         if let Some(c) = slot_ref(t, Slot(i)) {
             serialise_flight(&mut h, &c);
+        }
+    }
+    let st = &t.stats;
+    let any_src = order
+        .iter()
+        .any(|&(_, i)| t.src_ms.get(i as usize).is_some_and(|&v| v != NO_TIME));
+    if any_src || st.stale_amendments + st.plan_refused_old + st.no_source_time > 0 {
+        put(&mut h, SRC_TAG);
+        for v in [st.stale_amendments, st.plan_refused_old, st.no_source_time] {
+            put(&mut h, &v.to_le_bytes());
+        }
+        for &(_, i) in &order {
+            put(
+                &mut h,
+                &t.src_ms
+                    .get(i as usize)
+                    .copied()
+                    .unwrap_or(NO_TIME)
+                    .to_le_bytes(),
+            );
         }
     }
     if crate::table::stale_count(t) > 0 {
