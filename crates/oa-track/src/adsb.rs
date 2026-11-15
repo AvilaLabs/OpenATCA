@@ -147,8 +147,9 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
             let sv = nacv_epu_mps(nacv) / SIGMA95;
             let speed = f64::from(row.gs_dkt) * 0.1 * MPS_PER_KT;
             let ang = (f64::from(row.track_ddeg) * 0.1).to_radians();
-            m.vel_east_mps = (speed * ang.sin()) as f32;
-            m.vel_north_mps = (speed * ang.cos()) as f32;
+            let (sa, ca) = oa_math::sin_cos(ang);
+            m.vel_east_mps = (speed * sa) as f32;
+            m.vel_north_mps = (speed * ca) as f32;
             let vv = (sv * sv) as f32;
             m.vel_cov_m2s2 = [vv, 0.0, vv];
             m.flags |= M_HAS_VEL;

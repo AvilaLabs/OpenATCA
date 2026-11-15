@@ -150,6 +150,7 @@ fn blank_filter() -> Filter {
         t_ns: 0,
         lat_e7: 0,
         lon_e7: 0,
+        trig: [0.0, 1.0],
         rej_h: 0,
         rej_v: 0,
         has_alt: 0,
@@ -455,9 +456,11 @@ pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
         return Err(REF_POS_COV);
     }
     if m.flags & crate::types::M_HAS_VEL != 0 {
+        // Finite single-precision components, so the squares cannot overflow a double.
+        let (ve, vn) = (f64::from(m.vel_east_mps), f64::from(m.vel_north_mps));
         let v_ok = m.vel_east_mps.is_finite()
             && m.vel_north_mps.is_finite()
-            && f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) <= SPEED_ENVELOPE_MPS
+            && (ve * ve + vn * vn).sqrt() <= SPEED_ENVELOPE_MPS
             && cov_ok(&m.vel_cov_m2s2);
         if !v_ok {
             return Err(REF_VELOCITY);
@@ -575,7 +578,7 @@ fn gs_dkt(m: &Measurement) -> u16 {
     if m.flags & M_HAS_VEL == 0 {
         return NONE_U16;
     }
-    let kt = f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) / MPS_PER_KT;
+    let kt = oa_math::hypot(f64::from(m.vel_east_mps), f64::from(m.vel_north_mps)) / MPS_PER_KT;
     // Saturates one below the absent value.
     (kt * 10.0).round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
 }
@@ -583,11 +586,10 @@ fn gs_dkt(m: &Measurement) -> u16 {
 /// The filter's estimated ground speed in 0.1 kt, [`NONE_U16`] if it is not a number.
 fn estimated_gs_dkt(f: &Filter) -> u16 {
     let (x, _) = h_combine(&f.h);
-    let v = x
-        .get(2)
-        .copied()
-        .unwrap_or(0.0)
-        .hypot(x.get(3).copied().unwrap_or(0.0));
+    let v = oa_math::hypot(
+        x.get(2).copied().unwrap_or(0.0),
+        x.get(3).copied().unwrap_or(0.0),
+    );
     let dkt = v / MPS_PER_KT * 10.0;
     if dkt.is_finite() {
         // Saturates one below the absent value.
@@ -604,7 +606,7 @@ fn estimated_gs_dkt(f: &Filter) -> u16 {
 /// taken into account by the persistence rule, as it would be if the measurement is applied.
 fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
     let f = col(&t.cur, slot, blank_filter());
-    let frame = oa_geo::aeqd::frame_new(f64::from(f.lat_e7) / 1.0e7, f64::from(f.lon_e7) / 1.0e7);
+    let frame = crate::filter::filter_frame(&f);
     let (x, y) = oa_geo::aeqd::project(
         &frame,
         f64::from(m.lat_e7) / 1.0e7,
@@ -617,7 +619,9 @@ fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
     let mut trial = col(&t.cat, slot, CategoryState::default());
     let category = category_observe(&mut trial, m.category);
     let pair = JumpPair {
-        dist_m: x.hypot(y),
+        // `project` returns coordinates within half the earth's circumference, so the squares
+        // cannot overflow.
+        dist_m: (x * x + y * y).sqrt(),
         dt_s: (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64,
         slack_m: PLAUSIBLE_SLACK_M,
         category,

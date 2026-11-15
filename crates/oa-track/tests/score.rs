@@ -437,8 +437,21 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
 // innovation sum 142,114.4 to 142,128.2 (1e-4 of itself); rows differ in covariance and velocity
 // at the 0.3 % and 1e-3 m/s scale. The value before both was
 // "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962".
+// (3) Platform libm replaced by oa-math in the tracker and geodesy: the same 108,643 rows, 3,599
+// ticks, none skipped; 27 of 1,553,531 output rows differ, all in the last bits of a velocity
+// (largest 2e-5 m/s); no position changes at the 1e-7 degree quantum. The value before was
+// "c4fdb7d84f7a18180befdba24c239de7b94f4b3bfad44007fef67794b141a5cd".
+// (4) Elementary-function calls cut on the hot path (the frame's latitude sine and cosine carried
+// with the filter and the small-angle series in the chart, one exponential for the model and
+// vertical transitions, the model probabilities from the difference of the log weights): the
+// same 108,643 rows, 3,599 ticks, none skipped; of 1,553,531 output rows 141,493 differ, none in
+// position at the 1e-7 degree quantum, in velocity by at most 2e-5 m/s (one single-precision
+// unit), and in covariance and model probability by at most 3.3e-7 of themselves (two
+// single-precision units; terms near zero, the covariance cross term, turn rate and vertical
+// rate, move by more in relative terms). The value before was
+// "a70fef27c29a09f93d3a28b2a2dff3a2c70b1cc707288aea69466bf42e1f37cb".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "c4fdb7d84f7a18180befdba24c239de7b94f4b3bfad44007fef67794b141a5cd";
+    "2594d4f08780d75f4f38627cb49d636212de27addc34a247bf5572f26902be46";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

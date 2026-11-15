@@ -100,11 +100,11 @@ pub fn state_at(t: &Traj, dt: f64) -> State {
         let w = s.turn_dps.to_radians();
         let h1 = h + w * step;
         if w.abs() < 1.0e-12 {
-            e += t.speed_mps * h.sin() * step;
-            n += t.speed_mps * h.cos() * step;
+            e += t.speed_mps * oa_math::sin(h) * step;
+            n += t.speed_mps * oa_math::cos(h) * step;
         } else {
-            e += t.speed_mps / w * (h.cos() - h1.cos());
-            n += t.speed_mps / w * (h1.sin() - h.sin());
+            e += t.speed_mps / w * (oa_math::cos(h) - oa_math::cos(h1));
+            n += t.speed_mps / w * (oa_math::sin(h1) - oa_math::sin(h));
         }
         alt += s.vrate_fpm / 60.0 * step;
         h = h1;
@@ -118,10 +118,10 @@ pub fn state_at(t: &Traj, dt: f64) -> State {
     State {
         e,
         n,
-        ve: t.speed_mps * h.sin(),
-        vn: t.speed_mps * h.cos(),
-        ae: t.speed_mps * w * h.cos(),
-        an: -t.speed_mps * w * h.sin(),
+        ve: t.speed_mps * oa_math::sin(h),
+        vn: t.speed_mps * oa_math::cos(h),
+        ae: t.speed_mps * w * oa_math::cos(h),
+        an: -t.speed_mps * w * oa_math::sin(h),
         alt_ft: alt,
         vrate_fpm: vr,
         heading_deg: h.to_degrees().rem_euclid(360.0),
@@ -185,7 +185,8 @@ pub fn build_synthetic_truth(
         }) {
             return bad("segment values");
         }
-        let in_plane = |e: f64, n: f64| e.is_finite() && n.is_finite() && e.hypot(n) <= MAX_PLANE_M;
+        let in_plane =
+            |e: f64, n: f64| e.is_finite() && n.is_finite() && oa_math::hypot(e, n) <= MAX_PLANE_M;
         if !in_plane(t.x0, t.y0) {
             return bad("start position");
         }

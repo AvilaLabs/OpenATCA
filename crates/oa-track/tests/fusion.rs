@@ -675,10 +675,25 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // by well under a centimetre, so only the bits of the inputs changed. Checked by building this
 // commit with the simulator alone put back: the earlier digests return. Rows per run: 38,970,
 // 31,741, 151,234, 156,929; plots 6,261 and 2,214, none refused.
+// Re-pinned when platform libm was replaced by oa-math in the tracker, fusion layer and geodesy:
+// rows (38,970, 31,741, 151,234, 156,929), plots (6,261 and 2,214) and refusals (none) are the
+// same; of the rows of the five runs 0 to 2 differ in the last bits of a velocity (largest 3e-8
+// m/s), and no position moves at the 1e-7 degree quantum. The earlier digests were
+// 1defbdcd..2286, af680187..80e7, d3ab5657..e646, 13705015..19ac3 and a124b85e..e0ab.
+// Re-pinned when elementary-function calls were cut on the tracker's hot path (the frame's
+// latitude sine and cosine carried with the filter and the small-angle series in the chart, one
+// exponential for the model and vertical transitions, the model probabilities from the difference
+// of the log weights): rows, plots and refusals are the same as above in every run; of the rows of
+// the five runs 2,439 of 38,970, 1,104 of 31,741, 3,480 of 151,234, 4,789 of 156,929 and 5,209 of
+// 173,160 differ, none in position at the 1e-7 degree quantum, in velocity by at most 4e-6 m/s,
+// and in covariance and model probability by at most 2e-7 of themselves (a single-precision unit;
+// terms near zero, the covariance cross term, turn rate and vertical rate, move by more in
+// relative terms). The earlier digests were e7a42113..6cac, 83d24dd4..4099, e89d63bc..3ad8,
+// 76970282..9135 and aca1b691..9a47.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "1defbdcd8816da21f41a72b99b1e81f10f234bff5a708e2f92b1969ae0c72286",
-    "af68018747f343ae23ecf15d84522a4686859e5aa2baa5364b9dbb44418680e7",
-    "d3ab56575470e50b6a4940180bc6aa38fcd6681df485b10de8acad89405be646",
-    "13705015723c6542e606035cbf53cfcce197eefc1a517118dd1ce168dee19ac3",
-    "a124b85e6d38e83ac24d1050b65bc27936d163fafcf89b6b87637efaa2ece0ab",
+    "e8bfce481687ccccb1d3f186878bc3937ee86f9b949148974aeedf111876963d",
+    "6d546fa69d25cacaccabf5674289792329a19aa9e6ab31275222e9acced56a7e",
+    "bc1f506cc3a65158f6c007e9b81532da3fcb36a06483168bdef04cee17b94a01",
+    "d3782daea34db0dfcb939730ab06200319bd08ad4759a0ae78a6944feaf195a8",
+    "9323316479520b069e3292527c6cb0f52a26277ed4e395c33c0c1669a18eb896",
 ];

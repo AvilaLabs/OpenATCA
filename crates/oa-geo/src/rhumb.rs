@@ -81,12 +81,12 @@ impl Ellipsoid {
 
     /// Meridional radius of curvature at latitude `phi` (radians).
     fn merid_radius(&self, phi: f64) -> f64 {
-        self.a * (1.0 - self.e2) / (1.0 - self.e2 * sq(phi.sin())).powf(1.5)
+        self.a * (1.0 - self.e2) / oa_math::pow(1.0 - self.e2 * sq(oa_math::sin(phi)), 1.5)
     }
 
     /// Radius of the parallel at latitude `phi` (radians).
     fn parallel_radius(&self, phi: f64) -> f64 {
-        self.a * phi.cos() / (1.0 - self.e2 * sq(phi.sin())).sqrt()
+        self.a * oa_math::cos(phi) / (1.0 - self.e2 * sq(oa_math::sin(phi))).sqrt()
     }
 
     /// Meridian arc length from `phi_a` to `phi_b` (radians), metres, signed.
@@ -97,7 +97,7 @@ impl Ellipsoid {
     /// Isometric latitude difference from `phi_a` to `phi_b` (radians), signed.
     fn isometric_arc(&self, phi_a: f64, phi_b: f64) -> f64 {
         self.integrate(
-            |p| (1.0 - self.e2) / ((1.0 - self.e2 * sq(p.sin())) * p.cos()),
+            |p| (1.0 - self.e2) / ((1.0 - self.e2 * sq(oa_math::sin(p))) * oa_math::cos(p)),
             phi_a,
             phi_b,
         )
@@ -132,7 +132,7 @@ impl Ellipsoid {
             dmu / dpsi
         };
         Ok(RhumbInverse {
-            distance_m: dmu.hypot(d * dlam),
+            distance_m: oa_math::hypot(dmu, d * dlam),
             course_deg: atan2d(dlam, dpsi),
         })
     }
@@ -247,7 +247,7 @@ impl Ellipsoid {
             let q = self.direct(start, azi1, s)?;
             let inv = self.inverse(q.position, p)?;
             let theta = ang_normalize(inv.azimuth1_deg - q.azimuth2_deg).to_radians();
-            let next = (s + inv.distance_m * theta.cos()).clamp(0.0, s12);
+            let next = (s + inv.distance_m * oa_math::cos(theta)).clamp(0.0, s12);
             if (next - s).abs() < NEWTON_TOL_M {
                 // Distance from the last evaluated point; it differs from the distance at
                 // `next` by less than the tolerance, second order.

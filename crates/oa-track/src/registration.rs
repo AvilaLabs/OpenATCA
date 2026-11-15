@@ -254,7 +254,7 @@ pub fn reg_residual(
     let ground = (rho * rho - dh * dh).max(1.0).sqrt();
     let cos_e = (ground / rho).clamp(0.05, 1.0);
     let sin_e = dh / rho;
-    let (st, ct) = az.to_radians().sin_cos();
+    let (st, ct) = oa_math::sin_cos(az.to_radians());
     // Radial (u) and tangential (v) horizontal unit vectors.
     let (u, v) = ([st, ct], [ct, -st]);
     let quad =
@@ -262,7 +262,7 @@ pub fn reg_residual(
     let var_r_track = cos_e * cos_e * quad(u) + sin_e * sin_e * var_h_m2;
     let var_t_track = quad(v) / (ground * ground);
     let sa = s.sigma_az_deg.to_radians();
-    let deg2 = (180.0 / core::f64::consts::PI).powi(2);
+    let deg2 = oa_math::powi(180.0 / core::f64::consts::PI, 2);
     Residual {
         range_m: plot.range_m - rho,
         var_range_m2: s.sigma_range_m * s.sigma_range_m

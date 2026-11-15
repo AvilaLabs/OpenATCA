@@ -10,9 +10,8 @@
 //! as `linalg.rs`.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
-use crate::params::{
-    MU_FLOOR, V_MU0_LEVEL, V_PRIOR_RATE_STD_FPS, V_Q_CLIMB, V_Q_LEVEL, V_TAU_CLIMB_S, V_TAU_LEVEL_S,
-};
+use crate::hfilter::imm_weights;
+use crate::params::{MU_FLOOR, V_MU0_LEVEL, V_PRIOR_RATE_STD_FPS, V_Q_CLIMB, V_Q_LEVEL};
 
 /// One model: `[altitude, rate]` and the covariance packed `[p00, p01, p11]`. Hot (A7).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,10 +51,15 @@ pub(crate) fn v_init(alt_ft: f64, alt_var: f64, rate: Option<(f64, f64)>) -> VFi
 }
 
 /// The model transition probabilities over `dt` seconds.
-pub(crate) fn v_transition(dt: f64) -> [[f64; 2]; 2] {
-    let s0 = (-dt / V_TAU_LEVEL_S).exp();
-    let s1 = (-dt / V_TAU_CLIMB_S).exp();
-    [[s0, 1.0 - s0], [1.0 - s1, s1]]
+///
+/// `u` is [`crate::hfilter::dwell_decay`] of the step: both dwell times are a tenth of its unit,
+/// so both stay probabilities are `u^10`.
+pub(crate) fn v_transition(u: f64) -> [[f64; 2]; 2] {
+    let u2 = u * u;
+    let u4 = u2 * u2;
+    let u8 = u4 * u4;
+    let s = u8 * u2;
+    [[s, 1.0 - s], [1.0 - s, s]]
 }
 
 fn level_predict(m: &VModel, dt: f64) -> VModel {
@@ -79,8 +83,8 @@ fn climb_predict(m: &VModel, dt: f64) -> VModel {
 }
 
 /// Mixes and predicts over `dt`; the returned `mu` is the predicted probability.
-pub(crate) fn v_predict(v: &VFilter, dt: f64) -> VFilter {
-    let pi = v_transition(dt);
+pub(crate) fn v_predict(v: &VFilter, dt: f64, u: f64) -> VFilter {
+    let pi = v_transition(u);
     let mut mixed = v.m;
     let mut c = [0.0f64; 2];
     for j in 0..2 {
@@ -134,8 +138,10 @@ pub(crate) fn v_alt_innovation(pred: &VFilter, z: f64, var: f64) -> (f64, f64) {
     (z - x[0], p[0] + var)
 }
 
-/// Scalar update of state `i` (0 altitude, 1 rate) of one model; returns the log likelihood.
-fn update_scalar(m: &mut VModel, i: usize, z: f64, r: f64) -> f64 {
+/// Scalar update of state `i` (0 altitude, 1 rate) of one model; returns `(y^2 / s, s)`, the
+/// quadratic form and the innovation variance, from which the log likelihood is
+/// `-y^2 / (2 s) - ln(s) / 2`; `None`, with the model unchanged, if `s` is not positive.
+fn update_scalar(m: &mut VModel, i: usize, z: f64, r: f64) -> Option<(f64, f64)> {
     let (pii, p0i, p1i) = if i == 0 {
         (m.p[0], m.p[0], m.p[1])
     } else {
@@ -143,7 +149,7 @@ fn update_scalar(m: &mut VModel, i: usize, z: f64, r: f64) -> f64 {
     };
     let s = pii + r;
     if s.is_nan() || s <= 0.0 {
-        return f64::NEG_INFINITY;
+        return None;
     }
     let y = z - m.x[i];
     let (k0, k1) = (p0i / s, p1i / s);
@@ -154,7 +160,7 @@ fn update_scalar(m: &mut VModel, i: usize, z: f64, r: f64) -> f64 {
         m.p[1] - p0i * p1i / s,
         m.p[2] - p1i * p1i / s,
     ];
-    -0.5 * y * y / s - 0.5 * s.ln()
+    Some((y * y / s, s))
 }
 
 /// Updates the predicted filter with an altitude (variance `var`, ft^2) and a rate (feet per
@@ -165,26 +171,21 @@ pub(crate) fn v_update(
     rate: Option<(f64, f64)>,
 ) -> VFilter {
     let mut out = *pred;
-    let mut lw = [0.0f64; 2];
+    let mut fit = [Some((0.0, 1.0)); 2];
     for j in 0..2 {
-        let mut ll = 0.0;
-        if let Some((z, r)) = alt {
-            ll += update_scalar(&mut out.m[j], 0, z, r);
-        }
-        if let Some((z, r)) = rate {
-            ll += update_scalar(&mut out.m[j], 1, z, r);
+        let mut f = Some((0.0, 1.0));
+        for (i, obs) in [alt, rate].into_iter().enumerate() {
+            if let Some((z, r)) = obs {
+                let g = update_scalar(&mut out.m[j], i, z, r);
+                f = f.zip(g).map(|((q, d), (q2, d2))| (q + q2, d * d2));
+            }
         }
         if j == 0 {
             out.m[0].x[1] = 0.0;
         }
-        lw[j] = pred.mu[j].max(1.0e-300).ln() + ll;
+        fit[j] = f;
     }
-    let mx = lw[0].max(lw[1]);
-    let mut mu = if mx.is_finite() {
-        [(lw[0] - mx).exp(), (lw[1] - mx).exp()]
-    } else {
-        pred.mu
-    };
+    let mut mu = imm_weights(pred.mu, fit);
     let s = mu[0] + mu[1];
     mu = [(mu[0] / s).max(MU_FLOOR), (mu[1] / s).max(MU_FLOOR)];
     let s = mu[0] + mu[1];

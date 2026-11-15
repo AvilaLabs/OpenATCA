@@ -131,7 +131,7 @@ pub fn coarse_distance(
     (prho, paz): (f64, f64),
     (rho, az, ground, _sigma): (f64, f64, f64, f64),
 ) -> f64 {
-    let d = (prho - rho).hypot(az_diff(paz, az).to_radians() * ground);
+    let d = oa_math::hypot(prho - rho, az_diff(paz, az).to_radians() * ground);
     if d.is_nan() {
         0.0
     } else {
@@ -188,7 +188,7 @@ pub fn coarse_query(
     // Close to the radar the window reaches back past it by no more than the width; far from it,
     // by no more than the width less than the smallest ground range.
     let a_lo = if g_lo > w { g_lo - w } else { -w };
-    let (st, ct) = az_deg.to_radians().sin_cos();
+    let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
     // Latitude and longitude of nine points of the rectangle.
     let mut pts = [(0.0f64, 0.0f64); 9];
     let mut i = 0usize;
@@ -232,7 +232,7 @@ pub fn coarse_query(
     }
     let reaches_pole = north || south;
     let lat_edge = lat_lo.abs().max(lat_hi.abs()).min(89.0);
-    let pad_lon = PAD_DEG / lat_edge.to_radians().cos().max(1.0e-3);
+    let pad_lon = PAD_DEG / oa_math::cos(lat_edge.to_radians()).max(1.0e-3);
     let (lon_from, lon_to) = (lon_c + d_lo - pad_lon, lon_c + d_hi + pad_lon);
     let (c_lo, c_hi) = (lat_cell(lat_lo), lat_cell(lat_hi));
     let mut l_lo = ((lon_from + 180.0) / CELL_DEG).floor() as i64;

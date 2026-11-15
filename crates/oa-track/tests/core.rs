@@ -1245,8 +1245,18 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // innovation sum went from 2588.444 to 2589.553 (4e-4 of itself) and the rows differ in
 // covariance and velocity. The earlier values were 0x40a4_38e3_6693_06a4 and
 // "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc".
-const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97b_1227;
-const GOLDEN_DIGEST: &str = "c953ab2374b272a955edec2c2fd4cfe0ec9afb8911947e58f8f1ac6590791133";
+// Platform libm replaced by oa-math: counters and digest unchanged (no output row differs), the
+// innovation sum 2589.552684637037 to 2589.552684636896 (5e-14 of itself, 310 ulp). The earlier
+// value was 0x40a4_3b1a_f97b_1227.
+// Elementary-function calls cut on the hot path (the frame's latitude sine and cosine carried
+// with the filter and the small-angle series in the chart, one exponential for the model and
+// vertical transitions, the model probabilities from the difference of the log weights): counters
+// unchanged; of 1,062 rows 8 differ, in covariance and turn rate by at most 1e-7 of themselves
+// (one single-precision unit), in no position, velocity or probability; the innovation sum
+// 2589.552684636896 to 2589.552684607768 (1.1e-11 of itself, 64,053 ulp). The earlier values were
+// 0x40a4_3b1a_f97b_10f1 and "c953ab2374b272a955edec2c2fd4cfe0ec9afb8911947e58f8f1ac6590791133".
+const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97a_16bc;
+const GOLDEN_DIGEST: &str = "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1333,7 +1343,12 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // OA-TRK-263): the same 1,446 rows and the same end and hold counts; only covariance and velocity
 // values moved. The earlier value was
 // "797b729ae9d90ef7a363ffd0bafbebeed9d1e1edfee527696a6df1f4b0d14290".
-const GAPPY_DIGEST: &str = "9aab86ffa408a1516de991484686298f0ee0fd676a803e2c6a2664a8bf4d4163";
+// Re-recorded when elementary-function calls were cut on the hot path (see the scrambled-input
+// digest above): the same 1,446 rows and the same end and hold counts; 13 rows differ, in
+// covariance and turn rate by at most 1e-7 of themselves, in no position, velocity or
+// probability. The earlier value was
+// "9aab86ffa408a1516de991484686298f0ee0fd676a803e2c6a2664a8bf4d4163".
+const GAPPY_DIGEST: &str = "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd";
 
 // REQ: OA-TRK-041
 #[test]

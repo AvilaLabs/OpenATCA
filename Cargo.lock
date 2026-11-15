@@ -107,6 +107,9 @@ dependencies = [
 [[package]]
 name = "oa-geo"
 version = "0.0.1"
+dependencies = [
+ "oa-math",
+]
 
 [[package]]
 name = "oa-grib2"
@@ -226,6 +229,7 @@ dependencies = [
  "oa-bench",
  "oa-feed",
  "oa-geo",
+ "oa-math",
  "oa-sensorsim",
  "oa-sha256",
  "oa-truth",

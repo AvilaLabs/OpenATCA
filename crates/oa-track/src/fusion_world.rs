@@ -62,7 +62,7 @@ fn path_ok(t: &Traj, kind: Kind) -> bool {
     let mut s = 0.0;
     while s <= dur {
         let st = state_at(t, s);
-        let r = st.e.hypot(st.n);
+        let r = oa_math::hypot(st.e, st.n);
         if !(8_000.0..=cov).contains(&r) {
             return false;
         }
@@ -78,7 +78,9 @@ fn too_close(a: &Traj, b: &Traj) -> bool {
     let mut s = 0.0;
     while s <= end {
         let (x, y) = (state_at(a, s), state_at(b, s));
-        if (x.e - y.e).hypot(x.n - y.n) < BASE_MIN_SEP_M && (x.alt_ft - y.alt_ft).abs() < 2_000.0 {
+        if oa_math::hypot(x.e - y.e, x.n - y.n) < BASE_MIN_SEP_M
+            && (x.alt_ft - y.alt_ft).abs() < 2_000.0
+        {
             return true;
         }
         s += 2.0;
@@ -118,7 +120,7 @@ pub fn base_trajs(kind: Kind, seed: u64) -> Vec<Traj> {
             let bearing = rng.unit() * 360.0;
             let r = (r_lo + (r_hi - r_lo) * rng.unit()) * 1000.0;
             let speed = v_lo + (v_hi - v_lo) * rng.unit();
-            let (st, ct) = bearing.to_radians().sin_cos();
+            let (st, ct) = oa_math::sin_cos(bearing.to_radians());
             let mut alt = a_lo + (a_hi - a_lo) * rng.unit();
             let segs = match class {
                 0 => vec![Seg {
@@ -311,7 +313,7 @@ fn min_sep(a: &Traj, b: &Traj) -> f64 {
     let mut best = f64::INFINITY;
     while s <= end {
         let (x, y) = (state_at(a, s), state_at(b, s));
-        best = best.min((x.e - y.e).hypot(x.n - y.n));
+        best = best.min(oa_math::hypot(x.e - y.e, x.n - y.n));
         s += 0.25;
     }
     best
@@ -323,8 +325,8 @@ fn min_sep(a: &Traj, b: &Traj) -> f64 {
 pub fn pair_trajs(kind: Kind, g: &PairGeom) -> Vec<Traj> {
     let (dur, v, alt, rc) = pair_params(kind);
     let c = (
-        rc * 45.0_f64.to_radians().sin(),
-        rc * 45.0_f64.to_radians().cos(),
+        rc * oa_math::sin(45.0_f64.to_radians()),
+        rc * oa_math::cos(45.0_f64.to_radians()),
     );
     let one_seg = |d: f64| {
         vec![Seg {
@@ -337,7 +339,7 @@ pub fn pair_trajs(kind: Kind, g: &PairGeom) -> Vec<Traj> {
     let t_mid = dur / 2.0;
     // Start of a straight path through `p` at time `t_mid` with heading `h`.
     let start = |p: (f64, f64), h: f64, shift_s: f64| {
-        let (s, co) = h.to_radians().sin_cos();
+        let (s, co) = oa_math::sin_cos(h.to_radians());
         let back = t_mid + shift_s;
         (p.0 - v * s * back, p.1 - v * co * back)
     };
