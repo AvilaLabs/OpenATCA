@@ -594,6 +594,8 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
     phases.mark("clip decoded (all reports in memory)");
     let (set_a, set_b, split) = split_reports(&clip.reports);
+    oa_bench::split_check::check_split(&set_a, &set_b)
+        .map_err(|v| format!("the split of the clip is not valid, run refused: {v:?}"))?;
     let (clip_reports, clip_bad, clip_hash) =
         (reports_len(&clip.reports), clip.bad_frames, clip.hash);
     drop(clip.reports);

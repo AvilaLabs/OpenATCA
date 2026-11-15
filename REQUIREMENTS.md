@@ -2292,7 +2292,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   smoother subtracts without a check never exceed `leg_gap_ms`.
 - **OA-TRUTH-045** `oa-truth-check` refuses a clip over 4 GiB before reading it, and a clip whose frame
   headers claim more than 50 million rows before decoding the frame that crosses the cap (typed
-  `ClipError`). Ten times the largest real day (330 MB, 4.07 million rows).
+  `ClipError`). Ten times the largest real day (330 MB, 4.07 million rows). `oa-sensorsim` reads clips
+  through the same reader (`oa_truth::clip::read_clip`), so it has the same caps.
 
 
 ## M2 — Benchmark harness (oa-bench)
@@ -2582,6 +2583,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-119** `check_split` refuses a split of the ADS-B reports into the tracker's set A and the truth's
   set B when an (address, time) is in both sets or a set holds two reports of the same address, time and
   content: a typed violation, a hard error of the run and not a warning.
+- **OA-BENCH-120** `score_track_samples` and the `oa-track` scorer build the legacy table by truth leg, so T5
+  of a scored run is per trip, not pooled across the trips of one address.
 
 ## Winds aloft (oa-wind)
 
@@ -2802,6 +2805,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-SIM-028** Ghost and drift legs are WGS-84 geodesics from the leg start (initial azimuth, distance = speed or
   rate times elapsed), also near a pole. The flat offset helper `offset_deg` is for sub-millisecond advances only: it
   returns `None` for an offset above 500 m, a start within 0.1 degrees of a pole or a non-finite input.
+- **OA-SIM-029** `oa-sensorsim` reads its clip with the reader of `oa-truth` (OA-TRUTH-045): a clip over 4 GiB or
+  one whose frame headers claim more than 50 million rows is refused with a typed message.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -3099,6 +3104,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-295** A filter's carried sine and cosine of its frame origin's latitude stay within 1e-13 of
   those of the origin it labels through thousands of updates, and the frame rebuilt from them
   projects as `frame_new`'s does.
+- **OA-TRK-296** The `oa-track` run checks the split of the clip with `oa_bench::split_check::check_split`
+  right after `split_reports`; a violation is a hard error of the run. The scorer builds the legacy table by
+  truth leg (the chunk ranges are by address, so all legs of an address are in one chunk).
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

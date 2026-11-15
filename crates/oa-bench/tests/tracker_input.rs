@@ -201,3 +201,36 @@ fn the_publication_interval_is_never_taken_across_two_trips_of_one_aircraft() {
     let un = legacy_from_track_samples_by_leg(&view(&c), &other).unwrap();
     assert_eq!(un.flights.gufi.len(), 1);
 }
+
+// REQ: OA-BENCH-120
+#[test]
+fn scoring_track_samples_does_not_count_the_gap_between_two_trips_as_a_publication_interval() {
+    use oa_bench::run::score_track_samples;
+    use oa_bench::truth::{empty_env, NoTruth, TruthLeg};
+    let c = one_address_two_trips();
+    let legs = [
+        TruthLeg {
+            addr: 0xA0_0001,
+            start_ms: 0,
+            end_ms: 9_000,
+            callsign: None,
+        },
+        TruthLeg {
+            addr: 0xA0_0001,
+            start_ms: 309_000,
+            end_ms: 318_000,
+            callsign: None,
+        },
+    ];
+    let q = |_: u32, _: i64| Err(NoTruth::OutsideLegs);
+    let truth = Truth {
+        query: &q,
+        legs: &legs,
+    };
+    let out = score_track_samples(&view(&c), &truth, &empty_env(), &RunConfig::default()).unwrap();
+    let t5 = find(&out, "T5").unwrap();
+    let all = t5.rows.iter().find(|r| r.label == "all").unwrap();
+    // 9 one-second steps in each trip; the 309 s step between them is not an interval.
+    assert_eq!(all.stats.n, 18, "T5 intervals: {}", all.stats.n);
+    assert!(all.stats.p99 < 2.0, "T5 p99 {}", all.stats.p99);
+}

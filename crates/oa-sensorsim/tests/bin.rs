@@ -216,3 +216,19 @@ fn a_non_finite_numeric_option_is_refused() {
         assert!(err.contains("not a finite number"), "{opt} {v}: {err}");
     }
 }
+
+// REQ: OA-SIM-029
+#[test]
+fn a_clip_whose_headers_claim_more_rows_than_the_cap_is_refused_before_decoding() {
+    // One frame whose payload is a header claiming 50,000,001 rows and no records.
+    let mut payload = vec![0u8; 16];
+    payload[..4].copy_from_slice(&oa_adsb::PAYLOAD_MAGIC);
+    payload[4..6].copy_from_slice(&80u16.to_le_bytes());
+    payload[8..12].copy_from_slice(&50_000_001u32.to_le_bytes());
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, 0, 0, &payload).unwrap();
+    let path = tmp("sensorsim-rows-over-cap.oaf");
+    std::fs::write(&path, &buf[..n]).unwrap();
+    let e = oa_sensorsim::clip::read_clip(path.to_str().unwrap()).unwrap_err();
+    assert!(e.contains("50000001 rows, over the cap of 50000000"), "{e}");
+}

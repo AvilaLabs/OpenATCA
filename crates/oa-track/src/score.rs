@@ -47,7 +47,7 @@ use oa_bench::legacy::NO_ALT;
 use oa_bench::pair::PairTable;
 use oa_bench::run::{RunConfig, RunOutput};
 use oa_bench::stats::{stats_of, Stats};
-use oa_bench::tracker_input::{legacy_from_track_samples, TrackSamples};
+use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::{Env, Truth};
 use oa_sha256::{to_hex, Sha256};
 use oa_truth::{quality_check, QualityState, TruthConfig, DEFAULT_CONFIG};
@@ -698,16 +698,21 @@ pub fn score_source(
     let mut acc = ChunkAcc::default();
     for range in score_ranges(&counts, chunk_rows) {
         let r = src.rows_in(rows, range.0, range.1)?;
-        let legacy = legacy_from_track_samples(&TrackSamples {
-            addr: &r.addr,
-            t_ns: &r.t_ns,
-            lat_e7: &r.lat_e7,
-            lon_e7: &r.lon_e7,
-            alt_ft: &r.alt_ft,
-            vel_east_mps: &r.vel_east_mps,
-            vel_north_mps: &r.vel_north_mps,
-            coast: &r.coast,
-        })
+        // One flight per truth leg (T5 per trip, not pooled across trips of one address). The
+        // ranges are by address, so all legs of an address are in the one chunk.
+        let legacy = legacy_from_track_samples_by_leg(
+            &TrackSamples {
+                addr: &r.addr,
+                t_ns: &r.t_ns,
+                lat_e7: &r.lat_e7,
+                lon_e7: &r.lon_e7,
+                alt_ft: &r.alt_ft,
+                vel_east_mps: &r.vel_east_mps,
+                vel_north_mps: &r.vel_north_mps,
+                coast: &r.coast,
+            },
+            truth.legs,
+        )
         .map_err(|e| ScoreError(format!("track samples: {e:?}")))?;
         drop(r);
         let c = benchmark_chunk(&legacy, &truth, &tix, &env, &rcfg, range);
