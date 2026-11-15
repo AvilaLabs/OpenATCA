@@ -45,7 +45,7 @@ impl std::error::Error for CliError {}
 /// The usage text.
 pub const USAGE: &str = "usage:
   oa-adapt build --nasr <zip> --cifp <zip> --artcc <ID> [--buffer-nm <NM>]
-                 [--expect-sha256 <file>=<hex>]... --out <snapshot>
+                 [--expect-sha256 <file>=<hex>]... [--allow-cycle-mismatch] --out <snapshot>
   oa-adapt diff <snapshot-a> <snapshot-b>";
 
 fn failed(step: &str, e: impl fmt::Display) -> CliError {
@@ -62,6 +62,8 @@ pub struct BuildArgs {
     pub buffer_m: u32,
     pub expect: Vec<Expectation>,
     pub out: PathBuf,
+    /// `--allow-cycle-mismatch`.
+    pub allow_cycle_mismatch: bool,
 }
 
 /// A `--buffer-nm` value to whole metres; rejects non-finite, negative and over-limit values.
@@ -114,6 +116,7 @@ pub fn parse_build_args(args: &[String]) -> Result<BuildArgs, CliError> {
     let mut buffer_m = None;
     let mut expect = Vec::new();
     let mut out = None;
+    let mut allow_cycle_mismatch = false;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         // A value is the next argument; a missing, empty or flag-looking one is an error (a
@@ -145,6 +148,7 @@ pub fn parse_build_args(args: &[String]) -> Result<BuildArgs, CliError> {
                 }
                 expect.push(e);
             }
+            "--allow-cycle-mismatch" => allow_cycle_mismatch = true,
             "--out" => set_once(&mut out, "--out", PathBuf::from(value("--out")?))?,
             other => return Err(CliError::Usage(format!("unknown argument {other:?}"))),
         }
@@ -156,6 +160,7 @@ pub fn parse_build_args(args: &[String]) -> Result<BuildArgs, CliError> {
         buffer_m: buffer_m.unwrap_or((DEFAULT_BUFFER_NM * NM_M).round() as u32),
         expect,
         out: need(out, "--out")?,
+        allow_cycle_mismatch,
     })
 }
 
@@ -190,6 +195,7 @@ pub fn run_build(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let params = BuildParams {
         artcc: a.artcc.clone(),
         buffer_m: a.buffer_m,
+        allow_cycle_mismatch: a.allow_cycle_mismatch,
     };
     let built = build_model(&src, &params).map_err(|e| failed("build", e))?;
     let bytes = encode(&built.model).map_err(|e| failed("snapshot encode", e))?;

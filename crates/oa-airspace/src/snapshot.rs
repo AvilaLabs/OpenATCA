@@ -7,10 +7,14 @@
 //! magic "OATCA-ADAPT" (11 bytes), format version u32
 //! nasr_effective u32, cifp_cycle u32, buffer_m u32, artcc (u32 length, bytes),
 //! nasr_sha256 [32], cifp_sha256 [32]
+//! (version 4 only: cycle_override, u32 length and UTF-8 bytes)
 //! then the tables in fixed order, each: 4-byte tag, row count u32, its columns in the order
 //! of the field declarations in `model.rs`; a bitset column is ceil(rows/64) u64 words.
 //! tables: STRS PNTS VERT BNDS SEGS AWYS AWLG PROC RTES LEGS MORA UNRS DISA
 //! ```
+//!
+//! Version 3 is written whenever the NASR and CIFP cycles agree; version 4 only when the build
+//! allowed a mismatch and so carries the cycle_override text. Both are read.
 //!
 //! The snapshot's identity is the SHA-256 of the whole file. Because every table is written in
 //! its sorted key order and nothing is derived from hash-map order, the same inputs always give
@@ -27,6 +31,9 @@ use std::fmt;
 pub const MAGIC: &[u8; 11] = b"OATCA-ADAPT";
 /// Format version written and accepted.
 pub const FORMAT_VERSION: u32 = 3;
+/// Format version of a snapshot that carries a cycle-mismatch note (the version 3 layout plus
+/// the note after the header).
+pub const FORMAT_VERSION_NOTE: u32 = 4;
 /// Limit: largest snapshot the reader accepts, 512 MiB. A ZAU model is a few MiB; the whole
 /// national data set would stay under about 100 MiB.
 pub const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -66,6 +73,8 @@ pub enum SnapshotError {
     BadTag { expected: &'static str },
     /// A count claims more rows than the remaining bytes could hold.
     CountExceedsFile { table: &'static str, rows: u64 },
+    /// The cycle note is longer than [`MAX_CYCLE_OVERRIDE_BYTES`] (or, reading, not UTF-8).
+    BadNote,
     /// The artcc field is longer than [`MAX_ARTCC_BYTES`] (or, reading, not UTF-8).
     BadArtcc,
     /// The string table text is not valid UTF-8.
@@ -87,7 +96,7 @@ impl fmt::Display for SnapshotError {
             SnapshotError::BadMagic => write!(f, "snapshot: not an OATCA-ADAPT file"),
             SnapshotError::BadVersion(v) => write!(
                 f,
-                "snapshot: format version {v} is not supported (this reader reads version {FORMAT_VERSION} only); rebuild the snapshot with oa-adapt build"
+                "snapshot: format version {v} is not supported (this reader reads versions {FORMAT_VERSION} and {FORMAT_VERSION_NOTE} only); rebuild the snapshot with oa-adapt build"
             ),
             SnapshotError::Truncated(w) => write!(f, "snapshot: truncated in {w}"),
             SnapshotError::BadTag { expected } => write!(f, "snapshot: expected table {expected}"),
@@ -98,6 +107,7 @@ impl fmt::Display for SnapshotError {
                 )
             }
             SnapshotError::BadArtcc => write!(f, "snapshot: bad ARTCC field"),
+            SnapshotError::BadNote => write!(f, "snapshot: bad cycle note"),
             SnapshotError::BadText => write!(f, "snapshot: string table is not UTF-8"),
             SnapshotError::TrailingBytes { extra } => {
                 write!(f, "snapshot: {extra} unexpected bytes after the last table")
@@ -192,7 +202,20 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     }
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(MAGIC);
-    put_u32(&mut out, FORMAT_VERSION);
+    if m.cycle_override
+        .as_ref()
+        .is_some_and(|n| n.len() > MAX_CYCLE_OVERRIDE_BYTES)
+    {
+        return Err(SnapshotError::BadNote);
+    }
+    put_u32(
+        &mut out,
+        if m.cycle_override.is_some() {
+            FORMAT_VERSION_NOTE
+        } else {
+            FORMAT_VERSION
+        },
+    );
     put_u32(&mut out, m.meta.nasr_effective);
     put_u32(&mut out, m.meta.cifp_cycle);
     put_u32(&mut out, m.meta.buffer_m);
@@ -200,6 +223,10 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     out.extend_from_slice(m.meta.artcc.as_bytes());
     out.extend_from_slice(&m.meta.nasr_sha256);
     out.extend_from_slice(&m.meta.cifp_sha256);
+    if let Some(note) = &m.cycle_override {
+        put_u32(&mut out, count("cycle note", note.len())?);
+        out.extend_from_slice(note.as_bytes());
+    }
 
     put_header(&mut out, TAG_STRS, count("strings", str_count(&m.strings))?);
     put_u32(&mut out, count("strings", m.strings.text.len())?);
@@ -524,7 +551,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         return Err(SnapshotError::BadMagic);
     }
     let version = r.u32("version")?;
-    if version != FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != FORMAT_VERSION_NOTE {
         return Err(SnapshotError::BadVersion(version));
     }
     let nasr_effective = r.u32("header")?;
@@ -551,6 +578,15 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         buffer_m,
         nasr_sha256,
         cifp_sha256,
+    };
+    let cycle_override = if version == FORMAT_VERSION_NOTE {
+        let n = r.u32("header")? as usize;
+        if n > MAX_CYCLE_OVERRIDE_BYTES {
+            return Err(SnapshotError::BadNote);
+        }
+        Some(String::from_utf8(r.bytes(n, "header")?).map_err(|_| SnapshotError::BadNote)?)
+    } else {
+        None
     };
 
     // Strings: the count is of strings, with count + 1 offsets, then the text.
@@ -732,6 +768,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         mora,
         unresolved,
         disagreements,
+        cycle_override,
     };
     validate_model(&m).map_err(SnapshotError::Model)?;
     Ok(m)

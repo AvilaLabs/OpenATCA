@@ -260,8 +260,8 @@ fn damaged_headers_trailing_bytes_and_truncation_are_errors() {
     bad[0] ^= 1;
     assert_eq!(decode(&bad), Err(SnapshotError::BadMagic));
     let mut bad = good.clone();
-    bad[11] = 4;
-    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(4)));
+    bad[11] = 5;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(5)));
     // The earlier formats (no special-use time code or level; no per-volume completeness) are
     // refused, not misread, and the message says what to do.
     bad[11] = 1;

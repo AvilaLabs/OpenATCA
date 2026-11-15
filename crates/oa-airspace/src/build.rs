@@ -7,7 +7,8 @@
 //!
 //! 1. **Candidates.** Every NASR and CIFP point object becomes a candidate. Objects present in
 //!    both sources are merged under one identity (class of kind, ident, ICAO region, scope):
-//!    fixes with enroute/terminal waypoints by (ident, region), airports by ICAO or FAA ident,
+//!    fixes with enroute/terminal waypoints by (ident, region; a terminal waypoint elsewhere than
+//!    that point is its own point, scoped to its airport), airports by ICAO or FAA ident,
 //!    navaids by ident and class (nearest first, within [`MAX_PAIR_M`], because short NDB
 //!    identifiers recur across the country; the NASR navaid is unique by its own id, type, city
 //!    and state, and is never dropped because its derived key collides), runway thresholds by airport and designator.
@@ -26,6 +27,7 @@
 //! and route-qualifier codes, arc radius on legs, altitude description codes other than `+`
 //! and `B`, the TCH indicator, the header CRC and southern-hemisphere MORA rows.
 
+use crate::airac::airac_cycle;
 use crate::geom::{
     arc_radius_gap_m, area_contains, area_inside, build_area, cell_overlaps_area, deg_to_e7,
     distance_m, latlon_e7, ring_samples, samples_touch_area, segment_samples, Area, SegIn,
@@ -67,6 +69,9 @@ pub struct BuildParams {
     pub artcc: String,
     /// Buffer around the HIGH and LOW boundaries, metres (default 50 NM = 92,600).
     pub buffer_m: u32,
+    /// Build although the NASR effective date and the CIFP header are in different AIRAC cycles;
+    /// the snapshot then records that (OA-ASP-072).
+    pub allow_cycle_mismatch: bool,
 }
 
 /// Why a build failed.
@@ -80,6 +85,13 @@ pub enum BuildError {
     NasrCycle(String),
     /// The CIFP file has no header cycle.
     NoCifpCycle,
+    /// The NASR effective date and the CIFP header are in different AIRAC cycles, so the build
+    /// would combine data of two cycles.
+    CycleMismatch {
+        nasr_effective: u32,
+        nasr_cycle: u32,
+        cifp_cycle: u32,
+    },
     /// The ARTCC's boundary is not a valid polygon.
     BadBoundary {
         stratum: &'static str,
@@ -108,6 +120,14 @@ impl fmt::Display for BuildError {
             }
             BuildError::NasrCycle(m) => write!(f, "NASR cycle: {m}"),
             BuildError::NoCifpCycle => write!(f, "the CIFP file has no header cycle"),
+            BuildError::CycleMismatch {
+                nasr_effective,
+                nasr_cycle,
+                cifp_cycle,
+            } => write!(
+                f,
+                "NASR effective {nasr_effective} is AIRAC cycle {nasr_cycle} but the CIFP file is cycle {cifp_cycle}; rebuild from files of one cycle, or allow the mismatch explicitly"
+            ),
             BuildError::BadBoundary { stratum, error } => {
                 write!(
                     f,
@@ -397,6 +417,11 @@ fn cifp_vhf_kind(class: [char; 5]) -> u8 {
 struct Maps {
     /// (ident, region) to the fix-class candidate.
     fix: HashMap<(String, String), usize>,
+    /// (ident, region) to the candidate a procedure of any airport may use as an enroute fix:
+    /// every fix except the ones only a terminal waypoint of some airport defines.
+    fix_enr: HashMap<(String, String), usize>,
+    /// (airport candidate, ident, region) of a terminal waypoint (PC) to candidate.
+    term_fix: HashMap<(usize, String, String), usize>,
     /// ident to fix-class candidates.
     fix_by_ident: HashMap<String, Vec<usize>>,
     /// CIFP navaid (ident, region, subsection) to candidate.
@@ -906,6 +931,8 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
     };
     let mut maps = Maps {
         fix: HashMap::new(),
+        fix_enr: HashMap::new(),
+        term_fix: HashMap::new(),
         fix_by_ident: HashMap::new(),
         nav_cifp: HashMap::new(),
         nasr_nav: HashMap::new(),
@@ -1058,10 +1085,13 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
     // Navaids.
     pair_navaids(src, ell, &mut reg, &mut maps, info);
 
-    // Fixes and waypoints, by (ident, region). A CIFP waypoint repeated under one key is
-    // compared with the first and reported if the positions differ.
+    // Fixes and waypoints, by (ident, region). An enroute CIFP waypoint repeated under one key is
+    // compared with the first and reported if the positions differ; a terminal waypoint is
+    // compared with the first of the same airport only (another airport's fix is another fix).
     let mut firsts: HashMap<(&str, &str), (bool, &c424::Waypoint)> = HashMap::new();
     let mut first_order: Vec<(&str, &str)> = Vec::new();
+    let mut term_firsts: HashMap<(&str, &str, &str), &c424::Waypoint> = HashMap::new();
+    let mut term_order: Vec<(&str, &str, &str)> = Vec::new();
     let all_wpts = src
         .cifp
         .enroute_waypoints
@@ -1070,23 +1100,37 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         .chain(src.cifp.terminal_waypoints.iter().map(|w| (true, w)));
     for (terminal, w) in all_wpts {
         let key = (w.ident.as_str(), w.icao_region.as_str());
-        match firsts.get(&key) {
-            None => {
-                firsts.insert(key, (terminal, w));
-                first_order.push(key);
+        if let std::collections::hash_map::Entry::Vacant(e) = firsts.entry(key) {
+            e.insert((terminal, w));
+            first_order.push(key);
+            if !terminal {
+                continue;
             }
-            Some((_, f)) => {
-                let d = pos_distance(
-                    ell,
-                    (f.position.lat, f.position.lon),
-                    (w.position.lat, w.position.lon),
-                );
-                if d.is_nan() || d > DISAGREE_M {
-                    reg.duplicates.push(format!(
-                        "CIFP waypoint {} ({}) occurs twice with positions {d:.1} m apart; the first is used",
-                        w.ident, w.icao_region
-                    ));
+        }
+        let earlier = if terminal {
+            let tkey = (w.area.as_str(), key.0, key.1);
+            match term_firsts.get(&tkey) {
+                None => {
+                    term_firsts.insert(tkey, w);
+                    term_order.push(tkey);
+                    None
                 }
+                Some(f) => Some(*f),
+            }
+        } else {
+            firsts.get(&key).map(|(_, f)| *f)
+        };
+        if let Some(f) = earlier {
+            let d = pos_distance(
+                ell,
+                (f.position.lat, f.position.lon),
+                (w.position.lat, w.position.lon),
+            );
+            if d.is_nan() || d > DISAGREE_M {
+                reg.duplicates.push(format!(
+                    "CIFP waypoint {} ({}) occurs twice with positions {d:.1} m apart; the first is used",
+                    w.ident, w.icao_region
+                ));
             }
         }
     }
@@ -1114,6 +1158,10 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         let i = reg.add(ell, cand, false, "fix");
         maps.fix
             .insert((f.fix_id.clone(), f.icao_region_code.clone()), i);
+        if !firsts.get(&key).is_some_and(|&(terminal, _)| terminal) {
+            maps.fix_enr
+                .insert((f.fix_id.clone(), f.icao_region_code.clone()), i);
+        }
     }
     for key in &first_order {
         let Some(&(terminal, w)) = firsts.get(key) else {
@@ -1138,6 +1186,44 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.name = Some(w.name.clone()).filter(|n| *n != w.ident && !n.is_empty());
         let i = reg.add(ell, cand, false, "waypoint");
         maps.fix.insert((w.ident.clone(), w.icao_region.clone()), i);
+        if !terminal {
+            maps.fix_enr
+                .insert((w.ident.clone(), w.icao_region.clone()), i);
+        }
+    }
+    // Terminal waypoints by airport. One that sits where the point of its key sits is that
+    // point; one elsewhere is a point of its own, scoped to its airport.
+    for tkey in &term_order {
+        let Some(&w) = term_firsts.get(tkey) else {
+            continue;
+        };
+        let Some(&ai) = maps.apt_cifp.get(&w.area) else {
+            continue;
+        };
+        let pos = (w.position.lat, w.position.lon);
+        let shared = maps
+            .fix
+            .get(&(w.ident.clone(), w.icao_region.clone()))
+            .copied()
+            .filter(|&c| {
+                reg.cands
+                    .get(c)
+                    .is_some_and(|o| pos_distance(ell, o.pos, pos) <= DISAGREE_M)
+            });
+        let i = match shared {
+            Some(c) => c,
+            None => {
+                let mut cand = new_cand(point_kind::TERMINAL_WAYPOINT, &w.ident, pos);
+                cand.region = Some(w.icao_region.clone());
+                cand.scope = Some(w.area.clone());
+                cand.cifp = true;
+                cand.cifp_pos = Some(pos);
+                cand.name = Some(w.name.clone()).filter(|n| *n != w.ident && !n.is_empty());
+                reg.add(ell, cand, false, "terminal waypoint")
+            }
+        };
+        maps.term_fix
+            .insert((ai, w.ident.clone(), w.icao_region.clone()), i);
     }
     for ((ident, _), &ci) in &maps.fix {
         maps.fix_by_ident.entry(ident.clone()).or_default().push(ci);
@@ -1405,10 +1491,22 @@ fn resolve_nasr(src: &Sources, maps: &Maps, r: &NasrRef<'_>) -> Res {
 /// (runway and localizer identifiers are only unique within an airport).
 fn resolve_cifp(maps: &Maps, f: &c424::FixRef, airport: Option<usize>) -> Option<usize> {
     match (f.section, f.subsection) {
-        ('E', 'A') | ('P', 'C') => maps
-            .fix
-            .get(&(f.ident.clone(), f.icao_region.clone()))
-            .copied(),
+        // A terminal fix is the procedure's own airport's, else an enroute one; another airport's
+        // terminal fix is never used.
+        ('E', 'A') | ('P', 'C') => f
+            .subsection
+            .eq(&'C')
+            .then(|| {
+                maps.term_fix
+                    .get(&(airport?, f.ident.clone(), f.icao_region.clone()))
+                    .copied()
+            })
+            .flatten()
+            .or_else(|| {
+                maps.fix_enr
+                    .get(&(f.ident.clone(), f.icao_region.clone()))
+                    .copied()
+            }),
         ('P', 'A') => maps.apt_cifp.get(&f.ident).copied(),
         ('P', 'G') => {
             let desig = f.ident.strip_prefix("RW").unwrap_or(&f.ident).to_string();
@@ -1832,6 +1930,22 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         .as_ref()
         .map(|h| u32::from(h.cycle.year) * 100 + u32::from(h.cycle.release))
         .ok_or(BuildError::NoCifpCycle)?;
+    let nasr_cycle = airac_cycle(nasr_eff).ok_or_else(|| {
+        BuildError::NasrCycle(format!("effective date {nasr_eff} has no AIRAC cycle"))
+    })?;
+    let cycle_override = if nasr_cycle == cifp_cycle {
+        None
+    } else if params.allow_cycle_mismatch {
+        Some(format!(
+            "NASR effective {nasr_eff} is AIRAC cycle {nasr_cycle}, CIFP is cycle {cifp_cycle}; mismatch allowed explicitly"
+        ))
+    } else {
+        return Err(BuildError::CycleMismatch {
+            nasr_effective: nasr_eff,
+            nasr_cycle,
+            cifp_cycle,
+        });
+    };
 
     // The area: the ARTCC's HIGH and LOW boundaries, in model units.
     let own: Vec<&nasr::arb::Boundary> = src
@@ -2584,6 +2698,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         nasr_sha256: src.nasr_archive.sha256,
         cifp_sha256: src.cifp_archive.sha256,
     });
+    model.cycle_override = cycle_override;
 
     let n_points = order.len();
     let pt = &mut model.points;
