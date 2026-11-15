@@ -373,3 +373,139 @@ pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadE
     }
     Ok(count)
 }
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    #![allow(clippy::indexing_slicing)]
+    use super::*;
+
+    // REQ: OA-ADSB-100
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn decode_row_total_ads2() {
+        let rec: [u8; RECORD_LEN] = kani::any();
+        if let Some((row, anom)) = decode_row(&rec, false) {
+            assert!(anom <= ANOM_SOURCE | ANOM_MEASUREMENT | ANOM_RESERVED);
+            assert!((-900_000_000..=900_000_000).contains(&row.lat_e7));
+            assert!((-1_800_000_000..=1_800_000_000).contains(&row.lon_e7));
+            assert!(
+                row.source == NONE_U8
+                    || usize::from(row.source) < SOURCE_NAMES.len()
+                    || row.source == SOURCE_UNKNOWN
+            );
+        }
+    }
+
+    // REQ: OA-ADSB-100
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn decode_row_total_ads1() {
+        let rec: [u8; LEGACY_RECORD_LEN] = kani::any();
+        let _ = decode_row(&rec, true);
+    }
+
+    // REQ: OA-ADSB-101
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn parse_header_any_bytes_up_to_2_records() {
+        const N: usize = PAYLOAD_HEADER_LEN + 2 * RECORD_LEN;
+        let buf: [u8; N] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= N);
+        let bytes = &buf[..len];
+        match parse_header(bytes) {
+            Ok((legacy, count, rec_len)) => {
+                assert_eq!(
+                    rec_len,
+                    if legacy {
+                        LEGACY_RECORD_LEN
+                    } else {
+                        RECORD_LEN
+                    }
+                );
+                assert_eq!(len, PAYLOAD_HEADER_LEN + count * rec_len);
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Stands for `decode_row`, whose own contract is proved by `decode_row_total_ads2` and
+    /// `decode_row_total_ads1`: any record may be dropped or kept, and the anomaly bits are
+    /// among the three that exist. With it the loop and the counting are proved for symbolic
+    /// records without the solver re-deriving the record decoder for every record.
+    fn any_row(_: &[u8], _: bool) -> Option<(Row, u8)> {
+        if kani::any() {
+            let anom: u8 = kani::any();
+            kani::assume(anom <= ANOM_SOURCE | ANOM_MEASUREMENT | ANOM_RESERVED);
+            Some((ROW_EMPTY, anom))
+        } else {
+            None
+        }
+    }
+
+    /// Stands for `reports_push`, which appends the row to each column; thirty `Vec` pushes per
+    /// record are what the solver cannot afford, so the output columns are not inspected.
+    fn push_nothing(_: &mut Reports, _: &Row) {}
+
+    /// A payload with a valid header for exactly `K` records of the layout `LEGACY` selects,
+    /// through the lenient and the strict decoder. The length is a constant: a symbolic slice
+    /// length costs the solver more than the records do, and
+    /// `parse_header_any_bytes_up_to_2_records` covers every other length.
+    fn records_total<const K: usize, const LEGACY: bool>() {
+        let mut buf = [0u8; PAYLOAD_HEADER_LEN + RECORD_LEN * 8];
+        let rec = if LEGACY {
+            LEGACY_RECORD_LEN
+        } else {
+            RECORD_LEN
+        };
+        let magic = if LEGACY {
+            LEGACY_PAYLOAD_MAGIC
+        } else {
+            PAYLOAD_MAGIC
+        };
+        buf[..4].copy_from_slice(&magic);
+        buf[4..6].copy_from_slice(&(rec as u16).to_le_bytes());
+        buf[8..12].copy_from_slice(&(K as u32).to_le_bytes());
+        let bytes = &buf[..PAYLOAD_HEADER_LEN + K * rec];
+
+        let mut out = Reports::default();
+        let Ok(c) = decode_payload_lenient(bytes, &mut out) else {
+            panic!("a valid header was refused");
+        };
+        assert_eq!(c.records, K);
+        assert_eq!(c.kept + c.dropped, c.records);
+        assert_eq!(c.first_dropped.is_some(), c.dropped > 0);
+        assert!(c.unknown_source <= c.kept && c.bad_measurement <= c.kept);
+        assert!(c.reserved_set <= c.kept);
+
+        let mut strict = Reports::default();
+        match decode_payload(bytes, &mut strict) {
+            Ok(n) => {
+                assert_eq!(n, K);
+            }
+            Err(PayloadError::BadRecord(i)) => {
+                assert!(i < K);
+            }
+            Err(_) => panic!("a valid header was refused"),
+        }
+    }
+
+    // REQ: OA-ADSB-101
+    #[kani::proof]
+    #[kani::unwind(10)]
+    #[kani::stub(decode_row, any_row)]
+    #[kani::stub(reports_push, push_nothing)]
+    fn payload_records_ads2_4() {
+        records_total::<4, false>();
+    }
+
+    // REQ: OA-ADSB-101
+    #[kani::proof]
+    #[kani::unwind(10)]
+    #[kani::stub(decode_row, any_row)]
+    #[kani::stub(reports_push, push_nothing)]
+    fn payload_records_ads1_4() {
+        records_total::<4, true>();
+    }
+}

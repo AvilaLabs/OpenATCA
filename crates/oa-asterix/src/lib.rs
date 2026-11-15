@@ -59,3 +59,6 @@ pub use wire::{
     parse_block, MAX_BLOCK_LEN, MAX_EXTENSIONS, MAX_PRIMARY_OCTETS, MAX_RECORDS_PER_BLOCK,
     MAX_REPETITIONS,
 };
+
+#[cfg(kani)]
+mod proofs;

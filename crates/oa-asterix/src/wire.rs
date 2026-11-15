@@ -565,3 +565,7 @@ mod tests {
         assert_eq!(check_compound_minimal(&UAP_062, 1, &[0x01, 0x00]), Ok(()));
     }
 }
+
+#[cfg(kani)]
+#[path = "proofs_wire.rs"]
+mod proofs;

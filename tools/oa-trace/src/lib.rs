@@ -2,7 +2,9 @@
 //! oa-trace — requirements traceability checker (OA-TRC-001). See docs/M0_DESIGN.md.
 //!
 //! Requirements are list items `- **OA-XXX-NNN**` in `REQUIREMENTS.md`. Tests carry a
-//! `// REQ: ID[, ID...]` line directly above `#[test]`. [`analyze`] joins the two.
+//! `// REQ: ID[, ID...]` line directly above `#[test]`. A Kani proof harness carries it directly
+//! above `#[kani::proof]` (with an optional `#[kani::unwind(n)]` on either side of it) and
+//! counts as a proof, reported apart from tests. [`analyze`] joins the two.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,7 +20,7 @@ pub struct Requirement {
     pub withdrawn: bool,
 }
 
-/// A test that names a requirement.
+/// A test or proof harness that names a requirement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 // A7.2: cold struct, size guard waived
 pub struct TestRef {
@@ -26,9 +28,11 @@ pub struct TestRef {
     pub file: String,
     pub line: usize,
     pub name: String,
+    /// True for a Kani proof harness, false for a test.
+    pub proof: bool,
 }
 
-/// A tag problem (malformed ID, or not followed by `#[test]`).
+/// A tag problem (malformed ID, or not followed by `#[test]` or `#[kani::proof]`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 // A7.2: cold struct, size guard waived
 pub struct TagError {
@@ -41,9 +45,9 @@ pub struct TagError {
 #[derive(Debug, Default)]
 // A7.2: cold struct, size guard waived
 pub struct Report {
-    /// Requirement ID -> tests naming it (sorted).
+    /// Requirement ID -> tests and proofs naming it (sorted).
     pub covered: BTreeMap<String, Vec<TestRef>>,
-    /// Active requirements with no test (sorted).
+    /// Active requirements with no test and no proof (sorted).
     pub untested: Vec<String>,
     /// Withdrawn requirements (sorted).
     pub withdrawn: Vec<String>,
@@ -118,6 +122,21 @@ pub struct Tag {
     pub line: usize,
     pub ids: Vec<String>,
     pub test_name: String,
+    /// True when the tag sits on a Kani proof harness.
+    pub proof: bool,
+}
+
+/// What the attribute lines after a tag make the item: a test, a proof harness, or neither.
+fn tagged_kind(lines: &[&str], i: usize) -> Option<bool> {
+    let next = |k: usize| lines.get(i + k).map(|l| l.trim());
+    match next(1) {
+        Some("#[test]") => Some(false),
+        Some("#[kani::proof]") => Some(true),
+        Some(l) if l.starts_with("#[kani::unwind(") && next(2) == Some("#[kani::proof]") => {
+            Some(true)
+        }
+        _ => None,
+    }
 }
 
 /// Extracts tags from one source file; problems go to `errors`.
@@ -147,10 +166,10 @@ pub fn parse_tags(file: &str, text: &str, errors: &mut Vec<TagError>) -> Vec<Tag
                 err(format!("malformed requirement ID {tok:?}"));
             }
         }
-        let followed = lines.get(i + 1).is_some_and(|l| l.trim() == "#[test]");
-        if !followed {
+        let kind = tagged_kind(&lines, i);
+        if kind.is_none() {
             bad = true;
-            err("tag is not directly followed by #[test]".to_string());
+            err("tag is not directly followed by #[test] or #[kani::proof]".to_string());
         }
         if bad {
             continue;
@@ -166,6 +185,7 @@ pub fn parse_tags(file: &str, text: &str, errors: &mut Vec<TagError>) -> Vec<Tag
             line,
             ids,
             test_name: name,
+            proof: kind == Some(true),
         });
     }
     tags
@@ -260,6 +280,7 @@ pub fn analyze(root: &Path) -> Report {
                     file: rel.clone(),
                     line: tag.line,
                     name: tag.test_name.clone(),
+                    proof: tag.proof,
                 };
                 let bucket = match defs.get(id) {
                     None => &mut rep.unknown,
@@ -294,7 +315,8 @@ pub fn analyze(root: &Path) -> Report {
 
 fn fmt_tests(out: &mut String, tests: &[TestRef]) {
     for t in tests {
-        out.push_str(&format!("    {}:{} {}\n", t.file, t.line, t.name));
+        let kind = if t.proof { " (proof)" } else { "" };
+        out.push_str(&format!("    {}:{} {}{kind}\n", t.file, t.line, t.name));
     }
 }
 
@@ -371,10 +393,21 @@ pub fn render_markdown(rep: &Report) -> String {
         if let Some(tests) = rep.covered.get(id) {
             let cell = tests
                 .iter()
-                .map(|t| format!("`{}` ({}:{})", t.name, t.file, t.line))
+                .map(|t| {
+                    let kind = if t.proof { "proof " } else { "" };
+                    format!("{kind}`{}` ({}:{})", t.name, t.file, t.line)
+                })
                 .collect::<Vec<_>>()
                 .join("<br>");
-            o.push_str(&format!("| {id} | verified | {cell} |\n"));
+            let status = match (
+                tests.iter().any(|t| !t.proof),
+                tests.iter().any(|t| t.proof),
+            ) {
+                (true, true) => "verified, proved",
+                (false, true) => "proved",
+                _ => "verified",
+            };
+            o.push_str(&format!("| {id} | {status} | {cell} |\n"));
         } else if rep.withdrawn.contains(id) {
             o.push_str(&format!("| {id} | withdrawn | |\n"));
         } else {
@@ -523,6 +556,47 @@ mod tests {
         assert!(md.contains("| OA-AAA-001 | verified | `t_one` (a.rs:1)<br>`t_one` (b.rs:1) |"));
         assert!(md.contains("| OA-AAA-002 | **NO TEST** |"));
         assert!(md.contains("| OA-424-003 | withdrawn |"));
+    }
+
+    // REQ: OA-TRC-100
+    #[test]
+    fn kani_proof_tags_are_proofs() {
+        let t = Tmp::new();
+        t.write("REQUIREMENTS.md", REG);
+        t.write(
+            "a.rs",
+            &tag("OA-AAA-001", "#[kani::proof]").replace("t_one", "p_one"),
+        );
+        t.write(
+            "b.rs",
+            "// REQ: OA-AAA-001, OA-AAA-002\n#[kani::unwind(9)]\n#[kani::proof]\nfn p_two() {}\n",
+        );
+        t.write(
+            "c.rs",
+            "// REQ: OA-AAA-002\n#[kani::proof]\n#[kani::unwind(9)]\nfn p_three() {}\n",
+        );
+        // An unwind bound with no proof after it is not a harness.
+        t.write(
+            "d.rs",
+            "// REQ: OA-AAA-001\n#[kani::unwind(9)]\nfn x() {}\n",
+        );
+        t.write(
+            "e.rs",
+            &tag("OA-AAA-001", "#[test]").replace("t_one", "t_two"),
+        );
+        let r = analyze(&t.0);
+        assert_eq!(r.malformed.len(), 1);
+        assert_eq!(r.malformed[0].file, "d.rs");
+        let a = &r.covered["OA-AAA-001"];
+        assert_eq!(a.iter().filter(|x| x.proof).count(), 2);
+        assert_eq!(a.iter().filter(|x| !x.proof).count(), 1);
+        assert!(r.covered["OA-AAA-002"].iter().all(|x| x.proof));
+        let md = render_markdown(&r);
+        assert!(md.contains("| OA-AAA-001 | verified, proved |"));
+        assert!(md.contains(
+            "| OA-AAA-002 | proved | proof `p_two` (b.rs:1)<br>proof `p_three` (c.rs:1) |"
+        ));
+        assert!(render_text(&r).contains("p_two (proof)"));
     }
 
     // REQ: OA-TRC-001

@@ -125,8 +125,12 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 ### Traceability (oa-trace)
 
-- **OA-TRC-001** Lists every requirement without a test and every test tag naming an unknown
-  requirement, and exits non-zero if either list is non-empty.
+- **OA-TRC-001** Lists every requirement without a test or proof and every test or proof tag naming an
+  unknown requirement, and exits non-zero if either list is non-empty. A Kani harness (`// REQ:` above
+  `#[kani::proof]`, with an optional `#[kani::unwind(n)]`) counts as a proof and the report marks it as one,
+  apart from tests.
+- **OA-TRC-100** A `// REQ:` tag above `#[kani::proof]` (or an unwind bound and then the proof, in either
+  order) is accepted as a proof and listed as one; a tag above an unwind bound with no proof is malformed.
 
 ### Hashing (oa-sha256)
 
@@ -380,6 +384,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   every later frame is counted as lost rather than silently dropped, the final summary prints the
   failure and the lost count, and `oa-feed` exits non-zero when a requested recording failed
   (feed consumption may continue, and the log says so). Tested with a writer that fails on demand.
+- **OA-FEED-100** (proof) For every sequence number and every reachable health counter, `observe_seq` never
+  panics or overflows; a forward jump adds exactly one gap event and the saturated number of missing frames,
+  and any other frame changes neither.
 
 ### Compression (oa-deflate)
 
@@ -1092,6 +1099,10 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-080** A confirmed step marks every flight, programme and NOTAM row as stale until it is
   updated; the marked rows are counted (`stale_marked`) and the rows still stale can be counted at any
   time (`pipeline_stale_count`); eviction ages are as before.
+- **OA-RPL-100** (proof) `clock_observe` never panics or overflows for any clock and frame time (any `i64`,
+  including the extremes) from any reachable candidate state; a step is returned only on the frame that
+  completes `CLOCK_CONFIRM_FRAMES` consecutive candidates, with the saturated difference as its delta, and no
+  step is returned from an empty candidate state.
 
 ## M5 — Terrain and obstacles
 
@@ -1379,6 +1390,15 @@ frame of their feed has been fed (as the ADS-B table is).
   consecutive printed categories agree, and a reserved code is ignored and never raises the cap above
   the ordinary one. The summary applies it, and a report that is itself a jump does not count.
 
+- **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
+  (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
+  a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
+- **OA-ADSB-101** (proof) For every byte string of up to 176 octets the payload header check never panics, and
+  a header it accepts has a length of exactly header plus count records; for a payload with a valid header and 4
+  records of either layout (the record decoder and the column append taken as their stated contracts),
+  `decode_payload_lenient` and `decode_payload` never panic or overflow, kept plus dropped equals the
+  records, each anomaly count is at most the kept records, and the strict decoder reports only a record
+  below the count.
 ## Weather aloft (oa-grib2)
 
 GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO
@@ -2171,6 +2191,23 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   compound refusal, and an item that is not compound is never refused.
 - **OA-AST-090** A value is packed into an unsigned element of a given width exactly when it fits: the
   largest value of the width is accepted, the next is refused, and a 32-bit element takes every value.
+- **OA-AST-100** (proof) `rd` and `take` never panic, overflow or read out of bounds for any start and
+  length over inputs of up to 6 octets, and advance the position only on success by exactly the octets read;
+  `sext` keeps the low bits and stays in range, for every value and width of 1 to 32 bits.
+- **OA-AST-101** (proof) The FSPEC parser returns, for every input, either a non-empty list of FRNs with a
+  position inside the input, or an error positioned inside the input, without panic or overflow. CAT048:
+  every input (the FSPEC is read or refused within the 4 octets the UAP can address, so 5 octets cover all).
+  CAT021 and CAT062: inputs of up to 3 octets.
+- **OA-AST-102** (proof) Walking any item of the CAT021, CAT048 and CAT062 UAPs (every slot, SP and RE
+  included) over any bytes of up to 24 octets never panics, overflows or reads out of bounds; a walk that
+  succeeds ends after its start and inside the input, and an error is positioned inside the input.
+- **OA-AST-103** (proof) `parse_block` (the framing stage of `decode_block`) over any byte string of up to 3 octets, which holds the refusals
+  of a short header, a LEN below three or past the input, no record and an unsupported category,
+  never panics or overflows, and a block it accepts occupies more than zero and at most the input's octets.
+  Whole blocks of 4 octets and more are beyond what the solver finishes (see `docs/VERIFICATION.md`).
+- **OA-AST-104** (proof) Every six octets that decode as an identification encode back to the same six octets;
+  a 24-bit time of day survives 1/128 s to milliseconds and back exactly, and neither conversion overflows for
+  any `u32`.
 ## M3 — Surveillance tracking (oa-track)
 
 ### ADS-B-only tracker and its scoring (oa-track, oa-bench adapter)

@@ -187,3 +187,70 @@ pub fn clock_observe(c: &mut Clock, feed: usize, now: i64, t: i64) -> Tick {
     c.held += 1;
     Tick::Held { back }
 }
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    use super::*;
+
+    fn any_clock() -> Clock {
+        let c = Clock {
+            cand_last_ns: kani::any(),
+            cand_n: kani::any(),
+            cand_back: kani::any(),
+            held: kani::any(),
+            forward_steps: kani::any(),
+            backward_steps: kani::any(),
+        };
+        // Reachable states: a confirmation resets the count before it reaches the limit, and
+        // the three counters count frames, which cannot reach 2^64 - 1.
+        kani::assume(c.cand_n < CLOCK_CONFIRM_FRAMES);
+        kani::assume(c.held < u64::MAX);
+        kani::assume(c.forward_steps < u64::MAX && c.backward_steps < u64::MAX);
+        c
+    }
+
+    // REQ: OA-RPL-100
+    #[kani::proof]
+    fn clock_observe_total_and_confirms() {
+        let mut c = any_clock();
+        let before = c;
+        let (now, t): (i64, i64) = (kani::any(), kani::any());
+        let tick = clock_observe(&mut c, now, t);
+        // The candidate count stays below the confirmation limit.
+        assert!(c.cand_n < CLOCK_CONFIRM_FRAMES);
+        if let Tick::Step { delta } = tick {
+            // A step needs CLOCK_CONFIRM_FRAMES consecutive candidates: this frame is the
+            // last of them, so there were at least CLOCK_CONFIRM_FRAMES - 1 before it.
+            assert!(now != i64::MIN);
+            assert!(before.cand_n >= CLOCK_CONFIRM_FRAMES - 1);
+            assert_eq!(delta, t.saturating_sub(now));
+            assert_eq!(c.cand_n, 0);
+        }
+        if before.cand_n == 0 && now != i64::MIN {
+            assert!(!matches!(tick, Tick::Step { .. }));
+        }
+    }
+
+    // REQ: OA-RPL-100
+    #[kani::proof]
+    fn clock_observe_three_candidates_before_a_step() {
+        let mut c = any_clock();
+        kani::assume(c.cand_n == 0);
+        // Room for three more counts.
+        kani::assume(c.held < u64::MAX - 3);
+        let now: i64 = kani::any();
+        kani::assume(now != i64::MIN);
+        let (t1, t2, t3): (i64, i64, i64) = (kani::any(), kani::any(), kani::any());
+        // The clock does not move between candidates (a refused frame leaves it alone).
+        let a = clock_observe(&mut c, now, t1);
+        let b = clock_observe(&mut c, now, t2);
+        let was_step = matches!(a, Tick::Step { .. }) || matches!(b, Tick::Step { .. });
+        assert!(!was_step);
+        let d = clock_observe(&mut c, now, t3);
+        if let Tick::Step { .. } = d {
+            // Three frames all far from the clock, on one side, not going backward in time.
+            assert!(matches!(a, Tick::Held { .. }) && matches!(b, Tick::Held { .. }));
+        }
+    }
+}
