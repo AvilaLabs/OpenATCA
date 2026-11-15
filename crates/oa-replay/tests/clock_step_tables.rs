@@ -62,10 +62,14 @@ fn running() -> Pipeline {
     p
 }
 
-/// Three frames in a row at `to + k` seconds: a confirmed step of the clock.
+/// Three frames in a row at `to + k` seconds on every feed the tests use: a confirmed step of
+/// the recorder's clock. The other feeds' frames back the step (a step by one feed alone is
+/// refused while another feed, heard just before, backs the old clock).
 fn step_to(p: &mut Pipeline, to: i64) {
     for k in 0..3 {
         tick(p, to + k * NS);
+        process_frame(p, FeedKind::Adsb, Kind::Status, to + k * NS, &[]);
+        process_frame(p, FeedKind::Tbfm, Kind::Status, to + k * NS, &[]);
     }
 }
 

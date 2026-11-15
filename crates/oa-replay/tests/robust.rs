@@ -378,6 +378,9 @@ fn tick_from(p: &mut Pipeline, feed: FeedKind, t: i64) {
 #[test]
 fn a_frame_minutes_ahead_does_not_move_the_clock_without_confirmation() {
     let mut p = small_pipeline(64);
+    // A second feed has been heard: a recording with one feed alone takes a forward gap of up to
+    // 30 minutes as time that passed (OA-RPL-185), so a wild frame needs another feed to be held.
+    tick_from(&mut p, FeedKind::Tbfm, T0);
     for k in 0..10 {
         tick(&mut p, T0 + k * NS);
     }
