@@ -952,3 +952,38 @@ fn two_trips_of_one_address_are_two_flights_and_the_bad_one_fails() {
     assert_eq!(e.flights_over_r4, 1);
     assert!((e.flight_rms_max_m - 1000.0).abs() < 1e-9);
 }
+
+// REQ: OA-TRK-296
+#[test]
+fn the_split_check_passes_the_split_of_the_scorer_and_refuses_a_shared_report_time() {
+    use oa_bench::split_check::{check_split, SplitViolation};
+    let mut r = Reports::default();
+    for k in 0..9 {
+        let mut row = base_row(0x100001, f64::from(k));
+        row.lat_e7 = 410_000_000 + k * 10;
+        reports_push(&mut r, &row);
+    }
+    let (a, b, _) = split_reports(&r);
+    assert_eq!(check_split(&a, &b), Ok(()));
+    // The same report time in both sets is refused, naming the address and time.
+    let mut shared = Reports::default();
+    reports_push(&mut shared, &base_row(0x100001, 0.0));
+    assert_eq!(
+        check_split(&a, &shared),
+        Err(SplitViolation::SharedTime {
+            addr: 0x100001,
+            time_ns: T0
+        })
+    );
+    // On the real clip, when one is given.
+    let Ok(path) = std::env::var("OPENATCA_ADSB_CLIP") else {
+        eprintln!("skipped: OPENATCA_ADSB_CLIP not set");
+        return;
+    };
+    let Ok(clip) = oa_bench::input::load_adsb(std::path::Path::new(&path)) else {
+        eprintln!("skipped: {path} unreadable");
+        return;
+    };
+    let (a, b, _) = split_reports(&clip.reports);
+    assert_eq!(check_split(&a, &b), Ok(()));
+}

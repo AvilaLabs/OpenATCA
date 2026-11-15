@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 //! oa-truth: reference trajectories from ADS-B, the truth side of the M2 benchmark
 //! (docs/M2_DESIGN.md section 1). Core (pure, B1): [`build_truth`] and [`truth_at`] are pure
-//! functions of their arguments; the `oa-truth-check` binary is the shell (it reads a file,
-//! reads the clock and writes stdout).
+//! functions of their arguments; the `oa-truth-check` binary and the [`clip`] reader are the
+//! shell (they read a file, the clock and write stdout).
 //!
 //! # What it does
 //!
@@ -60,6 +60,7 @@
 //! truth model is a struct-of-arrays, one column per field, with no hot per-row struct.
 
 mod build;
+pub mod clip;
 mod frame;
 mod linalg;
 mod loo;

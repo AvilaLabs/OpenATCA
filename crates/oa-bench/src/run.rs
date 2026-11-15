@@ -278,15 +278,15 @@ pub(crate) fn association_cases(
 }
 
 /// Scores a tracker's output columns: the columns become the legacy table
-/// ([`crate::tracker_input`]) and go through [`run_benchmark`], the one code path ERAM's samples
-/// take, so association, pairing, the along-track offset treatment and every metric are shared.
+/// ([`crate::tracker_input`], one flight per truth leg) and go through [`run_benchmark`], the one
+/// code path ERAM's samples take, so association, pairing, the along-track offset treatment and every metric are shared.
 pub fn score_track_samples(
     s: &crate::tracker_input::TrackSamples<'_>,
     truth: &Truth<'_>,
     env: &Env<'_>,
     cfg: &RunConfig,
 ) -> Result<RunOutput, crate::tracker_input::SamplesError> {
-    let leg = crate::tracker_input::legacy_from_track_samples(s)?;
+    let leg = crate::tracker_input::legacy_from_track_samples_by_leg(s, truth.legs)?;
     Ok(run_benchmark(&leg, truth, env, cfg))
 }
 
