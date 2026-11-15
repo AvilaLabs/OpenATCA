@@ -1,0 +1,146 @@
+# Fuzz harness for the decoders. A workspace of its own, outside the main one, so that
+# libfuzzer-sys is never a dependency of any shipped crate (docs/FUZZING.md).
+[package]
+name = "oa-fuzz"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oa-asterix = { path = "../crates/oa-asterix" }
+oa-adsb = { path = "../crates/oa-adsb" }
+oa-feed = { path = "../crates/oa-feed" }
+oa-grib2 = { path = "../crates/oa-grib2" }
+oa-j2k = { path = "../crates/oa-j2k" }
+oa-tiff = { path = "../crates/oa-tiff" }
+oa-xml = { path = "../crates/oa-xml" }
+oa-tbfm = { path = "../crates/oa-tbfm" }
+oa-tfms = { path = "../crates/oa-tfms" }
+oa-fixm = { path = "../crates/oa-fixm" }
+oa-tar = { path = "../crates/oa-tar" }
+oa-zip = { path = "../crates/oa-zip" }
+oa-awc = { path = "../crates/oa-awc" }
+oa-json = { path = "../crates/oa-json" }
+
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "asterix"
+path = "fuzz_targets/asterix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adsb-payload"
+path = "fuzz_targets/adsb_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adsb-trace"
+path = "fuzz_targets/adsb_trace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feed-frame"
+path = "fuzz_targets/feed_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grib2"
+path = "fuzz_targets/grib2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "j2k"
+path = "fuzz_targets/j2k.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tiff"
+path = "fuzz_targets/tiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tbfm"
+path = "fuzz_targets/tbfm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tfms"
+path = "fuzz_targets/tfms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fixm"
+path = "fuzz_targets/fixm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar"
+path = "fuzz_targets/tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip"
+path = "fuzz_targets/zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gzip"
+path = "fuzz_targets/gzip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "awc"
+path = "fuzz_targets/awc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
