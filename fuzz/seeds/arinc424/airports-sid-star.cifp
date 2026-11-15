@@ -1,0 +1,31 @@
+HDR01FAACIFP18      001P013200000262611  07-OCT-202615:55:03  U.S.A. DOT FAA                                                9D60747B
+HDR02                                 FEDERAL AVIATION ADMINISTRATION                                                               
+HDR03                                 AERONAUTICAL INFORMATION SERVICES                                                             
+HDR04                                 CODED INSTRUMENT FLIGHT PROCEDURES VOLUME 2611  EFFECTIVE 29 OCT 2026                         
+HDR05                                 REPORT DATA ERRORS TO FAA                 TEL 800 638 8972                                    
+SUSAP KQQBK5AMDW     0     065YHN41470832W087450982W004000620         1800018000C    MNAR    QUINCY SAMPLE INTL            533482506
+SUSAP KQQCK3AMSP     0     110YHN44525510W093131840E000000842         1800018000C    MNAR    SAMPLETON-NORTH INTL/EXAMPLE- 657331305
+SUSAP KQQAK5AORD     0     130YHN41583699W087542934W003000680         1800018000C    MNAR    QUINCY  O'TEST INTL           788452112
+SUSAP KQQBK5GRW04L   0055070470 N41465836W087453342         +0154700617075855150R                                          538461705
+SUSAP KQQBK5GRW13R   0038591380 N41471705W087453170         +0151600607000050060D                                          538491705
+SUSAP KQQAK5GRW04L   0075000420 N41585396W087545010         +0166200656000050150D                                          805972106
+SUSAP KQQAK5GRW04R   0080750450 N41571198W087535791         +0168000661000052150RIFJU1                                     805982508
+SUSAP KQQAK5GRW09C   0112450930 N41591789W087555366         +0171600673000055200IIOYG3                                     805992012
+SUSAP KQQCK3DBITEZ15ALL   010HHOBAK3EA0E       IF                                 + 04000     18000       KQQC  K3PA       658972611
+SUSAP KQQCK3DBITEZ15ALL   020BITEZK3EA0EE      TF                                                                          658982611
+SUSAP KQQCK3DBITEZ16DKOTA 010BITEZK3EA0E       IF                                             18000                        658992611
+SUSAP KQQCK3DBITEZ16DKOTA 020SKITOK3EA0E       TF                                                                          659002611
+SUSAP KQQCK3DBITEZ16DKOTA 030TICKKK3EA0E       TF                                                                          659012611
+SUSAP KQQCK3DBITEZ16DKOTA 040HHCEEK3EA0E       TF                                                                          659022611
+SUSAP KQQAK5EBENKY64BFORD 010BFORDK5PC0E       IF                                 + FL220     18000                        790882012
+SUSAP KQQAK5EBENKY64BFORD 020BYLAWK5PC0E       TF                                 B FL230FL200                             790892012
+SUSAP KQQAK5EBENKY64BFORD 030BENKYK5EA0EE      TF                                   12000                                  790902012
+SUSAP KQQAK5EBENKY64BYLAW 010BYLAWK5PC0E       IF                                 B FL230FL20018000                        790912012
+SUSAP KQQAK5EBENKY64BYLAW 020BENKYK5EA0EE      TF                                   12000                                  790922012
+SUSAP KQQAK5EBENKY64CASHN 010CASHNK5PC0E       IF                                             18000                        790932012
+SUSAP KQQAK5EBENKY64CASHN 020BFORDK5PC0E       TF                                 + FL220                                  790942012
+SUSAP KQQAK5EBENKY64CASHN 030BYLAWK5PC0E       TF                                 B FL230FL200                             790952012
+SUSAP KQQAK5EBENKY64CASHN 040BENKYK5EA0EE      TF                                   12000                                  790962012
+SUSAP KQQAK5EBENKY64DRAMS 010DRAMSK5PC0E       IF                                             18000                        790972012
+SUSAP KQQAK5EBENKY64DRAMS 020RYELYK5PC0E       TF                                 + FL240                                  790982012
+SUSAP KQQAK5EBENKY64DRAMS 030BFORDK5PC0E       TF                                 + FL220                                  790992012
