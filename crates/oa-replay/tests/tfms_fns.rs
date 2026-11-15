@@ -1203,7 +1203,9 @@ fn the_tfms_and_fns_tables_never_move_or_grow_after_init() {
         feed(
             &mut p,
             FeedKind::Fns,
-            mar5(9) + k * NS,
+            // The frames of both feeds share one receive time line (merged order); the NOTAMs'
+            // own times are in March, so they stay live.
+            at(3, 0, k),
             &notam(&nt("Z", 1 + k as u32)),
         );
     }

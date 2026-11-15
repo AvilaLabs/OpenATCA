@@ -46,7 +46,10 @@ pub use adsb::{
     ADSB_HASH_TAG_EVICT, ADSB_MAX_AGE_NS, ADSB_MAX_AHEAD_NS, ADSB_SWEEP_NS,
 };
 pub use apply::{apply_sfdps, apply_tbfm, Applied};
-pub use clock::{clock_observe, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_TOLERANCE_NS};
+pub use clock::{
+    clock_observe, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_TOLERANCE_NS,
+    FEED_GAP_MAX_NS,
+};
 pub use errors::{count_error, errors_total, ErrKind, Errors, ERR_COUNT, ERR_NAMES};
 pub use fns::{
     apply_fns, fns_in_force, fns_live, fns_slot_of, fns_stale_count, fns_sweep, new_fns_table,

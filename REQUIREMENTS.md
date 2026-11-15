@@ -1226,16 +1226,20 @@ frame of their feed has been fed (as the ADS-B table is).
   never taken as the clock or as a candidate: five such frames neither step the clock nor let a later
   frame a day ahead be taken as a first frame, and before the first frame it is held as well.
 - **OA-RPL-100** (proof) `clock_observe` never panics or overflows for any clock state, feed index (any
-  `usize`) and frame time (any `i64`, including the extremes) from any reachable candidate state; a step is
-  returned only on the frame that completes `CLOCK_CONFIRM_FRAMES` consecutive candidates of that frame's
-  feed, with the saturated difference as its delta, every candidate count is then cleared, no step is returned
-  from an empty candidate state, and a frame never adds candidates to another feed.
+  `usize`) and frame time (any `i64`, including the extremes) from any reachable candidate state (every
+  candidate count at most `CLOCK_CONFIRM_FRAMES`); a step is returned only on the frame that completes a run of
+  `CLOCK_CONFIRM_FRAMES` consecutive candidates of that frame's feed, with the saturated difference as its
+  delta, every candidate count is then cleared, no step is returned from an empty candidate state, and a frame
+  never adds candidates to another feed.
 - **OA-RPL-101** (proof) From any state the pipeline can hold (every feed with an accepted frame has it at or
-  before the clock), one frame that does not complete a confirmation moves a running clock forward by at most
-  `CLOCK_TOLERANCE_NS` (2 minutes), and the state stays consistent with the clock that results.
-- **OA-RPL-150** A feed's candidate frames continue one run only when each is within the tolerance of the
-  one before, in either direction: a genuine step back whose three frames arrive up to a second out of order
-  confirms on the third, and candidates a day apart each start a new run and never confirm.
+  before the clock), one frame that is accepted moves a running clock forward by at most `CLOCK_TOLERANCE_NS`
+  (2 minutes), or by at most `FEED_GAP_MAX_NS` (30 minutes) when no other feed has ever had an accepted frame,
+  and the state stays consistent with the clock that results.
+- **OA-RPL-150** A feed's candidate frames behind the clock continue one run only when each is within the
+  tolerance of the one before, in either direction: a genuine step back whose three frames arrive up to a
+  second out of order confirms on the third; candidates ahead of the clock continue a run when each is not
+  more than the tolerance before the one before and not more than 30 minutes after it. Candidates a day apart
+  each start a new run and never confirm.
 - **OA-RPL-170** A confirmed step shifts every ADS-B report time by the step as it does the other tables'
   ages, and marks each aircraft stale (counted in `stale_marked`, counted by `adsb_stale_count`): a forward
   step of an hour keeps every aircraft that was live, and a backward step of ten minutes accepts the next
@@ -1249,6 +1253,42 @@ frame of their feed has been fed (as the ADS-B table is).
   stale so a replay with none hashes as it did.
 - **OA-RPL-174** A confirmed step whose size does not fit in 64 bits is not applied: the clock and every age
   are kept, the candidate state is kept as it was, and the step is counted under `clock-step-overflow`.
+
+- **OA-RPL-180** Frames reach the clock in merged receive order, so a stream whose times run ahead cannot move
+  the clock ahead of another stream that still has frames: a stream walking 119 s per frame beside a stream
+  talking every second for 30 minutes leaves the clock never more than the tolerance past the second stream's
+  latest frame and never evicts its flight.
+- **OA-RPL-181** A forward run of `CLOCK_CONFIRM_FRAMES` candidates is a step with no vote (in merged order
+  the other feeds are silent over the gap); a backward run is a step only if the feeds backing the new time
+  (the stepping feed and every other feed with an open candidate on that side within the tolerance of the
+  frame) are at least as many as those backing the old clock (every other feed with an accepted frame, no
+  candidate and a last frame within the tolerance of the clock). A refused backward run is counted in
+  `steps_outvoted` and asks again on the feed's next candidate.
+- **OA-RPL-182** A feed whose times jump ten minutes back while three others agree is outvoted: no backward
+  step, the refusals are counted, and the clock ends with the three.
+- **OA-RPL-183** A feed ten minutes behind that speaks first in merge order starts the clock; three feeds that
+  agree ten minutes later take it with one forward step.
+- **OA-RPL-184** A step back of an hour on every feed at once is one backward step, however the frames
+  interleave, with every age shifted (nothing evicted) and the rows marked stale.
+- **OA-RPL-185** In a single-feed recording a frame later than the feed's last by at most 30 minutes is
+  accepted and the clock follows it, so frames 5 minutes apart move the clock each time with no step, and rows
+  age out as time passes.
+- **OA-RPL-186** In a single-feed recording a gap over 30 minutes is a confirmed step (the ages carry over the
+  pause), as for any run of three candidates.
+- **OA-RPL-187** Two interleaved feeds that are both sparse (gaps over the tolerance) do not freeze the
+  clock: the feed that speaks first runs alone while the other has no accepted frame, then the clock moves by
+  forward steps (11 over 30 frames of each feed, 2.5 minutes apart, trailing the newest frame by under 15
+  minutes) with no step back.
+- **OA-RPL-188** (proof) A step is returned only for three candidates; a backward step also needs the vote
+  (at least as many backers of the new time as of the old clock); a refused backward step is held and
+  counted with the run kept at the limit; three forward candidates in a row are always a step; a forward step,
+  a backward step, a counted refusal and a lone-forward advance are each reachable.
+- **OA-RPL-189** The limit of the single-feed rule: in a single-feed recording one wild frame less than 30
+  minutes after the feed's last is accepted (a gap and a glitch cannot be told apart), one more than 30
+  minutes after it is held as a candidate.
+- **OA-RPL-190** A feed that resumes alone after a pause, with another feed's last frame just before the pause
+  (merged order), takes a forward step after three frames: the ages of both feeds' rows are shifted and the
+  rows marked stale, not refused.
 
 ## M5 — Terrain and obstacles
 
