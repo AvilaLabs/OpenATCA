@@ -48,11 +48,15 @@ design, section 3). Availability and data age are reported separately and are no
   the tracker and odd-numbered to the truth, which removes the direct reuse but not the error
   the halves share; GNSS error is correlated over seconds and is in both. ERAM fuses ADS-B with
   radar where it has both, so less of its error is shared with the truth, and a comparison
-  against an ADS-B-only OpenATCA run favours OpenATCA by that difference. Every absolute
-  accuracy number of OpenATCA against ADS-B truth is therefore labelled as such and read as a
-  lower bound on its error, and every ERAM comparison states which inputs each side had. The
-  independent checks available are radar-only runs scored against ADS-B truth and the
-  simulated sensors below, whose error is known.
+  against an ADS-B-only OpenATCA run favours OpenATCA by that difference. What the score
+  measures is disagreement with a reference whose error is correlated with the tracker's and
+  whose absolute bias is unknown. It is not a bound on the tracker's true error in either
+  direction: the measured mean square is the tracker's plus the reference's, minus twice the
+  covariance of their errors, so shared error lowers it and opposing error raises it. Every
+  absolute accuracy number of OpenATCA against ADS-B truth is therefore labelled as
+  disagreement with ADS-B truth, and every ERAM comparison states which inputs each side had.
+  The checks with known error are the simulated sensors below, where the true position is
+  given; radar-only runs scored against ADS-B truth share less error with the reference.
 - **Event truth** (meter-fix crossing times, runway threshold times, top of climb, top of
   descent) is derived from the same smoothed reference.
 - **Synthetic truth** for things real traffic does not contain often enough (near mid-air
