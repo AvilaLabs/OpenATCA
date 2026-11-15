@@ -675,10 +675,15 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // by well under a centimetre, so only the bits of the inputs changed. Checked by building this
 // commit with the simulator alone put back: the earlier digests return. Rows per run: 38,970,
 // 31,741, 151,234, 156,929; plots 6,261 and 2,214, none refused.
+// Re-pinned when platform libm was replaced by oa-math in the tracker, fusion layer and geodesy:
+// rows (38,970, 31,741, 151,234, 156,929), plots (6,261 and 2,214) and refusals (none) are the
+// same; of the rows of the five runs 0 to 2 differ in the last bits of a velocity (largest 3e-8
+// m/s), and no position moves at the 1e-7 degree quantum. The earlier digests were
+// 1defbdcd..2286, af680187..80e7, d3ab5657..e646, 13705015..19ac3 and a124b85e..e0ab.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "1defbdcd8816da21f41a72b99b1e81f10f234bff5a708e2f92b1969ae0c72286",
-    "af68018747f343ae23ecf15d84522a4686859e5aa2baa5364b9dbb44418680e7",
-    "d3ab56575470e50b6a4940180bc6aa38fcd6681df485b10de8acad89405be646",
-    "13705015723c6542e606035cbf53cfcce197eefc1a517118dd1ce168dee19ac3",
-    "a124b85e6d38e83ac24d1050b65bc27936d163fafcf89b6b87637efaa2ece0ab",
+    "e7a42113e7c7dd6aac900609f8e9f28832579f41c5205fab7fe4714fcf546cac",
+    "83d24dd44caa88082331a92e84cb972ccfd593f424f9ceeb321271c881ba4099",
+    "e89d63bc1e21224a80fdae12966e985e4b5ff9afaefda31bd91a7d6d11c43ad8",
+    "7697028250cb7b3266ed14134cdcb611d5303670db5f1ca919785ca547f59135",
+    "aca1b6914df18cda79e5c519feea5856109f0f164efe14ab59098b5ca3269a47",
 ];

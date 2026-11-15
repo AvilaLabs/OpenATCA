@@ -437,8 +437,12 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
 // innovation sum 142,114.4 to 142,128.2 (1e-4 of itself); rows differ in covariance and velocity
 // at the 0.3 % and 1e-3 m/s scale. The value before both was
 // "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962".
+// (3) Platform libm replaced by oa-math in the tracker and geodesy: the same 108,643 rows, 3,599
+// ticks, none skipped; 27 of 1,553,531 output rows differ, all in the last bits of a velocity
+// (largest 2e-5 m/s); no position changes at the 1e-7 degree quantum. The value before was
+// "c4fdb7d84f7a18180befdba24c239de7b94f4b3bfad44007fef67794b141a5cd".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "c4fdb7d84f7a18180befdba24c239de7b94f4b3bfad44007fef67794b141a5cd";
+    "a70fef27c29a09f93d3a28b2a2dff3a2c70b1cc707288aea69466bf42e1f37cb";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

@@ -63,6 +63,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-GEO-013** The inverse projection refuses (returns no point for) a distance from the origin that
   is not finite or is past half the sphere's circumference; a huge finite east or north does not
   overflow into a NaN position.
+- **OA-GEO-014** The crate's production sources call no platform maths function (`sin`, `atan2`,
+  `hypot`, `powf`, `mul_add` and the rest of a fixed list); the elementary functions are
+  `oa-math`'s, so a result is the same bits on every IEEE-754 machine. The check is itself tested
+  against a planted call.
 
 ### Elementary functions (oa-math)
 
@@ -3053,6 +3057,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted and the table never grows; removal under collisions leaves every other entry findable;
   retention of a subset leaves exactly that subset. The order in which entries are evicted is the
   order the ordered maps gave.
+- **OA-TRK-293** The tracker, fusion layer and their helpers call no platform maths function in
+  production code (`sin`, `atan2`, `exp`, `ln`, `hypot`, `powi`, `mul_add` and the rest of a fixed
+  list); the elementary functions are `oa-math`'s, so a run is the same bits on every IEEE-754
+  machine (RULESET B6). The check is itself tested against a planted call.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

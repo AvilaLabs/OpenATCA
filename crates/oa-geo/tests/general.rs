@@ -51,8 +51,9 @@ fn manifest_declares_no_dependencies() {
             continue;
         }
         if section == "[dependencies]" {
+            // The one workspace crate allowed: the elementary functions (RULESET F1).
             assert!(
-                t.is_empty() || t.starts_with('#'),
+                t.is_empty() || t.starts_with('#') || t == "oa-math = { path = \"../oa-math\" }",
                 "dependency declared: {t}"
             );
         }

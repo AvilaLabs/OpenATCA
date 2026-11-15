@@ -209,11 +209,11 @@ fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
 /// Geodetic to earth-centred earth-fixed metres (WGS-84).
 pub fn ecef(lat_deg: f64, lon_deg: f64, h_m: f64) -> [f64; 3] {
     let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
-    let (sl, cl) = (lat.sin(), lat.cos());
+    let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
     let n = WGS84_A / (1.0 - WGS84_E2 * sl * sl).sqrt();
     [
-        (n + h_m) * cl * lon.cos(),
-        (n + h_m) * cl * lon.sin(),
+        (n + h_m) * cl * oa_math::cos(lon),
+        (n + h_m) * cl * oa_math::sin(lon),
         (n * (1.0 - WGS84_E2) + h_m) * sl,
     ]
 }
@@ -222,14 +222,14 @@ pub fn ecef(lat_deg: f64, lon_deg: f64, h_m: f64) -> [f64; 3] {
 /// iteration on the latitude (converges to under 1e-9 rad in 5 steps; stopped at 1e-13).
 pub fn geodetic_of_ecef(p: &[f64; 3]) -> (f64, f64, f64) {
     let [x, y, z] = *p;
-    let r = x.hypot(y);
-    let lon = y.atan2(x);
-    let mut lat = z.atan2(r * (1.0 - WGS84_E2));
+    let r = oa_math::hypot(x, y);
+    let lon = oa_math::atan2(y, x);
+    let mut lat = oa_math::atan2(z, r * (1.0 - WGS84_E2));
     let height = |lat: f64| -> (f64, f64) {
-        let s = lat.sin();
+        let s = oa_math::sin(lat);
         let n = WGS84_A / (1.0 - WGS84_E2 * s * s).sqrt();
-        let h = if lat.cos().abs() > 0.1 {
-            r / lat.cos() - n
+        let h = if oa_math::cos(lat).abs() > 0.1 {
+            r / oa_math::cos(lat) - n
         } else {
             z / s - n * (1.0 - WGS84_E2)
         };
@@ -237,7 +237,7 @@ pub fn geodetic_of_ecef(p: &[f64; 3]) -> (f64, f64, f64) {
     };
     for _ in 0..8 {
         let (n, h) = height(lat);
-        let next = z.atan2(r * (1.0 - WGS84_E2 * n / (n + h)));
+        let next = oa_math::atan2(z, r * (1.0 - WGS84_E2 * n / (n + h)));
         let done = (next - lat).abs() < 1.0e-13;
         lat = next;
         if done {
@@ -288,7 +288,12 @@ pub const EPOCH_MAX_NS: i64 = 4_000_000_000_000_000_000;
 /// The frame of a valid site.
 pub fn radar_geom(s: &RadarSite) -> RadarGeom {
     let (lat, lon) = (s.lat_deg.to_radians(), s.lon_deg.to_radians());
-    let (sl, cl, so, co) = (lat.sin(), lat.cos(), lon.sin(), lon.cos());
+    let (sl, cl, so, co) = (
+        oa_math::sin(lat),
+        oa_math::cos(lat),
+        oa_math::sin(lon),
+        oa_math::cos(lon),
+    );
     let w2 = 1.0 - WGS84_E2 * sl * sl;
     RadarGeom {
         origin: ecef(s.lat_deg, s.lon_deg, s.height_m),
@@ -305,7 +310,7 @@ pub fn radar_geom(s: &RadarSite) -> RadarGeom {
 pub fn polar_of(g: &RadarGeom, lat_deg: f64, lon_deg: f64, h_m: f64) -> (f64, f64) {
     let p = ecef(lat_deg, lon_deg, h_m);
     let d = [p[0] - g.origin[0], p[1] - g.origin[1], p[2] - g.origin[2]];
-    let az = dot(&d, &g.east).atan2(dot(&d, &g.north)).to_degrees();
+    let az = oa_math::atan2(dot(&d, &g.east), dot(&d, &g.north)).to_degrees();
     (dot(&d, &d).sqrt(), az.rem_euclid(360.0))
 }
 
@@ -334,10 +339,10 @@ pub fn polar_to_geodetic(
     let (r, a) = (g.r_mean_m, g.r_mean_m + g.height_m);
     let b = r + h_m;
     let sin_e_raw = (b * b - a * a - rho_m * rho_m) / (2.0 * a * rho_m);
-    let mut e = sin_e_raw.clamp(-1.0, 1.0).asin();
-    let (st, ct) = az_deg.to_radians().sin_cos();
+    let mut e = oa_math::asin(sin_e_raw.clamp(-1.0, 1.0));
+    let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
     let at = |e: f64| -> (f64, f64, f64) {
-        let (se, ce) = e.sin_cos();
+        let (se, ce) = oa_math::sin_cos(e);
         let mut p = g.origin;
         for (i, c) in p.iter_mut().enumerate() {
             let dir = ce * st * g.east.get(i).copied().unwrap_or(0.0)
@@ -348,7 +353,7 @@ pub fn polar_to_geodetic(
         geodetic_of_ecef(&p)
     };
     let geo_of = |e: f64, res: (f64, f64, f64)| {
-        let phi = (rho_m * e.cos()).atan2(a + rho_m * e.sin());
+        let phi = oa_math::atan2(rho_m * oa_math::cos(e), a + rho_m * oa_math::sin(e));
         Geo {
             lat_deg: res.0,
             lon_deg: res.1,
@@ -356,14 +361,14 @@ pub fn polar_to_geodetic(
             ground_m: r * phi,
         }
     };
-    if e.cos() >= CONE_COS_ELEV {
+    if oa_math::cos(e) >= CONE_COS_ELEV {
         let mut res = at(e);
         for _ in 0..MAX_NEWTON {
             let err = res.2 - h_m;
             if err.abs() <= HEIGHT_TOL_M {
                 return Ok(geo_of(e, res));
             }
-            let d = rho_m * e.cos();
+            let d = rho_m * oa_math::cos(e);
             if d.abs() < 1.0e-6 {
                 break;
             }
@@ -425,8 +430,8 @@ pub fn polar_cov_local(
     var_az_rad2: f64,
     var_h_m2: f64,
 ) -> [f64; 3] {
-    let (st, ct) = az_deg.to_radians().sin_cos();
-    let (se, ce) = elev_rad.sin_cos();
+    let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
+    let (se, ce) = oa_math::sin_cos(elev_rad);
     let comb = |e: f64, n: f64, u: f64| -> [f64; 3] {
         let mut v = [0.0; 3];
         for (i, c) in v.iter_mut().enumerate() {
@@ -443,7 +448,12 @@ pub fn polar_cov_local(
     let d_az = comb(ce * ct, -ce * st, 0.0);
     // The ellipsoid's normal at the target and the target's own east and north.
     let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
-    let (sl, cl, so, co) = (lat.sin(), lat.cos(), lon.sin(), lon.cos());
+    let (sl, cl, so, co) = (
+        oa_math::sin(lat),
+        oa_math::cos(lat),
+        oa_math::sin(lon),
+        oa_math::cos(lon),
+    );
     let up_t = [cl * co, cl * so, sl];
     let east_t = [-so, co, 0.0];
     let north_t = [-sl * co, -sl * so, cl];
@@ -526,7 +536,7 @@ pub fn plot_convert(
         + s.range_quantum_m * s.range_quantum_m / 12.0
         + bias.var_range_m2;
     let sa = s.sigma_az_deg.to_radians();
-    let var_az = sa * sa + bias.var_az_deg2 * (core::f64::consts::PI / 180.0).powi(2);
+    let var_az = sa * sa + bias.var_az_deg2 * oa_math::powi(core::f64::consts::PI / 180.0, 2);
     let cov = polar_cov_local(
         g,
         rho,

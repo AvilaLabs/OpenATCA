@@ -111,7 +111,7 @@ fn max0(x: f64) -> f64 {
 }
 
 fn norm2(x: f64, y: f64) -> (f64, f64) {
-    let r = x.hypot(y);
+    let r = oa_math::hypot(x, y);
     (x / r, y / r)
 }
 
@@ -120,7 +120,7 @@ pub(crate) fn sincosd(x: f64) -> (f64, f64) {
     let r = x % 360.0;
     let q = (r / 90.0).round();
     let r = (r - 90.0 * q).to_radians();
-    let (s, c) = r.sin_cos();
+    let (s, c) = oa_math::sin_cos(r);
     let (s, c) = match (q as i64).rem_euclid(4) {
         0 => (s, c),
         1 => (c, -s),
@@ -141,7 +141,7 @@ pub(crate) fn atan2d(y: f64, x: f64) -> f64 {
         x = -x;
         q += 1;
     }
-    let ang = y.atan2(x).to_degrees();
+    let ang = oa_math::atan2(y, x).to_degrees();
     match q {
         1 => 180.0_f64.copysign(y) - ang,
         2 => 90.0 - ang,
@@ -252,11 +252,11 @@ fn astroid(x: f64, y: f64) -> f64 {
     if disc >= 0.0 {
         let mut t3 = s + r3;
         t3 += if t3 < 0.0 { -disc.sqrt() } else { disc.sqrt() };
-        let t = t3.cbrt();
+        let t = oa_math::cbrt(t3);
         u += t + if t != 0.0 { r2 / t } else { 0.0 };
     } else {
-        let ang = (-disc).sqrt().atan2(-(s + r3));
-        u += 2.0 * r * (ang / 3.0).cos();
+        let ang = oa_math::atan2((-disc).sqrt(), -(s + r3));
+        u += 2.0 * r * oa_math::cos(ang / 3.0);
     }
     let v = (sq(u) + q).sqrt();
     let uv = if u < 0.0 { q / (v - u) } else { u + v };
@@ -350,7 +350,7 @@ impl Ellipsoid {
         // Gauss-Legendre nodes and weights by Newton's method on P_n.
         let m = GL_N;
         for i in 0..m / 2 {
-            let mut x = (std::f64::consts::PI * (i as f64 + 0.75) / (m as f64 + 0.5)).cos();
+            let mut x = oa_math::cos(std::f64::consts::PI * (i as f64 + 0.75) / (m as f64 + 0.5));
             for _ in 0..100 {
                 let (p, dp) = legendre(m, x);
                 let dx = p / dp;
@@ -435,7 +435,7 @@ impl Ellipsoid {
             calp1
         };
         let salp0 = salp1 * cbet1;
-        let calp0 = calp1.hypot(salp1 * sbet1);
+        let calp0 = oa_math::hypot(calp1, salp1 * sbet1);
         let mut ssig1 = sbet1;
         let somg1 = salp0 * sbet1;
         let mut csig1 = calp1 * cbet1;
@@ -459,10 +459,16 @@ impl Ellipsoid {
         let mut csig2 = calp2 * cbet2;
         let comg2 = csig2;
         (ssig2, csig2) = norm2(ssig2, csig2);
-        let sig12 = (max0(csig1 * ssig2 - ssig1 * csig2)).atan2(csig1 * csig2 + ssig1 * ssig2);
+        let sig12 = oa_math::atan2(
+            max0(csig1 * ssig2 - ssig1 * csig2),
+            csig1 * csig2 + ssig1 * ssig2,
+        );
         let somg12 = max0(comg1 * somg2 - somg1 * comg2);
         let comg12 = comg1 * comg2 + somg1 * somg2;
-        let eta = (somg12 * clam120 - comg12 * slam120).atan2(comg12 * clam120 + somg12 * slam120);
+        let eta = oa_math::atan2(
+            somg12 * clam120 - comg12 * slam120,
+            comg12 * clam120 + somg12 * slam120,
+        );
         let k2 = sq(calp0) * self.ep2;
         let eps = eps_from_k2(k2);
         let c3 = self.c3f(eps);
@@ -520,7 +526,7 @@ impl Ellipsoid {
             sbetm2 /= sbetm2 + sq(cbet1 + cbet2);
             st.dnm = (1.0 + self.ep2 * sbetm2).sqrt();
             let omg12 = lam12 / (self.f1 * st.dnm);
-            (somg12, comg12) = omg12.sin_cos();
+            (somg12, comg12) = oa_math::sin_cos(omg12);
         } else {
             somg12 = slam12;
             comg12 = clam12;
@@ -531,7 +537,7 @@ impl Ellipsoid {
         } else {
             sbet12a - cbet2 * sbet1 * sq(somg12) / (1.0 - comg12)
         };
-        let ssig12 = st.salp1.hypot(st.calp1);
+        let ssig12 = oa_math::hypot(st.salp1, st.calp1);
         let csig12 = sbet1 * sbet2 + cbet1 * cbet2 * comg12;
         let etol2 =
             0.1 * TOL2 / (self.f.abs().max(0.001) * (1.0_f64).min(1.0 - self.f / 2.0) / 2.0).sqrt();
@@ -546,14 +552,14 @@ impl Ellipsoid {
                         1.0 - comg12
                     };
             (st.salp2, st.calp2) = norm2(st.salp2, st.calp2);
-            st.sig12 = ssig12.atan2(csig12);
+            st.sig12 = oa_math::atan2(ssig12, csig12);
         } else if self.n.abs() > 0.1
             || csig12 >= 0.0
             || ssig12 >= 6.0 * self.n.abs() * std::f64::consts::PI * sq(cbet1)
         {
             // The zeroth-order spherical estimate is adequate.
         } else {
-            let lam12x = (-slam12).atan2(-clam12);
+            let lam12x = oa_math::atan2(-slam12, -clam12);
             let k2 = sq(sbet1) * self.ep2;
             let eps = eps_from_k2(k2);
             let lamscale = self.f * cbet1 * self.a3f(eps) * std::f64::consts::PI;
@@ -562,8 +568,8 @@ impl Ellipsoid {
             let y = sbet12a / betscale;
             let k = astroid(x, y);
             let omg12a = lamscale * (-x * k / (1.0 + k));
-            let somg12 = omg12a.sin();
-            let comg12 = -omg12a.cos();
+            let somg12 = oa_math::sin(omg12a);
+            let comg12 = -oa_math::cos(omg12a);
             st.salp1 = cbet2 * somg12;
             st.calp1 = sbet12a - cbet2 * sbet1 * sq(somg12) / (1.0 - comg12);
         }
@@ -643,7 +649,10 @@ impl Ellipsoid {
             let csig1 = calp1 * cbet1;
             let ssig2 = sbet2;
             let csig2 = calp2 * cbet2;
-            let sig12 = (max0(csig1 * ssig2 - ssig1 * csig2)).atan2(csig1 * csig2 + ssig1 * ssig2);
+            let sig12 = oa_math::atan2(
+                max0(csig1 * ssig2 - ssig1 * csig2),
+                csig1 * csig2 + ssig1 * ssig2,
+            );
             // On a meridian eps equals the third flattening n exactly.
             let (mut s12b, m12b) =
                 Self::lengths(self.n, sig12, ssig1, csig1, dn1, ssig2, csig2, dn2);
@@ -709,7 +718,7 @@ impl Ellipsoid {
                     if numit < MAXIT1 && dv > 0.0 {
                         let dalp1 = -v / dv;
                         if dalp1.abs() < std::f64::consts::PI {
-                            let (sdalp1, cdalp1) = dalp1.sin_cos();
+                            let (sdalp1, cdalp1) = oa_math::sin_cos(dalp1);
                             let nsalp1 = salp1 * cdalp1 + calp1 * sdalp1;
                             if nsalp1 > 0.0 {
                                 calp1 = calp1 * cdalp1 - salp1 * sdalp1;
@@ -803,7 +812,7 @@ impl Ellipsoid {
         (sbet1, cbet1) = norm2(sbet1, cbet1);
         cbet1 = cbet1.max(TINY);
         let salp0 = salp1 * cbet1;
-        let calp0 = calp1.hypot(salp1 * sbet1);
+        let calp0 = oa_math::hypot(calp1, salp1 * sbet1);
         let mut ssig1 = sbet1;
         let somg1 = salp0 * sbet1;
         let mut csig1 = if sbet1 != 0.0 || calp1 != 0.0 {
@@ -818,7 +827,7 @@ impl Ellipsoid {
         let a1m = a1(eps);
         let c1 = series6(&coef::C1, eps);
         let b11 = sin_series(&c1, ssig1, csig1);
-        let (s, c) = b11.sin_cos();
+        let (s, c) = oa_math::sin_cos(b11);
         let stau1 = ssig1 * c + csig1 * s;
         let ctau1 = csig1 * c - ssig1 * s;
         let c1p = series6(&coef::C1P, eps);
@@ -827,14 +836,14 @@ impl Ellipsoid {
         let b31 = sin_series(&c3, ssig1, csig1);
 
         let tau12 = s12 / (self.b * a1m);
-        let (s, c) = tau12.sin_cos();
+        let (s, c) = oa_math::sin_cos(tau12);
         let b12 = -sin_series(&c1p, stau1 * c + ctau1 * s, ctau1 * c - stau1 * s);
         let sig12 = tau12 - (b12 - b11);
-        let (ssig12, csig12) = sig12.sin_cos();
+        let (ssig12, csig12) = oa_math::sin_cos(sig12);
         let ssig2 = ssig1 * csig12 + csig1 * ssig12;
         let csig2 = csig1 * csig12 - ssig1 * ssig12;
         let sbet2 = calp0 * ssig2;
-        let mut cbet2 = salp0.hypot(calp0 * csig2);
+        let mut cbet2 = oa_math::hypot(salp0, calp0 * csig2);
         let mut csig2c = csig2;
         if cbet2 == 0.0 {
             cbet2 = TINY;
@@ -846,8 +855,8 @@ impl Ellipsoid {
         let comg2 = csig2c;
         let e = 1.0_f64.copysign(salp0);
         let omg12 = e
-            * (sig12 - (ssig2.atan2(csig2c) - ssig1.atan2(csig1))
-                + ((e * somg2).atan2(comg2) - (e * somg1).atan2(comg1)));
+            * (sig12 - (oa_math::atan2(ssig2, csig2c) - oa_math::atan2(ssig1, csig1))
+                + (oa_math::atan2(e * somg2, comg2) - oa_math::atan2(e * somg1, comg1)));
         let lam12 = omg12 + a3c * (sig12 + (sin_series(&c3, ssig2, csig2c) - b31));
         let lat2 = atan2d(sbet2, self.f1 * cbet2);
         let azi2 = atan2d(salp2, calp2);

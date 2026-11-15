@@ -53,8 +53,8 @@ pub(crate) fn v_init(alt_ft: f64, alt_var: f64, rate: Option<(f64, f64)>) -> VFi
 
 /// The model transition probabilities over `dt` seconds.
 pub(crate) fn v_transition(dt: f64) -> [[f64; 2]; 2] {
-    let s0 = (-dt / V_TAU_LEVEL_S).exp();
-    let s1 = (-dt / V_TAU_CLIMB_S).exp();
+    let s0 = oa_math::exp(-dt / V_TAU_LEVEL_S);
+    let s1 = oa_math::exp(-dt / V_TAU_CLIMB_S);
     [[s0, 1.0 - s0], [1.0 - s1, s1]]
 }
 
@@ -154,7 +154,7 @@ fn update_scalar(m: &mut VModel, i: usize, z: f64, r: f64) -> f64 {
         m.p[1] - p0i * p1i / s,
         m.p[2] - p1i * p1i / s,
     ];
-    -0.5 * y * y / s - 0.5 * s.ln()
+    -0.5 * y * y / s - 0.5 * oa_math::ln(s)
 }
 
 /// Updates the predicted filter with an altitude (variance `var`, ft^2) and a rate (feet per
@@ -177,11 +177,11 @@ pub(crate) fn v_update(
         if j == 0 {
             out.m[0].x[1] = 0.0;
         }
-        lw[j] = pred.mu[j].max(1.0e-300).ln() + ll;
+        lw[j] = oa_math::ln(pred.mu[j].max(1.0e-300)) + ll;
     }
     let mx = lw[0].max(lw[1]);
     let mut mu = if mx.is_finite() {
-        [(lw[0] - mx).exp(), (lw[1] - mx).exp()]
+        [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
     } else {
         pred.mu
     };

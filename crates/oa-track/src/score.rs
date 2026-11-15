@@ -331,7 +331,7 @@ pub fn initiation_delays(log: &TrackLog) -> (Vec<f64>, u64) {
 
 /// Heading in radians clockwise from north.
 fn heading(e: f64, n: f64) -> f64 {
-    e.atan2(n)
+    oa_math::atan2(e, n)
 }
 
 /// Transversal acceleration, m/s^2, from two truth velocities `span_s` apart: the speed times the
@@ -344,7 +344,7 @@ pub fn transversal_accel(v1: (f64, f64), v2: (f64, f64), span_s: f64) -> f64 {
     while dh < -std::f64::consts::PI {
         dh += 2.0 * std::f64::consts::PI;
     }
-    let speed = (v1.0.hypot(v1.1) + v2.0.hypot(v2.1)) / 2.0;
+    let speed = (oa_math::hypot(v1.0, v1.1) + oa_math::hypot(v2.0, v2.1)) / 2.0;
     speed * dh.abs() / span_s
 }
 
@@ -445,7 +445,7 @@ pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
             p.cross_m.get(i).copied().unwrap_or(f32::NAN),
             p.along_m.get(i).copied().unwrap_or(f32::NAN),
         );
-        let e = f64::from(cross).hypot(f64::from(along));
+        let e = oa_math::hypot(f64::from(cross), f64::from(along));
         let sp = f64::from(p.speed_err_kt.get(i).copied().unwrap_or(f32::NAN)) * MPS_PER_KT;
         let hd = f64::from(p.hdg_err_deg.get(i).copied().unwrap_or(f32::NAN));
         if e.is_finite() {

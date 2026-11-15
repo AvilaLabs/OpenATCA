@@ -1245,7 +1245,10 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // innovation sum went from 2588.444 to 2589.553 (4e-4 of itself) and the rows differ in
 // covariance and velocity. The earlier values were 0x40a4_38e3_6693_06a4 and
 // "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc".
-const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97b_1227;
+// Platform libm replaced by oa-math: counters and digest unchanged (no output row differs), the
+// innovation sum 2589.552684637037 to 2589.552684636896 (5e-14 of itself, 310 ulp). The earlier
+// value was 0x40a4_3b1a_f97b_1227.
+const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97b_10f1;
 const GOLDEN_DIGEST: &str = "c953ab2374b272a955edec2c2fd4cfe0ec9afb8911947e58f8f1ac6590791133";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and

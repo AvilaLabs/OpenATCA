@@ -1756,7 +1756,7 @@ fn cand_cost(c: &Cand, m: &Measurement, plot_scan: i64) -> Option<f64> {
         ((0.0, 0.0), CAND_SLACK_M + CAND_MAX_SPEED_MPS * dt)
     };
     let radius = radius + noise(m.pos_cov_m2) + noise(last.pos_cov_m2);
-    let d = (x - pred.0).hypot(y - pred.1);
+    let d = oa_math::hypot(x - pred.0, y - pred.1);
     if d >= radius {
         return None;
     }

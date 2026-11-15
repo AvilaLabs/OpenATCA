@@ -31,7 +31,7 @@ pub struct Frame {
 /// A frame about `(lat_deg, lon_deg)`.
 pub fn frame_new(lat_deg: f64, lon_deg: f64) -> Frame {
     let lat0 = lat_deg.to_radians();
-    let s = lat0.sin();
+    let s = oa_math::sin(lat0);
     let w2 = 1.0 - WGS84_E2 * s * s;
     // sqrt(M N) = a sqrt(1 - e2) / w2.
     let r = WGS84_A * (1.0 - WGS84_E2).sqrt() / w2;
@@ -39,7 +39,7 @@ pub fn frame_new(lat_deg: f64, lon_deg: f64) -> Frame {
         lat0,
         lon0: lon_deg.to_radians(),
         sin0: s,
-        cos0: lat0.cos(),
+        cos0: oa_math::cos(lat0),
         r,
     }
 }
@@ -47,13 +47,13 @@ pub fn frame_new(lat_deg: f64, lon_deg: f64) -> Frame {
 /// The angle at the sphere's centre between the origin and a point, radians.
 pub fn frame_angle(f: &Frame, lat_deg: f64, lon_deg: f64) -> f64 {
     let (s_e, s_n, cosc) = parts(f, lat_deg.to_radians(), lon_deg.to_radians());
-    (s_e * s_e + s_n * s_n).sqrt().atan2(cosc)
+    oa_math::atan2((s_e * s_e + s_n * s_n).sqrt(), cosc)
 }
 
 fn parts(f: &Frame, lat: f64, lon: f64) -> (f64, f64, f64) {
     let dl = lon - f.lon0;
-    let (sl, cl) = (lat.sin(), lat.cos());
-    let (sd, cd) = (dl.sin(), dl.cos());
+    let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
+    let (sd, cd) = (oa_math::sin(dl), oa_math::cos(dl));
     let s_e = cl * sd;
     let s_n = f.cos0 * sl - f.sin0 * cl * cd;
     let cosc = f.sin0 * sl + f.cos0 * cl * cd;
@@ -72,7 +72,7 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     let k = if sinc < 1e-12 {
         1.0
     } else {
-        sinc.atan2(cosc) / sinc
+        oa_math::atan2(sinc, cosc) / sinc
     };
     (f.r * k * s_e, f.r * k * s_n)
 }
@@ -95,11 +95,9 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
         return Some((f.lat0.to_degrees(), wrap_deg(f.lon0.to_degrees())));
     }
     let c = rho / f.r;
-    let (sc, cc) = (c.sin(), c.cos());
-    let lat = (cc * f.sin0 + y * sc * f.cos0 / rho)
-        .clamp(-1.0, 1.0)
-        .asin();
-    let lon = f.lon0 + (x * sc).atan2(rho * f.cos0 * cc - y * f.sin0 * sc);
+    let (sc, cc) = (oa_math::sin(c), oa_math::cos(c));
+    let lat = oa_math::asin((cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0));
+    let lon = f.lon0 + oa_math::atan2(x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
     Some((lat.to_degrees(), wrap_deg(lon.to_degrees())))
 }
 
@@ -132,7 +130,7 @@ fn cross(a: &V3, b: &V3) -> V3 {
 
 /// The frame origin's east, north and up unit vectors in earth-fixed axes.
 fn basis(f: &Frame) -> [V3; 3] {
-    let (sl, cl) = f.lon0.sin_cos();
+    let (sl, cl) = oa_math::sin_cos(f.lon0);
     [
         [-sl, cl, 0.0],
         [-f.sin0 * cl, -f.sin0 * sl, f.cos0],
@@ -146,14 +144,14 @@ fn basis(f: &Frame) -> [V3; 3] {
 /// along plane y. The radial direction is preserved by the projection and the tangential one is
 /// scaled by `sin c / c` (`c` the angle from the origin), so the displacements are exact.
 fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
-    let rho = x.hypot(y);
+    let rho = oa_math::hypot(x, y);
     let c = rho / f.r;
     let (sa, ca) = if rho < 1e-9 {
         (0.0, 1.0)
     } else {
         (x / rho, y / rho)
     };
-    let (sc, cc) = c.sin_cos();
+    let (sc, cc) = oa_math::sin_cos(c);
     // Floored: the factor vanishes only at the origin's antipode, which the projection
     // does not map to one place.
     let k = if c < 1e-8 { 1.0 } else { (sc / c).max(1e-6) };

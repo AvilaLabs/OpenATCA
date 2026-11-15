@@ -768,7 +768,7 @@ pub fn raw_plot_errors(truth: &Truth, radar: &StudyRadar, plots: &[RadarPlot]) -
             continue;
         };
         let (e, n) = enu(s.lat_deg, s.lon_deg, c.geo.lat_deg, c.geo.lon_deg);
-        let err = e.hypot(n);
+        let err = oa_math::hypot(e, n);
         let q = |dt: i64| match truth_at(truth, p.label, t_ms + dt) {
             TruthQuery::Ok(s) => Some((s.vel_east_mps, s.vel_north_mps)),
             _ => None,

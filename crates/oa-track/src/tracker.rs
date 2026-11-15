@@ -457,7 +457,8 @@ pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
     if m.flags & crate::types::M_HAS_VEL != 0 {
         let v_ok = m.vel_east_mps.is_finite()
             && m.vel_north_mps.is_finite()
-            && f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) <= SPEED_ENVELOPE_MPS
+            && oa_math::hypot(f64::from(m.vel_east_mps), f64::from(m.vel_north_mps))
+                <= SPEED_ENVELOPE_MPS
             && cov_ok(&m.vel_cov_m2s2);
         if !v_ok {
             return Err(REF_VELOCITY);
@@ -575,7 +576,7 @@ fn gs_dkt(m: &Measurement) -> u16 {
     if m.flags & M_HAS_VEL == 0 {
         return NONE_U16;
     }
-    let kt = f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) / MPS_PER_KT;
+    let kt = oa_math::hypot(f64::from(m.vel_east_mps), f64::from(m.vel_north_mps)) / MPS_PER_KT;
     // Saturates one below the absent value.
     (kt * 10.0).round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
 }
@@ -583,11 +584,10 @@ fn gs_dkt(m: &Measurement) -> u16 {
 /// The filter's estimated ground speed in 0.1 kt, [`NONE_U16`] if it is not a number.
 fn estimated_gs_dkt(f: &Filter) -> u16 {
     let (x, _) = h_combine(&f.h);
-    let v = x
-        .get(2)
-        .copied()
-        .unwrap_or(0.0)
-        .hypot(x.get(3).copied().unwrap_or(0.0));
+    let v = oa_math::hypot(
+        x.get(2).copied().unwrap_or(0.0),
+        x.get(3).copied().unwrap_or(0.0),
+    );
     let dkt = v / MPS_PER_KT * 10.0;
     if dkt.is_finite() {
         // Saturates one below the absent value.
@@ -617,7 +617,7 @@ fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
     let mut trial = col(&t.cat, slot, CategoryState::default());
     let category = category_observe(&mut trial, m.category);
     let pair = JumpPair {
-        dist_m: x.hypot(y),
+        dist_m: oa_math::hypot(x, y),
         dt_s: (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64,
         slack_m: PLAUSIBLE_SLACK_M,
         category,

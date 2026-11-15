@@ -100,8 +100,8 @@ fn set_block(p: &mut M5, i: usize, j: usize, aa: f64, ab: f64, bb: f64) {
 /// The model transition probabilities over `dt` seconds: `[[cv to cv, cv to ct], [ct to cv,
 /// ct to ct]]`.
 pub(crate) fn h_transition(dt: f64) -> [[f64; 2]; 2] {
-    let s0 = (-dt / H_TAU_CV_S).exp();
-    let s1 = (-dt / H_TAU_CT_S).exp();
+    let s0 = oa_math::exp(-dt / H_TAU_CV_S);
+    let s1 = oa_math::exp(-dt / H_TAU_CT_S);
     [[s0, 1.0 - s0], [1.0 - s1, s1]]
 }
 
@@ -153,7 +153,7 @@ fn ct_terms(theta: f64) -> ((f64, f64), (f64, f64)) {
             (-theta / 3.0, 0.5 - t2 / 8.0),
         )
     } else {
-        let (s, c) = theta.sin_cos();
+        let (s, c) = oa_math::sin_cos(theta);
         (
             (s / theta, (1.0 - c) / theta),
             (
@@ -176,7 +176,7 @@ fn ct_predict(m: &HModel, dt: f64) -> HModel {
     let ((a1, b1), (da, db)) = ct_terms(theta);
     let (a, b) = (dt * a1, dt * b1);
     let (da, db) = (dt * dt * da, dt * dt * db);
-    let (s, c) = theta.sin_cos();
+    let (s, c) = oa_math::sin_cos(theta);
     let xn = [
         x + vx * a - vy * b,
         y + vx * b + vy * a,
@@ -330,7 +330,7 @@ fn update_sel(x: &mut V5, p: &mut M5, i: [usize; 2], z: &[f64; 2], r: &[f64; 3])
     }
     let (n00, n01, n11) = (s11 / det, -s01 / det, s00 / det);
     let d2 = y0 * (n00 * y0 + n01 * y1) + y1 * (n01 * y0 + n11 * y1);
-    let ll = -0.5 * d2 - 0.5 * det.ln();
+    let ll = -0.5 * d2 - 0.5 * oa_math::ln(det);
     let old = *p;
     let mut k = [[0.0f64; 2]; 5];
     for (row, kr) in k.iter_mut().enumerate() {
@@ -391,11 +391,11 @@ pub(crate) fn h_update(
                 *w = 0.0;
             }
         }
-        lw[j] = pred.mu.get(j).copied().unwrap_or(0.0).max(1.0e-300).ln() + ll;
+        lw[j] = oa_math::ln(pred.mu.get(j).copied().unwrap_or(0.0).max(1.0e-300)) + ll;
     }
     let mx = lw[0].max(lw[1]);
     let mut mu = if mx.is_finite() {
-        [(lw[0] - mx).exp(), (lw[1] - mx).exp()]
+        [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
     } else {
         pred.mu
     };
