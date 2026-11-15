@@ -1584,3 +1584,55 @@ fn tfms_flights_and_notams_last_heard_before_a_confirmed_step_are_stale_until_up
     feed(&mut p, FeedKind::Tfms, at(6, 1, 0), &flight((6, 0, 30)));
     assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (0, 1));
 }
+
+// REQ: OA-RPL-263
+#[test]
+fn a_clock_step_moves_a_replay_time_tombstone_with_the_clock_and_never_shortens_it() {
+    use oa_replay::fns::{fns_shift_times, fns_tombstones};
+    let day = 86_400 * 1_000_000_000;
+    let cancel = || {
+        let mut c = nt_at("Z", 9, I10);
+        c.ntype = "C";
+        c.refd = Some(("Z", 1));
+        c
+    };
+    // Forward by eight days: the clock now reads past the seven days, the tombstone is not due.
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &cancel(), mar5(10));
+    fns_shift_times(&mut t, 8 * day);
+    fns_sweep(&mut t, mar5(10) + 8 * day + 1_000_000);
+    assert_eq!(fns_tombstones(&t), 1);
+    assert_eq!(
+        fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(11) + 8 * day),
+        FnsApplied::OutOfOrder
+    );
+    // It still lasts seven days from the cancellation on the new clock.
+    fns_sweep(&mut t, mar5(10) + 15 * day + 1_000_000);
+    assert_eq!(fns_tombstones(&t), 0);
+    // Backward by two days: the tombstone is held for the same seven days of the clock, so it is
+    // due five days after the cancellation on the new clock, and not still held at six.
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &cancel(), mar5(10));
+    fns_shift_times(&mut t, -2 * day);
+    fns_sweep(&mut t, mar5(10) + 4 * day);
+    assert_eq!(fns_tombstones(&t), 1);
+    fns_sweep(&mut t, mar5(10) + 5 * day + 1_000_000);
+    assert_eq!(fns_tombstones(&t), 0);
+}
+
+// REQ: OA-RPL-263
+#[test]
+fn a_clock_step_leaves_a_tombstone_held_to_the_notices_own_end_where_it_is() {
+    use oa_replay::fns::{fns_shift_times, fns_tombstones};
+    let day = 86_400 * 1_000_000_000;
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &nt_at("Z", 1, I9), mar5(9));
+    let mut c = nt_at("Z", 9, I10);
+    c.ntype = "C";
+    c.refd = Some(("Z", 1));
+    fns_apply(&mut t, &c, mar5(10));
+    // Held to the notice's end (feed time, 2030-03-06 18:30): a step does not move it.
+    fns_shift_times(&mut t, 3 * day);
+    fns_sweep(&mut t, 1_899_052_200_001 * MS_NS);
+    assert_eq!(fns_tombstones(&t), 0);
+}

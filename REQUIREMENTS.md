@@ -943,6 +943,10 @@ the SFDPS `gufi` (they are different kinds of value, survey).
 - **OA-DSP-033** A view whose projection constants are not finite (a centre at either pole) is refused
   with the typed `BadView`; a view one count of 1e-7 degree from a pole is accepted, with finite constants,
   and projects its centre and nearby points on the screen.
+- **OA-DSP-034** A legend text that runs past the right edge of a narrow screen (down to the 64-pixel minimum)
+  is marked there with a two-pixel bar in the text colour and counted (`legend_cut`), and the command line prints the whole
+  legend, so the cycles, range and HIDDEN list are never cut without notice. A wide enough screen prints
+  nothing extra (the default HIDDEN line already runs past 800 pixels). The legend stays in its fixed strip (it is marked, not wrapped).
 
 ### Replay and flight state (oa-replay)
 
@@ -1353,7 +1357,12 @@ frame of their feed has been fed (as the ADS-B table is).
   so a cancellation that arrives first holds.
 - **OA-RPL-204** A tombstone is kept until the cancelled NOTAM's end (or cancelled) time if it was held and had
   one, else for seven days of replay time from the cancellation (a redelivery arrives within hours; a week is far
-  past any seen), then dropped at the next sweep (`tomb_expired`).
+  past any seen), then dropped at the next sweep (`tomb_expired`). A confirmed step of the replay clock moves a
+  tombstone held for replay time with the clock (OA-RPL-263).
+- **OA-RPL-263** A tombstone's deadline records its basis: the notice's own end or cancelled time (feed time) is
+  never moved by a clock step; the seven-day span of replay time is moved by it, forward or back, so a step
+  never shortens a tombstone's protection (a redelivered old NEW is still refused after a forward correction
+  past the seven days).
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
@@ -2920,6 +2929,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-079** A spill refuses a directory that exists and has anything in it, creates its column files
   new, and on drop removes only those files (by name) and then the directory if it is empty; a file put
   into the directory meanwhile survives.
+- **OA-TRK-280** A spill that fails partway through creating its column files removes only the files that call
+  created, and the directory only if that call created it: files another writer made in the same directory
+  survive.
 - **OA-TRK-080** Reading a spilled run checks every column file's size against the row count and refuses a
   truncated or extended column of any of the 15, with a typed error naming the column and the bytes found
   and expected.

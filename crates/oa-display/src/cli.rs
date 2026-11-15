@@ -11,7 +11,8 @@
 use crate::list::{list_new, DisplayError};
 use crate::raster::{frame_digest, frame_len, rasterize, FrameSpec, RenderError};
 use crate::scene::{
-    build_scene, layer_set, scene_caps, scene_index, scratch_for, view_new, LAYER_NAMES,
+    build_scene, layer_set, scene_caps, scene_index, scratch_for, view_new, LAYER_LEGEND,
+    LAYER_NAMES,
 };
 use oa_airspace::geom::deg_to_e7;
 use oa_airspace::snapshot::{decode, MAX_SNAPSHOT_BYTES};
@@ -279,6 +280,24 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
     );
     if let Some(d) = &digest {
         let _ = writeln!(out, "sha256   {}", to_hex(d));
+    }
+    if stats.legend_cut > 0 {
+        // The screen is too narrow for the legend: the image marks each cut at its right edge and
+        // the whole legend is here.
+        let _ = writeln!(
+            out,
+            "legend   {} texts are cut at the right edge of this {}-pixel width; whole legend:",
+            stats.legend_cut, a.width
+        );
+        let t = &list.texts;
+        for ((&s, &n), &layer) in t.start.iter().zip(&t.len).zip(&t.layer) {
+            let text = list
+                .text
+                .get(s as usize..(s as usize).saturating_add(n as usize));
+            if let (LAYER_LEGEND, Some(text)) = (layer, text) {
+                let _ = writeln!(out, "legend   {text}");
+            }
+        }
     }
     let _ = writeln!(
         out,
