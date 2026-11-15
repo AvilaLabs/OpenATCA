@@ -73,7 +73,9 @@ const HYPOT_HI: f64 = 1.0e150;
 /// parts below 2^-104), a double square root and one correction with the exact square:
 /// `r = sqrt(sh)`, `rem = sh + sl - r^2`, `cl = rem * (1 / 2r)`. The error is the rounding of
 /// `cl` (the reciprocal and the product, below 2^-105 of `r` as `cl` is below 2^-52 `r`) and of
-/// the low sum (below 2^-103 relative) plus the second-order term `cl^2 / 2r`: below 2^-102.
+/// the low sum (below 2^-103 relative) plus the second-order term `cl^2 / 2r`: below 2^-102. The
+/// sum of the squares is used as `s.hi` plus the low terms without renormalising: `s.hi - r^2` is
+/// exact (the two agree to 2^-52), and `cl` stays below 1.5 2^-52 `r`.
 /// The operands are ordered by their bit patterns (equal to the order of magnitudes) and used
 /// as they are (by [`hypot_fast`], which checks the range and the ratio): the derivation does
 /// not depend on the scale, only on the ratio.
@@ -83,11 +85,10 @@ fn hypot_fast_plain(big: f64, small: f64) -> Option<f64> {
     let pb = two_sqr(small);
     // pa.hi >= pb.hi, as the squares round monotonically
     let s = fast_two_sum(pa.hi, pb.hi);
-    let f = fast_two_sum(s.hi, s.lo + (pa.lo + pb.lo));
-    let r = f.hi.sqrt();
+    let r = s.hi.sqrt();
     let half_inv = 0.5 / r;
     let sq = two_sqr(r);
-    let cl = (((f.hi - sq.hi) - sq.lo) + f.lo) * half_inv;
+    let cl = (((s.hi - sq.hi) - sq.lo) + (s.lo + (pa.lo + pb.lo))) * half_inv;
     round_test(r, cl, r * ROOT_FAST_REL)
 }
 
