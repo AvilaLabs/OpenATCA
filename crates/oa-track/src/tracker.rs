@@ -53,7 +53,8 @@
 //! the ticks after it, not those already emitted.
 
 use oa_adsb::{
-    category_observe, jump_verdict, CategoryState, JumpPair, JumpVerdict, CAP_ORDINARY_KT, NONE_U16,
+    category_observe, jump_verdict, CategoryState, JumpPair, JumpVerdict, CAP_ORDINARY_KT,
+    NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
 use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
@@ -456,7 +457,7 @@ pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
     if m.flags & crate::types::M_HAS_VEL != 0 {
         let v_ok = m.vel_east_mps.is_finite()
             && m.vel_north_mps.is_finite()
-            && m.vel_east_mps.hypot(m.vel_north_mps) < 1500.0
+            && f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) <= SPEED_ENVELOPE_MPS
             && cov_ok(&m.vel_cov_m2s2);
         if !v_ok {
             return Err(REF_VELOCITY);
@@ -637,20 +638,36 @@ fn note_category(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.cat, slot, c);
 }
 
-/// Applies a measurement newer than or equal to the track's newest update.
-fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
+/// What [`decide`] did with a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// The track restarted from the measurement (initiation window or plausibility).
+    Begun,
+    /// Applied to the filter.
+    Applied,
+    /// Rejected by the position gate (the filter keeps the run of rejections).
+    Rejected,
+    /// Too many rejections in a row: the filter started again at the measurement.
+    Resynced,
+}
+
+/// The per-measurement decision, the same for a measurement that arrives in order and for each
+/// one of a history replayed after a late insertion: initiation window and plausibility of a
+/// tentative track, the position gate, the rejection streak and the resync. Updates the track's
+/// columns; counts the decision's own events (restarts, rejections, resyncs) but not
+/// `applied`, which the callers count as their path requires. The measurement is at or after the
+/// track's newest update.
+fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
     if col(&t.state, slot, FREE) == TENTATIVE {
         if m.toa_ns - col(&t.first_ns, slot, 0) > init_window_ns(t) {
             t.stats.init_window_expired += 1;
             track_begin(t, slot, m);
-            emit_if_confirmed(t, slot, out);
-            return;
+            return Step::Begun;
         }
         if implausible(t, slot, m) {
             t.stats.init_implausible += 1;
             track_begin(t, slot, m);
-            emit_if_confirmed(t, slot, out);
-            return;
+            return Step::Begun;
         }
     }
     let mut f = col(&t.cur, slot, blank_filter());
@@ -658,6 +675,7 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
         Applied::Rejected => {
             // Keeps the count of rejections in a row, so repeated ones re-initialise.
             put(&mut t.cur, slot, f);
+            Step::Rejected
         }
         Applied::Yes => {
             put(&mut t.cur, slot, f);
@@ -668,9 +686,8 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
             put(&mut t.updates, slot, u);
             let h = col(&t.hits, slot, 0).saturating_add(1);
             put(&mut t.hits, slot, h);
-            t.stats.applied += 1;
             maybe_confirm(t, slot, m.toa_ns);
-            emit_if_confirmed(t, slot, out);
+            Step::Applied
         }
         Applied::Resync => {
             put(&mut t.cur, slot, f);
@@ -681,18 +698,40 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
             set_last(t, slot, m.toa_ns);
             put(&mut t.hits, slot, 1);
             put(&mut t.updates, slot, 1);
-            t.stats.applied += 1;
+            Step::Resynced
         }
     }
 }
 
-fn emit_if_confirmed(t: &Tracker, slot: usize, out: &mut TrackOutput) {
-    if col(&t.state, slot, FREE) == CONFIRMED {
-        emit(t, slot, col(&t.last_ns, slot, 0), 0, out);
+/// Applies a measurement newer than or equal to the track's newest update.
+fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
+    match decide(t, slot, m) {
+        Step::Begun => emit_if_confirmed(t, slot, out),
+        Step::Applied => {
+            t.stats.applied += 1;
+            emit_if_confirmed(t, slot, out);
+        }
+        Step::Resynced => t.stats.applied += 1,
+        Step::Rejected => {}
     }
 }
 
-/// Applies a measurement older than the track's newest update by re-filtering from the ring.
+fn emit_if_confirmed(t: &Tracker, slot: usize, out: &mut TrackOutput) {
+    emit_if_confirmed_at(t, slot, col(&t.last_ns, slot, 0), out);
+}
+
+fn emit_if_confirmed_at(t: &Tracker, slot: usize, at_ns: i64, out: &mut TrackOutput) {
+    if col(&t.state, slot, FREE) == CONFIRMED {
+        emit(t, slot, at_ns, 0, out);
+    }
+}
+
+/// Applies a measurement older than the track's newest update by re-filtering from the ring: the
+/// track is put back as it was after the newest stored update at or before the measurement, and
+/// the measurement and the stored ones after it are decided again in time order, through
+/// [`decide`], as if they had arrived in that order. So restarts, confirmation, rejections and
+/// resyncs do not depend on the order of arrival (while the ring holds the whole history since
+/// the track began; past that the trusted category is the live one).
 fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
     let len = ring_len(t, slot);
     // The newest stored update at or before the measurement (the state after an update is at
@@ -714,54 +753,88 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         t.stats.duplicates += 1;
         return;
     }
-    // The stored measurements after the base, to be applied again after `m`.
-    let mut later = [blank_measurement(); RING_DEPTH];
-    let mut n_later = 0usize;
+    // The measurement, then the stored ones after the base, in time order.
+    let mut seq = [*m; RING_DEPTH + 1];
+    let mut n_seq = 1usize;
     for k in (e + 1)..len {
         let at = ring_ix(t, slot, k);
-        if let Some(c) = later.get_mut(n_later) {
+        if let Some(c) = seq.get_mut(n_seq) {
             *c = col(&t.ring_m, at, blank_measurement());
-            n_later += 1;
+            n_seq += 1;
         }
     }
     // The run of rejected reports since the newest update belongs to the live filter, not to a
-    // state rebuilt from the ring (whose counters are zero): it is put back at the end.
+    // state rebuilt from the ring (whose counters are zero): it is put back at the end, unless
+    // the replay itself rejected, re-synchronised or restarted the track, when what the
+    // chronological order gives stands.
     let live = col(&t.cur, slot, blank_filter());
     let (rej_h, rej_v) = (live.rej_h, live.rej_v);
+    // The track as it was after the base entry: the filter, the counts, the category, and
+    // tentative again if it was confirmed only by a later entry.
+    let base_ns = col(&t.ring_m, ring_ix(t, slot, e), blank_measurement()).toa_ns;
     let bf = ring_state(t, slot, e);
+    let kept = len - (e + 1);
+    let updates = col(&t.updates, slot, 0);
+    let mut cat = if (updates as usize) <= len {
+        CategoryState::default()
+    } else {
+        // Entries older than the ring were dropped: their trusted category stands.
+        CategoryState {
+            trusted: col(&t.cat, slot, CategoryState::default()).trusted,
+            ..CategoryState::default()
+        }
+    };
+    for k in 0..=e {
+        let em = col(&t.ring_m, ring_ix(t, slot, k), blank_measurement());
+        category_observe(&mut cat, em.category);
+    }
+    put(&mut t.cat, slot, cat);
+    put(
+        &mut t.updates,
+        slot,
+        updates.saturating_sub(kept as u32).max(1),
+    );
+    let hits = col(&t.hits, slot, 0);
+    put(
+        &mut t.hits,
+        slot,
+        hits.saturating_sub(kept.min(255) as u8).max(1),
+    );
+    if col(&t.state, slot, FREE) == CONFIRMED && col(&t.confirmed_ns, slot, i64::MIN) > base_ns {
+        put(&mut t.state, slot, TENTATIVE);
+        put(&mut t.confirmed_ns, slot, i64::MIN);
+        t.stats.confirmed = t.stats.confirmed.saturating_sub(1);
+    }
     put(&mut t.ring_len, slot, (e + 1) as u8);
     put(&mut t.cur, slot, bf);
-    let mut f = bf;
-    let applied = matches!(filter_apply(&mut f, m, &mut t.stats), Applied::Yes);
-    if applied {
-        put(&mut t.cur, slot, f);
-        ring_push(t, slot, m);
-        t.stats.applied += 1;
-        t.stats.refiltered += 1;
-        let u = col(&t.updates, slot, 0).saturating_add(1);
-        put(&mut t.updates, slot, u);
-        let h = col(&t.hits, slot, 0).saturating_add(1);
-        put(&mut t.hits, slot, h);
-        maybe_confirm(t, slot, m.toa_ns);
-        if col(&t.state, slot, FREE) == CONFIRMED {
-            emit(t, slot, m.toa_ns, 0, out);
+    set_last(t, slot, base_ns);
+    // `m` and then the stored later ones, in time order, through the in-order decision.
+    let mut disturbed = false;
+    for (k, cm) in seq.iter().take(n_seq).enumerate() {
+        let step = decide(t, slot, cm);
+        match step {
+            Step::Applied if k == 0 => {
+                t.stats.applied += 1;
+                t.stats.refiltered += 1;
+            }
+            Step::Applied => t.stats.replayed += 1,
+            Step::Resynced if k == 0 => {
+                disturbed = true;
+                t.stats.applied += 1;
+                t.stats.refiltered += 1;
+            }
+            Step::Resynced | Step::Begun | Step::Rejected => disturbed = true,
+        }
+        if k == 0 && matches!(step, Step::Applied | Step::Begun) {
+            emit_if_confirmed_at(t, slot, m.toa_ns, out);
         }
     }
-    let mut newest = col(&t.cur, slot, blank_filter()).t_ns;
-    for lm in later.iter().take(n_later) {
+    if !disturbed {
         let mut f = col(&t.cur, slot, blank_filter());
-        if matches!(filter_apply(&mut f, lm, &mut t.stats), Applied::Yes) {
-            put(&mut t.cur, slot, f);
-            ring_push(t, slot, lm);
-            t.stats.replayed += 1;
-            newest = lm.toa_ns;
-        }
+        f.rej_h = rej_h;
+        f.rej_v = rej_v;
+        put(&mut t.cur, slot, f);
     }
-    set_last(t, slot, newest);
-    let mut f = col(&t.cur, slot, blank_filter());
-    f.rej_h = rej_h;
-    f.rej_v = rej_v;
-    put(&mut t.cur, slot, f);
 }
 
 /// The first tick of the grid at or after `at_ns`. `at_ns` and the tick are bounded
@@ -875,6 +948,15 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
 
 /// Keeps a held measurement; past the buffer the oldest is discarded.
 fn held_push(t: &mut Tracker, m: &Measurement) {
+    // An exact repeat of a held measurement is not held again.
+    let repeat = t
+        .held
+        .iter()
+        .take(t.held_n)
+        .any(|h| h.toa_ns == m.toa_ns && h.addr == m.addr && h.sensor == m.sensor);
+    if repeat {
+        return;
+    }
     if t.held_n >= t.held.len() {
         t.held.rotate_left(1);
         t.held_n = t.held.len() - 1;
@@ -1046,4 +1128,148 @@ pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, boo
         col(&t.state, slot, FREE) == CONFIRMED,
         col(&t.last_ns, slot, 0),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+    use crate::types::{output_new, DEFAULT_CONFIG};
+
+    const S: i64 = NS_PER_S;
+    const ADDR: u32 = 0xABC123;
+
+    fn cfg(init_m: u8, h_mode: u8) -> TrackerConfig {
+        TrackerConfig {
+            max_tracks: 8,
+            out_capacity: 1 << 12,
+            log_capacity: 64,
+            init_m,
+            init_n: 3,
+            h_mode,
+            ..DEFAULT_CONFIG
+        }
+    }
+
+    /// A position-only report at `t_s` seconds, `east_m` metres east of (0, 0) on the equator and
+    /// `lon_e7` further, with position variance `var`.
+    fn at(t_s: i64, lon_e7: i32, var: f32) -> Measurement {
+        Measurement {
+            toa_ns: 1_000 * S + t_s * S,
+            pos_cov_m2: [var, 0.0, var],
+            lon_e7,
+            addr: ADDR,
+            sensor: 1,
+            ..blank_measurement()
+        }
+    }
+
+    /// Everything the order of arrival must not change about the track.
+    #[derive(Debug, PartialEq)]
+    struct Snap {
+        state: u8,
+        hits: u8,
+        updates: u32,
+        first_ns: i64,
+        last_ns: i64,
+        confirmed_ns: i64,
+        cur: Filter,
+        ring: Vec<Measurement>,
+    }
+
+    fn snap(t: &Tracker) -> Snap {
+        let slot = lookup(t, ADDR).unwrap();
+        Snap {
+            state: col(&t.state, slot, FREE),
+            hits: col(&t.hits, slot, 0),
+            updates: col(&t.updates, slot, 0),
+            first_ns: col(&t.first_ns, slot, 0),
+            last_ns: col(&t.last_ns, slot, 0),
+            confirmed_ns: col(&t.confirmed_ns, slot, 0),
+            cur: col(&t.cur, slot, blank_filter()),
+            ring: (0..ring_len(t, slot))
+                .map(|k| col(&t.ring_m, ring_ix(t, slot, k), blank_measurement()))
+                .collect(),
+        }
+    }
+
+    fn run(c: &TrackerConfig, ms: &[Measurement]) -> Tracker {
+        let mut t = tracker_new(c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for m in ms {
+            tracker_update(&mut t, m, &mut out);
+        }
+        t
+    }
+
+    fn assert_same_outcome(c: &TrackerConfig, chrono: &[Measurement], late: &[Measurement]) {
+        let (a, b) = (run(c, chrono), run(c, late));
+        assert_eq!(snap(&a), snap(&b));
+        let (sa, sb) = (tracker_stats(&a), tracker_stats(&b));
+        assert_eq!(sa.init_implausible, sb.init_implausible);
+        assert_eq!(sa.init_window_expired, sb.init_window_expired);
+        assert_eq!(sa.confirmed, sb.confirmed);
+        assert_eq!(sa.jump_rejected, sb.jump_rejected);
+        assert_eq!(sa.resyncs, sb.resyncs);
+    }
+
+    // REQ: OA-TRK-230
+    #[test]
+    fn a_late_report_gets_the_same_plausibility_check_as_one_in_order() {
+        let c = cfg(3, 1);
+        // B is about 100 km from A; its huge covariance passes the statistical gate.
+        let a0 = at(0, 0, 100.0);
+        let b1 = at(1, 9_000_000, 1.0e9);
+        let a2 = at(2, 0, 100.0);
+        assert_same_outcome(&c, &[a0, b1, a2], &[a0, a2, b1]);
+        let t = run(&c, &[a0, a2, b1]);
+        assert_eq!(tracker_stats(&t).init_implausible, 2);
+        assert_eq!(tracker_stats(&t).confirmed, 0);
+        assert_eq!(snap(&t).hits, 1);
+    }
+
+    /// A0 with a loose variance, a precise report `LATE_OFF_E7` (700 m) east at 1 s, then `n` precise
+    /// reports back at the origin that the late one's state rejects.
+    const LATE_OFF_E7: i32 = 62_900;
+
+    fn streak_world(n: i64) -> (Vec<Measurement>, Vec<Measurement>) {
+        let a0 = at(0, 0, 100.0);
+        let l1 = at(1, LATE_OFF_E7, 1.0);
+        let ns: Vec<Measurement> = (2..2 + n).map(|s| at(s, 0, 1.0)).collect();
+        let mut chrono = vec![a0, l1];
+        chrono.extend(&ns);
+        let mut late = vec![a0];
+        late.extend(&ns);
+        late.push(l1);
+        (chrono, late)
+    }
+
+    // REQ: OA-TRK-231
+    #[test]
+    fn a_late_report_leaves_the_rejection_streak_chronological_arrival_gives() {
+        let c = cfg(2, 1);
+        let (chrono, late) = streak_world(3);
+        assert_same_outcome(&c, &chrono, &late);
+        let s = snap(&run(&c, &late));
+        assert_eq!(s.cur.rej_h, 3);
+        assert_eq!(tracker_stats(&run(&c, &late)).jump_rejected, 3);
+    }
+
+    // REQ: OA-TRK-231
+    #[test]
+    fn a_late_report_gives_the_resync_chronological_arrival_gives() {
+        let c = cfg(2, 1);
+        let (chrono, late) = streak_world(5);
+        assert_same_outcome(&c, &chrono, &late);
+        let t = run(&c, &late);
+        assert_eq!(tracker_stats(&t).resyncs, 1);
+        let s = snap(&t);
+        assert_eq!((s.hits, s.ring.len(), s.cur.rej_h), (1, 1, 0));
+    }
 }

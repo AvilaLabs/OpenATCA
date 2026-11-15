@@ -1726,6 +1726,8 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-ADSB-162** A command-line date is refused unless its day exists in its month (28 or 29 days in
   February by the Gregorian leap rule, 30 in April, June, September and November) and every field is
   plain digits, with no sign.
+- **OA-ADSB-170** The supported speed envelope `SPEED_ENVELOPE_KT` is the highest hard cap of any category
+  (4,088 kt) and `SPEED_ENVELOPE_MPS` is the same in metres per second.
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
@@ -2655,7 +2657,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   (position under 8 m RMS, speed under 1 m/s), because the frame is re-centred on every update and the
   velocity rotated by the change of the frame's axes.
 - **OA-TRK-009** A measurement that arrives out of order inside the window is applied by re-filtering from
-  stored state: with every fifth neighbour pair swapped, each swap is re-filtered and replayed exactly
+  stored state (decided again in time order, OA-TRK-230): with every fifth neighbour pair swapped, each swap is re-filtered and replayed exactly
   once and the output after the last swap is bit-identical to the in-order run.
 - **OA-TRK-010** A measurement older than the clock by more than the window, one inside the window but
   older than every stored state of its track, and an exact repeat (same time and sensor) are each counted
@@ -2853,8 +2855,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-077** A report is a duplicate when any report in the track's ring has its time and sensor, not
   only the newest or the one just before it: a repeat of one sensor's report after another sensor's report
   at the same instant is counted and not applied again, in order and out of order.
-- **OA-TRK-078** A late report applied by re-filtering keeps the track's run of rejected reports, so the
-  rejection that would have re-initialised the filter still does.
+- **OA-TRK-078** A late report applied by re-filtering keeps the track's run of rejected reports when the
+  replay itself had no rejection, restart or resync (OA-TRK-231), so the rejection that would have
+  re-initialised the filter still does.
 - **OA-TRK-079** A spill refuses a directory that exists and has anything in it, creates its column files
   new, and on drop removes only those files (by name) and then the directory if it is empty; a file put
   into the directory meanwhile survives.
@@ -2973,6 +2976,24 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-200** Sensors live only because of data ahead of the real time (a forged clock's) do not lock a
   real sensor out of the step back: two colluding sensors that put the clock ahead, then one real sensor
   with many aircraft, step it back after the run.
+
+- **OA-TRK-230** A report applied late (older than its track's newest update, inside the window) is decided
+  again with the stored reports after it, in time order, through the decision an in-order report gets
+  (initiation window, plausibility, position gate, rejection streak, resync): the track's hits,
+  confirmation, restarts, filter state and stored history equal those of the same reports arriving in time
+  order. A far, huge-covariance late report cannot confirm a tentative track that in-order arrival restarts.
+- **OA-TRK-231** The rejections, rejection streak and resync that the replay of a late report produces are
+  kept (a streak of 3 and a resync at the fifth rejection equal those of in-order arrival); the live streak
+  is put back only when the replay had no rejection, restart or resync (OA-TRK-078).
+- **OA-TRK-232** The tracker's velocity limit is the supported speed envelope of `oa-adsb`
+  (`SPEED_ENVELOPE_KT`, the highest category cap, 4,088 kt): one definition, no limit of the tracker's own.
+- **OA-TRK-233** A velocity up to the envelope is accepted (2,916 and 3,000 kt with and without velocity pass
+  alike); one above it is refused as a bad velocity and counted, and no track is made from it.
+- **OA-TRK-234** Exact repeats (same time, address and sensor) of a far-ahead or a late measurement do not add
+  members to a run, in the gate or in the held buffer: three repeats of one far-ahead report do not step the
+  clock, with other tracks live or with one track live that another sensor delivers.
+- **OA-TRK-235** When only the measurement's own track and sensor are live, the first far-ahead report steps
+  the clock at once and its exact repeats add nothing (counted as duplicates, none applied or held).
 
 - **OA-TRK-210** A radar plot's position covariance is in the target's own east-north frame: the range,
   azimuth and height errors are linearised exactly (the elevation adjusting to hold the height) and rotated

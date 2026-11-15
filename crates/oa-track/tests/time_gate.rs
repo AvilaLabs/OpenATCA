@@ -292,3 +292,64 @@ fn the_sensor_table_reuses_the_least_recent_place_and_counts_it() {
     assert_eq!(tracker_stats(&t).time_sensor_evicted, 6); // NEW-STAT
     assert_eq!(tracker_stats(&t).late_window, 0);
 }
+
+/// One live track of aircraft 0 reported by sensor 1 until `t1` seconds.
+fn lone_track(t1: i64) -> (Tracker, TrackOutput, Rng) {
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 20);
+    let mut rng = Rng(11);
+    for s in 0..=t1 {
+        tracker_update(&mut t, &meas(0, 1, s as f64, &mut rng), &mut out);
+    }
+    (t, out, rng)
+}
+
+// REQ: OA-TRK-234
+#[test]
+fn exact_repeats_of_one_far_ahead_measurement_are_not_a_run() {
+    // Six live tracks from two sensors.
+    let (mut t, mut out, mut rng) = fleet_until(10);
+    let m = far(0, 3, 11.0, 10 + 299, &mut rng);
+    for _ in 0..3 {
+        tracker_update(&mut t, &m, &mut out);
+    }
+    assert_eq!(
+        (tracker_stats(&t).time_held, tracker_stats(&t).time_steps),
+        (3, 0)
+    );
+    assert_eq!(tracker_live(&t).len(), 6);
+    // One live track (its own address) delivered by another sensor: the spread a run needs is
+    // one sensor and one address, which three repeats of one report would meet.
+    let (mut t, mut out, mut rng) = lone_track(10);
+    let m = far(0, 3, 11.0, 10 + 299, &mut rng);
+    for _ in 0..3 {
+        tracker_update(&mut t, &m, &mut out);
+    }
+    let st = tracker_stats(&t);
+    assert_eq!((st.time_held, st.time_steps), (3, 0), "held, steps");
+    assert_eq!(tracker_live(&t), vec![(0xA00000, 10 * S)]);
+    // Two different reports are still a run only at three: the repeats added nothing.
+    tracker_update(&mut t, &far(0, 3, 12.0, 10 + 300, &mut rng), &mut out);
+    assert_eq!(tracker_stats(&t).time_steps, 0);
+    tracker_update(&mut t, &far(0, 3, 13.0, 10 + 301, &mut rng), &mut out);
+    assert_eq!(tracker_stats(&t).time_steps, 1);
+}
+
+// REQ: OA-TRK-235
+#[test]
+fn repeats_of_a_far_ahead_measurement_of_the_only_track_and_sensor_add_nothing() {
+    let (mut t, mut out, mut rng) = lone_track(10);
+    let m = far(0, 1, 11.0, 10 + 299, &mut rng);
+    tracker_update(&mut t, &m, &mut out);
+    let after_first = *tracker_stats(&t);
+    // Nothing else is at stake: the first steps the clock at once.
+    assert_eq!((after_first.time_steps, after_first.time_held), (1, 0));
+    for _ in 0..2 {
+        tracker_update(&mut t, &m, &mut out);
+    }
+    let st = tracker_stats(&t);
+    assert_eq!((st.time_steps, st.time_held, st.late_window), (1, 0, 0));
+    assert_eq!(st.duplicates, 2);
+    assert_eq!(st.applied, after_first.applied);
+    assert_eq!(oa_track::tracker_newest_update_ns(&t), (10 + 299) * S);
+}

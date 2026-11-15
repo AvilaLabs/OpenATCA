@@ -41,12 +41,20 @@
 //! 3. if neither gives a ground speed, the implied speed is under the **ceiling** of the class
 //!    (the speed the class can fly plus 250 kt of wind).
 
+const MPS_PER_KT: f64 = 0.514_444_444_444;
+
 /// Hard cap for ordinary emitter classes, knots: the subsonic ground-speed field maximum.
 pub const CAP_ORDINARY_KT: f64 = 1000.0;
 /// Hard cap for high-performance, no-information and unmanned categories, knots.
 pub const CAP_HIGH_KT: f64 = 2000.0;
 /// Hard cap for space and trans-atmospheric vehicles, knots: the supersonic field maximum.
 pub const CAP_SPACE_KT: f64 = 4088.0;
+/// The supported speed envelope, knots: the highest ground speed of any category class. A
+/// consumer that bounds a velocity (the tracker's measurement check) uses this, so no limit of
+/// its own can refuse a speed a category allows.
+pub const SPEED_ENVELOPE_KT: f64 = CAP_SPACE_KT;
+/// [`SPEED_ENVELOPE_KT`] in metres per second.
+pub const SPEED_ENVELOPE_MPS: f64 = SPEED_ENVELOPE_KT * MPS_PER_KT;
 /// Multiplier on the reported ground speed in the consistency test.
 pub const CONSISTENCY_FACTOR: f64 = 1.2;
 /// Constant added in the consistency test, knots.
@@ -54,8 +62,6 @@ pub const CONSISTENCY_BASE_KT: f64 = 40.0;
 /// Speed change allowed per second of the gap in the consistency test, knots per second
 /// (about 0.1 g).
 pub const CONSISTENCY_ACCEL_KT_S: f64 = 2.0;
-
-const MPS_PER_KT: f64 = 0.514_444_444_444;
 
 /// Why a displacement was judged impossible; [`JumpVerdict::Plausible`] if it was not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

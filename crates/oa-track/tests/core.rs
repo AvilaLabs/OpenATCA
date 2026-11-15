@@ -1388,6 +1388,59 @@ fn a_repeat_of_a_report_is_a_duplicate_even_after_another_sensor_reported_at_the
     assert_eq!(tracker_stats(&t).applied, applied);
 }
 
+// REQ: OA-TRK-232
+#[test]
+fn the_velocity_limit_is_the_speed_envelope_of_the_category_table() {
+    let mut m = base_measurements(0xD00003, 1, 1.0, 1)[0];
+    m.vel_cov_m2s2 = [1.0, 0.0, 1.0];
+    m.flags |= M_HAS_VEL;
+    m.vel_north_mps = 0.0;
+    let envelope = oa_adsb::SPEED_ENVELOPE_MPS as f32;
+    m.vel_east_mps = envelope - 1.0;
+    assert_eq!(measurement_check(&m), Ok(()));
+    m.vel_east_mps = envelope + 1.0;
+    assert_eq!(measurement_check(&m), Err(2));
+}
+
+// REQ: OA-TRK-233
+#[test]
+fn a_velocity_is_accepted_up_to_the_supported_speed_envelope_and_refused_above_it() {
+    let mut base = base_measurements(0xD00002, 3, 1.0, 1)[0];
+    base.category = 0xb7;
+    base.vel_cov_m2s2 = [1.0, 0.0, 1.0];
+    let kt = |k: f64| (k * 0.514_444_444_444) as f32;
+    let with_vel = |k: f64| {
+        let mut m = base;
+        m.vel_east_mps = kt(k);
+        m.vel_north_mps = 0.0;
+        m.flags |= M_HAS_VEL;
+        m
+    };
+    let without = {
+        let mut m = base;
+        m.flags &= !M_HAS_VEL;
+        m
+    };
+    assert!(measurement_check(&without).is_ok());
+    // 2,916 kt is 1,500 m/s; 3,000 kt is a valid B7 speed.
+    for k in [2_916.0, 3_000.0, 4_000.0, oa_adsb::SPEED_ENVELOPE_KT] {
+        assert_eq!(measurement_check(&with_vel(k)), Ok(()), "{k} kt");
+    }
+    // Just above the envelope, and far above: refused as a bad velocity.
+    for k in [4_090.0, 6_000.0] {
+        assert_eq!(measurement_check(&with_vel(k)), Err(2), "{k} kt");
+    }
+    // The refusal is counted and no track is made; the same report below the envelope is applied.
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(100);
+    tracker_update(&mut t, &with_vel(4_090.0), &mut out);
+    assert_eq!(tracker_stats(&t).refused[2], 1);
+    assert_eq!(tracker_stats(&t).started, 0);
+    tracker_update(&mut t, &with_vel(3_000.0), &mut out);
+    assert_eq!(tracker_stats(&t).refused[2], 1);
+    assert_eq!(tracker_stats(&t).started, 1);
+}
+
 // REQ: OA-TRK-078
 #[test]
 fn a_late_report_does_not_erase_the_run_of_rejected_reports() {
