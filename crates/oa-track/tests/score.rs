@@ -651,6 +651,29 @@ fn the_latency_stages_are_stamped_from_an_injected_clock_and_never_change_the_ou
     );
 }
 
+// REQ: OA-TRK-160
+#[test]
+fn a_report_received_before_its_sensor_time_is_counted_as_clock_skew() {
+    use oa_track::latency::{latency_new, latency_record, latency_stats, Stamps};
+    let mut log = latency_new(8);
+    let at = |toa_ns: i64, recv_ns: i64| Stamps {
+        toa_ns,
+        recv_ns,
+        received: 10,
+        decoded: 20,
+        update_start: 30,
+        updated: 40,
+        emitted: 50,
+    };
+    latency_record(&mut log, &at(1_000, 1_500));
+    assert_eq!(log.sensor_negative, 0);
+    latency_record(&mut log, &at(2_000, 1_500));
+    // The signed value is kept (the statistics show the skew); the count says how many.
+    assert_eq!(log.sensor_negative, 1);
+    assert_eq!(log.negative, 0);
+    assert_eq!(latency_stats(&log, 0).min, -500);
+}
+
 // REQ: OA-TRK-047
 #[test]
 fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages() {

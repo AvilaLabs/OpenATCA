@@ -309,7 +309,7 @@ fn scattered_wild_frames_are_held_and_counted_and_a_step_needs_three_in_a_row() 
     // Two wild frames that agree are not enough, a third that is earlier restarts the count, and
     // so does one in the other direction.
     let far = T0 + 30 * 24 * HOUR;
-    for t in [far, far + NS, far - NS, far + 2 * NS] {
+    for t in [far, far + NS, far + 3 * HOUR, far + 3 * HOUR + 2 * NS] {
         tick(&mut p, t);
         assert_eq!(p.replay_ns, T0 + 39 * NS);
     }
@@ -342,6 +342,31 @@ fn a_step_back_is_counted_and_the_regressions_before_it_stay_counted() {
     assert_eq!(p.clock.backward_steps, 1);
     // The two held frames were behind the clock, so they are regressions as before.
     assert_eq!(p.errors[ErrKind::TimeRegression as usize], 2);
+}
+
+// REQ: OA-RPL-150
+#[test]
+fn a_step_is_confirmed_by_candidates_that_jitter_and_not_by_candidates_far_apart() {
+    // A step back whose three frames arrive out of order by up to a second (two decoder
+    // threads): confirmed on the third.
+    let mut p = small_pipeline(64);
+    tick(&mut p, T0);
+    let base = T0 - 2 * HOUR;
+    tick(&mut p, base + NS);
+    tick(&mut p, base);
+    assert_eq!(p.replay_ns, T0);
+    tick(&mut p, base + NS / 2);
+    assert_eq!(p.clock.backward_steps, 1);
+    assert_eq!(p.replay_ns, base + NS / 2);
+    // Candidates a day apart each start a new run: none confirms.
+    let mut p = small_pipeline(64);
+    tick(&mut p, T0);
+    for k in 1..=3 {
+        tick(&mut p, T0 + k * 24 * HOUR);
+        assert_eq!(p.replay_ns, T0);
+    }
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (0, 0));
+    assert_eq!(p.clock.held, 3);
 }
 
 /// A frame that carries no feed data, from the feed `feed`.

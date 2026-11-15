@@ -243,6 +243,10 @@ fn find(parent: &mut [u32], mut x: usize) -> usize {
     x
 }
 
+/// Relative cost per track index that settles exact ties in the matrix solve (times the gate):
+/// far below any difference of two costs that are not equal, far above rounding.
+const TIE_BREAK: f64 = 1.0e-10;
+
 /// The exact minimum of the padded square assignment `h.cost[i * n + j]` (`n x n`): for each
 /// row the column chosen, in `h.row_to_col`. Hungarian method with potentials (rows and columns
 /// are 1-based inside).
@@ -486,10 +490,13 @@ fn solve_component(
         ) else {
             continue;
         };
-        // The same pair twice keeps the cheaper cost.
+        // The same pair twice keeps the cheaper cost. A track pays a hair more for each place
+        // after the first in the component, so an exact tie goes to the lowest track index
+        // (the padded dummies carry no such term, so every solution pays the same for them).
         let c = &mut m[i * n + j];
-        if p.cost < *c {
-            *c = p.cost;
+        let cost = p.cost + gate * TIE_BREAK * i as f64;
+        if cost < *c {
+            *c = cost;
         }
     }
     let pen = 0.5 * gate;
@@ -652,6 +659,33 @@ mod tests {
             n_tracks,
             gate,
         )
+    }
+
+    // REQ: OA-TRK-151
+    #[test]
+    fn the_hungarian_branch_breaks_an_exact_cost_tie_by_lowest_track_index() {
+        let pr = |track, plot, cost| Pair { track, plot, cost };
+        // Two tracks equally good for one plot, in either order of the pairs.
+        for pairs in [
+            [pr(0, 0, 1.0), pr(1, 0, 1.0)],
+            [pr(1, 0, 1.0), pr(0, 0, 1.0)],
+        ] {
+            let (a, st) = solve(2, 1, &pairs, 10.0);
+            assert_eq!(st.solved, 1);
+            assert_eq!(a, vec![0]);
+        }
+        // Three tracks, two plots, every cost equal: the two lowest tracks win, in plot order.
+        let mut pairs = Vec::new();
+        for t in (0..3).rev() {
+            for q in 0..2 {
+                pairs.push(pr(t, q, 2.0));
+            }
+        }
+        let (a, st) = solve(3, 2, &pairs, 10.0);
+        assert_eq!(st.solved, 1);
+        let mut won = a.clone();
+        won.sort_unstable();
+        assert_eq!(won, vec![0, 1]);
     }
 
     // REQ: OA-TRK-035

@@ -52,7 +52,7 @@ use oa_adsb::{
 };
 
 use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
-use crate::hfilter::HFilter;
+use crate::hfilter::{h_combine, HFilter};
 use crate::params::{
     CLOCK_STEP_CONFIRM, CLOCK_STEP_LIMIT_NS, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH,
 };
@@ -532,6 +532,23 @@ fn gs_dkt(m: &Measurement) -> u16 {
     (kt * 10.0).round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
 }
 
+/// The filter's estimated ground speed in 0.1 kt, [`NONE_U16`] if it is not a number.
+fn estimated_gs_dkt(f: &Filter) -> u16 {
+    let (x, _) = h_combine(&f.h);
+    let v = x
+        .get(2)
+        .copied()
+        .unwrap_or(0.0)
+        .hypot(x.get(3).copied().unwrap_or(0.0));
+    let dkt = v / MPS_PER_KT * 10.0;
+    if dkt.is_finite() {
+        // Saturates one below the absent value.
+        dkt.round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
+    } else {
+        NONE_U16
+    }
+}
+
 /// The track's position to the measurement is not a displacement the speed rule
 /// (`oa_adsb::jump_verdict`) allows: the measurement is not the same aircraft's next report.
 /// The rule takes the category and the ground speeds of the track's newest report and of the
@@ -556,7 +573,12 @@ fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
         dt_s: (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64,
         slack_m: PLAUSIBLE_SLACK_M,
         category,
-        gs_a_dkt: prev.map_or(NONE_U16, |p| gs_dkt(&p)),
+        gs_a_dkt: prev.map_or(NONE_U16, |p| match gs_dkt(&p) {
+            // The newest report gives no speed: the filter's own estimate stands in for it once
+            // it has had two updates to form one (the first leaves only the prior).
+            NONE_U16 if col(&t.updates, slot, 0) >= 2 => estimated_gs_dkt(&f),
+            g => g,
+        }),
         gs_b_dkt: gs_dkt(m),
     };
     jump_verdict(&pair, CAP_ORDINARY_KT) != JumpVerdict::Plausible

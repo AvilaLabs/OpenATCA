@@ -100,6 +100,9 @@ pub struct LatencyLog {
     pub saturated: u64,
     /// Monotonic differences that were negative (a clock that went back), stored as 0.
     pub negative: u64,
+    /// Stage 0 differences that were negative (a frame received before its sensor time: clock
+    /// skew); the signed value is stored as it is.
+    pub sensor_negative: u64,
     /// Stage 0: receive time minus sensor time, signed, ns.
     pub sensor_to_receive: Vec<i64>,
     /// Stages 1 to 5 (index `stage - 1`), ns.
@@ -139,8 +142,11 @@ pub fn latency_record(log: &mut LatencyLog, s: &Stamps) {
         log.overflow += 1;
         return;
     }
-    log.sensor_to_receive
-        .push(s.recv_ns.saturating_sub(s.toa_ns));
+    let skew = s.recv_ns.saturating_sub(s.toa_ns);
+    if skew < 0 {
+        log.sensor_negative += 1;
+    }
+    log.sensor_to_receive.push(skew);
     let d = [
         i128::from(s.decoded) - i128::from(s.received),
         i128::from(s.updated) - i128::from(s.decoded),

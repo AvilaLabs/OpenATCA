@@ -1110,6 +1110,9 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-101** (proof) From any state the pipeline can hold (every feed with an accepted frame has it at or
   before the clock), one frame that does not complete a confirmation moves a running clock forward by at most
   `CLOCK_TOLERANCE_NS` (2 minutes), and the state stays consistent with the clock that results.
+- **OA-RPL-150** A feed's candidate frames continue one run only when each is within the tolerance of the
+  one before, in either direction: a genuine step back whose three frames arrive up to a second out of order
+  confirms on the third, and candidates a day apart each start a new run and never confirm.
 
 ## M5 — Terrain and obstacles
 
@@ -2480,3 +2483,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-088** A bucket already processed is not processed again: inputs for it that arrive after the
   advance past it are counted late and dropped, so batching the calls does not change what is
   associated.
+- **OA-TRK-150** A report of a track whose newest report gives no ground speed (no category, a radar-only
+  track) is judged against the filter's own estimated ground speed once the track has two updates, not
+  against the 2,000 kt ceiling of "no category": a track steadily flying 300 kt is restarted by a report
+  displaced as a 1,500 kt move, a 900 kt track is not restarted by its own next report, and a track with
+  one update (no estimate yet) is judged as before.
+- **OA-TRK-151** The matrix solve of the assignment breaks an exact cost tie by the lowest track index: two
+  tracks equally good for one plot give it to the lower, whatever the order of the pairs.
+- **OA-TRK-160** A report received before its sensor time is counted as clock skew
+  (`LatencyLog::sensor_negative`); its signed difference is stored as it is.
