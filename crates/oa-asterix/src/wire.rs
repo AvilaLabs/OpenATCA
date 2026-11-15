@@ -529,3 +529,7 @@ pub(crate) fn assemble_record(items: &[(u8, Vec<u8>)]) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(kani)]
+#[path = "proofs_wire.rs"]
+mod proofs;

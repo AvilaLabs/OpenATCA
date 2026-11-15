@@ -41,6 +41,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | [docs/LEGACY_SHORTCOMINGS.md](docs/LEGACY_SHORTCOMINGS.md) | Documented ERAM and STARS failures, each turned into a requirement or test scenario |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements register; every requirement has a test |
 | [docs/RULESET.md](docs/RULESET.md) | The engineering law every change is reviewed against |
+| [docs/VERIFICATION.md](docs/VERIFICATION.md) | Formal proofs (Kani bounded model checking): what is proved, to what bound, and what is not |
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
 | [docs/M0_REPORT.md](docs/M0_REPORT.md) | Milestone 0 result: the ZAU model, checks, defects found, limits |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why and the next step |

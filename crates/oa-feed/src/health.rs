@@ -405,3 +405,39 @@ pub fn format_summary(h: &FeedHealth, now_ns: i64) -> String {
     );
     s
 }
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    use super::*;
+
+    // REQ: OA-FEED-100
+    #[kani::proof]
+    fn observe_seq_accumulation_saturates() {
+        let mut h = FeedHealth::new();
+        h.frames = kani::any();
+        h.seq_next = kani::any();
+        h.seq_last = kani::any();
+        h.gaps = kani::any();
+        h.missing = kani::any();
+        h.duplicates = kani::any();
+        h.regressions = kani::any();
+        // The counters count frames of one feed: 2^64 - 1 of them is not reachable.
+        kani::assume(h.duplicates < u64::MAX && h.regressions < u64::MAX);
+        let seq: u64 = kani::any();
+        let (frames, next, gaps, missing) = (h.frames, h.seq_next, h.gaps, h.missing);
+        observe_seq(&mut h, seq);
+        assert!(h.gaps >= gaps && h.missing >= missing);
+        assert!(h.gaps - gaps <= 1);
+        if frames != 0 && seq > next {
+            assert_eq!(h.gaps, gaps.saturating_add(1));
+            assert_eq!(h.missing, missing.saturating_add(seq - next));
+        } else {
+            assert!(h.gaps == gaps && h.missing == missing);
+        }
+        // The next expected number is never behind the last one seen.
+        if h.seq_last == seq {
+            assert!(h.seq_next >= seq);
+        }
+    }
+}
