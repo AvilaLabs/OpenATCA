@@ -21,26 +21,35 @@
 //!   is refused.
 //!
 //! A range must hold every flight associated with a truth address in it (true for a tracker's
-//! output, which is associated by address).
+//! output, which is associated by address). That is checked, not assumed: a chunk with a flight
+//! keyed or associated outside its range is refused, two ranges that overlap are refused, and a
+//! run whose ranges do not together cover the whole key space (every `u32`, so the radar-only
+//! tracks keyed from 0x4000_0000 are in some range) is refused when it is finished, so no flight
+//! is counted twice or dropped.
+//!
+//! The report of a run in ranges is byte for byte the report of a run in one piece, whatever
+//! order the ranges are added in: case lists are sorted by [`crate::stats::CaseKey`] before they
+//! are cut, sums are exactly rounded ([`crate::stats::ExactSum`]), and the per-flight
+//! association is put together in range order.
 
 use std::collections::BTreeMap;
 
 use crate::assoc::{associate, astatus, index_truth, Assoc, TruthIndex};
-use crate::legacy::{plan_index, Legacy, NO_ALT, NO_TIME};
+use crate::legacy::{new_legacy, plan_index, Legacy, NONE, NO_ALT, NO_TIME};
 use crate::metrics_event::{f1_f2_tbfm, f3_tfms, h1_handoffs, r1_route_conformance, EventCtx};
 use crate::metrics_flow::{
-    presence_add, presence_parts, presence_results, t9_association_errors, PresenceParts,
-    MAX_INTERVAL_S,
+    presence_add, presence_parts, presence_results, t9_keyed, PresenceParts, MAX_INTERVAL_S,
 };
 use crate::metrics_th::{
     t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
 };
 use crate::pair::{build_pairs, PairTable};
 use crate::run::{
-    assoc_result, association_cases, flagged_assoc, flagged_metrics, RunConfig, RunOutput,
+    assoc_result, association_case_lines, flagged_assoc, flagged_metrics, flagged_views, RunConfig,
+    RunOutput,
 };
 use crate::stats::{
-    band, new_result, Exclusions, MetricResult, Row, Stats, COAST_NAMES, MAX_CASES,
+    band, new_result, sort_cases, Exclusions, KeyedCase, MetricResult, Row, Stats, COAST_NAMES,
 };
 use crate::thindex::{build_th_index, samples_of};
 use crate::truth::{Env, Truth};
@@ -134,7 +143,7 @@ pub struct T5Hists {
     pub long: u64,
 }
 
-fn t5_add(h: &mut T5Hists, leg: &Legacy, ix: &crate::thindex::ThIndex) {
+pub fn t5_add(h: &mut T5Hists, leg: &Legacy, ix: &crate::thindex::ThIndex) {
     for f in 0..leg.flights.gufi.len() {
         let s = samples_of(ix, f as u32);
         for w in s.windows(2) {
@@ -173,7 +182,7 @@ fn t5_add(h: &mut T5Hists, leg: &Legacy, ix: &crate::thindex::ThIndex) {
     }
 }
 
-fn t5_result(h: &T5Hists) -> MetricResult {
+pub fn t5_result(h: &T5Hists) -> MetricResult {
     let mut r = new_result("T5", "publication interval per flight", "s");
     let mut rows = vec![Row {
         label: "all".to_string(),
@@ -217,8 +226,16 @@ pub struct ChunkOut {
     /// Flights per [`astatus::REASON_NAMES`] entry.
     pub flag_reasons: [u64; astatus::REASON_NAMES.len()],
     pub unchecked: u64,
-    /// The association's case lines, in flight order.
-    pub assoc_cases: Vec<String>,
+    /// The address range the chunk was scored for, inclusive.
+    pub range: (u32, u32),
+    /// The association of the chunk's flights (one entry per flight).
+    pub assoc: Assoc,
+    /// Flights keyed or associated with an address outside `range` (refused by [`chunk_add`]).
+    pub outside: u64,
+    /// The association's case lines with their places in the list, at most [`MAX_CASES`].
+    pub assoc_cases: Vec<KeyedCase>,
+    /// T9's case lines with their places in the list.
+    pub t9_cases: Vec<KeyedCase>,
     pub t5: T5Hists,
     pub t6_none: u64,
     pub t6_with: u64,
@@ -226,6 +243,51 @@ pub struct ChunkOut {
     pub t9: MetricResult,
     /// F1, F2, F3 arrival, F3 departure, R1, H1.
     pub flows: Vec<MetricResult>,
+    /// The same six results for a table with no flights at all: what "no plan data" looks like,
+    /// NaN and all. [`chunk_add`] refuses a chunk whose results are not exactly these.
+    pub flows_no_data: Vec<MetricResult>,
+}
+
+/// Whether two results are the same, a NaN equal to a NaN (every float bit for bit).
+fn same_result(a: &MetricResult, b: &MetricResult) -> bool {
+    let bits = |x: f64, y: f64| x.to_bits() == y.to_bits();
+    a.id == b.id
+        && a.name == b.name
+        && a.unit == b.unit
+        && a.rows == b.rows
+        && a.withheld == b.withheld
+        && a.cases == b.cases
+        && a.notes == b.notes
+        && a.scalars.len() == b.scalars.len()
+        && a.scalars
+            .iter()
+            .zip(&b.scalars)
+            .all(|(x, y)| x.0 == y.0 && bits(x.1, y.1))
+}
+
+/// The six flow results of a table with no flights, for `ctx`'s truth and settings.
+fn flows_of_nothing(
+    truth: &Truth<'_>,
+    tix: &TruthIndex,
+    env: &Env<'_>,
+    cfg: &RunConfig,
+) -> Vec<MetricResult> {
+    let leg = new_legacy();
+    let assoc = Assoc::default();
+    let plan = plan_index(&leg);
+    let ctx = EventCtx {
+        assoc: &assoc,
+        truth,
+        tix,
+        env,
+        cfg: &cfg.event,
+    };
+    let mut ex = Exclusions::new();
+    let (f1, f2) = f1_f2_tbfm(&leg, &plan, &ctx, &mut ex);
+    let (f3a, f3d) = f3_tfms(&leg, &plan, &ctx, &mut ex);
+    let r1 = r1_route_conformance(&leg, &PairTable::default(), truth, env, &cfg.event, &mut ex);
+    let h1 = h1_handoffs(&leg, &assoc, truth, env, &cfg.event, &mut ex);
+    vec![f1, f2, f3a, f3d, r1, h1]
 }
 
 /// Scores the rows of `leg` (the flights of the address range `range`, inclusive) with the
@@ -249,8 +311,20 @@ pub fn benchmark_chunk(
             *c += 1;
         }
     }
-    let mut case_res = new_result("ASSOC", "", "");
-    association_cases(leg, &assoc, &mut case_res);
+    let mut assoc_cases = association_case_lines(leg, &ix, &assoc);
+    sort_cases(&mut assoc_cases);
+    let in_range = |a: u32| a == NONE || (a >= range.0 && a <= range.1);
+    let outside = (0..leg.flights.gufi.len())
+        .filter(|&f| {
+            [
+                leg.flights.addr.get(f),
+                assoc.addr.get(f),
+                assoc.flag_addr.get(f),
+            ]
+            .iter()
+            .any(|a| a.is_some_and(|&a| !in_range(a)))
+        })
+        .count() as u64;
     let plan = plan_index(leg);
     let ctx = EventCtx {
         assoc: &assoc,
@@ -259,7 +333,7 @@ pub fn benchmark_chunk(
         env,
         cfg: &cfg.event,
     };
-    let t9 = t9_association_errors(leg, &pairs, truth, &cfg.swap);
+    let (t9, t9_cases) = t9_keyed(leg, &pairs, truth, &cfg.swap);
     let presence = presence_parts(leg, &ix, &assoc, truth, env, &cfg.presence, range);
     let (f1, f2) = f1_f2_tbfm(leg, &plan, &ctx, &mut ex);
     let (f3a, f3d) = f3_tfms(leg, &plan, &ctx, &mut ex);
@@ -275,13 +349,18 @@ pub fn benchmark_chunk(
         assoc_counts: assoc.counts,
         flag_reasons,
         unchecked: assoc.unchecked,
-        assoc_cases: case_res.cases,
+        range,
+        assoc,
+        outside,
+        assoc_cases,
+        t9_cases,
         t5,
         t6_none: leg.th.pos_ms.len() as u64 - with,
         t6_with: with,
         presence,
         t9,
         flows: vec![f1, f2, f3a, f3d, r1, h1],
+        flows_no_data: flows_of_nothing(truth, tix, env, cfg),
     }
 }
 
@@ -293,20 +372,17 @@ pub struct ChunkAcc {
     flagged_pairs: PairTable,
     flag_reasons: [u64; astatus::REASON_NAMES.len()],
     unchecked: u64,
-    assoc_cases: Vec<String>,
+    assoc_cases: Vec<KeyedCase>,
+    t9_cases: Vec<KeyedCase>,
     exclusions: Exclusions,
     assoc_counts: [u64; astatus::COUNT],
+    /// The range and association of each chunk, put together in range order at the end.
+    assocs: Vec<((u32, u32), Assoc)>,
     t5: T5Hists,
     t6_none: u64,
     presence: PresenceParts,
     t9: Option<MetricResult>,
     flows: Option<Vec<MetricResult>>,
-}
-
-fn flow_is_empty(r: &MetricResult) -> bool {
-    r.rows.iter().all(|x| x.stats.n == 0)
-        && r.scalars.iter().all(|(_, v)| *v == 0.0 || v.is_nan())
-        && r.cases.is_empty()
 }
 
 /// Appends the rows of `b` to `a`.
@@ -325,17 +401,51 @@ fn pairs_extend(a: &mut PairTable, b: &PairTable) {
     a.coast.extend_from_slice(&b.coast);
 }
 
-/// Adds one chunk to the sums.
+/// Adds one chunk to the sums. A chunk is refused when its range is empty or overlaps a range
+/// already added, when one of its flights is keyed or associated outside its range, when it has
+/// receive times, or when a plan-data result is not exactly what no data gives.
 pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
+    let (lo, hi) = c.range;
+    if lo > hi {
+        return Err(ChunkError(format!(
+            "the address range {lo:#x}..={hi:#x} is empty"
+        )));
+    }
+    if let Some((a, b)) = acc
+        .assocs
+        .iter()
+        .map(|(r, _)| *r)
+        .find(|&(a, b)| lo <= b && a <= hi)
+    {
+        return Err(ChunkError(format!(
+            "the address range {lo:#x}..={hi:#x} overlaps {a:#x}..={b:#x}, which was already scored: its flights and legs would be counted twice"
+        )));
+    }
+    if c.outside > 0 {
+        return Err(ChunkError(format!(
+            "{} flight(s) of the chunk are keyed or associated with an address outside its range {lo:#x}..={hi:#x}",
+            c.outside
+        )));
+    }
     if c.t6_with > 0 {
         return Err(ChunkError(
             "chunked scoring is for a tracker's output, which has no receive time".to_string(),
         ));
     }
-    if let Some(r) = c.flows.iter().find(|r| !flow_is_empty(r)) {
+    if c.flows.len() != c.flows_no_data.len() {
+        return Err(ChunkError(
+            "the plan-data results are incomplete".to_string(),
+        ));
+    }
+    if let Some(r) = c
+        .flows
+        .iter()
+        .zip(&c.flows_no_data)
+        .find(|(r, none)| !same_result(r, none))
+    {
         return Err(ChunkError(format!(
-            "chunked scoring is for a tracker's output, which has no plan data, but {} is not empty",
-            r.id
+            "chunked scoring is for a tracker's output, which has no plan data, but {} is not what no data gives",
+            r.0.id
         )));
     }
     pairs_extend(&mut acc.pairs, &c.pairs);
@@ -350,11 +460,11 @@ pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
         *a += b;
     }
     acc.unchecked += c.unchecked;
-    for case in c.assoc_cases {
-        if acc.assoc_cases.len() < MAX_CASES {
-            acc.assoc_cases.push(case);
-        }
-    }
+    acc.assoc_cases.extend(c.assoc_cases);
+    sort_cases(&mut acc.assoc_cases);
+    acc.t9_cases.extend(c.t9_cases);
+    sort_cases(&mut acc.t9_cases);
+    acc.assocs.push((c.range, c.assoc));
     acc.t5.all.merge(&c.t5.all);
     for (a, b) in acc.t5.band.iter_mut().zip(c.t5.band.iter()) {
         a.merge(b);
@@ -372,11 +482,6 @@ pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
             for (a, b) in t.scalars.iter_mut().zip(c.t9.scalars.iter()) {
                 a.1 += b.1;
             }
-            for case in c.t9.cases {
-                if t.cases.len() < MAX_CASES {
-                    t.cases.push(case);
-                }
-            }
         }
     }
     if acc.flows.is_none() {
@@ -385,12 +490,59 @@ pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
     Ok(())
 }
 
+/// Puts the per-flight associations of the chunks together in range order.
+fn assoc_of(
+    mut parts: Vec<((u32, u32), Assoc)>,
+    counts: [u64; astatus::COUNT],
+    unchecked: u64,
+) -> Assoc {
+    parts.sort_by_key(|p| p.0);
+    let mut a = Assoc {
+        counts,
+        unchecked,
+        ..Assoc::default()
+    };
+    for (_, p) in parts {
+        a.addr.extend(p.addr);
+        a.method.extend(p.method);
+        a.status.extend(p.status);
+        a.flag_addr.extend(p.flag_addr);
+        a.flag_method.extend(p.flag_method);
+        a.flag_reason.extend(p.flag_reason);
+        a.gate_share.extend(p.gate_share);
+        a.shared.extend(p.shared);
+    }
+    a
+}
+
 /// The finished benchmark and the paired samples it was made from (for the ESASSP-style split).
-/// `presence` is the T7 and T8 configuration of `cfg`. A run with no chunk is refused.
+/// `presence` is the T7 and T8 configuration of `cfg`. A run with no chunk is refused, and so is
+/// one whose ranges do not cover every key from 0 to `u32::MAX` (a gap would drop the flights
+/// keyed in it). `RunOutput::assoc` is the chunks' associations one after the other in range
+/// order: its flight `i` is the `i`-th flight of the run in that order, not a flight of any one
+/// table.
 pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTable), ChunkError> {
-    let (Some(t9), Some(flows)) = (acc.t9, acc.flows) else {
+    let (Some(mut t9), Some(flows)) = (acc.t9, acc.flows) else {
         return Err(ChunkError("no chunk was scored".to_string()));
     };
+    let mut ranges: Vec<(u32, u32)> = acc.assocs.iter().map(|(r, _)| *r).collect();
+    ranges.sort_unstable();
+    let mut next = Some(0u32);
+    for &(lo, hi) in &ranges {
+        if next != Some(lo) {
+            return Err(ChunkError(format!(
+                "the address ranges do not cover the whole key space: a gap before {lo:#x} (every key from 0 to 0xffffffff must be in some range, the radar-only tracks keyed from 0x40000000 included)"
+            )));
+        }
+        next = hi.checked_add(1);
+    }
+    if next.is_some() {
+        return Err(ChunkError(format!(
+            "the address ranges do not cover the whole key space: nothing from {:#x} to 0xffffffff",
+            next.unwrap_or(0)
+        )));
+    }
+    t9.cases = acc.t9_cases.into_iter().map(|c| c.1).collect();
     let pairs = acc.pairs;
     let mut m = vec![
         t1_cross_track(&pairs),
@@ -401,6 +553,7 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
         t4_altitude(&pairs),
         t5_result(&acc.t5),
     ];
+    flagged_views(&mut m, &pairs, &acc.flagged_pairs, &acc.assoc_counts);
     let mut t6 = new_result("T6", "staleness (receive time minus position time)", "s");
     t6.withheld =
         Some("the recordings carry no receive time (raw .msg files); use .oaf recordings".into());
@@ -419,18 +572,14 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
         acc.unchecked,
         &cfg.assoc,
     );
-    a.cases = acc.assoc_cases;
+    a.cases = acc.assoc_cases.into_iter().map(|c| c.1).collect();
     m.push(a);
     let n_pairs = pairs.t_ms.len();
     Ok((
         RunOutput {
             metrics: m,
             exclusions: acc.exclusions,
-            assoc: Assoc {
-                counts: acc.assoc_counts,
-                unchecked: acc.unchecked,
-                ..Assoc::default()
-            },
+            assoc: assoc_of(acc.assocs, acc.assoc_counts, acc.unchecked),
             pairs: n_pairs,
         },
         pairs,

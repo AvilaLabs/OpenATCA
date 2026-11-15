@@ -3,6 +3,7 @@
 //! a value.
 
 use crate::fields::FieldErrorKind;
+use crate::rows::{spd_unit, NO_NUM};
 use crate::time::parse_iso_ms;
 
 /// A name: printable ASCII without spaces (0x21 to 0x7E), at most `N` bytes, zero padded.
@@ -123,6 +124,59 @@ pub fn parse_altitude(v: &[u8]) -> Result<(i32, u8), FieldErrorKind> {
 /// A whole number of knots or similar: one to four digits.
 pub fn parse_speed(v: &[u8]) -> Result<i32, FieldErrorKind> {
     i32::try_from(parse_digits(v, 4)?).map_err(|_| FieldErrorKind::Format)
+}
+
+/// A speed with its unit, in thousandths: `(value, unit)` with a [`spd_unit`] code. One to four
+/// digits, or two to four digits and a decimal, is knots; one digit and two or three decimals
+/// (`0.82`) and the `M` form (`M082`, hundredths) are a Mach number; `N` and up to five digits
+/// (`N0450`) is knots. Any other shape built of digits, `.`, `M` and `N` is
+/// [`spd_unit::UNKNOWN`] with the value kept when it reads as a number and [`NO_NUM`] otherwise.
+/// Anything with another byte is a format error (the message is refused).
+pub fn parse_speed_unit(v: &[u8]) -> Result<(i32, u8), FieldErrorKind> {
+    if v.is_empty()
+        || !v
+            .iter()
+            .all(|&b| b.is_ascii_digit() || matches!(b, b'.' | b'M' | b'N'))
+    {
+        return Err(FieldErrorKind::Format);
+    }
+    let unknown = |milli: Option<i32>| Ok((milli.unwrap_or(NO_NUM), spd_unit::UNKNOWN));
+    let (prefix, body) = match v.split_first() {
+        Some((&p @ (b'M' | b'N'), rest)) => (p, rest),
+        _ => (0, v),
+    };
+    let (int, frac, dot) = match body.iter().position(|&b| b == b'.') {
+        Some(i) => (
+            body.get(..i).unwrap_or(&[]),
+            body.get(i + 1..).unwrap_or(&[]),
+            true,
+        ),
+        None => (body, &[][..], false),
+    };
+    let digits = |d: &[u8]| !d.is_empty() && d.iter().all(u8::is_ascii_digit);
+    if !digits(int) || (dot && !digits(frac)) || int.len() > 6 || frac.len() > 3 {
+        return unknown(None);
+    }
+    let i = i64::from(parse_digits(int, 6)?);
+    let f = if dot {
+        i64::from(parse_digits(frac, 3)?) * 10i64.pow(3 - frac.len() as u32)
+    } else {
+        0
+    };
+    let milli = i32::try_from(i * 1000 + f).ok();
+    match (prefix, dot, int.len(), frac.len()) {
+        // `M082` is hundredths of a Mach number
+        (b'M', false, 3, _) => Ok((
+            i32::try_from(i * 10).map_err(|_| FieldErrorKind::Format)?,
+            spd_unit::MACH,
+        )),
+        (b'N', false, 1..=5, _) => Ok((milli.unwrap_or(NO_NUM), spd_unit::KNOTS)),
+        (0, false, 1..=4, _) | (0, true, 2..=4, 1..=3) => {
+            Ok((milli.unwrap_or(NO_NUM), spd_unit::KNOTS))
+        }
+        (0, true, 1, 2..=3) => Ok((milli.unwrap_or(NO_NUM), spd_unit::MACH)),
+        _ => unknown(if prefix == 0 { milli } else { None }),
+    }
 }
 
 /// Latitude or longitude as signed decimal degrees to 1e-7 degree: an optional `-`, one to

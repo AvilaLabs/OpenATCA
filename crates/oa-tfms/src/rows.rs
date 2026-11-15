@@ -265,6 +265,23 @@ pub mod flag {
     /// The route text came from `routeOfFlight@legacyFormat` (bit 12), not from the element
     /// text of `ncsmRouteData/routeOfFlight`.
     pub const ROUTE_LEGACY: u16 = 1 << 12;
+    /// The message carried a `flightRef` (bit 13); without it `flight_ref` is 0 and means
+    /// nothing, and a carried reference of 0 is a real one.
+    pub const FLIGHT_REF: u16 = 1 << 13;
+}
+
+/// The unit of a stored speed ([`FlightRow::speed_unit`], [`FlightRow::tas_unit`]). A whole
+/// number or `ddd.d` is knots (the survey's reading for `speed` and `filedTrueAirSpeed`), `d.dd`
+/// and the `Mddd` form are Mach numbers; a value of any other shape is kept with unit
+/// [`UNKNOWN`](spd_unit::UNKNOWN) and counted, never guessed.
+pub mod spd_unit {
+    /// No speed in the row.
+    pub const NONE: u8 = 0;
+    pub const KNOTS: u8 = 1;
+    pub const MACH: u8 = 2;
+    pub const UNKNOWN: u8 = 3;
+    pub const COUNT: usize = 4;
+    pub const NAMES: [&str; COUNT] = ["-", "knots", "mach", "unknown"];
 }
 
 /// Declares a row record and its columns from one field list: the `repr(C)` record, its blank
@@ -379,7 +396,8 @@ soa! {
     remarks: StrRef = NO_STR,
     /// `tmi/fcaId` of a TMI flight list entry (the first one).
     fca: StrRef = NO_STR,
-    /// `flightRef` (a flight reference number, nine digits in the sample, ten allowed).
+    /// `flightRef` (a flight reference number, nine digits in the sample, ten allowed). Zero is a
+    /// valid reference ("0000000000"); whether the message carried one is `flag::FLIGHT_REF`.
     flight_ref: u64 = 0,
     /// Latitude and longitude, 1e-7 degree (from degrees, minutes and optional seconds:
     /// rounded to the nearest unit).
@@ -394,10 +412,10 @@ soa! {
     asg_ft: i32 = NO_NUM,
     /// Requested altitude, feet.
     req_ft: i32 = NO_NUM,
-    /// `speed` of a track or oceanic message (knots by the survey's reading; unconfirmed).
-    speed_kt: i32 = NO_NUM,
-    /// `filedTrueAirSpeed`.
-    tas_kt: i32 = NO_NUM,
+    /// `speed` of a track or oceanic message, in thousandths of the unit in `speed_unit`.
+    speed_milli: i32 = NO_NUM,
+    /// `filedTrueAirSpeed`, in thousandths of the unit in `tas_unit`.
+    tas_milli: i32 = NO_NUM,
     /// Fix and sector counts are not stored; this counts the `fxaFlight` entries of a TMI
     /// flight list entry.
     n_fxa: u16 = 0,
@@ -418,6 +436,10 @@ soa! {
     eta_type: u8 = 0,
     etd_type: u8 = 0,
     coord_type: u8 = 0,
+    /// What `speed_milli` is, see [`spd_unit`]; the value is never read without it.
+    speed_unit: u8 = spd_unit::NONE,
+    /// What `tas_milli` is, see [`spd_unit`].
+    tas_unit: u8 = spd_unit::NONE,
     /// The letter after a reported altitude (`C` on about half the track messages; meaning
     /// unconfirmed), or 0.
     alt_sfx: u8 = 0,

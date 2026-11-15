@@ -34,6 +34,8 @@ pub struct Stats {
     pub reject_kinds: [u64; ERROR_KIND_COUNT],
     /// Vocabulary words kept as unknown instead of refusing the message.
     pub unknown_words: u64,
+    /// Speeds of a form that is neither knots nor Mach, kept as unknown.
+    pub unknown_units: u64,
     /// Elements, attributes and namespaces the decoder does not know, in accepted documents.
     pub unknown_paths: u64,
     /// Known elements it deliberately does not store, in accepted documents.
@@ -56,6 +58,7 @@ pub const fn new_stats() -> Stats {
         rejected_messages: 0,
         reject_kinds: [0; ERROR_KIND_COUNT],
         unknown_words: 0,
+        unknown_units: 0,
         unknown_paths: 0,
         ignored_paths: 0,
     }
@@ -84,6 +87,7 @@ pub fn observe(
             s.ignored_paths += u64::from(o.ignored_paths);
             s.rejected_messages += u64::from(o.rejected);
             s.unknown_words += u64::from(o.unknown_words);
+            s.unknown_units += u64::from(o.unknown_units);
             for (t, &n) in s.field_errors.iter_mut().zip(&o.reject_fields) {
                 *t += u64::from(n);
             }

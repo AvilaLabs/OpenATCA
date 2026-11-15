@@ -42,12 +42,13 @@ use crate::fields::{
 };
 use crate::rows::{
     accat, divert, fkind, flag, flights_len, flows_len, kind, prog, push_flight, push_flow, scope,
-    status, text, trig, truncate_rows, ttype, ucat, FlightRow, FlowRow, Rows, StrRef, BLANK_FLIGHT,
-    BLANK_FLOW, NO_TIME, UNKNOWN_WORD,
+    spd_unit, status, text, trig, truncate_rows, ttype, ucat, FlightRow, FlowRow, Rows, StrRef,
+    BLANK_FLIGHT, BLANK_FLOW, NO_TIME, UNKNOWN_WORD,
 };
 use crate::scalar::{
     contains_word, dms_e7, parse_altitude, parse_bool, parse_decimal_e7, parse_digits,
-    parse_digits64, parse_letter, parse_name, parse_speed, parse_time, parse_vocab, parse_words,
+    parse_digits64, parse_letter, parse_name, parse_speed_unit, parse_time, parse_vocab,
+    parse_words,
 };
 use crate::schema::{
     ns_uri, At, El, Nsx, BODIES, EMPTY, FI_MESSAGE, FLIGHT_DATA, FLOW_BODIES, FLTD_MESSAGE,
@@ -92,6 +93,9 @@ pub struct Outcome {
     pub reject_kinds: [u32; ERROR_KIND_COUNT],
     /// Words outside a vocabulary that were kept as unknown instead of refusing the message.
     pub unknown_words: u32,
+    /// Speeds of a form that is neither knots nor Mach, kept with unit
+    /// [`spd_unit::UNKNOWN`] instead of refusing the message.
+    pub unknown_units: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -182,6 +186,8 @@ struct Ctx<'r> {
     dropped: u32,
     /// Vocabulary words kept as unknown.
     unknown_words: u32,
+    /// Speeds whose form is no known unit, kept as unknown.
+    unknown_units: u32,
 }
 
 /// Where a value's bytes are: one span (an attribute value, or a text node), or a run of text
@@ -419,7 +425,10 @@ fn store_small(c: &mut Ctx<'_>, field: Field, v: &[u8]) -> Result<(), FieldError
     match field {
         F::MsgType => {}
         F::Acid => same_name(&mut c.f.acid, v)?,
-        F::FlightRef => c.f.flight_ref = parse_digits64(v, 10)?,
+        F::FlightRef => {
+            c.f.flight_ref = parse_digits64(v, 10)?;
+            c.f.flags |= flag::FLIGHT_REF;
+        }
         F::Airline => c.f.airline = parse_name(v)?,
         F::Major => c.f.major = parse_name(v)?,
         F::Dep => same_name(&mut c.f.dep, v)?,
@@ -493,8 +502,12 @@ fn store_small(c: &mut Ctx<'_>, field: Field, v: &[u8]) -> Result<(), FieldError
         }
         F::AsgAlt => c.f.asg_ft = parse_altitude(v)?.0,
         F::ReqAlt => c.f.req_ft = parse_altitude(v)?.0,
-        F::Speed => c.f.speed_kt = parse_speed(v)?,
-        F::Tas => c.f.tas_kt = parse_speed(v)?,
+        F::Speed => {
+            (c.f.speed_milli, c.f.speed_unit) = speed_of(c, v)?;
+        }
+        F::Tas => {
+            (c.f.tas_milli, c.f.tas_unit) = speed_of(c, v)?;
+        }
         F::Dp => c.f.dp = parse_name(v)?,
         F::Star => c.f.star = parse_name(v)?,
         F::Tod => c.f.tod_ms = parse_time(v)?,
@@ -567,6 +580,15 @@ fn store_small(c: &mut Ctx<'_>, field: Field, v: &[u8]) -> Result<(), FieldError
 }
 
 /// A rate or similar count: one to five digits.
+/// A speed and its unit; a shape that is none of the known forms is kept as unknown and counted.
+fn speed_of(c: &mut Ctx<'_>, v: &[u8]) -> Result<(i32, u8), FieldErrorKind> {
+    let (milli, unit) = parse_speed_unit(v)?;
+    if unit == spd_unit::UNKNOWN {
+        c.unknown_units = c.unknown_units.saturating_add(1);
+    }
+    Ok((milli, unit))
+}
+
 fn parse_speed_wide(v: &[u8]) -> Result<i32, FieldErrorKind> {
     i32::try_from(parse_digits(v, 5)?).map_err(|_| FieldErrorKind::Format)
 }
@@ -864,6 +886,7 @@ struct Mark {
     unknown: u32,
     ignored: u32,
     words: u32,
+    units: u32,
     dropped: u32,
 }
 
@@ -875,6 +898,7 @@ fn mark(acc: &Acc, c: &Ctx<'_>) -> Mark {
         unknown: acc.unknown,
         ignored: acc.ignored,
         words: c.unknown_words,
+        units: c.unknown_units,
         dropped: c.dropped,
     }
 }
@@ -894,6 +918,7 @@ fn guarded(
             acc.unknown = m.unknown;
             acc.ignored = m.ignored;
             c.unknown_words = m.words;
+            c.unknown_units = m.units;
             c.dropped = m.dropped;
             acc.rejected = acc.rejected.saturating_add(1);
             acc.first_reject.get_or_insert(fe);
@@ -1161,6 +1186,7 @@ fn decode_root(
         prefix,
         dropped: 0,
         unknown_words: 0,
+        unknown_units: 0,
     };
     let mut kind = None;
     let mut messages = 0u32;
@@ -1216,5 +1242,6 @@ fn decode_root(
         reject_fields: acc.reject_fields,
         reject_kinds: acc.reject_kinds,
         unknown_words: c.unknown_words,
+        unknown_units: c.unknown_units,
     })
 }

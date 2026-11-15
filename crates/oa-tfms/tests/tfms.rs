@@ -8,7 +8,7 @@
 )]
 
 use oa_tfms::rows::{
-    accat, divert, fflag, fkind, flag, kind, prog, scope, status, trig, ttype, ucat,
+    accat, divert, fflag, fkind, flag, kind, prog, scope, spd_unit, status, trig, ttype, ucat,
 };
 use oa_tfms::scalar::{
     contains_word, dms_e7, parse_altitude, parse_bool, parse_decimal_e7, parse_digits,
@@ -480,7 +480,7 @@ fn rows_are_plain_struct_of_arrays_with_absent_values() {
     for v in [b.lat_e7, b.lon_e7, b.next_lat_e7, b.next_lon_e7] {
         assert_eq!(v, NO_COORD);
     }
-    for v in [b.alt_ft, b.asg_ft, b.req_ft, b.speed_kt, b.tas_kt] {
+    for v in [b.alt_ft, b.asg_ft, b.req_ft, b.speed_milli, b.tas_milli] {
         assert_eq!(v, NO_NUM);
     }
     assert_eq!((b.route, b.remarks, b.fca), (NO_STR, NO_STR, NO_STR));
@@ -572,7 +572,7 @@ fn track_information_carries_identity_position_altitude_and_speed() {
     assert_eq!((r.lat_e7, r.lon_e7), (417_733_333, -841_466_667));
     assert_eq!(r.pos_ms, t(3, 4, 0));
     assert_eq!((r.alt_ft, r.alt_sfx), (35_000, b'C'));
-    assert_eq!(r.speed_kt, 276);
+    assert_eq!((r.speed_milli, r.speed_unit), (276_000, spd_unit::KNOTS));
     assert_eq!((r.next_lat_e7, r.next_lon_e7), (419_000_000, -845_000_000));
     assert_eq!((nm(&r.arr_fix), r.arrfix_ms), ("ARRFX", t(4, 0, 0)));
     assert_eq!((nm(&r.dep_fix), r.depfix_ms), ("DEPFX", t(2, 0, 0)));
@@ -584,7 +584,7 @@ fn track_information_carries_identity_position_altitude_and_speed() {
     assert_eq!(flag_get(r.flags, flag::RVSM_FUT), 1);
     assert_eq!(text(&rows, r.route), "");
     // Absent values stay absent.
-    assert_eq!((r.asg_ft, r.req_ft, r.tas_kt), (NO_NUM, NO_NUM, NO_NUM));
+    assert_eq!((r.asg_ft, r.req_ft, r.tas_milli), (NO_NUM, NO_NUM, NO_NUM));
     assert_eq!((r.status, r.diversion, r.eng_class, r.equip), (0, 0, 0, 0));
 }
 
@@ -644,7 +644,7 @@ fn flight_plan_has_altitudes_speed_coordination_and_the_legacy_route() {
     assert_eq!((o.unknown_paths, o.ignored_paths), (0, 8));
     assert_eq!(r.kind, kind::FLIGHT_PLAN);
     assert_eq!((r.asg_ft, r.req_ft), (33_000, 37_000));
-    assert_eq!(r.tas_kt, 450);
+    assert_eq!((r.tas_milli, r.tas_unit), (450_000, spd_unit::KNOTS));
     assert_eq!(nm(&r.ac_type), "A320");
     assert_eq!((r.equip, nm(&r.special)), (b'W', "TCAS"));
     assert_eq!(
@@ -687,7 +687,7 @@ fn amendment_departure_arrival_and_cancellation() {
     assert_eq!((r.coord_ms, r.coord_type), (t(3, 40, 0), ttype::ESTIMATED));
     assert_eq!((nm(&r.ac_type), r.equip), ("B737", b'Q'));
     assert_eq!(text(&rows, r.route), "KTAA.NEWRT.KTBB");
-    assert_eq!(r.tas_kt, 420);
+    assert_eq!((r.tas_milli, r.tas_unit), (420_000, spd_unit::KNOTS));
 
     let (_, _, r) = one_flight(&departure());
     assert_eq!(r.kind, kind::DEPARTURE);
@@ -733,7 +733,7 @@ fn boundary_crossing_and_oceanic_report() {
     assert_eq!(r.kind, kind::BOUNDARY);
     assert_eq!(r.bnd_ms, t(3, 20, 0));
     assert_eq!(r.alt_ft, 24_000);
-    assert_eq!(r.tas_kt, 430);
+    assert_eq!((r.tas_milli, r.tas_unit), (430_000, spd_unit::KNOTS));
     assert_eq!(text(&rows, r.route), "KTAA.FIXA..FIXB.KTBB");
     assert_eq!(nm(&r.ac_type), "B738");
 
@@ -744,7 +744,7 @@ fn boundary_crossing_and_oceanic_report() {
     assert_eq!((r.lat_e7, r.lon_e7), (500_000_000, -305_000_000));
     assert_eq!(r.alt_ft, 35_000);
     assert_eq!(r.pos_ms, t(3, 0, 0));
-    assert_eq!(r.speed_kt, 480);
+    assert_eq!((r.speed_milli, r.speed_unit), (480_000, spd_unit::KNOTS));
 }
 
 // REQ: OA-TFMS-004, OA-TFMS-006
@@ -805,7 +805,7 @@ fn create_times_route_sectors_and_activate() {
     );
     let (_, _, r) = one_flight(&activate);
     assert_eq!(r.kind, kind::ACTIVATE);
-    assert_eq!((r.asg_ft, r.tas_kt), (35_000, 460));
+    assert_eq!((r.asg_ft, r.tas_milli), (35_000, 460_000));
 }
 
 // REQ: OA-TFMS-004
@@ -1313,7 +1313,7 @@ fn duplicates_nesting_and_text_errors_are_refused() {
     for empty in ["<nxcm:speed> </nxcm:speed>", "<nxcm:speed/>"] {
         let x = wrap_flight(&track()).replace("<nxcm:speed>276</nxcm:speed>", empty);
         let (_, rows) = ok(&x);
-        assert_eq!(rows.flights.speed_kt[0], NO_NUM);
+        assert_eq!(rows.flights.speed_milli[0], NO_NUM);
     }
 }
 
@@ -1554,7 +1554,7 @@ fn unknown_paths_are_counted_and_do_not_refuse_the_document() {
     let (o, rows) = ok(&x);
     assert!(o.unknown_paths > o0.unknown_paths);
     assert_eq!(o.flight_rows, 1);
-    assert_eq!(rows.flights.speed_kt, rows0.flights.speed_kt);
+    assert_eq!(rows.flights.speed_milli, rows0.flights.speed_milli);
     // an unknown attribute on a known element
     let x = base.replace("sensitivity=\"A\"", "sensitivity=\"A\" novel=\"1\"");
     let (o, _) = ok(&x);
@@ -1566,7 +1566,7 @@ fn unknown_paths_are_counted_and_do_not_refuse_the_document() {
     assert!(o.unknown_paths >= 1);
     assert_eq!(rows.flights.kind[0], kind::OTHER);
     assert_eq!(nm(&rows.flights.acid[0]), "TST123");
-    assert_eq!(rows.flights.speed_kt[0], NO_NUM);
+    assert_eq!(rows.flights.speed_milli[0], NO_NUM);
     // an unknown element in a foreign namespace is not mistaken for a known name
     let x = base.replace(
         "<nxcm:speed>276</nxcm:speed>",
@@ -1574,7 +1574,7 @@ fn unknown_paths_are_counted_and_do_not_refuse_the_document() {
     );
     let (o, rows) = ok(&x);
     assert!(o.unknown_paths > o0.unknown_paths);
-    assert_eq!(rows.flights.speed_kt, rows0.flights.speed_kt);
+    assert_eq!(rows.flights.speed_milli, rows0.flights.speed_milli);
     // the same element in another prefix is the same element: names are matched by namespace
     let x = base
         .replace("xmlns:nxcm=", "xmlns:zz=")
@@ -1586,7 +1586,7 @@ fn unknown_paths_are_counted_and_do_not_refuse_the_document() {
         (o0.unknown_paths, o0.ignored_paths)
     );
     assert_eq!(rows.flights.alt_ft, rows0.flights.alt_ft);
-    assert_eq!(rows.flights.speed_kt, rows0.flights.speed_kt);
+    assert_eq!(rows.flights.speed_milli, rows0.flights.speed_milli);
 }
 
 // REQ: OA-TFMS-016
@@ -1751,6 +1751,7 @@ fn sfdps(ev: &mut oa_fixm::Events, gufi: u128, plan: &str, acid: &str, dep: &str
 fn tfms(rows: &mut Rows, flight_ref: u64, gufi: &str, acid: &str, dep: &str, arr: &str) {
     let mut r = BLANK_FLIGHT;
     r.flight_ref = flight_ref;
+    r.flags |= flag::FLIGHT_REF;
     for (dst, src) in [
         (&mut r.gufi[..], gufi),
         (&mut r.acid[..], acid),
@@ -1933,7 +1934,7 @@ fn a_word_outside_a_vocabulary_is_kept_as_unknown_and_counted() {
     assert_eq!(flag_get(r.flags, flag::RVSM_EQ), flag::UNKNOWN);
     // everything else in the message is read as usual
     assert_eq!(nm(&r.acid), "TST123");
-    assert_eq!(r.speed_kt, 276);
+    assert_eq!((r.speed_milli, r.speed_unit), (276_000, spd_unit::KNOTS));
     assert_eq!(r.lat_e7, 417_733_333);
     // the other vocabulary fields: a restriction category and scope, a general flow status
     let flow = wrap_fi(&rstr())
@@ -2020,7 +2021,7 @@ fn text_split_by_a_comment_or_cdata_is_joined() {
         "<nxcm:speed>276</nxcm:speed>",
         "<nxcm:speed>2<!--note-->7<![CDATA[6]]></nxcm:speed>",
     ));
-    assert_eq!(r.speed_kt, 276);
+    assert_eq!((r.speed_milli, r.speed_unit), (276_000, spd_unit::KNOTS));
     // a name, and free text that goes into the text table
     let route = track_route().replace(
         "<nxcm:routeOfFlight>KTAA./.ABC..DEF.STAR1.KTBB/0100</nxcm:routeOfFlight>",
@@ -2045,4 +2046,74 @@ fn text_split_by_a_comment_or_cdata_is_joined() {
     // and a string table that is too small for joined free text is the capacity reject
     let (r, _) = run_with(&wrap_flight(&route), 4, 4, 8);
     assert_eq!(r.unwrap_err(), DocError::Capacity(CapKind::Strings));
+}
+
+// REQ: OA-TFMS-027
+#[test]
+fn a_mach_or_decimal_speed_keeps_the_message_with_its_unit() {
+    let with = |v: &str| track().replace("<nxcm:speed>276<", &format!("<nxcm:speed>{v}<"));
+    // (text, value in thousandths, unit, counted as unknown)
+    for (v, milli, unit, unk) in [
+        ("276", 276_000, spd_unit::KNOTS, 0),
+        ("276.5", 276_500, spd_unit::KNOTS, 0),
+        ("0.82", 820, spd_unit::MACH, 0),
+        ("M082", 820, spd_unit::MACH, 0),
+        ("N0450", 450_000, spd_unit::KNOTS, 0),
+        ("1.2.3", NO_NUM, spd_unit::UNKNOWN, 1),
+        ("12345.5", 12_345_500, spd_unit::UNKNOWN, 1),
+        ("M08", NO_NUM, spd_unit::UNKNOWN, 1),
+    ] {
+        let (o, _, r) = one_flight(&with(v));
+        assert_eq!((o.rejected, o.unknown_units), (0, unk), "{v}");
+        assert_eq!((r.speed_milli, r.speed_unit), (milli, unit), "{v}");
+        assert_eq!((r.tas_milli, r.tas_unit), (NO_NUM, spd_unit::NONE), "{v}");
+    }
+    // The same for the filed true airspeed, and the counter folds into the totals.
+    let plan_tas = plan().replace(">450<", ">0.80<");
+    let (o, _, r) = one_flight(&plan_tas);
+    assert_eq!((o.rejected, o.unknown_units), (0, 0));
+    assert_eq!((r.tas_milli, r.tas_unit), (800, spd_unit::MACH));
+    let mut s = new_stats();
+    let (r, rows) = run(&wrap_flight(&with("1.2.3")));
+    let kinds = rows.flights.kind.clone();
+    observe(&mut s, &r, &kinds, &[]);
+    assert_eq!((s.unknown_units, s.rejected_messages), (1, 0));
+    // A byte that is no part of a speed still refuses the message, and rolls the count back.
+    let e = field_err(err(&wrap_flight(&with("2x6"))));
+    assert_eq!((e.field, e.kind), (Field::Speed, FieldErrorKind::Format));
+    let (o, _) = ok(&wrap_flight(&format!("{}{}", with("1.2.3"), with("2x6"))));
+    assert_eq!((o.rejected, o.unknown_units), (1, 1));
+}
+
+// REQ: OA-TFMS-028
+#[test]
+fn a_flight_reference_of_zero_is_told_from_no_reference() {
+    let zero = track().replace("flightRef=\"100000001\"", "flightRef=\"0000000000\"");
+    // The decoder refuses a message with no reference, so a decoded row's reference is always
+    // carried, and 0 is a valid one; only a row nobody filled in is without one.
+    let (_, _, a) = one_flight(&zero);
+    assert_eq!(a.flight_ref, 0);
+    assert_eq!(a.flags & flag::FLIGHT_REF, flag::FLIGHT_REF);
+    assert_eq!(BLANK_FLIGHT.flags & flag::FLIGHT_REF, 0);
+    let none = track().replace("flightRef=\"100000001\" ", "");
+    let e = field_err(err(&wrap_flight(&none)));
+    assert_eq!(
+        (e.field, e.kind),
+        (Field::FlightRef, FieldErrorKind::Missing)
+    );
+    // In the linkage: two rows with no reference are two flights, and a carried 0 is one flight
+    // of its own that does not absorb them.
+    use oa_tfms::link_flights;
+    let ev = oa_fixm::new_events(1, 8);
+    let mut rows = new_rows(8, 1, 16);
+    tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // reference 0, carried
+    tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // the same flight again
+    for (acid, dep) in [("TST2", "KTAA"), ("TST3", "KTDD")] {
+        tfms(&mut rows, 0, "", acid, dep, "KTBB");
+        let i = flights_len(&rows.flights) - 1;
+        rows.flights.flags[i] &= !flag::FLIGHT_REF;
+    }
+    let rep = link_flights(&ev, &rows);
+    assert_eq!((rep.tfms_rows, rep.tfms_flights), (4, 3));
+    assert_eq!(rep.tfms_rows_without_ref, 2);
 }
