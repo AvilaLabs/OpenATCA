@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 # Workspace crate; not an outside dependency (RULESET F1).
+oa-geo = { path = "../oa-geo" }
 oa-json = { path = "../oa-json" }
 
 [[bin]]

@@ -211,7 +211,7 @@ fn truth_pos(truth: &Truth, addr: u32, t_ns: i64) -> Option<Pos> {
                 s.lon_deg,
                 s.vel_east_mps * rem_s,
                 s.vel_north_mps * rem_s,
-            );
+            )?;
             let alt_ft = s
                 .baro_alt_ft
                 .map(|a| a + s.vert_rate_fpm.unwrap_or(0.0) / 60.0 * rem_s);

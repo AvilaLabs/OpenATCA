@@ -41,7 +41,8 @@ use crate::metrics_flow::{
     presence_add, presence_parts, presence_results, t9_keyed, PresenceParts, MAX_INTERVAL_S,
 };
 use crate::metrics_th::{
-    t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_speed, t4_altitude,
+    t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_heading_grid, t3_speed,
+    t4_altitude,
 };
 use crate::pair::{build_pairs, PairTable};
 use crate::run::{
@@ -408,6 +409,8 @@ fn pairs_extend(a: &mut PairTable, b: &PairTable) {
     a.along_m.extend_from_slice(&b.along_m);
     a.speed_err_kt.extend_from_slice(&b.speed_err_kt);
     a.hdg_err_deg.extend_from_slice(&b.hdg_err_deg);
+    a.lat_e7.extend_from_slice(&b.lat_e7);
+    a.lon_e7.extend_from_slice(&b.lon_e7);
     a.alt_err_ft.extend_from_slice(&b.alt_err_ft);
     a.truth_speed_mps.extend_from_slice(&b.truth_speed_mps);
     a.method.extend_from_slice(&b.method);
@@ -565,6 +568,7 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
         t2_along_corrected(&pairs, &cfg.offset),
         t3_speed(&pairs),
         t3_heading(&pairs),
+        t3_heading_grid(&pairs),
         t4_altitude(&pairs),
         t5_result(&acc.t5),
     ];

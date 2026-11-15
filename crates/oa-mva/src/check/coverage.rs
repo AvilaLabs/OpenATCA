@@ -16,7 +16,6 @@ use crate::model::{
     chart_count, facility_text, ring_range, ring_vertices, sector_range_of_chart, Model, SectorIx,
 };
 use crate::query::sectors_containing;
-use crate::{NM_PER_DEG_LAT, NM_PER_DEG_LON_EQUATOR};
 use std::collections::HashMap;
 
 /// Raster cell size, degrees (about 220 m north-south, 165 m east-west at 42 N).
@@ -156,10 +155,30 @@ fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, 
     }
 }
 
+/// Nautical miles per degree of latitude and of longitude at `lat_deg` on WGS-84: the meridian
+/// radius `M` and the prime-vertical radius `N` times the cosine of the latitude, per degree.
+/// (Constants local to the coverage report, which must not understate an area; the crate-level
+/// per-degree constants are deliberately conservative for the radius query and stay as they are.)
+fn nm_per_deg(lat_deg: f64) -> (f64, f64) {
+    const A_M: f64 = 6_378_137.0;
+    const E2: f64 = 0.006_694_379_990_141_316;
+    let s = lat_deg.to_radians().sin();
+    let w = 1.0 - E2 * s * s;
+    let (m, n) = (A_M * (1.0 - E2) / (w * w.sqrt()), A_M / w.sqrt());
+    let per_deg = std::f64::consts::PI / 180.0 / 1852.0;
+    (m * per_deg, n * lat_deg.to_radians().cos() * per_deg)
+}
+
+/// Area in square nautical miles of a small patch `dlat_deg` by `dlon_deg` centred at `lat_deg`:
+/// `M N cos(lat) dlat dlon`.
+fn patch_area_nm2(lat_deg: f64, dlat_deg: f64, dlon_deg: f64) -> f64 {
+    let (a, b) = nm_per_deg(lat_deg);
+    dlat_deg * a * dlon_deg * b
+}
+
 fn cell_area_nm2(g: &Raster, j: usize) -> f64 {
     let lat = g.lat0 + (j as f64 + 0.5) * COVERAGE_CELL_DEG;
-    let c = COVERAGE_CELL_DEG;
-    c * NM_PER_DEG_LAT * c * NM_PER_DEG_LON_EQUATOR * lat.to_radians().cos()
+    patch_area_nm2(lat, COVERAGE_CELL_DEG, COVERAGE_CELL_DEG)
 }
 
 /// Coverage report of chart row `chart`. `Err` names why a chart was not rasterised (too many
@@ -310,11 +329,9 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
             let (a, alt_a) = name(x);
             let (b, alt_b) = name(y);
             let lat_mid = g.lat0 + ((p.j.0 + p.j.1) as f64 / 2.0 + 0.5) * c;
-            let dy = (p.j.1 - p.j.0 + 1) as f64 * c * NM_PER_DEG_LAT;
-            let dx = (p.i.1 - p.i.0 + 1) as f64
-                * c
-                * NM_PER_DEG_LON_EQUATOR
-                * lat_mid.to_radians().cos();
+            let (nm_lat, nm_lon) = nm_per_deg(lat_mid);
+            let dy = (p.j.1 - p.j.0 + 1) as f64 * c * nm_lat;
+            let dx = (p.i.1 - p.i.0 + 1) as f64 * c * nm_lon;
             Overlap {
                 a,
                 b,
@@ -343,4 +360,35 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
         gaps,
         overlaps,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-MVA-077
+    #[test]
+    fn a_small_cell_area_matches_the_exact_wgs84_zone_area() {
+        // 0.1 by 0.1 degrees at 45 N. Independent value: the authalic zone area of WGS-84,
+        // A = b^2 dlon / 2 [ s/(1 - e^2 s^2) + ln((1 + e s)/(1 - e s)) / (2 e) ] from 44.95 to
+        // 45.05 N, with a = 6378137 m, f = 1/298.257223563, in 40-digit arithmetic, divided by
+        // 1852^2 m^2 per square nautical mile.
+        let exact = 25.547_035_094_100_846;
+        let got = patch_area_nm2(45.0, 0.1, 0.1);
+        assert!(
+            ((got - exact) / exact).abs() < 1e-4,
+            "{got} against {exact}"
+        );
+        // The cell of the raster is the same formula at its row's centre latitude.
+        let g = Raster {
+            lon0: 0.0,
+            lat0: 44.0,
+            nx: 1,
+            ny: 1000,
+        };
+        let j = ((45.0 - 44.0) / COVERAGE_CELL_DEG) as usize;
+        let want = patch_area_nm2(g.lat0 + (j as f64 + 0.5) * COVERAGE_CELL_DEG, 0.002, 0.002);
+        assert!((cell_area_nm2(&g, j) - want).abs() < 1e-12);
+    }
 }

@@ -14,6 +14,7 @@ workspace = true
 oa-adsb = { path = "../oa-adsb" }
 oa-asterix = { path = "../oa-asterix" }
 oa-feed = { path = "../oa-feed" }
+oa-geo = { path = "../oa-geo" }
 oa-truth = { path = "../oa-truth" }
 
 [[bin]]

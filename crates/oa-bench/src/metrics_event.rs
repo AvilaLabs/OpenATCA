@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::assoc::{Assoc, TruthIndex};
-use crate::geo::{dist_m, enu, NM_M};
+use crate::geo::{dist_m, NM_M};
 use crate::legacy::{
     hev, name, norm_id, plan_candidates, plan_overflowed, tbfm_kind, tfms_kind, Legacy, PlanIndex,
     NONE, NO_COORD, NO_TIME,
@@ -35,6 +35,8 @@ use crate::legacy::{
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
 use crate::truth::{AirportRef, Env, Truth, TruthSample, STANDARD_INHG};
+use oa_airspace::geom::exact_edge_m;
+use oa_geo::{wgs84, LatLon};
 
 /// Look-ahead bin names, 5 minutes each to 60.
 pub const LOOKAHEAD_NAMES: [&str; 12] = [
@@ -844,25 +846,35 @@ fn polyline(leg: &Legacy, route: usize, env: &Env<'_>) -> RouteLine {
 }
 
 /// Distance in metres from a point to a polyline (the nearest segment; one point is a point).
+/// Each segment is a WGS-84 geodesic and the distance is the exact geodesic distance to it
+/// (`oa_airspace::geom::exact_edge_m`). A segment is skipped without the search when even the
+/// nearer end, less half the segment, is farther than the best so far. An invalid position gives
+/// `f64::MAX`.
 pub fn dist_to_polyline(lat: f64, lon: f64, line: &[(f64, f64)]) -> f64 {
     let mut best = f64::MAX;
     if let [only] = line {
         return dist_m(lat, lon, only.0, only.1);
     }
+    let Ok(p) = LatLon::new(lat, lon) else {
+        return best;
+    };
+    let ell = wgs84();
     for w in line.windows(2) {
         let (Some(&(la, lo)), Some(&(lb, ob))) = (w.first(), w.get(1)) else {
             continue;
         };
-        let (bx, by) = enu(la, lo, lb, ob);
-        let (px, py) = enu(la, lo, lat, lon);
-        let l2 = bx * bx + by * by;
-        let u = if l2 > 0.0 {
-            ((px * bx + py * by) / l2).clamp(0.0, 1.0)
-        } else {
-            0.0
+        let (Ok(a), Ok(b)) = (LatLon::new(la, lo), LatLon::new(lb, ob)) else {
+            continue;
         };
-        let d = (px - u * bx).hypot(py - u * by);
-        best = best.min(d);
+        if let (Ok(da), Ok(db), Ok(ab)) = (ell.inverse(p, a), ell.inverse(p, b), ell.inverse(a, b))
+        {
+            if da.distance_m.min(db.distance_m) - ab.distance_m / 2.0 > best {
+                continue;
+            }
+        }
+        if let Ok(d) = exact_edge_m(&ell, a, b, p) {
+            best = best.min(d);
+        }
     }
     best
 }

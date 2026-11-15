@@ -8,7 +8,9 @@
 )]
 
 use oa_bench::geo::{dist_m, enu, from_enu};
-use oa_bench::metrics_event::{landing_time, takeoff_time, EventConfig, GroundEvent};
+use oa_bench::metrics_event::{
+    dist_to_polyline, landing_time, takeoff_time, EventConfig, GroundEvent,
+};
 use oa_bench::truth::{AirportRef, NoTruth, Truth, TruthLeg, TruthSample};
 
 const FIELD: (f64, f64) = (39.86, -104.67);
@@ -164,4 +166,44 @@ fn an_invalid_position_gives_nan_not_a_distance() {
     assert!(dist_m(0.0, 0.0, f64::NAN, 0.0).is_nan());
     let (e, n) = enu(0.0, 200.0, 0.0, 0.0);
     assert!(e.is_nan() && n.is_nan());
+}
+
+// REQ: OA-BENCH-113
+#[test]
+fn a_long_route_segment_distance_is_geodesic() {
+    use oa_geo::{wgs84, LatLon};
+    let e = wgs84();
+    let ll = |la: f64, lo: f64| LatLon::new(la, lo).unwrap();
+    let a = ll(45.0, -100.0);
+    let len = 600.0 * 1852.0;
+    let b = e.direct(a, 90.0, len).unwrap();
+    let (b_lat, b_lon) = (b.position.lat(), b.position.lon());
+    let ab = e.inverse(a, b.position).unwrap();
+    // A point 100 NM to the left of the segment near its far end.
+    let on = e.direct(a, ab.azimuth1_deg, 0.9 * ab.distance_m).unwrap();
+    let p = e
+        .direct(on.position, on.azimuth2_deg - 90.0, 100.0 * 1852.0)
+        .unwrap()
+        .position;
+    // Brute force: the geodesic sampled every 25 m, each sample measured with the inverse.
+    let n = 24_000usize;
+    let mut brute = f64::MAX;
+    for i in 0..=n {
+        let q = e
+            .direct(a, ab.azimuth1_deg, ab.distance_m * i as f64 / n as f64)
+            .unwrap()
+            .position;
+        brute = brute.min(e.inverse(q, p).unwrap().distance_m);
+    }
+    let got = dist_to_polyline(p.lat(), p.lon(), &[(45.0, -100.0), (b_lat, b_lon)]);
+    assert!((got - brute).abs() < 1.0, "{got} against {brute}");
+    // A point past the end measures to the end point; one point is a point.
+    let past = e
+        .direct(b.position, ab.azimuth2_deg, 50_000.0)
+        .unwrap()
+        .position;
+    let want = dist_m(b_lat, b_lon, past.lat(), past.lon());
+    let got = dist_to_polyline(past.lat(), past.lon(), &[(45.0, -100.0), (b_lat, b_lon)]);
+    assert!((got - want).abs() < 0.01, "{got} {want}");
+    assert_eq!(dist_to_polyline(45.0, -100.0, &[(45.0, -100.0)]), 0.0);
 }

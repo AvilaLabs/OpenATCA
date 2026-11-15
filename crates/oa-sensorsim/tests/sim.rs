@@ -9,7 +9,7 @@
 
 use oa_adsb::{reports_push, Reports, ROW_EMPTY};
 use oa_asterix::{decode_stream, Block};
-use oa_sensorsim::geom::{az_diff, frame_at, offset_deg, polar_of, FT_M, NM_M};
+use oa_sensorsim::geom::{az_diff, frame_at, offset_geodesic_deg, polar_of, FT_M, NM_M};
 use oa_sensorsim::plots::{
     plots_len, plots_push, to_cat048, Plot, Plots, KIND_FALSE, KIND_SPLIT, KIND_TRUE, NONE_ADDR,
     NONE_ALT, NONE_CODE,
@@ -35,7 +35,7 @@ fn track(
 ) {
     let mut t = 0.0;
     while t <= dur_s + 1e-9 {
-        let (lat, lon) = offset_deg(lat0, lon0, ve * t, vn * t);
+        let (lat, lon) = offset_geodesic_deg(lat0, lon0, ve * t, vn * t).unwrap();
         let mut row = ROW_EMPTY;
         row.icao = addr;
         row.time_ns = T0 + (t * 1e9).round() as i64;
@@ -99,7 +99,7 @@ fn stationary_field(dur_s: f64) -> Reports {
         let brg = f64::from(k) * 45.0 + 20.0;
         let d = 40_000.0 + f64::from(k) * 5_000.0;
         let (e, n) = (d * brg.to_radians().sin(), d * brg.to_radians().cos());
-        let (lat, lon) = offset_deg(RLAT, RLON, e, n);
+        let (lat, lon) = offset_geodesic_deg(RLAT, RLON, e, n).unwrap();
         track(
             &mut r,
             0xa00000 + k,
@@ -202,7 +202,7 @@ fn bias_is_applied_exactly() {
 #[test]
 fn scan_time_is_exact_for_a_stationary_target() {
     let mut r = Reports::default();
-    let (lat, lon) = offset_deg(RLAT, RLON, 30_000.0, 20_000.0);
+    let (lat, lon) = offset_geodesic_deg(RLAT, RLON, 30_000.0, 20_000.0).unwrap();
     track(&mut r, 0xa11111, (lat, lon), (0.0, 0.0), 10_000, 200.0, 2.0);
     let truth = truth_of(&r);
     let s = site(clean(MSSR_EUROCONTROL_1997));
@@ -228,7 +228,7 @@ fn scan_time_is_exact_for_a_stationary_target() {
 fn scan_time_accounts_for_target_motion() {
     // 250 m/s crossing 25 km abeam of the radar: about 0.57 degree per second.
     let mut r = Reports::default();
-    let (lat, lon) = offset_deg(RLAT, RLON, 25_000.0, -40_000.0);
+    let (lat, lon) = offset_geodesic_deg(RLAT, RLON, 25_000.0, -40_000.0).unwrap();
     track(
         &mut r,
         0xa22222,
@@ -406,7 +406,7 @@ fn cd2_range_is_on_the_eighth_nautical_mile_grid() {
 fn coverage_range_and_horizon_cut_off() {
     // Antenna 30 m, aircraft 10 000 ft: horizon about 4.12 (sqrt 30 + sqrt 3048) = 250 km.
     let mut r = Reports::default();
-    let place = |km: f64| offset_deg(RLAT, RLON, km * 1000.0, 0.0);
+    let place = |km: f64| offset_geodesic_deg(RLAT, RLON, km * 1000.0, 0.0).unwrap();
     track(
         &mut r,
         0xb00001,
@@ -530,12 +530,13 @@ fn same_seed_same_bytes_and_streams_are_per_aircraft() {
     // Dropping the other aircraft does not change one aircraft's plots.
     let mut one = Reports::default();
     let brg = 20.0f64;
-    let (lat, lon) = offset_deg(
+    let (lat, lon) = offset_geodesic_deg(
         RLAT,
         RLON,
         40_000.0 * brg.to_radians().sin(),
         40_000.0 * brg.to_radians().cos(),
-    );
+    )
+    .unwrap();
     track(
         &mut one,
         0xa00000,

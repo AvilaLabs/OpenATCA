@@ -12,9 +12,9 @@
 //! * [`inject_duplicate`]: a second aircraft transmits under a real aircraft's address (the
 //!   donor's reports re-addressed).
 //!
-//! Every attack number is a parameter; there are no defaults. Offsets are on a sphere of the
-//! mean earth radius (the flat small-offset approximation), which is exact enough for the
-//! kilometres involved and is the same in every transform. Injected rows are merged by time
+//! Every attack number is a parameter; there are no defaults. Offsets follow the
+//! WGS-84 geodesic from the start of the leg (the ghost's first point, the victim's reported
+//! position), by the leg's azimuth and the distance travelled. Injected rows are merged by time
 //! (ties keep the original rows first). Rows that are changed or added are the labelled ones;
 //! nothing else changes, and the confusion matrix ([`confusion`]) scores a detector against the
 //! labels.
@@ -22,7 +22,7 @@
 use oa_adsb::{reports_len, reports_push, reports_row, Reports, Row, NON_ICAO, ROW_EMPTY};
 
 use crate::error::SimError;
-use crate::geom::offset_deg;
+use crate::geom::direct_deg;
 use crate::plots::NONE_ADDR;
 
 /// Label: a row of the original traffic.
@@ -191,13 +191,13 @@ pub fn inject_ghost(base: &Labelled, g: &GhostParams) -> Result<Labelled, SimErr
         .and_then(|ns| g.start_ns.checked_add(ns))
         .ok_or(SimError::BadSpoof("ghost duration overflows"))?;
     let v_mps = g.speed_kt * 1852.0 / 3600.0;
-    let (sin_t, cos_t) = g.track_deg.to_radians().sin_cos();
     let trk = g.track_deg.rem_euclid(360.0);
     let mut added = Vec::with_capacity(g.count as usize);
     for k in 0..g.count {
         let dt_ms = i64::from(k) * g.interval_ms;
         let d = v_mps * dt_ms as f64 / 1000.0;
-        let (lat, lon) = offset_deg(g.lat_deg, g.lon_deg, d * sin_t, d * cos_t);
+        let (lat, lon) = direct_deg(g.lat_deg, g.lon_deg, g.track_deg, d)
+            .ok_or(SimError::BadSpoof("ghost position out of range"))?;
         let mut r = ROW_EMPTY;
         r.icao = g.addr;
         r.time_ns = g.start_ns.saturating_add(dt_ms.saturating_mul(1_000_000));
@@ -246,7 +246,6 @@ pub fn inject_drift(base: &Labelled, d: &DriftParams) -> Result<Labelled, SimErr
     if !d.bearing_deg.is_finite() {
         return Err(SimError::BadSpoof("drift bearing"));
     }
-    let (sin_b, cos_b) = d.bearing_deg.to_radians().sin_cos();
     let mut out = base.clone();
     let mut hit = 0u64;
     for i in 0..n {
@@ -261,12 +260,13 @@ pub fn inject_drift(base: &Labelled, d: &DriftParams) -> Result<Labelled, SimErr
         else {
             return Err(SimError::ColumnLength);
         };
-        let (lat, lon) = offset_deg(
+        let (lat, lon) = direct_deg(
             f64::from(la) / 1.0e7,
             f64::from(lo) / 1.0e7,
-            off * sin_b,
-            off * cos_b,
-        );
+            d.bearing_deg,
+            off,
+        )
+        .ok_or(SimError::BadSpoof("drift position out of range"))?;
         if let (Some(x), Some(y), Some(l), Some(v)) = (
             out.reports.lat_e7.get_mut(i),
             out.reports.lon_e7.get_mut(i),

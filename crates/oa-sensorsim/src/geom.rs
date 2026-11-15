@@ -7,6 +7,8 @@
 //! the target if the central angle between the two is no more than the sum of each end's
 //! horizon angle. No terrain is modelled.
 
+use oa_geo::{wgs84, LatLon};
+
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
 /// Mean earth radius, metres (IUGG), the sphere the effective-radius model is scaled from.
@@ -96,15 +98,60 @@ pub fn line_of_sight(h1_m: f64, h2_m: f64, theta_rad: f64, k: f64) -> bool {
     theta_rad / k <= horizon(h1_m) + horizon(h2_m)
 }
 
-/// Offsets a position by `east_m` and `north_m` on a sphere of the mean earth radius (the flat
-/// small-offset approximation, used for the sub-millisecond truth advance and the spoof
-/// transforms, where an exact geodesic is not needed). Returns degrees.
-pub fn offset_deg(lat_deg: f64, lon_deg: f64, east_m: f64, north_m: f64) -> (f64, f64) {
-    let lat = lat_deg + (north_m / EARTH_MEAN_RADIUS_M).to_degrees();
-    let c = lat_deg.to_radians().cos().max(1e-9);
-    (
-        lat,
-        lon_deg + (east_m / (EARTH_MEAN_RADIUS_M * c)).to_degrees(),
+/// The largest offset [`offset_deg`] accepts, metres. At 500 m the flat approximation is within
+/// 1 cm of the geodesic at mid latitudes (about 2 cm at 1 km; checked in the tests).
+pub const FLAT_OFFSET_MAX_M: f64 = 500.0;
+
+/// Offsets a position by `east_m` and `north_m` with the WGS-84 radii of curvature at the start
+/// (the flat small-offset approximation, for the sub-millisecond truth advance only). Returns degrees, or
+/// `None` for a non-finite input, an offset above [`FLAT_OFFSET_MAX_M`], or a start within 0.1
+/// degrees of a pole. Longer offsets use [`direct_deg`].
+pub fn offset_deg(lat_deg: f64, lon_deg: f64, east_m: f64, north_m: f64) -> Option<(f64, f64)> {
+    if !(lat_deg.is_finite() && lon_deg.is_finite() && east_m.is_finite() && north_m.is_finite())
+        || east_m.hypot(north_m) > FLAT_OFFSET_MAX_M
+        || lat_deg.abs() > 89.9
+    {
+        return None;
+    }
+    // Meridian radius of curvature at the start latitude, prime-vertical radius at the middle
+    // latitude of the step.
+    let s0 = lat_deg.to_radians().sin();
+    let w0 = 1.0 - WGS84_E2 * s0 * s0;
+    let dlat = north_m / (WGS84_A * (1.0 - WGS84_E2) / (w0 * w0.sqrt()));
+    let (s, c) = (lat_deg.to_radians() + dlat / 2.0).sin_cos();
+    let n = WGS84_A / (1.0 - WGS84_E2 * s * s).sqrt();
+    Some((
+        lat_deg + dlat.to_degrees(),
+        lon_deg + (east_m / (n * c)).to_degrees(),
+    ))
+}
+
+/// The WGS-84 geodesic from a position, along `azimuth_deg` (true) for `distance_m`. Returns
+/// degrees, or `None` for a non-finite input or an invalid start.
+pub fn direct_deg(
+    lat_deg: f64,
+    lon_deg: f64,
+    azimuth_deg: f64,
+    distance_m: f64,
+) -> Option<(f64, f64)> {
+    let p = LatLon::new(lat_deg, lon_deg).ok()?;
+    let d = wgs84().direct(p, azimuth_deg, distance_m).ok()?;
+    Some((d.position.lat(), d.position.lon()))
+}
+
+/// The WGS-84 geodesic end point of an `east_m`, `north_m` offset taken as a distance and an
+/// initial azimuth from the start. Returns degrees.
+pub fn offset_geodesic_deg(
+    lat_deg: f64,
+    lon_deg: f64,
+    east_m: f64,
+    north_m: f64,
+) -> Option<(f64, f64)> {
+    direct_deg(
+        lat_deg,
+        lon_deg,
+        east_m.atan2(north_m).to_degrees(),
+        east_m.hypot(north_m),
     )
 }
 
@@ -143,6 +190,22 @@ mod tests {
         assert!(!line_of_sight(h1, h2, theta(d_km * 1.02), 4.0 / 3.0));
         // With k = 1 the horizon is shorter.
         assert!(!line_of_sight(h1, h2, theta(d_km * 0.98), 1.0));
+    }
+
+    // REQ: OA-SIM-028
+    #[test]
+    fn the_flat_offset_refuses_beyond_half_a_kilometre_and_near_the_pole() {
+        let (la, lo) = offset_deg(45.0, -88.0, 300.0, 400.0).unwrap();
+        let (gla, glo) = offset_geodesic_deg(45.0, -88.0, 300.0, 400.0).unwrap();
+        // Within 1 cm of the geodesic (a degree of latitude is about 111 km).
+        assert!(((la - gla) * 111_000.0).abs() < 0.01, "{}", la - gla);
+        assert!(((lo - glo) * 78_000.0).abs() < 0.01, "{}", lo - glo);
+        assert!(offset_deg(45.0, -88.0, 500.1, 0.0).is_none());
+        assert!(offset_deg(45.0, -88.0, 400.0, 400.0).is_none());
+        assert!(offset_deg(45.0, -88.0, f64::NAN, 0.0).is_none());
+        // Near the pole the flat longitude step is enormous, so it is refused.
+        assert!(offset_deg(89.99999, 0.0, 500.0, 0.0).is_none());
+        assert!(offset_deg(90.0, 0.0, 1.0, 0.0).is_none());
     }
 
     #[test]
