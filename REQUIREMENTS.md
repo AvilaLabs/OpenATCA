@@ -2737,3 +2737,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   in seconds in a debug build; candidates visited are charged to the bucket's work limit and counted; when
   the limit is reached the radars of a bucket have each had an equal share, so one radar's flood does not
   leave another radar's plots ungated.
+
+- **OA-TRK-210** A radar plot's position covariance is in the target's own east-north frame: the range,
+  azimuth and height errors are linearised exactly (the elevation adjusting to hold the height) and rotated
+  into the target's local frame, so the ellipse is oriented along the true range axis at any latitude and
+  bearing, and matches a central finite-difference Jacobian of the conversion to 1e-6 of its trace at sites
+  from the equator to 85 degrees and targets 50 to 600 km away.
+- **OA-TRK-211** At 80 N and 500 km east, where the meridians have converged by 24 degrees, an elongated
+  plot covariance accepts a residual along the range axis and rejects the same residual across it.
+- **OA-TRK-212** The simulated ADS-B noise of a sample depends only on the seed, the address and the
+  sample's time, so the two legs of one aircraft do not repeat each other's draws and a simulation of a
+  subrange reproduces exactly the samples of the full run that it covers.
