@@ -11,8 +11,8 @@ use oa_tfms::NO_TIME as TFMS_NO_TIME;
 use oa_xml::Parser;
 
 use crate::legacy::{
-    flight_ix, pad, push_tbfm, push_tfms, push_th, row_has, tbfm_kind, tfms_kind, Legacy, TfmsIn,
-    NO_ALT, NO_TIME,
+    flight_ix, pad, push_tbfm, push_tfms, push_th, row_has, tbfm_kind, tfms_kind, Counts, Legacy,
+    TfmsIn, NO_ALT, NO_TIME,
 };
 use crate::scan::scan_doc;
 
@@ -64,10 +64,24 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
         leg.counts.doc_errors[0] += 1;
         return;
     };
+    let before = r.fixm.stats().rejected;
     match r.fixm.decode_prefix(&doc, bytes, &mut r.events) {
         Ok(sum) => {
             leg.counts.sfdps_rejected += u64::from(sum.rejected);
             leg.counts.rows_not_decoded += u64::from(sum.not_decoded);
+            leg.counts.sfdps_field_errors += u64::from(sum.field_errors);
+            let after = r.fixm.stats().rejected;
+            for ((name, a), b) in oa_fixm::REJECT_NAMES.iter().zip(after).zip(before) {
+                leg.counts
+                    .note(format!("SFDPS messages rejected, reason {name}"), a - b);
+            }
+            for (f, name) in oa_fixm::ALL_FIELDS.iter().zip(oa_fixm::FIELD_NAMES) {
+                let n = (0..r.events.len)
+                    .filter(|&row| oa_fixm::field_error(&r.events, row, *f))
+                    .count();
+                leg.counts
+                    .note(format!("SFDPS field errors, field {name}"), n as u64);
+            }
         }
         Err(_) => {
             leg.counts.doc_errors[0] += 1;
@@ -129,6 +143,45 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
     scan_doc(&doc, &mut r.text, leg);
 }
 
+/// Field error kind names of `oa-tbfm`, by `error_kind_index`.
+const TBFM_KINDS: [&str; oa_tbfm::ERROR_KIND_COUNT] = [
+    "missing",
+    "too-long",
+    "bad-char",
+    "format",
+    "time",
+    "vocabulary",
+    "duplicate",
+    "inconsistent",
+    "not-leaf",
+    "text",
+];
+
+/// Field error kind names of `oa-tfms`, by `error_kind_index`.
+const TFMS_KINDS: [&str; oa_tfms::ERROR_KIND_COUNT] = [
+    "missing",
+    "too-long",
+    "bad-char",
+    "format",
+    "time",
+    "vocabulary",
+    "range",
+    "duplicate",
+    "inconsistent",
+    "not-leaf",
+    "text",
+];
+
+/// Adds one document's refusals, by field index and by reason, to the counts.
+fn note_rejects(c: &mut Counts, feed: &str, fields: &[u32], kinds: &[u32], names: &[&str]) {
+    for (i, &n) in fields.iter().enumerate() {
+        c.note(format!("{feed} refusals, field #{i}"), u64::from(n));
+    }
+    for (name, &n) in names.iter().zip(kinds) {
+        c.note(format!("{feed} refusals, reason {name}"), u64::from(n));
+    }
+}
+
 fn tb_time(t: i64) -> Option<i64> {
     (t != TBFM_NO_TIME).then_some(t)
 }
@@ -142,7 +195,17 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
         return;
     };
     match oa_tbfm::decode_doc_prefix(&doc, &mut r.tbfm_rows) {
-        Ok(out) => leg.counts.rows_not_decoded += u64::from(out.dropped),
+        Ok(out) => {
+            leg.counts.rows_not_decoded += u64::from(out.dropped);
+            leg.counts.tbfm_rejected += u64::from(out.rejected);
+            note_rejects(
+                &mut leg.counts,
+                "TBFM",
+                &out.reject_fields,
+                &out.reject_kinds,
+                &TBFM_KINDS,
+            );
+        }
         Err(_) => {
             leg.counts.doc_errors[1] += 1;
             return;
@@ -204,7 +267,17 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
         return;
     };
     match oa_tfms::decode_doc_prefix(&doc, &mut r.tfms_rows) {
-        Ok(out) => leg.counts.rows_not_decoded += u64::from(out.dropped),
+        Ok(out) => {
+            leg.counts.rows_not_decoded += u64::from(out.dropped);
+            leg.counts.tfms_rejected += u64::from(out.rejected);
+            note_rejects(
+                &mut leg.counts,
+                "TFMS",
+                &out.reject_fields,
+                &out.reject_kinds,
+                &TFMS_KINDS,
+            );
+        }
         Err(_) => {
             leg.counts.doc_errors[2] += 1;
             return;

@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use oa_bench::adsb_truth::{self, config_with, truth_section};
 use oa_bench::airspace_env::lookup_from_model;
-use oa_bench::input::{load, load_adsb, FeedInput};
+use oa_bench::input::{load, load_adsb, read_capped_file, FeedInput};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::{run_benchmark, RunConfig, RunOutput};
 use oa_bench::synth::{
@@ -247,7 +247,8 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     let truth_secs = started.elapsed().as_secs_f64();
     let lookup = match &o.airspace {
         Some(p) => {
-            let bytes = fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let bytes = read_capped_file(p, oa_airspace::snapshot::MAX_SNAPSHOT_BYTES as u64)
+                .map_err(|e| e.to_string())?;
             let model = oa_airspace::snapshot::decode(&bytes)
                 .map_err(|e| format!("{}: {e}", p.display()))?;
             Some(lookup_from_model(&model))

@@ -379,3 +379,103 @@ fn real_sample_extraction_counts() {
     );
     assert_eq!(c.overflow_th + c.overflow_flights, 0);
 }
+
+fn count_of(leg: &oa_bench::legacy::Legacy, label: &str) -> u64 {
+    oa_bench::report::extraction_counts(leg)
+        .iter()
+        .find(|(k, _)| k.contains(label))
+        .unwrap_or_else(|| panic!("no count line containing {label:?}"))
+        .1
+}
+
+// REQ: OA-BENCH-091
+#[test]
+fn tbfm_rows_refused_for_a_field_are_counted_by_reason() {
+    let bad = TBFM_DOC
+        .replace("KR000001Aa", "KR000002Bb")
+        .replace("2030-01-02T03:30:00Z</eta_mfx>", "soon</eta_mfx>");
+    let both = TBFM_DOC.replace(
+        "</tma>",
+        &format!(
+            "{}</tma>",
+            &bad[bad.find("<air").unwrap()..bad.find("</tma>").unwrap()]
+        ),
+    );
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_tbfm(&mut leg, &mut r, both.as_bytes());
+    assert_eq!(leg.counts.doc_errors[1], 0);
+    assert_eq!(leg.tbfm.kind.len(), 4, "the valid flight is kept");
+    assert_eq!(count_of(&leg, "TBFM flights refused for a field"), 1);
+    assert_eq!(count_of(&leg, "TBFM refusals, reason time"), 1);
+    assert_eq!(
+        count_of(
+            &leg,
+            &format!("TBFM refusals, field #{}", oa_tbfm::Field::EtaMfx as usize)
+        ),
+        1
+    );
+}
+
+// REQ: OA-BENCH-091
+#[test]
+fn tfms_messages_refused_for_a_field_are_counted_by_reason() {
+    let one = tfms_doc();
+    let m0 = one.find("<fdm:fltdMessage").unwrap();
+    let m1 = one.find("</fltdOutput>").unwrap();
+    let msg = &one[m0..m1];
+    let bad = msg.replace(
+        r#"etaType="ESTIMATED" timeValue="2030-01-02T04:30:00Z""#,
+        r#"etaType="ESTIMATED" timeValue="soon""#,
+    );
+    let doc = one.replace(msg, &format!("{msg}{bad}"));
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_tfms(&mut leg, &mut r, doc.as_bytes());
+    assert_eq!(leg.counts.doc_errors[2], 0, "{:?}", leg.counts);
+    assert_eq!(leg.tfms.kind.len(), 2, "the valid message is kept");
+    assert_eq!(count_of(&leg, "TFMS messages refused for a field"), 1);
+    assert_eq!(count_of(&leg, "TFMS refusals, reason time"), 1);
+}
+
+// REQ: OA-BENCH-091
+#[test]
+fn sfdps_messages_and_fields_refused_are_counted_by_reason() {
+    let good = th(
+        GUFI_A,
+        "2030-01-02T03:00:05.250Z",
+        "2030-01-02T03:00:04Z",
+        false,
+        "",
+    );
+    let bad_field = th(
+        GUFI_B,
+        "2030-01-02T03:00:05.250Z",
+        "2030-01-02T03:00:04Z",
+        false,
+        "",
+    )
+    .replace(
+        r#"<altitude uom="FEET">35000.0</altitude>"#,
+        r#"<altitude uom="FEET">high</altitude>"#,
+    );
+    let no_gufi = good.replace(
+        &format!(r#"<gufi codeSpace="urn:uuid">{GUFI_A}</gufi>"#),
+        "",
+    );
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        sfdps(&format!("{good}{bad_field}{no_gufi}")).as_bytes(),
+        NO_TIME,
+    );
+    assert_eq!(count_of(&leg, "SFDPS messages rejected by the decoder"), 1);
+    assert_eq!(
+        count_of(&leg, "SFDPS messages rejected, reason missing GUFI"),
+        1
+    );
+    assert!(count_of(&leg, "SFDPS field errors in kept rows") >= 1);
+    assert!(count_of(&leg, "SFDPS field errors, field ") >= 1);
+}

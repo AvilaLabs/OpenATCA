@@ -232,6 +232,16 @@ pub struct Counts {
     pub doc_errors: [u64; 3],
     /// SFDPS messages rejected by the decoder (no usable GUFI or timestamp).
     pub sfdps_rejected: u64,
+    /// SFDPS field errors in the rows the decoder kept (a field that was present but malformed or
+    /// duplicated; the row stays, the field is treated as absent).
+    pub sfdps_field_errors: u64,
+    /// TBFM flights refused for a field, with their siblings kept.
+    pub tbfm_rejected: u64,
+    /// TFMS messages refused for a field, with their siblings kept.
+    pub tfms_rejected: u64,
+    /// The refusals above by reason and by field, keyed by a report label (see
+    /// [`Counts::note`]).
+    pub reasons: std::collections::BTreeMap<String, u64>,
     /// Messages or rows of accepted documents past the replay's per-document table size (SFDPS
     /// messages, TBFM rows, TFMS rows); decoded as far as they fit, the rest counted here.
     pub rows_not_decoded: u64,
@@ -251,6 +261,15 @@ pub struct Counts {
     pub th_adsb_hint: u64,
     /// Route points that are relative to a fix (radial and distance) rather than a fix itself.
     pub route_relative_points: u64,
+}
+
+impl Counts {
+    /// Adds `n` to the refusal count labelled `label`; a zero adds nothing.
+    pub fn note(&mut self, label: String, n: u64) {
+        if n > 0 {
+            *self.reasons.entry(label).or_insert(0) += n;
+        }
+    }
 }
 
 /// The legacy tables. Cold container (A7.2); the tables inside are the hot data.
@@ -463,6 +482,23 @@ pub fn pad<const N: usize>(s: &[u8]) -> [u8; N] {
     out
 }
 
+/// An identifier (callsign, aircraft identification, plan identifier) normalised for comparison:
+/// leading white space skipped, cut at the first zero or white space, ASCII upper case, zero
+/// padded to `N`. Every join on an identifier compares through this, so the accepted forms of one
+/// identifier (any case, padded with spaces or zeros) are the same key.
+pub fn norm_id<const N: usize>(c: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let start = c.iter().take_while(|b| b.is_ascii_whitespace()).count();
+    let body = c.get(start..).unwrap_or(&[]);
+    for (o, &b) in out.iter_mut().zip(
+        body.iter()
+            .take_while(|&&b| b != 0 && !b.is_ascii_whitespace()),
+    ) {
+        *o = b.to_ascii_uppercase();
+    }
+    out
+}
+
 /// Most flights kept per plan identifier. An identifier is reused by a handful of flights at
 /// most (a re-filed plan, a recycled number); a flight past this is not indexed and is counted in
 /// [`PlanIndex::overflow`].
@@ -478,7 +514,7 @@ pub struct PlanSlot {
     pub overflowed: bool,
 }
 
-/// Plan identifier to the flights that used it, for joining TBFM and TFMS rows. Built once, sized
+/// Plan identifier (normalised, [`norm_id`]) to the flights that used it, for joining TBFM and TFMS rows. Built once, sized
 /// at init from the flight table; flights with no plan identifier are left out. An identifier
 /// can name several flights (it is reused), so a join must choose among them
 /// ([`plan_candidates`]) and never take the first.
@@ -500,7 +536,7 @@ pub fn plan_index(leg: &Legacy) -> PlanIndex {
         if p.iter().all(|&b| b == 0) {
             continue;
         }
-        let slot = idx.slots.entry(*p).or_default();
+        let slot = idx.slots.entry(norm_id(p)).or_default();
         let n = usize::from(slot.len);
         match slot.flights.get_mut(n) {
             Some(s) => {
@@ -519,19 +555,21 @@ pub fn plan_index(leg: &Legacy) -> PlanIndex {
 /// The flights that used plan identifier `key`, in flight order.
 pub fn plan_candidates<'a>(idx: &'a PlanIndex, key: &[u8; 12]) -> &'a [u32] {
     idx.slots
-        .get(key)
+        .get(&norm_id::<12>(key))
         .and_then(|s| s.flights.get(..usize::from(s.len)))
         .unwrap_or(&[])
 }
 
 /// Whether more flights used `key` than [`plan_candidates`] lists.
 pub fn plan_overflowed(idx: &PlanIndex, key: &[u8; 12]) -> bool {
-    idx.slots.get(key).is_some_and(|s| s.overflowed)
+    idx.slots
+        .get(&norm_id::<12>(key))
+        .is_some_and(|s| s.overflowed)
 }
 
 /// Whether plan identifier `key` names any flight.
 pub fn plan_known(idx: &PlanIndex, key: &[u8; 12]) -> bool {
-    idx.slots.contains_key(key)
+    idx.slots.contains_key(&norm_id::<12>(key))
 }
 
 /// A summary of which `Field`s an `Events` row has, for the SFDPS ingest.

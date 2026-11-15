@@ -194,24 +194,39 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
     }
 }
 
+/// A name as the model spells identifiers: white space trimmed, ASCII upper case. A lookup that
+/// finds nothing as given tries this form, so any case or padding of an identifier joins.
+fn norm_name(name: &str) -> String {
+    name.trim().to_ascii_uppercase()
+}
+
 impl AirspaceLookup {
     /// Fix or navaid identifier to `(lat, lon)`; `None` when unknown or when the identifier
     /// names more than one place.
     pub fn fix(&self, name: &str) -> Option<(f64, f64)> {
-        match self.fixes.get(name).map(Vec::as_slice) {
+        match self.fixes_of(name).map(Vec::as_slice) {
             Some([only]) => Some(*only),
             _ => None,
         }
     }
 
+    fn fixes_of(&self, name: &str) -> Option<&Vec<(f64, f64)>> {
+        self.fixes
+            .get(name)
+            .or_else(|| self.fixes.get(&norm_name(name)))
+    }
+
     /// Every distinct place the identifier names.
     pub fn fix_all(&self, name: &str) -> Vec<(f64, f64)> {
-        self.fixes.get(name).cloned().unwrap_or_default()
+        self.fixes_of(name).cloned().unwrap_or_default()
     }
 
     /// Airport identifier (ICAO or FAA) to its reference data.
     pub fn airport(&self, name: &str) -> Option<AirportRef> {
-        self.airports.get(name).cloned()
+        self.airports
+            .get(name)
+            .or_else(|| self.airports.get(&norm_name(name)))
+            .cloned()
     }
 
     /// Whether the point is inside the model's ARTCC.
