@@ -207,3 +207,26 @@ fn bad_arguments_are_refused_with_a_reason() {
         assert!(e.contains("out of range or reversed"), "{bad}: {e}");
     }
 }
+
+// REQ: OA-ADSB-162
+#[test]
+fn iso_days_follow_the_month_and_fields_are_digits_only() {
+    use oa_adsb::cli::parse_iso;
+    assert_eq!(parse_iso("2026-02-31T00:00:00Z"), None);
+    assert_eq!(parse_iso("2026-02-29T00:00:00Z"), None);
+    assert_eq!(parse_iso("2026-04-31T00:00:00Z"), None);
+    assert_eq!(parse_iso("1900-02-29T00:00:00Z"), None);
+    assert_eq!(
+        parse_iso("2028-02-29T00:00:00Z"),
+        parse_iso("2028-03-01T00:00:00Z").map(|t| t - 86_400)
+    );
+    assert_eq!(
+        parse_iso("2000-02-29T00:00:00Z"),
+        parse_iso("2000-03-01T00:00:00Z").map(|t| t - 86_400)
+    );
+    assert!(parse_iso("2026-04-30T00:00:00Z").is_some());
+    assert!(parse_iso("2026-12-31T23:59:59Z").is_some());
+    assert_eq!(parse_iso("2026-+5-01T00:00:00Z"), None);
+    assert_eq!(parse_iso("+026-05-01T00:00:00Z"), None);
+    assert_eq!(parse_iso("2026-05-01T+1:00:00Z"), None);
+}

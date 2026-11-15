@@ -37,7 +37,14 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     {
         return None;
     }
-    let n = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse().ok() };
+    // Digits only: `parse` alone would also take a sign.
+    let n = |a: usize, z: usize| -> Option<i64> {
+        let f = s.get(a..z)?;
+        if !f.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        f.parse().ok()
+    };
     let (y, m, d, hh, mm, ss) = (
         n(0, 4)?,
         n(5, 7)?,
@@ -46,7 +53,14 @@ pub fn parse_iso(s: &str) -> Option<i64> {
         n(14, 16)?,
         n(17, 19)?,
     );
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&m) || !(1..=month_days).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
     // Days from civil (Howard Hinnant).

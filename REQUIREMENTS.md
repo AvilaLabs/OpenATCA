@@ -1448,6 +1448,9 @@ frame of their feed has been fed (as the ADS-B table is).
   `--allow-truncated`, `--help`, `-h`, parts), with times as Unix seconds or ISO, and refuses a missing value, an
   unknown option, a bad box, a frame span outside 1 to 60000 ms, a missing output or no parts.
 
+- **OA-ADSB-162** A command-line date is refused unless its day exists in its month (28 or 29 days in
+  February by the Gregorian leap rule, 30 in April, June, September and November) and every field is
+  plain digits, with no sign.
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
