@@ -107,7 +107,7 @@ fn run_chains(streams: Vec<(FeedKind, Vec<Vec<u8>>)>, chunk: usize) -> Outcome {
     let mut p = pipeline();
     let r = run_streams(&mut p, specs, chunk, &mut |_| {}).unwrap();
     Outcome {
-        checkpoints: p.checkpoints.clone(),
+        checkpoints: p.checkpoints.to_vec(),
         last: snapshot(&p),
         frames: p.frames,
         rows_applied: p.rows_applied,
@@ -148,14 +148,14 @@ fn checkpoints_fall_on_the_replay_time_cadence_and_record_counts_and_hash() {
         p.checkpoints.iter().map(|c| c.frames).collect::<Vec<_>>(),
         expect_frames
     );
-    for c in &p.checkpoints {
+    for c in p.checkpoints.iter() {
         assert_eq!(c.replay_ns.rem_euclid(1_000_000_000), 500_000_000);
         assert!(c.flights > 0 && c.rows_applied > 0);
     }
     let times: Vec<i64> = p.checkpoints.iter().map(|c| c.replay_ns).collect();
     assert!(times.windows(2).all(|w| w[0] < w[1]));
     // The hash is the state's hash at that point: the last checkpoint is before the last frames.
-    assert_ne!(p.checkpoints[3].hash, state_hash(&p.table));
+    assert_ne!(p.checkpoints.get(3).unwrap().hash, state_hash(&p.table));
     // A different cadence is a setting.
     let slow = PipelineConfig {
         checkpoint_ns: 20_000_000_000,

@@ -35,6 +35,7 @@ pub mod fns;
 pub mod hash;
 pub mod index;
 pub mod pipeline;
+pub mod report;
 pub mod slots;
 pub mod source;
 pub mod table;
@@ -58,13 +59,14 @@ pub use fns::{
 pub use hash::{state_hash, HASH_TAG};
 pub use pipeline::{
     add_errors, doc_fixm_limits, doc_xml_limits, frames_total, new_doc_events, new_doc_tbfm_rows,
-    new_doc_tfms_rows, new_pipeline, pipeline_stale_count, process_frame, replay_hash,
-    rows_applied_total, snapshot, Checkpoint, FeedKind, Pipeline, PipelineConfig, PipelineError,
-    FEED_COUNT, FEED_NAMES,
+    new_doc_tfms_rows, new_pipeline, pipeline_drain_checkpoints, pipeline_stale_count,
+    pipeline_try_drain_checkpoints, process_frame, replay_hash, replay_state_digest,
+    rows_applied_total, snapshot, Checkpoint, CheckpointRing, FeedKind, Pipeline, PipelineConfig,
+    PipelineError, DEFAULT_CHECKPOINT_RING, FEED_COUNT, FEED_NAMES, MIN_CHECKPOINT_NS,
 };
 pub use source::{
-    list_recordings, merge_key, merge_streams, run_streams, spec_from_bytes, spec_from_paths,
-    MergeReport, Merged, StreamSpec,
+    list_recordings, merge_key, merge_streams, run_streams, run_streams_with, spec_from_bytes,
+    spec_from_paths, try_merge_streams, MergeReport, Merged, StreamSpec,
 };
 pub use table::{
     advance_time, class_of_status, flights_live, is_stale, new_table, shift_times, slot_of_gufi,

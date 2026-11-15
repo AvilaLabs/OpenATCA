@@ -561,7 +561,7 @@ fn a_mixed_swim_and_adsb_replay_is_deterministic_in_any_order_and_chunking() {
         let (q, b2) = run_mixed(&order, chunk);
         assert_eq!(b2, bytes);
         assert_eq!(snapshot(&q), want, "{order:?} {chunk}");
-        assert_eq!(q.checkpoints, p.checkpoints);
+        assert_eq!(q.checkpoints.to_vec(), p.checkpoints.to_vec());
         assert_eq!(q.errors, p.errors);
         assert_eq!(q.rows_applied, p.rows_applied);
     }
