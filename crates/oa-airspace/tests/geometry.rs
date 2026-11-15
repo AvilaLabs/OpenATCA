@@ -501,3 +501,71 @@ fn a_rhumb_edge_is_sampled_as_the_rhumb_line_it_is() {
     assert!(mid_geod > 60.8, "{mid_geod}");
     assert!(rhumb.len() > 600, "{}", rhumb.len());
 }
+
+// REQ: OA-ASP-002
+#[test]
+fn the_selection_never_disagrees_with_the_exact_distance_near_the_buffer_of_a_long_edge() {
+    let ell = wgs84();
+    for lat in [24.0, 50.0] {
+        for az0 in [90.0, 60.0] {
+            for len_nm in [300.0, 600.0] {
+                let a = ll(lat, -100.0);
+                let b = ell.direct(a, az0, len_nm * 1852.0).unwrap().position;
+                // The third vertex is north of the edge, so points south of it are outside.
+                let ring = vec![a, b, ll(lat + 3.0, -100.0)];
+                let inv = ell.inverse(a, b).unwrap();
+                for buf in [1000.0, 3000.0, 10_000.0] {
+                    let area = build_area(vec![ring.clone()], buf).unwrap();
+                    for ti in (1..24).step_by(2) {
+                        let t = inv.distance_m * f64::from(ti) / 24.0;
+                        let q = ell.direct(a, inv.azimuth1_deg, t).unwrap();
+                        for k in (-30..=30).step_by(3).filter(|k| *k != 0) {
+                            let d = buf * (1.0 + f64::from(k) * 0.01);
+                            let p = ell
+                                .direct(q.position, q.azimuth2_deg + 90.0, d)
+                                .unwrap()
+                                .position;
+                            let truth = area_inside(&area, p)
+                                || area_edge_distance_m(&area, p).unwrap() <= buf;
+                            assert_eq!(
+                                area_contains(&area, p).unwrap(),
+                                truth,
+                                "lat {lat} az {az0} len {len_nm} NM buffer {buf} m, point {d} m from the edge at {t} m"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// REQ: OA-ASP-008
+#[test]
+fn a_ring_box_holds_the_bulge_of_its_edges_and_wraps_over_the_antimeridian() {
+    let ell = wgs84();
+    // A 100 NM edge along 45 N bulges about 670 m poleward: the box is taller than the vertices.
+    let ring = [
+        ll(44.0, -90.5),
+        ll(44.0, -88.15),
+        ll(45.0, -88.15),
+        ll(45.0, -90.5),
+    ];
+    let b = ring_bbox(&ell, &ring).unwrap();
+    assert!(b.max_lat > 45.005 && b.max_lat < 45.01, "{}", b.max_lat);
+    assert!(b.min_lat < 44.0 && b.min_lat > 43.99);
+    // Across the antimeridian the interval is unwrapped: 179.5 east to 180.5.
+    let w = [
+        ll(30.0, 179.5),
+        ll(30.0, -179.5),
+        ll(31.0, -179.5),
+        ll(31.0, 179.5),
+    ];
+    let b = ring_bbox(&ell, &w).unwrap();
+    assert!(lon_overlaps(179.9, 179.9, b.min_lon, b.max_lon));
+    assert!(lon_overlaps(-179.9, -179.9, b.min_lon, b.max_lon));
+    assert!(!lon_overlaps(0.0, 0.0, b.min_lon, b.max_lon));
+    // Too wide or too far north for a box to be a safe filter.
+    assert!(ring_bbox(&ell, &[ll(0.0, 0.0), ll(0.0, 100.0), ll(10.0, -160.0)]).is_none());
+    assert!(ring_bbox(&ell, &[ll(81.0, 0.0), ll(81.0, 10.0), ll(82.0, 5.0)]).is_none());
+}

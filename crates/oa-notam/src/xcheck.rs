@@ -28,7 +28,7 @@
 
 use crate::fields::Field;
 use crate::rows::{code_str, has_circle, has_field, polygon_vertices, polygons_of, Notams};
-use oa_airspace::geom::{latlon_e7, ring_samples};
+use oa_airspace::geom::{latlon_e7, lon_overlaps, ring_bbox, ring_samples};
 use oa_airspace::model::{boundary_source, point_kind, str_or_empty, stratum, Model};
 use oa_geo::{wgs84, LatLon, Polygon};
 use std::collections::{BTreeMap, BTreeSet};
@@ -320,17 +320,6 @@ fn boundaries(model: &Model, check: &mut PolyCheck) -> Vec<Boundary> {
     out
 }
 
-fn bbox(v: &[LatLon]) -> (f64, f64, f64, f64) {
-    let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in v {
-        b.0 = b.0.min(p.lat());
-        b.1 = b.1.max(p.lat());
-        b.2 = b.2.min(p.lon());
-        b.3 = b.3.max(p.lon());
-    }
-    b
-}
-
 fn polygon_check(n: &Notams, bounds: &[Boundary], check: &mut PolyCheck) {
     let ell = wgs84();
     for row in 0..n.len {
@@ -355,14 +344,19 @@ fn polygon_check(n: &Notams, bounds: &[Boundary], check: &mut PolyCheck) {
                 check.unusable += 1;
                 continue;
             };
-            let (la0, la1, lo0, lo1) = bbox(&ring);
+            // Skips samples outside the polygon's box, which includes its edges' bulge and may
+            // run over the antimeridian; no box means no skipping.
+            let bbox = ring_bbox(&ell, &ring);
+            let in_box = |s: &LatLon| {
+                bbox.is_none_or(|b| {
+                    s.lat() >= b.min_lat
+                        && s.lat() <= b.max_lat
+                        && lon_overlaps(s.lon(), s.lon(), b.min_lon, b.max_lon)
+                })
+            };
             let touches = bounds.iter().any(|bd| {
                 ring.iter().any(|&v| bd.polygon.contains(v))
-                    || bd.samples.iter().any(|s| {
-                        (la0..=la1).contains(&s.lat())
-                            && (lo0..=lo1).contains(&s.lon())
-                            && poly.contains(*s)
-                    })
+                    || bd.samples.iter().any(|s| in_box(s) && poly.contains(*s))
             });
             if touches {
                 check.touching += 1;

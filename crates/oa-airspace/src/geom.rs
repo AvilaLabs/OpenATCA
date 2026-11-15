@@ -6,8 +6,10 @@
 //!   or its geodesic distance to the nearest polygon edge is at most the buffer.
 //! * The nearest-edge distance is found in two steps so the build stays fast: a spherical
 //!   estimate per edge (cross-track on a sphere of the mean radius, off by at most about 0.4 %
-//!   from the ellipsoid) decides every point that is not within 1 % of the buffer; only the
-//!   rest are measured exactly (geodesic inverse and direct problems along the edge).
+//!   from the ellipsoid, plus the bow of the great circle away from the geodesic, up to 80 m on
+//!   a 600 NM edge) decides every point outside the grey band around the buffer (1 % of it, or
+//!   the scale error plus the bow bound of the edge when that is larger); only the rest are
+//!   measured exactly (geodesic inverse and direct problems along the edge).
 //! * [`edge_separations`]: per boundary, the largest geodesic-versus-rhumb separation over its
 //!   edges (OA-ASP-005).
 //! * Sampling helpers turn boundary descriptions (vertices, arcs, circles) into dense point
@@ -27,9 +29,14 @@ use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon, Polygon};
 pub const DEG_PER_E7: f64 = 1e-7;
 /// Mean earth radius used by the spherical estimate, metres.
 const R_MEAN_M: f64 = 6_371_008.8;
-/// Relative margin around the buffer inside which the exact distance decides: the spherical
-/// estimate is within 0.4 % of the ellipsoidal distance, so 1 % is safe.
+/// Smallest relative margin around the buffer inside which the exact distance decides (see
+/// [`grey_m`] for the wider band of a long edge).
 const GREY: f64 = 0.01;
+/// Largest relative error of the spherical estimate from the scale difference between the
+/// sphere and the ellipsoid (0.42 % at 24 degrees north), rounded up.
+const SCALE_ERR: f64 = 0.005;
+/// WGS 84 flattening, for the bow bound of [`bow_bound_m`].
+const FLATTENING: f64 = 1.0 / 298.257_223_563;
 /// Spacing of the points sampled along a long edge for intersection tests, metres.
 pub const SAMPLE_STEP_M: f64 = 20_000.0;
 /// Spacing of the points of a densified geodesic, rhumb or parallel edge, metres. Each point
@@ -110,6 +117,8 @@ struct Edge {
     /// Unit vector to the middle of the edge, and half its angular length, radians.
     c3: V3,
     half: f64,
+    /// Bound on how far the great circle through the end points lies from the geodesic, metres.
+    bow_m: f64,
 }
 
 fn edge_of(a: LatLon, b: LatLon) -> Edge {
@@ -136,7 +145,21 @@ fn edge_of(a: LatLon, b: LatLon) -> Edge {
         n3,
         c3,
         half: angle(a3, b3) / 2.0,
+        bow_m: bow_bound_m(angle(a3, b3) * R_MEAN_M),
     }
+}
+
+/// Bound on the offset between the great circle through two geodetic coordinates and the
+/// geodesic between them, for an edge of `len_m` metres: 1.25 times `f * L^2 / (8 R)`, the
+/// measured worst case (80 m at 600 NM) being 0.99 times that term.
+fn bow_bound_m(len_m: f64) -> f64 {
+    1.25 * FLATTENING * len_m * len_m / (8.0 * R_MEAN_M)
+}
+
+/// Half-width of the band around the buffer inside which the spherical estimate for `e` does
+/// not decide: the larger of [`GREY`] of the buffer and the scale error plus the bow bound.
+fn grey_m(e: &Edge, buffer_m: f64) -> f64 {
+    (GREY * buffer_m).max(SCALE_ERR * buffer_m + e.bow_m)
 }
 
 /// Spherical estimate of the distance from `p` to the edge, metres.
@@ -269,6 +292,36 @@ fn edge_vertex_lat(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<Option<f64>,
     Ok(Some(if c1 > 0.0 { lat } else { -lat }))
 }
 
+/// Bounding box of one ring of geodesic edges, for skipping points that cannot be inside it:
+/// the latitude range includes the poleward bulge of every edge, the longitude range is
+/// unwrapped as in [`Bbox`] (test with [`lon_overlaps`]), and both are padded by a millionth
+/// of a degree. `None` when a box is not a safe filter: the ring is wider than 120 degrees of
+/// longitude, reaches past 80 degrees of latitude, or an edge cannot be solved.
+pub fn ring_bbox(ell: &Ellipsoid, ring: &[LatLon]) -> Option<Bbox> {
+    const PAD: f64 = 1e-6;
+    let first = ring.first()?;
+    let (lo, hi) = lon_range(first.lon(), ring.iter().map(|v| v.lon()))?;
+    let (mut min_lat, mut max_lat) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (i, a) in ring.iter().enumerate() {
+        let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
+        min_lat = min_lat.min(a.lat());
+        max_lat = max_lat.max(a.lat());
+        if let Some(v) = edge_vertex_lat(ell, *a, b).ok()? {
+            min_lat = min_lat.min(v);
+            max_lat = max_lat.max(v);
+        }
+    }
+    if hi - lo > 120.0 || min_lat.abs().max(max_lat.abs()) > 80.0 {
+        return None;
+    }
+    Some(Bbox {
+        min_lat: min_lat - PAD,
+        max_lat: max_lat + PAD,
+        min_lon: lo - PAD,
+        max_lon: hi + PAD,
+    })
+}
+
 /// The selection area: polygons, the buffer, and prepared edges.
 #[derive(Clone, Debug)]
 // A7.2: cold struct, size guard waived
@@ -381,16 +434,20 @@ pub fn area_contains(area: &Area, p: LatLon) -> Result<bool, GeoError> {
     }
     let p3 = unit(p);
     let approx: Vec<f64> = area.edges.iter().map(|e| approx_edge_m(e, p3)).collect();
-    let nearest = approx.iter().copied().fold(f64::INFINITY, f64::min);
-    if nearest < area.buffer_m * (1.0 - GREY) {
-        return Ok(true);
+    let mut undecided = false;
+    for (e, est) in area.edges.iter().zip(&approx) {
+        let g = grey_m(e, area.buffer_m);
+        if *est < area.buffer_m - g {
+            return Ok(true);
+        }
+        undecided |= *est <= area.buffer_m + g;
     }
-    if nearest > area.buffer_m * (1.0 + GREY) {
+    if !undecided {
         return Ok(false);
     }
-    // Within 1 % of the buffer: measure the edges that could be that close exactly.
+    // Within the grey band: measure the edges that could be that close exactly.
     for (e, est) in area.edges.iter().zip(&approx) {
-        if *est <= area.buffer_m * (1.0 + 2.0 * GREY)
+        if *est <= area.buffer_m + 2.0 * grey_m(e, area.buffer_m)
             && exact_edge_m(&area.ell, e.a, e.b, p)? <= area.buffer_m
         {
             return Ok(true);
@@ -617,10 +674,11 @@ fn arcs_cross(p: &Edge, q: &Edge) -> bool {
 /// True when `p` is within the area's buffer of the short edge `e`.
 fn within_buffer_of_edge(area: &Area, e: &Edge, p: LatLon) -> Result<bool, GeoError> {
     let est = approx_edge_m(e, unit(p));
-    if est < area.buffer_m * (1.0 - GREY) {
+    let g = grey_m(e, area.buffer_m);
+    if est < area.buffer_m - g {
         return Ok(true);
     }
-    if est > area.buffer_m * (1.0 + GREY) {
+    if est > area.buffer_m + g {
         return Ok(false);
     }
     Ok(exact_edge_m(&area.ell, e.a, e.b, p)? <= area.buffer_m)
@@ -802,4 +860,56 @@ pub fn edge_separations(ell: &Ellipsoid, ring: &[LatLon]) -> Result<RingSeparati
 /// Geodesic distance between two positions, metres.
 pub fn distance_m(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<f64, GeoError> {
     Ok(ell.inverse(a, b)?.distance_m)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-ASP-002
+    #[test]
+    fn the_spherical_estimate_stays_within_the_scale_error_plus_the_bow_bound_of_the_exact_distance(
+    ) {
+        let ell = wgs84();
+        let (mut worst_ratio, mut worst_bow): (f64, f64) = (0.0, 0.0);
+        for lat in [24.0, 35.0, 50.0, 60.0] {
+            for az0 in [90.0, 60.0, 30.0, 0.0] {
+                for len_nm in [50.0, 100.0, 200.0, 300.0, 450.0, 600.0] {
+                    let a = LatLon::new(lat, -100.0).unwrap();
+                    let b = ell.direct(a, az0, len_nm * 1852.0).unwrap().position;
+                    let e = edge_of(a, b);
+                    let inv = ell.inverse(a, b).unwrap();
+                    for ti in 1..30 {
+                        let t = inv.distance_m * f64::from(ti) / 30.0;
+                        let q = ell.direct(a, inv.azimuth1_deg, t).unwrap();
+                        for side in [90.0, -90.0] {
+                            for d in [200.0, 1000.0, 10_000.0, 30_000.0] {
+                                let p = ell
+                                    .direct(q.position, q.azimuth2_deg + side, d)
+                                    .unwrap()
+                                    .position;
+                                let ap = approx_edge_m(&e, unit(p));
+                                let ex = exact_edge_m(&ell, a, b, p).unwrap();
+                                let allowed = SCALE_ERR * ex + e.bow_m;
+                                assert!(
+                                    (ap - ex).abs() <= allowed,
+                                    "lat {lat} az {az0} len {len_nm}: {ap} vs {ex}"
+                                );
+                                worst_ratio = worst_ratio.max((ap - ex).abs() / allowed);
+                                if d < 300.0 {
+                                    worst_bow = worst_bow.max((ap - ex).abs() / e.bow_m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The bound is not slack by more than the margin built into it.
+        assert!(
+            worst_ratio > 0.5 && worst_bow > 0.5,
+            "{worst_ratio} {worst_bow}"
+        );
+    }
 }
