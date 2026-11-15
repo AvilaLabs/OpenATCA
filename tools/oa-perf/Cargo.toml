@@ -1,0 +1,21 @@
+[package]
+name = "oa-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-geo = { path = "../../crates/oa-geo" }
+oa-sensorsim = { path = "../../crates/oa-sensorsim" }
+oa-track = { path = "../../crates/oa-track" }
+oa-truth = { path = "../../crates/oa-truth" }
+
+[[bin]]
+name = "oa-perf"
+path = "src/main.rs"

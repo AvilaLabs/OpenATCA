@@ -154,6 +154,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-perf"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-sensorsim",
+ "oa-track",
+ "oa-truth",
+]
+
+[[package]]
 name = "oa-replay"
 version = "0.0.1"
 dependencies = [
