@@ -275,3 +275,27 @@ pub(crate) fn emit_b(out: &mut Vec<u8>, v: u8) -> Result<(), ErrorKind> {
 pub(crate) type Items = Vec<(u8, Vec<u8>)>;
 /// An encode failure with the FRN of the item it belongs to (0 if none).
 pub(crate) type ItemError = (u8, ErrorKind);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-AST-090
+    #[test]
+    fn pack_u_accepts_exactly_the_values_that_fit() {
+        assert_eq!(pack_u(0, 4), Ok(0));
+        assert_eq!(pack_u(15, 4), Ok(15));
+        assert_eq!(pack_u(16, 4), Err(ErrorKind::ValueOutOfRange));
+        assert_eq!(pack_u(31, 4), Err(ErrorKind::ValueOutOfRange));
+        assert_eq!(pack_u(1, 1), Ok(1));
+        assert_eq!(pack_u(2, 1), Err(ErrorKind::ValueOutOfRange));
+        assert_eq!(pack_u(0, 0), Ok(0));
+        assert_eq!(pack_u(1, 0), Err(ErrorKind::ValueOutOfRange));
+        assert_eq!(pack_u(0x00FF_FFFF, 24), Ok(0x00FF_FFFF));
+        assert_eq!(pack_u(0x0100_0000, 24), Err(ErrorKind::ValueOutOfRange));
+        assert_eq!(pack_u(0x7FFF_FFFF, 31), Ok(0x7FFF_FFFF));
+        assert_eq!(pack_u(0x8000_0000, 31), Err(ErrorKind::ValueOutOfRange));
+        // A 32-bit element holds every value.
+        assert_eq!(pack_u(u32::MAX, 32), Ok(u32::MAX));
+    }
+}

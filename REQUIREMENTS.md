@@ -2109,6 +2109,41 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   sample `asterix.pcap`) is refused by the Ed 1.21 decoder and not misread; on the real file all 100 are
   refused and all 100 tile their blocks exactly under the Ed 0.17 layout with a constant data source and a
   time of track that never runs backwards.
+- **OA-AST-078** Each field of the CAT021 quality indicators (I021/090: NICBARO, SIL, NACp in the first
+  extension; SILS, SDA, GVA in the second; PIC in the third) is read from its own bits, so that a value
+  in one field never shows in its neighbour, and an extension that is absent gives no value.
+- **OA-AST-079** Each flag and field of the CAT021 target report descriptor extension (I021/040: GBS, SIM,
+  TST, CL) is read from its own bits, an extension that is absent gives no value, and the primary subfield
+  gives ATP, ARC, RC and RAB at their own bits.
+- **OA-AST-080** A descriptor and a quality item with every extension present decode from the wire to
+  the values worked out by hand from the bit layout and encode back to the same bytes.
+- **OA-AST-081** Every unit constant (the LSBs of CAT021, CAT048 and CAT062 and the bit counts of the
+  positions) has its exact value.
+- **OA-AST-082** A refusal in a block header (short input, LEN below the header, LEN past the input,
+  category not carried, no record) names its byte offset, counted from the start of the block plus the
+  offset the caller gave for it.
+- **OA-AST-083** A refusal in the FSPEC of a record that is not the first (empty, cut short, not the
+  shortest, too long, a slot the category leaves unused, no data source identifier) names the record and
+  the byte offset of the FSPEC octet or of the record.
+- **OA-AST-084** A refusal inside an item of a record that is not the first (fixed, extended, repetitive,
+  explicit-length and compound items, spare bits) names the record, the item, the subitem of a compound
+  item, and the offset where the item or the offending octet starts.
+- **OA-AST-085** A refusal by the typed layer in a record that is not the first (a value out of range, a
+  compound primary subfield that is not the shortest, which is named before a failure of the same
+  item) names the record, the item and the offset.
+- **OA-AST-086** In a stream of blocks, a refusal in the second block reports the offset from the start
+  of the whole stream.
+- **OA-AST-087** In the aircraft derived data of a CAT062 record (I062/380) an unparsed subitem that
+  repeats one the record already gives typed, or that stands for the address or the selected altitude, is
+  refused as a duplicate; the same subitem number with no typed counterpart is written; subitem
+  number zero is refused, and so is a record with no subitem.
+- **OA-AST-088** A position count converts to 1e-7 degree rounded to nearest with ties away from zero,
+  for both signs and for each width, and the conversion back rounds the same way.
+- **OA-AST-089** A compound primary subfield is refused as not the shortest only when an all-zero octet
+  ends it after the first octet, naming that octet; a single zero octet at the start is left to the empty
+  compound refusal, and an item that is not compound is never refused.
+- **OA-AST-090** A value is packed into an unsigned element of a given width exactly when it fits: the
+  largest value of the width is accepted, the next is refused, and a 32-bit element takes every value.
 ## M3 — Surveillance tracking (oa-track)
 
 ### ADS-B-only tracker and its scoring (oa-track, oa-bench adapter)
