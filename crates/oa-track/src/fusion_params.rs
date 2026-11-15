@@ -46,8 +46,8 @@ pub const MAX_ASSOC_TRACKS: usize = 8_192;
 pub const RADAR_INIT_M: u8 = 3;
 /// Scans the M must fall in, counting the first (the N).
 pub const RADAR_INIT_N: u8 = 4;
-/// Largest ground speed a candidate pair of plots may imply, m/s (700 kt, the tracker's
-/// `MAX_PLAUSIBLE_KT`, in SI).
+/// Largest ground speed a candidate pair of plots may imply, m/s (700 kt; radar plots carry no
+/// category or ground speed for the speed rule of `oa_adsb::jump_verdict`).
 pub const CAND_MAX_SPEED_MPS: f64 = 360.0;
 /// Slack added to every candidate gate, metres (plot noise at long range).
 pub const CAND_SLACK_M: f64 = 400.0;

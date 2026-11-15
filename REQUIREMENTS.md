@@ -944,9 +944,9 @@ ADS-B reports (`docs/ADSB_PAYLOAD.md`) merge with the SWIM recordings in one tim
 - **OA-RPL-034** Until an ADS-B frame has been fed the replay hash equals the flight-table hash, so
   the checkpoints and final hash of every replay without ADS-B are unchanged (pinned to the value the
   code gave before ADS-B existed).
-- **OA-RPL-035** An ADS-B payload that `oa_adsb::decode_payload` refuses (length, magic, layout,
-  too many records, a record out of range) is counted under its own error kind and applies none of
-  its reports; no corruption of a payload panics or half-applies it.
+- **OA-RPL-035** An ADS-B payload whose header or length `oa_adsb::decode_payload_lenient` refuses
+  (length, magic, layout, too many records) is counted under its own error kind and applies none of
+  its reports; no corruption of a payload panics.
 - **OA-RPL-036** ADS-B is a feed kind of its own that sorts after TFMS and FNS in the merge key, so
   at an equal receive time SWIM frames come first and ADS-B last, whatever order the streams were
   named in; the merged order is still the global sort of the total key (OA-RPL-021).
@@ -1020,17 +1020,17 @@ frame of their feed has been fed (as the ADS-B table is).
 
 ### Clock, ages and oversized documents (oa-replay)
 
-- **OA-RPL-061** One frame whose receive time is more than 10 minutes ahead of the replay clock does
-  not move the clock, is processed at the old time and is counted as held, and nothing is evicted
+- **OA-RPL-061** One frame whose receive time is more than 2 minutes ahead of the replay clock and of its
+  feed's last frame does not move the clock, is processed at the old time and is counted as held, and nothing is evicted
   because of it.
 - **OA-RPL-062** A forward step of the receive times confirmed by three consecutive frames (each no
-  earlier than the one before, all more than 10 minutes ahead) moves the clock to the third frame and
+  earlier than the one before, all more than 2 minutes ahead) moves the clock to the third frame and
   shifts the last-update times in the flight, TFMS, programme and NOTAM tables by the same amount, so
   no flight is evicted by the step and eviction goes on from the new time.
-- **OA-RPL-063** The same for a step back: three consecutive frames more than 10 minutes behind the
+- **OA-RPL-063** The same for a step back: three consecutive frames more than 2 minutes behind the
   clock move it back (the earlier ones are counted as time regressions as before), the tables' times
   shift with it, and time is not frozen.
-- **OA-RPL-064** A replay whose frames are never more than 10 minutes from the clock (small
+- **OA-RPL-064** A replay whose frames are never more than 2 minutes from the clock (small
   regressions included) hashes exactly as it did before the step rules, so the existing hashes hold.
 - **OA-RPL-065** The ADS-B table frees an aircraft whose held report is more than 30 minutes older than
   the replay clock, at a sweep each minute of replay time, and reuses the slot; a long run or a flood
@@ -1062,6 +1062,19 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-076** Ten-digit TFMS flight references and restriction identifiers that differ by a multiple of 2^32
   are different flights and programmes; the state hash writes an identifier below `u32::MAX` as four
   bytes as before and a larger one as an escape plus eight bytes.
+- **OA-RPL-077** An ADS-B record whose position or flags are out of range is dropped and counted under
+  the bad-record error kind, one for each; the other records of its payload are applied, and a record
+  with only an unknown source, a bad measurement or a set reserved byte is kept.
+- **OA-RPL-078** A frame more than 2 minutes ahead of the clock and of its own feed's last frame is
+  held, not accepted: 9.9 minutes ahead, repeated among honest frames, never moves the clock and the
+  honest frames are never counted as regressions.
+- **OA-RPL-079** Each feed's frames are compared with that feed's own last frame: feeds whose receive
+  times differ by a constant under the tolerance count no regressions against each other, a frame
+  before its own feed's last is still a regression, and a feed steadily more than the tolerance behind
+  the others is held and never steps the clock.
+- **OA-RPL-080** A confirmed step marks every flight, programme and NOTAM row as stale until it is
+  updated; the marked rows are counted (`stale_marked`) and the rows still stale can be counted at any
+  time (`pipeline_stale_count`); eviction ages are as before.
 
 ## M5 — Terrain and obstacles
 
@@ -1339,11 +1352,16 @@ frame of their feed has been fed (as the ADS-B table is).
   `ADS2` layouts are unchanged.
 - **OA-ADSB-028** `jump_verdict` decides whether a displacement is possible from the distance, the
   time gap, the emitter category and the reported ground speeds: not over the category's hard cap
-  (1,000 kt ordinary, 2,000 kt high-performance, unmanned, no-information and unknown, 4,088 kt
-  space), consistent with a reported ground speed (at most 1.2 times the larger plus 40 kt plus 2 kt
+  (1,000 kt ordinary and reserved codes, 2,000 kt high-performance, unmanned and no-information,
+  4,088 kt space), consistent with a reported ground speed (at most 1.2 times the larger plus 40 kt plus 2 kt
   per second of gap), and under the class ceiling when no ground speed is given. A 900 kt aircraft
   reporting 900 kt is plausible; a 450 kt aircraft that jumps 2,782 kt is not; a displacement
   within the position allowance is always plausible.
+- **OA-ADSB-029** The emitter category the jump rule uses comes from `category_observe`: an ordinary
+  class is taken at once, a cap-raising one (`A0`, `A6`, `B0`, `B6`, `B7`) only after three
+  consecutive printed categories agree, and a reserved code is ignored and never raises the cap above
+  the ordinary one. The summary applies it, and a report that is itself a jump does not count.
+
 ## Weather aloft (oa-grib2)
 
 GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO
@@ -1696,6 +1714,17 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   not the reports carry a ground speed.
 - **OA-TRUTH-019** Reports of the reserved addresses 0x000000 and 0xFFFFFF are removed as invalid
   and give no aircraft or leg; the same digits with the non-ICAO mark are kept.
+- **OA-TRUTH-021** The quality values carried forward within an aircraft come only from rows that
+  are in range, not stale and from an ADS-B source: a row from another source does not vouch for the
+  ADS-B rows after it.
+- **OA-TRUTH-022** Rows of one aircraft at one instant do not make the truth depend on input order: those
+  further apart than the 50 m truth radius contradict each other and are all removed (counted as
+  duplicate times), closer ones are tried in the order of their content, so the same reports in any
+  input order give the same truth and statistics.
+- **OA-TRUTH-020** The emitter category that sets the jump cap is taken only from reports that pass
+  the quality rules and are kept, and a cap-raising one must persist (`oa_adsb::category_observe`):
+  one report printing B7 or a reserved code does not let a 2,782 kt jump into truth, and a category
+  printed by every report does raise the cap after three.
 ## M2 — Benchmark harness (oa-bench)
 
 Built on `docs/M2_DESIGN.md` sections 2 to 6. Truth comes through a plain query and leg list (`Truth`),
@@ -1835,6 +1864,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   report identical to calling the two directly, and yields the same metrics, in the same order, with the
   same offset scalars and notes as an ERAM run; a tracker that lags the truth shows the lag in the raw
   along-track error.
+- **OA-BENCH-040** Reading an ADS-B clip drops only a record that cannot be read (position or flags out of
+  range), counts it apart from refused frames, and keeps the other records of its frame.
 
 ## Winds aloft (oa-wind)
 
@@ -2023,6 +2054,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   of the profile's.
 - **OA-SIM-019** The `oa-sensorsim` binary writes the plots (CSV and CAT048) of an OAF1 clip, gives the same
   bytes for the same arguments, and refuses to run without the bias, coverage and split parameters.
+- **OA-SIM-020** Reading a clip drops only a record that cannot be read (position or flags out of range) and
+  counts it; the other records of its frame are kept.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -2236,3 +2269,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   rate columns (not 0 ft) and the flag clear; the scorer takes the altitude through
   `scored_altitude_ft`, which gives the absent value for a clear flag or a non-finite column; the
   output digest hashes absent columns as zero, so it equals the earlier digest of the same run.
+- **OA-TRK-067** The tracker's plausibility check on the second report of a tentative track is the speed
+  rule `oa_adsb::jump_verdict` (category, ground speeds, hard cap), not a fixed 700 kt: a 950 kt
+  aircraft reporting 950 kt is not restarted, a 300 kt one that moves as far is, and one report
+  printing a fast category does not excuse a 2,782 kt displacement. The category is the track's
+  trusted one under `oa_adsb::category_observe`. The output digest of the ZAU clip is unchanged.
+- **OA-TRK-068** A measurement more than 5 minutes ahead of the tracker clock does not move the clock
+  or touch any track until three in a row, none earlier than the one before, agree (the others are
+  counted as held); a confirmed step, and `tracker_advance` over a long gap, emit ticks only while a
+  track could still be live and jump the tick grid over the rest in one sweep, counting the skipped
+  ticks.
+- **OA-TRK-069** A time of applicability or an advance beyond about 146 years either side of the epoch
+  is refused and counted under its own reason, and a tick must be between 1 ms and a quarter of the
+  range, so rounding to a tick and stepping from tick to tick cannot overflow or stop advancing.

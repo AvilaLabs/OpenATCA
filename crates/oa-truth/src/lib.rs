@@ -103,9 +103,6 @@ pub const MAX_SIGMA95_H_M: f64 = 50.0;
 /// Whether a displacement between consecutive kept reports is a jump is decided by
 /// `oa_adsb::jump_verdict`: this cap, the aircraft's own reported ground speed and the time gap.
 pub const JUMP_CAP_KT: f64 = oa_adsb::CAP_ORDINARY_KT;
-/// The old fixed limit (`oa_adsb::MAX_JUMP_KT`, 700 kt), no longer used here; kept so a consumer
-/// that still has it compiles until it moves to `oa_adsb::jump_verdict`.
-pub const MAX_JUMP_KT: f64 = oa_adsb::MAX_JUMP_KT;
 /// Allowance added to the jump distance so position noise at short intervals is not a jump, m.
 pub const JUMP_SLACK_M: f64 = 200.0;
 /// After this many jump rejections in a row the next report starts a new leg (the report the

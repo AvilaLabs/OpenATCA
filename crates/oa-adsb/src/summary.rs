@@ -1,14 +1,9 @@
 //! Whole-set checks over decoded reports. Core (pure).
 
 use crate::{
-    jump_verdict, reports_len, JumpPair, JumpVerdict, Reports, CAP_ORDINARY_KT, F_NEW_LEG,
-    NONE_U16, NONE_U8,
+    category_observe, jump_verdict, reports_len, CategoryState, JumpPair, JumpVerdict, Reports,
+    CAP_ORDINARY_KT, F_NEW_LEG, NONE_U16, NONE_U8,
 };
-
-/// The old single speed limit, knots. No longer used by oa-adsb or oa-truth, which judge a pair
-/// with [`jump_verdict`] (the limit rejected real aircraft at 700 kt ground speed and above);
-/// kept so a consumer that still has it compiles until it moves to the rule.
-pub const MAX_JUMP_KT: f64 = 700.0;
 
 /// Pairs closer than this are position noise, not jumps: two reports a few metres apart a
 /// hundredth of a second apart (different sources, or CPR rounding) imply thousands of knots
@@ -64,8 +59,9 @@ pub fn summarize(r: &Reports) -> Summary {
         ..Summary::default()
     };
     let mut prev: Option<usize> = None;
-    // Latest emitter category seen for the aircraft being walked (printed on a minority of rows).
-    let mut category = 0u8;
+    // Emitter category trusted for the aircraft being walked (printed on a minority of rows; a
+    // cap-raising one must persist, see `category_observe`).
+    let mut cat = CategoryState::default();
     for &i in &ix {
         let i = i as usize;
         let (Some(&icao), Some(&t), Some(&lat), Some(&lon), Some(&flags)) = (
@@ -90,13 +86,12 @@ pub fn summarize(r: &Reports) -> Summary {
             (pi == icao).then_some(p)
         });
         if same.is_none() {
-            category = 0;
+            cat = CategoryState::default();
         }
-        if let Some(&c) = r.category.get(i) {
-            if c != 0 {
-                category = c;
-            }
-        }
+        // Judged by the category as this report leaves it, kept only if the pair is plausible,
+        // so a report that is itself a jump cannot vouch for the category that excuses it.
+        let mut trial = cat;
+        let category = category_observe(&mut trial, r.category.get(i).copied().unwrap_or(0));
         match same {
             Some(p) => {
                 if flags & F_NEW_LEG == 0 {
@@ -128,7 +123,9 @@ pub fn summarize(r: &Reports) -> Summary {
                         gs_a_dkt: r.gs_dkt.get(p).copied().unwrap_or(NONE_U16),
                         gs_b_dkt: r.gs_dkt.get(i).copied().unwrap_or(NONE_U16),
                     };
-                    if jump_verdict(&pair, CAP_ORDINARY_KT) != JumpVerdict::Plausible {
+                    if jump_verdict(&pair, CAP_ORDINARY_KT) == JumpVerdict::Plausible {
+                        cat = trial;
+                    } else {
                         if nm >= MIN_JUMP_NM {
                             s.jumps += 1;
                         } else {
@@ -137,7 +134,10 @@ pub fn summarize(r: &Reports) -> Summary {
                     }
                 }
             }
-            None => s.aircraft += 1,
+            None => {
+                s.aircraft += 1;
+                cat = trial;
+            }
         }
         prev = Some(i);
     }

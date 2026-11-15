@@ -155,8 +155,12 @@ fn summary(p: &Pipeline, files: usize, bytes: u64) -> String {
     let c = &p.clock;
     if c.held > 0 || c.forward_steps > 0 || c.backward_steps > 0 {
         s.push_str(&format!(
-            "clock held={} forward_steps={} backward_steps={}\n",
-            c.held, c.forward_steps, c.backward_steps
+            "clock held={} forward_steps={} backward_steps={} stale_marked={} stale_now={}\n",
+            c.held,
+            c.forward_steps,
+            c.backward_steps,
+            p.stale_marked,
+            oa_replay::pipeline_stale_count(p)
         ));
     }
     let st = &p.table.stats;

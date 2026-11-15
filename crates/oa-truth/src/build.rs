@@ -1,8 +1,8 @@
 //! Truth construction: selection, legs, smoothing. Core (pure).
 
 use oa_adsb::{
-    is_reserved_address, jump_verdict, reports_len, reports_row, JumpPair, JumpVerdict, Reports,
-    F_NEW_LEG, NONE_U16,
+    category_observe, is_reserved_address, jump_verdict, reports_len, reports_row, CategoryState,
+    JumpPair, JumpVerdict, Reports, F_NEW_LEG, F_STALE, NONE_U16, NONE_U8,
 };
 
 use crate::frame::{frame_angle, frame_new, project, Frame};
@@ -116,8 +116,9 @@ pub fn build_truth(
         };
         order.push((a, t, i as u32));
     }
-    // (address, time, input index) is a total order: the result does not depend on input order
-    // except between reports identical in address and time, where input order decides.
+    // (address, time, input index) is a total order. Reports equal in address and time are put in
+    // a canonical order of their own, by content, in `process_aircraft`, so the result does not
+    // depend on input order at all.
     order.sort_unstable();
     let mut b = Builder {
         cfg,
@@ -203,6 +204,93 @@ fn count_split(b: &mut Builder<'_>, kind: usize) {
     }
 }
 
+/// An aircraft's rows with those equal in time put in a canonical order, and the rows of every
+/// equal-time group that disagrees about the position.
+struct Canon {
+    rows: Vec<(u32, i64, u32)>,
+    /// Input indexes of the rows to remove, sorted.
+    quarantined: Vec<u32>,
+}
+
+/// Content of a row that the selection reads, as a sort key: the order between rows equal in
+/// time, so that it does not depend on where they were in the input.
+fn tie_key(r: &Reports, i: u32) -> [i64; 17] {
+    let i = i as usize;
+    let g = |v: Option<&i32>| v.map_or(0, |&x| i64::from(x));
+    let u = |v: Option<&u8>| v.map_or(0, |&x| i64::from(x));
+    [
+        g(r.lat_e7.get(i)),
+        g(r.lon_e7.get(i)),
+        g(r.baro_alt_ft.get(i)),
+        g(r.geom_alt_ft.get(i)),
+        r.gs_dkt.get(i).map_or(0, |&x| i64::from(x)),
+        r.track_ddeg.get(i).map_or(0, |&x| i64::from(x)),
+        r.vrate_fpm.get(i).map_or(0, |&x| i64::from(x)),
+        u(r.flags.get(i)),
+        u(r.source.get(i)),
+        u(r.category.get(i)),
+        u(r.nic.get(i)),
+        u(r.nac_p.get(i)),
+        u(r.nac_v.get(i)),
+        u(r.sil.get(i)),
+        u(r.sil_type.get(i)),
+        u(r.version.get(i)),
+        0,
+    ]
+}
+
+/// Two reports of one aircraft at one instant that are further apart than the 95 % radius the
+/// truth is allowed to have ([`crate::MAX_SIGMA95_H_M`], 50 m) cannot both be right: the whole
+/// group is quarantined (counted as duplicate times). Closer ones are one position measured twice;
+/// the first of them in the canonical order (lowest content key) is the one tried first, so the
+/// same reports in any input order give the same truth.
+fn canonical_ties(r: &Reports, rows: &[(u32, i64, u32)]) -> Canon {
+    let mut rows: Vec<(u32, i64, u32)> = rows.to_vec();
+    rows.sort_by_key(|&(_, t, i)| (t, tie_key(r, i), i));
+    let mut quarantined = Vec::new();
+    let mut at = 0usize;
+    while at < rows.len() {
+        let t = rows.get(at).map_or(0, |e| e.1);
+        let end = at
+            + rows
+                .get(at..)
+                .map_or(0, |s| s.iter().take_while(|e| e.1 == t).count());
+        let group = rows.get(at..end).unwrap_or(&[]);
+        // Only rows the selection could use count: a stale row or one from another source is
+        // removed on its own account and is no evidence about the ADS-B position.
+        let eligible: Vec<(u32, i64, u32)> = group
+            .iter()
+            .copied()
+            .filter(|e| {
+                let src = r.source.get(e.2 as usize).copied().unwrap_or(NONE_U8);
+                let fl = r.flags.get(e.2 as usize).copied().unwrap_or(0);
+                fl & F_STALE == 0 && (src == NONE_U8 || crate::ADSB_SOURCES.contains(&src))
+            })
+            .collect();
+        let group = eligible.as_slice();
+        if group.len() > 1 {
+            let pos = |i: u32| {
+                (
+                    r.lat_e7.get(i as usize).copied().unwrap_or(0),
+                    r.lon_e7.get(i as usize).copied().unwrap_or(0),
+                )
+            };
+            let conflict = group.iter().any(|a| {
+                group.iter().any(|b| {
+                    let ((la, oa), (lb, ob)) = (pos(a.2), pos(b.2));
+                    dist_m(la, oa, lb, ob) > crate::MAX_SIGMA95_H_M
+                })
+            });
+            if conflict {
+                quarantined.extend(group.iter().map(|e| e.2));
+            }
+        }
+        at = end.max(at + 1);
+    }
+    quarantined.sort_unstable();
+    Canon { rows, quarantined }
+}
+
 /// Selects, splits and builds the legs of one aircraft; `rows` are in time order.
 fn process_aircraft(
     b: &mut Builder<'_>,
@@ -219,12 +307,15 @@ fn process_aircraft(
         }
         return Ok(());
     }
+    let canon = canonical_ties(r, rows);
+    let (rows, quarantined) = (canon.rows.as_slice(), canon.quarantined.as_slice());
     let gap_ns = cfg.leg_gap_ms * NS_PER_MS;
     let mut q = QualityState::default();
-    // Ground speed of the last kept report, and the emitter category last printed for the
-    // aircraft (readsb prints it on a minority of rows).
+    // Ground speed of the last kept report, and the emitter category trusted for the aircraft
+    // (readsb prints it on a minority of rows; only kept reports count towards it, and a
+    // cap-raising one must persist, see `oa_adsb::category_observe`).
     let mut last_gs = NONE_U16;
-    let mut category = 0u8;
+    let mut cat = CategoryState::default();
     let mut buf = LegBuf::default();
     let mut frame: Option<Frame> = None;
     let mut pending_new_leg = false;
@@ -237,8 +328,9 @@ fn process_aircraft(
         if row.flags & F_NEW_LEG != 0 {
             pending_new_leg = true;
         }
-        if row.category != 0 {
-            category = row.category;
+        if quarantined.binary_search(&i).is_ok() {
+            count_removed(b, REM_DUPLICATE);
+            continue;
         }
         let verdict = quality_check(&mut q, &row, t, cfg);
         let (fail, carried, nacp) = (verdict.removal, verdict.carried, verdict.nacp);
@@ -246,7 +338,10 @@ fn process_aircraft(
             count_removed(b, kind);
             continue;
         }
-        // Past this point the row has passed the quality rules.
+        // Past this point the row has passed the quality rules. It is judged by the category as
+        // it would leave the state, which is kept only if the row is.
+        let mut trial = cat;
+        let category = category_observe(&mut trial, row.category);
         let last = buf.t.last().copied();
         let last_pos = buf.lat_e7.last().copied().zip(buf.lon_e7.last().copied());
         if last.is_some_and(|lt| t <= lt) {
@@ -291,6 +386,7 @@ fn process_aircraft(
             count_split(b, kind);
         }
         consecutive_jumps = 0;
+        cat = trial;
         pending_new_leg = false;
         last_gs = row.gs_dkt;
         if buf.t.is_empty() {

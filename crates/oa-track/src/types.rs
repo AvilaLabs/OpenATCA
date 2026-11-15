@@ -52,10 +52,13 @@ pub struct Measurement {
     pub ident: u16,
     /// [`M_HAS_VEL`] and [`M_ALT_GEOMETRIC`].
     pub flags: u8,
+    /// ADS-B emitter category byte (`"A3"` is 0xA3), 0 if not known or not ADS-B. The tracker
+    /// trusts a cap-raising one only after it persists (`oa_adsb::category_observe`).
+    pub category: u8,
 }
 
 // Budget: 8 (time) + 12 + 12 (covariances) + 8 (velocity) + 5 x 4 (position, altitude, rate,
-// address) + 3 x 2 (quantisation, sensor, identity) + 1 (flags) = 67 packed; 72 with alignment.
+// address) + 3 x 2 (quantisation, sensor, identity) + 1 (flags) + 1 (category) = 68 packed; 72 with alignment.
 // A7.1: three more bytes were cheaper than reordering around the 8-byte time.
 const _: () = assert!(core::mem::size_of::<Measurement>() == 72);
 
@@ -66,14 +69,24 @@ pub const REFUSE_NAMES: [&str; REFUSE_KINDS] = [
     "bad_velocity",
     "bad_altitude",
     "no_address",
+    "time_out_of_range",
 ];
 /// Number of refusal reasons.
-pub const REFUSE_KINDS: usize = 5;
+pub const REFUSE_KINDS: usize = 6;
 pub const REF_POSITION: usize = 0;
 pub const REF_POS_COV: usize = 1;
 pub const REF_VELOCITY: usize = 2;
 pub const REF_ALTITUDE: usize = 3;
 pub const REF_NO_ADDRESS: usize = 4;
+pub const REF_TIME: usize = 5;
+/// A time of applicability, or a time the caller advances to, must be within this of the Unix
+/// epoch, ns (a little over 146 years either side): further out is refused, so rounding to a tick
+/// and stepping from tick to tick cannot overflow.
+pub const TIME_LIMIT_NS: i64 = i64::MAX / 2;
+/// Shortest and longest tick, ns (1 ms and a quarter of the range): a tick of 1 ns would make
+/// every second of catching up a billion rows of work.
+pub const MIN_TICK_NS: i64 = 1_000_000;
+pub const MAX_TICK_NS: i64 = i64::MAX / 4;
 
 /// Why a track ended. Indexes [`TrackerStats::ended`] and [`TrackLog::reason`].
 pub const END_NAMES: [&str; END_KINDS] =
@@ -165,6 +178,9 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     }
     if c.tick_ns <= 0 || c.expected_interval_ns <= 0 || c.init_interval_ns <= 0 {
         return bad("tick_ns, expected_interval_ns or init_interval_ns");
+    }
+    if !(MIN_TICK_NS..=MAX_TICK_NS).contains(&c.tick_ns) {
+        return bad("tick_ns outside 1 ms to a quarter of the range");
     }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
@@ -399,6 +415,14 @@ pub struct TrackerStats {
     pub init_window_expired: u64,
     /// Fixed-rate ticks emitted.
     pub ticks: u64,
+    /// Ticks skipped, not emitted, because every track had already expired by then: the tick
+    /// grid jumped over them (the gap after a confirmed time step, or a long `tracker_advance`).
+    pub ticks_skipped: u64,
+    /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
+    /// counted and not applied.
+    pub time_held: u64,
+    /// Forward steps of the tracker clock confirmed by consecutive far-ahead measurements.
+    pub time_steps: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

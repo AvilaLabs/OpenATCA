@@ -3,17 +3,19 @@
 use std::fs::File;
 use std::io::Read;
 
-use oa_adsb::{decode_payload, Reports};
+use oa_adsb::{decode_payload_lenient, Reports};
 use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
 
-/// Every ADS-B payload frame of the file at `path` as one set of reports, and the number of
-/// frames that did not decode.
-pub fn read_clip(path: &str) -> Result<(Reports, u64), String> {
+/// Every ADS-B payload frame of the file at `path` as one set of reports, the number of frames
+/// that did not decode and the number of records dropped from frames that did (a bad record does
+/// not refuse its frame).
+pub fn read_clip(path: &str) -> Result<(Reports, u64, u64), String> {
     let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).map_err(|e| format!("{e:?}"))?;
     let mut out = Reports::default();
     let mut bad = 0u64;
+    let mut dropped = 0u64;
     let mut chunk = vec![0u8; 1 << 20];
     loop {
         let n = f.read(&mut chunk).map_err(|e| format!("{path}: {e}"))?;
@@ -28,8 +30,9 @@ pub fn read_clip(path: &str) -> Result<(Reports, u64), String> {
             while let Some(fr) = rd.next() {
                 match fr {
                     Ok(fr) if fr.kind == Kind::Message => {
-                        if decode_payload(fr.payload, &mut out).is_err() {
-                            bad += 1;
+                        match decode_payload_lenient(fr.payload, &mut out) {
+                            Ok(c) => dropped += c.dropped as u64,
+                            Err(_) => bad += 1,
                         }
                     }
                     Ok(_) => {}
@@ -41,5 +44,5 @@ pub fn read_clip(path: &str) -> Result<(Reports, u64), String> {
             }
         }
     }
-    Ok((out, bad))
+    Ok((out, bad, dropped))
 }

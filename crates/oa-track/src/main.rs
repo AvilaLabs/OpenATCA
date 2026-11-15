@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use oa_adsb::{decode_payload, reports_len, Reports};
+use oa_adsb::{decode_payload_lenient, reports_len, Reports};
 use oa_bench::adsb_truth;
 use oa_bench::input::{for_each_adsb_frame, load_adsb};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
@@ -222,7 +222,7 @@ fn replay_timed(
         }
         let received = clock.now_ns();
         let mut fr = Reports::default();
-        let ok = decode_payload(payload, &mut fr).is_ok();
+        let ok = decode_payload_lenient(payload, &mut fr).is_ok();
         let decoded = clock.now_ns();
         if !ok {
             return;

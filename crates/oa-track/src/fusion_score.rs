@@ -281,6 +281,7 @@ pub fn simulate_adsb(
                         sensor: 0,
                         ident: NO_IDENT,
                         flags: M_HAS_VEL,
+                        category: 0,
                     });
                 }
                 t += cfg.period_ns;

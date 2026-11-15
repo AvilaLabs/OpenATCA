@@ -197,8 +197,12 @@ pub fn load(feeds: &[FeedInput]) -> io::Result<Loaded> {
 // A7.2: cold struct, size guard waived
 pub struct AdsbClip {
     pub reports: oa_adsb::Reports,
-    /// Frames that did not decode (bad frame or bad payload), counted not hidden.
+    /// Frames that did not decode (bad frame, or a payload whose header or length is wrong),
+    /// counted not hidden.
     pub bad_frames: u64,
+    /// Records dropped from frames that did decode (position or flags out of range); the rest of
+    /// such a frame is kept.
+    pub dropped_records: u64,
     pub hash: InputHash,
 }
 
@@ -237,20 +241,24 @@ pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Re
 }
 
 /// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
-/// and hashes the file.
+/// and hashes the file. A bad record loses only itself (`decode_payload_lenient`).
 pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
     let mut reports = oa_adsb::Reports::default();
     let mut undecodable = 0u64;
-    let damaged = for_each_adsb_frame(path, &mut |_, payload| {
-        if oa_adsb::decode_payload(payload, &mut reports).is_err() {
-            undecodable += 1;
-        }
-    })?;
+    let mut dropped_records = 0u64;
+    let damaged = for_each_adsb_frame(
+        path,
+        &mut |_, payload| match oa_adsb::decode_payload_lenient(payload, &mut reports) {
+            Ok(c) => dropped_records += c.dropped as u64,
+            Err(_) => undecodable += 1,
+        },
+    )?;
     let bad = damaged + undecodable;
     let hash = hash_files(&format!("adsb ({})", path.display()), &[path.to_path_buf()])?;
     Ok(AdsbClip {
         reports,
         bad_frames: bad,
+        dropped_records,
         hash,
     })
 }

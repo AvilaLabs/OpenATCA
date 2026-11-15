@@ -28,8 +28,8 @@ fn radars_over_a_real_clip() {
         eprintln!("{path} absent: skipping the real-data run");
         return;
     }
-    let (reports, bad) = read_clip(&path).unwrap();
-    assert_eq!(bad, 0);
+    let (reports, bad, dropped) = read_clip(&path).unwrap();
+    assert_eq!((bad, dropped), (0, 0));
     let (truth, ts) = build_truth(&reports, &DEFAULT_CONFIG).unwrap();
     let first = *reports.time_ns.iter().min().unwrap();
     let last = *reports.time_ns.iter().max().unwrap();

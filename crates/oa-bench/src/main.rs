@@ -283,9 +283,10 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     // Wall-clock time goes to stderr only: the report must be the same bytes on every run.
     eprintln!("truth built in {truth_secs:.2} s");
     notes.push(format!(
-        "truth: ADS-B clip, {} reports decoded, {} frames refused",
+        "truth: ADS-B clip, {} reports decoded, {} frames refused, {} records dropped",
         clip.reports.icao.len(),
-        clip.bad_frames
+        clip.bad_frames,
+        clip.dropped_records
     ));
     let mut overrides = Vec::new();
     if o.bracket_s.is_some() {

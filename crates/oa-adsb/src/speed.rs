@@ -31,7 +31,7 @@
 //!
 //! 1. the implied speed (after `slack_m` of position noise) is under the **hard cap** of the
 //!    category class: 1,000 kt for ordinary classes (the subsonic field maximum), 2,000 kt for
-//!    `A6`, `A0`, `B0`, `B6` and unknown categories, 4,088 kt for `B7`;
+//!    `A6`, `A0`, `B0`, `B6` and no category, 4,088 kt for `B7`;
 //! 2. if either report gives its ground speed, the implied speed is consistent with it: at most
 //!    1.2 times the larger reported speed plus 40 kt plus 2 kt for each second of the gap (a
 //!    deceleration or acceleration allowance of about 0.1 g, in line with transport aircraft;
@@ -43,7 +43,7 @@
 
 /// Hard cap for ordinary emitter classes, knots: the subsonic ground-speed field maximum.
 pub const CAP_ORDINARY_KT: f64 = 1000.0;
-/// Hard cap for high-performance, no-information, unmanned and unknown categories, knots.
+/// Hard cap for high-performance, no-information and unmanned categories, knots.
 pub const CAP_HIGH_KT: f64 = 2000.0;
 /// Hard cap for space and trans-atmospheric vehicles, knots: the supersonic field maximum.
 pub const CAP_SPACE_KT: f64 = 4088.0;
@@ -92,9 +92,9 @@ pub fn category_hard_cap_kt(category: u8, ordinary_cap_kt: f64) -> f64 {
     match category {
         0xb7 => CAP_SPACE_KT,
         0xa6 | 0xa0 | 0xb0 | 0xb6 | 0 => CAP_HIGH_KT.max(ordinary_cap_kt),
-        0xa1..=0xa5 | 0xa7 | 0xb1..=0xb4 | 0xc1..=0xc3 => ordinary_cap_kt,
-        // Reserved codes (`A8`, `B5`, set D, ...) say nothing, like no information.
-        _ => CAP_HIGH_KT.max(ordinary_cap_kt),
+        // Ordinary classes, and reserved codes (`A8`, `B5`, set D, ...), which say nothing and
+        // never raise the cap.
+        _ => ordinary_cap_kt,
     }
 }
 

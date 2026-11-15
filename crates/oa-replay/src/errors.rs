@@ -65,7 +65,8 @@ pub enum ErrKind {
     AdsbLayout,
     /// An ADS-B payload with more records than a frame may carry.
     AdsbTooManyRows,
-    /// An ADS-B payload with a record whose values are out of range.
+    /// An ADS-B record whose position or flags are out of range (dropped; the rest of the payload
+    /// is kept).
     AdsbBadRecord,
     /// An ADS-B payload the decoder could not range-check (an internal inconsistency).
     AdsbInternal,

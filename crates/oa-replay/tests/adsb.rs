@@ -321,7 +321,7 @@ fn run_chains_hash(
 
 // REQ: OA-RPL-035
 #[test]
-fn malformed_adsb_payloads_are_counted_by_type_and_never_applied() {
+fn malformed_adsb_payload_headers_are_counted_by_type_and_never_applied() {
     let good = payload(&[row(1, T0), row(2, T0)]);
     let mut cases: Vec<(Vec<u8>, ErrKind)> = Vec::new();
     cases.push((good[..good.len() - 1].to_vec(), ErrKind::AdsbLength));
@@ -338,16 +338,6 @@ fn malformed_adsb_payloads_are_counted_by_type_and_never_applied() {
     let mut m = good.clone();
     m[8..12].copy_from_slice(&60_001u32.to_le_bytes());
     cases.push((m, ErrKind::AdsbTooManyRows));
-    // Record 1: latitude out of range; flag bits 5 to 7; a reserved byte; an unknown source.
-    for (at, v) in [(4usize, 0x7fu8), (38, 0x20), (79, 1), (39, 14)] {
-        let mut m = good.clone();
-        let o = 16 + RECORD_LEN + at;
-        m[o] = v;
-        if at == 4 {
-            m[o + 3] = 0x7f;
-        }
-        cases.push((m, ErrKind::AdsbBadRecord));
-    }
     assert_eq!(&good[..4], &PAYLOAD_MAGIC);
     for (bytes, kind) in cases {
         let mut p = small_pipeline(8);
@@ -369,7 +359,8 @@ fn malformed_adsb_payloads_are_counted_by_type_and_never_applied() {
             p.adsb.live == 0 || p.adsb.live == 2 || p.adsb.live == 1,
             "{i}"
         );
-        if errors_total(&p.errors) > 0 {
+        // A damaged header refuses the payload whole; a damaged record loses only itself.
+        if errors_total(&p.errors) > p.errors[ErrKind::AdsbBadRecord as usize] {
             assert_eq!(p.adsb.live, 0, "byte {i}");
         }
     }
@@ -385,6 +376,37 @@ fn malformed_adsb_payloads_are_counted_by_type_and_never_applied() {
     process_frame(&mut p, FeedKind::Adsb, Kind::Status, T0, &good);
     assert_eq!(p.adsb.live, 0);
     assert_eq!(p.other_frames[FeedKind::Adsb as usize], 1);
+}
+
+// REQ: OA-RPL-077
+#[test]
+fn a_bad_adsb_record_loses_only_itself_and_is_counted() {
+    let good = payload(&[row(1, T0), row(2, T0), row(3, T0)]);
+    // Record 1: latitude out of range, or flag bits 5 to 7; a reserved byte and an unknown source
+    // keep their record.
+    for (at, v, dropped) in [
+        (4usize, 0x7fu8, 1u64),
+        (38, 0x20, 1),
+        (79, 1, 0),
+        (39, 14, 0),
+    ] {
+        let mut m = good.clone();
+        let o = 16 + RECORD_LEN + at;
+        m[o] = v;
+        if at == 4 {
+            m[o + 3] = 0x7f;
+        }
+        let mut p = small_pipeline(8);
+        process_frame(&mut p, FeedKind::Adsb, Kind::Message, T0, &m);
+        assert_eq!(p.adsb.live, (3 - dropped) as usize, "byte {at}");
+        assert_eq!(
+            p.errors[ErrKind::AdsbBadRecord as usize],
+            dropped,
+            "byte {at}"
+        );
+        assert_eq!(errors_total(&p.errors), dropped, "byte {at}");
+        assert_eq!(p.rows_seen[FeedKind::Adsb as usize], 3 - dropped);
+    }
 }
 
 // REQ: OA-RPL-036

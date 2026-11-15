@@ -599,6 +599,166 @@ fn a_track_is_confirmed_by_two_reports_of_three_and_restarts_on_an_implausible_s
     assert!(tracker_live(&t).is_empty());
 }
 
+/// Two reports `gap_s` apart of an aircraft flying east at `kt` knots, with its ground speed
+/// (an east velocity) on both.
+fn east_pair(addr: u32, kt: f64, gap_s: f64) -> [Measurement; 2] {
+    let f = frame0();
+    let v = kt * 0.514_444_444_444;
+    let mut rng = Rng(5);
+    let mut at = |t: f64| {
+        let tr = Truth {
+            e: v * t,
+            n: 0.0,
+            ve: v,
+            vn: 0.0,
+            alt_ft: 30000.0,
+            vrate_fpm: 0.0,
+        };
+        measure(&f, addr, t, &tr, 3.0, Some(1.0), true, &mut rng)
+    };
+    [at(0.0), at(gap_s)]
+}
+
+// REQ: OA-TRK-067
+#[test]
+fn a_fast_aircraft_reporting_its_speed_is_not_restarted_as_implausible() {
+    // 950 kt for 2 s is 977 m: over what a single 700 kt limit and 200 m of slack allow (920 m),
+    // but the aircraft says it flies 950 kt.
+    let [a, b] = east_pair(0x424242, 950.0, 2.0);
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 12);
+    tracker_update(&mut t, &a, &mut out);
+    tracker_update(&mut t, &b, &mut out);
+    assert_eq!(tracker_stats(&t).init_implausible, 0);
+    assert_eq!(tracker_live(&t).len(), 1);
+    // The same displacement claimed by an aircraft that says it flies 300 kt is a different one.
+    let [mut a, mut b] = east_pair(0x424243, 300.0, 2.0);
+    b.lon_e7 = a.lon_e7 + (977.0 / (111_195.0 * LAT0.to_radians().cos()) * 1.0e7) as i32;
+    a.category = 0xa3;
+    b.category = 0xa3;
+    let mut t = tracker_new(&big_config()).unwrap();
+    tracker_update(&mut t, &a, &mut out);
+    tracker_update(&mut t, &b, &mut out);
+    assert_eq!(tracker_stats(&t).init_implausible, 1);
+}
+
+// REQ: OA-TRK-067
+#[test]
+fn one_report_claiming_a_fast_category_does_not_excuse_a_jump_in_the_tracker() {
+    // 2,782 kt in 2 s without a ground speed: possible only for a space vehicle.
+    let [mut a, mut b] = east_pair(0x424244, 450.0, 2.0);
+    for m in [&mut a, &mut b] {
+        m.flags = 0;
+        m.vel_cov_m2s2 = [0.0; 3];
+        m.vel_east_mps = 0.0;
+        m.category = 0xa3;
+    }
+    b.lon_e7 = a.lon_e7 + (2862.0 / (111_195.0 * LAT0.to_radians().cos()) * 1.0e7) as i32;
+    b.category = 0xb7;
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 12);
+    tracker_update(&mut t, &a, &mut out);
+    tracker_update(&mut t, &b, &mut out);
+    assert_eq!(tracker_stats(&t).init_implausible, 1);
+}
+
+/// A tracker that has followed the aircraft `addr` for four seconds.
+fn tracker_with_one_track(addr: u32) -> (oa_track::Tracker, TrackOutput, Vec<Measurement>) {
+    let ms = base_measurements(addr, 8, 1.0, 3);
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 16);
+    for m in &ms[..4] {
+        tracker_update(&mut t, m, &mut out);
+    }
+    assert_eq!(tracker_live(&t).len(), 1);
+    (t, out, ms)
+}
+
+// REQ: OA-TRK-068
+#[test]
+fn one_measurement_far_ahead_does_not_move_the_clock_or_expire_other_tracks() {
+    let (mut t, mut out, ms) = tracker_with_one_track(0xAAAAAA);
+    // Another aircraft's report an hour ahead, then the first aircraft's next real report.
+    let mut far = ms[0];
+    far.addr = 0xBBBBBB;
+    far.toa_ns = 3600 * 1_000_000_000;
+    tracker_update(&mut t, &far, &mut out);
+    tracker_update(&mut t, &ms[4], &mut out);
+    assert_eq!(tracker_live(&t).len(), 1, "the other track expired");
+    assert_eq!(tracker_stats(&t).late_window, 0);
+    assert!(tracker_stats(&t).ticks < 20, "{}", tracker_stats(&t).ticks);
+    assert_eq!(tracker_stats(&t).applied, 5);
+}
+
+// REQ: OA-TRK-068
+#[test]
+fn three_far_measurements_in_a_row_step_the_clock_without_a_tick_for_every_second() {
+    let (mut t, mut out, ms) = tracker_with_one_track(0xAAAAAA);
+    for k in 0..3 {
+        let mut far = ms[0];
+        far.addr = 0xBBBBBB;
+        far.toa_ns = (7200 + k) * 1_000_000_000;
+        tracker_update(&mut t, &far, &mut out);
+    }
+    // The old track is long gone; the clock is two hours on and the grid did not walk there.
+    assert!(!tracker_live(&t).iter().any(|l| l.0 == 0xAAAAAA));
+    assert!(tracker_stats(&t).ticks < 200, "{}", tracker_stats(&t).ticks);
+    assert!(tracker_stats(&t).ticks_skipped > 6000);
+    assert_eq!(tracker_stats(&t).time_steps, 1);
+    // Advancing the caller's clock a day on is as cheap.
+    let before = tracker_stats(&t).ticks;
+    tracker_advance(
+        &mut t,
+        7200 * 1_000_000_000 + 86_400 * 1_000_000_000,
+        &mut out,
+    );
+    assert!(tracker_stats(&t).ticks - before < 200);
+}
+
+// REQ: OA-TRK-069
+#[test]
+fn extreme_times_are_refused_and_tick_arithmetic_cannot_overflow_or_stall() {
+    use oa_track::{REF_TIME, TIME_LIMIT_NS};
+    let ms = base_measurements(0xCCCCCC, 4, 1.0, 4);
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1 << 12);
+    for at in [i64::MAX, i64::MIN, TIME_LIMIT_NS + 1, -TIME_LIMIT_NS - 1] {
+        let mut m = ms[0];
+        m.toa_ns = at;
+        tracker_update(&mut t, &m, &mut out);
+    }
+    assert_eq!(tracker_stats(&t).refused[REF_TIME], 4);
+    assert_eq!(tracker_stats(&t).started, 0);
+    // The edge of the allowed range is accepted, and its ticks are few.
+    let mut m = ms[0];
+    m.toa_ns = TIME_LIMIT_NS;
+    tracker_update(&mut t, &m, &mut out);
+    tracker_advance(&mut t, i64::MAX, &mut out);
+    tracker_advance(&mut t, TIME_LIMIT_NS, &mut out);
+    assert_eq!(tracker_stats(&t).refused[REF_TIME], 5);
+    assert_eq!(tracker_stats(&t).started, 1);
+    assert!(tracker_stats(&t).ticks <= 2);
+    // A tick of one nanosecond, or one beyond a quarter of the range, is a bad configuration.
+    for tick_ns in [1, 999_999, i64::MAX / 4 + 1, i64::MAX] {
+        let c = TrackerConfig {
+            tick_ns,
+            ..big_config()
+        };
+        assert!(tracker_new(&c).is_err(), "{tick_ns}");
+    }
+    // The shortest tick near the top of the range still advances and ends.
+    let c = TrackerConfig {
+        tick_ns: 1_000_000,
+        ..big_config()
+    };
+    let mut t = tracker_new(&c).unwrap();
+    let mut m = ms[0];
+    m.toa_ns = TIME_LIMIT_NS - 5_000_000;
+    tracker_update(&mut t, &m, &mut out);
+    tracker_advance(&mut t, TIME_LIMIT_NS, &mut out);
+    assert!(tracker_stats(&t).ticks + tracker_stats(&t).ticks_skipped <= 6);
+}
+
 // REQ: OA-TRK-012
 #[test]
 fn a_silent_track_coasts_after_three_intervals_and_is_dropped_after_sixty_seconds() {
