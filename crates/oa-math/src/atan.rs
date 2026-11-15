@@ -7,8 +7,7 @@
 use crate::consts::{
     ATAN_C, ATAN_TAB, INV3_DD, PIO2_DD, PIO2_HI, PIO4_HI, PI_DD, PI_HI, THREE_PIO4_HI,
 };
-use crate::dd::{self, dd, two_prod, two_sum, Dd, SPLITTER};
-use crate::fast::ratio;
+use crate::dd::{self, dd, fast_two_sum, two_prod, two_sqr, two_sum, Dd};
 use crate::util::{abs, exponent, is_neg, mul_pow2, negate_if, round_test, with_sign_of, NAN};
 
 /// Below this |x|, atan x and asin x round to x.
@@ -166,74 +165,119 @@ pub(crate) fn acos_slow(x: f64) -> f64 {
 
 // ---- fast paths -------------------------------------------------------------------------
 
-/// Relative error bound used for the fast atan family (derivation at `atan_unit_fast`).
+/// Relative error bound used for the fast atan family (derivation at `atan_frac_fast`).
 const ATAN_FAST_REL: f64 = 1.734_723_475_976_807e-18; // 2^-59
 
-/// atan t for a double-double 0 < t <= 1 (slightly above 1 is fine) as `(h, l)`. With
-/// c = j/16 the nearest table point, atan t = atan c + atan u, u = (t - c) / (1 + t c) as a
-/// double-double quotient (|u| < 2^-5; `t - c` exact, `t c` split into two exact products,
-/// the quotient error below 2^-100), and atan u = u + u^3 (-1/3 + u^2 Q(u^2)) with Q the
-/// series 1/5 - u^2/7 + ... down to u^13 / 13. Errors (u = 2^-53): the series cut-off
-/// u^15 / 15 < 2^-70 (relative to the result at least 2^-5 for j > 0, to u for j = 0); the
-/// roundings of `u^3 (...)`, a quantity of size at most 2^-16.6, four of them and two more in
-/// the sum of the low parts: below 2^-67; the neglected `u_lo u^2` below 2^-68 and the cube
-/// taken of the high part of u alone. With the result at least atan(1/32) = 2^-5 these are
-/// below 2^-61.5 relative, and for j = 0 (result about u) the relative error is
-/// 5 u * u^2 / 3 < 2^-61 as well; the bound used is 2^-59.
-fn atan_unit_fast(th: f64, tl: f64) -> (f64, f64) {
-    let j = (th * 16.0 + 0.5) as usize;
-    let c = j as f64 * 0.0625;
-    let base = ATAN_TAB.get(j).copied().unwrap_or(dd(0.0, 0.0));
-    let (uh, ul) = if j == 0 {
-        (th, tl)
-    } else {
-        let nh = th - c;
-        let sp = SPLITTER * th;
-        let thh = sp - (sp - th);
-        let thl = th - thh;
-        // 1 + t c = d.hi + dl up to 2^-105: thh c and thl c are exact (26 + 5 bits), the sums
-        // of 1, thh c and thl c are two exact `two_sum`s, only `tl c` and the low parts round
-        let d1 = two_sum(1.0, thh * c);
-        let d = two_sum(d1.hi, thl * c);
-        let dl = d.lo + (d1.lo + tl * c);
-        let q1 = nh / d.hi;
-        let p = two_prod(q1, d.hi);
-        let rem = ((nh - p.hi) - p.lo) + (tl - q1 * dl);
-        (q1, rem / d.hi)
-    };
-    let u2 = uh * uh;
-    let [k5, k7, k9, k11, k13] = ATAN_C;
-    let q = k5 + u2 * (k7 + u2 * (k9 + u2 * (k11 + u2 * k13)));
-    let t = (u2 * uh) * (u2 * q - INV3_DD.hi) - (u2 * uh) * INV3_DD.lo;
-    let s = two_sum(base.hi, uh);
-    let f = two_sum(s.hi, (s.lo + base.lo) + (ul + t));
-    (f.hi, f.lo)
-}
+/// 1.5 * 2^52: adding it to a double of size below 2^51 rounds that double to an integer (ties
+/// to even) and leaves the integer in the low bits of the sum.
+const ROUND_MAGIC: f64 = 6_755_399_441_055_744.0;
 
-/// atan((nh + nl) / (dh + dl)) for positive doubles-doubles as `(h, l)`, same error as
-/// [`atan_unit_fast`] (the ratio is a double-double with error below 2^-100; above 1 the
-/// identity atan t = pi/2 - atan(1/t) subtracts a result below pi/4 from pi/2, so the absolute
-/// error stays and the result is at least pi/4).
-fn atan_ratio_fast(nh: f64, nl: f64, dh: f64, dl: f64) -> (f64, f64) {
-    if nh > dh {
-        let t = ratio(dh, dl, nh, nl);
-        let (h, l) = atan_unit_fast(t.hi, t.lo);
-        let s = two_sum(PIO2_DD.hi, -h);
-        let f = two_sum(s.hi, (s.lo + PIO2_DD.lo) - l);
-        (f.hi, f.lo)
-    } else {
-        let t = ratio(nh, nl, dh, dl);
-        atan_unit_fast(t.hi, t.lo)
+/// The starting value of the sum for the four cases of `atan_frac_fast`, 17 entries each:
+/// atan c, pi/2 - atan c (ratio inverted), pi - atan c (negative x), pi/2 + atan c (both),
+/// as double-doubles (error below 2^-104 relative).
+const fn base_tab() -> [Dd; 68] {
+    let mut t = [dd(0.0, 0.0); 68];
+    let mut j = 0;
+    while j < 17 {
+        #[allow(clippy::indexing_slicing)]
+        {
+            let a = ATAN_TAB[j];
+            t[j] = a;
+            t[17 + j] = dd::sub(PIO2_DD, a);
+            t[34 + j] = dd::sub(PI_DD, a);
+            t[51 + j] = dd::add(PIO2_DD, a);
+        }
+        j += 1;
     }
+    t
+}
+const BASE_TAB: [Dd; 68] = base_tab();
+
+/// `(hi, lo)` with `hi + lo == c * x` exactly and `hi = fl(c * x)`, for `c` a multiple of 1/16 in
+/// [0, 1] (at most 5 significant bits): `x` is cut into 26 and at most 27 bits, so `c xh` and
+/// `c xl` are exact, `c xh - hi` is exact (the two agree to 2^-25), and their sum is the exact
+/// rounding error, a double.
+#[inline]
+fn two_prod_c(c: f64, x: f64) -> (f64, f64) {
+    let p = c * x;
+    let xh = f64::from_bits(x.to_bits() & !0x7ff_ffff);
+    (p, (c * xh - p) + c * (x - xh))
 }
 
-/// `pi - (h + l)` for a result below pi/2 (so the difference is at least pi/2: no cancellation).
-fn pi_minus(h: f64, l: f64) -> (f64, f64) {
-    let s = two_sum(PI_DD.hi, -h);
-    let f = two_sum(s.hi, (s.lo + PI_DD.lo) - l);
-    (f.hi, f.lo)
+/// `sel(m, a, b)` is `b` when the mask `m` is all ones and `a` when it is 0.
+#[inline]
+fn sel(m: u64, a: f64, b: f64) -> f64 {
+    f64::from_bits((a.to_bits() & !m) | (b.to_bits() & m))
 }
 
+/// The sum of the four-case table value and atan of the small remainder, for
+/// `(nh + nl) / (dh + dl)` (positive, `nl` and `dl` at most a few ulps of `nh` and `dh`): with
+/// n the smaller and d the larger of the two (`swapped` when they were exchanged),
+/// t = n / d <= 1 (up to 2^-52 above), c = j/16 the table point nearest t and
+/// u = (n - c d) / (d + c n) = tan(atan t - atan c), |u| < 2^-5 (t is only an approximation of n/d
+/// used to pick j, so |u| stays below 2^-5 (1 + 2^-50)), and
+///
+/// * atan(n / d) = atan c + atan u,
+/// * pi/2 - atan(n / d) = (pi/2 - atan c) - atan u (swapped),
+/// * pi - atan(n / d) = (pi - atan c) - atan u (`xneg`, the arc cosine and atan2 of a negative x),
+/// * pi/2 + atan(n / d) = (pi/2 + atan c) + atan u (both),
+///
+/// the sign of u flipped by the sign bit of the numerator. Returns `(h, l)` with
+/// `l` below 2^-11 of `h`, not renormalised. The numerator is formed exactly: `c d` as an exact
+/// product and sum, `n - c dh` exact (the two agree to 2^-4 or better, Sterbenz), the pieces
+/// summed with a full `two_sum`; the denominator is a sum without cancellation (relative error
+/// below 2^-104). The quotient `u` is `uh = num / den.hi` from a reciprocal (error 2 u), the exact
+/// remainder `rem = num - uh den` and `ul = rem * recip` (relative error below 2^-103, which
+/// with the rounding of `rem` and `num` is 2^-100 of the numerator's size, below 2^-95 absolute
+/// as c <= 1). Series: atan u = u + u^3 (-1/3 + u^2 Q(u^2)) with Q the series 1/5 - u^2/7 + ...
+/// down to u^13 / 13, in the order of Estrin (the rounding of Q is below 2^-70 of u^5: not
+/// material). Errors (u = 2^-53): the series cut-off u^15 / 15 < 2^-70 (relative to the result
+/// at least 2^-5 for j > 0, to u for j = 0); the roundings of `u^3 (...)`, a quantity of size
+/// at most 2^-16.6, four of them and two more in the sum of the low parts: below 2^-67; the
+/// neglected `u_lo u^2` below 2^-68 and the cube taken of the high part of u alone. With the
+/// result at least atan(1/32) = 2^-5 these are below 2^-61.5 relative, and for j = 0 (result
+/// about u) the relative error is 5 u * u^2 / 3 < 2^-61 as well; the unnormalised low part adds a
+/// rounding of 2^-64 of `h` in `round_test`; the bound used is 2^-59. The first sum is a
+/// `fast_two_sum`: the table value is 0 (then it is the first term) or at least 0.0624 > |u|.
+#[inline]
+fn atan_frac_fast(nh: f64, nl: f64, dh: f64, dl: f64, xneg: u64) -> (f64, f64) {
+    let swapped = nh > dh;
+    let m = 0u64.wrapping_sub(swapped as u64);
+    let (an, al) = (sel(m, nh, dh), sel(m, nl, dl));
+    let (bn, bl) = (sel(m, dh, nh), sel(m, dl, nl));
+    // an + al is the smaller, bn + bl the larger
+    let tm = (an / bn) * 16.0 + ROUND_MAGIC;
+    let j = tm.to_bits().wrapping_sub(ROUND_MAGIC.to_bits()) as usize;
+    let c = (tm - ROUND_MAGIC) * 0.0625;
+    let (ph, pl) = two_prod_c(c, bn);
+    let (qh, ql) = two_prod_c(c, an);
+    let nsum = two_sum(an - ph, -pl);
+    let num = two_sum(nsum.hi, nsum.lo + (al - c * bl));
+    let ds = fast_two_sum(bn, qh);
+    let den = fast_two_sum(ds.hi, ds.lo + (ql + (bl + c * al)));
+    let flip = ((swapped as u64) ^ xneg) << 63;
+    let (numh, numl) = (
+        f64::from_bits(num.hi.to_bits() ^ flip),
+        f64::from_bits(num.lo.to_bits() ^ flip),
+    );
+    let recip = 1.0 / den.hi;
+    let uh = numh * recip;
+    let p = two_prod(uh, den.hi);
+    let rem = ((numh - p.hi) - p.lo) + (numl - uh * den.lo);
+    let ul = rem * recip;
+    let u2 = uh * uh;
+    let u4 = u2 * u2;
+    let [k5, k7, k9, k11, k13] = ATAN_C;
+    let q = ((k5 + u2 * k7) + u4 * (k9 + u2 * k11)) + (u4 * u4) * k13;
+    let u3 = u2 * uh;
+    let t = u3 * (u2 * q - INV3_DD.hi) - u3 * INV3_DD.lo;
+    let kind = (swapped as usize) | ((xneg as usize) << 1);
+    let base = BASE_TAB.get(kind * 17 + j).copied().unwrap_or(dd(0.0, 0.0));
+    let s = fast_two_sum(base.hi, uh);
+    (s.hi, (s.lo + base.lo) + (ul + t))
+}
+
+#[inline]
 fn finish(hl: (f64, f64)) -> Option<f64> {
     round_test(hl.0, hl.1, abs(hl.0) * ATAN_FAST_REL)
 }
@@ -243,41 +287,63 @@ pub(crate) fn atan_fast(x: f64) -> Option<f64> {
     if !(TINY..=1.152_921_504_606_846_9e18).contains(&ax) {
         return None;
     }
-    let r = finish(atan_ratio_fast(ax, 0.0, 1.0, 0.0))?;
+    let r = finish(atan_frac_fast(ax, 0.0, 1.0, 0.0, 0))?;
     Some(with_sign_of(r, x))
 }
 
+/// Operand range of the unscaled atan2 fast path (the larger magnitude).
+const ATAN2_LO: f64 = 1.0e-100;
+const ATAN2_HI: f64 = 1.0e100;
+
 pub(crate) fn atan2_fast(y: f64, x: f64) -> Option<f64> {
+    let (ay, ax) = (abs(y), abs(x));
+    let big = if ay > ax { ay } else { ax };
+    let neg_x = x.to_bits() >> 63;
+    if (ATAN2_LO..ATAN2_HI).contains(&big) {
+        // a ratio beyond 2^-60 is for the slow path (limiting forms); the smaller is 0 when
+        // either operand is
+        let small = if ay > ax { ax } else { ay };
+        if small < big * 8.673_617_379_884_035e-19 {
+            return None;
+        }
+        let r = finish(atan_frac_fast(ay, 0.0, ax, 0.0, neg_x))?;
+        return Some(with_sign_of(r, y));
+    }
     if !(x.is_finite() && y.is_finite()) || x == 0.0 || y == 0.0 {
         return None;
     }
-    let ay = abs(y);
-    let ax = abs(x);
     let q = ay / ax;
     if !(8.673_617_379_884_035e-19..=1.152_921_504_606_846_9e18).contains(&q) {
         return None;
     }
-    let big = if ay > ax { ay } else { ax };
     let s = -exponent(big);
-    let (h, l) = atan_ratio_fast(mul_pow2(ay, s), 0.0, mul_pow2(ax, s), 0.0);
-    let (h, l) = if is_neg(x) { pi_minus(h, l) } else { (h, l) };
-    Some(with_sign_of(finish((h, l))?, y))
+    let r = finish(atan_frac_fast(
+        mul_pow2(ay, s),
+        0.0,
+        mul_pow2(ax, s),
+        0.0,
+        neg_x,
+    ))?;
+    Some(with_sign_of(r, y))
 }
 
-/// sqrt((1 - a)(1 + a)) as a double-double for 0 <= a < 1: the product of the two exact sums
-/// (`p.lo q.lo` below 2^-108 dropped), then a square root corrected once with the exact square
-/// of its first approximation; relative error below 2^-100.
+/// sqrt(1 - a^2) as a double-double for 0 <= a < 1: `1 - a^2` from the exact square
+/// (`ph + pl`): `1 - ph` as a `fast_two_sum` (ph < 1) and the low part `pl` subtracted, so the
+/// double-double `(wh, wl)` is `1 - a^2` up to one rounding of the low part (below 2^-107
+/// relative); `wh >= 2^-53 > |pl|` as a < 1 makes the last `fast_two_sum` exact. Then a square
+/// root corrected once with the exact square of its first approximation; relative error below
+/// 2^-100. The correction divides by 2 ch as a product with the reciprocal (computed beside the
+/// square, relative error below 2^-103 of a correction below 2^-52 ch).
+#[inline]
 fn cos_of_asin_fast(a: f64) -> Dd {
-    let p = two_sum(1.0, -a);
-    let q = two_sum(1.0, a);
-    let w = two_prod(p.hi, q.hi);
-    let wl = w.lo + (p.hi * q.lo + p.lo * q.hi);
-    let wh = w.hi + wl;
-    let wl = wl - (wh - w.hi);
-    let ch = wh.sqrt();
-    let e = two_prod(ch, ch);
-    let rem = ((wh - e.hi) - e.lo) + wl;
-    dd(ch, rem / (2.0 * ch))
+    let sq = two_sqr(a);
+    let d = fast_two_sum(1.0, -sq.hi);
+    let w = fast_two_sum(d.hi, d.lo - sq.lo);
+    let ch = w.hi.sqrt();
+    let half_inv = 0.5 / ch;
+    let e = two_sqr(ch);
+    let rem = ((w.hi - e.hi) - e.lo) + w.lo;
+    dd(ch, rem * half_inv)
 }
 
 pub(crate) fn asin_fast(x: f64) -> Option<f64> {
@@ -286,7 +352,7 @@ pub(crate) fn asin_fast(x: f64) -> Option<f64> {
         return None;
     }
     let c = cos_of_asin_fast(ax);
-    let r = finish(atan_ratio_fast(ax, 0.0, c.hi, c.lo))?;
+    let r = finish(atan_frac_fast(ax, 0.0, c.hi, c.lo, 0))?;
     Some(negate_if(r, is_neg(x)))
 }
 
@@ -296,9 +362,7 @@ pub(crate) fn acos_fast(x: f64) -> Option<f64> {
         return None;
     }
     let c = cos_of_asin_fast(ax);
-    let (h, l) = atan_ratio_fast(c.hi, c.lo, ax, 0.0);
-    let (h, l) = if is_neg(x) { pi_minus(h, l) } else { (h, l) };
-    finish((h, l))
+    finish(atan_frac_fast(c.hi, c.lo, ax, 0.0, x.to_bits() >> 63))
 }
 
 /// Arc tangent of `x`, in radians, range [-pi/2, pi/2]. Domain: all doubles. Faithfully rounded
