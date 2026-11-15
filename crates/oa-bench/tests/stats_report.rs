@@ -6,7 +6,9 @@
     clippy::panic
 )]
 
-use oa_bench::report::{code_version, render_csv, render_text, Header, InputHash};
+use oa_bench::report::{
+    code_version, render_csv, render_text, scoring_digest, Header, InputHash, SCORING_SOURCES,
+};
 use oa_bench::stats::{nearest_rank, split_rows, stats_of, Splits};
 use oa_bench::synth::{run_world, self_test_config, Injected};
 
@@ -117,7 +119,7 @@ fn the_report_carries_hashes_versions_every_metric_with_n_and_the_exclusions() {
     let csv = render_csv(&h, &out);
     assert!(text.contains(&"ab".repeat(32)));
     assert!(text.contains(&"cd".repeat(32)));
-    assert!(text.contains("oa-bench metrics v1"));
+    assert!(text.contains("oa-bench metrics v2"));
     assert!(text.contains("Exclusions"));
     assert!(
         text.contains("internal track"),
@@ -240,4 +242,44 @@ fn the_binary_runs_the_synthetic_world_and_refuses_bad_arguments() {
     assert_eq!(none.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
+}
+
+/// The 64-hex scoring digest printed in a code version string.
+fn digest_in(v: &str) -> Option<&str> {
+    let d = v.split("scoring digest ").nth(1)?.get(..64)?;
+    d.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        .then_some(d)
+}
+
+// REQ: OA-BENCH-072
+#[test]
+fn the_header_carries_metrics_version_2_and_a_scoring_code_digest() {
+    let v = code_version();
+    assert!(v.starts_with("oa-bench metrics v2; crate "), "{v}");
+    assert!(digest_in(&v).is_some(), "{v}");
+    let text = render_text(
+        &header(),
+        &run_world(&Injected::default(), &self_test_config()).1,
+    );
+    assert!(text.contains(&v));
+}
+
+// REQ: OA-BENCH-072
+#[test]
+fn the_scoring_digest_is_the_hash_of_the_included_source_texts() {
+    let mut bytes = Vec::new();
+    for (name, text) in SCORING_SOURCES {
+        assert!(!text.is_empty(), "{name}");
+        bytes.extend_from_slice(format!("{name}:{}\n", text.len()).as_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+    let want = oa_sha256::to_hex(&oa_sha256::sha256(&bytes));
+    assert_eq!(scoring_digest(), want);
+    assert_eq!(digest_in(&code_version()), Some(want.as_str()));
+    // The metric modules the digest covers are the ones that define a score.
+    let names: Vec<&str> = SCORING_SOURCES.iter().map(|s| s.0).collect();
+    for m in ["common_time.rs", "metrics_event.rs", "pair.rs"] {
+        assert!(names.contains(&m), "{m}");
+    }
 }

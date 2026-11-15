@@ -11,8 +11,35 @@ use std::fmt::Write as _;
 use crate::run::RunOutput;
 use crate::stats::{MetricResult, Stats};
 
-/// The version string of the metric code. Bump when a definition changes.
-pub const METRICS_VERSION: &str = "oa-bench metrics v1";
+/// The version string of the metric code. Bump when a definition changes. Version 2: event
+/// occurrence, route resolution, ambiguity, duplicate tracks in C1 and passages of a fix.
+pub const METRICS_VERSION: &str = "oa-bench metrics v2";
+
+/// The source text of the modules that define what the metrics compute, in the order they are
+/// hashed (name, text). The digest of the scoring code is over these texts.
+pub const SCORING_SOURCES: [(&str, &str); 10] = [
+    ("assoc.rs", include_str!("assoc.rs")),
+    ("common_time.rs", include_str!("common_time.rs")),
+    ("geo.rs", include_str!("geo.rs")),
+    ("metrics_event.rs", include_str!("metrics_event.rs")),
+    ("metrics_flow.rs", include_str!("metrics_flow.rs")),
+    ("metrics_th.rs", include_str!("metrics_th.rs")),
+    ("pair.rs", include_str!("pair.rs")),
+    ("stats.rs", include_str!("stats.rs")),
+    ("thindex.rs", include_str!("thindex.rs")),
+    ("truth.rs", include_str!("truth.rs")),
+];
+
+/// SHA-256 as lower-case hex over the texts of [`SCORING_SOURCES`], each preceded by its name and
+/// its length in bytes (so moving text between files changes it), computed at run time.
+pub fn scoring_digest() -> String {
+    let mut bytes = Vec::new();
+    for (name, text) in SCORING_SOURCES {
+        bytes.extend_from_slice(format!("{name}:{}\n", text.len()).as_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+    oa_sha256::to_hex(&oa_sha256::sha256(&bytes))
+}
 
 /// What the report says before any number (M2_DESIGN "What SFDPS lets us measure").
 pub const SCOPE_TEXT: &str = "SFDPS publishes ERAM's published track, not its internal track: it may decimate or smooth the \
@@ -57,9 +84,19 @@ pub struct Header {
     pub truth: Vec<(String, String)>,
 }
 
-/// The code version string for this build.
+/// The code version string for this build: the metrics version, the crate version, the digest of
+/// the scoring code and, when set at build time, the source revision (`OPENATCA_SOURCE_REV`).
 pub fn code_version() -> String {
-    format!("{METRICS_VERSION}; crate {}", env!("CARGO_PKG_VERSION"))
+    let mut v = format!(
+        "{METRICS_VERSION}; crate {}; scoring digest {}",
+        env!("CARGO_PKG_VERSION"),
+        scoring_digest()
+    );
+    if let Some(rev) = option_env!("OPENATCA_SOURCE_REV") {
+        v.push_str("; source rev ");
+        v.push_str(rev);
+    }
+    v
 }
 
 /// A scalar for the text report: "no data" for NaN.

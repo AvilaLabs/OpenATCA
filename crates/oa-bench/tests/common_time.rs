@@ -101,3 +101,64 @@ fn a_grid_time_counts_only_when_both_systems_have_a_report_near_it() {
         .1;
     assert_eq!(dropped, 3.0);
 }
+
+/// Rows `(flight, second, error)` of one aircraft, every time shifted by `shift_ms`.
+fn rows(spec: &[(u32, i64, f32)], shift_ms: i64) -> PairTable {
+    let mut p = PairTable::default();
+    for &(f, s, e) in spec {
+        p.th.push(0);
+        p.flight.push(f);
+        p.addr.push(ADDR);
+        p.t_ms.push(T0_MS + s * 1000 + shift_ms);
+        p.cross_m.push(e);
+        p.along_m.push(0.0);
+    }
+    p
+}
+
+fn scalar(m: &MetricResult, k: &str) -> f64 {
+    m.scalars.iter().find(|(n, _)| n == k).unwrap().1
+}
+
+// REQ: OA-BENCH-070
+#[test]
+fn the_duplicate_row_chosen_never_depends_on_its_error() {
+    // System A: two rows for one aircraft and time from two flight records, 1,000 m (flight 0)
+    // and 0 m (flight 1), one paired sample each, so the lowest flight index is the primary.
+    let a = rows(&[(0, 0, 1000.0), (1, 0, 0.0)], 0);
+    let b = rows(&[(0, 0, 10.0)], 0);
+    let cfg = CommonTimeConfig {
+        grid_ms: 10_000,
+        tol_ms: 500,
+    };
+    let m = common_time_compare(&a, &b, &cfg);
+    assert_eq!(row(&m, "horizontal, system A").rms, 1000.0);
+    assert_eq!(row(&m, "horizontal, system B").rms, 10.0);
+    assert_eq!(scalar(&m, "duplicate-track samples, system A"), 1.0);
+    assert_eq!(scalar(&m, "duplicate-track samples, system B"), 0.0);
+}
+
+// REQ: OA-BENCH-070
+#[test]
+fn the_primary_track_is_the_flight_with_most_samples_whatever_the_grid_phase() {
+    // Flight 3 has 60 samples at 100 m; flight 1 has 20 at 0 m at the same times as the start of
+    // flight 3 (flight 1 has the lower index, flight 3 the more samples).
+    let mut spec: Vec<(u32, i64, f32)> = (0..60).map(|s| (3, s, 100.0)).collect();
+    spec.extend((0..20).map(|s| (1, s, 0.0)));
+    let b: Vec<(u32, i64, f32)> = (0..60).map(|s| (0, s, 10.0)).collect();
+    let cfg = CommonTimeConfig {
+        grid_ms: 10_000,
+        tol_ms: 2_000,
+    };
+    for shift in [0, 250, 700, 1_300, 4_100] {
+        let m = common_time_compare(&rows(&spec, shift), &rows(&b, shift), &cfg);
+        let ra = row(&m, "horizontal, system A");
+        assert_eq!(ra.rms, 100.0, "shift {shift} ms");
+        assert_eq!(ra.n, row(&m, "horizontal, system B").n, "shift {shift} ms");
+        assert_eq!(
+            scalar(&m, "duplicate-track samples, system A"),
+            20.0,
+            "shift {shift} ms"
+        );
+    }
+}

@@ -4,7 +4,10 @@
 //! path to the fix, found on a coarse grid then refined, accepted only when the refined distance
 //! is within the fix radius (2 NM) and the closest point is not the first or last point of a
 //! truth leg (an aircraft that appears or disappears near a fix did not pass it). A flight that
-//! never passes within the radius is excluded and counted.
+//! never passes within the radius is excluded and counted. A leg can pass a fix more than once
+//! (a hold): each contiguous stretch inside the radius is one passage, with its own closest
+//! approach. An estimate is scored against the first passage that ends after its issue time (the
+//! passage it was issued in, when it was issued inside one); its estimated time never chooses.
 //!
 //! **One occurrence per flight.** An aircraft can fly several trips in a recording, crossing the
 //! same fix and using the same airport more than once. An estimate belongs to one flight plan,
@@ -231,51 +234,75 @@ pub fn occurrence_leg(
     best.map(|b| b.1)
 }
 
-/// The truth crossing time of a fix by the aircraft of truth leg `leg_ix` during that leg, Unix
-/// ms, or `None` when it did not pass within the fix radius.
-pub fn crossing_time(
+/// One passage of a fix in a truth leg: a contiguous stretch of the leg inside the fix radius.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Passage {
+    /// The last time of the stretch inside the radius, Unix ms.
+    pub end_ms: i64,
+    /// The closest approach within the stretch, Unix ms; `None` when it is the first or last
+    /// point of the leg (an aircraft that appears or disappears near a fix did not pass it).
+    pub cross_ms: Option<i64>,
+}
+
+/// Every passage of a fix by the aircraft of truth leg `leg_ix`, in time order: each contiguous
+/// stretch of the leg within the fix radius, found on the coarse grid and refined, with its
+/// closest approach. Empty when the aircraft never came within the radius.
+pub fn fix_passages(
     truth: &Truth<'_>,
     leg_ix: u32,
     lat: f64,
     lon: f64,
     cfg: &EventConfig,
-) -> Option<i64> {
-    let l = truth.legs.get(leg_ix as usize)?;
-    let addr = l.addr;
-    let mut best: Option<(f64, i64)> = None;
-    let mut t = l.start_ms;
-    while t <= l.end_ms {
-        if let Ok(s) = (truth.query)(addr, t) {
-            let d = dist_m(lat, lon, s.lat, s.lon);
-            if best.is_none_or(|b| d < b.0) {
-                best = Some((d, t));
+) -> Vec<Passage> {
+    let Some(l) = truth.legs.get(leg_ix as usize) else {
+        return Vec::new();
+    };
+    let (addr, ls, le) = (l.addr, l.start_ms, l.end_ms);
+    let (coarse, fine) = (cfg.coarse_ms.max(1), cfg.fine_ms.max(1));
+    let dist = |t: i64| {
+        (truth.query)(addr, t)
+            .ok()
+            .map(|s| dist_m(lat, lon, s.lat, s.lon))
+    };
+    // Windows around the coarse samples that are near the fix, merged when they touch.
+    let mut windows: Vec<(i64, i64)> = Vec::new();
+    let mut t = ls;
+    while t <= le {
+        if dist(t).is_some_and(|d| d <= cfg.fix_radius_m + 2_000.0) {
+            let w = ((t - coarse).max(ls), (t + coarse).min(le));
+            match windows.last_mut() {
+                Some(last) if w.0 <= last.1 => last.1 = last.1.max(w.1),
+                _ => windows.push(w),
             }
         }
-        t += cfg.coarse_ms.max(1);
+        t += coarse;
     }
-    let (d0, t0) = best?;
-    let (ls, le) = (l.start_ms, l.end_ms);
-    if d0 > cfg.fix_radius_m + 2_000.0 {
-        return None;
-    }
-    let (mut bd, mut bt) = (f64::MAX, t0);
-    let mut t = t0 - cfg.coarse_ms;
-    while t <= t0 + cfg.coarse_ms {
-        if t >= ls && t <= le {
-            if let Ok(s) = (truth.query)(addr, t) {
-                let d = dist_m(lat, lon, s.lat, s.lon);
-                if d < bd {
-                    bd = d;
-                    bt = t;
+    let mut out = Vec::new();
+    for (lo, hi) in windows {
+        // (closest distance, its time, last time inside) of the stretch being walked.
+        let mut cur: Option<(f64, i64, i64)> = None;
+        let mut t = lo;
+        while t <= hi + fine {
+            let d = if t <= hi { dist(t) } else { None };
+            match (d.filter(|&d| d <= cfg.fix_radius_m), cur) {
+                (Some(d), Some((bd, bt, _))) => {
+                    cur = Some(if d < bd { (d, t, t) } else { (bd, bt, t) });
                 }
+                (Some(d), None) => cur = Some((d, t, t)),
+                (None, Some((_, bt, end))) => {
+                    let inner = bt - ls >= coarse && le - bt >= coarse;
+                    out.push(Passage {
+                        end_ms: end,
+                        cross_ms: inner.then_some(bt),
+                    });
+                    cur = None;
+                }
+                (None, None) => {}
             }
+            t += fine;
         }
-        t += cfg.fine_ms.max(1);
     }
-    if bd > cfg.fix_radius_m || bt - ls < cfg.coarse_ms || le - bt < cfg.coarse_ms {
-        return None;
-    }
-    Some(bt)
+    out
 }
 
 /// What a fix identifier resolved to.
@@ -341,7 +368,7 @@ pub fn f1_f2_tbfm(
         cfg,
     } = *ctx;
     let (mut v1, mut b1, mut v2, mut b2) = (vec![], vec![], vec![], vec![]);
-    let mut cache: BTreeMap<(u32, [u8; 8]), Option<i64>> = BTreeMap::new();
+    let mut cache: BTreeMap<(u32, [u8; 8], u32), Option<Passage>> = BTreeMap::new();
     let windows = flight_windows(leg);
     let t = &leg.tbfm;
     for i in 0..t.kind.len() {
@@ -384,10 +411,33 @@ pub fn f1_f2_tbfm(
             exclude(ex, scope, NO_LEG);
             continue;
         };
-        let cross = *cache
-            .entry((li, fix))
-            .or_insert_with(|| crossing_time(truth, li, lat, lon, cfg));
-        let Some(cross) = cross else {
+        // The first passage that ends after the issue time (the one the issue time falls in, when
+        // it falls inside one); the estimated time never chooses it.
+        let mut k = 0u32;
+        let passage = loop {
+            let p = *cache.entry((li, fix, k)).or_insert_with(|| {
+                fix_passages(truth, li, lat, lon, cfg)
+                    .get(k as usize)
+                    .copied()
+            });
+            match p {
+                Some(p) if issue != NO_TIME && p.end_ms <= issue => k += 1,
+                other => break other,
+            }
+        };
+        let Some(passage) = passage else {
+            exclude(
+                ex,
+                scope,
+                if k == 0 {
+                    "truth never within 2 NM of the meter fix"
+                } else {
+                    "issued after the crossing or more than 60 min before it"
+                },
+            );
+            continue;
+        };
+        let Some(cross) = passage.cross_ms else {
             exclude(ex, scope, "truth never within 2 NM of the meter fix");
             continue;
         };

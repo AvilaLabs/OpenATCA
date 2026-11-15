@@ -11,7 +11,9 @@
 //! system is never credited with reports it did not publish. Each aircraft then counts in
 //! proportion to the time both systems cover it, and the per-aircraft RMS values give a
 //! distribution over aircraft that no long flight can dominate. The error is the horizontal one,
-//! the root of the squares of the cross-track and along-track errors of the pairing.
+//! the root of the squares of the cross-track and along-track errors of the pairing. Where a system
+//! has several rows for one aircraft at one time, the row of its primary track is used (never the
+//! one with the smaller error) and the others are counted as duplicate-track samples.
 
 use std::collections::BTreeMap;
 
@@ -37,10 +39,17 @@ impl Default for CommonTimeConfig {
     }
 }
 
-/// Horizontal error samples `(time, metres)` per truth aircraft, sorted by time; samples without
-/// both a cross-track and an along-track error are left out.
-fn by_aircraft(p: &PairTable) -> BTreeMap<u32, Vec<(i64, f64)>> {
-    let mut m: BTreeMap<u32, Vec<(i64, f64)>> = BTreeMap::new();
+/// Horizontal error samples `(time, metres)` per truth aircraft, sorted by time, and the number
+/// of duplicate-track samples left out. Samples without both a cross-track and an along-track
+/// error are left out. When several rows of one aircraft share a time (the aircraft was tracked
+/// by more than one flight record), the row kept is the one of the primary track: the flight with
+/// the most paired samples for the aircraft over the whole table, the lowest flight index on a
+/// tie. The error never chooses the row. Every other row at that time is a duplicate-track
+/// sample.
+fn by_aircraft(p: &PairTable) -> (BTreeMap<u32, Vec<(i64, f64)>>, u64) {
+    // (time, flight, error) per aircraft.
+    let mut rows: BTreeMap<u32, Vec<(i64, u32, f64)>> = BTreeMap::new();
+    let mut count: BTreeMap<(u32, u32), u64> = BTreeMap::new();
     for i in 0..p.t_ms.len() {
         let (Some(&a), Some(&t), Some(&c), Some(&l)) = (
             p.addr.get(i),
@@ -51,15 +60,35 @@ fn by_aircraft(p: &PairTable) -> BTreeMap<u32, Vec<(i64, f64)>> {
             continue;
         };
         if c.is_finite() && l.is_finite() {
-            m.entry(a)
+            let f = p.flight.get(i).copied().unwrap_or(u32::MAX);
+            *count.entry((a, f)).or_insert(0) += 1;
+            rows.entry(a)
                 .or_default()
-                .push((t, f64::from(c).hypot(f64::from(l))));
+                .push((t, f, f64::from(c).hypot(f64::from(l))));
         }
     }
-    for v in m.values_mut() {
-        v.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut m: BTreeMap<u32, Vec<(i64, f64)>> = BTreeMap::new();
+    let mut duplicates = 0u64;
+    for (a, mut v) in rows {
+        let n = |f: u32| count.get(&(a, f)).copied().unwrap_or(0);
+        v.sort_by(|x, y| {
+            x.0.cmp(&y.0)
+                .then(n(y.1).cmp(&n(x.1)))
+                .then(x.1.cmp(&y.1))
+                .then(x.2.total_cmp(&y.2))
+        });
+        let kept = m.entry(a).or_default();
+        let mut last: Option<i64> = None;
+        for (t, _, e) in v {
+            if last == Some(t) {
+                duplicates += 1;
+            } else {
+                kept.push((t, e));
+                last = Some(t);
+            }
+        }
     }
-    m
+    (m, duplicates)
 }
 
 /// The error of the sample nearest to `g` within `tol` (the earlier on a tie).
@@ -86,7 +115,7 @@ fn nearest(v: &[(i64, f64)], g: i64, tol: i64) -> Option<f64> {
 /// Rows: the horizontal error over all shared grid times of each system, and the distribution over
 /// aircraft of each system's RMS at those times.
 pub fn common_time_compare(a: &PairTable, b: &PairTable, cfg: &CommonTimeConfig) -> MetricResult {
-    let (ma, mb) = (by_aircraft(a), by_aircraft(b));
+    let ((ma, dup_a), (mb, dup_b)) = (by_aircraft(a), by_aircraft(b));
     let grid = cfg.grid_ms.max(1);
     let (mut ea, mut eb) = (Vec::new(), Vec::new());
     let (mut fa, mut fb) = (Vec::new(), Vec::new());
@@ -146,6 +175,10 @@ pub fn common_time_compare(a: &PairTable, b: &PairTable, cfg: &CommonTimeConfig)
         "grid times without a report of both systems".into(),
         without as f64,
     ));
+    r.scalars
+        .push(("duplicate-track samples, system A".into(), dup_a as f64));
+    r.scalars
+        .push(("duplicate-track samples, system B".into(), dup_b as f64));
     r.scalars
         .push(("grid spacing, s".into(), cfg.grid_ms as f64 / 1000.0));
     r.scalars
