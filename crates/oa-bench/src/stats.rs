@@ -8,7 +8,9 @@
 //!
 //! **Nothing is not zero.** The statistics of an empty set are `n = 0` and NaN in every other
 //! field, never 0.0, which would read as a perfect result. The report prints such a row as
-//! "no data" and the CSV as `NA`.
+//! "no data" and the CSV as `NA`. The same holds for a value that cannot be computed: the sums
+//! are scaled by the largest magnitude, so finite input never overflows to a falsely perfect
+//! (or infinite) RMS, and a result that is still not finite is NaN, never 0.
 
 /// Phase codes of a paired sample, from the truth vertical rate.
 pub mod phase {
@@ -199,33 +201,73 @@ pub fn nearest_rank(sorted: &[f64], p: u64) -> f64 {
     sorted.get((k - 1) as usize).copied().unwrap_or(f64::NAN)
 }
 
-/// The statistics of `values`; non-finite values are skipped (the caller counts them).
+/// The largest power of two not above `max`, a finite positive number. Dividing by it is exact
+/// (except for digits below the subnormal range) and brings the largest magnitude into `[1, 2)`.
+fn scale_of(max: f64) -> f64 {
+    let bits = max.to_bits();
+    if bits & 0x7ff0_0000_0000_0000 != 0 {
+        f64::from_bits(bits & 0x7ff0_0000_0000_0000)
+    } else {
+        // Subnormal: the mantissa is the value in units of the smallest subnormal.
+        f64::from_bits(1u64 << (63 - bits.leading_zeros()))
+    }
+}
+
+/// The statistics of `values`; non-finite values are skipped (the caller counts them). The mean
+/// and the root mean square are summed on the values divided by a power of two near the largest
+/// magnitude, so no sum or square leaves the range of a double for finite input: `[1e200]` has
+/// RMS `1e200`, and a value near the smallest subnormal does not square to zero. A statistic that
+/// is still not finite is not computable: see [`stats_checked`].
 pub fn stats_of(values: &[f64]) -> Stats {
+    match stats_checked(values) {
+        Ok(s) => s,
+        Err(_) => Stats {
+            n: values.iter().filter(|v| v.is_finite()).count() as u64,
+            ..Stats::EMPTY
+        },
+    }
+}
+
+/// [`stats_of`], or the reason the mean or the RMS is not computable (`n` is then still the count
+/// of finite values, in [`stats_of`]'s result). The scaled sums stay within the range of a double
+/// for any finite input, so the reason is a guard, not an expected outcome.
+pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
     let mut abs: Vec<f64> = Vec::with_capacity(values.len());
-    let mut sum = ExactSum::default();
-    let mut sumsq = ExactSum::default();
     for &v in values {
         if v.is_finite() {
-            sum.add(v);
-            sumsq.add(v * v);
             abs.push(v.abs());
         }
     }
-    let (sum, sumsq) = (sum.value(), sumsq.value());
-    if abs.is_empty() {
-        return Stats::EMPTY;
+    let Some(max) = abs.iter().copied().max_by(f64::total_cmp) else {
+        return Ok(Stats::EMPTY);
+    };
+    let n = abs.len() as f64;
+    let (mean, rms) = if max == 0.0 {
+        (0.0, 0.0)
+    } else {
+        let scale = scale_of(max);
+        let mut sum = ExactSum::default();
+        let mut sumsq = ExactSum::default();
+        for &v in values.iter().filter(|v| v.is_finite()) {
+            let u = v / scale;
+            sum.add(u);
+            sumsq.add(u * u);
+        }
+        (sum.value() / n * scale, (sumsq.value() / n).sqrt() * scale)
+    };
+    if !mean.is_finite() || !rms.is_finite() {
+        return Err("statistic not finite");
     }
     abs.sort_by(f64::total_cmp);
-    let n = abs.len() as f64;
-    Stats {
+    Ok(Stats {
         n: abs.len() as u64,
-        mean: sum / n,
-        rms: (sumsq / n).sqrt(),
+        mean,
+        rms,
         median: nearest_rank(&abs, 50),
         p95: nearest_rank(&abs, 95),
         p99: nearest_rank(&abs, 99),
         max: abs.last().copied().unwrap_or(f64::NAN),
-    }
+    })
 }
 
 /// One labelled row of a metric result.

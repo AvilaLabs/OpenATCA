@@ -74,6 +74,9 @@ pub struct MsHist {
     pub n: u64,
     pub sum_ms: i128,
     pub sumsq_ms: u128,
+    /// Set when `sumsq_ms` left the range of a `u128` (values of tens of years in ms, squared and
+    /// summed): the RMS is then not computable and reported as NaN, never as a small number.
+    pub sumsq_overflow: bool,
     /// Absolute value in ms to count.
     pub by_abs: BTreeMap<u64, u64>,
 }
@@ -83,7 +86,11 @@ impl MsHist {
     pub fn add(&mut self, ms: i64) {
         self.n += 1;
         self.sum_ms += i128::from(ms);
-        self.sumsq_ms += (i128::from(ms) * i128::from(ms)) as u128;
+        let sq = i128::from(ms).unsigned_abs().pow(2);
+        match self.sumsq_ms.checked_add(sq) {
+            Some(t) => self.sumsq_ms = t,
+            None => self.sumsq_overflow = true,
+        }
         *self.by_abs.entry(ms.unsigned_abs()).or_insert(0) += 1;
     }
 
@@ -91,7 +98,11 @@ impl MsHist {
     pub fn merge(&mut self, o: &MsHist) {
         self.n += o.n;
         self.sum_ms += o.sum_ms;
-        self.sumsq_ms += o.sumsq_ms;
+        match self.sumsq_ms.checked_add(o.sumsq_ms) {
+            Some(t) => self.sumsq_ms = t,
+            None => self.sumsq_overflow = true,
+        }
+        self.sumsq_overflow |= o.sumsq_overflow;
         for (k, c) in &o.by_abs {
             *self.by_abs.entry(*k).or_insert(0) += c;
         }
@@ -119,7 +130,11 @@ impl MsHist {
         Stats {
             n: self.n,
             mean: self.sum_ms as f64 / 1000.0 / n,
-            rms: (self.sumsq_ms as f64 / 1.0e6 / n).sqrt(),
+            rms: if self.sumsq_overflow {
+                f64::NAN
+            } else {
+                (self.sumsq_ms as f64 / 1.0e6 / n).sqrt()
+            },
             median: self.rank(50),
             p95: self.rank(95),
             p99: self.rank(99),

@@ -246,59 +246,105 @@ impl Read for Endless {
     }
 }
 
-// REQ: OA-BENCH-092
-#[test]
-fn a_msg_file_longer_than_a_document_can_be_is_refused_by_its_length() {
-    let dir = scratch("long");
+const REFUSED: &str = "longer than a document can be";
+
+/// What loading one oversize `.msg` file left: the load, the file's digest and the bytes pulled.
+fn load_oversize(name: &str, disk_len: u64, stream_len: u64) -> (oa_bench::input::Loaded, u64) {
+    let dir = scratch(name);
     let f = std::fs::File::create(dir.join("000000.msg")).unwrap();
-    // A sparse file: past the largest document, no real bytes on disk.
-    f.set_len(16 * 1024 * 1024).unwrap();
+    // A sparse file: no real bytes on disk.
+    f.set_len(disk_len).unwrap();
     drop(f);
     let pulled = Rc::new(RefCell::new(0u64));
     let p2 = pulled.clone();
     let open: Opener = Rc::new(move |_| {
         Ok(Box::new(Endless {
             pulled: p2.clone(),
-            limit: 16 * 1024 * 1024,
+            limit: stream_len,
         }) as Box<dyn Read>)
     });
-    let r = load_with(
+    let l = load_with(
         &[FeedInput {
             feed: FeedKind::Sfdps,
             dir: dir.clone(),
         }],
         &open,
-    );
-    let e = r.err().expect("an oversize file is refused");
-    assert!(e.to_string().contains("000000.msg"), "{e}");
-    assert_eq!(*pulled.borrow(), 0, "refused before any read");
+    )
+    .expect("an oversize file does not fail the load");
     let _ = std::fs::remove_dir_all(dir);
+    let n = *pulled.borrow();
+    (l, n)
 }
 
-// REQ: OA-BENCH-092
+/// The SHA-256 of `n` zero bytes, in hex.
+fn zeros_digest(n: u64) -> String {
+    let mut h = oa_sha256::Sha256::new();
+    let z = [0u8; 8192];
+    let mut left = n;
+    while left > 0 {
+        let k = left.min(z.len() as u64) as usize;
+        h.update(&z[..k]).unwrap();
+        left -= k as u64;
+    }
+    to_hex(&h.finalize())
+}
+
+// REQ: OA-BENCH-102
 #[test]
-fn a_msg_stream_that_outgrows_its_length_is_cut_at_the_limit() {
-    let dir = scratch("grow");
-    std::fs::write(dir.join("000000.msg"), b"<x/>").unwrap();
+fn a_msg_file_longer_than_a_document_can_be_is_refused_and_counted_and_its_digest_covers_it() {
+    let n = 16 * 1024 * 1024;
+    let (l, pulled) = load_oversize("long", n, n);
+    assert_eq!(pulled, n, "read to its end for the digest");
+    assert_eq!(l.legacy.counts.docs[0], 1);
+    assert_eq!(l.legacy.counts.doc_errors[0], 1);
+    assert_eq!(l.legacy.counts.reasons.get(REFUSED), Some(&1));
+    assert_eq!(l.inputs[0].bytes, n);
+    assert_eq!(l.inputs[0].sha256, zeros_digest(n));
+}
+
+// REQ: OA-BENCH-102
+#[test]
+fn a_msg_stream_that_outgrows_its_length_is_refused_and_counted_and_its_digest_covers_it() {
+    let n = 12 * 1024 * 1024;
+    let (l, pulled) = load_oversize("grow", 4, n);
+    assert_eq!(pulled, n);
+    assert_eq!(l.legacy.counts.doc_errors[0], 1);
+    assert_eq!(l.legacy.counts.reasons.get(REFUSED), Some(&1));
+    assert_eq!(l.inputs[0].bytes, n);
+    assert_eq!(l.inputs[0].sha256, zeros_digest(n));
+}
+
+// REQ: OA-BENCH-102
+#[test]
+fn the_load_continues_with_the_files_after_a_refused_one() {
+    let dir = scratch("after");
+    std::fs::write(dir.join("000000.msg"), b"x").unwrap();
+    let good = sfdps(2);
+    std::fs::write(dir.join("000001.msg"), good.as_bytes()).unwrap();
     let pulled = Rc::new(RefCell::new(0u64));
     let p2 = pulled.clone();
-    let open: Opener = Rc::new(move |_| {
-        Ok(Box::new(Endless {
-            pulled: p2.clone(),
-            limit: 64 * 1024 * 1024,
-        }) as Box<dyn Read>)
+    let open: Opener = Rc::new(move |p: &Path| {
+        if p.ends_with("000000.msg") {
+            Ok(Box::new(Endless {
+                pulled: p2.clone(),
+                limit: 9 * 1024 * 1024,
+            }) as Box<dyn Read>)
+        } else {
+            Ok(Box::new(std::fs::File::open(p)?) as Box<dyn Read>)
+        }
     });
-    let r = load_with(
+    let l = load_with(
         &[FeedInput {
             feed: FeedKind::Sfdps,
             dir: dir.clone(),
         }],
         &open,
-    );
-    let e = r.err().expect("a stream past the limit is refused");
-    assert!(e.to_string().contains("000000.msg"), "{e}");
-    let got = *pulled.borrow();
-    assert!(got <= 4 * 1024 * 1024 + 64 * 1024 + 8192, "pulled {got}");
+    )
+    .unwrap();
+    assert_eq!(l.legacy.counts.docs[0], 2);
+    assert_eq!(l.legacy.counts.doc_errors[0], 1);
+    assert_eq!(l.legacy.th.flight.len(), 2, "the second file was ingested");
+    assert_eq!(l.inputs[0].files, 2);
     let _ = std::fs::remove_dir_all(dir);
 }
 

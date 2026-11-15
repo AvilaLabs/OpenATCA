@@ -248,7 +248,7 @@ pub struct Passage {
 
 /// Every passage of a fix by the aircraft of truth leg `leg_ix`, in time order: each contiguous
 /// stretch of the leg within the fix radius, found on the coarse grid and refined, with its
-/// closest approach. Empty when the aircraft never came within the radius.
+/// closest approach (none when the stretch begins or ends at a hole in the truth). Empty when the aircraft never came within the radius.
 pub fn fix_passages(
     truth: &Truth<'_>,
     leg_ix: u32,
@@ -281,26 +281,32 @@ pub fn fix_passages(
     }
     let mut out = Vec::new();
     for (lo, hi) in windows {
-        // (closest distance, its time, last time inside) of the stretch being walked.
-        let mut cur: Option<(f64, i64, i64)> = None;
+        // (closest distance, its time, last time inside, began after a hole in the truth) of the
+        // stretch being walked.
+        let mut cur: Option<(f64, i64, i64, bool)> = None;
+        let mut after_hole = false;
         let mut t = lo;
         while t <= hi + fine {
-            let d = if t <= hi { dist(t) } else { None };
-            match (d.filter(|&d| d <= cfg.fix_radius_m), cur) {
-                (Some(d), Some((bd, bt, _))) => {
-                    cur = Some(if d < bd { (d, t, t) } else { (bd, bt, t) });
+            let raw = if t <= hi { dist(t) } else { None };
+            let hole = t <= hi && raw.is_none();
+            match (raw.filter(|&d| d <= cfg.fix_radius_m), cur) {
+                (Some(d), Some((bd, bt, _, h))) => {
+                    cur = Some(if d < bd { (d, t, t, h) } else { (bd, bt, t, h) });
                 }
-                (Some(d), None) => cur = Some((d, t, t)),
-                (None, Some((_, bt, end))) => {
+                (Some(d), None) => cur = Some((d, t, t, after_hole)),
+                (None, Some((_, bt, end, began_after_hole))) => {
+                    // A stretch that begins or ends at a hole in the truth has no known closest
+                    // approach: the aircraft may have been nearer inside the hole.
                     let inner = bt - ls >= coarse && le - bt >= coarse;
                     out.push(Passage {
                         end_ms: end,
-                        cross_ms: inner.then_some(bt),
+                        cross_ms: (inner && !began_after_hole && !hole).then_some(bt),
                     });
                     cur = None;
                 }
                 (None, None) => {}
             }
+            after_hole = hole;
             t += fine;
         }
     }
@@ -987,7 +993,22 @@ pub fn r1_route_conformance(
     r
 }
 
-/// The truth crossing of the boundary from unit `from` to unit `to` near time `around`, Unix ms.
+/// Why no crossing time is given for a handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoCrossing {
+    /// The units were never seen to change from the transferring to the receiving one.
+    NotSeen,
+    /// They were, but the truth is not continuous across the change: the time it happened is not
+    /// known (no truth between the two sides for longer than [`oa_truth::LEG_GAP_MS`], or no unit
+    /// at a probe inside the interval).
+    TruthGap,
+}
+
+/// The truth crossing of the boundary from unit `from` to unit `to` nearest the time `around`,
+/// Unix ms. Only where the truth is continuous across it: the last sample over `from` and the
+/// first over `to` must lie no further apart than the truth's own continuity gap, and the unit is
+/// known at every probe of the refinement; otherwise the time is unknown and nothing is
+/// interpolated across the gap.
 fn boundary_crossing(
     truth: &Truth<'_>,
     env: &Env<'_>,
@@ -996,7 +1017,7 @@ fn boundary_crossing(
     to: [u8; 8],
     around: i64,
     cfg: &EventConfig,
-) -> Option<i64> {
+) -> Result<i64, NoCrossing> {
     let unit = |t: i64| -> Option<[u8; 8]> {
         let s = (truth.query)(addr, t).ok()?;
         (env.unit_at)(s.lat, s.lon, s.baro_alt_ft)
@@ -1004,27 +1025,55 @@ fn boundary_crossing(
     let step = cfg.handoff_step_ms.max(1);
     let mut t = around - cfg.handoff_window_ms;
     let mut prev: Option<(i64, [u8; 8])> = None;
+    let mut best: Option<i64> = None;
+    let mut seen_gap = false;
     while t <= around + cfg.handoff_window_ms {
         if let Some(u) = unit(t) {
             if let Some((pt, pu)) = prev {
                 if pu == from && u == to {
-                    let (mut lo, mut hi) = (pt, t);
-                    while hi - lo > 1000 {
-                        let mid = lo + (hi - lo) / 2;
-                        if unit(mid) == Some(from) {
-                            lo = mid;
-                        } else {
-                            hi = mid;
+                    match refine_crossing(&unit, from, to, pt, t) {
+                        Some(c) if t - pt <= oa_truth::LEG_GAP_MS => {
+                            if best.is_none_or(|b| (c - around).abs() < (b - around).abs()) {
+                                best = Some(c);
+                            }
                         }
+                        _ => seen_gap = true,
                     }
-                    return Some(hi);
                 }
             }
             prev = Some((t, u));
         }
         t += step;
     }
-    None
+    match (best, seen_gap) {
+        (Some(c), _) => Ok(c),
+        (None, true) => Err(NoCrossing::TruthGap),
+        (None, false) => Err(NoCrossing::NotSeen),
+    }
+}
+
+/// The first time within `(lo, hi]` at which the unit is `to` rather than `from`, found by
+/// bisection to 1 s; `None` when a probe has neither unit (the truth or the model says nothing
+/// there, or a third unit is there).
+fn refine_crossing(
+    unit: &dyn Fn(i64) -> Option<[u8; 8]>,
+    from: [u8; 8],
+    to: [u8; 8],
+    mut lo: i64,
+    mut hi: i64,
+) -> Option<i64> {
+    while hi - lo > 1000 {
+        let mid = lo + (hi - lo) / 2;
+        let u = unit(mid)?;
+        if u == from {
+            lo = mid;
+        } else if u == to {
+            hi = mid;
+        } else {
+            return None;
+        }
+    }
+    Some(hi)
 }
 
 /// H1: handoff initiation and acceptance time against the truth crossing of the boundary between
@@ -1066,11 +1115,16 @@ pub fn h1_handoffs(
             continue;
         }
         match boundary_crossing(truth, env, addr, from, to, ts, cfg) {
-            Some(c) => {
+            Ok(c) => {
                 vals.push((ts - c) as f64 / 1000.0);
                 kinds.push(code);
             }
-            None => exclude(ex, "H1", "no boundary crossing in truth near the event"),
+            Err(NoCrossing::TruthGap) => {
+                exclude(ex, "H1", "truth missing across the boundary crossing")
+            }
+            Err(NoCrossing::NotSeen) => {
+                exclude(ex, "H1", "no boundary crossing in truth near the event")
+            }
         }
     }
     let mut r = new_result(

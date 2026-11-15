@@ -12,7 +12,8 @@
 //! that changes between listing and reading, or while it is read, cannot give a digest that does
 //! not describe what was scored. The `.msg` files, the `.oaf` and `.oaf.gz` recordings (through
 //! the replay merge) and the ADS-B clip all go this way; a file that is not read to its end is an
-//! error, not a digest. [`hash_files`] reads separately and is for stand-alone use only.
+//! error, not a digest. A `.msg` file longer than a document can be is still read to its end (the
+//! digest covers every byte) but through a fixed buffer, and is counted as a refused document. [`hash_files`] reads separately and is for stand-alone use only.
 
 use std::cell::RefCell;
 use std::fs;
@@ -101,7 +102,10 @@ pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
 /// mark, trailing white space); a file longer than the limit plus this is not a document.
 pub const MSG_MARGIN: u64 = 64 * 1024;
 
-/// The longest `.msg` file read: the replay parser's document limit plus [`MSG_MARGIN`].
+/// The refusal reason counted for a `.msg` file past the limit.
+pub const MSG_TOO_LONG: &str = "longer than a document can be";
+
+/// The longest `.msg` file kept: the replay parser's document limit plus [`MSG_MARGIN`].
 pub fn msg_limit() -> u64 {
     oa_replay::doc_xml_limits().max_input_bytes as u64 + MSG_MARGIN
 }
@@ -352,28 +356,47 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
             match kind {
                 DirKind::Msg => {
                     for (f, done) in files.iter().zip(dones) {
-                        let len = fs::metadata(f)
-                            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", f.display())))?
-                            .len();
-                        if len > max_msg {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "{}: {len} bytes, past the limit of {max_msg} bytes for a message document",
-                                    f.display()
-                                ),
-                            ));
+                        // Read to the end through a fixed buffer, so the digest covers every
+                        // byte; only a document within the limit is kept.
+                        let mut hr = HashRead::new(open(f)?, done.clone());
+                        let mut b: Vec<u8> = Vec::new();
+                        let mut buf = [0u8; 8192];
+                        let mut too_long = false;
+                        loop {
+                            let n = hr.read(&mut buf).map_err(|e| {
+                                io::Error::new(e.kind(), format!("{}: {e}", f.display()))
+                            })?;
+                            let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else {
+                                break;
+                            };
+                            if !too_long {
+                                if (b.len() + n) as u64 > max_msg {
+                                    too_long = true;
+                                    b = Vec::new();
+                                } else {
+                                    b.extend_from_slice(chunk);
+                                }
+                            }
                         }
-                        let capped = Capped {
-                            inner: open(f)?,
-                            left: max_msg,
-                            limit: max_msg,
-                        };
-                        let mut hr = HashRead::new(capped, done.clone());
-                        let mut b = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-                        hr.read_to_end(&mut b).map_err(|e| {
-                            io::Error::new(e.kind(), format!("{}: {e}", f.display()))
-                        })?;
+                        if too_long {
+                            let fi = match feed {
+                                FeedKind::Sfdps => Some(0),
+                                FeedKind::Tbfm => Some(1),
+                                FeedKind::Tfms => Some(2),
+                                FeedKind::Fns | FeedKind::Adsb => None,
+                            };
+                            if let Some(fi) = fi {
+                                if let (Some(d), Some(e)) = (
+                                    leg.counts.docs.get_mut(fi),
+                                    leg.counts.doc_errors.get_mut(fi),
+                                ) {
+                                    *d += 1;
+                                    *e += 1;
+                                }
+                            }
+                            leg.counts.note(MSG_TOO_LONG.to_string(), 1);
+                            continue;
+                        }
                         ingest_one(&mut leg, &mut reader, *feed, &b, NO_TIME);
                     }
                 }

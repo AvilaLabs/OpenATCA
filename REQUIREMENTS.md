@@ -2262,7 +2262,8 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   each sample, the share of flight time beyond 2 NM, and lists each flight with time beyond it (bounded,
   the rest counted).
 - **OA-BENCH-018** Handoff timing (H1) compares the initiation and acceptance event times with the truth
-  crossing of the boundary between the transferring and receiving unit, signed, by event.
+  crossing of the boundary between the transferring and receiving unit, signed, by event. A crossing time
+  is taken only where the truth is continuous across it (OA-BENCH-100).
 - **OA-BENCH-019** Samples and estimates that cannot be scored are counted in an exclusions table keyed by
   scope and reason (no truth by kind, not associated by outcome, no meter fix, never within 2 NM, no
   route, and others); nothing is dropped silently.
@@ -2426,11 +2427,26 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-091** The extraction counts list what the decoders refused: SFDPS messages rejected by reason and
   field errors in kept rows by field, TBFM flights and TFMS messages refused for a field by field index and by
   reason, each with its total. A row or field that did not reach scoring is in one of the counts.
-- **OA-BENCH-092** An input file is bounded before it is read. A `.msg` file is refused (the load fails, naming
-  the file) when its length is past the replay parser's document limit plus 64 KiB, before it is opened, and
-  the read is capped at the same limit so a file that grows, or reports a short length, is cut there; the
-  airspace snapshot is read the same way against the snapshot size limit. No read allocates more than the
-  limit.
+- **OA-BENCH-092** An input file is bounded. A `.msg` file longer than the replay parser's document limit plus
+  64 KiB, by its length or because it grows while read, is not kept: it is read to its end through a fixed
+  buffer and refused as a document (OA-BENCH-102). The airspace snapshot is read with a cap against the
+  snapshot size limit and refused (the load fails, naming the file) when longer. No read allocates more than
+  the limit.
+- **OA-BENCH-100** A handoff crossing time is derived from truth only where the truth is continuous across the
+  boundary: the last sample over the transferring unit and the first over the receiving unit are no further
+  apart than the truth leg gap (`oa_truth::LEG_GAP_MS`) and the unit is known at every refinement probe.
+  Otherwise the handoff is excluded as "truth missing across the boundary crossing" and counted. With
+  several crossings in the window the one nearest the event is used.
+- **OA-BENCH-101** Mean and RMS are summed on values scaled by a power of two near the largest magnitude, so
+  finite input gives no overflow or underflow to a perfect value: `[1e200]` has RMS 1e200, values near
+  `f64::MAX` and the smallest subnormal give their RMS, and one huge value among ordinary ones is not
+  lost. A statistic still not finite is NaN (not computable), never 0.
+- **OA-BENCH-102** A `.msg` file longer than a document can be is counted as a refused document of its feed
+  with the reason "longer than a document can be" and the load continues; its bytes are all in the input
+  digest.
+- **OA-BENCH-103** A fix passage whose stretch inside the radius begins or ends at a hole in the truth has no
+  closest-approach time. The sum of squared milliseconds behind a histogram RMS that leaves the range of a
+  `u128` gives an RMS of NaN, not a wrapped or panicking one.
 
 ## Winds aloft (oa-wind)
 
