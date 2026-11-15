@@ -179,10 +179,15 @@ pub const SCRATCH_ROWS: usize = 4096;
 /// period.
 pub const DROP_PERIODS: i64 = 6;
 
+/// How far the drop time stays above the clock-step limit: validation needs the limit strictly
+/// below it.
+pub const DROP_MARGIN_NS: i64 = 1;
+
 /// A tracker configuration for a fusion run: `base` with the expected and initiation intervals
 /// set to the longest scan period of `sites`, the drop time [`DROP_PERIODS`] such periods and
 /// the out-of-order window long enough to replay a candidate's plots (the initiation window of
-/// `RADAR_INIT_N` scans plus two buckets).
+/// `RADAR_INIT_N` scans plus two buckets). The drop time is at least [`DROP_MARGIN_NS`] above the
+/// step limit.
 pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> TrackerConfig {
     let period = sites.iter().map(|s| s.period_ns).max().unwrap_or(NS_PER_S);
     let ooo = base
@@ -193,13 +198,16 @@ pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> Track
                 .saturating_add(2 * BUCKET_NS),
         )
         .max(OOO_WINDOW_NS);
+    // The step limit is never below the window it must not be smaller than.
+    let step = base.clock_step_limit_ns.max(ooo);
     TrackerConfig {
         expected_interval_ns: period,
         init_interval_ns: period,
-        drop_after_ns: DROP_PERIODS.saturating_mul(period),
+        drop_after_ns: DROP_PERIODS
+            .saturating_mul(period)
+            .max(step.saturating_add(DROP_MARGIN_NS)),
         ooo_window_ns: ooo,
-        // The step limit is never below the window it must not be smaller than.
-        clock_step_limit_ns: base.clock_step_limit_ns.max(ooo),
+        clock_step_limit_ns: step,
         ..*base
     }
 }
@@ -2936,6 +2944,38 @@ mod tests {
         assert_eq!(st.plots_refused, 3, "{st:?}");
         assert_eq!(st.processed, 0);
         assert_eq!(st.cand_started, 0);
+    }
+
+    // REQ: OA-TRK-289
+    #[test]
+    fn the_fusion_tracker_config_passes_validation_for_every_accepted_rotation_period() {
+        use crate::radar::site_check;
+        use crate::types::check_config;
+        let base = TrackerConfig {
+            max_tracks: 64,
+            out_capacity: 1024,
+            log_capacity: 64,
+            ..DEFAULT_CONFIG
+        };
+        let (lo, hi) = (100_000_000i64, 600_000_000_000i64);
+        let mut periods = vec![lo, lo + 1, hi - 1, hi];
+        // Log-spaced between the endpoints, and the whole seconds a site is likely to have.
+        for k in 0..=200 {
+            let x = (k as f64) / 200.0;
+            periods.push(((lo as f64) * ((hi as f64) / (lo as f64)).powf(x)).round() as i64);
+        }
+        periods.extend((1..=600).map(|s| s * NS_PER_S));
+        for period_ns in periods {
+            let site = RadarSite { period_ns, ..SITE };
+            assert!(site_check(&site).is_ok(), "{period_ns}");
+            let tc = fusion_tracker_config(&base, &[site]);
+            assert!(check_config(&tc).is_ok(), "period {period_ns} ns: {tc:?}");
+        }
+        for period_ns in [lo, hi] {
+            let site = RadarSite { period_ns, ..SITE };
+            let c = fusion_config(fusion_tracker_config(&base, &[site]));
+            assert!(fusion_new(&c, &[site]).is_ok(), "period {period_ns} ns");
+        }
     }
 
     /// A plot that, if processed, would start a candidate (no address, no track near).

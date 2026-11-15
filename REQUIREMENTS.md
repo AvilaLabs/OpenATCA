@@ -3000,6 +3000,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   scan number, so radar-only confirmation counts hits one rotation apart.
 - **OA-TRK-288** A latency record whose receive time minus sensor time does not fit a 64-bit integer is
   refused and counted, not stored with a clamped value.
+- **OA-TRK-289** The tracker configuration the fusion layer derives from a site passes the tracker's
+  validation for every rotation period a site accepts (100 ms to 600 s, both ends included): the drop
+  time is never below the clock-step limit it must exceed.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
