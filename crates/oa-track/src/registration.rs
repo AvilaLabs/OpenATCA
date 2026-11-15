@@ -636,7 +636,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-071
+    // REQ: OA-TRK-074
     #[test]
     fn a_few_lying_references_cannot_move_the_estimate() {
         // Twelve references, two of which misreport their position by 250 m and 0.25 degree.
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(st.resets, 0);
     }
 
-    // REQ: OA-TRK-071
+    // REQ: OA-TRK-074
     #[test]
     fn nothing_is_learned_from_too_few_references() {
         // Two references, however many residuals, are never enough to tell a liar from the
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(st.building, 200);
     }
 
-    // REQ: OA-TRK-072
+    // REQ: OA-TRK-075
     #[test]
     fn a_step_change_of_the_radar_bias_is_followed() {
         // The radar is realigned at round 150: 50 m and 0.05 degree become 200 m and 0.2 degree.
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(reg_sample(&st, 0).resets, st.resets);
     }
 
-    // REQ: OA-TRK-072
+    // REQ: OA-TRK-075
     #[test]
     fn an_honest_steady_radar_is_never_restarted() {
         // 24 references for 400 rounds against a constant bias: 9,600 residuals, no restart and

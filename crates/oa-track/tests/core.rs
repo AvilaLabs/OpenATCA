@@ -952,8 +952,8 @@ fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_r
     assert_eq!(digest, GOLDEN_DIGEST);
 }
 
-// Re-recorded when the repeat check began to look at every stored report (OA-TRK-074) and a late
-// re-filter began to keep the run of rejected reports (OA-TRK-075): five more repeats are now
+// Re-recorded when the repeat check began to look at every stored report (OA-TRK-077) and a late
+// re-filter began to keep the run of rejected reports (OA-TRK-078): five more repeats are now
 // counted as duplicates instead of applied again (30 became 35, applied 477 became 472). The
 // earlier values were:
 // "579 477 30 53 4 288 869 14 0 1343", 0x40a4_9f6c_7a87_a22b and
@@ -1062,7 +1062,7 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     assert!(per(b, 38_000) < 2_200.0);
 }
 
-// REQ: OA-TRK-074
+// REQ: OA-TRK-077
 #[test]
 fn a_repeat_of_a_report_is_a_duplicate_even_after_another_sensor_reported_at_the_same_time() {
     let ms = base_measurements(0x777777, 30, 1.0, 6);
@@ -1095,7 +1095,7 @@ fn a_repeat_of_a_report_is_a_duplicate_even_after_another_sensor_reported_at_the
     assert_eq!(tracker_stats(&t).applied, applied);
 }
 
-// REQ: OA-TRK-075
+// REQ: OA-TRK-078
 #[test]
 fn a_late_report_does_not_erase_the_run_of_rejected_reports() {
     let ms = base_measurements(0x888888, 40, 1.0, 7);
@@ -1130,7 +1130,7 @@ fn a_late_report_does_not_erase_the_run_of_rejected_reports() {
     assert_eq!(tracker_stats(&t).resyncs, 1);
 }
 
-// REQ: OA-TRK-080
+// REQ: OA-TRK-083
 #[test]
 fn a_position_on_the_far_side_of_the_earth_is_a_jump_not_a_coherent_update() {
     // A stationary aircraft at the frame origin of its own filter, reported at (0, 0) every

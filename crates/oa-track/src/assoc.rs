@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(out, vec![0, NONE]);
     }
 
-    // REQ: OA-TRK-067
+    // REQ: OA-TRK-070
     #[test]
     fn an_invalid_gate_is_refused_with_every_plot_unassigned() {
         // Two plots and two tracks all gated to each other: a component the Hungarian method
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(assoc_plot_track(&sc), &[0, 1]);
     }
 
-    // REQ: OA-TRK-068
+    // REQ: OA-TRK-071
     #[test]
     fn a_solve_allocates_nothing_and_refuses_what_exceeds_its_buffers() {
         // A scratch of fixed capacity: its buffers are the same before and after solves of
@@ -867,7 +867,7 @@ mod tests {
         assert_eq!(assoc_scratch_buffers(&sc), before);
     }
 
-    // REQ: OA-TRK-070
+    // REQ: OA-TRK-073
     #[test]
     fn a_flooded_bucket_is_associated_in_bounded_time() {
         // 20,000 plots over 20,000 tracks, each plot gated to its own track and the next one: a

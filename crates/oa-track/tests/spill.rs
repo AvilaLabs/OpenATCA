@@ -55,7 +55,7 @@ fn shorten(dir: &Path, col: &str, by: u64) {
     f.set_len(len - by).unwrap();
 }
 
-// REQ: OA-TRK-076
+// REQ: OA-TRK-079
 #[test]
 fn a_spill_refuses_a_directory_that_has_anything_in_it() {
     let dir = scratch("nonempty");
@@ -73,7 +73,7 @@ fn a_spill_refuses_a_directory_that_has_anything_in_it() {
     let _ = fs::remove_dir_all(&dir2);
 }
 
-// REQ: OA-TRK-076
+// REQ: OA-TRK-079
 #[test]
 fn dropping_a_run_removes_only_the_files_it_made_and_then_its_empty_directory() {
     let dir = scratch("drop");
@@ -91,7 +91,7 @@ fn dropping_a_run_removes_only_the_files_it_made_and_then_its_empty_directory() 
     assert!(!dir.exists());
 }
 
-// REQ: OA-TRK-077
+// REQ: OA-TRK-080
 #[test]
 fn a_truncated_column_is_an_error_whichever_column_it_is() {
     for col in ["flags", "poscov", "t_ns", "muv"] {
@@ -112,7 +112,7 @@ fn a_truncated_column_is_an_error_whichever_column_it_is() {
     }
 }
 
-// REQ: OA-TRK-083
+// REQ: OA-TRK-086
 #[test]
 fn rows_without_an_altitude_have_one_digest_in_memory_and_on_disk() {
     // Rows with no altitude hold NaN in the altitude columns; one with and one without a

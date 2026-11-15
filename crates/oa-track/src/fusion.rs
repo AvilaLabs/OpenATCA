@@ -1914,7 +1914,7 @@ mod tests {
         assert_eq!(fusion_registration(&without, 0).unwrap().0.used, 0);
     }
 
-    // REQ: OA-TRK-071
+    // REQ: OA-TRK-074
     #[test]
     fn spoofed_adsb_aircraft_cannot_shift_the_registration_of_a_radar() {
         // Two of the eight reference aircraft report positions 200 m east of the truth.
@@ -1933,7 +1933,7 @@ mod tests {
         assert!(st.inconsistent > 20, "inconsistent {}", st.inconsistent);
     }
 
-    // REQ: OA-TRK-069
+    // REQ: OA-TRK-072
     #[test]
     fn a_mode_s_plot_far_from_its_track_is_not_applied() {
         // A Mode S aircraft is followed, and one plot carrying its address turns up 70 km from
@@ -1972,7 +1972,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-TRK-069
+    // REQ: OA-TRK-072
     #[test]
     fn a_track_takes_at_most_one_plot_per_radar_bucket() {
         // One Mode S aircraft. In scan 6 its plot is joined, in the same second, by an
@@ -2019,7 +2019,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-073
+    // REQ: OA-TRK-076
     #[test]
     fn two_close_radar_only_aircraft_are_not_starved_by_the_ambiguity_hold() {
         // Two aircraft flying together 90 m apart (plot scatter is 70 m): every plot is within
@@ -2061,7 +2061,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-068
+    // REQ: OA-TRK-071
     #[test]
     fn association_runs_in_buffers_allocated_at_start() {
         // A crossing (ambiguity, holds and forced resolution), two close aircraft, a Mode S
@@ -2110,7 +2110,7 @@ mod tests {
         assert_eq!(st.assoc_refused, 0);
     }
 
-    // REQ: OA-TRK-070
+    // REQ: OA-TRK-073
     #[test]
     fn a_bucket_with_more_plots_than_the_limit_is_cut_and_counted() {
         // 16,584 anonymous plots of one radar inside one second: the limit is 16,384 a radar a
@@ -2157,7 +2157,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-079
+    // REQ: OA-TRK-082
     #[test]
     fn a_quiet_fusion_still_coasts_and_drops_its_tracks() {
         let mut f = make_fusion(|_| {});
@@ -2188,7 +2188,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-TRK-085
+    // REQ: OA-TRK-088
     #[test]
     fn a_completed_bucket_is_not_reopened_by_a_later_call() {
         let lines = easting(&[Line {
@@ -2218,7 +2218,7 @@ mod tests {
         assert_eq!(fusion_stats(&f).late, 1);
     }
 
-    // REQ: OA-TRK-084
+    // REQ: OA-TRK-087
     #[test]
     fn a_refused_or_repeated_adsb_report_does_not_count_toward_registration() {
         let mut f = make_fusion(|_| {});
@@ -2246,7 +2246,7 @@ mod tests {
         assert_eq!((s.applied, s.duplicates), (2, 1));
     }
 
-    // REQ: OA-TRK-081
+    // REQ: OA-TRK-084
     #[test]
     fn bookkeeping_stays_within_the_trackers_capacity_over_many_turnovers() {
         let mut f = make_fusion_capacity(2);
@@ -2278,7 +2278,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-TRK-081
+    // REQ: OA-TRK-084
     #[test]
     fn the_radar_track_records_are_held_to_a_limit_and_can_be_drained() {
         let mut lines = Vec::new();
@@ -2323,7 +2323,7 @@ mod tests {
         fusion_new(&c, &[SITE]).unwrap()
     }
 
-    // REQ: OA-TRK-082
+    // REQ: OA-TRK-085
     #[test]
     fn every_live_track_up_to_the_configured_capacity_takes_part_in_association() {
         let n = 8_193usize;
