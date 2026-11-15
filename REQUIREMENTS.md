@@ -2555,6 +2555,12 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-117** T8 is the time of the first associated position of the leg minus the zone entry. A value of zero
   or less is not a delay: it is counted as `established_before_entry` and left out of the distribution; a pop-up
   20 s after entry gives 20 s.
+- **OA-BENCH-118** `legacy_from_track_samples_by_leg` makes one flight per truth leg of an address (a row goes
+  to the latest leg of its address starting at or before its time), so the publication interval (T5) is never
+  taken between two trips of one aircraft.
+- **OA-BENCH-119** `check_split` refuses a split of the ADS-B reports into the tracker's set A and the truth's
+  set B when an (address, time) is in both sets or a set holds two reports of the same address, time and
+  content: a typed violation, a hard error of the run and not a warning.
 
 ## Winds aloft (oa-wind)
 

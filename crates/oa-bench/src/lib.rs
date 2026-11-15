@@ -36,6 +36,7 @@ pub mod pair;
 pub mod report;
 pub mod run;
 pub mod scan;
+pub mod split_check;
 pub mod stats;
 pub mod synth;
 pub mod thindex;

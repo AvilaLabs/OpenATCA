@@ -9,7 +9,9 @@
 use oa_bench::legacy::NO_ALT;
 use oa_bench::run::{find, run_benchmark, RunConfig};
 use oa_bench::synth::{build_world, env, truth_at, Injected, T0_MS};
-use oa_bench::tracker_input::{legacy_from_track_samples, SamplesError, TrackSamples};
+use oa_bench::tracker_input::{
+    legacy_from_track_samples, legacy_from_track_samples_by_leg, SamplesError, TrackSamples,
+};
 use oa_bench::truth::Truth;
 
 struct Cols {
@@ -126,4 +128,76 @@ fn track_sample_columns_of_different_lengths_are_refused() {
         Some(SamplesError::ColumnLength)
     );
     let _ = T0_MS;
+}
+
+fn one_address_two_trips() -> Cols {
+    let mut c = Cols {
+        addr: vec![],
+        t_ns: vec![],
+        lat: vec![],
+        lon: vec![],
+        alt: vec![],
+        ve: vec![],
+        vn: vec![],
+        coast: vec![],
+    };
+    // Ten rows one second apart, then ten more starting 300 s after the last of the first.
+    for base_s in [0i64, 309] {
+        for k in 0..10i64 {
+            c.addr.push(0xA0_0001);
+            c.t_ns.push((base_s + k) * 1_000_000_000);
+            c.lat.push(410_000_000);
+            c.lon.push(-880_000_000);
+            c.alt.push(NO_ALT);
+            c.ve.push(f32::NAN);
+            c.vn.push(f32::NAN);
+            c.coast.push(false);
+        }
+    }
+    c
+}
+
+fn t5_all_n(leg: &oa_bench::legacy::Legacy) -> u64 {
+    let ix = oa_bench::thindex::build_th_index(&leg.th, leg.flights.gufi.len());
+    let mut h = oa_bench::chunked::T5Hists::default();
+    oa_bench::chunked::t5_add(&mut h, leg, &ix);
+    h.all.stats().n
+}
+
+// REQ: OA-BENCH-118
+#[test]
+fn the_publication_interval_is_never_taken_across_two_trips_of_one_aircraft() {
+    let c = one_address_two_trips();
+    let legs = [
+        oa_bench::truth::TruthLeg {
+            addr: 0xA0_0001,
+            start_ms: 0,
+            end_ms: 9_000,
+            callsign: None,
+        },
+        oa_bench::truth::TruthLeg {
+            addr: 0xA0_0001,
+            start_ms: 309_000,
+            end_ms: 318_000,
+            callsign: None,
+        },
+    ];
+    let by_leg = legacy_from_track_samples_by_leg(&view(&c), &legs).unwrap();
+    assert_eq!(by_leg.flights.gufi.len(), 2);
+    assert_eq!(by_leg.th.flight.len(), 20);
+    // 9 steps in each trip; the 300 s step between them is not a publication interval.
+    assert_eq!(t5_all_n(&by_leg), 18);
+    // Pooled by address, as `legacy_from_track_samples` does, the 300 s step is in the distribution.
+    let pooled = legacy_from_track_samples(&view(&c)).unwrap();
+    assert_eq!(pooled.flights.gufi.len(), 1);
+    assert_eq!(t5_all_n(&pooled), 19);
+    // An address no leg names is one flight, and the legs of other addresses do not split it.
+    let other = [oa_bench::truth::TruthLeg {
+        addr: 0xA0_0002,
+        start_ms: 100_000,
+        end_ms: 200_000,
+        callsign: None,
+    }];
+    let un = legacy_from_track_samples_by_leg(&view(&c), &other).unwrap();
+    assert_eq!(un.flights.gufi.len(), 1);
 }
