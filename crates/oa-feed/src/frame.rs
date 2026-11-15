@@ -89,6 +89,12 @@ pub enum ErrorKind {
         /// The CRC computed over the frame bytes.
         actual: u32,
     },
+    /// The reserved header bytes (offsets 6 and 7) are not zero: a frame variant this reader does
+    /// not know.
+    Reserved {
+        /// The reserved field as found.
+        value: u16,
+    },
     /// The stream ended inside a frame.
     Truncated {
         /// Bytes of the partial frame that were present.
@@ -122,6 +128,9 @@ impl fmt::Display for FrameError {
                     f,
                     "crc32 mismatch: frame says {expected:08x}, computed {actual:08x}"
                 )
+            }
+            ErrorKind::Reserved { value } => {
+                write!(f, "reserved header bytes are {value:#06x}, expected zero")
             }
             ErrorKind::Truncated { have } => {
                 write!(f, "stream ends inside a frame ({have} bytes present)")

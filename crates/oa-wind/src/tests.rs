@@ -949,3 +949,49 @@ fn real_rap_agrees_with_hrrr_and_the_cache_is_bounded() {
         Err(QueryError::Refused(Refusal::OutsideTime { .. }))
     ));
 }
+
+// REQ: OA-WIND-050
+#[test]
+fn an_infinite_cell_is_refused_at_build_and_never_answered() {
+    // build_hour refuses an infinite cell (NaN stays: it is how a file marks a missing value).
+    let mut fs = fields(0, 12, linear);
+    fs[0].values[7] = f32::INFINITY;
+    assert!(build_hour(fs).is_err());
+    let mut fs = fields(0, 12, linear);
+    fs[1].values[7] = f32::NEG_INFINITY;
+    assert!(build_hour(fs).is_err());
+    let mut fs = fields(0, 12, linear);
+    fs[0].values[7] = f32::NAN;
+    assert!(build_hour(fs).is_ok());
+    // An hour that reached the sampler with an infinite cell anyway never gives an Ok answer:
+    // 0 * inf would be NaN and inf * 0.5 is inf.
+    let mut h = linear_hour(12);
+    let npts = (NX * NY) as usize;
+    let k = 3 * npts + 8 * NX as usize + 8; // level 3 (500 hPa), cell (8, 8)
+    h.u[k] = f32::INFINITY;
+    h.t[k] = f32::INFINITY;
+    let (lat, lon) = ij_to_latlon(&h.grid, 8.4, 8.4).unwrap();
+    let r = sample_hour_pressure(&h, lat, lon, 500.0);
+    assert!(r.is_err(), "{r:?}");
+    let q = Query {
+        lat,
+        lon,
+        alt_ft: 18_289.0,
+        time_s: valid(12) as f64,
+    };
+    assert!(sample_hours(&[&h], &q).is_err());
+    // Away from the bad cell the same hour still answers, with finite numbers.
+    let (lat, lon) = ij_to_latlon(&h.grid, 2.5, 2.5).unwrap();
+    let pt = sample_hour_pressure(&h, lat, lon, 500.0).unwrap();
+    assert!([pt.u, pt.v, pt.t, pt.z].iter().all(|x| x.is_finite()));
+}
+
+// REQ: OA-WIND-051
+#[test]
+fn bracket_refuses_duplicate_and_unsorted_times() {
+    assert!(bracket(&[1000, 1000], 1000.0).is_err());
+    assert!(bracket(&[100, 200, 200, 300], 250.0).is_err());
+    assert!(bracket(&[200, 100], 150.0).is_err());
+    assert!(bracket(&[100, 300, 200], 150.0).is_err());
+    assert_eq!(bracket(&[100, 200, 400], 300.0).unwrap(), (1, 2, 0.5));
+}

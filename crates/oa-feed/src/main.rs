@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{format_summary, observe_error, observe_frame, observe_skipped, FeedHealth};
-use oa_feed::record::{utc_iso, Format, Outcome, Recorder};
+use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
 use oa_feed::replay::{replay_files, GzNoteKind};
 use oa_feed::{FrameReader, MAX_FRAME_LEN};
 use oa_zip::TruncStage;
@@ -240,8 +240,11 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 // A quiet feed: frames already written must not sit in the compressor.
                 if let Some(r) = recorder.as_mut() {
                     if let Err(e) = r.idle_flush(now_ns().div_euclid(1_000_000_000)) {
-                        eprintln!("oa-feed: WARNING feed={} recording failed: {e}", cfg.feed);
-                        recorder = None;
+                        eprintln!(
+                            "oa-feed: ERROR feed={} recording failed: {e}; frames are no longer \
+                             saved, the feed is still consumed, the exit status will be failure",
+                            cfg.feed
+                        );
                     }
                 }
             }
@@ -263,7 +266,10 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     }
     if let Some(r) = recorder.as_mut() {
         if let Err(e) = r.finish() {
-            eprintln!("oa-feed: WARNING feed={} recording failed: {e}", cfg.feed);
+            eprintln!("oa-feed: ERROR feed={} recording failed: {e}", cfg.feed);
+        }
+        // A recording that failed at any point (write, flush or finish) fails the run.
+        if r.failure().is_some() {
             exit = ExitCode::FAILURE;
         }
     }
@@ -279,12 +285,7 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     print!("final ");
     print_summary(&cfg.feed, &health);
     if let Some(r) = &recorder {
-        println!(
-            "recorded feed={} files={} bytes={}",
-            cfg.feed,
-            r.files_opened(),
-            r.total_bytes()
-        );
+        println!("{}", format_recording(&cfg.feed, r));
     }
     Ok(exit)
 }
@@ -305,16 +306,18 @@ fn drain(
                         f.recv_unix_ns.div_euclid(1_000_000_000),
                         now_ns().div_euclid(1_000_000_000),
                     ) {
-                        Ok(Outcome::Written | Outcome::Stopped) => {}
+                        Ok(Outcome::Written | Outcome::Stopped | Outcome::Failed) => {}
                         Ok(Outcome::StoppedNow) => eprintln!(
                             "oa-feed: WARNING feed={feed} recording stopped: --max-bytes cap reached \
                              ({} bytes); nothing deleted, frames are no longer saved",
                             r.total_bytes()
                         ),
-                        Err(e) => {
-                            eprintln!("oa-feed: WARNING feed={feed} recording failed: {e}");
-                            *recorder = None;
-                        }
+                        // The recorder keeps the failure and counts the frames lost from here
+                        // on; the final summary and the exit status report it.
+                        Err(e) => eprintln!(
+                            "oa-feed: ERROR feed={feed} recording failed: {e}; frames are no \
+                             longer saved, the feed is still consumed, the exit status will be failure"
+                        ),
                     }
                 }
             }

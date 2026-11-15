@@ -16,6 +16,11 @@
 //! rotation size, and the total the cap, by the output of one flush interval before the next
 //! check sees it. A file cut by a crash is read back up to its last flush (oa-zip
 //! `GzipReader`).
+//!
+//! A write, flush or finish that fails (a full disk) is a persistent failed state, not a
+//! warning: the recorder keeps the first error, stops writing, and counts every frame handed to
+//! it afterwards as lost ([`Recorder::failure`], [`Recorder::lost_frames`], [`format_recording`]),
+//! so the shell can report it and exit non-zero.
 
 use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
@@ -42,12 +47,19 @@ pub enum Outcome {
     StoppedNow,
     /// Recording had already stopped; the frame was not written.
     Stopped,
+    /// Recording has failed (an earlier write error): the frame was not written and is counted
+    /// as lost.
+    Failed,
 }
+
+/// Creates the file for a new recording at the given path, failing if it exists. The default
+/// creates a real file; tests pass one whose writes fail on demand.
+pub type Opener = Box<dyn FnMut(&Path) -> io::Result<Box<dyn Write + Send>> + Send>;
 
 /// The open file: bytes on disk so far, the compressor, and when it was last flushed.
 // A7.2: cold struct, size guard waived
 struct Current {
-    file: File,
+    file: Box<dyn Write + Send>,
     disk: u64,
     gz: Option<GzipWriter>,
     flushed_secs: i64,
@@ -66,6 +78,10 @@ pub struct Recorder {
     stopped: bool,
     files_opened: u32,
     implausible_stamps: u64,
+    opener: Opener,
+    /// The first error that failed the recording; once set, nothing more is written.
+    failed: Option<String>,
+    lost_frames: u64,
 }
 
 /// A frame stamp this many seconds from local time is counted as implausible.
@@ -90,6 +106,23 @@ impl Recorder {
         max_bytes: u64,
         format: Format,
     ) -> io::Result<Recorder> {
+        let opener: Opener = Box::new(|path: &Path| {
+            let f: File = OpenOptions::new().write(true).create_new(true).open(path)?;
+            Ok(Box::new(f) as Box<dyn Write + Send>)
+        });
+        Recorder::open_with(dir, feed, rotate_bytes, max_bytes, format, opener)
+    }
+
+    /// As [`Recorder::open`], creating each file through `opener` (for a writer that fails on
+    /// demand in tests).
+    pub fn open_with(
+        dir: &Path,
+        feed: &str,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        format: Format,
+        opener: Opener,
+    ) -> io::Result<Recorder> {
         fs::create_dir_all(dir)?;
         let mut total = 0u64;
         for e in fs::read_dir(dir)? {
@@ -110,6 +143,9 @@ impl Recorder {
             stopped: false,
             files_opened: 0,
             implausible_stamps: 0,
+            opener,
+            failed: None,
+            lost_frames: 0,
         })
     }
 
@@ -118,6 +154,25 @@ impl Recorder {
     /// wild stamp cannot stall flushing or name a file for the wrong time. `frame_unix_secs` is
     /// the frame's own receive stamp, used only to count stamps far from local time.
     pub fn write_frame(
+        &mut self,
+        raw: &[u8],
+        frame_unix_secs: i64,
+        now_unix_secs: i64,
+    ) -> io::Result<Outcome> {
+        if self.failed.is_some() {
+            self.lost_frames = self.lost_frames.saturating_add(1);
+            return Ok(Outcome::Failed);
+        }
+        match self.write_frame_inner(raw, frame_unix_secs, now_unix_secs) {
+            Err(e) => {
+                self.lost_frames = self.lost_frames.saturating_add(1);
+                Err(self.fail(e))
+            }
+            ok => ok,
+        }
+    }
+
+    fn write_frame_inner(
         &mut self,
         raw: &[u8],
         frame_unix_secs: i64,
@@ -183,6 +238,14 @@ impl Recorder {
     /// that has gone quiet, so frames already written do not sit in the compressor. A flush with
     /// nothing new writes nothing. A no-op for raw recordings.
     pub fn idle_flush(&mut self, now_unix_secs: i64) -> io::Result<()> {
+        if self.failed.is_some() {
+            return Ok(());
+        }
+        self.idle_flush_inner(now_unix_secs)
+            .map_err(|e| self.fail(e))
+    }
+
+    fn idle_flush_inner(&mut self, now_unix_secs: i64) -> io::Result<()> {
         let Some(cur) = self.current.as_mut() else {
             return Ok(());
         };
@@ -211,6 +274,16 @@ impl Recorder {
     /// Ends the open file: the compressed member gets its final block and trailer, and the file
     /// is synced to the operating system. Call at exit; rotation and the cap do it themselves.
     pub fn finish(&mut self) -> io::Result<()> {
+        if self.failed.is_some() {
+            // Failed earlier: the open file is abandoned as it stands (it replays up to its last
+            // flush) and the failure is already recorded.
+            self.current = None;
+            return Ok(());
+        }
+        self.finish_inner().map_err(|e| self.fail(e))
+    }
+
+    fn finish_inner(&mut self) -> io::Result<()> {
         let Some(mut cur) = self.current.take() else {
             return Ok(());
         };
@@ -235,6 +308,18 @@ impl Recorder {
         self.total
     }
 
+    /// The first error that failed the recording, or `None` while it is healthy. Once set it
+    /// stays set.
+    pub fn failure(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    /// Frames handed to the recorder that were not saved because it had failed (the frame that
+    /// hit the error counts too).
+    pub fn lost_frames(&self) -> u64 {
+        self.lost_frames
+    }
+
     /// Files created by this recorder.
     pub fn files_opened(&self) -> u32 {
         self.files_opened
@@ -243,6 +328,15 @@ impl Recorder {
     /// Frames whose receive stamp was more than an hour from local time when written.
     pub fn implausible_stamps(&self) -> u64 {
         self.implausible_stamps
+    }
+
+    /// Records `e` as the failure (keeping the first), abandons the open file, passes `e` on.
+    fn fail(&mut self, e: io::Error) -> io::Error {
+        if self.failed.is_none() {
+            self.failed = Some(e.to_string());
+        }
+        self.current = None;
+        e
     }
 
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
@@ -263,11 +357,7 @@ impl Recorder {
                 ));
             }
             let name = format!("{}-{stamp}-{n:04}.{ext}", self.feed);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.dir.join(name))
-            {
+            match (self.opener)(&self.dir.join(name)) {
                 Ok(file) => {
                     self.files_opened += 1;
                     return Ok(Current {
@@ -313,4 +403,21 @@ fn utc_fields(unix_secs: i64) -> (i64, i64, i64, i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// The summary line for a recording: files and bytes, and, when it failed, the failure, the
+/// frames lost since and the first error.
+pub fn format_recording(feed: &str, r: &Recorder) -> String {
+    let mut out = format!(
+        "recorded feed={feed} files={} bytes={}",
+        r.files_opened(),
+        r.total_bytes()
+    );
+    if let Some(e) = r.failure() {
+        out.push_str(&format!(
+            " FAILED lost_frames={} first_error=\"{e}\"",
+            r.lost_frames()
+        ));
+    }
+    out
 }

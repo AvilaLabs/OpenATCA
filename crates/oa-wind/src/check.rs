@@ -155,6 +155,7 @@ pub fn refusal_name(r: &Refusal) -> &'static str {
         Refusal::OutsideTime { .. } => "outside-time",
         Refusal::NoHours => "no-hours",
         Refusal::MissingValue => "missing-value",
+        Refusal::NonFinite => "non-finite",
     }
 }
 

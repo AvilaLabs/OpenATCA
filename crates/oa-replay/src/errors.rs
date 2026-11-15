@@ -91,10 +91,12 @@ pub enum ErrKind {
     FnsNoKey,
     /// A field of an accepted FNS row that was malformed (the field was treated as absent).
     FnsField,
+    /// A frame's reserved header bytes were not zero.
+    FrameReserved,
 }
 
 /// Number of [`ErrKind`] values.
-pub const ERR_COUNT: usize = 42;
+pub const ERR_COUNT: usize = 43;
 
 /// Display names, indexed by `ErrKind as usize`.
 pub const ERR_NAMES: [&str; ERR_COUNT] = [
@@ -140,6 +142,7 @@ pub const ERR_NAMES: [&str; ERR_COUNT] = [
     "fns-capacity",
     "fns-no-key",
     "fns-field",
+    "frame-reserved",
 ];
 
 /// Counts by [`ErrKind`].

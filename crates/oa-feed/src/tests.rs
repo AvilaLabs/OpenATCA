@@ -16,7 +16,7 @@ use crate::health::{
     FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED,
 };
 use crate::reader::FrameReader;
-use crate::record::{utc_stamp, Format, Outcome, Recorder};
+use crate::record::{format_recording, utc_stamp, Format, Opener, Outcome, Recorder};
 use crate::replay::{replay_files, replay_sources, GzNoteKind};
 use crate::{
     FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN, MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
@@ -1190,6 +1190,7 @@ fn compressed_rotation_and_cap_count_bytes_on_disk() {
                 stopped_at = Some(i);
             }
             Outcome::Stopped => assert!(stopped_at.is_some()),
+            Outcome::Failed => panic!("no write fails here"),
         }
     }
     let stopped_at = stopped_at.expect("the cap was reached");
@@ -1458,4 +1459,116 @@ fn sequence_gap_total_saturates() {
         observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"<a/>"), t);
     }
     assert!(h.missing >= u64::MAX - 2);
+}
+
+// REQ: OA-FEED-050
+#[test]
+fn nonzero_reserved_bytes_are_refused_and_counted() {
+    let good = msg(0, b"ok");
+    let mut bad = msg(1, b"reserved set");
+    bad[6] = 1;
+    bad[7] = 0x80;
+    // A matching CRC: only the reserved-field rule can refuse this frame.
+    let n = bad.len();
+    let crc = oa_zip::crc32(&bad[..n - TRAILER_LEN]);
+    bad[n - TRAILER_LEN..].copy_from_slice(&crc.to_le_bytes());
+    let tail = msg(2, b"after");
+    let stream = cat(&[&good, &bad, &tail]);
+    let mut buf = big_buf();
+    let run = run_chunks(&mut buf, &[&stream]);
+    assert_eq!(
+        run.frames.iter().map(|f| f.seq).collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(run.errors.len(), 1);
+    assert_eq!(run.errors[0].offset, good.len() as u64);
+    assert_eq!(run.errors[0].kind, ErrorKind::Reserved { value: 0x8001 });
+    assert!(run.errors[0].to_string().contains("reserved"));
+    assert_eq!(run.skipped, bad.len() as u64);
+    assert_conserved(&run, stream.len());
+    // The encoder writes zero, so every frame it makes passes.
+    assert!(msg(3, b"x")[6..8] == [0, 0]);
+}
+
+/// A sink that accepts bytes until its switch is thrown, then fails every write like a full disk.
+struct Switched(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl std::io::Write for Switched {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("no space left on device"))
+        } else {
+            Ok(b.len())
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn switched_recorder(
+    name: &str,
+    format: Format,
+) -> (Recorder, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let sw = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sw2 = sw.clone();
+    let opener: Opener = Box::new(move |_| Ok(Box::new(Switched(sw2.clone()))));
+    let dir = tmpdir(name);
+    let rec = Recorder::open_with(&dir, "f", u64::MAX, u64::MAX, format, opener).unwrap();
+    (rec, sw)
+}
+
+fn fail_now(sw: &std::sync::atomic::AtomicBool) {
+    sw.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+// REQ: OA-FEED-051
+#[test]
+fn a_failed_write_is_a_persistent_failed_state_with_a_count() {
+    let (mut rec, sw) = switched_recorder("failwrite", Format::Raw);
+    let f = msg(0, b"<a/>");
+    assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Written);
+    assert!(rec.failure().is_none());
+    assert!(!format_recording("f", &rec).contains("FAILED"));
+    fail_now(&sw);
+    assert!(rec.write_frame(&f, 1001, 1001).is_err());
+    assert_eq!(rec.failure(), Some("no space left on device"));
+    // Later frames are counted as lost, not silently dropped; nothing more is tried.
+    for _ in 0..3 {
+        assert_eq!(rec.write_frame(&f, 1002, 1002).unwrap(), Outcome::Failed);
+    }
+    assert_eq!(rec.lost_frames(), 4);
+    rec.idle_flush(2000).unwrap();
+    rec.finish().unwrap();
+    // The failure is still there after finish, and the summary says so.
+    assert!(rec.failure().is_some());
+    let line = format_recording("f", &rec);
+    assert!(
+        line.contains("FAILED lost_frames=4 first_error=\"no space left on device\""),
+        "{line}"
+    );
+}
+
+// REQ: OA-FEED-051
+#[test]
+fn a_failed_idle_flush_or_finish_also_fails_the_recording() {
+    // The compressor holds the frame until a flush: the first write succeeds.
+    let (mut rec, sw) = switched_recorder("failflush", Format::Gzip);
+    let f = msg(0, b"<a/>");
+    assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Written);
+    fail_now(&sw);
+    assert!(rec.idle_flush(1005).is_err());
+    assert!(rec.failure().is_some());
+    assert_eq!(rec.write_frame(&f, 1006, 1006).unwrap(), Outcome::Failed);
+    assert_eq!(rec.lost_frames(), 1);
+    // A failure only at the final finish counts as well.
+    let (mut rec, sw) = switched_recorder("failfinish", Format::Gzip);
+    assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Written);
+    fail_now(&sw);
+    assert!(rec.finish().is_err());
+    assert_eq!(rec.failure(), Some("no space left on device"));
+    assert!(format_recording("f", &rec).contains("FAILED"));
+    // The first error is the one kept.
+    assert!(rec.write_frame(&f, 1001, 1001).is_ok());
+    assert_eq!(rec.failure(), Some("no space left on device"));
 }

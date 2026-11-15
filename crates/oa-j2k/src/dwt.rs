@@ -8,6 +8,8 @@
 //! of the sample's coordinate in the resolution grid (even: low-pass), then runs the horizontal
 //! lifting over every row and the vertical lifting over every column (F.3.2).
 
+use crate::error::J2kError;
+
 /// A resolution's rectangle in its own sample grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // A7.2: cold struct, size guard waived (one per resolution level)
@@ -18,12 +20,17 @@ pub struct Rect {
     pub y1: u32,
 }
 
+/// The refusal for a line whose lifting leaves the 32-bit coefficient range.
+const OVERFLOW: J2kError = J2kError::BadBlock("wavelet coefficients overflow 32 bits");
+
 /// 1D_SR on one interleaved line `s`. `p` is the parity (0 or 1) of the global coordinate of
-/// `s[0]`; samples whose global coordinate is even are the low-pass ones.
-pub fn lift_line(s: &mut [i32], p: usize) {
+/// `s[0]`; samples whose global coordinate is even are the low-pass ones. The arithmetic is done
+/// in 64 bits and each result is checked to fit `i32`, so a stream whose coefficients are out of
+/// range for its precision is refused instead of overflowing; `s` is unspecified after an error.
+pub fn lift_line(s: &mut [i32], p: usize) -> Result<(), J2kError> {
     let n = s.len();
     if n == 0 {
-        return;
+        return Ok(());
     }
     if n == 1 {
         if p == 1 {
@@ -31,10 +38,10 @@ pub fn lift_line(s: &mut [i32], p: usize) {
                 *v /= 2;
             }
         }
-        return;
+        return Ok(());
     }
     // Whole-sample symmetric extension needs only one reflected neighbour at each end.
-    let at = |s: &[i32], i: usize, up: bool| -> i32 {
+    let at = |s: &[i32], i: usize, up: bool| -> i64 {
         // The neighbour below (up = false: i - 1) or above (up = true: i + 1), reflected at ends.
         let j = if up {
             if i + 1 < n {
@@ -47,14 +54,14 @@ pub fn lift_line(s: &mut [i32], p: usize) {
         } else {
             1
         };
-        s.get(j).copied().unwrap_or(0)
+        s.get(j).copied().map_or(0, i64::from)
     };
     // F-5: even-coordinate samples.
     let mut i = p;
     while i < n {
         let sum = at(s, i, false) + at(s, i, true) + 2;
         if let Some(v) = s.get_mut(i) {
-            *v -= sum >> 2;
+            *v = i32::try_from(i64::from(*v) - (sum >> 2)).map_err(|_| OVERFLOW)?;
         }
         i += 2;
     }
@@ -63,20 +70,22 @@ pub fn lift_line(s: &mut [i32], p: usize) {
     while i < n {
         let sum = at(s, i, false) + at(s, i, true);
         if let Some(v) = s.get_mut(i) {
-            *v += sum >> 1;
+            *v = i32::try_from(i64::from(*v) + (sum >> 1)).map_err(|_| OVERFLOW)?;
         }
         i += 2;
     }
+    Ok(())
 }
 
 /// Runs the inverse transform over `coef` (row stride `stride`), given the rectangles of
-/// resolutions 0 to NL. Resolution NL ends up as the tile-component.
-pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) {
+/// resolutions 0 to NL. Resolution NL ends up as the tile-component. Refuses a coefficient set
+/// whose lifting overflows 32 bits.
+pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) -> Result<(), J2kError> {
     let mut line: Vec<i32> = Vec::new();
     let mut tmp: Vec<i32> = Vec::new();
     for r in 1..res.len() {
         let (Some(cur), Some(low)) = (res.get(r), res.get(r - 1)) else {
-            return;
+            return Ok(());
         };
         let w = (cur.x1 - cur.x0) as usize;
         let h = (cur.y1 - cur.y0) as usize;
@@ -92,7 +101,7 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) {
         for y in 0..h {
             let base = y * stride;
             let Some(row) = coef.get_mut(base..base + w) else {
-                return;
+                return Ok(());
             };
             // Interleave: position x is low-pass when its global coordinate is even, and the
             // band index is x / 2 either way; the high band is stored after the nlx low ones.
@@ -107,7 +116,7 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) {
                 }
             }
             if let Some(l) = line.get_mut(..w) {
-                lift_line(l, px);
+                lift_line(l, px)?;
                 row.copy_from_slice(l);
             }
         }
@@ -121,7 +130,7 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) {
                 }
             }
             if let Some(t) = tmp.get_mut(..h) {
-                lift_line(t, py);
+                lift_line(t, py)?;
                 for (y, &v) in t.iter().enumerate() {
                     if let Some(c) = coef.get_mut(y * stride + x) {
                         *c = v;
@@ -130,4 +139,5 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) {
             }
         }
     }
+    Ok(())
 }

@@ -154,6 +154,7 @@ fn note_error(errors: &mut Errors, kept: &mut Vec<FrameError>, e: FrameError) {
         ErrorKind::UnknownKind { .. } => ErrKind::FrameUnknownKind,
         ErrorKind::Oversize { .. } => ErrKind::FrameOversize,
         ErrorKind::Crc { .. } => ErrKind::FrameCrc,
+        ErrorKind::Reserved { .. } => ErrKind::FrameReserved,
         ErrorKind::Truncated { .. } => ErrKind::FrameTruncated,
     };
     count_error(errors, k, 1);

@@ -100,7 +100,7 @@ pub fn decode(data: &[u8]) -> Result<Image, J2kError> {
     let (w, h) = (p.siz.x1 - p.siz.x0, p.siz.y1 - p.siz.y0);
     let mut coef = vec![0i32; w as usize * h as usize];
     tile::decode_blocks(&t, p.body, &mut coef, w as usize)?;
-    dwt::inverse(&mut coef, w as usize, &t.res);
+    dwt::inverse(&mut coef, w as usize, &t.res)?;
     // G.1.2: unsigned samples carry a level shift of 2^(bits-1), then are clipped to the range.
     let bits = u32::from(p.siz.bits);
     let (shift, lo, hi) = if p.siz.signed {
