@@ -27,8 +27,9 @@ pub mod replay;
 pub mod stream;
 
 pub use frame::{
-    encode_frame, ErrorKind, Frame, FrameError, Kind, FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN,
-    MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
+    encode_frame, encode_frame_mono, ErrorKind, Frame, FrameError, Kind, FLAG_BYTES,
+    FLAG_REDELIVERED, HEADER_LEN, HEADER_LEN_V2, MAGIC, MAGIC_V2, MAX_FRAME_LEN, MAX_PAYLOAD,
+    TRAILER_LEN,
 };
 pub use health::{
     format_summary, observe_error, observe_frame, observe_skipped, rates_milli, FeedHealth,

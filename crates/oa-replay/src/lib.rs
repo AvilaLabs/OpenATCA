@@ -48,8 +48,8 @@ pub use adsb::{
 };
 pub use apply::{apply_sfdps, apply_tbfm, Applied};
 pub use clock::{
-    clock_observe, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_TOLERANCE_NS,
-    FEED_GAP_MAX_NS,
+    clock_observe, clock_observe_mono, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES,
+    CLOCK_TOLERANCE_NS, FEED_GAP_MAX_NS, MONO_AGREE_TOL_NS,
 };
 pub use errors::{count_error, errors_total, ErrKind, Errors, ERR_COUNT, ERR_NAMES};
 pub use fns::{
@@ -60,9 +60,10 @@ pub use hash::{state_hash, HASH_TAG};
 pub use pipeline::{
     add_errors, doc_fixm_limits, doc_xml_limits, frames_total, new_doc_events, new_doc_tbfm_rows,
     new_doc_tfms_rows, new_pipeline, pipeline_drain_checkpoints, pipeline_stale_count,
-    pipeline_try_drain_checkpoints, process_frame, replay_hash, replay_state_digest,
-    rows_applied_total, snapshot, Checkpoint, CheckpointRing, FeedKind, Pipeline, PipelineConfig,
-    PipelineError, DEFAULT_CHECKPOINT_RING, FEED_COUNT, FEED_NAMES, MIN_CHECKPOINT_NS,
+    pipeline_try_drain_checkpoints, process_frame, process_frame_mono, replay_hash,
+    replay_state_digest, rows_applied_total, snapshot, Checkpoint, CheckpointRing, FeedKind,
+    Pipeline, PipelineConfig, PipelineError, DEFAULT_CHECKPOINT_RING, FEED_COUNT, FEED_NAMES,
+    MIN_CHECKPOINT_NS,
 };
 pub use source::{
     list_recordings, merge_key, merge_streams, run_streams, run_streams_with, spec_from_bytes,

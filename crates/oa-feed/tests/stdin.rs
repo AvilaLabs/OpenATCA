@@ -9,7 +9,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oa_feed::{encode_frame, HEADER_LEN, TRAILER_LEN};
+use oa_feed::{encode_frame, FrameReader, HEADER_LEN, MAX_FRAME_LEN, TRAILER_LEN};
 
 fn frames() -> Vec<u8> {
     let mut out = Vec::new();
@@ -20,6 +20,38 @@ fn frames() -> Vec<u8> {
         encode_frame(&mut v, 1, 0, seq, recv, recv / 1_000_000 - 7, &payload).unwrap();
         out.extend(v);
     }
+    out
+}
+
+/// The recorded frames with their monotonic time taken off: every frame must carry one, not
+/// going back, and the rest of each frame is what the recorder was given.
+fn without_mono(recorded: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    assert_eq!(r.push(recorded), recorded.len());
+    let mut out = Vec::new();
+    let mut last = 0u64;
+    while let Some(f) = r.next() {
+        let f = f.unwrap();
+        let mono = f
+            .mono_ns()
+            .expect("a recorded frame carries a monotonic time");
+        assert!(mono >= last, "monotonic time went back");
+        last = mono;
+        let mut v = vec![0u8; HEADER_LEN + f.payload.len() + TRAILER_LEN];
+        let n = encode_frame(
+            &mut v,
+            f.kind as u8,
+            f.flags,
+            f.seq,
+            f.recv_unix_ns,
+            f.jms_timestamp_ms,
+            f.payload,
+        )
+        .unwrap();
+        out.extend(&v[..n]);
+    }
+    assert!(r.finish().is_none());
     out
 }
 
@@ -57,9 +89,9 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
     assert_eq!(files.len(), 1);
     assert!(files[0].to_string_lossy().ends_with(".oaf"));
     assert_eq!(
-        std::fs::read(&files[0]).unwrap(),
+        without_mono(&std::fs::read(&files[0]).unwrap()),
         data,
-        "recording is the input, byte for byte"
+        "recording is the input, each frame with the recorder's monotonic time added"
     );
     let rep = Command::new(bin)
         .arg("replay")
@@ -145,7 +177,7 @@ fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {
     match Command::new("gzip").arg("-dc").arg(gz).output() {
         Ok(o) => {
             assert!(o.status.success());
-            assert_eq!(o.stdout, data);
+            assert_eq!(without_mono(&o.stdout), data);
         }
         Err(e) => eprintln!("gzip not available: {e}"),
     }

@@ -2,7 +2,8 @@
 //! allocation; it works in a buffer the caller supplies once.
 //!
 //! Bytes go in through [`FrameReader::push`] in any chunking; [`FrameReader::next`] yields
-//! complete validated frames or errors. After an error the reader scans for the next `OAF1` and
+//! complete validated frames or errors. It reads `OAF1` frames and `OAF2` frames (which also carry
+//! the recorder's monotonic time). After an error the reader scans for the next magic and
 //! discards what lies between, counting every discarded byte (INTERFACES IF-R5: refuse and flag,
 //! never pass on). Errors found while hunting are not reported again; the skipped-byte count
 //! covers them. A frame whose own bytes contain `OAF1` inside a corrupted region can cause one
@@ -15,7 +16,8 @@
 use oa_zip::crc32;
 
 use crate::frame::{
-    ErrorKind, Frame, FrameError, Kind, HEADER_LEN, MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
+    ErrorKind, Frame, FrameError, Kind, HEADER_LEN, HEADER_LEN_V2, MAGIC, MAGIC_V2, MAX_FRAME_LEN,
+    MAX_PAYLOAD, TRAILER_LEN,
 };
 
 /// The supplied buffer cannot hold one maximum-size frame.
@@ -88,7 +90,10 @@ impl<'b> FrameReader<'b> {
             let avail = self.end - self.start;
             if self.resync {
                 let data = self.buf.get(self.start..self.end)?;
-                match data.windows(MAGIC.len()).position(|w| w == MAGIC) {
+                match data
+                    .windows(MAGIC.len())
+                    .position(|w| w == MAGIC || w == MAGIC_V2)
+                {
                     Some(i) => {
                         self.discard(i);
                         self.resync = false;
@@ -106,10 +111,12 @@ impl<'b> FrameReader<'b> {
             }
             let data = self.buf.get(self.start..self.end)?;
             let magic = [*data.first()?, *data.get(1)?, *data.get(2)?, *data.get(3)?];
-            if magic != MAGIC {
+            let v2 = magic == MAGIC_V2;
+            if magic != MAGIC && !v2 {
                 return Some(Err(self.fail(ErrorKind::BadMagic { found: magic })));
             }
-            if avail < HEADER_LEN {
+            let header_len = if v2 { HEADER_LEN_V2 } else { HEADER_LEN };
+            if avail < header_len {
                 return None;
             }
             let kind_byte = *data.get(4)?;
@@ -123,11 +130,11 @@ impl<'b> FrameReader<'b> {
             if reserved != 0 {
                 return Some(Err(self.fail(ErrorKind::Reserved { value: reserved })));
             }
-            let len = le_u32(data, 32)?;
+            let len = le_u32(data, header_len - 4)?;
             if len as usize > MAX_PAYLOAD {
                 return Some(Err(self.fail(ErrorKind::Oversize { len })));
             }
-            let total = HEADER_LEN + len as usize + TRAILER_LEN;
+            let total = header_len + len as usize + TRAILER_LEN;
             if avail < total {
                 return None;
             }
@@ -141,24 +148,26 @@ impl<'b> FrameReader<'b> {
             let seq = le_u64(data, 8)?;
             let recv_unix_ns = le_u64(data, 16)? as i64;
             let jms_timestamp_ms = le_u64(data, 24)? as i64;
+            let mono_ns = if v2 { Some(le_u64(data, 32)?) } else { None };
             let offset = self.base;
             let skipped_before = std::mem::take(&mut self.skipped_pending);
             let s = self.start;
             self.start += total;
             self.base += total as u64;
             let raw = self.buf.get(s..s + total)?;
-            let payload = raw.get(HEADER_LEN..total - TRAILER_LEN)?;
-            return Some(Ok(Frame {
+            let payload = raw.get(header_len..total - TRAILER_LEN)?;
+            return Some(Ok(Frame::new(
                 seq,
                 recv_unix_ns,
                 jms_timestamp_ms,
+                mono_ns,
                 offset,
                 skipped_before,
                 payload,
                 raw,
                 kind,
                 flags,
-            }));
+            )));
         }
     }
 

@@ -19,7 +19,8 @@ use crate::reader::FrameReader;
 use crate::record::{format_recording, utc_stamp, Format, Opener, Outcome, Recorder};
 use crate::replay::{replay_files, replay_sources, GzNoteKind};
 use crate::{
-    FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN, MAGIC, MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
+    encode_frame_mono, FLAG_BYTES, FLAG_REDELIVERED, HEADER_LEN, HEADER_LEN_V2, MAGIC,
+    MAX_FRAME_LEN, MAX_PAYLOAD, TRAILER_LEN,
 };
 
 // ---------------------------------------------------------------- helpers
@@ -217,17 +218,7 @@ fn fr<'a>(
     jms_ms: i64,
     payload: &'a [u8],
 ) -> Frame<'a> {
-    Frame {
-        seq,
-        recv_unix_ns: recv_ns,
-        jms_timestamp_ms: jms_ms,
-        offset: 0,
-        skipped_before: 0,
-        payload,
-        raw: &[],
-        kind,
-        flags,
-    }
+    Frame::new(seq, recv_ns, jms_ms, None, 0, 0, payload, &[], kind, flags)
 }
 
 const SEC: i64 = 1_000_000_000;
@@ -507,11 +498,9 @@ fn reader_memory_is_fixed_and_a_maximum_frame_fits() {
     let mut small = vec![0u8; MAX_FRAME_LEN - 1];
     assert!(FrameReader::new(&mut small).is_err());
     let big = vec![b'm'; MAX_PAYLOAD];
-    let mut v = vec![0u8; MAX_FRAME_LEN];
-    assert_eq!(
-        encode_frame(&mut v, 1, 0, 1, 0, 0, &big),
-        Some(MAX_FRAME_LEN)
-    );
+    let v1_max = HEADER_LEN + MAX_PAYLOAD + TRAILER_LEN;
+    let mut v = vec![0u8; v1_max];
+    assert_eq!(encode_frame(&mut v, 1, 0, 1, 0, 0, &big), Some(v1_max));
     assert!(encode_frame(
         &mut vec![0u8; MAX_FRAME_LEN + 8],
         1,
@@ -748,7 +737,7 @@ fn time_since_last_frame_comes_from_the_injected_clock() {
 #[test]
 fn hot_structs_keep_their_budgeted_sizes() {
     use core::mem::size_of;
-    assert_eq!(size_of::<Frame<'static>>(), 80);
+    assert_eq!(size_of::<Frame<'static>>(), 88);
     assert_eq!(size_of::<crate::health::Slot>(), 16);
     assert_eq!(size_of::<FeedHealth>(), 2440);
     // The size budget has no hidden padding: fields sum to the struct size.
@@ -1797,8 +1786,12 @@ fn push_takes_exactly_what_fits_and_compacts_when_room_is_short() {
 
     // Frame A is consumed, the first four bytes of a maximum frame C remain.
     let a = msg(0, &[1u8; 1000]);
-    let c = msg(1, &vec![2u8; MAX_PAYLOAD]);
-    assert_eq!(c.len(), cap);
+    // The largest frame there is, an OAF2 frame with a maximum payload.
+    let mut c = vec![0u8; cap];
+    assert_eq!(
+        encode_frame_mono(&mut c, 1, 0, 1, 0, 0, 7, &vec![2u8; MAX_PAYLOAD]),
+        Some(cap)
+    );
     let mut r = FrameReader::new(&mut buf).unwrap();
     assert_eq!(r.push(&cat(&[&a, &c[..4]])), a.len() + 4);
     assert!(r.next().unwrap().is_ok());
@@ -2144,4 +2137,108 @@ fn a_repeat_or_unremembered_late_frame_inside_the_last_gap_range_makes_no_false_
     // Before any gap, a lower frame is a regression as before.
     let h = seqs(&[10, 11, 5]);
     assert_eq!((h.regressions, h.duplicates), (1, 0));
+}
+
+// ---------------------------------------------------------------- OAF2 (monotonic time)
+
+fn frame_mono(seq: u64, recv_ns: i64, mono_ns: u64, payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![0u8; HEADER_LEN_V2 + payload.len() + TRAILER_LEN];
+    let n = encode_frame_mono(&mut v, 1, 2, seq, recv_ns, 77, mono_ns, payload).unwrap();
+    assert_eq!(n, v.len());
+    v
+}
+
+// REQ: OA-FEED-175
+#[test]
+fn oaf2_frame_round_trips_every_field_including_the_monotonic_time() {
+    let a = frame_mono(9, -5, u64::MAX, b"payload two");
+    assert_eq!(&a[..4], b"OAF2");
+    let b = frame(1, 0, 10, 6, 0, b"old");
+    let mut buf = big_buf();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    assert_eq!(r.push(&cat(&[&a, &b])), a.len() + b.len());
+    let f = r.next().unwrap().unwrap();
+    assert_eq!(
+        (f.kind, f.flags, f.seq, f.recv_unix_ns, f.jms_timestamp_ms),
+        (Kind::Message, 2, 9, -5, 77)
+    );
+    assert_eq!(f.mono_ns(), Some(u64::MAX));
+    assert_eq!(
+        (f.payload, f.raw, f.offset),
+        (&b"payload two"[..], &a[..], 0)
+    );
+    // An OAF1 frame in the same stream has no monotonic time.
+    let g = r.next().unwrap().unwrap();
+    assert_eq!((g.seq, g.mono_ns(), g.offset), (10, None, a.len() as u64));
+    assert!(r.next().is_none() && r.finish().is_none());
+}
+
+// REQ: OA-FEED-176
+#[test]
+fn oaf2_frames_are_identical_however_the_stream_is_chunked_and_resync_after_damage() {
+    let a = frame_mono(0, 1, 5, b"alpha");
+    let b = frame(1, 0, 1, 2, 0, b"beta");
+    let c = frame_mono(2, 3, 9, b"");
+    let stream = cat(&[&a, &b, &c]);
+    let mut buf = big_buf();
+    let whole = run_whole(&mut buf, &stream);
+    assert!(whole.errors.is_empty());
+    assert_eq!(whole.frames.len(), 3);
+    for cut in 1..stream.len() {
+        let two = run_chunks(&mut buf, &[&stream[..cut], &stream[cut..]]);
+        assert_eq!(two, whole, "split at {cut}");
+    }
+    // A bit flip in an OAF2 payload is a CRC error at its offset; the reader finds the next
+    // frame (of either version) and conserves every byte.
+    let mut bad = a.clone();
+    bad[HEADER_LEN_V2 + 1] ^= 0x10;
+    let damaged = cat(&[&bad, &b, &c]);
+    let run = run_whole(&mut buf, &damaged);
+    assert_eq!(run.errors.len(), 1);
+    assert_eq!(run.errors[0].offset, 0);
+    assert!(matches!(run.errors[0].kind, ErrorKind::Crc { .. }));
+    assert_eq!(
+        run.frames.iter().map(|f| f.seq).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_conserved(&run, damaged.len());
+    // A truncated OAF2 header is a truncated tail.
+    let run = run_whole(&mut buf, &a[..HEADER_LEN_V2 - 1]);
+    assert!(matches!(
+        run.errors.last().map(|e| e.kind),
+        Some(ErrorKind::Truncated { .. })
+    ));
+}
+
+// REQ: OA-FEED-177
+#[test]
+fn a_recorded_oaf2_frame_reads_back_from_a_gzip_recording_with_its_monotonic_time() {
+    let dir = tmpdir("oaf2-rec");
+    let mut rec = Recorder::open(&dir, "scds-m", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    let frames = [
+        frame_mono(0, 1_000_000_000, 10, b"one"),
+        frame(1, 0, 1, 2_000_000_000, 0, b"two"),
+        frame_mono(2, 3_000_000_000, 3_000_000_123, b"three"),
+    ];
+    for f in &frames {
+        assert_eq!(rec.write_frame(f, 1, 1).unwrap(), Outcome::Written);
+    }
+    rec.finish().unwrap();
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let rep = replay_files(&[file]).unwrap();
+    assert!(rep.errors.is_empty() && rep.gzip.is_empty());
+    assert_eq!(rep.health.frames, 3);
+    // The same bytes through the reader give the stored monotonic times.
+    let mut buf = big_buf();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push(&cat(&[&frames[0], &frames[1], &frames[2]]));
+    let monos: Vec<Option<u64>> = (0..3)
+        .map(|_| r.next().unwrap().unwrap().mono_ns())
+        .collect();
+    assert_eq!(monos, vec![Some(10), None, Some(3_000_000_123)]);
 }

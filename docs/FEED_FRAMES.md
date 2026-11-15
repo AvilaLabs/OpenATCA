@@ -33,6 +33,29 @@ A worked example (kind 1, flags 3, seq 7, `recv_unix_ns` 1700000000123456789,
 `jms_timestamp_ms` 1700000000100, payload `hello`) is the golden vector in the oa-feed tests,
 produced by the bridge's Java encoder.
 
+## Frame with a monotonic time (OAF2)
+
+A recording stores each frame with one more field, the recorder's monotonic time. The bridge
+writes `OAF1` only; `oa-feed` writes the `OAF2` form when it records, so a frame's wall clock
+(`recv_unix_ns`, the bridge's) can be compared with a clock that never steps.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 4 | magic | ASCII `OAF2` |
+| 4 to 31 | 28 | as OAF1 | kind, flags, reserved, seq, recv_unix_ns, jms_timestamp_ms, at the same offsets |
+| 32 | 8 | mono_ns | u64. `Instant` elapsed since the recorder (`oa-feed`) started, ns, taken when the frame is recorded |
+| 40 | 4 | payload_len | u32, at most 4 194 304 |
+| 44 | n | payload | `payload_len` bytes |
+| 44+n | 4 | crc32 | CRC-32 of every preceding byte of the frame |
+
+Header 44 bytes. There is no version field to dispatch on beyond the magic: the reader takes
+`OAF1` and `OAF2` frames in one stream, and a recording made before the field existed (all
+`OAF1`) reads and replays exactly as it did. `mono_ns` is per recorder run: a restart makes it
+start again from near zero, which a replay takes as "not comparable" and falls back to the wall
+clock alone. Replay uses it to tell a step of the recorder's wall clock from time that passed
+(`crates/oa-replay/src/clock.rs`, rule 7). The Linux monotonic clock does not run during
+suspend, so a suspended recorder looks like a clock step.
+
 ## Kinds
 
 * **MESSAGE.** The SWIM message body: TextMessage as UTF-8 bytes, BytesMessage raw.

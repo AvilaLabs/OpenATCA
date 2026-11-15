@@ -20,7 +20,7 @@ use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{format_summary, observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
 use oa_feed::replay::{replay_files, GzNoteKind};
-use oa_feed::{FrameReader, MAX_FRAME_LEN};
+use oa_feed::{encode_frame_mono, FrameReader, MAX_FRAME_LEN};
 use oa_zip::TruncStage;
 
 const DEFAULT_JAR: &str = "adapters/scds-bridge/target/scds-bridge.jar";
@@ -180,6 +180,8 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader = FrameReader::new(&mut storage).map_err(|e| format!("{e:?}"))?;
     let mut health = FeedHealth::new();
+    // The recorded form of a frame (an OAF2 frame with the monotonic time), reused per frame.
+    let mut stamped: Vec<u8> = Vec::new();
 
     let start = Instant::now();
     let deadline = cfg.duration_secs.map(|s| start + Duration::from_secs(s));
@@ -222,7 +224,14 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 while off < chunk.len() {
                     let took = reader.push(chunk.get(off..).unwrap_or(&[]));
                     off += took;
-                    drain(&mut reader, &mut health, &mut recorder, &cfg.feed);
+                    drain(
+                        &mut reader,
+                        &mut health,
+                        &mut recorder,
+                        &cfg.feed,
+                        start,
+                        &mut stamped,
+                    );
                     if took == 0 {
                         break;
                     }
@@ -300,14 +309,39 @@ fn drain(
     health: &mut FeedHealth,
     recorder: &mut Option<Recorder>,
     feed: &str,
+    start: Instant,
+    stamped: &mut Vec<u8>,
 ) {
     while let Some(ev) = reader.next() {
         match ev {
             Ok(f) => {
                 observe_frame(health, &f, f.recv_unix_ns);
                 if let Some(r) = recorder.as_mut() {
+                    // A recorded frame carries the recorder's monotonic time since start, so a
+                    // replay can tell a step of the wall clock from time that passed. A frame
+                    // that already has one keeps it.
+                    let raw = if f.mono_ns().is_some() {
+                        f.raw
+                    } else {
+                        let mono = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        stamped.clear();
+                        stamped.resize(f.raw.len() + 8, 0);
+                        match encode_frame_mono(
+                            stamped,
+                            f.kind as u8,
+                            f.flags,
+                            f.seq,
+                            f.recv_unix_ns,
+                            f.jms_timestamp_ms,
+                            mono,
+                            f.payload,
+                        ) {
+                            Some(n) => stamped.get(..n).unwrap_or(f.raw),
+                            None => f.raw,
+                        }
+                    };
                     match r.write_frame(
-                        f.raw,
+                        raw,
                         f.recv_unix_ns.div_euclid(1_000_000_000),
                         now_ns().div_euclid(1_000_000_000),
                     ) {
