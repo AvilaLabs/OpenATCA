@@ -118,12 +118,14 @@ fn new_done() -> Done {
     Rc::new(RefCell::new(None))
 }
 
-/// A reader that hashes every byte it passes on. At the end of the file (a read of zero bytes) the
-/// digest and the length go to `done`; a reader dropped before that leaves `done` empty.
+/// A reader that hashes every byte it passes on, however many reads that takes. A read of zero
+/// bytes puts the digest of everything read so far, and the length, in `done`; bytes read after
+/// that take it away again until the next zero read. A reader dropped with no zero read last leaves
+/// `done` empty: the file was not read to its end.
 // A7.2: cold struct, size guard waived
 struct HashRead<R: Read> {
     inner: R,
-    h: Option<Sha256>,
+    h: Sha256,
     bytes: u64,
     failed: bool,
     done: Done,
@@ -133,7 +135,7 @@ impl<R: Read> HashRead<R> {
     fn new(inner: R, done: Done) -> HashRead<R> {
         HashRead {
             inner,
-            h: Some(Sha256::new()),
+            h: Sha256::new(),
             bytes: 0,
             failed: false,
             done,
@@ -145,18 +147,19 @@ impl<R: Read> Read for HashRead<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(out)?;
         if n == 0 && !out.is_empty() {
-            if let Some(h) = self.h.take() {
-                let r = if self.failed {
-                    Err("the file is too long to hash".to_string())
-                } else {
-                    Ok((h.finalize(), self.bytes))
-                };
-                *self.done.borrow_mut() = Some(r);
-            }
+            let r = if self.failed {
+                Err("the file is too long to hash".to_string())
+            } else {
+                Ok((self.h.clone().finalize(), self.bytes))
+            };
+            *self.done.borrow_mut() = Some(r);
             return Ok(0);
         }
-        if let (Some(h), Some(chunk)) = (self.h.as_mut(), out.get(..n)) {
-            self.failed |= h.update(chunk).is_err();
+        if n > 0 {
+            *self.done.borrow_mut() = None;
+        }
+        if let Some(chunk) = out.get(..n) {
+            self.failed |= self.h.update(chunk).is_err();
         }
         self.bytes += n as u64;
         Ok(n)
@@ -393,4 +396,52 @@ pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
         dropped_records,
         hash,
     })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unused_io_amount
+)]
+mod tests {
+    use super::*;
+
+    /// Hands out its chunks in order; an empty chunk is a read of zero bytes.
+    struct Chunks(std::collections::VecDeque<Vec<u8>>);
+
+    impl Read for Chunks {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let c = self.0.pop_front().unwrap_or_default();
+            out[..c.len()].copy_from_slice(&c);
+            Ok(c.len())
+        }
+    }
+
+    // REQ: OA-BENCH-062
+    #[test]
+    fn the_digest_covers_every_byte_of_every_read_even_after_a_zero_read() {
+        let chunks = vec![b"abc".to_vec(), vec![], b"def".to_vec(), vec![]];
+        let done = new_done();
+        let mut r = HashRead::new(Chunks(chunks.into()), done.clone());
+        let mut buf = [0u8; 16];
+        let mut got = Vec::new();
+        for _ in 0..4 {
+            let n = r.read(&mut buf).unwrap();
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, b"abcdef");
+        let (d, n) = finished(Path::new("x"), &done).unwrap();
+        assert_eq!((d, n), (sha256(b"abcdef"), 6));
+        // Data after the last zero read: not read to its end, so no digest.
+        let done = new_done();
+        let chunks = vec![b"abc".to_vec(), vec![], b"def".to_vec()];
+        let mut r = HashRead::new(Chunks(chunks.into()), done.clone());
+        for _ in 0..3 {
+            r.read(&mut buf).unwrap();
+        }
+        assert!(finished(Path::new("x"), &done).is_err());
+    }
 }
