@@ -88,8 +88,9 @@ fn a_forward_step_keeps_the_aircraft_that_were_live_and_marks_them_stale() {
     assert_eq!(p.adsb.live, 2, "the step wiped the ADS-B table");
     assert_eq!((adsb_stale_count(&p.adsb), p.stale_marked), (2, 2));
     let s = adsb_slot_of(&p.adsb, 1).unwrap();
-    // The clock takes the third frame of the step, and the report moves with it.
-    assert_eq!(p.adsb.time_ns[s], T0 + HOUR + 2 * NS);
+    // The step is pending: no report time moves until a report says which clock it follows.
+    assert_eq!(p.adsb.time_ns[s], T0 + 9 * NS);
+    assert_eq!(p.adsb.pending_ns, T0 + HOUR + 2 * NS - (T0 + 9 * NS));
 }
 
 // REQ: OA-RPL-170
@@ -269,4 +270,146 @@ fn a_step_too_large_to_measure_is_refused_counted_and_leaves_the_clock() {
     // The clock goes on from where it was.
     tick(&mut p, now + 20);
     assert_eq!(p.replay_ns, now + 20);
+}
+
+/// Aircraft 1 and 2 heard at `T0 + 9 s`, then a confirmed step of the recorder's clock by
+/// `to - (T0 + 9 s)`. Returns the replay clock after it.
+fn heard_then_step(p: &mut Pipeline, to: i64) -> i64 {
+    adsb_frame(
+        p,
+        T0 + 9 * NS,
+        &[adsb_row(1, T0 + 9 * NS), adsb_row(2, T0 + 9 * NS)],
+    );
+    step_to(p, to);
+    p.replay_ns
+}
+
+// REQ: OA-RPL-250
+#[test]
+fn a_forward_step_the_report_times_did_not_follow_keeps_the_aircraft_and_takes_new_reports() {
+    let mut p = running();
+    let now = heard_then_step(&mut p, T0 + HOUR);
+    assert_eq!(p.clock.forward_steps, 1);
+    let s = adsb_slot_of(&p.adsb, 2).unwrap();
+    // The report times are in their own domain: nothing was moved.
+    assert_eq!(p.adsb.time_ns[s], T0 + 9 * NS);
+    // Twenty seconds later by the recorder; the reports' own clock says the same.
+    let t = now + 20 * NS;
+    adsb_frame(
+        &mut p,
+        t,
+        &[adsb_row(1, T0 + 29 * NS), adsb_row(3, T0 + 29 * NS)],
+    );
+    assert_eq!(p.adsb.stats.out_of_order, 0);
+    assert_eq!(p.adsb.stats.future_refused, 0);
+    assert_eq!((p.adsb.stats.applied, p.adsb.live), (4, 3));
+    assert_eq!(adsb_stale_count(&p.adsb), 1);
+    assert_eq!(p.adsb.time_ns[s], T0 + 9 * NS);
+    assert_eq!(p.adsb.stats.domain_kept_own, 1);
+    assert_eq!(p.adsb.stats.domain_follows_clock, 0);
+    assert_eq!(
+        (p.adsb.pending_ns, p.adsb.offset_ns),
+        (0, now - (T0 + 9 * NS))
+    );
+}
+
+// REQ: OA-RPL-250
+#[test]
+fn a_backward_step_the_report_times_did_not_follow_takes_new_reports() {
+    let mut p = running();
+    let now = heard_then_step(&mut p, T0 - 10 * MIN);
+    assert_eq!(p.clock.backward_steps, 1);
+    let t = now + 20 * NS;
+    adsb_frame(
+        &mut p,
+        t,
+        &[adsb_row(1, T0 + 29 * NS), adsb_row(3, T0 + 29 * NS)],
+    );
+    assert_eq!(p.adsb.stats.future_refused, 0);
+    assert_eq!(p.adsb.stats.out_of_order, 0);
+    assert_eq!((p.adsb.stats.applied, p.adsb.live), (4, 3));
+    assert_eq!(p.adsb.stats.domain_kept_own, 1);
+    assert_eq!(
+        (p.adsb.pending_ns, p.adsb.offset_ns),
+        (0, now - (T0 + 9 * NS))
+    );
+}
+
+// REQ: OA-RPL-250
+#[test]
+fn report_times_that_step_with_the_recorder_shift_the_held_ones() {
+    let mut p = running();
+    let now = heard_then_step(&mut p, T0 + HOUR);
+    let t = now + 20 * NS;
+    adsb_frame(&mut p, t, &[adsb_row(1, t)]);
+    assert_eq!(p.adsb.stats.out_of_order, 0);
+    assert_eq!(p.adsb.stats.domain_follows_clock, 1);
+    assert_eq!(p.adsb.stats.domain_kept_own, 0);
+    assert_eq!((p.adsb.pending_ns, p.adsb.offset_ns), (0, 0));
+    // The aircraft not heard again moved with the step.
+    let s = adsb_slot_of(&p.adsb, 2).unwrap();
+    assert_eq!(p.adsb.time_ns[s], now);
+}
+
+// REQ: OA-RPL-251
+#[test]
+fn a_sweep_while_a_step_is_unattributed_evicts_nobody() {
+    let mut p = running();
+    heard_then_step(&mut p, T0 + HOUR);
+    let mut t = p.replay_ns;
+    for _ in 0..40 {
+        t += 30 * NS;
+        tick(&mut p, t);
+    }
+    assert_eq!(p.adsb.stats.evicted, 0);
+    assert_eq!(p.adsb.live, 2);
+    // The reports' own clock is now T0 + 9 s + 20 min: the next report resolves it.
+    let own = T0 + 9 * NS + 20 * MIN;
+    adsb_frame(&mut p, t, &[adsb_row(1, own)]);
+    assert_eq!(p.adsb.stats.out_of_order, 0);
+    assert_eq!(p.adsb.stats.domain_kept_own, 1);
+    assert_eq!(p.adsb.live, 2);
+}
+
+// REQ: OA-RPL-252
+#[test]
+fn a_report_that_fits_neither_reading_is_refused_and_the_step_stays_pending() {
+    let mut p = running();
+    let now = heard_then_step(&mut p, T0 + HOUR);
+    let t = now + 20 * NS;
+    // Twenty minutes into the reports' own time: forty minutes old by one reading and twenty
+    // minutes ahead by the other.
+    adsb_frame(&mut p, t, &[adsb_row(1, T0 + 20 * MIN)]);
+    assert_eq!(p.adsb.stats.future_refused, 1);
+    assert_eq!(p.adsb.stats.applied, 2);
+    assert_ne!(p.adsb.pending_ns, 0);
+    assert_eq!(
+        (
+            p.adsb.stats.domain_kept_own,
+            p.adsb.stats.domain_follows_clock
+        ),
+        (0, 0)
+    );
+    adsb_frame(&mut p, t + NS, &[adsb_row(1, T0 + 30 * NS)]);
+    assert_eq!(p.adsb.stats.applied, 3);
+    assert_eq!(p.adsb.pending_ns, 0);
+    assert_eq!(p.adsb.stats.domain_kept_own, 1);
+}
+
+// REQ: OA-RPL-253
+#[test]
+fn two_steps_before_any_report_resolve_by_their_sum() {
+    let mut p = running();
+    let now1 = heard_then_step(&mut p, T0 + HOUR);
+    step_to(&mut p, now1 + 30 * MIN);
+    let now = p.replay_ns;
+    assert_eq!(p.clock.forward_steps, 2);
+    let t = now + 20 * NS;
+    adsb_frame(&mut p, t, &[adsb_row(1, T0 + 29 * NS)]);
+    assert_eq!(p.adsb.stats.out_of_order, 0);
+    assert_eq!(p.adsb.stats.domain_kept_own, 1);
+    assert_eq!(
+        (p.adsb.pending_ns, p.adsb.offset_ns),
+        (0, now - (T0 + 9 * NS))
+    );
 }
