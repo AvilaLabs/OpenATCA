@@ -11,7 +11,10 @@
 //!    rows, so each is carried forward within an aircraft for at most 60 s; a row with no value
 //!    in that age is not truth. Rows with readsb's stale flag (position older than 20 s, the
 //!    only fault flag a trace row has), rows whose source is not ADS-B (MLAT, TIS-B, ADS-R and
-//!    the rest carry no meaningful NACp), duplicate times and kinematic jumps are removed. Every
+//!    the rest carry no meaningful NACp), duplicate times, reports of the reserved addresses
+//!    (all zeros and all ones, under `invalid`) and kinematic jumps are removed. A jump is a
+//!    displacement the speed rule (`oa_adsb::jump_verdict`) calls impossible: over the hard cap of
+//!    the emitter category, or inconsistent with the aircraft's own ground speed and the gap. Every
 //!    removed row is counted under one reason ([`REMOVE_NAMES`]) in [`TruthStats`], so
 //!    `rows_in = rows_kept + removed` always balances.
 //! 2. **Legs.** An aircraft (the 24-bit address plus `oa_adsb::NON_ICAO`, the same key as the
@@ -96,8 +99,12 @@ pub const LEG_GAP_MS: i64 = 120_000;
 pub const BRACKET_MS: i64 = 10_000;
 /// Gate: truth with a 95 % horizontal radius above this is refused, metres.
 pub const MAX_SIGMA95_H_M: f64 = 50.0;
-/// Gate: implied ground speed above this between consecutive kept reports is a jump, knots
-/// (the same value as `oa_adsb::MAX_JUMP_KT`).
+/// Gate: the hard speed cap of the ordinary emitter classes, knots (`oa_adsb::CAP_ORDINARY_KT`).
+/// Whether a displacement between consecutive kept reports is a jump is decided by
+/// `oa_adsb::jump_verdict`: this cap, the aircraft's own reported ground speed and the time gap.
+pub const JUMP_CAP_KT: f64 = oa_adsb::CAP_ORDINARY_KT;
+/// The old fixed limit (`oa_adsb::MAX_JUMP_KT`, 700 kt), no longer used here; kept so a consumer
+/// that still has it compiles until it moves to `oa_adsb::jump_verdict`.
 pub const MAX_JUMP_KT: f64 = oa_adsb::MAX_JUMP_KT;
 /// Allowance added to the jump distance so position noise at short intervals is not a jump, m.
 pub const JUMP_SLACK_M: f64 = 200.0;
@@ -193,7 +200,7 @@ pub const DEFAULT_CONFIG: TruthConfig = TruthConfig {
     leg_gap_ms: LEG_GAP_MS,
     bracket_ms: BRACKET_MS,
     max_sigma95_h_m: MAX_SIGMA95_H_M,
-    max_jump_kt: MAX_JUMP_KT,
+    max_jump_kt: JUMP_CAP_KT,
     jump_slack_m: JUMP_SLACK_M,
     jump_resync: JUMP_RESYNC,
     accel_q: ACCEL_Q,

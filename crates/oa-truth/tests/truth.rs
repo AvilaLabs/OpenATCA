@@ -8,8 +8,8 @@
 )]
 
 use oa_adsb::{
-    reports_len, reports_push, Reports, Row, F_NEW_LEG, F_STALE, NONE_I32, NONE_U8, NON_ICAO,
-    ROW_EMPTY,
+    reports_len, reports_push, Reports, Row, F_NEW_LEG, F_STALE, NONE_I32, NONE_U16, NONE_U8,
+    NON_ICAO, ROW_EMPTY,
 };
 use oa_sha256::Sha256;
 use oa_truth::*;
@@ -228,6 +228,84 @@ fn jumps_are_removed_and_counted() {
     assert_eq!(s.splits[SPLIT_JUMP], 1);
     assert_eq!(s.legs, 2);
     assert!(balanced(&s));
+}
+
+// REQ: OA-TRUTH-017
+#[test]
+fn a_900_kt_aircraft_is_one_continuous_leg() {
+    // 900 kt is 463 m/s: a real fast aircraft in a jet stream or a military jet. Reports every
+    // 3 s (some were lost) are 1389 m apart, over what a 700 kt limit allows (1080 m + 200 m).
+    // The aircraft's own ground speed says it is going that fast, so no report is a jump.
+    for step in [1.0, 3.0] {
+        let mut r = Reports::default();
+        let mut t = 0.0;
+        let mut n = 0u64;
+        while t <= 600.0 + 1e-9 {
+            let (la, lo) = to_deg(0.0, 463.0 * t);
+            let mut row = good(ADDR, t, la, lo);
+            row.gs_dkt = 9000;
+            row.category = 0xa3;
+            reports_push(&mut r, &row);
+            t += step;
+            n += 1;
+        }
+        let (_, s) = build(&r);
+        assert_eq!(removed(&s, REM_JUMP), 0, "step {step}");
+        assert_eq!((s.legs, s.rows_kept, s.splits[SPLIT_JUMP]), (1, n, 0));
+        assert!(balanced(&s));
+    }
+}
+
+// REQ: OA-TRUTH-018
+#[test]
+fn a_position_jump_is_removed_whether_or_not_ground_speed_is_known() {
+    // A 450 kt aircraft whose 31st report is 2862 m off in 2 s: 2782 kt implied, which its own
+    // ground speed (and any aircraft) contradicts.
+    for gs in [4500u16, NONE_U16] {
+        let mut r = Reports::default();
+        for k in 0..60 {
+            let t = f64::from(k) * 2.0;
+            let (mut la, lo) = to_deg(0.0, 231.5 * t);
+            if k == 30 {
+                la += 2862.0 / M_PER_DEG;
+            }
+            let mut row = good(ADDR, t, la, lo);
+            row.gs_dkt = gs;
+            row.category = 0xa3;
+            reports_push(&mut r, &row);
+        }
+        let (_, s) = build(&r);
+        assert_eq!(
+            (removed(&s, REM_JUMP), s.rows_kept, s.legs),
+            (1, 59, 1),
+            "gs {gs}"
+        );
+    }
+}
+
+// REQ: OA-TRUTH-019
+#[test]
+fn reserved_addresses_are_never_an_aircraft() {
+    // Two aircraft's worth of reports under 0x000000 and 0xFFFFFF, plus a real one.
+    let mut r = straight(ADDR, 2.0, 100.0, 5.0, 3);
+    let real = reports_len(&r) as u64;
+    for addr in [0u32, 0x00ff_ffff] {
+        let mut other = straight(addr, 2.0, 100.0, 5.0, 9);
+        oa_adsb::reports_extend(&mut r, &std::mem::take(&mut other));
+    }
+    let (truth, s) = build(&r);
+    assert_eq!((s.rows_kept, s.legs, s.aircraft_out), (real, 1, 1));
+    assert_eq!(removed(&s, REM_INVALID), 2 * real);
+    assert!(balanced(&s));
+    for addr in [0u32, 0x00ff_ffff] {
+        assert_eq!(
+            truth_at(&truth, addr, ms(10.0)),
+            TruthQuery::UnknownAircraft
+        );
+    }
+    // A non-ICAO pseudo-address with the same digits is a trackfile identifier, kept.
+    let r = straight(NON_ICAO, 2.0, 100.0, 5.0, 4);
+    assert_eq!(build(&r).1.legs, 1);
 }
 
 // REQ: OA-TRUTH-004

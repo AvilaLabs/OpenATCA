@@ -6,7 +6,7 @@ use std::fmt;
 
 use crate::{
     reports_len, reports_push, reports_row, Reports, Row, F_GROUND, NONE_I16, NONE_U16, NONE_U8,
-    ROW_EMPTY, SOURCE_NAMES,
+    ROW_EMPTY, SOURCE_NAMES, SOURCE_UNKNOWN,
 };
 
 /// First four payload bytes of the layout written now.
@@ -143,18 +143,24 @@ fn rd<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
     b.get(at..at + N)?.try_into().ok()
 }
 
-/// The measurements of an `ADS2` record, or all absent for an `ADS1` one (whose bytes from 57 on
-/// must be zero).
-fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<()> {
+/// What was wrong with a record that was still decoded. Bits of [`Anomalies`].
+const ANOM_SOURCE: u8 = 1;
+const ANOM_MEASUREMENT: u8 = 2;
+const ANOM_RESERVED: u8 = 4;
+
+/// The measurements of an `ADS2` record, or all absent for an `ADS1` one. A reserved byte that
+/// is not zero, or a measurement out of the range the decoder guarantees, is an anomaly: the
+/// reserved bytes are ignored and the bad measurement is left absent. Returns the anomaly bits.
+fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<u8> {
+    let mut anom = 0;
     if legacy {
-        return b
-            .get(57..LEGACY_RECORD_LEN)?
-            .iter()
-            .all(|&x| x == 0)
-            .then_some(());
+        if !b.get(57..LEGACY_RECORD_LEN)?.iter().all(|&x| x == 0) {
+            anom |= ANOM_RESERVED;
+        }
+        return Some(anom);
     }
     if *b.get(79)? != 0 {
-        return None;
+        anom |= ANOM_RESERVED;
     }
     let u = |i: usize| -> Option<u16> { Some(u16::from_le_bytes(rd(b, 57 + 2 * i)?)) };
     let s = |i: usize| -> Option<i16> { Some(i16::from_le_bytes(rd(b, 71 + 2 * i)?)) };
@@ -169,16 +175,28 @@ fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<()> {
     row.tat_c = s(1)?;
     row.roll_cdeg = s(2)?;
     row.track_rate_cdps = s(3)?;
-    // Ranges the decoder guarantees: a value outside them is a corrupt record.
-    let heading_ok = |v: u16| v == NONE_U16 || v < 36_000;
-    let ok = (row.wd_deg == NONE_U16 || row.wd_deg < 360)
-        && heading_ok(row.mag_heading_cdeg)
-        && heading_ok(row.true_heading_cdeg)
-        && (row.roll_cdeg == NONE_I16 || row.roll_cdeg.abs() <= 18_000);
-    ok.then_some(())
+    // Ranges the decoder guarantees: a value outside them is a corrupt measurement.
+    if !(row.wd_deg == NONE_U16 || row.wd_deg < 360) {
+        row.wd_deg = NONE_U16;
+        anom |= ANOM_MEASUREMENT;
+    }
+    for h in [&mut row.mag_heading_cdeg, &mut row.true_heading_cdeg] {
+        if !(*h == NONE_U16 || *h < 36_000) {
+            *h = NONE_U16;
+            anom |= ANOM_MEASUREMENT;
+        }
+    }
+    if !(row.roll_cdeg == NONE_I16 || row.roll_cdeg.abs() <= 18_000) {
+        row.roll_cdeg = NONE_I16;
+        anom |= ANOM_MEASUREMENT;
+    }
+    Some(anom)
 }
 
-fn decode_row(b: &[u8], legacy: bool) -> Option<Row> {
+/// Decodes one record. `None` if its position or flags cannot be read (the record has no
+/// meaning); otherwise the row with every minor field that was out of range made absent or
+/// `unknown`, and the anomaly bits saying what was changed.
+fn decode_row(b: &[u8], legacy: bool) -> Option<(Row, u8)> {
     let u8s: [u8; 9] = rd(b, 48)?;
     let [category, nic, nac_p, nac_v, sil, sil_type, version, gva, sda] = u8s;
     let mut row = Row {
@@ -206,12 +224,19 @@ fn decode_row(b: &[u8], legacy: bool) -> Option<Row> {
         sda,
         ..ROW_EMPTY
     };
-    decode_measurements(b, &mut row, legacy)?;
+    let mut anom = decode_measurements(b, &mut row, legacy)?;
+    // Without a readable position or flags (stale, new leg) the record has no meaning.
     let ok = (-900_000_000..=900_000_000).contains(&row.lat_e7)
         && (-1_800_000_000..=1_800_000_000).contains(&row.lon_e7)
-        && row.flags & !(F_GROUND | 15) == 0
-        && (row.source == NONE_U8 || usize::from(row.source) < SOURCE_NAMES.len());
-    ok.then_some(row)
+        && row.flags & !(F_GROUND | 15) == 0;
+    if !ok {
+        return None;
+    }
+    if !(row.source == NONE_U8 || usize::from(row.source) < SOURCE_NAMES.len()) {
+        row.source = SOURCE_UNKNOWN;
+        anom |= ANOM_SOURCE;
+    }
+    Some((row, anom))
 }
 
 /// Appends one payload holding reports `from..to` of `r` to `out`. The range must be non-empty
@@ -240,9 +265,28 @@ pub fn encode_payload(
     Ok(())
 }
 
-/// Parses one payload, appending its reports to `out`. Returns the count. A bad payload
-/// appends nothing.
-pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadError> {
+/// What a lenient payload decode did. Plain record (A1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct PayloadCounts {
+    /// Records in the payload.
+    pub records: usize,
+    /// Records appended to the output.
+    pub kept: usize,
+    /// Records dropped because their position or flags were out of range.
+    pub dropped: usize,
+    /// Index of the first dropped record.
+    pub first_dropped: Option<usize>,
+    /// Kept records whose source type was not a known one (stored as `unknown`).
+    pub unknown_source: usize,
+    /// Kept records with a measurement out of range (left absent).
+    pub bad_measurement: usize,
+    /// Kept records with a reserved byte that was not zero (ignored).
+    pub reserved_set: usize,
+}
+
+/// Parses the payload header and checks the length; `Ok((legacy, count, record_length))`.
+fn parse_header(bytes: &[u8]) -> Result<(bool, usize, usize), PayloadError> {
     if bytes.len() < PAYLOAD_HEADER_LEN {
         return Err(PayloadError::Length);
     }
@@ -269,11 +313,60 @@ pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadE
     if bytes.len() != PAYLOAD_HEADER_LEN + count * rec_len {
         return Err(PayloadError::Length);
     }
+    Ok((legacy, count, rec_len))
+}
+
+/// Parses one payload, appending every record that can be read and counting the rest. A payload
+/// whose header or length is wrong is refused whole (the records cannot be located) and appends
+/// nothing. A record whose position or flags are out of range is dropped and counted; a record
+/// whose source type is unknown keeps its position with source `unknown`, and one with a bad
+/// measurement keeps it absent (the layout is unchanged).
+pub fn decode_payload_lenient(
+    bytes: &[u8],
+    out: &mut Reports,
+) -> Result<PayloadCounts, PayloadError> {
+    let (legacy, count, rec_len) = parse_header(bytes)?;
+    let mut c = PayloadCounts {
+        records: count,
+        ..PayloadCounts::default()
+    };
     let mut rows = Vec::with_capacity(count);
     for i in 0..count {
         let at = PAYLOAD_HEADER_LEN + i * rec_len;
         let rec = bytes.get(at..at + rec_len).ok_or(PayloadError::Length)?;
-        rows.push(decode_row(rec, legacy).ok_or(PayloadError::BadRecord(i))?);
+        match decode_row(rec, legacy) {
+            Some((row, anom)) => {
+                c.unknown_source += usize::from(anom & ANOM_SOURCE != 0);
+                c.bad_measurement += usize::from(anom & ANOM_MEASUREMENT != 0);
+                c.reserved_set += usize::from(anom & ANOM_RESERVED != 0);
+                rows.push(row);
+            }
+            None => {
+                c.dropped += 1;
+                c.first_dropped.get_or_insert(i);
+            }
+        }
+    }
+    c.kept = rows.len();
+    for row in &rows {
+        reports_push(out, row);
+    }
+    Ok(c)
+}
+
+/// Parses one payload strictly, appending its reports to `out`. Returns the count. A payload
+/// with anything [`decode_payload_lenient`] would drop or repair is refused whole with
+/// [`PayloadError::BadRecord`] and appends nothing.
+pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadError> {
+    let (legacy, count, rec_len) = parse_header(bytes)?;
+    let mut rows = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = PAYLOAD_HEADER_LEN + i * rec_len;
+        let rec = bytes.get(at..at + rec_len).ok_or(PayloadError::Length)?;
+        match decode_row(rec, legacy) {
+            Some((row, 0)) => rows.push(row),
+            _ => return Err(PayloadError::BadRecord(i)),
+        }
     }
     for row in &rows {
         reports_push(out, row);

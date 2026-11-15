@@ -1,10 +1,13 @@
 //! Whole-set checks over decoded reports. Core (pure).
 
-use crate::{reports_len, Reports, F_NEW_LEG, NONE_U8};
+use crate::{
+    jump_verdict, reports_len, JumpPair, JumpVerdict, Reports, CAP_ORDINARY_KT, F_NEW_LEG,
+    NONE_U16, NONE_U8,
+};
 
-/// Ground speeds above this between consecutive reports of one aircraft are impossible for
-/// the aircraft in the data (the fastest airliners cruise near 500 kt ground speed; this
-/// leaves a wide margin and flags position glitches).
+/// The old single speed limit, knots. No longer used by oa-adsb or oa-truth, which judge a pair
+/// with [`jump_verdict`] (the limit rejected real aircraft at 700 kt ground speed and above);
+/// kept so a consumer that still has it compiles until it moves to the rule.
 pub const MAX_JUMP_KT: f64 = 700.0;
 
 /// Pairs closer than this are position noise, not jumps: two reports a few metres apart a
@@ -25,10 +28,10 @@ pub struct Summary {
     pub nac_p_ge_8: u64,
     /// Consecutive report pairs of one aircraft compared.
     pub pairs: u64,
-    /// Pairs whose implied speed exceeds [`MAX_JUMP_KT`] and which are at least
+    /// Pairs the speed rule ([`jump_verdict`], no position allowance) calls impossible and which are at least
     /// [`MIN_JUMP_NM`] apart, not counting pairs whose second report starts a new leg.
     pub jumps: u64,
-    /// Pairs over [`MAX_JUMP_KT`] but closer than [`MIN_JUMP_NM`]: position noise.
+    /// Pairs the speed rule calls impossible but closer than [`MIN_JUMP_NM`]: position noise.
     pub jitter: u64,
     /// Largest implied speed among the compared pairs at least [`MIN_JUMP_NM`] apart, knots.
     pub max_implied_kt: f64,
@@ -61,6 +64,8 @@ pub fn summarize(r: &Reports) -> Summary {
         ..Summary::default()
     };
     let mut prev: Option<usize> = None;
+    // Latest emitter category seen for the aircraft being walked (printed on a minority of rows).
+    let mut category = 0u8;
     for &i in &ix {
         let i = i as usize;
         let (Some(&icao), Some(&t), Some(&lat), Some(&lon), Some(&flags)) = (
@@ -84,6 +89,14 @@ pub fn summarize(r: &Reports) -> Summary {
             let pi = r.icao.get(p).copied()?;
             (pi == icao).then_some(p)
         });
+        if same.is_none() {
+            category = 0;
+        }
+        if let Some(&c) = r.category.get(i) {
+            if c != 0 {
+                category = c;
+            }
+        }
         match same {
             Some(p) => {
                 if flags & F_NEW_LEG == 0 {
@@ -107,7 +120,15 @@ pub fn summarize(r: &Reports) -> Summary {
                     if kt > s.max_implied_kt && nm >= MIN_JUMP_NM {
                         s.max_implied_kt = kt;
                     }
-                    if kt > MAX_JUMP_KT {
+                    let pair = JumpPair {
+                        dist_m: nm * 1852.0,
+                        dt_s: hours * 3600.0,
+                        slack_m: 0.0,
+                        category,
+                        gs_a_dkt: r.gs_dkt.get(p).copied().unwrap_or(NONE_U16),
+                        gs_b_dkt: r.gs_dkt.get(i).copied().unwrap_or(NONE_U16),
+                    };
+                    if jump_verdict(&pair, CAP_ORDINARY_KT) != JumpVerdict::Plausible {
                         if nm >= MIN_JUMP_NM {
                             s.jumps += 1;
                         } else {

@@ -12,7 +12,7 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use oa_adsb::{decode_payload, reports_len, Reports};
+use oa_adsb::{decode_payload_lenient, reports_len, Reports};
 use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
 use oa_sha256::{to_hex, Sha256};
 use oa_truth::{
@@ -25,13 +25,15 @@ fn usage() -> &'static str {
 }
 
 /// Reads every ADS-B payload frame of an OAF1 file into one set of reports. Returns the reports
-/// and the number of frames that did not decode.
-fn read_clip(path: &str) -> Result<(Reports, u64), String> {
+/// the number of frames that did not decode and the number of records dropped from frames that
+/// did (a bad record does not refuse its frame).
+fn read_clip(path: &str) -> Result<(Reports, u64, u64), String> {
     let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).map_err(|e| format!("{e:?}"))?;
     let mut out = Reports::default();
     let mut bad = 0u64;
+    let mut dropped = 0u64;
     let mut chunk = vec![0u8; 1 << 20];
     loop {
         let n = f.read(&mut chunk).map_err(|e| format!("{path}: {e}"))?;
@@ -46,8 +48,9 @@ fn read_clip(path: &str) -> Result<(Reports, u64), String> {
             while let Some(fr) = rd.next() {
                 match fr {
                     Ok(fr) if fr.kind == Kind::Message => {
-                        if decode_payload(fr.payload, &mut out).is_err() {
-                            bad += 1;
+                        match decode_payload_lenient(fr.payload, &mut out) {
+                            Ok(c) => dropped += c.dropped as u64,
+                            Err(_) => bad += 1,
                         }
                     }
                     Ok(_) => {}
@@ -59,7 +62,7 @@ fn read_clip(path: &str) -> Result<(Reports, u64), String> {
             }
         }
     }
-    Ok((out, bad))
+    Ok((out, bad, dropped))
 }
 
 fn dist_row(name: &str, unit: &str, d: &Dist) {
@@ -169,11 +172,16 @@ fn run() -> Result<(), String> {
         }
     }
     let path = path.ok_or(usage())?;
-    let (reports, bad) = read_clip(&path)?;
+    let (reports, bad, dropped) = read_clip(&path)?;
     println!(
         "clip {path}: {} reports decoded, {bad} frames refused",
         reports_len(&reports)
     );
+    if dropped > 0 {
+        println!(
+            "{dropped} records dropped from frames that decoded (position or flags out of range)"
+        );
+    }
     let start = Instant::now();
     let (truth, stats) = build_truth(&reports, &cfg).map_err(|e| e.to_string())?;
     let secs = start.elapsed().as_secs_f64();

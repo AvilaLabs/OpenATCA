@@ -128,15 +128,15 @@ fn day() -> Day {
     );
     // One good row, one bad row.
     let f = trace_json(
-        "ffffff",
+        "fffffe",
         &[
-            "[1.0,43.0,-90.0,1000,1.0,1.0,99,0]",
+            "[1.0,43.0,-90.0,1000,1.0,1.0,256,0]",
             "[2.0,43.0,-90.0,1000,1.0,1.0,0,0]",
         ],
     );
     tar_entry(
         &mut t,
-        "./traces/ff/trace_full_ffffff.json",
+        "./traces/ff/trace_full_fffffe.json",
         &gzip(f.as_bytes()),
     );
     // Not traces: other names are skipped unread.
@@ -163,7 +163,7 @@ fn archive_scan_decodes_traces_and_survives_bad_ones() {
     let d = day();
     let (res, calls) = scan(vec![Cursor::new(d.tar.clone())], &ZAU_BOX);
     assert_eq!(res.end, ScanEnd::Complete);
-    assert_eq!(calls, [(0xaaaaaa, 5), (0xbbbbbb, 3), (0xffffff, 1)]);
+    assert_eq!(calls, [(0xaaaaaa, 5), (0xbbbbbb, 3), (0xfffffe, 1)]);
     assert_eq!((res.trace_entries, res.other_entries), (6, 3));
     let st = res.stats;
     assert_eq!((st.traces_read, st.traces_refused), (4, 2));
@@ -192,7 +192,7 @@ fn archive_scan_decodes_traces_and_survives_bad_ones() {
         ..ZAU_BOX
     };
     let (res, calls) = scan(vec![Cursor::new(d.tar)], &f);
-    // ffffff's rows are at +1 s and +2 s, before the window: both counted as outside it (the
+    // fffffe's rows are at +1 s and +2 s, before the window: both counted as outside it (the
     // bad one too, since the window is checked before the rest of the row).
     assert_eq!(calls, [(0xaaaaaa, 3), (0xbbbbbb, 1)]);
     assert_eq!(res.stats.outside_time, 2 + 2 + 2);
@@ -296,8 +296,8 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     let (_, r, frames) = read_frames(&out);
     assert_eq!((reports_len(&r), frames), (9, 2));
     assert!(r.time_ns.windows(2).all(|w| w[0] <= w[1]));
-    // ffffff's good row is at +2 s, before the others' first report at +1000 s.
-    assert_eq!(r.icao[0], 0xffffff);
+    // fffffe's good row is at +2 s, before the others' first report at +1000 s.
+    assert_eq!(r.icao[0], 0xfffffe);
     assert_eq!(summarize(&r).aircraft, 3);
     // Window with an ISO time and a smaller box.
     let o = run(&[
@@ -485,12 +485,12 @@ fn real_day_archive_first_part() {
     let st = res.stats;
     let s = summarize(&all);
     eprintln!(
-        "real {}: traces_read={} refused={} rows_seen={} kept={} aircraft={} nac_p_known={} nac_p>=8={} ({:.2}% of known, {:.2}% of kept) pairs={} jumps>{}kt={} jitter={} max_implied_kt={:.0} archive_complete={}",
+        "real {}: traces_read={} refused={} rows_seen={} kept={} aircraft={} nac_p_known={} nac_p>=8={} ({:.2}% of known, {:.2}% of kept) pairs={} jumps={} jitter={} max_implied_kt={:.0} archive_complete={}",
         part.display(), st.traces_read, st.traces_refused, st.rows_seen, st.kept, s.aircraft,
         s.nac_p_known, s.nac_p_ge_8,
         100.0 * s.nac_p_ge_8 as f64 / s.nac_p_known.max(1) as f64,
         100.0 * s.nac_p_ge_8 as f64 / s.reports.max(1) as f64,
-        s.pairs, MAX_JUMP_KT, s.jumps, s.jitter, s.max_implied_kt,
+        s.pairs, s.jumps, s.jitter, s.max_implied_kt,
         std::mem::discriminant(&res.end) == std::mem::discriminant(&ScanEnd::Complete),
     );
     assert!(st.traces_read > 100, "{st:?}");

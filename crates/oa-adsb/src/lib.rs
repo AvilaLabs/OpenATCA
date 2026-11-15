@@ -105,24 +105,41 @@
 //! Every limit is a constant: [`MAX_TRACE_ROWS`], [`MAX_ROW_LEN`], [`MAX_OBJECT_MEMBERS`],
 //! [`MAX_TRACE_BYTES`] (decompressed file), plus the `oa-json` and `oa-tar` limits. A trace
 //! that breaks a structural rule (not an object, no `icao`, `timestamp` or `trace`, too many
-//! rows, bad gzip, JSON error) is refused whole and counted in [`Stats`]; a row that breaks a
-//! value rule (a coordinate out of range, an unknown source type, a malformed object field,
-//! ...) is refused alone and counted by reason in [`Stats::rejected`]. Nothing refused reaches
-//! the output (E5), and nothing is dropped without being counted.
+//! rows, bad gzip, JSON error) is refused whole and counted in [`Stats`]. A row is refused alone
+//! (counted by reason in [`Stats::rejected`]) only when its time, position, shape or flags cannot
+//! be read: without them the position has no meaning. Any other field that is malformed, out of
+//! range, null or an enumeration value this reader does not know is left absent (`unknown` for the
+//! source type and `sil_type`), the row and its position are kept, and the occurrence is counted
+//! per field and value ([`Stats::unknown_fields`], [`Stats::unknown_values`]), so a format change
+//! in readsb shows up as a count and does not drop aircraft. Traces of the reserved addresses
+//! 0x000000 and 0xFFFFFF (misconfigured transponders) are counted and not output. Nothing refused
+//! reaches the output (E5), and nothing is dropped without being counted.
+//!
+//! # Is a displacement possible
+//!
+//! [`jump_verdict`] judges two reports of one aircraft from the distance, the time gap, the
+//! emitter category and the reported ground speeds (see its module for the sources of the
+//! limits); it replaces the single speed limit that rejected real fast aircraft.
 //!
 //! Cold, offline code: A7.2 applies to the records here; [`Reports`] is the quantity
 //! collection, one column per field.
 
 mod archive;
 mod frames;
+mod speed;
 mod summary;
 mod trace;
 
 pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
 pub use frames::{
-    decode_payload, encode_payload, frame_ranges, PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS,
-    LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN, MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS,
-    PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
+    decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
+    PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN,
+    MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
+};
+pub use speed::{
+    category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,
+    JumpPair, JumpVerdict, CAP_HIGH_KT, CAP_ORDINARY_KT, CAP_SPACE_KT, CONSISTENCY_ACCEL_KT_S,
+    CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR,
 };
 pub use summary::{summarize, Summary, MAX_JUMP_KT, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};
@@ -171,6 +188,10 @@ pub const NON_ICAO: u32 = 1 << 24;
 pub const SIL_UNKNOWN: u8 = 0;
 pub const SIL_PER_HOUR: u8 = 1;
 pub const SIL_PER_SAMPLE: u8 = 2;
+
+/// The stored `source` value for a source type this reader does not know: the index of
+/// `unknown` in [`SOURCE_NAMES`].
+pub const SOURCE_UNKNOWN: u8 = 13;
 
 /// Source type names in readsb's `addrtype_t` order: the index is the stored `source` value.
 pub const SOURCE_NAMES: [&str; 14] = [
@@ -494,22 +515,75 @@ pub const ZAU_BOX: Filter = Filter {
     to_ns: i64::MAX,
 };
 
-/// Why a row was refused, indexing [`Stats::rejected`].
-pub const REJECT_NAMES: [&str; REJECT_KINDS] = [
-    "shape", "time", "position", "altitude", "speed", "track", "flags", "rate", "source", "object",
-];
+/// Why a row was refused, indexing [`Stats::rejected`]. Only what the position's meaning needs
+/// refuses a row: its time, its position, the shape of the row and the flags (stale and
+/// new-leg say whether the position is current and continuous, so a flags value that cannot be
+/// read leaves the position without its meaning). Every other field that is malformed, unknown
+/// or null is left absent (or `unknown` for an enumeration) and counted in
+/// [`Stats::unknown_fields`] and [`Stats::unknown_values`], and the row is kept.
+pub const REJECT_NAMES: [&str; REJECT_KINDS] = ["shape", "time", "position", "flags"];
 /// Number of row-refusal reasons.
-pub const REJECT_KINDS: usize = 10;
+pub const REJECT_KINDS: usize = 4;
 pub const REJ_SHAPE: usize = 0;
 pub const REJ_TIME: usize = 1;
 pub const REJ_POSITION: usize = 2;
-pub const REJ_ALTITUDE: usize = 3;
-pub const REJ_SPEED: usize = 4;
-pub const REJ_TRACK: usize = 5;
-pub const REJ_FLAGS: usize = 6;
-pub const REJ_RATE: usize = 7;
-pub const REJ_SOURCE: usize = 8;
-pub const REJ_OBJECT: usize = 9;
+pub const REJ_FLAGS: usize = 3;
+
+/// Fields of a row whose unknown, malformed or null values are counted, indexing
+/// [`Stats::unknown_fields`] and named by [`FIELD_NAMES`].
+pub const FIELD_NAMES: [&str; FIELD_KINDS] = [
+    "altitude", "geom_alt", "speed", "track", "rate", "source", "object", "flight", "squawk",
+    "category", "nic", "nac_p", "nac_v", "sil", "gva", "sda", "version", "sil_type", "flags",
+];
+/// Number of counted fields.
+pub const FIELD_KINDS: usize = 19;
+pub const FLD_ALTITUDE: usize = 0;
+pub const FLD_GEOM_ALT: usize = 1;
+pub const FLD_SPEED: usize = 2;
+pub const FLD_TRACK: usize = 3;
+pub const FLD_RATE: usize = 4;
+pub const FLD_SOURCE: usize = 5;
+pub const FLD_OBJECT: usize = 6;
+pub const FLD_FLIGHT: usize = 7;
+pub const FLD_SQUAWK: usize = 8;
+pub const FLD_CATEGORY: usize = 9;
+pub const FLD_NIC: usize = 10;
+pub const FLD_NAC_P: usize = 11;
+pub const FLD_NAC_V: usize = 12;
+pub const FLD_SIL: usize = 13;
+pub const FLD_GVA: usize = 14;
+pub const FLD_SDA: usize = 15;
+pub const FLD_VERSION: usize = 16;
+pub const FLD_SIL_TYPE: usize = 17;
+/// Flag bits above the four readsb defines (the row is kept with them cleared).
+pub const FLD_FLAGS: usize = 18;
+
+/// Distinct (field, value) pairs [`Stats`] keeps counts for; later ones add to
+/// [`Stats::unknown_overflow`].
+pub const MAX_UNKNOWN_VALUES: usize = 32;
+/// Bytes of a value kept in an [`UnknownValue`]; longer text is cut.
+pub const UNKNOWN_TEXT_LEN: usize = 24;
+
+/// How often one value of one field was unknown, malformed or null. Plain record (A1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct UnknownValue {
+    /// Index into [`FIELD_NAMES`].
+    pub field: u8,
+    /// Bytes of `text` in use.
+    pub len: u8,
+    /// The value as text (a string as it was, a number as printed, `null`, or the kind of a
+    /// structure), cut at [`UNKNOWN_TEXT_LEN`] bytes.
+    pub text: [u8; UNKNOWN_TEXT_LEN],
+    /// Times seen; 0 marks a free slot.
+    pub count: u64,
+}
+
+/// The text of `v` (cut on a character boundary, so always valid).
+pub fn unknown_value_text(v: &UnknownValue) -> &str {
+    let b = v.text.get(..usize::from(v.len)).unwrap_or(&[]);
+    std::str::from_utf8(b).unwrap_or("")
+}
 
 /// Refusal counts for a scan. Plain record (A1).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -527,11 +601,57 @@ pub struct Stats {
     pub outside_box: u64,
     /// Rows inside the box but outside the time window.
     pub outside_time: u64,
+    /// Rows of traces whose address is reserved (0x000000 or 0xFFFFFF, not flagged non-ICAO):
+    /// a misconfigured transponder's reports are not one aircraft's, so none are output.
+    pub reserved_address: u64,
     /// Rows kept.
     pub kept: u64,
     /// Rows kept in which an optional measurement (wind, temperature, speeds, headings, roll)
     /// was malformed or out of range and was left absent instead of refusing the row.
     pub bad_measurements: u64,
+    /// Times a field of a kept row was unknown, malformed or null, by field ([`FIELD_NAMES`]).
+    pub unknown_fields: [u64; FIELD_KINDS],
+    /// The same by field and value, for the first [`MAX_UNKNOWN_VALUES`] distinct pairs.
+    pub unknown_values: [UnknownValue; MAX_UNKNOWN_VALUES],
+    /// Occurrences of pairs that did not fit in `unknown_values`.
+    pub unknown_overflow: u64,
+}
+
+/// Counts one unknown, malformed or null `value` of `field` (an index into [`FIELD_NAMES`]).
+pub fn stats_note_unknown(st: &mut Stats, field: usize, value: &str) {
+    if let Some(c) = st.unknown_fields.get_mut(field) {
+        *c += 1;
+    }
+    add_unknown(st, field as u8, value.as_bytes(), 1);
+}
+
+fn add_unknown(st: &mut Stats, field: u8, text: &[u8], count: u64) {
+    // Cut on a character boundary: back off while the next byte is a continuation byte.
+    let mut len = text.len().min(UNKNOWN_TEXT_LEN);
+    while len > 0 && text.get(len).is_some_and(|&b| b & 0xc0 == 0x80) {
+        len -= 1;
+    }
+    let text = text.get(..len).unwrap_or(&[]);
+    for slot in st.unknown_values.iter_mut() {
+        if slot.count > 0
+            && slot.field == field
+            && slot.text.get(..len) == Some(text)
+            && usize::from(slot.len) == len
+        {
+            slot.count += count;
+            return;
+        }
+        if slot.count == 0 {
+            slot.field = field;
+            slot.len = len as u8;
+            for (d, b) in slot.text.iter_mut().zip(text) {
+                *d = *b;
+            }
+            slot.count = count;
+            return;
+        }
+    }
+    st.unknown_overflow += count;
 }
 
 /// Adds the counts of `b` into `a`.
@@ -544,6 +664,15 @@ pub fn stats_add(a: &mut Stats, b: &Stats) {
     }
     a.outside_box += b.outside_box;
     a.outside_time += b.outside_time;
+    a.reserved_address += b.reserved_address;
     a.kept += b.kept;
     a.bad_measurements += b.bad_measurements;
+    for (x, y) in a.unknown_fields.iter_mut().zip(b.unknown_fields.iter()) {
+        *x += *y;
+    }
+    for v in b.unknown_values.iter().filter(|v| v.count > 0) {
+        let text = v.text.get(..usize::from(v.len)).unwrap_or(&[]);
+        add_unknown(a, v.field, text, v.count);
+    }
+    a.unknown_overflow += b.unknown_overflow;
 }

@@ -5,10 +5,12 @@ use std::fmt;
 use oa_json::{Doc, Kind, NodeIx};
 
 use crate::{
-    reports_push, Filter, Reports, Row, Stats, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN,
-    MAX_TRACE_NODES, MAX_TRACE_ROWS, NONE_I16, NONE_U16, NON_ICAO, REJ_ALTITUDE, REJ_FLAGS,
-    REJ_OBJECT, REJ_POSITION, REJ_RATE, REJ_SHAPE, REJ_SOURCE, REJ_SPEED, REJ_TIME, REJ_TRACK,
-    ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES,
+    is_reserved_address, reports_push, stats_note_unknown, Filter, Reports, Row, Stats,
+    FLD_ALTITUDE, FLD_CATEGORY, FLD_FLAGS, FLD_FLIGHT, FLD_GEOM_ALT, FLD_GVA, FLD_NAC_P, FLD_NAC_V,
+    FLD_NIC, FLD_OBJECT, FLD_RATE, FLD_SDA, FLD_SIL, FLD_SIL_TYPE, FLD_SOURCE, FLD_SPEED,
+    FLD_SQUAWK, FLD_TRACK, FLD_VERSION, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN, MAX_TRACE_NODES,
+    MAX_TRACE_ROWS, NONE_I16, NONE_U16, NONE_U8, NON_ICAO, REJ_FLAGS, REJ_POSITION, REJ_SHAPE,
+    REJ_TIME, ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES, SOURCE_UNKNOWN,
 };
 
 /// Why a whole trace file was refused.
@@ -171,80 +173,136 @@ fn wrap(v: u16, modulus: u16) -> u16 {
     }
 }
 
+/// The value of `n` as short text for the unknown-value counts: a string as it is, a number as
+/// it prints, `null`, or the kind of anything else.
+fn value_text(doc: &Doc<'_>, n: NodeIx) -> String {
+    match doc.kind(n) {
+        Some(Kind::Null) => "null".to_string(),
+        Some(Kind::True) => "true".to_string(),
+        Some(Kind::False) => "false".to_string(),
+        Some(Kind::Number) => doc
+            .as_f64(n)
+            .map_or_else(|| "number".to_string(), |x| format!("{x}")),
+        Some(Kind::String | Kind::StringPooled) => doc.str(n).unwrap_or("").to_string(),
+        Some(Kind::Array) => "<array>".to_string(),
+        Some(Kind::Object) => "<object>".to_string(),
+        None => "<none>".to_string(),
+    }
+}
+
+/// Counts the value at `n` as unknown for `field`.
+fn note(st: &mut Stats, field: usize, doc: &Doc<'_>, n: NodeIx) {
+    stats_note_unknown(st, field, &value_text(doc, n));
+}
+
+/// A small integer field of the aircraft object: the value if it is an integer in `0..=max`,
+/// else [`NONE_U8`] with the value counted (a null is counted as `null`).
+fn small_field(doc: &Doc<'_>, v: NodeIx, max: i64, field: usize, st: &mut Stats) -> u8 {
+    match opt_int(doc, Some(v), 0, max) {
+        Ok(Some(x)) => x as u8,
+        _ => {
+            note(st, field, doc, v);
+            NONE_U8
+        }
+    }
+}
+
 /// Fields of the per-row aircraft object that we keep. Ranges are the widths of the ADS-B bit
 /// fields readsb copies through (`nac_p` four bits, `nac_v` three, `sil`, `gva` and `sda` two);
 /// `nic` is readsb's computed 0 to 11. Real data carries `nac_v` up to 7, so the defined 0 to 4
-/// is not the bound.
-fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row, bad: &mut u64) -> Result<(), ()> {
+/// is not the bound. A field that is null, malformed or an unknown enumeration value is left
+/// absent (`unknown` for `sil_type`) and counted in `st`: none of them is needed to know what the
+/// position means, and the row's position is good. An object over the member limit is ignored
+/// whole and counted.
+fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row, bad: &mut u64, st: &mut Stats) {
     if doc.len(obj) > MAX_OBJECT_MEMBERS {
-        return Err(());
+        note(st, FLD_OBJECT, doc, obj);
+        return;
     }
     for (k, v) in doc.members(obj) {
         let Some(key) = doc.str(k) else {
-            return Err(());
+            continue;
         };
         if read_measurement(doc, key, v, row, bad) {
             continue;
         }
-        let small = |max: i64| -> Result<u8, ()> {
-            match opt_int(doc, Some(v), 0, max)? {
-                Some(x) => Ok(x as u8),
-                None => Err(()),
-            }
-        };
         match key {
             "flight" => {
-                let s = doc.str(v).ok_or(())?.trim_end_matches(' ');
-                if s.len() > 8 || !s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
-                    return Err(());
-                }
-                row.callsign = [0; 8];
-                for (d, b) in row.callsign.iter_mut().zip(s.bytes()) {
-                    *d = b;
+                let s = doc.str(v).map(|s| s.trim_end_matches(' '));
+                match s {
+                    Some(s) if s.len() <= 8 && s.bytes().all(|b| (0x20..=0x7e).contains(&b)) => {
+                        row.callsign = [0; 8];
+                        for (d, b) in row.callsign.iter_mut().zip(s.bytes()) {
+                            *d = b;
+                        }
+                    }
+                    _ => note(st, FLD_FLIGHT, doc, v),
                 }
             }
-            "squawk" => {
-                let s = doc.str(v).ok_or(())?;
-                if s.len() != 4 || !s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
-                    return Err(());
+            "squawk" => match doc.str(v) {
+                Some(s) if s.len() == 4 && s.bytes().all(|b| (b'0'..=b'7').contains(&b)) => {
+                    row.squawk = s.parse().unwrap_or(NONE_U16);
                 }
-                row.squawk = s.parse().map_err(|_| ())?;
-            }
+                _ => note(st, FLD_SQUAWK, doc, v),
+            },
             "category" => {
-                let s = doc.str(v).ok_or(())?.as_bytes();
-                let (Some(&a), Some(&b), 2) = (s.first(), s.get(1), s.len()) else {
-                    return Err(());
-                };
-                let c = (hex_val(a).ok_or(())? << 4) | hex_val(b).ok_or(())?;
-                row.category = c as u8;
+                let c = doc.str(v).and_then(|s| {
+                    let s = s.as_bytes();
+                    match (s.first(), s.get(1), s.len()) {
+                        (Some(&a), Some(&b), 2) => Some((hex_val(a)? << 4) | hex_val(b)?),
+                        _ => None,
+                    }
+                });
+                match c {
+                    Some(c) => row.category = c as u8,
+                    None => note(st, FLD_CATEGORY, doc, v),
+                }
             }
-            "nic" => row.nic = small(11)?,
-            "nac_p" => row.nac_p = small(15)?,
-            "nac_v" => row.nac_v = small(7)?,
-            "sil" => row.sil = small(3)?,
-            "gva" => row.gva = small(3)?,
-            "sda" => row.sda = small(3)?,
-            "version" => row.version = small(7)?,
-            "sil_type" => {
-                row.sil_type = match doc.str(v).ok_or(())? {
-                    "unknown" => SIL_UNKNOWN,
-                    "perhour" => SIL_PER_HOUR,
-                    "persample" => SIL_PER_SAMPLE,
-                    _ => return Err(()),
-                };
-            }
+            "nic" => row.nic = small_field(doc, v, 11, FLD_NIC, st),
+            "nac_p" => row.nac_p = small_field(doc, v, 15, FLD_NAC_P, st),
+            "nac_v" => row.nac_v = small_field(doc, v, 7, FLD_NAC_V, st),
+            "sil" => row.sil = small_field(doc, v, 3, FLD_SIL, st),
+            "gva" => row.gva = small_field(doc, v, 3, FLD_GVA, st),
+            "sda" => row.sda = small_field(doc, v, 3, FLD_SDA, st),
+            "version" => row.version = small_field(doc, v, 7, FLD_VERSION, st),
+            "sil_type" => match doc.str(v) {
+                Some("unknown") => row.sil_type = SIL_UNKNOWN,
+                Some("perhour") => row.sil_type = SIL_PER_HOUR,
+                Some("persample") => row.sil_type = SIL_PER_SAMPLE,
+                // A null says nothing; any other value is a name this reader does not know.
+                _ => {
+                    if doc.kind(v) != Some(Kind::Null) {
+                        row.sil_type = SIL_UNKNOWN;
+                    }
+                    note(st, FLD_SIL_TYPE, doc, v);
+                }
+            },
             _ => {}
         }
     }
-    Ok(())
 }
 
-/// Reasons a row fails after its position and time were accepted.
-fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> Result<(), usize> {
+/// Reads the columns after position and time. Only the flags can refuse the row ([`REJ_FLAGS`]);
+/// every other malformed or unknown value is left absent (`unknown` for the source type) and
+/// counted in `st`.
+fn decode_rest(
+    doc: &Doc<'_>,
+    cols: &[NodeIx],
+    row: &mut Row,
+    bad: &mut u64,
+    st: &mut Stats,
+) -> Result<(), usize> {
     let col = |i: usize| cols.get(i).copied();
-    // Flags first: they say what the altitude and rate columns mean.
-    let flags = match opt_int(doc, col(6), 0, 15) {
-        Ok(Some(f)) => f as u8,
+    // Flags first: they say what the altitude and rate columns mean, and whether the position is
+    // current (stale) and continuous (new leg). Bits above the four readsb defines are cleared
+    // and counted: they cannot change what the four mean.
+    let flags = match (col(6), opt_int(doc, col(6), 0, 255)) {
+        (Some(n), Ok(Some(f))) => {
+            if f > 15 {
+                note(st, FLD_FLAGS, doc, n);
+            }
+            (f & 15) as u8
+        }
         _ => return Err(REJ_FLAGS),
     };
     row.flags = flags;
@@ -252,19 +310,27 @@ fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> 
     let mut alt = None;
     match col(3) {
         Some(n) if doc.kind(n) == Some(Kind::String) || doc.kind(n) == Some(Kind::StringPooled) => {
-            if doc.str(n) != Some("ground") {
-                return Err(REJ_ALTITUDE);
+            if doc.str(n) == Some("ground") {
+                row.flags |= F_GROUND;
+            } else {
+                note(st, FLD_ALTITUDE, doc, n);
             }
-            row.flags |= F_GROUND;
         }
-        n => match opt_int(doc, n, -ALT_LIMIT, ALT_LIMIT) {
+        Some(n) => match opt_int(doc, Some(n), -ALT_LIMIT, ALT_LIMIT) {
             Ok(a) => alt = a,
-            Err(()) => return Err(REJ_ALTITUDE),
+            Err(()) => note(st, FLD_ALTITUDE, doc, n),
         },
+        None => {}
     }
-    let geom = match opt_int(doc, col(10), -ALT_LIMIT, ALT_LIMIT) {
-        Ok(g) => g,
-        Err(()) => return Err(REJ_ALTITUDE),
+    let geom = match col(10) {
+        Some(n) => match opt_int(doc, Some(n), -ALT_LIMIT, ALT_LIMIT) {
+            Ok(g) => g,
+            Err(()) => {
+                note(st, FLD_GEOM_ALT, doc, n);
+                None
+            }
+        },
+        None => None,
     };
     if let Some(a) = alt {
         if flags & crate::F_ALT_GEOM != 0 {
@@ -276,24 +342,31 @@ fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> 
     if let Some(g) = geom {
         row.geom_alt_ft = g as i32;
     }
-    match opt_f64(doc, col(4)) {
-        Ok(Some(g)) if (0.0..=6000.0).contains(&g) => row.gs_dkt = fixed(g, 10.0) as u16,
-        Ok(None) => {}
-        _ => return Err(REJ_SPEED),
-    }
-    match opt_f64(doc, col(5)) {
-        Ok(Some(t)) if (0.0..=360.0).contains(&t) => {
-            row.track_ddeg = (fixed(t, 10.0) % 3600) as u16
+    if let Some(n) = col(4) {
+        match opt_f64(doc, Some(n)) {
+            Ok(Some(g)) if (0.0..=6000.0).contains(&g) => row.gs_dkt = fixed(g, 10.0) as u16,
+            Ok(None) => {}
+            _ => note(st, FLD_SPEED, doc, n),
         }
-        Ok(None) => {}
-        _ => return Err(REJ_TRACK),
     }
-    match opt_int(doc, col(7), -RATE_LIMIT, RATE_LIMIT) {
-        Ok(Some(r)) => row.vrate_fpm = r as i32,
-        Ok(None) => {}
-        Err(()) => return Err(REJ_RATE),
+    if let Some(n) = col(5) {
+        match opt_f64(doc, Some(n)) {
+            Ok(Some(t)) if (0.0..=360.0).contains(&t) => {
+                row.track_ddeg = (fixed(t, 10.0) % 3600) as u16
+            }
+            Ok(None) => {}
+            _ => note(st, FLD_TRACK, doc, n),
+        }
     }
-    // Source type: absent in files before 2022.
+    if let Some(n) = col(7) {
+        match opt_int(doc, Some(n), -RATE_LIMIT, RATE_LIMIT) {
+            Ok(Some(r)) => row.vrate_fpm = r as i32,
+            Ok(None) => {}
+            Err(()) => note(st, FLD_RATE, doc, n),
+        }
+    }
+    // Source type: absent in files before 2022. A name this reader does not know is the
+    // `unknown` source (which truth selection does not take as ADS-B).
     if let Some(n) = col(9) {
         match doc.kind(n) {
             Some(Kind::Null) => {}
@@ -301,10 +374,16 @@ fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> 
                 let s = doc.str(n).unwrap_or("");
                 match SOURCE_NAMES.iter().position(|&name| name == s) {
                     Some(i) => row.source = i as u8,
-                    None => return Err(REJ_SOURCE),
+                    None => {
+                        row.source = SOURCE_UNKNOWN;
+                        note(st, FLD_SOURCE, doc, n);
+                    }
                 }
             }
-            _ => return Err(REJ_SOURCE),
+            _ => {
+                row.source = SOURCE_UNKNOWN;
+                note(st, FLD_SOURCE, doc, n);
+            }
         }
     }
     // Indicated airspeed and roll are columns of every row; the aircraft object, when present,
@@ -318,8 +397,8 @@ fn decode_rest(doc: &Doc<'_>, cols: &[NodeIx], row: &mut Row, bad: &mut u64) -> 
     if let Some(n) = col(8) {
         match doc.kind(n) {
             Some(Kind::Null) => {}
-            Some(Kind::Object) => read_object(doc, n, row, bad).map_err(|()| REJ_OBJECT)?,
-            _ => return Err(REJ_OBJECT),
+            Some(Kind::Object) => read_object(doc, n, row, bad, st),
+            _ => note(st, FLD_OBJECT, doc, n),
         }
     }
     Ok(())
@@ -334,7 +413,8 @@ fn reject(st: &mut Stats, why: usize) {
 
 /// Decodes the trace file `json`, appending the reports inside `filter` to `out` and counting
 /// every row in `stats`. A structural error refuses the whole trace (nothing is appended for
-/// it, `stats` is untouched); a bad row is counted and skipped.
+/// it, `stats` is untouched); a row whose time, position, shape or flags cannot be read is
+/// counted and skipped; any other unknown or malformed field is counted and the row is kept.
 ///
 /// Rows outside the box or the time window are counted as such after their time and position
 /// are validated; the rest of such a row is not examined.
@@ -375,6 +455,13 @@ pub fn decode_trace(
     }
     let base_ms = fixed(base, 1000.0);
     let mut local = Stats::default();
+    // A reserved address (not flagged non-ICAO) is not an aircraft: count the rows, output none.
+    if is_reserved_address(icao) {
+        local.rows_seen = rows as u64;
+        local.reserved_address = rows as u64;
+        crate::stats_add(stats, &local);
+        return Ok(());
+    }
     let mut cols = [NodeIx::NONE; MAX_ROW_LEN];
     for rown in doc.elements(trace) {
         local.rows_seen += 1;
@@ -429,7 +516,7 @@ pub fn decode_trace(
         row.lat_e7 = lat_e7;
         row.lon_e7 = lon_e7;
         let mut bad = 0;
-        if let Err(why) = decode_rest(&doc, cols, &mut row, &mut bad) {
+        if let Err(why) = decode_rest(&doc, cols, &mut row, &mut bad, &mut local) {
             reject(&mut local, why);
             continue;
         }

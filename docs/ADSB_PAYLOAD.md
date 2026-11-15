@@ -108,10 +108,20 @@ tool's output), not refused.
 
 ## Reader rules
 
-A payload with a wrong length, magic, record length, a non-zero reserved byte, a count above the
-maximum of its version, or a record whose latitude or longitude is out of range, whose flags use
-bits 5 to 7, whose source is not 0 to 13 or 255, whose wind direction is 360 or more, whose
-heading is 36000 or more or whose roll is beyond 180 degrees is refused whole (`PayloadError`) and yields no reports.
+A payload with a wrong length, magic, record length, a non-zero reserved header field or a count
+above the maximum of its version is refused whole (`PayloadError`) and yields no reports: the
+records cannot be located. Inside a good payload, `decode_payload_lenient` keeps every record it
+can read and counts the rest (`PayloadCounts`):
+
+* a record whose latitude or longitude is out of range, or whose flags use bits 5 to 7, has no
+  readable position or flags (stale, new leg): it is dropped and counted;
+* a record whose source is not 0 to 13 or 255 is kept with source 13 (`unknown`);
+* a record whose wind direction is 360 or more, whose heading is 36000 or more or whose roll is
+  beyond 180 degrees is kept with that value absent;
+* a non-zero reserved byte (79, or 57 to 63 of `ADS1`) is ignored and counted.
+
+`decode_payload` is the strict form: any of those makes it refuse the whole payload with
+`BadRecord(n)`, as before. A payload with none of them decodes the same by both.
 
 ## Clip tool
 

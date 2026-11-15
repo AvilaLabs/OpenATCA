@@ -20,9 +20,9 @@ use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 use oa_adsb::{
-    encode_payload, frame_ranges, reports_extend, reports_len, scan_archive, summarize, Filter,
-    Reports, ScanEnd, ScanError, DEFAULT_FRAME_MS, MAX_FRAME_MS, MIN_FRAME_MS, REJECT_NAMES,
-    ZAU_BOX,
+    encode_payload, frame_ranges, reports_extend, reports_len, scan_archive, summarize,
+    unknown_value_text, Filter, Reports, ScanEnd, ScanError, DEFAULT_FRAME_MS, FIELD_NAMES,
+    MAX_FRAME_MS, MIN_FRAME_MS, REJECT_NAMES, ZAU_BOX,
 };
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 
@@ -239,6 +239,28 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         st.outside_box, st.outside_time, st.kept
     );
     eprintln!("measurements_bad {}", st.bad_measurements);
+    eprintln!("reserved_address_rows {}", st.reserved_address);
+    let unk: Vec<String> = st
+        .unknown_values
+        .iter()
+        .filter(|v| v.count > 0)
+        .map(|v| {
+            let f = FIELD_NAMES
+                .get(usize::from(v.field))
+                .copied()
+                .unwrap_or("?");
+            format!("{f}={:?}:{}", unknown_value_text(v), v.count)
+        })
+        .collect();
+    eprintln!(
+        "unknown_values {} (overflow {})",
+        if unk.is_empty() {
+            "none".to_string()
+        } else {
+            unk.join(" ")
+        },
+        st.unknown_overflow
+    );
     let rej: Vec<String> = REJECT_NAMES
         .iter()
         .zip(st.rejected.iter())
@@ -254,8 +276,8 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         }
     );
     eprintln!(
-        "aircraft={} nac_p_known={} nac_p_ge_8={} pairs={} jumps_over_{}kt={} jitter_pairs={} max_implied_kt={:.0}",
-        sum.aircraft, sum.nac_p_known, sum.nac_p_ge_8, sum.pairs, oa_adsb::MAX_JUMP_KT, sum.jumps,
+        "aircraft={} nac_p_known={} nac_p_ge_8={} pairs={} jumps={} jitter_pairs={} max_implied_kt={:.0}",
+        sum.aircraft, sum.nac_p_known, sum.nac_p_ge_8, sum.pairs, sum.jumps,
         sum.jitter, sum.max_implied_kt
     );
     for s in &res.error_samples {

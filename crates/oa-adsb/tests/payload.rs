@@ -365,3 +365,179 @@ fn legacy_ads1_payloads_still_decode_with_measurements_absent() {
     );
     assert_eq!(reports_len(&out), MAX_ROWS_PER_FRAME + 1);
 }
+
+// REQ: OA-ADSB-027
+#[test]
+fn a_bad_record_does_not_refuse_the_frame_the_valid_ones_are_kept_and_the_bad_one_counted() {
+    let r = sample_rows(6);
+    let mut p = Vec::new();
+    encode_payload(&mut p, &r, 0, 6).unwrap();
+    let rec = |i: usize| 16 + i * RECORD_LEN;
+    let mut m = p.clone();
+    m[rec(1) + 7] = 0x7f; // record 1: latitude out of range, no position
+    m[rec(2) + 38] = 0x80; // record 2: unknown flag bits
+    m[rec(3) + 39] = 14; // record 3: unknown source type
+    m[rec(4) + 59] = 0x68; // record 4: wind direction 360 or more
+    m[rec(4) + 60] = 0x01;
+    m[rec(5) + 79] = 1; // record 5: reserved byte set
+                        // Strict: the whole payload is refused at the first bad record (unchanged).
+    let mut out = Reports::default();
+    assert_eq!(
+        decode_payload(&m, &mut out).unwrap_err(),
+        PayloadError::BadRecord(1)
+    );
+    assert_eq!(reports_len(&out), 0);
+    // Lenient: records 0, 3, 4 and 5 are kept (3 with source unknown, 4 with the direction
+    // absent), 1 and 2 are dropped and counted; the layout is the one documented.
+    let c = decode_payload_lenient(&m, &mut out).unwrap();
+    assert_eq!(
+        c,
+        PayloadCounts {
+            records: 6,
+            kept: 4,
+            dropped: 2,
+            first_dropped: Some(1),
+            unknown_source: 1,
+            bad_measurement: 1,
+            reserved_set: 1,
+        }
+    );
+    assert_eq!(reports_row(&out, 0), reports_row(&r, 0));
+    let r3 = reports_row(&out, 1).unwrap();
+    assert_eq!(
+        (r3.icao, r3.source),
+        (reports_row(&r, 3).unwrap().icao, SOURCE_UNKNOWN)
+    );
+    assert_eq!(reports_row(&out, 2).unwrap().wd_deg, NONE_U16);
+    assert_eq!(
+        reports_row(&out, 3).unwrap().icao,
+        reports_row(&r, 5).unwrap().icao
+    );
+    // A clean payload decodes the same by both paths; structural errors still refuse whole.
+    let (mut a, mut b) = (Reports::default(), Reports::default());
+    assert_eq!(decode_payload(&p, &mut a).unwrap(), 6);
+    assert_eq!(decode_payload_lenient(&p, &mut b).unwrap().kept, 6);
+    assert_eq!(a, b);
+    let mut out = Reports::default();
+    assert_eq!(
+        decode_payload_lenient(&p[..p.len() - 1], &mut out).unwrap_err(),
+        PayloadError::Length
+    );
+    let mut bad_magic = p.clone();
+    bad_magic[0] = b'X';
+    assert_eq!(
+        decode_payload_lenient(&bad_magic, &mut out).unwrap_err(),
+        PayloadError::Magic
+    );
+    assert_eq!(reports_len(&out), 0);
+}
+
+fn pair(dist_m: f64, dt_s: f64, category: u8, gs_a_kt: u16, gs_b_kt: u16) -> JumpPair {
+    let dkt = |kt: u16| if kt == NONE_U16 { NONE_U16 } else { kt * 10 };
+    JumpPair {
+        dist_m,
+        dt_s,
+        slack_m: 200.0,
+        category,
+        gs_a_dkt: dkt(gs_a_kt),
+        gs_b_dkt: dkt(gs_b_kt),
+    }
+}
+
+const KT: f64 = 0.514_444_444_444;
+
+// REQ: OA-ADSB-028
+#[test]
+fn the_speed_rule_passes_real_fast_aircraft_and_catches_position_jumps() {
+    let v = |p: &JumpPair| jump_verdict(p, CAP_ORDINARY_KT);
+    // 900 kt for 3 s, reporting 900 kt: plausible whatever the category says, even for an
+    // airliner category, and for one that reports nothing about itself in a class that can.
+    for cat in [0xa3u8, 0xa6, 0] {
+        assert_eq!(
+            v(&pair(900.0 * KT * 3.0, 3.0, cat, 900, 900)),
+            JumpVerdict::Plausible
+        );
+    }
+    assert_eq!(
+        v(&pair(900.0 * KT * 3.0, 3.0, 0xa6, NONE_U16, NONE_U16)),
+        JumpVerdict::Plausible
+    );
+    // One report with a ground speed is enough; the larger one counts.
+    assert_eq!(
+        v(&pair(900.0 * KT * 3.0, 3.0, 0xa3, NONE_U16, 900)),
+        JumpVerdict::Plausible
+    );
+    // The 2,782 kt jump: caught with and without ground speed, in every class but space.
+    for (cat, gs, want) in [
+        (0xa3u8, 450u16, JumpVerdict::OverCap),
+        (0xa3, NONE_U16, JumpVerdict::OverCap),
+        (0xa6, 450, JumpVerdict::OverCap),
+        (0xa6, NONE_U16, JumpVerdict::OverCap),
+        (0, NONE_U16, JumpVerdict::OverCap),
+    ] {
+        assert_eq!(
+            v(&pair(2782.0 * KT * 2.0, 2.0, cat, gs, gs)),
+            want,
+            "{cat:x} {gs}"
+        );
+    }
+    // 1,500 kt is within the high-performance cap but not consistent with 450 kt reported.
+    assert_eq!(
+        v(&pair(1500.0 * KT * 2.0, 2.0, 0xa6, 450, 450)),
+        JumpVerdict::InconsistentWithGroundSpeed
+    );
+    assert_eq!(
+        v(&pair(1500.0 * KT * 2.0, 2.0, 0xa6, 1500, 1500)),
+        JumpVerdict::Plausible
+    );
+    // No ground speed: the class ceiling decides. 700 kt is fine for an airliner class, not for
+    // a light aircraft or a surface vehicle; 900 kt is over the airliner ceiling.
+    assert_eq!(
+        v(&pair(700.0 * KT * 5.0, 5.0, 0xa3, NONE_U16, NONE_U16)),
+        JumpVerdict::Plausible
+    );
+    assert_eq!(
+        v(&pair(700.0 * KT * 5.0, 5.0, 0xc2, NONE_U16, NONE_U16)),
+        JumpVerdict::OverCeiling
+    );
+    assert_eq!(
+        v(&pair(900.0 * KT * 5.0, 5.0, 0xa3, NONE_U16, NONE_U16)),
+        JumpVerdict::OverCeiling
+    );
+    // A 300 kt aircraft that jumps 2 km in 5 s (780 kt, under every cap and the old fixed limit)
+    // is caught by its own speed, and a 300 kt one that moved 4 km in 20 s (390 kt) is not.
+    assert_eq!(
+        v(&pair(2000.0, 5.0, 0xa3, 300, 300)),
+        JumpVerdict::InconsistentWithGroundSpeed
+    );
+    assert_eq!(
+        v(&pair(4000.0, 20.0, 0xa3, 300, 300)),
+        JumpVerdict::Plausible
+    );
+    // Position noise within the allowance is never a jump, even at no elapsed time; otherwise
+    // no time elapsed is an impossible displacement.
+    assert_eq!(v(&pair(150.0, 0.0, 0xa3, 0, 0)), JumpVerdict::Plausible);
+    assert!(is_jump(&pair(1000.0, 0.0, 0xa3, 900, 900), CAP_ORDINARY_KT));
+    // The caps by class.
+    assert_eq!(category_hard_cap_kt(0xa3, CAP_ORDINARY_KT), 1000.0);
+    assert_eq!(category_hard_cap_kt(0xa6, CAP_ORDINARY_KT), 2000.0);
+    assert_eq!(category_hard_cap_kt(0, CAP_ORDINARY_KT), 2000.0);
+    assert_eq!(category_hard_cap_kt(0xb7, CAP_ORDINARY_KT), 4088.0);
+    assert!(category_ceiling_kt(0xa5) < category_ceiling_kt(0xa6));
+    // The summary uses the same rule: a 900 kt pair reporting 900 kt is not a jump.
+    let mut r = Reports::default();
+    for k in 0..4 {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + i64::from(k) * 3_000_000_000;
+        row.lat_e7 = 400_000_000 + (f64::from(k) * 900.0 * KT * 3.0 / 0.011_119_5) as i32;
+        row.lon_e7 = -900_000_000;
+        row.gs_dkt = 9000;
+        row.category = 0xa3;
+        reports_push(&mut r, &row);
+    }
+    let s = summarize(&r);
+    assert_eq!((s.pairs, s.jumps), (3, 0));
+    r.gs_dkt.iter_mut().for_each(|g| *g = NONE_U16);
+    assert_eq!(summarize(&r).jumps, 3);
+}

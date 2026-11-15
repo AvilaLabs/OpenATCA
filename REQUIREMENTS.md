@@ -1169,10 +1169,9 @@ frame of their feed has been fed (as the ADS-B table is).
   files before 2022 (7 to 9 columns) decode with the source absent; extra columns are ignored.
 - **OA-ADSB-004** Aircraft-object fields are range checked (bit-field widths) and trailing spaces
   are removed from callsigns; unknown keys are ignored; duplicate keys keep the last; a malformed
-  known field refuses the row as `object`.
-- **OA-ADSB-005** Each value rule (position range, altitude, speed, track, flags, vertical rate,
-  source, row shape, time) refuses the row alone and counts it under its own reason; the other
-  rows of the trace are kept.
+  or null known field is left absent and counted (OA-ADSB-025), the row is kept.
+- **OA-ADSB-005** Only the rules the position's meaning needs (position range, flags, row shape,
+  time) refuse a row, alone, counted under their own reason; the other rows of the trace are kept.
 - **OA-ADSB-006** The box (edges inclusive) and the time window (`[from, to)`) are applied while
   decoding; rows outside are counted separately and not delivered; the ZAU box is
   38.5 to 46.5 N, 83.5 to 93.5 W.
@@ -1189,8 +1188,9 @@ frame of their feed has been fed (as the ADS-B table is).
   record value out of range is refused and appends nothing; the encoder refuses an empty or
   out-of-range row range and more than the per-frame maximum.
 - **OA-ADSB-012** The summary counts distinct aircraft, reports with `nac_p`, and those with
-  `nac_p` of 8 or more, and finds position jumps (implied speed over 700 kt and at least
-  0.5 NM apart) between consecutive reports of one aircraft in time order, exempting a report
+  `nac_p` of 8 or more, and finds position jumps (a pair the speed rule of OA-ADSB-028 calls
+  impossible and at least 0.5 NM apart) between consecutive reports of one aircraft in time order,
+  exempting a report
   that starts a new leg and counting closer pairs separately as noise; input order does not
   matter.
 - **OA-ADSB-013** Scanning a day archive decodes gzip and plain trace files, skips other entries,
@@ -1228,6 +1228,30 @@ frame of their feed has been fed (as the ADS-B table is).
   without them.
 - **OA-ADSB-024** A malformed or out-of-range measurement is left absent and counted once per row in
   `Stats::bad_measurements`; the row is still kept; 360 degrees wraps to 0.
+- **OA-ADSB-025** A row keeps its position when a field other than time, position, shape or flags is
+  unknown, malformed, out of range or null: an altitude, speed, track, vertical rate, an object
+  field (callsign, squawk, category, NIC, NACp, NACv, SIL, GVA, SDA, version, a non-object or
+  oversized object) is left absent, an unknown source type becomes `unknown` and an unknown
+  `sil_type` name becomes `unknown`, flag bits above the four readsb defines are cleared. Each
+  occurrence is counted per field and per value (`Stats::unknown_fields`, `Stats::unknown_values`
+  for the first 32 distinct pairs, the rest in `unknown_overflow`); counts add across traces. Flags
+  that are null, not an integer or above 255 still refuse the row, because they say whether the
+  position is current and continuous.
+- **OA-ADSB-026** Rows of a trace whose address is 0x000000 or 0xFFFFFF (misconfigured
+  transponders, shared by unrelated aircraft) are counted in `Stats::reserved_address` and not
+  output; the same digits with the non-ICAO mark are an ordinary identifier.
+- **OA-ADSB-027** `decode_payload_lenient` keeps the readable records of a payload and counts the
+  rest (position or flags out of range dropped; unknown source kept as `unknown`; bad measurement
+  kept absent; reserved byte ignored) and a wrong header or length still refuses the whole payload;
+  `decode_payload` stays strict and gives the same reports on a clean payload. The `ADS1` and
+  `ADS2` layouts are unchanged.
+- **OA-ADSB-028** `jump_verdict` decides whether a displacement is possible from the distance, the
+  time gap, the emitter category and the reported ground speeds: not over the category's hard cap
+  (1,000 kt ordinary, 2,000 kt high-performance, unmanned, no-information and unknown, 4,088 kt
+  space), consistent with a reported ground speed (at most 1.2 times the larger plus 40 kt plus 2 kt
+  per second of gap), and under the class ceiling when no ground speed is given. A 900 kt aircraft
+  reporting 900 kt is plausible; a 450 kt aircraft that jumps 2,782 kt is not; a displacement
+  within the position allowance is always plausible.
 ## Weather aloft (oa-grib2)
 
 GRIB Edition 2 decoder for NOAA RAP and HRRR winds and temperatures aloft, written from the WMO
@@ -1520,9 +1544,10 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   one named reason, and rows in always equal rows kept plus rows removed.
 - **OA-TRUTH-002** Quality fields are carried forward within an aircraft for at most 60 s; a row
   with no NACp, NIC or SIL value that young is not truth and is counted as such.
-- **OA-TRUTH-003** A report implying more than 700 kt from the last kept one (plus a 200 m
-  allowance) is removed and counted as a jump and does not affect the track; five jumps in a
-  row start a new leg instead of rejecting the rest of the flight.
+- **OA-TRUTH-003** A report that `oa_adsb::jump_verdict` calls impossible from the last kept one
+  (hard cap of the emitter category, reported ground speed, time gap, plus a 200 m allowance) is
+  removed and counted as a jump and does not affect the track; five jumps in a row start a new leg
+  instead of rejecting the rest of the flight.
 - **OA-TRUTH-004** An aircraft splits into legs at readsb's new-leg flag (also when the flagged
   row is itself removed) and at a gap of more than 120 s between kept reports, not at exactly
   120 s; leg start, end, report count and address are readable.
@@ -1563,6 +1588,12 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   kept and removed by reason, the leave-one-out table, the share of query times under the
   uncertainty gate, the build time and the model digest (equal to the library's); `--accel-q`,
   `--sigma-scale` and `--no-loo` are honoured; usage errors and unreadable input exit 2.
+- **OA-TRUTH-017** An aircraft flying 900 kt in a straight line and reporting 900 kt gives one
+  continuous leg with no report removed as a jump, at 1 s and at 3 s between reports.
+- **OA-TRUTH-018** A position jump of 2,782 kt in a 450 kt track is removed and counted, whether or
+  not the reports carry a ground speed.
+- **OA-TRUTH-019** Reports of the reserved addresses 0x000000 and 0xFFFFFF are removed as invalid
+  and give no aircraft or leg; the same digits with the non-ICAO mark are kept.
 ## M2 — Benchmark harness (oa-bench)
 
 Built on `docs/M2_DESIGN.md` sections 2 to 6. Truth comes through a plain query and leg list (`Truth`),

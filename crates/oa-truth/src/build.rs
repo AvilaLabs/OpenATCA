@@ -1,6 +1,9 @@
 //! Truth construction: selection, legs, smoothing. Core (pure).
 
-use oa_adsb::{reports_len, reports_row, Reports, F_NEW_LEG};
+use oa_adsb::{
+    is_reserved_address, jump_verdict, reports_len, reports_row, JumpPair, JumpVerdict, Reports,
+    F_NEW_LEG, NONE_U16,
+};
 
 use crate::frame::{frame_angle, frame_new, project, Frame};
 use crate::loo::{loo_finish, loo_leg, LooAcc};
@@ -13,7 +16,6 @@ use crate::{
 };
 
 const NS_PER_MS: i64 = 1_000_000;
-const MPS_PER_KT: f64 = 0.514_444_444_444;
 const EARTH_R_M: f64 = 6_371_008.8;
 /// Checks a configuration; the error names the first bad value.
 fn check_config(c: &TruthConfig) -> Result<(), TruthError> {
@@ -209,8 +211,20 @@ fn process_aircraft(
     rows: &[(u32, i64, u32)],
 ) -> Result<(), TruthError> {
     let cfg = b.cfg;
+    // The reserved addresses (all zeros, all ones) are what a misconfigured transponder sends:
+    // many aircraft share them, so their reports are not one aircraft's track.
+    if is_reserved_address(addr) {
+        if let Some(c) = b.stats.removed.get_mut(REM_INVALID) {
+            *c += rows.len() as u64;
+        }
+        return Ok(());
+    }
     let gap_ns = cfg.leg_gap_ms * NS_PER_MS;
     let mut q = QualityState::default();
+    // Ground speed of the last kept report, and the emitter category last printed for the
+    // aircraft (readsb prints it on a minority of rows).
+    let mut last_gs = NONE_U16;
+    let mut category = 0u8;
     let mut buf = LegBuf::default();
     let mut frame: Option<Frame> = None;
     let mut pending_new_leg = false;
@@ -222,6 +236,9 @@ fn process_aircraft(
         };
         if row.flags & F_NEW_LEG != 0 {
             pending_new_leg = true;
+        }
+        if row.category != 0 {
+            category = row.category;
         }
         let verdict = quality_check(&mut q, &row, t, cfg);
         let (fail, carried, nacp) = (verdict.removal, verdict.carried, verdict.nacp);
@@ -243,9 +260,15 @@ fn process_aircraft(
             } else if t - lt > gap_ns {
                 split = Some(SPLIT_GAP);
             } else {
-                let dt = (t - lt) as f64 / 1.0e9;
-                let allowed = cfg.max_jump_kt * MPS_PER_KT * dt + cfg.jump_slack_m;
-                if dist_m(la, lo, row.lat_e7, row.lon_e7) > allowed {
+                let pair = JumpPair {
+                    dist_m: dist_m(la, lo, row.lat_e7, row.lon_e7),
+                    dt_s: (t - lt) as f64 / 1.0e9,
+                    slack_m: cfg.jump_slack_m,
+                    category,
+                    gs_a_dkt: last_gs,
+                    gs_b_dkt: row.gs_dkt,
+                };
+                if jump_verdict(&pair, cfg.max_jump_kt) != JumpVerdict::Plausible {
                     consecutive_jumps += 1;
                     if consecutive_jumps >= cfg.jump_resync {
                         split = Some(SPLIT_JUMP);
@@ -269,6 +292,7 @@ fn process_aircraft(
         }
         consecutive_jumps = 0;
         pending_new_leg = false;
+        last_gs = row.gs_dkt;
         if buf.t.is_empty() {
             frame = Some(frame_new(deg(row.lat_e7), deg(row.lon_e7)));
         }

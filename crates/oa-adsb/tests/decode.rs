@@ -188,7 +188,7 @@ fn aircraft_object_fields_and_their_ranges() {
     // Duplicate keys: the last one wins (oa-json policy).
     let (_, out, _) = run(&wrap(&[&obj(r#"{"nac_p":3,"nac_p":9}"#)]), &WIDE);
     assert_eq!(row0(&out).nac_p, 9);
-    // Malformed fields refuse the row, counted as `object`.
+    // Malformed fields leave the field absent and the row kept; see OA-ADSB-025.
     for bad in [
         r#"{"nic":12}"#,
         r#"{"nac_p":-1}"#,
@@ -214,77 +214,25 @@ fn aircraft_object_fields_and_their_ranges() {
         let (res, out, st) = run(&wrap(&[&obj(bad)]), &WIDE);
         res.unwrap();
         assert_eq!(
-            (st.kept, st.rejected[REJ_OBJECT], reports_len(&out)),
-            (0, 1, 0),
+            (st.kept, st.rejected.iter().sum::<u64>(), reports_len(&out)),
+            (1, 0, 1),
             "{bad}"
         );
+        assert_eq!(st.unknown_fields.iter().sum::<u64>(), 1, "{bad}");
     }
 }
 
 // REQ: OA-ADSB-005
 #[test]
-fn each_value_rule_refuses_the_row_and_counts_it_by_reason() {
-    let base = |lat: &str, alt: &str, gs: &str, tr: &str, fl: &str, vr: &str, src: &str| {
-        format!("[1,{lat},-90.0,{alt},{gs},{tr},{fl},{vr},null,{src}]")
-    };
-    let cases: [(String, usize); 14] = [
-        (
-            base("91.0", "100", "1.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_POSITION,
-        ),
-        (
-            base("null", "100", "1.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_POSITION,
-        ),
-        (
-            base(
-                "40.0",
-                "\"airborne\"",
-                "1.0",
-                "1.0",
-                "0",
-                "0",
-                "\"adsb_icao\"",
-            ),
-            REJ_ALTITUDE,
-        ),
-        (
-            base("40.0", "210000", "1.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_ALTITUDE,
-        ),
-        (
-            base("40.0", "100.5", "1.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_ALTITUDE,
-        ),
-        (
-            base("40.0", "100", "7000.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_SPEED,
-        ),
-        (
-            base("40.0", "100", "-1.0", "1.0", "0", "0", "\"adsb_icao\""),
-            REJ_SPEED,
-        ),
-        (
-            base("40.0", "100", "1.0", "361.0", "0", "0", "\"adsb_icao\""),
-            REJ_TRACK,
-        ),
-        (
-            base("40.0", "100", "1.0", "1.0", "16", "0", "\"adsb_icao\""),
-            REJ_FLAGS,
-        ),
-        (
-            base("40.0", "100", "1.0", "1.0", "null", "0", "\"adsb_icao\""),
-            REJ_FLAGS,
-        ),
-        (
-            base("40.0", "100", "1.0", "1.0", "0", "300000", "\"adsb_icao\""),
-            REJ_RATE,
-        ),
-        (
-            base("40.0", "100", "1.0", "1.0", "0", "0", "\"adsb_icao_v2\""),
-            REJ_SOURCE,
-        ),
-        (base("40.0", "100", "1.0", "1.0", "0", "0", "7"), REJ_SOURCE),
+fn only_time_position_shape_and_flags_refuse_a_row_and_are_counted_by_reason() {
+    let base =
+        |lat: &str, fl: &str| format!("[1,{lat},-90.0,100,1.0,1.0,{fl},0,null,\"adsb_icao\"]");
+    let cases: [(String, usize); 6] = [
+        (base("91.0", "0"), REJ_POSITION),
+        (base("null", "0"), REJ_POSITION),
+        (base("40.0", "256"), REJ_FLAGS),
+        (base("40.0", "-1"), REJ_FLAGS),
+        (base("40.0", "null"), REJ_FLAGS),
         ("[1,40.0,-90.0]".to_string(), REJ_SHAPE),
     ];
     for (row, why) in &cases {
@@ -451,13 +399,140 @@ fn row_count_bound_is_enforced() {
     let long = format!("[{}]", vec!["0"; MAX_ROW_LEN + 1].join(","));
     let (_, _, st) = run(&wrap(&[&long]), &WIDE);
     assert_eq!(st.rejected[REJ_SHAPE], 1);
-    // An object with too many members is refused as an object error.
+    // An object with too many members is ignored whole and counted; the row is kept.
     let members: Vec<String> = (0..=MAX_OBJECT_MEMBERS)
         .map(|i| format!("\"k{i}\":0"))
         .collect();
     let row = format!("[1,40.0,-90.0,1,1,1,0,0,{{{}}}]", members.join(","));
     let (_, _, st) = run(&wrap(&[&row]), &WIDE);
-    assert_eq!(st.rejected[REJ_OBJECT], 1);
+    assert_eq!((st.kept, st.unknown_fields[FLD_OBJECT]), (1, 1));
+}
+
+// REQ: OA-ADSB-025
+#[test]
+fn an_unknown_or_null_minor_field_keeps_the_row_and_is_counted_by_field_and_value() {
+    let obj = |o: &str| format!("[1,40.0,-90.0,1000,300.0,90.0,0,0,{o},\"adsb_icao\"]");
+    let cases: [(&str, usize, &str); 7] = [
+        (r#"{"nac_p":16}"#, FLD_NAC_P, "16"),
+        (r#"{"nic":null}"#, FLD_NIC, "null"),
+        (r#"{"sil_type":"bogus"}"#, FLD_SIL_TYPE, "bogus"),
+        (r#"{"flight":7}"#, FLD_FLIGHT, "7"),
+        (r#"{"squawk":"1800"}"#, FLD_SQUAWK, "1800"),
+        (r#"{"category":"ZZ"}"#, FLD_CATEGORY, "ZZ"),
+        (r#"[1]"#, FLD_OBJECT, "<array>"),
+    ];
+    let mut total = Stats::default();
+    for (o, field, text) in cases {
+        let (res, out, st) = run(&wrap(&[&obj(o)]), &WIDE);
+        res.unwrap();
+        assert_eq!((st.kept, reports_len(&out)), (1, 1), "{o}");
+        assert_eq!(row0(&out).lat_e7, 400_000_000, "{o}");
+        assert_eq!(st.rejected, [0; REJECT_KINDS], "{o}");
+        assert_eq!(st.unknown_fields[field], 1, "{o}");
+        let v = st.unknown_values[0];
+        assert_eq!(
+            (usize::from(v.field), unknown_value_text(&v), v.count),
+            (field, text, 1),
+            "{o}"
+        );
+        stats_add(&mut total, &st);
+    }
+    // Counts merge by field and value.
+    let (_, _, again) = run(&wrap(&[&obj(r#"{"nac_p":16}"#)]), &WIDE);
+    stats_add(&mut total, &again);
+    assert_eq!(total.unknown_fields[FLD_NAC_P], 2);
+    let nacp = total
+        .unknown_values
+        .iter()
+        .find(|v| usize::from(v.field) == FLD_NAC_P);
+    assert_eq!(nacp.map(|v| v.count), Some(2));
+    // The sil_type name this reader does not know is the `unknown` enumerator; null is absent.
+    let (_, out, _) = run(&wrap(&[&obj(r#"{"sil_type":"bogus"}"#)]), &WIDE);
+    assert_eq!(row0(&out).sil_type, SIL_UNKNOWN);
+    let (_, out, _) = run(&wrap(&[&obj(r#"{"nic":null,"nac_p":9}"#)]), &WIDE);
+    assert_eq!((row0(&out).nic, row0(&out).nac_p), (NONE_U8, 9));
+    // An unknown source string or a number there: kept, source `unknown`; bad altitude, speed,
+    // track, rate and flag bits above the four defined: kept, absent.
+    let row = |alt: &str, gs: &str, tr: &str, fl: &str, vr: &str, src: &str| {
+        format!("[1,40.0,-90.0,{alt},{gs},{tr},{fl},{vr},null,{src}]")
+    };
+    let a = "\"adsb_icao\"";
+    let cases = [
+        (
+            row("1000", "300.0", "90.0", "0", "0", "\"adsb_icao_v2\""),
+            FLD_SOURCE,
+        ),
+        (row("1000", "300.0", "90.0", "0", "0", "7"), FLD_SOURCE),
+        (
+            row("\"airborne\"", "300.0", "90.0", "0", "0", a),
+            FLD_ALTITUDE,
+        ),
+        (row("210000", "300.0", "90.0", "0", "0", a), FLD_ALTITUDE),
+        (row("100.5", "300.0", "90.0", "0", "0", a), FLD_ALTITUDE),
+        (row("1000", "7000.0", "90.0", "0", "0", a), FLD_SPEED),
+        (row("1000", "-1.0", "90.0", "0", "0", a), FLD_SPEED),
+        (row("1000", "300.0", "361.0", "0", "0", a), FLD_TRACK),
+        (row("1000", "300.0", "90.0", "0", "300000", a), FLD_RATE),
+        (row("1000", "300.0", "90.0", "18", "0", a), FLD_FLAGS),
+    ];
+    for (r, field) in &cases {
+        let (_, out, st) = run(&wrap(&[r]), &WIDE);
+        assert_eq!((st.kept, reports_len(&out)), (1, 1), "{r}");
+        assert_eq!(
+            (st.unknown_fields[*field], st.rejected.iter().sum::<u64>()),
+            (1, 0),
+            "{r}"
+        );
+    }
+    let (_, out, _) = run(&wrap(&[&cases[0].0]), &WIDE);
+    assert_eq!(row0(&out).source, SOURCE_UNKNOWN);
+    assert_eq!(SOURCE_NAMES[usize::from(SOURCE_UNKNOWN)], "unknown");
+    let (_, out, _) = run(&wrap(&[&cases[9].0]), &WIDE);
+    assert_eq!(row0(&out).flags, 2);
+    // Past the table size the overflow is counted, not lost.
+    let many: Vec<String> = (0..MAX_UNKNOWN_VALUES + 3)
+        .map(|i| format!("[{i},40.0,-90.0,1,1,1,0,0,null,\"src{i}\"]"))
+        .collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let (_, _, st) = run(&wrap(&refs), &WIDE);
+    assert_eq!(
+        st.unknown_fields[FLD_SOURCE],
+        (MAX_UNKNOWN_VALUES + 3) as u64
+    );
+    assert_eq!(st.unknown_overflow, 3);
+}
+
+// REQ: OA-ADSB-026
+#[test]
+fn rows_of_a_reserved_address_are_counted_and_never_output() {
+    let rows = ["[1,40.0,-90.0,1,1,1,0]", "[2,40.0,-90.0,1,1,1,0]"];
+    for icao in ["000000", "ffffff", "FFFFFF"] {
+        let json = format!(
+            "{{\"icao\":\"{icao}\",\"timestamp\":1700000000.000,\"trace\":[{}]}}",
+            rows.join(",")
+        );
+        let (res, out, st) = run(&json, &WIDE);
+        res.unwrap();
+        assert_eq!(
+            (
+                reports_len(&out),
+                st.kept,
+                st.rows_seen,
+                st.reserved_address
+            ),
+            (0, 0, 2, 2),
+            "{icao}"
+        );
+    }
+    // A non-ICAO pseudo-address with the same digits is a trackfile identifier, not reserved.
+    let json = format!(
+        "{{\"icao\":\"~000000\",\"timestamp\":1700000000.000,\"trace\":[{}]}}",
+        rows.join(",")
+    );
+    let (_, out, st) = run(&json, &WIDE);
+    assert_eq!((reports_len(&out), st.reserved_address), (2, 0));
+    assert!(is_reserved_address(0) && is_reserved_address(0x00ff_ffff));
+    assert!(!is_reserved_address(1) && !is_reserved_address(NON_ICAO));
 }
 
 // REQ: OA-ADSB-009
