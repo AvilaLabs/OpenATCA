@@ -41,6 +41,18 @@ design, section 3). Availability and data age are reported separately and are no
   we keep only reports whose NACp is 8 or better (estimated position uncertainty under 0.05 NM)
   and score against a smoothed reference built after the fact from the whole trajectory, never
   against single reports.
+- **Truth and input share data.** OpenATCA's tracker takes in the ADS-B reports that the truth
+  is built from, so a score against ADS-B truth cannot see error carried by the reports
+  themselves (a GNSS position bias, a wrong time stamp): the tracker and the reference both
+  inherit it. The tracker's own scoring splits each aircraft's reports in two, even-numbered to
+  the tracker and odd-numbered to the truth, which removes the direct reuse but not the error
+  the halves share; GNSS error is correlated over seconds and is in both. ERAM fuses ADS-B with
+  radar where it has both, so less of its error is shared with the truth, and a comparison
+  against an ADS-B-only OpenATCA run favours OpenATCA by that difference. Every absolute
+  accuracy number of OpenATCA against ADS-B truth is therefore labelled as such and read as a
+  lower bound on its error, and every ERAM comparison states which inputs each side had. The
+  independent checks available are radar-only runs scored against ADS-B truth and the
+  simulated sensors below, whose error is known.
 - **Event truth** (meter-fix crossing times, runway threshold times, top of climb, top of
   descent) is derived from the same smoothed reference.
 - **Synthetic truth** for things real traffic does not contain often enough (near mid-air
