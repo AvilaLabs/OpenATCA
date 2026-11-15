@@ -109,6 +109,8 @@ fn wrap180(d: f64) -> f64 {
 
 /// The residual of `plot` against a reference at geodetic `(lat, lon, h_m)` whose position
 /// covariance in the local plane is `cov = [ee, en, nn]` (m^2) and height variance `var_h_m2`.
+// Eight plain inputs of one residual; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn reg_residual(
     g: &RadarGeom,
     s: &RadarSite,
@@ -127,7 +129,8 @@ pub fn reg_residual(
     let (st, ct) = az.to_radians().sin_cos();
     // Radial (u) and tangential (v) horizontal unit vectors.
     let (u, v) = ([st, ct], [ct, -st]);
-    let quad = |a: [f64; 2]| a[0] * a[0] * cov[0] + 2.0 * a[0] * a[1] * cov[1] + a[1] * a[1] * cov[2];
+    let quad =
+        |a: [f64; 2]| a[0] * a[0] * cov[0] + 2.0 * a[0] * a[1] * cov[1] + a[1] * a[1] * cov[2];
     let var_r_track = cos_e * cos_e * quad(u) + sin_e * sin_e * var_h_m2;
     let var_t_track = quad(v) / (ground * ground);
     let sa = s.sigma_az_deg.to_radians();
@@ -215,6 +218,7 @@ mod tests {
         range_quantum_m: 0.0,
         alt_quantum_ft: 100,
         period_ns: 4_800_000_000,
+        epoch_ns: 0,
         sensor: 1,
     };
 
@@ -250,8 +254,10 @@ mod tests {
                 reg_update(&mut st, t, &z);
                 t += 1_000_000_000 * (1 + i64::from(k % 3));
             }
-            errs.push(((st.range_m - true_r) / st.var_range_m2.sqrt(),
-                       (st.az_deg - true_a) / st.var_az_deg2.sqrt()));
+            errs.push((
+                (st.range_m - true_r) / st.var_range_m2.sqrt(),
+                (st.az_deg - true_a) / st.var_az_deg2.sqrt(),
+            ));
             if trial == 0 {
                 r = st;
             }

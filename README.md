@@ -72,7 +72,7 @@ and freedom from vendor lock-in. An open-source platform provides those by const
 | `crates/oa-asterix` | ASTERIX category 021, 048 and 062 encoder and decoder: generic core (data block, FSPEC, item kinds, constant UAP tables) and typed items for the tracker |
 | `crates/oa-sensorsim` | M3 sensor simulation from `oa-truth`: rotating-beam secondary radar plots (named error profiles from BENCHMARKS 3.1, bias, Pd, false and split plots, line of sight, quantisation) as a table and ASTERIX CAT048, ADS-B spoof transforms (ghost, drift, replay, duplicate address) with row labels, and the `oa-sensorsim` binary |
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, report writer, and the `oa-bench` binary |
-| `crates/oa-track` | M3 surveillance tracker, ADS-B only: horizontal and vertical interacting-multiple-model filters in a re-centred local frame, time-of-applicability ordering with re-filtering, M-of-N initiation, coasting, drop, fixed one-second output, split-report scoring against `oa-truth` and `oa-bench`, and the `oa-track-run` tool |
+| `crates/oa-track` | M3 surveillance tracker: ADS-B and radar plots (exact plot conversion, exact global-nearest-neighbour association, online radar registration against ADS-B) with horizontal and vertical interacting-multiple-model filters in a re-centred local frame, time-of-applicability ordering with re-filtering, M-of-N initiation, coasting, drop, fixed one-second output, split-report scoring against `oa-truth` and `oa-bench`, and the `oa-track-run` and `oa-track-fusion` tools |
 | `tools/oa-trace` | Requirements traceability checker |
 
 ## Building and testing

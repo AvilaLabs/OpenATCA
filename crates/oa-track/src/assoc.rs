@@ -352,6 +352,7 @@ mod tests {
 
     /// The best objective over every partial matching, by exhaustive search.
     fn brute(pairs: &[Pair], n_tracks: usize, n_plots: usize, gate: f64) -> f64 {
+        #[allow(clippy::too_many_arguments)]
         fn rec(
             j: usize,
             n_plots: usize,

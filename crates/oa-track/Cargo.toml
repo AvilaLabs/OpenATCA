@@ -22,3 +22,7 @@ oa-truth = { path = "../oa-truth" }
 [[bin]]
 name = "oa-track-run"
 path = "src/main.rs"
+
+[[bin]]
+name = "oa-track-fusion"
+path = "src/fusion_main.rs"

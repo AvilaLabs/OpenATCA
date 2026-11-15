@@ -104,6 +104,9 @@ pub struct RadarSite {
     pub alt_quantum_ft: u16,
     /// Antenna rotation period, ns.
     pub period_ns: i64,
+    /// An instant at which a revolution starts (a north crossing), Unix ns; revolution numbers
+    /// are counted from it. A real radar's is read from its north marker messages.
+    pub epoch_ns: i64,
     /// Sensor identifier written to the measurements.
     pub sensor: u16,
 }
@@ -256,11 +259,7 @@ pub fn radar_geom(s: &RadarSite) -> RadarGeom {
 /// seen from the radar: the exact forward model, the one the simulator uses.
 pub fn polar_of(g: &RadarGeom, lat_deg: f64, lon_deg: f64, h_m: f64) -> (f64, f64) {
     let p = ecef(lat_deg, lon_deg, h_m);
-    let d = [
-        p[0] - g.origin[0],
-        p[1] - g.origin[1],
-        p[2] - g.origin[2],
-    ];
+    let d = [p[0] - g.origin[0], p[1] - g.origin[1], p[2] - g.origin[2]];
     let az = dot(&d, &g.east).atan2(dot(&d, &g.north)).to_degrees();
     (dot(&d, &d).sqrt(), az.rem_euclid(360.0))
 }
@@ -330,6 +329,8 @@ pub fn polar_to_geodetic(
 /// azimuth `az_deg`, elevation `elev_rad` and ground arc `ground_m`, with range variance
 /// `var_rho_m2`, azimuth variance `var_az_rad2` and height variance `var_h_m2` (first order; see
 /// the module documentation).
+// Eight plain scalars of one formula; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn polar_cov_local(
     g: &RadarGeom,
     rho_m: f64,
@@ -466,6 +467,7 @@ mod tests {
         range_quantum_m: 0.0,
         alt_quantum_ft: 100,
         period_ns: 4_800_000_000,
+        epoch_ns: 0,
         sensor: 1,
     };
 
@@ -494,7 +496,10 @@ mod tests {
             }
         }
         assert!(n > 300, "{n}");
-        assert!(worst < 1.0e-3, "worst inverse error {worst} m over {n} points");
+        assert!(
+            worst < 1.0e-3,
+            "worst inverse error {worst} m over {n} points"
+        );
     }
 
     // REQ: OA-TRK-030
@@ -570,7 +575,11 @@ mod tests {
             assert!(rel(mee, cov[0]) < 0.10, "ee {mee} vs {}", cov[0]);
             assert!(rel(mnn, cov[2]) < 0.10, "nn {mnn} vs {}", cov[2]);
             let scale = (cov[0] * cov[2]).sqrt();
-            assert!((men - cov[1]).abs() < 0.10 * scale, "en {men} vs {}", cov[1]);
+            assert!(
+                (men - cov[1]).abs() < 0.10 * scale,
+                "en {men} vs {}",
+                cov[1]
+            );
         }
     }
 
@@ -694,10 +703,7 @@ mod tests {
                 range_m: 700_000.0,
                 ..ok
             },
-            RadarPlot {
-                az_deg: -1.0,
-                ..ok
-            },
+            RadarPlot { az_deg: -1.0, ..ok },
             RadarPlot {
                 az_deg: 361.0,
                 ..ok

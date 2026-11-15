@@ -45,15 +45,16 @@ use oa_geo::aeqd::{frame_new, project};
 use crate::assoc::{ambiguous, gnn, nearest, GnnStats, Pair, NONE as NO_TRACK};
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_MAX_ACCEL_MPS2,
-    CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M, GATE_H_CHI2, GATE_TOTAL_CHI2,
-    GATE_V_CHI2, KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS,
-    RADAR_INIT_M, RADAR_INIT_N, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
-    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_PUBLISH_NS,
+    CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M, GATE_H_CHI2,
+    GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2,
+    KEY_RADAR_BASE, MAX_ASSOC_TRACKS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, RADAR_INIT_M,
+    RADAR_INIT_N, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
+    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_PUBLISH_NS, RESCUED_COST_FRACTION,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
-    plot_check, plot_convert, polar_of, radar_geom, site_check, Converted, RadarError,
-    RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT, NO_BIAS,
+    plot_check, plot_convert, polar_of, radar_geom, site_check, Converted, RadarError, RadarGeom,
+    RadarPlot, RadarSite, FT_M, NONE_ALT, NO_BIAS,
 };
 use crate::registration::{
     reg_bias, reg_new, reg_predict, reg_residual, reg_sample, reg_update, RegSample, RegState,
@@ -64,8 +65,8 @@ use crate::tracker::{
     tracker_update, Tracker,
 };
 use crate::types::{
-    output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput, TrackerConfig,
-    TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT,
+    output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput,
+    TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT,
 };
 
 /// Association rule of the run: exact global nearest neighbour, or the plain nearest neighbour
@@ -205,6 +206,8 @@ pub struct FusionStats {
     /// Sums of the assignment solves (radar association and candidate association).
     pub gnn: GnnStats,
     pub reg_clamped: u64,
+    /// Inputs processed (ADS-B measurements and plots, after the buckets completed).
+    pub processed: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -394,10 +397,7 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
             f.stats.pending_overflow += 1;
             continue;
         }
-        f.pend_plots.push(PendPlot {
-            radar: r,
-            plot: *p,
-        });
+        f.pend_plots.push(PendPlot { radar: r, plot: *p });
     }
 }
 
@@ -506,12 +506,18 @@ fn d2_horizontal(row: &OutRow, z_lat: f64, z_lon: f64, z_cov: [f64; 3]) -> f64 {
 }
 
 /// Squared normalised altitude difference, where the plot and the row both have an altitude.
-fn d2_vertical(row: &OutRow, plot: &RadarPlot, quant_ft: u16) -> f64 {
+fn d2_vertical(row: &OutRow, plot: &RadarPlot, quant_ft: u16, since_update_ns: i64) -> f64 {
     if plot.alt_ft == NONE_ALT || row.flags & O_HAS_ALT == 0 {
         return 0.0;
     }
     let q = f64::from(quant_ft);
-    let var = f64::from(row.alt_var_ft2).max(0.0) + q * q / 12.0 + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT;
+    let dt_min = since_update_ns.clamp(0, (GATE_MANEUVER_MAX_DT_S * NS_PER_S as f64) as i64) as f64
+        / (60.0 * NS_PER_S as f64);
+    let onset = GATE_VRATE_SIGMA_FPM * dt_min;
+    let var = f64::from(row.alt_var_ft2).max(0.0)
+        + q * q / 12.0
+        + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT
+        + onset * onset;
     let dz = f64::from(plot.alt_ft) - f64::from(row.alt_ft);
     dz * dz / var
 }
@@ -697,7 +703,7 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
             {
                 continue;
             }
-            let Some((row, _, _)) = tracker_predict(&f.tracker, t.key, p.time_ns) else {
+            let Some((row, _, last_ns)) = tracker_predict(&f.tracker, t.key, p.time_ns) else {
                 continue;
             };
             let conv = match conv_own.get(a).copied().flatten() {
@@ -711,21 +717,34 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
                 },
             };
             f.stats.pairs_tested += 1;
-            let dh = d2_horizontal(
-                &row,
+            let dt_s = ((p.time_ns - last_ns).max(0) as f64) / NS_PER_S as f64;
+            let man_dt = dt_s.min(GATE_MANEUVER_MAX_DT_S);
+            let man = 0.5 * GATE_MANEUVER_MPS2 * man_dt * man_dt;
+            let (plat, plon) = (
                 f64::from(conv.m.lat_e7) / 1.0e7,
                 f64::from(conv.m.lon_e7) / 1.0e7,
-                cov_f64(conv.m.pos_cov_m2),
             );
-            let dv = d2_vertical(&row, p, s.alt_quantum_ft);
-            if dh <= GATE_H_CHI2 && dv <= GATE_V_CHI2 && dh + dv <= GATE_TOTAL_CHI2 {
+            let zc = cov_f64(conv.m.pos_cov_m2);
+            let dh = d2_horizontal(&row, plat, plon, zc);
+            // The gate allows for a manoeuvre the filter has not caught up with; the cost does
+            // not, so a pair that passes only by that allowance costs just under the gate and
+            // is assigned only where no better pair competes for either side.
+            let dh_gate = d2_horizontal(
+                &row,
+                plat,
+                plon,
+                [zc[0] + man * man, zc[1], zc[2] + man * man],
+            );
+            let dv = d2_vertical(&row, p, s.alt_quantum_ft, p.time_ns - last_ns);
+            if dh_gate <= GATE_H_CHI2 && dv <= GATE_V_CHI2 && dh_gate + dv <= GATE_TOTAL_CHI2 {
                 f.stats.pairs_gated += 1;
                 let mut m = conv.m;
                 m.addr = t.key;
+                let cost = (dh + dv).min(RESCUED_COST_FRACTION * GATE_TOTAL_CHI2);
                 pairs.push(Pair {
                     track: ti as u32,
                     plot: a as u32,
-                    cost: dh + dv,
+                    cost,
                 });
                 infos.push(PairInfo { m, row });
             }
@@ -733,7 +752,13 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
     }
     let mut plot_track: Vec<u32> = Vec::new();
     if f.cfg.assoc == ASSOC_GNN {
-        let st = gnn(tracks.len(), anon.len(), &pairs, GATE_TOTAL_CHI2, &mut plot_track);
+        let st = gnn(
+            tracks.len(),
+            anon.len(),
+            &pairs,
+            GATE_TOTAL_CHI2,
+            &mut plot_track,
+        );
         add_gnn(&mut f.stats.gnn, &st);
     } else {
         nearest(anon.len(), &pairs, &mut plot_track);
@@ -833,6 +858,7 @@ struct Ev {
 
 fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out: &mut TrackOutput) {
     f.stats.reg_clamped = f.reg.iter().map(|r| r.clamped).sum();
+    f.stats.processed += (adsb.len() + plots.len()) as u64;
     // Group plots by radar, keeping time order.
     let mut groups: Vec<(usize, Vec<RadarPlot>)> = Vec::new();
     for p in plots {
@@ -929,8 +955,11 @@ fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
 // ---- radar-only initiation ------------------------------------------------------------
 
 fn scan_of(f: &Fusion, radar: usize, t_ns: i64) -> i64 {
-    let p = f.sites.get(radar).map_or(NS_PER_S, |s| s.period_ns);
-    t_ns.div_euclid(p)
+    let (p, e) = f
+        .sites
+        .get(radar)
+        .map_or((NS_PER_S, 0), |s| (s.period_ns, s.epoch_ns));
+    (t_ns - e).div_euclid(p)
 }
 
 /// Normalised cost of a plot joining a candidate: the distance from the candidate's straight-line
@@ -946,8 +975,15 @@ fn cand_cost(c: &Cand, m: &Measurement, plot_scan: i64) -> Option<f64> {
     if dt <= 0.0 {
         return None;
     }
-    let frame = frame_new(f64::from(last.lat_e7) / 1.0e7, f64::from(last.lon_e7) / 1.0e7);
-    let (x, y) = project(&frame, f64::from(m.lat_e7) / 1.0e7, f64::from(m.lon_e7) / 1.0e7);
+    let frame = frame_new(
+        f64::from(last.lat_e7) / 1.0e7,
+        f64::from(last.lon_e7) / 1.0e7,
+    );
+    let (x, y) = project(
+        &frame,
+        f64::from(m.lat_e7) / 1.0e7,
+        f64::from(m.lon_e7) / 1.0e7,
+    );
     let noise = |c: [f32; 3]| 4.0 * f64::from(c[0]).max(f64::from(c[2])).max(0.0).sqrt();
     let (pred, radius) = if n >= 2 {
         let prev = c.meas.get(n - 2)?;
@@ -1088,7 +1124,13 @@ fn initiate(
         ms.push(row);
     }
     let mut plot_cand: Vec<u32> = Vec::new();
-    let st = gnn(cand_ix.len(), anon.len(), &pairs, GATE_TOTAL_CHI2, &mut plot_cand);
+    let st = gnn(
+        cand_ix.len(),
+        anon.len(),
+        &pairs,
+        GATE_TOTAL_CHI2,
+        &mut plot_cand,
+    );
     add_gnn(&mut f.stats.gnn, &st);
     for (a, &j) in anon.iter().enumerate() {
         let Some(p) = plots.get(j) else { continue };
@@ -1250,6 +1292,7 @@ mod tests {
         range_quantum_m: 0.0,
         alt_quantum_ft: 100,
         period_ns: 4_800_000_000,
+        epoch_ns: 0,
         sensor: 1,
     };
 
@@ -1367,7 +1410,10 @@ mod tests {
         assert!((9.0..10.2).contains(&dt), "initiation delay {dt} s");
         assert!(recs[0].key >= KEY_RADAR_BASE);
         // No output row before the decision.
-        assert!(out.t_ns.iter().all(|&t| t >= recs[0].confirm_ns - 1_000_000));
+        assert!(out
+            .t_ns
+            .iter()
+            .all(|&t| t >= recs[0].confirm_ns - 1_000_000));
         assert!(output_len(&out) > 8);
         // Every plot after the first scans was applied to the same key.
         let log = fusion_assign_log(&f);
@@ -1603,7 +1649,8 @@ mod tests {
                 let stamp = t + 100_000_000 * (i64::from(l.label) & 1);
                 let ts = stamp as f64 / 1.0e9;
                 let (x, y) = (l.x0 + l.vx * ts, l.y0 + l.vy * ts);
-                let (lat, lon) = oa_geo::aeqd::unproject(&frame, x + 4.1 * rng.normal(), y + 4.1 * rng.normal());
+                let (lat, lon) =
+                    oa_geo::aeqd::unproject(&frame, x + 4.1 * rng.normal(), y + 4.1 * rng.normal());
                 adsb.push(Measurement {
                     toa_ns: stamp,
                     pos_cov_m2: [16.7, 0.0, 16.7],
@@ -1630,7 +1677,11 @@ mod tests {
         let _ = run(&mut without, &plots, &adsb);
         let (st, hist) = fusion_registration(&with, 0).unwrap();
         assert!(st.used > 100, "used {}", st.used);
-        assert!((st.range_m - b_r).abs() < 15.0, "range bias est {}", st.range_m);
+        assert!(
+            (st.range_m - b_r).abs() < 15.0,
+            "range bias est {}",
+            st.range_m
+        );
         assert!((st.az_deg - b_a).abs() < 0.02, "az bias est {}", st.az_deg);
         assert!(hist.len() > 10);
         // The estimate's own uncertainty covers the error (within 4 sigma).
