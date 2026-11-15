@@ -17,10 +17,11 @@ use oa_notam::{new_decoder, new_notams, new_stats, Limits};
 use oa_replay::tfms::{tcol, TFMS_FLIGHT_MAX_AGE_NS};
 use oa_replay::{
     apply_fns, apply_tfms_flight, errors_total, flow_live, flow_sweep, fns_in_force, fns_live,
-    fns_slot_of, fns_sweep, new_flow_table, new_fns_table, new_pipeline, new_table, new_tfms_table,
-    process_frame, replay_hash, run_streams, snapshot, spec_from_bytes, state_hash, tfms_linked,
-    tfms_live, tfms_slot_of, tfms_sweep, ErrKind, FeedKind, FnsApplied, Pipeline, PipelineConfig,
-    TableConfig, TfmsApplied, ERR_NAMES, LINK_ACID, LINK_PLAN,
+    fns_slot_of, fns_stale_count, fns_sweep, new_flow_table, new_fns_table, new_pipeline,
+    new_table, new_tfms_table, pipeline_stale_count, process_frame, replay_hash, run_streams,
+    snapshot, spec_from_bytes, state_hash, tfms_linked, tfms_live, tfms_slot_of, tfms_stale_count,
+    tfms_sweep, ErrKind, FeedKind, FnsApplied, Pipeline, PipelineConfig, TableConfig, TfmsApplied,
+    ERR_NAMES, LINK_ACID, LINK_PLAN,
 };
 use oa_tfms::{decode_bytes as tfms_decode, default_limits, new_rows as new_tfms_rows, NO_TIME};
 use oa_xml::Parser;
@@ -46,12 +47,12 @@ fn ts(h: i64, m: i64, s: i64) -> String {
     format!("2030-01-02T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Moves the replay clock to just before `t` in steps of 9 minutes, with frames that carry no feed
-/// data: the clock takes a bigger step only on the third frame that agrees (and then shifts every
-/// age with it), and these tests are about expiry over elapsed time.
+/// Moves the replay clock to just before `t` in steps of 100 seconds, with frames that carry no
+/// feed data: the clock takes a bigger step only on the third frame that agrees (and then shifts
+/// every age with it), and these tests are about expiry over elapsed time.
 fn jump(p: &mut Pipeline, t: i64) {
-    while p.replay_ns + 9 * 60 * NS < t {
-        let next = p.replay_ns + 9 * 60 * NS;
+    while p.replay_ns + 100 * NS < t {
+        let next = p.replay_ns + 100 * NS;
         oa_replay::process_frame(p, FeedKind::Tfms, oa_feed::Kind::Status, next, &[]);
     }
 }
@@ -212,8 +213,14 @@ fn mar5(h: i64) -> i64 {
 
 // ---- pipeline helpers -------------------------------------------------------------------------
 
+/// A pipeline that checkpoints once a day of replay time: `jump` takes tens of thousands of
+/// frames to cross weeks, and a checkpoint hashes every table.
 fn pl() -> Pipeline {
-    new_pipeline(PipelineConfig::default()).unwrap()
+    new_pipeline(PipelineConfig {
+        checkpoint_ns: 86_400 * NS,
+        ..PipelineConfig::default()
+    })
+    .unwrap()
 }
 
 fn feed(p: &mut Pipeline, f: FeedKind, t: i64, xml: &str) {
@@ -1246,4 +1253,33 @@ fn ten_digit_flight_references_and_restriction_ids_are_applied_and_kept_apart() 
     }
     assert_eq!(errors_total(&p.errors), 0, "{:?}", p.errors);
     assert_eq!(flow_live(&p.flows), 2);
+}
+
+// REQ: OA-RPL-080
+#[test]
+fn tfms_flights_and_notams_last_heard_before_a_confirmed_step_are_stale_until_updated() {
+    let mut p = pl();
+    let flight = |src: (i64, i64, i64)| {
+        wrap_flight(&departure(
+            7001,
+            "TST1",
+            Some("KA000001AB"),
+            src,
+            (5, 0, 0),
+            (2, 0, 0),
+        ))
+    };
+    feed(&mut p, FeedKind::Tfms, at(3, 0, 1), &flight((3, 0, 0)));
+    feed(&mut p, FeedKind::Fns, at(3, 0, 1), &notam(&nt("Z", 1)));
+    assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (0, 0));
+    // Three frames in a row three hours on: the clock steps and the ages are shifted.
+    for k in 0..3 {
+        process_frame(&mut p, FeedKind::Tfms, Kind::Status, at(6, 0, 10 + k), &[]);
+    }
+    assert_eq!(p.clock.forward_steps, 1);
+    assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (1, 1));
+    assert_eq!((pipeline_stale_count(&p), p.stale_marked), (2, 2));
+    // A newer message of the flight clears its mark; the NOTAM keeps its own.
+    feed(&mut p, FeedKind::Tfms, at(6, 1, 0), &flight((6, 0, 30)));
+    assert_eq!((tfms_stale_count(&p.tfms), fns_stale_count(&p.fns)), (0, 1));
 }

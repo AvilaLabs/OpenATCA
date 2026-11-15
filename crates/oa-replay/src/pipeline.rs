@@ -5,14 +5,16 @@
 //! A frame goes through four steps, each counted and none skipped silently:
 //!
 //! 1. the replay clock moves to the frame's time under the step rules of [`crate::clock`] (a
-//!    frame earlier than one already seen is counted as a time regression and the clock stays;
-//!    a time more than 10 minutes from the clock is held until three frames in a row confirm
-//!    it), the tables' eviction cadences run ([`advance_time`]), and a checkpoint is recorded
+//!    frame earlier than one already seen of its feed is counted as a time regression and the
+//!    clock stays; a time more than 2 minutes from the clock and from its feed's last frame is
+//!    held until three frames in a row confirm it, and a confirmed step marks every row stale
+//!    until it is heard again), the tables' eviction cadences run ([`advance_time`]), and a checkpoint is recorded
 //!    if one is due;
 //! 2. only MESSAGE frames carry feed data; REJECT and STATUS frames are counted;
 //! 3. the payload is parsed with oa-xml and decoded with oa-fixm (SFDPS), oa-tbfm (TBFM),
-//!    oa-tfms (TFMS) or oa-notam (FNS), or decoded with `oa_adsb::decode_payload` (ADS-B, refused
-//!    whole when malformed); every failure is counted under its [`ErrKind`]. A document with more
+//!    oa-tfms (TFMS) or oa-notam (FNS), or decoded with `oa_adsb::decode_payload_lenient` (ADS-B:
+//!    refused whole when its header or length is wrong; a record that cannot be read is dropped
+//!    and counted, the rest is kept); every failure is counted under its [`ErrKind`]. A document with more
 //!    rows or route text than the row tables hold is decoded as far as it fits and the rest is
 //!    counted (SFDPS, TBFM and TFMS; FNS decoding is as it was);
 //! 4. each decoded row is applied to the flight table ([`apply_sfdps`], [`apply_tbfm`]) or, for
@@ -31,7 +33,7 @@
 //! [`new_pipeline`]. The checkpoint list grows with the length of the run (one entry per
 //! interval of replay time), the stated exception for an offline harness (C6).
 
-use oa_adsb::{decode_payload, reports_clear, reports_len, PayloadError, Reports};
+use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, PayloadError, Reports};
 use oa_feed::Kind;
 use oa_fixm::{clear_events, new_events, Decoder, Events, FixmError, Limits, REJECT_COUNT};
 use oa_notam::{
@@ -54,17 +56,19 @@ use crate::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::clock::{clock_observe, Clock, Tick};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 use crate::fns::{
-    apply_fns, fns_hash_into, fns_shift_times, fns_sweep, new_fns_table, FnsApplied, FnsTable,
-    FNS_CAPACITY,
+    apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, new_fns_table,
+    FnsApplied, FnsTable, FNS_CAPACITY,
 };
 use crate::hash::state_hash;
 use crate::table::{
-    advance_time, new_table, shift_times, ConfigError, FlightTable, TableConfig, NS_PER_S,
+    advance_time, new_table, shift_times, stale_count, ConfigError, FlightTable, TableConfig,
+    NS_PER_S,
 };
 use crate::tfms::{
-    apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_sweep,
-    new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times, tfms_sweep,
-    FlowApplied, FlowTable, TfmsApplied, TfmsTable, FLOW_CAPACITY, TFMS_CAPACITY,
+    apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_stale_count,
+    flow_sweep, new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times,
+    tfms_stale_count, tfms_sweep, FlowApplied, FlowTable, TfmsApplied, TfmsTable, FLOW_CAPACITY,
+    TFMS_CAPACITY,
 };
 
 /// Which feed a frame came from; chosen by the caller, never guessed from the payload.
@@ -181,6 +185,10 @@ pub struct Pipeline {
     pub replay_ns: i64,
     /// The clock's step rules: frames held and steps confirmed ([`clock_observe`]).
     pub clock: Clock,
+    /// Rows marked stale by confirmed steps of the clock, all tables, cumulative: each was last
+    /// updated before a step and its age was shifted ([`pipeline_stale_count`] is how many still
+    /// are).
+    pub stale_marked: u64,
     next_checkpoint_ns: i64,
     /// Checkpoints recorded.
     pub checkpoints: Vec<Checkpoint>,
@@ -250,6 +258,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         notams: default_notams_small(),
         replay_ns: i64::MIN,
         clock: Clock::default(),
+        stale_marked: 0,
         next_checkpoint_ns: i64::MIN,
         checkpoints: Vec::new(),
         frames: [0; FEED_COUNT],
@@ -331,6 +340,15 @@ pub fn replay_hash(p: &Pipeline) -> Digest {
     h.finalize()
 }
 
+/// The rows, in every table, that were last updated before a confirmed step of the clock and have
+/// not been updated since: what they show was current before the step, whatever their age says.
+pub fn pipeline_stale_count(p: &Pipeline) -> usize {
+    stale_count(&p.table)
+        + tfms_stale_count(&p.tfms)
+        + flow_stale_count(&p.flows)
+        + fns_stale_count(&p.fns)
+}
+
 /// Adds `n` to an error count (for failures found before the pipeline, such as frame errors).
 pub fn add_errors(p: &mut Pipeline, k: ErrKind, n: u64) {
     count_error(&mut p.errors, k, n);
@@ -351,8 +369,9 @@ pub fn process_frame(
 ) {
     let f = feed as usize;
     // 1. Clock, eviction cadence, checkpoint.
-    match clock_observe(&mut p.clock, p.replay_ns, recv_unix_ns) {
+    match clock_observe(&mut p.clock, f, p.replay_ns, recv_unix_ns) {
         Tick::Advance => p.replay_ns = recv_unix_ns,
+        Tick::Keep => {}
         Tick::Regress => count_error(&mut p.errors, ErrKind::TimeRegression, 1),
         Tick::Held { back } => {
             if back {
@@ -399,14 +418,16 @@ pub fn process_frame(
 }
 
 /// A confirmed step of the clock: take the new time, shift the ages the tables hold by the same
-/// amount so nothing is evicted or stranded by it, and restart the sweep and checkpoint cadences
+/// amount so nothing is evicted or stranded by it (and mark every row as stale until it is heard
+/// again, since its age is no longer the time since it was heard), and restart the sweep and checkpoint cadences
 /// from the new time.
 fn step_clock(p: &mut Pipeline, to_ns: i64, delta: i64) {
     p.replay_ns = to_ns;
-    shift_times(&mut p.table, delta);
-    tfms_shift_times(&mut p.tfms, delta);
-    flow_shift_times(&mut p.flows, delta);
-    fns_shift_times(&mut p.fns, delta);
+    let marked = shift_times(&mut p.table, delta)
+        + tfms_shift_times(&mut p.tfms, delta)
+        + flow_shift_times(&mut p.flows, delta)
+        + fns_shift_times(&mut p.fns, delta);
+    p.stale_marked += marked as u64;
     // Each cadence is due now: a sweep and a checkpoint at the new time, as after any long gap.
     p.table.next_sweep_ns = to_ns;
     p.adsb.next_sweep_ns = to_ns;
@@ -489,17 +510,21 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
 
 fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
     reports_clear(&mut p.reports);
-    if let Err(e) = decode_payload(payload, &mut p.reports) {
-        let k = match e {
-            PayloadError::Length => ErrKind::AdsbLength,
-            PayloadError::Magic => ErrKind::AdsbMagic,
-            PayloadError::Layout => ErrKind::AdsbLayout,
-            PayloadError::TooManyRows => ErrKind::AdsbTooManyRows,
-            PayloadError::BadRecord(_) => ErrKind::AdsbBadRecord,
-            PayloadError::Range => ErrKind::AdsbInternal,
-        };
-        count_error(&mut p.errors, k, 1);
-        return;
+    match decode_payload_lenient(payload, &mut p.reports) {
+        // A record that cannot be read loses only itself, and is counted.
+        Ok(c) => count_error(&mut p.errors, ErrKind::AdsbBadRecord, c.dropped as u64),
+        Err(e) => {
+            let k = match e {
+                PayloadError::Length => ErrKind::AdsbLength,
+                PayloadError::Magic => ErrKind::AdsbMagic,
+                PayloadError::Layout => ErrKind::AdsbLayout,
+                PayloadError::TooManyRows => ErrKind::AdsbTooManyRows,
+                PayloadError::BadRecord(_) => ErrKind::AdsbBadRecord,
+                PayloadError::Range => ErrKind::AdsbInternal,
+            };
+            count_error(&mut p.errors, k, 1);
+            return;
+        }
     }
     for i in 0..reports_len(&p.reports) {
         let a = apply_adsb(&mut p.adsb, &p.reports, i, now);

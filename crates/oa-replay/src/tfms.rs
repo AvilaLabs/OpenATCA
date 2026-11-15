@@ -170,6 +170,9 @@ pub struct TfmsTable {
     pub last_src_ms: Vec<i64>,
     /// Replay time of the last applied row, ns.
     pub last_update_ns: Vec<i64>,
+    /// Whether the row was last updated before a confirmed step of the replay clock and has not
+    /// been updated since: its age is the time since the step, not since it was heard.
+    pub stale: Vec<bool>,
     /// The 10-character identifier (equal to the SFDPS flight-plan identifier); all zero if none.
     pub gufi: Vec<[u8; 16]>,
     /// Aircraft identification.
@@ -218,6 +221,7 @@ pub fn new_tfms_table(capacity: usize) -> TfmsTable {
         flight_ref: vec![0; n],
         last_src_ms: vec![NO_TIME; n],
         last_update_ns: vec![0; n],
+        stale: vec![false; n],
         gufi: vec![[0; 16]; n],
         acid: vec![[0; 8]; n],
         dep: vec![[0; 8]; n],
@@ -281,6 +285,7 @@ fn blank_flight(t: &mut TfmsTable, s: usize) {
     set(&mut t.flight_ref, s, 0);
     set(&mut t.last_src_ms, s, NO_TIME);
     set(&mut t.last_update_ns, s, 0);
+    set(&mut t.stale, s, false);
     set(&mut t.gufi, s, [0; 16]);
     set(&mut t.acid, s, [0; 8]);
     set(&mut t.dep, s, [0; 8]);
@@ -357,6 +362,7 @@ pub fn apply_tfms_flight(
         set(&mut t.last_src_ms, s, r.src_ms);
     }
     set(&mut t.last_update_ns, s, now_ns);
+    set(&mut t.stale, s, false);
     let mut conflicts = 0;
     fill_name(&mut t.gufi, s, &r.gufi, &mut conflicts);
     fill_name(&mut t.acid, s, &r.acid, &mut conflicts);
@@ -525,26 +531,55 @@ pub fn tfms_sweep(t: &mut TfmsTable, now_ns: i64) -> usize {
 }
 
 /// Moves the last-update time of every flight by `delta_ns`, for a step of the replay clock (the
-/// time since each was heard stays what it was).
-pub fn tfms_shift_times(t: &mut TfmsTable, delta_ns: i64) {
+/// time since each was heard stays what it was). Every flight is marked stale until it is
+/// updated; returns the number marked.
+pub fn tfms_shift_times(t: &mut TfmsTable, delta_ns: i64) -> usize {
+    let mut n = 0;
     for i in 0..t.slots.capacity {
         if slot_live(&t.slots, i) {
             if let Some(v) = t.last_update_ns.get_mut(i) {
                 *v = v.saturating_add(delta_ns);
             }
+            if let Some(v) = t.stale.get_mut(i) {
+                *v = true;
+                n += 1;
+            }
         }
     }
+    n
+}
+
+/// The number of rows that are stale: last updated before a confirmed step of the replay clock
+/// and not updated since.
+pub fn tfms_stale_count(t: &TfmsTable) -> usize {
+    (0..t.slots.capacity)
+        .filter(|&i| slot_live(&t.slots, i) && t.stale.get(i).copied().unwrap_or(false))
+        .count()
 }
 
 /// The same for the programme table.
-pub fn flow_shift_times(t: &mut FlowTable, delta_ns: i64) {
+pub fn flow_shift_times(t: &mut FlowTable, delta_ns: i64) -> usize {
+    let mut n = 0;
     for i in 0..t.slots.capacity {
         if slot_live(&t.slots, i) {
             if let Some(v) = t.last_update_ns.get_mut(i) {
                 *v = v.saturating_add(delta_ns);
             }
+            if let Some(v) = t.stale.get_mut(i) {
+                *v = true;
+                n += 1;
+            }
         }
     }
+    n
+}
+
+/// The number of rows that are stale: last updated before a confirmed step of the replay clock
+/// and not updated since.
+pub fn flow_stale_count(t: &FlowTable) -> usize {
+    (0..t.slots.capacity)
+        .filter(|&i| slot_live(&t.slots, i) && t.stale.get(i).copied().unwrap_or(false))
+        .count()
 }
 
 fn next_boundary(now: i64, step: i64) -> i64 {
@@ -732,6 +767,9 @@ pub struct FlowTable {
     pub event_ms: Vec<i64>,
     /// Replay time of the last applied row, ns.
     pub last_update_ns: Vec<i64>,
+    /// Whether the row was last updated before a confirmed step of the replay clock and has not
+    /// been updated since: its age is the time since the step, not since it was heard.
+    pub stale: Vec<bool>,
     /// `rate`, `rate_dep`, `rate_strat`; `NO_NUM` if absent.
     pub rates: Vec<[i32; 3]>,
     /// `referenceRestrictionId`.
@@ -765,6 +803,7 @@ pub fn new_flow_table(capacity: usize) -> FlowTable {
         end_ms: vec![NO_TIME; n],
         event_ms: vec![NO_TIME; n],
         last_update_ns: vec![0; n],
+        stale: vec![false; n],
         rates: vec![[NO_NUM; 3]; n],
         ref_id: vec![0; n],
         action: vec![0; n],
@@ -823,6 +862,7 @@ fn blank_flow(t: &mut FlowTable, s: usize) {
     set(&mut t.end_ms, s, NO_TIME);
     set(&mut t.event_ms, s, NO_TIME);
     set(&mut t.last_update_ns, s, 0);
+    set(&mut t.stale, s, false);
     set(&mut t.rates, s, [NO_NUM; 3]);
     set(&mut t.ref_id, s, 0);
     set(&mut t.action, s, 0);
@@ -869,6 +909,7 @@ pub fn apply_tfms_flow(t: &mut FlowTable, rows: &Rows, i: usize, now_ns: i64) ->
     }
     set(&mut t.src_ms, s, r.src_ms);
     set(&mut t.last_update_ns, s, now_ns);
+    set(&mut t.stale, s, false);
     for (col, v) in [
         (&mut t.start_ms, r.start_ms),
         (&mut t.end_ms, r.end_ms),

@@ -90,9 +90,9 @@ fn run() -> Result<(), String> {
         .unwrap_or(1);
     let name = flag(&args, "--name").unwrap_or_else(|| name.to_string());
     let t_total = Instant::now();
-    let (reports, bad) = read_clip(clip)?;
+    let (reports, bad, dropped) = read_clip(clip)?;
     println!(
-        "clip: {} reports ({bad} frames not decoded)",
+        "clip: {} reports ({bad} frames not decoded, {dropped} records dropped)",
         oa_adsb::reports_len(&reports)
     );
     let t0 = Instant::now();

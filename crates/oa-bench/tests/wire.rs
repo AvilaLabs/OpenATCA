@@ -218,6 +218,32 @@ fn gate_overrides_change_the_truth_config_and_the_section_records_them() {
     assert!(get("loo_cross_track_m").unwrap().starts_with("n="));
 }
 
+/// One frame of `n` reports whose second record has its latitude out of range.
+fn clip_with_a_bad_record(n: usize) -> Vec<u8> {
+    let r = clip_reports(&[b"TST123\0\0"]);
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, &r, 0, n).unwrap();
+    let o = 16 + oa_adsb::RECORD_LEN + 4;
+    payload[o] = 0x7f;
+    payload[o + 3] = 0x7f;
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let len = encode_frame(&mut buf, 1, FLAG_BYTES, 0, 0, 0, &payload).unwrap();
+    buf[..len].to_vec()
+}
+
+// REQ: OA-BENCH-045
+#[test]
+fn a_bad_record_costs_the_clip_that_record_and_is_counted() {
+    let d = scratch("badrec");
+    let path = d.join("bad.oaf");
+    std::fs::write(&path, clip_with_a_bad_record(10)).unwrap();
+    let l = load_adsb(&path).unwrap();
+    assert_eq!(
+        (reports_len(&l.reports), l.bad_frames, l.dropped_records),
+        (9, 0, 1)
+    );
+}
+
 // REQ: OA-BENCH-031
 #[test]
 fn the_clip_is_read_and_hashed() {

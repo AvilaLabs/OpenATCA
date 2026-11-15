@@ -283,6 +283,160 @@ fn a_position_jump_is_removed_whether_or_not_ground_speed_is_known() {
     }
 }
 
+/// A 450 kt aircraft reporting every 2 s for 2 minutes; report `spoof` is `dist_m` off along
+/// the track and every report prints the category `cat(k)`.
+fn with_spoof(spoof: usize, dist_m: f64, cat: impl Fn(usize) -> u8) -> Reports {
+    let mut r = Reports::default();
+    for k in 0..60 {
+        let t = k as f64 * 2.0;
+        let (mut la, lo) = to_deg(0.0, 231.5 * t);
+        if k == spoof {
+            la += dist_m / M_PER_DEG;
+        }
+        let mut row = good(ADDR, t, la, lo);
+        row.category = cat(k);
+        reports_push(&mut r, &row);
+    }
+    r
+}
+
+// REQ: OA-TRUTH-020
+#[test]
+fn one_report_claiming_a_fast_category_does_not_raise_the_jump_cap() {
+    // 2862 m in 2 s is 2782 kt, a jump for an ordinary class (1,000 kt) and plausible without
+    // a ground speed for a space vehicle (4,088 kt). Reserved codes never raise the cap.
+    for spoof_cat in [0xb7u8, 0xa8, 0xb5] {
+        let r = with_spoof(30, 2862.0, |k| if k == 30 { spoof_cat } else { 0xa3 });
+        let (_, s) = build(&r);
+        assert_eq!(
+            (removed(&s, REM_JUMP), s.rows_kept),
+            (1, 59),
+            "category {spoof_cat:x}"
+        );
+        assert!(balanced(&s));
+    }
+    // 1543 m in 2 s is 1500 kt: over the ordinary cap, under the high-performance one.
+    let r = with_spoof(30, 1543.0, |k| if k == 30 { 0xa8 } else { 0xa3 });
+    assert_eq!(removed(&build(&r).1, REM_JUMP), 1);
+}
+
+// REQ: OA-TRUTH-020
+#[test]
+fn a_report_that_failed_quality_does_not_set_the_category() {
+    // The spoofed report has no usable accuracy (NACp 0), so the quality rules remove it; its
+    // category must not carry on to the next report, which is the jump.
+    let mut r = Reports::default();
+    for k in 0..60 {
+        let t = k as f64 * 2.0;
+        let (mut la, lo) = to_deg(0.0, 231.5 * t);
+        let mut row = good(ADDR, t, la, lo);
+        row.category = 0xa3;
+        if k == 29 {
+            row.category = 0xb7;
+            row.nac_p = 0;
+        }
+        if k == 30 {
+            la += 2862.0 / M_PER_DEG;
+            row = good(ADDR, t, la, lo);
+        }
+        reports_push(&mut r, &row);
+    }
+    let (_, s) = build(&r);
+    assert_eq!(removed(&s, REM_JUMP), 1);
+}
+
+// REQ: OA-TRUTH-020
+#[test]
+fn a_fast_category_that_persists_does_raise_the_cap() {
+    // Every report prints B7: after three accepted reports the class counts, and the same
+    // 2,782 kt displacement is possible for it.
+    let r = with_spoof(30, 2862.0, |_| 0xb7);
+    let (_, s) = build(&r);
+    assert_eq!((removed(&s, REM_JUMP), s.rows_kept), (0, 60));
+    // A different category in the middle of the run resets the count.
+    let r = with_spoof(30, 2862.0, |k| if k == 29 { 0xa3 } else { 0xb7 });
+    assert_eq!(removed(&build(&r).1, REM_JUMP), 1);
+}
+
+// REQ: OA-TRUTH-021
+#[test]
+fn a_row_from_another_source_does_not_vouch_for_the_adsb_rows_after_it() {
+    // An MLAT row (source 5) carries good quality; ten seconds later an ADS-B row has none.
+    let mut r = Reports::default();
+    let mut mlat = good(ADDR, 0.0, LAT0, LON0);
+    mlat.source = 5;
+    reports_push(&mut r, &mlat);
+    let mut adsb = good(ADDR, 10.0, LAT0, LON0 + 0.001);
+    (adsb.nac_p, adsb.nic, adsb.sil, adsb.version) = (NONE_U8, NONE_U8, NONE_U8, NONE_U8);
+    reports_push(&mut r, &adsb);
+    let (_, s) = build(&r);
+    assert_eq!(removed(&s, REM_SOURCE), 1);
+    assert_eq!(removed(&s, REM_NO_QUALITY), 1);
+    assert_eq!(s.rows_kept, 0);
+    // A good ADS-B row first does carry its quality to the next.
+    let mut r = Reports::default();
+    reports_push(&mut r, &good(ADDR, 0.0, LAT0, LON0));
+    reports_push(&mut r, &adsb);
+    assert_eq!(removed(&build(&r).1, REM_NO_QUALITY), 0);
+}
+
+// REQ: OA-TRUTH-022
+#[test]
+fn rows_equal_in_time_give_the_same_truth_in_any_input_order() {
+    // Two rows of one instant 20 m apart (one position measured twice): either input order
+    // keeps the same one.
+    let rows = |swap: bool| {
+        let mut r = Reports::default();
+        for k in 0..30 {
+            let t = f64::from(k) * 2.0;
+            let (la, lo) = to_deg(0.0, 231.5 * t);
+            let a = good(ADDR, t, la, lo);
+            if k == 10 {
+                let (la2, lo2) = to_deg(20.0, 231.5 * t);
+                let b = good(ADDR, t, la2, lo2);
+                let pair = if swap { [b, a] } else { [a, b] };
+                for x in pair {
+                    reports_push(&mut r, &x);
+                }
+            } else {
+                reports_push(&mut r, &a);
+            }
+        }
+        r
+    };
+    let (t1, s1) = build(&rows(false));
+    let (t2, s2) = build(&rows(true));
+    assert_eq!(digest(&t1), digest(&t2));
+    assert_eq!(s1.removed, s2.removed);
+    assert_eq!(removed(&s1, REM_DUPLICATE), 1);
+    // Two rows of one instant 400 m apart contradict each other: both are removed, in any order.
+    let far = |swap: bool| {
+        let mut r = Reports::default();
+        for k in 0..30 {
+            let t = f64::from(k) * 2.0;
+            let (la, lo) = to_deg(0.0, 231.5 * t);
+            let a = good(ADDR, t, la, lo);
+            if k == 10 {
+                let (la2, lo2) = to_deg(400.0, 231.5 * t);
+                let b = good(ADDR, t, la2, lo2);
+                let pair = if swap { [b, a] } else { [a, b] };
+                for x in pair {
+                    reports_push(&mut r, &x);
+                }
+            } else {
+                reports_push(&mut r, &a);
+            }
+        }
+        r
+    };
+    let (t1, s1) = build(&far(false));
+    let (t2, s2) = build(&far(true));
+    assert_eq!(digest(&t1), digest(&t2));
+    assert_eq!((removed(&s1, REM_DUPLICATE), s1.rows_kept), (2, 29));
+    assert_eq!(s1.removed, s2.removed);
+    assert!(balanced(&s1));
+}
+
 // REQ: OA-TRUTH-019
 #[test]
 fn reserved_addresses_are_never_an_aircraft() {

@@ -47,13 +47,20 @@
 //! advances time; the row is the filter predicted to the tick time. A late measurement changes
 //! the ticks after it, not those already emitted.
 
+use oa_adsb::{
+    category_observe, jump_verdict, CategoryState, JumpPair, JumpVerdict, CAP_ORDINARY_KT, NONE_U16,
+};
+
 use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
 use crate::hfilter::HFilter;
-use crate::params::{MAX_PLAUSIBLE_KT, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
+use crate::params::{
+    CLOCK_STEP_CONFIRM, CLOCK_STEP_LIMIT_NS, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH,
+};
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
-    TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, NONE_I32, NO_ADDR,
-    O_COAST, O_TICK, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_VELOCITY,
+    TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL, NONE_I32,
+    NO_ADDR, O_COAST, O_TICK, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME,
+    REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -74,6 +81,9 @@ pub struct Tracker {
     log: TrackLog,
     /// Newest time of applicability seen.
     clock_ns: i64,
+    /// Consecutive far-ahead measurements so far (a step candidate), and the latest one's time.
+    step_n: u32,
+    step_last_ns: i64,
     /// The next tick to emit; `i64::MIN` until the first measurement.
     next_tick_ns: i64,
     /// One past the highest slot ever used (the scan bound).
@@ -90,6 +100,8 @@ pub struct Tracker {
     cur: Vec<Filter>,
     ring_len: Vec<u8>,
     ring_head: Vec<u8>,
+    /// The emitter category trusted for each track and the candidate that may replace it.
+    cat: Vec<CategoryState>,
     /// The filter state after the oldest measurement of each track's ring.
     anchor: Vec<Filter>,
     /// `max_tracks * RING_DEPTH` stored measurements.
@@ -145,6 +157,7 @@ fn blank_measurement() -> Measurement {
         sensor: 0,
         ident: crate::types::NO_IDENT,
         flags: 0,
+        category: 0,
     }
 }
 
@@ -158,6 +171,8 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         stats: TrackerStats::default(),
         log: log_new(cfg.log_capacity),
         clock_ns: i64::MIN,
+        step_n: 0,
+        step_last_ns: 0,
         next_tick_ns: i64::MIN,
         high: 0,
         active: 0,
@@ -171,6 +186,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         cur: vec![blank_filter(); n],
         ring_len: vec![0; n],
         ring_head: vec![0; n],
+        cat: vec![CategoryState::default(); n],
         anchor: vec![blank_filter(); n],
         ring_m: vec![blank_measurement(); n * RING_DEPTH],
         // Popped from the end: slot 0 first.
@@ -211,7 +227,15 @@ pub fn tracker_counts(t: &Tracker) -> (usize, usize) {
 /// Bytes of memory the tables hold (the columns, rings and index), for the report.
 pub fn tracker_bytes(t: &Tracker) -> usize {
     let n = t.cfg.max_tracks;
-    n * (4 + 1 + 8 * 3 + 4 + 1 + core::mem::size_of::<Filter>() + 2 + 4)
+    n * (4
+        + 1
+        + 8 * 3
+        + 4
+        + 1
+        + core::mem::size_of::<Filter>()
+        + 2
+        + 4
+        + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
         + t.index.len() * 4
@@ -235,6 +259,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.cur),
         of(&t.ring_len),
         of(&t.ring_head),
+        of(&t.cat),
         of(&t.anchor),
         of(&t.ring_m),
         of(&t.free),
@@ -382,6 +407,9 @@ fn ring_state(t: &Tracker, slot: usize, k: usize) -> Filter {
 
 /// Checks a measurement (E5): the first failing rule's `REF_*` index.
 pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
+    if m.toa_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {
+        return Err(REF_TIME);
+    }
     if !(-900_000_000..=900_000_000).contains(&m.lat_e7)
         || !(-1_800_000_000..=1_800_000_000).contains(&m.lon_e7)
     {
@@ -454,6 +482,8 @@ fn end_track(t: &mut Tracker, slot: usize, reason: u8) {
 /// Starts (or restarts) a tentative track in `slot` from `m`.
 fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
+    put(&mut t.cat, slot, CategoryState::default());
+    note_category(t, slot, m);
     ring_clear(t, slot);
     ring_push(t, slot, m);
     put(&mut t.first_ns, slot, m.toa_ns);
@@ -481,8 +511,21 @@ fn emit(t: &Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) 
     output_push(out, &row);
 }
 
-/// Implied ground speed from the track's position to the measurement exceeds the plausible
-/// maximum (with the slack): the measurement is not the same aircraft's next report.
+/// A measurement's ground speed in 0.1 kt for the jump rule, [`NONE_U16`] without a velocity.
+fn gs_dkt(m: &Measurement) -> u16 {
+    if m.flags & M_HAS_VEL == 0 {
+        return NONE_U16;
+    }
+    let kt = f64::from(m.vel_east_mps).hypot(f64::from(m.vel_north_mps)) / MPS_PER_KT;
+    // Saturates one below the absent value.
+    (kt * 10.0).round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
+}
+
+/// The track's position to the measurement is not a displacement the speed rule
+/// (`oa_adsb::jump_verdict`) allows: the measurement is not the same aircraft's next report.
+/// The rule takes the category and the ground speeds of the track's newest report and of the
+/// measurement; the category is the track's trusted one with the measurement's printed category
+/// taken into account by the persistence rule, as it would be if the measurement is applied.
 fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
     let f = col(&t.cur, slot, blank_filter());
     let frame = oa_geo::aeqd::frame_new(f64::from(f.lat_e7) / 1.0e7, f64::from(f.lon_e7) / 1.0e7);
@@ -491,8 +534,28 @@ fn implausible(t: &Tracker, slot: usize, m: &Measurement) -> bool {
         f64::from(m.lat_e7) / 1.0e7,
         f64::from(m.lon_e7) / 1.0e7,
     );
-    let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
-    x.hypot(y) > MAX_PLAUSIBLE_KT * MPS_PER_KT * dt + PLAUSIBLE_SLACK_M
+    let n = ring_len(t, slot);
+    let prev = n
+        .checked_sub(1)
+        .map(|k| col(&t.ring_m, ring_ix(t, slot, k), blank_measurement()));
+    let mut trial = col(&t.cat, slot, CategoryState::default());
+    let category = category_observe(&mut trial, m.category);
+    let pair = JumpPair {
+        dist_m: x.hypot(y),
+        dt_s: (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64,
+        slack_m: PLAUSIBLE_SLACK_M,
+        category,
+        gs_a_dkt: prev.map_or(NONE_U16, |p| gs_dkt(&p)),
+        gs_b_dkt: gs_dkt(m),
+    };
+    jump_verdict(&pair, CAP_ORDINARY_KT) != JumpVerdict::Plausible
+}
+
+/// Adds an applied measurement's printed category to the track's.
+fn note_category(t: &mut Tracker, slot: usize, m: &Measurement) {
+    let mut c = col(&t.cat, slot, CategoryState::default());
+    category_observe(&mut c, m.category);
+    put(&mut t.cat, slot, c);
 }
 
 /// Applies a measurement newer than or equal to the track's newest update.
@@ -519,6 +582,7 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
         }
         Applied::Yes => {
             put(&mut t.cur, slot, f);
+            note_category(t, slot, m);
             ring_push(t, slot, m);
             put(&mut t.last_ns, slot, m.toa_ns);
             let u = col(&t.updates, slot, 0).saturating_add(1);
@@ -531,6 +595,8 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
         }
         Applied::Resync => {
             put(&mut t.cur, slot, f);
+            put(&mut t.cat, slot, CategoryState::default());
+            note_category(t, slot, m);
             ring_clear(t, slot);
             ring_push(t, slot, m);
             put(&mut t.last_ns, slot, m.toa_ns);
@@ -628,8 +694,27 @@ pub fn tracker_update(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
         t.stats.late_window += 1;
         return;
     }
+    // A measurement far ahead of the clock is a step of the clock only if three in a row agree;
+    // alone it could expire every other track and make the tick loop run over the whole gap.
+    if t.clock_ns != i64::MIN && toa > t.clock_ns.saturating_add(CLOCK_STEP_LIMIT_NS) {
+        t.step_n = if t.step_n > 0 && toa >= t.step_last_ns {
+            t.step_n + 1
+        } else {
+            1
+        };
+        t.step_last_ns = toa;
+        if t.step_n < CLOCK_STEP_CONFIRM {
+            t.stats.time_held += 1;
+            return;
+        }
+        t.step_n = 0;
+        t.stats.time_steps += 1;
+    } else {
+        t.step_n = 0;
+    }
     if toa > t.clock_ns {
         if t.next_tick_ns == i64::MIN {
+            // `toa` and the tick are bounded (`TIME_LIMIT_NS`, `MAX_TICK_NS`): no overflow.
             t.next_tick_ns = toa.div_euclid(t.cfg.tick_ns) * t.cfg.tick_ns
                 + if toa.rem_euclid(t.cfg.tick_ns) == 0 {
                     0
@@ -705,7 +790,16 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
         .cfg
         .coast_after_intervals
         .saturating_mul(t.cfg.expected_interval_ns);
-    while t.next_tick_ns <= limit_ns {
+    // Past the newest update plus the drop age every track is gone and a tick emits nothing: the
+    // ticks after that are jumped over, with one sweep, so a long gap costs no more than the
+    // drop age does.
+    let newest = (0..t.high)
+        .filter(|&s| col(&t.state, s, FREE) != FREE)
+        .map(|s| col(&t.last_ns, s, 0))
+        .max();
+    let useful = newest.map_or(i64::MIN, |n| n.saturating_add(t.cfg.drop_after_ns));
+    let emit_to = limit_ns.min(useful);
+    while t.next_tick_ns <= emit_to {
         let tick = t.next_tick_ns;
         sweep(t, tick);
         for slot in 0..t.high {
@@ -717,12 +811,29 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
         }
         t.stats.ticks += 1;
         t.next_tick_ns = tick.saturating_add(t.cfg.tick_ns);
+        if t.next_tick_ns <= tick {
+            break;
+        }
+    }
+    if t.next_tick_ns <= limit_ns {
+        sweep(t, limit_ns);
+        let skipped = (limit_ns - t.next_tick_ns) / t.cfg.tick_ns + 1;
+        t.stats.ticks_skipped += skipped as u64;
+        t.next_tick_ns = t
+            .next_tick_ns
+            .saturating_add(skipped.saturating_mul(t.cfg.tick_ns));
     }
 }
 
 /// Advances time to `now_ns` without a measurement: emits the ticks up to it and expires old
 /// tracks. Time never goes backwards; an earlier `now_ns` does nothing.
 pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
+    if now_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {
+        if let Some(c) = t.stats.refused.get_mut(REF_TIME) {
+            *c += 1;
+        }
+        return;
+    }
     if now_ns > t.clock_ns {
         if t.next_tick_ns == i64::MIN {
             return;

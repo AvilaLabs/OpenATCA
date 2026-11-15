@@ -51,6 +51,31 @@ fn clip() -> Vec<u8> {
     bytes
 }
 
+// REQ: OA-SIM-020
+#[test]
+fn a_bad_record_costs_the_clip_that_record_and_is_counted() {
+    let mut r = Reports::default();
+    for k in 0..10 {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + i64::from(k) * 2_000_000_000;
+        row.lat_e7 = 411_000_000;
+        row.lon_e7 = -880_000_000 + k * 400;
+        reports_push(&mut r, &row);
+    }
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, &r, 0, 10).unwrap();
+    let o = 16 + oa_adsb::RECORD_LEN + 4;
+    payload[o] = 0x7f;
+    payload[o + 3] = 0x7f;
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let len = encode_frame(&mut buf, 1, FLAG_BYTES, 0, 0, 0, &payload).unwrap();
+    let path = tmp("sensorsim-bad.oaf");
+    std::fs::write(&path, &buf[..len]).unwrap();
+    let (reports, bad, dropped) = oa_sensorsim::clip::read_clip(path.to_str().unwrap()).unwrap();
+    assert_eq!((reports_len(&reports), bad, dropped), (9, 0, 1));
+}
+
 // REQ: OA-SIM-019
 #[test]
 fn binary_writes_plots_for_a_clip_and_demands_the_biases() {

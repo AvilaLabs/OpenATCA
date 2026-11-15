@@ -118,8 +118,8 @@ fn held_value(h: &mut Held, own: u8, t_ns: i64, carry_ns: i64, carried: &mut boo
     None
 }
 
-/// Applies the truth selection rules to one row at `t_ns`, updating the carried values. The
-/// first failing rule is the reason.
+/// Applies the truth selection rules to one row at `t_ns`, updating the carried values (only for a row that is in range, not stale and from an ADS-B
+/// source). The first failing rule is the reason.
 pub fn quality_check(
     st: &mut QualityState,
     row: &Row,
@@ -127,14 +127,24 @@ pub fn quality_check(
     cfg: &TruthConfig,
 ) -> QualityVerdict {
     let carry_ns = cfg.quality_carry_ms * NS_PER_MS;
+    // The carried values are updated on a copy and kept only if the row is a usable ADS-B row:
+    // one that is stale, out of range or from another source (which prints no meaningful quality)
+    // must not vouch for the rows after it.
+    let mut trial = *st;
     let mut carried = false;
-    let nacp = held_value(&mut st.nacp, row.nac_p, t_ns, carry_ns, &mut carried);
-    let nic = held_value(&mut st.nic, row.nic, t_ns, carry_ns, &mut carried);
-    let sil = held_value(&mut st.sil, row.sil, t_ns, carry_ns, &mut carried);
-    let ver = held_value(&mut st.version, row.version, t_ns, carry_ns, &mut carried);
+    let nacp = held_value(&mut trial.nacp, row.nac_p, t_ns, carry_ns, &mut carried);
+    let nic = held_value(&mut trial.nic, row.nic, t_ns, carry_ns, &mut carried);
+    let sil = held_value(&mut trial.sil, row.sil, t_ns, carry_ns, &mut carried);
+    let ver = held_value(
+        &mut trial.version,
+        row.version,
+        t_ns,
+        carry_ns,
+        &mut carried,
+    );
     // NACv does not count toward `carried` (truth statistics are about the checked fields).
     let mut ignore = false;
-    let nacv = held_value(&mut st.nacv, row.nac_v, t_ns, carry_ns, &mut ignore);
+    let nacv = held_value(&mut trial.nacv, row.nac_v, t_ns, carry_ns, &mut ignore);
     let removal = if !(-900_000_000..=900_000_000).contains(&row.lat_e7)
         || !(-1_800_000_000..=1_800_000_000).contains(&row.lon_e7)
     {
@@ -156,6 +166,9 @@ pub fn quality_check(
     } else {
         None
     };
+    if !matches!(removal, Some(REM_INVALID | REM_STALE | REM_SOURCE)) {
+        *st = trial;
+    }
     QualityVerdict {
         removal,
         carried,

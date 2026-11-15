@@ -134,6 +134,7 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
                 row.squawk
             },
             flags: 0,
+            category: row.category,
         };
         if row.gs_dkt != NONE_U16 && row.track_ddeg != NONE_U16 {
             let nacv = match v.nacv {

@@ -242,6 +242,9 @@ pub struct FlightTable {
 
     /// Replay time of the last applied update, ns.
     pub last_update_ns: Vec<i64>,
+    /// Whether the row was last updated before a confirmed step of the replay clock and has not
+    /// been updated since: its age is the time since the step, not since it was heard.
+    pub stale: Vec<bool>,
     /// SFDPS source code of the last update when `last_feed` is [`FEED_SFDPS`].
     pub last_source: Vec<[u8; 2]>,
     /// Feed of the last update.
@@ -331,6 +334,7 @@ pub(crate) struct SlotMut<'a> {
     pub vy_dkt: &'a mut i16,
     pub pos_time_ms: &'a mut i64,
     pub last_update_ns: &'a mut i64,
+    pub stale: &'a mut bool,
     pub last_source: &'a mut [u8; 2],
     pub last_feed: &'a mut u8,
     pub ctrl: &'a mut [u8; 8],
@@ -394,6 +398,7 @@ pub fn new_table(cfg: TableConfig) -> Result<FlightTable, ConfigError> {
         vy_dkt: vec![0; n],
         pos_time_ms: vec![NO_TIME; n],
         last_update_ns: vec![0; n],
+        stale: vec![false; n],
         last_source: vec![[0; 2]; n],
         last_feed: vec![FEED_NONE; n],
         ctrl: vec![[0; 8]; n],
@@ -484,6 +489,7 @@ pub(crate) fn slot_mut(t: &mut FlightTable, s: Slot) -> Option<SlotMut<'_>> {
         vy_dkt: t.vy_dkt.get_mut(i)?,
         pos_time_ms: t.pos_time_ms.get_mut(i)?,
         last_update_ns: t.last_update_ns.get_mut(i)?,
+        stale: t.stale.get_mut(i)?,
         last_source: t.last_source.get_mut(i)?,
         last_feed: t.last_feed.get_mut(i)?,
         ctrl: t.ctrl.get_mut(i)?,
@@ -518,6 +524,7 @@ fn blank(c: &mut SlotMut<'_>) {
     *c.vy_dkt = 0;
     *c.pos_time_ms = NO_TIME;
     *c.last_update_ns = 0;
+    *c.stale = false;
     *c.last_source = [0; 2];
     *c.last_feed = FEED_NONE;
     *c.ctrl = [0; 8];
@@ -714,15 +721,34 @@ fn age_limit(t: &FlightTable, flags: u8) -> i64 {
 }
 
 /// Moves every flight's last-update time by `delta_ns`, for a step of the replay clock: the time
-/// since each flight was last heard stays what it was.
-pub fn shift_times(t: &mut FlightTable, delta_ns: i64) {
+/// since each flight was last heard stays what it was. Every flight is marked stale (see
+/// [`FlightTable::stale`]) until it is updated; returns the number marked.
+pub fn shift_times(t: &mut FlightTable, delta_ns: i64) -> usize {
+    let mut n = 0;
     for i in 0..t.capacity {
         if is_occupied(t, Slot(i as u32)) {
             if let Some(v) = t.last_update_ns.get_mut(i) {
                 *v = v.saturating_add(delta_ns);
             }
+            if let Some(v) = t.stale.get_mut(i) {
+                *v = true;
+                n += 1;
+            }
         }
     }
+    n
+}
+
+/// Whether the flight in slot `slot` (as `slot_of_gufi` gives it) was last updated before a confirmed step of the replay clock and has
+/// not been updated since. False for a slot that is out of range or free.
+pub fn is_stale(t: &FlightTable, slot: usize) -> bool {
+    u32::try_from(slot).is_ok_and(|i| is_occupied(t, Slot(i)))
+        && t.stale.get(slot).copied().unwrap_or(false)
+}
+
+/// The number of flights that are stale ([`is_stale`]).
+pub fn stale_count(t: &FlightTable) -> usize {
+    (0..t.capacity).filter(|&i| is_stale(t, i)).count()
 }
 
 /// Evicts every flight whose last update is older than its state allows (see the module

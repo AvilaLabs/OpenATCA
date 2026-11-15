@@ -86,9 +86,12 @@ pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
 /// comparisons were anchored to was probably the bad one). The value of `oa_truth::JUMP_RESYNC`.
 pub const RESYNC_AFTER: u8 = oa_truth::JUMP_RESYNC as u8;
-/// Implied ground speed above this between the first two reports of a tentative track is not
-/// plausible, knots (the value of `oa_truth::MAX_JUMP_KT`, which is oa-adsb's).
-pub const MAX_PLAUSIBLE_KT: f64 = oa_truth::MAX_JUMP_KT;
+/// A measurement more than this ahead of the tracker clock (5 minutes, five times the time after
+/// which a silent track is dropped) does not move the clock until three in a row, each no earlier
+/// than the one before, agree; until then it is counted and not applied.
+pub const CLOCK_STEP_LIMIT_NS: i64 = 300 * NS_PER_S;
+/// Consecutive far-ahead measurements that confirm a step of the clock.
+pub const CLOCK_STEP_CONFIRM: u32 = 3;
 /// Allowance added to the plausibility distance, metres (`oa_truth::JUMP_SLACK_M`).
 pub const PLAUSIBLE_SLACK_M: f64 = oa_truth::JUMP_SLACK_M;
 

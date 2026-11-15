@@ -46,31 +46,32 @@ pub use adsb::{
     ADSB_MAX_AHEAD_NS, ADSB_SWEEP_NS,
 };
 pub use apply::{apply_sfdps, apply_tbfm, Applied};
-pub use clock::{clock_observe, Clock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_STEP_NS};
+pub use clock::{clock_observe, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES, CLOCK_TOLERANCE_NS};
 pub use errors::{count_error, errors_total, ErrKind, Errors, ERR_COUNT, ERR_NAMES};
 pub use fns::{
-    apply_fns, fns_in_force, fns_live, fns_slot_of, fns_sweep, new_fns_table, FnsApplied, FnsKey,
-    FnsStats, FnsTable, FNS_CAPACITY, FNS_HASH_TAG, FNS_OPEN_AGE_NS,
+    apply_fns, fns_in_force, fns_live, fns_slot_of, fns_stale_count, fns_sweep, new_fns_table,
+    FnsApplied, FnsKey, FnsStats, FnsTable, FNS_CAPACITY, FNS_HASH_TAG, FNS_OPEN_AGE_NS,
 };
 pub use hash::{state_hash, HASH_TAG};
 pub use pipeline::{
-    add_errors, frames_total, new_pipeline, process_frame, replay_hash, rows_applied_total,
-    snapshot, Checkpoint, FeedKind, Pipeline, PipelineConfig, PipelineError, FEED_COUNT,
-    FEED_NAMES,
+    add_errors, frames_total, new_pipeline, pipeline_stale_count, process_frame, replay_hash,
+    rows_applied_total, snapshot, Checkpoint, FeedKind, Pipeline, PipelineConfig, PipelineError,
+    FEED_COUNT, FEED_NAMES,
 };
 pub use source::{
     list_recordings, merge_key, merge_streams, run_streams, spec_from_bytes, spec_from_paths,
     MergeReport, Merged, StreamSpec,
 };
 pub use table::{
-    advance_time, class_of_status, flights_live, new_table, shift_times, slot_of_gufi, sweep,
-    ConfigError, FlightTable, TableConfig, TableStats, CLASS_ACTIVE, CLASS_FINISHED, CLASS_MASK,
-    CLASS_PROPOSED, DEFAULT_ACTIVE_AGE_NS, DEFAULT_CAPACITY, DEFAULT_MAX_AGE_NS,
-    DEFAULT_PROPOSED_AGE_NS, DEFAULT_SWEEP_NS, DEFAULT_TERMINAL_AGE_NS, NS_PER_S,
+    advance_time, class_of_status, flights_live, is_stale, new_table, shift_times, slot_of_gufi,
+    stale_count, sweep, ConfigError, FlightTable, TableConfig, TableStats, CLASS_ACTIVE,
+    CLASS_FINISHED, CLASS_MASK, CLASS_PROPOSED, DEFAULT_ACTIVE_AGE_NS, DEFAULT_CAPACITY,
+    DEFAULT_MAX_AGE_NS, DEFAULT_PROPOSED_AGE_NS, DEFAULT_SWEEP_NS, DEFAULT_TERMINAL_AGE_NS,
+    NS_PER_S,
 };
 pub use tfms::{
-    apply_tfms_flight, apply_tfms_flow, flow_live, flow_sweep, new_flow_table, new_tfms_table,
-    tfms_linked, tfms_live, tfms_slot_of, tfms_sweep, FlowApplied, FlowStats, FlowTable,
-    TfmsApplied, TfmsStats, TfmsTable, FLOW_CAPACITY, FLOW_HASH_TAG, LINK_ACID, LINK_NONE,
-    LINK_PLAN, TFMS_CAPACITY, TFMS_HASH_TAG,
+    apply_tfms_flight, apply_tfms_flow, flow_live, flow_stale_count, flow_sweep, new_flow_table,
+    new_tfms_table, tfms_linked, tfms_live, tfms_slot_of, tfms_stale_count, tfms_sweep,
+    FlowApplied, FlowStats, FlowTable, TfmsApplied, TfmsStats, TfmsTable, FLOW_CAPACITY,
+    FLOW_HASH_TAG, LINK_ACID, LINK_NONE, LINK_PLAN, TFMS_CAPACITY, TFMS_HASH_TAG,
 };

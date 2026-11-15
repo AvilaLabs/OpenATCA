@@ -121,6 +121,7 @@ fn touch(c: &mut SlotMut<'_>, now_ns: i64, feed: u8, source: [u8; 2]) {
         *c.last_source = source;
     }
     *c.updates = c.updates.saturating_add(1);
+    *c.stale = false;
 }
 
 fn refuse_out_of_order(t: &mut FlightTable, s: Slot) -> Applied {

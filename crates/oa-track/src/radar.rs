@@ -444,6 +444,7 @@ pub fn plot_convert(
             p.mode_a
         },
         flags: 0,
+        category: 0,
     };
     Ok(Converted { m, geo })
 }

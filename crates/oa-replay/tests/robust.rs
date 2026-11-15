@@ -14,7 +14,8 @@ use common::*;
 use oa_adsb::{encode_payload, reports_len, reports_push, Reports, Row, ROW_EMPTY};
 use oa_feed::Kind;
 use oa_replay::{
-    adsb_slot_of, process_frame, replay_hash, slot_of_gufi, ErrKind, FeedKind, Pipeline,
+    adsb_slot_of, is_stale, pipeline_stale_count, process_frame, replay_hash, slot_of_gufi,
+    ErrKind, FeedKind, Pipeline,
 };
 use oa_sha256::to_hex;
 
@@ -147,8 +148,8 @@ fn ordinary(p: &mut Pipeline) {
             tick(p, t - 3 * NS);
         }
     }
-    // Nine quiet minutes: inside the plausible step.
-    tick(p, T0 + 400 * 1_500_000_000 + 9 * MIN);
+    // A hundred quiet seconds: inside the tolerance.
+    tick(p, T0 + 400 * 1_500_000_000 + 100 * NS);
 }
 
 // REQ: OA-RPL-064
@@ -163,7 +164,9 @@ fn an_ordinary_replay_hashes_as_it_always_did() {
     );
     assert_eq!(
         to_hex(&replay_hash(&p)),
-        "cc63a78d3082dbb2e3d1bdc141da5724bd9289968633bdbad65689d53558e207"
+        // Equal to what the code before the 2-minute tolerance gave for the same frames; the pin
+        // moved only because the replay now ends on a 100 s quiet spell, not a 9 minute one.
+        "39cdf512d34a34fea093eb27c040b4bc6e7a3f992534f01b623dae345f0fd0a5"
     );
 }
 
@@ -341,6 +344,102 @@ fn a_step_back_is_counted_and_the_regressions_before_it_stay_counted() {
     assert_eq!(p.errors[ErrKind::TimeRegression as usize], 2);
 }
 
+/// A frame that carries no feed data, from the feed `feed`.
+fn tick_from(p: &mut Pipeline, feed: FeedKind, t: i64) {
+    process_frame(p, feed, Kind::Status, t, &[]);
+}
+
+// REQ: OA-RPL-078
+#[test]
+fn a_frame_minutes_ahead_does_not_move_the_clock_without_confirmation() {
+    let mut p = small_pipeline(64);
+    for k in 0..10 {
+        tick(&mut p, T0 + k * NS);
+    }
+    // 9.9 minutes ahead, as the 10-minute rule used to let through.
+    tick(&mut p, T0 + 9 * NS + 594 * NS);
+    assert_eq!(p.replay_ns, T0 + 9 * NS);
+    assert_eq!(p.clock.held, 1);
+    // Repeated every few frames, with honest frames between: the clock follows the honest ones,
+    // and they are never counted as regressions.
+    for k in 10..60 {
+        tick(&mut p, T0 + k * NS);
+        if k % 5 == 0 {
+            tick(&mut p, T0 + k * NS + 594 * NS);
+        }
+        assert_eq!(p.replay_ns, T0 + k * NS);
+    }
+    assert_eq!(p.errors[ErrKind::TimeRegression as usize], 0);
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (0, 0));
+    // A frame inside the tolerance (two minutes) is ordinary.
+    tick(&mut p, T0 + 59 * NS + 100 * NS);
+    assert_eq!(p.replay_ns, T0 + 159 * NS);
+}
+
+// REQ: OA-RPL-079
+#[test]
+fn feeds_with_a_constant_skew_under_the_tolerance_do_not_regress_each_other() {
+    let mut p = small_pipeline(64);
+    // The feeds' receive times are 100 s apart all the way through, interleaved.
+    for k in 0..60 {
+        tick_from(&mut p, FeedKind::Sfdps, T0 + k * NS);
+        tick_from(&mut p, FeedKind::Tbfm, T0 + 100 * NS + k * NS);
+    }
+    assert_eq!(p.errors[ErrKind::TimeRegression as usize], 0);
+    assert_eq!(p.clock.held, 0);
+    // The clock is the latest time any feed has had.
+    assert_eq!(p.replay_ns, T0 + 159 * NS);
+    // A frame of the slow feed that goes back in its own time is still a regression.
+    tick_from(&mut p, FeedKind::Sfdps, T0 + 10 * NS);
+    assert_eq!(p.errors[ErrKind::TimeRegression as usize], 1);
+    // A feed that is five minutes behind the others from its first frame is not the clock's to
+    // follow: its frames are held, and the clock stays with the others.
+    for k in 60..70 {
+        tick_from(&mut p, FeedKind::Sfdps, T0 + k * NS);
+        tick_from(&mut p, FeedKind::Tbfm, T0 + 100 * NS + k * NS);
+        tick_from(&mut p, FeedKind::Adsb, T0 + k * NS - 300 * NS);
+    }
+    assert_eq!(p.replay_ns, T0 + 100 * NS + 69 * NS);
+    assert_eq!((p.clock.forward_steps, p.clock.backward_steps), (0, 0));
+}
+
+// REQ: OA-RPL-080
+#[test]
+fn flights_last_heard_before_a_confirmed_step_are_stale_until_they_are_heard_again() {
+    let mut p = small_pipeline(64);
+    for k in 0..10 {
+        tick(&mut p, T0 + k * NS);
+    }
+    flight_at(&mut p, 1, T0 + 9 * NS, None);
+    flight_at(&mut p, 2, T0 + 9 * NS, None);
+    assert_eq!((pipeline_stale_count(&p), p.stale_marked), (0, 0));
+    // Not stale through a step that is only a candidate.
+    tick(&mut p, T0 + 2 * HOUR);
+    assert_eq!(pipeline_stale_count(&p), 0);
+    let step = 2 * HOUR;
+    for k in 10..30 {
+        tick(&mut p, T0 + step + k * NS);
+    }
+    assert_eq!(p.clock.forward_steps, 1);
+    // Both flights survived the step with their ages shifted, and both are marked.
+    assert!(alive(&p, 1) && alive(&p, 2));
+    let stale = |p: &Pipeline, n| is_stale(&p.table, slot_of_gufi(&p.table, gufi(n)).unwrap());
+    assert!(stale(&p, 1) && stale(&p, 2));
+    assert_eq!((pipeline_stale_count(&p), p.stale_marked), (2, 2));
+    // A fresh update of one clears its mark and only its mark.
+    flight_at(&mut p, 1, T0 + step + 30 * NS, None);
+    assert!(!stale(&p, 1) && stale(&p, 2));
+    assert_eq!((pipeline_stale_count(&p), p.stale_marked), (1, 2));
+    // A flight first heard after the step is never stale; an evicted one is no longer counted.
+    flight_at(&mut p, 3, T0 + step + 31 * NS, None);
+    assert_eq!(pipeline_stale_count(&p), 1);
+    for k in 1..=35 {
+        tick(&mut p, T0 + step + 31 * NS + k * MIN);
+    }
+    assert!(!alive(&p, 2));
+    assert_eq!(pipeline_stale_count(&p), 0);
+}
+
 /// The ADS-B table after the same reports in two different orders and slot histories.
 fn aircraft_hash(order: &[u32]) -> String {
     let mut p = small_pipeline(8);
@@ -364,11 +463,17 @@ fn aircraft_eviction_and_future_refusals_are_counted_and_hashed_deterministicall
         to_hex(&replay_hash(&p))
     };
     // One aircraft is heard again, the other is not; 50 minutes on, the silent one is freed.
-    for k in 1..=10 {
-        let t = T0 + 5 * k * MIN;
-        adsb_frame(&mut p, t, &[adsb_row(2, t)]);
+    for k in 1..=50 {
+        let t = T0 + k * MIN;
+        if k % 5 == 0 {
+            adsb_frame(&mut p, t, &[adsb_row(2, t)]);
+        } else {
+            tick(&mut p, t);
+        }
     }
-    tick(&mut p, T0 + 55 * MIN);
+    for k in 51..=55 {
+        tick(&mut p, T0 + k * MIN);
+    }
     assert_eq!(p.adsb.stats.evicted, 1);
     assert_eq!((p.adsb.live, p.adsb.free.len()), (1, 15));
     assert!(adsb_slot_of(&p.adsb, 1).is_none() && adsb_slot_of(&p.adsb, 2).is_some());

@@ -119,18 +119,21 @@
 //!
 //! [`jump_verdict`] judges two reports of one aircraft from the distance, the time gap, the
 //! emitter category and the reported ground speeds (see its module for the sources of the
-//! limits); it replaces the single speed limit that rejected real fast aircraft.
+//! limits); it replaces the single speed limit that rejected real fast aircraft. The category it
+//! is given comes from [`category_observe`], which makes a cap-raising category persist first.
 //!
 //! Cold, offline code: A7.2 applies to the records here; [`Reports`] is the quantity
 //! collection, one column per field.
 
 mod archive;
+mod category;
 mod frames;
 mod speed;
 mod summary;
 mod trace;
 
 pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
+pub use category::{category_is_reserved, category_observe, CategoryState, CATEGORY_PERSIST};
 pub use frames::{
     decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
     PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN,
@@ -141,7 +144,7 @@ pub use speed::{
     JumpPair, JumpVerdict, CAP_HIGH_KT, CAP_ORDINARY_KT, CAP_SPACE_KT, CONSISTENCY_ACCEL_KT_S,
     CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR,
 };
-pub use summary::{summarize, Summary, MAX_JUMP_KT, MIN_JUMP_NM};
+pub use summary::{summarize, Summary, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};
 
 /// Limit: rows in one trace. A busy day's longest real trace is tens of thousands of rows; at

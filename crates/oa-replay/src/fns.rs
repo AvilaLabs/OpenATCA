@@ -138,6 +138,9 @@ pub struct FnsTable {
     pub times: Vec<[i64; 4]>,
     /// Replay time of the last applied row, ns.
     pub last_update_ns: Vec<i64>,
+    /// Whether the row was last updated before a confirmed step of the replay clock and has not
+    /// been updated since: its age is the time since the step, not since it was heard.
+    pub stale: Vec<bool>,
     /// Location, affected FIR, ICAO location.
     pub location: Vec<[u8; 4]>,
     /// See `location`.
@@ -187,6 +190,7 @@ pub fn new_fns_table(capacity: usize) -> FnsTable {
         flags: vec![0; n],
         times: vec![[FNS_NO_TIME; 4]; n],
         last_update_ns: vec![0; n],
+        stale: vec![false; n],
         location: vec![[0; 4]; n],
         fir: vec![[0; 4]; n],
         icao: vec![[0; 4]; n],
@@ -257,6 +261,7 @@ fn blank(t: &mut FnsTable, s: usize) {
     set(&mut t.flags, s, 0);
     set(&mut t.times, s, [FNS_NO_TIME; 4]);
     set(&mut t.last_update_ns, s, 0);
+    set(&mut t.stale, s, false);
     set(&mut t.location, s, [0; 4]);
     set(&mut t.fir, s, [0; 4]);
     set(&mut t.icao, s, [0; 4]);
@@ -416,6 +421,7 @@ fn store(t: &mut FnsTable, s: usize, n: &Notams, i: usize, now_ns: i64, ntype: u
         ],
     );
     set(&mut t.last_update_ns, s, now_ns);
+    set(&mut t.stale, s, false);
     let name = |f: Field| usable(n, i, f);
     let cp = |name_ok: bool, v: &[u8]| -> Vec<u8> {
         if name_ok {
@@ -560,15 +566,30 @@ pub fn fns_sweep(t: &mut FnsTable, now_ns: i64) -> usize {
     n
 }
 
-/// Moves the last-update time of every NOTAM by `delta_ns`, for a step of the replay clock.
-pub fn fns_shift_times(t: &mut FnsTable, delta_ns: i64) {
+/// Moves the last-update time of every NOTAM by `delta_ns`, for a step of the replay clock, and
+/// marks each stale until it is updated; returns the number marked.
+pub fn fns_shift_times(t: &mut FnsTable, delta_ns: i64) -> usize {
+    let mut n = 0;
     for i in 0..t.slots.capacity {
         if slot_live(&t.slots, i) {
             if let Some(v) = t.last_update_ns.get_mut(i) {
                 *v = v.saturating_add(delta_ns);
             }
+            if let Some(v) = t.stale.get_mut(i) {
+                *v = true;
+                n += 1;
+            }
         }
     }
+    n
+}
+
+/// The number of rows that are stale: last updated before a confirmed step of the replay clock
+/// and not updated since.
+pub fn fns_stale_count(t: &FnsTable) -> usize {
+    (0..t.slots.capacity)
+        .filter(|&i| slot_live(&t.slots, i) && t.stale.get(i).copied().unwrap_or(false))
+        .count()
 }
 
 fn put(h: &mut Sha256, b: &[u8]) {

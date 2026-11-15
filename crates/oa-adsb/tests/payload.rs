@@ -541,3 +541,49 @@ fn the_speed_rule_passes_real_fast_aircraft_and_catches_position_jumps() {
     r.gs_dkt.iter_mut().for_each(|g| *g = NONE_U16);
     assert_eq!(summarize(&r).jumps, 3);
 }
+
+// REQ: OA-ADSB-029
+#[test]
+fn a_cap_raising_category_must_persist_and_a_reserved_code_never_raises_the_cap() {
+    let mut s = CategoryState::default();
+    // No category changes nothing; an ordinary class is taken at once.
+    assert_eq!(category_observe(&mut s, 0), 0);
+    assert_eq!(category_observe(&mut s, 0xa3), 0xa3);
+    // One or two reports of a cap-raising class do not move it; the third does.
+    assert_eq!(category_observe(&mut s, 0xb7), 0xa3);
+    assert_eq!(category_observe(&mut s, 0xb7), 0xa3);
+    assert_eq!(category_observe(&mut s, 0xb7), 0xb7);
+    // A report with no category in between does not break the count; a different one does.
+    let mut s = CategoryState::default();
+    for c in [0xb7u8, 0, 0xb7, 0xa6, 0xb7, 0xb7] {
+        assert_eq!(category_observe(&mut s, c), 0, "{c:x}");
+    }
+    assert_eq!(category_observe(&mut s, 0xb7), 0xb7);
+    // An ordinary class after it is taken at once and resets the candidate.
+    assert_eq!(category_observe(&mut s, 0xa5), 0xa5);
+    assert_eq!(category_observe(&mut s, 0xb7), 0xa5);
+    // Reserved codes are ignored however often they are printed.
+    let mut s = CategoryState::default();
+    for _ in 0..10 {
+        assert_eq!(category_observe(&mut s, 0xa8), 0);
+    }
+    assert!(category_is_reserved(0xa8) && category_is_reserved(0xb5) && category_is_reserved(0xd1));
+    assert!(!category_is_reserved(0xb7) && !category_is_reserved(0));
+    // A reserved code in a direct verdict gets the ordinary cap, not the high one.
+    assert_eq!(category_hard_cap_kt(0xa8, CAP_ORDINARY_KT), 1000.0);
+    assert_eq!(category_hard_cap_kt(0xb5, CAP_ORDINARY_KT), 1000.0);
+    // The summary applies the same rule: one report printing B7 does not excuse a 2,782 kt jump.
+    let mut r = Reports::default();
+    for k in 0..6 {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + i64::from(k) * 2_000_000_000;
+        let extra = if k == 3 { 2862.0 / 0.011_119_5 } else { 0.0 };
+        row.lat_e7 = 400_000_000 + (f64::from(k) * 2.0 * 231.5 / 0.011_119_5 + extra) as i32;
+        row.lon_e7 = -900_000_000;
+        row.category = if k == 3 { 0xb7 } else { 0xa3 };
+        reports_push(&mut r, &row);
+    }
+    // The jump out and the jump back; with B7 taken on the spot only the jump back counted.
+    assert_eq!(summarize(&r).jumps, 2);
+}

@@ -87,6 +87,7 @@ pub fn measure(
         sensor: 1,
         ident: NO_IDENT,
         flags: 0,
+        category: 0,
     };
     if let Some(sv) = sigma_vel {
         let (te, tn) = frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn);

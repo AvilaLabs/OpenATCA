@@ -616,6 +616,7 @@ fn associate_radar(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) -> Vec<Dec
         sensor: s.sensor,
         ident: crate::types::NO_IDENT,
         flags: 0,
+        category: 0,
     };
     let none = Decision {
         kind: D_UNASSIGNED,
@@ -1666,6 +1667,7 @@ mod tests {
                     sensor: 0,
                     ident: crate::types::NO_IDENT,
                     flags: crate::types::M_HAS_VEL,
+                    category: 0,
                 });
             }
             t += 1_000_000_000;
