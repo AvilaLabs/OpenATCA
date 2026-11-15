@@ -44,6 +44,20 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   either side of every edge of the ZAU boundary.
 - **OA-GEO-007** Computes the maximum separation between a geodesic and a rhumb line joining the
   same two points.
+- **OA-GEO-008** In the local east-north frame (`aeqd`) a true velocity at the frame origin converts to
+  the frame by the analytic differential (east times sphere radius over prime-vertical radius, north
+  times it over the meridian radius) and back to 1e-6 m/s, at origin latitudes 45, 89, 89.99 and 89.9999
+  degrees in both hemispheres; no finite displacement is used.
+- **OA-GEO-009** The local differential of the projection at a plane point (plane step to true east and
+  north metres) equals a fine central difference of the inverse projection at 45, 89, 89.99 and 89.9999
+  degrees and in the south, and the velocity conversions apply that matrix and its inverse.
+- **OA-GEO-010** At exactly a pole east and north are those of the limit along the frame origin's own
+  meridian: east is the origin's east, north continues along that meridian through the pole. The
+  differential there is finite, for the pole as origin and as a point, and mirrors in the south.
+- **OA-GEO-011** The differential of a change of frame at one physical point needs no east or north; it
+  agrees with the true-axes differentials of the two frames and its round trip is the identity, at
+  midlatitude and near a pole.
+- **OA-GEO-012** A covariance is carried through a linear map as `M S M^T`.
 
 ### Elementary functions (oa-math)
 
@@ -2715,7 +2729,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   middle of each phase.
 - **OA-TRK-008** A track 600 km from the origin at 64 degrees north is as accurate as one at the origin
   (position under 8 m RMS, speed under 1 m/s), because the frame is re-centred on every update and the
-  velocity rotated by the change of the frame's axes.
+  state (velocity and the whole covariance) carried through the change of the frame's axes.
 - **OA-TRK-009** A measurement that arrives out of order inside the window is applied by re-filtering from
   stored state: with every fifth neighbour pair swapped, each swap is re-filtered and replayed exactly
   once and the output after the last swap is bit-identical to the in-order run.
@@ -3053,3 +3067,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   all candidates the window test can pass, at index sizes either side of the scan fallback.
 - **OA-TRK-222** When the visit budget is shorter than the candidates, the nearest by coarse distance
   (then lowest track number) are kept, not the lowest numbered; the plot is still marked capped.
+- **OA-TRK-260** A plot's position covariance, given in the target's own east-north axes, is mapped into
+  the filter's plane as `J R J^T` (J the differential of the projection at the plot) before the gate and
+  the update: at 89.99 degrees, 0 to 90 degrees east, the normalised innovation equals the one computed
+  with an independent finite-difference J, and at 45 degrees likewise.
+- **OA-TRK-261** A known anisotropic physical ellipse, position and velocity, is the same physical
+  ellipse and velocity in east and north after the frame is re-centred, 1.6 km away near either pole and
+  at midlatitude (within 0.3 %).
+- **OA-TRK-262** A change of frame carries every model's position mean, velocity mean and the whole
+  state covariance (position and velocity blocks and their cross terms) by the differential of the
+  change of frame; a quarter turn exchanges the east and north blocks and cross terms.
+- **OA-TRK-263** A track's output position and velocity covariances are in east and north at the output
+  point: a track started from a plot returns its covariance and velocity at the start, at 45 and 89.9999
+  degrees and in the south, to 1e-4.

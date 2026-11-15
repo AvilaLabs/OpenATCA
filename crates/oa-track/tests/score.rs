@@ -419,8 +419,13 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
     assert_eq!(run.digest, PINNED_TRACKER_CLIP_DIGEST);
 }
 
+// Re-pinned when the covariance mapping and the exact velocity differential came in (OA-TRK-260 to
+// OA-TRK-263): the same 108,644 reports applied and 1,125 jump-rejected, the normalised
+// innovation sum 142,114.4 to 142,128.2 (1e-4 of itself); the rows differ in covariance and
+// velocity at the 0.3 % and 1e-3 m/s scale. The earlier value was
+// "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "a697ae2ba723b32160a5e14e45595b3fd077b7d1bfeb09cb215453c75892f962";
+    "4c9aa0a6d5607e7c62c0e3cc70a257c2a7d2c560d98752c1e840350f87ae4b69";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

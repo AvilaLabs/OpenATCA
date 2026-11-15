@@ -656,10 +656,18 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // 6,039 to 6,039 none changed, 2,082 to 2,080 (2 dropped), 8,111 to 8,110 (3 dropped, 2
 // gained, 3 with another way). Everything else in the digests is the covariance and position
 // of the output rows.
+// Re-pinned when the plot covariance was mapped into the filter's plane as J R J^T, the state
+// covariance carried through the whole change of frame, and the output covariances and velocity
+// taken from the exact local differential (OA-TRK-260 to OA-TRK-263): the covariances are scaled
+// by the sphere-to-ellipsoid metre (0.3 % in standard deviation) and the velocity chord error is
+// gone. Plots in the assignment log, old code to new, per run: 6,036 to 6,036, 2,009 to 2,009,
+// 6,039 to 6,039, 2,080 to 2,080 (none changed in these), 8,110 to 8,109 (1 dropped, none gained,
+// none with another way). Applied and jump-rejected counts are the same except one fewer applied in
+// the two-radar run; the mean normalised innovation moved by 2e-5 to 2e-4 of itself.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "726ff3415356fdef7e8735428c5360222fd64b8c25b3cb0af0104e219636fcbd",
-    "47b02c94245abd261cfe8b6909d2a6377ec258346806b6ad2943dbb61337484c",
-    "a7e81f4ab3a4c53dda19fb565b318427e960442c4c74cf9c9a209346a8e7f9c8",
-    "49ac1ff33c9f5e40dda9a2e0bde7cce9d9173a5242016ced0be0c143b34f82a8",
-    "22337761a8dc1e32ad3f680a12f4d3cfe8594fed515e2f00276019d43ddbe14d",
+    "74244208e302c7249a21ec6838d5bbc32f5531cad9a0001d983913e990df5cc1",
+    "2ec144c347f90ac5dee17c2fb966c2a60fad5c6efca7cc282e2893679614a18b",
+    "9fe0b7190212d49c651a5e90274ed441eca1cb32c4a695d0d7ab42861a22aa1c",
+    "e3ab1ae5c579b69aa7faa8cf70f1c822e464378d9905c6fbc7c2ab8bc8217816",
+    "43363471167164753e8146b434106526a99a9fb1b1bf1d345ac2d9f7bcb03315",
 ];

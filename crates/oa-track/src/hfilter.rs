@@ -407,28 +407,72 @@ pub(crate) fn h_update(
     out
 }
 
-/// The velocity rotation of a frame change: applies the 2 x 2 `r` to the velocity block of
-/// every model state and covariance.
-pub(crate) fn h_rotate_velocity(h: &mut HFilter, r: &[[f64; 2]; 2]) {
+/// A frame change at the mean position: every model's state and covariance are carried to the
+/// new frame. Positions go to `to + d (q - from)`, velocities to `d v`, and the covariance to
+/// `T P T^T` with `T = diag(d, d, 1)`, so the position and velocity blocks and their cross terms
+/// are all transformed; `d` is the differential of the change of frame at the point.
+pub(crate) fn h_change_frame(h: &mut HFilter, from: [f64; 2], to: [f64; 2], d: &[[f64; 2]; 2]) {
     let mut t = ident();
-    set(&mut t, 2, 2, r[0][0]);
-    set(&mut t, 2, 3, r[0][1]);
-    set(&mut t, 3, 2, r[1][0]);
-    set(&mut t, 3, 3, r[1][1]);
+    for ix in [0usize, 2] {
+        set(&mut t, ix, ix, d[0][0]);
+        set(&mut t, ix, ix + 1, d[0][1]);
+        set(&mut t, ix + 1, ix, d[1][0]);
+        set(&mut t, ix + 1, ix + 1, d[1][1]);
+    }
     for m in h.m.iter_mut() {
-        m.x = matvec(&t, &m.x);
+        let rel = [m.x[0] - from[0], m.x[1] - from[1], m.x[2], m.x[3], m.x[4]];
+        let mut x = matvec(&t, &rel);
+        x[0] += to[0];
+        x[1] += to[1];
+        m.x = x;
         m.p = symmetrise(&mul(&mul(&t, &m.p), &transpose(&t)));
     }
 }
 
-/// Shifts every model's position by `(dx, dy)` (the frame origin moved by `-(dx, dy)`).
-pub(crate) fn h_shift(h: &mut HFilter, dx: f64, dy: f64) {
-    for m in h.m.iter_mut() {
-        if let Some(v) = m.x.get_mut(0) {
-            *v += dx;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-TRK-262
+    #[test]
+    fn a_frame_change_transforms_the_whole_covariance_and_every_mean() {
+        let mut h = h_init(
+            &[10000.0, 30.0, 1.0],
+            Some(([20.0, -5.0], [4.0, 0.5, 0.25])),
+            0,
+        );
+        // Give the position/velocity block a cross term and the models different positions.
+        for (k, m) in h.m.iter_mut().enumerate() {
+            m.p[0][2] = 3.0;
+            m.p[2][0] = 3.0;
+            m.p[1][3] = -2.0;
+            m.p[3][1] = -2.0;
+            m.x[0] = 5.0 + k as f64;
         }
-        if let Some(v) = m.x.get_mut(1) {
-            *v += dy;
+        let d = [[0.0, -1.0], [1.0, 0.0]];
+        let before = h;
+        h_change_frame(&mut h, [5.5, 0.0], [100.0, 200.0], &d);
+        for (b, a) in before.m.iter().zip(h.m.iter()) {
+            // Position: to + d (q - from); velocity: d v; turn rate unchanged.
+            let (qx, qy) = (b.x[0] - 5.5, b.x[1]);
+            assert!((a.x[0] - (100.0 - qy)).abs() < 1e-12 && (a.x[1] - (200.0 + qx)).abs() < 1e-12);
+            assert!((a.x[2] - 5.0).abs() < 1e-12 && (a.x[3] - 20.0).abs() < 1e-12);
+            assert_eq!(a.x[4], b.x[4]);
+            // A quarter turn: (x, y) -> (-y, x) in both the position and velocity blocks, with
+            // the cross terms following.
+            assert!((a.p[0][0] - b.p[1][1]).abs() < 1e-12 && (a.p[1][1] - b.p[0][0]).abs() < 1e-12);
+            assert!((a.p[0][1] + b.p[0][1]).abs() < 1e-12);
+            assert!((a.p[2][2] - b.p[3][3]).abs() < 1e-12 && (a.p[3][3] - b.p[2][2]).abs() < 1e-12);
+            // Position-velocity: new (E_pos, E_vel) = (-N_pos, -N_vel) ...
+            assert!(
+                (a.p[0][2] - b.p[1][3]).abs() < 1e-12,
+                "{} {}",
+                a.p[0][2],
+                b.p[1][3]
+            );
+            assert!((a.p[1][3] - b.p[0][2]).abs() < 1e-12);
+            assert!((a.p[0][3] + b.p[1][2]).abs() < 1e-12);
         }
     }
 }

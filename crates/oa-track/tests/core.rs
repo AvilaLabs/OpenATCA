@@ -1169,8 +1169,13 @@ fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_r
 // "579 477 30 53 4 288 869 14 0 1343", 0x40a4_9f6c_7a87_a22b and
 // "6ea4de8c2647f225e2b723d0422fb68eef0b81dea5a641f733827844421c6cd5".
 const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
-const GOLDEN_NIS_BITS: u64 = 0x40a4_38e3_6693_06a4;
-const GOLDEN_DIGEST: &str = "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc";
+// Re-recorded when the covariance mapping and the exact velocity differential came in
+// (OA-TRK-260 to OA-TRK-263): the counters are unchanged (nothing applied, dropped or gained); the
+// innovation sum went from 2588.444 to 2589.553 (4e-4 of itself) and the rows differ in
+// covariance and velocity. The earlier values were 0x40a4_38e3_6693_06a4 and
+// "67be4436e36e6b6b39b89cea17490227140bfdccddf9df9e8b42d9af2d811bfc".
+const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97b_1227;
+const GOLDEN_DIGEST: &str = "c953ab2374b272a955edec2c2fd4cfe0ec9afb8911947e58f8f1ac6590791133";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1253,7 +1258,11 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // fate; a third, held at 20,000 s, is discarded because the caller's `tracker_advance` moved the
 // clock first). The earlier value was
 // "5cbeb052deda04a2f6ebf9a7e1e34fa8f94955283f59bd03cec60ceb8cbcd86f".
-const GAPPY_DIGEST: &str = "797b729ae9d90ef7a363ffd0bafbebeed9d1e1edfee527696a6df1f4b0d14290";
+// Re-recorded for the covariance mapping and exact velocity differential (OA-TRK-260 to
+// OA-TRK-263): the same 1,446 rows and the same end and hold counts; only covariance and velocity
+// values moved. The earlier value was
+// "797b729ae9d90ef7a363ffd0bafbebeed9d1e1edfee527696a6df1f4b0d14290".
+const GAPPY_DIGEST: &str = "9aab86ffa408a1516de991484686298f0ee0fd676a803e2c6a2664a8bf4d4163";
 
 // REQ: OA-TRK-041
 #[test]
