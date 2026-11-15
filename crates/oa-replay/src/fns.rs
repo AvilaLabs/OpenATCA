@@ -198,8 +198,10 @@ pub struct FnsTable {
     pub alt_ref: Vec<[u8; 2]>,
     /// Polygons and vertices of the NOTAM.
     pub polys: Vec<[u32; 2]>,
-    /// Bounding box of all polygon vertices: minimum latitude, minimum longitude, maximum
-    /// latitude, maximum longitude, 1e-7 degree; [`FNS_NO_NUM`] when there is no polygon.
+    /// Bounding box of all polygon vertices: minimum latitude, west longitude, maximum
+    /// latitude, east longitude, 1e-7 degree; [`FNS_NO_NUM`] when there is no polygon. The
+    /// longitudes are the smallest interval covering the vertices; west larger than east means
+    /// it runs east through 180 degrees.
     pub bbox: Vec<[i32; 4]>,
     /// Tombstone bookkeeping, keyed by [`FnsKey`].
     pub tomb: Slots,
@@ -646,28 +648,82 @@ fn store(t: &mut FnsTable, s: usize, n: &Notams, i: usize, now_ns: i64, ntype: u
         ],
     );
     let (mut polys, mut verts) = (0u32, 0u32);
-    let mut bbox = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    let (mut min_lat, mut max_lat) = (i32::MAX, i32::MIN);
     if usable(n, i, Field::Polygons) {
         for p in polygons_of(n, i) {
             polys += 1;
             let (lat, lon) = polygon_vertices(n, p);
-            for (&la, &lo) in lat.iter().zip(lon) {
-                verts += 1;
-                bbox = [
-                    bbox[0].min(la),
-                    bbox[1].min(lo),
-                    bbox[2].max(la),
-                    bbox[3].max(lo),
-                ];
+            for (&la, _) in lat.iter().zip(lon) {
+                min_lat = min_lat.min(la);
+                max_lat = max_lat.max(la);
             }
+            verts = verts.saturating_add(lat.len().min(lon.len()) as u32);
         }
     }
+    let cover = if verts == 0 {
+        None
+    } else {
+        lon_cover(polygons_of(n, i).map(|p| polygon_vertices(n, p).1))
+    };
     set(&mut t.polys, s, [polys, verts]);
     set(
         &mut t.bbox,
         s,
-        if verts == 0 { [FNS_NO_NUM; 4] } else { bbox },
+        match cover {
+            Some((west, east)) if verts != 0 => [min_lat, west, max_lat, east],
+            _ => [FNS_NO_NUM; 4],
+        },
     );
+}
+
+/// One turn, 1e-7 degree.
+const TURN_E7: i64 = 3_600_000_000;
+
+/// The smallest longitude interval covering every longitude in `rings`, as (west, east) in
+/// 1e-7 degree within [-180, 180] degrees. When it runs through 180 degrees, `west` is larger
+/// than `east` (the interval goes east from `west` over the antimeridian to `east`); otherwise
+/// `west <= east`. `None` when there is no longitude.
+fn lon_cover<'a>(rings: impl Iterator<Item = &'a [i32]> + Clone) -> Option<(i32, i32)> {
+    let reference = i64::from(*rings.clone().find_map(|r| r.first())?);
+    // Longitudes placed within half a turn of the first one.
+    let unwrap = |l: i32| {
+        reference + (i64::from(l) - reference + TURN_E7 / 2).rem_euclid(TURN_E7) - TURN_E7 / 2
+    };
+    let all = || rings.clone().flat_map(|r| r.iter().copied());
+    let lo = all().map(unwrap).min()?;
+    let hi = all().map(unwrap).max()?;
+    let (west, east) = if hi - lo <= TURN_E7 / 2 {
+        // Every gap between neighbours is within the span, and the empty arc is over half a
+        // turn, so this is the smallest cover.
+        (lo, hi)
+    } else {
+        // Wide: the cover is the whole circle less the largest gap between neighbours.
+        let mut gap = (-1i64, lo, hi);
+        for v in all().map(i64::from) {
+            let next = all()
+                .map(i64::from)
+                .map(|w| (w - v).rem_euclid(TURN_E7))
+                .filter(|&d| d > 0)
+                .min();
+            if let Some(d) = next {
+                if d > gap.0 {
+                    gap = (d, v + d, v);
+                }
+            }
+        }
+        (gap.1, gap.2)
+    };
+    let fold = |x: i64| {
+        let x = if x > TURN_E7 / 2 {
+            x - TURN_E7
+        } else if x < -TURN_E7 / 2 {
+            x + TURN_E7
+        } else {
+            x
+        };
+        i32::try_from(x).ok()
+    };
+    Some((fold(west)?, fold(east)?))
 }
 
 fn pad4(v: &[u8]) -> [u8; 4] {
@@ -905,4 +961,24 @@ pub fn fns_icao_str(t: &FnsTable, s: usize) -> &str {
 /// Whether the NOTAM in slot `s` has unlimited ceiling.
 pub fn fns_ceiling_unlimited(t: &FnsTable, s: usize) -> bool {
     t.alt_ft.get(s).is_some_and(|a| a[1] == ALT_UNLIMITED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEG: i32 = 10_000_000;
+
+    // REQ: OA-RPL-052
+    #[test]
+    fn the_longitude_cover_is_the_smallest_interval_and_wraps_over_the_antimeridian() {
+        let cover = |a: &[i32]| lon_cover(core::iter::once(a));
+        let d = |x: i32| x * DEG;
+        assert_eq!(cover(&[d(-90), d(-87)]), Some((d(-90), d(-87))));
+        assert_eq!(cover(&[d(179), d(-179)]), Some((d(179), d(-179))));
+        assert_eq!(cover(&[d(-179), d(179), d(180)]), Some((d(179), d(-179))));
+        // 200 degrees wide, so the interval is found from the gaps: 10 east to 150 west.
+        assert_eq!(cover(&[d(10), d(110), d(-150)]), Some((d(10), d(-150))));
+        assert_eq!(cover(&[]), None);
+    }
 }

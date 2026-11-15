@@ -1242,7 +1242,9 @@ frame of their feed has been fed (as the ADS-B table is).
   time; one with no end time leaves after thirty days without an update; a reader can ask how many are in
   force at a time.
 - **OA-RPL-052** A NOTAM keeps its circle, altitude limits and references, affected feature, polygon and
-  vertex counts and the bounding box of its polygon vertices.
+  vertex counts and the bounding box of its polygon vertices: the latitude range and the smallest
+  longitude interval covering them, with the west end larger than the east end when the interval
+  runs through 180 degrees.
 - **OA-RPL-053** An FNS payload that is not well-formed XML or is refused by the decoder, and a row with
   no usable identity, are counted under typed errors and applied to nothing; a malformed
   field is counted and treated as absent.

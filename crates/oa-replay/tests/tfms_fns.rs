@@ -953,6 +953,35 @@ fn a_notam_keeps_its_circle_altitudes_and_the_bounding_box_of_its_polygons() {
     assert_eq!((p.fns.polys[s2], p.fns.bbox[s2]), ([0, 0], [i32::MIN; 4]));
 }
 
+// REQ: OA-RPL-052
+#[test]
+fn the_polygon_box_of_a_ring_over_the_antimeridian_is_a_wrapped_longitude_interval() {
+    let mut p = pl();
+    let mut n = nt("Z", 1);
+    n.members = polygon("30.0 179.5 30.0 -179.5 31.0 -179.5 31.0 179.5 30.0 179.5");
+    feed(&mut p, FeedKind::Fns, mar5(9), &notam(&n));
+    let s = fns_slot_of(&p.fns, &key("Z", 1)).unwrap();
+    // West end 179.5 east, east end 179.5 west: the west end is the larger number, which marks
+    // an interval that runs through 180 degrees.
+    assert_eq!(
+        p.fns.bbox[s],
+        [300_000_000, 1_795_000_000, 310_000_000, -1_795_000_000]
+    );
+    // Two rings, one each side of the line, give the same one-degree-wide interval.
+    let mut m = nt("Z", 2);
+    m.members = format!(
+        "{}{}",
+        polygon("30.0 179.5 30.0 179.8 31.0 179.8 31.0 179.5 30.0 179.5"),
+        polygon("30.0 -179.8 30.0 -179.5 31.0 -179.5 31.0 -179.8 30.0 -179.8")
+    );
+    feed(&mut p, FeedKind::Fns, mar5(9), &notam(&m));
+    let s2 = fns_slot_of(&p.fns, &key("Z", 2)).unwrap();
+    assert_eq!(
+        p.fns.bbox[s2],
+        [300_000_000, 1_795_000_000, 310_000_000, -1_795_000_000]
+    );
+}
+
 // REQ: OA-RPL-053
 #[test]
 fn malformed_fns_payloads_are_counted_by_kind_and_never_applied() {

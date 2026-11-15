@@ -285,3 +285,54 @@ fn polygons_are_tested_against_the_models_own_artcc_boundary() {
         (1, 1, 0)
     );
 }
+
+/// The model with its own boundary (the first four vertices) replaced by a box.
+fn model_with_boundary(lat: (f64, f64), lon: (f64, f64)) -> Model {
+    let mut m = model();
+    let e7 = |d: f64| (d * 1e7).round() as i32;
+    for (v, (la, lo)) in m.vertices.iter_mut().zip([
+        (lat.0, lon.0),
+        (lat.0, lon.1),
+        (lat.1, lon.1),
+        (lat.1, lon.0),
+    ]) {
+        v.lat = e7(la);
+        v.lon = e7(lo);
+    }
+    m
+}
+
+fn one_ring(ring: &'static str) -> Notams {
+    build(&[Case {
+        fir: "ZQQ",
+        loc: "QQA",
+        apt: None,
+        rwy: None,
+        navaid: false,
+        ring: Some(ring),
+        coords: "3012N09045W",
+    }])
+}
+
+// REQ: OA-NOTAM-021
+#[test]
+fn a_boundary_point_between_a_long_polygon_edge_and_its_vertex_box_still_touches() {
+    // The polygon's north edge runs 100 NM along 45 N, and the geodesic bulges about 670 m north
+    // of the parallel at its middle (89.325 W). The boundary box lies in that sliver: no
+    // vertex of the polygon is in it, and its corners are north of every polygon vertex.
+    let m = model_with_boundary((45.002, 45.004), (-89.345, -89.305));
+    let n = one_ring("44.0 -90.5 44.0 -88.15 45.0 -88.15 45.0 -90.5 44.0 -90.5");
+    let p = cross_check(&m, &n).polygons;
+    assert_eq!((p.polygons, p.unusable, p.boundaries), (1, 0, 1));
+    assert_eq!((p.touching, p.rows_touching), (1, 1));
+}
+
+// REQ: OA-NOTAM-021
+#[test]
+fn a_polygon_across_the_antimeridian_touches_a_boundary_inside_it() {
+    let m = model_with_boundary((30.4, 30.6), (179.9, -179.9));
+    let n = one_ring("30.0 179.5 30.0 -179.5 31.0 -179.5 31.0 179.5 30.0 179.5");
+    let p = cross_check(&m, &n).polygons;
+    assert_eq!((p.polygons, p.unusable, p.boundaries), (1, 0, 1));
+    assert_eq!((p.touching, p.rows_touching), (1, 1));
+}
