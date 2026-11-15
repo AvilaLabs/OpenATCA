@@ -3111,6 +3111,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   tracks predicted for association, the coarse window width, the anonymous plots never gated because the
   limit was reached, the coarse visits, exact tests and initiation tests, the candidates alive at most and the
   buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
+- **OA-TRK-298** An anonymous candidate does not become a second track for an aircraft a live track already
+  holds. At its confirmation its latest plot is gated, with the association gate and its own covariance (and
+  the time between the plot and the track's state), against every live track, those confirmed earlier in the
+  same bucket by any radar included; if it gates, no track is made and `cand_merged_on_confirm` counts it. When
+  a track is confirmed, the anonymous candidates of the other radars that gate with it are cancelled and
+  counted in `cand_cancelled_by_track`; `confirm_gate_tests` counts the tests.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

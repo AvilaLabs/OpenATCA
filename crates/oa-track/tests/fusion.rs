@@ -721,10 +721,17 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // terms near zero, the covariance cross term, turn rate and vertical rate, move by more in
 // relative terms). The earlier digests were e7a42113..6cac, 83d24dd4..4099, e89d63bc..3ad8,
 // 76970282..9135 and aca1b691..9a47.
+// Re-pinned (the fifth, two radars) when a candidate whose latest plot gates with a live track no
+// longer becomes a second track, and a new track cancels the other radars' candidates it gates
+// with (OA-TRK-298). The four single-radar runs are unchanged. Two radars, old to new: 173,160 to
+// 173,017 rows, 8,462 plots, 0 refused (the same), tracks created 678 to 676, candidates confirmed
+// 102 to 100, duplicate tracks 30 to 28, coast rows 8,811 to 8,739, swaps 25, wrong plots 67 and
+// false plots applied 1 (the same). The value before was
+// "9323316479520b069e3292527c6cb0f52a26277ed4e395c33c0c1669a18eb896".
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
     "e8bfce481687ccccb1d3f186878bc3937ee86f9b949148974aeedf111876963d",
     "6d546fa69d25cacaccabf5674289792329a19aa9e6ab31275222e9acced56a7e",
     "bc1f506cc3a65158f6c007e9b81532da3fcb36a06483168bdef04cee17b94a01",
     "d3782daea34db0dfcb939730ab06200319bd08ad4759a0ae78a6944feaf195a8",
-    "9323316479520b069e3292527c6cb0f52a26277ed4e395c33c0c1669a18eb896",
+    "c0e2736508a46fababe9e5f2a06e44fe541a0c2f7a8b8e7aa79f3c19ca28253d",
 ];
