@@ -168,8 +168,8 @@ fn check(r: &Reports) -> Worst {
             assert!(dlon <= CAT021_POS_HR_DEG / 2.0 + 1e-12, "lon {dlon}");
             w.lat_deg = w.lat_deg.max(dlat);
             w.lon_deg = w.lon_deg.max(dlon);
-            let elat = (raw_to_e7(p.lat, CAT021_POS_HR_BITS) - r.lat_e7[k]).abs();
-            let elon = (raw_to_e7(p.lon, CAT021_POS_HR_BITS) - r.lon_e7[k]).abs();
+            let elat = (raw_to_e7(p.lat, CAT021_POS_HR_BITS).unwrap() - r.lat_e7[k]).abs();
+            let elon = (raw_to_e7(p.lon, CAT021_POS_HR_BITS).unwrap() - r.lon_e7[k]).abs();
             assert!(elat <= 1 && elon <= 1, "e7 {elat} {elon}");
             w.lat_e7 = w.lat_e7.max(elat);
             w.lon_e7 = w.lon_e7.max(elon);

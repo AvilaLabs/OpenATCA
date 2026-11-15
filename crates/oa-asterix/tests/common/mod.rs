@@ -308,7 +308,7 @@ pub fn cat062_full() -> Cat062 {
         time: Some(0xFF_FFFF),
         position: Some(RawPosition {
             lat: -16_777_216,
-            lon: 2_147_483_647,
+            lon: 33_554_432,
         }),
         cartesian: Some(CartPosition {
             x: -8_388_608,

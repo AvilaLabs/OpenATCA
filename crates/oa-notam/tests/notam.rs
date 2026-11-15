@@ -644,6 +644,35 @@ fn polygons_are_vertex_spans_in_a_shared_array() {
     assert_eq!(polygon_vertices(&n, 0).0.len(), 3);
 }
 
+// REQ: OA-NOTAM-022
+#[test]
+fn decimal_overflow_in_a_ring_is_refused_and_the_next_message_decodes() {
+    let good = "30.1 -90.1 30.1 -90.2 30.2 -90.2 30.1 -90.1";
+    let huge = "999999999999.9 0 30.1 -90.2 30.2 -90.2 999999999999.9 0";
+    let (n, s) = ok(&msg(&[&runway_element(huge)]));
+    assert_eq!(n.errors[0], bit(Field::Polygons));
+    assert_eq!(n.poly_count[0], 0);
+    assert_eq!(s.field_errors[Field::Polygons as usize], 1);
+    check_invariants(&n);
+    // The same decoder state takes a good message after the refused one.
+    let mut out = small();
+    let mut st = default_stats();
+    run_into(msg(&[&runway_element(huge)]).as_bytes(), &mut out, &mut st).unwrap();
+    run_into(msg(&[&runway_element(good)]).as_bytes(), &mut out, &mut st).unwrap();
+    assert_eq!(out.len, 2);
+    assert_eq!(out.errors[0], bit(Field::Polygons));
+    assert_eq!(out.errors[1], 0);
+    assert!(has_field(&out, 1, Field::Polygons));
+    // The scaler at the i64 limits.
+    assert_eq!(parse_scaled(b"999999999999", 0), Some(999_999_999_999));
+    assert_eq!(parse_scaled(b"999999999999", 7), None);
+    assert_eq!(parse_scaled(b"-999999999999.9", 7), None);
+    assert_eq!(parse_scaled(b"922337203685.4775807", 7), Some(i64::MAX));
+    assert_eq!(parse_scaled(b"922337203685.47758075", 7), None);
+    assert_eq!(parse_scaled(b"922337203685.4775808", 7), None);
+    assert_eq!(parse_scaled(b"999999999999.99999999999999999999", 12), None);
+}
+
 // REQ: OA-NOTAM-010
 #[test]
 fn a_bad_polygon_is_a_field_error_on_the_row_and_none_is_kept() {

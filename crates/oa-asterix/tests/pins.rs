@@ -734,22 +734,32 @@ fn derived_data_subitem_one_and_six_cannot_be_given_as_other() {
 #[test]
 fn position_rounding_is_to_nearest_half_away_from_zero() {
     // 1.8e9 / 2^10 = 1 757 812.5 exactly: a tie rounds away from zero on both signs.
-    assert_eq!(raw_to_e7(1, 10), 1_757_813);
-    assert_eq!(raw_to_e7(-1, 10), -1_757_813);
-    assert_eq!(raw_to_e7(3, 10), 5_273_438);
-    assert_eq!(raw_to_e7(-3, 10), -5_273_438);
+    assert_eq!(raw_to_e7(1, 10), Some(1_757_813));
+    assert_eq!(raw_to_e7(-1, 10), Some(-1_757_813));
+    assert_eq!(raw_to_e7(3, 10), Some(5_273_438));
+    assert_eq!(raw_to_e7(-3, 10), Some(-5_273_438));
     // Not ties: 214.577 rounds up, 53.644 up, 8.38 down, 1.68 up.
-    assert_eq!(raw_to_e7(1, 23), 215);
-    assert_eq!(raw_to_e7(-1, 23), -215);
-    assert_eq!(raw_to_e7(1, 25), 54);
-    assert_eq!(raw_to_e7(-1, 25), -54);
-    assert_eq!(raw_to_e7(5, 30), 8);
-    assert_eq!(raw_to_e7(-5, 30), -8);
-    assert_eq!(raw_to_e7(1, 30), 2);
-    assert_eq!(raw_to_e7(-1, 30), -2);
-    assert_eq!(raw_to_e7(0, 30), 0);
-    assert_eq!(raw_to_e7(293_867_031, 30), 492_633_000);
-    assert_eq!(raw_to_e7(-293_867_031, 30), -492_633_000);
+    assert_eq!(raw_to_e7(1, 23), Some(215));
+    assert_eq!(raw_to_e7(-1, 23), Some(-215));
+    assert_eq!(raw_to_e7(1, 25), Some(54));
+    assert_eq!(raw_to_e7(-1, 25), Some(-54));
+    assert_eq!(raw_to_e7(5, 30), Some(8));
+    assert_eq!(raw_to_e7(-5, 30), Some(-8));
+    assert_eq!(raw_to_e7(1, 30), Some(2));
+    assert_eq!(raw_to_e7(-1, 30), Some(-2));
+    assert_eq!(raw_to_e7(0, 30), Some(0));
+    assert_eq!(raw_to_e7(293_867_031, 30), Some(492_633_000));
+    assert_eq!(raw_to_e7(-293_867_031, 30), Some(-492_633_000));
+    // Out of the geographic range or an unsupported width: refused, never wrapped.
+    assert_eq!(raw_to_e7(0x4000_0000, 25), None); // 5760 degrees, which wrapped to 176.5
+    assert_eq!(raw_to_e7(i32::MIN, 30), None);
+    assert_eq!(raw_to_e7(i32::MAX, 30), None);
+    assert_eq!(raw_to_e7(1 << 30, 30), Some(1_800_000_000)); // exactly 180 degrees
+    assert_eq!(raw_to_e7((1 << 30) + 1, 30), None);
+    assert_eq!(raw_to_e7(-(1 << 30), 30), Some(-1_800_000_000));
+    assert_eq!(raw_to_e7(-(1 << 30) - 1, 30), None);
+    assert_eq!(raw_to_e7((1 << 25) + 1, 25), None);
+    assert_eq!(raw_to_e7(1, 33), None);
     // The inverse: 1e-7 degree to counts, ties away from zero, negatives too.
     assert_eq!(e7_to_raw(1_757_813, 10), 1);
     assert_eq!(e7_to_raw(-1_757_813, 10), -1);

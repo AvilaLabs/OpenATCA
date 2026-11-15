@@ -437,3 +437,44 @@ fn bounds_are_constants_and_hold_at_the_edge() {
     let Block::Cat048(r) = b else { panic!() };
     assert_eq!(r[0].mb_data.as_ref().unwrap().len(), 255);
 }
+
+// REQ: OA-AST-105
+#[test]
+fn cat062_longitude_range_is_refused_both_ways() {
+    // I062/105 (FRN 5): latitude then longitude, LSB 180/2^25 degrees, so 2^25 counts is exactly
+    // 180 degrees and is allowed; one count more is not.
+    let pos = |lat: u32, lon: u32| {
+        let mut item = lat.to_be_bytes().to_vec();
+        item.extend_from_slice(&lon.to_be_bytes());
+        blk(62, &[rec(&[(1, &SRC), (5, &item)])])
+    };
+    assert!(decode_block(&pos(0, 0x0200_0000)).is_ok());
+    assert!(decode_block(&pos(0, 0xFE00_0000)).is_ok());
+    let e = dec(&pos(0, 0x0200_0001));
+    assert_eq!((e.kind, e.cat, e.item), (ErrorKind::InvalidValue, 62, 105));
+    let e = dec(&pos(0, 0xFDFF_FFFF));
+    assert_eq!((e.kind, e.item), (ErrorKind::InvalidValue, 105));
+    // The byte string of the report: 00 00 00 00 02 00 00 01.
+    let e = dec(&blk(
+        62,
+        &[rec(&[(1, &SRC), (5, &[0, 0, 0, 0, 0x02, 0, 0, 0x01])])],
+    ));
+    assert_eq!((e.kind, e.item), (ErrorKind::InvalidValue, 105));
+    // A raw longitude of 0x40000000 is 5760 degrees, not a wrapped 176.5.
+    let e = dec(&pos(0, 0x4000_0000));
+    assert_eq!((e.kind, e.item), (ErrorKind::InvalidValue, 105));
+    // The encoder refuses the same values, and takes the limits.
+    let enc = |lon: i32| {
+        let Block::Cat062(mut r) = decode_block(&pos(0, 0)).unwrap().0 else {
+            panic!()
+        };
+        r[0].position = Some(RawPosition { lat: 0, lon });
+        encode_block(&Block::Cat062(r))
+    };
+    assert!(enc(1 << 25).is_ok());
+    assert!(enc(-(1 << 25)).is_ok());
+    for lon in [(1 << 25) + 1, -(1 << 25) - 1, 0x4000_0000, i32::MIN] {
+        let e = enc(lon).unwrap_err();
+        assert_eq!((e.kind, e.item), (ErrorKind::InvalidValue, 105), "{lon}");
+    }
+}

@@ -124,6 +124,15 @@ pub(crate) fn check_lat(lat: i32, bits: u32) -> Result<(), ErrorKind> {
     Ok(())
 }
 
+/// A longitude in raw counts must be within +-180 degrees: `2^bits` counts of `180 / 2^bits`
+/// degrees. Same rule as [`check_lat`].
+pub(crate) fn check_lon(lon: i32, bits: u32) -> Result<(), ErrorKind> {
+    if i64::from(lon).abs() > 1i64 << bits {
+        return Err(ErrorKind::InvalidValue);
+    }
+    Ok(())
+}
+
 /// Six-bit character to ASCII (ICAO Annex 10 Vol IV 3.1.2.9.1.2 Table 3-8, which the category
 /// specifications cite): 1 to 26 are `A` to `Z`, 32 is a space, 48 to 57 are `0` to `9`.
 /// Anything else is refused.
@@ -179,8 +188,13 @@ pub(crate) fn encode_ident(id: &Ident, out: &mut Vec<u8>) -> Result<(), ErrorKin
 }
 
 /// Latitude or longitude: raw counts of `180 / 2^bits` degrees to 1e-7 degree, rounded to the
-/// nearest (half away from zero).
-pub fn raw_to_e7(raw: i32, bits: u32) -> i32 {
+/// nearest (half away from zero). `None` when the result is not a geographic angle (past 180
+/// degrees, or a width the conversion does not support), so a raw count out of range never turns
+/// into a plausible position; a latitude is further limited to 90 degrees by the caller.
+pub fn raw_to_e7(raw: i32, bits: u32) -> Option<i32> {
+    if bits > 32 {
+        return None;
+    }
     let num = i64::from(raw) * 1_800_000_000;
     let den = 1i64 << bits;
     let half = den / 2;
@@ -189,12 +203,15 @@ pub fn raw_to_e7(raw: i32, bits: u32) -> i32 {
     } else {
         (num - half) / den
     };
-    q as i32
+    if q.abs() > 1_800_000_000 {
+        return None;
+    }
+    i32::try_from(q).ok()
 }
 
 /// The inverse of [`raw_to_e7`]: 1e-7 degree to the nearest count of `180 / 2^bits` degrees.
 /// Counts are at least 1.67e-7 degree apart for `bits` up to 30, so for those widths
-/// `e7_to_raw(raw_to_e7(r)) == r`; the error of the other direction is at most half an LSB.
+/// `raw_to_e7(r)` is `Some(e)` with `e7_to_raw(e) == r`; the error of the other direction is at most half an LSB.
 pub fn e7_to_raw(e7: i32, bits: u32) -> i32 {
     let num = i64::from(e7) * (1i64 << bits);
     let den = 1_800_000_000i64;

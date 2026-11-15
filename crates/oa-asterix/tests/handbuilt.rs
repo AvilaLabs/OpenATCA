@@ -400,14 +400,18 @@ fn unit_constants_and_conversions() {
     // survives the trip through e-7 degree exactly.
     for bits in [23, 25, 30] {
         for raw in [0, 1, -1, 123_456, -987_654, 293_867_031 >> (30 - bits)] {
-            assert_eq!(e7_to_raw(raw_to_e7(raw, bits), bits), raw, "bits {bits}");
+            assert_eq!(
+                e7_to_raw(raw_to_e7(raw, bits).unwrap(), bits),
+                raw,
+                "bits {bits}"
+            );
         }
     }
     // The 131 count of the hand-built record: 492 633 000 e-7 degree.
     assert_eq!(e7_to_raw(492_633_000, 30), 0x1184_0E17);
     assert_eq!(e7_to_raw(106_142_390, 30), 0x03C6_21B2);
     // The other direction: at most half an LSB of error, about 0.84e-7 degree for 131.
-    let back = raw_to_e7(0x1184_0E17, 30);
+    let back = raw_to_e7(0x1184_0E17, 30).unwrap();
     assert!((back - 492_633_000).abs() <= 1);
     // Times: 1/128 s to milliseconds, rounded.
     assert_eq!(time128_to_ms(128), 1000);

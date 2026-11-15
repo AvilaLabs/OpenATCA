@@ -118,6 +118,16 @@ pub fn projection_new(
     let sin_chi_start = (w1 - 1.0) / (w1 + 1.0);
     let c = (n + sin0) * (1.0 - sin_chi_start) / ((n - sin0) * (1.0 + sin_chi_start));
     let (sin_chi0, cos_chi0) = chi_sin_cos(c, w1);
+    // At a pole the isometric latitude is infinite and these come out NaN; such a view is
+    // unusable, so it is refused here rather than accepted with non-finite constants.
+    if ![radius_m, n, c, sin_chi0, cos_chi0]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(DisplayError::BadView(
+            "centre has no finite projection (a pole)",
+        ));
+    }
     let half_short = f64::from(width.min(map_h)) / 2.0;
     let scale = f64::from(SUBPIXEL) * half_short / (range_nm * NM_M);
     Ok(Projection {
@@ -342,6 +352,66 @@ mod tests {
 
     fn proj(range: f64) -> Projection {
         projection_new(ORD.0, ORD.1, range, 1920, 1080, 0).unwrap()
+    }
+
+    // REQ: OA-DSP-033
+    #[test]
+    fn a_pole_view_is_refused_and_the_nearest_ones_are_usable() {
+        for lat in [900_000_000, -900_000_000] {
+            for lon in [0, 1_800_000_000, -1_800_000_000] {
+                for range in [0.05, 60.0, 20_000.0] {
+                    assert!(
+                        matches!(
+                            projection_new(lat, lon, range, 1920, 1080, 0),
+                            Err(DisplayError::BadView(_))
+                        ),
+                        "{lat},{lon},{range}"
+                    );
+                }
+            }
+        }
+        // Next to a pole the sine of the latitude rounds to 1, so the nearest centres are as
+        // unusable as the pole itself: each is either refused or fully usable, never in between.
+        // Well clear of that, 0.001 degree off the pole, the view works.
+        let mut worked = 0;
+        for mag in [
+            899_999_999,
+            899_999_000,
+            899_990_000,
+            899_900_000,
+            899_000_000,
+        ] {
+            for lat in [mag, -mag] {
+                match projection_new(lat, 0, 60.0, 1920, 1080, 0) {
+                    Err(e) => assert!(matches!(e, DisplayError::BadView(_)), "{lat}"),
+                    Ok(p) => {
+                        worked += 1;
+                        for v in [p.n, p.c, p.sin_chi0, p.cos_chi0, p.radius_m, p.scale] {
+                            assert!(v.is_finite(), "{lat}");
+                        }
+                        let (x, y) = project(&p, lat, 0).unwrap();
+                        assert!(
+                            (x - p.cx16 as i32).abs() < 16 && (y - p.cy16 as i32).abs() < 16,
+                            "{lat}: {x},{y}"
+                        );
+                        let off = if lat > 0 { lat - 10_000 } else { lat + 10_000 };
+                        let (x, y) = project(&p, off, 100_000_000).unwrap();
+                        assert!(
+                            x > 0 && y > 0 && x < 1920 * 16 && y < 1080 * 16,
+                            "{lat}: {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(worked >= 2);
+        let p = projection_new(899_000_000, 0, 60.0, 1920, 1080, 0).unwrap();
+        let below = f64::from_bits(90f64.to_bits() - 1).to_radians();
+        // The nearest f64 latitude below 90 degrees, through the radian entry, is finite or
+        // absent, and never a saturated corner.
+        if let Some((x, y)) = project_rad(&p, below, 0.0) {
+            assert!(x > 0 && y < 1080 * 16, "{x},{y}");
+        }
     }
 
     /// Deterministic generator for sweeps.

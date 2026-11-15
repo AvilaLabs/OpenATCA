@@ -634,6 +634,37 @@ fn position_range_and_reference_system() {
     err_field(&one("TH", nosrs), Field::Position);
 }
 
+// REQ: OA-FIXM-018
+#[test]
+fn decimal_overflow_is_a_field_error_and_the_next_message_decodes() {
+    let pos = |p: &str| {
+        format!(
+            r#"<enRoute><position><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>{p}</pos></location></position></position></enRoute>"#
+        )
+    };
+    let xml = doc(&[
+        message("TH", &pos("999999999999.9 0")),
+        message("TH", &pos("10 20")),
+    ]);
+    let r = run(&xml);
+    assert_eq!(r.ev.len, 2);
+    assert!(field_error(&r.ev, 0, Field::Position));
+    assert!(!has_field(&r.ev, 0, Field::Position));
+    assert_eq!(r.dec.stats().field_errors[Field::Position as usize], 1);
+    assert!(has_field(&r.ev, 1, Field::Position));
+    assert_eq!((r.ev.lat_e7[1], r.ev.lon_e7[1]), (100_000_000, 200_000_000));
+    // The scaler itself, at and past the i64 limits.
+    assert_eq!(parse_scaled(b"999999999999", 0), Some(999_999_999_999));
+    assert_eq!(parse_scaled(b"999999999999", 7), None);
+    assert_eq!(parse_scaled(b"999999999999.9", 7), None);
+    assert_eq!(parse_scaled(b"-999999999999.9", 7), None);
+    assert_eq!(parse_scaled(b"922337203685.4775807", 7), Some(i64::MAX));
+    assert_eq!(parse_scaled(b"922337203685.47758075", 7), None);
+    assert_eq!(parse_scaled(b"922337203685.4775808", 7), None);
+    assert_eq!(parse_scaled(b"1.5", 12), Some(1_500_000_000_000));
+    assert_eq!(parse_scaled(b"999999999999.999999999999", 12), None);
+}
+
 // REQ: OA-FIXM-006
 #[test]
 fn speed_units_range_and_track() {
