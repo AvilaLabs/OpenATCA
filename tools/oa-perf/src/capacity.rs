@@ -1046,14 +1046,28 @@ mod tests {
         );
         // The delay from an input's time to the end of its second is under a second.
         assert!(r.delay_adsb_ms.max <= 1000.0 && r.delay_plot_ms.max <= 1000.0);
-        // The peak bounds every sample. RSS after construction is not asserted above RSS before
-        // it: under memory pressure the kernel can reclaim pages between the two reads.
+        // Linux documents VmRSS and VmHWM as approximate. Separate /proc reads do not
+        // establish an exact ordering; retain and report each observed sample unchanged.
+        #[cfg(target_os = "linux")]
         assert!(
-            r.hwm_kb >= r.rss_after_new_kb && r.hwm_kb >= r.rss_before_kb && r.rss_after_new_kb > 0
+            r.rss_before_kb > 0 && r.rss_after_new_kb > 0 && r.rss_end_kb > 0 && r.hwm_kb > 0,
+            "memory samples: before={}, after={}, end={}, hwm={}",
+            r.rss_before_kb,
+            r.rss_after_new_kb,
+            r.rss_end_kb,
+            r.hwm_kb
         );
         let kv = cap_kv(&r);
         assert_eq!(kv.get("n"), Some("100"));
-        assert!(kv.get("advance.p99_ms").is_some() && kv.get("vmhwm_kb").is_some());
+        assert!(kv.get("advance.p99_ms").is_some());
+        for (name, value) in [
+            ("rss_before_kb", r.rss_before_kb),
+            ("rss_after_new_kb", r.rss_after_new_kb),
+            ("rss_end_kb", r.rss_end_kb),
+            ("vmhwm_kb", r.hwm_kb),
+        ] {
+            assert_eq!(kv.get(name), Some(value.to_string().as_str()));
+        }
         assert!(cap_text(&r).contains("loaded machine, preliminary"));
         assert_eq!(seconds_csv(&r).lines().count(), 21);
     }
