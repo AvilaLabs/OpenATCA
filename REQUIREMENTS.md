@@ -3131,10 +3131,37 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-296** The `oa-track` run checks the split of the clip with `oa_bench::split_check::check_split`
   right after `split_reports`; a violation is a hard error of the run. The scorer builds the legacy table by
   truth leg (the chunk ranges are by address, so all legs of an address are in one chunk).
-- **OA-TRK-297** The fusion layer records where a bucket's time goes and what its work limit leaves out: the
+- **OA-TRK-297** The fusion layer records where a bucket's work goes and what its work limit leaves out: the
   tracks predicted for association, the coarse window width, the anonymous plots never gated because the
-  limit was reached, the initiation tests and candidates alive at most, and (apart from the counters, in
-  `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
+  limit was reached, the coarse visits, exact tests and initiation tests, the candidates alive at most and the
+  buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
+- **OA-TRK-298** An anonymous candidate does not become a second track for an aircraft a live track already
+  holds. At its confirmation its latest plot is gated, with the association gate and its own covariance (and
+  the time between the plot and the track's state), against every live track, those confirmed earlier in the
+  same bucket by any radar included; if it gates, no track is made and `cand_merged_on_confirm` counts it. When
+  a track is confirmed, the anonymous candidates of the other radars that gate with it are cancelled and
+  counted in `cand_cancelled_by_track`; `confirm_gate_tests` counts the tests.
+- **OA-TRK-299** A plot the bucket's work limit left ungated is deferred: it is not unassigned, so it starts
+  no candidate and joins none, and `anon_plots_ungated` counts it. The association loop starts at a plot that
+  depends deterministically on the bucket and the radar, so the plots left out are not always the same
+  sector of the scan; when nothing is cut the result does not depend on where the loop started.
+- **OA-TRK-300** The coarse window of an association is per track: a track whose window (the coarse
+  margin plus eight standard deviations) is above the standard search radius is on a wide list of fixed
+  capacity that every plot also tests, and the grid is searched at the standard radius, so one uncertain
+  track does not widen the search of every plot. The tracks tested for a plot are every track the single
+  widest window would have tested that could pass its own window. A track that finds the wide list full is
+  left out of that association and counted in `wide_full`.
+- **OA-TRK-301** Initiation tests an anonymous plot against the anonymous candidates near it, found in a
+  grid of the candidates by predicted position (cells and a wide list of fixed capacity for the candidates
+  whose reach exceeds the standard one), and converts the plot once. The candidates tested for a plot are
+  every candidate the all-candidates test could pass; a candidate that finds the wide list full is not
+  tested in that bucket and is counted in `init_wide_full`; `init_tests` counts the exact tests and
+  `init_visits` the candidates the grid returned.
+- **OA-TRK-302** A track's expected update interval is the shortest scan period among the radars that
+  updated it within their last three periods (as of its newest update), and it is flagged coasting when
+  its newest update is older than three of those intervals; a track no radar updated that recently keeps
+  three of the configured expected interval (the longest scan period). The time to drop a track is
+  unchanged.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

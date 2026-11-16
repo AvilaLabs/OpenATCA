@@ -33,6 +33,14 @@ pub const GATE_TOTAL_CHI2: f64 = 21.11;
 /// Covers the motion within a bucket at 360 m/s with room; it only saves work, the exact gate
 /// decides.
 pub const COARSE_M: f64 = 3_000.0;
+/// The standard coarse search radius, metres: the grid is searched this far from a plot, which
+/// covers every track whose own window ([`COARSE_M`] plus eight standard deviations) is no wider,
+/// that is, a standard deviation up to 187 m. A track with a wider window is on the wide list.
+pub const COARSE_STD_M: f64 = 4_500.0;
+/// Limit: tracks on the wide list of one association, 4,096 (the tracks with a standard deviation
+/// above 187 m: starved tracks and the coarse ones; the limit is far above what the stress
+/// traffic makes). Past it a track is left out of that association and counted.
+pub const WIDE_TRACKS_MAX: usize = 4_096;
 /// A plot held rather than applied when another track is within this cost (chi-square units) of
 /// its assigned track. About one standard deviation of the cost difference of two tracks 2
 /// sigma apart; set from the swap counts of the crossing runs.
@@ -200,6 +208,19 @@ pub const BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_RADARS * MAX_BUCKET_PLOTS
 /// Capacity of the candidate indices of one radar's association: the candidates, at most
 /// [`MAX_CANDIDATES`].
 pub const CAND_IX_MAX: usize = MAX_CANDIDATES;
+
+/// The standard reach of a candidate in initiation, metres: a candidate whose plots can lie no
+/// further than this from its predicted place (the gate radius at the longest interval of the
+/// bucket, the drift of the prediction over the bucket and the noise, with margin) is in the grid
+/// of candidates; one that can lie further is on the wide list.
+pub const INIT_STD_M: f64 = 6_000.0;
+/// Side of a cell of the grid of candidates, metres: the reach of the grid's plots (the standard
+/// reach and the noise of the plot) is within one cell either side in nearly every case.
+pub const INIT_CELL_M: f64 = 12_000.0;
+/// Limit: candidates on the wide list of one radar's initiation, 1,024 (a candidate lives at most
+/// [`RADAR_INIT_N`] scans and the wide ones are the starved: one hit, a long interval). Past it a
+/// candidate is not tested in that bucket and is counted.
+pub const INIT_WIDE_MAX: usize = 1_024;
 
 /// A plot with a Mode S address is applied to the track of that address only if its distance
 /// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3

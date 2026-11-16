@@ -596,6 +596,35 @@ fn run_digest(r: &RunOut) -> String {
     oa_sha256::to_hex(&h.finalize())
 }
 
+/// The counts reported when a pin moves: tracks created, identity errors, coast rows, and what
+/// the initiation and the work limit did.
+fn clip_counts(r: &RunOut) -> String {
+    let id = identify(r);
+    let coast = r
+        .out
+        .flags
+        .iter()
+        .filter(|f| *f & oa_track::O_COAST != 0)
+        .count();
+    let s = &r.fstats;
+    format!(
+        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {}",
+        r.out.t_ns.len(),
+        s.plots_in,
+        s.plots_refused,
+        r.tstats.started,
+        s.cand_confirmed,
+        id.duplicates,
+        id.false_tracks,
+        id.swaps,
+        id.wrong_plots,
+        id.false_applied,
+        coast,
+        s.bucket_work_capped,
+        s.anon_plots_ungated
+    )
+}
+
 // REQ: OA-TRK-170
 #[test]
 fn the_real_clip_runs_give_the_pinned_digests() {
@@ -637,6 +666,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
             r.fstats.plots_in,
             r.fstats.plots_refused
         );
+        println!("clip counts {kind:?} mixed={mixed}: {}", clip_counts(&r));
         got.push(d);
     }
     // The two radars together on one run.
@@ -647,6 +677,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     let adsb = simulate_adsb(&built.truth, &ADSB_STUDY, 501, lo, hi, &|a| a & 1 == 0).unwrap();
     let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
     println!("clip digest two radars: {}", run_digest(&r));
+    println!("clip counts two radars: {}", clip_counts(&r));
     got.push(run_digest(&r));
     assert_eq!(got, PINNED_CLIP_DIGESTS);
 }
@@ -690,10 +721,25 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // terms near zero, the covariance cross term, turn rate and vertical rate, move by more in
 // relative terms). The earlier digests were e7a42113..6cac, 83d24dd4..4099, e89d63bc..3ad8,
 // 76970282..9135 and aca1b691..9a47.
+// Re-pinned (the fifth, two radars) when a candidate whose latest plot gates with a live track no
+// longer becomes a second track, and a new track cancels the other radars' candidates it gates
+// with (OA-TRK-298). The four single-radar runs are unchanged. Two radars, old to new: 173,160 to
+// 173,017 rows, 8,462 plots, 0 refused (the same), tracks created 678 to 676, candidates confirmed
+// 102 to 100, duplicate tracks 30 to 28, coast rows 8,811 to 8,739, swaps 25, wrong plots 67 and
+// false plots applied 1 (the same). The value before was
+// "9323316479520b069e3292527c6cb0f52a26277ed4e395c33c0c1669a18eb896".
+// Re-pinned (the fifth, two radars) when a track's coasting follows the scan periods of the radars
+// that update it (OA-TRK-302): three of its own expected intervals, the shortest period among the
+// radars that updated it within their last three periods, else three of the longest period as
+// before. The four single-radar runs are unchanged (one period). Two radars, old to new: rows
+// 173,017 (the same), plots 8,462, refused 0, tracks created 676, candidates confirmed 100,
+// duplicate tracks 28, swaps 25, wrong plots 67 and false plots applied 1 (all the same); coast
+// rows 8,739 to 11,016. The value before was
+// "c0e2736508a46fababe9e5f2a06e44fe541a0c2f7a8b8e7aa79f3c19ca28253d".
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
     "e8bfce481687ccccb1d3f186878bc3937ee86f9b949148974aeedf111876963d",
     "6d546fa69d25cacaccabf5674289792329a19aa9e6ab31275222e9acced56a7e",
     "bc1f506cc3a65158f6c007e9b81532da3fcb36a06483168bdef04cee17b94a01",
     "d3782daea34db0dfcb939730ab06200319bd08ad4759a0ae78a6944feaf195a8",
-    "9323316479520b069e3292527c6cb0f52a26277ed4e395c33c0c1669a18eb896",
+    "eaadd04b8ded9c9f6318260bd502c1b314d8937fd8058d4426f834fa06689da9",
 ];
