@@ -66,8 +66,8 @@ use crate::{
     MIN_VERTICES_PER_RING,
 };
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_elem_ns, span_bytes, text_needs_decode, AttrIx, Doc,
-    ElemIx, Limits, Ns, Parser, SpanKind, TextIx,
+    attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes,
+    text_needs_decode, AttrIx, Doc, ElemIx, Limits, Ns, Parser, SpanKind, TextIx,
 };
 use std::borrow::Cow;
 use std::path::Path;
@@ -79,17 +79,32 @@ const CRS84: &[u8] = b"urn:ogc:def:crs:OGC:1.3:CRS84";
 const DESC_MVA: &[u8] = b"MINIMUM VECTORING ALTITUDE (MVA)";
 const DESC_MIA: &[u8] = b"MINIMUM IFR ALTITUDE (MIA)";
 
-/// Attribute names (local part) the reader understands anywhere; their values are checked where
-/// they matter. Namespace declarations are skipped.
-const KNOWN_ATTRS: [&str; 8] = [
-    "id",
-    "type",
-    "nil",
-    "uom",
-    "srsName",
-    "srsDimension",
-    "interpolation",
-    "indeterminatePosition",
+const NS_XLINK: &[u8] = b"http://www.w3.org/1999/xlink";
+const NS_XSI: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
+
+/// The namespace of an attribute, as far as the reader distinguishes them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AQ {
+    /// No namespace (an unprefixed attribute, whatever default namespace is declared).
+    None,
+    Gml,
+    Xlink,
+    Xsi,
+    Other,
+}
+
+/// The qualified attribute names (namespace, local part) the reader understands anywhere; their
+/// values are checked where they matter. Namespace declarations are skipped. An attribute with
+/// the same local name in another namespace is a different attribute and is refused.
+const KNOWN_ATTRS: [(AQ, &str); 8] = [
+    (AQ::Gml, "id"),
+    (AQ::Xlink, "type"),
+    (AQ::Xsi, "nil"),
+    (AQ::None, "uom"),
+    (AQ::None, "srsName"),
+    (AQ::None, "srsDimension"),
+    (AQ::None, "interpolation"),
+    (AQ::None, "indeterminatePosition"),
 ];
 
 /// The `oa-xml` limits for a chart message. The input is capped at [`MAX_FILE_BYTES`]; the
@@ -337,7 +352,28 @@ fn trim(b: &[u8]) -> &[u8] {
     b.get(s..e).unwrap_or(&[])
 }
 
-/// The value of attribute `name` (local part) of `e`, decoded.
+/// The namespace class and local name of attribute `a` of `e`.
+fn attr_q<'a>(w: &W<'a>, e: ElemIx, a: usize) -> (AQ, &'a [u8]) {
+    let nm = w
+        .doc
+        .attr_name
+        .get(a)
+        .and_then(|&s| span_bytes(w.doc.input, s).ok())
+        .unwrap_or(&[]);
+    let q = match resolve_attr_ns(&w.doc, e, AttrIx(a as u32)) {
+        Ns::None => AQ::None,
+        Ns::Uri(u) => match span_bytes(w.doc.input, u) {
+            Ok(b) if b == NS_GML => AQ::Gml,
+            Ok(b) if b == NS_XLINK => AQ::Xlink,
+            Ok(b) if b == NS_XSI => AQ::Xsi,
+            _ => AQ::Other,
+        },
+        Ns::Xml => AQ::Other,
+    };
+    (q, nm)
+}
+
+/// The value of the unprefixed (no-namespace) attribute `name` of `e`, decoded.
 fn attr<'a>(w: &W<'a>, e: ElemIx, name: &str) -> Result<Option<Cow<'a, [u8]>>, MvaError> {
     let first = w
         .doc
@@ -350,14 +386,9 @@ fn attr<'a>(w: &W<'a>, e: ElemIx, name: &str) -> Result<Option<Cow<'a, [u8]>>, M
         .get(e.0 as usize)
         .map_or(0, |&c| c as usize);
     for a in first..first.saturating_add(n) {
-        let nm = w
-            .doc
-            .attr_name
-            .get(a)
-            .and_then(|&s| span_bytes(w.doc.input, s).ok())
-            .unwrap_or(&[]);
+        let (q, nm) = attr_q(w, e, a);
         let is_decl = is_xmlns(w, a);
-        if nm == name.as_bytes() && !is_decl {
+        if q == AQ::None && nm == name.as_bytes() && !is_decl {
             let sp = w.doc.attr_value.get(a).copied().ok_or(MvaError::BadValue {
                 field: "attribute",
                 at: at(w, e),
@@ -393,8 +424,8 @@ fn is_xmlns(w: &W<'_>, a: usize) -> bool {
     prefix == b"xmlns" || (prefix.is_empty() && name == b"xmlns")
 }
 
-/// Refuses an attribute (other than a namespace declaration) not in [`KNOWN_ATTRS`], on any
-/// element of the message.
+/// Refuses an attribute (other than a namespace declaration) whose qualified name is not in
+/// [`KNOWN_ATTRS`], or that appears twice on one element, on any element of the message.
 fn check_attributes(w: &W<'_>) -> Result<(), MvaError> {
     for e in 0..w.doc.elem_name.len() {
         let first = w.doc.elem_first_attr.get(e).map_or(0, |a| a.0 as usize);
@@ -403,16 +434,17 @@ fn check_attributes(w: &W<'_>) -> Result<(), MvaError> {
             if is_xmlns(w, a) {
                 continue;
             }
-            let nm = w
-                .doc
-                .attr_name
-                .get(a)
-                .and_then(|&s| span_bytes(w.doc.input, s).ok())
-                .unwrap_or(&[]);
-            if !KNOWN_ATTRS.iter().any(|k| k.as_bytes() == nm) {
+            let el = ElemIx(e as u32);
+            let (q, nm) = attr_q(w, el, a);
+            let known = KNOWN_ATTRS
+                .iter()
+                .any(|&(kq, kn)| kq == q && kn.as_bytes() == nm);
+            // Known names resolve to one namespace each, so a repeat has the same class.
+            let twice = (first..a).any(|b| !is_xmlns(w, b) && attr_q(w, el, b) == (q, nm));
+            if !known || twice {
                 return Err(MvaError::UnexpectedAttribute {
                     name: short_name(nm),
-                    at: at(w, ElemIx(e as u32)),
+                    at: at(w, el),
                 });
             }
         }

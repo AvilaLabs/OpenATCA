@@ -22,6 +22,10 @@ use std::collections::HashMap;
 pub const COVERAGE_CELL_DEG: f64 = 0.002;
 /// Most raster cells for one chart (the largest real chart needs about 20 million).
 pub const MAX_RASTER_CELLS: usize = 64_000_000;
+/// Most (cell, extra owner) records kept for one chart; past it the chart is refused.
+pub const MAX_OVERLAP_RECORDS: usize = 8_000_000;
+/// Most sectors that may cover one cell; past it the chart is refused.
+pub const MAX_OWNERS_PER_CELL: usize = 16;
 
 /// An uncovered pocket inside the union of a chart. Plain data (A1).
 // A7.2: cold struct, size guard waived
@@ -199,13 +203,24 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
     if secs.is_empty() {
         return Err("empty chart".to_string());
     }
+    // The raster is planar in longitude, so a chart whose sectors lie either side of the
+    // antimeridian (a span over half the globe) is refused rather than rastered as a world-wide
+    // strip or wrapped.
+    let lon_span = i64::from(lo1) - i64::from(lo0);
+    let lat_span = i64::from(la1) - i64::from(la0);
+    if lon_span > 180 * crate::E7 {
+        return Err(format!(
+            "chart spans {:.1} degrees of longitude (it crosses the antimeridian or is not one region); not rasterised",
+            lon_span as f64 / f
+        ));
+    }
     let c = COVERAGE_CELL_DEG;
     // One cell of margin on every side, so the outside is a connected border.
     let g = Raster {
         lon0: f64::from(lo0) / f - c,
         lat0: f64::from(la0) / f - c,
-        nx: ((f64::from(lo1 - lo0) / f) / c).ceil() as usize + 2,
-        ny: ((f64::from(la1 - la0) / f) / c).ceil() as usize + 2,
+        nx: ((lon_span as f64 / f) / c).ceil() as usize + 2,
+        ny: ((lat_span as f64 / f) / c).ceil() as usize + 2,
     };
     let cells = g.nx.saturating_mul(g.ny);
     if cells > MAX_RASTER_CELLS {
@@ -214,30 +229,81 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
         ));
     }
     let mut owner = vec![0u16; cells];
-    let mut pairs: HashMap<(u16, u16), Pair> = HashMap::new();
+    // (cell, sector id) for every owner after a cell's first, in sector order.
+    let mut extra: Vec<(u32, u16)> =
+        Vec::with_capacity(cells.saturating_mul(2).min(MAX_OVERLAP_RECORDS));
+    let mut extra_full = false;
     let mut covered = 0.0;
     for (k, si) in secs.clone().enumerate() {
         let id = (k + 1) as u16;
         let nx = g.nx;
         fill_sector(m, SectorIx(si as u32), &g, &mut |i, j| {
-            if let Some(o) = owner.get_mut(j * nx + i) {
+            let p = j * nx + i;
+            if let Some(o) = owner.get_mut(p) {
                 if *o == 0 {
                     *o = id;
                     covered += cell_area_nm2(&g, j);
                 } else if *o != id {
-                    let e = pairs.entry((*o, id)).or_insert(Pair {
-                        cells: 0,
-                        area: 0.0,
-                        i: (i, i),
-                        j: (j, j),
-                    });
-                    e.cells += 1;
-                    e.area += cell_area_nm2(&g, j);
-                    e.i = (e.i.0.min(i), e.i.1.max(i));
-                    e.j = (e.j.0.min(j), e.j.1.max(j));
+                    if extra.len() < extra.capacity() {
+                        extra.push((p as u32, id));
+                    } else {
+                        extra_full = true;
+                    }
                 }
             }
         });
+    }
+    if extra_full {
+        return Err(format!(
+            "more than {} overlapping cell records; not reported",
+            extra.capacity()
+        ));
+    }
+    // Every unordered pair of owners of each cell, the earlier sector first.
+    extra.sort_unstable();
+    let mut pairs: HashMap<(u16, u16), Pair> = HashMap::new();
+    let mut s0 = 0;
+    while let Some(&(cell, _)) = extra.get(s0) {
+        let mut s1 = s0;
+        while extra.get(s1).is_some_and(|&(c2, _)| c2 == cell) {
+            s1 += 1;
+        }
+        let p = cell as usize;
+        let group = extra.get(s0..s1).unwrap_or(&[]);
+        if group.len() + 1 > MAX_OWNERS_PER_CELL {
+            return Err(format!(
+                "a cell is covered by more than {MAX_OWNERS_PER_CELL} sectors; not reported"
+            ));
+        }
+        let mut owners = [0u16; MAX_OWNERS_PER_CELL];
+        let first = owner.get(p).copied().unwrap_or(0);
+        if let Some(o) = owners.get_mut(0) {
+            *o = first;
+        }
+        for (n, &(_, id)) in group.iter().enumerate() {
+            if let Some(o) = owners.get_mut(n + 1) {
+                *o = id;
+            }
+        }
+        let owners = owners.get(..group.len() + 1).unwrap_or(&[]);
+        let (i, j) = (p % g.nx, p / g.nx);
+        for (n, &x) in owners.iter().enumerate() {
+            for &y in owners.get(n + 1..).unwrap_or(&[]) {
+                // Owners are in sector order, so the first of each pair is the earlier sector.
+                let key = (x, y);
+                let e = pairs.entry(key).or_insert(Pair {
+                    cells: 0,
+                    area: 0.0,
+                    i: (i, i),
+                    j: (j, j),
+                });
+                e.cells += 1;
+                e.area += cell_area_nm2(&g, j);
+                e.i = (e.i.0.min(i), e.i.1.max(i));
+                e.j = (e.j.0.min(j), e.j.1.max(j));
+            }
+        }
+        s0 = s1;
     }
     // Flood the uncovered cells reachable from the border; what is left uncovered is a gap.
     let mut seen = vec![false; cells];
