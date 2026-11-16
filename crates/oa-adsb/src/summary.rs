@@ -125,12 +125,10 @@ pub fn summarize(r: &Reports) -> Summary {
                     };
                     if jump_verdict(&pair, CAP_ORDINARY_KT) == JumpVerdict::Plausible {
                         cat = trial;
+                    } else if nm >= MIN_JUMP_NM {
+                        s.jumps += 1;
                     } else {
-                        if nm >= MIN_JUMP_NM {
-                            s.jumps += 1;
-                        } else {
-                            s.jitter += 1;
-                        }
+                        s.jitter += 1;
                     }
                 }
             }

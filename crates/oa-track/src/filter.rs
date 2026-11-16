@@ -205,7 +205,7 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
         x.first().copied().unwrap_or(0.0),
         x.get(1).copied().unwrap_or(0.0),
     );
-    if !(px.is_finite() && py.is_finite()) || !x.iter().all(|v| v.is_finite()) {
+    if !(px.is_finite() && py.is_finite() && x.iter().all(|v| v.is_finite())) {
         *f = filter_init(m, f.h_mode);
         stats.resyncs += 1;
         return Applied::Resync;

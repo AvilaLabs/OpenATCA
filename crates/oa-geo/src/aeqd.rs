@@ -807,8 +807,8 @@ mod tests {
             let (b1, b2) = (axes(&f), axes(&g));
             let r = axes_rotation(&f, &g);
             for k in 0..3 {
-                for j in 0..3 {
-                    let want = dot(&b2[k], &b1[j]);
+                for (j, b1j) in b1.iter().enumerate() {
+                    let want = dot(&b2[k], b1j);
                     assert!((r[k][j] - want).abs() < 4e-16, "{a:?} {b:?} {k}{j}");
                 }
             }
