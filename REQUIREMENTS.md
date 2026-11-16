@@ -2510,6 +2510,51 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-049** A state past the chart of the leg's frame (the antipode of its origin) is refused as too
   uncertain; no NaN velocity or position is returned as truth. The velocity conversion uses
   `oa_geo::aeqd::try_frame_velocity` and handles `None`.
+- **OA-TRUTH-050** Every limit of `TruthConfig` is exact: NACp gate 1 to 11, NIC at most 11, SIL at most 3, version
+  at most 7, carry time not negative and the other time gates positive and at most one day, floating settings
+  finite and positive (the covariance ones capped), jump allowance zero or more, `jump_resync` at least 1,
+  `min_leg_points` at least 3, `loo_stride` at least 2; each is accepted at the limit and refused one step beyond.
+  `MAX_REPORTS` is 200 Mi reports, exactly that many are accepted and one more refused, and every `TruthError`
+  has its message text.
+- **OA-TRUTH-051** Rows of one instant: the kept row is the first in the order barometric altitude, geometric
+  altitude, vertical rate, ground speed, track, whichever input order; geometric as well as barometric altitudes
+  more than 25 ft apart make the instant ambiguous (25 ft is not), an absent one does not; every pair of distinct
+  eligible positions is compared once and no pair twice.
+- **OA-TRUTH-052** A report that fails on quality still sets the quality values the reports after it carry (a
+  NACp of 7 is not forgotten, so the following reports without a NACp fail with it); one of several rows of an
+  instant that fails does not.
+- **OA-TRUTH-053** A leg whose reports pass 3,000 km (0.4709 rad of arc) from its first report is split there and
+  counted under `frame_range`, at the first report past the limit and not before.
+- **OA-TRUTH-054** The measurement sigma of a report is its NACp 95 % radius over 2.4477 times `sigma_scale`
+  (checked on the forward covariance of the first report against the Kalman update); the shares of report times
+  and interval midpoints under the gate count intervals up to and including twice the bracket (20 s), compare the
+  radius at the midpoint (not at the earlier report), and are exact against the Kalman/RTS covariance.
+- **OA-TRUTH-055** Queries: a radius exactly at the gate is truth, a velocity well past the speed envelope is
+  not; the vertical rate is the interpolated reported rates when both are present, else the altitude difference
+  over a bracket of at least 2 s, else absent; a leg's first whole millisecond rounds up and its last rounds down
+  (before 1970 too); a leg with no reports has no start, end or count.
+- **OA-TRUTH-056** Each quality gate passes at its limit and fails one step below (NACp 8 to 11, NIC 7, SIL 3,
+  version 2); a row missing any one of NACp, NIC or SIL has no quality, a missing version is allowed; the NACp and
+  NACv tables are the standard's values.
+- **OA-TRUTH-057** Leave-one-out: positions 2, 7, 12 and so on of a leg are hidden; a leg with fewer than three
+  reports left, a hidden report with no remaining report on a side, one more than 10 s away on either side, or a
+  prediction with a non-finite state or variance is counted as not predicted and adds no residual; horizontal,
+  along-track and cross-track residuals, the coverage test (residual against 2.4477 times the root of the predicted
+  plus the report variance), the gate share and the altitude residual (time-weighted neighbours, all three
+  present) equal values worked out from the filter equations; distributions are the signed mean, the RMS and the
+  nearest-rank median, p95, p99 and maximum.
+- **OA-TRUTH-058** The smoother's forward and smoothed states and full covariances, and the interpolated state and
+  covariance between and at reports, equal the Kalman and Rauch-Tung-Striebel equations evaluated independently;
+  the process noise is the white-jerk matrix element by element; the 3 x 3 inverse is exact and a singular or
+  non-finite matrix has none.
+- **OA-TRUTH-059** `oa-truth-check` prints each removal reason with its count, the removal total beside the kept
+  and input counts, the shares as `percent (hit of n)` (`n/a` with no sample), the records dropped from decoded
+  frames when there are any and only then, and refuses an unknown option, a missing value and a second path with
+  the usage text.
+- **OA-TRUTH-060** The clip reader's caps are 4 GiB and 50 million rows; a row total exactly at the cap is accepted
+  and one past it refused; after the cap is crossed later frames change nothing; frames that are not messages are
+  ignored; dropped records, undecodable payloads and a cut frame are each counted once; `ClipError` has its
+  message texts.
 
 
 ## M2 — Benchmark harness (oa-bench)

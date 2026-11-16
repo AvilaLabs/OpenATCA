@@ -169,6 +169,122 @@ mod tests {
         // At the cap it is read.
         assert!(read_clip(&path, len, 1000).is_ok());
     }
+
+    /// One frame of `kind` carrying `payload`.
+    fn frame_of(kind: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, kind, FLAG_BYTES, seq, 0, 0, payload).unwrap();
+        buf.truncate(n);
+        buf
+    }
+
+    /// A payload of `rows` stationary ADS-B reports, the first `bad` of them with a latitude past
+    /// 90 degrees (a record the lenient decoder drops).
+    fn payload_with(rows: usize, bad: usize) -> Vec<u8> {
+        let mut r = oa_adsb::Reports::default();
+        for k in 0..rows {
+            let mut row = oa_adsb::ROW_EMPTY;
+            row.icao = 0xa00001;
+            row.time_ns = 1_700_000_000_000_000_000 + k as i64 * 1_000_000_000;
+            row.lat_e7 = if k < bad { 910_000_000 } else { 410_000_000 };
+            row.lon_e7 = -880_000_000;
+            oa_adsb::reports_push(&mut r, &row);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, 0, rows).unwrap();
+        payload
+    }
+
+    // REQ: OA-TRUTH-060
+    #[test]
+    fn the_caps_and_the_error_texts_are_the_documented_ones() {
+        assert_eq!(MAX_CLIP_BYTES, 4_294_967_296);
+        assert_eq!(MAX_CLIP_ROWS, 50_000_000);
+        assert_eq!(ClipError::Io("x: gone".to_string()).to_string(), "x: gone");
+        assert_eq!(
+            ClipError::TooManyBytes { bytes: 12, cap: 10 }.to_string(),
+            "clip is 12 bytes, over the cap of 10"
+        );
+        assert_eq!(
+            ClipError::TooManyRows {
+                rows: 1200,
+                cap: 1000
+            }
+            .to_string(),
+            "clip claims 1200 rows, over the cap of 1000"
+        );
+    }
+
+    // REQ: OA-TRUTH-060
+    #[test]
+    fn a_running_row_total_at_the_cap_is_accepted_and_one_past_it_is_refused() {
+        assert_eq!(claim_rows(0, 1000, 1000), Ok(1000));
+        assert_eq!(claim_rows(400, 600, 1000), Ok(1000));
+        assert_eq!(claim_rows(400, 601, 1000), Err(1001));
+        assert_eq!(claim_rows(u64::MAX, 5, 1000), Err(u64::MAX));
+        // A file whose single frame claims exactly the cap is not refused for rows (the empty
+        // payload below it then fails to decode and is counted as a refused frame).
+        let path = write("rows_at_cap.oaf", &header_only_frame(1000));
+        let (r, refused, dropped) = read_clip(&path, 1 << 20, 1000).unwrap();
+        assert_eq!((oa_adsb::reports_len(&r), refused, dropped), (0, 1, 0));
+    }
+
+    // REQ: OA-TRUTH-060
+    #[test]
+    fn after_the_row_cap_is_crossed_later_frames_do_not_change_the_refusal() {
+        // 600 + 600 crosses 1000 at 1200; the third frame would make it 1500 if it were looked at.
+        let mut bytes = header_only_frame(600);
+        bytes.extend(frame_of(1, 2, &header_only_payload(600)));
+        bytes.extend(frame_of(1, 3, &header_only_payload(900)));
+        let path = write("rows_after_cap.oaf", &bytes);
+        assert_eq!(
+            read_clip(&path, 1 << 20, 1000).unwrap_err(),
+            ClipError::TooManyRows {
+                rows: 1200,
+                cap: 1000
+            }
+        );
+    }
+
+    fn header_only_payload(claimed: u32) -> Vec<u8> {
+        let mut payload = vec![0u8; 16];
+        payload[..4].copy_from_slice(&PAYLOAD_MAGIC);
+        payload[4..6].copy_from_slice(&80u16.to_le_bytes());
+        payload[8..12].copy_from_slice(&claimed.to_le_bytes());
+        payload
+    }
+
+    // REQ: OA-TRUTH-060
+    #[test]
+    fn frames_that_are_not_messages_are_ignored_and_not_counted_as_refused() {
+        // A status frame and a reject frame around one good message frame.
+        let mut bytes = frame_of(3, 1, b"state=up");
+        bytes.extend(frame_of(1, 2, &payload_with(3, 0)));
+        bytes.extend(frame_of(2, 3, b"reason"));
+        let path = write("mixed_kinds.oaf", &bytes);
+        let (r, refused, dropped) = read_clip(&path, 1 << 20, 1000).unwrap();
+        assert_eq!((oa_adsb::reports_len(&r), refused, dropped), (3, 0, 0));
+    }
+
+    // REQ: OA-TRUTH-060
+    #[test]
+    fn dropped_records_and_undecodable_and_damaged_frames_are_each_counted() {
+        let mut bytes = frame_of(1, 1, &payload_with(4, 2));
+        bytes.extend(frame_of(1, 2, &payload_with(3, 1)));
+        // Two frames whose payload is not a payload at all.
+        bytes.extend(frame_of(1, 3, &[0u8; 16]));
+        bytes.extend(frame_of(1, 4, &[0u8; 30]));
+        // A frame cut short: counted as damaged by the frame reader.
+        let cut = frame_of(1, 5, &payload_with(2, 0));
+        bytes.extend_from_slice(&cut[..cut.len() - 20]);
+        let path = write("counts.oaf", &bytes);
+        let (r, refused, dropped) = read_clip(&path, 1 << 20, 1000).unwrap();
+        // 2 + 1 records dropped; 4 - 2 and 3 - 1 kept.
+        assert_eq!(dropped, 3);
+        assert_eq!(oa_adsb::reports_len(&r), 2 + 2);
+        // Two undecodable payloads and one cut frame.
+        assert_eq!(refused, 3);
+    }
 }
 
 #[cfg(kani)]

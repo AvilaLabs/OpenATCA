@@ -120,9 +120,7 @@ pub fn build_truth(
 ) -> Result<(Truth, TruthStats), TruthError> {
     check_config(cfg)?;
     let n = reports_len(reports);
-    if n > MAX_REPORTS {
-        return Err(TruthError::TooManyReports(n));
-    }
+    check_report_count(n)?;
     if !columns_match(reports, n) {
         return Err(TruthError::ColumnLength);
     }
@@ -179,6 +177,14 @@ pub fn build_truth(
         b.stats.loo = loo_finish(&mut b.loo, cfg);
     }
     Ok((b.truth, b.stats))
+}
+
+/// Refuses more than [`MAX_REPORTS`] reports; exactly the limit is accepted.
+fn check_report_count(n: usize) -> Result<(), TruthError> {
+    if n > MAX_REPORTS {
+        return Err(TruthError::TooManyReports(n));
+    }
+    Ok(())
 }
 
 fn columns_match(r: &Reports, n: usize) -> bool {
@@ -613,4 +619,20 @@ fn flush_leg(
     t.pt_ps.extend_from_slice(&sm.ps);
     buf_clear(buf);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-TRUTH-050
+    #[test]
+    fn exactly_the_report_limit_is_accepted_and_one_more_is_refused() {
+        assert_eq!(check_report_count(0), Ok(()));
+        assert_eq!(check_report_count(MAX_REPORTS), Ok(()));
+        assert_eq!(
+            check_report_count(MAX_REPORTS + 1),
+            Err(TruthError::TooManyReports(MAX_REPORTS + 1))
+        );
+    }
 }
