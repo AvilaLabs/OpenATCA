@@ -321,6 +321,11 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
         ),
         ("tracker.time_future_dropped".into(), t.time_future_dropped),
         ("tracker.time_sensor_evicted".into(), t.time_sensor_evicted),
+        // A track row withheld because its position cannot be represented is output lost.
+        (
+            "tracker.rows_unrepresentable".into(),
+            t.rows_unrepresentable,
+        ),
     ];
     for (name, c) in REFUSE_NAMES.iter().zip(t.refused.iter()) {
         v.push((format!("tracker.refused_{name}"), *c));
@@ -828,6 +833,7 @@ mod tests {
             "tracker.time_held_discarded" => t.time_held = t.time_held_applied + 1,
             "tracker.time_future_dropped" => t.time_future_dropped = 1,
             "tracker.time_sensor_evicted" => t.time_sensor_evicted = 1,
+            "tracker.rows_unrepresentable" => t.rows_unrepresentable = 1,
             "out.overflow" => r.out_overflow = 1,
             n if n.starts_with("tracker.refused_") => t.refused[0] = 1,
             n => panic!("no setter for {n}"),
