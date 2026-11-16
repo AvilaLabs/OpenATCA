@@ -3172,6 +3172,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-305** Two radar-only aircraft close together (in formation, or on parallel lines one nautical
   mile apart) that both radars see from the first scan end as two live tracks, never merged, each
   updated to the end; the parallel pair's tracks each keep one aircraft's plots.
+- **OA-TRK-306** The grid of the coarse window has cells about 5.6 km on a side everywhere on earth (bands of
+  0.05 degrees of latitude, each cut into as many cells of longitude as keep it that wide at its
+  edge nearest a pole), and the window's rectangle is cut into pieces of at most 20 km, each with a box of
+  its own, so a plot visits few tracks. The candidates hold every track the window passes at the poles, on
+  the seam and at the equator.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
