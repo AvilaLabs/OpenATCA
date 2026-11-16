@@ -1,0 +1,8 @@
+# cargo-mutants configuration (https://mutants.rs).
+#
+# Kani proof harnesses live in `#[cfg(kani)] mod proofs` blocks (docs/VERIFICATION.md). `cargo test`
+# never compiles them, so a mutant in one can only be reported as missed. Mutant names include the
+# module path, so this skips every function in a module called `proofs`, and the two files that
+# hold one.
+exclude_re = ['\bproofs::']
+exclude_globs = ['**/proofs.rs', '**/proofs_wire.rs']

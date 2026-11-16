@@ -300,3 +300,108 @@ fn zau_low_agrees_with_a_densely_sampled_planar_polygon() {
         "{inside} of {total} inside"
     );
 }
+
+// REQ: OA-GEO-006
+#[test]
+fn symmetric_geodesic_crossing_at_equator_separates_nearby_points() {
+    // By symmetry, the shortest geodesic from (-10, -10) to (10, 10) crosses longitude zero
+    // at latitude zero. The triangle's third vertex is east of that edge, so points immediately
+    // north and south of the crossing must lie on opposite sides of the boundary.
+    let e = wgs84();
+    let tri = Polygon::new(&e, &[pt(-10.0, -10.0), pt(10.0, 10.0), pt(0.0, 30.0)])
+        .expect("valid symmetric triangle");
+    assert!(
+        tri.contains(pt(-0.000_001, 0.0)),
+        "south of the diagonal is east of the triangle edge"
+    );
+    assert!(
+        !tri.contains(pt(0.000_001, 0.0)),
+        "north of the diagonal is west of the triangle edge"
+    );
+}
+
+// REQ: OA-GEO-006
+#[test]
+fn equatorial_edge_has_known_inside_and_outside_sides() {
+    // The shortest edge between two points on the equator remains on the equator. The apex is
+    // north of that edge, which fixes the expected answer without using polygon calculations.
+    let e = wgs84();
+    let tri = Polygon::new(&e, &[pt(0.0, -20.0), pt(0.0, 20.0), pt(20.0, 0.0)])
+        .expect("valid equatorial triangle");
+    assert!(tri.contains(pt(0.1, 0.0)));
+    assert!(!tri.contains(pt(-0.1, 0.0)));
+}
+
+// REQ: OA-GEO-006
+#[test]
+fn equatorial_edge_crossing_the_antimeridian_has_known_sides() {
+    // The short equatorial arc from 170 E to 170 W crosses longitude 180 at latitude zero.
+    // The third vertex is north, so the explicit points below are inside and outside respectively.
+    let e = wgs84();
+    let tri = Polygon::new(&e, &[pt(0.0, 170.0), pt(0.0, -170.0), pt(20.0, 180.0)])
+        .expect("valid antimeridian triangle");
+    assert!(tri.contains(pt(0.1, 180.0)));
+    assert!(!tri.contains(pt(-0.1, 180.0)));
+    assert!(!tri.contains(pt(0.1, 0.0)));
+}
+
+// REQ: OA-GEO-006
+#[test]
+fn containment_near_a_vertex_has_explicit_expected_sides() {
+    // This triangle has an equatorial edge and a meridian edge. Near its southwest vertex,
+    // points northeast are inside while points south or west are outside.
+    let e = wgs84();
+    let tri = Polygon::new(&e, &[pt(0.0, 0.0), pt(0.0, 10.0), pt(10.0, 0.0)])
+        .expect("valid right triangle");
+    assert!(tri.contains(pt(0.000_1, 0.000_1)));
+    assert!(!tri.contains(pt(-0.000_1, 0.000_1)));
+    assert!(!tri.contains(pt(0.000_1, -0.000_1)));
+}
+
+// REQ: OA-GEO-026
+#[test]
+fn geo_error_display_preserves_the_specific_failure_message() {
+    assert!(GeoError::NonFinite("longitude")
+        .to_string()
+        .contains("longitude"));
+    assert!(GeoError::BadPolygon("edge spans 180 degrees of longitude")
+        .to_string()
+        .contains("edge spans 180 degrees of longitude"));
+}
+
+// REQ: OA-GEO-006
+#[test]
+fn oblique_spherical_edges_separate_points_across_the_analytic_great_circle() {
+    let sphere = Ellipsoid::new(6_371_000.0, 0.0).expect("sphere");
+    let a = pt(10.0, -30.0);
+    let b = pt(65.0, 40.0);
+    let c = pt(15.0, 60.0);
+    let cartesian = |p: LatLon| {
+        let (s, co) = p.lat().to_radians().sin_cos();
+        let (sl, cl) = p.lon().to_radians().sin_cos();
+        [co * cl, co * sl, s]
+    };
+    let u = cartesian(a);
+    let v = cartesian(b);
+    let normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    for ring in [[a, b, c], [c, b, a]] {
+        let polygon = Polygon::new(&sphere, &ring).expect("oblique triangle");
+        for lon in [-29.9999_f64, -15.0, 0.0, 25.0, 39.9999] {
+            // A great circle is the plane normal dot position = 0. Solving that equation
+            // for latitude gives this crossing without a geodesic or root solver.
+            let (sl, cl) = lon.to_radians().sin_cos();
+            let crossing = (-(normal[0] * cl + normal[1] * sl) / normal[2])
+                .atan()
+                .to_degrees();
+            assert!(polygon.contains(pt(crossing - 1e-7, lon)), "south at {lon}");
+            assert!(
+                !polygon.contains(pt(crossing + 1e-7, lon)),
+                "north at {lon}"
+            );
+        }
+    }
+}

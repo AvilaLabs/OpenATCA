@@ -495,6 +495,45 @@ mod tests {
         }
     }
 
+    // REQ: OA-GEO-016
+    #[test]
+    fn projection_matches_the_closed_form_at_cardinal_bearings_and_known_radii() {
+        // Independent spherical azimuthal-equidistant equations: due east/north use
+        // x = R c sin(bearing), y = R c cos(bearing), with c from the spherical dot product.
+        let f = frame_new(0.0, 0.0);
+        let r = WGS84_A * (1.0 - WGS84_E2).sqrt();
+        assert!((f.r - r).abs() < 1e-9);
+        let cases = [
+            (0.0, 90.0, r * std::f64::consts::FRAC_PI_2, 0.0),
+            (90.0, 0.0, 0.0, r * std::f64::consts::FRAC_PI_2),
+            (-90.0, 0.0, 0.0, -r * std::f64::consts::FRAC_PI_2),
+            (0.0, 180.0, r * std::f64::consts::PI, 0.0),
+        ];
+        for (lat, lon, x, y) in cases {
+            let got = project(&f, lat, lon);
+            assert!((got.0 - x).abs() < 1e-7, "{lat} {lon}: {got:?}");
+            assert!((got.1 - y).abs() < 1e-7, "{lat} {lon}: {got:?}");
+        }
+        let pole_r = WGS84_A / (1.0 - WGS84_E2).sqrt();
+        assert!((radius_at(1.0) - pole_r).abs() < 1e-8);
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn recentered_frame_matches_direct_trigonometry_on_both_sides_of_its_cutoff() {
+        let fix = unproject_fix(&frame_new(37.0, -122.0), 100.0, -200.0).unwrap();
+        for delta in [SIN_COS_LIMIT - 1e-8, SIN_COS_LIMIT, SIN_COS_LIMIT + 1e-8] {
+            for sign in [-1.0, 1.0] {
+                let lat = (fix.lat_rad + sign * delta).to_degrees();
+                let fast = frame_at_fix(&fix, lat, 25.0);
+                let direct = frame_new(lat, 25.0);
+                assert!((fast.sin0 - direct.sin0).abs() < 3e-16);
+                assert!((fast.cos0 - direct.cos0).abs() < 3e-16);
+                assert!((fast.r - direct.r).abs() < 1e-8);
+            }
+        }
+    }
+
     // REQ: OA-GEO-013
     #[test]
     fn unproject_refuses_distances_that_overflow_or_pass_half_the_circumference() {
@@ -957,5 +996,54 @@ mod tests {
         assert!(try_frame_change(&f, f.r * past, 0.0, &g, 0.0, 0.0).is_none());
         assert!(try_frame_change(&f, 0.0, 0.0, &g, g.r * past, 0.0).is_none());
         assert!(unproject(&f, f.r * past, 0.0).is_none());
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn frame_angles_match_independent_spherical_angles() {
+        let frame = frame_new(0.0, 0.0);
+        for (lat, lon, expected) in [
+            (0.0, 0.0, 0.0),
+            (0.0, 90.0, std::f64::consts::FRAC_PI_2),
+            (90.0, 0.0, std::f64::consts::FRAC_PI_2),
+            (0.0, 180.0, std::f64::consts::PI),
+            // acos(cos(pi/6) cos(pi/3)), evaluated independently at 100 digits.
+            (30.0, 60.0, 1.122_963_929_865_964_2),
+        ] {
+            assert!((frame_angle(&frame, lat, lon) - expected).abs() < 1e-14);
+        }
+    }
+
+    // REQ: OA-GEO-012
+    #[test]
+    fn a_general_matrix_carries_correlated_covariance_by_exact_integer_algebra() {
+        // M S = [[16,25],[3,26]], then M S M^T = [[107,84],[84,101]].
+        let m = [[2.0, 3.0], [-1.0, 4.0]];
+        let s = [5.0, 2.0, 7.0];
+        assert_eq!(mat2_congruence(&m, &s), [107.0, 84.0, 101.0]);
+        assert_eq!(mat2_apply(&m, (5.0, -2.0)), (4.0, -13.0));
+    }
+
+    // REQ: OA-GEO-016
+    #[test]
+    fn longitude_wrapping_and_oblique_inverse_have_independent_expected_answers() {
+        for (input, expected) in [
+            (-720.0, 0.0),
+            (-540.0, -180.0),
+            (-181.0, 179.0),
+            (-180.0, -180.0),
+            (180.0, 180.0),
+            (181.0, -179.0),
+            (540.0, 180.0),
+            (720.0, 0.0),
+        ] {
+            assert_eq!(wrap_deg(input), expected);
+        }
+        // Independent 100-digit spherical equations, c = hypot(x,y)/R:
+        // lat = asin(y sin(c)/rho), lon = atan2(x sin(c), rho cos(c)).
+        let frame = frame_new(0.0, 0.0);
+        let point = unproject_fix(&frame, 300_000.0, -400_000.0).unwrap();
+        assert!((point.lat_deg - -3.604_008_872_057_368).abs() < 2e-12);
+        assert!((point.lon_deg - 2.707_584_876_097_325).abs() < 2e-12);
     }
 }

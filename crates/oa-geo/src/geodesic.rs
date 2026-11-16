@@ -863,3 +863,68 @@ impl Ellipsoid {
         (lat2, lam12.to_degrees(), azi2)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ang_diff, ang_normalize, ang_round, atan2d, remainder360, sincosd, two_sum};
+
+    // REQ: OA-GEO-020
+    #[test]
+    fn degree_trig_is_exact_at_quadrant_angles() {
+        assert_eq!(sincosd(0.0), (0.0, 1.0));
+        assert_eq!(sincosd(90.0), (1.0, 0.0));
+        assert_eq!(sincosd(180.0), (0.0, -1.0));
+        assert_eq!(sincosd(-90.0), (-1.0, 0.0));
+        assert_eq!(sincosd(360.0), (0.0, 1.0));
+        assert_eq!(sincosd(180.0).0.to_bits(), 0.0f64.to_bits());
+        assert_eq!(sincosd(270.0).1.to_bits(), 0.0f64.to_bits());
+    }
+
+    // REQ: OA-GEO-021
+    #[test]
+    fn atan2_degrees_has_exact_axis_and_diagonal_values() {
+        assert_eq!(atan2d(0.0, 1.0), 0.0);
+        assert_eq!(atan2d(1.0, 0.0), 90.0);
+        assert_eq!(atan2d(0.0, -1.0), 180.0);
+        assert_eq!(atan2d(-1.0, 0.0), -90.0);
+        assert_eq!(atan2d(1.0, 1.0), 45.0);
+        assert_eq!(atan2d(1.0, -1.0), 135.0);
+        assert_eq!(atan2d(-1.0, -1.0), -135.0);
+        assert_eq!(atan2d(-0.0, 1.0).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(atan2d(-0.0, -1.0), -180.0);
+    }
+
+    // REQ: OA-GEO-022
+    #[test]
+    fn angle_reductions_have_explicit_half_turn_endpoints() {
+        assert_eq!(ang_normalize(-180.0), 180.0);
+        assert_eq!(ang_normalize(180.0), 180.0);
+        assert_eq!(ang_normalize(540.0), 180.0);
+        assert_eq!(remainder360(-180.0), -180.0);
+        assert_eq!(remainder360(180.0), 180.0);
+        assert_eq!(remainder360(540.0), 180.0);
+    }
+
+    // REQ: OA-GEO-023
+    #[test]
+    fn angle_difference_preserves_direction_at_half_turns() {
+        assert_eq!(ang_diff(0.0, 180.0), (180.0, 0.0));
+        assert_eq!(ang_diff(0.0, -180.0), (-180.0, 0.0));
+        assert_eq!(ang_diff(180.0, 0.0), (-180.0, 0.0));
+    }
+
+    // REQ: OA-GEO-024
+    #[test]
+    fn compensated_sum_returns_the_lost_unit() {
+        assert_eq!(two_sum(1.0e16, 1.0), (1.0e16, 1.0));
+        assert_eq!(two_sum(1.0e16, -1.0e16), (0.0, 0.0));
+    }
+
+    // REQ: OA-GEO-025
+    #[test]
+    fn angle_rounding_cleans_sub_grid_noise_and_preserves_its_sign() {
+        assert_eq!(ang_round(1.0e-20), 0.0);
+        assert_eq!(ang_round(-1.0e-20f64).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(ang_round(1.0e-17), 2.0f64.powi(-57));
+    }
+}
