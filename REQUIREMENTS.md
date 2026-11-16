@@ -61,8 +61,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   midlatitude and near a pole.
 - **OA-GEO-012** A covariance is carried through a linear map as `M S M^T`.
 - **OA-GEO-013** The inverse projection refuses (returns no point for) a distance from the origin that
-  is not finite or is past half the sphere's circumference; a huge finite east or north does not
-  overflow into a NaN position.
+  is not finite or is within `ANTIPODE_MARGIN_RAD` (OA-GEO-017) of half the sphere's circumference; a huge
+  finite east or north does not overflow into a NaN position.
 - **OA-GEO-014** The crate's production sources call no platform maths function (`sin`, `atan2`,
   `hypot`, `powf`, `mul_add` and the rest of a fixed list); the elementary functions are
   `oa-math`'s, so a result is the same bits on every IEEE-754 machine. The check is itself tested
@@ -75,6 +75,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   recentred a hundred thousand times from the sine and cosine of its latitude carried with it keeps
   them within 1e-13 of those of its origin, and a point that cannot carry them (near a pole, across the
   antimeridian, far from the origin) takes the frame `frame_new` makes.
+- **OA-GEO-017** The chart's domain is the angular distance `c < PI - ANTIPODE_MARGIN_RAD` (1e-5 rad, 64 m) about the
+  origin, where the tangential scale `sin c / c` is 3.2e-6 or more and the 1e-6 floor an earlier version
+  put under it is never reached. `unproject` and the differentials (`try_frame_to_true`, `try_frame_from_true`,
+  `try_frame_change`) refuse past it with `None`; `frame_to_true`, `frame_from_true`, `frame_change` and the
+  velocity conversions then return NaN. Inside it the differential is exact, with no floor.
 
 ### Elementary functions (oa-math)
 
@@ -1475,6 +1480,15 @@ frame of their feed has been fed (as the ADS-B table is).
   goes through the candidate run, the vote and the confirmation of rules 4 to 6, and when it confirms the
   ages shift by the step alone (never more than the clock's move), so a gap that is partly a step ages
   every row by the time that passed and translates only the step.
+  `MONO_AGREE_TOL_NS` (10 seconds) agree, one nanosecond more is a step; a monotonic time that went back, a
+  frame with none, and a frame behind the clock are not classified as a real gap.
+- **OA-RPL-273** A cancellation removes the held NOTAM it names only when that version was issued at or before
+  the cancellation; a version issued after it is kept and the cancellation is counted (`cancel_stale`, hashed
+  only when not zero). Either way the cancellation leaves its tombstone, so the NOTAM held and the tombstone
+  issued time are the same in every arrival order of a notice, its cancellation and its reissue.
+- **OA-RPL-274** The longitude cover of a wide polygon set (more than half a turn) takes the largest gap between
+  neighbouring vertex longitudes from one sort, not a scan of every vertex against every other: the work grows as
+  n log n, and the cover equals the pairwise method's.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
@@ -1655,6 +1669,15 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-TIFF-087** A conservative query whose work (lattice cells times the larger of 1 and the polygon
   vertices, plus the tiles) is over `MAX_QUERY_WORK` is refused with `TooMuchWork` before any cell is
   visited.
+- **OA-TIFF-088** The work estimate of a conservative query includes one lookup in each candidate tile
+  for every lattice cell, so overlapping tiles raise it; the estimate is never below the work the
+  query counts as it runs, and an over-budget query is refused before any cell is visited.
+- **OA-TIFF-089** The GeoTIFF vertical units key (4099) is read: metre or absent leaves samples as they
+  are, international foot (9002) and US survey foot (9003) are converted to metres with the exact
+  factors 0.3048 and 1200/3937, nodata is matched before conversion, and any other unit is refused
+  with `GeoRef`.
+- **OA-TIFF-090** A plain (centre-in-area) polygon query whose cell tests times the polygon vertices are
+  over `MAX_QUERY_WORK` is refused with `TooMuchWork` before any cell is visited.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -2881,6 +2904,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   returns `None` for an offset above 500 m, a start within 0.1 degrees of a pole or a non-finite input.
 - **OA-SIM-029** `oa-sensorsim` reads its clip with the reader of `oa-truth` (OA-TRUTH-045): a clip over 4 GiB or
   one whose frame headers claim more than 50 million rows is refused with a typed message.
+- **OA-SIM-030** The truth position at a crossing time is kept at any latitude when the time is a whole
+  number of milliseconds (no offset is applied); a sub-millisecond remainder is applied flat, or, where the flat
+  step refuses (within 0.1 degrees of a pole), by the geodesic direct problem. An aircraft above 89.9 degrees is
+  detected by a site at 89.5 degrees.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or

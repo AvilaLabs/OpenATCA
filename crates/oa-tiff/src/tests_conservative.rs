@@ -6,7 +6,7 @@
 )]
 //! Tests of the warning-grade terrain maxima.
 
-use crate::conservative::collect;
+use crate::conservative::{collect, collect_counted};
 use crate::grid::check_polygon;
 use crate::*;
 
@@ -786,4 +786,55 @@ fn an_ordinary_sector_sized_query_is_within_the_work_budget() {
     fine.dlat = 1.0 / 10_800.0;
     fine.dlon = 1.0 / 10_800.0;
     assert!(grid_max_in_radius_conservative(&fine, 39.99, -89.99, 1.0).is_ok());
+}
+
+/// `n` aligned tiles of 4 by 4 samples, all on the lattice of `one_arc_second`, overlapping.
+fn overlapping(n: usize) -> Vec<Grid> {
+    vec![one_arc_second(); n]
+}
+
+// REQ: OA-TIFF-088
+#[test]
+fn overlapping_tiles_multiply_the_work_estimate_and_an_over_budget_query_is_refused_first() {
+    // 0.5 degree box on a one arc-second lattice: 3.2 million cells, each looked up in 1024
+    // overlapping tiles when it passes, 3.3e9 lookups against a budget of 2.1e9.
+    let tiles = overlapping(MAX_TILES);
+    let bbox = (39.5, 40.0, -90.0, -89.5);
+    let visits = std::cell::Cell::new(0u64);
+    let hit = |_: f64, _: f64| {
+        visits.set(visits.get() + 1);
+        true
+    };
+    assert_eq!(collect(&tiles, bbox, 0, &hit), Err(QueryError::TooMuchWork));
+    assert_eq!(visits.get(), 0);
+}
+
+// REQ: OA-TIFF-088
+#[test]
+fn the_work_estimate_is_at_least_the_work_counted() {
+    let hit_all = |_: f64, _: f64| true;
+    let hit_none = |_: f64, _: f64| false;
+    let hit_half = |la: f64, _: f64| la > 39.99;
+    let sq = (39.99, 40.0, -90.0, -89.99);
+    for n in [1usize, 2, 16, 1024] {
+        let tiles = overlapping(n);
+        for (vertices, hit) in [
+            (0usize, &hit_all as &dyn Fn(f64, f64) -> bool),
+            (7, &hit_all),
+            (0, &hit_none),
+            (5, &hit_half),
+        ] {
+            let (_, w) = collect_counted(&tiles, sq, vertices, hit).unwrap();
+            assert!(
+                w.estimate >= w.counted as f64,
+                "{n} tiles, {vertices} vertices: estimate {} < counted {}",
+                w.estimate,
+                w.counted
+            );
+        }
+    }
+    // With every cell passing, the tile multiplier is most of the counted work.
+    let tiles = overlapping(1024);
+    let (_, w) = collect_counted(&tiles, sq, 0, &hit_all).unwrap();
+    assert!(w.counted > 1024 * 100);
 }

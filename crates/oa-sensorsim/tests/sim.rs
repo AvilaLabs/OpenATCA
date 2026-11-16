@@ -752,3 +752,48 @@ fn a_non_finite_generated_measurement_is_dropped_and_counted() {
         stats.in_coverage - stats.missed
     );
 }
+
+// REQ: OA-SIM-030
+#[test]
+fn an_aircraft_above_89_9_degrees_is_detected_by_a_site_at_89_5() {
+    // 50 km from the site, moving east at 60 m/s a few kilometres from the pole: the plots exist
+    // at every scan, at whole-millisecond and fractional crossing times alike.
+    let mut r = Reports::default();
+    track(
+        &mut r,
+        0xc00001,
+        (89.95, -88.0),
+        (60.0, 0.0),
+        30_000,
+        100.0,
+        1.0,
+    );
+    track(
+        &mut r,
+        0xc00002,
+        (89.95, -88.0),
+        (0.0, 0.0),
+        30_000,
+        100.0,
+        1.0,
+    );
+    let truth = truth_of(&r);
+    let mut s = site(clean(MSSR_EUROCONTROL_1997));
+    s.lat_deg = 89.5;
+    s.lon_deg = -88.0;
+    let (plots, st) = run(&truth, &s, 3);
+    let count = |a: u32| plots.truth_addr.iter().filter(|&&x| x == a).count();
+    assert!(
+        count(0xc00001) >= 15,
+        "moving: {} ({st:?})",
+        count(0xc00001)
+    );
+    assert!(
+        count(0xc00002) >= 15,
+        "stationary: {} ({st:?})",
+        count(0xc00002)
+    );
+    // A scan period of a whole millisecond number puts the crossing of a stationary aircraft on
+    // a whole-millisecond time only by chance; the offset at both kinds of time is tested in
+    // the crate.
+}

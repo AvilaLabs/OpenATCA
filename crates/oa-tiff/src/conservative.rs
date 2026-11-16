@@ -167,6 +167,14 @@ fn place(tiles: &[Grid]) -> Result<Vec<Placed<'_>>, QueryError> {
     Ok(out)
 }
 
+/// The work of one query in units of one `hit` vertex test or one tile lookup: what the refusal
+/// budget estimated before the query, and what the query counted while it ran.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Work {
+    pub(crate) estimate: f64,
+    pub(crate) counted: u64,
+}
+
 /// Visits every sample of the reference lattice inside the bounding box (widened by one step)
 /// that `hit` accepts, and looks each up across the tiles. `vertices` is the cost of one `hit`
 /// call (zero for a test of constant cost); the work is checked before any cell is visited.
@@ -176,6 +184,16 @@ pub(crate) fn collect(
     vertices: usize,
     hit: &dyn Fn(f64, f64) -> bool,
 ) -> Result<TerrainMax, QueryError> {
+    collect_counted(tiles, bbox, vertices, hit).map(|(t, _)| t)
+}
+
+/// [`collect`], also returning the work estimate and the work counted.
+pub(crate) fn collect_counted(
+    tiles: &[Grid],
+    bbox: (f64, f64, f64, f64),
+    vertices: usize,
+    hit: &dyn Fn(f64, f64) -> bool,
+) -> Result<(TerrainMax, Work), QueryError> {
     let placed = place(tiles)?;
     let r = tiles.first().ok_or(QueryError::NoTiles)?;
     let (la0, la1, lo0, lo1) = bbox;
@@ -186,11 +204,6 @@ pub(crate) fn collect(
     let cells = (c_hi - c_lo + 1.0) * (r_hi - r_lo + 1.0);
     if !(cells.is_finite() && cells <= MAX_QUERY_SAMPLES as f64) {
         return Err(QueryError::TooManySamples);
-    }
-    // Every cell runs `hit` once, which for a polygon walks every edge.
-    let work = cells * vertices.max(1) as f64 + tiles.len() as f64;
-    if work > MAX_QUERY_WORK as f64 {
-        return Err(QueryError::TooMuchWork);
     }
     let (c_lo, c_hi, r_lo, r_hi) = (c_lo as i64, c_hi as i64, r_lo as i64, r_hi as i64);
     // Only tiles that reach the node range are looked at.
@@ -203,6 +216,13 @@ pub(crate) fn collect(
                 && p.row_off + i64::from(p.g.height) > r_lo
         })
         .collect();
+    // Every cell runs `hit` once, which for a polygon walks every edge, and every cell that
+    // passes looks itself up in every candidate tile.
+    let estimate = cells * (vertices.max(1) + cands.len()) as f64 + tiles.len() as f64;
+    if estimate > MAX_QUERY_WORK as f64 {
+        return Err(QueryError::TooMuchWork);
+    }
+    let mut counted = tiles.len() as u64;
     let mut f = Found {
         peak: None,
         nodes: 0,
@@ -215,9 +235,11 @@ pub(crate) fn collect(
         let lat = r.lat0 - row as f64 * r.dlat;
         for col in c_lo..=c_hi {
             let lon = r.lon0 + col as f64 * r.dlon;
+            counted += vertices.max(1) as u64;
             if !hit(lat, lon) {
                 continue;
             }
+            counted += cands.len() as u64;
             let mut present = false;
             let mut best: Option<f32> = None;
             for p in &cands {
@@ -257,7 +279,7 @@ pub(crate) fn collect(
             }
         }
     }
-    Ok(match f.peak {
+    let found = match f.peak {
         Some(peak) if f.nodata == 0 && f.missing == 0 => TerrainMax::Complete {
             peak,
             nodes: f.nodes,
@@ -269,7 +291,8 @@ pub(crate) fn collect(
             missing_nodes: f.missing,
             missing_squares: u32::try_from(f.squares.len()).unwrap_or(u32::MAX),
         },
-    })
+    };
+    Ok((found, Work { estimate, counted }))
 }
 
 /// The conservative maximum of one grid within `radius_nm` (WGS 84 geodesic) of a point. See the

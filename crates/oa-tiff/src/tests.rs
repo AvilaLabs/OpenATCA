@@ -912,3 +912,71 @@ fn a_non_finite_gdal_nodata_text_is_refused() {
         assert!(matches!(r, Err(TiffError::GeoRef(_))), "{text}: {r:?}");
     }
 }
+
+// REQ: OA-TIFF-089
+#[test]
+fn vertical_units_are_read_and_converted_to_metres() {
+    let metres: Vec<f32> = (0..64).map(|i| 100.0 + 3.0 * i as f32).collect();
+    let mut sm = Spec::new(8, 8, metres.clone());
+    sm.vertical = Some(5703);
+    let want = grid_of(&sm).elev;
+    // Absent and an explicit metre key (9001) read as metres, unchanged.
+    sm.vertical_units = Some(9001);
+    assert_eq!(grid_of(&sm).elev, want);
+    // The same surface in feet (international 9002, US survey 9003) gives the same heights.
+    for (code, metres_per_unit) in [(9002u16, 0.3048_f64), (9003, 1200.0 / 3937.0)] {
+        let feet: Vec<f32> = metres
+            .iter()
+            .map(|&m| (f64::from(m) / metres_per_unit) as f32)
+            .collect();
+        let mut sf = Spec::new(8, 8, feet);
+        sf.vertical = Some(5703);
+        sf.vertical_units = Some(code);
+        let got = grid_of(&sf).elev;
+        for (a, b) in got.iter().zip(&want) {
+            assert!((a - b).abs() < 1e-3, "unit {code}: {a} vs {b}");
+        }
+    }
+    // Exact factors on single values; nodata stays nodata and is matched in the file's unit.
+    let mut s = Spec::new(2, 2, vec![1000.0, -9999.0, 1000.0, 1000.0]);
+    s.nodata = Some("-9999".to_string());
+    s.vertical_units = Some(9002);
+    let g = grid_of(&s);
+    assert_eq!(g.elev.first().copied(), Some((1000.0_f64 * 0.3048) as f32));
+    assert!(g.elev.get(1).is_some_and(|v| v.is_nan()));
+    s.vertical_units = Some(9003);
+    let g = grid_of(&s);
+    assert_eq!(
+        g.elev.first().copied(),
+        Some((1000.0_f64 * 1200.0 / 3937.0) as f32)
+    );
+    // Any other unit is refused.
+    for code in [9000u16, 9014, 9036, 32767, 0] {
+        let mut s = Spec::new(8, 8, metres.clone());
+        s.vertical_units = Some(code);
+        assert!(
+            matches!(read_geotiff(&build(&s)), Err(TiffError::GeoRef(_))),
+            "unit {code}"
+        );
+    }
+}
+
+// REQ: OA-TIFF-090
+#[test]
+fn a_plain_polygon_query_counts_the_vertices_walked_per_sample() {
+    // 500 by 500 samples under a 10 000-vertex polygon around all of them: 2.5e9 edge tests,
+    // over the work budget though only 250 000 samples.
+    let g = ramp_grid(40.0, -90.0, 500, 500, 0.001);
+    let poly: Vec<(f64, f64)> = (0..10_000)
+        .map(|i| {
+            let a = f64::from(i) * std::f64::consts::TAU / 10_000.0;
+            (39.75 + 0.3 * a.sin(), -89.75 + 0.3 * a.cos())
+        })
+        .collect();
+    assert_eq!(
+        grid_max_in_polygon(&g, &poly).err(),
+        Some(QueryError::TooMuchWork)
+    );
+    // A few vertices over the same samples answer.
+    assert!(grid_max_in_polygon(&g, &poly[..16]).is_ok());
+}
