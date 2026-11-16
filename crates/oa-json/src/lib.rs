@@ -56,6 +56,7 @@ pub const MAX_NODES: usize = 4 * 1024 * 1024;
 pub struct Limits {
     pub max_input_bytes: usize,
     pub max_depth: usize,
+    /// Most raw bytes between a string's quotes, escapes counted as written (`\n` is two).
     pub max_string_bytes: usize,
     pub max_nodes: usize,
 }

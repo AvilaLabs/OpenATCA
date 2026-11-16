@@ -1208,3 +1208,80 @@ fn route_attribute_whitespace_is_normalised() {
     res.unwrap();
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
 }
+
+fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
+    let d = parser.parse(xml.as_bytes()).expect("fixture parses");
+    let mut dec = Decoder::new(Limits::default());
+    let mut ev = new_events(cap, 1 << 16);
+    let s = dec.decode_prefix(&d, xml.as_bytes(), &mut ev).unwrap();
+    (s, ev.len)
+}
+
+// REQ: OA-FIXM-019
+#[test]
+fn xsi_type_is_resolved_to_the_fixm_namespace() {
+    let typed = |decl: &str, ty: &str| {
+        format!(
+            r#"<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" {decl} xsi:type="{ty}"><flight source="TH" timestamp="{TS}">{}</flight></message>"#,
+            gufi_el(GUFI)
+        )
+    };
+    let rejected = |m: String| {
+        let r = run(&doc(&[m]));
+        assert_eq!((r.sum.rejected, r.sum.rows), (1, 0));
+        assert_eq!(r.dec.stats().rejected[Reject::NotFlightMessage as usize], 1);
+    };
+    let accepted = |m: String| {
+        let r = run(&doc(&[m]));
+        assert_eq!((r.sum.rejected, r.sum.rows), (0, 1));
+    };
+    // A foreign namespace under the right local name.
+    rejected(typed(r#"xmlns:evil="urn:other""#, "evil:FlightMessageType"));
+    // A prefix that is not declared.
+    rejected(typed("", "nope:FlightMessageType"));
+    // No prefix and no default namespace.
+    rejected(typed("", "FlightMessageType"));
+    // Another prefix bound to the right namespace, plain or escaped.
+    accepted(typed(
+        r#"xmlns:zz="http://www.faa.aero/nas/3.0""#,
+        "zz:FlightMessageType",
+    ));
+    accepted(typed(
+        r#"xmlns:zz="http://www.faa.aero/nas/3&#46;0""#,
+        "zz:FlightMessageType",
+    ));
+}
+
+// REQ: OA-FIXM-019
+#[test]
+fn escaped_namespace_uris_decode_like_plain_ones() {
+    let plain = doc(&[message("TH", "")]);
+    let escaped = plain
+        .replace("faa.aero/nas", "faa&#46;aero/nas")
+        .replace("fixm.aero", "fixm&#46;aero")
+        .replace("XMLSchema-instance", "XMLSchema&#45;instance");
+    assert_ne!(plain, escaped);
+    let a = run(&plain);
+    let b = run(&escaped);
+    assert_eq!(a.sum, b.sum);
+    assert_eq!(b.sum.rows, 1);
+    assert_eq!(b.sum.unknown_elements, 0);
+}
+
+// REQ: OA-FIXM-020
+#[test]
+fn foreign_siblings_do_not_count_as_messages() {
+    let foreign = r#"<other xmlns="urn:other"><x/></other>"#.to_string();
+    let xml = doc(&[message("TH", ""), foreign.clone()]);
+    // Capacity for exactly one row: the foreign sibling needs none.
+    let (r, res) = run_with(&xml, 1, 1 << 16, Limits::default());
+    res.expect("one message fits one row");
+    assert_eq!((r.sum.messages, r.sum.rows), (1, 1));
+    // Prefix mode with no capacity: the one real message is undecoded, the sibling is not counted.
+    let (s, len) = decode_prefix_run(&xml, 0);
+    assert_eq!((s.not_decoded, s.rows, len), (1, 0, 0));
+    // Only foreign children: nothing to hold, nothing undecoded.
+    let (s, _) = decode_prefix_run(&doc(&[foreign]), 0);
+    assert_eq!(s.not_decoded, 0);
+}

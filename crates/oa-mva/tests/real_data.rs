@@ -123,8 +123,12 @@ fn real_coverage_has_no_large_gap() {
     let (mut gaps, mut overlaps) = (0, 0);
     let mut worst_gap = 0;
     let mut worst_overlap = 0.0f64;
+    let mut most_visits = 0u64;
     for c in 0..chart_count(m) {
-        let r = coverage::chart_coverage(m, c).unwrap();
+        let (r, visits) = coverage::chart_coverage_budget(m, c, coverage::MAX_CELL_VISITS);
+        let r = r.unwrap();
+        most_visits = most_visits.max(visits);
+        eprintln!("{}: {visits} cell visits", label(m, c));
         gaps += r.gaps.len();
         overlaps += r.overlaps.len();
         worst_gap = worst_gap.max(r.gaps.first().map_or(0, |g| g.cells));
@@ -137,6 +141,12 @@ fn real_coverage_has_no_large_gap() {
         );
     }
     eprintln!("total {gaps} gaps (largest {worst_gap} cells), {overlaps} overlapping pairs (largest {worst_overlap:.2} nm2)");
+    eprintln!(
+        "most cell visits for one chart {most_visits} of {}",
+        coverage::MAX_CELL_VISITS
+    );
+    // The budget is several times the largest real chart's need.
+    assert!(most_visits.saturating_mul(4) < coverage::MAX_CELL_VISITS);
     // Every pocket between sectors is smaller than a few cells (a sliver along a shared edge)
     // and every overlap is under 2 square nautical miles.
     assert!(worst_gap < 10, "a gap of {worst_gap} cells");

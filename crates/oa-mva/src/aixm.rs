@@ -66,7 +66,7 @@ use crate::{
     MIN_VERTICES_PER_RING,
 };
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes,
+    attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, span_bytes,
     text_needs_decode, AttrIx, Doc, ElemIx, Limits, Ns, Parser, SpanKind, TextIx,
 };
 use std::borrow::Cow;
@@ -176,10 +176,10 @@ fn local<'a>(w: &W<'a>, e: ElemIx) -> &'a [u8] {
 
 fn qname<'a>(w: &W<'a>, e: ElemIx) -> (Q, &'a [u8]) {
     let q = match resolve_elem_ns(&w.doc, e) {
-        Ns::Uri(u) => match span_bytes(w.doc.input, u) {
-            Ok(b) if b == NS_AIXM => Q::Aixm,
-            Ok(b) if b == NS_GML => Q::Gml,
-            Ok(b) if b == NS_MSG => Q::Msg,
+        Ns::Uri(u) => match ns_uri_bytes(&w.doc, u) {
+            Some(b) if b == NS_AIXM => Q::Aixm,
+            Some(b) if b == NS_GML => Q::Gml,
+            Some(b) if b == NS_MSG => Q::Msg,
             _ => Q::Other,
         },
         _ => Q::Other,
@@ -362,10 +362,10 @@ fn attr_q<'a>(w: &W<'a>, e: ElemIx, a: usize) -> (AQ, &'a [u8]) {
         .unwrap_or(&[]);
     let q = match resolve_attr_ns(&w.doc, e, AttrIx(a as u32)) {
         Ns::None => AQ::None,
-        Ns::Uri(u) => match span_bytes(w.doc.input, u) {
-            Ok(b) if b == NS_GML => AQ::Gml,
-            Ok(b) if b == NS_XLINK => AQ::Xlink,
-            Ok(b) if b == NS_XSI => AQ::Xsi,
+        Ns::Uri(u) => match ns_uri_bytes(&w.doc, u) {
+            Some(b) if b == NS_GML => AQ::Gml,
+            Some(b) if b == NS_XLINK => AQ::Xlink,
+            Some(b) if b == NS_XSI => AQ::Xsi,
             _ => AQ::Other,
         },
         Ns::Xml => AQ::Other,

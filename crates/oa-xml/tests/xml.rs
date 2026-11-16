@@ -877,3 +877,62 @@ fn whitespace_next_to_text_or_cdata_is_data_and_layout_is_still_dropped() {
     assert_eq!(d.text_span.len(), 1);
     assert_eq!(sb(d.input, d.text_span[0]), b"t");
 }
+
+// REQ: OA-XML-029
+#[test]
+fn escaped_namespace_uris_are_expanded_before_comparison() {
+    // Same expanded name under two prefixes, one spelled with a character reference.
+    assert!(matches!(
+        err(b"<r xmlns:a=\"urn:test\" xmlns:b=\"urn:t&#101;st\" a:x=\"1\" b:x=\"2\"/>"),
+        XmlError::DuplicateAttribute { .. }
+    ));
+    // The XML namespace, escaped, is still reserved.
+    assert!(matches!(
+        err(b"<r xmlns:b=\"http://www.w3.org/XML/1998/namesp&#97;ce\"/>"),
+        XmlError::Syntax { .. }
+    ));
+    assert!(matches!(
+        err(b"<r xmlns:xml=\"http://www.w3.org/XML/1998/namesp&#97;ce\" xmlns=\"http://www.w3.org/2000/xmlns&#47;\"/>"),
+        XmlError::Syntax { .. }
+    ));
+    // The expanded URI is what resolution returns, through `ns_uri_bytes`.
+    let src = "<r xmlns:a=\"urn:t&#101;st\" xmlns:p=\"urn:plain\"><a:c p:k=\"1\"/></r>";
+    let (mut parser, bytes) = parse_ok(src);
+    let d = parser.parse(&bytes).unwrap();
+    let get = |ns: Ns| match ns {
+        Ns::Uri(s) => oa_xml::ns_uri_bytes(&d, s).unwrap().to_vec(),
+        _ => Vec::new(),
+    };
+    assert_eq!(get(resolve_elem_ns(&d, ElemIx(1))), b"urn:test");
+    let first = d.elem_first_attr[1].0;
+    assert_eq!(
+        get(resolve_attr_ns(&d, ElemIx(1), AttrIx(first))),
+        b"urn:plain"
+    );
+    // Only the escaped URI is copied; the plain one stays a span of the input.
+    assert!(d.ns_buf.len() == b"urn:test".len());
+}
+
+// REQ: OA-XML-029
+#[test]
+fn escaped_namespace_uris_share_a_bounded_buffer() {
+    // One binding slot reserves 2,048 bytes; two escaped URIs of 1,500 bytes do not both fit.
+    let limits = Limits {
+        max_ns_bindings: 1,
+        ..Limits::default()
+    };
+    let uri = format!("urn:&#97;{}", "x".repeat(1_500));
+    let one = format!("<r xmlns:a=\"{uri}\"/>");
+    let two = format!("<r><a xmlns:a=\"{uri}\"/><b xmlns:b=\"{uri}\"/></r>");
+    let mut p = Parser::new(limits).unwrap();
+    assert!(p.parse(one.as_bytes()).is_ok());
+    assert!(matches!(
+        p.parse(two.as_bytes()).unwrap_err(),
+        XmlError::Limit {
+            limit: LimitKind::NsBindings,
+            ..
+        }
+    ));
+    // The buffer is reused by the next parse.
+    assert!(p.parse(one.as_bytes()).is_ok());
+}

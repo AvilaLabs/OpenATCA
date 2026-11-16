@@ -40,7 +40,7 @@ mod ns;
 mod parse;
 
 pub use decode::{decode_into, decode_text_run, span_eq_str, SpanKind};
-pub use ns::{resolve_attr_ns, resolve_elem_ns, Ns};
+pub use ns::{resolve_attr_ns, resolve_elem_ns, resolve_prefix, Ns};
 pub use parse::Parser;
 
 use std::fmt;
@@ -148,7 +148,7 @@ impl Limits {
     /// Name length: 65,536 bytes. Namespace bindings: 1,024 (every prefix lookup is linear in
     /// it).
     pub const CEILING: Limits = Limits {
-        max_input_bytes: u32::MAX as usize,
+        max_input_bytes: i32::MAX as usize,
         max_depth: 65_536,
         max_elements: 16_777_216,
         max_attributes: 16_777_216,
@@ -401,6 +401,25 @@ pub struct Doc<'a> {
     pub ns_prefix: &'a [Span],
     pub ns_uri: &'a [Span],
     pub ns_next: &'a [NsIx],
+    /// The expanded form of the namespace URIs that contained a reference or a normalised
+    /// byte; read through [`ns_uri_bytes`].
+    pub ns_buf: &'a [u8],
+}
+
+/// Marks a namespace URI span whose bytes are in [`Doc::ns_buf`] rather than the input; the
+/// offset is in the low 31 bits. Input is limited to below 2 GiB, so no span of the input can
+/// carry it, and `span_bytes` on such a span fails (out of range) instead of misreading.
+pub(crate) const NS_BUF_FLAG: u32 = 1 << 31;
+
+/// The bytes of a namespace URI span as returned by [`resolve_elem_ns`] and
+/// [`resolve_attr_ns`]: the expanded URI, from the input when it holds no reference, else from
+/// [`Doc::ns_buf`]. `None` for a span outside either.
+pub fn ns_uri_bytes<'a>(doc: &Doc<'a>, s: Span) -> Option<&'a [u8]> {
+    if s.start & NS_BUF_FLAG == 0 {
+        return bytes_of(doc.input, s);
+    }
+    let a = (s.start & !NS_BUF_FLAG) as usize;
+    doc.ns_buf.get(a..a.checked_add(s.len as usize)?)
 }
 
 /// The bytes a span covers, or `SpanOutOfRange` if the span does not lie inside `input`

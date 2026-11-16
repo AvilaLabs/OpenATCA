@@ -1,10 +1,10 @@
 //! The one-pass parser. Core (pure): a function of the input and the limits. The tables are
 //! sized once in [`Parser::new`]; every push is preceded by a limit check, so none reallocates.
 
-use crate::decode::{off, parse_entity};
+use crate::decode::{decode_into, off, parse_entity, SpanKind};
 use crate::{
-    validate_limits, AttrIx, BindIx, Binding, Doc, ElemIx, Frame, LimitKind, Limits, NsIx, Span,
-    XmlError,
+    bit_get, validate_limits, AttrIx, BindIx, Binding, Doc, ElemIx, Frame, LimitKind, Limits, NsIx,
+    Span, XmlError, NS_BUF_FLAG,
 };
 
 /// The XML namespace, bound to the `xml` prefix and to nothing else (Namespaces section 3).
@@ -38,6 +38,9 @@ pub struct Parser {
     // Per-element scratch: the namespace URI of each attribute of the element being parsed
     // (empty for an unprefixed, `xml` or `xmlns` attribute), for the expanded-name check.
     attr_uri: Vec<Span>,
+    // Expanded namespace URIs (those with a reference in them); `ns_buf_len` bytes are used.
+    ns_buf: Vec<u8>,
+    ns_buf_len: usize,
 }
 
 /// A table of capacity `cap` made with `try_reserve_exact`, so an allocation failure is an
@@ -54,6 +57,18 @@ fn bitset(bits: usize, limit: LimitKind) -> Result<Vec<u64>, XmlError> {
     let words = bits.div_ceil(64);
     let mut v = table(words, limit)?;
     v.resize(words, 0);
+    Ok(v)
+}
+
+/// Bytes reserved per namespace binding slot for expanded URIs (twice the longest real FAA URI
+/// seen, rounded up to a power of two).
+const NS_URI_RESERVE: usize = 2_048;
+
+/// The expanded-URI buffer: zero-filled to its full size, so it can be written by slice.
+fn ns_buf(bindings: usize) -> Result<Vec<u8>, XmlError> {
+    let n = bindings.saturating_mul(NS_URI_RESERVE);
+    let mut v = table(n, LimitKind::NsBindings)?;
+    v.resize(n, 0);
     Ok(v)
 }
 
@@ -91,6 +106,8 @@ impl Parser {
             stack: table(limits.max_depth, LimitKind::Depth)?,
             bindings: table(limits.max_ns_bindings, LimitKind::NsBindings)?,
             attr_uri: table(limits.max_attrs_per_elem, LimitKind::AttributesPerElement)?,
+            ns_buf: ns_buf(limits.max_ns_bindings)?,
+            ns_buf_len: 0,
             limits,
         })
     }
@@ -119,6 +136,7 @@ impl Parser {
             + self.stack.capacity()
             + self.bindings.capacity()
             + self.attr_uri.capacity()
+            + self.ns_buf.capacity()
     }
 
     /// The limits in force.
@@ -151,6 +169,7 @@ impl Parser {
             ns_prefix: &self.ns_prefix,
             ns_uri: &self.ns_uri,
             ns_next: &self.ns_next,
+            ns_buf: self.ns_buf.get(..self.ns_buf_len).unwrap_or(&[]),
         })
     }
 
@@ -183,6 +202,7 @@ impl Parser {
         self.stack.clear();
         self.bindings.clear();
         self.attr_uri.clear();
+        self.ns_buf_len = 0;
     }
 }
 
@@ -833,6 +853,39 @@ fn bound(bindings: &[Binding], input: &[u8], prefix: &[u8]) -> Option<Span> {
         .map(|b| b.uri)
 }
 
+/// The bytes of a namespace URI span: the input, or the expanded-URI buffer when flagged.
+fn span_text<'a>(input: &'a [u8], buf: &'a [u8], s: Span) -> &'a [u8] {
+    if s.start & NS_BUF_FLAG == 0 {
+        return sub(
+            input,
+            s.start as usize,
+            (s.start as usize).saturating_add(s.len as usize),
+        );
+    }
+    let a = (s.start & !NS_BUF_FLAG) as usize;
+    buf.get(a..a.saturating_add(s.len as usize)).unwrap_or(&[])
+}
+
+/// Expands the references and normalised bytes of the namespace value `av` into the parser's
+/// URI buffer and returns the flagged span of the result. The buffer is shared by the whole
+/// document; running out of it is the namespace-bindings limit.
+fn expand_ns_uri(p: &mut Parser, input: &[u8], av: Span) -> Result<Span, XmlError> {
+    let used = p.ns_buf_len;
+    let dst = p.ns_buf.get_mut(used..).unwrap_or(&mut []);
+    let n = decode_into(av, input, dst, SpanKind::AttrValue).map_err(|e| match e {
+        XmlError::OutputTooSmall { at } => XmlError::Limit {
+            limit: LimitKind::NsBindings,
+            at,
+        },
+        other => other,
+    })?;
+    p.ns_buf_len = used + n;
+    Ok(Span {
+        start: off(used) | NS_BUF_FLAG,
+        len: off(n),
+    })
+}
+
 fn bytes_eq(input: &[u8], s: Span, want: &[u8]) -> bool {
     sub(
         input,
@@ -918,18 +971,30 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
         };
         let name = sub(input, an.start as usize, (an.start + an.len) as usize);
         let pre = sub(input, ap.start as usize, (ap.start + ap.len) as usize);
-        let uri = sub(input, av.start as usize, (av.start + av.len) as usize);
+        let is_decl = pre == b"xmlns" || (pre.is_empty() && name == b"xmlns");
+        if !is_decl {
+            continue;
+        }
+        if pre == b"xmlns" && name == b"xmlns" {
+            return Err(syntax(ap.start as usize, "reserved prefix 'xmlns'"));
+        }
+        if pre == b"xmlns" && av.len == 0 {
+            return Err(syntax(av.start as usize, "empty namespace URI"));
+        }
+        // The value is an attribute value: expand references before any comparison.
+        let uspan = if bit_get(&p.attr_entity, a) {
+            expand_ns_uri(p, input, av)?
+        } else {
+            av
+        };
+        let uri = span_text(input, &p.ns_buf, uspan);
+        let is_xml_ns = uri == XML_NS;
+        let is_xmlns_ns = uri == XMLNS_NS;
         let binding = if pre == b"xmlns" {
-            if name == b"xmlns" {
-                return Err(syntax(ap.start as usize, "reserved prefix 'xmlns'"));
-            }
-            if av.len == 0 {
-                return Err(syntax(av.start as usize, "empty namespace URI"));
-            }
             if name == b"xml" {
                 // `xml` may be declared, but only as the XML namespace; there is nothing to
                 // record, it is always in scope.
-                if uri != XML_NS {
+                if !is_xml_ns {
                     return Err(syntax(
                         av.start as usize,
                         "prefix 'xml' bound to another URI",
@@ -939,26 +1004,24 @@ fn start_tag(p: &mut Parser, input: &[u8], lt: usize) -> Result<usize, XmlError>
             }
             Binding {
                 prefix: an,
-                uri: av,
+                uri: uspan,
             }
-        } else if pre.is_empty() && name == b"xmlns" {
+        } else {
             Binding {
                 prefix: Span {
                     start: an.start,
                     len: 0,
                 },
-                uri: av,
+                uri: uspan,
             }
-        } else {
-            continue;
         };
-        if uri == XML_NS {
+        if is_xml_ns {
             return Err(syntax(
                 av.start as usize,
                 "XML namespace bound to another prefix",
             ));
         }
-        if uri == XMLNS_NS {
+        if is_xmlns_ns {
             return Err(syntax(
                 av.start as usize,
                 "the 'xmlns' namespace cannot be bound",
@@ -1085,8 +1148,7 @@ fn check_expanded_duplicates(p: &Parser, input: &[u8], first_attr: usize) -> Res
             if ni.len == nj.len
                 && sub(input, ni.start as usize, (ni.start + ni.len) as usize)
                     == sub(input, nj.start as usize, (nj.start + nj.len) as usize)
-                && sub(input, ui.start as usize, (ui.start + ui.len) as usize)
-                    == sub(input, uj.start as usize, (uj.start + uj.len) as usize)
+                && span_text(input, &p.ns_buf, ui) == span_text(input, &p.ns_buf, uj)
             {
                 let at = p
                     .attr_prefix

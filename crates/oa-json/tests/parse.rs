@@ -100,8 +100,17 @@ fn every_bound_is_enforced_and_named() {
     assert!(parse(b"\"abcd\"", &small).is_ok());
     assert_eq!(e("[1,2,3,4,5]"), ErrorKind::TooManyNodes);
     assert!(parse(b"[1,2,3,4]", &small).is_ok());
-    // The same string bound counts escaped text by its raw length.
+    // The same string bound counts escaped text by its raw length, quotes excluded, on both
+    // paths: four raw bytes pass whether plain or escaped, five do not.
     assert_eq!(e("\"\\n\\n\\n\""), ErrorKind::StringTooLong);
+    assert!(parse(b"\"\\nxy\"", &small).is_ok());
+    assert!(parse(b"\"x\\ny\"", &small).is_ok());
+    assert!(parse(b"\"xy\\n\"", &small).is_ok());
+    assert_eq!(e("\"\\u0041x\""), ErrorKind::StringTooLong);
+    assert_eq!(e("\"\\nxyz\""), ErrorKind::StringTooLong);
+    assert_eq!(e("\"xyz\\n\""), ErrorKind::StringTooLong);
+    assert!(parse(b"\"\\\\\\\\\"", &small).is_ok());
+    assert_eq!(e("\"\\\\\\\\\\\\\""), ErrorKind::StringTooLong);
     // Object keys are nodes too: 2 members = 5 nodes with the object itself.
     assert!(parse(b"{\"a\":1,\"b\":2}", &small).is_ok());
     assert_eq!(e("{\"a\":1,\"b\":2,\"c\":3}"), ErrorKind::TooManyNodes);
