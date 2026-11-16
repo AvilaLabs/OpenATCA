@@ -256,7 +256,7 @@ pub fn inject_drift(base: &Labelled, d: &DriftParams) -> Result<Labelled, SimErr
         if a != d.victim || t <= d.start_ns || t > d.end_ns {
             continue;
         }
-        let off = d.rate_mps * (t - d.start_ns) as f64 * 1.0e-9;
+        let off = d.rate_mps * (i128::from(t) - i128::from(d.start_ns)) as f64 * 1.0e-9;
         let (Some(&la), Some(&lo)) = (base.reports.lat_e7.get(i), base.reports.lon_e7.get(i))
         else {
             return Err(SimError::ColumnLength);

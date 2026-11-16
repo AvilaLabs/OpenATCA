@@ -797,3 +797,54 @@ fn an_aircraft_above_89_9_degrees_is_detected_by_a_site_at_89_5() {
     // a whole-millisecond time only by chance; the offset at both kinds of time is tested in
     // the crate.
 }
+
+// REQ: OA-SIM-031
+#[test]
+fn an_extreme_epoch_is_refused_with_a_typed_error_and_never_overflows() {
+    let truth = truth_of(&stationary_field(30.0));
+    let good = site(clean(MSSR_EUROCONTROL_1997));
+    for epoch_ns in [
+        i64::MIN,
+        i64::MIN + 1,
+        i64::MAX,
+        i64::MAX - 1,
+        i64::MIN / 2 - 1,
+        i64::MAX / 2 + 1,
+    ] {
+        let s = RadarSite { epoch_ns, ..good };
+        for (from, to) in [
+            (i64::MIN / 2, i64::MAX / 2),
+            (0, 1),
+            (T0, T0 + 10_000_000_000),
+        ] {
+            assert!(
+                matches!(
+                    simulate_radar(&truth, &s, 1, from, to),
+                    Err(SimError::BadSite(_))
+                ),
+                "epoch {epoch_ns}, window {from}..{to}"
+            );
+        }
+    }
+    // The widest accepted epochs run without overflow, whatever the window.
+    for epoch_ns in [i64::MIN / 2, i64::MAX / 2, 0, T0] {
+        let s = RadarSite { epoch_ns, ..good };
+        for (from, to) in [(i64::MIN, i64::MAX), (T0, T0 + 10_000_000_000)] {
+            let r = simulate_radar(&truth, &s, 1, from, to);
+            assert!(
+                r.is_ok() || matches!(r, Err(SimError::BadSite(_))),
+                "epoch {epoch_ns}"
+            );
+        }
+    }
+    // The beam azimuth and scan start never overflow either.
+    for t in [i64::MIN, i64::MAX, 0] {
+        let s = RadarSite {
+            epoch_ns: i64::MAX / 2,
+            ..good
+        };
+        let az = beam_az_deg(&s, t);
+        assert!((0.0..360.0).contains(&az));
+        let _ = scan_start_ns(&s, i64::MAX);
+    }
+}
