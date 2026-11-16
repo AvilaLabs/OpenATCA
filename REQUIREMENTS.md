@@ -1733,6 +1733,8 @@ frame of their feed has been fed (as the ADS-B table is).
   positive, is refused by the plain queries with `BadGrid` and never panics a point lookup.
 - **OA-TIFF-094** A conservative query whose box sits at a lattice index too large to hold is
   refused with `TooManySamples`, not clamped to a box that finds nothing.
+- **OA-TIFF-095** The file the fuzzer found overflowing an offset product (committed as a seed) is read
+  and queried without a panic.
 
 ### Digital Obstacle File (oa-dof)
 

@@ -1069,3 +1069,14 @@ fn a_grid_that_cannot_be_indexed_is_refused_not_a_panic_or_a_whole_grid_scan() {
         let _ = grid_elevation_at(g, 40.5, -90.5);
     }
 }
+
+// REQ: OA-TIFF-095
+#[test]
+fn the_fuzzer_found_offset_overflow_is_refused_not_a_panic() {
+    // Found by the `tiff` fuzz target on 2026-11-16: an offset product overflowed in `tiff.rs`
+    // (attempt to multiply with overflow). Checked offset arithmetic now refuses it.
+    let seed = include_bytes!("../../../fuzz/seeds/tiff/overflow-fuzz-60cc4a82.tif");
+    if let Ok(g) = read_geotiff(seed) {
+        let _ = grid_elevation_at(&g, 45.0, -90.0);
+    }
+}
