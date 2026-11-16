@@ -328,6 +328,8 @@ fn equatorial_edge_has_known_inside_and_outside_sides() {
     let e = wgs84();
     let tri = Polygon::new(&e, &[pt(0.0, -20.0), pt(0.0, 20.0), pt(20.0, 0.0)])
         .expect("valid equatorial triangle");
+    assert_eq!(tri.len(), 3);
+    assert!(!tri.is_empty());
     assert!(tri.contains(pt(0.1, 0.0)));
     assert!(!tri.contains(pt(-0.1, 0.0)));
 }
