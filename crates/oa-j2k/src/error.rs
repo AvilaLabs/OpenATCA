@@ -32,6 +32,10 @@ pub enum J2kError {
     UnsupportedQuantization(u8),
     /// More code blocks than [`crate::MAX_CODE_BLOCKS`].
     TooManyCodeBlocks(u64),
+    /// The blocks and layers could create more codeword segments than [`crate::MAX_SEGMENTS`].
+    TooManySegments(u64),
+    /// The working tables would exceed [`crate::MAX_SCRATCH_BYTES`].
+    ScratchBudget { needed: u64, budget: u64 },
     /// A packet header or body is inconsistent with the codestream.
     BadPacket(&'static str),
     /// A code block's arithmetic-coded data or pass count is impossible.
@@ -65,6 +69,13 @@ impl fmt::Display for J2kError {
                 write!(f, "quantization style {s} is not supported")
             }
             J2kError::TooManyCodeBlocks(n) => write!(f, "{n} code blocks is out of bounds"),
+            J2kError::TooManySegments(n) => write!(f, "{n} codeword segments is out of bounds"),
+            J2kError::ScratchBudget { needed, budget } => {
+                write!(
+                    f,
+                    "decode needs {needed} bytes of tables, budget is {budget}"
+                )
+            }
             J2kError::BadPacket(why) => write!(f, "bad packet: {why}"),
             J2kError::BadBlock(why) => write!(f, "bad code block: {why}"),
             J2kError::WorkBudget { work, budget } => {

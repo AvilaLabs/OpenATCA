@@ -2,7 +2,8 @@
 //!
 //! Templates 4.0 (analysis or forecast at a point in time) and 4.8 (statistical interval) are
 //! read, and so are their ensemble forms 4.1 and 4.11 (GEFS); all four share the same first 34
-//! octets, which is all that is kept. What follows (ensemble member, interval description) is
+//! octets. For 4.8 and 4.11 the end of the overall interval, the number of time ranges and the
+//! statistical process of the first range are kept as an [`Interval`]; the ensemble member is
 //! checked for length and ignored.
 
 use crate::bits::{be, sign_mag, u16_at, u8_at};
@@ -88,6 +89,18 @@ pub struct RefTime {
     pub second: u8,
 }
 
+/// The statistical interval of templates 4.8 and 4.11. The interval starts at the product's
+/// reference time plus its forecast time and ends at `end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct Interval {
+    pub end: RefTime,
+    /// Number of time ranges the template describes.
+    pub ranges: u8,
+    /// Code table 4.10 statistical process of the first range (255 when missing).
+    pub statistic: u8,
+}
+
 /// What section 4 says, before the data are attached.
 #[derive(Debug, Clone, Copy, PartialEq)]
 // A7.2: cold struct, size guard waived
@@ -99,6 +112,8 @@ pub struct Product {
     pub time_unit: u8,
     pub forecast_time: u32,
     pub level: Level,
+    /// `Some` for templates 4.8 and 4.11, `None` for the instantaneous 4.0 and 4.1.
+    pub interval: Option<Interval>,
 }
 
 /// Octets of template 4.0 including the 9-octet section header.
@@ -156,6 +171,16 @@ pub fn parse_product(sect: &[u8]) -> Result<Product, Grib2Error> {
             Level { kind, value: v }
         }
     };
+    // Octet 35 starts the end-of-interval time in 4.8; 4.11 puts three ensemble octets before it.
+    let at = match template {
+        8 => Some(34),
+        11 => Some(37),
+        _ => None,
+    };
+    let interval = match at {
+        Some(o) => Some(parse_interval(sect, o)?),
+        None => None,
+    };
     Ok(Product {
         template,
         category,
@@ -163,6 +188,24 @@ pub fn parse_product(sect: &[u8]) -> Result<Product, Grib2Error> {
         time_unit,
         forecast_time,
         level,
+        interval,
+    })
+}
+
+/// The interval description whose end-of-interval year is at byte `o` of the section.
+fn parse_interval(sect: &[u8], o: usize) -> Result<Interval, Grib2Error> {
+    let t = Grib2Error::Truncated("product definition");
+    let end = ref_time_at(sect, o).ok_or_else(|| t.clone())??;
+    let ranges = u8_at(sect, o + 7).ok_or_else(|| t.clone())?;
+    let statistic = if ranges == 0 {
+        255
+    } else {
+        u8_at(sect, o + 12).ok_or_else(|| t.clone())?
+    };
+    Ok(Interval {
+        end,
+        ranges,
+        statistic,
     })
 }
 
@@ -175,30 +218,48 @@ pub fn parse_ref_time(sect: &[u8]) -> Result<RefTime, Grib2Error> {
             length: sect.len() as u32,
         });
     }
-    let year = u16_at(sect, 12).ok_or_else(|| t.clone())?;
-    let month = u8_at(sect, 14).ok_or_else(|| t.clone())?;
-    let day = u8_at(sect, 15).ok_or_else(|| t.clone())?;
-    let hour = u8_at(sect, 16).ok_or_else(|| t.clone())?;
-    let minute = u8_at(sect, 17).ok_or_else(|| t.clone())?;
-    let second = u8_at(sect, 18).ok_or_else(|| t.clone())?;
+    ref_time_at(sect, 12).ok_or(t)?
+}
+
+/// A calendar time of seven octets (year, month, day, hour, minute, second) at `pos`: `None`
+/// when the bytes run out, a refusal when they are not a calendar time.
+fn ref_time_at(sect: &[u8], pos: usize) -> Option<Result<RefTime, Grib2Error>> {
+    let year = u16_at(sect, pos)?;
+    let month = u8_at(sect, pos + 2)?;
+    let day = u8_at(sect, pos + 3)?;
+    let hour = u8_at(sect, pos + 4)?;
+    let minute = u8_at(sect, pos + 5)?;
+    let second = u8_at(sect, pos + 6)?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day < 1
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
         || second > 60
     {
-        return Err(Grib2Error::BadProduct(
+        return Some(Err(Grib2Error::BadProduct(
             "reference time is not a calendar time",
-        ));
+        )));
     }
-    Ok(RefTime {
+    Some(Ok(RefTime {
         year,
         month,
         day,
         hour,
         minute,
         second,
-    })
+    }))
+}
+
+/// Days in `month` (1 to 12) of `year`, Gregorian leap-year rule.
+fn days_in_month(year: u16, month: u8) -> u8 {
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Reference time as Unix seconds (proleptic Gregorian, no leap seconds).

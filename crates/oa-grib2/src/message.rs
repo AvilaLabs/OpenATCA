@@ -17,7 +17,7 @@ use crate::error::Grib2Error;
 use crate::grid::{grid_dims, parse_grid, Grid};
 use crate::pack::{apply_bitmap, parse_bitmap, parse_repr, unpack, BitmapSpec, Repr};
 use crate::product::{
-    parameter_of, parse_product, parse_ref_time, Level, Parameter, Product, RefTime,
+    parameter_of, parse_product, parse_ref_time, Interval, Level, Parameter, Product, RefTime,
 };
 use crate::{MAX_FIELDS_PER_MESSAGE, MAX_GRID_POINTS, MAX_MESSAGE_BYTES, MAX_MESSAGE_POINTS};
 
@@ -36,6 +36,9 @@ pub struct Field {
     pub time_unit: u8,
     pub forecast_time: u32,
     pub product_template: u16,
+    /// The statistical interval of product templates 4.8 and 4.11; `None` for an instantaneous
+    /// product.
+    pub interval: Option<Interval>,
     pub packing_template: u16,
     pub grid: Grid,
     pub values: Vec<f32>,
@@ -56,6 +59,8 @@ pub struct FieldInfo {
     pub time_unit: u8,
     pub forecast_time: u32,
     pub product_template: u16,
+    /// As [`Field::interval`].
+    pub interval: Option<Interval>,
     /// Number of the data representation template, whether or not this crate can unpack it.
     pub packing_template: u16,
     pub grid: Grid,
@@ -195,6 +200,7 @@ pub fn decode_message(msg: &[u8]) -> Result<Vec<Field>, Grib2Error> {
             time_unit: info.time_unit,
             forecast_time: info.forecast_time,
             product_template: info.product_template,
+            interval: info.interval,
             packing_template: info.packing_template,
             grid: info.grid,
             values,
@@ -248,6 +254,64 @@ pub fn inspect_stream(data: &[u8]) -> Inspected {
         pos += length;
     }
     out
+}
+
+/// What the first field of a message is, read from the first bytes of the message (`head`, at
+/// least through its data representation section) without its length being known to fit: the
+/// indicator, identification, grid, product and data representation sections are read and the
+/// rest is not looked at. For checking an inventory against the file without reading the data.
+pub fn peek_info(head: &[u8]) -> Result<FieldInfo, Grib2Error> {
+    if head.get(0..4) != Some(b"GRIB".as_slice()) {
+        return Err(Grib2Error::NotGrib { offset: 0 });
+    }
+    let edition = u8_at(head, 7).ok_or(Grib2Error::Truncated("indicator section"))?;
+    if edition != 2 {
+        return Err(Grib2Error::UnsupportedEdition(edition));
+    }
+    let discipline = u8_at(head, 6).ok_or(Grib2Error::Truncated("indicator section"))?;
+    let mut ref_time = None;
+    let mut grid = None;
+    let mut product = None;
+    let mut pos = 16usize;
+    loop {
+        let slen = u32_at(head, pos).ok_or(Grib2Error::Truncated("section header"))? as usize;
+        let num = u8_at(head, pos + 4).ok_or(Grib2Error::Truncated("section header"))?;
+        if slen < 5 {
+            return Err(Grib2Error::BadSectionLength {
+                section: num,
+                length: slen as u32,
+            });
+        }
+        let sect = head
+            .get(pos..pos + slen)
+            .ok_or(Grib2Error::Truncated("section"))?;
+        match num {
+            1 => ref_time = Some(parse_ref_time(sect)?),
+            3 => grid = Some(parse_grid(sect)?),
+            4 => product = Some(parse_product(sect)?),
+            5 => {
+                let packing_template = crate::bits::u16_at(sect, 9)
+                    .ok_or(Grib2Error::Truncated("data representation"))?;
+                let product = product.ok_or(Grib2Error::MissingSection("product definition"))?;
+                return Ok(FieldInfo {
+                    discipline,
+                    category: product.category,
+                    number: product.number,
+                    parameter: parameter_of(discipline, product.category, product.number),
+                    level: product.level,
+                    ref_time: ref_time.ok_or(Grib2Error::MissingSection("identification"))?,
+                    time_unit: product.time_unit,
+                    forecast_time: product.forecast_time,
+                    product_template: product.template,
+                    interval: product.interval,
+                    packing_template,
+                    grid: grid.ok_or(Grib2Error::MissingSection("grid definition"))?,
+                });
+            }
+            _ => {}
+        }
+        pos += slen;
+    }
 }
 
 /// A field's description and, when the walk unpacks, its values.
@@ -406,6 +470,7 @@ fn finish_field(
         time_unit: product.time_unit,
         forecast_time: product.forecast_time,
         product_template: product.template,
+        interval: product.interval,
         packing_template: repr.template,
         grid,
     };

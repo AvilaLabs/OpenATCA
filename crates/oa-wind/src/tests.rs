@@ -75,6 +75,7 @@ fn field(g: Grid, p: Parameter, pa: f32, hour: u8, values: Vec<f32>) -> Field {
         time_unit: 1,
         forecast_time: 0,
         product_template: 0,
+        interval: None,
         packing_template: 0,
         grid: g,
         values,

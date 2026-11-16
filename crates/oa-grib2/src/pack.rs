@@ -359,13 +359,16 @@ fn unpack_complex(
     br.align();
     let mut widths = Vec::with_capacity(ng);
     for _ in 0..ng {
-        let w = u32::from(c.width_ref)
-            + br.read(u32::from(c.width_bits))
-                .ok_or_else(|| short.clone())?;
+        // Both terms come from the header; the sum is checked in 64 bits, not 32.
+        let w = u64::from(c.width_ref)
+            + u64::from(
+                br.read(u32::from(c.width_bits))
+                    .ok_or_else(|| short.clone())?,
+            );
         if w > 32 {
             return Err(Grib2Error::BadPacking("group width over 32 bits"));
         }
-        widths.push(w);
+        widths.push(w as u32);
     }
     br.align();
     let mut lengths = Vec::with_capacity(ng);

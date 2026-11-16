@@ -48,14 +48,17 @@ pub mod sample;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_index;
 
 pub use archive::{
     archive_files, archive_sample, index_files, new_archive, read_file_capped, read_hour_file,
-    Archive, HourFile,
+    read_hour_file_report, Archive, HourFile, IndexUse,
 };
 pub use error::{LoadError, QueryError, Refusal};
 pub use hour::{
-    build_hour, hour_bytes, hour_levels, load_hour, needed_ranges, needed_ranges_text, Hour,
+    build_hour, check_claims, head_claim, hour_bytes, hour_levels, index_claims, load_hour,
+    load_hour_claimed, needed_ranges, needed_ranges_text, Claim, Hour,
 };
 pub use isa::{altitude_ft_from_pressure_hpa, pressure_hpa_from_altitude_ft};
 pub use sample::{
