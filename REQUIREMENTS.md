@@ -3762,6 +3762,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `--adsb-frac` outside 0 to 1, and traffic times (`--warmup`, `--duration`, `--clip-secs`) whose
   sum overflows or passes the time range the layer accepts, each with a message naming the flag.
 - **OA-PRF-011** Every aircraft of the synthetic traffic is inside its box at every second of the fed
-  interval (warm-up plus measurement, of any length): a track that would leave the box turns back and one
-  that would still leave reflects at the wall, so in the stress layout every aircraft is in the coverage of
-  every radar throughout, and no plot is lost to leaving it. Deterministic per seed.
+  interval (warm-up plus measurement, up to the traffic's horizon): a track that would leave the box flies
+  the reverse heading, and one that would still leave flies straight to a point from which it turns at the
+  standard rate (3 degrees per second) onto a circle that fits in the box and circles there. Velocity is
+  continuous and of constant magnitude, and no aircraft turns faster than the standard rate. So in the
+  stress layout every aircraft is in the coverage of every radar throughout, no plot is lost to leaving it,
+  and no aircraft makes a manoeuvre a real aircraft could not fly. Deterministic per seed.

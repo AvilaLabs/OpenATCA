@@ -918,7 +918,11 @@ mod tests {
         );
         // The delay from an input's time to the end of its second is under a second.
         assert!(r.delay_adsb_ms.max <= 1000.0 && r.delay_plot_ms.max <= 1000.0);
-        assert!(r.hwm_kb >= r.rss_after_new_kb && r.rss_after_new_kb > r.rss_before_kb);
+        // The peak bounds every sample. RSS after construction is not asserted above RSS before
+        // it: under memory pressure the kernel can reclaim pages between the two reads.
+        assert!(
+            r.hwm_kb >= r.rss_after_new_kb && r.hwm_kb >= r.rss_before_kb && r.rss_after_new_kb > 0
+        );
         let kv = cap_kv(&r);
         assert_eq!(kv.get("n"), Some("100"));
         assert!(kv.get("advance.p99_ms").is_some() && kv.get("vmhwm_kb").is_some());
