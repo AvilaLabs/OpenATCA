@@ -39,12 +39,12 @@ architecture has been tested.
 | Rule | Status today |
 |---|---|
 | Fixed capacities, named, with a written behaviour when full (C1, C2) | Followed in most collections. Not yet enforced by a test: the counting-allocator check (C5) needs an exception to the no-unsafe rule (A0) that is not decided, so "no allocation after startup" is a design rule, not a verified property. |
-| Bounded work, not only bounded storage | Not uniform. Several decoders and the tracker have had limits that capped memory but not the work done; these are being fixed and the rule is being made checkable. |
-| Invalid input is refused and counted, never passed on (E5) | Followed in most paths. Some paths have been found to substitute a value or drop data silently; these are being found and fixed. |
-| Identity from positive evidence | Being written as a rule. Matching by local name, by raw text, or by position alone has been found and fixed in several places. |
-| Arithmetic on untrusted values is checked before use | Not uniform; being made checkable with clippy's arithmetic and cast lints on the input-handling crates. |
+| Bounded work, not only bounded storage (C7) | Not uniform. Several decoders and the tracker have had limits that capped memory but not the work done; these are being fixed and the rule is being made checkable. |
+| Invalid input is refused and counted, never passed on or substituted (E5, E6) | Followed in most paths. Some paths have been found to substitute a value or drop data silently; these are being found and fixed. |
+| Identity from positive evidence (E7) | Written as a rule on 2026-11-16. Matching by local name, by raw text, or by position alone has been found and fixed in several places. |
+| Arithmetic on untrusted values is checked before use (E8) | Not uniform; being made checkable with clippy's arithmetic and cast lints on the input-handling crates. |
 | Deterministic replay (B6) | Tested on one platform; see above. |
-| Measurements that cannot flatter the result | Capacity claims now fail on any lost work and on any second over budget. Benchmark definitions are in [BENCHMARKS.md](BENCHMARKS.md); each change to a metric is a reviewed change. |
+| Measurements that cannot flatter the result (G6) | Capacity claims now fail on any lost work and on any second over budget. Benchmark definitions are in [BENCHMARKS.md](BENCHMARKS.md); each change to a metric is a reviewed change. |
 
 ## Performance numbers
 
