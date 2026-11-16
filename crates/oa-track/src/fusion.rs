@@ -65,9 +65,9 @@ use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
-    COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2,
-    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M,
-    INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
+    COARSE_STD_M, FRESH_MAX, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
+    GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
+    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
     MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
     MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX,
     REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES,
@@ -332,6 +332,10 @@ pub struct FusionStats {
     pub init_visits: u64,
     /// Candidates left untested for a bucket because the initiation's wide list was full.
     pub init_wide_full: u64,
+    /// Free anonymous plots initiation left alone because they gate with a track made earlier in
+    /// the same bucket (by another radar's candidate) that has taken no plot of this radar in
+    /// their scan.
+    pub stale_plots_skipped: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -502,6 +506,8 @@ pub struct Fusion {
     init_grid: PointGrid,
     init_wide: Vec<u32>,
     init_near: Vec<u32>,
+    /// The keys of the tracks initiation made in the bucket being processed ([`FRESH_MAX`]).
+    fresh: Vec<u32>,
     /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
     /// took one of its plots (a small map: entries exist only while a run is going).
     hold_run: FixedMap<(u32, u8), HoldRun>,
@@ -615,6 +621,7 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         init_grid: point_grid_new(CAND_IX_MAX, INIT_CELL_M),
         init_wide: Vec::with_capacity(INIT_WIDE_MAX),
         init_near: Vec::with_capacity(CAND_IX_MAX),
+        fresh: Vec::with_capacity(FRESH_MAX),
         hold_run: FixedMap::new(KEY_TABLE_SLOTS),
         hold_run_max: MAX_ASSOC_TRACKS,
         plot_scan: FixedMap::new(KEY_TABLE_SLOTS),
@@ -1802,6 +1809,7 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
         }
     }
     f.stats.buckets += 1;
+    f.fresh.clear();
     prune_plot_scan(f, plots.first().map_or(0, |p| p.plot.time_ns));
     associate_bucket(f);
     // Events in time order.
@@ -2189,6 +2197,8 @@ fn initiate(
                 }
                 None => start_candidate(f, radar, p.addr, c.m, p.label, scan),
             }
+        } else if gates_fresh_track(f, radar, p, &g, &s, &bias) {
+            f.stats.stale_plots_skipped += 1;
         } else {
             anon.push(j);
         }
@@ -2535,7 +2545,41 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
             confirm_ns: last,
         });
     }
+    if !push_within(&mut f.fresh, key) {
+        f.stats.scratch_full += 1;
+    }
     Some((key, decision_ns))
+}
+
+/// Whether the anonymous plot `p` of `radar` gates with a track made earlier in this bucket and
+/// that has taken no plot of this radar in the plot's scan. Association ran for every radar before
+/// any initiation, so such a plot was free when the track did not yet exist; it is that track's
+/// aircraft's. A track that has taken a plot of the radar in the scan makes the plot another
+/// aircraft's, a hit as before.
+fn gates_fresh_track(
+    f: &Fusion,
+    radar: usize,
+    p: &RadarPlot,
+    g: &RadarGeom,
+    s: &RadarSite,
+    bias: &Bias,
+) -> bool {
+    if f.fresh.is_empty() {
+        return false;
+    }
+    let Some(scan) = scan_of(f, radar, p.time_ns) else {
+        return false;
+    };
+    f.fresh.iter().any(|&key| {
+        let Some((row, _, last_ns)) = tracker_predict(&f.tracker, key, p.time_ns) else {
+            return false;
+        };
+        let Ok(conv) = plot_convert(g, s, p, bias, track_height(&row), key) else {
+            return false;
+        };
+        cand_gates_row(&row, last_ns, &conv.m, s.alt_quantum_ft)
+            && !took_plot_in_scan(f, key, radar, scan)
+    })
 }
 
 /// Whether the latest plot of the anonymous candidate `c` gates with any live track.
@@ -4942,5 +4986,112 @@ mod tests {
         assert!(fusion_radar_tracks(&f).is_empty());
         assert_eq!(st.cand_expired, 1, "{st:?}");
         assert_eq!(st.cand_started, 2, "{st:?}");
+    }
+
+    // REQ: OA-TRK-304
+    #[test]
+    fn a_plot_free_before_a_track_the_bucket_made_does_not_start_a_candidate_on_it() {
+        // Both radars see one aircraft at the same times. The first radar confirms on its third
+        // plot, and the second radar's third plot, in the same bucket, was free when the
+        // association ran: it gates with the track that radar's initiation finds made.
+        let lines = easting(&[Line {
+            x0: 20_000.0,
+            y0: 25_000.0,
+            vx: -140.0,
+            vy: 30.0,
+            alt_ft: 22_000,
+            label: 0xA00001,
+        }]);
+        let three = |site: &RadarSite, seed: u64| plots_of_site(site, &lines, 3, seed, false);
+        let (pa, pb) = (three(&SITE, 3), three(&SITE_EAST, 4));
+        let mut f = make_fusion_sites(&[SITE, SITE_EAST], 64);
+        run_two(&mut f, &pa, &pb);
+        let st = *fusion_stats(&f);
+        assert_eq!(st.cand_confirmed, 1, "{st:?}");
+        assert_eq!(st.cand_cancelled_by_track, 1, "{st:?}");
+        assert_eq!(st.cand_started, 2, "{st:?}");
+        assert_eq!(st.stale_plots_skipped, 1, "{st:?}");
+    }
+
+    /// Two radar-only aircraft `gap_m` apart on parallel lines, seen by both radars from the first
+    /// scan (no track exists for either): the labels each live track took, by key.
+    fn close_pair_cold(gap_m: f64, seed: u64) -> (Fusion, BTreeMap<u32, BTreeMap<u32, usize>>) {
+        let lines = easting(&[
+            Line {
+                x0: 20_000.0,
+                y0: 25_000.0,
+                vx: -140.0,
+                vy: 30.0,
+                alt_ft: 22_000,
+                label: 0xA00001,
+            },
+            Line {
+                x0: 20_000.0,
+                y0: 25_000.0 + gap_m,
+                vx: -140.0,
+                vy: 30.0,
+                alt_ft: 22_000,
+                label: 0xA00002,
+            },
+        ]);
+        let pa = plots_of_site(&SITE, &lines, 24, seed, false);
+        let pb = plots_of_site(&SITE_EAST, &lines, 24, seed + 100, false);
+        let mut f = make_fusion_sites(&[SITE, SITE_EAST], 64);
+        run_two(&mut f, &pa, &pb);
+        let log = fusion_assign_log(&f);
+        let mut by_key: BTreeMap<u32, BTreeMap<u32, usize>> = BTreeMap::new();
+        for i in 0..log.key.len() {
+            *by_key
+                .entry(log.key[i])
+                .or_default()
+                .entry(log.label[i])
+                .or_insert(0) += 1;
+        }
+        (f, by_key)
+    }
+
+    // REQ: OA-TRK-305
+    #[test]
+    fn two_close_radar_only_aircraft_starting_together_on_two_radars_get_two_tracks() {
+        // A formation 90 m apart (plot scatter is 70 m) and a parallel pair one nautical mile
+        // apart. Both radars start cold on both aircraft in the same bucket. Whatever the
+        // initiation cancels or leaves alone, two aircraft must end as two live tracks, each
+        // updated to the end: a merge here would lose an aircraft.
+        for gap in [90.0, 1_852.0] {
+            for seed in [1u64, 2, 3, 4] {
+                let (f, by_key) = close_pair_cold(gap, seed);
+                let st = *fusion_stats(&f);
+                // The run ends by flushing the tracker, so the tracks are read from the records
+                // and the log: two made, each given plots to the end.
+                assert_eq!(
+                    fusion_radar_tracks(&f).len(),
+                    2,
+                    "gap {gap} seed {seed}: {st:?}"
+                );
+                let log = fusion_assign_log(&f);
+                let end = log.t_ns.iter().copied().max().unwrap();
+                for k in by_key.keys() {
+                    let last = (0..log.key.len())
+                        .filter(|&i| log.key[i] == *k)
+                        .map(|i| log.t_ns[i])
+                        .max()
+                        .unwrap();
+                    // A formation inside the plot scatter has most of its plots held (see
+                    // `HOLD_MAX_RUN`): its tracks are updated a scan or two in three.
+                    let allowed = if gap > 1_000.0 { 6 } else { 20 };
+                    assert!(
+                        end - last <= allowed * NS_PER_S,
+                        "gap {gap} seed {seed}: track {k:#x} not updated to the end"
+                    );
+                }
+                assert_eq!(by_key.len(), 2, "gap {gap} seed {seed}: {by_key:?}");
+                if gap > 1_000.0 {
+                    // Well apart: each track is one aircraft's, from its first plot.
+                    for labels in by_key.values() {
+                        assert_eq!(labels.len(), 1, "gap {gap} seed {seed}: {by_key:?}");
+                    }
+                }
+            }
+        }
     }
 }

@@ -3165,6 +3165,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-303** A candidate takes no hit later than its window: a candidate whose first hit is more than the
   initiation window of scans before a radar's plots of the bucket is expired before those plots are
   offered to it, whether or not the radar delivered plots in the buckets between.
+- **OA-TRK-304** A free anonymous plot that gates with a track made earlier in the same bucket, and
+  whose radar has taken no plot of that track in the plot's scan, starts or joins no candidate
+  (`stale_plots_skipped`): association ran before the track existed. A plot of a scan the track has
+  taken a plot of the radar in is another aircraft's and is a hit as before.
+- **OA-TRK-305** Two radar-only aircraft close together (in formation, or on parallel lines one nautical
+  mile apart) that both radars see from the first scan end as two live tracks, never merged, each
+  updated to the end; the parallel pair's tracks each keep one aircraft's plots.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

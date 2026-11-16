@@ -222,6 +222,11 @@ pub const INIT_CELL_M: f64 = 12_000.0;
 /// candidate is not tested in that bucket and is counted.
 pub const INIT_WIDE_MAX: usize = 1_024;
 
+/// Limit: tracks initiation makes in one bucket that later radars' initiation checks free plots
+/// against, 256 (a bucket is a second; a track takes three scans of plots to make). Past it the
+/// later tracks are not checked against, which is as before, and counted in `scratch_full`.
+pub const FRESH_MAX: usize = 256;
+
 /// A plot with a Mode S address is applied to the track of that address only if its distance
 /// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3
 /// degrees of freedom, tail about 8e-11. Far wider than the ordinary gate (an address is strong
