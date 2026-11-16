@@ -8,15 +8,36 @@ pub const AIRAC_EPOCH: (i32, u32, u32) = (2026, 1, 22);
 /// Days in one AIRAC cycle.
 pub const AIRAC_DAYS: i64 = 28;
 
-/// Days since 1970-01-01 of a proleptic Gregorian date.
-fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+/// Years `days_from_civil` accepts, inclusive.
+pub const CIVIL_YEARS: (i32, i32) = (1, 9999);
+
+fn is_leap(y: i32) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+/// Days in month `m` (1 to 12) of year `y`; `None` for another month.
+fn days_in_month(y: i32, m: u32) -> Option<u32> {
+    Some(match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + u32::from(is_leap(y)),
+        _ => return None,
+    })
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date; `None` unless the year is within
+/// [`CIVIL_YEARS`], the month is 1 to 12 and the day exists in that month.
+fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
+    if !(CIVIL_YEARS.0..=CIVIL_YEARS.1).contains(&y) || d < 1 || d > days_in_month(y, m)? {
+        return None;
+    }
     let y = i64::from(y) - i64::from(m <= 2);
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let mp = (i64::from(m) + 9) % 12;
     let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// The year of a day count (days since 1970-01-01).
@@ -39,23 +60,65 @@ pub fn airac_cycle(yyyymmdd: u32) -> Option<u32> {
         (yyyymmdd / 100) % 100,
         yyyymmdd % 100,
     );
-    if !(1..=12).contains(&m) || !(2000..=2099).contains(&y) {
+    if !(2000..=2099).contains(&y) {
         return None;
     }
-    let next = if m == 12 {
-        days_from_civil(y + 1, 1, 1)
-    } else {
-        days_from_civil(y, m + 1, 1)
-    };
-    if d < 1 || i64::from(d) > next - days_from_civil(y, m, 1) {
-        return None;
-    }
-    let epoch = days_from_civil(AIRAC_EPOCH.0, AIRAC_EPOCH.1, AIRAC_EPOCH.2);
-    let day = days_from_civil(y, m, d);
+    let day = days_from_civil(y, m, d)?;
+    let epoch = days_from_civil(AIRAC_EPOCH.0, AIRAC_EPOCH.1, AIRAC_EPOCH.2)?;
     let start = epoch + (day - epoch).div_euclid(AIRAC_DAYS) * AIRAC_DAYS;
     let year = year_of_days(start);
-    let jan1 = days_from_civil(i32::try_from(year).ok()?, 1, 1);
+    let jan1 = days_from_civil(i32::try_from(year).ok()?, 1, 1)?;
     let first = epoch + (jan1 - epoch + AIRAC_DAYS - 1).div_euclid(AIRAC_DAYS) * AIRAC_DAYS;
     let release = (start - first) / AIRAC_DAYS + 1;
     u32::try_from((year - 2000) * 100 + release).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-ASP-078
+    #[test]
+    fn days_from_civil_matches_known_dates_and_refuses_impossible_ones() {
+        for (y, m, d, days) in [
+            (1970, 1, 1, 0),
+            (1969, 12, 31, -1),
+            (2000, 2, 29, 11_016),
+            (2000, 3, 1, 11_017),
+            (2024, 2, 29, 19_782),
+            (2026, 1, 22, 20_475),
+            (2026, 10, 29, 20_755),
+            (1, 1, 1, -719_162),
+            (9999, 12, 31, 2_932_896),
+            (1900, 3, 1, -25_508),
+        ] {
+            assert_eq!(days_from_civil(y, m, d), Some(days), "{y}-{m}-{d}");
+        }
+        for (y, m, d) in [
+            (1900, 2, 29),
+            (2100, 2, 29),
+            (2023, 2, 29),
+            (2026, 4, 31),
+            (2026, 0, 1),
+            (2026, 13, 1),
+            (2026, 1, 0),
+            (2026, 1, 32),
+            (0, 1, 1),
+            (10_000, 1, 1),
+            (-5, 6, 1),
+            (i32::MAX, 1, 1),
+        ] {
+            assert_eq!(days_from_civil(y, m, d), None, "{y}-{m}-{d}");
+        }
+    }
+
+    // REQ: OA-ASP-078
+    #[test]
+    fn airac_cycle_refuses_dates_that_do_not_exist() {
+        assert_eq!(airac_cycle(20_261_029), Some(2611));
+        assert_eq!(airac_cycle(20_260_431), None);
+        assert_eq!(airac_cycle(20_260_229), None);
+        assert!(airac_cycle(20_240_229).is_some());
+        assert_eq!(airac_cycle(20_261_300), None);
+    }
 }

@@ -50,6 +50,12 @@ pub const ARC_CHORD_M: f64 = 0.2;
 const PARALLEL_STEP_M: f64 = 1_000.0;
 /// Most points of one densified arc.
 const MAX_ARC_POINTS: usize = 20_000;
+/// Most sample points one boundary may produce (OA-ASP-074); a boundary that would need more is
+/// refused before any point is made.
+pub const MAX_BOUNDARY_SAMPLES: usize = 1 << 20;
+/// Most edge tests one [`samples_touch_area`] call may make (samples times the area's edges,
+/// dense edges and vertices); a call that would pass it is refused before any test is made.
+pub const MAX_TOUCH_WORK: u64 = 1 << 34;
 /// How far an arc's coded radius may differ from the distance between its centre and either
 /// end before the build reports the volume, metres. The radius is coded in tenths of a
 /// nautical mile (ARINC 424 cols 71-74), so rounding alone moves it by up to 0.05 NM
@@ -464,8 +470,32 @@ pub fn edge_samples(
     b: LatLon,
     step_m: f64,
 ) -> Result<Vec<LatLon>, GeoError> {
+    let mut remaining = MAX_BOUNDARY_SAMPLES;
+    edge_samples_within(ell, a, b, step_m, &mut remaining)
+}
+
+/// The error of a boundary that needs more than [`MAX_BOUNDARY_SAMPLES`] points.
+fn over_sample_budget() -> GeoError {
+    GeoError::BadParameter("boundary sample count exceeds the work budget")
+}
+
+/// Takes `n` points from `remaining`, or refuses.
+fn take_samples(remaining: &mut usize, n: usize) -> Result<(), GeoError> {
+    *remaining = remaining.checked_sub(n).ok_or_else(over_sample_budget)?;
+    Ok(())
+}
+
+/// [`edge_samples`], drawing its point count from `remaining` before making any point.
+fn edge_samples_within(
+    ell: &Ellipsoid,
+    a: LatLon,
+    b: LatLon,
+    step_m: f64,
+    remaining: &mut usize,
+) -> Result<Vec<LatLon>, GeoError> {
     let inv = ell.inverse(a, b)?;
     let n = ((inv.distance_m / step_m).ceil() as usize).clamp(1, 10_000);
+    take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     out.push(a);
     for i in 1..n {
@@ -479,10 +509,16 @@ pub fn edge_samples(
 
 /// Samples of a ring joined by geodesics (closing edge included).
 pub fn ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, GeoError> {
+    ring_samples_at(ell, ring, SAMPLE_STEP_M)
+}
+
+/// The points of a ring's geodesic edges `step_m` apart, within the sample budget.
+fn ring_samples_at(ell: &Ellipsoid, ring: &[LatLon], step_m: f64) -> Result<Vec<LatLon>, GeoError> {
     let mut out = Vec::new();
+    let mut remaining = MAX_BOUNDARY_SAMPLES;
     for (i, a) in ring.iter().enumerate() {
         let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
-        out.extend(edge_samples(ell, *a, b, SAMPLE_STEP_M)?);
+        out.extend(edge_samples_within(ell, *a, b, step_m, &mut remaining)?);
     }
     Ok(out)
 }
@@ -490,12 +526,7 @@ pub fn ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, Geo
 /// Samples of a ring joined by geodesics, dense enough for exact edge tests (closing edge
 /// included): the points are [`DENSE_STEP_M`] apart.
 pub fn dense_ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, GeoError> {
-    let mut out = Vec::new();
-    for (i, a) in ring.iter().enumerate() {
-        let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
-        out.extend(edge_samples(ell, *a, b, DENSE_STEP_M)?);
-    }
-    Ok(out)
+    ring_samples_at(ell, ring, DENSE_STEP_M)
 }
 
 /// Points along the rhumb line from `a` to `b`, from `a` up to but not including `b`, at most
@@ -505,9 +536,11 @@ fn rhumb_samples(
     a: LatLon,
     b: LatLon,
     step_m: f64,
+    remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
     let inv = ell.rhumb_inverse(a, b)?;
     let n = ((inv.distance_m / step_m).ceil() as usize).clamp(1, 10_000);
+    take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     out.push(a);
     for i in 1..n {
@@ -536,10 +569,12 @@ fn arc_samples(
     radius_m: f64,
     from_deg: f64,
     sweep_deg: f64,
+    remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
     let r = radius_m.max(2.0 * ARC_CHORD_M);
     let max_step_deg = (2.0 * (1.0 - ARC_CHORD_M / r).acos()).to_degrees();
     let n = ((sweep_deg.abs() / max_step_deg).ceil() as usize).clamp(1, MAX_ARC_POINTS);
+    take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let brg = from_deg + sweep_deg * i as f64 / n as f64;
@@ -571,18 +606,19 @@ fn arc_sweep(
 pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, GeoError> {
     use crate::model::via;
     let mut out = Vec::new();
+    let mut remaining = MAX_BOUNDARY_SAMPLES;
     for (i, s) in segs.iter().enumerate() {
         let next = segs.get((i + 1) % segs.len()).and_then(|n| n.pos);
         match s.via {
             via::CIRCLE => {
                 if let Some(c) = s.centre {
-                    out.extend(arc_samples(ell, c, s.radius_m, 0.0, 360.0)?);
+                    out.extend(arc_samples(ell, c, s.radius_m, 0.0, 360.0, &mut remaining)?);
                 }
             }
             via::ARC_CW | via::ARC_CCW => {
                 if let (Some(a), Some(b), Some(c)) = (s.pos, next, s.centre) {
                     let (from, sweep) = arc_sweep(ell, s.via, c, a, b)?;
-                    let mut arc = arc_samples(ell, c, s.radius_m, from, sweep)?;
+                    let mut arc = arc_samples(ell, c, s.radius_m, from, sweep, &mut remaining)?;
                     // The stored start point, not the point at the coded radius on its bearing.
                     if let Some(first) = arc.first_mut() {
                         *first = a;
@@ -594,14 +630,20 @@ pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, G
             }
             via::RHUMB => {
                 if let (Some(a), Some(b)) = (s.pos, next) {
-                    out.extend(rhumb_samples(ell, a, b, DENSE_STEP_M)?);
+                    out.extend(rhumb_samples(ell, a, b, DENSE_STEP_M, &mut remaining)?);
                 } else if let Some(a) = s.pos {
                     out.push(a);
                 }
             }
             _ => {
                 if let (Some(a), Some(b)) = (s.pos, next) {
-                    out.extend(edge_samples(ell, a, b, DENSE_STEP_M)?);
+                    out.extend(edge_samples_within(
+                        ell,
+                        a,
+                        b,
+                        DENSE_STEP_M,
+                        &mut remaining,
+                    )?);
                 } else if let Some(a) = s.pos {
                     out.push(a);
                 }
@@ -720,8 +762,26 @@ fn polyline_meets_area(area: &Area, pts: &[LatLon]) -> Result<bool, GeoError> {
 /// the buffer of a vertex of the area, or some vertex of the area lies inside the outline (a
 /// volume that encloses the area).
 pub fn samples_touch_area(area: &Area, samples: &[LatLon]) -> Result<bool, GeoError> {
+    samples_touch_area_within(area, samples, MAX_TOUCH_WORK)
+}
+
+/// [`samples_touch_area`] with its work budget given: the edge tests it would make are counted
+/// from the sizes first, and a call over `max_work` is refused before any test.
+pub fn samples_touch_area_within(
+    area: &Area,
+    samples: &[LatLon],
+    max_work: u64,
+) -> Result<bool, GeoError> {
     if samples.is_empty() {
         return Ok(false);
+    }
+    let per_sample =
+        area.edges.len() + area.dense.len() + area.rings.iter().map(Vec::len).sum::<usize>();
+    let work = (samples.len() as u64).saturating_mul(per_sample as u64);
+    if work > max_work {
+        return Err(GeoError::BadParameter(
+            "boundary against area tests exceed the work budget",
+        ));
     }
     if let Some(b) = area.bbox {
         let (mut lo_la, mut hi_la) = (f64::INFINITY, f64::NEG_INFINITY);

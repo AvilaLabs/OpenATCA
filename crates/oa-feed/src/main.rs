@@ -390,7 +390,7 @@ fn print_summary(feed: &str, h: &FeedHealth) {
     let now = now_ns();
     println!(
         "t={} feed={feed} {}",
-        utc_iso(now.div_euclid(1_000_000_000)),
+        utc_iso(now.div_euclid(1_000_000_000)).unwrap_or_else(|| "unrepresentable".to_string()),
         format_summary(h, now)
     );
 }

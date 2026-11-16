@@ -569,3 +569,40 @@ fn a_ring_box_holds_the_bulge_of_its_edges_and_wraps_over_the_antimeridian() {
     assert!(ring_bbox(&ell, &[ll(0.0, 0.0), ll(0.0, 100.0), ll(10.0, -160.0)]).is_none());
     assert!(ring_bbox(&ell, &[ll(81.0, 0.0), ll(81.0, 10.0), ll(82.0, 5.0)]).is_none());
 }
+
+// REQ: OA-ASP-074
+#[test]
+fn a_boundary_needing_more_samples_than_the_budget_is_refused() {
+    use oa_airspace::model::via;
+    let ell = wgs84();
+    // 300 edges of about 20,000 km each: 4,000 dense points apiece, over a million in all.
+    let ring: Vec<LatLon> = (0..300)
+        .map(|i| {
+            ll(
+                if i % 2 == 0 { 10.0 } else { -10.0 },
+                if i % 2 == 0 { 0.0 } else { 179.0 },
+            )
+        })
+        .collect();
+    assert!(dense_ring_samples(&ell, &ring).is_err());
+    assert!(ring_samples(&ell, &ring).is_ok());
+    // 400 circles of 400 km radius: about 3,200 points apiece.
+    let circle = SegIn {
+        via: via::CIRCLE,
+        pos: None,
+        centre: Some(ll(42.0, -88.0)),
+        radius_m: 400_000.0,
+    };
+    assert!(segment_samples(&ell, &vec![circle; 400]).is_err());
+    assert!(segment_samples(&ell, &vec![circle; 10]).is_ok());
+}
+
+// REQ: OA-ASP-074
+#[test]
+fn boundary_tests_past_the_work_budget_are_refused_before_any_test() {
+    let area = build_area(vec![square()], 0.0).expect("area");
+    let pts = vec![ll(50.0, 0.0); 10];
+    // Ten samples against the square's edges, dense edges and vertices is more than 100 tests.
+    assert!(samples_touch_area_within(&area, &pts, 100).is_err());
+    assert_eq!(samples_touch_area_within(&area, &pts, 1 << 20), Ok(false));
+}

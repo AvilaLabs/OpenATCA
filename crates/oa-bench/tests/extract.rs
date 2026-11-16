@@ -479,3 +479,82 @@ fn sfdps_messages_and_fields_refused_are_counted_by_reason() {
     assert!(count_of(&leg, "SFDPS field errors in kept rows") >= 1);
     assert!(count_of(&leg, "SFDPS field errors, field ") >= 1);
 }
+
+fn reason(leg: &oa_bench::legacy::Legacy, label: &str) -> u64 {
+    leg.counts.reasons.get(label).copied().unwrap_or(0)
+}
+
+// REQ: OA-BENCH-129
+#[test]
+fn sfdps_rows_refused_at_the_flight_table_are_counted_by_reason() {
+    let mut leg = new_legacy();
+    leg.limits = Limits {
+        flights: 1,
+        ..Limits::default()
+    };
+    let mut r = new_reader().unwrap();
+    let doc = sfdps(&format!(
+        "{}{}{}",
+        th(
+            GUFI_A,
+            "2030-01-02T03:00:05.250Z",
+            "2030-01-02T03:00:04Z",
+            false,
+            ""
+        ),
+        th(
+            GUFI_B,
+            "2030-01-02T03:00:17.000Z",
+            "2030-01-02T03:00:16Z",
+            false,
+            ""
+        ),
+        th(
+            GUFI_B,
+            "2030-01-02T03:00:27.000Z",
+            "2030-01-02T03:00:26Z",
+            false,
+            ""
+        ),
+    ));
+    ingest_sfdps(&mut leg, &mut r, doc.as_bytes(), NO_TIME);
+    assert_eq!(leg.th.flight.len(), 1);
+    assert_eq!(
+        reason(&leg, "SFDPS rows dropped, reason flight table full"),
+        2,
+        "{:?}",
+        leg.counts.reasons
+    );
+}
+
+// REQ: OA-BENCH-129
+#[test]
+fn tbfm_values_without_a_time_are_counted() {
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    let doc = TBFM_DOC.replace("<eta_rwy>2030-01-02T03:50:00Z</eta_rwy>", "");
+    ingest_tbfm(&mut leg, &mut r, doc.as_bytes());
+    assert_eq!(leg.tbfm.kind.len(), 3);
+    assert_eq!(
+        reason(&leg, "TBFM values dropped, reason time absent"),
+        1,
+        "{:?}",
+        leg.counts.reasons
+    );
+}
+
+// REQ: OA-BENCH-129
+#[test]
+fn tfms_times_that_are_not_estimates_are_counted() {
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    let doc = tfms_doc().replace(r#"etdType="ESTIMATED""#, r#"etdType="SCHEDULED""#);
+    ingest_tfms(&mut leg, &mut r, doc.as_bytes());
+    assert_eq!(leg.tfms.kind.len(), 1);
+    assert_eq!(
+        reason(&leg, "TFMS times dropped, reason type is not ESTIMATED"),
+        1,
+        "{:?}",
+        leg.counts
+    );
+}

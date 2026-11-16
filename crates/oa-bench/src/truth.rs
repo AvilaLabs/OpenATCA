@@ -41,16 +41,19 @@ pub enum NoTruth {
     TooUncertain,
     /// No leg of the aircraft covers the time: before its first report, after its last, or between legs.
     OutsideLegs,
+    /// The state carries an altitude or vertical rate that is not a finite number in range.
+    NotFinite,
 }
 
 /// Number of [`NoTruth`] values.
-pub const NO_TRUTH_COUNT: usize = 4;
+pub const NO_TRUTH_COUNT: usize = 5;
 /// Display names, indexed by `NoTruth as usize`.
 pub const NO_TRUTH_NAMES: [&str; NO_TRUTH_COUNT] = [
     "unknown aircraft",
     "no nearby report",
     "truth too uncertain",
     "outside legs",
+    "non-finite truth value",
 ];
 
 /// One truth leg: a continuous stretch of one aircraft.

@@ -91,9 +91,11 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
     let ev = &r.events;
     for row in 0..ev.len {
         let Some(&gufi) = ev.gufi.get(row) else {
+            leg.counts.note(DROP_SFDPS_NO_GUFI.into(), 1);
             continue;
         };
         let Some(f) = flight_ix(leg, gufi) else {
+            leg.counts.note(DROP_SFDPS_FLIGHT_FULL.into(), 1);
             continue;
         };
         let fi = f as usize;
@@ -118,12 +120,16 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
                 *slot = *c;
             }
         }
+        if row_has(ev, row, Field::Position) && !row_has(ev, row, Field::PositionTime) {
+            leg.counts.note(DROP_SFDPS_NO_POS_TIME.into(), 1);
+        }
         if row_has(ev, row, Field::Position) && row_has(ev, row, Field::PositionTime) {
             let (Some(&lat), Some(&lon), Some(&pt)) = (
                 ev.lat_e7.get(row),
                 ev.lon_e7.get(row),
                 ev.pos_time_ms.get(row),
             ) else {
+                leg.counts.note(DROP_SFDPS_NO_POS_COLUMN.into(), 1);
                 continue;
             };
             let alt = if row_has(ev, row, Field::ReportedAlt) {
@@ -182,6 +188,16 @@ fn note_rejects(c: &mut Counts, feed: &str, fields: &[u32], kinds: &[u32], names
     }
 }
 
+/// Report labels of rows ingest drops, one reason each (E6).
+const DROP_SFDPS_NO_GUFI: &str = "SFDPS rows dropped, reason no GUFI column entry";
+const DROP_SFDPS_FLIGHT_FULL: &str = "SFDPS rows dropped, reason flight table full";
+const DROP_SFDPS_NO_POS_TIME: &str = "SFDPS position rows without a position time (no TH sample)";
+const DROP_SFDPS_NO_POS_COLUMN: &str = "SFDPS rows dropped, reason position column entry missing";
+const DROP_TBFM_NO_ROW: &str = "TBFM rows dropped, reason row not readable";
+const DROP_TBFM_NO_TIME: &str = "TBFM values dropped, reason time absent";
+const DROP_TFMS_NO_ROW: &str = "TFMS rows dropped, reason row not readable";
+const DROP_TFMS_NOT_ESTIMATE: &str = "TFMS times dropped, reason type is not ESTIMATED";
+
 fn tb_time(t: i64) -> Option<i64> {
     (t != TBFM_NO_TIME).then_some(t)
 }
@@ -214,6 +230,7 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     let rows = &r.tbfm_rows;
     for i in 0..oa_tbfm::rows_len(rows) {
         let Some(row) = oa_tbfm::row_at(rows, i) else {
+            leg.counts.note(DROP_TBFM_NO_ROW.into(), 1);
             continue;
         };
         let entries: [(u8, usize, bool); 4] = [
@@ -237,6 +254,7 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
                 row.sta_ms.get(p)
             };
             let Some(time) = t.copied().and_then(tb_time) else {
+                leg.counts.note(DROP_TBFM_NO_TIME.into(), 1);
                 continue;
             };
             let issue = tb_time(row.msg_ms).unwrap_or(NO_TIME);
@@ -285,6 +303,7 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     }
     for i in 0..oa_tfms::flights_len(&r.tfms_rows.flights) {
         let Some(f) = oa_tfms::flight_at(&r.tfms_rows.flights, i) else {
+            leg.counts.note(DROP_TFMS_NO_ROW.into(), 1);
             continue;
         };
         let issue = if f.src_ms == TFMS_NO_TIME {
@@ -301,6 +320,11 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             time_ms: 0,
             issue_ms: issue,
         };
+        for (ms, ty) in [(f.eta_ms, f.eta_type), (f.etd_ms, f.etd_type)] {
+            if ms != TFMS_NO_TIME && ty != ttype::ESTIMATED {
+                leg.counts.note(DROP_TFMS_NOT_ESTIMATE.into(), 1);
+            }
+        }
         if f.eta_ms != TFMS_NO_TIME && f.eta_type == ttype::ESTIMATED {
             push_tfms(
                 leg,

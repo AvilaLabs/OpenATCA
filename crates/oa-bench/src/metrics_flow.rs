@@ -377,7 +377,13 @@ pub struct SwapConfig {
     pub min_run: usize,
     /// A sample can only be a mismatch if its own error exceeds this, metres.
     pub min_own_error_m: f64,
+    /// Most truth legs looked at over one call (each tested sample looks at every leg); a sample
+    /// that would pass it is refused and counted, not tested.
+    pub max_leg_visits: u64,
 }
+
+/// Default of [`SwapConfig::max_leg_visits`].
+pub const MAX_SWAP_LEG_VISITS: u64 = 1 << 34;
 
 impl Default for SwapConfig {
     fn default() -> SwapConfig {
@@ -385,6 +391,7 @@ impl Default for SwapConfig {
             stride: 4,
             min_run: 3,
             min_own_error_m: 300.0,
+            max_leg_visits: MAX_SWAP_LEG_VISITS,
         }
     }
 }
@@ -392,7 +399,10 @@ impl Default for SwapConfig {
 /// T9: association errors. A tested sample is a mismatch when the ERAM position is closer to
 /// another aircraft's truth than to its own truth (and its own error exceeds
 /// [`SwapConfig::min_own_error_m`]); `min_run` consecutive mismatches among a flight's tested
-/// samples are one association error, listed as a case.
+/// samples are one association error, listed as a case. "Another aircraft" is the one nearest to
+/// the ERAM position, and of two at exactly the same distance the lower address, so the result
+/// does not depend on the order of the legs; samples with such a tie are counted. This measures
+/// nearness, not identity.
 pub fn t9_association_errors(
     leg: &Legacy,
     p: &PairTable,
@@ -417,6 +427,9 @@ pub fn t9_keyed(
     let mut cases: Vec<KeyedCase> = Vec::new();
     let mut r = new_result("T9", "association errors (track swaps)", "count");
     let (mut tested, mut mism, mut events, mut flights) = (0u64, 0u64, 0u64, 0u64);
+    let (mut tied, mut refused, mut visits, mut not_finite) = (0u64, 0u64, 0u64, 0u64);
+    let mut no_own_truth = 0u64;
+    let leg_count = truth.legs.len() as u64;
     let mut i = 0usize;
     let n = p.t_ms.len();
     while i < n {
@@ -461,24 +474,54 @@ pub fn t9_keyed(
                 (Some(c), Some(a)) => f64::from(c).hypot(f64::from(a)),
                 _ => match (truth.query)(own, t) {
                     Ok(s) => dist_m(s.lat, s.lon, lat, lon),
-                    Err(_) => continue,
+                    Err(_) => {
+                        no_own_truth += 1;
+                        continue;
+                    }
                 },
             };
+            if !d_own.is_finite() {
+                not_finite += 1;
+                flush(&mut run, &mut events, &mut cases);
+                continue;
+            }
+            let search = d_own > cfg.min_own_error_m;
+            if search && visits.saturating_add(leg_count) > cfg.max_leg_visits {
+                refused += 1;
+                flush(&mut run, &mut events, &mut cases);
+                continue;
+            }
             tested += 1;
             let mut best: Option<(u32, f64)> = None;
-            if d_own > cfg.min_own_error_m {
+            let mut tie = false;
+            if search {
+                visits += leg_count;
                 for l in truth.legs {
                     if l.addr == own || t < l.start_ms || t > l.end_ms {
                         continue;
                     }
                     if let Ok(s) = (truth.query)(l.addr, t) {
                         let d = dist_m(s.lat, s.lon, lat, lon);
-                        if best.is_none_or(|(_, bd)| d < bd) {
-                            best = Some((l.addr, d));
+                        if !d.is_finite() {
+                            not_finite += 1;
+                            continue;
+                        }
+                        match best {
+                            None => best = Some((l.addr, d)),
+                            Some((ba, bd)) => {
+                                if d < bd {
+                                    best = Some((l.addr, d));
+                                    tie = false;
+                                } else if d == bd && l.addr != ba {
+                                    tie = true;
+                                    best = Some((l.addr.min(ba), d));
+                                }
+                            }
                         }
                     }
                 }
             }
+            tied += u64::from(tie);
             match best {
                 Some((a, d)) if d < d_own => {
                     mism += 1;
@@ -494,6 +537,13 @@ pub fn t9_keyed(
     r.scalars.push(("samples_tested".into(), tested as f64));
     r.scalars.push(("mismatch_samples".into(), mism as f64));
     r.scalars.push(("association_errors".into(), events as f64));
+    r.scalars.push(("nearest_tied_samples".into(), tied as f64));
+    r.scalars
+        .push(("samples_refused_work_budget".into(), refused as f64));
+    r.scalars
+        .push(("samples_without_own_truth".into(), no_own_truth as f64));
+    r.scalars
+        .push(("distances_not_finite".into(), not_finite as f64));
     r.notes.push(format!(
         "every {}th paired sample; {} consecutive mismatches make an error; own error above {} m",
         cfg.stride, cfg.min_run, cfg.min_own_error_m

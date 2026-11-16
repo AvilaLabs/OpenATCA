@@ -403,7 +403,12 @@ impl Recorder {
     }
 
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
-        let stamp = utc_stamp(now_unix_secs);
+        let stamp = utc_stamp(now_unix_secs).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local clock is outside the years 1 to 9999; no file name can be made",
+            )
+        })?;
         let ext = match self.format {
             Format::Gzip => "oaf.gz",
             Format::Raw => "oaf",
@@ -440,20 +445,31 @@ impl Recorder {
     }
 }
 
-/// `YYYYMMDDTHHMMSSZ` for a Unix time in seconds (proleptic Gregorian, UTC).
-pub fn utc_stamp(unix_secs: i64) -> String {
-    let (y, m, d, hh, mm, ss) = utc_fields(unix_secs);
-    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}Z")
+/// Earliest Unix time [`utc_stamp`] and [`utc_iso`] accept: 0001-01-01T00:00:00Z.
+pub const UTC_MIN_SECS: i64 = -62_135_596_800;
+/// Latest Unix time they accept: 9999-12-31T23:59:59Z.
+pub const UTC_MAX_SECS: i64 = 253_402_300_799;
+
+/// `YYYYMMDDTHHMMSSZ` for a Unix time in seconds (proleptic Gregorian, UTC); `None` outside
+/// [`UTC_MIN_SECS`] to [`UTC_MAX_SECS`].
+pub fn utc_stamp(unix_secs: i64) -> Option<String> {
+    let (y, m, d, hh, mm, ss) = utc_fields(unix_secs)?;
+    Some(format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}Z"))
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time in seconds.
-pub fn utc_iso(unix_secs: i64) -> String {
-    let (y, m, d, hh, mm, ss) = utc_fields(unix_secs);
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time in seconds; `None` outside the range of [`utc_stamp`].
+pub fn utc_iso(unix_secs: i64) -> Option<String> {
+    let (y, m, d, hh, mm, ss) = utc_fields(unix_secs)?;
+    Some(format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z"))
 }
 
-/// Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-fn utc_fields(unix_secs: i64) -> (i64, i64, i64, i64, i64, i64) {
+/// Civil date and time of a Unix time (Howard Hinnant's algorithm): year 1 to 9999, month 1 to
+/// 12, day 1 to the month's length, hour 0 to 23, minute and second 0 to 59. `None` for a time
+/// outside [`UTC_MIN_SECS`] to [`UTC_MAX_SECS`].
+fn utc_fields(unix_secs: i64) -> Option<(i64, i64, i64, i64, i64, i64)> {
+    if !(UTC_MIN_SECS..=UTC_MAX_SECS).contains(&unix_secs) {
+        return None;
+    }
     let days = unix_secs.div_euclid(86_400);
     let rem = unix_secs.rem_euclid(86_400);
     let z = days + 719_468;
@@ -465,7 +481,7 @@ fn utc_fields(unix_secs: i64) -> (i64, i64, i64, i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
+    Some((y, m, d, rem / 3600, rem % 3600 / 60, rem % 60))
 }
 
 /// The summary line for a recording: files and bytes, and, when it failed, the failure, the

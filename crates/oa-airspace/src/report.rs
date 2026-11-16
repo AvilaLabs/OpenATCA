@@ -627,6 +627,13 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
         "{} coordinates stored as 1e-7 degree integers; largest rounding error {:.6} m (at {}).",
         info.rounding.pos_values, info.rounding.pos_max_m, info.rounding.pos_at
     );
+    if info.rounding.pos_unverified > 0 {
+        let _ = writeln!(
+            o,
+            "{} coordinates could not be measured (the round trip failed); they are not in the largest error above.",
+            info.rounding.pos_unverified
+        );
+    }
     let _ = writeln!(o, "Leg distances stored as whole metres; largest rounding error {:.3} m. Altitudes, courses, speeds exact.\n", info.rounding.dist_max_m);
 
     let _ = writeln!(o, "## Other findings\n");
