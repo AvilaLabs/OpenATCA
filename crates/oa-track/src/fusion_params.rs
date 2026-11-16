@@ -209,6 +209,19 @@ pub const BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_RADARS * MAX_BUCKET_PLOTS
 /// [`MAX_CANDIDATES`].
 pub const CAND_IX_MAX: usize = MAX_CANDIDATES;
 
+/// The standard reach of a candidate in initiation, metres: a candidate whose plots can lie no
+/// further than this from its predicted place (the gate radius at the longest interval of the
+/// bucket, the drift of the prediction over the bucket and the noise, with margin) is in the grid
+/// of candidates; one that can lie further is on the wide list.
+pub const INIT_STD_M: f64 = 6_000.0;
+/// Side of a cell of the grid of candidates, metres: the reach of the grid's plots (the standard
+/// reach and the noise of the plot) is within one cell either side in nearly every case.
+pub const INIT_CELL_M: f64 = 12_000.0;
+/// Limit: candidates on the wide list of one radar's initiation, 1,024 (a candidate lives at most
+/// [`RADAR_INIT_N`] scans and the wide ones are the starved: one hit, a long interval). Past it a
+/// candidate is not tested in that bucket and is counted.
+pub const INIT_WIDE_MAX: usize = 1_024;
+
 /// A plot with a Mode S address is applied to the track of that address only if its distance
 /// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3
 /// degrees of freedom, tail about 8e-11. Far wider than the ordinary gate (an address is strong

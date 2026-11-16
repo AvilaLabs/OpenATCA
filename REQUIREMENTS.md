@@ -3127,6 +3127,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   track does not widen the search of every plot. The tracks tested for a plot are every track the single
   widest window would have tested that could pass its own window. A track that finds the wide list full is
   left out of that association and counted in `wide_full`.
+- **OA-TRK-301** Initiation tests an anonymous plot against the anonymous candidates near it, found in a
+  grid of the candidates by predicted position (cells and a wide list of fixed capacity for the candidates
+  whose reach exceeds the standard one), and converts the plot once. The candidates tested for a plot are
+  every candidate the all-candidates test could pass; a candidate that finds the wide list full is not
+  tested in that bucket and is counted in `init_wide_full`; `init_tests` counts the exact tests and
+  `init_visits` the candidates the grid returned.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

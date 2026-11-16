@@ -50,7 +50,7 @@
 //! The per-key bookkeeping is two fixed-capacity hash tables (`fixed_map.rs`, [`KEY_TABLE_SLOTS`]
 //! slots each, made at start); the tracker allocates nothing after construction.
 
-use oa_geo::aeqd::{frame_new, project};
+use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
 use crate::assoc::{
     ambiguous_pairs, assigned_pairs, assoc_ambiguous, assoc_pair_of, assoc_plot_track,
@@ -59,19 +59,19 @@ use crate::assoc::{
 };
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
-    CoarseIndex,
+    point_grid_buffer, point_grid_build, point_grid_new, point_grid_query, CoarseIndex, PointGrid,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
     COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2,
-    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE,
-    KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS,
-    MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS,
-    RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX,
-    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
-    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
+    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M,
+    INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
+    MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
+    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX,
+    REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES,
+    REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
     RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
@@ -325,6 +325,10 @@ pub struct FusionStats {
     /// radar-buckets, and those refused because the list was full (left out of that association).
     pub wide_tracks_sum: u64,
     pub wide_full: u64,
+    /// Candidates the grid of initiation returned for the plots (the exact tests are `init_tests`).
+    pub init_visits: u64,
+    /// Candidates left untested for a bucket because the initiation's wide list was full.
+    pub init_wide_full: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -488,6 +492,13 @@ pub struct Fusion {
     init_free: Vec<usize>,
     init_anon: Vec<usize>,
     cand_ix: Vec<usize>,
+    /// Initiation's index of the candidates of one radar: where each is expected and how far a
+    /// plot of it can lie from there, the grid of the ones of standard reach, the others, and
+    /// the candidates of one plot ([`CAND_IX_MAX`] each, the wide list [`INIT_WIDE_MAX`]).
+    init_reach: Vec<CandReach>,
+    init_grid: PointGrid,
+    init_wide: Vec<u32>,
+    init_near: Vec<u32>,
     /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
     /// took one of its plots (a small map: entries exist only while a run is going).
     hold_run: FixedMap<(u32, u8), HoldRun>,
@@ -596,6 +607,10 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         init_free: Vec::with_capacity(RADAR_PLOTS_MAX),
         init_anon: Vec::with_capacity(RADAR_PLOTS_MAX),
         cand_ix: Vec::with_capacity(CAND_IX_MAX),
+        init_reach: Vec::with_capacity(CAND_IX_MAX),
+        init_grid: point_grid_new(CAND_IX_MAX, INIT_CELL_M),
+        init_wide: Vec::with_capacity(INIT_WIDE_MAX),
+        init_near: Vec::with_capacity(CAND_IX_MAX),
         hold_run: FixedMap::new(KEY_TABLE_SLOTS),
         hold_run_max: MAX_ASSOC_TRACKS,
         plot_scan: FixedMap::new(KEY_TABLE_SLOTS),
@@ -691,12 +706,16 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.init_free),
         of(&f.init_anon),
         of(&f.cand_ix),
+        of(&f.init_reach),
+        of(&f.init_wide),
+        of(&f.init_near),
         of(&f.pairs_buf),
         of(&f.ms_buf),
         of(&f.cands),
         of(&f.tracks),
         f.hold_run.buffer(),
         f.plot_scan.buffer(),
+        point_grid_buffer(&f.init_grid),
         f.keyinfo.buffer(),
     ]);
     v.extend(f.pairs_bufs.iter().map(of));
@@ -1994,6 +2013,83 @@ fn add_hit(c: &mut Cand, m: Measurement, label: u32, scan: i64) {
     }
 }
 
+/// Where a candidate's next plot can be, in the radar's plane (metres): none (it can gate no plot
+/// of the bucket), within `reach` of a place, or anywhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CandReach {
+    Never,
+    At(f64, f64, f64),
+    Anywhere,
+}
+
+/// Where the plots of a bucket (times `t_lo` to `t_hi`) can be, relative to the candidate `c`, in
+/// the plane of `frame` (the radar's).
+///
+/// Superset: [`cand_cost`] passes a plot at time `tp` only if its distance in the plane of the
+/// candidate's last plot from the prediction (the last plot, moved by the velocity of the last two
+/// plots for the time since the last, if there are two) is below the gate radius, which at
+/// most is the radius at the longest interval, `t_hi` less the last time, plus the noise of the
+/// last plot and of the plot. The prediction at `tp` is within the speed times `t_hi - t_lo` of
+/// the prediction at `t_lo`, which is the place returned. So a plot the candidate can gate is
+/// within `radius at t_hi + noise of the last plot + drift` of that place, plus the plot's own
+/// noise, in the plane of the candidate's last plot; the radar's plane and that one differ in
+/// distance by a fraction of a per cent over the radar's range, so a margin of 3 % and 300 m is
+/// added. A candidate with no interval to a plot of the bucket (or, with two plots, none between
+/// them) gates none, which `cand_cost` also refuses.
+fn cand_reach(c: &Cand, frame: &Frame, t_lo: i64, t_hi: i64) -> CandReach {
+    let n = usize::from(c.n);
+    let Some(last) = n.checked_sub(1).and_then(|k| c.meas.get(k)) else {
+        return CandReach::Never;
+    };
+    let secs = |ns: i64| ns as f64 / 1.0e9;
+    let dt_max = secs(t_hi.saturating_sub(last.toa_ns));
+    if t_hi < t_lo || dt_max <= 0.0 {
+        return CandReach::Never;
+    }
+    let at_last = frame_new(
+        f64::from(last.lat_e7) / 1.0e7,
+        f64::from(last.lon_e7) / 1.0e7,
+    );
+    let (offset, radius, speed) = if n >= 2 {
+        let Some(prev) = c.meas.get(n - 2) else {
+            return CandReach::Never;
+        };
+        let dtp = secs(last.toa_ns.saturating_sub(prev.toa_ns));
+        if dtp <= 0.0 {
+            return CandReach::Never;
+        }
+        let (px, py) = project(
+            &at_last,
+            f64::from(prev.lat_e7) / 1.0e7,
+            f64::from(prev.lon_e7) / 1.0e7,
+        );
+        let (vx, vy) = (-px / dtp, -py / dtp);
+        let dt_lo = secs(t_lo.saturating_sub(last.toa_ns));
+        (
+            (vx * dt_lo, vy * dt_lo),
+            CAND_SLACK_M + 0.5 * CAND_MAX_ACCEL_MPS2 * dt_max * dt_max,
+            oa_math::hypot(vx, vy),
+        )
+    } else {
+        ((0.0, 0.0), CAND_SLACK_M + CAND_MAX_SPEED_MPS * dt_max, 0.0)
+    };
+    let noise = 4.0
+        * f64::from(last.pos_cov_m2[0])
+            .max(f64::from(last.pos_cov_m2[2]))
+            .max(0.0)
+            .sqrt();
+    let Some((lat, lon)) = unproject(&at_last, offset.0, offset.1) else {
+        return CandReach::Anywhere;
+    };
+    let (x, y) = project(frame, lat, lon);
+    let reach = 1.03 * (radius + noise + speed * secs(t_hi - t_lo)) + 300.0;
+    if x.is_finite() && y.is_finite() && reach.is_finite() {
+        CandReach::At(x, y, reach)
+    } else {
+        CandReach::Anywhere
+    }
+}
+
 fn initiate(
     f: &mut Fusion,
     radar: usize,
@@ -2072,41 +2168,149 @@ fn initiate(
     ms.clear();
     let mut tests = 0usize;
     let mut capped = false;
+    // The candidates are indexed by where each is expected and how far from there a plot of this
+    // bucket can lie (see [`cand_reach`]).
+    let frame = frame_new(s.lat_deg, s.lon_deg);
+    let (mut t_lo, mut t_hi) = (i64::MAX, i64::MIN);
+    for &j in &anon {
+        if let Some(p) = plots.get(j) {
+            t_lo = t_lo.min(p.time_ns);
+            t_hi = t_hi.max(p.time_ns);
+        }
+    }
+    #[cfg(test)]
+    let all = f.brute_coarse;
+    #[cfg(not(test))]
+    let all = false;
+    let mut reach = std::mem::take(&mut f.init_reach);
+    let mut grid = std::mem::take(&mut f.init_grid);
+    let mut wide = std::mem::take(&mut f.init_wide);
+    let mut near = std::mem::take(&mut f.init_near);
+    reach.clear();
+    wide.clear();
+    for (ci, &i) in cand_ix.iter().enumerate() {
+        let r = f
+            .cands
+            .get(i)
+            .map_or(CandReach::Never, |c| cand_reach(c, &frame, t_lo, t_hi));
+        // The grid takes the candidates of standard reach, the wide list the rest, as long as it
+        // has room: the one that finds it full is not tested in this bucket.
+        let r = match r {
+            CandReach::At(_, _, w) if w > INIT_STD_M => {
+                if wide.len() < INIT_WIDE_MAX && push_within(&mut wide, ci as u32) {
+                    r
+                } else {
+                    f.stats.init_wide_full += 1;
+                    CandReach::Never
+                }
+            }
+            CandReach::Anywhere => {
+                if wide.len() < INIT_WIDE_MAX && push_within(&mut wide, ci as u32) {
+                    r
+                } else {
+                    f.stats.init_wide_full += 1;
+                    CandReach::Never
+                }
+            }
+            r => r,
+        };
+        push_within(&mut reach, r);
+    }
+    point_grid_build(&mut grid, reach.len(), |ci| match reach.get(ci) {
+        Some(CandReach::At(x, y, w)) if *w <= INIT_STD_M => Some((*x, *y)),
+        _ => None,
+    });
     'plots: for (a, &j) in anon.iter().enumerate() {
         let Some(p) = plots.get(j) else { continue };
         let Some(scan) = scan_of(f, radar, p.time_ns) else {
             continue;
         };
-        for (ci, &i) in cand_ix.iter().enumerate() {
+        // A plot with Mode C converts the same for every candidate: once, and the candidates it can
+        // reach are those near it (if its noise is too wide for the grid, all of them).
+        let own = (p.alt_ft != NONE_ALT).then(|| plot_convert(&g, &s, p, &bias, None, NO_ADDR));
+        let (conv_own, window) = match &own {
+            Some(Ok(c)) => {
+                let q = project(&frame, c.geo.lat_deg, c.geo.lon_deg);
+                let noise = 4.0
+                    * f64::from(c.m.pos_cov_m2[0])
+                        .max(f64::from(c.m.pos_cov_m2[2]))
+                        .max(0.0)
+                        .sqrt();
+                (Some(c.m), Some((q, 1.03 * noise)))
+            }
+            // The conversion fails for every candidate alike.
+            Some(Err(_)) => continue,
+            None => (None, None),
+        };
+        near.clear();
+        let nearby = !all
+            && window.is_some_and(|(q, noise)| {
+                point_grid_query(&grid, &mut near, q.0, q.1, INIT_STD_M + noise)
+            });
+        if nearby {
+            for &w in &wide {
+                push_within(&mut near, w);
+            }
+            near.sort_unstable();
+        } else {
+            near.clear();
+            near.extend(0..cand_ix.len() as u32);
+        }
+        f.stats.init_visits += near.len() as u64;
+        for &ci in &near {
+            let ci = ci as usize;
+            let Some(&i) = cand_ix.get(ci) else { continue };
             let Some(c) = f.cands.get(i) else {
                 continue;
             };
+            // A candidate the plot cannot reach (it is further than the candidate's reach and the
+            // plot's noise): the exact test would refuse it.
+            match (reach.get(ci), window) {
+                _ if all => {}
+                (Some(CandReach::Never), _) => continue,
+                (Some(CandReach::At(x, y, w)), Some((q, noise)))
+                    if oa_math::hypot(q.0 - x, q.1 - y) > w + noise =>
+                {
+                    continue;
+                }
+                _ => {}
+            }
             if tests >= MAX_BUCKET_TESTS || pairs.len() >= MAX_BUCKET_PAIRS {
                 capped = true;
                 break 'plots;
             }
             tests += 1;
             f.stats.init_tests += 1;
-            // The plot's height: its Mode C altitude, else the candidate's last altitude.
-            let last_alt = c
-                .meas
-                .get(usize::from(c.n).saturating_sub(1))
-                .map(|m| m.alt_ft)
-                .filter(|&a| a != NONE_I32);
-            let h = last_alt.map(|a| (f64::from(a) * FT_M, 15.0));
-            let Ok(conv) = plot_convert(&g, &s, p, &bias, h, NO_ADDR) else {
-                continue;
+            let m = match conv_own {
+                Some(m) => m,
+                None => {
+                    // The plot's height: the candidate's last altitude.
+                    let last_alt = c
+                        .meas
+                        .get(usize::from(c.n).saturating_sub(1))
+                        .map(|m| m.alt_ft)
+                        .filter(|&a| a != NONE_I32);
+                    let h = last_alt.map(|a| (f64::from(a) * FT_M, 15.0));
+                    let Ok(conv) = plot_convert(&g, &s, p, &bias, h, NO_ADDR) else {
+                        continue;
+                    };
+                    conv.m
+                }
             };
-            if let Some(cost) = cand_cost(c, &conv.m, scan) {
+            if let Some(cost) = cand_cost(c, &m, scan) {
                 pairs.push(Pair {
                     track: ci as u32,
                     plot: a as u32,
                     cost,
                 });
-                ms.push(conv.m);
+                ms.push(m);
             }
         }
     }
+    f.init_reach = reach;
+    f.init_grid = grid;
+    f.init_wide = wide;
+    f.init_near = near;
     if capped {
         f.stats.bucket_work_capped += 1;
         f.stats.init_capped += 1;
@@ -3266,6 +3470,8 @@ mod tests {
         crate::types::output_hash_into(&mut h, out);
         let mut st = *fusion_stats(f);
         st.coarse_visits = 0;
+        st.init_tests = 0;
+        st.init_visits = 0;
         (
             st,
             fusion_assign_log(f).clone(),
@@ -4504,5 +4710,92 @@ mod tests {
         assert_eq!(st.wide_tracks_sum, 3, "{st:?}");
         assert_eq!(st.wide_full, 5, "{st:?}");
         assert_eq!(st.scratch_full, 0, "{st:?}");
+    }
+
+    /// `n` radar-only aircraft over a square of `side_m`, straight at 100 to 250 m/s.
+    fn many_lines(n: usize, side_m: f64, seed: u64) -> Vec<Line> {
+        let mut rng = Rng::from_seed(seed);
+        (0..n)
+            .map(|i| {
+                let (dir, speed) = (
+                    std::f64::consts::TAU * rng.unit(),
+                    100.0 + 150.0 * rng.unit(),
+                );
+                Line {
+                    x0: side_m * (rng.unit() - 0.5),
+                    y0: side_m * (rng.unit() - 0.5),
+                    vx: speed * dir.cos(),
+                    vy: speed * dir.sin(),
+                    alt_ft: 15_000 + 100 * (rng.unit() * 200.0) as i32,
+                    label: 0xB00000 + i as u32,
+                }
+            })
+            .collect()
+    }
+
+    // REQ: OA-TRK-301
+    #[test]
+    fn initiation_tests_the_candidates_near_a_plot_not_all_of_them() {
+        let lines = many_lines(150, 200_000.0, 21);
+        let plots = plots_of(&lines, 10, 5, false);
+        let mut f = make_fusion_sites(&[SITE], 1_000);
+        run(&mut f, &plots, &[]);
+        let st = *fusion_stats(&f);
+        assert!(st.cand_confirmed > 100, "{st:?}");
+        // Every plot against every candidate would be 150 x 150 a scan (about 160,000 here).
+        assert!(st.init_tests < 2_000, "{st:?}");
+    }
+
+    // REQ: OA-TRK-301
+    #[test]
+    fn the_candidate_grid_gives_the_initiations_of_testing_every_candidate() {
+        // Two radars, 120 aircraft crossing the same sky (a few per second a scan on each), some
+        // plots without Mode C, some clutter, some aircraft that vanish: the tracks made and the
+        // plots they took are the same as when every plot is tested against every candidate.
+        for seed in 0..4u64 {
+            let run_once = |brute: bool| {
+                let lines = many_lines(120, 160_000.0, 30 + seed);
+                let mut pa = plots_of_site(&SITE, &lines, 9, 40 + seed, false);
+                let mut pb = plots_of_site(&SITE_EAST, &lines, 9, 50 + seed, false);
+                let mut rng = Rng::from_seed(60 + seed);
+                for (k, p) in pa.iter_mut().chain(pb.iter_mut()).enumerate() {
+                    if k % 11 == 0 {
+                        p.alt_ft = NONE_ALT;
+                    }
+                }
+                for k in 0..60i64 {
+                    for (r, v) in [&mut pa, &mut pb].into_iter().enumerate() {
+                        v.push(RadarPlot {
+                            time_ns: k * 700_000_000 + r as i64 * 3_000_000,
+                            range_m: 3_000.0 + 150_000.0 * rng.unit(),
+                            az_deg: 360.0 * rng.unit(),
+                            alt_ft: 10_000 + 100 * (rng.unit() * 250.0) as i32,
+                            addr: NO_ADDR,
+                            label: 9_000 + k as u32,
+                            mode_a: NONE_CODE,
+                        });
+                    }
+                }
+                // Aircraft that vanish: the plots of the last scans of some are dropped.
+                pa.retain(|p| !(p.label % 5 == 0 && p.time_ns > 20_000_000_000));
+                pa.sort_by_key(|p| p.time_ns);
+                pb.sort_by_key(|p| p.time_ns);
+                let mut f = make_fusion_sites(&[SITE, SITE_EAST], 1_000);
+                f.brute_coarse = brute;
+                let out = run_two(&mut f, &pa, &pb);
+                (outcome(&f, &out), fusion_stats(&f).init_tests)
+            };
+            let (grid, grid_tests) = run_once(false);
+            let (brute, brute_tests) = run_once(true);
+            assert!(grid.0.cand_confirmed > 60, "seed {seed}: {:?}", grid.0);
+            assert!(grid.0.cand_joined > 100, "seed {seed}: {:?}", grid.0);
+            assert_eq!(grid.0, brute.0, "seed {seed}");
+            assert_eq!(grid.1, brute.1, "seed {seed}");
+            assert_eq!(grid.2, brute.2, "seed {seed}");
+            assert!(
+                grid_tests * 3 < brute_tests,
+                "seed {seed}: {grid_tests} {brute_tests}"
+            );
+        }
     }
 }
