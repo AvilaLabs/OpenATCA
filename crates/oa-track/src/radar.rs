@@ -79,6 +79,12 @@ pub const MAX_PLOT_RANGE_M: f64 = 600_000.0;
 pub const MIN_PLOT_RANGE_M: f64 = 500.0;
 /// The conversion's covariance uses `cos(E)` no smaller than this (E about 87 degrees).
 pub const MIN_COS_ELEV: f64 = 0.05;
+/// A plot covariance whose determinant is under this fraction of the squared trace is a line (one
+/// axis a hundredth of the other or less): near the vertical the range error moves the point along
+/// the azimuth only, and the single-precision check of the tracker would refuse it. Its diagonal
+/// is raised by this fraction of the trace, so the small axis is about a hundredth of the large
+/// (14 m against 1.4 km at 12.5 km height), well above single-precision rounding (6e-8).
+pub const COV_LINE_RATIO: f64 = 1.0e-4;
 /// Absent altitude of a plot.
 pub const NONE_ALT: i32 = i32::MIN;
 /// Absent Mode A code of a plot.
@@ -537,7 +543,7 @@ pub fn plot_convert(
         + bias.var_range_m2;
     let sa = s.sigma_az_deg.to_radians();
     let var_az = sa * sa + bias.var_az_deg2 * oa_math::powi(core::f64::consts::PI / 180.0, 2);
-    let cov = polar_cov_local(
+    let mut cov = polar_cov_local(
         g,
         rho,
         az,
@@ -548,6 +554,11 @@ pub fn plot_convert(
         var_az,
         sigma_h * sigma_h,
     );
+    let trace = cov[0] + cov[2];
+    if cov[0] * cov[2] - cov[1] * cov[1] < COV_LINE_RATIO * trace * trace {
+        cov[0] += COV_LINE_RATIO * trace;
+        cov[2] += COV_LINE_RATIO * trace;
+    }
     let m = Measurement {
         toa_ns: p.time_ns,
         pos_cov_m2: [cov[0] as f32, cov[1] as f32, cov[2] as f32],
@@ -632,6 +643,38 @@ mod tests {
             worst < 1.0e-3,
             "worst inverse error {worst} m over {n} points"
         );
+    }
+
+    // REQ: OA-TRK-310
+    #[test]
+    fn a_plot_over_the_antenna_converts_to_a_covariance_the_tracker_accepts() {
+        // Mode C 41,600 ft and a slant range 57 m short of that height above the antenna: the
+        // noise put the range under the altitude, so the plot is placed under the vertical, where
+        // the range error moves it along one line only and the covariance is a single line.
+        let g = radar_geom(&SITE);
+        for (rho, az, alt) in [
+            (12_415.5, 303.3, 41_600),
+            (13_145.3, 61.0, 43_900),
+            (12_472.0, 0.0, 41_600),
+            (9_200.0, 200.0, 30_500),
+        ] {
+            let p = RadarPlot {
+                time_ns: 1_000_000_000,
+                range_m: rho,
+                az_deg: az,
+                alt_ft: alt,
+                addr: NO_ADDR,
+                label: NO_ADDR,
+                mode_a: NONE_CODE,
+            };
+            let c = plot_convert(&g, &SITE, &p, &NO_BIAS, None, 5).unwrap();
+            assert_eq!(
+                crate::tracker::measurement_check(&c.m),
+                Ok(()),
+                "rho {rho} alt {alt}: {:?}",
+                c.m.pos_cov_m2
+            );
+        }
     }
 
     // REQ: OA-TRK-030

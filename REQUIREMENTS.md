@@ -3202,6 +3202,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-309** The allowance for a change of climb rate widens the gate and not the cost: a pair inside the
   gate only by the allowance costs `RESCUED_COST_FRACTION` of the total gate, so it is assigned only where no
   better pair wants either side, and the allowance stops growing at `GATE_MANEUVER_MAX_DT_S`.
+- **OA-TRK-310** A plot placed under the vertical (its range under its altitude by less than the slack, so the
+  point is over the antenna) converts to a position covariance the tracker accepts: where the covariance is a
+  line (the determinant under `COV_LINE_RATIO` of the squared trace) its diagonal is raised by that fraction of
+  the trace, so the plot is applied and not refused for a non-positive-definite covariance.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
