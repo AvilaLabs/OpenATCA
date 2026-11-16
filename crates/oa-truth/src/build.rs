@@ -2,7 +2,7 @@
 
 use oa_adsb::{
     category_observe, is_reserved_address, jump_verdict, reports_len, reports_row, CategoryState,
-    JumpPair, JumpVerdict, Reports, F_NEW_LEG, NONE_U16,
+    JumpPair, JumpVerdict, Reports, F_NEW_LEG, NONE_I32, NONE_U16,
 };
 
 use crate::frame::{frame_angle, frame_new, project, Frame};
@@ -10,9 +10,10 @@ use crate::loo::{loo_finish, loo_leg, LooAcc};
 use crate::quality::{nacp_epu_m, quality_eval, QualityState};
 use crate::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
 use crate::{
-    Fraction, Truth, TruthConfig, TruthError, TruthStats, MAX_FRAME_ARC_RAD, MAX_REPORTS,
-    MAX_SAME_TIME_DISTINCT, REM_DUPLICATE, REM_INVALID, REM_JUMP, REM_NO_QUALITY, REM_OVERSIZED,
-    REM_SHORT_LEG, SAME_TIME_CHI2, SPLIT_FRAME, SPLIT_GAP, SPLIT_JUMP, SPLIT_NEW_LEG,
+    Fraction, Truth, TruthConfig, TruthError, TruthStats, ALT_QUANTUM_FT, MAX_FRAME_ARC_RAD,
+    MAX_REPORTS, MAX_SAME_TIME_DISTINCT, REM_AMBIGUOUS, REM_DUPLICATE, REM_INVALID, REM_JUMP,
+    REM_NO_QUALITY, REM_OVERSIZED, REM_SHORT_LEG, SAME_TIME_CHI2, SPLIT_FRAME, SPLIT_GAP,
+    SPLIT_JUMP, SPLIT_NEW_LEG,
 };
 
 const NS_PER_MS: i64 = 1_000_000;
@@ -247,11 +248,27 @@ fn tie_key(r: &Reports, i: u32) -> [i64; 17] {
     ]
 }
 
-/// An aircraft's rows in time order, those equal in time put in the order of their content (then
-/// input index), so that the result does not depend on where they were in the input.
+/// Which fields a row carries, in the preference order for rows equal in time: barometric
+/// altitude, geometric altitude, vertical rate, ground speed, track. Compared element by element,
+/// a row with a valid value earlier in the list is preferred over one without it, whatever the
+/// later fields say; the raw value of an absent field never takes part.
+fn preference(r: &Reports, i: u32) -> [bool; 5] {
+    let i = i as usize;
+    [
+        r.baro_alt_ft.get(i).is_some_and(|&x| x != NONE_I32),
+        r.geom_alt_ft.get(i).is_some_and(|&x| x != NONE_I32),
+        r.vrate_fpm.get(i).is_some_and(|&x| x != NONE_I32),
+        r.gs_dkt.get(i).is_some_and(|&x| x != NONE_U16),
+        r.track_ddeg.get(i).is_some_and(|&x| x != NONE_U16),
+    ]
+}
+
+/// An aircraft's rows in time order, those equal in time put in the order of their [`preference`]
+/// (more valid fields first), then of their content, then input index, so that the first row of
+/// an instant is the preferred one and the result does not depend on where they were in the input.
 fn canonical_rows(r: &Reports, rows: &[(u32, i64, u32)]) -> Vec<(u32, i64, u32)> {
     let mut rows: Vec<(u32, i64, u32)> = rows.to_vec();
-    rows.sort_by_key(|&(_, t, i)| (t, tie_key(r, i), i));
+    rows.sort_by_key(|&(_, t, i)| (t, std::cmp::Reverse(preference(r, i)), tie_key(r, i), i));
     rows
 }
 
@@ -266,7 +283,10 @@ fn canonical_rows(r: &Reports, rows: &[(u32, i64, u32)]) -> Vec<(u32, i64, u32)>
 /// oversized). Otherwise two reports conflict when their squared horizontal distance exceeds
 /// [`SAME_TIME_CHI2`] times the sum of their squared per-axis sigmas (NACp 95 % radius over
 /// [`SIGMA95`]; independent errors assumed) and then all eligible rows of the group are
-/// quarantined (counted as duplicate times). Closer ones are one position measured twice.
+/// quarantined (counted as duplicate times). Closer ones are one position measured twice. Eligible
+/// rows with two valid barometric (or two valid geometric) altitudes more than [`ALT_QUANTUM_FT`]
+/// apart also contradict each other: all are quarantined (counted as ambiguous). Otherwise the
+/// first of the group in [`preference`] order is the one kept.
 fn same_time_check(
     r: &Reports,
     group: &[(u32, i64, u32)],
@@ -276,6 +296,8 @@ fn same_time_check(
     let mut out: Vec<(u32, usize)> = Vec::new();
     // (lat, lon, NACp, input index) of the eligible rows.
     let mut elig: Vec<(i32, i32, u8, u32)> = Vec::new();
+    // The valid barometric and geometric altitudes of the eligible rows.
+    let (mut baro, mut geom): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
     for &(_, t, i) in group {
         let Some(row) = reports_row(r, i as usize) else {
             continue;
@@ -283,7 +305,15 @@ fn same_time_check(
         let (v, _) = quality_eval(snap, &row, t, cfg);
         match (v.removal, v.nacp) {
             (Some(kind), _) => out.push((i, kind)),
-            (None, Some(n)) => elig.push((row.lat_e7, row.lon_e7, n, i)),
+            (None, Some(n)) => {
+                elig.push((row.lat_e7, row.lon_e7, n, i));
+                if row.baro_alt_ft != NONE_I32 {
+                    baro.push(row.baro_alt_ft);
+                }
+                if row.geom_alt_ft != NONE_I32 {
+                    geom.push(row.geom_alt_ft);
+                }
+            }
             (None, None) => out.push((i, REM_NO_QUALITY)),
         }
     }
@@ -304,7 +334,18 @@ fn same_time_check(
                 }
             }
         }
-        conflict.then_some(REM_DUPLICATE)
+        let spread = |v: &[i32]| {
+            let (lo, hi) = (v.iter().min(), v.iter().max());
+            lo.zip(hi)
+                .is_some_and(|(&l, &h)| i64::from(h) - i64::from(l) > i64::from(ALT_QUANTUM_FT))
+        };
+        if conflict {
+            Some(REM_DUPLICATE)
+        } else if spread(&baro) || spread(&geom) {
+            Some(REM_AMBIGUOUS)
+        } else {
+            None
+        }
     };
     if let Some(kind) = refuse {
         out.extend(elig.iter().map(|e| (e.3, kind)));

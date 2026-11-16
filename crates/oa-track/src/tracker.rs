@@ -582,7 +582,11 @@ fn maybe_confirm(t: &mut Tracker, slot: usize, at_ns: i64) {
 fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) {
     t.stats.rows_computed += 1;
     let f = col(&t.cur, slot, blank_filter());
-    let mut row: OutRow = filter_output(&f, at_ns);
+    // A position that cannot be represented is never a row, and never a coordinate of 0.
+    let Some(mut row) = filter_output(&f, at_ns) else {
+        t.stats.rows_unrepresentable += 1;
+        return;
+    };
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
     if at_ns <= col(&t.disagree_until_ns, slot, i64::MIN) {
@@ -1190,15 +1194,15 @@ pub fn tracker_live_iter(t: &Tracker) -> impl Iterator<Item = (u32, i64)> + '_ {
 }
 
 /// A live track as the fusion layer sees it: the track keyed `key` predicted to `at_ns`, whether
-/// it is confirmed, and its newest update time. `None` if there is no such track. Nothing is
-/// stored; the filter is predicted on a copy, as for an output row.
+/// it is confirmed, and its newest update time. `None` if there is no such track, or if its position at `at_ns`
+/// cannot be represented. Nothing is stored; the filter is predicted on a copy, as for an output row.
 pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, bool, i64)> {
     let slot = lookup(t, key)?;
     if col(&t.state, slot, FREE) == FREE {
         return None;
     }
     let f = col(&t.cur, slot, blank_filter());
-    let mut row = filter_output(&f, at_ns.max(f.t_ns));
+    let mut row = filter_output(&f, at_ns.max(f.t_ns))?;
     row.addr = key;
     Some((
         row,

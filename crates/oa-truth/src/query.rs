@@ -3,7 +3,7 @@
 use oa_adsb::NONE_I32;
 use oa_sha256::Sha256;
 
-use crate::frame::{frame_new, frame_velocity, unproject};
+use crate::frame::{frame_new, try_frame_velocity, unproject};
 use crate::smooth::{interp, sigma95_h_m, LegView};
 use crate::{LegIx, LegRange, Truth, TruthQuery, TruthSample, TRUTH_HASH_TAG};
 
@@ -171,9 +171,12 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     let Some((lat, lon)) = unproject(&frame, e, n) else {
         return TruthQuery::TooUncertain;
     };
-    let (vel_e, vel_n) = frame_velocity(&frame, e, n, ve, vn);
-    // A state the frame cannot convert (overflow past the chart), or one moving faster than any
-    // ADS-B emitter class can report, is unusable, not a position: finite is not the same as valid.
+    // A state the frame cannot convert (past the chart's domain) has no velocity.
+    let Some((vel_e, vel_n)) = try_frame_velocity(&frame, e, n, ve, vn) else {
+        return TruthQuery::TooUncertain;
+    };
+    // A non-finite state, or one moving faster than any ADS-B emitter class can report, is
+    // unusable, not a position: finite is not the same as valid.
     if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite())
         || vel_e.hypot(vel_n) > oa_adsb::SPEED_ENVELOPE_MPS
     {

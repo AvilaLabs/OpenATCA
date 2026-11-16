@@ -365,7 +365,7 @@ fn a_far_track_is_as_accurate_as_one_at_the_origin() {
             f64::from(out.lon_e7[i]) / 1e7,
         );
         p.push((e - tr.e).hypot(n - tr.n));
-        let (te, tn) = oa_geo::aeqd::frame_velocity(&f, tr.e, tr.n, tr.ve, tr.vn);
+        let (te, tn) = oa_geo::aeqd::try_frame_velocity(&f, tr.e, tr.n, tr.ve, tr.vn).unwrap();
         s.push(
             f64::from(out.vel_east_mps[i]).hypot(f64::from(out.vel_north_mps[i])) - te.hypot(tn),
         );
@@ -1605,4 +1605,53 @@ fn a_position_on_the_far_side_of_the_earth_is_a_jump_not_a_coherent_update() {
     let after = *tracker_stats(&t);
     assert_eq!(after.jump_rejected, before.jump_rejected + 1);
     assert_eq!(after.applied, before.applied);
+}
+
+// REQ: OA-TRK-312
+#[test]
+fn a_track_extrapolated_past_the_projection_emits_no_zero_position_and_is_counted() {
+    let f = frame0();
+    let man = Manoeuvre::straight(300.0, 90.0);
+    let mut rng = Rng(5);
+    let ms: Vec<Measurement> = (0..30)
+        .map(|k| {
+            let t = f64::from(k);
+            measure(
+                &f,
+                0xA11111,
+                t,
+                &man.at(t, 0.0, 0.0),
+                SIGMA_POS,
+                Some(SIGMA_VEL),
+                true,
+                &mut rng,
+            )
+        })
+        .collect();
+    let cfg = TrackerConfig {
+        h_mode: 1,
+        tick_ns: 60_000_000_000,
+        drop_after_ns: 24 * 3_600_000_000_000,
+        ..big_config()
+    };
+    let mut t = tracker_new(&cfg).unwrap();
+    let mut out = output_new(cfg.out_capacity);
+    for m in &ms {
+        tracker_update(&mut t, m, &mut out);
+    }
+    let last = ms.last().unwrap().toa_ns;
+    out = output_new(cfg.out_capacity);
+    let before = tracker_stats(&t).rows_computed;
+    // 300 m/s for 20 h is 21,600 km: past half the sphere's circumference (20,015 km).
+    tracker_advance(&mut t, last + 20 * 3_600_000_000_000, &mut out);
+    assert!(out.t_ns.len() > 100, "{} rows", out.t_ns.len());
+    let zero = (0..out.t_ns.len())
+        .filter(|&i| out.lat_e7[i] == 0 && out.lon_e7[i] == 0)
+        .count();
+    assert_eq!(zero, 0, "rows at (0, 0)");
+    let refused = tracker_stats(&t).rows_unrepresentable;
+    assert!(refused > 0, "no refusal counted");
+    // Every row computed is either emitted or a counted refusal.
+    let computed = tracker_stats(&t).rows_computed - before;
+    assert_eq!(computed, out.t_ns.len() as u64 + refused);
 }

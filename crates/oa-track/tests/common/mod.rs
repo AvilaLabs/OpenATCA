@@ -7,7 +7,7 @@
     clippy::indexing_slicing
 )]
 
-use oa_geo::aeqd::{frame_new, frame_velocity, project, unproject, Frame};
+use oa_geo::aeqd::{frame_new, project, try_frame_velocity, unproject, Frame};
 use oa_track::{
     output_clear, output_len, output_new, tracker_flush, tracker_new, tracker_update, Measurement,
     TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT,
@@ -90,7 +90,7 @@ pub fn measure(
         category: 0,
     };
     if let Some(sv) = sigma_vel {
-        let (te, tn) = frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn);
+        let (te, tn) = try_frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn).unwrap();
         m.vel_east_mps = (te + sv * rng.normal()) as f32;
         m.vel_north_mps = (tn + sv * rng.normal()) as f32;
         let vv = (sv * sv) as f32;
@@ -211,7 +211,7 @@ pub fn pos_err(f: &Frame, o: &TrackOutput, i: usize, tr: &Truth) -> f64 {
 
 /// Speed error (m/s) and heading error (degrees) of row `i`.
 pub fn vel_err(f: &Frame, o: &TrackOutput, i: usize, tr: &Truth) -> (f64, f64) {
-    let (te, tn) = frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn);
+    let (te, tn) = try_frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn).unwrap();
     let (ve, vn) = (f64::from(o.vel_east_mps[i]), f64::from(o.vel_north_mps[i]));
     let ds = ve.hypot(vn) - te.hypot(tn);
     let mut dh = ve.atan2(vn) - te.atan2(tn);

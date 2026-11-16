@@ -221,6 +221,14 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     Ok(())
 }
 
+/// A coordinate in degrees as 1e-7 degree, or `None` if it is not a number or does not fit an
+/// `i32`: an unusable position is refused, never a saturated or zero coordinate.
+pub(crate) fn to_e7(d: f64) -> Option<i32> {
+    let v = (d * 1.0e7).round();
+    // Both bounds are exactly representable; the range test also fails for NaN.
+    (v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX)).then_some(v as i32)
+}
+
 /// [`TrackOutput::flags`]: the track is coasting.
 pub const O_COAST: u8 = 1;
 /// The altitude columns are meaningful. Without it `alt_ft`, `alt_var_ft2` and `vrate_fpm` are
@@ -446,6 +454,10 @@ pub struct TrackerStats {
     /// Output rows computed (a row is computed before the table can refuse it): the work of the
     /// emitter, which a full table must not keep growing.
     pub rows_computed: u64,
+    /// Output rows not emitted because the track's predicted position cannot be represented (it
+    /// lies past the projection's domain, or not a number): refused and counted, never a
+    /// coordinate of 0.
+    pub rows_unrepresentable: u64,
     /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
     /// counted and not applied.
     pub time_held: u64,
