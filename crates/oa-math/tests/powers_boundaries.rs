@@ -17,6 +17,8 @@ fn pow_negative_unit_tracks_integer_parity_at_binary64_integer_cutoff() {
 #[test]
 fn powi_i32_minimum_exponent_keeps_the_negative_power_scale() {
     assert_eq!(powi(2.0, i32::MIN), 0.0);
+    assert_eq!(powi(4.0, i32::MIN), 0.0);
+    assert_eq!(powi(0.25, i32::MAX), 0.0);
     assert_eq!(powi(0.5, i32::MIN), f64::INFINITY);
     assert_eq!(powi(-1.0, i32::MIN), 1.0);
     assert_eq!(powi(-1.0, i32::MAX), -1.0);
