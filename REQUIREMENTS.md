@@ -3356,7 +3356,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   point is over the antenna) converts to a position covariance the tracker accepts: where the covariance is a
   line (the determinant under `COV_LINE_RATIO` of the squared trace) its diagonal is raised by that fraction of
   the trace, so the plot is applied and not refused for a non-positive-definite covariance.
-- **OA-TRK-312** The coarse query lists each track at most once as it appends, so its output never
+- **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed
   are the same as when the output was sorted and deduplicated afterwards.

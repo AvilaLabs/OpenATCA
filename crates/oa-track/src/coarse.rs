@@ -769,7 +769,7 @@ mod tests {
         Some(out)
     }
 
-    // REQ: OA-TRK-312
+    // REQ: OA-TRK-318
     #[test]
     fn tracks_on_a_piece_boundary_are_listed_once_and_the_output_never_outgrows_the_tracks() {
         // Plot 100 km north, 4.5 km wide: two pieces that meet at 96.25 km north.
@@ -799,7 +799,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-312
+    // REQ: OA-TRK-318
     #[test]
     fn queries_over_piece_boundaries_equal_the_brute_force_and_stay_within_the_tracks() {
         let mut rng = Rng::from_seed(312);
