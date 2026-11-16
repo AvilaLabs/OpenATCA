@@ -2134,6 +2134,16 @@ decoder is OA-GRIB-021.
   known elevation; a sector with only such samples has no terrain maximum.
 - **OA-MVA-077** Coverage cell areas and overlap extents use the WGS-84 meridian and prime-vertical radii at the
   latitude, within 1e-4 of the exact authalic zone area for a 0.1 degree cell at 45 N.
+- **OA-MVA-078** An attribute is matched by namespace and local name: `uom`, `srsName`, `srsDimension`,
+  `interpolation` and `indeterminatePosition` are the unprefixed attributes, `id` is `gml:id`, `type` is
+  `xlink:type` and `nil` is `xsi:nil`. Any other qualified attribute, such as `x:uom` beside `uom`, and
+  any repeat of a qualified name, is refused in either order.
+- **OA-MVA-079** A chart whose sectors span more than 180 degrees of longitude (one either side of the
+  antimeridian) is refused by the coverage check with an error naming the antimeridian; the extent is
+  computed without 32-bit overflow.
+- **OA-MVA-080** Every unordered pair of sectors that share a cell is reported as an overlap, however many
+  sectors cover the cell (three identical polygons give three pairs of equal area in any order); a cell
+  with more than 16 owners, or more than 8 million overlap records, refuses the chart.
 
 ## M2 — Weather inputs
 

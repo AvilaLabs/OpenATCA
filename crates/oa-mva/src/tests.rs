@@ -1287,3 +1287,137 @@ fn the_antimeridian_aliases_answer_alike() {
         assert_eq!(far, vec![SectorIx(0), SectorIx(2)], "lon {lon}");
     }
 }
+
+// REQ: OA-MVA-078
+#[test]
+fn namespaced_attributes_do_not_stand_in_for_the_expected_ones() {
+    let base = message(
+        "RFD_MVA_FUS3_2024",
+        MVA,
+        &[Fix {
+            name: "A",
+            alt: 2500,
+            rings: vec![sq(0.0, 0.0, 1.0, 1.0)],
+        }],
+    );
+    assert!(load_xml(&base).1.is_ok());
+    let x = r#" xmlns:x="urn:other""#;
+    let refused = |xml: String| {
+        let (m, r) = load_xml(&xml);
+        // The XML layer may already refuse a repeated qualified name; either refusal will do.
+        assert!(
+            matches!(
+                r,
+                Err(MvaError::UnexpectedAttribute { .. })
+                    | Err(MvaError::Xml(oa_xml::XmlError::DuplicateAttribute { .. }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(sector_count(&m), 0);
+    };
+    // A foreign-namespace uom beside the real one, in either order: 3000 m must never be read as
+    // feet because the first match won.
+    let alt = base.replace("uom=\"FT\">2500", "uom=\"M\">2500");
+    refused(alt.replace("uom=\"M\"", &format!("x:uom=\"FT\" uom=\"M\"{x}")));
+    refused(alt.replace("uom=\"M\"", &format!("uom=\"M\" x:uom=\"FT\"{x}")));
+    // The same for srsName and srsDimension.
+    refused(base.replace(
+        "srsName=\"urn",
+        &format!("x:srsName=\"urn:ogc:def:crs:OGC:1.3:CRS84\"{x} srsName=\"urn"),
+    ));
+    refused(base.replace(
+        "<ns1:posList>",
+        &format!("<ns1:posList x:srsDimension=\"2\"{x}>"),
+    ));
+    // A prefix bound to the AIXM or GML namespace is still a namespaced attribute.
+    refused(base.replace("uom=\"FT\"", "ns3:uom=\"M\" uom=\"FT\""));
+    // A second prefix for the GML namespace gives a duplicate of gml:id.
+    refused(base.replace(
+        "<ns3:Airspace ns1:id=\"1\"",
+        "<ns3:Airspace ns1:id=\"1\" g:id=\"2\" xmlns:g=\"http://www.opengis.net/gml/3.2\"",
+    ));
+    // An unprefixed id is not gml:id.
+    refused(base.replace("<ns3:Airspace ns1:id=\"1\"", "<ns3:Airspace id=\"1\""));
+}
+
+// REQ: OA-MVA-079
+#[test]
+fn a_chart_across_the_antimeridian_is_refused_not_overflowed() {
+    let mk = |x0, x1, name| Fix {
+        name,
+        alt: 2500,
+        rings: vec![sq(x0, 50.0, x1, 50.1)],
+    };
+    let (m, _) = load(
+        "XYZ_MVA_FUS3_2024_v1",
+        &[mk(179.0, 179.1, "E"), mk(-179.1, -179.0, "W")],
+    )
+    .unwrap();
+    let r = coverage::chart_coverage(&m, 0);
+    let e = r.unwrap_err();
+    assert!(e.contains("antimeridian"), "{e}");
+    // Two sectors a few degrees apart are still one bounded raster.
+    let (m, _) = load(
+        "XYZ_MVA_FUS3_2024_v1",
+        &[mk(10.0, 10.1, "E"), mk(12.0, 12.1, "W")],
+    )
+    .unwrap();
+    let r = coverage::chart_coverage(&m, 0).unwrap();
+    assert!(r.raster_cells > 1000, "{}", r.raster_cells);
+}
+
+// REQ: OA-MVA-080
+#[test]
+fn every_pair_of_three_overlapping_sectors_is_reported_in_any_order() {
+    let mk = |name, alt| Fix {
+        name,
+        alt,
+        rings: vec![sq(0.0, 0.0, 0.1, 0.1)],
+    };
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut first: Option<Vec<(String, String, usize, u64)>> = None;
+    for o in orders {
+        let all = [mk("A", 2500), mk("B", 3000), mk("C", 3500)];
+        let secs: Vec<Fix> = o
+            .iter()
+            .map(|&i| Fix {
+                name: all[i].name,
+                alt: all[i].alt,
+                rings: all[i].rings.clone(),
+            })
+            .collect();
+        let (m, _) = load("TRI_MVA_FUS3_2024", &secs).unwrap();
+        let r = coverage::chart_coverage(&m, 0).unwrap();
+        assert_eq!(r.overlaps.len(), 3, "{:?}", r.overlaps);
+        let mut v: Vec<(String, String, usize, u64)> = r
+            .overlaps
+            .iter()
+            .map(|p| {
+                let (a, b) = if p.a < p.b {
+                    (&p.a, &p.b)
+                } else {
+                    (&p.b, &p.a)
+                };
+                (a.clone(), b.clone(), p.cells, p.area_nm2.to_bits())
+            })
+            .collect();
+        v.sort();
+        assert_eq!(v[0].2, v[1].2);
+        assert_eq!(v[1].2, v[2].2);
+        assert_eq!(v[0].3, v[1].3);
+        assert_eq!(v[1].3, v[2].3);
+        let names: Vec<(&str, &str)> = v.iter().map(|p| (p.0.as_str(), p.1.as_str())).collect();
+        assert_eq!(names, vec![("A", "B"), ("A", "C"), ("B", "C")]);
+        match &first {
+            None => first = Some(v),
+            Some(f) => assert_eq!(f, &v, "order {o:?}"),
+        }
+    }
+}
