@@ -1722,6 +1722,10 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-DOF-008** The real `DOF.DAT` (`OPENATCA_DATA`) parses with no rejected line, the line and
   obstacle counts agree, the per-state and per-country files are subsets whose total falls short
   by under 100 obstacles, and positions are inside the world; skipped when the data is absent.
+- **OA-DOF-009** A bounding-box query whose bound is NaN or infinite is refused with a typed error;
+  it is never read as 0 degrees or as the whole world.
+- **OA-DOF-010** The seconds field is read with checked arithmetic and held under 60.00, at its edges
+  (59.99 accepted, 60.00 and 99.99 refused).
 
 ## M1 — ADS-B history input
 

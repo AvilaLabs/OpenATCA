@@ -2,7 +2,10 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // Test fixtures and loop counters, not parsed input.
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
 )]
 
 use crate::*;
@@ -309,6 +312,7 @@ fn bounding_box_query() {
     let d = parse_dof(&file(&[REAL, UNVERIFIED, PR, SOUTH_EAST])).unwrap();
     let hits = |a, b, c, e| {
         in_bbox(&d, a, b, c, e)
+            .unwrap()
             .iter()
             .map(|i| i.0)
             .collect::<Vec<_>>()
@@ -361,4 +365,37 @@ fn never_panics_on_damage() {
         }
         let _ = parse_dof(&junk);
     }
+}
+
+// REQ: OA-DOF-009
+#[test]
+fn a_non_finite_box_bound_is_refused_not_read_as_zero_degrees() {
+    // An obstacle at 0 N 0 E: a NaN bound read as 0 degrees would match it.
+    let mut d = parse_dof(&file(&[REAL])).unwrap();
+    d.lat_e7[0] = 0;
+    d.lon_e7[0] = 0;
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for slot in 0..4 {
+            let mut b = [-1.0, 1.0, -1.0, 1.0];
+            b[slot] = bad;
+            let r = in_bbox(&d, b[0], b[1], b[2], b[3]);
+            assert!(r.is_err(), "bound {slot} = {bad} matched {r:?}");
+        }
+    }
+    assert_eq!(
+        in_bbox(&d, -1.0, 1.0, -1.0, 1.0).unwrap(),
+        vec![ObstacleIx(0)]
+    );
+}
+
+// REQ: OA-DOF-010
+#[test]
+fn seconds_field_edges_are_exact() {
+    assert_eq!(seconds_hundredths(b"59.99"), Some(5999));
+    assert_eq!(seconds_hundredths(b"60.00"), None);
+    assert_eq!(seconds_hundredths(b"00.00"), Some(0));
+    assert_eq!(seconds_hundredths(b"9.999"), None);
+    assert_eq!(seconds_hundredths(b"99.99"), None);
+    assert_eq!(seconds_hundredths(b"5x.00"), None);
+    assert_eq!(seconds_hundredths(b"+5.00"), None);
 }

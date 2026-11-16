@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 //! oa-dof: parser for the FAA Digital Obstacle File (DOF), the fixed-width `.Dat` files the
 //! FAA's Aeronautical Information Services publishes every 56 days. Core (pure): bytes in,
 //! struct-of-arrays out; [`read_file`] is the one shell function.
@@ -178,6 +179,8 @@ pub enum DofError {
     BadHeader,
     /// More than [`u32::MAX`] obstacles (cannot be indexed).
     TooManyObstacles,
+    /// A bounding box with a bound that is not a finite number.
+    BadBox,
 }
 
 impl fmt::Display for DofError {
@@ -191,6 +194,7 @@ impl fmt::Display for DofError {
             DofError::BadCurrency => write!(f, "first line is not a CURRENCY DATE header"),
             DofError::BadHeader => write!(f, "the four header lines are missing or malformed"),
             DofError::TooManyObstacles => write!(f, "too many obstacles to index"),
+            DofError::BadBox => write!(f, "bounding box bound is not a finite number"),
         }
     }
 }
@@ -279,7 +283,10 @@ pub fn oas_number(d: &Dof, i: ObstacleIx) -> Option<String> {
 /// Text of a blank-padded field with the padding removed. Bytes 0x80 and up are read as
 /// Windows-1252 (the file's own encoding for names like `PE\xd1UELAS`).
 pub fn text(field: &[u8]) -> String {
-    let end = field.iter().rposition(|&b| b != b' ').map_or(0, |p| p + 1);
+    let end = field
+        .iter()
+        .rposition(|&b| b != b' ')
+        .map_or(0, |p| p.saturating_add(1));
     field
         .get(..end)
         .unwrap_or(&[])
@@ -381,7 +388,7 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, DofError> {
 
 /// 1-based inclusive column range of a line; empty if outside it.
 fn cols(line: &[u8], from: usize, to: usize) -> &[u8] {
-    line.get(from - 1..to).unwrap_or(&[])
+    line.get(from.saturating_sub(1)..to).unwrap_or(&[])
 }
 
 fn digits(b: &[u8]) -> Option<u32> {
@@ -389,7 +396,8 @@ fn digits(b: &[u8]) -> Option<u32> {
         return None;
     }
     b.iter().try_fold(0u32, |a, &c| {
-        a.checked_mul(10)?.checked_add(u32::from(c - b'0'))
+        a.checked_mul(10)?
+            .checked_add(u32::from(c.saturating_sub(b'0')))
     })
 }
 
@@ -399,7 +407,9 @@ fn seconds_hundredths(b: &[u8]) -> Option<u32> {
     if b.len() != 5 || dot != b"." {
         return None;
     }
-    let v = digits(whole)? * 100 + digits(frac)?;
+    let v = digits(whole)?
+        .checked_mul(100)?
+        .checked_add(digits(frac)?)?;
     (v < 6000).then_some(v)
 }
 
@@ -417,16 +427,20 @@ fn dms_e7(
     if m >= 60 {
         return None;
     }
-    let hundredths = (u64::from(d) * 3600 + u64::from(m) * 60) * 100 + u64::from(s);
-    if hundredths > u64::from(max_deg) * 360_000 {
+    let hundredths = u64::from(d)
+        .checked_mul(3600)?
+        .checked_add(u64::from(m).checked_mul(60)?)?
+        .checked_mul(100)?
+        .checked_add(u64::from(s))?;
+    if hundredths > u64::from(max_deg).checked_mul(360_000)? {
         return None;
     }
     // 1e-7 degrees per hundredth of an arc second is 1e7 / 360000 = 250 / 9; round half up.
-    let e7 = (hundredths * 500 + 9) / 18;
+    let e7 = hundredths.checked_mul(500)?.checked_add(9)? / 18;
     let v = i32::try_from(e7).ok()?;
     match hemi {
         h if h == pos => Some(v),
-        h if h == neg => Some(-v),
+        h if h == neg => v.checked_neg(),
         _ => None,
     }
 }
@@ -475,7 +489,7 @@ fn parse_line(line: &[u8]) -> Result<Row, Field> {
         10usize, 12, 15, 18, 35, 38, 41, 48, 52, 55, 62, 81, 83, 89, 95, 97, 99, 101, 103, 118, 120,
     ] {
         if cols(line, c, c) != b" " {
-            return Err(Field::Separator(c as u8));
+            return Err(Field::Separator(u8::try_from(c).unwrap_or(u8::MAX)));
         }
     }
     if cols(line, 3, 3) != b"-" {
@@ -532,12 +546,15 @@ fn parse_line(line: &[u8]) -> Result<Row, Field> {
     }
     let quantity = digits(cols(line, 82, 82))
         .filter(|&q| q >= 1)
-        .ok_or(Field::Quantity)? as u8
-        + b'0';
+        .and_then(|q| u8::try_from(q).ok())
+        .and_then(|q| q.checked_add(b'0'))
+        .ok_or(Field::Quantity)?;
     let agl_ft = digits(cols(line, 84, 88)).ok_or(Field::Agl)?;
     let amsl = cols(line, 90, 94);
     let amsl_ft = match amsl.split_first() {
-        Some((b'-', rest)) => digits(rest).and_then(|v| i32::try_from(v).ok()).map(|v| -v),
+        Some((b'-', rest)) => digits(rest)
+            .and_then(|v| i32::try_from(v).ok())
+            .and_then(i32::checked_neg),
         _ => digits(amsl).and_then(|v| i32::try_from(v).ok()),
     }
     .ok_or(Field::Amsl)?;
@@ -607,7 +624,11 @@ fn parse_currency(line: &[u8]) -> Option<Currency> {
         digits(date.get(3..5)?)?,
         digits(date.get(6..8)?)?,
     );
-    let year = if y < 80 { 2000 + y } else { 1900 + y };
+    let year = if y < 80 {
+        y.saturating_add(2000)
+    } else {
+        y.saturating_add(1900)
+    };
     let days = match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -615,10 +636,13 @@ fn parse_currency(line: &[u8]) -> Option<Currency> {
         2 => 28,
         _ => return None,
     };
-    (d >= 1 && d <= days).then_some(Currency {
-        year: year as u16,
-        month: m as u8,
-        day: d as u8,
+    if !(1..=days).contains(&d) {
+        return None;
+    }
+    Some(Currency {
+        year: u16::try_from(year).ok()?,
+        month: u8::try_from(m).ok()?,
+        day: u8::try_from(d).ok()?,
     })
 }
 
@@ -671,7 +695,7 @@ pub fn parse_dof(data: &[u8]) -> Result<Dof, DofError> {
         if last_empty {
             break;
         }
-        d.lines += 1;
+        d.lines = d.lines.saturating_add(1);
         if d.lines > MAX_LINES {
             return Err(DofError::TooManyLines);
         }
@@ -710,7 +734,7 @@ pub fn parse_dof(data: &[u8]) -> Result<Dof, DofError> {
                 Err(f) => LineErrorKind::Field(f),
             }
         };
-        d.rejected_total += 1;
+        d.rejected_total = d.rejected_total.saturating_add(1);
         if d.rejected.len() < MAX_REJECTED {
             d.rejected.push(LineError {
                 line: d.lines,
@@ -724,8 +748,23 @@ pub fn parse_dof(data: &[u8]) -> Result<Dof, DofError> {
 /// Obstacles inside a latitude/longitude box (degrees, edges inclusive). A box whose
 /// `lon_min` is greater than `lon_max` crosses the antimeridian. The file is ordered by latitude
 /// within each state, not globally, so this is a linear scan (650,000 obstacles take a
-/// millisecond or two).
-pub fn in_bbox(d: &Dof, lat_min: f64, lat_max: f64, lon_min: f64, lon_max: f64) -> Vec<ObstacleIx> {
+/// millisecond or two). A bound that is not finite is refused with [`DofError::BadBox`]; a finite
+/// one past the world is clamped, which keeps its order against every stored position.
+pub fn in_bbox(
+    d: &Dof,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+) -> Result<Vec<ObstacleIx>, DofError> {
+    if ![lat_min, lat_max, lon_min, lon_max]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(DofError::BadBox);
+    }
+    // Clamped to plus or minus 2e9 first, which fits an i32, so the cast does not truncate.
+    #[allow(clippy::cast_possible_truncation)]
     let e7 = |v: f64| (v * 1e7).round().clamp(-2e9, 2e9) as i32;
     let (la0, la1, lo0, lo1) = (e7(lat_min), e7(lat_max), e7(lon_min), e7(lon_max));
     let mut out = Vec::new();
@@ -736,10 +775,13 @@ pub fn in_bbox(d: &Dof, lat_min: f64, lat_max: f64, lon_min: f64, lon_max: f64) 
             lo >= lo0 || lo <= lo1
         };
         if la >= la0 && la <= la1 && lon_in {
-            out.push(ObstacleIx(i as u32));
+            // The parser refuses a file of u32::MAX obstacles or more, so the index fits.
+            out.push(ObstacleIx(
+                u32::try_from(i).map_err(|_| DofError::TooManyObstacles)?,
+            ));
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

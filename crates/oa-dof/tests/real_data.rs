@@ -87,7 +87,7 @@ fn real_dof_parses_without_rejections() {
     }
     eprintln!("verified {verified}, without accuracy codes {no_acc}, negative AMSL {neg_amsl}, tallest AGL {tallest} ft");
     // Chicago O'Hare area: a plausible number of obstacles inside a 0.2 degree box.
-    let hits = in_bbox(&all, 41.88, 42.08, -87.99, -87.79);
+    let hits = in_bbox(&all, 41.88, 42.08, -87.99, -87.79).unwrap();
     eprintln!("obstacles within 0.1 deg of ORD: {}", hits.len());
     assert!(!hits.is_empty());
     // Every position is inside the world and every height field decoded.
