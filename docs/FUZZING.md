@@ -190,6 +190,37 @@ build and run, not that the parsers are clean.
 | notam | 1,038,538 | 17,025 | 2,376 | 6,619 | 1,368 | none |
 | mva | 39,959 | 655 | 1,848 | 7,561 | 488 | none |
 
+
+### Extended text and chart parser run, 2026-11-16
+
+A sequential rotation requested 45 minutes per target, one worker and a 2 GiB RSS limit. Five
+of six targets completed. The wrapper itself returned success despite an individual target failure,
+so the table follows each target's log rather than the wrapper's exit code.
+
+| Target | Executions | cov | ft | Kept inputs | Result |
+|---|---:|---:|---:|---:|---|
+| csv | 1,342,465 | 1,276 | 5,451 | 923 | completed |
+| arinc424 | 481,418* | 3,353* | 17,018* | 2,053* | stopped early; harness panic |
+| nasr | 3,186,394 | 4,279 | 17,231 | 2,148 | completed |
+| notam | 29,354,525 | 2,843 | 9,326 | 2,691 | completed |
+| mva | 3,036,676 | 2,517 | 10,189 | 1,549 | completed |
+| tiff | 34,492,297 | 1,089 | 2,949 | 491 | completed |
+
+`*` Last progress counters before the failure, not final campaign totals. The logs do not record
+the source commit, so these results cannot establish coverage of an exact revision.
+
+The ARINC 424 target panicked while preparing a fixed-width record: `String::truncate(132)`
+split a two-byte UTF-8 character. The parser itself did not panic. Preparation now resizes bytes
+and invokes the text-record decoder only when the prefix is valid UTF-8; the whole-file byte
+parser still receives the original input. The exact input is committed as
+`fuzz/seeds/arinc424/utf8-record-cutoff.bin`. It reproduces the old harness failure and completes
+with the corrected target. A subsequent 61-second smoke run completed 147,470 executions with
+no failure; it is not a replacement for the interrupted 45-minute run. AddressSanitizer remained
+enabled, but leak detection was disabled because LeakSanitizer cannot operate in the test sandbox.
+
+The TIFF artifact retained from an earlier rotation is the overflow input covered by
+OA-TIFF-095. This rotation's TIFF log completed normally with no new crash.
+
 ## What fuzzing does not show
 
 - Absence of bugs. Fifteen minutes per target, one core, one run is a sample. In every target

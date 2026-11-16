@@ -45,12 +45,13 @@ fuzz_target!(|data: &[u8]| {
         let Ok(text) = std::str::from_utf8(line) else {
             continue;
         };
-        let mut padded = text.to_string();
-        while padded.len() < RECORD_LEN {
-            padded.push(' ');
-        }
-        padded.truncate(RECORD_LEN);
-        for t in [text, padded.as_str()] {
+        // Record lengths are bytes; a truncated UTF-8 prefix need not be valid text.
+        let mut padded = line.to_vec();
+        padded.resize(RECORD_LEN, b' ');
+        for t in [Some(text), std::str::from_utf8(&padded).ok()]
+            .into_iter()
+            .flatten()
+        {
             if let Ok(r) = oa_arinc424::parse_record(n, t) {
                 let _ = oa_arinc424::record_meta(&r);
             }
