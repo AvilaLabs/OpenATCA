@@ -2977,6 +2977,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   number of milliseconds (no offset is applied); a sub-millisecond remainder is applied flat, or, where the flat
   step refuses (within 0.1 degrees of a pole), by the geodesic direct problem. An aircraft above 89.9 degrees is
   detected by a site at 89.5 degrees.
+- **OA-SIM-031** A radar site's `epoch_ns` outside half the signed 64-bit nanosecond range is refused by
+  `simulate_radar` with `SimError::BadSite("epoch")`, and the scan index, the scan start and the beam
+  azimuth use checked or widened arithmetic, so no epoch or window overflows.
+- **OA-SIM-032** A drift window across the whole time range does not overflow in the elapsed time.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -3352,6 +3356,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   point is over the antenna) converts to a position covariance the tracker accepts: where the covariance is a
   line (the determinant under `COV_LINE_RATIO` of the squared trace) its diagonal is raised by that fraction of
   the trace, so the plot is applied and not refused for a non-positive-definite covariance.
+- **OA-TRK-312** The coarse query lists each track at most once as it appends, so its output never
+  holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
+  the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed
+  are the same as when the output was sorted and deduplicated afterwards.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
@@ -3657,3 +3665,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-PRF-010** The command line refuses a `--max-wall` that is not a positive finite number, an
   `--adsb-frac` outside 0 to 1, and traffic times (`--warmup`, `--duration`, `--clip-secs`) whose
   sum overflows or passes the time range the layer accepts, each with a message naming the flag.
+- **OA-PRF-011** Every aircraft of the synthetic traffic is inside its box at every second of the fed
+  interval (warm-up plus measurement, of any length): a track that would leave the box turns back and one
+  that would still leave reflects at the wall, so in the stress layout every aircraft is in the coverage of
+  every radar throughout, and no plot is lost to leaving it. Deterministic per seed.

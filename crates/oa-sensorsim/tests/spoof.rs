@@ -539,3 +539,18 @@ fn a_long_drift_follows_the_geodesic() {
     assert!(n > 0);
     assert!(worst < 1.0, "worst {worst} m");
 }
+
+// REQ: OA-SIM-032
+#[test]
+fn a_drift_window_across_the_whole_time_range_does_not_overflow() {
+    let base = traffic();
+    let d = DriftParams {
+        victim: A,
+        start_ns: i64::MIN,
+        end_ns: i64::MAX,
+        rate_mps: 0.0,
+        bearing_deg: 45.0,
+    };
+    // Either an error or a result, but no panic on the subtraction of the window.
+    let _ = inject_drift(&base, &d);
+}

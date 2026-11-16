@@ -234,34 +234,72 @@ pub fn coarse_query(
     if ix.lon_cells.len() != N_LAT as usize {
         return push_all(ix, out);
     }
-    // The rectangle in pieces, each with a box of its own.
+    // The rectangle in pieces, each with a box of its own. A cell that meets the boxes of two
+    // pieces is taken with the first, so no track is appended twice and `out` never holds more
+    // than the tracks.
     let length = g_hi - a_lo;
     let pieces = ((length / SEGMENT_M).ceil() as usize).clamp(1, SEGMENTS_MAX);
     let step = length / pieces as f64;
+    let mut boxes = [PieceBox::default(); SEGMENTS_MAX];
     for k in 0..pieces {
         let (p_lo, p_hi) = (a_lo + step * k as f64, a_lo + step * (k + 1) as f64);
         let p_hi = if k + 1 == pieces { g_hi } else { p_hi };
-        if !piece_cells(ix, &frame, out, (st, ct), (p_lo, p_hi), w) {
+        let Some(b) = piece_box(&frame, (st, ct), (p_lo, p_hi), w) else {
+            return push_all(ix, out);
+        };
+        if let Some(slot) = boxes.get_mut(k) {
+            *slot = b;
+        }
+        if !piece_cells(ix, out, &boxes, k) {
             return push_all(ix, out);
         }
     }
     push_cell(&ix.keys, out, ALWAYS);
     out.sort_unstable();
-    out.dedup();
 }
 
-/// Appends the tracks of the cells that meet the box of the piece of the rectangle from `a_lo` to
-/// `a_hi` along the plot's azimuth line (`st`, `ct`: its sine and cosine) and `w` either side of it.
-/// `false` if the tracks are better all taken (a point the chart cannot reach, or more cells than
-/// tracks), with nothing certain about `out`.
-fn piece_cells(
-    ix: &CoarseIndex,
+/// The box of one piece of the rectangle: the bands of latitude and the longitudes it meets.
+#[derive(Debug, Clone, Copy, Default)]
+struct PieceBox {
+    c_lo: i64,
+    c_hi: i64,
+    lon_from: f64,
+    lon_to: f64,
+    reaches_pole: bool,
+}
+
+/// The cells of longitude of band `la` that the box takes: from the cell of its west edge to its
+/// east edge (the first and last, possibly past `0..n` before wrapping), or all of them; and the
+/// number of cells of the band.
+fn box_span(ix: &CoarseIndex, b: &PieceBox, la: i64) -> (i64, i64, i64) {
+    let n = band_cells(ix, la);
+    let at = |lon: f64| ((lon + 180.0) / 360.0 * n as f64).floor() as i64;
+    let (l_lo, l_hi) = (at(b.lon_from), at(b.lon_to));
+    if b.reaches_pole || l_hi - l_lo + 1 >= n {
+        (0, n - 1, n)
+    } else {
+        (l_lo, l_hi, n)
+    }
+}
+
+/// Whether cell `lo` of band `la` is taken by the box.
+fn box_takes(ix: &CoarseIndex, b: &PieceBox, la: i64, lo: i64) -> bool {
+    if la < b.c_lo || la > b.c_hi {
+        return false;
+    }
+    let (l_lo, l_hi, n) = box_span(ix, b, la);
+    (lo - l_lo).rem_euclid(n) <= l_hi - l_lo
+}
+
+/// The box of the piece of the rectangle from `a_lo` to `a_hi` along the plot's azimuth line
+/// (`st`, `ct`: its sine and cosine) and `w` either side of it. `None` if the tracks are better
+/// all taken (a point the chart cannot reach).
+fn piece_box(
     frame: &Frame,
-    out: &mut Vec<u32>,
     (st, ct): (f64, f64),
     (a_lo, a_hi): (f64, f64),
     w: f64,
-) -> bool {
+) -> Option<PieceBox> {
     // Latitude and longitude of nine points of the piece.
     let mut pts = [(0.0f64, 0.0f64); 9];
     let mut i = 0usize;
@@ -276,7 +314,7 @@ fn piece_cells(
         }
     }
     if pts.iter().any(|p| !(p.0.is_finite() && p.1.is_finite())) {
-        return false;
+        return None;
     }
     let mut lat_lo = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - PAD_DEG;
     let mut lat_hi = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + PAD_DEG;
@@ -308,28 +346,41 @@ fn piece_cells(
     let pad_lon = PAD_DEG / oa_math::cos(lat_edge.to_radians()).max(1.0e-3);
     let (lon_from, lon_to) = (lon_c + d_lo - pad_lon, lon_c + d_hi + pad_lon);
     let (c_lo, c_hi) = (lat_cell(lat_lo), lat_cell(lat_hi));
-    // The cells of longitude of a band: from the cell of the box's west edge to its east edge, or
-    // all of them.
-    let span = |la: i64| {
-        let n = band_cells(ix, la);
-        let at = |lon: f64| ((lon + 180.0) / 360.0 * n as f64).floor() as i64;
-        let (l_lo, l_hi) = (at(lon_from), at(lon_to));
-        if reaches_pole || l_hi - l_lo + 1 >= n {
-            (0, n - 1, n)
-        } else {
-            (l_lo, l_hi, n)
-        }
+    Some(PieceBox {
+        c_lo,
+        c_hi,
+        lon_from,
+        lon_to,
+        reaches_pole,
+    })
+}
+
+/// Appends the tracks of the cells of piece `k` that no earlier piece's box takes. `false` if the
+/// tracks are better all taken (more cells than tracks), with nothing certain about `out`.
+fn piece_cells(ix: &CoarseIndex, out: &mut Vec<u32>, boxes: &[PieceBox], k: usize) -> bool {
+    let Some(b) = boxes.get(k) else {
+        return false;
     };
-    let cells: i64 = (c_lo..=c_hi).map(|la| span(la).1 - span(la).0 + 1).sum();
+    let cells: i64 = (b.c_lo..=b.c_hi)
+        .map(|la| {
+            let (l_lo, l_hi, _) = box_span(ix, b, la);
+            l_hi - l_lo + 1
+        })
+        .sum();
     if cells > ix.keys.len() as i64 + 1 {
         // More cells than tracks: walking the tracks is cheaper than the cells.
         return false;
     }
-    for la in c_lo..=c_hi {
-        let (l_lo, l_hi, n) = span(la);
+    let earlier = boxes.get(..k).unwrap_or(&[]);
+    for la in b.c_lo..=b.c_hi {
+        let (l_lo, l_hi, n) = box_span(ix, b, la);
         let first = ix.first_cell.get(la as usize).copied().unwrap_or(0);
         for lo in l_lo..=l_hi {
-            push_cell(&ix.keys, out, first + lo.rem_euclid(n) as u32);
+            let lo = lo.rem_euclid(n);
+            if earlier.iter().any(|e| box_takes(ix, e, la, lo)) {
+                continue;
+            }
+            push_cell(&ix.keys, out, first + lo as u32);
         }
     }
     true
@@ -668,6 +719,136 @@ mod tests {
         for n in [200, 1_000, 3_000, 5_000, 10_000, 20_000] {
             let target = track_at(&s, 89.99, 170.0, 3_375.0);
             finds_extras(&s, n, vec![target], (550_000.0, 0.0), 30_000.0, 1);
+        }
+    }
+
+    /// The query as it was before the pieces were deduplicated while appending: every piece's
+    /// cells appended, then sorted and deduplicated. `None` where the tracks are all taken.
+    fn appended_then_deduplicated(
+        ix: &CoarseIndex,
+        rho: f64,
+        az_deg: f64,
+        dh_max: f64,
+        width: f64,
+    ) -> Option<Vec<u32>> {
+        let frame = ix.frame?;
+        let extra = EXTRA_FIXED_M + EXTRA_PER_RANGE * rho;
+        let w = width + extra;
+        let g_hi = rho + w;
+        let slant_lo = (rho - width).max(0.0);
+        let g_lo = ((slant_lo * slant_lo - dh_max * dh_max).max(0.0).sqrt() - extra).max(0.0);
+        let a_lo = if g_lo > w { g_lo - w } else { -w };
+        let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
+        let pieces = (((g_hi - a_lo) / SEGMENT_M).ceil() as usize).clamp(1, SEGMENTS_MAX);
+        let step = (g_hi - a_lo) / pieces as f64;
+        let mut out = Vec::new();
+        for k in 0..pieces {
+            let p_hi = if k + 1 == pieces {
+                g_hi
+            } else {
+                a_lo + step * (k + 1) as f64
+            };
+            let b = piece_box(&frame, (st, ct), (a_lo + step * k as f64, p_hi), w)?;
+            let cells: i64 = (b.c_lo..=b.c_hi)
+                .map(|la| box_span(ix, &b, la).1 - box_span(ix, &b, la).0 + 1)
+                .sum();
+            if cells > ix.keys.len() as i64 + 1 {
+                return None;
+            }
+            for la in b.c_lo..=b.c_hi {
+                let (l_lo, l_hi, n) = box_span(ix, &b, la);
+                let first = ix.first_cell.get(la as usize).copied().unwrap_or(0);
+                for lo in l_lo..=l_hi {
+                    push_cell(&ix.keys, &mut out, first + lo.rem_euclid(n) as u32);
+                }
+            }
+        }
+        push_cell(&ix.keys, &mut out, ALWAYS);
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
+
+    // REQ: OA-TRK-312
+    #[test]
+    fn tracks_on_a_piece_boundary_are_listed_once_and_the_output_never_outgrows_the_tracks() {
+        // Plot 100 km north, 4.5 km wide: two pieces that meet at 96.25 km north.
+        let s = site(0.0, 0.0);
+        let g = radar_geom(&s);
+        let (rho, width) = (100_000.0, 4_500.0);
+        for n in [1usize, 50, 5_000] {
+            let mut t = Vec::new();
+            for i in 0..n {
+                // On the boundary, spread a little across it.
+                let r = 96_250.0 + (i % 7) as f64 * 0.5;
+                let geo = polar_to_geodetic(&g, r, 0.0, g.height_m).unwrap();
+                t.push(track_at(&s, geo.lat_deg, geo.lon_deg, 0.0));
+            }
+            let (ix, _, _) = built(&s, &t);
+            let mut out = Vec::with_capacity(t.len());
+            let before = (out.as_ptr() as usize, out.capacity());
+            coarse_query(&ix, &mut out, rho, 0.0, 0.0, width);
+            assert!(out.len() <= n, "{n} tracks, {} entries", out.len());
+            assert_eq!(
+                (out.as_ptr() as usize, out.capacity()),
+                before,
+                "{n} tracks: the output buffer was reallocated"
+            );
+            assert!(out.windows(2).all(|w| w[0] < w[1]));
+            assert_eq!(out.len(), n, "every track is a candidate");
+        }
+    }
+
+    // REQ: OA-TRK-312
+    #[test]
+    fn queries_over_piece_boundaries_equal_the_brute_force_and_stay_within_the_tracks() {
+        let mut rng = Rng::from_seed(312);
+        for (lat, lon) in [(0.0, 0.0), (45.0, -100.0), (80.0, 20.0), (0.0, 179.9)] {
+            let s = site(lat, lon);
+            let g = radar_geom(&s);
+            for _ in 0..40 {
+                let az = 360.0 * rng.unit();
+                let rho = 20_000.0 + 400_000.0 * rng.unit();
+                let width = 500.0 + 6_000.0 * rng.unit();
+                let n = 1 + (rng.unit() * 400.0) as usize;
+                // Same rectangle as the query: pieces of equal length from a_lo to g_hi.
+                let extra = EXTRA_FIXED_M + EXTRA_PER_RANGE * rho;
+                let w = width + extra;
+                let g_hi = rho + w;
+                let slant_lo = (rho - width).max(0.0);
+                let g_lo = (slant_lo - extra).max(0.0);
+                let a_lo = if g_lo > w { g_lo - w } else { -w };
+                let pieces = (((g_hi - a_lo) / SEGMENT_M).ceil() as usize).clamp(1, SEGMENTS_MAX);
+                let step = (g_hi - a_lo) / pieces as f64;
+                let mut t = Vec::new();
+                while t.len() < n {
+                    // Along the line at a piece boundary (or anywhere in the window), across it.
+                    let k = 1 + (rng.unit() * pieces as f64) as usize % pieces;
+                    let along = (a_lo + step * k as f64 + 60.0 * (rng.unit() - 0.5)).max(1.0);
+                    let cross = 2.0 * width * (rng.unit() - 0.5);
+                    let r = oa_math::hypot(along, cross);
+                    let a = az + cross.atan2(along).to_degrees();
+                    let Ok(geo) = polar_to_geodetic(&g, r, a, g.height_m) else {
+                        continue;
+                    };
+                    t.push(track_at(&s, geo.lat_deg, geo.lon_deg, 0.0));
+                }
+                let (ix, _, _) = built(&s, &t);
+                let mut out = Vec::with_capacity(t.len());
+                let cap = out.capacity();
+                coarse_query(&ix, &mut out, rho, az, 0.0, width);
+                assert!(out.len() <= t.len());
+                assert_eq!(out.capacity(), cap, "reallocated at {lat} N");
+                assert!(out.windows(2).all(|w| w[0] < w[1]));
+                let plot = (rho, az);
+                let passes = |i: u32| coarse_passes(width, plot, t[i as usize].polar);
+                let brute: Vec<u32> = (0..t.len() as u32).filter(|&i| passes(i)).collect();
+                let narrowed: Vec<u32> = out.iter().copied().filter(|&i| passes(i)).collect();
+                assert_eq!(narrowed, brute, "{lat} N {az} deg {rho} m");
+                if let Some(old) = appended_then_deduplicated(&ix, rho, az, 0.0, width) {
+                    assert_eq!(out, old, "{lat} N {az} deg {rho} m");
+                }
+            }
         }
     }
 

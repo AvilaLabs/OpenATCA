@@ -9,7 +9,7 @@
 //! azimuth sigmas.
 //!
 //! Stated simplifications (the numbers in a report carry them): straight flight at constant
-//! speed and altitude; every plot detected (no misses, no false plots, no splits); plots carry
+//! speed and altitude (reflected at the walls of the box where it would leave); every plot detected (no misses, no false plots, no splits); plots carry
 //! no address; no line-of-sight test; ADS-B noise white at NACp 9.
 
 use oa_geo::aeqd::{frame_new, frame_velocity, unproject, Frame};
@@ -79,7 +79,8 @@ pub struct TrafficCfg {
     pub adsb_frac: f64,
     /// Radars, in order; offsets from the centre are fixed (see [`RADAR_OFFSETS_KM`]).
     pub radars: Vec<Kind>,
-    /// Aircraft keep inside the box for this long (those that would leave fly the other way).
+    /// Aircraft that would leave the box within this time fly the other way; any that would still
+    /// leave it reflect at the wall, so every aircraft is in the box at every time.
     pub horizon_s: f64,
 }
 
@@ -95,7 +96,9 @@ pub fn half_km(cfg: &TrafficCfg) -> f64 {
     }
 }
 
-/// One aircraft: a straight constant-speed track in the east-north plane of the centre.
+/// One aircraft: a constant-speed track in the east-north plane of the centre. Straight while it
+/// stays in the box; at a wall (the box is `half_m` either side of the centre) it reflects, so
+/// the aircraft is in the box at every time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aircraft {
     pub addr: u32,
@@ -103,15 +106,38 @@ pub struct Aircraft {
     pub n0: f64,
     pub ve: f64,
     pub vn: f64,
+    /// Half the width of the box the aircraft keeps inside, metres.
+    pub half_m: f64,
     pub alt_ft: i32,
     /// Offset of its reports within each second, ns (whole milliseconds).
     pub phase_ns: i64,
     pub adsb: bool,
 }
 
+/// A coordinate `x0 + v t` reflected into `[-half, half]`, and the sign of its motion.
+fn reflect(x0: f64, v: f64, t_s: f64, half: f64) -> (f64, f64) {
+    let u = (x0 + v * t_s + half).rem_euclid(4.0 * half);
+    if u < 2.0 * half {
+        (u - half, 1.0)
+    } else {
+        (3.0 * half - u, -1.0)
+    }
+}
+
 impl Aircraft {
     fn pos(&self, t_s: f64) -> (f64, f64) {
-        (self.e0 + self.ve * t_s, self.n0 + self.vn * t_s)
+        (
+            reflect(self.e0, self.ve, t_s, self.half_m).0,
+            reflect(self.n0, self.vn, t_s, self.half_m).0,
+        )
+    }
+
+    /// East and north velocity at `t_s`, metres per second.
+    pub fn vel(&self, t_s: f64) -> (f64, f64) {
+        (
+            self.ve * reflect(self.e0, self.ve, t_s, self.half_m).1,
+            self.vn * reflect(self.n0, self.vn, t_s, self.half_m).1,
+        )
     }
 }
 
@@ -163,7 +189,8 @@ impl Traffic {
             let n0 = (rng.unit() * 2.0 - 1.0) * half;
             let speed = 120.0 + 140.0 * rng.unit();
             let mut hdg = rng.unit() * std::f64::consts::TAU;
-            // An airliner that would leave the box within the horizon flies the other way.
+            // An airliner that would leave the box within the horizon flies the other way; one
+            // that would leave it either way (or later, past the horizon) reflects at the wall.
             let reach = speed * cfg.horizon_s;
             let (e1, n1) = (e0 + reach * hdg.sin(), n0 + reach * hdg.cos());
             if e1.abs() > half || n1.abs() > half {
@@ -180,6 +207,7 @@ impl Traffic {
                 n0,
                 ve: speed * hdg.sin(),
                 vn: speed * hdg.cos(),
+                half_m: half,
                 alt_ft,
                 phase_ns,
                 adsb,
@@ -233,6 +261,7 @@ impl Traffic {
             let t_ns = EPOCH_NS + k * NS_PER_S + a.phase_ns;
             let t_s = k as f64 + a.phase_ns as f64 * 1.0e-9;
             let (e, n) = a.pos(t_s);
+            let (ve, vn) = a.vel(t_s);
             let mut rng = Rng::from_stream(self.cfg.seed, u64::from(a.addr), k as u64);
             let (ne, nn) = (
                 rng.normal() * ADSB_SIGMA_POS_M,
@@ -245,7 +274,7 @@ impl Traffic {
             let Some((lat, lon)) = unproject(&self.frame, e + ne, n + nn) else {
                 continue;
             };
-            let (te, tn) = frame_velocity(&self.frame, e, n, a.ve, a.vn);
+            let (te, tn) = frame_velocity(&self.frame, e, n, ve, vn);
             out.push(Measurement {
                 toa_ns: t_ns,
                 pos_cov_m2: [var, 0.0, var],
@@ -504,5 +533,66 @@ mod tests {
         let dens = 38_000.0 / (side * side);
         assert!((dens - NAS_DENSITY_PER_KM2).abs() < 1e-9);
         assert!(Traffic::new(&cfg(1, 0, Layout::Nas)).is_err());
+    }
+
+    // REQ: OA-PRF-011
+    #[test]
+    fn every_aircraft_stays_in_the_box_and_in_every_radars_coverage_for_the_whole_fed_interval() {
+        // Warm-up plus measurement of the long runs, and a run far longer than the box is wide.
+        for horizon_s in [120.0, 900.0, 7_200.0] {
+            for seed in 0..40u64 {
+                let c = TrafficCfg {
+                    horizon_s,
+                    ..cfg(seed, 300, Layout::Stress)
+                };
+                let t = Traffic::new(&c).unwrap();
+                let half = STRESS_HALF_KM * 1000.0;
+                let step = if horizon_s > 1_000.0 { 7 } else { 1 };
+                for a in t.aircraft() {
+                    // Corner and wall starts are the ones that leave: the generator may place the
+                    // start anywhere in the box, and the box is covered at every point.
+                    let h = f64::from(a.alt_ft) * FT_M;
+                    for s in (0..horizon_s as i64).step_by(step) {
+                        let (e, n) = a.pos(s as f64);
+                        assert!(
+                            e.abs() <= half + 1e-6 && n.abs() <= half + 1e-6,
+                            "seed {seed} horizon {horizon_s}: {:#x} at {s} s is at ({e:.0}, {n:.0})",
+                            a.addr
+                        );
+                        let (lat, lon) = unproject(&t.frame, e, n).unwrap();
+                        for (ri, r) in t.rads.iter().enumerate() {
+                            let (rho, _) = polar_of(&r.geom, lat, lon, h);
+                            assert!(
+                                rho <= r.coverage_m,
+                                "seed {seed} horizon {horizon_s}: {:#x} at {s} s is {rho:.0} m from radar {ri} (coverage {:.0})",
+                                a.addr,
+                                r.coverage_m
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // REQ: OA-PRF-011
+    #[test]
+    fn reflection_folds_a_coordinate_into_the_box_and_flips_its_velocity_at_a_wall() {
+        let half = 50_000.0;
+        // From the east wall, heading east: straight back in.
+        assert_eq!(reflect(half, 100.0, 10.0, half), (half - 1_000.0, -1.0));
+        // From a corner, heading out on both axes, a long way: always inside.
+        for k in 0..2_000 {
+            let t = f64::from(k) * 37.0;
+            for (x0, v) in [(half, 250.0), (-half, -250.0), (0.0, 120.0), (half, -120.0)] {
+                let (x, sign) = reflect(x0, v, t, half);
+                assert!(
+                    x.abs() <= half + 1e-6 && sign.abs() == 1.0,
+                    "{x0} {v} {t}: {x}"
+                );
+            }
+        }
+        // Inside the box the track is straight.
+        assert_eq!(reflect(-10_000.0, 100.0, 50.0, half), (-5_000.0, 1.0));
     }
 }

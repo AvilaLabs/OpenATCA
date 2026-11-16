@@ -125,6 +125,11 @@ fn check_site(s: &RadarSite) -> Result<(), SimError> {
     if !(fin(s.rotation_period_s) && (0.1..=600.0).contains(&s.rotation_period_s)) {
         return Err(SimError::BadSite("rotation period"));
     }
+    // Half the nanosecond range either side of zero (the year 2116 is 4.5e18), so a scan index
+    // and a scan start stay in range for any plausible window.
+    if !(i64::MIN / 2..=i64::MAX / 2).contains(&s.epoch_ns) {
+        return Err(SimError::BadSite("epoch"));
+    }
     if !(fin(s.initial_az_deg) && (0.0..360.0).contains(&s.initial_az_deg)) {
         return Err(SimError::BadSite("initial azimuth"));
     }
@@ -190,7 +195,7 @@ pub fn scan_start_ns(site: &RadarSite, k: i64) -> i64 {
 /// The beam azimuth at `t_ns`, degrees in `[0, 360)`.
 pub fn beam_az_deg(site: &RadarSite, t_ns: i64) -> f64 {
     let p = period_ns(site);
-    let into = (t_ns - site.epoch_ns).rem_euclid(p);
+    let into = (i128::from(t_ns) - i128::from(site.epoch_ns)).rem_euclid(i128::from(p)) as i64;
     wrap360(site.initial_az_deg + 360.0 * into as f64 / p as f64)
 }
 
@@ -253,7 +258,9 @@ fn solve_crossing(
         };
         let (_, az) = polar_of(frame, p.lat, p.lon, height_m(&p));
         let frac = wrap360(az - site.initial_az_deg) / 360.0;
-        let t_new = (scan_start + (frac * p_ns as f64).round() as i64).min(scan_start + p_ns - 1);
+        let t_new = scan_start
+            .saturating_add((frac * p_ns as f64).round() as i64)
+            .min(scan_start.saturating_add(p_ns - 1));
         let moved = (t_new - t).abs();
         t = t_new;
         if moved <= SOLVE_TOL_NS {
@@ -322,12 +329,16 @@ pub fn simulate_radar(
             if lo > hi {
                 continue;
             }
-            let k0 = (lo - site.epoch_ns).div_euclid(p_ns);
-            let k1 = (hi - site.epoch_ns).div_euclid(p_ns);
+            let (Some(d0), Some(d1)) =
+                (lo.checked_sub(site.epoch_ns), hi.checked_sub(site.epoch_ns))
+            else {
+                return Err(SimError::BadSite("epoch"));
+            };
+            let (k0, k1) = (d0.div_euclid(p_ns), d1.div_euclid(p_ns));
             for k in k0..=k1 {
                 stats.crossings += 1;
                 let start = scan_start_ns(site, k);
-                let guess = (start + p_ns / 2).clamp(ls, le);
+                let guess = start.saturating_add(p_ns / 2).clamp(ls, le);
                 let (t, pos) = match solve_crossing(truth, addr, site, &frame, start, guess) {
                     Solve::NoTruth => {
                         stats.no_truth += 1;
@@ -410,7 +421,9 @@ pub fn simulate_radar(
                     // when the beam is at that azimuth in the same revolution.
                     let az = fa * 360.0;
                     let frac = wrap360(az - site.initial_az_deg) / 360.0;
-                    let ft = (start + (frac * p_ns as f64).round() as i64).min(start + p_ns - 1);
+                    let ft = start
+                        .saturating_add((frac * p_ns as f64).round() as i64)
+                        .min(start.saturating_add(p_ns - 1));
                     rows.push(Plot {
                         time_ns: ft,
                         scan: k,
