@@ -3491,3 +3491,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-PRF-008** Every plot of the synthetic traffic is where its aircraft is at the time the plot
   carries, to within the plot noise; a revolution in which the aircraft crosses the beam's starting
   azimuth and the crossing cannot be solved gives no plot.
+- **OA-PRF-009** A capacity run passes (`keeps_up`, and the strict knee with it) only if every
+  measured second's advance took under 1 s of wall time and every loss-of-work counter (`loss_counters`:
+  refusals, overflows, capped or ungated association work, full tables and buffers, late and dropped
+  inputs, output rows lost) is zero over the measured window; a run that is fast but loses work is
+  reported as lost work, not a pass. The mean and 99th percentile are reported, not tested. Every
+  counter of the fusion and tracker statistics is listed as loss or as not loss.
+- **OA-PRF-010** The command line refuses a `--max-wall` that is not a positive finite number, an
+  `--adsb-frac` outside 0 to 1, and traffic times (`--warmup`, `--duration`, `--clip-secs`) whose
+  sum overflows or passes the time range the layer accepts, each with a message naming the flag.
