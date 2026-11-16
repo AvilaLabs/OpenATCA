@@ -35,6 +35,9 @@ pub const ADDR_BASE: u32 = 0xA0_0000;
 /// Most aircraft: addresses stay below 2^24.
 pub const MAX_AIRCRAFT: usize = 0x5F_0000;
 const NS_PER_S: i64 = 1_000_000_000;
+/// A beam crossing is settled when the beam's azimuth at the stamped time is within this of the
+/// aircraft's, degrees (0.01 degrees at 100 km is 17 m; the loop converges to far less).
+const CROSSING_TOL_DEG: f64 = 0.005;
 /// ADS-B position sigma per axis, metres: the NACp 9 bound (30 m, 95 %) over 2.448.
 const ADSB_SIGMA_POS_M: f64 = 30.0 / 2.447_746_830_680_816;
 /// ADS-B velocity sigma per axis, m/s: NACv 2.
@@ -299,17 +302,28 @@ fn scan_plots(ac: &[Aircraft], frame: &Frame, seed: u64, ri: u64, rad: &mut Rad,
         let mut t_ns = start + p_ns / 2;
         let mut polar = (0.0, 0.0);
         let mut ok = true;
+        let mut settled = false;
         // The beam reaches azimuth az at start + az/360 of a period; the aircraft moves meanwhile.
-        for _ in 0..4 {
+        for _ in 0..5 {
             let (e, n) = a.pos((t_ns - EPOCH_NS) as f64 * 1.0e-9);
             let Some((lat, lon)) = unproject(frame, e, n) else {
                 ok = false;
                 break;
             };
             polar = polar_of(&rad.geom, lat, lon, h);
-            t_ns = start + (polar.1 / 360.0 * p_ns as f64) as i64;
+            let next = start + (polar.1 / 360.0 * p_ns as f64) as i64;
+            // Settled when the beam is at the aircraft's azimuth at the time the aircraft was
+            // placed at. An aircraft crossing the beam's starting azimuth during the revolution
+            // has no crossing in it (the iteration then jumps between its two ends): no plot,
+            // as the simulator of `oa-sensorsim` makes none for an unsolved crossing.
+            let beam = (t_ns - start) as f64 / p_ns as f64 * 360.0;
+            if ((polar.1 - beam + 540.0).rem_euclid(360.0) - 180.0).abs() < CROSSING_TOL_DEG {
+                settled = true;
+                break;
+            }
+            t_ns = next;
         }
-        if !ok || polar.0 > rad.coverage_m || polar.0 < 2.0 * MIN_PLOT_RANGE_M {
+        if !ok || !settled || polar.0 > rad.coverage_m || polar.0 < 2.0 * MIN_PLOT_RANGE_M {
             continue;
         }
         let mut rng = Rng::from_stream(seed.wrapping_add(ri + 1), u64::from(a.addr), j as u64);
@@ -379,6 +393,43 @@ mod tests {
             assert_ne!(a1, a3);
             assert_ne!(p1, p3);
         }
+    }
+
+    // REQ: OA-PRF-008
+    #[test]
+    fn every_plot_is_where_its_aircraft_is_at_the_time_it_carries() {
+        // The beam crossing is solved against the moving aircraft. An aircraft crossing the beam's
+        // starting azimuth during a revolution has no crossing in it (or one at either end of the
+        // revolution), and a plot made from a crossing that was not found would carry the position
+        // of one time and the stamp of another.
+        let c = cfg(1, 1200, Layout::Stress);
+        let mut t = Traffic::new(&c).unwrap();
+        let mut w = Vec::new();
+        let mut checked = 0usize;
+        for k in 0..120 {
+            t.plot_windows(k, &mut w);
+            for (ri, ps) in w.iter().enumerate() {
+                let rad = &t.rads[ri];
+                for p in ps {
+                    let a = &t.ac[(p.label - ADDR_BASE) as usize];
+                    let (e, n) = a.pos((p.time_ns - EPOCH_NS) as f64 * 1.0e-9);
+                    let (lat, lon) = unproject(&t.frame, e, n).unwrap();
+                    let (rho, az) = polar_of(&rad.geom, lat, lon, f64::from(a.alt_ft) * FT_M);
+                    let dr = (p.range_m - rho).abs() / rad.site.sigma_range_m;
+                    let da = ((p.az_deg - az + 540.0).rem_euclid(360.0) - 180.0).abs()
+                        / rad.site.sigma_az_deg;
+                    // 6 sigma of two normals, and the millisecond rounding of the stamp.
+                    assert!(
+                        dr < 6.0 && da < 6.0,
+                        "radar {ri} aircraft {:#x} t={:.3}: {dr:.1} sigma in range, {da:.1} in azimuth",
+                        p.label,
+                        (p.time_ns - EPOCH_NS) as f64 * 1.0e-9
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 40_000, "{checked}");
     }
 
     // REQ: OA-PRF-002

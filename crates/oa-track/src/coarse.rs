@@ -1,12 +1,15 @@
-//! A uniform latitude and longitude grid over the live tracks of one association, so that the
-//! coarse window of a plot is tested against the few tracks near it instead of every track.
-//! Core (pure).
+//! A grid over the live tracks of one association, in cells of about [`CELL_DEG`] degrees (5.6
+//! km) on a side, so that the coarse window of a plot is tested against the few tracks near it
+//! instead of every track. Core (pure).
 //!
 //! The window of `fusion.rs` is in the radar's own polar terms (slant range and azimuth, scaled by
 //! the track's ground range). The grid does not replace that test: it only narrows the tracks the
 //! test is applied to, to a set certain to contain every track the test would pass, so the
-//! outcome is the same as testing every track. The set is the tracks in the cells of a
-//! latitude and longitude box around the region that can pass the window:
+//! outcome is the same as testing every track. The cells are bands of [`CELL_DEG`] of latitude,
+//! each cut into as many cells of longitude as keep a cell at least as wide as it is tall at the
+//! band's edge nearest a pole (about 7,200 at the equator, one in the polar band), so a cell is the
+//! same size everywhere on earth. The set is the tracks in the cells of the latitude and longitude
+//! boxes of the region that can pass the window:
 //!
 //! * the slant range of a passing track is within the window width of the plot's, and its ground
 //!   range is at most that plus the width, and at least what a height difference of the tallest
@@ -18,11 +21,22 @@
 //!   covers the difference between the projection's distances and the radar model's (0.3 % of the
 //!   sphere against the ellipsoid, and the height of the aircraft) with room.
 //!
-//! The box is the latitude and longitude extent of nine points of the rectangle, with a margin.
-//! A pole that lies inside the rectangle (judged in the rectangle's own plane, with a margin, not
-//! from the nine points) makes the box run to that pole and take every longitude; longitudes are taken relative to the box's
-//! centre and wrapped, so a box across the +-180 degree seam is two runs of cells; a latitude
-//! beyond the poles is clamped to the last cell.
+//! The rectangle is cut along its length into pieces of at most [`SEGMENT_M`], and each piece has a
+//! box: the latitude and longitude extent of nine points of the piece, with a margin. A box over
+//! the whole rectangle would, on a long rectangle at an angle, hold many times its area in cells.
+//! A pole that lies inside a piece (judged in the rectangle's own plane, with a margin, not
+//! from the nine points) makes that piece's box run to that pole and take every longitude of the
+//! bands it spans (few, near a pole); longitudes are taken relative to the box's centre and
+//! wrapped, so a box across the +-180 degree seam is two runs of cells; a latitude beyond the
+//! poles is clamped to the last cell.
+//!
+//! **Superset.** Every track is in the cell of its own latitude and longitude. A piece's box
+//! contains the piece (the margin covers the curvature between the nine points, which is smaller
+//! the shorter the piece), the pieces' union is the rectangle, and the query takes every cell that
+//! meets a box (every band of the box's latitudes, and in each the cells of the box's longitudes
+//! or all of them). A track the window passes is in the rectangle, so in a cell taken. Anything
+//! the box cannot say (a point the chart cannot reach, a count of cells above the number of tracks)
+//! takes every track.
 //!
 //! The index is a sorted array of one word per track (cell number above, track number below), built
 //! in a buffer allocated when it is made and queried into one the caller owns: building is a sort in place, a query a binary
@@ -32,10 +46,13 @@
 
 use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
-/// Side of a cell, degrees (about 28 km of latitude).
-pub const CELL_DEG: f64 = 0.25;
-const N_LAT: i64 = 720;
-const N_LON: i64 = 1440;
+/// Height of a band of cells, degrees (about 5.6 km of latitude).
+pub const CELL_DEG: f64 = 0.05;
+const N_LAT: i64 = 3_600;
+/// Longest piece of the window's rectangle that has a box of its own, metres.
+pub const SEGMENT_M: f64 = 20_000.0;
+/// Most pieces of one rectangle (a rectangle longer than this times [`SEGMENT_M`] has longer pieces).
+const SEGMENTS_MAX: usize = 64;
 /// The cell of tracks every query includes.
 const ALWAYS: u32 = u32::MAX;
 /// Margin added to the rectangle, metres, and the fraction of the range added to it.
@@ -53,13 +70,29 @@ pub struct CoarseIndex {
     /// `cell << 32 | track`, ascending after a build.
     keys: Vec<u64>,
     frame: Option<Frame>,
+    /// Per band of latitude: the cells of longitude in it, and the number of the first cell.
+    lon_cells: Vec<u32>,
+    first_cell: Vec<u32>,
 }
 
 /// An index with room for `capacity` tracks, which is all it will ever hold.
 pub fn coarse_new(capacity: usize) -> CoarseIndex {
+    let mut lon_cells = Vec::with_capacity(N_LAT as usize);
+    let mut first_cell = Vec::with_capacity(N_LAT as usize);
+    let mut next = 0u32;
+    for la in 0..N_LAT {
+        let lo = -90.0 + CELL_DEG * la as f64;
+        let edge = lo.abs().max((lo + CELL_DEG).abs()).min(90.0);
+        let n = ((360.0 * oa_math::cos(edge.to_radians()) / CELL_DEG).floor() as u32).max(1);
+        lon_cells.push(n);
+        first_cell.push(next);
+        next += n;
+    }
     CoarseIndex {
         keys: Vec::with_capacity(capacity),
         frame: None,
+        lon_cells,
+        first_cell,
     }
 }
 
@@ -72,12 +105,20 @@ fn lat_cell(lat: f64) -> i64 {
     (((lat + 90.0) / CELL_DEG).floor() as i64).clamp(0, N_LAT - 1)
 }
 
-fn lon_cell(lon: f64) -> i64 {
-    (((lon + 180.0) / CELL_DEG).floor() as i64).rem_euclid(N_LON)
+/// The cells of longitude of band `la`.
+fn band_cells(ix: &CoarseIndex, la: i64) -> i64 {
+    ix.lon_cells.get(la as usize).map_or(1, |&n| i64::from(n))
 }
 
-fn cell_of(lat: f64, lon: f64) -> u32 {
-    (lat_cell(lat) * N_LON + lon_cell(lon)) as u32
+/// The cell number of the place, or [`ALWAYS`] for an index without its bands.
+fn cell_of(ix: &CoarseIndex, lat: f64, lon: f64) -> u32 {
+    let la = lat_cell(lat);
+    let n = band_cells(ix, la);
+    let lo = (((lon + 180.0) / 360.0 * n as f64).floor() as i64).rem_euclid(n);
+    match ix.first_cell.get(la as usize) {
+        Some(&f) => f + lo as u32,
+        None => ALWAYS,
+    }
 }
 
 /// Builds the index of `n` tracks about a radar at `(site_lat, site_lon)`. `place(i)` is track
@@ -98,7 +139,7 @@ pub fn coarse_build(
             continue;
         }
         let cell = match place(i) {
-            Some((lat, lon)) => cell_of(lat, lon),
+            Some((lat, lon)) => cell_of(ix, lat, lon),
             None => ALWAYS,
         };
         ix.keys.push(u64::from(cell) << 32 | i as u64);
@@ -152,6 +193,7 @@ fn push_cell(keys: &[u64], cand: &mut Vec<u32>, cell: u32) {
 }
 
 fn push_all(ix: &CoarseIndex, out: &mut Vec<u32>) {
+    out.clear();
     for &k in &ix.keys {
         out.push(k as u32);
     }
@@ -189,31 +231,62 @@ pub fn coarse_query(
     // by no more than the width less than the smallest ground range.
     let a_lo = if g_lo > w { g_lo - w } else { -w };
     let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
-    // Latitude and longitude of nine points of the rectangle.
+    if ix.lon_cells.len() != N_LAT as usize {
+        return push_all(ix, out);
+    }
+    // The rectangle in pieces, each with a box of its own.
+    let length = g_hi - a_lo;
+    let pieces = ((length / SEGMENT_M).ceil() as usize).clamp(1, SEGMENTS_MAX);
+    let step = length / pieces as f64;
+    for k in 0..pieces {
+        let (p_lo, p_hi) = (a_lo + step * k as f64, a_lo + step * (k + 1) as f64);
+        let p_hi = if k + 1 == pieces { g_hi } else { p_hi };
+        if !piece_cells(ix, &frame, out, (st, ct), (p_lo, p_hi), w) {
+            return push_all(ix, out);
+        }
+    }
+    push_cell(&ix.keys, out, ALWAYS);
+    out.sort_unstable();
+    out.dedup();
+}
+
+/// Appends the tracks of the cells that meet the box of the piece of the rectangle from `a_lo` to
+/// `a_hi` along the plot's azimuth line (`st`, `ct`: its sine and cosine) and `w` either side of it.
+/// `false` if the tracks are better all taken (a point the chart cannot reach, or more cells than
+/// tracks), with nothing certain about `out`.
+fn piece_cells(
+    ix: &CoarseIndex,
+    frame: &Frame,
+    out: &mut Vec<u32>,
+    (st, ct): (f64, f64),
+    (a_lo, a_hi): (f64, f64),
+    w: f64,
+) -> bool {
+    // Latitude and longitude of nine points of the piece.
     let mut pts = [(0.0f64, 0.0f64); 9];
     let mut i = 0usize;
-    for a in [a_lo, 0.5 * (a_lo + g_hi), g_hi] {
+    for a in [a_lo, 0.5 * (a_lo + a_hi), a_hi] {
         for c in [-w, 0.0, w] {
             if let Some(p) = pts.get_mut(i) {
                 // A point the chart cannot reach is a NaN, which the check below sends to the full scan.
-                *p = unproject(&frame, a * st + c * ct, a * ct - c * st)
+                *p = unproject(frame, a * st + c * ct, a * ct - c * st)
                     .unwrap_or((f64::NAN, f64::NAN));
             }
             i += 1;
         }
     }
     if pts.iter().any(|p| !(p.0.is_finite() && p.1.is_finite())) {
-        return push_all(ix, out);
+        return false;
     }
     let mut lat_lo = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - PAD_DEG;
     let mut lat_hi = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + PAD_DEG;
-    // A pole inside the rectangle (in its plane, with a margin), whatever the nine points show.
+    // A pole inside the piece (in its plane, with a margin), whatever the nine points show.
     let pole_in = |pole: f64| {
-        let (x, y) = project(&frame, pole, 0.0);
+        let (x, y) = project(frame, pole, 0.0);
         let (a, c) = (x * st + y * ct, x * ct - y * st);
         let pad = 2.0 * PAD_DEG * M_PER_DEG;
         !(a.is_finite() && c.is_finite())
-            || (a >= a_lo - pad && a <= g_hi + pad && c.abs() <= w + pad)
+            || (a >= a_lo - pad && a <= a_hi + pad && c.abs() <= w + pad)
     };
     let (north, south) = (pole_in(90.0), pole_in(-90.0));
     if north {
@@ -235,24 +308,31 @@ pub fn coarse_query(
     let pad_lon = PAD_DEG / oa_math::cos(lat_edge.to_radians()).max(1.0e-3);
     let (lon_from, lon_to) = (lon_c + d_lo - pad_lon, lon_c + d_hi + pad_lon);
     let (c_lo, c_hi) = (lat_cell(lat_lo), lat_cell(lat_hi));
-    let mut l_lo = ((lon_from + 180.0) / CELL_DEG).floor() as i64;
-    let mut l_hi = ((lon_to + 180.0) / CELL_DEG).floor() as i64;
-    if reaches_pole || l_hi - l_lo + 1 >= N_LON {
-        (l_lo, l_hi) = (0, N_LON - 1);
-    }
-    let cells = (c_hi - c_lo + 1).saturating_mul(l_hi - l_lo + 1);
+    // The cells of longitude of a band: from the cell of the box's west edge to its east edge, or
+    // all of them.
+    let span = |la: i64| {
+        let n = band_cells(ix, la);
+        let at = |lon: f64| ((lon + 180.0) / 360.0 * n as f64).floor() as i64;
+        let (l_lo, l_hi) = (at(lon_from), at(lon_to));
+        if reaches_pole || l_hi - l_lo + 1 >= n {
+            (0, n - 1, n)
+        } else {
+            (l_lo, l_hi, n)
+        }
+    };
+    let cells: i64 = (c_lo..=c_hi).map(|la| span(la).1 - span(la).0 + 1).sum();
     if cells > ix.keys.len() as i64 + 1 {
         // More cells than tracks: walking the tracks is cheaper than the cells.
-        return push_all(ix, out);
+        return false;
     }
     for la in c_lo..=c_hi {
+        let (l_lo, l_hi, n) = span(la);
+        let first = ix.first_cell.get(la as usize).copied().unwrap_or(0);
         for lo in l_lo..=l_hi {
-            let cell = (la * N_LON + lo.rem_euclid(N_LON)) as u32;
-            push_cell(&ix.keys, out, cell);
+            push_cell(&ix.keys, out, first + lo.rem_euclid(n) as u32);
         }
     }
-    push_cell(&ix.keys, out, ALWAYS);
-    out.sort_unstable();
+    true
 }
 
 // ---- points in a plane --------------------------------------------------------------------
@@ -666,5 +746,102 @@ mod tests {
         assert!(!point_grid_query(&h, &mut out, 0.0, 0.0, f64::NAN));
         assert!(!point_grid_query(&h, &mut out, 0.0, 0.0, 1.0e6));
         assert_eq!(point_grid_buffer(&g), before);
+    }
+
+    // REQ: OA-TRK-306
+    #[test]
+    fn the_fine_grid_finds_every_track_of_the_window_at_the_poles_and_the_seam() {
+        // Dense tracks of standard uncertainty (a standard deviation of 100 m or less, so the
+        // windows are the fusion layer's usual width) round radars on the +-180 degree seam, at
+        // the equator, and beside and over each pole; plots near the tracks and at random. The
+        // grid's candidates hold every track the window passes, and are a small part of the whole
+        // wherever no pole is in the window.
+        let mut rng = Rng::from_seed(91);
+        let (mut visited, mut total) = (0usize, 0usize);
+        for (lat, lon, reach_m) in [
+            (0.0, 179.999, 90_000.0),
+            (-33.0, -179.99, 90_000.0),
+            (41.98, -87.91, 90_000.0),
+            (89.95, 30.0, 40_000.0),
+            (-89.9, -120.0, 40_000.0),
+            (89.5, 179.9, 120_000.0),
+            (-89.99, 0.0, 20_000.0),
+            (88.0, -179.9, 250_000.0),
+        ] {
+            let s = site(lat, lon);
+            let mut t = tracks(&s, 4_000, reach_m, &mut rng);
+            for x in &mut t {
+                x.polar.3 = 100.0 * rng.unit();
+            }
+            let (ix, dh, width) = built(&s, &t);
+            let mut cand = Vec::with_capacity(t.len());
+            let mut found = 0usize;
+            for k in 0..2_000usize {
+                let x = &t[k % t.len()].polar;
+                let (prho, paz) = if k % 4 == 0 {
+                    (
+                        1_000.0 + (reach_m - 1_000.0) * rng.unit(),
+                        360.0 * rng.unit(),
+                    )
+                } else {
+                    (
+                        x.0 + 3_000.0 * (rng.unit() - 0.5),
+                        (x.1 + 0.05 * (rng.unit() - 0.5)).rem_euclid(360.0),
+                    )
+                };
+                coarse_query(&ix, &mut cand, prho, paz, dh, width);
+                assert!(cand.windows(2).all(|w| w[0] < w[1]), "not ascending");
+                let brute: Vec<u32> = (0..t.len() as u32)
+                    .filter(|&i| coarse_passes(COARSE_M, (prho, paz), t[i as usize].polar))
+                    .collect();
+                let narrowed: Vec<u32> = cand
+                    .iter()
+                    .copied()
+                    .filter(|&i| coarse_passes(COARSE_M, (prho, paz), t[i as usize].polar))
+                    .collect();
+                assert_eq!(narrowed, brute, "site {lat} {lon} plot {prho} {paz}");
+                found += brute.len();
+                if lat.abs() <= 85.0 {
+                    visited += cand.len();
+                    total += t.len();
+                }
+            }
+            assert!(found > 0, "site {lat} {lon}: the test found nothing");
+        }
+        // Away from the poles the grid is a narrowing to a few per cent of the tracks.
+        assert!(visited * 10 < total, "{visited} of {total}");
+    }
+
+    // REQ: OA-TRK-306
+    #[test]
+    fn a_cell_is_about_the_same_size_everywhere_and_the_numbers_of_cells_are_distinct() {
+        let ix = coarse_new(1);
+        assert_eq!(ix.lon_cells.len(), N_LAT as usize);
+        // Cell widths on the ground, at the band's edge nearest a pole, at least the height.
+        for la in [0i64, 700, 1_800, 2_400, 3_000, 3_599] {
+            let edge = (-90.0 + CELL_DEG * la as f64)
+                .abs()
+                .max((-90.0 + CELL_DEG * (la + 1) as f64).abs());
+            let n = band_cells(&ix, la);
+            let width_m = 360.0 / n as f64 * M_PER_DEG * oa_math::cos(edge.to_radians());
+            let height_m = CELL_DEG * M_PER_DEG;
+            assert!(
+                n == 1 || width_m >= height_m * 0.999,
+                "band {la}: {width_m} m"
+            );
+            assert!(n == 1 || width_m < 2.0 * height_m, "band {la}: {width_m} m");
+        }
+        // Cell numbers run on without a gap or a repeat, below the cell of the unplaced tracks.
+        let mut next = 0u32;
+        for la in 0..N_LAT {
+            assert_eq!(ix.first_cell[la as usize], next);
+            next += ix.lon_cells[la as usize];
+        }
+        assert!(next < ALWAYS);
+        // Both sides of the seam are cells of the same band, the first and the last.
+        let (west, east) = (cell_of(&ix, 10.0, -179.999), cell_of(&ix, 10.0, 179.999));
+        let la = lat_cell(10.0) as usize;
+        assert_eq!(west, ix.first_cell[la]);
+        assert_eq!(east, ix.first_cell[la] + ix.lon_cells[la] - 1);
     }
 }
