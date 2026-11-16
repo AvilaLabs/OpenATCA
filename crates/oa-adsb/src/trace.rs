@@ -11,6 +11,7 @@ use crate::{
     FLD_SQUAWK, FLD_TRACK, FLD_VERSION, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN, MAX_TRACE_NODES,
     MAX_TRACE_ROWS, NONE_I16, NONE_U16, NONE_U8, NON_ICAO, REJ_FLAGS, REJ_POSITION, REJ_SHAPE,
     REJ_TIME, ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES, SOURCE_UNKNOWN,
+    TIME_MAX_NS, TIME_MIN_NS,
 };
 
 /// Why a whole trace file was refused.
@@ -486,6 +487,12 @@ pub fn decode_trace(
             continue;
         };
         let time_ms = base_ms + fixed(dt, 1000.0);
+        // The payload reader drops a record outside this range, so the producer must not write it.
+        let time_ns = time_ms.saturating_mul(1_000_000);
+        if !(TIME_MIN_NS..TIME_MAX_NS).contains(&time_ns) {
+            reject(&mut local, REJ_TIME);
+            continue;
+        }
         let lat = cols.get(1).and_then(|&n| doc.as_f64(n));
         let lon = cols.get(2).and_then(|&n| doc.as_f64(n));
         let (Some(lat), Some(lon)) = (lat, lon) else {
@@ -505,7 +512,6 @@ pub fn decode_trace(
             local.outside_box += 1;
             continue;
         }
-        let time_ns = time_ms.saturating_mul(1_000_000);
         if time_ns < filter.from_ns || time_ns >= filter.to_ns {
             local.outside_time += 1;
             continue;

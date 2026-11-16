@@ -411,10 +411,22 @@ fn ols_slope(n: usize, get: impl Fn(usize) -> Option<(f64, f64)>) -> Option<(f64
     Some((slope, (sse / (cnt - 2) as f64 / sxx).sqrt(), cnt))
 }
 
+/// The widest longitude span, degrees, of the samples of [`t3_heading_grid`]: past it the
+/// regression is refused and counted. The term `(lon - lon_ref) * sin(lat)` is a plane
+/// approximation of the convergence, and a cohort spread round the globe has no single reference.
+pub const HEADING_GRID_MAX_SPAN_DEG: f64 = 90.0;
+
+/// 1e-7 degree units in a half turn.
+const HALF_TURN_E7: i64 = 1_800_000_000;
+
 /// T3 heading against grid convergence: the heading error (degrees) regressed on
 /// `c = (lon - lon_ref) * sin(lat)`, with `lon_ref` the mean longitude of the samples used.
 /// A slope near 1 says the scored velocity is reported in a plane grid rotated against true north
 /// by the meridian convergence rather than in true east and north; a slope near 0 says it is not.
+/// The result does not depend on the order of the pairs: longitudes are taken relative to the
+/// smallest longitude of the samples (wrapped, so a run across the antimeridian is one block),
+/// and the samples are summed in sorted order. A cohort wider than
+/// [`HEADING_GRID_MAX_SPAN_DEG`] is refused: scalar `refused_span` is 1 and no slope is given.
 /// Scalars: `slope_deg_per_deg`, `slope_se` (sample standard error, treating samples as
 /// independent), `n` and `lon_ref_deg`.
 pub fn t3_heading_grid(p: &PairTable) -> MetricResult {
@@ -423,31 +435,61 @@ pub fn t3_heading_grid(p: &PairTable) -> MetricResult {
         "heading error against (lon - mean lon) * sin(lat)",
         "deg per deg",
     );
-    // Longitudes are taken relative to the first sample's, wrapped, so a run across the
-    // antimeridian is one block.
-    let anchor = p
-        .lon_e7
-        .iter()
-        .zip(&p.hdg_err_deg)
-        .find(|(_, h)| h.is_finite())
-        .map_or(0.0, |(&l, _)| f64::from(l) * 1e-7);
-    let sample = |i: usize| -> Option<(f64, f64, f64)> {
-        let h = f64::from(p.hdg_err_deg.get(i).copied()?);
+    let used = |i: usize| -> Option<(i32, i32, f32)> {
+        let h = p.hdg_err_deg.get(i).copied()?;
         let (la, lo) = (p.lat_e7.get(i).copied()?, p.lon_e7.get(i).copied()?);
-        if !h.is_finite() {
-            return None;
-        }
-        let dlon = crate::geo::wrap180(f64::from(lo) * 1e-7 - anchor);
-        Some((dlon, f64::from(la) * 1e-7, h))
+        h.is_finite().then_some((la, lo, h))
     };
-    let (mut cnt, mut sum) = (0u64, 0.0);
-    for (dlon, _, _) in (0..p.hdg_err_deg.len()).filter_map(sample) {
-        cnt += 1;
-        sum += dlon;
+    let anchor = (0..p.hdg_err_deg.len())
+        .filter_map(used)
+        .map(|(_, lo, _)| lo)
+        .min();
+    let mut rows: Vec<(i32, i64, u32)> = Vec::new();
+    if let Some(anchor) = anchor {
+        let wrap = |lo: i32| -> i64 {
+            (i64::from(lo) - i64::from(anchor) + HALF_TURN_E7).rem_euclid(2 * HALF_TURN_E7)
+                - HALF_TURN_E7
+        };
+        rows.extend(
+            (0..p.hdg_err_deg.len())
+                .filter_map(used)
+                .map(|(la, lo, h)| {
+                    // The bits of the error as a key that sorts as the value does.
+                    let b = h.to_bits();
+                    (la, wrap(lo), if b >> 31 == 0 { b | 1 << 31 } else { !b })
+                }),
+        );
+        rows.sort_unstable();
     }
-    let mean = if cnt > 0 { sum / cnt as f64 } else { 0.0 };
-    let fit = ols_slope(p.hdg_err_deg.len(), |i| {
-        sample(i).map(|(dlon, lat, h)| ((dlon - mean) * lat.to_radians().sin(), h))
+    let cnt = rows.len() as u64;
+    let (lo_e7, hi_e7) = rows
+        .iter()
+        .fold((i64::MAX, i64::MIN), |(l, h), x| (l.min(x.1), h.max(x.1)));
+    if cnt > 0 && (hi_e7 - lo_e7) as f64 * 1e-7 > HEADING_GRID_MAX_SPAN_DEG {
+        r.scalars.push(("n".to_string(), cnt as f64));
+        r.scalars.push(("refused_span".to_string(), 1.0));
+        r.notes.push(format!(
+            "slope not computed: the samples span {:.1} degrees of longitude, more than {HEADING_GRID_MAX_SPAN_DEG} degrees",
+            (hi_e7 - lo_e7) as f64 * 1e-7
+        ));
+        return r;
+    }
+    let sum: i64 = rows.iter().map(|x| x.1).sum();
+    let mean = if cnt > 0 {
+        sum as f64 / cnt as f64 * 1e-7
+    } else {
+        0.0
+    };
+    let fit = ols_slope(rows.len(), |i| {
+        let &(la, dlon, key) = rows.get(i)?;
+        let b = if key >> 31 == 1 {
+            key & !(1 << 31)
+        } else {
+            !key
+        };
+        let h = f64::from(f32::from_bits(b));
+        let lat = f64::from(la) * 1e-7;
+        Some(((dlon as f64 * 1e-7 - mean) * lat.to_radians().sin(), h))
     });
     match fit {
         Some((slope, se, n)) => {
@@ -456,7 +498,7 @@ pub fn t3_heading_grid(p: &PairTable) -> MetricResult {
             r.scalars.push(("n".to_string(), n as f64));
             r.scalars.push((
                 "lon_ref_deg".to_string(),
-                crate::geo::wrap180(anchor + mean),
+                crate::geo::wrap180(f64::from(anchor.unwrap_or(0)) * 1e-7 + mean),
             ));
         }
         None => {

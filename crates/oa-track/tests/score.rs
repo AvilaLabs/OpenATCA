@@ -108,6 +108,47 @@ fn the_split_is_alternate_reports_per_aircraft_disjoint_and_complete() {
     assert_eq!(ka, ka2);
 }
 
+// REQ: OA-TRK-308
+#[test]
+fn siblings_differing_in_source_or_stale_are_not_copies_and_input_order_does_not_matter() {
+    let mut current = base_row(0x100009, 4.0);
+    current.lat_e7 = 410_000_000;
+    let mut stale = current;
+    stale.flags = oa_adsb::F_STALE;
+    let mut mlat = current;
+    mlat.source = 3;
+    let rows = [stale, mlat, current];
+    let split_of = |order: &[usize]| {
+        let mut r = Reports::default();
+        // A neighbour before and after, so the group lands on either side.
+        reports_push(&mut r, &base_row(0x100009, 0.0));
+        for &i in order {
+            reports_push(&mut r, &rows[i]);
+        }
+        let (a, b, st) = split_reports(&r);
+        let dump = |s: &Reports| -> Vec<Row> {
+            (0..reports_len(s))
+                .map(|i| reports_row(s, i).unwrap())
+                .collect()
+        };
+        (dump(&a), dump(&b), st)
+    };
+    let (a1, b1, st1) = split_of(&[0, 1, 2]);
+    let (a2, b2, st2) = split_of(&[2, 1, 0]);
+    assert_eq!(
+        (
+            st1.duplicates_removed,
+            st1.conflict_groups,
+            st1.conflict_rows
+        ),
+        (0, 1, 3)
+    );
+    assert_eq!(st1, st2);
+    assert_eq!(a1, a2);
+    assert_eq!(b1, b2);
+    assert_eq!(a1.len() + b1.len(), 4);
+}
+
 // REQ: OA-TRK-024
 #[test]
 fn quality_fields_are_carried_over_the_whole_sequence_before_the_split() {
@@ -450,8 +491,13 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
 // single-precision units; terms near zero, the covariance cross term, turn rate and vertical
 // rate, move by more in relative terms). The value before was
 // "a70fef27c29a09f93d3a28b2a2dff3a2c70b1cc707288aea69466bf42e1f37cb".
+// (5) Reports of one address and time that differ in any field scoring reads are not copies
+// (OA-TRK-308), and such siblings pass quality handling in key order, not input order: split
+// counts unchanged (0 copies removed, 319 conflict groups, 638 rows), the same 108,643 rows, 3,599
+// ticks, none skipped; only the order of the siblings within the 319 groups of set A moved. The
+// value before was "2594d4f08780d75f4f38627cb49d636212de27addc34a247bf5572f26902be46".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "2594d4f08780d75f4f38627cb49d636212de27addc34a247bf5572f26902be46";
+    "fad4e9c12707743add69d2364c22b1573f4ef8231ccdc528526bbad4544d9842";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

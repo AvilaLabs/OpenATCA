@@ -217,7 +217,9 @@ fn scale_of(max: f64) -> f64 {
 /// and the root mean square are summed on the values divided by a power of two near the largest
 /// magnitude, so no sum or square leaves the range of a double for finite input: `[1e200]` has
 /// RMS `1e200`, and a value near the smallest subnormal does not square to zero. A statistic that
-/// is still not finite is not computable: see [`stats_checked`].
+/// is still not finite is not computable: see [`stats_checked`]. The mean keeps what the scaling
+/// rounds away from values too small for the scaled range, so `[1e308, -1e308, 1e-300]` has mean
+/// `3.33e-301`.
 pub fn stats_of(values: &[f64]) -> Stats {
     match stats_checked(values) {
         Ok(s) => s,
@@ -247,13 +249,26 @@ pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
     } else {
         let scale = scale_of(max);
         let mut sum = ExactSum::default();
+        // What dividing by the scale rounds away (a value too small for the scaled range), summed
+        // exactly on its own: it is below 8 in magnitude, so it cannot overflow, and a mean
+        // that cancels to nothing in the scaled sum keeps it.
+        let mut lost = ExactSum::default();
         let mut sumsq = ExactSum::default();
         for &v in values.iter().filter(|v| v.is_finite()) {
             let u = v / scale;
             sum.add(u);
+            lost.add(v - u * scale);
             sumsq.add(u * u);
         }
-        (sum.value() / n * scale, (sumsq.value() / n).sqrt() * scale)
+        // Unscaling is exact unless the sum leaves the range of a double; then the mean is as
+        // large as the sum is, and what the scaling lost is far below it.
+        let total = sum.value() * scale;
+        let mean = if total.is_finite() {
+            (total + lost.value()) / n
+        } else {
+            sum.value() / n * scale
+        };
+        (mean, (sumsq.value() / n).sqrt() * scale)
     };
     if !mean.is_finite() || !rms.is_finite() {
         return Err("statistic not finite");

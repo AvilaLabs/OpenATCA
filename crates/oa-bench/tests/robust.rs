@@ -307,3 +307,46 @@ fn a_handoff_whose_truth_passes_through_an_ambiguous_area_is_excluded_and_counte
         "{ex:?}"
     );
 }
+
+// REQ: OA-BENCH-124
+#[test]
+fn the_mean_keeps_the_residual_of_a_cancellation() {
+    let s = stats_of(&[1e308, -1e308, 1e-300]);
+    let want = 1e-300 / 3.0;
+    assert!((s.mean - want).abs() <= want * 1e-15, "{s:?}");
+    // Random values over a wide range of magnitudes against the exact sum (no scaling, no
+    // overflow at these sizes), with the large ones cancelling.
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for round in 0..50 {
+        let mut v = Vec::new();
+        for _ in 0..(2 + round % 9) {
+            let e = (next() % 700) as i32 - 350;
+            let m = 1.0 + (next() % 1_000_000) as f64 / 1e6;
+            let sign = if next() % 2 == 0 { 1.0 } else { -1.0 };
+            let big = sign * m * 2f64.powi(e.clamp(-1000, 200));
+            v.push(big);
+            if round % 2 == 0 {
+                v.push(-big);
+            }
+        }
+        v.push(m_tiny(next()));
+        let mut ex = oa_bench::stats::ExactSum::default();
+        v.iter().for_each(|&u| ex.add(u));
+        let want = ex.value() / v.len() as f64;
+        let got = stats_of(&v).mean;
+        assert!(
+            (got - want).abs() <= want.abs() * 1e-14,
+            "round {round}: got {got:e}, want {want:e}"
+        );
+    }
+}
+
+fn m_tiny(r: u64) -> f64 {
+    (1 + r % 1000) as f64 * 1e-300
+}

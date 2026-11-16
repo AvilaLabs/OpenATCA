@@ -46,6 +46,7 @@ use oa_bench::chunked::{benchmark_chunk, chunk_add, chunk_finish, truth_index, C
 use oa_bench::legacy::NO_ALT;
 use oa_bench::pair::PairTable;
 use oa_bench::run::{RunConfig, RunOutput};
+use oa_bench::split_check::observation_key;
 use oa_bench::stats::{stats_of, Stats};
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::{Env, Truth};
@@ -105,27 +106,6 @@ pub struct SplitStats {
     pub rows_invalid: u64,
 }
 
-/// What makes two reports of one address and time the same observation: position, altitudes,
-/// velocity and the quality fields.
-type ObsKey = (i32, i32, i32, i32, u16, u16, i32, u8, u8, u8, u8, u8);
-
-fn obs_key(r: &oa_adsb::Row) -> ObsKey {
-    (
-        r.lat_e7,
-        r.lon_e7,
-        r.baro_alt_ft,
-        r.geom_alt_ft,
-        r.gs_dkt,
-        r.track_ddeg,
-        r.vrate_fpm,
-        r.nic,
-        r.nac_p,
-        r.nac_v,
-        r.sil,
-        r.version,
-    )
-}
-
 /// Splits `r` into the two disjoint sets (see the module documentation). Rows keep every field.
 pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
     let n = reports_len(r);
@@ -160,13 +140,18 @@ pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
                 st.rows_invalid += 1;
                 continue;
             };
-            if group.iter().any(|x| obs_key(x) == obs_key(&row)) {
+            if group
+                .iter()
+                .any(|x| observation_key(x) == observation_key(&row))
+            {
                 st.duplicates_removed += 1;
             } else {
                 group.push(row);
             }
         }
         g = end;
+        // Siblings go through quality handling in one fixed order, not the input order.
+        group.sort_by_key(observation_key);
         if group.len() > 1 {
             st.conflict_groups += 1;
             st.conflict_rows += group.len() as u64;
