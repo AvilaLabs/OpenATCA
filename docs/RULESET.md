@@ -110,6 +110,12 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
   anything allocates after initialization.
 - **C6 [DEFAULT]** Shell and offline tools (parsers, adaptation build, reports) may allocate
   normally, bounded per OA-GEN-003.
+- **C7 [MUST]** Work is bounded, not only storage. Any loop whose length comes from input (records,
+  vertices, tiles, segments, candidates, tracks visited) counts its iterations against a named
+  budget, and the budget is checked before the work is done, from the sizes the input declares, or
+  inside the loop. A limit that caps a buffer while the loop that fills it runs on is not a bound.
+  Every search that can return the same item twice either deduplicates as it goes or is sized for
+  the duplicates.
 
 ## D. Module boundaries
 
@@ -138,6 +144,22 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
   seen.
 - **E5 [MUST]** Data that fails validation is refused and flagged, never passed on. Inconsistent
   data reaching a controller is worse than a visible gap.
+- **E6 [MUST]** No silent substitution or omission. A value that cannot be computed is never
+  replaced by a plausible one (NaN by zero, a missing field by a default, a failed projection by a
+  coordinate). Every row, sample or query that is skipped, refused or excluded is counted under a
+  named reason, and every reported rate states its denominator. Where several inputs describe the
+  same thing, the choice between them is a stated rule that does not depend on input order, and
+  a genuine conflict is reported as a conflict, not resolved by sort order.
+- **E7 [MUST]** Identity needs positive evidence. Two things are the same only when an identifier
+  says so in full: an XML name is its (namespace URI, local name) after the URI's references are
+  expanded; an airport is its identifier and region; an aircraft is its address. Nearness in
+  position, a matching local name, or matching text is not identity. Where identity cannot be
+  settled, both are kept and the ambiguity is visible, because hiding an aircraft is worse than
+  showing it twice.
+- **E8 [MUST]** Arithmetic on a value that came from input or configuration is checked before it
+  can overflow, wrap or truncate: widths, counts, offsets, times, epochs, durations and casts from
+  float to integer. The check comes before the operation, not after. Calendar fields are checked
+  against the calendar.
 
 ## F. Dependencies and simplicity
 
@@ -167,6 +189,10 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
 - **G4 [MUST]** No optimization may break a rule in A–F.
 - **G5 [MUST]** Every real-time path has a stated deadline, and its worst case (not average) is
   measured against it.
+- **G6 [MUST]** A measurement cannot flatter its subject. A run that loses work (refuses, caps,
+  overflows, drops) does not pass, however fast it was. A test generator is checked against its
+  own description over the whole run (coverage, load, timing), and a metric's definition is
+  written before its result is read.
 
 ## H. Process
 
@@ -198,5 +224,10 @@ tracker (M3) is the first fully real-time core and is held to every rule from it
 - [ ] Deep modules around changing decisions (D1–D3)
 - [ ] Bounded queues between subsystems; failures contained; invalid data refused (E1, E2, E5)
 - [ ] No panic paths outside tests (E3)
+- [ ] Work bounded by a budget checked before or during the work, not only storage (C7)
+- [ ] Nothing substituted or dropped silently; every exclusion counted by reason (E6)
+- [ ] Identity from full identifiers only; ambiguity kept visible (E7)
+- [ ] Arithmetic on input and configuration checked before it can overflow or truncate (E8)
+- [ ] Measurements fail on lost work; generators checked against their description (G6)
 - [ ] No new dependency without justification and approval (F1)
 - [ ] Measurements behind performance claims; worst case against deadline (G1, G5)
