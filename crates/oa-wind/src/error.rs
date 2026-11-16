@@ -21,6 +21,16 @@ pub enum LoadError {
     DuplicateField { field: &'static str, level_pa: u32 },
     /// A field holds an infinite value (NaN marks a missing value and is allowed).
     NonFinite { field: &'static str, level_pa: u32 },
+    /// Wanted fields come from a statistical-interval product template (4.8 or 4.11); the hour
+    /// model is instantaneous. `fields` counts them; the first is named.
+    StatisticalInterval {
+        fields: usize,
+        field: &'static str,
+        level_pa: u32,
+    },
+    /// The `.idx` sidecar disagrees with the file it sits beside; the payload says where. The
+    /// archive counts these and reads the whole file instead.
+    IndexMismatch(&'static str),
     /// A level is not a positive whole number of Pa.
     BadLevel,
     /// Two fields do not share one grid, point count or valid time.
@@ -55,6 +65,16 @@ impl fmt::Display for LoadError {
             LoadError::NonFinite { field, level_pa } => {
                 write!(f, "{field} at {level_pa} Pa holds an infinite value")
             }
+            LoadError::StatisticalInterval {
+                fields,
+                field,
+                level_pa,
+            } => write!(
+                f,
+                "{fields} statistical-interval fields (first {field} at {level_pa} Pa); \
+                 the hour model is instantaneous"
+            ),
+            LoadError::IndexMismatch(w) => write!(f, "idx disagrees with its file: {w}"),
             LoadError::BadLevel => write!(f, "isobaric level is not a positive whole Pa"),
             LoadError::Inconsistent(w) => write!(f, "fields disagree: {w}"),
             LoadError::BadSize(n) => write!(f, "grid or hour size {n} out of bounds"),

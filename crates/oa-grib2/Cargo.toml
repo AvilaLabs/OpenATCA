@@ -9,5 +9,9 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the test-only encoder to the dev-dependencies of other crates.
+testenc = []
+
 [dependencies]
 oa-j2k = { path = "../oa-j2k" }

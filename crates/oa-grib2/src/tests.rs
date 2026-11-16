@@ -48,6 +48,7 @@ fn lambert_field(values: Vec<f32>, flags: u8) -> Field {
         time_unit: 1,
         forecast_time: 0,
         product_template: 0,
+        interval: None,
         packing_template: 0,
         grid: g,
         missing_count: values.iter().filter(|v| v.is_nan()).count() as u32,
@@ -784,6 +785,10 @@ fn product_templates_parameters_and_levels() {
         sec[7..9].copy_from_slice(&template.to_be_bytes());
         let extra = if template == 1 { 3 } else { 27 };
         sec.extend(std::iter::repeat_n(0u8, extra));
+        if template == 11 {
+            // The interval's end time (octets 38-44) must be a calendar time.
+            sec[37..42].copy_from_slice(&[0x07, 0xEA, 11, 14, 19]);
+        }
         let n = sec.len() as u32;
         sec[0..4].copy_from_slice(&n.to_be_bytes());
         let m = simple_message(small_grid(), sec, &p, sect6(None, false));
@@ -1486,4 +1491,171 @@ fn more_groups_than_points_is_refused() {
     // As many groups as points is allowed.
     let (rp, payload) = zero_cost_groups(10, 10);
     assert_eq!(crate::pack::unpack(&rp, &payload).unwrap().len(), 10);
+}
+
+/// A complex field whose width table adds the width reference to a 32-bit delta.
+fn width_overflow_case() -> (crate::pack::Repr, Vec<u8>) {
+    let rp = crate::pack::Repr {
+        template: 2,
+        ndata: 1,
+        r: 0.0,
+        e: 0,
+        d: 0,
+        nbits: 1,
+        complex: Some(crate::pack::Complex {
+            missing_mgmt: 0,
+            ngroups: 1,
+            width_ref: 32,
+            width_bits: 32,
+            length_ref: 1,
+            length_inc: 0,
+            last_length: 1,
+            length_bits: 1,
+            diff_order: 0,
+            extra_octets: 0,
+        }),
+    };
+    // Reference (1 bit, padded to an octet), width delta 0xFFFFFFFF (4 octets), length (1 bit).
+    let mut payload = vec![0u8];
+    payload.extend([0xFF; 4]);
+    payload.push(0);
+    (rp, payload)
+}
+
+// REQ: OA-GRIB-055
+#[test]
+fn group_width_sum_cannot_overflow() {
+    let (rp, payload) = width_overflow_case();
+    assert_eq!(
+        crate::pack::unpack(&rp, &payload),
+        Err(Grib2Error::BadPacking("group width over 32 bits"))
+    );
+}
+
+/// The same descriptor as a whole message: one group of 12 points, width reference 32 and width
+/// delta 0xFFFFFFFF. Committed as a fuzz seed (`fuzz/seeds/grib2/width-overflow.grib2`).
+fn width_overflow_message() -> Vec<u8> {
+    let o = ComplexOpts {
+        group_lens: vec![12],
+        order: 0,
+        missing_mgmt: 0,
+        extra_octets: 0,
+    };
+    let mut p = encode_complex(&ramp(12, |k| k as i64), 0.0, 0, 0, &o);
+    p.sect5[35] = 32;
+    p.sect5[36] = 32;
+    let mut payload = p.sect7[5..].to_vec();
+    payload.iter_mut().for_each(|b| *b = 0xFF);
+    let mut s7 = be(5 + payload.len() as u64, 4);
+    s7.push(7);
+    s7.extend(payload);
+    p.sect7 = s7;
+    let bm = sect6(None, false);
+    simple_message(small_grid(), temp_product(500), &p, bm)
+}
+
+// REQ: OA-GRIB-055
+#[test]
+fn width_overflow_message_is_refused_and_seeded() {
+    let m = width_overflow_message();
+    assert_eq!(
+        decode_message(&m),
+        Err(Grib2Error::BadPacking("group width over 32 bits"))
+    );
+    let seed = include_bytes!("../../../fuzz/seeds/grib2/width-overflow.grib2");
+    assert_eq!(seed.as_slice(), m.as_slice());
+}
+
+// REQ: OA-GRIB-056
+#[test]
+fn reference_time_is_a_real_calendar_time() {
+    use crate::product::parse_ref_time;
+    let bad = |y: u16, m: u8, d: u8| {
+        assert_eq!(
+            parse_ref_time(&sect1(y, m, d, 0)),
+            Err(Grib2Error::BadProduct(
+                "reference time is not a calendar time"
+            )),
+            "{y}-{m}-{d}"
+        );
+    };
+    // Not a leap year: 2023, and 1900 (divisible by 100 but not 400).
+    bad(2023, 2, 29);
+    bad(1900, 2, 29);
+    bad(2024, 2, 30);
+    bad(2024, 2, 31);
+    bad(2023, 2, 31);
+    bad(2024, 4, 31);
+    bad(2024, 6, 31);
+    bad(2024, 9, 31);
+    bad(2024, 11, 31);
+    bad(2024, 1, 0);
+    bad(2024, 13, 1);
+    for (y, m, d) in [(2000, 2, 29), (2024, 2, 29), (2023, 2, 28), (2024, 12, 31)] {
+        let t = parse_ref_time(&sect1(y, m, d, 23)).unwrap();
+        assert_eq!((t.year, t.month, t.day), (y, m, d));
+    }
+    // Hour, minute and second ranges.
+    let mut s = sect1(2024, 1, 1, 0);
+    s[16] = 24;
+    assert!(parse_ref_time(&s).is_err());
+    s[16] = 23;
+    s[17] = 60;
+    assert!(parse_ref_time(&s).is_err());
+    s[17] = 59;
+    s[18] = 61;
+    assert!(parse_ref_time(&s).is_err());
+    s[18] = 59;
+    assert!(parse_ref_time(&s).is_ok());
+}
+
+// REQ: OA-GRIB-057
+#[test]
+fn statistical_interval_is_exposed() {
+    use crate::product::parse_product;
+    // Template 4.0 and 4.1 are instantaneous.
+    let t0 = parse_product(&sect4(0, 2, 2, 100, 0, 25_000)).unwrap();
+    assert_eq!(t0.interval, None);
+    // Template 4.8: end 2026-11-14 19:00:00, one range, statistical process 1 (accumulation).
+    let s8 = sect4(8, 2, 2, 100, 0, 25_000);
+    let t8 = parse_product(&s8).unwrap();
+    let iv = t8.interval.unwrap();
+    assert_eq!(
+        (iv.end.year, iv.end.month, iv.end.day, iv.end.hour),
+        (2026, 11, 14, 19)
+    );
+    assert_eq!((iv.ranges, iv.statistic), (1, 1));
+    // Template 4.11 is 4.8 with three ensemble octets after octet 34.
+    let mut s11 = s8.clone();
+    s11.splice(34..34, [1, 0, 1]);
+    s11[7..9].copy_from_slice(&11u16.to_be_bytes());
+    let n = s11.len() as u32;
+    s11[0..4].copy_from_slice(&n.to_be_bytes());
+    assert_eq!(parse_product(&s11).unwrap().interval, Some(iv));
+    // The field carries it through a whole message.
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let m = simple_message(small_grid(), s8, &p, sect6(None, false));
+    assert_eq!(decode_message(&m).unwrap()[0].interval, Some(iv));
+    // An end time that is not on the calendar is refused.
+    let mut bad = sect4(8, 2, 2, 100, 0, 25_000);
+    bad[36] = 2;
+    bad[37] = 30;
+    assert!(parse_product(&bad).is_err());
+}
+
+// REQ: OA-GRIB-058
+#[test]
+fn peek_reads_the_first_field_from_the_head_of_a_message() {
+    let p = encode_simple(&[1; 12], 0.0, 0, 0);
+    let m = simple_message(
+        small_grid(),
+        sect4(0, 2, 3, 100, 0, 25_000),
+        &p,
+        sect6(None, false),
+    );
+    let whole = inspect_stream(&m).fields.remove(0);
+    // Section 5 ends by octet 173; the rest is never looked at.
+    assert_eq!(peek_info(&m[..175]).unwrap(), whole);
+    assert!(peek_info(&m[..60]).is_err());
+    assert!(peek_info(b"not a message at all").is_err());
 }

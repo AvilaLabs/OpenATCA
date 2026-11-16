@@ -5,14 +5,21 @@
 //! When the `.idx` beside a file matches it, only the byte ranges of those messages are read
 //! from disk; when it does not (the local copies are already subsets whose `.idx` is that of
 //! the original file) the file is read whole, bounded by [`MAX_FILE_BYTES`], and its messages
-//! are filtered by what they contain. Either way the same hour results.
+//! are filtered by what they contain. Either way the same hour results: the `.idx` is checked
+//! against the file (its offsets are the file's message starts, every message's own header says
+//! what the index says, and the decoded ranges are the messages the index claimed), and any
+//! disagreement is counted and the whole file read instead.
 
 use crate::error::{LoadError, QueryError};
-use crate::hour::{hour_bytes, load_hour, needed_ranges_text, Hour};
+use crate::hour::{
+    head_claim, hour_bytes, index_claims, load_hour, load_hour_claimed, needed_ranges, Hour,
+};
 use crate::isa::pressure_hpa_from_altitude_ft;
 use crate::sample::{bracket, sample_blend, Query, Sample};
 use crate::{MAX_ARCHIVE_FILES, MAX_FILE_BYTES, MAX_HOURS_HELD, MAX_IDX_BYTES};
-use oa_grib2::{forecast_seconds, inspect_stream, message_length, ref_unix_seconds};
+use oa_grib2::{
+    forecast_seconds, inspect_stream, message_length, parse_idx, peek_info, ref_unix_seconds, Idx,
+};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -31,6 +38,7 @@ pub struct HourFile {
 pub struct Archive {
     files: Vec<HourFile>,
     held: Vec<(usize, Hour)>,
+    index_fallbacks: u64,
 }
 
 fn io_err(path: &Path, e: &std::io::Error) -> LoadError {
@@ -103,6 +111,7 @@ pub fn archive_files(mut files: Vec<HourFile>) -> Result<Archive, LoadError> {
     Ok(Archive {
         files,
         held: Vec::new(),
+        index_fallbacks: 0,
     })
 }
 
@@ -111,6 +120,7 @@ pub fn new_archive() -> Archive {
     Archive {
         files: Vec::new(),
         held: Vec::new(),
+        index_fallbacks: 0,
     }
 }
 
@@ -128,6 +138,11 @@ impl Archive {
     /// Bytes of arrays currently held.
     pub fn held_bytes(&self) -> u64 {
         self.held.iter().map(|(_, h)| hour_bytes(h)).sum()
+    }
+
+    /// Hours loaded from a whole file because their `.idx` disagreed with the file.
+    pub fn index_fallbacks(&self) -> u64 {
+        self.index_fallbacks
     }
 
     /// The indexed files, sorted by valid time.
@@ -167,10 +182,108 @@ fn read_ranges(path: &Path, ranges: &[(u64, u64)]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// How an hour's `.idx` sidecar was used.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexUse {
+    /// No readable `.idx` beside the file, or it names no needed message.
+    Absent,
+    /// The hour was read from the index's byte ranges.
+    Used,
+    /// The index disagreed with the file (the reason is named); the whole file was read.
+    Refused(LoadError),
+}
+
+/// Bytes read from the start of each message to learn what its first field is.
+const HEAD_BYTES: usize = 2048;
+
+/// Walks the framing of the file at `path`, 16 bytes a message, and returns each message's
+/// start and length. Refuses a file that is not whole messages back to back or has more than
+/// [`oa_grib2::idx::MAX_IDX_LINES`].
+fn message_starts(f: &mut File, file_len: u64) -> Result<Vec<(u64, u64)>, LoadError> {
+    let bad = LoadError::IndexMismatch("file framing");
+    let mut out = Vec::new();
+    let mut pos = 0u64;
+    while pos < file_len {
+        if out.len() >= oa_grib2::idx::MAX_IDX_LINES {
+            return Err(bad);
+        }
+        let mut head = [0u8; 16];
+        f.seek(SeekFrom::Start(pos)).map_err(|_| bad.clone())?;
+        f.read_exact(&mut head).map_err(|_| bad.clone())?;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(head.get(8..16).ok_or_else(|| bad.clone())?);
+        let len = u64::from_be_bytes(a);
+        if head.get(0..4) != Some(b"GRIB".as_slice())
+            || !(41..=oa_grib2::MAX_MESSAGE_BYTES).contains(&len)
+            || pos + len > file_len
+        {
+            return Err(bad);
+        }
+        out.push((pos, len));
+        pos += len;
+    }
+    Ok(out)
+}
+
+/// Checks an index against the file itself, reading only the first bytes of each message: the
+/// index's message offsets are exactly the file's message starts, and for every message the
+/// variable and level of its first field agree with the index's first row for it whenever
+/// either one is a field an hour wants.
+fn check_index_against_file(path: &Path, idx: &Idx, file_len: u64) -> Result<(), LoadError> {
+    let mut f = File::open(path).map_err(|e| io_err(path, &e))?;
+    let starts = message_starts(&mut f, file_len)?;
+    let mut offsets: Vec<u64> = idx.offset.clone();
+    offsets.dedup();
+    if offsets.len() != starts.len() || offsets.iter().zip(&starts).any(|(o, (s, _))| o != s) {
+        return Err(LoadError::IndexMismatch("message offsets"));
+    }
+    for &(start, len) in &starts {
+        let n = len.min(HEAD_BYTES as u64) as usize;
+        let mut head = vec![0u8; n];
+        f.seek(SeekFrom::Start(start))
+            .map_err(|e| io_err(path, &e))?;
+        f.read_exact(&mut head).map_err(|e| io_err(path, &e))?;
+        let info = peek_info(&head).map_err(LoadError::Decode)?;
+        // The first index row of this message.
+        let row = idx
+            .offset
+            .iter()
+            .position(|&o| o == start)
+            .ok_or(LoadError::IndexMismatch("message offsets"))?;
+        let one = Idx {
+            msg: vec![0],
+            sub: vec![0],
+            offset: vec![start],
+            date: idx.date.get(row).copied().into_iter().collect(),
+            var: idx.var.get(row).cloned().into_iter().collect(),
+            level: idx.level.get(row).cloned().into_iter().collect(),
+            forecast: idx.forecast.get(row).cloned().into_iter().collect(),
+        };
+        let said = index_claims(&one).into_iter().next();
+        let is = head_claim(&info);
+        if said.is_some() != is.is_some() {
+            return Err(LoadError::IndexMismatch("message variable or level"));
+        }
+        if let (Some(a), Some(b)) = (said, is) {
+            if a.var != b.var || a.level_pa != b.level_pa || a.date != b.date {
+                return Err(LoadError::IndexMismatch("message variable, level or date"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Loads one hour from a file, using the `.idx` beside it when it matches the file and the
-/// whole file otherwise. A stale `.idx` is detected, never trusted: the ranges must read
-/// and decode into a complete hour, else the file is read whole.
+/// whole file otherwise. A stale `.idx` is detected, never trusted: it must agree with the
+/// file's messages (see the module comment), and the ranges must read and decode into the
+/// messages it claimed, else the file is read whole.
 pub fn read_hour_file(path: &Path) -> Result<Hour, LoadError> {
+    read_hour_file_report(path).map(|(h, _)| h)
+}
+
+/// [`read_hour_file`] that also says how the `.idx` was used, so a caller can count refusals.
+pub fn read_hour_file_report(path: &Path) -> Result<(Hour, IndexUse), LoadError> {
     let meta = std::fs::metadata(path).map_err(|e| io_err(path, &e))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(LoadError::Io {
@@ -183,20 +296,31 @@ pub fn read_hour_file(path: &Path) -> Result<Hour, LoadError> {
     let idx = read_file_capped(Path::new(&idx_path), MAX_IDX_BYTES)
         .ok()
         .and_then(|b| String::from_utf8(b).ok());
-    if let Some(text) = idx {
-        if let Ok(ranges) = needed_ranges_text(&text, meta.len()) {
-            let fits = ranges.last().is_some_and(|r| r.1 < meta.len());
-            if fits {
-                if let Ok(data) = read_ranges(path, &ranges) {
-                    if let Ok(h) = load_hour(&data) {
-                        return Ok(h);
-                    }
-                }
-            }
+    let mut used = IndexUse::Absent;
+    if let Some(idx) = idx.as_deref().and_then(|t| parse_idx(t).ok()) {
+        match try_index(path, &idx, meta.len()) {
+            Ok(Some(h)) => return Ok((h, IndexUse::Used)),
+            Ok(None) => {}
+            Err(e) => used = IndexUse::Refused(e),
         }
     }
     let data = read_file_capped(path, MAX_FILE_BYTES).map_err(|e| io_err(path, &e))?;
-    load_hour(&data)
+    Ok((load_hour(&data)?, used))
+}
+
+/// The indexed read: `Ok(None)` when the index names nothing to read, an error when it
+/// disagrees with the file.
+fn try_index(path: &Path, idx: &Idx, file_len: u64) -> Result<Option<Hour>, LoadError> {
+    let ranges = needed_ranges(idx, file_len)?;
+    let Some(last) = ranges.last() else {
+        return Ok(None);
+    };
+    if last.1 >= file_len {
+        return Err(LoadError::IndexMismatch("ranges run past the file"));
+    }
+    check_index_against_file(path, idx, file_len)?;
+    let data = read_ranges(path, &ranges).map_err(|e| io_err(path, &e))?;
+    load_hour_claimed(&data, &index_claims(idx)).map(Some)
 }
 
 type Loader<'a> = &'a mut dyn FnMut(&Path) -> Result<Hour, LoadError>;
@@ -226,7 +350,17 @@ fn held_hour(a: &Archive, k: usize) -> Option<&Hour> {
 /// The query over an archive: loads the (at most two) bracketing hours as needed, evicting the
 /// least recently used beyond [`MAX_HOURS_HELD`].
 pub fn archive_sample(a: &mut Archive, q: &Query) -> Result<Sample, QueryError> {
-    archive_sample_with(a, q, &mut read_hour_file)
+    let mut refused = 0u64;
+    let mut load = |p: &Path| {
+        let (h, used) = read_hour_file_report(p)?;
+        if matches!(used, IndexUse::Refused(_)) {
+            refused += 1;
+        }
+        Ok(h)
+    };
+    let r = archive_sample_with(a, q, &mut load);
+    a.index_fallbacks += refused;
+    r
 }
 
 /// [`archive_sample`] with the file reader supplied (the tests give it synthetic hours).

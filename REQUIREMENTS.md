@@ -2036,6 +2036,19 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   points) 53 MB, so an ordinary field, including a constant one, decodes under the default.
 - **OA-GRIB-054** A complex field that declares more groups than points is refused with a typed
   error before its tables are read.
+- **OA-GRIB-055** A group width is the width reference plus a 32-bit table entry, added in 64 bits and
+  refused as `BadPacking` above 32 bits; no header field is added to or shifted before it is checked.
+  The descriptor that overflowed 32 bits (reference 32, delta 0xFFFFFFFF) is the committed fuzz seed
+  `fuzz/seeds/grib2/width-overflow.grib2`.
+- **OA-GRIB-056** A reference time (and the end of a statistical interval) must be on the Gregorian
+  calendar: day within the month (leap years by the 4, 100, 400 rule), hour 0 to 23, minute 0 to 59,
+  second 0 to 60; 2023-02-29, 1900-02-29, February 30 and 31 and April 31 are refused, 2000-02-29 and
+  2024-02-29 are read.
+- **OA-GRIB-057** Product templates 4.8 and 4.11 are decoded and their interval is kept: the end of the
+  interval, the number of time ranges and the statistical process (`Field::interval`, `None` for
+  templates 4.0 and 4.1). The interval starts at the reference time plus the forecast time.
+- **OA-GRIB-058** `peek_info` reads the first field's description from the first bytes of a message
+  (through section 5), so an inventory can be checked against a file without reading its data.
 
 ## JPEG 2000 decoder (oa-j2k)
 
@@ -2092,6 +2105,11 @@ decoder is OA-GRIB-021.
   quantization exponent is at most the sample bits plus the sub-band gain: 0 for LL, 1 for HL and
   LH, 2 for HH), and the inverse lifting uses checked arithmetic, so no coefficient can overflow
   32 bits: an inconsistent stream or an overflowing line is refused with a typed error.
+- **OA-J2K-014** The codeword segments a stream could create (code blocks times layers, known from the
+  headers) are capped at `MAX_SEGMENTS` (65,536) and the working tables at `MAX_SCRATCH_BYTES` (72 MiB),
+  refused before any table is built. Largest real input over 6,068 template 5.40 messages: 58 blocks, 1
+  layer, 58 segments, 151,987 samples, 57,485 body bytes. A 32768 x 512 claim with 8 x 8 blocks and 64
+  layers is refused as `TooManySegments`.
 
 ## M5 — Minimum vectoring and IFR altitudes (oa-mva)
 
@@ -2754,6 +2772,20 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
   and again by a read that stops one byte past the limit; an oversize `.idx` is ignored and the file
   read whole.
 ## M3 — ASTERIX codecs (oa-asterix)
+- **OA-WIND-054** The hour model is instantaneous: a wanted field (isobaric UGRD, VGRD, TMP, HGT) from a
+  statistical-interval product template is refused as `StatisticalInterval`, counting the fields and
+  naming the first; a quartet of instantaneous fields loads as before, and an interval field the hour
+  does not use is ignored.
+- **OA-WIND-055** An `.idx` is checked against its file before its ranges are trusted: its message
+  offsets are the file's message starts, each message's own header agrees with the index's first row for
+  it, the decoded ranges are exactly the variables, levels and times the index claimed, and the hour
+  holds exactly the levels the index names. Any difference is an `IndexMismatch`, counted
+  (`IndexUse::Refused`, `Archive::index_fallbacks`), and the whole file is read: the hour is then the
+  one a file without a sidecar gives, never a thinner one.
+- **OA-WIND-056** On the real RAP hours (skipped when absent) the shipped `.idx` of the original file is
+  refused for the local subset and the hour equals the whole-file hour; an index written from the
+  subset's own headers is accepted and gives the same hour.
+- **OA-WIND-057** Two wanted fields of one message (rows `N.1` and `N.2`) select one byte range.
 
 Encoder and decoder for EUROCONTROL ASTERIX category 021 (ADS-B target reports, Ed 2.7), 048 (monoradar
 target reports, Ed 1.32) and 062 (system track data, Ed 1.21), written from the specifications (Part 1

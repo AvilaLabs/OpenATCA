@@ -10,7 +10,7 @@ use crate::dwt::Rect;
 use crate::error::J2kError;
 use crate::header::{Parsed, Siz};
 use crate::tagtree::{self, new_tree, TagTree};
-use crate::{MAX_CODE_BLOCKS, MAX_PASSES};
+use crate::{scratch_bytes, MAX_CODE_BLOCKS, MAX_PASSES, MAX_SCRATCH_BYTES, MAX_SEGMENTS};
 
 /// No segment.
 const NONE: u32 = u32::MAX;
@@ -185,6 +185,19 @@ pub fn build(p: &Parsed) -> Result<Tile, J2kError> {
             total_blocks += nblk;
             if total_blocks > MAX_CODE_BLOCKS {
                 return Err(J2kError::TooManyCodeBlocks(total_blocks));
+            }
+            // Worst case from the headers alone: every block in every layer adds a segment.
+            let segs = total_blocks * u64::from(p.layers);
+            if segs > MAX_SEGMENTS {
+                return Err(J2kError::TooManySegments(segs));
+            }
+            let samples = u64::from(x1 - x0) * u64::from(y1 - y0);
+            let needed = scratch_bytes(samples, total_blocks, segs);
+            if needed > MAX_SCRATCH_BYTES {
+                return Err(J2kError::ScratchBudget {
+                    needed,
+                    budget: MAX_SCRATCH_BYTES,
+                });
             }
             let b = &mut t.bands;
             b.res.push(r as u8);

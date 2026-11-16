@@ -29,8 +29,9 @@ pub mod pack;
 pub mod product;
 pub mod sample;
 
-#[cfg(test)]
-mod testenc;
+/// Test encoder for this crate's tests and for downstream crates' (feature `testenc`).
+#[cfg(any(test, feature = "testenc"))]
+pub mod testenc;
 #[cfg(test)]
 mod tests;
 
@@ -41,13 +42,13 @@ pub use grid::{
 };
 pub use idx::{byte_range, find_rows, idx_len, isobaric_label, parse_idx, Idx};
 pub use message::{
-    decode_message, decode_stream, inspect_stream, message_length, scan_messages, Decoded, Field,
-    FieldInfo, Inspected, MessageSpan, Skipped,
+    decode_message, decode_stream, inspect_stream, message_length, peek_info, scan_messages,
+    Decoded, Field, FieldInfo, Inspected, MessageSpan, Skipped,
 };
 pub use pack::MISSING;
 pub use product::{
-    forecast_seconds, parameter_name, parameter_of, ref_unix_seconds, Level, Parameter, RefTime,
-    LEVEL_HEIGHT_ABOVE_GROUND, LEVEL_ISOBARIC, LEVEL_SURFACE,
+    forecast_seconds, parameter_name, parameter_of, ref_unix_seconds, Interval, Level, Parameter,
+    RefTime, LEVEL_HEIGHT_ABOVE_GROUND, LEVEL_ISOBARIC, LEVEL_SURFACE,
 };
 pub use sample::{bilinear_ij, sample_bilinear, wind_at, Wind};
 

@@ -9,8 +9,9 @@
 use crate::error::LoadError;
 use crate::{MAX_HOUR_VALUES, MAX_LEVELS};
 use oa_grib2::{
-    byte_range, decode_message, forecast_seconds, grid_dims, inspect_stream, parse_idx,
-    ref_unix_seconds, scan_messages, Field, Grid, Idx, Parameter, LEVEL_ISOBARIC,
+    byte_range, decode_message, forecast_seconds, grid_dims, inspect_stream, parameter_name,
+    parse_idx, ref_unix_seconds, scan_messages, Field, FieldInfo, Grid, Idx, Parameter,
+    LEVEL_ISOBARIC,
 };
 use std::collections::BTreeMap;
 
@@ -62,9 +63,12 @@ fn slot(p: Parameter) -> Option<usize> {
 /// Only isobaric UGRD, VGRD, TMP and HGT fields are used; others are ignored. Refuses: a level
 /// that lacks one of the four, a parameter twice on a level, fields on different grids, point
 /// counts or valid times, fewer than two levels, more than [`MAX_LEVELS`], a grid under 2 x 2,
-/// and an hour over [`MAX_HOUR_VALUES`] values.
+/// an hour over [`MAX_HOUR_VALUES`] values, and any wanted field from a statistical-interval
+/// product template (4.8, 4.11): the hour is an instantaneous model.
 pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
     let mut by_level: BTreeMap<u32, [Option<Field>; 4]> = BTreeMap::new();
+    // Count and name of the wanted fields that describe an interval, not an instant.
+    let mut interval: Option<(usize, &'static str, u32)> = None;
     for f in fields {
         let Some(s) = slot(f.parameter) else { continue };
         if f.level.kind != LEVEL_ISOBARIC {
@@ -73,6 +77,13 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
         let pa = f.level.value;
         if !pa.is_finite() || pa < 1.0 || pa.fract() != 0.0 || pa > 200_000.0 {
             return Err(LoadError::BadLevel);
+        }
+        if f.interval.is_some() {
+            let name = NAMES.get(s).copied().unwrap_or("");
+            interval = match interval {
+                Some((n, a, b)) => Some((n + 1, a, b)),
+                None => Some((1, name, pa as u32)),
+            };
         }
         let entry = by_level.entry(pa as u32).or_default();
         let dup = LoadError::DuplicateField {
@@ -86,6 +97,13 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
         if by_level.len() > MAX_LEVELS {
             return Err(LoadError::TooManyLevels(by_level.len()));
         }
+    }
+    if let Some((fields, field, level_pa)) = interval {
+        return Err(LoadError::StatisticalInterval {
+            fields,
+            field,
+            level_pa,
+        });
     }
     for (&level_pa, four) in &by_level {
         for (s, f) in four.iter().enumerate() {
@@ -179,6 +197,11 @@ fn wanted(info_param: Parameter, kind: u8) -> bool {
 /// one the hour needed, the hour then lacks that level and is refused as incomplete. A needed
 /// message that inspects but fails to decode is refused with its error.
 pub fn load_hour(data: &[u8]) -> Result<Hour, LoadError> {
+    build_hour(decode_wanted(data)?)
+}
+
+/// Decodes the wanted fields of a multi-message file, in file order.
+fn decode_wanted(data: &[u8]) -> Result<Vec<Field>, LoadError> {
     let spans = scan_messages(data)?;
     let mut keep: Vec<Field> = Vec::new();
     for span in spans {
@@ -199,7 +222,145 @@ pub fn load_hour(data: &[u8]) -> Result<Hour, LoadError> {
             }
         }
     }
-    build_hour(keep)
+    Ok(keep)
+}
+
+/// What an `.idx` row says about a message: its variable, isobaric level and time.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Claim {
+    pub var: &'static str,
+    pub level_pa: u32,
+    /// Reference time as `YYYYMMDDHH`.
+    pub date: u64,
+    /// Forecast lead in seconds, `None` when the row's forecast text is not one this reads.
+    pub lead_s: Option<i64>,
+}
+
+/// Forecast lead of an `.idx` forecast field: `anl`, `N hour fcst` or `N min fcst`.
+fn parse_lead(text: &str) -> Option<i64> {
+    if text == "anl" {
+        return Some(0);
+    }
+    let (n, unit) = text.split_once(' ')?;
+    let n: i64 = n.parse().ok().filter(|n| (0..=1_000_000).contains(n))?;
+    match unit {
+        "hour fcst" => Some(n * 3600),
+        "min fcst" => Some(n * 60),
+        _ => None,
+    }
+}
+
+/// The claims of the rows [`needed_ranges`] selects, in index order.
+pub fn index_claims(idx: &Idx) -> Vec<Claim> {
+    let mut out = Vec::new();
+    for k in 0..idx.msg.len() {
+        let var = idx.var.get(k).map(String::as_str).unwrap_or("");
+        let level = idx.level.get(k).map(String::as_str).unwrap_or("");
+        let Some(name) = NAMES.iter().find(|n| **n == var) else {
+            continue;
+        };
+        let Some(mb) = parse_mb(level) else { continue };
+        out.push(Claim {
+            var: name,
+            level_pa: mb.saturating_mul(100),
+            date: idx.date.get(k).copied().unwrap_or(0),
+            lead_s: idx.forecast.get(k).and_then(|f| parse_lead(f)),
+        });
+    }
+    out
+}
+
+/// `YYYYMMDDHH` of a field's reference time, as an `.idx` writes it.
+fn date_of(f: &FieldInfo) -> u64 {
+    let t = &f.ref_time;
+    u64::from(t.year) * 1_000_000
+        + u64::from(t.month) * 10_000
+        + u64::from(t.day) * 100
+        + u64::from(t.hour)
+}
+
+/// The claim a field's own header would make: what the index should have said about it.
+fn claim_of(info: &FieldInfo) -> Option<Claim> {
+    if !wanted(info.parameter, info.level.kind) {
+        return None;
+    }
+    let pa = info.level.value;
+    if !pa.is_finite() || pa < 1.0 || pa.fract() != 0.0 || pa > 200_000.0 {
+        return None;
+    }
+    let var = parameter_name(info.parameter)?;
+    let var = NAMES.iter().find(|n| **n == var)?;
+    Some(Claim {
+        var,
+        level_pa: pa as u32,
+        date: date_of(info),
+        lead_s: forecast_seconds(info.time_unit, info.forecast_time),
+    })
+}
+
+/// Checks the claims of an index against what was decoded from its ranges: the same multiset of
+/// variable and level, and for each the claimed reference date and lead. Order within the file
+/// is not part of a claim.
+pub fn check_claims(claims: &[Claim], fields: &[Field]) -> Result<(), LoadError> {
+    let mut actual: Vec<Claim> = fields.iter().filter_map(field_claim).collect();
+    let mut claimed: Vec<Claim> = claims.to_vec();
+    if actual.len() != fields.len() || actual.len() != claimed.len() {
+        return Err(LoadError::IndexMismatch("field count"));
+    }
+    actual.sort();
+    claimed.sort();
+    for (a, c) in actual.iter().zip(&claimed) {
+        if a.var != c.var || a.level_pa != c.level_pa {
+            return Err(LoadError::IndexMismatch("parameter or level"));
+        }
+        if a.date != c.date || a.lead_s != c.lead_s || c.lead_s.is_none() {
+            return Err(LoadError::IndexMismatch("time"));
+        }
+    }
+    Ok(())
+}
+
+fn field_claim(f: &Field) -> Option<Claim> {
+    let info = FieldInfo {
+        discipline: f.discipline,
+        category: f.category,
+        number: f.number,
+        parameter: f.parameter,
+        level: f.level,
+        ref_time: f.ref_time,
+        time_unit: f.time_unit,
+        forecast_time: f.forecast_time,
+        product_template: f.product_template,
+        interval: f.interval,
+        packing_template: f.packing_template,
+        grid: f.grid,
+    };
+    claim_of(&info)
+}
+
+/// The claim a message's first field makes, from its header (see [`oa_grib2::peek_info`]), and
+/// whether the field is one an hour wants. `None` for a field of no interest.
+pub fn head_claim(info: &FieldInfo) -> Option<Claim> {
+    claim_of(info)
+}
+
+/// [`load_hour`] for bytes read by the ranges of an index: the decoded messages must be what
+/// the index claimed (variable, level and time of each), and the hour must hold exactly the
+/// levels the index names. Any difference is [`LoadError::IndexMismatch`]; the caller then
+/// reads the whole file.
+pub fn load_hour_claimed(data: &[u8], claims: &[Claim]) -> Result<Hour, LoadError> {
+    let fields = decode_wanted(data)?;
+    check_claims(claims, &fields)?;
+    let hour = build_hour(fields)?;
+    let mut levels: Vec<u32> = claims.iter().map(|c| c.level_pa).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    let held: Vec<u32> = hour.levels_pa.iter().map(|&p| p as u32).collect();
+    if held != levels {
+        return Err(LoadError::IndexMismatch("level set"));
+    }
+    Ok(hour)
 }
 
 /// Parses `NNN mb` and returns NNN; layer labels such as `500-1000 mb` give `None`.
@@ -227,6 +388,8 @@ pub fn needed_ranges(idx: &Idx, file_len: u64) -> Result<Vec<(u64, u64)>, LoadEr
             .and_then(|(a, b)| b.map(|b| (a, b)))
             .ok_or(LoadError::Inconsistent("idx range"))?;
         match out.last_mut() {
+            // Two wanted fields of one message (rows `N.1`, `N.2`) name the same range.
+            Some(prev) if first >= prev.0 && last <= prev.1 => {}
             Some(prev) if prev.1.checked_add(1) == Some(first) => prev.1 = last,
             _ => out.push((first, last)),
         }

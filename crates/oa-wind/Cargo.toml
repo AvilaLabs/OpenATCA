@@ -15,6 +15,9 @@ oa-grib2 = { path = "../oa-grib2" }
 oa-awc = { path = "../oa-awc" }
 oa-adsb = { path = "../oa-adsb" }
 
+[dev-dependencies]
+oa-grib2 = { path = "../oa-grib2", features = ["testenc"] }
+
 [[bin]]
 name = "oa-wind-check"
 path = "src/main.rs"

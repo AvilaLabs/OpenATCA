@@ -51,6 +51,16 @@ pub const MAX_LEVELS: u8 = 15;
 pub const MAX_LAYERS: u16 = 64;
 /// Limit: code blocks in the tile, 256 Ki: a 16 Mi image at 8 x 8 (RAP has 150 at 64 x 64).
 pub const MAX_CODE_BLOCKS: u64 = 1 << 18;
+/// Limit: codeword segments the packets may create, 64 Ki. Every included block of every layer
+/// adds one (12 bytes of tables), so the worst case is the block count times the layer count,
+/// known from the headers; it is refused before any table is built. The largest real input
+/// (6,068 template 5.40 messages: the HRRR/RAP/GEFS test fields and 84 RAP hours) has 58 blocks,
+/// 1 layer and 58 segments, so this leaves a margin of over 1,000.
+pub const MAX_SEGMENTS: u64 = 1 << 16;
+/// Limit: bytes of working tables for one image, 72 MiB: the coefficient array of a
+/// [`MAX_SAMPLES`] image (64 MiB) plus 8 MiB of block and segment tables. The largest real
+/// image (151,987 samples) needs about 0.6 MB.
+pub const MAX_SCRATCH_BYTES: u64 = 72 << 20;
 /// Limit: coding passes of one block, 3 per bit-plane over at most 30 planes, less 2.
 pub const MAX_PASSES: u32 = 88;
 
@@ -70,6 +80,16 @@ pub fn work_budget(samples: u64, bits: u8, body_bytes: usize) -> u64 {
     let by_size = samples.saturating_mul(3 * (u64::from(bits) + 8));
     let by_data = WORK_FLOOR.saturating_add(WORK_PER_BYTE.saturating_mul(body_bytes as u64));
     by_size.min(by_data)
+}
+
+/// Bytes of tables a decode reserves for `samples`, `blocks` code blocks and `segments` codeword
+/// segments at most: the coefficient array (4 bytes a sample), the block state (13 bytes a block)
+/// and the segment table (12 bytes a segment). Exact for the arrays it counts.
+pub fn scratch_bytes(samples: u64, blocks: u64, segments: u64) -> u64 {
+    samples
+        .saturating_mul(4)
+        .saturating_add(blocks.saturating_mul(13))
+        .saturating_add(segments.saturating_mul(12))
 }
 
 /// A decoded image: `width * height` samples, row-major, already DC-level shifted.

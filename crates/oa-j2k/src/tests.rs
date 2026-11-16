@@ -858,3 +858,56 @@ fn a_quantization_exponent_beyond_the_sample_precision_is_refused() {
     assert!(matches!(decode(&one), Err(J2kError::BadMarker(_))));
     assert!(decode(&cs).is_ok());
 }
+
+/// A header-only stream of `w` x `h` samples with `2^(cb+2)`-sided blocks, no wavelet levels and
+/// `layers` layers: the small body of a 64 x 64 image behind a larger claim.
+fn claimed_geometry(w: u32, h: u32, cb: u8, layers: u16) -> Vec<u8> {
+    let mut cs = encode(&[0; 64 * 64], &Opts::new(64, 64, 8, 0));
+    let siz = find(&cs, 0xFF51);
+    for (at, v) in [(2, w), (6, h), (18, w), (22, h)] {
+        cs[siz + 4 + at..siz + 4 + at + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    let cod = find(&cs, 0xFF52);
+    cs[cod + 6..cod + 8].copy_from_slice(&layers.to_be_bytes());
+    cs[cod + 10] = cb;
+    cs[cod + 11] = cb;
+    cs
+}
+
+// REQ: OA-J2K-014
+#[test]
+fn segment_bound_is_refused_before_any_table_is_built() {
+    use crate::{header, tile};
+    // 32768 x 512 samples, 8 x 8 blocks (262,144, at the block limit), 64 layers: 16.8 M
+    // segments of tables possible from a body of a few bytes.
+    let cs = claimed_geometry(32768, 512, 1, 64);
+    let p = header::parse(&cs).unwrap();
+    assert_eq!((p.siz.x1, p.siz.y1, p.layers), (32768, 512, 64));
+    // Refused by the geometry pass itself: no block or segment table exists yet.
+    let want = Err(J2kError::TooManySegments(262_144 * 64));
+    assert_eq!(tile::build(&p).map(|_| ()), want);
+    assert_eq!(decode(&cs).map(|_| ()), want);
+    // Fewer layers at the same geometry fit under the segment limit and are only refused
+    // later, for the packets they lack.
+    let ok = claimed_geometry(32768, 512, 1, 0);
+    assert!(!matches!(
+        decode(&ok),
+        Err(J2kError::TooManySegments(_) | J2kError::ScratchBudget { .. })
+    ));
+}
+
+// REQ: OA-J2K-014
+#[test]
+fn scratch_budget_is_refused_and_real_fields_fit() {
+    use crate::{scratch_bytes, MAX_SAMPLES, MAX_SCRATCH_BYTES, MAX_SEGMENTS};
+    // The coefficient array of the largest image plus the largest tables still fits; one more
+    // table byte-worth does not.
+    assert!(scratch_bytes(MAX_SAMPLES, 1 << 18, MAX_SEGMENTS) <= MAX_SCRATCH_BYTES);
+    assert!(scratch_bytes(MAX_SAMPLES, 1 << 18, 1 << 20) > MAX_SCRATCH_BYTES);
+    // The largest real field of the data set: 151,987 samples, 58 blocks, 58 segments.
+    assert!(scratch_bytes(151_987, 58, 58) < 1 << 20);
+    // A real-size stream decodes under the limits.
+    let samples: Vec<i32> = (0..64 * 64).map(|k| k % 200).collect();
+    let cs = encode(&samples, &Opts::new(64, 64, 8, 3));
+    assert_eq!(decode(&cs).unwrap().samples, samples);
+}
