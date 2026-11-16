@@ -545,7 +545,10 @@ mod proofs {
             2 => true,
             _ => neg_y == 1,
         };
-        assert_eq!(sin_sign(n, neg_y, neg_x), u64::from(sin_neg != (neg_x == 1)));
+        assert_eq!(
+            sin_sign(n, neg_y, neg_x),
+            u64::from(sin_neg != (neg_x == 1))
+        );
         assert_eq!(cos_sign(n, neg_y), u64::from(cos_neg));
     }
 
