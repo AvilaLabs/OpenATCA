@@ -162,3 +162,126 @@ fn a_non_finite_or_non_positive_tuning_value_is_a_usage_error() {
         }
     }
 }
+
+/// Writes `r` as an OAF1 clip of 100-report frames.
+fn write_clip(r: &Reports, name: &str) -> PathBuf {
+    let n = reports_len(r);
+    let mut bytes = Vec::new();
+    let (mut seq, mut at) = (0u64, 0);
+    while at < n {
+        let end = (at + 100).min(n);
+        let mut payload = Vec::new();
+        encode_payload(&mut payload, r, at, end).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let len = encode_frame(&mut buf, 1, FLAG_BYTES, seq, 0, 0, &payload).unwrap();
+        bytes.extend_from_slice(&buf[..len]);
+        seq += 1;
+        at = end;
+    }
+    let path = tmp(name);
+    std::fs::write(&path, &bytes).unwrap();
+    path
+}
+
+fn run(path: &PathBuf, extra: &[&str]) -> (String, String, Option<i32>) {
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-truth-check"))
+        .arg(path)
+        .args(extra)
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+        o.status.code(),
+    )
+}
+
+// REQ: OA-TRUTH-059
+#[test]
+fn check_binary_prints_the_removal_total_and_the_shares_it_computed() {
+    // 300 good reports plus three that fail NACp (7 < 8), on the first aircraft after its track.
+    let mut r = track();
+    for k in 0..3 {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + (400 + 2 * k) * 1_000_000_000;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 7;
+        row.sil = 3;
+        row.version = 2;
+        row.source = 0;
+        reports_push(&mut r, &row);
+    }
+    let (out, err, code) = run(&write_clip(&r, "truth_check_removed.oaf"), &[]);
+    assert_eq!(code, Some(0), "{out} {err}");
+    // `{:<20}` pads the name to 20 columns, then one space and the count.
+    let line = |name: &str, tail: &str| format!("  {name:<20} {tail}");
+    assert!(out.contains(&line("nacp", "3\n")), "{out}");
+    assert!(
+        out.contains(&line(
+            "total",
+            "3   (kept + removed = 303, rows in = 303)\n"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("rows kept          300\n"), "{out}");
+    // Every report and every interval of the 2 s track is far inside the 50 m gate.
+    assert!(
+        out.contains("at report times:      100.00 % (300 of 300)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("at interval midpoints: 100.00 % (298 of 298)\n"),
+        "{out}"
+    );
+    assert!(!out.contains("records dropped"), "{out}");
+    // Without leave-one-out there is nothing to take a share of.
+    let (out, _, _) = run(&write_clip(&r, "truth_check_removed.oaf"), &["--no-loo"]);
+    assert!(out.contains("at hidden times: n/a\n"), "{out}");
+    assert!(
+        out.contains("(calibration, ~95 % if honest): n/a\n"),
+        "{out}"
+    );
+}
+
+// REQ: OA-TRUTH-059
+#[test]
+fn check_binary_reports_records_dropped_from_frames_that_decoded() {
+    let mut r = track();
+    for k in 0..2 {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xa00001;
+        row.time_ns = 1_700_000_000_000_000_000 + (400 + 2 * k) * 1_000_000_000;
+        row.lat_e7 = 910_000_000;
+        row.lon_e7 = -880_000_000;
+        reports_push(&mut r, &row);
+    }
+    let (out, err, code) = run(&write_clip(&r, "truth_check_dropped.oaf"), &["--no-loo"]);
+    assert_eq!(code, Some(0), "{out} {err}");
+    assert!(
+        out.contains("300 reports decoded, 0 frames refused\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "2 records dropped from frames that decoded (position or flags out of range)\n"
+        ),
+        "{out}"
+    );
+}
+
+// REQ: OA-TRUTH-059
+#[test]
+fn check_binary_refuses_an_unknown_option_and_a_second_path_with_the_usage_text() {
+    let path = write_clip(&track(), "truth_check_usage.oaf");
+    for extra in [&["--bogus"][..], &["--accel-q"], &["other.oaf"]] {
+        let (_, err, code) = run(&path, extra);
+        assert_eq!(code, Some(2), "{extra:?}");
+        assert!(
+            err.contains("oa-truth-check: usage: oa-truth-check <clip.oaf> [--accel-q <v>] [--sigma-scale <v>] [--no-loo]"),
+            "{extra:?}: {err}"
+        );
+    }
+}

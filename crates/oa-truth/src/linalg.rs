@@ -113,3 +113,51 @@ pub(crate) fn proc_noise(dt: f64, q: f64) -> M3 {
 pub(crate) fn predict_cov(f: &M3, p: &M3, q: &M3) -> M3 {
     add(&mul(&mul(f, p), &transpose(f)), q)
 }
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-TRUTH-058
+    #[test]
+    fn the_process_noise_is_the_white_jerk_matrix_element_by_element() {
+        // q = 0.1, dt = 2: dt^2 = 4, dt^3 = 8, dt^4 = 16, dt^5 = 32.
+        let m = proc_noise(2.0, 0.1);
+        let want = [
+            [0.1 * 32.0 / 20.0, 0.1 * 16.0 / 8.0, 0.1 * 8.0 / 6.0],
+            [0.1 * 16.0 / 8.0, 0.1 * 8.0 / 3.0, 0.1 * 4.0 / 2.0],
+            [0.1 * 8.0 / 6.0, 0.1 * 4.0 / 2.0, 0.1 * 2.0],
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((m[i][j] - want[i][j]).abs() < 1e-15, "({i},{j}): {m:?}");
+            }
+        }
+        // Literal values of the three distinct entries, so the table above is not a copy of the code.
+        assert!((m[0][0] - 0.16).abs() < 1e-15);
+        assert!((m[1][0] - 0.2).abs() < 1e-15);
+        assert!((m[1][1] - 0.8 / 3.0).abs() < 1e-15);
+        assert!((m[2][0] - 0.8 / 6.0).abs() < 1e-15);
+        assert!((m[2][2] - 0.2).abs() < 1e-15);
+    }
+
+    // REQ: OA-TRUTH-058
+    #[test]
+    fn the_inverse_is_exact_and_a_singular_or_non_finite_matrix_has_none() {
+        let m: M3 = [[2.0, 0.0, 0.0], [1.0, 4.0, 0.0], [0.0, 0.0, 5.0]];
+        // Lower triangular: inverse [[1/2,0,0],[-1/8,1/4,0],[0,0,1/5]].
+        let i = inv(&m).unwrap();
+        let want: M3 = [[0.5, 0.0, 0.0], [-0.125, 0.25, 0.0], [0.0, 0.0, 0.2]];
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!((i[r][c] - want[r][c]).abs() < 1e-15, "{i:?}");
+            }
+        }
+        // Rows 1 and 2 are proportional: determinant zero.
+        assert!(inv(&[[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 1.0, 1.0]]).is_none());
+        assert!(inv(&[[0.0; 3]; 3]).is_none());
+        assert!(inv(&[[f64::NAN, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]).is_none());
+        assert!(inv(&[[f64::INFINITY, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]).is_none());
+    }
+}

@@ -241,3 +241,219 @@ pub(crate) fn interp(v: &LegView<'_>, k: usize, t_ns: i64, q: f64) -> Option<([f
     let ps = add(&pt, &mul(&mul(&c, &dp), &transpose(&c)));
     Some((join(&xe, &xn), pack(&ps)))
 }
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // Reference values: the Kalman filter and Rauch-Tung-Striebel equations of the module
+    // documentation (prior diag(1e6, 62500, 900), F(dt), Q(dt, q) of white jerk) evaluated
+    // independently in double precision for a three-report leg: times 0, 2 and 5 s, east
+    // 0, 10, 17 m, north 0, -3, -4 m, per-axis sigma 3, 2 and 4 m, q = 0.1.
+    const T: [i64; 3] = [0, 2_000_000_000, 5_000_000_000];
+    const ZE: [f64; 3] = [0.0, 10.0, 17.0];
+    const ZN: [f64; 3] = [0.0, -3.0, -4.0];
+    const SG: [f64; 3] = [3.0, 2.0, 4.0];
+    const XF: [[f64; 6]; 3] = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [
+            9.999842279477877,
+            5.070722672320022,
+            0.07097949230663987,
+            -2.9999526838433628,
+            -1.5212168016960064,
+            -0.02129384769199196,
+        ],
+        [
+            17.002731153964827,
+            0.7370956151244927,
+            -1.0651955224709098,
+            -4.001171488044079,
+            0.3650836052132238,
+            0.46605159783548217,
+        ],
+    ];
+    const PF: [[f64; 6]; 3] = [
+        [8.999919000663795, 0.0, 0.0, 62500.0, 0.0, 900.0],
+        [
+            3.9999369117431343,
+            2.0282890689122723,
+            0.02839179692250582,
+            890.6716861777313,
+            887.4023093467652,
+            887.4227449915741,
+        ],
+        [
+            15.994877936660487,
+            8.52672421456009,
+            2.1308064159156856,
+            8.310209787750864,
+            2.956548722280786,
+            1.2956001769971408,
+        ],
+    ];
+    const XS: [[f64; 6]; 3] = [
+        [
+            0.0027408980420973172,
+            6.062660386668204,
+            -1.064903269348937,
+            -0.0011299126512589464,
+            -1.9649969630835127,
+            0.46592556232962556,
+        ],
+        [
+            9.99809902363962,
+            3.9326245722509334,
+            -1.0651187087706713,
+            -2.999204940069637,
+            -1.0330464772141434,
+            0.46601864973639684,
+        ],
+        XF[2],
+    ];
+    const PS: [[f64; 6]; 3] = [
+        [
+            8.99569027370532,
+            -6.29365837817107,
+            1.797182101859386,
+            7.54944688348769,
+            -2.7619990396889844,
+            1.26165876137361,
+        ],
+        [
+            3.9978501405330826,
+            0.665924299495122,
+            -1.3315789856028333,
+            1.241275765733576,
+            -0.465168150283489,
+            1.1154539784233748,
+        ],
+        PF[2],
+    ];
+
+    /// `rel` is the relative tolerance. The prior (variance 1e6 against reports of a few m^2)
+    /// makes the backward step ill-conditioned: the cofactor inverse and a reference inverse
+    /// differ by about 1e-9 in a state, 1e-6 in a velocity or acceleration variance and 2e-4 in a
+    /// covariance between two reports. A wrong term in the equations is orders of magnitude more.
+    fn close(got: &[f64; 6], want: &[f64; 6], what: &str, rel: f64) {
+        for i in 0..6 {
+            let tol = rel * want[i].abs().max(1.0);
+            assert!(
+                (got[i] - want[i]).abs() <= tol,
+                "{what}[{i}]: {got:?} vs {want:?}"
+            );
+        }
+    }
+
+    fn run() -> Smoothed {
+        smooth(&T, &ZE, &ZN, &SG, 0.1)
+    }
+
+    // REQ: OA-TRUTH-058
+    #[test]
+    fn the_smoother_gives_the_rts_state_and_full_covariance() {
+        let sm = run();
+        for k in 0..3 {
+            close(&sm.xf[k], &XF[k], "xf", 1e-7);
+            close(&sm.pf[k], &PF[k], "pf", 1e-7);
+            close(&sm.xs[k], &XS[k], "xs", 1e-7);
+            close(&sm.ps[k], &PS[k], "ps", 1e-3);
+        }
+    }
+
+    fn view(sm: &Smoothed) -> LegView<'_> {
+        LegView {
+            t_ns: &T,
+            alt_ft: &[0, 0, 0],
+            vrate_fpm: &[0, 0, 0],
+            xf: &sm.xf,
+            pf: &sm.pf,
+            xs: &sm.xs,
+            ps: &sm.ps,
+        }
+    }
+
+    // REQ: OA-TRUTH-058
+    #[test]
+    fn interpolation_between_reports_is_the_smoothed_state_and_covariance() {
+        let sm = run();
+        let v = view(&sm);
+        let (x, p) = interp(&v, 0, 1_000_000_000, 0.1).unwrap();
+        close(
+            &x,
+            &[
+                5.532929779196803,
+                4.997697608244749,
+                -1.0650213662803771,
+                -1.7331554399364373,
+                -1.4990455151085724,
+                0.4659768113845958,
+            ],
+            "x(1 s)",
+            1e-7,
+        );
+        close(
+            &p,
+            &[
+                3.3040729603962973,
+                -0.47049487025651615,
+                -0.3438351543550766,
+                3.2494393707820564,
+                -1.557940101901636,
+                1.1685894478256387,
+            ],
+            "p(1 s)",
+            1e-3,
+        );
+        let (x, p) = interp(&v, 1, 3_500_000_000, 0.1).unwrap();
+        close(
+            &x,
+            &[
+                14.698743848688288,
+                2.334885298183951,
+                -1.0651859207587038,
+                -4.0244893116304885,
+                -0.33399224709583564,
+                0.4660474793232357,
+            ],
+            "x(3.5 s)",
+            1e-7,
+        );
+        close(
+            &p,
+            &[
+                5.534846254485274,
+                0.7152306645921271,
+                -0.8821793776573941,
+                2.229108925026594,
+                1.1415793969213155,
+                1.1605823448156798,
+            ],
+            "p(3.5 s)",
+            1e-3,
+        );
+    }
+
+    // REQ: OA-TRUTH-058
+    #[test]
+    fn interpolation_at_a_report_time_is_that_reports_smoothed_estimate_and_outside_is_none() {
+        let sm = run();
+        let v = view(&sm);
+        // At the later end of an interval: the later report's estimate, for the first and the
+        // second interval.
+        for (k, at) in [(0usize, 2_000_000_000i64), (1, 5_000_000_000)] {
+            let (x, p) = interp(&v, k, at, 0.1).unwrap();
+            assert_eq!(x, sm.xs[k + 1]);
+            assert_eq!(p, sm.ps[k + 1]);
+        }
+        // At the earlier end: the earlier report's.
+        let (x, p) = interp(&v, 1, 2_000_000_000, 0.1).unwrap();
+        assert_eq!((x, p), (sm.xs[1], sm.ps[1]));
+        // Outside [t[k], t[k+1]] on either side there is no answer.
+        assert!(interp(&v, 1, 1_999_999_999, 0.1).is_none());
+        assert!(interp(&v, 1, 5_000_000_001, 0.1).is_none());
+        assert!(interp(&v, 0, -1, 0.1).is_none());
+        assert!(interp(&v, 0, 2_000_000_001, 0.1).is_none());
+    }
+}

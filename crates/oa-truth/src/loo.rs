@@ -174,3 +174,222 @@ pub(crate) fn dist_of(v: &[f64]) -> Dist {
         max: a.last().copied().unwrap_or(0.0),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::DEFAULT_CONFIG;
+    use oa_adsb::NONE_I32;
+
+    const S: i64 = 1_000_000_000;
+
+    /// A leg's columns: times in s, east, north, sigma, altitude, vertical rate.
+    struct Leg {
+        t: Vec<i64>,
+        ze: Vec<f64>,
+        zn: Vec<f64>,
+        sg: Vec<f64>,
+        alt: Vec<i32>,
+        vr: Vec<i32>,
+    }
+
+    /// `n` reports 1 s apart on the line 100 m/s east and 100 m/s north, sigma 5 m, altitude
+    /// 10000 ft.
+    fn line(n: usize) -> Leg {
+        Leg {
+            t: (0..n as i64).map(|k| k * S).collect(),
+            ze: (0..n).map(|k| 100.0 * k as f64).collect(),
+            zn: (0..n).map(|k| 100.0 * k as f64).collect(),
+            sg: vec![5.0; n],
+            alt: vec![10_000; n],
+            vr: vec![0; n],
+        }
+    }
+
+    fn run(l: &Leg, cfg: &TruthConfig) -> LooAcc {
+        let mut acc = LooAcc::default();
+        loo_leg(&mut acc, cfg, &l.t, &l.ze, &l.zn, &l.sg, &l.alt, &l.vr);
+        acc
+    }
+
+    fn near(a: f64, b: f64, what: &str) {
+        assert!((a - b).abs() < 1e-6, "{what}: {a} vs {b}");
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn every_fifth_report_from_the_third_is_hidden_and_the_last_has_no_right_neighbour() {
+        // n = 13 hides positions 2, 7 and 12 (k % 5 == 2). Altitude markers tell them apart.
+        let mut l = line(13);
+        l.alt[2] += 1000;
+        l.alt[7] += 2000;
+        l.alt[12] += 4000;
+        let acc = run(&l, &DEFAULT_CONFIG);
+        assert_eq!(acc.hidden, 3);
+        // Position 12 is the last report: nothing to its right, so it is not predicted.
+        assert_eq!(acc.no_bracket, 1);
+        assert_eq!(acc.hz.len(), 2);
+        // Neighbours are 10000 ft on both sides, so the residual is the marker.
+        assert_eq!(acc.alt, vec![1000.0, 2000.0]);
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn a_leg_with_fewer_than_min_leg_points_left_after_hiding_is_counted_not_predicted() {
+        // Three reports: position 2 is hidden, two remain (under 3): not smoothed.
+        let acc = run(&line(3), &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket, acc.hz.len()), (1, 1, 0));
+        // Four reports: three remain, exactly the minimum: predicted.
+        let acc = run(&line(4), &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket, acc.hz.len()), (1, 0, 1));
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn a_hidden_report_needs_a_remaining_report_within_the_bracket_on_both_sides() {
+        let shifted = |from: usize, extra_s: i64| {
+            let mut l = line(9);
+            for t in &mut l.t[from..] {
+                *t += extra_s * S;
+            }
+            l
+        };
+        // Right neighbour (position 3) 12 s after the hidden one: no bracket; position 7 is fine.
+        let acc = run(&shifted(3, 11), &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket, acc.hz.len()), (2, 1, 1));
+        // Left neighbour (position 1) 12 s before the hidden one.
+        let acc = run(&shifted(2, 11), &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket, acc.hz.len()), (2, 1, 1));
+        // Left neighbour exactly 10 s before: inside the bracket.
+        let acc = run(&shifted(2, 9), &DEFAULT_CONFIG);
+        assert_eq!((acc.no_bracket, acc.hz.len()), (0, 2));
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn a_prediction_that_is_not_finite_is_counted_and_adds_no_residual() {
+        // A NaN position poisons the whole filter.
+        let mut l = line(9);
+        l.ze[0] = f64::NAN;
+        let acc = run(&l, &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket), (2, 2));
+        assert!(acc.hz.is_empty() && acc.along.is_empty() && acc.alt.is_empty());
+        assert_eq!((acc.under_gate.n, acc.coverage.n), (0, 0));
+        // An unbounded sigma on the report before the first hidden one leaves its filtered state
+        // finite and its variance NaN: the prediction has a finite state and a non-finite variance.
+        let mut l = line(9);
+        l.sg[1] = 1e200;
+        let acc = run(&l, &DEFAULT_CONFIG);
+        assert_eq!((acc.hidden, acc.no_bracket), (2, 2));
+        assert!(acc.hz.is_empty());
+    }
+
+    // Reference values for `line(9)` with the hidden position 2 moved by (dx, dy), computed
+    // independently from the filter and smoother equations on the seven remaining reports.
+    // Position 2 is predicted at t = 2 s from reports at 1 s and 3 s; position 7 at 7 s from
+    // 6 s and 8 s.
+    const VAR2: f64 = 6.504303403933136;
+    const VAR7: f64 = 9.750431367413661;
+
+    fn offset_leg(dx: f64, dy: f64) -> Leg {
+        let mut l = line(9);
+        l.ze[2] += dx;
+        l.zn[2] += dy;
+        l
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn residuals_split_into_horizontal_along_and_cross_track() {
+        // Offset (30, 40) from a track heading north-east: hz 50, along (30 + 40) / sqrt 2 less the
+        // prediction's own millimetre-level drift, cross (30 - 40) / sqrt 2 (negative: left).
+        let acc = run(&offset_leg(30.0, 40.0), &DEFAULT_CONFIG);
+        assert_eq!(acc.hz.len(), 2);
+        near(acc.hz[0], 50.003327534033886, "hz[0]");
+        near(acc.hz[1], 0.0011821500587057034, "hz[1]");
+        assert_eq!(acc.along.len(), 2);
+        near(acc.along[0], 49.50083599774726, "along[0]");
+        near(acc.along[1], -0.0011821500587057031, "along[1]");
+        assert_eq!(acc.cross.len(), 2);
+        near(acc.cross[0], -7.071067811865472, "cross[0]");
+        near(acc.cross[1], 0.0, "cross[1]");
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn coverage_compares_the_residual_with_the_prediction_variance_plus_the_report_variance() {
+        // Offset (12, 16): hz = 20.0033 m. The 95 % radius of variance plus report variance is
+        // 2.4477 * sqrt(6.5043 + 25) = 13.74 m (a miss); of the product it would be 31.2 m. The
+        // unperturbed report at position 7 (hz 0.001 m) is a hit.
+        let acc = run(&offset_leg(12.0, 16.0), &DEFAULT_CONFIG);
+        assert_eq!((acc.coverage.n, acc.coverage.hit), (2, 1));
+        // Predicted 95 % radii 6.2426 m and 7.6433 m (2.4477 * sqrt(VAR)): both under the 50 m
+        // gate; with a 7 m gate only the first.
+        assert_eq!((acc.under_gate.n, acc.under_gate.hit), (2, 2));
+        let cfg = TruthConfig {
+            max_sigma95_h_m: 7.0,
+            ..DEFAULT_CONFIG
+        };
+        let acc = run(&offset_leg(12.0, 16.0), &cfg);
+        assert_eq!((acc.under_gate.n, acc.under_gate.hit), (2, 1));
+        assert!((SIGMA95 * VAR2.sqrt() - 6.2426).abs() < 1e-3);
+        assert!((SIGMA95 * VAR7.sqrt() - 7.6433).abs() < 1e-3);
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn the_altitude_residual_is_against_the_time_weighted_neighbours_and_needs_all_three() {
+        // Times 0 1 2 4 5 6 7 8 9: position 2 (t = 2 s) sits a third of the way from the report at
+        // 1 s to the one at 4 s: 10000 + 300 / 3 = 10100; reported 10150: residual 50.
+        let base = || {
+            let mut l = line(9);
+            l.t = [0, 1, 2, 4, 5, 6, 7, 8, 9].iter().map(|s| s * S).collect();
+            l.alt[1] = 10_000;
+            l.alt[3] = 10_300;
+            l.alt[2] = 10_150;
+            l
+        };
+        let acc = run(&base(), &DEFAULT_CONFIG);
+        assert_eq!(acc.alt.len(), 2);
+        near(acc.alt[0], 50.0, "alt[0]");
+        // Position 7: neighbours 10000 and 10000, reported 10000.
+        near(acc.alt[1], 0.0, "alt[1]");
+        // Any one of the three missing: no altitude residual for position 2 (position 7 stays).
+        for missing in [2usize, 1, 3] {
+            let mut l = base();
+            l.alt[missing] = NONE_I32;
+            let acc = run(&l, &DEFAULT_CONFIG);
+            assert_eq!(acc.alt.len(), 1, "alt missing at {missing}");
+        }
+    }
+
+    // REQ: OA-TRUTH-057
+    #[test]
+    fn distributions_are_signed_mean_rms_and_nearest_rank_of_the_absolute_values() {
+        // Absolute values 1..=20, signs alternating: mean of 1 - 2 + 3 - ... - 20 over 20 is -0.5.
+        let v: Vec<f64> = (1..=20)
+            .map(|k| {
+                if k % 2 == 0 {
+                    -f64::from(k)
+                } else {
+                    f64::from(k)
+                }
+            })
+            .collect();
+        let d = dist_of(&v);
+        assert_eq!(d.n, 20);
+        assert!((d.mean + 0.5).abs() < 1e-12);
+        // sum of squares 1..=20 = 2870.
+        assert!((d.rms - (2870.0f64 / 20.0).sqrt()).abs() < 1e-12);
+        // Nearest rank: ceil(p n)-th smallest: 10th, 19th, 20th.
+        assert_eq!((d.median, d.p95, d.p99, d.max), (10.0, 19.0, 20.0, 20.0));
+        // One value: every rank is it.
+        let d = dist_of(&[-3.0]);
+        assert_eq!(
+            (d.n, d.mean, d.median, d.p95, d.p99, d.max),
+            (1, -3.0, 3.0, 3.0, 3.0, 3.0)
+        );
+        assert_eq!(dist_of(&[]), Dist::default());
+    }
+}
