@@ -475,7 +475,7 @@ pub fn run_streams_with(
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
 ) -> io::Result<MergeReport> {
     let (report, end) = merge_counted(specs, chunk, &mut |m| {
-        process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.mono_ns, m.payload);
+        process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.stream, m.mono_ns, m.payload);
         after_frame(p)
     });
     // The counts go in first, so they are there whether the run ended or a hook failed.

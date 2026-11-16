@@ -556,6 +556,7 @@ pub fn replay_state_digest(p: &Pipeline) -> Digest {
         for f in &p.clock.feeds {
             i(&mut h, f.ref_wall_ns);
             u(&mut h, f.ref_mono_ns);
+            u(&mut h, u64::from(f.ref_stream));
             let _ = h.update(&[u8::from(f.ref_ok)]);
         }
     }
@@ -595,24 +596,26 @@ pub fn process_frame(
     recv_unix_ns: i64,
     payload: &[u8],
 ) {
-    process_frame_mono(p, feed, kind, recv_unix_ns, None, payload);
+    process_frame_mono(p, feed, kind, recv_unix_ns, 0, None, payload);
 }
 
 /// [`process_frame`] for a frame that may carry the recorder's monotonic time (`mono_ns`), which
-/// lets the clock tell a real gap from a step of the recorder's clock (`clock` module, rule 7).
-/// With `None` it is [`process_frame`] exactly.
+/// lets the clock tell time that passed from a step of the recorder's clock (`clock` module,
+/// rule 7); `stream` is the stream the frame comes from (its monotonic time is compared only with
+/// that stream's). With `None` it is [`process_frame`] exactly.
 pub fn process_frame_mono(
     p: &mut Pipeline,
     feed: FeedKind,
     kind: Kind,
     recv_unix_ns: i64,
+    stream: u32,
     mono_ns: Option<u64>,
     payload: &[u8],
 ) {
     let f = feed as usize;
     // 1. Clock, eviction cadence, checkpoint.
     let clock_before = p.clock;
-    match clock_observe_mono(&mut p.clock, f, p.replay_ns, recv_unix_ns, mono_ns) {
+    match clock_observe_mono(&mut p.clock, f, p.replay_ns, recv_unix_ns, stream, mono_ns) {
         Tick::Advance | Tick::RealGap => p.replay_ns = recv_unix_ns,
         Tick::Keep => {}
         Tick::Regress => count_error(&mut p.errors, ErrKind::TimeRegression, 1),
@@ -621,11 +624,12 @@ pub fn process_frame_mono(
                 count_error(&mut p.errors, ErrKind::TimeRegression, 1);
             }
         }
-        Tick::Step { .. } => {
-            // The step is applied only if its size is exact: the ages are shifted by it, and a
-            // saturated size would leave them wrong against the clock that takes the new time.
+        Tick::Step { delta } => {
+            // The step is applied only if the clock's move is exact: the ages are shifted by
+            // `delta` (at most that move), and a saturated move would leave them wrong against
+            // the clock that takes the new time.
             match recv_unix_ns.checked_sub(p.replay_ns) {
-                Some(delta) => step_clock(p, recv_unix_ns, delta),
+                Some(_) => step_clock(p, recv_unix_ns, delta),
                 None => {
                     p.clock = clock_before;
                     count_error(&mut p.errors, ErrKind::ClockStepOverflow, 1);

@@ -118,6 +118,37 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// REQ: OA-FEED-178
+#[test]
+fn duration_arguments_at_the_limit_run_and_above_it_are_refused_without_a_panic() {
+    let bin = env!("CARGO_BIN_EXE_oa-feed");
+    let run = |flag: &str, v: u64| {
+        let mut child = Command::new(bin)
+            .args(["--stdin", flag, &v.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+    for (flag, limit) in [
+        ("--duration", oa_feed::cli::MAX_DURATION_SECS),
+        ("--summary-every", oa_feed::cli::MAX_SUMMARY_SECS),
+    ] {
+        let ok = run(flag, limit);
+        assert!(ok.status.success(), "{flag} {limit}: {:?}", ok.status);
+        for over in [limit + 1, u64::MAX] {
+            let out = run(flag, over);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "{flag} {over} was accepted");
+            assert!(!err.contains("panicked"), "{flag} {over}: {err}");
+            assert!(err.contains("at most"), "{flag} {over}: {err}");
+        }
+    }
+}
+
 // REQ: OA-FEED-031
 #[test]
 fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {

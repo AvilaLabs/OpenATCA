@@ -640,8 +640,12 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   CRC error at its offset with resynchronisation on to the next frame of either version, and every byte
   is delivered or counted skipped.
 - **OA-FEED-177** `oa-feed --record` and `--record-raw` store each frame as an `OAF2` frame with the
-  recorder's monotonic time since start (not going back); a frame that already has one keeps it; the
+  recorder's monotonic time since start (not going back), taken when the chunk of input that completed the
+  frame was read, before it is queued; a frame that already has one keeps it; the
   other fields and the payload are the input's; a gzip recording of such frames replays.
+- **OA-FEED-178** `--duration` is refused above 10 years (`MAX_DURATION_SECS`, 315 360 000 s) and
+  `--summary-every` above one day (`MAX_SUMMARY_SECS`, 86 400 s), including `u64::MAX`, at parse time; at the
+  limits a run does not panic. Every `Instant` offset in the binary is checked.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1446,10 +1450,11 @@ frame of their feed has been fed (as the ADS-B table is).
   time, or the notice's own end), which decides whether a step of the replay clock moves it: two states
   that differ only in that flag have different digests. Nothing is added while no tombstone is held, and
   `replay_hash` is unchanged.
-- **OA-RPL-266** A recording with a monotonic time per frame and a genuine gap (wall and monotonic time
-  elapsed agree within 10 seconds, the frame ahead of the clock) is accepted at once at its own time
-  (`Tick::RealGap`): no age is shifted, no row is marked stale, and a flight silent for the gap expires
-  under its age limit (an ACTIVE flight after 3 hours).
+- **OA-RPL-266** A recording with a monotonic time per frame and a genuine gap (the wall time elapsed is the
+  monotonic time elapsed, up to a difference within the clock tolerance of 2 minutes, the frame ahead of the
+  clock) is accepted at once at its own time (`Tick::RealGap`): no age is shifted, no row is marked stale,
+  and a flight silent for the gap expires under its age limit (an ACTIVE flight after 3 hours), also when
+  the first frame after the gap waited seconds in the recorder before it was stamped (OA-RPL-272).
 - **OA-RPL-267** A frame whose wall time is far from the clock while the monotonic time elapsed is short
   (a step of +3 hours in 1 second, or a step back) is a step of the recorder's clock: handled by rules
   4 to 6 as before, and counted in `Clock::mono_steps`.
@@ -1459,8 +1464,17 @@ frame of their feed has been fed (as the ADS-B table is).
   decision's kind and elapsed times, and each feed's reference), written only once there is a monotonic
   reference or a decision, so two replays that classify a gap differently differ.
 - **OA-RPL-270** The classification at its tolerance: elapsed times differing by exactly
-  `MONO_AGREE_TOL_NS` (10 seconds) agree, one nanosecond more is a step; a monotonic time that went back, a
-  frame with none, and a frame behind the clock are not classified as a real gap.
+  `CLOCK_TOLERANCE_NS` (2 minutes) are time that passed, one nanosecond more is a step; a monotonic time
+  that went back, a frame with none, and a frame behind the clock are not classified as a real gap.
+- **OA-RPL-271** Monotonic times are compared only between frames of the same stream: two recordings of the
+  same feed from different recorder runs, whose monotonic origins happen to make a gap look genuine, are
+  not classified, and `process_frame_mono` and `clock_observe_mono` take the stream. A feed's monotonic
+  reference is dropped when a step confirmed by another feed forgets or re-bases its record.
+- **OA-RPL-272** The wall time elapsed since a feed's last frame is split exactly into the monotonic time
+  elapsed (time that passed) and a step (the rest). A step within the clock tolerance is noise; a larger one
+  goes through the candidate run, the vote and the confirmation of rules 4 to 6, and when it confirms the
+  ages shift by the step alone (never more than the clock's move), so a gap that is partly a step ages
+  every row by the time that passed and translates only the step.
 - **OA-RPL-205** The tombstone table is of fixed size (set when the NOTAM table is made, by default the size of
   the NOTAM table); when it is full the oldest tombstone is evicted and counted (`tomb_evicted`). Tombstones are
   part of the state hash, after the NOTAMs, only when there are some or a tombstone counter is not zero.
