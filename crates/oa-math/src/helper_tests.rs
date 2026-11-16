@@ -364,3 +364,143 @@ fn hypot_fast_equals_slow_around_the_unscaled_range() {
         },
     );
 }
+
+// REQ: OA-MATH-029
+#[test]
+fn pow2_returns_exact_ieee_encodings_at_range_edges() {
+    use crate::util::pow2;
+
+    let cases: [(i32, u64); 12] = [
+        (-1076, 0),
+        (-1075, 0),
+        (-1074, 0x0000_0000_0000_0001),
+        (-1073, 0x0000_0000_0000_0002),
+        (-1023, 0x0008_0000_0000_0000),
+        (-1022, 0x0010_0000_0000_0000),
+        (-1021, 0x0020_0000_0000_0000),
+        (1022, 0x7fd0_0000_0000_0000),
+        (1023, 0x7fe0_0000_0000_0000),
+        (1024, 0x7ff0_0000_0000_0000),
+        (1025, 0x7ff0_0000_0000_0000),
+        (2048, 0x7ff0_0000_0000_0000),
+    ];
+    for (exponent, expected_bits) in cases {
+        assert_eq!(pow2(exponent).to_bits(), expected_bits, "2^{exponent}");
+    }
+}
+
+// REQ: OA-MATH-029
+#[test]
+fn frexp1_reconstructs_subnormals_and_exact_powers() {
+    use crate::util::frexp1;
+
+    let cases = [
+        (f64::from_bits(1), -1074, 1.0),
+        (f64::from_bits(2), -1073, 1.0),
+        (f64::from_bits(3), -1073, 1.5),
+        (f64::MIN_POSITIVE, -1022, 1.0),
+        (
+            f64::from_bits(0x0010_0000_0000_0001),
+            -1022,
+            1.0 + f64::EPSILON,
+        ),
+        (f64::from_bits(0x3ff0_0000_0000_0000), 0, 1.0),
+        (f64::from_bits(0x7fe0_0000_0000_0000), 1023, 1.0),
+    ];
+    for (x, expected_exponent, expected_mantissa) in cases {
+        let (exponent, mantissa) = frexp1(x);
+        assert_eq!(exponent, expected_exponent, "frexp1({x:e}) exponent");
+        assert_eq!(
+            mantissa.to_bits(),
+            expected_mantissa.to_bits(),
+            "frexp1({x:e}) mantissa"
+        );
+        assert_eq!(
+            (mantissa * crate::util::pow2(exponent)).to_bits(),
+            x.to_bits(),
+            "frexp1({x:e}) reconstruction"
+        );
+    }
+}
+
+// REQ: OA-MATH-029
+#[test]
+fn exponent_reports_subnormal_and_adjacent_normal_binades() {
+    use crate::util::exponent;
+
+    let cases = [
+        (f64::from_bits(0x0000_0000_0000_0001), -1074),
+        (f64::from_bits(0x0000_0000_0000_0002), -1073),
+        (f64::from_bits(0x0000_0000_0000_0003), -1073),
+        (f64::from_bits(0x000f_ffff_ffff_ffff), -1023),
+        (f64::MIN_POSITIVE, -1022),
+        (f64::from_bits(0x0010_0000_0000_0001), -1022),
+        (f64::from_bits(0x3ff0_0000_0000_0000), 0),
+        (f64::from_bits(0x4000_0000_0000_0000), 1),
+        (f64::from_bits(0x4000_0000_0000_0001), 1),
+        (f64::from_bits(0x7fe0_0000_0000_0000), 1023),
+    ];
+    for (x, expected) in cases {
+        assert_eq!(exponent(x), expected, "exponent({x:e})");
+    }
+}
+
+// REQ: OA-MATH-026
+#[test]
+fn scale_round_returns_exact_dyadic_boundary_bits() {
+    use crate::dd::dd;
+    use crate::util::scale_round;
+
+    let cases = [
+        (dd(1.5, 0.0), 0, 0x3ff8_0000_0000_0000), // ordinary exact value
+        (dd(1.0, 0.0), -1022, 0x0010_0000_0000_0000), // least normal
+        (dd(1.0, 0.0), -1074, 0x0000_0000_0000_0001), // least subnormal
+        (dd(1.0, 0.0), -1075, 0x0000_0000_0000_0000), // half least subnormal, even zero
+        (dd(3.0, 0.0), -1075, 0x0000_0000_0000_0002), // tie to even two units
+        (dd(5.0, 0.0), -1075, 0x0000_0000_0000_0002), // tie to even two units
+        (dd(1.0, 0.0), 1023, 0x7fe0_0000_0000_0000), // largest finite binade power
+        (dd(1.0, 0.0), 1024, 0x7ff0_0000_0000_0000), // overflow
+        // These distinguish e+k from the mutant e-k and e*k cutoff predicates.
+        (
+            dd(f64::from_bits(0x0170_0000_0000_0000), 0.0),
+            101,
+            0x07c0_0000_0000_0000,
+        ), // 2^-1000 * 2^101 = 2^-899
+        (
+            dd(f64::from_bits(0x0170_0000_0000_0000), 0.0),
+            2,
+            0x0190_0000_0000_0000,
+        ), // 2^-1000 * 2^2 = 2^-998
+        // Exact midpoint between max finite and infinity; nearest-even overflows.
+        (
+            dd(
+                f64::from_bits(0x7fe0_0000_0000_0000),
+                -f64::from_bits(0x7c80_0000_0000_0000),
+            ),
+            1,
+            0x7ff0_0000_0000_0000,
+        ),
+        // Just below the overflow midpoint, normalized about the lower neighbour.
+        (
+            dd(
+                f64::from_bits(0x7fdf_ffff_ffff_ffff),
+                f64::from_bits(0x7c80_0000_0000_0000) - f64::from_bits(0x7940_0000_0000_0000),
+            ),
+            1,
+            0x7fef_ffff_ffff_ffff,
+        ),
+    ];
+    for (value, scale, expected_bits) in cases {
+        assert_eq!(
+            (value.hi + value.lo).to_bits(),
+            value.hi.to_bits(),
+            "normalized input"
+        );
+        assert_eq!(
+            scale_round(value, scale).to_bits(),
+            expected_bits,
+            "scale_round({:?}, {scale})",
+            value
+        );
+    }
+}

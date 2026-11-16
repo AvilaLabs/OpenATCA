@@ -81,6 +81,26 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `try_frame_change`) refuse past it with `None`; `frame_to_true`, `frame_from_true`, `frame_change` and the
   velocity conversions then return NaN. Inside it the differential is exact, with no floor.
 
+- **OA-GEO-018** Ellipsoid flattening accepts both endpoints of [0, 0.01] and rejects the next
+  representable value above the upper endpoint.
+- **OA-GEO-019** The direct problem rejects a non-finite distance or azimuth with an error naming
+  the invalid quantity.
+- **OA-GEO-020** Degree sine and cosine return exact quadrant values with positive zero at axes.
+- **OA-GEO-021** Degree arctangent returns exact axis and diagonal angles and preserves the sign
+  of zero when it determines the half-turn direction.
+- **OA-GEO-022** Angle normalization uses (-180, 180], while the compensated remainder retains
+  the sign of an exact half-turn.
+- **OA-GEO-023** Compensated angle differences preserve the direction of exact half-turns.
+- **OA-GEO-024** The compensated sum retains a unit lost when adding it to a much larger value.
+- **OA-GEO-025** Sub-grid angular cleanup preserves signed zero and angles outside its grid.
+- **OA-GEO-026** A displayed geodesy error retains the failed quantity or supplied refusal reason.
+- **OA-GEO-027** Oblique WGS-84 rhumb lengths and courses agree with independent meridian and
+  isometric-latitude integrals, including near a pole and across the antimeridian; the direct
+  problem reaches the reference endpoint within 1e-8 degrees.
+
+- **OA-GEO-028** The closest-point fallback scan agrees within one micrometre with analytic
+  spherical distances for an on-segment point, an interior perpendicular foot and a nearest endpoint.
+
 ### Elementary functions (oa-math)
 
 - **OA-MATH-001** `sin`, `cos` and `tan` are faithfully rounded (error below 1 ulp, measured

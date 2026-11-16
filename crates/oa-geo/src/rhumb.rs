@@ -392,3 +392,34 @@ impl Ellipsoid {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use crate::{Ellipsoid, LatLon};
+
+    // REQ: OA-GEO-028
+    #[test]
+    fn fallback_distance_scan_matches_spherical_interior_and_endpoint_minima() {
+        let radius = 6_371_000.0;
+        let sphere = Ellipsoid::new(radius, 0.0).expect("sphere");
+        let start = LatLon::new(0.0, -20.0).expect("start");
+        let length = radius * 40.0f64.to_radians();
+        for (lat, lon, expected) in [
+            (0.0, 3.7, 0.0),
+            (5.0, 3.7, radius * 5.0f64.to_radians()),
+            // Outside the segment: distance to its western endpoint. Independent
+            // 100-digit value of R acos(cos(5 degrees) cos(10 degrees)).
+            (5.0, -30.0, 1_241_930.888_666_342_2),
+        ] {
+            let point = LatLon::new(lat, lon).expect("query");
+            let got = sphere
+                .distance_to_geodesic_scan(point, start, 90.0, length)
+                .expect("fallback scan");
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "{lat} {lon}: {got} vs {expected}"
+            );
+        }
+    }
+}

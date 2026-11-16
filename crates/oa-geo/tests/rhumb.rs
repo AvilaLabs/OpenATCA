@@ -172,6 +172,81 @@ fn rhumb_rejects_poles_and_bad_input() {
     assert!(d.lat() > 89.0 && d.lon().is_finite());
 }
 
+// REQ: OA-GEO-007
+#[test]
+fn spherical_oblique_rhumb_matches_closed_form_and_reverses_signs() {
+    let radius = 6_371_000.0;
+    let sphere = Ellipsoid::new(radius, 0.0).expect("sphere");
+    let a = pt(12.0, -35.0);
+    let b = pt(47.0, 18.0);
+    let (phi1, phi2) = (12.0f64.to_radians(), 47.0f64.to_radians());
+    let dphi = phi2 - phi1;
+    let dlambda = 53.0f64.to_radians();
+    let psi = |phi: f64| (std::f64::consts::FRAC_PI_4 + phi / 2.0).tan().ln();
+    let dpsi = psi(phi2) - psi(phi1);
+    let expected_distance = radius * (dphi * dphi + (dphi / dpsi * dlambda).powi(2)).sqrt();
+    let expected_course = dlambda.atan2(dpsi).to_degrees();
+
+    let forward = sphere.rhumb_inverse(a, b).expect("forward");
+    let reverse = sphere.rhumb_inverse(b, a).expect("reverse");
+    assert!((forward.distance_m - expected_distance).abs() < 1e-7);
+    assert!((forward.course_deg - expected_course).abs() < 1e-12);
+    assert!((reverse.distance_m - expected_distance).abs() < 1e-7);
+    assert!((reverse.course_deg - (expected_course - 180.0)).abs() < 1e-12);
+}
+
+// REQ: OA-GEO-007
+#[test]
+fn rhumb_exact_antipodal_longitude_tie_is_eastward() {
+    let e = wgs84();
+    let a = pt(25.0, -40.0);
+    let b = pt(25.0, 140.0);
+    let r = e.rhumb_inverse(a, b).expect("eastward tie");
+    let reverse_tie = e.rhumb_inverse(b, a).expect("reverse tie");
+    assert_eq!(r.course_deg, 90.0);
+    assert_eq!(reverse_tie.course_deg, 90.0);
+    assert_eq!(r.distance_m, reverse_tie.distance_m);
+    assert!(r.distance_m > 0.0);
+}
+
+// REQ: OA-GEO-027
+#[test]
+fn oblique_ellipsoidal_rhumbs_match_independent_integrals() {
+    // mpmath, 100 decimal digits: integrate M(phi) = a(1-e2)/(1-e2 sin(phi)^2)^(3/2),
+    // psi = asinh(tan(phi)) - e atanh(e sin(phi)), course = atan2(dlon, dpsi),
+    // length = |dm| sqrt(1 + (dlon/dpsi)^2). No geodesic implementation supplies the answers.
+    let cases = [
+        (
+            (-75.0, -120.0),
+            (83.0, 35.0),
+            20_133_289.958_898_693,
+            29.361_226_572_331_564,
+        ),
+        (
+            (89.0, -170.0),
+            (89.8, 160.0),
+            93_964.691_603_311_25,
+            -18.021_027_254_210_786,
+        ),
+        (
+            (10.0, -70.0),
+            (65.0, 40.0),
+            10_742_776.338_751_214,
+            55.365_872_921_422_174,
+        ),
+    ];
+    let e = wgs84();
+    for (a, b, distance, course) in cases {
+        let start = pt(a.0, a.1);
+        let result = e.rhumb_inverse(start, pt(b.0, b.1)).expect("inverse");
+        assert!((result.distance_m - distance).abs() < 1e-3, "{result:?}");
+        assert!((result.course_deg - course).abs() < 1e-10, "{result:?}");
+        let endpoint = e.rhumb_direct(start, course, distance).expect("direct");
+        assert!((endpoint.lat() - b.0).abs() < 1e-8, "{endpoint:?}");
+        assert!((endpoint.lon() - b.1).abs() < 1e-8, "{endpoint:?}");
+    }
+}
+
 /// Closed-form separation on a sphere between the great circle through (phi, -delta) and
 /// (phi, +delta) and the parallel (which is the rhumb line there): the parallel is farthest from
 /// the great circle at its midpoint, where sin(d / R) = |n . P| with n the unit normal of the

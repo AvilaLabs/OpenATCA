@@ -10,7 +10,7 @@
     clippy::indexing_slicing
 )]
 
-use oa_geo::{wgs84, Ellipsoid, LatLon};
+use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon};
 
 const SAMPLE: &str = include_str!("fixtures/geodtest_sample.dat");
 
@@ -379,4 +379,37 @@ fn ellipsoid_parameters_are_validated() {
     let e = wgs84();
     assert_eq!(e.equatorial_radius(), 6_378_137.0);
     assert!((e.flattening() - 1.0 / 298.257_223_563).abs() < 1e-18);
+}
+
+// REQ: OA-GEO-018
+#[test]
+fn ellipsoid_flattening_limits_are_inclusive() {
+    let sphere = Ellipsoid::new(6_371_000.0, 0.0).expect("sphere boundary");
+    assert_eq!(sphere.flattening(), 0.0);
+    let upper = Ellipsoid::new(6_371_000.0, 0.01).expect("supported upper boundary");
+    assert_eq!(upper.flattening(), 0.01);
+    assert!(Ellipsoid::new(6_371_000.0, f64::from_bits(0.01f64.to_bits() + 1)).is_err());
+}
+
+// REQ: OA-GEO-019
+#[test]
+fn direct_rejects_non_finite_distance_and_azimuth() {
+    let e = wgs84();
+    let p = LatLon::new(0.0, 0.0).expect("valid origin");
+    assert_eq!(
+        e.direct(p, f64::NAN, 0.0),
+        Err(GeoError::NonFinite("azimuth"))
+    );
+    assert_eq!(
+        e.direct(p, f64::INFINITY, 0.0),
+        Err(GeoError::NonFinite("azimuth"))
+    );
+    assert_eq!(
+        e.direct(p, 0.0, f64::NAN),
+        Err(GeoError::NonFinite("distance"))
+    );
+    assert_eq!(
+        e.direct(p, 0.0, f64::NEG_INFINITY),
+        Err(GeoError::NonFinite("distance"))
+    );
 }
