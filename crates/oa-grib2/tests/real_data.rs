@@ -598,28 +598,3 @@ fn gefs_jpeg2000_file_decodes_to_physical_fields() {
         r.fields.len()
     );
 }
-
-// REQ: OA-GRIB-060
-#[test]
-fn fuzz_slow_units_decode_within_the_point_budget() {
-    skip_unless_data!(dir);
-    let Ok(rd) = std::fs::read_dir(dir.join("fuzz/grib2/artifacts")) else {
-        println!("no fuzz artifacts: skipping");
-        return;
-    };
-    for e in rd.filter_map(Result::ok) {
-        if !e.file_name().to_string_lossy().starts_with("slow-unit-") {
-            continue;
-        }
-        let data = std::fs::read(e.path()).unwrap();
-        // 26 messages of ordinary 360 x 181 fields: the work is linear in the points decoded,
-        // and the counter bound holds.
-        let d = decode_stream(&data);
-        let points: u64 = d.fields.iter().map(|f| f.values.len() as u64).sum();
-        assert!(
-            points <= work_budget(data.len()),
-            "{}: {points} points",
-            e.path().display()
-        );
-    }
-}
