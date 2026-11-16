@@ -167,6 +167,15 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   cut product up to 2^-77), the multipliers of the `ln` table have at most 12 significant bits, the
   quadrant sign bits of `sin` and `cos` follow the quadrant table, and the case tables built at
   compile time equal the same double-double sums made at run time.
+- **OA-MATH-030** Proved (Kani, `quadrant_signs_follow_the_quadrant_table`): for every quadrant 0 to 3 and
+  every sign bit of y and of x, `sin_sign` and `cos_sign` equal the quadrant table (sin negative for y,
+  never, not y, always; cos the sine of the next quadrant).
+- **OA-MATH-031** Proved (Kani, `magic_number_rounds_half_even`): for every double of magnitude below 2^51,
+  the magic-number sum with 1.5 * 2^52 leaves the value rounded to an integer, ties to even, in the low
+  bits (`magic_int`) and as the double `t - ROUND_MAGIC`.
+- **OA-MATH-032** Proved (Kani, `cut_split_halves_are_exact_and_short`): the split of `two_prod_cut` gives
+  a high half of at most 26 bits and a low half of at most 27 bits of the mantissa, each exact, whose sum
+  is the input, for every normal double whose low half is normal.
 
 ### NASR (oa-nasr)
 
@@ -2294,6 +2303,9 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   headers claim more than 50 million rows before decoding the frame that crosses the cap (typed
   `ClipError`). Ten times the largest real day (330 MB, 4.07 million rows). `oa-sensorsim` reads clips
   through the same reader (`oa_truth::clip::read_clip`), so it has the same caps.
+- **OA-TRUTH-046** Proved (Kani, `clip_row_count_refuses_exactly_when_the_total_crosses_the_cap`,
+  `clip_claim_rows_is_total`): the row count the clip reader accumulates from frame headers cannot wrap, and
+  it refuses at the first frame whose exact running total is over the cap, and at no other.
 
 
 ## M2 — Benchmark harness (oa-bench)
@@ -3111,6 +3123,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   tracks predicted for association, the coarse window width, the anonymous plots never gated because the
   limit was reached, the initiation tests and candidates alive at most, and (apart from the counters, in
   `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
+- **OA-TRK-298** Proved (Kani, `fixed_map_agrees_with_a_reference_model_2_slots`): `FixedMap` agrees with a
+  reference list through any sequence of insert, get, remove and retain: no key is lost or duplicated, `len`
+  is the number of held keys, an insert is refused exactly when the key is new and the table is full, and
+  nothing panics or indexes out of bounds.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and
