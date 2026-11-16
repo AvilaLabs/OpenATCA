@@ -1699,3 +1699,121 @@ fn section_and_message_lengths_at_the_top_of_the_address_space_never_panic() {
         }
     }
 }
+
+/// A 4096 x 4096 (16 Mi points, the largest grid accepted) lat/lon grid of 8-bit flat samples
+/// as oa-j2k's encoder wrote them: 112 bytes for 16 Mi samples.
+const J2K_FLAT_4096: [u8; 112] = [
+    0xff, 0x4f, 0xff, 0x51, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x01, 0xff, 0x52, 0x00,
+    0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x04, 0x04, 0x00, 0x01, 0xff, 0x5c, 0x00, 0x13, 0x40,
+    0x40, 0x48, 0x48, 0x50, 0x48, 0x48, 0x50, 0x48, 0x48, 0x50, 0x48, 0x48, 0x50, 0x48, 0x48, 0x50,
+    0xff, 0x64, 0x00, 0x08, 0x00, 0x01, 0x74, 0x65, 0x73, 0x74, 0xff, 0x90, 0x00, 0x0a, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x14, 0x00, 0x01, 0xff, 0x93, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xd9,
+];
+
+fn square_grid(n: u32) -> Vec<u8> {
+    let span = (n as i64 - 1) * 10_000;
+    sect3_latlon(&LatLonSpec {
+        ni: n,
+        nj: n,
+        la1_micro: 45_000_000,
+        lo1_micro: 0,
+        la2_micro: 45_000_000 - span,
+        lo2_micro: span,
+        di_micro: 10_000,
+        dj_micro: 10_000,
+        scan: 0,
+    })
+}
+
+/// A message of `n` x `n` points whose whole data is `packed`.
+fn square_message(n: u32, p: &Packed) -> Vec<u8> {
+    simple_message(square_grid(n), temp_product(500), p, sect6(None, false))
+}
+
+// REQ: OA-GRIB-060
+#[test]
+fn declared_points_without_input_behind_them_are_refused_before_decoding() {
+    let n = 4096u32;
+    let points = u64::from(n) * u64::from(n);
+    // Constant 5.40 (0 bits, no codestream) and a 112-byte codestream of flat samples, each
+    // declaring 16 Mi points in a message of a few hundred bytes.
+    let msgs = [
+        square_message(n, &encode_jpeg2000(&[], n * n, 273.5, 0, 0, 0, 0)),
+        square_message(n, &encode_jpeg2000(&J2K_FLAT_4096, n * n, 0.0, 0, 0, 8, 0)),
+    ];
+    for m in &msgs {
+        assert!(m.len() < 400);
+        assert_eq!(
+            decode_message(m),
+            Err(Grib2Error::WorkBudget {
+                points,
+                budget: work_budget(m.len())
+            })
+        );
+        let d = decode_stream(m);
+        assert!(d.fields.is_empty());
+        assert!(matches!(
+            d.skipped.first().map(|s| &s.error),
+            Some(Grib2Error::WorkBudget { .. })
+        ));
+        // Reading what the fields are costs no per-point work and stays allowed.
+        assert_eq!(inspect_stream(m).fields.len(), 1);
+    }
+}
+
+// REQ: OA-GRIB-060
+#[test]
+fn the_point_budget_is_shared_by_the_messages_of_one_call() {
+    // Eight constant fields of 1 Mi points: each is within the floor, together they are not.
+    let m = square_message(1024, &encode_jpeg2000(&[], 1024 * 1024, 273.5, 0, 0, 0, 0));
+    let stream: Vec<u8> = (0..8).flat_map(|_| m.iter().copied()).collect();
+    let budget = work_budget(stream.len());
+    let d = decode_stream(&stream);
+    let decoded: u64 = d.fields.iter().map(|f| f.values.len() as u64).sum();
+    assert!(decoded <= budget);
+    assert_eq!(d.fields.len() as u64, budget / (1024 * 1024));
+    assert_eq!(d.skipped.len(), 8 - d.fields.len());
+    assert!(d
+        .skipped
+        .iter()
+        .all(|s| matches!(s.error, Grib2Error::WorkBudget { .. })));
+    assert_eq!(d.messages, 8);
+    // One message alone is decoded.
+    assert_eq!(decode_message(&m).unwrap().len(), 1);
+}
+
+// REQ: OA-GRIB-060
+#[test]
+fn the_budget_leaves_real_field_sizes_far_inside() {
+    // The densest real input measured: 12.9 grid points per byte (a complex-packed GFS 0.5 degree
+    // field), and 151,987 points in one RAP message.
+    assert!(work_budget(80_576) > 8 * 1_038_240);
+    assert!(work_budget(28_600) > 151_987);
+    assert!(work_budget(0) >= 1 << 22);
+    assert_eq!(work_budget(usize::MAX), u64::MAX);
+}
+
+// REQ: OA-GRIB-060
+#[test]
+fn the_committed_point_seeds_are_what_the_builders_write_and_are_refused() {
+    let n = 4096u32;
+    let seeds: [(&[u8], Vec<u8>); 2] = [
+        (
+            include_bytes!("../../../fuzz/seeds/grib2/points-without-data.grib2"),
+            square_message(n, &encode_jpeg2000(&[], n * n, 273.5, 0, 0, 0, 0)),
+        ),
+        (
+            include_bytes!("../../../fuzz/seeds/grib2/points-flat-codestream.grib2"),
+            square_message(n, &encode_jpeg2000(&J2K_FLAT_4096, n * n, 0.0, 0, 0, 8, 0)),
+        ),
+    ];
+    for (seed, built) in &seeds {
+        assert_eq!(*seed, built.as_slice());
+        assert!(matches!(
+            decode_message(seed),
+            Err(Grib2Error::WorkBudget { .. })
+        ));
+    }
+}
