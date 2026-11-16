@@ -284,4 +284,15 @@ fn check_binary_refuses_an_unknown_option_and_a_second_path_with_the_usage_text(
             "{extra:?}: {err}"
         );
     }
+    // An unknown option on its own is not taken for the clip path.
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-truth-check"))
+        .arg("--bogus")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).starts_with("oa-truth-check: usage: oa-truth-check "),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
