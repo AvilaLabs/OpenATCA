@@ -221,6 +221,21 @@ enabled, but leak detection was disabled because LeakSanitizer cannot operate in
 The TIFF artifact retained from an earlier rotation is the overflow input covered by
 OA-TIFF-095. This rotation's TIFF log completed normally with no new crash.
 
+### Completed ARINC 424 continuation, 2026-11-16
+
+The corrected ARINC 424 target was run again for the full requested 45 minutes at
+`dfa3c129b1be00c8bc5ab9905201059da76e497c`, starting from the grown local corpus and the
+committed UTF-8 cutoff seed. One worker, `-max_total_time=2700`, and a 2 GiB RSS limit produced:
+
+| Executions | Elapsed seconds | cov | ft | Kept inputs | Result |
+|---:|---:|---:|---:|---:|---|
+| 6,251,668 | 2,701 | 3,626 | 20,363 | 2,892 | exit 0; no failure artifacts |
+
+The run ended at 19:22:54 UTC. AddressSanitizer was enabled; leak detection remained disabled
+because LeakSanitizer cannot operate in the sandbox. The local campaign directory retains the
+source revision, binary SHA-256, limits, log, corpus and exit status. This replaces the interrupted
+ARINC campaign; it does not establish absence of parser defects or coverage of later revisions.
+
 ## What fuzzing does not show
 
 - Absence of bugs. Fifteen minutes per target, one core, one run is a sample. In every target
