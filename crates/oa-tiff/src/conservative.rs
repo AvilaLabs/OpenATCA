@@ -128,6 +128,15 @@ struct Placed<'a> {
     row_off: i64,
 }
 
+/// Largest lattice index a query box may sit at, so index arithmetic in i64 cannot overflow.
+const MAX_LATTICE_INDEX: f64 = 1_099_511_627_776.0;
+
+/// The whole degree below a latitude or longitude of a sample (finite, within the lattice box).
+#[allow(clippy::cast_possible_truncation)]
+fn whole_degrees(v: f64) -> i32 {
+    v.floor().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
 /// Meridian radius of curvature at geodetic latitude `phi` (radians), metres.
 fn meridian_radius(phi: f64) -> f64 {
     let s = phi.sin();
@@ -158,10 +167,13 @@ fn place(tiles: &[Grid]) -> Result<Vec<Placed<'_>>, QueryError> {
         {
             return Err(QueryError::TilesNotAligned);
         }
+        // Both ratios are finite and within 1e9 (checked above), so they fit an i64.
+        #[allow(clippy::cast_possible_truncation)]
+        let (col_off, row_off) = (fc.round() as i64, fr.round() as i64);
         out.push(Placed {
             g,
-            col_off: fc.round() as i64,
-            row_off: fr.round() as i64,
+            col_off,
+            row_off,
         });
     }
     Ok(out)
@@ -205,20 +217,29 @@ pub(crate) fn collect_counted(
     if !(cells.is_finite() && cells <= MAX_QUERY_SAMPLES as f64) {
         return Err(QueryError::TooManySamples);
     }
+    // A box that is small but sits at a lattice index too large to hold is refused, not clamped.
+    if ![c_lo, c_hi, r_lo, r_hi]
+        .iter()
+        .all(|v| v.abs() <= MAX_LATTICE_INDEX)
+    {
+        return Err(QueryError::TooManySamples);
+    }
+    // All four are finite and within MAX_LATTICE_INDEX, so they fit an i64.
+    #[allow(clippy::cast_possible_truncation)]
     let (c_lo, c_hi, r_lo, r_hi) = (c_lo as i64, c_hi as i64, r_lo as i64, r_hi as i64);
     // Only tiles that reach the node range are looked at.
     let cands: Vec<&Placed<'_>> = placed
         .iter()
         .filter(|p| {
             p.col_off <= c_hi
-                && p.col_off + i64::from(p.g.width) > c_lo
+                && p.col_off.saturating_add(i64::from(p.g.width)) > c_lo
                 && p.row_off <= r_hi
-                && p.row_off + i64::from(p.g.height) > r_lo
+                && p.row_off.saturating_add(i64::from(p.g.height)) > r_lo
         })
         .collect();
     // Every cell runs `hit` once, which for a polygon walks every edge, and every cell that
     // passes looks itself up in every candidate tile.
-    let estimate = cells * (vertices.max(1) + cands.len()) as f64 + tiles.len() as f64;
+    let estimate = cells * vertices.max(1).saturating_add(cands.len()) as f64 + tiles.len() as f64;
     if estimate > MAX_QUERY_WORK as f64 {
         return Err(QueryError::TooMuchWork);
     }
@@ -235,18 +256,21 @@ pub(crate) fn collect_counted(
         let lat = r.lat0 - row as f64 * r.dlat;
         for col in c_lo..=c_hi {
             let lon = r.lon0 + col as f64 * r.dlon;
-            counted += vertices.max(1) as u64;
+            counted = counted.saturating_add(vertices.max(1) as u64);
             if !hit(lat, lon) {
                 continue;
             }
-            counted += cands.len() as u64;
+            counted = counted.saturating_add(cands.len() as u64);
             let mut present = false;
             let mut best: Option<f32> = None;
             for p in &cands {
-                let (Ok(c), Ok(rw)) = (
-                    u32::try_from(col - p.col_off),
-                    u32::try_from(row - p.row_off),
-                ) else {
+                let c = col
+                    .checked_sub(p.col_off)
+                    .and_then(|v| u32::try_from(v).ok());
+                let rw = row
+                    .checked_sub(p.row_off)
+                    .and_then(|v| u32::try_from(v).ok());
+                let (Some(c), Some(rw)) = (c, rw) else {
                     continue;
                 };
                 if let Some(v) = grid_sample(p.g, c, rw) {
@@ -258,16 +282,16 @@ pub(crate) fn collect_counted(
             }
             match (present, best) {
                 (false, _) => {
-                    f.missing += 1;
-                    let sq = (lat.floor() as i32, lon.floor() as i32);
+                    f.missing = f.missing.saturating_add(1);
+                    let sq = (whole_degrees(lat), whole_degrees(lon));
                     if f.last_square != Some(sq) {
                         f.squares.insert(sq);
                         f.last_square = Some(sq);
                     }
                 }
-                (true, None) => f.nodata += 1,
+                (true, None) => f.nodata = f.nodata.saturating_add(1),
                 (true, Some(v)) => {
-                    f.nodes += 1;
+                    f.nodes = f.nodes.saturating_add(1);
                     if f.peak.is_none_or(|p| v > p.metres) {
                         f.peak = Some(Peak {
                             metres: v,

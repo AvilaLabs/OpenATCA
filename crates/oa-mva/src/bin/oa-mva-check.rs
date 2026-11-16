@@ -127,14 +127,22 @@ fn main() -> ExitCode {
         }
     }
     println!("== Ring integrity (counted, nothing repaired)");
-    let t = rings::model_rings(m);
-    println!(
-        "  {} rings, {} vertices: not closed {}, proper crossings {}, touches {}, spikes {}, repeated vertices {}, zero-area {}, clockwise exteriors {}, holes outside exterior {}",
-        t.rings, t.vertices, t.not_closed, t.proper_crossings, t.touches, t.spikes,
-        t.repeated_vertices, t.zero_area, t.clockwise_exteriors, t.holes_outside
-    );
+    match rings::model_rings(m) {
+        Ok(t) => println!(
+            "  {} rings, {} vertices: not closed {}, proper crossings {}, touches {}, spikes {}, repeated vertices {}, zero-area {}, clockwise exteriors {}, holes outside exterior {}",
+            t.rings, t.vertices, t.not_closed, t.proper_crossings, t.touches, t.spikes,
+            t.repeated_vertices, t.zero_area, t.clockwise_exteriors, t.holes_outside
+        ),
+        Err(e) => println!("  REFUSED: {e}"),
+    }
     for i in 0..sector_count(m) {
-        let r = rings::sector_rings(m, SectorIx(i as u32));
+        let r = match rings::sector_rings(m, SectorIx(i as u32)) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("    REFUSED: {e}");
+                continue;
+            }
+        };
         if r.proper_crossings + r.touches + r.spikes + r.holes_outside + r.zero_area > 0 {
             println!(
                 "    {} {} {}: crossings {}, touches {}, spikes {}, zero-area {}, holes outside {}",

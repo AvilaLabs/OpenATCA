@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 //! oa-tiff: a TIFF 6.0 / GeoTIFF 1.1 elevation reader and the terrain queries the minimum safe
 //! altitude warning needs. Core (pure): every function takes bytes or a [`Grid`] and returns
 //! data; [`read_file`] is the one shell function and only reads a file into memory.
@@ -35,11 +36,15 @@ mod grid;
 mod lzw;
 mod tiff;
 
+// Test fixtures build files and lattices from loop counters, not parsed input.
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 mod tests;
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 mod tests_conservative;
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 mod testutil;
 
 pub use conservative::{

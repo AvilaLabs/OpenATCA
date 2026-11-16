@@ -16,6 +16,7 @@ use crate::model::{
     chart_count, facility_text, ring_range, ring_vertices, sector_range_of_chart, Model, SectorIx,
 };
 use crate::query::sectors_containing;
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// Raster cell size, degrees (about 220 m north-south, 165 m east-west at 42 N).
@@ -24,11 +25,11 @@ pub const COVERAGE_CELL_DEG: f64 = 0.002;
 pub const MAX_RASTER_CELLS: usize = 64_000_000;
 /// Most (cell, extra owner) records kept for one chart; past it the chart is refused.
 pub const MAX_OVERLAP_RECORDS: usize = 8_000_000;
-/// Most cell visits (calls of the paint callback, one per cell of each sector) for one chart.
-/// The overlap cap bounds records, not work: many identical sectors cost one visit per cell per
-/// sector. A chart's visits are its covered cells plus the repeats of overlap; the largest real
-/// chart (ZAU TAV) needs 6.95 million, and this is about 6 times that, which keeps a chart's
-/// rasterising to well under a second.
+/// Most cell visits for one chart: one per cell painted for each sector, one per row of a
+/// sector's row table, and one per row each of its edges crosses. The overlap cap bounds records,
+/// not work: many identical sectors cost one visit per cell per sector. A chart's visits are its
+/// covered cells plus the repeats of overlap plus the row work; the largest real chart (ZAU TAV)
+/// needs 6.99 million, and 40 million keeps a chart's rasterising to well under a second.
 pub const MAX_CELL_VISITS: u64 = 40_000_000;
 /// Most sectors that may cover one cell; past it the chart is refused.
 pub const MAX_OWNERS_PER_CELL: usize = 16;
@@ -84,12 +85,9 @@ fn edges(m: &Model, s: SectorIx) -> Vec<(f64, f64, f64, f64)> {
     let mut out = Vec::new();
     for r in ring_range(m, s) {
         let (lats, lons) = ring_vertices(m, r);
-        let n = lats.len().min(lons.len());
-        let mut i = 1;
-        while i < n {
-            if let (Some(&ay), Some(&ax), Some(&by), Some(&bx)) =
-                (lats.get(i - 1), lons.get(i - 1), lats.get(i), lons.get(i))
-            {
+        for (ys, xs) in lats.windows(2).zip(lons.windows(2)) {
+            if let ([ay, by], [ax, bx]) = (ys, xs) {
+                let (ay, ax, by, bx) = (*ay, *ax, *by, *bx);
                 let (ax, ay, bx, by) = (
                     f64::from(ax) / f,
                     f64::from(ay) / f,
@@ -104,7 +102,6 @@ fn edges(m: &Model, s: SectorIx) -> Vec<(f64, f64, f64, f64)> {
                     out.push((bx, by, ax, ay));
                 }
             }
-            i += 1;
         }
     }
     out
@@ -125,27 +122,62 @@ struct Raster {
     ny: usize,
 }
 
+/// Adds `n` to the visits spent; false once they pass `budget`.
+fn charge(spent: &Cell<u64>, budget: u64, n: u64) -> bool {
+    let v = spent.get().saturating_add(n);
+    // Past the budget the count stops at one over it: the work asked for is not the work done.
+    spent.set(v.min(budget.saturating_add(1)));
+    v <= budget
+}
+
 /// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`, until it
-/// returns `false`, which stops the sector at once.
-fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, usize) -> bool) {
+/// returns `false`, which stops the sector at once. The row table (one entry per row the sector
+/// spans) and the rows each edge crosses are charged to `spent` before they are built, and the
+/// sector is not filled when they pass `budget`; false is returned then.
+// E8: raster cells are at most MAX_RASTER_CELLS (64 million) and a chart has at most 500 sectors, so cell indexes, counts and the casts to u32 and u16 cannot overflow or truncate; float bounds are finite and clamped to the raster before the cast.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn fill_sector(
+    m: &Model,
+    s: SectorIx,
+    g: &Raster,
+    spent: &Cell<u64>,
+    budget: u64,
+    paint: &mut dyn FnMut(usize, usize) -> bool,
+) -> bool {
     let c = COVERAGE_CELL_DEG;
     let es = edges(m, s);
     let (ymin, ymax) = es.iter().fold((f64::MAX, f64::MIN), |(lo, hi), e| {
         (lo.min(e.1), hi.max(e.3))
     });
     if es.is_empty() {
-        return;
+        return true;
     }
     // Rows whose centre latitude is in [ymin, ymax).
     let jmin = ((ymin - g.lat0) / c - 0.5).ceil().max(0.0) as usize;
     let jmax = (((ymax - g.lat0) / c - 0.5).ceil().max(0.0) as usize).min(g.ny);
     if jmin >= jmax {
-        return;
+        return true;
     }
-    let mut rows: Vec<Vec<f64>> = vec![Vec::new(); jmax - jmin];
-    for &(x0, y0, x1, y1) in &es {
+    let row_span = |&(_, y0, _, y1): &(f64, f64, f64, f64)| {
         let lo = (((y0 - g.lat0) / c - 0.5).ceil().max(jmin as f64)) as usize;
         let hi = ((((y1 - g.lat0) / c - 0.5).ceil()).min(jmax as f64)) as usize;
+        (lo, hi)
+    };
+    let edge_rows = es.iter().fold(0u64, |a, e| {
+        let (lo, hi) = row_span(e);
+        a.saturating_add(hi.saturating_sub(lo) as u64)
+    });
+    if !charge(spent, budget, (jmax - jmin) as u64) || !charge(spent, budget, edge_rows) {
+        return false;
+    }
+    let mut rows: Vec<Vec<f64>> = vec![Vec::new(); jmax - jmin];
+    for e in &es {
+        let &(x0, y0, x1, y1) = e;
+        let (lo, hi) = row_span(e);
         for j in lo..hi {
             let yc = g.lat0 + (j as f64 + 0.5) * c;
             let x = x0 + (yc - y0) * (x1 - x0) / (y1 - y0);
@@ -161,11 +193,12 @@ fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, 
             let ib = ((((xb - g.lon0) / c - 0.5).ceil()).min(g.nx as f64).max(0.0)) as usize;
             for i in ia..ib {
                 if !paint(i, jmin + k) {
-                    return;
+                    return true;
                 }
             }
         }
     }
+    true
 }
 
 /// Nautical miles per degree of latitude and of longitude at `lat_deg` on WGS-84: the meridian
@@ -206,16 +239,22 @@ pub fn chart_coverage_budget(
     chart: usize,
     budget: u64,
 ) -> (Result<CoverageReport, String>, u64) {
-    let mut visits = 0u64;
-    let r = coverage_inner(m, chart, budget, &mut visits);
-    (r, visits)
+    let spent = Cell::new(0u64);
+    let r = coverage_inner(m, chart, budget, &spent);
+    (r, spent.get())
 }
 
+// E8: raster cells are at most MAX_RASTER_CELLS (64 million) and a chart has at most 500 sectors, so cell indexes, counts and the casts to u32 and u16 cannot overflow or truncate; float bounds are finite and clamped to the raster before the cast.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn coverage_inner(
     m: &Model,
     chart: usize,
     budget: u64,
-    visits: &mut u64,
+    spent: &Cell<u64>,
 ) -> Result<CoverageReport, String> {
     if chart >= chart_count(m) {
         return Err(format!("no chart {chart}"));
@@ -267,9 +306,8 @@ fn coverage_inner(
     for (k, si) in secs.clone().enumerate() {
         let id = (k + 1) as u16;
         let nx = g.nx;
-        fill_sector(m, SectorIx(si as u32), &g, &mut |i, j| {
-            *visits += 1;
-            if *visits > budget {
+        let in_budget = fill_sector(m, SectorIx(si as u32), &g, spent, budget, &mut |i, j| {
+            if !charge(spent, budget, 1) {
                 over_budget = true;
                 return false;
             }
@@ -289,6 +327,7 @@ fn coverage_inner(
             }
             true
         });
+        over_budget |= !in_budget;
         if extra_full || over_budget {
             break;
         }
@@ -474,7 +513,13 @@ fn coverage_inner(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+// Test arithmetic on fixed values.
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

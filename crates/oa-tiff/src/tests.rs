@@ -980,3 +980,92 @@ fn a_plain_polygon_query_counts_the_vertices_walked_per_sample() {
     // A few vertices over the same samples answer.
     assert!(grid_max_in_polygon(&g, &poly[..16]).is_ok());
 }
+
+/// A tile that holds no samples: the cell loop still runs, which is what the work budget counts.
+fn empty_tile(lat0: f64, lon0: f64, w: u32, h: u32, d: f64) -> Grid {
+    let mut g = ramp_grid(lat0, lon0, 1, 1, d);
+    g.width = w;
+    g.height = h;
+    g.elev.clear();
+    g
+}
+
+// REQ: OA-TIFF-091
+#[test]
+fn radius_query_work_adds_up_over_overlapping_tiles() {
+    // Five tiles over the same ground, 100 x 100 cells at 0.01 degrees. A 10 nm circle covers
+    // about 3,000 cells of each; the box the query scans is about 4,500.
+    let tiles: Vec<Grid> = (0..5)
+        .map(|_| empty_tile(41.0, -91.0, 100, 100, 0.01))
+        .collect();
+    let one = crate::grid::max_in_radius_limited(&tiles[..1], 40.5, -90.5, 10.0, 6_000);
+    assert!(one.is_ok(), "one tile within the limit: {one:?}");
+    let r = crate::grid::max_in_radius_limited(&tiles, 40.5, -90.5, 10.0, 6_000);
+    assert_eq!(
+        r,
+        Err(QueryError::TooMuchWork),
+        "five overlapping tiles scanned {r:?} against a limit of 6000 cell tests"
+    );
+}
+
+// REQ: OA-TIFF-092
+#[test]
+fn a_scan_with_a_non_finite_box_is_refused_not_widened() {
+    let g = ramp_grid(41.0, -91.0, 101, 101, 0.01);
+    let all = |_: f64, _: f64| true;
+    let fresh = || crate::grid::Acc::new(0, MAX_QUERY_WORK);
+    // The same box with a finite bound visits a part of the grid.
+    let mut acc = fresh();
+    crate::grid::scan(&g, 40.2, 40.4, -90.8, -90.6, &all, &mut acc).unwrap();
+    assert!(
+        acc.samples > 0 && acc.samples < 101 * 101,
+        "{}",
+        acc.samples
+    );
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for slot in 0..4 {
+            let mut b = [40.2, 40.4, -90.8, -90.6];
+            b[slot] = bad;
+            let mut acc = fresh();
+            let r = crate::grid::scan(&g, b[0], b[1], b[2], b[3], &all, &mut acc);
+            assert!(
+                r.is_err(),
+                "bound {slot} = {bad} scanned {} samples",
+                acc.samples
+            );
+        }
+    }
+}
+
+// REQ: OA-TIFF-093
+#[test]
+fn a_grid_that_cannot_be_indexed_is_refused_not_a_panic_or_a_whole_grid_scan() {
+    let good = ramp_grid(41.0, -91.0, 101, 101, 0.01);
+    let mut bad = Vec::new();
+    for (w, h) in [(0, 0), (1, 101), (101, 1)] {
+        let mut g = good.clone();
+        g.width = w;
+        g.height = h;
+        bad.push(g);
+    }
+    for edit in [
+        (|g: &mut Grid| g.dlat = 0.0) as fn(&mut Grid),
+        |g| g.dlon = 0.0,
+        |g| g.dlat = f64::NAN,
+        |g| g.dlon = -0.01,
+        |g| g.lat0 = f64::INFINITY,
+    ] {
+        let mut g = good.clone();
+        edit(&mut g);
+        bad.push(g);
+    }
+    for (k, g) in bad.iter().enumerate() {
+        let r = grid_max_in_radius(g, 40.5, -90.5, 5.0);
+        assert_eq!(r, Err(QueryError::BadGrid), "grid {k}: {r:?}");
+        let poly = [(40.4, -90.6), (40.4, -90.4), (40.6, -90.5)];
+        let r = grid_max_in_polygon(g, &poly);
+        assert_eq!(r, Err(QueryError::BadGrid), "grid {k}: {r:?}");
+        // A point lookup does not panic on it.
+        let _ = grid_elevation_at(g, 40.5, -90.5);
+    }
+}

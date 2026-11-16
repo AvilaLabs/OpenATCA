@@ -51,7 +51,7 @@ pub fn pdf_labels_from_text(text: &str) -> Vec<(String, i32)> {
             if is_id(id) && (2..=3).contains(&num.len()) && num.bytes().all(|c| c.is_ascii_digit())
             {
                 if let Ok(h) = num.parse::<i32>() {
-                    out.push(((*id).to_string(), h * 100));
+                    out.push(((*id).to_string(), h.saturating_mul(100)));
                 }
             }
         }
@@ -85,6 +85,8 @@ pub fn pdf_path_for(dir: &Path, facility: &str, set: &str) -> PathBuf {
 }
 
 /// Compares chart `chart` of `m` with the labels read from its PDF.
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn compare_chart(m: &Model, chart: usize, labels: &[(String, i32)]) -> PdfReport {
     let secs = sector_range_of_chart(m, chart);
     let fac = secs
@@ -109,7 +111,7 @@ pub fn compare_chart(m: &Model, chart: usize, labels: &[(String, i32)]) -> PdfRe
         if on_pdf.is_empty() {
             rep.missing_in_pdf.push(id);
         } else if on_pdf.contains(&alt) {
-            rep.matched += 1;
+            rep.matched = rep.matched.saturating_add(1);
         } else {
             rep.mismatched
                 .push((id, alt, on_pdf.first().copied().unwrap_or(0)));
@@ -127,6 +129,8 @@ pub fn compare_chart(m: &Model, chart: usize, labels: &[(String, i32)]) -> PdfRe
 }
 
 /// Runs the check for every chart of `m` whose PDF is in `dir`.
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn check_all(m: &Model, dir: &Path) -> Vec<PdfStatus> {
     (0..chart_count(m))
         .map(|c| {

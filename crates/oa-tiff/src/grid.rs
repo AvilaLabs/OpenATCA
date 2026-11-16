@@ -107,6 +107,8 @@ pub enum QueryError {
     TooManyTiles,
     /// The region would visit more than [`MAX_QUERY_SAMPLES`] samples.
     TooManySamples,
+    /// A grid with fewer than two samples a side, or a lattice that is not finite and positive.
+    BadGrid,
     /// The cell tests plus the tile lookups (see [`MAX_QUERY_WORK`]) would be over the budget.
     TooMuchWork,
     /// A conservative circle reaches a pole or would cross the antimeridian, where longitude is
@@ -126,6 +128,7 @@ impl std::fmt::Display for QueryError {
             QueryError::BadRadius => write!(f, "radius not positive, finite and within the limit"),
             QueryError::BadPolygon => write!(f, "polygon needs 3 to {MAX_POLYGON_VERTICES} vertices within 180 degrees of longitude"),
             QueryError::TooManyTiles => write!(f, "more than {MAX_TILES} tiles"),
+            QueryError::BadGrid => write!(f, "grid has fewer than two samples a side or no valid lattice"),
             QueryError::TooManySamples => write!(f, "query region too large"),
             QueryError::TooMuchWork => write!(f, "query would do too much work"),
             QueryError::LongitudeWraps => write!(f, "area reaches a pole or crosses the antimeridian"),
@@ -143,9 +146,12 @@ pub fn grid_sample(g: &Grid, col: u32, row: u32) -> Option<f32> {
     if col >= g.width || row >= g.height {
         return None;
     }
-    g.elev
-        .get(row as usize * g.width as usize + col as usize)
-        .map(|&v| if v.is_finite() { v } else { f32::NAN })
+    (row as usize)
+        .checked_mul(g.width as usize)
+        .and_then(|o| o.checked_add(col as usize))
+        .and_then(|i| g.elev.get(i))
+        .copied()
+        .map(|v| if v.is_finite() { v } else { f32::NAN })
 }
 
 pub(crate) fn valid_coord(lat: f64, lon: f64) -> bool {
@@ -164,8 +170,14 @@ fn frac_index(g: &Grid, lat: f64, lon: f64) -> (f64, f64) {
 fn in_lattice(g: &Grid, fx: f64, fy: f64) -> bool {
     fx >= -EDGE_EPS
         && fy >= -EDGE_EPS
-        && fx <= f64::from(g.width - 1) + EDGE_EPS
-        && fy <= f64::from(g.height - 1) + EDGE_EPS
+        && fx <= f64::from(g.width.saturating_sub(1)) + EDGE_EPS
+        && fy <= f64::from(g.height.saturating_sub(1)) + EDGE_EPS
+}
+
+/// An interpolated elevation (an average of f32 samples) back to f32: only precision is lost.
+#[allow(clippy::cast_possible_truncation)]
+fn narrow(v: f64) -> f32 {
+    v as f32
 }
 
 /// Bilinear elevation at a point inside one grid. [`Elevation::Outside`] when the point is beyond
@@ -193,20 +205,24 @@ fn grid_elevation_here(g: &Grid, lat: f64, lon: f64) -> Elevation {
     if !in_lattice(g, fx, fy) {
         return Elevation::Outside;
     }
-    let fx = fx.clamp(0.0, f64::from(g.width - 1));
-    let fy = fy.clamp(0.0, f64::from(g.height - 1));
-    let c0 = (fx.floor() as u32).min(g.width - 2);
-    let r0 = (fy.floor() as u32).min(g.height - 2);
+    let fx = fx.clamp(0.0, f64::from(g.width.saturating_sub(1)));
+    let fy = fy.clamp(0.0, f64::from(g.height.saturating_sub(1)));
+    // fx and fy are finite and clamped to 0 ..= size - 1 just above.
+    #[allow(clippy::cast_possible_truncation)]
+    let (c0, r0) = (
+        (fx.floor() as u32).min(g.width.saturating_sub(2)),
+        (fy.floor() as u32).min(g.height.saturating_sub(2)),
+    );
     let tx = fx - f64::from(c0);
     let ty = fy - f64::from(r0);
-    let corner = |dc: u32, dr: u32| grid_sample(g, c0 + dc, r0 + dr);
+    let corner = |dc: u32, dr: u32| grid_sample(g, c0.saturating_add(dc), r0.saturating_add(dr));
     match (corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)) {
         (Some(a), Some(b), Some(c), Some(d))
             if a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite() =>
         {
             let top = f64::from(a) * (1.0 - tx) + f64::from(b) * tx;
             let bot = f64::from(c) * (1.0 - tx) + f64::from(d) * tx;
-            Elevation::Metres((top * (1.0 - ty) + bot * ty) as f32)
+            Elevation::Metres(narrow(top * (1.0 - ty) + bot * ty))
         }
         _ => Elevation::NoData,
     }
@@ -223,7 +239,10 @@ fn node_value(g: &Grid, lat: f64, lon: f64) -> Option<f32> {
     if (fx - rx).abs() > 1e-3 || (fy - ry).abs() > 1e-3 {
         return None;
     }
-    grid_sample(g, rx.max(0.0) as u32, ry.max(0.0) as u32)
+    // rx and ry are within the lattice (checked above), so they are in 0 ..= size - 1.
+    #[allow(clippy::cast_possible_truncation)]
+    let (c, r) = (rx.max(0.0) as u32, ry.max(0.0) as u32);
+    grid_sample(g, c, r)
 }
 
 /// True when some tile gives the point an answer, value or nodata (so a point in a one-pixel gap
@@ -289,7 +308,7 @@ fn elevation_here(tiles: &[Grid], lat: f64, lon: f64) -> Elevation {
             }
             let top = f64::from(a) * (1.0 - tx) + f64::from(b) * tx;
             let bot = f64::from(c) * (1.0 - tx) + f64::from(d) * tx;
-            Elevation::Metres((top * (1.0 - ty) + bot * ty) as f32)
+            Elevation::Metres(narrow(top * (1.0 - ty) + bot * ty))
         }
         _ => Elevation::Outside,
     }
@@ -305,20 +324,52 @@ fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 }
 
 /// Running state of a max query.
-struct Acc {
-    peak: Option<Peak>,
-    samples: u64,
-    nodata: u64,
+pub(crate) struct Acc {
+    pub(crate) peak: Option<Peak>,
+    pub(crate) samples: u64,
+    pub(crate) nodata: u64,
     /// Cost of one `inside` call beyond a constant (the polygon vertices; 0 for a constant-cost
     /// test).
-    per_cell: u64,
-    /// Cell tests so far, each weighted by `per_cell`.
-    work: f64,
+    pub(crate) per_cell: u64,
+    /// Cell tests so far, each weighted by `per_cell` (at least 1), over every tile.
+    pub(crate) work: f64,
+    /// Cells of the scanned boxes so far, over every tile (a cell in two tiles counts twice).
+    pub(crate) cells: f64,
+    /// Most work one query may do.
+    pub(crate) limit: u64,
 }
 
-/// Visits every node of `g` inside the bounding box that `inside` accepts. The cell tests, each
-/// weighted by `acc.per_cell`, are held to [`MAX_QUERY_WORK`] before any cell is visited.
-fn scan(
+impl Acc {
+    pub(crate) fn new(per_cell: u64, limit: u64) -> Acc {
+        Acc {
+            peak: None,
+            samples: 0,
+            nodata: 0,
+            per_cell,
+            work: 0.0,
+            cells: 0.0,
+            limit,
+        }
+    }
+}
+
+/// True when `g` can be indexed: two samples each way and a finite, positive lattice.
+fn usable(g: &Grid) -> bool {
+    g.width >= 2
+        && g.height >= 2
+        && g.lon0.is_finite()
+        && g.lat0.is_finite()
+        && g.dlon.is_finite()
+        && g.dlat.is_finite()
+        && g.dlon > 0.0
+        && g.dlat > 0.0
+}
+
+/// Visits every node of `g` inside the bounding box that `inside` accepts. A box with a bound
+/// that is not finite, or a grid that cannot be indexed, is refused. The cells, and the cell tests
+/// weighted by `acc.per_cell` (at least 1), are added up over every tile and held to the limits
+/// before any cell is visited.
+pub(crate) fn scan(
     g: &Grid,
     lat_lo: f64,
     lat_hi: f64,
@@ -327,37 +378,48 @@ fn scan(
     inside: &dyn Fn(f64, f64) -> bool,
     acc: &mut Acc,
 ) -> Result<(), QueryError> {
+    if ![lat_lo, lat_hi, lon_lo, lon_hi]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(QueryError::BadCoordinate);
+    }
+    if !usable(g) {
+        return Err(QueryError::BadGrid);
+    }
     let col_lo = ((lon_lo - g.lon0) / g.dlon).ceil().max(0.0);
     let col_hi = ((lon_hi - g.lon0) / g.dlon)
         .floor()
-        .min(f64::from(g.width - 1));
+        .min(f64::from(g.width.saturating_sub(1)));
     let row_lo = ((g.lat0 - lat_hi) / g.dlat).ceil().max(0.0);
     let row_hi = ((g.lat0 - lat_lo) / g.dlat)
         .floor()
-        .min(f64::from(g.height - 1));
+        .min(f64::from(g.height.saturating_sub(1)));
     if col_lo > col_hi || row_lo > row_hi {
         return Ok(());
     }
     let cells = (col_hi - col_lo + 1.0) * (row_hi - row_lo + 1.0);
-    if (acc.samples + acc.nodata) as f64 + cells > MAX_QUERY_SAMPLES as f64 {
+    acc.cells += cells;
+    if acc.cells > MAX_QUERY_SAMPLES as f64 {
         return Err(QueryError::TooManySamples);
     }
-    if acc.per_cell > 0 {
-        acc.work += cells * acc.per_cell as f64;
-        if acc.work > MAX_QUERY_WORK as f64 {
-            return Err(QueryError::TooMuchWork);
-        }
+    acc.work += cells * acc.per_cell.max(1) as f64;
+    if acc.work > acc.limit as f64 {
+        return Err(QueryError::TooMuchWork);
     }
-    for r in row_lo as u32..=row_hi as u32 {
+    // The box is finite and the bounds are clamped to the grid above.
+    #[allow(clippy::cast_possible_truncation)]
+    let (rows, cols) = (row_lo as u32..=row_hi as u32, col_lo as u32..=col_hi as u32);
+    for r in rows {
         let lat = g.lat0 - f64::from(r) * g.dlat;
-        for c in col_lo as u32..=col_hi as u32 {
+        for c in cols.clone() {
             let lon = g.lon0 + f64::from(c) * g.dlon;
             if !inside(lat, lon) {
                 continue;
             }
             match grid_sample(g, c, r) {
                 Some(v) if v.is_finite() => {
-                    acc.samples += 1;
+                    acc.samples = acc.samples.saturating_add(1);
                     if acc.peak.is_none_or(|p| v > p.metres) {
                         acc.peak = Some(Peak {
                             metres: v,
@@ -366,7 +428,7 @@ fn scan(
                         });
                     }
                 }
-                Some(_) => acc.nodata += 1,
+                Some(_) => acc.nodata = acc.nodata.saturating_add(1),
                 None => {}
             }
         }
@@ -431,16 +493,21 @@ fn max_in_radius(
     lon: f64,
     radius_nm: f64,
 ) -> Result<MaxQuery, QueryError> {
+    max_in_radius_limited(tiles, lat, lon, radius_nm, MAX_QUERY_WORK)
+}
+
+/// [`max_in_radius`] with an explicit work limit (cell tests over all tiles).
+pub(crate) fn max_in_radius_limited(
+    tiles: &[Grid],
+    lat: f64,
+    lon: f64,
+    radius_nm: f64,
+    limit: u64,
+) -> Result<MaxQuery, QueryError> {
     let r_m = check_radius(lat, lon, radius_nm)?;
     let (la0, la1, lo0, lo1) = circle_box(lat, lon, r_m);
     let inside = move |la: f64, lo: f64| haversine_m(lat, lon, la, lo) <= r_m;
-    let mut acc = Acc {
-        peak: None,
-        samples: 0,
-        nodata: 0,
-        per_cell: 0,
-        work: 0.0,
-    };
+    let mut acc = Acc::new(0, limit);
     for g in tiles {
         scan(g, la0, la1, lo0, lo1, &inside, &mut acc)?;
     }
@@ -517,13 +584,7 @@ pub fn max_elevation_in_polygon(
 fn max_in_polygon(tiles: &[Grid], poly: &[(f64, f64)]) -> Result<MaxQuery, QueryError> {
     let (la0, la1, lo0, lo1) = check_polygon(poly)?;
     let inside = |la: f64, lo: f64| in_polygon(poly, la, lo);
-    let mut acc = Acc {
-        peak: None,
-        samples: 0,
-        nodata: 0,
-        per_cell: poly.len() as u64,
-        work: 0.0,
-    };
+    let mut acc = Acc::new(poly.len() as u64, MAX_QUERY_WORK);
     for g in tiles {
         scan(g, la0, la1, lo0, lo1, &inside, &mut acc)?;
     }

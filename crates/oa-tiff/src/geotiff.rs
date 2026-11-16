@@ -101,7 +101,7 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
         .as_deref()
         .ok_or(TiffError::GeoRef("GeoKeyDirectory missing"))?;
     let nkeys = match keys {
-        [_ver, _rev, _min, n, ..] => *n as usize,
+        [_ver, _rev, _min, n, ..] => usize::try_from(*n).unwrap_or(usize::MAX),
         _ => return Err(TiffError::GeoRef("GeoKeyDirectory header truncated")),
     };
     if nkeys > crate::MAX_GEO_KEYS {
@@ -111,19 +111,15 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
             limit: crate::MAX_GEO_KEYS as u64,
         });
     }
-    if keys.len() < 4 + nkeys * 4 {
+    // nkeys is at most MAX_GEO_KEYS here, so the key table length cannot overflow.
+    let table = nkeys.saturating_mul(4).saturating_add(4);
+    if keys.len() < table {
         return Err(TiffError::GeoRef(
             "GeoKeyDirectory shorter than its key count",
         ));
     }
     let short_key = |id: u64| -> Result<Option<u64>, TiffError> {
-        for k in keys
-            .get(4..4 + nkeys * 4)
-            .unwrap_or(&[])
-            .as_chunks::<4>()
-            .0
-            .iter()
-        {
+        for k in keys.get(4..table).unwrap_or(&[]).as_chunks::<4>().0.iter() {
             let [kid, loc, cnt, val] = *k;
             if kid == id {
                 if loc != 0 || cnt != 1 {
@@ -148,7 +144,7 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
         Some(_) => return Err(TiffError::GeoRef("unknown GTRasterType")),
     };
     let crs = match short_key(KEY_GEOGRAPHIC_TYPE)? {
-        Some(c @ (CRS_NAD83 | CRS_WGS84)) => c as u16,
+        Some(c @ (CRS_NAD83 | CRS_WGS84)) => u16::try_from(c).unwrap_or(u16::MAX),
         Some(_) => {
             return Err(TiffError::GeoRef(
                 "geographic CRS is not NAD83 (4269) or WGS 84 (4326)",
@@ -175,8 +171,8 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
     let h = if point { 0.0 } else { 0.5 };
     let lon0 = tx + (h - ti) * sx;
     let lat0 = ty - (h - tj) * sy;
-    let lon_last = lon0 + f64::from(width - 1) * sx;
-    let lat_last = lat0 - f64::from(height - 1) * sy;
+    let lon_last = lon0 + f64::from(width.saturating_sub(1)) * sx;
+    let lat_last = lat0 - f64::from(height.saturating_sub(1)) * sy;
     if !(lon0 >= -180.0 && lon_last <= 180.0 && lat0 <= 90.0 && lat_last >= -90.0) {
         return Err(TiffError::GeoRef(
             "raster extent is outside the valid latitude/longitude range",

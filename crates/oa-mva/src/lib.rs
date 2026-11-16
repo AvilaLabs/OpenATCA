@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 //! oa-mva: the FAA Minimum Vectoring Altitude (MVA) charts and the center Minimum IFR Altitude
 //! (MIA, "TAV") chart as a queryable model: a safety-net input for the minimum safe altitude
 //! warning (M5). Given a position it returns the minimum altitude that applies there.
