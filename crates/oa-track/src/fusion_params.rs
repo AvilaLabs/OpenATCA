@@ -251,11 +251,17 @@ pub const ASSIGN_LOG_MAX: usize = 4 << 20;
 
 /// Vertical-gate allowance for a change of climb rate since the track's last update, one
 /// standard deviation, feet per minute: the gate variance grows by (this x the time since the
-/// last update, at most [`GATE_MANEUVER_MAX_DT_S`])^2. OFF (0): the study measured it. With it
-/// on, tracks survive the onset of a climb in the synthetic worlds (duplicate tracks fall), but
-/// on the real-clip shapes the radar-only position error rises from 81 m to 105 m (terminal)
-/// and from 260 m to 2,000 m (en route) because tracks take on the wrong aircraft.
-pub const GATE_VRATE_SIGMA_FPM: f64 = 0.0;
+/// last update, at most [`GATE_MANEUVER_MAX_DT_S`])^2. The cost does not (a pair inside the gate
+/// only by this allowance costs [`RESCUED_COST_FRACTION`] of the total gate), so the allowance
+/// widens what a track may take and never what it prefers. Set from the real-clip runs: the
+/// climb rate of an aircraft changes by 500 to 2,100 ft/min between two plots in 20 of the 34
+/// terminal and 15 of the 24 en-route second tracks started while the first was alive (see the
+/// re-pin note of `PINNED_CLIP_DIGESTS`); a sweep of 400 to 1,000 found the wrong plots of the
+/// five runs no higher than with the allowance off up to 700 and higher in the two-radar run
+/// (65 to 82) and the terminal run (2 to 9) from 800. Applied alone, without the separate cost,
+/// the allowance had raised the en-route position error from 260 m to 2,000 m (wrong
+/// aircraft taken).
+pub const GATE_VRATE_SIGMA_FPM: f64 = 700.0;
 
 /// Horizontal-gate allowance for a manoeuvre since the track's last update, metres per second
 /// squared: the gate covariance grows by (0.5 x this x the time since the last update, at most

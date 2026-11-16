@@ -130,7 +130,7 @@ fn a_copy_of_truth_scores_zero_and_a_shifted_copy_scores_its_shift() {
             segs: vec![Seg {
                 dur_s: 300.0,
                 turn_dps: 0.0,
-                vrate_fpm: 1_500.0,
+                vrate_fpm: 1_000.0,
             }],
         },
     ];
@@ -736,10 +736,82 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // duplicate tracks 28, swaps 25, wrong plots 67 and false plots applied 1 (all the same); coast
 // rows 8,739 to 11,016. The value before was
 // "c0e2736508a46fababe9e5f2a06e44fe541a0c2f7a8b8e7aa79f3c19ca28253d".
+// Re-pinned (all five) when the association gate gained an allowance for a change of climb rate
+// (OA-TRK-308, OA-TRK-309; GATE_VRATE_SIGMA_FPM 700 ft/min, which also gates the confirmation of a
+// candidate against live tracks) and the cost of a pair inside the gate only by an allowance became
+// the rescued cost: of the second tracks started while the first was alive or coasting, 18 of 34
+// terminal and 18 of 24 en-route failed the altitude gate alone (the aircraft's climb rate had
+// changed by 500 to 2,100 ft/min since the last plot). Old to new per run (terminal, en-route,
+// terminal mixed, en-route mixed, two radars). Rows 38,970 to 38,727; 31,741 to 31,662; 151,234 to
+// 151,150; 156,929 to 156,837; 173,017 to 172,387. Plots 6,261, 2,214, 6,261, 2,214 and 8,462 and
+// refused 0 (all the same). Tracks created 182 to 161; 161 to 152; 851 to 841; 653 to 650; 676 to
+// 665. Duplicate tracks 81 to 60; 53 to 44; 30 to 20; 25 to 22; 28 to 17, by class (a) simultaneous,
+// (b1) the first still coasting, (b2) the first dropped: 2/34/45 to 0/15/45; 4/24/25 to 5/14/25;
+// 2/16/12 to 1/7/12; 3/8/14 to 3/5/14; 5/12/11 to 1/5/11. Swaps 3, 1, 2, 1 and 25 to 3, 1, 2, 1 and
+// 23; wrong plots 2, 2, 2, 2 and 67 to 2, 2, 2, 2 and 65; false plots applied 0, 0, 0, 0 and 1 (the
+// same). Coast rows 2,221 to 1,892; 4,675 to 4,430; 4,894 to 4,745; 8,493 to 8,405; 11,016 to
+// 10,312. Scoring (updates, position and speed RMS, m and m/s, old to new, with the rows scored
+// 4,501 to 4,850, 1,457 to 1,509, 60,776 to 60,957, 57,325 to 57,336, 62,926 to 63,119):
+// 109.87/5.775 to 108.52/5.882; 279.66/10.085 to 279.14/10.548; 15.53/1.292 to 16.06/1.332;
+// 22.69/1.152 to 22.79/1.151; 132.22/1.535 to 132.10/1.570. The earlier digests were e8bfce48..963d,
+// 6d546fa6..6a7e, bc1f506c..4a01, d3782dae..95a8 and eaadd04b..89da9.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "e8bfce481687ccccb1d3f186878bc3937ee86f9b949148974aeedf111876963d",
-    "6d546fa69d25cacaccabf5674289792329a19aa9e6ab31275222e9acced56a7e",
-    "bc1f506cc3a65158f6c007e9b81532da3fcb36a06483168bdef04cee17b94a01",
-    "d3782daea34db0dfcb939730ab06200319bd08ad4759a0ae78a6944feaf195a8",
-    "eaadd04b8ded9c9f6318260bd502c1b314d8937fd8058d4426f834fa06689da9",
+    "0f7056500b44af3a6fb4ad889aa10864ea2f1dca9b2c819a9b5dadc657548e8f",
+    "1ee82e469c1cb70db1112ce39544fd944af73c2e562ddb9a012904dd9747bfd6",
+    "255279cc32ccad5633c81b6a4252a600a993d5b25ead32a3e5f949fd35d12dce",
+    "cf00b4349af0b9bcf0ae7e77ce168cbebd69b9d1f0eb702c406853da2b5ffe0a",
+    "d7c3d24f5a4a89625e5970882feaee004386218cfc5b949f5595a17ff5d7d5e5",
 ];
+
+// REQ: OA-TRK-308
+#[test]
+fn a_radar_only_track_keeps_its_aircraft_through_the_onset_of_a_climb() {
+    // Six aircraft on lines 5 km apart, level for 100 s and then climbing at 1,000 ft/min, the
+    // onsets spread over a scan so that some fall just after a plot. Without the allowance for a
+    // change of climb rate the next plot is outside the altitude gate of the level track and
+    // starts a second one.
+    let d = oa_track::fusion_score::site_def(Kind::Terminal);
+    let trajs: Vec<Traj> = (0..6)
+        .map(|i| Traj {
+            addr: 0xA10000 + i,
+            t0_s: 0.0,
+            x0: 12_000.0,
+            y0: 15_000.0 + 5_000.0 * f64::from(i),
+            heading_deg: 90.0,
+            speed_mps: 120.0,
+            alt_ft: 5_000.0,
+            segs: vec![
+                Seg {
+                    dur_s: 100.0 + 0.8 * f64::from(i),
+                    turn_dps: 0.0,
+                    vrate_fpm: 0.0,
+                },
+                Seg {
+                    dur_s: 120.0,
+                    turn_dps: 0.0,
+                    vrate_fpm: 1_000.0,
+                },
+            ],
+        })
+        .collect();
+    let built = built_of(build_synthetic_truth(d.lat_deg, d.lon_deg, EPOCH_NS, &trajs).unwrap());
+    let radar = make_radar(Kind::Terminal, MSSR_EUROCONTROL_1997, 0.0, 0.0);
+    let f = first_ns(&built);
+    let mut dups = 0;
+    for seed in 1..=8u64 {
+        let (plots, _k, st) = simulate_plots(
+            &built.truth,
+            &radar,
+            seed,
+            f - 1_000_000_000,
+            f + 230_000_000_000,
+        )
+        .unwrap();
+        assert!(st.detected > 200, "{st:?}");
+        let r = run_variant(&V_OURS_NOREG, &[radar.trk], &[&plots], &[]).unwrap();
+        let id = identify(&r);
+        assert_eq!(id.swaps, 0, "seed {seed}");
+        dups += id.duplicates;
+    }
+    assert_eq!(dups, 0, "second tracks made at the onset of a climb");
+}

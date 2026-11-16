@@ -955,14 +955,28 @@ fn d2_horizontal(row: &OutRow, z_lat: f64, z_lon: f64, z_cov: [f64; 3]) -> f64 {
     (s[2] * x * x - 2.0 * s[1] * x * y + s[0] * y * y) / det
 }
 
-/// Squared normalised altitude difference, where the plot and the row both have an altitude.
-fn d2_vertical(row: &OutRow, plot: &RadarPlot, quant_ft: u16, since_update_ns: i64) -> f64 {
+/// Squared normalised altitude difference, where the plot and the row both have an altitude;
+/// `onset_fpm` is the allowance for a change of climb rate since the last update (0 for the
+/// cost, [`GATE_VRATE_SIGMA_FPM`] for the gate).
+fn d2_vertical(
+    row: &OutRow,
+    plot: &RadarPlot,
+    quant_ft: u16,
+    since_update_ns: i64,
+    onset_fpm: f64,
+) -> f64 {
     let alt = (plot.alt_ft != NONE_ALT).then(|| f64::from(plot.alt_ft));
-    d2_vertical_alt(row, alt, quant_ft, since_update_ns)
+    d2_vertical_alt(row, alt, quant_ft, since_update_ns, onset_fpm)
 }
 
 /// The same for an altitude in feet, if there is one.
-fn d2_vertical_alt(row: &OutRow, alt_ft: Option<f64>, quant_ft: u16, since_update_ns: i64) -> f64 {
+fn d2_vertical_alt(
+    row: &OutRow,
+    alt_ft: Option<f64>,
+    quant_ft: u16,
+    since_update_ns: i64,
+    onset_fpm: f64,
+) -> f64 {
     let Some(alt_ft) = alt_ft else { return 0.0 };
     if row.flags & O_HAS_ALT == 0 {
         return 0.0;
@@ -970,7 +984,7 @@ fn d2_vertical_alt(row: &OutRow, alt_ft: Option<f64>, quant_ft: u16, since_updat
     let q = f64::from(quant_ft);
     let dt_min = since_update_ns.clamp(0, (GATE_MANEUVER_MAX_DT_S * NS_PER_S as f64) as i64) as f64
         / (60.0 * NS_PER_S as f64);
-    let onset = GATE_VRATE_SIGMA_FPM * dt_min;
+    let onset = onset_fpm * dt_min;
     let var = f64::from(row.alt_var_ft2).max(0.0)
         + q * q / 12.0
         + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT
@@ -995,7 +1009,7 @@ fn cand_gates_row(row: &OutRow, last_ns: i64, m: &Measurement, quant_ft: u16) ->
     let dh = d2_horizontal(row, lat, lon, [zc[0] + man * man, zc[1], zc[2] + man * man]);
     let alt = (m.alt_ft != NONE_I32).then(|| f64::from(m.alt_ft));
     let since = m.toa_ns.saturating_sub(last_ns);
-    let dv = d2_vertical_alt(row, alt, quant_ft, since);
+    let dv = d2_vertical_alt(row, alt, quant_ft, since, GATE_VRATE_SIGMA_FPM);
     dh <= GATE_H_CHI2 && dv <= GATE_V_CHI2 && dh + dv <= GATE_TOTAL_CHI2
 }
 
@@ -1091,6 +1105,9 @@ struct PairCost {
     dh_gate: f64,
     /// Vertical squared normalised distance.
     dv: f64,
+    /// The same with the allowance for a change of climb rate, which the gate (not the cost)
+    /// uses.
+    dv_gate: f64,
 }
 
 fn pair_cost(
@@ -1118,8 +1135,15 @@ fn pair_cost(
         plon,
         [zc[0] + man * man, zc[1], zc[2] + man * man],
     );
-    let dv = d2_vertical(row, plot, quant_ft, plot.time_ns.saturating_sub(last_ns));
-    PairCost { dh, dh_gate, dv }
+    let since = plot.time_ns.saturating_sub(last_ns);
+    let dv = d2_vertical(row, plot, quant_ft, since, 0.0);
+    let dv_gate = d2_vertical(row, plot, quant_ft, since, GATE_VRATE_SIGMA_FPM);
+    PairCost {
+        dh,
+        dh_gate,
+        dv,
+        dv_gate,
+    }
 }
 
 /// One radar's association in progress: what the first part (hard-constraint plots, the tracks,
@@ -1257,7 +1281,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             continue;
         };
         let pc = pair_cost(&row, &c, p, s.alt_quantum_ft, last_ns);
-        let cost = pc.dh_gate + pc.dv;
+        let cost = pc.dh_gate + pc.dv_gate;
         if cost.is_nan() || cost > HARD_GATE_CHI2 {
             f.stats.hard_mismatch += 1;
             // A radar contradicts the track: flag its rows for a few scans (no position moves).
@@ -1502,13 +1526,20 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         f.stats.pairs_tested += 1;
         let pc = pair_cost(&row, &conv, p, s.alt_quantum_ft, last_ns);
         if pc.dh_gate <= GATE_H_CHI2
-            && pc.dv <= GATE_V_CHI2
-            && pc.dh_gate + pc.dv <= GATE_TOTAL_CHI2
+            && pc.dv_gate <= GATE_V_CHI2
+            && pc.dh_gate + pc.dv_gate <= GATE_TOTAL_CHI2
         {
             f.stats.pairs_gated += 1;
             let mut m = conv.m;
             m.addr = t.key;
-            let cost = (pc.dh + pc.dv).min(RESCUED_COST_FRACTION * GATE_TOTAL_CHI2);
+            // A pair outside the gate without the allowances costs just under the gate.
+            let rescued =
+                pc.dh > GATE_H_CHI2 || pc.dv > GATE_V_CHI2 || pc.dh + pc.dv > GATE_TOTAL_CHI2;
+            let cost = if rescued {
+                RESCUED_COST_FRACTION * GATE_TOTAL_CHI2
+            } else {
+                (pc.dh + pc.dv).min(RESCUED_COST_FRACTION * GATE_TOTAL_CHI2)
+            };
             ra.pairs.push(Pair {
                 track: ti as u32,
                 plot: a as u32,
@@ -4187,6 +4218,47 @@ mod tests {
             let pc = pair_cost(&row, &c, &p, 100, last);
             assert!(!pc.dh.is_nan() && !pc.dv.is_nan());
         }
+    }
+
+    // REQ: OA-TRK-309
+    #[test]
+    fn the_climb_rate_allowance_widens_the_vertical_gate_and_not_the_cost() {
+        let row = OutRow {
+            t_ns: 0,
+            addr: 1,
+            lat_e7: 0,
+            lon_e7: 0,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            pos_cov_m2: [100.0, 0.0, 100.0],
+            vel_cov_m2s2: [1.0, 0.0, 1.0],
+            turn_rate_rps: 0.0,
+            alt_ft: 5_000.0,
+            alt_var_ft2: 100.0,
+            vrate_fpm: 0.0,
+            mu_h: [1.0, 0.0],
+            mu_v: [1.0, 0.0],
+            flags: O_HAS_ALT,
+        };
+        // A Mode C plot 230 ft above a level track 4.8 s after its last update: a climb of 2,900
+        // ft/min that began since.
+        let since = 4_800_000_000;
+        let plain = d2_vertical_alt(&row, Some(5_230.0), 100, since, 0.0);
+        let allowed = d2_vertical_alt(&row, Some(5_230.0), 100, since, GATE_VRATE_SIGMA_FPM);
+        assert!(plain > GATE_V_CHI2, "{plain}");
+        assert!(allowed <= GATE_V_CHI2, "{allowed}");
+        // The allowance stops growing with the time since the update.
+        let late = d2_vertical_alt(
+            &row,
+            Some(5_230.0),
+            100,
+            60 * NS_PER_S,
+            GATE_VRATE_SIGMA_FPM,
+        );
+        let capped = d2_vertical_alt(&row, Some(5_230.0), 100, 6 * NS_PER_S, GATE_VRATE_SIGMA_FPM);
+        assert_eq!(late, capped);
+        // A plot that is not an allowance's worth off is unchanged to within the allowance.
+        assert!(d2_vertical_alt(&row, Some(5_000.0), 100, since, GATE_VRATE_SIGMA_FPM) < 1e-9);
     }
 
     // REQ: OA-TRK-082
