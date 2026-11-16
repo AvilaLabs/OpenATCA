@@ -19,6 +19,11 @@ pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_ROTATE_BYTES: u64 = 256 * 1024 * 1024;
 /// Default seconds between health lines.
 pub const DEFAULT_SUMMARY_SECS: u64 = 10;
+/// Largest `--duration`: 10 years of 365 days, in seconds. Longer is refused (an `Instant` plus a
+/// larger duration can overflow).
+pub const MAX_DURATION_SECS: u64 = 10 * 365 * 24 * 3600;
+/// Largest `--summary-every`: one day, in seconds.
+pub const MAX_SUMMARY_SECS: u64 = 24 * 3600;
 
 /// Where live frames come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,9 +122,19 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             "--max-bytes" => max_bytes = number("--max-bytes", &value("--max-bytes")?)?,
             "--rotate-bytes" => rotate_bytes = number("--rotate-bytes", &value("--rotate-bytes")?)?,
-            "--duration" => duration_secs = Some(number("--duration", &value("--duration")?)?),
+            "--duration" => {
+                duration_secs = Some(bounded(
+                    "--duration",
+                    &value("--duration")?,
+                    MAX_DURATION_SECS,
+                )?);
+            }
             "--summary-every" => {
-                summary_secs = number("--summary-every", &value("--summary-every")?)?;
+                summary_secs = bounded(
+                    "--summary-every",
+                    &value("--summary-every")?,
+                    MAX_SUMMARY_SECS,
+                )?;
                 if summary_secs == 0 {
                     return Err("--summary-every must be at least 1".into());
                 }
@@ -161,4 +176,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 fn number(name: &str, v: &str) -> Result<u64, String> {
     v.parse::<u64>()
         .map_err(|_| format!("{name} needs a whole number, got {v:?}"))
+}
+
+/// A whole number of seconds of at most `max`.
+fn bounded(name: &str, v: &str, max: u64) -> Result<u64, String> {
+    let n = number(name, v)?;
+    if n > max {
+        return Err(format!("{name} is at most {max} seconds, got {n}"));
+    }
+    Ok(n)
 }

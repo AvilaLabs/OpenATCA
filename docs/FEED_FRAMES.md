@@ -43,7 +43,7 @@ writes `OAF1` only; `oa-feed` writes the `OAF2` form when it records, so a frame
 |---|---|---|---|
 | 0 | 4 | magic | ASCII `OAF2` |
 | 4 to 31 | 28 | as OAF1 | kind, flags, reserved, seq, recv_unix_ns, jms_timestamp_ms, at the same offsets |
-| 32 | 8 | mono_ns | u64. `Instant` elapsed since the recorder (`oa-feed`) started, ns, taken when the frame is recorded |
+| 32 | 8 | mono_ns | u64. `Instant` elapsed since the recorder (`oa-feed`) started, ns, taken when the chunk of input that completed the frame was read, before it is queued |
 | 40 | 4 | payload_len | u32, at most 4 194 304 |
 | 44 | n | payload | `payload_len` bytes |
 | 44+n | 4 | crc32 | CRC-32 of every preceding byte of the frame |
@@ -52,9 +52,12 @@ Header 44 bytes. There is no version field to dispatch on beyond the magic: the 
 `OAF1` and `OAF2` frames in one stream, and a recording made before the field existed (all
 `OAF1`) reads and replays exactly as it did. `mono_ns` is per recorder run: a restart makes it
 start again from near zero, which a replay takes as "not comparable" and falls back to the wall
-clock alone. Replay uses it to tell a step of the recorder's wall clock from time that passed
-(`crates/oa-replay/src/clock.rs`, rule 7). The Linux monotonic clock does not run during
-suspend, so a suspended recorder looks like a clock step.
+clock alone; a restart that leaves it larger than before cannot be seen, and the stream is the
+only run boundary replay knows. Replay uses it to split the wall time between two frames of one
+stream into time that passed (the monotonic time elapsed) and a step of the recorder's wall clock
+(the rest; under 2 minutes is noise), see `crates/oa-replay/src/clock.rs`, rule 7. Monotonic times
+of different streams are never compared. The Linux monotonic clock does not run during suspend,
+so the hours of a suspend are a step.
 
 ## Kinds
 

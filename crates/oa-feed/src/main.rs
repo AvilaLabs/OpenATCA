@@ -29,7 +29,8 @@ const CHUNK: usize = 64 * 1024;
 const QUEUE_CHUNKS: usize = 8;
 
 enum Msg {
-    Data(Vec<u8>),
+    /// A chunk read, with the recorder's monotonic time (ns since start) when it arrived.
+    Data(Vec<u8>, u64),
     End(Option<String>),
 }
 
@@ -139,6 +140,7 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
         }
     };
     let (tx, rx) = sync_channel::<Msg>(QUEUE_CHUNKS);
+    let start = Instant::now();
     thread::spawn(move || loop {
         let mut buf = vec![0u8; CHUNK];
         match src.read(&mut buf) {
@@ -147,8 +149,11 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 return;
             }
             Ok(n) => {
+                // The stamp is taken here, as the bytes arrive and before they queue, so a
+                // recorder that is slow to drain does not move it.
+                let mono = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 buf.truncate(n);
-                if tx.send(Msg::Data(buf)).is_err() {
+                if tx.send(Msg::Data(buf, mono)).is_err() {
                     return;
                 }
             }
@@ -183,10 +188,21 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     // The recorded form of a frame (an OAF2 frame with the monotonic time), reused per frame.
     let mut stamped: Vec<u8> = Vec::new();
 
-    let start = Instant::now();
-    let deadline = cfg.duration_secs.map(|s| start + Duration::from_secs(s));
+    // The command line bounds both (`cli`), so these sums cannot overflow; they are checked anyway.
+    let deadline = match cfg.duration_secs {
+        Some(s) => Some(
+            start
+                .checked_add(Duration::from_secs(s))
+                .ok_or("--duration is too long")?,
+        ),
+        None => None,
+    };
     let every = Duration::from_secs(cfg.summary_secs);
-    let mut next_summary = start + every;
+    let mut next_summary = Some(
+        start
+            .checked_add(every)
+            .ok_or("--summary-every is too long")?,
+    );
     let mut stopping = false;
     let mut stop_at = start;
     let mut end_reason: Option<String> = None;
@@ -194,9 +210,9 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
 
     loop {
         let now = Instant::now();
-        if now >= next_summary {
+        if next_summary.is_some_and(|n| now >= n) {
             print_summary(&cfg.feed, &health);
-            next_summary += every;
+            next_summary = next_summary.and_then(|n| n.checked_add(every));
         }
         if !stopping && deadline.is_some_and(|d| now >= d) {
             stopping = true;
@@ -210,16 +226,17 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             break;
         }
         let wake = if stopping {
-            stop_at + Duration::from_millis(100)
+            stop_at.checked_add(Duration::from_millis(100))
         } else {
             next_summary
         };
-        let wait = wake
-            .min(deadline.unwrap_or(wake))
-            .saturating_duration_since(now)
-            .clamp(Duration::from_millis(1), Duration::from_millis(200));
+        let wait = wake.map_or(Duration::from_millis(200), |w| {
+            w.min(deadline.unwrap_or(w))
+                .saturating_duration_since(now)
+                .clamp(Duration::from_millis(1), Duration::from_millis(200))
+        });
         match rx.recv_timeout(wait) {
-            Ok(Msg::Data(chunk)) => {
+            Ok(Msg::Data(chunk, mono)) => {
                 let mut off = 0usize;
                 while off < chunk.len() {
                     let took = reader.push(chunk.get(off..).unwrap_or(&[]));
@@ -229,7 +246,7 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                         &mut health,
                         &mut recorder,
                         &cfg.feed,
-                        start,
+                        mono,
                         &mut stamped,
                     );
                     if took == 0 {
@@ -309,7 +326,7 @@ fn drain(
     health: &mut FeedHealth,
     recorder: &mut Option<Recorder>,
     feed: &str,
-    start: Instant,
+    mono: u64,
     stamped: &mut Vec<u8>,
 ) {
     while let Some(ev) = reader.next() {
@@ -317,13 +334,13 @@ fn drain(
             Ok(f) => {
                 observe_frame(health, &f, f.recv_unix_ns);
                 if let Some(r) = recorder.as_mut() {
-                    // A recorded frame carries the recorder's monotonic time since start, so a
-                    // replay can tell a step of the wall clock from time that passed. A frame
-                    // that already has one keeps it.
+                    // A recorded frame carries the recorder's monotonic time since start (taken
+                    // when the chunk that completed it arrived), so a replay can tell a step of
+                    // the wall clock from time that passed. A frame that already has one keeps
+                    // it.
                     let raw = if f.mono_ns().is_some() {
                         f.raw
                     } else {
-                        let mono = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                         stamped.clear();
                         stamped.resize(f.raw.len() + 8, 0);
                         match encode_frame_mono(

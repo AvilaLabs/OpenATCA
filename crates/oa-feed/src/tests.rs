@@ -989,6 +989,24 @@ fn command_line_parsing() {
     }
 }
 
+// REQ: OA-FEED-178
+#[test]
+fn durations_over_the_operational_limits_are_refused() {
+    let a = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+    for (flag, limit) in [
+        ("--duration", cli::MAX_DURATION_SECS),
+        ("--summary-every", cli::MAX_SUMMARY_SECS),
+    ] {
+        // At the limit it parses; one above it, and u64::MAX, are refused, with no panic.
+        let at = cli::parse(&a(&format!("--stdin {flag} {limit}")));
+        assert!(matches!(at, Ok(Command::Live(_))), "{flag} {limit}: {at:?}");
+        for over in [limit + 1, u64::MAX - 1, u64::MAX] {
+            let r = cli::parse(&a(&format!("--stdin {flag} {over}")));
+            assert!(r.is_err(), "{flag} {over} should be refused, got {r:?}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- compressed recording
 
 /// Reads a whole gzip file (or a part of one) with the oa-zip reader; the bytes delivered and

@@ -80,18 +80,27 @@
 //!
 //! 7. **Monotonic time.** A recording made with a monotonic time per frame (an `OAF2` frame, see
 //!    `docs/FEED_FRAMES.md`) lets rules 3 to 6 tell time that passed from a step of the wall
-//!    clock. For a frame that would be a candidate, [`clock_observe_mono`] compares the wall time
-//!    elapsed since the feed's last accepted frame with the monotonic time elapsed between the
-//!    same two frames. If they agree within [`MONO_AGREE_TOL_NS`] and the frame is ahead of the
-//!    clock, the recorder was running through the gap and nothing arrived: this is a **real
-//!    gap**. The frame is accepted at once ([`Tick::RealGap`]), the clock takes its time and no
-//!    age is shifted, so every row is silent for the whole gap and expires under its own age
-//!    limit. If they disagree (the monotonic time is short and the wall time is large, or
-//!    negative) it is a **step of the recorder's clock** and rules 4 to 6 apply as they always
-//!    did. A frame with no monotonic time, a feed with no earlier frame to compare with, or a
-//!    monotonic time that went back (the recorder restarted) is not classified: rules 4 to 6
-//!    apply, and a recording with no monotonic time at all behaves exactly as before. Each
-//!    decision is counted and folded into [`Clock::domain_log`], which the state digest covers.
+//!    clock. For a frame that would be a candidate, [`clock_observe_mono`] splits the wall time
+//!    elapsed since the feed's last accepted frame exactly in two: the monotonic time elapsed
+//!    between the same two frames is **time that passed**, and the rest (wall elapsed minus
+//!    monotonic elapsed, the **step**) is a step of the recorder's clock. A step within `TOL`
+//!    is noise (a frame that waited in the recorder's queue before it was stamped, a few
+//!    seconds of skew) and is ignored: then, if the frame is ahead of the clock, the gap is a
+//!    **real gap**. The frame is accepted at once ([`Tick::RealGap`]), the clock takes its time
+//!    and no age is shifted, so every row is silent for the whole gap and expires under its own
+//!    age limit. A step over `TOL` goes through rules 4 to 6 as it always did (the run of three
+//!    candidates, the vote), and when it confirms the clock takes the frame's time but the ages
+//!    are shifted by the step alone ([`Tick::Step`]), no more than the clock moved: the time
+//!    that passed ages every row, so a gap that also holds a step expires what it should. A
+//!    pure step (the monotonic time elapsed is a second) shifts by all but that second. The
+//!    two times are comparable only for two frames of the same stream (one recorder run: the
+//!    monotonic time of different streams has different origins and is never compared, and a
+//!    stream's reference is dropped for a feed whose record a step forgot) and a monotonic time
+//!    that did not go back (one that did is a recorder restart). A frame with no monotonic
+//!    time, a feed with no comparable earlier frame, or a restart is not classified: rules 4 to
+//!    6 apply with the shift the whole difference of the clock, and a recording with no
+//!    monotonic time at all behaves exactly as before. Each decision is counted and folded into
+//!    [`Clock::domain_log`], which the state digest covers.
 //!
 //! # What the rules defend against, and what they do not
 //!
@@ -130,19 +139,6 @@ pub const CLOCK_CONFIRM_FRAMES: u32 = 3;
 /// and the largest a forward candidate may be after the previous one.
 pub const FEED_GAP_MAX_NS: i64 = 30 * 60 * NS_PER_S;
 
-/// Largest difference between the wall time and the monotonic time elapsed between a feed's two
-/// frames for the gap to be taken as time that passed: 10 seconds.
-///
-/// Both clocks run at the same rate (the kernel slews them together), so across a gap in which
-/// nothing stepped they differ only by how the two stamps were taken: the wall time is the
-/// bridge's at receipt, the monotonic time is the recorder's when it drains the frame, and the
-/// pipe and queue between them can hold a frame for a few seconds when the recorder is slow.
-/// 10 seconds covers that. It is far below [`CLOCK_TOLERANCE_NS`], the smallest step the rules
-/// act on, so a wall step that matters (2 minutes or more) is never mistaken for agreement. A
-/// recorder stopped by suspend counts its monotonic time too short (the Linux monotonic clock
-/// does not run while suspended), so a suspend is classified as a step, as it was before.
-pub const MONO_AGREE_TOL_NS: i64 = 10 * NS_PER_S;
-
 /// One feed's record. Plain data (A1).
 // A7.2: cold struct, size guard waived (one per feed)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -168,6 +164,8 @@ pub struct FeedClock {
     pub ref_wall_ns: i64,
     /// Its monotonic time.
     pub ref_mono_ns: u64,
+    /// The stream it came from: monotonic times of different streams are never compared.
+    pub ref_stream: u32,
 }
 
 /// The clock's per-feed state and counts. Plain data (A1).
@@ -215,9 +213,10 @@ pub enum Tick {
         back: bool,
     },
     /// A step is confirmed: the clock takes the frame's time, and the tables shift their ages
-    /// by `delta` (the new time minus the old, negative for a step back).
+    /// by `delta`.
     Step {
-        /// New clock minus old clock, ns.
+        /// The step, ns: new clock minus old clock (negative for a step back), less the
+        /// monotonic time that passed in the gap if the frame had one (rule 7).
         delta: i64,
     },
     /// The frame follows a gap that the monotonic time shows was real: the clock takes the
@@ -225,31 +224,40 @@ pub enum Tick {
     RealGap,
 }
 
-/// How a frame's wall time compares with the monotonic time, against the feed's last accepted
+/// How a frame's wall time splits against the monotonic time, against the feed's last accepted
 /// frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Domain {
-    /// No monotonic time, or nothing to compare it with.
+    /// No monotonic time, or nothing comparable to it.
     Unknown,
-    /// Wall and monotonic time elapsed agree: time passed.
-    Agree { wall_ns: i64, mono_ns: i64 },
-    /// They do not: the wall clock stepped.
-    Step { wall_ns: i64, mono_ns: i64 },
+    /// The wall time elapsed is the monotonic time elapsed plus `step_ns`.
+    Split {
+        wall_ns: i64,
+        mono_ns: i64,
+        step_ns: i64,
+    },
 }
 
-fn classify(own: &FeedClock, t: i64, mono: Option<u64>) -> Domain {
+fn classify(own: &FeedClock, t: i64, stream: u32, mono: Option<u64>) -> Domain {
     let Some(m) = mono else {
         return Domain::Unknown;
     };
-    if !own.ref_ok || m < own.ref_mono_ns {
+    if !own.ref_ok || own.ref_stream != stream || m < own.ref_mono_ns {
         return Domain::Unknown;
     }
-    let wall_ns = t.saturating_sub(own.ref_wall_ns);
-    let mono_ns = i64::try_from(m - own.ref_mono_ns).unwrap_or(i64::MAX);
-    if wall_ns.saturating_sub(mono_ns).saturating_abs() <= MONO_AGREE_TOL_NS {
-        Domain::Agree { wall_ns, mono_ns }
-    } else {
-        Domain::Step { wall_ns, mono_ns }
+    let Ok(mono_ns) = i64::try_from(m - own.ref_mono_ns) else {
+        return Domain::Unknown;
+    };
+    let Some(wall_ns) = t.checked_sub(own.ref_wall_ns) else {
+        return Domain::Unknown;
+    };
+    match wall_ns.checked_sub(mono_ns) {
+        Some(step_ns) => Domain::Split {
+            wall_ns,
+            mono_ns,
+            step_ns,
+        },
+        None => Domain::Unknown,
     }
 }
 
@@ -273,10 +281,11 @@ fn log_decision(c: &mut Clock, kind: u8, wall_ns: i64, mono_ns: i64) {
 
 /// Records the frame as the feed's reference for rule 7 (or clears it, for a frame with no
 /// monotonic time).
-fn set_ref(f: &mut FeedClock, t: i64, mono: Option<u64>) {
+fn set_ref(f: &mut FeedClock, t: i64, stream: u32, mono: Option<u64>) {
     f.ref_ok = mono.is_some();
     f.ref_wall_ns = t;
     f.ref_mono_ns = mono.unwrap_or(0);
+    f.ref_stream = stream;
 }
 
 fn within(a: i64, b: i64) -> bool {
@@ -295,13 +304,21 @@ fn forward_continues(t: i64, prev: i64) -> bool {
 /// the guarantee that one feed cannot drag the clock ahead of the others is void (see the module
 /// documentation).
 pub fn clock_observe(c: &mut Clock, feed: usize, now: i64, t: i64) -> Tick {
-    clock_observe_mono(c, feed, now, t, None)
+    clock_observe_mono(c, feed, now, t, 0, None)
 }
 
 /// [`clock_observe`] for a frame that may carry the recorder's monotonic time (`mono`, ns since
-/// the recorder started). With `None` it is [`clock_observe`] exactly; with a time it also
-/// applies rule 7.
-pub fn clock_observe_mono(c: &mut Clock, feed: usize, now: i64, t: i64, mono: Option<u64>) -> Tick {
+/// the recorder started) and the stream it comes from (`stream`: monotonic times are compared
+/// only within one). With `None` it is [`clock_observe`] exactly; with a time it also applies
+/// rule 7.
+pub fn clock_observe_mono(
+    c: &mut Clock,
+    feed: usize,
+    now: i64,
+    t: i64,
+    stream: u32,
+    mono: Option<u64>,
+) -> Tick {
     let feed = feed.min(FEED_COUNT - 1);
     let Some(own) = c.feeds.get(feed).copied() else {
         return Tick::Held { back: t < now };
@@ -317,7 +334,7 @@ pub fn clock_observe_mono(c: &mut Clock, feed: usize, now: i64, t: i64, mono: Op
             f.last_ns = t;
             f.seen = true;
             f.ever = true;
-            set_ref(f, t, mono);
+            set_ref(f, t, stream, mono);
         }
         return Tick::Advance;
     }
@@ -337,24 +354,34 @@ pub fn clock_observe_mono(c: &mut Clock, feed: usize, now: i64, t: i64, mono: Op
             f.last_ns = t;
             f.seen = true;
             f.ever = true;
-            set_ref(f, t, mono);
+            set_ref(f, t, stream, mono);
         }
         return if t >= now { Tick::Advance } else { Tick::Keep };
     }
     let back = t < now;
-    let domain = classify(&own, t, mono);
-    if let (false, Domain::Agree { wall_ns, mono_ns }) = (back, domain) {
-        // Rule 7: the recorder ran through the gap, so it is time that passed.
-        if let Some(f) = c.feeds.get_mut(feed) {
-            f.last_ns = t;
-            f.seen = true;
-            f.ever = true;
-            f.cand_n = 0;
-            set_ref(f, t, mono);
+    let domain = classify(&own, t, stream, mono);
+    if let (
+        false,
+        Domain::Split {
+            wall_ns,
+            mono_ns,
+            step_ns,
+        },
+    ) = (back, domain)
+    {
+        // Rule 7: a gap whose step is within the tolerance is time that passed.
+        if step_ns.saturating_abs() <= CLOCK_TOLERANCE_NS {
+            if let Some(f) = c.feeds.get_mut(feed) {
+                f.last_ns = t;
+                f.seen = true;
+                f.ever = true;
+                f.cand_n = 0;
+                set_ref(f, t, stream, mono);
+            }
+            c.real_gaps += 1;
+            log_decision(c, 1, wall_ns, mono_ns);
+            return Tick::RealGap;
         }
-        c.real_gaps += 1;
-        log_decision(c, 1, wall_ns, mono_ns);
-        return Tick::RealGap;
     }
     let mut ready = false;
     if let Some(f) = c.feeds.get_mut(feed) {
@@ -391,10 +418,18 @@ pub fn clock_observe_mono(c: &mut Clock, feed: usize, now: i64, t: i64, mono: Op
             }
         }
         if !back || new >= old {
+            // The ages shift by the whole move of the clock, less the monotonic time that passed
+            // in it (never more than the move, so no age shrinks).
+            let mut delta = t.saturating_sub(now);
             match domain {
-                Domain::Step { wall_ns, mono_ns } => {
+                Domain::Split {
+                    wall_ns,
+                    mono_ns,
+                    step_ns,
+                } if step_ns.saturating_abs() > CLOCK_TOLERANCE_NS => {
                     c.mono_steps += 1;
                     log_decision(c, 2, wall_ns, mono_ns);
+                    delta = delta.min(step_ns);
                 }
                 Domain::Unknown if mono.is_some() => {
                     c.unclassified_steps += 1;
@@ -408,26 +443,27 @@ pub fn clock_observe_mono(c: &mut Clock, feed: usize, now: i64, t: i64, mono: Op
                 c.forward_steps += 1;
             }
             // The backers keep their records; the other feeds' times were compared with the old
-            // clock, they are compared with the new.
+            // clock, they are compared with the new. A feed that did not take this frame has no
+            // monotonic reference any more: it was taken before the step.
             for (i, g) in c.feeds.iter_mut().enumerate() {
                 if i == feed {
                     g.last_ns = t;
                     g.seen = true;
                     g.ever = true;
-                    set_ref(g, t, mono);
+                    set_ref(g, t, stream, mono);
                 } else if backs_new(g) {
                     // At most the new clock, so every feed with a record is at or before it.
                     g.last_ns = g.cand_last_ns.min(t);
                     g.seen = true;
                     g.ever = true;
+                    g.ref_ok = false;
                 } else {
                     g.seen = false;
+                    g.ref_ok = false;
                 }
                 g.cand_n = 0;
             }
-            return Tick::Step {
-                delta: t.saturating_sub(now),
-            };
+            return Tick::Step { delta };
         }
         c.steps_outvoted += 1;
     }
@@ -451,6 +487,7 @@ mod proofs {
             ref_ok: kani::any(),
             ref_wall_ns: kani::any(),
             ref_mono_ns: kani::any(),
+            ref_stream: kani::any(),
         };
         // Reachable: the count stops at the limit (a refused step leaves it there).
         kani::assume(f.cand_n <= CLOCK_CONFIRM_FRAMES);

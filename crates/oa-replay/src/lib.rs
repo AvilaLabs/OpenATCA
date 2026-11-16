@@ -49,7 +49,7 @@ pub use adsb::{
 pub use apply::{apply_sfdps, apply_tbfm, Applied};
 pub use clock::{
     clock_observe, clock_observe_mono, Clock, FeedClock, Tick, CLOCK_CONFIRM_FRAMES,
-    CLOCK_TOLERANCE_NS, FEED_GAP_MAX_NS, MONO_AGREE_TOL_NS,
+    CLOCK_TOLERANCE_NS, FEED_GAP_MAX_NS,
 };
 pub use errors::{count_error, errors_total, ErrKind, Errors, ERR_COUNT, ERR_NAMES};
 pub use fns::{
