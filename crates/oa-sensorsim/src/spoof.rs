@@ -173,11 +173,12 @@ pub fn inject_ghost(base: &Labelled, g: &GhostParams) -> Result<Labelled, SimErr
     if g.interval_ms <= 0 || g.count == 0 || g.count > MAX_GHOST_ROWS {
         return Err(SimError::BadSpoof("ghost interval or count"));
     }
-    if !(g.speed_kt.is_finite() && (0.0..=1500.0).contains(&g.speed_kt))
-        || !g.track_deg.is_finite()
-        || !g.lat_deg.is_finite()
-        || !g.lon_deg.is_finite()
-    {
+    let ok = g.speed_kt.is_finite()
+        && (0.0..=1500.0).contains(&g.speed_kt)
+        && g.track_deg.is_finite()
+        && g.lat_deg.is_finite()
+        && g.lon_deg.is_finite();
+    if !ok {
         return Err(SimError::BadSpoof("ghost speed, track or position"));
     }
     e7_lat(g.lat_deg)?;

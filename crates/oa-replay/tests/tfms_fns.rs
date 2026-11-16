@@ -1187,6 +1187,95 @@ fn a_tombstone_is_kept_until_the_cancelled_notams_end_or_seven_days() {
     assert_eq!(oa_replay::fns::fns_tombstones(&t), 0);
 }
 
+/// What of the table must not depend on the order notices arrive in: the NOTAM held for `Z1`
+/// (its issued time) and the tombstone of `Z1` (its issued time and how many are held).
+fn z1_state(t: &oa_replay::fns::FnsTable) -> (usize, Option<i64>, usize, Option<i64>) {
+    let held = fns_slot_of(t, &key("Z", 1)).map(|s| t.times[s][0]);
+    let tomb = oa_replay::fns::fns_tombstone_issued(t, &key("Z", 1));
+    (fns_live(t), held, oa_replay::fns::fns_tombstones(t), tomb)
+}
+
+/// The same three notices for `Z1` in a given arrival order: issued 10:00, cancelled by a
+/// notice issued 10:30, issued again at 11:00. No end time, so a tombstone's life is the same
+/// whether or not the NOTAM was held when the cancellation arrived.
+fn z1_notices() -> [Nt; 3] {
+    let mut first = nt_at("Z", 1, I10);
+    first.end = None;
+    let mut cancel = nt_at("Z", 9, "2030-03-05T10:30:00.000Z");
+    cancel.ntype = "C";
+    cancel.refd = Some(("Z", 1));
+    cancel.end = None;
+    let mut again = nt_at("Z", 1, I11);
+    again.end = None;
+    [first, cancel, again]
+}
+
+// REQ: OA-RPL-271
+#[test]
+fn a_cancellation_removes_only_versions_issued_at_or_before_it_in_every_arrival_order() {
+    let ns = z1_notices();
+    let orders: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut states = Vec::new();
+    for o in orders {
+        let mut t = new_fns_table(8);
+        for i in o {
+            fns_apply(&mut t, &ns[i], mar5(12));
+        }
+        states.push((o, z1_state(&t)));
+    }
+    let (live, held, tombs, tomb_issued) = states[0].1;
+    assert_eq!((live, tombs), (1, 1), "{states:?}");
+    assert_eq!(held, Some(mar5(11) / MS_NS), "{states:?}");
+    assert_eq!(
+        tomb_issued,
+        Some(mar5(10) / MS_NS + 1_800_000),
+        "{states:?}"
+    );
+    for (o, st) in &states {
+        assert_eq!(*st, states[0].1, "order {o:?}: {states:?}");
+    }
+}
+
+// REQ: OA-RPL-271
+#[test]
+fn a_cancellation_older_than_the_held_version_is_kept_out_and_counted() {
+    let [_, cancel, again] = z1_notices();
+    // Held issued 11:00, cancellation issued 10:30 arrives second: stale, nothing removed.
+    let mut t = new_fns_table(8);
+    fns_apply(&mut t, &again, mar5(12));
+    assert_eq!(fns_apply(&mut t, &cancel, mar5(12)), FnsApplied::OutOfOrder);
+    assert_eq!(fns_live(&t), 1);
+    assert_eq!(t.stats.cancelled, 0);
+    assert_eq!(t.stats.cancel_stale, 1);
+    assert_eq!(oa_replay::fns::fns_tombstones(&t), 1);
+    // A cancellation at the held version's own issued time removes it.
+    let mut t = new_fns_table(8);
+    let mut held = again.clone();
+    held.issued = "2030-03-05T10:30:00.000Z";
+    fns_apply(&mut t, &held, mar5(12));
+    assert_eq!(fns_apply(&mut t, &cancel, mar5(12)), FnsApplied::Cancelled);
+    assert_eq!(fns_live(&t), 0);
+    assert_eq!(t.stats.cancel_stale, 0);
+    // The target issued 11:00 against a 10:00 cancellation, in both arrival orders.
+    let mut c10 = cancel.clone();
+    c10.issued = I10;
+    let mut a = new_fns_table(8);
+    fns_apply(&mut a, &again, mar5(12));
+    fns_apply(&mut a, &c10, mar5(12));
+    let mut b = new_fns_table(8);
+    fns_apply(&mut b, &c10, mar5(12));
+    fns_apply(&mut b, &again, mar5(12));
+    assert_eq!(z1_state(&a), z1_state(&b));
+    assert_eq!(z1_state(&a).1, Some(mar5(11) / MS_NS));
+}
+
 // REQ: OA-RPL-205
 #[test]
 fn a_full_tombstone_table_evicts_the_oldest_and_counts_it() {

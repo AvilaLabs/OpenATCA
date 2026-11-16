@@ -14,7 +14,8 @@
 //! to extrapolate; the sub-millisecond remainder is applied with the truth velocity. A plot is
 //! therefore only produced where truth exists at the crossing time. Pressure altitude is taken
 //! as height above the ellipsoid, and an aircraft with no altitude (on the ground) is placed at
-//! zero height for geometry.
+//! zero height for geometry. The remainder is applied flat except within 0.1 degrees of a pole,
+//! where the geodesic direct problem is used.
 //!
 //! Randomness: one stream per (aircraft, revolution) from [`crate::prng::Rng::from_stream`], so
 //! an aircraft's plots do not depend on which other aircraft are in the truth. Draw order per
@@ -206,12 +207,16 @@ fn truth_pos(truth: &Truth, addr: u32, t_ns: i64) -> Option<Pos> {
     let rem_s = t_ns.rem_euclid(1_000_000) as f64 * 1.0e-9;
     match truth_at(truth, addr, t_ms) {
         TruthQuery::Ok(s) => {
-            let (lat, lon) = crate::geom::offset_deg(
-                s.lat_deg,
-                s.lon_deg,
-                s.vel_east_mps * rem_s,
-                s.vel_north_mps * rem_s,
-            )?;
+            // No remainder, no offset: the truth position as it is, at any latitude. A
+            // remainder is applied flat where that is valid and by the geodesic direct problem
+            // near a pole, where the flat step is not.
+            let (lat, lon) = if t_ns.rem_euclid(1_000_000) == 0 {
+                (s.lat_deg, s.lon_deg)
+            } else {
+                let (e, n) = (s.vel_east_mps * rem_s, s.vel_north_mps * rem_s);
+                crate::geom::offset_deg(s.lat_deg, s.lon_deg, e, n)
+                    .or_else(|| crate::geom::offset_geodesic_deg(s.lat_deg, s.lon_deg, e, n))?
+            };
             let alt_ft = s
                 .baro_alt_ft
                 .map(|a| a + s.vert_rate_fpm.unwrap_or(0.0) / 60.0 * rem_s);
@@ -437,4 +442,70 @@ pub fn simulate_radar(
     }
     debug_assert_eq!(plots_len(&plots), rows.len());
     Ok((plots, stats))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use oa_adsb::{reports_push, Reports, ROW_EMPTY};
+    use oa_truth::{build_truth, DEFAULT_CONFIG};
+
+    const T0: i64 = 1_700_000_000_000_000_000;
+
+    /// One aircraft at (`lat`, 10 degrees east) moving east at 100 m/s, a report a second.
+    fn truth_at_lat(lat: f64) -> Truth {
+        let mut r = Reports::default();
+        for k in 0..60i64 {
+            let (la, lo) =
+                crate::geom::offset_geodesic_deg(lat, 10.0, 100.0 * k as f64, 0.0).unwrap();
+            let mut row = ROW_EMPTY;
+            row.icao = 0xd00001;
+            row.time_ns = T0 + k * 1_000_000_000;
+            row.lat_e7 = (la * 1e7).round() as i32;
+            row.lon_e7 = (lo * 1e7).round() as i32;
+            row.baro_alt_ft = 30_000;
+            row.nic = 8;
+            row.nac_p = 10;
+            row.sil = 3;
+            row.version = 2;
+            reports_push(&mut r, &row);
+        }
+        build_truth(&r, &DEFAULT_CONFIG).unwrap().0
+    }
+
+    // REQ: OA-SIM-030
+    #[test]
+    fn the_truth_position_near_the_pole_is_kept_at_whole_and_fractional_milliseconds() {
+        for lat in [45.0, 89.95] {
+            let truth = truth_at_lat(lat);
+            let whole = T0 + 20_000_000_000;
+            let p0 = truth_pos(&truth, 0xd00001, whole).unwrap();
+            // The whole-millisecond time is the truth position, untouched by any offset.
+            let q = truth_pos(&truth, 0xd00001, whole + 1).unwrap();
+            // 1 ns at 100 m/s is 1e-7 m: the fractional position is the same to well under a
+            // millimetre, and finite.
+            let (d, _) = crate::geom::polar_of(
+                &crate::geom::frame_at(p0.lat, p0.lon, 0.0),
+                q.lat,
+                q.lon,
+                0.0,
+            );
+            assert!(d < 1e-3, "lat {lat}: {d}");
+            let half = truth_pos(&truth, 0xd00001, whole + 500_000).unwrap();
+            let (d, _) = crate::geom::polar_of(
+                &crate::geom::frame_at(p0.lat, p0.lon, 0.0),
+                half.lat,
+                half.lon,
+                0.0,
+            );
+            // 0.5 ms at 100 m/s is 5 cm.
+            assert!((d - 0.05).abs() < 0.005, "lat {lat}: {d}");
+        }
+    }
 }

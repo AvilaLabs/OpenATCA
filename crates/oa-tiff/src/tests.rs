@@ -960,3 +960,23 @@ fn vertical_units_are_read_and_converted_to_metres() {
         );
     }
 }
+
+// REQ: OA-TIFF-090
+#[test]
+fn a_plain_polygon_query_counts_the_vertices_walked_per_sample() {
+    // 500 by 500 samples under a 10 000-vertex polygon around all of them: 2.5e9 edge tests,
+    // over the work budget though only 250 000 samples.
+    let g = ramp_grid(40.0, -90.0, 500, 500, 0.001);
+    let poly: Vec<(f64, f64)> = (0..10_000)
+        .map(|i| {
+            let a = f64::from(i) * std::f64::consts::TAU / 10_000.0;
+            (39.75 + 0.3 * a.sin(), -89.75 + 0.3 * a.cos())
+        })
+        .collect();
+    assert_eq!(
+        grid_max_in_polygon(&g, &poly).err(),
+        Some(QueryError::TooMuchWork)
+    );
+    // A few vertices over the same samples answer.
+    assert!(grid_max_in_polygon(&g, &poly[..16]).is_ok());
+}

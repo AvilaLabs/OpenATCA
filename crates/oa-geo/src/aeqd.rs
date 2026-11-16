@@ -12,7 +12,8 @@
 //! tangentially) is far below the noise. Velocities and covariances are converted to and from
 //! true east and north by the exact local differential of the projection (the radial direction
 //! from the origin keeps its scale, the tangential one is scaled by `sin c / c`, and the axes
-//! are turned by the meridian convergence, which is large near a pole).
+//! are turned by the meridian convergence, which is large near a pole). The chart is defined
+//! short of the origin's antipode only: see [`ANTIPODE_MARGIN_RAD`].
 
 use crate::small::{
     angle_from_sin_cos, atan_small, sin_cos_near_zero, sin_cos_small, ATAN_LIMIT, SIN_COS_LIMIT,
@@ -20,6 +21,15 @@ use crate::small::{
 
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
+
+/// The chart's domain is the open disc of angular distance `c < PI - ANTIPODE_MARGIN_RAD` about
+/// the origin (about 64 m short of the antipode on the sphere). At the antipode the tangential
+/// scale `sin c / c` is zero and the map is not invertible. The margin is chosen where the scale
+/// is still well clear of rounding: at the margin `sin c / c` is 3.2e-6, so the inverse
+/// differential is conditioned at about 3e5, and the 1e-6 floor an earlier version put under the
+/// scale (which bites from `PI - c` of 3.1e-6) is never reached. [`unproject`] and the
+/// differentials refuse a point past the margin.
+pub const ANTIPODE_MARGIN_RAD: f64 = 1e-5;
 
 /// A projection about an origin. Plain data (A1, private fields: A1.1); A7.2: cold struct, size
 /// guard waived.
@@ -150,8 +160,9 @@ pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
 }
 
 /// `(east_m, north_m)` to `(lat_deg, lon_deg)`, longitude in [-180, 180]. `None` for a point whose
-/// distance from the origin is not finite or is past half the sphere's circumference: the chart
-/// does not reach there, and a larger distance would wrap round onto some other place.
+/// distance from the origin is not finite or is past the chart's domain ([`ANTIPODE_MARGIN_RAD`]
+/// short of half the sphere's circumference): the chart does not reach there, the map is singular
+/// at the antipode, and a larger distance would wrap round onto some other place.
 pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
     unproject_fix(f, x, y).map(|p| (p.lat_deg, p.lon_deg))
 }
@@ -172,7 +183,7 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
         return None;
     }
     let rho = (x * x + y * y).sqrt();
-    if rho > half {
+    if rho > half || rho / f.r > std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
         return None;
     }
     if rho < 1e-9 {
@@ -265,7 +276,8 @@ fn axes_rotation(from: &Frame, to: &Frame) -> [V3; 3] {
 /// the two sphere displacements, in radians per plane metre, of a unit step along plane x and
 /// along plane y. The radial direction is preserved by the projection and the tangential one is
 /// scaled by `sin c / c` (`c` the angle from the origin), so the displacements are exact.
-fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
+/// `None` outside the chart's domain ([`ANTIPODE_MARGIN_RAD`]), where the scale is not exact.
+fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
     // The plane position is bounded in every use (a chart point, a filter state); `hypot` only
     // guards a component whose square could overflow.
     let rho = if x.abs() < 1e150 && y.abs() < 1e150 {
@@ -274,15 +286,17 @@ fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
         oa_math::hypot(x, y)
     };
     let c = rho / f.r;
+    if !c.is_finite() || c > std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+        return None;
+    }
     let (sa, ca) = if rho < 1e-9 {
         (0.0, 1.0)
     } else {
         (x / rho, y / rho)
     };
     let (sc, cc) = sin_cos_near_zero(c);
-    // Floored: the factor vanishes only at the origin's antipode, which the projection
-    // does not map to one place.
-    let k = if c < 1e-8 { 1.0 } else { (sc / c).max(1e-6) };
+    // Exact: the factor vanishes only at the origin's antipode, which the domain excludes.
+    let k = if c < 1e-8 { 1.0 } else { sc / c };
     let u = [cc * sa, cc * ca, -sc];
     let t = [ca, -sa, 0.0];
     let col = |p: f64, q: f64| {
@@ -292,7 +306,7 @@ fn local(f: &Frame, x: f64, y: f64) -> (V3, [V3; 2], f64) {
             (p * u[2] + q * k * t[2]) / f.r,
         ]
     };
-    ([sc * sa, sc * ca, cc], [col(sa, ca), col(ca, -sa)], k)
+    Some(([sc * sa, sc * ca, cc], [col(sa, ca), col(ca, -sa)], k))
 }
 
 /// The point's unit east and north vectors and the WGS-84 radii `(N, M)` there, in the frame's
@@ -323,27 +337,48 @@ fn enu(f: &Frame, p: &V3) -> (V3, V3, f64, f64) {
 /// The local differential of the projection at plane position `(x, y)`: the matrix taking a
 /// small plane displacement (or velocity) to the true `(east, north)` displacement in metres on
 /// the ellipsoid at that point. Exact; the east and north at a pole follow [`enu`]'s convention.
-pub fn frame_to_true(f: &Frame, x: f64, y: f64) -> Mat2 {
-    let (p, cols, _) = local(f, x, y);
+/// `None` outside the chart's domain ([`ANTIPODE_MARGIN_RAD`]); never a regularised value.
+pub fn try_frame_to_true(f: &Frame, x: f64, y: f64) -> Option<Mat2> {
+    let (p, cols, _) = local(f, x, y)?;
     let (east, north, n, m) = enu(f, &p);
     let row = |v: &V3, radius: f64| [radius * dot(v, &cols[0]), radius * dot(v, &cols[1])];
-    [row(&east, n), row(&north, m)]
+    Some([row(&east, n), row(&north, m)])
 }
 
-/// The inverse of [`frame_to_true`]: true `(east, north)` metres at `(x, y)` to plane metres.
-pub fn frame_from_true(f: &Frame, x: f64, y: f64) -> Mat2 {
-    let [[a, b], [c, d]] = frame_to_true(f, x, y);
+/// [`try_frame_to_true`] where the caller has a matrix to fill: every entry NaN outside the
+/// chart's domain, which propagates as a refusal and is never a plausible number.
+pub fn frame_to_true(f: &Frame, x: f64, y: f64) -> Mat2 {
+    try_frame_to_true(f, x, y).unwrap_or([[f64::NAN; 2]; 2])
+}
+
+/// The inverse of [`try_frame_to_true`]: true `(east, north)` metres at `(x, y)` to plane metres.
+/// `None` outside the chart's domain.
+pub fn try_frame_from_true(f: &Frame, x: f64, y: f64) -> Option<Mat2> {
+    let [[a, b], [c, d]] = try_frame_to_true(f, x, y)?;
     let det = a * d - b * c;
-    [[d / det, -b / det], [-c / det, a / det]]
+    Some([[d / det, -b / det], [-c / det, a / det]])
+}
+
+/// [`try_frame_from_true`] with every entry NaN outside the chart's domain.
+pub fn frame_from_true(f: &Frame, x: f64, y: f64) -> Mat2 {
+    try_frame_from_true(f, x, y).unwrap_or([[f64::NAN; 2]; 2])
 }
 
 /// The differential of the change of frame at one physical point: the matrix taking a small
 /// displacement (or velocity) in the plane of `from` at `(x1, y1)` to the same displacement in
 /// the plane of `to` at `(x2, y2)`, where `(x2, y2)` is the same point in `to`'s plane. Needs
 /// no east or north, so it is the same at a pole.
-pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64) -> Mat2 {
-    let (_, cols, _) = local(from, x1, y1);
-    let (_, cols2, _) = local(to, x2, y2);
+/// `None` when either point is outside the chart's domain ([`ANTIPODE_MARGIN_RAD`]).
+pub fn try_frame_change(
+    from: &Frame,
+    x1: f64,
+    y1: f64,
+    to: &Frame,
+    x2: f64,
+    y2: f64,
+) -> Option<Mat2> {
+    let (_, cols, _) = local(from, x1, y1)?;
+    let (_, cols2, _) = local(to, x2, y2)?;
     // `cols2` are the images of the plane steps; the plane components of a displacement `w`
     // are the solution of the 2 x 2 system through them (they are not orthonormal).
     let rot = axes_rotation(from, to);
@@ -361,7 +396,12 @@ pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64
         ((g11 * h0 - g01 * h1) / det, (g00 * h1 - g01 * h0) / det)
     };
     let (a, c) = (column(&cols[0]), column(&cols[1]));
-    [[a.0, c.0], [a.1, c.1]]
+    Some([[a.0, c.0], [a.1, c.1]])
+}
+
+/// [`try_frame_change`] with every entry NaN outside the chart's domain.
+pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64) -> Mat2 {
+    try_frame_change(from, x1, y1, to, x2, y2).unwrap_or([[f64::NAN; 2]; 2])
 }
 
 /// `m * v`.
@@ -440,9 +480,15 @@ mod tests {
         assert_eq!(unproject(&f, 0.0, f64::INFINITY), None);
         assert_eq!(unproject(&f, 20_037_509.0 * 2.0, 0.0), None);
         assert_eq!(unproject(&f, half * 1.001, 0.0), None);
-        // The far edge of the chart, and a point reached by project, still convert.
-        assert!(unproject(&f, half, 0.0).is_some());
+        // The antipode and the strip of the margin short of it are past the domain; just inside
+        // it, and a point a kilometre from the antipode, still convert.
+        assert_eq!(unproject(&f, half, 0.0), None);
         let (x, y) = project(&f, -41.9, 91.7);
+        assert_eq!(unproject(&f, x, y), None);
+        let limit = f.r * (std::f64::consts::PI - ANTIPODE_MARGIN_RAD);
+        assert!(unproject(&f, limit * 0.999_999, 0.0).is_some());
+        assert_eq!(unproject(&f, limit * 1.000_001, 0.0), None);
+        let (x, y) = project(&f, -41.9, 91.69);
         assert!(unproject(&f, x, y).is_some());
     }
 
@@ -807,11 +853,84 @@ mod tests {
             let (b1, b2) = (axes(&f), axes(&g));
             let r = axes_rotation(&f, &g);
             for k in 0..3 {
+                #[allow(clippy::needless_range_loop)]
                 for j in 0..3 {
                     let want = dot(&b2[k], &b1[j]);
                     assert!((r[k][j] - want).abs() < 4e-16, "{a:?} {b:?} {k}{j}");
                 }
             }
         }
+    }
+
+    /// The plane point at angular distance `c` from the origin, due east.
+    fn at_angle(f: &Frame, c: f64) -> (f64, f64) {
+        (f.r * c, 0.0)
+    }
+
+    // REQ: OA-GEO-017
+    #[test]
+    fn near_the_antipode_the_chart_refuses_and_never_returns_a_floored_value() {
+        let f = frame_new(41.9, -88.3);
+        let pi = std::f64::consts::PI;
+        // 1e-6 rad short of the antipode is inside the region where a floor of 1e-6 under the
+        // tangential scale (3.2e-7 there) used to stand in for it.
+        for gap in [1e-6, 3e-6, 9e-6, 0.0] {
+            let (x, y) = at_angle(&f, pi - gap);
+            assert_eq!(unproject(&f, x, y), None, "unproject, gap {gap}");
+            let m = frame_to_true(&f, x, y);
+            assert!(m.iter().flatten().all(|v| v.is_nan()), "{gap}: {m:?}");
+            let (vx, vy) = frame_velocity(&f, x, y, 10.0, 10.0);
+            assert!(vx.is_nan() && vy.is_nan(), "{gap}");
+        }
+        // Up to the limit the values are exact: the scale is sin c / c, floor or no floor.
+        for gap in [1.2e-5, 3e-5, 1e-3, 0.1] {
+            let (x, y) = at_angle(&f, pi - gap);
+            let m = frame_to_true(&f, x, y);
+            assert!(m.iter().flatten().all(|v| v.is_finite()), "{gap}: {m:?}");
+            assert!(unproject(&f, x, y).is_some(), "gap {gap}");
+        }
+    }
+
+    // REQ: OA-GEO-017
+    #[test]
+    fn the_differential_is_exact_right_up_to_the_domain_limit() {
+        let pi = std::f64::consts::PI;
+        let f = frame_new(41.9, -88.3);
+        // Approach the limit: the differential agrees with a central difference of the inverse
+        // and the inverse differential undoes it; past the limit both refuse.
+        for (gap, h, tol) in [(0.5, 0.5, 1e-5), (1e-2, 0.01, 1e-4), (1e-3, 1e-3, 1e-3)] {
+            for dir in [0.0_f64, 0.7, 2.5] {
+                let c = pi - gap;
+                let (x, y) = (f.r * c * dir.cos(), f.r * c * dir.sin());
+                let got = try_frame_to_true(&f, x, y).unwrap();
+                let want = numeric_to_true(&f, x, y, h);
+                assert!(close(&got, &want, tol), "{gap} {dir}: {got:?} vs {want:?}");
+                let back = try_frame_from_true(&f, x, y).unwrap();
+                let id = [
+                    [
+                        back[0][0] * got[0][0] + back[0][1] * got[1][0],
+                        back[0][0] * got[0][1] + back[0][1] * got[1][1],
+                    ],
+                    [
+                        back[1][0] * got[0][0] + back[1][1] * got[1][0],
+                        back[1][0] * got[0][1] + back[1][1] * got[1][1],
+                    ],
+                ];
+                assert!(close(&id, &[[1.0, 0.0], [0.0, 1.0]], 1e-9), "{id:?}");
+            }
+        }
+        // At the limit itself the tangential scale is sin c / c, with no floor.
+        let c = pi - ANTIPODE_MARGIN_RAD * 1.001;
+        let (x, y) = (f.r * c, 0.0);
+        let (_, _, k) = local(&f, x, y).unwrap();
+        assert!((k - c.sin() / c).abs() < 1e-15 && k > 1e-6, "{k}");
+        let past = pi - ANTIPODE_MARGIN_RAD * 0.999;
+        assert!(try_frame_to_true(&f, f.r * past, 0.0).is_none());
+        assert!(try_frame_from_true(&f, f.r * past, 0.0).is_none());
+        let g = frame_new(41.9, -88.3);
+        assert!(try_frame_change(&f, x, 0.0, &g, 0.0, 0.0).is_some());
+        assert!(try_frame_change(&f, f.r * past, 0.0, &g, 0.0, 0.0).is_none());
+        assert!(try_frame_change(&f, 0.0, 0.0, &g, g.r * past, 0.0).is_none());
+        assert!(unproject(&f, f.r * past, 0.0).is_none());
     }
 }

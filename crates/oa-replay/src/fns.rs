@@ -11,8 +11,9 @@
 //!   time is older than the held one's, which is refused whole and counted;
 //! * replace: the NOTAM named by the row's referred series, number and year is removed and the
 //!   row is stored; a replacement naming nothing held is counted and stored all the same;
-//! * cancel: the NOTAM named by the referred series, number and year is removed; the cancelling
-//!   NOTAM itself is not stored. A cancellation naming nothing held is counted (it is ordinary
+//! * cancel: the NOTAM named by the referred series, number and year is removed, unless the held
+//!   version was issued after the cancellation (then it is kept and the cancellation counted in
+//!   `cancel_stale`); the cancelling NOTAM itself is not stored. A cancellation naming nothing held is counted (it is ordinary
 //!   when the target expired first, or was issued before the recording began).
 //!
 //! **Tombstones.** A cancellation or replacement leaves a tombstone of the NOTAM it removed (or
@@ -67,6 +68,10 @@ pub const FNS_OPEN_AGE_NS: i64 = 30 * 24 * 3600 * 1_000_000_000;
 /// 7 days. The feed redelivers a notice within minutes to hours of its first delivery; a week
 /// is far past any redelivery seen, and a tombstone costs a few dozen bytes.
 pub const FNS_TOMBSTONE_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
+/// Most polygon vertices of one NOTAM whose longitudes are sorted to find the cover: 32,768, twice
+/// what four rings at the decoder's default limit hold. A NOTAM with more has a cover of the whole
+/// circle and is counted (`cover_widened`).
+pub const FNS_COVER_VERTICES: usize = 1 << 15;
 /// Absent time (Unix ms), altitude, latitude and longitude.
 pub const FNS_NO_TIME: i64 = i64::MIN;
 /// Absent altitude, latitude or longitude in the table's columns.
@@ -76,6 +81,8 @@ pub const FNS_NO_NUM: i32 = i32::MIN;
 pub const FNS_HASH_TAG: &[u8; 5] = b"OAFN1";
 /// Tag of the tombstones in the canonical serialisation.
 pub const FNS_TOMB_TAG: &[u8; 5] = b"OAFT1";
+/// Tag of the counts of stale cancellations and widened covers, written only when one is not zero.
+pub const FNS_STALE_CANCEL_TAG: &[u8; 5] = b"OAFC1";
 
 /// Running totals of the table, kept for the whole run.
 // A7.2: cold struct, size guard waived
@@ -108,6 +115,12 @@ pub struct FnsStats {
     /// New or replacing rows refused because a tombstone shows the NOTAM was already cancelled
     /// or replaced by a notice issued no earlier.
     pub tomb_refused: u64,
+    /// Cancellations refused whole because the held NOTAM of that identity was issued after
+    /// them; each still leaves its tombstone.
+    pub cancel_stale: u64,
+    /// NOTAMs with more polygon vertices than [`FNS_COVER_VERTICES`] whose longitude cover was
+    /// widened to the whole circle.
+    pub cover_widened: u64,
     /// Tombstones evicted, oldest first, because the tombstone table was full.
     pub tomb_evicted: u64,
     /// Tombstones dropped at their retention time.
@@ -218,6 +231,8 @@ pub struct FnsTable {
     pub tomb_seq: Vec<u64>,
     /// The next creation number.
     pub tomb_next_seq: u64,
+    /// Scratch for sorting the longitudes of one NOTAM's polygons, [`FNS_COVER_VERTICES`] long.
+    pub cover_buf: Vec<i64>,
 }
 
 /// An empty table of `capacity` NOTAMs (use [`FNS_CAPACITY`]) and as many tombstones.
@@ -263,6 +278,7 @@ pub fn new_fns_table_with(capacity: usize, tombstones: usize) -> FnsTable {
         tomb_replay: vec![false; tombstones],
         tomb_seq: vec![0; tombstones],
         tomb_next_seq: 0,
+        cover_buf: vec![0; FNS_COVER_VERTICES],
     }
 }
 
@@ -291,6 +307,12 @@ fn tomb_of(t: &FnsTable, k: &FnsKey) -> Option<usize> {
 /// Number of tombstones held.
 pub fn fns_tombstones(t: &FnsTable) -> usize {
     t.tomb.live
+}
+
+/// The `issued` time (Unix ms) of the latest notice that cancelled or replaced NOTAM `k`, if a
+/// tombstone of it is held.
+pub fn fns_tombstone_issued(t: &FnsTable, k: &FnsKey) -> Option<i64> {
+    tomb_of(t, k).and_then(|s| t.tomb_issued.get(s).copied())
 }
 
 /// Records that NOTAM `k` was cancelled or replaced by a notice issued at `issued_ms`, to be kept
@@ -433,10 +455,19 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
     };
     if ntype == TYPE_CANCEL {
         let hit = target.as_ref().and_then(|k| fns_slot_of(t, k));
+        let cancel_issued = issued_of(n, i, &r);
         if let Some(k) = target {
             let until = tomb_until(t, hit, now_ns);
-            tomb_put(t, k, issued_of(n, i, &r), until);
+            tomb_put(t, k, cancel_issued, until);
         }
+        // A held version issued after the cancellation is not the one it cancels.
+        let hit = match hit {
+            Some(s) if issued_after(t, s, cancel_issued) => {
+                t.stats.cancel_stale += 1;
+                return FnsApplied::OutOfOrder;
+            }
+            other => other,
+        };
         return match hit {
             Some(s) => {
                 remove(t, s);
@@ -513,6 +544,12 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
     store(t, s, n, i, now_ns, ntype);
     t.stats.applied += 1;
     out
+}
+
+/// Whether the NOTAM in slot `s` was issued after `at_ms`; false when either time is absent.
+fn issued_after(t: &FnsTable, s: usize, at_ms: i64) -> bool {
+    let held = t.times.get(s).map_or(FNS_NO_TIME, |x| x[0]);
+    held != FNS_NO_TIME && at_ms != FNS_NO_TIME && held > at_ms
 }
 
 /// The `issued` time of row `i`, or [`FNS_NO_TIME`] when absent or malformed.
@@ -663,7 +700,16 @@ fn store(t: &mut FnsTable, s: usize, n: &Notams, i: usize, now_ns: i64, ntype: u
     let cover = if verts == 0 {
         None
     } else {
-        lon_cover(polygons_of(n, i).map(|p| polygon_vertices(n, p).1))
+        let mut work = CoverWork::default();
+        let c = lon_cover(
+            polygons_of(n, i).map(|p| polygon_vertices(n, p).1),
+            &mut t.cover_buf,
+            &mut work,
+        );
+        if work.widened {
+            t.stats.cover_widened += 1;
+        }
+        c
     };
     set(&mut t.polys, s, [polys, verts]);
     set(
@@ -679,11 +725,26 @@ fn store(t: &mut FnsTable, s: usize, n: &Notams, i: usize, now_ns: i64, ntype: u
 /// One turn, 1e-7 degree.
 const TURN_E7: i64 = 3_600_000_000;
 
+/// Work done by [`lon_cover`], for the tests and the table's totals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CoverWork {
+    /// Vertices read, plus probes of the binary search.
+    visits: u64,
+    /// The cover was too wide to sort in the buffer and was widened to the whole circle.
+    widened: bool,
+}
+
 /// The smallest longitude interval covering every longitude in `rings`, as (west, east) in
 /// 1e-7 degree within [-180, 180] degrees. When it runs through 180 degrees, `west` is larger
 /// than `east` (the interval goes east from `west` over the antimeridian to `east`); otherwise
-/// `west <= east`. `None` when there is no longitude.
-fn lon_cover<'a>(rings: impl Iterator<Item = &'a [i32]> + Clone) -> Option<(i32, i32)> {
+/// `west <= east`. `None` when there is no longitude. A cover over half a turn is found from the
+/// sorted longitudes, in `buf` (no allocation); more vertices than `buf` holds give the whole
+/// circle and set `work.widened`.
+fn lon_cover<'a>(
+    rings: impl Iterator<Item = &'a [i32]> + Clone,
+    buf: &mut [i64],
+    work: &mut CoverWork,
+) -> Option<(i32, i32)> {
     let reference = i64::from(*rings.clone().find_map(|r| r.first())?);
     // Longitudes placed within half a turn of the first one.
     let unwrap = |l: i32| {
@@ -698,19 +759,50 @@ fn lon_cover<'a>(rings: impl Iterator<Item = &'a [i32]> + Clone) -> Option<(i32,
         (lo, hi)
     } else {
         // Wide: the cover is the whole circle less the largest gap between neighbours.
-        let mut gap = (-1i64, lo, hi);
-        for v in all().map(i64::from) {
-            let next = all()
-                .map(i64::from)
-                .map(|w| (w - v).rem_euclid(TURN_E7))
-                .filter(|&d| d > 0)
-                .min();
-            if let Some(d) = next {
-                if d > gap.0 {
-                    gap = (d, v + d, v);
+        let mut n = 0usize;
+        for v in all() {
+            work.visits += 1;
+            match buf.get_mut(n) {
+                Some(b) => *b = i64::from(v),
+                None => {
+                    work.widened = true;
+                    return Some((-1_800_000_000, 1_800_000_000));
                 }
             }
+            n += 1;
         }
+        let sorted = buf.get_mut(..n)?;
+        sorted.sort_unstable();
+        let sorted: &[i64] = sorted;
+        // The gap above `x` to the next larger longitude, wrapping from the largest to the smallest.
+        let first = *sorted.first()?;
+        let above = |x: i64, probes: &mut u64| {
+            let k = sorted.partition_point(|&y| {
+                *probes += 1;
+                y <= x
+            });
+            match sorted.get(k) {
+                Some(&y) => y - x,
+                None => first + TURN_E7 - x,
+            }
+        };
+        let mut probes = 0u64;
+        let mut widest = 0i64;
+        for &x in sorted.iter() {
+            work.visits += 1;
+            widest = widest.max(above(x, &mut probes));
+        }
+        // The first vertex in ring order with that gap, as the pairwise method took it.
+        let mut gap = (-1i64, lo, hi);
+        for v in all().map(i64::from) {
+            work.visits += 1;
+            let d = above(v, &mut probes);
+            if d == widest {
+                gap = (d, v + d, v);
+                break;
+            }
+        }
+        work.visits += probes;
         (gap.1, gap.2)
     };
     let fold = |x: i64| {
@@ -948,6 +1040,11 @@ pub fn fns_hash_into(h: &mut Sha256, t: &FnsTable) {
             put(h, &t.tomb_seq.get(s).copied().unwrap_or(0).to_le_bytes());
         }
     }
+    if st.cancel_stale + st.cover_widened > 0 {
+        put(h, FNS_STALE_CANCEL_TAG);
+        put(h, &st.cancel_stale.to_le_bytes());
+        put(h, &st.cover_widened.to_le_bytes());
+    }
     if fns_stale_count(t) > 0 {
         stale_hash_into(h, &t.stale, order.iter().map(|&(_, s)| s));
     }
@@ -990,6 +1087,12 @@ pub fn fns_ceiling_unlimited(t: &FnsTable, s: usize) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -998,7 +1101,14 @@ mod tests {
     // REQ: OA-RPL-052
     #[test]
     fn the_longitude_cover_is_the_smallest_interval_and_wraps_over_the_antimeridian() {
-        let cover = |a: &[i32]| lon_cover(core::iter::once(a));
+        let buf = vec![0i64; 64];
+        let cover = |a: &[i32]| {
+            lon_cover(
+                core::iter::once(a),
+                &mut buf.clone(),
+                &mut CoverWork::default(),
+            )
+        };
         let d = |x: i32| x * DEG;
         assert_eq!(cover(&[d(-90), d(-87)]), Some((d(-90), d(-87))));
         assert_eq!(cover(&[d(179), d(-179)]), Some((d(179), d(-179))));
@@ -1006,5 +1116,128 @@ mod tests {
         // 200 degrees wide, so the interval is found from the gaps: 10 east to 150 west.
         assert_eq!(cover(&[d(10), d(110), d(-150)]), Some((d(10), d(-150))));
         assert_eq!(cover(&[]), None);
+    }
+
+    /// The pairwise method the sorted one replaced: for every vertex, the next larger longitude
+    /// round the circle, by a scan of every vertex. Returns the cover and the comparisons made.
+    fn pairwise_cover(rings: &[&[i32]]) -> (Option<(i32, i32)>, u64) {
+        let reference = i64::from(*rings.iter().find_map(|r| r.first()).unwrap());
+        let unwrap = |l: i32| {
+            reference + (i64::from(l) - reference + TURN_E7 / 2).rem_euclid(TURN_E7) - TURN_E7 / 2
+        };
+        let all = || rings.iter().flat_map(|r| r.iter().copied());
+        let lo = all().map(unwrap).min().unwrap();
+        let hi = all().map(unwrap).max().unwrap();
+        let mut compared = 0u64;
+        let (west, east) = if hi - lo <= TURN_E7 / 2 {
+            (lo, hi)
+        } else {
+            let mut gap = (-1i64, lo, hi);
+            for v in all().map(i64::from) {
+                let next = all()
+                    .map(i64::from)
+                    .inspect(|_| compared += 1)
+                    .map(|w| (w - v).rem_euclid(TURN_E7))
+                    .filter(|&d| d > 0)
+                    .min();
+                if let Some(d) = next {
+                    if d > gap.0 {
+                        gap = (d, v + d, v);
+                    }
+                }
+            }
+            (gap.1, gap.2)
+        };
+        let fold = |x: i64| {
+            let x = if x > TURN_E7 / 2 {
+                x - TURN_E7
+            } else if x < -TURN_E7 / 2 {
+                x + TURN_E7
+            } else {
+                x
+            };
+            i32::try_from(x).ok()
+        };
+        (Some((fold(west).unwrap(), fold(east).unwrap())), compared)
+    }
+
+    // REQ: OA-RPL-272
+    #[test]
+    fn the_sorted_longitude_cover_equals_the_pairwise_one_on_random_polygons() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut buf = vec![0i64; 64];
+        let mut wide = 0;
+        for _ in 0..4000 {
+            let rings: Vec<Vec<i32>> = (0..1 + next() % 3)
+                .map(|_| {
+                    (0..1 + next() % 6)
+                        .map(|_| {
+                            // Few distinct values, so ties between gaps occur, over the whole circle.
+                            let k = (next() % 12) as i32;
+                            (k * 30 - 180) * DEG + (next() % 3) as i32 * DEG / 7
+                        })
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[i32]> = rings.iter().map(Vec::as_slice).collect();
+            let want = pairwise_cover(&refs).0;
+            let got = lon_cover(refs.iter().copied(), &mut buf, &mut CoverWork::default());
+            let (lo, hi) = refs
+                .iter()
+                .flat_map(|r| r.iter())
+                .fold((i32::MAX, i32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+            if i64::from(hi) - i64::from(lo) > TURN_E7 / 2 {
+                wide += 1;
+            }
+            // Narrow covers are the same code; the wide ones are the point.
+            assert_eq!(got, want, "{refs:?}");
+        }
+        assert!(wide > 500, "{wide} wide cases");
+    }
+
+    // REQ: OA-RPL-272
+    #[test]
+    fn the_longitude_cover_of_four_big_rings_takes_near_linearithmic_work() {
+        // Four rings of 4,095 vertices alternating between two far-apart longitudes round the
+        // circle, so the cover is wide: the pairwise method compared about 268 million pairs.
+        let ring = |off: i32| -> Vec<i32> {
+            (0..4095)
+                .map(|k| ((k * 7919) % 3_600_000 - 1_800_000) * 1000 + off)
+                .collect()
+        };
+        let rings = [ring(0), ring(1), ring(2), ring(3)];
+        let refs: Vec<&[i32]> = rings.iter().map(Vec::as_slice).collect();
+        let n = 4 * 4095u64;
+        let mut buf = vec![0i64; FNS_COVER_VERTICES];
+        let mut work = CoverWork::default();
+        let got = lon_cover(refs.iter().copied(), &mut buf, &mut work);
+        let (want, compared) = pairwise_cover(&refs);
+        assert_eq!(got, want);
+        assert_eq!(compared, n * n);
+        // Linear passes (3 n) plus two binary searches per vertex (2 n log2 n).
+        let bound = 3 * n + 2 * n * (64 - n.leading_zeros() as u64);
+        assert!(
+            work.visits <= bound,
+            "{} visits, bound {bound}",
+            work.visits
+        );
+        assert!(
+            work.visits * 100 < compared,
+            "{} vs {compared}",
+            work.visits
+        );
+        assert!(!work.widened);
+        // More vertices than the buffer holds: the whole circle, counted.
+        let mut small = vec![0i64; 100];
+        let mut w2 = CoverWork::default();
+        let c = lon_cover(refs.iter().copied(), &mut small, &mut w2);
+        assert_eq!(c, Some((-1_800_000_000, 1_800_000_000)));
+        assert!(w2.widened);
     }
 }

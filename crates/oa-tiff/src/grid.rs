@@ -9,7 +9,10 @@
 //! for the small buffers they are used for; a polygon spanning more than 180 degrees of
 //! longitude is refused (it would cross the antimeridian).
 
-use crate::{MAX_POLYGON_VERTICES, MAX_QUERY_SAMPLES, MAX_RADIUS_NM, MAX_TILES, METRES_PER_NM};
+use crate::{
+    MAX_POLYGON_VERTICES, MAX_QUERY_SAMPLES, MAX_QUERY_WORK, MAX_RADIUS_NM, MAX_TILES,
+    METRES_PER_NM,
+};
 
 const EARTH_RADIUS_M: f64 = 6_371_008.8;
 /// Tolerance for a point sitting on the edge of a grid, in fractions of a pixel.
@@ -306,9 +309,15 @@ struct Acc {
     peak: Option<Peak>,
     samples: u64,
     nodata: u64,
+    /// Cost of one `inside` call beyond a constant (the polygon vertices; 0 for a constant-cost
+    /// test).
+    per_cell: u64,
+    /// Cell tests so far, each weighted by `per_cell`.
+    work: f64,
 }
 
-/// Visits every node of `g` inside the bounding box that `inside` accepts.
+/// Visits every node of `g` inside the bounding box that `inside` accepts. The cell tests, each
+/// weighted by `acc.per_cell`, are held to [`MAX_QUERY_WORK`] before any cell is visited.
 fn scan(
     g: &Grid,
     lat_lo: f64,
@@ -332,6 +341,12 @@ fn scan(
     let cells = (col_hi - col_lo + 1.0) * (row_hi - row_lo + 1.0);
     if (acc.samples + acc.nodata) as f64 + cells > MAX_QUERY_SAMPLES as f64 {
         return Err(QueryError::TooManySamples);
+    }
+    if acc.per_cell > 0 {
+        acc.work += cells * acc.per_cell as f64;
+        if acc.work > MAX_QUERY_WORK as f64 {
+            return Err(QueryError::TooMuchWork);
+        }
     }
     for r in row_lo as u32..=row_hi as u32 {
         let lat = g.lat0 - f64::from(r) * g.dlat;
@@ -423,6 +438,8 @@ fn max_in_radius(
         peak: None,
         samples: 0,
         nodata: 0,
+        per_cell: 0,
+        work: 0.0,
     };
     for g in tiles {
         scan(g, la0, la1, lo0, lo1, &inside, &mut acc)?;
@@ -504,6 +521,8 @@ fn max_in_polygon(tiles: &[Grid], poly: &[(f64, f64)]) -> Result<MaxQuery, Query
         peak: None,
         samples: 0,
         nodata: 0,
+        per_cell: poly.len() as u64,
+        work: 0.0,
     };
     for g in tiles {
         scan(g, la0, la1, lo0, lo1, &inside, &mut acc)?;

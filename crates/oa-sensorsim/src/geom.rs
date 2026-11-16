@@ -171,7 +171,7 @@ mod tests {
         // Due north by 0.1 degree of latitude: about 11.1 km at azimuth 0.
         let (r, az) = polar_of(&f, 41.1, -88.0, 0.0);
         assert!((r - 11_100.0).abs() < 30.0, "{r}");
-        assert!(az < 1e-6 || az > 360.0 - 1e-6, "{az}");
+        assert!(!(1e-6..=360.0 - 1e-6).contains(&az), "{az}");
         let (_, az) = polar_of(&f, 41.0, -87.9, 0.0);
         assert!((az - 90.0).abs() < 0.1, "{az}");
         // Straight up 1000 m: range 1000.
