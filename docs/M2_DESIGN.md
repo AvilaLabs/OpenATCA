@@ -139,7 +139,7 @@ cruise, descent from the truth vertical rate), altitude band and coast indicator
 | T1 | Cross-track position error | ERAM TH position vs truth at ERAM position time |
 | T2 | Along-track error, raw and offset-corrected | same |
 | T3 | Speed error and heading error | ERAM track velocity vs truth velocity |
-| T4 | Altitude error | ERAM reported altitude vs truth barometric altitude |
+| T4 | Altitude error | ERAM reported altitude vs truth on ERAM's reference: pressure altitude at or above 18,000 ft, altimeter-corrected altitude below (see Altitude reference) |
 | T5 | Publication interval per flight | consecutive TH position times |
 | T6 | Staleness | receive time minus position time (UK-004) |
 | T7 | Presence | fraction of truth flight-time inside ZAU with an ERAM position within 30 s |
@@ -168,6 +168,21 @@ barometric altitude within 200 ft of the field elevation. A truth leg that start
 threshold with no barometric altitude (coverage that simply begins or ends there) is not a
 landing or takeoff; the estimate is excluded and counted as "altitude unknown, ground not
 confirmed".
+
+**Altitude reference for T4.** ADS-B barometric altitude is pressure altitude, referenced to
+29.92 inHg. Below the transition altitude (18,000 ft in the United States) ERAM reports altitude
+set with the local altimeter setting, so the two differ by the altimeter correction, about 1,000 ft
+per inHg: on 2026-11-15 the Chicago setting was near 30.39 inHg and an uncorrected comparison put
+ERAM about 400 ft high below 18,000 ft and within 30 ft above it. A reported value at or above
+18,000 ft is treated as a flight level and compared with truth pressure altitude as it is. A lower
+value is treated as an altitude: the truth is brought to indicated altitude with pressure altitude
+plus (setting minus 29.92) times 1,000 ft, the relation F3 also uses. The setting is that of the
+nearest METAR station by position with a setting within 60 minutes, and of its reports the one
+nearest in time; settings outside 27 to 32 inHg are not used. A pair with no such setting is
+excluded under "no altimeter setting", never compared uncorrected. The SFDPS feed gives altitudes
+in feet without saying whether ERAM meant a flight level, so the 18,000 ft threshold decides, and
+the lowest-usable-flight-level adjustment on low-pressure days is not modelled; the report gives
+the number of pairs on each side and the mean correction applied.
 
 **Takeoff for T8.** A takeoff is observed, never inferred from altitude. Each ADS-B report of the
 leg's aircraft within the leg's span states ground (the report carries the on-ground flag),
