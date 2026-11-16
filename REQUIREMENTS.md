@@ -2727,9 +2727,9 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-116** A handoff crossing time is given only where the truth is available and definite at every probe of
   the search and on both sides of the bracket; a crossing that may lie inside a gap in the truth is excluded and
   counted as "crossing inside a truth gap". Without a gap it is located to 1 s.
-- **OA-BENCH-117** T8 is the time of the first associated position of the leg minus the zone entry. A value of zero
-  or less is not a delay: it is counted as `established_before_entry` and left out of the distribution; a pop-up
-  20 s after entry gives 20 s.
+- **OA-BENCH-117** T8 is the time of the first associated position of the leg minus the zone entry, or, for a leg
+  that starts inside the zone, minus its observed takeoff (OA-BENCH-125). A value of zero or less is not a delay: it
+  is counted as `established_before_entry` and left out of the distribution; a pop-up 20 s after entry gives 20 s.
 - **OA-BENCH-118** `legacy_from_track_samples_by_leg` makes one flight per truth leg of an address (a row goes
   to the latest leg of its address starting at or before its time), so the publication interval (T5) is never
   taken between two trips of one aircraft.

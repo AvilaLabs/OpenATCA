@@ -143,7 +143,7 @@ cruise, descent from the truth vertical rate), altitude band and coast indicator
 | T5 | Publication interval per flight | consecutive TH position times |
 | T6 | Staleness | receive time minus position time (UK-004) |
 | T7 | Presence | fraction of truth flight-time inside ZAU with an ERAM position within 30 s |
-| T8 | Initiation delay | first ERAM position of the truth leg minus its entry into ZAU or takeoff; a track already present at or before entry is counted as established before entry, not scored |
+| T8 | Initiation delay | first ERAM position of the truth leg minus its entry into ZAU, or minus its observed takeoff for a leg that starts inside ZAU (see Takeoff for T8); a track already present at or before entry is counted as established before entry, not scored |
 | T9 | Association errors | ERAM position closer to another aircraft's truth than to its own for 3+ consecutive samples |
 | F1 | Meter-fix time error | TBFM estimate vs truth crossing time, by look-ahead in 5-minute bins to 60 min |
 | F2 | Schedule delivery | TBFM scheduled time vs truth crossing time |
@@ -168,6 +168,25 @@ barometric altitude within 200 ft of the field elevation. A truth leg that start
 threshold with no barometric altitude (coverage that simply begins or ends there) is not a
 landing or takeoff; the estimate is excluded and counted as "altitude unknown, ground not
 confirmed".
+
+**Takeoff for T8.** A takeoff is observed, never inferred from altitude. Each ADS-B report of the
+leg's aircraft within the leg's span states ground (the report carries the on-ground flag),
+airborne (no ground flag and a barometric or geometric altitude), or nothing. Reports the truth
+builder removed still count, because the ground state does not depend on position quality. If a
+ground report is followed by an airborne one, the takeoff time is the first airborne report and
+the gap back to the last ground report is its uncertainty: the true takeoff lies in that gap, so a
+delay measured from it is a lower bound by at most the gap, and the report gives the largest gap
+among the measured takeoffs. A leg that starts inside ZAU is measured from its takeoff only if it
+has one and the truth at that instant is inside the zone. Every other leg that starts inside ZAU
+is excluded and counted under its reason: first seen airborne in the zone, never airborne, or no
+ground report. On the 2026-11-13 ZAU clip, 534 of 1,222 legs start inside the zone. 21 of them
+have an observed takeoff (gaps 0.5 s to 80 s, median about 2 s), 470 are first seen airborne and 43
+never leave the ground. The earlier rule (first altitude at or below 2,000 ft) called 234 of those
+legs takeoffs; most were aircraft first seen airborne at low altitude, whose delay it would have
+measured from the wrong instant. The T8 cohort for departures is therefore small and limited by
+surface coverage of the ADS-B receivers, and the report states its size. This definition is for
+T8 only. F3 compares TFMS estimates with a takeoff found at a runway threshold (Ground evidence,
+below), because it needs the departure airport as well as the time.
 
 **Fix names and routes.** An identifier that names more than one place in the model is never
 resolved by row order. A meter fix with several places is the one inside the zone when exactly one
