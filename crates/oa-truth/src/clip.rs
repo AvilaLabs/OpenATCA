@@ -48,6 +48,17 @@ impl std::fmt::Display for ClipError {
     }
 }
 
+/// The running row count after a frame claiming `claimed` rows: `Ok` while it stays at or under
+/// `max_rows`, `Err` with the count that crossed it otherwise. Saturating, so it cannot wrap.
+fn claim_rows(rows: u64, claimed: u32, max_rows: u64) -> Result<u64, u64> {
+    let total = rows.saturating_add(u64::from(claimed));
+    if total > max_rows {
+        Err(total)
+    } else {
+        Ok(total)
+    }
+}
+
 /// Reads every ADS-B payload frame of an OAF1 file into one set of reports. Returns the reports
 /// the number of frames that did not decode and the number of records dropped from frames that
 /// did (a bad record does not refuse its frame). A file over `max_bytes` is refused unread; a
@@ -79,11 +90,13 @@ pub fn read_clip(
                 .payload
                 .get(8..12)
                 .and_then(|b| <[u8; 4]>::try_from(b).ok())
-                .map_or(0, |b| u64::from(u32::from_le_bytes(b)));
-            rows = rows.saturating_add(claimed);
-            if rows > max_rows {
-                over = Some(rows);
-                return;
+                .map_or(0, u32::from_le_bytes);
+            match claim_rows(rows, claimed, max_rows) {
+                Ok(total) => rows = total,
+                Err(total) => {
+                    over = Some(total);
+                    return;
+                }
             }
             match decode_payload_lenient(fr.payload, &mut out) {
                 Ok(c) => dropped += c.dropped as u64,
@@ -155,5 +168,51 @@ mod tests {
         );
         // At the cap it is read.
         assert!(read_clip(&path, len, 1000).is_ok());
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    use super::*;
+
+    // REQ: OA-TRUTH-046
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn clip_row_count_refuses_exactly_when_the_total_crosses_the_cap() {
+        let max_rows: u64 = kani::any();
+        let mut rows = 0u64;
+        // The exact total, which three u32 claims cannot overflow.
+        let mut exact = 0u64;
+        for _ in 0..3 {
+            let claimed: u32 = kani::any();
+            exact += u64::from(claimed);
+            match claim_rows(rows, claimed, max_rows) {
+                Ok(total) => {
+                    assert!(exact <= max_rows);
+                    assert_eq!(total, exact);
+                    rows = total;
+                }
+                Err(total) => {
+                    assert!(exact > max_rows);
+                    assert_eq!(total, exact);
+                    // The reader stops at the first refusal.
+                    break;
+                }
+            }
+        }
+    }
+
+    // REQ: OA-TRUTH-046
+    #[kani::proof]
+    fn clip_claim_rows_is_total() {
+        // Any running count, including one at the top of the range.
+        let rows: u64 = kani::any();
+        let claimed: u32 = kani::any();
+        let max_rows: u64 = kani::any();
+        match claim_rows(rows, claimed, max_rows) {
+            Ok(t) => assert!(t <= max_rows && t >= rows),
+            Err(t) => assert!(t > max_rows && t >= rows),
+        }
     }
 }

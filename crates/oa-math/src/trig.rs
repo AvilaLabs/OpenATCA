@@ -349,6 +349,12 @@ fn part(ayh: f64, ayl: f64) -> Part {
     Part { j, b, sinb_l, c2 }
 }
 
+/// `x` with the low 27 bits of its mantissa cleared.
+#[inline]
+fn cut27(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & !0x7ff_ffff)
+}
+
 /// Exact product up to 2^-78 relative: `hi + lo == a * b`, `hi = fl(a * b)`, the operands split
 /// by clearing the low 27 mantissa bits (pieces of 26 and at most 27 bits, so all but the last
 /// partial product are exact; the last is rounded, below 2^-107 relative, and the sums of
@@ -356,8 +362,8 @@ fn part(ayh: f64, ayl: f64) -> Part {
 #[inline]
 pub(crate) fn two_prod_cut(a: f64, b: f64) -> Dd {
     let p = a * b;
-    let ah = f64::from_bits(a.to_bits() & !0x7ff_ffff);
-    let bh = f64::from_bits(b.to_bits() & !0x7ff_ffff);
+    let ah = cut27(a);
+    let bh = cut27(b);
     let (al, bl) = (a - ah, b - bh);
     let err = (((ah * bh - p) + ah * bl) + al * bh) + al * bl;
     dd(p, err)
@@ -510,5 +516,95 @@ pub fn tan(x: f64) -> f64 {
     match tan_fast(x) {
         Some(r) => r,
         None => tan_slow(x),
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    use super::*;
+
+    // REQ: OA-MATH-030
+    #[kani::proof]
+    fn quadrant_signs_follow_the_quadrant_table() {
+        let n: u64 = kani::any();
+        let neg_y: u64 = kani::any();
+        let neg_x: u64 = kani::any();
+        kani::assume(n < 4 && neg_y < 2 && neg_x < 2);
+        // The quadrants 0 to 3: sin is negative for y, never, not y, always; cos is the sine of
+        // the next quadrant.
+        let sin_neg = match n {
+            0 => neg_y == 1,
+            1 => false,
+            2 => neg_y == 0,
+            _ => true,
+        };
+        let cos_neg = match n {
+            0 => false,
+            1 => neg_y == 0,
+            2 => true,
+            _ => neg_y == 1,
+        };
+        assert_eq!(
+            sin_sign(n, neg_y, neg_x),
+            u64::from(sin_neg != (neg_x == 1))
+        );
+        assert_eq!(cos_sign(n, neg_y), u64::from(cos_neg));
+    }
+
+    /// `v` rounded to an integer, ties to even, by integer arithmetic on the truncation.
+    fn round_half_even(v: f64) -> i64 {
+        let t = v as i64;
+        let frac = v - t as f64;
+        if frac > 0.5 {
+            t + 1
+        } else if frac < -0.5 {
+            t - 1
+        } else if frac == 0.5 {
+            t + (t & 1)
+        } else if frac == -0.5 {
+            t - (t & 1)
+        } else {
+            t
+        }
+    }
+
+    // REQ: OA-MATH-031
+    #[kani::proof]
+    fn magic_number_rounds_half_even() {
+        let v: f64 = kani::any();
+        kani::assume(!v.is_nan() && v > -2_251_799_813_685_248.0 && v < 2_251_799_813_685_248.0);
+        let t = v + ROUND_MAGIC;
+        let want = round_half_even(v);
+        // The integer in the low bits, as `reduce_fast` and the other fast paths read it.
+        assert_eq!(magic_int(t) as i64, want);
+        // And the float they subtract back out.
+        assert_eq!(t - ROUND_MAGIC, want as f64);
+    }
+
+    // REQ: OA-MATH-032
+    #[kani::proof]
+    fn cut_split_halves_are_exact_and_short() {
+        let a: f64 = kani::any();
+        let bits = a.to_bits();
+        // Normal numbers whose low part (units of 2^(e-52), at least 2^-1022) is normal too.
+        let e = (bits >> 52) & 0x7ff;
+        kani::assume(e >= 53 && e < 0x7ff);
+        let m = (bits & 0x000f_ffff_ffff_ffff) | (1 << 52);
+        let ah = cut27(a);
+        let al = a - ah;
+        // The unit of the mantissa's last bit, an exact power of two.
+        let unit = f64::from_bits((e - 52) << 52);
+        let neg = if bits >> 63 == 1 { -1.0 } else { 1.0 };
+        let hi_m = m >> 27;
+        let lo_m = m & 0x7ff_ffff;
+        // The halves are the high and the low bits of the mantissa, each exact in a double.
+        assert_eq!(ah, neg * (hi_m << 27) as f64 * unit);
+        assert_eq!(al, neg * lo_m as f64 * unit);
+        // Pieces of 26 bits (the high one) and 27 bits (the low one) at most.
+        assert!(hi_m < 1 << 26);
+        assert!(lo_m < 1 << 27);
+        // They sum to the input.
+        assert_eq!((hi_m << 27) + lo_m, m);
     }
 }

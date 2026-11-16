@@ -199,3 +199,154 @@ impl<K: TableKey, V: Copy> FixedMap<K, V> {
         self.slots.iter().flatten().map(|(k, v)| (k, v))
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
+    use super::*;
+
+    /// The hash, replaced for the proofs by the identity: the table's logic reads a key only
+    /// through equality and its home slot, and with free keys every assignment of homes is
+    /// reachable already, so the 64-bit multiplications of the real mixer add cost and no case.
+    fn mix_identity(x: u64) -> u64 {
+        x
+    }
+
+    /// The reference: the held (key, value) pairs in no particular order, at most `OPS`.
+    struct Model<const OPS: usize> {
+        e: [Option<(u32, u8)>; OPS],
+        refused: u64,
+    }
+
+    impl<const OPS: usize> Model<OPS> {
+        fn pos(&self, k: u32) -> Option<usize> {
+            for i in 0..OPS {
+                if let Some((key, _)) = self.e[i] {
+                    if key == k {
+                        return Some(i);
+                    }
+                }
+            }
+            None
+        }
+        fn count(&self) -> usize {
+            let mut c = 0;
+            for i in 0..OPS {
+                if self.e[i].is_some() {
+                    c += 1;
+                }
+            }
+            c
+        }
+    }
+
+    /// The keep predicate of a retain: a function of the pair, chosen by `mask`.
+    fn keeps(mask: u8, k: u32, v: u8) -> bool {
+        (mask >> ((k ^ u32::from(v)) & 7)) & 1 == 1
+    }
+
+    /// `OPS` symbolic operations on a table of `CAP` slots, checked against the reference after
+    /// each.
+    fn run<const CAP: usize, const OPS: usize>() {
+        let mut m: FixedMap<u32, u8> = FixedMap::new(CAP);
+        let mut r: Model<OPS> = Model {
+            e: [None; OPS],
+            refused: 0,
+        };
+        for _ in 0..OPS {
+            let op: u8 = kani::any();
+            kani::assume(op < 4);
+            let k: u32 = kani::any();
+            let v: u8 = kani::any();
+            let mask: u8 = kani::any();
+            match op {
+                0 => {
+                    let was_new = r.pos(k).is_none();
+                    let full = r.count() >= CAP;
+                    let ok = m.insert(k, v);
+                    // Refused exactly when the key is new and the table is full.
+                    assert_eq!(ok, !(was_new && full));
+                    if ok {
+                        match r.pos(k) {
+                            Some(i) => r.e[i] = Some((k, v)),
+                            None => {
+                                let mut placed = false;
+                                for i in 0..OPS {
+                                    if !placed && r.e[i].is_none() {
+                                        r.e[i] = Some((k, v));
+                                        placed = true;
+                                    }
+                                }
+                                assert!(placed);
+                            }
+                        }
+                    } else {
+                        r.refused += 1;
+                    }
+                }
+                1 => {
+                    let want = r.pos(k).and_then(|i| r.e[i]).map(|(_, x)| x);
+                    assert_eq!(m.get(&k).copied(), want);
+                    assert_eq!(m.contains_key(&k), want.is_some());
+                }
+                2 => {
+                    let want = r.pos(k).and_then(|i| r.e[i]).map(|(_, x)| x);
+                    assert_eq!(m.remove(&k), want);
+                    if let Some(i) = r.pos(k) {
+                        r.e[i] = None;
+                    }
+                }
+                _ => {
+                    m.retain(|key, val| keeps(mask, *key, *val));
+                    for i in 0..OPS {
+                        if let Some((key, val)) = r.e[i] {
+                            if !keeps(mask, key, val) {
+                                r.e[i] = None;
+                            }
+                        }
+                    }
+                }
+            }
+            // The invariants after every operation.
+            assert_eq!(m.len(), r.count());
+            assert_eq!(m.is_empty(), r.count() == 0);
+            assert_eq!(m.refused(), r.refused);
+            assert_eq!(m.capacity(), CAP);
+            // No key lost: every held pair is found with its value.
+            for i in 0..OPS {
+                if let Some((key, val)) = r.e[i] {
+                    assert_eq!(m.get(&key).copied(), Some(val));
+                }
+            }
+            // No key duplicated or invented: the table holds exactly `len` pairs, each in the
+            // reference, and no two equal.
+            let mut seen = 0;
+            let mut keys = [0u32; CAP];
+            for (key, val) in m.iter() {
+                assert!(seen < CAP);
+                for j in 0..seen {
+                    assert!(keys[j] != *key);
+                }
+                keys[seen] = *key;
+                seen += 1;
+                let i = r.pos(*key);
+                assert!(i.is_some());
+                assert_eq!(r.e[i.unwrap_or(0)], Some((*key, *val)));
+            }
+            assert_eq!(seen, m.len());
+            // A probe key: absent from the reference means absent from the table.
+            let probe: u32 = kani::any();
+            assert_eq!(m.contains_key(&probe), r.pos(probe).is_some());
+        }
+    }
+
+    // REQ: OA-TRK-303
+    #[kani::proof]
+    #[kani::unwind(7)]
+    #[kani::solver(cadical)]
+    #[kani::stub(mix, mix_identity)]
+    fn fixed_map_agrees_with_a_reference_model_2_slots() {
+        // Two slots, four operations: a refusal, wrap-around and a shift back are reachable.
+        run::<2, 4>();
+    }
+}
