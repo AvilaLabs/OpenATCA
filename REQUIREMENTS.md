@@ -3162,6 +3162,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   its newest update is older than three of those intervals; a track no radar updated that recently keeps
   three of the configured expected interval (the longest scan period). The time to drop a track is
   unchanged.
+- **OA-TRK-303** A candidate takes no hit later than its window: a candidate whose first hit is more than the
+  initiation window of scans before a radar's plots of the bucket is expired before those plots are
+  offered to it, whether or not the radar delivered plots in the buckets between.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

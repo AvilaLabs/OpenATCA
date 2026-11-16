@@ -2134,6 +2134,18 @@ fn initiate(
     } else {
         NO_BIAS
     };
+    // A candidate older than its window by the time of this bucket's plots takes no hit, whether
+    // or not the radar delivered plots in the buckets between (the check below, after the hits,
+    // only runs in buckets that have plots). One more scan than the window is allowed: it is
+    // the age at which the check below would have removed it after the previous bucket.
+    if let Some(now) = plots.first().and_then(|p| scan_of(f, radar, p.time_ns)) {
+        let window = i64::from(f.cfg.init_n);
+        let before = f.cands.len();
+        f.cands.retain(|c| {
+            usize::from(c.radar) != radar || now.saturating_sub(c.first_scan) <= window
+        });
+        f.stats.cand_expired += (before - f.cands.len()) as u64;
+    }
     // Candidate plots: unassigned (not held, not refused).
     // The lists are the layer's, made at start: at most `plots.len()` (below `RADAR_PLOTS_MAX`)
     // plots and `MAX_CANDIDATES` candidates go in them.
@@ -4905,5 +4917,30 @@ mod tests {
             (36.0..37.5).contains(&cb),
             "en-route track coasted after {cb} s"
         );
+    }
+
+    // REQ: OA-TRK-303
+    #[test]
+    fn a_candidate_does_not_take_a_hit_after_its_window_when_the_radar_was_silent() {
+        // Two hits, five minutes without a plot, one more that the candidate's (very wide) gate
+        // would take: the first two are long out of their four scans, so no track results.
+        let lines = easting(&[Line {
+            x0: 30_000.0,
+            y0: 20_000.0,
+            vx: -20.0,
+            vy: 5.0,
+            alt_ft: 20_000,
+            label: 0xA00001,
+        }]);
+        let all = plots_of(&lines, 70, 3, false);
+        let plots: Vec<RadarPlot> = [0usize, 1, 63].iter().map(|&k| all[k]).collect();
+        assert!(plots[2].time_ns - plots[1].time_ns > 290 * NS_PER_S);
+        let mut f = make_fusion(|_| {});
+        run(&mut f, &plots, &[]);
+        let st = fusion_stats(&f);
+        assert_eq!(st.cand_confirmed, 0, "{st:?}");
+        assert!(fusion_radar_tracks(&f).is_empty());
+        assert_eq!(st.cand_expired, 1, "{st:?}");
+        assert_eq!(st.cand_started, 2, "{st:?}");
     }
 }
