@@ -11,8 +11,8 @@ use crate::{
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DROPPED, STATUS_PROPOSED,
 };
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes,
-    text_needs_decode, AttrIx, Doc, ElemIx, Ns, Span, SpanKind, TextIx,
+    attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, resolve_prefix,
+    span_bytes, text_needs_decode, AttrIx, Doc, ElemIx, Ns, Span, SpanKind, TextIx,
 };
 
 /// The bytes of a name or namespace span. Spans of a parsed `Doc` always lie inside its input; a
@@ -20,6 +20,12 @@ use oa_xml::{
 /// is unknown and nothing is decoded from it. Values use `span_bytes` and report the error.
 fn name_bytes(input: &[u8], sp: Span) -> &[u8] {
     span_bytes(input, sp).unwrap_or(&[])
+}
+
+/// The expanded bytes of a namespace URI span from `resolve_*_ns`; empty (matching nothing) if
+/// the span is outside the document.
+fn uri_bytes<'a>(doc: &Doc<'a>, sp: Span) -> &'a [u8] {
+    ns_uri_bytes(doc, sp).unwrap_or(&[])
 }
 
 const NS_NAS: &[u8] = b"http://www.faa.aero/nas/3.0";
@@ -601,7 +607,7 @@ impl Decoder {
         let root_ok = n > 0
             && name_bytes(input, doc.elem_name.first().copied().unwrap_or_default())
                 == b"MessageCollection"
-            && matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(u) if name_bytes(input, u) == NS_NAS);
+            && matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(u) if uri_bytes(doc, u) == NS_NAS);
         if !root_ok {
             self.stats.unsupported_roots = self.stats.unsupported_roots.saturating_add(1);
             return Err(FixmError::UnsupportedRoot);
@@ -609,7 +615,7 @@ impl Decoder {
         // Rows needed in the worst case: every message accepted.
         let mut messages = 0usize;
         for (i, p) in doc.elem_parent.iter().enumerate() {
-            if i > 0 && p.0 == 0 {
+            if i > 0 && p.0 == 0 && is_message_elem(doc, i) {
                 messages += 1;
             }
         }
@@ -715,13 +721,13 @@ impl Decoder {
             match ns {
                 Ns::None => {}
                 Ns::Xml => h = extend(h, b"{xml"),
-                Ns::Uri(u) => h = extend(extend(h, b"{"), name_bytes(doc.input, u)),
+                Ns::Uri(u) => h = extend(extend(h, b"{"), uri_bytes(doc, u)),
             }
             if let Some(x) = self.hash.get_mut(i) {
                 *x = h;
             }
             let known = if is_msg_level {
-                h == P_MESSAGE && ns == Ns::None
+                is_message_elem(doc, i)
             } else {
                 self.known_paths.binary_search(&h).is_ok()
             };
@@ -769,7 +775,7 @@ impl Decoder {
             if prefix.len > 0 {
                 let xsi = matches!(
                     resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
-                    Ns::Uri(u) if name_bytes(doc.input, u) == NS_XSI
+                    Ns::Uri(u) if uri_bytes(doc, u) == NS_XSI
                 );
                 if xsi && (nb == b"type" || nb == b"nil") {
                     continue;
@@ -1307,7 +1313,15 @@ impl Decoder {
     }
 }
 
-/// Whether `message` element `i` carries `xsi:type` `FlightMessageType` (any prefix).
+/// Whether element `i` (a child of the root) is a `message`: that local name in no namespace.
+/// The walk and the row-capacity preflight both use this, so they count the same messages.
+fn is_message_elem(doc: &Doc<'_>, i: usize) -> bool {
+    let name = doc.elem_name.get(i).copied().unwrap_or_default();
+    extend(SEED, name_bytes(doc.input, name)) == P_MESSAGE
+        && resolve_elem_ns(doc, ElemIx(i as u32)) == Ns::None
+}
+
+/// Whether `message` element `i` carries `xsi:type` `FlightMessageType` resolved through the namespaces in scope (any prefix bound to the NAS namespace).
 fn is_flight_message(doc: &Doc<'_>, i: usize, buf: &mut [u8]) -> bool {
     for a in attr_range(doc, i) {
         let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
@@ -1317,7 +1331,7 @@ fn is_flight_message(doc: &Doc<'_>, i: usize, buf: &mut [u8]) -> bool {
         }
         let xsi = matches!(
             resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
-            Ns::Uri(u) if name_bytes(doc.input, u) == NS_XSI
+            Ns::Uri(u) if uri_bytes(doc, u) == NS_XSI
         );
         if !xsi {
             continue;
@@ -1327,8 +1341,16 @@ fn is_flight_message(doc: &Doc<'_>, i: usize, buf: &mut [u8]) -> bool {
         };
         let ent = attr_needs_decode(doc, AttrIx(a as u32));
         if let Raw::Val(v) = raw_bytes(doc.input, sp, ent, SpanKind::AttrValue, buf) {
-            let local = v.rsplit(|&b| b == b':').next().unwrap_or(v);
-            return local == b"FlightMessageType";
+            // A QName: the prefix means whatever is bound to it in scope at this element.
+            let (pre, local) = match v.iter().position(|&b| b == b':') {
+                Some(c) => (v.get(..c).unwrap_or(&[]), v.get(c + 1..).unwrap_or(&[])),
+                None => (&[][..], v),
+            };
+            return local == b"FlightMessageType"
+                && matches!(
+                    resolve_prefix(doc, ElemIx(i as u32), pre),
+                    Ns::Uri(u) if uri_bytes(doc, u) == NS_NAS
+                );
         }
         return false;
     }

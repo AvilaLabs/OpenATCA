@@ -1421,3 +1421,73 @@ fn every_pair_of_three_overlapping_sectors_is_reported_in_any_order() {
         }
     }
 }
+
+/// Real-chart visit counts are measured by the real-data suite; here, a chart built to be as
+/// expensive as the overlap cap allows.
+// REQ: OA-MVA-081
+#[test]
+fn overlap_cap_stops_the_painting() {
+    // 500 identical 6 x 6 degree sectors: 9 million cells each, 4.5 billion visits if every
+    // sector were painted after the overlap records ran out.
+    let secs: Vec<Fix> = (0..500)
+        .map(|k| Fix {
+            name: Box::leak(format!("S{k}").into_boxed_str()),
+            alt: 2500,
+            rings: vec![sq(0.0, 0.0, 6.0, 6.0)],
+        })
+        .collect();
+    let (m, _) = load("BIG_MVA_FUS3_2024", &secs).unwrap();
+    let (r, visits) = coverage::chart_coverage_budget(&m, 0, coverage::MAX_CELL_VISITS);
+    let e = r.unwrap_err();
+    assert!(e.contains("overlapping cell records"), "{e}");
+    assert!(
+        visits <= coverage::MAX_CELL_VISITS,
+        "{visits} visits for a refused chart"
+    );
+}
+
+// REQ: OA-MVA-081
+#[test]
+fn visit_budget_refuses_a_chart_below_the_overlap_cap() {
+    let secs: Vec<Fix> = (0..3)
+        .map(|k| Fix {
+            name: Box::leak(format!("S{k}").into_boxed_str()),
+            alt: 2500,
+            rings: vec![sq(0.0, 0.0, 0.5, 0.5)],
+        })
+        .collect();
+    let (m, _) = load("BUD_MVA_FUS3_2024", &secs).unwrap();
+    // Each sector is 250 x 250 = 62,500 cells.
+    let (ok, v) = coverage::chart_coverage_budget(&m, 0, 3 * 62_500);
+    assert!(ok.is_ok());
+    assert_eq!(v, 3 * 62_500);
+    let (r, v) = coverage::chart_coverage_budget(&m, 0, 100_000);
+    let e = r.unwrap_err();
+    assert!(e.contains("cell visits"), "{e}");
+    assert!(v <= 100_001, "{v}");
+}
+
+// REQ: OA-MVA-082
+#[test]
+fn escaped_namespace_uris_load_like_plain_ones() {
+    let plain = message(
+        "RFD_MVA_FUS3_2024",
+        MVA,
+        &[Fix {
+            name: "A",
+            alt: 2500,
+            rings: vec![sq(-88.5, 42.25, -88.0, 42.75)],
+        }],
+    );
+    let escaped = plain
+        .replace("schema/5.1\"", "schema/5&#46;1\"")
+        .replace("schema/5.1/message", "schema/5&#46;1/message")
+        .replace("gml/3.2", "gml/3&#46;2")
+        .replace("1999/xlink", "1999/x&#108;ink")
+        .replace("XMLSchema-instance", "XMLSchema&#45;instance");
+    assert_ne!(plain, escaped);
+    let (_, a) = load_xml(&plain);
+    let (m, b) = load_xml(&escaped);
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(sector_count(&m), 1);
+}

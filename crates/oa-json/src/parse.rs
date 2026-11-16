@@ -147,7 +147,6 @@ impl<'a> P<'a> {
 
     /// Parses a string starting at the opening quote; adds its node.
     fn string(&mut self) -> Result<(), JsonError> {
-        let open = self.pos;
         self.pos += 1;
         let start = self.pos;
         // Fast path: no escapes.
@@ -173,7 +172,8 @@ impl<'a> P<'a> {
             .pool
             .extend_from_slice(self.inp.get(start..self.pos).unwrap_or(&[]));
         loop {
-            if self.pos - open > self.lim.max_string_bytes {
+            // Raw content bytes (quotes excluded), as on the fast path.
+            if self.pos - start > self.lim.max_string_bytes {
                 return err(self.pos, ErrorKind::StringTooLong);
             }
             let Some(b) = self.peek() else {

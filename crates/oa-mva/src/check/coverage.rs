@@ -24,6 +24,12 @@ pub const COVERAGE_CELL_DEG: f64 = 0.002;
 pub const MAX_RASTER_CELLS: usize = 64_000_000;
 /// Most (cell, extra owner) records kept for one chart; past it the chart is refused.
 pub const MAX_OVERLAP_RECORDS: usize = 8_000_000;
+/// Most cell visits (calls of the paint callback, one per cell of each sector) for one chart.
+/// The overlap cap bounds records, not work: many identical sectors cost one visit per cell per
+/// sector. A chart's visits are its covered cells plus the repeats of overlap; the largest real
+/// chart (ZAU TAV) needs 6.95 million, and this is about 6 times that, which keeps a chart's
+/// rasterising to well under a second.
+pub const MAX_CELL_VISITS: u64 = 40_000_000;
 /// Most sectors that may cover one cell; past it the chart is refused.
 pub const MAX_OWNERS_PER_CELL: usize = 16;
 
@@ -119,8 +125,9 @@ struct Raster {
     ny: usize,
 }
 
-/// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`.
-fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, usize)) {
+/// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`, until it
+/// returns `false`, which stops the sector at once.
+fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, usize) -> bool) {
     let c = COVERAGE_CELL_DEG;
     let es = edges(m, s);
     let (ymin, ymax) = es.iter().fold((f64::MAX, f64::MIN), |(lo, hi), e| {
@@ -153,7 +160,9 @@ fn fill_sector(m: &Model, s: SectorIx, g: &Raster, paint: &mut dyn FnMut(usize, 
             let ia = (((xa - g.lon0) / c - 0.5).ceil().max(0.0)) as usize;
             let ib = ((((xb - g.lon0) / c - 0.5).ceil()).min(g.nx as f64).max(0.0)) as usize;
             for i in ia..ib {
-                paint(i, jmin + k);
+                if !paint(i, jmin + k) {
+                    return;
+                }
             }
         }
     }
@@ -188,6 +197,26 @@ fn cell_area_nm2(g: &Raster, j: usize) -> f64 {
 /// Coverage report of chart row `chart`. `Err` names why a chart was not rasterised (too many
 /// cells, or no such chart).
 pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String> {
+    chart_coverage_budget(m, chart, MAX_CELL_VISITS).0
+}
+
+/// [`chart_coverage`] with an explicit visit budget; also returns the cell visits spent.
+pub fn chart_coverage_budget(
+    m: &Model,
+    chart: usize,
+    budget: u64,
+) -> (Result<CoverageReport, String>, u64) {
+    let mut visits = 0u64;
+    let r = coverage_inner(m, chart, budget, &mut visits);
+    (r, visits)
+}
+
+fn coverage_inner(
+    m: &Model,
+    chart: usize,
+    budget: u64,
+    visits: &mut u64,
+) -> Result<CoverageReport, String> {
     if chart >= chart_count(m) {
         return Err(format!("no chart {chart}"));
     }
@@ -233,11 +262,17 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
     let mut extra: Vec<(u32, u16)> =
         Vec::with_capacity(cells.saturating_mul(2).min(MAX_OVERLAP_RECORDS));
     let mut extra_full = false;
+    let mut over_budget = false;
     let mut covered = 0.0;
     for (k, si) in secs.clone().enumerate() {
         let id = (k + 1) as u16;
         let nx = g.nx;
         fill_sector(m, SectorIx(si as u32), &g, &mut |i, j| {
+            *visits += 1;
+            if *visits > budget {
+                over_budget = true;
+                return false;
+            }
             let p = j * nx + i;
             if let Some(o) = owner.get_mut(p) {
                 if *o == 0 {
@@ -248,10 +283,20 @@ pub fn chart_coverage(m: &Model, chart: usize) -> Result<CoverageReport, String>
                         extra.push((p as u32, id));
                     } else {
                         extra_full = true;
+                        return false;
                     }
                 }
             }
+            true
         });
+        if extra_full || over_budget {
+            break;
+        }
+    }
+    if over_budget && !extra_full {
+        return Err(format!(
+            "more than {budget} cell visits (every cell of every sector counts); not rasterised"
+        ));
     }
     if extra_full {
         return Err(format!(

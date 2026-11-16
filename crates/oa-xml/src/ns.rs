@@ -36,10 +36,23 @@ pub fn resolve_attr_ns(doc: &Doc<'_>, e: ElemIx, a: AttrIx) -> Ns {
     }
 }
 
+/// The namespace a prefix written in a value (a QName in an attribute or text, such as
+/// `xsi:type`) means at element `e`, from the declarations in scope there. An empty prefix is
+/// the default namespace. A prefix that is not declared gives `None`, as does an element
+/// outside the document; [`resolve_elem_ns`] cannot tell that apart from "no namespace", so a
+/// caller that must refuse an undeclared prefix checks it against the namespace it expects.
+pub fn resolve_prefix(doc: &Doc<'_>, e: ElemIx, prefix: &[u8]) -> Ns {
+    lookup_bytes(doc, e, prefix)
+}
+
 fn lookup(doc: &Doc<'_>, e: ElemIx, prefix: Span) -> Ns {
-    let Some(want) = bytes_of(doc.input, prefix) else {
-        return Ns::None;
-    };
+    match bytes_of(doc.input, prefix) {
+        Some(want) => lookup_bytes(doc, e, want),
+        None => Ns::None,
+    }
+}
+
+fn lookup_bytes(doc: &Doc<'_>, e: ElemIx, want: &[u8]) -> Ns {
     if want == b"xml" {
         return Ns::Xml;
     }

@@ -469,7 +469,7 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-XML-026** A span that does not lie inside the input is `SpanOutOfRange` in every public
   function that takes a span, never an empty value.
 - **OA-XML-027** `Parser::new` returns a `Result`. Every limit has a hard ceiling
-  (`Limits::CEILING`: input bytes `u32::MAX`; elements, attributes and text nodes 16,777,216;
+  (`Limits::CEILING`: input bytes `i32::MAX`; elements, attributes and text nodes 16,777,216;
   depth and name length 65,536; attributes per element and namespace bindings 1,024), and
   input bytes, depth, elements and name length must be at least 1; a violation is
   `LimitsInvalid` naming the limit. Tables are reserved with `try_reserve_exact`, so a limit
@@ -480,6 +480,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   bounded by the output buffer (`OutputTooSmall` past it). Whitespace-only text is still layout
   and not stored, except next to text or a CDATA section of the same element (`a<!--c--> <!--d-->b`),
   where it is data.
+- **OA-XML-029** A namespace declaration's value is an attribute value: references (and attribute
+  normalisation) are expanded before it is stored, into a buffer reserved in `Parser::new`
+  (2,048 bytes per binding slot; overflow is `Limit` on namespace bindings). Every namespace
+  comparison uses the expanded URI: duplicate expanded attribute names, the reserved `xml` and
+  `xmlns` bindings, and what `resolve_*_ns` returns, which a decoder reads with `ns_uri_bytes`.
 
 ### SCDS feed frames (oa-feed)
 
@@ -735,6 +740,12 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   counts each message.
 - **OA-FIXM-018** A decimal too large for the scaler (twelve integer digits at 1e-7, or a sum past `i64`) is
   refused, not wrapped: the position is a field error, counted, and a following message still decodes.
+- **OA-FIXM-019** A message's `xsi:type` is read as a QName: its prefix is resolved with the namespaces
+  in scope and the (namespace, local name) pair must be the NAS namespace and `FlightMessageType`
+  (an undeclared prefix, or a foreign namespace, is `NotFlightMessage`). Namespace URIs compare
+  by their expanded text, so an escaped spelling of a FIXM, NAS or XSI URI decodes like the plain one.
+- **OA-FIXM-020** The row capacity needed and the undecoded total count only the children of the
+  root that the decoder recognises as `message` elements; a foreign sibling counts for neither.
 
 ### TBFM metering publication (oa-tbfm)
 
@@ -1715,8 +1726,9 @@ frame of their feed has been fed (as the ADS-B table is).
   hand-written set of valid and invalid texts (leading zeros, `+`, `NaN`, trailing commas,
   single quotes, comments, vertical tab as whitespace, unterminated values) agrees.
 - **OA-JSON-002** Every bound is a constant in `Limits` and exceeding it is a typed error with the
-  byte offset: input bytes, nesting depth, string bytes (counted on the raw text, escapes
-  included) and node count (values plus object keys); a text exactly at a bound is accepted.
+  byte offset: input bytes, nesting depth, string bytes (counted on the raw text between the quotes, escapes
+  as written, the same on the plain and the escaped path),
+  and node count (values plus object keys); a text exactly at a bound is accepted.
 - **OA-JSON-003** Numbers are kept as their source text; `as_f64` returns `None` when the value is
   not finite, and `as_i64` returns `None` for a fraction, an exponent or a value outside `i64`
   (`i64::MIN` and `i64::MAX` are accepted).
@@ -2183,6 +2195,12 @@ decoder is OA-GRIB-021.
 - **OA-MVA-080** Every unordered pair of sectors that share a cell is reported as an overlap, however many
   sectors cover the cell (three identical polygons give three pairs of equal area in any order); a cell
   with more than 16 owners, or more than 8 million overlap records, refuses the chart.
+- **OA-MVA-081** Rasterising stops as soon as the overlap-record cap is reached (the remaining sectors are
+  not painted), and a chart is also refused once its cell visits (one per cell of each sector, so
+  overlap repeats count) pass `MAX_CELL_VISITS` (40 million, about 6 times the largest real chart's
+  6.95 million), so the cost of a refusal, and of an accepted chart, is bounded by that budget.
+- **OA-MVA-082** Namespace URIs are compared in their expanded form (read with `oa_xml::ns_uri_bytes`), so an
+  AIXM, GML, XLink or XSI namespace written with character references loads like the plain one.
 
 ## M2 — Weather inputs
 
