@@ -63,3 +63,22 @@ pub const MAX_GRID_POINTS: u64 = 16 * 1024 * 1024;
 pub const MAX_FIELDS_PER_MESSAGE: usize = 16;
 /// Limit: grid points summed over all fields of one message, 64 Mi (256 MiB of f32 at most).
 pub const MAX_MESSAGE_POINTS: u64 = 64 * 1024 * 1024;
+
+/// Limit: grid points a decode may produce with no input behind them, 4 Mi: two of HRRR's
+/// 1799 x 1059 grids, 4 times GFS 0.25 degree. The point is the unit of work: unpacking,
+/// scaling and the value vector all cost per point, whatever the packing, and a constant field
+/// or a flat codestream declares millions of them in a few bytes.
+pub const POINT_FLOOR: u64 = 4 * 1024 * 1024;
+/// Limit: grid points per byte of input, on top of [`POINT_FLOOR`]. The densest real input
+/// (the GFS 0.5 degree complex-packed test field) has 12.9 points per byte and the densest RAP
+/// message 5.3 (6,068 template 5.40 messages and the other test files), so 64 leaves a margin of
+/// 5, and a 1 MiB input costs at most 64 Mi points (about 5 s at the measured 75 ns a point), not hours.
+pub const POINTS_PER_BYTE: u64 = 64;
+
+/// The grid points one call of [`decode_stream`] (all its messages together) or
+/// [`decode_message`] may decode from `input_bytes` of input: [`POINT_FLOOR`] plus
+/// [`POINTS_PER_BYTE`] a byte. A field that would exceed what is left is refused with
+/// [`Grib2Error::WorkBudget`] before any of it is unpacked.
+pub fn work_budget(input_bytes: usize) -> u64 {
+    POINT_FLOOR.saturating_add(POINTS_PER_BYTE.saturating_mul(input_bytes as u64))
+}

@@ -19,7 +19,9 @@ use crate::pack::{apply_bitmap, parse_bitmap, parse_repr, unpack, BitmapSpec, Re
 use crate::product::{
     parameter_of, parse_product, parse_ref_time, Interval, Level, Parameter, Product, RefTime,
 };
-use crate::{MAX_FIELDS_PER_MESSAGE, MAX_GRID_POINTS, MAX_MESSAGE_BYTES, MAX_MESSAGE_POINTS};
+use crate::{
+    work_budget, MAX_FIELDS_PER_MESSAGE, MAX_GRID_POINTS, MAX_MESSAGE_BYTES, MAX_MESSAGE_POINTS,
+};
 
 /// One decoded field. `values` has `nx * ny` entries in scan order (see [`crate::grid`]); a
 /// point with no data is NaN, and `missing_count` says how many there are.
@@ -147,6 +149,7 @@ pub fn decode_stream(data: &[u8]) -> Decoded {
         messages: 0,
         stopped: None,
     };
+    let mut left = work_budget(data.len());
     let mut pos = 0usize;
     while pos < data.len() {
         let length = match message_length(data, pos) {
@@ -164,7 +167,7 @@ pub fn decode_stream(data: &[u8]) -> Decoded {
             });
             return out;
         };
-        match decode_message(msg) {
+        match decode_with(msg, &mut left) {
             Ok(mut f) => out.fields.append(&mut f),
             Err(error) => out.skipped.push(Skipped { offset: pos, error }),
         }
@@ -186,7 +189,12 @@ struct State {
 
 /// Decodes one whole message (`msg` is exactly its bytes, `GRIB` through `7777`).
 pub fn decode_message(msg: &[u8]) -> Result<Vec<Field>, Grib2Error> {
-    let entries = walk(msg, true)?;
+    decode_with(msg, &mut work_budget(msg.len()))
+}
+
+/// [`decode_message`] charging its grid points to `left`, the budget of the whole call.
+fn decode_with(msg: &[u8], left: &mut u64) -> Result<Vec<Field>, Grib2Error> {
+    let entries = walk(msg, true, left)?;
     let mut out = Vec::with_capacity(entries.len());
     for (info, values) in entries {
         let values = values.unwrap_or_default();
@@ -248,7 +256,7 @@ pub fn inspect_stream(data: &[u8]) -> Inspected {
             });
             return out;
         };
-        match walk(msg, false) {
+        match walk(msg, false, &mut 0) {
             Ok(entries) => out.fields.extend(entries.into_iter().map(|(info, _)| info)),
             Err(error) => out.skipped.push(Skipped { offset: pos, error }),
         }
@@ -322,7 +330,9 @@ pub fn peek_info(head: &[u8]) -> Result<FieldInfo, Grib2Error> {
 /// A field's description and, when the walk unpacks, its values.
 type Entry = (FieldInfo, Option<Vec<f32>>);
 
-fn walk(msg: &[u8], want_data: bool) -> Result<Vec<Entry>, Grib2Error> {
+/// Walks a message. When `want_data`, each field's grid points are taken from `left` before the
+/// field is unpacked, and a field that does not fit is refused with nothing decoded.
+fn walk(msg: &[u8], want_data: bool, left: &mut u64) -> Result<Vec<Entry>, Grib2Error> {
     let len = message_length(msg, 0)?;
     if len != msg.len() {
         return Err(Grib2Error::BadMessageLength(msg.len() as u64));
@@ -405,6 +415,16 @@ fn walk(msg: &[u8], want_data: bool) -> Result<Vec<Entry>, Grib2Error> {
                     points += u64::from(a) * u64::from(b);
                     if points > MAX_MESSAGE_POINTS {
                         return Err(Grib2Error::GridPoints(points));
+                    }
+                    if want_data {
+                        let n = u64::from(a) * u64::from(b);
+                        if n > *left {
+                            return Err(Grib2Error::WorkBudget {
+                                points: n,
+                                budget: *left,
+                            });
+                        }
+                        *left -= n;
                     }
                 }
                 fields.push(finish_field(&st, discipline, payload, want_data)?);

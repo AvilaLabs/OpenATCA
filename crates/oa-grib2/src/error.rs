@@ -25,6 +25,8 @@ pub enum Grib2Error {
     MissingSection(&'static str),
     /// More points than [`crate::MAX_GRID_POINTS`] (or a point count that does not match the grid).
     GridPoints(u64),
+    /// A field's points exceed the work left for the call ([`crate::work_budget`] of its input).
+    WorkBudget { points: u64, budget: u64 },
     /// More fields in one message than [`crate::MAX_FIELDS_PER_MESSAGE`].
     TooManyFields,
     /// Grid definition template other than 3.0 and 3.30.
@@ -76,6 +78,10 @@ impl fmt::Display for Grib2Error {
             }
             Grib2Error::MissingSection(what) => write!(f, "missing {what}"),
             Grib2Error::GridPoints(n) => write!(f, "{n} grid points is out of bounds"),
+            Grib2Error::WorkBudget { points, budget } => write!(
+                f,
+                "{points} grid points exceed the {budget} the input's size allows decoding"
+            ),
             Grib2Error::TooManyFields => write!(f, "too many fields in one message"),
             Grib2Error::UnsupportedGridTemplate(t) => {
                 write!(f, "grid template 3.{t} is not supported")

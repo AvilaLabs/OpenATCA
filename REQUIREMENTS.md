@@ -2127,6 +2127,11 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   (through section 5), so an inventory can be checked against a file without reading its data.
 - **OA-GRIB-059** Section and message lengths that would wrap an offset are added with checked arithmetic: a damaged length at the
   top of the address space ends the scan or is refused with a typed error, never a panic.
+- **OA-GRIB-060** Decoding is bounded by the input's size: one call of `decode_stream` (all its messages together)
+  or `decode_message` may decode `work_budget(input bytes)` grid points, 4 Mi plus 64 per input byte. A field
+  that does not fit is refused with `Grib2Error::WorkBudget` before any of it is unpacked, so a message that
+  declares 16 Mi points in a few hundred bytes (a constant field, a flat codestream) costs nothing. The densest
+  real input has 12.9 points per byte; reading the inventory (`inspect_stream`) is not limited.
 
 ## JPEG 2000 decoder (oa-j2k)
 
