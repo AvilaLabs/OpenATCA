@@ -1641,6 +1641,13 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-TIFF-087** A conservative query whose work (lattice cells times the larger of 1 and the polygon
   vertices, plus the tiles) is over `MAX_QUERY_WORK` is refused with `TooMuchWork` before any cell is
   visited.
+- **OA-TIFF-088** The work estimate of a conservative query includes one lookup in each candidate tile
+  for every lattice cell, so overlapping tiles raise it; the estimate is never below the work the
+  query counts as it runs, and an over-budget query is refused before any cell is visited.
+- **OA-TIFF-089** The GeoTIFF vertical units key (4099) is read: metre or absent leaves samples as they
+  are, international foot (9002) and US survey foot (9003) are converted to metres with the exact
+  factors 0.3048 and 1200/3937, nodata is matched before conversion, and any other unit is refused
+  with `GeoRef`.
 
 ### Digital Obstacle File (oa-dof)
 

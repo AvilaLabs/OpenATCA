@@ -104,7 +104,7 @@ pub enum QueryError {
     TooManyTiles,
     /// The region would visit more than [`MAX_QUERY_SAMPLES`] samples.
     TooManySamples,
-    /// The cells times the polygon vertices, plus the tiles, are over [`MAX_QUERY_WORK`].
+    /// The cell tests plus the tile lookups (see [`MAX_QUERY_WORK`]) would be over the budget.
     TooMuchWork,
     /// A conservative circle reaches a pole or would cross the antimeridian, where longitude is
     /// not a plane; the query is refused rather than answered from one side only.

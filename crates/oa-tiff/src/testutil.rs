@@ -38,6 +38,8 @@ pub struct Spec {
     pub model_type: u16,
     pub nodata: Option<String>,
     pub vertical: Option<u16>,
+    /// VerticalUnitsGeoKey (4099) written when set.
+    pub vertical_units: Option<u16>,
     /// Orientation tag (274) written when set.
     pub orientation: Option<u16>,
 }
@@ -62,6 +64,7 @@ impl Spec {
             model_type: 2,
             nodata: None,
             vertical: None,
+            vertical_units: None,
             orientation: None,
         }
     }
@@ -357,6 +360,9 @@ pub fn build(s: &Spec) -> Vec<u8> {
         ];
         if let Some(v) = s.vertical {
             keys.push([4096, 0, 1, v]);
+        }
+        if let Some(u) = s.vertical_units {
+            keys.push([4099, 0, 1, u]);
         }
         let mut dir: Vec<u16> = vec![1, 1, 0, keys.len() as u16];
         dir.extend(keys.iter().flatten());

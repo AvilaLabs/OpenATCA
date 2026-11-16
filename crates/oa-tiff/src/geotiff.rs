@@ -10,6 +10,7 @@ const KEY_MODEL_TYPE: u64 = 1024;
 const KEY_RASTER_TYPE: u64 = 1025;
 const KEY_GEOGRAPHIC_TYPE: u64 = 2048;
 const KEY_VERTICAL_CS: u64 = 4096;
+const KEY_VERTICAL_UNITS: u64 = 4099;
 
 const MODEL_TYPE_GEOGRAPHIC: u64 = 2;
 const RASTER_PIXEL_IS_AREA: u64 = 1;
@@ -17,6 +18,10 @@ const RASTER_PIXEL_IS_POINT: u64 = 2;
 /// NAD83 and WGS 84 geographic coordinate systems (EPSG codes).
 const CRS_NAD83: u64 = 4269;
 const CRS_WGS84: u64 = 4326;
+/// EPSG unit codes of VerticalUnitsGeoKey: metre, international foot, US survey foot.
+const UNIT_METRE: u64 = 9001;
+const UNIT_FOOT: u64 = 9002;
+const UNIT_US_SURVEY_FOOT: u64 = 9003;
 
 /// The raw georeferencing tags of an IFD. Plain data (A1).
 // A7.2: cold struct, size guard waived
@@ -56,6 +61,9 @@ pub struct Geo {
     pub crs: u16,
     /// EPSG vertical CS key when present (3DEP: 5703, NAVD88 height).
     pub vertical_cs: Option<u16>,
+    /// Metres per vertical unit of the samples: 1 for metres or no unit key, 0.3048 for feet,
+    /// 1200/3937 for US survey feet.
+    pub vertical_unit_m: f64,
 }
 
 /// Interprets the tags for an image of `width` by `height` pixels.
@@ -149,6 +157,17 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
         None => return Err(TiffError::GeoRef("GeographicType key missing")),
     };
     let vertical_cs = short_key(KEY_VERTICAL_CS)?.and_then(|v| u16::try_from(v).ok());
+    // GeoTIFF 1.1: the default vertical unit is the metre.
+    let vertical_unit_m = match short_key(KEY_VERTICAL_UNITS)? {
+        Some(UNIT_METRE) | None => 1.0,
+        Some(UNIT_FOOT) => crate::METRES_PER_FOOT,
+        Some(UNIT_US_SURVEY_FOOT) => 1200.0 / 3937.0,
+        Some(_) => {
+            return Err(TiffError::GeoRef(
+                "vertical unit is not metre, foot or US survey foot",
+            ))
+        }
+    };
 
     // Raster (i, j) maps to model (x, y) = (tx + (i - ti) * sx, ty - (j - tj) * sy). Sample
     // (col, row) is at raster (col + h, row + h), with h = 0.5 for PixelIsArea (raster integer
@@ -182,5 +201,6 @@ pub fn georeference(t: &GeoTags, width: u32, height: u32) -> Result<Geo, TiffErr
         point_registered: point,
         crs,
         vertical_cs,
+        vertical_unit_m,
     })
 }

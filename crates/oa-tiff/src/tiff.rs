@@ -563,6 +563,8 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         if !v.is_finite() || declared {
             *v = f32::NAN;
             nodata_count += 1;
+        } else if geo.vertical_unit_m != 1.0 {
+            *v = (f64::from(*v) * geo.vertical_unit_m) as f32;
         }
     }
     Ok(Grid {
