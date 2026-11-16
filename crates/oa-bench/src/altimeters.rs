@@ -8,7 +8,9 @@ use std::path::Path;
 use oa_awc::{finalize_metar, metar_altim_hpa, metar_len, new_metar_table, pack_ident};
 use oa_awc::{parse_metar, MetarStats, MetarTable};
 
-use crate::input::{hash_files, read_capped_file};
+use oa_sha256::sha256;
+
+use crate::input::{manifest_hash, read_capped_file};
 use crate::report::InputHash;
 
 /// Hectopascals per inch of mercury.
@@ -30,8 +32,18 @@ pub struct Altimeters {
     pub rows: usize,
 }
 
-/// Reads every `metar*.json` file of `dir` (name order) and hashes them.
+/// Reads every `metar*.json` file of `dir` (name order) and hashes them. Each file is read once;
+/// the digest and the parse are of those same bytes.
 pub fn load_metar_dir(dir: &Path) -> io::Result<(Altimeters, InputHash)> {
+    load_metar_dir_with(dir, &|p| read_capped_file(p, MAX_FILE_BYTES))
+}
+
+/// As [`load_metar_dir`], reading each file's bytes with `read` (called once per file, in name
+/// order). The seam for a test that returns other bytes on a second read.
+pub fn load_metar_dir_with(
+    dir: &Path,
+    read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> io::Result<(Altimeters, InputHash)> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -51,14 +63,16 @@ pub fn load_metar_dir(dir: &Path) -> io::Result<(Altimeters, InputHash)> {
     let mut table = new_metar_table();
     let mut stats = MetarStats::default();
     let mut refused_files = 0usize;
+    let mut sums = Vec::with_capacity(paths.len());
     for p in &paths {
-        let bytes = read_capped_file(p, MAX_FILE_BYTES)?;
+        let bytes = read(p)?;
+        sums.push((sha256(&bytes), bytes.len() as u64));
         if parse_metar(&bytes, &mut table, &mut stats).is_err() {
             refused_files += 1;
         }
     }
     finalize_metar(&mut table);
-    let hash = hash_files(&format!("metar ({})", dir.display()), &paths)?;
+    let hash = manifest_hash(&format!("metar ({})", dir.display()), &paths, &sums);
     let rows = metar_len(&table);
     Ok((
         Altimeters {

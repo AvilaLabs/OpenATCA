@@ -648,3 +648,40 @@ fn malformed_measurements_are_left_absent_and_counted_without_refusing_the_row()
     stats_add(&mut t, &st);
     assert_eq!(t.bad_measurements, 2);
 }
+
+// REQ: OA-ADSB-172
+#[test]
+fn a_trace_row_the_payload_reader_would_drop_is_refused_at_both_date_boundaries() {
+    // Bases at the two ends of the accepted range, rows a second either side of them.
+    for (base, kept_dt) in [("946684800.000", "0.0"), ("4102444799.000", "0.0")] {
+        let json = format!(
+            "{{\"icao\":\"abc123\",\"timestamp\":{base},\"trace\":[[-1.0,40.0,-90.0,1000,300.0,10.0,0,0,null,\"adsb_icao\",1000,0,0,0.0],[{kept_dt},40.0,-90.0,1000,300.0,10.0,0,0,null,\"adsb_icao\",1000,0,0,0.0],[1.0,40.0,-90.0,1000,300.0,10.0,0,0,null,\"adsb_icao\",1000,0,0,0.0]]}}"
+        );
+        let (res, out, st) = run(&json, &WIDE);
+        res.unwrap();
+        assert_eq!(st.rows_seen, 3);
+        // Whatever the producer keeps, the payload reader accepts, row for row.
+        let n = reports_len(&out);
+        assert_eq!(st.kept as usize, n);
+        assert_eq!(st.rejected[REJ_TIME] as usize, 3 - n, "base {base}");
+        assert!(n >= 1);
+        let mut p = Vec::new();
+        encode_payload(&mut p, &out, 0, n).unwrap();
+        let mut back = Reports::default();
+        assert_eq!(decode_payload(&p, &mut back).unwrap(), n, "base {base}");
+        for i in 0..n {
+            assert!((TIME_MIN_NS..TIME_MAX_NS).contains(&reports_row(&out, i).unwrap().time_ns));
+        }
+    }
+    // Exactly the lower and the upper limit: the first is in range, the second is not.
+    let low = run(&wrap_at("946684800.000", "0.0"), &WIDE);
+    assert_eq!(reports_len(&low.1), 1);
+    let high = run(&wrap_at("4102444800.000", "0.0"), &WIDE);
+    assert_eq!((reports_len(&high.1), high.2.rejected[REJ_TIME]), (0, 1));
+}
+
+fn wrap_at(base: &str, dt: &str) -> String {
+    format!(
+        "{{\"icao\":\"abc123\",\"timestamp\":{base},\"trace\":[[{dt},40.0,-90.0,1000,300.0,10.0,0,0,null,\"adsb_icao\",1000,0,0,0.0]]}}"
+    )
+}

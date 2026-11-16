@@ -1874,6 +1874,8 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-ADSB-171** A payload record whose report time is before 2000-01-01T00:00Z or at or after
   2100-01-01T00:00Z (`TIME_MIN_NS`, `TIME_MAX_NS`) is dropped and counted (`dropped`, `bad_time`); the strict
   decoder refuses the payload.
+- **OA-ADSB-172** The trace decoder refuses and counts (`REJ_TIME`) a row whose absolute time (base plus offset) is
+  outside `TIME_MIN_NS..TIME_MAX_NS`, so every row it produces is one the payload reader accepts.
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
@@ -2631,6 +2633,18 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   content: a typed violation, a hard error of the run and not a warning.
 - **OA-BENCH-120** `score_track_samples` and the `oa-track` scorer build the legacy table by truth leg, so T5
   of a scored run is per trip, not pooled across the trips of one address.
+- **OA-BENCH-121** `observation_key` is the one identity of an ADS-B report for the split and its check: address,
+  time and every field scoring or quality handling reads (position, altitudes, vertical rate, speed, track,
+  squawk, flags, source, category, NIC, NACp, NACv, SIL, SIL type, version). Reports of one address and time
+  that differ in any of them are not copies: they stay together on one side, ordered by the key, so the
+  retained evidence and the scores do not depend on input order.
+- **OA-BENCH-122** `load_metar_dir` reads each METAR file once into memory and hashes and parses those bytes, so
+  the reported digest describes the data scored even if the file changes between reads.
+- **OA-BENCH-123** `T3-heading-grid` does not depend on the order of the pairs: longitudes are taken relative to
+  the smallest longitude of the samples and the samples are summed in sorted order. A cohort spanning more than
+  90 degrees of longitude is refused (scalar `refused_span` is 1, no slope), not fitted to an arbitrary anchor.
+- **OA-BENCH-124** `stats_of` keeps in the mean what scaling by a power of two rounds away from values too small
+  for the scaled range: `[1e308, -1e308, 1e-300]` has mean 3.33e-301, equal to the exact sum over the count.
 
 ## Winds aloft (oa-wind)
 
@@ -3161,6 +3175,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   reference list through any sequence of insert, get, remove and retain: no key is lost or duplicated, `len`
   is the number of held keys, an insert is refused exactly when the key is new and the table is full, and
   nothing panics or indexes out of bounds.
+- **OA-TRK-308** The scoring split treats reports of one address and time that differ in any field scoring or
+  quality handling reads (`oa_bench::split_check::observation_key`: flags, source, category, SIL type among them)
+  as different observations kept together on one side, in key order; only exact copies are removed. Reversing the
+  input rows changes neither the retained evidence nor the scores.
   limit was reached, the coarse visits, exact tests and initiation tests, the candidates alive at most and the
   buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
 - **OA-TRK-298** An anonymous candidate does not become a second track for an aircraft a live track already

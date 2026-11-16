@@ -19,9 +19,18 @@ pub enum SplitViolation {
     Unreadable { set: u8 },
 }
 
-type Key = (u32, i64, [i64; 12]);
+/// The identity of one observation: address, time and the fields `Key` lists.
+pub type Key = (u32, i64, [i64; 17]);
 
-fn key(r: &Row) -> Key {
+/// What makes two reports the same observation, for the split and for its check. An exact copy
+/// agrees on the address, the time and every field that scoring or quality handling reads:
+/// position, both altitudes, vertical rate, ground speed, track, squawk, the flags (stale,
+/// new-leg, geometric and ground bits), source, emitter category, NIC, NACp, NACv, SIL, SIL
+/// type and version. Reports that agree on address and time but differ in any of these are
+/// different observations (one may be stale or MLAT while the other is current ADS-B). Fields
+/// that nothing downstream reads (callsign, GVA, SDA, wind and temperature, speeds, headings,
+/// roll and track rate) are not part of the identity.
+pub fn observation_key(r: &Row) -> Key {
     (
         r.icao,
         r.time_ns,
@@ -33,10 +42,15 @@ fn key(r: &Row) -> Key {
             i64::from(r.gs_dkt),
             i64::from(r.track_ddeg),
             i64::from(r.vrate_fpm),
+            i64::from(r.squawk),
+            i64::from(r.flags),
+            i64::from(r.source),
+            i64::from(r.category),
             i64::from(r.nic),
             i64::from(r.nac_p),
             i64::from(r.nac_v),
             i64::from(r.sil),
+            i64::from(r.sil_type),
             i64::from(r.version),
         ],
     )
@@ -47,7 +61,7 @@ fn keys_of(r: &Reports, set: u8) -> Result<Vec<Key>, SplitViolation> {
     let mut v = Vec::with_capacity(reports_len(r));
     for i in 0..reports_len(r) {
         let row = reports_row(r, i).ok_or(SplitViolation::Unreadable { set })?;
-        v.push(key(&row));
+        v.push(observation_key(&row));
     }
     v.sort_unstable();
     for w in v.windows(2) {

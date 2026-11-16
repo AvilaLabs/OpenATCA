@@ -73,3 +73,32 @@ fn a_copy_inside_a_set_is_a_violation() {
         Err(SplitViolation::Duplicate { set: b'B', .. })
     ));
 }
+
+// REQ: OA-BENCH-121
+#[test]
+fn a_stale_report_and_a_current_one_at_one_time_are_not_copies() {
+    let current = row(1, 0, 10);
+    let mut stale = current;
+    stale.flags = oa_adsb::F_STALE;
+    let mut mlat = current;
+    mlat.source = 3;
+    assert_eq!(
+        check_split(&set(&[current, stale, mlat]), &set(&[row(1, 1, 11)])),
+        Ok(())
+    );
+    assert_ne!(
+        oa_bench::split_check::observation_key(&current),
+        oa_bench::split_check::observation_key(&stale)
+    );
+    // A copy that differs only in an unread field is still a copy.
+    let mut named = current;
+    named.callsign = *b"ABC123  ";
+    assert_eq!(
+        check_split(&set(&[current, named]), &set(&[])),
+        Err(SplitViolation::Duplicate {
+            set: b'A',
+            addr: 1,
+            time_ns: current.time_ns
+        })
+    );
+}

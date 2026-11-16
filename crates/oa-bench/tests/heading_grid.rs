@@ -99,3 +99,69 @@ fn the_run_publishes_the_diagnostic_and_the_synthetic_world_has_no_grid_heading(
     assert!(scalar(m, "n") > 100.0);
     assert!(slope.abs() < 4.0 * se + 0.05, "slope {slope} se {se}");
 }
+
+fn table(rows: &[(f64, f64, f32)]) -> PairTable {
+    let mut p = PairTable::default();
+    for (k, &(la, lo, h)) in rows.iter().enumerate() {
+        p.t_ms.push(k as i64);
+        p.lat_e7.push((la * 1e7).round() as i32);
+        p.lon_e7.push((lo * 1e7).round() as i32);
+        p.hdg_err_deg.push(h);
+    }
+    p
+}
+
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![vec![]];
+    }
+    let mut out = Vec::new();
+    for p in permutations(n - 1) {
+        for at in 0..n {
+            let mut q = p.clone();
+            q.insert(at, n - 1);
+            out.push(q);
+        }
+    }
+    out
+}
+
+// REQ: OA-BENCH-123
+#[test]
+fn the_result_does_not_depend_on_the_order_of_the_pairs() {
+    // Three longitudes a third of the way round at 60 N, the error being the convergence term of
+    // each from longitude 0: in no order may the answer differ, and a span this wide is refused.
+    let e = (120.0 * 60f64.to_radians().sin()) as f32;
+    let rows = [(60.0, 0.0, 0.0), (60.0, 120.0, e), (60.0, -120.0, -e)];
+    let mut first = None;
+    for perm in permutations(3) {
+        let m = t3_heading_grid(&table(&perm.iter().map(|&i| rows[i]).collect::<Vec<_>>()));
+        assert!(m
+            .scalars
+            .iter()
+            .any(|(n, v)| n == "refused_span" && *v == 1.0));
+        assert!(m.scalars.iter().all(|(n, _)| n != "slope_deg_per_deg"));
+        assert_eq!(scalar(&m, "n"), 3.0);
+        match &first {
+            None => first = Some(m.scalars.clone()),
+            Some(f) => assert_eq!(f, &m.scalars),
+        }
+    }
+    // A cohort across the antimeridian is one block, and the order of its rows changes no bit.
+    let rows = [
+        (59.0, 179.9, 0.1),
+        (60.0, -179.95, 0.4),
+        (61.0, -179.8, 0.2),
+        (62.0, 179.85, 0.9),
+        (63.0, -179.7, 0.3),
+    ];
+    let mut first = None;
+    for perm in permutations(5) {
+        let m = t3_heading_grid(&table(&perm.iter().map(|&i| rows[i]).collect::<Vec<_>>()));
+        assert!(m.scalars.iter().any(|(n, _)| n == "slope_deg_per_deg"));
+        match &first {
+            None => first = Some(m.scalars.clone()),
+            Some(f) => assert_eq!(f, &m.scalars),
+        }
+    }
+}

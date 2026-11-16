@@ -361,3 +361,35 @@ fn a_whole_file_read_stops_at_its_limit() {
     assert!(e.to_string().contains("a.bin"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// REQ: OA-BENCH-122
+#[test]
+fn the_metar_digest_is_of_the_bytes_parsed_and_each_file_is_read_once() {
+    use oa_bench::altimeters::load_metar_dir_with;
+    let dir = scratch("metar-once");
+    std::fs::write(dir.join("metar1.json"), b"disk one").unwrap();
+    std::fs::write(dir.join("metar2.json"), b"disk two").unwrap();
+    std::fs::write(dir.join("other.json"), b"not listed").unwrap();
+    // The reader gives other bytes on a second read of a file, as a file that changed.
+    let reads: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let read = |p: &Path| -> io::Result<Vec<u8>> {
+        let seen = reads.borrow().iter().filter(|q| *q == p).count();
+        reads.borrow_mut().push(p.to_path_buf());
+        let name = p.file_name().unwrap().to_str().unwrap();
+        Ok(format!("{name} read {seen}").into_bytes())
+    };
+    let (alt, hash) = load_metar_dir_with(&dir, &read).unwrap();
+    assert_eq!(reads.borrow().len(), 2, "each listed file is opened once");
+    let line = |n: &str| {
+        format!(
+            "{n}:{}\n",
+            to_hex(&sha256(format!("{n} read 0").as_bytes()))
+        )
+    };
+    let want = to_hex(&sha256(
+        (line("metar1.json") + &line("metar2.json")).as_bytes(),
+    ));
+    assert_eq!(hash.sha256, want);
+    assert_eq!((alt.files, hash.files), (2, 2));
+    assert_eq!(hash.bytes, 2 * "metar1.json read 0".len() as u64);
+}

@@ -60,7 +60,7 @@ pub fn list_inputs(dir: &Path) -> io::Result<(DirKind, Vec<PathBuf>)> {
 
 /// The hash of a set of files: for one file, its SHA-256; for several, the SHA-256 of the lines
 /// `<file name>:<sha256>\n` in the given order. Also the file count and total size.
-fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64)]) -> InputHash {
+pub(crate) fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64)]) -> InputHash {
     let mut bytes = 0u64;
     let mut manifest = String::new();
     let mut single = String::new();
