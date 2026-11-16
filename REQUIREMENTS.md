@@ -3133,6 +3133,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   every candidate the all-candidates test could pass; a candidate that finds the wide list full is not
   tested in that bucket and is counted in `init_wide_full`; `init_tests` counts the exact tests and
   `init_visits` the candidates the grid returned.
+- **OA-TRK-302** A track's expected update interval is the shortest scan period among the radars that
+  updated it within their last three periods (as of its newest update), and it is flagged coasting when
+  its newest update is older than three of those intervals; a track no radar updated that recently keeps
+  three of the configured expected interval (the longest scan period). The time to drop a track is
+  unchanged.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

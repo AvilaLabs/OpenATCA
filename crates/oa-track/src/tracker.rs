@@ -42,7 +42,8 @@
 //! intervals of the first; if the second report implies a ground speed above the plausible
 //! maximum, or the window passes without confirmation, the track restarts from the new report
 //! (counted). A confirmed track is output at every update and at every tick; it is flagged
-//! coasting when its newest update is older than `coast_after_intervals` expected intervals and
+//! coasting when its newest update is older than `coast_after_intervals` expected intervals (its
+//! own, if the caller set one, else the configured one) and
 //! dropped (logged, slot freed) when older than `drop_after_ns`.
 //!
 //! # Fixed-rate output
@@ -111,6 +112,9 @@ pub struct Tracker {
     last_ns: Vec<i64>,
     /// Rows of the track up to this time carry [`O_RADAR_DISAGREES`]; `i64::MIN` for none.
     disagree_until_ns: Vec<i64>,
+    /// The track's own expected update interval; 0 for the configuration's (the fusion layer sets
+    /// it from the scan periods of the radars that update the track).
+    expected_ns: Vec<i64>,
     updates: Vec<u32>,
     hits: Vec<u8>,
     cur: Vec<Filter>,
@@ -201,6 +205,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         confirmed_ns: vec![i64::MIN; n],
         last_ns: vec![0; n],
         disagree_until_ns: vec![i64::MIN; n],
+        expected_ns: vec![0; n],
         updates: vec![0; n],
         hits: vec![0; n],
         cur: vec![blank_filter(); n],
@@ -274,6 +279,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.first_ns),
         of(&t.confirmed_ns),
         of(&t.last_ns),
+        of(&t.expected_ns),
         of(&t.updates),
         of(&t.hits),
         of(&t.cur),
@@ -518,6 +524,17 @@ fn set_last(t: &mut Tracker, slot: usize, ns: i64) {
     t.newest_update_ns = t.newest_update_ns.max(ns);
 }
 
+/// Sets the expected update interval of the track of `key` to `ns` (it coasts after
+/// `coast_after_intervals` of them); `ns <= 0` returns it to the configured one. Returns whether
+/// there is such a track.
+pub fn tracker_set_expected_interval(t: &mut Tracker, key: u32, ns: i64) -> bool {
+    let Some(slot) = lookup(t, key) else {
+        return false;
+    };
+    put(&mut t.expected_ns, slot, ns.max(0));
+    true
+}
+
 /// Marks the track of `key` as contradicted by a radar until `until_ns`: its rows at or before
 /// then carry [`O_RADAR_DISAGREES`] (a later call can only extend it). Nothing about the track's
 /// state changes. Returns whether there is such a track.
@@ -549,6 +566,7 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.hits, slot, 1);
     put(&mut t.confirmed_ns, slot, i64::MIN);
     put(&mut t.disagree_until_ns, slot, i64::MIN);
+    put(&mut t.expected_ns, slot, 0);
     put(&mut t.state, slot, TENTATIVE);
     maybe_confirm(t, slot, m.toa_ns);
 }
@@ -1104,7 +1122,13 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
                 out.overflow = out.overflow.saturating_add(1);
                 continue;
             }
-            let coast = tick - col(&t.last_ns, slot, 0) > coast_ns;
+            let own = col(&t.expected_ns, slot, 0);
+            let limit = if own > 0 {
+                t.cfg.coast_after_intervals.saturating_mul(own)
+            } else {
+                coast_ns
+            };
+            let coast = tick - col(&t.last_ns, slot, 0) > limit;
             emit(t, slot, tick, O_TICK | if coast { O_COAST } else { 0 }, out);
         }
         t.stats.ticks += 1;
@@ -1324,5 +1348,42 @@ mod tests {
         assert_eq!(tracker_stats(&t).resyncs, 1);
         let s = snap(&t);
         assert_eq!((s.hits, s.ring.len(), s.cur.rej_h), (1, 1, 0));
+    }
+
+    // REQ: OA-TRK-302
+    #[test]
+    fn a_track_with_its_own_expected_interval_coasts_by_it() {
+        let c = TrackerConfig {
+            tick_ns: S,
+            expected_interval_ns: 12 * S,
+            drop_after_ns: 200 * S,
+            ..cfg(1, 0)
+        };
+        let first_coast = |own: i64| {
+            let mut t = tracker_new(&c).unwrap();
+            let mut out = output_new(c.out_capacity);
+            for k in 0..3 {
+                tracker_update(&mut t, &at(5 * k, 100 * k as i32, 100.0), &mut out);
+            }
+            if own > 0 {
+                assert!(tracker_set_expected_interval(&mut t, ADDR, own));
+            }
+            crate::types::output_clear(&mut out);
+            tracker_advance(&mut t, 1_000 * S + 100 * S, &mut out);
+            let last = 1_000 * S + 10 * S;
+            (0..out.t_ns.len())
+                .filter(|&i| out.flags[i] & O_COAST != 0)
+                .map(|i| (out.t_ns[i] - last) / S)
+                .min()
+        };
+        // The configured 12 s: after 36 s. Its own 4.8 s: after 14.4 s, so the first coasting
+        // tick is the 15th second.
+        assert_eq!(first_coast(0), Some(37));
+        assert_eq!(first_coast(4_800_000_000), Some(15));
+        assert!(!tracker_set_expected_interval(
+            &mut tracker_new(&c).unwrap(),
+            ADDR,
+            S
+        ));
     }
 }
