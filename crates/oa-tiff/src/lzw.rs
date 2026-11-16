@@ -22,8 +22,14 @@ pub enum LzwError {
 /// Decodes `input` into exactly `expected` bytes. A stream that ends (end code or end of input)
 /// before `expected` bytes is [`LzwError::Truncated`]; one that would produce more is
 /// [`LzwError::TooLong`].
-// E3: indexes below are codes checked `< next` (at most TABLE - 1) or `< TABLE` by construction.
-#[allow(clippy::indexing_slicing)]
+// E3, E8: indexes are codes checked `< next` (at most TABLE - 1) or `< TABLE`; the code width is
+// at most 12 and nbits stays under width + 8, so `acc` stays in 32 bits; casts are of values
+// under 4096 (codes) or 256 (bytes); `pos` is below `input.len()` where it is advanced.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 pub fn lzw_decode(input: &[u8], expected: usize) -> Result<Vec<u8>, LzwError> {
     let mut out: Vec<u8> = Vec::with_capacity(expected);
     let mut prefix = [0u16; TABLE];

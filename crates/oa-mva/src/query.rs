@@ -22,6 +22,8 @@ pub struct MinAlt {
 
 /// Rounds a latitude/longitude in degrees to 1e-7 degrees, refusing a non-finite or out of
 /// range value.
+// E8: the point is checked to be within 90 and 180 degrees, so the rounded e7 values fit i32.
+#[allow(clippy::cast_possible_truncation)]
 fn to_e7(lat: f64, lon: f64) -> Result<(i32, i32), MvaError> {
     if !(lat.is_finite()
         && lon.is_finite()
@@ -40,6 +42,8 @@ fn to_e7(lat: f64, lon: f64) -> Result<(i32, i32), MvaError> {
 /// meridian. A sector never crosses the seam (the loader's extent limit), so its own vertices
 /// need no unwrapping. An alias outside the i32 range is more than 34 degrees past the seam and
 /// far from every sector, so the plain value stands.
+// E8: longitudes are i32 widened to i64, so sums and differences cannot overflow; indexes stay below the slice length.
+#[allow(clippy::arithmetic_side_effects)]
 fn unwrap_lon(lon: i32, lo0: i32, lo1: i32) -> i32 {
     let full = 360 * E7;
     let centre = (i64::from(lo0) + i64::from(lo1)) / 2;
@@ -93,6 +97,8 @@ pub fn sector_contains(m: &Model, s: SectorIx, lat: i32, lon: i32) -> bool {
 
 /// Appends to `out` every sector of `set` that contains the point, in model order. `out` is not
 /// cleared.
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sectors_containing(
     m: &Model,
     lat: f64,
@@ -115,6 +121,8 @@ pub fn sectors_containing(
 /// The highest minimum altitude of every sector of `set` that contains the point (conservative:
 /// where charts overlap or meet, the higher value wins). `None` when no sector of the set
 /// contains it: the point is outside the charts, and no altitude is invented.
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn min_altitude_at(
     m: &Model,
     lat: f64,
@@ -134,7 +142,7 @@ pub fn min_altitude_at(
         best = Some(match best {
             Some(b) => MinAlt {
                 min_alt_ft: b.min_alt_ft.max(alt),
-                sectors: b.sectors + 1,
+                sectors: b.sectors.saturating_add(1),
             },
             None => MinAlt {
                 min_alt_ft: alt,
@@ -151,6 +159,8 @@ pub fn min_altitude_at(
 /// plot and states no separation standard, so it is not part of the FUS3/FUS5 answer; for a
 /// warning the higher minimum wins where they overlap, which this function gives. `sectors`
 /// counts the sectors of both. `None` when neither contains the point.
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn min_altitude_with_sub(
     m: &Model,
     lat: f64,
@@ -176,7 +186,7 @@ pub fn min_altitude_with_sub(
         best = Some(match best {
             Some(b) => MinAlt {
                 min_alt_ft: b.min_alt_ft.max(alt),
-                sectors: b.sectors + 1,
+                sectors: b.sectors.saturating_add(1),
             },
             None => MinAlt {
                 min_alt_ft: alt,
@@ -218,6 +228,8 @@ fn kx_for(max_abs_lat_deg: f64) -> f64 {
 /// latitude of the point and the sector, so it never exceeds the true distance (the error is a
 /// few tenths of a percent in latitude and under 10 percent in longitude at these latitudes):
 /// a sector within the true radius is never missed.
+// E8: longitudes are i32 widened to i64, so sums and differences cannot overflow; indexes stay below the slice length.
+#[allow(clippy::arithmetic_side_effects)]
 fn dist_nm(m: &Model, s: SectorIx, la: i32, lo: i32, limit_nm: f64) -> f64 {
     let i = s.0 as usize;
     let (Some(&la0), Some(&la1), Some(&lo0), Some(&lo1)) = (
@@ -287,6 +299,8 @@ pub fn sector_distance_nm(m: &Model, s: SectorIx, lat: f64, lon: f64) -> Result<
 /// (conservative: a sector counts when any part of its edge or interior is within the radius,
 /// not only a vertex, and the distance metric never overstates). The radius must be finite,
 /// positive and at most [`MAX_RADIUS_NM`].
+// E8: sector rows are bounded by MAX_SECTORS, so the index fits u32.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sectors_within_radius(
     m: &Model,
     lat: f64,

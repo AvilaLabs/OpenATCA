@@ -112,7 +112,7 @@ const KNOWN_ATTRS: [(AQ, &str); 8] = [
 /// are about 30 times what the largest real chart (about 1,800 elements) needs.
 pub fn default_limits() -> Limits {
     Limits {
-        max_input_bytes: MAX_FILE_BYTES as usize,
+        max_input_bytes: usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX),
         ..Limits::default()
     }
 }
@@ -348,11 +348,13 @@ fn trim(b: &[u8]) -> &[u8] {
     let e = b
         .iter()
         .rposition(|c| !c.is_ascii_whitespace())
-        .map_or(s, |p| p + 1);
+        .map_or(s, |p| p.saturating_add(1));
     b.get(s..e).unwrap_or(&[])
 }
 
 /// The namespace class and local name of attribute `a` of `e`.
+// E8: element, attribute, text, ring and sector counts are bounded by the oa-xml limits and MAX_VERTICES, so the casts to u32 cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
 fn attr_q<'a>(w: &W<'a>, e: ElemIx, a: usize) -> (AQ, &'a [u8]) {
     let nm = w
         .doc
@@ -374,6 +376,8 @@ fn attr_q<'a>(w: &W<'a>, e: ElemIx, a: usize) -> (AQ, &'a [u8]) {
 }
 
 /// The value of the unprefixed (no-namespace) attribute `name` of `e`, decoded.
+// E8: element, attribute, text, ring and sector counts are bounded by the oa-xml limits and MAX_VERTICES, so the casts to u32 cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
 fn attr<'a>(w: &W<'a>, e: ElemIx, name: &str) -> Result<Option<Cow<'a, [u8]>>, MvaError> {
     let first = w
         .doc
@@ -426,6 +430,8 @@ fn is_xmlns(w: &W<'_>, a: usize) -> bool {
 
 /// Refuses an attribute (other than a namespace declaration) whose qualified name is not in
 /// [`KNOWN_ATTRS`], or that appears twice on one element, on any element of the message.
+// E8: element, attribute, text, ring and sector counts are bounded by the oa-xml limits and MAX_VERTICES, so the casts to u32 cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
 fn check_attributes(w: &W<'_>) -> Result<(), MvaError> {
     for e in 0..w.doc.elem_name.len() {
         let first = w.doc.elem_first_attr.get(e).map_or(0, |a| a.0 as usize);
@@ -489,7 +495,7 @@ pub(crate) fn parse_deg_e7(tok: &[u8], max_deg: i64) -> Option<i32> {
         _ => (false, tok),
     };
     let (int_s, frac_s) = match rest.iter().position(|&c| c == b'.') {
-        Some(p) => (rest.get(..p)?, Some(rest.get(p + 1..)?)),
+        Some(p) => (rest.get(..p)?, Some(rest.get(p.saturating_add(1)..)?)),
         None => (rest, None),
     };
     if int_s.is_empty() || int_s.len() > 3 || !int_s.iter().all(u8::is_ascii_digit) {
@@ -497,7 +503,9 @@ pub(crate) fn parse_deg_e7(tok: &[u8], max_deg: i64) -> Option<i32> {
     }
     let mut v: i64 = 0;
     for &c in int_s {
-        v = v * 10 + i64::from(c - b'0');
+        v = v
+            .checked_mul(10)?
+            .checked_add(i64::from(c.saturating_sub(b'0')))?;
     }
     let mut frac: i64 = 0;
     let mut digits = 0u32;
@@ -506,15 +514,19 @@ pub(crate) fn parse_deg_e7(tok: &[u8], max_deg: i64) -> Option<i32> {
             return None;
         }
         for &c in f {
-            frac = frac * 10 + i64::from(c - b'0');
-            digits += 1;
+            frac = frac
+                .checked_mul(10)?
+                .checked_add(i64::from(c.saturating_sub(b'0')))?;
+            digits = digits.saturating_add(1);
         }
     }
-    let scaled = v * E7 + frac * 10_i64.pow(7 - digits);
-    if scaled > max_deg * E7 {
+    let scaled = v
+        .checked_mul(E7)?
+        .checked_add(frac.checked_mul(10_i64.checked_pow(7_u32.checked_sub(digits)?)?)?)?;
+    if scaled > max_deg.checked_mul(E7)? {
         return None;
     }
-    let s = if neg { -scaled } else { scaled };
+    let s = if neg { scaled.checked_neg()? } else { scaled };
     i32::try_from(s).ok()
 }
 
@@ -546,8 +558,8 @@ fn parse_ring(w: &W<'_>, e: ElemIx, ctx: &'static str) -> Result<Ring, MvaError>
         .split(|c| c.is_ascii_whitespace())
         .filter(|t| !t.is_empty())
     {
-        count += 1;
-        if count > MAX_VERTICES_PER_RING * 2 {
+        count = count.saturating_add(1);
+        if count > MAX_VERTICES_PER_RING.saturating_mul(2) {
             return Err(MvaError::Limit {
                 what: "vertices per ring",
                 max: MAX_VERTICES_PER_RING as u64,
@@ -770,7 +782,10 @@ fn parse_alt(w: &W<'_>, ml: ElemIx) -> Result<i32, MvaError> {
     }
     let mut v: i32 = 0;
     for &c in t {
-        v = v * 10 + i32::from(c - b'0');
+        // At most 6 digits (checked above), so this cannot overflow an i32.
+        v = v
+            .saturating_mul(10)
+            .saturating_add(i32::from(c.saturating_sub(b'0')));
     }
     if !(MIN_ALT_FT..=MAX_ALT_FT).contains(&v) {
         return Err(bad);
@@ -801,7 +816,7 @@ fn parse_surface(w: &W<'_>, hp: ElemIx) -> Result<Vec<Ring>, MvaError> {
     )?;
     let ex = one(w, pp, &ks, "PolygonPatch", Q::Gml, "exterior")?;
     let holes = matching(w, &ks, Q::Gml, "interior");
-    if holes.len() + 1 > MAX_RINGS_PER_SECTOR {
+    if holes.len() >= MAX_RINGS_PER_SECTOR {
         return Err(MvaError::Limit {
             what: "rings per sector",
             max: MAX_RINGS_PER_SECTOR as u64,
@@ -928,7 +943,9 @@ fn rollback(m: &mut Model, k: &Marks) {
     m.ring_hole.truncate(k.rings.div_ceil(64));
     if !k.rings.is_multiple_of(64) {
         if let Some(w) = m.ring_hole.last_mut() {
-            *w &= (1u64 << (k.rings % 64)) - 1;
+            *w &= !u64::MAX
+                .checked_shl(u32::try_from(k.rings % 64).unwrap_or(0))
+                .unwrap_or(0);
         }
     }
     m.vert_lat_e7.truncate(k.verts);
@@ -940,6 +957,10 @@ fn rollback(m: &mut Model, k: &Marks) {
     m.chart_sector_count.truncate(k.charts);
 }
 
+// E8: element, attribute, text, ring and sector counts are bounded by the oa-xml limits and MAX_VERTICES, so the casts to u32 cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
+// E8: a ring index below MAX_VERTICES plus one, and differences of i32 values taken in i64, cannot overflow.
+#[allow(clippy::arithmetic_side_effects)]
 fn append(m: &mut Model, name: &ChartName, secs: &[Sector]) -> Result<Loaded, MvaError> {
     let (s0, r0, v0) = (
         m.min_alt_ft.len(),
@@ -1006,8 +1027,8 @@ fn append(m: &mut Model, name: &ChartName, secs: &[Sector]) -> Result<Loaded, Mv
     Ok(Loaded {
         chart,
         sectors: secs.len(),
-        rings: m.ring_vert_count.len() - r0,
-        vertices: m.vert_lat_e7.len() - v0,
+        rings: m.ring_vert_count.len().saturating_sub(r0),
+        vertices: m.vert_lat_e7.len().saturating_sub(v0),
     })
 }
 
@@ -1025,6 +1046,8 @@ pub fn load_message(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<
     r
 }
 
+// E8: element, attribute, text, ring and sector counts are bounded by the oa-xml limits and MAX_VERTICES, so the casts to u32 cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
 fn load_inner(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<Loaded, MvaError> {
     let doc = parser.parse(input).map_err(MvaError::Xml)?;
     let mut texts = vec![NO_TEXT; doc.elem_name.len()];
@@ -1132,14 +1155,14 @@ fn load_inner(m: &mut Model, parser: &mut Parser, input: &[u8]) -> Result<Loaded
         .flat_map(|s| s.rings.iter())
         .map(|r| r.lat.len())
         .sum();
-    if m.min_alt_ft.len() + secs.len() > MAX_SECTORS {
+    if m.min_alt_ft.len().saturating_add(secs.len()) > MAX_SECTORS {
         return Err(MvaError::Limit {
             what: "sectors in the model",
             max: MAX_SECTORS as u64,
             at: at(&w, root),
         });
     }
-    if m.vert_lat_e7.len() + verts > MAX_VERTICES || rings > u32::MAX as usize {
+    if m.vert_lat_e7.len().saturating_add(verts) > MAX_VERTICES || rings > u32::MAX as usize {
         return Err(MvaError::Limit {
             what: "vertices in the model",
             max: MAX_VERTICES as u64,

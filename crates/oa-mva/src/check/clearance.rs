@@ -77,7 +77,12 @@ pub fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
     }
-    let ix = ((sorted.len() - 1) as f64 * p.clamp(0.0, 1.0)).round() as usize;
+    if p.is_nan() {
+        return f64::NAN;
+    }
+    // p is in 0 ..= 1, so the product is in 0 ..= len - 1.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ix = (sorted.len().saturating_sub(1) as f64 * p.clamp(0.0, 1.0)).round() as usize;
     sorted.get(ix).copied().unwrap_or(f64::NAN)
 }
 
@@ -87,11 +92,9 @@ fn sector_edges(m: &Model, s: SectorIx) -> Vec<(f64, f64, f64, f64)> {
     let mut out = Vec::new();
     for r in crate::ring_range(m, s) {
         let (lats, lons) = crate::ring_vertices(m, r);
-        let n = lats.len().min(lons.len());
-        for i in 1..n {
-            if let (Some(&ay), Some(&ax), Some(&by), Some(&bx)) =
-                (lats.get(i - 1), lons.get(i - 1), lats.get(i), lons.get(i))
-            {
+        for (ys, xs) in lats.windows(2).zip(lons.windows(2)) {
+            if let ([ay, by], [ax, bx]) = (ys, xs) {
+                let (ay, ax, by, bx) = (*ay, *ax, *by, *bx);
                 let (ax, ay, bx, by) = (
                     f64::from(ax) / f,
                     f64::from(ay) / f,
@@ -117,78 +120,216 @@ pub(crate) struct Acc {
     pub(crate) nodata: u64,
 }
 
-/// Scans the samples of `g` whose centres lie inside the polygon given by `edges`.
-pub(crate) fn scan_grid(g: &oa_tiff::Grid, edges: &[(f64, f64, f64, f64)], acc: &mut Acc) {
+impl Acc {
+    pub(crate) fn new() -> Acc {
+        Acc {
+            max_m: f32::MIN,
+            peak: (0.0, 0.0),
+            samples: 0,
+            nodata: 0,
+        }
+    }
+}
+
+/// Work units one [`clearance`] call may do: rows of the row tables, rows crossed by edges, grid
+/// cells scanned, sector-by-tile and sector-by-obstacle tests. A limit, not a measure of a typical
+/// run: one sector over one 1-degree tile is at most 13 million cells.
+pub const MAX_CLEARANCE_WORK: u64 = 1 << 36;
+
+/// A finite `f64` as `i64`, saturating at the ends (a bound that far out is clamped to the grid
+/// by the caller, never used as an index).
+#[allow(clippy::cast_possible_truncation)]
+fn sat_i64(v: f64) -> i64 {
+    v as i64
+}
+
+/// Adds `n` to `work`; an error once it passes `limit`.
+fn spend(work: &mut u64, limit: u64, n: u64, what: &str) -> Result<(), String> {
+    *work = work.saturating_add(n);
+    if *work > limit {
+        return Err(format!(
+            "terrain clearance needs more than {limit} units of work ({what}); not computed"
+        ));
+    }
+    Ok(())
+}
+
+/// Scans the samples of `g` whose centres lie inside the polygon given by `edges`. The row table,
+/// the rows each edge crosses and the cells of each span are added to `work` and held to `limit`
+/// before they are built or visited. A grid without a valid lattice or shorter than its
+/// dimensions, or a non-finite edge, is an error.
+pub(crate) fn scan_grid(
+    g: &oa_tiff::Grid,
+    edges: &[(f64, f64, f64, f64)],
+    acc: &mut Acc,
+    work: &mut u64,
+    limit: u64,
+) -> Result<(), String> {
     if edges.is_empty() || g.width == 0 || g.height == 0 {
-        return;
+        return Ok(());
+    }
+    let lattice = [g.lat0, g.lon0, g.dlat, g.dlon];
+    if !(lattice.iter().all(|v| v.is_finite()) && g.dlat > 0.0 && g.dlon > 0.0) {
+        return Err("terrain grid has no valid lattice".to_string());
+    }
+    let cells = u64::from(g.width).saturating_mul(u64::from(g.height));
+    if (g.elev.len() as u64) < cells {
+        return Err("terrain grid holds fewer samples than its dimensions".to_string());
+    }
+    if edges
+        .iter()
+        .any(|e| !(e.0.is_finite() && e.1.is_finite() && e.2.is_finite() && e.3.is_finite()))
+    {
+        return Err("sector edge is not finite".to_string());
     }
     let (ymin, ymax) = edges.iter().fold((f64::MAX, f64::MIN), |(lo, hi), e| {
         (lo.min(e.1), hi.max(e.3))
     });
     let h = i64::from(g.height);
     let w = i64::from(g.width);
-    let rmin = ((g.lat0 - ymax) / g.dlat).ceil().max(0.0) as i64;
-    let rmax = (((g.lat0 - ymin) / g.dlat).floor() as i64).min(h - 1);
+    let rmin = sat_i64(((g.lat0 - ymax) / g.dlat).ceil()).max(0);
+    let rmax = sat_i64(((g.lat0 - ymin) / g.dlat).floor()).min(h.saturating_sub(1));
     if rmin > rmax {
-        return;
+        return Ok(());
     }
-    let mut rows: Vec<Vec<f64>> = vec![Vec::new(); (rmax - rmin + 1) as usize];
-    for &(x0, y0, x1, y1) in edges {
-        // Rows whose latitude is in [y0, y1).
-        let lo = (((g.lat0 - y1) / g.dlat).floor() as i64 + 1).max(rmin);
-        let hi = (((g.lat0 - y0) / g.dlat).floor() as i64).min(rmax);
+    // Rows whose latitude is in [y0, y1), for one edge.
+    let span = |e: &(f64, f64, f64, f64)| {
+        let lo = sat_i64(((g.lat0 - e.3) / g.dlat).floor())
+            .saturating_add(1)
+            .max(rmin);
+        let hi = sat_i64(((g.lat0 - e.1) / g.dlat).floor()).min(rmax);
+        (lo, hi)
+    };
+    let rows_n = rmax.saturating_sub(rmin).saturating_add(1);
+    let edge_rows = edges.iter().fold(0u64, |a, e| {
+        let (lo, hi) = span(e);
+        a.saturating_add(u64::try_from(hi.saturating_sub(lo).saturating_add(1)).unwrap_or(0))
+    });
+    spend(
+        work,
+        limit,
+        u64::try_from(rows_n).unwrap_or(u64::MAX),
+        "row table",
+    )?;
+    spend(work, limit, edge_rows, "rows crossed by edges")?;
+    let mut rows: Vec<Vec<f64>> =
+        vec![Vec::new(); usize::try_from(rows_n).map_err(|e| e.to_string())?];
+    for e in edges {
+        let &(x0, y0, x1, y1) = e;
+        let (lo, hi) = span(e);
         let mut r = lo;
         while r <= hi {
             let lat = g.lat0 - r as f64 * g.dlat;
             let x = x0 + (lat - y0) * (x1 - x0) / (y1 - y0);
-            if let Some(row) = rows.get_mut((r - rmin) as usize) {
+            let slot = usize::try_from(r.saturating_sub(rmin))
+                .ok()
+                .and_then(|k| rows.get_mut(k));
+            if let Some(row) = slot {
                 row.push(x);
             }
-            r += 1;
+            r = r.saturating_add(1);
         }
     }
     for (k, xs) in rows.iter_mut().enumerate() {
         xs.sort_by(f64::total_cmp);
-        let r = rmin + k as i64;
+        let r = rmin.saturating_add(k as i64);
         let lat = g.lat0 - r as f64 * g.dlat;
         for &[xa, xb] in xs.as_chunks::<2>().0 {
-            let ca = (((xa - g.lon0) / g.dlon).ceil() as i64).max(0);
-            let cb = (((xb - g.lon0) / g.dlon).floor() as i64).min(w - 1);
-            let base = (r * w) as usize;
+            let ca = sat_i64(((xa - g.lon0) / g.dlon).ceil()).max(0);
+            let cb = sat_i64(((xb - g.lon0) / g.dlon).floor()).min(w.saturating_sub(1));
+            if ca > cb {
+                continue;
+            }
+            spend(
+                work,
+                limit,
+                u64::try_from(cb.saturating_sub(ca).saturating_add(1)).unwrap_or(u64::MAX),
+                "cells",
+            )?;
+            // r < height and c < width, and the sample table holds width * height samples.
+            let base = r.saturating_mul(w);
             let mut c = ca;
             while c <= cb {
-                match g.elev.get(base + c as usize) {
-                    Some(&v) if !v.is_finite() => acc.nodata += 1,
+                let at = usize::try_from(base.saturating_add(c)).ok();
+                match at.and_then(|i| g.elev.get(i)) {
+                    Some(&v) if !v.is_finite() => acc.nodata = acc.nodata.saturating_add(1),
                     Some(&v) => {
-                        acc.samples += 1;
+                        acc.samples = acc.samples.saturating_add(1);
                         if v > acc.max_m {
                             acc.max_m = v;
                             acc.peak = (lat, g.lon0 + c as f64 * g.dlon);
                         }
                     }
-                    None => {}
+                    None => return Err("terrain sample index outside the grid".to_string()),
                 }
-                c += 1;
+                c = c.saturating_add(1);
             }
         }
     }
+    Ok(())
 }
 
 /// The 3DEP tile name of the 1-degree cell whose south-west corner is (`lat`, `lon`) (western
 /// hemisphere longitudes are negative).
 pub fn tile_name(lat: i32, lon: i32) -> String {
-    format!("USGS_1_n{:02}w{:03}.tif", lat + 1, -lon)
+    format!(
+        "USGS_1_n{:02}w{:03}.tif",
+        lat.saturating_add(1),
+        0i32.saturating_sub(lon)
+    )
 }
 
 /// Scans `sectors` of `m` against the 3DEP tiles in `tile_dir` and the obstacles of `dof`.
 /// Tiles are read one at a time; a tile that is absent is counted in
 /// [`SectorClearance::tiles_missing`], and one that cannot be read is an error.
+///
+/// A sector that is not a row of `m`, obstacle columns of different lengths, or work over
+/// [`MAX_CLEARANCE_WORK`] is an error, so no sector is reported as empty for want of its data.
 pub fn clearance(
     m: &Model,
     sectors: &[SectorIx],
     tile_dir: &Path,
     dof: &oa_dof::Dof,
 ) -> Result<Vec<SectorClearance>, String> {
+    clearance_budget(m, sectors, tile_dir, dof, MAX_CLEARANCE_WORK)
+}
+
+/// [`clearance`] with an explicit work limit.
+pub fn clearance_budget(
+    m: &Model,
+    sectors: &[SectorIx],
+    tile_dir: &Path,
+    dof: &oa_dof::Dof,
+    limit: u64,
+) -> Result<Vec<SectorClearance>, String> {
+    let n = oa_dof::len(dof);
+    if [
+        dof.lon_e7.len(),
+        dof.amsl_ft.len(),
+        dof.kind.len(),
+        dof.oas_code.len(),
+        dof.oas_number.len(),
+    ]
+    .iter()
+    .any(|&l| l != n)
+    {
+        return Err("obstacle columns have different lengths".to_string());
+    }
+    for &s in sectors {
+        let i = s.0 as usize;
+        let rows = [
+            m.bbox_lat_min.len(),
+            m.bbox_lat_max.len(),
+            m.bbox_lon_min.len(),
+            m.bbox_lon_max.len(),
+            m.min_alt_ft.len(),
+            m.set.len(),
+        ];
+        if rows.iter().any(|&l| i >= l) || i >= crate::sector_count(m) {
+            return Err(format!("sector {} is not in the model", s.0));
+        }
+    }
+    let mut work = 0u64;
     let edges: Vec<Vec<(f64, f64, f64, f64)>> =
         sectors.iter().map(|&s| sector_edges(m, s)).collect();
     let f = E7 as f64;
@@ -201,29 +342,44 @@ pub fn clearance(
             f64::from(m.bbox_lon_max.get(i).copied().unwrap_or(0)) / f,
         )
     };
-    let mut accs: Vec<Acc> = sectors
-        .iter()
-        .map(|_| Acc {
-            max_m: f32::MIN,
-            peak: (0.0, 0.0),
-            samples: 0,
-            nodata: 0,
-        })
-        .collect();
+    let mut accs: Vec<Acc> = sectors.iter().map(|_| Acc::new()).collect();
     let mut missing = vec![0u32; sectors.len()];
-    // The 1-degree cells any sector touches.
+    // The 1-degree cells any sector touches, counted from the boxes before any is listed.
+    let whole = |v: i32| i32::try_from(i64::from(v).div_euclid(E7)).unwrap_or(i32::MAX);
+    let mut listed = 0u64;
+    for &s in sectors {
+        let i = s.0 as usize;
+        let b = |c: &[i32]| c.get(i).copied().map_or(0, whole);
+        let (la, lo) = (
+            i64::from(b(&m.bbox_lat_max))
+                .saturating_sub(i64::from(b(&m.bbox_lat_min)))
+                .saturating_add(1),
+            i64::from(b(&m.bbox_lon_max))
+                .saturating_sub(i64::from(b(&m.bbox_lon_min)))
+                .saturating_add(1),
+        );
+        listed = listed.saturating_add(u64::try_from(la.saturating_mul(lo)).unwrap_or(0));
+    }
+    spend(
+        &mut work,
+        limit,
+        listed,
+        "1-degree cells of the sector boxes",
+    )?;
     let mut cells: Vec<(i32, i32)> = Vec::new();
     for &s in sectors {
-        let (la0, la1, lo0, lo1) = bbox(s);
-        for la in la0.floor() as i32..=la1.floor() as i32 {
-            for lo in lo0.floor() as i32..=lo1.floor() as i32 {
-                if !cells.contains(&(la, lo)) {
-                    cells.push((la, lo));
-                }
+        let i = s.0 as usize;
+        let b = |c: &[i32]| c.get(i).copied().map_or(0, whole);
+        for la in b(&m.bbox_lat_min)..=b(&m.bbox_lat_max) {
+            for lo in b(&m.bbox_lon_min)..=b(&m.bbox_lon_max) {
+                cells.push((la, lo));
             }
         }
     }
     cells.sort_unstable();
+    cells.dedup();
+    let tests = (cells.len() as u64).saturating_mul(sectors.len() as u64);
+    spend(&mut work, limit, tests, "sector and 1-degree cell pairs")?;
     for (la, lo) in cells {
         let touching: Vec<usize> = sectors
             .iter()
@@ -231,9 +387,9 @@ pub fn clearance(
             .filter(|&(_, &s)| {
                 let (a0, a1, o0, o1) = bbox(s);
                 a1 > f64::from(la)
-                    && a0 < f64::from(la + 1)
+                    && a0 < f64::from(la.saturating_add(1))
                     && o1 > f64::from(lo)
-                    && o0 < f64::from(lo + 1)
+                    && o0 < f64::from(lo.saturating_add(1))
             })
             .map(|(k, _)| k)
             .collect();
@@ -244,7 +400,7 @@ pub fn clearance(
         if !path.is_file() {
             for &k in &touching {
                 if let Some(x) = missing.get_mut(k) {
-                    *x += 1;
+                    *x = x.saturating_add(1);
                 }
             }
             continue;
@@ -254,7 +410,8 @@ pub fn clearance(
         drop(bytes);
         for &k in &touching {
             if let (Some(acc), Some(es)) = (accs.get_mut(k), edges.get(k)) {
-                scan_grid(&g, es, acc);
+                scan_grid(&g, es, acc, &mut work, limit)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
             }
         }
     }
@@ -276,6 +433,12 @@ pub fn clearance(
             la >= ula0 && la <= ula1 && lo >= ulo0 && lo <= ulo1
         })
         .collect();
+    spend(
+        &mut work,
+        limit,
+        (sectors.len() as u64).saturating_mul(near.len() as u64),
+        "sector and obstacle pairs",
+    )?;
     let mut out = Vec::with_capacity(sectors.len());
     for (k, &s) in sectors.iter().enumerate() {
         let i = s.0 as usize;
@@ -295,7 +458,7 @@ pub fn clearance(
             if la < la0 || la > la1 || lo < lo0 || lo > lo1 || !sector_contains(m, s, la, lo) {
                 continue;
             }
-            count += 1;
+            count = count.saturating_add(1);
             let a = dof.amsl_ft.get(o).copied().unwrap_or(i32::MIN);
             if best.is_none_or(|(b, _)| a > b) {
                 best = Some((a, o));
@@ -319,7 +482,10 @@ pub fn clearance(
             obstacle_max_ft: best.map(|b| b.0),
             obstacle_peak: best.map(|(_, o)| {
                 (
-                    oa_dof::oas_number(dof, oa_dof::ObstacleIx(o as u32)).unwrap_or_default(),
+                    u32::try_from(o)
+                        .ok()
+                        .and_then(|i| oa_dof::oas_number(dof, oa_dof::ObstacleIx(i)))
+                        .unwrap_or_default(),
                     dof.kind.get(o).map(|b| oa_dof::text(b)).unwrap_or_default(),
                 )
             }),

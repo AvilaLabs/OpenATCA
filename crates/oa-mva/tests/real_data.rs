@@ -106,7 +106,17 @@ fn real_charts_all_load_with_no_refusal() {
 #[test]
 fn real_rings_close_and_do_not_cross() {
     let Some((_, l)) = loaded() else { return };
-    let r = rings::model_rings(&l.model);
+    let m = &l.model;
+    let (mut most, mut total) = (0u64, 0u64);
+    for i in 0..sector_count(m) {
+        let p = rings::sector_edge_pairs(m, SectorIx(i as u32));
+        most = most.max(p);
+        total += p;
+    }
+    eprintln!("edge pairs: largest sector {most}, whole model {total}");
+    assert!(most.saturating_mul(4) < rings::MAX_SECTOR_EDGE_PAIRS);
+    assert!(total.saturating_mul(4) < rings::MAX_MODEL_EDGE_PAIRS);
+    let r = rings::model_rings(m).unwrap();
     eprintln!("{r:?}");
     assert_eq!(r.not_closed, 0);
     assert_eq!(r.proper_crossings, 0, "a polygon crosses itself");

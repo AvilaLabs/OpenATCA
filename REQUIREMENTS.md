@@ -1708,6 +1708,15 @@ frame of their feed has been fed (as the ADS-B table is).
   with `GeoRef`.
 - **OA-TIFF-090** A plain (centre-in-area) polygon query whose cell tests times the polygon vertices are
   over `MAX_QUERY_WORK` is refused with `TooMuchWork` before any cell is visited.
+- **OA-TIFF-091** The plain radius query charges its cell tests to `MAX_QUERY_WORK` and adds the
+  cells of every tile it scans, so overlapping tiles cannot multiply the work; over the limit it is
+  refused with `TooMuchWork` before the cells of the tile that crosses it are visited.
+- **OA-TIFF-092** A scan whose bounding box has a bound that is NaN or infinite is refused with a
+  typed error; it never scans a widened box.
+- **OA-TIFF-093** A grid with fewer than two samples a side, or a lattice that is not finite and
+  positive, is refused by the plain queries with `BadGrid` and never panics a point lookup.
+- **OA-TIFF-094** A conservative query whose box sits at a lattice index too large to hold is
+  refused with `TooManySamples`, not clamped to a box that finds nothing.
 
 ### Digital Obstacle File (oa-dof)
 
@@ -1735,6 +1744,10 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-DOF-008** The real `DOF.DAT` (`OPENATCA_DATA`) parses with no rejected line, the line and
   obstacle counts agree, the per-state and per-country files are subsets whose total falls short
   by under 100 obstacles, and positions are inside the world; skipped when the data is absent.
+- **OA-DOF-009** A bounding-box query whose bound is NaN or infinite is refused with a typed error;
+  it is never read as 0 degrees or as the whole world.
+- **OA-DOF-010** The seconds field is read with checked arithmetic and held under 60.00, at its edges
+  (59.99 accepted, 60.00 and 99.99 refused).
 
 ## M1 — ADS-B history input
 
@@ -2234,10 +2247,17 @@ decoder is OA-GRIB-021.
   with more than 16 owners, or more than 8 million overlap records, refuses the chart.
 - **OA-MVA-081** Rasterising stops as soon as the overlap-record cap is reached (the remaining sectors are
   not painted), and a chart is also refused once its cell visits (one per cell of each sector, so
-  overlap repeats count) pass `MAX_CELL_VISITS` (40 million, about 6 times the largest real chart's
-  6.95 million), so the cost of a refusal, and of an accepted chart, is bounded by that budget.
+  overlap repeats count, one per row of a sector's row table and one per row an edge crosses) pass
+  `MAX_CELL_VISITS` (40 million, about 6 times the largest real chart's 6.99 million), so the cost of a refusal, and of an accepted chart, is bounded by that budget.
 - **OA-MVA-082** Namespace URIs are compared in their expanded form (read with `oa_xml::ns_uri_bytes`), so an
   AIXM, GML, XLink or XSI namespace written with character references loads like the plain one.
+- **OA-MVA-083** The ring checks need a number of edge pairs known from the ring sizes (every pair of
+  edges of a sector); a sector over `MAX_SECTOR_EDGE_PAIRS`, or a model over `MAX_MODEL_EDGE_PAIRS`,
+  is refused with an error before any pair is tested. The real charts are under a quarter of both.
+- **OA-MVA-084** The terrain and obstacle scan refuses, with an error, a sector that is not in the model,
+  obstacle columns of different lengths, a terrain grid without a valid lattice or shorter than its
+  dimensions, and work over `MAX_CLEARANCE_WORK` (rows, edge rows, cells, pair tests, counted before
+  they are built); a NaN percentile is NaN.
 
 ## M2 — Weather inputs
 

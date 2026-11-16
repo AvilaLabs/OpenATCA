@@ -2,7 +2,10 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // Test fixtures and loop counters, not parsed input.
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
 )]
 
 use crate::check::{clearance, coverage, pdf, rings};
@@ -743,17 +746,17 @@ fn raw_model(rings_: &[&[(i32, i32)]]) -> Model {
 fn ring_integrity_counts_defects_without_repairing() {
     // A clean square: counter-clockwise, nothing to report.
     let ok = raw_model(&[&[(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)]]);
-    let r = rings::model_rings(&ok);
+    let r = rings::model_rings(&ok).unwrap();
     assert_eq!(
         (r.proper_crossings, r.touches, r.spikes, r.not_closed),
         (0, 0, 0, 0)
     );
     assert_eq!(r.clockwise_exteriors, 0);
     let cw = raw_model(&[&[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]]);
-    assert_eq!(rings::model_rings(&cw).clockwise_exteriors, 1);
+    assert_eq!(rings::model_rings(&cw).unwrap().clockwise_exteriors, 1);
     // A bow tie crosses itself once.
     let bow = raw_model(&[&[(0, 0), (100, 100), (0, 100), (100, 0), (0, 0)]]);
-    let r = rings::model_rings(&bow);
+    let r = rings::model_rings(&bow).unwrap();
     assert_eq!(r.proper_crossings, 1);
     // A ring that touches itself at a vertex (figure eight pinched at a point).
     let pinch = raw_model(&[&[
@@ -765,7 +768,7 @@ fn ring_integrity_counts_defects_without_repairing() {
         (100, 0),
         (0, 0),
     ]]);
-    let r = rings::model_rings(&pinch);
+    let r = rings::model_rings(&pinch).unwrap();
     assert_eq!(
         (r.proper_crossings, r.touches),
         (0, 4),
@@ -781,26 +784,26 @@ fn ring_integrity_counts_defects_without_repairing() {
         (100, 0),
         (0, 0),
     ]]);
-    assert!(rings::model_rings(&spike).spikes >= 1);
+    assert!(rings::model_rings(&spike).unwrap().spikes >= 1);
     // An open ring is counted as not closed (the loader would have refused it).
     let open = raw_model(&[&[(0, 0), (0, 100), (100, 100), (100, 0)]]);
-    assert_eq!(rings::model_rings(&open).not_closed, 1);
+    assert_eq!(rings::model_rings(&open).unwrap().not_closed, 1);
     // A hole outside its exterior; a repeated vertex; a zero-area ring.
     let ho = raw_model(&[
         &[(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)],
         &[(500, 500), (500, 600), (600, 600), (600, 500), (500, 500)],
     ]);
-    assert_eq!(rings::model_rings(&ho).holes_outside, 1);
+    assert_eq!(rings::model_rings(&ho).unwrap().holes_outside, 1);
     let rep = raw_model(&[&[(0, 0), (0, 0), (0, 100), (100, 100), (100, 0), (0, 0)]]);
-    assert_eq!(rings::model_rings(&rep).repeated_vertices, 1);
+    assert_eq!(rings::model_rings(&rep).unwrap().repeated_vertices, 1);
     let flat = raw_model(&[&[(0, 0), (0, 100), (0, 200), (0, 0)]]);
-    assert_eq!(rings::model_rings(&flat).zero_area, 1);
+    assert_eq!(rings::model_rings(&flat).unwrap().zero_area, 1);
     // A hole crossing its exterior's edge counts as a crossing.
     let cr = raw_model(&[
         &[(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)],
         &[(50, 50), (50, 150), (80, 150), (80, 50), (50, 50)],
     ]);
-    assert_eq!(rings::model_rings(&cr).proper_crossings, 2);
+    assert_eq!(rings::model_rings(&cr).unwrap().proper_crossings, 2);
 }
 
 // REQ: OA-MVA-012
@@ -974,7 +977,7 @@ fn terrain_scan_takes_samples_inside_the_polygon_only() {
         samples: 0,
         nodata: 0,
     };
-    clearance::scan_grid(&g, &edges, &mut acc);
+    clearance::scan_grid(&g, &edges, &mut acc, &mut 0, u64::MAX).unwrap();
     // Two vertical edges alone enclose nothing without a horizontal pair: rows get crossings
     // from the two edges, so the span between them is filled for rows 1..=3.
     assert_eq!(acc.samples, 9);
@@ -993,7 +996,7 @@ fn terrain_scan_takes_samples_inside_the_polygon_only() {
         samples: 0,
         nodata: 0,
     };
-    clearance::scan_grid(&g2, &edges, &mut acc);
+    clearance::scan_grid(&g2, &edges, &mut acc, &mut 0, u64::MAX).unwrap();
     assert_eq!((acc.samples, acc.nodata), (8, 1));
     assert_eq!(acc.max_m, 303.0);
     assert_eq!(clearance::tile_name(41, -88), "USGS_1_n42w088.tif");
@@ -1086,7 +1089,7 @@ fn non_finite_terrain_samples_are_nodata_in_the_scan() {
         samples: 0,
         nodata: 0,
     };
-    clearance::scan_grid(&g, &edges, &mut acc);
+    clearance::scan_grid(&g, &edges, &mut acc, &mut 0, u64::MAX).unwrap();
     assert_eq!((acc.samples, acc.nodata), (7, 2));
     assert!(acc.max_m.is_finite());
     // A sector of only -inf has no known terrain.
@@ -1100,7 +1103,7 @@ fn non_finite_terrain_samples_are_nodata_in_the_scan() {
         samples: 0,
         nodata: 0,
     };
-    clearance::scan_grid(&g2, &edges, &mut acc);
+    clearance::scan_grid(&g2, &edges, &mut acc, &mut 0, u64::MAX).unwrap();
     assert_eq!((acc.samples, acc.nodata), (0, 9));
 }
 
@@ -1457,10 +1460,12 @@ fn visit_budget_refuses_a_chart_below_the_overlap_cap() {
         })
         .collect();
     let (m, _) = load("BUD_MVA_FUS3_2024", &secs).unwrap();
-    // Each sector is 250 x 250 = 62,500 cells.
-    let (ok, v) = coverage::chart_coverage_budget(&m, 0, 3 * 62_500);
+    // Each sector is 250 x 250 = 62,500 cells, a 250 row table and two vertical edges of 250
+    // rows each.
+    let per_sector = 62_500 + 250 + 2 * 250;
+    let (ok, v) = coverage::chart_coverage_budget(&m, 0, 3 * per_sector);
     assert!(ok.is_ok());
-    assert_eq!(v, 3 * 62_500);
+    assert_eq!(v, 3 * per_sector);
     let (r, v) = coverage::chart_coverage_budget(&m, 0, 100_000);
     let e = r.unwrap_err();
     assert!(e.contains("cell visits"), "{e}");
@@ -1490,4 +1495,234 @@ fn escaped_namespace_uris_load_like_plain_ones() {
     let (m, b) = load_xml(&escaped);
     assert_eq!(a.unwrap(), b.unwrap());
     assert_eq!(sector_count(&m), 1);
+}
+
+/// A closed ring of `n` edges round the origin, counter-clockwise, as (lat, lon) in e7.
+fn polygon_ring(n: usize, radius: i32) -> Vec<(i32, i32)> {
+    let mut v: Vec<(i32, i32)> = (0..n)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            (
+                (f64::from(radius) * a.sin()) as i32,
+                (f64::from(radius) * a.cos()) as i32,
+            )
+        })
+        .collect();
+    v.push(v[0]);
+    v
+}
+
+// REQ: OA-MVA-083
+#[test]
+fn ring_checks_refuse_a_sector_over_the_pair_budget_before_testing_any_pair() {
+    // Eight rings of 200 edges: 1,600 edges, 1,279,200 edge pairs.
+    let rings_: Vec<Vec<(i32, i32)>> = (0..8)
+        .map(|k| polygon_ring(200, 1_000_000 * (k + 1)))
+        .collect();
+    let refs: Vec<&[(i32, i32)]> = rings_.iter().map(|r| r.as_slice()).collect();
+    let m = raw_model(&refs);
+    assert_eq!(rings::sector_edge_pairs(&m, SectorIx(0)), 1_279_200);
+    let r = rings::sector_rings_budget(&m, SectorIx(0), 1_279_200);
+    assert!(r.is_ok(), "{r:?}");
+    let r = rings::sector_rings_budget(&m, SectorIx(0), 1_000_000);
+    let e = r.unwrap_err();
+    assert!(e.contains("edge pairs"), "{e}");
+}
+
+// REQ: OA-MVA-083
+#[test]
+fn ring_checks_refuse_a_model_over_the_total_budget_and_keep_the_counts_under_it() {
+    let sq_ring = [(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)];
+    let bow = [(0, 0), (100, 100), (0, 100), (100, 0), (0, 0)];
+    let m = raw_model(&[&sq_ring, &bow]);
+    // 8 edges: 28 pairs.
+    assert_eq!(rings::sector_edge_pairs(&m, SectorIx(0)), 28);
+    let ok = rings::model_rings_budget(&m, 28, 28).unwrap();
+    assert_eq!(ok, rings::sector_rings_budget(&m, SectorIx(0), 28).unwrap());
+    assert!(ok.proper_crossings >= 1);
+    let e = rings::model_rings_budget(&m, 27, 1 << 30).unwrap_err();
+    assert!(e.contains("sector 0") && e.contains("28 edge pairs"), "{e}");
+    let e = rings::model_rings_budget(&m, 1 << 30, 27).unwrap_err();
+    assert!(
+        e.contains("the model") && e.contains("28 edge pairs"),
+        "{e}"
+    );
+    // The largest ring the loader accepts is inside the default sector budget.
+    let max_edges = (MAX_VERTICES_PER_RING - 1) as u64;
+    assert!(max_edges * (max_edges - 1) / 2 <= rings::MAX_SECTOR_EDGE_PAIRS);
+    // A maximal sector is not.
+    let edges = max_edges * MAX_RINGS_PER_SECTOR as u64;
+    assert!(edges * (edges - 1) / 2 > rings::MAX_SECTOR_EDGE_PAIRS);
+}
+
+// REQ: OA-MVA-081
+#[test]
+fn the_row_table_and_the_edge_rows_are_charged_to_the_visit_budget() {
+    // A sector 5 degrees tall and one cell wide: 2,500 rows but about 2,500 cells.
+    let tall = Fix {
+        name: "T",
+        alt: 2500,
+        rings: vec![sq(0.0, 0.0, 0.002, 5.0)],
+    };
+    let (m, _) = load("TAL_MVA_FUS3_2024", &[tall]).unwrap();
+    let (ok, v) = coverage::chart_coverage_budget(&m, 0, coverage::MAX_CELL_VISITS);
+    assert!(ok.is_ok());
+    // The row table (2,500 rows) and the two vertical edges over 2,500 rows are work too.
+    assert!(
+        v >= 2_500 + 2 * 2_500,
+        "{v} visits charged for a 2,500 row sector"
+    );
+    let (r, v) = coverage::chart_coverage_budget(&m, 0, 3_000);
+    let e = r.unwrap_err();
+    assert!(e.contains("cell visits"), "{e}");
+    assert!(v <= 3_001 + 5_000, "{v}");
+}
+
+// REQ: OA-MVA-081
+#[test]
+fn many_long_edges_over_few_cells_are_refused_by_the_budget() {
+    // 2,000 edges that each span 500 rows (a comb of thin spikes 1 degree tall): a million
+    // edge-row crossings over a sector of about 10,000 cells.
+    let mut ring = Vec::new();
+    for k in 0..1000 {
+        let x = f64::from(k) * 1e-5;
+        ring.push((x, 0.0));
+        ring.push((x + 5e-6, 1.0));
+    }
+    let comb = Fix {
+        name: "C",
+        alt: 2500,
+        rings: vec![ring],
+    };
+    let (m, _) = load("COM_MVA_FUS3_2024", &[comb]).unwrap();
+    let (r, v) = coverage::chart_coverage_budget(&m, 0, 100_000);
+    let e = r.unwrap_err();
+    assert!(
+        e.contains("cell visits"),
+        "{e} after {v} visits for 2,000 edges of 500 rows each"
+    );
+    assert!(v <= 100_001, "{v}");
+}
+
+fn empty_dof() -> oa_dof::Dof {
+    let header = "  CURRENCY DATE = 09/27/26\r\n\
+                                   LATITUDE     LONGITUDE     OBSTACLE             AGL   AMSL LT ACC MAR FAA          ACTION\r\n\
+OAS#      V CO ST CITY             DEG MIN SEC  DEG MIN SEC   TYPE                 HT    HT     H V IND STUDY           JDATE\r\n\
+-------------------------------------------------------------------------------------------------------------------------------\r\n";
+    oa_dof::parse_dof(header.as_bytes()).unwrap()
+}
+
+fn one_obstacle_dof(lat_e7: i32, lon_e7: i32) -> oa_dof::Dof {
+    let mut d = empty_dof();
+    d.oas_code.push(*b"01");
+    d.oas_number.push(1);
+    d.verification.push(b'O');
+    d.country.push(*b"US");
+    d.state.push(*b"AL");
+    d.city.push([b' '; 16]);
+    d.lat_e7.push(lat_e7);
+    d.lon_e7.push(lon_e7);
+    d.kind.push(*b"TOWER             ");
+    d.quantity.push(b'1');
+    d.agl_ft.push(100);
+    d.amsl_ft.push(900);
+    d.lighting.push(b'N');
+    d.h_acc.push(b'1');
+    d.v_acc.push(b'A');
+    d.marking.push(b'N');
+    d.study.push([b' '; 14]);
+    d.action.push(b'A');
+    d.julian.push(2026001);
+    d
+}
+
+fn centre_square_model() -> Model {
+    let (m, _) = load(
+        "CEN_MVA_FUS3_2024",
+        &[Fix {
+            name: "A",
+            alt: 2500,
+            rings: vec![sq(-0.1, -0.1, 0.1, 0.1)],
+        }],
+    )
+    .unwrap();
+    m
+}
+
+// REQ: OA-MVA-084
+#[test]
+fn clearance_refuses_a_sector_that_is_not_in_the_model_instead_of_reading_it_as_empty() {
+    let m = centre_square_model();
+    let dir = std::env::temp_dir().join("oa-mva-no-such-tiles");
+    let dof = one_obstacle_dof(500_000, 500_000);
+    let ok = clearance::clearance(&m, &[SectorIx(0)], &dir, &dof);
+    assert!(ok.is_ok(), "{ok:?}");
+    let r = clearance::clearance(&m, &[SectorIx(0), SectorIx(99)], &dir, &dof);
+    assert!(
+        r.is_err(),
+        "a sector row that does not exist gave {:?}",
+        r.map(|v| v.len())
+    );
+}
+
+// REQ: OA-MVA-084
+#[test]
+fn clearance_refuses_ragged_obstacle_columns_instead_of_reading_a_missing_longitude_as_zero() {
+    let m = centre_square_model();
+    let dir = std::env::temp_dir().join("oa-mva-no-such-tiles");
+    // Inside the sector in latitude, far east in longitude: not in the sector.
+    let mut dof = one_obstacle_dof(500_000, 1_000_000_000);
+    let r = clearance::clearance(&m, &[SectorIx(0)], &dir, &dof).unwrap();
+    assert_eq!(r[0].obstacles, 0);
+    // With the longitude column short, the obstacle used to be read at longitude 0.
+    dof.lon_e7.clear();
+    let r = clearance::clearance(&m, &[SectorIx(0)], &dir, &dof);
+    assert!(
+        r.is_err(),
+        "a missing longitude gave {:?} obstacles",
+        r.map(|v| v[0].obstacles)
+    );
+}
+
+// REQ: OA-MVA-084
+#[test]
+fn a_terrain_scan_is_charged_rows_edge_rows_and_cells_and_refused_over_the_limit() {
+    let g = oa_tiff::Grid {
+        width: 100,
+        height: 100,
+        lon0: 20.0,
+        lat0: 10.0,
+        dlon: 0.01,
+        dlat: 0.01,
+        elev: vec![1.0; 100 * 100],
+        nodata_count: 0,
+        point_registered: true,
+        crs: 4326,
+        vertical_cs: None,
+    };
+    // A box over the whole grid: 2 vertical edges of about 100 rows, 100 rows, 100 x 100 cells.
+    let edges = vec![(19.99, 8.99, 19.99, 10.01), (21.01, 8.99, 21.01, 10.01)];
+    let mut acc = clearance::Acc::new();
+    let mut work = 0u64;
+    clearance::scan_grid(&g, &edges, &mut acc, &mut work, 1_000_000).unwrap();
+    assert_eq!(acc.samples, 10_000);
+    assert!(work >= 10_000 + 100 + 200, "{work}");
+    let mut acc = clearance::Acc::new();
+    let r = clearance::scan_grid(&g, &edges, &mut acc, &mut 0, 5_000);
+    assert!(
+        r.is_err(),
+        "a 10,000 cell scan under a limit of 5,000 gave {} samples",
+        acc.samples
+    );
+    assert!(acc.samples < 10_000);
+}
+
+// REQ: OA-MVA-084
+#[test]
+fn a_percentile_of_nan_is_nan_not_the_first_value() {
+    let v = [1.0, 2.0, 3.0];
+    assert!(clearance::percentile(&v, f64::NAN).is_nan());
+    assert_eq!(clearance::percentile(&v, 0.0), 1.0);
+    assert_eq!(clearance::percentile(&v, 1.0), 3.0);
+    assert_eq!(clearance::percentile(&v, 7.0), 3.0);
 }

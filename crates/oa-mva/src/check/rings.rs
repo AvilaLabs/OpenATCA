@@ -3,6 +3,12 @@
 use crate::geom::{locate_in_ring, orient, segments_meet, Meet, Where};
 use crate::model::{ring_is_hole, ring_range, ring_vertices, sector_count, Model, SectorIx};
 
+/// Most edge pairs one sector may need for its ring checks (about 11,500 edges: a ring of the
+/// loader's largest size needs 8.4 million; the largest real sector needs 1.38 million and the whole real model 20.2 million).
+pub const MAX_SECTOR_EDGE_PAIRS: u64 = 1 << 26;
+/// Most edge pairs the ring checks of a whole model may need.
+pub const MAX_MODEL_EDGE_PAIRS: u64 = 1 << 30;
+
 /// Counts of defects over a set of sectors. Plain data (A1).
 // A7.2: cold struct, size guard waived (one per report)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,6 +36,8 @@ pub struct RingReport {
 }
 
 /// Twice the signed area of a closed ring in 1e-14 square degrees.
+// E8: coordinates are i32 (products fit i128), edge indexes stay below 4,096 and the counts are bounded by the edge-pair budget, so nothing can overflow.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn ring_area2(lats: &[i32], lons: &[i32]) -> i128 {
     let n = lats.len().min(lons.len());
     let mut s: i128 = 0;
@@ -48,11 +56,13 @@ pub fn ring_area2(lats: &[i32], lons: &[i32]) -> i128 {
 fn edge(lats: &[i32], lons: &[i32], i: usize) -> Option<((i32, i32), (i32, i32))> {
     Some((
         (*lons.get(i)?, *lats.get(i)?),
-        (*lons.get(i + 1)?, *lats.get(i + 1)?),
+        (*lons.get(i.checked_add(1)?)?, *lats.get(i.checked_add(1)?)?),
     ))
 }
 
 /// Edge pairs within one ring: crossings, touches and spikes.
+// E8: coordinates are i32 (products fit i128), edge indexes stay below 4,096 and the counts are bounded by the edge-pair budget, so nothing can overflow.
+#[allow(clippy::arithmetic_side_effects)]
 fn within_ring(lats: &[i32], lons: &[i32], rep: &mut RingReport) {
     let n_edges = lats.len().min(lons.len()).saturating_sub(1);
     for i in 0..n_edges {
@@ -93,6 +103,8 @@ fn within_ring(lats: &[i32], lons: &[i32], rep: &mut RingReport) {
 }
 
 /// Edge pairs between two different rings of one sector.
+// E8: coordinates are i32 (products fit i128), edge indexes stay below 4,096 and the counts are bounded by the edge-pair budget, so nothing can overflow.
+#[allow(clippy::arithmetic_side_effects)]
 fn between_rings((la, lo): (&[i32], &[i32]), (lb, lob): (&[i32], &[i32]), rep: &mut RingReport) {
     let na = la.len().min(lo.len()).saturating_sub(1);
     let nb = lb.len().min(lob.len()).saturating_sub(1);
@@ -113,8 +125,36 @@ fn between_rings((la, lo): (&[i32], &[i32]), (lb, lob): (&[i32], &[i32]), rep: &
     }
 }
 
-/// Integrity counts of sector `s`.
-pub fn sector_rings(m: &Model, s: SectorIx) -> RingReport {
+/// Edge pairs the ring tests of sector `s` examine: every pair of edges of the sector, within a
+/// ring and between rings. Known from the ring sizes before any pair is tested.
+pub fn sector_edge_pairs(m: &Model, s: SectorIx) -> u64 {
+    let edges: u64 = ring_range(m, s)
+        .map(|r| (ring_vertices(m, r).0.len() as u64).saturating_sub(1))
+        .fold(0, u64::saturating_add);
+    edges.saturating_mul(edges.saturating_sub(1)) / 2
+}
+
+/// Integrity counts of sector `s`, or an error when the sector needs more than `budget` edge
+/// pairs ([`sector_edge_pairs`]); the refusal comes before any pair is tested.
+pub fn sector_rings_budget(m: &Model, s: SectorIx, budget: u64) -> Result<RingReport, String> {
+    let pairs = sector_edge_pairs(m, s);
+    if pairs > budget {
+        return Err(format!(
+            "sector {} needs {pairs} edge pairs, over the budget of {budget}; ring checks not run",
+            s.0
+        ));
+    }
+    Ok(sector_rings_tested(m, s))
+}
+
+/// [`sector_rings_budget`] with the default budget, [`MAX_SECTOR_EDGE_PAIRS`].
+pub fn sector_rings(m: &Model, s: SectorIx) -> Result<RingReport, String> {
+    sector_rings_budget(m, s, MAX_SECTOR_EDGE_PAIRS)
+}
+
+// E8: coordinates are i32 (products fit i128), edge indexes stay below 4,096 and the counts are bounded by the edge-pair budget, so nothing can overflow.
+#[allow(clippy::arithmetic_side_effects)]
+fn sector_rings_tested(m: &Model, s: SectorIx) -> RingReport {
     let mut rep = RingReport {
         sectors: 1,
         ..RingReport::default()
@@ -150,22 +190,46 @@ pub fn sector_rings(m: &Model, s: SectorIx) -> RingReport {
     rep
 }
 
-/// Sums [`sector_rings`] over every sector of the model.
-pub fn model_rings(m: &Model) -> RingReport {
-    let mut t = RingReport::default();
-    for i in 0..sector_count(m) {
-        let r = sector_rings(m, SectorIx(i as u32));
-        t.sectors += r.sectors;
-        t.rings += r.rings;
-        t.vertices += r.vertices;
-        t.not_closed += r.not_closed;
-        t.proper_crossings += r.proper_crossings;
-        t.touches += r.touches;
-        t.spikes += r.spikes;
-        t.repeated_vertices += r.repeated_vertices;
-        t.zero_area += r.zero_area;
-        t.clockwise_exteriors += r.clockwise_exteriors;
-        t.holes_outside += r.holes_outside;
+/// Sums [`sector_rings`] over every sector of the model. Refused, before any pair is tested, when
+/// one sector is over [`MAX_SECTOR_EDGE_PAIRS`] or the model over [`MAX_MODEL_EDGE_PAIRS`].
+pub fn model_rings(m: &Model) -> Result<RingReport, String> {
+    model_rings_budget(m, MAX_SECTOR_EDGE_PAIRS, MAX_MODEL_EDGE_PAIRS)
+}
+
+/// [`model_rings`] with explicit budgets for one sector and for the whole model.
+pub fn model_rings_budget(m: &Model, sector: u64, model: u64) -> Result<RingReport, String> {
+    let n = sector_count(m);
+    let mut total = 0u64;
+    for i in 0..n {
+        let s = SectorIx(u32::try_from(i).map_err(|_| "too many sectors".to_string())?);
+        let pairs = sector_edge_pairs(m, s);
+        if pairs > sector {
+            return Err(format!(
+                "sector {i} needs {pairs} edge pairs, over the budget of {sector}; ring checks not run"
+            ));
+        }
+        total = total.saturating_add(pairs);
     }
-    t
+    if total > model {
+        return Err(format!(
+            "the model needs {total} edge pairs, over the budget of {model}; ring checks not run"
+        ));
+    }
+    let mut t = RingReport::default();
+    for i in 0..n {
+        let s = SectorIx(u32::try_from(i).map_err(|_| "too many sectors".to_string())?);
+        let r = sector_rings_tested(m, s);
+        t.sectors = t.sectors.saturating_add(r.sectors);
+        t.rings = t.rings.saturating_add(r.rings);
+        t.vertices = t.vertices.saturating_add(r.vertices);
+        t.not_closed = t.not_closed.saturating_add(r.not_closed);
+        t.proper_crossings = t.proper_crossings.saturating_add(r.proper_crossings);
+        t.touches = t.touches.saturating_add(r.touches);
+        t.spikes = t.spikes.saturating_add(r.spikes);
+        t.repeated_vertices = t.repeated_vertices.saturating_add(r.repeated_vertices);
+        t.zero_area = t.zero_area.saturating_add(r.zero_area);
+        t.clockwise_exteriors = t.clockwise_exteriors.saturating_add(r.clockwise_exteriors);
+        t.holes_outside = t.holes_outside.saturating_add(r.holes_outside);
+    }
+    Ok(t)
 }

@@ -121,6 +121,18 @@ fn type_size(typ: u16) -> Option<u64> {
     }
 }
 
+/// Offset of value `i` of `size` bytes in a tag whose values start at `base`.
+fn value_at(base: usize, i: usize, size: usize) -> Result<usize, TiffError> {
+    i.checked_mul(size)
+        .and_then(|o| base.checked_add(o))
+        .ok_or(TiffError::BadOffset("tag values"))
+}
+
+/// `at` plus `k` bytes, for the fields of one IFD entry.
+fn plus(at: usize, k: usize) -> Result<usize, TiffError> {
+    at.checked_add(k).ok_or(TiffError::BadOffset("IFD entry"))
+}
+
 fn find(entries: &[Entry], tag: u16) -> Option<Entry> {
     entries.iter().copied().find(|e| e.tag == tag)
 }
@@ -133,13 +145,20 @@ fn uints(s: Src<'_>, e: Entry) -> Result<Vec<u64>, TiffError> {
             count: e.count,
         });
     }
-    let n = e.count as usize;
+    let n = usize::try_from(e.count).map_err(|_| TiffError::TagTooLarge {
+        tag: e.tag,
+        count: e.count,
+    })?;
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
         let x = match e.typ {
-            1 => u64::from(get::<1>(s, e.at + i, "tag values")?[0]),
-            3 => u64::from(u16_at(s, e.at + i * 2, "tag values")?),
-            4 => u64::from(u32_at(s, e.at + i * 4, "tag values")?),
+            1 => u64::from(u8::from_ne_bytes(get::<1>(
+                s,
+                value_at(e.at, i, 1)?,
+                "tag values",
+            )?)),
+            3 => u64::from(u16_at(s, value_at(e.at, i, 2)?, "tag values")?),
+            4 => u64::from(u32_at(s, value_at(e.at, i, 4)?, "tag values")?),
             t => return Err(TiffError::BadTagType { tag: e.tag, typ: t }),
         };
         v.push(x);
@@ -153,7 +172,10 @@ fn uint1(s: Src<'_>, e: Entry) -> Result<u32, TiffError> {
         return Err(TiffError::BadValue("tag must hold exactly one value"));
     }
     let v = uints(s, e)?;
-    let x = v.first().copied().unwrap_or(0);
+    let x = v
+        .first()
+        .copied()
+        .ok_or(TiffError::BadValue("tag must hold exactly one value"))?;
     u32::try_from(x).map_err(|_| TiffError::BadValue("tag value over 32 bits"))
 }
 
@@ -172,8 +194,9 @@ pub(crate) fn doubles(
     if count > MAX_TAG_COUNT {
         return Err(TiffError::TagTooLarge { tag: 0, count });
     }
-    (0..count as usize)
-        .map(|i| f64_at(src, at + i * 8, "double values"))
+    let n = usize::try_from(count).map_err(|_| TiffError::TagTooLarge { tag: 0, count })?;
+    (0..n)
+        .map(|i| f64_at(src, value_at(at, i, 8)?, "double values"))
         .collect()
 }
 
@@ -190,9 +213,10 @@ fn ascii(s: Src<'_>, e: Entry) -> Result<String, TiffError> {
             count: e.count,
         });
     }
-    let end =
-        e.at.checked_add(e.count as usize)
-            .ok_or(TiffError::BadOffset("ascii value"))?;
+    let end = usize::try_from(e.count)
+        .ok()
+        .and_then(|n| e.at.checked_add(n))
+        .ok_or(TiffError::BadOffset("ascii value"))?;
     let b = s
         .data
         .get(e.at..end)
@@ -234,19 +258,23 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         43 => return Err(TiffError::BigTiffUnsupported),
         _ => return Err(TiffError::BadHeader),
     }
-    let ifd = u32_at(s, 4, "header")? as usize;
-    let n = u64::from(u16_at(s, ifd, "IFD")?);
-    if n as usize > MAX_IFD_ENTRIES {
-        return Err(TiffError::TooManyEntries(n));
+    let ifd =
+        usize::try_from(u32_at(s, 4, "header")?).map_err(|_| TiffError::BadOffset("IFD offset"))?;
+    let n = usize::from(u16_at(s, ifd, "IFD")?);
+    if n > MAX_IFD_ENTRIES {
+        return Err(TiffError::TooManyEntries(n as u64));
     }
-    let mut entries: Vec<Entry> = Vec::with_capacity(n as usize);
-    for i in 0..n as usize {
-        let at = ifd
-            .checked_add(2 + i * 12)
+    let mut entries: Vec<Entry> = Vec::with_capacity(n);
+    for i in 0..n {
+        let at = i
+            .checked_mul(12)
+            .and_then(|o| o.checked_add(2))
+            .and_then(|o| ifd.checked_add(o))
             .ok_or(TiffError::BadOffset("IFD entry"))?;
         let tag = u16_at(s, at, "IFD entry")?;
-        let typ = u16_at(s, at + 2, "IFD entry")?;
-        let count = u64::from(u32_at(s, at + 4, "IFD entry")?);
+        let typ = u16_at(s, plus(at, 2)?, "IFD entry")?;
+        let count = u64::from(u32_at(s, plus(at, 4)?, "IFD entry")?);
+        let inline = plus(at, 8)?;
         if entries.iter().any(|e| e.tag == tag) {
             return Err(TiffError::DuplicateTag(tag));
         }
@@ -257,18 +285,19 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
                 tag,
                 typ,
                 count,
-                at: at + 8,
+                at: inline,
             });
             continue;
         };
         let total = size.saturating_mul(count);
-        let value_at = if total <= 4 {
-            at + 8
+        let value_off = if total <= 4 {
+            inline
         } else {
-            u32_at(s, at + 8, "IFD entry")? as usize
+            usize::try_from(u32_at(s, inline, "IFD entry")?)
+                .map_err(|_| TiffError::BadOffset("IFD entry"))?
         };
         if total > 4 {
-            let end = (value_at as u64).saturating_add(total);
+            let end = (value_off as u64).saturating_add(total);
             if end > data.len() as u64 {
                 // Only fatal if the tag is one we read; recorded as out of range via `at`.
                 entries.push(Entry {
@@ -284,7 +313,7 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
             tag,
             typ,
             count,
-            at: value_at,
+            at: value_off,
         });
     }
     let req = |tag: u16, name: &'static str| find(&entries, tag).ok_or(TiffError::MissingTag(name));
@@ -301,7 +330,7 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
             limit: u64::from(MAX_DIMENSION),
         });
     }
-    let pixels = u64::from(width) * u64::from(height);
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
     if pixels > MAX_PIXELS {
         return Err(TiffError::TooLarge {
             what: "pixel count",
@@ -343,7 +372,7 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         (b, f) => {
             return Err(TiffError::Unsupported {
                 what: "sample layout (bits, format)",
-                value: b * 100 + f,
+                value: b.saturating_mul(100).saturating_add(f),
             })
         }
     };
@@ -419,7 +448,11 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
     };
     let across = u64::from(width).div_ceil(u64::from(seg_w));
     let down = u64::from(height).div_ceil(u64::from(seg_h));
-    let nseg = if tiled { across * down } else { down };
+    let nseg = if tiled {
+        across.saturating_mul(down)
+    } else {
+        down
+    };
     if offsets.len() as u64 != nseg || counts.len() as u64 != nseg {
         return Err(TiffError::BadValue(
             "segment offset/count arrays do not match the image size",
@@ -427,7 +460,9 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
     }
     // Strips are stored at their true height (the last may be short); tiles always in full.
     let bps = bytes_per_sample(format) as u64;
-    let full_bytes = u64::from(seg_w) * u64::from(seg_h) * bps;
+    let full_bytes = u64::from(seg_w)
+        .saturating_mul(u64::from(seg_h))
+        .saturating_mul(bps);
     if full_bytes > MAX_SEGMENT_BYTES {
         return Err(TiffError::TooLarge {
             what: "strip or tile bytes",
@@ -465,9 +500,13 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         let rows_stored = if tiled {
             u64::from(seg_h)
         } else {
-            u64::from(seg_h).min(u64::from(height) - idx as u64 * u64::from(seg_h))
+            u64::from(seg_h).min(
+                u64::from(height).saturating_sub((idx as u64).saturating_mul(u64::from(seg_h))),
+            )
         };
-        let expected = u64::from(seg_w) * rows_stored * bps;
+        let expected = u64::from(seg_w)
+            .saturating_mul(rows_stored)
+            .saturating_mul(bps);
         let fits_file = off.checked_add(cnt).is_some_and(|e| e <= data.len() as u64);
         if !fits_file {
             return Err(TiffError::Decompress {
@@ -488,22 +527,34 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         }
     }
 
-    let mut elev = vec![f32::NAN; pixels as usize];
+    let outside = TiffError::BadValue("segment outside image");
+    let size_of = |v: u64| usize::try_from(v).map_err(|_| outside.clone());
+    let mut elev = vec![f32::NAN; size_of(pixels)?];
     let mut nodata_count: u64 = 0;
     for (idx, (&off, &cnt)) in offsets.iter().zip(counts.iter()).enumerate() {
         let (x0, y0, rows_stored) = if tiled {
-            let tx = idx as u64 % across;
-            let ty = idx as u64 / across;
+            let i = idx as u64;
+            let (Some(tx), Some(ty)) = (i.checked_rem(across), i.checked_div(across)) else {
+                return Err(outside);
+            };
             (
-                tx * u64::from(seg_w),
-                ty * u64::from(seg_h),
+                tx.saturating_mul(u64::from(seg_w)),
+                ty.saturating_mul(u64::from(seg_h)),
                 u64::from(seg_h),
             )
         } else {
-            let y0 = idx as u64 * u64::from(seg_h);
-            (0, y0, u64::from(seg_h).min(u64::from(height) - y0))
+            let y0 = (idx as u64).saturating_mul(u64::from(seg_h));
+            (
+                0,
+                y0,
+                u64::from(seg_h).min(u64::from(height).saturating_sub(y0)),
+            )
         };
-        let expected = (u64::from(seg_w) * rows_stored * bps) as usize;
+        let expected = size_of(
+            u64::from(seg_w)
+                .saturating_mul(rows_stored)
+                .saturating_mul(bps),
+        )?;
         let end = off
             .checked_add(cnt)
             .filter(|&e| e <= data.len() as u64)
@@ -512,7 +563,7 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
                 reason: "segment lies outside the file",
             })?;
         let comp = data
-            .get(off as usize..end as usize)
+            .get(size_of(off)?..size_of(end)?)
             .ok_or(TiffError::Decompress {
                 segment: idx,
                 reason: "segment lies outside the file",
@@ -520,30 +571,39 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         let raw = decompress(comp, compression, expected, idx)?;
         let vals = to_samples(
             &raw,
-            seg_w as usize,
-            rows_stored as usize,
+            size_of(u64::from(seg_w))?,
+            size_of(rows_stored)?,
             format,
             predictor,
             big,
             idx,
         )?;
         // Copy the part of the segment that lies inside the image.
-        let copy_w = (u64::from(seg_w)).min(u64::from(width) - x0) as usize;
-        for r in 0..rows_stored as usize {
-            let y = y0 as usize + r;
-            if y >= height as usize {
+        let copy_w = size_of(u64::from(seg_w).min(u64::from(width).saturating_sub(x0)))?;
+        let (seg_w, width_n, x0) = (
+            size_of(u64::from(seg_w))?,
+            size_of(u64::from(width))?,
+            size_of(x0)?,
+        );
+        for r in 0..size_of(rows_stored)? {
+            let y = size_of(y0)?.saturating_add(r);
+            if y >= size_of(u64::from(height))? {
                 break;
             }
-            let src_row = vals
-                .get(r * seg_w as usize..r * seg_w as usize + copy_w)
-                .ok_or(TiffError::Decompress {
-                    segment: idx,
-                    reason: "internal row bounds",
-                })?;
-            let dst_at = y * width as usize + x0 as usize;
+            let src_at = r.checked_mul(seg_w).ok_or_else(|| outside.clone())?;
+            let src_row =
+                vals.get(src_at..src_at.saturating_add(copy_w))
+                    .ok_or(TiffError::Decompress {
+                        segment: idx,
+                        reason: "internal row bounds",
+                    })?;
+            let dst_at = y
+                .checked_mul(width_n)
+                .and_then(|o| o.checked_add(x0))
+                .ok_or_else(|| outside.clone())?;
             let dst = elev
-                .get_mut(dst_at..dst_at + copy_w)
-                .ok_or(TiffError::BadValue("segment outside image"))?;
+                .get_mut(dst_at..dst_at.saturating_add(copy_w))
+                .ok_or_else(|| outside.clone())?;
             for (d, &v) in dst.iter_mut().zip(src_row.iter()) {
                 *d = v;
             }
@@ -562,9 +622,13 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
         };
         if !v.is_finite() || declared {
             *v = f32::NAN;
-            nodata_count += 1;
+            nodata_count = nodata_count.saturating_add(1);
         } else if geo.vertical_unit_m != 1.0 {
-            *v = (f64::from(*v) * geo.vertical_unit_m) as f32;
+            // A finite elevation times a factor of at most 1: the narrowing loses only precision.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *v = (f64::from(*v) * geo.vertical_unit_m) as f32;
+            }
         }
     }
     Ok(Grid {
@@ -590,6 +654,8 @@ fn read_doubles(s: Src<'_>, e: Entry) -> Result<Vec<f64>, TiffError> {
     })
 }
 
+// E8: a chunk of 5552 bytes keeps `a` and `b` under 2^32 before the reduction (zlib's NMAX).
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn adler32(data: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for chunk in data.chunks(5552) {
@@ -631,7 +697,7 @@ fn decompress(
                 (Some(&a), Some(&b)) => (a, b),
                 _ => return Err(fail("zlib header missing")),
             };
-            if cmf & 0x0f != 8 || (u16::from(cmf) * 256 + u16::from(flg)) % 31 != 0 {
+            if cmf & 0x0f != 8 || u16::from_be_bytes([cmf, flg]) % 31 != 0 {
                 return Err(fail("bad zlib header"));
             }
             if flg & 0x20 != 0 {
@@ -640,8 +706,9 @@ fn decompress(
             if comp.len() < 6 {
                 return Err(fail("zlib stream too short"));
             }
-            let body = comp.get(2..comp.len() - 4).unwrap_or(&[]);
-            let trailer = comp.get(comp.len() - 4..).unwrap_or(&[]);
+            let tail = comp.len().saturating_sub(4);
+            let body = comp.get(2..tail).unwrap_or(&[]);
+            let trailer = comp.get(tail..).unwrap_or(&[]);
             let out = oa_zip::inflate(body, expected, expected)
                 .map_err(|_| fail("DEFLATE data is invalid or longer than the segment"))?;
             if out.len() != expected {
@@ -670,8 +737,16 @@ fn to_samples(
     segment: usize,
 ) -> Result<Vec<f32>, TiffError> {
     let bps = bytes_per_sample(format);
-    let row_bytes = row_w * bps;
-    let mut out = Vec::with_capacity(row_w * rows);
+    let too_big = || TiffError::Decompress {
+        segment,
+        reason: "segment size overflows",
+    };
+    let row_bytes = row_w.checked_mul(bps).ok_or_else(too_big)?;
+    let total = row_w.checked_mul(rows).ok_or_else(too_big)?;
+    if row_bytes == 0 {
+        return Err(too_big());
+    }
+    let mut out = Vec::with_capacity(total);
     for row in raw.chunks_exact(row_bytes).take(rows) {
         match (format, predictor) {
             (Format::F32, 1) => {
@@ -688,15 +763,23 @@ fn to_samples(
                 // Predictor 3: byte-wise running sum across the row, then the four byte planes
                 // (most significant first, whatever the file's byte order) are interleaved.
                 let mut acc = row.to_vec();
-                for i in 1..acc.len() {
-                    let prev = acc.get(i - 1).copied().unwrap_or(0);
-                    if let Some(x) = acc.get_mut(i) {
-                        *x = x.wrapping_add(prev);
-                    }
+                let mut prev = 0u8;
+                for x in acc.iter_mut() {
+                    *x = x.wrapping_add(prev);
+                    prev = *x;
                 }
+                // `row` has row_w * 4 bytes, so every plane index is inside `acc`; a miss is an
+                // error, not a zero.
                 for i in 0..row_w {
-                    let p = |k: usize| acc.get(k * row_w + i).copied().unwrap_or(0);
-                    out.push(f32::from_bits(u32::from_be_bytes([p(0), p(1), p(2), p(3)])));
+                    let p = |k: usize| {
+                        k.checked_mul(row_w)
+                            .and_then(|o| o.checked_add(i))
+                            .and_then(|o| acc.get(o))
+                            .copied()
+                            .ok_or_else(too_big)
+                    };
+                    let bits = u32::from_be_bytes([p(0)?, p(1)?, p(2)?, p(3)?]);
+                    out.push(f32::from_bits(bits));
                 }
             }
             (Format::I16, p) => {
@@ -716,7 +799,7 @@ fn to_samples(
             }
         }
     }
-    if out.len() != row_w * rows {
+    if out.len() != total {
         return Err(TiffError::Decompress {
             segment,
             reason: "segment holds fewer rows than expected",

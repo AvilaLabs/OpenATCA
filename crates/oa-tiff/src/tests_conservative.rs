@@ -838,3 +838,31 @@ fn the_work_estimate_is_at_least_the_work_counted() {
     let (_, w) = collect_counted(&tiles, sq, 0, &hit_all).unwrap();
     assert!(w.counted > 1024 * 100);
 }
+
+// REQ: OA-TIFF-094
+#[test]
+fn a_box_at_a_lattice_index_too_large_to_hold_is_refused_not_clamped() {
+    // A lattice step of 1e-300 degrees is a valid GeoTIFF scale; the box then sits at an index
+    // near 1e300, which a clamp to i64 would turn into i64::MAX and overflow against a tile
+    // that starts a few steps earlier.
+    let tile = |lon0: f64| Grid {
+        width: 2,
+        height: 2,
+        lon0,
+        lat0: 40.0,
+        dlon: 1e-300,
+        dlat: 1e-300,
+        elev: vec![1.0; 4],
+        nodata_count: 0,
+        point_registered: false,
+        crs: 4269,
+        vertical_cs: None,
+    };
+    let set = TileSet {
+        tiles: vec![tile(-90.0), tile(-90.0 - 5e-300)],
+    };
+    // A polygon with no extent gives a box of one cell however fine the lattice.
+    let poly = [(39.9, -90.05); 3];
+    let r = max_elevation_in_polygon_conservative(&set, &poly);
+    assert_eq!(r, Err(QueryError::TooManySamples), "{r:?}");
+}

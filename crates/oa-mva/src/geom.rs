@@ -13,6 +13,8 @@ pub enum Where {
 }
 
 /// Twice the signed area of the triangle (a, b, c): positive when c is left of a to b.
+// E8: coordinates are i32, so every difference and product fits i128; the loop index stays below the slice length.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn orient(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> i128 {
     let (ax, ay) = (i128::from(a.0), i128::from(a.1));
     let (bx, by) = (i128::from(b.0), i128::from(b.1));
@@ -33,6 +35,8 @@ pub(crate) fn on_segment(p: (i32, i32), a: (i32, i32), b: (i32, i32)) -> bool {
 /// `lons` (last vertex equal to the first; the arrays must be the same length). Even-odd rule
 /// with a ray toward +longitude; an edge point is [`Where::Boundary`], exactly. A ring of fewer
 /// than 2 vertices contains nothing.
+// E8: coordinates are i32, so every difference and product fits i128; the loop index stays below the slice length.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn locate_in_ring(lats: &[i32], lons: &[i32], lat: i32, lon: i32) -> Where {
     let n = lats.len().min(lons.len());
     let p = (lon, lat);
@@ -76,6 +80,8 @@ pub(crate) enum Meet {
 }
 
 /// Classifies the intersection of segments a-b and c-d exactly.
+// E8: coordinates are i32, so every difference and product fits i128; the loop index stays below the slice length.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn segments_meet(a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)) -> Meet {
     let o1 = orient(a, b, c).signum();
     let o2 = orient(a, b, d).signum();
