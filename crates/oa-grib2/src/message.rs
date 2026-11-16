@@ -134,7 +134,7 @@ pub fn scan_messages(data: &[u8]) -> Result<Vec<MessageSpan>, Grib2Error> {
             offset: pos,
             length,
         });
-        pos += length;
+        pos = pos.saturating_add(length);
     }
     Ok(out)
 }
@@ -157,7 +157,7 @@ pub fn decode_stream(data: &[u8]) -> Decoded {
             }
         };
         out.messages += 1;
-        let Some(msg) = data.get(pos..pos + length) else {
+        let Some(msg) = pos.checked_add(length).and_then(|e| data.get(pos..e)) else {
             out.stopped = Some(Skipped {
                 offset: pos,
                 error: Grib2Error::Truncated("message"),
@@ -168,7 +168,8 @@ pub fn decode_stream(data: &[u8]) -> Decoded {
             Ok(mut f) => out.fields.append(&mut f),
             Err(error) => out.skipped.push(Skipped { offset: pos, error }),
         }
-        pos += length;
+        // `message_length` proved `length` fits in `data` from `pos`; saturating ends the loop.
+        pos = pos.saturating_add(length);
     }
     out
 }
@@ -240,7 +241,7 @@ pub fn inspect_stream(data: &[u8]) -> Inspected {
             }
         };
         out.messages += 1;
-        let Some(msg) = data.get(pos..pos + length) else {
+        let Some(msg) = pos.checked_add(length).and_then(|e| data.get(pos..e)) else {
             out.stopped = Some(Skipped {
                 offset: pos,
                 error: Grib2Error::Truncated("message"),
@@ -251,7 +252,7 @@ pub fn inspect_stream(data: &[u8]) -> Inspected {
             Ok(entries) => out.fields.extend(entries.into_iter().map(|(info, _)| info)),
             Err(error) => out.skipped.push(Skipped { offset: pos, error }),
         }
-        pos += length;
+        pos = pos.saturating_add(length);
     }
     out
 }
@@ -275,16 +276,20 @@ pub fn peek_info(head: &[u8]) -> Result<FieldInfo, Grib2Error> {
     let mut pos = 16usize;
     loop {
         let slen = u32_at(head, pos).ok_or(Grib2Error::Truncated("section header"))? as usize;
-        let num = u8_at(head, pos + 4).ok_or(Grib2Error::Truncated("section header"))?;
+        let num = pos
+            .checked_add(4)
+            .and_then(|p| u8_at(head, p))
+            .ok_or(Grib2Error::Truncated("section header"))?;
         if slen < 5 {
             return Err(Grib2Error::BadSectionLength {
                 section: num,
                 length: slen as u32,
             });
         }
-        let sect = head
-            .get(pos..pos + slen)
+        let end = pos
+            .checked_add(slen)
             .ok_or(Grib2Error::Truncated("section"))?;
+        let sect = head.get(pos..end).ok_or(Grib2Error::Truncated("section"))?;
         match num {
             1 => ref_time = Some(parse_ref_time(sect)?),
             3 => grid = Some(parse_grid(sect)?),
@@ -310,7 +315,7 @@ pub fn peek_info(head: &[u8]) -> Result<FieldInfo, Grib2Error> {
             }
             _ => {}
         }
-        pos += slen;
+        pos = end;
     }
 }
 
@@ -341,16 +346,20 @@ fn walk(msg: &[u8], want_data: bool) -> Result<Vec<Entry>, Grib2Error> {
     let mut last_section = 0u8;
     while pos < body_end {
         let slen = u32_at(msg, pos).ok_or(Grib2Error::Truncated("section header"))?;
-        let num = u8_at(msg, pos + 4).ok_or(Grib2Error::Truncated("section header"))?;
+        let num = pos
+            .checked_add(4)
+            .and_then(|p| u8_at(msg, p))
+            .ok_or(Grib2Error::Truncated("section header"))?;
         if slen < 5 || pos as u64 + u64::from(slen) > body_end as u64 {
             return Err(Grib2Error::BadSectionLength {
                 section: num,
                 length: slen,
             });
         }
-        let sect = msg
-            .get(pos..pos + slen as usize)
+        let end = pos
+            .checked_add(slen as usize)
             .ok_or(Grib2Error::Truncated("section"))?;
+        let sect = msg.get(pos..end).ok_or(Grib2Error::Truncated("section"))?;
         let order_ok = match num {
             1 => last_section == 0,
             2 => last_section == 1 || last_section == 7,
@@ -403,7 +412,7 @@ fn walk(msg: &[u8], want_data: bool) -> Result<Vec<Entry>, Grib2Error> {
             _ => return Err(Grib2Error::SectionOrder { section: num }),
         }
         last_section = num;
-        pos += slen as usize;
+        pos = end;
     }
     if pos != body_end {
         return Err(Grib2Error::BadSectionLength {

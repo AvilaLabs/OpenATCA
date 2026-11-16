@@ -18,10 +18,10 @@ pub struct Summary {
     pub max: f64,
 }
 
-/// Percentile `q` in 0..=1 of an ascending slice, linear between ranks; `None` when empty.
+/// Percentile `q` in 0..=1 of an ascending slice, linear between ranks; `None` when empty or `q` is NaN.
 pub fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
     let n = sorted.len();
-    if n == 0 {
+    if n == 0 || q.is_nan() {
         return None;
     }
     let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;

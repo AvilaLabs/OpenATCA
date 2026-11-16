@@ -1594,9 +1594,10 @@ fn finish(mut m: Msg, out: &mut Notams) -> Result<u32, DocError> {
     if m.notams != 1 {
         return Err(DocError::Rejected(Reject::NoNotam));
     }
-    // Referred NOTAM: all three parts or none.
+    // Referred NOTAM: all three parts, or number and year alone (the local format names the
+    // referred NOTAM without a series, then `ref_series` stays zero), or none.
     if m.ref_seen != 0 {
-        if m.ref_bad || m.ref_seen != 7 {
+        if m.ref_bad || (m.ref_seen != 7 && m.ref_seen != 6) {
             mark_err(&mut m, Field::Ref);
         } else {
             mark_ok(&mut m, Field::Ref);

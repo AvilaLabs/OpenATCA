@@ -5,6 +5,11 @@
 //! has no series (47 of the 112 messages of the 2026-11-14 sample) and its number is numbered per
 //! location, so its series is taken to be `!` followed by its location code (`!QQA`), which cannot
 //! collide with a real series letter. A row with neither a series nor a location has no identity.
+//! The identity is (series or `!`+location, number, year) in every format: international and
+//! domestic NOTAMs with a series are numbered per series, local ones per location. A local row that
+//! cancels or replaces names the referred NOTAM by number and year; the referred series is then
+//! `!` + the row's own location. A row with a series and a referred number and year but no
+//! referred series names no NOTAM.
 //! Rows are applied by type:
 //!
 //! * new (or no type): stored. A row for a NOTAM already held replaces it unless its `issued`
@@ -443,8 +448,15 @@ pub fn apply_fns(t: &mut FnsTable, n: &Notams, i: usize, now_ns: i64) -> FnsAppl
         return FnsApplied::NoKey;
     }
     let key: FnsKey = (series, r.number, r.year);
-    let target: Option<FnsKey> = if usable(n, i, Field::Ref) {
+    // The referred NOTAM: its own series if given. A local-format row names a NOTAM by number and
+    // year alone, and that is one of its own location (FAA NOTAM format: the cancelled or replaced
+    // NOTAM is of the same accountability location), so its series is `!` + this row's location.
+    let target: Option<FnsKey> = if !usable(n, i, Field::Ref) {
+        None
+    } else if r.ref_series != [0; 12] {
         Some((r.ref_series, r.ref_number, r.ref_year))
+    } else if series.first() == Some(&b'!') {
+        Some((series, r.ref_number, r.ref_year))
     } else {
         None
     };

@@ -911,3 +911,75 @@ fn scratch_budget_is_refused_and_real_fields_fit() {
     let cs = encode(&samples, &Opts::new(64, 64, 8, 3));
     assert_eq!(decode(&cs).unwrap().samples, samples);
 }
+
+// REQ: OA-J2K-051
+#[test]
+fn a_block_size_that_overflows_is_refused_not_wrapped() {
+    use crate::t1::{decode_block, BlockSpec, Scratch};
+    let mut sc = Scratch::default();
+    let mut out = vec![0i32; 4];
+    for (w, h) in [
+        (usize::MAX / 2 + 1, 2usize),
+        (usize::MAX, 2),
+        (1 << 40, 1 << 40),
+        (4, usize::MAX),
+    ] {
+        let spec = BlockSpec {
+            w,
+            h,
+            orient: 0,
+            passes: 1,
+            start_bp: 0,
+        };
+        assert!(
+            matches!(
+                decode_block(&mut sc, spec, &[], &mut out),
+                Err(J2kError::BadBlock("block size"))
+            ),
+            "{w} x {h}"
+        );
+    }
+}
+
+// REQ: OA-J2K-051
+#[test]
+fn a_resolution_rectangle_that_runs_backwards_is_refused_not_wrapped() {
+    let mut coef = vec![0i32; 16];
+    let res = [
+        Rect {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        },
+        Rect {
+            x0: 5,
+            y0: 0,
+            x1: 2,
+            y1: 4,
+        },
+    ];
+    assert!(matches!(
+        inverse(&mut coef, 4, &res),
+        Err(J2kError::BadBlock("resolution rectangle"))
+    ));
+    let res = [
+        Rect {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        },
+        Rect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        },
+    ];
+    // A stride that overflows the row offsets is refused too.
+    assert!(matches!(
+        inverse(&mut coef, usize::MAX, &res),
+        Err(J2kError::BadBlock(_))
+    ));
+}

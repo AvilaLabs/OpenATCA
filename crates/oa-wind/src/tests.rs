@@ -1137,3 +1137,12 @@ fn whole_file_reads_stop_at_their_limit() {
     assert!(read_file_capped(&dir.join("missing"), 100).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// REQ: OA-WIND-059
+#[test]
+fn a_percentile_rank_that_is_not_a_number_is_no_value_not_the_first_element() {
+    let v = [1.0, 2.0, 3.0];
+    assert_eq!(percentile(&v, f64::NAN), None);
+    assert_eq!(percentile(&v, 0.5), Some(2.0));
+    assert_eq!(percentile(&v, 2.0), Some(3.0));
+}

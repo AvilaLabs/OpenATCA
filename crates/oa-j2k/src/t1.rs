@@ -372,7 +372,16 @@ pub fn decode_block(
         passes,
         start_bp,
     } = spec;
-    if w == 0 || h == 0 || out.len() != w * h {
+    // The sizes come from the caller: the products are checked before they are used.
+    let (Some(samples), Some(stride), Some(rows)) =
+        (w.checked_mul(h), w.checked_add(2), h.checked_add(2))
+    else {
+        return Err(J2kError::BadBlock("block size"));
+    };
+    let Some(flag_len) = stride.checked_mul(rows) else {
+        return Err(J2kError::BadBlock("block size"));
+    };
+    if w == 0 || h == 0 || out.len() != samples {
         return Err(J2kError::BadBlock("block size"));
     }
     out.fill(0);
@@ -382,11 +391,10 @@ pub fn decode_block(
     if start_bp > 29 || passes > 3 * (start_bp + 1) - 2 {
         return Err(J2kError::BadBlock("more coding passes than bit-planes"));
     }
-    let stride = w + 2;
     s.flags.clear();
-    s.flags.resize(stride * (h + 2), 0);
+    s.flags.resize(flag_len, 0);
     s.mag.clear();
-    s.mag.resize(w * h, 0);
+    s.mag.resize(samples, 0);
     let zc = match orient {
         HL => &ZC_HL,
         LH => &ZC_LH,

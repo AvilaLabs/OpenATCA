@@ -245,8 +245,8 @@ fn parse_lead(text: &str) -> Option<i64> {
     let (n, unit) = text.split_once(' ')?;
     let n: i64 = n.parse().ok().filter(|n| (0..=1_000_000).contains(n))?;
     match unit {
-        "hour fcst" => Some(n * 3600),
-        "min fcst" => Some(n * 60),
+        "hour fcst" => n.checked_mul(3600),
+        "min fcst" => n.checked_mul(60),
         _ => None,
     }
 }

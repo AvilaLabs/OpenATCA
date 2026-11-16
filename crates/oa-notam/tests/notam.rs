@@ -1406,3 +1406,27 @@ fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
         (s.rows, s.unknown_elements, s.unknown_attributes)
     );
 }
+
+// REQ: OA-NOTAM-024
+#[test]
+fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
+    let xml = rep(
+        &rep(&msg(&[]), "<event:type>N</event:type>", "<event:type>C</event:type>"),
+        "<event:number>42</event:number>",
+        "<event:number>42</event:number><event:referredNumber>7</event:referredNumber><event:referredYear>2029</event:referredYear>",
+    );
+    let (n, _) = ok(&xml);
+    assert_eq!(n.errors[0], 0);
+    assert!(has_field(&n, 0, Field::Ref));
+    assert_eq!(
+        (code_str(&n.ref_series[0]), n.ref_number[0], n.ref_year[0]),
+        ("", 7, 2029)
+    );
+    // A referred year alone is still not a reference.
+    let xml = rep(
+        &msg(&[]),
+        "<event:number>42</event:number>",
+        "<event:number>42</event:number><event:referredYear>2029</event:referredYear>",
+    );
+    assert_eq!(ok(&xml).0.errors[0], bit(Field::Ref));
+}

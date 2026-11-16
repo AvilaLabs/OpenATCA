@@ -284,6 +284,11 @@ fn u64_at(d: &[u8], o: usize, what: &'static str) -> Result<u64, ZipError> {
         .ok_or(ZipError::Truncated(what))
 }
 
+/// `o + n`, or `Truncated` when it does not fit: offsets come from the file.
+fn plus(o: usize, n: usize, what: &'static str) -> Result<usize, ZipError> {
+    o.checked_add(n).ok_or(ZipError::Truncated(what))
+}
+
 fn to_usize(v: u64, what: &'static str) -> Result<usize, ZipError> {
     usize::try_from(v).map_err(|_| ZipError::Zip64(what))
 }
@@ -359,9 +364,12 @@ fn read_eocd(d: &[u8], pos: usize) -> Result<Option<Eocd>, ZipError> {
         if u32_at(d, loc, "zip64 locator")? != SIG_ZIP64_LOCATOR {
             return Err(ZipError::Zip64("locator missing"));
         }
-        let loc_disk = u32_at(d, loc + 4, "zip64 locator")?;
-        let rec = to_usize(u64_at(d, loc + 8, "zip64 locator")?, "record offset")?;
-        let n_disks = u32_at(d, loc + 16, "zip64 locator")?;
+        let loc_disk = u32_at(d, plus(loc, 4, "zip64 locator")?, "zip64 locator")?;
+        let rec = to_usize(
+            u64_at(d, plus(loc, 8, "zip64 locator")?, "zip64 locator")?,
+            "record offset",
+        )?;
+        let n_disks = u32_at(d, plus(loc, 16, "zip64 locator")?, "zip64 locator")?;
         if loc_disk != 0 || n_disks > 1 {
             return Err(ZipError::MultiDisk);
         }
@@ -371,16 +379,16 @@ fn read_eocd(d: &[u8], pos: usize) -> Result<Option<Eocd>, ZipError> {
         if d.len() < rec.saturating_add(ZIP64_EOCD_LEN) {
             return Err(ZipError::Truncated("zip64 eocd"));
         }
-        let z_disk = u32_at(d, rec + 16, "zip64 eocd")?;
-        let z_cd_disk = u32_at(d, rec + 20, "zip64 eocd")?;
-        let z_here = u64_at(d, rec + 24, "zip64 eocd")?;
-        let z_total = u64_at(d, rec + 32, "zip64 eocd")?;
+        let z_disk = u32_at(d, plus(rec, 16, "zip64 eocd")?, "zip64 eocd")?;
+        let z_cd_disk = u32_at(d, plus(rec, 20, "zip64 eocd")?, "zip64 eocd")?;
+        let z_here = u64_at(d, plus(rec, 24, "zip64 eocd")?, "zip64 eocd")?;
+        let z_total = u64_at(d, plus(rec, 32, "zip64 eocd")?, "zip64 eocd")?;
         if z_disk != 0 || z_cd_disk != 0 || z_here != z_total {
             return Err(ZipError::MultiDisk);
         }
         e.entries = z_total;
-        e.cd_size = u64_at(d, rec + 40, "zip64 eocd")?;
-        e.cd_offset = u64_at(d, rec + 48, "zip64 eocd")?;
+        e.cd_size = u64_at(d, plus(rec, 40, "zip64 eocd")?, "zip64 eocd")?;
+        e.cd_offset = u64_at(d, plus(rec, 48, "zip64 eocd")?, "zip64 eocd")?;
     } else if disk != 0 || cd_disk != 0 || here != total {
         return Err(ZipError::MultiDisk);
     }
@@ -523,21 +531,22 @@ impl<'a> Archive<'a> {
         if u32_at(d, off, "local header")? != SIG_LOCAL {
             return Err(ZipError::BadSignature("local header"));
         }
-        let flags = u16_at(d, off + 6, "local header")?;
-        let method = u16_at(d, off + 8, "local header")?;
-        let crc = u32_at(d, off + 14, "local header")?;
-        let csize = u32_at(d, off + 18, "local header")?;
-        let usize_ = u32_at(d, off + 22, "local header")?;
-        let nlen = usize::from(u16_at(d, off + 26, "local header")?);
-        let elen = usize::from(u16_at(d, off + 28, "local header")?);
+        let flags = u16_at(d, plus(off, 6, "local header")?, "local header")?;
+        let method = u16_at(d, plus(off, 8, "local header")?, "local header")?;
+        let crc = u32_at(d, plus(off, 14, "local header")?, "local header")?;
+        let csize = u32_at(d, plus(off, 18, "local header")?, "local header")?;
+        let usize_ = u32_at(d, plus(off, 22, "local header")?, "local header")?;
+        let nlen = usize::from(u16_at(d, plus(off, 26, "local header")?, "local header")?);
+        let elen = usize::from(u16_at(d, plus(off, 28, "local header")?, "local header")?);
         if flags & (FLAG_ENCRYPTED | FLAG_STRONG) != 0 {
             return Err(ZipError::Encrypted(e.name.clone()));
         }
         if method != e.method {
             return Err(ZipError::Inconsistent("local and central method differ"));
         }
+        let name_at = plus(off, LOCAL_LEN, "local header name")?;
         let name_bytes = d
-            .get(off + LOCAL_LEN..off + LOCAL_LEN + nlen)
+            .get(name_at..plus(name_at, nlen, "local header name")?)
             .ok_or(ZipError::Truncated("local header name"))?;
         if String::from_utf8_lossy(name_bytes) != e.name {
             return Err(ZipError::Inconsistent("local and central name differ"));

@@ -1782,3 +1782,52 @@ fn two_states_differing_only_in_a_tombstone_basis_have_different_digests() {
     assert_eq!(replay_hash(&p), replay_hash(&q));
     assert_ne!(replay_state_digest(&p), replay_state_digest(&q));
 }
+
+// REQ: OA-RPL-275
+#[test]
+fn a_local_format_cancellation_removes_the_notam_of_its_own_location_only() {
+    let mut p = pl();
+    // Local format: no series, and the referred NOTAM named by number and year alone.
+    let local = |loc: &str, n: u32, ntype: &'static str, refd: Option<u32>| {
+        let mut x = nt("Z", n);
+        x.ntype = ntype;
+        let mut s = notam(&x)
+            .replace("<event:series>Z</event:series>", "")
+            .replace(
+                "<event:location>QQA</event:location>",
+                &format!("<event:location>{loc}</event:location>"),
+            );
+        if let Some(k) = refd {
+            s = s.replace(
+                "<event:issued>",
+                &format!("<event:referredNumber>{k}</event:referredNumber><event:referredYear>2030</event:referredYear><event:issued>"),
+            );
+        }
+        s
+    };
+    // The same number at two offices is two NOTAMs.
+    feed(&mut p, FeedKind::Fns, mar5(9), &local("QQA", 42, "N", None));
+    feed(&mut p, FeedKind::Fns, mar5(9), &local("QQB", 42, "N", None));
+    assert_eq!(fns_live(&p.fns), 2);
+    feed(
+        &mut p,
+        FeedKind::Fns,
+        mar5(10),
+        &local("QQA", 43, "C", Some(42)),
+    );
+    assert_eq!(p.fns.stats.cancelled, 1);
+    assert_eq!(p.fns.stats.cancel_unmatched, 0);
+    assert!(fns_slot_of(&p.fns, &key("!QQA", 42)).is_none());
+    assert!(fns_slot_of(&p.fns, &key("!QQB", 42)).is_some());
+    assert_eq!(fns_live(&p.fns), 1);
+    // A local replacement names the NOTAM of its own location, too.
+    feed(
+        &mut p,
+        FeedKind::Fns,
+        mar5(11),
+        &local("QQB", 44, "R", Some(42)),
+    );
+    assert_eq!(p.fns.stats.replaced, 1);
+    assert!(fns_slot_of(&p.fns, &key("!QQB", 42)).is_none());
+    assert!(fns_slot_of(&p.fns, &key("!QQB", 44)).is_some());
+}

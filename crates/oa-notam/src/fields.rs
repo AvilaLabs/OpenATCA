@@ -17,7 +17,7 @@ pub enum Field {
     /// `NOTAM/type`: new, replace, cancel (absent in two of the 112 surveyed messages).
     Type,
     /// `NOTAM/referredSeries`, `referredNumber`, `referredYear`, which are one field: all
-    /// three or none.
+    /// three, or number and year alone (a local-format reference, series left zero), or none.
     Ref,
     /// `NOTAM/location`.
     Location,

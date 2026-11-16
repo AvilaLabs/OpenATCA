@@ -33,15 +33,19 @@ pub const NO_ALT: i32 = i32::MIN;
 /// Station and aircraft-type identifiers are packed into a `u32`; this value means "none".
 pub const NO_IDENT: u32 = 0;
 
-/// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+/// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`), for years 1970
+/// to 9999 and dates that exist; `None` for any other year, month or day.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
+        return None;
+    }
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let mp = (m + 9) % 12;
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    Some(era * 146_097 + doe - 719_468)
 }
 
 fn days_in_month(y: i64, m: i64) -> i64 {
@@ -56,12 +60,12 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 
 fn digits(b: &[u8], at: usize, n: usize) -> Option<i64> {
     let mut v = 0i64;
-    for i in at..at + n {
+    for i in at..at.checked_add(n)? {
         let d = *b.get(i)?;
         if !d.is_ascii_digit() {
             return None;
         }
-        v = v * 10 + i64::from(d - b'0');
+        v = v.checked_mul(10)?.checked_add(i64::from(d - b'0'))?;
     }
     Some(v)
 }
@@ -106,7 +110,7 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
     if b.get(at) != Some(&b'Z') || at + 1 != b.len() {
         return None;
     }
-    let days = days_from_civil(y, mo, d);
+    let days = days_from_civil(y, mo, d)?;
     Some(((days * 24 + h) * 60 + mi) * 60_000 + sec * 1000 + ms)
 }
 
@@ -209,4 +213,57 @@ pub fn indicated_altitude_ft(pressure_alt_ft: f64, qnh_hpa: f64) -> Option<f64> 
     let ratio = (1.0 - pressure_alt_ft / FT_PER_M / H0_M).powf(1.0 / EXP);
     let p = ISA_SEA_LEVEL_HPA * ratio;
     Some(H0_M * (1.0 - (p / qnh_hpa).powf(EXP)) * FT_PER_M)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod calendar_tests {
+    use super::*;
+
+    // (year, month, day, Unix day or None): the same table is applied in every crate that has
+    // its own calendar helper.
+    const VECTORS: [(i64, i64, i64, Option<i64>); 20] = [
+        (1970, 1, 1, Some(0)),
+        (2000, 2, 29, Some(11_016)),
+        (2024, 2, 29, Some(19_782)),
+        (2026, 11, 15, Some(20_772)),
+        (9999, 12, 31, Some(2_932_896)),
+        (2023, 2, 29, None),
+        (2100, 2, 29, None),
+        (2026, 4, 31, None),
+        (2026, 6, 31, None),
+        (2026, 9, 31, None),
+        (2026, 1, 32, None),
+        (2026, 1, 0, None),
+        (2026, 0, 1, None),
+        (2026, 13, 1, None),
+        (-1, 1, 1, None),
+        (1969, 12, 31, None),
+        (10_000, 1, 1, None),
+        (i64::MAX, 1, 1, None),
+        (i64::MIN, 1, 1, None),
+        (2026, i64::MAX, 1, None),
+    ];
+
+    // REQ: OA-AWC-024
+    #[test]
+    fn impossible_dates_and_years_out_of_range_are_refused() {
+        for (y, m, d, want) in VECTORS {
+            assert_eq!(days_from_civil(y, m, d), want, "{y}-{m}-{d}");
+        }
+        assert_eq!(parse_iso_ms("2026-02-29T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("2026-04-31T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("2026-11-15T24:00:00Z"), None);
+        assert_eq!(parse_iso_ms("1999-12-31T23:59:59Z"), None);
+        assert_eq!(parse_iso_ms("2100-01-01T00:00:00Z"), None);
+        assert_eq!(
+            parse_iso_ms("2026-11-15T00:00:00Z"),
+            Some(20_772 * 86_400_000)
+        );
+    }
 }

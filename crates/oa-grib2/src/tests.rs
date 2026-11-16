@@ -1659,3 +1659,43 @@ fn peek_reads_the_first_field_from_the_head_of_a_message() {
     assert!(peek_info(&m[..60]).is_err());
     assert!(peek_info(b"not a message at all").is_err());
 }
+
+// REQ: OA-GRIB-059
+#[test]
+fn section_and_message_lengths_at_the_top_of_the_address_space_never_panic() {
+    let x: Vec<u64> = (0..12).collect();
+    let msgs = [
+        simple_message(
+            small_grid(),
+            temp_product(500),
+            &encode_simple(&x, 0.0, 0, 0),
+            sect6(None, false),
+        ),
+        simple_message(
+            small_grid(),
+            temp_product(500),
+            &encode_jpeg2000(&J2K_A, 12, 100.0, 1, 1, 8, 0),
+            sect6(None, false),
+        ),
+    ];
+    for f in &msgs {
+        for w in [4usize, 8] {
+            for at in 0..f.len().saturating_sub(w) {
+                for v in [
+                    u64::MAX,
+                    0x8000_0000_0000_0000,
+                    0xFFFF_FFFF,
+                    0x7FFF_FFFF_FFFF_FFF0,
+                ] {
+                    let mut d = f.clone();
+                    d[at..at + w].copy_from_slice(&v.to_be_bytes()[8 - w..]);
+                    let _ = decode_stream(&d);
+                    let _ = inspect_stream(&d);
+                    let _ = peek_info(&d);
+                    let _ = decode_message(&d);
+                    let _ = scan_messages(&d);
+                }
+            }
+        }
+    }
+}
