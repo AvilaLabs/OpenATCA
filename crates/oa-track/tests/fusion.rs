@@ -737,7 +737,7 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // rows 8,739 to 11,016. The value before was
 // "c0e2736508a46fababe9e5f2a06e44fe541a0c2f7a8b8e7aa79f3c19ca28253d".
 // Re-pinned (all five) when the association gate gained an allowance for a change of climb rate
-// (OA-TRK-308, OA-TRK-309; GATE_VRATE_SIGMA_FPM 700 ft/min, which also gates the confirmation of a
+// (OA-TRK-311, OA-TRK-309; GATE_VRATE_SIGMA_FPM 700 ft/min, which also gates the confirmation of a
 // candidate against live tracks) and the cost of a pair inside the gate only by an allowance became
 // the rescued cost: of the second tracks started while the first was alive or coasting, 18 of 34
 // terminal and 18 of 24 en-route failed the altitude gate alone (the aircraft's climb rate had
@@ -763,7 +763,7 @@ const PINNED_CLIP_DIGESTS: [&str; 5] = [
     "d7c3d24f5a4a89625e5970882feaee004386218cfc5b949f5595a17ff5d7d5e5",
 ];
 
-// REQ: OA-TRK-308
+// REQ: OA-TRK-311
 #[test]
 fn a_radar_only_track_keeps_its_aircraft_through_the_onset_of_a_climb() {
     // Six aircraft on lines 5 km apart, level for 100 s and then climbing at 1,000 ft/min, the

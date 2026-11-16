@@ -3237,7 +3237,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   edge nearest a pole), and the window's rectangle is cut into pieces of at most 20 km, each with a box of
   its own, so a plot visits few tracks. The candidates hold every track the window passes at the poles, on
   the seam and at the equator.
-- **OA-TRK-308** A radar-only track keeps its aircraft through the onset of a climb: a level aircraft that
+- **OA-TRK-311** A radar-only track keeps its aircraft through the onset of a climb: a level aircraft that
   starts to climb between two scans does not start a second track (the altitude gate of the association is
   widened by a standard deviation of `GATE_VRATE_SIGMA_FPM` of climb rate over the time since the update, at
   most `GATE_MANEUVER_MAX_DT_S`).
