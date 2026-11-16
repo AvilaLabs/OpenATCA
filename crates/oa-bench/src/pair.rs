@@ -6,14 +6,45 @@
 //! truth ground-track direction (along, positive when ERAM is ahead) and on the direction to its
 //! right (cross, positive when ERAM is to the right of the truth track). Speed error is ERAM
 //! track speed minus truth ground speed; heading error is the wrapped difference of the two
-//! headings; altitude error is ERAM reported altitude minus truth barometric altitude.
+//! headings; altitude error is ERAM reported altitude minus truth altitude on ERAM's own reference:
+//! at or above [`TRANSITION_FT`] ERAM reports a flight level (pressure altitude, as the truth
+//! is), below it an altitude corrected with the local altimeter setting, so the truth pressure
+//! altitude is first brought to indicated altitude with the setting of the nearest station in
+//! space and time ([`indicated_ft`]); a pair with no setting has no altitude error and is
+//! counted.
 
 use crate::assoc::Assoc;
 use crate::geo::{enu, heading_deg, wrap180, KT_MPS};
 use crate::legacy::{Legacy, NONE, NO_ALT, NO_VEL};
 use crate::stats::{band, exclude, phase, Exclusions};
 use crate::thindex::{samples_of, ThIndex};
-use crate::truth::{Truth, NO_TRUTH_NAMES};
+use crate::truth::{indicated_ft, Truth, NO_TRUTH_NAMES};
+
+/// The US transition altitude, feet: a reported value below it is an altitude (altimeter setting
+/// applied), a value at or above it a flight level (standard setting). The decoded feed carries
+/// only feet, not which of the two ERAM meant, so the rule is by value.
+pub const TRANSITION_FT: i32 = 18_000;
+
+/// How the altitude error of a pair was formed (the `alt_mode` column).
+pub mod altmode {
+    /// No altitude on one side: no altitude error.
+    pub const NONE: u8 = 0;
+    /// Reported as a flight level: compared with the truth pressure altitude as it is.
+    pub const FLIGHT_LEVEL: u8 = 1;
+    /// Reported as an altitude: truth brought to indicated altitude with an altimeter setting.
+    pub const CORRECTED: u8 = 2;
+    /// Reported as an altitude with no altimeter setting found: not compared.
+    pub const NO_SETTING: u8 = 3;
+}
+
+/// The altimeter lookup of a pairing run: `(lat, lon, time Unix ms)` to inches of mercury.
+pub type AltimeterAt<'a> = &'a dyn Fn(f64, f64, i64) -> Option<f64>;
+
+/// Position cell of the altimeter lookup, 1e-7 degrees (0.1 degree), and its time cell,
+/// milliseconds (one minute): the setting is looked up once per cell, at the cell's centre, so
+/// the answer depends on the cell only.
+const ALT_CELL_E7: i64 = 1_000_000;
+const ALT_CELL_MS: i64 = 60_000;
 
 /// Pairing settings (cold: A7.2).
 // A7.2: cold struct, size guard waived
@@ -57,6 +88,10 @@ pub struct PairTable {
     pub lat_e7: Vec<i32>,
     pub lon_e7: Vec<i32>,
     pub alt_err_ft: Vec<f32>,
+    /// How the altitude error was formed ([`altmode`]).
+    pub alt_mode: Vec<u8>,
+    /// The correction applied to the truth altitude, feet (NaN unless [`altmode::CORRECTED`]).
+    pub alt_corr_ft: Vec<f32>,
     /// Truth ground speed, metres per second.
     pub truth_speed_mps: Vec<f32>,
     pub method: Vec<u8>,
@@ -65,7 +100,8 @@ pub struct PairTable {
     pub coast: Vec<u8>,
 }
 
-/// Pairs every sample of every associated flight with truth.
+/// Pairs every sample of every associated flight with truth, with no altimeter settings known:
+/// a sample reported below [`TRANSITION_FT`] has no altitude error.
 pub fn build_pairs(
     leg: &Legacy,
     ix: &ThIndex,
@@ -73,6 +109,20 @@ pub fn build_pairs(
     truth: &Truth<'_>,
     cfg: &PairConfig,
 ) -> (PairTable, Exclusions) {
+    build_pairs_with(leg, ix, assoc, truth, cfg, &|_, _, _| None)
+}
+
+/// Pairs every sample of every associated flight with truth; `altimeter` gives the setting for
+/// the altitude error of samples reported below [`TRANSITION_FT`].
+pub fn build_pairs_with(
+    leg: &Legacy,
+    ix: &ThIndex,
+    assoc: &Assoc,
+    truth: &Truth<'_>,
+    cfg: &PairConfig,
+    altimeter: AltimeterAt<'_>,
+) -> (PairTable, Exclusions) {
+    let mut memo: Option<((i64, i64, i64), Option<f64>)> = None;
     let mut p = PairTable::default();
     let mut ex = Exclusions::new();
     for f in 0..leg.flights.gufi.len() {
@@ -158,13 +208,45 @@ pub fn build_pairs(
                 exclude(&mut ex, "T3", "no ERAM velocity");
             }
             let alt = leg.th.alt_ft.get(i).copied().unwrap_or(NO_ALT);
-            let alt_err = match ts.baro_alt_ft {
-                Some(ta) if alt != NO_ALT => (alt - ta) as f32,
-                _ => {
-                    exclude(&mut ex, "T4", "no altitude on one side");
-                    f32::NAN
+            let (mut alt_err, mut mode, mut corr) = (f32::NAN, altmode::NONE, f32::NAN);
+            match ts.baro_alt_ft {
+                Some(ta) if alt != NO_ALT && alt >= TRANSITION_FT => {
+                    alt_err = (alt - ta) as f32;
+                    mode = altmode::FLIGHT_LEVEL;
                 }
-            };
+                Some(ta) if alt != NO_ALT => {
+                    let key = (
+                        (f64::from(lat) / ALT_CELL_E7 as f64).floor() as i64,
+                        (f64::from(lon) / ALT_CELL_E7 as f64).floor() as i64,
+                        t.div_euclid(ALT_CELL_MS),
+                    );
+                    let inhg = match memo {
+                        Some((k, v)) if k == key => v,
+                        _ => {
+                            let v = altimeter(
+                                (key.0 as f64 + 0.5) * ALT_CELL_E7 as f64 * 1e-7,
+                                (key.1 as f64 + 0.5) * ALT_CELL_E7 as f64 * 1e-7,
+                                key.2 * ALT_CELL_MS + ALT_CELL_MS / 2,
+                            );
+                            memo = Some((key, v));
+                            v
+                        }
+                    };
+                    match inhg {
+                        Some(h) => {
+                            let ind = indicated_ft(f64::from(ta), h);
+                            alt_err = (f64::from(alt) - ind) as f32;
+                            corr = (ind - f64::from(ta)) as f32;
+                            mode = altmode::CORRECTED;
+                        }
+                        None => {
+                            exclude(&mut ex, "T4", "no altimeter setting");
+                            mode = altmode::NO_SETTING;
+                        }
+                    }
+                }
+                _ => exclude(&mut ex, "T4", "no altitude on one side"),
+            }
             let ph = match ts.vert_rate_fpm {
                 None => phase::UNKNOWN,
                 Some(r) if r > phase::RATE_FPM => phase::CLIMB,
@@ -182,6 +264,8 @@ pub fn build_pairs(
             p.lat_e7.push(lat);
             p.lon_e7.push(lon);
             p.alt_err_ft.push(alt_err);
+            p.alt_mode.push(mode);
+            p.alt_corr_ft.push(corr);
             p.truth_speed_mps.push(v as f32);
             p.method.push(meth);
             p.phase.push(ph);

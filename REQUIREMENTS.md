@@ -2830,6 +2830,14 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   same distance, the lower address, with such samples counted (`nearest_tied_samples`). The legs looked at over a
   call are bounded by `SwapConfig::max_leg_visits`; a sample past it is refused and counted
   (`samples_refused_work_budget`). T9 measures nearness, not identity.
+- **OA-BENCH-131** T4 compares ERAM altitude with the truth on ERAM's own reference. A reported value at or
+  above 18,000 ft is a flight level, compared with the truth pressure altitude as it is. A lower value is an
+  altitude set with the local altimeter setting, so the truth is first brought to indicated altitude with
+  `pressure altitude + (inHg - 29.92) * 1000` ft, using the setting of the nearest station (by position) that has
+  one within 60 minutes of the sample (the setting nearest in time). A pair with no setting is not compared: it is
+  counted under `T4` / `no altimeter setting`, never compared uncorrected. T4 reports `compared_as_flight_level`,
+  `corrected_with_altimeter`, `excluded_no_altimeter_setting` and `mean_altimeter_correction_ft`; the flagged view
+  applies the same correction.
 
 ## Winds aloft (oa-wind)
 

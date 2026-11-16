@@ -44,7 +44,7 @@ use crate::metrics_th::{
     t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_heading_grid, t3_speed,
     t4_altitude,
 };
-use crate::pair::{build_pairs, PairTable};
+use crate::pair::{build_pairs_with, PairTable};
 use crate::run::{
     assoc_result, association_case_lines, flagged_assoc, flagged_metrics, flagged_views, RunConfig,
     RunOutput,
@@ -318,9 +318,10 @@ pub fn benchmark_chunk(
 ) -> ChunkOut {
     let ix = build_th_index(&leg.th, leg.flights.gufi.len());
     let assoc = associate(leg, &ix, truth, tix, &cfg.assoc);
-    let (pairs, mut ex) = build_pairs(leg, &ix, &assoc, truth, &cfg.pair);
+    let (pairs, mut ex) = build_pairs_with(leg, &ix, &assoc, truth, &cfg.pair, env.altimeter_at);
     let flagged = flagged_assoc(&assoc);
-    let (flagged_pairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
+    let (flagged_pairs, _) =
+        build_pairs_with(leg, &ix, &flagged, truth, &cfg.pair, env.altimeter_at);
     let mut flag_reasons = [0u64; astatus::REASON_NAMES.len()];
     for &r in &assoc.flag_reason {
         if let Some(c) = flag_reasons.get_mut(usize::from(r)) {
@@ -412,6 +413,8 @@ fn pairs_extend(a: &mut PairTable, b: &PairTable) {
     a.lat_e7.extend_from_slice(&b.lat_e7);
     a.lon_e7.extend_from_slice(&b.lon_e7);
     a.alt_err_ft.extend_from_slice(&b.alt_err_ft);
+    a.alt_mode.extend_from_slice(&b.alt_mode);
+    a.alt_corr_ft.extend_from_slice(&b.alt_corr_ft);
     a.truth_speed_mps.extend_from_slice(&b.truth_speed_mps);
     a.method.extend_from_slice(&b.method);
     a.phase.extend_from_slice(&b.phase);

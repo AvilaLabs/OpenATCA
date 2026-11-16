@@ -119,18 +119,30 @@ pub const ALTIMETER_WINDOW_MS: i64 = 3_600_000;
 /// Standard altimeter setting, inches of mercury: pressure altitude is indicated altitude here.
 pub const STANDARD_INHG: f64 = 29.92;
 
+/// The setting of `obs` (`(observation time Unix ms, inches of mercury)`, any order) observed
+/// nearest in time to `t_ms` and within [`ALTIMETER_WINDOW_MS`] of it (the earlier of two equally
+/// near); `None` when there is none. A setting outside 27 to 32 inHg is not an altimeter setting
+/// and is skipped.
+pub fn nearest_setting(obs: &[(i64, f64)], t_ms: i64) -> Option<f64> {
+    obs.iter()
+        .filter(|&&(_, v)| v.is_finite() && (27.0..=32.0).contains(&v))
+        .map(|&(o, v)| ((o - t_ms).abs(), o, v))
+        .filter(|&(d, _, _)| d <= ALTIMETER_WINDOW_MS)
+        .min_by_key(|&(d, o, _)| (d, o))
+        .map(|(_, _, v)| v)
+}
+
+/// Indicated altitude (feet above mean sea level) of an aircraft at pressure altitude `pa_ft`
+/// with altimeter setting `inhg`: `pa + (inHg - 29.92) * 1000`, the relation the ground test uses.
+pub fn indicated_ft(pa_ft: f64, inhg: f64) -> f64 {
+    pa_ft + (inhg - STANDARD_INHG) * 1000.0
+}
+
 impl AirportRef {
-    /// The altimeter setting, inches of mercury, observed nearest in time to `t_ms` and within
-    /// [`ALTIMETER_WINDOW_MS`] of it (the earlier of two equally near); `None` when there is
-    /// none. A setting outside 27 to 32 inHg is not an altimeter setting and is skipped.
+    /// The altimeter setting, inches of mercury, observed nearest in time to `t_ms`
+    /// ([`nearest_setting`]); `None` when there is none within [`ALTIMETER_WINDOW_MS`].
     pub fn altimeter_near(&self, t_ms: i64) -> Option<f64> {
-        self.altimeters
-            .iter()
-            .filter(|&&(_, v)| v.is_finite() && (27.0..=32.0).contains(&v))
-            .map(|&(o, v)| ((o - t_ms).abs(), o, v))
-            .filter(|&(d, _, _)| d <= ALTIMETER_WINDOW_MS)
-            .min_by_key(|&(d, o, _)| (d, o))
-            .map(|(_, _, v)| v)
+        nearest_setting(&self.altimeters, t_ms)
     }
 }
 
@@ -153,6 +165,10 @@ pub struct Env<'a> {
     /// Whether a point lies in the areas of more than one unit, so `unit_at` has none for it
     /// although the point is inside the model; asked only when `unit_at` answers `None`.
     pub unit_ambiguous: &'a dyn Fn(f64, f64) -> bool,
+    /// The altimeter setting, inches of mercury, for a point `(lat, lon)` in degrees at a time
+    /// (Unix ms): that of the nearest station with a setting within 60 minutes of the time;
+    /// `None` when there is none.
+    pub altimeter_at: &'a dyn Fn(f64, f64, i64) -> Option<f64>,
 }
 
 /// An [`Env`] that knows nothing: every lookup is empty and no point is in the zone.
@@ -164,5 +180,6 @@ pub fn empty_env() -> Env<'static> {
         in_zone: &|_, _| false,
         unit_at: &|_, _, _| None,
         unit_ambiguous: &|_, _| false,
+        altimeter_at: &|_, _, _| None,
     }
 }

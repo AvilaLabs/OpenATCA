@@ -286,6 +286,8 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
         |la: f64, lo: f64, _alt: Option<i32>| lookup.as_ref().and_then(|l| l.unit_at(la, lo));
     let unit_ambiguous =
         |la: f64, lo: f64| lookup.as_ref().is_some_and(|l| l.unit_ambiguous(la, lo));
+    let altimeter_at =
+        |la: f64, lo: f64, t: i64| metar.as_ref().and_then(|(m, _)| m.near(la, lo, t));
     let env: Env<'_> = if lookup.is_some() {
         Env {
             fix: &fix,
@@ -294,9 +296,13 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
             in_zone: &in_zone,
             unit_at: &unit_at,
             unit_ambiguous: &unit_ambiguous,
+            altimeter_at: &altimeter_at,
         }
     } else {
-        empty_env()
+        Env {
+            altimeter_at: &altimeter_at,
+            ..empty_env()
+        }
     };
     let mut rcfg = RunConfig::default();
     // The pairing gate is the truth uncertainty gate: one value, one place in the report.

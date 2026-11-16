@@ -421,6 +421,7 @@ pub fn env() -> Env<'static> {
             x.abs() <= ZONE_M && y.abs() <= ZONE_M
         },
         unit_ambiguous: &|_, _| false,
+        altimeter_at: &|_, _, _| Some(crate::truth::STANDARD_INHG),
         unit_at: &|lat, lon, _| {
             let (x, _) = enu(LAT0, LON0, lat, lon);
             Some(if x < 40_000.0 {

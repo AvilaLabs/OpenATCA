@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::pair::PairTable;
+use crate::pair::{altmode, PairTable};
 use crate::stats::{
     new_result, split_result, stats_of, withheld_result, ExactSum, MetricResult, Row, Splits,
 };
@@ -538,10 +538,44 @@ pub fn t3_heading_grid(p: &PairTable) -> MetricResult {
     r
 }
 
-/// T4: ERAM reported altitude minus truth barometric altitude, feet.
+/// T4: ERAM reported altitude minus truth altitude on ERAM's reference, feet. A value at or above
+/// the transition altitude is a flight level, compared with the truth pressure altitude; a lower
+/// one is an altitude, compared with the truth brought to indicated altitude by the altimeter
+/// setting of the nearest station (pairs with no setting are left out and counted).
 pub fn t4_altitude(p: &PairTable) -> MetricResult {
     let c = collect(p, |i| at(&p.alt_err_ft, i));
-    result_of("T4", "altitude error", "ft", &c)
+    let mut r = result_of("T4", "altitude error", "ft", &c);
+    let (mut fl, mut corrected, mut none) = (0u64, 0u64, 0u64);
+    let mut sum = 0.0f64;
+    for (i, &m) in p.alt_mode.iter().enumerate() {
+        match m {
+            altmode::FLIGHT_LEVEL => fl += 1,
+            altmode::CORRECTED => {
+                corrected += 1;
+                sum += f64::from(at(&p.alt_corr_ft, i));
+            }
+            altmode::NO_SETTING => none += 1,
+            _ => {}
+        }
+    }
+    r.scalars
+        .push(("compared_as_flight_level".to_string(), fl as f64));
+    r.scalars
+        .push(("corrected_with_altimeter".to_string(), corrected as f64));
+    r.scalars
+        .push(("excluded_no_altimeter_setting".to_string(), none as f64));
+    r.scalars.push((
+        "mean_altimeter_correction_ft".to_string(),
+        if corrected > 0 {
+            sum / corrected as f64
+        } else {
+            f64::NAN
+        },
+    ));
+    r.notes.push(
+        "below 18,000 ft ERAM reports altitude with the local altimeter setting and the truth is pressure altitude, so the truth is brought to indicated altitude with the setting of the nearest station within 60 minutes (pressure altitude + (inHg - 29.92) * 1000 ft); a pair with no setting is not compared; the reported value decides flight level or altitude (the feed carries feet only)".to_string(),
+    );
+    r
 }
 
 /// An empty result placeholder used when no pairs exist.
