@@ -455,11 +455,12 @@ fn scale_round_returns_exact_dyadic_boundary_bits() {
         (dd(1.5, 0.0), 0, 0x3ff8_0000_0000_0000), // ordinary exact value
         (dd(1.0, 0.0), -1022, 0x0010_0000_0000_0000), // least normal
         (dd(1.0, 0.0), -1074, 0x0000_0000_0000_0001), // least subnormal
-        (dd(1.0, 0.0), -1075, 0x0000_0000_0000_0000), // half least subnormal, even zero
-        (dd(3.0, 0.0), -1075, 0x0000_0000_0000_0002), // tie to even two units
-        (dd(5.0, 0.0), -1075, 0x0000_0000_0000_0002), // tie to even two units
-        (dd(1.0, 0.0), 1023, 0x7fe0_0000_0000_0000), // largest finite binade power
-        (dd(1.0, 0.0), 1024, 0x7ff0_0000_0000_0000), // overflow
+        (dd(f64::from_bits(1), 0.0), 27, 0x0000_0000_0800_0000), // subnormal input scaled to 2^-1047
+        (dd(1.0, 0.0), -1075, 0x0000_0000_0000_0000),            // half least subnormal, even zero
+        (dd(3.0, 0.0), -1075, 0x0000_0000_0000_0002),            // tie to even two units
+        (dd(5.0, 0.0), -1075, 0x0000_0000_0000_0002),            // tie to even two units
+        (dd(1.0, 0.0), 1023, 0x7fe0_0000_0000_0000),             // largest finite binade power
+        (dd(1.0, 0.0), 1024, 0x7ff0_0000_0000_0000),             // overflow
         // These distinguish e+k from the mutant e-k and e*k cutoff predicates.
         (
             dd(f64::from_bits(0x0170_0000_0000_0000), 0.0),

@@ -413,3 +413,19 @@ fn direct_rejects_non_finite_distance_and_azimuth() {
         Err(GeoError::NonFinite("distance"))
     );
 }
+
+// REQ: OA-GEO-003, OA-GEO-005
+#[test]
+fn near_antipodal_equatorial_points_take_the_shorter_non_equatorial_geodesic() {
+    // Independent Clairaut-integral quadrature at 80 and 140 decimal digits, with
+    // quadrature orders 40 and 80 agreeing within 2e-11 m (decimal endpoints).
+    // The equatorial arc is over 23 km longer and is not the shortest solution here.
+    let expected = 20_003_008.421_509_41;
+    let e = wgs84();
+    for end in [179.9, -179.9] {
+        let start = LatLon::new(0.0, 0.0).expect("start");
+        let finish = LatLon::new(0.0, end).expect("finish");
+        let result = e.inverse(start, finish).expect("near antipode");
+        assert!((result.distance_m - expected).abs() < 1e-3, "{result:?}");
+    }
+}

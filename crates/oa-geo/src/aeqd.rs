@@ -183,7 +183,7 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
         return None;
     }
     let rho = (x * x + y * y).sqrt();
-    if rho > half || rho / f.r > std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+    if rho > half || rho / f.r >= std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
         return None;
     }
     if rho < 1e-9 {
@@ -286,7 +286,7 @@ fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
         oa_math::hypot(x, y)
     };
     let c = rho / f.r;
-    if !c.is_finite() || c > std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+    if !c.is_finite() || c >= std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
         return None;
     }
     let (sa, ca) = if rho < 1e-9 {
@@ -1045,5 +1045,30 @@ mod tests {
         let point = unproject_fix(&frame, 300_000.0, -400_000.0).unwrap();
         assert!((point.lat_deg - -3.604_008_872_057_368).abs() < 2e-12);
         assert!((point.lon_deg - 2.707_584_876_097_325).abs() < 2e-12);
+    }
+
+    // REQ: OA-GEO-017
+    #[test]
+    fn the_chart_refuses_its_exact_open_domain_boundary() {
+        let frame = frame_new(0.0, 0.0);
+        let limit = std::f64::consts::PI - ANTIPODE_MARGIN_RAD;
+        let middle = (frame.r * limit).to_bits();
+        let mut found = false;
+        for bits in middle - 4..=middle + 4 {
+            let x = f64::from_bits(bits);
+            if x / frame.r == limit {
+                found = true;
+                let accepted = [
+                    unproject(&frame, x, 0.0).is_some(),
+                    unproject_fix(&frame, x, 0.0).is_some(),
+                    try_frame_velocity(&frame, x, 0.0, 1.0, 2.0).is_some(),
+                    try_frame_to_true(&frame, x, 0.0).is_some(),
+                    try_frame_from_true(&frame, x, 0.0).is_some(),
+                    try_frame_change(&frame, x, 0.0, &frame, x, 0.0).is_some(),
+                ];
+                assert_eq!(accepted, [false; 6], "chart boundary at {x:?}");
+            }
+        }
+        assert!(found, "a representable plane radius exercises equality");
     }
 }

@@ -217,3 +217,28 @@ fn logarithm_reduction_bins_and_normal_boundary_match_independent_references() {
         same(ln(x), want, "ln reduction/range boundary");
     }
 }
+
+// REQ: OA-MATH-004, OA-MATH-021, OA-MATH-023
+#[test]
+fn power_rounding_remains_certified_when_error_terms_nearly_cancel() {
+    // Exact binary64 inputs; independent mpmath at 80 and 200 digits agrees on
+    // these correctly rounded bits. The adjacent wrong answers have errors
+    // 0.50076958 and 0.50019482 ulp, respectively.
+    for (x, y, expected) in [
+        (
+            0x3fef_4897_41ec_69bb,
+            0xc07b_1a62_3070_d46e,
+            0x40d1_f3ed_e20e_9acd,
+        ),
+        (
+            0x3ff0_0000_0026_fd2f,
+            0x4269_fd28_cd93_1a12,
+            0x6d9e_7111_3068_ded8,
+        ),
+    ] {
+        assert_eq!(
+            pow(f64::from_bits(x), f64::from_bits(y)).to_bits(),
+            expected
+        );
+    }
+}

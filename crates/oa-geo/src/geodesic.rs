@@ -878,6 +878,7 @@ mod tests {
         assert_eq!(sincosd(360.0), (0.0, 1.0));
         assert_eq!(sincosd(180.0).0.to_bits(), 0.0f64.to_bits());
         assert_eq!(sincosd(270.0).1.to_bits(), 0.0f64.to_bits());
+        assert_eq!(sincosd(90.0).1.to_bits(), 0.0f64.to_bits());
     }
 
     // REQ: OA-GEO-021
