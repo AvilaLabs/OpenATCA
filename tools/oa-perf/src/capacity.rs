@@ -89,6 +89,11 @@ pub struct CapResult {
     pub fusion: FusionStats,
     pub tracker: TrackerStats,
     pub out_overflow: u64,
+    /// The same three at the end of the warm-up: the loss counters of the measured window are the
+    /// differences (all zero if the run stopped inside the warm-up).
+    pub fusion_warm: FusionStats,
+    pub tracker_warm: TrackerStats,
+    pub out_overflow_warm: u64,
     pub tracks_tentative: usize,
     pub tracks_confirmed: usize,
     pub radar_track_recs_taken: u64,
@@ -109,21 +114,51 @@ pub struct CapResult {
 }
 
 impl CapResult {
-    /// Every second of the measured traffic took under a second, and the 99th percentile
-    /// advance was under the advance interval (1 s). The knee is the largest `n` where this holds.
-    pub fn keeps_up(&self) -> bool {
+    /// The loss-of-work counters that moved during the measured window, by name.
+    pub fn loss(&self) -> Vec<(String, u64)> {
+        let now = loss_counters(&self.fusion, &self.tracker, self.out_overflow);
+        let warm = loss_counters(
+            &self.fusion_warm,
+            &self.tracker_warm,
+            self.out_overflow_warm,
+        );
+        now.into_iter()
+            .zip(warm)
+            .map(|((name, a), (_, b))| (name, a.saturating_sub(b)))
+            .filter(|(_, v)| *v > 0)
+            .collect()
+    }
+
+    /// The run discarded work in the measured window: some loss counter moved.
+    pub fn lost_work(&self) -> bool {
+        !self.loss().is_empty()
+    }
+
+    /// Fast enough: the traffic was all fed and every measured second's advance finished within
+    /// the real-time budget (under 1 s of wall time per second of traffic), with no exception. The
+    /// mean and the 99th percentile are reported, not tested.
+    pub fn in_time(&self) -> bool {
         !self.truncated
             && !self.stopped_early
             && self.realtime_ratio < 1.0
-            && self.advance_ms.p99 < 1000.0
-            && self.fusion.pending_overflow == 0
+            && self.advance_ms.max < ADVANCE_BUDGET_MS
     }
 
-    /// The stricter test: the slowest advance too was under a second.
+    /// A capacity claim: fast enough and no work lost. The knee is the largest `n` where this
+    /// holds.
+    pub fn keeps_up(&self) -> bool {
+        self.in_time() && !self.lost_work()
+    }
+
+    /// The same test as [`CapResult::keeps_up`] (the slowest advance is already under the budget);
+    /// kept as its own key so result files and the strict knee stay.
     pub fn keeps_up_strict(&self) -> bool {
-        self.keeps_up() && self.advance_ms.max < 1000.0
+        self.keeps_up()
     }
 }
+
+/// The time one advance may take: one second of wall time per second of traffic, ms.
+pub const ADVANCE_BUDGET_MS: f64 = 1000.0;
 
 /// The names and values of the fusion counters.
 pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
@@ -164,27 +199,135 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("keyinfo_overflow", s.keyinfo_overflow),
         ("scratch_full", s.scratch_full),
         ("reg_history_full", s.reg_history_full),
+        ("anon_plots_ungated", s.anon_plots_ungated),
+        ("init_capped", s.init_capped),
+        ("plot_scan_full", s.plot_scan_full),
+        ("wide_full", s.wide_full),
+        ("init_wide_full", s.init_wide_full),
     ]
 }
 
-/// The counters of the capacity refusals: the ones that say work or items were refused or cut.
-pub const CAPACITY_COUNTERS: [&str; 15] = [
-    "plots_refused",
-    "late",
-    "pending_overflow",
-    "hold_evicted",
-    "bucket_plot_overflow",
-    "bucket_work_capped",
-    "assoc_refused",
-    "cand_capacity",
-    "track_refused",
-    "assign_log_overflow",
-    "track_rec_overflow",
-    "keyinfo_overflow",
-    "scratch_full",
-    "reg_history_full",
-    "no_height_pairs",
+/// Fusion counters that are not loss of work: traffic and outcomes, the work done, the
+/// hard-constraint plots counted and not applied by design, and the high-water marks.
+pub const FUSION_NOT_LOSS: &[&str] = &[
+    "adsb_in",
+    "plots_in",
+    "applied_hard",
+    "applied_assoc",
+    "held",
+    "unassigned",
+    "hard_no_track",
+    "hard_mismatch",
+    "radar_disagree",
+    "hard_extra",
+    "held_forced",
+    "coarse_visits",
+    "pairs_tested",
+    "pairs_gated",
+    "cand_started",
+    "cand_joined",
+    "cand_confirmed",
+    "cand_expired",
+    "gnn",
+    "reg_clamped",
+    "processed",
+    "tracks_at_sum",
+    "init_tests",
+    "cands_live_max",
+    "assoc_runs",
+    "coarse_width_sum_m",
+    "coarse_width_max_m",
+    "buckets",
+    "cand_merged_on_confirm",
+    "cand_cancelled_by_track",
+    "confirm_gate_tests",
+    "cand_same_scan_kept",
+    "wide_tracks_sum",
+    "init_visits",
+    "stale_plots_skipped",
 ];
+
+/// Tracker counters that are not loss of work: traffic, filter outcomes (a rejected jump or
+/// altitude is a decision of the filter), track life, clock steps and the sums.
+pub const TRACKER_NOT_LOSS: &[&str] = &[
+    "offered",
+    "applied",
+    "duplicates",
+    "refiltered",
+    "replayed",
+    "jump_rejected",
+    "resyncs",
+    "alt_rejected",
+    "alt_geometric_skipped",
+    "started",
+    "confirmed",
+    "ended",
+    "init_implausible",
+    "init_window_expired",
+    "ticks",
+    "ticks_skipped",
+    "rows_computed",
+    "time_held",
+    "time_steps",
+    "time_held_applied",
+    "time_steps_back",
+    "nis_sum",
+    "nis_n",
+];
+
+/// Every counter of work lost or refused: input or output that the run dropped, refused, cut
+/// short or never examined for want of room. A capacity claim needs all of them zero over the
+/// measured window. The one list: a counter added to a stats struct must be put here or in
+/// [`FUSION_NOT_LOSS`] / [`TRACKER_NOT_LOSS`], or the test of that name fails.
+///
+/// Fusion: plots refused by validation, plots late for their bucket, the pending queue full, hold
+/// runs evicted, bucket plot overflow, bucket work capped, anonymous plots never gated, initiation
+/// cut short, the solver refusing, candidate table full, a confirmed track the tracker could not
+/// hold, assignment log full, plots without a height (candidates not started, pairs skipped), scan
+/// notes dropped, wide lists full (association and initiation), radar-only track records dropped,
+/// keys not remembered, scratch buffers full, registration history full.
+/// Tracker: no free slot, each validation refusal, late measurements (window and ring), clock-step
+/// holds discarded, tracks dropped by a step back, sensor table entries evicted.
+/// Output: rows lost to a full table.
+pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = vec![
+        ("fusion.plots_refused".into(), f.plots_refused),
+        ("fusion.late".into(), f.late),
+        ("fusion.pending_overflow".into(), f.pending_overflow),
+        ("fusion.hold_evicted".into(), f.hold_evicted),
+        ("fusion.bucket_plot_overflow".into(), f.bucket_plot_overflow),
+        ("fusion.bucket_work_capped".into(), f.bucket_work_capped),
+        ("fusion.anon_plots_ungated".into(), f.anon_plots_ungated),
+        ("fusion.init_capped".into(), f.init_capped),
+        ("fusion.assoc_refused".into(), f.assoc_refused),
+        ("fusion.cand_capacity".into(), f.cand_capacity),
+        ("fusion.cand_no_height".into(), f.cand_no_height),
+        ("fusion.no_height_pairs".into(), f.no_height_pairs),
+        ("fusion.track_refused".into(), f.track_refused),
+        ("fusion.assign_log_overflow".into(), f.assign_log_overflow),
+        ("fusion.plot_scan_full".into(), f.plot_scan_full),
+        ("fusion.wide_full".into(), f.wide_full),
+        ("fusion.init_wide_full".into(), f.init_wide_full),
+        ("fusion.track_rec_overflow".into(), f.track_rec_overflow),
+        ("fusion.keyinfo_overflow".into(), f.keyinfo_overflow),
+        ("fusion.scratch_full".into(), f.scratch_full),
+        ("fusion.reg_history_full".into(), f.reg_history_full),
+        ("tracker.capacity_refused".into(), t.capacity_refused),
+        ("tracker.late_window".into(), t.late_window),
+        ("tracker.late_ring".into(), t.late_ring),
+        (
+            "tracker.time_held_discarded".into(),
+            t.time_held.saturating_sub(t.time_held_applied),
+        ),
+        ("tracker.time_future_dropped".into(), t.time_future_dropped),
+        ("tracker.time_sensor_evicted".into(), t.time_sensor_evicted),
+    ];
+    for (name, c) in REFUSE_NAMES.iter().zip(t.refused.iter()) {
+        v.push((format!("tracker.refused_{name}"), *c));
+    }
+    v.push(("out.overflow".into(), out_overflow));
+    v
+}
 
 /// The tracker's counters, by name.
 pub fn tracker_counters(s: &TrackerStats) -> Vec<(String, u64)> {
@@ -221,7 +364,7 @@ pub fn tracker_cfg(max_tracks: usize, n: usize) -> TrackerConfig {
         max_tracks,
         // A second of a full table is a tick row per track and the update rows: four per track is
         // room; a full table counts what it loses.
-        out_capacity: (4 * n).clamp(1 << 16, 1 << 24),
+        out_capacity: n.saturating_mul(4).clamp(1 << 16, 1 << 24),
         ..DEFAULT_CONFIG
     }
 }
@@ -262,12 +405,13 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut seconds = Vec::new();
     let (mut wall_measured, mut wall_total) = (0.0f64, 0.0f64);
     let (mut sum_adsb, mut sum_plots, mut sum_rows) = (0usize, 0usize, 0usize);
-    let total_s = cfg.warmup_s + cfg.measure_s;
+    let total_s = cfg.warmup_s.saturating_add(cfg.measure_s);
     let started = Instant::now();
     let (mut truncated, mut stopped_early) = (false, false);
     let mut measure_done = 0i64;
     let mut seconds_done = 0i64;
     let mut rss_warm_kb = 0u64;
+    let mut warm = (FusionStats::default(), TrackerStats::default(), 0u64);
     for k in 0..total_s {
         if started.elapsed().as_secs_f64() > cfg.max_wall_s {
             truncated = true;
@@ -277,7 +421,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
-        let until = EPOCH_NS + (k + 1) * NS_PER_S;
+        let until = EPOCH_NS.saturating_add((k + 1).saturating_mul(NS_PER_S));
         if measured {
             snapshot(&f, &mut before);
         }
@@ -347,6 +491,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         output_clear(&mut out);
         if k + 1 == cfg.warmup_s {
             rss_warm_kb = status_kb("VmRSS").unwrap_or(0);
+            warm = (*fusion_stats(&f), *fusion_tracker_stats(&f), out.overflow);
         }
         if cfg.early_stop
             && ((k >= 14 && wall_total > 2.0 * (k + 1) as f64)
@@ -401,6 +546,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         fusion: *fusion_stats(&f),
         tracker: *fusion_tracker_stats(&f),
         out_overflow: out.overflow,
+        fusion_warm: warm.0,
+        tracker_warm: warm.1,
+        out_overflow_warm: warm.2,
         tracks_tentative: tent,
         tracks_confirmed: conf,
         radar_track_recs_taken: recs_taken,
@@ -435,6 +583,8 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("wall_measured_s", fmt_f(r.wall_measured_s));
     kv.put("wall_total_s", fmt_f(r.wall_total_s));
     kv.put("realtime_ratio", format!("{:.4}", r.realtime_ratio));
+    kv.put("in_time", u8::from(r.in_time()));
+    kv.put("lost_work", u8::from(r.lost_work()));
     kv.put("keeps_up", u8::from(r.keeps_up()));
     kv.put("keeps_up_strict", u8::from(r.keeps_up_strict()));
     kv.put("seconds_over_1s", r.seconds_over_1s);
@@ -451,6 +601,13 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put_dist("age_coast_rows", "ms", &r.age_coast_ms);
     kv.put_dist("delay_adsb", "ms", &r.delay_adsb_ms);
     kv.put_dist("delay_plot", "ms", &r.delay_plot_ms);
+    let warm = loss_counters(&r.fusion_warm, &r.tracker_warm, r.out_overflow_warm);
+    for ((name, v), (_, w)) in loss_counters(&r.fusion, &r.tracker, r.out_overflow)
+        .into_iter()
+        .zip(warm)
+    {
+        kv.put(&format!("loss.{name}"), v.saturating_sub(w));
+    }
     for (name, v) in fusion_counters(&r.fusion) {
         kv.put(&format!("fusion.{name}"), v);
     }
@@ -525,12 +682,20 @@ pub fn cap_text(r: &CapResult) -> String {
         r.plots_per_s,
         r.rows_per_s
     ));
+    let verdict = if r.keeps_up() {
+        "keeps up".to_string()
+    } else if r.in_time() {
+        "LOST WORK (fast enough, not a pass)".to_string()
+    } else {
+        "does not keep up".to_string()
+    };
     s.push_str(&format!(
-        "  processing time per second of traffic: {:.1} ms = {:.3} x real time; {} seconds took 1 s or more; keeps up: {} (strict, slowest advance < 1 s: {})\n",
+        "  processing time per second of traffic: {:.1} ms = {:.3} x real time; {} seconds took 1 s or more; slowest advance {:.1} ms; verdict: {} (every measured second under 1 s, no work lost; strict: {})\n",
         r.realtime_ratio * 1000.0,
         r.realtime_ratio,
         r.seconds_over_1s,
-        r.keeps_up(),
+        r.advance_ms.max,
+        verdict,
         r.keeps_up_strict()
     ));
     s.push_str(&dist_line("per-advance wall time", "ms", &r.advance_ms));
@@ -582,29 +747,18 @@ pub fn cap_text(r: &CapResult) -> String {
         "  tracks at the end: {} confirmed, {} tentative (aircraft {})\n",
         r.tracks_confirmed, r.tracks_tentative, r.n
     ));
-    let moved: Vec<String> = fusion_counters(&r.fusion)
+    let moved: Vec<String> = r
+        .loss()
         .into_iter()
-        .filter(|(name, v)| CAPACITY_COUNTERS.contains(name) && *v > 0)
-        .map(|(name, v)| format!("{name}={v}"))
-        .collect();
-    let tmoved: Vec<String> = tracker_counters(&r.tracker)
-        .into_iter()
-        .filter(|(name, v)| {
-            *v > 0
-                && (name == "capacity_refused"
-                    || name.starts_with("refused_")
-                    || name == "late_window"
-                    || name == "late_ring"
-                    || name == "time_held"
-                    || name == "ticks_skipped")
-        })
-        .map(|(name, v)| format!("{name}={v}"))
+        .map(|(n, v)| format!("{n}={v}"))
         .collect();
     s.push_str(&format!(
-        "  capacity counters moved (fusion): {}\n  capacity counters moved (tracker): {}; output overflow rows {}\n",
-        if moved.is_empty() { "none".to_string() } else { moved.join(" ") },
-        if tmoved.is_empty() { "none".to_string() } else { tmoved.join(" ") },
-        r.out_overflow
+        "  work-loss counters moved in the measured window: {}\n",
+        if moved.is_empty() {
+            "none".to_string()
+        } else {
+            moved.join(" ")
+        },
     ));
     s.push_str(&format!(
         "  buffers unchanged across the run: {}; radar-only track records handed on: {}\n",
@@ -643,6 +797,65 @@ pub fn parse_radars(s: &str) -> Result<Vec<Kind>, String> {
 mod tests {
     use super::*;
 
+    /// Sets the counter `name` (as `loss_counters` names it) to 1 in the result's totals.
+    fn set_loss(r: &mut CapResult, name: &str) {
+        let (f, t) = (&mut r.fusion, &mut r.tracker);
+        match name {
+            "fusion.plots_refused" => f.plots_refused = 1,
+            "fusion.late" => f.late = 1,
+            "fusion.pending_overflow" => f.pending_overflow = 1,
+            "fusion.hold_evicted" => f.hold_evicted = 1,
+            "fusion.bucket_plot_overflow" => f.bucket_plot_overflow = 1,
+            "fusion.bucket_work_capped" => f.bucket_work_capped = 1,
+            "fusion.anon_plots_ungated" => f.anon_plots_ungated = 1,
+            "fusion.init_capped" => f.init_capped = 1,
+            "fusion.assoc_refused" => f.assoc_refused = 1,
+            "fusion.cand_capacity" => f.cand_capacity = 1,
+            "fusion.cand_no_height" => f.cand_no_height = 1,
+            "fusion.no_height_pairs" => f.no_height_pairs = 1,
+            "fusion.track_refused" => f.track_refused = 1,
+            "fusion.assign_log_overflow" => f.assign_log_overflow = 1,
+            "fusion.plot_scan_full" => f.plot_scan_full = 1,
+            "fusion.wide_full" => f.wide_full = 1,
+            "fusion.init_wide_full" => f.init_wide_full = 1,
+            "fusion.track_rec_overflow" => f.track_rec_overflow = 1,
+            "fusion.keyinfo_overflow" => f.keyinfo_overflow = 1,
+            "fusion.scratch_full" => f.scratch_full = 1,
+            "fusion.reg_history_full" => f.reg_history_full = 1,
+            "tracker.capacity_refused" => t.capacity_refused = 1,
+            "tracker.late_window" => t.late_window = 1,
+            "tracker.late_ring" => t.late_ring = 1,
+            "tracker.time_held_discarded" => t.time_held = t.time_held_applied + 1,
+            "tracker.time_future_dropped" => t.time_future_dropped = 1,
+            "tracker.time_sensor_evicted" => t.time_sensor_evicted = 1,
+            "out.overflow" => r.out_overflow = 1,
+            n if n.starts_with("tracker.refused_") => t.refused[0] = 1,
+            n => panic!("no setter for {n}"),
+        }
+    }
+
+    /// The top-level field names of a derived `Debug` string.
+    fn debug_fields(d: &str) -> Vec<String> {
+        let (mut out, mut depth, mut word) = (Vec::new(), 0i32, String::new());
+        let b: Vec<char> = d.chars().collect();
+        for (i, &c) in b.iter().enumerate() {
+            match c {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 1 && (c.is_alphanumeric() || c == '_') {
+                word.push(c);
+            } else {
+                if depth == 1 && c == ':' && b.get(i + 1) == Some(&' ') && !word.is_empty() {
+                    out.push(word.clone());
+                }
+                word.clear();
+            }
+        }
+        out
+    }
+
     fn small(n: usize, warm: i64, meas: i64) -> CapCfg {
         CapCfg {
             traffic: TrafficCfg {
@@ -674,11 +887,7 @@ mod tests {
             f.processed,
             f.adsb_in + f.plots_in - f.plots_refused - f.late
         );
-        for (name, v) in fusion_counters(f) {
-            if CAPACITY_COUNTERS.contains(&name) && name != "no_height_pairs" {
-                assert_eq!(v, 0, "{name}");
-            }
-        }
+        assert!(r.loss().is_empty(), "{:?}", r.loss());
         assert_eq!(r.out_overflow, 0);
         assert_eq!(r.tracker.capacity_refused, 0);
         assert!(r.buffers_stable);
@@ -743,5 +952,91 @@ mod tests {
         assert!(r.tracker.capacity_refused > 0, "{:?}", r.tracker);
         assert!(r.tracks_confirmed <= 40);
         assert!(r.buffers_stable);
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn too_few_track_slots_is_fast_but_not_a_pass() {
+        let mut c = small(100, 5, 10);
+        c.max_tracks = 40;
+        let r = run_capacity(&c).unwrap();
+        assert!(r.tracker.capacity_refused > 0, "{:?}", r.tracker);
+        assert!(r.advance_ms.max < 1000.0, "the run was meant to be fast");
+        assert!(!r.keeps_up(), "a run that refused aircraft passed");
+        assert!(r.lost_work() && r.in_time());
+        assert!(
+            !r.keeps_up_strict(),
+            "a run that refused aircraft passed strict"
+        );
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn a_capped_bucket_in_the_window_is_not_a_pass() {
+        let mut r = run_capacity(&small(60, 5, 10)).unwrap();
+        assert!(r.keeps_up() && r.keeps_up_strict(), "the clean run passes");
+        r.fusion.bucket_work_capped = 3;
+        assert!(!r.keeps_up(), "a capped bucket passed");
+        assert!(!r.keeps_up_strict(), "a capped bucket passed strict");
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn every_loss_counter_fails_a_run_and_a_clean_run_passes() {
+        let clean = run_capacity(&small(60, 5, 10)).unwrap();
+        assert!(clean.keeps_up());
+        for (name, _) in loss_counters(&Default::default(), &Default::default(), 0) {
+            let mut r = clean.clone();
+            set_loss(&mut r, &name);
+            assert!(!r.keeps_up(), "{name} moved and the run passed");
+        }
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn loss_before_the_measured_window_does_not_fail_a_run() {
+        let mut r = run_capacity(&small(60, 5, 10)).unwrap();
+        r.fusion.bucket_work_capped = 4;
+        r.fusion_warm.bucket_work_capped = 4;
+        assert!(r.keeps_up());
+        r.fusion.bucket_work_capped = 5;
+        assert!(!r.keeps_up());
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn every_counter_is_sorted_into_loss_or_not() {
+        let known = |n: &str, loss: &[(String, u64)], not: &[&str], pre: &str| {
+            not.contains(&n)
+                || loss.iter().any(|(l, _)| *l == format!("{pre}{n}"))
+                || (n == "refused" && loss.iter().any(|(l, _)| l.starts_with("tracker.refused_")))
+        };
+        let loss = loss_counters(&Default::default(), &Default::default(), 0);
+        for n in debug_fields(&format!("{:?}", FusionStats::default())) {
+            assert!(
+                known(&n, &loss, FUSION_NOT_LOSS, "fusion."),
+                "fusion counter {n} is neither a loss counter nor listed as not one"
+            );
+        }
+        for n in debug_fields(&format!("{:?}", TrackerStats::default())) {
+            assert!(
+                known(&n, &loss, TRACKER_NOT_LOSS, "tracker."),
+                "tracker counter {n} is neither a loss counter nor listed as not one"
+            );
+        }
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn one_slow_second_in_a_hundred_is_not_a_pass() {
+        let mut r = run_capacity(&small(60, 5, 10)).unwrap();
+        let mut v = vec![10.0; 99];
+        v.push(2000.0);
+        r.advance_ms = dist_of(&v);
+        r.realtime_ratio = r.advance_ms.mean * 1.0e-3;
+        // The mean is 30 ms and the 99th percentile 10 ms: the old rule passed it.
+        assert!(r.realtime_ratio < 0.05 && r.advance_ms.p99 < 20.0);
+        assert!(!r.keeps_up(), "a 2 s second passed");
+        assert!(!r.keeps_up_strict());
     }
 }

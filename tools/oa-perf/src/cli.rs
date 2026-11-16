@@ -8,14 +8,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::capacity::{
-    cap_kv, cap_text, fusion_counters, parse_radars, run_capacity, seconds_csv, CapCfg,
-    CAPACITY_COUNTERS,
+    cap_kv, cap_text, loss_counters, parse_radars, run_capacity, seconds_csv, CapCfg,
 };
 use crate::clip::{clip_kv, clip_text, run_clip, ClipCfg};
 use crate::gen::{Layout, TrafficCfg};
 use crate::stats::{fmt_f, Kv};
 use crate::sys::{cpu_model, loadavg, nproc};
 use oa_track::fusion_params::MAX_ASSOC_TRACKS;
+use oa_track::fusion_score::EPOCH_NS;
+
+/// Seconds past the end of the run that the traffic is generated for.
+const HORIZON_PAD_S: i64 = 60;
 
 /// The usage text.
 pub const USAGE: &str = "usage: oa-perf <all|clip|sweep|one> [flags]
@@ -33,7 +36,7 @@ flags (defaults in brackets):
   --radars e,t,t     radars: e en-route (12 s), t terminal (4.8 s) [e,t,t]
   --adsb-frac F      fraction of aircraft sending ADS-B [0.5]
   --warmup S --duration S   seconds fed before the statistics, and seconds measured [60, 60]
-  --max-wall S       stop a run's feeding after this many wall seconds [540]
+  --max-wall S       stop a run's feeding after this many wall seconds, positive [540]
   --max-tracks N     tracker capacity [65536]
   --refine K         bisection steps between the knee and the first failing size [2]
   --seed N           traffic seed [1]
@@ -94,6 +97,37 @@ fn num<T: std::str::FromStr>(flag: &str, v: Option<&String>) -> Result<T, String
         .map_err(|_| format!("{flag}: not a valid number"))
 }
 
+/// Refuses the timing and fraction values that cannot work: a wall limit that is not a positive
+/// finite number, a fraction outside 0..=1, and traffic times whose sum (with the 60 s the
+/// traffic is generated past the run) or whose nanoseconds would overflow or leave the range the
+/// layer accepts.
+fn check_times(o: &Opts) -> Result<(), String> {
+    if !(o.max_wall.is_finite() && o.max_wall > 0.0) {
+        return Err(format!(
+            "--max-wall: {} is not a positive finite number of seconds",
+            o.max_wall
+        ));
+    }
+    if !(0.0..=1.0).contains(&o.adsb_frac) {
+        return Err(format!(
+            "--adsb-frac: {} is not between 0 and 1",
+            o.adsb_frac
+        ));
+    }
+    let total = o
+        .warmup
+        .checked_add(o.duration)
+        .and_then(|t| t.checked_add(HORIZON_PAD_S))
+        .ok_or("--warmup plus --duration is too large")?;
+    let limit_s = (oa_track::TIME_LIMIT_NS - EPOCH_NS) / 1_000_000_000;
+    if total > limit_s || o.clip_secs > limit_s {
+        return Err(format!(
+            "--warmup plus --duration (or --clip-secs) is more than {limit_s} s, the longest time the layer accepts"
+        ));
+    }
+    Ok(())
+}
+
 /// Parses the command line (without the program name).
 pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts::default();
@@ -143,6 +177,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     if o.warmup < 0 || o.duration < 1 || o.clip_secs < 1 {
         return Err("--warmup, --duration or --clip-secs out of range".to_string());
     }
+    check_times(&o)?;
     parse_radars(&o.radars)?;
     Ok(o)
 }
@@ -156,7 +191,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
             layout: o.layout,
             adsb_frac: o.adsb_frac,
             radars: parse_radars(&o.radars)?,
-            horizon_s: (o.warmup + o.duration) as f64 + 60.0,
+            horizon_s: o.warmup.saturating_add(o.duration) as f64 + HORIZON_PAD_S as f64,
         },
         warmup_s: o.warmup,
         measure_s: o.duration,
@@ -225,16 +260,13 @@ fn flag(kv: &Kv, k: &str) -> bool {
 
 fn row_line(n: usize, kv: &Kv) -> String {
     let f = |k: &str| kv.get_f64(k).unwrap_or(f64::NAN);
-    let moved: Vec<String> = CAPACITY_COUNTERS
+    let moved: Vec<String> = kv
+        .rows
         .iter()
-        .filter_map(|c| {
-            let v = kv.get(&format!("fusion.{c}"))?.parse::<u64>().ok()?;
-            (v > 0).then(|| format!("{c}={v}"))
+        .filter_map(|(k, v)| {
+            let name = k.strip_prefix("loss.")?;
+            (v.parse::<u64>().ok()? > 0).then(|| format!("{name}={v}"))
         })
-        .chain(["capacity_refused"].iter().filter_map(|c| {
-            let v = kv.get(&format!("tracker.{c}"))?.parse::<u64>().ok()?;
-            (v > 0).then(|| format!("tracker.{c}={v}"))
-        }))
         .collect();
     format!(
         "{n:>6} {:>7.3} {:>9} {:>9} {:>10} {:>9.0} {:>6} {:>6}  {}\n",
@@ -243,7 +275,13 @@ fn row_line(n: usize, kv: &Kv) -> String {
         fmt_f(f("advance.max_ms")),
         fmt_f(f("age_tick_rows.p99_ms")),
         f("vmhwm_kb") / 1024.0,
-        if flag(kv, "keeps_up") { "yes" } else { "NO" },
+        if flag(kv, "keeps_up") {
+            "yes"
+        } else if flag(kv, "in_time") {
+            "LOST"
+        } else {
+            "NO"
+        },
         if flag(kv, "truncated") {
             "cut"
         } else if flag(kv, "stopped_early") {
@@ -260,7 +298,7 @@ fn row_line(n: usize, kv: &Kv) -> String {
 }
 
 const TABLE_HEAD: &str =
-    "     N  x-real  adv-p99ms adv-max-ms  age-p99ms(tick) HWM-MB keeps  note  counters moved\n";
+    "     N  x-real  adv-p99ms adv-max-ms  age-p99ms(tick) HWM-MB keeps  note  work-loss counters moved\n";
 
 /// The sweep, knee and overload. Returns the summary text.
 fn sweep(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
@@ -281,7 +319,8 @@ fn sweep(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
         let Some(fail) = results.iter().filter(|r| r.0 > ok).map(|r| r.0).min() else {
             break;
         };
-        let mid = (ok + fail) / 2 / 100 * 100;
+        let mid = ok / 2 + fail / 2;
+        let mid = mid / 100 * 100;
         if mid <= ok || mid >= fail {
             break;
         }
@@ -311,11 +350,11 @@ fn sweep(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
         }
     }
     s.push_str(&format!(
-        "knee (largest size, every measured second under 1 s of work, p99 advance under 1 s): {}\n",
+        "knee (largest size where every measured second's advance took under 1 s and no work was lost): {}\n",
         knee.map_or("none of the sizes keeps up".to_string(), |k| k.to_string())
     ));
     s.push_str(&format!(
-        "strict knee (the slowest advance also under 1 s): {}\n",
+        "strict knee (same test, kept for result files): {}\n",
         knee_strict.map_or("none".to_string(), |k| k.to_string())
     ));
     kvs.put(&format!("knee.{}", o.layout.name()), knee.unwrap_or(0));
@@ -325,7 +364,7 @@ fn sweep(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
     );
     if !o.no_overload {
         if let Some(k) = knee {
-            let n2 = 2 * k;
+            let n2 = k.saturating_mul(2);
             s.push_str(&format!("\n== overload: twice the knee, n={n2} ==\n"));
             let mut oo = o.clone();
             oo.cmd = "overload".to_string();
@@ -367,28 +406,14 @@ fn compare(a: &Kv, b: &Kv) -> String {
         flag(b, "buffers_stable")
     ));
     let mut any = false;
-    for (name, _) in fusion_counters(&Default::default()) {
-        let (x, y) = (
-            g(a, &format!("fusion.{name}")),
-            g(b, &format!("fusion.{name}")),
-        );
-        if CAPACITY_COUNTERS.contains(&name) && (x > 0.0 || y > 0.0) {
-            s.push_str(&format!("    fusion.{name}: {x:.0} -> {y:.0}\n"));
-            any = true;
+    for (name, _) in loss_counters(&Default::default(), &Default::default(), 0) {
+        // The output rows have their own line below.
+        if name.starts_with("out.") {
+            continue;
         }
-    }
-    for name in [
-        "capacity_refused",
-        "late_window",
-        "time_held",
-        "ticks_skipped",
-    ] {
-        let (x, y) = (
-            g(a, &format!("tracker.{name}")),
-            g(b, &format!("tracker.{name}")),
-        );
+        let (x, y) = (g(a, &format!("loss.{name}")), g(b, &format!("loss.{name}")));
         if x > 0.0 || y > 0.0 {
-            s.push_str(&format!("    tracker.{name}: {x:.0} -> {y:.0}\n"));
+            s.push_str(&format!("    {name}: {x:.0} -> {y:.0}\n"));
             any = true;
         }
     }
@@ -522,9 +547,9 @@ mod tests {
     #[test]
     fn the_knee_comparison_reads_the_counters() {
         let a = Kv::parse(
-            "realtime_ratio=0.5\nfusion.bucket_work_capped=0\nvmhwm_kb=2048\nbuffers_stable=1\n",
+            "realtime_ratio=0.5\nloss.fusion.bucket_work_capped=0\nvmhwm_kb=2048\nbuffers_stable=1\n",
         );
-        let b = Kv::parse("realtime_ratio=1.5\nfusion.bucket_work_capped=7\nvmhwm_kb=4096\nbuffers_stable=1\nout_overflow=3\n");
+        let b = Kv::parse("realtime_ratio=1.5\nloss.fusion.bucket_work_capped=7\nvmhwm_kb=4096\nbuffers_stable=1\nout_overflow=3\n");
         let t = compare(&a, &b);
         assert!(t.contains("0.500 -> 1.500"), "{t}");
         assert!(t.contains("fusion.bucket_work_capped: 0 -> 7"), "{t}");
@@ -533,5 +558,33 @@ mod tests {
             "{t}"
         );
         assert!(t.contains("2 -> 4 MB"), "{t}");
+    }
+
+    // REQ: OA-PRF-010
+    #[test]
+    fn timing_and_float_values_that_cannot_work_are_refused() {
+        let bad = [
+            "one --max-wall NaN",
+            "one --max-wall inf",
+            "one --max-wall -inf",
+            "one --max-wall 0",
+            "one --max-wall -5",
+            "one --adsb-frac NaN",
+            "one --adsb-frac 1.5",
+            "one --adsb-frac -0.1",
+            "one --warmup 9223372036854775807 --duration 1",
+            "one --warmup 9223372036854775807 --duration 9223372036854775807",
+            "one --warmup 0 --duration 9223372036854775807",
+            "one --warmup 3000000000 --duration 1",
+            "one --clip-secs 9223372036854775807",
+            "one --warmup -1",
+            "one --duration 0",
+        ];
+        for b in bad {
+            let e = parse_args(&a(b)).expect_err(b);
+            assert!(!e.is_empty() && e.starts_with("--"), "{b}: {e}");
+        }
+        assert!(parse_args(&a("one --max-wall 0.5 --adsb-frac 0 --warmup 0")).is_ok());
+        assert!(parse_args(&a("one --adsb-frac 1")).is_ok());
     }
 }
