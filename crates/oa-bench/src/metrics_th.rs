@@ -85,6 +85,10 @@ pub struct OffsetFit {
     /// The worst groups by deviation: `(address, samples, offset, deviation)`, at most
     /// [`WORST_GROUPS`].
     pub worst_groups: Vec<(u32, u64, f64, f64)>,
+    /// Samples left out because the along-track error or the truth speed is not finite.
+    pub not_finite: u64,
+    /// Samples left out because the truth speed is below the fit minimum (the stated filter).
+    pub below_min_speed: u64,
 }
 
 /// Aircraft groups listed in the untrimmed report.
@@ -109,6 +113,7 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
     let mut bins: BTreeMap<i64, Acc> = BTreeMap::new();
     let mut groups: BTreeMap<u32, Acc> = BTreeMap::new();
     let t0 = p.t_ms.iter().copied().min().unwrap_or(0);
+    let (mut not_finite, mut below_min_speed) = (0u64, 0u64);
     for i in 0..p.t_ms.len() {
         let (Some(&e), Some(&v), Some(&t), Some(&a)) = (
             p.along_m.get(i),
@@ -119,7 +124,12 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
             continue;
         };
         let (e, v) = (f64::from(e), f64::from(v));
-        if !e.is_finite() || v < cfg.min_speed_mps {
+        if !e.is_finite() || !v.is_finite() {
+            not_finite += 1;
+            continue;
+        }
+        if v < cfg.min_speed_mps {
+            below_min_speed += 1;
             continue;
         }
         let bin = (t - t0).div_euclid(cfg.bin_ms.max(1));
@@ -146,6 +156,8 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
         between_se_s: f64::NAN,
         max_group_dev_untrimmed_s: f64::NAN,
         worst_groups: Vec::new(),
+        not_finite,
+        below_min_speed,
     };
     let Some(tau) = fit.tau_s else { return fit };
     if all.n > 1 {
@@ -292,17 +304,29 @@ pub fn t2_along_raw(p: &PairTable) -> MetricResult {
     result_of("T2-raw", "along-track error, raw (primary)", "m", &c)
 }
 
+/// States what the fit left out, by reason.
+fn push_fit_exclusions(r: &mut MetricResult, fit: &OffsetFit) {
+    r.scalars
+        .push(("fit_excluded_not_finite".to_string(), fit.not_finite as f64));
+    r.scalars.push((
+        "fit_excluded_below_min_speed".to_string(),
+        fit.below_min_speed as f64,
+    ));
+}
+
 /// T2 corrected: along-track error after removing the fitted constant time offset. The offset,
 /// its sample count and the stability test are scalars; a drifting offset withholds the rows.
 pub fn t2_along_corrected(p: &PairTable, cfg: &OffsetConfig) -> MetricResult {
     let fit = fit_offset(p, cfg);
     let Some(tau) = fit.tau_s else {
-        return withheld_result(
+        let mut r = withheld_result(
             "T2-offset",
             "along-track error, offset corrected (secondary)",
             "m",
             "no sample with a defined along-track error and truth speed above the fit minimum",
         );
+        push_fit_exclusions(&mut r, &fit);
+        return r;
     };
     let mut r = if let Some(why) = &fit.drift {
         withheld_result(
@@ -324,6 +348,7 @@ pub fn t2_along_corrected(p: &PairTable, cfg: &OffsetConfig) -> MetricResult {
     };
     r.scalars.push(("fitted_offset_s".to_string(), tau));
     r.scalars.push(("fit_n".to_string(), fit.n as f64));
+    push_fit_exclusions(&mut r, &fit);
     r.scalars.push(("fitted_offset_se_s".to_string(), fit.se_s));
     r.scalars.push((
         "fitted_offset_between_aircraft_se_s".to_string(),

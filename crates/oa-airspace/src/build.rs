@@ -172,6 +172,9 @@ pub struct Rounding {
     pub pos_values: u64,
     /// Largest error converting a leg distance from nautical miles to whole metres.
     pub dist_max_m: f64,
+    /// Coordinates whose round trip could not be measured (a failed geodesic or an unusable
+    /// coordinate): their error is unknown, not zero, so they are left out of `pos_max_m`.
+    pub pos_unverified: u64,
 }
 
 /// What the build learned that the model tables do not hold; the report prints it.
@@ -206,6 +209,8 @@ pub struct BuildInfo {
     pub unverified_alt_desc: usize,
     /// Boundaries that could not be used for the area test, with the reason.
     pub boundary_notes: Vec<String>,
+    /// Boundary records refused because another record has their key and different content.
+    pub boundary_conflicts: usize,
     /// Selected CIFP volumes with an arc whose coded radius differs from the distance between
     /// its centre and an end point by more than [`ARC_RADIUS_TOLERANCE_M`], one line per volume.
     pub arc_radius_mismatches: Vec<String>,
@@ -1386,8 +1391,10 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         ));
     }
     // Class airspace flags from NASR.
+    let mut class_no_airport = 0usize;
     for c in &src.nasr.class_airspace {
         let Some(&i) = maps.apt_faa.get(&c.arpt_id) else {
+            class_no_airport += 1;
             continue;
         };
         if let Some(cand) = reg.cands.get_mut(i) {
@@ -1396,6 +1403,12 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
                 | (u8::from(c.class_d) << 2)
                 | (u8::from(c.class_e) << 3);
         }
+    }
+    if class_no_airport > 0 {
+        info.skipped.push((
+            "class airspace rows whose airport is not in the sources".to_string(),
+            class_no_airport,
+        ));
     }
     (reg, maps)
 }
@@ -1610,6 +1623,7 @@ struct AirwayOut<'a> {
 }
 
 // A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq)]
 struct SegOut {
     via: u8,
     lat: i32,
@@ -1621,6 +1635,7 @@ struct SegOut {
 }
 
 // A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq)]
 struct BoundaryOut {
     source: u8,
     stratum: u8,
@@ -1637,6 +1652,58 @@ struct BoundaryOut {
     incomplete: bool,
     verts: Vec<PosE7>,
     segs: Vec<SegOut>,
+}
+
+/// The key two boundary records share when they describe the same boundary.
+fn boundary_key(b: &BoundaryOut) -> (u8, u8, &str, u8, &str) {
+    (b.source, b.stratum, &b.facility, b.multiple, &b.name)
+}
+
+/// Merges the boundary records that share a key (source, stratum, facility, multiple, name).
+/// Identical records are one boundary. Records that share a key and differ in content conflict:
+/// no one of them is chosen, since nothing but input order would choose; all of them are refused,
+/// counted in `info.boundary_conflicts` and named in `info.boundary_notes`. The result does not
+/// depend on the order of `boundaries`.
+fn merge_boundaries(mut boundaries: Vec<BoundaryOut>, info: &mut BuildInfo) -> Vec<BoundaryOut> {
+    boundaries.sort_by(|a, b| boundary_key(a).cmp(&boundary_key(b)));
+    let before = boundaries.len();
+    let mut out: Vec<BoundaryOut> = Vec::with_capacity(before);
+    let mut identical = 0usize;
+    let mut it = boundaries.into_iter().peekable();
+    while let Some(first) = it.next() {
+        let mut distinct = vec![first];
+        let mut copies = 0usize;
+        while let Some(next) = it.next_if(|n| {
+            distinct
+                .first()
+                .is_some_and(|f| boundary_key(f) == boundary_key(n))
+        }) {
+            if distinct.contains(&next) {
+                copies += 1;
+            } else {
+                distinct.push(next);
+            }
+        }
+        if distinct.len() == 1 {
+            identical += copies;
+            out.extend(distinct);
+        } else if let Some(f) = distinct.first() {
+            info.boundary_conflicts += distinct.len() + copies;
+            info.boundary_notes.push(format!(
+                "{} {} {}: {} records share this key and differ in content; none is kept",
+                f.facility,
+                f.name,
+                f.stratum,
+                distinct.len() + copies
+            ));
+        }
+    }
+    if identical > 0 {
+        info.duplicates.push(format!(
+            "{identical} boundaries repeat another's key; the repeats are dropped"
+        ));
+    }
+    out
 }
 
 /// A displaced threshold with no coordinate: label, the physical end, displacement (ft).
@@ -1907,6 +1974,20 @@ fn limit_ft(l: Option<c424::AltitudeLimit>, unverified: &mut usize) -> (i32, boo
     }
 }
 
+/// Records the round-trip error of one stored coordinate. A measurement that failed is counted
+/// in `pos_unverified`; it is never taken as an error of zero.
+fn note_round_trip(r: &mut Rounding, what: &str, measured: Result<f64, GeoError>) {
+    match measured {
+        Ok(err) => {
+            if err > r.pos_max_m {
+                r.pos_max_m = err;
+                r.pos_at = what.to_string();
+            }
+        }
+        Err(_) => r.pos_unverified += 1,
+    }
+}
+
 /// Stores a coordinate pair (degrees) as model units, tracking the conversion error.
 fn store_pos(
     ell: &Ellipsoid,
@@ -1918,13 +1999,11 @@ fn store_pos(
         return Err(BuildError::Unstorable(format!("position {p:?} of {what}")));
     };
     r.pos_values += 1;
-    if let (Some(orig), Ok(stored)) = (latlon(p), latlon_e7(la, lo)) {
-        let err = distance_m(ell, orig, stored).unwrap_or(0.0);
-        if err > r.pos_max_m {
-            r.pos_max_m = err;
-            r.pos_at = what.to_string();
-        }
-    }
+    let measured = match (latlon(p), latlon_e7(la, lo)) {
+        (Some(orig), Ok(stored)) => distance_m(ell, orig, stored),
+        _ => Err(GeoError::BadParameter("coordinate cannot be measured")),
+    };
+    note_round_trip(r, what, measured);
     Ok((la, lo))
 }
 
@@ -2168,6 +2247,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         );
     }
     // NASR procedures: join with CIFP ones, or enter as uncoded procedures (UK-003).
+    let mut procs_no_airport = 0usize;
     for (pk, list) in [
         (nasr::procedure::ProcedureKind::Star, &src.nasr.stars),
         (nasr::procedure::ProcedureKind::Dp, &src.nasr.dps),
@@ -2186,6 +2266,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             served.dedup();
             for faa in served {
                 let Some(&ai) = maps.apt_faa.get(faa) else {
+                    procs_no_airport += 1;
                     continue;
                 };
                 if !reg.cands.get(ai).is_some_and(|c| c.inside) {
@@ -2285,6 +2366,14 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
                 );
             }
         }
+    }
+
+    if procs_no_airport > 0 {
+        info.skipped.push((
+            "NASR procedure airports that are not in the sources (procedure not placed)"
+                .to_string(),
+            procs_no_airport,
+        ));
     }
 
     // 4. Airways with a point in the area.
@@ -2616,17 +2705,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             &b.name,
         ))
     });
-    let before = boundaries.len();
-    boundaries.dedup_by(|b, a| {
-        (a.source, a.stratum, &a.facility, a.multiple, &a.name)
-            == (b.source, b.stratum, &b.facility, b.multiple, &b.name)
-    });
-    if boundaries.len() != before {
-        info.duplicates.push(format!(
-            "{} boundaries repeat another's key; the repeats are dropped",
-            before - boundaries.len()
-        ));
-    }
+    boundaries = merge_boundaries(boundaries, &mut info);
 
     // 6. MORA cells overlapping the area.
     let mut mora: BTreeMap<(i16, i16), i16> = BTreeMap::new();
@@ -3059,5 +3138,76 @@ impl Interner {
 
     fn intern_opt(&mut self, s: Option<&str>) -> StrIx {
         s.map_or(StrIx::NONE, |s| self.intern(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(facility: &str, name: &str, lat: i32) -> BoundaryOut {
+        BoundaryOut {
+            source: boundary_source::NASR_ARB,
+            stratum: stratum::ARTCC_HIGH,
+            multiple: 0,
+            facility: facility.to_string(),
+            name: name.to_string(),
+            floor: ALT_NONE,
+            ceiling: ALT_NONE,
+            floor_agl: false,
+            ceiling_agl: false,
+            time_code: time_code::UNKNOWN,
+            level: level::UNKNOWN,
+            incomplete: false,
+            verts: vec![PosE7 { lat, lon: 0 }],
+            segs: Vec::new(),
+        }
+    }
+
+    // REQ: OA-ASP-075
+    #[test]
+    fn boundaries_with_one_key_and_different_content_are_a_counted_conflict_in_any_order() {
+        let (a, b) = (rec("ZAA", "ONE", 10), rec("ZAA", "ONE", 20));
+        let other = rec("ZBB", "TWO", 30);
+        let mut results = Vec::new();
+        for order in [
+            vec![a.clone(), b.clone(), other.clone()],
+            vec![other.clone(), b.clone(), a.clone()],
+        ] {
+            let mut info = BuildInfo::default();
+            let out = merge_boundaries(order, &mut info);
+            assert_eq!(out.len(), 1, "both conflicting records are refused");
+            assert_eq!(out.first().map(|b| b.facility.as_str()), Some("ZBB"));
+            assert_eq!(info.boundary_conflicts, 2);
+            assert_eq!(info.boundary_notes.len(), 1, "{:?}", info.boundary_notes);
+            results.push((info.boundary_notes, info.duplicates));
+        }
+        assert_eq!(results.first(), results.get(1));
+    }
+
+    // REQ: OA-ASP-075
+    #[test]
+    fn identical_boundary_records_merge_and_are_reported_as_repeats() {
+        let a = rec("ZAA", "ONE", 10);
+        let mut info = BuildInfo::default();
+        let out = merge_boundaries(vec![a.clone(), a.clone(), a], &mut info);
+        assert_eq!(out.len(), 1);
+        assert_eq!(info.boundary_conflicts, 0);
+        assert_eq!(
+            info.duplicates,
+            vec!["2 boundaries repeat another's key; the repeats are dropped".to_string()]
+        );
+    }
+
+    // REQ: OA-ASP-076
+    #[test]
+    fn a_failed_round_trip_measurement_is_counted_not_taken_as_zero_error() {
+        let mut r = Rounding::default();
+        note_round_trip(&mut r, "x", Ok(0.004));
+        note_round_trip(&mut r, "y", Err(GeoError::NoConvergence("inverse")));
+        assert_eq!(
+            (r.pos_max_m, r.pos_at.as_str(), r.pos_unverified),
+            (0.004, "x", 1)
+        );
     }
 }

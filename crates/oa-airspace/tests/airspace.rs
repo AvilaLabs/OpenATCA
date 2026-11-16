@@ -2011,3 +2011,22 @@ fn two_airports_with_one_identifier_in_two_regions_keep_their_own_runways_and_pr
         assert!(find_proc(m, "KMDW", "K7", proc_kind::STAR, "ENDEE8").is_none());
     }
 }
+
+// REQ: OA-ASP-077
+#[test]
+fn procedure_airports_that_are_not_in_the_sources_are_counted() {
+    const LABEL: &str =
+        "NASR procedure airports that are not in the sources (procedure not placed)";
+    let base = fixture_build().info;
+    assert!(base.skipped.iter().all(|(l, _)| l != LABEL));
+    let mut files = nasr_files();
+    edit_nasr(
+        &mut files,
+        "STAR_APT.csv",
+        "\"BENKY-HIMGO\",1,\"ORD\",\"27R\"",
+        "\"BENKY-HIMGO\",1,\"QQQ\",\"27R\"",
+    );
+    let out = build_model(&sources_from(&files, &cifp_file()), &params("ZAU", 92_600)).unwrap();
+    let n = out.info.skipped.iter().find(|(l, _)| l == LABEL);
+    assert_eq!(n.map(|x| x.1), Some(1), "{:?}", out.info.skipped);
+}

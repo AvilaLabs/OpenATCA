@@ -31,19 +31,39 @@ use oa_truth::{
 
 use crate::truth::{LegStart, NoTruth, TruthLeg, TruthSample};
 
-/// Maps one `oa-truth` answer to this crate's.
+/// `v` rounded to a whole number; `None` for NaN, infinity or a value an `i32` cannot hold (a cast
+/// would turn those into 0 or the integer limit).
+fn whole(v: f64) -> Option<i32> {
+    let r = v.round();
+    (r.is_finite() && r >= f64::from(i32::MIN) && r <= f64::from(i32::MAX)).then_some(r as i32)
+}
+
+/// Maps one `oa-truth` answer to this crate's. A state whose altitude or vertical rate is not a
+/// finite number of an `i32`'s range is refused as [`NoTruth::NotFinite`].
 pub fn map_query(q: TruthQuery) -> Result<TruthSample, NoTruth> {
     match q {
-        TruthQuery::Ok(s) => Ok(TruthSample {
-            lat: s.lat_deg,
-            lon: s.lon_deg,
-            baro_alt_ft: s.baro_alt_ft.map(|a| a.round() as i32),
-            vel_east_mps: s.vel_east_mps,
-            vel_north_mps: s.vel_north_mps,
-            vert_rate_fpm: s.vert_rate_fpm.map(|v| v.round() as i32),
-            sigma95_h_m: s.sigma95_h_m,
-            leg: s.leg.0,
-        }),
+        TruthQuery::Ok(s) => {
+            let baro_alt_ft = match s.baro_alt_ft.map(whole) {
+                Some(None) => return Err(NoTruth::NotFinite),
+                Some(Some(a)) => Some(a),
+                None => None,
+            };
+            let vert_rate_fpm = match s.vert_rate_fpm.map(whole) {
+                Some(None) => return Err(NoTruth::NotFinite),
+                Some(Some(v)) => Some(v),
+                None => None,
+            };
+            Ok(TruthSample {
+                lat: s.lat_deg,
+                lon: s.lon_deg,
+                baro_alt_ft,
+                vel_east_mps: s.vel_east_mps,
+                vel_north_mps: s.vel_north_mps,
+                vert_rate_fpm,
+                sigma95_h_m: s.sigma95_h_m,
+                leg: s.leg.0,
+            })
+        }
         TruthQuery::UnknownAircraft => Err(NoTruth::UnknownAircraft),
         TruthQuery::OutsideLegs => Err(NoTruth::OutsideLegs),
         TruthQuery::NoNearbyReport => Err(NoTruth::NoNearbyReport),

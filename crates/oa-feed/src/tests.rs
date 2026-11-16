@@ -919,14 +919,41 @@ fn recorder_rotates_caps_and_never_deletes() {
 // REQ: OA-FEED-020
 #[test]
 fn utc_names_are_correct_calendar_times() {
-    assert_eq!(utc_stamp(0), "19700101T000000Z");
-    assert_eq!(utc_stamp(-1), "19691231T235959Z");
-    assert_eq!(utc_stamp(1_700_000_000), "20231114T221320Z");
-    assert_eq!(utc_stamp(951_782_400), "20000229T000000Z"); // leap day
-    assert_eq!(utc_stamp(4_102_444_799), "20991231T235959Z");
+    assert_eq!(utc_stamp(0).as_deref(), Some("19700101T000000Z"));
+    assert_eq!(utc_stamp(-1).as_deref(), Some("19691231T235959Z"));
     assert_eq!(
-        crate::record::utc_iso(1_700_000_000),
-        "2023-11-14T22:13:20Z"
+        utc_stamp(1_700_000_000).as_deref(),
+        Some("20231114T221320Z")
+    );
+    assert_eq!(utc_stamp(951_782_400).as_deref(), Some("20000229T000000Z")); // leap day
+    assert_eq!(
+        utc_stamp(4_102_444_799).as_deref(),
+        Some("20991231T235959Z")
+    );
+    assert_eq!(
+        crate::record::utc_iso(1_700_000_000).as_deref(),
+        Some("2023-11-14T22:13:20Z")
+    );
+}
+
+// REQ: OA-FEED-180
+#[test]
+fn utc_names_refuse_times_outside_years_1_to_9999() {
+    use crate::record::{UTC_MAX_SECS, UTC_MIN_SECS};
+    assert_eq!(utc_stamp(UTC_MIN_SECS).as_deref(), Some("00010101T000000Z"));
+    assert_eq!(utc_stamp(UTC_MAX_SECS).as_deref(), Some("99991231T235959Z"));
+    assert_eq!(utc_stamp(UTC_MIN_SECS - 1), None);
+    assert_eq!(utc_stamp(UTC_MAX_SECS + 1), None);
+    assert_eq!(utc_stamp(i64::MIN), None);
+    assert_eq!(utc_stamp(i64::MAX), None);
+    assert_eq!(crate::record::utc_iso(i64::MAX), None);
+    assert_eq!(
+        utc_stamp(1_078_099_199).as_deref(),
+        Some("20040229T235959Z")
+    );
+    assert_eq!(
+        utc_stamp(-2_203_891_200).as_deref(),
+        Some("19000301T000000Z")
     );
 }
 
@@ -1449,7 +1476,7 @@ fn flush_and_file_name_follow_local_clock_not_frame_stamp() {
             .unwrap();
     }
     let names = files_in(&dir);
-    assert!(names[0].contains(&utc_stamp(local)), "{names:?}");
+    assert!(names[0].contains(&utc_stamp(local).unwrap()), "{names:?}");
     let on_disk = std::fs::read(dir.join(&names[0])).unwrap();
     let (out, _) = gunzip_all(&on_disk);
     let all: Vec<u8> = frames.iter().flat_map(|(_, f)| f.clone()).collect();

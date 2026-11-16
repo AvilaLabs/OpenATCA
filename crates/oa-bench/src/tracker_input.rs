@@ -44,8 +44,21 @@ pub enum SamplesError {
 /// The legacy table of a tracker's output. Refuses columns of different lengths (E5). All rows
 /// of an address are one flight; see [`legacy_from_track_samples_by_leg`] for one flight per trip.
 pub fn legacy_from_track_samples(s: &TrackSamples<'_>) -> Result<Legacy, SamplesError> {
-    adapt(s, &BTreeMap::new())
+    adapt(s, &BTreeMap::new(), new_legacy())
 }
+
+/// As [`legacy_from_track_samples`], filling `leg` (which sets the table limits).
+pub fn legacy_from_track_samples_into(
+    s: &TrackSamples<'_>,
+    leg: Legacy,
+) -> Result<Legacy, SamplesError> {
+    adapt(s, &BTreeMap::new(), leg)
+}
+
+/// Report label of the rows left out because their flight did not fit the flight table.
+pub const DROP_FLIGHT_FULL: &str = "tracker rows dropped, reason flight table full";
+/// Report label of the rows left out because a column had no entry for them.
+pub const DROP_NO_TRIP: &str = "tracker rows dropped, reason no trip (column entry missing)";
 
 /// As [`legacy_from_track_samples`], but one flight per truth leg of an address: a row belongs
 /// to the latest leg of its address that starts at or before its time (to the first leg if it
@@ -62,7 +75,7 @@ pub fn legacy_from_track_samples_by_leg(
     for v in starts.values_mut() {
         v.sort_unstable();
     }
-    adapt(s, &starts)
+    adapt(s, &starts, new_legacy())
 }
 
 /// The trip of a row: the number of leg starts of its address at or before `t_ms`, less one.
@@ -77,7 +90,11 @@ fn flight_key(addr: u32, trip: u32) -> u128 {
     u128::from(addr) | (1u128 << 100) | (u128::from(trip) << 40)
 }
 
-fn adapt(s: &TrackSamples<'_>, starts: &BTreeMap<u32, Vec<i64>>) -> Result<Legacy, SamplesError> {
+fn adapt(
+    s: &TrackSamples<'_>,
+    starts: &BTreeMap<u32, Vec<i64>>,
+    mut leg: Legacy,
+) -> Result<Legacy, SamplesError> {
     let n = s.addr.len();
     if [
         s.t_ns.len(),
@@ -93,7 +110,6 @@ fn adapt(s: &TrackSamples<'_>, starts: &BTreeMap<u32, Vec<i64>>) -> Result<Legac
     {
         return Err(SamplesError::ColumnLength);
     }
-    let mut leg = new_legacy();
     let trip_at = |i: usize| -> Option<(u32, u32)> {
         let (&a, &t) = (s.addr.get(i)?, s.t_ns.get(i)?);
         Some((a, trip_of(starts, a, t.div_euclid(1_000_000))))
@@ -110,9 +126,11 @@ fn adapt(s: &TrackSamples<'_>, starts: &BTreeMap<u32, Vec<i64>>) -> Result<Legac
         let (Some(&t), Some(&la), Some(&lo), Some(key)) =
             (s.t_ns.get(i), s.lat_e7.get(i), s.lon_e7.get(i), trip_at(i))
         else {
+            leg.counts.note(DROP_NO_TRIP.into(), 1);
             continue;
         };
         let Some(&f) = flight_of.get(&key) else {
+            leg.counts.note(DROP_FLIGHT_FULL.into(), 1);
             continue;
         };
         let alt = s.alt_ft.get(i).copied().unwrap_or(NO_ALT);

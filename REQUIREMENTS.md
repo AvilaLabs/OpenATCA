@@ -310,6 +310,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   registry, CIFP runway, localizer, terminal waypoint, terminal NDB and procedure joins, airport references in
   procedure legs, the order of procedures and `find_proc`. Two airports with one identifier in two regions keep
   their own runways and procedures.
+- **OA-ASP-074** Boundary sampling and testing are bounded before any point is made: a boundary needing more
+  than `MAX_BOUNDARY_SAMPLES` points, or a sample set whose edge tests would pass `MAX_TOUCH_WORK`, is refused
+  with an error.
+- **OA-ASP-075** Boundary records sharing a key (source, stratum, facility, multiple, name) merge only when
+  identical. Records that differ are a conflict: all are refused, counted (`boundary_conflicts`) and named in the
+  boundary notes, whatever the input order.
+- **OA-ASP-076** A coordinate whose round-trip error could not be measured is counted (`pos_unverified`) and
+  reported, not taken as an error of zero.
+- **OA-ASP-077** NASR procedures and class airspace rows whose airport is not in the sources are counted in the
+  skipped list.
+- **OA-ASP-078** The calendar helper refuses impossible dates: year 1 to 9999, month 1 to 12, a day that exists
+  in the month; `airac_cycle` returns `None` for them.
 
 
 ### Traceability (oa-trace)
@@ -663,6 +675,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-179** A feed label is one safe filename component: 1 to 64 ASCII letters, digits, `-`, `_` and `.`,
   not starting with `.`. `--feed` and a label derived from the env file name are refused at parse time, and
   `Recorder::open` refuses one again before touching the directory.
+- **OA-FEED-180** `utc_stamp` and `utc_iso` accept Unix times from 0001-01-01T00:00:00Z to
+  9999-12-31T23:59:59Z and return `None` outside them; a recording is not named from a clock outside that range.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -2784,6 +2798,14 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-128** The airspace lookups keep airports of two ICAO regions that share an identifier apart:
   thresholds join the airport of their own region, and an identifier naming airports of more than one region is
   not answered and is counted (`ambiguous_airports`).
+- **OA-BENCH-129** Rows, samples and values the benchmark leaves out are counted under a named reason and
+  reported, not dropped: tracker rows of a flight the table refuses, SFDPS, TBFM and TFMS rows ingest cannot
+  place, samples left out of the T2 offset fit and of the common-time comparison (non-finite or slow), and truth
+  states with a non-finite or out-of-range altitude or vertical rate, which are refused as `NoTruth::NotFinite`.
+- **OA-BENCH-130** T9 names the nearest other aircraft the same way whatever the order of the legs: of two at the
+  same distance, the lower address, with such samples counted (`nearest_tied_samples`). The legs looked at over a
+  call are bounded by `SwapConfig::max_leg_visits`; a sample past it is refused and counted
+  (`samples_refused_work_budget`). T9 measures nearness, not identity.
 
 ## Winds aloft (oa-wind)
 
