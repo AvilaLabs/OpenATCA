@@ -41,7 +41,7 @@ use oa_feed::{ErrorKind, FrameError, FrameReader, Kind, MAX_FRAME_LEN};
 use oa_zip::GzipReader;
 
 use crate::errors::{count_error, ErrKind, Errors, ERR_COUNT};
-use crate::pipeline::{process_frame, FeedKind, Pipeline};
+use crate::pipeline::{process_frame_mono, FeedKind, Pipeline};
 
 /// Frame errors kept for reporting; all are counted.
 pub const MAX_KEPT_FRAME_ERRORS: usize = 1000;
@@ -124,6 +124,7 @@ enum Mode {
 
 struct Head {
     recv_ns: i64,
+    mono_ns: Option<u64>,
     seq: u64,
     offset: u64,
     kind: Kind,
@@ -170,6 +171,7 @@ impl Stream<'_> {
             match self.reader.next() {
                 Some(Ok(f)) => {
                     self.head.recv_ns = f.recv_unix_ns;
+                    self.head.mono_ns = f.mono_ns();
                     self.head.seq = f.seq;
                     self.head.offset = f.offset;
                     self.head.kind = f.kind;
@@ -291,6 +293,9 @@ pub struct Merged<'a> {
     pub kind: Kind,
     /// Bridge wall clock at receipt, ns.
     pub recv_ns: i64,
+    /// The recorder's monotonic time at receipt, ns since it started; `None` for a frame of a
+    /// recording made without one.
+    pub mono_ns: Option<u64>,
     /// The bridge's frame counter.
     pub seq: u64,
     /// Index of the stream in the list given.
@@ -377,6 +382,7 @@ fn merge_counted(
             pend_at: 0,
             head: Head {
                 recv_ns: 0,
+                mono_ns: None,
                 seq: 0,
                 offset: 0,
                 kind: Kind::Message,
@@ -405,6 +411,7 @@ fn merge_counted(
                 feed: s.feed,
                 kind: s.head.kind,
                 recv_ns: s.head.recv_ns,
+                mono_ns: s.head.mono_ns,
                 seq: s.head.seq,
                 stream: i as u32,
                 offset: s.head.offset,
@@ -468,7 +475,7 @@ pub fn run_streams_with(
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
 ) -> io::Result<MergeReport> {
     let (report, end) = merge_counted(specs, chunk, &mut |m| {
-        process_frame(p, m.feed, m.kind, m.recv_ns, m.payload);
+        process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.mono_ns, m.payload);
         after_frame(p)
     });
     // The counts go in first, so they are there whether the run ended or a hook failed.

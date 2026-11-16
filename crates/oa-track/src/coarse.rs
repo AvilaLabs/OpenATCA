@@ -255,6 +255,81 @@ pub fn coarse_query(
     out.sort_unstable();
 }
 
+// ---- points in a plane --------------------------------------------------------------------
+
+/// Most rings of cells a [`point_grid_query`] searches round the cell of the point; a larger
+/// radius is answered with `false`, for the caller to search every point.
+pub const POINT_RINGS_MAX: i64 = 3;
+/// Cells either side of the origin along each axis.
+const POINT_CELLS: i64 = 1 << 15;
+
+/// A uniform grid of points in a plane (metres), for the initiation of tracks: the candidates of
+/// a radar are put in by predicted position, and the plot looks only at the cells round it. The
+/// same layout as [`CoarseIndex`]: one word a point (cell above, number below), sorted, in a
+/// buffer allocated when it is made. Core (pure).
+// A7.2: cold struct (one per fusion layer)
+#[derive(Debug, Default)]
+pub struct PointGrid {
+    keys: Vec<u64>,
+    cell_m: f64,
+}
+
+/// A grid of cells `cell_m` wide with room for `capacity` points, which is all it will ever hold.
+pub fn point_grid_new(capacity: usize, cell_m: f64) -> PointGrid {
+    PointGrid {
+        keys: Vec::with_capacity(capacity),
+        cell_m: cell_m.max(1.0),
+    }
+}
+
+/// The address and capacity of the buffer, to check that nothing is reallocated.
+pub fn point_grid_buffer(g: &PointGrid) -> (usize, usize) {
+    (g.keys.as_ptr() as usize, g.keys.capacity())
+}
+
+fn point_cell(g: &PointGrid, x: f64, y: f64) -> (i64, i64) {
+    let c = |v: f64| ((v / g.cell_m).floor() as i64).clamp(-POINT_CELLS, POINT_CELLS - 1);
+    (c(x), c(y))
+}
+
+fn point_key(cx: i64, cy: i64) -> u32 {
+    (((cx + POINT_CELLS) as u32) << 16) | ((cy + POINT_CELLS) as u32)
+}
+
+/// Builds the grid of points `0..n`: `place(i)` is point `i`'s place, or `None` to leave it out
+/// (the caller keeps such points in a list of its own). At most the capacity is indexed.
+pub fn point_grid_build(g: &mut PointGrid, n: usize, place: impl Fn(usize) -> Option<(f64, f64)>) {
+    g.keys.clear();
+    for i in 0..n.min(g.keys.capacity()) {
+        let Some((x, y)) = place(i).filter(|p| p.0.is_finite() && p.1.is_finite()) else {
+            continue;
+        };
+        let (cx, cy) = point_cell(g, x, y);
+        g.keys.push(u64::from(point_key(cx, cy)) << 32 | i as u64);
+    }
+    g.keys.sort_unstable();
+}
+
+/// Appends to `out` every point within `r` of `(x, y)`, and some others, in no order; `true`.
+/// `false`, with nothing appended, when `r` is not a finite number or reaches more than
+/// [`POINT_RINGS_MAX`] cells. `out` needs room for the points to avoid growing.
+pub fn point_grid_query(g: &PointGrid, out: &mut Vec<u32>, x: f64, y: f64, r: f64) -> bool {
+    if !(r.is_finite() && x.is_finite() && y.is_finite()) {
+        return false;
+    }
+    let rings = (r.max(0.0) / g.cell_m).ceil() as i64;
+    if rings > POINT_RINGS_MAX {
+        return false;
+    }
+    let (cx, cy) = point_cell(g, x, y);
+    for ix in (cx - rings).max(-POINT_CELLS)..=(cx + rings).min(POINT_CELLS - 1) {
+        for iy in (cy - rings).max(-POINT_CELLS)..=(cy + rings).min(POINT_CELLS - 1) {
+            push_cell(&g.keys, out, point_key(ix, iy));
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -543,5 +618,53 @@ mod tests {
             extra.extend(ring(10_000.0));
             finds_extras(&s, n, extra, (1_100_000.0, 0.0), 20_000.0, 10);
         }
+    }
+
+    // REQ: OA-TRK-301
+    #[test]
+    fn the_point_grid_returns_every_point_within_the_radius() {
+        let mut rng = Rng::from_seed(77);
+        let pts: Vec<(f64, f64)> = (0..400)
+            .map(|_| {
+                (
+                    600_000.0 * (rng.unit() - 0.5),
+                    600_000.0 * (rng.unit() - 0.5),
+                )
+            })
+            .collect();
+        let mut g = point_grid_new(pts.len(), 12_000.0);
+        point_grid_build(&mut g, pts.len(), |i| pts.get(i).copied());
+        let before = point_grid_buffer(&g);
+        let mut out = Vec::with_capacity(pts.len());
+        for _ in 0..300 {
+            let (x, y) = (
+                600_000.0 * (rng.unit() - 0.5),
+                600_000.0 * (rng.unit() - 0.5),
+            );
+            let r = 40_000.0 * rng.unit();
+            out.clear();
+            if !point_grid_query(&g, &mut out, x, y, r) {
+                assert!(r > POINT_RINGS_MAX as f64 * 12_000.0);
+                continue;
+            }
+            for (i, p) in pts.iter().enumerate() {
+                if oa_math::hypot(p.0 - x, p.1 - y) <= r {
+                    assert!(out.contains(&(i as u32)), "point {i} at {r}");
+                }
+            }
+        }
+        // A point somewhere else entirely is found by a query at its own place; a point with no
+        // place is left out; nothing was reallocated.
+        let mut h = point_grid_new(4, 12_000.0);
+        point_grid_build(&mut h, 3, |i| {
+            [Some((1.0e9, -1.0e9)), None, Some((5.0, 5.0))][i]
+        });
+        out.clear();
+        assert!(point_grid_query(&h, &mut out, 1.0e9, -1.0e9, 100.0));
+        assert!(out.contains(&0));
+        out.clear();
+        assert!(!point_grid_query(&h, &mut out, 0.0, 0.0, f64::NAN));
+        assert!(!point_grid_query(&h, &mut out, 0.0, 0.0, 1.0e6));
+        assert_eq!(point_grid_buffer(&g), before);
     }
 }

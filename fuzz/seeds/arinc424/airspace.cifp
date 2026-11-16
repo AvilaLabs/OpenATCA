@@ -1,0 +1,31 @@
+HDR01FAACIFP18      001P013200000262611  07-OCT-202615:55:03  U.S.A. DOT FAA                                                9D60747B
+HDR02                                 FEDERAL AVIATION ADMINISTRATION                                                               
+HDR03                                 AERONAUTICAL INFORMATION SERVICES                                                             
+HDR04                                 CODED INSTRUMENT FLIGHT PROCEDURES VOLUME 2611  EFFECTIVE 29 OCT 2026                         
+HDR05                                 REPORT DATA ERRORS TO FAA                 TEL 800 638 8972                                    
+SUSAUCK5TKQQA PAB  A00100     R N42041100W087553100N41591600W08754170000503494   GND  A10000MQUINCY  AREA A                666351811
+SUSAUCK5TKQQA PAB  A00200     G N41591500W087473500                                                                        666361811
+SUSAUCK5TKQQA PAB  A00300     R N41591500W087461500N41591600W08754170000600901                                             666371703
+SUSAUCK5TKQQA PAB  A00400     G N41571600W088015200                                                                        666381811
+SUSAUCK5TKQQA PAB  A00500     G N41572587W088013894                                                                        666391811
+SUSAUCK5TKQQA PAB  A00600     G N41574570W088013482                                                                        666401811
+SUSAUCK5TKQQA PAB  A00700     G N41584397W088012470                                                                        666411811
+SUSAUCK5TKQQA PAB  A00800     G N41592543W088012423                                                                        666421811
+SUSAUCK5TKQQA PAB  A00900     G N41594405W088012752                                                                        666431811
+SUSAUCK5TKQQA PAB  A01000     G N42005396W088014937                                                                        666441811
+SUSAUCK5TKQQA PAB  A01100     G N42011318W088015203                                                                        666451811
+SUSAUCK5TKQQA PAB  A01200     R N42011700W088015200N41591600W08754170000602897                                             666461811
+SUSAUCK5TKQQA PAB  A01300     G N42050300W087562500                                                                        666471811
+SUSAUCK5TKQQA PAB  A01400     GEN42043693W087555184                                                                        666481811
+SUSAUCK5TKQQA PAB  C04400     R N42075200W088104700N41591600W08754170001503051   03000M10000MQUINCY  AREA C                666781811
+SUSAUCK5TKQQA PAB  C04500     REN41495300W088095900N41591600W08754170001502314                                             666791811
+SUSAURK1MBOARDMAN  A00101L    G N45525900W119310400                              04000M17999MBOARDMAN MOA                  710221703
+SUSAURK1MBOARDMAN  A00102C                                                                         FAA SEATTLE ARTCC       710231703
+SUSAURK1MBOARDMAN  A00200L    G N45514700W119310400                                                                        710241703
+SUSAURK1MBOARDMAN  A00300L    G N45515700W119302800                                                                        710251703
+SUSAURK1MBOARDMAN  A00400L    G N45520400W119222300                                                                        710261703
+SUSAURK1A680       A00100L    CE                   N48105900W1223805000030       GND  A03000MA-680                         710211703
+SUSAURK5R3401A     A00101B    G N39213000W086060000                              GND  A40000MR-3401A                       874651703
+SUSAURK5R3401A     A00102C                                                                         FAA INDIANAPOLIS ARTCC  874661703
+SUSAURK5R3401A     A00200B    G N39213000W085593000                                                                        874671703
+SUSAURK5R3401A     A00300B    G N39130000W085593000                                                                        874681703

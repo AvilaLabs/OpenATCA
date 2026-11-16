@@ -56,7 +56,7 @@ use crate::adsb::{
     AdsbApplied, AdsbTable, ADSB_CAPACITY,
 };
 use crate::apply::{apply_sfdps, apply_tbfm, Applied};
-use crate::clock::{clock_observe, Clock, Tick};
+use crate::clock::{clock_observe_mono, Clock, Tick};
 use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 use crate::fns::{
     apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
@@ -516,7 +516,9 @@ pub fn replay_hash(p: &Pipeline) -> Digest {
 /// The digest of the whole replay state: SHA-256 over the tag `OATSD`, the content hash
 /// ([`replay_hash`]), the replay time, and then every field of the clock (each feed's `last_ns`,
 /// `seen`, `ever`, `cand_last_ns`, `cand_n` and `cand_back`, then `held`, `forward_steps`,
-/// `backward_steps` and `steps_outvoted`) and the cadence state (the next checkpoint time and
+/// `backward_steps` and `steps_outvoted`; then, once the clock has a monotonic reference or has
+/// made a time-domain decision, the tag `OADM1` and the decision counts, the decision log and
+/// each feed's reference) and the cadence state (the next checkpoint time and
 /// the next sweep time of the flight, ADS-B and TFMS tables), integers as eight little-endian
 /// bytes and flags as one byte. Two pipelines with equal digests behave alike on any further
 /// input; equal [`replay_hash`] alone does not say so, as a held candidate step changes what the
@@ -543,6 +545,20 @@ pub fn replay_state_digest(p: &Pipeline) -> Digest {
     u(&mut h, p.clock.forward_steps);
     u(&mut h, p.clock.backward_steps);
     u(&mut h, p.clock.steps_outvoted);
+    // The time-domain decisions (the clock's rule 7), only once there has been one or a feed has
+    // a monotonic reference, so a replay of a recording with no monotonic time hashes as before.
+    if p.clock.domain_log != 0 || p.clock.feeds.iter().any(|f| f.ref_ok) {
+        let _ = h.update(b"OADM1");
+        u(&mut h, p.clock.real_gaps);
+        u(&mut h, p.clock.mono_steps);
+        u(&mut h, p.clock.unclassified_steps);
+        u(&mut h, p.clock.domain_log);
+        for f in &p.clock.feeds {
+            i(&mut h, f.ref_wall_ns);
+            u(&mut h, f.ref_mono_ns);
+            let _ = h.update(&[u8::from(f.ref_ok)]);
+        }
+    }
     i(&mut h, p.next_checkpoint_ns);
     i(&mut h, p.table.next_sweep_ns);
     i(&mut h, p.adsb.next_sweep_ns);
@@ -579,11 +595,25 @@ pub fn process_frame(
     recv_unix_ns: i64,
     payload: &[u8],
 ) {
+    process_frame_mono(p, feed, kind, recv_unix_ns, None, payload);
+}
+
+/// [`process_frame`] for a frame that may carry the recorder's monotonic time (`mono_ns`), which
+/// lets the clock tell a real gap from a step of the recorder's clock (`clock` module, rule 7).
+/// With `None` it is [`process_frame`] exactly.
+pub fn process_frame_mono(
+    p: &mut Pipeline,
+    feed: FeedKind,
+    kind: Kind,
+    recv_unix_ns: i64,
+    mono_ns: Option<u64>,
+    payload: &[u8],
+) {
     let f = feed as usize;
     // 1. Clock, eviction cadence, checkpoint.
     let clock_before = p.clock;
-    match clock_observe(&mut p.clock, f, p.replay_ns, recv_unix_ns) {
-        Tick::Advance => p.replay_ns = recv_unix_ns,
+    match clock_observe_mono(&mut p.clock, f, p.replay_ns, recv_unix_ns, mono_ns) {
+        Tick::Advance | Tick::RealGap => p.replay_ns = recv_unix_ns,
         Tick::Keep => {}
         Tick::Regress => count_error(&mut p.errors, ErrKind::TimeRegression, 1),
         Tick::Held { back } => {

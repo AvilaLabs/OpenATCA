@@ -105,10 +105,14 @@ error is the correct outcome for bad input and is not a finding. Where a decoder
 | `gzip` | `oa_zip::GzipReader`, `oa_zip::Inflater`, `oa_zip::inflate` | gzip members and raw DEFLATE, 64 MiB output cap |
 | `awc` | first byte selects METAR, TAF, PIREP, SIGMET, AIRSIGMET or G-AIRMET; the rest is the file; parse then finalize | |
 | `json` | `oa_json::parse`, then every node accessor | the parser under `oa-awc` and `oa-adsb` |
+| `csv` | `oa_csv::Reader` (header, every record, every accessor), once with a `BufReader` capacity of 1-64 bytes taken from the first input byte and once with the default capacity | asserts the two give the same header, records and error, so BOM and record handling cannot depend on buffering |
+| `arinc424` | `oa_arinc424::parse_bytes` and `parse_reader` (7-byte buffer), the file accessors on the result, `parse_record` and `record_meta` on each line (as is and padded to 132 bytes), `parse_lat`, `parse_lon`, `parse_path_terminator`, `parse_cycle` | |
+| `nasr` | first byte selects a parser: airports, runways, runway ends, fixes, fix navaids, navaids, airway bases and segments, airways, ARB base and boundaries, class airspace, STAR/DP bases, airports and procedures, `parse_schemas`, `validate`; the rest is the CSV (form feed between files for the multi-file parsers) | every parser takes a `BufRead`, so the byte entry is the public one |
+| `notam` | `oa_notam::decode_bytes`, then every row accessor, plus the `scalar` field parsers on the raw bytes | `cross_check` needs an `oa-mva` model and is not fuzzed |
+| `mva` | `oa_mva::load_message`, then the model accessors and every query (`sectors_containing`, `min_altitude_at`, `min_altitude_with_sub`, `sector_distance_nm`, `sectors_within_radius`) at a vertex of the chart | |
 
-Not fuzzed in this pass: `oa-notam`, `oa-dof`, `oa-mva`, `oa-nasr`, `oa-arinc424`, `oa-csv`,
-`oa-airspace`, `oa-replay`, `oa-wind`. They were not on the list; the nearest to a network input
-is `oa-notam` (AIXM over the same XML parser) and should be next.
+Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mva`, `oa-nasr`,
+`oa-arinc424` and `oa-csv` were added in a second pass, below.)
 
 ## Seed corpora
 
@@ -126,6 +130,11 @@ is `oa-notam` (AIXM over the same XML parser) and should be next.
 | tar, zip, gzip | synthetic archives from Python's standard library (committed) |
 | awc | the AWC files in `raw/awc`, each prefixed with its selector byte |
 | json | the JSONTestSuite files, adsb.lol traces and AWC files |
+| csv | eight synthetic files (committed; the first byte is the buffer capacity); locally, four chunks (header plus up to eight rows) of each NASR CSV file with a random capacity |
+| arinc424 | six synthetic files (committed): the crate's fixture record layouts with the airport identifiers and names replaced, in files with a matching header count; locally, 400 chunks of 1-30 consecutive records of the real CIFP under its real header with the count patched |
+| nasr | seven synthetic files (committed): a structure file, a structure plus data file, fixes (valid and hostile), STAR base, and the STAR and DP families as three files; locally, chunks of every parsed NASR file (header plus 1-40 rows), the STAR and DP triples, the airway pairs, every structure file and structure-plus-data pairs |
+| notam | six synthetic messages (committed), built from the made-up fixture of the `oa-notam` tests; there is no local real NOTAM corpus |
+| mva | four synthetic charts (committed): two squares, one with a hole; a FUS5 chart; a sub-area chart; an unclosed ring; locally, the FAA chart files in `raw/mva` and `raw/mva-zjx` |
 
 Each seed is under 400 KB and each corpus was under 50 MB at the start; after a run the `awc` and
 `adsb-trace` corpora had grown past it and were merged back down (`-merge=1`).
@@ -166,6 +175,20 @@ and j2k targets execute so few inputs per second.
 
 Because nothing crashed, no regression tests were added and no code changed (the requirement
 numbers for such tests would have started at each crate's highest plus 60).
+
+### Second pass: text parsers, 2026-11-15
+
+Smoke run of each new target for 60 seconds (`-max_total_time=60`, 2 GiB RSS limit), starting
+from the committed seeds and the local corpus. A smoke run, not a campaign: it says the targets
+build and run, not that the parsers are clean.
+
+| Target | Executions | exec/s | cov | ft | Kept inputs | Crashes, OOM, timeouts |
+|---|---|---|---|---|---|---|
+| csv | 141,502 | 2,319 | 451 | 1,645 | 231 | none |
+| arinc424 | 45,838 | 751 | 3,138 | 14,883 | 1,349 | none |
+| nasr | 90,326 | 1,480 | 3,838 | 13,763 | 1,084 | none |
+| notam | 1,038,538 | 17,025 | 2,376 | 6,619 | 1,368 | none |
+| mva | 39,959 | 655 | 1,848 | 7,561 | 488 | none |
 
 ## What fuzzing does not show
 
