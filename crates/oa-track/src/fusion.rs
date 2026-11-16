@@ -65,13 +65,14 @@ use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
-    GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM,
-    GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS,
-    MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS,
-    MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
-    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
-    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
-    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION,
+    COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2,
+    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, KEY_RADAR_BASE,
+    KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS,
+    MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS,
+    RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX,
+    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
+    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
+    RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
@@ -320,6 +321,10 @@ pub struct FusionStats {
     pub cand_same_scan_kept: u64,
     /// Scan notes not stored because the table was full.
     pub plot_scan_full: u64,
+    /// Tracks put on the wide list (a coarse window above [`COARSE_STD_M`]), summed over the
+    /// radar-buckets, and those refused because the list was full (left out of that association).
+    pub wide_tracks_sum: u64,
+    pub wide_full: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -425,6 +430,9 @@ struct RadarScratch {
     /// tracker's capacity.
     tracks: Vec<TrackAt>,
     skip: Vec<bool>,
+    /// Indices of the tracks of `tracks` whose coarse window is wider than the standard one
+    /// ([`WIDE_TRACKS_MAX`]).
+    wide: Vec<u32>,
 }
 
 fn radar_scratch_new(max_tracks: usize) -> RadarScratch {
@@ -437,6 +445,7 @@ fn radar_scratch_new(max_tracks: usize) -> RadarScratch {
         taken: Vec::with_capacity(RADAR_PLOTS_MAX),
         tracks: Vec::with_capacity(max_tracks),
         skip: Vec::with_capacity(max_tracks),
+        wide: Vec::with_capacity(WIDE_TRACKS_MAX.min(max_tracks)),
     }
 }
 
@@ -508,6 +517,8 @@ pub struct Fusion {
     /// Work (coarse candidates and exact gates) one bucket's associations may spend in all (a
     /// field so a test can lower it).
     bucket_tests_max: usize,
+    /// Tracks on one association's wide list at most (a field so a test can lower it).
+    wide_max: usize,
     /// Test only: test every track against the coarse window, as before the grid.
     #[cfg(test)]
     brute_coarse: bool,
@@ -606,6 +617,7 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .collect(),
         cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
         bucket_tests_max: MAX_BUCKET_TESTS,
+        wide_max: WIDE_TRACKS_MAX,
         #[cfg(test)]
         brute_coarse: false,
         keyinfo: FixedMap::new(KEY_TABLE_SLOTS),
@@ -700,6 +712,7 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
             of(&r.taken),
             of(&r.tracks),
             of(&r.skip),
+            of(&r.wide),
         ]);
     }
     v.extend([
@@ -1094,8 +1107,9 @@ struct RadarAssoc {
     anon: Vec<usize>,
     conv_own: Vec<Option<Converted>>,
     grid: CoarseIndex,
-    /// The widest coarse window of the tracks and the tallest of them above or below the radar.
-    width: f64,
+    /// The tracks with a coarse window above the standard one, ascending, and the tallest of
+    /// the others above or below the radar.
+    wide: Vec<u32>,
     dh_max: f64,
     pairs: Vec<Pair>,
     infos: Vec<PairInfo>,
@@ -1146,6 +1160,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         mut taken,
         mut tracks,
         mut skip,
+        mut wide,
     } = std::mem::take(f.rscratch.get_mut(radar)?);
     // Radars are numbered below MAX_RADARS.
     let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
@@ -1273,6 +1288,37 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                 .and_then(|p| plot_convert(&g, &s, p, &bias, None, NO_ADDR).ok()),
         );
     }
+    // Each track has its own coarse window, [`COARSE_M`] plus eight standard deviations. The tracks
+    // whose window is above the standard search radius ([`COARSE_STD_M`]) are on the wide list,
+    // which every plot tests; the rest are in the grid, searched at the standard radius.
+    //
+    // Superset: the old search was the grid at the widest window of any live track, `W`, which
+    // returns every track that passes its own window at a plot (own window <= W, and the grid's
+    // proof covers any window up to the width it is searched at). Now a track with its own window
+    // <= COARSE_STD_M is in the grid, and the search width COARSE_STD_M is at least that window,
+    // so the same proof returns it whenever it passes its window; a track with a wider window (or
+    // a window that is not a number, which passes whatever its place) is on the wide list, tested
+    // for every plot. The union of the two lists, in track order, holds every track that passes
+    // its own window, which is every track the old search could test. A track refused for want of
+    // room on the wide list is left out of the association (`wide_full`).
+    wide.clear();
+    for (i, t) in tracks.iter().enumerate() {
+        if skip.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        if COARSE_M + 8.0 * t.sigma <= COARSE_STD_M {
+            continue;
+        }
+        if wide.len() < f.wide_max && push_within(&mut wide, i as u32) {
+            f.stats.wide_tracks_sum += 1;
+        } else {
+            f.stats.wide_full += 1;
+            if let Some(k) = skip.get_mut(i) {
+                *k = true;
+            }
+        }
+    }
+    let on_wide = |i: usize| wide.binary_search(&(i as u32)).is_ok();
     let mut grid = std::mem::take(f.grids.get_mut(radar)?);
     coarse_build(
         &mut grid,
@@ -1284,15 +1330,17 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                 .filter(|t| t.rho.is_finite() && t.az.is_finite() && t.ground.is_finite())
                 .map(|t| (t.lat, t.lon))
         },
-        |i| skip.get(i).copied().unwrap_or(false),
+        |i| skip.get(i).copied().unwrap_or(false) || on_wide(i),
     );
     let live = |i: usize| !skip.get(i).copied().unwrap_or(false);
+    // The tallest of the tracks in the grid above or below the radar.
     let dh_max = tracks
         .iter()
         .enumerate()
-        .filter(|(i, _)| live(*i))
+        .filter(|(i, _)| live(*i) && !on_wide(*i))
         .map(|(_, t)| t.dh.abs())
         .fold(0.0, f64::max);
+    // The widest window of any live track (recorded, not searched at).
     let width = tracks
         .iter()
         .enumerate()
@@ -1324,7 +1372,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         anon,
         conv_own,
         grid,
-        width,
+        wide,
         dh_max,
         pairs,
         infos,
@@ -1355,7 +1403,16 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         cand.clear();
         cand.extend(0..ra.tracks.len() as u32);
     } else {
-        coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, ra.width);
+        coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, COARSE_STD_M);
+        // The wide tracks are in no cell: add them, and keep the candidates in track order.
+        if !ra.wide.is_empty() {
+            for &w in &ra.wide {
+                if !push_within(&mut cand, w) {
+                    f.stats.scratch_full += 1;
+                }
+            }
+            cand.sort_unstable();
+        }
     }
     // Visiting a candidate is work: charged, counted, and the plot stops where the budget does.
     // A plot with more candidates than budget visits three quarters of the budget and leaves the
@@ -1445,6 +1502,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         anon,
         conv_own,
         grid,
+        wide,
         mut pairs,
         mut infos,
         capped,
@@ -1552,6 +1610,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         slot.conv_own = conv_own;
         slot.tracks = tracks;
         slot.skip = skip;
+        slot.wide = wide;
     }
 }
 
@@ -3180,6 +3239,10 @@ mod tests {
         // A busy bucket of one radar over a whole airspace of tracks: every plot used to be
         // tested against every track (2e8 window tests).
         let mut f = make_fusion_sites(&[SITE], 20_000);
+        // This density of tracks sits within a tenth of the work limit; the standard search radius
+        // is a little wider than the one window this test used to have, so the limit is doubled:
+        // the test is of the cost of the search, not of the limit.
+        f.bucket_tests_max = 2 * MAX_BUCKET_TESTS;
         let at = feed_tracks(&mut f, &SITE, 20_000, 800_000.0, 12, 0x100000);
         let mut out = output_new(1 << 18);
         fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
@@ -4294,5 +4357,152 @@ mod tests {
             );
             assert!(d.is_empty(), "shift {shift} {d:?}");
         }
+    }
+
+    /// `n` stationary tracks over `side_m` round `site` and one more for each of `fat_sigmas_m`,
+    /// reported with that standard deviation (from `addr0`); the places of all of them.
+    fn feed_with_fat_tracks(
+        f: &mut Fusion,
+        site: &RadarSite,
+        side_m: f64,
+        n: usize,
+        fat_sigmas_m: &[f64],
+        seed: u64,
+        addr0: u32,
+    ) -> Vec<(f64, f64)> {
+        let mut at = feed_tracks(f, site, n, side_m, seed, addr0);
+        let frame = oa_geo::aeqd::frame_new(site.lat_deg, site.lon_deg);
+        let mut rng = Rng::from_seed(seed + 1_000);
+        for (i, &sigma) in fat_sigmas_m.iter().enumerate() {
+            let (lat, lon) = oa_geo::aeqd::unproject(
+                &frame,
+                side_m * (rng.unit() - 0.5),
+                side_m * (rng.unit() - 0.5),
+            )
+            .unwrap();
+            for k in 0..4i64 {
+                let mut m = adsb_fix(addr0 + 0x8000 + i as u32, k * NS_PER_S);
+                m.lat_e7 = (lat * 1.0e7).round() as i32;
+                m.lon_e7 = (lon * 1.0e7).round() as i32;
+                let var = (sigma * sigma) as f32;
+                m.pos_cov_m2 = [var, 0.0, var];
+                fusion_adsb(f, &m);
+            }
+            at.push((lat, lon));
+        }
+        at
+    }
+
+    // REQ: OA-TRK-300
+    #[test]
+    fn one_uncertain_track_does_not_widen_the_search_for_every_plot() {
+        let mut f = make_fusion_sites(&[SITE], 1_000);
+        let mut out = output_new(1 << 18);
+        let at = feed_with_fat_tracks(&mut f, &SITE, 300_000.0, 600, &[20_000.0], 11, 0x100000);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        fusion_plots(&mut f, 0, &plots_on(&SITE, &at, 600, 100.0, 3));
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let st = *fusion_stats(&f);
+        assert!(st.coarse_width_max_m > 50_000, "{st:?}");
+        // Every plot used to take the whole table (about 600 candidates) from the one wide
+        // window; now it visits the few tracks near it and the one wide track.
+        assert!(st.coarse_visits < 600 * 100, "{st:?}");
+        assert!(st.pairs_gated > 550, "{st:?}");
+        assert_eq!(st.wide_full, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-300
+    #[test]
+    fn the_wide_list_and_the_standard_grid_give_the_associations_of_testing_every_track() {
+        // Three radars (the seam, the pole's limit, ordinary); each with 300 tracks and 24 of
+        // standard deviations from 100 m to 30 km, plots a few hundred metres off all of them (some
+        // with addresses) and random ones; the same outcome as testing every track, whatever the
+        // seed.
+        let site = |lat_deg: f64, lon_deg: f64, sensor: u16| RadarSite {
+            lat_deg,
+            lon_deg,
+            sensor,
+            ..SITE
+        };
+        let sites = [
+            site(0.0, 179.95, 1),
+            site(85.0, 20.0, 2),
+            site(41.98, -87.91, 3),
+        ];
+        for seed in 0..3u64 {
+            let run_once = |brute: bool| {
+                let mut f = make_fusion_sites(&sites, 2_000);
+                f.brute_coarse = brute;
+                let mut out = output_new(1 << 18);
+                let mut rng = Rng::from_seed(100 + seed);
+                let mut places = Vec::new();
+                for (r, s) in sites.iter().enumerate() {
+                    let sigmas: Vec<f64> = (0..24)
+                        .map(|_| 100.0 * (300.0f64).powf(rng.unit()))
+                        .collect();
+                    places.push(feed_with_fat_tracks(
+                        &mut f,
+                        s,
+                        300_000.0,
+                        300,
+                        &sigmas,
+                        40 + 10 * seed + r as u64,
+                        0x100000 * (r as u32 + 1),
+                    ));
+                }
+                fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+                for (r, s) in sites.iter().enumerate() {
+                    let n = places[r].len();
+                    let mut plots = plots_on(s, &places[r], n, 300.0, 50 + r as u64);
+                    for (i, p) in plots.iter_mut().enumerate() {
+                        if i % 7 == 0 {
+                            p.addr = 0x100000 * (r as u32 + 1) + i as u32;
+                        }
+                    }
+                    for k in 0..150i64 {
+                        plots.push(RadarPlot {
+                            time_ns: 5 * NS_PER_S + 7_000_000 + k * 10_000,
+                            range_m: 1_000.0 + 400_000.0 * rng.unit(),
+                            az_deg: 360.0 * rng.unit(),
+                            alt_ft: 20_000,
+                            addr: NO_ADDR,
+                            label: 9_000 + k as u32,
+                            mode_a: NONE_CODE,
+                        });
+                    }
+                    fusion_plots(&mut f, r, &plots);
+                }
+                fusion_advance(&mut f, 12 * NS_PER_S, &mut out);
+                fusion_finish(&mut f, 12 * NS_PER_S, &mut out);
+                (outcome(&f, &out), fusion_stats(&f).coarse_visits)
+            };
+            let (grid, visits) = run_once(false);
+            let (brute, none) = run_once(true);
+            assert_eq!(none, 0);
+            assert!(visits > 0);
+            assert!(grid.0.wide_tracks_sum > 20, "seed {seed}: {:?}", grid.0);
+            assert!(grid.0.pairs_gated > 300, "seed {seed}: {:?}", grid.0);
+            assert_eq!(grid.0, brute.0, "seed {seed}");
+            assert_eq!(grid.1, brute.1, "seed {seed}");
+            assert_eq!(grid.2, brute.2, "seed {seed}");
+        }
+    }
+
+    // REQ: OA-TRK-300
+    #[test]
+    fn a_full_wide_list_leaves_the_track_out_and_counts_it() {
+        let mut f = make_fusion_sites(&[SITE], 1_000);
+        f.wide_max = 3;
+        let mut out = output_new(1 << 18);
+        let sigmas = [10_000.0; 8];
+        let at = feed_with_fat_tracks(&mut f, &SITE, 100_000.0, 50, &sigmas, 11, 0x100000);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        fusion_plots(&mut f, 0, &plots_on(&SITE, &at, at.len(), 100.0, 3));
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        let st = *fusion_stats(&f);
+        // Eight uncertain tracks, room for three.
+        assert_eq!(st.wide_tracks_sum, 3, "{st:?}");
+        assert_eq!(st.wide_full, 5, "{st:?}");
+        assert_eq!(st.scratch_full, 0, "{st:?}");
     }
 }

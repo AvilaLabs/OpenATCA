@@ -3121,6 +3121,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   no candidate and joins none, and `anon_plots_ungated` counts it. The association loop starts at a plot that
   depends deterministically on the bucket and the radar, so the plots left out are not always the same
   sector of the scan; when nothing is cut the result does not depend on where the loop started.
+- **OA-TRK-300** The coarse window of an association is per track: a track whose window (the coarse
+  margin plus eight standard deviations) is above the standard search radius is on a wide list of fixed
+  capacity that every plot also tests, and the grid is searched at the standard radius, so one uncertain
+  track does not widen the search of every plot. The tracks tested for a plot are every track the single
+  widest window would have tested that could pass its own window. A track that finds the wide list full is
+  left out of that association and counted in `wide_full`.
 - **OA-TRK-057** The base world has 44 aircraft: 20 straight, 12 turning (1.5, 3 and 6 deg/s, both
   directions), 12 climbing or descending at 1,500 fpm, with no same-altitude approach inside 5 NM.
 - **OA-TRK-058** Every pair geometry (crossing and parallel at 3 NM, crossing and same-track at 1,000 ft, and

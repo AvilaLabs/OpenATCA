@@ -33,6 +33,14 @@ pub const GATE_TOTAL_CHI2: f64 = 21.11;
 /// Covers the motion within a bucket at 360 m/s with room; it only saves work, the exact gate
 /// decides.
 pub const COARSE_M: f64 = 3_000.0;
+/// The standard coarse search radius, metres: the grid is searched this far from a plot, which
+/// covers every track whose own window ([`COARSE_M`] plus eight standard deviations) is no wider,
+/// that is, a standard deviation up to 187 m. A track with a wider window is on the wide list.
+pub const COARSE_STD_M: f64 = 4_500.0;
+/// Limit: tracks on the wide list of one association, 4,096 (the tracks with a standard deviation
+/// above 187 m: starved tracks and the coarse ones; the limit is far above what the stress
+/// traffic makes). Past it a track is left out of that association and counted.
+pub const WIDE_TRACKS_MAX: usize = 4_096;
 /// A plot held rather than applied when another track is within this cost (chi-square units) of
 /// its assigned track. About one standard deviation of the cost difference of two tracks 2
 /// sigma apart; set from the swap counts of the crossing runs.
