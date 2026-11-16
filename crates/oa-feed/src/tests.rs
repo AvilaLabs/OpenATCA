@@ -2260,3 +2260,54 @@ fn a_recorded_oaf2_frame_reads_back_from_a_gzip_recording_with_its_monotonic_tim
         .collect();
     assert_eq!(monos, vec![Some(10), None, Some(3_000_000_123)]);
 }
+
+// ---------------------------------------------------------------- feed label
+
+/// Labels that are not a single safe filename component.
+fn bad_labels() -> Vec<String> {
+    vec![
+        "/tmp/escape".into(),
+        "../escape".into(),
+        "a/b".into(),
+        "a\\b".into(),
+        "nul\0byte".into(),
+        String::new(),
+        ".hidden".into(),
+        "..".into(),
+        "with space".into(),
+        "caf\u{e9}".into(),
+        "x".repeat(65),
+    ]
+}
+
+// REQ: OA-FEED-179
+#[test]
+fn a_feed_label_that_is_not_a_single_safe_filename_component_is_refused_at_parse_time() {
+    for label in bad_labels() {
+        let args = vec!["--stdin".to_string(), "--feed".to_string(), label.clone()];
+        assert!(cli::parse(&args).is_err(), "accepted {label:?}");
+    }
+    // A default derived from the env file name is held to the same rule.
+    let a = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+    assert!(cli::parse(&a("--env /x/bad\u{e9}.env")).is_err());
+    for ok in ["scds-tbfm", "a.b_c-1", "x", &"y".repeat(64)] {
+        let args = vec!["--stdin".to_string(), "--feed".to_string(), ok.to_string()];
+        assert!(cli::parse(&args).is_ok(), "refused {ok:?}");
+    }
+    assert!(cli::parse(&a("--stdin")).is_ok());
+    assert!(cli::parse(&a("--env /x/scds-tbfm.env")).is_ok());
+}
+
+// REQ: OA-FEED-179
+#[test]
+fn the_recorder_refuses_a_feed_label_that_could_leave_its_directory() {
+    let dir = tmpdir("label");
+    for label in bad_labels() {
+        let r = Recorder::open(&dir.join("rec"), &label, u64::MAX, u64::MAX, Format::Raw);
+        assert!(r.is_err(), "accepted {label:?}");
+    }
+    // Refused before the directory is touched.
+    assert!(!dir.join("rec").exists());
+    assert!(Recorder::open(&dir.join("rec"), "scds-x", u64::MAX, u64::MAX, Format::Raw).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}

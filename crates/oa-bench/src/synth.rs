@@ -25,7 +25,7 @@ use crate::legacy::{
 };
 use crate::run::{find, run_benchmark, RunConfig, RunOutput};
 use crate::stats::MetricResult;
-use crate::truth::{AirportRef, Env, NoTruth, Truth, TruthLeg, TruthSample};
+use crate::truth::{AirportRef, Env, LegStart, NoTruth, Truth, TruthLeg, TruthSample};
 
 /// Latitude of the world origin, degrees.
 pub const LAT0: f64 = 41.9;
@@ -458,6 +458,16 @@ pub fn build_world(inj: &Injected) -> World {
             start_ms: T0_MS + (a.start_s * 1000.0).round() as i64,
             end_ms: T0_MS + (a.end_s * 1000.0).round() as i64,
             callsign: Some(callsign_bytes(a.callsign)),
+            // SYN005 takes off from a threshold at its first instant; every other aircraft is
+            // first seen airborne.
+            start: if a.addr == 0xA0_0005 {
+                LegStart::Takeoff {
+                    t_ms: T0_MS + (a.start_s * 1000.0).round() as i64,
+                    gap_ms: 0,
+                }
+            } else {
+                LegStart::FirstSeenAirborne
+            },
         })
         .collect();
     let mut leg = new_legacy();

@@ -57,13 +57,14 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         stride: 1920 * 4,
     };
     let index = scene_index(&model);
-    let mut list = list_new(scene_caps(&model));
+    let mut list = list_new(scene_caps(&model).unwrap()).unwrap();
     let mut buf = vec![0u8; frame_len(&spec)];
     let caps = list_capacities(&list);
     let mut scratch = scratch_for(
         &model,
         &view_new(419_800_000, -879_000_000, 250.0, 1920, 1080).unwrap(),
-    );
+    )
+    .unwrap();
     let mut wide = None;
     for (lat, lon, range) in [
         (419_800_000, -879_000_000, 250.0),

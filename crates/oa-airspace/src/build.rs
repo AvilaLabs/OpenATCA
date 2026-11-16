@@ -313,15 +313,13 @@ struct Registry {
     duplicates: Vec<String>,
 }
 
-fn key_of(c: &Cand, drop_region: bool) -> Key {
+/// The identity of a point: class, identifier, ICAO region and scope (M0: identifier plus region
+/// plus type). Airports are keyed by region like every other point.
+fn key_of(c: &Cand) -> Key {
     (
         point_kind::class(c.kind),
         c.ident.clone(),
-        if drop_region {
-            String::new()
-        } else {
-            c.region.clone().unwrap_or_default()
-        },
+        c.region.clone().unwrap_or_default(),
         c.scope.clone().unwrap_or_default(),
     )
 }
@@ -329,8 +327,8 @@ fn key_of(c: &Cand, drop_region: bool) -> Key {
 impl Registry {
     /// Adds a candidate, or returns the existing one with the same key (reporting the second
     /// as a duplicate with the distance between the two positions).
-    fn add(&mut self, ell: &Ellipsoid, c: Cand, drop_region: bool, what: &str) -> usize {
-        let key = key_of(&c, drop_region);
+    fn add(&mut self, ell: &Ellipsoid, c: Cand, what: &str) -> usize {
+        let key = key_of(&c);
         if let Some(&i) = self.by_key.get(&key) {
             let d = self
                 .cands
@@ -434,13 +432,24 @@ struct Maps {
     nasr_nav_cand: Vec<usize>,
     /// (airport candidate, identifier) of a terminal NDB (PN) to candidate.
     tndb: HashMap<(usize, String), usize>,
-    apt_cifp: HashMap<String, usize>,
+    /// CIFP airport (ident, ICAO region) to candidate.
+    apt_cifp: HashMap<(String, String), usize>,
     apt_faa: HashMap<String, usize>,
     thr: HashMap<(usize, String), usize>,
     loc: HashMap<(usize, String), usize>,
 }
 
 const NO_CAND: usize = usize::MAX;
+
+/// A terminal waypoint's place: airport identifier, airport region, identifier, region.
+type TermKey<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+/// The candidate of the CIFP airport with this identifier in this ICAO region.
+fn apt_cifp(maps: &Maps, ident: &str, region: &str) -> Option<usize> {
+    maps.apt_cifp
+        .get(&(ident.to_string(), region.to_string()))
+        .copied()
+}
 
 /// Records a CIFP navaid under its lookup key; a terminal NDB also under its airport. The first
 /// registration of a key stays; the earlier, different candidate is returned when there is one.
@@ -449,7 +458,7 @@ fn register_cifp_nav(
     sub: char,
     ident: &str,
     region: &str,
-    airport: Option<&str>,
+    airport: Option<(&str, &str)>,
     cand: usize,
 ) -> Option<usize> {
     let mut earlier = None;
@@ -462,7 +471,7 @@ fn register_cifp_nav(
             earlier = Some(e);
         }
     }
-    if let Some(a) = airport.and_then(|a| maps.apt_cifp.get(a).copied()) {
+    if let Some(a) = airport.and_then(|(id, rg)| apt_cifp(maps, id, rg)) {
         let e = *maps.tndb.entry((a, ident.to_string())).or_insert(cand);
         if e != cand {
             earlier = Some(e);
@@ -492,8 +501,9 @@ struct CNav {
     ident: String,
     region: String,
     sub: char,
-    /// The airport of a terminal NDB.
+    /// The airport of a terminal NDB, and its ICAO region.
     airport: Option<String>,
+    airport_region: Option<String>,
     pos: (f64, f64),
     name: String,
     elev: Option<i32>,
@@ -546,6 +556,7 @@ fn pair_navaids(
                 region: v.icao_region.clone(),
                 sub: ' ',
                 airport: None,
+                airport_region: None,
                 pos: (p.lat, p.lon),
                 name: v.name.clone(),
                 elev: v.dme_elevation_ft,
@@ -561,6 +572,7 @@ fn pair_navaids(
             region: n.icao_region.clone(),
             sub,
             airport: n.airport_ident.clone(),
+            airport_region: n.airport_region.clone(),
             pos: (n.position.lat, n.position.lon),
             name: n.name.clone(),
             elev: None,
@@ -818,7 +830,7 @@ fn pair_navaids(
             }
             cand.scope = c.airport.clone();
         }
-        let key = key_of(&cand, false);
+        let key = key_of(&cand);
         if let Some(&e) = cifp_only.get(&key) {
             // The same CIFP key twice: the first is the point, as for every other source key.
             if let Some(o) = navs.get_mut(e) {
@@ -851,14 +863,14 @@ fn pair_navaids(
     for tier in 0..3u8 {
         let mut count: HashMap<Key, usize> = HashMap::new();
         for nc in &navs {
-            *count.entry(key_of(&nc.cand, false)).or_default() += 1;
+            *count.entry(key_of(&nc.cand)).or_default() += 1;
         }
         let mut changed = false;
         for nc in &mut navs {
             let Some(n) = nc.nasr.and_then(|ni| src.nasr.navaids.get(ni)) else {
                 continue;
             };
-            if count.get(&key_of(&nc.cand, false)).copied().unwrap_or(0) < 2 {
+            if count.get(&key_of(&nc.cand)).copied().unwrap_or(0) < 2 {
                 continue;
             }
             let place = format!("{}/{}", n.state_code.as_deref().unwrap_or("-"), n.city);
@@ -879,15 +891,20 @@ fn pair_navaids(
     for nc in navs {
         let members = nc.members;
         let nasr_ix = nc.nasr;
-        let i = reg.add(ell, nc.cand, false, "navaid");
+        let i = reg.add(ell, nc.cand, "navaid");
         if let Some(slot) = nasr_ix.and_then(|ni| maps.nasr_nav_cand.get_mut(ni)) {
             *slot = i;
         }
         for ci in members {
             let Some(c) = cnavs.get(ci) else { continue };
-            if let Some(prev) =
-                register_cifp_nav(maps, c.sub, &c.ident, &c.region, c.airport.as_deref(), i)
-            {
+            if let Some(prev) = register_cifp_nav(
+                maps,
+                c.sub,
+                &c.ident,
+                &c.region,
+                c.airport.as_deref().zip(c.airport_region.as_deref()),
+                i,
+            ) {
                 let d = match (reg.cands.get(prev), reg.cands.get(i)) {
                     (Some(a), Some(b)) => pos_distance(ell, a.pos, b.pos),
                     _ => f64::NAN,
@@ -1023,13 +1040,14 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
                         c: Cand,
                         ell: &Ellipsoid,
                         nasr_faa: Option<&str>,
-                        cifp_ident: Option<&str>| {
-        let i = reg.add(ell, c, true, "airport");
+                        cifp_ident: Option<(&str, &str)>| {
+        let i = reg.add(ell, c, "airport");
         if let Some(f) = nasr_faa {
             maps.apt_faa.insert(f.to_string(), i);
         }
-        if let Some(id) = cifp_ident {
-            maps.apt_cifp.insert(id.to_string(), i);
+        if let Some((id, region)) = cifp_ident {
+            maps.apt_cifp
+                .insert((id.to_string(), region.to_string()), i);
         }
         i
     };
@@ -1064,7 +1082,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
             cand,
             ell,
             Some(&a.arpt_id),
-            paired.map(|c| c.ident.as_str()),
+            paired.map(|c| (c.ident.as_str(), c.icao_region.as_str())),
         );
     }
     for (ci, c) in src.cifp.airports.iter().enumerate() {
@@ -1079,7 +1097,14 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.name = Some(c.name.clone());
         cand.elev = c.elevation_ft;
         cand.alt_ident = c.iata.clone().filter(|t| *t != c.ident);
-        airport_cand(&mut reg, &mut maps, cand, ell, None, Some(&c.ident));
+        airport_cand(
+            &mut reg,
+            &mut maps,
+            cand,
+            ell,
+            None,
+            Some((&c.ident, &c.icao_region)),
+        );
     }
 
     // Navaids.
@@ -1090,8 +1115,8 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
     // compared with the first of the same airport only (another airport's fix is another fix).
     let mut firsts: HashMap<(&str, &str), (bool, &c424::Waypoint)> = HashMap::new();
     let mut first_order: Vec<(&str, &str)> = Vec::new();
-    let mut term_firsts: HashMap<(&str, &str, &str), &c424::Waypoint> = HashMap::new();
-    let mut term_order: Vec<(&str, &str, &str)> = Vec::new();
+    let mut term_firsts: HashMap<TermKey<'_>, &c424::Waypoint> = HashMap::new();
+    let mut term_order: Vec<TermKey<'_>> = Vec::new();
     let all_wpts = src
         .cifp
         .enroute_waypoints
@@ -1108,7 +1133,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
             }
         }
         let earlier = if terminal {
-            let tkey = (w.area.as_str(), key.0, key.1);
+            let tkey = (w.area.as_str(), w.area_region.as_str(), key.0, key.1);
             match term_firsts.get(&tkey) {
                 None => {
                     term_firsts.insert(tkey, w);
@@ -1155,7 +1180,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
             cand.name = Some(w.name.clone()).filter(|n| *n != w.ident && !n.is_empty());
             used.insert(key, ());
         }
-        let i = reg.add(ell, cand, false, "fix");
+        let i = reg.add(ell, cand, "fix");
         maps.fix
             .insert((f.fix_id.clone(), f.icao_region_code.clone()), i);
         if !firsts.get(&key).is_some_and(|&(terminal, _)| terminal) {
@@ -1184,7 +1209,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.cifp = true;
         cand.cifp_pos = Some(pos);
         cand.name = Some(w.name.clone()).filter(|n| *n != w.ident && !n.is_empty());
-        let i = reg.add(ell, cand, false, "waypoint");
+        let i = reg.add(ell, cand, "waypoint");
         maps.fix.insert((w.ident.clone(), w.icao_region.clone()), i);
         if !terminal {
             maps.fix_enr
@@ -1197,7 +1222,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         let Some(&w) = term_firsts.get(tkey) else {
             continue;
         };
-        let Some(&ai) = maps.apt_cifp.get(&w.area) else {
+        let Some(ai) = apt_cifp(&maps, &w.area, &w.area_region) else {
             continue;
         };
         let pos = (w.position.lat, w.position.lon);
@@ -1219,7 +1244,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
                 cand.cifp = true;
                 cand.cifp_pos = Some(pos);
                 cand.name = Some(w.name.clone()).filter(|n| *n != w.ident && !n.is_empty());
-                reg.add(ell, cand, false, "terminal waypoint")
+                reg.add(ell, cand, "terminal waypoint")
             }
         };
         maps.term_fix
@@ -1274,11 +1299,11 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.defect = defect_of(posrec, "APT_RWY_END.csv", r.line);
         cand.elev = elev.and_then(round_i32);
         cand.airport = Some(ai);
-        let i = reg.add(ell, cand, false, "runway threshold");
+        let i = reg.add(ell, cand, "runway threshold");
         maps.thr.insert((ai, r.rwy_end_id.clone()), i);
     }
     for r in &src.cifp.runways {
-        let Some(&ai) = maps.apt_cifp.get(&r.airport_ident) else {
+        let Some(ai) = apt_cifp(&maps, &r.airport_ident, &r.airport_region) else {
             no_airport += 1;
             continue;
         };
@@ -1318,7 +1343,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.cifp_pos = Some(pos);
         cand.elev = r.threshold_elevation_ft;
         cand.airport = Some(ai);
-        let i = reg.add(ell, cand, false, "runway threshold");
+        let i = reg.add(ell, cand, "runway threshold");
         maps.thr.insert((ai, desig), i);
     }
 
@@ -1336,7 +1361,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
     info.threshold_unknown.sort();
     // Localizers (CIFP only).
     for l in &src.cifp.localizers {
-        let Some(&ai) = maps.apt_cifp.get(&l.airport_ident) else {
+        let Some(ai) = apt_cifp(&maps, &l.airport_ident, &l.airport_region) else {
             no_airport += 1;
             continue;
         };
@@ -1350,7 +1375,7 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.cifp = true;
         cand.cifp_pos = Some(pos);
         cand.airport = Some(ai);
-        let i = reg.add(ell, cand, false, "localizer");
+        let i = reg.add(ell, cand, "localizer");
         maps.loc.insert((ai, l.ident.clone()), i);
     }
 
@@ -1507,7 +1532,7 @@ fn resolve_cifp(maps: &Maps, f: &c424::FixRef, airport: Option<usize>) -> Option
                     .get(&(f.ident.clone(), f.icao_region.clone()))
                     .copied()
             }),
-        ('P', 'A') => maps.apt_cifp.get(&f.ident).copied(),
+        ('P', 'A') => apt_cifp(maps, &f.ident, &f.icao_region),
         ('P', 'G') => {
             let desig = f.ident.strip_prefix("RW").unwrap_or(&f.ident).to_string();
             maps.thr.get(&(airport?, desig)).copied()
@@ -2082,7 +2107,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
     // 3. Procedures of airports inside the ARTCC.
     let mut procs: BTreeMap<(usize, u8, String), ProcOut> = BTreeMap::new();
     for p in &src.cifp.procedures {
-        let Some(&ai) = maps.apt_cifp.get(&p.airport_ident) else {
+        let Some(ai) = apt_cifp(&maps, &p.airport_ident, &p.airport_region) else {
             continue;
         };
         if !reg.cands.get(ai).is_some_and(|c| c.inside) {
@@ -2899,13 +2924,13 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
         }
     }
 
-    // Procedures: sorted by (airport ident, kind, ident).
+    // Procedures: sorted by (airport ident, airport region, kind, ident).
     let mut proc_list: Vec<&ProcOut> = procs.values().collect();
     proc_list.sort_by(|a, b| {
         let ai = |p: &ProcOut| {
             reg.cands
                 .get(p.airport)
-                .map(|c| c.ident.clone())
+                .map(|c| (c.ident.clone(), c.region.clone().unwrap_or_default()))
                 .unwrap_or_default()
         };
         (ai(a), a.kind, &a.ident).cmp(&(ai(b), b.kind, &b.ident))

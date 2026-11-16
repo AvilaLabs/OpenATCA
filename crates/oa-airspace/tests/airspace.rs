@@ -204,7 +204,7 @@ fn every_procedure_of_every_airport_inside_is_selected_with_its_points() {
         }
     }
     // BENKY6 is coded: it has legs with path terminators and fixes.
-    let st = find_proc(&m, "KORD", proc_kind::STAR, "BENKY6").expect("BENKY6");
+    let st = find_proc(&m, "KORD", "K5", proc_kind::STAR, "BENKY6").expect("BENKY6");
     assert!(bit_get(&m.procs.coded, st.row()));
     let routes = m.procs.routes[st.row()];
     assert!(routes.len > 0);
@@ -879,7 +879,7 @@ fn a_snapshot_reads_back_to_the_same_model_and_rewrites_identically() {
     assert_eq!(sha256(&again), sha256(&bytes));
     // The model's strings, points and procedures survive by value.
     assert!(airport(&back, "KORD").is_some());
-    assert!(find_proc(&back, "KORD", proc_kind::STAR, "BENKY6").is_some());
+    assert!(find_proc(&back, "KORD", "K5", proc_kind::STAR, "BENKY6").is_some());
 }
 
 // REQ: OA-ASP-006
@@ -1943,4 +1943,71 @@ fn an_explicit_override_builds_and_the_snapshot_records_the_mismatch() {
         build_model(&src, &p).expect("build").model.cycle_override,
         None
     );
+}
+
+/// The fixture CIFP with a second airport `KMDW` in ICAO region K6: every `KMDWK5` record of the
+/// fixture repeated under `KMDWK6`, placed before or after the originals.
+fn cifp_with_second_kmdw(before: bool) -> Vec<u8> {
+    cifp_edited(|text| {
+        let copies: String = text
+            .lines()
+            .filter(|l| l.starts_with("SUSAP KMDWK5"))
+            .map(|l| format!("SUSAP KMDWK6{}\n", &l["SUSAP KMDWK5".len()..]))
+            .collect();
+        let at = if before {
+            text.find("SUSAP KMDWK5").expect("KMDW records")
+        } else {
+            text.len()
+        };
+        let mut out = text.clone();
+        out.insert_str(at, &copies);
+        out
+    })
+}
+
+/// The coded (CIFP) procedures of an airport; NASR-only ones belong to the NASR airport alone.
+fn procs_of(m: &Model, ap: PointIx) -> usize {
+    (0..m.procs.airport.len())
+        .filter(|&i| m.procs.airport[i] == ap && bit_get(&m.procs.coded, i))
+        .count()
+}
+
+// REQ: OA-ASP-073
+#[test]
+fn two_airports_with_one_identifier_in_two_regions_keep_their_own_runways_and_procedures() {
+    let base = fixture_build().model;
+    let kmdw = find_point(&base, key("KMDW", "K5", "", point_kind::AIRPORT)).unwrap();
+    let want_procs = procs_of(&base, kmdw);
+    assert!(want_procs > 0);
+    for before in [false, true] {
+        let src = sources_from(&nasr_files(), &cifp_with_second_kmdw(before));
+        let out = build_model(&src, &params("ZAU", 92_600)).unwrap();
+        let m = &out.model;
+        validate_model(m).unwrap();
+        for region in ["K5", "K6"] {
+            let ap = find_point(m, key("KMDW", region, "", point_kind::AIRPORT))
+                .unwrap_or_else(|| panic!("no KMDW {region} (before {before})"));
+            let thr = find_point(m, key("04L", region, "KMDW", point_kind::THRESHOLD))
+                .unwrap_or_else(|| panic!("no 04L of KMDW {region} (before {before})"));
+            assert!(bit_get(&m.points.src_cifp, thr.row()), "{region}");
+            assert_eq!(
+                procs_of(m, ap),
+                want_procs,
+                "procedures of KMDW {region} (before {before})"
+            );
+        }
+        // The copy's terminal waypoints keep the K5 region of the original, so those (and only
+        // those) share an identity; nothing of the airports, runways, localizers or procedures.
+        let dups: Vec<&String> = out
+            .info
+            .duplicates
+            .iter()
+            .filter(|d| !d.contains("waypoint"))
+            .collect();
+        assert!(dups.is_empty(), "{dups:?}");
+        // A procedure is found under its own airport's region only.
+        assert!(find_proc(m, "KMDW", "K5", proc_kind::STAR, "ENDEE8").is_some());
+        assert!(find_proc(m, "KMDW", "K6", proc_kind::STAR, "ENDEE8").is_some());
+        assert!(find_proc(m, "KMDW", "K7", proc_kind::STAR, "ENDEE8").is_none());
+    }
 }

@@ -39,6 +39,7 @@ fn legs() -> [TruthLeg; 1] {
         start_ms: T0_MS,
         end_ms: T0_MS + 1_000_000,
         callsign: Some(*b"FAIR01\0\0"),
+        start: Default::default(),
     }]
 }
 

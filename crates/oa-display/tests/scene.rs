@@ -246,13 +246,13 @@ fn texts(l: &DisplayList) -> Vec<&str> {
 fn build(m: &Model, range: f64, tweak: impl Fn(&mut View)) -> (DisplayList, SceneStats, View) {
     let mut view = view_new(ORD.0, ORD.1, range, 800, 600).unwrap();
     tweak(&mut view);
-    let mut l = list_new(scene_caps(m));
+    let mut l = list_new(scene_caps(m).unwrap()).unwrap();
     let st = build_scene(
         &mut l,
         m,
         &scene_index(m),
         &view,
-        &mut scratch_for(m, &view),
+        &mut scratch_for(m, &view).unwrap(),
     )
     .unwrap();
     assert!(!l.faulted);
@@ -619,13 +619,13 @@ fn the_legend_strip_hides_no_map_data_and_its_rows_never_overlap() {
     let m = model(Tail::Border);
     for range in [20.0, 50.0, 250.0] {
         let view = view_new(ORD.0, ORD.1, range, 1920, 1080).unwrap();
-        let mut l = list_new(scene_caps(&m));
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
         build_scene(
             &mut l,
             &m,
             &scene_index(&m),
             &view,
-            &mut scratch_for(&m, &view),
+            &mut scratch_for(&m, &view).unwrap(),
         )
         .unwrap();
         // The strip: everything of the map within the range is below it.
@@ -694,13 +694,13 @@ fn ring_labels_sit_on_the_diagonal_and_never_overlap_at_any_spacing() {
         ] {
             let mut view = view_new(ORD.0, ORD.1, range, w, h).unwrap();
             view.label_max_nm = 0.0;
-            let mut l = list_new(scene_caps(&m));
+            let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
             let st = build_scene(
                 &mut l,
                 &m,
                 &scene_index(&m),
                 &view,
-                &mut scratch_for(&m, &view),
+                &mut scratch_for(&m, &view).unwrap(),
             )
             .unwrap();
             let labels: Vec<_> = boxes(&l)
@@ -906,13 +906,13 @@ fn labels_in_a_dense_scene_never_overlap_keep_clear_of_the_legend_and_are_counte
     ] {
         let mut view = view_new(ORD.0, ORD.1, range, w, h).unwrap();
         all_open(&mut view);
-        let mut l = list_new(scene_caps(&m));
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
         let st = build_scene(
             &mut l,
             &m,
             &scene_index(&m),
             &view,
-            &mut scratch_for(&m, &view),
+            &mut scratch_for(&m, &view).unwrap(),
         )
         .unwrap();
         let shown = st.fixes + st.terminal_waypoints + st.navaids + st.airports;
@@ -1003,7 +1003,7 @@ fn random_scratch(seed: &mut u64, n: usize) -> Scratch {
         .collect();
     let m = points_model(&pts);
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
-    let mut s = scratch_for(&m, &view);
+    let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, LEGEND_STRIP_PX as i32 * 16, 1920 * 16, 1080 * 16];
     for i in 0..n {
         let chars = 2 + lcg(seed) as usize % 7;
@@ -1096,7 +1096,7 @@ fn a_full_grid_cell_drops_the_label_and_counts_it_without_overflowing() {
         .collect();
     let m = points_model(&pts);
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
-    let mut s = scratch_for(&m, &view);
+    let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, 104 * 16, 1920 * 16, 1080 * 16];
     for i in 0..n {
         s.prio.push(4);
@@ -1144,11 +1144,11 @@ fn label_placement_is_deterministic_and_does_not_depend_on_the_order_of_the_poin
         let mut view = view_new(ORD.0, ORD.1, 20.0, 1920, 1080).unwrap();
         all_open(&mut view);
         let index = scene_index(&m);
-        let mut sc = scratch_for(&m, &view);
-        let mut l = list_new(scene_caps(&m));
+        let mut sc = scratch_for(&m, &view).unwrap();
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
         let st = build_scene(&mut l, &m, &index, &view, &mut sc).unwrap();
         // The same scratch, a second frame: the same list.
-        let mut l2 = list_new(scene_caps(&m));
+        let mut l2 = list_new(scene_caps(&m).unwrap()).unwrap();
         build_scene(&mut l2, &m, &index, &view, &mut sc).unwrap();
         assert_eq!(l, l2);
         let mut v: Vec<_> = (0..l.texts.x.len())
@@ -1193,11 +1193,25 @@ fn rejecting_positions_by_bounding_box_changes_nothing_on_screen() {
             view.non_ifr_airport_max_nm = 1e9;
             view.minor_navaid_max_nm = 1e9;
             let index = scene_index(&m);
-            let mut a = list_new(scene_caps(&m));
-            let mut b = list_new(scene_caps(&m));
-            let sa = build_scene(&mut a, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+            let mut a = list_new(scene_caps(&m).unwrap()).unwrap();
+            let mut b = list_new(scene_caps(&m).unwrap()).unwrap();
+            let sa = build_scene(
+                &mut a,
+                &m,
+                &index,
+                &view,
+                &mut scratch_for(&m, &view).unwrap(),
+            )
+            .unwrap();
             view.bbox = None;
-            let sb = build_scene(&mut b, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+            let sb = build_scene(
+                &mut b,
+                &m,
+                &index,
+                &view,
+                &mut scratch_for(&m, &view).unwrap(),
+            )
+            .unwrap();
             assert_eq!(a, b, "{lat},{lon} range {range}: the box changed the list");
             assert_eq!(
                 (sa.fixes, sa.navaids, sa.airports, sa.airway_legs, sa.labels),
@@ -1213,10 +1227,17 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
     let m = model(Tail::None);
     let (_, _, view) = build(&m, 50.0, |_| {});
     let index = scene_index(&m);
-    let full = scene_caps(&m);
+    let full = scene_caps(&m).unwrap();
     // Each table, one row short of what the scene needs, fails by name.
-    let mut l = list_new(full);
-    build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+    let mut l = list_new(full).unwrap();
+    build_scene(
+        &mut l,
+        &m,
+        &index,
+        &view,
+        &mut scratch_for(&m, &view).unwrap(),
+    )
+    .unwrap();
     let used = (
         l.lines.x0.len(),
         l.circles.x.len(),
@@ -1270,8 +1291,14 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
         ),
         ("rects", ListCaps { rects: 0, ..full }),
     ] {
-        let mut l = list_new(caps);
-        match build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)) {
+        let mut l = list_new(caps).unwrap();
+        match build_scene(
+            &mut l,
+            &m,
+            &index,
+            &view,
+            &mut scratch_for(&m, &view).unwrap(),
+        ) {
             Err(DisplayError::Full { table, .. }) => assert_eq!(table, what),
             other => panic!("{what}: {other:?}"),
         }
@@ -1289,7 +1316,7 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
     for tail in [Tail::None, Tail::Border, Tail::Unresolved] {
         let m = model(tail);
         let index = scene_index(&m);
-        let full = scene_caps(&m);
+        let full = scene_caps(&m).unwrap();
         for (lat, lon) in [
             ORD,
             (899_000_000, 0),
@@ -1306,9 +1333,15 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
                 view.terminal_wpt_max_nm = 1e9;
                 view.runway_max_nm = 1e9;
                 view.major_label_max_nm = 1e9;
-                let mut l = list_new(full);
-                build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view))
-                    .unwrap_or_else(|e| panic!("{lat},{lon} {range}: {e}"));
+                let mut l = list_new(full).unwrap();
+                build_scene(
+                    &mut l,
+                    &m,
+                    &index,
+                    &view,
+                    &mut scratch_for(&m, &view).unwrap(),
+                )
+                .unwrap_or_else(|e| panic!("{lat},{lon} {range}: {e}"));
                 let mut buf = vec![0u8; 640 * 480 * 4];
                 rasterize(&l, &spec(640, 480), &mut buf).unwrap();
             }
@@ -1321,14 +1354,21 @@ fn an_overflowing_scene_is_an_error_and_the_list_is_never_drawn() {
 fn frames_are_identical_and_never_change_the_lists_capacity() {
     let m = model(Tail::Border);
     let index = scene_index(&m);
-    let mut l = list_new(scene_caps(&m));
+    let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
     let caps = list_capacities(&l);
     let sp = spec(800, 600);
     let mut buf = vec![0u8; frame_len(&sp)];
     let mut digests = Vec::new();
     for range in [60.0, 250.0, 5.0, 60.0, 1000.0, 60.0] {
         let view = view_new(ORD.0, ORD.1, range, 800, 600).unwrap();
-        build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+        build_scene(
+            &mut l,
+            &m,
+            &index,
+            &view,
+            &mut scratch_for(&m, &view).unwrap(),
+        )
+        .unwrap();
         let d = render(&l, &sp, &mut buf).unwrap();
         assert_eq!(
             list_capacities(&l),
@@ -1342,9 +1382,23 @@ fn frames_are_identical_and_never_change_the_lists_capacity() {
     assert_eq!(digests[0], digests[5]);
     assert_ne!(digests[0], digests[1]);
     let view = view_new(ORD.0, ORD.1, 60.0, 800, 600).unwrap();
-    let mut fresh = list_new(scene_caps(&m));
-    build_scene(&mut fresh, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
-    build_scene(&mut l, &m, &index, &view, &mut scratch_for(&m, &view)).unwrap();
+    let mut fresh = list_new(scene_caps(&m).unwrap()).unwrap();
+    build_scene(
+        &mut fresh,
+        &m,
+        &index,
+        &view,
+        &mut scratch_for(&m, &view).unwrap(),
+    )
+    .unwrap();
+    build_scene(
+        &mut l,
+        &m,
+        &index,
+        &view,
+        &mut scratch_for(&m, &view).unwrap(),
+    )
+    .unwrap();
     assert_eq!(fresh, l);
 }
 
@@ -1423,13 +1477,13 @@ fn the_command_line_renders_a_snapshot_to_a_ppm_whose_hash_it_reports() {
     // And the same picture the library gives for the same model and view.
     let view = view_new(ORD.0, ORD.1, 60.0, 800, 600).unwrap();
     let m = decode(&bytes).unwrap();
-    let mut l = list_new(scene_caps(&m));
+    let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
     build_scene(
         &mut l,
         &m,
         &scene_index(&m),
         &view,
-        &mut scratch_for(&m, &view),
+        &mut scratch_for(&m, &view).unwrap(),
     )
     .unwrap();
     let sp = spec(800, 600);
@@ -1618,13 +1672,13 @@ fn every_legend_text_past_the_edge_gets_a_bar_at_the_narrowest_width() {
     let m = model(Tail::Border);
     let mut view = view_new(ORD.0, ORD.1, 60.0, 64, 120).unwrap();
     layer_set(&mut view.layers, "fixes", false);
-    let mut l = list_new(scene_caps(&m));
+    let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
     let st = build_scene(
         &mut l,
         &m,
         &scene_index(&m),
         &view,
-        &mut scratch_for(&m, &view),
+        &mut scratch_for(&m, &view).unwrap(),
     )
     .unwrap();
     assert!(!l.faulted);
@@ -1681,4 +1735,157 @@ fn a_non_finite_or_out_of_range_command_line_number_is_refused_when_parsed() {
     let mut v = args(&ok);
     v.extend(args(&["--fix-max-nm", "nan"]));
     assert!(cli::parse_render_args(&v).is_err());
+}
+
+// REQ: OA-DSP-036
+#[test]
+fn a_boundary_that_asks_for_a_huge_list_is_refused_before_anything_is_allocated() {
+    let mut m = model(Tail::None);
+    // One more ARTCC boundary claiming 10 million vertices: 640 million polyline vertices, about
+    // 2.5 GB per column, more than the display limit. The model never holds those vertices.
+    m.boundaries.stratum.push(stratum::ARTCC_HIGH);
+    m.boundaries.vertices.push(Span {
+        start: VertexIx::new(0),
+        len: 10_000_000,
+    });
+    match scene_caps(&m) {
+        Err(DisplayError::TooLarge {
+            what,
+            requested,
+            limit,
+        }) => {
+            assert_eq!(what, "boundary polyline vertices");
+            assert_eq!(limit, MAX_LIST_ROWS);
+            assert!(requested > limit as u128, "{requested}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A list asked for by hand above the limit is refused too, not allocated.
+    let caps = ListCaps {
+        lines: 1,
+        rects: 1,
+        circles: 1,
+        polylines: 1,
+        poly_vertices: usize::MAX,
+        texts: 1,
+        text_bytes: 1,
+    };
+    assert!(matches!(list_new(caps), Err(DisplayError::TooLarge { .. })));
+    let caps = ListCaps {
+        poly_vertices: 1,
+        text_bytes: MAX_LIST_TEXT_BYTES + 1,
+        ..caps
+    };
+    assert!(matches!(
+        list_new(caps),
+        Err(DisplayError::TooLarge {
+            what: "text bytes",
+            ..
+        })
+    ));
+}
+
+// REQ: OA-DSP-036
+#[test]
+fn a_screen_that_asks_for_a_huge_label_grid_is_refused() {
+    let m = model(Tail::None);
+    let mut view = view_new(ORD.0, ORD.1, 50.0, 800, 600).unwrap();
+    view.proj.width = 1 << 16;
+    view.proj.height = 1 << 16;
+    assert!(matches!(
+        scratch_for(&m, &view),
+        Err(DisplayError::TooLarge {
+            what: "label grid boxes",
+            ..
+        })
+    ));
+}
+
+// REQ: OA-DSP-036
+#[test]
+fn the_model_and_screens_the_display_is_built_for_are_within_the_limits() {
+    let m = model(Tail::Border);
+    let caps = scene_caps(&m).unwrap();
+    assert!(caps.poly_vertices <= MAX_LIST_ROWS);
+    let view = view_new(ORD.0, ORD.1, 50.0, 8192, 8192).unwrap();
+    assert!(scratch_for(&m, &view).is_ok());
+}
+
+type Setter = fn(&mut View, f64);
+type Poke = fn(&mut View);
+
+// REQ: OA-DSP-037
+#[test]
+fn a_threshold_that_is_not_a_finite_non_negative_number_is_refused_by_build_scene() {
+    let m = model(Tail::None);
+    let index = scene_index(&m);
+    let fields: [(&str, Setter); 7] = [
+        ("fix_max_nm", |v, x| v.fix_max_nm = x),
+        ("terminal_wpt_max_nm", |v, x| v.terminal_wpt_max_nm = x),
+        ("runway_max_nm", |v, x| v.runway_max_nm = x),
+        ("non_ifr_airport_max_nm", |v, x| {
+            v.non_ifr_airport_max_nm = x
+        }),
+        ("minor_navaid_max_nm", |v, x| v.minor_navaid_max_nm = x),
+        ("label_max_nm", |v, x| v.label_max_nm = x),
+        ("major_label_max_nm", |v, x| v.major_label_max_nm = x),
+    ];
+    for (name, set) in fields {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut view = view_new(ORD.0, ORD.1, 50.0, 800, 600).unwrap();
+            set(&mut view, bad);
+            let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
+            let r = build_scene(
+                &mut l,
+                &m,
+                &index,
+                &view,
+                &mut scratch_for(&m, &view).unwrap(),
+            );
+            assert!(
+                matches!(r, Err(DisplayError::BadView(_))),
+                "{name} = {bad}: {r:?}"
+            );
+        }
+        // Zero is a valid threshold: nothing of that kind is shown.
+        let mut view = view_new(ORD.0, ORD.1, 50.0, 800, 600).unwrap();
+        set(&mut view, 0.0);
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
+        build_scene(
+            &mut l,
+            &m,
+            &index,
+            &view,
+            &mut scratch_for(&m, &view).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+// REQ: OA-DSP-037
+#[test]
+fn a_projection_with_non_finite_numbers_is_refused_by_build_scene() {
+    let m = model(Tail::None);
+    let index = scene_index(&m);
+    let good = view_new(ORD.0, ORD.1, 50.0, 800, 600).unwrap();
+    let fields: [(&str, Poke); 5] = [
+        ("range_nm", |v| v.proj.range_nm = f64::NAN),
+        ("scale", |v| v.proj.scale = f64::INFINITY),
+        ("cx16", |v| v.proj.cx16 = f64::NAN),
+        ("cy16", |v| v.proj.cy16 = f64::NAN),
+        ("radius_m", |v| v.proj.radius_m = f64::NAN),
+    ];
+    for (name, set) in fields {
+        let mut view = good;
+        set(&mut view);
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
+        let r = build_scene(
+            &mut l,
+            &m,
+            &index,
+            &view,
+            &mut scratch_for(&m, &good).unwrap(),
+        );
+        assert!(matches!(r, Err(DisplayError::BadView(_))), "{name}: {r:?}");
+    }
 }

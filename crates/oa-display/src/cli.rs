@@ -265,8 +265,8 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
     };
     // All allocation happens here, once.
     let index = scene_index(&model);
-    let mut list = list_new(scene_caps(&model));
-    let mut scratch = scratch_for(&model, &view);
+    let mut list = list_new(scene_caps(&model).map_err(display_err)?).map_err(display_err)?;
+    let mut scratch = scratch_for(&model, &view).map_err(display_err)?;
     let mut buf = vec![0u8; frame_len(&spec)];
     let t0 = Instant::now();
     let stats = build_scene(&mut list, &model, &index, &view, &mut scratch).map_err(display_err)?;

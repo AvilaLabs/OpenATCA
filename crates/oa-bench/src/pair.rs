@@ -151,6 +151,8 @@ pub fn build_pairs(
                     hdg = wrap180(
                         heading_deg(ex_kt, ny_kt) - heading_deg(ts.vel_east_mps, ts.vel_north_mps),
                     ) as f32;
+                } else {
+                    exclude(&mut ex, "T3-heading", "truth speed below 30 kt");
                 }
             } else {
                 exclude(&mut ex, "T3", "no ERAM velocity");

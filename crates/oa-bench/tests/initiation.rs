@@ -48,6 +48,7 @@ fn t8(pos_ms: &[i64]) -> MetricResult {
         start_ms: 0,
         end_ms: 2_000_000,
         callsign: None,
+        start: Default::default(),
     }];
     let truth = Truth {
         query: &q,

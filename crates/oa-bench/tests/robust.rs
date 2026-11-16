@@ -57,6 +57,7 @@ fn h1(cross_ms: i64, hole: Option<(i64, i64)>) -> (oa_bench::stats::MetricResult
         start_ms: 0,
         end_ms: 2 * TS,
         callsign: None,
+        start: Default::default(),
     }];
     let truth = Truth {
         query: &q,
@@ -227,6 +228,7 @@ fn a_fix_passage_is_not_placed_inside_a_hole_in_the_truth() {
         start_ms: 0,
         end_ms: 1_000_000,
         callsign: None,
+        start: Default::default(),
     }];
     let truth = Truth {
         query: &q,
@@ -262,6 +264,7 @@ fn a_handoff_whose_truth_passes_through_an_ambiguous_area_is_excluded_and_counte
         start_ms: 0,
         end_ms: 2 * TS,
         callsign: None,
+        start: Default::default(),
     }];
     let truth = Truth {
         query: &q,

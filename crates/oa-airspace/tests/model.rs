@@ -107,9 +107,9 @@ fn validation_catches_every_kind_of_inconsistency() {
 #[test]
 fn lookups_find_present_keys_and_answer_none_for_absent_ones() {
     let m = base();
-    assert!(find_proc(&m, "KORD", proc_kind::STAR, "BENKY6").is_some());
-    assert!(find_proc(&m, "KORD", proc_kind::STAR, "NOPE1").is_none());
-    assert!(find_proc(&m, "KJFK", proc_kind::STAR, "BENKY6").is_none());
+    assert!(find_proc(&m, "KORD", "K5", proc_kind::STAR, "BENKY6").is_some());
+    assert!(find_proc(&m, "KORD", "K5", proc_kind::STAR, "NOPE1").is_none());
+    assert!(find_proc(&m, "KJFK", "K6", proc_kind::STAR, "BENKY6").is_none());
     assert!(find_airway(&m, "V156", b'C').is_some());
     assert!(find_airway(&m, "V156", b'A').is_none());
     assert!(find_airway(&m, "", b'C').is_none());

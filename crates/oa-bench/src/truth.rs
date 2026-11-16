@@ -65,6 +65,24 @@ pub struct TruthLeg {
     pub end_ms: i64,
     /// Callsign when known: ASCII, zero or space padded.
     pub callsign: Option<[u8; 8]>,
+    /// How the leg began, from the ADS-B ground indication (T8).
+    pub start: LegStart,
+}
+
+/// How a truth leg began, from the ADS-B on-ground indication of its reports. A takeoff is an
+/// observed event: a ground report followed by an airborne one. Nothing is inferred from altitude.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LegStart {
+    /// No report of the leg states ground or airborne (or the source carries no such indication).
+    #[default]
+    Unknown,
+    /// The first report that states a ground state is airborne: the leg has no takeoff.
+    FirstSeenAirborne,
+    /// Every report that states a ground state is on the ground: the aircraft never took off.
+    NeverAirborne,
+    /// A ground report was followed by an airborne one. `t_ms` is the first airborne report; the
+    /// takeoff itself lay between the last ground report and it, `gap_ms` earlier at most.
+    Takeoff { t_ms: i64, gap_ms: i64 },
 }
 
 /// The truth query: `(addr, t_ms)` to a sample or the reason there is none.

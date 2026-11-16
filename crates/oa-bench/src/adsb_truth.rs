@@ -16,10 +16,12 @@
 //!   non-empty callsign among the decoded reports of its address whose time lies in the leg's
 //!   span (ties go to the smaller bytes). Reports that truth removed still count: the callsign
 //!   is identity, not a position. `None` when no report in the span carries one.
+//! * **Start.** [`TruthLeg::start`] comes from the ADS-B on-ground indication of the reports of
+//!   the address inside the leg's span, in time order (see [`leg_start`]).
 
 use std::collections::BTreeMap;
 
-use oa_adsb::Reports;
+use oa_adsb::{Reports, F_GROUND, NONE_I32};
 use oa_sha256::{to_hex, Sha256};
 use oa_truth::{
     build_truth, leg_count, leg_end_ms, leg_end_ns, leg_start_ms, leg_start_ns, truth_at,
@@ -27,7 +29,7 @@ use oa_truth::{
     REMOVE_NAMES, SPLIT_NAMES,
 };
 
-use crate::truth::{NoTruth, TruthLeg, TruthSample};
+use crate::truth::{LegStart, NoTruth, TruthLeg, TruthSample};
 
 /// Maps one `oa-truth` answer to this crate's.
 pub fn map_query(q: TruthQuery) -> Result<TruthSample, NoTruth> {
@@ -54,6 +56,42 @@ pub fn query(truth: &oa_truth::Truth, addr: u32, t_ms: i64) -> Result<TruthSampl
     map_query(truth_at(truth, addr, t_ms))
 }
 
+/// Whether a report is on the ground (`Some(true)`), airborne (`Some(false)`: not flagged on the
+/// ground and carrying an altitude) or says neither (`None`).
+fn ground_state(reports: &Reports, i: usize) -> Option<bool> {
+    if reports.flags.get(i).is_some_and(|&f| f & F_GROUND != 0) {
+        return Some(true);
+    }
+    let has_alt = reports.baro_alt_ft.get(i).is_some_and(|&a| a != NONE_I32)
+        || reports.geom_alt_ft.get(i).is_some_and(|&a| a != NONE_I32);
+    has_alt.then_some(false)
+}
+
+/// How a leg began, from the reports `states` (time in ns, on the ground or not) of its address
+/// inside its span, in time order. A takeoff is the first airborne report after a ground report;
+/// the gap back to the last ground report bounds when it happened. A leg whose first stated
+/// state is airborne has no takeoff; one that is never airborne never took off.
+pub fn leg_start(states: &[(i64, bool)]) -> LegStart {
+    let mut last_ground: Option<i64> = None;
+    for &(t_ns, ground) in states {
+        match (ground, last_ground) {
+            (true, _) => last_ground = Some(t_ns),
+            (false, None) => return LegStart::FirstSeenAirborne,
+            (false, Some(g)) => {
+                return LegStart::Takeoff {
+                    t_ms: t_ns.div_euclid(1_000_000),
+                    gap_ms: (t_ns - g).div_euclid(1_000_000),
+                }
+            }
+        }
+    }
+    if last_ground.is_some() {
+        LegStart::NeverAirborne
+    } else {
+        LegStart::Unknown
+    }
+}
+
 /// The legs of `truth` with callsigns taken from `reports` (see the module docs).
 pub fn legs(truth: &oa_truth::Truth, reports: &Reports) -> Vec<TruthLeg> {
     // Rows that carry a callsign, ordered by (address, time).
@@ -67,6 +105,14 @@ pub fn legs(truth: &oa_truth::Truth, reports: &Reports) -> Vec<TruthLeg> {
         .map(|(i, ((&a, &t), _))| (a, t, i as u32))
         .collect();
     rows.sort_unstable();
+    // Rows that state a ground state, ordered by (address, time).
+    let mut states: Vec<(u32, i64, bool)> = (0..reports.icao.len())
+        .filter_map(|i| {
+            let g = ground_state(reports, i)?;
+            Some((*reports.icao.get(i)?, *reports.time_ns.get(i)?, g))
+        })
+        .collect();
+    states.sort_unstable();
     (0..leg_count(truth))
         .map(|i| {
             let ix = LegIx(i as u32);
@@ -91,7 +137,16 @@ pub fn legs(truth: &oa_truth::Truth, reports: &Reports) -> Vec<TruthLeg> {
                     best = Some((c, n));
                 }
             }
+            let sf = states.partition_point(|&(a, t, _)| (a, t) < (addr, s_ns));
+            let span: Vec<(i64, bool)> = states
+                .get(sf..)
+                .unwrap_or(&[])
+                .iter()
+                .take_while(|&&(a, t, _)| a == addr && t <= e_ns)
+                .map(|&(_, t, g)| (t, g))
+                .collect();
             TruthLeg {
+                start: leg_start(&span),
                 addr,
                 start_ms: leg_start_ms(truth, ix).unwrap_or(0),
                 end_ms: leg_end_ms(truth, ix).unwrap_or(-1),
