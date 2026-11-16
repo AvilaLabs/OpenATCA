@@ -120,6 +120,26 @@ fn fmt_rms(v: f64) -> String {
     }
 }
 
+fn csv_field(value: &str) -> String {
+    if value
+        .bytes()
+        .any(|b| matches!(b, b',' | b'"' | b'\r' | b'\n'))
+    {
+        let mut escaped = String::with_capacity(value.len() + 2);
+        escaped.push('"');
+        for c in value.chars() {
+            if c == '"' {
+                escaped.push('"');
+            }
+            escaped.push(c);
+        }
+        escaped.push('"');
+        escaped
+    } else {
+        value.to_string()
+    }
+}
+
 fn pass(v: f64, bound: f64) -> &'static str {
     if v.is_nan() {
         " "
@@ -155,8 +175,17 @@ fn esassp_row(label: &str, p: &Pools, rep: &mut Report, tag: &str) {
     );
     let _ = writeln!(
         rep.csv,
-        "{tag},{label},{},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3}",
-        p.pos[0].n, pa, ps, pt, ss, st, hs, ht
+        "{},{},{},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3}",
+        csv_field(tag),
+        csv_field(label),
+        p.pos[0].n,
+        pa,
+        ps,
+        pt,
+        ss,
+        st,
+        hs,
+        ht
     );
 }
 
@@ -476,8 +505,9 @@ fn section_base(
             );
             let _ = writeln!(
                 rep.csv,
-                "{tag}|id,{},{},{},{},{},{},{:.2},{:.2},{:.2},{:.2}",
-                v.name,
+                "{},{},{},{},{},{},{},{:.2},{:.2},{:.2},{:.2}",
+                csv_field(&format!("{tag}|id")),
+                csv_field(v.name),
                 a.swaps,
                 a.wrong,
                 a.false_tracks,
@@ -609,8 +639,9 @@ fn section_sweep(
                 }
                 let _ = writeln!(
                     rep.csv,
-                    "sweep|{name},{},{br},{ba},{:.2},{},{}",
-                    v.name,
+                    "{},{},{br},{ba},{:.2},{},{}",
+                    csv_field(&format!("sweep|{name}")),
+                    csv_field(v.name),
                     p.pos[0].rms(),
                     c.id.duplicates,
                     c.id.false_tracks
@@ -686,8 +717,15 @@ fn section_pairs(rep: &mut Report, kind: Kind, opts: &Opts) -> Result<(), String
                 );
                 let _ = writeln!(
                     rep.csv,
-                    "pairs|{kname},{},{},{},{},{},{},{}",
-                    g.name, v.name, t.0, t.1, t.2, t.3, t.4
+                    "{},{},{},{},{},{},{},{}",
+                    csv_field(&format!("pairs|{kname}")),
+                    csv_field(g.name),
+                    csv_field(v.name),
+                    t.0,
+                    t.1,
+                    t.2,
+                    t.3,
+                    t.4
                 );
             }
         }
@@ -753,8 +791,15 @@ fn section_pairs(rep: &mut Report, kind: Kind, opts: &Opts) -> Result<(), String
                 );
                 let _ = writeln!(
                     rep.csv,
-                    "pairs-mixed|{kname},{},{},{},{},{},{},{}",
-                    g.name, v.name, t.0, t.1, t.2, t.3, t.4
+                    "{},{},{},{},{},{},{},{}",
+                    csv_field(&format!("pairs-mixed|{kname}")),
+                    csv_field(g.name),
+                    csv_field(v.name),
+                    t.0,
+                    t.1,
+                    t.2,
+                    t.3,
+                    t.4
                 );
             }
         }
@@ -802,8 +847,12 @@ fn section_false(rep: &mut Report, kind: Kind, opts: &Opts) -> Result<(), String
             );
             let _ = writeln!(
                 rep.csv,
-                "false|{kname},{label},{},{f},{},{}",
-                v.name, id.false_tracks, run.fstats.cand_confirmed
+                "{},{},{},{f},{},{}",
+                csv_field(&format!("false|{kname}")),
+                csv_field(label),
+                csv_field(v.name),
+                id.false_tracks,
+                run.fstats.cand_confirmed
             );
         }
     }
@@ -1074,5 +1123,29 @@ fn main() -> ExitCode {
             eprintln!("oa-track-fusion: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod csv_tests {
+    use super::{esassp_row, Pools, Report};
+
+    // REQ: OA-TRK-065
+    #[test]
+    fn esassp_csv_quotes_text_fields_with_commas_quotes_and_newlines() {
+        let mut report = Report {
+            txt: String::new(),
+            csv: String::new(),
+        };
+        esassp_row(
+            "raw, \"plots\"\nsecond line",
+            &Pools::default(),
+            &mut report,
+            "tag, quoted\nsection",
+        );
+        assert_eq!(
+            report.csv,
+            "\"tag, quoted\nsection\",\"raw, \"\"plots\"\"\nsecond line\",0,NaN,NaN,NaN,NaN,NaN,NaN,NaN\n"
+        );
     }
 }

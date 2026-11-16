@@ -50,6 +50,7 @@ These are the design rules. How far the code meets each one today is in
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Requirements register; every requirement has a test |
 | [docs/RULESET.md](docs/RULESET.md) | The engineering law every change is reviewed against |
 | [docs/STATUS.md](docs/STATUS.md) | Assurance status: what has been checked, how, and what has not |
+| [docs/VALIDATION.md](docs/VALIDATION.md) | Candidate acceptance checks, reproducible evidence and claims that remain open |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Formal proofs (Kani bounded model checking): what is proved, to what bound, and what is not |
 | [docs/M0_DESIGN.md](docs/M0_DESIGN.md) | Milestone 0: airspace foundation |
 | [docs/M0_REPORT.md](docs/M0_REPORT.md) | Milestone 0 result: the ZAU model, checks, defects found, limits |

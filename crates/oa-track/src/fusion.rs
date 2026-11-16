@@ -84,13 +84,13 @@ use crate::registration::{
     Residual,
 };
 use crate::tracker::{
-    tracker_advance, tracker_buffers, tracker_flush, tracker_live_iter, tracker_new,
-    tracker_note_radar_disagreement, tracker_predict, tracker_set_expected_interval, tracker_stats,
-    tracker_update, Tracker,
+    check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_live_iter,
+    tracker_new, tracker_note_radar_disagreement, tracker_predict, tracker_set_expected_interval,
+    tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput,
-    TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT,
+    TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT, TIME_LIMIT_NS,
 };
 
 /// Association rule of the run: exact global nearest neighbour, or the plain nearest neighbour
@@ -818,6 +818,9 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
 /// the last of them (its fixed-rate rows, coasting and expiry), whether or not anything was
 /// pending: with every sensor quiet, time still passes for the tracks.
 pub fn fusion_advance(f: &mut Fusion, until_ns: i64, out: &mut TrackOutput) {
+    if !check_advance_time(&mut f.tracker, until_ns) {
+        return;
+    }
     let complete = until_ns.div_euclid(f.cfg.bucket_ns);
     process_pending(f, complete, out);
     // Every bucket before `complete` is closed, whether or not it held an event: a plot timed
@@ -826,11 +829,16 @@ pub fn fusion_advance(f: &mut Fusion, until_ns: i64, out: &mut TrackOutput) {
     // Up to the last instant before the boundary, as a measurement at the boundary would: the
     // tracker emits a tick at a measurement's own time only after applying it.
     let boundary = complete.saturating_mul(f.cfg.bucket_ns);
-    tracker_advance(&mut f.tracker, boundary.saturating_sub(1), out);
+    // The first representable bucket can start below the valid negative clock limit.
+    let target = boundary.saturating_sub(1).max(-TIME_LIMIT_NS);
+    tracker_advance(&mut f.tracker, target, out);
 }
 
 /// Processes everything pending, then runs the tracker to `now_ns` and flushes it.
 pub fn fusion_finish(f: &mut Fusion, now_ns: i64, out: &mut TrackOutput) {
+    if !check_advance_time(&mut f.tracker, now_ns) {
+        return;
+    }
     process_pending(f, i64::MAX, out);
     tracker_advance(&mut f.tracker, now_ns, out);
     tracker_flush(&mut f.tracker, now_ns, out);

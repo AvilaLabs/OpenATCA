@@ -17,10 +17,11 @@
 //!
 //! # Honest limits of this step
 //!
-//! The scoring input is adsb.lol history thinned to about one position per 17 s per aircraft,
-//! and the split halves it again. No result here is an ESASSP exit result (that needs full-rate
-//! ADS-B, `docs/M3_DESIGN.md`); every scored number is labelled so. GNSS error correlated over
-//! seconds is shared between the two halves of a split, so the scored error is a lower bound.
+//! The scoring input is ADS-B history, whose cadence is measured for each clip; the split
+//! halves its report groups. No result here is an ESASSP exit result (see `docs/M3_DESIGN.md`);
+//! every scored number is labelled so. GNSS error correlated over
+//! seconds is shared between the two halves of a split. The score measures disagreement with
+//! a correlated reference and does not bound absolute error.
 
 mod linalg;
 

@@ -19,7 +19,8 @@
 //! minority of rows, so without this half the aircraft would have none in age after the split;
 //! they describe the aircraft's navigation state, not a measurement, so sharing them does not
 //! share any position noise. GNSS errors that are correlated over seconds are shared
-//! between the sets, so the scored error is a lower bound; every report says so.
+//! between the sets. The score measures disagreement with a correlated reference, not a bound
+//! on the tracker's absolute error.
 //!
 //! # What is scored
 //!
@@ -66,7 +67,7 @@ use crate::types::{
 /// The split, in words, for every report.
 pub const SPLIT_TEXT: &str = "per aircraft, copies of one observation removed, then distinct (time, input index) groups numbered from 0: even to set A (tracker), odd to set B (truth); reports of different content at one time stay on one side";
 /// The basis every scored number carries.
-pub const BASIS_TEXT: &str = "on thinned ~17 s input split in two; not an ESASSP exit result; GNSS error correlated over seconds is shared between the sets";
+pub const BASIS_TEXT: &str = "on ADS-B input split into disjoint report groups; not an ESASSP exit result; GNSS error correlated over seconds is shared between the sets; disagreement does not bound absolute error";
 /// A track is dropped after this long without an update in the scoring run, ns: the gap at which
 /// `oa-truth` starts a new leg (`oa_truth::LEG_GAP_MS`), so tracker and truth end an aircraft's
 /// pass at the same silence.
@@ -479,7 +480,7 @@ pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
 pub struct Scored {
     pub bench: RunOutput,
     pub esassp: Esassp,
-    /// One-second rows scored (confirmed tracks).
+    /// Confirmed-track one-second rows offered to the scorer, before pair exclusions.
     pub tick_rows: usize,
     pub pairs: usize,
 }

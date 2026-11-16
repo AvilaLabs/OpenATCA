@@ -482,7 +482,7 @@ fn tracker_section(
     );
     let _ = writeln!(
         o,
-        "  output: {} rows ({} one-second ticks scored), digest {}, rows lost to table capacity {}",
+        "  output: {} rows ({} one-second ticks offered to scorer), digest {}, rows lost to table capacity {}",
         run.rows, scored.tick_rows, run.digest, run.overflow
     );
     let _ = writeln!(
@@ -712,7 +712,7 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
             ),
             ("split_conflict_groups".to_string(), split.conflict_groups),
             (
-                "tracker_one_second_rows_scored".to_string(),
+                "tracker_one_second_rows_offered_to_scorer".to_string(),
                 scored.tick_rows as u64,
             ),
         ],

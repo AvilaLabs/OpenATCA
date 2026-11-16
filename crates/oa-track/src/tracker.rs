@@ -1151,14 +1151,22 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
     }
 }
 
-/// Advances time to `now_ns` without a measurement: emits the ticks up to it and expires old
-/// tracks. Time never goes backwards; an earlier `now_ns` does nothing. The step limit does not
-/// apply here: the caller's clock (the replay clock) has its own confirmed rules.
-pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
+/// Counts and refuses an invalid clock value before the caller changes any other state.
+pub(crate) fn check_advance_time(t: &mut Tracker, now_ns: i64) -> bool {
     if now_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {
         if let Some(c) = t.stats.refused.get_mut(REF_TIME) {
             *c += 1;
         }
+        return false;
+    }
+    true
+}
+
+/// Advances time to `now_ns` without a measurement: emits the ticks up to it and expires old
+/// tracks. Time never goes backwards; an earlier `now_ns` does nothing. The step limit does not
+/// apply here: the caller's clock (the replay clock) has its own confirmed rules.
+pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
+    if !check_advance_time(t, now_ns) {
         return;
     }
     if now_ns > t.clock_ns {
@@ -1172,6 +1180,9 @@ pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
 
 /// Ends the run at `now_ns`: emits the remaining ticks and logs every live track as flushed.
 pub fn tracker_flush(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
+    if !check_advance_time(t, now_ns) {
+        return;
+    }
     tracker_advance(t, now_ns, out);
     for slot in 0..t.high {
         if col(&t.state, slot, FREE) != FREE {
