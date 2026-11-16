@@ -36,6 +36,7 @@ fn landing(alt: i32, f: impl FnOnce(&Truth<'_>)) {
         start_ms: 0,
         end_ms: 100_000,
         callsign: None,
+        start: Default::default(),
     }];
     f(&Truth {
         query: &q,

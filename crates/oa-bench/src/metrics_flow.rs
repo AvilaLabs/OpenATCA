@@ -11,7 +11,7 @@ use crate::stats::{
     band, group_rows, new_result, sort_cases, KeyedCase, MetricResult, Row, COAST_NAMES,
 };
 use crate::thindex::{samples_of, ThIndex};
-use crate::truth::{Env, Truth};
+use crate::truth::{Env, LegStart, Truth, NO_TRUTH_COUNT, NO_TRUTH_NAMES};
 
 /// Longest publication interval counted by T5, seconds. A longer silence is a flight that left
 /// and re-entered coverage, not a publication interval; those are counted in a scalar.
@@ -76,9 +76,6 @@ pub struct PresenceConfig {
     pub grid_ms: i64,
     /// An ERAM position within this of a truth time counts as present, ms.
     pub window_ms: i64,
-    /// A leg that begins inside the zone counts as a takeoff for T8 only if its first truth
-    /// altitude is at or below this, feet.
-    pub takeoff_alt_ft: i32,
 }
 
 impl Default for PresenceConfig {
@@ -86,7 +83,6 @@ impl Default for PresenceConfig {
         PresenceConfig {
             grid_ms: 5_000,
             window_ms: 30_000,
-            takeoff_alt_ft: 2_000,
         }
     }
 }
@@ -101,12 +97,27 @@ fn has_within(times: &[i64], t: i64, window: i64) -> bool {
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PresenceParts {
+    /// Grid points with usable truth (the denominator of every other count here).
+    pub n_usable: u64,
+    /// Grid points with no usable truth, by reason (`NoTruth as usize`).
+    pub n_failed: [u64; NO_TRUTH_COUNT],
+    /// Legs with no usable truth at any grid point: neither in nor out of the zone is known.
+    pub no_usable_truth: u64,
     pub n_in: u64,
     pub n_present: u64,
     pub n_unassoc: u64,
     /// `(index of the leg in the truth legs, delay in seconds)`, in leg order.
     pub delays: Vec<(usize, f64)>,
-    pub started_inside: u64,
+    /// Legs that begin inside the zone, left out of T8 because they have no observed takeoff:
+    /// first seen airborne in the zone, never airborne, or no ground indication in the reports.
+    pub first_seen_airborne: u64,
+    pub never_airborne: u64,
+    pub no_ground_report: u64,
+    /// Observed takeoffs whose position is not in the zone (or has no usable truth).
+    pub takeoff_outside_zone: u64,
+    /// `(index of the leg, ms)`: how long before the first airborne report the takeoff may have
+    /// been, for the legs in `delays` that were measured from a takeoff.
+    pub takeoff_gaps_ms: Vec<(usize, i64)>,
     pub never_zone: u64,
     pub never_tracked: u64,
     /// Entries whose first associated position is at or before the zone entry.
@@ -115,11 +126,20 @@ pub struct PresenceParts {
 
 /// Adds `b` to `a`.
 pub fn presence_add(a: &mut PresenceParts, b: PresenceParts) {
+    a.n_usable += b.n_usable;
+    for (x, y) in a.n_failed.iter_mut().zip(b.n_failed) {
+        *x += y;
+    }
+    a.no_usable_truth += b.no_usable_truth;
     a.n_in += b.n_in;
     a.n_present += b.n_present;
     a.n_unassoc += b.n_unassoc;
     a.delays.extend(b.delays);
-    a.started_inside += b.started_inside;
+    a.first_seen_airborne += b.first_seen_airborne;
+    a.never_airborne += b.never_airborne;
+    a.no_ground_report += b.no_ground_report;
+    a.takeoff_outside_zone += b.takeoff_outside_zone;
+    a.takeoff_gaps_ms.extend(b.takeoff_gaps_ms);
     a.never_zone += b.never_zone;
     a.never_tracked += b.never_tracked;
     a.established_before_entry += b.established_before_entry;
@@ -158,41 +178,75 @@ pub fn presence_parts(
         }
         let ts = times.get(&l.addr);
         let mut t_in: Option<(i64, bool)> = None;
+        let mut usable = 0u64;
         let mut t = l.start_ms;
         while t <= l.end_ms {
-            if let Ok(s) = (truth.query)(l.addr, t) {
-                if (env.in_zone)(s.lat, s.lon) {
-                    p.n_in += 1;
-                    match ts {
-                        None => p.n_unassoc += 1,
-                        Some(v) => {
-                            if has_within(v, t, cfg.window_ms) {
-                                p.n_present += 1;
+            match (truth.query)(l.addr, t) {
+                Err(e) => {
+                    if let Some(c) = p.n_failed.get_mut(e as usize) {
+                        *c += 1;
+                    }
+                }
+                Ok(s) => {
+                    usable += 1;
+                    p.n_usable += 1;
+                    if (env.in_zone)(s.lat, s.lon) {
+                        p.n_in += 1;
+                        match ts {
+                            None => p.n_unassoc += 1,
+                            Some(v) => {
+                                if has_within(v, t, cfg.window_ms) {
+                                    p.n_present += 1;
+                                }
                             }
                         }
-                    }
-                    if t_in.is_none() {
-                        let low = s.baro_alt_ft.is_some_and(|a| a <= cfg.takeoff_alt_ft);
-                        t_in = Some((t, t == l.start_ms && !low));
+                        if t_in.is_none() {
+                            t_in = Some((t, t == l.start_ms));
+                        }
                     }
                 }
             }
             t += cfg.grid_ms.max(1);
         }
+        if usable == 0 {
+            p.no_usable_truth += 1;
+            continue;
+        }
+        let first_after = |from: i64| {
+            ts.and_then(|v| {
+                let k = v.partition_point(|&x| x < from);
+                v.get(k).copied().filter(|&x| x <= l.end_ms)
+            })
+        };
         match t_in {
             None => p.never_zone += 1,
-            Some((_, true)) => p.started_inside += 1,
-            Some((tin, false)) => {
-                let first = ts.and_then(|v| {
-                    let k = v.partition_point(|&x| x < l.start_ms);
-                    v.get(k).copied().filter(|&x| x <= l.end_ms)
-                });
-                match first {
-                    Some(f) if f <= tin => p.established_before_entry += 1,
-                    Some(f) => p.delays.push((li, (f - tin) as f64 / 1000.0)),
-                    None => p.never_tracked += 1,
+            // The leg begins inside the zone: only an observed takeoff is a start to measure from.
+            Some((_, true)) => match l.start {
+                LegStart::FirstSeenAirborne => p.first_seen_airborne += 1,
+                LegStart::NeverAirborne => p.never_airborne += 1,
+                LegStart::Unknown => p.no_ground_report += 1,
+                LegStart::Takeoff { t_ms, gap_ms } => {
+                    let in_zone =
+                        (truth.query)(l.addr, t_ms).is_ok_and(|s| (env.in_zone)(s.lat, s.lon));
+                    if !in_zone {
+                        p.takeoff_outside_zone += 1;
+                    } else {
+                        match first_after(l.start_ms) {
+                            Some(f) if f <= t_ms => p.established_before_entry += 1,
+                            Some(f) => {
+                                p.delays.push((li, (f - t_ms) as f64 / 1000.0));
+                                p.takeoff_gaps_ms.push((li, gap_ms));
+                            }
+                            None => p.never_tracked += 1,
+                        }
+                    }
                 }
-            }
+            },
+            Some((tin, false)) => match first_after(l.start_ms) {
+                Some(f) if f <= tin => p.established_before_entry += 1,
+                Some(f) => p.delays.push((li, (f - tin) as f64 / 1000.0)),
+                None => p.never_tracked += 1,
+            },
         }
     }
     p
@@ -206,6 +260,19 @@ pub fn presence_results(
     p.delays.sort_by_key(|d| d.0);
     let delays: Vec<f64> = p.delays.iter().map(|d| d.1).collect();
     let mut r7 = new_result("T7", "presence in the zone", "share");
+    let failed: u64 = p.n_failed.iter().sum();
+    let total = p.n_usable + failed;
+    r7.scalars.push(("truth_grid_points".into(), total as f64));
+    r7.scalars
+        .push(("truth_grid_points_usable".into(), p.n_usable as f64));
+    for (n, c) in NO_TRUTH_NAMES.iter().zip(p.n_failed.iter()) {
+        r7.scalars.push((
+            format!("truth_grid_points_failed_{}", n.replace(' ', "_")),
+            *c as f64,
+        ));
+    }
+    r7.scalars
+        .push(("legs_no_usable_truth".into(), p.no_usable_truth as f64));
     r7.scalars
         .push(("truth_grid_points_in_zone".into(), p.n_in as f64));
     r7.scalars
@@ -227,6 +294,11 @@ pub fn presence_results(
         cfg.grid_ms / 1000,
         cfg.window_ms / 1000
     ));
+    r7.notes.push(format!(
+        "presence is conditional on usable truth: {} of {} grid points had it ({} failed, by reason above); \
+         a leg with no usable truth at any point is counted as such, not as never in the zone",
+        p.n_usable, total, failed
+    ));
     let mut r8 = new_result(
         "T8",
         "initiation delay (first ERAM position minus zone entry)",
@@ -237,9 +309,35 @@ pub fn presence_results(
         stats: crate::stats::stats_of(&delays),
     }];
     r8.scalars.push((
-        "legs_starting_inside_zone_not_a_takeoff".into(),
-        p.started_inside as f64,
+        "legs_first_seen_airborne_in_zone".into(),
+        p.first_seen_airborne as f64,
     ));
+    r8.scalars.push((
+        "legs_starting_inside_zone_never_airborne".into(),
+        p.never_airborne as f64,
+    ));
+    r8.scalars.push((
+        "legs_starting_inside_zone_no_ground_report".into(),
+        p.no_ground_report as f64,
+    ));
+    r8.scalars
+        .push(("takeoffs_not_in_zone".into(), p.takeoff_outside_zone as f64));
+    r8.scalars
+        .push(("legs_no_usable_truth".into(), p.no_usable_truth as f64));
+    r8.scalars.push((
+        "legs_measured_from_a_takeoff".into(),
+        p.takeoff_gaps_ms.len() as f64,
+    ));
+    r8.scalars.push((
+        "takeoff_time_uncertainty_s_max".into(),
+        p.takeoff_gaps_ms.iter().map(|g| g.1).max().unwrap_or(0) as f64 / 1000.0,
+    ));
+    r8.notes.push(
+        "a takeoff is the first airborne ADS-B report after a ground report; the true takeoff lies \
+         up to the leg's gap earlier, so a takeoff-based delay is a lower bound within \
+         takeoff_time_uncertainty_s_max"
+            .into(),
+    );
     r8.scalars
         .push(("legs_never_in_zone".into(), p.never_zone as f64));
     r8.scalars

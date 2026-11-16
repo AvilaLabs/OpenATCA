@@ -13,6 +13,8 @@
 
 use std::path::PathBuf;
 
+use crate::record::check_feed_label;
+
 /// Default total recording cap: 2 GiB.
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Default size at which a recording file rotates: 256 MiB.
@@ -161,6 +163,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             .to_string(),
         Source::Stdin => "stdin".to_string(),
     });
+    check_feed_label(&feed).map_err(|e| format!("--feed: {e}"))?;
     Ok(Command::Live(Live {
         source,
         feed,

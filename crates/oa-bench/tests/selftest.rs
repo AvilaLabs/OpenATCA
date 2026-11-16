@@ -184,7 +184,7 @@ fn presence_and_initiation_delay_match_the_construction() {
     assert_eq!(row(t8, "all").n, 3);
     assert!((row(t8, "all").mean - inj.init_delay_s).abs() <= 5.1);
     assert_eq!(scalar(t8, "legs_never_in_zone"), 3.0);
-    assert_eq!(scalar(t8, "legs_starting_inside_zone_not_a_takeoff"), 4.0);
+    assert_eq!(scalar(t8, "legs_first_seen_airborne_in_zone"), 4.0);
 }
 
 // REQ: OA-BENCH-014
@@ -341,6 +341,7 @@ fn the_callsign_gate_needs_80_percent_within_3_nm_and_1000_ft() {
         start_ms: T0_MS,
         end_ms: T0_MS + 1_000_000,
         callsign: Some(*b"GATE01\0\0"),
+        start: Default::default(),
     }];
     let q = |a: u32, t: i64| {
         if a == 0xABC001 {
@@ -441,6 +442,7 @@ fn truth_that_is_missing_is_counted_by_reason_and_never_filled_in() {
         start_ms: T0_MS,
         end_ms: T0_MS + 1_000_000,
         callsign: None,
+        start: Default::default(),
     }];
     let q = |_: u32, t: i64| match (t - T0_MS) / 12_000 {
         0 => Err(NoTruth::NoNearbyReport),
@@ -526,6 +528,7 @@ fn the_address_hint_associates_when_no_aircraft_address_is_given_and_is_its_own_
         start_ms: T0_MS,
         end_ms: T0_MS + 1_000_000,
         callsign: Some(*b"HINT01\0\0"),
+        start: Default::default(),
     }];
     let q = |a: u32, t: i64| {
         if a == 0xABC001 {

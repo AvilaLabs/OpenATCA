@@ -82,6 +82,7 @@ fn truth_legs(legs: &[LegPath]) -> Vec<TruthLeg> {
             start_ms: l.0,
             end_ms: l.1,
             callsign: None,
+            start: Default::default(),
         })
         .collect()
 }

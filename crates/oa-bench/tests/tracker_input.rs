@@ -174,12 +174,14 @@ fn the_publication_interval_is_never_taken_across_two_trips_of_one_aircraft() {
             start_ms: 0,
             end_ms: 9_000,
             callsign: None,
+            start: Default::default(),
         },
         oa_bench::truth::TruthLeg {
             addr: 0xA0_0001,
             start_ms: 309_000,
             end_ms: 318_000,
             callsign: None,
+            start: Default::default(),
         },
     ];
     let by_leg = legacy_from_track_samples_by_leg(&view(&c), &legs).unwrap();
@@ -197,6 +199,7 @@ fn the_publication_interval_is_never_taken_across_two_trips_of_one_aircraft() {
         start_ms: 100_000,
         end_ms: 200_000,
         callsign: None,
+        start: Default::default(),
     }];
     let un = legacy_from_track_samples_by_leg(&view(&c), &other).unwrap();
     assert_eq!(un.flights.gufi.len(), 1);
@@ -214,12 +217,14 @@ fn scoring_track_samples_does_not_count_the_gap_between_two_trips_as_a_publicati
             start_ms: 0,
             end_ms: 9_000,
             callsign: None,
+            start: Default::default(),
         },
         TruthLeg {
             addr: 0xA0_0001,
             start_ms: 309_000,
             end_ms: 318_000,
             callsign: None,
+            start: Default::default(),
         },
     ];
     let q = |_: u32, _: i64| Err(NoTruth::OutsideLegs);

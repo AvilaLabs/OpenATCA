@@ -94,6 +94,31 @@ const MAX_STAMP_SKEW_SECS: u64 = 3600;
 /// Most recordings that can be opened in one UTC second (the four-digit name counter).
 const MAX_SAME_SECOND: u32 = 9999;
 
+/// Longest feed label, characters.
+pub const MAX_FEED_LABEL_LEN: usize = 64;
+
+/// A feed label becomes part of every recording's file name, so it must be one safe filename
+/// component: 1 to [`MAX_FEED_LABEL_LEN`] ASCII letters, digits, `-`, `_` and `.`, not starting
+/// with `.` (no separator, no `..`, no hidden file, no NUL).
+pub fn check_feed_label(label: &str) -> Result<(), String> {
+    if label.is_empty() || label.len() > MAX_FEED_LABEL_LEN {
+        return Err(format!(
+            "a feed label is 1 to {MAX_FEED_LABEL_LEN} characters, got {}",
+            label.len()
+        ));
+    }
+    if label.starts_with('.') {
+        return Err("a feed label does not start with '.'".into());
+    }
+    if !label
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err("a feed label is ASCII letters, digits, '-', '_' and '.' only".into());
+    }
+    Ok(())
+}
+
 fn is_recording(p: &Path) -> bool {
     p.file_name()
         .and_then(|n| n.to_str())
@@ -127,6 +152,7 @@ impl Recorder {
         format: Format,
         opener: Opener,
     ) -> io::Result<Recorder> {
+        check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         fs::create_dir_all(dir)?;
         let mut total = 0u64;
         for e in fs::read_dir(dir)? {

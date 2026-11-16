@@ -737,7 +737,8 @@ mod tests {
         let mut l = list_new(ListCaps {
             lines: lines.len(),
             ..big()
-        });
+        })
+        .unwrap();
         for &(x0, y0, x1, y1) in lines {
             push_line_w(&mut l, (x0, y0), (x1, y1), TEXT, 0, width).unwrap();
         }
@@ -906,7 +907,7 @@ mod tests {
             let cy = range(&mut s, -150 * 16, (h + 150) * 16) as i32;
             let r = range(&mut s, 0, 220 * 16) as i32;
             let mk = |dx: i32, dy: i32| {
-                let mut l = list_new(big());
+                let mut l = list_new(big()).unwrap();
                 push_circle(&mut l, (cx + dx, cy + dy), r, TEXT, 0).unwrap();
                 l
             };
@@ -927,7 +928,7 @@ mod tests {
             }
         }
         // Huge radii: an arc crossing the frame, and circles that miss it entirely.
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         push_circle(
             &mut l,
             (24 * 16, 18 * 16 + i32::MAX / 4),
@@ -948,7 +949,7 @@ mod tests {
     // REQ: OA-DSP-009
     #[test]
     fn rectangles_fill_pixels_whose_centres_are_inside_and_clip() {
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         push_rect(&mut l, (8 * 16, 3 * 16), (12 * 16, 5 * 16), TEXT, 0).unwrap();
         // Corners given in the other order, and half a pixel in: pixel centres decide.
         push_rect(
@@ -996,7 +997,7 @@ mod tests {
             let mut s = 0xDEAD_BEEF_CAFE_F00D_u64;
             let mut all = Vec::new();
             for frame in 0..120 {
-                let mut l = list_new(big());
+                let mut l = list_new(big()).unwrap();
                 let coord = |s: &mut u64| -> i32 {
                     match xorshift(s) % 6 {
                         0 => i32::MIN,
@@ -1083,7 +1084,7 @@ mod tests {
             to_hex(&d)
         };
         // A fan of lines in sixteen directions, a rectangle, a circle and a polyline.
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         let (cx, cy) = (32 * 16, 24 * 16);
         for (i, (dx, dy)) in [
             (30, 0),
@@ -1126,7 +1127,7 @@ mod tests {
             "42328fff6fd1a21230b6dc56e10db03cf7e4b28037c0d06a28b87755e97e445a"
         );
         // Text: every glyph class, three sizes, three alignments.
-        let mut t = list_new(big());
+        let mut t = list_new(big()).unwrap();
         push_text(
             &mut t,
             (4 * 16, 4 * 16),
@@ -1202,7 +1203,7 @@ mod tests {
             "bb3de42bf3290d28e58605a3484f7d92aa603e732f0a60bb21ad902689fd74d0"
         );
         // Layers: a later layer covers an earlier one whatever the push order; clipped shapes.
-        let mut c = list_new(big());
+        let mut c = list_new(big()).unwrap();
         push_rect(&mut c, (8 * 16, 8 * 16), (40 * 16, 40 * 16), 2, 3).unwrap();
         push_rect(&mut c, (0, 0), (30 * 16, 30 * 16), 3, 1).unwrap();
         push_line(&mut c, (-20 * 16, -20 * 16), (70 * 16, 60 * 16), 1, 2).unwrap();
@@ -1217,7 +1218,7 @@ mod tests {
     // REQ: OA-DSP-010
     #[test]
     fn the_picture_depends_only_on_the_list_not_on_what_the_buffer_held() {
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         push_text(&mut l, (16, 16), 12, ALIGN_LEFT, 1, 2, "DETERMINISM 0123").unwrap();
         push_line(&mut l, (0, 0), (60 * 16, 30 * 16), 3, 1).unwrap();
         push_circle(&mut l, (30 * 16, 15 * 16), 12 * 16, 4, 0).unwrap();
@@ -1289,7 +1290,7 @@ mod tests {
     // REQ: OA-DSP-024
     #[test]
     fn two_pixel_polylines_and_goldens_and_refused_widths() {
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         begin_polyline_w(&mut l, 2, 1, 2).unwrap();
         for (x, y) in [(3, 3), (30, 8), (50, 40), (10, 44), (3, 3)] {
             push_vertex(&mut l, x * 16 + 3, y * 16 + 11).unwrap();
@@ -1329,7 +1330,7 @@ mod tests {
             "0af409950f76dc896b0fd5a15e2d753af1df8348b7aae218b5b3fb292d481e9e"
         );
         // A width other than 1 or 2 is refused when pushed and when found in a list.
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         assert_eq!(
             push_line_w(&mut bad, (0, 0), (1, 1), 1, 0, 3),
             Err(DisplayError::BadWidth(3))
@@ -1338,7 +1339,7 @@ mod tests {
             push_line_w(&mut bad, (0, 0), (1, 1), 1, 0, 0),
             Err(DisplayError::BadWidth(0))
         );
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         begin_polyline_w(&mut bad, 1, 0, 2).unwrap();
         bad.polylines.width[0] = 9;
         assert!(matches!(
@@ -1350,7 +1351,7 @@ mod tests {
     // REQ: OA-DSP-012
     #[test]
     fn layers_draw_in_ascending_order_whatever_the_push_order() {
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         push_rect(&mut l, (0, 0), (10 * 16, 10 * 16), 2, 5).unwrap();
         push_rect(&mut l, (0, 0), (10 * 16, 10 * 16), 3, 1).unwrap();
         let mut f = fb(12, 12, 0);
@@ -1361,7 +1362,7 @@ mod tests {
     // REQ: OA-DSP-013
     #[test]
     fn the_frame_hash_ignores_stride_and_changes_with_any_pixel() {
-        let mut l = list_new(big());
+        let mut l = list_new(big()).unwrap();
         push_text(&mut l, (16, 16), 12, ALIGN_LEFT, 1, 0, "HASH").unwrap();
         push_circle(&mut l, (20 * 16, 20 * 16), 8 * 16, 4, 0).unwrap();
         let mut a = fb(48, 32, 0);
@@ -1384,7 +1385,7 @@ mod tests {
     // REQ: OA-DSP-013
     #[test]
     fn unusable_frames_are_refused() {
-        let l = list_new(big());
+        let l = list_new(big()).unwrap();
         let ok = FrameSpec {
             width: 8,
             height: 8,
@@ -1421,7 +1422,7 @@ mod tests {
     #[test]
     fn a_faulted_or_inconsistent_list_is_refused_and_the_buffer_left_alone() {
         let mut f = fb(16, 16, 0);
-        let mut l = list_new(ListCaps { lines: 1, ..big() });
+        let mut l = list_new(ListCaps { lines: 1, ..big() }).unwrap();
         push_line(&mut l, (0, 0), (100, 100), 1, 0).unwrap();
         assert!(push_line(&mut l, (0, 0), (100, 100), 1, 0).is_err());
         assert_eq!(
@@ -1433,35 +1434,35 @@ mod tests {
             "a refused frame wrote pixels"
         );
         // Public columns edited by hand are validated, not trusted.
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         push_line(&mut bad, (0, 0), (1, 1), 1, 0).unwrap();
         bad.lines.colour[0] = 200;
         assert!(matches!(
             render(&bad, &f.spec, &mut f.buf),
             Err(RenderError::BadList(_))
         ));
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         push_line(&mut bad, (0, 0), (1, 1), 1, 0).unwrap();
         bad.lines.x1.pop();
         assert!(matches!(
             render(&bad, &f.spec, &mut f.buf),
             Err(RenderError::BadList(_))
         ));
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         begin_polyline(&mut bad, 1, 0).unwrap();
         bad.polylines.len[0] = 5;
         assert!(matches!(
             render(&bad, &f.spec, &mut f.buf),
             Err(RenderError::BadList(_))
         ));
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         push_text(&mut bad, (0, 0), 12, 0, 1, 0, "\u{2191}").unwrap();
         bad.texts.len[0] = 1;
         assert!(matches!(
             render(&bad, &f.spec, &mut f.buf),
             Err(RenderError::BadList(_))
         ));
-        let mut bad = list_new(big());
+        let mut bad = list_new(big()).unwrap();
         push_circle(&mut bad, (0, 0), 5, 1, 0).unwrap();
         bad.circles.r[0] = -1;
         assert!(matches!(
@@ -1475,7 +1476,7 @@ mod tests {
     #[test]
     fn text_is_anchored_by_its_alignment_and_unknown_characters_show_a_box() {
         let extent = |align: u8, s: &str| {
-            let mut l = list_new(big());
+            let mut l = list_new(big()).unwrap();
             push_text(&mut l, (100 * 16, 20 * 16), 12, align, 1, 0, s).unwrap();
             let mut f = fb(200, 40, 0);
             draw(&mut f, &l);

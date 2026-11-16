@@ -9,8 +9,11 @@
 //!   [`AirspaceLookup::duplicate_fixes`] and identifiers with several places in
 //!   [`AirspaceLookup::ambiguous_fixes`]. No place is ever picked by row order.
 //! * Airports: the airport points by ICAO identifier and by FAA identifier; field elevation from
-//!   the point, thresholds from the runway-threshold points whose scope is the airport. An
-//!   airport with no published elevation is not offered (nothing is made up).
+//!   the point, thresholds from the runway-threshold points whose scope is the airport and whose
+//!   region is the airport's (an airport is its identifier plus its ICAO region). An airport with
+//!   no published elevation is not offered (nothing is made up). An identifier that names
+//!   airports of more than one region is not answered (the caller gives no region), counted in
+//!   [`AirspaceLookup::ambiguous_airports`]; no airport is picked by row order.
 //! * Zone: the model's own ARTCC (`Meta::artcc`), its HIGH and LOW boundaries together.
 //! * Unit: the ARTCC boundary containing the point (any ARTCC in the model, HIGH or LOW), as the
 //!   ARTCC identifier in bytes 0 to 3 with the sector bytes zero. A point inside the areas of
@@ -40,12 +43,21 @@ pub struct Unit {
     area: Area,
 }
 
+/// One airport under one of its identifiers.
+// A7.2: cold struct, size guard waived
+struct AirportEntry {
+    /// The airport's ICAO region, empty when the model gives none.
+    region: String,
+    data: AirportRef,
+}
+
 /// Lookups built once from a model.
 // A7.2: cold struct, size guard waived
 pub struct AirspaceLookup {
     /// Every distinct place of an identifier, sorted by (latitude, longitude).
     fixes: BTreeMap<String, Vec<(f64, f64)>>,
-    airports: BTreeMap<String, AirportRef>,
+    /// Every airport an identifier names, one entry per (airport, region).
+    airports: BTreeMap<String, Vec<AirportEntry>>,
     units: Vec<Unit>,
     zone: Option<usize>,
     /// Ambiguous positions examined, by the pair of facilities whose areas both contain them.
@@ -56,6 +68,8 @@ pub struct AirspaceLookup {
     pub duplicate_fixes: usize,
     /// Fix identifiers that name more than one distinct place.
     pub ambiguous_fixes: usize,
+    /// Airport identifiers that name airports of more than one ICAO region.
+    pub ambiguous_airports: usize,
     /// ARTCC boundaries that were not a usable polygon and were left out.
     pub unusable_boundaries: usize,
 }
@@ -65,8 +79,15 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
     let p = &m.points;
     let mut fixes: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     let mut duplicate_fixes = 0usize;
-    let mut airports: BTreeMap<String, AirportRef> = BTreeMap::new();
-    let mut thresholds: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut airports: BTreeMap<String, Vec<AirportEntry>> = BTreeMap::new();
+    // Thresholds by (airport identifier, airport region).
+    let mut thresholds: BTreeMap<(String, String), Vec<(f64, f64)>> = BTreeMap::new();
+    let region_of = |raw: u32| {
+        at(&p.region, raw)
+            .map(|r| str_or_empty(&m.strings, r))
+            .unwrap_or("")
+            .to_string()
+    };
     for i in 0..p.kind.len() {
         let raw = i as u32;
         let (Some(kind), Some(lat), Some(lon), Some(ident)) = (
@@ -98,7 +119,7 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
             point_kind::THRESHOLD => {
                 if let Some(s) = at(&p.scope, raw).filter(|s| s.get() != NONE_U32) {
                     thresholds
-                        .entry(str_or_empty(&m.strings, s).to_string())
+                        .entry((str_or_empty(&m.strings, s).to_string(), region_of(raw)))
                         .or_default()
                         .push(pos);
                 }
@@ -113,38 +134,45 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
                     thresholds: Vec::new(),
                     altimeters: Vec::new(),
                 };
-                airports
-                    .entry(ident.to_string())
-                    .or_insert_with(|| r.clone());
+                let region = region_of(raw);
+                let mut names = vec![ident.to_string()];
                 if let Some(alt) = at(&p.alt_ident, raw).filter(|s| s.get() != NONE_U32) {
-                    airports
-                        .entry(str_or_empty(&m.strings, alt).to_string())
-                        .or_insert(r);
+                    names.push(str_or_empty(&m.strings, alt).to_string());
+                }
+                for name in names {
+                    airports.entry(name).or_default().push(AirportEntry {
+                        region: region.clone(),
+                        data: r.clone(),
+                    });
                 }
             }
             _ => {}
         }
     }
-    // Thresholds are scoped by the airport's `ident` (the ICAO identifier where there is one);
-    // the FAA identifier entry of the same airport gets the same list.
+    // Thresholds are scoped by the airport's `ident` (the ICAO identifier where there is one) and
+    // carry its region; the FAA identifier entry of the same airport gets the same list.
     for i in 0..p.kind.len() {
         let raw = i as u32;
         if at(&p.kind, raw) != Some(point_kind::AIRPORT) {
             continue;
         }
         let ident = at(&p.ident, raw).map_or("", |s| str_or_empty(&m.strings, s));
-        let Some(list) = thresholds.get(ident) else {
+        let region = region_of(raw);
+        let Some(list) = thresholds.get(&(ident.to_string(), region.clone())) else {
             continue;
         };
         let alt = at(&p.alt_ident, raw)
             .filter(|s| s.get() != NONE_U32)
             .map(|s| str_or_empty(&m.strings, s));
         for name in std::iter::once(ident).chain(alt) {
-            if let Some(a) = airports.get_mut(name) {
-                a.thresholds = list.clone();
+            for e in airports.get_mut(name).into_iter().flatten() {
+                if e.region == region {
+                    e.data.thresholds = list.clone();
+                }
             }
         }
     }
+    let ambiguous_airports = airports.values().filter(|v| v.len() > 1).count();
     // ARTCC boundaries, grouped by facility.
     let b = &m.boundaries;
     let mut rings: BTreeMap<String, Vec<Vec<LatLon>>> = BTreeMap::new();
@@ -198,6 +226,7 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
         artcc: m.meta.artcc.clone(),
         duplicate_fixes,
         ambiguous_fixes,
+        ambiguous_airports,
         unusable_boundaries: unusable,
     }
 }
@@ -229,12 +258,31 @@ impl AirspaceLookup {
         self.fixes_of(name).cloned().unwrap_or_default()
     }
 
-    /// Airport identifier (ICAO or FAA) to its reference data.
+    /// Airport identifier (ICAO or FAA) to its reference data; `None` when unknown or when the
+    /// identifier names more than one airport (another ICAO region).
     pub fn airport(&self, name: &str) -> Option<AirportRef> {
-        self.airports
+        let list = self
+            .airports
             .get(name)
-            .or_else(|| self.airports.get(&norm_name(name)))
-            .cloned()
+            .or_else(|| self.airports.get(&norm_name(name)))?;
+        match list.as_slice() {
+            [only] => Some(only.data.clone()),
+            _ => None,
+        }
+    }
+
+    /// The airport with this identifier (ICAO or FAA) in this ICAO region; `None` when there is
+    /// none or when two airports of that region share the identifier.
+    pub fn airport_in(&self, name: &str, region: &str) -> Option<AirportRef> {
+        let list = self
+            .airports
+            .get(name)
+            .or_else(|| self.airports.get(&norm_name(name)))?;
+        let mut hits = list.iter().filter(|e| e.region == region);
+        match (hits.next(), hits.next()) {
+            (Some(e), None) => Some(e.data.clone()),
+            _ => None,
+        }
     }
 
     /// Whether the point is inside the model's ARTCC.

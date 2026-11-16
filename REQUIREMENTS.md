@@ -306,6 +306,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   --allow-cycle-mismatch`) it builds and the model carries the mismatch text (`cycle_override`),
   which is written in the snapshot (format version 4; a snapshot without a mismatch stays version
   3 and byte-identical), shown in the report and listed by the diff.
+- **OA-ASP-073** An airport is its identifier plus its ICAO region everywhere in the build: the airport
+  registry, CIFP runway, localizer, terminal waypoint, terminal NDB and procedure joins, airport references in
+  procedure legs, the order of procedures and `find_proc`. Two airports with one identifier in two regions keep
+  their own runways and procedures.
 
 
 ### Traceability (oa-trace)
@@ -651,6 +655,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-178** `--duration` is refused above 10 years (`MAX_DURATION_SECS`, 315 360 000 s) and
   `--summary-every` above one day (`MAX_SUMMARY_SECS`, 86 400 s), including `u64::MAX`, at parse time; at the
   limits a run does not panic. Every `Instant` offset in the binary is checked.
+- **OA-FEED-179** A feed label is one safe filename component: 1 to 64 ASCII letters, digits, `-`, `_` and `.`,
+  not starting with `.`. `--feed` and a label derived from the env file name are refused at parse time, and
+  `Recorder::open` refuses one again before touching the directory.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1028,6 +1035,12 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   nothing extra (the default HIDDEN line already runs past 800 pixels). The legend stays in its fixed strip (it is marked, not wrapped).
 - **OA-DSP-035** A command-line number of `oa-scope render` (centre, range, thresholds) that is NaN, infinite,
   or for the range outside 0.05 to 20000 NM is a usage error when it is parsed, not a value passed on to the view.
+- **OA-DSP-036** A list, scene or scratch whose size is derived from the model or the screen is checked in
+  128-bit arithmetic against a named display limit before anything is allocated: `MAX_LIST_ROWS` (2^24 rows per
+  table), `MAX_LIST_TEXT_BYTES` (2^26) and `MAX_GRID_BOXES` (2^22 label boxes). A request above it is
+  `DisplayError::TooLarge`, not an allocation.
+- **OA-DSP-037** `build_scene` refuses a view whose range thresholds are NaN, infinite or negative, or whose
+  projection has a non-finite constant or an empty screen, with `DisplayError::BadView`.
 
 ### Replay and flight state (oa-replay)
 
@@ -2682,6 +2695,20 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   90 degrees of longitude is refused (scalar `refused_span` is 1, no slope), not fitted to an arbitrary anchor.
 - **OA-BENCH-124** `stats_of` keeps in the mean what scaling by a power of two rounds away from values too small
   for the scaled range: `[1e308, -1e308, 1e-300]` has mean 3.33e-301, equal to the exact sum over the count.
+- **OA-BENCH-125** A takeoff in T8 is an observed event: the first airborne ADS-B report after a ground report
+  inside the truth leg (`LegStart::Takeoff`, with the gap back to the last ground report as the stated
+  uncertainty, `takeoff_time_uncertainty_s_max`). A leg that begins inside the zone is measured from its takeoff;
+  one whose first stated ground state is airborne is excluded and counted as `legs_first_seen_airborne_in_zone`,
+  one never airborne as `legs_starting_inside_zone_never_airborne`, one with no ground indication as
+  `legs_starting_inside_zone_no_ground_report`. No altitude cutoff is used.
+- **OA-BENCH-126** T7 counts every grid point whose truth query failed, by reason (`truth_grid_points_failed_*`),
+  with the total and the usable points, and says that presence is conditional on usable truth; a leg with no usable
+  truth at any point is counted as `legs_no_usable_truth`, not as never in the zone.
+- **OA-BENCH-127** A pair whose truth ground speed is below 30 kt is left out of the heading statistics with a
+  counted reason, `T3-heading: truth speed below 30 kt`.
+- **OA-BENCH-128** The airspace lookups keep airports of two ICAO regions that share an identifier apart:
+  thresholds join the airport of their own region, and an identifier naming airports of more than one region is
+  not answered and is counted (`ambiguous_airports`).
 
 ## Winds aloft (oa-wind)
 

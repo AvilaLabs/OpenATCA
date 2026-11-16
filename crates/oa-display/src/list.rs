@@ -14,6 +14,12 @@
 use crate::palette::PALETTE_LEN;
 use std::fmt;
 
+/// Most rows any one table of a display list may be given. A table of 2^24 rows of 4-byte
+/// values is 64 MB and a full list stays near 1 GB; the real ZAU model asks for a small fraction
+/// of this, so a request above it is a malformed or hostile model, not a map.
+pub const MAX_LIST_ROWS: usize = 1 << 24;
+/// Most bytes the string table of a display list may be given (64 MB).
+pub const MAX_LIST_TEXT_BYTES: usize = 1 << 26;
 /// Number of layers. Layers draw in ascending order.
 pub const MAX_LAYERS: usize = 16;
 /// Largest text size, cap height in pixels.
@@ -43,6 +49,14 @@ pub enum DisplayError {
     NoPolyline,
     /// The view configuration is not usable; the text says which part.
     BadView(&'static str),
+    /// A table or buffer derived from the input would be larger than its display limit. Nothing
+    /// was allocated.
+    TooLarge {
+        what: &'static str,
+        /// The size asked for (saturated at `u128::MAX`).
+        requested: u128,
+        limit: usize,
+    },
 }
 
 impl fmt::Display for DisplayError {
@@ -59,6 +73,14 @@ impl fmt::Display for DisplayError {
             DisplayError::BadWidth(w) => write!(f, "line width {w} is not 1 or 2"),
             DisplayError::NoPolyline => write!(f, "polyline vertex added with no polyline open"),
             DisplayError::BadView(what) => write!(f, "bad view: {what}"),
+            DisplayError::TooLarge {
+                what,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "{what} would need {requested}, more than the display limit of {limit}"
+            ),
         }
     }
 }
@@ -159,9 +181,37 @@ pub struct DisplayList {
     pub faulted: bool,
 }
 
-/// An empty list with all its capacity allocated.
-pub fn list_new(caps: ListCaps) -> DisplayList {
-    DisplayList {
+/// Checks one derived size against its display limit.
+pub fn check_limit(
+    what: &'static str,
+    requested: u128,
+    limit: usize,
+) -> Result<usize, DisplayError> {
+    match usize::try_from(requested) {
+        Ok(n) if n <= limit => Ok(n),
+        _ => Err(DisplayError::TooLarge {
+            what,
+            requested,
+            limit,
+        }),
+    }
+}
+
+/// An empty list with all its capacity allocated. A capacity above [`MAX_LIST_ROWS`] (or
+/// [`MAX_LIST_TEXT_BYTES`] for the string table) is refused before anything is allocated.
+pub fn list_new(caps: ListCaps) -> Result<DisplayList, DisplayError> {
+    for (what, n) in [
+        ("lines", caps.lines),
+        ("rects", caps.rects),
+        ("circles", caps.circles),
+        ("polylines", caps.polylines),
+        ("polyline vertices", caps.poly_vertices),
+        ("texts", caps.texts),
+    ] {
+        check_limit(what, n as u128, MAX_LIST_ROWS)?;
+    }
+    check_limit("text bytes", caps.text_bytes as u128, MAX_LIST_TEXT_BYTES)?;
+    Ok(DisplayList {
         caps,
         lines: Lines {
             x0: Vec::with_capacity(caps.lines),
@@ -209,7 +259,7 @@ pub fn list_new(caps: ListCaps) -> DisplayList {
         text: String::with_capacity(caps.text_bytes),
         layers_used: 0,
         faulted: false,
-    }
+    })
 }
 
 /// Empties the list for the next frame. Every capacity is kept; nothing is freed or allocated.
@@ -513,7 +563,7 @@ mod tests {
     // REQ: OA-DSP-001
     #[test]
     fn every_primitive_carries_a_colour_and_a_layer() {
-        let mut l = list_new(caps(4));
+        let mut l = list_new(caps(4)).unwrap();
         push_line(&mut l, (0, 1), (2, 3), 4, 5).unwrap();
         push_rect(&mut l, (1, 1), (9, 9), 6, 7).unwrap();
         push_circle(&mut l, (5, 5), 32, 2, 3).unwrap();
@@ -544,7 +594,7 @@ mod tests {
     // REQ: OA-DSP-001
     #[test]
     fn colour_layer_size_and_radius_are_checked() {
-        let mut l = list_new(caps(4));
+        let mut l = list_new(caps(4)).unwrap();
         assert_eq!(
             push_line(&mut l, (0, 0), (1, 1), PALETTE_LEN as u8, 0),
             Err(DisplayError::BadColour(PALETTE_LEN as u8))
@@ -570,7 +620,7 @@ mod tests {
     #[test]
     fn overflow_of_every_table_is_an_error_that_says_so() {
         let full = |table: &'static str, capacity: usize| DisplayError::Full { table, capacity };
-        let mut l = list_new(caps(1));
+        let mut l = list_new(caps(1)).unwrap();
         push_line(&mut l, (0, 0), (1, 1), 0, 0).unwrap();
         assert_eq!(
             push_line(&mut l, (0, 0), (1, 1), 0, 0),
@@ -619,7 +669,7 @@ mod tests {
     // REQ: OA-DSP-003
     #[test]
     fn clearing_keeps_every_capacity() {
-        let mut l = list_new(caps(100));
+        let mut l = list_new(caps(100)).unwrap();
         let before = list_capacities(&l);
         for round in 0..5 {
             list_clear(&mut l);

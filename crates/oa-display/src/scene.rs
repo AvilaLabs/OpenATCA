@@ -69,13 +69,14 @@
 
 use crate::font::{text_width_units, CAP_HEIGHT};
 use crate::list::{
-    begin_polyline_w, list_clear, push_circle, push_line, push_line_w, push_rect, push_text,
-    push_vertex, DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
+    begin_polyline_w, check_limit, list_clear, push_circle, push_line, push_line_w, push_rect,
+    push_text, push_vertex, DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
+    MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
 };
 use crate::palette as pal;
 use crate::project::{
     dlon_e7, in_bbox, project, project_rad, projection_new, ring_radius16, view_bbox, Bbox,
-    Projection, NM_M,
+    Projection, MAX_RANGE_NM, MIN_RANGE_NM, NM_M,
 };
 use oa_airspace::model::{
     bit_get, point_kind, str_or_empty, stratum, unresolved_role, Model, PointIx, POS_NONE,
@@ -406,37 +407,46 @@ pub fn scene_index(m: &Model) -> SceneIndex {
 
 /// Capacities that cannot overflow for `m`: counted from the model, with the worst-case edge
 /// splitting and the fixed furniture (C2). Reaching a capacity is still an error, never a wrap.
-pub fn scene_caps(m: &Model) -> ListCaps {
-    let points = m.points.kind.len();
-    let boundary_vertices: usize = m
+/// Every size is derived in 128-bit arithmetic and checked against [`MAX_LIST_ROWS`] (or
+/// [`MAX_LIST_TEXT_BYTES`]) before it is returned, so a model that asks for more is refused with
+/// [`DisplayError::TooLarge`] and nothing is allocated.
+pub fn scene_caps(m: &Model) -> Result<ListCaps, DisplayError> {
+    let points = m.points.kind.len() as u128;
+    let boundary_vertices: u128 = m
         .boundaries
         .stratum
         .iter()
         .zip(&m.boundaries.vertices)
         .filter(|(s, _)| **s == stratum::ARTCC_HIGH || **s == stratum::ARTCC_LOW)
-        .map(|(_, v)| (v.len as usize).saturating_add(1))
+        .map(|(_, v)| u128::from(v.len) + 1)
         .sum();
-    let ident_bytes: usize = m
+    let ident_bytes: u128 = m
         .points
         .ident
         .iter()
-        .map(|i| str_or_empty(&m.strings, *i).len())
+        .map(|i| str_or_empty(&m.strings, *i).len() as u128)
         .sum();
-    ListCaps {
-        lines: m
-            .airway_legs
-            .from
-            .len()
-            .saturating_mul(SUBDIV_AIRWAY as usize)
-            .saturating_add(points.saturating_mul(4))
-            .saturating_add(FURNITURE),
+    let furniture = FURNITURE as u128;
+    let rows = |what: &'static str, n: u128| check_limit(what, n, MAX_LIST_ROWS);
+    Ok(ListCaps {
+        lines: rows(
+            "airway and symbol lines",
+            (m.airway_legs.from.len() as u128) * u128::from(SUBDIV_AIRWAY) + points * 4 + furniture,
+        )?,
         rects: 1,
-        circles: points.saturating_add(FURNITURE),
-        polylines: m.boundaries.stratum.len().saturating_add(FURNITURE),
-        poly_vertices: boundary_vertices.saturating_mul(SUBDIV_BOUNDARY as usize),
-        texts: points.saturating_add(FURNITURE),
-        text_bytes: ident_bytes.saturating_add(FURNITURE * 32),
-    }
+        circles: rows("circles", points + furniture)?,
+        polylines: rows("polylines", m.boundaries.stratum.len() as u128 + furniture)?,
+        poly_vertices: rows(
+            "boundary polyline vertices",
+            boundary_vertices * u128::from(SUBDIV_BOUNDARY),
+        )?,
+        texts: rows("texts", points + furniture)?,
+        text_bytes: check_limit(
+            "text bytes",
+            ident_bytes + furniture * 32,
+            MAX_LIST_TEXT_BYTES,
+        )?,
+    })
 }
 
 /// Label candidates and the occupancy grid, allocated once by [`scratch_for`] and reused by every
@@ -481,12 +491,24 @@ const CELL_SHIFT: u32 = 10;
 /// Space kept around a label, 1/16 pixel each side.
 pub const LABEL_PAD16: i32 = 2 * 16;
 
-/// A scratch for `m` drawn at the size of `v`.
-pub fn scratch_for(m: &Model, v: &View) -> Scratch {
-    let n = m.points.kind.len();
+/// Most label boxes the occupancy grid of a scratch may hold (a cell of 64 by 64 pixels holds
+/// [`CELL_CAP`]): 4 Mi boxes of 16 bytes is 64 MB, enough for a screen over 26 000 pixels a side.
+pub const MAX_GRID_BOXES: usize = 1 << 22;
+
+/// A scratch for `m` drawn at the size of `v`. A candidate count above [`MAX_LIST_ROWS`] or a
+/// grid above [`MAX_GRID_BOXES`] is refused with [`DisplayError::TooLarge`] before anything is
+/// allocated.
+pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
+    let n = check_limit(
+        "label candidates",
+        m.points.kind.len() as u128,
+        MAX_LIST_ROWS,
+    )?;
     let cols = (v.proj.width as usize).div_ceil(64).max(1);
     let rows = (v.proj.height as usize).div_ceil(64).max(1);
-    Scratch {
+    let cells = (cols as u128) * (rows as u128);
+    check_limit("label grid boxes", cells * CELL_CAP as u128, MAX_GRID_BOXES)?;
+    Ok(Scratch {
         cap: n,
         prio: Vec::with_capacity(n),
         x: Vec::with_capacity(n),
@@ -502,7 +524,7 @@ pub fn scratch_for(m: &Model, v: &View) -> Scratch {
         cell_n: vec![0; cols * rows],
         cell_box: vec![[0; 4]; cols * rows * CELL_CAP],
         bounds: [0; 4],
-    }
+    })
 }
 
 /// Empties the candidates and the grid and sets where labels may lie.
@@ -844,6 +866,64 @@ pub fn ring_step_nm(proj: &Projection) -> f64 {
         .unwrap_or(RING_STEP_MAX_NM)
 }
 
+/// Refuses a view whose numbers would make the build silently wrong: a threshold that is NaN,
+/// infinite or negative (a comparison with NaN hides every layer it governs), a projection whose
+/// range, scale, centre position or radius is not finite or whose screen is empty. A view made
+/// by [`view_new`] passes; one assembled by hand may not.
+fn view_check(v: &View) -> Result<(), DisplayError> {
+    let thresholds = [
+        (
+            v.fix_max_nm,
+            "fix_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.terminal_wpt_max_nm,
+            "terminal_wpt_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.runway_max_nm,
+            "runway_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.non_ifr_airport_max_nm,
+            "non_ifr_airport_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.minor_navaid_max_nm,
+            "minor_navaid_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.label_max_nm,
+            "label_max_nm is not a finite, non-negative number",
+        ),
+        (
+            v.major_label_max_nm,
+            "major_label_max_nm is not a finite, non-negative number",
+        ),
+    ];
+    for (x, why) in thresholds {
+        if !(x.is_finite() && x >= 0.0) {
+            return Err(DisplayError::BadView(why));
+        }
+    }
+    let p = &v.proj;
+    if !p.range_nm.is_finite() || !(MIN_RANGE_NM..=MAX_RANGE_NM).contains(&p.range_nm) {
+        return Err(DisplayError::BadView("range is outside 0.05 to 20000 NM"));
+    }
+    let finite = [p.scale, p.cx16, p.cy16, p.radius_m, p.ecc, p.n, p.c]
+        .iter()
+        .all(|x| x.is_finite());
+    if !finite || p.scale <= 0.0 || p.radius_m <= 0.0 {
+        return Err(DisplayError::BadView(
+            "the projection has a non-finite or non-positive constant",
+        ));
+    }
+    if p.width == 0 || p.height == 0 || p.top_inset >= p.height {
+        return Err(DisplayError::BadView("the screen or its map area is empty"));
+    }
+    Ok(())
+}
+
 /// Clears `l` and builds the static map for `m` as seen through `v`. On an error the list is left
 /// faulted (it overflowed or was misused) and will not be drawn; show a fault, never the frame.
 pub fn build_scene(
@@ -853,6 +933,7 @@ pub fn build_scene(
     v: &View,
     sc: &mut Scratch,
 ) -> Result<SceneStats, DisplayError> {
+    view_check(v)?;
     list_clear(l);
     scratch_clear(sc, &v.proj);
     let mut st = SceneStats::default();

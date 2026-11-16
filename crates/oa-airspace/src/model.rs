@@ -619,7 +619,7 @@ pub struct AirwayLegs {
     pub dogleg: BitSet,
 }
 
-/// Procedures. Sorted by (airport ident, kind, ident).
+/// Procedures. Sorted by (airport ident, airport region, kind, ident).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 // A7.2: cold struct, size guard waived
 pub struct Procs {
@@ -1315,7 +1315,8 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
             .zip(&pr.ident)
             .map(|((ap, k), id)| {
                 let airport = at(&p.ident, ap.0).map_or("", |x| str_or_empty(s, x));
-                (airport, *k, str_or_empty(s, *id))
+                let region = at(&p.region, ap.0).map_or("", |x| str_or_empty(s, x));
+                (airport, region, *k, str_or_empty(s, *id))
             }),
     )?;
     let r = &m.routes;
@@ -1489,8 +1490,14 @@ pub fn find_airway(m: &Model, designator: &str, location: u8) -> Option<AirwayIx
         .map(AirwayIx)
 }
 
-/// Finds a procedure by airport identifier, kind and identifier.
-pub fn find_proc(m: &Model, airport_ident: &str, kind: u8, ident: &str) -> Option<ProcIx> {
+/// Finds a procedure by airport identity (identifier and ICAO region), kind and identifier.
+pub fn find_proc(
+    m: &Model,
+    airport_ident: &str,
+    airport_region: &str,
+    kind: u8,
+    ident: &str,
+) -> Option<ProcIx> {
     let pr = &m.procs;
     pr.kind
         .iter()
@@ -1501,6 +1508,8 @@ pub fn find_proc(m: &Model, airport_ident: &str, kind: u8, ident: &str) -> Optio
                 && str_or_empty(&m.strings, *id) == ident
                 && at(&m.points.ident, ap.0)
                     .is_some_and(|a| str_or_empty(&m.strings, a) == airport_ident)
+                && at(&m.points.region, ap.0)
+                    .is_some_and(|r| str_or_empty(&m.strings, r) == airport_region)
         })
         .and_then(|i| u32::try_from(i).ok())
         .map(ProcIx)
