@@ -77,6 +77,11 @@ pub fn lift_line(s: &mut [i32], p: usize) -> Result<(), J2kError> {
     Ok(())
 }
 
+/// Length of the half-open interval `a..b`; `None` when it runs backwards.
+fn span(a: u32, b: u32) -> Option<usize> {
+    usize::try_from(b.checked_sub(a)?).ok()
+}
+
 /// Runs the inverse transform over `coef` (row stride `stride`), given the rectangles of
 /// resolutions 0 to NL. Resolution NL ends up as the tile-component. Refuses a coefficient set
 /// whose lifting overflows 32 bits.
@@ -87,10 +92,14 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) -> Result<(), J2kE
         let (Some(cur), Some(low)) = (res.get(r), res.get(r - 1)) else {
             return Ok(());
         };
-        let w = (cur.x1 - cur.x0) as usize;
-        let h = (cur.y1 - cur.y0) as usize;
-        let nlx = (low.x1 - low.x0) as usize;
-        let nly = (low.y1 - low.y0) as usize;
+        let (Some(w), Some(h), Some(nlx), Some(nly)) = (
+            span(cur.x0, cur.x1),
+            span(cur.y0, cur.y1),
+            span(low.x0, low.x1),
+            span(low.y0, low.y1),
+        ) else {
+            return Err(J2kError::BadBlock("resolution rectangle"));
+        };
         let px = (cur.x0 & 1) as usize;
         let py = (cur.y0 & 1) as usize;
         line.clear();
@@ -99,9 +108,11 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) -> Result<(), J2kE
         tmp.resize(w.max(h), 0);
         // HOR_SR over every row.
         for y in 0..h {
-            let base = y * stride;
-            let Some(row) = coef.get_mut(base..base + w) else {
-                return Ok(());
+            let Some(base) = y.checked_mul(stride) else {
+                return Err(J2kError::BadBlock("resolution rectangle"));
+            };
+            let Some(row) = base.checked_add(w).and_then(|e| coef.get_mut(base..e)) else {
+                return Err(J2kError::BadBlock("coefficient array"));
             };
             // Interleave: position x is low-pass when its global coordinate is even, and the
             // band index is x / 2 either way; the high band is stored after the nlx low ones.
@@ -125,14 +136,16 @@ pub fn inverse(coef: &mut [i32], stride: usize, res: &[Rect]) -> Result<(), J2kE
             for y in 0..h {
                 let low_y = (y + py) & 1 == 0;
                 let k = if low_y { y / 2 } else { nly + y / 2 };
-                if let (Some(t), Some(&c)) = (tmp.get_mut(y), coef.get(k * stride + x)) {
+                let at = k.checked_mul(stride).and_then(|v| v.checked_add(x));
+                if let (Some(t), Some(&c)) = (tmp.get_mut(y), at.and_then(|a| coef.get(a))) {
                     *t = c;
                 }
             }
             if let Some(t) = tmp.get_mut(..h) {
                 lift_line(t, py)?;
                 for (y, &v) in t.iter().enumerate() {
-                    if let Some(c) = coef.get_mut(y * stride + x) {
+                    let at = y.checked_mul(stride).and_then(|v| v.checked_add(x));
+                    if let Some(c) = at.and_then(|a| coef.get_mut(a)) {
                         *c = v;
                     }
                 }

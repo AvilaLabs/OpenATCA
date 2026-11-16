@@ -381,6 +381,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   directory order), exactly and at any length; the check costs time proportional to the total
   name bytes, not to the square of the entry count: ten thousand 4,096-byte names sharing a
   4,093-byte prefix parse in seconds.
+- **OA-ZIP-062** Offsets read from the archive (the zip64 locator and record, a local header) are added to constants with checked
+  arithmetic: a value that would wrap is a typed truncation error, never a panic or a wrapped offset.
 
 
 ## M1 — SWIM input adapters
@@ -746,6 +748,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   by their expanded text, so an escaped spelling of a FIXM, NAS or XSI URI decodes like the plain one.
 - **OA-FIXM-020** The row capacity needed and the undecoded total count only the children of the
   root that the decoder recognises as `message` elements; a foreign sibling counts for neither.
+- **OA-FIXM-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
+  month; hour 24 is refused.
 
 ### TBFM metering publication (oa-tbfm)
 
@@ -837,6 +841,8 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   working bound applies to the total.
 - **OA-TBFM-024** A namespace URI written with a character reference compares as its expanded text, so the message is
   not refused as foreign.
+- **OA-TBFM-025** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
+  month; hour 24 is refused.
 
 ### TFMS data service (oa-tfms)
 
@@ -928,6 +934,8 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   treats it as a flight of its own, never as part of the flight whose reference is 0.
 - **OA-TFMS-029** A namespace URI written with a character reference compares as its expanded text, so the message is
   not refused as foreign.
+- **OA-TFMS-030** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
+  month; hour 24 is refused.
 
 ## M1 — Controller display
 
@@ -1228,6 +1236,11 @@ the FAA event extension).
   message still decodes.
 - **OA-NOTAM-023** A namespace URI written with a character reference compares as its expanded text, so its elements
   are not counted as another namespace.
+- **OA-NOTAM-024** A referred number and year without a referred series is a valid reference (the local format
+  names the cancelled or replaced NOTAM that way) and leaves the referred series zero; a referred series alone, or
+  a year alone, is still a malformed reference.
+- **OA-NOTAM-025** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
+  month; hour 24 is refused.
 
 - **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
   (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time
@@ -1513,6 +1526,9 @@ frame of their feed has been fed (as the ADS-B table is).
   identity is kept whole in a fixed pool of cells made at init and compared whole on lookup. A new programme whose
   title or element is over 512 bytes, or for which no cell is free, is refused and counted (`refused_long`,
   reported as a full table); two different identities are never merged.
+- **OA-RPL-275** A NOTAM is its series (or `!` and its location when it has none), number and year. A local-format
+  row that cancels or replaces names the referred NOTAM by number and year; the referred series is `!` and the
+  row's own location, so the cancellation removes that office's NOTAM and not another office's of the same number.
 
 - **OA-RPL-180** Frames reach the clock in merged receive order, so a stream whose times run ahead cannot move
   the clock ahead of another stream that still has frames: a stream walking 119 s per frame beside a stream
@@ -2067,6 +2083,8 @@ Manual on Codes (FM 92 GRIB) and NCEP's public GRIB2 documentation. Pure core; n
   templates 4.0 and 4.1). The interval starts at the reference time plus the forecast time.
 - **OA-GRIB-058** `peek_info` reads the first field's description from the first bytes of a message
   (through section 5), so an inventory can be checked against a file without reading its data.
+- **OA-GRIB-059** Section and message lengths that would wrap an offset are added with checked arithmetic: a damaged length at the
+  top of the address space ends the scan or is refused with a typed error, never a panic.
 
 ## JPEG 2000 decoder (oa-j2k)
 
@@ -2123,6 +2141,8 @@ decoder is OA-GRIB-021.
   quantization exponent is at most the sample bits plus the sub-band gain: 0 for LL, 1 for HL and
   LH, 2 for HH), and the inverse lifting uses checked arithmetic, so no coefficient can overflow
   32 bits: an inconsistent stream or an overflowing line is refused with a typed error.
+- **OA-J2K-051** A code-block size or a resolution rectangle that would overflow `w * h`, the flag-array size or a row offset, or that
+  runs backwards, is refused with a typed error; a coefficient array too short for a row is an error, not a silent stop.
 - **OA-J2K-014** The codeword segments a stream could create (code blocks times layers, known from the
   headers) are capped at `MAX_SEGMENTS` (65,536) and the working tables at `MAX_SCRATCH_BYTES` (72 MiB),
   refused before any table is built. Largest real input over 6,068 template 5.40 messages: 58 blocks, 1
@@ -2303,6 +2323,8 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-AWC-022** The scan reads each file with a length check and a capped read (`MAX_FILE_BYTES`, the
   `oa-json` input limit); a larger file is listed as refused whole without being read.
 - **OA-AWC-023** `point_hazards_near` measures the WGS-84 geodesic distance (`oa-geo` inverse), not a spherical one.
+- **OA-AWC-024** The ISO timestamp parser's calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that
+  do not exist in the month (29 February of a non-leap year, day 31 of a 30-day month); hour 24 is refused.
 
 ## M2 — Benchmark truth (oa-truth)
 
@@ -2823,6 +2845,9 @@ by `oa-grib2`: the trajectory predictor's weather input. Pure core, file shell i
   refused for the local subset and the hour equals the whole-file hour; an index written from the
   subset's own headers is accepted and gives the same hour.
 - **OA-WIND-057** Two wanted fields of one message (rows `N.1` and `N.2`) select one byte range.
+- **OA-WIND-058** The day of an ADS-B archive part named `vYYYY.MM.DD` is refused unless the date exists and the year is 1970 to
+  9999 (not a day 1 to 31 in any month).
+- **OA-WIND-059** A percentile rank that is NaN gives no value; it is not read as rank 0.
 
 Encoder and decoder for EUROCONTROL ASTERIX category 021 (ADS-B target reports, Ed 2.7), 048 (monoradar
 target reports, Ed 1.32) and 062 (system track data, Ed 1.21), written from the specifications (Part 1

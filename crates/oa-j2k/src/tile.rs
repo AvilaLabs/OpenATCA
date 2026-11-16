@@ -397,14 +397,23 @@ pub fn work(t: &Tile) -> u64 {
         let (gx0, gy0) = (g(&t.gx0), g(&t.gy0));
         for by in 0..nby {
             for bx in 0..nbx {
-                let blk = (first + by * nbx + bx) as usize;
+                let blk = first
+                    .saturating_add(by.saturating_mul(nbx))
+                    .saturating_add(bx);
+                let blk = usize::try_from(blk).unwrap_or(usize::MAX);
                 let passes = u64::from(t.blocks.passes.get(blk).copied().unwrap_or(0));
                 if passes == 0 {
                     continue;
                 }
-                let w = (((gx0 + bx + 1) * cw).min(bx1)).saturating_sub(((gx0 + bx) * cw).max(bx0));
-                let h = (((gy0 + by + 1) * ch).min(by1)).saturating_sub(((gy0 + by) * ch).max(by0));
-                total = total.saturating_add(passes * w * h);
+                let w = (gx0 + bx + 1)
+                    .saturating_mul(cw)
+                    .min(bx1)
+                    .saturating_sub((gx0 + bx).saturating_mul(cw).max(bx0));
+                let h = (gy0 + by + 1)
+                    .saturating_mul(ch)
+                    .min(by1)
+                    .saturating_sub((gy0 + by).saturating_mul(ch).max(by0));
+                total = total.saturating_add(passes.saturating_mul(w).saturating_mul(h));
             }
         }
     }
@@ -438,16 +447,27 @@ pub fn decode_blocks(
         let (gx0, gy0) = (g(&t.gx0), g(&t.gy0));
         for by in 0..nby {
             for bx in 0..nbx {
-                let blk = (first + by * nbx + bx) as usize;
+                let Some(blk) = first
+                    .checked_add(by.saturating_mul(nbx))
+                    .and_then(|v| v.checked_add(bx))
+                    .and_then(|v| usize::try_from(v).ok())
+                else {
+                    return Err(J2kError::BadBlock("block geometry"));
+                };
                 let passes = u32::from(t.blocks.passes.get(blk).copied().unwrap_or(0));
                 if passes == 0 {
                     continue;
                 }
-                let x0 = ((gx0 + bx) * cw).max(bx0);
-                let x1 = ((gx0 + bx + 1) * cw).min(bx1);
-                let y0 = ((gy0 + by) * ch).max(by0);
-                let y1 = ((gy0 + by + 1) * ch).min(by1);
-                let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+                let cell = |g: u32, b: u32, c: u32, lo: u32, hi: u32| {
+                    let a = g.checked_add(b)?.checked_mul(c)?.max(lo);
+                    let e = g.checked_add(b)?.checked_add(1)?.checked_mul(c)?.min(hi);
+                    Some((a, usize::try_from(e.checked_sub(a)?).ok()?))
+                };
+                let (Some((x0, w)), Some((y0, h))) =
+                    (cell(gx0, bx, cw, bx0, bx1), cell(gy0, by, ch, by0, by1))
+                else {
+                    return Err(J2kError::BadBlock("block geometry"));
+                };
                 let zero = u32::from(t.blocks.zero_planes.get(blk).copied().unwrap_or(0));
                 if zero >= mb {
                     return Err(J2kError::BadBlock(
@@ -459,11 +479,12 @@ pub fn decode_blocks(
                 while sg != NONE {
                     let st = t.segs.start.get(sg as usize).copied().unwrap_or(0) as usize;
                     let ln = t.segs.len.get(sg as usize).copied().unwrap_or(0) as usize;
-                    data.extend_from_slice(body.get(st..st + ln).unwrap_or(&[]));
+                    let seg = st.checked_add(ln).and_then(|e| body.get(st..e));
+                    data.extend_from_slice(seg.unwrap_or(&[]));
                     sg = t.segs.next.get(sg as usize).copied().unwrap_or(NONE);
                 }
                 out.clear();
-                out.resize(w * h, 0);
+                out.resize(w.saturating_mul(h), 0);
                 crate::t1::decode_block(
                     &mut scratch,
                     crate::t1::BlockSpec {
@@ -477,11 +498,22 @@ pub fn decode_blocks(
                     &mut out,
                 )?;
                 for row in 0..h {
-                    let dst = (off_y + (y0 - by0)) as usize + row;
-                    let col = (off_x + (x0 - bx0)) as usize;
+                    let at = |a: u32, b: u32, c: u32| {
+                        usize::try_from(a.checked_add(b.checked_sub(c)?)?).ok()
+                    };
+                    let (Some(dst), Some(col)) = (
+                        at(off_y, y0, by0).and_then(|v| v.checked_add(row)),
+                        at(off_x, x0, bx0),
+                    ) else {
+                        return Err(J2kError::BadBlock("block outside the coefficient array"));
+                    };
                     let (Some(d), Some(sr)) = (
-                        coef.get_mut(dst * width + col..dst * width + col + w),
-                        out.get(row * w..row * w + w),
+                        dst.checked_mul(width)
+                            .and_then(|b| b.checked_add(col))
+                            .and_then(|b| Some(b..b.checked_add(w)?))
+                            .and_then(|r| coef.get_mut(r)),
+                        row.checked_mul(w)
+                            .and_then(|b| out.get(b..b.checked_add(w)?)),
                     ) else {
                         return Err(J2kError::BadBlock("block outside the coefficient array"));
                     };

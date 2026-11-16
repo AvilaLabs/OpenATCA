@@ -93,7 +93,11 @@ pub fn bracket(times: &[i64], t: f64) -> Result<(usize, usize, f64), Refusal> {
 
 /// A corner value: `Ok(None)` where the file has none (NaN), an error for an infinite one.
 fn at(a: &[f32], k: usize, npts: usize, off: usize) -> Result<Option<f64>, Refusal> {
-    let Some(&v) = a.get(k * npts + off) else {
+    let Some(&v) = k
+        .checked_mul(npts)
+        .and_then(|b| b.checked_add(off))
+        .and_then(|i| a.get(i))
+    else {
         return Ok(None);
     };
     if v.is_nan() {

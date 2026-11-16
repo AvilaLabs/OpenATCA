@@ -14,14 +14,29 @@ use std::process::ExitCode;
 const BOX_E7: (i32, i32, i32, i32) = (150_000_000, 600_000_000, -1_400_000_000, -500_000_000);
 const KT_PER_MS: f64 = 3600.0 / 1852.0;
 
-/// Unix day number (days since 1970-01-01) of a proleptic Gregorian date.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+/// Days in month `m` (1..=12) of year `y`; 0 for any other month.
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`), for years 1970
+/// to 9999 and dates that exist; `None` for any other year, month or day.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
+        return None;
+    }
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// The day of an archive part named `vYYYY.MM.DD-...`, as Unix seconds at its start.
@@ -33,7 +48,7 @@ fn day_start(name: &str) -> Option<i64> {
         it.next()?.parse::<i64>().ok()?,
         it.next()?.parse::<i64>().ok()?,
     );
-    ((1..=12).contains(&m) && (1..=31).contains(&d)).then(|| days_from_civil(y, m, d) * 86_400)
+    days_from_civil(y, m, d)?.checked_mul(86_400)
 }
 
 /// Archive parts under `dir` grouped by day archive (name up to `.tar`), each group's parts in
@@ -214,4 +229,53 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
         "  note: the turning split uses roll and track rate with readsb's own gates; readsb withholds a new wind while they are over the gate but may still print an older one for up to 60 s"
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod calendar_tests {
+    use super::*;
+
+    // (year, month, day, Unix day or None): the same table is applied in every crate that has
+    // its own calendar helper.
+    const VECTORS: [(i64, i64, i64, Option<i64>); 20] = [
+        (1970, 1, 1, Some(0)),
+        (2000, 2, 29, Some(11_016)),
+        (2024, 2, 29, Some(19_782)),
+        (2026, 11, 15, Some(20_772)),
+        (9999, 12, 31, Some(2_932_896)),
+        (2023, 2, 29, None),
+        (2100, 2, 29, None),
+        (2026, 4, 31, None),
+        (2026, 6, 31, None),
+        (2026, 9, 31, None),
+        (2026, 1, 32, None),
+        (2026, 1, 0, None),
+        (2026, 0, 1, None),
+        (2026, 13, 1, None),
+        (-1, 1, 1, None),
+        (1969, 12, 31, None),
+        (10_000, 1, 1, None),
+        (i64::MAX, 1, 1, None),
+        (i64::MIN, 1, 1, None),
+        (2026, i64::MAX, 1, None),
+    ];
+
+    // REQ: OA-WIND-058
+    #[test]
+    fn impossible_dates_and_years_out_of_range_are_refused() {
+        for (y, m, d, want) in VECTORS {
+            assert_eq!(days_from_civil(y, m, d), want, "{y}-{m}-{d}");
+        }
+        assert_eq!(day_start("v2026.11.15-x"), Some(20_772 * 86_400));
+        assert_eq!(day_start("v2026.02.29-x"), None);
+        assert_eq!(day_start("v2026.04.31-x"), None);
+        assert_eq!(day_start("v1969.12.31-x"), None);
+        assert_eq!(day_start("v9999.99.99-x"), None);
+    }
 }

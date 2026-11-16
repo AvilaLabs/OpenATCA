@@ -161,11 +161,14 @@ fn main() -> ExitCode {
         }
     };
     let times = archive.times();
+    // An archive with no hours has no valid range; it is not 0..0.
+    let span = match (times.first(), times.last()) {
+        (Some(a), Some(b)) => format!("{a}..{b}"),
+        _ => "none".to_string(),
+    };
     println!(
-        "RAP: {} hours, valid {}..{} (Unix s), cache holds at most {MAX_HOURS_HELD} hours",
+        "RAP: {} hours, valid {span} (Unix s), cache holds at most {MAX_HOURS_HELD} hours",
         times.len(),
-        times.first().copied().unwrap_or(0),
-        times.last().copied().unwrap_or(0)
     );
     let mut ok = true;
 

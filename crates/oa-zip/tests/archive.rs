@@ -690,3 +690,23 @@ fn duplicate_names_are_found_exactly_and_cheaply() {
         Err(ZipError::DuplicateName(_))
     ));
 }
+
+// REQ: OA-ZIP-062
+#[test]
+fn offsets_near_the_top_of_the_address_space_are_refused_not_added_to() {
+    // Every 8-byte window of a stored and a zip64 archive set to values that make
+    // `offset + constant` wrap: parsing and extracting return an error or data, never panic.
+    for f in [STORED, ZIP64] {
+        for at in 0..f.len().saturating_sub(8) {
+            for v in [u64::MAX, u64::MAX - 8, 0x8000_0000_0000_0000] {
+                let mut d = f.to_vec();
+                d[at..at + 8].copy_from_slice(&v.to_le_bytes());
+                if let Ok(a) = Archive::parse(&d) {
+                    for e in a.entries() {
+                        let _ = a.extract_entry(e);
+                    }
+                }
+            }
+        }
+    }
+}
