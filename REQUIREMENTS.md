@@ -3147,7 +3147,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   tracks predicted for association, the coarse window width, the anonymous plots never gated because the
   limit was reached, the initiation tests and candidates alive at most, and (apart from the counters, in
   `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
-- **OA-TRK-298** Proved (Kani, `fixed_map_agrees_with_a_reference_model_2_slots`): `FixedMap` agrees with a
+- **OA-TRK-303** Proved (Kani, `fixed_map_agrees_with_a_reference_model_2_slots`): `FixedMap` agrees with a
   reference list through any sequence of insert, get, remove and retain: no key is lost or duplicated, `len`
   is the number of held keys, an insert is refused exactly when the key is new and the table is full, and
   nothing panics or indexes out of bounds.
