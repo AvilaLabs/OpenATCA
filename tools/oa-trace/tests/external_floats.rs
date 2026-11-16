@@ -36,6 +36,11 @@ const ALLOW: &[Allow] = &[
         reason: "the guard arm accepts only a finite value above zero",
     },
     Allow {
+        file: "crates/oa-bench/src/metrics_th.rs",
+        needle: "f64::from(f32::from_bits(b))",
+        reason: "not an outside read: it decodes the order-preserving sort key built a few lines above from a heading already checked finite, so the bits are that heading's",
+    },
+    Allow {
         file: "crates/oa-bench/src/scan.rs",
         needle: "it.next()?.parse().ok()?",
         reason: "latitude and longitude are range-checked on the next line (a NaN or infinity is outside)",
