@@ -15,7 +15,7 @@ use crate::metrics_th::{
     t1_cross_track, t2_along_corrected, t2_along_raw, t3_heading, t3_heading_grid, t3_speed,
     t4_altitude, OffsetConfig,
 };
-use crate::pair::{build_pairs, PairConfig};
+use crate::pair::{build_pairs_with, PairConfig};
 use crate::stats::{sort_cases, Exclusions, KeyedCase, MetricResult};
 use crate::thindex::build_th_index;
 use crate::truth::{Env, Truth};
@@ -48,7 +48,7 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
     let ix = build_th_index(&leg.th, leg.flights.gufi.len());
     let tix = index_truth(truth.legs);
     let assoc = associate(leg, &ix, truth, &tix, &cfg.assoc);
-    let (pairs, mut ex) = build_pairs(leg, &ix, &assoc, truth, &cfg.pair);
+    let (pairs, mut ex) = build_pairs_with(leg, &ix, &assoc, truth, &cfg.pair, env.altimeter_at);
     let plan = plan_index(leg);
     let ctx = EventCtx {
         assoc: &assoc,
@@ -58,7 +58,7 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         cfg: &cfg.event,
     };
     let flagged = flagged_assoc(&assoc);
-    let (fpairs, _) = build_pairs(leg, &ix, &flagged, truth, &cfg.pair);
+    let (fpairs, _) = build_pairs_with(leg, &ix, &flagged, truth, &cfg.pair, env.altimeter_at);
     let mut m = vec![
         t1_cross_track(&pairs),
         t2_along_raw(&pairs),

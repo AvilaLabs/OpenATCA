@@ -34,7 +34,7 @@ use crate::legacy::{
 };
 use crate::pair::PairTable;
 use crate::stats::{exclude, group_rows, new_result, Exclusions, MetricResult, MAX_CASES};
-use crate::truth::{AirportRef, Env, Truth, TruthSample, STANDARD_INHG};
+use crate::truth::{indicated_ft, AirportRef, Env, Truth, TruthSample};
 use oa_airspace::geom::exact_edge_m;
 use oa_geo::{wgs84, LatLon};
 
@@ -538,7 +538,7 @@ fn on_ground_at_airport(s: &TruthSample, t_ms: i64, ap: &AirportRef, cfg: &Event
     let Some(inhg) = ap.altimeter_near(t_ms) else {
         return Ground::NoAltimeter;
     };
-    let msl_ft = f64::from(a) + (inhg - STANDARD_INHG) * 1000.0;
+    let msl_ft = indicated_ft(f64::from(a), inhg);
     if msl_ft <= f64::from(ap.elev_ft) + f64::from(cfg.ground_margin_ft) {
         Ground::Yes
     } else {
