@@ -2117,3 +2117,20 @@ fn a_flight_reference_of_zero_is_told_from_no_reference() {
     assert_eq!((rep.tfms_rows, rep.tfms_flights), (4, 3));
     assert_eq!(rep.tfms_rows_without_ref, 2);
 }
+
+// REQ: OA-TFMS-029
+#[test]
+fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
+    let plain = wrap_flight(&track());
+    let escaped = plain.replacen(
+        &format!("xmlns:fdm=\"{FD}\""),
+        &format!("xmlns:fdm=\"{}\"", FD.replacen('u', "&#117;", 1)),
+        1,
+    );
+    assert_ne!(plain, escaped);
+    let (o, rows) = ok(&plain);
+    let (o2, rows2) = ok(&escaped);
+    assert_eq!(o, o2);
+    assert_eq!(flights_len(&rows2.flights), flights_len(&rows.flights));
+    assert_eq!(rows2.flights.flight_ref[0], rows.flights.flight_ref[0]);
+}

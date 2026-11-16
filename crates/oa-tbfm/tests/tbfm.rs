@@ -1378,3 +1378,20 @@ fn text_split_by_a_comment_or_cdata_is_joined() {
         })
     ));
 }
+
+// REQ: OA-TBFM-024
+#[test]
+fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
+    let plain = air("<flt><aid>TST123</aid></flt>");
+    let escaped = plain.replacen(
+        &format!("xmlns=\"{NS}\""),
+        &format!("xmlns=\"{}\"", NS.replacen('u', "&#117;", 1)),
+        1,
+    );
+    assert_ne!(plain, escaped);
+    let (o, rows) = ok(&plain);
+    let (o2, rows2) = ok(&escaped);
+    assert_eq!(o, o2);
+    assert_eq!(rows_len(&rows2), rows_len(&rows));
+    assert_eq!(name_str(&rows2.aid[0]), name_str(&rows.aid[0]));
+}

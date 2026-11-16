@@ -28,7 +28,7 @@ use crate::scalar::{
 };
 use crate::stats::{Stats, UnknownPath, MAX_PATH_TEXT};
 use oa_xml::{
-    attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes,
+    attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, span_bytes,
     text_needs_decode, AttrIx, Doc, ElemIx, Ns, Parser, Span, SpanKind, TextIx,
 };
 
@@ -655,12 +655,12 @@ enum Alias<'a> {
     Other(&'a [u8]),
 }
 
-fn alias_of<'a>(input: &'a [u8], ns: Ns) -> Alias<'a> {
+fn alias_of<'a>(doc: &Doc<'a>, ns: Ns) -> Alias<'a> {
     match ns {
         Ns::None => Alias::None,
         Ns::Xml => Alias::Known(b"xml"),
         Ns::Uri(u) => {
-            let uri = name_bytes(input, u);
+            let uri = ns_uri_bytes(doc, u).unwrap_or(&[]);
             match NAMESPACES.iter().find(|(k, _)| *k == uri) {
                 Some((_, a)) => Alias::Known(a),
                 None => Alias::Other(uri),
@@ -801,7 +801,7 @@ fn decode_inner(
     }
     let root = ElemIx(0);
     let root_name = doc.elem_name.first().copied().unwrap_or_default();
-    let root_ns = alias_of(doc.input, resolve_elem_ns(doc, root));
+    let root_ns = alias_of(doc, resolve_elem_ns(doc, root));
     let root_hash = seg_hash(SEED, &root_ns, name_bytes(doc.input, root_name));
     if n == 0 || root_hash != P_ROOT {
         return Err(DocError::Rejected(Reject::NotAixm));
@@ -844,7 +844,7 @@ fn decode_inner(
             continue;
         }
         let name = doc.elem_name.get(i).copied().unwrap_or_default();
-        let alias = alias_of(doc.input, resolve_elem_ns(doc, ElemIx(i as u32)));
+        let alias = alias_of(doc, resolve_elem_ns(doc, ElemIx(i as u32)));
         let ph = dec.hash.get(pi).copied().unwrap_or(0);
         let h = seg_hash(ph, &alias, name_bytes(doc.input, name));
         if let Some(x) = dec.hash.get_mut(i) {
@@ -904,7 +904,7 @@ fn check_attrs(
         } else {
             Ns::None
         };
-        let ah = seg_hash(extend(h, b"@"), &alias_of(doc.input, ns), local);
+        let ah = seg_hash(extend(h, b"@"), &alias_of(doc, ns), local);
         if dec.known_attrs.binary_search(&ah).is_err() {
             note_unknown(stats, doc, i, Some(a), ah);
             *unknown_at = unknown_at.saturating_add(1);
