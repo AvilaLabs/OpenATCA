@@ -53,7 +53,7 @@
 //! before the conversion and the estimate's variance is added to the plot's, so a radar with an
 //! unknown bias is weighted as the uncertainty says.
 
-use crate::types::{Measurement, NONE_I32, NO_ADDR, NO_IDENT, TIME_LIMIT_NS};
+use crate::types::{to_e7, Measurement, NONE_I32, NO_ADDR, NO_IDENT, TIME_LIMIT_NS};
 
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 0.006_694_379_990_141_316;
@@ -559,14 +559,18 @@ pub fn plot_convert(
         cov[0] += COV_LINE_RATIO * trace;
         cov[2] += COV_LINE_RATIO * trace;
     }
+    // A position that is not a number or does not fit is refused, never a saturated coordinate.
+    let (Some(lat_e7), Some(lon_e7)) = (to_e7(geo.lat_deg), to_e7(geo.lon_deg)) else {
+        return Err(RadarError::BadPlot("converted position"));
+    };
     let m = Measurement {
         toa_ns: p.time_ns,
         pos_cov_m2: [cov[0] as f32, cov[1] as f32, cov[2] as f32],
         vel_cov_m2s2: [0.0; 3],
         vel_east_mps: 0.0,
         vel_north_mps: 0.0,
-        lat_e7: (geo.lat_deg * 1.0e7).round() as i32,
-        lon_e7: (geo.lon_deg * 1.0e7).round() as i32,
+        lat_e7,
+        lon_e7,
         alt_ft: if p.alt_ft == NONE_ALT {
             NONE_I32
         } else {

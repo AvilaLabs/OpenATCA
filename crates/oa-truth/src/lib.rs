@@ -147,9 +147,10 @@ pub const REMOVE_NAMES: [&str; REMOVE_KINDS] = [
     "jump",
     "short_leg",
     "oversized_same_time_group",
+    "ambiguous_same_time_altitude",
 ];
 /// Number of removal reasons.
-pub const REMOVE_KINDS: usize = 12;
+pub const REMOVE_KINDS: usize = 13;
 pub const REM_INVALID: usize = 0;
 pub const REM_STALE: usize = 1;
 pub const REM_SOURCE: usize = 2;
@@ -162,6 +163,10 @@ pub const REM_DUPLICATE: usize = 8;
 pub const REM_JUMP: usize = 9;
 pub const REM_SHORT_LEG: usize = 10;
 pub const REM_OVERSIZED: usize = 11;
+pub const REM_AMBIGUOUS: usize = 12;
+/// Same-time reports of one aircraft: two valid altitudes of the instant that differ by more than
+/// this (feet, the 25 ft Mode S / ADS-B barometric quantum) contradict each other.
+pub const ALT_QUANTUM_FT: i32 = 25;
 /// Same-time reports of one aircraft: the 2-degree-of-freedom chi-square value at 99.9 %, the
 /// per-axis sigma of a NACp 95 % radius is `radius / SIGMA95`.
 pub const SAME_TIME_CHI2: f64 = 13.82;

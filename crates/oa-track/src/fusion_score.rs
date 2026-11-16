@@ -302,7 +302,9 @@ pub fn simulate_adsb(
                     );
                     let fr = oa_geo::aeqd::frame_new(s.lat_deg, s.lon_deg);
                     // A noise draw past the chart gives no sample.
-                    if let Some((lat, lon)) = oa_geo::aeqd::unproject(&fr, ne, nn) {
+                    if let Some((lat_e7, lon_e7)) = oa_geo::aeqd::unproject(&fr, ne, nn)
+                        .and_then(|(la, lo)| crate::types::to_e7(la).zip(crate::types::to_e7(lo)))
+                    {
                         let var = (sp * sp) as f32;
                         let vvar = (sv * sv) as f32;
                         let q = |a: f64| (a / 25.0).round() * 25.0;
@@ -312,8 +314,8 @@ pub fn simulate_adsb(
                             vel_cov_m2s2: [vvar, 0.0, vvar],
                             vel_east_mps: (s.vel_east_mps + nve) as f32,
                             vel_north_mps: (s.vel_north_mps + nvn) as f32,
-                            lat_e7: (lat * 1.0e7).round() as i32,
-                            lon_e7: (lon * 1.0e7).round() as i32,
+                            lat_e7,
+                            lon_e7,
                             alt_ft: s.baro_alt_ft.map_or(NONE_I32, |a| q(a) as i32),
                             vrate_fpm: s
                                 .vert_rate_fpm

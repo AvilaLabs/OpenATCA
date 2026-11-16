@@ -18,7 +18,7 @@ use oa_adsb::{
 };
 use oa_bench::adsb_truth;
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
-use oa_geo::aeqd::{frame_velocity, unproject};
+use oa_geo::aeqd::{try_frame_velocity, unproject};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     esassp_of, initiation_delays, interval_stats, run_tracker, run_tracker_spilled, score,
@@ -252,7 +252,7 @@ fn synthetic_reports() -> Reports {
                 tr.n + SIGMA_POS * rng.normal(),
             )
             .unwrap();
-            let (te, tn) = frame_velocity(&f, tr.e, tr.n, tr.ve, tr.vn);
+            let (te, tn) = try_frame_velocity(&f, tr.e, tr.n, tr.ve, tr.vn).unwrap();
             let mut row = base_row(*addr, t);
             row.lat_e7 = (lat * 1e7).round() as i32;
             row.lon_e7 = (lon * 1e7).round() as i32;

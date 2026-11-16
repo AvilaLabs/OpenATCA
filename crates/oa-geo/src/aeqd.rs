@@ -346,7 +346,9 @@ pub fn try_frame_to_true(f: &Frame, x: f64, y: f64) -> Option<Mat2> {
 }
 
 /// [`try_frame_to_true`] where the caller has a matrix to fill: every entry NaN outside the
-/// chart's domain, which propagates as a refusal and is never a plausible number.
+/// chart's domain, which propagates as a refusal and is never a plausible number. Test-only:
+/// product code uses the `try_` form and handles `None`.
+#[cfg(test)]
 pub fn frame_to_true(f: &Frame, x: f64, y: f64) -> Mat2 {
     try_frame_to_true(f, x, y).unwrap_or([[f64::NAN; 2]; 2])
 }
@@ -359,7 +361,8 @@ pub fn try_frame_from_true(f: &Frame, x: f64, y: f64) -> Option<Mat2> {
     Some([[d / det, -b / det], [-c / det, a / det]])
 }
 
-/// [`try_frame_from_true`] with every entry NaN outside the chart's domain.
+/// [`try_frame_from_true`] with every entry NaN outside the chart's domain. Test-only.
+#[cfg(test)]
 pub fn frame_from_true(f: &Frame, x: f64, y: f64) -> Mat2 {
     try_frame_from_true(f, x, y).unwrap_or([[f64::NAN; 2]; 2])
 }
@@ -399,7 +402,8 @@ pub fn try_frame_change(
     Some([[a.0, c.0], [a.1, c.1]])
 }
 
-/// [`try_frame_change`] with every entry NaN outside the chart's domain.
+/// [`try_frame_change`] with every entry NaN outside the chart's domain. Test-only.
+#[cfg(test)]
 pub fn frame_change(from: &Frame, x1: f64, y1: f64, to: &Frame, x2: f64, y2: f64) -> Mat2 {
     try_frame_change(from, x1, y1, to, x2, y2).unwrap_or([[f64::NAN; 2]; 2])
 }
@@ -422,18 +426,39 @@ pub fn mat2_congruence(m: &Mat2, s: &[f64; 3]) -> [f64; 3] {
 }
 
 /// True `(east, north)` velocity in m/s at frame position `(x, y)` for a frame velocity
-/// `(vx, vy)`: the exact local differential of the projection ([`frame_to_true`]), not a
-/// finite displacement, so it holds up to the poles.
+/// `(vx, vy)`: the exact local differential of the projection ([`try_frame_to_true`]), not a
+/// finite displacement, so it holds up to the poles. `None` outside the chart's domain.
+pub fn try_frame_velocity(f: &Frame, x: f64, y: f64, vx: f64, vy: f64) -> Option<(f64, f64)> {
+    Some(mat2_apply(&try_frame_to_true(f, x, y)?, (vx, vy)))
+}
+
+/// [`try_frame_velocity`] with NaN outside the chart's domain. Test-only.
+#[cfg(test)]
 pub fn frame_velocity(f: &Frame, x: f64, y: f64, vx: f64, vy: f64) -> (f64, f64) {
-    mat2_apply(&frame_to_true(f, x, y), (vx, vy))
+    try_frame_velocity(f, x, y, vx, vy).unwrap_or((f64::NAN, f64::NAN))
 }
 
 /// Frame velocity `(vx, vy)` in frame metres per second for a true `(east, north)` velocity in
-/// metres per second at frame position `(x, y)`: the inverse of [`frame_velocity`] there. The
+/// metres per second at frame position `(x, y)`: the inverse of [`try_frame_velocity`] there. The
 /// frame metre is the sphere's, the true metre the ellipsoid's, so the two differ by up to 0.3 %
 /// (east and north differently), and away from the origin the axes are turned by the meridian
 /// convergence; a filter that works in the frame converts its velocity measurements with this
-/// and its outputs back with [`frame_velocity`].
+/// and its outputs back with [`try_frame_velocity`]. `None` outside the chart's domain.
+pub fn try_frame_from_true_velocity_at(
+    f: &Frame,
+    x: f64,
+    y: f64,
+    east_mps: f64,
+    north_mps: f64,
+) -> Option<(f64, f64)> {
+    Some(mat2_apply(
+        &try_frame_from_true(f, x, y)?,
+        (east_mps, north_mps),
+    ))
+}
+
+/// [`try_frame_from_true_velocity_at`] with NaN outside the chart's domain. Test-only.
+#[cfg(test)]
 pub fn frame_from_true_velocity_at(
     f: &Frame,
     x: f64,
@@ -441,10 +466,11 @@ pub fn frame_from_true_velocity_at(
     east_mps: f64,
     north_mps: f64,
 ) -> (f64, f64) {
-    mat2_apply(&frame_from_true(f, x, y), (east_mps, north_mps))
+    try_frame_from_true_velocity_at(f, x, y, east_mps, north_mps).unwrap_or((f64::NAN, f64::NAN))
 }
 
-/// [`frame_from_true_velocity_at`] at the frame origin.
+/// [`try_frame_from_true_velocity_at`] at the frame origin, which is always inside the chart.
+#[cfg(test)]
 pub fn frame_from_true_velocity(f: &Frame, east_mps: f64, north_mps: f64) -> (f64, f64) {
     frame_from_true_velocity_at(f, 0.0, 0.0, east_mps, north_mps)
 }

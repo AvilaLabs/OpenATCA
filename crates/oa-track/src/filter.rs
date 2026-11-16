@@ -20,8 +20,9 @@
 //! whether or not the update carries an altitude.
 
 use oa_geo::aeqd::{
-    frame_at_fix, frame_change, frame_from_trig, frame_from_true, frame_new, frame_to_true,
-    frame_trig, mat2_apply, mat2_congruence, project, unproject, unproject_fix, Frame, Mat2,
+    frame_at_fix, frame_from_trig, frame_new, frame_trig, mat2_apply, mat2_congruence, project,
+    try_frame_change, try_frame_from_true, try_frame_to_true, unproject, unproject_fix, Frame,
+    Mat2,
 };
 
 use crate::hfilter::{
@@ -32,7 +33,7 @@ use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, RESYNC_AFTER, VRATE_SIGMA_FPS,
 };
 use crate::types::{
-    Measurement, OutRow, TrackerStats, M_ALT_GEOMETRIC, M_HAS_VEL, NONE_I32, O_HAS_ALT,
+    to_e7, Measurement, OutRow, TrackerStats, M_ALT_GEOMETRIC, M_HAS_VEL, NONE_I32, O_HAS_ALT,
 };
 use crate::vfilter::{v_alt_innovation, v_combine, v_init, v_predict, v_update, VFilter};
 
@@ -84,11 +85,6 @@ pub(crate) fn filter_frame(f: &Filter) -> Frame {
     frame_from_trig(deg(f.lat_e7), deg(f.lon_e7), f.trig)
 }
 
-fn to_e7(d: f64) -> i32 {
-    // Saturating float to int conversion; latitudes and longitudes are far inside i32.
-    (d * 1.0e7).round() as i32
-}
-
 /// The measurement's position covariance in the plane at the plot's plane position: its
 /// east-north covariance carried through the plane-from-true differential `from_true` there.
 fn pos_cov(m: &Measurement, from_true: &Mat2) -> [f64; 3] {
@@ -134,7 +130,8 @@ fn vertical_init(m: &Measurement) -> VFilter {
 /// A filter started at `m`. The measurement is assumed valid (see `measurement_check`).
 pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
     let frame = frame_new(deg(m.lat_e7), deg(m.lon_e7));
-    let from_true = frame_from_true(&frame, 0.0, 0.0);
+    // The frame's origin is inside its chart, so the differential exists there.
+    let from_true = try_frame_from_true(&frame, 0.0, 0.0).unwrap_or([[1.0, 0.0], [0.0, 1.0]]);
     let has_alt = has_baro_alt(m);
     let zero = VFilter {
         m: [crate::vfilter::VModel {
@@ -169,14 +166,30 @@ pub(crate) fn filter_replay(f: &mut Filter, m: &Measurement, stats: &mut Tracker
     apply(f, m, stats, false)
 }
 
+/// Counts a measurement too far from the track to apply; after `RESYNC_AFTER` in a row the filter
+/// restarts at it.
+fn reject_jump(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats) -> Applied {
+    stats.jump_rejected += 1;
+    f.rej_h = f.rej_h.saturating_add(1);
+    if f.rej_h >= RESYNC_AFTER {
+        *f = filter_init(m, f.h_mode);
+        stats.resyncs += 1;
+        return Applied::Resync;
+    }
+    Applied::Rejected
+}
+
 fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool) -> Applied {
     let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
     let frame = filter_frame(f);
     let u = dwell_decay(dt);
     let pred = h_predict(&f.h, dt, u, f.h_mode);
     let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
-    // One differential serves the position covariance, the velocity and its covariance.
-    let from_true = frame_from_true(&frame, zx, zy);
+    // One differential serves the position covariance, the velocity and its covariance. A plot
+    // at the frame's antipode, past the chart, is a jump: counted as one.
+    let Some(from_true) = try_frame_from_true(&frame, zx, zy) else {
+        return reject_jump(f, m, stats);
+    };
     let r = pos_cov(m, &from_true);
     if gated {
         let nis = h_pos_nis(&pred, &[zx, zy], &r);
@@ -186,14 +199,7 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
             nis
         };
         if gate.is_nan() || gate > GATE_CHI2 {
-            stats.jump_rejected += 1;
-            f.rej_h = f.rej_h.saturating_add(1);
-            if f.rej_h >= RESYNC_AFTER {
-                *f = filter_init(m, f.h_mode);
-                stats.resyncs += 1;
-                return Applied::Resync;
-            }
-            return Applied::Rejected;
+            return reject_jump(f, m, stats);
         }
         stats.nis_sum += nis;
         stats.nis_n += 1;
@@ -216,10 +222,18 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
         return Applied::Resync;
     };
     let (la, lo) = (fix.lat_deg, fix.lon_deg);
-    let (lat_e7, lon_e7) = (to_e7(la), to_e7(lo));
+    let (Some(lat_e7), Some(lon_e7)) = (to_e7(la), to_e7(lo)) else {
+        *f = filter_init(m, f.h_mode);
+        stats.resyncs += 1;
+        return Applied::Resync;
+    };
     let frame2 = frame_at_fix(&fix, deg(lat_e7), deg(lon_e7));
     let (sx, sy) = project(&frame2, la, lo);
-    let d = frame_change(&frame, px, py, &frame2, sx, sy);
+    let Some(d) = try_frame_change(&frame, px, py, &frame2, sx, sy) else {
+        *f = filter_init(m, f.h_mode);
+        stats.resyncs += 1;
+        return Applied::Resync;
+    };
     h_change_frame(&mut h, [px, py], [sx, sy], &d);
     // Vertical: always advanced to the update time; updated when the report has an altitude.
     let mut v = f.v;
@@ -271,8 +285,10 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
 }
 
 /// The track's state at `t_ns >= f.t_ns` as an output row (without address, kind and coast
-/// flags): the filter predicted to that time, nothing stored.
-pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
+/// flags): the filter predicted to that time, nothing stored. `None` if the predicted position
+/// cannot be represented (past the projection's chart, or not a number): such a row has no
+/// coordinate and is never given a zero one.
+pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> Option<OutRow> {
     let dt = (t_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
     let frame = filter_frame(f);
     let (h, vf) = if dt > 0.0 {
@@ -284,20 +300,21 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
     let (x, p) = h_combine(&h);
     let xg = |i: usize| x.get(i).copied().unwrap_or(0.0);
     let pg = |i: usize, j: usize| p.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.0);
-    // A state past the chart has no position; the NaN saturates to zero in the row.
-    let (la, lo) = unproject(&frame, xg(0), xg(1)).unwrap_or((f64::NAN, f64::NAN));
+    // A state past the chart has no position.
+    let (la, lo) = unproject(&frame, xg(0), xg(1))?;
+    let (lat_e7, lon_e7) = (to_e7(la)?, to_e7(lo)?);
     // The state is in the plane of the frame; the output is in east and north at the point.
-    let jt = frame_to_true(&frame, xg(0), xg(1));
+    let jt = try_frame_to_true(&frame, xg(0), xg(1))?;
     let (ve, vn) = mat2_apply(&jt, (xg(2), xg(3)));
     let pc = mat2_congruence(&jt, &[pg(0, 0), pg(0, 1), pg(1, 1)]);
     let vc = mat2_congruence(&jt, &[pg(2, 2), pg(2, 3), pg(3, 3)]);
     let (xv, pv) = v_combine(&vf);
     let has_alt = f.has_alt != 0;
-    OutRow {
+    Some(OutRow {
         t_ns,
         addr: 0,
-        lat_e7: to_e7(la),
-        lon_e7: to_e7(lo),
+        lat_e7,
+        lon_e7,
         vel_east_mps: ve as f32,
         vel_north_mps: vn as f32,
         pos_cov_m2: [pc[0] as f32, pc[1] as f32, pc[2] as f32],
@@ -317,7 +334,7 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> OutRow {
         mu_h: [h.mu[0] as f32, h.mu[1] as f32],
         mu_v: [vf.mu[0] as f32, vf.mu[1] as f32],
         flags: if has_alt { O_HAS_ALT } else { 0 },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -393,8 +410,8 @@ mod tests {
             vel_cov_m2s2: [0.0; 3],
             vel_east_mps: 0.0,
             vel_north_mps: 0.0,
-            lat_e7: to_e7(lat),
-            lon_e7: to_e7(lon),
+            lat_e7: to_e7(lat).unwrap(),
+            lon_e7: to_e7(lon).unwrap(),
             alt_ft: NONE_I32,
             vrate_fpm: NONE_I32,
             addr: NO_ADDR,
@@ -486,7 +503,7 @@ mod tests {
             let mut stats = TrackerStats::default();
             assert_eq!(filter_apply(&mut f, &m, &mut stats), Applied::Yes);
             assert!(f.lon_e7 != f0.lon_e7 || f.lat_e7 != f0.lat_e7);
-            let o = filter_output(&f, 2 * NS_PER_S);
+            let o = filter_output(&f, 2 * NS_PER_S).unwrap();
             let rel = |a: &[f64; 3], b: [f32; 3]| {
                 let scale = a[0].abs().max(a[2].abs());
                 (0..3)
@@ -524,7 +541,7 @@ mod tests {
             m.vel_north_mps = -40.0;
             m.vel_cov_m2s2 = [4.0, 0.5, 0.25];
             let f = filter_init(&m, 0);
-            let o = filter_output(&f, 0);
+            let o = filter_output(&f, 0).unwrap();
             for (a, b) in o.pos_cov_m2.iter().zip([10000.0, 30.0, 1.0]) {
                 assert!(
                     (f64::from(*a) - b).abs() < 1e-4 * 10000.0,
@@ -576,5 +593,42 @@ mod tests {
         let (a, b) = (filter_frame(&f), frame_new(deg(f.lat_e7), deg(f.lon_e7)));
         let (pa, pb) = (project(&a, lat, lon), project(&b, lat, lon));
         assert!((pa.0 - pb.0).abs() < 1e-6 && (pa.1 - pb.1).abs() < 1e-6);
+    }
+
+    // REQ: OA-TRK-313
+    #[test]
+    fn a_plot_at_the_antipode_of_the_frame_is_a_counted_jump_and_never_a_nan_state() {
+        let m0 = meas(0.0, 0.0, 0, [100.0, 0.0, 100.0]);
+        let f0 = filter_init(&m0, 0);
+        // The frame's antipode is past the chart's margin: no differential there.
+        let far = meas(0.0, 180.0, 1, [100.0, 0.0, 100.0]);
+        let mut f = f0;
+        let mut stats = TrackerStats::default();
+        assert_eq!(filter_apply(&mut f, &far, &mut stats), Applied::Rejected);
+        assert_eq!((stats.jump_rejected, stats.resyncs), (1, 0));
+        assert_eq!(
+            (f.h, f.t_ns, f.rej_h),
+            (f0.h, f0.t_ns, 1),
+            "only the rejection count moved"
+        );
+        let o = filter_output(&f, NS_PER_S).unwrap();
+        assert!(o.vel_east_mps.is_finite() && o.pos_cov_m2.iter().all(|v| v.is_finite()));
+    }
+
+    // REQ: OA-TRK-312
+    #[test]
+    fn a_coordinate_that_is_not_a_number_or_does_not_fit_is_refused() {
+        assert_eq!(to_e7(41.9), Some(419_000_000));
+        assert_eq!(to_e7(-180.0), Some(-1_800_000_000));
+        for d in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            215.0,
+            -215.0,
+            1e300,
+        ] {
+            assert_eq!(to_e7(d), None, "{d}");
+        }
     }
 }

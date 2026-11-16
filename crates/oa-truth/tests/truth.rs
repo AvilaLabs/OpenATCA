@@ -603,6 +603,67 @@ fn a_mixed_nacp_pair_is_judged_at_its_own_bound() {
     assert_eq!(removed(&outside, REM_DUPLICATE), 2, "{outside:?}");
 }
 
+/// A 60 s track whose report 10 (t = 20 s) is two rows at one position and NACp, with barometric
+/// altitudes `a` and `b` (`NONE_I32` for missing), pushed in the order `swap` selects.
+fn alt_pair_track(a: i32, b: i32, swap: bool) -> Reports {
+    let mut r = Reports::default();
+    for k in 0..30usize {
+        let t = k as f64 * 2.0;
+        let (la, lo) = to_deg(0.0, 231.5 * t);
+        let mut x = good(ADDR, t, la, lo);
+        if k == 10 {
+            let mut y = x;
+            x.baro_alt_ft = a;
+            y.baro_alt_ft = b;
+            let pair = if swap { [y, x] } else { [x, y] };
+            for z in pair {
+                reports_push(&mut r, &z);
+            }
+        } else {
+            reports_push(&mut r, &x);
+        }
+    }
+    r
+}
+
+/// The altitude of the truth point at t = 20 s, if there is one.
+fn alt_at_20s(t: &Truth) -> Option<i32> {
+    let i = t.pt_t_ns.iter().position(|&x| x == ns(20.0))?;
+    t.pt_alt_ft.get(i).copied()
+}
+
+// REQ: OA-TRUTH-047
+#[test]
+fn a_missing_altitude_never_beats_a_valid_one_at_the_same_instant() {
+    for (a, b) in [(NONE_I32, 35_000), (35_000, NONE_I32)] {
+        for swap in [false, true] {
+            let (t, s) = build(&alt_pair_track(a, b, swap));
+            assert_eq!(alt_at_20s(&t), Some(35_000), "a {a} b {b} swap {swap}");
+            assert_eq!(removed(&s, REM_DUPLICATE), 1, "{s:?}");
+            assert_eq!(removed(&s, REM_AMBIGUOUS), 0, "{s:?}");
+            assert!(balanced(&s));
+        }
+    }
+}
+
+// REQ: OA-TRUTH-048
+#[test]
+fn conflicting_valid_altitudes_at_one_instant_drop_the_instant_and_count_it() {
+    for swap in [false, true] {
+        let (t, s) = build(&alt_pair_track(35_000, 34_000, swap));
+        assert_eq!(alt_at_20s(&t), None, "swap {swap}");
+        assert_eq!(removed(&s, REM_AMBIGUOUS), 2, "{s:?}");
+        assert_eq!(s.rows_kept, 29);
+        assert!(balanced(&s));
+    }
+    // Within the 25 ft quantum the two are one altitude measured twice.
+    let (t, s) = build(&alt_pair_track(35_000, 35_025, false));
+    assert!(alt_at_20s(&t).is_some());
+    assert_eq!(removed(&s, REM_AMBIGUOUS), 0, "{s:?}");
+    let (t2, _) = build(&alt_pair_track(35_025, 35_000, true));
+    assert_eq!(digest(&t), digest(&t2));
+}
+
 /// A 40-report track at 2 s: the first and the 31st report print quality (NACp 10 and 8), the
 /// others none; with an optional far-away row at 60.5 s that prints `jump_nacp`.
 fn carry_track(jump_nacp: Option<u8>) -> Reports {
@@ -1335,6 +1396,16 @@ fn a_state_that_converts_to_a_non_finite_position_is_never_returned_as_truth() {
     // An ordinary state is still truth.
     let ok = two_knots([1.0e4, 100.0, 0.0, 2.0e4, 50.0, 0.0], p);
     assert!(matches!(truth_at(&ok, ADDR, t_ms), TruthQuery::Ok(_)));
+}
+
+// REQ: OA-TRUTH-049
+#[test]
+fn a_state_at_the_antipode_of_the_leg_frame_is_a_refusal_and_not_a_nan_sample() {
+    let p = [1.0e-4, 0.0, 0.0, 1.0e-6, 0.0, 1.0e-6];
+    let t_ms = T0 / 1_000_000;
+    // Half the sphere's circumference east of the leg origin, and a velocity that is finite.
+    let t = two_knots([2.0015e7, 100.0, 0.0, 0.0, 50.0, 0.0], p);
+    assert_eq!(truth_at(&t, ADDR, t_ms), TruthQuery::TooUncertain);
 }
 
 fn at_ns(t: i64) -> Row {

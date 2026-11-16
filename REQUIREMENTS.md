@@ -2415,6 +2415,19 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
 - **OA-TRUTH-046** Proved (Kani, `clip_row_count_refuses_exactly_when_the_total_crosses_the_cap`,
   `clip_claim_rows_is_total`): the row count the clip reader accumulates from frame headers cannot wrap, and
   it refuses at the first frame whose exact running total is over the cap, and at no other.
+- **OA-TRUTH-047** Of several accepted rows of one aircraft at one instant the builder keeps the one that
+  carries the most fields, in the preference order barometric altitude, geometric altitude, vertical rate,
+  ground speed, track (`preference` in `build.rs`; a row with a valid value earlier in the list wins), then
+  by content. A row whose altitude is absent never wins over one whose altitude is valid, whatever the input
+  order.
+- **OA-TRUTH-048** Eligible rows of one instant with two valid barometric (or two valid geometric) altitudes
+  more than `ALT_QUANTUM_FT` (25 ft) apart make the instant ambiguous: all its eligible rows are dropped,
+  counted as `ambiguous_same_time_altitude`, and the instant is not truth; the pick is never arbitrary and
+  does not depend on input order. Rows whose positions differ beyond their stated NACp are dropped and
+  counted as `duplicate_time`.
+- **OA-TRUTH-049** A state past the chart of the leg's frame (the antipode of its origin) is refused as too
+  uncertain; no NaN velocity or position is returned as truth. The velocity conversion uses
+  `oa_geo::aeqd::try_frame_velocity` and handles `None`.
 
 
 ## M2 — Benchmark harness (oa-bench)
@@ -3318,6 +3331,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   starts to climb between two scans does not start a second track (the altitude gate of the association is
   widened by a standard deviation of `GATE_VRATE_SIGMA_FPM` of climb rate over the time since the update, at
   most `GATE_MANEUVER_MAX_DT_S`).
+- **OA-TRK-312** A track position that cannot be represented (not a number, past the projection's chart,
+  or not within an `i32` of 1e-7 degree) is never a coordinate: a tick or update row for it is not emitted
+  and is counted in `TrackerStats::rows_unrepresentable`, and a coordinate conversion in the tracker, the
+  radar conversion and the scorer refuses such a value instead of saturating it to an integer (a row at
+  0, 0 degrees).
+- **OA-TRK-313** A plot at the antipode of a filter's frame, where the chart has no differential, is a
+  counted position jump (`jump_rejected`), leaves the filter unchanged, and never puts NaN in a state; the
+  tracker uses the `try_*` forms of the frame functions of `oa_geo::aeqd` and handles `None`.
 - **OA-TRK-309** The allowance for a change of climb rate widens the gate and not the cost: a pair inside the
   gate only by the allowance costs `RESCUED_COST_FRACTION` of the total gate, so it is assigned only where no
   better pair wants either side, and the allowance stops growing at `GATE_MANEUVER_MAX_DT_S`.
