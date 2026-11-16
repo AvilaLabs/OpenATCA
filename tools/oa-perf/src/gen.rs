@@ -12,7 +12,7 @@
 //! speed and altitude (reflected at the walls of the box where it would leave); every plot detected (no misses, no false plots, no splits); plots carry
 //! no address; no line-of-sight test; ADS-B noise white at NACp 9.
 
-use oa_geo::aeqd::{frame_new, frame_velocity, unproject, Frame};
+use oa_geo::aeqd::{frame_new, try_frame_velocity, unproject, Frame};
 use oa_sensorsim::prng::Rng;
 use oa_sensorsim::profile::MSSR_EUROCONTROL_1997;
 use oa_track::fusion_score::{make_radar, site_def, Kind, EPOCH_NS};
@@ -274,7 +274,11 @@ impl Traffic {
             let Some((lat, lon)) = unproject(&self.frame, e + ne, n + nn) else {
                 continue;
             };
-            let (te, tn) = frame_velocity(&self.frame, e, n, ve, vn);
+            // Inside the box both always succeed (OA-PRF-011); a failure is a generator fault the
+            // coverage test would show, never a report with a made-up velocity.
+            let Some((te, tn)) = try_frame_velocity(&self.frame, e, n, ve, vn) else {
+                continue;
+            };
             out.push(Measurement {
                 toa_ns: t_ns,
                 pos_cov_m2: [var, 0.0, var],
