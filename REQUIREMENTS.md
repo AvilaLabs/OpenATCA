@@ -3455,3 +3455,6 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   timed per report.
 - **OA-PRF-007** The command line refuses unknown commands, flags and values, and the overload
   comparison reads the counters of the knee run and the overload run.
+- **OA-PRF-008** Every plot of the synthetic traffic is where its aircraft is at the time the plot
+  carries, to within the plot noise; a revolution in which the aircraft crosses the beam's starting
+  azimuth and the crossing cannot be solved gives no plot.
