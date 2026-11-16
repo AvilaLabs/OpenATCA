@@ -8,9 +8,13 @@
 //! aircraft's position against the beam azimuth, and the errors are the profile's range and
 //! azimuth sigmas.
 //!
-//! Stated simplifications (the numbers in a report carry them): straight flight at constant
-//! speed and altitude (reflected at the walls of the box where it would leave); every plot detected (no misses, no false plots, no splits); plots carry
-//! no address; no line-of-sight test; ADS-B noise white at NACp 9.
+//! Stated simplifications (the numbers in a report carry them): constant speed and altitude;
+//! straight flight, except that an aircraft that could not stay in the box on a straight path for
+//! the horizon flies straight to a point from which it turns at the standard rate (3 degrees per
+//! second, a bank of about 25 degrees at 250 knots) onto a circle that fits in the box, and
+//! circles there; velocity is continuous everywhere, so no aircraft turns faster than that;
+//! every plot detected (no misses, no false plots, no splits); plots carry no address; no
+//! line-of-sight test; ADS-B noise white at NACp 9.
 
 use oa_geo::aeqd::{frame_new, try_frame_velocity, unproject, Frame};
 use oa_sensorsim::prng::Rng;
@@ -80,7 +84,7 @@ pub struct TrafficCfg {
     /// Radars, in order; offsets from the centre are fixed (see [`RADAR_OFFSETS_KM`]).
     pub radars: Vec<Kind>,
     /// Aircraft that would leave the box within this time fly the other way; any that would still
-    /// leave it reflect at the wall, so every aircraft is in the box at every time.
+    /// leave it fly onto a circle inside it, so every aircraft is in the box up to this time.
     pub horizon_s: f64,
 }
 
@@ -96,9 +100,28 @@ pub fn half_km(cfg: &TrafficCfg) -> f64 {
     }
 }
 
-/// One aircraft: a constant-speed track in the east-north plane of the centre. Straight while it
-/// stays in the box; at a wall (the box is `half_m` either side of the centre) it reflects, so
-/// the aircraft is in the box at every time.
+/// The turn rate of every turning aircraft: the standard rate, radians per second.
+pub const TURN_RATE_RAD_S: f64 = 3.0 * std::f64::consts::PI / 180.0;
+
+/// The circle an aircraft joins after its straight leg: it flies it at [`TURN_RATE_RAD_S`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Orbit {
+    /// Time of leaving the straight leg, s.
+    t0_s: f64,
+    /// Centre of the circle, metres.
+    ce: f64,
+    cn: f64,
+    /// Offset of the point of leaving from the centre, metres.
+    we: f64,
+    wn: f64,
+    /// Signed turn rate: positive turns left (counter-clockwise from above).
+    omega: f64,
+}
+
+/// One aircraft: a constant-speed track in the east-north plane of the centre. Straight (`ve`,
+/// `vn`) unless it has an orbit, which it joins tangentially after its straight leg and then
+/// circles; the circle lies in the box (the box is `half` either side of the centre), so the
+/// aircraft is in the box at every time, and the velocity is continuous.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aircraft {
     pub addr: u32,
@@ -106,38 +129,100 @@ pub struct Aircraft {
     pub n0: f64,
     pub ve: f64,
     pub vn: f64,
-    /// Half the width of the box the aircraft keeps inside, metres.
-    pub half_m: f64,
+    orbit: Option<Orbit>,
     pub alt_ft: i32,
     /// Offset of its reports within each second, ns (whole milliseconds).
     pub phase_ns: i64,
     pub adsb: bool,
 }
 
-/// A coordinate `x0 + v t` reflected into `[-half, half]`, and the sign of its motion.
-fn reflect(x0: f64, v: f64, t_s: f64, half: f64) -> (f64, f64) {
-    let u = (x0 + v * t_s + half).rem_euclid(4.0 * half);
-    if u < 2.0 * half {
-        (u - half, 1.0)
-    } else {
-        (3.0 * half - u, -1.0)
+/// `(x, y)` turned by `theta` radians counter-clockwise.
+fn rotate(x: f64, y: f64, theta: f64) -> (f64, f64) {
+    let (s, c) = theta.sin_cos();
+    (x * c - y * s, x * s + y * c)
+}
+
+/// The orbit of an aircraft at (`e0`, `n0`) flying along the unit vector (`ue`, `un`) at `speed`
+/// that leaves its straight leg after the least distance from which a circle at the standard
+/// rate fits in the box (inside the walls by 1 m), whichever way it heads and turns; `None`
+/// when no such circle exists. Returns the flown direction too.
+fn plan_orbit(
+    (e0, n0): (f64, f64),
+    (ue, un): (f64, f64),
+    speed: f64,
+    half: f64,
+) -> Option<(Orbit, (f64, f64))> {
+    let r = speed / TURN_RATE_RAD_S;
+    let m = half - r - 1.0;
+    if m < 0.0 {
+        return None;
     }
+    let mut best: Option<(f64, f64, f64, f64, f64)> = None;
+    for flip in [1.0, -1.0] {
+        for side in [1.0, -1.0] {
+            let (ue, un) = (ue * flip, un * flip);
+            // Left normal times side.
+            let (ne, nn) = (-un * side, ue * side);
+            let c0 = (e0 + r * ne, n0 + r * nn);
+            let (mut lo, mut hi) = (0.0f64, f64::INFINITY);
+            let mut empty = false;
+            for (c, u) in [(c0.0, ue), (c0.1, un)] {
+                if u.abs() < 1.0e-12 {
+                    empty |= c.abs() > m;
+                } else {
+                    let (x, y) = ((-m - c) / u, (m - c) / u);
+                    lo = lo.max(x.min(y));
+                    hi = hi.min(x.max(y));
+                }
+            }
+            if empty || lo > hi {
+                continue;
+            }
+            if best.is_none_or(|b| lo < b.0) {
+                best = Some((lo, flip, side, ue, un));
+            }
+        }
+    }
+    let (d, _, side, ue, un) = best?;
+    let (ce, cn) = (e0 + d * ue + r * -un * side, n0 + d * un + r * ue * side);
+    Some((
+        Orbit {
+            t0_s: d / speed,
+            ce,
+            cn,
+            we: r * un * side,
+            wn: -r * ue * side,
+            omega: side * TURN_RATE_RAD_S,
+        },
+        (ue, un),
+    ))
 }
 
 impl Aircraft {
     fn pos(&self, t_s: f64) -> (f64, f64) {
-        (
-            reflect(self.e0, self.ve, t_s, self.half_m).0,
-            reflect(self.n0, self.vn, t_s, self.half_m).0,
-        )
+        match self.orbit {
+            Some(o) if t_s > o.t0_s => {
+                let (x, y) = rotate(o.we, o.wn, o.omega * (t_s - o.t0_s));
+                (o.ce + x, o.cn + y)
+            }
+            _ => (self.e0 + self.ve * t_s, self.n0 + self.vn * t_s),
+        }
     }
 
     /// East and north velocity at `t_s`, metres per second.
     pub fn vel(&self, t_s: f64) -> (f64, f64) {
-        (
-            self.ve * reflect(self.e0, self.ve, t_s, self.half_m).1,
-            self.vn * reflect(self.n0, self.vn, t_s, self.half_m).1,
-        )
+        match self.orbit {
+            Some(o) if t_s > o.t0_s => {
+                // d/dt of the rotated offset: omega times the offset turned a quarter further.
+                let (x, y) = rotate(
+                    o.we,
+                    o.wn,
+                    o.omega * (t_s - o.t0_s) + std::f64::consts::FRAC_PI_2,
+                );
+                (o.omega * x, o.omega * y)
+            }
+            _ => (self.ve, self.vn),
+        }
     }
 }
 
@@ -185,16 +270,36 @@ impl Traffic {
         let mut ac = Vec::with_capacity(cfg.n);
         for i in 0..cfg.n {
             let mut rng = Rng::from_stream(cfg.seed, 0x4143, i as u64);
-            let e0 = (rng.unit() * 2.0 - 1.0) * half;
-            let n0 = (rng.unit() * 2.0 - 1.0) * half;
+            let mut e0 = (rng.unit() * 2.0 - 1.0) * half;
+            let mut n0 = (rng.unit() * 2.0 - 1.0) * half;
             let speed = 120.0 + 140.0 * rng.unit();
             let mut hdg = rng.unit() * std::f64::consts::TAU;
             // An airliner that would leave the box within the horizon flies the other way; one
-            // that would leave it either way (or later, past the horizon) reflects at the wall.
+            // that would leave it either way flies to a circle that fits in the box and circles.
             let reach = speed * cfg.horizon_s;
-            let (e1, n1) = (e0 + reach * hdg.sin(), n0 + reach * hdg.cos());
-            if e1.abs() > half || n1.abs() > half {
-                hdg += std::f64::consts::PI;
+            let leaves = |e: f64, n: f64, h: f64| {
+                let (e1, n1) = (e + reach * h.sin(), n + reach * h.cos());
+                e1.abs() > half || n1.abs() > half
+            };
+            let mut orbit = None;
+            if leaves(e0, n0, hdg) {
+                if leaves(e0, n0, hdg + std::f64::consts::PI) {
+                    let u = (hdg.sin(), hdg.cos());
+                    // A start so near a wall that no circle through it fits in the box starts
+                    // further in (at most two turn radii from the wall).
+                    let planned = plan_orbit((e0, n0), u, speed, half).or_else(|| {
+                        let lim = (half - 2.0 * speed / TURN_RATE_RAD_S - 2.0).max(0.0);
+                        e0 = e0.clamp(-lim, lim);
+                        n0 = n0.clamp(-lim, lim);
+                        plan_orbit((e0, n0), u, speed, half)
+                    });
+                    if let Some((o, (ue, un))) = planned {
+                        orbit = Some(o);
+                        hdg = ue.atan2(un);
+                    }
+                } else {
+                    hdg += std::f64::consts::PI;
+                }
             }
             // Altitude 2,000 to 45,000 ft in 100 ft steps.
             let alt_ft = 2_000 + 100 * ((rng.unit() * 430.0) as i32);
@@ -207,7 +312,7 @@ impl Traffic {
                 n0,
                 ve: speed * hdg.sin(),
                 vn: speed * hdg.cos(),
-                half_m: half,
+                orbit,
                 alt_ft,
                 phase_ns,
                 adsb,
@@ -581,22 +686,89 @@ mod tests {
 
     // REQ: OA-PRF-011
     #[test]
-    fn reflection_folds_a_coordinate_into_the_box_and_flips_its_velocity_at_a_wall() {
-        let half = 50_000.0;
-        // From the east wall, heading east: straight back in.
-        assert_eq!(reflect(half, 100.0, 10.0, half), (half - 1_000.0, -1.0));
-        // From a corner, heading out on both axes, a long way: always inside.
-        for k in 0..2_000 {
-            let t = f64::from(k) * 37.0;
-            for (x0, v) in [(half, 250.0), (-half, -250.0), (0.0, 120.0), (half, -120.0)] {
-                let (x, sign) = reflect(x0, v, t, half);
-                assert!(
-                    x.abs() <= half + 1e-6 && sign.abs() == 1.0,
-                    "{x0} {v} {t}: {x}"
-                );
+    fn velocity_is_continuous_at_constant_speed_and_turns_no_faster_than_the_standard_rate() {
+        let (mut turners, mut straight) = (0usize, 0usize);
+        for horizon_s in [120.0, 7_200.0] {
+            for seed in 0..40u64 {
+                let c = TrafficCfg {
+                    horizon_s,
+                    ..cfg(seed, 300, Layout::Stress)
+                };
+                let t = Traffic::new(&c).unwrap();
+                for a in t.aircraft() {
+                    let speed = a.ve.hypot(a.vn);
+                    if a.orbit.is_some() {
+                        turners += 1;
+                    } else {
+                        straight += 1;
+                    }
+                    let mut prev = a.vel(0.0);
+                    // Two samples per second, to catch a change shorter than a second.
+                    for k in 1..(2.0 * horizon_s.min(1_200.0)) as i64 {
+                        let v = a.vel(k as f64 * 0.5);
+                        assert!(
+                            (v.0.hypot(v.1) - speed).abs() < 1.0e-6,
+                            "{:#x}: speed {} against {speed}",
+                            a.addr,
+                            v.0.hypot(v.1)
+                        );
+                        let turn = (prev.0 * v.1 - prev.1 * v.0).atan2(prev.0 * v.0 + prev.1 * v.1);
+                        assert!(
+                            turn.abs() <= TURN_RATE_RAD_S * 0.5 + 1.0e-9,
+                            "seed {seed} {:#x} at {} s: {:.2} degrees in half a second",
+                            a.addr,
+                            k as f64 * 0.5,
+                            turn.to_degrees()
+                        );
+                        prev = v;
+                    }
+                }
             }
         }
-        // Inside the box the track is straight.
-        assert_eq!(reflect(-10_000.0, 100.0, 50.0, half), (-5_000.0, 1.0));
+        // Both kinds are exercised.
+        assert!(turners > 100 && straight > 100, "{turners} {straight}");
+    }
+
+    // REQ: OA-PRF-011
+    #[test]
+    fn the_position_follows_the_velocity_through_the_turn() {
+        // A numerical derivative of the position matches the velocity on both sides of the join.
+        for seed in 0..20u64 {
+            let c = TrafficCfg {
+                horizon_s: 900.0,
+                ..cfg(seed, 200, Layout::Stress)
+            };
+            let t = Traffic::new(&c).unwrap();
+            for a in t.aircraft().iter().filter(|a| a.orbit.is_some()) {
+                let t0 = a.orbit.map_or(0.0, |o| o.t0_s);
+                for s in [t0 - 5.0, t0 - 0.01, t0 + 0.01, t0 + 5.0, t0 + 77.0] {
+                    if s < 0.0 {
+                        continue;
+                    }
+                    let (p0, p1) = (a.pos(s), a.pos(s + 1.0e-3));
+                    let (v, w) = (
+                        a.vel(s + 5.0e-4),
+                        ((p1.0 - p0.0) * 1.0e3, (p1.1 - p0.1) * 1.0e3),
+                    );
+                    assert!(
+                        (v.0 - w.0).abs() < 1.0e-2 && (v.1 - w.1).abs() < 1.0e-2,
+                        "{:#x} at {s}: {v:?} against {w:?}",
+                        a.addr
+                    );
+                }
+            }
+        }
+    }
+
+    // REQ: OA-PRF-011
+    #[test]
+    fn at_the_run_horizon_only_the_few_that_would_leave_the_box_turn() {
+        let t = Traffic::new(&cfg(3, 2_000, Layout::Stress)).unwrap();
+        let turners = t.aircraft().iter().filter(|a| a.orbit.is_some()).count();
+        assert!(turners > 0 && turners < 200, "{turners}");
+        // The others fly the straight line from where they start.
+        for a in t.aircraft().iter().filter(|a| a.orbit.is_none()) {
+            assert_eq!(a.pos(100.0), (a.e0 + a.ve * 100.0, a.n0 + a.vn * 100.0));
+        }
     }
 }

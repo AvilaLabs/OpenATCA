@@ -27,6 +27,25 @@ use oa_track::{output_clear, output_new, tracker_live_iter, tracker_predict, O_C
 
 const NS: i64 = 1_000_000_000;
 
+/// One extra track: label, first plot s, confirmation s, velocity changes, first-plot minus nearest
+/// change s, first change s.
+type ReflRow = (u32, f64, f64, usize, Option<f64>, Option<f64>);
+
+/// Times (s) within the first `secs` s at which the aircraft's velocity changes, found at 0.1 s steps.
+fn reflections(a: &oa_perf::gen::Aircraft, secs: i64) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut prev = a.vel(0.0);
+    for i in 1..secs * 10 {
+        let t = i as f64 * 0.1;
+        let v = a.vel(t);
+        if (v.0 - prev.0).abs() > 1e-9 || (v.1 - prev.1).abs() > 1e-9 {
+            out.push(t);
+        }
+        prev = v;
+    }
+    out
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a[1].parse().unwrap();
@@ -237,6 +256,7 @@ fn main() {
     let mut late_capped: BTreeMap<usize, u32> = BTreeMap::new();
     let mut bucket_delta: BTreeMap<i64, u32> = BTreeMap::new();
     let mut pair_radars: BTreeMap<String, u32> = BTreeMap::new();
+    let mut refl_rows: Vec<ReflRow> = Vec::new();
     let mut dup_age_labels: HashSet<u32> = HashSet::new();
     for &l in &dup_labels {
         dup_age_labels.insert(l);
@@ -266,6 +286,20 @@ fn main() {
                 let r0 = rk[0];
                 ("radar", inits.get(&r0).map_or(i64::MAX, |i| i.confirm))
             };
+            {
+                let ac = traffic.aircraft()[(l - ADDR_BASE) as usize];
+                let refl = reflections(&ac, secs);
+                let first_s = (xi.first - EPOCH_NS) as f64 * 1e-9;
+                let conf_s = (xi.confirm - EPOCH_NS) as f64 * 1e-9;
+                // nearest reflection at or before the confirmation, and how long before the first plot
+                let near = refl
+                    .iter()
+                    .copied()
+                    .filter(|r| *r <= conf_s)
+                    .map(|r| first_s - r)
+                    .min_by(|a, b| a.abs().total_cmp(&b.abs()));
+                refl_rows.push((l, first_s, conf_s, refl.len(), near, refl.first().copied()));
+            }
             let all_r: HashSet<u8> = xi.radars.iter().copied().collect();
             let rad_tag = if all_r.len() > 1 {
                 "mixed-radar".to_string()
@@ -318,6 +352,29 @@ fn main() {
             }
             *cls.entry(key.clone()).or_default() += 1;
             examples.entry(key).or_default().push(l);
+        }
+    }
+    {
+        // reflection attribution: an extra track is explained when a reflection of its aircraft
+        // lies within WIN s before its first plot (to its confirmation)
+        const WIN: f64 = 20.0;
+        let mut hit = 0;
+        let mut unexplained: Vec<String> = Vec::new();
+        for (l, f, c, nr, near, r0) in &refl_rows {
+            if near.is_some_and(|d| (-(c - f)..=WIN).contains(&d)) {
+                hit += 1;
+            } else {
+                unexplained.push(format!("{l:#x} first {f:.0}s confirm {c:.0}s reflections {nr} first at {r0:?} nearest(first-refl) {near:?}"));
+            }
+        }
+        let ac_refl = traffic
+            .aircraft()
+            .iter()
+            .filter(|a| !reflections(a, secs).is_empty())
+            .count();
+        println!("-- reflection attribution: {hit} of {} extra tracks start within {WIN} s after a reflection of their aircraft; aircraft that reflect at all in {secs} s: {ac_refl} of {n}; extra-track aircraft that reflect: {} of {}", refl_rows.len(), refl_rows.iter().filter(|r| r.3 > 0).count(), refl_rows.len());
+        for u in &unexplained {
+            println!("   not explained: {u}");
         }
     }
     println!("-- extra-track classification (live extras at end) --");
