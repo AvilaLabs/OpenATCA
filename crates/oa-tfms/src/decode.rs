@@ -55,7 +55,7 @@ use crate::schema::{
     MAX_DEPTH, TMI_LIST_BODY, TMI_LIST_TYPE,
 };
 use oa_xml::{
-    attr_needs_decode, decode_into, decode_text_run, resolve_elem_ns, span_bytes,
+    attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind, XmlError,
 };
 
@@ -218,7 +218,7 @@ fn elem_at(doc: &Doc<'_>, e: ElemIx) -> u32 {
 
 fn in_ns(doc: &Doc<'_>, e: ElemIx, ns: Nsx) -> bool {
     match resolve_elem_ns(doc, e) {
-        Ns::Uri(s) => span_bytes(doc.input, s).is_ok_and(|b| b == ns_uri(ns)),
+        Ns::Uri(s) => ns_uri_bytes(doc, s).is_some_and(|b| b == ns_uri(ns)),
         _ => false,
     }
 }

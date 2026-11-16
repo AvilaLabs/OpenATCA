@@ -1389,3 +1389,20 @@ fn field_names_bits_and_tables_agree() {
     assert_eq!(parse_scaled(b"", 7), None);
     assert_eq!(parse_scaled(b"-", 7), None);
 }
+
+// REQ: OA-NOTAM-023
+#[test]
+fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
+    let plain = msg(&[&airport()]);
+    let escaped = plain.replacen("xmlns:event=\"http://", "xmlns:event=\"&#104;ttp://", 1);
+    assert_ne!(plain, escaped);
+    let (n, s) = ok(&plain);
+    let (n2, s2) = ok(&escaped);
+    assert_eq!(n2.event_id[0], n.event_id[0]);
+    assert_eq!(text_of(&n2, 0), text_of(&n, 0));
+    assert_eq!(n2.errors[0], n.errors[0]);
+    assert_eq!(
+        (s2.rows, s2.unknown_elements, s2.unknown_attributes),
+        (s.rows, s.unknown_elements, s.unknown_attributes)
+    );
+}

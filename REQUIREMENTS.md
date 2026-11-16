@@ -835,6 +835,8 @@ Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
   is not in the repository, so that labels allow spaces is a decision, not a confirmed rule.
 - **OA-TBFM-023** Text split by a comment or CDATA section is joined before validation, and the 64-byte
   working bound applies to the total.
+- **OA-TBFM-024** A namespace URI written with a character reference compares as its expanded text, so the message is
+  not refused as foreign.
 
 ### TFMS data service (oa-tfms)
 
@@ -924,6 +926,8 @@ the SFDPS `gufi` (they are different kinds of value, survey).
 - **OA-TFMS-028** Whether a message carried a flight reference is its own flag (`flag::FLIGHT_REF`), so a reference
   of 0 ("0000000000") is told from none; the linkage counts a row without one in `tfms_rows_without_ref` and
   treats it as a flight of its own, never as part of the flight whose reference is 0.
+- **OA-TFMS-029** A namespace URI written with a character reference compares as its expanded text, so the message is
+  not refused as foreign.
 
 ## M1 — Controller display
 
@@ -1222,6 +1226,8 @@ the FAA event extension).
 - **OA-NOTAM-022** A ring coordinate too large for the scaler (twelve integer digits at 1e-7, or a sum past
   `i64`) is refused, not wrapped: the polygons field is a counted error with nothing kept, and a following
   message still decodes.
+- **OA-NOTAM-023** A namespace URI written with a character reference compares as its expanded text, so its elements
+  are not counted as another namespace.
 
 - **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
   (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time
