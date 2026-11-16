@@ -62,8 +62,7 @@ fn sample(t_s: f64) -> Measurement {
     )
 }
 
-// REQ: OA-TRK-001
-// REQ: OA-TRK-002
+// REQ: OA-TRK-001, OA-TRK-002
 #[test]
 fn refused_time_and_measurement_leave_later_valid_fusion_evidence_usable() {
     let mut cfg = fusion_config(fusion_tracker_config(
