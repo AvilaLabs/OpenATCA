@@ -3469,12 +3469,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   input rows changes neither the retained evidence nor the scores.
   limit was reached, the coarse visits, exact tests and initiation tests, the candidates alive at most and the
   buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
-- **OA-TRK-298** An anonymous candidate does not become a second track for an aircraft a live track already
-  holds. At its confirmation its latest plot is gated, with the association gate and its own covariance (and
-  the time between the plot and the track's state), against every live track, those confirmed earlier in the
-  same bucket by any radar included; if it gates, no track is made and `cand_merged_on_confirm` counts it. When
-  a track is confirmed, the anonymous candidates of the other radars that gate with it are cancelled and
-  counted in `cand_cancelled_by_track`; `confirm_gate_tests` counts the tests.
+- **OA-TRK-298** WITHDRAWN: proximity-based candidate merging and cancellation conflicts with E7.
+  Replaced by OA-TRK-323 and OA-TRK-324; anonymous hypotheses stay separate and visibly unidentified.
 - **OA-TRK-299** A plot the bucket's work limit left ungated is deferred: it is not unassigned, so it starts
   no candidate and joins none, and `anon_plots_ungated` counts it. The association loop starts at a plot that
   depends deterministically on the bucket and the radar, so the plots left out are not always the same
@@ -3499,13 +3495,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-303** A candidate takes no hit later than its window: a candidate whose first hit is more than the
   initiation window of scans before a radar's plots of the bucket is expired before those plots are
   offered to it, whether or not the radar delivered plots in the buckets between.
-- **OA-TRK-304** A free anonymous plot that gates with a track made earlier in the same bucket, and
-  whose radar has taken no plot of that track in the plot's scan, starts or joins no candidate
-  (`stale_plots_skipped`): association ran before the track existed. A plot of a scan the track has
-  taken a plot of the radar in is another aircraft's and is a hit as before.
-- **OA-TRK-305** Two radar-only aircraft close together (in formation, or on parallel lines one nautical
-  mile apart) that both radars see from the first scan end as two live tracks, never merged, each
-  updated to the end; the parallel pair's tracks each keep one aircraft's plots.
+- **OA-TRK-304** WITHDRAWN: fresh-track proximity does not prove ownership of a free plot.
+  Replaced by OA-TRK-323; the plot remains available to its own candidate.
+- **OA-TRK-305** WITHDRAWN: exactly one track per anonymous aircraft assumed proximity established
+  identity. OA-TRK-323 retains source hypotheses; tracking quality reports their duplicates explicitly.
 - **OA-TRK-306** The grid of the coarse window has cells about 5.6 km on a side everywhere on earth (bands of
   0.05 degrees of latitude, each cut into as many cells of longitude as keep it that wide at its
   edge nearest a pole), and the window's rectangle is cut into pieces of at most 20 km, each with a box of
@@ -3530,6 +3523,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   point is over the antenna) converts to a position covariance the tracker accepts: where the covariance is a
   line (the determinant under `COV_LINE_RATIO` of the squared trace) its diagonal is raised by that fraction of
   the trace, so the plot is applied and not refused for a non-positive-definite covariance.
+- **OA-TRK-323** Anonymous radar candidates retain their own source-local track hypotheses at confirmation.
+  Proximity to another radar's track and equal, absent or conflicting Mode A codes never cancel a
+  candidate, suppress its free plots or establish duplicate aircraft identity.
+- **OA-TRK-324** Every emitted or predicted row keyed in the reserved radar-only namespace carries
+  `O_IDENTITY_UNCONFIRMED` (bit 16): the key is a local tracking handle and may describe the same aircraft
+  as another hypothesis. Full aircraft addresses do not carry that flag solely for being addresses.
+- **OA-TRK-325** Initiation has a named work budget shared by all radars of a bucket. Candidate
+  visits, address lookups, index construction/query, exact tests and retirement are charged before
+  their work; exhaustion preserves unvisited candidates, explicitly refuses omitted plots and
+  restores scratch buffers. Partial plot pairs never reach the assignment solver.
+- **OA-TRK-326** Aircraft addresses offered to fusion or radar validation fit 24 bits plus the non-ICAO
+  flag (at most `0x01ff_ffff`), or the radar's absent-address marker. An address outside that domain is
+  refused and counted before it can enter a pending queue or claim a reserved local radar key.
+  Local key exhaustion is refused without wrapping, issuing the absent marker or reusing a key.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed
@@ -3846,3 +3853,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   continuous and of constant magnitude, and no aircraft turns faster than the standard rate. So in the
   stress layout every aircraft is in the coverage of every radar throughout, no plot is lost to leaving it,
   and no aircraft makes a manoeuvre a real aircraft could not fly. Deterministic per seed.
+
+- **OA-PRF-012** A capacity run independently counts unique generated truth aircraft offered during
+  measurement, using ADS-B addresses and radar scoring labels in the shell only. All configured
+  aircraft must appear and unknown labels must be zero; repeated sightings count once. Tracker
+  hypothesis count is diagnostic and does not establish input load or distinct aircraft identity.

@@ -596,6 +596,23 @@ fn run_digest(r: &RunOut) -> String {
     oa_sha256::to_hex(&h.finalize())
 }
 
+/// Diagnostic digest with only the new identity-warning bit removed from output rows.
+fn digest_without_identity_warning(r: &RunOut) -> String {
+    let mut copied = r.out.clone();
+    for flag in &mut copied.flags {
+        *flag &= !oa_track::O_IDENTITY_UNCONFIRMED;
+    }
+    let mut h = oa_sha256::Sha256::new();
+    output_hash_into(&mut h, &copied);
+    for i in 0..r.assign.t_ns.len() {
+        h.update(&r.assign.t_ns[i].to_le_bytes()).unwrap();
+        h.update(&r.assign.key[i].to_le_bytes()).unwrap();
+        h.update(&r.assign.label[i].to_le_bytes()).unwrap();
+        h.update(&[r.assign.radar[i], r.assign.how[i]]).unwrap();
+    }
+    oa_sha256::to_hex(&h.finalize())
+}
+
 /// The counts reported when a pin moves: tracks created, identity errors, coast rows, and what
 /// the initiation and the work limit did.
 fn clip_counts(r: &RunOut) -> String {
@@ -607,8 +624,21 @@ fn clip_counts(r: &RunOut) -> String {
         .filter(|f| *f & oa_track::O_COAST != 0)
         .count();
     let s = &r.fstats;
+    let unknown_rows = r
+        .out
+        .flags
+        .iter()
+        .filter(|f| **f & oa_track::O_IDENTITY_UNCONFIRMED != 0)
+        .count();
+    let unknown_keys: std::collections::BTreeSet<u32> = r
+        .out
+        .addr
+        .iter()
+        .zip(&r.out.flags)
+        .filter_map(|(&key, &flag)| (flag & oa_track::O_IDENTITY_UNCONFIRMED != 0).then_some(key))
+        .collect();
     format!(
-        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {}",
+        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {} init_capped {} init_plots_refused {} identity_unconfirmed_rows {} identity_unconfirmed_keys {}",
         r.out.t_ns.len(),
         s.plots_in,
         s.plots_refused,
@@ -621,7 +651,7 @@ fn clip_counts(r: &RunOut) -> String {
         id.false_applied,
         coast,
         s.bucket_work_capped,
-        s.anon_plots_ungated
+        s.anon_plots_ungated, s.init_capped, s.init_plots_refused, unknown_rows, unknown_keys.len()
     )
 }
 
@@ -667,6 +697,10 @@ fn the_real_clip_runs_give_the_pinned_digests() {
             r.fstats.plots_refused
         );
         println!("clip counts {kind:?} mixed={mixed}: {}", clip_counts(&r));
+        println!(
+            "clip without identity bit {kind:?} mixed={mixed}: {}",
+            digest_without_identity_warning(&r)
+        );
         got.push(d);
     }
     // The two radars together on one run.
@@ -678,6 +712,10 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
     println!("clip digest two radars: {}", run_digest(&r));
     println!("clip counts two radars: {}", clip_counts(&r));
+    println!(
+        "clip without identity bit two radars: {}",
+        digest_without_identity_warning(&r)
+    );
     got.push(run_digest(&r));
     assert_eq!(got, PINNED_CLIP_DIGESTS);
 }
@@ -755,12 +793,24 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // 109.87/5.775 to 108.52/5.882; 279.66/10.085 to 279.14/10.548; 15.53/1.292 to 16.06/1.332;
 // 22.69/1.152 to 22.79/1.151; 132.22/1.535 to 132.10/1.570. The earlier digests were e8bfce48..963d,
 // 6d546fa6..6a7e, bc1f506c..4a01, d3782dae..95a8 and eaadd04b..89da9.
+// Updated for OA-TRK-323/324: every anonymous output now carries bit 16. The first four
+// cases are byte-identical to their prior output and assignment stream after removing ONLY
+// that bit (verified diagnostic hashes). Two radars also retain two formerly suppressed
+// hypotheses: tracks 665 -> 667, confirmed candidates 89 -> 91, duplicate hypotheses 17 -> 19,
+// rows 172387 -> 172530, coast rows 10312 -> 10406; swaps/wrong plots/false applied/false
+// tracks remain 23/65/1/0. All five have zero new caps or refused plots. Old raw hashes below;
+// the raw digest definition still includes every flag byte.
+// 0f7056500b44af3a6fb4ad889aa10864ea2f1dca9b2c819a9b5dadc657548e8f
+// 1ee82e469c1cb70db1112ce39544fd944af73c2e562ddb9a012904dd9747bfd6
+// 255279cc32ccad5633c81b6a4252a600a993d5b25ead32a3e5f949fd35d12dce
+// cf00b4349af0b9bcf0ae7e77ce168cbebd69b9d1f0eb702c406853da2b5ffe0a
+// d7c3d24f5a4a89625e5970882feaee004386218cfc5b949f5595a17ff5d7d5e5
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "0f7056500b44af3a6fb4ad889aa10864ea2f1dca9b2c819a9b5dadc657548e8f",
-    "1ee82e469c1cb70db1112ce39544fd944af73c2e562ddb9a012904dd9747bfd6",
-    "255279cc32ccad5633c81b6a4252a600a993d5b25ead32a3e5f949fd35d12dce",
-    "cf00b4349af0b9bcf0ae7e77ce168cbebd69b9d1f0eb702c406853da2b5ffe0a",
-    "d7c3d24f5a4a89625e5970882feaee004386218cfc5b949f5595a17ff5d7d5e5",
+    "7fb208ee878d35634456680264a501a67c6ef4cd8018f66b9a7ca3a423b95c9f",
+    "9cdad807478bd90a2f8b9b0a7c16188cb986b905ad6a5064a7f09f3e230c78bf",
+    "a6aa4ae1c2f1d4d2bfb3df2898c50c2e6c45a5cb5414dc8f8dfbe5bf395aef3a",
+    "87aad9103f98537f00930c998a49c90c1e502c8183c5a099f3818f4add778b71",
+    "b5adce47ffe6b5fc4ceff2cb8ddeeabb892f7fd36e684613a9414367f5b34cc4",
 ];
 
 // REQ: OA-TRK-311

@@ -68,8 +68,8 @@ use crate::time_gate::{
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
     TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL, NONE_I32,
-    NO_ADDR, O_COAST, O_RADAR_DISAGREES, O_TICK, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION,
-    REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
+    NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, RADAR_KEY_BASE,
+    REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -589,6 +589,9 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
     };
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
+    if row.addr >= RADAR_KEY_BASE {
+        row.flags |= O_IDENTITY_UNCONFIRMED;
+    }
     if at_ns <= col(&t.disagree_until_ns, slot, i64::MIN) {
         row.flags |= O_RADAR_DISAGREES;
     }
@@ -1215,6 +1218,9 @@ pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, boo
     let f = col(&t.cur, slot, blank_filter());
     let mut row = filter_output(&f, at_ns.max(f.t_ns))?;
     row.addr = key;
+    if key >= RADAR_KEY_BASE {
+        row.flags |= O_IDENTITY_UNCONFIRMED;
+    }
     Some((
         row,
         col(&t.state, slot, FREE) == CONFIRMED,

@@ -39,9 +39,9 @@ architecture has been tested.
 | Rule | Status today |
 |---|---|
 | Fixed capacities, named, with a written behaviour when full (C1, C2) | Followed in most collections. Buffer addresses and capacities are checked on exercised paths; these checks do not count every allocation. The complete C5 allocation check remains open in [candidate validation](VALIDATION.md). |
-| Bounded work, not only bounded storage (C7) | Not uniform. Several decoders and the tracker have had limits that capped memory but not the work done; these are being fixed and the rule is being made checkable. |
+| Bounded work, not only bounded storage (C7) | Not uniform. Radar initiation now shares a checked work allowance across radars, including address lookups and grid queries; exhaustion is counted. Other paths still need work arguments. |
 | Invalid input is refused and counted, never passed on or substituted (E5, E6) | Followed in most paths. Some paths have been found to substitute a value or drop data silently; these are being found and fixed. |
-| Identity from positive evidence (E7) | Written as a rule on 2026-11-16. Matching by local name, by raw text, or by position alone has been found and fixed in several places. |
+| Identity from positive evidence (E7) | Anonymous radar candidates remain separate source-local hypotheses and carry an unconfirmed-identity flag. Proximity and Mode A do not establish duplicate aircraft identity. Input addresses cannot claim the reserved local-key namespace. |
 | Arithmetic on untrusted values is checked before use (E8) | Not uniform; being made checkable with clippy's arithmetic and cast lints on the input-handling crates. |
 | Deterministic replay (B6) | Tested on one platform; see above. |
 | Measurements that cannot flatter the result (G6) | Capacity claims now fail on any lost work and on any second over budget. Benchmark definitions are in [BENCHMARKS.md](BENCHMARKS.md); each change to a metric is a reviewed change. |
@@ -52,3 +52,5 @@ The capacity figures come from `tools/oa-perf`: synthetic traffic, a laptop (Int
 flight-plan processing. A run passes only if every measured second finishes within real time and no
 work is lost (no refused plot, capped batch, overflow or refusal of any kind). They show where the
 tracker breaks under load; they are not a like-for-like comparison with a fielded system.
+Measured input coverage verifies the offered aircraft count independently; reported track counts
+are hypotheses and may include unresolved duplicates.

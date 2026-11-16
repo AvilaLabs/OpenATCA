@@ -192,6 +192,17 @@ fn push_cell(keys: &[u64], cand: &mut Vec<u32>, cell: u32) {
     }
 }
 
+/// Result of a point-grid query with an explicit work allowance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointGridQueryResult {
+    /// The query completed; `false` means the caller should use its wide fallback.
+    Complete(bool),
+    /// Work ran out before the next cell/probe/entry visit. `out` contains a partial result.
+    Capped,
+    /// The caller's output buffer cannot hold every indexed point without reallocating.
+    OutputFull,
+}
+
 fn push_all(ix: &CoarseIndex, out: &mut Vec<u32>) {
     out.clear();
     for &k in &ix.keys {
@@ -458,6 +469,82 @@ pub fn point_grid_query(g: &PointGrid, out: &mut Vec<u32>, x: f64, y: f64, r: f6
             push_cell(&g.keys, out, point_key(ix, iy));
         }
     }
+    true
+}
+
+/// Point-grid query that charges before every cell, binary-search comparison, and key visit.
+/// `remaining` is decreased only for completed/attempted work, and `spent` reports the same
+/// units for the owner's counter. `out` needs room for every indexed point to avoid growing.
+/// On `Capped`, callers must discard `out` and refuse the query.
+pub fn point_grid_query_budgeted(
+    g: &PointGrid,
+    out: &mut Vec<u32>,
+    x: f64,
+    y: f64,
+    r: f64,
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> PointGridQueryResult {
+    if out.capacity() < g.keys.len() {
+        return PointGridQueryResult::OutputFull;
+    }
+    out.clear();
+    if !(r.is_finite() && x.is_finite() && y.is_finite()) {
+        return PointGridQueryResult::Complete(false);
+    }
+    let rings = (r.max(0.0) / g.cell_m).ceil() as i64;
+    if rings > POINT_RINGS_MAX {
+        return PointGridQueryResult::Complete(false);
+    }
+    let (cx, cy) = point_cell(g, x, y);
+    for ix in (cx - rings).max(-POINT_CELLS)..=(cx + rings).min(POINT_CELLS - 1) {
+        for iy in (cy - rings).max(-POINT_CELLS)..=(cy + rings).min(POINT_CELLS - 1) {
+            if !charge_point_grid(remaining, spent) {
+                return PointGridQueryResult::Capped;
+            }
+            let cell = point_key(ix, iy);
+            let lo_key = u64::from(cell) << 32;
+            let mut lo = 0usize;
+            let mut hi = g.keys.len();
+            while lo < hi {
+                if !charge_point_grid(remaining, spent) {
+                    return PointGridQueryResult::Capped;
+                }
+                let mid = lo + (hi - lo) / 2;
+                if g.keys.get(mid).is_some_and(|&key| key < lo_key) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let mut at = lo;
+            loop {
+                if at >= g.keys.len() {
+                    break;
+                }
+                if !charge_point_grid(remaining, spent) {
+                    return PointGridQueryResult::Capped;
+                }
+                let Some(&key) = g.keys.get(at) else {
+                    break;
+                };
+                if key >> 32 != u64::from(cell) {
+                    break;
+                }
+                out.push(key as u32);
+                at += 1;
+            }
+        }
+    }
+    PointGridQueryResult::Complete(true)
+}
+
+fn charge_point_grid(remaining: &mut usize, spent: &mut usize) -> bool {
+    if *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    *spent = (*spent).saturating_add(1);
     true
 }
 
@@ -879,6 +966,41 @@ mod tests {
             extra.extend(ring(10_000.0));
             finds_extras(&s, n, extra, (1_100_000.0, 0.0), 20_000.0, 10);
         }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn point_grid_budget_stops_before_the_next_probe() {
+        let points = [(0.0, 0.0), (1.0, 1.0)];
+        let mut grid = point_grid_new(points.len(), 1.0);
+        point_grid_build(&mut grid, points.len(), |i| points.get(i).copied());
+        let mut out = Vec::with_capacity(points.len());
+        let (mut remaining, mut spent) = (1usize, 0usize);
+        assert_eq!(
+            point_grid_query_budgeted(&grid, &mut out, 0.0, 0.0, 1.0, &mut remaining, &mut spent,),
+            PointGridQueryResult::Capped
+        );
+        assert_eq!(remaining, 0);
+        assert_eq!(spent, 1);
+        assert!(out.is_empty());
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn point_grid_budget_refuses_output_that_could_reallocate() {
+        let points = [(0.0, 0.0)];
+        let mut grid = point_grid_new(points.len(), 1.0);
+        point_grid_build(&mut grid, points.len(), |i| points.get(i).copied());
+        let mut out = Vec::new();
+        let before = (out.as_ptr(), out.capacity());
+        let (mut remaining, mut spent) = (10usize, 0usize);
+        assert_eq!(
+            point_grid_query_budgeted(&grid, &mut out, 0.0, 0.0, 0.0, &mut remaining, &mut spent,),
+            PointGridQueryResult::OutputFull
+        );
+        assert_eq!((out.as_ptr(), out.capacity()), before);
+        assert_eq!(remaining, 10);
+        assert_eq!(spent, 0);
     }
 
     // REQ: OA-TRK-301

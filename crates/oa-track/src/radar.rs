@@ -489,6 +489,9 @@ pub fn polar_cov_local(
 
 /// Checks a plot (E5).
 pub fn plot_check(p: &RadarPlot) -> Result<(), RadarError> {
+    if p.addr != NO_ADDR && p.addr > crate::types::MAX_AIRCRAFT_ADDRESS {
+        return Err(RadarError::BadPlot("address"));
+    }
     // The tracker's own limit on a time of applicability, so every time difference taken of a
     // plot's time is within range.
     if p.time_ns.unsigned_abs() > TIME_LIMIT_NS as u64 {

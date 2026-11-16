@@ -117,6 +117,18 @@ the output goes back once, by as much as the clock had been forged ahead); `time
   would never update their tracks. If the swap rate on the
   recorded day is not zero, JPDA for closely spaced radar-only targets is the next step.
 
+**Unconfirmed identity.** Anonymous candidates keep separate source-local hypotheses; proximity
+and Mode A never cancel them or suppress their free plots. Every row of a radar-only key carries
+`O_IDENTITY_UNCONFIRMED`: it may describe the same aircraft as another key. These keys are not
+aircraft identities. Input addresses cannot claim their reserved namespace. Hypothesis counts,
+including possible duplicates, stay visible in scoring and capacity reports.
+
+Initiation has a separate work allowance shared by all radars of a bucket: candidate visits,
+address lookups, grid construction/query and retirement are charged before work. Exhaustion
+preserves unvisited candidates and explicitly refuses unprocessed plots; it does not promise a
+retry. One bounded refusal-accounting pass reports loss even with no allowance left. This is a
+bound on initiation, not a complete work or allocation proof for the whole tracker.
+
 **Initiation, coasting, drop.** Tentative to confirmed by M-of-N: 2 of 3 for ADS-B with a
 plausible address and kinematics, 3 of 4 for radar only. Coast after missed expected updates,
 flagged; drop after a time set from the recorded data per airspace (en route, terminal). Every

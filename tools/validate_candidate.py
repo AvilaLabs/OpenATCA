@@ -16,9 +16,9 @@ ALLOWED_ENV = {"OPENATCA_DATA", "OPENATCA_RAW", "OPENATCA_SNAPSHOT",
                "OPENATCA_GEODTEST", "OPENATCA_CIFP", "OPENATCA_NASR",
                "OPENATCA_ADSB_CLIP", "OPENATCA_SENSORSIM_CLIP"}
 LOSS_KEYS = tuple("loss." + k for k in (
-    "fusion.plots_refused", "fusion.late", "fusion.pending_overflow", "fusion.hold_evicted",
+    "fusion.plots_refused", "fusion.adsb_address_refused", "fusion.late", "fusion.pending_overflow", "fusion.hold_evicted",
     "fusion.bucket_plot_overflow", "fusion.bucket_work_capped", "fusion.anon_plots_ungated",
-    "fusion.init_capped", "fusion.assoc_refused", "fusion.cand_capacity",
+    "fusion.init_capped", "fusion.init_plots_refused", "fusion.assoc_refused", "fusion.cand_capacity",
     "fusion.cand_no_height", "fusion.no_height_pairs", "fusion.track_refused",
     "fusion.assign_log_overflow", "fusion.plot_scan_full", "fusion.wide_full",
     "fusion.init_wide_full", "fusion.track_rec_overflow", "fusion.keyinfo_overflow",
@@ -209,7 +209,8 @@ def evaluate_perf(kv, seconds, expected_s, n, overload=False, require_adsb=True)
     """Return explicit failures; absent evidence never defaults to a pass."""
     errors = []
     required = {"keeps_up", "lost_work", "buffers_stable", "tracks_confirmed",
-                "measure_s_asked", "measure_s_done", "truncated"}
+                "measure_s_asked", "measure_s_done", "truncated",
+                "offered_aircraft_unique", "offered_aircraft_expected", "unknown_input_labels"}
     missing = sorted(required - kv.keys())
     if missing:
         errors.append("missing required keys: " + ", ".join(missing))
@@ -233,13 +234,18 @@ def evaluate_perf(kv, seconds, expected_s, n, overload=False, require_adsb=True)
     positive_losses = [k for k, v in losses.items() if not _finite_zero(v)]
     if any(not _nonnegative_integer(v) for v in losses.values()):
         errors.append("loss counters must be nonnegative integers")
-    for key in ("tracks_confirmed", "measure_s_asked", "measure_s_done", "truncated"):
+    for key in ("tracks_confirmed", "measure_s_asked", "measure_s_done", "truncated",
+                "offered_aircraft_unique", "offered_aircraft_expected", "unknown_input_labels"):
         if key in kv and not _nonnegative_integer(kv[key]):
             errors.append(f"{key} must be a nonnegative integer")
     if nums.get("measure_s_asked") != expected_s or nums.get("measure_s_done") != expected_s or nums.get("truncated") != 0:
         errors.append("measurement window is partial or mismatched")
     if nums.get("buffers_stable") != 1:
         errors.append("buffers are not confirmed stable")
+    if nums.get("offered_aircraft_expected") != n or nums.get("offered_aircraft_unique") != n:
+        errors.append("measured input aircraft coverage differs from configured n")
+    if nums.get("unknown_input_labels") != 0:
+        errors.append("measured input has unknown truth labels")
     if overload:
         if nums.get("keeps_up") != 0 or nums.get("lost_work") != 1:
             errors.append("overload must fail keeps_up and report lost_work")
@@ -250,8 +256,6 @@ def evaluate_perf(kv, seconds, expected_s, n, overload=False, require_adsb=True)
             errors.append("positive run contradicts keeps_up/lost_work")
         if positive_losses:
             errors.append("positive run has loss: " + ", ".join(positive_losses))
-        if nums.get("tracks_confirmed") != n:
-            errors.append("confirmed track count differs from configured n")
     if not seconds:
         errors.append("missing per-second CSV rows")
     elif len(seconds) != expected_s:

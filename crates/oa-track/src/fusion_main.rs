@@ -1056,7 +1056,9 @@ ESASSP bars (EUROCONTROL-SPEC-0147 Ed 1.3 Vol 1 Table 4, 3 NM Recommended): R4 p
 (transversal acceleration 1.5 m/s^2). '+' marks a value meeting its bar, '-' missing it. Scoring rows are the\n\
 track state at each applied report (the closest to ESASSP's per-report errors), coasting rows excluded.\n\
 These synthetic runs are far below ESASSP's 36,000-interval sample; they are an accuracy comparison, not an\n\
-ESASSP exit result."
+ESASSP exit result.\n\
+Radar-only keys are source-local tracking hypotheses with unconfirmed identity; several keys may\n\
+describe one aircraft. Duplicate hypothesis counts remain in the tables."
     );
     let kinds: &[Kind] = if opts.terminal_only {
         &[Kind::Terminal]

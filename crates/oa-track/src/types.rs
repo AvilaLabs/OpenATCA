@@ -12,6 +12,11 @@ use crate::params::{
 pub const NONE_I32: i32 = i32::MIN;
 /// Absent address: a measurement without an address cannot be keyed to an ADS-B track.
 pub const NO_ADDR: u32 = u32::MAX;
+/// Largest aircraft address, including the non-ICAO bit 24.
+pub const MAX_AIRCRAFT_ADDRESS: u32 = 0x01ff_ffff;
+/// Local radar tracking handles start here and do not prove aircraft identity.
+pub const RADAR_KEY_BASE: u32 = 0x4000_0000;
+const _: () = assert!(RADAR_KEY_BASE > MAX_AIRCRAFT_ADDRESS);
 /// Absent identity (Mode A) code.
 pub const NO_IDENT: u16 = u16::MAX;
 
@@ -42,7 +47,9 @@ pub struct Measurement {
     pub alt_ft: i32,
     /// Vertical rate, feet per minute, or [`NONE_I32`].
     pub vrate_fpm: i32,
-    /// 24-bit aircraft address (bit 24 set for a non-ICAO address), or [`NO_ADDR`].
+    /// Aircraft address (bit 24 set for non-ICAO), or an internal local tracking handle.
+    /// Fusion input accepts aircraft addresses only; anonymous radar handles start at
+    /// [`RADAR_KEY_BASE`]. [`NO_ADDR`] means absent and cannot key a track.
     pub addr: u32,
     /// Altitude quantisation step, feet (25, 100); 0 if the altitude has none.
     pub alt_quant_ft: u16,
@@ -241,6 +248,9 @@ pub const O_TICK: u8 = 4;
 /// changed by it; a consumer reads it as "this track's position is contradicted by radar" (a
 /// spoofed or faulty ADS-B position, or another aircraft on the address).
 pub const O_RADAR_DISAGREES: u8 = 8;
+/// The key is a local radar tracking handle, without a confirmed aircraft address. It may
+/// describe the same aircraft as another hypothesis; proximity and Mode A do not settle this.
+pub const O_IDENTITY_UNCONFIRMED: u8 = 16;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
@@ -279,7 +289,7 @@ pub struct TrackOutput {
     pub mu_h: Vec<[f32; 2]>,
     /// Vertical model probabilities `[level, climb or descent]`.
     pub mu_v: Vec<[f32; 2]>,
-    /// [`O_COAST`], [`O_HAS_ALT`], [`O_TICK`], [`O_RADAR_DISAGREES`].
+    /// [`O_COAST`], [`O_HAS_ALT`], [`O_TICK`], [`O_RADAR_DISAGREES`], [`O_IDENTITY_UNCONFIRMED`].
     pub flags: Vec<u8>,
 }
 

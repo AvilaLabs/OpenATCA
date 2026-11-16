@@ -95,7 +95,15 @@ pub struct CapResult {
     pub tracker_warm: TrackerStats,
     pub out_overflow_warm: u64,
     pub tracks_tentative: usize,
+    /// Confirmed tracking hypotheses, including unresolved anonymous duplicates.
     pub tracks_confirmed: usize,
+    /// Distinct generated truth aircraft represented by at least one measured ADS-B report or
+    /// radar plot offered to fusion. This is input coverage, not a tracker hypothesis count.
+    pub offered_aircraft_unique: usize,
+    /// Configured generated truth aircraft expected in the measured window.
+    pub offered_aircraft_expected: usize,
+    /// Offered ADS-B addresses or plot labels absent from the generated truth address map.
+    pub unknown_input_labels: u64,
     pub radar_track_recs_taken: u64,
     pub bookkeeping: (usize, usize),
     pub buffers_stable: bool,
@@ -147,7 +155,10 @@ impl CapResult {
     /// A capacity claim: fast enough and no work lost. The knee is the largest `n` where this
     /// holds.
     pub fn keeps_up(&self) -> bool {
-        self.in_time() && !self.lost_work()
+        self.in_time()
+            && !self.lost_work()
+            && self.offered_aircraft_unique == self.offered_aircraft_expected
+            && self.unknown_input_labels == 0
     }
 
     /// The same test as [`CapResult::keeps_up`] (the slowest advance is already under the budget);
@@ -164,6 +175,7 @@ pub const ADVANCE_BUDGET_MS: f64 = 1000.0;
 pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
     vec![
         ("adsb_in", s.adsb_in),
+        ("adsb_address_refused", s.adsb_address_refused),
         ("plots_in", s.plots_in),
         ("plots_refused", s.plots_refused),
         ("late", s.late),
@@ -201,6 +213,9 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("reg_history_full", s.reg_history_full),
         ("anon_plots_ungated", s.anon_plots_ungated),
         ("init_capped", s.init_capped),
+        ("init_work", s.init_work),
+        ("init_plots_refused", s.init_plots_refused),
+        ("init_refusal_pass_visits", s.init_refusal_pass_visits),
         ("plot_scan_full", s.plot_scan_full),
         ("wide_full", s.wide_full),
         ("init_wide_full", s.init_wide_full),
@@ -233,6 +248,8 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "processed",
     "tracks_at_sum",
     "init_tests",
+    "init_work",
+    "init_refusal_pass_visits",
     "cands_live_max",
     "assoc_runs",
     "coarse_width_sum_m",
@@ -292,6 +309,7 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
 pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
         ("fusion.plots_refused".into(), f.plots_refused),
+        ("fusion.adsb_address_refused".into(), f.adsb_address_refused),
         ("fusion.late".into(), f.late),
         ("fusion.pending_overflow".into(), f.pending_overflow),
         ("fusion.hold_evicted".into(), f.hold_evicted),
@@ -299,6 +317,7 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
         ("fusion.bucket_work_capped".into(), f.bucket_work_capped),
         ("fusion.anon_plots_ungated".into(), f.anon_plots_ungated),
         ("fusion.init_capped".into(), f.init_capped),
+        ("fusion.init_plots_refused".into(), f.init_plots_refused),
         ("fusion.assoc_refused".into(), f.assoc_refused),
         ("fusion.cand_capacity".into(), f.cand_capacity),
         ("fusion.cand_no_height".into(), f.cand_no_height),
@@ -382,6 +401,56 @@ fn snapshot(f: &oa_track::fusion::Fusion, m: &mut HashMap<u32, i64>) {
     }
 }
 
+/// Measured-window truth coverage. All maps and bitset storage are prepared before timing;
+/// account calls only inspect offered shell inputs and never touch fusion's timed work.
+// A7.2: shell bookkeeping, allocated once before the measured windows.
+struct OfferedCoverage {
+    by_addr: HashMap<u32, usize>,
+    seen: Vec<bool>,
+    unique: usize,
+    unknown: u64,
+}
+
+fn offered_new(aircraft: &[crate::gen::Aircraft]) -> OfferedCoverage {
+    let mut by_addr = HashMap::with_capacity(aircraft.len());
+    for (i, a) in aircraft.iter().enumerate() {
+        by_addr.insert(a.addr, i);
+    }
+    OfferedCoverage {
+        by_addr,
+        seen: vec![false; aircraft.len()],
+        unique: 0,
+        unknown: 0,
+    }
+}
+
+fn offered_mark(coverage: &mut OfferedCoverage, label: u32) {
+    let Some(&i) = coverage.by_addr.get(&label) else {
+        coverage.unknown = coverage.unknown.saturating_add(1);
+        return;
+    };
+    if let Some(seen) = coverage.seen.get_mut(i) {
+        if !*seen {
+            *seen = true;
+            coverage.unique += 1;
+        }
+    } else {
+        coverage.unknown = coverage.unknown.saturating_add(1);
+    }
+}
+
+fn offered_adsb(coverage: &mut OfferedCoverage, reports: &[Measurement]) {
+    for report in reports {
+        offered_mark(coverage, report.addr);
+    }
+}
+
+fn offered_plots(coverage: &mut OfferedCoverage, radar_plots: &[Vec<oa_track::radar::RadarPlot>]) {
+    for plot in radar_plots.iter().flatten() {
+        offered_mark(coverage, plot.label);
+    }
+}
+
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let n = cfg.traffic.n;
@@ -392,6 +461,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let base = tracker_cfg(cfg.max_tracks, n);
     let fcfg = fusion_config(fusion_tracker_config(&base, &sites));
     let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
+    // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
+    // any core timing. Multiple radar labels for one aircraft intentionally count once.
+    let mut offered = offered_new(traffic.aircraft());
     let rss_after_new_kb = status_kb("VmRSS").unwrap_or(0);
     let mut out = output_new(base.out_capacity);
     let buffers0 = fusion_buffers(&f);
@@ -426,6 +498,10 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
+        if measured {
+            offered_adsb(&mut offered, &adsb);
+            offered_plots(&mut offered, &plots);
+        }
         let until = EPOCH_NS.saturating_add((k + 1).saturating_mul(NS_PER_S));
         if measured {
             snapshot(&f, &mut before);
@@ -556,6 +632,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         out_overflow_warm: warm.2,
         tracks_tentative: tent,
         tracks_confirmed: conf,
+        offered_aircraft_unique: offered.unique,
+        offered_aircraft_expected: n,
+        unknown_input_labels: offered.unknown,
         radar_track_recs_taken: recs_taken,
         bookkeeping: fusion_bookkeeping_len(&f),
         buffers_stable: fusion_buffers(&f) == buffers0,
@@ -622,6 +701,9 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("out_overflow", r.out_overflow);
     kv.put("tracks_tentative", r.tracks_tentative);
     kv.put("tracks_confirmed", r.tracks_confirmed);
+    kv.put("offered_aircraft_unique", r.offered_aircraft_unique);
+    kv.put("offered_aircraft_expected", r.offered_aircraft_expected);
+    kv.put("unknown_input_labels", r.unknown_input_labels);
     kv.put("radar_track_recs_taken", r.radar_track_recs_taken);
     kv.put("keyinfo_len", r.bookkeeping.0);
     kv.put("radar_track_recs_held", r.bookkeeping.1);
@@ -749,8 +831,12 @@ pub fn cap_text(r: &CapResult) -> String {
         r.age_unknown
     ));
     s.push_str(&format!(
-        "  tracks at the end: {} confirmed, {} tentative (aircraft {})\n",
+        "  tracking hypotheses at the end: {} confirmed, {} tentative (input aircraft {})\n",
         r.tracks_confirmed, r.tracks_tentative, r.n
+    ));
+    s.push_str(&format!(
+        "  measured input truth coverage: {}/{} unique aircraft offered; unknown labels {}\n",
+        r.offered_aircraft_unique, r.offered_aircraft_expected, r.unknown_input_labels
     ));
     let moved: Vec<String> = r
         .loss()
@@ -807,6 +893,7 @@ mod tests {
         let (f, t) = (&mut r.fusion, &mut r.tracker);
         match name {
             "fusion.plots_refused" => f.plots_refused = 1,
+            "fusion.adsb_address_refused" => f.adsb_address_refused = 1,
             "fusion.late" => f.late = 1,
             "fusion.pending_overflow" => f.pending_overflow = 1,
             "fusion.hold_evicted" => f.hold_evicted = 1,
@@ -814,6 +901,7 @@ mod tests {
             "fusion.bucket_work_capped" => f.bucket_work_capped = 1,
             "fusion.anon_plots_ungated" => f.anon_plots_ungated = 1,
             "fusion.init_capped" => f.init_capped = 1,
+            "fusion.init_plots_refused" => f.init_plots_refused = 1,
             "fusion.assoc_refused" => f.assoc_refused = 1,
             "fusion.cand_capacity" => f.cand_capacity = 1,
             "fusion.cand_no_height" => f.cand_no_height = 1,
@@ -880,12 +968,55 @@ mod tests {
         }
     }
 
+    // REQ: OA-PRF-012
+    #[test]
+    fn offered_coverage_counts_unique_truth_and_rejects_skips_or_unknown_labels() {
+        // Three generated aircraft exist, but only two labels were offered; duplicate radar
+        // sightings of the first aircraft count once, and an unknown label is explicit.
+        let mut coverage = OfferedCoverage {
+            by_addr: [(10, 0), (11, 1), (12, 2)].into_iter().collect(),
+            seen: vec![false; 3],
+            unique: 0,
+            unknown: 0,
+        };
+        offered_mark(&mut coverage, 10); // ADS-B
+        offered_mark(&mut coverage, 10); // same truth aircraft from another radar
+        offered_mark(&mut coverage, 11);
+        offered_mark(&mut coverage, 99); // not part of generated truth
+        assert_eq!(coverage.unique, 2);
+        assert_eq!(coverage.unknown, 1);
+        assert_ne!(
+            coverage.unique, 3,
+            "a skipped truth aircraft must fail coverage"
+        );
+        assert_ne!(
+            coverage.unknown, 0,
+            "an unknown offered label must fail coverage"
+        );
+    }
+
+    // REQ: OA-PRF-012
+    #[test]
+    fn incomplete_input_coverage_cannot_pass_a_fast_run() {
+        let mut r = run_capacity(&small(20, 3, 5)).unwrap();
+        assert!(r.keeps_up());
+        r.offered_aircraft_unique -= 1;
+        assert!(r.in_time(), "the control remains fast");
+        assert!(!r.keeps_up());
+        r.offered_aircraft_unique += 1;
+        r.unknown_input_labels = 1;
+        assert!(!r.keeps_up(), "an unknown offered label passed");
+    }
+
     // REQ: OA-PRF-003
     #[test]
     fn a_small_run_processes_all_traffic_and_reports_every_figure() {
         let r = run_capacity(&small(100, 10, 20)).unwrap();
         assert_eq!(r.measure_s_done, 20);
         assert!(!r.truncated);
+        assert_eq!(r.offered_aircraft_unique, r.offered_aircraft_expected);
+        assert_eq!(r.offered_aircraft_expected, 100);
+        assert_eq!(r.unknown_input_labels, 0);
         // All traffic was offered and processed; nothing was refused or cut.
         let f = &r.fusion;
         assert!(f.adsb_in > 0 && f.plots_in > 0, "{f:?}");
@@ -897,12 +1028,9 @@ mod tests {
         assert_eq!(r.out_overflow, 0);
         assert_eq!(r.tracker.capacity_refused, 0);
         assert!(r.buffers_stable);
-        // Every aircraft has a track (a few radar-only duplicates of ADS-B aircraft may exist).
-        assert!(
-            r.tracks_confirmed >= 95 && r.tracks_confirmed <= 130,
-            "{}",
-            r.tracks_confirmed
-        );
+        // Output has confirmed hypotheses; input coverage above establishes the offered load.
+        // Unidentified aliases remain visible rather than being merged to hit an upper count.
+        assert!(r.tracks_confirmed >= 95, "{}", r.tracks_confirmed);
         // Timing and age figures exist and are ordered.
         assert_eq!(r.advance_ms.n, 20);
         assert!(r.advance_ms.p50 <= r.advance_ms.p99 && r.advance_ms.p99 <= r.advance_ms.max);

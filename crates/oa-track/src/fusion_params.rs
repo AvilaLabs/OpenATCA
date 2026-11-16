@@ -167,7 +167,7 @@ pub const REG_CUSUM_CLIP: f64 = 3.0;
 /// Limit: radars.
 pub const MAX_RADARS: usize = 8;
 /// Radar-only tracks are keyed above every 24-bit address (and the non-ICAO bit 24).
-pub const KEY_RADAR_BASE: u32 = 0x4000_0000;
+pub const KEY_RADAR_BASE: u32 = crate::types::RADAR_KEY_BASE;
 /// Limit: plots of one radar associated in one bucket; later ones are counted and dropped (a
 /// flooded bucket must cost a bounded amount). Far above any real scan: a radar delivers a few
 /// hundred plots a scan, a bucket is one second of it.
@@ -178,6 +178,13 @@ pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
 /// given the exact gate costs one unit (about two microseconds) and so does a candidate the coarse
 /// window is applied to (much less), so this is about the longest a bucket can take.
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
+/// Initiation work units shared by every radar in one bucket. One million units matches the
+/// existing association work ceiling, so their separate caps give two million charged units
+/// combined. One unit is a candidate visit/exact pair; grid build/sort reserves conservative
+/// comparison bounds and query charges each cell, probe, and key visit. The sole refusal-accounting
+/// pass is separate and is bounded by `MAX_RADARS * MAX_BUCKET_PLOTS` (131,072) plot-slot visits
+/// per bucket; `FusionStats::init_refusal_pass_visits` reports that work.
+pub const MAX_INIT_WORK: usize = 1 << 20;
 /// Limit: tracks (and candidates) in one association solve.
 pub const MAX_SOLVE_TRACKS: usize = if MAX_ASSOC_TRACKS > MAX_CANDIDATES {
     MAX_ASSOC_TRACKS
@@ -221,11 +228,6 @@ pub const INIT_CELL_M: f64 = 12_000.0;
 /// [`RADAR_INIT_N`] scans and the wide ones are the starved: one hit, a long interval). Past it a
 /// candidate is not tested in that bucket and is counted.
 pub const INIT_WIDE_MAX: usize = 1_024;
-
-/// Limit: tracks initiation makes in one bucket that later radars' initiation checks free plots
-/// against, 256 (a bucket is a second; a track takes three scans of plots to make). Past it the
-/// later tracks are not checked against, which is as before, and counted in `scratch_full`.
-pub const FRESH_MAX: usize = 256;
 
 /// A plot with a Mode S address is applied to the track of that address only if its distance
 /// from the track (horizontal plus vertical, squared Mahalanobis) is below this: chi-square, 3

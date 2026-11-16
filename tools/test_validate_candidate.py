@@ -15,7 +15,9 @@ SPEC.loader.exec_module(gate)
 def evidence():
     kv = {"keeps_up": "1", "lost_work": "0", "buffers_stable": "1",
           "tracks_confirmed": "1200", "measure_s_asked": "2",
-          "measure_s_done": "2", "truncated": "0"}
+          "measure_s_done": "2", "truncated": "0",
+          "offered_aircraft_unique": "1200", "offered_aircraft_expected": "1200",
+          "unknown_input_labels": "0"}
     kv.update({k: "0" for k in gate.LOSS_KEYS})
     rows = [
         {"second": "60", "wall_ms": "3.1", "adsb_offered": "4", "plots_offered": "5", "rows_emitted": "10"},
@@ -53,6 +55,18 @@ class PerfEvidenceTests(unittest.TestCase):
     def test_positive_full_window_with_zero_losses_passes(self):
         kv, rows = evidence()
         self.assertEqual(gate.evaluate_perf(kv, rows, 2, 1200), [])
+
+    def test_input_coverage_cannot_be_replaced_by_hypothesis_count(self):
+        kv, rows = evidence()
+        kv["tracks_confirmed"] = "2400"
+        self.assertEqual(gate.evaluate_perf(kv, rows, 2, 1200), [])
+        kv["offered_aircraft_unique"] = "1199"
+        self.assertTrue(any("input aircraft coverage" in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
+        kv["offered_aircraft_unique"] = "1200"
+        kv["unknown_input_labels"] = "1"
+        self.assertTrue(any("unknown truth labels" in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
+        kv.pop("offered_aircraft_expected")
+        self.assertTrue(any("missing required keys" in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
 
     def test_missing_keys_and_empty_rows_are_not_assumed_clean(self):
         errors = gate.evaluate_perf({"keeps_up": "1"}, [], 2, 1200)

@@ -41,6 +41,8 @@
 //!    only. The three plots of a new track are replayed into the tracker (its out-of-order window
 //!    is sized for it by [`fusion_tracker_config`]); rows for the earlier two are discarded, so no
 //!    output precedes the confirmation decision.
+//!    Anonymous hypotheses are never cancelled or merged by proximity. Their local keys carry
+//!    [`crate::types::O_IDENTITY_UNCONFIRMED`]; they can describe the same aircraft as another key.
 //!
 //! Radar-only tracks are keyed above every address ([`KEY_RADAR_BASE`]). ADS-B tracks are keyed
 //! by address and radar plots join them, which is the fusion.
@@ -59,20 +61,21 @@ use crate::assoc::{
 };
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
-    point_grid_buffer, point_grid_build, point_grid_new, point_grid_query, CoarseIndex, PointGrid,
+    point_grid_buffer, point_grid_build, point_grid_new, point_grid_query_budgeted, CoarseIndex,
+    PointGrid, PointGridQueryResult,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
-    COARSE_STD_M, FRESH_MAX, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
-    GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
-    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
-    MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS,
-    MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX,
-    REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES,
-    REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
-    RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
+    COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2,
+    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M,
+    INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
+    MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING, MAX_RADARS,
+    MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
+    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
+    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
+    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
@@ -223,6 +226,8 @@ pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> Track
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FusionStats {
     pub adsb_in: u64,
+    /// Addressed inputs refused before queuing because they claim a non-aircraft key.
+    pub adsb_address_refused: u64,
     pub plots_in: u64,
     /// Plots refused by validation, by [`RadarError`]: range/azimuth/altitude, no height.
     pub plots_refused: u64,
@@ -276,7 +281,7 @@ pub struct FusionStats {
     /// Unassigned plots that could not start a candidate (no altitude).
     pub cand_no_height: u64,
     pub cand_capacity: u64,
-    /// A confirmed candidate whose track the tracker could not hold (capacity).
+    /// A confirmed candidate refused for track capacity or exhaustion of local keys.
     pub track_refused: u64,
     pub assign_log_overflow: u64,
     /// Sums of the assignment solves (radar association and candidate association).
@@ -303,6 +308,12 @@ pub struct FusionStats {
     pub init_capped: u64,
     /// Plot-candidate pairs tested by initiation.
     pub init_tests: u64,
+    /// Initiation work reserved by the budget.
+    pub init_work: u64,
+    /// Unassigned plots explicitly refused by initiation capacity.
+    pub init_plots_refused: u64,
+    /// Input slots visited by a separate, one-pass refusal count when no work remains.
+    pub init_refusal_pass_visits: u64,
     /// Most candidates alive at once.
     pub cands_live_max: u64,
     /// Radar-buckets that had plots to associate, and the sum and the largest of the coarse
@@ -312,15 +323,13 @@ pub struct FusionStats {
     pub coarse_width_max_m: u64,
     /// Buckets processed.
     pub buckets: u64,
-    /// Anonymous candidates that reached their hits but whose latest plot gated with a live track
-    /// (one another radar had confirmed, in this bucket or before): no second track was made.
+    /// Legacy diagnostics of withdrawn proximity suppression; remain zero.
     pub cand_merged_on_confirm: u64,
-    /// Anonymous candidates of other radars cancelled because a track confirmed in their place.
+    /// Legacy diagnostic of withdrawn candidate cancellation; remains zero.
     pub cand_cancelled_by_track: u64,
-    /// Live tracks tested against a candidate's latest plot by those two checks.
+    /// Legacy diagnostic of withdrawn confirmation gates; remains zero.
     pub confirm_gate_tests: u64,
-    /// Candidates that gated with a track but were kept because that track had a plot of the same
-    /// radar in the same scan (two aircraft).
+    /// Legacy diagnostic of withdrawn confirmation gates; remains zero.
     pub cand_same_scan_kept: u64,
     /// Scan notes not stored because the table was full.
     pub plot_scan_full: u64,
@@ -332,9 +341,7 @@ pub struct FusionStats {
     pub init_visits: u64,
     /// Candidates left untested for a bucket because the initiation's wide list was full.
     pub init_wide_full: u64,
-    /// Free anonymous plots initiation left alone because they gate with a track made earlier in
-    /// the same bucket (by another radar's candidate) that has taken no plot of this radar in
-    /// their scan.
+    /// Legacy diagnostic of withdrawn fresh-track plot suppression; remains zero.
     pub stale_plots_skipped: u64,
 }
 
@@ -508,8 +515,6 @@ pub struct Fusion {
     init_near: Vec<u32>,
     /// The most candidates on the wide list of one initiation (test hook; [`INIT_WIDE_MAX`]).
     init_wide_max: usize,
-    /// The keys of the tracks initiation made in the bucket being processed ([`FRESH_MAX`]).
-    fresh: Vec<u32>,
     /// Per (key, radar): consecutive plots of that radar held for ambiguity since the track last
     /// took one of its plots (a small map: entries exist only while a run is going).
     hold_run: FixedMap<(u32, u8), HoldRun>,
@@ -540,6 +545,11 @@ pub struct Fusion {
     /// Work (coarse candidates and exact gates) one bucket's associations may spend in all (a
     /// field so a test can lower it).
     bucket_tests_max: usize,
+    /// Initiation allowance shared across the radars of the current bucket.
+    init_work_left: usize,
+    init_capped_mask: u16,
+    #[cfg(test)]
+    init_work_max: usize,
     /// Tracks on one association's wide list at most (a field so a test can lower it).
     wide_max: usize,
     /// Test only: test every track against the coarse window, as before the grid.
@@ -624,7 +634,6 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         init_wide: Vec::with_capacity(INIT_WIDE_MAX),
         init_near: Vec::with_capacity(CAND_IX_MAX),
         init_wide_max: INIT_WIDE_MAX,
-        fresh: Vec::with_capacity(FRESH_MAX),
         hold_run: FixedMap::new(KEY_TABLE_SLOTS),
         hold_run_max: MAX_ASSOC_TRACKS,
         plot_scan: FixedMap::new(KEY_TABLE_SLOTS),
@@ -646,6 +655,10 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .collect(),
         cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
         bucket_tests_max: MAX_BUCKET_TESTS,
+        init_work_left: MAX_INIT_WORK,
+        init_capped_mask: 0,
+        #[cfg(test)]
+        init_work_max: MAX_INIT_WORK,
         wide_max: WIDE_TRACKS_MAX,
         #[cfg(test)]
         brute_coarse: false,
@@ -785,6 +798,10 @@ pub fn fusion_bookkeeping_len(f: &Fusion) -> (usize, usize) {
 /// Offers an ADS-B (or any addressed) measurement. It is applied when its bucket completes.
 pub fn fusion_adsb(f: &mut Fusion, m: &Measurement) {
     f.stats.adsb_in += 1;
+    if m.addr != NO_ADDR && m.addr > crate::types::MAX_AIRCRAFT_ADDRESS {
+        f.stats.adsb_address_refused += 1;
+        return;
+    }
     if f.pend_adsb.len() >= MAX_PENDING {
         f.stats.pending_overflow += 1;
         return;
@@ -999,26 +1016,6 @@ fn d2_vertical_alt(
         + onset * onset;
     let dz = alt_ft - f64::from(row.alt_ft);
     dz * dz / var
-}
-
-/// Whether the latest plot `m` of a candidate gates with a live track's row (predicted at or
-/// after `m`, its newest update at `last_ns`): the association gate (horizontal, vertical and
-/// total), with the plot's own covariance and the manoeuvre allowance of the time since the
-/// update, widened by the distance the track moves in the time between the row and the plot.
-fn cand_gates_row(row: &OutRow, last_ns: i64, m: &Measurement, quant_ft: u16) -> bool {
-    let (lat, lon) = (f64::from(m.lat_e7) / 1.0e7, f64::from(m.lon_e7) / 1.0e7);
-    let secs = |ns: i64| (ns as f64) / NS_PER_S as f64;
-    let man_dt = secs(m.toa_ns.saturating_sub(last_ns).max(0)).min(GATE_MANEUVER_MAX_DT_S);
-    let skew_s =
-        secs(m.toa_ns.saturating_sub(row.t_ns).saturating_abs()).min(GATE_MANEUVER_MAX_DT_S);
-    let speed = oa_math::hypot(f64::from(row.vel_east_mps), f64::from(row.vel_north_mps));
-    let man = 0.5 * GATE_MANEUVER_MPS2 * man_dt * man_dt + speed * skew_s;
-    let zc = cov_f64(m.pos_cov_m2);
-    let dh = d2_horizontal(row, lat, lon, [zc[0] + man * man, zc[1], zc[2] + man * man]);
-    let alt = (m.alt_ft != NONE_I32).then(|| f64::from(m.alt_ft));
-    let since = m.toa_ns.saturating_sub(last_ns);
-    let dv = d2_vertical_alt(row, alt, quant_ft, since, GATE_VRATE_SIGMA_FPM);
-    dh <= GATE_H_CHI2 && dv <= GATE_V_CHI2 && dh + dv <= GATE_TOTAL_CHI2
 }
 
 /// One live track at the start of the bucket, with its slant range and azimuth from the radar.
@@ -1851,7 +1848,7 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
         }
     }
     f.stats.buckets += 1;
-    f.fresh.clear();
+    f.init_capped_mask = 0;
     prune_plot_scan(f, plots.first().map_or(0, |p| p.plot.time_ns));
     associate_bucket(f);
     // Events in time order.
@@ -1910,6 +1907,14 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
     }
     f.evs = evs;
     // Registration, then initiation, per radar.
+    #[cfg(test)]
+    {
+        f.init_work_left = f.init_work_max;
+    }
+    #[cfg(not(test))]
+    {
+        f.init_work_left = MAX_INIT_WORK;
+    }
     for r in 0..f.rscratch.len() {
         let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
             continue;
@@ -1962,14 +1967,6 @@ fn refresh_expected(f: &mut Fusion, key: u32, t_ns: i64) {
     }
     let ns = if best == i64::MAX { 0 } else { best };
     tracker_set_expected_interval(&mut f.tracker, key, ns);
-}
-
-/// Whether the track `key` has taken a plot of `radar` in scan `scan` or a later one.
-fn took_plot_in_scan(f: &Fusion, key: u32, radar: usize, scan: i64) -> bool {
-    let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
-    f.plot_scan
-        .get(&(key, r8))
-        .is_some_and(|&t| scan_at(&f.sites, radar, t).is_some_and(|s| s >= scan))
 }
 
 /// Drops the plot notes older than [`RADAR_INIT_N`] + 2 scans before `t_ns` once the table is half
@@ -2184,10 +2181,48 @@ fn initiate(
     } else {
         NO_BIAS
     };
+    // Candidate plots and the single bounded refusal-accounting pass are built once per radar.
+    let mut free = std::mem::take(&mut f.init_free);
+    let mut anon = std::mem::take(&mut f.init_anon);
+    let mut cand_ix = std::mem::take(&mut f.cand_ix);
+    free.clear();
+    anon.clear();
+    cand_ix.clear();
+    // Reserve the full-input classification pass before inspecting plots. If it cannot fit,
+    // the refusal-accounting pass is separate, fixed at one pass over this input batch.
+    if !charge_init_work(f, plots.len()) {
+        f.stats.init_refusal_pass_visits = f
+            .stats
+            .init_refusal_pass_visits
+            .saturating_add(dec.len() as u64);
+        f.stats.init_plots_refused += dec.iter().filter(|d| d.kind == D_UNASSIGNED).count() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        return;
+    }
+    for j in 0..plots.len() {
+        if dec.get(j).is_some_and(|d| d.kind == D_UNASSIGNED) {
+            free.push(j);
+        }
+    }
     // A candidate older than its window by the time of this bucket's plots takes no hit, whether
     // or not the radar delivered plots in the buckets between (the check below, after the hits,
     // only runs in buckets that have plots). One more scan than the window is allowed: it is
     // the age at which the check below would have removed it after the previous bucket.
+    // Reserve the complete pruning pass before mutation. If it cannot fit, leave every
+    // candidate untouched and defer the unassigned plots for this radar.
+    let prune_work = f.cands.len().saturating_mul(2);
+    if f.init_work_left < prune_work {
+        f.stats.init_plots_refused += free.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        return;
+    }
+    let _ = charge_init_work(f, prune_work);
     if let Some(now) = plots.first().and_then(|p| scan_of(f, radar, p.time_ns)) {
         let window = i64::from(f.cfg.init_n);
         let before = f.cands.len();
@@ -2199,18 +2234,15 @@ fn initiate(
     // Candidate plots: unassigned (not held, not refused).
     // The lists are the layer's, made at start: at most `plots.len()` (below `RADAR_PLOTS_MAX`)
     // plots and `MAX_CANDIDATES` candidates go in them.
-    let mut free = std::mem::take(&mut f.init_free);
-    let mut anon = std::mem::take(&mut f.init_anon);
-    let mut cand_ix = std::mem::take(&mut f.cand_ix);
-    free.clear();
-    anon.clear();
-    cand_ix.clear();
-    for j in 0..plots.len() {
-        if dec.get(j).is_some_and(|d| d.kind == D_UNASSIGNED) {
-            free.push(j);
-        }
-    }
     // Address plots: join or start the candidate of that address.
+    if !charge_init_work(f, free.len()) {
+        f.stats.init_plots_refused += free.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        return;
+    }
     for &j in &free {
         let Some(p) = plots.get(j) else { continue };
         if f.cfg.use_address && p.addr != NO_ADDR {
@@ -2223,6 +2255,12 @@ fn initiate(
                 f.stats.plots_refused += 1;
                 continue;
             };
+            let visits = f.cands.len();
+            if !charge_init_work(f, visits) {
+                f.stats.init_plots_refused += 1;
+                mark_init_capped(f, radar);
+                continue;
+            }
             let at = f
                 .cands
                 .iter()
@@ -2239,13 +2277,20 @@ fn initiate(
                 }
                 None => start_candidate(f, radar, p.addr, c.m, p.label, scan),
             }
-        } else if gates_fresh_track(f, radar, p, &g, &s, &bias) {
-            f.stats.stale_plots_skipped += 1;
         } else {
             anon.push(j);
         }
     }
     // Anonymous plots against anonymous candidates of this radar: exact assignment.
+    let visits = f.cands.len();
+    if !charge_init_work(f, visits) {
+        f.stats.init_plots_refused += anon.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        return;
+    }
     for i in 0..f.cands.len() {
         if f.cands
             .get(i)
@@ -2259,6 +2304,17 @@ fn initiate(
     let mut ms = std::mem::take(&mut f.ms_buf);
     pairs.clear();
     ms.clear();
+    let anon_passes = anon.len().saturating_mul(2);
+    if !charge_init_work(f, anon_passes) {
+        f.stats.init_plots_refused += anon.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        f.pairs_buf = pairs;
+        f.ms_buf = ms;
+        return;
+    }
     let mut tests = 0usize;
     let mut capped = false;
     // The candidates are indexed by where each is expected and how far from there a plot of this
@@ -2282,6 +2338,20 @@ fn initiate(
     let mut near = std::mem::take(&mut f.init_near);
     reach.clear();
     wide.clear();
+    if !charge_init_work(f, cand_ix.len()) {
+        f.stats.init_plots_refused += anon.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        f.init_reach = reach;
+        f.init_grid = grid;
+        f.init_wide = wide;
+        f.init_near = near;
+        f.pairs_buf = pairs;
+        f.ms_buf = ms;
+        return;
+    }
     for (ci, &i) in cand_ix.iter().enumerate() {
         let r = f
             .cands
@@ -2310,11 +2380,35 @@ fn initiate(
         };
         push_within(&mut reach, r);
     }
+    let sort_work = reach
+        .len()
+        .saturating_mul(usize::BITS as usize)
+        .saturating_add(reach.len());
+    if !charge_init_work(f, sort_work) {
+        f.stats.init_plots_refused += anon.len() as u64;
+        mark_init_capped(f, radar);
+        f.init_free = free;
+        f.init_anon = anon;
+        f.cand_ix = cand_ix;
+        f.init_reach = reach;
+        f.init_grid = grid;
+        f.init_wide = wide;
+        f.init_near = near;
+        f.pairs_buf = pairs;
+        f.ms_buf = ms;
+        return;
+    }
     point_grid_build(&mut grid, reach.len(), |ci| match reach.get(ci) {
         Some(CandReach::At(x, y, w)) if *w <= INIT_STD_M => Some((*x, *y)),
         _ => None,
     });
     'plots: for (a, &j) in anon.iter().enumerate() {
+        if !charge_init_work(f, 1) {
+            f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+            mark_init_capped(f, radar);
+            anon.truncate(a);
+            break 'plots;
+        }
         let Some(p) = plots.get(j) else { continue };
         let Some(scan) = scan_of(f, radar, p.time_ns) else {
             continue;
@@ -2336,25 +2430,92 @@ fn initiate(
             Some(Err(_)) => continue,
             None => (None, None),
         };
+        let pair_start = pairs.len();
+        let ms_start = ms.len();
         near.clear();
-        let nearby = !all
-            && window.is_some_and(|(q, noise)| {
-                point_grid_query(&grid, &mut near, q.0, q.1, INIT_STD_M + noise)
-            });
+        let mut query_spent = 0usize;
+        let query_result = if !all {
+            window.map_or(PointGridQueryResult::Complete(false), |(q, noise)| {
+                point_grid_query_budgeted(
+                    &grid,
+                    &mut near,
+                    q.0,
+                    q.1,
+                    INIT_STD_M + noise,
+                    &mut f.init_work_left,
+                    &mut query_spent,
+                )
+            })
+        } else {
+            PointGridQueryResult::Complete(false)
+        };
+        f.stats.init_work = f.stats.init_work.saturating_add(query_spent as u64);
+        if query_result == PointGridQueryResult::Capped
+            || query_result == PointGridQueryResult::OutputFull
+        {
+            if query_result == PointGridQueryResult::OutputFull {
+                f.stats.scratch_full += 1;
+            }
+            f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+            mark_init_capped(f, radar);
+            pairs.truncate(pair_start);
+            ms.truncate(ms_start);
+            anon.truncate(a);
+            near.clear();
+            break 'plots;
+        }
+        let nearby = query_result == PointGridQueryResult::Complete(true);
         if nearby {
+            if !charge_init_work(f, wide.len()) {
+                f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+                mark_init_capped(f, radar);
+                pairs.truncate(pair_start);
+                ms.truncate(ms_start);
+                anon.truncate(a);
+                near.clear();
+                break 'plots;
+            }
             for &w in &wide {
                 push_within(&mut near, w);
+            }
+            let sort_work = near.len().saturating_mul(usize::BITS as usize);
+            if !charge_init_work(f, sort_work) {
+                f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+                mark_init_capped(f, radar);
+                pairs.truncate(pair_start);
+                ms.truncate(ms_start);
+                anon.truncate(a);
+                near.clear();
+                break 'plots;
             }
             near.sort_unstable();
         } else {
             near.clear();
+            if !charge_init_work(f, cand_ix.len()) {
+                f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+                mark_init_capped(f, radar);
+                pairs.truncate(pair_start);
+                ms.truncate(ms_start);
+                anon.truncate(a);
+                near.clear();
+                break 'plots;
+            }
             near.extend(0..cand_ix.len() as u32);
         }
         f.stats.init_visits += near.len() as u64;
         for &ci in &near {
+            if !charge_init_work(f, 1) {
+                f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+                mark_init_capped(f, radar);
+                pairs.truncate(pair_start);
+                ms.truncate(ms_start);
+                anon.truncate(a);
+                near.clear();
+                break 'plots;
+            }
             let ci = ci as usize;
             let Some(&i) = cand_ix.get(ci) else { continue };
-            let Some(c) = f.cands.get(i) else {
+            let Some(c) = f.cands.get(i).copied() else {
                 continue;
             };
             // A candidate the plot cannot reach (it is further than the candidate's reach and the
@@ -2369,8 +2530,17 @@ fn initiate(
                 }
                 _ => {}
             }
-            if tests >= MAX_BUCKET_TESTS || pairs.len() >= MAX_BUCKET_PAIRS {
+            if tests >= MAX_BUCKET_TESTS
+                || pairs.len() >= MAX_BUCKET_PAIRS
+                || !charge_init_work(f, 1)
+            {
                 capped = true;
+                f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
+                mark_init_capped(f, radar);
+                pairs.truncate(pair_start);
+                ms.truncate(ms_start);
+                anon.truncate(a);
+                near.clear();
                 break 'plots;
             }
             tests += 1;
@@ -2391,7 +2561,7 @@ fn initiate(
                     conv.m
                 }
             };
-            if let Some(cost) = cand_cost(c, &m, scan) {
+            if let Some(cost) = cand_cost(&c, &m, scan) {
                 pairs.push(Pair {
                     track: ci as u32,
                     plot: a as u32,
@@ -2407,7 +2577,7 @@ fn initiate(
     f.init_near = near;
     if capped {
         f.stats.bucket_work_capped += 1;
-        f.stats.init_capped += 1;
+        mark_init_capped(f, radar);
     }
     match gnn(
         &mut f.assoc,
@@ -2456,7 +2626,12 @@ fn initiate(
         .first()
         .map_or(Some(0), |p| scan_of(f, radar, p.time_ns));
     let mut i = 0usize;
+    let mut retire_capped = false;
     while i < f.cands.len() {
+        if !charge_init_work(f, 1) {
+            retire_capped = true;
+            break;
+        }
         let Some(c) = f.cands.get(i).copied() else {
             break;
         };
@@ -2465,20 +2640,48 @@ fn initiate(
             continue;
         }
         if c.n >= f.cfg.init_m {
-            f.cands.remove(i);
-            if let Some((key, decision_ns)) = confirm(f, radar, &c, out) {
-                // Candidates before `i` that go shift the walk.
-                i -= cancel_gated_cands(f, radar, key, decision_ns, i);
+            if !charge_init_work(f, f.cands.len().saturating_sub(i + 1)) {
+                retire_capped = true;
+                break;
             }
+            f.cands.remove(i);
+            let _ = confirm(f, radar, &c, out);
         } else if now_scan
             .and_then(|n| n.checked_sub(c.first_scan))
             .is_some_and(|d| d >= i64::from(f.cfg.init_n))
         {
+            if !charge_init_work(f, f.cands.len().saturating_sub(i + 1)) {
+                retire_capped = true;
+                break;
+            }
             f.cands.remove(i);
             f.stats.cand_expired += 1;
         } else {
             i += 1;
         }
+    }
+    if retire_capped {
+        mark_init_capped(f, radar);
+    }
+}
+
+/// Reserves initiation work before a bounded pass. Counters describe actual reserved work.
+fn charge_init_work(f: &mut Fusion, units: usize) -> bool {
+    if units > f.init_work_left {
+        return false;
+    }
+    f.init_work_left -= units;
+    f.stats.init_work = f.stats.init_work.saturating_add(units as u64);
+    true
+}
+
+fn mark_init_capped(f: &mut Fusion, radar: usize) {
+    let Some(bit) = 1u16.checked_shl(radar as u32) else {
+        return;
+    };
+    if f.init_capped_mask & bit == 0 {
+        f.init_capped_mask |= bit;
+        f.stats.init_capped += 1;
     }
 }
 
@@ -2536,19 +2739,23 @@ fn start_candidate(f: &mut Fusion, radar: usize, addr: u32, m: Measurement, labe
 }
 
 /// A candidate reached M hits: its plots become a track keyed by its address, or a new radar key.
-/// An anonymous candidate whose latest plot gates with a live track makes none (that track is
-/// the aircraft's: another radar confirmed it, in this bucket or earlier). Returns the key and
-/// the time of the decision when a track was made.
+/// Anonymous candidates keep separate local keys: proximity and Mode A do not establish identity.
+/// Returns the key and the time of the decision when a track was made.
 fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Option<(u32, i64)> {
-    if c.addr == NO_ADDR && cand_matches_live_track(f, radar, c) {
-        f.stats.cand_merged_on_confirm += 1;
-        return None;
-    }
     let key = if c.addr != NO_ADDR {
         c.addr
     } else {
-        f.next_serial += 1;
-        KEY_RADAR_BASE + f.next_serial
+        let Some((serial, key)) = f
+            .next_serial
+            .checked_add(1)
+            .and_then(|serial| KEY_RADAR_BASE.checked_add(serial).map(|key| (serial, key)))
+            .filter(|(_, key)| *key != NO_ADDR)
+        else {
+            f.stats.track_refused += 1;
+            return None;
+        };
+        f.next_serial = serial;
+        key
     };
     let n = usize::from(c.n);
     f.stats.cand_confirmed += 1;
@@ -2588,106 +2795,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
             confirm_ns: last,
         });
     }
-    if !push_within(&mut f.fresh, key) {
-        f.stats.scratch_full += 1;
-    }
     Some((key, decision_ns))
-}
-
-/// Whether the anonymous plot `p` of `radar` gates with a track made earlier in this bucket and
-/// that has taken no plot of this radar in the plot's scan. Association ran for every radar before
-/// any initiation, so such a plot was free when the track did not yet exist; it is that track's
-/// aircraft's. A track that has taken a plot of the radar in the scan makes the plot another
-/// aircraft's, a hit as before.
-fn gates_fresh_track(
-    f: &Fusion,
-    radar: usize,
-    p: &RadarPlot,
-    g: &RadarGeom,
-    s: &RadarSite,
-    bias: &Bias,
-) -> bool {
-    if f.fresh.is_empty() {
-        return false;
-    }
-    let Some(scan) = scan_of(f, radar, p.time_ns) else {
-        return false;
-    };
-    f.fresh.iter().any(|&key| {
-        let Some((row, _, last_ns)) = tracker_predict(&f.tracker, key, p.time_ns) else {
-            return false;
-        };
-        let Ok(conv) = plot_convert(g, s, p, bias, track_height(&row), key) else {
-            return false;
-        };
-        cand_gates_row(&row, last_ns, &conv.m, s.alt_quantum_ft)
-            && !took_plot_in_scan(f, key, radar, scan)
-    })
-}
-
-/// Whether the latest plot of the anonymous candidate `c` gates with any live track.
-fn cand_matches_live_track(f: &mut Fusion, radar: usize, c: &Cand) -> bool {
-    let Some(m) = c.meas.get(usize::from(c.n).saturating_sub(1)).copied() else {
-        return false;
-    };
-    let quant = f.sites.get(radar).map_or(100, |s| s.alt_quantum_ft);
-    let mut tests = 0u64;
-    let mut hit = false;
-    for (key, _) in tracker_live_iter(&f.tracker).take(MAX_ASSOC_TRACKS) {
-        let Some((row, _, last_ns)) = tracker_predict(&f.tracker, key, m.toa_ns) else {
-            continue;
-        };
-        tests += 1;
-        if cand_gates_row(&row, last_ns, &m, quant) {
-            if took_plot_in_scan(f, key, radar, c.last_scan) {
-                f.stats.cand_same_scan_kept += 1;
-                continue;
-            }
-            hit = true;
-            break;
-        }
-    }
-    f.stats.confirm_gate_tests += tests;
-    hit
-}
-
-/// Cancels the anonymous candidates of the other radars that gate with the track `key` just made
-/// (its row at `at_ns`); returns how many of them were before index `before` in the list.
-fn cancel_gated_cands(f: &mut Fusion, radar: usize, key: u32, at_ns: i64, before: usize) -> usize {
-    let Some((row, _, last_ns)) = tracker_predict(&f.tracker, key, at_ns) else {
-        return 0;
-    };
-    let (mut tests, mut gone, mut gone_before, mut at) = (0u64, 0u64, 0usize, 0usize);
-    let (sites, plot_scan) = (&f.sites, &f.plot_scan);
-    f.cands.retain(|c| {
-        let i = at;
-        at += 1;
-        if usize::from(c.radar) == radar || c.addr != NO_ADDR {
-            return true;
-        }
-        let Some(m) = c.meas.get(usize::from(c.n).saturating_sub(1)) else {
-            return true;
-        };
-        tests += 1;
-        let quant = sites
-            .get(usize::from(c.radar))
-            .map_or(100, |s| s.alt_quantum_ft);
-        let same_scan = plot_scan.get(&(key, c.radar)).is_some_and(|&t| {
-            scan_at(sites, usize::from(c.radar), t).is_some_and(|s| s >= c.last_scan)
-        });
-        if cand_gates_row(&row, last_ns, m, quant) && !same_scan {
-            gone += 1;
-            if i < before {
-                gone_before += 1;
-            }
-            false
-        } else {
-            true
-        }
-    });
-    f.stats.confirm_gate_tests += tests;
-    f.stats.cand_cancelled_by_track += gone;
-    gone_before
 }
 
 #[cfg(test)]
@@ -2703,7 +2811,7 @@ mod tests {
     use crate::tracker::tracker_live;
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
     use oa_sensorsim::prng::Rng;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     pub(crate) const SITE: RadarSite = RadarSite {
         lat_deg: 41.976_940_27,
@@ -2805,6 +2913,241 @@ mod tests {
         c.log_assign = true;
         mutate(&mut c);
         fusion_new(&c, &[SITE]).unwrap()
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_low_budget_defers_plots_before_point_grid_query() {
+        let mut f = make_fusion(|_| {});
+        f.init_work_max = 5;
+        let plots = [mode_s_plot_at(NO_ADDR, NS_PER_S, 0)];
+        let _ = run(&mut f, &plots, &[]);
+        let st = fusion_stats(&f);
+        assert!(st.init_work <= 5, "{st:?}");
+        assert!(st.init_plots_refused > 0, "{st:?}");
+        assert_eq!(st.init_tests, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_budget_exhaustion_preserves_unvisited_candidates() {
+        let mut f = make_fusion(|_| {});
+        f.init_work_max = 0;
+        let prior = Cand {
+            radar: 0,
+            addr: NO_ADDR,
+            n: 1,
+            first_scan: 0,
+            last_scan: 0,
+            meas: [adsb_fix(0xA00001, 0); 4],
+            label: [7; 4],
+        };
+        f.cands.push(prior);
+        let plots = [mode_s_plot_at(NO_ADDR, NS_PER_S, 0)];
+        let _ = run(&mut f, &plots, &[]);
+        assert_eq!(f.cands.len(), 1);
+        assert_eq!(
+            f.cands.first().map(|c| (c.addr, c.n, c.first_scan)),
+            Some((NO_ADDR, 1, 0))
+        );
+        assert!(fusion_stats(&f).init_plots_refused > 0);
+        assert_eq!(fusion_stats(&f).init_work, 0);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_address_lookup_is_charged_before_candidate_visit() {
+        let mut f = make_fusion(|_| {});
+        f.init_work_max = 4;
+        let prior = Cand {
+            radar: 0,
+            addr: 0xA00001,
+            n: 1,
+            first_scan: 0,
+            last_scan: 0,
+            meas: [adsb_fix(0xA00001, 0); 4],
+            label: [7; 4],
+        };
+        f.cands.push(prior);
+        let plots = [mode_s_plot_at(0xA00001, NS_PER_S, 0)];
+        let _ = run(&mut f, &plots, &[]);
+        assert_eq!(f.cands.len(), 1);
+        assert_eq!(f.cands.first().map(|c| (c.addr, c.n)), Some((0xA00001, 1)));
+        assert_eq!(fusion_stats(&f).init_work, 4);
+        assert_eq!(fusion_stats(&f).init_plots_refused, 1);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_budget_is_shared_across_radars_and_buffers_recover() {
+        let mut f = make_fusion_radars(2);
+        f.init_work_max = 3;
+        let before = point_grid_buffer(&f.init_grid);
+        let plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
+        fusion_plots(&mut f, 0, &[plot]);
+        fusion_plots(&mut f, 1, &[plot]);
+        let mut out = output_new(1 << 18);
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
+        fusion_finish(&mut f, 11 * NS_PER_S, &mut out);
+        assert!(fusion_stats(&f).init_work <= 3);
+        assert!(fusion_stats(&f).init_plots_refused >= 2);
+        assert_eq!(point_grid_buffer(&f.init_grid), before);
+
+        // A later bucket gets a fresh budget and reuses the same grid allocation.
+        f.init_work_max = MAX_INIT_WORK;
+        fusion_plots(&mut f, 0, &[mode_s_plot_at(NO_ADDR, 20 * NS_PER_S, 0)]);
+        fusion_advance(&mut f, 21 * NS_PER_S, &mut out);
+        fusion_finish(&mut f, 21 * NS_PER_S, &mut out);
+        assert_eq!(point_grid_buffer(&f.init_grid), before);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_rolls_back_partial_pairs_when_budget_expires_mid_plot() {
+        let mut f = make_fusion(|_| {});
+        // The pre-pair work is 1 classification + 4 prune + 1 free-list visit + 2 candidate
+        // collection + 2 reach visits + 130 grid build/sort + 2 anon passes + 1 plot visit
+        // + 2 fallback near-list writes = 145. The first candidate visit/test and second
+        // candidate visit consume 3 more units. Its exact test is then refused and the first
+        // pair is rolled back, at a total of 148.
+        f.init_work_max = 148;
+        f.brute_coarse = true;
+        let mut plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
+        plot.alt_ft = NONE_ALT;
+        let last = plot_convert(
+            f.geoms.first().unwrap(),
+            f.sites.first().unwrap(),
+            &plot,
+            &NO_BIAS,
+            Some((20_000.0 * FT_M, 15.0)),
+            NO_ADDR,
+        )
+        .unwrap()
+        .m;
+        let mut last = last;
+        last.toa_ns = 0;
+        for _ in 0..2 {
+            f.cands.push(Cand {
+                radar: 0,
+                addr: NO_ADDR,
+                n: 1,
+                first_scan: 0,
+                last_scan: 0,
+                meas: [last; 4],
+                label: [7; 4],
+            });
+        }
+        let mut probe = last;
+        probe.toa_ns = 10 * NS_PER_S;
+        assert!(cand_cost(f.cands.first().unwrap(), &probe, 1).is_some());
+        let _ = run(&mut f, &[plot], &[]);
+        let st = fusion_stats(&f);
+        assert_eq!(st.init_tests, 1, "{st:?}");
+        assert_eq!(st.cand_joined, 0, "{st:?}");
+        assert_eq!(st.init_plots_refused, 1, "{st:?}");
+        assert_eq!(st.assoc_refused, 0, "{st:?}");
+        assert_eq!(f.cands.len(), 2, "{st:?}");
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_exhaustion_at_each_stage_keeps_every_scratch_buffer() {
+        for limit in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            64,
+            140,
+            141,
+            142,
+            143,
+            144,
+            145,
+            146,
+            147,
+            148,
+            149,
+            150,
+            MAX_INIT_WORK,
+        ] {
+            let mut f = make_fusion(|c| c.tracker.max_tracks = 32);
+            f.init_work_max = limit;
+            let plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
+            let mut m = plot_convert(&radar_geom(&SITE), &SITE, &plot, &NO_BIAS, None, NO_ADDR)
+                .unwrap()
+                .m;
+            m.toa_ns = 0;
+            for label in [7, 8] {
+                f.cands.push(Cand {
+                    radar: 0,
+                    addr: NO_ADDR,
+                    n: 1,
+                    first_scan: 0,
+                    last_scan: 0,
+                    meas: [m; 4],
+                    label: [label; 4],
+                });
+            }
+            let before = fusion_buffers(&f);
+            let _ = run(&mut f, &[plot], &[]);
+            assert!(
+                f.stats.init_work <= limit as u64,
+                "limit {limit}: {:?}",
+                f.stats
+            );
+            assert_eq!(fusion_buffers(&f), before, "limit {limit}");
+            f.init_work_max = MAX_INIT_WORK;
+            let _ = run(&mut f, &[mode_s_plot_at(NO_ADDR, 20 * NS_PER_S, 0)], &[]);
+            assert_eq!(fusion_buffers(&f), before, "recovery after limit {limit}");
+        }
+    }
+
+    // REQ: OA-TRK-326
+    #[test]
+    fn local_identity_key_exhaustion_is_refused_without_reusing_a_key() {
+        let mut f = make_fusion(|c| c.tracker.max_tracks = 32);
+        f.next_serial = NO_ADDR - KEY_RADAR_BASE - 2;
+        let mut c = Cand {
+            radar: 0,
+            addr: NO_ADDR,
+            n: 3,
+            first_scan: 0,
+            last_scan: 2,
+            meas: [adsb_fix(7, 0); 4],
+            label: [7; 4],
+        };
+        for (i, m) in c.meas.iter_mut().take(3).enumerate() {
+            m.toa_ns = i as i64 * NS_PER_S;
+        }
+        let mut out = output_new(256);
+        assert_eq!(
+            confirm(&mut f, 0, &c, &mut out).map(|x| x.0),
+            Some(NO_ADDR - 1)
+        );
+        assert!(
+            !out.addr.is_empty(),
+            "the last valid key must emit evidence"
+        );
+        let serial = f.next_serial;
+        let rows = out.t_ns.len();
+        let confirmed = f.stats.cand_confirmed;
+        assert_eq!(confirm(&mut f, 0, &c, &mut out), None);
+        assert_eq!(f.next_serial, serial);
+        assert_eq!(out.t_ns.len(), rows);
+        assert_eq!(f.stats.cand_confirmed, confirmed);
+        assert_eq!(f.stats.track_refused, 1);
+        assert!(!out.addr.contains(&NO_ADDR));
     }
 
     fn easting(lines: &[Line]) -> Vec<Line> {
@@ -3605,6 +3948,8 @@ mod tests {
         st.coarse_visits = 0;
         st.init_tests = 0;
         st.init_visits = 0;
+        // Search implementations spend different work while making the same decisions.
+        st.init_work = 0;
         (
             st,
             fusion_assign_log(f).clone(),
@@ -4589,11 +4934,183 @@ mod tests {
         out
     }
 
-    // REQ: OA-TRK-298
+    /// Radar 0 sees only the first aircraft and radar 1 only the second, 100 m apart on
+    /// parallel paths. The codes are metadata varied by the contract tests, not identity.
+    fn each_seen_by_one(codes: Option<(u16, u16)>, scans: i64, seed: u64) -> (Fusion, TrackOutput) {
+        let line = |dy: f64, label: u32| {
+            easting(&[Line {
+                x0: 20_000.0,
+                y0: 25_000.0 + dy,
+                vx: -140.0,
+                vy: 30.0,
+                alt_ft: 22_000,
+                label,
+            }])
+        };
+        let mut pa = plots_of_site(&SITE, &line(0.0, 0xA00001), scans, seed, false);
+        let mut pb = plots_of_site(&SITE_EAST, &line(100.0, 0xA00002), scans, seed + 100, false);
+        if let Some((ca, cb)) = codes {
+            pa.iter_mut().for_each(|p| p.mode_a = ca);
+            pb.iter_mut().for_each(|p| p.mode_a = cb);
+        }
+        let mut f = make_fusion_sites(&[SITE, SITE_EAST], 64);
+        let out = run_two(&mut f, &pa, &pb);
+        (f, out)
+    }
+
+    fn assert_two_source_tracks(f: &Fusion, seed: u64) {
+        let st = fusion_stats(f);
+        assert_eq!(fusion_radar_tracks(f).len(), 2, "seed {seed}: {st:?}");
+        assert_eq!(st.cand_confirmed, 2, "seed {seed}: {st:?}");
+        assert_eq!(st.cand_cancelled_by_track, 0, "seed {seed}: {st:?}");
+        assert_eq!(st.cand_merged_on_confirm, 0, "seed {seed}: {st:?}");
+        assert_eq!(st.stale_plots_skipped, 0, "seed {seed}: {st:?}");
+        let log = fusion_assign_log(f);
+        let mut labels_by_key: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        for (&key, &label) in log.key.iter().zip(&log.label) {
+            labels_by_key.entry(key).or_default().insert(label);
+        }
+        assert_eq!(labels_by_key.len(), 2, "seed {seed}: {labels_by_key:?}");
+        assert!(labels_by_key
+            .values()
+            .any(|labels| labels.contains(&0xA00001)));
+        assert!(labels_by_key
+            .values()
+            .any(|labels| labels.contains(&0xA00002)));
+    }
+
+    // REQ: OA-TRK-323
     #[test]
-    fn two_radars_starting_cold_on_one_radar_only_aircraft_make_one_track() {
-        // Both radars build a candidate from their first plots and both reach their third hit in
-        // the same bucket: one track results, the other candidate is merged into it.
+    fn identity_close_parallel_aircraft_seen_by_one_radar_each_keep_both_source_tracks() {
+        for seed in 1..=8 {
+            let (f, _) = each_seen_by_one(None, 24, seed);
+            assert_two_source_tracks(&f, seed);
+        }
+    }
+
+    // REQ: OA-TRK-323
+    #[test]
+    fn identity_conflicting_mode_a_codes_do_not_substitute_for_aircraft_identity() {
+        for seed in 1..=8 {
+            let (f, _) = each_seen_by_one(Some((0o1200, 0o4321)), 24, seed);
+            assert_two_source_tracks(&f, seed);
+        }
+    }
+
+    // REQ: OA-TRK-323
+    #[test]
+    fn identity_equal_mode_a_codes_do_not_merge_distinct_aircraft() {
+        for seed in 1..=8 {
+            let (f, _) = each_seen_by_one(Some((0o1200, 0o1200)), 24, seed);
+            assert_two_source_tracks(&f, seed);
+        }
+    }
+
+    // REQ: OA-TRK-324
+    #[test]
+    fn identity_namespace_flags_updates_ticks_and_predictions_without_guessing_a_match() {
+        // Bit 16 is the output contract for a source-local hypothesis without an address.
+        let bit = crate::types::O_IDENTITY_UNCONFIRMED;
+        assert_eq!(bit, 16);
+        for key in [0xA00001, 0x01FF_FFFF, KEY_RADAR_BASE + 1] {
+            let mut t = tracker_new(&DEFAULT_CONFIG).unwrap();
+            let mut out = output_new(256);
+            let mut m = crate::radar::plot_convert(
+                &radar_geom(&SITE),
+                &SITE,
+                &RadarPlot {
+                    time_ns: 0,
+                    range_m: 30_000.0,
+                    az_deg: 60.0,
+                    alt_ft: 20_000,
+                    addr: NO_ADDR,
+                    mode_a: NONE_CODE,
+                    label: 7,
+                },
+                &NO_BIAS,
+                None,
+                key,
+            )
+            .unwrap()
+            .m;
+            for s in 0..3 {
+                m.toa_ns = s * NS_PER_S;
+                tracker_update(&mut t, &m, &mut out);
+            }
+            tracker_advance(&mut t, 3 * NS_PER_S, &mut out);
+            assert!(!out.flags.is_empty());
+            assert!(out.flags.iter().any(|x| x & crate::types::O_TICK != 0));
+            let expected = key >= KEY_RADAR_BASE;
+            assert!(
+                out.flags.iter().all(|x| (x & bit != 0) == expected),
+                "key {key:X}: {:?}",
+                out.flags
+            );
+            let (p, _, _) = tracker_predict(&t, key, 3 * NS_PER_S).unwrap();
+            assert_eq!(p.flags & bit != 0, expected, "key {key:X}");
+        }
+    }
+
+    // REQ: OA-TRK-326
+    #[test]
+    fn identity_namespace_cannot_be_claimed_by_an_aircraft_address_at_ingress() {
+        let geom = radar_geom(&SITE);
+        for addr in [0x0200_0000, KEY_RADAR_BASE + 1, NO_ADDR - 1] {
+            let p = RadarPlot {
+                time_ns: NS_PER_S,
+                range_m: 30_000.0,
+                az_deg: 60.0,
+                alt_ft: 20_000,
+                addr,
+                mode_a: NONE_CODE,
+                label: 7,
+            };
+            let mut geometry = p;
+            geometry.addr = NO_ADDR;
+            let m = plot_convert(&geom, &SITE, &geometry, &NO_BIAS, None, addr)
+                .unwrap()
+                .m;
+            let mut f = make_fusion(|_| {});
+            fusion_adsb(&mut f, &m);
+            assert!(
+                f.pend_adsb.is_empty(),
+                "address {addr:X} entered ADS-B queue"
+            );
+            fusion_plots(&mut f, 0, &[p]);
+            assert!(
+                f.pend_plots.is_empty(),
+                "address {addr:X} entered radar queue"
+            );
+            assert_eq!(f.stats.plots_refused, 1);
+        }
+        for addr in [0x00FF_FFFF, 0x01FF_FFFF] {
+            let p = RadarPlot {
+                time_ns: NS_PER_S,
+                range_m: 30_000.0,
+                az_deg: 60.0,
+                alt_ft: 20_000,
+                addr,
+                mode_a: NONE_CODE,
+                label: 7,
+            };
+            let mut geometry = p;
+            geometry.addr = NO_ADDR;
+            let m = plot_convert(&geom, &SITE, &geometry, &NO_BIAS, None, addr)
+                .unwrap()
+                .m;
+            let mut f = make_fusion(|_| {});
+            fusion_adsb(&mut f, &m);
+            fusion_plots(&mut f, 0, &[p]);
+            assert_eq!(f.pend_adsb.len(), 1);
+            assert_eq!(f.pend_plots.len(), 1);
+        }
+    }
+
+    // REQ: OA-TRK-323
+    #[test]
+    fn two_radars_starting_cold_keep_unidentified_hypotheses() {
+        // Both radars build a candidate in the same bucket. Neither stream carries a full
+        // address, so keep both source hypotheses even when the simulated aircraft is one.
         let lines = easting(&[Line {
             x0: 20_000.0,
             y0: 25_000.0,
@@ -4610,18 +5127,22 @@ mod tests {
         assert!(st.cand_started >= 2, "{st:?}");
         assert_eq!(
             fusion_radar_tracks(&f).len(),
-            1,
+            2,
             "{st:?} {:?}",
             fusion_radar_tracks(&f)
         );
-        assert_eq!(st.cand_confirmed, 1, "{st:?}");
+        assert_eq!(st.cand_confirmed, 2, "{st:?}");
         assert_eq!(
             st.cand_merged_on_confirm + st.cand_cancelled_by_track,
-            1,
+            0,
             "{st:?}"
         );
         let keys: std::collections::BTreeSet<u32> = out.addr.iter().copied().collect();
-        assert_eq!(keys.len(), 1, "{keys:?}");
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(out
+            .flags
+            .iter()
+            .all(|f| f & crate::types::O_IDENTITY_UNCONFIRMED != 0));
     }
 
     /// Plots over 200 stationary tracks, the bucket's work limit cut to 500 so the tail of the
@@ -5072,9 +5593,9 @@ mod tests {
         assert_eq!(st.cand_started, 2, "{st:?}");
     }
 
-    // REQ: OA-TRK-304
+    // REQ: OA-TRK-323
     #[test]
-    fn a_plot_free_before_a_track_the_bucket_made_does_not_start_a_candidate_on_it() {
+    fn a_plot_free_before_a_track_confirms_keeps_its_candidate() {
         // Both radars see one aircraft at the same times. The first radar confirms on its third
         // plot, and the second radar's third plot, in the same bucket, was free when the
         // association ran: it gates with the track that radar's initiation finds made.
@@ -5091,10 +5612,10 @@ mod tests {
         let mut f = make_fusion_sites(&[SITE, SITE_EAST], 64);
         run_two(&mut f, &pa, &pb);
         let st = *fusion_stats(&f);
-        assert_eq!(st.cand_confirmed, 1, "{st:?}");
-        assert_eq!(st.cand_cancelled_by_track, 1, "{st:?}");
+        assert_eq!(st.cand_confirmed, 2, "{st:?}");
+        assert_eq!(st.cand_cancelled_by_track, 0, "{st:?}");
         assert_eq!(st.cand_started, 2, "{st:?}");
-        assert_eq!(st.stale_plots_skipped, 1, "{st:?}");
+        assert_eq!(st.stale_plots_skipped, 0, "{st:?}");
     }
 
     /// Two radar-only aircraft `gap_m` apart on parallel lines, seen by both radars from the first
@@ -5134,41 +5655,40 @@ mod tests {
         (f, by_key)
     }
 
-    // REQ: OA-TRK-305
+    // REQ: OA-TRK-323
     #[test]
-    fn two_close_radar_only_aircraft_starting_together_on_two_radars_get_two_tracks() {
+    fn two_close_aircraft_keep_four_unidentified_source_hypotheses() {
         // A formation 90 m apart (plot scatter is 70 m) and a parallel pair one nautical mile
-        // apart. Both radars start cold on both aircraft in the same bucket. Whatever the
-        // initiation cancels or leaves alone, two aircraft must end as two live tracks, each
-        // updated to the end: a merge here would lose an aircraft.
+        // apart. Both radars start cold on both aircraft: four initial source hypotheses,
+        // with no address that would justify merging them. Keep both true labels visible.
         for gap in [90.0, 1_852.0] {
             for seed in [1u64, 2, 3, 4] {
                 let (f, by_key) = close_pair_cold(gap, seed);
                 let st = *fusion_stats(&f);
                 // The run ends by flushing the tracker, so the tracks are read from the records
-                // and the log: two made, each given plots to the end.
+                // and the log: four source-local hypotheses were made.
                 assert_eq!(
                     fusion_radar_tracks(&f).len(),
-                    2,
+                    4,
                     "gap {gap} seed {seed}: {st:?}"
                 );
                 let log = fusion_assign_log(&f);
                 let end = log.t_ns.iter().copied().max().unwrap();
-                for k in by_key.keys() {
-                    let last = (0..log.key.len())
-                        .filter(|&i| log.key[i] == *k)
+                for label in [0xA00001, 0xA00002] {
+                    let last = (0..log.label.len())
+                        .filter(|&i| log.label[i] == label)
                         .map(|i| log.t_ns[i])
                         .max()
                         .unwrap();
-                    // A formation inside the plot scatter has most of its plots held (see
-                    // `HOLD_MAX_RUN`): its tracks are updated a scan or two in three.
-                    let allowed = if gap > 1_000.0 { 6 } else { 20 };
+                    let allowed = (i64::from(HOLD_MAX_RUN) + 1) * SITE.period_ns + BUCKET_NS;
                     assert!(
-                        end - last <= allowed * NS_PER_S,
-                        "gap {gap} seed {seed}: track {k:#x} not updated to the end"
+                        end - last <= allowed,
+                        "gap {gap} seed {seed}: label {label:#x} lost near the end"
                     );
                 }
-                assert_eq!(by_key.len(), 2, "gap {gap} seed {seed}: {by_key:?}");
+                assert_eq!(st.cand_cancelled_by_track, 0);
+                assert_eq!(st.cand_merged_on_confirm, 0);
+                assert_eq!(by_key.len(), 4, "gap {gap} seed {seed}: {by_key:?}");
                 if gap > 1_000.0 {
                     // Well apart: each track is one aircraft's, from its first plot.
                     for labels in by_key.values() {

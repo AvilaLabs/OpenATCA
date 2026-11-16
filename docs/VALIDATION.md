@@ -16,10 +16,11 @@ configuration and input hashes. A successful command exit alone is not a passing
 | Results identify what was run | Clean source at the requested revision; build with `OPENATCA_SOURCE_REV`; retain source, binary, input and output hashes and exact arguments; check source again at the end | A scoring-source digest alone does not identify the tracker binary |
 | The scorer recovers known errors | Existing synthetic bias, time-offset, dropout and swap tests; repeated report bytes; independent common-time tie and tolerance-boundary fixture | Synthetic recovery does not establish real-world truth accuracy |
 | Invalid clock values leave valid evidence usable | Impossible advance followed by valid reports; invalid finish/flush leaves live tracks, pending input and output unchanged, apart from one counted refusal | Valid clock jumps still follow the documented clock and caller contracts |
-| Distinct identities and ambiguity stay visible | Existing address, Mode A, close-aircraft and cross-radar cases; exact-truth pair study; counted wrong, false, missing and duplicate tracks | A small study does not establish a whole-day identity-error rate |
+| Distinct identities and ambiguity stay visible | Per-source close-aircraft cases with absent, equal and conflicting Mode A; retained anonymous hypotheses and identity-warning flags; counted wrong, false, missing and duplicate tracks | A source-local hypothesis is not a distinct aircraft identity; a small study does not establish a whole-day identity-error rate |
+| Initiation work is bounded across radars | Low-budget lookup/query/retirement cases; partial-pair rollback; unchanged scratch buffers after exhaustion and recovery; charged work and explicit refused-plot counters | Separate association and initiation allowances; other paths still need work arguments |
 | Lost work cannot produce a capacity pass | Every stats field classified; full per-second evidence; every measured second under budget; every measured-window loss counter zero | Results apply to the stated machine, load, layout, seed and measurement window |
 | Overload is detected | The same traffic with deliberately insufficient track capacity must report counted loss and refuse a capacity pass, even if its process exits zero | This checks the detector, not capacity at every load |
-| Traffic maintains the advertised load | Whole-horizon coverage and position tests, continuous speed and bounded turn rate; recorded generator configuration | Simulated radar remains a model of sensor behavior |
+| Traffic maintains the advertised load | Whole-horizon kinematics and coverage; actual unique generated aircraft offered in the measured window; zero unknown input labels | Input coverage does not establish tracking accuracy or identity coverage |
 | Report fields remain machine-readable | Commas, quotes and newlines in text fields follow CSV escaping; an independent reader checks the study outputs | Tables have section-specific numeric columns |
 | The observed synthetic accuracy meets its stated targets | Small exact-truth study, with nonempty samples and the published position/speed/heading thresholds | Too few samples for an ESASSP exit result; a missed target stays a failure |
 | The core allocates nothing after initialization | Allocation instrumentation with a demonstrated positive control and explicit path coverage | **OPEN:** buffer stability alone does not establish C5; incomplete instrumentation cannot pass |
@@ -58,6 +59,12 @@ The fixed capacity cases are stress layout, seed 41, three radars (`e,t,t`), 60 
 60 seconds, the radar-only case for 120. The negative control has 1,200 aircraft and only 40
 track slots. Each actual per-second row and every required loss counter are checked independently
 of the tool's headline verdict. These are measured cases, not a NAS-wide capacity claim.
+
+The input-load check requires every configured aircraft to appear in the measured inputs, using
+ADS-B addresses and radar truth labels in the shell. Repeated sightings count once and unknown
+labels fail the check. Confirmed track count is diagnostic: anonymous hypotheses can duplicate
+one aircraft, so it cannot establish input load or distinct-aircraft coverage. This replaces the
+earlier exact-track-count proxy; it does not change the traffic, timing or zero-loss thresholds.
 
 Exit 1 means an executed check failed. Exit 2 means checks completed with mandatory claims still
 open or not run. Exit 0 is reserved for an accepted scope with all mandatory claims closed;
