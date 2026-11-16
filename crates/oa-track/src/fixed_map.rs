@@ -340,7 +340,7 @@ mod proofs {
         }
     }
 
-    // REQ: OA-TRK-303
+    // REQ: OA-TRK-307
     #[kani::proof]
     #[kani::unwind(7)]
     #[kani::solver(cadical)]
