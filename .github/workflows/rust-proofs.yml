@@ -49,13 +49,13 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 1
-      MIRI_SYSROOT: ${{ runner.temp }}/miri-sysroot
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned interpreter toolchain
         run: rustup toolchain install nightly-2026-08-21 --profile minimal --component miri,rust-src
       - name: Configure isolated build cache
         run: |
+          printf 'MIRI_SYSROOT=%s/miri-sysroot\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           proof_checkout_key=$(printf '%s' "$GITHUB_WORKSPACE" | sha256sum | cut -d' ' -f1)
           printf 'CARGO_TARGET_DIR=%s/miri-checkouts/%s\n' "$RUNNER_TEMP" "$proof_checkout_key" >> "$GITHUB_ENV"
       - name: Record tool versions and prepare Miri sysroot

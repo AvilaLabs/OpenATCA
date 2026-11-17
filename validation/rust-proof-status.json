@@ -246,6 +246,12 @@
       "after_sha256": "6fdaa981d542ff6bd01174cbc6335d451896ea39fbd62558c92ca66807e5c07e",
       "old_text": "// REQ: OA-TRK-335\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity",
       "new_text": "// Helper for OA-TRK-335.\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity"
+    },
+    {
+      "path": ".github/workflows/rust-proofs.yml",
+      "kind": "Set the runner-dependent Miri sysroot path in an executing step, since job env has no runner context.",
+      "before_sha256": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
+      "after_sha256": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e"
     }
   ]
 }
