@@ -10,7 +10,8 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from allocator_validation import allocation_layout_errors, evaluate_allocator_result
+from allocator_validation import (allocation_layout_errors, allocation_route_ledger_errors,
+                                  evaluate_allocator_result)
 
 
 def sha(path):
@@ -61,6 +62,8 @@ def run(args):
         report["source_before"] = source_state(repo)
         report["layout_errors"] = allocation_layout_errors(repo)
         report["errors"].extend(report["layout_errors"])
+        report["route_ledger_errors"] = allocation_route_ledger_errors(repo)
+        report["errors"].extend(report["route_ledger_errors"])
         lock = manifest.with_name("Cargo.lock")
         if not lock.is_file() or 'source = ' in lock.read_text():
             report["errors"].append("standalone lockfile missing or contains an external dependency")

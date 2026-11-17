@@ -18,7 +18,8 @@ FIXTURE_IDS = {
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
-    "predictions": 1, "advance_rows": 1, "flush_rows": 1, "ended": 1, "rows": 1,
+    "full_capacity": 8, "recovery_applied": 1, "predictions": 1, "advance_rows": 1, "flush_rows": 1,
+    "ended": 1, "rows": 1,
 }
 FUSION_FIELDS = {
     "plots": 40, "hard_applied": 1, "candidates_confirmed": 2, "refused": 1,
@@ -26,6 +27,57 @@ FUSION_FIELDS = {
     "registration_history": 1, "anon_applied": 2, "local_rows": 2,
     "init_visits": 1, "init_tests": 1, "coast_rows": 1, "quiet_advance_rows": 1,
 }
+
+# Evidence ledger: each measured API is tied to its owning production source and
+# to a result field that demonstrates its route had an observable effect. This
+# is intentionally scoped to deterministic fixtures; it does not imply that
+# every input through these APIs has been measured.
+ROUTE_LEDGER = {
+    "tracker_update": ("crates/oa-track/src/tracker.rs", "applied"),
+    "tracker_out_of_order_refilter": ("crates/oa-track/src/tracker.rs", "refiltered"),
+    "tracker_invalid_input_refusal": ("crates/oa-track/src/tracker.rs", "refused"),
+    "tracker_capacity_refusal": ("crates/oa-track/src/tracker.rs", "capacity_refused"),
+    "tracker_capacity_recovery": ("crates/oa-track/src/tracker.rs", "recovery_applied"),
+    "tracker_prediction": ("crates/oa-track/src/tracker.rs", "predictions"),
+    "tracker_advance": ("crates/oa-track/src/tracker.rs", "advance_rows"),
+    "tracker_flush": ("crates/oa-track/src/tracker.rs", "flush_rows"),
+    "fusion_adsb_ingest": ("crates/oa-track/src/fusion.rs", "hard_applied"),
+    "fusion_plot_ingest": ("crates/oa-track/src/fusion.rs", "plots"),
+    "fusion_advance": ("crates/oa-track/src/fusion.rs", "quiet_advance_rows"),
+    "fusion_finish": ("crates/oa-track/src/fusion.rs", "rows"),
+    "fusion_registration": ("crates/oa-track/src/fusion.rs", "registration_used"),
+    "fusion_anonymous_initiation": ("crates/oa-track/src/fusion.rs", "candidates_confirmed"),
+    "fusion_local_association": ("crates/oa-track/src/fusion.rs", "anon_applied"),
+}
+
+ROUTE_SYMBOLS = {
+    "tracker_update": "tracker_update", "tracker_out_of_order_refilter": "tracker_update",
+    "tracker_invalid_input_refusal": "tracker_update", "tracker_capacity_refusal": "tracker_update",
+    "tracker_capacity_recovery": "tracker_update",
+    "tracker_prediction": "tracker_predict", "tracker_advance": "tracker_advance",
+    "tracker_flush": "tracker_flush", "fusion_adsb_ingest": "fusion_adsb",
+    "fusion_plot_ingest": "fusion_plots", "fusion_advance": "fusion_advance",
+    "fusion_finish": "fusion_finish", "fusion_registration": "fusion_registration",
+    "fusion_anonymous_initiation": "fusion_plots", "fusion_local_association": "fusion_plots",
+}
+
+
+def allocation_route_ledger_errors(repo: Path) -> list[str]:
+    """Ensure each declared route is anchored in production source and observable evidence."""
+    errors: list[str] = []
+    for route_id, (relative, field) in ROUTE_LEDGER.items():
+        source_path = repo / relative
+        try:
+            source = _rust_tokens(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            errors.append(f"route ledger source unavailable for {route_id}: {exc}")
+            continue
+        symbol = ROUTE_SYMBOLS[route_id]
+        if not re.search(rf"\bfn\s+{re.escape(symbol)}\b", source):
+            errors.append(f"route ledger production symbol missing for {route_id}: {symbol}")
+        if not field:
+            errors.append(f"route ledger has no expected evidence field for {route_id}")
+    return errors
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -395,7 +447,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         return [f"result is not valid complete JSON: {exc}"]
     if not _object(result):
         return ["result must be a JSON object"]
-    required_keys = {"status", "injection_requested", "fixture_ids", "controls", "tracker", "fusion"}
+    required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls", "tracker", "fusion"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -409,6 +461,18 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             or any(not isinstance(item, str) for item in fixture_ids)
             or len(set(fixture_ids)) != 3 or set(fixture_ids) != FIXTURE_IDS):
         errors.append("fixture_ids must contain exactly the three required unique fixtures")
+
+    route_ids = result.get("route_ids")
+    if (not isinstance(route_ids, list) or len(route_ids) != len(ROUTE_LEDGER)
+            or any(not isinstance(item, str) for item in route_ids)
+            or len(set(route_ids)) != len(ROUTE_LEDGER) or set(route_ids) != set(ROUTE_LEDGER)):
+        errors.append("route_ids must contain exactly the unique source-backed allocation routes")
+    for route_id, (_, field) in ROUTE_LEDGER.items():
+        group = "tracker" if route_id.startswith("tracker_") else "fusion"
+        evidence = result.get(group)
+        value = evidence.get(field) if isinstance(evidence, dict) else None
+        if not _nonnegative_int(value) or value < 1:
+            errors.append(f"{group}.{field} must positively demonstrate route {route_id}")
 
     controls = result.get("controls")
     control_names = {"alloc", "zeroed", "realloc"}

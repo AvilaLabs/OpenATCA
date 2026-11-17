@@ -11,7 +11,7 @@ use oa_track::fusion::{
 use oa_track::radar::{plot_convert, radar_geom, RadarPlot, RadarSite, NONE_CODE, NO_BIAS};
 use oa_track::{
     output_len, output_new, tracker_advance, tracker_flush, tracker_new, tracker_predict,
-    tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, TrackerConfig,
+    tracker_counts, tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, TrackerConfig,
     DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_ADDR, NO_IDENT, O_COAST, RADAR_KEY_BASE,
 };
 
@@ -42,6 +42,8 @@ struct TrackerEvidence {
     refiltered: u64,
     refused: u64,
     capacity_refused: u64,
+    full_capacity: usize,
+    recovery_applied: u64,
     rows: usize,
     predictions: u64,
     advance_rows: usize,
@@ -78,7 +80,7 @@ fn emit_evidence(
     fusion: &FusionEvidence,
 ) {
     println!(
-        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"tracker_update_ooo_refusal_capacity_advance_flush\",\"fusion_adsb_hard_assoc_registration\",\"fusion_anonymous_init_and_assoc\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
+        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"tracker_update_ooo_refusal_capacity_advance_flush\",\"fusion_adsb_hard_assoc_registration\",\"fusion_anonymous_init_and_assoc\"],\"route_ids\":[\"tracker_update\",\"tracker_out_of_order_refilter\",\"tracker_invalid_input_refusal\",\"tracker_capacity_refusal\",\"tracker_capacity_recovery\",\"tracker_prediction\",\"tracker_advance\",\"tracker_flush\",\"fusion_adsb_ingest\",\"fusion_plot_ingest\",\"fusion_advance\",\"fusion_finish\",\"fusion_registration\",\"fusion_anonymous_initiation\",\"fusion_local_association\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
         status,
         injection_requested,
         controls.overflow,
@@ -93,6 +95,8 @@ fn emit_evidence(
         tracker.refiltered,
         tracker.refused,
         tracker.capacity_refused,
+        tracker.full_capacity,
+        tracker.recovery_applied,
         tracker.rows,
         tracker.predictions,
         tracker.advance_rows,
@@ -127,7 +131,7 @@ fn fail(message: &'static str) -> ! {
 
 fn tracker_config() -> TrackerConfig {
     TrackerConfig {
-        max_tracks: 1,
+        max_tracks: 8,
         out_capacity: 32_768,
         log_capacity: 64,
         ..DEFAULT_CONFIG
@@ -201,7 +205,21 @@ fn tracker_window(inject: bool) -> Result<TrackerEvidence, &'static str> {
     tracker_update(&mut tracker, &third, &mut out);
     tracker_update(&mut tracker, &late, &mut out);
     tracker_update(&mut tracker, &invalid, &mut out);
+    for offset in 0..7_u32 {
+        let key = ADDRESS + 10 + offset;
+        let lat = 420_000_000 + offset as i32 * 10;
+        let first = measurement(key, 3 * S, lat, -879_000_000);
+        let second = measurement(key, 4 * S, lat + 1, -879_000_000);
+        tracker_update(&mut tracker, &first, &mut out);
+        tracker_update(&mut tracker, &second, &mut out);
+    }
+    let (tentative_at_capacity, confirmed_at_capacity) = tracker_counts(&tracker);
+    let live_at_capacity = tentative_at_capacity + confirmed_at_capacity;
     tracker_update(&mut tracker, &capacity, &mut out);
+    let applied_before_recovery = tracker_stats(&tracker).applied;
+    let recovery = measurement(ADDRESS, 5 * S, 419_000_030, -879_000_000);
+    tracker_update(&mut tracker, &recovery, &mut out);
+    let recovery_applied = tracker_stats(&tracker).applied.saturating_sub(applied_before_recovery);
     let predictions = if tracker_predict(&tracker, ADDRESS, 4 * S).is_some() {
         1
     } else {
@@ -232,6 +250,8 @@ fn tracker_window(inject: bool) -> Result<TrackerEvidence, &'static str> {
         refiltered,
         refused,
         capacity_refused,
+        full_capacity: live_at_capacity,
+        recovery_applied,
         rows,
         predictions,
         advance_rows,
@@ -433,6 +453,8 @@ fn main() {
         || tracker.refiltered == 0
         || tracker.refused == 0
         || tracker.capacity_refused == 0
+        || tracker.full_capacity != 8
+        || tracker.recovery_applied == 0
         || tracker.rows == 0
         || tracker.predictions == 0
         || tracker.advance_rows == 0

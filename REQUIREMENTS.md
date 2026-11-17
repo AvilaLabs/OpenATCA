@@ -3911,3 +3911,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   measurement, using ADS-B addresses and radar scoring labels in the shell only. All configured
   aircraft must appear and unknown labels must be zero; repeated sightings count once. Tracker
   hypothesis count is diagnostic and does not establish input load or distinct aircraft identity.
+
+- **OA-TRK-337** The standalone allocation checker ties every declared measured tracker/fusion
+  route to its production source symbol and requires a positive route-specific runtime evidence
+  field. The configured tracker-capacity fixture fills all slots, observes refusal, then confirms
+  an existing track still accepts an update.

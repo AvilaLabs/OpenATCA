@@ -23,11 +23,14 @@ def result(injected=False):
             "fusion_adsb_hard_assoc_registration",
             "fusion_anonymous_init_and_assoc",
         ],
+        "route_ids": sorted(gate.ROUTE_LEDGER),
         "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
         "tracker": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
             "overflow": False,
             "applied": 7, "refiltered": 2, "refused": 1, "capacity_refused": 1,
+            "full_capacity": 8,
+            "recovery_applied": 1,
             "predictions": 4, "advance_rows": 3, "flush_rows": 2, "ended": 1, "rows": 8,
         },
         "fusion": {
@@ -90,6 +93,7 @@ unsafe impl GlobalAlloc for A {}
 
 
 class AllocatorResultTests(unittest.TestCase):
+    # REQ: OA-TRK-337
     def test_exercised_and_injected_results_pass(self):
         self.assertEqual(gate.evaluate_allocator_result(json.dumps(result())), [])
         self.assertEqual(gate.evaluate_allocator_result(json.dumps(result(True)), True), [])
@@ -131,6 +135,7 @@ class AllocatorResultTests(unittest.TestCase):
 
 
 class AllocatorLayoutTests(unittest.TestCase):
+    # REQ: OA-TRK-337
     def test_standalone_harness_requires_the_strict_runtime_lints(self):
         for lint in ("unwrap_used", "expect_used", "panic", "indexing_slicing"):
             with self.subTest(lint=lint), tempfile.TemporaryDirectory() as temp:
@@ -147,6 +152,27 @@ class AllocatorLayoutTests(unittest.TestCase):
             root = Path(temp)
             layout_tree(root)
             self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    # REQ: OA-TRK-337
+    def test_route_ledger_requires_source_symbols_and_exact_runtime_route_set(self):
+        value = result()
+        value["route_ids"] = value["route_ids"][:-1]
+        self.assertTrue(any("route_ids" in error for error in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["tracker"]["recovery_applied"] = 0
+        self.assertTrue(any("tracker.recovery_applied" in error for error in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for relative in {item[0] for item in gate.ROUTE_LEDGER.values()}:
+                write(root / relative, "fn tracker_update() {} fn tracker_predict() {} "
+                      "fn tracker_advance() {} fn tracker_flush() {} fn fusion_adsb() {} "
+                      "fn fusion_plots() {} fn fusion_advance() {} fn fusion_finish() {} "
+                      "fn fusion_registration() {}")
+            self.assertEqual(gate.allocation_route_ledger_errors(root), [])
+            (root / "crates/oa-track/src/fusion.rs").write_text("fn fusion_plots() {}", encoding="utf-8")
+            self.assertTrue(gate.allocation_route_ledger_errors(root))
 
     def test_workspace_leak_and_harness_dependency_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
