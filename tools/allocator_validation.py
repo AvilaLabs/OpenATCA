@@ -312,6 +312,11 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         errors.append("allocator harness package must set publish = false")
     if "workspace" not in harness:
         errors.append("allocator harness must declare its own [workspace]")
+    lints = harness.get("lints", {})
+    clippy = lints.get("clippy", {}) if isinstance(lints, dict) else {}
+    if (not isinstance(clippy, dict) or any(clippy.get(name) != "deny" for name in
+            ("unwrap_used", "expect_used", "panic", "indexing_slicing"))):
+        errors.append("allocator harness must deny the four strict runtime lints")
     deps = harness.get("dependencies", {})
     if not isinstance(deps, dict) or set(deps) != {"oa-track"}:
         errors.append("allocator harness may declare only the oa-track dependency")

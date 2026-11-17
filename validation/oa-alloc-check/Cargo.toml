@@ -7,6 +7,12 @@ publish = false
 
 [workspace]
 
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
 [dependencies]
 # F1: validation-only links to the existing local core; no external or product dependency.
 oa-track = { path = "../../crates/oa-track" }

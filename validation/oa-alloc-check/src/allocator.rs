@@ -172,6 +172,8 @@ pub fn inject_core_allocation() -> bool {
 }
 
 #[cfg(test)]
+// E3: test assertions may use expect; the allocator and fixture runtime may not.
+#[allow(clippy::expect_used)]
 // REQ: OA-TRK-327
 #[test]
 fn standard_global_allocation_controls_are_observed() {

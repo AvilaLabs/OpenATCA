@@ -289,7 +289,11 @@ fn fusion_window(inject: bool) -> Result<FusionEvidence, &'static str> {
     let mut out = output_new(cfg.tracker.out_capacity);
     let geom = radar_geom(&SITE);
     let mut adsb = [measurement(ADDRESS, 0, 0, 0); REFERENCE_PLOTS];
-    let mut plots = [addressed_plot(0, ADDRESS, REFERENCE_AZIMUTHS[0]); REFERENCE_PLOTS];
+    let first_azimuth = REFERENCE_AZIMUTHS
+        .first()
+        .copied()
+        .ok_or("reference azimuth fixture is empty")?;
+    let mut plots = [addressed_plot(0, ADDRESS, first_azimuth); REFERENCE_PLOTS];
     for scan in 0..REFERENCE_SCANS {
         let time_ns = (scan as i64) * SITE.period_ns;
         for (reference, &azimuth) in REFERENCE_AZIMUTHS.iter().enumerate() {
@@ -300,17 +304,18 @@ fn fusion_window(inject: bool) -> Result<FusionEvidence, &'static str> {
                 .map_err(|_| "reference fixture failed production plot conversion")?;
             let mut report = measurement(addr, time_ns, converted.m.lat_e7, converted.m.lon_e7);
             report.sensor = 0;
-            adsb[ix] = report;
-            plots[ix] = plot;
+            *adsb.get_mut(ix).ok_or("reference ADS-B fixture index")? = report;
+            *plots.get_mut(ix).ok_or("reference plot fixture index")? = plot;
         }
     }
     let mut anonymous = [[anonymous_plot(0, 90_000.0, 40.0, 100, &geom)?; 2]; 4];
-    for (scan, pair) in anonymous.iter_mut().enumerate() {
+    for (scan, [first, second]) in anonymous.iter_mut().enumerate() {
         let time_ns = (scan as i64 + REFERENCE_SCANS as i64) * SITE.period_ns;
-        pair[0] = anonymous_plot(time_ns, 90_000.0, 40.0, 100, &geom)?;
-        pair[1] = anonymous_plot(time_ns, 130_000.0, 230.0, 101, &geom)?;
+        *first = anonymous_plot(time_ns, 90_000.0, 40.0, 100, &geom)?;
+        *second = anonymous_plot(time_ns, 130_000.0, 230.0, 101, &geom)?;
     }
-    let invalid = measurement(ADDRESS + 8, i64::MIN, adsb[0].lat_e7, adsb[0].lon_e7);
+    let first = adsb.first().ok_or("reference ADS-B fixture is empty")?;
+    let invalid = measurement(ADDRESS + 8, i64::MIN, first.lat_e7, first.lon_e7);
 
     if !allocator::start() {
         return Err("fusion allocation window did not arm cleanly");

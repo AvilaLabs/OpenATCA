@@ -4,6 +4,8 @@ This is a standalone validation binary for allocation behavior in the real `oa-t
 
 The only unsafe-code exception is `src/allocator.rs`, as named in RULESET A0. The crate denies unsafe code; that module locally allows it for the `GlobalAlloc` implementation and its positive controls. Each unsafe operation forwards a valid allocation/layout pair to `std::alloc::System`, with an adjacent safety comment. Review this file line by line when it changes.
 
+The standalone manifest also denies the product's unwrap, expect, panic and indexing Clippy lints. Fixture access is checked before arming; only the test assertion has a local expect allowance under E3.
+
 ## Run
 
 From the repository root, with Rust 1.89.0 installed:

@@ -69,6 +69,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 [workspace]
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
 [dependencies]
 oa-track = { path = "../../crates/oa-track" }
 ''')
@@ -126,6 +131,17 @@ class AllocatorResultTests(unittest.TestCase):
 
 
 class AllocatorLayoutTests(unittest.TestCase):
+    def test_standalone_harness_requires_the_strict_runtime_lints(self):
+        for lint in ("unwrap_used", "expect_used", "panic", "indexing_slicing"):
+            with self.subTest(lint=lint), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                manifest = root / "validation/oa-alloc-check/Cargo.toml"
+                manifest.write_text(manifest.read_text().replace(f'{lint} = "deny"',
+                                                                f'{lint} = "allow"'))
+                self.assertTrue(any("runtime lints" in error
+                                    for error in gate.allocation_layout_errors(root)))
+
     def test_realistic_isolated_layout_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
