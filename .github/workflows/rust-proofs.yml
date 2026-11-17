@@ -1,0 +1,96 @@
+name: Rust assurance
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  kani:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned product Rust compiler
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Install Kani installer compiler
+        run: >-
+          rustup toolchain install nightly-2026-08-21 --profile minimal
+          --component llvm-tools --component rustc-dev --component rust-src --component rustfmt
+      - name: Install pinned Kani verifier
+        run: |
+          cargo +nightly-2026-08-21 install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      - name: Verify proof tool versions
+        run: |
+          kani --version | grep -F '0.68.0'
+          rustc +1.89.0 --version | grep -E '^rustc 1\.89\.0([[:space:]]|$)'
+      - name: Validate proof suite registry
+        run: python3 tools/test_rust_proof_suite.py
+      - name: Test Kani runner and result bindings
+        run: python3 tools/test_kani_validation.py
+      - name: Run registered proof suite sequentially
+        run: >-
+          python3 tools/rust_proof_suite.py
+          --repo "$GITHUB_WORKSPACE"
+          --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json"
+          --out "$RUNNER_TEMP/kani-proof-evidence"
+          --target-dir "$RUNNER_TEMP/kani-proof-target"
+      - name: Upload proof JSON and invocation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-proof-evidence
+          path: ${{ runner.temp }}/kani-proof-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+  miri:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 1
+      MIRI_SYSROOT: ${{ runner.temp }}/miri-sysroot
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned interpreter toolchain
+        run: rustup toolchain install nightly-2026-08-21 --profile minimal --component miri,rust-src
+      - name: Configure isolated build cache
+        run: |
+          proof_checkout_key=$(printf '%s' "$GITHUB_WORKSPACE" | sha256sum | cut -d' ' -f1)
+          printf 'CARGO_TARGET_DIR=%s/miri-checkouts/%s\n' "$RUNNER_TEMP" "$proof_checkout_key" >> "$GITHUB_ENV"
+      - name: Record tool versions and prepare Miri sysroot
+        run: |
+          rustc +nightly-2026-08-21 --version
+          cargo +nightly-2026-08-21 miri --version
+          cargo +nightly-2026-08-21 miri setup
+      - name: Run selected production regressions
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import os, pathlib, re, subprocess
+          out = pathlib.Path(os.environ["RUNNER_TEMP"]) / "miri-evidence"
+          out.mkdir()
+          cases = [
+              ("oa-replay", "mono_split::tests::exercises_each_refusal_class_and_signed_boundary_successes"),
+              ("oa-track", "tracker::tests::numerical_failure_after_partial_late_replay_rolls_back_track_stats_and_rows"),
+              ("oa-track", "tracker::tests::invalid_anchor_refuses_late_rebuild_without_mutation_and_recovers"),
+          ]
+          for index, (package, case) in enumerate(cases):
+              command = ["cargo", "+nightly-2026-08-21", "miri", "test", "--locked", "--offline",
+                         "-p", package, "--lib", case, "--", "--exact"]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+              (out / f"{index}.stdout.log").write_text(result.stdout)
+              (out / f"{index}.stderr.log").write_text(result.stderr)
+              print(result.stdout, end="")
+              print(result.stderr, end="")
+              if result.returncode or not re.search(r"^test result: ok\. 1 passed; 0 failed;", result.stdout, re.MULTILINE):
+                  raise SystemExit(f"Selected Miri regression did not pass exactly once: {case}")
+          PYTHON
+      - name: Upload interpreter logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-evidence
+          path: ${{ runner.temp }}/miri-evidence/
+          if-no-files-found: warn
+          retention-days: 14

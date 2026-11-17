@@ -127,6 +127,7 @@
 //! the third, so the first two after the gap are processed at the old time, and the ages in the
 //! tables carry over the gap instead of running through it.
 
+use crate::mono_split;
 use crate::pipeline::FEED_COUNT;
 use crate::table::NS_PER_S;
 
@@ -239,20 +240,16 @@ enum Domain {
 }
 
 fn classify(own: &FeedClock, t: i64, stream: u32, mono: Option<u64>) -> Domain {
-    let Some(m) = mono else {
-        return Domain::Unknown;
-    };
-    if !own.ref_ok || own.ref_stream != stream || m < own.ref_mono_ns {
-        return Domain::Unknown;
-    }
-    let Ok(mono_ns) = i64::try_from(m - own.ref_mono_ns) else {
-        return Domain::Unknown;
-    };
-    let Some(wall_ns) = t.checked_sub(own.ref_wall_ns) else {
-        return Domain::Unknown;
-    };
-    match wall_ns.checked_sub(mono_ns) {
-        Some(step_ns) => Domain::Split {
+    match mono_split::split(
+        own.ref_ok,
+        own.ref_stream,
+        own.ref_wall_ns,
+        own.ref_mono_ns,
+        t,
+        stream,
+        mono,
+    ) {
+        Some((wall_ns, mono_ns, step_ns)) => Domain::Split {
             wall_ns,
             mono_ns,
             step_ns,

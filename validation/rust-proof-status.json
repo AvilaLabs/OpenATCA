@@ -1,0 +1,251 @@
+{
+  "record_version": 1,
+  "date": "2026-11-17",
+  "base_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+  "scope": "Selected Rust properties only; no system, physical-accuracy, unbounded-history or generated-machine-code claim.",
+  "product_rust": "1.89.0",
+  "kani": {
+    "version": "0.68.0",
+    "cbmc": "6.11.0",
+    "required_passed": 22,
+    "configured": 25,
+    "proofs": [
+      {
+        "id": "output-append",
+        "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
+        "status": "PASS",
+        "result_sha256": "bb18a25c4bc74cd1bad8c64e7ad9621c437113b3ef0e718d02b0f235d36df6ea",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "output-capacity",
+        "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
+        "status": "PASS",
+        "result_sha256": "11c352e0b20676dc1497b4228835e208426a8270794062138aa606b186c09d98",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "output-clear",
+        "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
+        "status": "PASS",
+        "result_sha256": "e9385ad664d6700cd55bb21b9fba3be3d16a20f725c844be03e177c2149c9da9",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "tracker-current-row",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
+        "status": "PASS",
+        "result_sha256": "5451ffffc8793adb7315c3478e02dba5831fe363f0cee1fa56a8d565966d3479",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-unrepresentable-row",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
+        "status": "PASS",
+        "result_sha256": "2d1f3cfbc98e89d28744fa11639449bc45d4b95c91adcffa7e18610a39592839",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-output-overflow",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
+        "status": "PASS",
+        "result_sha256": "4c1e933dc6b8328ae1b7b6640398459d2d48c88e8e094cb5518f1461d15cce86",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-rejected-dispatch",
+        "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
+        "status": "PASS",
+        "result_sha256": "be618f2da8fc7fce2f7984806440bfbb3e082b9ac8440acfc547431c63a3b13c",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-unconfirmed-applied",
+        "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
+        "status": "PASS",
+        "result_sha256": "b8ca3cf992357c8e3342b530472b8ac32f2e104b81d1b5ceea7ae53191aafeee",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-unconfirmed-begun",
+        "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
+        "status": "PASS",
+        "result_sha256": "8b6414cb0c93bc408bdc0a9172ebb6a25ad1270ae9f5707bf1c97a8d5669fafe",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-confirmed-begun-dispatch",
+        "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
+        "status": "PASS",
+        "result_sha256": "dae2997d81293793978b312a262bee17e773c814f341025a903c1e1fa014cbc3",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-actual-decision",
+        "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
+        "status": "PASS",
+        "result_sha256": "75db1220047d8622bd992540bbf18e34fb45ea016488042f29500c388bb26327",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-refusal-routing",
+        "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
+        "status": "PASS",
+        "result_sha256": "55b38cde57852b36a277077258f9b18d243b98bdf3b1000c007e86198206526a",
+        "cfgs": [],
+        "stubbing": true
+      },
+      {
+        "id": "tracker-restore-current-filter",
+        "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
+        "status": "PASS",
+        "result_sha256": "9924593b66dcc07685114fff5bf6735242bb110a18a71a22c5b1ef4aee34e23e",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "tracker-restore-anchor-filter",
+        "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
+        "status": "PASS",
+        "result_sha256": "6b0eee605407c98740f6b079aef7d9000438a39c147521c6115e1b1fccedc48f",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "tracker-restore-ring-history",
+        "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
+        "status": "PASS",
+        "result_sha256": "2523dafb494f59f95179c31ed5dec3103111e2e7455efd7788bf81f4abc1587e",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "tracker-restore-metadata-category",
+        "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
+        "status": "PASS",
+        "result_sha256": "056f8796f4763179d8bbf6d5052c789f9c8b124d034c86e689bebdb7fef32382",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "tracker-restore-statistics",
+        "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
+        "status": "PASS",
+        "result_sha256": "f933526d0173b62579228efa981b4b6a1956ddfb4ccbe1c149ffbbd5167791b5",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "output-restore-appended-row",
+        "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
+        "status": "PASS",
+        "result_sha256": "3ba29c3a1155880d03248827de1dc9841801ac05ca4c5083d024ddcb4148fbe5",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "output-restore-overflow",
+        "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
+        "status": "PASS",
+        "result_sha256": "148acf294a7be80a8c19da088244e10c18a1af55fede37129a70676e513c3463",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "replay-monotonic-split",
+        "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+        "status": "PASS",
+        "result_sha256": "62f55cbb88fbf1615d9c584b47dd528cb0fb3d97e479a501016a8836a6f64a7f",
+        "cfgs": [],
+        "stubbing": false
+      },
+      {
+        "id": "full-sensor-live-count",
+        "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
+        "status": "PASS",
+        "result_sha256": "337f917e17e84cfbe249ab56d292d5f4dd4006f393aa80619b74f53eaa96af79",
+        "cfgs": [
+          "kani_full_capacity"
+        ],
+        "stubbing": false
+      },
+      {
+        "id": "full-sensor-monotonicity",
+        "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
+        "status": "PASS",
+        "result_sha256": "da342c37172d9d2c7750319f479afcfce28514ceb5040f85872c5cb956eb5349",
+        "cfgs": [
+          "kani_full_capacity"
+        ],
+        "stubbing": false
+      }
+    ]
+  },
+  "creusot": {
+    "version": "0.14.0",
+    "rust": "nightly-2026-08-03",
+    "proof_goals_passed": 11,
+    "scope": "Precondition-free exact total timestamp split contract on directly imported production source.",
+    "negative_control_detected": true
+  },
+  "miri": {
+    "rust": "nightly-2026-08-21",
+    "exact_regression_executions_passed": 3,
+    "scope": "Three exact selected production regression executions under default Miri checks; not input-exhaustive."
+  },
+  "negative_controls_detected": [
+    "omitted output column",
+    "missing resync output attempt",
+    "incorrect timestamp split (Kani and Creusot)"
+  ],
+  "experimental_open": [
+    "tracker-numerical-refusal-rollback",
+    "tracker-late-replay-rollback",
+    "full-sensor-update"
+  ],
+  "experimental_outcomes": {
+    "tracker-numerical-refusal-rollback": "Memory limit; no proof conclusion.",
+    "tracker-late-replay-rollback": "Final 12 GiB attempt timed out at 600 seconds; no proof conclusion.",
+    "full-sensor-update": "Timed out at 600 seconds; no proof conclusion."
+  },
+  "release_gate": "OPEN: broader allocation coverage, matched ERAM comparison, independent holdout/physical truth remain unresolved.",
+  "local_verified_source_sha256": {
+    "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
+    "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+    "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+    "crates/oa-track/src/tracker.rs": "af6c9d2cb519f52123f8456deee611c5c79f8e990cb7912a5f91d063a63c1b20",
+    "crates/oa-track/src/tracker_proofs.rs": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
+    "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+    "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+    "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+    "crates/oa-track/src/time_gate_proofs_full.rs": "1974e29e571245be9bea1bdfa7487ad0e95fec6cf2a0bc07ea8727c83ba3931e",
+    "validation/oa-creusot-check/Cargo.toml": "6e5d198694a29e0fbc690a3661d7dc192986d1e9856e3ba8fdc0a00a84ea77fb",
+    "validation/oa-creusot-check/Cargo.lock": "30ce4b4065a6a4d1a728556e7cf1709e3c22429f6cd27cc694a7bfaa9001a3aa",
+    "validation/oa-creusot-check/src/lib.rs": "6aa5bcde8c838656e102e393aa4fbfcc75ae38a5c2e649d9111462d2e6de6fc3",
+    ".github/workflows/rust-proofs.yml": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
+    "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
+    "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
+    "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1"
+  },
+  "post_local_run_source_changes": [
+    {
+      "path": "crates/oa-track/src/tracker_proofs.rs",
+      "kind": "Comment-only requirement annotation correction on helper reached only by experimental late-replay harness. No Rust tokens, assertions or runtime logic changed.",
+      "before_sha256": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
+      "after_sha256": "6fdaa981d542ff6bd01174cbc6335d451896ea39fbd62558c92ca66807e5c07e",
+      "old_text": "// REQ: OA-TRK-335\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity",
+      "new_text": "// Helper for OA-TRK-335.\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity"
+    }
+  ]
+}

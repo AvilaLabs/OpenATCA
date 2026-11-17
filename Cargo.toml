@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 # The fuzz crate is its own workspace (it alone may use libfuzzer-sys); see docs/FUZZING.md.
-exclude = ["fuzz", "validation/oa-alloc-check"]
+exclude = ["fuzz", "validation/oa-alloc-check", "validation/oa-creusot-check"]
 members = [
     "crates/oa-csv",
     "crates/oa-geo",
@@ -49,7 +49,7 @@ authors = ["Avila Labs"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 # Kani proof harnesses are compiled only by `cargo kani` (docs/VERIFICATION.md).
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_full_capacity)', 'cfg(creusot)'] }
 
 # RULESET E3: no panic paths outside tests. Test modules opt out with a module-level allow.
 [workspace.lints.clippy]

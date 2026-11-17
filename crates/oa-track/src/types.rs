@@ -556,3 +556,7 @@ pub fn output_hash_into(h: &mut oa_sha256::Sha256, o: &TrackOutput) {
     }
     put(h, &o.flags);
 }
+
+#[cfg(kani)]
+#[path = "types_proofs.rs"]
+mod proofs;

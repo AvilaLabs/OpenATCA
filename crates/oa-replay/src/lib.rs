@@ -34,6 +34,7 @@ pub mod errors;
 pub mod fns;
 pub mod hash;
 pub mod index;
+mod mono_split;
 pub mod pipeline;
 pub mod report;
 pub mod slots;

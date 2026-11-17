@@ -21,17 +21,18 @@
 
 use crate::params::CLOCK_STEP_CONFIRM;
 
-/// Capacity of the buffer of (sensor, address) pairs of a run: the last this many are kept. Kani
-/// proves with the smallest that holds the late run that can step the clock back.
-#[cfg(not(kani))]
+/// Capacity of the buffer of (sensor, address) pairs of a run: the last this many are kept. The
+/// default Kani model uses the smallest value that holds the late run; `kani_full_capacity` uses
+/// the production capacity.
+#[cfg(any(not(kani), kani_full_capacity))]
 pub const RUN_BUF: usize = 8;
-#[cfg(kani)]
+#[cfg(all(kani, not(kani_full_capacity)))]
 pub const RUN_BUF: usize = 6;
 /// Capacity of the table of sensors that recently delivered (sensor id to its newest accepted
-/// time). Kani proves with a smaller table.
-#[cfg(not(kani))]
+/// time). Default Kani proofs use a smaller table; `kani_full_capacity` uses this production size.
+#[cfg(any(not(kani), kani_full_capacity))]
 pub const SENSOR_TABLE: usize = 64;
-#[cfg(kani)]
+#[cfg(all(kani, not(kani_full_capacity)))]
 pub const SENSOR_TABLE: usize = 4;
 /// Late refusals in a row (with no accepted measurement between) that can step the clock back.
 pub const BACK_CONFIRM: u32 = 2 * CLOCK_STEP_CONFIRM;
@@ -445,7 +446,7 @@ fn runs_decide(
     Verdict::Held
 }
 
-#[cfg(kani)]
+#[cfg(all(kani, not(kani_full_capacity)))]
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
@@ -651,3 +652,7 @@ mod proofs {
         }
     }
 }
+
+#[cfg(all(kani, kani_full_capacity))]
+#[path = "time_gate_proofs_full.rs"]
+mod proofs_full;

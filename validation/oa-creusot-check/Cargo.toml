@@ -1,0 +1,18 @@
+[package]
+name = "oa-creusot-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+# Standalone workspace: this assurance-only package is deliberately not a member or dependency
+# of the product workspace. RULESET F1 justification: Connor explicitly authorized this Creusot
+# experiment in the 2026-11-17 task; `creusot-std` is used only by this proof package, never by
+# shipped product crates or binaries. See README.md for toolchain scope and trusted-base limits.
+[workspace]
+
+[dependencies]
+creusot-std = { version = "=0.14.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(creusot)', 'cfg(kani)'] }

@@ -1010,8 +1010,17 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     put(&mut t.cur, slot, bf);
     set_last(t, slot, base_ns);
     // `m` and then the stored later ones, in time order, through the in-order decision.
+    // `n_seq` starts at one and increases only after a successful `get_mut`, so it cannot
+    // exceed the fixed sequence array's length. Keep this explicit bounded walk simple for
+    // symbolic verification; an unexpected missing entry fails closed via transaction restore.
     let mut disturbed = false;
-    for (k, cm) in seq.iter().take(n_seq).enumerate() {
+    let mut k = 0;
+    while k < n_seq {
+        let Some(cm) = seq.get(k) else {
+            restore_track_txn(t, slot, transaction);
+            restore_output_txn(out, output);
+            return;
+        };
         let step = decide(t, slot, cm);
         match step {
             Step::Applied if k == 0 => {
@@ -1033,7 +1042,20 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         }
         if k == 0 && matches!(step, Step::Applied | Step::Begun | Step::Resynced) {
             emit_if_confirmed_at(t, slot, m.toa_ns, out);
+            // Kani-only reachability evidence that later replay failure rolls back a real attempt.
+            #[cfg(kani)]
+            {
+                kani::cover!(
+                    out.t_ns.len() > output.lens[0],
+                    "late replay appends current report before later failure"
+                );
+                kani::cover!(
+                    out.overflow > output.overflow,
+                    "late replay overflows current report before later failure"
+                );
+            }
         }
+        k += 1;
     }
     if !disturbed {
         let mut f = col(&t.cur, slot, blank_filter());
@@ -1042,6 +1064,10 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         put(&mut t.cur, slot, f);
     }
 }
+
+#[cfg(kani)]
+#[path = "tracker_proofs.rs"]
+mod proofs;
 
 /// The first tick of the grid at or after `at_ns`. `at_ns` and the tick are bounded
 /// (`TIME_LIMIT_NS`, `MAX_TICK_NS`): no overflow.

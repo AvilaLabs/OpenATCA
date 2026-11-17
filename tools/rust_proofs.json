@@ -1,0 +1,474 @@
+{
+  "registry_version": 1,
+  "expected_proof_count": 25,
+  "proofs": [
+    {
+      "id": "output-append",
+      "requirement": "OA-TRK-333: append preserves row alignment, prefixes and all payload bits for the bounded two-row sequence.",
+      "package": "oa-track",
+      "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "output-capacity",
+      "requirement": "OA-TRK-333: a full output table preserves payloads and changes only saturating overflow.",
+      "package": "oa-track",
+      "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "output-clear",
+      "requirement": "OA-TRK-333: clear empties aligned output columns while preserving configured and allocated capacity.",
+      "package": "oa-track",
+      "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-current-row",
+      "requirement": "OA-TRK-334: a confirmed applied or resynced dispatch attempts one current report row.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "report row stored",
+        "applied dispatch",
+        "resynced dispatch"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns a controlled Applied or Resynced dispatch result.",
+        "filter_output returns a representable row; production update, transaction, confirmation, emit and output append remain in path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-unrepresentable-row",
+      "requirement": "OA-TRK-334: an applied or resynced unrepresentable current row is counted without output mutation.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "unrepresentable output",
+        "applied unrepresentable output",
+        "resynced unrepresentable output"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns a controlled Applied or Resynced dispatch result.",
+        "filter_output returns an unrepresentable current row."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-output-overflow",
+      "requirement": "OA-TRK-334: an applied or resynced row attempt at output capacity preserves payload and increments overflow.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "full output table",
+        "applied overflow output",
+        "resynced overflow output"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns a controlled Applied or Resynced dispatch result.",
+        "filter_output returns a representable current row while the harness fills the one-row output."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-rejected-dispatch",
+      "requirement": "OA-TRK-334: a confirmed rejected update does not attempt report output.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns Rejected; filter_output is stubbed but is not called by the rejected path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-unconfirmed-applied",
+      "requirement": "OA-TRK-334: an unconfirmed applied or resynced update does not attempt report output.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns a controlled Applied or Resynced dispatch result.",
+        "filter_output is stubbed but is not called while the track is unconfirmed."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-unconfirmed-begun",
+      "requirement": "OA-TRK-334: an unconfirmed begun update does not attempt report output.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns Begun; filter_output is stubbed but is not called while the track is unconfirmed."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-confirmed-begun-dispatch",
+      "requirement": "OA-TRK-334: a confirmed track receiving a Begun dispatch follows the confirmed-state report-output contract.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns Begun to exercise the confirmed-track dispatch path.",
+        "filter_output returns a representable row if the path requests one."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-actual-decision",
+      "requirement": "OA-TRK-334: production decide commits its Applied or Resynced result and emits the current report time.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "actual Applied decision commits",
+        "actual Resynced decision commits"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "Real decide and update_in_order commit/history/emit code; filter_apply returns symbolic Yes or Resync and writes the report timestamp, while filter_output returns a row. filter_replay, implausible and track_begin panic if called, requiring initialization/reconstruction paths unreachable for the confirmed empty-ring fixture.",
+        "filter_replay, implausible and track_begin panic if called: the confirmed empty-ring fixture must make these paths unreachable."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288
+    },
+    {
+      "id": "tracker-refusal-routing",
+      "requirement": "OA-TRK-335: numerical refusal dispatch increments its refusal counter exactly once without computing or emitting a row; partial dispatch evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "first numerical refusal counted",
+        "numerical refusal counter saturates"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns numerical refusal without mutating tracker state; this proves refusal routing, not combined transaction restoration."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-restore-current-filter",
+      "requirement": "OA-TRK-335: restoring a tracker transaction restores the current filter; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "current filter differs before restoration"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-restore-anchor-filter",
+      "requirement": "OA-TRK-335: restoring a tracker transaction restores the anchor filter; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "anchor filter differs before restoration"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-restore-ring-history",
+      "requirement": "OA-TRK-335: restoring a tracker transaction restores ring history; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "ring history differs before restoration"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-restore-metadata-category",
+      "requirement": "OA-TRK-335: restoring a tracker transaction restores tracker metadata and category state; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "metadata differs before restoration"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-restore-statistics",
+      "requirement": "OA-TRK-335: restoring a tracker transaction restores all tracker statistics; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "statistics differ before restoration"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "output-restore-appended-row",
+      "requirement": "OA-TRK-335: restoring output transaction state removes an appended row and restores all columns; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "output-restore-overflow",
+      "requirement": "OA-TRK-335: restoring output transaction state restores the overflow counter; component evidence only.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "zero output overflow restored",
+        "saturated output overflow restored"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "tracker-numerical-refusal-rollback",
+      "requirement": "OA-TRK-335: numerical refusal restores tracker and output transaction state.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::numerical_refusal_restores_track_and_output_transaction_state",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns numerical refusal so the transaction rollback path is isolated."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288
+    },
+    {
+      "id": "tracker-late-replay-rollback",
+      "requirement": "OA-TRK-335: a later replay refusal restores tracker state and removes the earlier current-row output attempt.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [
+        "late output attempt is rolled back from overflow",
+        "late output attempt is rolled back from appended row"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply accepts the inserted report then numerically refuses a stored later report; filter_output returns the current report row. Real decide, update_late, ring, transaction, emit and output buffer logic remain. filter_replay, implausible and track_begin panic if called, so the proof requires those paths to be unreachable in the confirmed two-entry fixture."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288
+    },
+    {
+      "id": "replay-monotonic-split",
+      "requirement": "OA-RPL-272: monotonic timestamp splitting matches the i128 reference over the full typed input domain.",
+      "package": "oa-replay",
+      "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "absent monotonic timestamp",
+        "invalid monotonic reference",
+        "different monotonic stream",
+        "monotonic regression",
+        "monotonic delta exceeds i64",
+        "wall delta underflow",
+        "wall delta overflow",
+        "clock step underflow",
+        "representable timestamp split"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "full-sensor-live-count",
+      "requirement": "OA-TRK-336: live sensor count matches the full 64-slot table contract.",
+      "package": "oa-track",
+      "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "minimum stored sensor timestamp",
+        "maximum stored sensor timestamp",
+        "all 64 full-table sensors live",
+        "no full-table sensors live"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [
+        "kani_full_capacity"
+      ],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "full-sensor-monotonicity",
+      "requirement": "OA-TRK-336: live sensor count is monotone for an advancing clock on a full table.",
+      "package": "oa-track",
+      "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "signed clock extremes",
+        "minimum stored sensor timestamp",
+        "maximum stored sensor timestamp"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [
+        "kani_full_capacity"
+      ],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "full-sensor-update",
+      "requirement": "OA-TRK-336: a full 64-slot sensor table updates or evicts exactly according to the full-table contract.",
+      "package": "oa-track",
+      "harness": "time_gate::proofs_full::full_sensor_table_note_preserves_or_evicts_by_contract",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [
+        "new sensor reaches full-table eviction",
+        "existing sensor update does not evict",
+        "eviction counter saturates",
+        "minimum report-time input",
+        "maximum report-time input"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [
+        "kani_full_capacity"
+      ],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192
+    }
+  ]
+}

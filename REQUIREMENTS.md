@@ -3566,6 +3566,30 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   failure. Fusion counts failed eligible forecasts as loss, including association and registration
   queries; an ineligible tentative hard-address track is classified before forecasting. A failed
   forecast never establishes that an existing key has disappeared.
+- **OA-TRK-333** Starting with `output_new` and using the output append/clear operations,
+  every stored row fills all fifteen columns, preserves prior rows bit for bit (including
+  floating-point payloads), and keeps their lengths equal and within the configured capacity.
+  A full buffer preserves every column and saturating-increments its overflow counter.
+  Clearing empties every column while preserving the configured capacity, accumulated overflow
+  and each column's reserved capacity.
+- **OA-TRK-334** For a per-track report decision whose resulting track is confirmed, an applied,
+  begun or resynced report makes exactly one non-tick row attempt at that report's time and full
+  track address. Each attempt is accounted as a stored row, an explicitly unrepresentable row,
+  or output-capacity overflow. A rejected or unconfirmed report makes no report-row attempt.
+  During late replay only the newly inserted report may produce a report-time row; later
+  replayed history entries do not create backfilled report rows. Tick output is accounted
+  separately. Public lookup, clock admission and held-release behavior retain their own checks.
+- **OA-TRK-335** A numerical refusal inside a per-track update or late replay restores every
+  saved track-transaction field, history entry, prior output column and overflow value, including
+  refusal after a partial replay emitted output. The saved statistics are restored except for
+  one saturating numerical-refusal increment. Event admission and any clock/tick work preceding
+  that transaction remain recorded. No partially replayed state or row is committed.
+- **OA-TRK-336** At the production sensor-table capacity, live-sensor counting stays within the
+  table bound and cannot increase when only the clock advances with the same nonnegative drop
+  interval. Updating an existing sensor preserves its maximum accepted timestamp; inserting a
+  new sensor into a full table replaces the first least-recent slot and saturating-increments
+  eviction exactly once, preserving every other entry. Proof results state their fixture,
+  timestamp domain and capacity explicitly; they do not imply whole-clock-policy correctness.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed

@@ -4,6 +4,11 @@ This is the first set of machine-checked proofs in OpenATCA. It is narrow on pur
 states a property, the bound it holds up to, and what it does not say. Nothing here is a
 certification claim.
 
+The registered tracker/output/timestamp assurance suite is described in
+[Rust assurance](RUST_ASSURANCE.md). Its source-bound runner keeps exact harness names, required
+branch covers, stubs, capacity configuration and toolchain identities with each result. This suite
+extends the earlier inventory below; it is not a claim that all Rust code is proved.
+
 ## What Kani is
 
 [Kani](https://github.com/model-checking/kani) is a bounded model checker for Rust. It compiles a
