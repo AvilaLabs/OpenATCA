@@ -59,7 +59,8 @@ def result(injected=False):
         "bucket_capacity": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
             "plots_offered": 16_386, "bucket_plot_overflow": 1,
-            "track_capacity_refused": 16_381, "recovery_applied": 1,
+            "known_hard_applied": 1, "unmatched_hard_no_track": 16_383,
+            "recovery_applied": 1,
         },
         "adsb_pending": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
@@ -213,7 +214,8 @@ class AllocatorLayoutTests(unittest.TestCase):
             for relative in {item[0] for item in gate.ROUTE_LEDGER.values()}:
                 write(root / relative, "fn tracker_update() {} fn tracker_predict() {} "
                       "fn tracker_advance() {} fn tracker_flush() {} fn output_clear() {} fn fusion_adsb() {} "
-                      "fn fusion_plots() {} fn process_bucket() {} fn fusion_advance() {} fn fusion_finish() {} "
+                      "fn fusion_plots() {} fn process_bucket() {} fn associate_bucket() {} "
+                      "fn fusion_advance() {} fn fusion_finish() {} "
                       "fn fusion_registration() {}")
             self.assertEqual(gate.allocation_route_ledger_errors(root), [])
             (root / "crates/oa-track/src/fusion.rs").write_text("fn fusion_plots() {}", encoding="utf-8")

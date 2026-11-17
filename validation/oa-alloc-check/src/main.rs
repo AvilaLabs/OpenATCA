@@ -118,7 +118,8 @@ struct BucketCapacityEvidence {
     counts: Counts,
     plots_offered: u64,
     bucket_plot_overflow: u64,
-    track_capacity_refused: u64,
+    known_hard_applied: u64,
+    unmatched_hard_no_track: u64,
     recovery_applied: u64,
     injected: bool,
 }
@@ -137,7 +138,7 @@ fn emit_evidence(
     fusion: &FusionEvidence,
 ) {
     println!(
-        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"fusion_adsb_hard_assoc_registration\",\"fusion_adsb_pending_queue_capacity_recovery\",\"fusion_anonymous_init_and_assoc\",\"fusion_bucket_plot_cap_refusal_recovery\",\"fusion_plot_pending_queue_capacity_recovery\",\"tracker_clock_hold_stepback_recovery\",\"tracker_default_4096_capacity_recovery\",\"tracker_output_log_overflow_reuse\",\"tracker_update_ooo_refusal_capacity_advance_flush\"],\"route_ids\":[\"fusion_adsb_ingest\",\"fusion_adsb_pending_drain\",\"fusion_adsb_pending_overflow\",\"fusion_adsb_pending_recovery\",\"fusion_advance\",\"fusion_anonymous_initiation\",\"fusion_bucket_capacity_recovery\",\"fusion_bucket_plot_cap\",\"fusion_finish\",\"fusion_local_association\",\"fusion_plot_ingest\",\"fusion_plot_pending_bucket_cap\",\"fusion_plot_pending_overflow\",\"fusion_plot_pending_recovery\",\"fusion_registration\",\"tracker_advance\",\"tracker_capacity_recovery\",\"tracker_capacity_refusal\",\"tracker_clock_backstep\",\"tracker_clock_forward_recovery\",\"tracker_clock_hold\",\"tracker_clock_recovery\",\"tracker_default_capacity\",\"tracker_default_confirmed_capacity\",\"tracker_flush\",\"tracker_history_retention_refusal\",\"tracker_history_wrap_refilter\",\"tracker_history_wrap_replay\",\"tracker_invalid_input_refusal\",\"tracker_log_overflow\",\"tracker_out_of_order_refilter\",\"tracker_output_overflow\",\"tracker_output_payload_stability\",\"tracker_output_reuse\",\"tracker_prediction\",\"tracker_update\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"default_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"occupied\":{},\"confirmed\":{},\"refused\":{},\"recovered\":{},\"history_refiltered\":{},\"history_replayed\":{},\"late_ring\":{}}},\"output_log\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"output_overflow\":{},\"output_rows_after_reuse\":{},\"output_aligned\":{},\"output_preserved_addr\":{},\"output_payload_unchanged\":{},\"log_overflow\":{},\"log_rows\":{},\"log_aligned\":{}}},\"clock_gate\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"held\":{},\"held_applied\":{},\"step_forward\":{},\"late\":{},\"step_back\":{},\"future_dropped\":{},\"recovered\":{}}},\"bucket_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots_offered\":{},\"bucket_plot_overflow\":{},\"track_capacity_refused\":{},\"recovery_applied\":{}}},\"adsb_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"plot_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
+        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"fusion_adsb_hard_assoc_registration\",\"fusion_adsb_pending_queue_capacity_recovery\",\"fusion_anonymous_init_and_assoc\",\"fusion_bucket_plot_cap_refusal_recovery\",\"fusion_plot_pending_queue_capacity_recovery\",\"tracker_clock_hold_stepback_recovery\",\"tracker_default_4096_capacity_recovery\",\"tracker_output_log_overflow_reuse\",\"tracker_update_ooo_refusal_capacity_advance_flush\"],\"route_ids\":[\"fusion_adsb_ingest\",\"fusion_adsb_pending_drain\",\"fusion_adsb_pending_overflow\",\"fusion_adsb_pending_recovery\",\"fusion_advance\",\"fusion_anonymous_initiation\",\"fusion_bucket_capacity_recovery\",\"fusion_bucket_known_match\",\"fusion_bucket_plot_cap\",\"fusion_bucket_unknown_identity\",\"fusion_finish\",\"fusion_local_association\",\"fusion_plot_ingest\",\"fusion_plot_pending_bucket_cap\",\"fusion_plot_pending_overflow\",\"fusion_plot_pending_recovery\",\"fusion_registration\",\"tracker_advance\",\"tracker_capacity_recovery\",\"tracker_capacity_refusal\",\"tracker_clock_backstep\",\"tracker_clock_forward_recovery\",\"tracker_clock_hold\",\"tracker_clock_recovery\",\"tracker_default_capacity\",\"tracker_default_confirmed_capacity\",\"tracker_flush\",\"tracker_history_retention_refusal\",\"tracker_history_wrap_refilter\",\"tracker_history_wrap_replay\",\"tracker_invalid_input_refusal\",\"tracker_log_overflow\",\"tracker_out_of_order_refilter\",\"tracker_output_overflow\",\"tracker_output_payload_stability\",\"tracker_output_reuse\",\"tracker_prediction\",\"tracker_update\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"default_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"occupied\":{},\"confirmed\":{},\"refused\":{},\"recovered\":{},\"history_refiltered\":{},\"history_replayed\":{},\"late_ring\":{}}},\"output_log\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"output_overflow\":{},\"output_rows_after_reuse\":{},\"output_aligned\":{},\"output_preserved_addr\":{},\"output_payload_unchanged\":{},\"log_overflow\":{},\"log_rows\":{},\"log_aligned\":{}}},\"clock_gate\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"held\":{},\"held_applied\":{},\"step_forward\":{},\"late\":{},\"step_back\":{},\"future_dropped\":{},\"recovered\":{}}},\"bucket_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots_offered\":{},\"bucket_plot_overflow\":{},\"known_hard_applied\":{},\"unmatched_hard_no_track\":{},\"recovery_applied\":{}}},\"adsb_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"plot_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
         status,
         injection_requested,
         controls.overflow,
@@ -199,7 +200,8 @@ fn emit_evidence(
         bucket_capacity.counts.realloc,
         bucket_capacity.plots_offered,
         bucket_capacity.bucket_plot_overflow,
-        bucket_capacity.track_capacity_refused,
+        bucket_capacity.known_hard_applied,
+        bucket_capacity.unmatched_hard_no_track,
         bucket_capacity.recovery_applied,
         adsb_pending.counts.overflow,
         adsb_pending.counts.alloc,
@@ -652,27 +654,43 @@ fn fusion_bucket_capacity_window(inject: bool) -> Result<BucketCapacityEvidence,
     let cfg = fusion_config(fusion_tracker_config(&base, &[SITE]));
     let mut fusion = fusion_new(&cfg, &[SITE]).map_err(|_| "bucket-capacity fusion configuration refused")?;
     let mut out = output_new(cfg.tracker.out_capacity);
+    let seed_plot = addressed_plot(0, 0xE00000, 10.0);
+    let geom = radar_geom(&SITE);
+    let converted = plot_convert(&geom, &SITE, &seed_plot, &NO_BIAS, None, 0xE00000)
+        .map_err(|_| "bucket-capacity seed geometry conversion failed")?;
+    let mut seed_first = measurement(0xE00000, 0, converted.m.lat_e7, converted.m.lon_e7);
+    seed_first.sensor = 0;
+    let mut seed_second = measurement(0xE00000, S, converted.m.lat_e7, converted.m.lon_e7);
+    seed_second.sensor = 0;
+    fusion_adsb(&mut fusion, &seed_first);
+    fusion_advance(&mut fusion, S, &mut out);
+    fusion_adsb(&mut fusion, &seed_second);
+    fusion_advance(&mut fusion, 2 * S, &mut out);
+
+    let bucket_time = SITE.period_ns;
     let mut plots = Vec::with_capacity(MAX_BUCKET_PLOTS + 1);
-    for offset in 0..=MAX_BUCKET_PLOTS {
-        let addr = 0xE00000_u32 + offset as u32;
+    plots.push(addressed_plot(bucket_time, 0xE00000, 10.0));
+    for offset in 0..MAX_BUCKET_PLOTS {
+        let addr = 0xE10000_u32 + offset as u32;
         let azimuth = (offset % 360) as f64;
-        plots.push(addressed_plot(0, addr, azimuth));
+        plots.push(addressed_plot(bucket_time, addr, azimuth));
     }
-    let recovery = addressed_plot(SITE.period_ns, 0xE00000, 10.0);
+    let recovery = addressed_plot(2 * SITE.period_ns, 0xE00000, 10.0);
     if !allocator::start() {
         return Err("bucket-capacity fusion window did not arm cleanly");
     }
     fusion_plots(&mut fusion, 0, &plots);
-    fusion_advance(&mut fusion, S, &mut out);
+    fusion_advance(&mut fusion, bucket_time + S, &mut out);
     let first_bucket = fusion_stats(&fusion);
     let bucket_plot_overflow = first_bucket.bucket_plot_overflow;
-    let track_capacity_refused = fusion_tracker_stats(&fusion).capacity_refused;
     let before_recovery = first_bucket.applied_hard;
     fusion_plots(&mut fusion, 0, std::slice::from_ref(&recovery));
-    fusion_advance(&mut fusion, SITE.period_ns + S, &mut out);
+    fusion_advance(&mut fusion, 2 * SITE.period_ns + S, &mut out);
     let after = fusion_stats(&fusion);
     let recovery_applied = after.applied_hard.saturating_sub(before_recovery);
     let plots_offered = after.plots_in;
+    let known_hard_applied = before_recovery;
+    let unmatched_hard_no_track = first_bucket.hard_no_track;
     let injected = !inject || allocator::inject_core_allocation();
     let Some(counts) = allocator::stop() else {
         return Err("bucket-capacity fusion window did not disarm cleanly");
@@ -681,7 +699,8 @@ fn fusion_bucket_capacity_window(inject: bool) -> Result<BucketCapacityEvidence,
         counts,
         plots_offered,
         bucket_plot_overflow,
-        track_capacity_refused,
+        known_hard_applied,
+        unmatched_hard_no_track,
         recovery_applied,
         injected,
     })
@@ -895,8 +914,9 @@ fn main() {
         || clock_gate.recovered != 1
         || bucket_capacity.plots_offered != (MAX_BUCKET_PLOTS + 2) as u64
         || bucket_capacity.bucket_plot_overflow != 1
-        || bucket_capacity.track_capacity_refused == 0
-        || bucket_capacity.recovery_applied == 0
+        || bucket_capacity.known_hard_applied != 1
+        || bucket_capacity.unmatched_hard_no_track != 16_383
+        || bucket_capacity.recovery_applied != 1
         || adsb_pending.offered != 1_048_577
         || adsb_pending.pending_overflow != 1
         || adsb_pending.drained != 1_048_576

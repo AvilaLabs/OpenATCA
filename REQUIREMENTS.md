@@ -3916,6 +3916,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   route to its production source symbol and requires a positive route-specific runtime evidence
   field. Tracker fixtures include the default 4,096-track capacity followed by refusal and recovery,
   history wrap/replay and retention refusal, output/log overflow with fully preserved aligned row
-  data and output reuse, and clock hold/forward/backstep with valid follow-up. Fusion fills one radar
-  bucket past `MAX_BUCKET_PLOTS`, counts that deliberate loss, and proves a later existing-key plot
-  is processed. Each armed window independently observes the injected-allocation control.
+  data and output reuse, and clock hold/forward/backstep with valid follow-up. Fusion seeds a
+  confirmed geometry-matched key, fills one radar bucket past `MAX_BUCKET_PLOTS`, counts the
+  deliberate overflow and unknown hard identities, and proves a later existing-key plot matches.
+  Each armed window independently observes the injected-allocation control.
