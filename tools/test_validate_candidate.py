@@ -26,9 +26,12 @@ def evidence():
     return kv, rows
 
 
-def fusion_csv(turn_speed=7.9, truncate=False):
+def fusion_csv(turn_speed=7.9, truncate=False, include_counts=True):
     header = "section,label,n,posall,posstraight,posturn,speedstraight,speedturn,headingstraight,headingturn"
-    row = lambda section, label, speed: f'"{section}","{label}",100,0,0,0,0,{speed},0,0'
+    def row(section, label, speed):
+        metric = f'"{section}","{label}",100,0,0,0,0,{speed},0,0'
+        counts = f'"{section}|samples","{label}",100,80,20,100,80,20,100,80,20'
+        return metric + ("\n" + counts if include_counts else "")
     lines = [header]
     if truncate:
         lines.append(row("R|all", "b  ours, no reg", turn_speed))
@@ -51,7 +54,61 @@ def safeview_fixture(root):
     return safeview, actual
 
 
+def allocator_result(injected=False):
+    return {
+        "status": "FAIL_M3_ALLOCATION" if injected else "PASS_M3_EXERCISED",
+        "injection_requested": injected,
+        "fixture_ids": [
+            "tracker_update_ooo_refusal_capacity_advance_flush",
+            "fusion_adsb_hard_assoc_registration",
+            "fusion_anonymous_init_and_assoc",
+        ],
+        "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
+        "tracker": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
+            "predictions": 1, "advance_rows": 1, "flush_rows": 1, "ended": 1, "rows": 1,
+        },
+        "fusion": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "plots": 40, "hard_applied": 1, "candidates_confirmed": 2, "refused": 1,
+            "rows": 1, "radar_tracks": 2, "registration_used": 1, "registration_history": 1,
+            "anon_applied": 2, "local_rows": 2, "init_visits": 1, "init_tests": 1,
+            "coast_rows": 1, "quiet_advance_rows": 1,
+        },
+    }
+
+
+def allocator_report(revision="candidate-rev"):
+    source = {"revision": revision, "status": "", "files": {
+        "Cargo.toml": "a" * 64, "tools/check_allocations.py": "b" * 64,
+    }}
+    commands = [
+        {"name": name, "exit_code": 1 if name == "injected" else 0, "status": "PASS"}
+        for name in ("format", "lint", "build", "tests", "normal", "injected")
+    ]
+    return {
+        "scope": "M3 exercised routes only; not all inputs or all real-time crates",
+        "status": "PASS", "errors": [], "layout_errors": [],
+        "binary_unchanged": True, "source_unchanged": True,
+        "binary_sha256": "c" * 64, "source_before": source, "source_after": source,
+        "commands": commands, "normal_result": allocator_result(),
+        "injected_result": allocator_result(True),
+        "evidence_hashes": {f"{command['name']}.{stream}.txt": "d" * 64
+                            for command in commands for stream in ("stdout", "stderr")},
+    }
+
+
 class PerfEvidenceTests(unittest.TestCase):
+    def test_allocator_bundle_requires_every_command_log_fingerprint(self):
+        for malformed in ({}, {"normal.stdout.txt": "d" * 64},
+                          {**allocator_report()["evidence_hashes"], "unexpected.txt": "d" * 64},
+                          {**allocator_report()["evidence_hashes"], "normal.stdout.txt": "broken"}):
+            with self.subTest(hashes=malformed):
+                report = allocator_report()
+                report["evidence_hashes"] = malformed
+                self.assertTrue(gate.evaluate_allocator_report(report, "candidate-rev"))
+
     def test_positive_full_window_with_zero_losses_passes(self):
         kv, rows = evidence()
         self.assertEqual(gate.evaluate_perf(kv, rows, 2, 1200), [])
@@ -140,6 +197,22 @@ class PerfEvidenceTests(unittest.TestCase):
         self.assertTrue(any("speed_turn" in e for e in errors))
         self.assertIn("speed_turn", rows[0]["missed_targets"])
 
+    def test_fusion_base_requires_metric_class_counts(self):
+        errors, _ = gate.evaluate_fusion_csv(fusion_csv(include_counts=False))
+        self.assertTrue(any("sample count" in e for e in errors), errors)
+
+    def test_fusion_base_rejects_invalid_metric_class_counts(self):
+        valid = fusion_csv(include_counts=True)
+        for invalid in (
+                "99,80,20,100,80,20,100,80,20",
+                "100,90,20,100,80,20,100,80,20",
+                "100,80,20,100,80,0,100,80,20",
+                "100,80,20,100,80,1.5,100,80,20",
+                "100,80,20,100,80,-1,100,80,20"):
+            with self.subTest(counts=invalid):
+                malformed = valid.replace("100,80,20,100,80,20,100,80,20", invalid, 1)
+                self.assertTrue(gate.evaluate_fusion_csv(malformed)[0])
+
     def test_fusion_base_requires_full_expected_row_multiplicity(self):
         errors, _ = gate.evaluate_fusion_csv(fusion_csv(truncate=True))
         self.assertTrue(any("expected 2, found 1" in e for e in errors))
@@ -226,6 +299,59 @@ class PerfEvidenceTests(unittest.TestCase):
             link.symlink_to(forbidden, target_is_directory=True)
             with self.assertRaises(ValueError):
                 gate.resolve_reference_paths({"OPENATCA_SNAPSHOT": str(link)}, root)
+
+
+class AllocatorReportTests(unittest.TestCase):
+    def test_complete_clean_report_accepts_expected_negative_injection_exit(self):
+        self.assertEqual(gate.evaluate_allocator_report(allocator_report(), "candidate-rev"), [])
+
+    def test_missing_and_duplicate_commands_are_rejected(self):
+        report = allocator_report()
+        report["commands"] = report["commands"][:-1]
+        self.assertTrue(any("command set is incomplete" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+        report = allocator_report()
+        report["commands"].append(dict(report["commands"][0]))
+        self.assertTrue(any("duplicate allocator command" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+
+    def test_dirty_or_changed_source_snapshot_is_rejected(self):
+        report = allocator_report()
+        report["source_before"]["status"] = " M tools/check_allocations.py"
+        report["source_after"] = dict(report["source_before"])
+        self.assertTrue(any("frozen clean candidate" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+        report = allocator_report()
+        report["source_after"] = {**report["source_before"], "files": {"Cargo.toml": "d" * 64}}
+        self.assertTrue(any("frozen clean candidate" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+
+    def test_injected_command_exit_status_and_payload_must_agree(self):
+        report = allocator_report()
+        report["commands"][-1]["exit_code"] = 0
+        self.assertTrue(any("injected" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+        report = allocator_report()
+        report["injected_result"]["status"] = "PASS_M3_EXERCISED"
+        self.assertTrue(any("allocator injected" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+        report = allocator_report()
+        report["injected_result"]["fusion"]["alloc"] = 0
+        self.assertTrue(any("injected fusion.alloc" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
+
+    def test_missing_binary_or_source_fingerprints_are_rejected(self):
+        report = allocator_report()
+        report.pop("binary_sha256")
+        report["source_before"]["files"] = {}
+        report["source_after"]["files"] = {}
+        errors = gate.evaluate_allocator_report(report, "candidate-rev")
+        self.assertTrue(any("binary fingerprint" in e for e in errors))
+        self.assertTrue(any("source fingerprints" in e for e in errors))
+        report = allocator_report()
+        report["source_after"] = None
+        self.assertTrue(any("source snapshots" in e
+                            for e in gate.evaluate_allocator_report(report, "candidate-rev")))
 
 
 if __name__ == "__main__":

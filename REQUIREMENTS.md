@@ -3537,6 +3537,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   flag (at most `0x01ff_ffff`), or the radar's absent-address marker. An address outside that domain is
   refused and counted before it can enter a pending queue or claim a reserved local radar key.
   Local key exhaustion is refused without wrapping, issuing the absent marker or reusing a key.
+- **OA-TRK-327** A standalone, isolated allocation check runs real tracker and fusion entry points
+  after initialization with an observing global allocator. Its three allocation API controls
+  must be observed, every claimed route has explicit exercise evidence, and any observed
+  allocation, counter overflow, failed control or missing route fails the check. Results name
+  the exercised scope and do not imply coverage of every possible input or real-time crate.
+- **OA-TRK-328** Every fusion-study RMS row reports the sample count for each position, speed
+  and heading class. The candidate evaluator refuses missing, empty, malformed or inconsistent
+  class counts. Different variants' emitted primary-track cohorts remain explicit; adding counts
+  never changes the metric's samples, values, thresholds or truth classification.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed

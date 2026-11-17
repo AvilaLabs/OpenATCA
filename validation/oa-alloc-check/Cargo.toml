@@ -1,0 +1,16 @@
+[package]
+name = "oa-alloc-check"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace]
+
+[dependencies]
+# F1: validation-only links to the existing local core; no external or product dependency.
+oa-track = { path = "../../crates/oa-track" }
+
+[profile.release]
+debug = 1
+overflow-checks = true

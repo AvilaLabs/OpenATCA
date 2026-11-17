@@ -187,6 +187,28 @@ fn esassp_row(label: &str, p: &Pools, rep: &mut Report, tag: &str) {
         hs,
         ht
     );
+    let _ = writeln!(
+        rep.txt,
+        "    samples {label}: position [{},{},{}]; speed [{},{},{}]; heading [{},{},{}] (all, straight, turn)",
+        p.pos[0].n, p.pos[1].n, p.pos[2].n,
+        p.spd[0].n, p.spd[1].n, p.spd[2].n,
+        p.hdg[0].n, p.hdg[1].n, p.hdg[2].n,
+    );
+    let _ = writeln!(
+        rep.csv,
+        "{},{},{},{},{},{},{},{},{},{},{}",
+        csv_field(&format!("{tag}|samples")),
+        csv_field(label),
+        p.pos[0].n,
+        p.pos[1].n,
+        p.pos[2].n,
+        p.spd[0].n,
+        p.spd[1].n,
+        p.spd[2].n,
+        p.hdg[0].n,
+        p.hdg[1].n,
+        p.hdg[2].n,
+    );
 }
 
 fn header(rep: &mut Report, title: &str) {
@@ -1058,7 +1080,9 @@ track state at each applied report (the closest to ESASSP's per-report errors), 
 These synthetic runs are far below ESASSP's 36,000-interval sample; they are an accuracy comparison, not an\n\
 ESASSP exit result.\n\
 Radar-only keys are source-local tracking hypotheses with unconfirmed identity; several keys may\n\
-describe one aircraft. Duplicate hypothesis counts remain in the tables."
+describe one aircraft. Duplicate hypothesis counts remain in the tables. Each RMS has its own\n\
+sample count, ordered all/straight/turn. Variants emit different primary-track cohorts; their\n\
+unmatched RMS values alone do not establish a better estimator."
     );
     let kinds: &[Kind] = if opts.terminal_only {
         &[Kind::Terminal]
@@ -1130,7 +1154,29 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod csv_tests {
-    use super::{esassp_row, Pools, Report};
+    use super::{esassp_row, Pool, Pools, Report};
+
+    // REQ: OA-TRK-328
+    #[test]
+    fn esassp_rows_report_each_metric_class_sample_count() {
+        let pool = |n| Pool { n, ss: n as f64 };
+        let pools = Pools {
+            pos: [pool(10), pool(6), pool(4)],
+            spd: [pool(8), pool(5), pool(3)],
+            hdg: [pool(7), pool(4), pool(3)],
+        };
+        let mut report = Report {
+            txt: String::new(),
+            csv: String::new(),
+        };
+        esassp_row("variant", &pools, &mut report, "R|all");
+        assert!(report
+            .csv
+            .contains("R|all|samples,variant,10,6,4,8,5,3,7,4,3\n"));
+        assert!(report
+            .txt
+            .contains("position [10,6,4]; speed [8,5,3]; heading [7,4,3]"));
+    }
 
     // REQ: OA-TRK-065
     #[test]
@@ -1147,7 +1193,10 @@ mod csv_tests {
         );
         assert_eq!(
             report.csv,
-            "\"tag, quoted\nsection\",\"raw, \"\"plots\"\"\nsecond line\",0,NaN,NaN,NaN,NaN,NaN,NaN,NaN\n"
+            concat!(
+                "\"tag, quoted\nsection\",\"raw, \"\"plots\"\"\nsecond line\",0,NaN,NaN,NaN,NaN,NaN,NaN,NaN\n",
+                "\"tag, quoted\nsection|samples\",\"raw, \"\"plots\"\"\nsecond line\",0,0,0,0,0,0,0,0,0\n",
+            )
         );
     }
 }

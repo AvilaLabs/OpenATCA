@@ -3,6 +3,7 @@
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -11,6 +12,8 @@ import re
 import subprocess
 import sys
 import time
+
+from allocator_validation import evaluate_allocator_result
 
 ALLOWED_ENV = {"OPENATCA_DATA", "OPENATCA_RAW", "OPENATCA_SNAPSHOT",
                "OPENATCA_GEODTEST", "OPENATCA_CIFP", "OPENATCA_NASR",
@@ -312,12 +315,16 @@ def evaluate_fusion_csv(text):
                 ("M|all", "b"): (3, "b  ours, no reg"),
                 ("M|all", "c"): (3, "c  ours + reg")}
     counts = {}
+    sample_fields = ("position_all", "position_straight", "position_turn",
+                     "speed_all", "speed_straight", "speed_turn",
+                     "heading_all", "heading_straight", "heading_turn")
+    used_sample_rows = set()
     try:
-        rows = csv.reader(text.splitlines())
-        header = next(rows)
+        rows = list(csv.reader(io.StringIO(text)))
+        header = rows[0]
         if len(header) < 10:
             return ["fusion CSV is missing metric columns"], measured
-        for row in rows:
+        for index, row in enumerate(rows[1:], 1):
             if not row:
                 continue
             if row[0] not in ("R|all", "M|all"):
@@ -346,6 +353,23 @@ def evaluate_fusion_csv(text):
             if n <= 0 or any(not math.isfinite(v) or v < 0 for v in vals):
                 errors.append(f"{row[0]} {row[1]} has empty or negative/nonfinite evidence")
                 continue
+            sample_counts = None
+            sample_row = rows[index + 1] if index + 1 < len(rows) else []
+            if (len(sample_row) != 11 or sample_row[0] != row[0] + "|samples"
+                    or sample_row[1] != row[1]):
+                errors.append(f"{row[0]} {row[1]} is missing its metric class sample counts")
+            else:
+                used_sample_rows.add(index + 1)
+                if not all(_nonnegative_integer(v) for v in sample_row[2:]):
+                    errors.append(f"{row[0]} {row[1]} has malformed class sample counts")
+                else:
+                    ns = [int(v) for v in sample_row[2:]]
+                    sample_counts = dict(zip(sample_fields, ns))
+                    if any(v == 0 for v in ns):
+                        errors.append(f"{row[0]} {row[1]} has empty metric class sample counts")
+                    if ns[0] != n or any(ns[j + 1] + ns[j + 2] > ns[j]
+                                         for j in (0, 3, 6)):
+                        errors.append(f"{row[0]} {row[1]} has inconsistent class sample counts")
             pos_all, _pos_straight, _pos_turn, speed_straight, speed_turn, heading_straight, heading_turn = vals
             limits = (pos_all <= 210, speed_straight <= 4, speed_turn <= 8,
                       heading_straight <= 10, heading_turn <= 25)
@@ -353,10 +377,15 @@ def evaluate_fusion_csv(text):
                 ("pos_all", "speed_straight", "speed_turn", "heading_straight",
                  "heading_turn"), limits) if not ok]
             measured.append({"section": row[0], "variant": row[1], "n": n,
-                             "metrics": vals, "missed_targets": failed})
+                             "metrics": vals, "sample_counts": sample_counts,
+                             "missed_targets": failed})
             if failed:
                 errors.append(f"{row[0]} {row[1]} misses {', '.join(failed)}: {vals}")
-    except (StopIteration, ValueError, TypeError, csv.Error) as e:
+        for index, row in enumerate(rows[1:], 1):
+            if (len(row) >= 2 and row[0] in ("R|all|samples", "M|all|samples")
+                    and row[1].startswith(("b", "c")) and index not in used_sample_rows):
+                errors.append(f"orphan or duplicate metric class sample counts at row {index + 1}")
+    except (IndexError, StopIteration, ValueError, TypeError, csv.Error) as e:
         errors.append(f"invalid fusion CSV: {e}")
     for group, (want, _label) in expected.items():
         got = counts.get(group, 0)
@@ -365,6 +394,61 @@ def evaluate_fusion_csv(text):
     if not measured:
         errors.append("no R|all/M|all base rows with scored variants")
     return errors, measured
+
+
+def evaluate_allocator_report(report, revision):
+    """Require complete, source-bound results from the isolated M3 allocator check."""
+    if not isinstance(report, dict):
+        return ["allocator report is not an object"]
+    errors = []
+    if report.get("status") != "PASS" or report.get("errors") != [] or report.get("layout_errors") != []:
+        errors.append("allocator report did not pass every required check")
+    if report.get("binary_unchanged") is not True or report.get("source_unchanged") is not True:
+        errors.append("allocator report lacks unchanged source/binary evidence")
+    binary_hash = report.get("binary_sha256")
+    if not isinstance(binary_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", binary_hash):
+        errors.append("allocator binary fingerprint is missing or malformed")
+    before, after = report.get("source_before"), report.get("source_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        errors.append("allocator source snapshots are missing")
+    else:
+        if before != after or before.get("revision") != revision or before.get("status") != "":
+            errors.append("allocator check did not use the frozen clean candidate")
+        files = before.get("files")
+        if (not isinstance(files, dict) or not files
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in files.values())):
+            errors.append("allocator source fingerprints are missing or malformed")
+    required = {"format", "lint", "build", "tests", "normal", "injected"}
+    commands = report.get("commands")
+    seen = set()
+    if not isinstance(commands, list):
+        errors.append("allocator commands are missing")
+        commands = []
+    for command in commands:
+        if not isinstance(command, dict) or not isinstance(command.get("name"), str):
+            errors.append("allocator command evidence is malformed")
+            continue
+        name = command["name"]
+        if name not in required or name in seen:
+            errors.append(f"unexpected or duplicate allocator command: {name}")
+        seen.add(name)
+        code = command.get("exit_code")
+        if (command.get("status") != "PASS" or type(code) is not int
+                or code != (1 if name == "injected" else 0)):
+            errors.append(f"allocator command did not produce its required result: {name}")
+    if seen != required:
+        errors.append("allocator command set is incomplete")
+    hashes = report.get("evidence_hashes")
+    expected_logs = {f"{name}.{stream}.txt" for name in required for stream in ("stdout", "stderr")}
+    if (not isinstance(hashes, dict) or set(hashes) != expected_logs
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                   for value in hashes.values())):
+        errors.append("allocator command log fingerprints are incomplete or malformed")
+    for name, injected in (("normal", False), ("injected", True)):
+        errors.extend(f"allocator {name}: {e}" for e in evaluate_allocator_result(
+            json.dumps(report.get(name + "_result")), expect_injected=injected))
+    return errors
 
 
 def read_kv(path):
@@ -525,6 +609,35 @@ def run_gate(args):
             else:
                 records.append({"name": "trace_run", "status": "NOT_RUN",
                                 "reason": "oa-trace tests failed"})
+            allocator_out = out / "allocator"
+            allocator_target = target / "allocator-check"
+            allocator_rc, _ = command("allocator_check", [sys.executable,
+                str(repo / "tools/check_allocations.py"), "--repo", str(repo),
+                "--target-dir", str(allocator_target), "--out", str(allocator_out)])
+            allocator_errors = []
+            try:
+                allocator_report = json.loads((allocator_out / "result.json").read_text())
+                allocator_errors.extend(evaluate_allocator_report(allocator_report, rev))
+                if allocator_report.get("source_before", {}).get("files") != source_hashes:
+                    allocator_errors.append("allocator source hashes differ from candidate source hashes")
+                binary = allocator_target / "release/oa-alloc-check"
+                if not binary.is_file() or sha(binary) != allocator_report.get("binary_sha256"):
+                    allocator_errors.append("allocator binary fingerprint does not match the executed binary")
+                for name, digest in allocator_report.get("evidence_hashes", {}).items():
+                    if (Path(name).name != name or not (allocator_out / name).is_file()
+                            or sha(allocator_out / name) != digest):
+                        allocator_errors.append(f"allocator evidence fingerprint mismatch: {name}")
+                for name in ("normal", "injected"):
+                    actual = json.loads((allocator_out / f"{name}.stdout.txt").read_text())
+                    if actual != allocator_report.get(name + "_result"):
+                        allocator_errors.append(f"allocator {name} payload differs from its command output")
+            except (OSError, ValueError, TypeError, AttributeError) as error:
+                allocator_errors.append(f"allocator result unavailable: {error}")
+            records[-1]["status"] = "FAIL" if allocator_rc != 0 or allocator_errors else "PASS"
+            records.append({"name": "evaluate_allocator", "status": records[-1]["status"],
+                            "errors": allocator_errors,
+                            "claim_scope": "named M3 fixtures, not all inputs or all real-time crates"})
+            failures.extend("allocator: " + error for error in allocator_errors)
             for n, tag, warm, frac in ((1200, "stress_1200", 60, "0.5"),
                                        (2400, "stress_2400", 60, "0.5"),
                                        (1200, "radar_only_1200", 120, "0")):
@@ -648,7 +761,7 @@ def run_gate(args):
     finally:
         required_names = ["fmt", "clippy", "workspace_tests", "trace_tests", "trace_run",
                           "perf_stress_1200", "perf_stress_2400", "perf_radar_only_1200",
-                          "perf_overload", "fusion_base", "synthetic_1", "synthetic_2"]
+                          "perf_overload", "fusion_base", "synthetic_1", "synthetic_2", "allocator_check", "evaluate_allocator"]
         present = {r.get("name") for r in records}
         records.extend({"name": name, "status": "NOT_RUN", "reason": "release build failed"}
                        for name in required_names if name not in present)
@@ -659,12 +772,14 @@ def run_gate(args):
             "oa-track-run": target / "release" / "oa-track-run",
             "oa-track-fusion": target / "release" / "oa-track-fusion",
             "oa-trace": target / "debug" / "oa-trace",
+            "oa-alloc-check": target / "allocator-check/release/oa-alloc-check",
         }
         for name, p in binaries.items():
             if p.is_file():
                 binary_hashes[name] = sha(p)
         open_claims = [
-            {"claim": "allocation C5", "status": "OPEN", "reason": "not verified"},
+            {"claim": "allocation C5", "status": "OPEN",
+             "reason": "named M3 routes checked separately; all-input and other real-time-core coverage unproved"},
             {"claim": "matched ERAM comparison", "status": "OPEN", "reason": "not run"},
             {"claim": "untouched holdout / independent truth", "status": "OPEN",
              "reason": "not established"},

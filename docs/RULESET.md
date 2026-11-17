@@ -24,7 +24,12 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 - **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the single display-presentation
   crate, which needs raw OS calls for KMS/DRM (ioctl, mmap). There, every `unsafe` block is as
   small as possible, carries a `// SAFETY:` comment stating the invariant it relies on, and is
-  reviewed line by line. No other crate may gain an exception without amending this rule.
+  reviewed line by line. The standalone `validation/oa-alloc-check` C5 harness is the only other
+  exception: its single allocator module may implement `GlobalAlloc` to count allocations in the
+  real-time tracker/fusion tests. It is excluded from the product workspace, has no product use,
+  and must not be linked into a product target. Every unsafe operation is confined to that
+  module, carries a `// SAFETY:` comment, and is reviewed line by line. No other crate may gain an
+  exception without amending this rule.
 
 ## A. Data layout
 

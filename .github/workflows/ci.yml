@@ -11,13 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: rustup toolchain install 1.89 --profile minimal --component clippy,rustfmt && rustup default 1.89
+        run: rustup toolchain install 1.89.0 --profile minimal --component clippy,rustfmt && rustup default 1.89.0
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Candidate evaluator tests
         run: python3 tools/test_validate_candidate.py
+      - name: Allocator evaluator tests
+        run: python3 tools/test_allocator_validation.py
+      - name: Allocation harness
+        run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
       - name: Test
         run: cargo test --workspace --release --locked
       - name: Requirements traceability

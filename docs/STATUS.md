@@ -28,7 +28,8 @@ before.
 | Model checking (TLA+) | The replay clock; see [tla/README.md](tla/README.md) | Small bounds; the model abstracts the code |
 | Fuzzing | 21 libFuzzer targets over the byte-level decoders; see [FUZZING.md](FUZZING.md) | Most targets have had hours, not weeks |
 | Mutation testing | Saved numerical and truth cases have strengthened independent-answer tests | Unresolved cases are not automatically equivalent or confirmed defects |
-| CI | GitHub Actions: format, clippy with Rust 1.89 (the declared minimum), release-mode tests, traceability, no external crates | One platform |
+| Allocation instrumentation | Named M3 tracker/fusion routes run under an isolated counting allocator, with positive and injected-allocation controls | Complete C5 coverage remains open; see [candidate validation](VALIDATION.md) |
+| CI | GitHub Actions: format, clippy with Rust 1.89.0 (the declared minimum), release-mode tests, traceability, scoped M3 allocation check, no external crates | One platform |
 
 Everything above runs on x86-64 Linux. Bit-identical replay (RULESET B6) is tested on that platform.
 `oa-math` is written so that results do not depend on the machine's maths library, but no other
@@ -38,7 +39,7 @@ architecture has been tested.
 
 | Rule | Status today |
 |---|---|
-| Fixed capacities, named, with a written behaviour when full (C1, C2) | Followed in most collections. Buffer addresses and capacities are checked on exercised paths; these checks do not count every allocation. The complete C5 allocation check remains open in [candidate validation](VALIDATION.md). |
+| Fixed capacities, named, with a written behaviour when full (C1, C2) | Followed in most collections. Buffer addresses and capacities are checked on exercised paths. A separate allocator hook checks named M3 routes; complete C5 coverage remains open in [candidate validation](VALIDATION.md). |
 | Bounded work, not only bounded storage (C7) | Not uniform. Radar initiation now shares a checked work allowance across radars, including address lookups and grid queries; exhaustion is counted. Other paths still need work arguments. |
 | Invalid input is refused and counted, never passed on or substituted (E5, E6) | Followed in most paths. Some paths have been found to substitute a value or drop data silently; these are being found and fixed. |
 | Identity from positive evidence (E7) | Anonymous radar candidates remain separate source-local hypotheses and carry an unconfirmed-identity flag. Proximity and Mode A do not establish duplicate aircraft identity. Input addresses cannot claim the reserved local-key namespace. |
