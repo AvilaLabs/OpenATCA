@@ -76,7 +76,7 @@ pub const SCORE_DROP_AFTER_NS: i64 = oa_truth::LEG_GAP_MS * 1_000_000;
 /// no row is lost: 1 Mi rows.
 pub const SCORE_OUT_CAPACITY: usize = 1 << 20;
 /// Drain the output table into the accumulator when it holds more than this many rows.
-const DRAIN_ROWS: usize = 1 << 16;
+pub const DRAIN_ROWS: usize = 1 << 16;
 /// Longest gap between two reports counted in the measured interval distribution, ns.
 const MAX_INTERVAL_NS: i64 = 120 * NS_PER_S;
 /// Turn classification: half-width of the span over which the truth heading rate is measured, ms.
@@ -365,6 +365,200 @@ pub struct Esassp {
     pub flight_rms_p95_m: f64,
 }
 
+/// Per-truth-leg errors from the exact paired rows used by the ESASSP-style summary.
+/// A7.2: cold diagnostic output; this is not tracker state.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FlightErrorSummary {
+    pub address: u32,
+    pub truth_leg_index: u32,
+    pub leg_start_ms: i64,
+    pub leg_end_ms: i64,
+    pub paired_samples: u64,
+    pub noncoast_samples: u64,
+    pub position_samples: u64,
+    pub position_rms_m: Option<f64>,
+    pub position_max_m: Option<f64>,
+    pub speed_samples: u64,
+    pub speed_rms_mps: Option<f64>,
+    pub heading_samples: u64,
+    pub heading_rms_deg: Option<f64>,
+    pub window_start_ms: Option<i64>,
+    pub window_end_ms: Option<i64>,
+}
+
+/// Builds address/truth-leg summaries from the same paired errors used by `esassp_of`.
+/// Every truth leg is retained, including legs with no paired rows or too few position samples.
+pub fn flight_error_summaries(
+    p: &PairTable,
+    truth: &oa_truth::Truth,
+    legs: &[oa_bench::truth::TruthLeg],
+) -> Result<Vec<FlightErrorSummary>, ScoreError> {
+    #[derive(Default)]
+    struct Acc {
+        paired: u64,
+        noncoast: u64,
+        pos_n: u64,
+        pos_sq: f64,
+        pos_max: Option<f64>,
+        speed_n: u64,
+        speed_sq: f64,
+        heading_n: u64,
+        heading_sq: f64,
+        start: Option<i64>,
+        end: Option<i64>,
+    }
+    let n = p.t_ms.len();
+    for (name, len) in [
+        ("addr", p.addr.len()),
+        ("coast", p.coast.len()),
+        ("cross_m", p.cross_m.len()),
+        ("along_m", p.along_m.len()),
+        ("speed_err_kt", p.speed_err_kt.len()),
+        ("hdg_err_deg", p.hdg_err_deg.len()),
+    ] {
+        if len != n {
+            return Err(ScoreError(format!(
+                "flight error summaries: PairTable column {name} has {len} rows; expected {n}"
+            )));
+        }
+    }
+    let truth_leg_count = oa_truth::leg_count(truth);
+    if legs.len() != truth_leg_count {
+        return Err(ScoreError(format!(
+            "flight error summaries: adapted truth has {} legs; oa-truth has {truth_leg_count}",
+            legs.len()
+        )));
+    }
+    for (i, leg) in legs.iter().enumerate() {
+        let ix = u32::try_from(i).map_err(|_| {
+            ScoreError("flight error summaries: truth leg index exceeds u32".to_string())
+        })?;
+        let leg_ix = oa_truth::LegIx(ix);
+        let source = (
+            oa_truth::leg_addr(truth, leg_ix),
+            oa_truth::leg_start_ms(truth, leg_ix),
+            oa_truth::leg_end_ms(truth, leg_ix),
+        );
+        if source != (Some(leg.addr), Some(leg.start_ms), Some(leg.end_ms)) {
+            return Err(ScoreError(format!(
+                "flight error summaries: adapted truth leg {ix} does not match oa-truth identity/bounds"
+            )));
+        }
+    }
+
+    let mut acc: BTreeMap<(u32, u32), Acc> = BTreeMap::new();
+    for (i, leg) in legs.iter().enumerate() {
+        let ix = u32::try_from(i).map_err(|_| {
+            ScoreError("flight error summaries: truth leg index exceeds u32".to_string())
+        })?;
+        acc.insert((leg.addr, ix), Acc::default());
+    }
+    for i in 0..p.t_ms.len() {
+        let addr = p.addr.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable address missing at row {i}"
+            ))
+        })?;
+        let t = p.t_ms.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable time missing at row {i}"
+            ))
+        })?;
+        let trip = trip_of(truth, addr, t);
+        let leg = legs.get(trip as usize).ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: pair row {i} names unknown truth leg {trip}"
+            ))
+        })?;
+        if leg.addr != addr
+            || oa_truth::leg_addr(truth, oa_truth::LegIx(trip)) != Some(addr)
+            || !(leg.start_ms..=leg.end_ms).contains(&t)
+        {
+            return Err(ScoreError(format!(
+                "flight error summaries: pair row {i} identity/time does not match truth leg {trip}"
+            )));
+        }
+        let a = acc.get_mut(&(addr, trip)).ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: pair row {i} has no summary slot for address {addr:08X}, leg {trip}"
+            ))
+        })?;
+        a.paired += 1;
+        a.start = Some(a.start.map_or(t, |v| v.min(t)));
+        a.end = Some(a.end.map_or(t, |v| v.max(t)));
+        let coast = p.coast.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable coast flag missing at row {i}"
+            ))
+        })?;
+        if coast != 0 {
+            continue;
+        }
+        a.noncoast += 1;
+        let cross = f64::from(p.cross_m.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable cross-track error missing at row {i}"
+            ))
+        })?);
+        let along = f64::from(p.along_m.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable along-track error missing at row {i}"
+            ))
+        })?);
+        let pos = oa_math::hypot(cross, along);
+        if pos.is_finite() {
+            a.pos_n += 1;
+            a.pos_sq += pos * pos;
+            a.pos_max = Some(a.pos_max.map_or(pos, |v| v.max(pos)));
+        }
+        let speed = f64::from(p.speed_err_kt.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable speed error missing at row {i}"
+            ))
+        })?) * MPS_PER_KT;
+        if speed.is_finite() {
+            a.speed_n += 1;
+            a.speed_sq += speed * speed;
+        }
+        let heading = f64::from(p.hdg_err_deg.get(i).copied().ok_or_else(|| {
+            ScoreError(format!(
+                "flight error summaries: PairTable heading error missing at row {i}"
+            ))
+        })?);
+        if heading.is_finite() {
+            a.heading_n += 1;
+            a.heading_sq += heading * heading;
+        }
+    }
+    acc.into_iter()
+        .map(|((address, truth_leg_index), a)| {
+            let leg = legs.get(truth_leg_index as usize).ok_or_else(|| {
+                ScoreError(format!(
+                    "flight error summaries: unknown truth leg {truth_leg_index}"
+                ))
+            })?;
+            Ok(FlightErrorSummary {
+                address,
+                truth_leg_index,
+                leg_start_ms: leg.start_ms,
+                leg_end_ms: leg.end_ms,
+                paired_samples: a.paired,
+                noncoast_samples: a.noncoast,
+                position_samples: a.pos_n,
+                position_rms_m: (a.pos_n > 0).then(|| (a.pos_sq / a.pos_n as f64).sqrt()),
+                position_max_m: a.pos_max,
+                speed_samples: a.speed_n,
+                speed_rms_mps: (a.speed_n > 0).then(|| (a.speed_sq / a.speed_n as f64).sqrt()),
+                heading_samples: a.heading_n,
+                heading_rms_deg: (a.heading_n > 0)
+                    .then(|| (a.heading_sq / a.heading_n as f64).sqrt()),
+                window_start_ms: a.start,
+                window_end_ms: a.end,
+            })
+        })
+        .collect()
+}
+
 fn push_class(v: &mut [Vec<f64>; 3], class: Option<usize>, x: f64) {
     if let Some(a) = v.get_mut(CLASS_ALL) {
         a.push(x);
@@ -480,6 +674,8 @@ pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
 pub struct Scored {
     pub bench: RunOutput,
     pub esassp: Esassp,
+    /// Read-only per-truth-leg errors from the same final paired rows.
+    pub flight_errors: Vec<FlightErrorSummary>,
     /// Confirmed-track one-second rows offered to the scorer, before pair exclusions.
     pub tick_rows: usize,
     pub pairs: usize,
@@ -708,9 +904,11 @@ pub fn score_source(
     }
     let (bench, pairs) = chunk_finish(acc, &rcfg).map_err(|e| ScoreError(e.0))?;
     let esassp = esassp_of(&pairs, &built.truth);
+    let flight_errors = flight_error_summaries(&pairs, &built.truth, &built.legs)?;
     Ok(Scored {
         bench,
         esassp,
+        flight_errors,
         tick_rows: tick_rows as usize,
         pairs: pairs.t_ms.len(),
     })

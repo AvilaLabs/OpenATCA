@@ -903,7 +903,10 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
             t.stats.applied += 1;
             emit_if_confirmed(t, slot, out);
         }
-        Step::Resynced => t.stats.applied += 1,
+        Step::Resynced => {
+            t.stats.applied += 1;
+            emit_if_confirmed(t, slot, out);
+        }
         Step::Rejected => {}
     }
 }
@@ -1028,7 +1031,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
                 return;
             }
         }
-        if k == 0 && matches!(step, Step::Applied | Step::Begun) {
+        if k == 0 && matches!(step, Step::Applied | Step::Begun | Step::Resynced) {
             emit_if_confirmed_at(t, slot, m.toa_ns, out);
         }
     }
@@ -1512,6 +1515,69 @@ mod tests {
         assert_eq!(sa.confirmed, sb.confirmed);
         assert_eq!(sa.jump_rejected, sb.jump_rejected);
         assert_eq!(sa.resyncs, sb.resyncs);
+    }
+
+    // REQ: OA-TRK-027
+    #[test]
+    fn confirmed_in_order_resync_emits_only_its_current_report_row() {
+        let mut c = cfg(2, 0);
+        c.tick_ns = 60 * S;
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        tracker_update(&mut t, &at(0, 0, 25.0), &mut out);
+        tracker_update(&mut t, &at(1, 0, 25.0), &mut out);
+        assert!(tracker_is_confirmed(&t, ADDR));
+
+        // Isolate report-time emissions from the two reports that confirmed the track.
+        crate::types::output_clear(&mut out);
+        let before = *tracker_stats(&t);
+        let mut resync_report = at(2, 1_000_000, 25.0);
+        for rejection in 0..crate::params::RESYNC_AFTER {
+            resync_report.toa_ns = 1_000 * S + (2 + i64::from(rejection)) * S;
+            tracker_update(&mut t, &resync_report, &mut out);
+            if rejection + 1 < crate::params::RESYNC_AFTER {
+                assert_eq!(out.t_ns.len(), 0, "a rejected report is not emitted");
+            }
+        }
+
+        let after = tracker_stats(&t);
+        assert_eq!(after.applied, before.applied + 1);
+        assert_eq!(after.resyncs, before.resyncs + 1);
+        assert_eq!(
+            after.jump_rejected,
+            before.jump_rejected + u64::from(crate::params::RESYNC_AFTER)
+        );
+        assert_eq!(
+            out.t_ns.len(),
+            1,
+            "the resync report emits exactly one report-time row"
+        );
+        let i = 0;
+        assert_eq!(out.t_ns[i], resync_report.toa_ns);
+        assert_eq!(out.addr[i], ADDR);
+        assert_eq!(out.flags[i] & O_TICK, 0, "the report row is not a tick");
+
+        // Resync is a fresh filter initialized at this report, including its covariance.
+        let expected = filter_output(&filter_init(&resync_report, c.h_mode), resync_report.toa_ns)
+            .expect("the resync report must have a representable state");
+        assert_eq!(out.lat_e7[i], expected.lat_e7);
+        assert_eq!(out.lon_e7[i], expected.lon_e7);
+        assert_eq!(out.pos_cov_m2[i], expected.pos_cov_m2);
+        assert_eq!(out.vel_cov_m2s2[i], expected.vel_cov_m2s2);
+        assert_eq!(out.mu_h[i], expected.mu_h);
+
+        // Advancing later emits ticks only; it must not duplicate the report-time row.
+        crate::types::output_clear(&mut out);
+        tracker_advance(&mut t, resync_report.toa_ns + 60 * S, &mut out);
+        assert!(out.flags.iter().all(|flags| flags & O_TICK != 0));
+        assert_eq!(
+            out.t_ns
+                .iter()
+                .filter(|&&time| time == resync_report.toa_ns)
+                .count(),
+            0,
+            "a later advance must not duplicate the report-time row"
+        );
     }
 
     // REQ: OA-TRK-230

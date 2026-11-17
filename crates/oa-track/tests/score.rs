@@ -21,10 +21,10 @@ use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 use oa_geo::aeqd::{try_frame_velocity, unproject};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    esassp_of, initiation_delays, interval_stats, run_tracker, run_tracker_spilled, score,
-    score_ranges, score_source, scored_altitude_ft, scoring_config, split_reports,
-    transversal_accel, RowSet, RowSource, CLASS_STRAIGHT, CLASS_TURN, SCORE_CHUNK_ROWS,
-    SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
+    esassp_of, flight_error_summaries, initiation_delays, interval_stats, run_tracker,
+    run_tracker_spilled, score, score_ranges, score_source, scored_altitude_ft, scoring_config,
+    split_reports, transversal_accel, RowSet, RowSource, CLASS_STRAIGHT, CLASS_TURN,
+    SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
 use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
@@ -505,8 +505,14 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
 // 8.5 m at printed precision; straight speed RMS moves 1.21 -> 1.22 m/s. Numerical refusals and
 // unrepresentable output rows are zero. These are different scoring cohorts. Prior digest:
 // "fad4e9c12707743add69d2364c22b1573f4ef8231ccdc528526bbad4544d9842".
+// (7) Emit the current report when an already-confirmed track resyncs (OA-TRK-027).
+// All 1,555,337 prior output rows and 109,633 measurement decisions are unchanged; 64
+// previously omitted report-time rows are added. Each matches the prior current-time query.
+// Report-time pairs increase 78,318 -> 78,378; tick rows, applied reports and track counts
+// are unchanged. This is output conservation, not an accuracy improvement. Prior digest:
+// "48ea32ad2c4e76abcdd750527b0f1fd7a3525854c970c9316bfc6bd180bbfb42".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "48ea32ad2c4e76abcdd750527b0f1fd7a3525854c970c9316bfc6bd180bbfb42";
+    "8892186a0d06e90ebbbf2545c6f2af286a46949c255bedf68b1072fff2607e22";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.
@@ -960,7 +966,7 @@ fn conflicting_reports_stay_on_one_side_and_are_counted() {
 #[test]
 fn two_trips_of_one_address_are_two_flights_and_the_bad_one_fails() {
     // One address flies two legs (a gap over the leg gap between them), 1 s reports.
-    let addr = 0x100001u32;
+    let addr = oa_adsb::NON_ICAO | 0x100001u32;
     let mut r = Reports::default();
     let mut starts = [0.0, 0.0];
     for (leg, t0) in [0.0, 400.0].into_iter().enumerate() {
@@ -1006,6 +1012,44 @@ fn two_trips_of_one_address_are_two_flights_and_the_bad_one_fails() {
     assert_eq!(e.flights, 2);
     assert_eq!(e.flights_over_r4, 1);
     assert!((e.flight_rms_max_m - 1000.0).abs() < 1e-9);
+
+    let summaries = flight_error_summaries(&p, &built.truth, &built.legs).unwrap();
+    assert_eq!(summaries.len(), 2);
+    assert!(summaries.iter().all(|f| f.address == addr));
+    assert_eq!(summaries[0].position_samples, 50);
+    assert_eq!(summaries[1].position_samples, 12);
+    assert_eq!(summaries[0].position_rms_m, Some(0.0));
+    assert_eq!(summaries[1].position_rms_m, Some(1000.0));
+
+    let no_pairs = oa_bench::pair::PairTable::default();
+    let empty = flight_error_summaries(&no_pairs, &built.truth, &built.legs).unwrap();
+    assert_eq!(empty.len(), 2);
+    assert!(empty
+        .iter()
+        .all(|f| f.paired_samples == 0 && f.position_rms_m.is_none()));
+
+    let mut coast = p.clone();
+    coast.coast[0] = 1;
+    let coast_summaries = flight_error_summaries(&coast, &built.truth, &built.legs).unwrap();
+    assert_eq!(coast_summaries[0].paired_samples, 50);
+    assert_eq!(coast_summaries[0].noncoast_samples, 49);
+    assert_eq!(coast_summaries[0].position_samples, 49);
+
+    let mut malformed = p.clone();
+    malformed.cross_m.pop();
+    assert!(
+        flight_error_summaries(&malformed, &built.truth, &built.legs)
+            .unwrap_err()
+            .0
+            .contains("column cross_m")
+    );
+
+    let mut unknown = p.clone();
+    unknown.addr[0] = oa_adsb::NON_ICAO | 0x100002;
+    assert!(flight_error_summaries(&unknown, &built.truth, &built.legs)
+        .unwrap_err()
+        .0
+        .contains("unknown truth leg"));
 }
 
 // REQ: OA-TRK-296

@@ -40,7 +40,7 @@ use oa_track::latency::{
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
     split_reports, Esassp, IntervalStats, RowSet, Scored, SplitStats, BASIS_TEXT, CLASS_NAMES,
-    R4_PER_FLIGHT_M, SPLIT_TEXT,
+    PER_FLIGHT_MIN_N, R4_PER_FLIGHT_M, SPLIT_TEXT,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
 use oa_track::{
@@ -588,6 +588,95 @@ fn tracks_csv(run: &SpilledRun) -> String {
     o
 }
 
+fn optional_f64(v: Option<f64>) -> String {
+    v.filter(|x| x.is_finite())
+        .map_or_else(String::new, |x| format!("{x:.6}"))
+}
+
+fn outliers_csv(rows: &[(&str, &Scored)]) -> (String, String) {
+    let mut csv = String::from("row_set,rank,address_hex,truth_leg_index,leg_start_ms,leg_end_ms,paired_sample_count,noncoast_sample_count,position_sample_count,position_rms_m,position_max_m,speed_sample_count,speed_rms_mps,heading_sample_count,heading_rms_deg,window_start_ms,window_end_ms,eligible,exclusion_reason,cohort_n,cohort_over_r4\n");
+    let mut meta = String::from("row_set,truth_legs,paired_rows,eligible_legs,excluded_no_pairs,excluded_all_coasting,excluded_no_finite_position,excluded_fewer_than_10_positions,cohort_over_r4,threshold_m\n");
+    for (name, scored) in rows {
+        let mut flights = scored.flight_errors.clone();
+        flights.sort_by(|a, b| {
+            let ar = a
+                .position_rms_m
+                .filter(|_| a.position_samples >= PER_FLIGHT_MIN_N as u64);
+            let br = b
+                .position_rms_m
+                .filter(|_| b.position_samples >= PER_FLIGHT_MIN_N as u64);
+            match (ar, br) {
+                (Some(x), Some(y)) => y
+                    .total_cmp(&x)
+                    .then_with(|| a.address.cmp(&b.address))
+                    .then_with(|| a.leg_start_ms.cmp(&b.leg_start_ms))
+                    .then_with(|| a.truth_leg_index.cmp(&b.truth_leg_index)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a
+                    .address
+                    .cmp(&b.address)
+                    .then_with(|| a.leg_start_ms.cmp(&b.leg_start_ms))
+                    .then_with(|| a.truth_leg_index.cmp(&b.truth_leg_index)),
+            }
+        });
+        let cohort_n = flights
+            .iter()
+            .filter(|f| f.position_samples >= PER_FLIGHT_MIN_N as u64)
+            .count();
+        let over = flights
+            .iter()
+            .filter(|f| {
+                f.position_samples >= PER_FLIGHT_MIN_N as u64
+                    && f.position_rms_m.is_some_and(|v| v > R4_PER_FLIGHT_M)
+            })
+            .count();
+        let (mut no_pairs, mut all_coasting, mut no_finite_position, mut fewer_than_10) =
+            (0u64, 0u64, 0u64, 0u64);
+        let mut paired = 0u64;
+        let mut eligible_rank = 0usize;
+        for f in &flights {
+            paired += f.paired_samples;
+            let eligible = f.position_samples >= PER_FLIGHT_MIN_N as u64;
+            if !eligible {
+                match (f.paired_samples, f.noncoast_samples, f.position_samples) {
+                    (0, _, _) => no_pairs += 1,
+                    (_, 0, _) => all_coasting += 1,
+                    (_, _, 0) => no_finite_position += 1,
+                    _ => fewer_than_10 += 1,
+                }
+            }
+            let reason = if eligible {
+                ""
+            } else if f.paired_samples == 0 {
+                "no_pairs"
+            } else if f.noncoast_samples == 0 {
+                "all_coasting"
+            } else if f.position_samples == 0 {
+                "no_finite_position"
+            } else {
+                "fewer_than_10_positions"
+            };
+            let rank = if eligible {
+                eligible_rank += 1;
+                eligible_rank.to_string()
+            } else {
+                String::new()
+            };
+            let _ = writeln!(csv,
+                "{name},{rank},{:06X},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{cohort_n},{over}",
+                f.address, f.truth_leg_index, f.leg_start_ms, f.leg_end_ms, f.paired_samples,
+                f.noncoast_samples, f.position_samples, optional_f64(f.position_rms_m),
+                optional_f64(f.position_max_m), f.speed_samples, optional_f64(f.speed_rms_mps),
+                f.heading_samples, optional_f64(f.heading_rms_deg),
+                f.window_start_ms.map_or_else(String::new, |v| v.to_string()),
+                f.window_end_ms.map_or_else(String::new, |v| v.to_string()), eligible, reason);
+        }
+        let _ = writeln!(meta, "{name},{},{paired},{cohort_n},{no_pairs},{all_coasting},{no_finite_position},{fewer_than_10},{over},{R4_PER_FLIGHT_M:.1}", flights.len());
+    }
+    (csv, meta)
+}
+
 fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Result<(), String> {
     let mut phases = Phases::default();
     phases.mark("start");
@@ -754,9 +843,12 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
         rows.push((format!("{n},report_times"), u));
     }
     w("esassp.csv", esassp_csv(&rows))?;
+    let (outlier_rows, outlier_meta) = outliers_csv(&[("ticks", &scored), ("updates", &updates)]);
+    w("outliers.csv", outlier_rows)?;
+    w("outliers-summary.csv", outlier_meta)?;
     let ticks = scored.tick_rows;
     println!(
-        "wrote report.txt, report.csv, tracks.csv and esassp.csv to {}; {} measurements, {} tracks, {} one-second rows, {:.0} updates/s",
+        "wrote report.txt, report.csv, tracks.csv, esassp.csv, outliers.csv and outliers-summary.csv to {}; {} measurements, {} tracks, {} one-second rows, {:.0} updates/s",
         out_dir.display(),
         run.offered,
         run.stats.started,

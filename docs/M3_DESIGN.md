@@ -202,6 +202,22 @@ sees it. Per-stage p50, p95, p99 and max are published with the per-update proce
 replay is not live: a recording's frame stamp is its first report's time and frames come from a
 file, so replay latency is the code's cost per stage, not what a deployment would see.
 
+**Per-flight diagnostics.** `oa-track-run` writes `outliers.csv` for one-second and report-time
+rows, using the same final paired errors as the aggregate score. A flight is a truth leg, keyed
+by its full aircraft address and leg index. Every leg remains in the file, including legs with
+no pairs, only coasting rows, no finite position errors, or fewer than ten position samples.
+Eligible legs are ranked by position RMS; `outliers-summary.csv` records each denominator and
+exclusion count. The existing 230 m per-flight value is a diagnostic threshold on these
+correlated split-reference errors, not an independent physical-truth acceptance result.
+
+For individual cases, `cargo run --release -p oa-track --example prediction_trace -- --adsb
+<clip.oaf> --out <new-directory> --addr 0xA00001` writes measurement decisions and output states
+for the selected full address. Repeat `--addr` for more addresses. All aircraft in the original
+set-A input still drive the tracker; address selection only filters diagnostic serialization.
+Truth is queried after output is produced and never enters the tracker. Ambiguous frame stamps
+and unavailable input context remain explicitly unknown. The optional `--start-ns` and
+`--end-ns` bounds limit exported rows, not tracker input or warmup.
+
 ## 8. Code
 
 | Crate | Role |
