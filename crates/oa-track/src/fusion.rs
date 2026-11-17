@@ -61,16 +61,17 @@ use crate::assoc::{
 };
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
-    point_grid_buffer, point_grid_build, point_grid_new, point_grid_query_budgeted, CoarseIndex,
-    PointGrid, PointGridQueryResult,
+    point_grid_buffer, point_grid_build_budgeted, point_grid_new, point_grid_query_budgeted,
+    sort_unique_indices_budgeted, CoarseIndex, PointGrid, PointGridBuildResult,
+    PointGridQueryResult, SortUniqueResult,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
     AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
-    CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_SLACK_M, COARSE_M,
-    COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2,
-    GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M,
-    INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
+    CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_ORDER_WORDS, CAND_SLACK_M,
+    COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
+    GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
+    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
     MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING, MAX_RADARS,
     MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
     RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
@@ -304,7 +305,7 @@ pub struct FusionStats {
     /// Anonymous plots of an association that were never gated because the bucket's work limit
     /// or the pair limit was reached first.
     pub anon_plots_ungated: u64,
-    /// Initiations cut short at the work or pair limit (a subset of `bucket_work_capped`).
+    /// Initiation passes cut short by a limit, counted at most once per radar-bucket.
     pub init_capped: u64,
     /// Plot-candidate pairs tested by initiation.
     pub init_tests: u64,
@@ -2380,11 +2381,22 @@ fn initiate(
         };
         push_within(&mut reach, r);
     }
-    let sort_work = reach
-        .len()
-        .saturating_mul(usize::BITS as usize)
-        .saturating_add(reach.len());
-    if !charge_init_work(f, sort_work) {
+    let mut build_spent = 0usize;
+    let built = point_grid_build_budgeted(
+        &mut grid,
+        reach.len(),
+        |ci| match reach.get(ci) {
+            Some(CandReach::At(x, y, w)) if *w <= INIT_STD_M => Some((*x, *y)),
+            _ => None,
+        },
+        &mut f.init_work_left,
+        &mut build_spent,
+    );
+    f.stats.init_work = f.stats.init_work.saturating_add(build_spent as u64);
+    if built != PointGridBuildResult::Complete {
+        if built == PointGridBuildResult::CapacityFull {
+            f.stats.scratch_full += 1;
+        }
         f.stats.init_plots_refused += anon.len() as u64;
         mark_init_capped(f, radar);
         f.init_free = free;
@@ -2398,10 +2410,8 @@ fn initiate(
         f.ms_buf = ms;
         return;
     }
-    point_grid_build(&mut grid, reach.len(), |ci| match reach.get(ci) {
-        Some(CandReach::At(x, y, w)) if *w <= INIT_STD_M => Some((*x, *y)),
-        _ => None,
-    });
+    // Fixed stack storage: one bit per candidate, with no allocation in the plot loop.
+    let mut order_bits = [0u64; CAND_ORDER_WORDS];
     'plots: for (a, &j) in anon.iter().enumerate() {
         if !charge_init_work(f, 1) {
             f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
@@ -2478,8 +2488,21 @@ fn initiate(
             for &w in &wide {
                 push_within(&mut near, w);
             }
-            let sort_work = near.len().saturating_mul(usize::BITS as usize);
-            if !charge_init_work(f, sort_work) {
+            let mut sort_spent = 0usize;
+            let sorted = sort_unique_indices_budgeted(
+                &mut near,
+                &mut order_bits,
+                cand_ix.len(),
+                &mut f.init_work_left,
+                &mut sort_spent,
+            );
+            f.stats.init_work = f.stats.init_work.saturating_add(sort_spent as u64);
+            if let SortUniqueResult::Complete(len) = sorted {
+                near.truncate(len);
+            } else {
+                if sorted != SortUniqueResult::Capped {
+                    f.stats.assoc_refused += 1;
+                }
                 f.stats.init_plots_refused += anon.len().saturating_sub(a) as u64;
                 mark_init_capped(f, radar);
                 pairs.truncate(pair_start);
@@ -2488,7 +2511,6 @@ fn initiate(
                 near.clear();
                 break 'plots;
             }
-            near.sort_unstable();
         } else {
             near.clear();
             if !charge_init_work(f, cand_ix.len()) {
@@ -2625,44 +2647,36 @@ fn initiate(
     let now_scan = plots
         .first()
         .map_or(Some(0), |p| scan_of(f, radar, p.time_ns));
-    let mut i = 0usize;
-    let mut retire_capped = false;
-    while i < f.cands.len() {
-        if !charge_init_work(f, 1) {
-            retire_capped = true;
-            break;
-        }
-        let Some(c) = f.cands.get(i).copied() else {
-            break;
-        };
-        if usize::from(c.radar) != radar {
-            i += 1;
+    // Reserve one read and at most one survivor write per candidate. Stable compaction avoids
+    // shifting the entire suffix for every retirement, and preserves confirmation/key order.
+    let retire_len = f.cands.len();
+    if !charge_init_work(f, retire_len.saturating_mul(2)) {
+        mark_init_capped(f, radar);
+        return;
+    }
+    let mut kept = 0usize;
+    for read in 0..retire_len {
+        let Some(c) = f.cands.get(read).copied() else {
             continue;
-        }
-        if c.n >= f.cfg.init_m {
-            if !charge_init_work(f, f.cands.len().saturating_sub(i + 1)) {
-                retire_capped = true;
-                break;
-            }
-            f.cands.remove(i);
+        };
+        let same_radar = usize::from(c.radar) == radar;
+        if same_radar && c.n >= f.cfg.init_m {
+            // Confirmation reads this copied record, never the candidate collection.
             let _ = confirm(f, radar, &c, out);
-        } else if now_scan
-            .and_then(|n| n.checked_sub(c.first_scan))
-            .is_some_and(|d| d >= i64::from(f.cfg.init_n))
+        } else if same_radar
+            && now_scan
+                .and_then(|n| n.checked_sub(c.first_scan))
+                .is_some_and(|d| d >= i64::from(f.cfg.init_n))
         {
-            if !charge_init_work(f, f.cands.len().saturating_sub(i + 1)) {
-                retire_capped = true;
-                break;
-            }
-            f.cands.remove(i);
             f.stats.cand_expired += 1;
         } else {
-            i += 1;
+            if let Some(slot) = f.cands.get_mut(kept) {
+                *slot = c;
+            }
+            kept += 1;
         }
     }
-    if retire_capped {
-        mark_init_capped(f, radar);
-    }
+    f.cands.truncate(kept);
 }
 
 /// Reserves initiation work before a bounded pass. Counters describe actual reserved work.
@@ -2917,6 +2931,43 @@ mod tests {
 
     // REQ: OA-TRK-325
     #[test]
+    fn initiation_retires_a_full_expired_batch_with_linear_work() {
+        let mut f = make_fusion(|_| {});
+        let m = adsb_fix(0xA00001, 0);
+        let count = 2_048;
+        for _ in 0..count {
+            f.cands.push(Cand {
+                radar: 0,
+                addr: NO_ADDR,
+                n: 1,
+                first_scan: 0,
+                last_scan: 0,
+                meas: [m; 4],
+                label: [7; 4],
+            });
+        }
+        let before = fusion_buffers(&f);
+        // At exactly the window boundary, the pruning pass retains these candidates;
+        // the retirement pass must expire all of them. The already assigned plot adds no hit.
+        let plot = mode_s_plot_at(NO_ADDR, i64::from(f.cfg.init_n) * SITE.period_ns, 0);
+        let decision = Decision {
+            kind: D_APPLY,
+            key: m.addr,
+            how: HOW_ASSOC,
+            m,
+            resid: None,
+        };
+        let mut out = output_new(16);
+        initiate(&mut f, 0, &[plot], &[decision], &mut out);
+        assert!(f.cands.is_empty(), "{} candidates remain", f.cands.len());
+        assert_eq!(fusion_stats(&f).cand_expired, count as u64);
+        assert_eq!(fusion_stats(&f).init_capped, 0);
+        assert!(fusion_stats(&f).init_work < 10 * count as u64);
+        assert_eq!(fusion_buffers(&f), before);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
     fn initiation_low_budget_defers_plots_before_point_grid_query() {
         let mut f = make_fusion(|_| {});
         f.init_work_max = 5;
@@ -3005,12 +3056,13 @@ mod tests {
     #[test]
     fn initiation_rolls_back_partial_pairs_when_budget_expires_mid_plot() {
         let mut f = make_fusion(|_| {});
-        // The pre-pair work is 1 classification + 4 prune + 1 free-list visit + 2 candidate
-        // collection + 2 reach visits + 130 grid build/sort + 2 anon passes + 1 plot visit
-        // + 2 fallback near-list writes = 145. The first candidate visit/test and second
-        // candidate visit consume 3 more units. Its exact test is then refused and the first
-        // pair is rolled back, at a total of 148.
-        f.init_work_max = 148;
+        // Pre-pair work: 1 classification + 4 prune + 1 free-list visit + 2 candidate
+        // collection + 2 reach visits + 2 grid visits + 6 heap operations + 2 anon passes
+        // + 1 plot visit + 2 fallback writes = 23. The two grid keys share a cell and are
+        // ascending: heap build costs 4 units (loop, sift, comparison, swap), extraction 2.
+        // The first visit/test and second visit cost 3 more; the second exact test cannot
+        // fit and the first pair must be rolled back, at a total of 26.
+        f.init_work_max = 26;
         f.brute_coarse = true;
         let mut plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
         plot.alt_ft = NONE_ALT;
@@ -3052,35 +3104,7 @@ mod tests {
     // REQ: OA-TRK-325
     #[test]
     fn initiation_exhaustion_at_each_stage_keeps_every_scratch_buffer() {
-        for limit in [
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-            12,
-            13,
-            64,
-            140,
-            141,
-            142,
-            143,
-            144,
-            145,
-            146,
-            147,
-            148,
-            149,
-            150,
-            MAX_INIT_WORK,
-        ] {
+        for limit in (0..=40).chain([64, 140, 148, 150, MAX_INIT_WORK]) {
             let mut f = make_fusion(|c| c.tracker.max_tracks = 32);
             f.init_work_max = limit;
             let plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);

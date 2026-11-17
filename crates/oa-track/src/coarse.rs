@@ -452,6 +452,230 @@ pub fn point_grid_build(g: &mut PointGrid, n: usize, place: impl Fn(usize) -> Op
     g.keys.sort_unstable();
 }
 
+/// Result of building a point grid under an explicit work allowance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointGridBuildResult {
+    /// Every input was visited and the complete grid was sorted.
+    Complete,
+    /// The work allowance ended before the grid could be completed; the grid is empty.
+    Capped,
+    /// The declared input count exceeds the preallocated key capacity; the grid is empty.
+    CapacityFull,
+}
+
+/// Builds and sorts a point grid without allocation, charging each input visit, sort-loop
+/// iteration, comparison, and swap before doing it. `remaining` is reduced by completed/attempted
+/// units and `spent` reports the same units. On any incomplete result, the partial grid is cleared
+/// and must not be queried.
+pub fn point_grid_build_budgeted(
+    g: &mut PointGrid,
+    n: usize,
+    place: impl Fn(usize) -> Option<(f64, f64)>,
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> PointGridBuildResult {
+    g.keys.clear();
+    if n > g.keys.capacity() {
+        return PointGridBuildResult::CapacityFull;
+    }
+    for i in 0..n {
+        if !charge_work(remaining, spent) {
+            g.keys.clear();
+            return PointGridBuildResult::Capped;
+        }
+        let Some((x, y)) = place(i).filter(|p| p.0.is_finite() && p.1.is_finite()) else {
+            continue;
+        };
+        let (cx, cy) = point_cell(g, x, y);
+        g.keys.push(u64::from(point_key(cx, cy)) << 32 | i as u64);
+    }
+    if !sort_budgeted(&mut g.keys, remaining, spent) {
+        g.keys.clear();
+        return PointGridBuildResult::Capped;
+    }
+    PointGridBuildResult::Complete
+}
+
+/// In-place heapsort with no allocation. Each sort-loop iteration, comparison, and swap consumes
+/// one work unit before it occurs; `false` means the caller must discard the partially sorted
+/// slice. It is concrete to the grid's packed `u64` keys; near-list indexes use the bounded bitset
+/// routine below.
+pub fn sort_budgeted(items: &mut [u64], remaining: &mut usize, spent: &mut usize) -> bool {
+    let len = items.len();
+    if len < 2 {
+        return true;
+    }
+
+    // Build a max heap, starting at the last parent and moving toward the root.
+    for root in (0..len / 2).rev() {
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        if !sift_down(items, root, len, remaining, spent) {
+            return false;
+        }
+    }
+
+    // Move the maximum to the end, then restore the heap in the remaining prefix.
+    for end in (1..len).rev() {
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        items.swap(0, end);
+        if !sift_down(items, 0, end, remaining, spent) {
+            return false;
+        }
+    }
+    true
+}
+
+fn sift_down(
+    items: &mut [u64],
+    mut root: usize,
+    end: usize,
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> bool {
+    while root < end / 2 {
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        // E8: root < end / 2 proves 2*root + 2 <= end, so both child-index operations fit usize.
+        let left = root * 2 + 1;
+        let right = left + 1;
+        let mut largest = left;
+        if right < end {
+            if !charge_work(remaining, spent) {
+                return false;
+            }
+            let (Some(left_item), Some(right_item)) = (items.get(left), items.get(right)) else {
+                return false;
+            };
+            if left_item < right_item {
+                largest = right;
+            }
+        }
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        let (Some(root_item), Some(child_item)) = (items.get(root), items.get(largest)) else {
+            return false;
+        };
+        if root_item >= child_item {
+            break;
+        }
+        if !charge_work(remaining, spent) {
+            return false;
+        }
+        items.swap(root, largest);
+        root = largest;
+    }
+    true
+}
+
+fn charge_work(remaining: &mut usize, spent: &mut usize) -> bool {
+    let Some(next_spent) = spent.checked_add(1) else {
+        return false;
+    };
+    if *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    *spent = next_spent;
+    true
+}
+
+/// Result of sorting and deduplicating candidate indexes through a bounded bitset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortUniqueResult {
+    /// The first `len` input entries now contain the ascending unique indexes.
+    Complete(usize),
+    /// The full finite work bound did not fit; neither input nor scratch was modified.
+    Capped,
+    /// An input candidate index is outside `0..domain`; input stays unchanged and scratch clears.
+    InvalidIndex,
+    /// The scratch slice cannot represent the declared domain; no buffers are modified.
+    ScratchTooSmall,
+}
+
+/// Sorts and deduplicates indexes in place using caller-owned bitset scratch. The active scratch
+/// prefix is `ceil(domain / 64)` words. Before mutation, the full finite bound `2*words + 2*N`
+/// is reserved: clearing and scanning the active words, marking N inputs, and emitting at most N
+/// set indexes. `Capped` leaves both buffers unchanged. Invalid indexes leave the input unchanged
+/// and clear the active scratch prefix. Scratch beyond the active prefix is untouched.
+pub fn sort_unique_indices_budgeted(
+    indices: &mut [u32],
+    scratch: &mut [u64],
+    domain: usize,
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> SortUniqueResult {
+    let word_count = if domain % 64 == 0 {
+        domain / 64
+    } else {
+        domain / 64 + 1
+    };
+    if scratch.len() < word_count {
+        return SortUniqueResult::ScratchTooSmall;
+    }
+    let Some(index_work) = indices.len().checked_mul(2) else {
+        return SortUniqueResult::Capped;
+    };
+    let Some(word_work) = word_count.checked_mul(2) else {
+        return SortUniqueResult::Capped;
+    };
+    let Some(required) = word_work.checked_add(index_work) else {
+        return SortUniqueResult::Capped;
+    };
+    let Some(next_spent) = spent.checked_add(required) else {
+        return SortUniqueResult::Capped;
+    };
+    if *remaining < required {
+        return SortUniqueResult::Capped;
+    }
+    *remaining -= required;
+    *spent = next_spent;
+
+    let Some(active) = scratch.get_mut(..word_count) else {
+        return SortUniqueResult::ScratchTooSmall;
+    };
+    active.fill(0);
+    for &index in indices.iter() {
+        let index = index as usize;
+        if index >= domain {
+            active.fill(0);
+            return SortUniqueResult::InvalidIndex;
+        }
+        let word = index / 64;
+        let bit = index % 64;
+        let Some(word_value) = active.get_mut(word) else {
+            active.fill(0);
+            return SortUniqueResult::ScratchTooSmall;
+        };
+        *word_value |= 1u64 << bit;
+    }
+
+    let mut output_len = 0usize;
+    for (word_index, word) in active.iter_mut().enumerate() {
+        let mut bits = *word;
+        *word = 0;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let index = word_index * 64 + bit;
+            let Some(output) = indices.get_mut(output_len) else {
+                return SortUniqueResult::ScratchTooSmall;
+            };
+            *output = index as u32;
+            output_len += 1;
+            bits &= bits - 1;
+        }
+    }
+    SortUniqueResult::Complete(output_len)
+}
+
 /// Appends to `out` every point within `r` of `(x, y)`, and some others, in no order; `true`.
 /// `false`, with nothing appended, when `r` is not a finite number or reaches more than
 /// [`POINT_RINGS_MAX`] cells. `out` needs room for the points to avoid growing.
@@ -1001,6 +1225,282 @@ mod tests {
         assert_eq!((out.as_ptr(), out.capacity()), before);
         assert_eq!(remaining, 10);
         assert_eq!(spent, 0);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_sort_orders_empty_single_duplicate_and_general_inputs() {
+        for (mut values, expected) in [
+            (Vec::<u64>::new(), vec![]),
+            (vec![7], vec![7]),
+            (vec![4, 1, 4, 2, 1, 0], vec![0, 1, 1, 2, 4, 4]),
+        ] {
+            let (mut remaining, mut spent) = (1_000usize, 0usize);
+            assert!(sort_budgeted(&mut values, &mut remaining, &mut spent));
+            assert_eq!(values, expected);
+            assert_eq!(remaining + spent, 1_000);
+        }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_sort_caps_before_any_unfunded_operation() {
+        let mut values = [3u64, 1, 2];
+        let before = values;
+        let (mut remaining, mut spent) = (0usize, 0usize);
+        assert!(!sort_budgeted(&mut values, &mut remaining, &mut spent));
+        assert_eq!((remaining, spent), (0, 0));
+        assert_eq!(values, before);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_sort_matches_standard_order_for_exhaustive_small_arrays() {
+        for len in 0..=7usize {
+            let cases = 3usize.pow(len as u32);
+            for mut encoded in 0..cases {
+                let mut values = Vec::with_capacity(len);
+                for _ in 0..len {
+                    values.push((encoded % 3) as u64);
+                    encoded /= 3;
+                }
+                let mut expected = values.clone();
+                expected.sort_unstable();
+                let (mut remaining, mut spent) = (1_000usize, 0usize);
+                assert!(sort_budgeted(&mut values, &mut remaining, &mut spent));
+                assert_eq!(values, expected);
+                assert_eq!(remaining + spent, 1_000);
+            }
+        }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_sort_caps_at_each_work_boundary_without_reallocation() {
+        for source in [
+            vec![1u64, 0],
+            vec![4, 3, 2, 1],
+            vec![2, 1, 2, 0, 1, 0, 3, 2],
+        ] {
+            let mut fully_sorted = source.clone();
+            let (mut remaining, mut full_work) = (10_000usize, 0usize);
+            assert!(sort_budgeted(
+                &mut fully_sorted,
+                &mut remaining,
+                &mut full_work
+            ));
+            for allowance in 0..=full_work {
+                let mut values = source.clone();
+                let before = (values.as_ptr(), values.capacity());
+                let (mut remaining, mut spent) = (allowance, 0usize);
+                let complete = sort_budgeted(&mut values, &mut remaining, &mut spent);
+                assert_eq!((values.as_ptr(), values.capacity()), before);
+                assert_eq!(remaining + spent, allowance);
+                if complete {
+                    assert_eq!(allowance, full_work);
+                    assert_eq!(values, fully_sorted);
+                } else {
+                    assert_eq!(spent, allowance);
+                }
+            }
+        }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_point_grid_stays_in_its_buffer_and_clears_on_failure() {
+        let mut grid = point_grid_new(4, 1.0);
+        let before = point_grid_buffer(&grid);
+        let (mut remaining, mut spent) = (10_000usize, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(
+                &mut grid,
+                4,
+                |i| Some((3.0 - i as f64, 0.0)),
+                &mut remaining,
+                &mut spent,
+            ),
+            PointGridBuildResult::Complete
+        );
+        assert_eq!(point_grid_buffer(&grid), before);
+        assert_eq!(grid.keys.len(), 4);
+
+        let (mut remaining, mut spent) = (1usize, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(
+                &mut grid,
+                4,
+                |i| Some((i as f64, 0.0)),
+                &mut remaining,
+                &mut spent,
+            ),
+            PointGridBuildResult::Capped
+        );
+        assert!(grid.keys.is_empty());
+        assert_eq!(point_grid_buffer(&grid), before);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_point_grid_clears_at_every_cap_and_matches_legacy_output() {
+        let points = [
+            Some((3.0, 2.0)),
+            None,
+            Some((1.0, 1.0)),
+            Some((f64::NAN, 4.0)),
+            Some((3.0, 2.0)),
+            Some((-2.0, 7.0)),
+        ];
+        let mut legacy = point_grid_new(points.len(), 1.0);
+        point_grid_build(&mut legacy, points.len(), |i| {
+            points.get(i).copied().flatten()
+        });
+        let mut reference = point_grid_new(points.len(), 1.0);
+        let (mut remaining, mut full_work) = (10_000usize, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(
+                &mut reference,
+                points.len(),
+                |i| points.get(i).copied().flatten(),
+                &mut remaining,
+                &mut full_work,
+            ),
+            PointGridBuildResult::Complete
+        );
+        assert_eq!(reference.keys, legacy.keys);
+
+        for allowance in 0..=full_work {
+            let mut grid = point_grid_new(points.len(), 1.0);
+            let before = point_grid_buffer(&grid);
+            let (mut remaining, mut spent) = (allowance, 0usize);
+            let result = point_grid_build_budgeted(
+                &mut grid,
+                points.len(),
+                |i| points.get(i).copied().flatten(),
+                &mut remaining,
+                &mut spent,
+            );
+            assert_eq!(point_grid_buffer(&grid), before);
+            assert_eq!(remaining + spent, allowance);
+            if result == PointGridBuildResult::Complete {
+                assert_eq!(allowance, full_work);
+                assert_eq!(grid.keys, legacy.keys);
+            } else {
+                assert_eq!(result, PointGridBuildResult::Capped);
+                assert_eq!(spent, allowance);
+                assert!(grid.keys.is_empty());
+            }
+        }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_point_grid_refuses_declared_over_capacity_before_visiting() {
+        let mut grid = point_grid_new(1, 1.0);
+        let visits = std::cell::Cell::new(0usize);
+        let (mut remaining, mut spent) = (100usize, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(
+                &mut grid,
+                2,
+                |_| {
+                    visits.set(visits.get() + 1);
+                    Some((0.0, 0.0))
+                },
+                &mut remaining,
+                &mut spent,
+            ),
+            PointGridBuildResult::CapacityFull
+        );
+        assert_eq!(visits.get(), 0);
+        assert_eq!((remaining, spent), (100, 0));
+        assert!(grid.keys.is_empty());
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn bitset_sort_unique_orders_boundaries_and_deduplicates_with_finite_budget() {
+        let mut indices = [16_383u32, 64, 63, 0, 64, 16_383];
+        let mut scratch = [u64::MAX; 256];
+        let index_address = indices.as_ptr();
+        let scratch_address = scratch.as_ptr();
+        let allowance = 2 * 256 + 2 * indices.len();
+        let (mut remaining, mut spent) = (allowance, 0usize);
+        assert_eq!(
+            sort_unique_indices_budgeted(
+                &mut indices,
+                &mut scratch,
+                16_384,
+                &mut remaining,
+                &mut spent,
+            ),
+            SortUniqueResult::Complete(4)
+        );
+        assert_eq!(&indices[..4], &[0, 63, 64, 16_383]);
+        assert_eq!((remaining, spent), (0, allowance));
+        assert_eq!(indices.as_ptr(), index_address);
+        assert_eq!(scratch.as_ptr(), scratch_address);
+        assert!(scratch.iter().all(|&word| word == 0));
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn bitset_sort_unique_budget_precheck_preserves_both_buffers() {
+        let mut indices = [64u32, 1, 64];
+        let before_indices = indices;
+        let mut scratch = [0x55u64; 2];
+        let before_scratch = scratch;
+        let (mut remaining, mut spent) = (0usize, 0usize);
+        assert_eq!(
+            sort_unique_indices_budgeted(
+                &mut indices,
+                &mut scratch,
+                128,
+                &mut remaining,
+                &mut spent,
+            ),
+            SortUniqueResult::Capped
+        );
+        assert_eq!(indices, before_indices);
+        assert_eq!(scratch, before_scratch);
+        assert_eq!((remaining, spent), (0, 0));
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn bitset_sort_unique_refuses_invalid_indexes_and_short_scratch() {
+        let mut indices = [3u32, 64, 1];
+        let before = indices;
+        let mut scratch = [u64::MAX];
+        let (mut remaining, mut spent) = (100usize, 0usize);
+        assert_eq!(
+            sort_unique_indices_budgeted(
+                &mut indices,
+                &mut scratch,
+                64,
+                &mut remaining,
+                &mut spent,
+            ),
+            SortUniqueResult::InvalidIndex
+        );
+        assert_eq!(indices, before);
+        assert_eq!(scratch[0], 0);
+        assert_eq!(remaining + spent, 100);
+
+        let mut no_scratch = [];
+        let (mut remaining, mut spent) = (100usize, 0usize);
+        assert_eq!(
+            sort_unique_indices_budgeted(
+                &mut indices,
+                &mut no_scratch,
+                65,
+                &mut remaining,
+                &mut spent,
+            ),
+            SortUniqueResult::ScratchTooSmall
+        );
+        assert_eq!(indices, before);
+        assert_eq!((remaining, spent), (100, 0));
     }
 
     // REQ: OA-TRK-301

@@ -180,9 +180,10 @@ pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
 /// Initiation work units shared by every radar in one bucket. One million units matches the
 /// existing association work ceiling, so their separate caps give two million charged units
-/// combined. One unit is a candidate visit/exact pair; grid build/sort reserves conservative
-/// comparison bounds and query charges each cell, probe, and key visit. The sole refusal-accounting
-/// pass is separate and is bounded by `MAX_RADARS * MAX_BUCKET_PLOTS` (131,072) plot-slot visits
+/// combined. One unit is a candidate visit/exact pair; grid build/sort charges input visits,
+/// loop iterations, comparisons and swaps; query charges each cell, probe, and key visit.
+/// The sole refusal-accounting pass is separate and is bounded by
+/// `MAX_RADARS * MAX_BUCKET_PLOTS` (131,072) plot-slot visits
 /// per bucket; `FusionStats::init_refusal_pass_visits` reports that work.
 pub const MAX_INIT_WORK: usize = 1 << 20;
 /// Limit: tracks (and candidates) in one association solve.
@@ -215,6 +216,8 @@ pub const BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_RADARS * MAX_BUCKET_PLOTS
 /// Capacity of the candidate indices of one radar's association: the candidates, at most
 /// [`MAX_CANDIDATES`].
 pub const CAND_IX_MAX: usize = MAX_CANDIDATES;
+/// Bitset words for ordering the candidate pool indexes without comparison sorting.
+pub const CAND_ORDER_WORDS: usize = MAX_CANDIDATES.div_ceil(64);
 
 /// The standard reach of a candidate in initiation, metres: a candidate whose plots can lie no
 /// further than this from its predicted place (the gate radius at the longest interval of the

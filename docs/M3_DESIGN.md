@@ -124,7 +124,8 @@ aircraft identities. Input addresses cannot claim their reserved namespace. Hypo
 including possible duplicates, stay visible in scoring and capacity reports.
 
 Initiation has a separate work allowance shared by all radars of a bucket: candidate visits,
-address lookups, grid construction/query and retirement are charged before work. Exhaustion
+address lookups, grid construction/query, candidate-index ordering and retirement are charged
+before work. Exhaustion
 preserves unvisited candidates and explicitly refuses unprocessed plots; it does not promise a
 retry. One bounded refusal-accounting pass reports loss even with no allowance left. This is a
 bound on initiation, not a complete work or allocation proof for the whole tracker.
