@@ -3914,5 +3914,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 
 - **OA-TRK-337** The standalone allocation checker ties every declared measured tracker/fusion
   route to its production source symbol and requires a positive route-specific runtime evidence
-  field. The configured tracker-capacity fixture fills all slots, observes refusal, then confirms
-  an existing track still accepts an update.
+  field. Tracker fixtures include the default 4,096-track capacity followed by refusal and recovery,
+  history wrap/replay and retention refusal, output/log overflow with fully preserved aligned row
+  data and output reuse, and clock hold/forward/backstep with valid follow-up. Fusion fills one radar
+  bucket past `MAX_BUCKET_PLOTS`, counts that deliberate loss, and proves a later existing-key plot
+  is processed. Each armed window independently observes the injected-allocation control.

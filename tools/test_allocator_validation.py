@@ -20,6 +20,12 @@ def result(injected=False):
         "injection_requested": injected,
         "fixture_ids": [
             "tracker_update_ooo_refusal_capacity_advance_flush",
+            "tracker_default_4096_capacity_recovery",
+            "tracker_output_log_overflow_reuse",
+            "tracker_clock_hold_stepback_recovery",
+            "fusion_bucket_plot_cap_refusal_recovery",
+            "fusion_adsb_pending_queue_capacity_recovery",
+            "fusion_plot_pending_queue_capacity_recovery",
             "fusion_adsb_hard_assoc_registration",
             "fusion_anonymous_init_and_assoc",
         ],
@@ -32,6 +38,38 @@ def result(injected=False):
             "full_capacity": 8,
             "recovery_applied": 1,
             "predictions": 4, "advance_rows": 3, "flush_rows": 2, "ended": 1, "rows": 8,
+        },
+        "default_capacity": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "occupied": 4096, "confirmed": 4096, "refused": 1, "recovered": 1,
+            "history_refiltered": 1, "history_replayed": 1, "late_ring": 1,
+        },
+        "output_log": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "output_overflow": 1, "output_rows_after_reuse": 1, "output_aligned": True,
+            "output_preserved_addr": True, "output_payload_unchanged": True,
+            "log_overflow": 1, "log_rows": 1,
+            "log_aligned": True,
+        },
+        "clock_gate": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "held": 2, "held_applied": 2, "step_forward": 1, "late": 5,
+            "step_back": 1, "future_dropped": 3, "recovered": 1,
+        },
+        "bucket_capacity": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "plots_offered": 16_386, "bucket_plot_overflow": 1,
+            "track_capacity_refused": 16_381, "recovery_applied": 1,
+        },
+        "adsb_pending": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
+            "bucket_plot_overflow": 0, "recovery_applied": 2,
+        },
+        "plot_pending": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
+            "bucket_plot_overflow": 1_032_192, "recovery_applied": 1,
         },
         "fusion": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
@@ -132,6 +170,9 @@ class AllocatorResultTests(unittest.TestCase):
         self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
         self.assertTrue(gate.evaluate_allocator_result(json.dumps(result()) + " trailing"))
         self.assertTrue(gate.evaluate_allocator_result("[]"))
+        value = result()
+        value["output_log"] = []
+        self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
 
 
 class AllocatorLayoutTests(unittest.TestCase):
@@ -163,12 +204,16 @@ class AllocatorLayoutTests(unittest.TestCase):
         value["tracker"]["recovery_applied"] = 0
         self.assertTrue(any("tracker.recovery_applied" in error for error in
                             gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["default_capacity"]["confirmed"] = 4095
+        self.assertTrue(any("default_capacity.confirmed" in error for error in
+                            gate.evaluate_allocator_result(json.dumps(value))))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for relative in {item[0] for item in gate.ROUTE_LEDGER.values()}:
                 write(root / relative, "fn tracker_update() {} fn tracker_predict() {} "
-                      "fn tracker_advance() {} fn tracker_flush() {} fn fusion_adsb() {} "
-                      "fn fusion_plots() {} fn fusion_advance() {} fn fusion_finish() {} "
+                      "fn tracker_advance() {} fn tracker_flush() {} fn output_clear() {} fn fusion_adsb() {} "
+                      "fn fusion_plots() {} fn process_bucket() {} fn fusion_advance() {} fn fusion_finish() {} "
                       "fn fusion_registration() {}")
             self.assertEqual(gate.allocation_route_ledger_errors(root), [])
             (root / "crates/oa-track/src/fusion.rs").write_text("fn fusion_plots() {}", encoding="utf-8")

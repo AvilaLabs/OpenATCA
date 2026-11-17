@@ -2,17 +2,22 @@
 //! Standalone allocation validation. Shell (B3): fixtures, execution and reports.
 
 mod allocator;
+mod pending_windows;
+use pending_windows::{adsb_pending_window, plot_pending_window, PendingWindowEvidence};
 
 use allocator::{control_alloc, control_realloc, control_zeroed, Counts};
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_config, fusion_finish, fusion_new, fusion_plots,
     fusion_registration, fusion_stats, fusion_tracker_config, fusion_tracker_stats,
 };
+use oa_track::fusion_params::MAX_BUCKET_PLOTS;
+use oa_track::params::RING_DEPTH;
 use oa_track::radar::{plot_convert, radar_geom, RadarPlot, RadarSite, NONE_CODE, NO_BIAS};
 use oa_track::{
     output_len, output_new, tracker_advance, tracker_flush, tracker_new, tracker_predict,
-    tracker_counts, tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, TrackerConfig,
-    DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_ADDR, NO_IDENT, O_COAST, RADAR_KEY_BASE,
+    output_clear, tracker_counts, tracker_log, tracker_stats, tracker_update, Measurement,
+    OutRow, TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_ADDR, NO_IDENT,
+    O_COAST, RADAR_KEY_BASE,
 };
 
 const S: i64 = 1_000_000_000;
@@ -72,15 +77,67 @@ struct FusionEvidence {
     injected: bool,
 }
 
+struct DefaultCapacityEvidence {
+    counts: Counts,
+    occupied: usize,
+    confirmed: usize,
+    refused: u64,
+    recovered: u64,
+    history_refiltered: u64,
+    history_replayed: u64,
+    late_ring: u64,
+    injected: bool,
+}
+
+struct OutputLogEvidence {
+    counts: Counts,
+    output_overflow: u64,
+    output_rows_after_reuse: usize,
+    output_aligned: bool,
+    output_preserved_addr: bool,
+    output_payload_unchanged: bool,
+    log_overflow: u64,
+    log_rows: usize,
+    log_aligned: bool,
+    injected: bool,
+}
+
+struct ClockEvidence {
+    counts: Counts,
+    held: u64,
+    held_applied: u64,
+    step_forward: u64,
+    late: u64,
+    step_back: u64,
+    future_dropped: u64,
+    recovered: u64,
+    injected: bool,
+}
+
+struct BucketCapacityEvidence {
+    counts: Counts,
+    plots_offered: u64,
+    bucket_plot_overflow: u64,
+    track_capacity_refused: u64,
+    recovery_applied: u64,
+    injected: bool,
+}
+
 fn emit_evidence(
     status: &'static str,
     injection_requested: bool,
     controls: Counts,
     tracker: &TrackerEvidence,
+    default_capacity: &DefaultCapacityEvidence,
+    output_log: &OutputLogEvidence,
+    clock_gate: &ClockEvidence,
+    bucket_capacity: &BucketCapacityEvidence,
+    adsb_pending: &PendingWindowEvidence,
+    plot_pending: &PendingWindowEvidence,
     fusion: &FusionEvidence,
 ) {
     println!(
-        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"tracker_update_ooo_refusal_capacity_advance_flush\",\"fusion_adsb_hard_assoc_registration\",\"fusion_anonymous_init_and_assoc\"],\"route_ids\":[\"tracker_update\",\"tracker_out_of_order_refilter\",\"tracker_invalid_input_refusal\",\"tracker_capacity_refusal\",\"tracker_capacity_recovery\",\"tracker_prediction\",\"tracker_advance\",\"tracker_flush\",\"fusion_adsb_ingest\",\"fusion_plot_ingest\",\"fusion_advance\",\"fusion_finish\",\"fusion_registration\",\"fusion_anonymous_initiation\",\"fusion_local_association\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
+        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"fusion_adsb_hard_assoc_registration\",\"fusion_adsb_pending_queue_capacity_recovery\",\"fusion_anonymous_init_and_assoc\",\"fusion_bucket_plot_cap_refusal_recovery\",\"fusion_plot_pending_queue_capacity_recovery\",\"tracker_clock_hold_stepback_recovery\",\"tracker_default_4096_capacity_recovery\",\"tracker_output_log_overflow_reuse\",\"tracker_update_ooo_refusal_capacity_advance_flush\"],\"route_ids\":[\"fusion_adsb_ingest\",\"fusion_adsb_pending_drain\",\"fusion_adsb_pending_overflow\",\"fusion_adsb_pending_recovery\",\"fusion_advance\",\"fusion_anonymous_initiation\",\"fusion_bucket_capacity_recovery\",\"fusion_bucket_plot_cap\",\"fusion_finish\",\"fusion_local_association\",\"fusion_plot_ingest\",\"fusion_plot_pending_bucket_cap\",\"fusion_plot_pending_overflow\",\"fusion_plot_pending_recovery\",\"fusion_registration\",\"tracker_advance\",\"tracker_capacity_recovery\",\"tracker_capacity_refusal\",\"tracker_clock_backstep\",\"tracker_clock_forward_recovery\",\"tracker_clock_hold\",\"tracker_clock_recovery\",\"tracker_default_capacity\",\"tracker_default_confirmed_capacity\",\"tracker_flush\",\"tracker_history_retention_refusal\",\"tracker_history_wrap_refilter\",\"tracker_history_wrap_replay\",\"tracker_invalid_input_refusal\",\"tracker_log_overflow\",\"tracker_out_of_order_refilter\",\"tracker_output_overflow\",\"tracker_output_payload_stability\",\"tracker_output_reuse\",\"tracker_prediction\",\"tracker_update\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"default_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"occupied\":{},\"confirmed\":{},\"refused\":{},\"recovered\":{},\"history_refiltered\":{},\"history_replayed\":{},\"late_ring\":{}}},\"output_log\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"output_overflow\":{},\"output_rows_after_reuse\":{},\"output_aligned\":{},\"output_preserved_addr\":{},\"output_payload_unchanged\":{},\"log_overflow\":{},\"log_rows\":{},\"log_aligned\":{}}},\"clock_gate\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"held\":{},\"held_applied\":{},\"step_forward\":{},\"late\":{},\"step_back\":{},\"future_dropped\":{},\"recovered\":{}}},\"bucket_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots_offered\":{},\"bucket_plot_overflow\":{},\"track_capacity_refused\":{},\"recovery_applied\":{}}},\"adsb_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"plot_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}}}}",
         status,
         injection_requested,
         controls.overflow,
@@ -102,6 +159,66 @@ fn emit_evidence(
         tracker.advance_rows,
         tracker.flush_rows,
         tracker.ended_total,
+        default_capacity.counts.overflow,
+        default_capacity.counts.alloc,
+        default_capacity.counts.zeroed,
+        default_capacity.counts.realloc,
+        default_capacity.occupied,
+        default_capacity.confirmed,
+        default_capacity.refused,
+        default_capacity.recovered,
+        default_capacity.history_refiltered,
+        default_capacity.history_replayed,
+        default_capacity.late_ring,
+        output_log.counts.overflow,
+        output_log.counts.alloc,
+        output_log.counts.zeroed,
+        output_log.counts.realloc,
+        output_log.output_overflow,
+        output_log.output_rows_after_reuse,
+        output_log.output_aligned,
+        output_log.output_preserved_addr,
+        output_log.output_payload_unchanged,
+        output_log.log_overflow,
+        output_log.log_rows,
+        output_log.log_aligned,
+        clock_gate.counts.overflow,
+        clock_gate.counts.alloc,
+        clock_gate.counts.zeroed,
+        clock_gate.counts.realloc,
+        clock_gate.held,
+        clock_gate.held_applied,
+        clock_gate.step_forward,
+        clock_gate.late,
+        clock_gate.step_back,
+        clock_gate.future_dropped,
+        clock_gate.recovered,
+        bucket_capacity.counts.overflow,
+        bucket_capacity.counts.alloc,
+        bucket_capacity.counts.zeroed,
+        bucket_capacity.counts.realloc,
+        bucket_capacity.plots_offered,
+        bucket_capacity.bucket_plot_overflow,
+        bucket_capacity.track_capacity_refused,
+        bucket_capacity.recovery_applied,
+        adsb_pending.counts.overflow,
+        adsb_pending.counts.alloc,
+        adsb_pending.counts.zeroed,
+        adsb_pending.counts.realloc,
+        adsb_pending.offered,
+        adsb_pending.pending_overflow,
+        adsb_pending.drained,
+        adsb_pending.bucket_plot_overflow,
+        adsb_pending.recovery_applied,
+        plot_pending.counts.overflow,
+        plot_pending.counts.alloc,
+        plot_pending.counts.zeroed,
+        plot_pending.counts.realloc,
+        plot_pending.offered,
+        plot_pending.pending_overflow,
+        plot_pending.drained,
+        plot_pending.bucket_plot_overflow,
+        plot_pending.recovery_applied,
         fusion.counts.overflow,
         fusion.counts.alloc,
         fusion.counts.zeroed,
@@ -261,6 +378,234 @@ fn tracker_window(inject: bool) -> Result<TrackerEvidence, &'static str> {
     })
 }
 
+fn default_capacity_window(inject: bool) -> Result<DefaultCapacityEvidence, &'static str> {
+    let cfg = TrackerConfig {
+        max_tracks: DEFAULT_CONFIG.max_tracks,
+        out_capacity: 1 << 16,
+        log_capacity: DEFAULT_CONFIG.max_tracks,
+        ..DEFAULT_CONFIG
+    };
+    let mut tracker = tracker_new(&cfg).map_err(|_| "default-capacity tracker configuration refused")?;
+    let mut out = output_new(cfg.out_capacity);
+    let mut reports = Vec::with_capacity(DEFAULT_CONFIG.max_tracks * 2);
+    for slot in 0..DEFAULT_CONFIG.max_tracks {
+        let key = 0xB00000_u32 + slot as u32;
+        let lat = 400_000_000 + slot as i32 * 10;
+        reports.push(measurement(key, 0, lat, -870_000_000));
+        reports.push(measurement(key, S, lat + 1, -870_000_000));
+    }
+    let overflow = measurement(0xB10000, S, 410_000_000, -870_000_000);
+    let recovery = measurement(0xB00000, 2 * S, 400_000_002, -870_000_000);
+    let mut history = Vec::with_capacity(RING_DEPTH + 2);
+    for ix in 0..RING_DEPTH + 2 {
+        let mut report = measurement(0xB00000, 3 * S + ix as i64 * (S / 100), 400_000_002, -870_000_000);
+        report.sensor = 1;
+        history.push(report);
+    }
+    let newest_ns = 3 * S + (RING_DEPTH as i64 + 1) * (S / 100);
+    let late_between = measurement(0xB00000, newest_ns - S / 200, 400_000_002, -870_000_000);
+    let older_than_ring = measurement(0xB00000, 3 * S + S / 100, 400_000_002, -870_000_000);
+    if !allocator::start() {
+        return Err("default-capacity tracker window did not arm cleanly");
+    }
+    for report in &reports {
+        tracker_update(&mut tracker, report, &mut out);
+    }
+    let (tentative, confirmed) = tracker_counts(&tracker);
+    let occupied = tentative + confirmed;
+    tracker_update(&mut tracker, &overflow, &mut out);
+    let before = tracker_stats(&tracker).applied;
+    tracker_update(&mut tracker, &recovery, &mut out);
+    let recovered = tracker_stats(&tracker).applied.saturating_sub(before);
+    let before_history = tracker_stats(&tracker);
+    for report in &history {
+        tracker_update(&mut tracker, report, &mut out);
+    }
+    tracker_update(&mut tracker, &late_between, &mut out);
+    let after_refilter = tracker_stats(&tracker);
+    let history_refiltered = after_refilter.refiltered.saturating_sub(before_history.refiltered);
+    let history_replayed = after_refilter.replayed.saturating_sub(before_history.replayed);
+    let before_ring_refusal = after_refilter.late_ring;
+    tracker_update(&mut tracker, &older_than_ring, &mut out);
+    let late_ring = tracker_stats(&tracker).late_ring.saturating_sub(before_ring_refusal);
+    let refused = tracker_stats(&tracker).capacity_refused;
+    let injected = !inject || allocator::inject_core_allocation();
+    let Some(counts) = allocator::stop() else {
+        return Err("default-capacity tracker window did not disarm cleanly");
+    };
+    Ok(DefaultCapacityEvidence {
+        counts, occupied, confirmed, refused, recovered, history_refiltered,
+        history_replayed, late_ring, injected,
+    })
+}
+
+fn output_is_aligned(out: &TrackOutput) -> bool {
+    let n = output_len(out);
+    out.t_ns.len() == n
+        && out.addr.len() == n
+        && out.lat_e7.len() == n
+        && out.lon_e7.len() == n
+        && out.vel_east_mps.len() == n
+        && out.vel_north_mps.len() == n
+        && out.pos_cov_m2.len() == n
+        && out.vel_cov_m2s2.len() == n
+        && out.turn_rate_rps.len() == n
+        && out.alt_ft.len() == n
+        && out.alt_var_ft2.len() == n
+        && out.vrate_fpm.len() == n
+        && out.mu_h.len() == n
+        && out.mu_v.len() == n
+        && out.flags.len() == n
+}
+
+fn first_output(out: &TrackOutput) -> Option<OutRow> {
+    Some(OutRow {
+        t_ns: *out.t_ns.first()?,
+        addr: *out.addr.first()?,
+        lat_e7: *out.lat_e7.first()?,
+        lon_e7: *out.lon_e7.first()?,
+        vel_east_mps: *out.vel_east_mps.first()?,
+        vel_north_mps: *out.vel_north_mps.first()?,
+        pos_cov_m2: *out.pos_cov_m2.first()?,
+        vel_cov_m2s2: *out.vel_cov_m2s2.first()?,
+        turn_rate_rps: *out.turn_rate_rps.first()?,
+        alt_ft: *out.alt_ft.first()?,
+        alt_var_ft2: *out.alt_var_ft2.first()?,
+        vrate_fpm: *out.vrate_fpm.first()?,
+        mu_h: *out.mu_h.first()?,
+        mu_v: *out.mu_v.first()?,
+        flags: *out.flags.first()?,
+    })
+}
+
+fn output_log_window(inject: bool) -> Result<OutputLogEvidence, &'static str> {
+    let cfg = TrackerConfig {
+        max_tracks: 2,
+        out_capacity: 1,
+        log_capacity: 1,
+        ..DEFAULT_CONFIG
+    };
+    let mut tracker = tracker_new(&cfg).map_err(|_| "small-table tracker configuration refused")?;
+    let mut out = output_new(cfg.out_capacity);
+    let reports = [
+        measurement(0xC00001, 0, 410_000_000, -870_000_000),
+        measurement(0xC00001, S, 410_000_001, -870_000_000),
+        measurement(0xC00001, 2 * S, 410_000_002, -870_000_000),
+        measurement(0xC00002, 0, 411_000_000, -870_000_000),
+        measurement(0xC00002, S, 411_000_001, -870_000_000),
+        measurement(0xC00002, 2 * S, 411_000_002, -870_000_000),
+        measurement(0xC00001, 3 * S, 410_000_003, -870_000_000),
+    ];
+    if !allocator::start() {
+        return Err("output/log tracker window did not arm cleanly");
+    }
+    for report in reports.iter().take(3) {
+        tracker_update(&mut tracker, report, &mut out);
+    }
+    let original_payload = first_output(&out).ok_or("first track did not emit an output row")?;
+    for report in reports.iter().skip(3).take(3) {
+        tracker_update(&mut tracker, report, &mut out);
+    }
+    let initial_overflow = out.overflow;
+    let preserved_addr = out.addr.first().copied() == Some(0xC00001);
+    let preserved_aligned = output_is_aligned(&out);
+    let output_payload_unchanged = first_output(&out) == Some(original_payload);
+    output_clear(&mut out);
+    if let Some(reuse) = reports.get(6) {
+        tracker_update(&mut tracker, reuse, &mut out);
+    }
+    let output_rows_after_reuse = output_len(&out);
+    let output_aligned = output_is_aligned(&out);
+    tracker_flush(&mut tracker, 4 * S, &mut out);
+    let log = tracker_log(&tracker);
+    let log_rows = log.addr.len();
+    let log_aligned = log.first_ns.len() == log_rows
+        && log.confirmed_ns.len() == log_rows
+        && log.last_ns.len() == log_rows
+        && log.updates.len() == log_rows
+        && log.reason.len() == log_rows;
+    let log_overflow = log.overflow;
+    let injected = !inject || allocator::inject_core_allocation();
+    let Some(counts) = allocator::stop() else {
+        return Err("output/log tracker window did not disarm cleanly");
+    };
+    Ok(OutputLogEvidence {
+        counts,
+        output_overflow: initial_overflow,
+        output_rows_after_reuse,
+        output_aligned: preserved_aligned && output_aligned,
+        output_preserved_addr: preserved_addr,
+        output_payload_unchanged,
+        log_overflow,
+        log_rows,
+        log_aligned,
+        injected,
+    })
+}
+
+fn clock_gate_window(inject: bool) -> Result<ClockEvidence, &'static str> {
+    let cfg = TrackerConfig {
+        max_tracks: 8,
+        out_capacity: 256,
+        log_capacity: 8,
+        tick_ns: S,
+        expected_interval_ns: S,
+        init_interval_ns: S,
+        drop_after_ns: 100 * S,
+        ooo_window_ns: 2 * S,
+        clock_step_limit_ns: 3 * S,
+        ..DEFAULT_CONFIG
+    };
+    let mut tracker = tracker_new(&cfg).map_err(|_| "clock-gate tracker configuration refused")?;
+    let mut out = output_new(cfg.out_capacity);
+    let mut reports = Vec::with_capacity(3 * 3 + 3 + 6 + 1);
+    for (ix, key) in [0xD00001_u32, 0xD00002, 0xD00003].into_iter().enumerate() {
+        let sensor = 10 + ix as u16;
+        for (step, time) in [0, S, 2 * S].into_iter().enumerate() {
+            let mut report = measurement(key, time, 415_000_000 + ix as i32 * 100 + step as i32, -870_000_000);
+            report.sensor = sensor;
+            reports.push(report);
+        }
+    }
+    for (ix, key) in [0xD00001_u32, 0xD00002, 0xD00003].into_iter().enumerate() {
+        let mut report = measurement(key, (20 + ix as i64) * S, 415_000_010 + ix as i32 * 100, -870_000_000);
+        report.sensor = 20 + ix as u16;
+        reports.push(report);
+    }
+    for ix in 0..6_usize {
+        let time = 8 * S + (ix as i64) * (S / 2);
+        let key = 0xD10000 + (ix % 3) as u32;
+        let mut report = measurement(key, time, 416_000_000 + ix as i32, -870_000_000);
+        report.sensor = 10 + (ix % 3) as u16;
+        reports.push(report);
+    }
+    let recovery = measurement(0xD10002, 11 * S, 416_000_100, -870_000_000);
+    if !allocator::start() {
+        return Err("clock-gate tracker window did not arm cleanly");
+    }
+    for report in &reports {
+        tracker_update(&mut tracker, report, &mut out);
+    }
+    let before_recovery = tracker_stats(&tracker).applied;
+    tracker_update(&mut tracker, &recovery, &mut out);
+    let stats = tracker_stats(&tracker);
+    let recovered = stats.applied.saturating_sub(before_recovery);
+    let held = stats.time_held;
+    let held_applied = stats.time_held_applied;
+    let step_forward = stats.time_steps;
+    let late = stats.late_window;
+    let step_back = stats.time_steps_back;
+    let future_dropped = stats.time_future_dropped;
+    let injected = !inject || allocator::inject_core_allocation();
+    let Some(counts) = allocator::stop() else {
+        return Err("clock-gate tracker window did not disarm cleanly");
+    };
+    Ok(ClockEvidence {
+        counts, held, held_applied, step_forward, late, step_back, future_dropped,
+        recovered, injected,
+    })
+}
+
 fn addressed_plot(t_ns: i64, addr: u32, az_deg: f64) -> RadarPlot {
     RadarPlot {
         time_ns: t_ns,
@@ -295,6 +640,51 @@ fn anonymous_plot(
         return Err("anonymous fixture did not preserve its unaddressed key");
     }
     Ok(plot)
+}
+
+fn fusion_bucket_capacity_window(inject: bool) -> Result<BucketCapacityEvidence, &'static str> {
+    let base = TrackerConfig {
+        max_tracks: 4,
+        out_capacity: 256,
+        log_capacity: 8,
+        ..DEFAULT_CONFIG
+    };
+    let cfg = fusion_config(fusion_tracker_config(&base, &[SITE]));
+    let mut fusion = fusion_new(&cfg, &[SITE]).map_err(|_| "bucket-capacity fusion configuration refused")?;
+    let mut out = output_new(cfg.tracker.out_capacity);
+    let mut plots = Vec::with_capacity(MAX_BUCKET_PLOTS + 1);
+    for offset in 0..=MAX_BUCKET_PLOTS {
+        let addr = 0xE00000_u32 + offset as u32;
+        let azimuth = (offset % 360) as f64;
+        plots.push(addressed_plot(0, addr, azimuth));
+    }
+    let recovery = addressed_plot(SITE.period_ns, 0xE00000, 10.0);
+    if !allocator::start() {
+        return Err("bucket-capacity fusion window did not arm cleanly");
+    }
+    fusion_plots(&mut fusion, 0, &plots);
+    fusion_advance(&mut fusion, S, &mut out);
+    let first_bucket = fusion_stats(&fusion);
+    let bucket_plot_overflow = first_bucket.bucket_plot_overflow;
+    let track_capacity_refused = fusion_tracker_stats(&fusion).capacity_refused;
+    let before_recovery = first_bucket.applied_hard;
+    fusion_plots(&mut fusion, 0, std::slice::from_ref(&recovery));
+    fusion_advance(&mut fusion, SITE.period_ns + S, &mut out);
+    let after = fusion_stats(&fusion);
+    let recovery_applied = after.applied_hard.saturating_sub(before_recovery);
+    let plots_offered = after.plots_in;
+    let injected = !inject || allocator::inject_core_allocation();
+    let Some(counts) = allocator::stop() else {
+        return Err("bucket-capacity fusion window did not disarm cleanly");
+    };
+    Ok(BucketCapacityEvidence {
+        counts,
+        plots_offered,
+        bucket_plot_overflow,
+        track_capacity_refused,
+        recovery_applied,
+        injected,
+    })
 }
 
 fn fusion_window(inject: bool) -> Result<FusionEvidence, &'static str> {
@@ -444,6 +834,30 @@ fn main() {
         Ok(evidence) => evidence,
         Err(message) => fail(message),
     };
+    let default_capacity = match default_capacity_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+    let output_log = match output_log_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+    let clock_gate = match clock_gate_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+    let bucket_capacity = match fusion_bucket_capacity_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+    let adsb_pending = match adsb_pending_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+    let plot_pending = match plot_pending_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
     let fusion = match fusion_window(inject) {
         Ok(evidence) => evidence,
         Err(message) => fail(message),
@@ -460,12 +874,50 @@ fn main() {
         || tracker.advance_rows == 0
         || tracker.flush_rows == 0
         || tracker.ended_total == 0
+        || default_capacity.occupied != DEFAULT_CONFIG.max_tracks
+        || default_capacity.confirmed != DEFAULT_CONFIG.max_tracks
+        || default_capacity.refused != 1
+        || default_capacity.recovered == 0
+        || output_log.output_overflow == 0
+        || output_log.output_rows_after_reuse == 0
+        || !output_log.output_aligned
+        || !output_log.output_preserved_addr
+        || !output_log.output_payload_unchanged
+        || output_log.log_overflow != 1
+        || output_log.log_rows != 1
+        || !output_log.log_aligned
+        || clock_gate.held != 2
+        || clock_gate.held_applied != 2
+        || clock_gate.step_forward != 1
+        || clock_gate.late != 5
+        || clock_gate.step_back != 1
+        || clock_gate.future_dropped != 3
+        || clock_gate.recovered != 1
+        || bucket_capacity.plots_offered != (MAX_BUCKET_PLOTS + 2) as u64
+        || bucket_capacity.bucket_plot_overflow != 1
+        || bucket_capacity.track_capacity_refused == 0
+        || bucket_capacity.recovery_applied == 0
+        || adsb_pending.offered != 1_048_577
+        || adsb_pending.pending_overflow != 1
+        || adsb_pending.drained != 1_048_576
+        || adsb_pending.recovery_applied == 0
+        || plot_pending.offered != 1_048_577
+        || plot_pending.pending_overflow != 1
+        || plot_pending.drained != 1_048_576
+        || plot_pending.bucket_plot_overflow != 1_032_192
+        || plot_pending.recovery_applied == 0
     {
         emit_evidence(
             "FAIL_M3_COVERAGE",
             inject,
             control_counts,
             &tracker,
+            &default_capacity,
+            &output_log,
+            &clock_gate,
+            &bucket_capacity,
+            &adsb_pending,
+            &plot_pending,
             &fusion,
         );
         fail("tracker fixture did not prove all declared runtime paths");
@@ -490,26 +942,52 @@ fn main() {
             inject,
             control_counts,
             &tracker,
+            &default_capacity,
+            &output_log,
+            &clock_gate,
+            &bucket_capacity,
+            &adsb_pending,
+            &plot_pending,
             &fusion,
         );
         fail("fusion fixture did not prove association, registration, initiation, refusal, and output");
     }
-    if !tracker.injected || !fusion.injected {
+    if !tracker.injected || !default_capacity.injected || !output_log.injected
+        || !clock_gate.injected || !bucket_capacity.injected || !adsb_pending.injected
+        || !plot_pending.injected || !fusion.injected
+    {
         emit_evidence(
             "FAIL_M3_INJECTION_NOT_OBSERVED",
             inject,
             control_counts,
             &tracker,
+            &default_capacity,
+            &output_log,
+            &clock_gate,
+            &bucket_capacity,
+            &adsb_pending,
+            &plot_pending,
             &fusion,
         );
         std::process::exit(1);
     }
-    if !counts_zero(tracker.counts) || !counts_zero(fusion.counts) {
+    if !counts_zero(tracker.counts) || !counts_zero(default_capacity.counts)
+        || !counts_zero(output_log.counts) || !counts_zero(clock_gate.counts)
+        || !counts_zero(bucket_capacity.counts)
+        || !counts_zero(adsb_pending.counts) || !counts_zero(plot_pending.counts)
+        || !counts_zero(fusion.counts)
+    {
         emit_evidence(
             "FAIL_M3_ALLOCATION",
             inject,
             control_counts,
             &tracker,
+            &default_capacity,
+            &output_log,
+            &clock_gate,
+            &bucket_capacity,
+            &adsb_pending,
+            &plot_pending,
             &fusion,
         );
         std::process::exit(1);
@@ -519,6 +997,12 @@ fn main() {
         false,
         control_counts,
         &tracker,
+        &default_capacity,
+        &output_log,
+        &clock_gate,
+        &bucket_capacity,
+        &adsb_pending,
+        &plot_pending,
         &fusion,
     );
 }

@@ -13,6 +13,12 @@ import tomllib
 HARNESS = Path("validation/oa-alloc-check")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
+    "tracker_default_4096_capacity_recovery",
+    "tracker_output_log_overflow_reuse",
+    "tracker_clock_hold_stepback_recovery",
+    "fusion_bucket_plot_cap_refusal_recovery",
+    "fusion_adsb_pending_queue_capacity_recovery",
+    "fusion_plot_pending_queue_capacity_recovery",
     "fusion_adsb_hard_assoc_registration",
     "fusion_anonymous_init_and_assoc",
 }
@@ -38,6 +44,19 @@ ROUTE_LEDGER = {
     "tracker_invalid_input_refusal": ("crates/oa-track/src/tracker.rs", "refused"),
     "tracker_capacity_refusal": ("crates/oa-track/src/tracker.rs", "capacity_refused"),
     "tracker_capacity_recovery": ("crates/oa-track/src/tracker.rs", "recovery_applied"),
+    "tracker_default_capacity": ("crates/oa-track/src/tracker.rs", "default_capacity.occupied"),
+    "tracker_default_confirmed_capacity": ("crates/oa-track/src/tracker.rs", "default_capacity.confirmed"),
+    "tracker_history_wrap_refilter": ("crates/oa-track/src/tracker.rs", "default_capacity.history_refiltered"),
+    "tracker_history_wrap_replay": ("crates/oa-track/src/tracker.rs", "default_capacity.history_replayed"),
+    "tracker_history_retention_refusal": ("crates/oa-track/src/tracker.rs", "default_capacity.late_ring"),
+    "tracker_output_overflow": ("crates/oa-track/src/tracker.rs", "output_log.output_overflow"),
+    "tracker_log_overflow": ("crates/oa-track/src/tracker.rs", "output_log.log_overflow"),
+    "tracker_output_reuse": ("crates/oa-track/src/types.rs", "output_log.output_rows_after_reuse"),
+    "tracker_output_payload_stability": ("crates/oa-track/src/tracker.rs", "output_log.output_payload_unchanged"),
+    "tracker_clock_hold": ("crates/oa-track/src/tracker.rs", "clock_gate.held"),
+    "tracker_clock_forward_recovery": ("crates/oa-track/src/tracker.rs", "clock_gate.held_applied"),
+    "tracker_clock_backstep": ("crates/oa-track/src/tracker.rs", "clock_gate.step_back"),
+    "tracker_clock_recovery": ("crates/oa-track/src/tracker.rs", "clock_gate.recovered"),
     "tracker_prediction": ("crates/oa-track/src/tracker.rs", "predictions"),
     "tracker_advance": ("crates/oa-track/src/tracker.rs", "advance_rows"),
     "tracker_flush": ("crates/oa-track/src/tracker.rs", "flush_rows"),
@@ -48,17 +67,46 @@ ROUTE_LEDGER = {
     "fusion_registration": ("crates/oa-track/src/fusion.rs", "registration_used"),
     "fusion_anonymous_initiation": ("crates/oa-track/src/fusion.rs", "candidates_confirmed"),
     "fusion_local_association": ("crates/oa-track/src/fusion.rs", "anon_applied"),
+    "fusion_bucket_plot_cap": ("crates/oa-track/src/fusion.rs", "bucket_capacity.bucket_plot_overflow"),
+    "fusion_bucket_capacity_recovery": ("crates/oa-track/src/fusion.rs", "bucket_capacity.recovery_applied"),
+    "fusion_adsb_pending_overflow": ("crates/oa-track/src/fusion.rs", "adsb_pending.pending_overflow"),
+    "fusion_adsb_pending_drain": ("crates/oa-track/src/fusion.rs", "adsb_pending.drained"),
+    "fusion_adsb_pending_recovery": ("crates/oa-track/src/fusion.rs", "adsb_pending.recovery_applied"),
+    "fusion_plot_pending_overflow": ("crates/oa-track/src/fusion.rs", "plot_pending.pending_overflow"),
+    "fusion_plot_pending_bucket_cap": ("crates/oa-track/src/fusion.rs", "plot_pending.bucket_plot_overflow"),
+    "fusion_plot_pending_recovery": ("crates/oa-track/src/fusion.rs", "plot_pending.recovery_applied"),
 }
 
 ROUTE_SYMBOLS = {
     "tracker_update": "tracker_update", "tracker_out_of_order_refilter": "tracker_update",
     "tracker_invalid_input_refusal": "tracker_update", "tracker_capacity_refusal": "tracker_update",
     "tracker_capacity_recovery": "tracker_update",
+    "tracker_default_capacity": "tracker_update",
+    "tracker_default_confirmed_capacity": "tracker_update",
+    "tracker_history_wrap_refilter": "tracker_update",
+    "tracker_history_wrap_replay": "tracker_update",
+    "tracker_history_retention_refusal": "tracker_update",
+    "tracker_output_overflow": "tracker_update",
+    "tracker_log_overflow": "tracker_flush",
+    "tracker_output_reuse": "output_clear",
+    "tracker_output_payload_stability": "tracker_update",
+    "tracker_clock_hold": "tracker_update",
+    "tracker_clock_forward_recovery": "tracker_update",
+    "tracker_clock_backstep": "tracker_update",
+    "tracker_clock_recovery": "tracker_update",
     "tracker_prediction": "tracker_predict", "tracker_advance": "tracker_advance",
     "tracker_flush": "tracker_flush", "fusion_adsb_ingest": "fusion_adsb",
     "fusion_plot_ingest": "fusion_plots", "fusion_advance": "fusion_advance",
     "fusion_finish": "fusion_finish", "fusion_registration": "fusion_registration",
     "fusion_anonymous_initiation": "fusion_plots", "fusion_local_association": "fusion_plots",
+    "fusion_bucket_plot_cap": "process_bucket",
+    "fusion_bucket_capacity_recovery": "fusion_plots",
+    "fusion_adsb_pending_overflow": "fusion_adsb",
+    "fusion_adsb_pending_drain": "fusion_advance",
+    "fusion_adsb_pending_recovery": "fusion_adsb",
+    "fusion_plot_pending_overflow": "fusion_plots",
+    "fusion_plot_pending_bucket_cap": "process_bucket",
+    "fusion_plot_pending_recovery": "fusion_plots",
 }
 
 
@@ -447,7 +495,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         return [f"result is not valid complete JSON: {exc}"]
     if not _object(result):
         return ["result must be a JSON object"]
-    required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls", "tracker", "fusion"}
+    required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
+                     "tracker", "default_capacity", "output_log", "clock_gate",
+                     "bucket_capacity", "adsb_pending", "plot_pending", "fusion"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -457,10 +507,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         errors.append("injection_requested does not match requested mode")
 
     fixture_ids = result.get("fixture_ids")
-    if (not isinstance(fixture_ids, list) or len(fixture_ids) != 3
+    if (not isinstance(fixture_ids, list) or len(fixture_ids) != len(FIXTURE_IDS)
             or any(not isinstance(item, str) for item in fixture_ids)
-            or len(set(fixture_ids)) != 3 or set(fixture_ids) != FIXTURE_IDS):
-        errors.append("fixture_ids must contain exactly the three required unique fixtures")
+            or len(set(fixture_ids)) != len(FIXTURE_IDS) or set(fixture_ids) != FIXTURE_IDS):
+        errors.append("fixture_ids must contain exactly the required unique fixtures")
 
     route_ids = result.get("route_ids")
     if (not isinstance(route_ids, list) or len(route_ids) != len(ROUTE_LEDGER)
@@ -468,11 +518,15 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             or len(set(route_ids)) != len(ROUTE_LEDGER) or set(route_ids) != set(ROUTE_LEDGER)):
         errors.append("route_ids must contain exactly the unique source-backed allocation routes")
     for route_id, (_, field) in ROUTE_LEDGER.items():
-        group = "tracker" if route_id.startswith("tracker_") else "fusion"
+        if "." in field:
+            group, name = field.split(".", 1)
+        else:
+            group = "tracker" if route_id.startswith("tracker_") else "fusion"
+            name = field
         evidence = result.get(group)
-        value = evidence.get(field) if isinstance(evidence, dict) else None
-        if not _nonnegative_int(value) or value < 1:
-            errors.append(f"{group}.{field} must positively demonstrate route {route_id}")
+        value = evidence.get(name) if isinstance(evidence, dict) else None
+        if value is not True and (not _nonnegative_int(value) or value < 1):
+            errors.append(f"{group}.{name} must positively demonstrate route {route_id}")
 
     controls = result.get("controls")
     control_names = {"alloc", "zeroed", "realloc"}
@@ -529,4 +583,65 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             errors.append(f"fusion.{name} must be a nonnegative JSON integer")
         elif value < minimum:
             errors.append(f"fusion.{name} is below required exercised coverage")
+
+    extra_fields = {
+        "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1, "recovered": 1,
+                             "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
+        "output_log": {"output_overflow": 1, "output_rows_after_reuse": 1,
+                        "log_overflow": 1, "log_rows": 1},
+        "clock_gate": {"held": 1, "held_applied": 1, "step_forward": 1,
+                       "late": 5, "step_back": 1, "future_dropped": 1, "recovered": 1},
+        "bucket_capacity": {"plots_offered": 16_386, "bucket_plot_overflow": 1,
+                            "track_capacity_refused": 1, "recovery_applied": 1},
+        "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
+                         "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1},
+        "plot_pending": {"offered": 1_048_577, "pending_overflow": 1,
+                         "drained": 1_048_576, "bucket_plot_overflow": 1_032_192,
+                         "recovery_applied": 1},
+    }
+    for group, minima in extra_fields.items():
+        evidence = result.get(group)
+        required = set(minima) | {"overflow", "alloc", "zeroed", "realloc"}
+        if group == "output_log":
+            required |= {"output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"}
+        if not _object(evidence) or set(evidence) != required:
+            errors.append(f"{group} must contain exactly its declared route evidence and allocator counters")
+            evidence = {}
+        if evidence.get("overflow") is not False:
+            errors.append(f"{group}.overflow must be false")
+        for counter in control_names:
+            value = evidence.get(counter)
+            if not _nonnegative_int(value):
+                errors.append(f"{group}.{counter} must be a nonnegative JSON integer")
+            elif not expect_injected and value != 0:
+                errors.append(f"normal {group}.{counter} must be zero")
+            elif expect_injected and counter == "alloc" and value < 1:
+                errors.append(f"injected {group}.alloc must be at least one")
+        for name, minimum in minima.items():
+            value = evidence.get(name)
+            if not _nonnegative_int(value):
+                errors.append(f"{group}.{name} must be a nonnegative JSON integer")
+            elif value < minimum:
+                errors.append(f"{group}.{name} is below required exercised coverage")
+    exact_fields = {
+        "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
+                             "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
+        "output_log": {"log_overflow": 1, "log_rows": 1},
+        "clock_gate": {"held": 2, "held_applied": 2, "step_forward": 1, "late": 5,
+                       "step_back": 1, "future_dropped": 3, "recovered": 1},
+        "bucket_capacity": {"plots_offered": 16_386, "bucket_plot_overflow": 1},
+        "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
+                         "bucket_plot_overflow": 0, "recovery_applied": 2},
+        "plot_pending": {"offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
+                         "bucket_plot_overflow": 1_032_192, "recovery_applied": 1},
+    }
+    for group, fields in exact_fields.items():
+        evidence = result.get(group)
+        for name, expected in fields.items():
+            if not _object(evidence) or evidence.get(name) != expected:
+                errors.append(f"{group}.{name} must equal {expected}")
+    output_log = result.get("output_log")
+    for name in ("output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"):
+        if not _object(output_log) or output_log.get(name) is not True:
+            errors.append(f"output_log.{name} must be true")
     return errors

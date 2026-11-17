@@ -72,10 +72,16 @@ of the tool's headline verdict. These are measured cases, not a NAS-wide capacit
 
 The runner also invokes `tools/check_allocations.py`. This separately builds the excluded
 `validation/oa-alloc-check` package, checks its isolation, runs its tests, and requires both a
-zero-allocation normal run and a detected injected allocation. See the package's
-[scope and fixtures](../validation/oa-alloc-check/README.md). A missing route, control or fingerprint
-fails this scoped check. Its narrow unsafe-code exception is recorded in RULESET A0; product
-crates retain their unsafe-code prohibition.
+zero-allocation normal run and a detected injected allocation. The scoped fixtures include the
+default 4,096-track tracker capacity, small output/log overflow and reuse, and clock-gate hold,
+forward confirmation and recovery, plus one `MAX_BUCKET_PLOTS` overload with counted loss and
+subsequent existing-track recovery, and full ADS-B and plot pending queues with counted overflow,
+drain and recovery. A source-backed route ledger requires positive runtime evidence and
+injected-allocation detection in each armed window. Fusion association work, candidate, record and
+history boundaries remain outside this scope. See the package's [scope and
+fixtures](../validation/oa-alloc-check/README.md). A missing route, control or fingerprint fails
+this scoped check. Its narrow unsafe-code exception is recorded in RULESET A0; product crates
+retain their unsafe-code prohibition.
 
 Each synthetic accuracy CSV metric row has an adjacent `<section>|samples` row with the same
 label. Its nine integer columns are position, speed and heading counts, each in
