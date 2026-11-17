@@ -1202,10 +1202,10 @@ fn scrambled_world() -> Vec<Measurement> {
 
 // REQ: OA-TRK-040
 #[test]
-fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_replaced() {
-    // The digest and counters below were first recorded from the implementation that kept a full
-    // filter state per ring slot, which the anchor-and-replay ring reproduced bit for bit; they
-    // lock the current behaviour (re-filtering, duplicates, ring and window drops included).
+fn scrambled_input_keeps_its_pinned_replay_counters_and_output() {
+    // These pins originated with the full-state history ring. They now lock the current
+    // estimator's replay, duplicates and ring/window drops. The separate in-order versus
+    // out-of-order tests compare replay states directly.
     let ms = scrambled_world();
     let (t, out) = run(&big_config(), &ms, 200.0);
     let s = tracker_stats(&t);
@@ -1227,6 +1227,8 @@ fn refiltering_on_scrambled_input_is_bit_identical_to_the_stored_state_ring_it_r
         "scrambled: {counters} nis_sum {:016x} digest {digest}",
         s.nis_sum.to_bits()
     );
+    println!("scrambled full stats {s:?}");
+    assert_eq!(s.numerical_refused, 0);
     assert!(s.refiltered > 20 && s.late_ring > 0 && s.duplicates > 0 && s.jump_rejected > 0);
     assert_eq!(counters, GOLDEN_COUNTERS);
     assert_eq!(s.nis_sum.to_bits(), GOLDEN_NIS_BITS);
@@ -1255,8 +1257,12 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // (one single-precision unit), in no position, velocity or probability; the innovation sum
 // 2589.552684636896 to 2589.552684607768 (1.1e-11 of itself, 64,053 ulp). The earlier values were
 // 0x40a4_3b1a_f97b_10f1 and "c953ab2374b272a955edec2c2fd4cfe0ec9afb8911947e58f8f1ac6590791133".
-const GOLDEN_NIS_BITS: u64 = 0x40a4_3b1a_f97a_16bc;
-const GOLDEN_DIGEST: &str = "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd";
+// Nonlinear turn moments with separate discovery regularization (OA-TRK-329) change the
+// innovations and output values; all ten replay counters above remain unchanged. Prior values:
+// 0x40a4_3b1a_f97a_16bc and
+// "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd".
+const GOLDEN_NIS_BITS: u64 = 0x40a4_3264_bf63_657b;
+const GOLDEN_DIGEST: &str = "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1305,6 +1311,8 @@ fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
         s.time_held_applied
     );
     assert!(s.ended[usize::from(END_DROPPED)] >= 4, "{:?}", s.ended);
+    println!("gappy full stats {s:?}");
+    assert_eq!(s.numerical_refused, 0);
     assert_eq!(out.overflow, 0);
     assert_eq!(hash_of(&out), GAPPY_DIGEST);
 }
@@ -1348,7 +1356,10 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // covariance and turn rate by at most 1e-7 of themselves, in no position, velocity or
 // probability. The earlier value was
 // "9aab86ffa408a1516de991484686298f0ee0fd676a803e2c6a2664a8bf4d4163".
-const GAPPY_DIGEST: &str = "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd";
+// OA-TRK-329 changes predicted values with the same 1,446 rows, end counts, held reports and
+// applied-after-step counts. Prior digest:
+// "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd".
+const GAPPY_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44";
 
 // REQ: OA-TRK-041
 #[test]

@@ -448,7 +448,7 @@ fn the_real_clip_is_tracked_scored_and_reproducible() {
     assert!(run.stats.confirmed as f64 > 0.8 * run.stats.started as f64);
 }
 
-// REQ: OA-TRK-171
+// REQ: OA-TRK-171, OA-TRK-330
 #[test]
 fn the_real_clip_tracker_run_has_the_pinned_digest() {
     let Ok(path) = std::env::var("OPENATCA_ADSB_CLIP") else {
@@ -468,6 +468,9 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
         "tracker clip digest {} rows {} ticks {} skipped {}",
         run.digest, run.stats.applied, run.stats.ticks, run.stats.ticks_skipped
     );
+    println!("tracker clip stats {:?}", run.stats);
+    assert_eq!(run.stats.numerical_refused, 0);
+    assert_eq!(run.stats.rows_unrepresentable, 0);
     assert_eq!(run.digest, PINNED_TRACKER_CLIP_DIGEST);
 }
 
@@ -496,8 +499,14 @@ fn the_real_clip_tracker_run_has_the_pinned_digest() {
 // counts unchanged (0 copies removed, 319 conflict groups, 638 rows), the same 108,643 rows, 3,599
 // ticks, none skipped; only the order of the siblings within the 319 groups of set A moved. The
 // value before was "2594d4f08780d75f4f38627cb49d636212de27addc34a247bf5572f26902be46".
+// (6) Nonlinear turn prediction and discovery regularization (OA-TRK-329): identical split,
+// 108,643 -> 108,984 applied reports; 3,599 ticks and none skipped. Scored report pairs increase
+// 77,987 -> 78,318, tracks 1,299 -> 1,287 and confirmed tracks 1,226 -> 1,217. Position RMS stays
+// 8.5 m at printed precision; straight speed RMS moves 1.21 -> 1.22 m/s. Numerical refusals and
+// unrepresentable output rows are zero. These are different scoring cohorts. Prior digest:
+// "fad4e9c12707743add69d2364c22b1573f4ef8231ccdc528526bbad4544d9842".
 const PINNED_TRACKER_CLIP_DIGEST: &str =
-    "fad4e9c12707743add69d2364c22b1573f4ef8231ccdc528526bbad4544d9842";
+    "48ea32ad2c4e76abcdd750527b0f1fd7a3525854c970c9316bfc6bd180bbfb42";
 
 /// The scoring of a run in one piece, as it was done before the rows were taken in ranges: one
 /// legacy table of every row, `run_benchmark`, and the pairs again for the ESASSP split.

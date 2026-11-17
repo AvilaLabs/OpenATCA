@@ -88,13 +88,13 @@ use crate::registration::{
     Residual,
 };
 use crate::tracker::{
-    check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_live_iter,
-    tracker_new, tracker_note_radar_disagreement, tracker_predict, tracker_set_expected_interval,
-    tracker_stats, tracker_update, Tracker,
+    check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_has_key,
+    tracker_is_confirmed, tracker_live_iter, tracker_new, tracker_note_radar_disagreement,
+    tracker_predict_checked, tracker_set_expected_interval, tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
-    output_clear, output_new, output_push, Measurement, OutRow, TrackError, TrackOutput,
-    TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT, TIME_LIMIT_NS,
+    output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
+    TrackOutput, TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT, TIME_LIMIT_NS,
 };
 
 /// Association rule of the run: exact global nearest neighbour, or the plain nearest neighbour
@@ -244,6 +244,9 @@ pub struct FusionStats {
     pub unassigned: u64,
     /// Hard-constraint plots with no track of that address (went to a candidate).
     pub hard_no_track: u64,
+    /// Forecast queries that failed numerically or could not produce a representable position.
+    /// These are counted loss, distinct from a missing or unconfirmed track.
+    pub prediction_refused: u64,
     /// Hard-constraint plots outside [`HARD_GATE_CHI2`] of their address's track: counted, not
     /// applied.
     pub hard_mismatch: u64,
@@ -1033,17 +1036,23 @@ struct TrackAt {
     sigma: f64,
 }
 
-/// The live tracks at the start of a bucket, in `v` (cleared first); the number it had no room
-/// for (none while the tracker's capacity is the buffer's).
-fn tracks_at(f: &Fusion, radar: usize, at_ns: i64, v: &mut Vec<TrackAt>) -> u64 {
+/// The live tracks at the start of a bucket, in `v` (cleared first); returns (buffer refusals,
+/// failed forecasts). The former is normally zero while the tracker's capacity is the buffer's.
+fn tracks_at(f: &Fusion, radar: usize, at_ns: i64, v: &mut Vec<TrackAt>) -> (u64, u64) {
     v.clear();
     let Some(g) = f.geoms.get(radar) else {
-        return 0;
+        return (0, 0);
     };
     let mut refused = 0;
+    let mut prediction_refused = 0;
     for (key, _) in tracker_live_iter(&f.tracker).take(MAX_ASSOC_TRACKS) {
-        let Some((row, true, _)) = tracker_predict(&f.tracker, key, at_ns) else {
-            continue;
+        let row = match tracker_predict_checked(&f.tracker, key, at_ns) {
+            Ok((row, true, _)) => row,
+            Ok((_, false, _)) | Err(PredictError::NoTrack) => continue,
+            Err(PredictError::Numerical | PredictError::Unrepresentable) => {
+                prediction_refused += 1;
+                continue;
+            }
         };
         let (lat, lon) = (f64::from(row.lat_e7) / 1.0e7, f64::from(row.lon_e7) / 1.0e7);
         let h = if row.flags & O_HAS_ALT != 0 {
@@ -1069,7 +1078,7 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64, v: &mut Vec<TrackAt>) -> u64 
             refused += 1;
         }
     }
-    refused
+    (refused, prediction_refused)
 }
 
 /// Whether a reference track may register a radar (see the module documentation).
@@ -1263,7 +1272,9 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
     } else {
         NO_BIAS
     };
-    f.stats.scratch_full += tracks_at(f, radar, t0, &mut tracks);
+    let (track_refused, prediction_refused) = tracks_at(f, radar, t0, &mut tracks);
+    f.stats.scratch_full += track_refused;
+    f.stats.prediction_refused += prediction_refused;
     f.stats.tracks_at_sum += tracks.len() as u64;
     anon.clear();
     hard.clear();
@@ -1275,9 +1286,20 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             anon.push(j);
             continue;
         }
-        let Some((row, true, last_ns)) = tracker_predict(&f.tracker, p.addr, p.time_ns) else {
+        if !tracker_is_confirmed(&f.tracker, p.addr) {
             f.stats.hard_no_track += 1;
             continue;
+        }
+        let (row, last_ns) = match tracker_predict_checked(&f.tracker, p.addr, p.time_ns) {
+            Ok((row, true, last_ns)) => (row, last_ns),
+            Ok((_, false, _)) | Err(PredictError::NoTrack) => {
+                f.stats.hard_no_track += 1;
+                continue;
+            }
+            Err(PredictError::Numerical | PredictError::Unrepresentable) => {
+                f.stats.prediction_refused += 1;
+                continue;
+            }
         };
         let Ok(c) = plot_convert(&g, &s, p, &bias, track_height(&row), p.addr) else {
             f.stats.plots_refused += 1;
@@ -1515,8 +1537,13 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
             ra.capped = true;
             break;
         }
-        let Some((row, _, last_ns)) = tracker_predict(&f.tracker, t.key, p.time_ns) else {
-            continue;
+        let (row, last_ns) = match tracker_predict_checked(&f.tracker, t.key, p.time_ns) {
+            Ok((row, _, last_ns)) => (row, last_ns),
+            Err(PredictError::NoTrack) => continue,
+            Err(PredictError::Numerical | PredictError::Unrepresentable) => {
+                f.stats.prediction_refused += 1;
+                continue;
+            }
         };
         let conv = match ra.conv_own.get(a).copied().flatten() {
             Some(c) => c,
@@ -1801,8 +1828,7 @@ fn note_adsb(f: &mut Fusion, m: &Measurement) {
         // Full: forget the keys whose tracks have ended. The tracker took this report, so at
         // most max_tracks - 1 of the others are live and there is room afterwards.
         let tracker = &f.tracker;
-        f.keyinfo
-            .retain(|k, _| tracker_predict(tracker, *k, 0).is_some());
+        f.keyinfo.retain(|k, _| tracker_has_key(tracker, *k));
         if f.keyinfo.len() >= f.cfg.tracker.max_tracks {
             f.stats.keyinfo_overflow += 1;
             return;
@@ -2822,7 +2848,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
 mod tests {
     use super::*;
     use crate::radar::NONE_CODE;
-    use crate::tracker::tracker_live;
+    use crate::tracker::{tracker_live, tracker_predict};
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
     use oa_sensorsim::prng::Rng;
     use std::collections::{BTreeMap, BTreeSet};
@@ -2927,6 +2953,55 @@ mod tests {
         c.log_assign = true;
         mutate(&mut c);
         fusion_new(&c, &[SITE]).unwrap()
+    }
+
+    // REQ: OA-TRK-332
+    #[test]
+    fn track_collection_reports_forecast_failure_separately_from_absence() {
+        let mut f = make_fusion(|c| c.tracker.init_m = 1);
+        let mut rows = Vec::with_capacity(f.cfg.tracker.max_tracks);
+        assert_eq!(tracks_at(&f, 0, i64::MAX, &mut rows), (0, 0));
+        let mut out = output_new(16);
+        let mut moving = adsb_fix(0xA00001, 0);
+        moving.vel_east_mps = 100.0;
+        tracker_update(&mut f.tracker, &moving, &mut out);
+        assert!(tracker_has_key(&f.tracker, 0xA00001));
+        assert!(matches!(
+            tracker_predict_checked(&f.tracker, 0xA00001, i64::MAX),
+            Err(PredictError::Unrepresentable | PredictError::Numerical)
+        ));
+        assert_eq!(tracks_at(&f, 0, i64::MAX, &mut rows), (0, 1));
+        assert!(rows.is_empty());
+    }
+
+    // REQ: OA-TRK-332
+    #[test]
+    fn hard_address_tentative_track_is_not_a_failed_forecast_loss() {
+        let mut f = make_fusion(|c| {
+            c.tracker.init_m = 2;
+            c.use_address = true;
+        });
+        let key = 0xA00002;
+        let mut out = output_new(16);
+        let mut moving = adsb_fix(key, 0);
+        moving.vel_east_mps = 100.0;
+        tracker_update(&mut f.tracker, &moving, &mut out);
+        assert!(!tracker_is_confirmed(&f.tracker, key));
+        assert!(matches!(
+            tracker_predict_checked(&f.tracker, key, i64::MAX),
+            Err(PredictError::Numerical | PredictError::Unrepresentable)
+        ));
+
+        let before = *fusion_stats(&f);
+        let plot = PendPlot {
+            radar: 0,
+            plot: mode_s_plot_at(key, i64::MAX, 0),
+        };
+        process_bucket(&mut f, &[], &[plot], &mut out);
+
+        let after = fusion_stats(&f);
+        assert_eq!(after.hard_no_track, before.hard_no_track + 1);
+        assert_eq!(after.prediction_refused, before.prediction_refused);
     }
 
     // REQ: OA-TRK-325

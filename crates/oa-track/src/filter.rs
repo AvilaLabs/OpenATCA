@@ -33,7 +33,8 @@ use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, RESYNC_AFTER, VRATE_SIGMA_FPS,
 };
 use crate::types::{
-    to_e7, Measurement, OutRow, TrackerStats, M_ALT_GEOMETRIC, M_HAS_VEL, NONE_I32, O_HAS_ALT,
+    to_e7, Measurement, OutRow, PredictError, TrackerStats, M_ALT_GEOMETRIC, M_HAS_VEL, NONE_I32,
+    O_HAS_ALT,
 };
 use crate::vfilter::{v_alt_innovation, v_combine, v_init, v_predict, v_update, VFilter};
 
@@ -72,6 +73,8 @@ pub(crate) enum Applied {
     Yes,
     /// The position innovation was too large: not applied.
     Rejected,
+    /// Numerical prediction failed; no filter state changed.
+    NumericalRefused,
     /// Too many rejections in a row: the filter was re-initialised at this measurement.
     Resync,
 }
@@ -183,7 +186,10 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
     let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
     let frame = filter_frame(f);
     let u = dwell_decay(dt);
-    let pred = h_predict(&f.h, dt, u, f.h_mode);
+    let Some(pred) = h_predict(&f.h, dt, u, f.h_mode) else {
+        stats.numerical_refused = stats.numerical_refused.saturating_add(1);
+        return Applied::NumericalRefused;
+    };
     let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
     // One differential serves the position covariance, the velocity and its covariance. A plot
     // at the frame's antipode, past the chart, is a jump: counted as one.
@@ -289,11 +295,23 @@ fn apply(f: &mut Filter, m: &Measurement, stats: &mut TrackerStats, gated: bool)
 /// cannot be represented (past the projection's chart, or not a number): such a row has no
 /// coordinate and is never given a zero one.
 pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> Option<OutRow> {
-    let dt = (t_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    filter_output_checked(f, t_ns).ok()
+}
+
+/// Forecast with a typed failure so a missing track cannot hide failed numerical work.
+pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, PredictError> {
+    let dt = t_ns
+        .checked_sub(f.t_ns)
+        .ok_or(PredictError::Unrepresentable)?
+        .max(0) as f64
+        / NS_PER_S as f64;
     let frame = filter_frame(f);
     let (h, vf) = if dt > 0.0 {
         let u = dwell_decay(dt);
-        (h_predict(&f.h, dt, u, f.h_mode), v_predict(&f.v, dt, u))
+        (
+            h_predict(&f.h, dt, u, f.h_mode).ok_or(PredictError::Numerical)?,
+            v_predict(&f.v, dt, u),
+        )
     } else {
         (f.h, f.v)
     };
@@ -301,16 +319,19 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> Option<OutRow> {
     let xg = |i: usize| x.get(i).copied().unwrap_or(0.0);
     let pg = |i: usize, j: usize| p.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.0);
     // A state past the chart has no position.
-    let (la, lo) = unproject(&frame, xg(0), xg(1))?;
-    let (lat_e7, lon_e7) = (to_e7(la)?, to_e7(lo)?);
+    let (la, lo) = unproject(&frame, xg(0), xg(1)).ok_or(PredictError::Unrepresentable)?;
+    let (lat_e7, lon_e7) = (
+        to_e7(la).ok_or(PredictError::Unrepresentable)?,
+        to_e7(lo).ok_or(PredictError::Unrepresentable)?,
+    );
     // The state is in the plane of the frame; the output is in east and north at the point.
-    let jt = try_frame_to_true(&frame, xg(0), xg(1))?;
+    let jt = try_frame_to_true(&frame, xg(0), xg(1)).ok_or(PredictError::Unrepresentable)?;
     let (ve, vn) = mat2_apply(&jt, (xg(2), xg(3)));
     let pc = mat2_congruence(&jt, &[pg(0, 0), pg(0, 1), pg(1, 1)]);
     let vc = mat2_congruence(&jt, &[pg(2, 2), pg(2, 3), pg(3, 3)]);
     let (xv, pv) = v_combine(&vf);
     let has_alt = f.has_alt != 0;
-    Some(OutRow {
+    Ok(OutRow {
         t_ns,
         addr: 0,
         lat_e7,
@@ -423,6 +444,41 @@ mod tests {
         }
     }
 
+    // REQ: OA-TRK-330
+    #[test]
+    fn invalid_filter_covariance_refuses_an_update_without_changing_the_state() {
+        let initial = meas(42.0, -88.0, 0, [100.0, 0.0, 100.0]);
+        let mut f = filter_init(&initial, 0);
+        for model in &mut f.h.m {
+            model.p[2][2] = -1.0;
+        }
+        let before = f;
+        let mut stats = TrackerStats::default();
+        let next = meas(42.0, -88.0, 1, [100.0, 0.0, 100.0]);
+        assert_eq!(
+            filter_apply(&mut f, &next, &mut stats),
+            Applied::NumericalRefused
+        );
+        assert_eq!(f, before);
+        assert_eq!(stats.numerical_refused, 1);
+        assert_eq!(stats.jump_rejected, 0);
+        assert!(filter_output(&f, next.toa_ns).is_none());
+    }
+
+    // REQ: OA-TRK-332
+    #[test]
+    fn an_unrepresentable_forecast_interval_is_an_error_without_state_changes() {
+        let mut f = filter_init(&meas(42.0, -88.0, 0, [100.0, 0.0, 100.0]), 0);
+        f.t_ns = -1;
+        let before = f;
+        assert!(matches!(
+            filter_output_checked(&f, i64::MAX),
+            Err(PredictError::Unrepresentable)
+        ));
+        assert!(filter_output(&f, i64::MAX).is_none());
+        assert_eq!(f, before);
+    }
+
     /// A track at `(lat, 0)` with the true velocity that takes it to `(lat, lon_t)` in `dt` s
     /// along its frame's straight line, with the given position and velocity covariances.
     fn moving_track(lat: f64, lon_t: f64, dt: f64, pc: [f32; 3], vc: [f32; 3]) -> Filter {
@@ -450,7 +506,7 @@ mod tests {
             let dt = 2.0;
             let f0 = moving_track(lat, lon_t, dt, [1.0, 0.0, 1.0], [1e-4, 0.0, 1e-4]);
             let frame = frame_new(lat, 0.0);
-            let pred = h_predict(&f0.h, dt, dwell_decay(dt), 0);
+            let pred = h_predict(&f0.h, dt, dwell_decay(dt), 0).expect("valid prediction");
             let (pp, _) = h_pos_moments(&pred);
             // 30 m along the target's own east, at the predicted position.
             let u = inv(&num_to_true(&frame, pp[0], pp[1]));
@@ -486,7 +542,7 @@ mod tests {
             let dt = 2.0;
             let f0 = moving_track(lat, lon_t, dt, [10000.0, 0.0, 1.0], [4.0, 0.0, 0.25]);
             let frame = frame_new(lat, 0.0);
-            let pred = h_predict(&f0.h, dt, dwell_decay(dt), 0);
+            let pred = h_predict(&f0.h, dt, dwell_decay(dt), 0).expect("valid prediction");
             let (x, p) = h_combine(&pred);
             // The same physical ellipse in the target's own east-north axes.
             let jt = num_to_true(&frame, x[0], x[1]);

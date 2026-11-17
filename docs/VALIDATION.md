@@ -23,6 +23,8 @@ configuration and input hashes. A successful command exit alone is not a passing
 | Traffic maintains the advertised load | Whole-horizon kinematics and coverage; actual unique generated aircraft offered in the measured window; zero unknown input labels | Input coverage does not establish tracking accuracy or identity coverage |
 | Report fields remain machine-readable | Commas, quotes and newlines in text fields follow CSV escaping; an independent reader checks the study outputs and per-metric class counts | Tables have section-specific numeric columns |
 | The observed synthetic accuracy meets its stated targets | Small exact-truth study, with nonempty samples for each eligible metric class and the published position/speed/heading thresholds | Too few samples for an ESASSP exit result; variants can emit different cohorts; a missed target stays a failure |
+| Nonlinear turn prediction follows its stated integration rule | Closed-form spread, discovery-floor and mirror cases; independent high-precision mean/second-moment fixtures; direct conditional-Gaussian reference on captured states | Cubature and the separate discovery regularization are approximations, not an exact nonlinear posterior or a calibrated covariance upper bound |
+| Numerical failure cannot disappear as absent work | Typed forecast failures, counted tracker/fusion refusals, atomic history replay and per-field loss checks | The legacy optional forecast API cannot distinguish reasons; callers needing that distinction use the checked API |
 | Named M3 paths make no allocator calls after initialization | Isolated counting allocator, standard-API positive controls, injected-allocation negative control, required tracker/fusion route evidence, source and binary fingerprints | Scoped to the named fixtures and generated program; excluded shell helpers and other inputs are unproved |
 | The complete real-time core meets C5 | Extend allocation instrumentation and explicit path coverage across real-time crates | **OPEN:** the scoped M3 check and buffer stability do not establish the complete claim |
 | Recorded ADS-B results reproduce | Explicit authorized clip, split and input counts, output digest, exclusions and repeated execution | Report-disjoint samples still share correlated GNSS error; disagreement is not an absolute-error bound |
@@ -51,10 +53,16 @@ python3 tools/validate_candidate.py --repo /path/to/checkout \
 ```
 
 The runner uses only Python's standard library. It runs builds and checks sequentially with one
-Cargo build job, captures command output, and records evidence in `run.json`. The evidence
-directory must be new and outside the checkout. Reference paths are explicit; no recording
-directory is discovered. A missing clip is NOT_RUN. The full data suites can skip when their
-reference paths are absent, so a test-suite pass must be read with its recorded data manifest.
+Cargo build job, captures command output, and records evidence in `run.json`. `--target-dir` is a
+cache root outside the checkout; the runner derives `checkouts/<sha256-of-resolved-checkout-path>`
+under it for all Cargo builds, allocator artifacts, and binary checks. Different checkout paths
+therefore never share build artifacts, while repeated runs of the same resolved checkout may reuse
+them. A symlink alias resolves to the same checkout namespace. The evidence directory must be new
+and outside the checkout. Reference paths are explicit; no recording directory is discovered. A
+missing clip is NOT_RUN. The full data suites can skip when their reference paths are absent, so a
+test-suite pass must be read with its recorded data manifest.
+Manual comparisons also use a separate `CARGO_TARGET_DIR` for each checkout: a shared directory
+can reuse a test executable from a different worktree.
 
 The fixed capacity cases are stress layout, seed 41, three radars (`e,t,t`), 60 measured seconds:
 1,200 and 2,400 aircraft with half ADS-B, and 1,200 radar-only aircraft. The first two warm up for
@@ -73,9 +81,19 @@ Each synthetic accuracy CSV metric row has an adjacent `<section>|samples` row w
 label. Its nine integer columns are position, speed and heading counts, each in
 `all, straight, turn` order. Eligible classes must be nonempty; the position all-count must match
 the metric row's `n`. These counts describe emitted, matched samples for that variant. For the
-fixed radar-only terminal case, the turning-speed counts differ across variants (10, 35 and 71);
-their unmatched RMS values alone do not establish comparative superiority. Common-sample
+fixed radar-only terminal case, the frozen `9536ef8` baseline's turning-speed counts differ
+across variants (10, 35 and 71); the nonlinear turn predictor retains the original 71 and adds
+four. Their unmatched RMS values alone do not establish comparative superiority. Common-sample
 diagnostics do not replace the acceptance cohort or its unchanged target.
+
+Each base-study variant also reports a `<section>|loss` row with named counts for
+`tracker.numerical_refused`, `fusion.prediction_refused` and `tracker.rows_unrepresentable`.
+These counts cover the whole run, once per world, independently of score subsets. The synthetic
+accuracy gate requires all three counts to be present and zero for every eligible run. Historical
+tables without these rows provide no evidence for these loss counts.
+The gate's eligible rows are the all-aircraft `b` radar-only runs and `b`/`c` mixed-sensor runs.
+Other variants and score subsets retain their reported target misses; passing this scope does
+not establish that every subset meets every published study bar.
 
 The input-load check requires every configured aircraft to appear in the measured inputs, using
 ADS-B addresses and radar truth labels in the shell. Repeated sightings count once and unknown
@@ -104,3 +122,15 @@ The frozen baseline failed the invalid-time state-preservation checks and CSV fi
 Those failures and their repairs must remain linked in the candidate evidence. Its small radar-only
 study also missed the turning-speed target; that observation requires a separate disposition and
 must not be hidden by successful unit tests or fast capacity runs.
+
+The turn model integrates ten equally weighted spherical-radial points from its stored covariance
+through the existing motion map to predict the mean. A second ten-point set applies the existing
+turn-discovery variance floor and supplies the second moment about that mean, before process
+noise is added. This replaces a first-order approximation that can overstate velocity under
+uncertain turn rate, while keeping recurring discovery regularization from shifting the state
+mean. The initial turn-rate prior, process noises, floor value and accuracy targets are unchanged.
+The two sets do not describe one common posterior distribution when the floor is active, and
+their second moment is not a statistically calibrated upper bound. Numerical factorization
+failures refuse work explicitly. History updates roll back a partial replay, and fusion counts
+failed eligible forecasts separately from absent tracks. These changes require a new candidate
+run; prior-source results do not establish their accuracy or performance.

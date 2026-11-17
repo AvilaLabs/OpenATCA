@@ -3343,9 +3343,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-040** Re-filtering keeps one anchor filter state and a ring of the last 12 measurements per
   track and rebuilds the state at a late measurement by applying the ring's measurements to the anchor; on
   three aircraft whose reports arrive scrambled by up to 14 positions, with wild positions and exact and
-  different-sensor repeats, every output bit and every counter equals those recorded from the
-  implementation that stored a full filter state in each ring slot (recorded again at OA-TRK-077 and
-  OA-TRK-078, which changed five duplicate counts).
+  different-sensor repeats, every output bit and every counter equals a reference that stores a
+  full filter state in each ring slot and uses the same filter equations. Historical pins were
+  recorded again at OA-TRK-077 and OA-TRK-078, which changed five duplicate counts; changes to
+  prediction equations require a fresh comparison with that full-state reference.
 - **OA-TRK-041** A tracker filled to `MAX_TRACKS` aircraft with more reports each than the ring holds
   refuses the next aircraft under its own counter, re-filters a late report of a track in the full table,
   and reallocates no buffer.
@@ -3546,6 +3547,25 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   and heading class. The candidate evaluator refuses missing, empty, malformed or inconsistent
   class counts. Different variants' emitted primary-track cohorts remain explicit; adding counts
   never changes the metric's samples, values, thresholds or truth classification.
+- **OA-TRK-329** The coordinated-turn predictor computes the state mean from ten equally weighted
+  spherical-radial points of the stored five-dimensional covariance. A second ten-point set
+  applies the existing turn-discovery variance floor only to the predicted uncertainty: its
+  second moment is centered on the first set's predicted mean, then existing process noise is
+  added. The discovery regularization cannot shift that mean. The deterministic motion map and
+  initial turn-rate prior are preserved. Fixed-size square-root factorization accepts positive
+  semidefinite covariance, including exact zero directions, and refuses non-finite, asymmetric
+  or indefinite inputs without jitter or a fallback model.
+- **OA-TRK-330** A failed horizontal numerical prediction refuses the measurement, preserves
+  the prior filter state and increments a named numerical-refusal counter. Unavailable predicted
+  output is explicit and counted when an output row is withheld; a numerical refusal prevents
+  a capacity or synthetic-accuracy pass.
+- **OA-TRK-331** Numerical refusal while advancing a history anchor or replaying a late update
+  leaves the per-track state, history, category and output unchanged. The incoming update is
+  counted once as numerically refused; no partial replay or uncounted history loss is committed.
+- **OA-TRK-332** Read-only forecasts distinguish an absent track from numerical or coordinate
+  failure. Fusion counts failed eligible forecasts as loss, including association and registration
+  queries; an ineligible tentative hard-address track is classified before forecasting. A failed
+  forecast never establishes that an existing key has disappeared.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed

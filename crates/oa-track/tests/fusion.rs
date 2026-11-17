@@ -638,7 +638,7 @@ fn clip_counts(r: &RunOut) -> String {
         .filter_map(|(&key, &flag)| (flag & oa_track::O_IDENTITY_UNCONFIRMED != 0).then_some(key))
         .collect();
     format!(
-        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {} init_capped {} init_plots_refused {} identity_unconfirmed_rows {} identity_unconfirmed_keys {}",
+        "rows {} plots {} refused {} tracks_created {} cand_confirmed {} duplicates {} false_tracks {} swaps {} wrong_plots {} false_applied {} coast_rows {} work_capped {} ungated {} init_capped {} init_plots_refused {} identity_unconfirmed_rows {} identity_unconfirmed_keys {} numerical_refused {} prediction_refused {} rows_unrepresentable {}",
         r.out.t_ns.len(),
         s.plots_in,
         s.plots_refused,
@@ -651,11 +651,12 @@ fn clip_counts(r: &RunOut) -> String {
         id.false_applied,
         coast,
         s.bucket_work_capped,
-        s.anon_plots_ungated, s.init_capped, s.init_plots_refused, unknown_rows, unknown_keys.len()
+        s.anon_plots_ungated, s.init_capped, s.init_plots_refused, unknown_rows, unknown_keys.len(),
+        r.tstats.numerical_refused, s.prediction_refused, r.tstats.rows_unrepresentable
     )
 }
 
-// REQ: OA-TRK-170
+// REQ: OA-TRK-170, OA-TRK-330, OA-TRK-332
 #[test]
 fn the_real_clip_runs_give_the_pinned_digests() {
     let (Ok(path), Ok(_)) = (
@@ -697,6 +698,9 @@ fn the_real_clip_runs_give_the_pinned_digests() {
             r.fstats.plots_refused
         );
         println!("clip counts {kind:?} mixed={mixed}: {}", clip_counts(&r));
+        assert_eq!(r.tstats.numerical_refused, 0);
+        assert_eq!(r.fstats.prediction_refused, 0);
+        assert_eq!(r.tstats.rows_unrepresentable, 0);
         println!(
             "clip without identity bit {kind:?} mixed={mixed}: {}",
             digest_without_identity_warning(&r)
@@ -712,6 +716,9 @@ fn the_real_clip_runs_give_the_pinned_digests() {
     let r = run_variant(&V_OURS_REG, &[ra.trk, rb.trk], &[&pa, &pb], &adsb).unwrap();
     println!("clip digest two radars: {}", run_digest(&r));
     println!("clip counts two radars: {}", clip_counts(&r));
+    assert_eq!(r.tstats.numerical_refused, 0);
+    assert_eq!(r.fstats.prediction_refused, 0);
+    assert_eq!(r.tstats.rows_unrepresentable, 0);
     println!(
         "clip without identity bit two radars: {}",
         digest_without_identity_warning(&r)
@@ -805,12 +812,21 @@ fn the_real_clip_runs_give_the_pinned_digests() {
 // 255279cc32ccad5633c81b6a4252a600a993d5b25ead32a3e5f949fd35d12dce
 // cf00b4349af0b9bcf0ae7e77ce168cbebd69b9d1f0eb702c406853da2b5ffe0a
 // d7c3d24f5a4a89625e5970882feaee004386218cfc5b949f5595a17ff5d7d5e5
+// Nonlinear turn prediction (OA-TRK-329), on the same clip and simulated inputs: rows change
+// 38,727 -> 38,755; 31,662 -> 31,432; 151,150 -> 151,096; 156,837 -> 156,749;
+// 172,530 -> 172,819. Created tracks: 161 -> 158; 152 -> 146; 841 -> 838; 650 -> 648;
+// 667 -> 667. Duplicate hypotheses: 60 -> 57; 44 -> 37; 20 -> 17; 22 -> 19; 19 -> 18.
+// Two-radar swaps/wrong plots/false applied change 23/65/1 -> 12/26/0, with confirmed
+// candidates 91 -> 89. The estimator changes association and lifetimes, not only output bits.
+// Every run has zero numerical/forecast refusals, unrepresentable rows and new capacity losses.
+// Previous digests: 7fb208ee..c9f, 9cdad807..8bf, a6aa4ae1..f3a, 87aad910..b71,
+// b5adce47..cc4. Numeric thresholds, metric definitions and the raw digest stay unchanged.
 const PINNED_CLIP_DIGESTS: [&str; 5] = [
-    "7fb208ee878d35634456680264a501a67c6ef4cd8018f66b9a7ca3a423b95c9f",
-    "9cdad807478bd90a2f8b9b0a7c16188cb986b905ad6a5064a7f09f3e230c78bf",
-    "a6aa4ae1c2f1d4d2bfb3df2898c50c2e6c45a5cb5414dc8f8dfbe5bf395aef3a",
-    "87aad9103f98537f00930c998a49c90c1e502c8183c5a099f3818f4add778b71",
-    "b5adce47ffe6b5fc4ceff2cb8ddeeabb892f7fd36e684613a9414367f5b34cc4",
+    "07ac27be0d8a626a3ee624433412578c3bd5f2f2bbb9fec8a4f2417e90835f44",
+    "00ba1cba8c1c8c8ce592e981f0484d52b2cf9d03b39c0df5a8022cb48805e18b",
+    "022a97e7ceee8e01a22567962b5d7a4c64c6f9bff7a7f65789ef80a5eb426924",
+    "01dee885c82d3e88d932a4488338058711a057385131f87cb2cd3ed6cb9138e4",
+    "71139e851dcb21812a3082c65b02bac7d346a23f2b4d001ad031790a39e61123",
 ];
 
 // REQ: OA-TRK-311

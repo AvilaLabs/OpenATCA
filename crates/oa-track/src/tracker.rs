@@ -58,7 +58,9 @@ use oa_adsb::{
     NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
-use crate::filter::{filter_apply, filter_init, filter_output, filter_replay, Applied, Filter};
+use crate::filter::{
+    filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied, Filter,
+};
 use crate::hfilter::{h_combine, HFilter};
 use crate::params::{NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
 use crate::time_gate::{
@@ -66,9 +68,9 @@ use crate::time_gate::{
     RUN_BUF,
 };
 use crate::types::{
-    check_config, log_new, output_push, Measurement, OutRow, TrackError, TrackLog, TrackOutput,
-    TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL, NONE_I32,
-    NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, RADAR_KEY_BASE,
+    check_config, log_new, output_push, Measurement, OutRow, PredictError, TrackError, TrackLog,
+    TrackOutput, TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL,
+    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, RADAR_KEY_BASE,
     REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
@@ -396,37 +398,48 @@ fn ring_clear(t: &mut Tracker, slot: usize) {
 /// Stores a measurement that was applied; the track's filter (`cur`) is the state after it. The
 /// first entry of an empty ring sets the anchor from `cur`; when the ring is full the oldest
 /// entry is dropped and the anchor moves on by applying the next one to it.
-fn ring_push(t: &mut Tracker, slot: usize, m: &Measurement) {
+fn ring_push(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     let len = ring_len(t, slot);
-    if len == 0 {
-        put(&mut t.anchor, slot, col(&t.cur, slot, blank_filter()));
-    }
+    let mut next_anchor = col(&t.anchor, slot, blank_filter());
     if len == RING_DEPTH {
         let next = col(&t.ring_m, ring_ix(t, slot, 1), blank_measurement());
-        let mut a = col(&t.anchor, slot, blank_filter());
+        let mut a = next_anchor;
         // The counters were taken when the measurement was first applied.
-        let _ = filter_replay(&mut a, &next, &mut TrackerStats::default());
-        put(&mut t.anchor, slot, a);
+        if filter_replay(&mut a, &next, &mut TrackerStats::default()) == Applied::NumericalRefused {
+            return false;
+        }
+        next_anchor = a;
+    } else if len == 0 {
+        next_anchor = col(&t.cur, slot, blank_filter());
+    }
+    if len == RING_DEPTH {
+        put(&mut t.anchor, slot, next_anchor);
         let head = usize::from(col(&t.ring_head, slot, 0));
         put(&mut t.ring_head, slot, ((head + 1) % RING_DEPTH) as u8);
     } else {
         put(&mut t.ring_len, slot, (len + 1) as u8);
+        if len == 0 {
+            put(&mut t.anchor, slot, next_anchor);
+        }
     }
     let k = ring_len(t, slot).saturating_sub(1);
     let at = ring_ix(t, slot, k);
     put(&mut t.ring_m, at, *m);
+    true
 }
 
 /// The filter state after ring entry `k` (0 is the oldest): the anchor with entries `1..=k`
 /// applied again, counters discarded.
-fn ring_state(t: &Tracker, slot: usize, k: usize) -> Filter {
+fn ring_state(t: &Tracker, slot: usize, k: usize) -> Option<Filter> {
     let mut f = col(&t.anchor, slot, blank_filter());
     let mut scratch = TrackerStats::default();
     for j in 1..=k {
         let m = col(&t.ring_m, ring_ix(t, slot, j), blank_measurement());
-        let _ = filter_replay(&mut f, &m, &mut scratch);
+        if filter_replay(&mut f, &m, &mut scratch) == Applied::NumericalRefused {
+            return None;
+        }
     }
-    f
+    Some(f)
 }
 
 /// Whether the ring holds a measurement with this time of applicability from this sensor: a
@@ -554,12 +567,14 @@ pub fn tracker_newest_update_ns(t: &Tracker) -> i64 {
 }
 
 /// Starts (or restarts) a tentative track in `slot` from `m`.
-fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
+fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
     note_category(t, slot, m);
     ring_clear(t, slot);
-    ring_push(t, slot, m);
+    if !ring_push(t, slot, m) {
+        return false;
+    }
     put(&mut t.first_ns, slot, m.toa_ns);
     set_last(t, slot, m.toa_ns);
     put(&mut t.updates, slot, 1);
@@ -569,6 +584,7 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.expected_ns, slot, 0);
     put(&mut t.state, slot, TENTATIVE);
     maybe_confirm(t, slot, m.toa_ns);
+    true
 }
 
 fn maybe_confirm(t: &mut Tracker, slot: usize, at_ns: i64) {
@@ -668,6 +684,133 @@ fn note_category(t: &mut Tracker, slot: usize, m: &Measurement) {
     put(&mut t.cat, slot, c);
 }
 
+/// Fixed-size rollback point for one track and its replay history.
+#[repr(C)]
+struct TrackTxn {
+    cur: Filter,
+    anchor: Filter,
+    ring: [Measurement; RING_DEPTH],
+    stats: TrackerStats,
+    first_ns: i64,
+    confirmed_ns: i64,
+    last_ns: i64,
+    disagree_until_ns: i64,
+    expected_ns: i64,
+    newest_update_ns: i64,
+    cat: CategoryState,
+    updates: u32,
+    state: u8,
+    hits: u8,
+    ring_len: u8,
+    ring_head: u8,
+}
+// Budget: two 632-byte filters, twelve 72-byte measurements, 304-byte statistics,
+// six 8-byte times, 8-byte category, 4-byte update count and four byte fields.
+// One bounded stack checkpoint; no track key changes during an update or its replay.
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2496);
+
+fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
+    let mut ring = [blank_measurement(); RING_DEPTH];
+    let start = slot * RING_DEPTH;
+    for (k, value) in ring.iter_mut().enumerate() {
+        *value = col(&t.ring_m, start + k, blank_measurement());
+    }
+    TrackTxn {
+        state: col(&t.state, slot, FREE),
+        first_ns: col(&t.first_ns, slot, 0),
+        confirmed_ns: col(&t.confirmed_ns, slot, i64::MIN),
+        last_ns: col(&t.last_ns, slot, 0),
+        disagree_until_ns: col(&t.disagree_until_ns, slot, i64::MIN),
+        expected_ns: col(&t.expected_ns, slot, 0),
+        updates: col(&t.updates, slot, 0),
+        hits: col(&t.hits, slot, 0),
+        cur: col(&t.cur, slot, blank_filter()),
+        ring_len: col(&t.ring_len, slot, 0),
+        ring_head: col(&t.ring_head, slot, 0),
+        cat: col(&t.cat, slot, CategoryState::default()),
+        anchor: col(&t.anchor, slot, blank_filter()),
+        ring,
+        newest_update_ns: t.newest_update_ns,
+        stats: t.stats,
+    }
+}
+
+fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
+    put(&mut t.state, slot, snapshot.state);
+    put(&mut t.first_ns, slot, snapshot.first_ns);
+    put(&mut t.confirmed_ns, slot, snapshot.confirmed_ns);
+    put(&mut t.last_ns, slot, snapshot.last_ns);
+    put(&mut t.disagree_until_ns, slot, snapshot.disagree_until_ns);
+    put(&mut t.expected_ns, slot, snapshot.expected_ns);
+    put(&mut t.updates, slot, snapshot.updates);
+    put(&mut t.hits, slot, snapshot.hits);
+    put(&mut t.cur, slot, snapshot.cur);
+    put(&mut t.ring_len, slot, snapshot.ring_len);
+    put(&mut t.ring_head, slot, snapshot.ring_head);
+    put(&mut t.cat, slot, snapshot.cat);
+    put(&mut t.anchor, slot, snapshot.anchor);
+    let start = slot * RING_DEPTH;
+    for (k, value) in snapshot.ring.into_iter().enumerate() {
+        put(&mut t.ring_m, start + k, value);
+    }
+    t.newest_update_ns = snapshot.newest_update_ns;
+    t.stats = snapshot.stats;
+    t.stats.numerical_refused = t.stats.numerical_refused.saturating_add(1);
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct OutputTxn {
+    overflow: u64,
+    lens: [usize; 15],
+}
+// Budget: one 8-byte counter and fifteen native 8-byte lengths on the supported platform.
+const _: () = assert!(core::mem::size_of::<OutputTxn>() == 128);
+
+fn output_txn(out: &TrackOutput) -> OutputTxn {
+    OutputTxn {
+        overflow: out.overflow,
+        lens: [
+            out.t_ns.len(),
+            out.addr.len(),
+            out.lat_e7.len(),
+            out.lon_e7.len(),
+            out.vel_east_mps.len(),
+            out.vel_north_mps.len(),
+            out.pos_cov_m2.len(),
+            out.vel_cov_m2s2.len(),
+            out.turn_rate_rps.len(),
+            out.alt_ft.len(),
+            out.alt_var_ft2.len(),
+            out.vrate_fpm.len(),
+            out.mu_h.len(),
+            out.mu_v.len(),
+            out.flags.len(),
+        ],
+    }
+}
+
+fn restore_output_txn(out: &mut TrackOutput, snapshot: OutputTxn) {
+    out.overflow = snapshot.overflow;
+    let [t_ns, addr, lat_e7, lon_e7, vel_east_mps, vel_north_mps, pos_cov_m2, vel_cov_m2s2, turn_rate_rps, alt_ft, alt_var_ft2, vrate_fpm, mu_h, mu_v, flags] =
+        snapshot.lens;
+    out.t_ns.truncate(t_ns);
+    out.addr.truncate(addr);
+    out.lat_e7.truncate(lat_e7);
+    out.lon_e7.truncate(lon_e7);
+    out.vel_east_mps.truncate(vel_east_mps);
+    out.vel_north_mps.truncate(vel_north_mps);
+    out.pos_cov_m2.truncate(pos_cov_m2);
+    out.vel_cov_m2s2.truncate(vel_cov_m2s2);
+    out.turn_rate_rps.truncate(turn_rate_rps);
+    out.alt_ft.truncate(alt_ft);
+    out.alt_var_ft2.truncate(alt_var_ft2);
+    out.vrate_fpm.truncate(vrate_fpm);
+    out.mu_h.truncate(mu_h);
+    out.mu_v.truncate(mu_v);
+    out.flags.truncate(flags);
+}
+
 /// What [`decide`] did with a measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -679,6 +822,8 @@ enum Step {
     Rejected,
     /// Too many rejections in a row: the filter started again at the measurement.
     Resynced,
+    /// The filter refused a numerical prediction; callers roll back the update.
+    NumericalRefused,
 }
 
 /// The per-measurement decision, the same for a measurement that arrives in order and for each
@@ -691,17 +836,24 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
     if col(&t.state, slot, FREE) == TENTATIVE {
         if m.toa_ns - col(&t.first_ns, slot, 0) > init_window_ns(t) {
             t.stats.init_window_expired += 1;
-            track_begin(t, slot, m);
-            return Step::Begun;
+            return if track_begin(t, slot, m) {
+                Step::Begun
+            } else {
+                Step::NumericalRefused
+            };
         }
         if implausible(t, slot, m) {
             t.stats.init_implausible += 1;
-            track_begin(t, slot, m);
-            return Step::Begun;
+            return if track_begin(t, slot, m) {
+                Step::Begun
+            } else {
+                Step::NumericalRefused
+            };
         }
     }
     let mut f = col(&t.cur, slot, blank_filter());
     match filter_apply(&mut f, m, &mut t.stats) {
+        Applied::NumericalRefused => Step::NumericalRefused,
         Applied::Rejected => {
             // Keeps the count of rejections in a row, so repeated ones re-initialise.
             put(&mut t.cur, slot, f);
@@ -710,7 +862,9 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         Applied::Yes => {
             put(&mut t.cur, slot, f);
             note_category(t, slot, m);
-            ring_push(t, slot, m);
+            if !ring_push(t, slot, m) {
+                return Step::NumericalRefused;
+            }
             set_last(t, slot, m.toa_ns);
             let u = col(&t.updates, slot, 0).saturating_add(1);
             put(&mut t.updates, slot, u);
@@ -724,7 +878,9 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
             put(&mut t.cat, slot, CategoryState::default());
             note_category(t, slot, m);
             ring_clear(t, slot);
-            ring_push(t, slot, m);
+            if !ring_push(t, slot, m) {
+                return Step::NumericalRefused;
+            }
             set_last(t, slot, m.toa_ns);
             put(&mut t.hits, slot, 1);
             put(&mut t.updates, slot, 1);
@@ -735,7 +891,13 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
 
 /// Applies a measurement newer than or equal to the track's newest update.
 fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
+    let snapshot = track_txn(t, slot);
+    let output = output_txn(out);
     match decide(t, slot, m) {
+        Step::NumericalRefused => {
+            restore_track_txn(t, slot, snapshot);
+            restore_output_txn(out, output);
+        }
         Step::Begun => emit_if_confirmed(t, slot, out),
         Step::Applied => {
             t.stats.applied += 1;
@@ -763,6 +925,8 @@ fn emit_if_confirmed_at(t: &mut Tracker, slot: usize, at_ns: i64, out: &mut Trac
 /// resyncs do not depend on the order of arrival (while the ring holds the whole history since
 /// the track began; past that the trusted category is the live one).
 fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
+    let transaction = track_txn(t, slot);
+    let output = output_txn(out);
     let len = ring_len(t, slot);
     // The newest stored update at or before the measurement (the state after an update is at
     // the update's own time).
@@ -802,7 +966,11 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     // The track as it was after the base entry: the filter, the counts, the category, and
     // tentative again if it was confirmed only by a later entry.
     let base_ns = col(&t.ring_m, ring_ix(t, slot, e), blank_measurement()).toa_ns;
-    let bf = ring_state(t, slot, e);
+    let Some(bf) = ring_state(t, slot, e) else {
+        restore_track_txn(t, slot, transaction);
+        restore_output_txn(out, output);
+        return;
+    };
     let kept = len - (e + 1);
     let updates = col(&t.updates, slot, 0);
     let mut cat = if (updates as usize) <= len {
@@ -854,6 +1022,11 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
                 t.stats.refiltered += 1;
             }
             Step::Resynced | Step::Begun | Step::Rejected => disturbed = true,
+            Step::NumericalRefused => {
+                restore_track_txn(t, slot, transaction);
+                restore_output_txn(out, output);
+                return;
+            }
         }
         if k == 0 && matches!(step, Step::Applied | Step::Begun) {
             emit_if_confirmed_at(t, slot, m.toa_ns, out);
@@ -1024,7 +1197,10 @@ fn apply(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
             t.active += 1;
             t.stats.started += 1;
             t.stats.applied += 1;
-            track_begin(t, slot, m);
+            if !track_begin(t, slot, m) {
+                t.stats.numerical_refused += 1;
+                return;
+            }
             emit_if_confirmed(t, slot, out);
         }
         Some(slot) => {
@@ -1211,21 +1387,42 @@ pub fn tracker_live_iter(t: &Tracker) -> impl Iterator<Item = (u32, i64)> + '_ {
 /// it is confirmed, and its newest update time. `None` if there is no such track, or if its position at `at_ns`
 /// cannot be represented. Nothing is stored; the filter is predicted on a copy, as for an output row.
 pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, bool, i64)> {
-    let slot = lookup(t, key)?;
+    tracker_predict_checked(t, key, at_ns).ok()
+}
+
+/// Forecast with a typed reason for absence or failure. Earlier query times use the newest
+/// stored state, as in `tracker_predict`. This read-only operation does not change counters;
+/// callers that discard work must record numerical or unrepresentable failures separately.
+pub fn tracker_predict_checked(
+    t: &Tracker,
+    key: u32,
+    at_ns: i64,
+) -> Result<(OutRow, bool, i64), PredictError> {
+    let slot = lookup(t, key).ok_or(PredictError::NoTrack)?;
     if col(&t.state, slot, FREE) == FREE {
-        return None;
+        return Err(PredictError::NoTrack);
     }
     let f = col(&t.cur, slot, blank_filter());
-    let mut row = filter_output(&f, at_ns.max(f.t_ns))?;
+    let mut row = filter_output_checked(&f, at_ns.max(f.t_ns))?;
     row.addr = key;
     if key >= RADAR_KEY_BASE {
         row.flags |= O_IDENTITY_UNCONFIRMED;
     }
-    Some((
+    Ok((
         row,
         col(&t.state, slot, FREE) == CONFIRMED,
         col(&t.last_ns, slot, 0),
     ))
+}
+
+/// Existence is a key lookup, independent of whether a forecast can be computed.
+pub(crate) fn tracker_has_key(t: &Tracker, key: u32) -> bool {
+    lookup(t, key).is_some_and(|slot| col(&t.state, slot, FREE) != FREE)
+}
+
+/// Whether a keyed track is confirmed, independent of forecastability.
+pub(crate) fn tracker_is_confirmed(t: &Tracker, key: u32) -> bool {
+    lookup(t, key).is_some_and(|slot| col(&t.state, slot, FREE) == CONFIRMED)
 }
 
 #[cfg(test)]
@@ -1406,5 +1603,244 @@ mod tests {
             ADDR,
             S
         ));
+    }
+
+    fn assert_same_output_bits(a: &TrackOutput, b: &TrackOutput) {
+        assert_eq!((a.capacity, a.overflow), (b.capacity, b.overflow));
+        assert_eq!(a.t_ns, b.t_ns);
+        assert_eq!(a.addr, b.addr);
+        assert_eq!(a.lat_e7, b.lat_e7);
+        assert_eq!(a.lon_e7, b.lon_e7);
+        assert_eq!(a.flags, b.flags);
+        // Absent altitude is NaN; compare its bits, not NaN's non-reflexive PartialEq.
+        for (x, y) in [
+            (&a.vel_east_mps, &b.vel_east_mps),
+            (&a.vel_north_mps, &b.vel_north_mps),
+            (&a.turn_rate_rps, &b.turn_rate_rps),
+            (&a.alt_ft, &b.alt_ft),
+            (&a.alt_var_ft2, &b.alt_var_ft2),
+            (&a.vrate_fpm, &b.vrate_fpm),
+        ] {
+            assert_eq!(
+                x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                y.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+        for (x, y) in [
+            (&a.pos_cov_m2, &b.pos_cov_m2),
+            (&a.vel_cov_m2s2, &b.vel_cov_m2s2),
+        ] {
+            assert_eq!(
+                x.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                y.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+        for (x, y) in [(&a.mu_h, &b.mu_h), (&a.mu_v, &b.mu_v)] {
+            assert_eq!(
+                x.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                y.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct HistorySnap {
+        track: Snap,
+        anchor: Filter,
+        category: CategoryState,
+        ring_head: u8,
+        ring_len: u8,
+        ring_physical: Vec<Measurement>,
+        newest_update_ns: i64,
+    }
+
+    fn history_snap(t: &Tracker, slot: usize) -> HistorySnap {
+        let start = slot * RING_DEPTH;
+        HistorySnap {
+            track: snap(t),
+            anchor: col(&t.anchor, slot, blank_filter()),
+            category: col(&t.cat, slot, CategoryState::default()),
+            ring_head: col(&t.ring_head, slot, 0),
+            ring_len: col(&t.ring_len, slot, 0),
+            ring_physical: t.ring_m.get(start..start + RING_DEPTH).unwrap().to_vec(),
+            newest_update_ns: t.newest_update_ns,
+        }
+    }
+
+    fn full_ring_tracker() -> (Tracker, TrackOutput, usize) {
+        let c = TrackerConfig {
+            tick_ns: 100_000 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..RING_DEPTH {
+            tracker_update(&mut t, &at(k as i64, 0, 100.0), &mut out);
+        }
+        let slot = lookup(&t, ADDR).unwrap();
+        assert_eq!(ring_len(&t, slot), RING_DEPTH);
+        // Retain pre-existing output rows to check prefix preservation on rollback.
+        (t, out, slot)
+    }
+
+    fn poison_anchor_velocity_covariance(t: &mut Tracker, slot: usize) {
+        let anchor = t.anchor.get_mut(slot).unwrap();
+        for model in &mut anchor.h.m {
+            model.p[2][2] = -1.0e6;
+        }
+    }
+
+    fn assert_only_numerical_refusal(t: &Tracker, before: TrackerStats) {
+        let mut expected = before;
+        expected.offered += 1;
+        expected.numerical_refused += 1;
+        assert_eq!(t.stats, expected);
+    }
+
+    // REQ: OA-TRK-331
+    #[test]
+    fn invalid_anchor_refuses_ring_full_update_without_partial_commit_and_recovers() {
+        let (mut t, mut out, slot) = full_ring_tracker();
+        let good_anchor = col(&t.anchor, slot, blank_filter());
+        poison_anchor_velocity_covariance(&mut t, slot);
+        let before = history_snap(&t, slot);
+        let before_stats = t.stats;
+        let before_out = out.clone();
+
+        let next = at(RING_DEPTH as i64, 0, 100.0);
+        tracker_update(&mut t, &next, &mut out);
+
+        assert_eq!(history_snap(&t, slot), before);
+        assert_same_output_bits(&out, &before_out);
+        assert_only_numerical_refusal(&t, before_stats);
+
+        // A valid anchor lets the same update proceed, with no second refusal.
+        put(&mut t.anchor, slot, good_anchor);
+        let before_recovery = t.stats;
+        tracker_update(&mut t, &next, &mut out);
+        assert_eq!(t.stats.numerical_refused, before_recovery.numerical_refused);
+        assert_eq!(t.stats.applied, before_recovery.applied + 1);
+        assert_eq!(col(&t.last_ns, slot, 0), next.toa_ns);
+        assert_eq!(ring_len(&t, slot), RING_DEPTH);
+    }
+
+    // REQ: OA-TRK-332
+    #[test]
+    fn checked_forecast_distinguishes_a_failed_prediction_from_an_absent_key() {
+        let (mut t, _out, slot) = full_ring_tracker();
+        let at_ns = col(&t.last_ns, slot, 0) + S;
+        assert!(matches!(
+            tracker_predict_checked(&t, ADDR + 1, at_ns),
+            Err(PredictError::NoTrack)
+        ));
+        assert!(tracker_predict_checked(&t, ADDR, at_ns).is_ok());
+        let cur = t.cur.get_mut(slot).unwrap();
+        for model in &mut cur.h.m {
+            model.p[2][2] = -1.0e6;
+        }
+        let before = history_snap(&t, slot);
+        let stats = t.stats;
+        assert!(matches!(
+            tracker_predict_checked(&t, ADDR, at_ns),
+            Err(PredictError::Numerical)
+        ));
+        assert!(tracker_predict(&t, ADDR, at_ns).is_none());
+        assert!(tracker_has_key(&t, ADDR));
+        assert_eq!(history_snap(&t, slot), before);
+        assert_eq!(t.stats, stats);
+    }
+
+    // REQ: OA-TRK-331
+    #[test]
+    fn invalid_anchor_refuses_late_rebuild_without_mutation_and_recovers() {
+        let (mut t, mut out, slot) = full_ring_tracker();
+        let good_anchor = col(&t.anchor, slot, blank_filter());
+        poison_anchor_velocity_covariance(&mut t, slot);
+        let before = history_snap(&t, slot);
+        let before_stats = t.stats;
+        let before_out = out.clone();
+        let mut late = at(2, 0, 100.0);
+        late.toa_ns += S / 2;
+
+        tracker_update(&mut t, &late, &mut out);
+
+        assert_eq!(history_snap(&t, slot), before);
+        assert_same_output_bits(&out, &before_out);
+        assert_only_numerical_refusal(&t, before_stats);
+
+        put(&mut t.anchor, slot, good_anchor);
+        let before_recovery = t.stats;
+        tracker_update(&mut t, &late, &mut out);
+        assert_eq!(t.stats.numerical_refused, before_recovery.numerical_refused);
+        assert_eq!(t.stats.refiltered, before_recovery.refiltered + 1);
+        assert_eq!(ring_len(&t, slot), RING_DEPTH);
+        assert_eq!(col(&t.last_ns, slot, 0), before.track.last_ns);
+    }
+
+    // REQ: OA-TRK-331
+    #[test]
+    fn numerical_failure_after_partial_late_replay_rolls_back_track_stats_and_rows() {
+        let (mut t, mut out, slot) = full_ring_tracker();
+        out.capacity = out.t_ns.len();
+        let mut late = at(1, 0, 100.0);
+        late.toa_ns += S / 2;
+        late.category = 0xA6;
+        assert!(late.toa_ns >= t.clock_ns - t.cfg.ooo_window_ns);
+
+        // Inject a negative position covariance that h_update accepts but that makes the next
+        // replay prediction invalid. The same replay steps are used by update_late below.
+        let anchor = ring_state(&t, slot, 1).unwrap();
+        let mut after_late = anchor;
+        let mut scratch = TrackerStats::default();
+        assert_eq!(
+            filter_replay(&mut after_late, &late, &mut scratch),
+            Applied::Yes
+        );
+        let ring_one = col(&t.ring_m, ring_ix(&t, slot, 2), blank_measurement());
+        let ring_two = col(&t.ring_m, ring_ix(&t, slot, 3), blank_measurement());
+        let dt = (ring_one.toa_ns - late.toa_ns) as f64 / S as f64;
+        let predicted = crate::hfilter::h_predict(
+            &after_late.h,
+            dt,
+            crate::hfilter::dwell_decay(dt),
+            after_late.h_mode,
+        )
+        .unwrap();
+        let variance = predicted.m[1].p[0][0].min(predicted.m[1].p[1][1]);
+        // R is negative half the smaller predicted position variance: the innovation
+        // remains invertible, but this injected history fault makes a later covariance invalid.
+        let mut bad = ring_one;
+        let negative = (-0.5 * variance) as f32;
+        bad.pos_cov_m2 = [negative, 0.0, negative];
+        let mut after_bad = after_late;
+        let mut scratch = TrackerStats::default();
+        assert_eq!(
+            filter_replay(&mut after_bad, &bad, &mut scratch),
+            Applied::Yes
+        );
+        let next_dt = (ring_two.toa_ns - bad.toa_ns) as f64 / S as f64;
+        assert!(crate::hfilter::h_predict(
+            &after_bad.h,
+            next_dt,
+            crate::hfilter::dwell_decay(next_dt),
+            after_bad.h_mode,
+        )
+        .is_none());
+        let bad_ix = ring_ix(&t, slot, 2);
+        put(&mut t.ring_m, bad_ix, bad);
+        t.cat[slot] = CategoryState {
+            trusted: 0xA3,
+            cand: 0xA6,
+            cand_n: 2,
+        };
+        let before = history_snap(&t, slot);
+        let before_stats = t.stats;
+        let before_out = out.clone();
+
+        tracker_update(&mut t, &late, &mut out);
+
+        assert_eq!(history_snap(&t, slot), before);
+        assert_same_output_bits(&out, &before_out);
+        assert_only_numerical_refusal(&t, before_stats);
     }
 }

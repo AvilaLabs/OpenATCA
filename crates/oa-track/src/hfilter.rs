@@ -4,11 +4,14 @@
 //!
 //! Both models share one state `[east, north, east velocity, north velocity, turn rate]` so the
 //! mixing step is a plain weighted sum. The straight model keeps the turn rate exactly zero
-//! (its row and column of the transition matrix are zero). The turn model is an extended
-//! Kalman filter: with `theta = turn rate * dt` the position advances by
-//! `v (sin theta / w)` along and `(1 - cos theta) / w` across, and the velocity rotates by
-//! `theta`; the Jacobian column of the turn rate is written out, with series for small `theta`
-//! so the straight-flight limit is smooth.
+//! (its row and column of the transition matrix are zero). The turn model predicts the nonlinear
+//! coordinated-turn map with third-degree spherical-radial cubature over its five-dimensional
+//! Gaussian state. Ten equally weighted points from the validated input covariance determine the
+//! mean. Ten points from the covariance with the turn-rate floor determine the spread, centered on
+//! that mean, before the existing process noise is added. The map uses series for small `theta`,
+//! so the straight-flight limit is smooth. A strict generalized Cholesky factor accepts positive-
+//! semidefinite covariances, including exact zero pivots, and reports invalid or non-finite
+//! covariances instead of repairing them or falling back.
 //!
 //! A `mode` other than 0 replaces the pair by one straight-model filter with a fixed process
 //! noise ([`crate::params::CV_ONLY_Q`]): the single-filter baseline the interacting pair is
@@ -20,10 +23,12 @@
 //! the time step: the stay probability is `exp(-dt / tau)` with a mean dwell time per model
 //! ([`H_TAU_CV_S`], [`H_TAU_CT_S`]), so a 1 s and a 17 s step are both consistent.
 
+// E3: matrix indexes come from fixed 5-state/2-model bounds; cubature has exactly 2*N points.
+// These loops never take an index or collection length from external input.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
 use crate::linalg::{
-    add, ident, matvec, mul, outer, sandwich, scale, symmetrise, transpose, M5, V5, ZERO,
+    add, ident, matvec, mul, outer, sandwich, scale, symmetrise, transpose, M5, N, V5, ZERO,
 };
 use oa_geo::small::sin_cos_near_zero;
 
@@ -169,78 +174,159 @@ fn cv_predict(m: &HModel, dt: f64, q: f64) -> HModel {
     }
 }
 
-/// `(sin t / t, (1 - cos t) / t)` and the derivatives of `sin t / w` and `(1 - cos t) / w` with
-/// respect to `w = t / dt`, divided by `dt^2`: `((a1, b1), (da, db))`; `s` and `c` are `sin t`
-/// and `cos t`.
-fn ct_terms(theta: f64, s: f64, c: f64) -> ((f64, f64), (f64, f64)) {
+/// `(sin t / t, (1 - cos t) / t)`; `s` and `c` are `sin t` and `cos t`.
+fn ct_position_terms(theta: f64, s: f64, c: f64) -> (f64, f64) {
     if theta.abs() < 1.0e-4 {
         let t2 = theta * theta;
-        (
-            (1.0 - t2 / 6.0, theta / 2.0 - theta * t2 / 24.0),
-            (-theta / 3.0, 0.5 - t2 / 8.0),
-        )
+        (1.0 - t2 / 6.0, theta / 2.0 - theta * t2 / 24.0)
     } else {
-        (
-            (s / theta, (1.0 - c) / theta),
-            (
-                (theta * c - s) / (theta * theta),
-                (theta * s - (1.0 - c)) / (theta * theta),
-            ),
-        )
+        (s / theta, (1.0 - c) / theta)
     }
 }
 
-/// Turn model prediction over `dt`.
-fn ct_predict(m: &HModel, dt: f64) -> HModel {
-    let mut p0 = m.p;
-    // A turn can start at any time: the prior never claims more certainty than the floor.
-    let w_var = p0.get(4).and_then(|r| r.get(4)).copied().unwrap_or(0.0);
-    set(&mut p0, 4, 4, w_var.max(omega_var_floor()));
-    let (x, y, vx, vy) = (g(&m.x, 0), g(&m.x, 1), g(&m.x, 2), g(&m.x, 3));
-    let w = g(&m.x, 4).clamp(-OMEGA_MAX, OMEGA_MAX);
+/// Deterministic coordinated-turn state map; moments are integrated separately.
+fn ct_map(x: &V5, dt: f64) -> Option<V5> {
+    if !dt.is_finite() || dt < 0.0 || x.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let (px, py, vx, vy) = (x[0], x[1], x[2], x[3]);
+    let w = x[4].clamp(-OMEGA_MAX, OMEGA_MAX);
     let theta = w * dt;
+    if !theta.is_finite() {
+        return None;
+    }
     let (s, c) = sin_cos_near_zero(theta);
-    let ((a1, b1), (da, db)) = ct_terms(theta, s, c);
+    let (a1, b1) = ct_position_terms(theta, s, c);
     let (a, b) = (dt * a1, dt * b1);
-    let (da, db) = (dt * dt * da, dt * dt * db);
-    let xn = [
-        x + vx * a - vy * b,
-        y + vx * b + vy * a,
+    let mapped = [
+        px + vx * a - vy * b,
+        py + vx * b + vy * a,
         vx * c - vy * s,
         vx * s + vy * c,
         w,
     ];
-    let mut f = ident();
-    set(&mut f, 0, 2, a);
-    set(&mut f, 0, 3, -b);
-    set(&mut f, 0, 4, vx * da - vy * db);
-    set(&mut f, 1, 2, b);
-    set(&mut f, 1, 3, a);
-    set(&mut f, 1, 4, vx * db + vy * da);
-    set(&mut f, 2, 2, c);
-    set(&mut f, 2, 3, -s);
-    set(&mut f, 2, 4, dt * (-vx * s - vy * c));
-    set(&mut f, 3, 2, s);
-    set(&mut f, 3, 3, c);
-    set(&mut f, 3, 4, dt * (vx * c - vy * s));
-    let mut p = sandwich(&f, &p0);
+    mapped.iter().all(|v| v.is_finite()).then_some(mapped)
+}
+
+/// Exact-symmetry generalized lower Cholesky factor for a positive-semidefinite matrix.
+/// A zero pivot is accepted only when its remaining Schur-complement cross residual is exactly
+/// zero. Negative pivots are refused; no tolerance, jitter, or covariance repair is used.
+fn cholesky_psd(p: &M5) -> Option<M5> {
+    for i in 0..N {
+        for j in 0..N {
+            if !p[i][j].is_finite() || p[i][j] != p[j][i] {
+                return None;
+            }
+        }
+    }
+
+    let mut l = ZERO;
+    for i in 0..N {
+        for j in 0..=i {
+            let mut residual = p[i][j];
+            for k in 0..j {
+                let term = l[i][k] * l[j][k];
+                if !term.is_finite() {
+                    return None;
+                }
+                residual -= term;
+                if !residual.is_finite() {
+                    return None;
+                }
+            }
+            if i == j {
+                if residual < 0.0 {
+                    return None;
+                }
+                l[i][j] = residual.sqrt();
+            } else if l[j][j] == 0.0 {
+                if residual != 0.0 {
+                    return None;
+                }
+                l[i][j] = 0.0;
+            } else {
+                l[i][j] = residual / l[j][j];
+                if !l[i][j].is_finite() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(l)
+}
+
+/// Split-floor third-degree spherical-radial cubature, with ten equal-weight points in 5D.
+/// The original covariance determines the mean; its floored version determines the covariance
+/// spread, centered on the original mean. Returns `None` for invalid input or non-finite results.
+fn ct_predict(m: &HModel, dt: f64) -> Option<HModel> {
+    if !dt.is_finite() || dt < 0.0 || m.x.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // The original covariance determines the nominal forecast. Apply the existing discovery
+    // floor only to the covariance point cloud, then measure its spread around that forecast.
+    let original_l = cholesky_psd(&m.p)?;
+    let mut floored_p = m.p;
+    floored_p[4][4] = floored_p[4][4].max(omega_var_floor());
+    let floored_l = cholesky_psd(&floored_p)?;
+    let radius = (N as f64).sqrt();
+    let mut mean_points = [[0.0; N]; 2 * N];
+    let mut covariance_points = [[0.0; N]; 2 * N];
+    let mut point_ix = 0;
+    for axis in 0..N {
+        for sign in [-1.0, 1.0] {
+            let mut mean_point = m.x;
+            let mut covariance_point = m.x;
+            for row in 0..N {
+                mean_point[row] += sign * radius * original_l[row][axis];
+                covariance_point[row] += sign * radius * floored_l[row][axis];
+            }
+            mean_points[point_ix] = ct_map(&mean_point, dt)?;
+            covariance_points[point_ix] = ct_map(&covariance_point, dt)?;
+            point_ix += 1;
+        }
+    }
+
+    let weight = 1.0 / (2 * N) as f64;
+    let mut mean = [0.0; N];
+    for point in mean_points.iter() {
+        for i in 0..N {
+            mean[i] += weight * point[i];
+        }
+    }
+    if mean.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let mut p = ZERO;
+    for point in covariance_points.iter() {
+        let mut delta = [0.0; N];
+        for i in 0..N {
+            delta[i] = point[i] - mean[i];
+        }
+        for i in 0..N {
+            for j in 0..N {
+                p[i][j] += weight * delta[i] * delta[j];
+            }
+        }
+    }
     add_accel_noise(&mut p, dt, H_Q_CT);
     add_to(&mut p, 4, 4, H_Q_OMEGA * dt);
-    HModel {
-        x: xn,
-        p: symmetrise(&p),
+    p = symmetrise(&p);
+    if p.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
     }
+    Some(HModel { x: mean, p })
 }
 
 /// Mixes the two models for the next step and predicts each over `dt`. The returned filter's
-/// `mu` is the predicted model probability.
-pub(crate) fn h_predict(h: &HFilter, dt: f64, u: f64, mode: u8) -> HFilter {
+/// `mu` is the predicted model probability. In IMM mode, `None` reports an invalid CT covariance
+/// or non-finite mapped moment; callers must surface that failure.
+pub(crate) fn h_predict(h: &HFilter, dt: f64, u: f64, mode: u8) -> Option<HFilter> {
     if mode != 0 {
         // Single straight-model filter (the comparison baseline): no mixing, no turn model.
-        return HFilter {
+        return Some(HFilter {
             m: [cv_predict(&h.m[0], dt, cv_only_q(mode)), h.m[1]],
             mu: [1.0, 0.0],
-        };
+        });
     }
     let pi = h_transition(u);
     let mut mixed = [h.m[0], h.m[1]];
@@ -272,10 +358,13 @@ pub(crate) fn h_predict(h: &HFilter, dt: f64, u: f64, mode: u8) -> HFilter {
             p: symmetrise(&p),
         };
     }
-    HFilter {
-        m: [cv_predict(&mixed[0], dt, H_Q_CV), ct_predict(&mixed[1], dt)],
+    Some(HFilter {
+        m: [
+            cv_predict(&mixed[0], dt, H_Q_CV),
+            ct_predict(&mixed[1], dt)?,
+        ],
         mu: c,
-    }
+    })
 }
 
 /// Mean and covariance of the filter's output: the probability-weighted moments of the two
@@ -627,6 +716,276 @@ mod tests {
                 "{dt}"
             );
             assert_eq!(pi[0][1], 1.0 - pi[0][0]);
+        }
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn ct_prediction_integrates_the_turn_rate_spread_in_the_state_mean() {
+        let mut p = ZERO;
+        p[4][4] = 0.04 * 0.04;
+        let state = [0.0, 0.0, 230.0, 0.0, 0.0];
+        let h = HFilter {
+            m: [HModel { x: state, p: ZERO }, HModel { x: state, p }],
+            mu: [0.0, 1.0],
+        };
+        let dt = 4.8;
+        let predicted = h_predict(&h, dt, dwell_decay(dt), 0)
+            .expect("valid semidefinite CT covariance predicts");
+
+        // Eight of ten cubature points have omega=0; the remaining pair has
+        // omega=+/-sqrt(5)*0.04. Average those exact CT maps independently.
+        let theta = 5.0_f64.sqrt() * 0.04 * dt;
+        let sinc = theta.sin() / theta;
+        let expected_x = 230.0 * dt * (0.8 + 0.2 * sinc);
+        let expected_vx = 230.0 * (0.8 + 0.2 * theta.cos());
+        assert!((predicted.m[1].x[0] - expected_x).abs() < 1.0e-12);
+        assert!((predicted.m[1].x[2] - expected_vx).abs() < 1.0e-12);
+        assert!(predicted.m[1].x[1].abs() < 1.0e-12);
+        assert!(predicted.m[1].x[3].abs() < 1.0e-12);
+        assert!(predicted.m[1].x[4].abs() < 1.0e-12);
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn cubature_applies_the_existing_turn_limit_to_each_mapped_point() {
+        let mut p = ZERO;
+        p[4][4] = 0.04 * 0.04;
+        for sign in [-1.0, 1.0] {
+            let m = HModel {
+                x: [0.0, 0.0, 100.0, 0.0, sign * 0.49],
+                p,
+            };
+            let actual = ct_predict(&m, 4.8).expect("valid covariance at the turn limit");
+            // Eight points retain mean omega; one of the spread pair reaches the limit.
+            let expected = sign * (8.0 * 0.49 + 0.5 + (0.49 - 5.0_f64.sqrt() * 0.04)) / 10.0;
+            assert!((actual.x[4] - expected).abs() < 1.0e-15);
+            assert!(actual.x[4].abs() <= OMEGA_MAX);
+            assert!(actual.x.iter().all(|x| x.is_finite()));
+        }
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn cubature_matches_independent_dense_mean_and_covariance_golden() {
+        let lower = [
+            [30.0, 0.0, 0.0, 0.0, 0.0],
+            [3.0, 20.0, 0.0, 0.0, 0.0],
+            [1.0, 0.4, 3.0, 0.0, 0.0],
+            [-0.6, 1.0, 0.2, 2.0, 0.0],
+            [0.0002, -0.0004, 0.001, 0.002, 0.02],
+        ];
+        let mut p = ZERO;
+        for i in 0..N {
+            for j in 0..N {
+                for k in 0..N {
+                    p[i][j] += lower[i][k] * lower[j][k];
+                }
+            }
+        }
+        let state = [12.0, -4.0, 120.0, -50.0, 0.02];
+        let h = HFilter {
+            m: [HModel { x: state, p: ZERO }, HModel { x: state, p }],
+            mu: [0.0, 1.0],
+        };
+        let actual = h_predict(&h, 4.8, dwell_decay(4.8), 0)
+            .expect("dense positive-definite covariance predicts")
+            .m[1];
+        let expected_x: V5 = [
+            597.6637704174037,
+            -215.66527333107612,
+            123.64336971413496,
+            -38.076679239988074,
+            0.02,
+        ];
+        let expected_p: M5 = [
+            [
+                1910.402100494927,
+                1156.497134201323,
+                269.47430111690176,
+                436.1253776982784,
+                0.7864098117549173,
+            ],
+            [
+                1156.497134201323,
+                3899.5779055551016,
+                401.9871211981368,
+                1363.1331766430071,
+                2.242093301893808,
+            ],
+            [
+                269.47430111690176,
+                401.9871211981368,
+                89.4974379197418,
+                160.95228958089635,
+                0.28767944213523294,
+            ],
+            [
+                436.1253776982784,
+                1363.1331766430071,
+                160.95228958089635,
+                552.3214348529035,
+                0.9292618899328312,
+            ],
+            [
+                0.7864098117549173,
+                2.242093301893808,
+                0.28767944213523294,
+                0.9292618899328312,
+                0.0016144,
+            ],
+        ];
+        for i in 0..N {
+            let x_tol = 128.0 * f64::EPSILON * expected_x[i].abs().max(1.0);
+            assert!(
+                (actual.x[i] - expected_x[i]).abs() <= x_tol,
+                "mean[{i}] {} != {}",
+                actual.x[i],
+                expected_x[i]
+            );
+            assert!(actual.x[i].is_finite());
+            for j in 0..N {
+                let tol = 128.0 * f64::EPSILON * expected_p[i][j].abs().max(1.0);
+                assert!(
+                    (actual.p[i][j] - expected_p[i][j]).abs() <= tol,
+                    "p[{i}][{j}] {} != {}",
+                    actual.p[i][j],
+                    expected_p[i][j]
+                );
+                assert!(actual.p[i][j].is_finite());
+                assert_eq!(actual.p[i][j], actual.p[j][i]);
+            }
+        }
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn zero_turn_variance_floor_changes_covariance_without_moving_the_mean() {
+        let model = HModel {
+            x: [0.0, 0.0, 230.0, 0.0, 0.0],
+            p: ZERO,
+        };
+        let actual =
+            ct_predict(&model, 17.0).expect("zero covariance with discovery floor predicts");
+        let expected_x: V5 = [3910.0, 0.0, 230.0, 0.0, 0.0];
+        let expected_p: M5 = [
+            [361707.1803187536, 0.0, 58764.498164412995, 0.0, 0.0],
+            [
+                0.0,
+                1194568.4947803435,
+                0.0,
+                112346.72892929845,
+                43.68854912882645,
+            ],
+            [58764.498164412995, 0.0, 9560.446624909415, 0.0, 0.0],
+            [
+                0.0,
+                112346.72892929845,
+                0.0,
+                10570.285974350756,
+                4.109167501935302,
+            ],
+            [0.0, 43.68854912882645, 0.0, 4.109167501935302, 0.001651],
+        ];
+        for i in 0..N {
+            let x_tol = 128.0 * f64::EPSILON * expected_x[i].abs().max(1.0);
+            assert!(
+                (actual.x[i] - expected_x[i]).abs() <= x_tol,
+                "mean[{i}] {} != {}",
+                actual.x[i],
+                expected_x[i]
+            );
+            for j in 0..N {
+                let tol = 128.0 * f64::EPSILON * expected_p[i][j].abs().max(1.0);
+                assert!(
+                    (actual.p[i][j] - expected_p[i][j]).abs() <= tol,
+                    "p[{i}][{j}] {} != {}",
+                    actual.p[i][j],
+                    expected_p[i][j]
+                );
+                assert_eq!(actual.p[i][j], actual.p[j][i]);
+            }
+        }
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn strict_cholesky_reconstructs_psd_and_refuses_invalid_covariances() {
+        let mut rank_one = ZERO;
+        rank_one[0][0] = 4.0;
+        rank_one[0][1] = 2.0;
+        rank_one[1][0] = 2.0;
+        rank_one[1][1] = 1.0;
+        let l = cholesky_psd(&rank_one).expect("rank-one PSD covariance is valid");
+        for i in 0..N {
+            for j in 0..N {
+                let mut reconstructed = 0.0;
+                for k in 0..N {
+                    reconstructed += l[i][k] * l[j][k];
+                }
+                assert_eq!(reconstructed, rank_one[i][j]);
+            }
+        }
+
+        let mut negative = ZERO;
+        negative[4][4] = -f64::EPSILON;
+        assert!(cholesky_psd(&negative).is_none());
+        let mut bad_zero_pivot = ZERO;
+        bad_zero_pivot[0][1] = 1.0;
+        bad_zero_pivot[1][0] = 1.0;
+        assert!(cholesky_psd(&bad_zero_pivot).is_none());
+        let mut asymmetric = ZERO;
+        asymmetric[0][1] = 1.0;
+        assert!(cholesky_psd(&asymmetric).is_none());
+
+        let invalid_omega = HModel {
+            x: [0.0; N],
+            p: negative,
+        };
+        assert!(ct_predict(&invalid_omega, 4.8).is_none());
+        let mut invalid_cross = ZERO;
+        invalid_cross[0][4] = 1.0;
+        invalid_cross[4][0] = 1.0;
+        let invalid_omega_cross = HModel {
+            x: [0.0; N],
+            p: invalid_cross,
+        };
+        assert!(ct_predict(&invalid_omega_cross, 4.8).is_none());
+        let mut non_finite = ZERO;
+        non_finite[2][2] = f64::INFINITY;
+        assert!(cholesky_psd(&non_finite).is_none());
+    }
+
+    // REQ: OA-TRK-329
+    #[test]
+    fn cubature_prediction_is_deterministic_under_mirror_reflection() {
+        let mut p = ZERO;
+        p[0][0] = 25.0;
+        p[1][1] = 36.0;
+        p[2][2] = 4.0;
+        p[3][3] = 9.0;
+        p[4][4] = 0.04 * 0.04;
+        let x = [10.0, 20.0, 230.0, 15.0, 0.05];
+        let signs = [1.0, -1.0, 1.0, -1.0, -1.0];
+        let mirrored_x = [10.0, -20.0, 230.0, -15.0, -0.05];
+        let h = HFilter {
+            m: [HModel { x, p }, HModel { x, p }],
+            mu: [0.0, 1.0],
+        };
+        let mirrored = HFilter {
+            m: [HModel { x: mirrored_x, p }, HModel { x: mirrored_x, p }],
+            mu: [0.0, 1.0],
+        };
+        let a = ct_predict(&h.m[1], 4.8).expect("valid original covariance");
+        let b = ct_predict(&mirrored.m[1], 4.8).expect("valid mirrored covariance");
+        for i in 0..N {
+            assert!((b.x[i] - signs[i] * a.x[i]).abs() <= 1.0e-12 * a.x[i].abs().max(1.0));
+            for j in 0..N {
+                assert!(
+                    (b.p[i][j] - signs[i] * signs[j] * a.p[i][j]).abs()
+                        <= 1.0e-12 * a.p[i][j].abs().max(1.0)
+                );
+            }
         }
     }
 }

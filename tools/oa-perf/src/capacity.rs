@@ -217,6 +217,7 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("init_plots_refused", s.init_plots_refused),
         ("init_refusal_pass_visits", s.init_refusal_pass_visits),
         ("plot_scan_full", s.plot_scan_full),
+        ("prediction_refused", s.prediction_refused),
         ("wide_full", s.wide_full),
         ("init_wide_full", s.init_wide_full),
     ]
@@ -297,14 +298,16 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
 /// measured window. The one list: a counter added to a stats struct must be put here or in
 /// [`FUSION_NOT_LOSS`] / [`TRACKER_NOT_LOSS`], or the test of that name fails.
 ///
-/// Fusion: plots refused by validation, plots late for their bucket, the pending queue full, hold
-/// runs evicted, bucket plot overflow, bucket work capped, anonymous plots never gated, initiation
+/// Fusion: numerical/representability forecast failures, plots refused by validation, plots late
+/// for their bucket, the pending queue full, hold runs evicted, bucket plot overflow, bucket work
+/// capped, anonymous plots never gated, initiation
 /// cut short, the solver refusing, candidate table full, a confirmed track the tracker could not
 /// hold, assignment log full, plots without a height (candidates not started, pairs skipped), scan
 /// notes dropped, wide lists full (association and initiation), radar-only track records dropped,
 /// keys not remembered, scratch buffers full, registration history full.
-/// Tracker: no free slot, each validation refusal, late measurements (window and ring), clock-step
-/// holds discarded, tracks dropped by a step back, sensor table entries evicted.
+/// Tracker: no free slot, each validation refusal, numerical prediction/update refusals, late
+/// measurements (window and ring), clock-step holds discarded, tracks dropped by a step back,
+/// sensor table entries evicted.
 /// Output: rows lost to a full table.
 pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
@@ -325,6 +328,7 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
         ("fusion.track_refused".into(), f.track_refused),
         ("fusion.assign_log_overflow".into(), f.assign_log_overflow),
         ("fusion.plot_scan_full".into(), f.plot_scan_full),
+        ("fusion.prediction_refused".into(), f.prediction_refused),
         ("fusion.wide_full".into(), f.wide_full),
         ("fusion.init_wide_full".into(), f.init_wide_full),
         ("fusion.track_rec_overflow".into(), f.track_rec_overflow),
@@ -345,6 +349,8 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
             "tracker.rows_unrepresentable".into(),
             t.rows_unrepresentable,
         ),
+        // A filter prediction that cannot produce a finite/usable state withholds this update.
+        ("tracker.numerical_refused".into(), t.numerical_refused),
     ];
     for (name, c) in REFUSE_NAMES.iter().zip(t.refused.iter()) {
         v.push((format!("tracker.refused_{name}"), *c));
@@ -366,6 +372,7 @@ pub fn tracker_counters(s: &TrackerStats) -> Vec<(String, u64)> {
         ("resyncs".into(), s.resyncs),
         ("alt_rejected".into(), s.alt_rejected),
         ("capacity_refused".into(), s.capacity_refused),
+        ("numerical_refused".into(), s.numerical_refused),
         ("started".into(), s.started),
         ("confirmed".into(), s.confirmed),
         ("ticks".into(), s.ticks),
@@ -909,6 +916,7 @@ mod tests {
             "fusion.track_refused" => f.track_refused = 1,
             "fusion.assign_log_overflow" => f.assign_log_overflow = 1,
             "fusion.plot_scan_full" => f.plot_scan_full = 1,
+            "fusion.prediction_refused" => f.prediction_refused = 1,
             "fusion.wide_full" => f.wide_full = 1,
             "fusion.init_wide_full" => f.init_wide_full = 1,
             "fusion.track_rec_overflow" => f.track_rec_overflow = 1,
@@ -922,6 +930,7 @@ mod tests {
             "tracker.time_future_dropped" => t.time_future_dropped = 1,
             "tracker.time_sensor_evicted" => t.time_sensor_evicted = 1,
             "tracker.rows_unrepresentable" => t.rows_unrepresentable = 1,
+            "tracker.numerical_refused" => t.numerical_refused = 1,
             "out.overflow" => r.out_overflow = 1,
             n if n.starts_with("tracker.refused_") => t.refused[0] = 1,
             n => panic!("no setter for {n}"),

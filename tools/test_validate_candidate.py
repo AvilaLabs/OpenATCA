@@ -26,7 +26,8 @@ def evidence():
     return kv, rows
 
 
-def fusion_csv(turn_speed=7.9, truncate=False, include_counts=True):
+def fusion_csv(turn_speed=7.9, truncate=False, include_counts=True,
+               include_losses=True, loss_values=(0, 0, 0)):
     header = "section,label,n,posall,posstraight,posturn,speedstraight,speedturn,headingstraight,headingturn"
     def row(section, label, speed):
         metric = f'"{section}","{label}",100,0,0,0,0,{speed},0,0'
@@ -39,6 +40,14 @@ def fusion_csv(turn_speed=7.9, truncate=False, include_counts=True):
     lines.extend(row("R|all", "b  ours, no reg", turn_speed) for _ in range(2))
     lines.extend(row("M|all", "b  ours, no reg", turn_speed) for _ in range(3))
     lines.extend(row("M|all", "c  ours + reg", turn_speed) for _ in range(3))
+    if include_losses:
+        def loss_row(section, label):
+            n, p, u = loss_values
+            return (f'"{section}|loss","{label}","tracker.numerical_refused",{n},'
+                    f'"fusion.prediction_refused",{p},"tracker.rows_unrepresentable",{u}')
+        lines.extend(loss_row("R", "b  ours, no reg") for _ in range(2))
+        lines.extend(loss_row("M", "b  ours, no reg") for _ in range(3))
+        lines.extend(loss_row("M", "c  ours + reg") for _ in range(3))
     return "\n".join(lines) + "\n"
 
 
@@ -164,6 +173,34 @@ class PerfEvidenceTests(unittest.TestCase):
         kv.pop(gate.LOSS_KEYS[0])
         self.assertTrue(any("missing loss counters" in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
 
+    def test_numerical_prediction_refusal_is_required_and_fails_positive_run(self):
+        key = "loss.tracker.numerical_refused"
+        self.assertIn(key, gate.LOSS_KEYS)
+        kv, rows = evidence()
+        kv.pop(key)
+        self.assertTrue(any(key in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
+
+        kv, rows = evidence()
+        kv[key] = "1"
+        errors = gate.evaluate_perf(kv, rows, 2, 1200)
+        self.assertEqual(kv["keeps_up"], "1")
+        self.assertEqual(kv["lost_work"], "0")
+        self.assertTrue(any("has loss" in e and key in e for e in errors), errors)
+
+    def test_fusion_prediction_refusal_is_required_and_fails_positive_run(self):
+        key = "loss.fusion.prediction_refused"
+        self.assertIn(key, gate.LOSS_KEYS)
+        kv, rows = evidence()
+        kv.pop(key)
+        self.assertTrue(any(key in e for e in gate.evaluate_perf(kv, rows, 2, 1200)))
+
+        kv, rows = evidence()
+        kv[key] = "1"
+        errors = gate.evaluate_perf(kv, rows, 2, 1200)
+        self.assertEqual(kv["keeps_up"], "1")
+        self.assertEqual(kv["lost_work"], "0")
+        self.assertTrue(any("has loss" in e and key in e for e in errors), errors)
+
     def test_duplicate_seconds_and_zero_activity_fail(self):
         kv, rows = evidence()
         rows[1]["second"] = rows[0]["second"]
@@ -217,6 +254,18 @@ class PerfEvidenceTests(unittest.TestCase):
         errors, _ = gate.evaluate_fusion_csv(fusion_csv(truncate=True))
         self.assertTrue(any("expected 2, found 1" in e for e in errors))
         self.assertTrue(any("expected 3, found 0" in e for e in errors))
+
+    def test_fusion_base_requires_zero_loss_rows_for_every_eligible_run(self):
+        missing, _ = gate.evaluate_fusion_csv(fusion_csv(include_losses=False))
+        self.assertTrue(any("loss rows: expected" in e for e in missing), missing)
+        nonzero, _ = gate.evaluate_fusion_csv(fusion_csv(loss_values=(1, 0, 0)))
+        self.assertTrue(any("nonzero prediction/output loss counters" in e for e in nonzero), nonzero)
+
+    def test_fusion_base_rejects_malformed_loss_rows(self):
+        malformed = fusion_csv().replace(
+            '"tracker.numerical_refused",0', '"tracker.numerical_refused",not-an-int', 1)
+        errors, _ = gate.evaluate_fusion_csv(malformed)
+        self.assertTrue(any("malformed loss counter values" in e for e in errors), errors)
 
     def test_source_integrity_detects_head_status_or_hash_change(self):
         args = ("a", "a", "", "", {"x": "1"}, {"x": "1"})
@@ -304,6 +353,36 @@ class PerfEvidenceTests(unittest.TestCase):
 class AllocatorReportTests(unittest.TestCase):
     def test_complete_clean_report_accepts_expected_negative_injection_exit(self):
         self.assertEqual(gate.evaluate_allocator_report(allocator_report(), "candidate-rev"), [])
+
+
+class TargetCacheIsolationTests(unittest.TestCase):
+    def test_cache_namespaces_are_checkout_specific_and_symlink_stable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout_a = root / "checkout-a"
+            checkout_b = root / "checkout-b"
+            cache = root / "cache"
+            checkout_a.mkdir()
+            checkout_b.mkdir()
+            cache.mkdir()
+            alias = root / "checkout-a-alias"
+            alias.symlink_to(checkout_a, target_is_directory=True)
+
+            target_a = gate.checkout_target_dir(checkout_a, cache)
+            target_b = gate.checkout_target_dir(checkout_b, cache)
+            target_alias = gate.checkout_target_dir(alias, cache)
+
+            self.assertEqual(target_a, target_alias)
+            self.assertNotEqual(target_a, target_b)
+            self.assertEqual(len(target_a.name), 64)
+
+    def test_cache_root_inside_checkout_is_rejected_even_if_child_is_external(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary) / "checkout"
+            checkout.mkdir()
+            cache_root = checkout / "cache"
+            with self.assertRaisesRegex(ValueError, "cache root must be outside"):
+                gate.checkout_target_dir(checkout, cache_root)
 
     def test_missing_and_duplicate_commands_are_rejected(self):
         report = allocator_report()

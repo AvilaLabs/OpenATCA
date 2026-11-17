@@ -29,6 +29,7 @@ before.
 | Fuzzing | 21 libFuzzer targets over the byte-level decoders; see [FUZZING.md](FUZZING.md) | Most targets have had hours, not weeks |
 | Mutation testing | Saved numerical and truth cases have strengthened independent-answer tests | Unresolved cases are not automatically equivalent or confirmed defects |
 | Allocation instrumentation | Named M3 tracker/fusion routes run under an isolated counting allocator, with positive and injected-allocation controls | Complete C5 coverage remains open; see [candidate validation](VALIDATION.md) |
+| Turn-model moments | Closed-form and independent high-precision references for nonlinear prediction and separate discovery-floor regularization; numerical refusals are counted and history replay is atomic | Gaussian, cubature and regularization approximations remain; synthetic accuracy does not establish recorded-traffic truth |
 | CI | GitHub Actions: format, clippy with Rust 1.89.0 (the declared minimum), release-mode tests, traceability, scoped M3 allocation check, no external crates | One platform |
 
 Everything above runs on x86-64 Linux. Bit-identical replay (RULESET B6) is tested on that platform.

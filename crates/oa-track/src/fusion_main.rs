@@ -89,6 +89,10 @@ fn add_table(p: &mut Pools, t: &Table, ticks: bool) {
 #[derive(Debug, Clone, Default)]
 struct Acc {
     pools: Pools,
+    /// Full-world loss counters, accumulated once per cell (not once per score subset).
+    numerical_refused: u64,
+    prediction_refused: u64,
+    rows_unrepresentable: u64,
     swaps: u64,
     wrong: u64,
     false_tracks: u64,
@@ -295,6 +299,13 @@ fn absorb(acc: &mut Acc, c: &Cell, sel: u8) {
     };
     if let Some(t) = t {
         add_table(&mut acc.pools, t, false);
+    }
+    // `section_base` absorbs each run once for every score subset. Count telemetry only from
+    // the all-aircraft pass so a mixed-sensor run's counters are not multiplied by its subsets.
+    if sel == 0 {
+        acc.numerical_refused += c.run.tstats.numerical_refused;
+        acc.prediction_refused += c.run.fstats.prediction_refused;
+        acc.rows_unrepresentable += c.run.tstats.rows_unrepresentable;
     }
     acc.swaps += c.id.swaps;
     acc.wrong += c.id.wrong_plots;
@@ -510,6 +521,11 @@ fn section_base(
         if let Some(a) = accs.get(vi).and_then(|r| r.first()) {
             let _ = writeln!(
                 rep.txt,
+                "    {} loss over {} worlds: tracker numerical refusals {}, fusion forecast refusals {}, tracker rows unrepresentable {}",
+                v.name, opts.worlds, a.numerical_refused, a.prediction_refused, a.rows_unrepresentable
+            );
+            let _ = writeln!(
+                rep.txt,
                 "    {:<18} {:>5} {:>6} {:>6} {:>6} {:>5} {:>7} | {:>7.1} / {:>7.1}        | {:.1} / {:.1} / {:.1} / {:.1}",
                 v.name,
                 a.swaps,
@@ -524,6 +540,15 @@ fn section_base(
                 mean(&a.us_p50),
                 mean(&a.us_p99),
                 a.us_max,
+            );
+            let _ = writeln!(
+                rep.csv,
+                "{},{},tracker.numerical_refused,{},fusion.prediction_refused,{},tracker.rows_unrepresentable,{}",
+                csv_field(&format!("{tag}|loss")),
+                csv_field(v.name),
+                a.numerical_refused,
+                a.prediction_refused,
+                a.rows_unrepresentable,
             );
             let _ = writeln!(
                 rep.csv,

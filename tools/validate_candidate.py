@@ -25,12 +25,13 @@ LOSS_KEYS = tuple("loss." + k for k in (
     "fusion.cand_no_height", "fusion.no_height_pairs", "fusion.track_refused",
     "fusion.assign_log_overflow", "fusion.plot_scan_full", "fusion.wide_full",
     "fusion.init_wide_full", "fusion.track_rec_overflow", "fusion.keyinfo_overflow",
+    "fusion.prediction_refused",
     "fusion.scratch_full", "fusion.reg_history_full", "tracker.capacity_refused",
     "tracker.late_window", "tracker.late_ring", "tracker.time_held_discarded",
     "tracker.time_future_dropped", "tracker.time_sensor_evicted", "tracker.rows_unrepresentable",
     "tracker.refused_position_out_of_range", "tracker.refused_bad_position_covariance",
     "tracker.refused_bad_velocity", "tracker.refused_bad_altitude", "tracker.refused_no_address",
-    "tracker.refused_time_out_of_range", "out.overflow"))
+    "tracker.refused_time_out_of_range", "tracker.numerical_refused", "out.overflow"))
 PATH_TYPES = {
     "OPENATCA_DATA": "dir", "OPENATCA_RAW": "dir", "OPENATCA_SNAPSHOT": "file",
     "OPENATCA_GEODTEST": "file", "OPENATCA_CIFP": "file", "OPENATCA_NASR": "dir",
@@ -314,7 +315,12 @@ def evaluate_fusion_csv(text):
     expected = {("R|all", "b"): (2, "b  ours, no reg"),
                 ("M|all", "b"): (3, "b  ours, no reg"),
                 ("M|all", "c"): (3, "c  ours + reg")}
+    expected_loss = {("R|loss", "b"): (2, "b  ours, no reg"),
+                     ("M|loss", "b"): (3, "b  ours, no reg"),
+                     ("M|loss", "c"): (3, "c  ours + reg")}
     counts = {}
+    loss_counts = {}
+    loss_rows = {}
     sample_fields = ("position_all", "position_straight", "position_turn",
                      "speed_all", "speed_straight", "speed_turn",
                      "heading_all", "heading_straight", "heading_turn")
@@ -326,6 +332,33 @@ def evaluate_fusion_csv(text):
             return ["fusion CSV is missing metric columns"], measured
         for index, row in enumerate(rows[1:], 1):
             if not row:
+                continue
+            if row[0] in ("R|loss", "M|loss"):
+                if len(row) != 8:
+                    errors.append(f"{row[0]} loss row is malformed: expected 8 columns, found {len(row)}")
+                    continue
+                if (row[2], row[4], row[6]) != (
+                        "tracker.numerical_refused", "fusion.prediction_refused",
+                        "tracker.rows_unrepresentable"):
+                    errors.append(f"{row[0]} {row[1]} has unexpected loss counter names")
+                    continue
+                if not all(_nonnegative_integer(row[i]) for i in (3, 5, 7)):
+                    errors.append(f"{row[0]} {row[1]} has malformed loss counter values")
+                    continue
+                group = (row[0], row[1][0] if len(row) > 1 and row[1] else "")
+                loss_counts[group] = loss_counts.get(group, 0) + 1
+                loss_rows.setdefault(group, []).append({
+                    "tracker.numerical_refused": int(row[3]),
+                    "fusion.prediction_refused": int(row[5]),
+                    "tracker.rows_unrepresentable": int(row[7]),
+                })
+                if group in expected_loss and row[1] != expected_loss[group][1]:
+                    errors.append(f"unexpected eligible loss variant label {row[1]!r} in {row[0]}")
+                if group[1] in ("b", "c") and group not in expected_loss:
+                    errors.append(f"unexpected eligible loss group {group}")
+                values = [int(row[i]) for i in (3, 5, 7)]
+                if group in expected_loss and any(values):
+                    errors.append(f"{row[0]} {row[1]} has nonzero prediction/output loss counters: {values}")
                 continue
             if row[0] not in ("R|all", "M|all"):
                 continue
@@ -378,7 +411,9 @@ def evaluate_fusion_csv(text):
                  "heading_turn"), limits) if not ok]
             measured.append({"section": row[0], "variant": row[1], "n": n,
                              "metrics": vals, "sample_counts": sample_counts,
-                             "missed_targets": failed})
+                             "missed_targets": failed,
+                             "loss_group": (row[0].replace("|all", "|loss"), prefix),
+                             "loss_ordinal": counts[group] - 1})
             if failed:
                 errors.append(f"{row[0]} {row[1]} misses {', '.join(failed)}: {vals}")
         for index, row in enumerate(rows[1:], 1):
@@ -391,6 +426,18 @@ def evaluate_fusion_csv(text):
         got = counts.get(group, 0)
         if got != want:
             errors.append(f"{group[0]} {group[1]} rows: expected {want}, found {got}")
+    for group, (want, _label) in expected_loss.items():
+        got = loss_counts.get(group, 0)
+        if got != want:
+            errors.append(f"{group[0]} {group[1]} loss rows: expected {want}, found {got}")
+    for item in measured:
+        group = item["loss_group"]
+        ordinal = item["loss_ordinal"]
+        available = loss_rows.get(group, [])
+        if ordinal < len(available):
+            item["loss_counts"] = available[ordinal]
+        else:
+            item["loss_counts"] = None
     if not measured:
         errors.append("no R|all/M|all base rows with scored variants")
     return errors, measured
@@ -489,10 +536,21 @@ def evaluate_clip_artifacts(directory, stdout):
     return errors
 
 
+def checkout_target_dir(repo, cache_root):
+    """Return a Cargo cache namespace unique to the resolved checkout path."""
+    repo = Path(repo).resolve()
+    cache_root = Path(cache_root).resolve()
+    if cache_root == repo or repo in cache_root.parents:
+        raise ValueError("--target-dir cache root must be outside the repository")
+    checkout_id = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()
+    return cache_root / "checkouts" / checkout_id
+
+
 def run_gate(args):
     repo = args.repo.resolve()
     out = args.out.resolve()
-    target = args.target_dir.resolve()
+    target_root = args.target_dir.resolve()
+    target = checkout_target_dir(repo, target_root)
     if out.exists():
         raise ValueError(f"output directory already exists: {out}")
     if not (repo / "Cargo.toml").is_file():
@@ -533,8 +591,6 @@ def run_gate(args):
             raise ValueError(f"clip does not resolve to a file: {clip_path}")
     if not args.revision or rev != args.revision:
         raise ValueError("--revision must be the full resolved HEAD hash")
-    if target == repo or repo in target.parents:
-        raise ValueError("--target-dir must be outside the repository")
     lock = repo / "Cargo.lock"
     lock_text = lock.read_text()
     if 'source = "registry+' in lock_text or 'source = "git+' in lock_text:
@@ -814,6 +870,8 @@ def run_gate(args):
                   "external_inputs_end": end_inputs,
                   "clip_sha256": clip_hash_start,
                   "reference_env_sha256": reference_env_hash_start,
+                  "cargo_target_cache_root": str(target_root),
+                  "cargo_target_dir": str(target),
                   "evidence_hashes": {p.relative_to(out).as_posix(): sha(p)
                                       for p in out.rglob("*") if p.is_file() and p.name != "run.json"},
                   "commands": records, "failures": failures, "open_claims": open_claims,

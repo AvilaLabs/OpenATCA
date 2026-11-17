@@ -443,8 +443,8 @@ fn tracker_section(
     );
     let _ = writeln!(
         o,
-        "  measurements offered {}, applied {}, duplicates {}, late (window) {}, late (ring) {}, re-filtered {}, jump-rejected {}, resyncs {}, altitude-rejected {}, geometric altitude skipped {}, capacity-refused {}",
-        s.offered, s.applied, s.duplicates, s.late_window, s.late_ring, s.refiltered, s.jump_rejected, s.resyncs, s.alt_rejected, s.alt_geometric_skipped, s.capacity_refused
+        "  measurements offered {}, applied {}, duplicates {}, late (window) {}, late (ring) {}, re-filtered {}, jump-rejected {}, numerical-refused {}, resyncs {}, altitude-rejected {}, geometric altitude skipped {}, capacity-refused {}",
+        s.offered, s.applied, s.duplicates, s.late_window, s.late_ring, s.refiltered, s.jump_rejected, s.numerical_refused, s.resyncs, s.alt_rejected, s.alt_geometric_skipped, s.capacity_refused
     );
     for (n, c) in REFUSE_NAMES.iter().zip(s.refused.iter()) {
         let _ = writeln!(o, "    refused {n}: {c}");
@@ -482,8 +482,8 @@ fn tracker_section(
     );
     let _ = writeln!(
         o,
-        "  output: {} rows ({} one-second ticks offered to scorer), digest {}, rows lost to table capacity {}",
-        run.rows, scored.tick_rows, run.digest, run.overflow
+        "  output: {} rows ({} one-second ticks offered to scorer), digest {}, rows lost to table capacity {}, unrepresentable rows {}, skipped ticks {}",
+        run.rows, scored.tick_rows, run.digest, run.overflow, s.rows_unrepresentable, s.ticks_skipped
     );
     let _ = writeln!(
         o,

@@ -417,6 +417,17 @@ pub fn log_new(capacity: usize) -> TrackLog {
     }
 }
 
+/// Why a read-only track forecast is unavailable. No track is distinct from a failed forecast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredictError {
+    /// No live track has the requested key.
+    NoTrack,
+    /// Horizontal prediction could not produce valid numerical moments.
+    Numerical,
+    /// The requested time or projected output cannot be represented.
+    Unrepresentable,
+}
+
 /// The counters of a tracker. Plain record (A1); A7.2: cold struct, size guard waived.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TrackerStats {
@@ -438,6 +449,9 @@ pub struct TrackerStats {
     pub replayed: u64,
     /// Position innovation too large; not applied.
     pub jump_rejected: u64,
+    /// Measurement or history reconstruction refused because horizontal numerical prediction
+    /// failed. The prior per-track state is retained; this is counted loss.
+    pub numerical_refused: u64,
     /// Filters re-initialised after repeated rejections.
     pub resyncs: u64,
     /// Altitude innovation too large; altitude not applied.
@@ -465,8 +479,8 @@ pub struct TrackerStats {
     /// emitter, which a full table must not keep growing.
     pub rows_computed: u64,
     /// Output rows not emitted because the track's predicted position cannot be represented (it
-    /// lies past the projection's domain, or not a number): refused and counted, never a
-    /// coordinate of 0.
+    /// lies past the projection's domain, is not a number, or numerical prediction failed):
+    /// refused and counted, never a coordinate of 0.
     pub rows_unrepresentable: u64,
     /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
     /// counted and not applied.
