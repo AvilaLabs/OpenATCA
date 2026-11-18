@@ -32,6 +32,7 @@ jobs:
       - name: Run registered proof suite sequentially
         run: >-
           python3 tools/rust_proof_suite.py
+          --fail-fast
           --repo "$GITHUB_WORKSPACE"
           --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json"
           --out "$RUNNER_TEMP/kani-proof-evidence"

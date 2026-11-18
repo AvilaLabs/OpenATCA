@@ -20,6 +20,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-GEN-005** Every struct held in quantity as an array element asserts its exact size at
   compile time, and every index type is four bytes with one shared `NONE` sentinel (RULESET A4,
   A7).
+- **OA-GEN-006** The named-proof runner records its pinned tool versions and rejects mismatched
+  versions, source bindings or scoped loop diagnostics. Scoped loop presets accept only a
+  registered complete identity family at the declared bounds. In fail-fast mode, the suite stops
+  launching proofs after a non-passing result, reports its diagnostics, records remaining selected
+  proofs as `NOT_RUN`, and cannot report an overall pass.
 
 ### CSV (oa-csv)
 

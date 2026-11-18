@@ -506,6 +506,124 @@ class KaniBindingTests(unittest.TestCase):
                 self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(bad_lines), "")["passed"])
         self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(lines[:1] + lines[2:]), "")["passed"])
 
+    # REQ: OA-GEN-006
+    def test_pinned_cargo_late_preset_uses_ci_mangled_loop_ids(self):
+        preset_name = "late-replay-two-events-pinned-cargo"
+        preset = LOOP_UNWIND_PRESETS[preset_name]
+        self.assertEqual(preset["cargo_toolchain"], "1.89.0")
+        local_ids = ["_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late." + str(i) for i in range(4)]
+        ci_ids = ["_RNvNtCseRq8xMCbGsa_8oa_track7tracker11update_late." + str(i) for i in range(4)]
+        self.assertEqual(preset["log_families"], {"local": local_ids, "ci": ci_ids})
+        selectors = _loop_unwind_argument(preset).split(",")
+        self.assertEqual(len(selectors), 8)
+        self.assertEqual(
+            {selector.rsplit(":", 1)[0] for selector in selectors},
+            set(local_ids) | set(ci_ids),
+        )
+
+        def family_lines(family):
+            result = []
+            ids = preset["log_families"][family]
+            for loop, loop_id in zip(preset["loops"], ids):
+                if loop.get("log_mode") == "completed_before_bound":
+                    prefix, iterations = "Unwinding", loop["iterations"]
+                else:
+                    prefix, iterations = "Unwinding", list(range(1, loop["bound"]))
+                result.extend(
+                    f"{prefix} loop {loop_id} iteration {iteration} file "
+                    f"crates/oa-track/src/tracker.rs line {loop['line']} column 5 "
+                    "function tracker::update_late thread 0"
+                    for iteration in iterations
+                )
+                if loop.get("log_mode") != "completed_before_bound":
+                    result.append(
+                        f"Not unwinding loop {loop_id} iteration {loop['bound']} file "
+                        f"crates/oa-track/src/tracker.rs line {loop['line']} column 5 "
+                        "function tracker::update_late thread 0"
+                    )
+            return result
+
+        local_lines, ci_lines = family_lines("local"), family_lines("ci")
+        for family, lines in (("local", local_lines), ("ci", ci_lines)):
+            with self.subTest(family=family):
+                check = _check_loop_unwind_log(preset_name, "\n".join(lines), "")
+                self.assertTrue(check["passed"])
+                self.assertEqual(check["matched_family"], family)
+        mixed = [local_lines[0], *ci_lines[1:]]
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(mixed), "")["passed"])
+        unknown = list(ci_lines)
+        unknown[2] = unknown[2].replace(ci_ids[1], "_RNvNtCunknown_8oa_track7tracker11update_late.1")
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(unknown), "")["passed"])
+        wrong_bound = list(ci_lines)
+        wrong_bound[3] = wrong_bound[3].replace("iteration 2", "iteration 3")
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(wrong_bound), "")["passed"])
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(ci_lines[:-1]), "")["passed"])
+        one_name = "late-replay-two-events-pinned-cargo-one-loop"
+        one = LOOP_UNWIND_PRESETS[one_name]
+        self.assertEqual(
+            _loop_unwind_argument(one),
+            f"{local_ids[3]}:3,{ci_ids[3]}:3",
+        )
+        for family, loop_id in (("local", local_ids[3]), ("ci", ci_ids[3])):
+            lines = []
+            for loop_index, source_line in ((0, 937), (1, 956), (2, 988)):
+                unrequested_id = local_ids[loop_index]
+                iterations = (1, 2) if loop_index == 0 else range(1, 16)
+                lines.extend(
+                    f"Unwinding loop {unrequested_id} iteration {iteration} file "
+                    f"crates/oa-track/src/tracker.rs line {source_line} column 5 "
+                    "function tracker::update_late thread 0"
+                    for iteration in iterations
+                )
+                if loop_index in (1, 2):
+                    lines.append(
+                        f"Not unwinding loop {unrequested_id} iteration 16 file "
+                        f"crates/oa-track/src/tracker.rs line {source_line} column 5 "
+                        "function tracker::update_late thread 0"
+                    )
+            lines.extend([
+                f"Unwinding loop {loop_id} iteration {iteration} file "
+                "crates/oa-track/src/tracker.rs line 1018 column 5 "
+                "function tracker::update_late thread 0"
+                for iteration in (1, 2)
+            ])
+            lines.append(
+                f"Not unwinding loop {loop_id} iteration 3 file "
+                "crates/oa-track/src/tracker.rs line 1018 column 5 "
+                "function tracker::update_late thread 0"
+            )
+            check = _check_loop_unwind_log(one_name, "\n".join(lines), "")
+            self.assertTrue(check["passed"])
+            self.assertEqual(check["matched_family"], family)
+            unknown_requested = list(lines)
+            unknown_requested[-1] = unknown_requested[-1].replace(
+                loop_id, "_RNvNtCunknown_8oa_track7tracker11update_late.3"
+            )
+            self.assertFalse(_check_loop_unwind_log(one_name, "\n".join(unknown_requested), "")["passed"])
+        harness = sorted(preset["harnesses"])[0]
+        report = fixture_report()
+        report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
+        record = fixture_binding(report_text)
+        record["harness"] = harness
+        record["command"][record["command"].index("--harness") + 1] = harness
+        record["command"].insert(1, "+1.89.0")
+        record["command"] += ["--cbmc-args", "--unwindset", _loop_unwind_argument(preset), "--unwinding-assertions"]
+        record["command_sha256"] = _canonical_sha(record["command"])
+        record["cargo_version"] = "cargo 1.89.0 (pinned test cargo)"
+        record["loop_unwind_preset"] = preset_name
+        record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
+        record["loop_unwind_log_check"] = _check_loop_unwind_log(preset_name, "\n".join(ci_lines), "")
+        self.assertEqual(evaluate_kani_binding(report_text, record), [])
+        stale = json.loads(json.dumps(record))
+        stale["command"][1] = "+1.98.0"
+        stale["command_sha256"] = _canonical_sha(stale["command"])
+        self.assertTrue(any("pinned" in error for error in evaluate_kani_binding(report_text, stale)))
+        for harness in sorted(preset["harnesses"]):
+            with self.subTest(harness=harness):
+                _validate_loop_unwind_source(
+                    Path(__file__).resolve().parents[1], preset_name, "oa-track", harness
+                )
+
     def test_all_late_loop_preset_source_and_fixture_guards_cover_every_harness(self):
         preset_name = "late-replay-two-events-all-loops"
         for harness in sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"]):
@@ -649,7 +767,7 @@ class RunnerIsolationTests(unittest.TestCase):
 
 
 class RunnerCliBindingTests(unittest.TestCase):
-    def _fake_toolchain(self, root, kani_output):
+    def _fake_toolchain(self, root, kani_output, cargo_output="cargo 1.89.0 (fake pinned cargo)"):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         repo = root / "repo"
@@ -687,13 +805,14 @@ class RunnerCliBindingTests(unittest.TestCase):
             "cargo",
             "import json,os,pathlib,sys\n"
             "args=sys.argv[1:]\n"
+            f"if '--version' in args: print({cargo_output!r}); raise SystemExit(0)\n"
             "destination=pathlib.Path(args[args.index('--export-json')+1])\n"
             "destination.write_text(pathlib.Path(os.environ['FAKE_KANI_RESULT']).read_text())\n",
         )
         return bin_dir, repo, report_path
 
-    def _invoke_main(self, root, kani_output):
-        bin_dir, repo, report_path = self._fake_toolchain(root, kani_output)
+    def _invoke_main(self, root, kani_output, cargo_output="cargo 1.89.0 (fake pinned cargo)"):
+        bin_dir, repo, report_path = self._fake_toolchain(root, kani_output, cargo_output)
         out = root / "run-evidence"
         cache = root / "cache"
         old_path = os.environ.get("PATH", "")
@@ -727,13 +846,29 @@ class RunnerCliBindingTests(unittest.TestCase):
             run_record = json.loads((out / "run.json").read_text())
             self.assertEqual(run_record["status"], "PASS")
             self.assertEqual(run_record["kani_version"], "0.68.0")
+            self.assertEqual(run_record["cargo_version"], "cargo 1.89.0 (fake pinned cargo)")
             self.assertEqual(run_record["kani_version_output"], version.strip())
             check = run_record["checks"][0]
             self.assertEqual(check["evaluation_errors"], [])
             self.assertTrue(check["source_unchanged"])
             self.assertEqual(check["package"], "oa-track")
             self.assertEqual(check["harness"], HARNESS)
+            self.assertEqual(check["cargo_version"], run_record["cargo_version"])
+            self.assertEqual(check["command"][:2], ["cargo", "+1.89.0"])
             self.assertIn("src/harness.rs", check["harness_source_copies"])
+
+    # REQ: OA-GEN-006
+    def test_wrong_cargo_toolchain_is_rejected_before_proof_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rc, out, stderr = self._invoke_main(
+                root,
+                "Kani Rust Verifier 0.68.0 (standalone)\nCommit: pinned-test-build\n",
+                "cargo 1.98.0 (fake host cargo)",
+            )
+            self.assertEqual(rc, 2)
+            self.assertFalse(out.exists())
+            self.assertIn("expected Cargo 1.89.0", stderr)
 
     def test_wrong_kani_cli_version_is_rejected_before_proof_command(self):
         with tempfile.TemporaryDirectory() as temp:

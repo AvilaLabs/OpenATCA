@@ -631,7 +631,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -655,7 +655,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -679,7 +679,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -703,7 +703,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -727,7 +727,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -751,7 +751,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -775,7 +775,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -799,7 +799,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -823,7 +823,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -847,7 +847,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -871,7 +871,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -895,7 +895,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -925,7 +925,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -955,7 +955,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -979,7 +979,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     },
     {
@@ -1003,7 +1003,7 @@
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
       "loop_unwind_overrides": [
-        "late-replay-two-events-all-loops"
+        "late-replay-two-events-pinned-cargo"
       ]
     }
   ]

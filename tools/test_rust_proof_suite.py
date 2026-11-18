@@ -82,7 +82,7 @@ class SuiteConfigurationTests(unittest.TestCase):
                 self.assertEqual(proof["package"], "oa-track")
                 self.assertTrue(proof["stubbing"])
                 self.assertEqual(proof["stub_summaries"], common_stubs)
-                self.assertEqual(proof["loop_unwind_overrides"], ["late-replay-two-events-all-loops"])
+                self.assertEqual(proof["loop_unwind_overrides"], ["late-replay-two-events-pinned-cargo"])
                 if proof_id.endswith("reachability"):
                     self.assertEqual(proof["harness"], f"tracker::proofs::rollback_paths::late_replay_{mode}_reachability")
                     self.assertEqual(proof["cfgs"], ["kani_late_replay_covers"])
@@ -167,15 +167,21 @@ package = value("--package")
 harness = value("--harness")
 covers = [item.split("=", 1)[1] for flag, item in zip(args, args[1:]) if flag == "--require-cover"]
 loop_presets = [item for flag, item in zip(args, args[1:]) if flag == "--loop-unwind-preset"]
+mode = os.environ.get("FAKE_RUN_RECORD_MODE", "pass")
+invocation_log = os.environ.get("FAKE_INVOKED")
+if invocation_log:
+    with open(invocation_log, "a", encoding="utf-8") as stream:
+        stream.write(harness + "\\n")
 record = {
-    "status": "PASS",
+    "status": "FAIL" if mode == "fail" else "PASS",
     "package": package,
     "expected_harnesses": [harness],
     "required_covers": {harness: covers},
     "loop_unwind_presets": {harness: loop_presets},
-    "checks": [{"harness": harness, "status": "PASS", "source_unchanged": True}],
+    "checks": [{"harness": harness, "status": "FAIL" if mode == "fail" else "PASS",
+                "evaluation_errors": ["loop binding did not match source evidence"] if mode == "fail" else [],
+                "source_unchanged": True}],
 }
-mode = os.environ.get("FAKE_RUN_RECORD_MODE", "pass")
 if mode == "wrong":
     record["expected_harnesses"] = ["other::proof"]
 if mode != "missing":
@@ -204,11 +210,11 @@ print("fake runner stdout")
         registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
         return repo, registry_path, root / "evidence", root / "target", mode
 
-    def invoke(self, root, mode="pass", proof_count=2):
+    def invoke(self, root, mode="pass", proof_count=2, fail_fast=False):
         repo, registry, out, target, mode = self.fake_workspace(root, mode, proof_count)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"FAKE_RUN_RECORD_MODE": mode}), redirect_stdout(stdout), redirect_stderr(stderr):
-            result = run_suite(repo, out, target, registry)
+            result = run_suite(repo, out, target, registry, fail_fast=fail_fast)
         return result, out, registry, stdout.getvalue(), stderr.getvalue()
 
     def test_two_fake_harness_runs_pass_and_pipeline_sources_are_archived(self):
@@ -247,6 +253,63 @@ print("fake runner stdout")
                 self.assertEqual(result, 1)
                 self.assertEqual(suite["status"], "FAIL")
                 self.assertEqual(suite["checks"][0]["status"], "FAIL")
+
+    # REQ: OA-GEN-006
+    def test_fail_fast_reports_failure_and_marks_remaining_proofs_not_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=3)
+            invoked = root / "invoked.txt"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {
+                "FAKE_RUN_RECORD_MODE": "fail", "FAKE_INVOKED": str(invoked),
+            }), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry, fail_fast=True)
+            suite = json.loads((out / "suite.json").read_text())
+            statuses = [check["status"] for check in suite["checks"]]
+            self.assertEqual(result, 1)
+            self.assertEqual(suite["status"], "FAIL")
+            self.assertEqual(suite["selected_count"], 3)
+            self.assertEqual(statuses, ["FAIL", "NOT_RUN", "NOT_RUN"])
+            self.assertEqual(invoked.read_text().splitlines(), [proof_entry()["harness"]])
+            for outcome in suite["checks"][1:]:
+                self.assertIsNone(outcome["exit_code"])
+                self.assertIsNone(outcome["timed_out"])
+                self.assertIsNone(outcome["elapsed_seconds"])
+                self.assertIsNone(outcome["run_dir"])
+                self.assertIn("fail-fast", outcome["reason"])
+            self.assertIn("loop binding did not match source evidence", stdout.getvalue())
+
+    # REQ: OA-GEN-006
+    def test_fail_fast_success_runs_every_proof_and_default_failure_continues(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
+            invoked = root / "invoked.txt"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {
+                "FAKE_RUN_RECORD_MODE": "pass", "FAKE_INVOKED": str(invoked),
+            }), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry, fail_fast=True)
+            suite = json.loads((out / "suite.json").read_text())
+            self.assertEqual(result, 0, stderr.getvalue())
+            self.assertEqual(suite["status"], "PASS")
+            self.assertEqual([x["status"] for x in suite["checks"]], ["PASS"] * 3)
+            self.assertEqual(len(invoked.read_text().splitlines()), 3)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=2)
+            invoked = root / "invoked.txt"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {
+                "FAKE_RUN_RECORD_MODE": "fail", "FAKE_INVOKED": str(invoked),
+            }), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry)
+            suite = json.loads((out / "suite.json").read_text())
+            self.assertEqual(result, 1)
+            self.assertEqual(suite["status"], "FAIL")
+            self.assertEqual([x["status"] for x in suite["checks"]], ["FAIL"] * 2)
+            self.assertEqual(len(invoked.read_text().splitlines()), 2)
 
     def test_loop_unwind_preset_is_forwarded_and_recorded(self):
         with tempfile.TemporaryDirectory() as temp:

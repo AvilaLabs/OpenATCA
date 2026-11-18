@@ -1358,5 +1358,36 @@
   },
   "record_version": 2,
   "release_gate": "OPEN: global allocation and work-budget coverage, matched ERAM comparison, and independent holdout/reference evidence remain unresolved. Exact-head CI is a separate required policy check and is not represented by this local aggregation.",
+  "runner_portability_correction": {
+    "cargo": "1.89.0",
+    "ci_fail_fast": true,
+    "identity_policy": "Two explicitly registered observed loop-ID families; exactly one complete, consistent family must match actual source/function/bound diagnostics. Pinning Cargo alone does not unify generated IDs.",
+    "local_negative_control": {
+      "expected_failure": "a.overflow == b.overflow",
+      "result_sha256": "941a423a34e571f7881a84744ec4e416232fecc3175dee496e80dfa9e109aa29",
+      "status": "DETECTED"
+    },
+    "local_positive_checks": [
+      {
+        "id": "late-overflow-output-projection",
+        "result_record_sha256": "4d77ddcebf983e62b9b70530f7f6292a909940816d2a729c4261c54c131112c5",
+        "status": "PASS"
+      },
+      {
+        "id": "late-append-reachability",
+        "result_record_sha256": "6ff5c7c3459e99265ba8eacef0024e5e9e6e50ba1fff4dc5e93103fdef8f33bf",
+        "status": "PASS"
+      }
+    ],
+    "prior_ci": {
+      "raw_reports_passed": 43,
+      "reason": "Local-only generated loop selectors did not match CI; required diagnostics rejected the bindings.",
+      "revision": "4785bf3ec5a314b89a7fdeac57d4a1a1a221000a",
+      "runner_bindings_rejected": 14,
+      "status": "FAIL",
+      "url": "https://github.com/AvilaLabs/OpenATCA/actions/runs/44216068323"
+    },
+    "scope": "Runner correction only; no Rust source/model or proof-domain change. Existing local source groups remain historical. Complete exact-revision CI is required separately."
+  },
   "scope": "Selected local bounded Kani proofs only; results below are grouped by exact source snapshot and are not a single fresh-checkout run or an unbounded theorem."
 }

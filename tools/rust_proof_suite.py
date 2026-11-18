@@ -170,7 +170,61 @@ def _terminate_group(process: subprocess.Popen[Any], grace: float = 3.0) -> None
     process.wait()
 
 
-def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> int:
+def _failure_diagnostics(
+    run_record: dict[str, Any] | None, rc: int, timed_out: bool, run_record_path: Path,
+) -> list[str]:
+    diagnostics: list[str] = []
+    if timed_out:
+        diagnostics.append("proof runner timed out")
+    if rc != 0:
+        diagnostics.append(f"proof runner exited with status {rc}")
+    if not isinstance(run_record, dict):
+        diagnostics.append("runner produced no readable run.json record")
+    else:
+        checks = run_record.get("checks")
+        if isinstance(checks, list):
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                errors = check.get("evaluation_errors")
+                if not isinstance(errors, list):
+                    continue
+                for error in errors:
+                    if isinstance(error, str) and error:
+                        compact = " ".join(error.split())
+                        diagnostics.append(compact[:240])
+        if run_record.get("status") != "PASS" and not diagnostics:
+            diagnostics.append(f"child run status is {str(run_record.get('status'))[:80]}")
+    if not diagnostics and not run_record_path.is_file():
+        diagnostics.append("runner output record is missing")
+    if not diagnostics:
+        diagnostics.append("run did not match the registered proof binding")
+    return list(dict.fromkeys(diagnostics))[:4]
+
+
+def _not_run_outcome(proof: dict[str, Any], failed_id: str) -> dict[str, Any]:
+    return {
+        "id": proof["id"],
+        "package": proof["package"],
+        "harness": proof["harness"],
+        "loop_unwind_overrides": proof.get("loop_unwind_overrides", []),
+        "experimental": proof["experimental"],
+        "status": "NOT_RUN",
+        "exit_code": None,
+        "timed_out": None,
+        "elapsed_seconds": None,
+        "command": None,
+        "command_sha256": None,
+        "run_record_sha256": None,
+        "run_dir": None,
+        "reason": f"fail-fast after proof {failed_id} did not pass",
+        "diagnostics": [],
+    }
+
+
+def run_suite(
+    repo: Path, out: Path, target_dir: Path, registry_path: Path, fail_fast: bool = False,
+) -> int:
     try:
         registry_path = registry_path.resolve(strict=True)
         registry_bytes = registry_path.read_bytes()
@@ -218,7 +272,15 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
 
     started_utc = dt.datetime.now(dt.timezone.utc).isoformat()
     outcomes = []
+    failed_proof_id: str | None = None
     for proof in selected:
+        if fail_fast and failed_proof_id is not None:
+            outcome = _not_run_outcome(proof, failed_proof_id)
+            outcomes.append(outcome)
+            print(json.dumps({
+                "proof": proof["id"], "status": "NOT_RUN", "reason": outcome["reason"],
+            }), flush=True)
+            continue
         proof_dir = out / "proofs" / proof["id"]
         proof_dir.mkdir(parents=True, exist_ok=False)
         run_dir = proof_dir / "run"
@@ -276,6 +338,7 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
             and run_record.get("loop_unwind_presets", {}).get(proof["harness"], [])
             == proof.get("loop_unwind_overrides", [])
         )
+        diagnostics = [] if ok else _failure_diagnostics(run_record, rc, timed_out, run_record_path)
         outcomes.append({
             "id": proof["id"],
             "package": proof["package"],
@@ -283,6 +346,7 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
             "loop_unwind_overrides": proof.get("loop_unwind_overrides", []),
             "experimental": proof["experimental"],
             "status": "PASS" if ok else "FAIL",
+            "diagnostics": diagnostics,
             "exit_code": rc,
             "timed_out": timed_out,
             "elapsed_seconds": time.monotonic() - started,
@@ -292,7 +356,12 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
             if run_record_path.is_file() else None,
             "run_dir": str(run_dir),
         })
-        print(json.dumps({"proof": proof["id"], "status": outcomes[-1]["status"]}), flush=True)
+        summary = {"proof": proof["id"], "status": outcomes[-1]["status"]}
+        if diagnostics:
+            summary["diagnostics"] = diagnostics
+        print(json.dumps(summary), flush=True)
+        if fail_fast and not ok:
+            failed_proof_id = proof["id"]
 
     def unchanged(path: Path, key: str) -> bool:
         try:
@@ -332,10 +401,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path, required=True)
     parser.add_argument("--registry", type=Path)
+    parser.add_argument(
+        "--fail-fast", action="store_true",
+        help="stop starting proofs after the first non-PASS result",
+    )
     args = parser.parse_args(argv)
     repo = args.repo.resolve(strict=True)
     registry_path = args.registry or repo / "tools" / "rust_proofs.json"
-    return run_suite(repo, args.out, args.target_dir, registry_path)
+    return run_suite(repo, args.out, args.target_dir, registry_path, fail_fast=args.fail_fast)
 
 
 if __name__ == "__main__":

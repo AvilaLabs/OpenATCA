@@ -229,7 +229,7 @@ def main() -> int:
                     "filter_apply changes the inserted replay event then returns NumericalRefused for the later event; filter_output returns the late row; unexpected replay/restart paths panic."
                 ],
                 "required_covers": [],
-                "loop_unwind_overrides": ["late-replay-two-events"],
+                "loop_unwind_overrides": ["late-replay-two-events-pinned-cargo-one-loop"],
                 "harness_timeout_seconds": 600,
                 "external_timeout_seconds": 720,
                 "memory_mib": 12288,

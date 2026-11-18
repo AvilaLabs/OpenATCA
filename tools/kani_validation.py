@@ -36,6 +36,7 @@ from typing import Any, Iterable, Mapping
 
 
 PINNED_KANI_VERSION = "0.68.0"
+PINNED_CARGO_TOOLCHAIN = "1.89.0"
 # Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
 # build and the source location below; never accept arbitrary CBMC arguments.
 LOOP_UNWIND_PRESETS = {
@@ -102,6 +103,37 @@ LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
         "update_late(&mut t, PROOF_SLOT, &m, &mut out);",
     ],
 }
+_late_pinned_prefix = "_RNvNtCseRq8xMCbGsa_8oa_track7tracker11update_late."
+_late_local_prefix = "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late."
+_late_id_families = {
+    "local": [_late_local_prefix + str(index) for index in range(4)],
+    "ci": [_late_pinned_prefix + str(index) for index in range(4)],
+}
+LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo"] = {
+    **LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"],
+    "loop_id": _late_pinned_prefix + "3",
+    "loops": [
+        {
+            **loop,
+            "loop_ids": [
+                _late_local_prefix + loop["loop_id"].rsplit(".", 1)[1],
+                _late_pinned_prefix + loop["loop_id"].rsplit(".", 1)[1],
+            ],
+        }
+        for loop in LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"]["loops"]
+    ],
+    "log_families": _late_id_families,
+    "cargo_toolchain": PINNED_CARGO_TOOLCHAIN,
+}
+LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo-one-loop"] = {
+    **LOOP_UNWIND_PRESETS["late-replay-two-events"],
+    "loop_id": _late_pinned_prefix + "3",
+    "loop_ids": [_late_local_prefix + "3", _late_pinned_prefix + "3"],
+    "log_families": {
+        name: [ids[3]] for name, ids in _late_id_families.items()
+    },
+    "cargo_toolchain": PINNED_CARGO_TOOLCHAIN,
+}
 DEFAULT_TIMEOUT_SECONDS = 360
 DEFAULT_MEMORY_MIB = 6144
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
@@ -160,12 +192,21 @@ def _loop_unwind_configuration(preset_name: str | None) -> dict[str, Any] | None
 
 def _loop_unwind_argument(preset: Mapping[str, Any]) -> str:
     loops = preset.get("loops", [preset])
-    return ",".join(f"{loop['loop_id']}:{loop['bound']}" for loop in loops)
+    return ",".join(
+        f"{loop_id}:{loop['bound']}"
+        for loop in loops
+        for loop_id in loop.get("loop_ids", [loop["loop_id"]])
+    )
 
 
 def _expected_loop_log_line_count(preset: Mapping[str, Any]) -> int:
+    if not preset.get("log_families"):
+        return sum(
+            len(loop.get("iterations", [])) if loop.get("log_mode") == "completed_before_bound" else 1
+            for loop in preset.get("loops", [preset])
+        )
     return sum(
-        len(loop.get("iterations", [])) if loop.get("log_mode") == "completed_before_bound" else 1
+        len(loop.get("iterations", [])) if loop.get("log_mode") == "completed_before_bound" else loop["bound"]
         for loop in preset.get("loops", [preset])
     )
 
@@ -221,6 +262,9 @@ def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, har
 
 def _check_loop_unwind_log(preset_name: str, stdout: str, stderr: str) -> dict[str, Any]:
     preset = LOOP_UNWIND_PRESETS[preset_name]
+    families = preset.get("log_families")
+    if families:
+        return _check_aliased_loop_unwind_log(preset, stdout, stderr)
     source = r"[/\\]".join(re.escape(part) for part in preset["source"].split("/"))
     expected_loops = preset.get("loops", [preset])
     all_lines = (stdout + "\n" + stderr).splitlines()
@@ -275,6 +319,103 @@ def _check_loop_unwind_log(preset_name: str, stdout: str, stderr: str) -> dict[s
     if len(expected_loops) == 1:
         return {"passed": True, "matched_line": matched[0]}
     return {"passed": True, "matched_line": None, "matched_lines": matched}
+
+
+def _check_aliased_loop_unwind_log(
+    preset: Mapping[str, Any], stdout: str, stderr: str
+) -> dict[str, Any]:
+    """Accept one complete, unmixed family of explicitly registered loop IDs."""
+    families = preset["log_families"]
+    loops = preset.get("loops", [preset])
+    all_lines = (stdout + "\n" + stderr).splitlines()
+    source = r"[/\\]".join(re.escape(part) for part in preset["source"].split("/"))
+    all_known_ids = {loop_id for ids in families.values() for loop_id in ids}
+    requested_indexes = {loop_id.rsplit(".", 1)[-1] for loop_id in all_known_ids}
+    unknown_ids = set()
+    observed_ids = set()
+    for candidate in all_lines:
+        match = re.search(r"(?:Not unwinding|Unwinding) loop (\S+) iteration \d+", candidate)
+        if match and "update_late." in match.group(1):
+            loop_id = match.group(1)
+            loop_index = loop_id.rsplit(".", 1)[-1]
+            if loop_index not in requested_indexes:
+                continue
+            observed_ids.add(loop_id)
+            if loop_id not in all_known_ids:
+                unknown_ids.add(loop_id)
+    if unknown_ids:
+        return {
+            "passed": False,
+            "matched_line": None,
+            "matched_lines": [],
+            "expected": f"only registered loop IDs; unknown IDs observed: {sorted(unknown_ids)}",
+        }
+
+    for family_name, family_ids in families.items():
+        if not isinstance(family_ids, list) or len(family_ids) != len(loops):
+            return {"passed": False, "matched_line": None, "matched_lines": [], "expected": "valid registered loop-ID family"}
+        if observed_ids != set(family_ids):
+            continue
+        matched = []
+        valid = True
+        for loop, loop_id in zip(loops, family_ids):
+            source_and_function = (
+                rf"file (?:.*[/\\])?{source} line {loop['line']} column \d+ "
+                rf"function (?:[A-Za-z_]\w*::)*{re.escape(preset['function'])} thread \d+\s*$"
+            )
+            candidates = [
+                line for line in all_lines
+                if re.search(rf"^(?:Not unwinding|Unwinding) loop {re.escape(loop_id)} iteration \d+\b", line)
+            ]
+            if loop.get("log_mode") == "completed_before_bound":
+                expected = re.compile(
+                    rf"^Unwinding loop {re.escape(loop_id)} iteration (\d+) {source_and_function}"
+                )
+                observed = [(int(match.group(1)), line) for line in candidates if (match := expected.search(line))]
+                if [iteration for iteration, _ in observed] != loop["iterations"] or len(observed) != len(candidates):
+                    valid = False
+                    break
+                matched.extend(line for _, line in observed)
+            else:
+                expected_prefix = re.compile(
+                    rf"^Unwinding loop {re.escape(loop_id)} iteration (\d+) {source_and_function}"
+                )
+                prelude = [
+                    (int(match.group(1)), line)
+                    for line in candidates
+                    if (match := expected_prefix.search(line))
+                ]
+                expected_iterations = list(range(1, loop["bound"]))
+                expected = re.compile(
+                    rf"^Not unwinding loop {re.escape(loop_id)} iteration {loop['bound']} {source_and_function}"
+                )
+                not_lines = [line for line in candidates if line.startswith("Not unwinding loop ")]
+                if (
+                    [iteration for iteration, _ in prelude] != expected_iterations
+                    or len(not_lines) != 1
+                    or not expected.search(not_lines[0])
+                    or len(prelude) + len(not_lines) != len(candidates)
+                ):
+                    valid = False
+                    break
+                matched.extend(line for _, line in prelude)
+                matched.append(not_lines[0])
+        if valid:
+            if len(loops) == 1 and len(matched) == 1:
+                return {"passed": True, "matched_line": matched[0], "matched_family": family_name}
+            return {
+                "passed": True,
+                "matched_line": None,
+                "matched_lines": matched,
+                "matched_family": family_name,
+            }
+    return {
+        "passed": False,
+        "matched_line": None,
+        "matched_lines": [],
+        "observed_loop_ids": sorted(observed_ids),
+        "expected_families": {name: ids for name, ids in families.items()},
+    }
 
 
 def _is_nonnegative_int(value: Any) -> bool:
@@ -707,6 +848,12 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
         errors.append("command_sha256 does not bind the recorded argument vector")
     preset_name = record.get("loop_unwind_preset")
     scoped = record.get("loop_unwind_configuration")
+    cargo_version = record.get("cargo_version")
+    if cargo_version is not None:
+        if not isinstance(cargo_version, str) or not re.match(r"^cargo 1\.89\.0(?:\s|$)", cargo_version):
+            errors.append("recorded Cargo version is not 1.89.0")
+        if not isinstance(command, list) or command[:2] != ["cargo", "+1.89.0"]:
+            errors.append("command does not invoke Cargo through the pinned 1.89.0 toolchain")
     if preset_name is None:
         if scoped is not None or (
             isinstance(command, list)
@@ -722,6 +869,10 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
         if expected_scoped is not None:
             if scoped != expected_scoped:
                 errors.append("loop_unwind_configuration does not match its registered preset")
+            if expected_scoped.get("cargo_toolchain") == PINNED_CARGO_TOOLCHAIN and (
+                cargo_version is None or not isinstance(command, list) or command[:2] != ["cargo", "+1.89.0"]
+            ):
+                errors.append("pinned-Cargo unwind preset requires Cargo 1.89.0 invocation and version binding")
             if record.get("package") != expected_scoped["package"] or record.get("harness") not in expected_scoped["harnesses"]:
                 errors.append("loop-unwind preset is not applicable to the recorded proof")
             expected_tail = [
@@ -735,15 +886,24 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
             if not isinstance(log_check, dict) or log_check.get("passed") is not True:
                 errors.append("registered loop-unwind log check did not pass")
             else:
-                if len(expected_scoped.get("loops", [expected_scoped])) == 1:
+                if (
+                    len(expected_scoped.get("loops", [expected_scoped])) == 1
+                    and _expected_loop_log_line_count(expected_scoped) == 1
+                ):
                     matched_lines = [log_check.get("matched_line")]
                 else:
                     matched_lines = log_check.get("matched_lines")
+                rechecked_log = (
+                    _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "")
+                    if isinstance(matched_lines, list) and all(isinstance(line, str) for line in matched_lines)
+                    else {"passed": False}
+                )
                 if (
                     not isinstance(matched_lines, list)
                     or len(matched_lines) != _expected_loop_log_line_count(expected_scoped)
                     or any(not isinstance(line, str) for line in matched_lines)
-                    or not _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "")["passed"]
+                    or rechecked_log.get("passed") is not True
+                    or log_check.get("matched_family") != rechecked_log.get("matched_family")
                 ):
                     errors.append("recorded loop-unwind log line does not match the preset")
     source_before = record.get("source_before")
@@ -980,13 +1140,14 @@ def run_one(
     host_rustc: str,
     kani_version: str,
     kani_version_output: str,
+    cargo_version: str,
     loop_unwind_preset: str | None = None,
 ) -> dict[str, Any]:
     check_dir = out / "checks" / hashlib.sha256(harness.encode()).hexdigest()[:12]
     check_dir.mkdir(parents=True, exist_ok=False)
     result_path = check_dir / "result.json"
     argv = [
-        "cargo", "--locked", "kani", "--lib", "-p", package, "--harness", harness,
+        "cargo", "+1.89.0", "--locked", "kani", "--lib", "-p", package, "--harness", harness,
         "--jobs", "1", "-Z", "unstable-options", "--export-json", str(result_path),
         "--harness-timeout", f"{harness_timeout}s",
     ]
@@ -1047,6 +1208,7 @@ def run_one(
         "memory_limit_bytes": memory_bytes,
         "jobs": 1,
         "kani_version": kani_version,
+        "cargo_version": cargo_version,
         "kani_report_toolchain": None,
         "product_rustc_version": product_rustc,
         "host_rustc_version": host_rustc,
@@ -1234,6 +1396,9 @@ def main(argv: list[str] | None = None) -> int:
     rustup = shutil.which("rustup")
     if not cargo or not kani or not rustc or not rustup:
         parser.error("cargo, pinned Kani, rustc and rustup must already be installed; no installer is run")
+    cargo_version = subprocess.check_output([cargo, "+1.89.0", "--version"], cwd=repo, text=True).strip()
+    if not re.match(r"^cargo 1\.89\.0(?:\s|$)", cargo_version):
+        parser.error(f"expected Cargo 1.89.0, got {cargo_version!r}")
     kani_version_output = subprocess.check_output([kani, "--version"], text=True).strip()
     if not re.search(r"^Kani Rust Verifier " + re.escape(PINNED_KANI_VERSION) + r"(?:\s|$)", kani_version_output, re.MULTILINE):
         parser.error(f"expected Kani {PINNED_KANI_VERSION}, got {kani_version_output!r}")
@@ -1267,6 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
             host_rustc=host_rustc,
             kani_version=kani_version,
             kani_version_output=kani_version_output,
+            cargo_version=cargo_version,
             loop_unwind_preset=args.loop_unwind_preset,
         )
         records.append(record)
@@ -1291,6 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
         "host_rustc_version": host_rustc,
         "kani_version_output": kani_version_output,
         "kani_version": kani_version,
+        "cargo_version": cargo_version,
         "stubbing_enabled": args.stubbing,
         "stub_scope_descriptions": args.stub_summary,
         "cfgs": cfgs,
