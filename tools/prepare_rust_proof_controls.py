@@ -55,6 +55,7 @@ def source_changes(source: Path) -> tuple[list[str], list[str]]:
 def freeze_overlay(source: Path, root: Path, files: list[str], deleted: list[str]) -> tuple[Path, dict[str, str]]:
     """Capture the dirty candidate exactly once before creating any control checkout."""
     snapshot = root / "source-snapshot" / "frozen"
+    snapshot.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
     for rel in files:
         src = source / rel
@@ -176,8 +177,6 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     commit = git(source, "rev-parse", "HEAD")
     files, deleted = source_changes(source)
-    if not files:
-        parser.error("no changed or untracked source files found to snapshot")
     snapshot, frozen_hashes = freeze_overlay(source, root, files, deleted)
 
     seed = root / "git-seed"
@@ -185,7 +184,7 @@ def main() -> int:
         ["git", "clone", "--shared", "--no-checkout", str(source), str(seed)],
         check=True,
     )
-    names = ["baseline", "output-column", "resync-emit", "late-rollback", "mono-split"]
+    names = ["baseline", "output-column", "resync-emit", "caller-track-restore", "late-rollback", "sensor-oldest-tie", "mono-split"]
     harnesses = {
         "baseline": {"purpose": "same current source overlay without a mutation"},
         "output-column": {
@@ -200,11 +199,62 @@ def main() -> int:
             "expected_assertion": "assert_eq!(out.t_ns.len(), 1) on the Resynced path",
             "failure_kind": "counterexample to a Kani property assertion",
         },
+        "caller-track-restore": {
+            "package": "oa-track",
+            "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection",
+            "expected_assertion": "assert_eq!(t.first_ns[PROOF_SLOT], first)",
+            "failure_kind": "counterexample to a Kani property assertion",
+            "configuration": {
+                "cfgs": [],
+                "stubbing": True,
+                "stub_summaries": [
+                    "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+                ],
+                "required_covers": ["metadata projection dirtied before refusal"],
+                "loop_unwind_overrides": [],
+                "harness_timeout_seconds": 300,
+                "external_timeout_seconds": 420,
+                "memory_mib": 8192,
+            },
+        },
         "late-rollback": {
             "package": "oa-track",
-            "harness": "late_replay_restores_transaction_after_current_row_then_later_refusal",
-            "expected_assertion": "assert_output_txn_eq(&before_output, &output_txn(&out))",
+            "harness": "tracker::proofs::rollback_paths::late_overflow_output_projection",
+            "expected_assertion": "assert_output_txn_eq(&case.before_output, &output_txn(&case.output))",
             "failure_kind": "counterexample to a Kani property assertion",
+            "configuration": {
+                "cfgs": [],
+                "stubbing": True,
+                "stub_summaries": [
+                    "filter_apply changes the inserted replay event then returns NumericalRefused for the later event; filter_output returns the late row; unexpected replay/restart paths panic."
+                ],
+                "required_covers": [],
+                "loop_unwind_overrides": ["late-replay-two-events"],
+                "harness_timeout_seconds": 600,
+                "external_timeout_seconds": 720,
+                "memory_mib": 12288,
+            },
+        },
+        "sensor-oldest-tie": {
+            "package": "oa-track",
+            "harness": "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin",
+            "expected_assertion": "assert_eq!(g.sensor_id[i], SENSOR_TABLE as u16)",
+            "failure_kind": "counterexample to a Kani property assertion",
+            "configuration": {
+                "cfgs": ["kani_full_capacity"],
+                "stubbing": False,
+                "stub_summaries": [],
+                "required_covers": [
+                    "eviction counter saturates",
+                    "minimum report-time input",
+                    "maximum report-time input",
+                    "tied minimum keeps earliest slot",
+                ],
+                "loop_unwind_overrides": [],
+                "harness_timeout_seconds": 600,
+                "external_timeout_seconds": 720,
+                "memory_mib": 12288,
+            },
         },
         "mono-split": {
             "package": "oa-replay",
@@ -231,6 +281,13 @@ def main() -> int:
                 restore_track_txn(t, slot, transaction);
                 return;
             }"""
+    caller_track_restore_old = """        Step::NumericalRefused => {
+            restore_track_txn(t, slot, snapshot);
+            restore_output_txn(out, output);
+        }"""
+    caller_track_restore_new = """        Step::NumericalRefused => {
+            restore_output_txn(out, output);
+        }"""
     controls: dict[str, tuple[str, str, str] | None] = {
         "baseline": None,
         "output-column": (
@@ -239,7 +296,17 @@ def main() -> int:
             "",
         ),
         "resync-emit": ("crates/oa-track/src/tracker.rs", resync_old, resync_new),
+        "caller-track-restore": (
+            "crates/oa-track/src/tracker.rs",
+            caller_track_restore_old,
+            caller_track_restore_new,
+        ),
         "late-rollback": ("crates/oa-track/src/tracker.rs", rollback_old, rollback_new),
+        "sensor-oldest-tie": (
+            "crates/oa-track/src/time_gate.rs",
+            "                if ns < oldest_ns {\n",
+            "                if ns <= oldest_ns {\n",
+        ),
         "mono-split": (
             "crates/oa-replay/src/mono_split.rs",
             "    wall_ns\n        .checked_sub(mono_ns)\n        .map(|step_ns| (wall_ns, mono_ns, step_ns))\n",

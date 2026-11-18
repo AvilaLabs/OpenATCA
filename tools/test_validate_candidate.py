@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from test_allocator_validation import result as allocator_result
+
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("validate_candidate", Path(__file__).with_name("validate_candidate.py"))
 gate = importlib.util.module_from_spec(SPEC)
@@ -61,31 +63,6 @@ def safeview_fixture(root):
         target.mkdir()
         (safeview / name).symlink_to(target, target_is_directory=True)
     return safeview, actual
-
-
-def allocator_result(injected=False):
-    return {
-        "status": "FAIL_M3_ALLOCATION" if injected else "PASS_M3_EXERCISED",
-        "injection_requested": injected,
-        "fixture_ids": [
-            "tracker_update_ooo_refusal_capacity_advance_flush",
-            "fusion_adsb_hard_assoc_registration",
-            "fusion_anonymous_init_and_assoc",
-        ],
-        "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
-        "tracker": {
-            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
-            "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
-            "predictions": 1, "advance_rows": 1, "flush_rows": 1, "ended": 1, "rows": 1,
-        },
-        "fusion": {
-            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
-            "plots": 40, "hard_applied": 1, "candidates_confirmed": 2, "refused": 1,
-            "rows": 1, "radar_tracks": 2, "registration_used": 1, "registration_history": 1,
-            "anon_applied": 2, "local_rows": 2, "init_visits": 1, "init_tests": 1,
-            "coast_rows": 1, "quiet_advance_rows": 1,
-        },
-    }
 
 
 def allocator_report(revision="candidate-rev"):

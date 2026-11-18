@@ -19,19 +19,27 @@ This record separates requirement validity, bounded proof, runtime testing, allo
 
 ## Current verification results
 
-**Kani 0.68.0 registry:** all 22 enabled harnesses passed in one fresh sequential run on frozen current production/proof source. The registry contains 25 obligations; three remain disabled and experimental. The accepted subset covers three output-table properties, seven dispatch cases, real-decision/history commit, refusal routing, seven transaction-component restoration properties, full-typed timestamp split, and full-64 live-count/monotonicity. Each raw result is bound to its source snapshot, command, toolchain, declared stubs, and required covers. The local run predates a comment-only requirement-tag correction on the experimental late helper; [the machine-readable record](../validation/rust-proof-status.json) retains both hashes and the exact change. CI reruns the registered suite on each proposed revision.
+**Kani 0.68.0 registry:** 43 enabled obligations have source-bound local PASS records; the registry contains 48 entries, including five disabled experiments. The [machine-readable record](../validation/rust-proof-status.json) preserves the earlier 22 results and the 21 added results in distinct frozen source groups. This is a cumulative local record, not one fresh-checkout run. CI reruns the complete enabled registry on each proposed revision.
 
-The earlier candidate suite remains recorded FAIL. Re-evaluation of its unchanged raw results accepted 22/23 after correcting the evaluator's treatment of compiler-cloned cover sites; late replay was incomplete. That historical re-evaluation is distinct from the fresh 22/22 run. The final late-loop attempt at 12 GiB timed out at 600 seconds, so the combined rollback obligation remains open.
+Five added in-order caller proofs independently vary and dirty the selected current-filter, anchor-filter, ring, metadata or statistics projection before modeled refusal. Production capture and restore calls remain in the path. These establish each selected projection through the actual caller; their differing other prestate fields do not establish an arbitrary simultaneous-state theorem.
 
-The broad all-state rollback and late-replay proofs, plus the full-64 sensor update/note proof, remain experimental or incomplete. Recent resource ceilings were reduced; a timeout or memory exhaustion is not a proof or a counterexample. Do not generalize the accepted bounded harnesses to arbitrary histories, all tracker state, every capacity, or full-system correctness.
+Late replay uses six postcondition proofs for each output capacity: current filter, anchor filter, all ring entries and indexing metadata, other track metadata, statistics with one saturating numerical-refusal increment, and output. Each capacity's six proofs share the same two-event fixture, symbolic inputs, stubs and actual production call. Their conjunction establishes the complete declared rollback postcondition for that fixture. Two separate reachability proofs confirm an output attempt before later numerical refusal, for append capacity 2 and overflow capacity 1. Before/after track observations read raw columns independently of production transaction capture. The filter seam models first success and later refusal; this does not prove nonlinear filtering, arbitrary prestates or other histories.
 
-**Negative controls:** the output-column mutation was detected by its intended assertion. The wrong timestamp-split result was detected by the Kani control and by Creusot. A focused resync-emission control passed its positive proof and detected the intended missing-row mutation. The earlier larger-model control exhausted memory and remains recorded as inconclusive.
+The late family uses reviewed scoped loop bounds (3, 2, 2, 3) within the unchanged global unwind of 16. Every unwinding assertion remains required. The runner checks exact closed preset arguments, fixture/source locations and actual loop diagnostics, including the base scan's observed completion before its bound. A stale selector, incomplete report or resource failure cannot pass acceptance.
+
+Two full-64 sensor proofs cover the canonical full-table fixture with IDs 0..63: existing-ID maximum-time update, and fresh ID 64 evicting the first oldest entry. Stored/report timestamps span all i64 values and the eviction counter spans u64. The first-argmin witness exists for every nonempty finite timestamp array; the strict-earlier condition selects its unique first minimum. This pair covers the original finite fixture contract, not arbitrary table layouts or every u16 ID assignment.
+
+The combined experiments remain disabled. The broader arbitrary-state in-order proof is incomplete; the combined sensor/late fixture properties have the separate evidence above. The combined overflow attempt exhausted Kani-driver memory without producing a result JSON; the current assertion-only combined append configuration was not run. Earlier failed/time-limited runs remain recorded as such. No resource failure is a counterexample or a proof.
+
+**Negative controls:** omitted output column, missing resync output attempt and incorrect timestamp split were detected in the earlier checks; the timestamp control was also detected by Creusot. Added controls detect an omitted actual caller restore, incorrect oldest-sensor tie-breaking and omitted late output restoration at their intended assertions. The larger historical inconclusive controls remain distinct from these detections.
 
 **Creusot v0.14.0:** the assurance package imports the same `mono_split.rs` production helper used by replay; it does not prove a separately copied model. The helper has no preconditions and specifies the exact `Some`/`None` eligibility and representability split and returned values. Eleven proof goals passed: ten with Alt-Ergo and the helper contract with Z3. No custom trusted external specification was added. A wrong-step mutant translated and its `vc_split` obligation failed as expected. This proves the helper contract under the pinned Creusot/Why3/solver model, not the replay clock as a whole or stable Rust machine code.
 
 **Miri:** three exact production regression executions passed under `nightly-2026-08-21` with default interpreter checks: timestamp refusals/signed boundaries, partial late-replay rollback, and invalid-anchor recovery. The CI workflow requires each selected test to execute exactly once. This covers those executions only.
 
-**Runtime checks:** the recorded product check suite reports 1,890 Rust tests passing; final formatting, Clippy, timestamp-helper tests and trace checks pass. The late-loop runtime check suite reports 430 tests passing. These are software regression results, not formal proof or operational performance results.
+**Runtime checks:** the prior complete product run recorded 1,890 passing Rust tests. This phase's affected-package checks passed 446 Rust tests under 1.89.0, with formatting, Clippy and requirements traceability passing. These are regression results, not operational performance results.
+
+The allocation gate passed eight measured windows with zero allocation or reallocation calls, and detected an injected allocation in each window. Its 38-entry source route ledger requires positive observable evidence. Fixtures include the default 4,096-track capacity and both full 1,048,576-entry pending queues; duplicates, extra hard reports and deliberate capacity losses are explicitly counted. These synthetic allocation-detector executions do not establish diverse-traffic throughput, global C5/C7 or worst-case deadlines. See [validation scope](VALIDATION.md) and [fixture details](../validation/oa-alloc-check/README.md).
 
 ## Reproduce the checks
 
@@ -40,6 +48,7 @@ Install the pinned tools shown in [.github/workflows/rust-proofs.yml](../.github
 ```sh
 python3 tools/test_kani_validation.py
 python3 tools/test_rust_proof_suite.py
+python3 tools/test_prepare_rust_proof_controls.py
 python3 tools/rust_proof_suite.py --repo "$PWD" \
   --registry "$PWD/tools/rust_proofs.json" \
   --out /tmp/oa-rust-proof-evidence --target-dir /tmp/oa-rust-proof-cache
@@ -63,4 +72,4 @@ Requirements specify the intended property; tests exercise chosen production exe
 
 ## Release state
 
-The assurance/release gate remains **OPEN**. Allocation C5 coverage, matched ERAM comparison, and independent holdout/physical truth remain unresolved. The accepted Kani subset, Creusot helper proof, and runtime tests do not close those project-level claims or establish that the entire project is verified.
+The assurance/release gate remains **OPEN**. Global allocation/work-budget coverage, matched ERAM comparison, and independent holdout/physical truth remain unresolved. The accepted Kani subset, Creusot helper proof, and runtime tests do not close those project-level claims or establish that the entire project is verified.

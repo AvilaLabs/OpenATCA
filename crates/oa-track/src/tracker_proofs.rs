@@ -279,6 +279,8 @@ fn filter_apply_insert_then_refuse(
     } else if m.toa_ns == LATE_LATER_NS {
         f.t_ns = m.toa_ns;
         *stats = arbitrary_stats();
+        #[cfg(kani_late_replay_covers)]
+        kani::cover!(true, "late replay reaches later numerical refusal");
         Applied::NumericalRefused
     } else {
         panic!("unexpected replay measurement in proof fixture")
@@ -694,37 +696,125 @@ fn decide_numerical_refusal_without_mutation(_: &mut Tracker, _: usize, _: &Meas
     Step::NumericalRefused
 }
 
-// Helper for OA-TRK-335.
+struct LateReplayCase {
+    tracker: Tracker,
+    output: TrackOutput,
+    before_track: TrackTxn,
+    after_track: TrackTxn,
+    before_output: OutputTxn,
+    sentinel: OutRow,
+    capacity: usize,
+}
+
+// Independent proof observation: read each owned column directly, without production
+// track_txn, so capture defects cannot be shared by the expected and observed snapshots.
+fn observe_track_fields_directly(t: &Tracker, slot: usize) -> TrackTxn {
+    let start = slot * RING_DEPTH;
+    let mut ring = [blank_measurement(); RING_DEPTH];
+    for k in 0..RING_DEPTH {
+        ring[k] = t.ring_m[start + k];
+    }
+    TrackTxn {
+        cur: t.cur[slot],
+        anchor: t.anchor[slot],
+        ring,
+        stats: t.stats,
+        first_ns: t.first_ns[slot],
+        confirmed_ns: t.confirmed_ns[slot],
+        last_ns: t.last_ns[slot],
+        disagree_until_ns: t.disagree_until_ns[slot],
+        expected_ns: t.expected_ns[slot],
+        newest_update_ns: t.newest_update_ns,
+        cat: t.cat[slot],
+        updates: t.updates[slot],
+        state: t.state[slot],
+        hits: t.hits[slot],
+        ring_len: t.ring_len[slot],
+        ring_head: t.ring_head[slot],
+    }
+}
+
+// Shared actual-caller scenario for functional and reachability obligations.
 #[inline(always)]
-fn prove_late_replay_rollback_for_capacity(capacity: usize) {
+fn run_late_replay_case(capacity: usize) -> LateReplayCase {
     let mut t = late_proof_tracker();
     let mut out = crate::types::output_new(capacity);
     let sentinel = output_row(PROOF_TIME - 30);
     output_push(&mut out, &sentinel);
     let before_output = output_txn(&out);
-    let before_track = track_txn(&t, PROOF_SLOT);
+    let before_track = observe_track_fields_directly(&t, PROOF_SLOT);
     let m = late_proof_measurement();
 
     update_late(&mut t, PROOF_SLOT, &m, &mut out);
+    let actual_capacity = out.capacity;
+    let after_track = observe_track_fields_directly(&t, PROOF_SLOT);
 
-    let after_track = track_txn(&t, PROOF_SLOT);
-    assert_same_track_txn(&before_track, &after_track);
-    let mut expected_stats = before_track.stats;
-    expected_stats.numerical_refused = expected_stats.numerical_refused.saturating_add(1);
-    assert_stats_eq(&t.stats, &expected_stats);
+    LateReplayCase {
+        tracker: t,
+        output: out,
+        before_track,
+        after_track,
+        before_output,
+        sentinel,
+        capacity: actual_capacity,
+    }
+}
 
-    assert_output_txn_eq(&before_output, &output_txn(&out));
-    assert_eq!(out.capacity, capacity);
-    assert_output_len(&out, 1);
-    assert_output_row(&out, 0, &sentinel);
-    kani::cover!(
-        capacity == 1,
-        "late output attempt is rolled back from overflow"
-    );
-    kani::cover!(
-        capacity == 2,
-        "late output attempt is rolled back from appended row"
-    );
+fn assert_late_current_filter_projection(before: &TrackTxn, after: &TrackTxn) {
+    assert_filter_bits(&before.cur, &after.cur);
+}
+
+fn assert_late_anchor_filter_projection(before: &TrackTxn, after: &TrackTxn) {
+    assert_filter_bits(&before.anchor, &after.anchor);
+}
+
+fn assert_late_ring_projection(before: &TrackTxn, after: &TrackTxn) {
+    for k in 0..RING_DEPTH {
+        assert_measurement_bits(&before.ring[k], &after.ring[k]);
+    }
+    assert_eq!(before.ring_len, after.ring_len);
+    assert_eq!(before.ring_head, after.ring_head);
+}
+
+fn assert_late_metadata_projection(before: &TrackTxn, after: &TrackTxn) {
+    assert_eq!(before.first_ns, after.first_ns);
+    assert_eq!(before.confirmed_ns, after.confirmed_ns);
+    assert_eq!(before.last_ns, after.last_ns);
+    assert_eq!(before.disagree_until_ns, after.disagree_until_ns);
+    assert_eq!(before.expected_ns, after.expected_ns);
+    assert_eq!(before.newest_update_ns, after.newest_update_ns);
+    assert_eq!(before.cat.trusted, after.cat.trusted);
+    assert_eq!(before.cat.cand, after.cat.cand);
+    assert_eq!(before.cat.cand_n, after.cat.cand_n);
+    assert_eq!(before.updates, after.updates);
+    assert_eq!(before.state, after.state);
+    assert_eq!(before.hits, after.hits);
+}
+
+fn assert_late_stats_projection(before: &TrackTxn, after: &TrackTxn) {
+    let mut expected = before.stats;
+    expected.numerical_refused = expected.numerical_refused.saturating_add(1);
+    assert_stats_eq(&after.stats, &expected);
+}
+
+fn assert_late_output_projection(case: &LateReplayCase) {
+    assert_output_txn_eq(&case.before_output, &output_txn(&case.output));
+    assert_eq!(case.output.capacity, case.capacity);
+    assert_output_len(&case.output, 1);
+    assert_output_row(&case.output, 0, &case.sentinel);
+}
+
+// Full snapshot postcondition is the conjunction of the six named projections above.
+#[inline(always)]
+fn prove_late_replay_rollback_for_capacity(capacity: usize) -> usize {
+    let case = run_late_replay_case(capacity);
+    assert_late_current_filter_projection(&case.before_track, &case.after_track);
+    assert_late_anchor_filter_projection(&case.before_track, &case.after_track);
+    assert_late_ring_projection(&case.before_track, &case.after_track);
+    assert_late_metadata_projection(&case.before_track, &case.after_track);
+    assert_late_stats_projection(&case.before_track, &case.after_track);
+    assert_late_output_projection(&case);
+    case.capacity
 }
 
 // REQ: OA-TRK-335
@@ -1015,6 +1105,21 @@ fn numerical_refusal_restores_track_and_output_transaction_state() {
 #[kani::stub(implausible, implausible_must_be_unreachable)]
 #[kani::stub(track_begin, track_begin_must_be_unreachable)]
 fn late_replay_restores_transaction_after_current_row_then_later_refusal() {
-    prove_late_replay_rollback_for_capacity(1);
-    prove_late_replay_rollback_for_capacity(2);
+    #[cfg(kani_late_replay_covers)]
+    kani::cover!(
+        prove_late_replay_rollback_for_capacity(1) == 1,
+        "late replay overflow rollback case"
+    );
+    #[cfg(not(kani_late_replay_covers))]
+    assert_eq!(prove_late_replay_rollback_for_capacity(1), 1);
+    #[cfg(kani_late_replay_covers)]
+    kani::cover!(
+        prove_late_replay_rollback_for_capacity(2) == 2,
+        "late replay append rollback case"
+    );
+    #[cfg(not(kani_late_replay_covers))]
+    assert_eq!(prove_late_replay_rollback_for_capacity(2), 2);
 }
+
+#[path = "tracker_rollback_paths.rs"]
+mod rollback_paths;

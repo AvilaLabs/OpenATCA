@@ -15,11 +15,13 @@ import sys
 import time
 from typing import Any
 
+from kani_validation import LOOP_UNWIND_PRESETS
+
 
 REGISTRY_VERSION = 1
 MAX_PROOFS = 64
 ALLOWED_PACKAGES = {"oa-track", "oa-replay"}
-ALLOWED_CFGS = {"kani_full_capacity"}
+ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -61,7 +63,8 @@ def validate_registry(data: Any) -> list[str]:
             "required_covers", "stubbing", "stub_summaries", "cfgs",
             "harness_timeout_seconds", "external_timeout_seconds", "memory_mib",
         }
-        if set(entry) != required_keys:
+        allowed_keys = required_keys | {"loop_unwind_overrides"}
+        if not required_keys.issubset(entry) or not set(entry).issubset(allowed_keys):
             errors.append(f"{label} keys must exactly match the registered proof schema")
         proof_id = entry.get("id")
         if not isinstance(proof_id, str) or not ID_RE.fullmatch(proof_id):
@@ -118,6 +121,20 @@ def validate_registry(data: Any) -> list[str]:
             errors.append(f"{label}.external_timeout_seconds must exceed harness timeout")
         if entry.get("experimental") is True and entry.get("enabled") is True:
             errors.append(f"{label}: experimental proofs must remain disabled until promoted")
+        overrides = entry.get("loop_unwind_overrides", [])
+        if not isinstance(overrides, list) or any(not isinstance(x, str) for x in overrides):
+            errors.append(f"{label}.loop_unwind_overrides must be a list of preset names")
+        else:
+            if len(overrides) > 1:
+                errors.append(f"{label}.loop_unwind_overrides supports at most one preset")
+            if len(overrides) != len(set(overrides)):
+                errors.append(f"{label}.loop_unwind_overrides contains duplicates")
+            for preset_name in overrides:
+                preset = LOOP_UNWIND_PRESETS.get(preset_name)
+                if preset is None:
+                    errors.append(f"{label}.loop_unwind_overrides contains an unknown preset")
+                elif package != preset["package"] or harness not in preset["harnesses"]:
+                    errors.append(f"{label}: loop-unwind preset is not applicable to package/harness")
     return sorted(set(errors))
 
 
@@ -214,6 +231,8 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
         ]
         for label in proof["required_covers"]:
             cmd.extend(["--require-cover", f"{proof['harness']}={label}"])
+        for preset_name in proof.get("loop_unwind_overrides", []):
+            cmd.extend(["--loop-unwind-preset", preset_name])
         if proof["stubbing"]:
             cmd.append("--stubbing")
             for summary in proof["stub_summaries"]:
@@ -254,11 +273,14 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
             and run_record.get("expected_harnesses") == [proof["harness"]]
             and run_record.get("package") == proof["package"]
             and run_record.get("required_covers") == {proof["harness"]: proof["required_covers"]}
+            and run_record.get("loop_unwind_presets", {}).get(proof["harness"], [])
+            == proof.get("loop_unwind_overrides", [])
         )
         outcomes.append({
             "id": proof["id"],
             "package": proof["package"],
             "harness": proof["harness"],
+            "loop_unwind_overrides": proof.get("loop_unwind_overrides", []),
             "experimental": proof["experimental"],
             "status": "PASS" if ok else "FAIL",
             "exit_code": rc,
@@ -292,6 +314,9 @@ def run_suite(repo: Path, out: Path, target_dir: Path, registry_path: Path) -> i
         "repo": str(repo),
         "selected_count": len(selected),
         "configured_count": len(registry["proofs"]),
+        "loop_unwind_presets": {
+            proof["harness"]: proof.get("loop_unwind_overrides", []) for proof in selected
+        },
         "status": "PASS" if all(x["status"] == "PASS" for x in outcomes)
         and all(pipeline_source_unchanged.values()) else "FAIL",
         "checks": outcomes,

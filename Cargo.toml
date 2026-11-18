@@ -49,7 +49,7 @@ authors = ["Avila Labs"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 # Kani proof harnesses are compiled only by `cargo kani` (docs/VERIFICATION.md).
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_full_capacity)', 'cfg(creusot)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_full_capacity)', 'cfg(kani_late_replay_covers)', 'cfg(creusot)'] }
 
 # RULESET E3: no panic paths outside tests. Test modules opt out with a module-level allow.
 [workspace.lints.clippy]

@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 25,
+  "expected_proof_count": 48,
   "proofs": [
     {
       "id": "output-append",
@@ -469,6 +469,542 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192
+    },
+    {
+      "id": "caller-current-filter",
+      "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_current_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "filter projection dirtied before refusal"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "caller-metadata",
+      "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "metadata projection dirtied before refusal"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "caller-anchor-filter",
+      "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_anchor_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "anchor projection dirtied before refusal"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "caller-ring-history",
+      "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_all_ring_entry_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "ring history projection dirtied before refusal"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "caller-statistics",
+      "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_stats_projection_except_refusal_count",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "stats projection dirtied before refusal"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "full-sensor-note-existing",
+      "requirement": "OA-TRK-336: Full64 used table with IDs0..63 and arbitrary i64 timestamps; existing ID updates its max without eviction.",
+      "package": "oa-track",
+      "harness": "time_gate::proofs_full::full_sensor_table_note_existing_id_updates_max_without_eviction",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "existing ID at first slot",
+        "existing ID at last slot",
+        "minimum report-time input",
+        "maximum report-time input",
+        "unchanged saturated eviction counter"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [
+        "kani_full_capacity"
+      ],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288
+    },
+    {
+      "id": "full-sensor-note-new",
+      "requirement": "OA-TRK-336: Full64 used table with IDs0..63 and arbitrary i64 timestamps; fresh ID64 evicts the first minimum and saturates eviction count.",
+      "package": "oa-track",
+      "harness": "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "eviction counter saturates",
+        "minimum report-time input",
+        "maximum report-time input",
+        "tied minimum keeps earliest slot"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [
+        "kani_full_capacity"
+      ],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288
+    },
+    {
+      "id": "late-append-anchor-filter-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_anchor_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-current-filter-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_current_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-metadata-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_metadata_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-output-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_output_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-ring-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_ring_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-stats-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_append_stats_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-anchor-filter-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_anchor_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-current-filter-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_current_filter_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-metadata-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_metadata_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-output-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_output_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-ring-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_ring_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-stats-projection",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_overflow_stats_projection",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-reachability",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_replay_append_reachability",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "late replay attempts current report before later failure",
+        "late replay reaches later numerical refusal",
+        "late replay append rollback case"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [
+        "kani_late_replay_covers"
+      ],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-reachability",
+      "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_replay_overflow_reachability",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "late replay attempts current report before later failure",
+        "late replay reaches later numerical refusal",
+        "late replay overflow rollback case"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [
+        "kani_late_replay_covers"
+      ],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-overflow-combined",
+      "requirement": "OA-TRK-335: Combined postconditions for the fixed two-event modeled-refusal fixture; resource-incomplete experiment, covered separately by the component family.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_overflow_before_refusal",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
+    },
+    {
+      "id": "late-append-combined",
+      "requirement": "OA-TRK-335: Combined postconditions for the fixed two-event modeled-refusal fixture; resource-incomplete experiment, covered separately by the component family.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_append_before_refusal",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+        "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+        "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+        "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+        "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 12288,
+      "loop_unwind_overrides": [
+        "late-replay-two-events-all-loops"
+      ]
     }
   ]
 }

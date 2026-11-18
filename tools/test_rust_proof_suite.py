@@ -12,6 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from rust_proof_suite import load_registry, run_suite, validate_registry
+from kani_validation import LOOP_UNWIND_PRESETS
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -45,26 +46,77 @@ def registry_with(*proofs):
 
 
 class SuiteConfigurationTests(unittest.TestCase):
-    def test_checked_in_registry_has_twenty_five_unique_configured_harnesses(self):
+    def test_checked_in_registry_has_all_required_unique_configured_harnesses(self):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 25)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 25)
+        self.assertEqual(registry["expected_proof_count"], 48)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 48)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 22)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 43)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
             "tracker-late-replay-rollback",
             "full-sensor-update",
+            "late-append-combined",
+            "late-overflow-combined",
         })
+
+    def test_late_rollback_conjunction_has_every_component_and_reachability_case(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        enabled = {proof["id"]: proof for proof in registry["proofs"] if proof["enabled"]}
+        components = {"current-filter", "anchor-filter", "ring", "metadata", "stats", "output"}
+        common_stubs = enabled["late-append-output-projection"]["stub_summaries"]
+        for mode in ("append", "overflow"):
+            expected = {f"late-{mode}-{component}-projection" for component in components}
+            expected.add(f"late-{mode}-reachability")
+            actual = {proof_id for proof_id in enabled if proof_id.startswith(f"late-{mode}-")}
+            self.assertEqual(actual, expected)
+            for proof_id in expected:
+                proof = enabled[proof_id]
+                self.assertEqual(proof["package"], "oa-track")
+                self.assertTrue(proof["stubbing"])
+                self.assertEqual(proof["stub_summaries"], common_stubs)
+                self.assertEqual(proof["loop_unwind_overrides"], ["late-replay-two-events-all-loops"])
+                if proof_id.endswith("reachability"):
+                    self.assertEqual(proof["harness"], f"tracker::proofs::rollback_paths::late_replay_{mode}_reachability")
+                    self.assertEqual(proof["cfgs"], ["kani_late_replay_covers"])
+                    self.assertEqual(set(proof["required_covers"]), {
+                        "late replay attempts current report before later failure",
+                        "late replay reaches later numerical refusal",
+                        f"late replay {mode} rollback case",
+                    })
+                else:
+                    suffix = proof_id.removeprefix(f"late-{mode}-").replace("-", "_")
+                    self.assertEqual(proof["harness"], f"tracker::proofs::rollback_paths::late_{mode}_{suffix}")
+                    self.assertEqual(proof["cfgs"], [])
+                    self.assertEqual(proof["required_covers"], [])
 
     def test_minimal_valid_matrix_is_accepted(self):
         self.assertEqual(validate_registry(registry_with(proof_entry())), [])
+
+    def test_closed_loop_unwind_preset_is_optional_and_restricted(self):
+        proof = proof_entry()
+        proof["harness"] = sorted(LOOP_UNWIND_PRESETS["late-replay-two-events"]["harnesses"])[0]
+        proof["loop_unwind_overrides"] = ["late-replay-two-events"]
+        self.assertEqual(validate_registry(registry_with(proof)), [])
+        for malformed in (
+            ["unknown"], ["late-replay-two-events", "late-replay-two-events"],
+            "late-replay-two-events", ["late-replay-two-events", "x"],
+            ["late-replay-two-events:2"], [{"preset": "late-replay-two-events", "bound": 2}],
+        ):
+            with self.subTest(malformed=malformed):
+                bad = copy.deepcopy(proof)
+                bad["loop_unwind_overrides"] = malformed
+                self.assertTrue(validate_registry(registry_with(bad)))
+        wrong_harness = copy.deepcopy(proof)
+        wrong_harness["harness"] = "types::proofs::bounded_example"
+        self.assertTrue(any("not applicable" in error for error in validate_registry(registry_with(wrong_harness))))
 
     def test_expected_count_and_duplicate_harness_are_rejected(self):
         first = proof_entry()
@@ -114,11 +166,13 @@ out.mkdir(parents=True, exist_ok=True)
 package = value("--package")
 harness = value("--harness")
 covers = [item.split("=", 1)[1] for flag, item in zip(args, args[1:]) if flag == "--require-cover"]
+loop_presets = [item for flag, item in zip(args, args[1:]) if flag == "--loop-unwind-preset"]
 record = {
     "status": "PASS",
     "package": package,
     "expected_harnesses": [harness],
     "required_covers": {harness: covers},
+    "loop_unwind_presets": {harness: loop_presets},
     "checks": [{"harness": harness, "status": "PASS", "source_unchanged": True}],
 }
 mode = os.environ.get("FAKE_RUN_RECORD_MODE", "pass")
@@ -193,6 +247,25 @@ print("fake runner stdout")
                 self.assertEqual(result, 1)
                 self.assertEqual(suite["status"], "FAIL")
                 self.assertEqual(suite["checks"][0]["status"], "FAIL")
+
+    def test_loop_unwind_preset_is_forwarded_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, proof_count=1)
+            proof = proof_entry()
+            proof["harness"] = sorted(LOOP_UNWIND_PRESETS["late-replay-two-events"]["harnesses"])[0]
+            proof["loop_unwind_overrides"] = ["late-replay-two-events"]
+            registry.write_text(json.dumps(registry_with(proof), indent=2) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry)
+            self.assertEqual(result, 0, stderr.getvalue())
+            suite = json.loads((out / "suite.json").read_text())
+            outcome = suite["checks"][0]
+            self.assertIn("--loop-unwind-preset", outcome["command"])
+            self.assertIn("late-replay-two-events", outcome["command"])
+            run_record = json.loads((out / "proofs" / proof["id"] / "run" / "run.json").read_text())
+            self.assertEqual(run_record["loop_unwind_presets"][proof["harness"]], ["late-replay-two-events"])
 
 
 if __name__ == "__main__":

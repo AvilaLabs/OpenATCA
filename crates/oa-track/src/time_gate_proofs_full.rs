@@ -168,3 +168,96 @@ fn full_sensor_table_note_preserves_or_evicts_by_contract() {
     kani::cover!(toa == i64::MIN, "minimum report-time input");
     kani::cover!(toa == i64::MAX, "maximum report-time input");
 }
+
+/// Updating an existing ID preserves the full table and does not evict.
+// REQ: OA-TRK-336
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn full_sensor_table_note_existing_id_updates_max_without_eviction() {
+    let mut g = gate_new();
+    for i in 0..SENSOR_TABLE {
+        g.sensor_used[i] = true;
+        g.sensor_id[i] = i as u16;
+        g.sensor_ns[i] = kani::any();
+    }
+    g.evicted = kani::any();
+    let old_times = g.sensor_ns;
+    let before_evicts = g.evicted;
+    let target: usize = kani::any();
+    kani::assume(target < SENSOR_TABLE);
+    let toa: i64 = kani::any();
+
+    gate_note_applied(&mut g, target as u16, toa);
+
+    assert_eq!(g.evicted, before_evicts);
+    for i in 0..SENSOR_TABLE {
+        assert!(g.sensor_used[i]);
+        if i == target {
+            assert_eq!(g.sensor_id[i], target as u16);
+            assert_eq!(g.sensor_ns[i], old_times[i].max(toa));
+        } else {
+            assert_eq!(g.sensor_id[i], i as u16);
+            assert_eq!(g.sensor_ns[i], old_times[i]);
+        }
+    }
+    kani::cover!(target == 0, "existing ID at first slot");
+    kani::cover!(target == SENSOR_TABLE - 1, "existing ID at last slot");
+    kani::cover!(toa == i64::MIN, "minimum report-time input");
+    kani::cover!(toa == i64::MAX, "maximum report-time input");
+    kani::cover!(
+        before_evicts == u64::MAX,
+        "unchanged saturated eviction counter"
+    );
+}
+
+/// Inserting a new ID into a full table evicts the first least-recent slot.
+// REQ: OA-TRK-336
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn full_sensor_table_note_new_id_evicts_first_argmin() {
+    let mut g = gate_new();
+    for i in 0..SENSOR_TABLE {
+        g.sensor_used[i] = true;
+        g.sensor_id[i] = i as u16;
+        g.sensor_ns[i] = kani::any();
+    }
+    g.evicted = kani::any();
+    let old_times = g.sensor_ns;
+    let before_evicts = g.evicted;
+    let toa: i64 = kani::any();
+
+    // This proof-local witness does not constrain the input timestamp array: every finite
+    // 64-element array has a first minimum. The proof establishes the postcondition for any
+    // witness satisfying that exact first-argmin contract.
+    let expected_slot: usize = kani::any();
+    kani::assume(expected_slot < SENSOR_TABLE);
+    for i in 0..SENSOR_TABLE {
+        kani::assume(old_times[expected_slot] <= old_times[i]);
+        if i < expected_slot {
+            kani::assume(old_times[expected_slot] < old_times[i]);
+        }
+    }
+
+    gate_note_applied(&mut g, SENSOR_TABLE as u16, toa);
+
+    assert_eq!(g.evicted, before_evicts.saturating_add(1));
+    for i in 0..SENSOR_TABLE {
+        assert!(g.sensor_used[i]);
+        if i == expected_slot {
+            assert_eq!(g.sensor_id[i], SENSOR_TABLE as u16);
+            assert_eq!(g.sensor_ns[i], i64::MIN.max(toa));
+        } else {
+            assert_eq!(g.sensor_id[i], i as u16);
+            assert_eq!(g.sensor_ns[i], old_times[i]);
+        }
+    }
+    kani::cover!(before_evicts == u64::MAX, "eviction counter saturates");
+    kani::cover!(toa == i64::MIN, "minimum report-time input");
+    kani::cover!(toa == i64::MAX, "maximum report-time input");
+    kani::cover!(
+        expected_slot == 0 && old_times[1] == old_times[0] && old_times[0] <= old_times[2],
+        "tied minimum keeps earliest slot"
+    );
+}

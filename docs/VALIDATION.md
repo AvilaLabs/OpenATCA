@@ -77,8 +77,9 @@ default 4,096-track tracker capacity, small output/log overflow and reuse, and c
 forward confirmation and recovery, plus one `MAX_BUCKET_PLOTS` overload with counted loss and
 subsequent existing-track recovery, and full ADS-B and plot pending queues with counted overflow,
 drain and recovery. A source-backed route ledger requires positive runtime evidence and
-injected-allocation detection in each armed window. Fusion association work, candidate, record and
-history boundaries remain outside this scope. See the package's [scope and
+injected-allocation detection in each armed window. The tracker fixture exercises history-ring
+wrap, late replay and late-ring retention refusal. Fusion association-work/pair, candidate, record
+and registration-history boundaries remain outside this scope. See the package's [scope and
 fixtures](../validation/oa-alloc-check/README.md). A missing route, control or fingerprint fails
 this scoped check. Its narrow unsafe-code exception is recorded in RULESET A0; product crates
 retain their unsafe-code prohibition.

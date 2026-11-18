@@ -14,7 +14,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from kani_validation import (
+    LOOP_UNWIND_PRESETS,
+    _check_loop_unwind_log,
     _copy_source_artifacts,
+    _loop_unwind_configuration,
+    _loop_unwind_argument,
+    _validate_loop_unwind_source,
     changed_source_paths,
     evaluate_kani_binding,
     evaluate_kani_report,
@@ -408,6 +413,178 @@ class KaniBindingTests(unittest.TestCase):
         report["project"]["workspace_root"] = "/tmp/other-checkout"
         text_wrong_root = json.dumps(report, separators=(",", ":"))
         self.assertTrue(any("workspace_root" in e for e in evaluate_kani_binding(text_wrong_root, fixture_binding(text_wrong_root))))
+
+    def test_scoped_unwind_requires_exact_preset_command_and_logged_bound(self):
+        preset_name = "late-replay-two-events"
+        preset = LOOP_UNWIND_PRESETS[preset_name]
+        harness = sorted(preset["harnesses"])[0]
+        report = fixture_report()
+        report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
+        record = fixture_binding(report_text)
+        record["harness"] = harness
+        record["command"][record["command"].index("--harness") + 1] = harness
+        record["command"] += [
+            "--cbmc-args", "--unwindset", f"{preset['loop_id']}:{preset['bound']}",
+            "--unwinding-assertions",
+        ]
+        record["command_sha256"] = _canonical_sha(record["command"])
+        record["loop_unwind_preset"] = preset_name
+        record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
+        expected_line = (
+            f"Not unwinding loop {preset['loop_id']} iteration 3 file "
+            f"crates/oa-track/src/tracker.rs line 1018 column 5 function tracker::update_late thread 0"
+        )
+        record["loop_unwind_log_check"] = {"passed": True, "matched_line": expected_line}
+        self.assertEqual(evaluate_kani_binding(report_text, record), [])
+
+        stale = json.loads(json.dumps(record))
+        stale["loop_unwind_configuration"]["loop_id"] = "old.loop.id.3"
+        self.assertTrue(any("configuration" in error for error in evaluate_kani_binding(report_text, stale)))
+        wrong_harness = json.loads(json.dumps(record))
+        wrong_harness["harness"] = HARNESS
+        wrong_harness["command"][wrong_harness["command"].index("--harness") + 1] = HARNESS
+        wrong_harness["command_sha256"] = _canonical_sha(wrong_harness["command"])
+        self.assertTrue(any("not applicable" in error for error in evaluate_kani_binding(report_text, wrong_harness)))
+        wrong_line = json.loads(json.dumps(record))
+        wrong_line["loop_unwind_log_check"]["matched_line"] = expected_line.replace("iteration 3", "iteration 16")
+        self.assertTrue(any("log line" in error for error in evaluate_kani_binding(report_text, wrong_line)))
+
+    def test_scoped_unwind_log_check_rejects_wrong_id_or_wrong_source_location(self):
+        preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
+        line = (
+            f"Not unwinding loop {preset['loop_id']} iteration 3 file "
+            f"crates/oa-track/src/tracker.rs line 1018 column 5 function tracker::update_late thread 0"
+        )
+        self.assertTrue(_check_loop_unwind_log("late-replay-two-events", line, "")["passed"])
+        for malformed in (
+            line.replace(preset["loop_id"], "stale.id"),
+            line.replace("iteration 3", "iteration 2"),
+            line.replace("iteration 3", "iteration 4"),
+            line.replace("line 1018", "line 1017"),
+            line.replace("tracker::update_late", "tracker::other_loop"),
+            line.replace("tracker::update_late", "tracker::update_late_extra"),
+            line.replace("tracker.rs", "other.rs"),
+            line.replace("crates/oa-track/src", "other/src"),
+        ):
+            with self.subTest(malformed=malformed):
+                self.assertFalse(_check_loop_unwind_log("late-replay-two-events", malformed, "")["passed"])
+
+    def test_all_late_loop_preset_checks_every_loop_and_exact_bound_location(self):
+        preset_name = "late-replay-two-events-all-loops"
+        preset = LOOP_UNWIND_PRESETS[preset_name]
+        lines = []
+        for loop in preset["loops"]:
+            if loop.get("log_mode") == "completed_before_bound":
+                prefix = "Unwinding"
+                iterations = loop["iterations"]
+            else:
+                prefix = "Not unwinding"
+                iterations = [loop["bound"]]
+            lines.extend(
+                f"{prefix} loop {loop['loop_id']} iteration {iteration} file "
+                f"crates/oa-track/src/tracker.rs line {loop['line']} column 5 "
+                f"function tracker::update_late thread 0"
+                for iteration in iterations
+            )
+        check = _check_loop_unwind_log(preset_name, "\n".join(lines), "")
+        self.assertTrue(check["passed"])
+        self.assertEqual(check["matched_lines"], lines)
+        self.assertEqual(
+            _loop_unwind_argument(preset),
+            ",".join(f"{loop['loop_id']}:{loop['bound']}" for loop in preset["loops"]),
+        )
+        for index, malformed in (
+            (0, lines[0].replace(preset["loops"][0]["loop_id"], "stale.loop.id")),
+            (0, lines[0].replace("iteration 1", "iteration 3")),
+            (2, lines[2].replace("iteration 2", "iteration 3")),
+            (3, lines[3].replace("line 988", "line 987")),
+            (4, lines[4].replace("tracker::update_late", "tracker::wrong_loop")),
+        ):
+            bad_lines = list(lines)
+            bad_lines[index] = malformed
+            with self.subTest(index=index, malformed=malformed):
+                self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(bad_lines), "")["passed"])
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(lines[:1] + lines[2:]), "")["passed"])
+
+    def test_all_late_loop_preset_source_and_fixture_guards_cover_every_harness(self):
+        preset_name = "late-replay-two-events-all-loops"
+        for harness in sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"]):
+            with self.subTest(harness=harness):
+                _validate_loop_unwind_source(Path(__file__).resolve().parents[1], preset_name, "oa-track", harness)
+
+    def test_all_late_loop_record_binds_all_loop_args_and_log_lines(self):
+        preset_name = "late-replay-two-events-all-loops"
+        preset = LOOP_UNWIND_PRESETS[preset_name]
+        harness = sorted(preset["harnesses"])[0]
+        report = fixture_report()
+        report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
+        record = fixture_binding(report_text)
+        record["harness"] = harness
+        record["command"][record["command"].index("--harness") + 1] = harness
+        record["command"] += ["--cbmc-args", "--unwindset", _loop_unwind_argument(preset), "--unwinding-assertions"]
+        record["command_sha256"] = _canonical_sha(record["command"])
+        record["loop_unwind_preset"] = preset_name
+        record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
+        lines = []
+        for loop in preset["loops"]:
+            if loop.get("log_mode") == "completed_before_bound":
+                prefix, iterations = "Unwinding", loop["iterations"]
+            else:
+                prefix, iterations = "Not unwinding", [loop["bound"]]
+            lines.extend(
+                f"{prefix} loop {loop['loop_id']} iteration {iteration} file "
+                f"crates/oa-track/src/tracker.rs line {loop['line']} column 5 "
+                f"function tracker::update_late thread 0"
+                for iteration in iterations
+            )
+        record["loop_unwind_log_check"] = {"passed": True, "matched_line": None, "matched_lines": lines}
+        self.assertEqual(evaluate_kani_binding(report_text, record), [])
+        record["loop_unwind_log_check"]["matched_lines"] = lines[:-1]
+        self.assertTrue(any("log line" in error for error in evaluate_kani_binding(report_text, record)))
+
+    def test_scoped_unwind_source_guard_rejects_stale_loop_location(self):
+        preset_name = "late-replay-two-events"
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            path = repo / LOOP_UNWIND_PRESETS[preset_name]["source"]
+            path.parent.mkdir(parents=True)
+            path.write_text("fn update_late(\n" + "\n" * 1016 + "while other_condition {\n")
+            with self.assertRaisesRegex(ValueError, "stale source location"):
+                _validate_loop_unwind_source(
+                    repo, preset_name, "oa-track", sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"])[0]
+                )
+
+    def test_scoped_unwind_source_guard_requires_exact_harness_attribute(self):
+        preset_name = "late-replay-two-events"
+        harness = sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"])[0]
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            loop_path = repo / LOOP_UNWIND_PRESETS[preset_name]["source"]
+            loop_path.parent.mkdir(parents=True)
+            loop_lines = ["fn update_late("] + [""] * 1016 + ["while k < n_seq {"]
+            loop_path.write_text("\n".join(loop_lines) + "\n")
+            source_rel = LOOP_UNWIND_PRESETS[preset_name].get("harness_source", {}).get(
+                harness, LOOP_UNWIND_PRESETS[preset_name]["default_harness_source"]
+            )
+            proof_path = repo / source_rel
+            proof_path.parent.mkdir(parents=True, exist_ok=True)
+            fn_name = harness.rsplit("::", 1)[-1]
+            proof_path.write_text(f"#[kani::proof]\n#[kani::unwind(16)]\nfn {fn_name}() {{}}\n")
+            _validate_loop_unwind_source(repo, preset_name, "oa-track", harness)
+            proof_path.write_text(f"#[kani::proof]\n#[kani::unwind(15)]\nfn {fn_name}() {{}}\n")
+            with self.assertRaisesRegex(ValueError, "kani::unwind\\(16\\)"):
+                _validate_loop_unwind_source(repo, preset_name, "oa-track", harness)
+
+    def test_scoped_unwind_does_not_mask_failed_unwinding_assertion(self):
+        report = fixture_report()
+        report["verification_results"]["results"][0]["checks"].append({
+            "id": 6, "function": HARNESS, "status": "Failure",
+            "description": "stale scoped bound truncated loop", "category": "unwinding_assertion",
+        })
+        report["property_details"][0]["property_details"]["total_properties"] += 1
+        report["property_details"][0]["property_details"]["failed"] += 1
+        errors = evaluate_kani_report(report, [HARNESS], {HARNESS: COVERS})
+        self.assertTrue(any("unwinding check did not succeed" in error for error in errors))
 
 
 class RunnerIsolationTests(unittest.TestCase):

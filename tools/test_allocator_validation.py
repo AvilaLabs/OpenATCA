@@ -29,7 +29,46 @@ def result(injected=False):
             "fusion_adsb_hard_assoc_registration",
             "fusion_anonymous_init_and_assoc",
         ],
-        "route_ids": sorted(gate.ROUTE_LEDGER),
+        "route_ids": [
+            'fusion_adsb_ingest',
+            'fusion_adsb_pending_drain',
+            'fusion_adsb_pending_overflow',
+            'fusion_adsb_pending_recovery',
+            'fusion_advance',
+            'fusion_anonymous_initiation',
+            'fusion_bucket_capacity_recovery',
+            'fusion_bucket_known_match',
+            'fusion_bucket_plot_cap',
+            'fusion_bucket_unknown_identity',
+            'fusion_finish',
+            'fusion_local_association',
+            'fusion_plot_ingest',
+            'fusion_plot_pending_bucket_cap',
+            'fusion_plot_pending_overflow',
+            'fusion_plot_pending_recovery',
+            'fusion_registration',
+            'tracker_advance',
+            'tracker_capacity_recovery',
+            'tracker_capacity_refusal',
+            'tracker_clock_backstep',
+            'tracker_clock_forward_recovery',
+            'tracker_clock_hold',
+            'tracker_clock_recovery',
+            'tracker_default_capacity',
+            'tracker_default_confirmed_capacity',
+            'tracker_flush',
+            'tracker_history_retention_refusal',
+            'tracker_history_wrap_refilter',
+            'tracker_history_wrap_replay',
+            'tracker_invalid_input_refusal',
+            'tracker_log_overflow',
+            'tracker_out_of_order_refilter',
+            'tracker_output_overflow',
+            'tracker_output_payload_stability',
+            'tracker_output_reuse',
+            'tracker_prediction',
+            'tracker_update',
+        ],
         "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
         "tracker": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
@@ -66,11 +105,21 @@ def result(injected=False):
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
             "offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
             "bucket_plot_overflow": 0, "recovery_applied": 2,
+            "tracker_applied": 1, "tracker_duplicates": 1_048_575,
+            "tracker_refused": 0, "tracker_capacity_refused": 0,
+            "tracker_late_window": 0, "tracker_late_ring": 0,
+            "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+            "hard_extra": 0, "hard_mismatch": 0,
         },
         "plot_pending": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
             "offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
             "bucket_plot_overflow": 1_032_192, "recovery_applied": 1,
+            "tracker_applied": 1, "tracker_duplicates": 0,
+            "tracker_refused": 0, "tracker_capacity_refused": 0,
+            "tracker_late_window": 0, "tracker_late_ring": 0,
+            "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+            "hard_extra": 16_383, "hard_mismatch": 0,
         },
         "fusion": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
@@ -165,6 +214,17 @@ class AllocatorResultTests(unittest.TestCase):
         value["fusion"]["plots"] = 0
         self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
 
+    # REQ: OA-TRK-337
+    def test_pending_windows_require_exact_dispositions_for_all_admitted_work(self):
+        value = result()
+        value["adsb_pending"]["tracker_duplicates"] -= 1
+        self.assertTrue(any("adsb_pending.tracker_duplicates" in error
+                            for error in gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["plot_pending"]["hard_extra"] = 16_382
+        self.assertTrue(any("plot_pending.hard_extra" in error
+                            for error in gate.evaluate_allocator_result(json.dumps(value))))
+
     def test_overflow_partial_json_and_wrong_top_level_fail(self):
         value = result()
         value["overflow"] = True
@@ -211,15 +271,18 @@ class AllocatorLayoutTests(unittest.TestCase):
                             gate.evaluate_allocator_result(json.dumps(value))))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            for relative in {item[0] for item in gate.ROUTE_LEDGER.values()}:
-                write(root / relative, "fn tracker_update() {} fn tracker_predict() {} "
-                      "fn tracker_advance() {} fn tracker_flush() {} fn output_clear() {} fn fusion_adsb() {} "
-                      "fn fusion_plots() {} fn process_bucket() {} fn associate_bucket() {} "
-                      "fn fusion_advance() {} fn fusion_finish() {} "
-                      "fn fusion_registration() {}")
+            symbols_by_file = {}
+            for route_id, (relative, _) in gate.ROUTE_LEDGER.items():
+                symbols_by_file.setdefault(relative, set()).add(gate.ROUTE_SYMBOLS[route_id])
+            for relative, symbols in symbols_by_file.items():
+                write(root / relative, " ".join(f"fn {symbol}() {{}}" for symbol in sorted(symbols)))
             self.assertEqual(gate.allocation_route_ledger_errors(root), [])
-            (root / "crates/oa-track/src/fusion.rs").write_text("fn fusion_plots() {}", encoding="utf-8")
-            self.assertTrue(gate.allocation_route_ledger_errors(root))
+            tracker = root / "crates/oa-track/src/tracker.rs"
+            tracker.write_text("fn tracker_predict() {}", encoding="utf-8")
+            fusion = root / "crates/oa-track/src/fusion.rs"
+            fusion.write_text(fusion.read_text(encoding="utf-8") + " fn tracker_update() {}", encoding="utf-8")
+            errors = gate.allocation_route_ledger_errors(root)
+            self.assertTrue(any("tracker_update" in error for error in errors))
 
     def test_workspace_leak_and_harness_dependency_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -289,6 +352,19 @@ probe = { path = "../../validation/oa-alloc-check" }
                 self.assertNotIn("unsafe", gate._rust_tokens(text))
         with self.assertRaises(ValueError):
             gate._rust_tokens('r##"never closed')
+
+    def test_safe_pending_fixture_module_is_allowed_but_unsafe_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            helper = root / "validation/oa-alloc-check/src/pending_windows.rs"
+            helper.write_text("#![forbid(unsafe_code)]\nfn fixture() {}\n")
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+            helper.write_text("#![allow(unsafe_code)]\nunsafe fn fixture() {}\n")
+            self.assertTrue(any("pending_windows.rs" in e for e in gate.allocation_layout_errors(root)))
+
+    def test_repository_allocator_layout_is_valid(self):
+        self.assertEqual(gate.allocation_layout_errors(Path(__file__).resolve().parents[1]), [])
 
     def test_guard_allows_allocator_unsafe_and_rejects_duplicate_attribute(self):
         with tempfile.TemporaryDirectory() as temp:

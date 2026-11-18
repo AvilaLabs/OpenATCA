@@ -1043,15 +1043,11 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         if k == 0 && matches!(step, Step::Applied | Step::Begun | Step::Resynced) {
             emit_if_confirmed_at(t, slot, m.toa_ns, out);
             // Kani-only reachability evidence that later replay failure rolls back a real attempt.
-            #[cfg(kani)]
+            #[cfg(all(kani, kani_late_replay_covers))]
             {
                 kani::cover!(
-                    out.t_ns.len() > output.lens[0],
-                    "late replay appends current report before later failure"
-                );
-                kani::cover!(
-                    out.overflow > output.overflow,
-                    "late replay overflows current report before later failure"
+                    out.t_ns.len() > output.lens[0] || out.overflow > output.overflow,
+                    "late replay attempts current report before later failure"
                 );
             }
         }

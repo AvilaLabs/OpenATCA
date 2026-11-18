@@ -438,12 +438,12 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         return errors + ["allocator harness src directory escapes repository"]
     src_sources = sorted(p.name for p in src_real.glob("*.rs")) if src_real.is_dir() else []
     root_sources = sorted(p.name for p in harness_dir.glob("*.rs"))
-    if src_sources == ["allocator.rs", "main.rs"]:
+    if src_sources in (["allocator.rs", "main.rs"], ["allocator.rs", "main.rs", "pending_windows.rs"]):
         base = src_dir
     elif root_sources == ["allocator.rs", "main.rs"] and not src_dir.exists():
         base = harness_dir
     else:
-        errors.append("allocator harness src files must be exactly main.rs and allocator.rs")
+        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs")
         base = src_dir if src_dir.is_dir() else harness_dir
     try:
         if base.is_dir() and any(p.is_symlink() or p.is_dir() for p in base.iterdir()):
@@ -477,6 +477,22 @@ def allocation_layout_errors(repo: Path) -> list[str]:
                 errors.append("allocator.rs must contain exactly one global allocator attribute")
             if not re.search(r"\bunsafe\s+impl\s+(?:<[^>]*>\s*)?GlobalAlloc\b", allocator):
                 errors.append("allocator.rs must contain the unsafe GlobalAlloc implementation")
+    pending_path = base / "pending_windows.rs"
+    if pending_path.exists():
+        if pending_path.is_symlink() or not _inside(pending_path.resolve(), root):
+            errors.append("pending_windows.rs escapes its source boundary")
+        else:
+            try:
+                pending = _rust_tokens(pending_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as exc:
+                errors.append(f"cannot read pending_windows.rs: {exc}")
+            else:
+                if not re.search(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", pending):
+                    errors.append("pending_windows.rs must forbid unsafe_code")
+                if re.search(r"\bunsafe\b", pending):
+                    errors.append("pending_windows.rs may not contain unsafe tokens")
+                if re.search(r"#\s*!?\s*\[\s*allow\s*\([^]]*\bunsafe_code\b", pending):
+                    errors.append("pending_windows.rs may not allow unsafe_code")
     return errors
 
 
@@ -599,10 +615,20 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                             "known_hard_applied": 1, "unmatched_hard_no_track": 16_383,
                             "recovery_applied": 1},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
-                         "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1},
+                         "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1,
+                         "tracker_applied": 1, "tracker_duplicates": 1_048_575,
+                         "tracker_refused": 0, "tracker_capacity_refused": 0,
+                         "tracker_late_window": 0, "tracker_late_ring": 0,
+                         "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+                         "hard_extra": 0, "hard_mismatch": 0},
         "plot_pending": {"offered": 1_048_577, "pending_overflow": 1,
                          "drained": 1_048_576, "bucket_plot_overflow": 1_032_192,
-                         "recovery_applied": 1},
+                         "recovery_applied": 1, "tracker_applied": 1,
+                         "tracker_duplicates": 0, "tracker_refused": 0,
+                         "tracker_capacity_refused": 0, "tracker_late_window": 0,
+                         "tracker_late_ring": 0, "hard_extra": 16_383,
+                         "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+                         "hard_mismatch": 0},
     }
     for group, minima in extra_fields.items():
         evidence = result.get(group)
@@ -638,9 +664,19 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                              "known_hard_applied": 1, "unmatched_hard_no_track": 16_383,
                              "recovery_applied": 1},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
-                         "bucket_plot_overflow": 0, "recovery_applied": 2},
+                         "bucket_plot_overflow": 0, "recovery_applied": 2,
+                         "tracker_applied": 1, "tracker_duplicates": 1_048_575,
+                         "tracker_refused": 0, "tracker_capacity_refused": 0,
+                         "tracker_late_window": 0, "tracker_late_ring": 0,
+                         "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+                         "hard_extra": 0, "hard_mismatch": 0},
         "plot_pending": {"offered": 1_048_577, "pending_overflow": 1, "drained": 1_048_576,
-                         "bucket_plot_overflow": 1_032_192, "recovery_applied": 1},
+                         "bucket_plot_overflow": 1_032_192, "recovery_applied": 1,
+                         "tracker_applied": 1, "tracker_duplicates": 0,
+                         "tracker_refused": 0, "tracker_capacity_refused": 0,
+                         "tracker_late_window": 0, "tracker_late_ring": 0,
+                         "tracker_jump_rejected": 0, "tracker_numerical_refused": 0,
+                         "hard_extra": 16_383, "hard_mismatch": 0},
     }
     for group, fields in exact_fields.items():
         evidence = result.get(group)

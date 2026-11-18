@@ -20,6 +20,8 @@ jobs:
         run: python3 tools/test_validate_candidate.py
       - name: Allocator evaluator tests
         run: python3 tools/test_allocator_validation.py
+      - name: Proof control provisioning tests
+        run: python3 tools/test_prepare_rust_proof_controls.py
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
       - name: Test

@@ -1,257 +1,1362 @@
 {
-  "record_version": 1,
-  "date": "2026-11-17",
-  "base_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
-  "scope": "Selected Rust properties only; no system, physical-accuracy, unbounded-history or generated-machine-code claim.",
-  "product_rust": "1.89.0",
+  "base_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+  "creusot": {
+    "evidence_provenance": "Preserved from prior_phase_record; not rerun during this Kani aggregation.",
+    "negative_control_detected": true,
+    "proof_goals_passed": 11,
+    "rust": "nightly-2026-08-03",
+    "scope": "Precondition-free exact total timestamp split contract on directly imported production source.",
+    "version": "0.14.0"
+  },
+  "date": "2026-11-18",
+  "experimental_open": [
+    {
+      "harness": "tracker::proofs::numerical_refusal_restores_track_and_output_transaction_state",
+      "id": "tracker-numerical-refusal-rollback",
+      "scope": "Broader arbitrary-state proof remains experimental and open."
+    },
+    {
+      "harness": "tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal",
+      "id": "tracker-late-replay-rollback",
+      "scope": "Combined late rollback attempt remains experimental; the bounded fixed-fixture result is represented only by the conjunction of all 12 component projections and both caller reachability proofs."
+    },
+    {
+      "harness": "time_gate::proofs_full::full_sensor_table_note_preserves_or_evicts_by_contract",
+      "id": "full-sensor-update",
+      "scope": "Combined/full sensor-update attempt remains experimental; the selected existing-ID and first-argmin new-ID finite-table obligations are separately covered by the paired passing proofs."
+    },
+    {
+      "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_overflow_before_refusal",
+      "id": "late-overflow-combined",
+      "scope": "Combined late rollback attempt remains experimental; the bounded fixed-fixture result is represented only by the conjunction of all 12 component projections and both caller reachability proofs."
+    },
+    {
+      "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_append_before_refusal",
+      "id": "late-append-combined",
+      "scope": "Combined late rollback attempt remains experimental; the bounded fixed-fixture result is represented only by the conjunction of all 12 component projections and both caller reachability proofs."
+    }
+  ],
+  "experimental_outcomes": {
+    "full-sensor-update": "Combined update proof remains experimental; two independently checked full-64 finite-table obligations (existing-ID update and fresh-ID first-argmin eviction) pass as a pair. This does not claim every branch is jointly proven.",
+    "late-append-combined": "Combined append case was not run under the current assertion-only/all-loops configuration. An earlier run with a different model configuration exceeded driver resources; no result for the current configuration and no proof conclusion.",
+    "late-overflow-combined": "Combined overflow case with the registered all-loops preset reached CBMC SAT/UNSAT results, then Kani's driver failed allocating about 13.3 GB; no result JSON was produced. No proof conclusion.",
+    "tracker-late-replay-rollback": "The combined late-replay proof exceeded driver memory/time limits. Its fixed two-event fixture property is supported only if all six output-capacity-1 projections, all six capacity-2 projections, and both actual-caller reachability proofs pass. Arbitrary-prestate rollback is not established by that fixture proof.",
+    "tracker-numerical-refusal-rollback": "Memory limit; no proof conclusion."
+  },
   "kani": {
-    "version": "0.68.0",
     "cbmc": "6.11.0",
-    "required_passed": 22,
-    "configured": 25,
+    "configured": 48,
     "proofs": [
       {
-        "id": "output-append",
-        "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
-        "status": "PASS",
-        "result_sha256": "bb18a25c4bc74cd1bad8c64e7ad9621c437113b3ef0e718d02b0f235d36df6ea",
         "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "output-capacity",
-        "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
+        "evidence_ref": "path-candidate-suite-v2/proofs/caller-anchor-filter",
+        "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_anchor_filter_projection",
+        "id": "caller-anchor-filter",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "anchor projection dirtied before refusal"
+        ],
+        "result_sha256": "dd4bb3bd3adea964388ccc1d6ea5016aff6c44ef041316c65bbab8c1e0c7b601",
+        "source_group_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
         "status": "PASS",
-        "result_sha256": "11c352e0b20676dc1497b4228835e208426a8270794062138aa606b186c09d98",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "output-clear",
-        "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
-        "status": "PASS",
-        "result_sha256": "e9385ad664d6700cd55bb21b9fba3be3d16a20f725c844be03e177c2149c9da9",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "tracker-current-row",
-        "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
-        "status": "PASS",
-        "result_sha256": "5451ffffc8793adb7315c3478e02dba5831fe363f0cee1fa56a8d565966d3479",
-        "cfgs": [],
+        "stub_summaries": [
+          "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+        ],
         "stubbing": true
       },
       {
-        "id": "tracker-unrepresentable-row",
-        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
-        "status": "PASS",
-        "result_sha256": "2d1f3cfbc98e89d28744fa11639449bc45d4b95c91adcffa7e18610a39592839",
         "cfgs": [],
+        "evidence_ref": "path-candidate-suite-v2/proofs/caller-current-filter",
+        "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_current_filter_projection",
+        "id": "caller-current-filter",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "filter projection dirtied before refusal"
+        ],
+        "result_sha256": "db50bd5a597023ec7790d83118250d8ba8fd3e03dfaf924ae31bfd2095b4a746",
+        "source_group_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "status": "PASS",
+        "stub_summaries": [
+          "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+        ],
         "stubbing": true
       },
       {
-        "id": "tracker-output-overflow",
-        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
-        "status": "PASS",
-        "result_sha256": "4c1e933dc6b8328ae1b7b6640398459d2d48c88e8e094cb5518f1461d15cce86",
         "cfgs": [],
+        "evidence_ref": "path-candidate-suite-v2/proofs/caller-metadata",
+        "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection",
+        "id": "caller-metadata",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "metadata projection dirtied before refusal"
+        ],
+        "result_sha256": "1538370f83be571b9a53f5d97ba889e2c4c1e5c1fabb69d47902a073cc65ebc2",
+        "source_group_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "status": "PASS",
+        "stub_summaries": [
+          "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+        ],
         "stubbing": true
       },
       {
-        "id": "tracker-rejected-dispatch",
-        "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
-        "status": "PASS",
-        "result_sha256": "be618f2da8fc7fce2f7984806440bfbb3e082b9ac8440acfc547431c63a3b13c",
         "cfgs": [],
+        "evidence_ref": "path-candidate-suite-v2/proofs/caller-ring-history",
+        "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_all_ring_entry_projection",
+        "id": "caller-ring-history",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "ring history projection dirtied before refusal"
+        ],
+        "result_sha256": "f2ba37f5aba6196a92d2c78d3e1cfadea2d069f5fdfc2b521f6e6ba6429af097",
+        "source_group_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "status": "PASS",
+        "stub_summaries": [
+          "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+        ],
         "stubbing": true
       },
       {
-        "id": "tracker-unconfirmed-applied",
-        "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
-        "status": "PASS",
-        "result_sha256": "b8ca3cf992357c8e3342b530472b8ac32f2e104b81d1b5ceea7ae53191aafeee",
         "cfgs": [],
+        "evidence_ref": "path-candidate-suite-v2/proofs/caller-statistics",
+        "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_stats_projection_except_refusal_count",
+        "id": "caller-statistics",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "stats projection dirtied before refusal"
+        ],
+        "result_sha256": "23720c758b6b35bb03babb4f55bb2f937c28d0c43ea0e2d6775fcc0a793d2673",
+        "source_group_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0",
+        "status": "PASS",
+        "stub_summaries": [
+          "decide independently dirties the selected transaction projection with symbolic values and returns NumericalRefused; production update/capture/restore remain real."
+        ],
         "stubbing": true
       },
       {
-        "id": "tracker-unconfirmed-begun",
-        "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
-        "status": "PASS",
-        "result_sha256": "8b6414cb0c93bc408bdc0a9172ebb6a25ad1270ae9f5707bf1c97a8d5669fafe",
-        "cfgs": [],
-        "stubbing": true
-      },
-      {
-        "id": "tracker-confirmed-begun-dispatch",
-        "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
-        "status": "PASS",
-        "result_sha256": "dae2997d81293793978b312a262bee17e773c814f341025a903c1e1fa014cbc3",
-        "cfgs": [],
-        "stubbing": true
-      },
-      {
-        "id": "tracker-actual-decision",
-        "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
-        "status": "PASS",
-        "result_sha256": "75db1220047d8622bd992540bbf18e34fb45ea016488042f29500c388bb26327",
-        "cfgs": [],
-        "stubbing": true
-      },
-      {
-        "id": "tracker-refusal-routing",
-        "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
-        "status": "PASS",
-        "result_sha256": "55b38cde57852b36a277077258f9b18d243b98bdf3b1000c007e86198206526a",
-        "cfgs": [],
-        "stubbing": true
-      },
-      {
-        "id": "tracker-restore-current-filter",
-        "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
-        "status": "PASS",
-        "result_sha256": "9924593b66dcc07685114fff5bf6735242bb110a18a71a22c5b1ef4aee34e23e",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "tracker-restore-anchor-filter",
-        "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
-        "status": "PASS",
-        "result_sha256": "6b0eee605407c98740f6b079aef7d9000438a39c147521c6115e1b1fccedc48f",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "tracker-restore-ring-history",
-        "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
-        "status": "PASS",
-        "result_sha256": "2523dafb494f59f95179c31ed5dec3103111e2e7455efd7788bf81f4abc1587e",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "tracker-restore-metadata-category",
-        "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
-        "status": "PASS",
-        "result_sha256": "056f8796f4763179d8bbf6d5052c789f9c8b124d034c86e689bebdb7fef32382",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "tracker-restore-statistics",
-        "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
-        "status": "PASS",
-        "result_sha256": "f933526d0173b62579228efa981b4b6a1956ddfb4ccbe1c149ffbbd5167791b5",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "output-restore-appended-row",
-        "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
-        "status": "PASS",
-        "result_sha256": "3ba29c3a1155880d03248827de1dc9841801ac05ca4c5083d024ddcb4148fbe5",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "output-restore-overflow",
-        "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
-        "status": "PASS",
-        "result_sha256": "148acf294a7be80a8c19da088244e10c18a1af55fede37129a70676e513c3463",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "replay-monotonic-split",
-        "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
-        "status": "PASS",
-        "result_sha256": "62f55cbb88fbf1615d9c584b47dd528cb0fb3d97e479a501016a8836a6f64a7f",
-        "cfgs": [],
-        "stubbing": false
-      },
-      {
-        "id": "full-sensor-live-count",
+        "cfgs": [
+          "kani_full_capacity"
+        ],
+        "evidence_ref": "prior-phase/full-sensor-live-count",
         "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
-        "status": "PASS",
+        "id": "full-sensor-live-count",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
         "result_sha256": "337f917e17e84cfbe249ab56d292d5f4dd4006f393aa80619b74f53eaa96af79",
-        "cfgs": [
-          "kani_full_capacity"
-        ],
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
         "stubbing": false
       },
       {
-        "id": "full-sensor-monotonicity",
-        "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
-        "status": "PASS",
-        "result_sha256": "da342c37172d9d2c7750319f479afcfce28514ceb5040f85872c5cb956eb5349",
         "cfgs": [
           "kani_full_capacity"
         ],
+        "evidence_ref": "prior-phase/full-sensor-monotonicity",
+        "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
+        "id": "full-sensor-monotonicity",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "da342c37172d9d2c7750319f479afcfce28514ceb5040f85872c5cb956eb5349",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
         "stubbing": false
+      },
+      {
+        "cfgs": [
+          "kani_full_capacity"
+        ],
+        "evidence_ref": "sensor-existing-proof/proof",
+        "harness": "time_gate::proofs_full::full_sensor_table_note_existing_id_updates_max_without_eviction",
+        "id": "full-sensor-note-existing",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "existing ID at first slot",
+          "existing ID at last slot",
+          "minimum report-time input",
+          "maximum report-time input",
+          "unchanged saturated eviction counter"
+        ],
+        "result_sha256": "b67c4c651825996a8e81c03d883776f0270d6f41e9363329b1489665e30150c9",
+        "source_group_sha256": "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "3176ccce43a5f2a119541694fc0c17f2a9ed3e475e674d8cf3f5a46cbad9d394",
+        "source_snapshot_sha256": "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [
+          "kani_full_capacity"
+        ],
+        "evidence_ref": "sensor-new-proof/proof",
+        "harness": "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin",
+        "id": "full-sensor-note-new",
+        "loop_unwind_overrides": [],
+        "required_covers": [
+          "eviction counter saturates",
+          "minimum report-time input",
+          "maximum report-time input",
+          "tied minimum keeps earliest slot"
+        ],
+        "result_sha256": "85e20efd5aa0ef00068e83b662f50efdd2ba29dfd6ca1e910f72491f5444b85c",
+        "source_group_sha256": "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f",
+        "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+        "source_set_sha256": "3176ccce43a5f2a119541694fc0c17f2a9ed3e475e674d8cf3f5a46cbad9d394",
+        "source_snapshot_sha256": "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-anchor-filter-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_anchor_filter_projection",
+        "id": "late-append-anchor-filter-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "4d5667d28a45ac384ac5e612d2a050c3f1792074b86c3d755a3082c4d0cf4349",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-current-filter-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_current_filter_projection",
+        "id": "late-append-current-filter-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "767c02c0bb16828986ad5e18a51cac1314f2d6ab2fcca0ca209a87a1bf812659",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-metadata-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_metadata_projection",
+        "id": "late-append-metadata-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "3d0ff8e63f8877dccf23191ffef8294e02cfa6776860a4ccb379da4beaeb5427",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-output-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_output_projection",
+        "id": "late-append-output-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "1393f77a70877db67dd7a912047257bc757735ba9a9b263214f3473e7b5543a0",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [
+          "kani_late_replay_covers"
+        ],
+        "evidence_ref": "late-projection-suite/proofs/late-append-reachability",
+        "harness": "tracker::proofs::rollback_paths::late_replay_append_reachability",
+        "id": "late-append-reachability",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [
+          "late replay attempts current report before later failure",
+          "late replay reaches later numerical refusal",
+          "late replay append rollback case"
+        ],
+        "result_sha256": "48eb368412cecb62d6d710a57f74e28ad92558215367b3ef3485d25f88ca6bc6",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-ring-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_ring_projection",
+        "id": "late-append-ring-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "4b295f49dd406985a98a92d9aebbec7683bedc7a503811f256ba0e752297ffb8",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-append-stats-projection",
+        "harness": "tracker::proofs::rollback_paths::late_append_stats_projection",
+        "id": "late-append-stats-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "b50057e71ef302498cd7c04f64981a7cc73b1377ed73c028a681e4730e3addd5",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-anchor-filter-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_anchor_filter_projection",
+        "id": "late-overflow-anchor-filter-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "1689209172ba3d1b2459be7fa075a800e36af525564ccddd270c8efd843cd5cc",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-current-filter-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_current_filter_projection",
+        "id": "late-overflow-current-filter-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "6b0d3f127c0a2ab4a5f0b49800b808da8fe1f1bce7619a77a368e83c42b1c9b0",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-metadata-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_metadata_projection",
+        "id": "late-overflow-metadata-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "cf89409ef4df1bd2ebe11da060c4b591af8d91af3d02c81aab2c542bcb3f54f5",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-output-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_output_projection",
+        "id": "late-overflow-output-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "b7eaf66937be8e62d66b7f83edf85a041df39252a74b30f7aa8e8c58d3455c53",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [
+          "kani_late_replay_covers"
+        ],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-reachability",
+        "harness": "tracker::proofs::rollback_paths::late_replay_overflow_reachability",
+        "id": "late-overflow-reachability",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [
+          "late replay attempts current report before later failure",
+          "late replay reaches later numerical refusal",
+          "late replay overflow rollback case"
+        ],
+        "result_sha256": "3d8f881060a585508e92e7eb9d1101f1fa9673b36311fce316b5298ae55f19ff",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-ring-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_ring_projection",
+        "id": "late-overflow-ring-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "3cff3c71eb0f2d74aea661716fe49ceaf968e56f6383bc30962af07198ae3c0d",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "late-projection-suite/proofs/late-overflow-stats-projection",
+        "harness": "tracker::proofs::rollback_paths::late_overflow_stats_projection",
+        "id": "late-overflow-stats-projection",
+        "loop_unwind_overrides": [
+          "late-replay-two-events-all-loops"
+        ],
+        "required_covers": [],
+        "result_sha256": "22b97ff705b8f709f21564634abfca6a892ca6d8126fac217dc6ee9f9a9c3408",
+        "source_group_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af",
+        "status": "PASS",
+        "stub_summaries": [
+          "filter_apply -> filter_apply_insert_then_refuse: modeled first replay success followed by later numerical refusal; not production filter mathematics",
+          "filter_output -> return_late_row: supplies a representable report row for the fixed fixture",
+          "filter_replay -> filter_replay_must_be_unreachable: panic sentinel for the excluded path",
+          "implausible -> implausible_must_be_unreachable: panic sentinel for the excluded path",
+          "track_begin -> track_begin_must_be_unreachable: panic sentinel for the excluded path"
+        ],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/output-append",
+        "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
+        "id": "output-append",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "bb18a25c4bc74cd1bad8c64e7ad9621c437113b3ef0e718d02b0f235d36df6ea",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/output-capacity",
+        "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
+        "id": "output-capacity",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "11c352e0b20676dc1497b4228835e208426a8270794062138aa606b186c09d98",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/output-clear",
+        "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
+        "id": "output-clear",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "e9385ad664d6700cd55bb21b9fba3be3d16a20f725c844be03e177c2149c9da9",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/output-restore-appended-row",
+        "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
+        "id": "output-restore-appended-row",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "3ba29c3a1155880d03248827de1dc9841801ac05ca4c5083d024ddcb4148fbe5",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/output-restore-overflow",
+        "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
+        "id": "output-restore-overflow",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "148acf294a7be80a8c19da088244e10c18a1af55fede37129a70676e513c3463",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/replay-monotonic-split",
+        "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+        "id": "replay-monotonic-split",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "62f55cbb88fbf1615d9c584b47dd528cb0fb3d97e479a501016a8836a6f64a7f",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-actual-decision",
+        "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
+        "id": "tracker-actual-decision",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "75db1220047d8622bd992540bbf18e34fb45ea016488042f29500c388bb26327",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-confirmed-begun-dispatch",
+        "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
+        "id": "tracker-confirmed-begun-dispatch",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "dae2997d81293793978b312a262bee17e773c814f341025a903c1e1fa014cbc3",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-current-row",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
+        "id": "tracker-current-row",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "5451ffffc8793adb7315c3478e02dba5831fe363f0cee1fa56a8d565966d3479",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-output-overflow",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
+        "id": "tracker-output-overflow",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "4c1e933dc6b8328ae1b7b6640398459d2d48c88e8e094cb5518f1461d15cce86",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-refusal-routing",
+        "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
+        "id": "tracker-refusal-routing",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "55b38cde57852b36a277077258f9b18d243b98bdf3b1000c007e86198206526a",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-rejected-dispatch",
+        "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
+        "id": "tracker-rejected-dispatch",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "be618f2da8fc7fce2f7984806440bfbb3e082b9ac8440acfc547431c63a3b13c",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-restore-anchor-filter",
+        "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
+        "id": "tracker-restore-anchor-filter",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "6b0eee605407c98740f6b079aef7d9000438a39c147521c6115e1b1fccedc48f",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-restore-current-filter",
+        "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
+        "id": "tracker-restore-current-filter",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "9924593b66dcc07685114fff5bf6735242bb110a18a71a22c5b1ef4aee34e23e",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-restore-metadata-category",
+        "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
+        "id": "tracker-restore-metadata-category",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "056f8796f4763179d8bbf6d5052c789f9c8b124d034c86e689bebdb7fef32382",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-restore-ring-history",
+        "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
+        "id": "tracker-restore-ring-history",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "2523dafb494f59f95179c31ed5dec3103111e2e7455efd7788bf81f4abc1587e",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-restore-statistics",
+        "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
+        "id": "tracker-restore-statistics",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "f933526d0173b62579228efa981b4b6a1956ddfb4ccbe1c149ffbbd5167791b5",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": false
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-unconfirmed-applied",
+        "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
+        "id": "tracker-unconfirmed-applied",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "b8ca3cf992357c8e3342b530472b8ac32f2e104b81d1b5ceea7ae53191aafeee",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-unconfirmed-begun",
+        "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
+        "id": "tracker-unconfirmed-begun",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "8b6414cb0c93bc408bdc0a9172ebb6a25ad1270ae9f5707bf1c97a8d5669fafe",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
+      },
+      {
+        "cfgs": [],
+        "evidence_ref": "prior-phase/tracker-unrepresentable-row",
+        "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
+        "id": "tracker-unrepresentable-row",
+        "loop_unwind_overrides": [],
+        "required_covers": [],
+        "result_sha256": "2d1f3cfbc98e89d28744fa11639449bc45d4b95c91adcffa7e18610a39592839",
+        "source_group": "prior-phase",
+        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "status": "PASS",
+        "stub_summaries": [],
+        "stubbing": true
       }
-    ]
-  },
-  "creusot": {
-    "version": "0.14.0",
-    "rust": "nightly-2026-08-03",
-    "proof_goals_passed": 11,
-    "scope": "Precondition-free exact total timestamp split contract on directly imported production source.",
-    "negative_control_detected": true
+    ],
+    "required_passed": 43,
+    "source_provenance_note": "Each added PASS binds its own raw result SHA-256, source snapshot SHA-256, selected Rust/Kani source-set SHA-256, source revision, cfgs, stubs, covers, and unwind preset. Source groups differ; do not read this aggregation as 43 proofs of one source tree. Exact-head CI remains a separate required run.",
+    "source_snapshot_groups": {
+      "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e",
+          "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+          "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
+          "crates/oa-replay/Cargo.toml": "0af23a9ad5944c34b7b9f453d9e4bee89b449fa29541f0921bbe7c91c9bfe758",
+          "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+          "crates/oa-track/Cargo.toml": "0ace8ca0881616604e0412aca9d361acac8e2d6c43f18bba10d959c89e867895",
+          "crates/oa-track/src/adsb.rs": "557710bfeafab55c5a61bb11e91040fa08d611f052384cb84d8a84d039567a9f",
+          "crates/oa-track/src/assoc.rs": "e708b3ada379dbded666cc6275dbc96b628a8046cebe88b6860e4c81f5a3ec76",
+          "crates/oa-track/src/coarse.rs": "e6d716d0182b5fcf919118bc8272c77359324cfbf4bbf2a293aac13ed99f6553",
+          "crates/oa-track/src/filter.rs": "2fe2774de30921b15c3a26597ef50a9fb1fb47977f02993387153afb92b85af2",
+          "crates/oa-track/src/fixed_map.rs": "689a92c128bb6d54e074b3d6a3563c0be26b212d54b9794db706c2bca79c86ed",
+          "crates/oa-track/src/fusion.rs": "6c48527607224ebcf347f98e0051058929d8c19fadb2625423f831d0e3fee12e",
+          "crates/oa-track/src/fusion_main.rs": "9ca04f2b7b1e86df18a7466293e25264f0bd624f382deeb7d59fab801198cc3b",
+          "crates/oa-track/src/fusion_params.rs": "9f3940a4cc5d49d1484692260d646225d32ea2bd7bddab5d11465606c6c1d81c",
+          "crates/oa-track/src/fusion_score.rs": "77fd30ae06d06613c640a7982338753fe6b452d13d4f4f201bea052320d77e0c",
+          "crates/oa-track/src/fusion_world.rs": "0b566f648a2b7aea1dc4ff3ac9b8ffa04addedcff1875033079ad6c977395f62",
+          "crates/oa-track/src/hfilter.rs": "492e287b400c749e852f951572379e1d0dad52d1613ae3f5b8cc692c301d425a",
+          "crates/oa-track/src/latency.rs": "a03796740e4cedd20822876de8b571ff100c432e9bbd6780bf50e0e00b70f0eb",
+          "crates/oa-track/src/lib.rs": "86471df4969756d68fbd05a649215ffe357a9ffe5dc442ac832b6946cebf9fdd",
+          "crates/oa-track/src/linalg.rs": "8f5f66a47554cbc0e51cd7a32e3ab6de10aa4fd600b82c9554b33d99819d58a5",
+          "crates/oa-track/src/main.rs": "4696d7a425ec84f9fad8c54f5c4378e7ad4fd9101e7d89ffa73b8abeb074f43e",
+          "crates/oa-track/src/params.rs": "788437c555f5aa21f817c83b1d02b6fc09a84878a0b4a4972d91198b015ba15d",
+          "crates/oa-track/src/radar.rs": "dc487019e85c939f693c6bb91fb238c97559bc5b44548ab1cc20accbc28fa0a6",
+          "crates/oa-track/src/registration.rs": "7696bbb61a93360cde8bc64900e6925b8dd4d92b1bbbfdc9afedd3a0c628f642",
+          "crates/oa-track/src/score.rs": "a7503436db6d0e3651765fa381b1df570dd92f4fc75fc0c248dd515d9450377b",
+          "crates/oa-track/src/spill.rs": "77b3e343bcbc32352a7618088cd7832063a52c20be673faee3a139798b1b4018",
+          "crates/oa-track/src/synth_truth.rs": "8a8cf05da4b7e3a4865ab0b2873e8e1fa034555b7a0edf01bb01a594bb081bdc",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "17e735bb1105da06f648bf48b95a08bdd1f843ceb0ad8d020819798fcebd4f78",
+          "crates/oa-track/src/tracker.rs": "af6c9d2cb519f52123f8456deee611c5c79f8e990cb7912a5f91d063a63c1b20",
+          "crates/oa-track/src/tracker_proofs.rs": "6fdaa981d542ff6bd01174cbc6335d451896ea39fbd62558c92ca66807e5c07e",
+          "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "crates/oa-track/src/vfilter.rs": "2d83be2ff4338cb49cc8b72d28a1f154c32f09f453caf6ede5b17762bf799e33",
+          "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
+          "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
+          "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1"
+        },
+        "source_revisions": [
+          "acd5dd95ba726fea4475329bbbb1b354cb30f38b"
+        ],
+        "source_set_sha256": "3176ccce43a5f2a119541694fc0c17f2a9ed3e475e674d8cf3f5a46cbad9d394",
+        "source_snapshot_sha256": "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f"
+      },
+      "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e",
+          "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+          "Cargo.toml": "009c98d34d4fa210bdea3bcd7d4cca2115748c7304b9d43e20094019f7130237",
+          "crates/oa-replay/Cargo.toml": "0af23a9ad5944c34b7b9f453d9e4bee89b449fa29541f0921bbe7c91c9bfe758",
+          "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+          "crates/oa-track/Cargo.toml": "0ace8ca0881616604e0412aca9d361acac8e2d6c43f18bba10d959c89e867895",
+          "crates/oa-track/src/adsb.rs": "557710bfeafab55c5a61bb11e91040fa08d611f052384cb84d8a84d039567a9f",
+          "crates/oa-track/src/assoc.rs": "e708b3ada379dbded666cc6275dbc96b628a8046cebe88b6860e4c81f5a3ec76",
+          "crates/oa-track/src/coarse.rs": "e6d716d0182b5fcf919118bc8272c77359324cfbf4bbf2a293aac13ed99f6553",
+          "crates/oa-track/src/filter.rs": "2fe2774de30921b15c3a26597ef50a9fb1fb47977f02993387153afb92b85af2",
+          "crates/oa-track/src/fixed_map.rs": "689a92c128bb6d54e074b3d6a3563c0be26b212d54b9794db706c2bca79c86ed",
+          "crates/oa-track/src/fusion.rs": "6c48527607224ebcf347f98e0051058929d8c19fadb2625423f831d0e3fee12e",
+          "crates/oa-track/src/fusion_main.rs": "9ca04f2b7b1e86df18a7466293e25264f0bd624f382deeb7d59fab801198cc3b",
+          "crates/oa-track/src/fusion_params.rs": "9f3940a4cc5d49d1484692260d646225d32ea2bd7bddab5d11465606c6c1d81c",
+          "crates/oa-track/src/fusion_score.rs": "77fd30ae06d06613c640a7982338753fe6b452d13d4f4f201bea052320d77e0c",
+          "crates/oa-track/src/fusion_world.rs": "0b566f648a2b7aea1dc4ff3ac9b8ffa04addedcff1875033079ad6c977395f62",
+          "crates/oa-track/src/hfilter.rs": "492e287b400c749e852f951572379e1d0dad52d1613ae3f5b8cc692c301d425a",
+          "crates/oa-track/src/latency.rs": "a03796740e4cedd20822876de8b571ff100c432e9bbd6780bf50e0e00b70f0eb",
+          "crates/oa-track/src/lib.rs": "86471df4969756d68fbd05a649215ffe357a9ffe5dc442ac832b6946cebf9fdd",
+          "crates/oa-track/src/linalg.rs": "8f5f66a47554cbc0e51cd7a32e3ab6de10aa4fd600b82c9554b33d99819d58a5",
+          "crates/oa-track/src/main.rs": "4696d7a425ec84f9fad8c54f5c4378e7ad4fd9101e7d89ffa73b8abeb074f43e",
+          "crates/oa-track/src/params.rs": "788437c555f5aa21f817c83b1d02b6fc09a84878a0b4a4972d91198b015ba15d",
+          "crates/oa-track/src/radar.rs": "dc487019e85c939f693c6bb91fb238c97559bc5b44548ab1cc20accbc28fa0a6",
+          "crates/oa-track/src/registration.rs": "7696bbb61a93360cde8bc64900e6925b8dd4d92b1bbbfdc9afedd3a0c628f642",
+          "crates/oa-track/src/score.rs": "a7503436db6d0e3651765fa381b1df570dd92f4fc75fc0c248dd515d9450377b",
+          "crates/oa-track/src/spill.rs": "77b3e343bcbc32352a7618088cd7832063a52c20be673faee3a139798b1b4018",
+          "crates/oa-track/src/synth_truth.rs": "8a8cf05da4b7e3a4865ab0b2873e8e1fa034555b7a0edf01bb01a594bb081bdc",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "37e2ce62dd2768cf9fc2757be22c63531d15a0c9d7a6704d57c9b1f9c34589a1",
+          "crates/oa-track/src/tracker.rs": "1636beed4f5b8ba7f12fb31ff8b67ca7beef28adb1781ab118e504fe547a6a28",
+          "crates/oa-track/src/tracker_proofs.rs": "4a6f9b74bc6ad80566a0c35d6fa7cb824cd9c2ab704f1919d4cb0570cdfe93ff",
+          "crates/oa-track/src/tracker_rollback_paths.rs": "cb65aa9183d0fb5aafba056b34a816032d15c6a093cdd80b029ea02d42495e85",
+          "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "crates/oa-track/src/vfilter.rs": "2d83be2ff4338cb49cc8b72d28a1f154c32f09f453caf6ede5b17762bf799e33",
+          "tools/kani_validation.py": "2931d8d7d3260e4451cc2f0699c9834800e69ae8870294d557070b527681936a",
+          "tools/rust_proof_suite.py": "bbb0c9261b623c9b3af7cb6eab215df7ab58ce5fdbe97ebaaeac6487fe6f1677",
+          "tools/rust_proofs.json": "17ba61089b1ac79d0a152f344fdd9336a89a79347e28130534b8e72a180466a1"
+        },
+        "source_revisions": [
+          "97a01a237fb216e09e89973e663c0d98498be6f8"
+        ],
+        "source_set_sha256": "d7fb05bcfc3db05c7dceaf82587137a78ca80631899e5e300ec9aff8f285142d",
+        "source_snapshot_sha256": "c81e1ad3cad720a5290c7a77bb59c073b046f3a704f834add7e4cf1c2a77d6af"
+      },
+      "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e",
+          "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+          "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
+          "crates/oa-replay/Cargo.toml": "0af23a9ad5944c34b7b9f453d9e4bee89b449fa29541f0921bbe7c91c9bfe758",
+          "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+          "crates/oa-track/Cargo.toml": "0ace8ca0881616604e0412aca9d361acac8e2d6c43f18bba10d959c89e867895",
+          "crates/oa-track/src/adsb.rs": "557710bfeafab55c5a61bb11e91040fa08d611f052384cb84d8a84d039567a9f",
+          "crates/oa-track/src/assoc.rs": "e708b3ada379dbded666cc6275dbc96b628a8046cebe88b6860e4c81f5a3ec76",
+          "crates/oa-track/src/coarse.rs": "e6d716d0182b5fcf919118bc8272c77359324cfbf4bbf2a293aac13ed99f6553",
+          "crates/oa-track/src/filter.rs": "2fe2774de30921b15c3a26597ef50a9fb1fb47977f02993387153afb92b85af2",
+          "crates/oa-track/src/fixed_map.rs": "689a92c128bb6d54e074b3d6a3563c0be26b212d54b9794db706c2bca79c86ed",
+          "crates/oa-track/src/fusion.rs": "6c48527607224ebcf347f98e0051058929d8c19fadb2625423f831d0e3fee12e",
+          "crates/oa-track/src/fusion_main.rs": "9ca04f2b7b1e86df18a7466293e25264f0bd624f382deeb7d59fab801198cc3b",
+          "crates/oa-track/src/fusion_params.rs": "9f3940a4cc5d49d1484692260d646225d32ea2bd7bddab5d11465606c6c1d81c",
+          "crates/oa-track/src/fusion_score.rs": "77fd30ae06d06613c640a7982338753fe6b452d13d4f4f201bea052320d77e0c",
+          "crates/oa-track/src/fusion_world.rs": "0b566f648a2b7aea1dc4ff3ac9b8ffa04addedcff1875033079ad6c977395f62",
+          "crates/oa-track/src/hfilter.rs": "492e287b400c749e852f951572379e1d0dad52d1613ae3f5b8cc692c301d425a",
+          "crates/oa-track/src/latency.rs": "a03796740e4cedd20822876de8b571ff100c432e9bbd6780bf50e0e00b70f0eb",
+          "crates/oa-track/src/lib.rs": "86471df4969756d68fbd05a649215ffe357a9ffe5dc442ac832b6946cebf9fdd",
+          "crates/oa-track/src/linalg.rs": "8f5f66a47554cbc0e51cd7a32e3ab6de10aa4fd600b82c9554b33d99819d58a5",
+          "crates/oa-track/src/main.rs": "4696d7a425ec84f9fad8c54f5c4378e7ad4fd9101e7d89ffa73b8abeb074f43e",
+          "crates/oa-track/src/params.rs": "788437c555f5aa21f817c83b1d02b6fc09a84878a0b4a4972d91198b015ba15d",
+          "crates/oa-track/src/radar.rs": "dc487019e85c939f693c6bb91fb238c97559bc5b44548ab1cc20accbc28fa0a6",
+          "crates/oa-track/src/registration.rs": "7696bbb61a93360cde8bc64900e6925b8dd4d92b1bbbfdc9afedd3a0c628f642",
+          "crates/oa-track/src/score.rs": "a7503436db6d0e3651765fa381b1df570dd92f4fc75fc0c248dd515d9450377b",
+          "crates/oa-track/src/spill.rs": "77b3e343bcbc32352a7618088cd7832063a52c20be673faee3a139798b1b4018",
+          "crates/oa-track/src/synth_truth.rs": "8a8cf05da4b7e3a4865ab0b2873e8e1fa034555b7a0edf01bb01a594bb081bdc",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "37e2ce62dd2768cf9fc2757be22c63531d15a0c9d7a6704d57c9b1f9c34589a1",
+          "crates/oa-track/src/tracker.rs": "a5187bb07640ef883aee63a2883ae802c8aa122a8bdb3207dc82d5815b150715",
+          "crates/oa-track/src/tracker_proofs.rs": "f72d9061ebd8da890b0eee08e85f8495253c7e3c85966c0fe45f7e3a33d96516",
+          "crates/oa-track/src/tracker_rollback_paths.rs": "d9f45477f6d01c495f07baf11baf72f17d0e9b6d1feb0a1c8ec055e5e4ab1a7e",
+          "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "crates/oa-track/src/vfilter.rs": "2d83be2ff4338cb49cc8b72d28a1f154c32f09f453caf6ede5b17762bf799e33",
+          "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
+          "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
+          "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1"
+        },
+        "source_revisions": [
+          "acd5dd95ba726fea4475329bbbb1b354cb30f38b"
+        ],
+        "source_set_sha256": "a39f226c7bc7f0b13f6d49484a83a117fd59e1013bd338e66896e0b9f608e653",
+        "source_snapshot_sha256": "fcb663918979826ce39ef9b57658cf2608cd0b72389536dd7f75b839e4bc94c0"
+      },
+      "prior-phase": {
+        "provenance": "Preserved prior-phase local source inventory; not represented as one of the later proof-run snapshots.",
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
+          "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+          "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
+          "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "1974e29e571245be9bea1bdfa7487ad0e95fec6cf2a0bc07ea8727c83ba3931e",
+          "crates/oa-track/src/tracker.rs": "af6c9d2cb519f52123f8456deee611c5c79f8e990cb7912a5f91d063a63c1b20",
+          "crates/oa-track/src/tracker_proofs.rs": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
+          "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
+          "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
+          "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1",
+          "validation/oa-creusot-check/Cargo.lock": "30ce4b4065a6a4d1a728556e7cf1709e3c22429f6cd27cc694a7bfaa9001a3aa",
+          "validation/oa-creusot-check/Cargo.toml": "6e5d198694a29e0fbc690a3661d7dc192986d1e9856e3ba8fdc0a00a84ea77fb",
+          "validation/oa-creusot-check/src/lib.rs": "6aa5bcde8c838656e102e393aa4fbfcc75ae38a5c2e649d9111462d2e6de6fc3"
+        },
+        "source_revisions": [
+          "a9bfff66d2fe2ccaa654614d14f06d8c6b867066"
+        ],
+        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
+        "source_snapshot_sha256": null
+      }
+    },
+    "version": "0.68.0"
   },
   "miri": {
-    "rust": "nightly-2026-08-21",
+    "evidence_provenance": "Preserved from prior_phase_record; not rerun during this Kani aggregation.",
     "exact_regression_executions_passed": 3,
+    "rust": "nightly-2026-08-21",
     "scope": "Three exact selected production regression executions under default Miri checks; not input-exhaustive."
   },
   "negative_controls_detected": [
     "omitted output column",
     "missing resync output attempt",
-    "incorrect timestamp split (Kani and Creusot)"
-  ],
-  "experimental_open": [
-    "tracker-numerical-refusal-rollback",
-    "tracker-late-replay-rollback",
-    "full-sensor-update"
-  ],
-  "experimental_outcomes": {
-    "tracker-numerical-refusal-rollback": "Memory limit; no proof conclusion.",
-    "tracker-late-replay-rollback": "Final 12 GiB attempt timed out at 600 seconds; no proof conclusion.",
-    "full-sensor-update": "Timed out at 600 seconds; no proof conclusion."
-  },
-  "release_gate": "OPEN: broader allocation coverage, matched ERAM comparison, independent holdout/physical truth remain unresolved.",
-  "local_verified_source_sha256": {
-    "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
-    "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
-    "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
-    "crates/oa-track/src/tracker.rs": "af6c9d2cb519f52123f8456deee611c5c79f8e990cb7912a5f91d063a63c1b20",
-    "crates/oa-track/src/tracker_proofs.rs": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
-    "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
-    "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
-    "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
-    "crates/oa-track/src/time_gate_proofs_full.rs": "1974e29e571245be9bea1bdfa7487ad0e95fec6cf2a0bc07ea8727c83ba3931e",
-    "validation/oa-creusot-check/Cargo.toml": "6e5d198694a29e0fbc690a3661d7dc192986d1e9856e3ba8fdc0a00a84ea77fb",
-    "validation/oa-creusot-check/Cargo.lock": "30ce4b4065a6a4d1a728556e7cf1709e3c22429f6cd27cc694a7bfaa9001a3aa",
-    "validation/oa-creusot-check/src/lib.rs": "6aa5bcde8c838656e102e393aa4fbfcc75ae38a5c2e649d9111462d2e6de6fc3",
-    ".github/workflows/rust-proofs.yml": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
-    "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
-    "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
-    "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1"
-  },
-  "post_local_run_source_changes": [
+    "incorrect timestamp split (Kani and Creusot)",
     {
-      "path": "crates/oa-track/src/tracker_proofs.rs",
-      "kind": "Comment-only requirement annotation correction on helper reached only by experimental late-replay harness. No Rust tokens, assertions or runtime logic changed.",
-      "before_sha256": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
-      "after_sha256": "6fdaa981d542ff6bd01174cbc6335d451896ea39fbd62558c92ca66807e5c07e",
-      "old_text": "// REQ: OA-TRK-335\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity",
-      "new_text": "// Helper for OA-TRK-335.\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity"
+      "detected": true,
+      "evidence_ref": "negative-controls/caller-track-restore-omission",
+      "expected_failure": "t.first_ns[PROOF_SLOT] == first",
+      "failed_assertion_count": 14,
+      "id": "caller-track-restore-omission",
+      "mutation_source": "crates/oa-track/src/tracker.rs",
+      "result_sha256": "767629f5e91e4dbee614bba175c2089d199cb0b699eb22f03c154fc2745b3a17",
+      "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+      "status": "DETECTED"
     },
     {
-      "path": ".github/workflows/rust-proofs.yml",
-      "kind": "Set the runner-dependent Miri sysroot path in an executing step, since job env has no runner context.",
-      "before_sha256": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
-      "after_sha256": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e"
+      "detected": true,
+      "evidence_ref": "negative-controls/late-output-restore-omission",
+      "expected_failure": "a.overflow == b.overflow",
+      "failed_assertion_count": 1,
+      "id": "late-output-restore-omission",
+      "mutation_source": "crates/oa-track/src/tracker.rs",
+      "result_sha256": "16dc48a2e588454f33f06be363c4378276ffb4549c78e92b7e765cecd6184eac",
+      "source_revision": "97a01a237fb216e09e89973e663c0d98498be6f8",
+      "status": "DETECTED"
+    },
+    {
+      "detected": true,
+      "evidence_ref": "negative-controls/sensor-oldest-tie-inequality",
+      "expected_failure": "g.sensor_id[i] == SENSOR_TABLE as u16",
+      "failed_assertion_count": 1,
+      "id": "sensor-oldest-tie-inequality",
+      "mutation_source": "crates/oa-track/src/time_gate.rs",
+      "result_sha256": "41cfe10aa31aa9023df6603adbb313ed7096cf835d34d1c8ca69b0484c4c9e67",
+      "source_revision": "acd5dd95ba726fea4475329bbbb1b354cb30f38b",
+      "status": "DETECTED"
     }
-  ]
+  ],
+  "prior_phase_record": {
+    "base_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
+    "creusot": {
+      "negative_control_detected": true,
+      "proof_goals_passed": 11,
+      "rust": "nightly-2026-08-03",
+      "scope": "Precondition-free exact total timestamp split contract on directly imported production source.",
+      "version": "0.14.0"
+    },
+    "date": "2026-11-17",
+    "experimental_open": [
+      "tracker-numerical-refusal-rollback",
+      "tracker-late-replay-rollback",
+      "full-sensor-update"
+    ],
+    "experimental_outcomes": {
+      "full-sensor-update": "Timed out at 600 seconds; no proof conclusion.",
+      "tracker-late-replay-rollback": "Final 12 GiB attempt timed out at 600 seconds; no proof conclusion.",
+      "tracker-numerical-refusal-rollback": "Memory limit; no proof conclusion."
+    },
+    "kani": {
+      "cbmc": "6.11.0",
+      "configured": 25,
+      "proofs": [
+        {
+          "cfgs": [],
+          "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
+          "id": "output-append",
+          "result_sha256": "bb18a25c4bc74cd1bad8c64e7ad9621c437113b3ef0e718d02b0f235d36df6ea",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
+          "id": "output-capacity",
+          "result_sha256": "11c352e0b20676dc1497b4228835e208426a8270794062138aa606b186c09d98",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
+          "id": "output-clear",
+          "result_sha256": "e9385ad664d6700cd55bb21b9fba3be3d16a20f725c844be03e177c2149c9da9",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
+          "id": "tracker-current-row",
+          "result_sha256": "5451ffffc8793adb7315c3478e02dba5831fe363f0cee1fa56a8d565966d3479",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
+          "id": "tracker-unrepresentable-row",
+          "result_sha256": "2d1f3cfbc98e89d28744fa11639449bc45d4b95c91adcffa7e18610a39592839",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
+          "id": "tracker-output-overflow",
+          "result_sha256": "4c1e933dc6b8328ae1b7b6640398459d2d48c88e8e094cb5518f1461d15cce86",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
+          "id": "tracker-rejected-dispatch",
+          "result_sha256": "be618f2da8fc7fce2f7984806440bfbb3e082b9ac8440acfc547431c63a3b13c",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
+          "id": "tracker-unconfirmed-applied",
+          "result_sha256": "b8ca3cf992357c8e3342b530472b8ac32f2e104b81d1b5ceea7ae53191aafeee",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
+          "id": "tracker-unconfirmed-begun",
+          "result_sha256": "8b6414cb0c93bc408bdc0a9172ebb6a25ad1270ae9f5707bf1c97a8d5669fafe",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
+          "id": "tracker-confirmed-begun-dispatch",
+          "result_sha256": "dae2997d81293793978b312a262bee17e773c814f341025a903c1e1fa014cbc3",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
+          "id": "tracker-actual-decision",
+          "result_sha256": "75db1220047d8622bd992540bbf18e34fb45ea016488042f29500c388bb26327",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
+          "id": "tracker-refusal-routing",
+          "result_sha256": "55b38cde57852b36a277077258f9b18d243b98bdf3b1000c007e86198206526a",
+          "status": "PASS",
+          "stubbing": true
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
+          "id": "tracker-restore-current-filter",
+          "result_sha256": "9924593b66dcc07685114fff5bf6735242bb110a18a71a22c5b1ef4aee34e23e",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
+          "id": "tracker-restore-anchor-filter",
+          "result_sha256": "6b0eee605407c98740f6b079aef7d9000438a39c147521c6115e1b1fccedc48f",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
+          "id": "tracker-restore-ring-history",
+          "result_sha256": "2523dafb494f59f95179c31ed5dec3103111e2e7455efd7788bf81f4abc1587e",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
+          "id": "tracker-restore-metadata-category",
+          "result_sha256": "056f8796f4763179d8bbf6d5052c789f9c8b124d034c86e689bebdb7fef32382",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
+          "id": "tracker-restore-statistics",
+          "result_sha256": "f933526d0173b62579228efa981b4b6a1956ddfb4ccbe1c149ffbbd5167791b5",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
+          "id": "output-restore-appended-row",
+          "result_sha256": "3ba29c3a1155880d03248827de1dc9841801ac05ca4c5083d024ddcb4148fbe5",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
+          "id": "output-restore-overflow",
+          "result_sha256": "148acf294a7be80a8c19da088244e10c18a1af55fede37129a70676e513c3463",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [],
+          "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+          "id": "replay-monotonic-split",
+          "result_sha256": "62f55cbb88fbf1615d9c584b47dd528cb0fb3d97e479a501016a8836a6f64a7f",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [
+            "kani_full_capacity"
+          ],
+          "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
+          "id": "full-sensor-live-count",
+          "result_sha256": "337f917e17e84cfbe249ab56d292d5f4dd4006f393aa80619b74f53eaa96af79",
+          "status": "PASS",
+          "stubbing": false
+        },
+        {
+          "cfgs": [
+            "kani_full_capacity"
+          ],
+          "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
+          "id": "full-sensor-monotonicity",
+          "result_sha256": "da342c37172d9d2c7750319f479afcfce28514ceb5040f85872c5cb956eb5349",
+          "status": "PASS",
+          "stubbing": false
+        }
+      ],
+      "required_passed": 22,
+      "version": "0.68.0"
+    },
+    "local_verified_source_sha256": {
+      ".github/workflows/rust-proofs.yml": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
+      "Cargo.lock": "e59a2902f8c8937e6c381e2ff6f1010459ab8cab85639e822685093157fa460e",
+      "Cargo.toml": "3cc7d1e82772aa1d4a894a269858d707e1250fb134967185dcf828d2e4a7ae17",
+      "crates/oa-replay/src/mono_split.rs": "67c1fa0c902b2531b0538656f59840523e4e590a7b88b28d625038e814711335",
+      "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+      "crates/oa-track/src/time_gate_proofs_full.rs": "1974e29e571245be9bea1bdfa7487ad0e95fec6cf2a0bc07ea8727c83ba3931e",
+      "crates/oa-track/src/tracker.rs": "af6c9d2cb519f52123f8456deee611c5c79f8e990cb7912a5f91d063a63c1b20",
+      "crates/oa-track/src/tracker_proofs.rs": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
+      "crates/oa-track/src/types.rs": "b5b1988880089440439fe6275a6d7265d4cdb1e585fc3b044b0076702b0e4878",
+      "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+      "tools/kani_validation.py": "e4955547a05561f7b084f3229c0b735f68341461a16c2a995224e7bf0630ebc7",
+      "tools/rust_proof_suite.py": "1c9bdea723cd62b91995b5c735e123baab7678e454e3df684ebf45a569419c30",
+      "tools/rust_proofs.json": "c54f29b4689c618fae54ad3218973a07da621d9293a2fadacde551ede2863bc1",
+      "validation/oa-creusot-check/Cargo.lock": "30ce4b4065a6a4d1a728556e7cf1709e3c22429f6cd27cc694a7bfaa9001a3aa",
+      "validation/oa-creusot-check/Cargo.toml": "6e5d198694a29e0fbc690a3661d7dc192986d1e9856e3ba8fdc0a00a84ea77fb",
+      "validation/oa-creusot-check/src/lib.rs": "6aa5bcde8c838656e102e393aa4fbfcc75ae38a5c2e649d9111462d2e6de6fc3"
+    },
+    "miri": {
+      "exact_regression_executions_passed": 3,
+      "rust": "nightly-2026-08-21",
+      "scope": "Three exact selected production regression executions under default Miri checks; not input-exhaustive."
+    },
+    "negative_controls_detected": [
+      "omitted output column",
+      "missing resync output attempt",
+      "incorrect timestamp split (Kani and Creusot)"
+    ],
+    "post_local_run_source_changes": [
+      {
+        "after_sha256": "6fdaa981d542ff6bd01174cbc6335d451896ea39fbd62558c92ca66807e5c07e",
+        "before_sha256": "948c398c427e8c853bebb07af97df63557fc6efbe9d1a7e939bbfa1f3d87721d",
+        "kind": "Comment-only requirement annotation correction on helper reached only by experimental late-replay harness. No Rust tokens, assertions or runtime logic changed.",
+        "new_text": "// Helper for OA-TRK-335.\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity",
+        "old_text": "// REQ: OA-TRK-335\n#[inline(always)]\nfn prove_late_replay_rollback_for_capacity",
+        "path": "crates/oa-track/src/tracker_proofs.rs"
+      },
+      {
+        "after_sha256": "6f3644feb6d74a1fff5b5074ad382334b4ee3b82641cb885c1ce7daccad40d7e",
+        "before_sha256": "ae25c6a247930cc4008225e1560164faf2abf0bd295d5d287fc7e0cdb5662a41",
+        "kind": "Set the runner-dependent Miri sysroot path in an executing step, since job env has no runner context.",
+        "path": ".github/workflows/rust-proofs.yml"
+      }
+    ],
+    "product_rust": "1.89.0",
+    "record_version": 1,
+    "release_gate": "OPEN: broader allocation coverage, matched ERAM comparison, independent holdout/physical truth remain unresolved.",
+    "scope": "Selected Rust properties only; no system, physical-accuracy, unbounded-history or generated-machine-code claim."
+  },
+  "product_rust": "1.89.0",
+  "proof_scope_notes": {
+    "exact_head_ci": "Separate required CI evidence on the proposed revision; this local aggregation excludes CI outcomes.",
+    "full_sensor_table": "The two passing full-capacity proofs cover the selected existing-ID and fresh-ID first-argmin finite-table cases as a pair; the prior combined/full update attempt remains experimental.",
+    "late_replay": "The 14 passing proofs form six separately proven restoration projections for each output capacity (overflow capacity 1 and append capacity 2), plus one reachability witness per capacity. Their conjunction supports only the fixed two-event, modeled-refusal actual-caller fixture. The arbitrary-prestate rollback claim remains open and is outside that fixture proof's domain."
+  },
+  "record_version": 2,
+  "release_gate": "OPEN: global allocation and work-budget coverage, matched ERAM comparison, and independent holdout/reference evidence remain unresolved. Exact-head CI is a separate required policy check and is not represented by this local aggregation.",
+  "scope": "Selected local bounded Kani proofs only; results below are grouped by exact source snapshot and are not a single fresh-checkout run or an unbounded theorem."
 }

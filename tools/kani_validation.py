@@ -36,9 +36,75 @@ from typing import Any, Iterable, Mapping
 
 
 PINNED_KANI_VERSION = "0.68.0"
+# Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
+# build and the source location below; never accept arbitrary CBMC arguments.
+LOOP_UNWIND_PRESETS = {
+    "late-replay-two-events": {
+        "package": "oa-track",
+        "harnesses": frozenset({
+            'tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal',
+            'tracker::proofs::rollback_paths::late_replay_restores_transaction_after_overflow_before_refusal',
+            'tracker::proofs::rollback_paths::late_replay_restores_transaction_after_append_before_refusal',
+            'tracker::proofs::rollback_paths::late_replay_overflow_reachability',
+            'tracker::proofs::rollback_paths::late_replay_append_reachability',
+            'tracker::proofs::rollback_paths::late_overflow_current_filter_projection',
+            'tracker::proofs::rollback_paths::late_overflow_anchor_filter_projection',
+            'tracker::proofs::rollback_paths::late_overflow_ring_projection',
+            'tracker::proofs::rollback_paths::late_overflow_metadata_projection',
+            'tracker::proofs::rollback_paths::late_overflow_stats_projection',
+            'tracker::proofs::rollback_paths::late_append_current_filter_projection',
+            'tracker::proofs::rollback_paths::late_append_anchor_filter_projection',
+            'tracker::proofs::rollback_paths::late_append_ring_projection',
+            'tracker::proofs::rollback_paths::late_append_metadata_projection',
+            'tracker::proofs::rollback_paths::late_append_stats_projection',
+            'tracker::proofs::rollback_paths::late_overflow_output_projection',
+            'tracker::proofs::rollback_paths::late_append_output_projection',
+        }),
+        "loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3",
+        "bound": 3,
+        "global_unwind": 16,
+        "harness_source": {
+            'tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal': "crates/oa-track/src/tracker_proofs.rs",
+        },
+        "default_harness_source": "crates/oa-track/src/tracker_rollback_paths.rs",
+        "source": "crates/oa-track/src/tracker.rs",
+        "line": 1018,
+        "function": "update_late",
+        "source_line": "while k < n_seq {",
+    },
+}
+_late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
+LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
+    **_late_base_preset,
+    "loops": [
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.0", "bound": 3, "line": 937, "guard_line": 937, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.1", "bound": 2, "line": 956, "guard_line": 956, "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.2", "bound": 2, "line": 988, "source_line": "for k in 0..=e {"},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3", "bound": 3, "line": 1018, "source_line": "while k < n_seq {"},
+    ],
+    "fixture_source": "crates/oa-track/src/tracker_proofs.rs",
+    "fixture_snippets": [
+        "const LATE_BASE_NS: i64 = PROOF_TIME - 20;",
+        "const LATE_INSERT_NS: i64 = PROOF_TIME - 10;",
+        "const LATE_LATER_NS: i64 = PROOF_TIME;",
+        "toa_ns: LATE_BASE_NS,",
+        "sensor: 1,",
+        "toa_ns: LATE_INSERT_NS,",
+        "sensor: 3,",
+        "toa_ns: LATE_LATER_NS,",
+        "sensor: 2,",
+        "t.ring_len[PROOF_SLOT] = 2;",
+        "t.ring_head[PROOF_SLOT] = 0;",
+        "t.ring_m[PROOF_SLOT * RING_DEPTH] = base;",
+        "t.ring_m[PROOF_SLOT * RING_DEPTH + 1] = later;",
+        "let mut t = late_proof_tracker();",
+        "let m = late_proof_measurement();",
+        "update_late(&mut t, PROOF_SLOT, &m, &mut out);",
+    ],
+}
 DEFAULT_TIMEOUT_SECONDS = 360
 DEFAULT_MEMORY_MIB = 6144
-ALLOWED_CFGS = {"kani_full_capacity"}
+ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 COVER_STATUS = {"Satisfied", "Unsatisfiable"}
@@ -78,6 +144,137 @@ def _canonical_sha256(value: Any) -> str:
 
 def source_mapping_sha256(mapping: Mapping[str, str]) -> str:
     return _canonical_sha256(dict(sorted(mapping.items())))
+
+
+def _loop_unwind_configuration(preset_name: str | None) -> dict[str, Any] | None:
+    if preset_name is None:
+        return None
+    preset = LOOP_UNWIND_PRESETS.get(preset_name)
+    if preset is None:
+        raise ValueError(f"unknown loop-unwind preset: {preset_name}")
+    return {
+        key: sorted(value) if isinstance(value, frozenset) else value
+        for key, value in preset.items()
+    }
+
+
+def _loop_unwind_argument(preset: Mapping[str, Any]) -> str:
+    loops = preset.get("loops", [preset])
+    return ",".join(f"{loop['loop_id']}:{loop['bound']}" for loop in loops)
+
+
+def _expected_loop_log_line_count(preset: Mapping[str, Any]) -> int:
+    return sum(
+        len(loop.get("iterations", [])) if loop.get("log_mode") == "completed_before_bound" else 1
+        for loop in preset.get("loops", [preset])
+    )
+
+
+def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, harness: str) -> None:
+    preset = LOOP_UNWIND_PRESETS[preset_name]
+    if package != preset["package"] or harness not in preset["harnesses"]:
+        raise ValueError(f"loop-unwind preset {preset_name!r} is not allowed for {package}:{harness}")
+    path = repo / preset["source"]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"cannot read source for loop-unwind preset {preset_name!r}: {exc}") from exc
+    loops = preset.get("loops", [preset])
+    for loop in loops:
+        line_index = loop.get("guard_line", loop["line"]) - 1
+        if line_index >= len(lines) or lines[line_index].strip() != loop["source_line"]:
+            raise ValueError(f"stale source location for loop-unwind preset {preset_name!r}")
+        enclosing_fn = next(
+            (line for line in reversed(lines[:line_index]) if re.search(r"\bfn\s+[A-Za-z_]\w*\s*\(", line)),
+            "",
+        )
+        if not re.search(rf"\bfn\s+{re.escape(preset['function'])}\s*\(", enclosing_fn):
+            raise ValueError(f"stale function location for loop-unwind preset {preset_name!r}")
+    if "fixture_source" in preset:
+        try:
+            fixture_text = (repo / preset["fixture_source"]).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read fixture source for loop-unwind preset {preset_name!r}: {exc}") from exc
+        if any(snippet not in fixture_text for snippet in preset["fixture_snippets"]):
+            raise ValueError(f"stale bounded fixture for loop-unwind preset {preset_name!r}")
+    harness_source = preset.get("harness_source", {}).get(harness, preset.get("default_harness_source"))
+    if not isinstance(harness_source, str):
+        raise ValueError(f"missing source map for loop-unwind preset {preset_name!r}")
+    proof_path = repo / harness_source
+    try:
+        proof_lines = proof_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"cannot read harness source for loop-unwind preset {preset_name!r}: {exc}") from exc
+    fn_name = harness.rsplit("::", 1)[-1]
+    fn_indexes = [i for i, line in enumerate(proof_lines) if re.search(rf"\bfn\s+{re.escape(fn_name)}\s*\(", line)]
+    if len(fn_indexes) != 1:
+        raise ValueError(f"expected one source definition for harness {harness!r}")
+    fn_index = fn_indexes[0]
+    previous_fn = max((i for i, line in enumerate(proof_lines[:fn_index]) if re.search(r"\bfn\s+[A-Za-z_]\w*\s*\(", line)), default=-1)
+    attrs = [line.strip() for line in proof_lines[previous_fn + 1:fn_index] if line.strip().startswith("#[")]
+    unwind_attrs = [attr for attr in attrs if attr.startswith("#[kani::unwind(")]
+    if unwind_attrs != [f"#[kani::unwind({preset['global_unwind']})]"]:
+        raise ValueError(
+            f"harness {harness!r} must have exactly #[kani::unwind({preset['global_unwind']})]"
+        )
+
+
+def _check_loop_unwind_log(preset_name: str, stdout: str, stderr: str) -> dict[str, Any]:
+    preset = LOOP_UNWIND_PRESETS[preset_name]
+    source = r"[/\\]".join(re.escape(part) for part in preset["source"].split("/"))
+    expected_loops = preset.get("loops", [preset])
+    all_lines = (stdout + "\n" + stderr).splitlines()
+    matched = []
+    for loop in expected_loops:
+        source_and_function = (
+            rf"file (?:.*[/\\])?{source} line {loop['line']} column \d+ "
+            rf"function (?:[A-Za-z_]\w*::)*{re.escape(preset['function'])} thread \d+\s*$"
+        )
+        if loop.get("log_mode") == "completed_before_bound":
+            expected = re.compile(
+                rf"^Unwinding loop {re.escape(loop['loop_id'])} iteration (\d+) {source_and_function}"
+            )
+            observed = []
+            for candidate in all_lines:
+                match = expected.search(candidate)
+                if match:
+                    observed.append((int(match.group(1)), candidate))
+            unexpected = any(
+                re.search(rf"^(?:Not )?Unwinding loop {re.escape(loop['loop_id'])} iteration (\d+)\b", candidate)
+                and not expected.search(candidate)
+                for candidate in all_lines
+            )
+            if [iteration for iteration, _ in observed] != loop["iterations"] or unexpected:
+                return {
+                    "passed": False,
+                    "matched_line": None,
+                    "matched_lines": matched + [line for _, line in observed],
+                    "expected": (
+                        f"completed loop {loop['loop_id']} iterations {loop['iterations']} "
+                        f"before bound {loop['bound']} at {preset['source']} line {loop['line']}"
+                    ),
+                }
+            matched.extend(line for _, line in observed)
+            continue
+        expected = re.compile(
+            rf"^Not unwinding loop {re.escape(loop['loop_id'])} iteration {loop['bound']} {source_and_function}"
+        )
+        line = next((candidate for candidate in all_lines if expected.search(candidate)), None)
+        if line is None:
+            return {
+                "passed": False,
+                "matched_line": None,
+                "matched_lines": matched,
+                "expected": (
+                    f"Not unwinding loop {loop['loop_id']} iteration {loop['bound']} "
+                    f"file */{preset['source']} line {loop['line']} column <n> "
+                    f"function [namespace::]*{preset['function']} thread <n>"
+                ),
+            }
+        matched.append(line)
+    if len(expected_loops) == 1:
+        return {"passed": True, "matched_line": matched[0]}
+    return {"passed": True, "matched_line": None, "matched_lines": matched}
 
 
 def _is_nonnegative_int(value: Any) -> bool:
@@ -508,6 +705,47 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
         errors.append("command must be a nonempty argument vector")
     elif record.get("command_sha256") != _canonical_sha256(command):
         errors.append("command_sha256 does not bind the recorded argument vector")
+    preset_name = record.get("loop_unwind_preset")
+    scoped = record.get("loop_unwind_configuration")
+    if preset_name is None:
+        if scoped is not None or (
+            isinstance(command, list)
+            and any(arg in command for arg in ("--cbmc-args", "--unwindset", "--no-unwinding-assertions"))
+        ):
+            errors.append("scoped loop-unwind arguments require a registered preset")
+    else:
+        try:
+            expected_scoped = _loop_unwind_configuration(preset_name)
+        except ValueError:
+            expected_scoped = None
+            errors.append("loop_unwind_preset is unknown")
+        if expected_scoped is not None:
+            if scoped != expected_scoped:
+                errors.append("loop_unwind_configuration does not match its registered preset")
+            if record.get("package") != expected_scoped["package"] or record.get("harness") not in expected_scoped["harnesses"]:
+                errors.append("loop-unwind preset is not applicable to the recorded proof")
+            expected_tail = [
+                "--cbmc-args", "--unwindset",
+                _loop_unwind_argument(expected_scoped),
+                "--unwinding-assertions",
+            ]
+            if not isinstance(command, list) or command[-len(expected_tail):] != expected_tail:
+                errors.append("command does not contain the exact registered loop-unwind arguments")
+            log_check = record.get("loop_unwind_log_check")
+            if not isinstance(log_check, dict) or log_check.get("passed") is not True:
+                errors.append("registered loop-unwind log check did not pass")
+            else:
+                if len(expected_scoped.get("loops", [expected_scoped])) == 1:
+                    matched_lines = [log_check.get("matched_line")]
+                else:
+                    matched_lines = log_check.get("matched_lines")
+                if (
+                    not isinstance(matched_lines, list)
+                    or len(matched_lines) != _expected_loop_log_line_count(expected_scoped)
+                    or any(not isinstance(line, str) for line in matched_lines)
+                    or not _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "")["passed"]
+                ):
+                    errors.append("recorded loop-unwind log line does not match the preset")
     source_before = record.get("source_before")
     source_after = record.get("source_after")
     valid_source_maps = (
@@ -742,6 +980,7 @@ def run_one(
     host_rustc: str,
     kani_version: str,
     kani_version_output: str,
+    loop_unwind_preset: str | None = None,
 ) -> dict[str, Any]:
     check_dir = out / "checks" / hashlib.sha256(harness.encode()).hexdigest()[:12]
     check_dir.mkdir(parents=True, exist_ok=False)
@@ -753,6 +992,14 @@ def run_one(
     ]
     if stubbing:
         argv.extend(["-Z", "stubbing"])
+    if loop_unwind_preset is not None:
+        _validate_loop_unwind_source(repo, loop_unwind_preset, package, harness)
+        preset = LOOP_UNWIND_PRESETS[loop_unwind_preset]
+        argv.extend([
+            "--cbmc-args", "--unwindset",
+            _loop_unwind_argument(preset),
+            "--unwinding-assertions",
+        ])
     checkout_namespace = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()
     env = os.environ.copy()
     for key in ("RUSTC_WRAPPER", "CARGO_ENCODED_RUSTFLAGS", "KANIFLAGS", "RUSTFLAGS"):
@@ -780,6 +1027,8 @@ def run_one(
         "repo_revision": _git(repo, "rev-parse", "HEAD"),
         "package": package,
         "harness": harness,
+        "loop_unwind_preset": loop_unwind_preset,
+        "loop_unwind_configuration": _loop_unwind_configuration(loop_unwind_preset),
         "requested_covers": list(required_covers),
         "command": argv,
         "command_sha256": _canonical_sha256(argv),
@@ -852,6 +1101,12 @@ def run_one(
     report_obj, _, _ = _report_object(report_text) if report_text else (None, b"", [])
     if isinstance(report_obj, dict) and isinstance(report_obj.get("tools"), dict):
         record["kani_report_toolchain"] = report_obj["tools"].get("rustc")
+    if loop_unwind_preset is not None:
+        stdout_text = (check_dir / "stdout.log").read_text(encoding="utf-8", errors="replace")
+        stderr_text = (check_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")
+        record["loop_unwind_log_check"] = _check_loop_unwind_log(
+            loop_unwind_preset, stdout_text, stderr_text
+        )
     copied_sources: dict[str, str] = {}
     source_names = set(changed_tracked) | set(changed_untracked)
     if isinstance(report_obj, dict):
@@ -894,6 +1149,8 @@ def run_one(
     }
     errors = evaluate_kani_binding(report_text, record) if report_text else ["Kani did not produce result.json"]
     errors.extend(evaluate_kani_report(report_text, [harness], {harness: required_covers}) if report_text else [])
+    if loop_unwind_preset is not None and record["loop_unwind_log_check"]["passed"] is not True:
+        errors.append("CBMC log did not confirm the registered scoped unwind bound at the expected source location")
     errors.extend(record.get("source_copy_errors", []))
     for source_path, digest in copied_sources.items():
         if record.get("source_after", {}).get(source_path) != digest:
@@ -917,6 +1174,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stubbing", action="store_true")
     parser.add_argument("--stub-summary", action="append", default=[])
     parser.add_argument("--cfg", action="append", default=[], choices=sorted(ALLOWED_CFGS))
+    parser.add_argument(
+        "--loop-unwind-preset", choices=sorted(LOOP_UNWIND_PRESETS),
+        help="Use one closed, source-guarded CBMC per-loop bound preset",
+    )
     parser.add_argument("--harness-timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--timeout", type=int, help="external timeout; default harness timeout + 120s")
     parser.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB)
@@ -929,6 +1190,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in args.harness:
         if not HARNESS_RE.fullmatch(name):
             parser.error(f"invalid --harness name: {name!r}")
+    if args.loop_unwind_preset is not None:
+        preset = LOOP_UNWIND_PRESETS[args.loop_unwind_preset]
+        if args.package != preset["package"] or any(name not in preset["harnesses"] for name in args.harness):
+            parser.error(f"loop-unwind preset {args.loop_unwind_preset!r} is not applicable to package/harness")
     if args.harness_timeout <= 0 or args.memory_mib < 512:
         parser.error("timeouts must be positive and memory-mib must be at least 512")
     external_timeout = args.timeout if args.timeout is not None else args.harness_timeout + 120
@@ -948,6 +1213,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--repo must be a Cargo workspace directory")
     if Path(_git(repo, "rev-parse", "--show-toplevel")).resolve() != repo:
         parser.error("--repo must be the Git worktree root")
+    if args.loop_unwind_preset is not None:
+        try:
+            _validate_loop_unwind_source(repo, args.loop_unwind_preset, args.package, args.harness[0])
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.out.exists():
         parser.error("--out must not already exist")
     out = args.out.resolve()
@@ -997,6 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
             host_rustc=host_rustc,
             kani_version=kani_version,
             kani_version_output=kani_version_output,
+            loop_unwind_preset=args.loop_unwind_preset,
         )
         records.append(record)
     run_status = "PASS" if len(records) == len(args.harness) and all(not r["evaluation_errors"] for r in records) else "FAIL"
@@ -1009,6 +1280,10 @@ def main(argv: list[str] | None = None) -> int:
         "package": args.package,
         "expected_harnesses": args.harness,
         "required_covers": required_covers,
+        "loop_unwind_presets": {
+            record["harness"]: [record["loop_unwind_preset"]] if record["loop_unwind_preset"] else []
+            for record in records
+        },
         "target_dir": str(target),
         "checkout_namespace": checkout_namespace,
         "model_scope": "Bounded named-harness results only; no unbounded/product-compiler claim.",
