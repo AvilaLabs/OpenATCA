@@ -125,6 +125,10 @@ pub struct TrackerConfig {
     pub coast_after_intervals: i64,
     /// Drop after this long without an update, ns.
     pub drop_after_ns: i64,
+    /// A coasting track's tick row is published only while its 95% horizontal uncertainty
+    /// radius is at most this, metres ([`crate::params::COAST_MAX_R95_M`]; infinity turns the
+    /// limit off). Positive and not a number is refused.
+    pub coast_max_r95_m: f64,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
     /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
@@ -149,6 +153,7 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     init_interval_ns: EXPECTED_INTERVAL_NS,
     coast_after_intervals: COAST_AFTER_INTERVALS,
     drop_after_ns: DROP_AFTER_NS,
+    coast_max_r95_m: crate::params::COAST_MAX_R95_M,
     ooo_window_ns: OOO_WINDOW_NS,
     clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
@@ -200,6 +205,9 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     }
     if !(MIN_TICK_NS..=MAX_TICK_NS).contains(&c.tick_ns) {
         return bad("tick_ns outside 100 ms to a quarter of the range");
+    }
+    if c.coast_max_r95_m.is_nan() || c.coast_max_r95_m <= 0.0 {
+        return bad("coast_max_r95_m");
     }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
@@ -482,6 +490,10 @@ pub struct TrackerStats {
     /// lies past the projection's domain, is not a number, or numerical prediction failed):
     /// refused and counted, never a coordinate of 0.
     pub rows_unrepresentable: u64,
+    /// Coasting tick rows withheld because the predicted 95% horizontal uncertainty exceeded
+    /// [`crate::params::COAST_MAX_R95_M`]: designed behaviour (the position is not known well
+    /// enough to show), not lost work.
+    pub rows_coast_withheld: u64,
     /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
     /// counted and not applied.
     pub time_held: u64,

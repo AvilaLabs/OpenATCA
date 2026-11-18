@@ -3928,3 +3928,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   confirmed geometry-matched key, fills one radar bucket past `MAX_BUCKET_PLOTS`, counts the
   deliberate overflow and unknown hard identities, and proves a later existing-key plot matches.
   Each armed window independently observes the injected-allocation control.
+- **OA-TRK-338** A coasting track's tick row is published only while the 95% radius of its
+  predicted horizontal position (the semi-major axis of the 95% ellipse of the output covariance)
+  is at most 926 m (0.5 NM, the size ESASSP uses for a large position error); a row past that, or
+  with a covariance that is not a number, is withheld and counted in `rows_coast_withheld`. The
+  track is kept until its drop age, and its next update is published as usual. Withheld rows are
+  designed behaviour, not lost work, in capacity checks.

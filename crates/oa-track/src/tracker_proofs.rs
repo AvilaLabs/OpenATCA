@@ -220,6 +220,7 @@ fn arbitrary_stats() -> TrackerStats {
         ticks_skipped: kani::any(),
         rows_computed: kani::any(),
         rows_unrepresentable: kani::any(),
+        rows_coast_withheld: kani::any(),
         time_held: kani::any(),
         time_steps: kani::any(),
         time_held_applied: kani::any(),
@@ -396,6 +397,7 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.ticks_skipped, b.ticks_skipped);
     assert_eq!(a.rows_computed, b.rows_computed);
     assert_eq!(a.rows_unrepresentable, b.rows_unrepresentable);
+    assert_eq!(a.rows_coast_withheld, b.rows_coast_withheld);
     assert_eq!(a.time_held, b.time_held);
     assert_eq!(a.time_steps, b.time_steps);
     assert_eq!(a.time_held_applied, b.time_held_applied);

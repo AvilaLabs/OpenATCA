@@ -128,6 +128,15 @@ pub const COAST_AFTER_INTERVALS: i64 = 3;
 /// A track with no update for this long is dropped, ns. Set per airspace from the recorded gap
 /// distribution (en route, terminal).
 pub const DROP_AFTER_NS: i64 = 60 * NS_PER_S;
+/// A coasting track's position is published only while its 95% horizontal uncertainty radius is
+/// at most this, metres: 926 m (0.5 NM), the size ESASSP uses for a large position error
+/// (correlated errors over 926 m, BENCHMARKS R5). Past it the track has no displayed position
+/// until an update arrives: a position that uncertain is withheld and counted
+/// (`rows_coast_withheld`), never shown as if known. The track itself is kept until
+/// `drop_after_ns`, so a returning aircraft keeps its identity.
+pub const COAST_MAX_R95_M: f64 = 926.0;
+/// The 95% quantile of the chi-squared distribution with two degrees of freedom.
+pub const CHI2_2_95: f64 = 5.991_464_547_107_979;
 /// Capacity: simultaneous tracks. ERAM states 1,900 per centre; 4,096 is two times that.
 pub const MAX_TRACKS: usize = 4096;
 /// Capacity of the output table between drains. At one row per track per second plus one per

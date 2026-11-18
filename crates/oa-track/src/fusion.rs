@@ -5656,15 +5656,32 @@ mod tests {
         let (ka, ta) = last(0);
         let (kb, tb) = last(1);
         let ca = first_coast_after(&out, ka, ta).unwrap();
-        let cb = first_coast_after(&out, kb, tb).unwrap();
         assert!(
             (14.4..15.5).contains(&ca),
             "terminal track coasted after {ca} s"
         );
-        assert!(
-            (36.0..37.5).contains(&cb),
-            "en-route track coasted after {cb} s"
-        );
+        // The en-route radar-only track may already be too uncertain to show when it starts to
+        // coast (OA-TRK-338): its coasting rows are then withheld, and its last shown tick is the
+        // one before the onset.
+        match first_coast_after(&out, kb, tb) {
+            Some(cb) => assert!(
+                (36.0..37.5).contains(&cb),
+                "en-route track coasted after {cb} s"
+            ),
+            None => {
+                let shown = (0..out.t_ns.len())
+                    .filter(|&i| out.addr[i] == kb && out.flags[i] & crate::types::O_TICK != 0)
+                    .map(|i| out.t_ns[i])
+                    .max()
+                    .unwrap();
+                let s = (shown - tb) as f64 / 1.0e9;
+                assert!(
+                    (35.0..37.5).contains(&s),
+                    "en-route track last shown {s} s after its last update"
+                );
+                assert!(fusion_tracker_stats(&f).rows_coast_withheld > 0);
+            }
+        }
     }
 
     // REQ: OA-TRK-303

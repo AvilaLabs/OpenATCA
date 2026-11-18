@@ -62,7 +62,7 @@ use crate::filter::{
     filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied, Filter,
 };
 use crate::hfilter::{h_combine, HFilter};
-use crate::params::{NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
+use crate::params::{CHI2_2_95, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
 use crate::time_gate::{
     gate_decide, gate_new, gate_note_applied, gate_run_restarted, GateCfg, GateState, Verdict,
     RUN_BUF,
@@ -603,6 +603,12 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         t.stats.rows_unrepresentable += 1;
         return;
     };
+    let r95 = r95_m(&row.pos_cov_m2);
+    if flags & O_COAST != 0 && (r95.is_nan() || r95 > t.cfg.coast_max_r95_m) {
+        // A non-finite covariance is withheld too: its uncertainty is not known to be small.
+        t.stats.rows_coast_withheld += 1;
+        return;
+    }
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
     if row.addr >= RADAR_KEY_BASE {
@@ -612,6 +618,15 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         row.flags |= O_RADAR_DISAGREES;
     }
     output_push(out, &row);
+}
+
+/// The 95% horizontal uncertainty radius of a position covariance `[ee, en, nn]` (m^2), metres:
+/// the semi-major axis of the 95% ellipse, so the circle of this radius contains the ellipse.
+fn r95_m(c: &[f32; 3]) -> f64 {
+    let (ee, en, nn) = (f64::from(c[0]), f64::from(c[1]), f64::from(c[2]));
+    let half = 0.5 * (ee - nn);
+    let lmax = 0.5 * (ee + nn) + (half * half + en * en).sqrt();
+    (CHI2_2_95 * lmax).sqrt()
 }
 
 /// A measurement's ground speed in 0.1 kt for the jump rule, [`NONE_U16`] without a velocity.
@@ -704,10 +719,10 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 632-byte filters, twelve 72-byte measurements, 304-byte statistics,
+// Budget: two 632-byte filters, twelve 72-byte measurements, 312-byte statistics,
 // six 8-byte times, 8-byte category, 4-byte update count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2496);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2504);
 
 fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
     let mut ring = [blank_measurement(); RING_DEPTH];
@@ -1654,6 +1669,48 @@ mod tests {
         assert_eq!(tracker_stats(&t).resyncs, 1);
         let s = snap(&t);
         assert_eq!((s.hits, s.ring.len(), s.cur.rej_h), (1, 1, 0));
+    }
+
+    // REQ: OA-TRK-338
+    #[test]
+    fn a_coasting_position_is_withheld_once_its_uncertainty_passes_the_limit() {
+        let c = TrackerConfig {
+            tick_ns: S,
+            drop_after_ns: 200 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..3 {
+            tracker_update(&mut t, &at(5 * k, 100 * k as i32, 100.0), &mut out);
+        }
+        crate::types::output_clear(&mut out);
+        tracker_advance(&mut t, 1_000 * S + 150 * S, &mut out);
+        let coast: Vec<usize> = (0..out.t_ns.len())
+            .filter(|&i| out.flags[i] & O_COAST != 0)
+            .collect();
+        // Some coasting rows are shown first, each within the limit; later ones are withheld.
+        assert!(!coast.is_empty(), "no coasting row was shown");
+        for &i in &coast {
+            let r = r95_m(&out.pos_cov_m2[i]);
+            assert!(
+                r <= c.coast_max_r95_m,
+                "shown coasting row with 95% radius {r} m"
+            );
+        }
+        let withheld = tracker_stats(&t).rows_coast_withheld;
+        assert!(withheld > 0, "150 s of coasting withheld nothing");
+        // Once withheld, never shown again before an update: the shown rows come first.
+        let last_shown = coast.iter().map(|&i| out.t_ns[i]).max().unwrap();
+        let ticks_after = (last_shown - 1_000 * S) / S;
+        assert!(ticks_after < 150, "coasting rows shown to the end");
+        // The track is still alive (not dropped): an update is published as usual.
+        crate::types::output_clear(&mut out);
+        tracker_update(&mut t, &at(150, 3_000, 100.0), &mut out);
+        assert!(
+            !out.t_ns.is_empty(),
+            "the update after the withheld rows was not published"
+        );
     }
 
     // REQ: OA-TRK-302

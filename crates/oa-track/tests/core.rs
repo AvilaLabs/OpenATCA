@@ -845,6 +845,8 @@ fn rows_lost_to_a_full_table_equal_the_rows_a_large_table_takes_when_tracks_drop
     let cfg = TrackerConfig {
         tick_ns: 100_000_000,
         drop_after_ns: 60_000_000_000,
+        // Row accounting is under test, not the coasting display limit (OA-TRK-338).
+        coast_max_r95_m: f64::INFINITY,
         ..big_config()
     };
     // Two tracks that stop 7 s apart, so they are dropped at different ticks of the advance.
@@ -884,7 +886,12 @@ fn rows_lost_to_a_full_table_equal_the_rows_a_large_table_takes_when_tracks_drop
 #[test]
 fn a_silent_track_coasts_after_three_intervals_and_is_dropped_after_sixty_seconds() {
     let ms = base_measurements(0x999999, 101, 1.0, 8); // reports at 0 to 100 s
-    let mut t = tracker_new(&big_config()).unwrap();
+                                                       // Coast and drop timing are under test, not the coasting display limit (OA-TRK-338).
+    let cfg = TrackerConfig {
+        coast_max_r95_m: f64::INFINITY,
+        ..big_config()
+    };
+    let mut t = tracker_new(&cfg).unwrap();
     let mut out = output_new(1 << 18);
     for m in &ms {
         tracker_update(&mut t, m, &mut out);
@@ -1207,7 +1214,13 @@ fn scrambled_input_keeps_its_pinned_replay_counters_and_output() {
     // estimator's replay, duplicates and ring/window drops. The separate in-order versus
     // out-of-order tests compare replay states directly.
     let ms = scrambled_world();
-    let (t, out) = run(&big_config(), &ms, 200.0);
+    // With the coasting display limit off the output is bit for bit the pinned one, so
+    // OA-TRK-338 changes nothing but the withheld rows.
+    let cfg = TrackerConfig {
+        coast_max_r95_m: f64::INFINITY,
+        ..big_config()
+    };
+    let (t, out) = run(&cfg, &ms, 200.0);
     let s = tracker_stats(&t);
     let counters = format!(
         "{} {} {} {} {} {} {} {} {} {}",
@@ -1289,7 +1302,11 @@ fn gappy_world() -> Vec<Measurement> {
 fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
     // The digest was recorded when the jump over a long gap found the newest live update by
     // scanning every slot; the tracker now keeps it, and the rows are the same bit for bit.
-    let cfg = big_config();
+    // With the coasting display limit off the output is bit for bit the pinned one (OA-TRK-338).
+    let cfg = TrackerConfig {
+        coast_max_r95_m: f64::INFINITY,
+        ..big_config()
+    };
     let mut t = tracker_new(&cfg).unwrap();
     let mut out = output_new(cfg.out_capacity);
     for (i, m) in gappy_world().iter().enumerate() {
@@ -1643,6 +1660,8 @@ fn a_track_extrapolated_past_the_projection_emits_no_zero_position_and_is_counte
         h_mode: 1,
         tick_ns: 60_000_000_000,
         drop_after_ns: 24 * 3_600_000_000_000,
+        // The projection limit is under test, not the coasting display limit (OA-TRK-338).
+        coast_max_r95_m: f64::INFINITY,
         ..big_config()
     };
     let mut t = tracker_new(&cfg).unwrap();
