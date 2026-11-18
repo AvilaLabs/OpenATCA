@@ -27,3 +27,7 @@ path = "src/main.rs"
 [[bin]]
 name = "oa-track-fusion"
 path = "src/fusion_main.rs"
+
+[dev-dependencies]
+# Workspace crate, examples only.
+oa-replay = { path = "../oa-replay" }
