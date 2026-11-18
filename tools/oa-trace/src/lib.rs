@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 //! oa-trace — requirements traceability checker (OA-TRC-001). See docs/M0_DESIGN.md.
 //!
-//! Requirements are list items `- **OA-XXX-NNN**` in `REQUIREMENTS.md`. Tests carry a
-//! `// REQ: ID[, ID...]` line directly above `#[test]`. A Kani proof harness carries it directly
+//! Requirements are list items `- **OA-XXX-NNN**` in `REQUIREMENTS.md`. Rust tests carry a
+//! `// REQ: ID[, ID...]` line directly above `#[test]`; Python tests in `test_*.py` modules carry
+//! `# REQ: ID[, ID...]` directly above `def test_*`. A Kani proof harness carries its Rust tag directly
 //! above `#[kani::proof]` (with an optional `#[kani::unwind(n)]` on either side of it) and
 //! counts as a proof, reported apart from tests. [`analyze`] joins the two.
 
@@ -193,6 +194,68 @@ pub fn parse_tags(file: &str, text: &str, errors: &mut Vec<TagError>) -> Vec<Tag
     tags
 }
 
+/// Extract strict Python unit-test tags from one test module.
+fn parse_python_tags(file: &str, text: &str, errors: &mut Vec<TagError>) -> Vec<Tag> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut tags = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let Some(list) = raw.trim().strip_prefix("# REQ:") else {
+            continue;
+        };
+        let line = i + 1;
+        let mut bad = false;
+        let mut ids = Vec::new();
+        for tok in list.split(',') {
+            let tok = tok.trim();
+            if is_valid_id(tok) {
+                ids.push(tok.to_string());
+            } else {
+                bad = true;
+                errors.push(TagError {
+                    file: file.to_string(),
+                    line,
+                    message: format!("malformed requirement ID {tok:?}"),
+                });
+            }
+        }
+        let next = lines.get(i + 1).map(|value| value.trim());
+        let name = next.and_then(python_test_name);
+        if name.is_none() {
+            bad = true;
+            errors.push(TagError {
+                file: file.to_string(),
+                line,
+                message: "tag is not directly followed by def test_*".to_string(),
+            });
+        }
+        if !bad {
+            if let Some(test_name) = name {
+                tags.push(Tag {
+                    line,
+                    ids,
+                    test_name,
+                    proof: false,
+                });
+            }
+        }
+    }
+    tags
+}
+
+fn python_test_name(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("def ")?;
+    let name = rest.split_once('(')?.0;
+    if name.starts_with("test_")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
 fn fn_name(line: &str) -> Option<String> {
     let t = line.trim();
     let idx = if t.starts_with("fn ") {
@@ -212,7 +275,7 @@ fn fn_name(line: &str) -> Option<String> {
     }
 }
 
-fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>, io: &mut Vec<String>) {
+fn collect_test_sources(dir: &Path, out: &mut Vec<PathBuf>, io: &mut Vec<String>) {
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) => {
@@ -225,11 +288,17 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>, io: &mut Vec<String>) {
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
             let name = entry.file_name();
-            if name == "target" || name == ".git" {
+            if name == "target" || name == ".git" || name == "__pycache__" {
                 continue;
             }
-            collect_rs(&path, out, io);
-        } else if ft.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            collect_test_sources(&path, out, io);
+        } else if ft.is_file()
+            && (path.extension().is_some_and(|e| e == "rs")
+                || (path.extension().is_some_and(|e| e == "py")
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("test_"))))
+        {
             out.push(path);
         }
     }
@@ -259,7 +328,7 @@ pub fn analyze(root: &Path) -> Report {
     }
 
     let mut files = Vec::new();
-    collect_rs(root, &mut files, &mut rep.io_errors);
+    collect_test_sources(root, &mut files, &mut rep.io_errors);
     files.sort();
     for path in files {
         let rel = path
@@ -276,7 +345,12 @@ pub fn analyze(root: &Path) -> Report {
                 continue;
             }
         };
-        for tag in parse_tags(&rel, &text, &mut rep.malformed) {
+        let tags = if path.extension().is_some_and(|ext| ext == "py") {
+            parse_python_tags(&rel, &text, &mut rep.malformed)
+        } else {
+            parse_tags(&rel, &text, &mut rep.malformed)
+        };
+        for tag in tags {
             for id in &tag.ids {
                 let t = TestRef {
                     file: rel.clone(),
@@ -599,6 +673,51 @@ mod tests {
             "| OA-AAA-002 | proof harness linked | proof `p_two` (b.rs:1)<br>proof `p_three` (c.rs:1) |"
         ));
         assert!(render_text(&r).contains("p_two (proof)"));
+    }
+
+    // REQ: OA-TRC-104
+    #[test]
+    fn python_test_modules_link_direct_tags_as_tests() {
+        let t = Tmp::new();
+        t.write("REQUIREMENTS.md", "- **OA-AAA-001** one\n");
+        t.write(
+            "test_routes.py",
+            "# REQ: OA-AAA-001\ndef test_source_backed_route_evidence():\n    pass\n",
+        );
+        // Helpers are deliberately outside the collector's Python test-module pattern.
+        t.write(
+            "route_helpers.py",
+            "# REQ: OA-AAA-001\ndef test_helper_must_not_link():\n    pass\n",
+        );
+        let report = analyze(&t.0);
+        assert!(
+            report.covered.contains_key("OA-AAA-001"),
+            "Python test tag was not linked"
+        );
+        let linked = &report.covered["OA-AAA-001"];
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].file, "test_routes.py");
+        assert_eq!(linked[0].name, "test_source_backed_route_evidence");
+        assert!(!linked[0].proof);
+        assert!(report.malformed.is_empty());
+    }
+
+    // REQ: OA-TRC-104
+    #[test]
+    fn python_tags_reject_invalid_ids_non_tests_and_nonadjacent_defs() {
+        let t = Tmp::new();
+        t.write(
+            "REQUIREMENTS.md",
+            "- **OA-AAA-001** one\n- **OA-AAA-002** two\n",
+        );
+        t.write(
+            "test_bad_tags.py",
+            "# REQ: OA-AAA-001\ndef helper():\n    pass\n\n# REQ: BAD-ID\ndef test_bad_id():\n    pass\n\n# REQ: OA-AAA-002\n\ndef test_not_adjacent():\n    pass\n",
+        );
+        let report = analyze(&t.0);
+        assert_eq!(report.malformed.len(), 3, "{:?}", report.malformed);
+        assert_eq!(report.untested, vec!["OA-AAA-001", "OA-AAA-002"]);
+        assert!(report.covered.is_empty());
     }
 
     // REQ: OA-TRC-101

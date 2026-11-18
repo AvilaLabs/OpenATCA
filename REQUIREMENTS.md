@@ -361,6 +361,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `from_le_bytes`, an untyped `parse` into a float and the `f32` forms) except where a per-line allowlist gives the
   reason the value cannot reach the program as NaN, infinity or an out-of-range number; an allowlist entry that
   matches no line is itself a failure.
+- **OA-TRC-104** For Python source, `oa-trace` discovers only `test_*.py` modules and links a `# REQ:` tag directly above a
+  Python `def test_*` as a test (not a proof), and reports malformed IDs and tags attached to non-test
+  definitions.
 
 ### Hashing (oa-sha256)
 
