@@ -31,3 +31,59 @@ jobs:
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi
+  # REQUIREMENTS.md promises results are the same bits on every IEEE-754 machine (oa-math). The
+  # golden-digest tests run here on a second architecture (aarch64) to prove it.
+  arm:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Test (release, aarch64)
+        run: cargo +1.89.0 test --workspace --release --locked
+  # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks
+  # never run in the release-only test job above.
+  debug-assertions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Test (dev profile)
+        run: cargo +1.89.0 test --workspace --locked
+  # Short coverage-guided run of every fuzz target (docs/FUZZING.md). fuzz/ is its own workspace
+  # with its own Cargo.lock; the root workspace never builds it. The corpus is the committed
+  # synthetic seeds (the real-data corpora from make_corpora.py are not redistributable).
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install nightly-2026-08-21 --profile minimal --component rust-src && rustup default nightly-2026-08-21
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Fuzz every target for 60 seconds
+        working-directory: fuzz
+        run: |
+          set -eu
+          for t in $(cargo fuzz list); do
+            corpus="$RUNNER_TEMP/fuzz-corpus/$t"
+            mkdir -p "$corpus" "artifacts/$t"
+            if [ -d "seeds/$t" ]; then cp seeds/"$t"/* "$corpus"/; fi
+            echo "::group::fuzz $t"
+            cargo fuzz run "$t" "$corpus" -- \
+              -artifact_prefix="$PWD/artifacts/$t/" \
+              -rss_limit_mb=2048 -max_total_time=60
+            echo "::endgroup::"
+          done
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
