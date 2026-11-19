@@ -12,4 +12,4 @@ workspace = true
 [dependencies]
 
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"

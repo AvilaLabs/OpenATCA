@@ -22,4 +22,4 @@ name = "oa-adapt"
 path = "src/bin/oa-adapt.rs"
 
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"

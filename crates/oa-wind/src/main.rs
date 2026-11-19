@@ -14,7 +14,8 @@ mod adsb_mode;
 
 use oa_awc::{finalize_pirep, new_pirep_table, parse_pirep, pirep_len, PirepStats, PirepTable};
 use oa_grib2::{decode_stream, Field, Parameter};
-use oa_wind::check::{check_grid_points, compare_obs, compare_to_fields, ObsWind, VectorCompare};
+use oa_wind::check::{check_grid_points, compare_to_fields, ObsWind, VectorCompare};
+use oa_wind::compare_obs;
 use oa_wind::{
     archive_files, hour_bytes, hour_levels, index_files, read_file_capped, read_hour_file, Hour,
     MAX_FILE_BYTES, MAX_HOURS_HELD,

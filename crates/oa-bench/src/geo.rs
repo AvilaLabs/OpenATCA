@@ -1,4 +1,4 @@
-//! Geodesic helpers for error vectors and distances. Core (pure). Distances come from the
+//! Geodesic helpers for error vectors and distances. Shell (B7: `ellipsoid` caches the WGS-84 tables in a `std::sync::OnceLock`, which B8 bans from core). Distances come from the
 //! WGS-84 inverse problem of `oa-geo`, so they hold near the poles and over long baselines;
 //! `enu` is the local east-north frame at a point (geodesic azimuth and distance from it), and
 //! `enu` and `from_enu` are inverses of each other, which the synthetic self-test relies on.

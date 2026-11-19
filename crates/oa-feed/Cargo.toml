@@ -20,4 +20,4 @@ name = "oa-feed"
 path = "src/main.rs"
 
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"

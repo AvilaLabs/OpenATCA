@@ -23,4 +23,4 @@ name = "oa-wind-check"
 path = "src/main.rs"
 
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"

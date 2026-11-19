@@ -17,10 +17,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oa_feed::cli::{self, Command, Live, Source};
-use oa_feed::health::{format_summary, observe_error, observe_frame, observe_skipped, FeedHealth};
+use oa_feed::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
 use oa_feed::replay::{replay_files, GzNoteKind};
-use oa_feed::{encode_frame_mono, FrameReader, MAX_FRAME_LEN};
+use oa_feed::{encode_frame_mono, format_summary, FrameReader, MAX_FRAME_LEN};
 use oa_zip::TruncStage;
 
 const DEFAULT_JAR: &str = "adapters/scds-bridge/target/scds-bridge.jar";
