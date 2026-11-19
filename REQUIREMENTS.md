@@ -414,7 +414,15 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   the files below it; only the top-level `src/bin` and `src/main.rs` are skipped.
 - **OA-TRC-215** A core crate depending on a shell or unsplit crate fails whichever dependency table, rename or
   path form declares it; a path dependency that is not a workspace member fails.
-- **OA-TRC-216** The check runs on the real workspace: twelve unsplit crates, and no failure but the recorded one.
+- **OA-TRC-216** The check passes on the real workspace, with twelve unsplit crates.
+- **OA-TRC-217** In core code the only `extern crate` is `extern crate alloc;`.
+- **OA-TRC-218** In core code a call of a float method `core` lacks (`.sin(`, `f64::sqrt(`, and the rest of the
+  RULESET B8 list) fails with `oa_ieee` or `oa_math` named as the alternative and the note that a user-defined
+  method of that name is disallowed too; only the crate `oa-ieee` is exempt.
+- **OA-TRC-219** Every crate of class core except `oa-ieee` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]`
+  in `src/lib.rs` (RULESET B10).
+- **OA-TRC-220** The public API of `oa-ieee` is exactly `pub fn` sqrt, floor, ceil, trunc and round: any other
+  public item, module, re-export or macro, or a missing function, fails.
 
 ### Hashing (oa-sha256)
 
