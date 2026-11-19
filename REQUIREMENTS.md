@@ -1359,7 +1359,7 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   `MAX_RENDER_WORK` (a charge equal to it is accepted, one more is refused); a smaller retry succeeds.
 - **OA-DSP-054** `build_scene` precharges, against `MAX_SCENE_WORK` and before clearing the destination list, table scans,
   per-boundary-span subdivision (including overlapping and zero-length spans), airway-leg subdivision, the point-label
-  sort (comparisons times the longest identifier, not the string pool) and label-grid slot inspections; each term moves the
+  sort (the in-crate bottom-up merge sort's bound of n * ceil(log2 n) comparisons, 0 for n <= 1, each costing the longest identifier plus 4, not the string pool) and label-grid slot inspections; each term moves the
   bound by its own cost, a charge equal to the limit is accepted and one more is refused, over-limit work leaves the previous
   complete list intact, and a valid retry succeeds.
 - **OA-DSP-055** `scratch_for` refuses a display profile above `MAX_SCENE_PIXELS` before allocating grid storage, while preserving the earlier `MAX_GRID_BOXES` refusal precedence; a profile within the limit succeeds.

@@ -84,7 +84,7 @@ use oa_airspace::core::model::{
 use std::fmt::Write;
 
 /// Maximum precharged work in one scene build. The charge covers table scans, declared span
-/// visits, edge subdivision, point-label sorting (comparisons times the longest identifier) and
+/// visits, edge subdivision, point-label sorting (at most n * ceil(log2 n) comparisons, times the longest identifier) and
 /// worst-case label-grid slot inspection.
 pub const MAX_SCENE_WORK: u128 = 1 << 40;
 pub const MAX_SCENE_PIXELS: u128 = crate::core::raster::MAX_DISPLAY_PIXELS as u128;
@@ -473,6 +473,8 @@ pub struct Scratch {
     pub point: Vec<u32>,
     /// Candidate indexes in placement order.
     pub order: Vec<u32>,
+    /// The merge sort's one scratch buffer for `order`, bounded by the candidate capacity.
+    pub order_tmp: Vec<u32>,
     /// Per candidate: the offset 0 to 3 it was placed at, or [`DROPPED_NO_ROOM`] or
     /// [`DROPPED_CELL_FULL`].
     pub outcome: Vec<u8>,
@@ -532,6 +534,7 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
         w: Vec::with_capacity(n),
         point: Vec::with_capacity(n),
         order: Vec::with_capacity(n),
+        order_tmp: Vec::with_capacity(n),
         outcome: Vec::with_capacity(n),
         overflow: 0,
         cols,
@@ -993,6 +996,7 @@ pub fn build_scene(
         || sc.w.capacity() < point_rows
         || sc.point.capacity() < point_rows
         || sc.order.capacity() < point_rows
+        || sc.order_tmp.capacity() < point_rows
         || sc.outcome.capacity() < point_rows
     {
         return Err(DisplayError::BadView(
@@ -1057,9 +1061,77 @@ fn check_scene_work(work: u128) -> Result<(), DisplayError> {
     Ok(())
 }
 
-/// Upper bound on the point-label sort: `sort_unstable_by` makes at most `6 * n * (ceil(log2 n) + 1)`
-/// comparisons (an introsort that falls back to heapsort), and one comparison reads at most the
-/// longest identifier plus the four fixed key fields (priority, latitude, longitude, row).
+/// `ceil(log2 n)` for `n >= 2`, 0 for `n <= 1`.
+fn ceil_log2(n: u128) -> u128 {
+    u128::from(u128::BITS - n.saturating_sub(1).leading_zeros())
+}
+
+/// Bottom-up merge sort of `data` by `cmp`, using `tmp` (the same length) as its one scratch
+/// buffer: deterministic, no recursion, no allocation. A merge of two runs of `m` elements in all
+/// makes at most `m - 1` comparisons, and there are `ceil(log2 n)` passes, so it makes at most
+/// `n * ceil(log2 n)` comparisons (0 for `n <= 1`). Equal elements keep their order.
+fn merge_sort_by<T: Copy>(
+    data: &mut [T],
+    tmp: &mut [T],
+    cmp: &mut dyn FnMut(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = data.len();
+    if tmp.len() != n {
+        return;
+    }
+    let mut width = 1usize;
+    let mut in_data = true;
+    while width < n {
+        let (src, dst): (&[T], &mut [T]) = if in_data {
+            (&*data, &mut *tmp)
+        } else {
+            (&*tmp, &mut *data)
+        };
+        merge_pass(src, dst, width, cmp);
+        in_data = !in_data;
+        width = width.saturating_mul(2);
+    }
+    if !in_data {
+        data.copy_from_slice(tmp);
+    }
+}
+
+/// One pass: merges each pair of adjacent runs of `width` from `src` into `dst`.
+fn merge_pass<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    width: usize,
+    cmp: &mut dyn FnMut(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = src.len();
+    let mut lo = 0usize;
+    while lo < n {
+        let mid = lo.saturating_add(width).min(n);
+        let hi = lo.saturating_add(width.saturating_mul(2)).min(n);
+        let (mut i, mut j, mut k) = (lo, mid, lo);
+        while i < mid || j < hi {
+            let take_left = match (src.get(i), src.get(j)) {
+                (Some(a), Some(b)) if i < mid && j < hi => cmp(a, b) != std::cmp::Ordering::Greater,
+                _ => i < mid,
+            };
+            let from = if take_left { i } else { j };
+            if let (Some(out), Some(v)) = (dst.get_mut(k), src.get(from)) {
+                *out = *v;
+            }
+            if take_left {
+                i += 1;
+            } else {
+                j += 1;
+            }
+            k += 1;
+        }
+        lo = hi;
+    }
+}
+
+/// Upper bound on the point-label sort: [`merge_sort_by`] makes at most `n * ceil(log2 n)`
+/// comparisons, and one comparison reads at most the longest identifier plus the four fixed key
+/// fields (priority, latitude, longitude, row).
 fn point_sort_work(m: &Model) -> u128 {
     let n = m.points.kind.len() as u128;
     let longest = m
@@ -1069,10 +1141,7 @@ fn point_sort_work(m: &Model) -> u128 {
         .map(|i| str_or_empty(&m.strings, *i).len() as u128)
         .max()
         .unwrap_or(0);
-    let log2_ceil = u128::from(u128::BITS - n.saturating_sub(1).leading_zeros());
-    n.saturating_mul(6)
-        .saturating_mul(log2_ceil + 1)
-        .saturating_mul(longest + 4)
+    n.saturating_mul(ceil_log2(n)).saturating_mul(longest + 4)
 }
 
 /// Upper bound for each input-derived loop in a frame scene. This preflight runs before clearing
@@ -1465,10 +1534,16 @@ fn labels(
             row,
         )
     };
-    // Unstable sorting is deterministic here: the key ends with the table row, so the order is total.
+    // The key ends with the table row, so the order is total and any correct sort gives it.
     let mut order = std::mem::take(&mut sc.order);
-    order.sort_unstable_by(|a, b| key(sc, *a).cmp(&key(sc, *b)));
+    let mut tmp = std::mem::take(&mut sc.order_tmp);
+    tmp.clear();
+    tmp.resize(order.len(), 0);
+    merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
+        key(sc, *a).cmp(&key(sc, *b))
+    });
     sc.order = order;
+    sc.order_tmp = tmp;
     let placed = place_labels(sc);
     st.labels = placed;
     st.labels_dropped = (n as u32 - placed).saturating_add(sc.overflow);
@@ -1832,7 +1907,7 @@ mod work_budget_tests {
         bigger.cell_n.push(0);
         assert_eq!(scene_work_bound(&model, &bigger, cells, 0) - base, 1);
 
-        // Point sort: 6 * n * (ceil(log2 n) + 1) comparisons, each the longest identifier plus
+        // Point sort: n * ceil(log2 n) comparisons, each the longest identifier plus
         // four key fields, on top of 34 per point and the label-grid inspections.
         let n = 5usize;
         model.points.kind.resize(n, 0);
@@ -1843,7 +1918,7 @@ mod work_budget_tests {
             .ident
             .resize(n, oa_airspace::model::StrIx::new(0));
         let with_points = scene_work_bound(&model, &scratch, cells, 0);
-        let sort = 6 * n as u128 * (3 + 1) * (12 + 4);
+        let sort = n as u128 * 3 * (12 + 4);
         let others = n as u128 * 34 + n as u128 * 5 * cells * CELL_CAP as u128;
         assert_eq!(with_points - base, sort + others);
     }
@@ -1867,5 +1942,55 @@ mod work_budget_tests {
         let pool_only = scene_work_bound(&model, &scratch, 510, 0);
         assert_eq!(small, pool_only);
         assert!(small < MAX_SCENE_WORK);
+    }
+
+    /// A comparator over `vals` (the key is the value, then the row, so keys are unique) that
+    /// counts its calls.
+    fn sort_counting(vals: &[u32]) -> (Vec<u32>, u64) {
+        let n = vals.len();
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        let mut tmp = vec![0u32; n];
+        let mut count = 0u64;
+        merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
+            count += 1;
+            (vals[*a as usize], *a).cmp(&(vals[*b as usize], *b))
+        });
+        (order, count)
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn merge_sort_matches_std_and_stays_within_n_ceil_log2_n_comparisons() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 33) as u32
+        };
+        for n in [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 1000, 1024, 4097] {
+            let sorted: Vec<u32> = (0..n as u32).collect();
+            let reversed: Vec<u32> = (0..n as u32).rev().collect();
+            let equal = vec![7u32; n];
+            let organ: Vec<u32> = (0..n as u32).map(|i| i.min(n as u32 - 1 - i)).collect();
+            let random: Vec<u32> = (0..n).map(|_| rnd() % 50).collect();
+            for (name, vals) in [
+                ("sorted", sorted),
+                ("reversed", reversed),
+                ("equal", equal),
+                ("organ-pipe", organ),
+                ("random", random),
+            ] {
+                let (got, count) = sort_counting(&vals);
+                let mut want: Vec<u32> = (0..n as u32).collect();
+                want.sort_unstable_by_key(|r| (vals[*r as usize], *r));
+                assert_eq!(got, want, "{name} n={n}");
+                let bound = n as u64 * ceil_log2(n as u128) as u64;
+                assert!(count <= bound, "{name} n={n}: {count} > {bound}");
+                if n <= 1 {
+                    assert_eq!(count, 0);
+                }
+            }
+        }
     }
 }
