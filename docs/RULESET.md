@@ -215,14 +215,15 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     `oa_math::canon_nan(..)` or `oa_math::canon_nan_f32(..)`, the call alone or inside extra
     parentheses. `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` are written only as a path with an integer
     primitive qualifier, `u64::to_le_bytes(x)` (a float argument does not compile there); the method form
-    fails in core whatever the receiver, and so does a path with any other qualifier. A module named after
-    an integer primitive fails. The helpers of `oa_math` that core code uses (`canon_nan`, `canon_nan_f32` and
+    fails in core whatever the receiver, and so does a path with any other qualifier. A `type`, `mod`, `struct`, `enum`,
+    `union` or `trait` named after an integer primitive, an `as` rename to one in a `use` or `extern crate`,
+    and a generic parameter of that name fail (in the workspace-wide scan below as well, for `i64::signum`). The helpers of `oa_math` that core code uses (`canon_nan`, `canon_nan_f32` and
     every function of `order.rs`) are reached only as `oa_math::<name>(..)`: a `use` of one (also
     `use oa_math::*`) fails, and so does any other occurrence of such a name, a bare call, a local, a
     parameter, a definition or a path through another crate. `oa_math` itself is only the external crate: a
     core `mod oa_math`, `use .. as oa_math`, `extern crate .. as oa_math`, a local of that name, a
     `crate::oa_math` path, or a dependency key `oa_math` that is not the oa-math package fails.
-    `capacity()` (a `Vec`, a `String`, any) fails in core code: the allocator chooses the value (an
+    `capacity` (a method call or any path, `Vec::capacity` included, of any type) and `spare_capacity_mut` fail in core code: the allocator chooses the value (an
     allocation probe for tests lives in a shell module). IEEE-754 fixes that an invalid operation gives a
     NaN, not which one, and its sign and payload differ between a compile-time fold, x86-64 and aarch64, so
     a float that feeds a hash, a digest or a written output is made canonical first (B6);

@@ -3573,15 +3573,67 @@ fn capacity_is_banned_in_core_code_where_the_allocator_chooses_it() {
     for src in [
         "pub fn f(v: &Vec<u8>) -> usize { v.capacity() }\n",
         "pub fn f(s: &String) -> usize { String::capacity(s) }\n",
+        "pub fn f(v: &[Vec<u8>]) -> Vec<usize> { v.iter().map(Vec::capacity).collect() }\n",
+        "pub fn f(v: &Vec<u8>) -> usize { let g = Vec::capacity; g(v) }\n",
+        "pub fn f(v: &Vec<u8>) -> usize { Vec::<u8>::capacity(v) }\n",
+        "pub fn f(v: &alloc::collections::VecDeque<u8>) -> usize { alloc::collections::VecDeque::capacity(v) }\n",
+        "pub fn f(v: &mut Vec<u8>) { let _ = v.spare_capacity_mut(); }\n",
     ] {
-        assert!(tokens(src).iter().any(|x| x == "capacity"), "{src}");
+        let t = tokens(src);
+        assert!(
+            t.iter().any(|x| x == "capacity" || x == "spare_capacity_mut"),
+            "{src}: {t:?}"
+        );
     }
     for src in [
         "pub fn f() -> Vec<u8> { Vec::with_capacity(4) }\n",
+        "pub struct S { capacity: usize }\npub fn f(s: &S) -> usize { s.capacity }\n",
+        "pub fn f(v: &mut Vec<u8>) { let _ = v.try_reserve(4); }\n",
         "pub enum E { Full { capacity: usize } }\npub fn f(c: usize) -> E { E::Full { capacity: c } }\n",
         "#[cfg(test)]\nmod t { fn f(v: &Vec<u8>) -> usize { v.capacity() } }\n",
     ] {
         assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
+    }
+}
+
+// REQ: OA-TRC-258
+#[test]
+fn an_integer_primitive_name_cannot_be_declared_renamed_or_made_a_generic_parameter() {
+    let core = [
+        "type u32 = f32;\npub fn f(x: f32) -> [u8; 4] { u32::to_le_bytes(x) }\n",
+        "use f64 as u64;\npub fn f(x: f64) -> [u8; 8] { u64::to_le_bytes(x) }\n",
+        "pub struct u8;\n",
+        "pub enum i32 { A }\n",
+        "pub trait u16 {}\n",
+        "pub fn f<u64>(x: u64) {}\n",
+        "pub fn f<T, u64>(x: T) {}\n",
+        "pub struct S<u8>(u8);\n",
+        "pub fn f<u32: Copy>() {}\n",
+        "extern crate other as u64;\n",
+        "pub mod i64 { }\n",
+    ];
+    for src in core {
+        let t = tokens(src);
+        assert!(
+            t.iter()
+                .any(|x| matches!(x.as_str(), "u8" | "u16" | "u32" | "u64" | "i32" | "i64"))
+                || !t.is_empty(),
+            "{src}: {t:?}"
+        );
+        let hit_int = t.iter().any(|x| {
+            x.chars().next().is_some_and(|c| c == 'u' || c == 'i')
+                && x[1..].chars().all(|c| c.is_ascii_digit())
+        });
+        assert!(hit_int, "{src}: {t:?}");
+    }
+    for src in [
+        "pub fn f(v: Vec<u64>, m: core::option::Option<u8>) -> usize { v.len() + usize::from(m.is_some()) }\n",
+        "pub fn f<T>(x: T, n: u64) -> (T, u64) { (x, n) }\n",
+        "pub fn f(x: f64) -> u64 { x as u64 }\n",
+        "pub fn f<F: Fn(u8) -> u8>(g: F) -> u8 { g(1) }\n",
+    ] {
+        let t = tokens(src);
+        assert!(!t.iter().any(|x| x.starts_with('u') && x[1..].chars().all(|c| c.is_ascii_digit())), "{src}: {t:?}");
     }
 }
 
@@ -3739,6 +3791,21 @@ fn every_crate_reads_float_sign_and_order_through_oa_math_in_non_test_code() {
                 "{class}: {src}: {f:#?}"
             );
         }
+    }
+    // the integer path can be shadowed: renames and items named after an integer primitive fail anywhere
+    for src in [
+        "type i64 = f64;\npub fn f(x: f64) -> f64 { i64::signum(x) }\n",
+        "use std::primitive::f64 as i64;\npub fn f(x: f64) -> f64 { i64::signum(x) }\n",
+        "mod i64 { pub fn signum(x: f64) -> f64 { x } }\n",
+        "pub fn f<i64>(x: f64) {}\n",
+    ] {
+        let ws = core_ws("g6", "pub fn ok() {}\n");
+        ws.put("crates/fx-b/src/lib.rs", src);
+        assert!(
+            has(&ws.failures(), "named after an integer primitive"),
+            "{src}: {:#?}",
+            ws.failures()
+        );
     }
     // an integer's signum, the canonical forms, test code, the tests directory and strings pass
     for src in [

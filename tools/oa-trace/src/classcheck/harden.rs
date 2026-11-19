@@ -174,6 +174,64 @@ fn use_statements(toks: &[Tok]) -> Vec<(usize, usize)> {
     out
 }
 
+/// Token indexes inside a `use ..;` or `extern ..;` statement, where `as` renames.
+fn rename_statements(toks: &[Tok]) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if matches!(s(toks, i), "use" | "extern") && is_path_start(toks, i) {
+            let end = (i..toks.len())
+                .find(|&k| s(toks, k) == ";")
+                .unwrap_or(toks.len());
+            out.extend(i..end);
+            i = end;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether the integer primitive name at `toks[i]` is declared or renamed there: `type u32 = ..`,
+/// `mod i64`, `struct u8`, `enum`, `union`, `trait`, `.. as u64` in a `use` or `extern crate`, or a
+/// generic parameter (`fn f<u64>()`, `struct S<T, u8>`). Then `u64::to_le_bytes(x)` or
+/// `i64::signum(x)` may not mean the primitive's function.
+pub(super) fn int_shadow(toks: &[Tok], i: usize, stmt: &BTreeSet<usize>) -> bool {
+    if !super::INT_TYPES.contains(&s(toks, i)) {
+        return false;
+    }
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    if matches!(prev, "type" | "mod" | "struct" | "enum" | "union" | "trait") {
+        return true;
+    }
+    if prev == "as" && stmt.contains(&i) {
+        return true;
+    }
+    if matches!(prev, "<" | ",") {
+        // a generic parameter list: walk back to its `<`, named by `fn f`, `struct S`, `impl`..
+        let mut depth = 0usize;
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            match s(toks, j) {
+                ">" if s(toks, j.wrapping_sub(1)) != "-" => depth += 1,
+                "<" if depth == 0 => {
+                    // `impl<..>`, or `fn NAME<..>`, `struct NAME<..>` and the like
+                    return s(toks, j.wrapping_sub(1)) == "impl"
+                        || (j >= 2
+                            && matches!(
+                                s(toks, j - 2),
+                                "fn" | "struct" | "enum" | "union" | "trait" | "type"
+                            ));
+                }
+                "<" => depth -= 1,
+                ";" | "{" | "}" | "(" | ")" => return false,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// The ban checks of RULESET B8 that look at one token with its neighbours: unsafe and link
 /// items, addresses, platform sizes, lowercase type aliases, fn-pointer casts, and a float's
 /// bits that were not canonicalised. `oa-math` itself does bit arithmetic on floats by design.
@@ -213,6 +271,7 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
             ));
         }
     }
+    let stmt = rename_statements(toks);
     let in_use: BTreeSet<usize> = use_statements(toks)
         .into_iter()
         .flat_map(|(a, b)| a..b)
@@ -251,18 +310,20 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
                 "B8: `oa_math` in core code names only the external crate, as the head of a path `oa_math::..`; a module, rename, local or parameter of that name fails",
             ));
         }
-        if w == "capacity" && matches!(prev, "." | "::") && next == "(" {
+        if (w == "capacity" && (prev == "::" || (prev == "." && next == "(")))
+            || w == "spare_capacity_mut"
+        {
             hits.push(hit(
                 t.line,
                 w,
-                "B8: `capacity()` is a value the allocator chooses; compare lengths or keep an explicit capacity value",
+                "B8: `capacity` (a call, a method or a path value such as `Vec::capacity`) is a value the allocator chooses; compare lengths or keep an explicit capacity value. `try_reserve`-style probes are left alone: their only result is success or failure",
             ));
         }
-        if super::INT_TYPES.contains(&w) && prev == "mod" && !math {
+        if !math && int_shadow(toks, i, &stmt) {
             hits.push(hit(
                 t.line,
                 w,
-                "B8: a module named after an integer primitive would capture `u64::to_le_bytes(x)`",
+                "B8: an item, rename or generic parameter named after an integer primitive would capture `u64::to_le_bytes(x)`",
             ));
         }
         if HELPERS.contains(&w)
@@ -452,8 +513,16 @@ pub(super) fn sign_order_hits(src: &str) -> (Vec<Hit>, Vec<String>, bool) {
     let st = strip_test_items(tokenize(&mask(src)));
     let toks = &st.toks;
     let mut hits = Vec::new();
+    let stmt = rename_statements(toks);
     for (i, t) in toks.iter().enumerate() {
         let w = t.s.as_str();
+        if int_shadow(toks, i, &stmt) {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: an item, rename or generic parameter named after an integer primitive would capture `i64::signum(x)`",
+            ));
+        }
         let instead = match w {
             "total_cmp" => "oa_math::cmp_canon_f64 or cmp_canon_f32",
             "copysign" => "oa_math::copysign_canon_f64 or copysign_canon_f32",

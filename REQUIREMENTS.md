@@ -573,7 +573,7 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `usize::try_from(..)` with `?`/`.unwrap()`, or a final `as <integer>`) is not float evidence, whatever the
   expression mentions inside.
 - **OA-TRC-257** `fmt::Arguments` (it carries the caller's `Display` impls) is not taken by a reachable item.
-- **OA-TRC-258** In core code a `to_bits` token fails (method or path, any qualifier) unless it is the method on
+- **OA-TRC-258** (an integer primitive name cannot be declared, renamed or made a generic parameter, in core or, for `signum`, anywhere) In core code a `to_bits` token fails (method or path, any qualifier) unless it is the method on
   the result of `oa_math::canon_nan(..)` / `canon_nan_f32(..)`, alone or in extra parentheses. `to_le_bytes`,
   `to_be_bytes` and `to_ne_bytes` are allowed only as a path with an integer primitive qualifier
   (`u64::to_le_bytes(x)`); the method form fails whatever the receiver. No receiver is inferred, so a shadowing
@@ -593,8 +593,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `crates/oa-math/src/order.rs`. Code uses `cmp_canon_*`, `is_sign_negative_canon_*`, `copysign_canon_*` and
   `signum_canon_*` of `oa_math`. A site the core scan reports is reported once. Test directories, `#[cfg(test)]`
   items, comments and strings are not read; a crate-root `build.rs` is not scanned and the workspace has none.
-- **OA-TRC-261** `capacity()` (a method call or path call) fails in core code, since the allocator chooses the
-  value; the allocation probe of the display tests is in a shell module.
+- **OA-TRC-261** `capacity` as a method call, as any path (`Vec::capacity`, `Vec::<u8>::capacity`, a path value
+  passed to `map` or bound by `let`) and `spare_capacity_mut` fail in core code, since the allocator chooses the
+  value; a field named `capacity` and `with_capacity` do not, and `try_reserve`-style probes are left alone. The
+  allocation probe of the display tests is in a shell module.
 
 ### Hashing (oa-sha256)
 
