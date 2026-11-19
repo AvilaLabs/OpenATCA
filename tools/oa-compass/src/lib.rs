@@ -7,12 +7,24 @@
 //! * `core`: the pure conversion of one output row (an OpenATCA tracker tick row, or an ERAM
 //!   track sample) into the plain values of one CAT062 record, and of one ADS-B report into the
 //!   values of one CAT021 record, in the item LSBs of the specification, with the list of what
-//!   the row did not have. No I/O, no allocation.
+//!   the row did not have, the ERAM flight address check, and the interval statistics the README
+//!   states. No I/O, no clock.
 //! * `shell`: the encoder glue onto `oa-asterix` (which allocates per record, so it is shell),
 //!   the files, the tracker run, the ERAM load, the read-back verification, the notes, and the
 //!   `oa-compass` binary.
 //!
 //! Requirements: OA-CMP-001 and the following, in REQUIREMENTS.md.
+//!
+//! # A run
+//!
+//! `shell::job` is one export: the output directory must be new or empty; the data files, the
+//! data-source file and the README are all written as `.partial` and renamed in one pass, and any
+//! error removes everything the run created. The commit the README names comes from the
+//! `oa-build-info` crate (read at build time). `--openatca-rows ticks|updates` chooses the
+//! tracker's one-second tick rows (the default) or its update rows. With both `--adsb` and
+//! `--sfdps-dir`, every ERAM flight with an aircraft address is compared with the ADS-B reports of
+//! the same address (`core::addrcheck`): a flight whose track contradicts the address it carries
+//! is exported without I380 address and listed in the README.
 //!
 //! # CAT021 Ed 2.4 against Ed 2.7, for every item `adsb.ast` encodes
 //!
