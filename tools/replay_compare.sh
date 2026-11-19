@@ -87,6 +87,33 @@ check_spec "$spec_b"
 commit_a="$(resolve "$spec_a")"
 commit_b="$(resolve "$spec_b")"
 
+# The digest format a commit will emit, read from its tree (no build): the overlay's canon.rs is
+# v2, a commit with canon.rs says its own header constant, a half-way commit is refused.
+digest_format() {
+    local c="$1" canon has_flag=0
+    git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null | grep -q -- '"--digest"' && has_flag=1
+    if canon="$(git -C "$repo" show "$c:crates/oa-track/src/canon.rs" 2>/dev/null)"; then
+        [ "$has_flag" = 1 ] || { echo half-way; return; }
+        case "$canon" in
+        *"oa-track digest v2"*) echo v2 ;;
+        *"oa-track digest v1"*) echo v1 ;;
+        *) echo unknown ;;
+        esac
+    else
+        [ "$has_flag" = 0 ] && echo "v2+overlay" || echo half-way
+    fi
+}
+fmt_a="$(digest_format "$commit_a")"
+fmt_b="$(digest_format "$commit_b")"
+for pair in "A:$commit_a:$fmt_a" "B:$commit_b:$fmt_b"; do
+    case "${pair##*:}" in
+    "v2" | "v2+overlay") ;;
+    half-way) die "commit ${pair%%:*} has the canonical module or the --digest flag but not both (half-way commit); refusing" ;;
+    v1) die "commit ${pair%%:*} would emit digest v1 (no end line); v1 is refused, there is no legacy path" ;;
+    *) die "commit ${pair%%:*} has a digest format this script does not know" ;;
+    esac
+done
+
 [ -f "$clip" ] || die "no such clip: $clip"
 [ -z "$expect" ] || [ -f "$expect" ] || die "no such expect file: $expect"
 # A new or empty output directory only: nothing stale (an overlay report, hashes, a time file or a
@@ -167,7 +194,7 @@ build_and_run() {
     if [ -x /usr/bin/time ]; then
         timer=(/usr/bin/time -v -o "$outdir/time-$label.txt")
     fi
-    "${guard[@]}" "${timer[@]}" "$tgt/release/oa-track-run" --adsb "$clip" \
+    "${guard[@]}" "${timer[@]}" "${clean_env_prefix[@]}" "$tgt/release/oa-track-run" --adsb "$clip" \
         --out "$scratch/run-$label" --no-score \
         --digest "$outdir/digest-$label.txt" --rows "$outdir/rows-$label.bin" \
         >"$outdir/run-$label.log" 2>&1 || die "run of $commit failed (see $outdir/run-$label.log)"
@@ -196,6 +223,13 @@ diff_tgt="${CARGO_TARGET_DIR:-$repo/target}"
 diff_bin="$diff_tgt/release/oa-replay-diff"
 [ -x "$diff_bin" ] || die "the built oa-replay-diff is not at $diff_bin"
 echo "diff binary sha256: $(sha "$diff_bin")" >"$outdir/hashes-diff.txt"
+# The diff tool is built from this checkout: which commit, and whether the tree was clean.
+diff_commit="$(git -C "$repo" rev-parse HEAD)"
+if [ -z "$(git -C "$repo" status --porcelain)" ]; then diff_clean=yes; else diff_clean=no; fi
+{
+    echo "diff tool build commit: $diff_commit"
+    echo "diff tool tree clean: $diff_clean"
+} >>"$outdir/hashes-diff.txt"
 
 args=("$outdir/digest-A.txt" "$outdir/digest-B.txt"
     --rows-a "$outdir/rows-A.bin" --rows-b "$outdir/rows-B.bin"
@@ -248,6 +282,10 @@ status=0
     for l in A B; do
         if [ -f "$outdir/overlay-$l.txt" ]; then echo "overlay_$l=applied"; else echo "overlay_$l=none"; fi
     done
+    echo "digest_format_A=$fmt_a"
+    echo "digest_format_B=$fmt_b"
+    echo "diff_tool_commit=$diff_commit"
+    echo "diff_tool_tree_clean=$diff_clean"
     echo "status=$status"
 } >>"$outdir/summary.txt"
 if [ "${REPLAY_COMPARE_KEEP_ROWS:-0}" != 1 ]; then

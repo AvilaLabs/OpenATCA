@@ -4422,3 +4422,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-RDF-023** `tools/replay_compare.sh` refuses an output directory that exists and is not
   empty (exit 2, before any build, touching nothing), and a run that does not reach its end removes
   the rows files it made.
+- **OA-RDF-024** `tools/replay_compare.sh` reads from each commit's tree, before any build, the
+  digest format it will emit (the header constant of its `canon.rs`, or v2 for a commit that gets
+  the overlay); a commit that would emit v1, a half-way commit (only one of `canon.rs` and
+  `--digest`) or an unknown header is exit 2. It runs both `oa-track-run` calls in the same
+  `env -i` environment as the builds, and records the diff tool's build commit and whether that
+  tree was clean in the report and in `summary.txt`.
+- **OA-TRK-377** A P-002 hold-out run (neither `--development` nor `--allow-dirty`) needs
+  `--frozen-commit <40 hex>` and is refused (exit 2) unless the commit embedded in the binary at
+  build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
+  and the working tree at run time is at that commit and clean. This gates which runs count as
+  hold-out scores; it does not change what is computed.

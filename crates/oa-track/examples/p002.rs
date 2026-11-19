@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run --release -p oa-track --example p002 -- \
-//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development]
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha>]
 //! ```
 //!
 //! Written from the comparison's scoring protocol P-002 and its amendment P-003, fixed by their
@@ -22,7 +22,10 @@
 //! given, and then stamps every output file as not valid for hold-out scoring. `--development`
 //! marks a run on development data the same way (stamped, not a hold-out score); a run with
 //! neither flag is a hold-out run and fails if any OpenATCA sample has no tracker row for its
-//! flags, or only an ambiguous one (see "The flag join").
+//! flags, or only an ambiguous one (see "The flag join"). A hold-out run also needs
+//! `--frozen-commit <40 hex>` and is refused unless the commit the binary was built from (the
+//! build-time variables `OA_BUILD_COMMIT` and `OA_BUILD_DIRTY`, see `tools/p002_build.sh`) is that
+//! commit, that build's tree was clean, and the working tree at run time is clean and at it.
 //!
 //! Writes `p002.txt` (tables M1 to M7 and M2t, M3t, M4t, M7t with bootstrap intervals,
 //! breakdowns by phase, altitude and the three flags, exclusions, offsets, digests, commit) and
@@ -89,6 +92,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut sfdps, mut out, mut label) = (None, None, None, String::new());
     let (mut allow_dirty, mut development) = (false, false);
+    let mut frozen: Option<String> = None;
     while let Some(a) = args.next() {
         if a == "--allow-dirty" {
             allow_dirty = true;
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
             "--sfdps-dir" => sfdps = v.map(PathBuf::from),
             "--out" => out = v.map(PathBuf::from),
             "--label" => label = v.unwrap_or_default(),
+            "--frozen-commit" => frozen = v,
             _ => {
                 eprintln!("p002: unknown option {a}");
                 return ExitCode::from(2);
@@ -112,7 +117,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development]"
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha>]"
         );
         return ExitCode::from(2);
     };
@@ -129,6 +134,18 @@ fn main() -> ExitCode {
         holdout: !allow_dirty && !development,
         development,
     };
+    if let Err(e) = holdout_binding(
+        mode,
+        frozen.as_deref(),
+        Build {
+            commit: option_env!("OA_BUILD_COMMIT"),
+            dirty: option_env!("OA_BUILD_DIRTY"),
+        },
+        &git,
+    ) {
+        eprintln!("p002: refused: {e}");
+        return ExitCode::from(2);
+    }
     match run(&adsb, &sfdps, &out, &label, &git, mode) {
         Ok(text) => {
             print!("{text}");
@@ -723,6 +740,68 @@ struct GitState {
 struct Mode {
     holdout: bool,
     development: bool,
+}
+
+/// What the binary says it was built from: `OA_BUILD_COMMIT` (a commit) and `OA_BUILD_DIRTY`
+/// (`0` for a clean tree), set by whoever built it (`tools/p002_build.sh`); `None` when unset.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy)]
+struct Build<'a> {
+    commit: Option<&'a str>,
+    dirty: Option<&'a str>,
+}
+
+/// Whether `s` is a full commit id: 40 lowercase hex digits.
+fn is_full_sha(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The hold-out gate on provenance (not on what is computed): a hold-out run needs
+/// `--frozen-commit`, a binary built from exactly that commit on a clean tree, and a working tree
+/// at run time that is at that commit and clean. Any other mode is not checked here.
+fn holdout_binding(
+    mode: Mode,
+    frozen: Option<&str>,
+    build: Build<'_>,
+    git: &GitState,
+) -> Result<(), String> {
+    if !mode.holdout {
+        return Ok(());
+    }
+    let Some(frozen) = frozen else {
+        return Err("a hold-out run needs --frozen-commit <sha> (or use --development)".into());
+    };
+    if !is_full_sha(frozen) {
+        return Err(format!(
+            "--frozen-commit must be 40 lowercase hex digits, got `{frozen}`"
+        ));
+    }
+    let Some(built) = build.commit else {
+        return Err("this binary does not say what it was built from (OA_BUILD_COMMIT unset at build time; build with tools/p002_build.sh)".into());
+    };
+    if built != frozen {
+        return Err(format!(
+            "the binary was built from {built}, not the frozen commit {frozen}"
+        ));
+    }
+    if build.dirty != Some("0") {
+        return Err("the binary was built from a tree that was not clean".into());
+    }
+    if git.head != frozen {
+        return Err(format!(
+            "the working tree is at {}, not the frozen commit {frozen}",
+            git.head
+        ));
+    }
+    if git_is_dirty(git) {
+        return Err(format!(
+            "the working tree is not clean ({})",
+            git_tree_text(git)
+        ));
+    }
+    Ok(())
 }
 
 fn git_is_dirty(g: &GitState) -> bool {
@@ -1581,6 +1660,12 @@ fn run(
         "  git commit: {} (working tree: {})",
         git.head,
         git_tree_text(git)
+    );
+    let _ = writeln!(
+        o,
+        "  binary built from: {} (build tree clean: {})",
+        option_env!("OA_BUILD_COMMIT").unwrap_or("unknown"),
+        option_env!("OA_BUILD_DIRTY").map_or("unknown", |d| if d == "0" { "yes" } else { "no" })
     );
     let _ = writeln!(
         o,
@@ -2444,6 +2529,52 @@ mod tests {
         let e = flag_gate(hold, 1, 3, 1).unwrap_err();
         assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
         assert!(flag_gate(dev, 5, 0, 0).is_ok());
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn a_hold_out_run_needs_the_frozen_commit_a_clean_build_and_a_clean_tree_at_it() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        let git = |head: &str, dirty: bool| GitState {
+            head: head.into(),
+            porcelain: Some(if dirty {
+                " M x\n".into()
+            } else {
+                String::new()
+            }),
+        };
+        let b = |c: Option<&'static str>, d: Option<&'static str>| Build {
+            commit: c,
+            dirty: d,
+        };
+        let hold = Mode {
+            holdout: true,
+            development: false,
+        };
+        let dev = Mode {
+            holdout: false,
+            development: true,
+        };
+        let good = b(Some(sha), Some("0"));
+        assert!(holdout_binding(hold, Some(sha), good, &git(sha, false)).is_ok());
+        // No --frozen-commit, a short or upper-case one.
+        assert!(holdout_binding(hold, None, good, &git(sha, false)).is_err());
+        assert!(holdout_binding(hold, Some("0123456"), good, &git(sha, false)).is_err());
+        // Embedded sha differs from the argument.
+        let e = holdout_binding(hold, Some(other), good, &git(other, false)).unwrap_err();
+        assert!(e.contains("built from"), "{e}");
+        // Dirty build, unknown build.
+        let e = holdout_binding(hold, Some(sha), b(Some(sha), Some("1")), &git(sha, false))
+            .unwrap_err();
+        assert!(e.contains("not clean"), "{e}");
+        assert!(holdout_binding(hold, Some(sha), b(Some(sha), None), &git(sha, false)).is_err());
+        assert!(holdout_binding(hold, Some(sha), b(None, None), &git(sha, false)).is_err());
+        // Run-time tree at another commit, or dirty.
+        assert!(holdout_binding(hold, Some(sha), good, &git(other, false)).is_err());
+        assert!(holdout_binding(hold, Some(sha), good, &git(sha, true)).is_err());
+        // Development mode is unchanged: no argument, no build information needed.
+        assert!(holdout_binding(dev, None, b(None, None), &git(other, true)).is_ok());
     }
 
     #[test]
