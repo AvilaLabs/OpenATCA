@@ -5160,3 +5160,19 @@ value is a difference only when strictly greater than it.
   sealed check.
 - **OA-SHD-029** Every nonzero load count is printed in the summary header; a beacon table that overflowed
   (`DROP_SFDPS_BEACON_FULL`) fails the run.
+
+
+## M5 close-encounter record (oa-encounter, tools/oa-encounter)
+
+- **OA-ENC-001** A pair is in a class when its horizontal separation is strictly under the class's horizontal limit and its vertical separation strictly under the vertical limit; the record volume has the same strict edges, and the class of a finished encounter is the tightest class any tick with a known altitude met.
+- **OA-ENC-002** An encounter starts at the first tick a pair is inside the record volume and ends when the pair has been outside it for the hysteresis (end time the last tick inside); a re-entry within the hysteresis continues the same encounter and a later one is a new encounter.
+- **OA-ENC-003** Each encounter records the time of the closest horizontal approach, the minimum horizontal separation, the vertical separation and the mean altitude at that time, the minimum scaled three-dimensional separation, both tracks' flags and whether either was on the ground at that time.
+- **OA-ENC-004** A pair with both aircraft on the ground inside the record volume is not recorded and is counted; one aircraft on the ground, or an unknown ground state, is recorded.
+- **OA-ENC-005** A pair inside the horizontal radius with an altitude unknown on either track is recorded by horizontal distance, and an encounter with no tick of known altitude is class ALT_UNKNOWN; none is dropped.
+- **OA-ENC-006** The grid scan and the pair evaluation count their work against configured budgets; over budget the pairs are evaluated in order of smallest separation, the remainder is counted as not evaluated, an open encounter whose pair was not evaluated is kept alive and marked, and every shortfall (tracks not scanned, candidates dropped, encounters not opened) is a count.
+- **OA-ENC-007** The record is a deterministic function of the rows: the same rows in any order give the same encounters and counts; rows sharing an address, or with no valid position, are left out and counted.
+- **OA-ENC-008** The grid finds every pair that the exact separation test finds inside the record radius, including across the antimeridian and at high and southern latitudes.
+- **OA-ENC-009** The tool refuses, with exit 2 and before opening or creating anything, an input or output path that is, is inside, or resolves (through a link or the nearest existing ancestor of a new directory) into a sealed 2026-11-19 recording; its arguments are strict.
+- **OA-ENC-010** A cycle whose time is not after the previous cycle's is refused and counted, an out-of-range configuration is refused, and a full encounter log counts what it loses.
+- **OA-ENC-011** The tool writes `encounters.csv` and `summary.txt` deterministically, sorted by start time; the summary has counts per class, altitude band, hour and 0.25 degree cell, the work and overflow counts, a degraded state when any shortfall is non-zero and the digest of `encounters.csv`, and contains no aircraft address.
+- **OA-ENC-012** A synthetic close pass run through the tracker and the record gives one encounter of the expected class and distance, repeats exactly, is not recorded at a large vertical separation, and the on-ground state at a tick is the latest report not older than 30 s.
