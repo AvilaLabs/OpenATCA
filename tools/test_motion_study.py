@@ -6,6 +6,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tools import motion_study as ms
@@ -364,5 +365,15 @@ class MotionStudyTests(unittest.TestCase):
         study=ms.read_json(ms.STUDY_PATH)
         self.assertFalse(study["uncertainty"]["nis_claim"])
         self.assertIn("independent_physical_accuracy",study["prohibited_claims"])
+
+    # REQ: OA-ACC-169
+    def test_study_file_hash_is_pinned_and_changed_bytes_fail_closed(self):
+        self.assertEqual(hashlib.sha256(ms.STUDY_PATH.read_bytes()).hexdigest(),ms.STUDY_V1_SHA256)
+        self.assertEqual(ms._study()["uncertainty"]["bootstrap"],ms.read_json(ms.STUDY_PATH)["uncertainty"]["bootstrap"])
+        with tempfile.TemporaryDirectory() as d:
+            altered=Path(d)/"study.json"; altered.write_bytes(ms.STUDY_PATH.read_bytes()+b"\n")
+            with self.assertRaisesRegex(ms.StudyError,"does not match the frozen v1 hash"): ms._study(altered)
+            with mock.patch.object(ms,"STUDY_PATH",altered):
+                with self.assertRaises(ms.StudyError): ms.choose_training([])
 
 if __name__=="__main__": unittest.main()

@@ -14,6 +14,9 @@ from collections import defaultdict
 from pathlib import Path
 
 STUDY_PATH = Path(__file__).resolve().parents[1] / "validation" / "motion-study-v1.json"
+# Freeze: SHA-256 of validation/motion-study-v1.json; any other bytes are refused.
+STUDY_V1_SHA256 = "bd33609f2ddf189a0ea8377522f20b8d2ac7706d8e45ba90285b0c1d27a93989"
+STUDY_MISMATCH_REASON = "protocol file does not match the frozen v1 hash"
 MAX_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 2_000_000
 MAX_FIELD = 4096
@@ -27,6 +30,12 @@ CHI2_2D = {50: 1.38629436112, 90: 4.60517018599, 95: 5.99146454711}
 
 class StudyError(ValueError):
     pass
+
+def _study(path=None):
+    """Load the study definition only if its bytes hash to the pinned v1 digest (fail closed)."""
+    raw=Path(path or STUDY_PATH).read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=STUDY_V1_SHA256: raise StudyError(STUDY_MISMATCH_REASON)
+    return json.loads(raw.decode("utf-8"))
 
 def _parse_finite_float(value):
     result=float(value)
@@ -559,7 +568,7 @@ def score_pair(candidate_dir, candidate_build, default_dir, default_build):
     scenario_ratios={}
     for sc,systems in result["scenario_paired_metrics"].items():
         scenario_ratios[sc]={name:_ratio(systems["candidate"][field][stat],systems["default"][field][stat]) for name,(field,stat) in metric_fields.items()}
-    study=json.loads(STUDY_PATH.read_text(encoding="utf-8")); floors=study["uncertainty"]["coverage_floors_by_nominal_scenario"]
+    study=_study(); floors=study["uncertainty"]["coverage_floors_by_nominal_scenario"]
     nominal=scenario in study["main_profile_gates"]["nominal_scenarios"]
     coverage_gate=(cov_c==1.0 and cov_c is not None and cov_d is not None and cov_c>=cov_d and same)
     losses_ok=c_loss and d_loss
@@ -603,7 +612,7 @@ def _cohort_bootstrap(clusters_by_seed, success_key, bootstrap_seed=173):
     seed_ids=tuple(sorted(clusters_by_seed))
     if unique<20 or rows<200 or len(seed_ids)!=3:
         return {"pass_data_minimum":False,"unique_clusters":unique,"scored_rows":rows,"lower95":None,"upper95":None,"empirical_fraction":None}
-    study=json.loads(STUDY_PATH.read_text(encoding="utf-8")); bootstrap=study["uncertainty"]["bootstrap"]
+    study=_study(); bootstrap=study["uncertainty"]["bootstrap"]
     if bootstrap_seed!=bootstrap["seed"]: raise StudyError("bootstrap seed differs from preregistration")
     replicates=bootstrap["replicates"]; rng=random.Random(bootstrap_seed); reps=[]
     for _ in range(replicates):
@@ -632,7 +641,7 @@ def _merge_cluster_group(scores, container, group):
     return merged
 
 def _cohort_calibration(scores, groups, container="clusters"):
-    study=json.loads(STUDY_PATH.read_text(encoding="utf-8")); floors={int(k):v for k,v in study["uncertainty"]["coverage_floors_by_nominal_scenario"].items()}; report={}; passed=True
+    study=_study(); floors={int(k):v for k,v in study["uncertainty"]["coverage_floors_by_nominal_scenario"].items()}; report={}; passed=True
     for group in groups:
         clusters=_merge_cluster_group(scores,container,group)
         group_result={}
@@ -646,7 +655,7 @@ def _cohort_calibration(scores, groups, container="clusters"):
     return passed,report
 
 def choose_training(scores):
-    study=json.loads(STUDY_PATH.read_text(encoding="utf-8")); expected_seeds={1,2,3}; scenario_list=study["training"]["scenario_set"] if "scenario_set" in study["training"] else [*study["main_profile_gates"]["nominal_scenarios"],"dropout","onset-exit"]
+    study=_study(); expected_seeds={1,2,3}; scenario_list=study["training"]["scenario_set"] if "scenario_set" in study["training"] else [*study["main_profile_gates"]["nominal_scenarios"],"dropout","onset-exit"]
     expected={(seed,sc) for seed in expected_seeds for sc in scenario_list}; by_setting=defaultdict(list)
     for score in scores:
         if score.get("study_id")!="openatca-motion-study-v1" or score.get("seed") not in expected_seeds or score.get("scenario") not in scenario_list:
@@ -697,7 +706,7 @@ def choose_training(scores):
             by_case[key]=fingerprint
     eligible=[x for x in settings if x["training_pass"] and x["pooled_nominal_position_rms_m"] is not None]
     winner=min(eligible,key=lambda x:(x["pooled_nominal_position_rms_m"],x["H_Q_CV"],x["setting_id"])) if eligible else None
-    return {"schema":"openatca-motion-study-selection-v1","study_id":"openatca-motion-study-v1","seed_ids":sorted(expected_seeds),"scenario_set":scenario_list,"setting_results":settings,"selected_setting_id":winner["setting_id"] if winner else None,"selected_H_Q_CV":winner["H_Q_CV"] if winner else None,"status":"selected_for_single_development_check" if winner else "no_candidate_passed","cross_scenario_confidence_intervals":None,"bootstrap_protocol":json.loads(STUDY_PATH.read_text(encoding="utf-8"))["uncertainty"]["bootstrap"],"claim_scope":"developmental_model_check_only"}
+    return {"schema":"openatca-motion-study-selection-v1","study_id":"openatca-motion-study-v1","seed_ids":sorted(expected_seeds),"scenario_set":scenario_list,"setting_results":settings,"selected_setting_id":winner["setting_id"] if winner else None,"selected_H_Q_CV":winner["H_Q_CV"] if winner else None,"status":"selected_for_single_development_check" if winner else "no_candidate_passed","cross_scenario_confidence_intervals":None,"bootstrap_protocol":_study()["uncertainty"]["bootstrap"],"claim_scope":"developmental_model_check_only"}
 
 def validate_check(selection, scores):
     winner=selection.get("selected_setting_id")
@@ -715,7 +724,7 @@ def validate_check(selection, scores):
         if score.get("input_hashes_match") is not True or not isinstance(score.get("candidate_native_guard_pass"),bool) or not isinstance(score.get("default_native_guard_pass"),bool) or hashes.get("candidate_source")!=hashes.get("default_source") or hashes.get("candidate_source_head")!=hashes.get("default_source_head") or hashes.get("candidate_normalized_params")!=hashes.get("default_normalized_params") or hashes.get("candidate_source")!=selected.get("candidate_source_sha256") or hashes.get("candidate_source_head")!=selected.get("source_head") or hashes.get("candidate_normalized_params")!=selected.get("normalized_params_sha256") or score.get("parameters_except_H_Q_CV")!=selected.get("parameters_except_H_Q_CV"):
             raise StudyError("development check candidate source/parameters differ from the selected training winner")
     checks=all(s.get("selection_pass") is True and s["candidate_native_guard_pass"] and s["default_native_guard_pass"] for s in scores)
-    study=json.loads(STUDY_PATH.read_text(encoding="utf-8"))
+    study=_study()
     nominal_pass,nominal_report=_cohort_calibration([s for s in scores if s["role"]=="nominal"],study["main_profile_gates"]["nominal_scenarios"])
     windows_pass,windows_report=_cohort_calibration([s for s in scores if s["scenario"]=="onset-exit"],("even:onset","even:exit","odd:onset","odd:exit"),"onset_exit_window_clusters")
     return {"schema":"openatca-motion-study-check-v1","study_id":"openatca-motion-study-v1","selected_setting_id":winner,"case_count":len(scores),"all_preregistered_case_gates_pass":checks,"check_nominal_undercoverage_pass":nominal_pass,"check_nominal_containment":nominal_report,"check_onset_exit_undercoverage_pass":windows_pass,"check_onset_exit_containment":windows_report,"retune_permitted":False,"claim_scope":"developmental_model_check_only"}
