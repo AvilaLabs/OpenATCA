@@ -25,77 +25,268 @@ use std::cmp::Ordering;
 /// Sentinel for an absent `u32` index.
 pub const NONE_U32: u32 = u32::MAX;
 
-/// Defines a `u32` index newtype with a `NONE` sentinel (A4).
-macro_rules! index_type {
-    ($(#[$m:meta])* $name:ident) => {
-        $(#[$m])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[repr(transparent)]
-        pub struct $name(u32);
+// Each index newtype below is written out in full: `u32` inside, a private field (A4, A5), a
+// `NONE` sentinel, and `new`, `get` and `row`. Core code defines no macro (B8).
 
-        impl $name {
-            /// Absent reference.
-            pub const NONE: $name = $name(NONE_U32);
+/// Index into the string table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct StrIx(u32);
 
-            /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
-            /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
-            pub const fn new(raw: u32) -> $name {
-                $name(raw)
-            }
+impl StrIx {
+    /// Absent reference.
+    pub const NONE: StrIx = StrIx(NONE_U32);
 
-            /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
-            pub const fn get(self) -> u32 {
-                self.0
-            }
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> StrIx {
+        StrIx(raw)
+    }
 
-            /// The row as a `usize` for slicing a column; a `u32` always fits.
-            pub const fn row(self) -> usize {
-                self.0 as usize
-            }
-        }
-    };
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
 }
 
-index_type!(
-    /// Index into the string table.
-    StrIx
-);
-index_type!(
-    /// Row of [`Points`].
-    PointIx
-);
-index_type!(
-    /// Row of [`Vertices`].
-    VertexIx
-);
-index_type!(
-    /// Row of [`Segments`].
-    SegIx
-);
-index_type!(
-    /// Row of [`Boundaries`].
-    BoundaryIx
-);
-index_type!(
-    /// Row of [`Airways`].
-    AirwayIx
-);
-index_type!(
-    /// Row of [`AirwayLegs`].
-    AirwayLegIx
-);
-index_type!(
-    /// Row of [`Procs`].
-    ProcIx
-);
-index_type!(
-    /// Row of [`Routes`].
-    RouteIx
-);
-index_type!(
-    /// Row of [`Legs`].
-    LegIx
-);
+/// Row of [`Points`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct PointIx(u32);
+
+impl PointIx {
+    /// Absent reference.
+    pub const NONE: PointIx = PointIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> PointIx {
+        PointIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Vertices`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct VertexIx(u32);
+
+impl VertexIx {
+    /// Absent reference.
+    pub const NONE: VertexIx = VertexIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> VertexIx {
+        VertexIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Segments`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct SegIx(u32);
+
+impl SegIx {
+    /// Absent reference.
+    pub const NONE: SegIx = SegIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> SegIx {
+        SegIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Boundaries`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct BoundaryIx(u32);
+
+impl BoundaryIx {
+    /// Absent reference.
+    pub const NONE: BoundaryIx = BoundaryIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> BoundaryIx {
+        BoundaryIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Airways`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct AirwayIx(u32);
+
+impl AirwayIx {
+    /// Absent reference.
+    pub const NONE: AirwayIx = AirwayIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> AirwayIx {
+        AirwayIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`AirwayLegs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct AirwayLegIx(u32);
+
+impl AirwayLegIx {
+    /// Absent reference.
+    pub const NONE: AirwayLegIx = AirwayLegIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> AirwayLegIx {
+        AirwayLegIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Procs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct ProcIx(u32);
+
+impl ProcIx {
+    /// Absent reference.
+    pub const NONE: ProcIx = ProcIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> ProcIx {
+        ProcIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Routes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct RouteIx(u32);
+
+impl RouteIx {
+    /// Absent reference.
+    pub const NONE: RouteIx = RouteIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> RouteIx {
+        RouteIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Row of [`Legs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct LegIx(u32);
+
+impl LegIx {
+    /// Absent reference.
+    pub const NONE: LegIx = LegIx(NONE_U32);
+
+    /// The index for raw row number `raw`. The field is private (A4, A5): the raw value
+    /// crosses a module boundary only through [`Self::new`] and [`Self::get`].
+    pub const fn new(raw: u32) -> LegIx {
+        LegIx(raw)
+    }
+
+    /// The raw row number (the [`NONE_U32`] sentinel for [`Self::NONE`]).
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The row as a `usize` for slicing a column; a `u32` always fits.
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// A latitude/longitude pair in 1e-7 degree. Stored as an array element, so it is guarded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
