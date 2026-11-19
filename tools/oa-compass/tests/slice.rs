@@ -368,8 +368,8 @@ fn a_window_in_which_every_file_keeps_no_record_is_refused_with_the_counts() {
 }
 
 // REQ: OA-CMP-027
-#[cfg(unix)]
 #[test]
+#[cfg(unix)]
 fn a_symlink_to_the_input_directory_is_refused_as_the_output() {
     let inp = source("r3in3");
     let link = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cmp-slice-r3link");
