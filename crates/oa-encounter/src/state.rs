@@ -39,6 +39,7 @@ const _: () = assert!(core::mem::size_of::<Open>() == 136);
 pub struct EncounterState {
     pub(crate) cfg: EncounterConfig,
     pub(crate) band_deg: f64,
+    pub(crate) lat_limit_deg: f64,
     pub(crate) lon_cells: Vec<u32>,
     pub(crate) first_cell: Vec<u32>,
     pub(crate) cos_edge: Vec<f64>,
@@ -84,7 +85,7 @@ pub fn encounter_check(c: &EncounterConfig) -> Result<(), &'static str> {
             return Err("class limit");
         }
     }
-    if c.hysteresis_ns < 0 {
+    if c.hysteresis_ns <= 0 {
         return Err("hysteresis_ns");
     }
     if c.work_budget == 0 {
@@ -104,6 +105,7 @@ pub fn encounter_new(cfg: &EncounterConfig) -> Result<EncounterState, &'static s
     Ok(EncounterState {
         cfg: *cfg,
         band_deg,
+        lat_limit_deg: lat_limit(cfg.volume_h_m),
         lon_cells,
         first_cell,
         cos_edge,
@@ -118,6 +120,22 @@ pub fn encounter_new(cfg: &EncounterConfig) -> Result<EncounterState, &'static s
         started: false,
         totals: CycleStats::default(),
     })
+}
+
+/// The latitude, degrees, up to which the grid's flat-earth test is a superset test for this
+/// record radius. The test measures east-west distance at the first track's latitude, so against
+/// the true separation it is off by at most `tan(lat) * dphi`, `dphi` being the radius as an angle
+/// on the smallest sphere radius (6,356,752 m); the test accepts 2 % over the radius, so the
+/// limit is `atan(0.02 / dphi)`, 85.8 degrees for 5 NM. (The flat north-south scale is a lower
+/// bound and errs toward accepting.)
+fn lat_limit(volume_h_m: f64) -> f64 {
+    let dphi = volume_h_m / 6_356_752.0;
+    oa_math::atan(0.02 / dphi).to_degrees()
+}
+
+/// The latitude limit of this record's grid test, degrees (see the crate documentation).
+pub fn encounter_lat_limit_deg(st: &EncounterState) -> f64 {
+    st.lat_limit_deg
 }
 
 /// Encounters open now.

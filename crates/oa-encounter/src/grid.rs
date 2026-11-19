@@ -162,6 +162,17 @@ pub(crate) fn grid_scan(st: &mut EncounterState, stats: &mut CycleStats) {
                     let dx = dl * cosl * M_PER_DEG_LOW;
                     let d2 = dx * dx + dy * dy;
                     if d2 <= r2 {
+                        // Both altitudes known and a volume's height apart: never inside (the
+                        // same difference and strict comparison as the evaluation's).
+                        let dv = f64::from((oi.alt_ft - oj.alt_ft).abs());
+                        if oi.alt_ft.is_finite()
+                            && oj.alt_ft.is_finite()
+                            && dv >= st.cfg.volume_v_ft
+                        {
+                            stats.pairs_skipped_altitude += 1;
+                            continue;
+                        }
+                        stats.candidates += 1;
                         if st.cands.len() < st.cfg.max_candidates {
                             st.cands.push(Cand {
                                 d2: d2 as u64,

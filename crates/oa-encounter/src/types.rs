@@ -138,7 +138,7 @@ pub struct EncounterLog {
 
 /// What one cycle did, and (as the totals) what a run did. Every shortfall is a count here
 /// (M5 rule 5): a consumer shows "degraded" when any of `not_evaluated`, `tracks_unscanned`,
-/// `candidates_dropped`, `open_dropped` is non-zero. A7.2: cold struct, size guard waived.
+/// `open_dropped`, `rows_bad`, `rows_duplicate`, `rows_over_capacity`, `rows_high_lat` is non-zero. A7.2: cold struct, size guard waived.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CycleStats {
     pub cycles: u64,
@@ -151,14 +151,23 @@ pub struct CycleStats {
     pub rows_duplicate: u64,
     /// Rows past the track capacity.
     pub rows_over_capacity: u64,
+    /// Rows above the latitude the grid's flat test is proved for ([`crate::encounter_lat_limit_deg`]);
+    /// they are used, and the record may miss pairs among them.
+    pub rows_high_lat: u64,
     pub grid_work: u64,
     /// Tracks the grid scan did not reach before its budget ran out.
     pub tracks_unscanned: u64,
+    /// Pairs the grid found inside the flat-earth radius and the altitude test: every one, before
+    /// the table-full test. `evaluated + not_evaluated == candidates`.
     pub candidates: u64,
-    /// Candidates that did not fit the candidate table.
+    /// Pairs the grid skipped because both altitudes were known and at least the record volume's
+    /// vertical limit apart (they cannot be inside the volume).
+    pub pairs_skipped_altitude: u64,
+    /// Of `not_evaluated`: candidates that did not fit the candidate table.
     pub candidates_dropped: u64,
     pub evaluated: u64,
-    /// Candidates beyond the evaluation budget, the largest separations.
+    /// Candidates not evaluated: those beyond the evaluation budget (the largest separations) and
+    /// those that did not fit the candidate table.
     pub not_evaluated: u64,
     /// Pairs inside the volume that were left out because both were on the ground.
     pub ground_excluded: u64,

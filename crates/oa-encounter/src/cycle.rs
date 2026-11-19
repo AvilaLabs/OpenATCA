@@ -16,6 +16,8 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.rows_bad += s.rows_bad;
     t.rows_duplicate += s.rows_duplicate;
     t.rows_over_capacity += s.rows_over_capacity;
+    t.rows_high_lat += s.rows_high_lat;
+    t.pairs_skipped_altitude += s.pairs_skipped_altitude;
     t.grid_work += s.grid_work;
     t.tracks_unscanned += s.tracks_unscanned;
     t.candidates += s.candidates;
@@ -69,6 +71,13 @@ fn load(st: &mut EncounterState, rows: &[Obs], stats: &mut CycleStats) {
         a = b;
     }
     stats.tracks = st.obs.len() as u64;
+    let limit = st.lat_limit_deg;
+    stats.rows_high_lat = st.obs.iter().filter(|o| o.lat_deg.abs() > limit).count() as u64;
+}
+
+/// True if a row with this address is in the cycle's loaded rows (they are in address order).
+fn present(st: &EncounterState, addr: u32) -> bool {
+    st.obs.binary_search_by_key(&addr, |o| o.addr).is_ok()
 }
 
 fn pair_key(a: u32, b: u32) -> u64 {
@@ -274,7 +283,6 @@ pub fn encounter_cycle(
     st.cands.clear();
     grid_scan(st, &mut stats);
     st.cands.sort_unstable();
-    stats.candidates = st.cands.len() as u64;
     let n_eval = st.cands.len().min(st.cfg.eval_budget);
     for k in 0..n_eval {
         let Some(c) = st.cands.get(k).copied() else {
@@ -283,7 +291,7 @@ pub fn encounter_cycle(
         evaluate(st, c.i as usize, c.j as usize, t_ns, &mut stats);
         stats.evaluated += 1;
     }
-    stats.not_evaluated = (st.cands.len() - n_eval) as u64 + stats.candidates_dropped;
+    stats.not_evaluated = stats.candidates - stats.evaluated;
     for k in n_eval..st.cands.len() {
         let Some(c) = st.cands.get(k).copied() else {
             break;
@@ -303,6 +311,21 @@ pub fn encounter_cycle(
                 break;
             };
             if e.0 >= from || e.1 >= from {
+                keep_alive(st, e.0, e.1, t_ns);
+            }
+        }
+    }
+    // A shortfall never ends or splits an encounter: an open encounter not evaluated this tick is
+    // kept alive, and marked, when its pair could have been lost to it. A dropped candidate may be
+    // any pair of tracks that are here; a removed row may be any track that is not.
+    let removed = stats.rows_duplicate + stats.rows_bad + stats.rows_over_capacity > 0;
+    if removed || stats.candidates_dropped > 0 {
+        for p in 0..st.open.len() {
+            let Some(e) = st.open.get(p).map(|o| (o.e.addr_a, o.e.addr_b)) else {
+                break;
+            };
+            let both = present(st, e.0) && present(st, e.1);
+            if (stats.candidates_dropped > 0 && both) || (removed && !both) {
                 keep_alive(st, e.0, e.1, t_ns);
             }
         }

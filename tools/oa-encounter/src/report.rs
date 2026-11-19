@@ -172,9 +172,9 @@ pub fn encounters_csv(encounters: &[Encounter], airports: &[Airport], volume_v_f
     for e in sorted(encounters) {
         let _ = writeln!(
             o,
-            "{:06X},{:06X},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
-            e.addr_a & 0xFF_FFFF,
-            e.addr_b & 0xFF_FFFF,
+            "{:08X},{:08X},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
+            e.addr_a,
+            e.addr_b,
             secs(e.start_ns),
             secs(e.end_ns),
             secs(e.closest_ns),
@@ -242,6 +242,8 @@ pub struct SummaryInput<'a> {
     /// address pair, for the encounters at or above 18,000 ft.
     pub report_sep_m: &'a BTreeMap<(u32, u32), f32>,
     pub totals: CycleStats,
+    /// The latitude the grid test is proved for, degrees.
+    pub lat_limit_deg: f64,
     /// Encounters the tool's log lost (must be 0).
     pub log_overflow: u64,
     /// Rows the tracker's output table lost (must be 0).
@@ -311,7 +313,9 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let es: Vec<(&Encounter, usize)> = i.encounters.iter().zip(ctx_of.iter().copied()).collect();
     let degraded = t.not_evaluated
         + t.tracks_unscanned
-        + t.candidates_dropped
+        + t.rows_duplicate
+        + t.rows_bad
+        + t.rows_high_lat
         + t.open_dropped
         + i.log_overflow
         + t.out_of_order
@@ -580,6 +584,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "\nwork and overflow");
     let _ = writeln!(
         o,
+        "  latitude limit of the grid test: {:.1} degrees",
+        i.lat_limit_deg
+    );
+    let _ = writeln!(
+        o,
         "  budgets per cycle: grid work {}, pair evaluations {}, candidates kept {}; capacity: tracks {}, open encounters {}",
         cfg.work_budget, cfg.eval_budget, cfg.max_candidates, cfg.max_tracks, cfg.max_open
     );
@@ -595,12 +604,26 @@ pub fn summary_text(i: &SummaryInput) -> String {
         ("rows with no valid position", t.rows_bad),
         ("rows with a duplicate address (left out)", t.rows_duplicate),
         ("rows over track capacity", t.rows_over_capacity),
+        (
+            "rows above the grid's latitude limit (used, pairs may be missed)",
+            t.rows_high_lat,
+        ),
         ("grid work units", t.grid_work),
         ("tracks not scanned (grid budget)", t.tracks_unscanned),
-        ("candidate pairs", t.candidates),
-        ("candidate pairs dropped (table full)", t.candidates_dropped),
+        (
+            "pairs skipped by altitude (cannot be inside)",
+            t.pairs_skipped_altitude,
+        ),
+        ("candidate pairs (evaluated + not evaluated)", t.candidates),
         ("pairs evaluated", t.evaluated),
-        ("pairs not evaluated (budget)", t.not_evaluated),
+        (
+            "pairs not evaluated (budget or table full)",
+            t.not_evaluated,
+        ),
+        (
+            "  of which dropped, candidate table full",
+            t.candidates_dropped,
+        ),
         ("pair-ticks excluded, both on the ground", t.ground_excluded),
         ("pair-ticks inside the record volume", t.in_volume),
         ("encounters opened", t.opened),

@@ -183,8 +183,8 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     // Sorted by start time; addresses appear here.
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 5);
-    assert!(lines[1].starts_with("00AAAA,00BBBB,100.000"));
-    assert!(csv.contains("ABCDEF,123456"));
+    assert!(lines[1].starts_with("0000AAAA,0000BBBB,100.000"));
+    assert!(csv.contains("00ABCDEF,00123456"));
     assert!(lines[2].contains("ALT_UNKNOWN") && lines[2].contains(",unknown,"));
     assert!(lines[3].contains(",C1,<3000,2500,") && lines[3].contains(",coast,"));
     let input = |l: &[Encounter]| {
@@ -198,6 +198,7 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
                 cycles: 4,
                 ..CycleStats::default()
             },
+            lat_limit_deg: 85.8,
             log_overflow: 0,
             tracker_overflow: 0,
             measurements: 10,
@@ -251,6 +252,7 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
         airports_from: "",
         report_sep_m: &BTreeMap::new(),
         totals: t,
+        lat_limit_deg: 85.8,
         log_overflow: 0,
         tracker_overflow: 0,
         measurements: 0,
@@ -260,7 +262,41 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
         scope: "",
         csv_sha256: "",
     });
-    assert!(s.contains("DEGRADED") && s.contains("pairs not evaluated (budget): 3"));
+    assert!(s.contains("DEGRADED") && s.contains("pairs not evaluated (budget or table full): 3"));
+    // Duplicate or invalid rows and rows above the latitude limit make the record degraded too.
+    for t in [
+        CycleStats {
+            rows_duplicate: 2,
+            ..CycleStats::default()
+        },
+        CycleStats {
+            rows_bad: 1,
+            ..CycleStats::default()
+        },
+        CycleStats {
+            rows_high_lat: 1,
+            ..CycleStats::default()
+        },
+    ] {
+        let s = summary_text(&SummaryInput {
+            cfg: &cfg,
+            encounters: &[],
+            airports: &[],
+            airports_from: "",
+            report_sep_m: &BTreeMap::new(),
+            totals: t,
+            lat_limit_deg: 85.8,
+            log_overflow: 0,
+            tracker_overflow: 0,
+            measurements: 0,
+            tick_rows: 0,
+            clip_name: "c",
+            clip_sha256: "",
+            scope: "",
+            csv_sha256: "",
+        });
+        assert!(s.contains("record state: DEGRADED"));
+    }
     // Names and bands.
     assert_eq!(class_name(0), "C1");
     assert_eq!(class_name(CLASS_ALT_UNKNOWN), "ALT_UNKNOWN");
@@ -434,6 +470,7 @@ fn the_high_altitude_table_and_breakdown_and_the_vertical_histogram() {
         airports_from: "none",
         report_sep_m: &sep,
         totals: CycleStats::default(),
+        lat_limit_deg: 85.8,
         log_overflow: 0,
         tracker_overflow: 0,
         measurements: 0,
@@ -515,6 +552,7 @@ fn aircraft_a_level_apart_are_kept_and_counted_apart_from_the_class_tables() {
         airports_from: "none",
         report_sep_m: &BTreeMap::new(),
         totals: CycleStats::default(),
+        lat_limit_deg: 85.8,
         log_overflow: 0,
         tracker_overflow: 0,
         measurements: 0,

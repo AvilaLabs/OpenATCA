@@ -336,8 +336,9 @@ fn over_budget_the_closest_pairs_are_evaluated_and_the_rest_counted() {
     let s = encounter_cycle(&mut st, 0, &mk(1000.0), &mut log);
     assert_eq!(
         (s.candidates, s.candidates_dropped, s.not_evaluated),
-        (1, 1, 1)
+        (2, 1, 1)
     );
+    assert_eq!(s.evaluated + s.not_evaluated, s.candidates);
 }
 
 // REQ: OA-ENC-007
@@ -550,4 +551,101 @@ fn the_true_minimum_is_interpolated_between_ticks_and_the_sampled_one_kept() {
         "{}",
         log.items[0].min_h_interp_m
     );
+}
+
+// REQ: OA-ENC-019
+#[test]
+fn a_shortfall_never_ends_or_splits_an_encounter() {
+    // Pair X (addresses 21, 22) is open; at the middle tick a pair with lower addresses fills the
+    // one-place candidate table and X is dropped from it.
+    let mut c = cfg();
+    c.max_candidates = 1;
+    let mk = |near: f64| {
+        let (la, lo) = offset(31.0, -90.0, 0.0, near);
+        let (lb, lb_lon) = offset(30.0, -90.0, 0.0, 3000.0);
+        vec![
+            obs(1, 31.0, -90.0, 5000.0),
+            obs(2, la, lo, 5000.0),
+            obs(21, 30.0, -90.0, 5000.0),
+            obs(22, lb, lb_lon, 5000.0),
+        ]
+    };
+    let mut st = encounter_new(&c).unwrap();
+    let mut log = encounter_log_new(64);
+    encounter_cycle(&mut st, 0, &mk(30_000.0), &mut log);
+    let ticks: Vec<(i64, f64)> = vec![(1, 1000.0), (2, 1000.0), (12, 30_000.0)];
+    let mut dropped = 0;
+    for (t, near) in ticks {
+        // Long gaps: the mid ticks are within the hysteresis of the first.
+        let s = encounter_cycle(&mut st, t * S, &mk(near), &mut log);
+        dropped += s.candidates_dropped;
+        assert_eq!(s.evaluated + s.not_evaluated, s.candidates);
+    }
+    assert!(dropped >= 1);
+    encounter_finish(&mut st, &mut log);
+    let x: Vec<&Encounter> = log.items.iter().filter(|e| e.addr_a == 21).collect();
+    assert_eq!(x.len(), 1);
+    assert!(x[0].ticks_unevaluated >= 1);
+    assert_eq!(x[0].start_ns, 0);
+    // A cycle that loses a row to a duplicate address in the middle of an encounter.
+    let (mut st, mut log) = fresh();
+    run(&mut st, &mut log, 0, &pair(2000.0, 5000.0, 5000.0));
+    let mut r = pair(2000.0, 5000.0, 5000.0).to_vec();
+    r.push(obs(2, 40.0, -90.001, 5000.0));
+    let s = run(&mut st, &mut log, 11, &r);
+    assert_eq!((s.rows_duplicate, s.closed), (2, 0));
+    run(&mut st, &mut log, 12, &pair(2000.0, 5000.0, 5000.0));
+    encounter_finish(&mut st, &mut log);
+    assert_eq!(log.items.len(), 1);
+    assert_eq!(
+        (log.items[0].ticks_unevaluated, log.items[0].ticks_inside),
+        (1, 2)
+    );
+    // Without the shortfall the same gap ends it.
+    let (mut st, mut log) = fresh();
+    run(&mut st, &mut log, 0, &pair(2000.0, 5000.0, 5000.0));
+    run(&mut st, &mut log, 11, &[]);
+    assert_eq!(log.items.len(), 1);
+}
+
+// REQ: OA-ENC-020
+#[test]
+fn pairs_a_volume_apart_in_altitude_are_skipped_and_counted_and_the_record_is_unchanged() {
+    // Known altitudes 1,000 ft apart (strict edge): skipped; 999 ft: candidate; unknown: candidate.
+    for (a, b, skipped, cand) in [
+        (5000.0f32, 6000.0f32, 1u64, 0u64),
+        (5000.0, 5999.0, 0, 1),
+        (f32::NAN, 9000.0, 0, 1),
+    ] {
+        let (mut st, mut log) = fresh();
+        let s = run(&mut st, &mut log, 0, &pair(2000.0, a, b));
+        assert_eq!(
+            (s.pairs_skipped_altitude, s.candidates),
+            (skipped, cand),
+            "{a} {b}"
+        );
+        assert_eq!(s.evaluated + s.not_evaluated, s.candidates);
+        assert_eq!(encounter_open_len(&st), usize::from(cand == 1));
+    }
+}
+
+// REQ: OA-ENC-021
+#[test]
+fn rows_above_the_latitude_limit_are_counted_and_the_limit_is_stated() {
+    let st = encounter_new(&cfg()).unwrap();
+    let lim = encounter_lat_limit_deg(&st);
+    assert!((lim - 85.8).abs() < 0.1, "{lim}");
+    // A smaller radius allows a higher latitude.
+    let mut c = cfg();
+    c.volume_h_m = 2000.0;
+    assert!(encounter_lat_limit_deg(&encounter_new(&c).unwrap()) > lim);
+    let (mut st, mut log) = fresh();
+    let rows = [
+        obs(1, 86.5, 10.0, 1.0),
+        obs(2, 85.0, 10.0, 1.0),
+        obs(3, -87.0, 10.0, 1.0),
+    ];
+    let s = run(&mut st, &mut log, 0, &rows);
+    assert_eq!((s.rows_high_lat, s.tracks), (2, 3));
+    assert_eq!(encounter_totals(&st).rows_high_lat, 2);
 }

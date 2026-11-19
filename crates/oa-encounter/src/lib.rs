@@ -20,9 +20,13 @@
 //!   smallest separation and the rest are counted as not evaluated in [`CycleStats`]; an open
 //!   encounter whose pair was not evaluated is kept alive and marked, never ended by the gap.
 //!
-//! Limits, stated: the grid test uses a local flat approximation and is a superset test only
-//! below about 80 degrees of latitude; the geometry is sampled at the ticks given (no
-//! interpolation between them); velocity is not used.
+//! Limits, stated: the grid test uses a local flat approximation. Its east-west scale is taken at
+//! the first track's latitude, so it differs from the true separation by at most `tan(lat) * dphi`,
+//! `dphi` being the radius as an angle (radius over 6,356,752 m); it accepts 2 % over the radius, so
+//! it finds every pair inside the radius up to latitude `atan(0.02 / dphi)`, 85.8 degrees for the
+//! 5 NM record ([`encounter_lat_limit_deg`]). Rows above it are used and counted
+//! ([`CycleStats::rows_high_lat`]). The geometry is sampled at the ticks given and the true minimum
+//! is interpolated between consecutive ticks; velocity is not used.
 
 // The width of `usize` is fixed by construction: this crate does not build for a target whose
 // pointers are not 64 bits (RULESET B10).
@@ -40,7 +44,7 @@ mod types;
 pub use cycle::{encounter_cycle, encounter_finish};
 pub use geom::{inside_volume, pair_class};
 pub use state::{encounter_check, encounter_log_clear, encounter_log_new, encounter_new};
-pub use state::{encounter_open_len, encounter_totals, EncounterState};
+pub use state::{encounter_lat_limit_deg, encounter_open_len, encounter_totals, EncounterState};
 pub use types::{
     ClassLimit, CycleStats, Encounter, EncounterConfig, EncounterLog, Obs, AIRBORNE,
     CLASS_ALT_UNKNOWN, CLASS_VOLUME_ONLY, GROUND_UNKNOWN, MAX_CLASSES, M_PER_FT, ON_GROUND,

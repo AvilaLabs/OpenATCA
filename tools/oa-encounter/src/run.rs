@@ -6,9 +6,10 @@ use std::fs;
 use oa_adsb::{reports_len, Reports, F_GROUND, NONE_I32};
 use oa_bench::input::load_adsb;
 use oa_encounter::{
-    encounter_check, encounter_cycle, encounter_finish, encounter_log_clear, encounter_log_new,
-    encounter_new, encounter_totals, ClassLimit, CycleStats, Encounter, EncounterConfig,
-    EncounterLog, EncounterState, Obs, AIRBORNE, GROUND_UNKNOWN, MAX_CLASSES, ON_GROUND,
+    encounter_check, encounter_cycle, encounter_finish, encounter_lat_limit_deg,
+    encounter_log_clear, encounter_log_new, encounter_new, encounter_totals, ClassLimit,
+    CycleStats, Encounter, EncounterConfig, EncounterLog, EncounterState, Obs, AIRBORNE,
+    GROUND_UNKNOWN, MAX_CLASSES, ON_GROUND,
 };
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
@@ -111,6 +112,7 @@ pub fn ground_at(t: &GroundTable, addr: u32, t_ns: i64) -> u8 {
 pub struct Record {
     pub encounters: Vec<Encounter>,
     pub totals: CycleStats,
+    pub lat_limit_deg: f64,
     pub log_overflow: u64,
     pub tracker_overflow: u64,
     pub tick_rows: u64,
@@ -210,6 +212,7 @@ pub fn track_and_record(
     Ok(Record {
         encounters: f.all,
         totals: encounter_totals(&f.st),
+        lat_limit_deg: encounter_lat_limit_deg(&f.st),
         log_overflow,
         tracker_overflow: out.overflow,
         tick_rows: f.tick_rows,
@@ -287,10 +290,22 @@ pub fn report_separations(
                         continue;
                     }
                     let w = (t - t0) as f64 / (t1 - t0) as f64;
-                    (la0 + w * (la1 - la0), lo0 + w * (lo1 - lo0))
+                    let mut d = lo1 - lo0;
+                    if d > 180.0 {
+                        d -= 360.0;
+                    } else if d < -180.0 {
+                        d += 360.0;
+                    }
+                    (la0 + w * (la1 - la0), lo0 + w * d)
                 };
+                let mut dl = lo_b - lo_a;
+                if dl > 180.0 {
+                    dl -= 360.0;
+                } else if dl < -180.0 {
+                    dl += 360.0;
+                }
                 let dy = (lb - la) * 111_200.0;
-                let dx = (lo_b - lo_a) * 111_200.0 * la.to_radians().cos();
+                let dx = dl * 111_200.0 * la.to_radians().cos();
                 best = best.min(dx.hypot(dy));
             }
         }
@@ -364,6 +379,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         airports_from: &airports_from,
         report_sep_m: &report_sep,
         totals: rec.totals,
+        lat_limit_deg: rec.lat_limit_deg,
         log_overflow: rec.log_overflow,
         tracker_overflow: rec.tracker_overflow,
         measurements: meas.len() as u64,
