@@ -239,7 +239,7 @@ fn the_library_is_no_std_outside_tests() {
     assert!(lib.contains("#![forbid(unsafe_code)]"));
 }
 
-// REQ: OA-MATH-035
+// REQ: OA-MATH-037
 #[test]
 fn the_check_finds_a_raw_total_cmp_and_a_raw_sign_read() {
     for planted in [

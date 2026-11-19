@@ -151,6 +151,7 @@ fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck:
             private_mods: &BTreeSet::new(),
             sealed: &BTreeSet::new(),
             sealing: &BTreeSet::new(),
+            sealing_mods: &BTreeSet::new(),
             cb_types: &cb_types,
             depth: 1,
             classes: &classes,
@@ -2303,7 +2304,7 @@ fn a_pub_trait_in_core_is_sealed_or_on_the_reviewed_list() {
     assert!(
         has(
             &ws.failures(),
-            "impl@X: B5: core code lets the shell hand in behaviour (a blanket impl"
+            "impl@sealed::Sealed/for/X: B5: core code lets the shell hand in behaviour (a blanket impl"
         ),
         "{:#?}",
         ws.failures()
@@ -2861,31 +2862,31 @@ fn float_min_max_clamp_are_oa_maths_so_the_zeros_and_the_nan_are_defined() {
 fn the_header_of_every_impl_is_a_boundary_trait_impls_included() {
     for (name, src) in [
         (
-            "impl@F",
+            "impl@Hook/for/&F",
             "trait Hook {}\nimpl<F: Fn() -> f64> Hook for &F {}\n",
         ),
         (
-            "impl@Wrap",
+            "impl@Hook/for/Wrap<T>",
             "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T: Into<f64> + Copy> Hook for Wrap<T> {}\n",
         ),
         (
-            "impl@Box",
+            "impl@Hook/for/Box<dyn_Fn()->f64>",
             "trait Hook {}\nimpl Hook for Box<dyn Fn() -> f64> {}\n",
         ),
         (
-            "impl@Wrap",
+            "impl@Default/for/Wrap<T>",
             "pub struct Wrap<T>(T);\nimpl<T: Clone> Default for Wrap<T> { fn default() -> Self { unreachable!() } }\n",
         ),
         (
-            "impl@Wrap",
+            "impl@Hook/for/Wrap<T>",
             "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T> Hook for Wrap<T> where T: Iterator {}\n",
         ),
         (
-            "impl@Wrap",
+            "impl@Hook/for/Wrap<T>",
             "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T: Copy> Hook for Wrap<T> {}\n",
         ),
         (
-            "impl@Dbg",
+            "impl@Hook/for/&mut_dyn_Dbg",
             "trait Hook {}\nimpl Hook for &mut dyn Dbg {}\ntrait Dbg {}\n",
         ),
     ] {
@@ -2910,7 +2911,7 @@ fn the_header_of_every_impl_is_a_boundary_trait_impls_included() {
     let ws = core_ws("ih5", "trait Hook {}\nimpl<F: Fn()> Hook for &F {}\n");
     ws.put(
         CALLBACKS,
-        "fx-a lib.rs::impl@F reason: reviewed, a pure closure only\n",
+        "fx-a lib.rs::impl@Hook/for/&F reason: reviewed, a pure closure only\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
@@ -3272,7 +3273,7 @@ fn a_private_module_cannot_be_published_and_a_pub_mod_seals_nothing() {
     ] {
         let ws = core_ws("pm0", &src);
         assert!(
-            has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a private module"),
+            has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds a sealing trait"),
             "{src}: {:#?}",
             ws.failures()
         );
@@ -3288,5 +3289,262 @@ fn a_private_module_cannot_be_published_and_a_pub_mod_seals_nothing() {
     ] {
         let ws = core_ws("pm2", src);
         assert!(has(&ws.failures(), "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"), "{src}: {:#?}", ws.failures());
+    }
+}
+
+// REQ: OA-TRC-245
+#[test]
+fn a_parenthesised_bound_is_read_through_and_one_that_cannot_be_read_fails() {
+    for src in [
+        "pub fn f<T: (Clone)>(x: T) {}\n",
+        "pub fn f<T: ((Clone))>(x: T) {}\n",
+        "pub fn f<T>(x: T) where T: (Iterator<Item = u8>) {}\n",
+        "pub fn f(x: impl (Into<u8>)) {}\n",
+        "pub fn f<T: Sized + (Ord)>(x: T) {}\n",
+        "pub fn f<T: for<'a> (Clone)>(x: T) {}\n",
+        "pub fn f<T: ?Send>(x: T) {}\n",
+        "pub fn f<T: (?Send)>(x: T) {}\n",
+        "pub struct S<T: (Clone)>(T);\n",
+    ] {
+        let ws = core_ws("pb0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                ": B5: core code lets the shell hand in behaviour"
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    for (tag, src) in [
+        ("pb1", "pub fn f<T: (Sized)>(x: &T) {}\n"),
+        ("pb2", "pub fn f<T: ?Sized>(x: &T) {}\n"),
+        ("pb3", "pub fn f<'a, T: 'a + ?Sized>(x: &'a T) {}\n"),
+        ("pb4", "pub fn f<T>(x: &T) where T: ?Sized + 'static {}\n"),
+        ("pb5", "pub fn f<T: (?Sized)>(x: &T) {}\n"),
+    ] {
+        let ws = core_ws(tag, src);
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+}
+
+// REQ: OA-TRC-253
+#[test]
+fn a_self_leaf_a_nested_pub_mod_and_every_blanket_self_type_are_judged() {
+    let seal = "mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n";
+    for src in [
+        format!("{seal}pub use crate::sealed::{{self}};\n"),
+        format!("{seal}pub use self::sealed::{{self}};\n"),
+        format!("{seal}pub use crate::{{sealed::{{self}}, T as _x}};\n"),
+    ] {
+        let ws = core_ws("sf0", &src);
+        assert!(has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds a sealing trait"), "{src}: {:#?}", ws.failures());
+    }
+    // a `pub mod` inside a private module is not public: the trait is sealed, and the module
+    // cannot be re-exported
+    let ws = core_ws(
+        "sf1",
+        "mod inner { pub mod sealed { pub trait Sealed {} } }\npub trait T: inner::sealed::Sealed {}\npub use inner::sealed;\n",
+    );
+    let f = ws.failures();
+    assert!(has(&f, "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds"), "{f:#?}");
+    assert!(!has(&f, "T: B5"), "{f:#?}");
+    // the same through files: `mod a;` is private, so `pub mod sealed` inside a.rs is too
+    let ws = Ws::new(
+        "sf2",
+        "core",
+        &[
+            (
+                "src/lib.rs",
+                "mod a;\npub trait T: a::sealed::Sealed {}\npub use a::sealed;\n",
+            ),
+            ("src/a.rs", "pub mod sealed { pub trait Sealed {} }\n"),
+        ],
+    );
+    let f = ws.failures();
+    assert!(has(&f, "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds"), "{f:#?}");
+    assert!(!has(&f, "T: B5"), "{f:#?}");
+    // and a public chain seals nothing
+    let ws = Ws::new(
+        "sf3",
+        "core",
+        &[
+            (
+                "src/lib.rs",
+                "pub mod a;\npub trait T: a::sealed::Sealed {}\n",
+            ),
+            ("src/a.rs", "pub mod sealed { pub trait Sealed {} }\n"),
+        ],
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    // a blanket impl of a sealing trait, whatever shape the self type has around the parameter
+    for self_ty in [
+        "X",
+        "&X",
+        "&mut X",
+        "Box<X>",
+        "Wrap<X>",
+        "[X]",
+        "(X, u8)",
+        "&'static [X; 2]",
+    ] {
+        let src =
+            format!("{seal}pub struct Wrap<Y>(Y);\nimpl<X> sealed::Sealed for {self_ty} {{}}\n");
+        let ws = core_ws("sf4", &src);
+        assert!(
+            has(&ws.failures(), "a blanket impl of a sealing trait"),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    let src = format!("{seal}impl<X> sealed::Sealed for Vec<X> where X: Sized {{}}\n");
+    assert!(has(
+        &core_ws("sf5", &src).failures(),
+        "a blanket impl of a sealing trait"
+    ));
+    // not blanket: a concrete self type, and an impl of a trait that seals nothing
+    let src = format!("{seal}pub struct CoreType;\nimpl sealed::Sealed for CoreType {{}}\nimpl sealed::Sealed for Option<u8> {{}}\ntrait Plain {{}}\nimpl<X> Plain for &X {{}}\n");
+    assert!(
+        core_ws("sf6", &src).failures().is_empty(),
+        "{:#?}",
+        core_ws("sf6", &src).failures()
+    );
+}
+
+// REQ: OA-TRC-257
+#[test]
+fn the_word_arguments_in_a_reachable_signature_fails_however_it_was_named() {
+    for src in [
+        "use core::fmt::Arguments;\npub fn f(a: Arguments<'_>) { let _ = a; }\n",
+        "use core::fmt::{self, Arguments};\npub fn f(a: Arguments<'_>) { let _ = a; }\n",
+        "pub fn f(a: core::fmt::Arguments<'_>) { let _ = a; }\n",
+        "type A = core::fmt::Arguments<'static>;\npub fn f(a: A) { let _ = a; }\n",
+        "use core::fmt::Arguments;\ntype A = Arguments<'static>;\ntype B = Option<A>;\npub fn f(a: B) { let _ = a; }\n",
+    ] {
+        let ws = core_ws("ar0", src);
+        assert!(has(&ws.failures(), ": B5: core code lets the shell hand in behaviour"), "{src}: {:#?}", ws.failures());
+    }
+    let ws = core_ws("ar1", "use core::fmt::Arguments;\nfn f(a: Arguments<'_>) { let _ = a; }\ntype A = Arguments<'static>;\nfn g(a: A) { let _ = a; }\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-246
+#[test]
+fn the_header_of_a_pub_struct_or_union_is_checked_for_callbacks_and_bounds() {
+    for src in [
+        "pub struct W<F: Fn() -> u8>(F);\n",
+        "pub struct W<F>(F) where F: Fn();\n",
+        "pub struct W<F: Fn()> { x: F }\n",
+        "pub struct W<F> where F: FnMut() { x: F }\n",
+        "pub struct W<F: Clone>(F);\n",
+        "pub union U<F: Fn() + Copy> { a: F, b: u8 }\n",
+        "pub struct W<F = fn(u8)>(F);\n",
+        "pub struct W<F: Fn() -> u8> where F: Clone { pub x: u8 }\n",
+    ] {
+        let ws = core_ws("sh0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                "W: B5: core code lets the shell hand in behaviour"
+            ) || has(
+                &ws.failures(),
+                "U: B5: core code lets the shell hand in behaviour"
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    let ws = core_ws(
+        "sh1",
+        "struct W<F: Fn() -> u8>(F);\npub struct P<T: Sized> { cb: Box<dyn Fn()>, pub x: T }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-252
+#[test]
+fn an_impl_is_allowlisted_by_its_trait_and_self_type_not_by_a_head_word() {
+    let src = "pub struct Wrap<T>(T);\nimpl<T: Clone> Default for Wrap<T> { fn default() -> Self { unreachable!() } }\nimpl<T: Clone> From<u8> for Wrap<T> { fn from(_: u8) -> Self { unreachable!() } }\nimpl<T: Clone> Wrap<T> { fn m(&self) {} }\n";
+    let ws = core_ws("ik0", src);
+    let f = ws.failures();
+    assert!(has(&f, "impl@Default/for/Wrap<T>: B5"), "{f:#?}");
+    assert!(has(&f, "impl@From<u8>/for/Wrap<T>: B5"), "{f:#?}");
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::impl@Default/for/Wrap<T> reason: reviewed, a pure clone\n",
+    );
+    let f = ws.failures();
+    assert!(!has(&f, "impl@Default/for/Wrap<T>: B5"), "{f:#?}");
+    assert!(has(&f, "impl@From<u8>/for/Wrap<T>: B5"), "{f:#?}");
+    // the old head-word keys cover nothing
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::impl@Wrap reason: reviewed, a pure clone\n",
+    );
+    let f = ws.failures();
+    assert!(
+        has(&f, "impl@Default/for/Wrap<T>: B5") && has(&f, "listed but no core"),
+        "{f:#?}"
+    );
+}
+
+// REQ: OA-TRC-255
+#[test]
+fn a_value_unwrapped_from_a_result_or_option_that_holds_a_float_is_float_evidence() {
+    for (src, others, want) in [
+        (
+            "pub fn g() -> Result<f64, u8> { let v = f()?; Ok(v.max(1.0)) }\n",
+            "pub fn f() -> Result<f64, u8> { Ok(1.0) }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let v = f().unwrap(); v.max(1.0) }\n",
+            "pub fn f() -> Option<f64> { None }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let p = f().expect(\"p\"); p.0.max(1.0) }\n",
+            "pub fn f() -> Option<(f64, u8)> { None }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let v = f().unwrap(); v[0].max(1.0) }\n",
+            "type V3 = [f64; 3];\npub fn f() -> Result<V3, u8> { Err(0) }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> Result<f64, u8> { let v = m::f()?; Ok(v.min(1.0)) }\n",
+            "pub fn f() -> Result<Real, u8> { Ok(1.0) }\ntype Real = f64;\n",
+            "min",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).iter().any(|t| t == want),
+            "{src}: {:?}",
+            tokens_with(src, others)
+        );
+    }
+    for (src, others) in [
+        (
+            "pub fn g() -> Result<u8, u8> { let v = f()?; Ok(v.max(1)) }\n",
+            "pub fn f() -> Result<u8, u8> { Ok(1) }\n",
+        ),
+        (
+            "pub fn g() -> u8 { let p = f().unwrap(); p.1.max(1) }\n",
+            "pub fn f() -> Option<(f64, u8)> { None }\n",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).is_empty(),
+            "{src}: {:?}",
+            tokens_with(src, others)
+        );
     }
 }

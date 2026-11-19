@@ -225,6 +225,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   from `max` for the two zeros in either argument order, and never panic (`clamp` with `lo > hi` gives `hi`).
   Tested for every combination of sign, zero, infinity and NaN. Core code calls these in place of the
   float `min`, `max` and `clamp` (see OA-TRC-251).
+- **OA-MATH-037** Outside `order.rs`, no source of `oa-math` calls `total_cmp`, `is_sign_negative` or
+  `is_sign_positive` (method, path call or path as a value): the sign and order of a NaN come from the `*_canon_*`
+  functions only. The purity scan fails on one, and a planted-detection test shows the matcher finds each form.
 
 ### NASR (oa-nasr)
 
@@ -513,7 +516,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate (`Copy` is not, it implies `Clone`); `Clone`, `PartialEq`, `Eq`,
   `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into` and every other trait fail unless the
   allowlist names the item. Private and `pub(crate)` items may carry any bound, a type parameter with no bound
-  is not checked; the header of an `impl` is OA-TRC-252.
+  is not checked; the header of an `impl` is OA-TRC-252. A bound is read through parentheses, `?` and
+  `for<..>`; one that still has no name (anything but `?Sized` or a lifetime) fails.
 - **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer in the signature of a reachable item (OA-TRC-245),
   in a `pub` field of a `pub` struct or union, in the body of a `pub enum` or `pub type`, or by naming a type
   alias of the same crate (private or not) whose body holds one, fail unless the allowlist names the item.
@@ -549,11 +553,14 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `Wrap<T>`, `Box<dyn Fn()>`) is a boundary: its generic bounds, `where` clause and callback types are judged
   like those of a reachable item (OA-TRC-245, 246), and a trait `impl`'s are judged whether or not it has `pub`
   methods; the body of an impl is core's own code. An inherent `impl` header counts for its plain `pub` methods.
-  The allowlist names a header as `impl@SelfType`.
+  The allowlist names a header by trait and self type with their generic arguments and no spaces
+  (`impl@Default/for/Wrap<T>`, `impl@Wrap<T>`), not by a head word.
 - **OA-TRC-253** A `pub trait` is sealed only by the leading path of a supertrait (`sealed::Sealed`), never by a
   path inside its generic arguments (`Iterator<Item = sealed::Private>`), and a `use` tree is read per item
   (`use crate::{sealed::Sealed, open::Other}` seals through `Sealed` only). `pub use` of any glob, and of a sealing
-  trait, fails.
+  trait, fails, and so does a `pub use` of a module that holds one (`crate::sealed`, `sealed::{self}`).
+  A module is reachable only if it and every module around it is `pub`, so a `pub mod` inside a private module
+  seals. A blanket impl of a sealing trait fails when a type parameter appears anywhere in the self type.
 - **OA-TRC-254** A type alias that holds an `Fn*`, `dyn` or `fn(..)` is resolved through other aliases of the crate
   (`type B = Vec<A>;`, in any order, generic or not), so a reachable signature or field that names any of them
   fails. An `as` rename in any `use` of core code fails.

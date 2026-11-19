@@ -1083,6 +1083,8 @@ pub struct Ctx<'a> {
     /// Names of the traits that seal them (`Sealed` in `sealed::Sealed`): they are not re-exported
     /// and not implemented for a bare type parameter.
     pub sealing: &'a BTreeSet<String>,
+    /// Names of the modules that hold a sealing trait: a `pub use` of one publishes the seal.
+    pub sealing_mods: &'a BTreeSet<String>,
     /// Names of the type aliases of this crate whose body holds an `Fn*`, `dyn` or `fn(..)`: a
     /// reachable signature that names one hands behaviour in (B5).
     pub cb_types: &'a BTreeSet<String>,
@@ -2131,16 +2133,17 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
         allow: &allow_keys,
         used: BTreeSet::new(),
     };
-    let (floats, sealed, sealing, private) = workspace_facts(root, &members);
+    let (floats, seals) = workspace_facts(root, &members);
     let view = Workspace {
         classes: &classes,
         by_dir: &by_dir,
         ws_deps: &ws_deps,
         libs: &libs,
         floats: &floats,
-        sealed: &sealed,
-        sealing: &sealing,
-        private: &private,
+        sealed: &seals.sealed,
+        sealing: &seals.sealing,
+        sealing_mods: &seals.sealing_mods,
+        private: &seals.private,
     };
     for m in &members {
         if matches!(m.class, Class::Core | Class::Split) {
@@ -2312,6 +2315,8 @@ struct Workspace<'a> {
     /// Sealed `pub trait` names of every core crate, and the traits that seal them.
     sealed: &'a BTreeSet<String>,
     sealing: &'a BTreeSet<String>,
+    /// Names of the modules that hold a sealing trait.
+    sealing_mods: &'a BTreeSet<String>,
     /// Non-public module names, per crate.
     private: &'a BTreeMap<String, BTreeSet<String>>,
 }
@@ -2341,48 +2346,77 @@ fn gather_files(root: &Path, m: &Member) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<Str
     (files, shell_files, walk_fails)
 }
 
+/// The module path of a source file: `src/a/b.rs` and `src/a/b/mod.rs` are `["a", "b"]`, `lib.rs`
+/// is empty, and the `core` root of a split crate is empty too (`src/core.rs`, `src/core/mod.rs`).
+fn file_module_path(src: &Path, file: &Path, split: bool) -> Vec<String> {
+    let rel = file.strip_prefix(src).unwrap_or(file);
+    let mut parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if let Some(last) = parts.pop() {
+        let stem = last.strip_suffix(".rs").unwrap_or(&last).to_string();
+        if !matches!(stem.as_str(), "lib" | "mod") {
+            parts.push(stem);
+        }
+    }
+    if split && parts.first().is_some_and(|p| p == "core") {
+        parts.remove(0);
+    }
+    parts
+}
+
+/// The facts of the sealed `pub trait`s and non-public modules of every core crate (B5).
+struct Seals {
+    sealed: BTreeSet<String>,
+    sealing: BTreeSet<String>,
+    sealing_mods: BTreeSet<String>,
+    private: BTreeMap<String, BTreeSet<String>>,
+}
+
 /// What every core file of the workspace declares that a rule about one file needs to know: float
 /// fields, tuple fields, return types and constants (B8), the sealed `pub trait`s and the
 /// non-public modules (B5).
-fn workspace_facts(
-    root: &Path,
-    members: &[Member],
-) -> (
-    FloatFacts,
-    BTreeSet<String>,
-    BTreeSet<String>,
-    BTreeMap<String, BTreeSet<String>>,
-) {
+fn workspace_facts(root: &Path, members: &[Member]) -> (FloatFacts, Seals) {
     let mut floats = FloatFacts::default();
-    let mut sealed = BTreeSet::new();
-    let mut sealing = BTreeSet::new();
-    let mut private_by_crate = BTreeMap::new();
+    let mut seals = Seals {
+        sealed: BTreeSet::new(),
+        sealing: BTreeSet::new(),
+        sealing_mods: BTreeSet::new(),
+        private: BTreeMap::new(),
+    };
     for m in members {
         if !matches!(m.class, Class::Core | Class::Split) {
             continue;
         }
         // read failures are reported by `check_member`, which reads the same files
         let (files, _, _) = gather_files(root, m);
-        let texts: Vec<String> = files
+        let src = m.dir.join("src");
+        let split = m.class == Class::Split;
+        let texts: Vec<(Vec<String>, String)> = files
             .iter()
-            .filter_map(|f| fs::read_to_string(f).ok())
+            .filter_map(|f| {
+                fs::read_to_string(f)
+                    .ok()
+                    .map(|t| (file_module_path(&src, f, split), t))
+            })
             .collect();
-        let (mut private, mut public) = (BTreeSet::new(), BTreeSet::new());
-        for text in &texts {
+        for (_, text) in &texts {
             floats.add_source(text);
-            let (a, b) = module_visibility(text);
-            private.extend(a);
-            public.extend(b);
         }
+        let borrowed: Vec<(Vec<String>, &str)> =
+            texts.iter().map(|(p, t)| (p.clone(), t.as_str())).collect();
+        let (mut private, public) = module_visibility(&borrowed);
         private.retain(|n| !public.contains(n));
-        for text in &texts {
-            let (a, b) = sealed_traits(text, &private);
-            sealed.extend(a);
-            sealing.extend(b);
+        for (_, text) in &texts {
+            let (a, b, c) = sealed_traits(text, &private);
+            seals.sealed.extend(a);
+            seals.sealing.extend(b);
+            seals.sealing_mods.extend(c);
         }
-        private_by_crate.insert(m.name.clone(), private);
+        seals.private.insert(m.name.clone(), private);
     }
-    (floats, sealed, sealing, private_by_crate)
+    (floats, seals)
 }
 
 /// B7 to B9 checks of one core or split crate.
@@ -2533,6 +2567,7 @@ fn check_member(
             private_mods: no_private.get(name.as_str()).unwrap_or(&empty),
             sealed: w.sealed,
             sealing: w.sealing,
+            sealing_mods: w.sealing_mods,
             cb_types: &cb_types,
             depth: module_depth(&src, f),
             classes: w.classes,

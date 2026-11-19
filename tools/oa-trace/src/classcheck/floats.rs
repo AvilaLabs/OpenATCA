@@ -145,6 +145,9 @@ impl FloatFacts {
                 self.aliases.get(n).and_then(|b| self.resolve(b, depth + 1))
             }
             Agg::Alias(_) => None,
+            Agg::Wrap(inner) => self
+                .resolve(inner, depth + 1)
+                .map(|r| Agg::Wrap(Box::new(r))),
             _ => Some(a.clone()),
         }
     }
@@ -186,6 +189,27 @@ impl FloatFacts {
         }
     }
 
+    /// What `?` or `.unwrap()` on a call of this function gives, when every function of the name
+    /// returns an `Option` or `Result` of the same float, tuple or array.
+    pub(super) fn unwrapped_ret(&self, name: &str) -> Option<Agg> {
+        let rets: Vec<Agg> = self
+            .rets
+            .get(name)?
+            .iter()
+            .map(|a| self.resolve(a, 0))
+            .collect::<Option<Vec<_>>>()?;
+        let mut inner = None;
+        for r in rets {
+            let Agg::Wrap(x) = r else { return None };
+            match &inner {
+                None => inner = Some(*x),
+                Some(i) if *i == *x => {}
+                Some(_) => return None,
+            }
+        }
+        inner
+    }
+
     /// Whether a field of this name is a float: declared so, or with an alias type that is.
     pub(super) fn field_float(&self, name: &str) -> bool {
         self.fields.contains(name)
@@ -205,6 +229,8 @@ pub enum Agg {
     Container,
     /// `(f64, u8)`: the indexes that are floats.
     Tuple(BTreeSet<usize>),
+    /// `Option<T>` or `Result<T, _>` of a float, tuple or array: `?` or `.unwrap()` gives the `T`.
+    Wrap(Box<Agg>),
     /// A path type that may be an alias (`V3`, `crate::P`): the last segment.
     Alias(String),
     /// Anything else, `()` included.
@@ -230,8 +256,21 @@ fn parse_type(toks: &[Tok], from: usize, to: usize) -> Agg {
             Agg::Tuple(idx)
         };
     }
+    // `Option<f64>`, `Result<(f64, u8), E>`: what `?` and `.unwrap()` give back
+    if matches!(w, "Option" | "Result") && s(toks, j + 1) == "<" {
+        let close = skip_angles(toks, j + 1);
+        let first = chunks(toks, j + 2, close.saturating_sub(1))
+            .into_iter()
+            .next();
+        if let Some((a, b)) = first {
+            let inner = parse_type(toks, a, b);
+            if inner != Agg::Other {
+                return Agg::Wrap(Box::new(inner));
+            }
+        }
+    }
     let has_float = (j..to).any(|k| matches!(s(toks, k), "f32" | "f64") && s(toks, k + 1) != "::");
-    if (w == "[" || (matches!(w, "Vec" | "Option") && s(toks, j + 1) == "<")) && has_float {
+    if (w == "[" || (w == "Vec" && s(toks, j + 1) == "<")) && has_float {
         return Agg::Container;
     }
     // a path: the last segment before any generic arguments
@@ -706,6 +745,7 @@ impl<'a> Evidence<'a> {
                                 tuple = Some((name.clone(), idx));
                                 add.push((k, name, Bind::Other));
                             }
+                            Agg::Scalar => add.push((k, name, Bind::Scalar)),
                             _ => add.push((k, name, Bind::Container)),
                         }
                     } else if init_is_tuple && chunks(toks, init_from + 1, k - 1).len() > 1 {
@@ -851,14 +891,28 @@ impl<'a> Evidence<'a> {
         while is_word(s(self.toks, j)) && s(self.toks, j + 1) == "::" {
             j += 2;
         }
-        if is_word(s(self.toks, j))
-            && s(self.toks, j + 1) == "("
-            && skip_group(self.toks, j + 1) == to
-        {
-            self.facts.agg_ret(s(self.toks, j))
-        } else {
-            None
+        if !(is_word(s(self.toks, j)) && s(self.toks, j + 1) == "(") {
+            return None;
         }
+        let name = s(self.toks, j);
+        let mut k = skip_group(self.toks, j + 1);
+        if k == to {
+            return self.facts.agg_ret(name);
+        }
+        // `f()?`, `f().unwrap()`, `f().expect("..")`: the value inside the `Option` or `Result`
+        while k < to {
+            if s(self.toks, k) == "?" {
+                k += 1;
+            } else if s(self.toks, k) == "."
+                && matches!(s(self.toks, k + 1), "unwrap" | "expect")
+                && s(self.toks, k + 2) == "("
+            {
+                k = skip_group(self.toks, k + 2);
+            } else {
+                return None;
+            }
+        }
+        self.facts.unwrapped_ret(name)
     }
 
     /// Whether the outermost expression of `toks[from..to]` is an integer by its own shape,

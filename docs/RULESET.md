@@ -118,7 +118,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     `Iterator`, `Into`, `From` and every other std trait, because each has methods that a shell type
     can implement and the core would call (a shell `Ord` that reads a clock, passed to a `pub`
     generic sort);
-  - `fmt::Arguments` in a signature (it carries the caller's `Display` impls);
+  - the word `Arguments` in a signature, by any path or import (`fmt::Arguments` carries the caller's
+    `Display` impls), and an alias that names it;
   - every `pub trait` that is not sealed: a supertrait from a private module (`mod sealed { pub trait
     Sealed {} }`, `pub trait T: sealed::Sealed`), or listed. A `pub use` of the sealing trait and a
     blanket `impl<X> sealed::Sealed for X` un-seal it and fail.
@@ -130,7 +131,10 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   trait, whatever its self type (`&F`, `Box<F>`, `Wrap<T>`, `Box<dyn Fn()>`), are judged like those of
   a reachable item (an inherent one for its plain `pub` methods, a trait one always), so
   `impl<F: Fn() -> f64> Hook for &F` and `impl<T: Clone> Default for Wrap<T>` fail and
-  `impl Hook for CoreType` does not. Type aliases that hold a callback are resolved through other
+  `impl Hook for CoreType` does not. A header is allowlisted by the trait and the self type with its
+  generic arguments, written without spaces (`impl@Default/for/Wrap<T>`, `impl@Wrap<T>` for an
+  inherent one), never by a head word. A blanket impl of a sealing trait fails whenever a type
+  parameter appears anywhere in the self type (`&X`, `Box<X>`, `[X]`, `(X, u8)`). Type aliases that hold a callback are resolved through other
   aliases of the crate.
   A listed entry states why the caller cannot inject platform behaviour, or is marked OPEN where
   the type system does not stop it and the callers were only read. An entry is by the name of the
@@ -238,7 +242,11 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     returns a float aggregate (`pair().0`, `make()[0]`, `let p = make();`), or the result of a float
     method. A float that reaches the call any other way is not seen: a `for` loop variable, a closure
     parameter (`.map(|v| v.to_le_bytes())`), a `match` or `if let` binding, a struct pattern, a
-    generic `T` that is a float, an alias or struct that another crate declares under a name this
+    generic `T` that is a float, a generic alias instantiated with a float (`type P<T> = (T, T)` used as
+    `P<f64>`), an `Option` or `Result` of a float aggregate unwrapped anywhere but as the whole
+    initializer of a `let` (`f()?`, `f().unwrap()`, `f().expect(..)` are read there; `f().unwrap().max(x)`
+    is not), a core method named `len` or `count` that returns a float (an initializer ending in
+    `.len()` or `.count()` is taken as an integer), an alias or struct that another crate declares under a name this
     crate reuses for something else (aliases and fields are matched by name over all core crates,
     which can only add false alarms), the elements of a tuple alias held in a field
     (`s.pos.0`), a tuple pattern bound from a function call (`let (a, b) = pair();`), the result of a
@@ -263,8 +271,17 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     imported through one (read per item of a `use` tree), and a bound by a sealed trait is accepted for
     any trait of that name in any core crate; a `pub trait Sealed` that happens to share a name with a
     seal is exempt as one. A `pub use` of a sealing trait by its name and any `pub use` glob fail; a
-    `pub use` of an ordinary item from a private module is allowed (the facade of `oa-geo` and
+    `pub use` of a module that holds a sealing trait (`pub use crate::sealed;`, `sealed::{self}`, also
+    inside a `pub mod`) fails, and so does a module-level `pub use` of a private module whose name is
+    not also an item name (`atan::atan` names the function); a `pub use` of an ordinary item from a
+    private module is allowed (the facade of `oa-geo` and
     `oa-math` is that), since `as` renames are banned and the sealing traits are known by name;
+  - a module is reachable only if it and every module around it is plain `pub`, read along the file
+    layout (`src/a/b.rs` is inside `mod a;`) and inline nesting; a module declared by a macro or by
+    `#[path]` (banned) is not followed, and a name that is public anywhere in the crate is public
+    everywhere in it;
+  - a bound the reader cannot name (anything but `?Sized`, a lifetime or a path after `(`, `?` and
+    `for<..>`) is flagged as a bad bound, not skipped;
   - a shell `impl` that a macro generates through a `$` fragment is not seen, and a shell `impl` of a
     trait or type that another core crate defines is not seen (an `impl` of this crate's own core
     types and traits is);
