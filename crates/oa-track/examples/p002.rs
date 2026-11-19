@@ -930,6 +930,8 @@ fn run(
     };
     let mut rcfg = RunConfig::default();
     rcfg.pair.max_sigma_m = tcfg.max_sigma95_h_m;
+    // frozen p002 protocol: scored without the hint-over-plan rule (OA-BENCH-132 came later)
+    rcfg.assoc.hint_over_plan = false;
     let tix = truth_index(&truth);
     eprintln!("reference built");
 
