@@ -3,6 +3,10 @@
 //! "record and replay; bit-exact replay harness"). Every later stage (tracker, alerts) runs
 //! against this replayed state.
 //!
+//! The crate is `split` (B7): the modules below marked core live under `core/`, the shell ones
+//! under `shell/`. `mono_split`, a core helper shared with the Creusot package, stays at
+//! `src/mono_split.rs` because the proof tooling pins that path and its hash.
+//!
 //! * Core (pure, no I/O, no clock, no allocation after construction, B1-B5): [`index`] (a
 //!   fixed-size open-addressing hash index), [`table`] ([`FlightTable`], a struct-of-arrays of
 //!   fixed capacity, and its eviction), [`apply`] ([`apply_sfdps`], [`apply_tbfm`]), [`adsb`]
@@ -26,21 +30,13 @@
 //! full refuses and counts new flights instead of evicting early (INTERFACES IF-R1), and every
 //! parse, decode and apply failure is counted by kind (IF-R5, IF-R6).
 
-pub mod adsb;
-pub mod apply;
-pub mod cli;
-pub mod clock;
-pub mod errors;
-pub mod fns;
-pub mod hash;
-pub mod index;
+pub mod core;
+// Kept at its own path: the proof tooling and the Creusot package pin the file by path and hash.
 mod mono_split;
-pub mod pipeline;
-pub mod report;
-pub mod slots;
-pub mod source;
-pub mod table;
-pub mod tfms;
+pub mod shell;
+
+pub use crate::core::{adsb, apply, clock, errors, fns, hash, index, pipeline, slots, table, tfms};
+pub use crate::shell::{cli, report, source};
 
 pub use adsb::{
     adsb_advance, adsb_shift_times, adsb_slot_of, adsb_stale_count, adsb_sweep, apply_adsb,

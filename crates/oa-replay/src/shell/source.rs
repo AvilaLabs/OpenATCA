@@ -1,4 +1,4 @@
-//! Reading recordings as streams and merging them in constant memory. Shell (B1): reads files;
+//! Reading recordings as streams and merging them in constant memory. Shell (B1, B7): reads files;
 //! its output depends only on the bytes it reads, never on the clock or on how they were chunked.
 //!
 //! * A **stream** is one feed's recording: a chain of files read one after another (rotated

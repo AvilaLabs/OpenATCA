@@ -1,4 +1,4 @@
-//! Command-line parsing for `oa-replay`. Core (pure): a function from arguments to a command.
+//! Command-line parsing for `oa-replay`. Shell (B1, B7): a function from arguments to a command that allocates (`String`, `PathBuf`); not real-time core.
 //!
 //! ```text
 //! oa-replay (--sfdps | --tbfm | --tfms | --fns | --adsb <file> | --sfdps-dir | --tbfm-dir
