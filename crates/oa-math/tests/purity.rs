@@ -9,8 +9,11 @@
 use std::path::Path;
 
 /// Method or associated-function names that are not guaranteed correctly rounded by IEEE-754
-/// (or that some targets lower to a libm call). `sqrt`, `abs` and bit casts are allowed.
+/// (or that some targets lower to a libm call), and the methods `core` lacks, which the crate
+/// reaches through `oa_ieee` instead (`sqrt`, `floor`, `ceil`, `trunc`, `round`). `abs` and bit
+/// casts are allowed.
 const BANNED: &[&str] = &[
+    "sqrt",
     "sin",
     "cos",
     "tan",
@@ -167,15 +170,26 @@ fn the_check_also_finds_a_bare_path_and_a_float_remainder() {
 
 // REQ: OA-MATH-019
 #[test]
-fn manifest_has_no_dependencies() {
+fn manifest_depends_only_on_oa_ieee() {
     let toml =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    // the [dependencies] table only, up to the next table header
     let after = toml.split("[dependencies]").nth(1).unwrap();
+    let after = after.split("\n[").next().unwrap();
     assert!(
-        after
-            .lines()
-            .all(|l| l.trim().is_empty() || l.trim().starts_with('#')),
-        "oa-math must have no dependencies, found: {after}"
+        after.lines().all(|l| l.trim().is_empty()
+            || l.trim().starts_with('#')
+            || l.trim() == "oa-ieee = { path = \"../oa-ieee\" }"),
+        "oa-math may depend only on oa-ieee, found: {after}"
     );
     assert!(!toml.contains("dev-dependencies") && !toml.contains("build-dependencies"));
+}
+
+// REQ: OA-MATH-019
+#[test]
+fn the_library_is_no_std_outside_tests() {
+    let lib =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
+    assert!(lib.contains("#![cfg_attr(not(test), no_std)]"));
+    assert!(lib.contains("#![forbid(unsafe_code)]"));
 }

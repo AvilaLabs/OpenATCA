@@ -668,7 +668,10 @@ fn zau_boundary_separation_is_reported_with_its_edge() {
         .all(|i| m.boundaries.edge_interp[i] == edge_interp::UNKNOWN));
 }
 
-fn report_for(out: &oa_airspace::build::BuildOutput, src: &oa_airspace::source::Sources) -> String {
+fn report_for(
+    out: &oa_airspace::build::BuildOutput,
+    src: &oa_airspace::sources::Sources,
+) -> String {
     let bytes = encode(&out.model).expect("encode");
     render_report(&ReportInput {
         model: &out.model,
@@ -1082,7 +1085,7 @@ fn airway_legs(m: &Model, designator: &str) -> (usize, usize) {
     (span.start.row(), span.len as usize)
 }
 
-fn v156(src: &mut oa_airspace::source::Sources) -> &mut oa_nasr::awy::Airway {
+fn v156(src: &mut oa_airspace::sources::Sources) -> &mut oa_nasr::awy::Airway {
     src.nasr
         .airways
         .iter_mut()
@@ -1156,7 +1159,7 @@ fn an_airway_leg_ends_at_the_next_row_only_when_that_row_continues_the_same_airw
 }
 
 /// The first boundary point of the first CIFP controlled-airspace volume with an arc.
-fn first_arc(src: &mut oa_airspace::source::Sources) -> &mut oa_arinc424::BoundaryPoint {
+fn first_arc(src: &mut oa_airspace::sources::Sources) -> &mut oa_arinc424::BoundaryPoint {
     src.cifp
         .controlled_airspace
         .iter_mut()
@@ -1171,7 +1174,7 @@ fn first_arc(src: &mut oa_airspace::source::Sources) -> &mut oa_arinc424::Bounda
         .expect("an arc in the fixture")
 }
 
-fn first_circle(src: &mut oa_airspace::source::Sources) -> &mut oa_arinc424::BoundaryPoint {
+fn first_circle(src: &mut oa_airspace::sources::Sources) -> &mut oa_arinc424::BoundaryPoint {
     src.cifp
         .controlled_airspace
         .iter_mut()
@@ -1401,7 +1404,7 @@ fn terminal_ndb_record(ident: &str, airport: &str, pos: &str) -> String {
 
 /// A NASR NDB row (cloned from the first fixture navaid) with its own city and position.
 fn nasr_ndb(
-    src: &oa_airspace::source::Sources,
+    src: &oa_airspace::sources::Sources,
     id: &str,
     city: &str,
     lat: f64,

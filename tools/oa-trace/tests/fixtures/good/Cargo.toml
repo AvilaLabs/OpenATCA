@@ -1,0 +1,2 @@
+[workspace]
+members = ["crates/fx-core", "crates/fx-shell", "crates/fx-split", "crates/fx-old"]

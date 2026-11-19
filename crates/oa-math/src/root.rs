@@ -85,7 +85,7 @@ fn hypot_fast_plain(big: f64, small: f64) -> Option<f64> {
     let pb = two_sqr(small);
     // pa.hi >= pb.hi, as the squares round monotonically
     let s = fast_two_sum(pa.hi, pb.hi);
-    let r = s.hi.sqrt();
+    let r = oa_ieee::sqrt(s.hi);
     let half_inv = 0.5 / r;
     let sq = two_sqr(r);
     let cl = (((s.hi - sq.hi) - sq.lo) + (s.lo + (pa.lo + pb.lo))) * half_inv;
@@ -115,7 +115,7 @@ fn hypot_fast_scaled(x: f64, y: f64) -> Option<f64> {
     let pb = two_prod(b, b);
     let s = two_sum(pa.hi, pb.hi);
     let f = fast_two_sum(s.hi, s.lo + (pa.lo + pb.lo));
-    let r = f.hi.sqrt();
+    let r = oa_ieee::sqrt(f.hi);
     let sq = two_prod(r, r);
     let cl = (((f.hi - sq.hi) - sq.lo) + f.lo) / (2.0 * r);
     round_test(r, cl, r * ROOT_FAST_REL).map(|v| v * pow2(e))

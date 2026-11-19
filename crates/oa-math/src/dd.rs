@@ -112,7 +112,7 @@ pub(crate) fn sqrt(a: Dd) -> Dd {
     if a.hi <= 0.0 {
         return dd(0.0, 0.0);
     }
-    let s = a.hi.sqrt();
+    let s = oa_ieee::sqrt(a.hi);
     let rem = sub(a, two_prod(s, s));
     let corr = rem.hi / (2.0 * s);
     fast_two_sum(s, corr)

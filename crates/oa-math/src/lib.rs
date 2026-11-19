@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), no_std)]
 //! oa-math: elementary functions that give the same bits on every IEEE-754 machine.
 //!
-//! Core (pure) code. Zero dependencies, no allocation, no panic path.
+//! Core (pure) code. `no_std` outside tests, no allocation, no panic path. Its one dependency is
+//! `oa-ieee`, the five exactly specified operations `core` lacks (see the README).
 //!
 //! # Why this crate exists
 //!
@@ -14,7 +16,7 @@
 //! # The determinism rule
 //!
 //! Only operations that IEEE-754 requires to be correctly rounded are used: `+ - * /`,
-//! `f64::sqrt`, integer arithmetic and bit casts (`to_bits`, `from_bits`). Nothing calls the
+//! `oa_ieee::sqrt`, integer arithmetic and bit casts (`to_bits`, `from_bits`). Nothing calls the
 //! platform maths library, not even on a fallback path (a test greps the sources for the
 //! forbidden calls), and nothing relies on fused multiply-add (a separate multiply and add are
 //! never contracted by the compiler). Rounding is round-to-nearest-even, the Rust default.

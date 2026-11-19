@@ -14,7 +14,7 @@ use crate::error::GeoError;
 use crate::geodesic::{ang_normalize, atan2d, sincosd, sq, Ellipsoid};
 use crate::latlon::LatLon;
 
-const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
+const HALF_PI: f64 = core::f64::consts::FRAC_PI_2;
 /// Newton-type steps allowed before the scan is used, and the step size taken as converged.
 const NEWTON_STEPS: usize = 40;
 const NEWTON_TOL_M: f64 = 1e-8;
@@ -86,7 +86,7 @@ impl Ellipsoid {
 
     /// Radius of the parallel at latitude `phi` (radians).
     fn parallel_radius(&self, phi: f64) -> f64 {
-        self.a * oa_math::cos(phi) / (1.0 - self.e2 * sq(oa_math::sin(phi))).sqrt()
+        self.a * oa_math::cos(phi) / oa_ieee::sqrt(1.0 - self.e2 * sq(oa_math::sin(phi)))
     }
 
     /// Meridian arc length from `phi_a` to `phi_b` (radians), metres, signed.
@@ -334,18 +334,18 @@ impl Ellipsoid {
         let rhumb = self.rhumb_inverse(p1, p2)?;
         // The nearest geodesic point moves smoothly with the sample, so each solve starts from
         // the previous answer.
-        let foot = std::cell::Cell::new(f64::NAN);
-        let sep_at = |frac: f64| -> Result<f64, GeoError> {
+        let mut foot = f64::NAN;
+        let mut sep_at = |frac: f64| -> Result<f64, GeoError> {
             // The rhumb line was solved once above; only the direct problem varies per sample.
             let q = self.rhumb_direct(p1, rhumb.course_deg, rhumb.distance_m * frac)?;
-            let guess = if foot.get().is_nan() {
+            let guess = if foot.is_nan() {
                 frac * geo.distance_m
             } else {
-                foot.get()
+                foot
             };
             let (d, s) =
                 self.distance_to_geodesic(q, p1, geo.azimuth1_deg, geo.distance_m, guess)?;
-            foot.set(s);
+            foot = s;
             Ok(d)
         };
         let mut best = (0usize, 0.0f64);

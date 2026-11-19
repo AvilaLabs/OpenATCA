@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), no_std)]
 //! oa-geo: WGS-84 geodesy for OpenATCA (see docs/M0_DESIGN.md).
 //!
 //! * [`LatLon`], [`Dms`]: validated coordinates and degrees/minutes/seconds conversion.
@@ -10,6 +11,8 @@
 //!   uses so its common case needs no library call.
 //!
 //! No dependencies; no operation panics on any input (invalid input is an error).
+
+extern crate alloc;
 
 pub mod aeqd;
 mod coef;

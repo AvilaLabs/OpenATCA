@@ -45,7 +45,7 @@ pub struct Frame {
 /// The sphere's radius at a latitude with sine `s`: `sqrt(M N) = a sqrt(1 - e2) / w2`.
 fn radius_at(s: f64) -> f64 {
     let w2 = 1.0 - WGS84_E2 * s * s;
-    WGS84_A * (1.0 - WGS84_E2).sqrt() / w2
+    WGS84_A * oa_ieee::sqrt(1.0 - WGS84_E2) / w2
 }
 
 /// A frame about `(lat_deg, lon_deg)`.
@@ -117,7 +117,7 @@ pub fn frame_at_fix(fix: &Fix, lat_deg: f64, lon_deg: f64) -> Frame {
 /// The angle at the sphere's centre between the origin and a point, radians.
 pub fn frame_angle(f: &Frame, lat_deg: f64, lon_deg: f64) -> f64 {
     let (s_e, s_n, cosc) = parts(f, lat_deg.to_radians(), lon_deg.to_radians());
-    angle_from_sin_cos((s_e * s_e + s_n * s_n).sqrt(), cosc)
+    angle_from_sin_cos(oa_ieee::sqrt(s_e * s_e + s_n * s_n), cosc)
 }
 
 /// Sine and cosine of a latitude, turned from the origin's by the small difference of angle
@@ -147,9 +147,9 @@ fn parts(f: &Frame, lat: f64, lon: f64) -> (f64, f64, f64) {
 /// from the origin, as it is, and not onto it (a point there would pass every distance check).
 pub fn project(f: &Frame, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     let (s_e, s_n, cosc) = parts(f, lat_deg.to_radians(), lon_deg.to_radians());
-    let sinc = (s_e * s_e + s_n * s_n).sqrt();
+    let sinc = oa_ieee::sqrt(s_e * s_e + s_n * s_n);
     if sinc < 1e-12 && cosc < 0.0 {
-        return (f.r * std::f64::consts::PI, 0.0);
+        return (f.r * core::f64::consts::PI, 0.0);
     }
     let k = if sinc < 1e-12 {
         1.0
@@ -178,12 +178,12 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
 pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
     // Each component is bounded before squaring, so the sum cannot overflow; `sqrt` is exactly
     // rounded on every platform, unlike a library `hypot`.
-    let half = f.r * std::f64::consts::PI * (1.0 + 1e-12);
+    let half = f.r * core::f64::consts::PI * (1.0 + 1e-12);
     if !(x.abs() <= half && y.abs() <= half) {
         return None;
     }
-    let rho = (x * x + y * y).sqrt();
-    if rho > half || rho / f.r >= std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+    let rho = oa_ieee::sqrt(x * x + y * y);
+    if rho > half || rho / f.r >= core::f64::consts::PI - ANTIPODE_MARGIN_RAD {
         return None;
     }
     if rho < 1e-9 {
@@ -201,7 +201,7 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
     if c <= SIN_COS_LIMIT && f.sin0.abs() <= 0.9 {
         // `h = rho cos(lat)`; the latitude's offset from the origin's has sine
         // `sl cos0 - cl sin0` and cosine `cl cos0 + sl sin0`.
-        let h = (xs * xs + ys * ys).sqrt();
+        let h = oa_ieee::sqrt(xs * xs + ys * ys);
         let cl = h / rho;
         let sd = sl * f.cos0 - cl * f.sin0;
         let cd = cl * f.cos0 + sl * f.sin0;
@@ -230,8 +230,45 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
     })
 }
 
+/// `y mod 360` with the sign convention of `f64::rem_euclid` (result in [0, 360], as that
+/// function returns, 360 included when a tiny negative `y` rounds up), exact, and without the
+/// `%` operator (its float form is a library call that `core` code must not depend on). The
+/// quotient is taken with `trunc` and the product `t * 360` and the difference are exact for
+/// `|y| < 2^40`, far beyond any longitude; outside that range the result is NaN.
+fn rem_euclid_360(y: f64) -> f64 {
+    if y.is_nan() || y.abs() >= 1.099_511_627_776e12 {
+        return f64::NAN;
+    }
+    if y == 0.0 {
+        return y;
+    }
+    let mut r = y - oa_ieee::trunc(y / 360.0) * 360.0;
+    // the quotient may be one off: bring r to the sign of y with |r| < 360 (each step exact)
+    if y > 0.0 {
+        while r < 0.0 {
+            r += 360.0;
+        }
+        while r >= 360.0 {
+            r -= 360.0;
+        }
+        r
+    } else {
+        while r > 0.0 {
+            r -= 360.0;
+        }
+        while r <= -360.0 {
+            r += 360.0;
+        }
+        if r < 0.0 {
+            r + 360.0
+        } else {
+            r
+        }
+    }
+}
+
 fn wrap_deg(d: f64) -> f64 {
-    let m = (d + 180.0).rem_euclid(360.0) - 180.0;
+    let m = rem_euclid_360(d + 180.0) - 180.0;
     if m == -180.0 && d > 0.0 {
         180.0
     } else {
@@ -281,12 +318,12 @@ fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
     // The plane position is bounded in every use (a chart point, a filter state); `hypot` only
     // guards a component whose square could overflow.
     let rho = if x.abs() < 1e150 && y.abs() < 1e150 {
-        (x * x + y * y).sqrt()
+        oa_ieee::sqrt(x * x + y * y)
     } else {
         oa_math::hypot(x, y)
     };
     let c = rho / f.r;
-    if !c.is_finite() || c >= std::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+    if !c.is_finite() || c >= core::f64::consts::PI - ANTIPODE_MARGIN_RAD {
         return None;
     }
     let (sa, ca) = if rho < 1e-9 {
@@ -316,7 +353,7 @@ fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
 fn enu(f: &Frame, p: &V3) -> (V3, V3, f64, f64) {
     let z = [0.0, f.cos0, f.sin0];
     let e = cross(&z, p);
-    let cos_lat = dot(&e, &e).sqrt();
+    let cos_lat = oa_ieee::sqrt(dot(&e, &e));
     let east = if cos_lat < 1e-9 {
         [1.0, 0.0, 0.0]
     } else {
@@ -325,7 +362,7 @@ fn enu(f: &Frame, p: &V3) -> (V3, V3, f64, f64) {
     let north = cross(p, &east);
     let s = dot(&z, p);
     let w2 = 1.0 - WGS84_E2 * s * s;
-    let w = w2.sqrt();
+    let w = oa_ieee::sqrt(w2);
     (
         east,
         north,
@@ -501,20 +538,20 @@ mod tests {
         // Independent spherical azimuthal-equidistant equations: due east/north use
         // x = R c sin(bearing), y = R c cos(bearing), with c from the spherical dot product.
         let f = frame_new(0.0, 0.0);
-        let r = WGS84_A * (1.0 - WGS84_E2).sqrt();
+        let r = WGS84_A * oa_ieee::sqrt(1.0 - WGS84_E2);
         assert!((f.r - r).abs() < 1e-9);
         let cases = [
-            (0.0, 90.0, r * std::f64::consts::FRAC_PI_2, 0.0),
-            (90.0, 0.0, 0.0, r * std::f64::consts::FRAC_PI_2),
-            (-90.0, 0.0, 0.0, -r * std::f64::consts::FRAC_PI_2),
-            (0.0, 180.0, r * std::f64::consts::PI, 0.0),
+            (0.0, 90.0, r * core::f64::consts::FRAC_PI_2, 0.0),
+            (90.0, 0.0, 0.0, r * core::f64::consts::FRAC_PI_2),
+            (-90.0, 0.0, 0.0, -r * core::f64::consts::FRAC_PI_2),
+            (0.0, 180.0, r * core::f64::consts::PI, 0.0),
         ];
         for (lat, lon, x, y) in cases {
             let got = project(&f, lat, lon);
             assert!((got.0 - x).abs() < 1e-7, "{lat} {lon}: {got:?}");
             assert!((got.1 - y).abs() < 1e-7, "{lat} {lon}: {got:?}");
         }
-        let pole_r = WGS84_A / (1.0 - WGS84_E2).sqrt();
+        let pole_r = WGS84_A / oa_ieee::sqrt(1.0 - WGS84_E2);
         assert!((radius_at(1.0) - pole_r).abs() < 1e-8);
     }
 
@@ -538,7 +575,7 @@ mod tests {
     #[test]
     fn unproject_refuses_distances_that_overflow_or_pass_half_the_circumference() {
         let f = frame_new(41.9, -88.3);
-        let half = std::f64::consts::PI * f.r;
+        let half = core::f64::consts::PI * f.r;
         assert_eq!(unproject(&f, 1e200, 1e200), None);
         assert_eq!(unproject(&f, f64::MAX, f64::MAX), None);
         assert_eq!(unproject(&f, f64::NAN, 0.0), None);
@@ -550,7 +587,7 @@ mod tests {
         assert_eq!(unproject(&f, half, 0.0), None);
         let (x, y) = project(&f, -41.9, 91.7);
         assert_eq!(unproject(&f, x, y), None);
-        let limit = f.r * (std::f64::consts::PI - ANTIPODE_MARGIN_RAD);
+        let limit = f.r * (core::f64::consts::PI - ANTIPODE_MARGIN_RAD);
         assert!(unproject(&f, limit * 0.999_999, 0.0).is_some());
         assert_eq!(unproject(&f, limit * 1.000_001, 0.0), None);
         let (x, y) = project(&f, -41.9, 91.69);
@@ -561,7 +598,7 @@ mod tests {
     #[test]
     fn the_antipode_of_the_origin_is_far_from_it_not_on_it() {
         let f = frame_new(0.0, 0.0);
-        let half = std::f64::consts::PI * f.r;
+        let half = core::f64::consts::PI * f.r;
         for (la, lo) in [(0.0, 180.0), (0.0, -180.0)] {
             let (x, y) = project(&f, la, lo);
             assert!((x.hypot(y) - half).abs() < 1.0, "{la} {lo}: {x} {y}");
@@ -577,7 +614,7 @@ mod tests {
         let g = frame_new(41.9, -88.3);
         let (x, y) = project(&g, -41.9, 91.7);
         assert!(
-            (x.hypot(y) - std::f64::consts::PI * g.r).abs() < 1.0,
+            (x.hypot(y) - core::f64::consts::PI * g.r).abs() < 1.0,
             "{x} {y}"
         );
     }
@@ -598,8 +635,8 @@ mod tests {
         let s = lat_deg.to_radians().sin();
         let w2 = 1.0 - WGS84_E2 * s * s;
         (
-            WGS84_A / w2.sqrt(),
-            WGS84_A * (1.0 - WGS84_E2) / (w2 * w2.sqrt()),
+            WGS84_A / oa_ieee::sqrt(w2),
+            WGS84_A * (1.0 - WGS84_E2) / (w2 * oa_ieee::sqrt(w2)),
         )
     }
 
@@ -779,7 +816,7 @@ mod tests {
     // REQ: OA-GEO-012
     #[test]
     fn a_covariance_carried_by_a_rotation_keeps_its_trace_and_turns_its_axes() {
-        let r = std::f64::consts::FRAC_PI_2;
+        let r = core::f64::consts::FRAC_PI_2;
         let m = [[r.cos(), -r.sin()], [r.sin(), r.cos()]];
         let c = mat2_congruence(&m, &[10000.0, 0.0, 1.0]);
         assert!((c[0] - 1.0).abs() < 1e-9 && c[1].abs() < 1e-9 && (c[2] - 10000.0).abs() < 1e-9);
@@ -796,7 +833,7 @@ mod tests {
         let s_e = cl * sd;
         let s_n = f.cos0 * sl - f.sin0 * cl * cd;
         let cosc = f.sin0 * sl + f.cos0 * cl * cd;
-        let sinc = (s_e * s_e + s_n * s_n).sqrt();
+        let sinc = oa_ieee::sqrt(s_e * s_e + s_n * s_n);
         let k = if sinc < 1e-12 {
             1.0
         } else {
@@ -806,7 +843,7 @@ mod tests {
     }
 
     fn reference_unproject(f: &Frame, x: f64, y: f64) -> (f64, f64) {
-        let rho = (x * x + y * y).sqrt();
+        let rho = oa_ieee::sqrt(x * x + y * y);
         let c = rho / f.r;
         let (sc, cc) = (oa_math::sin(c), oa_math::cos(c));
         let lat = oa_math::asin((cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0));
@@ -851,8 +888,8 @@ mod tests {
             let (a, b) = (1.3 * f64::from(i), 0.7 * f64::from(i));
             let (x, y) = (300.0 * a.cos(), 300.0 * b.sin());
             let fix = unproject_fix(&f, x, y).unwrap();
-            let lat_e7 = (fix.lat_deg * 1.0e7).round() as i32;
-            let lon_e7 = (fix.lon_deg * 1.0e7).round() as i32;
+            let lat_e7 = oa_ieee::round(fix.lat_deg * 1.0e7) as i32;
+            let lon_e7 = oa_ieee::round(fix.lon_deg * 1.0e7) as i32;
             f = frame_at_fix(&fix, f64::from(lat_e7) / 1.0e7, f64::from(lon_e7) / 1.0e7);
             label = (lat_e7, lon_e7);
             if i % 500 == 0 {
@@ -935,7 +972,7 @@ mod tests {
     #[test]
     fn near_the_antipode_the_chart_refuses_and_never_returns_a_floored_value() {
         let f = frame_new(41.9, -88.3);
-        let pi = std::f64::consts::PI;
+        let pi = core::f64::consts::PI;
         // 1e-6 rad short of the antipode is inside the region where a floor of 1e-6 under the
         // tangential scale (3.2e-7 there) used to stand in for it.
         for gap in [1e-6, 3e-6, 9e-6, 0.0] {
@@ -958,7 +995,7 @@ mod tests {
     // REQ: OA-GEO-017
     #[test]
     fn the_differential_is_exact_right_up_to_the_domain_limit() {
-        let pi = std::f64::consts::PI;
+        let pi = core::f64::consts::PI;
         let f = frame_new(41.9, -88.3);
         // Approach the limit: the differential agrees with a central difference of the inverse
         // and the inverse differential undoes it; past the limit both refuse.
@@ -1004,9 +1041,9 @@ mod tests {
         let frame = frame_new(0.0, 0.0);
         for (lat, lon, expected) in [
             (0.0, 0.0, 0.0),
-            (0.0, 90.0, std::f64::consts::FRAC_PI_2),
-            (90.0, 0.0, std::f64::consts::FRAC_PI_2),
-            (0.0, 180.0, std::f64::consts::PI),
+            (0.0, 90.0, core::f64::consts::FRAC_PI_2),
+            (90.0, 0.0, core::f64::consts::FRAC_PI_2),
+            (0.0, 180.0, core::f64::consts::PI),
             // acos(cos(pi/6) cos(pi/3)), evaluated independently at 100 digits.
             (30.0, 60.0, 1.122_963_929_865_964_2),
         ] {
@@ -1051,7 +1088,7 @@ mod tests {
     #[test]
     fn the_chart_refuses_its_exact_open_domain_boundary() {
         let frame = frame_new(0.0, 0.0);
-        let limit = std::f64::consts::PI - ANTIPODE_MARGIN_RAD;
+        let limit = core::f64::consts::PI - ANTIPODE_MARGIN_RAD;
         let middle = (frame.r * limit).to_bits();
         let mut found = false;
         for bits in middle - 4..=middle + 4 {
@@ -1070,5 +1107,50 @@ mod tests {
             }
         }
         assert!(found, "a representable plane radius exercises equality");
+    }
+
+    /// `rem_euclid_360` equals `f64::rem_euclid(y, 360.0)` (the sign of a zero aside) on special
+    /// values, a sweep across the longitude range and random magnitudes up to 2^40.
+    #[test]
+    fn rem_euclid_360_matches_std() {
+        let check = |y: f64| {
+            let (a, b) = (rem_euclid_360(y), y.rem_euclid(360.0));
+            // the sign of a zero result may differ (-360 gives -0 there); wrap_deg subtracts 180 after
+            assert!(a == b, "{y:e}: {a:e} vs {b:e}");
+        };
+        for y in [
+            0.0,
+            -0.0,
+            360.0,
+            -360.0,
+            720.0,
+            -720.0,
+            359.999_999_999_999_94,
+            -1e-20,
+            1e-300,
+            -1e-300,
+            180.0,
+            -180.0,
+            1_079.999_999_999_999_9,
+            -1_079.999_999_999_999_9,
+        ] {
+            check(y);
+        }
+        let mut s = 0x9e37_79b9_7f4a_7c15_u64;
+        for i in 0..2_000_000_u32 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let u = (s >> 11) as f64 / 9_007_199_254_740_992.0 - 0.5;
+            let scale = [1.0, 400.0, 3.6e3, 1e6, 1e9, 1e12][(i % 6) as usize];
+            check(u * 2.0 * scale);
+        }
+        for k in -2000..2000 {
+            check(f64::from(k) * 0.25 * 360.0);
+            check(f64::from(k) * 0.25 * 360.0 + 1e-9);
+            check(f64::from(k) * 0.25 * 360.0 - 1e-9);
+        }
+        assert!(rem_euclid_360(f64::NAN).is_nan());
+        assert!(rem_euclid_360(f64::INFINITY).is_nan());
     }
 }

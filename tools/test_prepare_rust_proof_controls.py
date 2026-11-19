@@ -40,7 +40,7 @@ class PrepareControlsTests(unittest.TestCase):
             ),
             "crates/oa-track/src/types.rs": "    o.flags.push(r.flags);\n",
             "crates/oa-track/src/time_gate.rs": "                if ns < oldest_ns {\n                    oldest_ns = ns;\n                }\n",
-            "crates/oa-replay/src/mono_split.rs": (
+            "crates/oa-replay/src/core/mono_split.rs": (
                 "    wall_ns\n"
                 "        .checked_sub(mono_ns)\n"
                 "        .map(|step_ns| (wall_ns, mono_ns, step_ns))\n"

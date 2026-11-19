@@ -25,6 +25,7 @@
 use crate::error::GeoError;
 use crate::geodesic::{ang_normalize, Ellipsoid};
 use crate::latlon::LatLon;
+use alloc::vec::Vec;
 
 const MAX_VERTICES: usize = 100_000;
 const MAX_EDGE_M: f64 = 10_000_000.0;
