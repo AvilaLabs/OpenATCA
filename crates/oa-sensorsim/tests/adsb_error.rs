@@ -558,6 +558,10 @@ fn a_lagged_row_before_its_leg_began_is_stepped_back_along_the_velocity() {
             .count() as u64,
         e.extrapolated_rows
     );
+    // On a straight constant-velocity track the stand-in is the truth at t - L: the check
+    // distances are tiny.
+    assert!(!e.stepback_diff_m.is_empty());
+    assert!(e.stepback_diff_m.iter().all(|&d| d < 0.05));
     // A short base column is refused.
     let mut short = base();
     short.nac_p.pop();

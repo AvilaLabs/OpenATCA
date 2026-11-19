@@ -19,9 +19,10 @@
 //! answer between reports) and against the truth built from B (B score), on the rows both
 //! truths answer, so the samples are identical: the harness asserts equal pair counts, at least
 //! `MIN_PAIRS` Updates pairs per cell, and (for a lagged cell) that at most `MAX_DROP_SHARE` of
-//! the lagged aircraft's rows are left out. The share of lagged rows taken by stepping the truth
-//! back (extrapolated) is printed by label and reason and must not exceed `MAX_EXTRAPOLATED_SHARE`
-//! (the failure is reported after every cell has run).
+//! the lagged aircraft's rows are left out. Rows whose t-L falls in a reporting gap use
+//! the truth at t stepped back along its velocity by L; its accuracy is checked on rows where both
+//! are available (p99 of the horizontal difference at most `MAX_STEPBACK_P99_M`, reported after
+//! every cell has run), and the share of such rows is printed by label and reason.
 //!
 //! Confound: a row is classed straight or turning by the truth it is scored against, so the A and B
 //! scores can class the same row differently. The per-class pair counts of both scores and the
@@ -51,7 +52,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 const MIN_PAIRS: usize = 10_000;
 const MAX_DROP_SHARE: f64 = 0.02;
-const MAX_EXTRAPOLATED_SHARE: f64 = 0.05;
+const MAX_STEPBACK_P99_M: f64 = 1.0;
 
 /// A run's rows restricted to those both truths answer.
 struct Both<'a> {
@@ -330,9 +331,19 @@ fn optimism() {
                 e.extrapolated_by_label,
                 e.extrapolated_by_reason
             );
-            if f > MAX_EXTRAPOLATED_SHARE {
+            let mut d = e.stepback_diff_m.clone();
+            d.sort_by(f64::total_cmp);
+            let rms = (d.iter().map(|v| v * v).sum::<f64>() / d.len().max(1) as f64).sqrt();
+            let p99 = d.get(d.len() * 99 / 100).copied().unwrap_or(f64::NAN);
+            println!(
+                "STEPBACK {} n {} rms {rms:.3} p99 {p99:.3} max {:.3}",
+                cell.name,
+                d.len(),
+                d.last().copied().unwrap_or(f64::NAN)
+            );
+            if !(p99 <= MAX_STEPBACK_P99_M) {
                 failures.push(format!(
-                    "cell {}: extrapolated share of lagged rows {f:.4} above {MAX_EXTRAPOLATED_SHARE}",
+                    "cell {}: step-back p99 {p99:.3} m above {MAX_STEPBACK_P99_M}",
                     cell.name
                 ));
             }

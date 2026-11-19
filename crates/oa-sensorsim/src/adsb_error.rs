@@ -22,7 +22,9 @@
 //! taken from the truth at `t` stepped back by `L` along its velocity, and counted as
 //! extrapolated (by label and by reason); its barometric altitude and vertical rate, which the
 //! truth at `t` does not give for `t - L`, are blanked. It is left out only when the truth cannot
-//! answer at `t` either or its velocity is not finite.
+//! answer at `t` either or its velocity is not finite. On the lagged rows the truth answers at
+//! both times, the distance between the truth at `t - L` and the stepped-back truth at `t` is
+//! recorded ([`Errored::stepback_diff_m`]), which is how accurate the stand-in is.
 //!
 //! Optional per-report noise: each row gets an independent Gaussian offset (seeded per address
 //! and time) of standard deviation `hypot(noise_sigma_m, noise_bound_frac * bound)` per axis,
@@ -43,7 +45,7 @@ use oa_math::{atan2, clamp_f64, hypot, rem_euclid};
 use oa_truth::{nacp_epu_m, truth_at, Truth, TruthQuery};
 
 use crate::error::SimError;
-use crate::geom::direct_deg;
+use crate::geom::{direct_deg, frame_at, polar_of};
 use crate::prng::Rng;
 
 /// Label bit: the row carries the aircraft's position bias.
@@ -103,6 +105,10 @@ pub struct Errored {
     pub extrapolated_rows: u64,
     pub extrapolated_by_label: [u64; 4],
     pub extrapolated_by_reason: [u64; 3],
+    /// For lagged rows the truth answers at both `t - L` and `t`: the horizontal distance, metres,
+    /// between the truth at `t - L` and the truth at `t` stepped back by `L` along its velocity
+    /// (how good the stand-in of the extrapolated rows is).
+    pub stepback_diff_m: Vec<f64>,
 }
 
 fn unit_fraction(f: f64) -> bool {
@@ -215,7 +221,20 @@ pub fn adsb_error(truth: &Truth, base: &Reports, p: &ErrorParams) -> Result<Erro
         let mut back_m = 0.0;
         let mut extrapolated = false;
         let s = match truth_at(truth, r.icao, at_ms - lag) {
-            TruthQuery::Ok(s) => s,
+            TruthQuery::Ok(s) => {
+                if let (true, TruthQuery::Ok(now)) = (lag > 0, truth_at(truth, r.icao, at_ms)) {
+                    let back = hypot(now.vel_east_mps, now.vel_north_mps) * lag as f64 * 1.0e-3;
+                    let heading = atan2(now.vel_east_mps, now.vel_north_mps).to_degrees() + 180.0;
+                    if let Some((la, lo)) = direct_deg(now.lat_deg, now.lon_deg, heading, back) {
+                        let f = frame_at(s.lat_deg, s.lon_deg, 0.0);
+                        let (d, _) = polar_of(&f, la, lo, 0.0);
+                        if d.is_finite() {
+                            out.stepback_diff_m.push(d);
+                        }
+                    }
+                }
+                s
+            }
             refused => match truth_at(truth, r.icao, at_ms) {
                 TruthQuery::Ok(s)
                     if lag > 0 && s.vel_east_mps.is_finite() && s.vel_north_mps.is_finite() =>
