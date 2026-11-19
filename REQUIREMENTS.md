@@ -420,13 +420,33 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-216** The check passes on the real workspace, and the unsplit crates are exactly those still listed
   in the allowlist file.
 - **OA-TRC-217** In core code the only `extern crate` is `extern crate alloc;`.
-- **OA-TRC-218** In core code a call of a float method `core` lacks (`.sin(`, `f64::sqrt(`, and the rest of the
-  RULESET B8 list) fails with `oa_ieee` or `oa_math` named as the alternative and the note that a user-defined
-  method of that name is disallowed too; only the crate `oa-ieee` is exempt.
+- **OA-TRC-218** In core code a float method `core` lacks fails, with the alternative named (`oa_ieee::x` for sqrt,
+  floor, ceil, trunc and round; `oa_math::pow` for `powf`; `oa_math::x` for the rest; for `rem_euclid` and
+  `div_euclid` the integer path form `i64::rem_euclid(a, b)` or `oa_math` for floats) and the note that a
+  user-defined method of that name is disallowed too. Only the crate `oa-ieee` is exempt. See OA-TRC-221 for
+  the list and the call forms.
 - **OA-TRC-219** Every crate of class core except `oa-ieee` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]`
   in `src/lib.rs` (RULESET B10).
 - **OA-TRC-220** The public API of `oa-ieee` is exactly `pub fn` sqrt, floor, ceil, trunc and round: any other
   public item, module, re-export or macro, or a missing function, fails.
+- **OA-TRC-221** The float list in `classcheck.rs` equals the set of `f32`/`f64` inherent methods absent from `core` on
+  the pinned toolchain, derived from a `no_std` compile probe of std's documented methods. A listed name after
+  `.` (called) or after `::` (whatever precedes it: `f64::sin`, `<f64>::sqrt`, `Self::sin`, `R::sin`, called or not)
+  fails; `oa_ieee::x`, `oa_math::x` and `i64::rem_euclid(a, b)` pass.
+- **OA-TRC-222** In core code `macro_rules!`, the `$` token, a raw identifier, `cfg!(target_..)`, `#[cfg(target_..)]`,
+  `cfg_attr(target_..` (and `unix`, `windows`), a raw pointer type and `{:p}` in a string literal fail.
+- **OA-TRC-223** The `src/lib.rs` of a core crate declares no module named `main` or `bin`, in any visibility, inline or
+  in a file.
+- **OA-TRC-224** A `#[cfg(test)] mod x;` inside an inline module skips nothing: the file is scanned.
+- **OA-TRC-225** Every core-crate dependency, in any table, must resolve to a core workspace crate: `workspace = true`
+  entries are resolved through the root `[workspace.dependencies]`, a `[lib] name` is the name source uses, and a
+  dependency that cannot be resolved (an outside crate, a missing root entry) fails; a split crate may depend on
+  shell crates but not on outside code.
+- **OA-TRC-226** In split core code `self::super::` and any `super` after `self::` counts as `super`.
+- **OA-TRC-227** The `no_std` attribute of a core crate is an inner attribute at the top of `src/lib.rs`, before any
+  item and outside any module or cfg block; the failure says the crate "must have" it.
+- **OA-TRC-228** Each public function of `oa-ieee` has the body `v.<same name>()` exactly.
+- **OA-TRC-229** A workspace `exclude` entry that does not normalise fails.
 
 ### Hashing (oa-sha256)
 
