@@ -180,7 +180,8 @@ the ways to an unmarked false track are exactly these, each counted: a second fo
 least 0.5 s later that agrees with the moved track and not the old path confirms the move
 (`moves_confirmed`); a report in the gate that agrees with neither path, or comes after the
 window, leaves the move standing (`moves_undecided`); and a run of consistent reports the gate
-refuses re-synchronises the filter onto them (`moves_abandoned_resync`). Only a second source
+refuses re-synchronises the filter onto them (`moves_abandoned_resync`; the rows after it stay marked
+and uncertain until the move's window would have ended, `moves_resync_marked`). Only a second source
 (radar or multilateration, above) can refute any of them.
 A tentative track is not covered (its second report has no velocity and moves far from its
 prediction as a matter of course). With the pool full (a forger would need a confirmed track, a

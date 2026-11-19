@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 61,
+  "expected_proof_count": 62,
   "proofs": [
     {
       "id": "output-append",
@@ -427,7 +427,7 @@
     },
     {
       "id": "large-move-decision-rejected",
-      "requirement": "OA-TRK-354: update_in_order_held with a report that is not applied: the move, its snapshot, the scalar columns, the category, the counters and the vote time are as before apart from the named counters, changed as the real rejected path changes them (not: applied or large-move reports, ticks, forecasts, late replay); the filters and the ring are the two sibling proofs.",
+      "requirement": "OA-TRK-354: update_in_order_held with a report that is not applied: the move, its snapshot, the scalar columns, the category, the counters and the vote time are as before apart from the named counters, changed as the real rejected path changes them (default configuration: resync off and the run of refusals below RESYNC_AFTER; the moved track differs from the snapshot in every group, the snapshot in the pool is unchanged bit for bit; not: applied or large-move reports, ticks, forecasts, late replay); the filters and the ring are the two sibling proofs.",
       "package": "oa-track",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_scalars_and_counters",
       "enabled": true,
@@ -440,7 +440,7 @@
       ],
       "stubbing": true,
       "stub_summaries": [
-        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals).",
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
         "filter_miss_m returns any distance, so every verdict of resolve_decide.",
         "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
       ],
@@ -1203,16 +1203,16 @@
       "memory_mib": 16384
     },
     {
-      "id": "large-move-decision-rejected-filters",
-      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, comparing the current filter (its run of refusals one more) and the anchor filter, bit for bit.",
+      "id": "large-move-decision-rejected-current-filter",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected (the moved track differs from the snapshot in every group), current filter symbolic: it is as before but for its run of refusals (one more), and the snapshot in the pool is unchanged bit for bit.",
       "package": "oa-track",
-      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_filters",
+      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
       "stubbing": true,
       "stub_summaries": [
-        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals).",
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
         "filter_miss_m returns any distance, so every verdict of resolve_decide.",
         "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
       ],
@@ -1223,7 +1223,7 @@
     },
     {
       "id": "large-move-decision-rejected-ring",
-      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, comparing the ring bit for bit.",
+      "requirement": "OA-TRK-354: the same scenario, ring entry symbolic: the ring is as before and the snapshot in the pool is unchanged bit for bit.",
       "package": "oa-track",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_ring",
       "enabled": true,
@@ -1231,7 +1231,7 @@
       "required_covers": [],
       "stubbing": true,
       "stub_summaries": [
-        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals).",
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
         "filter_miss_m returns any distance, so every verdict of resolve_decide.",
         "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
       ],
@@ -1239,6 +1239,25 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 900,
       "memory_mib": 8192
+    },
+    {
+      "id": "large-move-decision-rejected-anchor-filter",
+      "requirement": "OA-TRK-354: the same scenario, anchor filter symbolic: the anchor filter is as before and the snapshot in the pool is unchanged bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+        "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+        "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 1200,
+      "external_timeout_seconds": 1500,
+      "memory_mib": 16384
     }
   ]
 }

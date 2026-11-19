@@ -4272,7 +4272,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   (`moves_old_path_votes`); a second one, at least 0.5 s after the vote and inside the window,
   rolls back; one less than 0.5 s after it waits. A report that agrees with the moved track
   confirms as before and ends the count. One stray report at the old place, or one replayed by a
-  forger, therefore cannot undo a genuine relocation. (Kani: `resolve_decide`, OA-TRK-348.)
+  forger, therefore cannot undo a genuine relocation. A report the gate refused counts as the
+  vote exactly as one it applied would (the moved track usually refuses it), and it counts when
+  it is one of a run of refusals heading for a resynchronisation. The exception is the
+  resynchronisation itself: five refused reports in a row (the filter's own rule) re-synchronise
+  the track onto them, which ends the move (`moves_abandoned_resync`) but not silently: the
+  rows after it carry `O_MOVE_UNCONFIRMED` and `O_UNCERTAIN` (the radius lifted over the
+  uncertainty threshold, no old path being left) until the move's window would have ended, and
+  `moves_resync_marked` counts it. A late replay that releases the move's snapshot clears the
+  vote. (Kani: `resolve_decide`, OA-TRK-348.)
 - **OA-TRK-353** An old path that has a snapshot but cannot be predicted at the report's time
   (its distance is not a number) is not agreement with anything (RT-276): the report is applied
   as it is, `moves_old_path_unpredictable` counts it, and the move stays, marked, until the
@@ -4290,7 +4298,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   current filter's run of refusals and the counters `jump_rejected` (one more),
   `moves_decision_rejected`, `moves_old_path_votes`, `moves_old_path_unpredictable` (at most one
   of them one more), which change as the real rejected path changes them; no row, no outcome.
-  Not covered by any proof (integration tests): a report that is applied or is itself a large
+  The moved track differs from the snapshot in every group (scalar columns and category,
+  current filter, anchor filter, ring) in these proofs, and afterwards the snapshot in the pool
+  equals the one taken, field for field, bit for bit; the move's start, first report time and
+  sensor are as before and the hold flag is off. They hold for the default configuration
+  (`resync_consistent_k` 0 and the run of refusals below `RESYNC_AFTER`): the refusal that
+  resynchronises is the integration test of OA-TRK-352. Not covered by any proof (integration tests): a report that is applied or is itself a large
   move, ticks, forecasts, the late replay and the rows it emits.
 - **OA-TRK-350** A report whose distance from the predicted position is at most `confirm_move_m`
   is applied exactly as before: its outputs are bit for bit those of a tracker with the rule off.

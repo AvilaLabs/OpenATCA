@@ -479,7 +479,7 @@ fn tracker_section(
     );
     let _ = writeln!(
         o,
-        "  large moves: peak at once {}, deciding reports not applied {}, rollback lost to a late re-filter {}, no snapshot (pool full) {}, widening failed {}, internal refusals {}, first old-path reports (votes) {}, old path unpredictable {}",
+        "  large moves: peak at once {}, deciding reports not applied {}, rollback lost to a late re-filter {}, no snapshot (pool full) {}, widening failed {}, internal refusals {}, first old-path reports (votes) {}, old path unpredictable {}, resyncs marked {}",
         s.moves_peak_active,
         s.moves_decision_rejected,
         s.moves_rollback_lost_late,
@@ -487,7 +487,8 @@ fn tracker_section(
         s.move_widen_failed,
         s.moves_internal_refused,
         s.moves_old_path_votes,
-        s.moves_old_path_unpredictable
+        s.moves_old_path_unpredictable,
+        s.moves_resync_marked
     );
     let _ = writeln!(
         o,

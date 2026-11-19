@@ -144,6 +144,9 @@ pub struct Tracker {
     /// The time of the earlier report that agreed with the old path, [`NO_VOTE_NS`] if none: a
     /// rollback needs a second one (RT-273).
     mv_old_vote_ns: Vec<i64>,
+    /// After a resynchronisation ended the move: the time up to which the rows stay marked and
+    /// uncertain (the move's window would have ended then), `i64::MIN` if none.
+    mv_resync_until_ns: Vec<i64>,
     /// The pool entry holding the state from before the move, [`NO_SNAP`] if there is none.
     mv_snap: Vec<u32>,
     /// The pool of rollback snapshots: `confirm_pool` entries (at most `max_tracks`).
@@ -255,6 +258,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         mv_first_ns: vec![0; n],
         mv_first_sens: vec![0; n],
         mv_old_vote_ns: vec![NO_VOTE_NS; n],
+        mv_resync_until_ns: vec![i64::MIN; n],
         mv_snap: vec![NO_SNAP; n],
         snaps: vec![blank_snap(); pool_n],
         snap_free: (0..pool_n as u32).rev().collect(),
@@ -342,6 +346,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.mv_first_ns),
         of(&t.mv_first_sens),
         of(&t.mv_old_vote_ns),
+        of(&t.mv_resync_until_ns),
         of(&t.mv_snap),
         of(&t.snaps),
         of(&t.snap_free),
@@ -584,6 +589,7 @@ fn end_track(t: &mut Tracker, slot: usize, reason: u8) {
     put(&mut t.state, slot, FREE);
     put(&mut t.key, slot, NO_ADDR);
     end_move(t, slot, MoveEnd::Ended);
+    put(&mut t.mv_resync_until_ns, slot, i64::MIN);
     ring_clear(t, slot);
     t.free.push(slot as u32);
     t.active = t.active.saturating_sub(1);
@@ -628,6 +634,7 @@ pub fn tracker_newest_update_ns(t: &Tracker) -> i64 {
 fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
+    put(&mut t.mv_resync_until_ns, slot, i64::MIN);
     note_category(t, slot, m);
     ring_clear(t, slot);
     if !ring_push(t, slot, m) {
@@ -675,6 +682,11 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         if !mark_row(&mut row, &mut r95, old.as_ref()) {
             t.stats.move_widen_failed += 1;
         }
+    } else if at_ns <= col(&t.mv_resync_until_ns, slot, i64::MIN) {
+        // After a resynchronisation that ended a move: marked, and uncertain (no old path is
+        // left, so the radius is only lifted over the uncertainty threshold).
+        row.flags |= O_MOVE_UNCONFIRMED;
+        widen_over(&mut row, &mut r95, t.cfg.coast_max_r95_m);
     }
     // The reacquisition arming follows the filter's own radius, not the widened one, so a
     // marked row leaves no trace on the rows after the mark is gone.
@@ -705,6 +717,30 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         row.flags |= O_RADAR_DISAGREES;
     }
     output_push(out, &row);
+}
+
+/// Scales the row's position covariance so that its 95% radius is just over `floor_m` if it was
+/// not, keeping its shape (a circle of the fail-closed radius if the scaling is not finite).
+fn widen_over(row: &mut OutRow, r95: &mut f64, floor_m: f64) {
+    if *r95 > floor_m {
+        return;
+    }
+    let target = floor_m * (1.0 + 1.0e-6);
+    let scaled = if *r95 > 0.0 {
+        let k = (target / *r95) * (target / *r95) * (1.0 + 1.0e-6);
+        row.pos_cov_m2.map(|c| (f64::from(c) * k) as f32)
+    } else {
+        let v = (target * target / CHI2_2_95 * (1.0 + 1.0e-6)) as f32;
+        [v, 0.0, v]
+    };
+    let r = r95_m(&scaled);
+    if r.is_finite() && r > floor_m {
+        row.pos_cov_m2 = scaled;
+        *r95 = r;
+    } else {
+        row.pos_cov_m2 = FAIL_CLOSED_COV;
+        *r95 = r95_m(&FAIL_CLOSED_COV);
+    }
 }
 
 /// The old path's row at `at_ns`: the snapshot's filter predicted to the same time. `None` if
@@ -868,11 +904,11 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 464-byte statistics (328 before
-// the seventeen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
+// Budget: two 648-byte filters, twelve 72-byte measurements, 472-byte statistics (328 before
+// the eighteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2688);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2696);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
@@ -1017,6 +1053,15 @@ fn release_snap(t: &mut Tracker, slot: usize) {
 fn end_move(t: &mut Tracker, slot: usize, why: MoveEnd) {
     if !move_active(t, slot) {
         return;
+    }
+    if why == MoveEnd::Resync {
+        // The old path goes with the resynchronised filter, and the track is now where five
+        // refused reports put it: not silent. The rows stay marked and uncertain until the
+        // window the move would have had is over.
+        let window = confirm_window_ns(&t.cfg, col(&t.expected_ns, slot, 0));
+        let until = col(&t.mv_start_ns, slot, 0).saturating_add(window);
+        put(&mut t.mv_resync_until_ns, slot, until);
+        t.stats.moves_resync_marked += 1;
     }
     release_snap(t, slot);
     put(&mut t.mv_old_vote_ns, slot, NO_VOTE_NS);
@@ -1364,7 +1409,9 @@ fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut
             update_in_order(t, slot, m, out);
         }
         // The first report on the old path: one report decides nothing (RT-273). Applied as it
-        // is; the move stays, marked, and the report is the old path's vote.
+        // is; the move stays, marked, and the report is the old path's vote. A report the gate
+        // refused counts as the vote too (the moved track usually refuses it), also when it is
+        // one of a run of refusals that is heading for a resynchronisation.
         Resolve::OldVote => {
             t.hold_on = false;
             let step = update_in_order(t, slot, m, out);
@@ -1686,7 +1733,10 @@ fn snap_before_entry(t: &Tracker, slot: usize, first: (i64, u16)) -> Option<Trac
 /// the old path's own radius (RT-275). The old path here is the track as it was before the late
 /// report `m`, predicted to the row's time (derived from the ring as the rollback point is); if
 /// that cannot be derived the row gets the fail-closed radius. Only this row changes, and
-/// `rows_uncertain` follows its flag.
+/// `rows_uncertain` follows its flag. Note which path is which: the widened row covers the
+/// pre-report state, while the move's rollback target (its snapshot) is the pre-replay one, the
+/// track as it was before the whole replay; the two differ when the replay changed other rows
+/// before the late report.
 fn widen_replay_row(
     t: &mut Tracker,
     slot: usize,
@@ -1695,6 +1745,14 @@ fn widen_replay_row(
     m: &Measurement,
 ) {
     let Some(mut row) = out_row_at(out, i) else {
+        // The row cannot be read back: marked all the same, fail closed, counted.
+        if let Some(f) = out.flags.get_mut(i) {
+            *f |= O_MOVE_UNCONFIRMED;
+        }
+        if let Some(c) = out.pos_cov_m2.get_mut(i) {
+            *c = FAIL_CLOSED_COV;
+        }
+        t.stats.move_widen_failed += 1;
         return;
     };
     let old = snap_before_entry(t, slot, (m.toa_ns, m.sensor))
@@ -1792,6 +1850,8 @@ fn update_late_marked(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut T
                 None => {
                     // The report has left the ring (or nothing before it is held).
                     release_snap(t, slot);
+                    // No old path left to vote for.
+                    put(&mut t.mv_old_vote_ns, slot, NO_VOTE_NS);
                     t.stats.moves_rollback_lost_late += 1;
                 }
             }

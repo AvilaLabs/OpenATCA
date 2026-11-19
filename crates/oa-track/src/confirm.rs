@@ -43,7 +43,9 @@ pub(crate) fn agree_limit_m(cfg: &TrackerConfig, sep_ns: i64) -> f64 {
     (cfg.confirm_agree_m + 0.5 * cfg.gate_manoeuvre_mps2 * s * s).min(cfg.confirm_move_m)
 }
 
-/// The time recorded for "no old-path vote yet".
+/// A sentinel, not a time: the value of the old-path vote column while the move has no vote yet
+/// (no report time is `i64::MIN`: times are applicability times of reports). Every reader tests
+/// for it before it subtracts.
 pub(crate) const NO_VOTE_NS: i64 = i64::MIN;
 
 // The decision is written for two reports at a place (see `CONFIRM_REPORTS`).

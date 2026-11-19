@@ -643,6 +643,10 @@ pub struct TrackerStats {
     /// Deciding reports of an unconfirmed move whose old path has a snapshot that cannot be
     /// predicted at the report's time: no agreement with anything, the move stands (RT-276).
     pub moves_old_path_unpredictable: u64,
+    /// Moves ended by a filter resynchronisation (five refused reports in a row): the rows after
+    /// it stay marked and uncertain until the move's window would have ended, the old path being
+    /// gone with the resynchronised filter. Counted with `moves_abandoned_resync`.
+    pub moves_resync_marked: u64,
     /// Moves applied and marked without a rollback snapshot: the pool was full.
     pub move_no_snapshot: u64,
     /// Rows of a marked track whose widened radius could not be computed: they carry a radius of

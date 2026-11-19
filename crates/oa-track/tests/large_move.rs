@@ -924,3 +924,35 @@ fn two_reports_at_the_old_place_roll_back_a_forged_move_but_not_two_in_a_burst()
     assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     balanced(&l.t);
 }
+
+// REQ: OA-TRK-352
+#[test]
+fn five_refused_old_place_reports_resync_the_track_and_the_rows_stay_marked() {
+    // A genuine relocation, then five reports at the old place in a burst: the gate refuses
+    // each, the fifth re-synchronises the filter onto them. That ends the move, but not
+    // silently: the rows after it stay marked and uncertain until the move's window is over.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    for t in seconds(0.0, 20.0) {
+        l.feed(&[still(&mut rng, t, 0.0)]);
+    }
+    l.feed(&[still(&mut rng, 60.0, 2_000.0)]);
+    for k in 1..=5 {
+        l.feed(&[still(&mut rng, 60.0 + 0.05 * f64::from(k), 0.0)]);
+    }
+    let s = l.s();
+    assert_eq!(
+        (s.resyncs, s.moves_abandoned_resync, s.moves_resync_marked),
+        (1, 1, 1),
+        "{s:?}"
+    );
+    assert_eq!(s.moves_rolled_back, 0, "{s:?}");
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    assert_ne!(l.last_flags() & O_UNCERTAIN, 0);
+    // Once the window is over the rows are plain again.
+    for t in seconds(61.0, 70.0) {
+        l.feed(&[still(&mut rng, t, 0.0)]);
+    }
+    assert_eq!(l.last_flags() & (O_MOVE_UNCONFIRMED | O_UNCERTAIN), 0);
+    balanced(&l.t);
+}
