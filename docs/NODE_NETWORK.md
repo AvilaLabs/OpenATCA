@@ -85,6 +85,27 @@ engine and is replicated with the rest. An instruction given by voice and never 
 by no automation, this one included; the takeover experiment measures how much of the control
 state that leaves out.
 
+### The core/shell boundary
+
+The design depends on RULESET section B, which the gate checks mechanically (B7 to B9):
+
+- **Comparison needs a pure core.** Nodes fed the same inputs reach the same state only if the
+  core is a pure function of its inputs. A clock read or a randomly seeded hash map in the core
+  would make healthy nodes disagree, and every mismatch alarm would be noise.
+- **The boundary defines the record and separates the fault classes.** The values the shell
+  hands to the core are the inputs a node logs and hashes; the core's state is what it hashes
+  and compares. A difference in inputs is a data-path fault in the shell; the same inputs giving
+  a different state is a compute fault (section 6).
+- **It is what makes the defences against code faults practical.** Inputs entering the core one
+  at a time through one boundary let the shell identify and quarantine the input that stops the
+  core. Small pure functions are what formal proof, mutation testing and a narrow second
+  implementation can cover. The safety monitor is itself a separate core module. A core with no
+  operating-system dependence runs unchanged on different compilers, hardware and operating
+  systems, which is what platform diversity needs (section 7).
+- **It does not catch a wrong requirement.** A pure, proven, replicated core computes a wrong
+  specification identically everywhere. Incident replays and review by controllers are the
+  defence against that.
+
 ## 3. The record
 
 Each node keeps an append-only Merkle tree over every input it consumed and every output it
