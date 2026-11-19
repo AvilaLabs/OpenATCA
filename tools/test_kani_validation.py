@@ -16,6 +16,7 @@ from unittest import mock
 from kani_validation import (
     LOOP_UNWIND_PRESETS,
     _check_loop_unwind_log,
+    _discover_loop_unwind_ids,
     _copy_source_artifacts,
     _loop_unwind_configuration,
     _loop_unwind_argument,
@@ -52,7 +53,14 @@ def late_goto_loops(disambiguator=DISAMBIGUATOR, lines=LATE_LOOP_LINES, function
 
 
 def discovery_record(preset_name, disambiguator=DISAMBIGUATOR):
-    return discover_loop_unwind_loops(preset_name, late_goto_loops(disambiguator))
+    return {
+        **discover_loop_unwind_loops(preset_name, late_goto_loops(disambiguator)),
+        "goto_binary": "x.out",
+        "goto_binary_sha256": "a" * 64,
+        "goto_instrument_path": "/home/u/.kani/kani-0.68.0/bin/goto-instrument",
+        "goto_instrument_sha256": "b" * 64,
+        "loops_listing_sha256": "c" * 64,
+    }
 
 
 HARNESS = "tracker::proofs::bounded_dispatch"
@@ -660,6 +668,15 @@ class KaniBindingTests(unittest.TestCase):
         missing = json.loads(json.dumps(record))
         missing["loop_unwind_discovery"] = None
         self.assertTrue(any("discovery" in error for error in evaluate_kani_binding(report_text, missing)))
+        for key, bad in (
+            ("goto_binary_sha256", None), ("goto_instrument_sha256", "abc"), ("loops_listing_sha256", "G" * 64),
+            ("goto_instrument_path", "/usr/bin/goto-instrument"),
+            ("goto_instrument_path", "/home/u/.kani/kani-0.67.0/bin/goto-instrument"),
+        ):
+            tampered = json.loads(json.dumps(record))
+            tampered["loop_unwind_discovery"][key] = bad
+            with self.subTest(key=key, bad=bad):
+                self.assertTrue(any("discovery" in error for error in evaluate_kani_binding(report_text, tampered)))
         moved = json.loads(json.dumps(record))
         moved["loop_unwind_discovery"]["loops"][3]["line"] = 1072
         self.assertTrue(any("discovery" in error for error in evaluate_kani_binding(report_text, moved)))
@@ -668,6 +685,32 @@ class KaniBindingTests(unittest.TestCase):
                 _validate_loop_unwind_source(
                     Path(__file__).resolve().parents[1], preset_name, "oa-track", harness
                 )
+
+    def test_loop_discovery_parses_a_real_goto_instrument_listing(self):
+        text = (Path(__file__).resolve().parent / "testdata" / "goto_show_loops_update_late.txt").read_text()
+        self.assertTrue(text.startswith("Reading GOTO program from"))
+        found = discover_loop_unwind_loops("late-replay-two-events-pinned-cargo", text)
+        self.assertEqual(found["disambiguator"], "s54ksHOfKhD")
+        self.assertEqual([entry["line"] for entry in found["loops"]], LATE_LOOP_LINES)
+        self.assertTrue(all(entry["file"] == "crates/oa-track/src/tracker.rs" for entry in found["loops"]))
+        # The registry's own line table must agree with the real listing.
+        moved = text.replace("line 1071 column 5", "line 1072 column 5")
+        with self.assertRaisesRegex(ValueError, "registered"):
+            discover_loop_unwind_loops("late-replay-two-events-pinned-cargo", moved)
+
+    def test_discovery_failures_are_fail_closed_value_errors(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for exc in (OSError("boom"), sp.TimeoutExpired("goto-instrument", 1)):
+                with self.subTest(exc=type(exc).__name__), mock.patch(
+                    "kani_validation.run_limited_process", side_effect=exc
+                ):
+                    with self.assertRaisesRegex(ValueError, "discovery failed"):
+                        _discover_loop_unwind_ids(
+                            "late-replay-two-events-pinned-cargo", ["cargo"], "a::b", root, root, {},
+                            root, 1 << 30, 60,
+                        )
 
     def test_loop_discovery_binds_ids_to_registered_locations(self):
         for name in (

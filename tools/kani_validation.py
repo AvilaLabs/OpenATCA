@@ -302,16 +302,16 @@ def _find_goto_binary(target: Path, harness: str, newer_than: float) -> Path:
 
 
 def _find_goto_instrument() -> Path:
-    candidates = []
+    """The goto-instrument of the pinned Kani bundle; a PATH lookup is never trusted."""
     home = Path(os.environ.get("KANI_HOME", Path.home() / ".kani"))
-    candidates.extend(sorted(home.glob(f"kani-{PINNED_KANI_VERSION}/bin/goto-instrument")))
-    on_path = shutil.which("goto-instrument")
-    if on_path:
-        candidates.append(Path(on_path))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise ValueError("goto-instrument from the pinned Kani bundle was not found")
+    tool = home / f"kani-{PINNED_KANI_VERSION}" / "bin" / "goto-instrument"
+    if not tool.is_file():
+        raise ValueError(f"goto-instrument of the pinned Kani {PINNED_KANI_VERSION} bundle not found at {tool}")
+    return tool
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 def _loop_unwind_argument(preset: Mapping[str, Any]) -> str:
@@ -1005,6 +1005,14 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
             try:
                 if not isinstance(discovery, dict) or not isinstance(discovery.get("loops"), list):
                     raise ValueError("missing loop discovery record")
+                for key in ("goto_binary_sha256", "goto_instrument_sha256", "loops_listing_sha256"):
+                    if not _is_sha256_hex(discovery.get(key)):
+                        raise ValueError(f"{key} is missing or not a sha256")
+                tool_path = discovery.get("goto_instrument_path")
+                if not isinstance(tool_path, str) or not re.fullmatch(
+                    rf"/(?:.*/)?kani-{re.escape(PINNED_KANI_VERSION)}/bin/goto-instrument", tool_path
+                ):
+                    raise ValueError("goto-instrument is not from the pinned Kani bundle")
                 bound = bind_loop_unwind_discovery(preset_name, discovery["loops"])
                 if bound != {"disambiguator": discovery.get("disambiguator"), "loops": discovery["loops"]}:
                     raise ValueError("discovery record is not canonical")
@@ -1281,32 +1289,48 @@ def _discover_loop_unwind_ids(
             skip = True
         else:
             discovery_argv.append(arg)
-    discovery_argv.append("--only-codegen")
+    # --force-build rewrites the goto binary even when Kani could reuse a fresh
+    # build, so the mtime filter below always selects this run's output; the
+    # verification run that follows then reuses that build.
+    discovery_argv.extend(["--force-build", "--only-codegen"])
     started = time.time() - 1
-    with (check_dir / "discovery-stdout.log").open("w", encoding="utf-8") as stdout, (
-        check_dir / "discovery-stderr.log"
-    ).open("w", encoding="utf-8") as stderr:
-        rc, timed_out = run_limited_process(
-            discovery_argv, repo, env, stdout, stderr, timeout_seconds, memory_bytes
-        )
-    if rc != 0 or timed_out:
-        raise ValueError(f"loop discovery codegen failed (exit {rc}, timed out: {timed_out})")
-    goto = _find_goto_binary(target, harness, started)
-    tool = _find_goto_instrument()
-    shown = subprocess.run(
-        [str(tool), "--show-loops", str(goto)], cwd=repo, capture_output=True, text=True, timeout=300
-    )
-    if shown.returncode != 0:
-        raise ValueError(f"goto-instrument --show-loops failed (exit {shown.returncode})")
-    (check_dir / "discovery-loops.txt").write_text(shown.stdout, encoding="utf-8")
-    bound = discover_loop_unwind_loops(preset_name, shown.stdout)
-    return {
-        **bound,
-        "goto_binary": goto.name,
-        "goto_binary_sha256": _sha256_file(goto),
-        "goto_instrument_sha256": _sha256_file(tool),
-        "loops_listing_sha256": _sha256_file(check_dir / "discovery-loops.txt"),
-    }
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        with (check_dir / "discovery-stdout.log").open("w", encoding="utf-8") as stdout, (
+            check_dir / "discovery-stderr.log"
+        ).open("w", encoding="utf-8") as stderr:
+            rc, timed_out = run_limited_process(
+                discovery_argv, repo, env, stdout, stderr, timeout_seconds, memory_bytes
+            )
+        if rc != 0 or timed_out:
+            raise ValueError(f"loop discovery codegen failed (exit {rc}, timed out: {timed_out})")
+        goto = _find_goto_binary(target, harness, started)
+        tool = _find_goto_instrument()
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            raise ValueError("loop discovery exhausted the proof's external timeout")
+        listing = check_dir / "discovery-loops.txt"
+        with listing.open("w", encoding="utf-8") as stdout, (
+            check_dir / "discovery-listing-stderr.log"
+        ).open("w", encoding="utf-8") as stderr:
+            rc, timed_out = run_limited_process(
+                [str(tool), "--show-loops", str(goto)], repo, env, stdout, stderr,
+                min(300, remaining), memory_bytes,
+            )
+        if rc != 0 or timed_out:
+            raise ValueError(f"goto-instrument --show-loops failed (exit {rc}, timed out: {timed_out})")
+        bound = discover_loop_unwind_loops(preset_name, listing.read_text(encoding="utf-8", errors="replace"))
+        return {
+            **bound,
+            "goto_binary": goto.name,
+            "goto_binary_sha256": _sha256_file(goto),
+            "goto_instrument_path": str(tool),
+            "goto_instrument_sha256": _sha256_file(tool),
+            "loops_listing_sha256": _sha256_file(listing),
+            "elapsed_seconds": time.monotonic() - (deadline - timeout_seconds),
+        }
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(f"loop discovery failed: {exc}") from exc
 
 
 def run_one(
@@ -1360,6 +1384,9 @@ def run_one(
         )
         if key in env
     }
+    excluded = [check_dir, out, target]
+    # Snapshot before discovery so an edit between discovery and verification is caught.
+    source_before = _source_snapshot(repo, excluded)
     discovery: dict[str, Any] | None = None
     resolved_preset: dict[str, Any] | None = None
     if loop_unwind_preset is not None:
@@ -1372,8 +1399,10 @@ def run_one(
             _loop_unwind_argument(resolved_preset),
             "--unwinding-assertions",
         ])
-    excluded = [check_dir, out, target]
-    source_before = _source_snapshot(repo, excluded)
+        # Discovery counts against the proof's external timeout.
+        timeout_seconds_run = max(1, timeout_seconds - int(discovery["elapsed_seconds"]))
+    else:
+        timeout_seconds_run = timeout_seconds
     record: dict[str, Any] = {
         "record_version": 1,
         "repo": str(repo),
@@ -1431,7 +1460,7 @@ def run_one(
     ).open("w", encoding="utf-8") as stderr:
         try:
             rc, timed_out = run_limited_process(
-                argv, repo, env, stdout, stderr, timeout_seconds, memory_bytes
+                argv, repo, env, stdout, stderr, timeout_seconds_run, memory_bytes
             )
         except OSError as exc:
             stderr.write(f"failed to start Kani command: {exc}\n")
