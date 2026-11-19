@@ -1,29 +1,21 @@
-//! RULESET B5 beyond the `pub fn`: every way shell code can hand behaviour to the core that is not
-//! a public function signature. A `pub trait` the shell can implement, a generic parameter bounded
-//! by a trait the shell can implement, and a function pointer, `Fn*` or `dyn` anywhere. Same
-//! lexer as [`super`]; a hit is a [`CallbackSig`], so the reviewed allowlist covers it the same
-//! way (`crate file.rs::name reason`).
+//! RULESET B5 for everything the shell can reach: a `pub trait` it can implement, and, in an item
+//! it can name (plain `pub`; methods of a `pub trait`; `pub` fields), a generic bound that is not
+//! `Copy`, `Sized` or a sealed trait, an `impl Trait` argument, `Fn*`, `dyn`, a `fn(..)` pointer
+//! or a private type alias that holds one. Private items may use any of them. Same lexer as
+//! [`super`]; a hit is a [`CallbackSig`], so the reviewed allowlist covers it the same way
+//! (`crate file.rs::name reason`).
 
-use super::harden::{head_of, CallbackSig};
+use super::harden::CallbackSig;
 use super::{
     is_word, mask, s, skip_group, skip_modifiers, skip_turbofish, strip_test_items, tokenize, Ctx,
     Tok,
 };
 use std::collections::BTreeSet;
 
-/// The bounds a core generic may carry besides a sealed trait: std marker and derivable traits
-/// whose behaviour a derive writes, not the caller.
-pub const FIXED_BOUNDS: &[&str] = &[
-    "Copy",
-    "Clone",
-    "Debug",
-    "PartialEq",
-    "Eq",
-    "PartialOrd",
-    "Ord",
-    "Default",
-    "Sized",
-];
+/// The bounds a reachable generic may carry besides a sealed trait: the two that have no method.
+/// Every other std trait (`Clone`, `PartialEq`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`,
+/// `Into`..) has methods a shell type can implement, and `Eq` counts as `PartialEq`.
+pub const FIXED_BOUNDS: &[&str] = &["Copy", "Sized"];
 const CALLBACK_WORDS: &[&str] = &[
     "Fn",
     "FnMut",
@@ -187,34 +179,18 @@ fn bad_bounds(toks: &[Tok], from: usize, to: usize, ctx: &Ctx<'_>) -> Vec<String
     split_top(toks, from, to, "+")
         .into_iter()
         .filter_map(|(a, b)| bound_name(toks, a, b))
-        .filter(|n| !FIXED_BOUNDS.contains(&n.as_str()) && !ctx.sealed.contains(n))
+        .filter(|n| {
+            !FIXED_BOUNDS.contains(&n.as_str())
+                && !ctx.sealed.contains(n)
+                && !CALLBACK_WORDS.contains(&n.as_str())
+        })
         .collect()
-}
-
-/// What `callback_sigs` calls the self type of an impl, for the allowlist key.
-fn impl_key(toks: &[Tok], from: usize, to: usize) -> String {
-    let from = if s(toks, from) == "<" {
-        angles_end(toks, from)
-    } else {
-        from
-    };
-    let mut angle = 0usize;
-    let mut head_from = from;
-    for k in from..to {
-        match s(toks, k) {
-            "<" => angle += 1,
-            ">" if s(toks, k - 1) != "-" => angle = angle.saturating_sub(1),
-            "for" if angle == 0 => head_from = k + 1,
-            _ => {}
-        }
-    }
-    format!("impl@{}", head_of(toks.get(head_from..to).unwrap_or(&[])).0)
 }
 
 fn note(why: &mut Vec<String>, bad: Vec<String>, what: &str) {
     for b in bad {
         why.push(format!(
-            "{what} bound `{b}` is not a std marker trait or a sealed trait"
+            "{what} bound `{b}` is not `Copy`, `Sized` or a sealed trait (a shell type can implement its methods)"
         ));
     }
 }
@@ -239,8 +215,7 @@ pub fn extra_sigs(src: &str, ctx: &Ctx<'_>) -> Vec<CallbackSig> {
     let toks = strip_test_items(tokenize(&mask(src))).toks;
     let mut out = Vec::new();
     seal_rules(&toks, ctx, &mut out);
-    bound_rules(&toks, ctx, &mut out);
-    callback_words(&toks, &mut out);
+    reach_rules(&toks, ctx, &mut out);
     out
 }
 
@@ -375,177 +350,228 @@ fn seal_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
     }
 }
 
-fn bound_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
+/// Names of the type aliases of `src` (private or not) whose body holds an `Fn*`, `dyn` or `fn(..)`.
+pub fn callback_aliases(src: &str) -> BTreeSet<String> {
+    let toks = strip_test_items(tokenize(&mask(src))).toks;
+    let mut out = BTreeSet::new();
     for (i, t) in toks.iter().enumerate() {
-        let prev = if i == 0 { "" } else { s(toks, i - 1) };
-        let (kind, name) = match t.s.as_str() {
-            "fn" | "struct" | "enum" | "union" | "trait" | "type" if is_word(s(toks, i + 1)) => {
-                (t.s.as_str(), s(toks, i + 1).to_string())
-            }
-            "impl" if matches!(prev, "" | ";" | "}" | "{" | "]" | "unsafe") => {
-                ("impl", String::new())
-            }
-            _ => continue,
-        };
-        let mut j = if kind == "impl" { i + 1 } else { i + 2 };
-        let mut params: Vec<(String, bool)> = Vec::new();
-        let mut why: Vec<String> = Vec::new();
-        let gen_end = if s(toks, j) == "<" {
-            let end = angles_end(toks, j);
-            for (a, b) in split_top(toks, j + 1, end - 1, ",") {
-                if s(toks, a) == "const" || !is_word(s(toks, a)) {
-                    continue;
-                }
-                let pname = s(toks, a).to_string();
-                let mut bounded = false;
-                if s(toks, a + 1) == ":" {
-                    // bounds up to a default `= Type`
-                    let stop = (a + 2..b).find(|&k| s(toks, k) == "=").unwrap_or(b);
-                    note(&mut why, bad_bounds(toks, a + 2, stop, ctx), "a generic");
-                    bounded = split_top(toks, a + 2, stop, "+")
-                        .into_iter()
-                        .any(|(x, y)| bound_name(toks, x, y).is_some());
-                }
-                params.push((pname, bounded));
-            }
-            end
-        } else {
-            j
-        };
-        j = gen_end;
-        // fn: arguments, then `-> ret`, then `where`
-        if kind == "fn" && s(toks, j) == "(" {
-            let end = skip_group(toks, j);
-            for (a, b) in split_top(toks, j + 1, end - 1, ",") {
-                for k in a..b {
-                    if s(toks, k) == "impl" {
-                        note(
-                            &mut why,
-                            bad_bounds(toks, k + 1, b, ctx),
-                            "an `impl` argument",
-                        );
-                    }
-                }
-            }
-            j = end;
-        }
-        let (stop, where_at) = header_end(toks, j);
-        if let Some(w) = where_at {
-            for (a, b) in split_top(toks, w + 1, stop, ",") {
-                let Some(colon) = top_colon(toks, a, b) else {
-                    continue;
-                };
-                note(&mut why, bad_bounds(toks, colon + 1, b, ctx), "a where");
-                if colon == a + 1 {
-                    let lhs = s(toks, a).to_string();
-                    for p in params.iter_mut() {
-                        if p.0 == lhs {
-                            p.1 = true;
-                        }
-                    }
-                }
+        if t.s == "type" && is_word(s(&toks, i + 1)) {
+            let (end, _) = header_end(&toks, i + 2);
+            if (i + 2..end).any(|k| callback_at(&toks, k)) {
+                out.insert(s(&toks, i + 1).to_string());
             }
         }
-        let key = if kind == "impl" {
-            impl_key(toks, i + 1, where_at.unwrap_or(stop))
-        } else {
-            name
-        };
-        // an unbounded type parameter stored in the field of a `pub` struct, enum or union
-        if matches!(kind, "struct" | "enum" | "union") && prev == "pub" {
-            let end = if s(toks, stop) == "{" {
-                skip_group(toks, stop)
-            } else {
-                stop
-            };
-            let body_from = if s(toks, gen_end) == "(" {
-                gen_end
-            } else {
-                stop
-            };
-            for (pname, bounded) in &params {
-                if !bounded && (body_from..end).any(|k| s(toks, k) == pname) {
-                    why.push(format!(
-                        "the unbounded type parameter `{pname}` is stored in a field of a `pub` type"
-                    ));
-                }
-            }
-        }
-        why.sort();
-        why.dedup();
-        if !why.is_empty() {
-            out.push(CallbackSig {
-                name: key,
-                line: t.line,
-                why: why.join("; "),
-            });
+    }
+    out
+}
+
+/// Whether `toks[k]` is `Fn`, `FnMut`, `FnOnce`, `dyn` or the `fn` of a `fn(..)` pointer type.
+fn callback_at(toks: &[Tok], k: usize) -> bool {
+    CALLBACK_WORDS.contains(&s(toks, k))
+        || (s(toks, k) == "fn" && skip_turbofish(toks, k + 1) == k + 1 && s(toks, k + 1) == "(")
+}
+
+/// Reasons the tokens `toks[from..to]` hand behaviour in: a callback word, or a private callback
+/// alias named.
+fn callback_whys(toks: &[Tok], from: usize, to: usize, ctx: &Ctx<'_>, why: &mut Vec<String>) {
+    for k in from..to {
+        if callback_at(toks, k) {
+            let w = s(toks, k);
+            why.push(format!(
+                "`{}` in a signature the shell can reach: a callback or function pointer can carry platform behaviour",
+                if w == "fn" { "fn(..)" } else { w }
+            ));
+        } else if ctx.cb_types.contains(s(toks, k)) && (k == 0 || s(toks, k - 1) != ".") {
+            why.push(format!(
+                "the type alias `{}` holds an `Fn`, `dyn` or `fn(..)` type",
+                s(toks, k)
+            ));
         }
     }
 }
 
-/// Every `Fn`, `FnMut`, `FnOnce`, `dyn` and `fn(..)` pointer type of the file, with the name of
-/// the innermost item that holds it.
-fn callback_words(toks: &[Tok], out: &mut Vec<CallbackSig>) {
-    // (start, end, name) of every item that can hold one
-    let mut spans: Vec<(usize, usize, String)> = Vec::new();
-    for (i, t) in toks.iter().enumerate() {
-        let prev = if i == 0 { "" } else { s(toks, i - 1) };
-        let next = s(toks, i + 1);
-        let (name, from) = match t.s.as_str() {
-            "fn" if is_word(next) => (next.to_string(), i),
-            "struct" | "enum" | "union" | "trait" | "type" | "static" if is_word(next) => {
-                (next.to_string(), i)
-            }
-            "const" if is_word(next) && !matches!(next, "fn" | "unsafe" | "async" | "extern") => {
-                (next.to_string(), i)
-            }
-            "impl" if matches!(prev, "" | ";" | "}" | "{" | "]" | "unsafe") => {
-                let (end, _) = header_end(toks, i + 1);
-                (impl_key(toks, i + 1, end), i)
-            }
-            _ => continue,
-        };
-        // to the `;` or the closing brace of the item
-        let mut depth = 0usize;
-        let mut k = from + 1;
-        let mut end = toks.len();
-        while k < toks.len() {
-            match s(toks, k) {
-                "(" | "[" => depth += 1,
-                ")" | "]" => depth = depth.saturating_sub(1),
-                "{" if depth == 0 => {
-                    end = skip_group(toks, k);
-                    break;
-                }
-                ";" if depth == 0 => {
-                    end = k;
-                    break;
-                }
-                _ => {}
-            }
-            k += 1;
-        }
-        spans.push((from, end, name));
+/// Bound reasons of the generics `<..>` at `toks[i]` (if any); returns the index after them.
+fn generics_whys(toks: &[Tok], i: usize, ctx: &Ctx<'_>, why: &mut Vec<String>) -> usize {
+    if s(toks, i) != "<" {
+        return i;
     }
-    for (i, t) in toks.iter().enumerate() {
-        let w = t.s.as_str();
-        let hit = CALLBACK_WORDS.contains(&w)
-            || (w == "fn" && skip_turbofish(toks, i + 1) == i + 1 && s(toks, i + 1) == "(");
-        if !hit {
+    let end = angles_end(toks, i);
+    for (a, b) in split_top(toks, i + 1, end - 1, ",") {
+        if s(toks, a) == "const" || !is_word(s(toks, a)) || s(toks, a + 1) != ":" {
             continue;
         }
-        let name = spans
-            .iter()
-            .filter(|(a, b, _)| *a <= i && i < *b)
-            .max_by_key(|(a, _, _)| *a)
-            .map_or("<file>", |(_, _, n)| n.as_str());
-        out.push(CallbackSig {
-            name: name.to_string(),
-            line: t.line,
-            why: format!(
-                "`{}` in core code: a callback or function pointer can carry platform behaviour",
-                if w == "fn" { "fn(..)" } else { w }
-            ),
-        });
+        // bounds up to a default `= Type`
+        let stop = (a + 2..b).find(|&k| s(toks, k) == "=").unwrap_or(b);
+        note(why, bad_bounds(toks, a + 2, stop, ctx), "a generic");
+    }
+    end
+}
+
+/// Reasons for the `where` clause of the header ending at `stop`.
+fn where_whys(toks: &[Tok], w: Option<usize>, stop: usize, ctx: &Ctx<'_>, why: &mut Vec<String>) {
+    if let Some(w) = w {
+        for (a, b) in split_top(toks, w + 1, stop, ",") {
+            if let Some(colon) = top_colon(toks, a, b) {
+                note(why, bad_bounds(toks, colon + 1, b, ctx), "a where");
+            }
+        }
+    }
+}
+
+/// Reasons a `fn` whose keyword is at `toks[j]` lets the shell hand in behaviour.
+fn fn_whys(toks: &[Tok], j: usize, ctx: &Ctx<'_>) -> Vec<String> {
+    let mut why = Vec::new();
+    let mut k = generics_whys(toks, j + 2, ctx, &mut why);
+    if s(toks, k) == "(" {
+        let end = skip_group(toks, k);
+        for (a, b) in split_top(toks, k + 1, end - 1, ",") {
+            for m in a..b {
+                if s(toks, m) == "impl" {
+                    note(
+                        &mut why,
+                        bad_bounds(toks, m + 1, b, ctx),
+                        "an `impl` argument",
+                    );
+                }
+            }
+        }
+        k = end;
+    }
+    let (stop, w) = header_end(toks, k);
+    where_whys(toks, w, stop, ctx, &mut why);
+    callback_whys(toks, j + 2, stop, ctx, &mut why);
+    why
+}
+
+/// The plain-`pub` fields of the record or tuple body at `toks[from]` (`{..}` or `(..)`).
+fn pub_field_ranges(toks: &[Tok], from: usize) -> Vec<(usize, usize)> {
+    let end = skip_group(toks, from);
+    split_top(toks, from + 1, end - 1, ",")
+        .into_iter()
+        .filter(|&(a, _)| {
+            let mut a = a;
+            while s(toks, a) == "#" && s(toks, a + 1) == "[" {
+                a = skip_group(toks, a + 1);
+            }
+            s(toks, a) == "pub" && s(toks, a + 1) != "("
+        })
+        .collect()
+}
+
+/// B5 for the items the shell can reach (see the module doc). Reachability is lexical: an item
+/// with plain `pub`, a method of a `pub trait`, a `pub` field; the module path is not followed.
+fn reach_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
+    // inherent `impl` blocks whose header carries a bound or a callback: (body span, reasons)
+    let mut impls: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let prev = if i == 0 { "" } else { s(toks, i - 1) };
+        if t.s != "impl" || !matches!(prev, "" | ";" | "}" | "{" | "]" | "unsafe") {
+            continue;
+        }
+        let mut why = Vec::new();
+        let k = generics_whys(toks, i + 1, ctx, &mut why);
+        let (stop, w) = header_end(toks, k);
+        // an impl of a trait is core's own code (a sealed trait's is internal)
+        let is_trait_impl = (k..stop).any(|m| s(toks, m) == "for" && s(toks, m + 1) != "<");
+        if is_trait_impl || s(toks, stop) != "{" {
+            continue;
+        }
+        where_whys(toks, w, stop, ctx, &mut why);
+        callback_whys(toks, i + 1, stop, ctx, &mut why);
+        if !why.is_empty() {
+            impls.push((stop, skip_group(toks, stop), why));
+        }
+    }
+    let mut push = |name: &str, line: usize, mut why: Vec<String>| {
+        why.sort();
+        why.dedup();
+        if !why.is_empty() {
+            out.push(CallbackSig {
+                name: name.to_string(),
+                line,
+                why: why.join("; "),
+            });
+        }
+    };
+    for (i, t) in toks.iter().enumerate() {
+        if t.s != "pub" || s(toks, i + 1) == "(" {
+            continue;
+        }
+        let j = skip_modifiers(toks, i);
+        let kw = s(toks, j);
+        let name = s(toks, j + 1);
+        if !is_word(name) {
+            continue;
+        }
+        match kw {
+            "fn" => {
+                let mut why = fn_whys(toks, j, ctx);
+                for (from, to, ws) in &impls {
+                    if *from < j && j < *to {
+                        why.extend(ws.iter().cloned());
+                    }
+                }
+                push(name, toks.get(j).map_or(0, |t| t.line), why);
+            }
+            "struct" | "enum" | "union" | "type" => {
+                let mut why = Vec::new();
+                let k = generics_whys(toks, j + 2, ctx, &mut why);
+                let (stop, w) = header_end(toks, k);
+                where_whys(toks, w, stop, ctx, &mut why);
+                match kw {
+                    // the whole body of a `pub type` or `pub enum` is reachable
+                    "type" => callback_whys(toks, j + 2, stop, ctx, &mut why),
+                    "enum" => {
+                        let end = if s(toks, stop) == "{" {
+                            skip_group(toks, stop)
+                        } else {
+                            stop
+                        };
+                        callback_whys(toks, j + 2, end, ctx, &mut why);
+                    }
+                    _ => {
+                        let body = if s(toks, k) == "(" {
+                            Some(k)
+                        } else if s(toks, stop) == "{" {
+                            Some(stop)
+                        } else {
+                            None
+                        };
+                        if let Some(b) = body {
+                            for (a, z) in pub_field_ranges(toks, b) {
+                                callback_whys(toks, a, z, ctx, &mut why);
+                            }
+                        }
+                    }
+                }
+                push(name, toks.get(j).map_or(0, |t| t.line), why);
+            }
+            "trait" => {
+                let mut head = Vec::new();
+                let k = generics_whys(toks, j + 2, ctx, &mut head);
+                let (stop, w) = header_end(toks, k);
+                where_whys(toks, w, stop, ctx, &mut head);
+                callback_whys(toks, j + 2, stop, ctx, &mut head);
+                if s(toks, stop) != "{" {
+                    continue;
+                }
+                let end = skip_group(toks, stop);
+                push(name, toks.get(j).map_or(0, |t| t.line), head.clone());
+                // every method declared in the body, at the top level of the body
+                let mut depth = 0usize;
+                for m in stop..end {
+                    match s(toks, m) {
+                        "{" | "(" | "[" => depth += 1,
+                        "}" | ")" | "]" => depth = depth.saturating_sub(1),
+                        "fn" if depth == 1 && is_word(s(toks, m + 1)) => {
+                            let why = fn_whys(toks, m, ctx);
+                            push(s(toks, m + 1), toks.get(m).map_or(0, |t| t.line), why);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }

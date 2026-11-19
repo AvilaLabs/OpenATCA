@@ -100,25 +100,33 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   **Time is an input.** Every core step receives the current time as a value.
 - **B5 [MUST]** Data crosses the core/shell boundary as plain values. No callbacks from the core
   into the shell, and no trait the shell can implement (amended 2026-11-19, after a review found
-  the first scan read only `pub fn`s). The gate fails, unless the item is on the reviewed allowlist
-  `tools/oa-trace/core-callbacks-allowlist.txt` (entries `crate file.rs::name reason`; an entry that
-  matches nothing fails too), on each of:
-  - a core `pub fn` (`pub(crate)` included) whose signature names `Fn`, `FnMut`, `FnOnce` or `dyn`,
-    takes `impl Trait` as a parameter or has a bound (`<T: Bound>` or `where`), also when the bound
-    sits on the `impl` block around it; a bare `fn(..)` pointer type in a signature; and a `pub struct`,
-    `enum`, `union` or `type` that holds an `Fn*`, `dyn` or `fn(..)` type;
+  the first scan read only `pub fn`s; narrowed the same day to what the shell can reach). The gate
+  fails, unless the item is on the reviewed allowlist `tools/oa-trace/core-callbacks-allowlist.txt`
+  (entries `crate file.rs::name reason`; an entry that matches nothing fails too). An item is
+  reachable when it has plain `pub` (not `pub(crate)`, `pub(super)` or `pub(in ..)`), is a method
+  declared in a `pub trait`, or is a `pub` field; the module path is not followed (see the limits
+  under B8). In a reachable item the gate fails on:
+  - `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer type anywhere in its signature (parameters,
+    return type, generics, `where`, the header of the `impl` block around a method), in the type of
+    a `pub` field of a `pub` struct or union, in the whole body of a `pub enum` and of a `pub type`;
+    and the name of a type alias of the same crate, private or not, whose body holds one of them;
+  - an `impl Trait` argument or a generic bound (`<T: Bound>`, `where`, also on the `impl` block
+    around a method, a `pub` struct, enum, union, type or trait) that is not `Copy`, `Sized`, `?Sized`,
+    a lifetime or a sealed trait of a core crate. `Clone`, `PartialEq`, `Eq` (it counts as
+    `PartialEq`), `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into`, `From` and
+    every other std trait fail, because each has methods that a shell type can implement and the
+    core would call (a shell `Ord` that reads a clock, passed to a `pub` generic sort);
   - every `pub trait` that is not sealed: a supertrait from a private module (`mod sealed { pub trait
     Sealed {} }`, `pub trait T: sealed::Sealed`), or listed. A `pub use` of the sealing trait and a
-    blanket `impl<X> sealed::Sealed for X` un-seal it and fail;
-  - every generic of every item, `pub` or not (struct, enum, union, `fn`, `impl`, trait method, `type`,
-    `where` clauses, `impl Trait` arguments): its bounds are `Copy`, `Clone`, `Debug`, `PartialEq`,
-    `Eq`, `PartialOrd`, `Ord`, `Default`, `Sized`, or a sealed trait of a core crate, and nothing else;
-    an unbounded type parameter stored in a field of a `pub` struct, enum or union fails too;
-  - `Fn`, `FnMut`, `FnOnce`, `dyn` and `fn(..)` anywhere in core code: any signature, private ones,
-    trait method declarations, trait-impl methods, type aliases, fields, `static`s and `let`s.
-  A listed entry states why the caller cannot inject platform behaviour, or is marked OPEN where the
-  type system does not stop it and the callers were only read. An entry is by the name of the item
-  that holds the token (`impl@Type` for an `impl` block).
+    blanket `impl<X> sealed::Sealed for X` un-seal it and fail.
+  Private and `pub(crate)` items may use closures, `dyn`, fn pointers, `impl Iterator`, `impl Into`
+  and any bound: the shell cannot name them. A type parameter with no bound at all is not checked,
+  stored or not: the core cannot call into a type it knows nothing about, so any behaviour needs a
+  bound, and the bound is checked. An `impl` of a trait for a type is not checked either: of a
+  sealed core trait it is internal, of a std trait for a core type it is core's own code.
+  A listed entry states why the caller cannot inject platform behaviour, or is marked OPEN where
+  the type system does not stop it and the callers were only read. An entry is by the name of the
+  item that holds the token (the method or fn name, the struct, enum, type or trait name).
 - **B6 [MUST]** Because of B2–B5, any run can be replayed bit for bit from its recorded inputs. A
   change that breaks replay determinism is a defect.
 - **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
@@ -222,6 +230,12 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     one struct and an integer in another (the float one wins, a false alarm, never a miss). Bindings
     are ordered by the source, so a later `let` of the same name replaces an earlier one; blocks are
     not modelled;
+  - reachability for B5 is lexical: a plain-`pub` item counts as reachable even in a private module
+    or when the type it belongs to is not exported, and a `pub` method of a private type is checked
+    like any other (a false alarm, never a miss); a `pub use` of a private item is not followed; a
+    macro-generated item is not seen;
+  - a shell type's `Drop` runs when the core drops it: it can cause a side effect, and it cannot
+    feed a value back into the core except by panicking, so it is not blocked;
   - the sealing of a `pub trait` is judged by name: a supertrait is a seal if its path runs through
     a module that the crate declares non-public, and a bound by a sealed trait is accepted for any
     trait of that name in any core crate; a `pub trait Sealed` that happens to share a name with a seal

@@ -1,10 +1,9 @@
-# Core items that let shell code hand behaviour to the core (RULESET B5): a `pub fn` that takes a
-# callback (`Fn`, `FnMut`, `FnOnce`, `dyn`, `impl Trait` parameter) or a trait-bound generic, a
-# `pub trait` that is not sealed, a generic bounded by a trait that is not a std marker or sealed,
-# an unbounded type parameter stored in a `pub` type, and `Fn*`, `dyn` or `fn(..)` anywhere in core
-# code, private fns included. Each line is `crate file.rs::name reason`, the file relative to the
-# crate's `src/`, the name that of the fn, type, trait or constant that holds it (`impl@Type` for an
-# `impl` block). oa-trace fails on an item missing from this list and on an entry nothing matches,
+# Core items the shell can reach (plain `pub`, a method of a `pub` trait, a `pub` field) that let it
+# hand behaviour to the core (RULESET B5): a `pub trait` that is not sealed; a generic bound or
+# `impl Trait` argument that is not `Copy`, `Sized` or a sealed trait; `Fn*`, `dyn` or `fn(..)` in
+# the signature, a `pub` field or an alias they name. Each line is `crate file.rs::name reason`, the
+# file relative to the crate's `src/`, the name that of the fn, method, struct, enum, type or trait
+# that holds it. oa-trace fails on an item missing from this list and on an entry nothing matches,
 # so the list is reviewed whenever it changes.
 #
 # OPEN means the type system does not stop a caller from passing a closure that does I/O; the

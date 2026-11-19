@@ -508,15 +508,16 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `tools/oa-trace/core-callbacks-allowlist.txt` as `crate file.rs::TraitName reason`. A `pub use` of the sealing
   trait and a blanket `impl<X> sealed::Sealed for X` un-seal it and fail. The sealing trait itself, `pub(crate)`
   and private traits and test-only ones are not listed.
-- **OA-TRC-245** Every generic of core code, on any item (`fn`, struct, enum, union, `type`, `impl` block, trait
-  method), `pub` or not, in the angle brackets, a `where` clause or as an `impl Trait` argument, is bounded only by
-  `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Default`, `Sized` (`?Sized`, lifetimes and
-  const generics aside) or by a sealed trait of a core crate; any other bound fails unless the allowlist names
-  the item (`impl@Type` for an `impl` block). A type parameter with no bound at all that is stored in a field of
-  a `pub` struct, enum or union fails unless listed.
-- **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer type anywhere in non-test core code, in any
-  signature (`pub` or private), trait method, trait-impl method, type alias, field, `static`, `const` or `let`, fail
-  unless the allowlist names the item that holds it.
+- **OA-TRC-245** In an item the shell can reach (plain `pub`; a method of a `pub trait`; a `pub` field), every
+  generic bound (angle brackets, `where`, the `impl` block around a method) and every `impl Trait` argument is
+  `Copy`, `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate; `Clone`, `PartialEq`, `Eq`,
+  `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into` and every other trait fail unless the
+  allowlist names the item. Private and `pub(crate)` items may carry any bound, a type parameter with no bound
+  is not checked, and an `impl` of a trait for a type is not checked.
+- **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer in the signature of a reachable item (OA-TRC-245),
+  in a `pub` field of a `pub` struct or union, in the body of a `pub enum` or `pub type`, or by naming a type
+  alias of the same crate (private or not) whose body holds one, fail unless the allowlist names the item.
+  Private and `pub(crate)` items, and bodies, may use closures, `dyn` and fn pointers.
 - **OA-TRC-247** `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign` are banned in core code (`oa-math`
   excepted), method or path, and so is `signum` on a float (an integer's `signum` is not seen); the failure names
   `oa_math::cmp_canon_f64`/`_f32`, `is_sign_negative_canon_f64`/`_f32` and `copysign_canon_f64`/`_f32`, which

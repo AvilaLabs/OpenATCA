@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 mod boundary;
 mod floats;
 mod harden;
-pub use boundary::{module_visibility, sealed_traits, FIXED_BOUNDS};
+pub use boundary::{callback_aliases, module_visibility, sealed_traits, FIXED_BOUNDS};
 pub use floats::FloatFacts;
 pub use harden::{
-    callback_sigs, count_float_calls, parse_budget, parse_callbacks, scan_shell, CallbackEntry,
-    CallbackSig, CALLBACK_ALLOWLIST, FLOAT_BUDGET,
+    count_float_calls, parse_budget, parse_callbacks, scan_shell, CallbackEntry, CallbackSig,
+    CALLBACK_ALLOWLIST, FLOAT_BUDGET,
 };
 
 /// The committed list of crates allowed to be `unsplit`, relative to the workspace root. It must
@@ -1083,6 +1083,9 @@ pub struct Ctx<'a> {
     /// Names of the traits that seal them (`Sealed` in `sealed::Sealed`): they are not re-exported
     /// and not implemented for a bare type parameter.
     pub sealing: &'a BTreeSet<String>,
+    /// Names of the type aliases of this crate whose body holds an `Fn*`, `dyn` or `fn(..)`: a
+    /// reachable signature that names one hands behaviour in (B5).
+    pub cb_types: &'a BTreeSet<String>,
     /// Class of every workspace crate by name.
     pub classes: &'a BTreeMap<String, Class>,
     /// Identifier used in source -> workspace crate it names (own name, dependency keys).
@@ -1549,11 +1552,7 @@ pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
         hits,
         test_mods: st.test_mods,
         whole_file: st.whole_file,
-        callbacks: {
-            let mut cbs = callback_sigs(src);
-            cbs.extend(boundary::extra_sigs(src, ctx));
-            cbs
-        },
+        callbacks: boundary::extra_sigs(src, ctx),
     }
 }
 
@@ -2462,6 +2461,10 @@ fn check_member(
         }
         core_types.extend(harden::defined_types(text));
     }
+    let cb_types: BTreeSet<String> = texts
+        .iter()
+        .flat_map(|(_, text)| boundary::callback_aliases(text))
+        .collect();
     let mut scans = Vec::new();
     let empty = BTreeSet::new();
     let no_private = &w.private;
@@ -2475,6 +2478,7 @@ fn check_member(
             private_mods: no_private.get(name.as_str()).unwrap_or(&empty),
             sealed: w.sealed,
             sealing: w.sealing,
+            cb_types: &cb_types,
             depth: module_depth(&src, f),
             classes: w.classes,
             aliases: &aliases,

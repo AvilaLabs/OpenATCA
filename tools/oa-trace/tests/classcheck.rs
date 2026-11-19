@@ -139,6 +139,7 @@ fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck:
         .keys()
         .map(|n| (n.replace('-', "_"), n.clone()))
         .collect();
+    let cb_types = oa_trace::classcheck::callback_aliases(src);
     scan_source(
         src,
         &Ctx {
@@ -150,6 +151,7 @@ fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck:
             private_mods: &BTreeSet::new(),
             sealed: &BTreeSet::new(),
             sealing: &BTreeSet::new(),
+            cb_types: &cb_types,
             depth: 1,
             classes: &classes,
             aliases: &aliases,
@@ -1792,13 +1794,16 @@ fn addresses_platform_sizes_and_built_format_strings_are_banned_in_core() {
 fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
     let sigs = [
         ("f", "pub fn f(g: impl Fn(u8) -> u8) -> u8 { g(1) }"),
-        ("h", "pub fn h<T: Copy>(x: T) -> T { x }"),
+        ("h", "pub fn h<T: Ord>(v: &mut [T]) { let _ = v; }"),
         (
             "d",
             "pub fn d(x: &dyn core::fmt::Debug) -> usize { let _ = x; 0 }",
         ),
         ("w", "pub fn w<T>(x: T) -> T where T: Clone { x }"),
-        ("p", "pub(crate) fn p(g: impl FnMut()) { let _ = g; }"),
+        (
+            "p",
+            "type G = Box<dyn FnMut()>;\npub fn p(g: G) { let _ = g; }",
+        ),
         ("b", "pub fn b(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }"),
         ("c", "pub const fn c<F: Fn()>(g: F) { let _ = g; }"),
     ];
@@ -1819,16 +1824,14 @@ fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
         );
         assert!(ws.failures().is_empty(), "{sig}: {:#?}", ws.failures());
     }
-    // not boundaries: a private fn, a plain generic, an `impl` in return position, a method
-    // without a bound in a type's impl
+    // not boundaries: a plain generic, a `Copy` or `Sized` bound, an `impl` in return position,
+    // a method without a bound in a type's impl, and anything the shell cannot name: a private
+    // or `pub(crate)` fn may take closures, `impl Iterator`, `impl Into` and any bound
     let ws = core_ws(
         "c1",
-        "pub fn r<T>(x: T) -> T { x }\npub fn s() -> impl Iterator<Item = u8> { core::iter::empty() }\npub struct S;\nimpl S { pub fn m(&self) -> u8 { 0 } }\n",
+        "pub fn r<T>(x: T) -> T { x }\npub fn s() -> impl Iterator<Item = u8> { core::iter::empty() }\npub struct S;\nimpl S { pub fn m(&self) -> u8 { 0 } }\npub fn h<T: Copy>(x: T) -> T { x }\npub fn z<T: Copy + ?Sized>(x: &T) -> usize { 0 }\npub(crate) fn p(g: impl FnMut()) { let _ = g; }\nfn q(g: impl Fn()) { g() }\nfn i(x: impl Iterator<Item = u8>, y: impl Into<u8>) {}\nfn o<T: Ord>(v: &mut [T]) { let _ = v; }\ntype Cb = Box<dyn Fn()>;\nfn u(f: Cb) { f() }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
-    // a private fn is a boundary too since OA-TRC-246: the closure parameter is listed
-    let ws = core_ws("c1b", "fn q(g: impl Fn()) { g() }\n");
-    assert!(has(&ws.failures(), "q: B5"), "{:#?}", ws.failures());
     // a method of an impl block is a signature too
     let ws = core_ws(
         "c2",
@@ -2078,8 +2081,8 @@ fn callbacks_through_impl_bounds_fn_pointers_and_struct_fields_need_the_allowlis
         ("run", "pub fn run(f: &fn()) {}\n"),
         ("run", "pub fn run() -> fn() { || () }\n"),
         ("S", "pub struct S { pub cb: fn(u8) }\n"),
-        ("S", "pub struct S { cb: Box<dyn FnMut()> }\n"),
-        ("S", "pub struct S(Box<dyn Fn()>);\n"),
+        ("S", "pub struct S { pub cb: Box<dyn FnMut()> }\n"),
+        ("S", "pub struct S(pub Box<dyn Fn()>);\n"),
         ("E", "pub enum E { A(fn()), B }\n"),
         ("T", "pub type T = fn(u8) -> u8;\n"),
     ] {
@@ -2108,11 +2111,11 @@ fn callbacks_through_impl_bounds_fn_pointers_and_struct_fields_need_the_allowlis
             .collect();
         assert!(left.is_empty(), "{src}: {left:#?}");
     }
-    // data-only items and an impl without bounds are not boundaries (a generic that is not stored
-    // in a field of a pub type is not either)
+    // data-only items and an impl without bounds are not boundaries, nor is a callback in a
+    // private field or an unbounded parameter stored in a pub type (core cannot call into it)
     let ws = core_ws(
         "z2",
-        "pub struct S { pub a: u8, pub f: f64 }\npub enum E { A(u8) }\npub type T = u32;\npub struct W<F: Copy>(F);\nimpl W<u8> { pub fn get(&self) -> u8 { 0 } }\n",
+        "pub struct S { pub a: u8, pub f: f64 }\npub enum E { A(u8) }\npub type T = u32;\npub struct W<F: Copy>(F);\nimpl W<u8> { pub fn get(&self) -> u8 { 0 } }\npub struct P { cb: Box<dyn FnMut()> }\npub struct Q(Box<dyn Fn()>);\npub struct U<T>(T);\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
@@ -2315,33 +2318,42 @@ fn a_pub_trait_in_core_is_sealed_or_on_the_reviewed_list() {
 
 // REQ: OA-TRC-245
 #[test]
-fn a_core_generic_is_bounded_only_by_std_markers_or_sealed_traits() {
-    // planted, each in a private item (OA-TRC-235 reads only the `pub fn`s)
+fn a_reachable_generic_is_bounded_only_by_copy_sized_or_sealed_traits() {
+    // planted, each in an item the shell can name (plain `pub`)
     for (name, src) in [
-        ("f", "fn f<T: Iterator<Item = u8>>(x: T) -> u8 { 0 }\n"),
-        ("f", "fn f<T>(x: T) -> u8 where T: Into<u8> { x.into() }\n"),
-        ("f", "fn f<T: Copy + AsRef<[u8]>>(x: T) -> u8 { 0 }\n"),
-        ("f", "fn f(x: impl Into<u8>) -> u8 { x.into() }\n"),
+        ("f", "pub fn f<T: Iterator<Item = u8>>(x: T) -> u8 { 0 }\n"),
         (
             "f",
-            "fn f<T>(x: T) -> u8 where for<'a> &'a T: Into<u8> { 0 }\n",
+            "pub fn f<T>(x: T) -> u8 where T: Into<u8> { x.into() }\n",
         ),
-        ("S", "struct S<T: AsRef<u8>>(T);\n"),
-        ("E", "enum E<T> where T: Iterator { A(T) }\n"),
+        ("f", "pub fn f<T: Copy + AsRef<[u8]>>(x: T) -> u8 { 0 }\n"),
+        ("f", "pub fn f(x: impl Into<u8>) -> u8 { x.into() }\n"),
+        ("f", "pub fn f<T: Ord>(v: &mut [T]) { v.sort(); }\n"),
+        ("f", "pub fn f<T: Eq>(x: T) {}\n"),
+        ("f", "pub fn f<T: Clone>(x: T) {}\n"),
+        ("f", "pub fn f<T: Default>() -> T { T::default() }\n"),
+        ("f", "pub fn f<T: core::fmt::Debug>(x: T) {}\n"),
+        ("f", "pub fn f<T: core::hash::Hash>(x: T) {}\n"),
+        ("f", "pub fn f<T: PartialOrd>(x: T) {}\n"),
         (
-            "impl@S",
-            "struct S<T>(T);\nimpl<T: Iterator> S<T> { fn m(&self) {} }\n",
+            "f",
+            "pub fn f<T>(x: T) -> u8 where for<'a> &'a T: Into<u8> { 0 }\n",
         ),
-        (
-            "impl@S",
-            "struct S<T>(T);\nimpl<T> S<T> where T: Into<u8> { fn m(&self) {} }\n",
-        ),
-        ("m", "trait Tr { fn m<X: Iterator>(&self, x: X); }\n"),
+        ("S", "pub struct S<T: AsRef<u8>>(T);\n"),
+        ("E", "pub enum E<T> where T: Iterator { A(T) }\n"),
         (
             "m",
-            "struct S;\nimpl S { fn m<X: AsRef<u8>>(&self, x: X) {} }\n",
+            "pub struct S<T>(T);\nimpl<T: Iterator> S<T> { pub fn m(&self) {} }\n",
         ),
-        ("T", "type T<X: Iterator> = Vec<X>;\n"),
+        (
+            "m",
+            "pub struct S<T>(T);\nimpl<T> S<T> where T: Into<u8> { pub fn m(&self) {} }\n",
+        ),
+        (
+            "m",
+            "pub struct S;\nimpl S { pub fn m<X: AsRef<u8>>(&self, x: X) {} }\n",
+        ),
+        ("T", "pub type T<X: Iterator> = Vec<X>;\n"),
     ] {
         let ws = core_ws("g0", src);
         assert!(
@@ -2356,105 +2368,99 @@ fn a_core_generic_is_bounded_only_by_std_markers_or_sealed_traits() {
             CALLBACKS,
             &format!("fx-a lib.rs::{name} reason: reviewed, the bound is a pure trait\n"),
         );
-        // the allowlist covers the flagged name; a struct and its impl are separate names
+        // the allowlist covers the flagged name
         let left = ws.failures();
         assert!(
             left.iter().all(|f| !f.contains(&format!("{name}: B5"))),
             "{src}: {left:#?}"
         );
     }
-    // clean: the fixed list, a `?Sized`, a lifetime, a const generic, a path, a sealed trait
+    // a method of a `pub trait` is reachable
+    let ws = core_ws(
+        "g0t",
+        &format!("{SEALED}pub trait Tr: sealed::Sealed {{ fn m<X: Iterator>(&self, x: X); }}\n"),
+    );
+    assert!(has(&ws.failures(), "m: B5"), "{:#?}", ws.failures());
+    // clean: `Copy`, `Sized`, `?Sized`, lifetimes, const generics, a sealed trait, an unbounded
+    // parameter, and any bound at all on an item the shell cannot name
     for (tag, src) in [
-        ("g1", "fn f<T: Copy + Clone + core::fmt::Debug + PartialEq + Eq + PartialOrd + Ord + Default + Sized>(x: T) -> T { x }\n".to_string()),
-        ("g2", "fn f<T: ?Sized>(x: &T) -> usize { 0 }\nfn g<'a, const N: usize, T: Copy + 'a>(x: &'a [T; N]) -> usize { N }\n".to_string()),
-        ("g3", "fn f<T>(x: T) -> T where T: Copy, u8: Copy { x }\n".to_string()),
-        ("g4", "struct S<T: Ord>(T);\nimpl<T: Ord> S<T> { fn m(&self) {} }\n".to_string()),
-        ("g5", format!("{SEALED}pub trait Sh: sealed::Sealed {{}}\nfn f<T: Sh>(x: &T) -> usize {{ 0 }}\nfn g<T>(x: &T) where T: Sh + Copy {{}}\n")),
-        ("g6", "fn f(x: impl Copy + Clone) -> u8 { 0 }\n".to_string()),
-        ("g7", "#[cfg(test)]\nmod t { fn f<T: Iterator>(x: T) {} }\n".to_string()),
+        ("g1", "pub fn f<T: Copy + Sized>(x: T) -> T { x }\n".to_string()),
+        ("g2", "pub fn f<T: ?Sized>(x: &T) -> usize { 0 }\npub fn g<'a, const N: usize, T: Copy + 'a>(x: &'a [T; N]) -> usize { N }\n".to_string()),
+        ("g3", "pub fn f<T>(x: T) -> T where T: Copy, u8: Copy { x }\n".to_string()),
+        ("g4", "struct S<T: Ord>(T);\nimpl<T: Ord> S<T> { fn m(&self) {} }\npub(crate) fn p<T: Ord + Clone>(x: T) {}\n".to_string()),
+        ("g5", format!("{SEALED}pub trait Sh: sealed::Sealed {{}}\npub fn f<T: Sh>(x: &T) -> usize {{ 0 }}\npub fn g<T>(x: &T) where T: Sh + Copy {{}}\n")),
+        ("g6", "pub fn f(x: impl Copy + Sized) -> u8 { 0 }\nfn g(x: impl Clone + Iterator) {}\n".to_string()),
+        ("g7", "#[cfg(test)]\nmod t { pub fn f<T: Iterator>(x: T) {} }\n".to_string()),
+        ("g8", "pub struct W<T>(T);\npub enum E<T> { A(T), B }\npub struct V<T> { pub x: T }\n".to_string()),
+        ("g9", "pub struct W<T: Copy>(T);\n".to_string()),
+        ("ga", "impl PartialOrd for X { fn partial_cmp(&self, o: &X) -> Option<core::cmp::Ordering> { None } }\n".to_string()),
     ] {
         let ws = core_ws(tag, &src);
         assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
     }
-    // an unbounded parameter stored in a field of a pub type fails; bounded, private and
-    // unstored ones do not
-    for src in [
-        "pub struct W<T>(T);\n",
-        "pub struct W<T> { pub x: T }\n",
-        "pub enum E<T> { A(T), B }\n",
-        "pub union U<T: Copy> { a: T, b: u8 }\npub struct W<T> { x: [T; 2] }\n",
+}
+
+// REQ: OA-TRC-246
+#[test]
+fn a_function_pointer_fn_trait_or_dyn_in_a_reachable_item_needs_the_allowlist() {
+    for (name, src) in [
+        ("q", "pub fn q(g: impl Fn(u8) -> u8) -> u8 { g(1) }\n"),
+        ("q", "pub fn q(g: &mut dyn FnMut()) { g() }\n"),
+        ("q", "pub fn q(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }\n"),
+        ("q", "pub fn q(d: &dyn core::fmt::Debug) {}\n"),
+        ("q", "pub fn q(f: fn(u8) -> u8) -> u8 { f(1) }\n"),
+        // a private alias that holds one makes every reachable signature that names it fail
+        (
+            "q",
+            "type F = Box<dyn Fn(u8) -> u8>;\npub fn q(f: F) -> u8 { f(1) }\n",
+        ),
+        (
+            "q",
+            "type F = fn(u8) -> u8;\npub fn q() -> Option<F> { None }\n",
+        ),
+        ("S", "type F = fn(u8) -> u8;\npub struct S { pub f: F }\n"),
+        (
+            "m",
+            "pub struct S;\nimpl S { pub fn m(&self, f: &dyn Fn()) { f() } }\n",
+        ),
+        (
+            "x",
+            "pub struct S;\nimpl dyn core::fmt::Debug { pub fn x(&self) {} }\n",
+        ),
+        ("F", "pub type F = fn(u8) -> u8;\n"),
+        ("F", "pub type F = Box<dyn Fn(u8) -> u8>;\n"),
+        ("S", "pub struct S { pub cb: fn(u8) }\n"),
     ] {
-        let ws = core_ws("g8", src);
+        let ws = core_ws("f0", src);
         assert!(
             has(
                 &ws.failures(),
-                "B5: core code lets the shell hand in behaviour (the unbounded type parameter"
+                &format!("{name}: B5: core code lets the shell hand in behaviour")
             ),
             "{src}: {:#?}",
             ws.failures()
         );
     }
-    for (tag, src) in [
-        ("g9", "pub struct W<T: Copy>(T);\n"),
-        ("ga", "struct W<T>(T);\n"),
-        ("gb", "pub(crate) struct W<T>(T);\n"),
-        ("gc", "pub struct W<T>(T) where T: Clone;\n"),
-    ] {
-        let ws = core_ws(tag, src);
-        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
-    }
-    ws_allow_struct();
-}
-
-fn ws_allow_struct() {
-    let ws = core_ws("gd", "pub struct W<T>(T);\n");
-    ws.put(
-        CALLBACKS,
-        "fx-a lib.rs::W reason: reviewed, only core types are stored\n",
+    // a method declared in a `pub trait`
+    let ws = core_ws(
+        "f0t",
+        &format!("{SEALED}pub trait Tr: sealed::Sealed {{ fn m(&self, f: fn(u8) -> u8); }}\n"),
     );
-    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
-}
-
-// REQ: OA-TRC-246
-#[test]
-fn a_function_pointer_fn_trait_or_dyn_anywhere_in_core_needs_the_allowlist() {
-    for (name, src) in [
-        ("q", "fn q(g: impl Fn(u8) -> u8) -> u8 { g(1) }\n"),
-        ("q", "fn q(g: &mut dyn FnMut()) { g() }\n"),
-        ("q", "fn q(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }\n"),
-        ("q", "fn q(d: &dyn core::fmt::Debug) {}\n"),
-        ("q", "fn q(f: fn(u8) -> u8) -> u8 { f(1) }\n"),
-        ("q", "fn q() { let f: fn(u8) -> u8 = h; let _ = f; }\nfn h(x: u8) -> u8 { x }\n"),
-        ("m", "trait Tr { fn m(&self, f: fn(u8) -> u8); }\n"),
-        ("m", "struct S;\ntrait Tr { fn m(&self, f: &dyn Fn()); }\nimpl Tr for S { fn m(&self, f: &dyn Fn()) { f() } }\n"),
-        ("F", "type F = fn(u8) -> u8;\n"),
-        ("F", "type F = Box<dyn Fn(u8) -> u8>;\n"),
-        ("T", "static T: [fn(); 1] = [n];\nfn n() {}\n"),
-        ("S", "struct S { cb: fn(u8) }\n"),
-        ("impl@S", "struct S;\nimpl Iterator for S where S: Sized { type Item = u8; fn next(&mut self) -> Option<u8> { None } }\nimpl dyn core::fmt::Debug {}\n"),
-    ] {
-        let ws = core_ws("f0", src);
-        // the `impl dyn` case is named after its self type: look for any B5 hit then
-        let needle = if name.starts_with("impl@") {
-            "B5: core code lets the shell hand in behaviour (`dyn` in core code".to_string()
-        } else {
-            format!("{name}: B5: core code lets the shell hand in behaviour")
-        };
-        assert!(has(&ws.failures(), &needle), "{src}: {:#?}", ws.failures());
-    }
+    assert!(has(&ws.failures(), "m: B5"), "{:#?}", ws.failures());
     // the allowlist line is by the name of the item that holds it, and covers all of its hits
-    let ws = core_ws("f1", "fn q(g: &dyn Fn(u8) -> u8) -> u8 { g(1) }\n");
+    let ws = core_ws("f1", "pub fn q(g: &dyn Fn(u8) -> u8) -> u8 { g(1) }\n");
     assert!(!ws.failures().is_empty());
     ws.put(
         CALLBACKS,
-        "fx-a lib.rs::q reason: reviewed, a private helper called with a pure closure\n",
+        "fx-a lib.rs::q reason: reviewed, called with a pure closure only\n",
     );
     let left = ws.failures();
     assert!(left.is_empty(), "{left:#?}");
-    // clean: closures in a body, a `fn` item, `impl Trait` in return position, test code
+    // clean: private items use closures, `dyn`, fn pointers and aliases of them freely; closures
+    // in a body, `impl Trait` in return position, a `pub(crate)` fn, test code
     let ws = core_ws(
         "f2",
-        "pub fn s(v: &[u8]) -> u8 { v.iter().map(|x| x.wrapping_add(1)).fold(0, |a, b| a ^ b) }\nfn h(x: u8) -> u8 { x }\npub fn r() -> impl Iterator<Item = u8> { core::iter::empty() }\n#[cfg(test)]\nmod t { fn q(g: &dyn Fn()) { g() } }\n",
+        "pub fn s(v: &[u8]) -> u8 { v.iter().map(|x| x.wrapping_add(1)).fold(0, |a, b| a ^ b) }\nfn h(x: u8) -> u8 { x }\npub fn r() -> impl Iterator<Item = u8> { core::iter::empty() }\n#[cfg(test)]\nmod t { pub fn q(g: &dyn Fn()) { g() } }\nfn p(g: impl Fn(u8) -> u8) -> u8 { g(1) }\nfn d(g: &mut dyn FnMut()) { g() }\nfn fp(f: fn(u8) -> u8) -> u8 { f(1) }\ntype F = Box<dyn Fn(u8) -> u8>;\nfn a(f: F) -> u8 { f(1) }\nstruct S { cb: fn(u8) }\npub struct P { cb: Box<dyn FnMut()> }\nstatic T: [fn(); 1] = [n];\nfn n() {}\npub(crate) fn pc(g: impl Fn()) { g() }\ntrait Tr { fn m(&self, f: fn(u8) -> u8); }\nimpl dyn core::fmt::Debug { fn x(&self) {} }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
