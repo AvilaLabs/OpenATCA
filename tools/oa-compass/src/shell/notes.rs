@@ -13,13 +13,13 @@ use super::run::{ClipInfo, InputsMode};
 use crate::core::adsb::{
     ADSB_NOTES, ADSB_NOTE_NAMES, ANOTE_CATEGORY_ABSENT, ANOTE_CATEGORY_NO_CODE, ANOTE_FL_ABSENT,
     ANOTE_FL_RANGE, ANOTE_HEIGHT_ABSENT, ANOTE_HEIGHT_RANGE, ANOTE_IDENT_ABSENT, ANOTE_IDENT_CHARS,
-    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_RATE_ABSENT,
-    ANOTE_RATE_RANGE, ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
+    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_RATE_ABSENT, ANOTE_RATE_RANGE,
+    ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
 };
 use crate::core::convert::{
-    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_QNH, NOTE_ALT_RANGE, NOTE_CLIMB_ABSENT,
-    NOTE_CLIMB_RANGE, NOTE_IDENT, NOTE_NAMES, NOTE_SERVICE, NOTE_VEL_ABSENT, NOTE_VEL_RANGE,
-    REFUSAL_NAMES,
+    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_QNH, NOTE_ALT_RANGE,
+    NOTE_CLIMB_ABSENT, NOTE_CLIMB_RANGE, NOTE_IDENT, NOTE_NAMES, NOTE_SERVICE, NOTE_VEL_ABSENT,
+    NOTE_VEL_RANGE, REFUSAL_NAMES,
 };
 
 /// The data source of the OpenATCA tracker output.
@@ -116,18 +116,37 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
         let _ = writeln!(out, "    {name}: {present}");
     };
     item("I010 data source", rows);
-    item("I015 service identification (1)", if is_oa { rows - n(NOTE_SERVICE).min(rows) } else { 0 });
+    item(
+        "I015 service identification (1)",
+        if is_oa {
+            rows - n(NOTE_SERVICE).min(rows)
+        } else {
+            0
+        },
+    );
     item("I070 time of track information", rows);
     item("I105 position in WGS-84", rows);
-    item("I185 velocity", rows - (n(NOTE_VEL_ABSENT) + n(NOTE_VEL_RANGE)).min(rows));
+    item(
+        "I185 velocity",
+        rows - (n(NOTE_VEL_ABSENT) + n(NOTE_VEL_RANGE)).min(rows),
+    );
     item("I380 target address", rows - n(NOTE_ADDRESS).min(rows));
     item("I380 target identification", rows - n(NOTE_IDENT).min(rows));
     item("I040 track number", rows);
-    item("I080 track status (first octet always; coasting adds CST)", rows);
+    item(
+        "I080 track status (first octet always; coasting adds CST)",
+        rows,
+    );
     let qnh = n(NOTE_ALT_QNH);
-    item(alt_name, rows - (n(NOTE_ALT_ABSENT) + n(NOTE_ALT_RANGE) + qnh).min(rows));
+    item(
+        alt_name,
+        rows - (n(NOTE_ALT_ABSENT) + n(NOTE_ALT_RANGE) + qnh).min(rows),
+    );
     if !is_oa {
-        item("I135 altitude with QNH = 1 (ERAM under 18 000 ft, inferred)", qnh);
+        item(
+            "I135 altitude with QNH = 1 (ERAM under 18 000 ft, inferred)",
+            qnh,
+        );
     }
     item(
         "I220 rate of climb/descent",
@@ -137,12 +156,18 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
             0
         },
     );
-    item("I500 accuracies, APW only", rows - n(NOTE_ACCURACY_ABSENT).min(rows));
+    item(
+        "I500 accuracies, APW only",
+        rows - n(NOTE_ACCURACY_ABSENT).min(rows),
+    );
     let _ = writeln!(
         out,
         "  never written: I060 Mode 3/A, I100, I130, I200, I290, I295, I210, I245, I340 and the rest"
     );
-    let _ = writeln!(out, "  omitted or not encodable, by reason (rows of {rows}):");
+    let _ = writeln!(
+        out,
+        "  omitted or not encodable, by reason (rows of {rows}):"
+    );
     for i in 0..NOTES {
         if let (Some(name), c) = (NOTE_NAMES.get(i), n(i)) {
             if c > 0 {
@@ -218,7 +243,10 @@ pub fn readme_with(
         );
     }
     let _ = writeln!(o, "\nFormat: ASTERIX category 062 Edition 1.21 (EUROCONTROL-SPEC-0149-9), raw data blocks (CAT, LEN, records), no framing, records in time order, up to 256 records per block.");
-    let _ = writeln!(o, "Encoder: oa-asterix of this repository, written from the specification; build {build}.");
+    let _ = writeln!(
+        o,
+        "Encoder: oa-asterix of this repository, written from the specification; build {build}."
+    );
     let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2). SAC 255 is a test range chosen by this export, not an allocation (OpenATCA 255/11, ERAM 255/12, ADS-B 255/13; 255/1 is left free because COMPASS uses it for its own reference): the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.");
     let _ = writeln!(o, "Import openatca.ast and eram.ast as ASTERIX CAT062 and, if present, adsb.ast as ASTERIX CAT021 (Ed 2.4), with the UTC Day above; nothing in the files needs a time-of-day override.\n");
     let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: CNF = 0 (confirmed: the tracker publishes confirmed tracks only); MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor, and MON = 0 for ERAM because it fuses radar and ADS-B; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.\n");
@@ -226,7 +254,7 @@ pub fn readme_with(
     let _ = writeln!(o, "ERAM duplicates: samples are compared on latitude, longitude, altitude, velocity east and north and the coast flag; a sample with the same flight, position time and those six values as an earlier one is a duplicate and is dropped (a row differing only in receive time is a duplicate). Same flight and position time with any difference are both kept and counted.\n");
     match mode {
         Some(InputsMode::All) => {
-            let _ = writeln!(o, "OpenATCA inputs: ALL (--inputs all). The tracker was fed every ADS-B report of the day's clip, as ERAM gets all its inputs, so the two files are like-for-like in what they were given (ERAM additionally has radar, and ADS-B reports from its own receivers, which OpenATCA does not). Because every report was used, no half of the clip is independent of this OpenATCA output: a reference built from the same ADS-B clip is not independent truth for it.\n");
+            let _ = writeln!(o, "OpenATCA inputs: ALL (--inputs all). The tracker's ADS-B adapter was offered every ADS-B report of the day's clip (it keeps those that pass its quality gates, counted below), as ERAM gets all its inputs, so the two files are like-for-like in what they were given (ERAM additionally has radar, and ADS-B reports from its own receivers, which OpenATCA does not). Because every report was offered to it, no half of the clip is independent of this OpenATCA output: a reference built from the same ADS-B clip is not independent truth for it.\n");
         }
         Some(InputsMode::Split) => {
             let _ = writeln!(o, "OpenATCA inputs: SPLIT (--inputs split). The tracker was fed set A only, half of the ADS-B reports (the scorer's split); ERAM got all its inputs, so the two files are NOT like-for-like in what they were given. Set B, the other half, is the only half independent of this OpenATCA output: a reference built from set A would be leaked truth.\n");
@@ -257,9 +285,13 @@ pub fn readme_with(
 /// The duplicate and conflict handling of the clip, with its counts.
 fn dedup_text(c: &ClipInfo, mode: Option<InputsMode>) -> String {
     let st = &c.split;
-    let halving = if mode == Some(InputsMode::Split) { "on (--inputs split)" } else { "off (--inputs all)" };
+    let halving = if mode == Some(InputsMode::Split) {
+        "on (--inputs split)"
+    } else {
+        "off (--inputs all)"
+    };
     format!(
-        "ADS-B reports before the tracker: the clip's reports go through the same function the scorer's split uses, oa-track's split_reports_with, with the halving {halving}. It removes copies (a report with the address, time and content of one already kept), puts the quality fields through the same carry-forward handling, and keeps every report of different content at one (address, time): the conflict rule is KEEP ALL such reports (in one fixed order), also with the halving off, because nothing says which one is right. Counts: {} reports read, {} aircraft, {} duplicate reports removed, {} conflicting (address, time) groups holding {} reports, {} unreadable rows left out; {} reports fed to the tracker and to adsb.ast, {} not fed.",
+        "ADS-B reports before the tracker: the clip's reports go through the same function the scorer's split uses, oa-track's split_reports_with, with the halving {halving}. It removes copies (a report with the address, time and content of one already kept), puts the quality fields through the same carry-forward handling, and keeps every report of different content at one (address, time): the conflict rule is KEEP ALL such reports (in one fixed order), also with the halving off, because nothing says which one is right. Counts: {} reports read, {} aircraft, {} duplicate reports removed, {} conflicting (address, time) groups holding {} reports, {} unreadable rows left out; {} reports offered to the tracker's adapter and to adsb.ast, {} not offered.",
         st.rows_in, st.aircraft, st.duplicates_removed, st.conflict_groups, st.conflict_rows, st.rows_invalid, c.fed, c.left
     )
 }
@@ -311,20 +343,50 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) 
     item("I040 target report descriptor, primary and first extension (ATP, ARC 2 unknown, GBS, CL 2 no information)", rows);
     item("I073 time of message reception of position", rows);
     item("I080 target address", rows);
-    item("I131 position in WGS-84, high resolution (I130 is not sent)", rows);
-    item("I145 flight level", less(n(ANOTE_FL_ABSENT) + n(ANOTE_FL_RANGE)));
-    item("I140 geometric height", less(n(ANOTE_HEIGHT_ABSENT) + n(ANOTE_HEIGHT_RANGE)));
-    item("I155 barometric or I157 geometric vertical rate (as the report says)", less(n(ANOTE_RATE_ABSENT) + n(ANOTE_RATE_RANGE)));
-    item("I160 airborne ground vector (none on the ground)", less(n(ANOTE_VECTOR_ABSENT) + n(ANOTE_VECTOR_RANGE) + n(ANOTE_VECTOR_GROUND)));
-    item("I170 target identification", less(n(ANOTE_IDENT_ABSENT) + n(ANOTE_IDENT_CHARS)));
-    item("I020 emitter category", less(n(ANOTE_CATEGORY_ABSENT) + n(ANOTE_CATEGORY_NO_CODE)));
-    item("I090 quality indicators (in every record; the extensions only when a bit in them is 1)", rows);
-    item("I210 MOPS version", less(n(ANOTE_MOPS_ABSENT) + n(ANOTE_MOPS_VERSION)));
+    item(
+        "I131 position in WGS-84, high resolution (I130 is not sent)",
+        rows,
+    );
+    item(
+        "I145 flight level",
+        less(n(ANOTE_FL_ABSENT) + n(ANOTE_FL_RANGE)),
+    );
+    item(
+        "I140 geometric height",
+        less(n(ANOTE_HEIGHT_ABSENT) + n(ANOTE_HEIGHT_RANGE)),
+    );
+    item(
+        "I155 barometric or I157 geometric vertical rate (as the report says)",
+        less(n(ANOTE_RATE_ABSENT) + n(ANOTE_RATE_RANGE)),
+    );
+    item(
+        "I160 airborne ground vector (none on the ground)",
+        less(n(ANOTE_VECTOR_ABSENT) + n(ANOTE_VECTOR_RANGE) + n(ANOTE_VECTOR_GROUND)),
+    );
+    item(
+        "I170 target identification",
+        less(n(ANOTE_IDENT_ABSENT) + n(ANOTE_IDENT_CHARS)),
+    );
+    item(
+        "I020 emitter category",
+        less(n(ANOTE_CATEGORY_ABSENT) + n(ANOTE_CATEGORY_NO_CODE)),
+    );
+    item(
+        "I090 quality indicators (in every record; the extensions only when a bit in them is 1)",
+        rows,
+    );
+    item(
+        "I210 MOPS version",
+        less(n(ANOTE_MOPS_ABSENT) + n(ANOTE_MOPS_VERSION)),
+    );
     let _ = writeln!(
         out,
         "  not encoded although the source has them (outside the requested item list): I070 Mode 3/A code, I150/I151 air speed, I152 magnetic heading, I230 roll angle, I165 track angle rate, I200 target status; and I130, I072, I074, I076, I077, I015, I146, I148, I110 and the rest, which the source does not have"
     );
-    let _ = writeln!(out, "  omitted or not encodable, by reason (records of {rows}):");
+    let _ = writeln!(
+        out,
+        "  omitted or not encodable, by reason (records of {rows}):"
+    );
     for i in 0..ADSB_NOTES {
         if let (Some(name), c) = (ADSB_NOTE_NAMES.get(i), n(i)) {
             if c > 0 {
@@ -366,7 +428,7 @@ fn tracker_relation(clip: Option<&ClipInfo>, written: u64) -> String {
         let g = &c.gate;
         let _ = write!(
             t,
-            " Of the {} reports offered to the tracker, {} became measurements (the \"measurements offered to the tracker\" total) and {} were dropped by its adapter:",
+            " Of the {} reports of the whole clip offered to the tracker, {} became measurements (the \"measurements offered to the tracker\" total) and {} were dropped by its adapter:",
             g.rows_in,
             g.passed,
             g.rows_in.saturating_sub(g.passed)
@@ -387,8 +449,18 @@ fn adsb_run_lines(out: &mut String, report: &AdsbReport) {
     let _ = writeln!(out, "  run totals for ADS-B over all days:");
     let total: u64 = report.days.iter().map(|d| d.stats.records).sum();
     let _ = writeln!(out, "    records written: {total}");
-    for (i, name) in ["position beyond 90 / 180 degrees", "time does not fit a day"].iter().enumerate() {
-        let _ = writeln!(out, "    reports refused, {name}: {}", report.refused.get(i).copied().unwrap_or(0));
+    for (i, name) in [
+        "position beyond 90 / 180 degrees",
+        "time does not fit a day",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let _ = writeln!(
+            out,
+            "    reports refused, {name}: {}",
+            report.refused.get(i).copied().unwrap_or(0)
+        );
     }
     for (label, v) in &report.counts {
         let _ = writeln!(out, "    {label}: {v}");

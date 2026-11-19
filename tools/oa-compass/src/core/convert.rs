@@ -359,7 +359,11 @@ pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
         Err(false) => notes |= note_bit(NOTE_VEL_RANGE),
     }
     if r.has_alt {
-        match count_in(f64::from(r.alt_ft) / ALT_LSB_FT, ALT_MIN_COUNTS, ALT_MAX_COUNTS) {
+        match count_in(
+            f64::from(r.alt_ft) / ALT_LSB_FT,
+            ALT_MIN_COUNTS,
+            ALT_MAX_COUNTS,
+        ) {
             Some(c) => v.baro_alt = Some(c as i16),
             None => notes |= note_bit(NOTE_ALT_RANGE),
         }

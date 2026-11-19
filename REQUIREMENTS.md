@@ -4416,7 +4416,7 @@ scope.
 - **OA-CMP-013** Every finished file is read back from disk with the decoder and must hold exactly the records and
   octets written, with the right data source and time order; a truncated or altered file fails the export.
 - **OA-CMP-014** `data_sources.json` is `{"content_type":"data_sources","content_version":"0.2","data_sources":[...]}`
-  with one `Tracker` entry per system, OpenATCA (SAC 255, SIC 1) and ERAM (SAC 255, SIC 2), which parses as JSON.
+  with one `Tracker` entry per system, OpenATCA (SAC 255, SIC 11) and ERAM (SAC 255, SIC 12), and one `ADSB` entry, ADS-B (SAC 255, SIC 13), which parses as JSON.
   The SAC is a test pair of this export, stated as such in the documentation and the README.
 - **OA-CMP-015** The README states the UTC date to give at import, the SAC/SIC of each system, the items of each
   file with the rows that carry them, the rows written, every omission and note by reason with its count, the
@@ -4456,19 +4456,20 @@ scope.
   the export unless days are split, which writes one directory per day.
 - **OA-CMP-025** `--inputs all` runs the clip through `oa_track::score::split_reports_with` (the scorer's split
   function) with the halving off: copies removed, every conflicting report kept (rule stated), counts printed in
-  the README; the same reports feed the tracker and `adsb.ast`.
+  the README; the same reports are offered to the tracker's adapter and to `adsb.ast`; the tracker uses the subset
+  that passes its quality gates (OA-CMP-028).
 - **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 13, DSType "ADSB", a string of the COMPASS manual's set); the README states
   the Ed 2.4 format, how each value was made, every omission with its count, and that a reference built from
   `adsb.ast` is not independent of OpenATCA's inputs (UK-008) and that ERAM also uses ADS-B.
-- **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
-  each; 255/1 is left free because COMPASS writes its reference there, and the README says so.
-- **OA-CMP-028** I090 is in every ADS-B record: with nothing known the primary subfield at NACv 0 / NIC 0, and
-  an extension only when a bit in it is 1; NIC or NACp above 11 and NACv above 4 are not encoded and counted;
-  a missing SIL type (SILS), the unverified NIC mapping under MOPS version 2 and the GBS assertion are counted;
-  I160 is omitted on a ground report and counted; the README states that adsb.ast is a superset of what the
-  tracker was fed, with the tracker adapter's removals per reason, and keeps the independence statement (UK-008).
 - **OA-CMP-027** `oa-compass slice --in DIR --from HH:MM:SS --to HH:MM:SS --out DIR2` reads each `.ast` file with
   the decoder (CAT062 Ed 1.21, CAT021 Ed 2.4), keeps the records with I070 or I073 in [from, to), writes them
   again unchanged in verified blocks, reads each file back, copies `data_sources.json` and writes a README with
   the window, the source directory and the records in and kept per file; a window across midnight or empty, a
   category other than 21 and 62, and a damaged file are refused, leaving no partial file.
+- **OA-CMP-028** I090 is in every ADS-B record: with nothing known the primary subfield at NACv 0 / NIC 0, and
+  an extension only when a bit in it is 1; NIC or NACp above 11 and NACv above 4 are not encoded and counted;
+  a missing SIL type (SILS), the unverified NIC mapping under MOPS version 2 and the GBS assertion are counted;
+  I160 is omitted on a ground report and counted; the README states that adsb.ast is a superset of what the
+  tracker was fed, with the tracker adapter's removals per reason, and keeps the independence statement (UK-008).
+- **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
+  each; 255/1 is left free because COMPASS writes its reference there, and the README says so.

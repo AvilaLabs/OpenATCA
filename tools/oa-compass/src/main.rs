@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! `oa-compass`: writes one UTC day of OpenATCA tracker output and ERAM tracks as ASTERIX CAT062
-//! Ed 1.21, and the ADS-B reports the tracker was fed as CAT021 Ed 2.4, for OpenATS COMPASS. Shell (B3): arguments, files, the clock and stdout.
+//! Ed 1.21, and the ADS-B reports offered to the tracker's adapter (a superset of those it used) as CAT021 Ed 2.4, for OpenATS COMPASS. Shell (B3): arguments, files, the clock and stdout.
 //!
 //! ```text
 //! oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days]
@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Writes `openatca.ast` (from `--adsb`: the tracker is run on the clip as the scorer runs it) and
-//! `adsb.ast` (the reports fed to it, deduplicated by the scorer's own code),
+//! `adsb.ast` (the ADS-B reports offered to the tracker's adapter (a superset of those it used), deduplicated by the scorer's own code),
 //! `eram.ast` (from `--sfdps-dir`: the ERAM tracks the scorer reads), `data_sources.json` and
 //! `README.txt` in `<dir>`. A file holds one UTC day: rows on another day than `--date` refuse the
 //! export unless `--split-days` is given, which writes one directory per day. Only development
@@ -22,14 +22,14 @@ use std::time::Instant;
 
 use oa_bench::input::{load, FeedInput};
 use oa_compass::core::time::days_from_civil;
-use oa_compass::shell::error::{io_err, ExportError};
 use oa_compass::shell::adsb_export::{AdsbExport, AdsbFinished};
+use oa_compass::shell::error::{io_err, ExportError};
 use oa_compass::shell::export::{date_text, Finished, Layout, SystemExport};
 use oa_compass::shell::notes::{
     data_sources_json, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
-use oa_compass::shell::slice;
 use oa_compass::shell::run::{export_adsb_clip, export_eram, ClipInfo, InputsMode};
+use oa_compass::shell::slice;
 use oa_replay::FeedKind;
 
 const USAGE: &str = "usage: oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days] [--inputs split|all]";
@@ -53,8 +53,16 @@ fn git(args: &[&str]) -> Option<String> {
 /// `commit <hash>` and whether tracked files are modified.
 fn build_text() -> String {
     let commit = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
-    format!("commit {commit}{}", if dirty { " (tracked files modified)" } else { "" })
+    let dirty =
+        git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    format!(
+        "commit {commit}{}",
+        if dirty {
+            " (tracked files modified)"
+        } else {
+            ""
+        }
+    )
 }
 
 fn main() -> ExitCode {
@@ -151,7 +159,11 @@ fn run(
             let mut days: Vec<i64> = reports
                 .iter()
                 .flat_map(|r| r.days.iter().map(|d| d.day))
-                .chain(adsb_report.iter().flat_map(|r| r.days.iter().map(|d| d.day)))
+                .chain(
+                    adsb_report
+                        .iter()
+                        .flat_map(|r| r.days.iter().map(|d| d.day)),
+                )
                 .collect();
             days.sort_unstable();
             days.dedup();
@@ -239,16 +251,35 @@ fn export_all(
                 return Err(e);
             }
         };
-        eprintln!("OpenATCA done at {:.1} s: {} tick rows", t0.elapsed().as_secs_f64(), info.tick_rows);
+        eprintln!(
+            "OpenATCA done at {:.1} s: {} tick rows",
+            t0.elapsed().as_secs_f64(),
+            info.tick_rows
+        );
         for (l, v) in [
             ("ADS-B reports fed to the tracker", cinfo.fed),
-            ("ADS-B reports not fed to the tracker (the other half under --inputs split)", cinfo.left),
+            (
+                "ADS-B reports not fed to the tracker (the other half under --inputs split)",
+                cinfo.left,
+            ),
             ("measurements offered to the tracker", info.measurements),
-            ("tick rows offered (one per second per confirmed track)", info.tick_rows),
-            ("update rows not exported (tick rows only)", info.update_rows_not_exported),
+            (
+                "tick rows offered (one per second per confirmed track)",
+                info.tick_rows,
+            ),
+            (
+                "update rows not exported (tick rows only)",
+                info.update_rows_not_exported,
+            ),
             ("tick rows with O_COAST (written with CST)", info.coasting),
-            ("tick rows with O_UNCERTAIN (written; flag not representable)", info.uncertain),
-            ("tick rows with O_REACQUIRED (written; flag not representable)", info.reacquired),
+            (
+                "tick rows with O_UNCERTAIN (written; flag not representable)",
+                info.uncertain,
+            ),
+            (
+                "tick rows with O_REACQUIRED (written; flag not representable)",
+                info.reacquired,
+            ),
             ("tracker output rows lost to a full table", info.overflow),
         ] {
             ex.counts.push((l.to_string(), v));
@@ -256,14 +287,19 @@ fn export_all(
         if let Some(a) = &cinfo.adsb {
             for (l, v) in [
                 ("ADS-B reports offered to the file", a.rows_in),
-                ("reports left out: position marked stale by the source", a.stale),
+                (
+                    "reports left out: position marked stale by the source",
+                    a.stale,
+                ),
                 ("reports written", a.converted),
             ] {
                 ax.counts.push((l.to_string(), v));
             }
             for (name, v) in &a.other_sources {
-                ax.counts
-                    .push((format!("reports left out: source type {name}, not ADS-B"), *v));
+                ax.counts.push((
+                    format!("reports left out: source type {name}, not ADS-B"),
+                    *v,
+                ));
             }
         }
         let mut f = match ex.finish() {
@@ -273,7 +309,9 @@ fn export_all(
                 return Err(e);
             }
         };
-        f.report.inputs.push(format!("ADS-B clip {}", clip.display()));
+        f.report
+            .inputs
+            .push(format!("ADS-B clip {}", clip.display()));
         done.systems.push(f);
         done.adsb = Some(ax.finish()?);
         done.clip = Some(cinfo);
@@ -296,13 +334,27 @@ fn export_all(
         let inputs: Vec<String> = loaded
             .inputs
             .iter()
-            .map(|h| format!("{} files={} bytes={} sha256={}", h.label, h.files, h.bytes, h.sha256))
+            .map(|h| {
+                format!(
+                    "{} files={} bytes={} sha256={}",
+                    h.label, h.files, h.bytes, h.sha256
+                )
+            })
             .collect();
         for (l, v) in [
             ("ERAM track samples (TH) in the input", info.rows_in),
-            ("samples dropped: same flight, position time and content as an earlier one", info.exact_duplicates),
-            ("samples kept: same flight and position time as another, different content", info.conflicting_same_time),
-            ("samples refused: flight not in the flight table", info.unknown_flight),
+            (
+                "samples dropped: same flight, position time and content as an earlier one",
+                info.exact_duplicates,
+            ),
+            (
+                "samples kept: same flight and position time as another, different content",
+                info.conflicting_same_time,
+            ),
+            (
+                "samples refused: flight not in the flight table",
+                info.unknown_flight,
+            ),
         ] {
             ex.counts.push((l.to_string(), v));
         }
@@ -313,7 +365,8 @@ fn export_all(
     Ok(())
 }
 
-const SLICE_USAGE: &str = "usage: oa-compass slice --in <dir> --from <HH:MM:SS> --to <HH:MM:SS> --out <dir>";
+const SLICE_USAGE: &str =
+    "usage: oa-compass slice --in <dir> --from <HH:MM:SS> --to <HH:MM:SS> --out <dir>";
 
 /// `oa-compass slice`: a time window of the `.ast` files of a finished export.
 fn slice_main() -> ExitCode {
@@ -333,13 +386,18 @@ fn slice_main() -> ExitCode {
         }
     }
     let (Some(inp), Some(out), Some(from), Some(to)) = (inp, out, from, to) else {
-        eprintln!("oa-compass slice: --in, --out, --from and --to (HH:MM:SS) are required\n{SLICE_USAGE}");
+        eprintln!(
+            "oa-compass slice: --in, --out, --from and --to (HH:MM:SS) are required\n{SLICE_USAGE}"
+        );
         return ExitCode::from(2);
     };
     match slice::slice_dir(&inp, &out, from, to) {
         Ok(files) => {
             for f in &files {
-                println!("{}: {} in, {} kept, {} blocks, {} octets", f.name, f.records_in, f.records_kept, f.blocks, f.bytes);
+                println!(
+                    "{}: {} in, {} kept, {} blocks, {} octets",
+                    f.name, f.records_in, f.records_kept, f.blocks, f.bytes
+                );
             }
             ExitCode::SUCCESS
         }

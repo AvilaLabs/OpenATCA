@@ -66,7 +66,9 @@ fn full() -> AdsbRow {
 
 /// The note counts of one conversion.
 fn noted(c: &AdsbConverted) -> Vec<usize> {
-    (0..ADSB_NOTES).filter(|&i| c.notes & (1 << i) != 0).collect()
+    (0..ADSB_NOTES)
+        .filter(|&i| c.notes & (1 << i) != 0)
+        .collect()
 }
 
 /// Notes every record carries: what the source never has.
@@ -146,7 +148,15 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     // I090 is in every record: the primary at the unknown codes.
     assert_eq!(
         v.quality,
-        Some(QualityValues { nacv: 0, nic: 0, nacp: 0, sil: 0, sils: false, sda: 0, gva: 0 })
+        Some(QualityValues {
+            nacv: 0,
+            nic: 0,
+            nacp: 0,
+            sil: 0,
+            sils: false,
+            sda: 0,
+            gva: 0
+        })
     );
     assert!(v.mops_version.is_none());
     let n = noted(&c);
@@ -216,11 +226,17 @@ fn a_field_that_cannot_be_encoded_is_left_out_never_clipped() {
     r.baro_alt_ft = Some(150_000);
     r.geom_alt_ft = Some(150_000);
     let v = adsb_record(&r).unwrap().values;
-    assert_eq!((v.flight_level, v.geometric_height), (Some(6000), Some(24_000)));
+    assert_eq!(
+        (v.flight_level, v.geometric_height),
+        (Some(6000), Some(24_000))
+    );
     r.baro_alt_ft = Some(-1500);
     r.geom_alt_ft = Some(-1500);
     let v = adsb_record(&r).unwrap().values;
-    assert_eq!((v.flight_level, v.geometric_height), (Some(-60), Some(-240)));
+    assert_eq!(
+        (v.flight_level, v.geometric_height),
+        (Some(-60), Some(-240))
+    );
 }
 
 // REQ: OA-CMP-021
@@ -311,7 +327,16 @@ fn positions_at_the_limits_and_beyond_and_times_round_to_the_day() {
     let c = adsb_record(&r).unwrap();
     assert_eq!((c.day, c.values.time), (DAY - 1, 86_400 * 128 - 1));
     // The position error is within half the source LSB plus half the item LSB.
-    for e7 in [-1_799_999_999, -123_456_789, -1, 0, 1, 77, 899_999_999, 1_799_999_999] {
+    for e7 in [
+        -1_799_999_999,
+        -123_456_789,
+        -1,
+        0,
+        1,
+        77,
+        899_999_999,
+        1_799_999_999,
+    ] {
         let mut r = full();
         r.lat_e7 = e7 / 2;
         r.lon_e7 = e7;
@@ -388,7 +413,10 @@ fn the_file_decodes_as_ed24_with_every_value_and_position_error_within_bounds() 
         assert_eq!(rec.address, Some(c.values.address));
         assert_eq!(rec.tomr_position, Some(c.values.time));
         assert_eq!(rec.flight_level, c.values.flight_level);
-        assert_eq!(rec.descriptor.as_ref().unwrap().atp, u8::from(r.non_icao) * 3);
+        assert_eq!(
+            rec.descriptor.as_ref().unwrap().atp,
+            u8::from(r.non_icao) * 3
+        );
         assert_eq!(rec.mops.map(|m| m.version), c.values.mops_version);
         assert_eq!(rec.target_id, Some(*b"DLH7YA  "));
         assert_eq!(rec.emitter_category, Some(3));
@@ -398,7 +426,12 @@ fn the_file_decodes_as_ed24_with_every_value_and_position_error_within_bounds() 
     assert!(oa_asterix::decode_block_with(&bytes, Cat021Edition::Ed27).is_ok());
     // The file reads back, and a changed record count does not.
     let p = out.join("adsb.ast");
-    assert_eq!(read_back(&p, ADSB_SOURCE_PAIR, 700, d.stats.bytes).unwrap().0, 700);
+    assert_eq!(
+        read_back(&p, ADSB_SOURCE_PAIR, 700, d.stats.bytes)
+            .unwrap()
+            .0,
+        700
+    );
     assert!(read_back(&p, ADSB_SOURCE_PAIR, 699, d.stats.bytes).is_err());
     assert!(read_back(&p, OPENATCA_SOURCE, 700, d.stats.bytes).is_err());
 }
@@ -489,7 +522,10 @@ fn reports_are_written_in_time_order_with_stale_and_non_adsb_ones_left_out_and_c
     assert_eq!(first.descriptor.as_ref().unwrap().ext, vec![0x44]);
     assert!(first.flight_level.is_none() && first.baro_rate.is_none());
     assert_eq!(first.geometric_rate.unwrap().raw, 102);
-    assert_eq!(oa_asterix::cat021::quality_sils(first.quality.as_ref().unwrap()), Some(1));
+    assert_eq!(
+        oa_asterix::cat021::quality_sils(first.quality.as_ref().unwrap()),
+        Some(1)
+    );
 }
 
 fn decode_stream_ed24(bytes: &[u8]) -> Vec<oa_asterix::cat021::Cat021> {
@@ -508,13 +544,26 @@ fn decode_stream_ed24(bytes: &[u8]) -> Vec<oa_asterix::cat021::Cat021> {
 #[test]
 fn all_mode_uses_the_scorers_split_code_with_halving_off_and_counts_what_it_removes() {
     let mut r = Reports::default();
-    for (t, lat) in [(1.0, 1), (2.0, 2), (2.0, 3), (2.0, 3), (3.0, 4), (3.0, 4), (4.0, 5)] {
+    for (t, lat) in [
+        (1.0, 1),
+        (2.0, 2),
+        (2.0, 3),
+        (2.0, 3),
+        (3.0, 4),
+        (3.0, 4),
+        (4.0, 5),
+    ] {
         push_row(&mut r, t, 0x100001, |x| x.lat_e7 = lat * 1000);
     }
     let (all, none, st) = oa_track::score::split_reports_with(&r, false);
     assert_eq!((reports_len(&all), reports_len(&none)), (5, 0));
     assert_eq!(
-        (st.rows_in, st.duplicates_removed, st.conflict_groups, st.conflict_rows),
+        (
+            st.rows_in,
+            st.duplicates_removed,
+            st.conflict_groups,
+            st.conflict_rows
+        ),
         (7, 2, 1, 2)
     );
     // The halving run removes the same copies and finds the same conflicts.
@@ -551,14 +600,18 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let third = doc.elements(list).nth(2).unwrap();
     assert_eq!(doc.str(doc.get(third, "ds_type").unwrap()), Some("ADSB"));
     assert_eq!(doc.as_i64(doc.get(third, "sic").unwrap()), Some(13));
-    assert!(text.contains(r#""ds_type":"ADSB","name":"ADS-B","sac":255,"sic":13"#), "{text}");
+    assert!(
+        text.contains(r#""ds_type":"ADSB","name":"ADS-B","sac":255,"sic":13"#),
+        "{text}"
+    );
     assert!(text.contains(r#""name":"OpenATCA","sac":255,"sic":11"#));
     // README.
     let (lay, _) = layout("readme", false);
     let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
     let base = full();
     for k in 0..10 {
-        ex.push(&at(&base, 1000 + k, 1), (500_000_000, -100_000_000)).unwrap();
+        ex.push(&at(&base, 1000 + k, 1), (500_000_000, -100_000_000))
+            .unwrap();
     }
     ex.counts.push(("reports written".into(), 10));
     let rep = ex.finish().unwrap().commit().unwrap();
@@ -609,7 +662,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "INDEPENDENCE",
         "NOT the set the tracker used",
         "superset of what the tracker was fed",
-        "Of the 10 reports offered to the tracker, 6 became measurements",
+        "Of the 10 reports of the whole clip offered to the tracker, 6 became measurements",
         "nacp 3;",
         "source_not_adsb 1;",
         "TIS-B, ADS-R and MLAT",
@@ -652,19 +705,24 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
         lay.clone(),
     );
     let mut ax = AdsbExport::new(ADSB_SOURCE, lay);
-    let (run, info) = oa_compass::shell::run::export_adsb_clip(
-        &clip,
-        &mut ex,
-        Some(&mut ax),
-        InputsMode::All,
-    )
-    .unwrap();
+    let (run, info) =
+        oa_compass::shell::run::export_adsb_clip(&clip, &mut ex, Some(&mut ax), InputsMode::All)
+            .unwrap();
     assert!(run.tick_rows > 1000);
     assert_eq!(info.left, 0);
-    let a = info.adsb.unwrap();
+    let a = info.adsb.as_ref().unwrap();
     assert_eq!(info.fed, info.split.set_a);
     assert_eq!(a.rows_in, info.fed);
-    assert_eq!(a.converted + a.stale + a.other_sources.iter().map(|x| x.1).sum::<u64>(), a.rows_in);
+    assert_eq!(
+        a.converted + a.stale + a.other_sources.iter().map(|x| x.1).sum::<u64>(),
+        a.rows_in
+    );
+    // The gate counts are the tracker adapter's own, on the same reports.
+    let clip_in = oa_bench::input::load_adsb(&clip).unwrap();
+    let (fed_set, _, _) = oa_track::score::split_reports_with(&clip_in.reports, false);
+    let (_, want) =
+        oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());
+    assert_eq!(info.gate, want, "gate counts differ from adsb_measurements");
     ex.finish().unwrap().commit().unwrap();
     let rep = ax.finish().unwrap().commit().unwrap();
     let written: u64 = rep.days.iter().map(|d| d.stats.records).sum();
@@ -672,6 +730,39 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
     for d in &rep.days {
         assert!(d.stats.max_lat_error_e7 <= 1 && d.stats.max_lon_error_e7 <= 1);
         assert_eq!(d.read_back_records, d.stats.records);
+    }
+    // The README states those counts.
+    let text = oa_compass::shell::notes::readme_with(
+        rep.days[0].day,
+        &[],
+        "commit test",
+        true,
+        Some(InputsMode::All),
+        &oa_compass::shell::notes::Extras {
+            adsb: Some(&rep),
+            clip: Some(&info),
+        },
+    );
+    let dropped = want.rows_in - want.passed;
+    let line = format!(
+        "Of the {} reports of the whole clip offered to the tracker, {} became measurements (the \"measurements offered to the tracker\" total) and {dropped} were dropped by its adapter:",
+        want.rows_in, want.passed
+    );
+    assert!(
+        text.contains(&line),
+        "README lacks {line:?}\n{}",
+        text.lines()
+            .filter(|l| l.contains("RELATION"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for (name, &n) in oa_truth::REMOVE_NAMES.iter().zip(want.removed.iter()) {
+        if n > 0 {
+            assert!(
+                text.contains(&format!(" {name} {n};")),
+                "README lacks {name} {n}"
+            );
+        }
     }
     let _ = decode_stream; // the whole-file decode is the read-back above
 }
@@ -749,4 +840,84 @@ fn values_outside_the_mops_are_not_encoded_and_the_notes_name_sils_and_nic_v2() 
     assert!(noted(&c).contains(&ANOTE_SILS) && noted(&c).contains(&ANOTE_NIC_V2));
     r.version = Some(1);
     assert!(!noted(&adsb_record(&r).unwrap()).contains(&ANOTE_NIC_V2));
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn the_extension_chain_carries_sils_only_sda_only_and_both_extensions() {
+    use oa_compass::shell::adsb_export::cat021_record;
+    let ext_of = |f: &dyn Fn(&mut AdsbRow)| {
+        let mut r = full();
+        r.nic = Some(0);
+        r.nac_p = Some(0);
+        r.nac_v = Some(0);
+        r.sil = Some(0);
+        r.sil_per_sample = Some(false);
+        r.sda = Some(0);
+        r.gva = Some(0);
+        f(&mut r);
+        let v = adsb_record(&r).unwrap().values;
+        cat021_record(&v, ADSB_SOURCE).quality.unwrap().ext
+    };
+    // SILS alone and SDA alone: the second extension, the empty first one chaining to it.
+    assert_eq!(
+        ext_of(&|r| r.sil_per_sample = Some(true)),
+        vec![0x01, 1 << 5]
+    );
+    assert_eq!(ext_of(&|r| r.sda = Some(2)), vec![0x01, 2 << 3]);
+    // Both extensions with values: the first carries SIL and NACp, with FX.
+    assert_eq!(
+        ext_of(&|r| {
+            r.sil = Some(3);
+            r.nac_p = Some(8);
+            r.sda = Some(1);
+            r.gva = Some(2);
+            r.sil_per_sample = Some(true);
+        }),
+        vec![(3 << 5) | (8 << 1) | 1, (1 << 5) | (1 << 3) | (2 << 1)]
+    );
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
+    let (lay, out) = layout("i090file", false);
+    let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
+    let base = full();
+    for k in 0..300i64 {
+        let mut r = base;
+        r.address = 0x200000 + k as u32;
+        r.time_ns = DAY_NS + (k * 128) * 1_000_000_000 / 128;
+        r.ground = k % 3 == 0;
+        if k % 4 == 0 {
+            r.nic = None;
+            r.nac_p = None;
+            r.nac_v = None;
+            r.sil = None;
+            r.sda = None;
+            r.gva = None;
+            r.sil_per_sample = None;
+        }
+        let c = adsb_record(&r).unwrap();
+        ex.push(&c, (r.lat_e7, r.lon_e7)).unwrap();
+    }
+    ex.finish().unwrap().commit().unwrap();
+    let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
+    assert_eq!(recs.len(), 300);
+    let mut ground = 0;
+    for rec in &recs {
+        assert!(rec.quality.is_some(), "a record without I090");
+        let gbs = rec
+            .descriptor
+            .as_ref()
+            .unwrap()
+            .ext
+            .first()
+            .is_some_and(|e| e & 0x40 != 0);
+        if gbs {
+            ground += 1;
+            assert!(rec.ground_vector.is_none(), "GBS=1 with I160");
+        }
+    }
+    assert_eq!(ground, 100);
 }

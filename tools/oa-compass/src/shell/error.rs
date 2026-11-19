@@ -17,7 +17,11 @@ pub enum ExportError {
     /// back as written.
     Verify(String),
     /// A record is earlier than the one before it in the same file.
-    OutOfOrder { system: &'static str, prev: u32, now: u32 },
+    OutOfOrder {
+        system: &'static str,
+        prev: u32,
+        now: u32,
+    },
     /// More distinct tracks in one file than the 16-bit track number holds.
     TrackNumbers { system: &'static str, day: String },
     /// A row falls on another UTC day than the requested one and `--split-days` was not given.

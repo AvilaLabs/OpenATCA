@@ -10,13 +10,12 @@ use oa_track::score::{
 };
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
-    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG,
-    O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK,
-    O_UNCERTAIN, RADAR_KEY_BASE,
+    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
+    O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK, O_UNCERTAIN, RADAR_KEY_BASE,
 };
 
-use super::error::ExportError;
 use super::adsb_export::AdsbExport;
+use super::error::ExportError;
 use super::export::SystemExport;
 use crate::core::adsb::{adsb_record, AdsbRow};
 use crate::core::convert::{eram_record, track_record, EramRow, TrackRow};
@@ -200,7 +199,9 @@ pub fn export_adsb_reports(
     let mut other = [0u64; 256];
     for &(_, _, i) in &order {
         let Some(row) = oa_adsb::reports_row(reports, i as usize) else {
-            return Err(ExportError::Input(format!("ADS-B report {i} cannot be read back")));
+            return Err(ExportError::Input(format!(
+                "ADS-B report {i} cannot be read back"
+            )));
         };
         if row.flags & oa_adsb::F_STALE != 0 {
             info.stale = info.stale.saturating_add(1);
@@ -340,14 +341,39 @@ pub fn eram_input_counts(c: &Counts) -> Result<Vec<(String, u64)>, ExportError> 
     }
     let mut v: Vec<(String, u64)> = vec![
         ("ingest: SFDPS documents offered".into(), c.docs[0]),
-        ("ingest: SFDPS documents the parser or decoder refused".into(), c.doc_errors[0]),
-        ("ingest: SFDPS messages rejected by the decoder".into(), c.sfdps_rejected),
-        ("ingest: rows of accepted documents past the per-document table size, not decoded".into(), c.rows_not_decoded),
-        ("ingest: SFDPS field errors in rows kept (field treated as absent)".into(), c.sfdps_field_errors),
-        ("ingest: flight table overflow (must be 0)".into(), c.overflow_flights),
-        ("ingest: track sample table overflow (must be 0)".into(), c.overflow_th),
-        ("ingest: track samples with a coast indicator".into(), c.th_coast),
-        ("ingest: track samples without a reported altitude".into(), c.th_no_alt),
+        (
+            "ingest: SFDPS documents the parser or decoder refused".into(),
+            c.doc_errors[0],
+        ),
+        (
+            "ingest: SFDPS messages rejected by the decoder".into(),
+            c.sfdps_rejected,
+        ),
+        (
+            "ingest: rows of accepted documents past the per-document table size, not decoded"
+                .into(),
+            c.rows_not_decoded,
+        ),
+        (
+            "ingest: SFDPS field errors in rows kept (field treated as absent)".into(),
+            c.sfdps_field_errors,
+        ),
+        (
+            "ingest: flight table overflow (must be 0)".into(),
+            c.overflow_flights,
+        ),
+        (
+            "ingest: track sample table overflow (must be 0)".into(),
+            c.overflow_th,
+        ),
+        (
+            "ingest: track samples with a coast indicator".into(),
+            c.th_coast,
+        ),
+        (
+            "ingest: track samples without a reported altitude".into(),
+            c.th_no_alt,
+        ),
     ];
     for (k, n) in &c.reasons {
         v.push((format!("ingest: {k}"), *n));
@@ -364,7 +390,9 @@ pub fn export_eram(leg: &Legacy, ex: &mut SystemExport) -> Result<EramInfo, Expo
     let mut order: Vec<(i64, u32, u32)> = Vec::with_capacity(n);
     for (i, (&t, &f)) in th.pos_ms.iter().zip(th.flight.iter()).enumerate() {
         let Ok(ix) = u32::try_from(i) else {
-            return Err(ExportError::Input("more than 2^32 ERAM track samples".into()));
+            return Err(ExportError::Input(
+                "more than 2^32 ERAM track samples".into(),
+            ));
         };
         order.push((t, f, ix));
     }
@@ -390,7 +418,8 @@ pub fn export_eram(leg: &Legacy, ex: &mut SystemExport) -> Result<EramInfo, Expo
             )));
         };
         let fi = f as usize;
-        let (Some(&addr), Some(callsign)) = (leg.flights.addr.get(fi), leg.flights.callsign.get(fi))
+        let (Some(&addr), Some(callsign)) =
+            (leg.flights.addr.get(fi), leg.flights.callsign.get(fi))
         else {
             info.unknown_flight = info.unknown_flight.saturating_add(1);
             continue;

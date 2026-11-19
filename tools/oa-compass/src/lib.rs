@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! oa-compass: writes a recorded UTC day of OpenATCA tracker output and of ERAM tracks as raw
-//! ASTERIX CAT062 Ed 1.21 data blocks, and the ADS-B reports the tracker was fed as CAT021
-//! Ed 2.4, with the data-source file and the import notes an outside evaluation tool (OpenATS
+//! ASTERIX CAT062 Ed 1.21 data blocks, and the ADS-B reports offered to the tracker's adapter (a
+//! superset of those it used) as CAT021 Ed 2.4, with the data-source file and the import notes an outside evaluation tool (OpenATS
 //! COMPASS) needs. Class `split` (B7).
 //!
 //! * `core`: the pure conversion of one output row (an OpenATCA tracker tick row, or an ERAM

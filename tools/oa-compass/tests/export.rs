@@ -49,18 +49,18 @@ impl Rng {
 
 fn track_row(g: &mut Rng, t_ns: i64) -> TrackRow {
     let ve = ((g.unit() - 0.5) * 600.0) as f32;
-    let ve = if g.next().is_multiple_of(7) { f32::NAN } else { ve };
+    let ve = if g.next().is_multiple_of(7) {
+        f32::NAN
+    } else {
+        ve
+    };
     TrackRow {
         t_ns,
         lat_e7: ((g.unit() * 2.0 - 1.0) * 85.0e7) as i32,
         lon_e7: ((g.unit() * 2.0 - 1.0) * 179.0e7) as i32,
         vel_east_mps: ve,
         vel_north_mps: ((g.unit() - 0.5) * 600.0) as f32,
-        pos_cov_m2: [
-            (g.unit() * 5000.0) as f32,
-            0.0,
-            (g.unit() * 5000.0) as f32,
-        ],
+        pos_cov_m2: [(g.unit() * 5000.0) as f32, 0.0, (g.unit() * 5000.0) as f32],
         alt_ft: ((g.unit() - 0.05) * 45_000.0) as f32,
         has_alt: !g.next().is_multiple_of(5),
         vrate_fpm: ((g.unit() - 0.5) * 8000.0) as f32,
@@ -155,8 +155,12 @@ fn eram_rows_round_trip_with_address_and_identification() {
             lat_e7: ((g.unit() * 2.0 - 1.0) * 80.0e7) as i32,
             lon_e7: ((g.unit() * 2.0 - 1.0) * 170.0e7) as i32,
             alt_ft: (!g.next().is_multiple_of(4)).then(|| (g.next() % 45_000) as i32),
-            vel_dkt: (!g.next().is_multiple_of(4))
-                .then(|| ((g.next() % 6000) as i16 - 3000, (g.next() % 6000) as i16 - 3000)),
+            vel_dkt: (!g.next().is_multiple_of(4)).then(|| {
+                (
+                    (g.next() % 6000) as i16 - 3000,
+                    (g.next() % 6000) as i16 - 3000,
+                )
+            }),
             coast: g.next().is_multiple_of(3),
             address: (!g.next().is_multiple_of(3)).then(|| (g.next() % 0x100_0000) as u32),
             callsign: (!g.next().is_multiple_of(3)).then_some(*b"DAL42\0\0\0"),
@@ -170,7 +174,10 @@ fn eram_rows_round_trip_with_address_and_identification() {
     for (rec, v) in decode_all(&bytes).iter().zip(&want) {
         assert_eq!(rec, &cat062_record(v, ERAM_SOURCE));
         assert_eq!(rec.measured_fl, v.measured_fl);
-        assert_eq!(rec.baro_altitude.map(|a| (a.raw, a.qnh)), v.baro_alt.map(|r| (r, v.baro_qnh)));
+        assert_eq!(
+            rec.baro_altitude.map(|a| (a.raw, a.qnh)),
+            v.baro_alt.map(|r| (r, v.baro_qnh))
+        );
         assert_eq!(rec.derived.as_ref().and_then(|d| d.address), v.address);
         assert_eq!(rec.derived.as_ref().and_then(|d| d.ident), v.ident);
         // No I015, no I500 for ERAM.
@@ -249,7 +256,10 @@ fn export_to(name: &str, split: bool, day: i64) -> (SystemExport, PathBuf) {
         day,
         split,
     };
-    (SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout), out)
+    (
+        SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout),
+        out,
+    )
 }
 
 // REQ: OA-CMP-009
@@ -257,14 +267,22 @@ fn export_to(name: &str, split: bool, day: i64) -> (SystemExport, PathBuf) {
 fn a_row_on_another_day_refuses_the_export_and_leaves_no_file() {
     let (mut ex, out) = export_to("midnight", false, DAY);
     let t = DAY_S * 1_000_000_000;
-    ex.push(&converted(t, 100_000_000), 1, (100_000_000, 100_000_000)).unwrap();
+    ex.push(&converted(t, 100_000_000), 1, (100_000_000, 100_000_000))
+        .unwrap();
     // One second into the next day.
     let e = ex
-        .push(&converted(t + 86_401 * 1_000_000_000, 100_000_000), 1, (0, 0))
+        .push(
+            &converted(t + 86_401 * 1_000_000_000, 100_000_000),
+            1,
+            (0, 0),
+        )
         .unwrap_err();
     assert!(matches!(e, ExportError::CrossesMidnight { .. }), "{e}");
     let text = e.to_string();
-    assert!(text.contains("2026.11.16") && text.contains("2026.11.15"), "{text}");
+    assert!(
+        text.contains("2026.11.16") && text.contains("2026.11.15"),
+        "{text}"
+    );
     ex.abort();
     let left: Vec<_> = fs::read_dir(&out).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
@@ -276,8 +294,12 @@ fn split_days_writes_one_directory_per_day_and_no_file_holds_two_days() {
     let (mut ex, out) = export_to("split", true, DAY);
     let t = DAY_S * 1_000_000_000;
     for i in 0..10 {
-        ex.push(&converted(t - 5 * 1_000_000_000 + i * 1_000_000_000, 100_000_000), 1, (0, 0))
-            .ok();
+        ex.push(
+            &converted(t - 5 * 1_000_000_000 + i * 1_000_000_000, 100_000_000),
+            1,
+            (0, 0),
+        )
+        .ok();
     }
     // Rows are on the 14th (before t) and the 15th; the file of the 14th is separate.
     let fin = ex.finish().unwrap();
@@ -303,7 +325,12 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
     let t = DAY_S * 1_000_000_000;
     // Keys A, B, A, C: numbers 1, 2, 1, 3.
     for (i, k) in [500u32, 7, 500, 99_999].iter().enumerate() {
-        ex.push(&converted(t + i as i64 * 1_000_000_000, 100_000_000), *k, (0, 0)).unwrap();
+        ex.push(
+            &converted(t + i as i64 * 1_000_000_000, 100_000_000),
+            *k,
+            (0, 0),
+        )
+        .unwrap();
     }
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].tracks, 3);
@@ -316,7 +343,9 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
         ex.push(&converted(t, 100_000_000), k, (0, 0)).unwrap();
     }
     ex.push(&converted(t, 100_000_000), 0, (0, 0)).unwrap();
-    let e = ex.push(&converted(t, 100_000_000), 65_535, (0, 0)).unwrap_err();
+    let e = ex
+        .push(&converted(t, 100_000_000), 65_535, (0, 0))
+        .unwrap_err();
     assert!(matches!(e, ExportError::TrackNumbers { .. }), "{e}");
     ex.abort();
 }
@@ -326,9 +355,13 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
 fn a_record_earlier_than_the_one_before_is_refused() {
     let (mut ex, _) = export_to("order", false, DAY);
     let t = DAY_S * 1_000_000_000;
-    ex.push(&converted(t + 5_000_000_000, 100_000_000), 1, (0, 0)).unwrap();
-    ex.push(&converted(t + 5_000_000_000, 100_000_000), 2, (0, 0)).unwrap();
-    let e = ex.push(&converted(t + 4_000_000_000, 100_000_000), 1, (0, 0)).unwrap_err();
+    ex.push(&converted(t + 5_000_000_000, 100_000_000), 1, (0, 0))
+        .unwrap();
+    ex.push(&converted(t + 5_000_000_000, 100_000_000), 2, (0, 0))
+        .unwrap();
+    let e = ex
+        .push(&converted(t + 4_000_000_000, 100_000_000), 1, (0, 0))
+        .unwrap_err();
     assert!(matches!(e, ExportError::OutOfOrder { .. }), "{e}");
     ex.abort();
 }
@@ -342,12 +375,72 @@ fn eram_legacy() -> Legacy {
     leg.flights.callsign[b as usize] = *b"bad-cs\0\0";
     let t0 = DAY_S * 1000;
     // Pushed out of time order, with a duplicate, a conflict and a row for an unknown flight.
-    push_th(&mut leg, a, t0 + 12_000, 0, 400_000_000, -880_000_000, 35_000, Some((2000, 0)), false);
-    push_th(&mut leg, b, t0, 0, 410_000_000, -870_000_000, NO_ALT, None, true);
-    push_th(&mut leg, a, t0, 0, 400_000_000, -880_000_000, 35_000, Some((2000, 0)), false);
-    push_th(&mut leg, a, t0, 0, 400_000_000, -880_000_000, 35_000, Some((2000, 0)), false);
-    push_th(&mut leg, a, t0, 0, 400_100_000, -880_000_000, 35_000, Some((2000, 0)), false);
-    push_th(&mut leg, 77, t0, 0, 400_000_000, -880_000_000, 35_000, None, false);
+    push_th(
+        &mut leg,
+        a,
+        t0 + 12_000,
+        0,
+        400_000_000,
+        -880_000_000,
+        35_000,
+        Some((2000, 0)),
+        false,
+    );
+    push_th(
+        &mut leg,
+        b,
+        t0,
+        0,
+        410_000_000,
+        -870_000_000,
+        NO_ALT,
+        None,
+        true,
+    );
+    push_th(
+        &mut leg,
+        a,
+        t0,
+        0,
+        400_000_000,
+        -880_000_000,
+        35_000,
+        Some((2000, 0)),
+        false,
+    );
+    push_th(
+        &mut leg,
+        a,
+        t0,
+        0,
+        400_000_000,
+        -880_000_000,
+        35_000,
+        Some((2000, 0)),
+        false,
+    );
+    push_th(
+        &mut leg,
+        a,
+        t0,
+        0,
+        400_100_000,
+        -880_000_000,
+        35_000,
+        Some((2000, 0)),
+        false,
+    );
+    push_th(
+        &mut leg,
+        77,
+        t0,
+        0,
+        400_000_000,
+        -880_000_000,
+        35_000,
+        None,
+        false,
+    );
     leg
 }
 
@@ -487,7 +580,8 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
     };
     let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout);
     let info = export_eram(&eram_legacy(), &mut ex).unwrap();
-    ex.counts.push(("samples in the input".into(), info.rows_in));
+    ex.counts
+        .push(("samples in the input".into(), info.rows_in));
     let mut fin = ex.finish().unwrap();
     fin.report.inputs.push("test input".into());
     let rep = fin.commit().unwrap();
@@ -536,7 +630,11 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
         o.pos_cov_m2.push([100.0, 0.0, 100.0]);
         o.vel_cov_m2s2.push([1.0, 0.0, 1.0]);
         o.turn_rate_rps.push(0.0);
-        o.alt_ft.push(if flags & O_HAS_ALT != 0 { 30_000.0 } else { f32::NAN });
+        o.alt_ft.push(if flags & O_HAS_ALT != 0 {
+            30_000.0
+        } else {
+            f32::NAN
+        });
         o.alt_var_ft2.push(1.0);
         o.vrate_fpm.push(0.0);
         o.mu_h.push([1.0, 0.0]);
@@ -556,7 +654,10 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
     let recs = decode_all(&fs::read(out.join("openatca.ast")).unwrap());
     assert_eq!(recs.len(), 2);
     // A radar-handle key is no aircraft address; a coasting row has no altitude here.
-    assert_eq!(recs[0].derived.as_ref().and_then(|d| d.address), Some(0xA00001));
+    assert_eq!(
+        recs[0].derived.as_ref().and_then(|d| d.address),
+        Some(0xA00001)
+    );
     assert_eq!(recs[1].derived, None);
     assert_eq!(recs[1].baro_altitude, None);
     assert_eq!(recs[0].baro_altitude.map(|a| a.raw), Some(1200));
@@ -617,7 +718,10 @@ fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
     let mut c = Counts::default();
     c.docs[0] = 9;
     c.note("SFDPS rows dropped, reason no GUFI column entry".into(), 4);
-    c.note("SFDPS position rows without a position time (no TH sample)".into(), 2);
+    c.note(
+        "SFDPS position rows without a position time (no TH sample)".into(),
+        2,
+    );
     c.th_no_alt = 7;
     let lines = eram_input_counts(&c).unwrap();
     let get = |k: &str| lines.iter().find(|(l, _)| l.contains(k)).map(|x| x.1);
@@ -638,7 +742,11 @@ fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
         "ERAM",
         "eram.ast",
         ERAM_SOURCE,
-        Layout { out: out.clone(), day: DAY, split: false },
+        Layout {
+            out: out.clone(),
+            day: DAY,
+            split: false,
+        },
     );
     assert!(export_eram(&leg, &mut ex).is_err());
     ex.abort();
@@ -654,14 +762,22 @@ fn the_readme_states_the_inputs_mode_and_the_leak_warning() {
         "ERAM",
         "eram.ast",
         ERAM_SOURCE,
-        Layout { out, day: DAY, split: false },
+        Layout {
+            out,
+            day: DAY,
+            split: false,
+        },
     );
     export_eram(&eram_legacy(), &mut ex).unwrap();
     let rep = ex.finish().unwrap().commit().unwrap();
     let all = readme(DAY, &[&rep], "b", false, Some(InputsMode::All));
     assert!(all.contains("ALL (--inputs all)") && all.contains("like-for-like"));
     let split = readme(DAY, &[&rep], "b", false, Some(InputsMode::Split));
-    assert!(split.contains("SPLIT") && split.contains("NOT like-for-like") && split.contains("leaked truth"));
+    assert!(
+        split.contains("SPLIT")
+            && split.contains("NOT like-for-like")
+            && split.contains("leaked truth")
+    );
 }
 
 // REQ: OA-CMP-007

@@ -405,7 +405,10 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
     // NACv 0 to 4; SIL, GVA and SDA are two bits.
     let fit = |v: Option<u8>, max: u8| v.filter(|&x| x <= max);
     let (nic, nac_p, nac_v) = (fit(r.nic, 11), fit(r.nac_p, 11), fit(r.nac_v, 4));
-    if r.nic.is_some_and(|v| v > 11) || r.nac_p.is_some_and(|v| v > 11) || r.nac_v.is_some_and(|v| v > 4) {
+    if r.nic.is_some_and(|v| v > 11)
+        || r.nac_p.is_some_and(|v| v > 11)
+        || r.nac_v.is_some_and(|v| v > 4)
+    {
         notes |= bit(ANOTE_QUALITY_RANGE);
     }
     let (sil, gva, sda) = (fit(r.sil, 3), fit(r.gva, 3), fit(r.sda, 3));

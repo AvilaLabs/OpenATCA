@@ -62,7 +62,7 @@ fn a_track_row_becomes_counts_of_the_item_lsbs() {
     assert_eq!(v.baro_alt, Some(1400)); // 35012 / 25 = 1400.48
     assert_eq!(v.measured_fl, None);
     assert_eq!(v.climb, Some(-240)); // -1500 / 6.25
-    // 12:00:00 UTC is 43200 s = 5 529 600 counts.
+                                     // 12:00:00 UTC is 43200 s = 5 529 600 counts.
     assert_eq!(v.time, 43_200 * 128);
     assert_eq!(v.service, Some(1));
     assert_eq!(v.address, Some(0xA1B2C3));
@@ -95,8 +95,14 @@ fn time_rounds_to_a_128th_and_the_day_is_that_of_the_rounded_time() {
     let day = days_from_civil(2026, 11, 15).unwrap();
     assert_eq!(day_time_of_ns(T0_NS).unwrap().day, day);
     // Half a count is 3.90625 ms: 3.9 ms rounds down, 3.91 ms rounds up.
-    assert_eq!(day_time_of_ns(T0_NS + 3_900_000).unwrap().units, 43_200 * 128);
-    assert_eq!(day_time_of_ns(T0_NS + 3_910_000).unwrap().units, 43_200 * 128 + 1);
+    assert_eq!(
+        day_time_of_ns(T0_NS + 3_900_000).unwrap().units,
+        43_200 * 128
+    );
+    assert_eq!(
+        day_time_of_ns(T0_NS + 3_910_000).unwrap().units,
+        43_200 * 128 + 1
+    );
     // Just before midnight rounds into the next day, at time of day 0.
     let midnight = T0_NS + 12 * 3_600 * 1_000_000_000;
     let t = day_time_of_ns(midnight - 3_000_000).unwrap();
@@ -161,10 +167,19 @@ fn an_absent_or_unfit_value_leaves_its_item_out_and_is_noted_never_zeroed() {
     assert!(has(&c, NOTE_VEL_RANGE) && has(&c, NOTE_CLIMB_RANGE));
     assert_eq!((c.values.velocity, c.values.climb), (None, None));
     // The limits of the altitude item: -15 FL and 1500 FL are in, a count beyond is out.
-    for (ft, ok) in [(-1_500.0, true), (-1_526.0, false), (150_000.0, true), (150_026.0, false)] {
+    for (ft, ok) in [
+        (-1_500.0, true),
+        (-1_526.0, false),
+        (150_000.0, true),
+        (150_026.0, false),
+    ] {
         let mut r = row();
         r.alt_ft = ft;
-        assert_eq!(track_record(&r).unwrap().values.baro_alt.is_some(), ok, "{ft}");
+        assert_eq!(
+            track_record(&r).unwrap().values.baro_alt.is_some(),
+            ok,
+            "{ft}"
+        );
     }
     // ERAM: no velocity, no altitude.
     let mut e = eram();
@@ -178,7 +193,12 @@ fn an_absent_or_unfit_value_leaves_its_item_out_and_is_noted_never_zeroed() {
 // REQ: OA-CMP-003
 #[test]
 fn a_row_with_an_impossible_position_is_refused() {
-    for (la, lo) in [(900_000_001, 0), (-900_000_001, 0), (0, 1_800_000_001), (0, i32::MIN)] {
+    for (la, lo) in [
+        (900_000_001, 0),
+        (-900_000_001, 0),
+        (0, 1_800_000_001),
+        (0, i32::MIN),
+    ] {
         let mut r = row();
         r.lat_e7 = la;
         r.lon_e7 = lo;
@@ -241,7 +261,11 @@ fn the_apw_components_are_raised_to_one_or_saturate_and_a_bad_covariance_leaves_
     r.pos_cov_m2 = [100.0, 0.0, 100.0];
     let (_, lo) = track_record(&r).unwrap().values.accuracy.unwrap();
     assert_eq!(lo, u16::MAX);
-    for bad in [[-1.0, 0.0, 1.0], [1.0, 0.0, f32::NAN], [f32::INFINITY, 0.0, 1.0]] {
+    for bad in [
+        [-1.0, 0.0, 1.0],
+        [1.0, 0.0, f32::NAN],
+        [f32::INFINITY, 0.0, 1.0],
+    ] {
         let mut r = row();
         r.pos_cov_m2 = bad;
         let c = track_record(&r).unwrap();
@@ -378,7 +402,12 @@ fn a_valid_rate_of_climb_is_exported_without_an_altitude_and_counted() {
 // REQ: OA-CMP-001
 #[test]
 fn eram_altitude_is_a_flight_level_from_18000_ft_and_qnh_corrected_below() {
-    for (ft, fl, qnh) in [(18_000, true, false), (35_000, true, false), (17_975, false, true), (5_000, false, true)] {
+    for (ft, fl, qnh) in [
+        (18_000, true, false),
+        (35_000, true, false),
+        (17_975, false, true),
+        (5_000, false, true),
+    ] {
         let mut e = eram();
         e.alt_ft = Some(ft);
         let c = eram_record(&e).unwrap();

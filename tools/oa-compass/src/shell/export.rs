@@ -153,12 +153,7 @@ impl SystemExport {
     }
 
     /// Adds a converted row of track `key` (the position it came from is `src_e7`).
-    pub fn push(
-        &mut self,
-        c: &Converted,
-        key: u32,
-        src_e7: (i32, i32),
-    ) -> Result<(), ExportError> {
+    pub fn push(&mut self, c: &Converted, key: u32, src_e7: (i32, i32)) -> Result<(), ExportError> {
         if !self.layout.split && c.day != self.layout.day {
             return Err(ExportError::CrossesMidnight {
                 system: self.name,
@@ -175,7 +170,11 @@ impl SystemExport {
             self.files.insert(
                 c.day,
                 DayFile {
-                    sink: BlockSink::new(BufWriter::with_capacity(1 << 20, f), self.source, self.name),
+                    sink: BlockSink::new(
+                        BufWriter::with_capacity(1 << 20, f),
+                        self.source,
+                        self.name,
+                    ),
                     partial,
                     path,
                     tracks: BTreeMap::new(),
@@ -309,7 +308,9 @@ pub fn read_back(
         buf.extend_from_slice(&body);
         let (block, used) = decode_block(&buf).map_err(|e| bad(format!("block {n_blk}: {e:?}")))?;
         if used != len {
-            return Err(bad(format!("block {n_blk}: {used} octets decoded of {len}")));
+            return Err(bad(format!(
+                "block {n_blk}: {used} octets decoded of {len}"
+            )));
         }
         let Block::Cat062(recs) = block else {
             return Err(bad(format!("block {n_blk}: not category 62")));

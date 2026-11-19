@@ -13,9 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use oa_asterix::{
-    decode_block_with, encode_block_with, Block, Cat021Edition, SourceId,
-};
+use oa_asterix::{decode_block_with, encode_block_with, Block, Cat021Edition, SourceId};
 
 use super::adsb_export::{self, EDITION as EDITION_021, RECORDS_PER_BLOCK};
 use super::error::{io_err, ExportError};
@@ -39,7 +37,11 @@ pub struct SliceFile {
 pub fn parse_clock(s: &str) -> Option<u32> {
     let mut it = s.split(':');
     let (h, m, sec) = (it.next()?, it.next()?, it.next()?);
-    if it.next().is_some() || [h, m, sec].iter().any(|p| p.len() != 2) {
+    if it.next().is_some()
+        || [h, m, sec]
+            .iter()
+            .any(|p| p.len() != 2 || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     let (h, m, sec): (i64, i64, i64) = (h.parse().ok()?, m.parse().ok()?, sec.parse().ok()?);
@@ -75,7 +77,10 @@ fn next_block(r: &mut impl Read, buf: &mut Vec<u8>, path: &Path) -> Result<bool,
     r.read_exact(&mut rest).map_err(|e| io_err(path, &e))?;
     let len = usize::from(u16::from_be_bytes(rest));
     if len < 3 {
-        return Err(ExportError::Verify(format!("{}: LEN {len}", path.display())));
+        return Err(ExportError::Verify(format!(
+            "{}: LEN {len}",
+            path.display()
+        )));
     }
     buf.clear();
     buf.extend_from_slice(&first);
@@ -144,7 +149,10 @@ fn slice_file(
     let f = File::open(input).map_err(|e| io_err(input, &e))?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let partial = out_path.with_extension("ast.partial");
-    let mut w = BufWriter::with_capacity(1 << 20, File::create(&partial).map_err(|e| io_err(&partial, &e))?);
+    let mut w = BufWriter::with_capacity(
+        1 << 20,
+        File::create(&partial).map_err(|e| io_err(&partial, &e))?,
+    );
     let mut buf = Vec::new();
     let mut pending: Vec<Block> = Vec::new();
     let mut pending_n = 0usize;
@@ -172,7 +180,10 @@ fn slice_file(
             let (block, used) = decode_block_with(&buf, ed)
                 .map_err(|e| ExportError::Verify(format!("{}: {e:?}", input.display())))?;
             if used != buf.len() {
-                return Err(ExportError::Verify(format!("{}: block length", input.display())));
+                return Err(ExportError::Verify(format!(
+                    "{}: block length",
+                    input.display()
+                )));
             }
             let times = record_times(&block);
             let mut keep = Vec::with_capacity(times.len());
@@ -231,7 +242,9 @@ fn slice_file(
         Ok((n, b)) if n == info.records_kept && b == info.blocks => {}
         Ok(_) => {
             let _ = fs::remove_file(&partial);
-            return Err(ExportError::Verify(format!("{name}: read-back block count differs")));
+            return Err(ExportError::Verify(format!(
+                "{name}: read-back block count differs"
+            )));
         }
         Err(e) => {
             let _ = fs::remove_file(&partial);
@@ -250,7 +263,10 @@ fn flush(
     w: &mut impl Write,
     info: &mut SliceFile,
 ) -> Result<(), ExportError> {
-    let ed = edition_of(cat).unwrap_or(Cat021Edition::Ed27);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let ed = edition_of(cat)?;
     let (mut r21, mut r62) = (Vec::new(), Vec::new());
     for b in pending.drain(..) {
         match b {
@@ -261,9 +277,13 @@ fn flush(
     }
     *pending_n = 0;
     let all: Vec<Block> = if cat == 21 {
-        r21.chunks(RECORDS_PER_BLOCK).map(|c| Block::Cat021(c.to_vec())).collect()
+        r21.chunks(RECORDS_PER_BLOCK)
+            .map(|c| Block::Cat021(c.to_vec()))
+            .collect()
     } else {
-        r62.chunks(RECORDS_PER_BLOCK).map(|c| Block::Cat062(c.to_vec())).collect()
+        r62.chunks(RECORDS_PER_BLOCK)
+            .map(|c| Block::Cat062(c.to_vec()))
+            .collect()
     };
     for block in all {
         let bytes = encode_block_with(&block, ed)?;
@@ -287,6 +307,16 @@ fn flush(
     Ok(())
 }
 
+/// A point in [`slice_dir_with`] at which a test can make the run fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// A7.2: cold enum, size guard waived
+pub enum Stage {
+    /// Every file is sliced and verified, nothing is renamed yet.
+    Verified,
+    /// This many files (1-based, the README and the data-source file included) are renamed.
+    Renamed(usize),
+}
+
 /// Slices every `.ast` file of `input` into `out`, copies `data_sources.json` and writes the
 /// README. Returns what each file holds.
 pub fn slice_dir(
@@ -294,6 +324,19 @@ pub fn slice_dir(
     out: &Path,
     from: u32,
     to: u32,
+) -> Result<Vec<SliceFile>, ExportError> {
+    slice_dir_with(input, out, from, to, &mut |_| Ok(()))
+}
+
+/// [`slice_dir`] with a hook called at each [`Stage`]; an error from the hook fails the run as
+/// any other error does. On any error every file this run created in `out` (partial or already
+/// renamed) is removed.
+pub fn slice_dir_with(
+    input: &Path,
+    out: &Path,
+    from: u32,
+    to: u32,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
 ) -> Result<Vec<SliceFile>, ExportError> {
     check_window(from, to)?;
     let mut names: Vec<PathBuf> = fs::read_dir(input)
@@ -304,7 +347,10 @@ pub fn slice_dir(
         .collect();
     names.sort();
     if names.is_empty() {
-        return Err(ExportError::Input(format!("{}: no .ast files", input.display())));
+        return Err(ExportError::Input(format!(
+            "{}: no .ast files",
+            input.display()
+        )));
     }
     fs::create_dir_all(out).map_err(|e| io_err(out, &e))?;
     // Not the input directory (by canonical path), and empty: nothing of an earlier run is mixed in.
@@ -315,56 +361,90 @@ pub fn slice_dir(
     if cin == cout {
         return Err(ExportError::Input("--out is the --in directory".into()));
     }
-    let occupied = fs::read_dir(out).map_err(|e| io_err(out, &e))?.next().is_some();
+    let occupied = fs::read_dir(out)
+        .map_err(|e| io_err(out, &e))?
+        .next()
+        .is_some();
     if occupied {
         return Err(ExportError::Input(format!(
             "{}: the output directory is not empty",
             out.display()
         )));
     }
-    let mut files = Vec::new();
-    let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut failure = None;
-    for p in &names {
-        let dest = out.join(p.file_name().unwrap_or_default());
-        match slice_file(p, &dest, from, to) {
-            Ok((info, partial)) => {
-                files.push(info);
-                if let Some(pp) = partial {
-                    renames.push((pp, dest));
-                }
+    // (partial, final) of every file of this run.
+    let mut pending: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut renamed: Vec<PathBuf> = Vec::new();
+    let result = (|| {
+        let mut files = Vec::new();
+        for p in &names {
+            let dest = out.join(p.file_name().unwrap_or_default());
+            let partial = dest.with_extension("ast.partial");
+            // The partial exists once slice_file runs; list it first so a failure removes it.
+            pending.push((partial, dest.clone()));
+            let (info, kept) = slice_file(p, &dest, from, to)?;
+            if kept.is_none() {
+                pending.pop();
             }
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
+            files.push(info);
+        }
+        if files.iter().all(|f| f.records_kept == 0) {
+            let counts: Vec<String> = files
+                .iter()
+                .map(|f| format!("{}: {} in, 0 kept", f.name, f.records_in))
+                .collect();
+            return Err(ExportError::Input(format!(
+                "no record of any file is in the window {} to {}: {}",
+                clock_text(from),
+                clock_text(to),
+                counts.join("; ")
+            )));
+        }
+        let ds = input.join("data_sources.json");
+        if ds.exists() {
+            let dest = out.join("data_sources.json");
+            let partial = out.join("data_sources.json.partial");
+            pending.push((partial.clone(), dest));
+            fs::copy(&ds, &partial).map_err(|e| io_err(&ds, &e))?;
+        }
+        let src_readme = fs::read_to_string(input.join("README.txt")).unwrap_or_default();
+        let readme = slice_readme(input, from, to, &files, &src_readme);
+        let (rp, rf) = (out.join("README.txt.partial"), out.join("README.txt"));
+        pending.push((rp.clone(), rf));
+        fs::write(&rp, readme).map_err(|e| io_err(&rp, &e))?;
+        hook(Stage::Verified)?;
+        // One pass of renames.
+        for (k, (from_p, to_p)) in pending.iter().enumerate() {
+            fs::rename(from_p, to_p).map_err(|e| io_err(to_p, &e))?;
+            renamed.push(to_p.clone());
+            hook(Stage::Renamed(k + 1))?;
+        }
+        Ok(files)
+    })();
+    if result.is_err() {
+        for (partial, _) in &pending {
+            let _ = fs::remove_file(partial);
+        }
+        for f in &renamed {
+            let _ = fs::remove_file(f);
         }
     }
-    if let Some(e) = failure {
-        for (from, _) in &renames {
-            let _ = fs::remove_file(from);
-        }
-        return Err(e);
-    }
-    for (from, to) in &renames {
-        fs::rename(from, to).map_err(|e| io_err(to, &e))?;
-    }
-    let ds = input.join("data_sources.json");
-    if ds.exists() {
-        fs::copy(&ds, out.join("data_sources.json")).map_err(|e| io_err(&ds, &e))?;
-    }
-    let src_readme = fs::read_to_string(input.join("README.txt")).unwrap_or_default();
-    let readme = slice_readme(input, from, to, &files, &src_readme);
-    let rp = out.join("README.txt");
-    fs::write(&rp, readme).map_err(|e| io_err(&rp, &e))?;
-    Ok(files)
+    result
 }
 
 /// The README of a slice.
-pub fn slice_readme(input: &Path, from: u32, to: u32, files: &[SliceFile], src_readme: &str) -> String {
+pub fn slice_readme(
+    input: &Path,
+    from: u32,
+    to: u32,
+    files: &[SliceFile],
+    src_readme: &str,
+) -> String {
     use std::fmt::Write as _;
     let mut o = String::new();
-    let _ = writeln!(o, "A time slice of an oa-compass export, for OpenATS COMPASS\n");
+    let _ = writeln!(
+        o,
+        "A time slice of an oa-compass export, for OpenATS COMPASS\n"
+    );
     let _ = writeln!(
         o,
         "Window: {} to {} UTC time of day, from and including, to and excluding (I070 for CAT062 files, I073 for CAT021 files; 1/128 s).",
@@ -372,18 +452,31 @@ pub fn slice_readme(input: &Path, from: u32, to: u32, files: &[SliceFile], src_r
         clock_text(to)
     );
     let _ = writeln!(o, "Source directory: {}", input.display());
-    if let Some(l) = src_readme.lines().find(|l| l.starts_with("UTC date to give at import")) {
+    if let Some(l) = src_readme
+        .lines()
+        .find(|l| l.starts_with("UTC date to give at import"))
+    {
         let _ = writeln!(o, "{l} (as in the source README)");
     }
-    let _ = writeln!(o, "The window is inside one UTC day; a window across midnight is refused.");
+    let _ = writeln!(
+        o,
+        "The window is inside one UTC day; a window across midnight is refused."
+    );
     let _ = writeln!(
         o,
         "Method: every file of the source directory was read block by block with this repository's decoder (CAT062 Ed 1.21, CAT021 Ed 2.4), the records inside the window were kept unchanged and written again into data blocks of up to {RECORDS_PER_BLOCK} records, every block was decoded again and equals what was encoded, and every file was read back from disk and equals what was written. No value of any record is changed; the data sources are those of data_sources.json, copied as it is. The source README describes the formats, the items and the omissions; its counts are for the whole day, not for this window."
     );
-    let _ = writeln!(o, "\nFiles (records in the source file, records kept, blocks, octets):");
+    let _ = writeln!(
+        o,
+        "\nFiles (records in the source file, records kept, blocks, octets):"
+    );
     for f in files {
         if f.records_kept == 0 {
-            let _ = writeln!(o, "  {}: {} in, 0 kept; no file written (no record in the window)", f.name, f.records_in);
+            let _ = writeln!(
+                o,
+                "  {}: {} in, 0 kept; no file written (no record in the window)",
+                f.name, f.records_in
+            );
         } else {
             let _ = writeln!(
                 o,

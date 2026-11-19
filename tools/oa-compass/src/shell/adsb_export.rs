@@ -1,5 +1,5 @@
-//! Shell (B1): the CAT021 Ed 2.4 file of one day, `adsb.ast`: the ADS-B reports the OpenATCA
-//! tracker was fed, one record per report, in time order. Same discipline as the CAT062 files:
+//! Shell (B1): the CAT021 Ed 2.4 file of one day, `adsb.ast`: the ADS-B reports
+//! offered to the tracker's adapter (a superset of those it used), one record per report, in time order. Same discipline as the CAT062 files:
 //! every block is decoded again before it is written and must equal the records encoded, files
 //! are written as `.partial` and renamed when everything has succeeded, and the committed files
 //! are read back from disk. The values come from [`crate::core::adsb`]; the layout of a record is
@@ -17,9 +17,7 @@ use oa_asterix::{
 
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Layout};
-use crate::core::adsb::{
-    count_adsb_notes, AdsbConverted, AdsbRefusal, AdsbValues, ADSB_NOTES,
-};
+use crate::core::adsb::{count_adsb_notes, AdsbConverted, AdsbRefusal, AdsbValues, ADSB_NOTES};
 
 /// Edition written and read back.
 pub const EDITION: Cat021Edition = Cat021Edition::Ed24;
@@ -399,7 +397,9 @@ pub fn read_back(
         let (block, used) =
             decode_block_with(&buf, EDITION).map_err(|e| bad(format!("block {n_blk}: {e:?}")))?;
         if used != len {
-            return Err(bad(format!("block {n_blk}: {used} octets decoded of {len}")));
+            return Err(bad(format!(
+                "block {n_blk}: {used} octets decoded of {len}"
+            )));
         }
         let Block::Cat021(recs) = block else {
             return Err(bad(format!("block {n_blk}: not category 21")));
