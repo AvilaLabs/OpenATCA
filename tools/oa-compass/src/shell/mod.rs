@@ -11,3 +11,4 @@ pub mod error;
 pub mod export;
 pub mod notes;
 pub mod run;
+pub mod slice;

@@ -539,9 +539,9 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let doc = oa_json::parse(text.as_bytes(), &oa_json::DEFAULT_LIMITS).unwrap();
     let list = doc.get(oa_json::NodeIx(0), "data_sources").unwrap();
     let third = doc.elements(list).nth(2).unwrap();
-    assert_eq!(doc.str(doc.get(third, "ds_type").unwrap()), Some("ADS-B"));
+    assert_eq!(doc.str(doc.get(third, "ds_type").unwrap()), Some("ADSB"));
     assert_eq!(doc.as_i64(doc.get(third, "sic").unwrap()), Some(3));
-    assert!(text.contains(r#""ds_type":"ADS-B","name":"ADS-B","sac":255,"sic":3"#), "{text}");
+    assert!(text.contains(r#""ds_type":"ADSB","name":"ADS-B","sac":255,"sic":3"#), "{text}");
     assert!(text.contains(r#""name":"OpenATCA","sac":255,"sic":1"#));
     // README.
     let (lay, _) = layout("readme", false);

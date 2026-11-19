@@ -28,6 +28,7 @@ use oa_compass::shell::export::{date_text, Finished, Layout, SystemExport};
 use oa_compass::shell::notes::{
     data_sources_json, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
+use oa_compass::shell::slice;
 use oa_compass::shell::run::{export_adsb_clip, export_eram, ClipInfo, InputsMode};
 use oa_replay::FeedKind;
 
@@ -57,6 +58,9 @@ fn build_text() -> String {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("slice") {
+        return slice_main();
+    }
     let (mut date, mut out, mut adsb, mut sfdps) = (None, None, None, None);
     let mut split = false;
     let mut mode = InputsMode::All;
@@ -301,4 +305,41 @@ fn export_all(
         done.systems.push(f);
     }
     Ok(())
+}
+
+const SLICE_USAGE: &str = "usage: oa-compass slice --in <dir> --from <HH:MM:SS> --to <HH:MM:SS> --out <dir>";
+
+/// `oa-compass slice`: a time window of the `.ast` files of a finished export.
+fn slice_main() -> ExitCode {
+    let (mut inp, mut out, mut from, mut to) = (None, None, None, None);
+    let mut args = std::env::args().skip(2);
+    while let Some(a) = args.next() {
+        let v = args.next();
+        match a.as_str() {
+            "--in" => inp = v.map(PathBuf::from),
+            "--out" => out = v.map(PathBuf::from),
+            "--from" => from = v.as_deref().and_then(slice::parse_clock),
+            "--to" => to = v.as_deref().and_then(slice::parse_clock),
+            _ => {
+                eprintln!("oa-compass slice: unknown argument {a}\n{SLICE_USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let (Some(inp), Some(out), Some(from), Some(to)) = (inp, out, from, to) else {
+        eprintln!("oa-compass slice: --in, --out, --from and --to (HH:MM:SS) are required\n{SLICE_USAGE}");
+        return ExitCode::from(2);
+    };
+    match slice::slice_dir(&inp, &out, from, to) {
+        Ok(files) => {
+            for f in &files {
+                println!("{}: {} in, {} kept, {} blocks, {} octets", f.name, f.records_in, f.records_kept, f.blocks, f.bytes);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("oa-compass slice: {e}");
+            ExitCode::from(1)
+        }
+    }
 }

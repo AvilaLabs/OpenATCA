@@ -4460,3 +4460,8 @@ scope.
 - **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 3, DSType "ADS-B"); the README states
   the Ed 2.4 format, how each value was made, every omission with its count, and that a reference built from
   `adsb.ast` is not independent of OpenATCA's inputs (UK-008) and that ERAM also uses ADS-B.
+- **OA-CMP-027** `oa-compass slice --in DIR --from HH:MM:SS --to HH:MM:SS --out DIR2` reads each `.ast` file with
+  the decoder (CAT062 Ed 1.21, CAT021 Ed 2.4), keeps the records with I070 or I073 in [from, to), writes them
+  again unchanged in verified blocks, reads each file back, copies `data_sources.json` and writes a README with
+  the window, the source directory and the records in and kept per file; a window across midnight or empty, a
+  category other than 21 and 62, and a damaged file are refused, leaving no partial file.

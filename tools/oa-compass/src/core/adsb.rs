@@ -29,12 +29,14 @@
 //! * I160 ground speed (2^-14 NM/s) and track angle (360/2^16 degrees); both or neither.
 //! * I170 identification, I020 emitter category (table below).
 //! * I090 quality: NACv and NIC in the primary subfield; first extension NICBARO (not in the
-//!   source: written 0), SIL and NACp; second extension SILS, SDA and GVA. A field the source
+//!   source and the item has no unknown code: written 0 = not cross-checked, the conservative
+//!   value), SIL and NACp; second extension SILS, SDA and GVA. A field the source
 //!   lacks is written 0, the specification's "unknown" code for each of them. PIC (third
 //!   extension) is not in the source and is left out. How NACv and NIC are to be read depends on
 //!   the MOPS version (I210/VN), which is why I210 is sent with them.
 //! * I210: VN from the report's version, 0 to 2 (Ed 2.4 does not define 3); LTT 0 (other),
-//!   because the source does not say whether the report came by 1090 ES, UAT or VDL 4.
+//!   because the source does not say whether the report came by 1090 ES, UAT or VDL 4 and the item
+//!   has no unknown code (0 = other claims none of the three).
 //!
 //! Emitter category (ADS-B set and code, to I021/020 in Ed 2.4 5.2.5): A1 1, A2 2, A3 3, A4 4, A5
 //! 5, A6 6, A7 10, B1 11, B2 12, B3 16, B4 15, B6 13, B7 14, C1 20, C2 21, C3 22, C4 23, C5 24.
@@ -78,7 +80,7 @@ pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
     "I161 track number: ADS-B reports carry none (item omitted)",
     "I071 time of applicability for position: the source has no avionics time (item omitted; I073 is sent)",
     "I075 time of message reception of velocity: the source has one time per report (item omitted)",
-    "I040 DCR, SIM, TST, SAA, RC, RAB and the error conditions: not in the source (written at the default 0; CL written 2, no information)",
+    "I040 DCR, SIM, TST, SAA, RC, RAB and the error conditions: source has none, and the item has no absent value (written 0, the specification's default, which asserts: no differential correction, actual target, not a test target, equipment capable of selected altitude, no range check pending, transponder report, no error; CL written 2, no information)",
     "I040 ATP: the address is not an ICAO address (written as 3, anonymous)",
     "I145 flight level: report has no barometric altitude or is on the ground (item omitted)",
     "I145 flight level: outside -15 FL to 1500 FL (item omitted)",
@@ -93,13 +95,13 @@ pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
     "I020 emitter category: report has none (item omitted)",
     "I020 emitter category: the category has no I020 code (item omitted)",
     "I090 quality indicators: report has none of NIC, NACp, NACv, SIL, SDA, GVA (item omitted)",
-    "I090 NICBARO: not in the source (written 0)",
+    "I090 NICBARO: source has no NIC_baro; the item has no unknown code, so written 0 = not cross-checked, the conservative value",
     "I090 PIC: not in the source (third extension omitted)",
     "I090 NIC, NACp, NACv, SIL, SILS, SDA or GVA: at least one the report lacks or that does not fit its bits (written 0, unknown)",
     "I210 MOPS version: report has none (item omitted)",
     "I210 MOPS version: 3 or more, not defined in Ed 2.4 (item omitted)",
     "I131 longitude: +180 degrees (written as -180)",
-    "I210 LTT link technology: not in the source (written 0, other)",
+    "I210 LTT link technology: source does not say; the item has no unknown code, so written 0 = other (claims neither 1090 ES, UAT nor VDL 4)",
 ];
 
 /// One ADS-B report as the conversion needs it: the optional fields opened out and the address

@@ -455,13 +455,19 @@ fn the_data_source_file_parses_and_names_both_systems() {
     let list = get(root, "data_sources");
     let items: Vec<_> = doc.elements(list).collect();
     assert_eq!(items.len(), 3);
+    // The strings of the COMPASS manual's data-source example (p. 486-487).
+    assert_eq!(
+        oa_compass::shell::notes::DS_TYPES,
+        ["Radar", "MLAT", "ADSB", "Tracker", "RefTraj", "Other"]
+    );
     let want = [
         ("OpenATCA", 255, 1, "Tracker"),
         ("ERAM", 255, 2, "Tracker"),
-        ("ADS-B", 255, 3, "ADS-B"),
+        ("ADS-B", 255, 3, "ADSB"),
     ];
     for (it, (name, sac, sic, ty)) in items.iter().zip(want) {
         assert_eq!(doc.str(get(*it, "ds_type")), Some(ty));
+        assert!(oa_compass::shell::notes::DS_TYPES.contains(&ty));
         assert_eq!(doc.str(get(*it, "name")), Some(name));
         assert_eq!(doc.as_i64(get(*it, "sac")), Some(sac));
         assert_eq!(doc.as_i64(get(*it, "sic")), Some(sic));

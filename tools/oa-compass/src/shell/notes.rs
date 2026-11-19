@@ -36,6 +36,9 @@ pub const ERAM_SOURCE: SourceId = SourceId { sac: 255, sic: 2 };
 /// The data source of the ADS-B reports file (see [`OPENATCA_SOURCE`]).
 pub const ADSB_SOURCE: SourceId = SourceId { sac: 255, sic: 3 };
 
+/// The `ds_type` strings the COMPASS manual's data-source example uses.
+pub const DS_TYPES: [&str; 6] = ["Radar", "MLAT", "ADSB", "Tracker", "RefTraj", "Other"];
+
 /// The COMPASS data-source file: the two trackers and the ADS-B source.
 pub fn data_sources_json() -> String {
     let one = |ty: &str, name: &str, s: SourceId| {
@@ -48,7 +51,7 @@ pub fn data_sources_json() -> String {
         "{{\"content_type\":\"data_sources\",\"content_version\":\"0.2\",\"data_sources\":[{},{},{}]}}\n",
         one("Tracker", "OpenATCA", OPENATCA_SOURCE),
         one("Tracker", "ERAM", ERAM_SOURCE),
-        one("ADS-B", "ADS-B", ADSB_SOURCE)
+        one("ADSB", "ADS-B", ADSB_SOURCE)
     )
 }
 
@@ -341,7 +344,7 @@ const ADSB_BASIS: [&str; 8] = [
     "Position: I131, 180/2^30 degrees, from the 1e-7 degree of the source; a longitude of +180 is written as -180.",
     "Altitude: I145 is the barometric (pressure) altitude of the report in 1/4 FL (25 ft steps, rounding at most 12.5 ft); I140 is the geometric height in 6.25 ft steps. Neither is clipped: a value outside the item's range is omitted and counted.",
     "I040: ATP is 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; Ed 2.4 does not say how to code the latter, and the Ed 2.7 note recommends 3. ARC is 2 (unknown), CL is 2 (no information), and DCR, SIM, TST, SAA, RC and RAB are the specification's default 0 because the source has none of them.",
-    "I090 and I210: values are those of the report after the scorer's quality handling, which carries the last known NIC, NACp, NACv, SIL and version forward within an aircraft's sequence; a field the aircraft never sent is written 0, the code for unknown. NICBARO and PIC are not in the source (NICBARO is written 0 because the first extension needs the bit; PIC is omitted). I210 LTT is 0 (other): the source does not say which link carried the report. NACv and NIC are to be read with the version in I210.",
+    "I090 and I210: values are those of the report after the scorer's quality handling, which carries the last known NIC, NACp, NACv, SIL and version forward within an aircraft's sequence; a field the aircraft never sent is written 0, the code for unknown. Defaults written because the format has no absent value: NICBARO is not in the source and Ed 2.4 has no unknown code for it, so it is written 0 (in ED-102A/DO-260B: barometric altitude not cross-checked, the conservative value); I210 LTT is written 0 (other, claiming neither 1090 ES, UAT nor VDL 4) because the source does not say which link carried the report; SILS, when the report has no SIL type, is written 0 (per flight-hour, the default; the bit has no unknown code); DCR, SIM, TST, SAA, RC, RAB are written 0, the specification's defaults. PIC is omitted (the extension is optional). NACv and NIC are to be read with the version in I210.",
     "Source filter: only reports of ADS-B source types (adsb_icao, adsb_icao_nt, adsb_other; or a clip without a source column) are written; other source types and positions the source marks stale are left out and counted.",
     "INDEPENDENCE: adsb.ast holds the same reports, after the same duplicate removal, that were fed to the OpenATCA tracker. A reference or track built from it is therefore NOT independent of OpenATCA's inputs (this project's uncertainty UK-008: the ADS-B reports are not an independent truth for the OpenATCA output).",
     "ERAM also uses ADS-B: its inputs include ADS-B reports (from its own receivers, not this clip), so ADS-B is not independent of ERAM's output either.",
