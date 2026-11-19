@@ -112,6 +112,12 @@ fn sample_nature(report: &SystemReport, d: &DayReport) -> String {
     };
     let iv = &d.intervals;
     let secs = |u: u32| f64::from(u) / 128.0;
+    if iv.pairs == 0 {
+        // Nothing is measured, so no value is shown (E6).
+        return format!(
+            "sample nature: {what}. Measured interval between consecutive rows of one track in this file: no consecutive rows of one track (0 pairs)"
+        );
+    }
     format!(
         "sample nature: {what}. Measured interval between consecutive rows of one track in this file: median {:.3} s, 90th percentile {:.3} s, longest {:.3} s, over {} pairs of rows ({} of them at the same time)",
         secs(iv.median),

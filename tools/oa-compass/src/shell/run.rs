@@ -21,16 +21,16 @@ use super::error::ExportError;
 use super::export::SystemExport;
 use crate::core::addrcheck::{check_flight, RefPoint, Verdict};
 use crate::core::adsb::{adsb_record, AdsbRow};
-use crate::core::convert::{eram_record, track_record, EramRow, TrackRow};
+use crate::core::convert::{eram_record, eram_refusal, track_record, EramRow, TrackRow};
 
 /// What a tracker run did besides the rows exported. A7.2: cold.
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrackRunInfo {
     pub measurements: u64,
-    /// Tick rows exported (`--openatca-rows ticks`).
+    /// Tick rows written (`--openatca-rows ticks`); a row refused by the conversion is not one.
     pub tick_rows: u64,
-    /// Update rows (the state at each applied report) exported (`--openatca-rows updates`).
+    /// Update rows (the state at each applied report) written (`--openatca-rows updates`).
     pub update_rows: u64,
     /// Update rows not exported (in `ticks` mode, all of them).
     pub update_rows_not_exported: u64,
@@ -86,7 +86,12 @@ pub enum OpenatcaRows {
     Updates,
 }
 
-/// Offers the rows of `out` that `rows` selects to `ex`; the others are counted.
+/// Offers the rows of `out` that `rows` selects to `ex`; the others are counted. The counters of
+/// the exported rows (ticks, updates, coasting, uncertain, reacquired, unconfirmed identity) and
+/// the time of the last update row change only for a row that was written; a row that is refused
+/// is counted under the export's refusals and nowhere else. In `updates` mode the rows of one
+/// call are taken in time order (stable for equal times), so that fewer fall behind a row already
+/// written.
 pub fn export_output(
     out: &TrackOutput,
     ex: &mut SystemExport,
@@ -94,42 +99,48 @@ pub fn export_output(
     mono: bool,
     rows: OpenatcaRows,
 ) -> Result<(), ExportError> {
+    let mut wanted: Vec<usize> = Vec::new();
     for i in 0..output_len(out) {
+        let is_tick = out.flags.get(i).is_some_and(|f| f & O_TICK != 0);
+        if is_tick == (rows == OpenatcaRows::Ticks) {
+            wanted.push(i);
+        } else if is_tick {
+            info.tick_rows_not_exported = info.tick_rows_not_exported.saturating_add(1);
+        } else {
+            info.update_rows_not_exported = info.update_rows_not_exported.saturating_add(1);
+        }
+    }
+    if rows == OpenatcaRows::Updates {
+        wanted.sort_by_key(|&i| (out.t_ns.get(i).copied().unwrap_or(0), i));
+    }
+    for i in wanted {
         let Some((row, key)) = track_row(out, i, mono) else {
             return Err(ExportError::Input(format!(
                 "tracker output row {i} has a column shorter than the table"
             )));
         };
-        let is_tick = out.flags.get(i).is_some_and(|f| f & O_TICK != 0);
-        let wanted = is_tick == (rows == OpenatcaRows::Ticks);
-        if !wanted {
-            if is_tick {
-                info.tick_rows_not_exported = info.tick_rows_not_exported.saturating_add(1);
-            } else {
-                info.update_rows_not_exported = info.update_rows_not_exported.saturating_add(1);
-            }
+        // Update rows come in the order the reports were applied; a late report can give a row
+        // earlier than one already written, and the file is in time order.
+        if rows == OpenatcaRows::Updates && info.last_update_ns.is_some_and(|t| row.t_ns < t) {
+            info.updates_out_of_order = info.updates_out_of_order.saturating_add(1);
             continue;
         }
-        if rows == OpenatcaRows::Updates {
-            // Update rows come in the order the reports were applied; a late report can give a
-            // row earlier than one already written, and the file is in time order.
-            if info.last_update_ns.is_some_and(|t| row.t_ns < t) {
-                info.updates_out_of_order = info.updates_out_of_order.saturating_add(1);
-                continue;
-            }
-            info.last_update_ns = Some(row.t_ns);
-            info.update_rows = info.update_rows.saturating_add(1);
-        } else {
-            info.tick_rows = info.tick_rows.saturating_add(1);
-        }
-        info.uncertain = info.uncertain.saturating_add(u64::from(row.uncertain));
-        info.reacquired = info.reacquired.saturating_add(u64::from(row.reacquired));
-        info.coasting = info.coasting.saturating_add(u64::from(row.coast));
-        info.unconfirmed_identity = info
-            .unconfirmed_identity
-            .saturating_add(u64::from(row.identity_unconfirmed));
         match track_record(&row) {
-            Ok(c) => ex.push(&c, key, (row.lat_e7, row.lon_e7))?,
+            Ok(c) => {
+                ex.push(&c, key, (row.lat_e7, row.lon_e7))?;
+                if rows == OpenatcaRows::Updates {
+                    info.last_update_ns = Some(row.t_ns);
+                    info.update_rows = info.update_rows.saturating_add(1);
+                } else {
+                    info.tick_rows = info.tick_rows.saturating_add(1);
+                }
+                info.uncertain = info.uncertain.saturating_add(u64::from(row.uncertain));
+                info.reacquired = info.reacquired.saturating_add(u64::from(row.reacquired));
+                info.coasting = info.coasting.saturating_add(u64::from(row.coast));
+                info.unconfirmed_identity = info
+                    .unconfirmed_identity
+                    .saturating_add(u64::from(row.identity_unconfirmed));
+            }
             Err(r) => ex.refuse(r),
         }
     }
@@ -208,6 +219,10 @@ pub struct ClipInfo {
     /// What the tracker's own adapter (oa-truth's quality gates and the rest) removed from the
     /// reports it was offered.
     pub gate: oa_track::adsb::AdsbStats,
+    /// Every ADS-B report of the whole clip (before the split and the duplicate removal), ICAO
+    /// addresses only, not stale and of an ADS-B source type, sorted by (address, time): what the
+    /// ERAM address check compares the flights with. Under `--inputs split` this includes set B.
+    pub positions: Vec<RefPoint>,
 }
 
 /// What became of the reports offered to the ADS-B file. A7.2: cold.
@@ -220,9 +235,31 @@ pub struct AdsbInfo {
     /// Source types that are not ADS-B (`oa_truth::ADSB_SOURCES`), by name.
     pub other_sources: Vec<(String, u64)>,
     pub converted: u64,
-    /// The reports written, ICAO addresses only, sorted by (address, time): what the ERAM
-    /// address check compares the flights with.
-    pub positions: Vec<RefPoint>,
+}
+
+/// The reference points of the address check: every report of `reports` that is not stale, of an
+/// ADS-B source type and under an ICAO address, sorted by (address, time).
+pub fn ref_points(reports: &oa_adsb::Reports) -> Vec<RefPoint> {
+    let mut v = Vec::new();
+    for i in 0..oa_adsb::reports_len(reports) {
+        let Some(row) = oa_adsb::reports_row(reports, i) else {
+            continue;
+        };
+        if row.flags & oa_adsb::F_STALE != 0
+            || row.icao & oa_adsb::NON_ICAO != 0
+            || (row.source != oa_adsb::NONE_U8 && !oa_truth::ADSB_SOURCES.contains(&row.source))
+        {
+            continue;
+        }
+        v.push(RefPoint {
+            address: row.icao & 0xFF_FFFF,
+            t_ns: row.time_ns,
+            lat_e7: row.lat_e7,
+            lon_e7: row.lon_e7,
+        });
+    }
+    v.sort_unstable();
+    v
 }
 
 /// The ADS-B reports as CAT021 rows, in time order (time, address, input order).
@@ -264,14 +301,6 @@ pub fn export_adsb_reports(
             Ok(c) => {
                 ax.push(&c, (row.lat_e7, row.lon_e7))?;
                 info.converted = info.converted.saturating_add(1);
-                if row.icao & oa_adsb::NON_ICAO == 0 {
-                    info.positions.push(RefPoint {
-                        address: row.icao & 0xFF_FFFF,
-                        t_ns: row.time_ns,
-                        lat_e7: row.lat_e7,
-                        lon_e7: row.lon_e7,
-                    });
-                }
             }
             Err(r) => ax.refuse(r),
         }
@@ -284,7 +313,6 @@ pub fn export_adsb_reports(
             info.other_sources.push((name, c));
         }
     }
-    info.positions.sort_unstable();
     Ok(info)
 }
 
@@ -340,6 +368,7 @@ pub fn export_adsb_clip(
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let clip = oa_bench::input::load_adsb(path)
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
+    let positions = ref_points(&clip.reports);
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
     drop(clip);
     let mut info = ClipInfo {
@@ -348,6 +377,7 @@ pub fn export_adsb_clip(
         split,
         adsb: None,
         gate: oa_track::adsb::AdsbStats::default(),
+        positions,
     };
     drop(other);
     if let Some(ax) = adsb {
@@ -405,6 +435,10 @@ pub struct EramInfo {
     pub flights_agree: u64,
     pub flights_not_checked: u64,
     pub flights_contradicted: u64,
+    /// Flights whose address is not an ICAO address (above 0xFFFFFF): their own outcome.
+    pub flights_non_icao: u64,
+    /// What was done with the contradicting flights.
+    pub address: EramAddress,
     /// The largest median distance among the flights that agree, metres: how far the rule's
     /// threshold is from what the agreeing flights do in this run.
     pub agree_max_median_m: u64,
@@ -476,30 +510,46 @@ pub fn eram_input_counts(c: &Counts) -> Result<Vec<(String, u64)>, ExportError> 
 /// Longest list of addresses on several flights written to the README.
 const SEVERAL_LISTED: usize = 50;
 
+/// What the export does with the address of a flight whose track contradicts it
+/// (`--eram-contradicted-address`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EramAddress {
+    /// Write the address ERAM published. The default: a wrong address is ERAM's own
+    /// identification error and stays visible to the evaluator; the check only reports it.
+    #[default]
+    Keep,
+    /// Write the flight without I380 address. The file is altered; the README says so and lists
+    /// the flights.
+    Drop,
+}
+
 /// Per flight: its rows and, for the address check, its positions.
 struct FlightRows {
-    rows: u64,
     samples: Vec<(i64, i32, i32)>,
 }
 
-/// The flights that contradict their address, and the counts by outcome, into `info`. Returns
-/// the set of the contradicting flights.
+/// The check of every flight with an address, counts by outcome into `info`; returns the flights
+/// that contradict their address. The four outcomes add up to the flights with an address, or the
+/// run is refused.
 fn address_check(
     leg: &Legacy,
     flights: &HashMap<u32, FlightRows>,
     refs: &[RefPoint],
     info: &mut EramInfo,
-) -> HashSet<u32> {
-    let mut withheld = HashSet::new();
+) -> Result<HashSet<u32>, ExportError> {
+    let mut contradicting = HashSet::new();
     let mut ids: Vec<u32> = flights.keys().copied().collect();
     ids.sort_unstable();
     for f in ids {
         let Some(fr) = flights.get(&f) else { continue };
         let addr = leg.flights.addr.get(f as usize).copied().unwrap_or(NONE);
-        if addr == NONE || addr > 0x00FF_FFFF {
+        if addr == NONE {
             continue;
         }
         match check_flight(addr, &fr.samples, refs) {
+            Verdict::NonIcao => {
+                info.flights_non_icao = info.flights_non_icao.saturating_add(1);
+            }
             Verdict::NotChecked { .. } => {
                 info.flights_not_checked = info.flights_not_checked.saturating_add(1);
             }
@@ -528,21 +578,35 @@ fn address_check(
                     pairs: pairs as u64,
                     median_m: (median_km * 1000.0) as u64,
                 });
-                withheld.insert(f);
+                contradicting.insert(f);
             }
         }
     }
-    withheld
+    let sum = info
+        .flights_agree
+        .saturating_add(info.flights_not_checked)
+        .saturating_add(info.flights_contradicted)
+        .saturating_add(info.flights_non_icao);
+    if sum != info.flights_with_address {
+        return Err(ExportError::Verify(format!(
+            "address check: {sum} flights in the four outcomes, {} flights with an address",
+            info.flights_with_address
+        )));
+    }
+    Ok(contradicting)
 }
 
 /// Sorts the ERAM track samples by (position time, flight, input order) and exports them. With
-/// `refs` (the ADS-B reports of the day, sorted by address and time) every flight is checked
-/// against the reports of its own address, and a flight whose track contradicts its address is
-/// written without the address.
+/// `refs` (every ADS-B report of the clip, sorted by address and time) every flight with an
+/// address is checked against the reports of its own address; the samples used are those that
+/// are exported (not refused for position or time), one per flight and position time (the first
+/// of any copies or same-time conflicts). A flight that contradicts its address is listed, and
+/// with `address` = [`EramAddress::Drop`] written without it.
 pub fn export_eram(
     leg: &Legacy,
     ex: &mut SystemExport,
     refs: Option<&[RefPoint]>,
+    address: EramAddress,
 ) -> Result<EramInfo, ExportError> {
     let ingest = eram_input_counts(&leg.counts)?;
     ex.counts.extend(ingest);
@@ -557,25 +621,34 @@ pub fn export_eram(
             ));
         };
         order.push((t, f, ix));
-        let fr = flights.entry(f).or_insert_with(|| FlightRows {
-            rows: 0,
+        flights.entry(f).or_insert_with(|| FlightRows {
             samples: Vec::new(),
         });
-        fr.rows = fr.rows.saturating_add(1);
-        if refs.is_some() {
-            if let (Some(&la), Some(&lo)) = (th.lat_e7.get(i), th.lon_e7.get(i)) {
-                if let Some(ns) = t.checked_mul(1_000_000) {
-                    fr.samples.push((ns, la, lo));
-                }
-            }
-        }
     }
     order.sort_unstable();
     let mut info = EramInfo {
         rows_in: n as u64,
         checked: refs.is_some(),
+        address,
         ..EramInfo::default()
     };
+    // The samples of the check: exported ones, one per flight and position time.
+    if refs.is_some() {
+        let mut last: (i64, u32) = (i64::MIN, NONE);
+        for &(t, f, i) in &order {
+            let i = i as usize; // u32 to usize: lossless on the 64-bit targets this tool runs on
+            let (Some(&la), Some(&lo)) = (th.lat_e7.get(i), th.lon_e7.get(i)) else {
+                continue;
+            };
+            if eram_refusal(t, la, lo).is_some() || last == (t, f) {
+                continue;
+            }
+            last = (t, f);
+            if let (Some(fr), Some(ns)) = (flights.get_mut(&f), t.checked_mul(1_000_000)) {
+                fr.samples.push((ns, la, lo));
+            }
+        }
+    }
     // Flights with rows that the flight table knows, with an address.
     let mut by_address: BTreeMap<u32, u64> = BTreeMap::new();
     for &f in flights.keys() {
@@ -596,9 +669,14 @@ pub fn export_eram(
             }
         }
     }
-    let withheld = match refs {
-        Some(r) => address_check(leg, &flights, r, &mut info),
+    let contradicting = match refs {
+        Some(r) => address_check(leg, &flights, r, &mut info)?,
         None => HashSet::new(),
+    };
+    let withheld = if address == EramAddress::Drop {
+        contradicting
+    } else {
+        HashSet::new()
     };
     drop(flights);
     let mut group: (i64, u32) = (i64::MIN, NONE);

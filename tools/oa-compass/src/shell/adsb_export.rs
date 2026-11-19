@@ -150,6 +150,8 @@ pub struct AdsbExport {
     files: BTreeMap<i64, DayFile>,
     refused: [u64; 2],
     pub counts: Vec<(String, u64)>,
+    /// Added to the latitude of every source position (a verification self-test, 0 normally).
+    source_offset_e7: i32,
 }
 
 /// The renames that make a finished export visible.
@@ -189,7 +191,13 @@ impl AdsbExport {
             files: BTreeMap::new(),
             refused: [0; 2],
             counts: Vec::new(),
+            source_offset_e7: 0,
         }
+    }
+
+    /// Sets the verification self-test offset (see `Job::self_test_adsb_offset_e7`).
+    pub fn set_source_offset(&mut self, e7: i32) {
+        self.source_offset_e7 = e7;
     }
 
     /// Counts a report that was not converted.
@@ -246,7 +254,8 @@ impl AdsbExport {
         file.stats.last_time = t;
         file.stats.records = file.stats.records.saturating_add(1);
         file.pending.push(cat021_record(&c.values, self.source));
-        file.src_e7.push(src_e7);
+        file.src_e7
+            .push((src_e7.0.saturating_add(self.source_offset_e7), src_e7.1));
         count_adsb_notes(&mut file.notes, c.notes);
         if file.pending.len() >= RECORDS_PER_BLOCK {
             flush(file)?;

@@ -19,7 +19,7 @@ use oa_compass::shell::export::{read_back, Layout, SystemExport};
 use oa_compass::shell::notes::{
     clock_text, data_sources_json, readme, ERAM_SOURCE, OPENATCA_SOURCE,
 };
-use oa_compass::shell::run::{export_eram, export_output, OpenatcaRows};
+use oa_compass::shell::run::{export_eram, export_output, EramAddress, OpenatcaRows};
 
 /// 2026-11-15T00:00:00Z, Unix seconds, and the day count.
 const DAY_S: i64 = 20_772 * 86_400;
@@ -466,7 +466,7 @@ fn eram_samples_are_sorted_deduplicated_and_counted() {
             split: false,
         },
     );
-    let info = export_eram(&eram_legacy(), &mut ex, None).unwrap();
+    let info = export_eram(&eram_legacy(), &mut ex, None, EramAddress::Keep).unwrap();
     assert_eq!(info.rows_in, 6);
     assert_eq!(info.exact_duplicates, 1);
     assert_eq!(info.conflicting_same_time, 1);
@@ -587,7 +587,7 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
         split: false,
     };
     let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout);
-    let info = export_eram(&eram_legacy(), &mut ex, None).unwrap();
+    let info = export_eram(&eram_legacy(), &mut ex, None, EramAddress::Keep).unwrap();
     ex.counts
         .push(("samples in the input".into(), info.rows_in));
     let mut fin = ex.finish().unwrap();
@@ -757,7 +757,7 @@ fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
             split: false,
         },
     );
-    assert!(export_eram(&leg, &mut ex, None).is_err());
+    assert!(export_eram(&leg, &mut ex, None, EramAddress::Keep).is_err());
     ex.abort();
     assert!(fs::read_dir(&out).unwrap().next().is_none());
 }
@@ -777,7 +777,7 @@ fn the_readme_states_the_inputs_mode_and_the_leak_warning() {
             split: false,
         },
     );
-    export_eram(&eram_legacy(), &mut ex, None).unwrap();
+    export_eram(&eram_legacy(), &mut ex, None, EramAddress::Keep).unwrap();
     let rep = ex.finish().unwrap().commit().unwrap();
     let all = readme(DAY, &[&rep], "b", false, Some(InputsMode::All));
     assert!(all.contains("ALL (--inputs all)") && all.contains("like-for-like"));

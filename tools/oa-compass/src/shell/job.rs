@@ -15,13 +15,16 @@ use oa_bench::legacy::Legacy;
 use oa_replay::FeedKind;
 
 use super::adsb_export::{AdsbExport, AdsbFinished};
+use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Finished, Layout, SystemExport, SystemReport};
+use super::guard::refuse_holdout;
 use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
 use super::run::{
-    export_adsb_clip, export_eram, ClipInfo, EramInfo, InputsMode, OpenatcaRows, TrackRunInfo,
+    export_adsb_clip, export_eram, ClipInfo, EramAddress, EramInfo, InputsMode, OpenatcaRows,
+    TrackRunInfo,
 };
 use super::slice::Stage;
 
@@ -42,6 +45,13 @@ pub struct Job {
     pub sfdps: Option<EramSource>,
     pub mode: InputsMode,
     pub rows: OpenatcaRows,
+    /// What to do with the address of an ERAM flight that contradicts it.
+    pub eram_address: EramAddress,
+    /// Verification self-tests: added to the latitude of every ERAM / ADS-B source position
+    /// before the position check compares it with the decoded record, to show that an error over
+    /// the limit fails the whole run. 0 in every real run.
+    pub self_test_eram_offset_e7: i32,
+    pub self_test_adsb_offset_e7: i32,
 }
 
 /// What has been produced and not yet committed.
@@ -74,21 +84,18 @@ pub fn run_job(
 ) -> Result<Vec<String>, ExportError> {
     let t0 = Instant::now();
     let out = job.layout.out.clone();
-    // A new or empty directory only: nothing of an earlier run is mixed in or overwritten.
-    let existed = out.exists();
-    if existed {
-        let occupied = fs::read_dir(&out)
-            .map_err(|e| io_err(&out, &e))?
-            .next()
-            .is_some();
-        if occupied {
-            return Err(ExportError::Input(format!(
-                "{}: the output directory is not empty; the export writes into a new or empty directory only",
-                out.display()
-            )));
-        }
+    // The refusals that need no output directory come first: the sealed recording, a missing
+    // input, a directory that is not new or empty. `out` is created after them, and every level
+    // created is recorded so that a failed run removes them all.
+    if let Some(p) = &job.adsb {
+        refuse_holdout(p)?;
     }
-    fs::create_dir_all(&out).map_err(|e| io_err(&out, &e))?;
+    if let Some(EramSource::Dir(p)) = &job.sfdps {
+        refuse_holdout(p)?;
+    }
+    check_out(&out)?;
+    let mut run_dirs: Vec<PathBuf> = Vec::new();
+    create_tracked(&out, &mut run_dirs)?;
     let mut created: Vec<PathBuf> = Vec::new();
     let mut done = Done::default();
     let has_adsb = job.adsb.is_some();
@@ -108,18 +115,16 @@ pub fn run_job(
             // `done` was moved into the commit; its partials are removed there on failure. What
             // can remain is a partial of a system that failed in `export_all`, which that
             // function removed, and the directories of this run.
-            remove_run_dirs(&out, &job.layout, existed, &created);
+            remove_run_dirs(&out, &job.layout, &created, &run_dirs);
             Err(e)
         }
     }
 }
 
-/// Removes the day directories of a failed run, and the output directory if the run made it.
-/// Directories that are not empty are left.
-fn remove_run_dirs(out: &Path, layout: &Layout, existed: bool, created: &[PathBuf]) {
-    for d in created {
-        let _ = fs::remove_dir(d);
-    }
+/// Removes the directories of a failed run: the day directories, then every level of `out` the
+/// run created, deepest first, with `remove_dir` only (a directory that is not empty stays).
+fn remove_run_dirs(out: &Path, layout: &Layout, created: &[PathBuf], run_dirs: &[PathBuf]) {
+    remove_created(created);
     if layout.split {
         if let Ok(rd) = fs::read_dir(out) {
             for e in rd.filter_map(Result::ok) {
@@ -129,9 +134,7 @@ fn remove_run_dirs(out: &Path, layout: &Layout, existed: bool, created: &[PathBu
             }
         }
     }
-    if !existed {
-        let _ = fs::remove_dir(out);
-    }
+    remove_created(run_dirs);
 }
 
 fn eram_counts(info: &EramInfo) -> Vec<(String, u64)> {
@@ -175,12 +178,17 @@ fn eram_counts(info: &EramInfo) -> Vec<(String, u64)> {
                 info.flights_not_checked,
             ),
             (
-                "address check: flights whose track contradicts their address (exported without I380 address)"
+                "address check: flights with a non-ICAO address (above 0xFFFFFF; nothing to compare with)"
                     .into(),
+                info.flights_non_icao,
+            ),
+            (
+                "address check: flights whose track contradicts their address".into(),
                 info.flights_contradicted,
             ),
             (
-                "address check: rows written without I380 address because of it".into(),
+                "address check: rows written without I380 address because of it (--eram-contradicted-address drop)"
+                    .into(),
                 info.rows_address_withheld,
             ),
         ]);
@@ -215,14 +223,18 @@ fn eram_details(info: &EramInfo) -> Vec<String> {
     }
     if info.checked {
         v.push(format!(
-            "address check (same rule for every flight with an address): each track sample is paired with the ADS-B report of the same address nearest in time, at most {} s apart; with at least {} pairs, a flight whose MEDIAN distance is over {} km contradicts its address. Reason: a pair is at most 10 s apart, so the aircraft has moved under 3 km between them, and the two sources differ by a few km; the distance between two different aircraft is tens to hundreds of km. A flight that contradicts its address is exported WITHOUT I380 address (everything else unchanged), and listed here; a flight with fewer pairs is not checked and keeps its address.",
+            "address check (same rule for every flight with an address): the samples used are those that are exported (not refused for position or time), one per flight and position time (copies and same-time conflicting samples are reduced to the first). Each is paired with the ADS-B report of the same address nearest in time (the earlier of two equally near), at most {} s apart (exactly that far is paired). The report set is EVERY ADS-B report of the clip (not stale, ADS-B source type, ICAO address), before the duplicate removal and under --inputs split also including set B, not only the reports offered to the tracker. With at least {} pairs, a flight whose MEDIAN distance (the lower of the two middle values when the count is even) is over {} km (exactly that is not over) contradicts its address. Reason: a pair is at most 10 s apart, so the aircraft has moved under 3 km between them, and the two sources differ by a few km; the distance between two different aircraft is tens to hundreds of km. A non-ICAO address, a flight with fewer pairs, or one with no ADS-B reports under its address is not checked and nothing is claimed for it.",
             crate::core::addrcheck::MAX_PAIR_GAP_S,
             crate::core::addrcheck::MIN_PAIRS,
             crate::core::addrcheck::MAX_MEDIAN_KM
         ));
+        v.push(match info.address {
+            EramAddress::Keep => "address check is REPORT ONLY (--eram-contradicted-address keep, the default): every address is exported as ERAM published it. A contradicting address is ERAM's own identification error and stays visible to the evaluator; the flights are listed here with the evidence.".to_string(),
+            EramAddress::Drop => format!("ERAM FILE ALTERED (--eram-contradicted-address drop): {} rows of the {} flights listed here were written WITHOUT I380 address, which ERAM published; everything else is unchanged.", info.rows_address_withheld, info.flights_contradicted),
+        });
         for c in &info.contradicted {
             v.push(format!(
-                "  address withheld: flight {} callsign {} address {:06X}: {} samples, {} paired, median distance {} km",
+                "  contradicts its address: flight {} callsign {} address {:06X}: {} samples, {} paired, median distance {} km",
                 c.flight,
                 if c.callsign.is_empty() { "(none)" } else { &c.callsign },
                 c.address,
@@ -258,6 +270,7 @@ fn export_all(
     if let Some(clip) = &job.adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
         let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
+        ax.set_source_offset(job.self_test_adsb_offset_e7);
         let r = export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows);
         let (info, mut cinfo) = match r {
             Ok(x) => x,
@@ -275,9 +288,7 @@ fn export_all(
         for (l, v) in openatca_counts(&info, job.rows, &cinfo) {
             ex.counts.push((l, v));
         }
-        if let Some(a) = &mut cinfo.adsb {
-            positions = std::mem::take(&mut a.positions);
-        }
+        positions = std::mem::take(&mut cinfo.positions);
         if let Some(a) = &cinfo.adsb {
             for (l, v) in [
                 ("ADS-B reports offered to the file", a.rows_in),
@@ -312,6 +323,7 @@ fn export_all(
     }
     if let Some(src) = &job.sfdps {
         let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout.clone());
+        ex.set_source_offset(job.self_test_eram_offset_e7);
         let refs = job.adsb.is_some().then_some(positions.as_slice());
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
@@ -324,7 +336,7 @@ fn export_all(
                     "ERAM loaded at {:.1} s",
                     t0.elapsed().as_secs_f64()
                 ));
-                let info = match export_eram(&loaded.legacy, &mut ex, refs) {
+                let info = match export_eram(&loaded.legacy, &mut ex, refs, job.eram_address) {
                     Ok(i) => i,
                     Err(e) => {
                         ex.abort();
@@ -344,7 +356,7 @@ fn export_all(
                 (info, inputs)
             }
             EramSource::Loaded(leg, inputs) => {
-                let info = match export_eram(leg, &mut ex, refs) {
+                let info = match export_eram(leg, &mut ex, refs, job.eram_address) {
                     Ok(i) => i,
                     Err(e) => {
                         ex.abort();

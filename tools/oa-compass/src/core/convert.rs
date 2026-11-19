@@ -333,6 +333,21 @@ fn velocity_counts(east: f64, north: f64) -> Result<(i16, i16), bool> {
     }
 }
 
+/// Why an ERAM sample would be refused by [`eram_record`] (position outside the range of a
+/// latitude and longitude, or a time that does not convert), without converting it; `None` if it
+/// would be converted. The address check uses it to leave out the samples that are not exported.
+pub fn eram_refusal(pos_ms: i64, lat_e7: i32, lon_e7: i32) -> Option<Refusal> {
+    let Some(t_ns) = pos_ms.checked_mul(1_000_000) else {
+        return Some(Refusal::Time);
+    };
+    if day_time_of_ns(t_ns).is_none() {
+        return Some(Refusal::Time);
+    }
+    position(lat_e7, lon_e7)
+        .is_none()
+        .then_some(Refusal::Position)
+}
+
 /// Converts one OpenATCA tracker tick row.
 pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
     let DayTime { day, units } = day_time_of_ns(r.t_ns).ok_or(Refusal::Time)?;

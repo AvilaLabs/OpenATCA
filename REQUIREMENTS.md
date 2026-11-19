@@ -4492,10 +4492,37 @@ scope.
   `.partial`, all are renamed in one pass, and on any error every file this run created is removed.
 - **OA-CMP-035** Every ERAM flight with an address is checked against the ADS-B reports of the same address
   (nearest report within 10 s, at least 10 pairs, median distance over 25 km contradicts; the rule and its reason
-  are in the README); a flight whose track contradicts its address is exported without I380 address, counted,
-  and listed in the README, and a flight with too few pairs keeps its address and is counted as not checked.
+  are in the README); the check is report-only by default (`--eram-contradicted-address keep`: the address ERAM
+  published is written, a contradicting flight is counted and listed with its evidence); with `drop` the
+  contradicting flight is written without I380 address and the README says the file was altered and lists the
+  flights; a flight with too few pairs is counted as not checked in both modes.
 - **OA-CMP-036** `--openatca-rows ticks|updates` (default `ticks`, unchanged) selects the tracker's one-second tick
   rows or its update rows (one per applied report, at the report's time, earlier-than-written rows counted and
   left out); the README states the mode prominently and counts the rows of the other kind.
 - **OA-CMP-037** The README states that OpenATCA publishes a calculated altitude (I135) and no measured flight level
   (I136), so COMPASS's "Mode C Present" does not apply to it.
+- **OA-CMP-038** The address-check counts are exact: a non-ICAO address (above 0xFFFFFF) is its own outcome,
+  samples refused for position or time are not paired, copies and same-time conflicting samples are reduced to
+  the first before pairing, agree + not checked + contradicts + non-ICAO equals the flights with an address (or
+  the run fails), the arithmetic is checked, and the median is the lower middle value, as in `stats`.
+- **OA-CMP-039** The nearest-report search pairs a sample with the nearest report in time (the earlier when equally
+  near) within 10 s inclusive, and a median over 25.0 km (not 25.0 km itself) contradicts.
+- **OA-CMP-040** The row counters (ticks, updates, coasting, uncertain, reacquired, unconfirmed identity) and the
+  time of the last update row change only for rows that were written; a refused row is counted under refused
+  only; written + refused equals offered. In updates mode each batch is taken in time order.
+- **OA-CMP-041** The export and `slice` are all-or-nothing for directories too: `--out` is created only after the
+  refusal checks, every level a run creates is recorded, and on any error each is removed, deepest first, with
+  `remove_dir` only.
+- **OA-CMP-042** An `--out` that holds only `.partial` files is refused with a message that an earlier run was
+  interrupted and names the files; they are not removed.
+- **OA-CMP-043** An interval histogram with no pairs is stated as "no consecutive rows of one track (0 pairs)", not
+  as zeros.
+- **OA-CMP-044** The position error limit is tested at the limit plus one for CAT062 and CAT021, a scale error
+  fails the whole run with nothing left in `--out`, and a failure after the first partial (ERAM load, ADS-B
+  export) leaves nothing.
+- **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
+- **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
+  (the build script reruns on the git index and on those trees).
+- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
+  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
+  repeated flag is an error.

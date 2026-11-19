@@ -10,7 +10,7 @@
 //! distance between two aircraft (tens to hundreds of km) when it is not. 25 km is about ten
 //! times the first and well under the second. At least [`MIN_PAIRS`] pairs are needed: fewer is
 //! "not checked", never "agrees". A flight with an address and no ADS-B reports of that address
-//! is also not checked.
+//! is also not checked. A non-ICAO address (above 0xFFFFFF) has its own outcome, `NonIcao`.
 
 use oa_ieee::sqrt;
 use oa_math::sin_cos;
@@ -37,6 +37,9 @@ pub struct RefPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 // A7.2: cold enum, size guard waived
 pub enum Verdict {
+    /// The address is not a 24-bit ICAO address (a non-ICAO address, above 0xFFFFFF): there are no
+    /// ADS-B reports under it to compare with, and nothing is claimed.
+    NonIcao,
     /// Too few pairs (or no reports of the address): nothing is claimed.
     NotChecked { pairs: usize },
     /// The median distance is within the threshold.
@@ -72,32 +75,49 @@ fn of_address(refs: &[RefPoint], address: u32) -> &[RefPoint] {
     refs.get(lo..hi).unwrap_or(&[])
 }
 
-/// The check of one flight: `samples` are (Unix ns, latitude, longitude) of its track, `refs` all
-/// ADS-B reports sorted by (address, time).
+/// The report of `mine` (the reports of one address, sorted by time) that a sample at `t_ns` is
+/// paired with: the nearest in time, the earlier one when the two are equally near, and none when
+/// the nearest is more than [`MAX_PAIR_GAP_S`] seconds away (exactly that far is still paired).
+pub fn nearest(mine: &[RefPoint], t_ns: i64) -> Option<&RefPoint> {
+    let at = mine.partition_point(|r| r.t_ns < t_ns);
+    let before = at.checked_sub(1).and_then(|i| mine.get(i));
+    let after = mine.get(at);
+    let best = match (before, after) {
+        // `abs_diff` cannot overflow where a subtraction could.
+        (Some(b), Some(a)) => {
+            if b.t_ns.abs_diff(t_ns) <= a.t_ns.abs_diff(t_ns) {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (Some(r), None) | (None, Some(r)) => Some(r),
+        (None, None) => None,
+    };
+    let gap = MAX_PAIR_GAP_S.unsigned_abs().saturating_mul(1_000_000_000);
+    best.filter(|r| r.t_ns.abs_diff(t_ns) <= gap)
+}
+
+/// Whether a median distance contradicts the address: strictly over [`MAX_MEDIAN_KM`] (exactly
+/// 25 km does not).
+pub fn contradicts(median_km: f64) -> bool {
+    median_km > MAX_MEDIAN_KM
+}
+
+/// The check of one flight: `samples` are (Unix ns, latitude, longitude) of its track, one per
+/// position time (the caller keeps the first of any several at one time and leaves out samples
+/// that are not exported), `refs` all ADS-B reports sorted by (address, time). The median is the
+/// lower of the two middle elements when the count is even, the nearest-rank 1/2 percentile that
+/// `stats::percentile` gives.
 pub fn check_flight(address: u32, samples: &[(i64, i32, i32)], refs: &[RefPoint]) -> Verdict {
+    if address > 0x00FF_FFFF {
+        return Verdict::NonIcao;
+    }
     let mine = of_address(refs, address);
-    let gap = MAX_PAIR_GAP_S.saturating_mul(1_000_000_000);
     let mut km: Vec<f64> = Vec::new();
     for &(t, lat, lon) in samples {
-        let at = mine.partition_point(|r| r.t_ns < t);
-        // The nearest in time of the report just before and the one at or after.
-        let before = at.checked_sub(1).and_then(|i| mine.get(i));
-        let after = mine.get(at);
-        let best = match (before, after) {
-            (Some(b), Some(a)) => {
-                if t - b.t_ns <= a.t_ns - t {
-                    Some(b)
-                } else {
-                    Some(a)
-                }
-            }
-            (Some(r), None) | (None, Some(r)) => Some(r),
-            (None, None) => None,
-        };
-        if let Some(r) = best {
-            if (r.t_ns - t).abs() <= gap {
-                km.push(distance_km((lat, lon), (r.lat_e7, r.lon_e7)));
-            }
+        if let Some(r) = nearest(mine, t) {
+            km.push(distance_km((lat, lon), (r.lat_e7, r.lon_e7)));
         }
     }
     let pairs = km.len();
@@ -105,8 +125,12 @@ pub fn check_flight(address: u32, samples: &[(i64, i32, i32)], refs: &[RefPoint]
         return Verdict::NotChecked { pairs };
     }
     km.sort_by(f64::total_cmp);
-    let median_km = km.get(pairs / 2).copied().unwrap_or(f64::NAN);
-    if median_km > MAX_MEDIAN_KM {
+    // Lower middle element: index (n - 1) / 2, in range because n >= MIN_PAIRS.
+    let median_km = km
+        .get(pairs.saturating_sub(1) / 2)
+        .copied()
+        .unwrap_or(f64::NAN);
+    if contradicts(median_km) {
         Verdict::Contradicts { pairs, median_km }
     } else {
         Verdict::Agrees { pairs, median_km }

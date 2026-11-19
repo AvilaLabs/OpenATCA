@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use oa_asterix::{decode_block_with, encode_block_with, Block, Cat021Edition, SourceId};
 
 use super::adsb_export::{self, EDITION as EDITION_021, RECORDS_PER_BLOCK};
+use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export;
+use super::guard::refuse_holdout;
 use super::notes::clock_text;
 use crate::core::time::UNITS_PER_DAY;
 
@@ -352,25 +354,24 @@ pub fn slice_dir_with(
             input.display()
         )));
     }
-    fs::create_dir_all(out).map_err(|e| io_err(out, &e))?;
-    // Not the input directory (by canonical path), and empty: nothing of an earlier run is mixed in.
-    let (cin, cout) = (
-        fs::canonicalize(input).map_err(|e| io_err(input, &e))?,
-        fs::canonicalize(out).map_err(|e| io_err(out, &e))?,
-    );
-    if cin == cout {
-        return Err(ExportError::Input("--out is the --in directory".into()));
+    refuse_holdout(input)?;
+    // Not the input directory (by canonical path), and new or empty: nothing of an earlier run is
+    // mixed in; a directory of only partial files says so.
+    if out.exists() {
+        let (cin, cout) = (
+            fs::canonicalize(input).map_err(|e| io_err(input, &e))?,
+            fs::canonicalize(out).map_err(|e| io_err(out, &e))?,
+        );
+        if cin == cout {
+            return Err(ExportError::Input("--out is the --in directory".into()));
+        }
     }
-    let occupied = fs::read_dir(out)
-        .map_err(|e| io_err(out, &e))?
-        .next()
-        .is_some();
-    if occupied {
-        return Err(ExportError::Input(format!(
-            "{}: the output directory is not empty",
-            out.display()
-        )));
-    }
+    // The source README is needed for the import date line: read before anything is created.
+    let src_readme = fs::read_to_string(input.join("README.txt"))
+        .map_err(|e| io_err(&input.join("README.txt"), &e))?;
+    check_out(out)?;
+    let mut run_dirs: Vec<PathBuf> = Vec::new();
+    create_tracked(out, &mut run_dirs)?;
     // (partial, final) of every file of this run.
     let mut pending: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut renamed: Vec<PathBuf> = Vec::new();
@@ -406,7 +407,6 @@ pub fn slice_dir_with(
             pending.push((partial.clone(), dest));
             fs::copy(&ds, &partial).map_err(|e| io_err(&ds, &e))?;
         }
-        let src_readme = fs::read_to_string(input.join("README.txt")).unwrap_or_default();
         let readme = slice_readme(input, from, to, &files, &src_readme);
         let (rp, rf) = (out.join("README.txt.partial"), out.join("README.txt"));
         pending.push((rp.clone(), rf));
@@ -427,6 +427,7 @@ pub fn slice_dir_with(
         for f in &renamed {
             let _ = fs::remove_file(f);
         }
+        remove_created(&run_dirs);
     }
     result
 }

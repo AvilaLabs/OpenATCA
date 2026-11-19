@@ -620,6 +620,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let clip = ClipInfo {
         offered: 10,
         not_offered: 0,
+        positions: Vec::new(),
         split: oa_track::score::SplitStats {
             rows_in: 14,
             aircraft: 1,

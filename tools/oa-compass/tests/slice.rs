@@ -287,6 +287,11 @@ fn a_failure_in_any_file_leaves_no_file_of_the_others() {
 #[test]
 fn a_time_of_day_of_24_hours_and_a_file_mixing_categories_are_refused() {
     let inp = tmp("in8");
+    fs::write(
+        inp.join("README.txt"),
+        "UTC date to give at import (UTC Day): 2026.11.15\n",
+    )
+    .unwrap();
     // I073 holds 24 bits; 86400 * 128 = 11 059 200 is not a time of day.
     fs::write(inp.join("a.ast"), block_21(&[units(1, 0, 0), 11_059_200])).unwrap();
     let out = tmp("out8");
@@ -305,6 +310,11 @@ fn a_time_of_day_of_24_hours_and_a_file_mixing_categories_are_refused() {
     let len = usize::from(u16::from_be_bytes([c62[1], c62[2]]));
     mixed.extend_from_slice(&c62[..len]);
     let inp2 = tmp("in10");
+    fs::write(
+        inp2.join("README.txt"),
+        "UTC date to give at import (UTC Day): 2026.11.15\n",
+    )
+    .unwrap();
     fs::write(inp2.join("m.ast"), mixed).unwrap();
     let out = tmp("out9");
     let e = slice_dir(&inp2, &out, units(0, 0, 0), units(2, 0, 0)).unwrap_err();
@@ -379,4 +389,49 @@ fn a_symlink_to_the_input_directory_is_refused_as_the_output() {
     let e = slice_dir(&inp, &link, units(1, 0, 0), units(2, 0, 0)).unwrap_err();
     assert!(matches!(e, ExportError::Input(_)), "{e:?}");
     let _ = fs::remove_file(&link);
+}
+
+// REQ: OA-CMP-045
+#[test]
+fn a_source_without_a_readme_is_an_error_and_nothing_is_created() {
+    let inp = source("noreadme-in");
+    fs::remove_file(inp.join("README.txt")).unwrap();
+    let out = tmp("noreadme-w").join("new").join("out");
+    let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("README.txt"), "{e}");
+    assert!(!out.exists() && !out.parent().unwrap().exists());
+    // A README that is a directory cannot be read: an error too.
+    fs::create_dir(inp.join("README.txt")).unwrap();
+    assert!(slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).is_err());
+}
+
+// REQ: OA-CMP-041
+#[test]
+fn an_empty_window_into_a_new_directory_leaves_no_directory() {
+    let inp = source("nodir-in");
+    let base = tmp("nodir-w");
+    let out = base.join("a").join("b");
+    // 00:00:03 to 00:00:04 holds no record of either file (they are at 10 s and 20 s steps).
+    let e = slice_dir(&inp, &out, units(0, 0, 3), units(0, 0, 4)).unwrap_err();
+    assert!(e.to_string().contains("no record"), "{e}");
+    assert!(!base.join("a").exists(), "no level of the new path is left");
+    // An existing empty directory stays.
+    fs::create_dir_all(&out).unwrap();
+    assert!(slice_dir(&inp, &out, units(0, 0, 3), units(0, 0, 4)).is_err());
+    assert!(out.is_dir());
+}
+
+// REQ: OA-CMP-042
+#[test]
+fn a_slice_out_with_only_partial_files_says_an_earlier_run_was_interrupted() {
+    let inp = source("partial-in");
+    let out = tmp("partial-w");
+    fs::write(out.join("openatca.ast.partial"), b"x").unwrap();
+    let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    let m = e.to_string();
+    assert!(
+        m.contains("an earlier run was interrupted") && m.contains("openatca.ast.partial"),
+        "{m}"
+    );
+    assert!(out.join("openatca.ast.partial").exists());
 }

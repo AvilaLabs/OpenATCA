@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use oa_adsb::{reports_push, Reports, ROW_EMPTY};
 use oa_asterix::{decode_stream, Block};
 use oa_bench::legacy::{flight_ix, push_th, Legacy};
-use oa_compass::core::addrcheck::{check_flight, distance_km, RefPoint, Verdict};
+use oa_compass::core::addrcheck::{
+    check_flight, contradicts, distance_km, nearest, RefPoint, Verdict,
+};
 use oa_compass::core::convert::{
     eram_record, track_record, EramRow, TrackRow, NOTE_ADDRESS_WITHHELD, NOTE_IDENTITY_UNCONFIRMED,
     NOTE_STATUS_ASSUMED,
@@ -25,7 +27,7 @@ use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::{Layout, SystemExport};
 use oa_compass::shell::job::{run_job, EramSource, Job};
 use oa_compass::shell::notes::{ADSB_SOURCE, OPENATCA_SOURCE};
-use oa_compass::shell::run::{export_output, InputsMode, OpenatcaRows, TrackRunInfo};
+use oa_compass::shell::run::{export_output, EramAddress, InputsMode, OpenatcaRows, TrackRunInfo};
 use oa_compass::shell::slice::Stage;
 
 /// 2026-11-15, as a day count and in Unix nanoseconds, and the start of the synthetic clip.
@@ -146,6 +148,9 @@ fn job(out: &Path, adsb: Option<PathBuf>, eram: bool, split: bool, rows: Openatc
         sfdps: eram.then(|| EramSource::Loaded(Box::new(eram_legacy()), vec!["test input".into()])),
         mode: InputsMode::All,
         rows,
+        eram_address: EramAddress::Keep,
+        self_test_eram_offset_e7: 0,
+        self_test_adsb_offset_e7: 0,
     }
 }
 
@@ -477,17 +482,18 @@ fn the_updates_mode_writes_update_rows_and_counts_the_rest() {
         day: DAY,
         split: false,
     };
-    // Two ticks and three updates; the last update is earlier than the one before it.
+    // Two ticks and three updates; a later batch holds an update earlier than one written.
     let o = track_output(&[
         (O_TICK, 1, 7),
         (0, 2, 7),
         (O_TICK | O_COAST, 2, 7),
         (0, 5, 7),
-        (0, 3, 7),
     ]);
+    let late = track_output(&[(0, 3, 7)]);
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay("upd"));
     let mut info = TrackRunInfo::default();
     export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Updates).unwrap();
+    export_output(&late, &mut ex, &mut info, true, OpenatcaRows::Updates).unwrap();
     assert_eq!(
         (
             info.update_rows,
@@ -512,7 +518,7 @@ fn the_updates_mode_writes_update_rows_and_counts_the_rest() {
             info.update_rows_not_exported,
             info.update_rows
         ),
-        (2, 3, 0)
+        (2, 2, 0)
     );
     assert_eq!(info.coasting, 1);
     ex.abort();
@@ -684,17 +690,19 @@ fn each_file_states_its_row_nature_and_the_measured_interval_and_the_eram_track_
 
 // REQ: OA-CMP-035
 #[test]
-fn a_flight_whose_track_contradicts_its_address_is_exported_without_the_address_and_listed() {
+fn with_drop_a_flight_whose_track_contradicts_its_address_is_exported_without_it_and_the_file_says_so(
+) {
     let work = tmp("addr");
     let out = work.join("out");
-    run(job(
+    let mut j = job(
         &out,
         Some(write_clip(&work, 120)),
         true,
         false,
         OpenatcaRows::Ticks,
-    ))
-    .unwrap();
+    );
+    j.eram_address = EramAddress::Drop;
+    run(j).unwrap();
     let recs = records_062(&out.join("eram.ast"));
     assert_eq!(recs.len(), 60);
     let by = |cs: &[u8; 8]| -> Vec<&oa_asterix::cat062::Cat062> {
@@ -721,17 +729,19 @@ fn a_flight_whose_track_contradicts_its_address_is_exported_without_the_address_
         r.contains("address check: flights whose track agrees with their address: 1"),
         "{r}"
     );
-    assert!(r.contains("address check: flights whose track contradicts their address (exported without I380 address): 1"), "{r}");
     assert!(
-        r.contains("address check: rows written without I380 address because of it: 20"),
+        r.contains("address check: flights whose track contradicts their address: 1"),
         "{r}"
     );
+    assert!(r.contains("address check: rows written without I380 address because of it (--eram-contradicted-address drop): 20"), "{r}");
+    assert!(r.contains("ERAM FILE ALTERED (--eram-contradicted-address drop): 20 rows of the 1 flights listed here"), "{r}");
     assert!(
         r.contains(
-            "address withheld: flight 1 callsign WRONG2 address 3C66B0: 20 samples, 20 paired"
+            "contradicts its address: flight 1 callsign WRONG2 address 3C66B0: 20 samples, 20 paired"
         ),
         "{r}"
     );
+    assert!(r.contains("EVERY ADS-B report of the clip"), "{r}");
     assert!(r.contains("    I380 target address: 20\n"), "{r}");
     assert!(r.contains("20: I380 target address withheld"), "{r}");
     // Without an ADS-B clip nothing is checked, and the README says so.
@@ -832,4 +842,505 @@ fn the_interval_summary_is_nearest_rank_over_the_histogram() {
     );
     assert_eq!(summarize(&[]).pairs, 0);
     let _ = NOTE_ADDRESS_WITHHELD;
+}
+
+// REQ: OA-CMP-035
+#[test]
+fn by_default_the_address_check_only_reports_and_the_published_address_is_written() {
+    let work = tmp("keep");
+    let out = work.join("out");
+    run(job(
+        &out,
+        Some(write_clip(&work, 120)),
+        true,
+        false,
+        OpenatcaRows::Ticks,
+    ))
+    .unwrap();
+    let recs = records_062(&out.join("eram.ast"));
+    assert_eq!(
+        recs.iter()
+            .filter(|r| r.derived.as_ref().is_some_and(|d| d.address == Some(ADDR)))
+            .count(),
+        40,
+        "both flights carry the address ERAM published"
+    );
+    let r = fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(
+        r.contains("REPORT ONLY (--eram-contradicted-address keep"),
+        "{r}"
+    );
+    assert!(!r.contains("ERAM FILE ALTERED"), "{r}");
+    assert!(
+        r.contains(
+            "contradicts its address: flight 1 callsign WRONG2 address 3C66B0: 20 samples, 20 paired"
+        ),
+        "{r}"
+    );
+    assert!(r.contains("EVERY ADS-B report of the clip"), "{r}");
+    assert!(
+        r.contains("because of it (--eram-contradicted-address drop): 0"),
+        "{r}"
+    );
+    // Under split the set B reports are in the reference set too.
+    let out = work.join("split");
+    let mut j = job(
+        &out,
+        Some(write_clip(&work, 120)),
+        true,
+        false,
+        OpenatcaRows::Ticks,
+    );
+    j.mode = InputsMode::Split;
+    run(j).unwrap();
+    let r = fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(
+        r.contains("under --inputs split also including set B"),
+        "{r}"
+    );
+}
+
+// REQ: OA-CMP-038
+#[test]
+fn the_check_counts_are_exact_and_use_exported_deduplicated_samples_only() {
+    let work = tmp("counts");
+    let out = work.join("out");
+    let mut leg = Legacy::default();
+    let w = flight_ix(&mut leg, 1).unwrap();
+    let n = flight_ix(&mut leg, 2).unwrap();
+    let g = flight_ix(&mut leg, 3).unwrap();
+    leg.flights.callsign[w as usize] = *b"WRONG2\0\0";
+    leg.flights.addr[w as usize] = ADDR;
+    leg.flights.callsign[n as usize] = *b"NONICAO\0";
+    leg.flights.addr[n as usize] = 0x0100_0000;
+    leg.flights.callsign[g as usize] = *b"GOOD3\0\0\0";
+    leg.flights.addr[g as usize] = ADDR;
+    for k in 0..20i64 {
+        let t_ms = (T0_NS / 1_000_000) + (10 + 5 * k) * 1000;
+        let (la, lo) = clip_position(10 + 5 * k);
+        // The wrong flight: every sample written twice (exact copies).
+        for _ in 0..2 {
+            push_th(
+                &mut leg,
+                w,
+                t_ms,
+                0,
+                la + 20_000_000,
+                lo,
+                35_000,
+                None,
+                false,
+            );
+        }
+        push_th(&mut leg, n, t_ms, 0, la, lo, 35_000, None, false);
+        push_th(&mut leg, g, t_ms, 0, la + 500, lo, 35_000, None, false);
+    }
+    // Samples that are refused (latitude out of range): never paired.
+    for k in 0..15i64 {
+        push_th(
+            &mut leg,
+            w,
+            (T0_NS / 1_000_000) + (200 + k) * 1000,
+            0,
+            950_000_000,
+            0,
+            35_000,
+            None,
+            false,
+        );
+    }
+    let mut j = job(
+        &out,
+        Some(write_clip(&work, 120)),
+        false,
+        false,
+        OpenatcaRows::Ticks,
+    );
+    j.sfdps = Some(EramSource::Loaded(Box::new(leg), vec!["test input".into()]));
+    run(j).unwrap();
+    let r = fs::read_to_string(out.join("README.txt")).unwrap();
+    for needle in [
+        "flights with samples and an aircraft address: 3",
+        "address check: flights whose track agrees with their address: 1",
+        "address check: flights not checked (too few ADS-B reports of the address to compare): 0",
+        "address check: flights with a non-ICAO address (above 0xFFFFFF; nothing to compare with): 1",
+        "address check: flights whose track contradicts their address: 1",
+        "contradicts its address: flight 0 callsign WRONG2 address 3C66B0: 20 samples, 20 paired",
+        "the lower of the two middle values",
+    ] {
+        assert!(r.contains(needle), "{needle}\n{r}");
+    }
+}
+
+// REQ: OA-CMP-038
+#[test]
+fn the_median_is_the_lower_middle_value_and_the_pair_arithmetic_does_not_overflow() {
+    // Ten pairs: five at 0 km and five about 222 km away; the lower middle is 0 km (agrees),
+    // the upper would be 222 km.
+    let refs: Vec<RefPoint> = (0..40)
+        .map(|k| point(7, k, 400_000_000, 100_000_000))
+        .collect();
+    let s: Vec<(i64, i32, i32)> = (0..10)
+        .map(|k| {
+            (
+                k * 2_000_000_000,
+                if k < 5 { 400_000_000 } else { 420_000_000 },
+                100_000_000,
+            )
+        })
+        .collect();
+    assert!(matches!(
+        check_flight(7, &s, &refs),
+        Verdict::Agrees { pairs: 10, .. }
+    ));
+    // The extreme times are compared without a subtraction that overflows.
+    let ext = [(i64::MIN, 0, 0), (i64::MAX, 0, 0)];
+    let far = [point(7, 0, 0, 0)];
+    assert_eq!(
+        check_flight(7, &ext, &far),
+        Verdict::NotChecked { pairs: 0 }
+    );
+    let big = [RefPoint {
+        address: 7,
+        t_ns: i64::MAX,
+        lat_e7: 0,
+        lon_e7: 0,
+    }];
+    assert_eq!(
+        check_flight(7, &ext, &big),
+        Verdict::NotChecked { pairs: 1 }
+    );
+    assert_eq!(check_flight(0x0100_0000, &ext, &big), Verdict::NonIcao);
+}
+
+// REQ: OA-CMP-039
+#[test]
+fn the_nearest_report_rules_for_before_after_ties_ten_seconds_and_25_km() {
+    let at = |s: i64| s * 1_000_000_000;
+    let refs = [point(7, 0, 1, 1), point(7, 10, 2, 2)];
+    assert_eq!(
+        nearest(&refs, at(3)).map(|r| r.lat_e7),
+        Some(1),
+        "before is closer"
+    );
+    assert_eq!(
+        nearest(&refs, at(7)).map(|r| r.lat_e7),
+        Some(2),
+        "after is closer"
+    );
+    assert_eq!(
+        nearest(&refs, at(5)).map(|r| r.lat_e7),
+        Some(1),
+        "a tie: the earlier wins"
+    );
+    assert_eq!(
+        nearest(&refs, at(-4)).map(|r| r.lat_e7),
+        Some(1),
+        "before the first"
+    );
+    assert_eq!(
+        nearest(&refs, at(14)).map(|r| r.lat_e7),
+        Some(2),
+        "after the last"
+    );
+    let one = [point(7, 0, 1, 1)];
+    assert!(nearest(&one, at(10)).is_some(), "exactly 10 s is in");
+    assert!(nearest(&one, at(10) + 1).is_none(), "10 s and 1 ns is out");
+    assert!(nearest(&one, -at(10)).is_some());
+    assert!(nearest(&one, -at(10) - 1).is_none());
+    assert!(nearest(&[], 0).is_none());
+    assert!(!contradicts(25.0), "exactly 25 km is not contradicted");
+    assert!(contradicts(25.000_001), "just above is");
+    // Through the whole rule: ten pairs at the same distance, a little over and under 25 km.
+    let refs: Vec<RefPoint> = (0..20).map(|k| point(7, k, 0, 0)).collect();
+    let samples = |lat_e7: i32| -> Vec<(i64, i32, i32)> {
+        (0..10).map(|k| (k * 1_000_000_000, lat_e7, 0)).collect()
+    };
+    // 1e-7 degree of latitude is 1.11195 cm; 25 km is 2_248_300 of them (rounded down).
+    assert!(matches!(
+        check_flight(7, &samples(2_248_000), &refs),
+        Verdict::Agrees { .. }
+    ));
+    assert!(matches!(
+        check_flight(7, &samples(2_249_000), &refs),
+        Verdict::Contradicts { .. }
+    ));
+}
+
+// REQ: OA-CMP-040
+#[test]
+fn refused_rows_change_no_counter_and_written_plus_refused_is_offered() {
+    use oa_track::{O_COAST, O_IDENTITY_UNCONFIRMED, O_REACQUIRED, O_TICK, O_UNCERTAIN};
+    let lay = |n: &str| Layout {
+        out: tmp(n),
+        day: DAY,
+        split: false,
+    };
+    let bad = O_TICK | O_COAST | O_UNCERTAIN | O_REACQUIRED | O_IDENTITY_UNCONFIRMED;
+    let mut o = track_output(&[
+        (O_TICK, 1, 7),
+        (bad, 2, 7),
+        (O_TICK | O_UNCERTAIN, 3, 7),
+        (O_TICK | O_COAST, 4, 7),
+    ]);
+    o.lat_e7[1] = 950_000_000;
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay("cnt"));
+    let mut info = TrackRunInfo::default();
+    export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Ticks).unwrap();
+    assert_eq!(info.tick_rows, 3);
+    assert_eq!(
+        (
+            info.coasting,
+            info.uncertain,
+            info.reacquired,
+            info.unconfirmed_identity
+        ),
+        (1, 1, 0, 0),
+        "the refused row's flags are not counted"
+    );
+    let f = ex.finish().unwrap();
+    let refused: u64 = f.report.refused.iter().sum();
+    assert_eq!(info.tick_rows + refused, 4, "written + refused = offered");
+    // Updates: a refused update does not move the time of the last update row.
+    let mut o = track_output(&[(0, 1, 7), (0, 5, 7), (0, 3, 7)]);
+    o.lat_e7[1] = 950_000_000;
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay("cnt2"));
+    let mut info = TrackRunInfo::default();
+    export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Updates).unwrap();
+    assert_eq!(
+        (
+            info.update_rows,
+            info.updates_out_of_order,
+            info.last_update_ns
+        ),
+        (2, 0, Some(DAY_NS + 3_000_000_000))
+    );
+    ex.abort();
+    // A batch is taken in time order: nothing is dropped as late.
+    let o = track_output(&[(0, 3, 7), (0, 1, 7), (0, 2, 7)]);
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay("cnt3"));
+    let mut info = TrackRunInfo::default();
+    export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Updates).unwrap();
+    assert_eq!((info.update_rows, info.updates_out_of_order), (3, 0));
+    ex.abort();
+}
+
+// REQ: OA-CMP-041
+#[test]
+fn a_failed_run_removes_every_directory_level_it_created() {
+    let work = tmp("levels");
+    let clip = write_clip(&work, 90);
+    // The hook fails after the data is written.
+    let out = work.join("a").join("b").join("out");
+    let mut hook = |s: Stage| match s {
+        Stage::Verified => Err(ExportError::Io("injected".into())),
+        _ => Ok(()),
+    };
+    assert!(run_job(
+        job(&out, Some(clip.clone()), true, false, OpenatcaRows::Ticks),
+        &mut hook,
+        &mut |_| {}
+    )
+    .is_err());
+    assert!(!work.join("a").exists(), "no level of the new path is left");
+    // Split days, three levels.
+    let out = work.join("c").join("d").join("out");
+    assert!(run_job(
+        job(&out, Some(clip.clone()), true, true, OpenatcaRows::Ticks),
+        &mut hook,
+        &mut |_| {}
+    )
+    .is_err());
+    assert!(!work.join("c").exists());
+    // An existing parent stays; a failure before anything is created creates nothing.
+    fs::create_dir_all(work.join("keep")).unwrap();
+    let out = work.join("keep").join("x").join("out");
+    let mut j = job(&out, Some(clip), true, false, OpenatcaRows::Ticks);
+    j.sfdps = Some(EramSource::Dir(work.join("no-such-sfdps")));
+    assert!(run(j).is_err());
+    assert!(work.join("keep").is_dir() && names(&work.join("keep")).is_empty());
+}
+
+// REQ: OA-CMP-042
+#[test]
+fn an_out_with_only_partial_files_is_refused_naming_them_and_they_stay() {
+    let work = tmp("interrupted");
+    let out = work.join("out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(out.join("eram.ast.partial"), b"x").unwrap();
+    fs::write(out.join("openatca.ast.partial"), b"y").unwrap();
+    let e = run(job(&out, None, true, false, OpenatcaRows::Ticks)).unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("an earlier run was interrupted"), "{m}");
+    assert!(
+        m.contains("eram.ast.partial") && m.contains("openatca.ast.partial"),
+        "{m}"
+    );
+    assert_eq!(names(&out), ["eram.ast.partial", "openatca.ast.partial"]);
+    // A directory with anything else says it is not empty.
+    fs::write(out.join("notes.txt"), b"z").unwrap();
+    let m = run(job(&out, None, true, false, OpenatcaRows::Ticks))
+        .unwrap_err()
+        .to_string();
+    assert!(m.contains("not empty") && !m.contains("earlier run"), "{m}");
+}
+
+// REQ: OA-CMP-043
+#[test]
+fn a_file_with_no_consecutive_rows_says_so_instead_of_printing_zeros() {
+    let work = tmp("nopairs");
+    let out = work.join("out");
+    let mut leg = Legacy::default();
+    let a = flight_ix(&mut leg, 1).unwrap();
+    push_th(
+        &mut leg,
+        a,
+        T0_NS / 1_000_000,
+        0,
+        410_000_000,
+        -880_000_000,
+        35_000,
+        None,
+        false,
+    );
+    let mut j = job(&out, None, false, false, OpenatcaRows::Ticks);
+    j.sfdps = Some(EramSource::Loaded(Box::new(leg), vec!["test input".into()]));
+    run(j).unwrap();
+    let r = fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(
+        r.contains("no consecutive rows of one track (0 pairs)"),
+        "{r}"
+    );
+    assert!(!r.contains("median 0.000 s"), "{r}");
+}
+
+// REQ: OA-CMP-044
+#[test]
+fn the_limit_plus_one_fails_and_a_scale_error_or_a_late_failure_leaves_nothing() {
+    use oa_compass::shell::adsb_export::MAX_POSITION_ERROR_E7 as LIMIT_021;
+    let work = tmp("limit1");
+    // CAT062: limit passes, limit + 1 fails.
+    for (extra, ok) in [(0, true), (1, false)] {
+        let lay = Layout {
+            out: work.join(format!("c62-{extra}")),
+            day: DAY,
+            split: false,
+        };
+        let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
+        let row = TrackRow {
+            t_ns: T0_NS,
+            lat_e7: 0,
+            lon_e7: 0,
+            vel_east_mps: 1.0,
+            vel_north_mps: 1.0,
+            pos_cov_m2: [25.0, 0.0, 25.0],
+            alt_ft: 10_000.0,
+            has_alt: true,
+            vrate_fpm: 0.0,
+            coast: false,
+            radar_disagrees: false,
+            uncertain: false,
+            reacquired: false,
+            identity_unconfirmed: false,
+            address: Some(ADDR),
+            monosensor: true,
+        };
+        let c = track_record(&row).unwrap();
+        ex.push(
+            &c,
+            1,
+            (row.lat_e7 + MAX_POSITION_ERROR_E7 + extra, row.lon_e7),
+        )
+        .unwrap();
+        assert_eq!(ex.finish().is_ok(), ok, "062 limit + {extra}");
+    }
+    // CAT021.
+    for (extra, ok) in [(0, true), (1, false)] {
+        let lay = Layout {
+            out: work.join(format!("c21-{extra}")),
+            day: DAY,
+            split: false,
+        };
+        let mut ax = AdsbExport::new(ADSB_SOURCE, lay);
+        let r = oa_compass::core::adsb::AdsbRow {
+            time_ns: T0_NS,
+            address: ADDR,
+            non_icao: false,
+            lat_e7: 0,
+            lon_e7: 0,
+            baro_alt_ft: None,
+            geom_alt_ft: None,
+            ground: false,
+            vrate_fpm: None,
+            rate_geometric: false,
+            gs_dkt: None,
+            track_ddeg: None,
+            callsign: [0; 8],
+            category: 0,
+            nic: None,
+            nac_p: None,
+            nac_v: None,
+            sil: None,
+            sil_per_sample: None,
+            version: None,
+            gva: None,
+            sda: None,
+        };
+        let c = oa_compass::core::adsb::adsb_record(&r).unwrap();
+        ax.push(&c, (r.lat_e7 + LIMIT_021 + extra, r.lon_e7))
+            .unwrap();
+        assert_eq!(ax.finish().is_ok(), ok, "021 limit + {extra}");
+    }
+    // A scale error in the ERAM positions fails the whole job; nothing is left in out.
+    let clip = write_clip(&work, 90);
+    let out = work.join("scale").join("out");
+    let mut j = job(&out, Some(clip.clone()), true, false, OpenatcaRows::Ticks);
+    j.self_test_eram_offset_e7 = 100;
+    let e = run(j).unwrap_err().to_string();
+    assert!(e.contains("over the limit"), "{e}");
+    assert!(!work.join("scale").exists(), "nothing left, no directory");
+    // An ADS-B export failure after the OpenATCA partial exists.
+    let out = work.join("adsbfail").join("out");
+    let mut j = job(&out, Some(clip.clone()), true, false, OpenatcaRows::Ticks);
+    j.self_test_adsb_offset_e7 = 100;
+    assert!(run(j).is_err());
+    assert!(!work.join("adsbfail").exists());
+    // An ERAM load failure after the OpenATCA and ADS-B partials exist.
+    let out = work.join("eramfail").join("out");
+    let mut j = job(&out, Some(clip), true, false, OpenatcaRows::Ticks);
+    j.sfdps = Some(EramSource::Dir(work.join("no-such-sfdps")));
+    assert!(run(j).is_err());
+    assert!(!work.join("eramfail").exists());
+}
+
+// REQ: OA-CMP-046
+#[test]
+fn the_modified_flag_of_the_build_commit_follows_the_tracked_files_of_the_built_trees() {
+    let b = oa_build_info::BUILD;
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let o = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--",
+            "../../crates",
+            "../../tools",
+            "../../Cargo.toml",
+            "../../Cargo.lock",
+        ])
+        .output();
+    // Without git the build says "unknown" and there is nothing to compare with.
+    if let Ok(o) = o {
+        if o.status.success() {
+            let modified = !o.stdout.is_empty();
+            assert_eq!(
+                b.ends_with("(tracked files modified)"),
+                modified,
+                "{b}: the flag is the working tree's state when the crate was built"
+            );
+        }
+    }
 }

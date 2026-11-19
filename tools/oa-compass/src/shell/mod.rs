@@ -7,9 +7,12 @@
 //! data-source file. The `oa-compass` binary (`src/main.rs`) is shell too.
 
 pub mod adsb_export;
+pub mod args;
+pub mod dirs;
 pub mod encode;
 pub mod error;
 pub mod export;
+pub mod guard;
 pub mod job;
 pub mod notes;
 pub mod run;

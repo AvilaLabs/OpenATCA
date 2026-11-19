@@ -110,6 +110,8 @@ pub struct SystemExport {
     files: BTreeMap<i64, DayFile>,
     refused: [u64; 2],
     pub counts: Vec<(String, u64)>,
+    /// Added to the latitude of every source position (a verification self-test, 0 normally).
+    source_offset_e7: i32,
 }
 
 /// The renames that make a finished export visible.
@@ -156,7 +158,13 @@ impl SystemExport {
             files: BTreeMap::new(),
             refused: [0; 2],
             counts: Vec::new(),
+            source_offset_e7: 0,
         }
+    }
+
+    /// Sets the verification self-test offset (see `Job::self_test_position_offset_e7`).
+    pub fn set_source_offset(&mut self, e7: i32) {
+        self.source_offset_e7 = e7;
     }
 
     /// Counts a row that was not converted.
@@ -223,7 +231,10 @@ impl SystemExport {
         };
         let mut v = c.values;
         v.track_number = number;
-        file.sink.push(&v, src_e7)?;
+        file.sink.push(
+            &v,
+            (src_e7.0.saturating_add(self.source_offset_e7), src_e7.1),
+        )?;
         count_notes(&mut file.notes, c.notes);
         Ok(())
     }

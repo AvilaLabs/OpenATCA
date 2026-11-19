@@ -5,6 +5,7 @@
 //! lives in a crate of its own because a build script is not allowed in a core or split crate
 //! (B8).
 
-/// `commit <hash>`, followed by ` (tracked files modified)` when the working tree differed from
+/// `commit <hash>`, followed by ` (tracked files modified)` when a tracked file of `crates/`,
+/// `tools/` or the workspace manifest or lock differed from
 /// that commit at build time; `commit unknown` only if git was not available at build time.
 pub const BUILD: &str = env!("OA_BUILD_INFO");
