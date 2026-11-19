@@ -91,8 +91,9 @@ pub const LAYER_ARTCC_LOW: u8 = 3;
 pub const LAYER_ARTCC_HIGH: u8 = 4;
 pub const LAYER_SYMBOL: u8 = 5;
 pub const LAYER_TEXT: u8 = 6;
-pub const LAYER_LEGEND_BG: u8 = 7;
-pub const LAYER_LEGEND: u8 = 8;
+// Layers 7 to 10 hold the live traffic (`crate::traffic`); the legend strip covers it.
+pub const LAYER_LEGEND_BG: u8 = 11;
+pub const LAYER_LEGEND: u8 = 12;
 
 /// Height of the legend strip, pixels: five rows of text and a rule.
 pub const LEGEND_STRIP_PX: u32 = 104;

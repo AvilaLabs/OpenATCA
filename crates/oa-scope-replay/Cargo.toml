@@ -1,0 +1,25 @@
+[package]
+name = "oa-scope-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Workspace crates only (RULESET F1). The tracker is linked here, in the shell, and never into the
+# display crate (F6, D3).
+[dependencies]
+oa-display = { path = "../oa-display" }
+oa-track = { path = "../oa-track" }
+oa-adsb = { path = "../oa-adsb" }
+oa-feed = { path = "../oa-feed" }
+oa-geo = { path = "../oa-geo" }
+oa-sha256 = { path = "../oa-sha256" }
+oa-airspace = { path = "../oa-airspace" }
+
+[[bin]]
+name = "oa-scope-replay"
+path = "src/bin/oa-scope-replay.rs"

@@ -8,3 +8,4 @@ pub mod ppm;
 pub mod project;
 pub mod raster;
 pub mod scene;
+pub mod traffic;

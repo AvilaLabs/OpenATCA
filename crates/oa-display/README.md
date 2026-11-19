@@ -19,6 +19,7 @@ Core versus shell (RULESET B1):
 | `font`    | core  | the built-in stroke font, const data                               |
 | `raster`  | core  | integer software rasterizer into an XRGB8888 buffer, frame hash    |
 | `scene`   | core  | airspace model to display list (boundaries, airways, fixes, rings)  |
+| `traffic` | core  | live targets to display list: symbols, leader, trail, data block    |
 | `ppm`     | shell | binary PPM (P6) writer                                             |
 | `cli`     | shell | the `oa-scope` command line, file reads and writes                 |
 
@@ -72,6 +73,44 @@ range circle always fits, and costs about a tenth of a 1080 px screen. Legs that
 crossings (published points outside the data, expected) are counted in the normal text colour
 ("N LEGS END AT BORDER CROSSINGS"). The alert colour is used only for conditions that need
 attention, never expected data: here, points, legs or edges that could not be placed.
+
+## Traffic
+
+`traffic` draws live targets over the map. The display knows a target only as plain data
+(`traffic::Target`: position, ground track and speed, altitude, address, callsign, coasting and
+uncertain flags, seconds since reacquisition, 95% radius in metres, up to 16 history positions);
+the tracker is not a dependency. `build_traffic` appends to the list `build_scene` built, so a
+frame is state, then list, then pixels, as for the map. Targets are drawn in set order.
+
+| state                  | drawing                                                                   |
+|------------------------|---------------------------------------------------------------------------|
+| tracking               | 8 px square outline and a centre dot                                       |
+| coasting               | the square with an X through it, no centre dot; tag `CST`                  |
+| uncertain              | 12 px diamond and a centre dot, the 95% radius as a circle of true scale; tag `UNC` |
+| coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`               |
+| reacquired (N s)       | a 9 px circle in the alert colour added to any of the above; tag `REACQ`   |
+
+All of it is in the target colour (index 12). Each target also has a velocity leader along its track
+(default 1 minute of flight, none without a velocity), history dots in the dim text colour (default
+the last 5 positions) and a data block 14 px right and 30 px above the symbol: callsign (hex address
+without one), altitude in hundreds of feet and ground speed in knots over ten (`---` and `--` when
+absent), then the tags. Data blocks do not yet avoid one another (LS-401).
+
+A `TargetSet` has a fixed capacity. A push past it is refused, counted and returns
+`TrafficError::Full`; the frame then shows `TARGETS NOT DRAWN: N` at the bottom left in the alert
+colour. Targets off the map area are counted in `TrafficStats::off_screen`. Traffic is on layers 7 to
+10, above the map and below the legend strip. `oa-scope-replay` (crate `oa-scope-replay`) runs the
+tracker over an ADS-B clip and draws it:
+
+```text
+oa-scope-replay --snapshot <file> --adsb <clip.oaf> --centre <lat,lon> --range-nm <n> --size <WxH>
+                --start <unix-seconds|YYYY-MM-DDTHH:MM:SSZ> --duration-s <n> --step-s <n> --out-dir <dir>
+                [--leader-min <n>] [--trail-n <n>] [--trail-step-s <n>] [--reacq-s <n>]
+                [--max-targets <n>] [--warmup-s <n>] [--hashes-only]
+```
+
+It writes `frame-NNNN.ppm` per step and `hashes.txt` (`frame_index time sha256`). The tracker is linked
+in that crate and not here, so the display stays free of it.
 
 ## Display list
 
@@ -141,6 +180,7 @@ dot).
 | 9     | alert      | `#FF5A4F` | attention conditions only        |
 | 10    | neighbour HIGH | `#2F6F96` | dim neighbour boundary      |
 | 11    | neighbour LOW  | `#9A6B00` | dim neighbour boundary      |
+| 12    | target     | `#7FE0B0` | live targets: symbol, leader, data block |
 
 ## Tests
 
