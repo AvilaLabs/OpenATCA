@@ -196,7 +196,7 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
     }
     let c = rho / f.r;
     let (sc, cc) = sin_cos_near_zero(c);
-    let sl = (cc * f.sin0 + y * sc * f.cos0 / rho).clamp(-1.0, 1.0);
+    let sl = oa_math::clamp_f64(cc * f.sin0 + y * sc * f.cos0 / rho, -1.0, 1.0);
     let (xs, ys) = (x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
     if c <= SIN_COS_LIMIT && f.sin0.abs() <= 0.9 {
         // `h = rho cos(lat)`; the latitude's offset from the origin's has sine

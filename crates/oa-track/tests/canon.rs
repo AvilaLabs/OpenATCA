@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use common::*;
 use oa_sha256::sha256;
 use oa_track::canon::*;
+use oa_track::canon_spill::*;
 use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
 use oa_track::{
     log_new, output_new, tracker_flush, tracker_new, tracker_update, OutRow, TrackOutput,
@@ -78,7 +79,7 @@ fn spill(dir: &std::path::Path, rows: &[OutRow]) -> SpilledRun {
 fn digest_of(rows: &[OutRow]) -> Vec<SecondEntry> {
     let mut d = Digester::new();
     for r in rows {
-        d.push(&canon_row(r));
+        d.push(&canon_row(r)).unwrap();
     }
     d.finish()
 }
@@ -116,7 +117,7 @@ fn a_row_encodes_to_fixed_width_little_endian_fields_at_fixed_offsets() {
 
 // REQ: OA-TRK-360
 #[test]
-fn a_nan_keeps_its_bit_pattern_and_row_at_matches_row() {
+fn every_nan_becomes_the_one_fixed_nan_and_row_at_matches_row() {
     let quiet = f32::from_bits(0x7fc0_0000);
     let payload = f32::from_bits(0x7fc0_1234);
     let neg = f32::from_bits(0xffc0_0001);
@@ -125,8 +126,8 @@ fn a_nan_keeps_its_bit_pattern_and_row_at_matches_row() {
     r.vrate_fpm = neg;
     r.alt_var_ft2 = quiet;
     let b = canon_row(&r);
-    assert_eq!(b[OFF_ALT..OFF_ALT + 4], 0x7fc0_1234u32.to_le_bytes());
-    assert_eq!(b[OFF_VRATE..OFF_VRATE + 4], 0xffc0_0001u32.to_le_bytes());
+    assert_eq!(b[OFF_ALT..OFF_ALT + 4], 0x7fc0_0000u32.to_le_bytes());
+    assert_eq!(b[OFF_VRATE..OFF_VRATE + 4], 0x7fc0_0000u32.to_le_bytes());
     assert_eq!(
         b[OFF_ALT_VAR..OFF_ALT_VAR + 4],
         0x7fc0_0000u32.to_le_bytes()
@@ -195,8 +196,11 @@ fn the_files_of_a_spilled_run_hold_the_digest_and_the_rows_grouped_by_second() {
     let text = fs::read_to_string(&dp).unwrap();
     let mut lines = text.lines();
     assert_eq!(lines.next(), Some(DIGEST_HEADER));
-    let want: Vec<String> = digest_of(&rows).iter().map(SecondEntry::line).collect();
-    assert_eq!(lines.map(str::to_string).collect::<Vec<_>>(), want);
+    let want: Vec<String> = digest_of(&rows).iter().map(second_line).collect();
+    let got: Vec<String> = lines.map(str::to_string).collect();
+    assert_eq!(got[..got.len() - 1], want[..]);
+    assert_eq!(got.last().unwrap(), &digest_end_line(&digest_of(&rows)));
+    assert!(got.last().unwrap().starts_with("end 3 4 "));
     let bin = fs::read(&rp).unwrap();
     assert_eq!(bin[..ROWS_HEADER_BYTES], rows_header(4));
     assert_eq!(bin[..8], *ROWS_MAGIC);
@@ -278,4 +282,118 @@ fn two_tracker_runs_on_the_same_input_write_identical_digests_and_rows() {
     assert_eq!(da, db);
     assert_eq!(ha, hb);
     assert_eq!(ra, rb);
+}
+
+// REQ: OA-TRK-370
+#[test]
+fn the_field_tables_tile_the_row_and_hex_round_trips_only_lowercase() {
+    // The compile-time assertions in canon.rs tile 0..ROW_BYTES; here the offsets are read back.
+    let mut r = row(5_000_000_000, 0x0A_BCDE, 1.0);
+    r.flags = 0xA5;
+    let b = canon_row(&r);
+    assert_eq!(field_at::<OFF_FLAGS, 1>(&b), [0xA5]);
+    assert_eq!(
+        u32::from_le_bytes(field_at::<OFF_ADDR, 4>(&b)),
+        0x0A_BCDE,
+        "address"
+    );
+    assert_eq!(row_second(&b), 5);
+    let h = sha256(b"x");
+    assert_eq!(from_hex32(&hex32(&h)), Some(h));
+    assert_eq!(from_hex32(&hex32(&h).to_uppercase()), None);
+    assert_eq!(from_hex32(&hex32(&h)[..63]), None);
+    assert_eq!(from_hex32(&format!("{}g", &hex32(&h)[..63])), None);
+}
+
+// REQ: OA-TRK-371
+#[test]
+fn a_second_or_a_run_past_its_limit_is_an_error_and_is_not_counted() {
+    let s = 1_000_000_000i64;
+    let mut d = Digester::with_limits(2, 3);
+    for k in 0..3 {
+        d.push(&canon_row(&row(10 * s, k, 1.0))).unwrap();
+    }
+    let e = d.push(&canon_row(&row(10 * s, 9, 1.0))).unwrap_err();
+    assert_eq!(e, LimitError::SecondTooLarge { second: 10 });
+    assert!(limit_text(e).contains("second 10"));
+    d.push(&canon_row(&row(11 * s, 1, 1.0))).unwrap();
+    assert_eq!(
+        d.push(&canon_row(&row(12 * s, 1, 1.0))).unwrap_err(),
+        LimitError::TooManySeconds
+    );
+    // The refused rows left no trace: the digest is that of the accepted rows.
+    let entries = d.finish();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| (e.second, e.rows))
+            .collect::<Vec<_>>(),
+        vec![(10, 3), (11, 1)]
+    );
+    // The named limits are the ones the readers check.
+    assert_eq!((MAX_ROWS_PER_SECOND, MAX_SECONDS), (1 << 20, 1 << 20));
+}
+
+// REQ: OA-TRK-372
+#[test]
+fn a_rows_header_is_checked_in_full_and_hash_rows_equals_the_digester() {
+    assert_eq!(parse_rows_header(&rows_header(7)), Ok(7));
+    let good = rows_header(7);
+    assert!(parse_rows_header(&good[..23])
+        .unwrap_err()
+        .contains("header"));
+    let mut longer = good.to_vec();
+    longer.push(0);
+    assert!(parse_rows_header(&longer).is_err());
+    for (at, what) in [(0usize, "magic"), (8, "version"), (12, "row size")] {
+        let mut bad = good;
+        bad[at] ^= 0x40;
+        assert!(
+            parse_rows_header(&bad).unwrap_err().contains(what),
+            "{what}"
+        );
+    }
+    let rows: Vec<CanonRow> = (0..5)
+        .map(|k| canon_row(&row(3_000_000_000, k, 2.0)))
+        .collect();
+    let mut d = Digester::new();
+    for r in &rows {
+        d.push(r).unwrap();
+    }
+    assert_eq!(d.finish()[0].hash, hash_rows(&rows).unwrap());
+    assert_ne!(hash_rows(&rows[1..]).unwrap(), hash_rows(&rows).unwrap());
+}
+
+// REQ: OA-RDF-015
+#[test]
+fn spill_columns_holding_raw_nan_bits_come_out_as_the_canonical_nan() {
+    // A base that spilled `x.to_bits()` leaves any NaN in the columns; the canon code that reads
+    // them back is what makes the rows canonical.
+    let dir = scratch("raw_nan");
+    let rows = [row(1_700_000_000_000_000_000, 1, 1.0)];
+    let run = spill(&dir, &rows);
+    let raw = |bits: &[u32]| -> Vec<u8> { bits.iter().flat_map(|b| b.to_le_bytes()).collect() };
+    fs::write(run.dir.join("ve"), raw(&[0x7fc0_0001])).unwrap();
+    fs::write(run.dir.join("vn"), raw(&[0xffc0_0000])).unwrap();
+    fs::write(
+        run.dir.join("poscov"),
+        raw(&[0x7f80_0001, 0x3f80_0000, 0xffff_ffff]),
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    spill_canon_rows(&run, &mut |r| {
+        got.push(*r);
+        Ok(())
+    })
+    .unwrap();
+    let b = got[0];
+    let nan = 0x7fc0_0000u32.to_le_bytes();
+    assert_eq!(b[OFF_VE..OFF_VE + 4], nan);
+    assert_eq!(b[OFF_VN..OFF_VN + 4], nan);
+    assert_eq!(b[OFF_POS_COV..OFF_POS_COV + 4], nan);
+    assert_eq!(b[OFF_POS_COV + 4..OFF_POS_COV + 8], 1.0f32.to_le_bytes());
+    assert_eq!(b[OFF_POS_COV + 8..OFF_POS_COV + 12], nan);
+    // Non-float fields are untouched.
+    assert_eq!(b[OFF_ADDR..OFF_ADDR + 4], 1u32.to_le_bytes());
+    assert_eq!(b[OFF_FLAGS], O_TICK);
 }

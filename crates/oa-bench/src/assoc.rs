@@ -14,7 +14,14 @@
 //!    known), and the ERAM positions must lie within the region of the truth for at least 80% of
 //!    the shared times (when there are enough shared times to decide; otherwise the address is
 //!    trusted and counted as unchecked). An implausible pair is not scored in the primary rows:
-//!    it is flagged and scored in a separate table ([`Assoc::flag_addr`]).
+//!    it is flagged and scored in a separate table ([`Assoc::flag_addr`]). Where the flight's
+//!    `aircraftAddress` fails that check or is unknown to truth, and its `ADSB_02M_*` hint is a
+//!    different address, known to truth, that passes the check (not merely unchecked), the hint
+//!    is used instead (method hint over plan, scored as its own split, every such flight listed
+//!    with both addresses and the reason the plan address failed); a plausible plan address
+//!    always wins, and so does one that is only unchecked (too few shared times): the rule
+//!    replaces a plan address that failed or is unknown to truth, nothing else
+//!    ([`AssocConfig::hint_over_plan`] switches it off for protocols frozen before it).
 //! 3. Otherwise the callsign (ERAM aircraft identification against the truth leg callsign, ASCII
 //!    case-insensitive) gives candidate aircraft. A candidate needs enough shared times (truth
 //!    and ERAM overlap in time) and the region test. Exactly one candidate is associated (method
@@ -51,7 +58,8 @@ pub mod astatus {
     pub const ADDRESS_IMPLAUSIBLE: u8 = 9;
     pub const HINT_IMPLAUSIBLE: u8 = 10;
     pub const CALLSIGN_IMPLAUSIBLE: u8 = 11;
-    pub const COUNT: usize = 12;
+    pub const HINT_OVER_PLAN: u8 = 12;
+    pub const COUNT: usize = 13;
     pub const NAMES: [&str; COUNT] = [
         "associated by address",
         "associated by callsign",
@@ -65,12 +73,20 @@ pub mod astatus {
         "address implausible against truth (scored separately)",
         "address hint implausible against truth (scored separately)",
         "callsign candidate far from truth (scored separately)",
+        "plan address implausible or unknown to truth; track address hint plausible and used",
     ];
     /// Why a flagged flight is flagged.
     pub const REASON_NAMES: [&str; 3] = [
         "not flagged",
         "ERAM positions far from the truth aircraft",
         "callsigns disagree",
+    ];
+    /// Why the plan address of a hint-over-plan flight failed ([`super::Assoc::plan_fail`]).
+    pub const PLAN_FAIL_NAMES: [&str; 4] = [
+        "plan address passed",
+        "ERAM positions far from the plan-address aircraft",
+        "callsigns disagree with the plan-address aircraft",
+        "plan address unknown to truth",
     ];
 }
 
@@ -91,6 +107,9 @@ pub struct AssocConfig {
     pub min_shared: u32,
     /// Most samples of a flight tested against one candidate (a deterministic stride is used).
     pub max_samples: usize,
+    /// Use a plausible address hint in place of a plan address that failed the plausibility
+    /// check or is unknown to truth (OA-BENCH-132).
+    pub hint_over_plan: bool,
 }
 
 impl Default for AssocConfig {
@@ -102,6 +121,7 @@ impl Default for AssocConfig {
             region_m: 50.0 * NM_M,
             min_shared: 5,
             max_samples: 200,
+            hint_over_plan: true,
         }
     }
 }
@@ -125,6 +145,9 @@ pub struct Assoc {
     pub flag_method: Vec<u8>,
     /// Index into [`astatus::REASON_NAMES`] per flight.
     pub flag_reason: Vec<u8>,
+    /// Index into [`astatus::PLAN_FAIL_NAMES`] per flight: why the plan address was passed over
+    /// for the hint (0 unless the status is [`astatus::HINT_OVER_PLAN`]).
+    pub plan_fail: Vec<u8>,
     /// Share of shared times inside the tight gate, NaN when not computed.
     pub gate_share: Vec<f64>,
     /// Shared times the plausibility or gate test was decided on.
@@ -278,6 +301,7 @@ pub fn associate(
         flag_addr: vec![NONE; n],
         flag_method: vec![0; n],
         flag_reason: vec![0; n],
+        plan_fail: vec![0; n],
         gate_share: vec![f64::NAN; n],
         shared: vec![0; n],
         unchecked: 0,
@@ -290,6 +314,8 @@ pub fn associate(
         let (mut addr, mut meth) = (NONE, 0u8);
         let (mut flag_addr, mut flag_meth, mut reason) = (NONE, 0u8, 0u8);
         let mut shared = 0u32;
+        let mut plan_fail = 0u8;
+        let hint = leg.flights.addr_hint.get(f).copied().unwrap_or(NONE);
         let by_address = if fa != NONE {
             Some((
                 fa,
@@ -298,19 +324,14 @@ pub fn associate(
                 astatus::ADDRESS_IMPLAUSIBLE,
             ))
         } else {
-            leg.flights
-                .addr_hint
-                .get(f)
-                .copied()
-                .filter(|&a| a != NONE)
-                .map(|a| {
-                    (
-                        a,
-                        method::ADDRESS_HINT,
-                        astatus::ADDRESS_HINT,
-                        astatus::HINT_IMPLAUSIBLE,
-                    )
-                })
+            Some(hint).filter(|&a| a != NONE).map(|a| {
+                (
+                    a,
+                    method::ADDRESS_HINT,
+                    astatus::ADDRESS_HINT,
+                    astatus::HINT_IMPLAUSIBLE,
+                )
+            })
         };
         if let Some((a, m, ok, bad)) = by_address {
             if tix.by_addr.contains_key(&a) {
@@ -324,6 +345,30 @@ pub fn associate(
                 }
             } else {
                 status = astatus::ADDRESS_NO_TRUTH;
+            }
+            // A plan address that fails, or truth does not know, gives way to a different track
+            // hint that passes the same check (an unchecked hint is not enough).
+            let plan_failed = cfg.hint_over_plan
+                && fa != NONE
+                && (status == astatus::ADDRESS_NO_TRUTH || status == astatus::ADDRESS_IMPLAUSIBLE);
+            if plan_failed && hint != NONE && hint != fa && tix.by_addr.contains_key(&hint) {
+                let mut hint_shared = 0u32;
+                let v =
+                    address_plausible(leg, samples, truth, tix, hint, &cs, cfg, &mut hint_shared);
+                if matches!(v, Plausible::Yes) {
+                    plan_fail = if status == astatus::ADDRESS_NO_TRUTH {
+                        3
+                    } else {
+                        reason
+                    };
+                    (status, addr, meth, shared) = (
+                        astatus::HINT_OVER_PLAN,
+                        hint,
+                        method::HINT_OVER_PLAN,
+                        hint_shared,
+                    );
+                    (flag_addr, flag_meth, reason) = (NONE, 0, 0);
+                }
             }
         } else if cs.iter().any(|&b| b != 0) {
             match tix.by_callsign.get(&cs) {
@@ -380,6 +425,13 @@ pub fn associate(
         }
         if let Some(c) = out.counts.get_mut(usize::from(status)) {
             *c += 1;
+        }
+        if let Some(p) = out.plan_fail.get_mut(f) {
+            *p = if status == astatus::HINT_OVER_PLAN {
+                plan_fail
+            } else {
+                0
+            };
         }
         if let (Some(a), Some(m), Some(s), Some(fa), Some(fm), Some(fr), Some(sh)) = (
             out.addr.get_mut(f),

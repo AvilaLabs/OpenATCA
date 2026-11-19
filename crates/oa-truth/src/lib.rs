@@ -61,6 +61,10 @@
 //! counted, never passed on and never dropped silently. Cold, offline code (A7.2, C6): the
 //! truth model is a struct-of-arrays, one column per field, with no hot per-row struct.
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 

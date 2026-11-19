@@ -22,6 +22,16 @@ use std::fmt::Write;
 /// How many over-cap navaid pairs the report lists (the count is always stated).
 const OVER_CAP_LISTED: usize = 100;
 
+// The report states these sizes as numbers (a platform size is not read in core code, B8); the
+// exact-size guards pin them to the real types, so a change of either fails the build.
+const POS_E7_BYTES: usize = 8;
+const SPAN_BYTES: usize = 8;
+const _: () = assert!(core::mem::size_of::<PosE7>() == POS_E7_BYTES);
+const _: () = assert!(core::mem::size_of::<Span<VertexIx>>() == SPAN_BYTES);
+const _: () = assert!(core::mem::size_of::<Span<AirwayLegIx>>() == SPAN_BYTES);
+const _: () = assert!(core::mem::size_of::<Span<RouteIx>>() == SPAN_BYTES);
+const _: () = assert!(core::mem::size_of::<Span<LegIx>>() == SPAN_BYTES);
+
 /// Everything the report prints.
 // A7.2: cold struct, size guard waived
 pub struct ReportInput<'a> {
@@ -126,43 +136,23 @@ pub fn table_sizes(m: &Model) -> Vec<TableSize> {
             total_bytes: (m.strings.text.len() + m.strings.offsets.len() * 4) as f64,
         },
         t("points", m.points.kind.len(), 1 + 3 * 4 + 5 * 4, 7),
-        t(
-            "vertices (PosE7)",
-            m.vertices.len(),
-            core::mem::size_of::<PosE7>(),
-            0,
-        ),
+        t("vertices (PosE7)", m.vertices.len(), POS_E7_BYTES, 0),
         t(
             "boundaries",
             m.boundaries.source.len(),
-            4 + 2 * 4 + 2 * 4 + 2 * core::mem::size_of::<Span<VertexIx>>(),
+            4 + 2 * 4 + 2 * 4 + 2 * SPAN_BYTES,
             2,
         ),
         t("segments", m.segments.via.len(), 1 + 4 * 4 + 4 + 2, 0),
-        t(
-            "airways",
-            m.airways.designator.len(),
-            4 + 1 + core::mem::size_of::<Span<AirwayLegIx>>(),
-            0,
-        ),
+        t("airways", m.airways.designator.len(), 4 + 1 + SPAN_BYTES, 0),
         t(
             "airway legs",
             m.airway_legs.from.len(),
             2 * 4 + 3 * 4 + 2,
             3,
         ),
-        t(
-            "procedures",
-            m.procs.kind.len(),
-            1 + 3 * 4 + core::mem::size_of::<Span<RouteIx>>(),
-            3,
-        ),
-        t(
-            "routes",
-            m.routes.route_type.len(),
-            1 + 4 + core::mem::size_of::<Span<LegIx>>(),
-            0,
-        ),
+        t("procedures", m.procs.kind.len(), 1 + 3 * 4 + SPAN_BYTES, 3),
+        t("routes", m.routes.route_type.len(), 1 + 4 + SPAN_BYTES, 0),
         t(
             "legs",
             m.legs.fix.len(),
@@ -374,8 +364,7 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     let _ = writeln!(
         o,
         "size guards (compile-time, exact): PosE7 = {} bytes, Span = {} bytes",
-        core::mem::size_of::<PosE7>(),
-        core::mem::size_of::<Span<VertexIx>>()
+        POS_E7_BYTES, SPAN_BYTES
     );
     let p = &m.points;
     let _ = writeln!(o, "\npoints by kind:");

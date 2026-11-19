@@ -13,6 +13,11 @@
 //! Depends only on the core crates `oa-math` and `oa-ieee`; no operation panics on any input
 //! (invalid input is an error).
 
+// The width of `usize` is fixed by construction: this crate does not build for a target whose
+// pointers are not 64 bits (RULESET B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
+
 extern crate alloc;
 
 pub mod aeqd;

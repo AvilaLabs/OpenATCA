@@ -19,7 +19,7 @@ use oa_zip::{GzipError, GzipReader, InflateLimits, Truncated, MAX_RATIO, RATIO_E
 
 use crate::frame::{FrameError, MAX_FRAME_LEN};
 use crate::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
-use crate::reader::FrameReader;
+use crate::reader::{FrameReader, FrameWorkBudget, FrameWorkRefusal};
 
 /// Largest decoded size of one compressed file, 64 GiB: far above a rotated recording (256 MiB
 /// of compressed data is a few GiB of frames) and a stop for a runaway stream.
@@ -119,20 +119,27 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
             match &mut mode {
                 Mode::Raw => {
                     bytes += n as u64;
-                    feed_frames(&mut reader, &mut health, &mut errors, i, data);
+                    feed_frames(&mut reader, &mut health, &mut errors, i, data)
+                        .map_err(work_refusal_error)?;
                 }
                 Mode::Gzip(g) => {
-                    let r = g.push(data, &mut |b: &[u8]| -> Result<(), Infallible> {
+                    let r = g.push(data, &mut |b: &[u8]| -> Result<(), FrameWorkRefusal> {
                         bytes += b.len() as u64;
-                        feed_frames(&mut reader, &mut health, &mut errors, i, b);
+                        feed_frames(&mut reader, &mut health, &mut errors, i, b)?;
                         Ok(())
                     });
-                    if let Err(e) = r {
-                        gzip.push(GzNote {
-                            file: i,
-                            kind: GzNoteKind::Damaged(e),
-                        });
-                        mode = Mode::Dead;
+                    match r {
+                        Ok(()) => {}
+                        Err(e) => match gzip_note_error(e) {
+                            Ok(damaged) => {
+                                gzip.push(GzNote {
+                                    file: i,
+                                    kind: GzNoteKind::Damaged(damaged),
+                                });
+                                mode = Mode::Dead;
+                            }
+                            Err(refusal) => return Err(work_refusal_error(refusal)),
+                        },
                     }
                 }
                 Mode::Dead => {}
@@ -147,7 +154,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
                 });
             }
         }
-        drain(&mut reader, &mut health, &mut errors, i);
+        drain(&mut reader, &mut health, &mut errors, i).map_err(work_refusal_error)?;
         if let Some(e) = reader.finish() {
             observe_error(&mut health, &e);
             errors.push(FileError { file: i, error: e });
@@ -171,20 +178,32 @@ fn feed_frames(
     errors: &mut Vec<FileError>,
     file: usize,
     data: &[u8],
-) {
+) -> Result<(), FrameWorkRefusal> {
     let mut off = 0usize;
     while off < data.len() {
-        let took = reader.push(data.get(off..).unwrap_or(&[]));
+        // The allowance follows the reader's real buffer, not a frame's worth of it.
+        let budget = FrameWorkBudget::for_capacity(reader.capacity());
+        let took = reader.push_with_budget(data.get(off..).unwrap_or(&[]), budget)?;
         off += took;
-        drain(reader, health, errors, file);
+        drain(reader, health, errors, file)?;
         if took == 0 {
             break;
         }
     }
+    Ok(())
 }
 
-fn drain(r: &mut FrameReader<'_>, h: &mut FeedHealth, errors: &mut Vec<FileError>, file: usize) {
-    while let Some(ev) = r.next() {
+fn drain(
+    r: &mut FrameReader<'_>,
+    h: &mut FeedHealth,
+    errors: &mut Vec<FileError>,
+    file: usize,
+) -> Result<(), FrameWorkRefusal> {
+    loop {
+        let budget = FrameWorkBudget::for_capacity(r.capacity());
+        let Some(ev) = r.next_with_budget(budget)? else {
+            return Ok(());
+        };
         match ev {
             Ok(f) => observe_frame(h, &f, f.recv_unix_ns),
             Err(e) => {
@@ -192,6 +211,31 @@ fn drain(r: &mut FrameReader<'_>, h: &mut FeedHealth, errors: &mut Vec<FileError
                 errors.push(FileError { file, error: e });
             }
         }
+    }
+}
+
+fn work_refusal_error(refusal: FrameWorkRefusal) -> io::Error {
+    io::Error::other(format!("frame reader work refused: {refusal:?}"))
+}
+
+fn gzip_note_error(
+    error: GzipError<FrameWorkRefusal>,
+) -> Result<GzipError<Infallible>, FrameWorkRefusal> {
+    match error {
+        GzipError::BadMagic => Ok(GzipError::BadMagic),
+        GzipError::UnsupportedMethod(method) => Ok(GzipError::UnsupportedMethod(method)),
+        GzipError::ReservedFlags(flags) => Ok(GzipError::ReservedFlags(flags)),
+        GzipError::HeaderFieldTooLong => Ok(GzipError::HeaderFieldTooLong),
+        GzipError::HeaderCrc { expected, actual } => Ok(GzipError::HeaderCrc { expected, actual }),
+        GzipError::Data(error) => Ok(GzipError::Data(error)),
+        GzipError::CrcMismatch { expected, actual } => {
+            Ok(GzipError::CrcMismatch { expected, actual })
+        }
+        GzipError::SizeMismatch { expected, actual } => {
+            Ok(GzipError::SizeMismatch { expected, actual })
+        }
+        GzipError::Failed => Ok(GzipError::Failed),
+        GzipError::Sink(refusal) => Err(refusal),
     }
 }
 

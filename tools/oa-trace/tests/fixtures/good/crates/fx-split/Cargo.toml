@@ -5,6 +5,9 @@ version = "0.0.1"
 [package.metadata.openatca]
 class = "split"
 
+[lints]
+workspace = true
+
 [dependencies]
 fx-core = { path = "../fx-core" }
 fx-shell = { path = "../fx-shell" }

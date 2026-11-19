@@ -342,7 +342,7 @@ fn pct(v: &[f64], p: f64) -> f64 {
         return f64::NAN;
     }
     let mut s = v.to_vec();
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let k = ((p * s.len() as f64).ceil() as usize).clamp(1, s.len());
     s.get(k - 1).copied().unwrap_or(f64::NAN)
 }

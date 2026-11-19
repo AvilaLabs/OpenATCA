@@ -7,9 +7,9 @@ use crate::cat048::{self, Cat048};
 use crate::cat062::{self, Cat062};
 use crate::common::{ItemError, Items, RawItem};
 use crate::error::{AsterixError, ErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
-use crate::uap::{uap_for, Uap};
+use crate::uap::{uap_for_edition, Cat021Edition, Uap};
 use crate::wire::{
-    assemble_record, check_compound_minimal, check_item, item_number, parse_block, RawBlock,
+    assemble_record, check_compound_minimal, check_item, item_number, parse_block_with, RawBlock,
     BLOCK_HEADER_LEN, MAX_BLOCK_LEN, MAX_RECORDS_PER_BLOCK,
 };
 
@@ -35,9 +35,14 @@ fn at(cat: u8, record: usize, frn: u8, uap: &Uap, offset: usize, kind: ErrorKind
 
 /// Types the records of a parsed block. `buf` is the buffer `raw` was parsed from, `base` its
 /// offset in the caller's stream.
-fn type_block(buf: &[u8], base: usize, raw: &RawBlock) -> Result<Block, AsterixError> {
+fn type_block(
+    buf: &[u8],
+    base: usize,
+    raw: &RawBlock,
+    ed: Cat021Edition,
+) -> Result<Block, AsterixError> {
     let cat = raw.cat;
-    let Some(uap) = uap_for(cat) else {
+    let Some(uap) = uap_for_edition(cat, ed) else {
         return Err(AsterixError {
             cat,
             record: NO_RECORD,
@@ -90,6 +95,8 @@ fn type_block(buf: &[u8], base: usize, raw: &RawBlock) -> Result<Block, AsterixE
         }
         match cat {
             21 => {
+                cat021::check_edition(&c21, ed)
+                    .map_err(|(frn, k)| at(cat, ri, frn, uap, base, k))?;
                 c21.raw = raws;
                 r21.push(c21);
             }
@@ -114,9 +121,23 @@ fn type_block(buf: &[u8], base: usize, raw: &RawBlock) -> Result<Block, AsterixE
 /// occupied (its LEN). `base` is the offset of `buf[0]` in the caller's stream, added to the
 /// offsets in errors.
 pub fn decode_block_at(buf: &[u8], base: usize) -> Result<(Block, usize), AsterixError> {
-    let raw = parse_block(buf, base)?;
-    let block = type_block(buf, base, &raw)?;
+    decode_block_at_with(buf, base, Cat021Edition::Ed27)
+}
+
+/// [`decode_block_at`] with CAT021 read as edition `ed`.
+pub fn decode_block_at_with(
+    buf: &[u8],
+    base: usize,
+    ed: Cat021Edition,
+) -> Result<(Block, usize), AsterixError> {
+    let raw = parse_block_with(buf, base, ed)?;
+    let block = type_block(buf, base, &raw, ed)?;
     Ok((block, raw.len))
+}
+
+/// [`decode_block`] with CAT021 read as edition `ed`.
+pub fn decode_block_with(buf: &[u8], ed: Cat021Edition) -> Result<(Block, usize), AsterixError> {
+    decode_block_at_with(buf, 0, ed)
 }
 
 /// Decodes the data block at the start of `buf` and returns it with the octets it occupied.
@@ -175,12 +196,18 @@ fn merge(
 /// element, a raw item that is not exactly one well-formed item, an item given twice, and a
 /// block over [`MAX_BLOCK_LEN`] octets.
 pub fn encode_block(block: &Block) -> Result<Vec<u8>, AsterixError> {
+    encode_block_with(block, Cat021Edition::Ed27)
+}
+
+/// [`encode_block`] with CAT021 written as edition `ed`; a record the edition does not define
+/// (see [`cat021::check_edition`]) is refused.
+pub fn encode_block_with(block: &Block, ed: Cat021Edition) -> Result<Vec<u8>, AsterixError> {
     let (cat, n) = match block {
         Block::Cat021(r) => (21, r.len()),
         Block::Cat048(r) => (48, r.len()),
         Block::Cat062(r) => (62, r.len()),
     };
-    let Some(uap) = uap_for(cat) else {
+    let Some(uap) = uap_for_edition(cat, ed) else {
         return Err(AsterixError {
             cat,
             record: NO_RECORD,
@@ -208,7 +235,11 @@ pub fn encode_block(block: &Block) -> Result<Vec<u8>, AsterixError> {
     for i in 0..n {
         let (typed, raws): (Result<Items, ItemError>, &[RawItem]) = match block {
             Block::Cat021(r) => match r.get(i) {
-                Some(x) => (cat021::encode_items(x), &x.raw),
+                Some(x) => {
+                    cat021::check_edition(x, ed)
+                        .map_err(|(frn, k)| enc_err(cat, i, uap, frn, k))?;
+                    (cat021::encode_items(x), &x.raw)
+                }
                 None => continue,
             },
             Block::Cat048(r) => match r.get(i) {

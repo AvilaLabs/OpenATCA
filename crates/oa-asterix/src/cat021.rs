@@ -1,4 +1,4 @@
-//! ASTERIX category 021, ADS-B target reports, Ed 2.7 (Part 12). Typed decode and encode of the
+//! ASTERIX category 021, ADS-B target reports, Ed 2.7 and Ed 2.4 (Part 12). Typed decode and encode of the
 //! items the tracker needs; every other item is kept as raw bytes. Core (pure).
 //!
 //! The fields hold raw counts of the LSBs in [`crate::units`] (A9), so `encode(decode(x))` is
@@ -7,6 +7,7 @@
 
 use crate::common::*;
 use crate::error::ErrorKind;
+use crate::uap::Cat021Edition;
 
 /// I021/040 Target Report Descriptor (5.2.6): the primary subfield, and the extension octets as
 /// they are on the wire (first extension DCR, GBS, SIM, TST, SAA, CL; second the error
@@ -216,6 +217,27 @@ pub fn descriptor_test(t: &Trd021) -> Option<bool> {
 /// CL, confidence level (0 valid, 1 suspect, 2 no information), of a descriptor.
 pub fn descriptor_confidence(t: &Trd021) -> Option<u8> {
     t.ext.first().map(|b| b >> 1 & 3)
+}
+
+/// The rules of edition `ed` that the shared item layout does not carry: Ed 2.4 defines two
+/// extensions of I021/040 (the second one's FX points at a third that the edition does not
+/// define) and three of I021/090, and MOPS versions 0 to 2 (I021/210 VN; Ed 2.7 adds 3). A
+/// record with more is not an Ed 2.4 record: refused on encode and on decode, so that the two
+/// stay inverse. Returns the FRN and the reason.
+pub fn check_edition(rec: &Cat021, ed: Cat021Edition) -> Result<(), (u8, ErrorKind)> {
+    if ed != Cat021Edition::Ed24 {
+        return Ok(());
+    }
+    if rec.descriptor.as_ref().is_some_and(|t| t.ext.len() > 2) {
+        return Err((2, ErrorKind::ValueOutOfRange));
+    }
+    if rec.quality.as_ref().is_some_and(|q| q.ext.len() > 3) {
+        return Err((17, ErrorKind::ValueOutOfRange));
+    }
+    if rec.mops.as_ref().is_some_and(|m| m.version > 2) {
+        return Err((18, ErrorKind::ValueOutOfRange));
+    }
+    Ok(())
 }
 
 fn tail(b: &[u8], from: usize) -> Vec<u8> {

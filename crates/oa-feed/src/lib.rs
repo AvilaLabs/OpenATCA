@@ -21,6 +21,10 @@
 //! bytes it skipped. Health is a function of frame fields and injected times only, so replaying
 //! a recording gives the same summary every time (B6).
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 
@@ -35,6 +39,9 @@ pub use crate::core::frame::{
 pub use crate::core::health::{
     observe_error, observe_frame, observe_skipped, rates_milli, FeedHealth,
 };
-pub use crate::core::reader::{BufferTooSmall, FrameReader};
+pub use crate::core::reader::{
+    frame_work_refusal_retryable, BufferTooSmall, FrameReader, FrameWorkBudget, FrameWorkKind,
+    FrameWorkRefusal, FrameWorkStats, DEFAULT_FRAME_WORK_LIMIT,
+};
 pub use crate::shell::stream::read_frames;
 pub use crate::shell::summary::format_summary;

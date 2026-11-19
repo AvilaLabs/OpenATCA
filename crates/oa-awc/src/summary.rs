@@ -264,7 +264,7 @@ pub fn availability(t: &MetarTable) -> Availability {
         }
         i = j;
     }
-    rows.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
+    rows.sort_by(|x, y| oa_math::cmp_canon_f64(x.1, y.1).then_with(|| x.0.cmp(&y.0)));
     rows.truncate(10);
     a.worst = rows;
     a

@@ -1,0 +1,6 @@
+# cargo-fuzz needs the nightly the fuzz-smoke job installs (.github/workflows/ci.yml); this keeps
+# the root rust-toolchain.toml from selecting 1.89.0 for the fuzz workspace.
+[toolchain]
+channel = "nightly-2026-08-21"
+profile = "minimal"
+components = ["rust-src"]

@@ -13,6 +13,7 @@ use oa_airspace::model::{
 use oa_display::list::{list_clear, list_new};
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
+use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_display::traffic::{
     build_traffic, caps_add, targets_clear, targets_new, targets_push, traffic_caps, Target,
     TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ, T_COAST, T_CS_CONFLICT,
@@ -576,6 +577,23 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     add_counts(&mut counts, c);
     if !refusing_ok {
         return Err("a measured refusing display frame failed");
+    }
+
+    // Window 5: a scene built into a cloned label scratch. A clone of a sized scratch keeps every
+    // buffer's length, so the frame writes by index and allocates nothing.
+    let map = model();
+    let view = view_new(ORD.0, ORD.1, 60.0, 1920, 1080).map_err(|_| "view_new")?;
+    let index = scene_index(&map);
+    let mut cloned = scratch_for(&map, &view).map_err(|_| "scratch_for")?.clone();
+    let mut scene_list =
+        list_new(scene_caps(&map).map_err(|_| "scene_caps")?).map_err(|_| "list_new")?;
+    let mut cloned_ok = true;
+    let c = measure(inject, FRAMES, |_| {
+        cloned_ok &= build_scene(&mut scene_list, &map, &index, &view, &mut cloned).is_ok();
+    })?;
+    add_counts(&mut counts, c);
+    if !cloned_ok {
+        return Err("a measured cloned-scratch scene failed");
     }
 
     Ok(DisplayEvidence {

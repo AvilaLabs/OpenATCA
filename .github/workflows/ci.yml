@@ -13,9 +13,9 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal --component clippy,rustfmt && rustup default 1.89.0
       - name: Format
-        run: cargo fmt --all --check
+        run: cargo +1.89.0 fmt --all --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings
       - name: Candidate evaluator tests
         run: python3 tools/test_validate_candidate.py
       - name: Allocator evaluator tests
@@ -24,10 +24,12 @@ jobs:
         run: python3 tools/test_prepare_rust_proof_controls.py
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
+      - name: Feed reader work check (release)
+        run: cargo +1.89.0 run --release --locked --manifest-path validation/oa-feed-work-check/Cargo.toml --target-dir "$RUNNER_TEMP/oa-feed-work-check-target"
       - name: Test
-        run: cargo test --workspace --release --locked
+        run: cargo +1.89.0 test --workspace --release --locked
       - name: Requirements traceability
-        run: cargo run --locked -p oa-trace
+        run: cargo +1.89.0 run --locked -p oa-trace
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi
@@ -64,17 +66,17 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install nightly-2026-08-21 --profile minimal --component rust-src && rustup default nightly-2026-08-21
       - name: Install cargo-fuzz
-        run: cargo install --locked cargo-fuzz --version 0.13.2
+        run: cargo +nightly-2026-08-21 install --locked cargo-fuzz --version 0.13.2
       - name: Fuzz every target for 60 seconds
         working-directory: fuzz
         run: |
           set -eu
-          for t in $(cargo fuzz list); do
+          for t in $(cargo +nightly-2026-08-21 fuzz list); do
             corpus="$RUNNER_TEMP/fuzz-corpus/$t"
             mkdir -p "$corpus" "artifacts/$t"
             if [ -d "seeds/$t" ]; then cp seeds/"$t"/* "$corpus"/; fi
             echo "::group::fuzz $t"
-            cargo fuzz run "$t" "$corpus" -- \
+            cargo +nightly-2026-08-21 fuzz run "$t" "$corpus" -- \
               -artifact_prefix="$PWD/artifacts/$t/" \
               -rss_limit_mb=2048 -max_total_time=60
             echo "::endgroup::"

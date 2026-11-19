@@ -23,8 +23,8 @@ use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     esassp_of, flight_error_summaries, initiation_delays, interval_stats, run_tracker,
     run_tracker_spilled, score, score_ranges, score_source, scored_altitude_ft, scoring_config,
-    split_reports, transversal_accel, RowSet, RowSource, CLASS_STRAIGHT, CLASS_TURN,
-    SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
+    split_reports, split_reports_with, transversal_accel, RowSet, RowSource, CLASS_STRAIGHT,
+    CLASS_TURN, SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
 use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
@@ -960,6 +960,32 @@ fn conflicting_reports_stay_on_one_side_and_are_counted() {
         (st.duplicates_removed, st.conflict_groups, st.conflict_rows),
         (1, 1, 2)
     );
+}
+
+// REQ: OA-TRK-274
+#[test]
+fn the_split_with_halving_off_keeps_every_distinct_report_in_the_first_set() {
+    let mut r = Reports::default();
+    for (t, lat) in [(0.0, 1), (1.0, 2), (1.0, 3), (1.0, 3), (2.0, 4), (3.0, 5)] {
+        let mut row = base_row(0x100001, t);
+        row.lat_e7 = lat;
+        reports_push(&mut r, &row);
+    }
+    let (a, b, st) = split_reports_with(&r, false);
+    let (ha, hb, hs) = split_reports(&r);
+    assert_eq!((reports_len(&a), reports_len(&b)), (5, 0));
+    assert_eq!((st.set_a, st.set_b), (5, 0));
+    // Same removal and conflict counts as the halving run, and the same rows in all.
+    assert_eq!(
+        (st.duplicates_removed, st.conflict_groups, st.conflict_rows),
+        (hs.duplicates_removed, hs.conflict_groups, hs.conflict_rows)
+    );
+    assert_eq!((st.duplicates_removed, st.conflict_groups), (1, 1));
+    let mut all: Vec<i32> = ha.lat_e7.iter().chain(hb.lat_e7.iter()).copied().collect();
+    all.sort_unstable();
+    let mut one = a.lat_e7.clone();
+    one.sort_unstable();
+    assert_eq!(all, one);
 }
 
 // REQ: OA-TRK-273

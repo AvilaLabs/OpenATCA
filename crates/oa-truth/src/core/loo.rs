@@ -111,7 +111,7 @@ pub(crate) fn loo_leg(
             acc.along.push(dx * ux + dy * uy);
             acc.cross.push(dx * uy - dy * ux);
         }
-        let var = p[0].max(0.0);
+        let var = oa_math::max_f64(p[0], 0.0);
         acc.under_gate.n += 1;
         if sigma95_h_m(var).is_some_and(|s| s <= cfg.max_sigma95_h_m) {
             acc.under_gate.hit += 1;
@@ -157,7 +157,7 @@ pub(crate) fn dist_of(v: &[f64]) -> Dist {
     let mean = v.iter().sum::<f64>() / nf;
     let rms = oa_ieee::sqrt(v.iter().map(|x| x * x).sum::<f64>() / nf);
     let mut a: Vec<f64> = v.iter().map(|x| x.abs()).collect();
-    a.sort_by(|x, y| x.total_cmp(y));
+    a.sort_by(|x, y| oa_math::cmp_canon_f64(*x, *y));
     let rank = |p: f64| -> f64 {
         let r = (oa_ieee::ceil(p * nf) as usize).clamp(1, n);
         a.get(r - 1).copied().unwrap_or(0.0)

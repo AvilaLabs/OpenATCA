@@ -12,8 +12,11 @@ divide the workload. It can exist for three other things:
 
 - **Resilience.** Every facility can compute the national picture, so a facility can take over a
   neighbour's airspace without first building a picture of it.
-- **Independent checking.** Facilities fed the same inputs reach the same state bit for bit, so a
-  facility whose state differs is found within seconds.
+- **Independent checking.** Facilities fed the same inputs are to reach the same state bit for bit,
+  so a facility whose state differs is found within seconds. Today that holds only for the same
+  build on the same kind of machine: the tracker crates are still `unsplit` (RULESET B9) and call
+  the platform maths library, whose last bit can differ between CPUs and C library versions. It
+  holds across machines once those crates are core (B7), which keeps them off platform maths.
 - **Local survival.** A facility cut off from the shared network keeps working on its own sensors.
 
 Control authority is not part of the network. Exactly one position is responsible for each

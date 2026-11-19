@@ -21,9 +21,15 @@
 //! platform maths library, not even on a fallback path (a test greps the sources for the
 //! forbidden calls), and nothing relies on fused multiply-add (a separate multiply and add are
 //! never contracted by the compiler). Rounding is round-to-nearest-even, the Rust default.
-//! Every NaN returned is one fixed bit pattern. The same inputs therefore give the same output
-//! bits on any IEEE-754 machine; the pinned value of `tests/fingerprint.rs` (one hash over a
+//! Every NaN these functions return is one fixed bit pattern. The same inputs therefore give the
+//! same output bits on any IEEE-754 machine; the pinned value of `tests/fingerprint.rs` (one hash over a
 //! million results) has been checked on x86-64 and wasm32 only, aarch64 has not been run.
+//!
+//! What the rule does not cover is a NaN the caller's own arithmetic makes (`0.0 / 0.0`,
+//! `inf - inf`, `oa_ieee::sqrt(-1.0)`): IEEE-754 says such a result is a NaN, not which one, and
+//! its sign and payload differ between a compile-time fold, x86-64 and aarch64. A float whose
+//! bits feed a hash, a digest or a written output goes through [`canon_nan`] first; the class
+//! check (`oa-trace`) rejects `to_bits` in core code on anything else.
 //!
 //! # How the accuracy is reached
 //!
@@ -91,12 +97,19 @@
 //! without it (an `examples/speed.rs` run prints the table); the price of the determinism and
 //! the extra accuracy.
 
+// The width of `usize` is fixed by construction: this crate does not build for a target whose
+// pointers are not 64 bits (RULESET B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
+
 mod atan;
 mod consts;
 mod dd;
 mod exp;
 mod fast;
 mod log;
+mod nan;
+mod order;
 mod pow;
 mod rem;
 mod root;
@@ -111,6 +124,12 @@ mod helper_tests;
 pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;
 pub use log::ln;
+pub use nan::{canon_nan, canon_nan_f32};
+pub use order::{
+    clamp_f32, clamp_f64, cmp_canon_f32, cmp_canon_f64, copysign_canon_f32, copysign_canon_f64,
+    is_sign_negative_canon_f32, is_sign_negative_canon_f64, max_f32, max_f64, min_f32, min_f64,
+    signum_canon_f32, signum_canon_f64,
+};
 pub use pow::{pow, powi};
 pub use rem::rem_euclid;
 pub use root::{cbrt, hypot};

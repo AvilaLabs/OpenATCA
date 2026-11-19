@@ -1520,3 +1520,38 @@ fn no_leg_has_a_step_longer_than_the_leg_gap() {
         }
     }
 }
+
+// REQ: OA-TRUTH-061
+#[test]
+fn the_digest_does_not_depend_on_which_nan_a_machine_made() {
+    let r = straight(ADDR, 1.0, 120.0, 5.0, 61);
+    let (base, _) = build(&r);
+    assert!(leg_count(&base) > 0);
+    let want = digest(&base);
+    // a NaN in a column or a setting: the sign and payload of the hardware's own NaN, a
+    // negative NaN and a payload NaN all hash as the one fixed NaN
+    let nans = [
+        f64::NAN,
+        -f64::NAN,
+        f64::from_bits(0x7ff8_0000_0000_1234),
+        f64::from_bits(0xfff8_0000_0000_0001),
+        std::hint::black_box(0.0f64) / std::hint::black_box(0.0f64),
+    ];
+    let mut seen = Vec::new();
+    for n in nans {
+        let (mut t, _) = build(&r);
+        t.leg_lat0[0] = n;
+        t.pt_ps[0][3] = n;
+        t.cfg.accel_q = n;
+        seen.push(digest(&t));
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "digests differ by NaN bits"
+    );
+    assert_ne!(seen[0], want);
+    // a finite change still changes the digest
+    let (mut t, _) = build(&r);
+    t.pt_ps[0][3] += 1.0;
+    assert_ne!(digest(&t), want);
+}

@@ -693,7 +693,7 @@ pub fn output_hash_into(h: &mut oa_sha256::Sha256, o: &TrackOutput) {
         .chain(o.vel_north_mps.iter())
         .chain(o.turn_rate_rps.iter())
     {
-        put(h, &v.to_bits().to_le_bytes());
+        put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
     }
     // The altitude columns of a row without an altitude are hashed as zero, which is what they
     // held before absence was written as NaN: the flags (hashed below) already say "absent", and
@@ -701,17 +701,22 @@ pub fn output_hash_into(h: &mut oa_sha256::Sha256, o: &TrackOutput) {
     for col in [&o.alt_ft, &o.alt_var_ft2, &o.vrate_fpm] {
         for (i, v) in col.iter().enumerate() {
             let has = o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0);
-            put(h, &(if has { *v } else { 0.0 }).to_bits().to_le_bytes());
+            put(
+                h,
+                &oa_math::canon_nan_f32(if has { *v } else { 0.0 })
+                    .to_bits()
+                    .to_le_bytes(),
+            );
         }
     }
     for c in o.pos_cov_m2.iter().chain(o.vel_cov_m2s2.iter()) {
         for v in c {
-            put(h, &v.to_bits().to_le_bytes());
+            put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
         }
     }
     for c in o.mu_h.iter().chain(o.mu_v.iter()) {
         for v in c {
-            put(h, &v.to_bits().to_le_bytes());
+            put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
         }
     }
     put(h, &o.flags);

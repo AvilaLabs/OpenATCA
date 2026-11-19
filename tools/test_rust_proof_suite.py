@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 62)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 62)
+        self.assertEqual(registry["expected_proof_count"], 64)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 64)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 57)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 59)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -65,6 +65,15 @@ class SuiteConfigurationTests(unittest.TestCase):
             "late-append-combined",
             "late-overflow-combined",
         })
+
+    def test_the_safety_net_inhibition_proofs_are_registered(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        safety = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-safety"}
+        self.assertEqual(set(safety), {"inhibition-in-force", "inhibition-band"})
+        for proof in safety.values():
+            self.assertTrue(proof["enabled"] and not proof["experimental"])
+            self.assertTrue(proof["harness"].startswith("inhibit::proofs::"))
 
     def test_late_rollback_conjunction_has_every_component_and_reachability_case(self):
         registry, errors = load_registry(REGISTRY_PATH)

@@ -298,7 +298,7 @@ fn run_clearance(
             .filter(|c| c.terrain_complete())
             .filter_map(clearance::margin_ft)
             .collect();
-        mg.sort_by(f64::total_cmp);
+        mg.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         if mg.is_empty() {
             continue;
         }
@@ -347,9 +347,10 @@ fn run_clearance(
         .filter(|c| clearance::margin_ft(c).is_some_and(|x| x < 0.0))
         .collect();
     neg.sort_by(|x, y| {
-        clearance::margin_ft(x)
-            .unwrap_or(0.0)
-            .total_cmp(&clearance::margin_ft(y).unwrap_or(0.0))
+        oa_math::cmp_canon_f64(
+            clearance::margin_ft(x).unwrap_or(0.0),
+            clearance::margin_ft(y).unwrap_or(0.0),
+        )
     });
     println!("  sectors with NEGATIVE margin: {}", neg.len());
     for c in neg {
@@ -376,9 +377,10 @@ fn run_clearance(
         })
         .collect();
     thin.sort_by(|x, y| {
-        clearance::margin_ft(x)
-            .unwrap_or(0.0)
-            .total_cmp(&clearance::margin_ft(y).unwrap_or(0.0))
+        oa_math::cmp_canon_f64(
+            clearance::margin_ft(x).unwrap_or(0.0),
+            clearance::margin_ft(y).unwrap_or(0.0),
+        )
     });
     let rounded = res
         .iter()

@@ -8,6 +8,7 @@ pub mod list;
 pub mod palette;
 pub mod project;
 pub mod raster;
+pub mod safety;
 pub mod scene;
 pub mod text;
 pub mod traffic;

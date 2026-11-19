@@ -24,6 +24,7 @@ module's class.
 | `raster`  | core  | integer software rasterizer into an XRGB8888 buffer, frame hash    |
 | `scene`   | core  | airspace model to display list (boundaries, airways, fixes, rings)  |
 | `traffic` | core  | live targets to display list: symbols, leader, trail, data block    |
+| `safety`  | core  | net-state banner, inhibition areas, feed states, picture frozen     |
 | `text`    | core  | fixed-size stack text buffer: the data block text, no allocation    |
 | `ppm`     | shell | binary PPM (P6) writer                                             |
 | `cli`     | shell | the `oa-scope` command line, file reads and writes                 |

@@ -537,7 +537,7 @@ fn pair_navaids(
                 }
             }
         }
-        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        near.sort_by(|a, b| oa_math::cmp_canon_f64(a.0, b.0).then(a.1.cmp(&b.1)));
         let label = || format!("navaid {} {} ({})", n.nav_id, n.nav_type, nasr_place(n));
         let Some(&(d0, c0)) = near.first() else {
             tries.push(Try {
@@ -842,7 +842,7 @@ fn pair_navaids(
     }
     info.navaid_ambiguous.sort();
     info.navaid_over_cap
-        .sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)));
+        .sort_by(|x, y| oa_math::cmp_canon_f64(x.0, y.0).then_with(|| x.1.cmp(&y.1)));
 }
 
 /// Two NDB records of one identifier and region closer than this are one NDB, metres.
@@ -2053,7 +2053,7 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
     }
 
     info.pairs_over
-        .sort_by(|x, y| y.0.total_cmp(&x.0).then_with(|| x.1.cmp(&y.1)));
+        .sort_by(|x, y| oa_math::cmp_canon_f64(y.0, x.0).then_with(|| x.1.cmp(&y.1)));
 
     // 2. Selection of points.
     for i in 0..reg.cands.len() {

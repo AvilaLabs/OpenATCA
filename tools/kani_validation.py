@@ -112,6 +112,9 @@ LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
         "let m = late_proof_measurement();",
         "update_late(&mut t, PROOF_SLOT, &m, &mut out);",
     ],
+    # The functions of `fixture_source` that build the scenario; every snippet must sit in the
+    # body of one of these or of the harness itself (a `const` snippet at module level).
+    "fixture_functions": ["late_proof_tracker", "late_proof_measurement", "run_late_replay_case"],
 }
 LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo"] = {
     **LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"],
@@ -335,49 +338,246 @@ def _expected_loop_log_line_count(preset: Mapping[str, Any]) -> int:
     )
 
 
+def _rust_scan(text: str) -> tuple[str, str]:
+    """Return `(code, masked)`: `text` with comments blanked, and `code` with string and
+    character literal contents blanked as well. Line breaks and offsets are kept, so a
+    position in one is the same position in the other and in `text`."""
+    code: list[str] = []
+    masked: list[str] = []
+    n = len(text)
+    i = 0
+
+    def put(ch: str, keep_code: bool, keep_masked: bool) -> None:
+        blank = "\n" if ch == "\n" else " "
+        code.append(ch if keep_code else blank)
+        masked.append(ch if keep_masked else blank)
+
+    while i < n:
+        ch = text[i]
+        two = text[i:i + 2]
+        if two == "//":
+            while i < n and text[i] != "\n":
+                put(text[i], False, False)
+                i += 1
+        elif two == "/*":
+            depth = 0
+            while i < n:
+                if text[i:i + 2] == "/*":
+                    depth += 1
+                    put(text[i], False, False)
+                    put(text[i + 1], False, False)
+                    i += 2
+                elif text[i:i + 2] == "*/":
+                    depth -= 1
+                    put(text[i], False, False)
+                    put(text[i + 1], False, False)
+                    i += 2
+                    if depth == 0:
+                        break
+                else:
+                    put(text[i], False, False)
+                    i += 1
+        elif ch == "r" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+                            or (text[i - 1] in "bc" and (i < 2 or not (text[i - 2].isalnum() or text[i - 2] == "_")))) \
+                and re.match(r'r#*"', text[i:]):
+            hashes = len(re.match(r"r(#*)", text[i:]).group(1))
+            end = text.find('"' + "#" * hashes, i + 1 + hashes + 1)
+            end = n if end < 0 else end + 1 + hashes
+            put(text[i], True, True)
+            for k in range(i + 1, end):
+                put(text[k], True, text[k] in '"#')
+            i = end
+        elif ch == '"':
+            put(ch, True, True)
+            i += 1
+            while i < n:
+                if text[i] == "\\" and i + 1 < n:
+                    put(text[i], True, False)
+                    put(text[i + 1], True, False)
+                    i += 2
+                elif text[i] == '"':
+                    put(text[i], True, True)
+                    i += 1
+                    break
+                else:
+                    put(text[i], True, False)
+                    i += 1
+        elif ch == "'":
+            if text[i + 1:i + 2] == "\\":
+                end = text.find("'", i + 3)
+                end = n if end < 0 else end + 1
+                put(ch, True, True)
+                for k in range(i + 1, end):
+                    put(text[k], True, False)
+                i = end
+            elif text[i + 2:i + 3] == "'" and text[i + 1:i + 2] != "'":
+                for k in range(i, i + 3):
+                    put(text[k], True, False)
+                i += 3
+            else:
+                put(ch, True, True)
+                i += 1
+        else:
+            put(ch, True, True)
+            i += 1
+    return "".join(code), "".join(masked)
+
+
+_FN_RE = re.compile(r"\bfn\s+([A-Za-z_]\w*)\s*[(<]")
+
+
+def _rust_fns(masked: str) -> list[dict[str, Any]]:
+    """Every `fn name` item of `masked` (generics allowed) with the span of its body, `None`
+    for a declaration without one. A header that never reaches a body runs to the end."""
+    fns: list[dict[str, Any]] = []
+    for match in _FN_RE.finditer(masked):
+        depth = 0
+        i = match.end() - 1
+        body: tuple[int, int] | None = None
+        while i < len(masked):
+            ch = masked[i]
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif ch == ";" and depth <= 0:
+                break
+            elif ch == "{" and depth <= 0:
+                level = 0
+                j = i
+                while j < len(masked):
+                    if masked[j] == "{":
+                        level += 1
+                    elif masked[j] == "}":
+                        level -= 1
+                        if level == 0:
+                            break
+                    j += 1
+                body = (i + 1, j)
+                break
+            i += 1
+        else:
+            body = (match.end(), len(masked))
+        fns.append({"name": match.group(1), "start": match.start(), "body": body})
+    return fns
+
+
+def _enclosing_fn(fns: list[dict[str, Any]], offset: int) -> str | None:
+    """Name of the innermost fn whose body holds `offset`."""
+    best: dict[str, Any] | None = None
+    for fn in fns:
+        if fn["body"] is not None and fn["body"][0] <= offset < fn["body"][1]:
+            if best is None or fn["body"][0] > best["body"][0]:
+                best = fn
+    return None if best is None else best["name"]
+
+
+_MODIFIERS_RE = re.compile(r'(?:(?:pub\s*(?:\([^)]*\))?|const|async|unsafe|default|extern(?:\s*"[^"]*")?)\s+)*\Z')
+
+
+def _fn_attributes(code: str, masked: str, fn_start: int) -> list[str]:
+    """The attributes written directly before the item whose `fn` keyword is at `fn_start`,
+    comments ignored, any number to a line, each as written."""
+    pos = _MODIFIERS_RE.search(masked[:fn_start]).start()  # always matches: it may be empty
+    attrs: list[str] = []
+    while True:
+        j = pos
+        while j > 0 and masked[j - 1].isspace():
+            j -= 1
+        if j == 0 or masked[j - 1] != "]":
+            return attrs
+        depth = 0
+        k = j - 1
+        while k >= 0:
+            if masked[k] == "]":
+                depth += 1
+            elif masked[k] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        h = k
+        while h > 0 and masked[h - 1].isspace():
+            h -= 1
+        if k < 0 or h == 0 or masked[h - 1] != "#":
+            return attrs
+        attrs.insert(0, code[h - 1:j])
+        pos = h - 1
+
+
+def _unwind_attributes(attrs: list[str]) -> list[str]:
+    """The attributes that set a Kani unwind bound, whitespace removed (`cfg_attr` ones too)."""
+    squashed = [re.sub(r"\s+", "", attr) for attr in attrs]
+    return [attr for attr in squashed if "kani::unwind" in attr]
+
+
 def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, harness: str) -> None:
     preset = LOOP_UNWIND_PRESETS[preset_name]
     if package != preset["package"] or harness not in preset["harnesses"]:
         raise ValueError(f"loop-unwind preset {preset_name!r} is not allowed for {package}:{harness}")
     path = repo / preset["source"]
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(f"cannot read source for loop-unwind preset {preset_name!r}: {exc}") from exc
+    code, masked = _rust_scan(text)
+    lines = code.split("\n")
+    starts = [0]
+    for line in lines[:-1]:
+        starts.append(starts[-1] + len(line) + 1)
+    fns = _rust_fns(masked)
     loops = preset.get("loops", [preset])
     for loop in loops:
         line_index = loop.get("guard_line", loop["line"]) - 1
+        # comments are blanked, so a loop line that only appears in a comment is stale
         if line_index >= len(lines) or lines[line_index].strip() != loop["source_line"]:
             raise ValueError(f"stale source location for loop-unwind preset {preset_name!r}")
-        enclosing_fn = next(
-            (line for line in reversed(lines[:line_index]) if re.search(r"\bfn\s+[A-Za-z_]\w*\s*\(", line)),
-            "",
-        )
-        if not re.search(rf"\bfn\s+{re.escape(preset['function'])}\s*\(", enclosing_fn):
+        offset = starts[line_index] + len(lines[line_index]) - len(lines[line_index].lstrip())
+        if _enclosing_fn(fns, offset) != preset["function"]:
             raise ValueError(f"stale function location for loop-unwind preset {preset_name!r}")
+    harness_source = preset.get("harness_source", {}).get(harness, preset.get("default_harness_source"))
+    if not isinstance(harness_source, str):
+        raise ValueError(f"missing source map for loop-unwind preset {preset_name!r}")
+    try:
+        proof_text = (repo / harness_source).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read harness source for loop-unwind preset {preset_name!r}: {exc}") from exc
+    proof_code, proof_masked = _rust_scan(proof_text)
+    fn_name = harness.rsplit("::", 1)[-1]
+    definitions = [fn for fn in _rust_fns(proof_masked) if fn["name"] == fn_name]
+    if len(definitions) != 1:
+        raise ValueError(f"expected one source definition for harness {harness!r}")
     if "fixture_source" in preset:
+        # Each snippet must be code inside the body of the harness or of a registered fixture
+        # function (a `const`/`static` item may sit at module level): not a comment, not an
+        # unrelated function, not anywhere else in the file.
         try:
             fixture_text = (repo / preset["fixture_source"]).read_text(encoding="utf-8")
         except OSError as exc:
             raise ValueError(f"cannot read fixture source for loop-unwind preset {preset_name!r}: {exc}") from exc
-        if any(snippet not in fixture_text for snippet in preset["fixture_snippets"]):
-            raise ValueError(f"stale bounded fixture for loop-unwind preset {preset_name!r}")
-    harness_source = preset.get("harness_source", {}).get(harness, preset.get("default_harness_source"))
-    if not isinstance(harness_source, str):
-        raise ValueError(f"missing source map for loop-unwind preset {preset_name!r}")
-    proof_path = repo / harness_source
-    try:
-        proof_lines = proof_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ValueError(f"cannot read harness source for loop-unwind preset {preset_name!r}: {exc}") from exc
-    fn_name = harness.rsplit("::", 1)[-1]
-    fn_indexes = [i for i, line in enumerate(proof_lines) if re.search(rf"\bfn\s+{re.escape(fn_name)}\s*\(", line)]
-    if len(fn_indexes) != 1:
-        raise ValueError(f"expected one source definition for harness {harness!r}")
-    fn_index = fn_indexes[0]
-    previous_fn = max((i for i, line in enumerate(proof_lines[:fn_index]) if re.search(r"\bfn\s+[A-Za-z_]\w*\s*\(", line)), default=-1)
-    attrs = [line.strip() for line in proof_lines[previous_fn + 1:fn_index] if line.strip().startswith("#[")]
-    unwind_attrs = [attr for attr in attrs if attr.startswith("#[kani::unwind(")]
+        fixture_code, fixture_masked = _rust_scan(fixture_text)
+        fixture_fns = _rust_fns(fixture_masked)
+        bodies: list[str] = []
+        for name in preset.get("fixture_functions", []):
+            found = [fn for fn in fixture_fns if fn["name"] == name and fn["body"] is not None]
+            if len(found) != 1:
+                raise ValueError(f"stale bounded fixture for loop-unwind preset {preset_name!r}")
+            bodies.append(fixture_code[found[0]["body"][0]:found[0]["body"][1]])
+        if (repo / preset["fixture_source"]).resolve() == (repo / harness_source).resolve() and definitions[0]["body"]:
+            start, end = definitions[0]["body"]
+            bodies.append(proof_code[start:end])
+        top = list(fixture_code)
+        for fn in fixture_fns:
+            if fn["body"] is not None:
+                for k in range(*fn["body"]):
+                    if top[k] != "\n":
+                        top[k] = " "
+        module_level = "".join(top)
+        for snippet in preset["fixture_snippets"]:
+            in_item = snippet.lstrip().startswith(("const ", "static ")) and snippet in module_level
+            if not in_item and not any(snippet in body for body in bodies):
+                raise ValueError(f"stale bounded fixture for loop-unwind preset {preset_name!r}")
+    unwind_attrs = _unwind_attributes(_fn_attributes(proof_code, proof_masked, definitions[0]["start"]))
     if unwind_attrs != [f"#[kani::unwind({preset['global_unwind']})]"]:
         raise ValueError(
             f"harness {harness!r} must have exactly #[kani::unwind({preset['global_unwind']})]"

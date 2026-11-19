@@ -7,11 +7,12 @@
 //! written at all and the buffer says so ([`text_clipped`]); it is never silently cut. The callers
 //! size their text so it fits, and count the clip if it ever happens (E6).
 
-/// Bytes a buffer holds. The longest text written is a notice of about 60 bytes.
-pub const TEXT_BYTES: usize = 96;
+/// Bytes a buffer holds. The longest text written is a safety banner line of about 100 bytes at
+/// its numeric caps; 128 leaves margin so that no line is clipped.
+pub const TEXT_BYTES: usize = 128;
 
 /// ASCII text of at most [`TEXT_BYTES`] bytes. Plain data with private fields (A1.1).
-// Budget: 96 bytes of text, its length and the clip flag; one per text line being built, on the
+// Budget: 128 bytes of text, its length and the clip flag; one per text line being built, on the
 // stack, never held in quantity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -62,7 +63,7 @@ fn put(b: &mut TextBuf, s: &[u8]) {
     match b.bytes.get_mut(at..end) {
         Some(dst) if s.is_ascii() => {
             dst.copy_from_slice(s);
-            // `end` is at most TEXT_BYTES (96), so it fits in a u8.
+            // `end` is at most TEXT_BYTES (128), so it fits in a u8.
             b.len = u8::try_from(end).unwrap_or(u8::MAX);
         }
         _ => b.clipped = true,

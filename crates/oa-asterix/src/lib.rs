@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! oa-asterix: encoder and decoder for EUROCONTROL ASTERIX categories 021 (ADS-B target
 //! reports), 048 (monoradar target reports) and 062 (system track data), written from the
-//! specifications: Part 1 Ed 3.1 (general structure), CAT021 Ed 2.7, CAT048 Ed 1.32, CAT062
+//! specifications: Part 1 Ed 3.1 (general structure), CAT021 Ed 2.7 (and Ed 2.4, see
+//! [`Cat021Edition`]), CAT048 Ed 1.32, CAT062
 //! Ed 1.21. All of it is core, pure functions of bytes and values (B1); there is no shell.
 //!
 //! # Layers
@@ -49,15 +50,19 @@ pub mod uap;
 pub mod units;
 pub mod wire;
 
-pub use block::{decode_block, decode_block_at, decode_stream, encode_block, Block};
+pub use block::{
+    decode_block, decode_block_at, decode_block_at_with, decode_block_with, decode_stream,
+    encode_block, encode_block_with, Block,
+};
 pub use common::{
     e7_to_raw, ms_to_time128, raw_to_e7, time128_to_ms, Ident, Mode3a, RawItem, RawPosition,
     SelectedAltitude, SourceId,
 };
 pub use error::{AsterixError, ErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
+pub use uap::Cat021Edition;
 pub use wire::{
-    parse_block, MAX_BLOCK_LEN, MAX_EXTENSIONS, MAX_PRIMARY_OCTETS, MAX_RECORDS_PER_BLOCK,
-    MAX_REPETITIONS,
+    parse_block, parse_block_with, MAX_BLOCK_LEN, MAX_EXTENSIONS, MAX_PRIMARY_OCTETS,
+    MAX_RECORDS_PER_BLOCK, MAX_REPETITIONS,
 };
 
 #[cfg(kani)]

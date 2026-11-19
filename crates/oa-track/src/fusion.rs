@@ -1340,7 +1340,11 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             },
         ));
     }
-    hard.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+    hard.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(oa_math::cmp_canon_f64(a.1, b.1))
+            .then(a.2.cmp(&b.2))
+    });
     // Keys of the tracks that took a hard plot, ascending (the list is sorted by key).
     for (key, _, j, d) in &hard {
         if taken.last() == Some(key) {
@@ -1526,7 +1530,7 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
             }
             _ => f64::INFINITY,
         };
-        cand.sort_unstable_by(|&x, &y| key(x).total_cmp(&key(y)).then(x.cmp(&y)));
+        cand.sort_unstable_by(|&x, &y| oa_math::cmp_canon_f64(key(x), key(y)).then(x.cmp(&y)));
         cand.truncate(visits);
         ra.capped = true;
     }

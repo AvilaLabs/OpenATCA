@@ -3,7 +3,7 @@
 //! [`Kind`] and the spare bits it must keep at zero. No code per item: [`crate::wire`] walks any
 //! item from its description.
 //!
-//! Sources: CAT021 Ed 2.7 section 5.3 (Table 1) and 5.2.x, CAT048 Ed 1.32 section 5.3.1
+//! Sources: CAT021 Ed 2.7 section 5.3 (Table 1) and Ed 2.4 section 5.3 (Table 2) and 5.2.x, CAT048 Ed 1.32 section 5.3.1
 //! (Table 2) and 5.2.x, CAT062 Ed 1.21 section 5.3 (Table 1) and 5.2.x. Item numbers in doc
 //! comments are those of the category (I021/130 is "130" in CAT021).
 //!
@@ -118,69 +118,114 @@ const fn sp(octet: u8, mask: u8) -> Spare {
 /// every ASTERIX record" (021 5.2.2, 048 5.2.1, 062 5.2.1).
 const MANDATORY: &[u8] = &[1];
 
+/// The editions of CAT021 this crate carries (Part 12). The codec is one: the edition selects
+/// the UAP table ([`uap_021`]) and the few checks that differ ([`crate::cat021::check_edition`]).
+/// Ed 2.7 is the default of every function without an edition argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold enum, size guard waived
+pub enum Cat021Edition {
+    /// Ed 2.4 (Released Edition): I021/040 has two extensions, I021/090 three, MOPS version 0 to 2.
+    Ed24,
+    /// Ed 2.7 (Released Edition).
+    Ed27,
+}
+
+/// I021/090 spare bits, Ed 2.7 (5.2.16): extension 2 bits 8/7, extension 3 bits 3/2 (bit 4 is
+/// SRC), extension 4 bits 8/7.
+const QUALITY_SPARE_ED27: &[Spare] = &[sp(2, 0xC0), sp(3, 0x06), sp(4, 0xC0)];
+/// I021/090 spare bits, Ed 2.4 (5.2.16): extension 2 bits 8/7, extension 3 bits 4/2; there is
+/// no fourth extension.
+const QUALITY_SPARE_ED24: &[Spare] = &[sp(2, 0xC0), sp(3, 0x0E)];
+
+/// The 49 slots of the CAT021 UAP, one macro for both editions (Table 1 of Ed 2.7, Table 2 of Ed 2.4). The two tables list
+/// the same FRNs, items and lengths (only the name of FRN 39 differs: "Mode S MB Data" in Ed 2.4,
+/// "BDS Register Data" in Ed 2.7); the spare bits of I021/090 differ.
+macro_rules! slots_021 {
+    ($quality_spare:expr) => {
+        [
+            item(10, fixed(2)),
+            // 5.2.6: the second extension has spare bit 8; the others are fully assigned.
+            item(40, ext(1, &[sp(2, 0x80)])),
+            item(161, fixed_s(2, &[sp(0, 0xF0)])),
+            item(15, fixed(1)),
+            item(71, fixed(3)),
+            item(130, fixed(6)),
+            item(131, fixed(8)),
+            item(72, fixed(3)),
+            item(150, fixed(2)),
+            item(151, fixed(2)),
+            item(80, fixed(3)),
+            item(73, fixed(3)),
+            item(74, fixed(4)),
+            item(75, fixed(3)),
+            item(76, fixed(4)),
+            item(140, fixed(2)),
+            // 5.2.16: spare bits per edition, see QUALITY_SPARE_ED27 and QUALITY_SPARE_ED24.
+            item(90, ext(1, $quality_spare)),
+            item(210, fixed_s(1, &[sp(0, 0x80)])),
+            item(70, fixed_s(2, &[sp(0, 0xF0)])),
+            item(230, fixed(2)),
+            item(145, fixed(2)),
+            item(152, fixed(2)),
+            item(200, fixed(1)),
+            item(155, fixed(2)),
+            item(157, fixed(2)),
+            item(160, fixed(4)),
+            item(165, fixed_s(2, &[sp(0, 0xFC)])),
+            item(77, fixed(3)),
+            item(170, fixed(6)),
+            item(20, fixed(1)),
+            // 5.2.36 Met Information: wind speed, wind direction, temperature (two octets each),
+            // turbulence (one octet).
+            item(220, compound(&[fixed(2), fixed(2), fixed(2), fixed(1)])),
+            item(146, fixed(2)),
+            item(148, fixed(2)),
+            // 5.2.17 Trajectory Intent: status (extended), data (repetitive, 15-octet points).
+            item(110, compound(&[ext(1, &[sp(0, 0x3E)]), rep(15)])),
+            item(16, fixed(1)),
+            item(8, fixed(1)),
+            item(271, ext(1, &[sp(0, 0xC0), sp(1, 0x0E)])),
+            item(132, fixed(1)),
+            item(250, rep(8)),
+            item(260, fixed(7)),
+            item(400, fixed(1)),
+            // 5.2.41 Data Ages: 23 one-octet ages.
+            item(295, compound(&[fixed(1); 23])),
+            Slot::Unused,
+            Slot::Unused,
+            Slot::Unused,
+            Slot::Unused,
+            Slot::Unused,
+            Slot::Re,
+            Slot::Sp,
+        ]
+    };
+}
+
+static SLOTS_021_ED27: [Slot; 49] = slots_021!(QUALITY_SPARE_ED27);
+static SLOTS_021_ED24: [Slot; 49] = slots_021!(QUALITY_SPARE_ED24);
+
 /// CAT021 Ed 2.7, Table 1 (49 slots).
 pub static UAP_021: Uap = Uap {
     cat: 21,
     mandatory: MANDATORY,
-    slots: &[
-        item(10, fixed(2)),
-        // 5.2.6: the second extension has spare bit 8; the others are fully assigned.
-        item(40, ext(1, &[sp(2, 0x80)])),
-        item(161, fixed_s(2, &[sp(0, 0xF0)])),
-        item(15, fixed(1)),
-        item(71, fixed(3)),
-        item(130, fixed(6)),
-        item(131, fixed(8)),
-        item(72, fixed(3)),
-        item(150, fixed(2)),
-        item(151, fixed(2)),
-        item(80, fixed(3)),
-        item(73, fixed(3)),
-        item(74, fixed(4)),
-        item(75, fixed(3)),
-        item(76, fixed(4)),
-        item(140, fixed(2)),
-        // 5.2.16: extension 2 spare bits 8/7, extension 3 spare bits 3/2, extension 4 spare
-        // bits 8/7.
-        item(90, ext(1, &[sp(2, 0xC0), sp(3, 0x06), sp(4, 0xC0)])),
-        item(210, fixed_s(1, &[sp(0, 0x80)])),
-        item(70, fixed_s(2, &[sp(0, 0xF0)])),
-        item(230, fixed(2)),
-        item(145, fixed(2)),
-        item(152, fixed(2)),
-        item(200, fixed(1)),
-        item(155, fixed(2)),
-        item(157, fixed(2)),
-        item(160, fixed(4)),
-        item(165, fixed_s(2, &[sp(0, 0xFC)])),
-        item(77, fixed(3)),
-        item(170, fixed(6)),
-        item(20, fixed(1)),
-        // 5.2.36 Met Information: wind speed, wind direction, temperature (two octets each),
-        // turbulence (one octet).
-        item(220, compound(&[fixed(2), fixed(2), fixed(2), fixed(1)])),
-        item(146, fixed(2)),
-        item(148, fixed(2)),
-        // 5.2.17 Trajectory Intent: status (extended), data (repetitive, 15-octet points).
-        item(110, compound(&[ext(1, &[sp(0, 0x3E)]), rep(15)])),
-        item(16, fixed(1)),
-        item(8, fixed(1)),
-        item(271, ext(1, &[sp(0, 0xC0), sp(1, 0x0E)])),
-        item(132, fixed(1)),
-        item(250, rep(8)),
-        item(260, fixed(7)),
-        item(400, fixed(1)),
-        // 5.2.41 Data Ages: 23 one-octet ages.
-        item(295, compound(&[fixed(1); 23])),
-        Slot::Unused,
-        Slot::Unused,
-        Slot::Unused,
-        Slot::Unused,
-        Slot::Unused,
-        Slot::Re,
-        Slot::Sp,
-    ],
+    slots: &SLOTS_021_ED27,
 };
+
+/// CAT021 Ed 2.4, Table 2 (49 slots).
+pub static UAP_021_ED24: Uap = Uap {
+    cat: 21,
+    mandatory: MANDATORY,
+    slots: &SLOTS_021_ED24,
+};
+
+/// The CAT021 UAP of edition `ed`.
+pub fn uap_021(ed: Cat021Edition) -> &'static Uap {
+    match ed {
+        Cat021Edition::Ed24 => &UAP_021_ED24,
+        Cat021Edition::Ed27 => &UAP_021,
+    }
+}
 
 /// CAT048 Ed 1.32, Table 2 (28 slots).
 pub static UAP_048: Uap = Uap {
@@ -392,8 +437,14 @@ static SUBS_062_390: [Field; 18] = [
 
 /// The UAP of a category, `None` for categories this crate does not carry.
 pub fn uap_for(cat: u8) -> Option<&'static Uap> {
+    uap_for_edition(cat, Cat021Edition::Ed27)
+}
+
+/// The UAP of a category with CAT021 read as edition `ed` (the other categories have one
+/// edition here), `None` for categories this crate does not carry.
+pub fn uap_for_edition(cat: u8, ed: Cat021Edition) -> Option<&'static Uap> {
     match cat {
-        21 => Some(&UAP_021),
+        21 => Some(uap_021(ed)),
         48 => Some(&UAP_048),
         62 => Some(&UAP_062),
         _ => None,

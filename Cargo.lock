@@ -44,6 +44,7 @@ version = "0.0.1"
 dependencies = [
  "oa-geo",
  "oa-json",
+ "oa-math",
 ]
 
 [[package]]
@@ -56,12 +57,34 @@ dependencies = [
  "oa-feed",
  "oa-fixm",
  "oa-geo",
+ "oa-math",
  "oa-replay",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
  "oa-truth",
  "oa-xml",
+]
+
+[[package]]
+name = "oa-build-info"
+version = "0.0.1"
+
+[[package]]
+name = "oa-compass"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-asterix",
+ "oa-bench",
+ "oa-build-info",
+ "oa-feed",
+ "oa-ieee",
+ "oa-json",
+ "oa-math",
+ "oa-replay",
+ "oa-track",
+ "oa-truth",
 ]
 
 [[package]]
@@ -83,6 +106,7 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-safety",
  "oa-sha256",
 ]
 
@@ -90,6 +114,28 @@ dependencies = [
 name = "oa-dof"
 version = "0.0.1"
 dependencies = [
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-encounter"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+]
+
+[[package]]
+name = "oa-encounter-run"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-encounter",
+ "oa-nasr",
+ "oa-sha256",
+ "oa-track",
  "oa-zip",
 ]
 
@@ -121,6 +167,7 @@ name = "oa-grib2"
 version = "0.0.1"
 dependencies = [
  "oa-j2k",
+ "oa-math",
 ]
 
 [[package]]
@@ -147,6 +194,7 @@ name = "oa-mva"
 version = "0.0.1"
 dependencies = [
  "oa-dof",
+ "oa-math",
  "oa-tiff",
  "oa-xml",
  "oa-zip",
@@ -177,6 +225,7 @@ name = "oa-perf"
 version = "0.0.1"
 dependencies = [
  "oa-geo",
+ "oa-math",
  "oa-sensorsim",
  "oa-track",
  "oa-truth",
@@ -206,6 +255,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-safety"
+version = "0.0.1"
+
+[[package]]
 name = "oa-scope-replay"
 version = "0.0.1"
 dependencies = [
@@ -229,12 +282,26 @@ dependencies = [
  "oa-asterix",
  "oa-feed",
  "oa-geo",
+ "oa-math",
  "oa-truth",
 ]
 
 [[package]]
 name = "oa-sha256"
 version = "0.0.1"
+
+[[package]]
+name = "oa-shadow"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-math",
+ "oa-replay",
+ "oa-sha256",
+ "oa-track",
+ "oa-truth",
+]
 
 [[package]]
 name = "oa-tar"

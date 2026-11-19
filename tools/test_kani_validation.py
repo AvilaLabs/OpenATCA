@@ -20,6 +20,11 @@ from kani_validation import (
     _copy_source_artifacts,
     _loop_unwind_configuration,
     _loop_unwind_argument,
+    _enclosing_fn,
+    _fn_attributes,
+    _rust_fns,
+    _rust_scan,
+    _unwind_attributes,
     _validate_loop_unwind_source,
     bind_loop_unwind_discovery,
     changed_source_paths,
@@ -832,6 +837,130 @@ class KaniBindingTests(unittest.TestCase):
         report["property_details"][0]["property_details"]["failed"] += 1
         errors = evaluate_kani_report(report, [HARNESS], {HARNESS: COVERS})
         self.assertTrue(any("unwinding check did not succeed" in error for error in errors))
+
+
+class SourceGuardTests(unittest.TestCase):
+    """The source guard of a scoped loop-unwind preset reads Rust, not lines of text."""
+
+    HARNESS = "m::proofs::the_harness"
+    PRESET = {
+        "package": "pkg",
+        "harnesses": frozenset({HARNESS}),
+        "source": "src/lib.rs",
+        "line": 4,
+        "function": "target_fn",
+        "source_line": "while k < n {",
+        "global_unwind": 16,
+        "default_harness_source": "src/proofs.rs",
+        "fixture_source": "src/proofs.rs",
+        "fixture_snippets": ["const BASE: i64 = 1;", "let mut t = fixture();", "sensor: 1,"],
+        "fixture_functions": ["fixture"],
+    }
+    LIB = "fn target_fn<T: Copy>(x: T)\n    -> u8\n{\n    while k < n {\n    }\n}\n"
+    PROOFS = (
+        "const BASE: i64 = 1;\n"
+        "fn fixture() -> T {\n    T { sensor: 1, }\n}\n"
+        "#[kani::proof]\n#[kani::unwind(16)]\nfn the_harness() {\n    let mut t = fixture();\n}\n"
+    )
+
+    def check(self, lib=None, proofs=None, **changes):
+        preset = {**self.PRESET, **changes}
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
+            LOOP_UNWIND_PRESETS, {"guard-test": preset}
+        ):
+            repo = Path(temp)
+            (repo / "src").mkdir()
+            (repo / "src/lib.rs").write_text(self.LIB if lib is None else lib)
+            (repo / "src/proofs.rs").write_text(self.PROOFS if proofs is None else proofs)
+            _validate_loop_unwind_source(repo, "guard-test", "pkg", self.HARNESS)
+
+    def refuses(self, pattern, **kwargs):
+        with self.assertRaisesRegex(ValueError, pattern):
+            self.check(**kwargs)
+
+    def test_the_fixture_is_accepted_and_its_snippets_must_sit_in_the_harness_or_a_fixture_function(self):
+        self.check()
+        # in an unrelated function, or in a comment, or only somewhere else in the file
+        self.refuses("stale bounded fixture", proofs=self.PROOFS.replace("T { sensor: 1, }", "T { sensor: 2, }")
+                     + "fn unrelated() {\n    let _ = T { sensor: 1, };\n}\n")
+        self.refuses("stale bounded fixture", proofs=self.PROOFS.replace("T { sensor: 1, }", "T { sensor: 2, } // sensor: 1,"))
+        self.refuses("stale bounded fixture", proofs=self.PROOFS.replace("T { sensor: 1, }", "T { sensor: 2, } /* sensor: 1, */"))
+        # a const must be at module level or in a body, not in a comment
+        self.refuses("stale bounded fixture", proofs=self.PROOFS.replace("const BASE: i64 = 1;", "// const BASE: i64 = 1;"))
+        # a const inside an unrelated function is not module level
+        self.refuses(
+            "stale bounded fixture",
+            proofs=self.PROOFS.replace("const BASE: i64 = 1;", "fn unrelated() {\n    const BASE: i64 = 1;\n}"),
+        )
+        # the harness body counts, and a registered fixture function that is gone is stale
+        self.check(fixture_functions=[], fixture_snippets=["let mut t = fixture();"])
+        self.refuses("stale bounded fixture", fixture_functions=["fixture", "gone"])
+        self.refuses("stale bounded fixture", fixture_functions=[], fixture_snippets=["sensor: 1,"])
+
+    def test_a_loop_must_sit_in_the_named_function_even_with_generics_comments_and_nesting(self):
+        # generics and a signature over several lines are read
+        self.check()
+        # a comment that looks like another fn between the header and the loop changes nothing
+        self.check(lib="fn target_fn<T>(x: T) {\n    // fn other(\n    while k < n {\n    }\n}\n", line=3)
+        self.check(lib="fn target_fn(x: u8) {\n    /* fn other() {\n    */\n    while k < n {\n    }\n}\n")
+        # the loop in another function, or in a nested one, is stale; a nested fn that ended
+        # before the loop does not capture it
+        self.refuses("stale function location", lib="fn target_fn() {}\nfn other() {\n    while k < n {\n    }\n}\n", line=3)
+        self.refuses("stale function location", lib="fn target_fn() {\n    fn inner() {\n    while k < n {\n    }\n    }\n}\n", line=3)
+        self.check(lib="fn target_fn() {\n    fn inner() {}\n    while k < n {\n    }\n}\n", line=3)
+        # braces in strings and characters do not end a body early
+        self.check(lib="fn target_fn() {\n    let _ = \"}\"; let _ = '}';\n    while k < n {\n    }\n}\n", line=3)
+        # a loop line that only exists in a comment is a stale location
+        self.refuses("stale source location", lib="fn target_fn() {\n/*\n    while k < n {\n*/\n}\n", line=3)
+
+    def test_the_harness_has_exactly_one_unwind_attribute_however_it_is_written(self):
+        fn = "fn the_harness() {\n    let mut t = fixture();\n}\n"
+        head = self.PROOFS.split("#[kani::proof]")[0]
+        for attrs in (
+            "#[kani::proof] #[kani::unwind(16)]\n",
+            "#[kani::proof]\n#[kani::unwind(16)] // why\n",
+            "#[kani::proof]\n#[ kani :: unwind( 16 ) ]\n",
+            "#[kani::proof]\n// #[kani::unwind(8)]\n#[kani::unwind(16)]\n",
+            "#[kani::proof]\n/* #[kani::unwind(8)]\n#[kani::unwind(4)] */\n#[kani::unwind(16)]\n",
+            "#[kani::proof]\n#[kani::unwind(16)]\n#[kani::solver(cadical)]\npub ",
+        ):
+            self.check(proofs=head + attrs + fn)
+        for attrs in (
+            "#[kani::proof]\n#[kani::unwind(16)] #[kani::unwind(8)]\n",
+            "#[kani::unwind(8)] #[kani::unwind(16)]\n#[kani::proof]\n",
+            "#[kani::proof]\n#[kani::unwind(8)]\n",
+            "#[kani::proof]\n",
+            "#[kani::proof]\n#[kani::unwind(16)]\n#[cfg_attr(kani, kani::unwind(8))]\n",
+        ):
+            self.refuses("kani::unwind\\(16\\)", proofs=head + attrs + fn)
+        # an attribute of the item before does not belong to the harness
+        before = "#[kani::unwind(8)]\nfn earlier() {}\n"
+        self.check(proofs=head + before + "#[kani::proof]\n#[kani::unwind(16)]\n" + fn)
+        # a commented-out copy of the definition is not a second definition; a real one is
+        self.check(proofs=head + "// fn the_harness() {}\n#[kani::proof]\n#[kani::unwind(16)]\n" + fn)
+        self.refuses("expected one source definition", proofs=head + "#[kani::proof]\n#[kani::unwind(16)]\n" + fn + "fn the_harness() {}\n")
+        # a harness with generics is still found
+        self.check(proofs=head + "#[kani::proof]\n#[kani::unwind(16)]\nfn the_harness<const N: usize>() {\n    let mut t = fixture();\n}\n")
+
+    def test_the_rust_reader_blanks_comments_and_literals_and_keeps_offsets(self):
+        text = 'a // x\nb /* y /* z */ w */ c\n"s // t" r#"u/*"# \'q\' \'\\\'\' \'a'
+        code, masked = _rust_scan(text)
+        self.assertEqual(len(code), len(text))
+        self.assertEqual(code.count("\n"), text.count("\n"))
+        self.assertNotIn("x", code.replace("text", ""))
+        self.assertIn('"s // t"', code)
+        self.assertNotIn("s // t", masked)
+        source = "fn f<T>() { fn g() { x } y } fn h();"
+        fns = _rust_fns(source)
+        self.assertEqual([(f["name"], f["body"] is not None) for f in fns], [("f", True), ("g", True), ("h", False)])
+        self.assertEqual(_enclosing_fn(fns, source.index("x")), "g")
+        self.assertEqual(_enclosing_fn(fns, source.index("y")), "f")
+        self.assertIsNone(_enclosing_fn(fns, source.index("fn h")))
+        code = "#[a] #[b(1)]\n// #[c]\npub(crate) const unsafe fn z() {}"
+        scanned = _rust_scan(code)
+        attrs = _fn_attributes(scanned[0], scanned[1], _rust_fns(scanned[1])[0]["start"])
+        self.assertEqual(attrs, ["#[a]", "#[b(1)]"])
+        self.assertEqual(_unwind_attributes(["#[ kani::unwind( 3 ) ]", "#[kani::proof]"]), ["#[kani::unwind(3)]"])
 
 
 class RunnerIsolationTests(unittest.TestCase):

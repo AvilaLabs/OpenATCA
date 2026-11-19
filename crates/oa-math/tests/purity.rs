@@ -62,6 +62,29 @@ const BANNED: &[&str] = &[
     "next_down",
 ];
 
+/// Methods that read the sign or the payload of a NaN: only `order.rs`, which defines the
+/// canonical forms, may call them (core code calls its functions instead, RULESET B8).
+const ORDER_ONLY: &[&str] = &["total_cmp", "is_sign_negative", "is_sign_positive"];
+
+/// Whether `code` names one of [`ORDER_ONLY`] as a method, a path call or a path used as a value.
+fn raw_order_use(code: &str) -> Option<String> {
+    for b in ORDER_ONLY {
+        if code.contains(&format!(".{b}(")) {
+            return Some(format!(".{b}("));
+        }
+        for ty in ["f64::", "f32::"] {
+            let pat = format!("{ty}{b}");
+            for (at, _) in code.match_indices(&pat) {
+                let next = code[at + pat.len()..].chars().next();
+                if !next.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    return Some(pat);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The lines that use `%` on integers (bit positions in the Payne-Hanek code).
 const INTEGER_REM: &[&str] = &["let s = pos % 64;", "let s = lo % 64;", "let s = lz % 64;"];
 
@@ -120,6 +143,11 @@ fn sources_call_no_platform_maths_function() {
                             hits.push(format!("{name}:{}: {pat} as a value or call", n + 1));
                         }
                     }
+                }
+            }
+            if name != "order.rs" {
+                if let Some(pat) = raw_order_use(code) {
+                    hits.push(format!("{name}:{}: {pat} outside order.rs", n + 1));
                 }
             }
             // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below
@@ -209,4 +237,22 @@ fn the_library_is_no_std_outside_tests() {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
     assert!(lib.contains("#![cfg_attr(not(test), no_std)]"));
     assert!(lib.contains("#![forbid(unsafe_code)]"));
+}
+
+// REQ: OA-MATH-037
+#[test]
+fn the_check_finds_a_raw_total_cmp_and_a_raw_sign_read() {
+    for planted in [
+        "v.sort_by(|a, b| a.total_cmp(b));",
+        "let n = x.is_sign_negative();",
+        "let p = y.is_sign_positive();",
+        "let o = f64::total_cmp(&a, &b);",
+        "xs.iter().map(f32::is_sign_negative)",
+    ] {
+        assert!(raw_order_use(planted).is_some(), "{planted}");
+    }
+    assert!(
+        raw_order_use("let c = cmp_canon_f64(a, b); let n = is_sign_negative_canon_f64(x);")
+            .is_none()
+    );
 }

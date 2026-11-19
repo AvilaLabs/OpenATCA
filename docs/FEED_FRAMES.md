@@ -83,6 +83,16 @@ so the hours of a suspend are a step.
 * The reader works in a caller-supplied buffer of at least one maximum frame; it allocates
   nothing after start. Input of any chunking gives the same frames.
 
+## Recording startup
+
+Before opening a recording, `oa-feed` counts existing `.oaf` and `.oaf.gz` bytes while inspecting
+at most 16,384 entries in the target directory. Unrelated and zero-byte entries count toward this
+operational entry cap. If another entry exists beyond the cap, startup fails with an explicit
+directory-entry-limit error that gives the number of entries found and the limit; no existing file is
+touched and nothing is created. To go on recording, point `--record` at a directory with fewer
+entries. The cap bounds enumeration work by entry count; it makes no elapsed-time
+claim for filesystem metadata or other blocking I/O.
+
 ## Bridge behaviour (adapters/scds-bridge)
 
 * One process per subscription. Argument: the path of the env file (`SCDS_JMS_URL`, `SCDS_VPN`,
