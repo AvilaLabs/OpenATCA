@@ -3260,3 +3260,33 @@ fn fmt_arguments_is_not_taken_by_a_reachable_item() {
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
+
+// REQ: OA-TRC-253
+#[test]
+fn a_private_module_cannot_be_published_and_a_pub_mod_seals_nothing() {
+    let seal = "mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n";
+    for src in [
+        format!("{seal}pub use self::sealed;\n"),
+        format!("{seal}pub use crate::sealed;\n"),
+        format!("{seal}pub mod api {{ pub use super::sealed; }}\n"),
+    ] {
+        let ws = core_ws("pm0", &src);
+        assert!(
+            has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a private module"),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    // a plain import is not a re-export
+    let ws = core_ws("pm1", &format!("{seal}use crate::sealed;\n"));
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a sealing trait in a `pub mod` is no seal, and neither is one when the name is also declared
+    // public anywhere in the crate
+    for src in [
+        "pub mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n",
+        "mod sealed { pub trait Sealed {} }\npub mod api { pub mod sealed { pub trait Sealed {} } }\npub trait T: sealed::Sealed {}\n",
+    ] {
+        let ws = core_ws("pm2", src);
+        assert!(has(&ws.failures(), "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"), "{src}: {:#?}", ws.failures());
+    }
+}

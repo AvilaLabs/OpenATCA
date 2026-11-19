@@ -424,6 +424,21 @@ fn seal_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
                 || leaf.path.last().is_some_and(|l| ctx.sealing.contains(l))
             {
                 Some("`pub use` of a sealing trait hands the seal out".to_string())
+            } else if leaf
+                .path
+                .last()
+                .is_some_and(|l| ctx.private_mods.contains(l))
+                // `atan::atan` names the item inside the module, not the module
+                && !leaf
+                    .path
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|n| leaf.path.get(n))
+                    .is_some_and(|p| {
+                        ctx.private_mods.contains(p) && !matches!(p.as_str(), "self" | "super" | "crate")
+                    })
+            {
+                Some("a `pub use` of a private module publishes whatever seal it holds without naming it".to_string())
             } else {
                 None
             };
