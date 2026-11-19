@@ -163,13 +163,20 @@ confusion matrix against the published bars (â‰¥95% detection; false positives â
 
 Limit of the position gate (red-team finding RT-239). The gate widens with the time since the
 track's last update, so after a gap a single forged report of any plausible size passes it. The
-tracker therefore holds a report that passes the gate but lies more than 926 m from the predicted
-position, applies it only when a second report within four expected report intervals (5 s at least) agrees with it to 300 m (more with time between the two, up to 926 m), and counts
-`moves_held`, `moves_confirmed` and `moves_expired` (OA-TRK-347 to OA-TRK-351). Residual risk: a
-forger who sends two reports that agree with each other, 0.5 s or more apart within the window, is believed by the
-ADS-B-only tracker; only a second source (radar or multilateration, above) can refute that. A
+tracker therefore applies a report that passes the gate but lies more than 926 m from the predicted
+position at once, as before, but keeps the track's state from before it, marks every row of the
+track `O_MOVE_UNCONFIRMED` with a 95% radius wide enough to cover the old path, and lets the track's
+next report decide: it agrees with the moved track (confirmed), with the old path (rolled back to
+the snapshot, the report applied to that), or with neither or comes after four expected report
+intervals (5 s at least), in which case the move stands. The counters are `moves_unconfirmed`,
+`moves_confirmed`, `moves_rolled_back` and `moves_undecided` (OA-TRK-347 to OA-TRK-351). It
+protects against one forged or faulty report. It does not protect against a forger who sends
+two reports that agree with each other, 0.5 s or more apart within the window: the ADS-B-only
+tracker believes them; only a second source (radar or multilateration, above) can refute that. A
 tentative track is not covered (its second report has no velocity and moves far from its
-prediction as a matter of course).
+prediction as a matter of course). The flag only helps if the consumer shows it: a display that
+draws a marked row like any other gives no protection, and a display follow-up to show it (and the
+wider radius) is open. The cost is 2.6 kB of state per track for the rollback point.
 
 ## 5. Flight plan correlation
 

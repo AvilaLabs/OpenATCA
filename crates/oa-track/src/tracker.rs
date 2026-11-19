@@ -58,10 +58,10 @@ use oa_adsb::{
     NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
-use crate::confirm::{confirm_decide, confirm_window_ns, pending_stale, Move, Pending};
+use crate::confirm::{confirm_window_ns, resolve_decide, Resolve};
 use crate::filter::{
-    filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied,
-    Filter, Probe,
+    filter_apply, filter_init, filter_miss_m, filter_output, filter_output_checked, filter_replay,
+    filter_row_distance_m, Applied, Filter,
 };
 use crate::hfilter::{h_combine, HFilter};
 use crate::params::{CHI2_2_95, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
@@ -72,9 +72,9 @@ use crate::time_gate::{
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, PredictError, TrackError, TrackLog,
     TrackOutput, TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL,
-    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK,
-    O_UNCERTAIN, RADAR_KEY_BASE, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME,
-    REF_VELOCITY, TIME_LIMIT_NS,
+    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES,
+    O_REACQUIRED, O_TICK, O_UNCERTAIN, RADAR_KEY_BASE, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION,
+    REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -131,15 +131,13 @@ pub struct Tracker {
     anchor: Vec<Filter>,
     /// `max_tracks * RING_DEPTH` stored measurements.
     ring_m: Vec<Measurement>,
-    /// Each track's pending large move (RT-239): at most one report held until another agrees.
-    pend: Vec<Pending>,
-    /// The large-move hold is on for the decision being made: only the first decision of an
-    /// in-order measurement. Off for a history replayed after a late insertion, and for the
-    /// pending report and the report that confirmed it (both already passed the hold).
+    /// Each track's unconfirmed large move (RT-239): its state from before the move, to roll back
+    /// to if the next report refutes it. One per track, fixed size.
+    mv: Vec<MoveState>,
+    /// The large-move rule is on for the decision being made: only the first decision of an
+    /// in-order measurement. Off for a history replayed after a late insertion and for a report
+    /// applied after a rollback.
     hold_on: bool,
-    /// The decision just made confirmed the track's pending report: the caller applies it and
-    /// then the measurement.
-    confirming: bool,
     /// Free slots (a stack, so reuse order is fixed).
     free: Vec<u32>,
     /// Open-addressing key index: slot numbers, [`EMPTY`] if unused; `mask + 1` entries.
@@ -178,13 +176,6 @@ fn blank_filter() -> Filter {
         h_mode: 0,
         rej_c: 0,
         reacq: 0,
-    }
-}
-
-fn no_pending() -> Pending {
-    Pending {
-        m: blank_measurement(),
-        valid: 0,
     }
 }
 
@@ -240,9 +231,8 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         cat: vec![CategoryState::default(); n],
         anchor: vec![blank_filter(); n],
         ring_m: vec![blank_measurement(); n * RING_DEPTH],
-        pend: vec![no_pending(); n],
+        mv: vec![no_move(); n],
         hold_on: false,
-        confirming: false,
         // Popped from the end: slot 0 first.
         free: (0..n as u32).rev().collect(),
         index: vec![EMPTY; index_len],
@@ -292,7 +282,7 @@ pub fn tracker_bytes(t: &Tracker) -> usize {
         + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
-        + t.pend.len() * core::mem::size_of::<Pending>()
+        + t.mv.len() * core::mem::size_of::<MoveState>()
         + t.index.len() * 4
 }
 
@@ -318,7 +308,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.cat),
         of(&t.anchor),
         of(&t.ring_m),
-        of(&t.pend),
+        of(&t.mv),
         of(&t.free),
         of(&t.index),
         of(&t.log.addr),
@@ -557,7 +547,7 @@ fn end_track(t: &mut Tracker, slot: usize, reason: u8) {
     }
     put(&mut t.state, slot, FREE);
     put(&mut t.key, slot, NO_ADDR);
-    put(&mut t.pend, slot, no_pending());
+    clear_move(t, slot);
     ring_clear(t, slot);
     t.free.push(slot as u32);
     t.active = t.active.saturating_sub(1);
@@ -603,7 +593,7 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
     note_category(t, slot, m);
-    put(&mut t.pend, slot, no_pending());
+    clear_move(t, slot);
     ring_clear(t, slot);
     if !ring_push(t, slot, m) {
         return false;
@@ -636,7 +626,7 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         t.stats.rows_unrepresentable += 1;
         return;
     };
-    let r95 = r95_m(&row.pos_cov_m2);
+    let mut r95 = r95_m(&row.pos_cov_m2);
     if r95.is_nan() {
         // Its uncertainty is not known: never a row, counted as loss.
         t.stats.nan_covariance += 1;
@@ -644,7 +634,14 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
     }
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
+    let r95_own = r95;
+    if move_active(t, slot) {
+        mark_unconfirmed(t, slot, at_ns, &mut row, &mut r95);
+    }
+    // The reacquisition arming follows the filter's own radius, not the widened one, so a
+    // marked row leaves no trace on the rows after the mark is gone.
     let uncertain = r95 > t.cfg.coast_max_r95_m;
+    let armed_uncertain = r95_own > t.cfg.coast_max_r95_m;
     if uncertain {
         row.flags |= O_UNCERTAIN;
         t.stats.rows_uncertain += 1;
@@ -655,9 +652,9 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         if f.reacq != 0 {
             row.flags |= O_REACQUIRED;
         }
-        u8::from(uncertain)
+        u8::from(armed_uncertain)
     } else {
-        f.reacq | u8::from(uncertain)
+        f.reacq | u8::from(armed_uncertain)
     };
     if armed != f.reacq {
         f.reacq = armed;
@@ -670,6 +667,34 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         row.flags |= O_RADAR_DISAGREES;
     }
     output_push(out, &row);
+}
+
+/// Marks a row of a track with an unconfirmed move (RT-239) and widens its position covariance
+/// so that its 95% radius is at least the distance from the old path's prediction to the row's
+/// position plus the old path's own radius: the row then covers where the track would be had the
+/// move been a forged report. The covariance is scaled, so its shape is kept.
+fn mark_unconfirmed(t: &Tracker, slot: usize, at_ns: i64, row: &mut OutRow, r95: &mut f64) {
+    row.flags |= O_MOVE_UNCONFIRMED;
+    let Some(old) =
+        t.mv.get(slot)
+            .and_then(|v| filter_output(&v.txn.cur, at_ns))
+    else {
+        return;
+    };
+    let wide = filter_row_distance_m(row, &old) + r95_m(&old.pos_cov_m2);
+    if wide.is_nan() || wide <= *r95 {
+        return;
+    }
+    if *r95 > 0.0 {
+        let k = (wide / *r95) * (wide / *r95);
+        for c in &mut row.pos_cov_m2 {
+            *c = (f64::from(*c) * k) as f32;
+        }
+    } else {
+        let v = (wide * wide / CHI2_2_95) as f32;
+        row.pos_cov_m2 = [v, 0.0, v];
+    }
+    *r95 = wide;
 }
 
 /// The 95% horizontal uncertainty radius of a position covariance `[ee, en, nn]` (m^2), metres:
@@ -757,6 +782,7 @@ fn note_category(t: &mut Tracker, slot: usize, m: &Measurement) {
 }
 
 /// Fixed-size rollback point for one track and its replay history.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct TrackTxn {
     cur: Filter,
@@ -770,18 +796,71 @@ struct TrackTxn {
     expected_ns: i64,
     newest_update_ns: i64,
     cat: CategoryState,
-    pend: Pending,
     updates: u32,
     state: u8,
     hits: u8,
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 352-byte statistics,
-// six 8-byte times, 8-byte category, 80-byte pending report (RT-239; 2552 before it, with
-// 328-byte statistics: 80 + 24 more), 4-byte update count and four byte fields.
+// Budget: two 648-byte filters, twelve 72-byte measurements, 360-byte statistics (328 before
+// the four large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
+// count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2656);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2584);
+
+/// A track's unconfirmed large move (RT-239): the rollback point from before the move, the
+/// capture of [`track_txn`] itself, and the time of the report that made the move. One per
+/// track, fixed size.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MoveState {
+    txn: TrackTxn,
+    start_ns: i64,
+    active: u8,
+}
+// Budget: one 2584-byte checkpoint, an 8-byte time and a flag, 2600 with alignment. Per track:
+// the tracker's tables grow by 2600 bytes (they were 2.2 kB), 10.6 MB at 4096 tracks.
+const _: () = assert!(core::mem::size_of::<MoveState>() == 2600);
+
+fn blank_txn() -> TrackTxn {
+    TrackTxn {
+        cur: blank_filter(),
+        anchor: blank_filter(),
+        ring: [blank_measurement(); RING_DEPTH],
+        stats: TrackerStats::default(),
+        first_ns: 0,
+        confirmed_ns: i64::MIN,
+        last_ns: 0,
+        disagree_until_ns: i64::MIN,
+        expected_ns: 0,
+        newest_update_ns: i64::MIN,
+        cat: CategoryState::default(),
+        updates: 0,
+        state: FREE,
+        hits: 0,
+        ring_len: 0,
+        ring_head: 0,
+    }
+}
+
+fn no_move() -> MoveState {
+    MoveState {
+        txn: blank_txn(),
+        start_ns: 0,
+        active: 0,
+    }
+}
+
+/// Forgets the track's unconfirmed move (it ended, restarted, resynchronised or was decided).
+fn clear_move(t: &mut Tracker, slot: usize) {
+    if let Some(m) = t.mv.get_mut(slot) {
+        m.active = 0;
+    }
+}
+
+fn move_active(t: &Tracker, slot: usize) -> bool {
+    t.mv.get(slot).is_some_and(|m| m.active != 0)
+}
 
 fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
     let mut ring = [blank_measurement(); RING_DEPTH];
@@ -802,7 +881,6 @@ fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
         ring_len: col(&t.ring_len, slot, 0),
         ring_head: col(&t.ring_head, slot, 0),
         cat: col(&t.cat, slot, CategoryState::default()),
-        pend: col(&t.pend, slot, no_pending()),
         anchor: col(&t.anchor, slot, blank_filter()),
         ring,
         newest_update_ns: t.newest_update_ns,
@@ -810,7 +888,9 @@ fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
     }
 }
 
-fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
+/// Puts the track's own columns back as `snapshot` held them: not the tracker's counters or its
+/// bound on the newest update.
+fn restore_track_columns(t: &mut Tracker, slot: usize, snapshot: &TrackTxn) {
     put(&mut t.state, slot, snapshot.state);
     put(&mut t.first_ns, slot, snapshot.first_ns);
     put(&mut t.confirmed_ns, slot, snapshot.confirmed_ns);
@@ -823,12 +903,15 @@ fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
     put(&mut t.ring_len, slot, snapshot.ring_len);
     put(&mut t.ring_head, slot, snapshot.ring_head);
     put(&mut t.cat, slot, snapshot.cat);
-    put(&mut t.pend, slot, snapshot.pend);
     put(&mut t.anchor, slot, snapshot.anchor);
     let start = slot * RING_DEPTH;
-    for (k, value) in snapshot.ring.into_iter().enumerate() {
-        put(&mut t.ring_m, start + k, value);
+    for (k, value) in snapshot.ring.iter().enumerate() {
+        put(&mut t.ring_m, start + k, *value);
     }
+}
+
+fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
+    restore_track_columns(t, slot, &snapshot);
     t.newest_update_ns = snapshot.newest_update_ns;
     t.stats = snapshot.stats;
     t.stats.numerical_refused = t.stats.numerical_refused.saturating_add(1);
@@ -900,11 +983,9 @@ enum Step {
     Resynced,
     /// The filter refused a numerical prediction; callers roll back the update.
     NumericalRefused,
-    /// A large move (RT-239): kept as the track's pending report, not applied.
-    Held,
-    /// A large move that agrees with the pending report: the caller applies the pending report
-    /// and then this one, with the hold off (`Tracker::confirming`).
-    Confirmed,
+    /// Applied, and a move of more than `confirm_move_m` (RT-239): the caller keeps the state
+    /// from before it as the track's rollback point.
+    Moved,
 }
 
 /// The per-measurement decision, the same for a measurement that arrives in order and for each
@@ -933,33 +1014,26 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         }
     }
     let mut f = col(&t.cur, slot, blank_filter());
-    // The hold is off for a replay and for the two reports of a confirmation, and for a track
-    // not yet confirmed (a second report with no velocity moves far from its prediction as a
-    // matter of course; the plausibility rule judges it). Elsewhere a pending report that can no
-    // longer be confirmed is discarded and counted.
+    // The rule is off for a replay, for a report applied after a rollback, and for a track not
+    // yet confirmed (a second report with no velocity moves far from its prediction as a matter
+    // of course; the plausibility rule judges it).
     let cfg = TrackerConfig {
         confirm_moves: t.cfg.confirm_moves && t.hold_on && col(&t.state, slot, FREE) == CONFIRMED,
         ..t.cfg
     };
-    if cfg.confirm_moves {
-        let p = col(&t.pend, slot, no_pending());
-        if p.valid != 0
-            && pending_stale(
-                p.m.toa_ns,
-                col(&t.last_ns, slot, 0),
-                m.toa_ns,
-                confirm_window_ns(&cfg, col(&t.expected_ns, slot, 0)),
-            )
-        {
-            put(&mut t.pend, slot, no_pending());
-            t.stats.moves_expired += 1;
-        }
+    let mut verdict = filter_apply(&mut f, m, &mut t.stats, &cfg);
+    let moved = verdict == Applied::Large;
+    if moved {
+        // Applied as a tracker without the rule applies it, bit for bit.
+        let plain = TrackerConfig {
+            confirm_moves: false,
+            ..cfg
+        };
+        verdict = filter_apply(&mut f, m, &mut t.stats, &plain);
     }
-    let held = col(&t.pend, slot, no_pending());
-    let held = (held.valid != 0).then_some(held.m);
-    match filter_apply(&mut f, m, &mut t.stats, &cfg, held.as_ref()) {
+    match verdict {
         Applied::NumericalRefused => Step::NumericalRefused,
-        Applied::Large(probe) => hold_or_confirm(t, slot, m, probe, &cfg),
+        Applied::Large => Step::Rejected,
         Applied::Rejected => {
             // Keeps the count of rejections in a row, so repeated ones re-initialise.
             put(&mut t.cur, slot, f);
@@ -977,12 +1051,16 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
             let h = col(&t.hits, slot, 0).saturating_add(1);
             put(&mut t.hits, slot, h);
             maybe_confirm(t, slot, m.toa_ns);
-            Step::Applied
+            if moved {
+                Step::Moved
+            } else {
+                Step::Applied
+            }
         }
         Applied::Resync => {
             put(&mut t.cur, slot, f);
             put(&mut t.cat, slot, CategoryState::default());
-            put(&mut t.pend, slot, no_pending());
+            clear_move(t, slot);
             note_category(t, slot, m);
             ring_clear(t, slot);
             if !ring_push(t, slot, m) {
@@ -996,47 +1074,6 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
     }
 }
 
-/// The decision for a report that passed the position gate and moved the track by more than
-/// `confirm_move_m` (RT-239): the pure `confirm_decide` on the geometry the filter measured.
-/// Holds it as the pending report, or says the pending one is confirmed (the caller then applies
-/// both).
-fn hold_or_confirm(
-    t: &mut Tracker,
-    slot: usize,
-    m: &Measurement,
-    probe: Probe,
-    cfg: &TrackerConfig,
-) -> Step {
-    let p = col(&t.pend, slot, no_pending());
-    let held_ns = (p.valid != 0).then_some(p.m.toa_ns);
-    let verdict = confirm_decide(
-        held_ns,
-        col(&t.last_ns, slot, 0),
-        m.toa_ns,
-        probe.miss_m,
-        probe.agree_m,
-        confirm_window_ns(cfg, col(&t.expected_ns, slot, 0)),
-        cfg,
-    );
-    match verdict {
-        Move::Confirm => {
-            t.stats.moves_confirmed += 1;
-            t.confirming = true;
-            Step::Confirmed
-        }
-        Move::Hold { expired } => {
-            if expired {
-                t.stats.moves_expired += 1;
-            }
-            put(&mut t.pend, slot, Pending { m: *m, valid: 1 });
-            t.stats.moves_held += 1;
-            Step::Held
-        }
-        // The filter held it for a large move; a move that is not large cannot come here.
-        Move::Apply => Step::Rejected,
-    }
-}
-
 /// Counts and emits what [`decide`] did for one measurement; false if it must be rolled back.
 fn settle(t: &mut Tracker, slot: usize, step: Step, out: &mut TrackOutput) -> bool {
     match step {
@@ -1046,26 +1083,63 @@ fn settle(t: &mut Tracker, slot: usize, step: Step, out: &mut TrackOutput) -> bo
             t.stats.applied += 1;
             emit_if_confirmed(t, slot, out);
         }
-        Step::Rejected | Step::Held | Step::Confirmed => {}
+        Step::Moved => {
+            t.stats.applied += 1;
+            t.stats.moves_unconfirmed += 1;
+            emit_if_confirmed(t, slot, out);
+        }
+        Step::Rejected => {}
     }
     true
 }
 
+/// The distances of `m` from the track's predicted position and from the old path's (the
+/// unconfirmed move's snapshot predicted the same way), at the report's time, metres.
+fn move_geometry(t: &Tracker, slot: usize, m: &Measurement) -> (f64, f64) {
+    let cur = col(&t.cur, slot, blank_filter());
+    let old =
+        t.mv.get(slot)
+            .map_or(f64::NAN, |v| filter_miss_m(&v.txn.cur, m));
+    (filter_miss_m(&cur, m), old)
+}
+
 /// Applies a measurement newer than or equal to the track's newest update, with the large-move
-/// hold on (RT-239). If the measurement confirms the track's pending report, the pending report
-/// is applied and then the measurement, in measurement-time order, with the hold off: each
-/// through the same [`update_in_order`] as any other measurement.
+/// rule on (RT-239). If the track has an unconfirmed move, the measurement decides it first
+/// (`crate::confirm::resolve_decide`): confirm (the mark is cleared), roll back (the track is put
+/// back as the snapshot held it and the measurement applied to that), or leave it standing; each
+/// counted.
 fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
-    t.hold_on = true;
+    let mut rule = true;
+    if t.cfg.confirm_moves && move_active(t, slot) {
+        let (cur_m, old_m) = move_geometry(t, slot, m);
+        let start = t.mv.get(slot).map_or(0, |v| v.start_ns);
+        let window = confirm_window_ns(&t.cfg, col(&t.expected_ns, slot, 0));
+        match resolve_decide(start, m.toa_ns, cur_m, old_m, window, &t.cfg) {
+            // Too soon to be a second report: applied as it is, the move stays unconfirmed.
+            Resolve::Wait => rule = false,
+            Resolve::Confirm => {
+                clear_move(t, slot);
+                t.stats.moves_confirmed += 1;
+                rule = false;
+            }
+            Resolve::Rollback => {
+                if let Some(v) = t.mv.get(slot).copied() {
+                    restore_track_columns(t, slot, &v.txn);
+                }
+                clear_move(t, slot);
+                t.stats.moves_rolled_back += 1;
+                rule = false;
+            }
+            // The move stands; this report is judged afresh (it may be a move of its own).
+            Resolve::Undecided => {
+                clear_move(t, slot);
+                t.stats.moves_undecided += 1;
+            }
+        }
+    }
+    t.hold_on = rule;
     update_in_order(t, slot, m, out);
     t.hold_on = false;
-    if t.confirming {
-        t.confirming = false;
-        let p = col(&t.pend, slot, no_pending());
-        put(&mut t.pend, slot, no_pending());
-        update_in_order(t, slot, &p.m, out);
-        update_in_order(t, slot, m, out);
-    }
 }
 
 /// Applies a measurement newer than or equal to the track's newest update.
@@ -1073,9 +1147,22 @@ fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut Trac
     let snapshot = track_txn(t, slot);
     let output = output_txn(out);
     let step = decide(t, slot, m);
+    if step == Step::Moved {
+        // The state from before the move is the rollback point; every row from here on is marked.
+        if let Some(v) = t.mv.get_mut(slot) {
+            *v = MoveState {
+                txn: snapshot,
+                start_ns: m.toa_ns,
+                active: 1,
+            };
+        }
+    }
     if !settle(t, slot, step, out) {
         restore_track_txn(t, slot, snapshot);
         restore_output_txn(out, output);
+        if step == Step::Moved {
+            clear_move(t, slot);
+        }
     }
 }
 
@@ -1207,9 +1294,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
                 t.stats.applied += 1;
                 t.stats.refiltered += 1;
             }
-            Step::Resynced | Step::Begun | Step::Rejected | Step::Held | Step::Confirmed => {
-                disturbed = true;
-            }
+            Step::Resynced | Step::Begun | Step::Rejected | Step::Moved => disturbed = true,
             Step::NumericalRefused => {
                 restore_track_txn(t, slot, transaction);
                 restore_output_txn(out, output);

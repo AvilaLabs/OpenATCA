@@ -1,49 +1,24 @@
-//! The large-move hold (RT-239). A report that passes the position gate but lies farther than
-//! `confirm_move_m` from the track's predicted position is not applied: the track keeps it as
-//! its one pending report, and a later report that agrees with it confirms both. The gate
-//! widens with the time since the track's last update, so after a gap it would pass one forged
-//! report of any plausible size; this distance is fixed and does not. Core (pure): the decision
-//! is a function of numbers only, so it is proved apart from the filter (`tracker_proofs`).
+//! The large-move rule (RT-239). The position gate widens with the time since the track's last
+//! update, so after a gap it passes one forged report of any plausible size. A report of a
+//! confirmed track that passes the gate but lies farther than `confirm_move_m` from the
+//! predicted position is applied at once, as without the rule, but the track keeps a snapshot of
+//! its state from before it and marks every row it emits `O_MOVE_UNCONFIRMED` with a wider
+//! uncertainty radius. The track's next report decides: it agrees with the moved track (the move
+//! is confirmed), with the old path (the move is rolled back to the snapshot and the report
+//! applied to it), or with neither or comes too late (the move stands). Core (pure): the
+//! decision is a function of numbers only, so it is proved apart from the filter
+//! (`tracker_proofs`).
 
 use crate::params::{CONFIRM_MIN_SEP_NS, CONFIRM_WINDOW_INTERVALS};
-use crate::types::{Measurement, TrackerConfig};
+use crate::types::TrackerConfig;
 
-/// A track's pending report. Fixed size: one slot per track, no allocation.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub(crate) struct Pending {
-    pub m: Measurement,
-    /// 1 if `m` is held.
-    pub valid: u8,
-}
-// Budget: the 72-byte measurement and a flag, 80 with alignment.
-const _: () = assert!(core::mem::size_of::<Pending>() == 80);
-
-/// What to do with a report that passed the position gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Move {
-    /// A small move: apply it as always.
-    Apply,
-    /// Keep it as the pending report (replacing any); `expired` if the replaced one was stale.
-    Hold { expired: bool },
-    /// It agrees with the pending report: apply the pending one, then it.
-    Confirm,
-}
-
-/// Whether a move of `miss_m` metres from the predicted position is held. A distance that is
-/// not a number is held (fail closed).
+/// Whether a move of `miss_m` metres from the predicted position is a large one. A distance that
+/// is not a number is large (fail closed).
 pub(crate) fn move_is_large(miss_m: f64, move_m: f64) -> bool {
     miss_m.is_nan() || miss_m > move_m
 }
 
-/// Whether the pending report (time `pend_t_ns`) can no longer be confirmed at `now_ns`: older
-/// than the window, or older than the track's last applied update (the track moved on without
-/// it, so applying it would run time backwards).
-pub(crate) fn pending_stale(pend_t_ns: i64, last_ns: i64, now_ns: i64, window_ns: i64) -> bool {
-    pend_t_ns < last_ns || now_ns.saturating_sub(pend_t_ns) > window_ns
-}
-
-/// The confirmation window of a track whose expected report interval is `expected_ns` (0: the
+/// The decision window of a track whose expected report interval is `expected_ns` (0: the
 /// configuration's): four intervals, not under `confirm_window_ns` (the floor, 5 s: live 1 Hz
 /// data keeps it) and not over the drop age. A thinned feed with a 7 s interval waits about 28 s
 /// or more, long enough for its next report.
@@ -59,44 +34,58 @@ pub(crate) fn confirm_window_ns(cfg: &TrackerConfig, expected_ns: i64) -> i64 {
         .max(cfg.confirm_window_ns)
 }
 
-/// How closely a confirming report `sep_ns` after the pending one must agree with it, metres:
+/// How closely a deciding report `sep_ns` after the move must agree with a path, metres:
 /// `confirm_agree_m` plus what a manoeuvre of `gate_manoeuvre_mps2` could add in that time
 /// (`0.5 a t^2`), never over `confirm_move_m`. Only the agreement of two reports loosens with
-/// time; the move that starts the hold is a fixed distance.
+/// time; the move that starts the rule is a fixed distance.
 pub(crate) fn agree_limit_m(cfg: &TrackerConfig, sep_ns: i64) -> f64 {
     let s = sep_ns.max(0) as f64 / 1.0e9;
     (cfg.confirm_agree_m + 0.5 * cfg.gate_manoeuvre_mps2 * s * s).min(cfg.confirm_move_m)
 }
 
-/// The decision for a report at `rep_t_ns` that passed the gate, `miss_m` from the predicted
-/// position and `agree_m` from the pending report propagated to its time (not a number when
-/// there is no pending report or it could not be computed). `Confirm` only when the move is
-/// large, a pending report exists and is not stale (`window_ns`), the report is at least the
-/// minimum separation after it, and `agree_m` is within [`agree_limit_m`]. Nothing here depends
-/// on the time since the track's last update or on its covariance: that is the point.
-pub(crate) fn confirm_decide(
-    pending_t_ns: Option<i64>,
-    last_ns: i64,
-    rep_t_ns: i64,
-    miss_m: f64,
-    agree_m: f64,
+/// What the track's next report does to an unconfirmed move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resolve {
+    /// Too soon after the move to be a second report (a copy, or a burst): nothing is decided.
+    Wait,
+    /// It agrees with the moved track: the move is confirmed.
+    Confirm,
+    /// It agrees with the old path and not with the moved track: roll back, then apply it.
+    Rollback,
+    /// It agrees with neither, or comes after the window: the move stands.
+    Undecided,
+}
+
+/// The decision for a report at `now_ns` on a track whose move was applied at `start_ns`:
+/// `cur_m` is its distance from the moved track's prediction and `old_m` from the old path's
+/// (the snapshot's), at its time; `window_ns` the track's window. `Confirm` only with a report
+/// at least the minimum separation after the move, within the window, that is within
+/// [`agree_limit_m`] of the moved track and no farther from it than from the old path;
+/// `Rollback` only likewise with the old path. Not a number agrees with nothing. Nothing here
+/// depends on the time since the track's last update before the move or on its covariance: that
+/// is the point.
+pub(crate) fn resolve_decide(
+    start_ns: i64,
+    now_ns: i64,
+    cur_m: f64,
+    old_m: f64,
     window_ns: i64,
     cfg: &TrackerConfig,
-) -> Move {
-    if !move_is_large(miss_m, cfg.confirm_move_m) {
-        return Move::Apply;
+) -> Resolve {
+    let sep = now_ns.saturating_sub(start_ns);
+    if sep < CONFIRM_MIN_SEP_NS {
+        return Resolve::Wait;
     }
-    let Some(pt) = pending_t_ns else {
-        return Move::Hold { expired: false };
-    };
-    if pending_stale(pt, last_ns, rep_t_ns, window_ns) {
-        return Move::Hold { expired: true };
+    if sep > window_ns {
+        return Resolve::Undecided;
     }
-    let sep = rep_t_ns.saturating_sub(pt);
-    if sep >= CONFIRM_MIN_SEP_NS && agree_m <= agree_limit_m(cfg, sep) {
-        Move::Confirm
+    let limit = agree_limit_m(cfg, sep);
+    if cur_m <= limit && (old_m.is_nan() || old_m >= cur_m) {
+        Resolve::Confirm
+    } else if old_m <= limit {
+        Resolve::Rollback
     } else {
-        Move::Hold { expired: false }
+        Resolve::Undecided
     }
 }
 
@@ -108,55 +97,38 @@ mod tests {
 
     const S: i64 = 1_000_000_000;
 
-    // REQ: OA-TRK-347, OA-TRK-348
+    // REQ: OA-TRK-348
     #[test]
     fn the_decision_table() {
         let c = DEFAULT_CONFIG;
-        let d = |pend: Option<i64>, last: i64, t: i64, miss: f64, agree: f64| {
-            confirm_decide(pend, last, t, miss, agree, c.confirm_window_ns, &c)
+        let w = c.confirm_window_ns;
+        let d = |sep_ns: i64, cur: f64, old: f64| {
+            resolve_decide(100 * S, 100 * S + sep_ns, cur, old, w, &c)
         };
-        // Small moves are applied, whatever the rest says.
-        assert_eq!(d(None, 0, 100 * S, 926.0, f64::NAN), Move::Apply);
-        assert_eq!(d(Some(0), 0, 2 * S, 10.0, 0.0), Move::Apply);
-        // A large move with no pending report, or a not-a-number distance, is held.
-        assert_eq!(
-            d(None, 0, 100 * S, 927.0, f64::NAN),
-            Move::Hold { expired: false }
-        );
-        assert_eq!(
-            d(None, 0, 100 * S, f64::NAN, 0.0),
-            Move::Hold { expired: false }
-        );
-        // Confirmed: pending 1 s before, agreeing.
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 41 * S, 2000.0, 299.0),
-            Move::Confirm
-        );
-        // Not agreeing, too soon, too late, superseded by an applied update.
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 41 * S, 2000.0, 303.0),
-            Move::Hold { expired: false }
-        );
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 41 * S, 2000.0, f64::NAN),
-            Move::Hold { expired: false }
-        );
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 40 * S + S / 4, 2000.0, 0.0),
-            Move::Hold { expired: false }
-        );
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 40 * S + S / 2, 2000.0, 0.0),
-            Move::Confirm
-        );
-        assert_eq!(d(Some(40 * S), 20 * S, 45 * S, 2000.0, 0.0), Move::Confirm);
-        assert_eq!(
-            d(Some(40 * S), 20 * S, 45 * S + 1, 2000.0, 0.0),
-            Move::Hold { expired: true }
-        );
-        assert_eq!(
-            d(Some(40 * S), 41 * S, 42 * S, 2000.0, 0.0),
-            Move::Hold { expired: true }
-        );
+        assert_eq!(d(S / 4, 0.0, 2000.0), Resolve::Wait);
+        assert_eq!(d(S, 10.0, 2000.0), Resolve::Confirm);
+        assert_eq!(d(S, 2000.0, 10.0), Resolve::Rollback);
+        assert_eq!(d(S, 2000.0, 2000.0), Resolve::Undecided);
+        assert_eq!(d(S, f64::NAN, f64::NAN), Resolve::Undecided);
+        // The limit is 302.5 m at 1 s: 303 m agrees with neither.
+        assert_eq!(d(S, 302.0, 5000.0), Resolve::Confirm);
+        assert_eq!(d(S, 303.0, 5000.0), Resolve::Undecided);
+        // Both within the limit: the nearer one.
+        assert_eq!(d(S, 100.0, 200.0), Resolve::Confirm);
+        assert_eq!(d(S, 200.0, 100.0), Resolve::Rollback);
+        // Window.
+        assert_eq!(d(5 * S, 10.0, 2000.0), Resolve::Confirm);
+        assert_eq!(d(5 * S + 1, 10.0, 2000.0), Resolve::Undecided);
+    }
+
+    // REQ: OA-TRK-347
+    #[test]
+    fn the_window_and_the_limit_follow_the_rate_and_the_gap() {
+        let c = DEFAULT_CONFIG;
+        assert_eq!(confirm_window_ns(&c, 0), 5 * S);
+        assert_eq!(confirm_window_ns(&c, 7 * S), 28 * S);
+        assert_eq!(confirm_window_ns(&c, 1000 * S), c.drop_after_ns);
+        assert_eq!(agree_limit_m(&c, 0), 300.0);
+        assert_eq!(agree_limit_m(&c, 1000 * S), 926.0);
     }
 }

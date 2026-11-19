@@ -147,20 +147,19 @@ pub struct TrackerConfig {
     /// position), besides the `RESYNC_AFTER` rule. 0 (the default) is off; otherwise 2 to
     /// `RESYNC_AFTER`.
     pub resync_consistent_k: u8,
-    /// Large-move hold (RT-239): a report that passes the position gate but lies farther than
-    /// this, metres, from the track's predicted position is held until a later report agrees
-    /// with it ([`crate::params::CONFIRM_MOVE_M`]). Positive and finite; a value of 0 is
+    /// Large-move rule (RT-239): a report that passes the position gate but lies farther than
+    /// this, metres, from the track's predicted position is applied but marked unconfirmed until
+    /// the next report decides ([`crate::params::CONFIRM_MOVE_M`]). Positive and finite; a value of 0 is
     /// refused, never read as "off" (`confirm_moves` turns the hold off).
     pub confirm_move_m: f64,
-    /// A confirming report agrees if within this, metres, of the held report propagated to its
-    /// time ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
+    /// A deciding report agrees with a path if within this, metres, of its prediction ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
     pub confirm_agree_m: f64,
     /// The floor of the time a held report waits before it is discarded, ns
     /// ([`crate::params::CONFIRM_WINDOW_NS`]); the window is four expected report intervals, not
     /// under this and not over `drop_after_ns`.
     /// Over 0.5 s (the least separation of the confirming report).
     pub confirm_window_ns: i64,
-    /// The large-move hold is on. True by default; false only by an explicit choice.
+    /// The large-move rule is on. True by default; false only by an explicit choice.
     pub confirm_moves: bool,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
@@ -335,6 +334,12 @@ pub const O_UNCERTAIN: u8 = 32;
 /// [`crate::params::REACQUIRE_GAP_NS`] since its previous applied update, or after a re-anchor on
 /// a report: the position may have jumped.
 pub const O_REACQUIRED: u8 = 64;
+/// The track's last position was a move of more than [`crate::params::CONFIRM_MOVE_M`] from its
+/// predicted position that no second report has confirmed yet (RT-239): the position is applied
+/// but may be a forged or faulty report, and `pos_cov_m2` is widened to cover the old path. The
+/// flag is on every row of the track, update or tick, until its next report decides. A display
+/// must show it.
+pub const O_MOVE_UNCONFIRMED: u8 = 128;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
@@ -590,15 +595,18 @@ pub struct TrackerStats {
     pub time_future_dropped: u64,
     /// Sensor table entries reused while the table was full.
     pub time_sensor_evicted: u64,
-    /// Reports that passed the position gate but moved the track by more than `confirm_move_m`,
-    /// held (stored as the track's pending report) and not applied; a report that replaces a
-    /// pending one counts again.
-    pub moves_held: u64,
-    /// Pending reports confirmed by an agreeing later report and applied, with it.
+    /// Reports of a confirmed track that passed the position gate but moved it by more than
+    /// `confirm_move_m` from its predicted position: applied, and the track marked
+    /// [`O_MOVE_UNCONFIRMED`] until its next report decides.
+    pub moves_unconfirmed: u64,
+    /// Moves confirmed by the next report agreeing with the moved track.
     pub moves_confirmed: u64,
-    /// Pending reports discarded for age (past `confirm_window_ns`) or because the track had
-    /// moved on past them.
-    pub moves_expired: u64,
+    /// Moves rolled back: the next report agreed with the old path and not with the moved track,
+    /// so the track was restored to its state from before the move and the report applied to it.
+    pub moves_rolled_back: u64,
+    /// Moves the next report neither confirmed nor refuted (it agreed with neither path, or came
+    /// after the window): the move stands, the mark is cleared.
+    pub moves_undecided: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

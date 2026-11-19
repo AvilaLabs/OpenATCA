@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 49,
+  "expected_proof_count": 51,
   "proofs": [
     {
       "id": "output-append",
@@ -380,16 +380,52 @@
       "memory_mib": 12288
     },
     {
-      "id": "large-move-hold",
-      "requirement": "OA-TRK-351: a report that moves a track by more than the fixed threshold is never applied without a second, agreeing report, for every gap and covariance.",
+      "id": "large-move-decision",
+      "requirement": "OA-TRK-348: a lone large move decides nothing; a confirmation or rollback needs a second report at least 0.5 s after it, within the window and within the agreement limit, for every gap and covariance.",
       "package": "oa-track",
-      "harness": "tracker::proofs::a_single_large_move_is_never_applied_without_an_agreeing_second_report",
+      "harness": "tracker::proofs::a_single_far_report_marks_every_row_until_a_second_report_decides",
       "enabled": true,
       "experimental": false,
       "required_covers": [
-        "a second report confirms",
-        "a stale pending report is replaced"
+        "confirmed",
+        "rolled back",
+        "undecided",
+        "too soon"
       ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "large-move-marks-rows",
+      "requirement": "OA-TRK-348: every row (update or tick) of a track with an unconfirmed move carries the unconfirmed flag.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::every_row_of_a_track_with_an_unconfirmed_move_is_marked",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a marked row is made"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "filter_output returns a representable row; production emit, the marking and output append remain in path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "large-move-rollback",
+      "requirement": "OA-TRK-349: rolling back restores every column of the track bit for bit as it was before the move.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::rolling_back_restores_the_track_as_it_was_before_the_move",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
       "stubbing": false,
       "stub_summaries": [],
       "cfgs": [],

@@ -159,8 +159,11 @@ fn a_radar_only_track_goes_from_live_to_coasting_to_uncertain_and_is_never_absen
     assert!(live < coast, "{live} {coast}");
     assert!(seq[coast..].iter().all(|x| x.0 && x.1));
     assert!(seq.iter().any(|x| !x.0 && x.1));
+    // Update rows count too: the radar's reports move this track by over 926 m now and then, and
+    // such a row (marked as an unconfirmed move, RT-239) has its radius widened to cover the old
+    // path, so it may be uncertain.
     assert_eq!(
         tracker_stats(&t).rows_uncertain,
-        seq.iter().filter(|x| x.1).count() as u64
+        out.flags.iter().filter(|&&f| f & O_UNCERTAIN != 0).count() as u64
     );
 }

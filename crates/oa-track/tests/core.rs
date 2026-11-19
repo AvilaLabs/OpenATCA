@@ -1454,10 +1454,11 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
         "tracker_bytes at {n} tracks: {bytes} ({} per track)",
         bytes / n
     );
-    // The columns, one current and one anchor filter and the measurement ring: under 2.3 kB each
-    // (it was 8.9 kB with a filter state in every ring slot; 2.2 kB before the filter carried
-    // the newest rejected report of a run, 16 bytes in each of its two copies).
-    assert!(bytes / n < 2_300, "{} bytes per track", bytes / n);
+    // The columns, one current and one anchor filter and the measurement ring (2.3 kB; it was
+    // 8.9 kB with a filter state in every ring slot), and the 2.6 kB rollback point of an
+    // unconfirmed large move (RT-239: the capture of a track's whole state, one per track, fixed
+    // size): under 5 kB each.
+    assert!(bytes / n < 5_000, "{} bytes per track", bytes / n);
 }
 
 // REQ: OA-TRK-042
@@ -1479,9 +1480,9 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     // The index is the only part that is not exactly linear (a power of two entries).
     let per = |x: usize, n: usize| x as f64 / n as f64;
     assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
-    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The pending
-    // report of the large-move hold (RT-239) adds 80 bytes per track.
-    assert!(per(b, 38_000) < 2_400.0);
+    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The rollback
+    // point of the large-move rule (RT-239) adds 2.6 kB per track.
+    assert!(per(b, 38_000) < 5_000.0);
 }
 
 // REQ: OA-TRK-077

@@ -3993,43 +3993,53 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   last update, so after a gap it passes a single forged report of any plausible size. A report of
   a confirmed track that passes the gate but lies farther than `confirm_move_m` (926 m, a fixed
   distance that does not scale with the gap or the covariance) from the track's predicted position
-  at the report's time is not applied: it is kept as the track's one pending report (position,
-  velocity if any, time, source and address) and counted in `moves_held`. A tentative track is
-  not held (its second report has no velocity and moves far from its prediction as a matter of
-  course; the plausibility rule judges it). A late report (older than the track's newest update)
-  is decided by the re-filter as before. The hold is on by default; a configuration value of 0
-  is refused, never read as "off", and `confirm_moves = false` turns it off only by an explicit
-  choice. Fixed-size state only: one pending slot per track, no allocation.
-- **OA-TRK-348** A later report of the track confirms the pending one if it also passes the
-  gate and moves the track by more than `confirm_move_m`, arrives at least 0.5 s after it and
-  within the track's window, and lies within the agreement limit of the pending report
-  propagated to its time by the pending report's velocity (the track's, without one). The
-  window is four of the track's expected report intervals (the track's own, else the
-  configuration's), not under `confirm_window_ns` (5 s: live 1 Hz data keeps it) and not over
-  `drop_after_ns`. The limit is `confirm_agree_m` (300 m) plus `0.5 a t^2` (`a` the gate's
-  manoeuvre allowance, `t` the time between the two reports), never over `confirm_move_m`: only
-  the agreement of two reports loosens with time, never the move that a single report may make. The
-  pending report is then applied and then the confirming one, in measurement-time order, through
-  the normal update path with the hold off (`moves_confirmed`). A report that does not agree
-  replaces the pending one (newest wins, `moves_held` again). A pending report older than the
-  window, or older than the track's newest applied update, is discarded and counted in
-  `moves_expired` at the next report of the track. A track restart, a re-anchor or the end of
-  the track clears it. Residual risk, stated: a forger who sends two reports that agree with each
-  other confirms them; only a second source (radar) can refute that.
-- **OA-TRK-349** A report whose distance from the predicted position is at most `confirm_move_m`
-  is applied exactly as before: the outputs of every such report are bit for bit those of a
-  tracker with the hold off.
-- **OA-TRK-350** `check_config` requires `confirm_move_m` finite and positive, `confirm_agree_m`
+  at the report's time is applied at once, exactly as a tracker without the rule applies it, and
+  counted in `moves_unconfirmed`. The track keeps its whole state from before the report (the
+  transaction capture that already protects an update, one per track, fixed size, no allocation)
+  and, until the next report decides (OA-TRK-348), every row it emits, update row or tick row,
+  carries the flag `O_MOVE_UNCONFIRMED` (128), and the row's position covariance is scaled up so
+  that its 95% radius is at least the distance from the old path's prediction to the row's
+  position plus the old path's own 95% radius. The reacquisition marking of OA-TRK-343 follows
+  the filter's own radius, not the widened one. A tentative track is not covered (its second
+  report has no velocity and moves far from its prediction as a matter of course; the
+  plausibility rule judges it). A late report is decided by the re-filter as before. The rule is
+  on by default; `confirm_moves = false` turns it off only by an explicit choice. The move's
+  report refreshes the drop timer like any update. A display must show the flag (follow-up).
+- **OA-TRK-348** The track's next report decides an unconfirmed move, by distances from the report
+  to the moved track's prediction and to the old path's (the snapshot's) at the report's time.
+  Under 0.5 s after the move it decides nothing (a copy or a burst). Within the track's window and
+  at least 0.5 s after: it agrees with the moved track (within the agreement limit and not
+  nearer the old path) and the move is confirmed, the flag cleared, the snapshot dropped
+  (`moves_confirmed`); or it agrees with the old path and not with the moved track and the move
+  is rolled back (OA-TRK-349, `moves_rolled_back`); or it agrees with neither, or comes after the
+  window, and the move stands, the flag is cleared and the snapshot dropped (`moves_undecided`),
+  the report processed normally on the current state. The window is four of the track's expected
+  report intervals (the track's own, else the configuration's), not under `confirm_window_ns`
+  (5 s: live 1 Hz data keeps it) and not over `drop_after_ns`. The agreement limit is
+  `confirm_agree_m` (300 m) plus `0.5 a t^2` (`a` the gate's manoeuvre allowance, `t` the time
+  since the move), never over `confirm_move_m`. A distance that is not a number agrees with
+  nothing. (Kani) The decision is a pure function of times, distances and the configuration;
+  for every configuration `check_config` accepts and every time and distance (so every gap and
+  every covariance) a lone move decides nothing, and a confirmation or rollback needs a report at
+  least 0.5 s after the move, within the window and within the limit; and every row the track
+  emits while the move is unconfirmed carries the flag. Residual risk, stated: a forger who sends
+  two reports that agree with each other confirms them; only a second source (radar) can refute
+  that.
+- **OA-TRK-349** A rollback puts the track's columns back exactly as the snapshot held them (bit
+  for bit: filters, measurement history, times, counts, category, state) and the report is then
+  applied to that through the normal path; the tracker's counters and its bound on the newest
+  update are not the track's and are kept. (Kani) The rollback restores the scalar columns, the category and the filter's time and first state value; the whole filters and ring by the OA-TRK-335 component proofs.
+  A track's end, restart, resynchronisation or drop clears the unconfirmed move.
+- **OA-TRK-350** A report whose distance from the predicted position is at most `confirm_move_m`
+  is applied exactly as before: its outputs are bit for bit those of a tracker with the rule off.
+  A move over it is applied exactly as without the rule too: a confirmed move leaves every row's
+  position, time and flags, and the covariance of every unmarked row, those of a tracker with
+  the rule off.
+- **OA-TRK-351** `check_config` requires `confirm_move_m` finite and positive, `confirm_agree_m`
   positive, finite and below `confirm_move_m`, and `confirm_window_ns` over 0.5 s (and at most one
-  day). The counters `moves_held`, `moves_confirmed` and `moves_expired` are in the statistics.
-  The pending report adds 80 bytes per track and to the per-track transaction.
-- **OA-TRK-351** (Kani) The decision of OA-TRK-347 and OA-TRK-348 is a pure function of the
-  pending report's time, the track's last update time, the report's time, its distances from the
-  prediction and from the pending report, and the configuration (`confirm_decide`). For every
-  configuration `check_config` accepts, every time and every distance (so every gap and every
-  covariance), a report over `confirm_move_m` is never applied without a confirming one, whatever the
-  window: the decision is `Confirm` only with a pending report that is not stale, at least 0.5 s
-  before it and within the window, that the report agrees with within `confirm_move_m`.
+  day). The counters `moves_unconfirmed`, `moves_confirmed`, `moves_rolled_back` and
+  `moves_undecided` are in the statistics. The rollback point adds 2600 bytes per track (the
+  tracker's tables go from 2.3 kB to 4.9 kB per track).
 
 ## NAM ACC-to-ACC interface (oa-nam)
 - **OA-NAM-001** The crate models exactly the 25 messages of the NAM Common Coordination ICD

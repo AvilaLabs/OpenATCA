@@ -451,8 +451,8 @@ fn tracker_section(
     }
     let _ = writeln!(
         o,
-        "  large-move hold: held {}, confirmed {}, expired {}",
-        s.moves_held, s.moves_confirmed, s.moves_expired
+        "  large moves: unconfirmed {}, confirmed {}, rolled back {}, undecided {}",
+        s.moves_unconfirmed, s.moves_confirmed, s.moves_rolled_back, s.moves_undecided
     );
     let _ = writeln!(
         o,

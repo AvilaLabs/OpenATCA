@@ -81,7 +81,7 @@ pub struct Filter {
 const _: () = assert!(core::mem::size_of::<Filter>() == 648);
 
 /// What [`filter_apply`] did with a measurement.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Applied {
     /// Applied.
     Yes,
@@ -92,8 +92,10 @@ pub(crate) enum Applied {
     /// Too many rejections in a row: the filter was re-initialised at this measurement.
     Resync,
     /// Passed the position gate but lies farther than `confirm_move_m` from the predicted
-    /// position: not applied, no state changed (RT-239, `crate::confirm`).
-    Large(Probe),
+    /// position: not applied here, no state changed; the caller notes the move and applies it
+    /// again with the check off, which is exactly the application of a tracker without it
+    /// (RT-239, `crate::confirm`).
+    Large,
 }
 
 fn deg(e7: i32) -> f64 {
@@ -179,16 +181,16 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
     }
 }
 
-/// Applies `m` (at `m.toa_ns >= f.t_ns`) to `f`. Counters go to `stats`. `held` is the track's
-/// pending report, if any: a large move (`cfg.confirm_moves`) is returned with its distance from it.
+/// Applies `m` (at `m.toa_ns >= f.t_ns`) to `f`. Counters go to `stats`. With `cfg.confirm_moves`
+/// a move over `cfg.confirm_move_m` that passed the gate is returned as [`Applied::Large`],
+/// unapplied.
 pub(crate) fn filter_apply(
     f: &mut Filter,
     m: &Measurement,
     stats: &mut TrackerStats,
     cfg: &TrackerConfig,
-    held: Option<&Measurement>,
 ) -> Applied {
-    apply(f, m, stats, true, cfg, held)
+    apply(f, m, stats, true, cfg)
 }
 
 /// Applies again a measurement that [`filter_apply`] applied to the same state (the ring's
@@ -200,7 +202,7 @@ pub(crate) fn filter_replay(
     stats: &mut TrackerStats,
     cfg: &TrackerConfig,
 ) -> Applied {
-    apply(f, m, stats, false, cfg, None)
+    apply(f, m, stats, false, cfg)
 }
 
 /// Whether a displacement of `dist_m` in `dt_s` seconds ending at `m` is one the speed rule
@@ -286,36 +288,23 @@ fn pred_miss_m(pred: &HFilter, zx: f64, zy: f64) -> f64 {
     oa_math::hypot(zx - mean(0), zy - mean(1))
 }
 
-/// What the large-move check measured, metres; `agree_m` is not a number without a held report or
-/// if it could not be computed (which no comparison treats as agreement).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Probe {
-    /// Distance of the report from the track's predicted position at the report's time.
-    pub miss_m: f64,
-    /// Distance of the report from the held report propagated to the report's time.
-    pub agree_m: f64,
+/// How far `m` lies from the filter's predicted position at `m`'s time, metres; not a number if
+/// the prediction fails. Reads only.
+pub(crate) fn filter_miss_m(f: &Filter, m: &Measurement) -> f64 {
+    let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    let frame = filter_frame(f);
+    let Some(pred) = h_predict(&f.h, dt, dwell_decay(dt), f.h_mode) else {
+        return f64::NAN;
+    };
+    let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
+    pred_miss_m(&pred, zx, zy)
 }
 
-/// Distance of `m`'s plane position `(zx, zy)` from the held report `p` propagated to `m`'s time
-/// by the held report's velocity (the track's own mean velocity if it has none), in the track's
-/// frame. Not a number if the held report cannot be placed.
-fn agree_m(f: &Filter, frame: &Frame, m: &Measurement, zx: f64, zy: f64, p: &Measurement) -> f64 {
-    let (px, py) = project(frame, deg(p.lat_e7), deg(p.lon_e7));
-    let own_vel = || {
-        let mean = |i: usize| {
-            f.h.m
-                .iter()
-                .zip(f.h.mu.iter())
-                .map(|(mm, w)| w * mm.x.get(i).copied().unwrap_or(f64::NAN))
-                .sum::<f64>()
-        };
-        [mean(2), mean(3)]
-    };
-    let v = try_frame_from_true(frame, px, py)
-        .and_then(|j| vel_of(p, &j))
-        .map_or_else(own_vel, |(v, _)| v);
-    let span = (m.toa_ns - p.toa_ns) as f64 / NS_PER_S as f64;
-    oa_math::hypot(zx - (px + v[0] * span), zy - (py + v[1] * span))
+/// The distance between two output rows' positions, metres.
+pub(crate) fn filter_row_distance_m(a: &OutRow, b: &OutRow) -> f64 {
+    let frame = frame_new(deg(a.lat_e7), deg(a.lon_e7));
+    let (e, n) = project(&frame, deg(b.lat_e7), deg(b.lon_e7));
+    oa_math::hypot(e, n)
 }
 
 fn apply(
@@ -324,7 +313,6 @@ fn apply(
     stats: &mut TrackerStats,
     gated: bool,
     cfg: &TrackerConfig,
-    held: Option<&Measurement>,
 ) -> Applied {
     let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
     let t_before = f.t_ns;
@@ -362,12 +350,8 @@ fn apply(
             return reject_jump(f, m, stats, cfg);
         }
         // A fixed distance, not the covariance's: the gate widens with the gap, this does not.
-        if cfg.confirm_moves {
-            let miss_m = pred_miss_m(&pred, zx, zy);
-            if move_is_large(miss_m, cfg.confirm_move_m) {
-                let agree_m = held.map_or(f64::NAN, |p| agree_m(f, &frame, m, zx, zy, p));
-                return Applied::Large(Probe { miss_m, agree_m });
-            }
+        if cfg.confirm_moves && move_is_large(pred_miss_m(&pred, zx, zy), cfg.confirm_move_m) {
+            return Applied::Large;
         }
         stats.nis_sum += nis;
         stats.nis_n += 1;
@@ -666,7 +650,7 @@ mod tests {
         let mut stats = TrackerStats::default();
         let next = meas(42.0, -88.0, 1, [100.0, 0.0, 100.0]);
         assert_eq!(
-            filter_apply(&mut f, &next, &mut stats, &vg(f64::INFINITY), None),
+            filter_apply(&mut f, &next, &mut stats, &vg(f64::INFINITY)),
             Applied::NumericalRefused
         );
         assert_eq!(f, before);
@@ -729,7 +713,7 @@ mod tests {
             let want = h_pos_nis(&pred, &[zx, zy], &r);
             let mut f = f0;
             let mut stats = TrackerStats::default();
-            let got = filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY), None);
+            let got = filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY));
             assert_eq!(got, Applied::Yes, "{lat} {lon_t}: nis {want}");
             assert!(
                 (stats.nis_sum - want).abs() < 2e-3 * want.max(1.0),
@@ -768,7 +752,7 @@ mod tests {
             let mut f = f0;
             let mut stats = TrackerStats::default();
             assert_eq!(
-                filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY), None),
+                filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY)),
                 Applied::Yes
             );
             assert!(f.lon_e7 != f0.lon_e7 || f.lat_e7 != f0.lat_e7);
@@ -850,7 +834,7 @@ mod tests {
                 k,
                 [100.0, 0.0, 100.0],
             );
-            filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY), None);
+            filter_apply(&mut f, &m, &mut stats, &vg(f64::INFINITY));
             let (sa, ca) = oa_math::sin_cos(deg(f.lat_e7).to_radians());
             for (g, w) in f.trig.iter().zip([sa, ca]) {
                 worst = worst.max((g - w).abs());
@@ -874,7 +858,7 @@ mod tests {
         let mut f = f0;
         let mut stats = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut f, &far, &mut stats, &vg(f64::INFINITY), None),
+            filter_apply(&mut f, &far, &mut stats, &vg(f64::INFINITY)),
             Applied::Rejected
         );
         assert_eq!((stats.jump_rejected, stats.resyncs), (1, 0));
@@ -930,7 +914,7 @@ mod tests {
         let mut f = f0;
         let mut stats = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut f, &m1, &mut stats, &vg(chi2), None),
+            filter_apply(&mut f, &m1, &mut stats, &vg(chi2)),
             Applied::Yes
         );
         assert_eq!((stats.velocity_gated, stats.jump_rejected), (1, 0));
@@ -945,7 +929,7 @@ mod tests {
         // Without the gate the same report drags the velocity far off.
         let mut g = f0;
         let mut st2 = TrackerStats::default();
-        filter_apply(&mut g, &m1, &mut st2, &vg(f64::INFINITY), None);
+        filter_apply(&mut g, &m1, &mut st2, &vg(f64::INFINITY));
         assert_eq!(st2.velocity_gated, 0);
         let og = filter_output(&g, NS_PER_S).unwrap();
         assert!(og.vel_east_mps > 130.0, "{}", og.vel_east_mps);
@@ -963,10 +947,7 @@ mod tests {
         m2.vel_east_mps = f32::NAN;
         let mut h = f1;
         let mut st4 = TrackerStats::default();
-        assert_eq!(
-            filter_apply(&mut h, &m2, &mut st4, &vg(chi2), None),
-            Applied::Yes
-        );
+        assert_eq!(filter_apply(&mut h, &m2, &mut st4, &vg(chi2)), Applied::Yes);
         assert_eq!(st4.velocity_gated, 1);
         assert!(filter_output(&h, NS_PER_S)
             .unwrap()
@@ -982,7 +963,7 @@ mod tests {
         let mut f = f0;
         let mut stats = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut f, &m1, &mut stats, &vg(chi2), None),
+            filter_apply(&mut f, &m1, &mut stats, &vg(chi2)),
             Applied::Yes
         );
         assert_eq!(stats.velocity_gated, 0);
@@ -993,7 +974,6 @@ mod tests {
             &m1,
             &mut TrackerStats::default(),
             &vg(f64::INFINITY),
-            None,
         );
         assert_eq!(f, g);
     }
@@ -1013,7 +993,7 @@ mod tests {
         let mut f = f0;
         let mut stats = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut f, &m1, &mut stats, &vg(400.0), None),
+            filter_apply(&mut f, &m1, &mut stats, &vg(400.0)),
             Applied::Yes
         );
         assert_eq!(stats.velocity_gated, 1);
@@ -1043,13 +1023,10 @@ mod tests {
         };
         let mut f = f0;
         let mut st = TrackerStats::default();
-        assert_eq!(
-            filter_apply(&mut f, &m, &mut st, &plain, None),
-            Applied::Rejected
-        );
+        assert_eq!(filter_apply(&mut f, &m, &mut st, &plain), Applied::Rejected);
         let mut g = f0;
         assert_eq!(
-            filter_apply(&mut g, &m, &mut TrackerStats::default(), &wide, None),
+            filter_apply(&mut g, &m, &mut TrackerStats::default(), &wide),
             Applied::Yes
         );
         // Bypass the gate (a huge limit through the replay path) to get the plain update.
@@ -1081,11 +1058,11 @@ mod tests {
         let mut f = f0;
         let mut st = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut f, &at(330.0, 20), &mut st, &two, None),
+            filter_apply(&mut f, &at(330.0, 20), &mut st, &two),
             Applied::Rejected
         );
         assert_eq!(
-            filter_apply(&mut f, &at(330.0, 21), &mut st, &two, None),
+            filter_apply(&mut f, &at(330.0, 21), &mut st, &two),
             Applied::Resync
         );
         assert_eq!((st.jump_rejected, st.resyncs), (2, 1));
@@ -1095,7 +1072,7 @@ mod tests {
         let mut s2 = TrackerStats::default();
         for t in [20, 21] {
             assert_eq!(
-                filter_apply(&mut g, &at(330.0, t), &mut s2, &vg(f64::INFINITY), None),
+                filter_apply(&mut g, &at(330.0, t), &mut s2, &vg(f64::INFINITY)),
                 Applied::Rejected
             );
         }
@@ -1105,11 +1082,11 @@ mod tests {
         let mut h = f0;
         let mut s3 = TrackerStats::default();
         assert_eq!(
-            filter_apply(&mut h, &at(330.0, 20), &mut s3, &two, None),
+            filter_apply(&mut h, &at(330.0, 20), &mut s3, &two),
             Applied::Rejected
         );
         assert_eq!(
-            filter_apply(&mut h, &at(3000.0, 23), &mut s3, &two, None),
+            filter_apply(&mut h, &at(3000.0, 23), &mut s3, &two),
             Applied::Rejected
         );
         assert_eq!((s3.resyncs, h.rej_c), (0, 1));

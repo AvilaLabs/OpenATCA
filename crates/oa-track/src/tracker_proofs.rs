@@ -234,9 +234,10 @@ fn arbitrary_stats() -> TrackerStats {
         time_steps_back: kani::any(),
         time_future_dropped: kani::any(),
         time_sensor_evicted: kani::any(),
-        moves_held: kani::any(),
+        moves_unconfirmed: kani::any(),
         moves_confirmed: kani::any(),
-        moves_expired: kani::any(),
+        moves_rolled_back: kani::any(),
+        moves_undecided: kani::any(),
         nis_sum: kani::any(),
         nis_n: kani::any(),
     }
@@ -283,7 +284,6 @@ fn filter_apply_insert_then_refuse(
     m: &Measurement,
     stats: &mut TrackerStats,
     _: &TrackerConfig,
-    _: Option<&Measurement>,
 ) -> Applied {
     if m.toa_ns == LATE_INSERT_NS {
         f.t_ns = m.toa_ns;
@@ -306,7 +306,6 @@ fn filter_apply_symbolic_yes_or_resync(
     m: &Measurement,
     stats: &mut TrackerStats,
     _: &TrackerConfig,
-    _: Option<&Measurement>,
 ) -> Applied {
     f.t_ns = m.toa_ns;
     f.h.m[0].x[0] = 321.0;
@@ -421,9 +420,10 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.time_steps_back, b.time_steps_back);
     assert_eq!(a.time_future_dropped, b.time_future_dropped);
     assert_eq!(a.time_sensor_evicted, b.time_sensor_evicted);
-    assert_eq!(a.moves_held, b.moves_held);
+    assert_eq!(a.moves_unconfirmed, b.moves_unconfirmed);
     assert_eq!(a.moves_confirmed, b.moves_confirmed);
-    assert_eq!(a.moves_expired, b.moves_expired);
+    assert_eq!(a.moves_rolled_back, b.moves_rolled_back);
+    assert_eq!(a.moves_undecided, b.moves_undecided);
     assert_f64_bits(a.nis_sum, b.nis_sum);
     assert_eq!(a.nis_n, b.nis_n);
 }
@@ -753,7 +753,6 @@ fn observe_track_fields_directly(t: &Tracker, slot: usize) -> TrackTxn {
         expected_ns: t.expected_ns[slot],
         newest_update_ns: t.newest_update_ns,
         cat: t.cat[slot],
-        pend: t.pend[slot],
         updates: t.updates[slot],
         state: t.state[slot],
         hits: t.hits[slot],
@@ -1152,12 +1151,16 @@ fn late_replay_restores_transaction_after_current_row_then_later_refusal() {
 #[path = "tracker_rollback_paths.rs"]
 mod rollback_paths;
 
-// REQ: OA-TRK-351
+fn return_move_row(_: &Filter, at_ns: i64) -> Option<OutRow> {
+    Some(output_row(at_ns))
+}
+
+// REQ: OA-TRK-348
 #[kani::proof]
 #[kani::solver(cadical)]
-fn a_single_large_move_is_never_applied_without_an_agreeing_second_report() {
-    // Any configuration the checker accepts, any times (so any gap since the track's last
-    // update), any distances (so any covariance behind them: the decision does not see it).
+fn a_single_far_report_marks_every_row_until_a_second_report_decides() {
+    // Any configuration the checker accepts, any times, any distances (so any gap and any
+    // covariance behind them: the decision does not see them), any window from the floor up.
     let cfg = TrackerConfig {
         confirm_move_m: kani::any(),
         confirm_agree_m: kani::any(),
@@ -1166,45 +1169,126 @@ fn a_single_large_move_is_never_applied_without_an_agreeing_second_report() {
         ..crate::types::DEFAULT_CONFIG
     };
     kani::assume(crate::types::check_config(&cfg).is_ok());
-    let last_ns: i64 = kani::any();
-    let rep_t_ns: i64 = kani::any();
-    // Any window the tracker can give a track: from the configured floor up (the per-track
-    // window, four expected intervals, is at most the drop age).
+    let start_ns: i64 = kani::any();
+    let now_ns: i64 = kani::any();
     let window_ns: i64 = kani::any();
     kani::assume(window_ns >= cfg.confirm_window_ns);
-    let pending: Option<i64> = if kani::any() { Some(kani::any()) } else { None };
-    let miss_m: f64 = kani::any();
-    let agree_m: f64 = kani::any();
-    // The report moves the track by more than the threshold (or by no number at all).
-    kani::assume(!(miss_m <= cfg.confirm_move_m));
-
-    let v = crate::confirm::confirm_decide(
-        pending, last_ns, rep_t_ns, miss_m, agree_m, window_ns, &cfg,
-    );
-
-    // Never applied alone.
-    assert!(v != crate::confirm::Move::Apply);
-    // Confirmed only by a second report: a pending one, not stale, at least the separation
-    // before this one, that this one agrees with.
-    if v == crate::confirm::Move::Confirm {
-        let Some(pt) = pending else {
-            panic!("confirmed with no pending report");
+    let cur_m: f64 = kani::any();
+    let old_m: f64 = kani::any();
+    let v = crate::confirm::resolve_decide(start_ns, now_ns, cur_m, old_m, window_ns, &cfg);
+    let sep = now_ns.saturating_sub(start_ns);
+    // Nothing but a second report, apart from the move and from the window, decides it.
+    if v == crate::confirm::Resolve::Wait {
+        assert!(sep < crate::params::CONFIRM_MIN_SEP_NS);
+    } else {
+        assert!(sep >= crate::params::CONFIRM_MIN_SEP_NS);
+    }
+    if v == crate::confirm::Resolve::Confirm || v == crate::confirm::Resolve::Rollback {
+        assert!(sep <= window_ns);
+        let near = if v == crate::confirm::Resolve::Confirm {
+            cur_m
+        } else {
+            old_m
         };
-        assert!(pt >= last_ns);
-        assert!(rep_t_ns.saturating_sub(pt) >= crate::params::CONFIRM_MIN_SEP_NS);
-        assert!(rep_t_ns.saturating_sub(pt) <= window_ns);
         // However long the wait, the agreement never loosens past the fixed move distance.
-        assert!(agree_m <= cfg.confirm_move_m);
+        assert!(near <= cfg.confirm_move_m);
     }
-    if pending.is_none() {
-        assert!(v == crate::confirm::Move::Hold { expired: false });
+    kani::cover!(v == crate::confirm::Resolve::Confirm, "confirmed");
+    kani::cover!(v == crate::confirm::Resolve::Rollback, "rolled back");
+    kani::cover!(v == crate::confirm::Resolve::Undecided, "undecided");
+    kani::cover!(v == crate::confirm::Resolve::Wait, "too soon");
+}
+
+// REQ: OA-TRK-348
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(filter_output, return_move_row)]
+fn every_row_of_a_track_with_an_unconfirmed_move_is_marked() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.mv[PROOF_SLOT].active = 1;
+    let at_ns: i64 = kani::any();
+    let flags: u8 = if kani::any() { O_TICK } else { 0 };
+    let mut out = crate::types::output_new(1);
+    emit(&mut t, PROOF_SLOT, at_ns, flags, &mut out);
+    // A row that is made at all is marked, update row or tick row.
+    if out.t_ns.len() == 1 {
+        assert!(out.flags[0] & O_MOVE_UNCONFIRMED != 0);
     }
-    kani::cover!(
-        v == crate::confirm::Move::Confirm,
-        "a second report confirms"
-    );
-    kani::cover!(
-        v == crate::confirm::Move::Hold { expired: true },
-        "a stale pending report is replaced"
-    );
+    kani::cover!(out.t_ns.len() == 1, "a marked row is made");
+}
+
+// REQ: OA-TRK-349
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn rolling_back_restores_the_track_as_it_was_before_the_move() {
+    // The snapshot is `track_txn`, restored by `restore_track_columns`; the anchor filter and the
+    // measurement ring are restored by the same function and covered one at a time by the
+    // component proofs of OA-TRK-335.
+    // Here the state before the move is arbitrary in every scalar, the category, the current
+    // filter's time and its first state value, and the move changes all of them.
+    let mut t = proof_tracker(CONFIRMED);
+    t.state[PROOF_SLOT] = kani::any();
+    t.first_ns[PROOF_SLOT] = kani::any();
+    t.confirmed_ns[PROOF_SLOT] = kani::any();
+    t.last_ns[PROOF_SLOT] = kani::any();
+    t.disagree_until_ns[PROOF_SLOT] = kani::any();
+    t.expected_ns[PROOF_SLOT] = kani::any();
+    t.updates[PROOF_SLOT] = kani::any();
+    t.hits[PROOF_SLOT] = kani::any();
+    t.cur[PROOF_SLOT].t_ns = kani::any();
+    t.cur[PROOF_SLOT].h.m[0].x[0] = kani::any();
+    t.ring_len[PROOF_SLOT] = kani::any();
+    t.ring_head[PROOF_SLOT] = kani::any();
+    t.cat[PROOF_SLOT] = arbitrary_category_state();
+    // The state before the move is the move's snapshot, taken as production takes it.
+    let before = observe_track_fields_directly(&t, PROOF_SLOT);
+    t.mv[PROOF_SLOT] = MoveState {
+        txn: track_txn(&t, PROOF_SLOT),
+        start_ns: kani::any(),
+        active: 1,
+    };
+    // The move: every column of the track changes.
+    t.state[PROOF_SLOT] = kani::any();
+    t.first_ns[PROOF_SLOT] = kani::any();
+    t.confirmed_ns[PROOF_SLOT] = kani::any();
+    t.last_ns[PROOF_SLOT] = kani::any();
+    t.disagree_until_ns[PROOF_SLOT] = kani::any();
+    t.expected_ns[PROOF_SLOT] = kani::any();
+    t.updates[PROOF_SLOT] = kani::any();
+    t.hits[PROOF_SLOT] = kani::any();
+    t.cur[PROOF_SLOT].t_ns = kani::any();
+    t.cur[PROOF_SLOT].h.m[0].x[0] = kani::any();
+    t.ring_len[PROOF_SLOT] = kani::any();
+    t.ring_head[PROOF_SLOT] = kani::any();
+    t.cat[PROOF_SLOT] = arbitrary_category_state();
+    let newest = t.newest_update_ns;
+
+    // The rollback of `update_in_order_held`, before the report is applied to the restored track.
+    let v = t.mv[PROOF_SLOT];
+    restore_track_columns(&mut t, PROOF_SLOT, &v.txn);
+    clear_move(&mut t, PROOF_SLOT);
+
+    let after = observe_track_fields_directly(&t, PROOF_SLOT);
+    // The track is as it was bit for bit; the tracker's counters and its bound on the newest
+    // update are not the track's and are left alone. One assertion, not one per field: a proof
+    // with a property for every float of the filters and the ring does not fit 6 GiB.
+    let same = after.cur.t_ns == before.cur.t_ns
+        && after.cur.h.m[0].x[0].to_bits() == before.cur.h.m[0].x[0].to_bits()
+        && after.first_ns == before.first_ns
+        && after.confirmed_ns == before.confirmed_ns
+        && after.last_ns == before.last_ns
+        && after.disagree_until_ns == before.disagree_until_ns
+        && after.expected_ns == before.expected_ns
+        && after.cat.trusted == before.cat.trusted
+        && after.cat.cand == before.cat.cand
+        && after.cat.cand_n == before.cat.cand_n
+        && after.updates == before.updates
+        && after.state == before.state
+        && after.hits == before.hits
+        && after.ring_len == before.ring_len
+        && after.ring_head == before.ring_head;
+    assert!(same);
+    assert_eq!(t.newest_update_ns, newest);
+    assert!(!move_active(&t, PROOF_SLOT));
 }
