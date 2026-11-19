@@ -192,6 +192,7 @@ dependencies = [
  "oa-asterix",
  "oa-feed",
  "oa-geo",
+ "oa-math",
  "oa-truth",
 ]
 

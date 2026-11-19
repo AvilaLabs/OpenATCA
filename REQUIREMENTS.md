@@ -3556,6 +3556,39 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `simulate_radar` with `SimError::BadSite("epoch")`, and the scan index, the scan start and the beam
   azimuth use checked or widened arithmetic, so no epoch or window overflows.
 - **OA-SIM-032** A drift window across the whole time range does not overflow in the elapsed time.
+- **OA-SIM-033** `adsb_error` gives a position bias to round(`bias_fraction` * N) of the N distinct addresses and a
+  latency to round(`lag_fraction` * N), chosen by a seeded shuffle, exactly for every seed; the two sets are chosen
+  independently.
+- **OA-SIM-034** A biased aircraft's reports are offset from the truth by `bias_mult` times one bound per aircraft, in a
+  direction fixed per aircraft.
+- **OA-SIM-035** A row with no usable NACp takes `bias_fallback_bound_m` as its bound where the aircraft has no usable NACp at all.
+- **OA-SIM-036** A lagged aircraft's report at time t carries the truth position and velocity of time t - L (whole
+  milliseconds), stamped at t.
+- **OA-SIM-037** Each lagged aircraft's L is constant and within `[lag_min_s, lag_max_s]`.
+- **OA-SIM-038** Each output row carries the label bits (`ERR_BIAS`, `ERR_LAG`) of the errors its aircraft has; a row
+  with no bits is the truth at its time.
+- **OA-SIM-039** The output depends only on the truth, the base reports and the parameters, and changes with the seed.
+- **OA-SIM-040** With no error the output is the truth at the base reports' times and addresses, every other field
+  copied, and rows the truth cannot answer are counted as dropped.
+- **OA-SIM-041** A fraction outside 0 to 1, a negative or non-finite multiple, bound or latency, an inverted latency
+  range or a latency above `MAX_LAG_S` is refused with `BadSpoof`.
+- **OA-SIM-042** With no error injected, a tracker run scored against the exact truth and against the truth rebuilt
+  from the generated reports gives the same Ticks and Updates position RMS within the stated tolerance (the optimism
+  harness, with the clip set; without it the test prints "skipped" and passes).
+- **OA-SIM-043** A biased aircraft's magnitude uses one bound for all its rows: the median (upper middle) of its usable
+  NACp bounds, so a NACp that changes in flight does not change the offset.
+- **OA-SIM-044** With both fractions at one half, the biased and the lagged sets differ, for each of five seeds.
+- **OA-SIM-045** A generated row's time is its base row's time rounded to the nearest whole millisecond, exactly.
+- **OA-SIM-046** A lagged row's altitude and vertical rate are the truth's at t - L where it has them, else blank; its
+  geometric altitude is blank.
+- **OA-SIM-047** Rows left out are counted in total and by the label their aircraft would have carried; the counts add
+  up with the rows kept.
+- **OA-SIM-049** A lagged row whose time t - L the truth cannot answer is the truth at t stepped back along its
+  velocity by L (counted as extrapolated, by label and by reason, with its altitude and vertical rate blank), and is
+  left out only when the truth cannot answer at t or its velocity is not finite. Base columns of different lengths
+  (including `nac_p`) are refused.
+- **OA-SIM-048** Per-report noise is seeded, independent per row, and per axis of standard deviation
+  `hypot(noise_sigma_m, noise_bound_frac * row bound)`.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
