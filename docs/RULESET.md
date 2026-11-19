@@ -99,16 +99,26 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 - **B4 [MUST NOT]** The core never imports or knows about the network, the renderer or a clock.
   **Time is an input.** Every core step receives the current time as a value.
 - **B5 [MUST]** Data crosses the core/shell boundary as plain values. No callbacks from the core
-  into the shell. The gate lists every core `pub fn` (`pub(crate)` included) whose signature names
-  `Fn`, `FnMut`, `FnOnce` or `dyn`, takes `impl Trait` as a parameter or has a bound (`<T: Bound>`
-  or `where`), because each is a way for the shell to hand behaviour to the core, and fails on any
-  that is not in the reviewed allowlist `tools/oa-trace/core-callbacks-allowlist.txt` (entries
-  `crate file.rs::fn reason`; an entry that matches no signature fails too). A listed entry states
-  why the caller cannot inject platform behaviour, or is marked OPEN where the type system does not
-  stop it and the callers were only read. Also listed: a `pub fn` inside an `impl` whose generics or
-  `where` clause carry a bound, a bare `fn(..)` pointer type in a signature, and a `pub struct`,
-  `enum`, `union` or `type` that holds an `Fn*`, `dyn` or `fn(..)` type. Private functions are not
-  boundaries and are not listed.
+  into the shell, and no trait the shell can implement (amended 2026-11-19, after a review found
+  the first scan read only `pub fn`s). The gate fails, unless the item is on the reviewed allowlist
+  `tools/oa-trace/core-callbacks-allowlist.txt` (entries `crate file.rs::name reason`; an entry that
+  matches nothing fails too), on each of:
+  - a core `pub fn` (`pub(crate)` included) whose signature names `Fn`, `FnMut`, `FnOnce` or `dyn`,
+    takes `impl Trait` as a parameter or has a bound (`<T: Bound>` or `where`), also when the bound
+    sits on the `impl` block around it; a bare `fn(..)` pointer type in a signature; and a `pub struct`,
+    `enum`, `union` or `type` that holds an `Fn*`, `dyn` or `fn(..)` type;
+  - every `pub trait` that is not sealed: a supertrait from a private module (`mod sealed { pub trait
+    Sealed {} }`, `pub trait T: sealed::Sealed`), or listed. A `pub use` of the sealing trait and a
+    blanket `impl<X> sealed::Sealed for X` un-seal it and fail;
+  - every generic of every item, `pub` or not (struct, enum, union, `fn`, `impl`, trait method, `type`,
+    `where` clauses, `impl Trait` arguments): its bounds are `Copy`, `Clone`, `Debug`, `PartialEq`,
+    `Eq`, `PartialOrd`, `Ord`, `Default`, `Sized`, or a sealed trait of a core crate, and nothing else;
+    an unbounded type parameter stored in a field of a `pub` struct, enum or union fails too;
+  - `Fn`, `FnMut`, `FnOnce`, `dyn` and `fn(..)` anywhere in core code: any signature, private ones,
+    trait method declarations, trait-impl methods, type aliases, fields, `static`s and `let`s.
+  A listed entry states why the caller cannot inject platform behaviour, or is marked OPEN where the
+  type system does not stop it and the callers were only read. An entry is by the name of the item
+  that holds the token (`impl@Type` for an `impl` block).
 - **B6 [MUST]** Because of B2–B5, any run can be replayed bit for bit from its recorded inputs. A
   change that breaks replay determinism is a defect.
 - **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
@@ -159,10 +169,11 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   - defines no `macro_rules!` macro and uses no raw identifier (`r#name`), so every name the
     scan reads is the name the compiler resolves;
   - has no target-dependent code: no `cfg!(target_…)`, no `#[cfg(target_…)]` and no
-    `cfg_attr` on a target, no raw pointer type, and no `{:p}` formatting, so core behaves the
+    `cfg_attr` on a target (the one exception is the 64-bit guard of B10), no raw pointer type, and no `{:p}` formatting, so core behaves the
     same on every machine (B6);
-  - keeps no address or platform fact (amended 2026-11-19): no `as_ptr`, `as_mut_ptr`, `.addr(`,
-    `expose_provenance`, `ptr::eq`, `ptr_eq`, no `usize`/`isize` `MAX`, `MIN` or `BITS`, no cast to a
+  - keeps no address or platform fact (amended 2026-11-19): no `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
+    `as_mut_ptr_range`, `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `addr_of`, `addr_of_mut`, `.addr(`,
+    `expose_provenance`, `with_exposed_provenance`, `ptr::eq`, `ptr_eq`, no `usize`/`isize` `MAX`, `MIN` or `BITS`, no cast to a
     fn pointer, and `size_of`/`align_of` only inside a `const _: () = assert!(..)` size guard (a
     report that prints a size states the number as a constant and asserts it beside it); no
     `concat!`, `stringify!` or `format_args!`, which could build a `{:p}` format string the scan
@@ -175,22 +186,46 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     a float method; a `Name::<float method>` path is allowed only when the qualifier is `oa_math`,
     `oa_ieee`, a core workspace crate, `self`/`super`/`crate`, a module the crate declares or (for
     `rem_euclid` and `div_euclid`) an integer type, and fails on any other qualifier;
-  - takes the bits of a float (`to_bits`, `f64::to_bits(x)`, `to_le_bytes`, `to_be_bytes` and
-    `to_ne_bytes` on a float) only from `oa_math::canon_nan(x)` or `canon_nan_f32(x)` (`oa-math`
-    itself excepted), and those names are `oa_math`'s: imported from it or called through it, never
-    defined, shadowed or imported from anywhere else. IEEE-754 fixes that an invalid operation gives a NaN, not which one, and its sign
+  - takes the bits of a float (`to_bits`, `f64::to_bits(x)`, `<f64>::to_bits(x)`, the path as a value
+    (`.map(f64::to_bits)`), `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` on a float) only from
+    `oa_math::canon_nan(x)` or `canon_nan_f32(x)` (`oa-math` itself excepted), and those names are
+    `oa_math`'s: imported from it or called through it, never defined, shadowed or imported from
+    anywhere else. IEEE-754 fixes that an invalid operation gives a NaN, not which one, and its sign
     and payload differ between a compile-time fold, x86-64 and aarch64, so a float that feeds a
-    hash, a digest or a written output is made canonical first (B6).
+    hash, a digest or a written output is made canonical first (B6). What is a float is read from
+    evidence (see the limits below): a literal, an `as f64` cast, a name declared or bound to one in
+    the same `fn` (parameters, typed and untyped `let`s, tuple patterns, `fold` accumulators), a struct
+    field, tuple-struct field, `fn` return type or constant that any core crate declares as a float;
+  - takes the sign, order and extremes of floats only from `oa_math` (`oa-math` itself excepted): no
+    `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` (their results depend on the sign
+    and payload of a NaN, which differ between machines) and no float `signum`, `min`, `max` or `clamp`
+    (the standard library leaves open which zero `min(-0.0, 0.0)` returns, so the same inputs can give
+    different bits). `oa_math` has `cmp_canon_f64`/`_f32` (total order after `canon_nan`),
+    `is_sign_negative_canon_f64`/`_f32`, `copysign_canon_f64`/`_f32` and `min_f64`/`max_f64`/`clamp_f64`
+    (and `f32`) with defined results: a NaN argument is ignored, `-0.0` is the smaller zero;
 
   Known lexical limits (the checker reads tokens; it resolves no names and infers no types):
   - `{:?}` or `{}` of a fn item or fn pointer, and `f as usize` of a fn item, print or cast an
     address and look like other uses; the fn-pointer cast ban, the `{:p}` ban and the module list
     narrow the ways to reach them, review catches the rest;
-  - `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` on a float are recognised only by a float literal,
-    an `as f32`/`as f64` cast, the `f32::`/`f64::` path form, or a receiver name that the same `fn`
-    declares `f32`/`f64` (parameters and typed `let`s, closure parameters included), indexed or not,
-    or a struct field the crate declares so; a float that reaches the call through an inferred type
-    (a `for` loop over a float slice, a function's return value) is not seen;
+  - a float is recognised by evidence, never proved. The rules about `to_*_bytes`, `signum`, `min`,
+    `max` and `clamp` see a float receiver (or, for `min`, `max`, `clamp`, a float argument) only when
+    it is a float literal, an `as f32`/`as f64` cast, an `f32::`/`f64::`/`<f64>::` path, a name that
+    the same `fn` declares or binds as a float (a typed parameter or `let`, a tuple pattern or tuple type,
+    an untyped `let` whose initializer mentions a float, a `fold` accumulator started from a float), a
+    field, tuple-struct field, `fn` return type or constant that some core crate declares as a float,
+    indexed or not, or the result of a float method. A float that reaches the call any other way is not
+    seen: a `for` loop variable, a closure parameter (`.map(|v| v.to_le_bytes())`), a `match` or
+    `if let` binding, a struct pattern, a generic `T` that is a float, the result of a method of the same
+    name as an integer one (`abs`, `max`) on an unknown receiver, a function whose name some other
+    function shares with a non-float return type, and a field of the same name that is a float in
+    one struct and an integer in another (the float one wins, a false alarm, never a miss). Bindings
+    are ordered by the source, so a later `let` of the same name replaces an earlier one; blocks are
+    not modelled;
+  - the sealing of a `pub trait` is judged by name: a supertrait is a seal if its path runs through
+    a module that the crate declares non-public, and a bound by a sealed trait is accepted for any
+    trait of that name in any core crate; a `pub trait Sealed` that happens to share a name with a seal
+    is exempt as one;
   - a shell `impl` that a macro generates through a `$` fragment is not seen, and a shell `impl` of a
     trait or type that another core crate defines is not seen (an `impl` of this crate's own core
     types and traits is);
@@ -217,7 +252,11 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   the Kani installer) and, for Miri, `nightly-2026-08-21` with `miri` and `rust-src`. Every `cargo`
   or `rustc` step in a workflow names its toolchain with `+toolchain`, so the root file does not
   choose for it; `fuzz/` pins the fuzz nightly and `validation/oa-creusot-check/` the Creusot
-  nightly (`nightly-2026-08-03`, Creusot v0.14.0's own pin) in their own files. A split
+  nightly (`nightly-2026-08-03`, Creusot v0.14.0's own pin) in their own files. The width of `usize` is fixed
+  by construction (amended 2026-11-19): the `src/lib.rs` of every core crate, `oa-ieee` included, has
+  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..)`, so no core crate builds for
+  a target whose `usize` is not 64 bits, and the gate reads it (the string too: a guard for another width,
+  or one inside a module or test code, fails). That is the one target cfg core code may have. A split
   crate cannot be `no_std` as a whole, so its core module relies on the B8 scan; core code that
   grows large is moved into its own core crate.
 - **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every

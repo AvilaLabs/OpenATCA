@@ -213,6 +213,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   an invalid operation makes at run time (`0.0 / 0.0`, `inf - inf`, `inf * 0.0`, `oa_ieee::sqrt(-1.0)`, tried
   under `black_box` so the compiler cannot fold them), negative and payload NaNs, and every other value
   (signed zeros, subnormals, infinities) unchanged bit for bit.
+- **OA-MATH-035** `cmp_canon_f64`/`_f32` order two floats by the IEEE-754 total order after both went through
+  `canon_nan` (`-inf < negatives < -0.0 < +0.0 < positives < +inf < NaN`, every NaN equal to every other, a
+  negative or payload NaN included); `is_sign_negative_canon_f64`/`_f32` read the sign bit after `canon_nan`
+  (true for `-0.0`, false for every NaN); `copysign_canon_f64`/`_f32` give the magnitude of the first
+  argument with the sign of the second after `canon_nan` (a NaN magnitude gives the canonical NaN). Core
+  code calls these in place of `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign`, whose
+  results depend on the sign and payload of a NaN (see OA-TRC-247).
+- **OA-MATH-036** `min_f64`/`max_f64`/`clamp_f64` and the `f32` forms ignore a NaN argument (the other is
+  returned; two NaNs, or a NaN `x` in `clamp`, give the canonical NaN), return `-0.0` from `min` and `0.0`
+  from `max` for the two zeros in either argument order, and never panic (`clamp` with `lo > hi` gives `hi`).
+  Tested for every combination of sign, zero, infinity and NaN. Core code calls these in place of the
+  float `min`, `max` and `clamp` (see OA-TRC-251).
 
 ### NASR (oa-nasr)
 
@@ -490,6 +502,44 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-243** `&raw const`/`&raw mut`, the identifier `Pointer`, `type X = usize;` and `isize`, `<usize>::MAX`
   and a `cfg`, `cfg!` or `cfg_attr` naming `debug_assertions` fail in core code; `debug_assert!`, `alloc::format`
   and `format!` pass; `core::hash`, `core::cell` and `alloc::rc` still fail.
+- **OA-TRC-244** Every `pub trait` (unrestricted `pub`, `unsafe` included) in core code is sealed, meaning one of
+  its supertraits is reached through a module the crate declares non-public (`mod sealed { pub trait Sealed {} }`
+  and `pub trait T: sealed::Sealed`, or `Sealed` imported through that module), or is listed in
+  `tools/oa-trace/core-callbacks-allowlist.txt` as `crate file.rs::TraitName reason`. A `pub use` of the sealing
+  trait and a blanket `impl<X> sealed::Sealed for X` un-seal it and fail. The sealing trait itself, `pub(crate)`
+  and private traits and test-only ones are not listed.
+- **OA-TRC-245** Every generic of core code, on any item (`fn`, struct, enum, union, `type`, `impl` block, trait
+  method), `pub` or not, in the angle brackets, a `where` clause or as an `impl Trait` argument, is bounded only by
+  `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Default`, `Sized` (`?Sized`, lifetimes and
+  const generics aside) or by a sealed trait of a core crate; any other bound fails unless the allowlist names
+  the item (`impl@Type` for an `impl` block). A type parameter with no bound at all that is stored in a field of
+  a `pub` struct, enum or union fails unless listed.
+- **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer type anywhere in non-test core code, in any
+  signature (`pub` or private), trait method, trait-impl method, type alias, field, `static`, `const` or `let`, fail
+  unless the allowlist names the item that holds it.
+- **OA-TRC-247** `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign` are banned in core code (`oa-math`
+  excepted), method or path, and so is `signum` on a float (an integer's `signum` is not seen); the failure names
+  `oa_math::cmp_canon_f64`/`_f32`, `is_sign_negative_canon_f64`/`_f32` and `copysign_canon_f64`/`_f32`, which
+  take the sign and order after `canon_nan`. Every use in the real core crates is migrated.
+- **OA-TRC-248** `to_bits` and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float are found also as a path used
+  as a value (`.map(f64::to_bits)`), as `<f64>::to_bits(..)` and `<f32>::..`, on a tuple-struct float field
+  (`struct P(f64)`, `self.0`), on a name bound by a tuple pattern with float types (`let (a, b): (f64, f64)`) or
+  a tuple type, on a name bound by an untyped `let` whose initializer mentions a float literal, a float-typed
+  name, a float field, a float method or function or an `as f64` cast (an integer cast at the end of the
+  initializer, or a later `let` of the same name, makes it not a float), and on a field, tuple field, function
+  return type or constant that any other core crate declares as a float. Whatever is left is stated in the
+  RULESET's known lexical limits.
+- **OA-TRC-249** `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
+  `as_mut_ptr_range`, `addr_of`, `addr_of_mut`, `.addr(`, `expose_provenance` and `with_exposed_provenance` fail
+  in core code.
+- **OA-TRC-250** The `src/lib.rs` of every crate of class core (`oa-ieee` included) has, at the top level and outside
+  test code, `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, so the crate does not
+  build for a target whose `usize` is not 64 bits. That is the one target cfg core code may have; any other
+  still fails. The check reads the string, so `"32"`, a missing `compile_error!` or a guard inside a module fails.
+- **OA-TRC-251** A float `min`, `max` or `clamp` (a float receiver or float argument by the evidence of
+  OA-TRC-248, or the path `f64::max`, `<f32>::min` and so on, also as a value in `fold(.., f64::max)`) fails in
+  core code (`oa-math` excepted), with `oa_math::min_f64`/`max_f64`/`clamp_f64` (and the `f32` forms) named, whose
+  results for the zeros and the NaN are defined (OA-MATH-036). Integer and iterator `min`/`max`/`clamp` pass.
 
 ### Hashing (oa-sha256)
 
@@ -2538,6 +2588,10 @@ decoder is OA-GRIB-021.
   obstacle columns of different lengths, a terrain grid without a valid lattice or shorter than its
   dimensions, and work over `MAX_CLEARANCE_WORK` (rows, edge rows, cells, pair tests, counted before
   they are built); a NaN percentile is NaN.
+- **OA-MVA-085** The overlaps of a chart come out in one fixed order: largest first, then by sector name, then
+  (two pairs that tie on both) by the sector pair as the model orders the sectors, and the pairs are collected in
+  an ordered map, never a hash map, so the report is the same on every run and whatever order the pairs were
+  found in. Tested with two pairs that tie on cells and names, collected in every order.
 
 ## M2 — Weather inputs
 

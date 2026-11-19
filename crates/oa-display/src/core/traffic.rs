@@ -623,7 +623,8 @@ fn true_radius16(
     let d = oa_math::hypot(f64::from(p.0 - here.0), f64::from(p.1 - here.1));
     let max = f64::from(1 << 28);
     let r = oa_ieee::round(d);
-    d.is_finite().then_some((r.min(max) as i32, r > max))
+    d.is_finite()
+        .then_some((oa_math::min_f64(r, max) as i32, r > max))
 }
 
 fn to_e7(deg: f64) -> Option<i32> {

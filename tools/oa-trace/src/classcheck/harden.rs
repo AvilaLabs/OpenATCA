@@ -3,6 +3,7 @@
 //! core, the unsafe and address bans, the callback allowlist and the unsplit float budget.
 //! Same lexer as [`super`]; same rule: anything unreadable is a failure.
 
+use super::floats::Evidence;
 use super::{
     call_at, hit, is_path_start, is_word, mask, s, skip_group, skip_modifiers, skip_turbofish,
     strip_test_items, tokenize, Ctx, FileScan, Hit, Tok, FLOAT_METHODS,
@@ -28,6 +29,14 @@ const BANNED_IDENTS: &[(&str, &str)] = &[
     ("expose_provenance", "B8: core code takes no address"),
     ("expose_addr", "B8: core code takes no address"),
     ("with_exposed_provenance", "B8: core code takes no address"),
+    ("into_raw", "B8: core code takes no address"),
+    ("into_raw_parts", "B8: core code takes no address"),
+    ("from_raw", "B8: core code takes no address"),
+    ("leak", "B8: core code takes no address, a leaked allocation has one"),
+    ("as_ptr_range", "B8: core code takes no address"),
+    ("as_mut_ptr_range", "B8: core code takes no address"),
+    ("addr_of", "B8: core code takes no address"),
+    ("addr_of_mut", "B8: core code takes no address"),
     ("ptr_eq", "B8: core code compares no addresses"),
     ("addr_eq", "B8: core code compares no addresses"),
     ("non_camel_case_types", "B8: core code does not silence the type-name lint, a lowercase type alias could hide a float method"),
@@ -64,7 +73,7 @@ fn guard_mask(toks: &[Tok]) -> Vec<bool> {
 }
 
 /// Index of the `(` that matches the `)` at `toks[close]`.
-fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
+pub(super) fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
     let mut depth = 0usize;
     for j in (0..=close).rev() {
         match s(toks, j) {
@@ -118,7 +127,7 @@ fn use_statements(toks: &[Tok]) -> Vec<(usize, usize)> {
 pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
     let math = ctx.math;
     let guard = guard_mask(toks);
-    let fn_names = fn_float_names(toks);
+    let ev = Evidence::new(toks, ctx.floats);
     let is_math_root =
         |w: &str| w == "oa_math" || ctx.aliases.get(w).is_some_and(|t| t == "oa-math");
     // `canon_nan` names must be oa_math's: imported from it, or called through it
@@ -257,136 +266,98 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
                 "as fn",
                 "B8: no cast to a fn pointer, its Debug and Pointer text is an address",
             ));
-        } else if w == "to_bits"
-            && !math
-            && (prev == "." || (prev == "::" && matches!(qual, "f32" | "f64")))
-            && call_at(toks, i + 1)
-        {
+        }
+        if !math {
+            float_rules(toks, i, &ev, hits);
+        }
+    }
+}
+
+/// The `Name::` qualifier of the method or path at `toks[i]` is a float type: `f64::x`, `<f32>::x`.
+fn float_path(toks: &[Tok], i: usize) -> bool {
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    let qual = s(toks, i.wrapping_sub(2));
+    prev == "::"
+        && (matches!(qual, "f32" | "f64")
+            || (qual == ">"
+                && matches!(s(toks, i.wrapping_sub(3)), "f32" | "f64")
+                && s(toks, i.wrapping_sub(4)) == "<"))
+}
+
+/// The rules of RULESET B8 about float bits, sign and order, for the token at `toks[i]`: what
+/// feeds a hash or a written output is `canon_nan(x).to_bits()`, and the functions whose result
+/// depends on the sign or payload of a NaN, or on the sign of a zero, are `oa_math`'s.
+fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
+    let w = s(toks, i);
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    let line = toks.get(i).map_or(0, |t| t.line);
+    let path = float_path(toks, i);
+    let method = prev == "." && call_at(toks, i + 1);
+    match w {
+        "to_bits" if method || path => {
             // the receiver (or the UFCS argument) must be `canon_nan(..)`: a NaN's sign and
-            // payload are not portable
-            let open = skip_turbofish(toks, i + 1);
+            // payload are not portable; a path used as a value (`.map(f64::to_bits)`) is not
             let canon = if prev == "." {
                 i >= 2
                     && s(toks, i - 2) == ")"
                     && open_of(toks, i - 2)
                         .is_some_and(|o| o >= 1 && CANON.contains(&s(toks, o - 1)))
-            } else {
+            } else if call_at(toks, i + 1) {
+                let open = skip_turbofish(toks, i + 1);
                 canon_call_end(toks, open + 1) == Some(skip_group(toks, open) - 1)
+            } else {
+                false
             };
             if !canon {
                 hits.push(hit(
-                    t.line,
+                    line,
                     "to_bits",
                     "B8: a float's bits in core code come from `oa_math::canon_nan(x).to_bits()`, a NaN's sign and payload differ between machines",
                 ));
             }
-        } else if BYTES.contains(&w) && !math && call_at(toks, i + 1) {
-            let float_recv = if prev == "::" {
-                matches!(qual, "f32" | "f64")
-            } else if prev == "." && i >= 2 {
-                let r = s(toks, i - 2);
-                // `name`, `name[..]` and `x.name` are judged by the name's declaration
-                let name_at = if r == "]" {
-                    open_of(toks, i - 2).and_then(|o| o.checked_sub(1))
-                } else {
-                    Some(i - 2)
-                };
-                (r.starts_with(|c: char| c.is_ascii_digit())
-                    && (r.ends_with("f64") || r.ends_with("f32")))
-                    || (r == ")"
-                        && matches!(s(toks, i.wrapping_sub(3)), "f32" | "f64")
-                        && s(toks, i.wrapping_sub(4)) == "as")
-                    || name_at.is_some_and(|n| {
-                        let name = s(toks, n);
-                        is_word(name)
-                            && if n >= 1 && s(toks, n - 1) == "." {
-                                ctx.float_names.contains(name)
-                            } else {
-                                fn_names.iter().any(|(from, to, names)| {
-                                    *from < n && n < *to && names.contains(name)
-                                })
-                            }
-                    })
-            } else {
-                false
+        }
+        _ if BYTES.contains(&w) && (path || (method && i >= 2 && ev.recv_is_float(i - 2))) => {
+            hits.push(hit(
+                line,
+                w,
+                "B8: a float's bytes in core code come from `oa_math::canon_nan(x).to_bits()`, then the integer's bytes",
+            ));
+        }
+        "total_cmp" | "is_sign_negative" | "is_sign_positive" | "copysign" => {
+            let instead = match w {
+                "total_cmp" => "oa_math::cmp_canon_f64 or cmp_canon_f32",
+                "copysign" => "oa_math::copysign_canon_f64 or copysign_canon_f32",
+                _ => "oa_math::is_sign_negative_canon_f64 or is_sign_negative_canon_f32 (is_sign_positive is its negation)",
             };
-            if float_recv {
+            hits.push(hit(
+                line,
+                w,
+                &format!("B8: `{w}` reads the sign and payload of a NaN, which differ between machines; use {instead}"),
+            ));
+        }
+        "signum" | "min" | "max" | "clamp" => {
+            let float = path
+                || (method && {
+                    let open = skip_turbofish(toks, i + 1);
+                    let close = skip_group(toks, open);
+                    (i >= 2 && ev.recv_is_float(i - 2)) || ev.mentions(open + 1, close - 1)
+                });
+            if float {
+                let instead = match w {
+                    "signum" => "compare with 0.0 and write the sign out, or use oa_math::copysign_canon_f64(1.0, x)",
+                    "min" => "oa_math::min_f64 or min_f32",
+                    "max" => "oa_math::max_f64 or max_f32",
+                    _ => "oa_math::clamp_f64 or clamp_f32",
+                };
                 hits.push(hit(
-                    t.line,
+                    line,
                     w,
-                    "B8: a float's bytes in core code come from `oa_math::canon_nan(x).to_bits()`, then the integer's bytes",
+                    &format!("B8: a float `{w}` does not say which zero it returns for -0.0 and 0.0 or which NaN it keeps; use {instead}"),
                 ));
             }
         }
+        _ => {}
     }
-}
-
-/// Whether `toks[i]` is the `:` of a declaration `name: f64` (`&f32`, `[f64; N]`, `Vec<f64>`).
-fn declares_float(toks: &[Tok], i: usize) -> bool {
-    if s(toks, i) != ":" || i == 0 || !is_word(s(toks, i - 1)) {
-        return false;
-    }
-    let mut j = i + 1;
-    while matches!(s(toks, j), "&" | "mut" | "[" | "Vec" | "<" | "Option") {
-        j += 1;
-    }
-    matches!(s(toks, j), "f32" | "f64")
-}
-
-/// Names of the fields a file's structs declare with a float type.
-pub(super) fn float_fields(src: &str) -> BTreeSet<String> {
-    let toks = strip_test_items(tokenize(&mask(src))).toks;
-    let mut out = BTreeSet::new();
-    for (i, t) in toks.iter().enumerate() {
-        if t.s != "struct" {
-            continue;
-        }
-        let Some(open) = (i..toks.len()).find(|&k| matches!(s(&toks, k), "{" | ";" | "(")) else {
-            continue;
-        };
-        if s(&toks, open) != "{" {
-            continue;
-        }
-        for k in open..skip_group(&toks, open) {
-            if declares_float(&toks, k) {
-                out.insert(s(&toks, k - 1).to_string());
-            }
-        }
-    }
-    out
-}
-
-/// Per `fn` of the file: the token span of the item and the names it declares with a float type
-/// (parameters, typed `let`s, closure parameters).
-fn fn_float_names(toks: &[Tok]) -> Vec<(usize, usize, BTreeSet<String>)> {
-    let mut out = Vec::new();
-    for (i, t) in toks.iter().enumerate() {
-        if t.s != "fn" || !is_word(s(toks, i + 1)) {
-            continue;
-        }
-        let mut depth = 0usize;
-        let mut k = i + 2;
-        while k < toks.len() {
-            match s(toks, k) {
-                "(" | "[" => depth += 1,
-                ")" | "]" => depth = depth.saturating_sub(1),
-                "{" | ";" if depth == 0 => break,
-                _ => {}
-            }
-            k += 1;
-        }
-        let end = if s(toks, k) == "{" {
-            skip_group(toks, k)
-        } else {
-            k
-        };
-        let names = (i..end)
-            .filter(|&m| declares_float(toks, m))
-            .map(|m| s(toks, m - 1).to_string())
-            .collect();
-        out.push((i, end, names));
-    }
-    out
 }
 
 /// Item names a file defines with `struct`, `enum`, `union`, `trait` or `type` (the type and
@@ -453,7 +424,7 @@ fn taint(toks: &[Tok], core: &BTreeSet<String>) -> BTreeSet<String> {
 
 /// The last path segment that leads `toks` (`&mut a::b::T<X>` gives `T`) and whether the path
 /// runs through `crate::core`, `super::core` or `self::core`.
-fn head_of(toks: &[Tok]) -> (String, bool) {
+pub(super) fn head_of(toks: &[Tok]) -> (String, bool) {
     let mut j = 0;
     while matches!(
         s(toks, j),

@@ -97,6 +97,11 @@
 //! without it (an `examples/speed.rs` run prints the table); the price of the determinism and
 //! the extra accuracy.
 
+// The width of `usize` is fixed by construction: this crate does not build for a target whose
+// pointers are not 64 bits (RULESET B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
+
 mod atan;
 mod consts;
 mod dd;
@@ -104,6 +109,7 @@ mod exp;
 mod fast;
 mod log;
 mod nan;
+mod order;
 mod pow;
 mod rem;
 mod root;
@@ -119,6 +125,10 @@ pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;
 pub use log::ln;
 pub use nan::{canon_nan, canon_nan_f32};
+pub use order::{
+    clamp_f32, clamp_f64, cmp_canon_f32, cmp_canon_f64, copysign_canon_f32, copysign_canon_f64,
+    is_sign_negative_canon_f32, is_sign_negative_canon_f64, max_f32, max_f64, min_f32, min_f64,
+};
 pub use pow::{pow, powi};
 pub use rem::rem_euclid;
 pub use root::{cbrt, hypot};
