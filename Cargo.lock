@@ -106,6 +106,7 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-safety",
  "oa-sha256",
 ]
 
@@ -230,6 +231,10 @@ version = "0.0.1"
 dependencies = [
  "oa-track",
 ]
+
+[[package]]
+name = "oa-safety"
+version = "0.0.1"
 
 [[package]]
 name = "oa-scope-replay"

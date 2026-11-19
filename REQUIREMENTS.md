@@ -5160,3 +5160,79 @@ value is a difference only when strictly greater than it.
   sealed check.
 - **OA-SHD-029** Every nonzero load count is printed in the summary header; a beacon table that overflowed
   (`DROP_SFDPS_BEACON_FULL`) fails the run.
+
+
+## M5 — Safety nets: state and inhibitions (oa-safety, oa-display)
+
+Build order step 1 of docs/M5_DESIGN.md (rules 1 and 2). `oa-safety` is a core crate with no
+allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes feet.
+
+### Net state (oa-safety)
+
+- **OA-SAF-001** A net that has never reported reads as `Unavailable(NeverReported)`, one whose last
+  report is older than the staleness limit (age strictly over it) as `Unavailable(StateStale)` with
+  its age, and one whose report is dated after the query as `Unavailable(TimeInconsistent)`: a net
+  that stops reporting is never shown as running. Extreme times do not panic.
+- **OA-SAF-002** The staleness limit comes from configuration with no default (zero or negative is
+  refused), and a report dated before the net's previous one is refused, counted, and does not
+  replace it.
+- **OA-SAF-003** Each net's state (running, degraded with reason, area and count, unavailable with
+  reason) is reported with the age of the state, for every net, in a fixed order.
+- **OA-SAF-004** A running net with at least one inhibition in force reads as inhibited, derived
+  from the inhibition table (a net cannot report it), and a degraded or unavailable net keeps its
+  state and shows the inhibitions in force as well.
+
+### Inhibitions (oa-safety)
+
+- **OA-SAF-005** An inhibition request is refused, counted and changes nothing when: the
+  configuration has no positive maximum duration for the net (there is no default), the end is not
+  after the start, the end is already past, the duration is over the maximum by one nanosecond (or
+  overflows), the polygon is not valid, the altitude band is reversed, or the reason or author is
+  empty, longer than its field or not printable ASCII. A duration exactly the maximum is accepted.
+- **OA-SAF-006** A full table refuses the request and counts it; no inhibition is evicted, and an
+  id is never reused.
+- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end` (the start instant in, the
+  end instant out; never for an empty or reversed span). Proved with Kani over every `i64` triple.
+- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Proved with
+  Kani over every `i32` triple.
+- **OA-SAF-009** The query names the inhibitions that hide an alert at a position, altitude and
+  time: on the net, in force, the point strictly inside the area (a point on an edge or vertex is
+  not hidden), the altitude in the band. An unknown altitude is hidden by none. The pure query
+  logs nothing.
+- **OA-SAF-010** Every suppression is recorded (net, inhibition id, time, position) in a bounded
+  log; an entry that does not fit is counted as overflow, the suppression still applies, and no
+  entry is evicted.
+- **OA-SAF-011** Removing an inhibition before its end is an explicit action that names who did it,
+  is refused for an unknown id or an invalid name, and is logged with the time and the name.
+- **OA-SAF-012** An inhibition whose end has passed is reported once as an expiry event (review) and
+  leaves the table; it no longer suppresses; creation is logged with the author.
+- **OA-SAF-013** If the event log is full an expired inhibition stays in the table (counted, not in
+  force) until the log is drained, then is reported once: no expiry is lost.
+- **OA-SAF-014** A polygon of 3 to 32 vertices is accepted only if no vertex is at a pole or off the
+  globe, no consecutive vertices repeat, no edge spans 180 degrees of longitude, no edge folds back
+  over its neighbour, no two edges cross or touch and its area is not zero; point-in-polygon is
+  integer arithmetic in 128 bits, correct for a concave polygon and at the extremes of the range.
+
+### Display indications (oa-display)
+
+- **OA-DSP-060** When every net is running with a fresh state, no inhibition is in force, every
+  feed is live and the newest track update is within the limit, the safety build draws nothing at
+  all, so a traffic frame (and each ZAU map frame, sha256 e34d3091...a062, 306bc3de...a0c3 and
+  06dca517...ac84) is byte for byte what it was.
+- **OA-DSP-061** Every net that is not plainly running is one banner line in the alert colour above
+  the other layers, under the legend strip, giving the name, state, reason, area, count and age of
+  the state (and the inhibitions in force); numbers are capped so no line is cut; the banner is a
+  function of the state alone, so it cannot be dismissed and ends with the condition.
+- **OA-DSP-062** An inhibition in force is drawn as a closed outline in the alert colour with a label
+  giving the net, the end time in UTC, the author and the reason cut to 16 characters; one not yet
+  started or already ended is not drawn; the net's banner line reads inhibited with the count.
+- **OA-DSP-063** The banner says `PICTURE FROZEN` with the age when the newest track update is at
+  least the configured limit old, nothing one nanosecond before it, and says so when there has been
+  no update; a limit that is not positive is refused.
+- **OA-DSP-064** A feed that is slow or lost is one banner line with its name and age, a live feed
+  none, and more feeds than the display lists is refused, not cut (design ND-04).
+- **OA-DSP-065** The worst state (64 inhibitions of 32 vertices, every net degraded with extreme
+  numbers, eight lost feeds, a frozen picture) fits `safety_caps` and `MAX_SAFETY_WORK`, loses no
+  text and rasterizes.
+- **OA-DSP-066** The UTC date and time of an instant are integer civil time from the epoch,
+  correct across leap days, the year 2000 and negative times, and total over every `i64`.

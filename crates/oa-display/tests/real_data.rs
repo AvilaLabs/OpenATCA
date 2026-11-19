@@ -15,9 +15,12 @@ use oa_display::probe::list_capacities;
 use oa_display::raster::{
     frame_digest, frame_len, rasterize, render_work_charge, FrameSpec, MAX_RENDER_WORK,
 };
+use oa_display::safety::{build_safety, FeedState, FeedStatus, SafetyScene};
 use oa_display::scene::{
     build_scene, scene_caps, scene_index, scene_work_charge, scratch_for, view_new, MAX_SCENE_WORK,
 };
+use oa_safety::inhibit::inhibits_new;
+use oa_safety::net::{state_report, state_table_new, NetReport, NETS};
 use oa_sha256::to_hex;
 use std::time::Instant;
 
@@ -107,6 +110,36 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         }
         rasterize(&list, &spec, &mut buf).unwrap();
         let first = frame_digest(&spec, &buf).unwrap();
+
+        // The safety indications with every net running, no inhibition, every feed live and a
+        // fresh picture add nothing: the frame is the same bytes.
+        {
+            let now = 1_000_000_000_000i64;
+            let mut states = state_table_new(10_000_000_000).unwrap();
+            for n in NETS {
+                state_report(&mut states, n, NetReport::Running, now).unwrap();
+            }
+            let inhibits = Box::new(inhibits_new());
+            let feeds = [FeedStatus {
+                name: *b"ADSB\0\0\0\0",
+                state: FeedState::Live,
+            }];
+            let sc = SafetyScene {
+                states: &states,
+                inhibits: &inhibits,
+                now_ns: now,
+                feeds: &feeds,
+                newest_track_ns: Some(now - 1_000_000_000),
+                frozen_limit_ns: 5_000_000_000,
+            };
+            let proj =
+                oa_display::project::projection_new(lat, lon, range, 1920, 1080, 104).unwrap();
+            let st = build_safety(&mut list, &proj, &sc).unwrap();
+            assert_eq!(st.banner_lines, 0);
+            let mut again = vec![0u8; frame_len(&spec)];
+            rasterize(&list, &spec, &mut again).unwrap();
+            assert_eq!(frame_digest(&spec, &again).unwrap(), first);
+        }
 
         let (mut build_ms, mut raster_ms) = (Vec::new(), Vec::new());
         for _ in 0..30 {

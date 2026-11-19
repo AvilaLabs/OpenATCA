@@ -38,6 +38,7 @@ members = [
     "crates/oa-nam",
     "crates/oa-sensorsim",
     "crates/oa-track",
+    "crates/oa-safety",
     "tools/oa-build-info",
     "tools/oa-compass",
     "tools/oa-perf",
