@@ -148,7 +148,7 @@ impl SystemExport {
     /// Counts a row that was not converted.
     pub fn refuse(&mut self, r: Refusal) {
         if let Some(c) = self.refused.get_mut(r as usize) {
-            *c += 1;
+            *c = c.saturating_add(1);
         }
     }
 

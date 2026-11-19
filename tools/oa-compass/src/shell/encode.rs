@@ -10,10 +10,11 @@
 //!
 //! I080 is one octet when nothing is set; AFF adds the first extent (bit 4), and a coasting track
 //! adds three extents (the first, an empty second, and the third with CST, bit 8). The primary
-//! octet always has SIM, SPI, MON and MRH at their default 0 and CNF 0 (confirmed): the tracker
-//! only publishes confirmed tracks, and for ERAM no tentative state exists in the data. SRC is 0
-//! (no source) because I130 is never sent. MON and MRH default to 0 because the data does not
-//! say which sensors made a track, and the altitude of both systems is barometric.
+//! octet has SIM, SPI and MRH at their default 0 and CNF 0 (confirmed): the tracker only
+//! publishes confirmed tracks, and for ERAM no tentative state exists in the data. SRC is 0 (no
+//! source) because I130 is never sent. MON is 1 for OpenATCA, whose tracker is fed ADS-B only
+//! (one kind of sensor), and 0 for ERAM, which fuses radar and ADS-B. MRH is 0 (barometric more
+//! reliable) as a default: no geometric altitude is ever sent.
 
 use std::io::Write;
 
@@ -86,11 +87,15 @@ pub fn cat062_record(v: &RecordValues, source: SourceId) -> Cat062 {
         derived,
         track_number: Some(v.track_number),
         track_status: Some(TrackStatus062 {
+            monosensor: v.monosensor,
             ext: status_extents(v),
             ..TrackStatus062::default()
         }),
         measured_fl: v.measured_fl,
-        baro_altitude: v.baro_alt.map(|raw| BaroAltitude { qnh: false, raw }),
+        baro_altitude: v.baro_alt.map(|raw| BaroAltitude {
+            qnh: v.baro_qnh,
+            raw,
+        }),
         climb_rate: v.climb,
         raw,
         ..Cat062::default()
@@ -149,7 +154,7 @@ impl<W: Write> BlockSink<W> {
             self.stats.first_time = v.time;
         }
         self.stats.last_time = v.time;
-        self.stats.records += 1;
+        self.stats.records = self.stats.records.saturating_add(1);
         self.pending.push(cat062_record(v, self.source));
         self.src_e7.push(src_e7);
         if self.pending.len() >= RECORDS_PER_BLOCK {
@@ -183,7 +188,9 @@ impl<W: Write> BlockSink<W> {
                     raw_to_e7(p.lon, 25).unwrap_or(i32::MAX),
                 );
                 let dla = i64::from(la).abs_diff(i64::from(s.0));
+                // A longitude of +180 is written as -180: compare around the circle.
                 let dlo = i64::from(lo).abs_diff(i64::from(s.1));
+                let dlo = dlo.min(3_600_000_000 - dlo.min(3_600_000_000));
                 self.stats.max_lat_error_e7 = self
                     .stats
                     .max_lat_error_e7
@@ -197,8 +204,8 @@ impl<W: Write> BlockSink<W> {
         self.out
             .write_all(&bytes)
             .map_err(|e| ExportError::Io(format!("{}: write: {e}", self.system)))?;
-        self.stats.blocks += 1;
-        self.stats.bytes += bytes.len() as u64;
+        self.stats.blocks = self.stats.blocks.saturating_add(1);
+        self.stats.bytes = self.stats.bytes.saturating_add(bytes.len() as u64);
         // Reuse the allocations' capacity for the next block.
         self.pending = Vec::with_capacity(RECORDS_PER_BLOCK);
         self.src_e7 = Vec::with_capacity(RECORDS_PER_BLOCK);

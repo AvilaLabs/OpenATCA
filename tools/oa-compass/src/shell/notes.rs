@@ -8,8 +8,9 @@ use std::fmt::Write as _;
 use oa_asterix::SourceId;
 
 use super::export::{date_text, DayReport, SystemReport};
+use super::run::InputsMode;
 use crate::core::convert::{
-    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_RANGE, NOTE_CLIMB_ABSENT,
+    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_QNH, NOTE_ALT_RANGE, NOTE_CLIMB_ABSENT,
     NOTE_CLIMB_RANGE, NOTE_IDENT, NOTE_NAMES, NOTE_SERVICE, NOTE_VEL_ABSENT, NOTE_VEL_RANGE,
     REFUSAL_NAMES,
 };
@@ -86,12 +87,16 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
     );
     let _ = writeln!(
         out,
-        "  verification: every block decoded again with the oa-asterix decoder and equal to the records encoded; the file read back from disk ({} records, {} blocks) equals what was written; largest position difference between source row and decoded record {} / {} (1e-7 degree, latitude / longitude; limit 27)",
+        "  verification: every block was decoded again with this repository's oa-asterix decoder and equals the records encoded; the file was read back from disk ({} records, {} blocks) and equals what was written; largest position difference between source row and decoded record {} / {} (1e-7 degree, latitude / longitude; limit 27). This shows that our encoder and decoder agree with each other; it is not an outside conformance test (the encoder was written from, and reviewed item by item against, the Ed 1.21 text; the first outside decode is the COMPASS import)",
         d.read_back_records, d.read_back_blocks, d.sink.max_lat_error_e7, d.sink.max_lon_error_e7
     );
     let n = |i: usize| d.notes.get(i).copied().unwrap_or(0);
     let is_oa = report.name == "OpenATCA";
-    let alt_name = if is_oa { "I135 barometric altitude (no QNH)" } else { "I136 measured flight level" };
+    let alt_name = if is_oa {
+        "I135 barometric altitude (no QNH)"
+    } else {
+        "I136 measured flight level (ERAM at or above 18 000 ft)"
+    };
     let _ = writeln!(out, "  items present (rows with the item, of {rows}):");
     let mut item = |name: &str, present: u64| {
         let _ = writeln!(out, "    {name}: {present}");
@@ -105,10 +110,18 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
     item("I380 target identification", rows - n(NOTE_IDENT).min(rows));
     item("I040 track number", rows);
     item("I080 track status (first octet always; coasting adds CST)", rows);
-    item(alt_name, rows - (n(NOTE_ALT_ABSENT) + n(NOTE_ALT_RANGE)).min(rows));
+    let qnh = n(NOTE_ALT_QNH);
+    item(alt_name, rows - (n(NOTE_ALT_ABSENT) + n(NOTE_ALT_RANGE) + qnh).min(rows));
+    if !is_oa {
+        item("I135 altitude with QNH = 1 (ERAM under 18 000 ft, inferred)", qnh);
+    }
     item(
         "I220 rate of climb/descent",
-        if is_oa { rows - (n(NOTE_CLIMB_ABSENT) + n(NOTE_CLIMB_RANGE)).min(rows) } else { 0 },
+        if is_oa {
+            rows - (n(NOTE_CLIMB_ABSENT) + n(NOTE_CLIMB_RANGE)).min(rows)
+        } else {
+            0
+        },
     );
     item("I500 accuracies, APW only", rows - n(NOTE_ACCURACY_ABSENT).min(rows));
     let _ = writeln!(
@@ -143,7 +156,13 @@ fn run_lines(out: &mut String, report: &SystemReport) {
 }
 
 /// The README of the directory of `day`. `build` names the encoder build (commit).
-pub fn readme(day: i64, systems: &[&SystemReport], build: &str, split: bool) -> String {
+pub fn readme(
+    day: i64,
+    systems: &[&SystemReport],
+    build: &str,
+    split: bool,
+    mode: Option<InputsMode>,
+) -> String {
     let mut o = String::new();
     let date = date_text(day);
     let _ = writeln!(o, "OpenATCA and ERAM tracks as ASTERIX CAT062, for evaluation in OpenATS COMPASS\n");
@@ -162,7 +181,18 @@ pub fn readme(day: i64, systems: &[&SystemReport], build: &str, split: bool) -> 
     let _ = writeln!(o, "Encoder: oa-asterix of this repository, written from the specification; build {build}.");
     let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2). SAC 255 is a test pair chosen by this export, not an allocation: the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.");
     let _ = writeln!(o, "Import each .ast file as ASTERIX CAT062 with the UTC Day above; nothing in the files needs a time-of-day override.\n");
-    let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080 carries CNF = 0 (confirmed: the tracker publishes confirmed tracks only), MON, SPI and MRH at their default 0 (the data does not say), SRC 0 (I130 is never sent), and CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.\n");
+    let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: CNF = 0 (confirmed: the tracker publishes confirmed tracks only); MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor, and MON = 0 for ERAM because it fuses radar and ADS-B; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.\n");
+    let _ = writeln!(o, "Altitude: OpenATCA's altitude is ADS-B barometric (pressure) altitude, filtered: I135 with QNH = 0. ERAM's altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, an inference and not a statement of the feed: at or above 18 000 ft the value is I136 (measured flight level), below it I135 with QNH = 1.\n");
+    let _ = writeln!(o, "ERAM duplicates: samples are compared on latitude, longitude, altitude, velocity east and north and the coast flag; a sample with the same flight, position time and those six values as an earlier one is a duplicate and is dropped (a row differing only in receive time is a duplicate). Same flight and position time with any difference are both kept and counted.\n");
+    match mode {
+        Some(InputsMode::All) => {
+            let _ = writeln!(o, "OpenATCA inputs: ALL (--inputs all). The tracker was fed every ADS-B report of the day's clip, as ERAM gets all its inputs, so the two files are like-for-like in what they were given (ERAM additionally has radar, and ADS-B reports from its own receivers, which OpenATCA does not). Because every report was used, no half of the clip is independent of this OpenATCA output: a reference built from the same ADS-B clip is not independent truth for it.\n");
+        }
+        Some(InputsMode::Split) => {
+            let _ = writeln!(o, "OpenATCA inputs: SPLIT (--inputs split). The tracker was fed set A only, half of the ADS-B reports (the scorer's split); ERAM got all its inputs, so the two files are NOT like-for-like in what they were given. Set B, the other half, is the only half independent of this OpenATCA output: a reference built from set A would be leaked truth.\n");
+        }
+        None => {}
+    }
     let _ = writeln!(o, "{I500_NOTE}\n");
     for s in systems {
         system_section(&mut o, s, day);

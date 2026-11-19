@@ -4,13 +4,15 @@
 //!
 //! ```text
 //! oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days]
+//!             [--inputs split|all]
 //! ```
 //!
 //! Writes `openatca.ast` (from `--adsb`: the tracker is run on the clip as the scorer runs it),
 //! `eram.ast` (from `--sfdps-dir`: the ERAM tracks the scorer reads), `data_sources.json` and
 //! `README.txt` in `<dir>`. A file holds one UTC day: rows on another day than `--date` refuse the
 //! export unless `--split-days` is given, which writes one directory per day. Only development
-//! days may be exported; the sealed hold-out day is never read by this tool's callers.
+//! `--inputs all` (the default) feeds the tracker every ADS-B report of the clip, like ERAM, `split`
+//! feeds it set A of the scorer's split only. Only development days may be exported; the sealed hold-out day is never read by this tool's callers.
 
 use std::fs;
 use std::path::PathBuf;
@@ -22,10 +24,10 @@ use oa_compass::core::time::days_from_civil;
 use oa_compass::shell::error::{io_err, ExportError};
 use oa_compass::shell::export::{date_text, Finished, Layout, SystemExport};
 use oa_compass::shell::notes::{data_sources_json, readme, ERAM_SOURCE, OPENATCA_SOURCE};
-use oa_compass::shell::run::{export_adsb_clip, export_eram};
+use oa_compass::shell::run::{export_adsb_clip, export_eram, InputsMode};
 use oa_replay::FeedKind;
 
-const USAGE: &str = "usage: oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days]";
+const USAGE: &str = "usage: oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days] [--inputs split|all]";
 
 fn parse_date(s: &str) -> Option<i64> {
     let mut it = s.split(['.', '-']);
@@ -53,6 +55,7 @@ fn build_text() -> String {
 fn main() -> ExitCode {
     let (mut date, mut out, mut adsb, mut sfdps) = (None, None, None, None);
     let mut split = false;
+    let mut mode = InputsMode::All;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--split-days" {
@@ -65,6 +68,14 @@ fn main() -> ExitCode {
             "--out" => out = v.map(PathBuf::from),
             "--adsb" => adsb = v.map(PathBuf::from),
             "--sfdps-dir" => sfdps = v.map(PathBuf::from),
+            "--inputs" => match v.as_deref() {
+                Some("all") => mode = InputsMode::All,
+                Some("split") => mode = InputsMode::Split,
+                _ => {
+                    eprintln!("oa-compass: --inputs takes split or all\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
             _ => {
                 eprintln!("oa-compass: unknown argument {a}\n{USAGE}");
                 return ExitCode::from(2);
@@ -83,7 +94,7 @@ fn main() -> ExitCode {
         eprintln!("oa-compass: give --adsb, --sfdps-dir or both\n{USAGE}");
         return ExitCode::from(2);
     }
-    match run(Layout { out, day, split }, adsb, sfdps) {
+    match run(Layout { out, day, split }, adsb, sfdps, mode) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oa-compass: {e}");
@@ -92,14 +103,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(layout: Layout, adsb: Option<PathBuf>, sfdps: Option<PathBuf>) -> Result<(), ExportError> {
+fn run(
+    layout: Layout,
+    adsb: Option<PathBuf>,
+    sfdps: Option<PathBuf>,
+    mode: InputsMode,
+) -> Result<(), ExportError> {
     let t0 = Instant::now();
     fs::create_dir_all(&layout.out).map_err(|e| io_err(&layout.out, &e))?;
     let mut finished: Vec<Finished> = Vec::new();
-    let result = export_all(&layout, adsb, sfdps, &mut finished, t0);
+    let has_adsb = adsb.is_some();
+    let result = export_all(&layout, adsb, sfdps, mode, &mut finished, t0);
     match result {
         Ok(()) => {
             let build = build_text();
+            let adsb_mode = has_adsb.then_some(mode);
             let reports: Vec<_> = finished.iter().map(|f| f.report.clone()).collect();
             let mut days: Vec<i64> = reports
                 .iter()
@@ -127,7 +145,7 @@ fn run(layout: Layout, adsb: Option<PathBuf>, sfdps: Option<PathBuf>) -> Result<
                     fs::write(&p, text).map_err(|e| io_err(&p, &e))
                 };
                 w("data_sources.json", data_sources_json())?;
-                w("README.txt", readme(day, &refs, &build, layout.split))?;
+                w("README.txt", readme(day, &refs, &build, layout.split, adsb_mode))?;
             }
             for r in &reports {
                 for d in &r.days {
@@ -158,12 +176,13 @@ fn export_all(
     layout: &Layout,
     adsb: Option<PathBuf>,
     sfdps: Option<PathBuf>,
+    mode: InputsMode,
     finished: &mut Vec<Finished>,
     t0: Instant,
 ) -> Result<(), ExportError> {
     if let Some(clip) = adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
-        let r = export_adsb_clip(&clip, &mut ex);
+        let r = export_adsb_clip(&clip, &mut ex, mode);
         let (info, n_a, n_b) = match r {
             Ok(x) => x,
             Err(e) => {
@@ -173,8 +192,8 @@ fn export_all(
         };
         eprintln!("OpenATCA done at {:.1} s: {} tick rows", t0.elapsed().as_secs_f64(), info.tick_rows);
         for (l, v) in [
-            ("ADS-B reports in the tracker's half of the scorer's split (set A)", n_a),
-            ("ADS-B reports in the other half (set B, the scorer's reference; not tracked)", n_b),
+            ("ADS-B reports fed to the tracker", n_a),
+            ("ADS-B reports not fed to the tracker (the other half under --inputs split)", n_b),
             ("measurements offered to the tracker", info.measurements),
             ("tick rows offered (one per second per confirmed track)", info.tick_rows),
             ("update rows not exported (tick rows only)", info.update_rows_not_exported),

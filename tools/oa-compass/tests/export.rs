@@ -69,6 +69,7 @@ fn track_row(g: &mut Rng, t_ns: i64) -> TrackRow {
         uncertain: g.next() % 6 == 0,
         reacquired: g.next() % 6 == 0,
         address: (g.next() % 8 != 0).then(|| (g.next() % 0x100_0000) as u32),
+        monosensor: true,
     }
 }
 
@@ -132,7 +133,7 @@ fn generated_rows_of_both_systems_round_trip_through_the_decoder_with_the_values
         }
         // Status: CNF clear, CST in the third extent when coasting, AFF in the first.
         let st = rec.track_status.as_ref().unwrap();
-        assert!(!st.tentative && !st.monosensor && !st.spi && !st.geometric_more_reliable);
+        assert!(!st.tentative && st.monosensor && !st.spi && !st.geometric_more_reliable);
         assert_eq!(st.altitude_source, 0);
         match (row.coast, row.radar_disagrees) {
             (true, aff) => assert_eq!(st.ext, vec![(u8::from(aff) * 8) | 1, 1, 0x80]),
@@ -169,7 +170,7 @@ fn eram_rows_round_trip_with_address_and_identification() {
     for (rec, v) in decode_all(&bytes).iter().zip(&want) {
         assert_eq!(rec, &cat062_record(v, ERAM_SOURCE));
         assert_eq!(rec.measured_fl, v.measured_fl);
-        assert_eq!(rec.baro_altitude, None);
+        assert_eq!(rec.baro_altitude.map(|a| (a.raw, a.qnh)), v.baro_alt.map(|r| (r, v.baro_qnh)));
         assert_eq!(rec.derived.as_ref().and_then(|d| d.address), v.address);
         assert_eq!(rec.derived.as_ref().and_then(|d| d.ident), v.ident);
         // No I015, no I500 for ERAM.
@@ -188,10 +189,12 @@ fn a_record_with_every_item_fits_the_stated_bounds() {
         velocity: Some((i16::MIN, i16::MAX)),
         track_number: u16::MAX,
         coasting: true,
+        monosensor: true,
         aff: true,
         address: Some(0xFF_FFFF),
         ident: Some(*b"ABCDEFGH"),
         baro_alt: Some(6000),
+        baro_qnh: true,
         measured_fl: Some(-60),
         climb: Some(i16::MIN),
         accuracy: Some((u16::MAX, u16::MAX)),
@@ -478,17 +481,23 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
     let mut fin = ex.finish().unwrap();
     fin.report.inputs.push("test input".into());
     let rep = fin.commit().unwrap();
-    let text = readme(DAY, &[&rep], "commit test", false);
+    let text = readme(DAY, &[&rep], "commit test", false, None);
     for needle in [
         "UTC date to give at import (UTC Day): 2026.11.15",
         "ERAM  (SAC 255 SIC 2)",
         "records written: 4 in 1 data blocks",
-        "I136 measured flight level: 3",
+        "I136 measured flight level (ERAM at or above 18 000 ft): 3",
         "I500 accuracies, APW only: 0",
         "4: I500 accuracy: no covariance in the source",
         "4: I060 Mode 3/A code: not in the source row",
         "ERAM publishes no accuracy",
         "samples in the input: 6",
+        "ingest: SFDPS documents offered: 0",
+        "ingest: flight table overflow (must be 0): 0",
+        "a row differing only in receive time is a duplicate",
+        "it is NOT established as pressure altitude",
+        "MON = 0 for ERAM",
+        "not an outside conformance test",
         "input: test input",
         "Edition 1.21",
         "commit test",
@@ -528,7 +537,7 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
     push(O_TICK | O_COAST | O_UNCERTAIN, 1, 0x4000_0005);
     let (mut ex, out) = export_to("ticks", false, DAY);
     let mut info = oa_compass::shell::run::TrackRunInfo::default();
-    export_output(&o, &mut ex, &mut info).unwrap();
+    export_output(&o, &mut ex, &mut info, true).unwrap();
     assert_eq!(info.tick_rows, 2);
     assert_eq!(info.update_rows_not_exported, 1);
     assert_eq!((info.coasting, info.uncertain), (1, 1));
@@ -574,7 +583,7 @@ fn a_slice_of_a_real_recording_round_trips_through_the_tracker_and_the_encoder()
         split: true,
     };
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout);
-    let info = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex).unwrap();
+    let info = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex, true).unwrap();
     assert!(info.tick_rows > 1000, "{info:?}");
     let rep = ex.finish().unwrap().commit().unwrap();
     let written: u64 = rep.days.iter().map(|d| d.sink.records).sum();
@@ -587,4 +596,73 @@ fn a_slice_of_a_real_recording_round_trips_through_the_tracker_and_the_encoder()
         // Ticks are at whole seconds.
         assert!(recs.iter().all(|r| r.time.unwrap() % 128 == 0));
     }
+}
+
+// REQ: OA-CMP-017
+#[test]
+fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
+    use oa_bench::legacy::Counts;
+    use oa_compass::shell::run::eram_input_counts;
+    let mut c = Counts::default();
+    c.docs[0] = 9;
+    c.note("SFDPS rows dropped, reason no GUFI column entry".into(), 4);
+    c.note("SFDPS position rows without a position time (no TH sample)".into(), 2);
+    c.th_no_alt = 7;
+    let lines = eram_input_counts(&c).unwrap();
+    let get = |k: &str| lines.iter().find(|(l, _)| l.contains(k)).map(|x| x.1);
+    assert_eq!(get("documents offered"), Some(9));
+    assert_eq!(get("no GUFI"), Some(4));
+    assert_eq!(get("without a position time"), Some(2));
+    assert_eq!(get("without a reported altitude"), Some(7));
+    c.overflow_th = 1;
+    assert!(eram_input_counts(&c).is_err());
+    c.overflow_th = 0;
+    c.overflow_flights = 3;
+    assert!(eram_input_counts(&c).is_err());
+    // export_eram refuses before writing anything.
+    let mut leg = eram_legacy();
+    leg.counts.overflow_th = 5;
+    let out = tmp("eram-overflow");
+    let mut ex = SystemExport::new(
+        "ERAM",
+        "eram.ast",
+        ERAM_SOURCE,
+        Layout { out: out.clone(), day: DAY, split: false },
+    );
+    assert!(export_eram(&leg, &mut ex).is_err());
+    ex.abort();
+    assert!(fs::read_dir(&out).unwrap().next().is_none());
+}
+
+// REQ: OA-CMP-018
+#[test]
+fn the_readme_states_the_inputs_mode_and_the_leak_warning() {
+    use oa_compass::shell::run::InputsMode;
+    let out = tmp("mode");
+    let mut ex = SystemExport::new(
+        "ERAM",
+        "eram.ast",
+        ERAM_SOURCE,
+        Layout { out, day: DAY, split: false },
+    );
+    export_eram(&eram_legacy(), &mut ex).unwrap();
+    let rep = ex.finish().unwrap().commit().unwrap();
+    let all = readme(DAY, &[&rep], "b", false, Some(InputsMode::All));
+    assert!(all.contains("ALL (--inputs all)") && all.contains("like-for-like"));
+    let split = readme(DAY, &[&rep], "b", false, Some(InputsMode::Split));
+    assert!(split.contains("SPLIT") && split.contains("NOT like-for-like") && split.contains("leaked truth"));
+}
+
+// REQ: OA-CMP-007
+#[test]
+fn the_verification_compares_a_wrapped_longitude_around_the_circle() {
+    let mut g = Rng(9);
+    let mut r = track_row(&mut g, DAY_S * 1_000_000_000);
+    r.lon_e7 = 1_800_000_000;
+    let c = track_record(&r).unwrap();
+    let mut sink = BlockSink::new(Vec::new(), OPENATCA_SOURCE, "OpenATCA");
+    sink.push(&c.values, (r.lat_e7, r.lon_e7)).unwrap();
+    let (bytes, stats) = sink.finish().unwrap();
+    assert!(stats.max_lon_error_e7 <= 27, "{}", stats.max_lon_error_e7);
+    assert_eq!(decode_all(&bytes)[0].position.unwrap().lon, -(1 << 25));
 }

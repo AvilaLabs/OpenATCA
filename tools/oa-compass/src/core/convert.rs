@@ -59,6 +59,8 @@ const ALT_MIN_COUNTS: f64 = -60.0;
 const ALT_MAX_COUNTS: f64 = 6000.0;
 /// I062/220 LSB, ft/min (5.2.17).
 const CLIMB_LSB_FPM: f64 = 6.25;
+/// ERAM altitudes at or above this many feet are read as flight levels (see [`eram_record`]).
+const ERAM_FLIGHT_LEVEL_FT: i32 = 18_000;
 /// Largest I062/500 APW component (16 bits).
 const APW_MAX: f64 = 65_535.0;
 
@@ -96,8 +98,11 @@ pub const NOTE_UNCERTAIN: usize = 14;
 pub const NOTE_REACQUIRED: usize = 15;
 pub const NOTE_SERVICE: usize = 16;
 pub const NOTE_ALT_ROUNDED: usize = 17;
+pub const NOTE_LON_WRAPPED: usize = 18;
+pub const NOTE_ALT_QNH: usize = 19;
+pub const NOTE_CLIMB_NO_ALT: usize = 20;
 /// Number of notes.
-pub const NOTES: usize = 18;
+pub const NOTES: usize = 21;
 
 /// The report line of each note, indexed by the constants above.
 pub const NOTE_NAMES: [&str; NOTES] = [
@@ -118,7 +123,10 @@ pub const NOTE_NAMES: [&str; NOTES] = [
     "O_UNCERTAIN row flag: no CAT062 field, not encoded (the I500 accuracy carries the size)",
     "O_REACQUIRED row flag: no CAT062 field, not encoded",
     "I015 service identification: not in the source (item omitted)",
-    "I136 altitude off the 25 ft grid: rounded to the nearest 25 ft (item kept)",
+    "I135/I136 altitude off the 25 ft grid: rounded to the nearest 25 ft (item kept)",
+    "longitude of exactly +180 degrees (or rounding to it): written as -180, the same meridian (CAT062 range is -180 up to, not including, +180)",
+    "ERAM altitude under 18 000 ft: written as I135 with QNH = 1 (altimeter-corrected, inferred; see README), not as a flight level",
+    "I220 rate of climb/descent: exported on a row without an altitude (item kept)",
 ];
 
 /// The bit of note `i` in [`Converted::notes`].
@@ -165,6 +173,8 @@ pub struct TrackRow {
     /// The aircraft address of the track as the key holds it (bit 24 marks a non-ICAO address),
     /// or `None` when the key is not an address.
     pub address: Option<u32>,
+    /// The tracker was fed one kind of sensor only (ADS-B): I062/080 MON = 1.
+    pub monosensor: bool,
 }
 
 /// One ERAM track sample (`TH` message with a position), in the units of the legacy tables, with
@@ -204,6 +214,8 @@ pub struct RecordValues {
     pub track_number: u16,
     /// I062/080 CST (third extent).
     pub coasting: bool,
+    /// I062/080 MON (monosensor track).
+    pub monosensor: bool,
     /// I062/080 AFF (first extent): ADS-B data inconsistent with other surveillance information.
     pub aff: bool,
     /// I062/380 subitem 1.
@@ -212,6 +224,8 @@ pub struct RecordValues {
     pub ident: Option<[u8; 8]>,
     /// I062/135 calculated barometric altitude, counts of 1/4 FL, no QNH correction.
     pub baro_alt: Option<i16>,
+    /// QNH flag of I062/135 (altimeter correction applied).
+    pub baro_qnh: bool,
     /// I062/136 measured flight level, counts of 1/4 FL.
     pub measured_fl: Option<i16>,
     /// I062/220, counts of 6.25 ft/min.
@@ -239,13 +253,23 @@ fn count_in(x: f64, lo: f64, hi: f64) -> Option<f64> {
     (r >= lo && r <= hi).then_some(r)
 }
 
-fn position(lat_e7: i32, lon_e7: i32) -> Option<(i32, i32)> {
-    if lat_e7.unsigned_abs() > MAX_LAT_E7.unsigned_abs() || lon_e7.unsigned_abs() > MAX_LON_E7.unsigned_abs() {
+/// Position counts and whether the longitude was wrapped. A longitude of exactly +180 degrees
+/// (count 2^25, also reached by rounding) is written as -180: the range of I062/105 is
+/// -180 <= lon < 180 (5.2.8) and it is the same meridian.
+fn position(lat_e7: i32, lon_e7: i32) -> Option<(i32, i32, bool)> {
+    if lat_e7.unsigned_abs() > MAX_LAT_E7.unsigned_abs()
+        || lon_e7.unsigned_abs() > MAX_LON_E7.unsigned_abs()
+    {
         return None;
     }
     // 2^25 / 1.8e9 counts per 1e-7 degree; at most 2^25 counts, so the cast cannot truncate.
     let f = |e7: i32| round(f64::from(e7) * (33_554_432.0 / 1_800_000_000.0)) as i32;
-    Some((f(lat_e7), f(lon_e7)))
+    let (lat, lon) = (f(lat_e7), f(lon_e7));
+    if lon >= 1 << 25 {
+        Some((lat, -(1 << 25), true))
+    } else {
+        Some((lat, lon, false))
+    }
 }
 
 /// The two APW components for a covariance at latitude `lat_e7`, and the notes. `None` if the
@@ -301,7 +325,7 @@ fn velocity_counts(east: f64, north: f64) -> Result<(i16, i16), bool> {
 /// Converts one OpenATCA tracker tick row.
 pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
     let DayTime { day, units } = day_time_of_ns(r.t_ns).ok_or(Refusal::Time)?;
-    let (lat, lon) = position(r.lat_e7, r.lon_e7).ok_or(Refusal::Position)?;
+    let (lat, lon, wrapped) = position(r.lat_e7, r.lon_e7).ok_or(Refusal::Position)?;
     let mut v = RecordValues {
         // The service identification is allocated by the system (5.2.2): this export allocates 1
         // to the OpenATCA tracker output, which is the one value it can state truthfully.
@@ -310,11 +334,15 @@ pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
         lat,
         lon,
         coasting: r.coast,
+        monosensor: r.monosensor,
         aff: r.radar_disagrees,
         ..RecordValues::default()
     };
     let mut notes = note_bit(NOTE_MODE3A) | note_bit(NOTE_AGES) | note_bit(NOTE_MOVEMENT);
     notes |= note_bit(NOTE_IDENT);
+    if wrapped {
+        notes |= note_bit(NOTE_LON_WRAPPED);
+    }
     if r.uncertain {
         notes |= note_bit(NOTE_UNCERTAIN);
     }
@@ -335,18 +363,25 @@ pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
             Some(c) => v.baro_alt = Some(c as i16),
             None => notes |= note_bit(NOTE_ALT_RANGE),
         }
-        let climb = f64::from(r.vrate_fpm);
-        if climb.is_nan() {
-            notes |= note_bit(NOTE_CLIMB_ABSENT);
-        } else {
-            let lim = f64::from(i16::MAX);
-            match count_in(climb / CLIMB_LSB_FPM, -lim - 1.0, lim) {
-                Some(c) => v.climb = Some(c as i16),
-                None => notes |= note_bit(NOTE_CLIMB_RANGE),
-            }
-        }
     } else {
-        notes |= note_bit(NOTE_ALT_ABSENT) | note_bit(NOTE_CLIMB_ABSENT);
+        notes |= note_bit(NOTE_ALT_ABSENT);
+    }
+    // The rate of climb does not depend on the altitude item: a valid rate is exported whether or
+    // not the row has an altitude.
+    let climb = f64::from(r.vrate_fpm);
+    if climb.is_nan() {
+        notes |= note_bit(NOTE_CLIMB_ABSENT);
+    } else {
+        let lim = f64::from(i16::MAX);
+        match count_in(climb / CLIMB_LSB_FPM, -lim - 1.0, lim) {
+            Some(c) => {
+                v.climb = Some(c as i16);
+                if !r.has_alt {
+                    notes |= note_bit(NOTE_CLIMB_NO_ALT);
+                }
+            }
+            None => notes |= note_bit(NOTE_CLIMB_RANGE),
+        }
     }
     match accuracy(&r.pos_cov_m2, r.lat_e7) {
         Some((a, n)) => {
@@ -383,7 +418,7 @@ fn ident_of(c: &[u8; 8]) -> Option<[u8; 8]> {
 pub fn eram_record(r: &EramRow) -> Result<Converted, Refusal> {
     let t_ns = r.pos_ms.checked_mul(1_000_000).ok_or(Refusal::Time)?;
     let DayTime { day, units } = day_time_of_ns(t_ns).ok_or(Refusal::Time)?;
-    let (lat, lon) = position(r.lat_e7, r.lon_e7).ok_or(Refusal::Position)?;
+    let (lat, lon, wrapped) = position(r.lat_e7, r.lon_e7).ok_or(Refusal::Position)?;
     let mut v = RecordValues {
         time: units,
         lat,
@@ -397,6 +432,9 @@ pub fn eram_record(r: &EramRow) -> Result<Converted, Refusal> {
         | note_bit(NOTE_ACCURACY_ABSENT)
         | note_bit(NOTE_CLIMB_ABSENT)
         | note_bit(NOTE_SERVICE);
+    if wrapped {
+        notes |= note_bit(NOTE_LON_WRAPPED);
+    }
     match r.address {
         Some(a) if a <= 0x00FF_FFFF => v.address = Some(a),
         _ => notes |= note_bit(NOTE_ADDRESS),
@@ -417,10 +455,20 @@ pub fn eram_record(r: &EramRow) -> Result<Converted, Refusal> {
         None => notes |= note_bit(NOTE_VEL_ABSENT),
     }
     match r.alt_ft {
-        // ERAM's reported altitude is a surveillance (Mode C) value: the measured flight level.
+        // The feed gives feet without saying what they are referenced to. The project's own
+        // comparison (docs/M2_DESIGN.md, "Altitude reference for T4") found values under 18 000 ft
+        // altimeter-corrected and values at or above it flight levels. The same rule is used
+        // here, and it is an inference, not something the feed states: at or above 18 000 ft the
+        // value is a measured flight level (I136); below it, I135 with QNH = 1.
         Some(a) => match count_in(f64::from(a) / ALT_LSB_FT, ALT_MIN_COUNTS, ALT_MAX_COUNTS) {
             Some(c) => {
-                v.measured_fl = Some(c as i16);
+                if a >= ERAM_FLIGHT_LEVEL_FT {
+                    v.measured_fl = Some(c as i16);
+                } else {
+                    v.baro_alt = Some(c as i16);
+                    v.baro_qnh = true;
+                    notes |= note_bit(NOTE_ALT_QNH);
+                }
                 if a % 25 != 0 {
                     notes |= note_bit(NOTE_ALT_ROUNDED);
                 }

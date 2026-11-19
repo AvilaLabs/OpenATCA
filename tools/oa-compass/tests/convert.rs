@@ -28,6 +28,7 @@ fn row() -> TrackRow {
         uncertain: false,
         reacquired: false,
         address: Some(0xA1B2C3),
+        monosensor: true,
     }
 }
 
@@ -148,6 +149,7 @@ fn an_absent_or_unfit_value_leaves_its_item_out_and_is_noted_never_zeroed() {
     let mut r = row();
     r.has_alt = false;
     r.alt_ft = f32::NAN;
+    r.vrate_fpm = f32::NAN;
     let c = track_record(&r).unwrap();
     assert_eq!((c.values.baro_alt, c.values.climb), (None, None));
     assert!(has(&c, NOTE_ALT_ABSENT) && has(&c, NOTE_CLIMB_ABSENT));
@@ -329,4 +331,61 @@ fn mode_3a_ages_and_movement_are_omitted_on_every_row_and_counted() {
     }
     assert_eq!(counts[NOTE_SERVICE], 1);
     assert_eq!(NOTE_NAMES.len(), NOTES);
+}
+
+// REQ: OA-CMP-003
+#[test]
+fn a_longitude_of_plus_180_is_written_as_minus_180_and_noted() {
+    for lon in [1_800_000_000, 1_799_999_990] {
+        let mut r = row();
+        r.lon_e7 = lon;
+        let c = track_record(&r).unwrap();
+        assert_eq!(c.values.lon, -(1 << 25), "{lon}");
+        assert!(has(&c, NOTE_LON_WRAPPED));
+        let mut e = eram();
+        e.lon_e7 = lon;
+        let c = eram_record(&e).unwrap();
+        assert_eq!(c.values.lon, -(1 << 25));
+        assert!(has(&c, NOTE_LON_WRAPPED));
+    }
+    let mut r = row();
+    r.lon_e7 = -1_800_000_000;
+    let c = track_record(&r).unwrap();
+    assert_eq!(c.values.lon, -(1 << 25));
+    assert!(!has(&c, NOTE_LON_WRAPPED));
+    r.lon_e7 = 1_799_000_000;
+    assert!(!has(&track_record(&r).unwrap(), NOTE_LON_WRAPPED));
+    assert!(track_record(&r).unwrap().values.lon < (1 << 25));
+}
+
+// REQ: OA-CMP-003
+#[test]
+fn a_valid_rate_of_climb_is_exported_without_an_altitude_and_counted() {
+    let mut r = row();
+    r.has_alt = false;
+    r.alt_ft = f32::NAN;
+    r.vrate_fpm = 625.0;
+    let c = track_record(&r).unwrap();
+    assert_eq!(c.values.climb, Some(100));
+    assert_eq!(c.values.baro_alt, None);
+    assert!(has(&c, NOTE_CLIMB_NO_ALT) && has(&c, NOTE_ALT_ABSENT) && !has(&c, NOTE_CLIMB_ABSENT));
+    r.vrate_fpm = f32::NAN;
+    let c = track_record(&r).unwrap();
+    assert!(has(&c, NOTE_CLIMB_ABSENT) && !has(&c, NOTE_CLIMB_NO_ALT));
+    assert!(track_record(&row()).unwrap().values.monosensor);
+}
+
+// REQ: OA-CMP-001
+#[test]
+fn eram_altitude_is_a_flight_level_from_18000_ft_and_qnh_corrected_below() {
+    for (ft, fl, qnh) in [(18_000, true, false), (35_000, true, false), (17_975, false, true), (5_000, false, true)] {
+        let mut e = eram();
+        e.alt_ft = Some(ft);
+        let c = eram_record(&e).unwrap();
+        assert_eq!(c.values.measured_fl.is_some(), fl, "{ft}");
+        assert_eq!(c.values.baro_alt.is_some(), qnh, "{ft}");
+        assert_eq!(c.values.baro_qnh, qnh);
+        assert_eq!(has(&c, NOTE_ALT_QNH), qnh);
+        assert!(!c.values.monosensor);
+    }
 }

@@ -4408,3 +4408,14 @@ scope.
 - **OA-CMP-016** The tracker run behind the OpenATCA file is the scorer's: set A of the split, the scoring
   configuration, one tick row per second per confirmed track; update rows are not exported and are counted; a
   run that lost rows to a full output table is refused.
+- **OA-CMP-017** Every count the SFDPS ingest keeps of what it saw and dropped (documents, refusals, rows without
+  a GUFI or position time or position column, rows past the document table, field errors, coast and altitude
+  counts) is printed in the README's ERAM block with its reason, and the export is refused if the flight table or
+  the track-sample table overflowed (rows were lost). Counters saturate, and an index that does not fit a
+  `u32` is a refusal, not a truncation.
+- **OA-CMP-018** `--inputs all` (default) feeds the OpenATCA tracker every ADS-B report of the clip, `--inputs split`
+  only set A of the scorer's split; the README states the mode, whether the two files are like-for-like, and, for
+  `split`, that a reference built from set A would be leaked truth. I062/080 MON is 1 for OpenATCA (ADS-B only) and
+  0 for ERAM; the README says why. ERAM altitude, whose reference the feed does not state, is I136 at or above
+  18 000 ft and I135 with QNH = 1 below, stated in the README as an inference. A valid rate of climb is exported
+  on a row without an altitude and counted; a longitude of +180 degrees is written as -180 and counted.
