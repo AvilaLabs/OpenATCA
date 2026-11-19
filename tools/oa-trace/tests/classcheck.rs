@@ -1,0 +1,730 @@
+//! The core/shell class check against fixture workspaces (OA-TRC-200 to OA-TRC-215).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use oa_trace::classcheck::{
+    check, check_with, lib_rs_problems, mask, parse_manifest, parse_members, scan_source, Class,
+    Ctx, UNSPLIT_ALLOWED,
+};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn has(failures: &[String], needle: &str) -> bool {
+    failures.iter().any(|f| f.contains(needle))
+}
+
+// REQ: OA-TRC-200
+#[test]
+fn a_clean_workspace_passes_with_comments_strings_and_test_code_ignored() {
+    let rep = check_with(&fixture("good"), &["fx-old"]);
+    assert!(rep.ok(), "{:#?}", rep.failures);
+    assert_eq!(rep.unsplit, ["fx-old"]);
+    assert_eq!(
+        rep.classes.get("fx-split").map(String::as_str),
+        Some("split")
+    );
+    assert_eq!(rep.classes.len(), 4);
+}
+
+// REQ: OA-TRC-201
+#[test]
+fn a_missing_or_unknown_class_names_the_crate() {
+    let rep = check_with(&fixture("bad"), &[]);
+    assert!(
+        has(
+            &rep.failures,
+            "fx-nocls: no [package.metadata.openatca] class"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(&rep.failures, "fx-weird: unknown class \"banana\""),
+        "{:#?}",
+        rep.failures
+    );
+}
+
+// REQ: OA-TRC-202
+#[test]
+fn modules_outside_the_allowlist_are_reported_with_file_line_and_token() {
+    let rep = check_with(&fixture("bad"), &[]);
+    let want = [
+        "crates/fx-badcore/src/lib.rs:2: std::fs",
+        "crates/fx-badcore/src/lib.rs:3: std::io",
+        "crates/fx-badcore/src/lib.rs:3: std::time",
+        "crates/fx-badcore/src/lib.rs:5: HashMap",
+        "crates/fx-badcore/src/lib.rs:6: println!",
+        "crates/fx-badcore/src/lib.rs:9: std::env",
+        "crates/fx-badcore/src/lib.rs:14: thread_local!",
+        "crates/fx-badcore/src/lib.rs:15: static mut",
+        "crates/fx-badsplit/src/core/mod.rs:2: HashSet",
+    ];
+    for w in want {
+        assert!(has(&rep.failures, w), "missing {w}: {:#?}", rep.failures);
+    }
+    // the comment and the string on lines 16 and 17 are not hits
+    assert!(!has(&rep.failures, "lib.rs:16:") && !has(&rep.failures, "lib.rs:17:"));
+    // and the failure names the allowed alternative
+    assert!(has(&rep.failures, "core::time::Duration"));
+    assert!(has(&rep.failures, "core::fmt"));
+}
+
+// REQ: OA-TRC-203
+#[test]
+fn a_path_into_a_shell_module_is_a_violation() {
+    let rep = check_with(&fixture("bad"), &[]);
+    assert!(
+        has(&rep.failures, "crates/fx-badcore/src/lib.rs:7: shell"),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(&rep.failures, "crates/fx-badsplit/src/core/mod.rs:1: shell"),
+        "{:#?}",
+        rep.failures
+    );
+}
+
+// REQ: OA-TRC-204
+#[test]
+fn comments_strings_and_char_literals_never_match() {
+    let src = "// std::fs\n/* HashMap /* nested */ println! */\n\
+               const A: &str = \"std::io HashSet\";\n\
+               const B: &str = r##\"dbg!(x) \"# static mut\"##;\n\
+               const C: char = '\"';\nconst D: char = '\\'';\n\
+               fn f<'a>(x: &'a str) -> &'a str { x }\n";
+    let masked = mask(src);
+    assert_eq!(masked.lines().count(), src.lines().count());
+    for bad in ["std", "HashMap", "HashSet", "println", "dbg", "static"] {
+        assert!(!masked.contains(bad), "{bad} survived: {masked}");
+    }
+    assert!(masked.contains("fn f<'a>(x: &'a str)"));
+    let hits = scan(src).hits;
+    assert!(hits.is_empty(), "{hits:?}");
+    // the same names in code are hits, and a path split over lines is still found
+    let hits = scan("fn f() {\n let _ = std\n   :: fs::read(\"x\");\n}\n").hits;
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!((hits[0].line, hits[0].token.as_str()), (3, "std::fs"));
+}
+
+fn scan(src: &str) -> oa_trace::classcheck::FileScan {
+    let classes: BTreeMap<String, Class> = [
+        ("fx-core".to_string(), Class::Core),
+        ("fx-shell".to_string(), Class::Shell),
+        ("fx-split".to_string(), Class::Split),
+    ]
+    .into_iter()
+    .collect();
+    let aliases: BTreeMap<String, String> = classes
+        .keys()
+        .map(|n| (n.replace('-', "_"), n.clone()))
+        .collect();
+    scan_source(
+        src,
+        &Ctx {
+            split: false,
+            depth: 1,
+            classes: &classes,
+            aliases: &aliases,
+        },
+    )
+}
+
+fn tokens(src: &str) -> Vec<String> {
+    scan(src).hits.into_iter().map(|h| h.token).collect()
+}
+
+// REQ: OA-TRC-205
+#[test]
+fn core_code_may_name_only_core_crates_and_the_core_module_of_split_crates() {
+    let rep = check_with(&fixture("bad"), &[]);
+    assert!(
+        has(
+            &rep.failures,
+            "fx-badcore: fx-shell: B8: core crate depends on shell crate fx-shell"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        !has(&rep.failures, "fx-badcore: fx-cleansplit"),
+        "a split crate is allowed as a dependency"
+    );
+    assert!(
+        has(
+            &rep.failures,
+            "crates/fx-badcore/src/lib.rs:10: fx_shell: B8: names a shell or unsplit crate"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(
+            &rep.failures,
+            "crates/fx-badcore/src/lib.rs:11: fx_cleansplit: B8: names a split crate outside its `core` module"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        !has(&rep.failures, "lib.rs:12:"),
+        "fx_cleansplit::core is allowed"
+    );
+    let mut t = tokens("use fx_shell as f; fn g() { f::x() }");
+    t.sort();
+    assert_eq!(t, ["as", "fx_shell"]);
+}
+
+// REQ: OA-TRC-206
+#[test]
+fn a_split_crate_needs_both_modules_and_a_lib_rs_declaring_exactly_them() {
+    let rep = check_with(&fixture("bad"), &[]);
+    assert!(
+        has(&rep.failures, "fx-badsplit: split crate has no src/shell/"),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(
+            &rep.failures,
+            "crates/fx-badsplit/src/lib.rs:2: fn: B7: lib.rs of a split crate"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(!has(&rep.failures, "fx-cleansplit"), "{:#?}", rep.failures);
+    let ok = "#![forbid(unsafe_code)]\n//! doc\npub mod core;\npub(crate) mod shell;\npub use self::core::{a, b};\n#[cfg(test)]\nmod tests { fn t() {} }\n";
+    assert!(lib_rs_problems(ok).is_empty());
+    for bad in [
+        "pub mod core { pub fn f() {} }\nmod shell;",
+        "mod core;\nmod shell;\nconst X: u8 = 1;",
+        "mod core;\nmod shell;\nmod util;",
+        "mod core;",
+        "mod core;\nmod shell;\nmod shell;",
+        "mod core;\n#[path = \"x.rs\"]\nmod shell;",
+    ] {
+        assert!(!lib_rs_problems(bad).is_empty(), "{bad}");
+    }
+}
+
+// REQ: OA-TRC-207
+#[test]
+fn the_unsplit_list_is_fixed_and_the_allowlist_file_may_only_shrink() {
+    let rep = check_with(&fixture("bad"), &[]);
+    assert_eq!(rep.unsplit, ["fx-newold"]);
+    assert!(
+        has(&rep.failures, "fx-newold: B9: new unsplit crate"),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(&rep.failures, "fx-shell: B9: listed but not unsplit"),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(&rep.failures, "fx-ghost: B9: listed but not unsplit"),
+        "{:#?}",
+        rep.failures
+    );
+    assert!(
+        has(&rep.failures, "fx-ghost: B9: not in the fixed list"),
+        "{:#?}",
+        rep.failures
+    );
+    // the clean workspace passes with its crate in the fixed list, fails without it
+    assert!(check_with(&fixture("good"), &["fx-old"]).ok());
+    assert!(has(
+        &check_with(&fixture("good"), &[]).failures,
+        "fx-old: B9: new unsplit crate"
+    ));
+    // the real list: twelve names, sorted, none a duplicate
+    assert_eq!(UNSPLIT_ALLOWED.len(), 12);
+    let mut sorted = UNSPLIT_ALLOWED;
+    sorted.sort();
+    assert_eq!(sorted, UNSPLIT_ALLOWED);
+}
+
+// REQ: OA-TRC-208
+#[test]
+fn the_cargo_toml_reader_finds_name_class_dependencies_and_members() {
+    let m = parse_manifest(
+        "[package]\nname = \"oa-x\" # n\n\n[package.metadata.openatca]\nclass = \"core\"\n\n[dependencies] # c\noa-a = { path = \"../oa-a\" }\n# oa-no = 1\noa-b.workspace = true\nfoo = { package = \"oa-c\", path = \"../oa-c\" }\n\n[target.'cfg(unix)'.dependencies]\noa-t = { path = \"../oa-t\" }\n\n[dev-dependencies.oa-d]\npath = \"../oa-d\"\n",
+    );
+    assert_eq!(m.name.as_deref(), Some("oa-x"));
+    assert_eq!(m.class.as_deref(), Some("core"));
+    let keys: Vec<&str> = m.deps.iter().map(|d| d.key.as_str()).collect();
+    assert_eq!(keys, ["oa-a", "oa-b", "foo", "oa-t", "oa-d"]);
+    assert_eq!(m.deps[2].package.as_deref(), Some("oa-c"));
+    assert_eq!(m.deps[3].path.as_deref(), Some("../oa-t"));
+    assert_eq!(m.deps[4].path.as_deref(), Some("../oa-d"));
+    let t = "[workspace]\nresolver = \"2\"\nexclude = [\"fuzz\"]\nmembers = [\n    \"crates/a\",\n    'tools/b', # c\n]\n[workspace.package]\nmembers = [\"nope\"]\n";
+    assert_eq!(
+        parse_members(t),
+        (vec!["crates/a".into(), "tools/b".into()], vec![])
+    );
+    let t = "[workspace]\nmembers =\n[\"a\", b]\n";
+    let _ = t;
+    let (items, bad) = parse_members("[workspace]\nmembers = [\"a\", b, \"c/*\"]\n");
+    assert_eq!(
+        (items, bad),
+        (
+            vec!["a".to_string()],
+            vec!["b".to_string(), "\"c/*\"".to_string()]
+        )
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Negative fixtures: one workspace per bypass the review found, each must fail.
+
+struct Ws {
+    root: PathBuf,
+}
+
+impl Ws {
+    /// A one-crate workspace: `fx-a` (class `class`) with `files`, plus the shell crate `fx-b`.
+    fn new(tag: &str, class: &str, files: &[(&str, &str)]) -> Ws {
+        let root =
+            std::env::temp_dir().join(format!("oa-trace-class-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let ws = Ws { root };
+        ws.put(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\n",
+        );
+        ws.put(ALLOW, "");
+        ws.put(
+            "crates/fx-a/Cargo.toml",
+            &format!(
+                "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"{class}\"\n"
+            ),
+        );
+        ws.put(
+            "crates/fx-b/Cargo.toml",
+            "[package]\nname = \"fx-b\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n",
+        );
+        ws.put("crates/fx-b/src/lib.rs", "pub fn go() {}\n");
+        for (p, c) in files {
+            ws.put(&format!("crates/fx-a/{p}"), c);
+        }
+        ws
+    }
+
+    fn put(&self, rel: &str, content: &str) {
+        let p = self.root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+
+    fn failures(&self) -> Vec<String> {
+        check_with(&self.root, &[]).failures
+    }
+}
+
+impl Drop for Ws {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+const ALLOW: &str = "tools/oa-trace/unsplit-allowlist.txt";
+
+fn core_ws(tag: &str, lib: &str) -> Ws {
+    Ws::new(tag, "core", &[("src/lib.rs", lib)])
+}
+
+fn split_ws(tag: &str, lib: &str, core: &str) -> Ws {
+    Ws::new(
+        tag,
+        "split",
+        &[
+            ("src/lib.rs", lib),
+            ("src/core/mod.rs", core),
+            (
+                "src/shell/mod.rs",
+                "pub fn s() { let _ = std::fs::read(\"x\"); }\n",
+            ),
+        ],
+    )
+}
+
+const SPLIT_LIB: &str = "mod core;\nmod shell;\n";
+
+// REQ: OA-TRC-209
+#[test]
+fn members_are_parsed_strictly_and_cross_checked_against_the_directories() {
+    // a clean one-crate workspace passes, with single quotes and a multi-line list
+    let ws = core_ws("m0", "pub fn f() {}\n");
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers =\n[\n  'crates/fx-a', # a\n  \"crates/fx-b\",\n]\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // zero members
+    ws.put("Cargo.toml", "[workspace]\n");
+    assert!(has(&ws.failures(), "no workspace members parsed"));
+    // an entry that is not a quoted string, and a glob
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", crates/fx-b]\n",
+    );
+    assert!(
+        has(&ws.failures(), "not a plain quoted path"),
+        "{:#?}",
+        ws.failures()
+    );
+    ws.put("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+    assert!(has(&ws.failures(), "not a plain quoted path"));
+    // a crate directory that is neither a member nor excluded; excluding it makes it pass
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\n",
+    );
+    ws.put("crates/fx-c/Cargo.toml", "[package]\nname = \"fx-c\"\n");
+    assert!(has(
+        &ws.failures(),
+        "crates/fx-c: has a Cargo.toml but is neither"
+    ));
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\nexclude = [\"crates/fx-c\"]\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a member that is not there
+    ws.put("Cargo.toml", "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\", \"crates/fx-z\"]\nexclude = [\"crates/fx-c\"]\n");
+    assert!(has(&ws.failures(), "crates/fx-z: cannot read Cargo.toml"));
+}
+
+// REQ: OA-TRC-210
+#[test]
+fn unreadable_missing_symlinked_and_redirected_sources_fail() {
+    // no src at all: nothing scanned
+    let ws = Ws::new("s0", "core", &[]);
+    assert!(
+        has(&ws.failures(), "fx-a: B8: no core files found to scan"),
+        "{:#?}",
+        ws.failures()
+    );
+    // a symlinked source file
+    let ws = core_ws("s1", "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-b/src/io.rs",
+        "pub fn r() { let _ = std::fs::read(\"x\"); }\n",
+    );
+    std::os::unix::fs::symlink(
+        ws.root.join("crates/fx-b/src/io.rs"),
+        ws.root.join("crates/fx-a/src/io.rs"),
+    )
+    .unwrap();
+    assert!(has(&ws.failures(), "symlink"), "{:#?}", ws.failures());
+    // custom [lib] / [[bin]] paths and a build script
+    let ws = core_ws("s2", "pub fn f() {}\n");
+    let head = "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"core\"\n";
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}\n[lib]\npath = \"elsewhere/lib.rs\"\n"),
+    );
+    assert!(has(
+        &ws.failures(),
+        "fx-a: B8: no custom [lib] or [[bin]] path"
+    ));
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}\n[[bin]]\nname = \"x\"\npath = \"src/cli.rs\"\n"),
+    );
+    assert!(has(
+        &ws.failures(),
+        "fx-a: B8: no custom [lib] or [[bin]] path"
+    ));
+    ws.put("crates/fx-a/Cargo.toml", head);
+    ws.put("crates/fx-a/build.rs", "fn main() {}\n");
+    assert!(has(&ws.failures(), "fx-a: B8: no build.rs"));
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        "[package]\nname = \"fx-a\"\nbuild = \"gen.rs\"\n\n[package.metadata.openatca]\nclass = \"core\"\n",
+    );
+    let _ = fs::remove_file(ws.root.join("crates/fx-a/build.rs"));
+    assert!(has(&ws.failures(), "fx-a: B8: no build.rs"));
+}
+
+// REQ: OA-TRC-211
+#[test]
+fn a_test_attribute_strips_items_only() {
+    // on a field, a match arm and a parameter nothing is stripped, so the code after is seen
+    for (tag, src) in [
+        ("t0", "pub struct S { #[cfg(test)] dbg: u8, f: std::fs::File }\n"),
+        ("t1", "pub fn f(x: u8) -> u8 { match x { #[cfg(test)] 0 => 1, _ => { let _ = std::fs::read(\"x\"); 2 } } }\n"),
+        ("t2", "pub fn f(#[cfg(test)] a: u8, b: u8) { let _ = std::fs::read(\"x\"); }\n"),
+        ("t3", "pub enum E { #[cfg(test)] A, B(std::fs::File) }\n"),
+        // any(test, ..) is compiled in a product build; not(test) is the product build
+        ("t4", "#[cfg(any(test, unix))]\nmod m { use std::fs; }\n"),
+        ("t5", "#[cfg(not(test))]\nmod m { use std::fs; }\n"),
+        // a statement is not an item
+        ("t6", "pub fn f() { #[cfg(test)] let _a = 1; let _ = std::fs::read(\"x\"); }\n"),
+    ] {
+        let ws = core_ws(tag, src);
+        assert!(has(&ws.failures(), "std::fs"), "{tag}: {:#?}", ws.failures());
+    }
+    // the real spellings are stripped: test, all(test, ..), an inner marker, a test-only file
+    let ws = core_ws(
+        "t7",
+        "#[cfg(test)]\nmod a { use std::fs; }\n#[cfg(all(test, unix))]\nmod b { use std::fs; }\n#[cfg(test)]\nfn c() { std::fs::read(\"x\"); }\n#[cfg(test)]\nuse std::io;\n#[cfg(test)]\nconst X: u8 = { 1 };\n#[cfg(test)]\nmod d;\nmod e;\npub fn ok() {}\n",
+    );
+    ws.put("crates/fx-a/src/d.rs", "use std::fs;\n");
+    ws.put("crates/fx-a/src/e.rs", "#![cfg(test)]\nuse std::fs;\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-212
+#[test]
+fn aliases_globs_extern_crate_and_includes_are_rejected() {
+    let cases: [(&str, &str, &str); 14] = [
+        ("a0", "use std as s;\n", "std"),
+        ("a1", "use std::fmt as f;\n", "as"),
+        ("a2", "use std::*;\n", "*"),
+        ("a3", "use std::{self as s};\n", "std::self"),
+        ("a4", "extern crate std as s;\n", "extern crate"),
+        ("a5", "use fx_b as f;\n", "as"),
+        ("a6", "use ::std::fs::read;\n", "std::fs"),
+        ("a7", "use fx_b;\n", "fx_b"),
+        ("a8", "pub fn f() { let _ = fx_b::go(); }\n", "fx_b"),
+        ("a9", "pub fn f() { let _ = ::fx_b::go(); }\n", "fx_b"),
+        ("a10", "pub const T: &str = include_str!(\"x.txt\");\n", "include_str!"),
+        ("a11", "pub const T: &str = env!(\"HOME\");\n", "env!"),
+        ("a12", "#[path = \"../fx-b/src/lib.rs\"]\nmod x;\n", "#[path]"),
+        ("a13", "pub fn f() { let _ = std::sync::atomic::AtomicU8::new(0); let _ = core::cell::Cell::new(0); }\n", "std::sync"),
+    ];
+    for (tag, src, want) in cases {
+        let ws = core_ws(tag, src);
+        assert!(
+            has(&ws.failures(), want),
+            "{tag} {src}: {:#?}",
+            ws.failures()
+        );
+    }
+    // allowed spellings pass
+    let ws = core_ws(
+        "a14",
+        "use core::fmt::{self, Debug};\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::size_of::<u8>() }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    let ws = core_ws(
+        "a15",
+        "use core::fmt::Debug;\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::size_of::<u8>() }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    for (tag, src) in [
+        ("a16", "use std::time::Duration;\n"),
+        ("a17", "use std::collections::HashMap;\n"),
+        ("a18", "use std::collections::LinkedList;\n"),
+        ("a19", "use std::collections;\n"),
+        ("a20", "use core::sync::atomic::AtomicU64;\n"),
+        ("a21", "use alloc::sync::Arc;\n"),
+        ("a22", "use std::os::unix::fs::MetadataExt;\n"),
+        ("a23", "use std::path::Path;\n"),
+    ] {
+        let ws = core_ws(tag, src);
+        assert!(!ws.failures().is_empty(), "{tag}: {src}");
+    }
+}
+
+// REQ: OA-TRC-213
+#[test]
+fn the_split_layout_cannot_hide_code_from_the_scan() {
+    // a third module, not core and not shell
+    let ws = split_ws(
+        "p0",
+        "mod core;\nmod shell;\nmod util;\n",
+        "pub fn f() {}\n",
+    );
+    ws.put(
+        "crates/fx-a/src/util.rs",
+        "pub fn r() { let _ = std::fs::read(\"x\"); }\n",
+    );
+    assert!(
+        has(&ws.failures(), "B7: lib.rs of a split crate"),
+        "{:#?}",
+        ws.failures()
+    );
+    assert!(has(&ws.failures(), "unexpected src/util.rs"));
+    // crate:: paths outside crate::core::, super:: out of the module
+    let ws = split_ws(
+        "p1",
+        SPLIT_LIB,
+        "pub fn f() { crate::shell_io(); crate::core::g(); }\npub fn g() {}\n",
+    );
+    assert!(
+        has(&ws.failures(), "crate::shell_io"),
+        "{:#?}",
+        ws.failures()
+    );
+    assert!(!has(&ws.failures(), "crate::core::g"));
+    let ws = split_ws("p2", SPLIT_LIB, "use super::util::r;\n");
+    assert!(has(&ws.failures(), "super"), "{:#?}", ws.failures());
+    // 2018 layout: src/core.rs is the core root and is scanned
+    let ws = Ws::new(
+        "p3",
+        "split",
+        &[
+            ("src/lib.rs", SPLIT_LIB),
+            ("src/core.rs", "mod sub;\nuse std::fs;\n"),
+            ("src/core/sub.rs", "pub fn x() {}\n"),
+            ("src/shell.rs", "pub fn s() {}\n"),
+        ],
+    );
+    assert!(
+        has(&ws.failures(), "src/core.rs:2: std::fs"),
+        "{:#?}",
+        ws.failures()
+    );
+    // a clean 2018-layout split crate passes
+    let ws = Ws::new(
+        "p4",
+        "split",
+        &[
+            ("src/lib.rs", SPLIT_LIB),
+            ("src/core.rs", "mod sub;\npub use self::sub::x;\n"),
+            ("src/core/sub.rs", "pub fn x() -> u8 { super::y() }\n"),
+            ("src/shell.rs", "pub fn s() {}\n"),
+        ],
+    );
+    assert!(!has(&ws.failures(), "src/core"), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-214
+#[test]
+fn test_file_names_do_not_exempt_and_module_files_resolve_like_rustc() {
+    // a normal module named like a test file is scanned
+    let ws = Ws::new(
+        "r0",
+        "core",
+        &[
+            ("src/lib.rs", "mod parse_tests;\nmod tests;\n"),
+            ("src/parse_tests.rs", "use std::fs;\n"),
+            ("src/tests.rs", "use std::io;\n"),
+        ],
+    );
+    let f = ws.failures();
+    assert!(
+        has(&f, "parse_tests.rs:1: std::fs") && has(&f, "tests.rs:1: std::io"),
+        "{f:#?}"
+    );
+    // foo.rs declares a test-only `util`: that is foo/util.rs, not the sibling util.rs
+    let ws = Ws::new(
+        "r1",
+        "core",
+        &[
+            ("src/lib.rs", "mod foo;\nmod util;\n"),
+            ("src/foo.rs", "#[cfg(test)]\nmod util;\n"),
+            ("src/foo/util.rs", "use std::fs;\n"),
+            ("src/util.rs", "use std::io;\n"),
+        ],
+    );
+    let f = ws.failures();
+    assert!(has(&f, "src/util.rs:1: std::io"), "{f:#?}");
+    assert!(!has(&f, "foo/util.rs"), "{f:#?}");
+    // children of a test-only module are test-only too
+    let ws = Ws::new(
+        "r2",
+        "core",
+        &[
+            ("src/lib.rs", "#[cfg(test)]\nmod helpers;\n"),
+            ("src/helpers/mod.rs", "mod deep;\n"),
+            ("src/helpers/deep.rs", "use std::fs;\n"),
+        ],
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // only the top-level src/bin and main.rs are skipped
+    let ws = Ws::new(
+        "r3",
+        "core",
+        &[
+            ("src/lib.rs", "mod sub;\n"),
+            ("src/sub/mod.rs", "mod bin;\n"),
+            ("src/sub/bin/mod.rs", "use std::fs;\n"),
+            ("src/bin/tool.rs", "use std::fs;\n"),
+            ("src/main.rs", "use std::fs;\n"),
+        ],
+    );
+    let f = ws.failures();
+    assert!(has(&f, "src/sub/bin/mod.rs:1: std::fs"), "{f:#?}");
+    assert!(
+        !has(&f, "src/bin/tool.rs") && !has(&f, "src/main.rs"),
+        "{f:#?}"
+    );
+}
+
+// REQ: OA-TRC-215
+#[test]
+fn every_dependency_table_and_rename_is_resolved_by_path() {
+    let head = "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"core\"\n\n";
+    for (tag, deps) in [
+        ("d0", "[dependencies]\nfx-b = { path = \"../fx-b\" }\n"),
+        (
+            "d1",
+            "[dependencies]\nfoo = { package = \"fx-b\", path = \"../fx-b\" }\n",
+        ),
+        (
+            "d2",
+            "[target.'cfg(unix)'.dependencies]\nfx-b = { path = \"../fx-b\" }\n",
+        ),
+        ("d3", "[dev-dependencies]\nfx-b = { path = \"../fx-b\" }\n"),
+        ("d4", "[dependencies] # why\nbar.path = \"../fx-b\"\n"),
+        ("d5", "[dependencies.baz]\npath = \"../fx-b\"\n"),
+    ] {
+        let ws = core_ws(tag, "pub fn f() {}\n");
+        ws.put("crates/fx-a/Cargo.toml", &format!("{head}{deps}"));
+        assert!(
+            has(&ws.failures(), "core crate depends on shell crate fx-b"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+    // a path that is not a member
+    let ws = core_ws("d6", "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}[dependencies]\nx = {{ path = \"../nowhere\" }}\n"),
+    );
+    assert!(has(&ws.failures(), "not a workspace member"));
+    // a renamed dependency is caught in source too
+    let ws = core_ws("d7", "pub fn f() { let _ = foo::go(); }\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}[dependencies]\nfoo = {{ package = \"fx-b\", path = \"../fx-b\" }}\n"),
+    );
+    assert!(
+        has(&ws.failures(), "foo: B8: names a shell or unsplit crate"),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+// REQ: OA-TRC-216
+#[test]
+fn the_real_workspace_is_checked_and_only_known_debt_remains() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rep = check(&root);
+    assert_eq!(rep.unsplit.len(), 12);
+    // oa-geo's `std::cell::Cell` in rhumb.rs is outside the B8 allowlist; it is reported to the
+    // coordinator rather than allowed. Nothing else may fail.
+    let rest: Vec<&String> = rep
+        .failures
+        .iter()
+        .filter(|f| !f.starts_with("crates/oa-geo/src/rhumb.rs:") || !f.contains("std::cell"))
+        .collect();
+    assert!(rest.is_empty(), "{rest:#?}");
+}

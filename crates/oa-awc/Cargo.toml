@@ -17,3 +17,6 @@ oa-json = { path = "../oa-json" }
 [[bin]]
 name = "oa-awc-summary"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

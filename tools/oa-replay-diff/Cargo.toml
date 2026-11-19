@@ -16,3 +16,6 @@ oa-track = { path = "../../crates/oa-track" }
 [[bin]]
 name = "oa-replay-diff"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "unsplit"

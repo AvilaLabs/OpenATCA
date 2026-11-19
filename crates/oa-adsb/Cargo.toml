@@ -19,3 +19,6 @@ oa-feed = { path = "../oa-feed" }
 [[bin]]
 name = "oa-adsb-clip"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

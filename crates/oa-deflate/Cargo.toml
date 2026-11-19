@@ -12,3 +12,6 @@ workspace = true
 [dependencies]
 # F1: path dependency inside this workspace, for CRC-32 (gzip trailer) and, in tests, the inflater.
 oa-zip = { path = "../oa-zip" }
+
+[package.metadata.openatca]
+class = "shell"
