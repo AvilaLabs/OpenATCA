@@ -7,7 +7,7 @@
 //! | item | class |
 //! |---|---|
 //! | [`ROW_BYTES`], `OFF_*`, [`DIGEST_HEADER`], [`ROWS_MAGIC`], [`ROWS_VERSION`], [`ROWS_HEADER_BYTES`], [`MAX_ROWS_PER_SECOND`], [`MAX_SECONDS`], [`CANON_FIELDS`], [`CANON_NAN_F32`] | core (constants) |
-//! | [`canon_row`], [`canon_row_at`], [`row_second`], [`field_at`] | core, pure |
+//! | [`canon_row`], [`canon_row_at`], [`canon_row_floats`], [`row_second`], [`field_at`] | core, pure |
 //! | [`second_line`], [`digest_end_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
 //! | [`Digester`] (`new`, `push`, `finish`) | core, pure (a subsystem under D5: owns its sums) |
 //! | [`rows_header`], [`parse_rows_header`], [`limit_text`] | core, pure |
@@ -138,8 +138,8 @@ fn put<const OFF: usize, const N: usize>(row: &mut CanonRow, bytes: [u8; N]) {
 }
 
 /// The one NaN of a canonical row (positive, quiet, no payload). Local on purpose: this file is
-/// also carried by the replay overlay onto old commits, which have no newer `oa-math` item; a
-/// test in `tests/canon.rs` pins it to `oa_math::canon_nan_f32`.
+/// also carried by the replay overlay onto old commits, which have no newer `oa-math` item; the
+/// test `tests/canon_nan.rs` pins it to `oa_math::canon_nan_f32`.
 pub const CANON_NAN_F32: u32 = 0x7fc0_0000;
 
 /// The IEEE bits of `x`, every NaN as [`CANON_NAN_F32`].
@@ -157,6 +157,22 @@ fn put_f32s<const OFF: usize, const N: usize>(row: &mut CanonRow, v: [f32; N]) {
     let bytes = v.into_iter().flat_map(|x| canon_f32_bits(x).to_le_bytes());
     for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
         *d = s;
+    }
+}
+
+/// Rewrites every NaN among the `f32` fields of a row (bytes `OFF_VE` up to `OFF_FLAGS`) as
+/// [`CANON_NAN_F32`]; the other bytes stay. A row read back from raw column bytes goes through
+/// this, so a base that spilled raw bits still yields canonical rows.
+pub fn canon_row_floats(row: &mut CanonRow) {
+    const { assert!(OFF_FLAGS > OFF_VE && (OFF_FLAGS - OFF_VE) % 4 == 0) };
+    let Some(floats) = row.get_mut(OFF_VE..OFF_FLAGS) else {
+        return;
+    };
+    for c in floats.chunks_exact_mut(4) {
+        if let Ok(b) = <[u8; 4]>::try_from(&*c) {
+            let bits = canon_f32_bits(f32::from_le_bytes(b));
+            c.copy_from_slice(&bits.to_le_bytes());
+        }
     }
 }
 

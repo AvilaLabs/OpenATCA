@@ -42,7 +42,7 @@ than one row, paired by emission order alone).
 
 ## What is trusted
 
-Nothing without checking. A digest needs its `v1` header and every chain hash recomputed; sizes
+Nothing without checking. A digest needs its `v2` header, its end line and every chain hash recomputed (a v1 digest is refused; there is no legacy path); sizes
 are bounded (2^20 seconds, 2^20 rows in a second). A rows file is used only after every second's
 hash and count are recomputed from its rows and equal the digest line, its header count equals the
 digest's total and it has no bytes after its last row. Any failure is exit 2 naming the first bad

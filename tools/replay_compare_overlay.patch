@@ -1,9 +1,9 @@
 diff --git a/crates/oa-track/src/canon.rs b/crates/oa-track/src/canon.rs
 new file mode 100644
-index 0000000..65ea675
+index 0000000..7338c0a
 --- /dev/null
 +++ b/crates/oa-track/src/canon.rs
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,451 @@
 +//! The canonical bytes of a tracker output row, the per-second digest over them, and the header
 +//! of the rows file that explains a difference between two runs. Core (B1): every item here is
 +//! pure and does no I/O; the files are written by [`crate::canon_spill`] (shell).
@@ -13,7 +13,7 @@ index 0000000..65ea675
 +//! | item | class |
 +//! |---|---|
 +//! | [`ROW_BYTES`], `OFF_*`, [`DIGEST_HEADER`], [`ROWS_MAGIC`], [`ROWS_VERSION`], [`ROWS_HEADER_BYTES`], [`MAX_ROWS_PER_SECOND`], [`MAX_SECONDS`], [`CANON_FIELDS`], [`CANON_NAN_F32`] | core (constants) |
-+//! | [`canon_row`], [`canon_row_at`], [`row_second`], [`field_at`] | core, pure |
++//! | [`canon_row`], [`canon_row_at`], [`canon_row_floats`], [`row_second`], [`field_at`] | core, pure |
 +//! | [`second_line`], [`digest_end_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
 +//! | [`Digester`] (`new`, `push`, `finish`) | core, pure (a subsystem under D5: owns its sums) |
 +//! | [`rows_header`], [`parse_rows_header`], [`limit_text`] | core, pure |
@@ -144,8 +144,8 @@ index 0000000..65ea675
 +}
 +
 +/// The one NaN of a canonical row (positive, quiet, no payload). Local on purpose: this file is
-+/// also carried by the replay overlay onto old commits, which have no newer `oa-math` item; a
-+/// test in `tests/canon.rs` pins it to `oa_math::canon_nan_f32`.
++/// also carried by the replay overlay onto old commits, which have no newer `oa-math` item; the
++/// test `tests/canon_nan.rs` pins it to `oa_math::canon_nan_f32`.
 +pub const CANON_NAN_F32: u32 = 0x7fc0_0000;
 +
 +/// The IEEE bits of `x`, every NaN as [`CANON_NAN_F32`].
@@ -163,6 +163,22 @@ index 0000000..65ea675
 +    let bytes = v.into_iter().flat_map(|x| canon_f32_bits(x).to_le_bytes());
 +    for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
 +        *d = s;
++    }
++}
++
++/// Rewrites every NaN among the `f32` fields of a row (bytes `OFF_VE` up to `OFF_FLAGS`) as
++/// [`CANON_NAN_F32`]; the other bytes stay. A row read back from raw column bytes goes through
++/// this, so a base that spilled raw bits still yields canonical rows.
++pub fn canon_row_floats(row: &mut CanonRow) {
++    const { assert!(OFF_FLAGS > OFF_VE && (OFF_FLAGS - OFF_VE) % 4 == 0) };
++    let Some(floats) = row.get_mut(OFF_VE..OFF_FLAGS) else {
++        return;
++    };
++    for c in floats.chunks_exact_mut(4) {
++        if let Ok(b) = <[u8; 4]>::try_from(&*c) {
++            let bits = canon_f32_bits(f32::from_le_bytes(b));
++            c.copy_from_slice(&bits.to_le_bytes());
++        }
 +    }
 +}
 +
@@ -441,10 +457,10 @@ index 0000000..65ea675
 +}
 diff --git a/crates/oa-track/src/canon_spill.rs b/crates/oa-track/src/canon_spill.rs
 new file mode 100644
-index 0000000..4924c1a
+index 0000000..b7d1ef7
 --- /dev/null
 +++ b/crates/oa-track/src/canon_spill.rs
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,169 @@
 +//! Reads a spilled tracker run back as canonical rows and writes the digest file and the rows
 +//! file ([`crate::canon`] is the pure side). Shell (B1, B3): every item here reads or writes
 +//! files.
@@ -469,8 +485,8 @@ index 0000000..4924c1a
 +use std::path::Path;
 +
 +use crate::canon::{
-+    digest_end_line, limit_text, row_second, rows_header, second_line, CanonRow, Digester,
-+    DIGEST_HEADER, FIELDS, MAX_ROWS_PER_SECOND, ROW_BYTES,
++    canon_row_floats, digest_end_line, limit_text, row_second, rows_header, second_line, CanonRow,
++    Digester, DIGEST_HEADER, FIELDS, MAX_ROWS_PER_SECOND, ROW_BYTES,
 +};
 +use crate::spill::{check_columns, ColReader, SpilledRun, WIDTHS};
 +
@@ -479,7 +495,8 @@ index 0000000..4924c1a
 +// A chunk takes whole seconds; the largest second must fit in one.
 +const _: () = assert!(MAX_ROWS_PER_SECOND <= CHUNK_ROWS);
 +
-+/// Calls `f` with every row of a spilled run, canonical, in emission order.
++/// Calls `f` with every row of a spilled run, canonical (every NaN among the floats is the one
++/// canonical NaN), in emission order.
 +pub fn spill_canon_rows(
 +    run: &SpilledRun,
 +    f: &mut dyn FnMut(&CanonRow) -> io::Result<()>,
@@ -516,6 +533,8 @@ index 0000000..4924c1a
 +                };
 +                dst.copy_from_slice(src);
 +            }
++            // A base that spilled raw bits may hold any NaN: the canonical row has the one NaN.
++            canon_row_floats(&mut row);
 +            f(&row)?;
 +            seen = seen
 +                .checked_add(1)
@@ -540,6 +559,10 @@ index 0000000..4924c1a
 +
 +/// Writes the digest file and/or the rows file of a spilled run. The rows file lists the rows
 +/// grouped by second in ascending order, each second's rows in emission order.
++///
++/// Memory: the digest holds one entry per second (at most [`crate::canon::MAX_SECONDS`]); a rows
++/// file written out of second order holds at most [`CHUNK_ROWS`] rows (about 356 MB of canonical
++/// rows) at a time, and one in order holds none.
 +pub fn write_canon(
 +    run: &SpilledRun,
 +    digest: Option<&Path>,

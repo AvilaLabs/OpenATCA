@@ -22,8 +22,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::canon::{
-    digest_end_line, limit_text, row_second, rows_header, second_line, CanonRow, Digester,
-    DIGEST_HEADER, FIELDS, MAX_ROWS_PER_SECOND, ROW_BYTES,
+    canon_row_floats, digest_end_line, limit_text, row_second, rows_header, second_line, CanonRow,
+    Digester, DIGEST_HEADER, FIELDS, MAX_ROWS_PER_SECOND, ROW_BYTES,
 };
 use crate::spill::{check_columns, ColReader, SpilledRun, WIDTHS};
 
@@ -32,7 +32,8 @@ pub const CHUNK_ROWS: u64 = 1 << 22;
 // A chunk takes whole seconds; the largest second must fit in one.
 const _: () = assert!(MAX_ROWS_PER_SECOND <= CHUNK_ROWS);
 
-/// Calls `f` with every row of a spilled run, canonical, in emission order.
+/// Calls `f` with every row of a spilled run, canonical (every NaN among the floats is the one
+/// canonical NaN), in emission order.
 pub fn spill_canon_rows(
     run: &SpilledRun,
     f: &mut dyn FnMut(&CanonRow) -> io::Result<()>,
@@ -69,6 +70,8 @@ pub fn spill_canon_rows(
                 };
                 dst.copy_from_slice(src);
             }
+            // A base that spilled raw bits may hold any NaN: the canonical row has the one NaN.
+            canon_row_floats(&mut row);
             f(&row)?;
             seen = seen
                 .checked_add(1)
@@ -93,6 +96,10 @@ pub struct CanonSummary {
 
 /// Writes the digest file and/or the rows file of a spilled run. The rows file lists the rows
 /// grouped by second in ascending order, each second's rows in emission order.
+///
+/// Memory: the digest holds one entry per second (at most [`crate::canon::MAX_SECONDS`]); a rows
+/// file written out of second order holds at most [`CHUNK_ROWS`] rows (about 356 MB of canonical
+/// rows) at a time, and one in order holds none.
 pub fn write_canon(
     run: &SpilledRun,
     digest: Option<&Path>,

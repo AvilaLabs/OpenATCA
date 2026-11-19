@@ -4371,7 +4371,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted per system with their samples and are scored unfitted (offset 0), and the output says so.
 - **OA-RDF-007** A digest is accepted only with the `v2` header as its first line and with every
   chain hash equal to the chain recomputed from the line and the lines before it; a line that fails
-  is named.
+  is named. A `v1` digest is refused (there is no legacy path), and so is a blank line before the
+  header.
 - **OA-RDF-008** A digest or expect file over its size limit, a second with no rows or over 2^20
   rows, and row counts that overflow are errors (exit 2), never a panic; a failing standard output
   (a closed pipe) is exit 2 with a message.
@@ -4393,12 +4394,18 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   patch and of every patched file; any mismatch is a refusal (exit 2).
 - **OA-RDF-015** The overlay patch creates `canon.rs` and `canon_spill.rs` byte for byte as they are in
   `crates/oa-track/src/`, so an old commit writes the digest line, second hash, chain and end line
-  of the tree.
-- **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with `RUSTFLAGS`,
-  `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS` removed, and its report
-  states that they were cleared, what they held and the toolchain.
+  of the tree. Reading the spill columns back turns every NaN among the `f32` fields into the one
+  canonical NaN, so rows are canonical whatever bits the old commit spilled.
+- **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with compiler flags
+  neutralised: the environment variables `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS`
+  are not passed, `CARGO_ENCODED_RUSTFLAGS` is passed empty (which cargo reads before every
+  config file, so a `target.<triple>.rustflags` or `target.<cfg>.rustflags` in the user's config
+  is not read), and `--config build.rustflags=[]` is given; its report states what the caller's
+  four flag variables held, that they were cleared, and the toolchain. Flags in a
+  `.cargo/config.toml` of the tree under test are not neutralised.
 - **OA-RDF-017** A digest ends with `end <seconds> <rows> <chain>` (format v2), which the reader
-  recomputes from the lines before it and requires; a digest cut at a line boundary, an end line that
+  recomputes from the lines before it and requires, compared field by field on single spaces (tabs,
+  repeated or trailing spaces are refused); a digest cut at a line boundary, an end line that
   disagrees, or text after it is an error.
 - **OA-RDF-018** Two digests that both have no seconds are exit 2 ("no seconds to compare"), not
   identical.
@@ -4408,6 +4415,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   second that was not diffed, is an inconsistency: exit 2, never a pass.
 - **OA-RDF-021** An option given twice is a usage error (exit 2).
 - **OA-RDF-022** `tools/replay_compare.sh` runs cargo and rustc under `env -i` with only PATH, HOME,
-  RUSTUP_HOME, CARGO_HOME, TMPDIR and the two variables it sets, with `--config build.rustflags=[]`;
+  RUSTUP_HOME, CARGO_HOME, TMPDIR, an empty `CARGO_ENCODED_RUSTFLAGS` and the two variables it
+  sets, with `--config build.rustflags=[]`;
   it records the dropped variable names, the sha256 of both digests, both rows files, both
   tracker binaries and the diff binary, and a missing diff binary is exit 2.
+- **OA-RDF-023** `tools/replay_compare.sh` refuses an output directory that exists and is not
+  empty (exit 2, before any build, touching nothing), and a run that does not reach its end removes
+  the rows files it made.

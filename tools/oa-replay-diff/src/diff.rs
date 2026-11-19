@@ -95,6 +95,9 @@ pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
     for (n, line) in text.lines().enumerate() {
         let n = n.saturating_add(1);
         if line.trim().is_empty() {
+            if !header {
+                return Err(format!("line {n}: a blank line before the digest header"));
+            }
             continue;
         }
         if ended {
@@ -110,16 +113,15 @@ pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
             continue;
         }
         if line.split_whitespace().next() == Some("end") {
-            let f: Vec<&str> = line.split_whitespace().collect();
             let want = format!(
                 "end {} {} {}",
                 out.len(),
                 total,
                 oa_track::canon::hex32(&prev)
             );
-            if f.len() != 4 || f.join(" ") != want {
+            if line != want {
                 return Err(format!(
-                    "line {n}: the end line does not match the lines before it (expected `{want}`)"
+                    "line {n}: the end line does not match the lines before it (expected exactly `{want}`, fields on single spaces)"
                 ));
             }
             ended = true;
@@ -1355,7 +1357,7 @@ mod tests {
 
     // REQ: OA-RDF-007
     #[test]
-    fn a_digest_without_its_v1_header_or_with_a_wrong_chain_is_refused() {
+    fn a_digest_without_its_v2_header_or_with_a_wrong_chain_is_refused() {
         let good = digest_text(&[r(10 * S, 1), r(11 * S, 1), r(12 * S, 1)]);
         assert_eq!(parse_digest(&good).unwrap().len(), 3);
         // Another version header, a comment instead of the header, the header missing.
@@ -1363,6 +1365,11 @@ mod tests {
         assert!(parse_digest(&v2).unwrap_err().contains("line 1"));
         let comment = good.replacen(DIGEST_HEADER, "# a comment", 1);
         assert!(parse_digest(&comment).unwrap_err().contains("line 1"));
+        // A v1 digest (no end line, no legacy path) is refused at its header.
+        assert!(parse_digest(&v2).unwrap_err().contains("another version"));
+        // A blank line before the header is refused; after it, blank lines are skipped.
+        let e = parse_digest(&format!("\n{good}")).unwrap_err();
+        assert!(e.contains("line 1") && e.contains("blank line"), "{e}");
         let no_header: String = good.lines().skip(1).map(|l| format!("{l}\n")).collect();
         assert!(parse_digest(&no_header).is_err());
         // Edit one chain hash (line 3 is the second of three): that line is named.
@@ -1407,6 +1414,23 @@ mod tests {
         assert!(parse_digest(&extra)
             .unwrap_err()
             .contains("after the end line"));
+    }
+
+    // REQ: OA-RDF-017
+    #[test]
+    fn the_end_line_is_compared_field_by_field_on_single_spaces() {
+        let good = digest_text(&[r(10 * S, 1), r(11 * S, 1)]);
+        assert_eq!(parse_digest(&good).unwrap().len(), 2);
+        let end = good.lines().last().unwrap();
+        for bad in [
+            end.replacen(' ', "  ", 1),
+            end.replacen(' ', "\t", 1),
+            format!("{end} "),
+        ] {
+            let text = good.replacen(end, &bad, 1);
+            let e = parse_digest(&text).unwrap_err();
+            assert!(e.contains("end line") && e.contains("single spaces"), "{e}");
+        }
     }
 
     // REQ: OA-RDF-018

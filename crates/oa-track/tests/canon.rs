@@ -363,3 +363,37 @@ fn a_rows_header_is_checked_in_full_and_hash_rows_equals_the_digester() {
     assert_eq!(d.finish()[0].hash, hash_rows(&rows).unwrap());
     assert_ne!(hash_rows(&rows[1..]).unwrap(), hash_rows(&rows).unwrap());
 }
+
+// REQ: OA-RDF-015
+#[test]
+fn spill_columns_holding_raw_nan_bits_come_out_as_the_canonical_nan() {
+    // A base that spilled `x.to_bits()` leaves any NaN in the columns; the canon code that reads
+    // them back is what makes the rows canonical.
+    let dir = scratch("raw_nan");
+    let rows = [row(1_700_000_000_000_000_000, 1, 1.0)];
+    let run = spill(&dir, &rows);
+    let raw = |bits: &[u32]| -> Vec<u8> { bits.iter().flat_map(|b| b.to_le_bytes()).collect() };
+    fs::write(run.dir.join("ve"), raw(&[0x7fc0_0001])).unwrap();
+    fs::write(run.dir.join("vn"), raw(&[0xffc0_0000])).unwrap();
+    fs::write(
+        run.dir.join("poscov"),
+        raw(&[0x7f80_0001, 0x3f80_0000, 0xffff_ffff]),
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    spill_canon_rows(&run, &mut |r| {
+        got.push(*r);
+        Ok(())
+    })
+    .unwrap();
+    let b = got[0];
+    let nan = 0x7fc0_0000u32.to_le_bytes();
+    assert_eq!(b[OFF_VE..OFF_VE + 4], nan);
+    assert_eq!(b[OFF_VN..OFF_VN + 4], nan);
+    assert_eq!(b[OFF_POS_COV..OFF_POS_COV + 4], nan);
+    assert_eq!(b[OFF_POS_COV + 4..OFF_POS_COV + 8], 1.0f32.to_le_bytes());
+    assert_eq!(b[OFF_POS_COV + 8..OFF_POS_COV + 12], nan);
+    // Non-float fields are untouched.
+    assert_eq!(b[OFF_ADDR..OFF_ADDR + 4], 1u32.to_le_bytes());
+    assert_eq!(b[OFF_FLAGS], O_TICK);
+}

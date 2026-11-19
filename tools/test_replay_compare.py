@@ -10,6 +10,7 @@ import unittest
 SCRIPT = Path(__file__).resolve().parent / "replay_compare.sh"
 OVERLAY_SCRIPT = Path(__file__).resolve().parent / "replay_overlay_apply.sh"
 OVERLAY_PATCH = Path(__file__).resolve().parent / "replay_compare_overlay.patch"
+CLEAN_ENV = Path(__file__).resolve().parent / "replay_clean_env.sh"
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -77,6 +78,25 @@ class ReplayCompareArguments(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("exists", r.stderr)
         self.assertEqual((self.out / "report.txt").read_text(), "old")
+
+    # REQ: OA-RDF-023
+    def test_a_non_empty_output_directory_is_refused_before_anything_is_built(self):
+        self.out.mkdir()
+        for name in ["overlay-A.txt", "hashes-A.txt", "time-A.txt", "rows-A.bin"]:
+            (self.out / name).write_text("stale")
+        r = run("HEAD", "HEAD", str(self.clip), str(self.out))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("not empty", r.stderr)
+        # Nothing was built or removed: the stale files are exactly as they were.
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                         ["hashes-A.txt", "overlay-A.txt", "rows-A.bin", "time-A.txt"])
+        self.assertEqual((self.out / "rows-A.bin").read_text(), "stale")
+        # An empty existing directory is fine (it gets as far as the build, which is refused here
+        # for the clip, not for the directory).
+        empty = self.dir / "empty"
+        empty.mkdir()
+        r = run("HEAD", "HEAD", str(self.dir / "nope.oaf"), str(empty))
+        self.assertIn("no such clip", r.stderr)
 
 
 def json_q(text):
@@ -299,7 +319,7 @@ class OverlayApply(unittest.TestCase):
             self.assertIn("--config build.rustflags=[]", b)
         names = {l[4:].split("=")[0] for l in calls.splitlines() if l.startswith("ENV ")}
         allowed = {"PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR", "CARGO_BUILD_JOBS",
-                   "CARGO_TARGET_DIR", "PWD", "SHLVL", "OLDPWD", "_"}
+                   "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "PWD", "SHLVL", "OLDPWD", "_"}
         self.assertLessEqual(names, allowed, names - allowed)
         report = (out / "report.txt").read_text()
         for v in ["RUSTFLAGS=[-C target-cpu=native]", "CARGO_ENCODED_RUSTFLAGS=[-Ctarget-cpu=native]",
@@ -345,6 +365,49 @@ class OverlayApply(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 2, res.stderr)
         self.assertIn("is not at", res.stderr)
+        # A failed run leaves no rows file behind (OA-RDF-023).
+        self.assertEqual(sorted(p.name for p in (self.dir / "out").glob("rows-*")), [])
+
+
+class CleanBuildEnvironment(unittest.TestCase):
+    # REQ: OA-RDF-016
+    def test_a_target_rustflags_config_in_cargo_home_does_not_reach_the_compiler(self):
+        home = Path(os.environ.get("RUSTUP_HOME", Path.home() / ".rustup"))
+        if not (home / "toolchains").is_dir():
+            self.skipTest("no rustup home")
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "cargo_home").mkdir()
+            (t / "cargo_home" / "config.toml").write_text(
+                '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n'
+            )
+            crate = t / "c"
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(
+                '[package]\nname = "probe"\nversion = "0.0.0"\nedition = "2021"\n'
+            )
+            (crate / "src" / "lib.rs").write_text("")
+            base = dict(os.environ, RUSTUP_HOME=str(home), CARGO_HOME=str(t / "cargo_home"))
+            # The config does reach a build run the plain way (so the check below proves something).
+            plain = subprocess.run(
+                ["env", "-i", f"PATH={base['PATH']}", f"HOME={t}", f"RUSTUP_HOME={home}",
+                 f"CARGO_HOME={t / 'cargo_home'}", "cargo", "+1.89.0", "build", "-v", "--offline",
+                 "--config", "build.rustflags=[]", "--target-dir", str(t / "tp")],
+                cwd=crate, capture_output=True, text=True, timeout=120,
+            )
+            self.assertIn("target-cpu=native", plain.stderr, plain.stderr)
+            # The script's environment ignores it.
+            res = subprocess.run(
+                ["bash", "-c",
+                 '. "$1"; replay_clean_env; "${clean_env_prefix[@]}" cargo +1.89.0 build -v --offline '
+                 "--config 'build.rustflags=[]' --target-dir \"$2\"",
+                 "x", str(CLEAN_ENV), str(t / "tc")],
+                cwd=crate, capture_output=True, text=True, timeout=120, env=base,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("rustc --crate-name probe", res.stderr)
+            self.assertNotIn("target-cpu", res.stderr)
+            self.assertNotIn("-C target", res.stderr)
 
 
 if __name__ == "__main__":

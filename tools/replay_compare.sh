@@ -18,9 +18,10 @@
 #   REPLAY_COMPARE_KEEP_ROWS  1 keeps the two rows files in <outdir>
 #
 # Every cargo and rustc call (both builds, the diff tool's build, the toolchain query) runs under
-# `env -i` with only PATH, HOME, RUSTUP_HOME, CARGO_HOME and TMPDIR (those that are set) and the
-# two variables this script sets itself (CARGO_BUILD_JOBS, CARGO_TARGET_DIR), and with
-# `--config build.rustflags=[]`, so no RUSTFLAGS-like variable or user config can change float
+# `env -i` with only PATH, HOME, RUSTUP_HOME, CARGO_HOME and TMPDIR (those that are set), an empty
+# CARGO_ENCODED_RUSTFLAGS and the two variables this script sets itself (CARGO_BUILD_JOBS,
+# CARGO_TARGET_DIR), and with `--config build.rustflags=[]`, so no RUSTFLAGS-like variable or
+# user config (a `target.<triple>.rustflags` included; see replay_clean_env.sh) can change float
 # results (-C target-cpu=native does) between the two builds. Builds use --locked. The report
 # records the names of every environment variable that was dropped and the values of the flag
 # variables among them, the toolchain (`rustc -vV`), the sha256 of the overlay patch and of every
@@ -63,6 +64,8 @@ clip="${pos[2]}"
 outdir="${pos[3]}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=replay_clean_env.sh
+. "$here/replay_clean_env.sh"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 
 # A commit spec is a hash or a ref name: no options, no revision syntax, nothing that names the
@@ -85,12 +88,15 @@ commit_b="$(resolve "$spec_b")"
 
 [ -f "$clip" ] || die "no such clip: $clip"
 [ -z "$expect" ] || [ -f "$expect" ] || die "no such expect file: $expect"
+# A new or empty output directory only: nothing stale (an overlay report, hashes, a time file or a
+# rows file of an earlier run) can be read as this run's.
+if [ -e "$outdir" ]; then
+    [ -d "$outdir" ] || die "$outdir exists and is not a directory"
+    [ -z "$(ls -A "$outdir")" ] || die "$outdir exists and is not empty; use a new output directory"
+fi
 mkdir -p "$outdir"
 outdir="$(cd "$outdir" && pwd)"
 clip="$(cd "$(dirname "$clip")" && pwd)/$(basename "$clip")"
-for f in report.txt summary.txt; do
-    [ ! -e "$outdir/$f" ] || die "$outdir/$f exists; use a new output directory"
-done
 scratch="${pos[4]:-$outdir/work}"
 mkdir -p "$scratch"
 scratch="$(cd "$scratch" && pwd)"
@@ -111,14 +117,14 @@ flags_before="RUSTFLAGS=[${RUSTFLAGS-}] CARGO_ENCODED_RUSTFLAGS=[${CARGO_ENCODED
 kept_vars=" PATH HOME RUSTUP_HOME CARGO_HOME TMPDIR "
 dropped_vars="$(env | cut -d= -f1 | sort | while read -r n; do case "$kept_vars" in *" $n "*) ;; *) echo "$n" ;; esac; done | tr '\n' ' ')"
 # The environment cargo and rustc run in: nothing but these.
-clean_env_prefix=(env -i "PATH=$PATH" "HOME=${HOME-}")
-[ -z "${RUSTUP_HOME+x}" ] || clean_env_prefix+=("RUSTUP_HOME=$RUSTUP_HOME")
-[ -z "${CARGO_HOME+x}" ] || clean_env_prefix+=("CARGO_HOME=$CARGO_HOME")
-[ -z "${TMPDIR+x}" ] || clean_env_prefix+=("TMPDIR=$TMPDIR")
+replay_clean_env
 rustc_vv="$("${clean_env_prefix[@]}" rustc "+$toolchain" -vV 2>&1)" || die "no rustc for toolchain $toolchain"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 worktrees=()
+finished=0
 cleanup() {
+    # A run that did not reach its end leaves no rows file behind.
+    [ "$finished" = 1 ] || rm -f "$outdir/rows-A.bin" "$outdir/rows-B.bin"
     for w in "${worktrees[@]}"; do
         git -C "$repo" worktree remove --force "$w" >/dev/null 2>&1 || true
     done
@@ -202,7 +208,7 @@ status=0
     echo "commit B: $commit_b ($spec_b)"
     echo "clip: $clip"
     echo "clip sha256: $clip_sha"
-    echo "builds ran under env -i with only PATH, HOME, RUSTUP_HOME, CARGO_HOME, TMPDIR, CARGO_BUILD_JOBS, CARGO_TARGET_DIR, and --config build.rustflags=[]"
+    echo "builds ran under env -i with only PATH, HOME, RUSTUP_HOME, CARGO_HOME, TMPDIR, an empty CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_JOBS, CARGO_TARGET_DIR, and --config build.rustflags=[]"
     echo "environment flags cleared for the builds: $flags_before"
     echo "environment variables dropped: $dropped_vars"
     echo "toolchain: $toolchain"
@@ -246,5 +252,6 @@ status=0
 if [ "${REPLAY_COMPARE_KEEP_ROWS:-0}" != 1 ]; then
     rm -f "$outdir/rows-A.bin" "$outdir/rows-B.bin"
 fi
+finished=1
 cat "$outdir/report.txt"
 exit "$status"
