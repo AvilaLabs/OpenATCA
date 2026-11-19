@@ -4470,6 +4470,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-CMP-066** Each run binds its cohort ID and scoring role to the frozen protocol plus the raw
   runner manifest seed/scenario; metadata must agree, and the development command cannot launch
   nominal qualification or sealed fault-cohort seeds.
+- **OA-CMP-067** The wrapper pins the comparison protocol hash (equal to the evaluator's pinned value) and refuses a protocol file or recorded `protocol_sha256` that differs.
+- **OA-CMP-068** A run's status is `completed` only for a clean, reference-validated run; a dirty source tree gives `exploratory (source tree not clean)`, and every status other than `completed`, including `reference_failure`, exits 3 whether or not `--require-competitive-pass` is given.
 - **OA-CMP-210** A `missing` output is an explicit row with scheduled `score_ns == publish_ns`,
   empty `source_ns` and empty position/velocity values; no required grid row may be omitted.
 
@@ -4504,6 +4506,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-CMP-218** Qualified v1 accuracy requires identical candidate and baseline usable post-init
   truth-grid key sets; a mismatch blocks qualified accuracy while raw per-system metrics and
   keyset intersection/difference counts remain reported.
+- **OA-CMP-219** The evaluator pins the SHA-256 of `validation/comparison-protocol-v1.json`; any other protocol bytes make accuracy qualification `unqualified_protocol_hash_mismatch` with the reason "protocol file does not match the frozen v1 hash", and every threshold it applies (ratios, coverage minimum, coast age, initialization window) is read from the verified protocol.
+- **OA-CMP-220** Every unpaired position, velocity, age and per-group statistic carries its coverage (rows used, rows expected, fraction) in the same object as its figures.
+- **OA-CMP-221** Parsed integers and numbers must match a strict decimal pattern; underscores, spaces, a leading plus sign, and inf/nan text are refused.
+- **OA-CMP-222** The cluster bootstrap reports its replicate count and how many replicates were dropped for a zero denominator.
 
 ## Motion-model development study
 
@@ -4580,3 +4586,4 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-ACC-166** Run manifests use the frozen `adsb_kinematic_v2` model for the six established scenarios and `adsb_motion_study_v1` only for onset-exit.
 - **OA-ACC-167** Onset-exit truth validation compares geographic velocity using the WGS84 Jacobian at each generated latitude while retaining the frozen position and velocity tolerances.
 - **OA-ACC-168** Containment uses position error in candidate-local ENU axes matching emitted covariance, and turn-rate residuals use the tracker's clockwise-positive sign convention.
+- **OA-ACC-169** The motion-study scorer, selector and checker load `validation/motion-study-v1.json` only if its bytes match the pinned v1 SHA-256, and otherwise fail closed with "protocol file does not match the frozen v1 hash".
