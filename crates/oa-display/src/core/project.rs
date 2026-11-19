@@ -170,17 +170,6 @@ fn chi_sin_cos(c: f64, w_over_c: f64) -> (f64, f64) {
     ((w - 1.0) / (w + 1.0), 2.0 * oa_ieee::sqrt(w) / (w + 1.0))
 }
 
-/// The remainder of `a / b` with the sign of `b`, as `f64::rem_euclid` defines it (std's own
-/// definition, written here because the standard library's method is not allowed in core).
-pub fn rem_euclid_f64(a: f64, b: f64) -> f64 {
-    let r = a % b;
-    if r < 0.0 {
-        r + b.abs()
-    } else {
-        r
-    }
-}
-
 fn saturate(v: f64) -> i32 {
     let lim = f64::from(COORD_LIMIT);
     // Finite by the callers' checks; a NaN would saturate to 0 and is excluded before this.
@@ -192,8 +181,9 @@ fn saturate(v: f64) -> i32 {
 pub fn project_rad(p: &Projection, lat: f64, lon: f64) -> Option<(i32, i32)> {
     let (sc, cc) = chi_sin_cos(p.c, oa_math::exp(iso_log(p.ecc, p.n, oa_math::sin(lat))));
     let tau = std::f64::consts::TAU;
-    let d =
-        p.n * (rem_euclid_f64(lon - p.lon0_rad + std::f64::consts::PI, tau) - std::f64::consts::PI);
+    let d = p.n
+        * (oa_math::rem_euclid(lon - p.lon0_rad + std::f64::consts::PI, tau)
+            - std::f64::consts::PI);
     let cd = oa_math::cos(d);
     let denom = 1.0 + sc * p.sin_chi0 + cc * p.cos_chi0 * cd;
     if !denom.is_finite() || denom < MIN_DENOMINATOR {

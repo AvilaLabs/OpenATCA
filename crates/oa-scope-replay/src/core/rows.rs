@@ -410,7 +410,7 @@ pub fn velocity_of(east_mps: f32, north_mps: f32) -> (u16, u16) {
     if kt < MIN_TRACK_KT {
         return (gs, NO_U16);
     }
-    let deg = oa_display::core::project::rem_euclid_f64(oa_math::atan2(e, n).to_degrees(), 360.0);
+    let deg = oa_math::rem_euclid(oa_math::atan2(e, n).to_degrees(), 360.0);
     let dd = oa_ieee::round(deg * 10.0) as u16;
     (gs, if dd >= 3600 { 0 } else { dd })
 }
