@@ -9,7 +9,8 @@
 use oa_adsb::{
     reports_push, Reports, Row, F_ALT_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY,
 };
-use oa_track::adsb::{adsb_measurements, AdsbConfig};
+use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
+use oa_track::params::{NACV_BOUND_VEL_SIGMA_MPS, NACV_VEL_SIGMA_MPS};
 use oa_track::{M_ALT_GEOMETRIC, M_HAS_VEL};
 use oa_truth::{build_truth, DEFAULT_CONFIG, REMOVE_NAMES};
 
@@ -35,6 +36,15 @@ fn row(t_s: i64, icao: u32, lat: f64, lon: f64) -> Row {
     }
 }
 
+/// The adapter with the NACv-bound velocity noise (the behaviour before the calibrated table):
+/// the tests of the bound arithmetic below pin it, and prove the table is the only change.
+fn bound_cfg() -> AdsbConfig {
+    AdsbConfig {
+        vel_sigma_mps: NACV_BOUND_VEL_SIGMA_MPS,
+        ..AdsbConfig::default()
+    }
+}
+
 fn reports(rows: &[Row]) -> Reports {
     let mut r = Reports::default();
     for x in rows {
@@ -47,7 +57,7 @@ fn reports(rows: &[Row]) -> Reports {
 #[test]
 fn measurement_noise_comes_from_nacp_and_nacv() {
     let rows = vec![row(0, 0xABCDEF, 41.9, -88.3)];
-    let (m, s) = adsb_measurements(&reports(&rows), &AdsbConfig::default());
+    let (m, s) = adsb_measurements(&reports(&rows), &bound_cfg());
     assert_eq!((s.rows_in, s.passed), (1, 1));
     let m = m[0];
     // NACp 9: 95 % bound 30 m, per-axis sigma 30 / 2.448.
@@ -69,7 +79,7 @@ fn measurement_noise_comes_from_nacp_and_nacv() {
     for (nacp, bound) in [(8u8, 92.6), (9, 30.0), (10, 10.0), (11, 3.0)] {
         let mut r = row(0, 1, 41.9, -88.3);
         r.nac_p = nacp;
-        let (m, _) = adsb_measurements(&reports(&[r]), &AdsbConfig::default());
+        let (m, _) = adsb_measurements(&reports(&[r]), &bound_cfg());
         assert!(
             (f64::from(m[0].pos_cov_m2[0]) - (bound / S95).powi(2)).abs()
                 < 0.01 * (bound / S95).powi(2) + 1e-3
@@ -95,7 +105,7 @@ fn quality_carry_forward_defaults_and_geometric_altitude() {
     // Geometric altitude only on the first.
     a.baro_alt_ft = NONE_I32;
     a.geom_alt_ft = 35_100;
-    let (m, s) = adsb_measurements(&reports(&[a, b, c]), &AdsbConfig::default());
+    let (m, s) = adsb_measurements(&reports(&[a, b, c]), &bound_cfg());
     assert_eq!((s.passed, s.removed[3]), (2, 1), "{s:?}");
     assert!(m[0].flags & M_ALT_GEOMETRIC != 0 && m[0].alt_ft == 35_100);
     // The second row's NACv was carried (2): sigma 3 / 2.448.
@@ -103,13 +113,13 @@ fn quality_carry_forward_defaults_and_geometric_altitude() {
     // A velocity with no NACv in age is used as NACv 1 (10 m/s bound), and counted.
     let mut d = row(0, 6, 41.9, -88.3);
     d.nac_v = NONE_U8;
-    let (m, s) = adsb_measurements(&reports(&[d]), &AdsbConfig::default());
+    let (m, s) = adsb_measurements(&reports(&[d]), &bound_cfg());
     assert!((f64::from(m[0].vel_cov_m2s2[0]) - (10.0 / S95).powi(2)).abs() < 1e-3);
     assert_eq!(s.velocity_default_nacv, 1);
     // No ground speed: no velocity.
     let mut e = row(0, 7, 41.9, -88.3);
     e.gs_dkt = NONE_U16;
-    let (m, _) = adsb_measurements(&reports(&[e]), &AdsbConfig::default());
+    let (m, _) = adsb_measurements(&reports(&[e]), &bound_cfg());
     assert_eq!(m[0].flags & M_HAS_VEL, 0);
 }
 
@@ -183,4 +193,57 @@ fn gating_is_the_same_code_as_the_truth_builder() {
     );
     // Output is in time order.
     assert!(m.windows(2).all(|w| w[0].toa_ns <= w[1].toa_ns));
+}
+
+// REQ: OA-TRK-339
+#[test]
+fn the_velocity_noise_comes_from_the_configured_table_by_nacv() {
+    // The default is the calibrated table: a NACv-2 report gets its entry squared.
+    let rows = vec![row(0, 0xABCDEF, 41.9, -88.3)];
+    let (m, _) = adsb_measurements(&reports(&rows), &AdsbConfig::default());
+    let want = (NACV_VEL_SIGMA_MPS[2] * NACV_VEL_SIGMA_MPS[2]) as f32;
+    assert_eq!(m[0].vel_cov_m2s2, [want, 0.0, want]);
+    // A configured table is used as given, whatever the NACv bound says.
+    let cfg = AdsbConfig {
+        vel_sigma_mps: [f64::INFINITY, 7.0, 0.5, 0.25, 0.125],
+        ..AdsbConfig::default()
+    };
+    for (nacv, sigma) in [(1u8, 7.0f64), (2, 0.5), (3, 0.25), (4, 0.125)] {
+        let mut r = row(0, 1, 41.9, -88.3);
+        r.nac_v = nacv;
+        let (m, _) = adsb_measurements(&reports(&[r]), &cfg);
+        let v = (sigma * sigma) as f32;
+        assert_eq!(m[0].vel_cov_m2s2, [v, 0.0, v], "NACv {nacv}");
+    }
+    // A velocity with no NACv takes the default NACv's entry.
+    let mut d = row(0, 6, 41.9, -88.3);
+    d.nac_v = NONE_U8;
+    let (m, s) = adsb_measurements(&reports(&[d]), &cfg);
+    assert_eq!(m[0].vel_cov_m2s2[0], 49.0);
+    assert_eq!(s.velocity_default_nacv, 1);
+    // The bound table is the old arithmetic exactly.
+    for (k, b) in [(1usize, 10.0f64), (2, 3.0), (3, 1.0), (4, 0.3)] {
+        assert_eq!(NACV_BOUND_VEL_SIGMA_MPS[k], b / S95);
+    }
+    // Every entry is positive and finite, and the table is accepted.
+    assert!(check_adsb_config(&AdsbConfig::default()).is_ok());
+    assert!(check_adsb_config(&bound_cfg()).is_ok());
+    for sigma in NACV_VEL_SIGMA_MPS.iter().skip(1) {
+        assert!(*sigma > 0.0 && sigma.is_finite());
+    }
+    // A bad entry is refused by the check, and the adapter does not use that velocity.
+    for bad in [0.0, -1.0, f64::NAN] {
+        let mut t = NACV_VEL_SIGMA_MPS;
+        t[2] = bad;
+        let cfg = AdsbConfig {
+            vel_sigma_mps: t,
+            ..AdsbConfig::default()
+        };
+        assert_eq!(check_adsb_config(&cfg), Err("vel_sigma_mps"));
+        let (m, s) = adsb_measurements(&reports(&rows), &cfg);
+        assert_eq!(
+            (m[0].flags & M_HAS_VEL, s.velocity_refused, s.with_velocity),
+            (0, 1, 0)
+        );
+    }
 }

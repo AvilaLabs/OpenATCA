@@ -18,6 +18,38 @@ pub const POS_SIGMA_SCALE: f64 = 1.0;
 /// 10 m/s), the loosest level that still bounds the error. Set from the NACv distribution of the
 /// clip.
 pub const DEFAULT_NACV: u8 = 1;
+/// Per-axis velocity noise from the NACv bound (DO-260B table 2-22: 10, 3, 1 and 0.3 m/s as 95 %
+/// radii) divided by `oa_truth::SIGMA95`, by NACv; index 0 is unused. The behaviour before the
+/// calibrated table: far looser than the measured error, so kept for the tests that pin
+/// outputs bit for bit and for comparison.
+pub const NACV_BOUND_VEL_SIGMA_MPS: [f64; 5] = [
+    f64::INFINITY,
+    10.0 / oa_truth::SIGMA95,
+    3.0 / oa_truth::SIGMA95,
+    1.0 / oa_truth::SIGMA95,
+    0.3 / oa_truth::SIGMA95,
+];
+/// Per-axis velocity noise by NACv, m/s (1 sigma), all flight conditions; index 0 is unused. Calibrated on the
+/// 2026-11-14 ZAU clip (`velocity_diag`, set A reported velocity against the set-B reference
+/// velocity at each report's time, east and north components): the robust sigma of NACv k is
+/// the 95th percentile of the absolute component error divided by 1.96, the larger of east and
+/// north, over every sample with a reference (all flight conditions, not steady flight only).
+/// NACv 1: 296,284 samples, east 2.1959, north 2.1733; NACv 2: 930,908, 1.8628 and 1.8602;
+/// NACv 3: 1,056, 1.8436 and 1.7313; NACv 4: 5,224, 2.7502 and 2.7294 (the steady-flight values
+/// are 0.46 to 0.71, medians of the absolute error 0.30 to 0.35). Every NACv had at least 1,000
+/// samples, so each takes its own estimate. The reference carries its own error, which is large
+/// in turns and accelerations (the smoother lags a manoeuvre), so these are conservative
+/// upper bounds on the error of the reported velocity; NACv 4 is above NACv 1 because the
+/// reference error and the manoeuvring share of that group, not the transponder, dominate it.
+pub const NACV_VEL_SIGMA_ALL_CONDITIONS_MPS: [f64; 5] = [f64::INFINITY, 2.196, 1.863, 1.844, 2.750];
+/// The default per-axis velocity noise by NACv, m/s (1 sigma); index 0 is unused: the
+/// steady-flight values of the same calibration (95th percentile of the absolute component error
+/// over steady-flight samples, divided by 1.96; 0.6142, 0.5938, 0.5209, 0.7070). The
+/// all-conditions table above puts the reference's own manoeuvre lag into the noise and weakens
+/// the filter in steady flight; manoeuvres are covered by the gate's allowance
+/// ([`GATE_MANOEUVRE_MPS2`]) instead. Chosen on the 2026-11-14 clip (position RMS 50.3 m with
+/// gate 400, 30.8 m with A5), validated on 2026-11-15 (58.3 m current, 32.0 m with A5).
+pub const NACV_VEL_SIGMA_MPS: [f64; 5] = [f64::INFINITY, 0.6142, 0.5938, 0.5209, 0.707];
 /// Barometric altitude quantisation of ADS-B reports, feet (Q bit set, 25 ft). adsb.lol rows do
 /// not say which encoding the transponder used; Mode C radar passes 100.
 pub const BARO_QUANT_FT: u16 = 25;
@@ -81,6 +113,22 @@ pub const V_PRIOR_RATE_STD_FPS: f64 = 30.0;
 /// A position innovation with a normalised squared distance above this is not applied
 /// (chi-square, 2 degrees of freedom, tail 1e-6). Set from the innovation distribution.
 pub const GATE_CHI2: f64 = 27.6;
+/// A velocity innovation with a normalised squared distance above this is dropped and the
+/// position of the same measurement is applied alone (chi-square, 2 degrees of freedom, tail
+/// 1e-3, 99.9 %). A report with a good position and a bad velocity (a stale or default-NACv
+/// velocity, 39 m/s RMS outliers on the 2026-11-14 clip) must not move the track's velocity once
+/// the velocity noise is the calibrated one.
+pub const VEL_GATE_CHI2_STRICT: f64 = 13.815_510_557_964_274;
+/// The default velocity gate: chi-square 400 (20 sigma). With the steady-flight noise the strict
+/// gate above drops velocities of a manoeuvring aircraft; 400 still drops the 39 m/s outliers
+/// and was slightly better on the 2026-11-14 clip, and on 2026-11-15.
+pub const VEL_GATE_CHI2: f64 = 400.0;
+/// The default manoeuvre allowance of the position gate, m/s^2: variance (0.5 a dt^2)^2 added to
+/// the innovation's, so a track that missed reports in a turn is not refused. Variant A5 of the
+/// 2026-11-14 experiments (position RMS 50.3 to 30.8 m, jump_rejected and resyncs cut by about
+/// 85 %), chosen before the 2026-11-15 validation was seen; a forged 2 km report is accepted at
+/// 10 s of gap instead of 12 s.
+pub const GATE_MANOEUVRE_MPS2: f64 = 5.0;
 /// An altitude innovation above this many standard deviations is not applied.
 pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
@@ -128,13 +176,15 @@ pub const COAST_AFTER_INTERVALS: i64 = 3;
 /// A track with no update for this long is dropped, ns. Set per airspace from the recorded gap
 /// distribution (en route, terminal).
 pub const DROP_AFTER_NS: i64 = 60 * NS_PER_S;
-/// A coasting track's position is published only while its 95% horizontal uncertainty radius is
-/// at most this, metres: 926 m (0.5 NM), the size ESASSP uses for a large position error
-/// (correlated errors over 926 m, BENCHMARKS R5). Past it the track has no displayed position
-/// until an update arrives: a position that uncertain is withheld and counted
-/// (`rows_coast_withheld`), never shown as if known. The track itself is kept until
-/// `drop_after_ns`, so a returning aircraft keeps its identity.
+/// A row (tick or update, coasting or live) whose 95% horizontal uncertainty radius is over this,
+/// metres, carries `O_UNCERTAIN`: 926 m (0.5 NM), the size ESASSP uses for a large position error
+/// (correlated errors over 926 m, BENCHMARKS R5). The row is published all the same, and counted
+/// in `rows_uncertain`: a live track is never absent from the output, and a consumer decides what
+/// to show of an uncertain one. (It withheld coasting rows past this radius before, OA-TRK-338.)
 pub const COAST_MAX_R95_M: f64 = 926.0;
+/// An update after more than this long, ns, since the track's previous applied update carries
+/// `O_REACQUIRED` (15 s: more than five expected intervals, past a coast).
+pub const REACQUIRE_GAP_NS: i64 = 15 * NS_PER_S;
 /// The 95% quantile of the chi-squared distribution with two degrees of freedom.
 pub const CHI2_2_95: f64 = 5.991_464_547_107_979;
 /// Capacity: simultaneous tracks. ERAM states 1,900 per centre; 4,096 is two times that.

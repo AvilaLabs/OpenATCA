@@ -20,6 +20,11 @@ oa-sensorsim = { path = "../oa-sensorsim" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-truth = { path = "../oa-truth" }
 
+[features]
+# Diagnostic only: records every applied measurement and its velocity gate decision
+# (`gate_trace`), for the velocity_diag example. Off in every build that ships.
+gate-trace = []
+
 [[bin]]
 name = "oa-track-run"
 path = "src/main.rs"

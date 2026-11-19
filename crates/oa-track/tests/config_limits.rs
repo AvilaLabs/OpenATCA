@@ -244,3 +244,17 @@ fn registration_and_association_scratch_sizes_are_bounded() {
     let (t, p, q) = assoc_scratch_caps(&sc);
     assert!(t < usize::MAX && p < usize::MAX && q < usize::MAX);
 }
+
+// REQ: OA-TRK-340
+#[test]
+fn the_velocity_gate_limit_must_be_positive_and_a_number() {
+    let with = |v: f64| oa_track::TrackerConfig {
+        vel_gate_chi2: v,
+        ..DEFAULT_CONFIG
+    };
+    assert!(check_config(&with(f64::INFINITY)).is_ok());
+    assert!(check_config(&DEFAULT_CONFIG).is_ok());
+    for bad in [0.0, -1.0, f64::NAN] {
+        assert!(check_config(&with(bad)).is_err(), "{bad}");
+    }
+}

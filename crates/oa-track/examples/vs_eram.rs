@@ -241,7 +241,7 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
         _ => 0.0,
     };
     let n_meas = meas.len();
-    let withheld = run.stats.rows_coast_withheld;
+    let uncertain = run.stats.rows_uncertain;
     drop(meas);
     eprintln!("tracker done in {track_secs:.1} s");
 
@@ -393,7 +393,7 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
     );
     let _ = writeln!(
         o,
-        "  paired samples: ERAM {}, OpenATCA {} (one-second output); OpenATCA coasting rows withheld (95% radius over 926 m): {withheld}",
+        "  paired samples: ERAM {}, OpenATCA {} (one-second output); OpenATCA rows flagged uncertain (95% radius over 926 m, scored): {uncertain}",
         eram_pairs.t_ms.len(),
         ours_pairs.t_ms.len()
     );

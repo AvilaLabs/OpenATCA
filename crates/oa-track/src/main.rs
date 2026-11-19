@@ -32,7 +32,7 @@ use oa_bench::input::{for_each_adsb_frame, load_adsb};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
-use oa_track::adsb::{adsb_measurements, AdsbConfig, AdsbStats};
+use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig, AdsbStats};
 use oa_track::latency::{
     latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
@@ -688,7 +688,9 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
     let (clip_reports, clip_bad, clip_hash) =
         (reports_len(&clip.reports), clip.bad_frames, clip.hash);
     drop(clip.reports);
-    let (meas, ad) = adsb_measurements(&set_a, &AdsbConfig::default());
+    let adsb_cfg = AdsbConfig::default();
+    check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
+    let (meas, ad) = adsb_measurements(&set_a, &adsb_cfg);
     drop(set_a);
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,

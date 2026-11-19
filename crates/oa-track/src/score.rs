@@ -61,7 +61,7 @@ use crate::tracker::{
 };
 use crate::types::{
     output_clear, output_hash_into, output_len, output_new, Measurement, TrackError, TrackLog,
-    TrackOutput, TrackerConfig, TrackerStats, O_COAST, O_HAS_ALT, O_TICK,
+    TrackOutput, TrackerConfig, TrackerStats, O_COAST, O_HAS_ALT, O_TICK, O_UNCERTAIN,
 };
 
 /// The split, in words, for every report.
@@ -735,6 +735,8 @@ pub struct ScoreRows {
     pub vel_east_mps: Vec<f32>,
     pub vel_north_mps: Vec<f32>,
     pub coast: Vec<bool>,
+    /// The row carries `O_UNCERTAIN`.
+    pub uncertain: Vec<bool>,
 }
 
 /// Where scoring reads a run's output rows from: memory ([`TrackRun`]) or disk
@@ -782,6 +784,7 @@ impl RowSource for TrackRun {
             r.vel_north_mps
                 .push(o.vel_north_mps.get(i).copied().unwrap_or(f32::NAN));
             r.coast.push(f & O_COAST != 0);
+            r.uncertain.push(f & O_UNCERTAIN != 0);
         }
         Ok(r)
     }
@@ -806,6 +809,7 @@ impl RowSource for SpilledRun {
                 .map(|(&a, &f)| alt_of(f, a))
                 .collect(),
             coast: flags.iter().map(|&f| f & O_COAST != 0).collect(),
+            uncertain: flags.iter().map(|&f| f & O_UNCERTAIN != 0).collect(),
             addr,
             t_ns,
             lat_e7,
@@ -922,12 +926,25 @@ pub fn run_tracker_spilled(
     cfg: &TrackerConfig,
     dir: &Path,
 ) -> Result<SpilledRun, ScoreError> {
+    run_tracker_spilled_observed(meas, cfg, dir, &mut |_, _, _| {})
+}
+
+/// [`run_tracker_spilled`], calling `observe(index, stats before, stats after)` around every
+/// offered measurement (a diagnostic: the counter differences say what became of it).
+pub fn run_tracker_spilled_observed(
+    meas: &[Measurement],
+    cfg: &TrackerConfig,
+    dir: &Path,
+    observe: &mut dyn FnMut(usize, &TrackerStats, &TrackerStats),
+) -> Result<SpilledRun, ScoreError> {
     let io = |e: std::io::Error| ScoreError(format!("spilled output: {e}"));
     let mut t = tracker_new(cfg).map_err(|e| ScoreError(e.to_string()))?;
     let mut scratch = output_new(cfg.out_capacity);
     let mut w = spill_new(dir).map_err(io)?;
-    for m in meas {
+    for (i, m) in meas.iter().enumerate() {
+        let before = *tracker_stats(&t);
         tracker_update(&mut t, m, &mut scratch);
+        observe(i, &before, tracker_stats(&t));
         if output_len(&scratch) > DRAIN_ROWS.min(cfg.out_capacity / 2) {
             spill_append(&mut w, &scratch).map_err(io)?;
             output_clear(&mut scratch);

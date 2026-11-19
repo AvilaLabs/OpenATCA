@@ -125,10 +125,28 @@ pub struct TrackerConfig {
     pub coast_after_intervals: i64,
     /// Drop after this long without an update, ns.
     pub drop_after_ns: i64,
-    /// A coasting track's tick row is published only while its 95% horizontal uncertainty
-    /// radius is at most this, metres ([`crate::params::COAST_MAX_R95_M`]; infinity turns the
-    /// limit off). Positive and not a number is refused.
+    /// A row whose 95% horizontal uncertainty radius is over this, metres
+    /// ([`crate::params::COAST_MAX_R95_M`]; infinity turns the flag off), carries
+    /// [`O_UNCERTAIN`]; the row is still published. Positive and not a number is refused.
     pub coast_max_r95_m: f64,
+    /// An update after more than this many ns since the track's previous applied update carries
+    /// [`O_REACQUIRED`] ([`crate::params::REACQUIRE_GAP_NS`]; `i64::MAX` turns the gap rule off).
+    /// Positive.
+    pub reacquire_gap_ns: i64,
+    /// A velocity whose normalised squared innovation (2 degrees of freedom, the better of the
+    /// two models) exceeds this is dropped and the position alone is applied, counted in
+    /// `velocity_gated` ([`crate::params::VEL_GATE_CHI2`]; infinity turns the gate off).
+    /// Positive and not a number is refused.
+    pub vel_gate_chi2: f64,
+    /// Manoeuvre allowance of the position gate, m/s^2: the gate (not the update) adds an
+    /// isotropic variance `(0.5 a dt^2)^2` to the innovation covariance, `dt` the time since the
+    /// track's last applied update. 0 is no allowance ([`crate::params::GATE_MANOEUVRE_MPS2`] by default). Finite and not negative.
+    pub gate_manoeuvre_mps2: f64,
+    /// Re-anchor after this many consecutive rejected reports that are each plausible after the
+    /// previous rejected one (and the last also plausible after the track's last applied
+    /// position), besides the `RESYNC_AFTER` rule. 0 (the default) is off; otherwise 2 to
+    /// `RESYNC_AFTER`.
+    pub resync_consistent_k: u8,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
     /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
@@ -154,6 +172,10 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     coast_after_intervals: COAST_AFTER_INTERVALS,
     drop_after_ns: DROP_AFTER_NS,
     coast_max_r95_m: crate::params::COAST_MAX_R95_M,
+    reacquire_gap_ns: crate::params::REACQUIRE_GAP_NS,
+    vel_gate_chi2: crate::params::VEL_GATE_CHI2,
+    gate_manoeuvre_mps2: crate::params::GATE_MANOEUVRE_MPS2,
+    resync_consistent_k: 0,
     ooo_window_ns: OOO_WINDOW_NS,
     clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
@@ -209,6 +231,20 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     if c.coast_max_r95_m.is_nan() || c.coast_max_r95_m <= 0.0 {
         return bad("coast_max_r95_m");
     }
+    if c.reacquire_gap_ns <= 0 {
+        return bad("reacquire_gap_ns");
+    }
+    if c.vel_gate_chi2.is_nan() || c.vel_gate_chi2 <= 0.0 {
+        return bad("vel_gate_chi2");
+    }
+    if !c.gate_manoeuvre_mps2.is_finite() || c.gate_manoeuvre_mps2 < 0.0 {
+        return bad("gate_manoeuvre_mps2");
+    }
+    if c.resync_consistent_k != 0
+        && !(2..=crate::params::RESYNC_AFTER).contains(&c.resync_consistent_k)
+    {
+        return bad("resync_consistent_k");
+    }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
     }
@@ -259,6 +295,13 @@ pub const O_RADAR_DISAGREES: u8 = 8;
 /// The key is a local radar tracking handle, without a confirmed aircraft address. It may
 /// describe the same aircraft as another hypothesis; proximity and Mode A do not settle this.
 pub const O_IDENTITY_UNCONFIRMED: u8 = 16;
+/// The row's 95% horizontal uncertainty radius (see [`crate::r95_m_of`]) exceeds
+/// [`crate::params::COAST_MAX_R95_M`], coasting or not: the position is shown, not known well.
+pub const O_UNCERTAIN: u8 = 32;
+/// The first update row after the track was uncertain, or after a gap of more than
+/// [`crate::params::REACQUIRE_GAP_NS`] since its previous applied update, or after a re-anchor on
+/// a report: the position may have jumped.
+pub const O_REACQUIRED: u8 = 64;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
@@ -490,10 +533,15 @@ pub struct TrackerStats {
     /// lies past the projection's domain, is not a number, or numerical prediction failed):
     /// refused and counted, never a coordinate of 0.
     pub rows_unrepresentable: u64,
-    /// Coasting tick rows withheld because the predicted 95% horizontal uncertainty exceeded
-    /// [`crate::params::COAST_MAX_R95_M`]: designed behaviour (the position is not known well
-    /// enough to show), not lost work.
-    pub rows_coast_withheld: u64,
+    /// Rows emitted with [`O_UNCERTAIN`] (95% horizontal uncertainty over
+    /// [`crate::params::COAST_MAX_R95_M`]), coasting or not: designed behaviour, not lost work.
+    pub rows_uncertain: u64,
+    /// Rows refused because the position covariance is not a number: counted as loss, never
+    /// emitted.
+    pub nan_covariance: u64,
+    /// Velocities dropped by the velocity gate (the position of the same measurement was
+    /// applied): designed behaviour, not lost work.
+    pub velocity_gated: u64,
     /// Measurements more than the step limit ahead of the tracker clock and not yet confirmed:
     /// counted and not applied.
     pub time_held: u64,

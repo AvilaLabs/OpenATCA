@@ -285,7 +285,8 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
     "ticks",
     "ticks_skipped",
     "rows_computed",
-    "rows_coast_withheld",
+    "rows_uncertain",
+    "velocity_gated",
     "time_held",
     "time_steps",
     "time_held_applied",
@@ -350,6 +351,8 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
             "tracker.rows_unrepresentable".into(),
             t.rows_unrepresentable,
         ),
+        // A row whose position covariance is not a number is never emitted: output lost.
+        ("tracker.nan_covariance".into(), t.nan_covariance),
         // A filter prediction that cannot produce a finite/usable state withholds this update.
         ("tracker.numerical_refused".into(), t.numerical_refused),
     ];
@@ -379,7 +382,8 @@ pub fn tracker_counters(s: &TrackerStats) -> Vec<(String, u64)> {
         ("ticks".into(), s.ticks),
         ("ticks_skipped".into(), s.ticks_skipped),
         ("rows_computed".into(), s.rows_computed),
-        ("rows_coast_withheld".into(), s.rows_coast_withheld),
+        ("rows_uncertain".into(), s.rows_uncertain),
+        ("velocity_gated".into(), s.velocity_gated),
         ("time_held".into(), s.time_held),
         ("time_steps".into(), s.time_steps),
         ("time_steps_back".into(), s.time_steps_back),
@@ -932,6 +936,7 @@ mod tests {
             "tracker.time_future_dropped" => t.time_future_dropped = 1,
             "tracker.time_sensor_evicted" => t.time_sensor_evicted = 1,
             "tracker.rows_unrepresentable" => t.rows_unrepresentable = 1,
+            "tracker.nan_covariance" => t.nan_covariance = 1,
             "tracker.numerical_refused" => t.numerical_refused = 1,
             "out.overflow" => r.out_overflow = 1,
             n if n.starts_with("tracker.refused_") => t.refused[0] = 1,

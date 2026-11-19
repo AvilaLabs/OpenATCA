@@ -70,8 +70,9 @@ use crate::time_gate::{
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, PredictError, TrackError, TrackLog,
     TrackOutput, TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL,
-    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, RADAR_KEY_BASE,
-    REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
+    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK,
+    O_UNCERTAIN, RADAR_KEY_BASE, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME,
+    REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -157,10 +158,15 @@ fn blank_filter() -> Filter {
         lat_e7: 0,
         lon_e7: 0,
         trig: [0.0, 1.0],
+        rej_t_ns: 0,
+        rej_lat_e7: 0,
+        rej_lon_e7: 0,
         rej_h: 0,
         rej_v: 0,
         has_alt: 0,
         h_mode: 0,
+        rej_c: 0,
+        reacq: 0,
     }
 }
 
@@ -405,7 +411,9 @@ fn ring_push(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
         let next = col(&t.ring_m, ring_ix(t, slot, 1), blank_measurement());
         let mut a = next_anchor;
         // The counters were taken when the measurement was first applied.
-        if filter_replay(&mut a, &next, &mut TrackerStats::default()) == Applied::NumericalRefused {
+        if filter_replay(&mut a, &next, &mut TrackerStats::default(), &t.cfg)
+            == Applied::NumericalRefused
+        {
             return false;
         }
         next_anchor = a;
@@ -435,7 +443,7 @@ fn ring_state(t: &Tracker, slot: usize, k: usize) -> Option<Filter> {
     let mut scratch = TrackerStats::default();
     for j in 1..=k {
         let m = col(&t.ring_m, ring_ix(t, slot, j), blank_measurement());
-        if filter_replay(&mut f, &m, &mut scratch) == Applied::NumericalRefused {
+        if filter_replay(&mut f, &m, &mut scratch, &t.cfg) == Applied::NumericalRefused {
             return None;
         }
     }
@@ -597,20 +605,39 @@ fn maybe_confirm(t: &mut Tracker, slot: usize, at_ns: i64) {
 
 fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) {
     t.stats.rows_computed += 1;
-    let f = col(&t.cur, slot, blank_filter());
+    let mut f = col(&t.cur, slot, blank_filter());
     // A position that cannot be represented is never a row, and never a coordinate of 0.
     let Some(mut row) = filter_output(&f, at_ns) else {
         t.stats.rows_unrepresentable += 1;
         return;
     };
     let r95 = r95_m(&row.pos_cov_m2);
-    if flags & O_COAST != 0 && (r95.is_nan() || r95 > t.cfg.coast_max_r95_m) {
-        // A non-finite covariance is withheld too: its uncertainty is not known to be small.
-        t.stats.rows_coast_withheld += 1;
+    if r95.is_nan() {
+        // Its uncertainty is not known: never a row, counted as loss.
+        t.stats.nan_covariance += 1;
         return;
     }
     row.addr = col(&t.key, slot, NO_ADDR);
     row.flags |= flags;
+    let uncertain = r95 > t.cfg.coast_max_r95_m;
+    if uncertain {
+        row.flags |= O_UNCERTAIN;
+        t.stats.rows_uncertain += 1;
+    }
+    // An update row carries the reacquisition flag once; a tick row after an uncertain one
+    // arms it for the next update row.
+    let armed = if flags & O_TICK == 0 {
+        if f.reacq != 0 {
+            row.flags |= O_REACQUIRED;
+        }
+        u8::from(uncertain)
+    } else {
+        f.reacq | u8::from(uncertain)
+    };
+    if armed != f.reacq {
+        f.reacq = armed;
+        put(&mut t.cur, slot, f);
+    }
     if row.addr >= RADAR_KEY_BASE {
         row.flags |= O_IDENTITY_UNCONFIRMED;
     }
@@ -622,6 +649,11 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
 
 /// The 95% horizontal uncertainty radius of a position covariance `[ee, en, nn]` (m^2), metres:
 /// the semi-major axis of the 95% ellipse, so the circle of this radius contains the ellipse.
+/// The value behind [`O_UNCERTAIN`], for a consumer to read from a row's `pos_cov_m2`.
+pub fn r95_m_of(c: &[f32; 3]) -> f64 {
+    r95_m(c)
+}
+
 fn r95_m(c: &[f32; 3]) -> f64 {
     let (ee, en, nn) = (f64::from(c[0]), f64::from(c[1]), f64::from(c[2]));
     let half = 0.5 * (ee - nn);
@@ -719,10 +751,10 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 632-byte filters, twelve 72-byte measurements, 312-byte statistics,
+// Budget: two 648-byte filters, twelve 72-byte measurements, 328-byte statistics,
 // six 8-byte times, 8-byte category, 4-byte update count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2504);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2552);
 
 fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
     let mut ring = [blank_measurement(); RING_DEPTH];
@@ -867,7 +899,7 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         }
     }
     let mut f = col(&t.cur, slot, blank_filter());
-    match filter_apply(&mut f, m, &mut t.stats) {
+    match filter_apply(&mut f, m, &mut t.stats, &t.cfg) {
         Applied::NumericalRefused => Step::NumericalRefused,
         Applied::Rejected => {
             // Keeps the count of rejections in a row, so repeated ones re-initialise.
@@ -981,6 +1013,12 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     // chronological order gives stands.
     let live = col(&t.cur, slot, blank_filter());
     let (rej_h, rej_v) = (live.rej_h, live.rej_v);
+    let live_reacq = live.reacq;
+    let (rej_c, rej_t_ns, rej_at) = (
+        live.rej_c,
+        live.rej_t_ns,
+        (live.rej_lat_e7, live.rej_lon_e7),
+    );
     // The track as it was after the base entry: the filter, the counts, the category, and
     // tentative again if it was confirmed only by a later entry.
     let base_ns = col(&t.ring_m, ring_ix(t, slot, e), blank_measurement()).toa_ns;
@@ -1072,6 +1110,9 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
         let mut f = col(&t.cur, slot, blank_filter());
         f.rej_h = rej_h;
         f.rej_v = rej_v;
+        (f.rej_c, f.rej_t_ns) = (rej_c, rej_t_ns);
+        f.reacq |= live_reacq;
+        (f.rej_lat_e7, f.rej_lon_e7) = rej_at;
         put(&mut t.cur, slot, f);
     }
 }
@@ -1527,7 +1568,11 @@ mod tests {
             first_ns: col(&t.first_ns, slot, 0),
             last_ns: col(&t.last_ns, slot, 0),
             confirmed_ns: col(&t.confirmed_ns, slot, 0),
-            cur: col(&t.cur, slot, blank_filter()),
+            // The reacquisition mark is output state, cleared by the row that carries it.
+            cur: Filter {
+                reacq: 0,
+                ..col(&t.cur, slot, blank_filter())
+            },
             ring: (0..ring_len(t, slot))
                 .map(|k| col(&t.ring_m, ring_ix(t, slot, k), blank_measurement()))
                 .collect(),
@@ -1671,9 +1716,9 @@ mod tests {
         assert_eq!((s.hits, s.ring.len(), s.cur.rej_h), (1, 1, 0));
     }
 
-    // REQ: OA-TRK-338
+    // REQ: OA-TRK-338, OA-TRK-343, OA-TRK-344, OA-TRK-345
     #[test]
-    fn a_coasting_position_is_withheld_once_its_uncertainty_passes_the_limit() {
+    fn a_coasting_track_is_never_absent_and_says_when_it_is_uncertain() {
         let c = TrackerConfig {
             tick_ns: S,
             drop_after_ns: 200 * S,
@@ -1685,32 +1730,116 @@ mod tests {
             tracker_update(&mut t, &at(5 * k, 100 * k as i32, 100.0), &mut out);
         }
         crate::types::output_clear(&mut out);
+        let before = tracker_stats(&t).rows_uncertain;
         tracker_advance(&mut t, 1_000 * S + 150 * S, &mut out);
-        let coast: Vec<usize> = (0..out.t_ns.len())
-            .filter(|&i| out.flags[i] & O_COAST != 0)
+        // One row per tick for the whole 150 s: nothing is withheld (it was, past 926 m, before).
+        let ticks: Vec<usize> = (0..out.t_ns.len())
+            .filter(|&i| out.flags[i] & O_TICK != 0)
             .collect();
-        // Some coasting rows are shown first, each within the limit; later ones are withheld.
-        assert!(!coast.is_empty(), "no coasting row was shown");
-        for &i in &coast {
+        let times: Vec<i64> = ticks.iter().map(|&i| out.t_ns[i]).collect();
+        assert!(times.windows(2).all(|w| w[1] - w[0] == S), "{times:?}");
+        assert!(times.len() >= 140, "{} tick rows", times.len());
+        assert_eq!(*times.last().unwrap(), 1_000 * S + 150 * S);
+        // The flag is exactly the radius test, on every row; it starts after the coast does.
+        let mut uncertain = 0u64;
+        let (mut first_coast, mut first_uncertain) = (None, None);
+        for &i in &ticks {
             let r = r95_m(&out.pos_cov_m2[i]);
-            assert!(
-                r <= c.coast_max_r95_m,
-                "shown coasting row with 95% radius {r} m"
-            );
+            let flagged = out.flags[i] & O_UNCERTAIN != 0;
+            assert_eq!(flagged, r > c.coast_max_r95_m, "row {i}: r95 {r}");
+            uncertain += u64::from(flagged);
+            if out.flags[i] & O_COAST != 0 && first_coast.is_none() {
+                first_coast = Some(out.t_ns[i]);
+            }
+            if flagged && first_uncertain.is_none() {
+                first_uncertain = Some(out.t_ns[i]);
+            }
         }
-        let withheld = tracker_stats(&t).rows_coast_withheld;
-        assert!(withheld > 0, "150 s of coasting withheld nothing");
-        // Once withheld, never shown again before an update: the shown rows come first.
-        let last_shown = coast.iter().map(|&i| out.t_ns[i]).max().unwrap();
-        let ticks_after = (last_shown - 1_000 * S) / S;
-        assert!(ticks_after < 150, "coasting rows shown to the end");
-        // The track is still alive (not dropped): an update is published as usual.
+        assert!(uncertain > 0, "150 s of coasting never became uncertain");
+        assert!(first_coast.unwrap() < first_uncertain.unwrap());
+        assert_eq!(tracker_stats(&t).rows_uncertain - before, uncertain);
+        assert_eq!(tracker_stats(&t).nan_covariance, 0);
+        // The next update is published, and says the track was reacquired.
         crate::types::output_clear(&mut out);
         tracker_update(&mut t, &at(150, 3_000, 100.0), &mut out);
-        assert!(
-            !out.t_ns.is_empty(),
-            "the update after the withheld rows was not published"
+        assert_eq!(out.t_ns.len(), 1);
+        assert_ne!(out.flags[0] & O_REACQUIRED, 0);
+        assert_eq!(out.flags[0] & O_UNCERTAIN, 0);
+        // The flag is carried once.
+        crate::types::output_clear(&mut out);
+        tracker_update(&mut t, &at(151, 3_020, 100.0), &mut out);
+        assert_eq!(out.flags[0] & O_REACQUIRED, 0);
+    }
+
+    // REQ: OA-TRK-344
+    #[test]
+    fn an_update_after_a_gap_over_fifteen_seconds_is_flagged_reacquired_and_a_short_gap_is_not() {
+        let c = TrackerConfig {
+            tick_ns: S,
+            drop_after_ns: 200 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        let flags_of = |t: &mut Tracker, out: &mut TrackOutput, m: &Measurement| {
+            crate::types::output_clear(out);
+            tracker_update(t, m, out);
+            (0..out.t_ns.len())
+                .filter(|&i| out.flags[i] & O_TICK == 0)
+                .map(|i| out.flags[i])
+                .next_back()
+                .unwrap_or(0)
+        };
+        for k in 0..3 {
+            tracker_update(&mut t, &at(k, 20 * k as i32, 100.0), &mut out);
+        }
+        // 10 s later: no. 20 s after that: yes, though not uncertain. Right after: no.
+        assert_eq!(
+            flags_of(&mut t, &mut out, &at(12, 240, 100.0)) & O_REACQUIRED,
+            0
         );
+        let f = flags_of(&mut t, &mut out, &at(32, 640, 100.0));
+        assert_eq!((f & O_REACQUIRED != 0, f & O_UNCERTAIN != 0), (true, false));
+        assert_eq!(
+            flags_of(&mut t, &mut out, &at(33, 660, 100.0)) & O_REACQUIRED,
+            0
+        );
+        // With the gap rule off (as the pinned tests do) a long gap is not flagged.
+        let off = TrackerConfig {
+            reacquire_gap_ns: i64::MAX,
+            ..c
+        };
+        let mut t2 = tracker_new(&off).unwrap();
+        for k in 0..3 {
+            tracker_update(&mut t2, &at(k, 20 * k as i32, 100.0), &mut out);
+        }
+        assert_eq!(
+            flags_of(&mut t2, &mut out, &at(32, 640, 100.0)) & O_REACQUIRED,
+            0
+        );
+    }
+
+    // REQ: OA-TRK-345
+    #[test]
+    fn a_row_with_a_covariance_that_is_not_a_number_is_refused_and_counted_as_loss() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        tracker_update(&mut t, &at(0, 0, 100.0), &mut out);
+        crate::types::output_clear(&mut out);
+        let slot = lookup(&t, ADDR).unwrap();
+        let mut f = col(&t.cur, slot, blank_filter());
+        for m in &mut f.h.m {
+            m.p[0][0] = f64::NAN;
+        }
+        put(&mut t.cur, slot, f);
+        let before = *tracker_stats(&t);
+        emit(&mut t, slot, 1_000 * S, 0, &mut out);
+        let after = *tracker_stats(&t);
+        assert_eq!(out.t_ns.len(), 0);
+        assert_eq!(after.nan_covariance, before.nan_covariance + 1);
+        assert_eq!(after.rows_computed, before.rows_computed + 1);
+        assert_eq!(after.rows_uncertain, before.rows_uncertain);
     }
 
     // REQ: OA-TRK-302
@@ -1938,7 +2067,7 @@ mod tests {
         let mut after_late = anchor;
         let mut scratch = TrackerStats::default();
         assert_eq!(
-            filter_replay(&mut after_late, &late, &mut scratch),
+            filter_replay(&mut after_late, &late, &mut scratch, &t.cfg),
             Applied::Yes
         );
         let ring_one = col(&t.ring_m, ring_ix(&t, slot, 2), blank_measurement());
@@ -1960,7 +2089,7 @@ mod tests {
         let mut after_bad = after_late;
         let mut scratch = TrackerStats::default();
         assert_eq!(
-            filter_replay(&mut after_bad, &bad, &mut scratch),
+            filter_replay(&mut after_bad, &bad, &mut scratch, &t.cfg),
             Applied::Yes
         );
         let next_dt = (ring_two.toa_ns - bad.toa_ns) as f64 / S as f64;

@@ -34,6 +34,7 @@ pub mod fusion;
 pub mod fusion_params;
 pub mod fusion_score;
 pub mod fusion_world;
+pub mod gate_trace;
 mod hfilter;
 pub mod latency;
 pub mod params;
@@ -50,7 +51,7 @@ mod vfilter;
 pub use filter::Filter;
 pub use hfilter::{HFilter, HModel};
 pub use tracker::{
-    measurement_check, tracker_advance, tracker_buffers, tracker_bytes, tracker_config,
+    measurement_check, r95_m_of, tracker_advance, tracker_buffers, tracker_bytes, tracker_config,
     tracker_counts, tracker_flush, tracker_live, tracker_live_iter, tracker_log, tracker_new,
     tracker_newest_update_ns, tracker_note_radar_disagreement, tracker_predict,
     tracker_predict_checked, tracker_stats, tracker_update, Tracker,

@@ -3934,6 +3934,61 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   with a covariance that is not a number, is withheld and counted in `rows_coast_withheld`. The
   track is kept until its drop age, and its next update is published as usual. Withheld rows are
   designed behaviour, not lost work, in capacity checks.
+- **OA-TRK-339** The ADS-B adapter takes the per-axis velocity noise from a configurable table by
+  NACv (`vel_sigma_mps`, 1-sigma m/s; entries 1 to 4 must be positive and not a number), whose
+  default is calibrated against the measured error of the reported velocity on the 2026-11-14 ZAU
+  clip (`NACV_VEL_SIGMA_MPS`); the NACv-bound table (`NACV_BOUND_VEL_SIGMA_MPS`, the bound over
+  2.448) remains selectable. A velocity whose table entry is not positive is not used and is
+  counted.
+- **OA-TRK-340** The tracker gates a measurement's velocity against the filter's predicted
+  velocity: if the smallest normalised squared velocity innovation over the two models exceeds
+  `vel_gate_chi2` (default 13.8155, chi-square with 2 degrees of freedom at 99.9 %), or is not a
+  number, the velocity is dropped for both models and the position of the same measurement is
+  applied alone, counted in `velocity_gated`. A velocity the gate passes is applied unchanged, a
+  late replay takes the same decision, and the counter is designed behaviour, not lost work, in
+  capacity checks.
+- **OA-TRK-341** The position gate can take a manoeuvre allowance (`gate_manoeuvre_mps2`, m/s^2,
+  default 0 = none): the gate decision, and only it, adds an isotropic variance of
+  `(0.5 a dt^2)^2` to the innovation covariance, `dt` the time since the track's last applied
+  update; an accepted update is the same as without the allowance. A single forged report 2 km off
+  a steady track is refused with any allowance in use at ordinary report intervals.
+- **OA-TRK-342** The tracker can re-anchor on a run of rejected reports that agree with each other
+  (`resync_consistent_k`, 0 = off, else 2 to 5): after that many consecutive rejected reports,
+  each plausible after the previous rejected one by the speed rule (`oa_adsb::jump_verdict`), and
+  the last also plausible after the track's last applied position, the filter restarts at the
+  last (counted as a resync). A run of forged reports that the aircraft could not have flown to
+  since its last applied report never re-anchors the track.
+- **OA-TRK-343** (supersedes the withholding of OA-TRK-338, whose text stands as the history) A
+  confirmed track emits its row at every tick while it is alive, coasting or not: no row is
+  withheld for its uncertainty. A row whose 95% horizontal uncertainty radius (the semi-major axis
+  of the 95% ellipse of its position covariance, `r95_m_of`) is over `coast_max_r95_m` (926 m by
+  default; infinity turns it off) carries `O_UNCERTAIN`, whether the track is coasting or live,
+  and is counted in `rows_uncertain`. A coasting track keeps its coasting flag, so a consumer sees
+  live, then coasting, then coasting and uncertain, and never an absent track.
+- **OA-TRK-344** The first update row after a track was uncertain (an uncertain row was emitted
+  since its last update row), after a gap of more than `reacquire_gap_ns` (15 s by default;
+  `i64::MAX` turns the gap rule off) since its previous applied update, or after a re-anchor on a
+  report, carries `O_REACQUIRED`; the following update rows do not.
+- **OA-TRK-345** A row whose position covariance is not a number is never emitted: it is counted
+  in `nan_covariance` as lost output, and, like a row not representable, in `rows_computed`, so
+  that the rows computed equal the rows emitted, refused as not representable, refused for a
+  covariance that is not a number, and lost to a full table. `rows_coast_withheld` is replaced by
+  `rows_uncertain`, which is designed behaviour and not lost work in capacity checks. The
+  uncertainty of a track coasting through a turn that began after its last report is known to be
+  too small (the true error passes the radius); that limit is recorded by a test, not hidden.
+- **OA-TRK-346** (supersedes the default values stated in OA-TRK-339, OA-TRK-340 and OA-TRK-341 by
+  reference; their text stands as the history) The defaults are: velocity noise by NACv the
+  steady-flight table (`NACV_VEL_SIGMA_MPS` = 0.6142, 0.5938, 0.5209, 0.7070 m/s for NACv 1 to
+  4; the all-conditions table stays as `NACV_VEL_SIGMA_ALL_CONDITIONS_MPS`), velocity gate
+  chi-square 400 (`VEL_GATE_CHI2`; the 13.8155 gate stays as `VEL_GATE_CHI2_STRICT`), position
+  gate manoeuvre allowance 5 m/s^2 (`GATE_MANOEUVRE_MPS2`), consistent-run resync off
+  (`resync_consistent_k` 0). Evidence: tuned on 2026-11-14 (position RMS 50.3 m with the table
+  and gate 400 alone, 30.8 m with the allowance of 5, jump_rejected and resyncs cut by about
+  85 %, a forged 2 km report accepted at a gap of 10 s instead of 12 s); the allowance of 5 was
+  chosen on that day, before 2026-11-15 was examined. Validated on 2026-11-15 without
+  re-tuning: position RMS 58.3 m (table and gate alone) against 32.0 m (allowance 5), jump_rejected
+  22,624 against 3,257, resyncs 1,327 against 3; the variants with allowance 8 (31.3 m) and with
+  the consistent-run resync (31.3 m) were not adopted, being chosen among on validation numbers.
 
 ## NAM ACC-to-ACC interface (oa-nam)
 - **OA-NAM-001** The crate models exactly the 25 messages of the NAM Common Coordination ICD

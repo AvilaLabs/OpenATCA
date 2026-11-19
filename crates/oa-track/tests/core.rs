@@ -847,6 +847,7 @@ fn rows_lost_to_a_full_table_equal_the_rows_a_large_table_takes_when_tracks_drop
         drop_after_ns: 60_000_000_000,
         // Row accounting is under test, not the coasting display limit (OA-TRK-338).
         coast_max_r95_m: f64::INFINITY,
+        reacquire_gap_ns: i64::MAX,
         ..big_config()
     };
     // Two tracks that stop 7 s apart, so they are dropped at different ticks of the advance.
@@ -889,6 +890,7 @@ fn a_silent_track_coasts_after_three_intervals_and_is_dropped_after_sixty_second
                                                        // Coast and drop timing are under test, not the coasting display limit (OA-TRK-338).
     let cfg = TrackerConfig {
         coast_max_r95_m: f64::INFINITY,
+        reacquire_gap_ns: i64::MAX,
         ..big_config()
     };
     let mut t = tracker_new(&cfg).unwrap();
@@ -1218,6 +1220,7 @@ fn scrambled_input_keeps_its_pinned_replay_counters_and_output() {
     // OA-TRK-338 changes nothing but the withheld rows.
     let cfg = TrackerConfig {
         coast_max_r95_m: f64::INFINITY,
+        reacquire_gap_ns: i64::MAX,
         ..big_config()
     };
     let (t, out) = run(&cfg, &ms, 200.0);
@@ -1305,6 +1308,7 @@ fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
     // With the coasting display limit off the output is bit for bit the pinned one (OA-TRK-338).
     let cfg = TrackerConfig {
         coast_max_r95_m: f64::INFINITY,
+        reacquire_gap_ns: i64::MAX,
         ..big_config()
     };
     let mut t = tracker_new(&cfg).unwrap();
@@ -1450,9 +1454,10 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
         "tracker_bytes at {n} tracks: {bytes} ({} per track)",
         bytes / n
     );
-    // The columns, one current and one anchor filter and the measurement ring: under 2.2 kB each
-    // (it was 8.9 kB with a filter state in every ring slot).
-    assert!(bytes / n < 2_200, "{} bytes per track", bytes / n);
+    // The columns, one current and one anchor filter and the measurement ring: under 2.3 kB each
+    // (it was 8.9 kB with a filter state in every ring slot; 2.2 kB before the filter carried
+    // the newest rejected report of a run, 16 bytes in each of its two copies).
+    assert!(bytes / n < 2_300, "{} bytes per track", bytes / n);
 }
 
 // REQ: OA-TRK-042
@@ -1475,7 +1480,7 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     let per = |x: usize, n: usize| x as f64 / n as f64;
     assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
     // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track.
-    assert!(per(b, 38_000) < 2_200.0);
+    assert!(per(b, 38_000) < 2_300.0);
 }
 
 // REQ: OA-TRK-077
@@ -1662,6 +1667,7 @@ fn a_track_extrapolated_past_the_projection_emits_no_zero_position_and_is_counte
         drop_after_ns: 24 * 3_600_000_000_000,
         // The projection limit is under test, not the coasting display limit (OA-TRK-338).
         coast_max_r95_m: f64::INFINITY,
+        reacquire_gap_ns: i64::MAX,
         ..big_config()
     };
     let mut t = tracker_new(&cfg).unwrap();

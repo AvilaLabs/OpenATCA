@@ -153,10 +153,15 @@ fn arbitrary_filter() -> Filter {
         lat_e7: kani::any(),
         lon_e7: kani::any(),
         trig: [kani::any(), kani::any()],
+        rej_t_ns: kani::any(),
+        rej_lat_e7: kani::any(),
+        rej_lon_e7: kani::any(),
         rej_h: kani::any(),
         rej_v: kani::any(),
         has_alt: kani::any(),
         h_mode: kani::any(),
+        rej_c: kani::any(),
+        reacq: kani::any(),
     }
 }
 
@@ -220,7 +225,9 @@ fn arbitrary_stats() -> TrackerStats {
         ticks_skipped: kani::any(),
         rows_computed: kani::any(),
         rows_unrepresentable: kani::any(),
-        rows_coast_withheld: kani::any(),
+        rows_uncertain: kani::any(),
+        nan_covariance: kani::any(),
+        velocity_gated: kani::any(),
         time_held: kani::any(),
         time_steps: kani::any(),
         time_held_applied: kani::any(),
@@ -255,6 +262,7 @@ fn filter_replay_must_be_unreachable(
     _: &mut Filter,
     _: &Measurement,
     _: &mut TrackerStats,
+    _: &TrackerConfig,
 ) -> Applied {
     panic!("filter_replay unexpectedly reached by bounded proof fixture")
 }
@@ -271,6 +279,7 @@ fn filter_apply_insert_then_refuse(
     f: &mut Filter,
     m: &Measurement,
     stats: &mut TrackerStats,
+    _: &TrackerConfig,
 ) -> Applied {
     if m.toa_ns == LATE_INSERT_NS {
         f.t_ns = m.toa_ns;
@@ -292,6 +301,7 @@ fn filter_apply_symbolic_yes_or_resync(
     f: &mut Filter,
     m: &Measurement,
     stats: &mut TrackerStats,
+    _: &TrackerConfig,
 ) -> Applied {
     f.t_ns = m.toa_ns;
     f.h.m[0].x[0] = 321.0;
@@ -397,7 +407,9 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.ticks_skipped, b.ticks_skipped);
     assert_eq!(a.rows_computed, b.rows_computed);
     assert_eq!(a.rows_unrepresentable, b.rows_unrepresentable);
-    assert_eq!(a.rows_coast_withheld, b.rows_coast_withheld);
+    assert_eq!(a.rows_uncertain, b.rows_uncertain);
+    assert_eq!(a.nan_covariance, b.nan_covariance);
+    assert_eq!(a.velocity_gated, b.velocity_gated);
     assert_eq!(a.time_held, b.time_held);
     assert_eq!(a.time_steps, b.time_steps);
     assert_eq!(a.time_held_applied, b.time_held_applied);
@@ -439,7 +451,12 @@ fn assert_filter_bits(a: &Filter, b: &Filter) {
     assert_eq!(a.t_ns, b.t_ns);
     assert_eq!(a.lat_e7, b.lat_e7);
     assert_eq!(a.lon_e7, b.lon_e7);
+    assert_eq!(a.rej_t_ns, b.rej_t_ns);
+    assert_eq!(a.rej_lat_e7, b.rej_lat_e7);
+    assert_eq!(a.rej_lon_e7, b.rej_lon_e7);
     assert_eq!(a.rej_h, b.rej_h);
+    assert_eq!(a.rej_c, b.rej_c);
+    assert_eq!(a.reacq, b.reacq);
     assert_eq!(a.rej_v, b.rej_v);
     assert_eq!(a.has_alt, b.has_alt);
     assert_eq!(a.h_mode, b.h_mode);

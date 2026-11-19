@@ -427,6 +427,25 @@ pub(crate) fn h_gate_d2(pred: &HFilter, z: &[f64; 2], r: &[f64; 3]) -> f64 {
     best
 }
 
+/// The gating distance of a velocity `v` with covariance `vr`: the smallest normalised squared
+/// innovation over the two models, each against its own predicted velocity covariance. Mirrors
+/// [`h_gate_d2`].
+pub(crate) fn h_vel_gate_d2(pred: &HFilter, v: &[f64; 2], vr: &[f64; 3]) -> f64 {
+    let mut best = f64::INFINITY;
+    for m in pred.m.iter() {
+        let p = &m.p;
+        let (s00, s01, s11) = (p[2][2] + vr[0], p[2][3] + vr[1], p[3][3] + vr[2]);
+        let det = s00 * s11 - s01 * s01;
+        if det.is_nan() || det <= 0.0 {
+            continue;
+        }
+        let (y0, y1) = (v[0] - m.x[2], v[1] - m.x[3]);
+        let d2 = (y0 * (s11 * y0 - s01 * y1) + y1 * (s00 * y1 - s01 * y0)) / det;
+        best = best.min(d2);
+    }
+    best
+}
+
 /// One two-component measurement of the states `i0` and `i1` (`z = x[i0], x[i1]` plus noise of
 /// covariance `r`): updates `x` and `p` and returns the quadratic form and the determinant of
 /// the innovation covariance, from which the log likelihood is `-d2 / 2 - ln(det) / 2` (without
