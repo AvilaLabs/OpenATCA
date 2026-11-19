@@ -55,6 +55,8 @@ const ZERO: ErrorParams = ErrorParams {
     lag_fraction: 0.0,
     lag_min_s: 0.5,
     lag_max_s: 0.5,
+    noise_sigma_m: 0.0,
+    noise_bound_frac: 0.0,
 };
 
 type Table = BTreeMap<(u32, i64), (f64, f64)>;
@@ -200,8 +202,8 @@ fn a_lagged_aircraft_reports_the_truth_of_t_minus_l_stamped_at_t() {
                 assert!((dist_m(c, pos) - back_m).abs() < 0.02, "{lag}");
                 // Behind the control: west of it.
                 assert!(pos.1 < c.1);
-                if lag == 2.0 {
-                    let earlier = control[&(ad, tn - 2_000_000_000)];
+                if let (true, Some(&earlier)) = (lag == 2.0, control.get(&(ad, tn - 2_000_000_000)))
+                {
                     assert!(dist_m(earlier, pos) < 0.02);
                 }
                 checked += 1;
@@ -355,7 +357,186 @@ fn parameters_out_of_range_are_refused() {
             lag_max_s: MAX_LAG_S + 1.0,
             ..ZERO
         },
+        ErrorParams {
+            noise_sigma_m: -1.0,
+            ..ZERO
+        },
     ] {
         assert!(matches!(adsb_error(&t, &r, &p), Err(SimError::BadSpoof(_))));
     }
+}
+
+// REQ: OA-SIM-043
+#[test]
+fn a_biased_aircraft_has_one_bound_the_median_of_its_nacp_bounds() {
+    let mut r = base();
+    // NACp 10 for the first half of every flight, 9 for the second: a changing NACp.
+    for i in 0..reports_len(&r) {
+        if (r.time_ns[i] - T0) / 1_000_000_000 >= STEPS / 2 {
+            r.nac_p[i] = 9;
+        }
+    }
+    let t = truth(&base());
+    let control = table(&adsb_error(&t, &r, &ZERO).unwrap());
+    let p = ErrorParams {
+        bias_fraction: 1.0,
+        ..ZERO
+    };
+    let got = table(&adsb_error(&t, &r, &p).unwrap());
+    // 60 rows at each value: the upper-middle bound is the larger one, for every row.
+    let want = 3.0 * nacp_epu_m(9);
+    assert!(want > 3.0 * nacp_epu_m(10));
+    assert!(got.len() > 1000);
+    for (k, &pos) in &got {
+        assert!((dist_m(control[k], pos) - want).abs() < 0.02);
+    }
+}
+
+// REQ: OA-SIM-044
+#[test]
+fn the_bias_and_latency_sets_differ_with_both_fractions_at_one_half() {
+    let r = base();
+    let t = truth(&r);
+    for seed in 0..5u64 {
+        let p = ErrorParams {
+            seed,
+            bias_fraction: 0.5,
+            lag_fraction: 0.5,
+            ..ZERO
+        };
+        let e = adsb_error(&t, &r, &p).unwrap();
+        let lag: Vec<u32> = e.lag_addrs.iter().map(|x| x.0).collect();
+        assert_eq!(e.bias_addrs.len(), 10);
+        assert_ne!(e.bias_addrs, lag, "seed {seed}");
+    }
+}
+
+// REQ: OA-SIM-045
+#[test]
+fn a_generated_row_is_stamped_at_the_nearest_whole_millisecond() {
+    let mut r = base();
+    for (i, t) in r.time_ns.iter_mut().enumerate() {
+        *t += [400_000, -400_000, 600_000][i % 3];
+    }
+    let t = truth(&base());
+    let e = adsb_error(&t, &r, &ZERO).unwrap();
+    assert!(!e.reports.time_ns.is_empty());
+    let mut plus_one = 0;
+    for &tn in &e.reports.time_ns {
+        // Within 0.4 ms of the second rounds to it; 0.6 ms past it rounds to the next whole ms.
+        let off = (tn - T0).rem_euclid(1_000_000_000);
+        assert!(off == 0 || off == 1_000_000, "{off}");
+        plus_one += usize::from(off == 1_000_000);
+    }
+    assert!(plus_one > 500);
+}
+
+// REQ: OA-SIM-046
+#[test]
+fn a_lagged_row_never_keeps_a_stale_geometric_altitude() {
+    let mut r = base();
+    for v in &mut r.geom_alt_ft {
+        *v = 31_000;
+    }
+    let t = truth(&r);
+    let p = ErrorParams {
+        lag_fraction: 0.5,
+        ..ZERO
+    };
+    let e = adsb_error(&t, &r, &p).unwrap();
+    let (mut lagged, mut plain) = (0, 0);
+    for (i, &l) in e.label.iter().enumerate() {
+        if l & ERR_LAG != 0 {
+            lagged += 1;
+            // The truth has no geometric altitude: blanked, not the base row's 31 000.
+            assert_eq!(e.reports.geom_alt_ft[i], oa_adsb::NONE_I32);
+        } else {
+            plain += 1;
+            assert_eq!(e.reports.geom_alt_ft[i], 31_000);
+        }
+    }
+    assert!(lagged > 500 && plain > 500);
+}
+
+// REQ: OA-SIM-047
+#[test]
+fn dropped_rows_are_counted_by_the_label_their_aircraft_carries() {
+    let r = base();
+    let t = truth(&r);
+    let p = ErrorParams {
+        bias_fraction: 0.5,
+        lag_fraction: 0.5,
+        lag_max_s: 0.9,
+        ..ZERO
+    };
+    let e = adsb_error(&t, &r, &p).unwrap();
+    assert_eq!(e.rows_by_label.iter().sum::<u64>(), reports_len(&r) as u64);
+    assert_eq!(e.dropped_by_label.iter().sum::<u64>(), e.dropped_rows);
+    assert_eq!(
+        reports_len(&e.reports) as u64 + e.dropped_rows,
+        reports_len(&r) as u64
+    );
+    for k in 0..4 {
+        assert!(e.dropped_by_label[k] <= e.rows_by_label[k]);
+        let kept = e.label.iter().filter(|&&l| usize::from(l) == k).count() as u64;
+        assert_eq!(kept + e.dropped_by_label[k], e.rows_by_label[k]);
+    }
+}
+
+// REQ: OA-SIM-048
+#[test]
+fn noise_is_seeded_independent_per_row_and_scaled_by_sigma_and_the_nacp_bound() {
+    let r = base();
+    let t = truth(&r);
+    let control = table(&adsb_error(&t, &r, &ZERO).unwrap());
+    let p = ErrorParams {
+        noise_sigma_m: 4.0,
+        noise_bound_frac: 0.5,
+        ..ZERO
+    };
+    let a = adsb_error(&t, &r, &p).unwrap();
+    assert_eq!(a, adsb_error(&t, &r, &p).unwrap());
+    // Per axis sigma = hypot(4, 0.5 * 10) = 6.4 m; the horizontal RMS is sigma * sqrt(2).
+    let got = table(&a);
+    let sq: f64 = got
+        .iter()
+        .map(|(k, &v)| dist_m(control[k], v).powi(2))
+        .sum();
+    let rms = (sq / got.len() as f64).sqrt();
+    let want = 6.403 * std::f64::consts::SQRT_2;
+    assert!((rms - want).abs() < 0.3, "{rms} {want}");
+    let q = ErrorParams { seed: 9, ..p };
+    assert_ne!(a, adsb_error(&t, &r, &q).unwrap());
+    // Two rows of one aircraft are not given the same offset.
+    let mut offs: Vec<i64> = got
+        .iter()
+        .filter(|(k, _)| k.0 == 0xd00000)
+        .map(|(k, &v)| ((v.0 - control[k].0) * 1e7).round() as i64)
+        .collect();
+    offs.sort_unstable();
+    offs.dedup();
+    assert!(offs.len() > 50);
+}
+
+// REQ: OA-SIM-049
+#[test]
+fn a_lagged_row_before_its_leg_began_is_stepped_back_along_the_velocity() {
+    let r = base();
+    let t = truth(&r);
+    let control = table(&adsb_error(&t, &r, &ZERO).unwrap());
+    let p = ErrorParams {
+        lag_fraction: 1.0,
+        lag_min_s: 2.0,
+        lag_max_s: 2.0,
+        ..ZERO
+    };
+    let e = adsb_error(&t, &r, &p).unwrap();
+    // The first two rows of each of the twenty tracks are before the leg: stepped back 200 m.
+    assert!(e.extrapolated_rows >= u64::from(AIRCRAFT));
+    let got = table(&e);
+    for a in 0..AIRCRAFT {
+        let k = (0xd00000 + a, T0);
+        assert!((dist_m(control[&k], got[&k]) - 200.0).abs() < 0.5);
+    }
+    assert_eq!(e.dropped_rows, 0);
 }

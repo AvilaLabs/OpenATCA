@@ -1,19 +1,30 @@
 //! How much the scorer's truth (built from the other half of the same ADS-B) flatters the
-//! tracker when the aircraft's errors are persistent. Runs only with `OPENATCA_ADSB_CLIP` and
-//! `OPT_CELLS`; every number comes from the environment, none is defaulted here.
+//! tracker when the aircraft's errors are persistent. Runs only with `OPENATCA_ADSB_CLIP`,
+//! `OPT_FALLBACK_M` and `OPT_CELLS`; otherwise it prints "skipped" and passes. Every number comes
+//! from the environment, none is defaulted here.
 //!
-//! * `OPT_CELLS`: `;`-separated `name:bias_frac:bias_mult:lag_frac:lag_min_s:lag_max_s:seed`.
+//! * `OPT_CELLS`: `;`-separated
+//!   `name:bias_frac:bias_mult:lag_frac:lag_min_s:lag_max_s:seed:where:noise_sigma_m:noise_bound_frac`.
+//!   `where` is `both`, `a` (errors only in the tracker's half; the truth half is clean) or `b`
+//!   (errors only in the truth's half; the tracker's input is clean).
 //! * `OPT_THINS`: `,`-separated thinning intervals in seconds (0 for none).
-//! * `OPT_FALLBACK_M`: the bias bound used where a row has no NACp, metres.
-//! * `OPT_CONTROL_TOL`: when set, a cell whose fractions are all zero must have B within this
-//!   relative distance of A in every printed Ticks position metric (the Updates position and
-//!   speed metrics are printed, not asserted: they sit closer to the rebuilt truth's own
-//!   reconstruction error, which the control measures).
+//! * `OPT_FALLBACK_M`: the bias bound used where an aircraft has no NACp, metres.
+//! * `OPT_CONTROL_TOL`: a cell with no error and no noise must have B within this relative distance
+//!   of A in every printed position metric (Updates and Ticks; the values are printed).
 //!
 //! The clip's reports (copies removed, nothing withheld) give the exact truth. Reports are
-//! regenerated from it with the errors, split as the scorer does, the tracker run on one half and
-//! scored (A) against the exact truth and (B) against the truth built from the other half, on the
-//! rows both truths answer.
+//! regenerated from it with the errors; the halves of the clip's own split decide which regenerated
+//! rows are the tracker's (A) and which are the truth's (B). The tracker runs on A and is scored
+//! against the exact truth (A score; built with its uncertainty gate opened so the generator can
+//! answer between reports) and against the truth built from B (B score), on the rows both
+//! truths answer, so the samples are identical: the harness asserts equal pair counts, at least
+//! `MIN_PAIRS` Updates pairs per cell, and (for a lagged cell) that at most `MAX_DROP_SHARE` of
+//! the lagged aircraft's rows are left out.
+//!
+//! Confound: a row is classed straight or turning by the truth it is scored against, so the A and B
+//! scores can class the same row differently. The per-class pair counts of both scores and the
+//! A-by-B class confusion matrix over the identical rows are printed, and the "all" class is not
+//! affected.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,12 +39,16 @@ use oa_sensorsim::adsb_error::{adsb_error, ErrorParams};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, run_tracker, score_source, scoring_config, split_reports, split_reports_with,
-    RowSet, RowSource, ScoreError, ScoreRows, TrackRun, CLASS_NAMES, SCORE_CHUNK_ROWS,
-    TURN_SPAN_MS,
+    transversal_accel, RowSet, RowSource, ScoreError, ScoreRows, TrackRun, CLASS_NAMES,
+    SCORE_CHUNK_ROWS, TURN_ACCEL_MPS2, TURN_SPAN_MS,
 };
+use oa_track::types::{O_COAST, O_TICK};
 use oa_track::DEFAULT_CONFIG;
 use oa_truth::DEFAULT_CONFIG as TRUTH;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+const MIN_PAIRS: usize = 10_000;
+const MAX_DROP_SHARE: f64 = 0.02;
 
 /// A run's rows restricted to those both truths answer.
 struct Both<'a> {
@@ -106,6 +121,8 @@ fn thin(a0: &oa_adsb::Reports, thin_s: f64) -> oa_adsb::Reports {
 struct Cell {
     name: String,
     p: ErrorParams,
+    in_a: bool,
+    in_b: bool,
 }
 
 fn cells(fallback: f64) -> Vec<Cell> {
@@ -115,7 +132,11 @@ fn cells(fallback: f64) -> Vec<Cell> {
         .map(|s| {
             let f: Vec<&str> = s.split(':').collect();
             let x = |i: usize| f[i].parse::<f64>().unwrap();
+            let w = f[7];
+            assert!(["both", "a", "b"].contains(&w));
             Cell {
+                in_a: w != "b",
+                in_b: w != "a",
                 name: f[0].to_string(),
                 p: ErrorParams {
                     seed: f[6].parse().unwrap(),
@@ -125,6 +146,8 @@ fn cells(fallback: f64) -> Vec<Cell> {
                     lag_fraction: x(3),
                     lag_min_s: x(4),
                     lag_max_s: x(5),
+                    noise_sigma_m: x(8),
+                    noise_bound_frac: x(9),
                 },
             }
         })
@@ -150,13 +173,61 @@ fn metrics(up: &oa_track::score::Scored, tk: &oa_track::score::Scored) -> Vec<(S
     v
 }
 
+/// The class of a sample by the velocity change of `bt`'s truth around it: 0 straight, 1
+/// turning, 2 not answered.
+fn class_of(bt: &BuiltTruth, addr: u32, t_ms: i64) -> usize {
+    let q = |dt: i64| {
+        adsb_truth::query(&bt.truth, addr, t_ms + dt)
+            .ok()
+            .map(|s| (s.vel_east_mps, s.vel_north_mps))
+    };
+    match (q(-TURN_SPAN_MS), q(TURN_SPAN_MS)) {
+        (Some(a), Some(b)) => usize::from(
+            transversal_accel(a, b, 2.0 * TURN_SPAN_MS as f64 / 1000.0) > TURN_ACCEL_MPS2,
+        ),
+        _ => 2,
+    }
+}
+
+/// The 3 by 3 confusion matrix (A class by B class) over the Updates rows both truths answer.
+fn confusion(src: &Both, a: &BuiltTruth, b: &BuiltTruth) -> [[u64; 3]; 3] {
+    let o = &src.run.out;
+    let mut m = [[0u64; 3]; 3];
+    for i in 0..o.t_ns.len() {
+        if o.flags[i] & (O_TICK | O_COAST) != 0 || !src.ok(o.addr[i], o.t_ns[i]) {
+            continue;
+        }
+        let t_ms = o.t_ns[i].div_euclid(1_000_000);
+        m[class_of(a, o.addr[i], t_ms)][class_of(b, o.addr[i], t_ms)] += 1;
+    }
+    m
+}
+
+/// The generated rows of `e` whose (address, millisecond) is in `keys`.
+fn rows_in(e: &oa_sensorsim::adsb_error::Errored, keys: &HashSet<(u32, i64)>) -> oa_adsb::Reports {
+    let mut r = oa_adsb::Reports::default();
+    for i in 0..oa_adsb::reports_len(&e.reports) {
+        if keys.contains(&(e.reports.icao[i], e.reports.time_ns[i] / 1_000_000)) {
+            oa_adsb::reports_push(&mut r, &oa_adsb::reports_row(&e.reports, i).unwrap());
+        }
+    }
+    r
+}
+
+fn keys_of(r: &oa_adsb::Reports) -> HashSet<(u32, i64)> {
+    (0..oa_adsb::reports_len(r))
+        .map(|i| (r.icao[i], (r.time_ns[i] + 500_000).div_euclid(1_000_000)))
+        .collect()
+}
+
 // REQ: OA-SIM-042
 #[test]
 fn optimism() {
-    let Ok(path) = std::env::var("OPENATCA_ADSB_CLIP") else {
-        return;
-    };
-    let Ok(fallback) = std::env::var("OPT_FALLBACK_M") else {
+    let (Ok(path), Ok(fallback)) = (
+        std::env::var("OPENATCA_ADSB_CLIP"),
+        std::env::var("OPT_FALLBACK_M"),
+    ) else {
+        println!("optimism: skipped (OPENATCA_ADSB_CLIP or OPT_FALLBACK_M unset)");
         return;
     };
     let t0 = std::time::Instant::now();
@@ -171,37 +242,92 @@ fn optimism() {
     let clip = oa_bench::input::load_adsb(std::path::Path::new(&path)).unwrap();
     let (base, _, _) = split_reports_with(&clip.reports, false);
     drop(clip);
-    let exact = adsb_truth::build(&base, &TRUTH).unwrap();
+    // The exact truth answers wherever a leg is, however uncertain: its gate is opened so that a
+    // lagged or between-report query is not refused; scoring still pairs only rows within the
+    // scorer's own gate (see `Both::ok`).
+    let exact = adsb_truth::build(&base, &adsb_truth::config_with(None, Some(1.0e6))).unwrap();
+    // Only rows the exact truth answers at their own time can be regenerated; the rest are left
+    // out up front, so the rows left out per cell are the ones a lag causes.
+    let mut answered = oa_adsb::Reports::default();
+    for i in 0..oa_adsb::reports_len(&base) {
+        let t_ms = (base.time_ns[i] + 500_000).div_euclid(1_000_000);
+        if adsb_truth::query(&exact.truth, base.icao[i], t_ms).is_ok() {
+            oa_adsb::reports_push(&mut answered, &oa_adsb::reports_row(&base, i).unwrap());
+        }
+    }
+    println!(
+        "base rows {} of which the exact truth answers {}",
+        oa_adsb::reports_len(&base),
+        oa_adsb::reports_len(&answered)
+    );
+    let base = answered;
+    // The clip's own halves decide which rows are the tracker's and which the truth's.
+    let (base_a, base_b, _) = split_reports(&base);
+    let (keys_a, keys_b) = (keys_of(&base_a), keys_of(&base_b));
+    drop((base_a, base_b));
     println!(
         "exact truth built, base rows {}",
         oa_adsb::reports_len(&base)
     );
     for cell in cells(fallback.parse().unwrap()) {
         let e = adsb_error(&exact.truth, &base, &cell.p).unwrap();
+        let clean = ErrorParams {
+            bias_fraction: 0.0,
+            lag_fraction: 0.0,
+            noise_sigma_m: 0.0,
+            noise_bound_frac: 0.0,
+            ..cell.p
+        };
+        let c = adsb_error(&exact.truth, &base, &clean).unwrap();
         println!(
-            "CELL {} rows {} dropped {} bias_aircraft {} lag_aircraft {} secs {:.0}",
+            "CELL {} rows {} bias_aircraft {} lag_aircraft {} extrapolated {} secs {:.0}",
             cell.name,
             oa_adsb::reports_len(&e.reports),
-            e.dropped_rows,
             e.bias_addrs.len(),
             e.lag_addrs.len(),
+            e.extrapolated_rows,
             t0.elapsed().as_secs_f64()
         );
-        let (a0, b, _) = split_reports(&e.reports);
-        let built_b = adsb_truth::build(&b, &TRUTH).unwrap();
-        drop(b);
+        let share = |k: &[usize]| {
+            let (d, n): (u64, u64) = k.iter().fold((0, 0), |a, &i| {
+                (a.0 + e.dropped_by_label[i], a.1 + e.rows_by_label[i])
+            });
+            (d, n, d as f64 / n.max(1) as f64)
+        };
+        for (name, k) in [
+            ("none", vec![0]),
+            ("bias", vec![1]),
+            ("lag", vec![2]),
+            ("both", vec![3]),
+            ("all lagged", vec![2, 3]),
+        ] {
+            let (d, n, f) = share(&k);
+            println!(
+                "DROPPED {} {name}: {d} of {n} ({:.2} %)",
+                cell.name,
+                100.0 * f
+            );
+        }
+        if !e.lag_addrs.is_empty() {
+            let (_, _, f) = share(&[2, 3]);
+            assert!(f <= MAX_DROP_SHARE, "dropped share of lagged rows {f}");
+        }
+        let a_tab = rows_in(if cell.in_a { &e } else { &c }, &keys_a);
+        let b_tab = rows_in(if cell.in_b { &e } else { &c }, &keys_b);
+        drop((e, c));
+        let built_b = adsb_truth::build(&b_tab, &TRUTH).unwrap();
         {
-            // The rebuilt truth against the exact one at the generated report times.
+            // The rebuilt truth against the exact one at the truth half's report times.
             let mut d: Vec<f64> = Vec::new();
-            for i in (0..oa_adsb::reports_len(&e.reports)).step_by(7) {
-                let (ad, t) = (e.reports.icao[i], e.reports.time_ns[i] / 1_000_000);
+            for i in (0..oa_adsb::reports_len(&b_tab)).step_by(7) {
+                let (ad, t) = (b_tab.icao[i], b_tab.time_ns[i] / 1_000_000);
                 if let (Ok(x), Ok(y)) = (
                     adsb_truth::query(&exact.truth, ad, t),
                     adsb_truth::query(&built_b.truth, ad, t),
                 ) {
                     let k = std::f64::consts::PI / 180.0 * 6_371_008.8;
                     let (de, dn) = (
-                        (y.lon - x.lon) * k * (x.lat * k / 6_371_008.8).cos(),
+                        (y.lon - x.lon) * k * (x.lat * std::f64::consts::PI / 180.0).cos(),
                         (y.lat - x.lat) * k,
                     );
                     d.push(de.hypot(dn));
@@ -217,8 +343,12 @@ fn optimism() {
                 d.get(d.len() * 95 / 100).copied().unwrap_or(f64::NAN)
             );
         }
+        let is_control = cell.p.bias_fraction == 0.0
+            && cell.p.lag_fraction == 0.0
+            && cell.p.noise_sigma_m == 0.0
+            && cell.p.noise_bound_frac == 0.0;
         for &ts in &thins {
-            let a = thin(&a0, ts);
+            let a = thin(&a_tab, ts);
             let (meas, _) = adsb_measurements(&a, &AdsbConfig::default());
             let iv = interval_stats(&meas).unwrap();
             let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
@@ -236,6 +366,24 @@ fn optimism() {
                 "SAMPLES {} thin {ts} updates_pairs A {} B {} ticks_pairs A {} B {}",
                 cell.name, au.pairs, bu.pairs, at.pairs, bt.pairs
             );
+            assert_eq!(au.pairs, bu.pairs);
+            assert_eq!(at.pairs, bt.pairs);
+            assert!(au.pairs >= MIN_PAIRS, "only {} Updates pairs", au.pairs);
+            for (rs, x, y) in [("Updates", &au, &bu), ("Ticks", &at, &bt)] {
+                println!(
+                    "CLASSPAIRS {} thin {ts} {rs}: A straight {} turning {} | B straight {} turning {}",
+                    cell.name,
+                    x.esassp.position_m[1].n,
+                    x.esassp.position_m[2].n,
+                    y.esassp.position_m[1].n,
+                    y.esassp.position_m[2].n
+                );
+            }
+            let m = confusion(&src, &exact, &built_b);
+            println!(
+                "CONFUSION {} thin {ts} (rows A straight/turning/none, columns B straight/turning/none): {:?}",
+                cell.name, m
+            );
             let (ma, mb) = (metrics(&au, &at), metrics(&bu, &bt));
             for ((l, x), (_, y)) in ma.iter().zip(mb.iter()) {
                 println!(
@@ -244,11 +392,7 @@ fn optimism() {
                     y - x,
                     y / x
                 );
-                if let (Some(tol), true, true) = (
-                    tol,
-                    cell.p.bias_fraction == 0.0 && cell.p.lag_fraction == 0.0,
-                    l.starts_with("Ticks pos"),
-                ) {
+                if let (Some(tol), true, true) = (tol, is_control, l.contains("pos")) {
                     assert!((y / x - 1.0).abs() <= tol, "control {l}: A {x} B {y}");
                 }
             }
