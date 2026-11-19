@@ -24,6 +24,8 @@ jobs:
         run: python3 tools/test_prepare_rust_proof_controls.py
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
+      - name: Feed reader work check (release)
+        run: cargo +1.89.0 run --release --locked --manifest-path validation/oa-feed-work-check/Cargo.toml --target-dir "$RUNNER_TEMP/oa-feed-work-check-target"
       - name: Test
         run: cargo +1.89.0 test --workspace --release --locked
       - name: Requirements traceability

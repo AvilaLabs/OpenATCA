@@ -852,7 +852,7 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-187** Work cancellation leaves complete buffered frames unclassified as malformed and retains them
   for explicit disposition; only normal end-of-stream finalization reports a truncated tail.
 - **OA-FEED-188** The release binary `oa-feed-work-check` reports the maximum service-turn wall time and exits
-  nonzero above 1 s; the local gate runs it. It separately labels valid-capacity and malformed-input safety
+  nonzero above 1 s; the `ci` workflow runs it in release. It separately labels valid-capacity and malformed-input safety
   cases, accounts CRC refusals/skips as rejection rather than valid-frame loss, and checks defer/resume and
   compaction ownership exactly; its `#[test]` asserts only these deterministic checks, not wall time.
 - **OA-FEED-189** Recorder startup inspects at most 16,384 directory entries when summing existing recording
