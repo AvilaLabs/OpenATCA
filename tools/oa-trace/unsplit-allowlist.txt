@@ -1,4 +1,4 @@
-# Crates allowed to be `class = "unsplit"` (RULESET B9). This list only shrinks: split the crate, set its class, delete its line.
+# Crates of the fixed unsplit list (UNSPLIT_ALLOWED in classcheck.rs, RULESET B9) that are still unsplit. Delete a line when its crate is split or reclassified; none may be added.
 oa-airspace
 oa-bench
 oa-display
