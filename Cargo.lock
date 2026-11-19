@@ -258,6 +258,15 @@ name = "oa-sha256"
 version = "0.0.1"
 
 [[package]]
+name = "oa-stdds"
+version = "0.0.1"
+dependencies = [
+ "oa-feed",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-tar"
 version = "0.0.1"
 

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:asdexMsg xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:smes:surfacemovementevent">
+  <airport>ZZB</airport>
+  <positionReport>
+    <seqNum>1001</seqNum>
+    <time>2030-01-02T03:04:05.123Z</time>
+    <track>321</track>
+    <tgtType>aircraft</tgtType>
+    <flightId>
+      <acAddress>abc123</acAddress>
+      <aircraftId>TST9</aircraftId>
+      <mode3ACode>1234</mode3ACode>
+    </flightId>
+    <flightInfo>
+      <acType>A320</acType>
+      <fix>ZZZZZ</fix>
+    </flightInfo>
+    <movement>
+      <heading>270.5</heading>
+      <speed>7.25</speed>
+      <vx>-7.2</vx>
+      <vy>0.5</vy>
+      <ax>0.1</ax>
+    </movement>
+    <position>
+      <altitude>0</altitude>
+      <latitude>40.6398</latitude>
+      <longitude>-73.7789</longitude>
+    </position>
+    <runway>04L</runway>
+    <status>
+      <vertRate>0</vertRate>
+      <sil>3</sil>
+    </status>
+    <enhancedData><sfdpsGufi>x</sfdpsGufi></enhancedData>
+  </positionReport>
+</ns2:asdexMsg>

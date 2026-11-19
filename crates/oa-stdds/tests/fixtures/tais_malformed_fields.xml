@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation">
+  <record>
+    <track>
+      <trackNum>12x</trackNum>
+      <mrtTime>2030-02-30T03:04:05Z</mrtTime>
+      <lat>91.0</lat>
+      <lon>-74.5</lon>
+      <reportedAltitude>999999</reportedAltitude>
+      <vx>abc</vx>
+      <vy>10.5</vy>
+      <reportedBeaconCode>1289</reportedBeaconCode>
+      <acAddress>XYZ123</acAddress>
+    </track>
+    <flightPlan>
+      <acid></acid>
+      <acType>TOOLONGTYPE</acType>
+    </flightPlan>
+  </record>
+</ns2:TATrackAndFlightPlan>

@@ -20,6 +20,7 @@ members = [
     "crates/oa-feed",
     "crates/oa-fixm",
     "crates/oa-tbfm",
+    "crates/oa-stdds",
     "crates/oa-replay",
     "crates/oa-notam",
     "crates/oa-tfms",

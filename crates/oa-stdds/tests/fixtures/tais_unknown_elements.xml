@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation">
+  <src>ZZA</src>
+  <header><msgType>FP</msgType></header>
+  <record>
+    <track>
+      <trackNum>5</trackNum>
+      <xPos>123</xPos>
+      <yPos>456</yPos>
+      <future><deep>1</deep></future>
+    </track>
+    <flightPlan>
+      <newField>x</newField>
+    </flightPlan>
+  </record>
+  <record>
+    <track>
+      <trackNum>6</trackNum>
+      <xPos>1</xPos>
+    </track>
+  </record>
+</ns2:TATrackAndFlightPlan>

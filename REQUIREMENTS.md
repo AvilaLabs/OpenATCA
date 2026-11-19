@@ -4526,3 +4526,68 @@ scope.
 - **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
   refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
+
+## SWIM STDDS terminal data (oa-stdds)
+
+- **OA-STD-001** Classifies a message by its root element and namespace into a product kind: TAIS
+  `TATrackAndFlightPlan`, SMES/ASDE-X `asdexMsg` by its first report child (Cat11 `positionReport`,
+  Cat10 `adsbReport`, Cat10 `mlatReport`), the other STDDS terminal-entities namespaces (APDS, ISMC,
+  RVR, TDES, any other), and the FIXM-mediated `MessageCollection` by `metadata@messageType`. Element
+  names and structure follow the FAA's public FIXM-Mediated STDDS Data Overview v2 (mapping tables,
+  sections 2.3.1 to 2.3.4) and the STDDS R6P2 release notes (sections 4.2 to 4.5); no real STDDS message
+  was available, so every unit and name marked ASSUMED in the crate docs awaits confirmation on real data.
+- **OA-STD-002** A message of no known kind is counted by kind and its root name and namespace are kept
+  in a bounded table; it is never an error.
+- **OA-STD-003** A TAIS message parses into typed records with `src` and, per `record`, every track field
+  (`trackNum`, `mrtTime`, `lat`, `lon`, `reportedAltitude`, `vx`, `vy`, `vVert`, `reportedBeaconCode`,
+  `acAddress`, `status`) and flight-plan field (`acid`, `acType`, both beacon codes, both altitudes,
+  `airport`, `runway`, both flight-rule fields, `ECID`, `sfpn`, `ptdTime`, entry and exit fix, `type`,
+  `status`) in fixed integer units named in the field (1e-7 degree, Unix ms, feet, cm/s, feet per minute);
+  no floating point is used.
+- **OA-STD-004** A field absent from a record clears only its own presence bit and is no error; a
+  latitude or longitude left without its partner is refused as an incomplete pair.
+- **OA-STD-005** A field that is present but malformed (syntax, range, empty, too long) is a counted
+  error naming the field and the byte offset of its element; the record is kept, the field is absent and
+  its bit is set in the record's error word, the other fields are intact, and nothing is defaulted.
+- **OA-STD-006** A field given twice in one record is a duplicate error at the second element and keeps
+  neither value.
+- **OA-STD-007** A latitude without a longitude, or the reverse (a delta-encoded message), is refused as
+  an incomplete position pair in both TAIS and SMES; the other fields of the record are kept.
+- **OA-STD-008** Values are checked exactly: beacon codes are four octal digits, Mode S addresses 1 to 6
+  hex digits, decimals take no sign, exponent or spaces and round half away from zero, and each range
+  (latitude +-90, longitude +-180, altitude -2,000 to 100,000 ft, velocity +-3,000 m/s, vertical rate
+  +-30,000 ft/min) accepts its edge and refuses one past it.
+- **OA-STD-009** Timestamps are strict ISO-8601 UTC (`Z` or `+00:00` only, real calendar dates, no leap
+  second, years 1970 to 9999) read to Unix milliseconds; anything else is refused.
+- **OA-STD-010** A field the sender marks `r="1"` is absent and counted as invalidated, not an error.
+- **OA-STD-011** The records per message are limited (`Limits::max_records`); a message over it is refused
+  whole with the offset of the first record over, and nothing from it is kept. Field errors past
+  `Limits::max_errors` are counted as dropped, while each record's error word keeps every bit.
+- **OA-STD-012** Input the XML reader refuses (truncated, DOCTYPE, bad bytes) is refused whole with the
+  reader's byte offset and counted; every truncation and every single-byte deletion of every fixture
+  returns a result without panicking.
+- **OA-STD-013** Elements outside the known structure are counted per path in a bounded table (overflow
+  counted too), only the topmost element of an unknown subtree is counted, and they are never errors;
+  known elements that are deliberately not read are not counted as unknown.
+- **OA-STD-014** An ASDE-X Cat11 `positionReport` parses into a typed report with `airport`, time,
+  position, altitude, heading, speed, velocity, vertical rate, sequence and track numbers, Mode S address,
+  Mode 3/A code, callsign, aircraft type, runway and target type; the Cat10 `mlatReport` and `adsbReport`,
+  the FIXM-mediated forms and the other STDDS products are classified only.
+- **OA-STD-015** A message of a classified-only kind returns its kind and is counted, with no record.
+- **OA-STD-016** The statistics count messages per kind, refusals per reason, field errors per kind,
+  records, records with errors, empty records, and per-field presence and refusal counts for TAIS and
+  SMES; they hold counts only, never a message value.
+- **OA-STD-017** A typed parser called on a message of another kind returns `WrongKind` with that kind and
+  counts it, with no byte offset.
+- **OA-STD-018** Parsing is deterministic: the same bytes give the same records whatever was parsed in
+  between, and a parser and a statistics accumulator are reusable.
+- **OA-STD-019** A `record` with no known field is kept with no bits set and counted as empty.
+- **OA-STD-020** Element text is trimmed and its character references and CDATA are decoded before it is
+  parsed.
+- **OA-STD-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days
+  that do not exist (the table shared with the other crates' calendar helpers).
+- **OA-STD-022** The namespace version (`vN-M`) is never compared, so a version change does not break
+  classification, but the shape of the namespace (`...:terminal:entities:vN-M:service:name`) is.
+- **OA-STD-023** Message frames of a recorded feed parse to the same counts as the same bytes parsed
+  directly; the summary example reads such a feed (raw or gzip) and prints counts and schema names only,
+  never a position, identity or time, and refuses the sealed hold-out recording.

@@ -1,0 +1,21 @@
+[package]
+name = "oa-stdds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oa-xml = { path = "../oa-xml" }
+
+[dev-dependencies]
+# Workspace crates, used by the summary example only to read recordings (not outside code).
+oa-feed = { path = "../oa-feed" }
+oa-zip = { path = "../oa-zip" }
+
+[package.metadata.openatca]
+class = "shell"

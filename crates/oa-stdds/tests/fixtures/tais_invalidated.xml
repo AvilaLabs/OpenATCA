@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation">
+  <record><track><trackNum>9</trackNum><reportedAltitude r="1">5000</reportedAltitude><lat>1.5</lat><lon>2.5</lon></track></record>
+</ns2:TATrackAndFlightPlan>

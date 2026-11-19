@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mesg:MessageCollection xmlns:mesg="http://www.fixm.aero/messaging/4.0" xmlns:nas="http://www.faa.aero/nas/4.1">
+ <mesg:message><nas:flight/><nas:metadata messageType="TAIS_TRACK_AND_FLIGHT_PLAN"><nas:provenance tracon="ZZA"/></nas:metadata></mesg:message>
+</mesg:MessageCollection>
