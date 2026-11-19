@@ -2,17 +2,28 @@
 //!
 //! ```text
 //! cargo run --release -p oa-track --example p002 -- \
-//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>]
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty]
 //! ```
 //!
-//! Written from the comparison's scoring protocol P-002, fixed by its hash before any hold-out
-//! data was read; the protocol governs where this code and it differ. The split, the
+//! Written from the comparison's scoring protocol P-002 and its amendment P-003, fixed by their
+//! hashes before any hold-out data was read; the protocol governs where this code and it differ. The split, the
 //! tracker run, the reference, the ERAM load, the association and the pairing are those of
 //! `vs_eram`, and the error definitions are `oa-bench`'s (cross-track and along-track in the
 //! truth frame, the time offset as `metrics_th::fit_offset` defines it, here per aircraft).
 //!
-//! Writes `p002.txt` (tables M1 to M7 with bootstrap intervals, breakdowns, exclusions, offsets,
-//! digests, commit) and `samples.csv` (one row per grid sample).
+//! P-003 adds, for every system alike, the rounding-tolerant along-track error
+//! `a_t = sign(a) * max(0, |a| - 0.5 s * v)` of the time-fitted along-track error `a` and the
+//! reference ground speed `v` (M2t), and the horizontal error `hypot(cross, a_t)` (M3t); M4 and
+//! M7 are also computed on M3t. The headline position metrics are M1 and M3t; M2 and M3 are
+//! reported, but no claim of "better than ERAM" may rest on them. The breakdowns by the tracker's
+//! coasting, uncertain (`O_UNCERTAIN`) and reacquired (`O_REACQUIRED`) flags report M1, M3t and M5
+//! with sample counts, on the same resamples. The scorer records `git rev-parse HEAD` and
+//! refuses a tree that `git status --porcelain` lists as modified unless `--allow-dirty` is
+//! given, and then stamps every output file as not valid for hold-out scoring.
+//!
+//! Writes `p002.txt` (tables M1 to M7 and M2t, M3t, M4t, M7t with bootstrap intervals,
+//! breakdowns by phase, altitude and the three flags, exclusions, offsets, digests, commit) and
+//! `samples.csv` (one row per grid sample).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -55,6 +66,12 @@ const LARGE_M: f64 = 926.0;
 /// The passthrough rule: within this share of OpenATCA's value.
 const FLOOR_SHARE: f64 = 0.10;
 
+/// P-003 rounding tolerance: reference times are whole seconds, so along-track error within this
+/// many seconds of travel at the reference ground speed is not charged.
+const ROUND_TOL_S: f64 = 0.5;
+/// The stamp on every output file of a run on a modified tree (P-003 section 2, item 13).
+const DIRTY_STAMP: &str = "DIRTY TREE \u{2014} not valid for hold-out scoring";
+
 const SYS: [&str; 3] = ["OpenATCA", "ERAM", "Passthrough"];
 const OA: usize = 0;
 const ER: usize = 1;
@@ -64,7 +81,12 @@ const STATS: [&str; 3] = ["median", "p95", "rms"];
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut sfdps, mut out, mut label) = (None, None, None, String::new());
+    let mut allow_dirty = false;
     while let Some(a) = args.next() {
+        if a == "--allow-dirty" {
+            allow_dirty = true;
+            continue;
+        }
         let v = args.next();
         match a.as_str() {
             "--adsb" => adsb = v.map(PathBuf::from),
@@ -78,10 +100,20 @@ fn main() -> ExitCode {
         }
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
-        eprintln!("usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>]");
+        eprintln!(
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty]"
+        );
         return ExitCode::from(2);
     };
-    match run(&adsb, &sfdps, &out, &label) {
+    let git = git_state();
+    if git.is_dirty() && !allow_dirty {
+        eprintln!(
+            "p002: refused: the working tree is not clean ({}); a hold-out score is valid only from a clean checkout at the frozen commit (--allow-dirty runs it, stamped as not valid)",
+            git.tree_text()
+        );
+        return ExitCode::from(2);
+    }
+    match run(&adsb, &sfdps, &out, &label, &git) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -184,6 +216,9 @@ struct Pt {
     /// Track-angle error, degrees (NaN when absent).
     hdg: f64,
     coast: u8,
+    /// The tracker's `O_UNCERTAIN` and `O_REACQUIRED` flags of the row (OpenATCA only).
+    uncertain: bool,
+    reacquired: bool,
     phase: u8,
     band: u8,
 }
@@ -246,6 +281,8 @@ fn points_of(p: &PairTable, per: &mut PerAc, dropped: &mut Dropped) {
             spd: g(&p.speed_err_kt, nan) * KT_MPS,
             hdg: g(&p.hdg_err_deg, nan),
             coast: p.coast.get(i).copied().unwrap_or(0),
+            uncertain: false,
+            reacquired: false,
             phase: p.phase.get(i).copied().unwrap_or(0),
             band: p.band.get(i).copied().unwrap_or(0),
         });
@@ -307,6 +344,9 @@ struct Val {
     along_fit: f64,
     h_raw: f64,
     h_fit: f64,
+    /// P-003 rounding-tolerant along-track error and horizontal error.
+    along_tol: f64,
+    h_tol: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -346,12 +386,62 @@ fn fit_tau(it: impl Iterator<Item = (f64, f64)>) -> Option<f64> {
     (svv > 0.0).then(|| sev / svv)
 }
 
+/// P-003 rounding-tolerant along-track error: the fitted error `a` less `0.5 s * v` of travel at
+/// the reference ground speed `v`, floored at zero and keeping the sign of `a`. NaN when either
+/// is not finite.
+fn along_tol(a: f64, v: f64) -> f64 {
+    if !(a.is_finite() && v.is_finite()) {
+        return f64::NAN;
+    }
+    let m = (a.abs() - ROUND_TOL_S * v).max(0.0);
+    if a < 0.0 {
+        -m
+    } else {
+        m
+    }
+}
+
+/// What `git` said of the tree the scorer was built from.
+struct GitState {
+    head: String,
+    /// `git status --porcelain` output; `None` when git could not say.
+    porcelain: Option<String>,
+}
+
+impl GitState {
+    fn is_dirty(&self) -> bool {
+        tree_is_dirty(self.porcelain.as_deref())
+    }
+
+    fn tree_text(&self) -> String {
+        match self.porcelain.as_deref() {
+            None => "git status unavailable".to_string(),
+            Some(p) => {
+                let n = p.lines().filter(|l| !l.trim().is_empty()).count();
+                if n == 0 {
+                    "clean".to_string()
+                } else {
+                    format!("{n} paths modified or untracked")
+                }
+            }
+        }
+    }
+}
+
+/// Whether a tree is unfit for hold-out scoring: any line of `git status --porcelain`, or no
+/// answer from git at all.
+fn tree_is_dirty(porcelain: Option<&str>) -> bool {
+    porcelain.is_none_or(|p| p.lines().any(|l| !l.trim().is_empty()))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Cross,
     AlongRaw,
     AlongFit,
     HFit,
+    AlongTol,
+    HTol,
     Speed,
     Track,
 }
@@ -363,6 +453,8 @@ impl Kind {
             Kind::AlongRaw => v.pt.along.abs(),
             Kind::AlongFit => v.along_fit.abs(),
             Kind::HFit => v.h_fit,
+            Kind::AlongTol => v.along_tol.abs(),
+            Kind::HTol => v.h_tol,
             Kind::Speed => v.pt.spd.abs(),
             Kind::Track => v.pt.hdg.abs(),
         }
@@ -640,7 +732,6 @@ fn write_strata(
         o,
         "{title}: breakdown (common set; median with 95% interval, p95 and rms as points)"
     );
-    type Keep = Box<dyn Fn(&Row) -> bool>;
     let mut strata: Vec<(String, Keep)> = Vec::new();
     for (i, name) in phase::NAMES.iter().enumerate() {
         strata.push((
@@ -672,7 +763,60 @@ fn write_strata(
                 .is_some_and(|v| v.pt.coast != 0)
         }),
     ));
-    for (name, keep) in &strata {
+    write_groups(o, rows, n_ac, draws, k, &strata);
+}
+
+type Keep = Box<dyn Fn(&Row) -> bool>;
+
+/// The flag groups of P-003: OpenATCA's coasting, uncertain and reacquired rows against the rest,
+/// each pair on the same common set and resamples as the other tables.
+fn flag_groups() -> Vec<(String, Keep)> {
+    let oa = |r: &Row| r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
+    let mut g: Vec<(String, Keep)> = Vec::new();
+    type Flag = fn(&Pt) -> bool;
+    let flags: [(&str, Flag); 3] = [
+        ("coasting", |p| p.coast != 0),
+        ("uncertain", |p| p.uncertain),
+        ("reacquired", |p| p.reacquired),
+    ];
+    for (name, f) in flags {
+        g.push((
+            format!("OpenATCA not {name}"),
+            Box::new(move |r: &Row| oa(r).is_some_and(|p| !f(&p))),
+        ));
+        g.push((
+            format!("OpenATCA {name}"),
+            Box::new(move |r: &Row| oa(r).is_some_and(|p| f(&p))),
+        ));
+    }
+    g
+}
+
+/// P-003 breakdown by the tracker's flags for one metric.
+fn write_flag_groups(
+    o: &mut String,
+    title: &str,
+    rows: &[Row],
+    n_ac: usize,
+    draws: &[Vec<u32>],
+    k: Kind,
+) {
+    let _ = writeln!(
+        o,
+        "{title}: breakdown by OpenATCA row flag (common set; groups by OpenATCA's flag on the grid sample; median with 95% interval, p95 and rms as points)"
+    );
+    write_groups(o, rows, n_ac, draws, k, &flag_groups());
+}
+
+fn write_groups(
+    o: &mut String,
+    rows: &[Row],
+    n_ac: usize,
+    draws: &[Vec<u32>],
+    k: Kind,
+    strata: &[(String, Keep)],
+) {
+    for (name, keep) in strata {
         let m = metric(rows, n_ac, draws, k, keep.as_ref());
         let n = m.n.first().copied().unwrap_or(0);
         if n == 0 {
@@ -706,7 +850,7 @@ fn write_strata(
 // The run.
 // ---------------------------------------------------------------------------------------------
 
-fn git_state() -> String {
+fn git_state() -> GitState {
     let dir = env!("CARGO_MANIFEST_DIR");
     let git = |args: &[&str]| {
         Command::new("git")
@@ -716,12 +860,12 @@ fn git_state() -> String {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     };
-    let head = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
-        .map_or("unknown".to_string(), |s| s.lines().count().to_string());
-    format!("{head} (tracked paths modified in the working tree: {dirty})")
+    GitState {
+        head: git(&["rev-parse", "HEAD"]).map_or("unknown".into(), |s| s.trim().to_string()),
+        porcelain: git(&["status", "--porcelain"]),
+    }
 }
 
 fn peak_rss_mb() -> f64 {
@@ -741,7 +885,13 @@ fn fmt_opt(v: Option<f64>, prec: usize) -> String {
         .map_or(String::new(), |x| format!("{x:.prec$}"))
 }
 
-fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<String, String> {
+fn run(
+    clip_path: &Path,
+    sfdps: &Path,
+    out_dir: &Path,
+    label: &str,
+    git: &GitState,
+) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let t_start = Instant::now();
 
@@ -789,6 +939,7 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
     let mut oa_ex = Exclusions::new();
     let mut oa_assoc = [0u64; astatus::COUNT];
     let mut oa_rows = 0u64;
+    let mut flag_unmatched = 0u64;
     let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
     for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
         let r = run
@@ -809,9 +960,30 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
         )
         .map_err(|e| format!("track samples: {e:?}"))?;
         oa_rows += r.addr.len() as u64;
+        // The tracker's flags by (address, row time, ms); one row per address and time.
+        let flags_of: BTreeMap<(u32, i64), (bool, bool)> = (0..r.addr.len())
+            .filter_map(|i| {
+                Some((
+                    (*r.addr.get(i)?, r.t_ns.get(i)?.div_euclid(1_000_000)),
+                    (*r.uncertain.get(i)?, *r.reacquired.get(i)?),
+                ))
+            })
+            .collect();
         drop(r);
         let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
+        let first_new: BTreeSet<u32> = flags_of.keys().map(|k| k.0).collect();
         points_of(&p.pairs, &mut oa_pts, &mut oa_drop);
+        for a in first_new {
+            for pt in oa_pts.get_mut(&a).into_iter().flatten() {
+                match flags_of.get(&(a, pt.t)) {
+                    Some(&(u, re)) => {
+                        pt.uncertain = u;
+                        pt.reacquired = re;
+                    }
+                    None => flag_unmatched += 1,
+                }
+            }
+        }
         for (k, v) in p.ex {
             *oa_ex.entry(k).or_default() += v;
         }
@@ -981,6 +1153,8 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
                     along_fit: pt.along,
                     h_raw: pt.cross.hypot(pt.along),
                     h_fit: pt.cross.hypot(pt.along),
+                    along_tol: along_tol(pt.along, pt.v),
+                    h_tol: pt.cross.hypot(along_tol(pt.along, pt.v)),
                 });
             }
             rows.push(Row {
@@ -1018,6 +1192,8 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
                 let t = tau.get(s).copied().flatten().unwrap_or(0.0);
                 v.along_fit = v.pt.along - t * v.pt.v;
                 v.h_fit = v.pt.cross.hypot(v.along_fit);
+                v.along_tol = along_tol(v.along_fit, v.pt.v);
+                v.h_tol = v.pt.cross.hypot(v.along_tol);
             }
         }
     }
@@ -1030,16 +1206,33 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
     let m2r = metric(&rows, n_ac, &draws, Kind::AlongRaw, &all);
     let m2f = metric(&rows, n_ac, &draws, Kind::AlongFit, &all);
     let m3 = metric(&rows, n_ac, &draws, Kind::HFit, &all);
+    let m2t = metric(&rows, n_ac, &draws, Kind::AlongTol, &all);
+    let m3t = metric(&rows, n_ac, &draws, Kind::HTol, &all);
     let m5s = metric(&rows, n_ac, &draws, Kind::Speed, &all);
     let m5t = metric(&rows, n_ac, &draws, Kind::Track, &all);
     eprintln!("main metrics bootstrapped");
 
     let mut o = String::new();
-    let _ = writeln!(o, "P-002 scoring: OpenATCA, ERAM, passthrough baseline");
+    if git.is_dirty() {
+        let _ = writeln!(o, "{DIRTY_STAMP}");
+    }
+    let _ = writeln!(
+        o,
+        "P-002 scoring with the P-003 amendment: OpenATCA, ERAM, passthrough baseline"
+    );
     if !label.is_empty() {
         let _ = writeln!(o, "  label: {label}");
     }
-    let _ = writeln!(o, "  git commit: {}", git_state());
+    let _ = writeln!(
+        o,
+        "  git commit: {} (working tree: {})",
+        git.head,
+        git.tree_text()
+    );
+    let _ = writeln!(
+        o,
+        "  P-003: M2t = sign(a) * max(0, |a| - {ROUND_TOL_S} s * v) of the time-fitted along-track error a and the reference ground speed v; M3t = hypot(cross, M2t); all three systems alike; headline position metrics are M1 and M3t (no 'better than ERAM' claim may rest on M2 or M3); M4 and M7 are also given on M3t"
+    );
     let _ = writeln!(
         o,
         "  ADS-B clip: {} sha256={} (files={}, bytes={})",
@@ -1210,34 +1403,54 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
     write_metric(&mut o, "M2 along-track error, raw", "m", &m2r);
     write_metric(&mut o, "M2 along-track error, time-fitted", "m", &m2f);
     write_metric(&mut o, "M3 horizontal error after time fit", "m", &m3);
+    write_metric(
+        &mut o,
+        "M2t along-track error, rounding-tolerant (P-003)",
+        "m",
+        &m2t,
+    );
+    write_metric(
+        &mut o,
+        "M3t horizontal error, rounding-tolerant (P-003)",
+        "m",
+        &m3t,
+    );
     write_metric(&mut o, "M5 ground-speed error", "m/s", &m5s);
     write_metric(&mut o, "M5 track-angle error", "deg", &m5t);
 
     // M4.
-    let mut m4: Vec<(&str, f64, [Cnt; 3])> = Vec::new();
-    for (name, thr) in [("within 100 m", 100.0), ("within 300 m", 300.0)] {
-        let mut c = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
-        for r in &rows {
-            for (s, cs) in c.iter_mut().enumerate() {
-                let ok = r
-                    .val
-                    .get(s)
-                    .and_then(|v| v.as_ref())
-                    .is_some_and(|v| v.h_fit <= thr);
-                cs.add(r.ac, ok);
+    for (what, h) in [
+        (
+            "time-fitted horizontal error (M3)",
+            (|v: &Val| v.h_fit) as fn(&Val) -> f64,
+        ),
+        (
+            "rounding-tolerant horizontal error (M3t, P-003)",
+            |v: &Val| v.h_tol,
+        ),
+    ] {
+        let _ = writeln!(
+            o,
+            "M4{} coverage-penalised share of ALL {grid} grid samples with {what} within threshold (a miss is a failure)",
+            if what.contains("M3t") { "t" } else { "" }
+        );
+        for (name, thr) in [("within 100 m", 100.0), ("within 300 m", 300.0)] {
+            let mut c = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
+            for r in &rows {
+                for (s, cs) in c.iter_mut().enumerate() {
+                    let ok = r
+                        .val
+                        .get(s)
+                        .and_then(|v| v.as_ref())
+                        .is_some_and(|v| h(v) <= thr);
+                    cs.add(r.ac, ok);
+                }
             }
+            let _ = writeln!(o, "  {name}:");
+            write_share(&mut o, &c, &draws, 1.0);
         }
-        m4.push((name, thr, c));
+        let _ = writeln!(o);
     }
-    let _ = writeln!(
-        o,
-        "M4 coverage-penalised share of ALL {grid} grid samples with time-fitted horizontal error within threshold (a miss is a failure)"
-    );
-    for (name, _, c) in &m4 {
-        let _ = writeln!(o, "  {name}:");
-        write_share(&mut o, c, &draws, 1.0);
-    }
-    let _ = writeln!(o);
 
     // M6.
     let (mut win, mut lose, mut tie) = (0u64, 0u64, 0u64);
@@ -1331,6 +1544,23 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
     }
     write_share(&mut o, &m7, &draws, 10_000.0);
     let _ = writeln!(o);
+    let _ = writeln!(
+        o,
+        "M7t large errors on the rounding-tolerant horizontal error (M3t, P-003): samples over {LARGE_M} m on ALL {grid} grid samples; a miss is counted as a failure"
+    );
+    let mut m7t: [Cnt; 3] = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
+    for r in &rows {
+        for (s, cs) in m7t.iter_mut().enumerate() {
+            let v = r.val.get(s).and_then(|v| v.as_ref());
+            cs.add(r.ac, v.is_none() || v.is_some_and(|v| v.h_tol > LARGE_M));
+        }
+    }
+    for (s, sys) in SYS.iter().enumerate() {
+        let (f, _) = m7t.get(s).map_or((0, 0), Cnt::point);
+        let _ = writeln!(o, "  {sys}: failures {f} (over {LARGE_M} m or missed)");
+    }
+    write_share(&mut o, &m7t, &draws, 10_000.0);
+    let _ = writeln!(o);
 
     // Breakdowns.
     write_strata(
@@ -1366,6 +1596,40 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
         Kind::Track,
     );
 
+    // P-003 flag groups (P-002 item 9: the low-confidence breakdown is the uncertain group).
+    write_flag_groups(
+        &mut o,
+        "M1 cross-track error (m)",
+        &rows,
+        n_ac,
+        &draws,
+        Kind::Cross,
+    );
+    write_flag_groups(
+        &mut o,
+        "M3t rounding-tolerant horizontal error (m)",
+        &rows,
+        n_ac,
+        &draws,
+        Kind::HTol,
+    );
+    write_flag_groups(
+        &mut o,
+        "M5 ground-speed error (m/s)",
+        &rows,
+        n_ac,
+        &draws,
+        Kind::Speed,
+    );
+    write_flag_groups(
+        &mut o,
+        "M5 track-angle error (deg)",
+        &rows,
+        n_ac,
+        &draws,
+        Kind::Track,
+    );
+
     let secs = t_start.elapsed().as_secs_f64();
     let _ = writeln!(
         o,
@@ -1374,18 +1638,22 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
     );
     let _ = writeln!(
         o,
-        "NOTE: OpenATCA's low-confidence flag is not carried into the scored rows, so the breakdown by flag is by the coast flag only."
+        "NOTE: OpenATCA's uncertain and reacquired flags are joined to the paired samples by address and row time; paired OpenATCA samples with no matching tracker row: {flag_unmatched}"
     );
 
     // samples.csv.
-    let mut csv = String::from("addr,t_ms,phase,band,common");
+    let mut csv = String::new();
+    if git.is_dirty() {
+        let _ = writeln!(csv, "# {DIRTY_STAMP}");
+    }
+    csv.push_str("addr,t_ms,phase,band,common");
     for p in ["oa", "eram", "pt"] {
         let _ = write!(
             csv,
-            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
+            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_along_tol_m,{p}_h_tol_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
         );
     }
-    csv.push_str(",oa_coast,oa_lowconf\n");
+    csv.push_str(",oa_coast,oa_uncertain,oa_reacquired\n");
     for r in &rows {
         let _ = write!(
             csv,
@@ -1401,15 +1669,17 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
         );
         for v in &r.val {
             match v {
-                None => csv.push_str(",1,,,,,,,"),
+                None => csv.push_str(",1,,,,,,,,,"),
                 Some(v) => {
                     let _ = write!(
                         csv,
-                        ",0,{},{},{},{},{},{},{}",
+                        ",0,{},{},{},{},{},{},{},{},{}",
                         fmt_opt(Some(v.pt.cross), 2),
                         fmt_opt(Some(v.pt.along), 2),
                         fmt_opt(Some(v.along_fit), 2),
                         fmt_opt(Some(v.h_fit), 2),
+                        fmt_opt(Some(v.along_tol), 2),
+                        fmt_opt(Some(v.h_tol), 2),
                         fmt_opt(Some(v.pt.spd), 3),
                         fmt_opt(Some(v.pt.hdg), 2),
                         v.pt.t - r.t
@@ -1417,11 +1687,13 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, label: &str) -> Result<St
                 }
             }
         }
-        let coast = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt.coast);
+        let oa = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
         let _ = writeln!(
             csv,
-            ",{},NA",
-            coast.map_or(String::new(), |c| c.to_string())
+            ",{},{},{}",
+            oa.map_or(String::new(), |p| p.coast.to_string()),
+            oa.map_or(String::new(), |p| u8::from(p.uncertain).to_string()),
+            oa.map_or(String::new(), |p| u8::from(p.reacquired).to_string())
         );
     }
     fs::write(out_dir.join("samples.csv"), &csv).map_err(|e| e.to_string())?;
@@ -1523,6 +1795,36 @@ mod tests {
     }
 
     #[test]
+    fn along_tolerance_below_at_and_above_half_second_of_travel() {
+        // v = 200 m/s: the tolerance is 100 m.
+        assert_eq!(along_tol(60.0, 200.0), 0.0);
+        assert_eq!(along_tol(100.0, 200.0), 0.0);
+        assert_eq!(along_tol(130.0, 200.0), 30.0);
+        assert_eq!(along_tol(0.0, 200.0), 0.0);
+        // Zero speed charges nothing.
+        assert_eq!(along_tol(7.5, 0.0), 7.5);
+    }
+
+    #[test]
+    fn along_tolerance_keeps_the_sign() {
+        assert_eq!(along_tol(-130.0, 200.0), -30.0);
+        assert_eq!(along_tol(-100.0, 200.0), 0.0);
+        assert_eq!(along_tol(-60.0, 200.0), 0.0);
+        assert!(along_tol(f64::NAN, 200.0).is_nan());
+        assert!(along_tol(10.0, f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn dirty_tree_is_refused_unless_porcelain_is_empty() {
+        assert!(!tree_is_dirty(Some("")));
+        assert!(!tree_is_dirty(Some("\n")));
+        assert!(tree_is_dirty(Some(" M crates/oa-track/src/score.rs\n")));
+        assert!(tree_is_dirty(Some("?? new.rs\n")));
+        // No answer from git is not a clean tree.
+        assert!(tree_is_dirty(None));
+    }
+
+    #[test]
     fn tau_recovers_a_constant_offset() {
         let pts: Vec<(f64, f64)> = [60.0, 120.0, 200.0].iter().map(|&v| (0.5 * v, v)).collect();
         assert!((fit_tau(pts.iter().copied()).unwrap() - 0.5).abs() < 1e-12);
@@ -1559,6 +1861,8 @@ mod tests {
             spd: 0.0,
             hdg: 0.0,
             coast: 0,
+            uncertain: false,
+            reacquired: false,
             phase: 0,
             band: 0,
         };
