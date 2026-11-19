@@ -1,5 +1,6 @@
 //! Queries on a built [`Truth`], its accessors and its digest. Core (pure, B7).
 
+use oa_math::canon_nan;
 use oa_sha256::core::sha256::Sha256;
 
 use super::frame::{frame_new, try_frame_velocity, unproject};
@@ -224,7 +225,8 @@ fn put(h: &mut Sha256, b: &[u8]) {
 }
 
 /// Writes the truth's canonical serialisation to the hasher: the tag, the settings, the counts,
-/// then every column, integers little-endian and floats as their IEEE bits. Equal digests mean
+/// then every column, integers little-endian and floats as their IEEE bits (a NaN as the one
+/// fixed NaN, [`canon_nan`], since its sign and payload differ between machines). Equal digests mean
 /// the models are bit-identical.
 pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
     put(h, TRUTH_HASH_TAG);
@@ -242,7 +244,7 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
         c.accel_q,
         c.sigma_scale,
     ] {
-        put(h, &v.to_bits().to_le_bytes());
+        put(h, &canon_nan(v).to_bits().to_le_bytes());
     }
     for v in [c.jump_resync, c.min_leg_points, c.loo_stride] {
         put(h, &v.to_le_bytes());
@@ -261,7 +263,7 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
         put(h, &v.to_le_bytes());
     }
     for v in t.leg_lat0.iter().chain(&t.leg_lon0) {
-        put(h, &v.to_bits().to_le_bytes());
+        put(h, &canon_nan(*v).to_bits().to_le_bytes());
     }
     for v in &t.pt_t_ns {
         put(h, &v.to_le_bytes());
@@ -272,7 +274,7 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
     for col in [&t.pt_xf, &t.pt_pf, &t.pt_xs, &t.pt_ps] {
         for row in col {
             for v in row {
-                put(h, &v.to_bits().to_le_bytes());
+                put(h, &canon_nan(*v).to_bits().to_le_bytes());
             }
         }
     }

@@ -1225,10 +1225,14 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
         return Err(bad("strings", "offsets do not span the text"));
     }
     for w in s.offsets.windows(2) {
-        let (a, b) = match w {
-            [a, b] => (*a as usize, *b as usize),
-            _ => (usize::MAX, 0),
+        // `windows(2)` yields pairs only; the other arm is unreachable and refuses all the same
+        let [a, b] = w else {
+            return Err(bad(
+                "strings",
+                "offsets are not increasing character boundaries",
+            ));
         };
+        let (a, b) = (*a as usize, *b as usize);
         if a > b || s.text.get(a..b).is_none() {
             return Err(bad(
                 "strings",

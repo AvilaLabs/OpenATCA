@@ -1,6 +1,7 @@
 //! Pure. Mentions std::fs, HashMap, println! and crate::shell only in comments and strings.
 /* block comment: std::io::stdin() and dbg!(x), /* nested HashSet */ still comment */
 
+#![forbid(unsafe_code)]
 #![cfg_attr(not(test), no_std)]
 
 pub const TEXT: &str = "std::fs::read and HashMap and println!(x) and crate::shell::go";

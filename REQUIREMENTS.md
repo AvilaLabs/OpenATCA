@@ -209,6 +209,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-MATH-033** `rem_euclid(a, b)` equals the standard library's `f64::rem_euclid` bit for bit on two
   million inputs (bearing wraps, mixed signs, arbitrary bit patterns, wide exponent range) and on the
   edge values, a NaN result excepted, which has the crate's one fixed bit pattern.
+- **OA-MATH-034** `canon_nan(x)` returns the one fixed NaN (`0x7ff8000000000000`) for every NaN, including those
+  an invalid operation makes at run time (`0.0 / 0.0`, `inf - inf`, `inf * 0.0`, `oa_ieee::sqrt(-1.0)`, tried
+  under `black_box` so the compiler cannot fold them), negative and payload NaNs, and every other value
+  (signed zeros, subnormals, infinities) unchanged bit for bit.
 
 ### NASR (oa-nasr)
 
@@ -447,6 +451,33 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   item and outside any module or cfg block; the failure says the crate "must have" it.
 - **OA-TRC-228** Each public function of `oa-ieee` has the body `v.<same name>()` exactly.
 - **OA-TRC-229** A workspace `exclude` entry that does not normalise fails.
+- **OA-TRC-230** `lib.rs` of a split crate carries only `#![forbid(unsafe_code)]` and `doc` attributes: an
+  attribute on `mod shell` or `mod core` (`#[macro_use]`, `#[allow]`, `cfg_attr`) and an inner `allow` fail; a
+  `#[macro_export]` in shell code fails; core code has no `#[macro_use]` or `#[macro_export]`.
+- **OA-TRC-231** Shell code of a split crate may not `impl` a type or trait that its core module defines,
+  spelled by name, by path (`crate::core::`, `super::core::`), through a `use .. as` rename or through a type
+  alias; its own types, std traits on them and a core type as a trait argument are allowed.
+- **OA-TRC-232** Every core and split crate declares `[lints] workspace = true` and has `#![forbid(unsafe_code)]`
+  as an inner attribute at the top of `src/lib.rs` (`oa-ieee` included); core code has none of the tokens
+  `unsafe`, `extern`, `#[link`, `no_mangle`, `export_name`, `link_section`.
+- **OA-TRC-233** Core code may not silence the type-name lint (`non_camel_case_types`, `nonstandard_style`,
+  `bad_style`) or define a type alias that is not CamelCase; `X::<float method>` with a qualifier `X` that is
+  not `oa_math`, `oa_ieee`, a core crate, `self`/`super`/`crate`, a module the crate declares or (for the
+  Euclidean pair) an integer type fails.
+- **OA-TRC-234** Core code may not call `as_ptr`, `as_mut_ptr`, `.addr(`, `expose_provenance`, `ptr::eq`,
+  `ptr_eq`, name `usize`/`isize` `MAX`, `MIN` or `BITS`, use `size_of`/`align_of` outside a `const _: () =
+  assert!(..)` size guard, use `concat!`, `stringify!` or `format_args!`, or cast to a fn pointer.
+- **OA-TRC-235** A core `pub fn` (`pub(crate)` included) whose signature names `Fn`, `FnMut`, `FnOnce` or `dyn`,
+  takes `impl Trait` as a parameter or has a bound or `where` clause fails unless
+  `tools/oa-trace/core-callbacks-allowlist.txt` lists it as `crate file.rs::fn reason`; an entry that matches no
+  signature, has no reason or is malformed fails.
+- **OA-TRC-236** `.to_bits()` in core code (tests excepted) has the receiver `canon_nan(..)`; `oa-math` is exempt.
+- **OA-TRC-237** The platform float-method calls in non-test code of an unsplit crate may not exceed the number
+  recorded for it in `tools/oa-trace/unsplit-float-budget.txt`; a missing, stale, doubled or malformed entry
+  fails; the counts are printed.
+- **OA-TRC-238** A dependency inline table over several lines is read as one entry of its own key.
+- **OA-TRC-239** `rust-toolchain.toml` pins 1.89.0 with the components `clippy` and `rustfmt`, as the CI workflow
+  installs it; `fuzz/rust-toolchain.toml` pins the fuzz nightly.
 
 ### Hashing (oa-sha256)
 
@@ -2751,6 +2782,9 @@ US SIGMET and G-AIRMET); fields and null patterns are recorded in that directory
   and one past it refused; after the cap is crossed later frames change nothing; frames that are not messages are
   ignored; dropped records, undecodable payloads and a cut frame are each counted once; `ClipError` has its
   message texts.
+- **OA-TRUTH-061** The truth digest hashes a float's IEEE bits through `oa_math::canon_nan`: two truths that differ
+  only in the sign or payload of a NaN in any float column or setting have the same digest, and a truth that
+  differs in a finite value does not.
 
 
 ## M2 — Benchmark harness (oa-bench)

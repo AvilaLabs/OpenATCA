@@ -1,0 +1,8 @@
+# The compiler every job in .github/workflows/ci.yml installs (1.89.0, with the components its
+# check job uses). A plain `cargo` in this tree builds with it; the proof and fuzz jobs name
+# their own nightly (`+nightly-..` or RUSTUP_TOOLCHAIN). Raising it is a reviewed change made
+# together with the workflows, `rust-version` in Cargo.toml and the float list of oa-trace.
+[toolchain]
+channel = "1.89.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

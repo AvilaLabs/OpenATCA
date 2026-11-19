@@ -19,7 +19,7 @@ installed.) A software square root (bit by bit on the significand) is correct bu
 So the operations come from the small crate `oa-ieee`, which is `std` and has exactly five public
 functions (`sqrt`, `floor`, `ceil`, `trunc`, `round`), each a one-line call of the std method.
 IEEE-754 requires square root to be correctly rounded and the other four are exact, so every
-conforming machine returns the same bits. The determinism rule is unchanged.
+conforming machine returns the same bits for every result that is not a NaN. (A NaN result, such as the square root of a negative number, is required to be a NaN but not which one: its sign and payload differ between machines, so `oa_math::canon_nan` maps it to the one fixed NaN before its bits are hashed or written.) The determinism rule is unchanged.
 
 One caveat: because `oa-ieee` is in the dependency graph, the compiler still resolves the
 std-only inherent methods on `f64` (`x.sqrt()`) in these crates. Paths into `std` itself

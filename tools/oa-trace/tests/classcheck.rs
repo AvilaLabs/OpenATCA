@@ -8,10 +8,10 @@
 
 use oa_trace::classcheck::{
     check, check_with, ieee_api_problems, lib_rs_problems, mask, parse_manifest, parse_members,
-    scan_source, Class, Ctx, UNSPLIT_ALLOWED,
+    render_text, scan_source, Class, Ctx, UNSPLIT_ALLOWED,
 };
 use oa_trace::classcheck::{float_method_advice, FLOAT_METHODS};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -139,6 +139,8 @@ fn scan(src: &str) -> oa_trace::classcheck::FileScan {
         &Ctx {
             split: false,
             ieee: false,
+            math: false,
+            modules: &BTreeSet::new(),
             depth: 1,
             classes: &classes,
             aliases: &aliases,
@@ -315,8 +317,11 @@ impl Ws {
     /// As [`Ws::new`] with the package name of the crate in `crates/fx-a` set. A core crate's
     /// `src/lib.rs` gets `#![cfg_attr(not(test), no_std)]` on its first line (B10) unless it has one.
     fn named(tag: &str, pkg: &str, class: &str, files: &[(&str, &str)]) -> Ws {
+        // one directory per workspace, so equal tags in parallel tests do not share it
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root =
-            std::env::temp_dir().join(format!("oa-trace-class-{}-{tag}", std::process::id()));
+            std::env::temp_dir().join(format!("oa-trace-class-{}-{n}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let ws = Ws { root };
         ws.put(
@@ -324,10 +329,12 @@ impl Ws {
             "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\n",
         );
         ws.put(ALLOW, "");
+        ws.put(CALLBACKS, "");
+        ws.put(BUDGET, "");
         ws.put(
             "crates/fx-a/Cargo.toml",
             &format!(
-                "[package]\nname = \"{pkg}\"\n\n[package.metadata.openatca]\nclass = \"{class}\"\n"
+                "[package]\nname = \"{pkg}\"\n\n[package.metadata.openatca]\nclass = \"{class}\"\n\n[lints]\nworkspace = true\n"
             ),
         );
         ws.put(
@@ -336,11 +343,16 @@ impl Ws {
         );
         ws.put("crates/fx-b/src/lib.rs", "pub fn go() {}\n");
         for (p, c) in files {
-            let c = if class == "core" && *p == "src/lib.rs" && !c.contains("no_std") {
-                format!("#![cfg_attr(not(test), no_std)] {c}")
-            } else {
-                (*c).to_string()
-            };
+            let mut c = (*c).to_string();
+            if class == "core" && *p == "src/lib.rs" && !c.contains("no_std") {
+                c = format!("#![cfg_attr(not(test), no_std)] {c}");
+            }
+            if matches!(class, "core" | "split")
+                && *p == "src/lib.rs"
+                && !c.contains("forbid(unsafe_code)")
+            {
+                c = format!("#![forbid(unsafe_code)] {c}");
+            }
             ws.put(&format!("crates/fx-a/{p}"), &c);
         }
         ws
@@ -364,6 +376,8 @@ impl Drop for Ws {
 }
 
 const ALLOW: &str = "tools/oa-trace/unsplit-allowlist.txt";
+const CALLBACKS: &str = "tools/oa-trace/core-callbacks-allowlist.txt";
+const BUDGET: &str = "tools/oa-trace/unsplit-float-budget.txt";
 
 fn core_ws(tag: &str, lib: &str) -> Ws {
     Ws::new(tag, "core", &[("src/lib.rs", lib)])
@@ -541,12 +555,12 @@ fn aliases_globs_extern_crate_and_includes_are_rejected() {
     // allowed spellings pass
     let ws = core_ws(
         "a14",
-        "use core::fmt::{self, Debug};\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::size_of::<u8>() }\n",
+        "use core::fmt::{self, Debug};\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::drop(1u8); 0 }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     let ws = core_ws(
         "a15",
-        "use core::fmt::Debug;\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::size_of::<u8>() }\n",
+        "use core::fmt::Debug;\nuse alloc::collections::BTreeMap;\nuse core::time::Duration;\npub fn f(_d: Duration, _m: &BTreeMap<u8, u8>) -> usize { core::mem::drop(1u8); 0 }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     for (tag, src) in [
@@ -823,11 +837,14 @@ fn a_core_crate_must_be_no_std() {
     let ws = Ws::new("n0", "core", &[("src/lib.rs", "pub fn f() {}\n")]);
     ws.put("crates/fx-a/src/lib.rs", "pub fn f() {}\n");
     assert!(has(&ws.failures(), "fx-a: B10"), "{:#?}", ws.failures());
-    ws.put("crates/fx-a/src/lib.rs", "#![no_std]\npub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/src/lib.rs",
+        "#![forbid(unsafe_code)]\n#![no_std]\npub fn f() {}\n",
+    );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     ws.put(
         "crates/fx-a/src/lib.rs",
-        "#![cfg_attr( not(test) , no_std )]\npub fn f() {}\n",
+        "#![forbid(unsafe_code)]\n#![cfg_attr( not(test) , no_std )]\npub fn f() {}\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     // in a comment, a string, or the wrong cfg it does not count
@@ -1347,4 +1364,620 @@ fn every_suggested_float_alternative_is_a_real_public_function() {
     assert!(float_method_advice("powf").contains("oa_math::pow"));
     assert!(float_method_advice("div_euclid").contains("`i64::div_euclid(a, b)`"));
     assert!(float_method_advice("rem_euclid").contains("for a float use oa_math::rem_euclid"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Round two: bypasses a red-team pass proved on a10ff92, each with its planted violation.
+
+/// A split crate with the given `lib.rs`, core module and shell module.
+fn split_with(tag: &str, lib: &str, core: &str, shell: &str) -> Ws {
+    Ws::new(
+        tag,
+        "split",
+        &[
+            ("src/lib.rs", lib),
+            ("src/core/mod.rs", core),
+            ("src/shell/mod.rs", shell),
+        ],
+    )
+}
+
+// REQ: OA-TRC-230
+#[test]
+fn an_attribute_on_a_split_module_or_an_exported_shell_macro_cannot_reach_the_core() {
+    let shell_macro = "macro_rules! io { () => { std::fs::read(\"x\") }; }\n";
+    // `#[macro_use]` on `mod shell` (or any attribute) makes the macro visible to what follows
+    for (tag, lib) in [
+        ("h0", "#[macro_use]\nmod shell;\nmod core;\n"),
+        ("h1", "#[macro_use]\nmod core;\nmod shell;\n"),
+        ("h2", "#[allow(unused)]\nmod shell;\nmod core;\n"),
+        (
+            "h3",
+            "#[cfg_attr(unix, macro_use)]\nmod shell;\nmod core;\n",
+        ),
+        (
+            "h4",
+            "#![allow(non_camel_case_types)]\nmod core;\nmod shell;\n",
+        ),
+        ("h5", "mod core;\n#[doc(hidden)] #[inline]\nmod shell;\n"),
+    ] {
+        let ws = split_with(tag, lib, "pub fn f() { let _ = io!(); }\n", shell_macro);
+        assert!(
+            has(&ws.failures(), "B7: lib.rs of a split crate carries only"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+        assert!(!lib_rs_problems(lib).is_empty(), "{tag}");
+    }
+    // the attributes a split lib.rs needs are fine
+    let ok = "#![forbid(unsafe_code)]\n#![doc = include_str!(\"../README.md\")]\n#[doc(hidden)]\npub mod core;\npub mod shell;\n#[cfg(test)]\n#[macro_use]\nmod tests;\n";
+    assert!(lib_rs_problems(ok).is_empty(), "{:?}", lib_rs_problems(ok));
+    // `#[macro_export]` in the shell puts the macro at the crate root, where core could name it
+    let ws = split_with(
+        "h6",
+        SPLIT_LIB,
+        "pub fn f() {}\n",
+        &format!("#[macro_export]\n{shell_macro}"),
+    );
+    assert!(
+        has(&ws.failures(), "B7: a shell macro cannot be exported"),
+        "{:#?}",
+        ws.failures()
+    );
+    // a local macro in the shell stays legal
+    let ws = split_with("h7", SPLIT_LIB, "pub fn f() {}\n", shell_macro);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // and core code imports or exports no macro by attribute either
+    for (tag, src) in [
+        ("h8", "#[macro_use]\nmod m { }\npub fn f() {}\n"),
+        ("h9", "#[macro_export]\nfn g() {}\n"),
+    ] {
+        let ws = split_with(tag, SPLIT_LIB, src, "pub fn s() {}\n");
+        assert!(
+            has(&ws.failures(), "B8: core code imports no macro")
+                || has(&ws.failures(), "B8: core code exports no macro"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+}
+
+// REQ: OA-TRC-231
+#[test]
+fn shell_code_may_not_impl_a_core_type_or_a_core_trait() {
+    let core = "pub struct Rec { pub x: u8 }\npub trait Tr { fn t(&self) -> u8; }\n";
+    for (tag, shell) in [
+        // an inherent impl and a trait impl on a core type, imported
+        ("i0", "use crate::core::Rec;\nimpl Rec { pub fn go(&self) -> u8 { 1 } }\n"),
+        ("i1", "use crate::core::Rec;\nimpl Default for Rec { fn default() -> Rec { Rec { x: 0 } } }\n"),
+        // a core trait implemented for a shell type
+        ("i2", "use crate::core::Tr;\npub struct S;\nimpl Tr for S { fn t(&self) -> u8 { 0 } }\n"),
+        // spelled by path, through a rename and through a type alias
+        ("i3", "impl crate::core::Rec { pub fn go(&self) {} }\n"),
+        ("i4", "use crate::core::Rec as R;\nimpl R { pub fn go(&self) {} }\n"),
+        ("i5", "type A = crate::core::Rec;\nimpl A { pub fn go(&self) {} }\n"),
+        ("i6", "use crate::core::Rec;\ntype A = Rec;\ntype B = A;\nimpl B { pub fn go(&self) {} }\n"),
+        // on a reference, generic over a lifetime, with a where clause, inside a function
+        ("i7", "use crate::core::Rec;\npub trait Own { fn o(&self); }\nimpl<'a> Own for &'a Rec { fn o(&self) {} }\n"),
+        ("i8", "use super::super::core::Tr;\npub struct S;\nimpl Tr for S where S: Sized { fn t(&self) -> u8 { 0 } }\n"),
+        ("i9", "use crate::core::Rec;\npub fn f() { impl Rec { fn g(&self) {} } }\n"),
+    ] {
+        let ws = split_with(tag, SPLIT_LIB, core, shell);
+        assert!(
+            has(&ws.failures(), "B7: shell code `impl`s the core"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+    // what a shell may do: its own types, std traits on them, a core type as a trait argument
+    let ws = split_with(
+        "i10",
+        SPLIT_LIB,
+        core,
+        "use crate::core::Rec;\npub struct Own;\nimpl Own { pub fn new() -> Own { Own } }\nimpl std::fmt::Display for Own { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(\"o\") } }\nimpl From<Rec> for Own { fn from(_: Rec) -> Own { Own } }\npub trait Shelly { fn s(&self) -> impl Iterator<Item = u8>; }\nimpl<T: crate::core::Tr> Shelly for Vec<T> { fn s(&self) -> impl Iterator<Item = u8> { std::iter::empty() } }\n#[cfg(test)]\nmod tests { use crate::core::Rec; impl Rec { fn t(&self) {} } }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a shell type with the same name as a core type is its own
+    let ws = split_with(
+        "i11",
+        SPLIT_LIB,
+        core,
+        "pub struct Rec;\nimpl Rec { pub fn go(&self) {} }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-232
+#[test]
+fn every_core_and_split_crate_takes_the_workspace_lints_and_forbids_unsafe() {
+    for class in ["core", "split"] {
+        let ws = if class == "core" {
+            core_ws("u0", "pub fn f() {}\n")
+        } else {
+            split_ws("u0", SPLIT_LIB, "pub fn f() {}\n")
+        };
+        assert!(ws.failures().is_empty(), "{class}: {:#?}", ws.failures());
+        // no `[lints] workspace = true`, or lints of its own that could allow `unsafe_code`
+        let head = format!(
+            "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"{class}\"\n"
+        );
+        for tail in [
+            "",
+            "\n[lints.rust]\nunsafe_code = \"allow\"\n",
+            "\n[lints]\nworkspace = false\n",
+        ] {
+            ws.put("crates/fx-a/Cargo.toml", &format!("{head}{tail}"));
+            assert!(
+                has(
+                    &ws.failures(),
+                    "A0: a core or split crate declares `[lints] workspace = true`"
+                ),
+                "{class} {tail:?}: {:#?}",
+                ws.failures()
+            );
+        }
+    }
+    // no `#![forbid(unsafe_code)]` at the top of lib.rs: absent, in a comment, in a string,
+    // after an item, in the wrong form
+    for (tag, class, lib) in [
+        (
+            "u1",
+            "core",
+            "#![cfg_attr(not(test), no_std)]\npub fn f() {}\n",
+        ),
+        (
+            "u2",
+            "core",
+            "#![cfg_attr(not(test), no_std)]\n// #![forbid(unsafe_code)]\npub fn f() {}\n",
+        ),
+        (
+            "u3",
+            "core",
+            "#![cfg_attr(not(test), no_std)]\npub fn f() {}\n#![forbid(unsafe_code)]\n",
+        ),
+        (
+            "u4",
+            "core",
+            "#![cfg_attr(not(test), no_std)]\n#![deny(unsafe_code)]\npub fn f() {}\n",
+        ),
+        ("u5", "split", "mod core;\nmod shell;\n"),
+        (
+            "u6",
+            "split",
+            "// #![forbid(unsafe_code)]\nmod core;\nmod shell;\n",
+        ),
+        (
+            "u7",
+            "split",
+            "mod core;\nmod shell;\npub const S: &str = \"#![forbid(unsafe_code)]\";\n",
+        ),
+    ] {
+        let files: Vec<(&str, &str)> = if class == "core" {
+            vec![("src/lib.rs", "pub fn f() {}\n")]
+        } else {
+            vec![
+                ("src/lib.rs", "pub fn f() {}\n"),
+                ("src/core/mod.rs", "pub fn f() {}\n"),
+                ("src/shell/mod.rs", "pub fn s() {}\n"),
+            ]
+        };
+        let ws = Ws::new(tag, class, &files);
+        ws.put("crates/fx-a/src/lib.rs", lib);
+        assert!(
+            has(&ws.failures(), "A0: src/lib.rs of a"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+    // oa-ieee is held to it too
+    let api = "pub fn sqrt(v: f64) -> f64 { v.sqrt() }\npub fn floor(v: f64) -> f64 { v.floor() }\npub fn ceil(v: f64) -> f64 { v.ceil() }\npub fn trunc(v: f64) -> f64 { v.trunc() }\npub fn round(v: f64) -> f64 { v.round() }\n";
+    let ws = Ws::named("u8", "oa-ieee", "core", &[("src/lib.rs", api)]);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    ws.put("crates/fx-a/src/lib.rs", api);
+    assert!(
+        has(&ws.failures(), "A0: src/lib.rs of a core crate"),
+        "{:#?}",
+        ws.failures()
+    );
+    // core files may not hold the tokens that open the way to unsafe or foreign code
+    for (src, want) in [
+        ("pub fn f() { unsafe { } }\n", "unsafe"),
+        ("pub unsafe fn f() {}\n", "unsafe"),
+        ("extern \"C\" { fn g(); }\n", "extern"),
+        ("pub extern \"C\" fn f() {}\n", "extern"),
+        ("pub extern fn f() {}\n", "extern"),
+        ("#[link(name = \"m\")]\nextern \"C\" {}\n", "#[link"),
+        ("#[no_mangle]\npub fn f() {}\n", "no_mangle"),
+        ("#[unsafe(no_mangle)]\npub fn f() {}\n", "no_mangle"),
+        ("#[export_name = \"x\"]\npub fn f() {}\n", "export_name"),
+        (
+            "#[link_section = \".x\"]\nstatic X: u8 = 0;\n",
+            "link_section",
+        ),
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // the lint name and a comment or string are not the keyword
+    assert!(tokens(
+        "#![forbid(unsafe_code)]\n// unsafe extern \"C\"\npub const S: &str = \"unsafe\";\n"
+    )
+    .is_empty());
+}
+
+// REQ: OA-TRC-233
+#[test]
+fn a_lowercase_alias_cannot_stand_for_f64_and_an_unknown_qualifier_fails_closed() {
+    // the red team's case: the type-name lint silenced, a lowercase alias, a float method
+    let src =
+        "#[allow(non_camel_case_types)]\ntype fl = f64;\npub fn f(x: f64) -> f64 { fl::sin(x) }\n";
+    let t = tokens(src);
+    for want in ["non_camel_case_types", "type fl", "sin"] {
+        assert!(t.iter().any(|x| x == want), "{want}: {t:?}");
+    }
+    let ws = core_ws("a0", src);
+    assert!(
+        has(&ws.failures(), "B8: the standard library's float `sin`"),
+        "{:#?}",
+        ws.failures()
+    );
+    for (src, want) in [
+        (
+            "#![allow(nonstandard_style)]\npub fn f() {}\n",
+            "nonstandard_style",
+        ),
+        ("#![allow(bad_style)]\npub fn f() {}\n", "bad_style"),
+        (
+            "#[cfg_attr(unix, allow(non_camel_case_types))]\ntype x = u8;\n",
+            "non_camel_case_types",
+        ),
+        ("type fl = f64;\n", "type fl"),
+        ("type fl<T> = Vec<T>;\n", "type fl"),
+        ("type FL_X = f64;\n", "type FL_X"),
+        // a CamelCase alias is allowed, but a float method through it is still a failure
+        (
+            "type Fl = f64;\npub fn f(x: f64) -> f64 { Fl::sin(x) }\n",
+            "sin",
+        ),
+        // an unknown lowercase qualifier fails closed
+        ("pub fn f(x: f64) -> f64 { fl::sin(x) }\n", "sin"),
+        ("pub fn f(x: f64) -> f64 { a::b::sqrt(x) }\n", "sqrt"),
+    ] {
+        assert!(
+            tokens(src).iter().any(|x| x == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    assert!(
+        tokens("type Fl = f64;\ntype Items = Vec<u8>;\npub fn f(x: Fl) -> Fl { x }\n").is_empty()
+    );
+    // a qualifier is known when it is oa_math or oa_ieee, `self`/`super`/`crate`, a module the
+    // crate declares, or an integer type for the Euclidean pair
+    let ws = core_ws(
+        "a1",
+        "mod dd { pub fn sqrt(x: f64) -> f64 { x } }\npub fn f(x: f64) -> f64 { dd::sqrt(x) + self::dd::sqrt(x) + crate::dd::sqrt(x) + oa_math::sin(x) + oa_ieee::floor(x) }\npub fn g(a: i64) -> i64 { i64::rem_euclid(a, 3) }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a split crate's own core modules are known too
+    let ws = split_ws(
+        "a2",
+        SPLIT_LIB,
+        "pub mod dd { pub fn sqrt(x: f64) -> f64 { x } }\npub fn f(x: f64) -> f64 { dd::sqrt(x) }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-234
+#[test]
+fn addresses_platform_sizes_and_built_format_strings_are_banned_in_core() {
+    for (src, want) in [
+        (
+            "pub fn f(x: &[u8]) -> usize { x.as_ptr() as usize }\n",
+            "as_ptr",
+        ),
+        (
+            "pub fn f(x: &mut [u8]) { let _ = x.as_mut_ptr(); }\n",
+            "as_mut_ptr",
+        ),
+        ("pub fn f(p: u8) -> usize { p.addr() }\n", ".addr("),
+        (
+            "pub fn f(p: u8) { let _ = p.expose_provenance(); }\n",
+            "expose_provenance",
+        ),
+        (
+            "pub fn f(a: &u8, b: &u8) -> bool { ptr::eq(a, b) }\n",
+            "ptr::eq",
+        ),
+        (
+            "pub fn f(a: &u8, b: &u8) -> bool { Rc::ptr_eq(a, b) }\n",
+            "ptr_eq",
+        ),
+        ("pub const M: usize = usize::MAX;\n", "usize::MAX"),
+        ("pub const M: isize = isize::MAX;\n", "isize::MAX"),
+        ("pub const M: u32 = usize::BITS;\n", "usize::BITS"),
+        (
+            "pub fn f() -> usize { core::mem::size_of::<u8>() }\n",
+            "size_of",
+        ),
+        (
+            "pub const S: usize = core::mem::size_of::<u8>();\n",
+            "size_of",
+        ),
+        (
+            "pub fn f() -> usize { core::mem::align_of::<u8>() }\n",
+            "align_of",
+        ),
+        (
+            "pub fn f() { assert!(core::mem::size_of::<u8>() == 1); }\n",
+            "size_of",
+        ),
+        (
+            "pub const S: &str = concat!(\"{\", \":p\", \"}\");\n",
+            "concat!",
+        ),
+        ("pub const S: &str = stringify!(x);\n", "stringify!"),
+        (
+            "pub fn f() { let _ = core::fmt::format(format_args!(\"{}\", 1)); }\n",
+            "format_args!",
+        ),
+        ("pub fn f(g: u8) { let _ = g as fn(u8); }\n", "as fn"),
+    ] {
+        assert!(
+            tokens(src).iter().any(|x| x == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // a size is allowed in the compile-time size guard, over several lines too
+    let guard = "pub struct S { pub a: u32 }\nconst _: () = assert!(core::mem::size_of::<S>() == 4);\nconst _: () = assert!(\n    core::mem::size_of::<S>() == 4 && core::mem::align_of::<S>() == 4,\n    \"S\"\n);\n";
+    assert!(tokens(guard).is_empty(), "{:?}", tokens(guard));
+    // but not just anything with `const _`
+    assert!(!tokens("const _: u8 = core::mem::size_of::<u8>() as u8;\n").is_empty());
+    assert!(!tokens("const _: () = { let _ = core::mem::size_of::<u8>(); };\n").is_empty());
+    // the real workspace carries neither (the report states its sizes as constants)
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rep = check(&root);
+    assert!(
+        !has(&rep.failures, "size_of") && !has(&rep.failures, "usize::MAX"),
+        "{:#?}",
+        rep.failures
+    );
+}
+
+// REQ: OA-TRC-235
+#[test]
+fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
+    let sigs = [
+        ("f", "pub fn f(g: impl Fn(u8) -> u8) -> u8 { g(1) }"),
+        ("h", "pub fn h<T: Copy>(x: T) -> T { x }"),
+        (
+            "d",
+            "pub fn d(x: &dyn core::fmt::Debug) -> usize { let _ = x; 0 }",
+        ),
+        ("w", "pub fn w<T>(x: T) -> T where T: Clone { x }"),
+        ("p", "pub(crate) fn p(g: impl FnMut()) { let _ = g; }"),
+        ("b", "pub fn b(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }"),
+        ("c", "pub const fn c<F: Fn()>(g: F) { let _ = g; }"),
+    ];
+    for (name, sig) in sigs {
+        let ws = core_ws("c0", &format!("{sig}\n"));
+        assert!(
+            has(
+                &ws.failures(),
+                &format!("{name}: B5: a core `pub fn` takes a callback or a bound")
+            ),
+            "{sig}: {:#?}",
+            ws.failures()
+        );
+        // a line in the allowlist with a reason lets that function through
+        ws.put(
+            CALLBACKS,
+            &format!("fx-a lib.rs::{name} reason: the caller passes a pure comparison\n"),
+        );
+        assert!(ws.failures().is_empty(), "{sig}: {:#?}", ws.failures());
+    }
+    // not boundaries: a private fn, a plain generic, an `impl` in return position, a method
+    // without a bound in a type's impl
+    let ws = core_ws(
+        "c1",
+        "fn q(g: impl Fn()) { g() }\npub fn r<T>(x: T) -> T { x }\npub fn s() -> impl Iterator<Item = u8> { core::iter::empty() }\npub struct S;\nimpl S { pub fn m(&self) -> u8 { 0 } }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a method of an impl block is a signature too
+    let ws = core_ws(
+        "c2",
+        "pub struct S;\nimpl S { pub fn each(&self, mut g: impl FnMut(u8)) { g(0) } }\n",
+    );
+    assert!(has(&ws.failures(), "each: B5"), "{:#?}", ws.failures());
+    // a test-only item is not core
+    let ws = core_ws(
+        "c3",
+        "#[cfg(test)]\nmod t { pub fn f(g: impl Fn()) { g() } }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // the list itself: a stale entry, an entry without a reason and one in the wrong shape fail
+    let ws = core_ws("c4", "pub fn r<T>(x: T) -> T { x }\n");
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::gone reason: it used to take a closure\n",
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "fx-a lib.rs::gone: B5: listed but no core `pub fn`"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    for bad in [
+        "fx-a lib.rs::f\n",
+        "fx-a f reason: long enough text\n",
+        "fx-a lib.rs::f why\n",
+    ] {
+        ws.put(CALLBACKS, bad);
+        assert!(
+            has(&ws.failures(), "is not `crate file.rs::fn reason`"),
+            "{bad}: {:#?}",
+            ws.failures()
+        );
+    }
+    // the file must exist
+    let _ = fs::remove_file(ws.root.join(CALLBACKS));
+    assert!(
+        has(&ws.failures(), "core-callbacks-allowlist.txt: cannot read"),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+// REQ: OA-TRC-236
+#[test]
+fn a_floats_bits_in_core_code_pass_through_canon_nan() {
+    for src in [
+        "pub fn f(x: f64) -> u64 { x.to_bits() }\n",
+        "pub fn f() -> u64 { 1.0f64.to_bits() }\n",
+        "pub fn f(x: f64, y: f64) -> u64 { (x + y).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { g(x).to_bits() }\n",
+        "pub fn f(x: &[f64]) -> u64 { x.iter().map(|v| v.to_bits()).sum() }\n",
+        "pub fn f(x: f64) -> u64 { (canon_nan(x) + 1.0).to_bits() }\n",
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == "to_bits"),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    for src in [
+        "pub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x * 2.0).to_bits() }\n",
+        "pub fn f(x: f64) -> [u8; 8] { canon_nan(x).to_bits().to_le_bytes() }\n",
+        "#[cfg(test)]\nmod t { fn f(x: f64) -> u64 { x.to_bits() } }\n",
+    ] {
+        assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
+    }
+    // oa-math does bit arithmetic on floats by design
+    let src = "pub fn sign(x: f64) -> u64 { x.to_bits() >> 63 }\n";
+    let ws = Ws::named("t0", "oa-math", "core", &[("src/lib.rs", src)]);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    let ws = core_ws("t1", src);
+    assert!(
+        has(
+            &ws.failures(),
+            "fx-a/src/lib.rs:1: to_bits: B8: a float's bits"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+// REQ: OA-TRC-237
+#[test]
+fn an_unsplit_crates_float_method_count_may_not_rise() {
+    let lib = "pub fn f(x: f64) -> f64 { x.sin() + x.sqrt() + f64::exp(x) + oa_math::ln(x) + oa_ieee::floor(x) }\npub fn g(a: i64) -> i64 { i64::rem_euclid(a, 3) }\n#[cfg(test)]\nmod t { fn h(x: f64) -> f64 { x.cos() } }\n#[cfg(test)]\nmod tests;\n";
+    let ws = Ws::new(
+        "b0",
+        "unsplit",
+        &[
+            ("src/lib.rs", lib),
+            ("src/tests.rs", "fn k(x: f64) -> f64 { x.tan() }\n"),
+        ],
+    );
+    let run = |budget: &str| {
+        ws.put(BUDGET, budget);
+        check_with(&ws.root, &["fx-a"])
+    };
+    // three calls count: `.sin()`, `.sqrt()`, `f64::exp`; oa_math, oa_ieee, the integer
+    // Euclidean remainder and test code do not
+    let rep = run("fx-a 3\n");
+    assert!(rep.ok(), "{:#?}", rep.failures);
+    assert_eq!(rep.float_counts.get("fx-a"), Some(&(3, Some(3))));
+    assert!(render_text(&rep).contains("fx-a: 3 (3)"));
+    // a count that fell is fine; a count that rose fails
+    assert!(run("fx-a 5\n").ok());
+    let rep = run("fx-a 2\n");
+    assert!(
+        has(
+            &rep.failures,
+            "fx-a: B9: 3 platform float-method calls, the budget is 2"
+        ),
+        "{:#?}",
+        rep.failures
+    );
+    // no entry, an entry for a crate that is not unsplit, a malformed or doubled entry fail
+    assert!(has(&run("").failures, "fx-a: B9: no entry in"));
+    assert!(has(
+        &run("fx-a 3\nfx-b 0\n").failures,
+        "fx-b: B9: listed but not unsplit"
+    ));
+    assert!(has(&run("fx-a three\n").failures, "is not `crate count`"));
+    assert!(has(&run("fx-a 3\nfx-a 3\n").failures, "listed twice"));
+    // the file must exist
+    let _ = fs::remove_file(ws.root.join(BUDGET));
+    assert!(has(
+        &check_with(&ws.root, &["fx-a"]).failures,
+        "unsplit-float-budget.txt: cannot read"
+    ));
+    // the real workspace holds its recorded counts
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rep = check(&root);
+    for (n, (count, budget)) in &rep.float_counts {
+        assert!(
+            budget.is_some_and(|b| *count <= b),
+            "{n}: {count} {budget:?}"
+        );
+    }
+    assert!(rep.float_counts.contains_key("oa-track"));
+}
+
+// REQ: OA-TRC-238
+#[test]
+fn a_dependency_table_over_several_lines_is_read_as_one_entry() {
+    let m = parse_manifest(
+        "[package]\nname = \"oa-x\"\n\n[dependencies]\noa-a = {\n    path = \"../oa-a\", # c\n    features = [\"x\"],\n}\noa-b = { path = \"../oa-b\" }\nfoo = { package = \"oa-c\",\n  path = \"../oa-c\" }\n",
+    );
+    let keys: Vec<&str> = m.deps.iter().map(|d| d.key.as_str()).collect();
+    assert_eq!(keys, ["oa-a", "oa-b", "foo"]);
+    assert_eq!(m.deps[0].path.as_deref(), Some("../oa-a"));
+    assert_eq!(m.deps[2].package.as_deref(), Some("oa-c"));
+    assert_eq!(m.deps[2].path.as_deref(), Some("../oa-c"));
+    // a split crate may depend on a shell crate through such a table, with no false failure
+    let ws = split_ws("l0", SPLIT_LIB, "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"split\"\n\n[lints]\nworkspace = true\n\n[dependencies]\nfx-b = {\n    path = \"../fx-b\",\n}\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-239
+#[test]
+fn the_pinned_toolchain_is_the_one_ci_installs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let tc = fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
+    let lines: Vec<&str> = tc
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    assert!(lines.contains(&"channel = \"1.89.0\""), "{tc}");
+    assert!(
+        lines.contains(&"components = [\"clippy\", \"rustfmt\"]"),
+        "{tc}"
+    );
+    // the workflow installs that channel with those components, and the manifest agrees
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    assert!(
+        ci.contains("rustup toolchain install 1.89.0 --profile minimal --component clippy,rustfmt"),
+        "ci.yml does not install the pinned toolchain"
+    );
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("rust-version = \"1.89\""));
+    // the fuzz workspace sits under the root: it names its own nightly, the one CI installs
+    let fuzz = fs::read_to_string(root.join("fuzz/rust-toolchain.toml")).unwrap();
+    assert!(fuzz.contains("channel = \"nightly-2026-08-21\""), "{fuzz}");
+    assert!(ci.contains("rustup toolchain install nightly-2026-08-21"));
 }

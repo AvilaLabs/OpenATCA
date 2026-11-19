@@ -21,9 +21,15 @@
 //! platform maths library, not even on a fallback path (a test greps the sources for the
 //! forbidden calls), and nothing relies on fused multiply-add (a separate multiply and add are
 //! never contracted by the compiler). Rounding is round-to-nearest-even, the Rust default.
-//! Every NaN returned is one fixed bit pattern. The same inputs therefore give the same output
-//! bits on any IEEE-754 machine; the pinned value of `tests/fingerprint.rs` (one hash over a
+//! Every NaN these functions return is one fixed bit pattern. The same inputs therefore give the
+//! same output bits on any IEEE-754 machine; the pinned value of `tests/fingerprint.rs` (one hash over a
 //! million results) has been checked on x86-64 and wasm32 only, aarch64 has not been run.
+//!
+//! What the rule does not cover is a NaN the caller's own arithmetic makes (`0.0 / 0.0`,
+//! `inf - inf`, `oa_ieee::sqrt(-1.0)`): IEEE-754 says such a result is a NaN, not which one, and
+//! its sign and payload differ between a compile-time fold, x86-64 and aarch64. A float whose
+//! bits feed a hash, a digest or a written output goes through [`canon_nan`] first; the class
+//! check (`oa-trace`) rejects `to_bits` in core code on anything else.
 //!
 //! # How the accuracy is reached
 //!
@@ -97,6 +103,7 @@ mod dd;
 mod exp;
 mod fast;
 mod log;
+mod nan;
 mod pow;
 mod rem;
 mod root;
@@ -111,6 +118,7 @@ mod helper_tests;
 pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;
 pub use log::ln;
+pub use nan::canon_nan;
 pub use pow::{pow, powi};
 pub use rem::rem_euclid;
 pub use root::{cbrt, hypot};

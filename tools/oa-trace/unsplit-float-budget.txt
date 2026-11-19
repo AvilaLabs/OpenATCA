@@ -1,0 +1,5 @@
+# Platform float-method calls (`.sqrt()`, `f64::sin`, ...) in non-test code of each unsplit crate
+# (RULESET B9). The count may fall and never rise; when it falls, lower the number here. An
+# unsplit crate is split into core and shell, or reclassified, to retire its line.
+oa-replay-diff 4
+oa-track 88
