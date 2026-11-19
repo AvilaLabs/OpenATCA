@@ -101,19 +101,34 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 - **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
   classifications in doc comments that had drifted from the code). Every crate's Cargo.toml
   declares `[package.metadata.openatca] class = "core"`, `"shell"` or `"split"`. In a split
-  crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs` only
-  declares those modules and re-exports. Binaries, tests, examples and benches are shell. A pure
+  crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs`
+  declares exactly those two modules plus re-exports, attributes and doc comments. Binaries, tests, examples and benches are shell. A pure
   decoder that allocates per message is shell under C6, not core.
-- **B8 [MUST]** The gate checks B7 mechanically (`oa-trace`). Outside comments and string
-  literals, core code names none of: `std::fs`, `std::net`, `std::io`, `std::env`,
-  `std::process`, `std::thread`, `std::time`, `std::sync`, `thread_local!`, `static mut`,
-  `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `HashMap`, `HashSet`, `RandomState`
-  (the default hasher is seeded from OS randomness, which breaks B2 and B6), or any path into
-  a `shell` module. Core code depends only on core crates and on the `core` modules of split
-  crates.
+- **B8 [MUST]** The gate checks B7 mechanically (`oa-trace`), by allowlist (amended 2026-11-19 after
+  a review showed a blocklist could be bypassed by aliases, globs and attributes). Outside
+  comments and string literals, core code:
+  - names from `std`, `core` and `alloc` only these modules: `fmt`, `ops`, `cmp`, `mem`, `num`,
+    `convert`, `iter`, `slice`, `array`, `str`, `char`, `ascii`, `option`, `result`, `marker`,
+    `default`, `clone`, `borrow`, `hint`, `error`, `f32`, `f64`, the primitive integer modules,
+    `vec`, `boxed`, `string`, `collections` (`BTreeMap`, `BTreeSet`, `VecDeque` and `BinaryHeap`
+    only) and `core::time` (`Duration` only). Every other module (among them `fs`, `io`, `net`,
+    `env`, `process`, `thread`, `sync`, `cell`, `os`, `path`, `ffi`, `panic`, `alloc::alloc`,
+    `std::time` and the hash-map family, whose default hasher is seeded from OS randomness)
+    fails;
+  - uses no `as` rename and no `*` glob on a `std`, `core`, `alloc` or workspace-crate path, no
+    `extern crate`, no `#[path]`, no `include!`, `include_str!`, `include_bytes!`, `env!`,
+    `option_env!` or `file!`, no `static mut`, no `thread_local!`, and no print or `dbg!` macro;
+  - names `crate::` paths only under `crate::core::`, and another workspace crate only if that
+    crate is core, or through its `core` module if it is split.
+
+  A core or split crate has no `build.rs`, no custom `[lib]` or `[[bin]]` path, and no
+  dependency, in any dependency table and however renamed, on a shell or unsplit crate. The
+  checker fails on anything it cannot read or parse, on symlinks, and on a core scan that finds
+  no files.
 - **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every
-  unsplit crate and fails if a new one appears. This class exists only until the migration ends,
-  and this rule is then removed.
+  unsplit crate and fails if one appears that is not in the fixed list of the twelve crates
+  unsplit on 2026-11-19, held in the checker's source. This class exists only until the
+  migration ends, and this rule is then removed.
 
 ## C. Memory
 
