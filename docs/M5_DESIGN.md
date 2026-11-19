@@ -1,7 +1,8 @@
 # M5 — Safety nets: design
 
 Status: approved by Connor 2026-11-19. Built: step 1 (net state, inhibition objects and their
-display indications, `oa-safety` and `oa-display`). The rest is not built yet.
+display indications, `oa-safety` and `oa-display`) and step 2 (the close-encounter record,
+`oa-encounter` and `tools/oa-encounter`). The rest is not built yet.
 
 ## Goal
 
@@ -116,6 +117,16 @@ geometry. That gives the facility the record of close-proximity events the NTSB 
 DCA (AIR-26-02, findings 63 to 66, A-26-37). It also gives every nuisance alert a classification.
 Public output is aggregated, with the LADD list and the observer-network privacy rules applied
 (NODE_NETWORK §10). This record can be built before the alerts, from tracks alone.
+
+Built as `oa-encounter` (`tools/oa-encounter/README.md`). On the development hour (ZAU, 13 November
+2026, 18:00Z) it found 2,501 encounters. 1,559 were on the surface and 439 involved a coasting or
+uncertain track. Of the 503 airborne encounters between healthy tracks, 57 were aircraft on levels
+1,000 ft apart, inside the volume only through 25 ft altitude steps. The other 446 had none in the
+closest class, and the 28 in the next class were light aircraft in traffic patterns at
+general-aviation fields. 145 of the airborne encounters near 1,000 ft involve a climb or descent.
+Telling a level-off 1,000 ft from another aircraft from a climb that does not stop needs the
+cleared altitude, which comes with flight data (M4). Until then they stay in the record as
+converging.
 
 ## 6. Evaluation
 

@@ -118,6 +118,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-encounter"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+]
+
+[[package]]
+name = "oa-encounter-run"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-encounter",
+ "oa-nasr",
+ "oa-sha256",
+ "oa-track",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-feed"
 version = "0.0.1"
 dependencies = [
