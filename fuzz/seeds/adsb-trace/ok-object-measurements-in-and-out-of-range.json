@@ -1,0 +1,1 @@
+{"icao":"abc123","timestamp":1700000000.000,"trace":[[1,40.0,-90.0,100,1.0,1.0,0,0,{"ws":25,"wd":360,"tas":480,"ias":300,"mach":0.78,"mag_heading":359.99,"true_heading":0,"oat":-56,"tat":-40,"roll":-10.72,"track_rate":0.5},"adsb_icao"],[1,40.0,-90.0,100,1.0,1.0,0,0,{"ws":1001,"wd":361,"mach":5.1,"oat":201,"roll":181,"track_rate":-301},"adsb_icao"]]}
