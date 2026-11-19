@@ -238,8 +238,9 @@ pub fn load_airports(path: &std::path::Path) -> Result<Vec<Airport>, String> {
 }
 
 /// For each encounter at or above 18,000 ft pressure altitude, the smallest separation between
-/// reports of its two aircraft, metres: each report of one against the nearest-in-time report of
-/// the other within 2 s, over the encounter's time with 2 s each side. Keyed by address pair.
+/// reports of its two aircraft, metres: each report of one against the other's position at that
+/// time (its own report, or the line between its two reports around it, not over 15 s apart),
+/// over the encounter's time with 5 s each side, in both directions. Keyed by address pair.
 pub fn report_separations(
     meas: &[Measurement],
     encounters: &[Encounter],
@@ -260,21 +261,34 @@ pub fn report_separations(
     let mut out = BTreeMap::new();
     let none = Vec::new();
     for e in hi {
-        let (a, b) = (
+        let (ra, rb) = (
             by.get(&e.addr_a).unwrap_or(&none),
             by.get(&e.addr_b).unwrap_or(&none),
         );
-        let (lo, hi_t) = (e.start_ns - 2 * S_NS, e.end_ns + 2 * S_NS);
+        let (lo, hi_t) = (e.start_ns - 5 * S_NS, e.end_ns + 5 * S_NS);
         let mut best = f64::INFINITY;
-        for &(t, la, lo_a) in a.iter().filter(|r| r.0 >= lo && r.0 <= hi_t) {
-            let k = b.partition_point(|r| r.0 < t);
-            for r in [k.checked_sub(1), Some(k)].into_iter().flatten() {
-                let Some(&(tb, lb, lo_b)) = b.get(r) else {
+        for (a, b) in [(ra, rb), (rb, ra)] {
+            for &(t, la, lo_a) in a.iter().filter(|r| r.0 >= lo && r.0 <= hi_t) {
+                // The other aircraft's position at this time: its own report, or the straight line
+                // between the two reports around it when they are not more than 15 s apart.
+                let k = b.partition_point(|r| r.0 < t);
+                let (Some(&(t1, la1, lo1)), prev) =
+                    (b.get(k), k.checked_sub(1).and_then(|p| b.get(p)))
+                else {
                     continue;
                 };
-                if (tb - t).abs() > 2 * S_NS {
-                    continue;
-                }
+                let (lb, lo_b) = if t1 == t {
+                    (la1, lo1)
+                } else {
+                    let Some(&(t0, la0, lo0)) = prev else {
+                        continue;
+                    };
+                    if t1 - t0 > 15 * S_NS {
+                        continue;
+                    }
+                    let w = (t - t0) as f64 / (t1 - t0) as f64;
+                    (la0 + w * (la1 - la0), lo0 + w * (lo1 - lo0))
+                };
                 let dy = (lb - la) * 111_200.0;
                 let dx = (lo_b - lo_a) * 111_200.0 * la.to_radians().cos();
                 best = best.min(dx.hypot(dy));
