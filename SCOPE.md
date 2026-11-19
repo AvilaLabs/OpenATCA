@@ -186,6 +186,67 @@ add-on.
    read from Linux input devices directly. KMS needs a few raw OS calls (ioctl, mmap); they live
    in one isolated module under a recorded exception to the no-unsafe rule (RULESET.md A0).
 
+8. **Every facility is a full node** (Connor, 2026-11-19). If the whole NAS fits on one laptop
+   (M9), the network no longer exists to divide the workload. It exists for resilience,
+   locality and independent checking:
+   - **The whole picture everywhere.** Every facility can compute the national picture from
+     sensor data, so any facility can take over a neighbour's airspace at once. After the fire
+     at Chicago Center in September 2014, neighbouring centres took over its airspace under
+     improvised arrangements, and recovery took weeks.
+   - **Verify, don't trust.** Processing is deterministic, so facilities fed the same inputs
+     reach the same state bit for bit and can prove it by exchanging state hashes. A mismatch
+     is detected and flagged, never resolved by averaging. With three or more independent nodes
+     on the same inputs, agreement of the others can identify which node is faulty (the
+     triple-redundancy pattern of fly-by-wire computers); it isolates that node and never
+     decides who controls an aircraft. Membership is known and authenticated, so classical
+     Byzantine fault tolerance applies; proof-of-work, which exists for open membership, does not.
+   - **Control is assigned, never voted on.** Data and computation are replicated; authority is
+     not. Exactly one position is responsible for each aircraft at any moment, and responsibility
+     moves only by explicit handoff. No consensus protocol sits in any real-time path.
+   - **Tamper-evident record.** Each facility keeps an append-only record of every input and
+     every output, hash-chained and signed, so the record that an investigation relies on cannot
+     be changed without detection. Optionally, a daily digest of the record is anchored in a
+     public timestamping chain (for example Bitcoin through OpenTimestamps), giving anyone proof
+     that the record existed in that form on that date.
+   - **Run alone when the backbone fails.** A facility cut off from the shared network keeps
+     working on its own local sensors (principle 2a), and facilities can exchange the essentials
+     over a path independent of the backbone. Which path (satellite, HF radio, others) is open.
+   - **Cost rule: a node is a deployment, not a subsystem.** The core does not change: the same
+     deterministic engine runs with a wider input set. Node features (input distribution, hash
+     exchange, signed record) live in the shell, each one small and added only when a milestone
+     needs it. No consensus protocol, no replication machinery beyond the inputs themselves.
+     First evidence (M9): two nodes on the same recording agree bit for bit, and a replayed
+     takeover of one centre's airspace by another works with no hand edits.
+   - **Judged against real failures** (Connor, 2026-11-19). When the node features exist, each
+     real incident in docs/LEGACY_SHORTCOMINGS.md and the migration record is assessed one by
+     one: would the node setup have prevented it, reduced it, or made no difference, and why,
+     with sources. "No difference" results are reported as prominently as the others. Real
+     incidents first, hypothetical scenarios only to fill gaps.
+   - **Replicas catch broken machines, not broken code.** Identical deterministic nodes agree on
+     a shared bug and die together on a shared poison input (NATS 2014, Ariane 501). Code faults
+     need diversity, bought in this order of evidence: (1) an independent safety monitor on every
+     node, a small separately written checker that bounds every output track against the raw
+     measurements, physical limits, update ages and table limits (the Simplex runtime-assurance
+     pattern), verified far more heavily than the tracker; (2) a raw-surveillance display path
+     that does not pass through the tracker; (3) different compilers, hardware and operating
+     systems across nodes, and staggered restarts; (4) a second implementation only of narrow,
+     well-specified pieces such as the safety nets, used as a differential-testing oracle, never
+     counted as an independent vote. Independently written versions are known not to fail
+     independently (Knight and Leveson 1986 and later replications), so no reliability figure
+     is ever multiplied out from a replica count.
+   - **Fallback ladder:** full picture; picture annotated by the monitor; raw surveillance only
+     (the role ERAM's EBUS and STARS's emergency service level play today). Every step down is
+     logged and counted.
+   - **Poison input:** an input that crashes or stalls processing is quarantined and the node
+     runs on without it; it is never reprocessed on restart, and it becomes a permanent test.
+   - **What may be claimed:** only measured results against a stated baseline: fault-detection
+     rate and latency under injected faults, false-alarm rate, failover time, monitor escapes
+     from a mutation study. No availability or failure probability is derived from the number
+     of nodes.
+   - **Limit:** taking over airspace also needs radio frequencies, radar feeds routed to the
+     new site, and controllers trained on that airspace. The node design removes the automation
+     and adaptation part of that problem, not the rest.
+
 Implementation language: Rust (memory safety without a garbage collector, deterministic timing,
 already in use across Avila Labs). The core targets the standard library only.
 
@@ -219,6 +280,46 @@ the standard, not the Mandatory one), the legacy system measured by us on the sa
 traffic, and the best published research result. SWIM carries ERAM's, TBFM's and TFMS's own
 outputs, so the legacy number for tracking, arrival times and trajectory estimates is something
 we measure, not something we quote.
+
+## 3b. What openness and efficiency make possible
+
+Connor, 2026-11-19. Three properties together (open code, a compute cost of about one percent of
+a laptop core for national tracking, and bit-exact deterministic processing) allow practices
+that a closed system needing racks of dedicated hardware cannot afford. Each is a planned
+capability, not a side effect. Described as what these properties make possible, never as a
+claim that the legacy systems are inefficient; the public record supports "old, costly and hard
+to change" (DOT OIG AV-2020-040), and that is the comparison made.
+
+1. **Exact replay for investigation.** With the signed record and the same version, anyone
+   reproduces exactly what the system computed and displayed at any moment of an incident, and
+   why each alert did or did not fire. Needs: the signed record (principle 8). Measured by:
+   replay of recorded sessions reproducing every displayed state hash.
+2. **The whole country on every change.** A recorded national day replays as a regression test
+   on every change, and a release must reproduce the previous release's state hashes except
+   where the change declares a difference. Needs: a recorded national fixture and the
+   version-comparison job. In reach now.
+3. **Rehearsal before change.** Before any software update, airspace change or procedure change,
+   and for every 28-day aeronautical data cycle, the last month of real traffic replays through
+   the new version or adaptation and every behaviour difference (alerts, handoffs, conflicts) is
+   listed for review. In reach now for tracking; grows with each function.
+4. **Fast-time simulation.** A day of traffic replays in minutes, so thousands of days, doubled
+   traffic, a regional radar outage or a GNSS-jamming event can be run on one laptop and their
+   effect on every metric measured.
+5. **One codebase for training and operations.** Controller training runs the operational
+   software on real recorded traffic, so nothing trained differs from what is operated. Needs:
+   the display (M8).
+6. **Contingency kit.** A portable machine with an ADS-B receiver gives a surveillance picture
+   where a facility is lost or none exists (after a hurricane, at small island airports). It is
+   situational awareness, not certified control, and says so on screen. Needs: the display and
+   the LADD block.
+7. **Several candidates in shadow at once.** Shadow running is cheap enough to run two or three
+   candidate versions side by side on live data and choose on measured differences.
+8. **No obsolete hardware.** Ordinary machines of any make run it, so no part becomes
+   unobtainable; the hardware can be replaced on a commodity cycle.
+9. **Fast safety fixes with evidence.** A fix ships with replay evidence that it changes only what
+   it declares, so the review is of a small, proven difference.
+10. **Public scrutiny.** Researchers, universities, security reviewers and the public observer
+    network look for problems in the published code and data (SECURITY.md).
 
 ## 4. Architecture
 
@@ -479,14 +580,40 @@ Exit: evaluation by people who have worked ERAM or STARS positions, on recorded 
 their findings recorded and acted on. This makes the platform usable for training and research
 (rung 2).
 
-### M9 — Whole NAS (M)
+### M9 — Whole NAS on one laptop (M)
 
 Adaptation for all 20 centres and the TRACONs generated from NASR and CIFP each AIRAC cycle,
 with an automatic diff of what changed; whole-NAS replay and live shadow at real time on one
-machine.
+laptop.
+
+The laptop is a showcase target and a design constraint (Connor, 2026-11-19): every function
+OpenATCA has built by then, for the whole NAS at the busiest recorded hour, runs in real time on
+one ordinary laptop. The reference machine is the project's development laptop: a Star Labs
+StarBook Horizon, Intel Core i3-N305 (8 low-power cores, 3.8 GHz maximum), 30 GB of memory. If it
+runs there, it runs on any machine an agency would buy.
+
+What runs: surveillance tracking and fusion for every aircraft, from the national ADS-B feed and
+from radar input at the real number and placement of FAA radars (simulated where recordings are
+not available, and said so); flight data processing for every flight; the safety nets; feed
+health; and the comparator against ERAM. Display scene generation is measured for a stated number
+of positions; drawing for every position in the country is not part of the claim, because each
+position has its own screen.
+
+What the claim is, and is not: it compares compute and hardware. It is not a claim that one
+laptop should run the NAS. Operations need redundant, separated machines and an assurance case.
+ERAM's documented problems are cost, ageing hardware and parts that can no longer be repaired
+(DOT OIG AV-2020-040), not an inability to keep up with traffic, and results are worded that way.
+
+Interim marker, after M3: national surveillance tracking alone (every aircraft in the
+continental US at the busiest hour of a recorded day, from ADS-B) in real time on the reference
+laptop, with compute, memory and the share of one core measured.
 
 Exit: every centre and TRACON adapts with no hand edits, or each hand edit is recorded with its
-reason; whole-NAS peak load runs in real time with measured headroom.
+reason; whole-NAS peak load runs in real time on the reference laptop using at most half of its
+cores, so the measured headroom is at least two to one; position accuracy and every alert
+result are the same as on the per-region runs (the laptop costs nothing in accuracy); compute,
+memory, power draw where measurable, and program size are published with the recording, the
+scoring-code version and the replay state hash, so anyone can rerun it.
 
 ### Dependencies
 
