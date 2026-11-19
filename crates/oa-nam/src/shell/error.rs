@@ -1,6 +1,6 @@
 //! The one error type of the codec: every refusal names why, which field, where, and the LRM
 //! error code a receiving system would answer with (Rev G Appendix A, Table A-1, and Attachment
-//! 2 Table 2-2). Plain data (A1). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
+//! 2 Table 2-2). Plain data (A1). Shell (input-format adapter, B1, B7, C6): allocates per message, so not real-time core (C1).
 
 /// Why an input or a value was refused. Each variant maps to the Table A-1 code in
 /// [`lrm_code`].

@@ -1,4 +1,4 @@
-//! Field and element parsers and formatters (Part II section 2, Part I section 3). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
+//! Field and element parsers and formatters (Part II section 2, Part I section 3). Shell (input-format adapter, B1, B7, C6): allocates per message, so not real-time core (C1).
 //! Functions of bytes and values (B2), no clock, no I/O. Every `parse_*` takes the bytes of one field
 //! (no leading hyphen) and refuses what the field definition does not allow; every `fmt_*`
 //! writes the one canonical form. Nothing here indexes a slice: lengths are checked and slice

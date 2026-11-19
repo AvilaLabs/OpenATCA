@@ -4,14 +4,14 @@
 //! Core (pure, B1): [`step`] is a function `(config, session, event, now) -> (session, actions)`.
 //! It reads no clock (time is the `now` argument, B4), does no I/O, allocates nothing, and is
 //! bounded: [`MAX_PENDING`] unanswered messages, [`MAX_ACTIONS`] actions per step (C1, C2). It
-//! is the only core module of this crate; the codec is an input-format adapter (see lib.rs).
+//! is the only core module of this crate besides `identity`; the codec is shell (see lib.rs).
 //! The counting-allocator check of C5 is the `nam_session` route of `validation/oa-alloc-check`.
 //!
 //! The shell turns [`Action`]s into bytes ([`crate::message::encode`], [`crate::frame::frame`])
 //! and sends them, feeds received messages in as [`Event::Received`], and calls [`Event::Tick`]
 //! when [`next_deadline`] has passed.
 
-use crate::model::{Facility, Header, Kind, MsgId, Profile};
+use super::identity::{Facility, Header, Kind, MsgId, Profile};
 
 /// Time in milliseconds on any monotonic scale the shell chooses.
 pub type Millis = u64;

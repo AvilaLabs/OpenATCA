@@ -6,15 +6,16 @@
 //! Dominican, Central American) centres. No sockets, no clock: the shell supplies bytes and
 //! the time.
 //!
-//! # Classification (B1)
+//! # Classification (B1, B7)
 //!
-//! [`session`] is the only core module: a pure function of its inputs that allocates nothing
-//! and holds fixed, named capacities (C1, C2), checked under a counting allocator (C5). Every
-//! other module (the codec: [`field`], [`message`], [`model`], [`schema`], [`frame`], [`lrm`],
-//! [`error`], [`workload`]) is an input-format adapter under the shell and offline rules (D1,
-//! C6, as the other decoders of this repository). It is a pure function of bytes and values,
-//! but it allocates per message (`Vec`, `String`), so it is not real-time core and is not held
-//! to C1 or C3. Its structs are cold under A7.2.
+//! The crate is `split`. [`core`](crate::core) holds [`session`], a pure function of its inputs
+//! that allocates nothing and holds fixed, named capacities (C1, C2), checked under a counting
+//! allocator (C5), and the `Copy` identity types it uses (`core::identity`, re-exported by
+//! [`model`]). The `shell` modules (the codec: [`field`], [`message`], [`model`], [`schema`],
+//! [`frame`], [`lrm`], [`error`], [`workload`]) are an input-format adapter under the shell and
+//! offline rules (D1, C6, as the other decoders of this repository). They are a pure function
+//! of bytes and values, but they allocate per message (`Vec`, `String`), so they are not
+//! real-time core and are not held to C1 or C3. Their structs are cold under A7.2.
 //!
 //! # Layers
 //!
@@ -44,15 +45,11 @@
 //! at most [`session::MAX_PENDING`] unanswered messages and returns at most
 //! [`session::MAX_ACTIONS`] actions per step.
 
-pub mod error;
-pub mod field;
-pub mod frame;
-pub mod lrm;
-pub mod message;
-pub mod model;
-pub mod schema;
-pub mod session;
-pub mod workload;
+pub mod core;
+pub mod shell;
+
+pub use crate::core::session;
+pub use crate::shell::{error, field, frame, lrm, message, model, schema, workload};
 
 pub use error::{ErrorKind, NamError, NO_OFFSET};
 pub use field::{MAX_F31_PLAIN, MAX_F31_TEXT, MAX_MESSAGE_LEN, MAX_ROUTE_ELEMENTS};

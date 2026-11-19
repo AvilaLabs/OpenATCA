@@ -1,5 +1,5 @@
 //! Whole-message parse and encode, driven by the table in [`crate::schema`] (Part II section 3,
-//! Part III 2.4). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1). `parse` is strict: it accepts exactly the canonical text of every
+//! Part III 2.4). Shell (input-format adapter, B1, B7, C6): allocates per message, so not real-time core (C1). `parse` is strict: it accepts exactly the canonical text of every
 //! message it understands and refuses the rest with the LRM code a receiver would answer with.
 //! [`parse_tolerant`] additionally accepts the one deviation the ICD's own examples show
 //! (spaces next to a field separator), and says that it did.
