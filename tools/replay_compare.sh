@@ -112,7 +112,8 @@ build_and_run() {
     worktrees+=("$wt")
     # A commit from before the digest flags existed gets the frozen overlay patch.
     if ! grep -q -- '--digest' "$wt/crates/oa-track/src/main.rs"; then
-        if ! git -C "$wt" apply --whitespace=nowarn "$here/replay_compare_overlay.patch"; then
+        # Fuzz 3: the commit's main.rs may differ in the lines around the patched ones.
+        if ! (cd "$wt" && patch -p1 -F3 --no-backup-if-mismatch -s <"$here/replay_compare_overlay.patch"); then
             die "$commit has no --digest/--rows and the overlay patch does not apply to it"
         fi
         echo "$label: overlay applied (commit predates --digest/--rows)" >&2
