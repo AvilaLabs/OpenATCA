@@ -83,6 +83,11 @@ use oa_airspace::core::model::{
 };
 use std::fmt::Write;
 
+/// Maximum precharged work in one scene build. The charge covers table scans, declared span
+/// visits, edge subdivision, point-label sorting and worst-case label-grid slot inspection.
+pub const MAX_SCENE_WORK: u128 = 1 << 40;
+pub const MAX_SCENE_PIXELS: u128 = crate::core::raster::MAX_DISPLAY_PIXELS as u128;
+
 /// Layers, drawn first to last.
 pub const LAYER_RING: u8 = 0;
 pub const LAYER_AIRWAY: u8 = 1;
@@ -500,6 +505,7 @@ pub const MAX_GRID_BOXES: usize = 1 << 22;
 /// grid above [`MAX_GRID_BOXES`] is refused with [`DisplayError::TooLarge`] before anything is
 /// allocated.
 pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
+    let pixels = u128::from(v.proj.width) * u128::from(v.proj.height);
     let n = check_limit(
         "label candidates",
         m.points.kind.len() as u128,
@@ -509,6 +515,13 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
     let rows = (v.proj.height as usize).div_ceil(64).max(1);
     let cells = (cols as u128) * (rows as u128);
     check_limit("label grid boxes", cells * CELL_CAP as u128, MAX_GRID_BOXES)?;
+    if pixels > MAX_SCENE_PIXELS {
+        return Err(DisplayError::TooLarge {
+            what: "scene pixels",
+            requested: pixels,
+            limit: MAX_SCENE_PIXELS as usize,
+        });
+    }
     Ok(Scratch {
         cap: n,
         prio: Vec::with_capacity(n),
@@ -943,6 +956,74 @@ pub fn build_scene(
     sc: &mut Scratch,
 ) -> Result<SceneStats, DisplayError> {
     view_check(v)?;
+    let cols = (v.proj.width as usize).div_ceil(64).max(1);
+    let rows = (v.proj.height as usize).div_ceil(64).max(1);
+    let cells = cols as u128 * rows as u128;
+    let boxes = cells * CELL_CAP as u128;
+    if u128::from(v.proj.width) * u128::from(v.proj.height) > MAX_SCENE_PIXELS {
+        return Err(DisplayError::TooLarge {
+            what: "scene pixels",
+            requested: u128::from(v.proj.width) * u128::from(v.proj.height),
+            limit: MAX_SCENE_PIXELS as usize,
+        });
+    }
+    if sc.cols != cols
+        || sc.rows != rows
+        || sc.cell_n.len() as u128 != cells
+        || sc.cell_box.len() as u128 != boxes
+    {
+        return Err(DisplayError::BadView(
+            "label scratch does not match the view",
+        ));
+    }
+    let point_rows = m.points.kind.len();
+    if point_rows > MAX_LIST_ROWS {
+        return Err(DisplayError::TooLarge {
+            what: "scene point rows",
+            requested: point_rows as u128,
+            limit: MAX_LIST_ROWS,
+        });
+    }
+    if sc.cap < point_rows
+        || sc.prio.capacity() < point_rows
+        || sc.x.capacity() < point_rows
+        || sc.y.capacity() < point_rows
+        || sc.gap.capacity() < point_rows
+        || sc.w.capacity() < point_rows
+        || sc.point.capacity() < point_rows
+        || sc.order.capacity() < point_rows
+        || sc.outcome.capacity() < point_rows
+    {
+        return Err(DisplayError::BadView(
+            "label scratch capacity is below the model point count",
+        ));
+    }
+    // This preflight span summation and the later boundary rendering pass each walk these rows;
+    // the row-count gate below caps both passes, including zero-length spans.
+    let boundary_rows = m.boundaries.stratum.len();
+    if boundary_rows > MAX_LIST_ROWS {
+        return Err(DisplayError::TooLarge {
+            what: "scene boundary rows",
+            requested: boundary_rows as u128,
+            limit: MAX_LIST_ROWS,
+        });
+    }
+    let boundary_vertex_visits = m
+        .boundaries
+        .stratum
+        .iter()
+        .zip(&m.boundaries.vertices)
+        .fold(0u128, |sum, (_, span)| {
+            sum.saturating_add(u128::from(span.len))
+        });
+    let work = scene_work_bound(m, sc, cells, boundary_vertex_visits);
+    if work > MAX_SCENE_WORK {
+        return Err(DisplayError::TooLarge {
+            what: "scene work units",
+            requested: work,
+            limit: MAX_SCENE_WORK as usize,
+        });
+    }
     list_clear(l);
     scratch_clear(sc, &v.proj);
     let mut st = SceneStats::default();
@@ -954,6 +1035,37 @@ pub fn build_scene(
     points(l, m, idx, v, sc, &mut st)?;
     legend(l, m, v, &mut st)?;
     Ok(st)
+}
+
+/// Upper bound for each input-derived loop in a frame scene. This preflight runs before clearing
+/// the caller's list, so a refused view/model leaves the previous complete scene available.
+fn scene_work_bound(m: &Model, sc: &Scratch, cells: u128, boundary_vertex_visits: u128) -> u128 {
+    let points = m.points.kind.len() as u128;
+    let boundaries = m.boundaries.stratum.len() as u128;
+    let legs = m.airway_legs.from.len() as u128;
+    let point_sort = points
+        .saturating_mul(64)
+        .saturating_mul(m.strings.text.len() as u128);
+    let grid = sc.cell_n.len() as u128;
+    points
+        .saturating_mul(34)
+        .saturating_add(boundaries.saturating_mul(2))
+        .saturating_add(boundary_vertex_visits.saturating_mul(u128::from(SUBDIV_BOUNDARY)))
+        .saturating_add(legs.saturating_mul(u128::from(SUBDIV_AIRWAY) + 1))
+        .saturating_add(point_sort)
+        .saturating_add(grid)
+        .saturating_add(
+            (MAX_RINGS as u128)
+                .saturating_mul(cells)
+                .saturating_mul(CELL_CAP as u128)
+                .saturating_mul(2),
+        )
+        .saturating_add(
+            points
+                .saturating_mul(5)
+                .saturating_mul(cells)
+                .saturating_mul(CELL_CAP as u128),
+        )
 }
 
 /// The ring labels sit where each ring meets the ray 45 degrees east of north from the centre.
@@ -1543,4 +1655,99 @@ fn legend(
         legend_text(l, st, width16, (x, y), palette::ALERT, label_str(&t))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod work_budget_tests {
+    use super::*;
+    use crate::core::list::{list_new, push_line, ListCaps};
+    use oa_airspace::model::{empty_model, Meta};
+
+    fn empty_display_model() -> Model {
+        empty_model(Meta {
+            nasr_effective: 20261118,
+            cifp_cycle: 2611,
+            artcc: String::from("ZAU"),
+            buffer_m: 0,
+            nasr_sha256: [0; 32],
+            cifp_sha256: [0; 32],
+        })
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn scene_work_refusal_preserves_previous_list_and_retry_builds() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let index = scene_index(&model);
+        let mut scratch = scratch_for(&model, &view).unwrap();
+        let mut list = list_new(ListCaps {
+            lines: 64,
+            rects: 8,
+            circles: 32,
+            polylines: 32,
+            poly_vertices: 64,
+            texts: 128,
+            text_bytes: 4096,
+        })
+        .unwrap();
+        push_line(&mut list, (0, 0), (16, 16), palette::TEXT, LAYER_AIRWAY).unwrap();
+        let old_lines = list.lines.x0.clone();
+
+        model.boundaries.stratum.resize(20, stratum::ARTCC_HIGH);
+        model
+            .boundaries
+            .vertices
+            .extend((0..20).map(|_| oa_airspace::model::Span {
+                start: oa_airspace::model::VertexIx::new(0),
+                len: 1_000_000_000,
+            }));
+        assert!(matches!(
+            build_scene(&mut list, &model, &index, &view, &mut scratch),
+            Err(DisplayError::TooLarge {
+                what: "scene work units",
+                ..
+            })
+        ));
+        assert_eq!(list.lines.x0, old_lines);
+
+        model.boundaries.stratum.clear();
+        model.boundaries.vertices.clear();
+        assert!(build_scene(&mut list, &model, &index, &view, &mut scratch).is_ok());
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn boundary_scan_charge_includes_zero_length_spans() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        let cells = 510;
+        let empty_work = scene_work_bound(&model, &scratch, cells, 0);
+        model.boundaries.stratum.push(stratum::ARTCC_HIGH);
+        let one_boundary = scene_work_bound(&model, &scratch, cells, 0);
+        assert_eq!(one_boundary.saturating_sub(empty_work), 2);
+    }
+
+    // REQ: OA-DSP-055
+    #[test]
+    fn scratch_profile_refusal_precedes_allocation_and_smaller_retry_succeeds() {
+        let model = empty_display_model();
+        let large = view_new(0, 0, 50.0, 8193, 8192).unwrap();
+        assert!(matches!(
+            scratch_for(&model, &large),
+            Err(DisplayError::TooLarge {
+                what: "scene pixels",
+                ..
+            })
+        ));
+        let accepted = view_new(0, 0, 50.0, 8192, 8192).unwrap();
+        assert!(scratch_for(&model, &accepted).is_ok());
+    }
 }
