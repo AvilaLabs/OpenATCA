@@ -11,4 +11,3 @@
 oa-replay core/index.rs::index_find OPEN: `eq` is called with a slot number during the probe; callers read: core/table.rs (by_gufi, by_plan, by_tma), core/slots.rs, shell/adsb.rs adsb_slot_of; each compares a key column
 oa-replay core/index.rs::index_remove OPEN: `home` is called with a slot number to re-hash it while the probe chain is repaired; callers read: core/table.rs, core/slots.rs, shell/adsb.rs; each hashes a key column
 oa-replay core/slots.rs::slots_find OPEN: forwards `eq` to index_find; callers read: shell/tfms.rs, shell/fns.rs; each compares a key column
-oa-airspace core/model.rs::at bound is `T: Copy`, a marker with no method: the function only copies an element out of a slice, no behaviour is called through it
