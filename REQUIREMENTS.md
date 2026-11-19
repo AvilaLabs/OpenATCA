@@ -4350,3 +4350,61 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-RDF-006** `tools/replay_compare.sh` accepts only commit hashes or refs of the repository,
   refuses a working-tree or option-like spec, builds each commit in its own clean detached worktree,
   one build at a time, and records both commits and the clip's SHA-256 in its report.
+
+## COMPASS export (oa-compass)
+
+A tool crate (`tools/oa-compass`, class `split`) that writes one recorded UTC day of OpenATCA tracker output
+and of ERAM tracks as raw ASTERIX CAT062 Ed 1.21 for OpenATS COMPASS. The conversion of a row to the values of
+a record is core (`src/core`); the encoder glue, the files and the binary are shell. CAT021 export is not in
+scope.
+
+- **OA-CMP-001** A tracker tick row becomes the values of one record in the LSBs of the specification: position
+  in counts of 180/2^25 degree (I062/105), velocity in 0.25 m/s east and north (I062/185), barometric altitude in
+  1/4 FL (I062/135, no QNH correction), vertical rate in 6.25 ft/min (I062/220), time in 1/128 s since midnight
+  UTC (I062/070), each rounded to nearest. An ERAM sample becomes position, time, velocity (0.1 kt to 0.25 m/s)
+  and the reported altitude as a measured flight level (I062/136).
+- **OA-CMP-002** The time of a row is rounded to 1/128 s and the UTC day is that of the rounded time: a row within
+  1/256 s before midnight is on the next day with time of day 0, never at 24:00:00. A date is checked against the
+  calendar (leap years, month lengths) and the day count and its inverse agree.
+- **OA-CMP-003** A value a row does not have, or that does not fit its item (not a number, outside -15 FL to 1500 FL,
+  outside the 16-bit velocity or climb range), is left out of the record, never replaced by zero or clipped, and is
+  named in the row's notes; the shell counts each note per system and day and the README lists the counts. A row
+  whose latitude or longitude is out of range, or whose time does not convert, is refused and counted, not written.
+- **OA-CMP-004** I062/500 subfield 3 (APW) of an OpenATCA row is the standard deviation of the position in
+  latitude and in longitude from the position covariance: `sqrt(nn)` and `sqrt(ee)` metres over the WGS-84
+  meridian radius and over the prime vertical radius times the cosine of the latitude, in counts of 180/2^25
+  degree, rounded to nearest; a component of 0 counts is raised to 1 and one past 65 535 is the maximum, each
+  noted; a covariance that is negative or not a number leaves the item out. ERAM rows carry no I500 and say so.
+- **OA-CMP-005** I062/080 has CNF 0 (confirmed) and SIM, SPI, MON, MRH, SRC at 0; a coasting row adds the three
+  extents with CST (bit 8 of the third) set and an OpenATCA radar-disagrees row sets AFF (bit 4 of the first).
+  The row flags `O_UNCERTAIN` and `O_REACQUIRED`, which CAT062 has no field for, are not encoded and are counted.
+- **OA-CMP-006** I062/380 carries the target address only for a 24-bit Mode S address (a track keyed by a radar
+  handle or a non-ICAO address has none, noted) and, for ERAM, the callsign as an identification only if every
+  character is `A-Z`, `0-9` or space (NUL padding becomes spaces); no other character is changed or dropped.
+  I060, I200, I290 and I295 are never written, and counted as omitted on every row.
+- **OA-CMP-007** Encoding then decoding with the `oa-asterix` decoder gives records equal to those encoded, for
+  generated rows of both systems and for the tick rows of the tracker run on a slice of a real recording (skipped
+  when the recording is absent); the decoded position differs from the source position by at most 27 units of
+  1e-7 degree.
+- **OA-CMP-008** A data block holds at most 256 records, a record is at most 49 octets (every item present), so a
+  block is at most 12 547 octets, under the 65 535 a LEN holds; the encoder refuses a block over it.
+- **OA-CMP-009** A file holds one UTC day. Without `--split-days` a row on another day than the one asked for
+  refuses the export (E5) and no file is left behind; with it, one directory per day holds `openatca.ast`,
+  `eram.ast`, `data_sources.json` and `README.txt`, and no file holds a row of another day.
+- **OA-CMP-010** Track numbers (I062/040) are assigned per file in order of first appearance, from 1, one per key and
+  stable over the file; more than 65 535 distinct keys in a file is a refusal, not a wrap.
+- **OA-CMP-011** Records in a file are in non-decreasing I070; a record earlier than the one before it is refused.
+- **OA-CMP-012** ERAM samples are sorted by position time, flight and input order; a sample with the same flight,
+  position time and content as an earlier one is dropped and counted, one with different content is kept and
+  counted as a conflict, and a sample whose flight is not in the flight table is counted and not written.
+- **OA-CMP-013** Every finished file is read back from disk with the decoder and must hold exactly the records and
+  octets written, with the right data source and time order; a truncated or altered file fails the export.
+- **OA-CMP-014** `data_sources.json` is `{"content_type":"data_sources","content_version":"0.2","data_sources":[...]}`
+  with one `Tracker` entry per system, OpenATCA (SAC 255, SIC 1) and ERAM (SAC 255, SIC 2), which parses as JSON.
+  The SAC is a test pair of this export, stated as such in the documentation and the README.
+- **OA-CMP-015** The README states the UTC date to give at import, the SAC/SIC of each system, the items of each
+  file with the rows that carry them, the rows written, every omission and note by reason with its count, the
+  inputs, the I500 conversion and the encoder build.
+- **OA-CMP-016** The tracker run behind the OpenATCA file is the scorer's: set A of the split, the scoring
+  configuration, one tick row per second per confirmed track; update rows are not exported and are counted; a
+  run that lost rows to a full output table is refused.

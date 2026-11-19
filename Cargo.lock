@@ -65,6 +65,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-compass"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-asterix",
+ "oa-bench",
+ "oa-ieee",
+ "oa-json",
+ "oa-math",
+ "oa-replay",
+ "oa-track",
+]
+
+[[package]]
 name = "oa-csv"
 version = "0.0.1"
 
