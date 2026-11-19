@@ -3,7 +3,7 @@
 //! [`chain_next`] are pure. Shell: [`write_canon`] reads a spilled run back and writes the files.
 //!
 //! A row is [`ROW_BYTES`] bytes, every field little-endian at a fixed offset, floats as their
-//! IEEE bits (a NaN keeps its payload and sign; nothing is zeroed or normalised). Rows are
+//! IEEE bits (every NaN becomes the one fixed NaN, `oa_math::canon_nan_f32`; nothing else is zeroed or normalised). Rows are
 //! grouped by the Unix second of their time (`t_ns` floored to a second). The digest of a second
 //! is the SHA-256 of its rows in the order the tracker emitted them; the chain hash of a second
 //! is the SHA-256 of the chain hash of the second before it (32 zero bytes for the first), the
@@ -82,7 +82,11 @@ fn put(row: &mut CanonRow, off: usize, bytes: &[u8]) {
 
 fn put_f32s(row: &mut CanonRow, off: usize, v: &[f32]) {
     for (i, x) in v.iter().enumerate() {
-        put(row, off + 4 * i, &x.to_bits().to_le_bytes());
+        put(
+            row,
+            off + 4 * i,
+            &oa_math::canon_nan_f32(*x).to_bits().to_le_bytes(),
+        );
     }
 }
 

@@ -20,7 +20,7 @@ jobs:
       - name: Install pinned Kani verifier
         run: |
           cargo +nightly-2026-08-21 install --locked kani-verifier --version 0.68.0
-          cargo kani setup
+          cargo +nightly-2026-08-21 kani setup
       - name: Verify proof tool versions
         run: |
           kani --version | grep -F '0.68.0'

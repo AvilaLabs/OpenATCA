@@ -478,6 +478,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-238** A dependency inline table over several lines is read as one entry of its own key.
 - **OA-TRC-239** `rust-toolchain.toml` pins 1.89.0 with the components `clippy` and `rustfmt`, as the CI workflow
   installs it; `fuzz/rust-toolchain.toml` pins the fuzz nightly.
+- **OA-TRC-240** A turbofish (`::<..>`, any spacing) between a method name and its parentheses changes no rule:
+  float methods, `.addr(`, `to_bits` and the unsplit float count all still match.
+- **OA-TRC-241** A core `pub fn` inside an `impl` whose generics or `where` clause carry a bound, with a bare
+  `fn(..)` pointer type in its signature, and a `pub struct`, `enum`, `union` or `type` holding an `Fn*`, `dyn`
+  or `fn(..)` type need an allowlist line like any other callback.
+- **OA-TRC-242** `canon_nan` and `canon_nan_f32` in core are `oa_math`'s: qualified through it or imported from
+  it; a fn, binding, method or import of that name from anywhere else fails. `f64::to_bits(x)`, `f32::to_bits(x)`
+  and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float (a literal, an `as f64` cast, a name the same fn
+  declares `f32`/`f64`, a struct field declared so, or the UFCS form) fail unless the value passed `canon_nan`.
+- **OA-TRC-243** `&raw const`/`&raw mut`, the identifier `Pointer`, `type X = usize;` and `isize`, `<usize>::MAX`
+  and a `cfg`, `cfg!` or `cfg_attr` naming `debug_assertions` fail in core code; `debug_assert!`, `alloc::format`
+  and `format!` pass; `core::hash`, `core::cell` and `alloc::rc` still fail.
 
 ### Hashing (oa-sha256)
 
@@ -4301,7 +4313,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
   position, velocity, turn rate, altitude terms, position and velocity covariance terms, model
   probabilities and flags, every field little-endian at a fixed offset (`oa_track::canon`), floats as
-  their IEEE bits so a NaN keeps its sign and payload, nothing zeroed or normalised. The same row
+  their IEEE bits with every NaN made the one fixed NaN first (`oa_math::canon_nan_f32`, whose sign and payload
+  would otherwise differ between machines), nothing else zeroed or normalised. The same row
   gives the same bytes on every call, and the form built from a row in memory equals the form built
   from the column files of a spilled run.
 - **OA-TRK-361** The digest of an output second is the SHA-256 of the canonical rows whose time

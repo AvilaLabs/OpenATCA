@@ -118,7 +118,7 @@ mod helper_tests;
 pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;
 pub use log::ln;
-pub use nan::canon_nan;
+pub use nan::{canon_nan, canon_nan_f32};
 pub use pow::{pow, powi};
 pub use rem::rem_euclid;
 pub use root::{cbrt, hypot};

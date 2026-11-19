@@ -55,3 +55,22 @@ fn every_nan_becomes_the_one_fixed_nan_and_nothing_else_changes() {
     assert_eq!(oa_math::sin(f64::INFINITY).to_bits(), CANON);
     assert_eq!(canon_nan(oa_math::ln(black_box(-1.0))).to_bits(), CANON);
 }
+
+// REQ: OA-MATH-034
+#[test]
+fn the_single_precision_form_has_one_fixed_nan_too() {
+    let zero = black_box(0.0f32);
+    for x in [
+        zero / black_box(0.0),
+        -(zero / black_box(0.0)),
+        f32::from_bits(0x7fc0_1234),
+        f32::from_bits(0xffff_ffff),
+        f32::from_bits(0x7f80_0001),
+    ] {
+        assert!(x.is_nan());
+        assert_eq!(oa_math::canon_nan_f32(x).to_bits(), 0x7fc0_0000);
+    }
+    for bits in [0u32, 0x8000_0000, 1, 0x7f80_0000, 0xff80_0000, 0x3f80_0000] {
+        assert_eq!(oa_math::canon_nan_f32(f32::from_bits(bits)).to_bits(), bits);
+    }
+}

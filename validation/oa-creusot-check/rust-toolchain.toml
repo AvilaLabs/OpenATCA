@@ -1,0 +1,6 @@
+# Creusot v0.14.0 pins this nightly (see README.md); the root rust-toolchain.toml (1.89.0) is for
+# the product workspace and must not select the compiler here. Components come from the Creusot
+# installation, not from this file.
+[toolchain]
+channel = "nightly-2026-08-03"
+profile = "minimal"

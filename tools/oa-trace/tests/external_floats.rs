@@ -71,6 +71,11 @@ const ALLOW: &[Allow] = &[
         reason: "as_f64 returns None for a non-finite value on the next line",
     },
     Allow {
+        file: "crates/oa-math/src/nan.rs",
+        needle: "f32::from_bits(0x7fc0_0000)",
+        reason: "the one fixed single-precision NaN, a constant, not read from outside the program",
+    },
+    Allow {
         file: "crates/oa-math/src/",
         needle: "f64::from_bits(",
         reason: "the elementary functions' own bit-level arithmetic on values they computed or on internal \

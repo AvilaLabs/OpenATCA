@@ -141,6 +141,7 @@ fn scan(src: &str) -> oa_trace::classcheck::FileScan {
             ieee: false,
             math: false,
             modules: &BTreeSet::new(),
+            float_names: &BTreeSet::new(),
             depth: 1,
             classes: &classes,
             aliases: &aliases,
@@ -1852,9 +1853,10 @@ fn a_floats_bits_in_core_code_pass_through_canon_nan() {
         );
     }
     for src in [
-        "pub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
+        "use oa_math::canon_nan;\npub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
         "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x * 2.0).to_bits() }\n",
-        "pub fn f(x: f64) -> [u8; 8] { canon_nan(x).to_bits().to_le_bytes() }\n",
+        "use oa_math::{canon_nan, canon_nan_f32};\npub fn f(x: f64) -> [u8; 8] { canon_nan(x).to_bits().to_le_bytes() }\npub fn g(x: f32) -> u32 { canon_nan_f32(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { f64::to_bits(oa_math::canon_nan(x)) }\n",
         "#[cfg(test)]\nmod t { fn f(x: f64) -> u64 { x.to_bits() } }\n",
     ] {
         assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
@@ -1980,4 +1982,190 @@ fn the_pinned_toolchain_is_the_one_ci_installs() {
     let fuzz = fs::read_to_string(root.join("fuzz/rust-toolchain.toml")).unwrap();
     assert!(fuzz.contains("channel = \"nightly-2026-08-21\""), "{fuzz}");
     assert!(ci.contains("rustup toolchain install nightly-2026-08-21"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Round three: what the independent review of round two still got past.
+
+// REQ: OA-TRC-240
+#[test]
+fn a_turbofish_between_a_method_name_and_its_parentheses_changes_nothing() {
+    for (src, want) in [
+        ("pub fn f(x: f64) -> f64 { x.sin::<>() }\n", "sin"),
+        ("pub fn f(x: f64) -> f64 { x . sin :: < > () }\n", "sin"),
+        ("pub fn f(x: f64) -> f64 { x.sqrt::<Vec<u8>>() }\n", "sqrt"),
+        (
+            "pub fn f(x: f64) -> f64 { x.powi::<Option<fn(u8) -> u8>>(2) }\n",
+            "powi",
+        ),
+        ("pub fn f(p: u8) -> usize { p.addr::<>() }\n", ".addr("),
+        ("pub fn f(x: f64) -> u64 { x.to_bits::<>() }\n", "to_bits"),
+    ] {
+        assert!(
+            tokens(src).iter().any(|x| x == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // and the unsplit counter counts it
+    let lib = "pub fn f(x: f64) -> f64 { x.sin::<>() + x.cos :: <> () }\n";
+    let ws = Ws::new("z0", "unsplit", &[("src/lib.rs", lib)]);
+    ws.put(BUDGET, "fx-a 2\n");
+    let rep = check_with(&ws.root, &["fx-a"]);
+    assert_eq!(
+        rep.float_counts.get("fx-a"),
+        Some(&(2, Some(2))),
+        "{:#?}",
+        rep.failures
+    );
+}
+
+// REQ: OA-TRC-241
+#[test]
+fn callbacks_through_impl_bounds_fn_pointers_and_struct_fields_need_the_allowlist_too() {
+    for (name, src) in [
+        (
+            "call",
+            "pub struct W<F>(F);\nimpl<F: Fn()> W<F> { pub fn call(&self) {} }\n",
+        ),
+        (
+            "call",
+            "pub struct W<F>(F);\nimpl<F> W<F> where F: Fn() { pub fn call(&self) {} }\n",
+        ),
+        ("run", "pub fn run(f: fn(u8) -> u8) -> u8 { f(1) }\n"),
+        ("run", "pub fn run(f: Option<fn()>) {}\n"),
+        ("run", "pub fn run(f: &fn()) {}\n"),
+        ("run", "pub fn run() -> fn() { || () }\n"),
+        ("S", "pub struct S { pub cb: fn(u8) }\n"),
+        ("S", "pub struct S { cb: Box<dyn FnMut()> }\n"),
+        ("S", "pub struct S(Box<dyn Fn()>);\n"),
+        ("E", "pub enum E { A(fn()), B }\n"),
+        ("T", "pub type T = fn(u8) -> u8;\n"),
+    ] {
+        let ws = core_ws("z1", src);
+        assert!(
+            has(
+                &ws.failures(),
+                &format!("{name}: B5: a core `pub fn` takes a callback or a bound")
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+        ws.put(
+            CALLBACKS,
+            &format!("fx-a lib.rs::{name} reason: reviewed, the caller passes a pure function\n"),
+        );
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+    // data-only items and an impl without bounds are not boundaries
+    let ws = core_ws(
+        "z2",
+        "pub struct S { pub a: u8, pub f: f64 }\npub enum E { A(u8) }\npub type T = u32;\npub struct W<F>(F);\nimpl<F> W<F> { pub fn get(&self) -> u8 { 0 } }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-242
+#[test]
+fn only_oa_maths_canon_nan_counts_and_every_float_byte_path_goes_through_it() {
+    // a local fn, a shadowing binding, another crate's import, a method of that name
+    for src in [
+        "fn canon_nan(x: f64) -> f64 { x }\npub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { let canon_nan = |y: f64| y; canon_nan(x).to_bits() }\n",
+        "use crate::util::canon_nan;\npub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { other::canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { x.canon_nan().to_bits() }\n",
+        "pub mod m { pub fn canon_nan_f32(x: f32) -> f32 { x } }\n",
+    ] {
+        assert!(
+            tokens(src).iter().any(|x| x.starts_with("canon_nan")),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // UFCS and the byte forms
+    for (src, want) in [
+        ("pub fn f(x: f64) -> u64 { f64::to_bits(x) }\n", "to_bits"),
+        ("pub fn f(x: f32) -> u32 { f32::to_bits(x) }\n", "to_bits"),
+        (
+            "pub fn f(x: f64) -> [u8; 8] { f64::to_le_bytes(x) }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(x: f64) -> [u8; 8] { f64::to_be_bytes(x) }\n",
+            "to_be_bytes",
+        ),
+        (
+            "pub fn f(x: u32) -> [u8; 8] { (x as f64).to_ne_bytes() }\n",
+            "to_ne_bytes",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { 1.5f64.to_le_bytes() }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(x: f64) -> [u8; 8] { x.to_le_bytes() }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(v: &[f64]) -> [u8; 8] { v[0].to_le_bytes() }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub struct S { pub x: f32 }\npub fn f(s: &S) -> [u8; 4] { s.x.to_be_bytes() }\n",
+            "to_be_bytes",
+        ),
+    ] {
+        let ws = core_ws("z3", src);
+        let want_hit =
+            tokens(src).iter().any(|x| x == want) || has(&ws.failures(), &format!("{want}: B8"));
+        assert!(want_hit, "{src}: {:#?}", ws.failures());
+    }
+    // integers are not floats, and the canonical forms pass
+    let ws = core_ws(
+        "z4",
+        "use oa_math::canon_nan;\npub fn f(x: u32, y: f64) -> [u8; 8] { let _ = x.to_le_bytes(); canon_nan(y).to_bits().to_le_bytes() }\npub fn g(v: f64) -> u64 { let n: u32 = 1; let _ = n.to_le_bytes(); 0 }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a name that is a float in one fn is not a float in another
+    let ws = core_ws(
+        "z5",
+        "pub fn a(v: f64) -> f64 { v }\npub fn b(v: u32) -> [u8; 4] { v.to_le_bytes() }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // oa-math itself may define and use them
+    let ws = Ws::named("z6", "oa-math", "core", &[("src/lib.rs", "pub fn canon_nan(x: f64) -> f64 { if x.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { x } }\n")]);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-243
+#[test]
+fn raw_borrows_fmt_pointer_width_aliases_and_debug_assertion_branches_are_banned_in_core() {
+    for (src, want) in [
+        ("pub fn f(x: &u8) { let _ = &raw const *x; }\n", "&raw"),
+        ("pub fn f(x: &mut u8) { let _ = &raw mut *x; }\n", "&raw"),
+        ("pub struct S; impl core::fmt::Pointer for S { fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { Ok(()) } }\n", "Pointer"),
+        ("type Wide = usize;\npub const M: usize = Wide::MAX;\n", "type Wide"),
+        ("type Narrow = isize;\n", "type Narrow"),
+        ("pub const M: usize = <usize>::MAX;\n", "usize::MAX"),
+        ("pub fn f() -> u8 { if cfg!(debug_assertions) { 1 } else { 2 } }\n", "debug_assertions"),
+        ("#[cfg(debug_assertions)]\npub fn f() {}\n", "debug_assertions"),
+        ("#[cfg(not(debug_assertions))]\npub fn f() {}\n", "debug_assertions"),
+        ("#[cfg_attr(debug_assertions, inline)]\npub fn f() {}\n", "debug_assertions"),
+    ] {
+        assert!(tokens(src).iter().any(|x| x == want), "{src}: {:?}", tokens(src));
+    }
+    // debug_assert! can only panic and stays; a list of usize is not an alias of usize
+    assert!(tokens("pub fn f(x: u8) { debug_assert!(x < 9); debug_assert_eq!(x, x); }\ntype Ix = Vec<usize>;\n").is_empty());
+    // alloc::format is allowed; hash, cell and rc stay out
+    let ws = core_ws("z7", "use alloc::format;\nuse alloc::string::String;\npub fn f(x: u8) -> String { format!(\"{x}\") }\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    for (tag, src) in [
+        ("z8", "use core::hash::Hasher;\n"),
+        ("z9", "use core::cell::Cell;\n"),
+        ("za", "use alloc::rc::Rc;\n"),
+    ] {
+        assert!(!core_ws(tag, src).failures().is_empty(), "{src}");
+    }
 }

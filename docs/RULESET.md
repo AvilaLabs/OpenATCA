@@ -105,7 +105,10 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   that is not in the reviewed allowlist `tools/oa-trace/core-callbacks-allowlist.txt` (entries
   `crate file.rs::fn reason`; an entry that matches no signature fails too). A listed entry states
   why the caller cannot inject platform behaviour, or is marked OPEN where the type system does not
-  stop it and the callers were only read. Private functions are not boundaries and are not listed.
+  stop it and the callers were only read. Also listed: a `pub fn` inside an `impl` whose generics or
+  `where` clause carry a bound, a bare `fn(..)` pointer type in a signature, and a `pub struct`,
+  `enum`, `union` or `type` that holds an `Fn*`, `dyn` or `fn(..)` type. Private functions are not
+  boundaries and are not listed.
 - **B6 [MUST]** Because of B2–B5, any run can be replayed bit for bit from its recorded inputs. A
   change that breaks replay determinism is a defect.
 - **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
@@ -127,11 +130,13 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   - names from `std`, `core` and `alloc` only these modules: `fmt`, `ops`, `cmp`, `mem`, `num`,
     `convert`, `iter`, `slice`, `array`, `str`, `char`, `ascii`, `option`, `result`, `marker`,
     `default`, `clone`, `borrow`, `hint`, `error`, `f32`, `f64`, the primitive integer modules,
-    `vec`, `boxed`, `string`, `collections` (`BTreeMap`, `BTreeSet`, `VecDeque` and `BinaryHeap`
+    `vec`, `boxed`, `string`, `format` (`alloc::format!`), `collections` (`BTreeMap`, `BTreeSet`, `VecDeque` and `BinaryHeap`
     only) and `core::time` (`Duration` only). Every other module (among them `fs`, `io`, `net`,
-    `env`, `process`, `thread`, `sync`, `cell`, `os`, `path`, `ffi`, `panic`, `alloc::alloc`,
-    `std::time` and the hash-map family, whose default hasher is seeded from OS randomness)
-    fails;
+    `env`, `process`, `thread`, `sync`, `cell`, `rc`, `hash`, `os`, `path`, `ffi`, `panic`,
+    `alloc::alloc`, `std::time` and the hash-map family, whose default hasher is seeded from OS
+    randomness) fails. `core::hash` stays out because a `Hasher` is implemented by the caller, so
+    passing one in is a callback from the shell (B5); `cell` and `rc` hide mutation and aliasing
+    from the scan;
   - uses no `as` rename and no `*` glob on a `std`, `core`, `alloc` or workspace-crate path, no
     `extern crate` other than `extern crate alloc;`, no `#[path]`, no `include!`,
     `include_str!`, `include_bytes!`, `env!`, `option_env!` or `file!`, no `static mut`, no
@@ -140,7 +145,10 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     `floor`, `ceil`, `trunc`, `round`, `powi`, `powf`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log`,
     `log2`, `log10`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
     `tanh`, `hypot`, `cbrt`, `mul_add`, `rem_euclid`, `div_euclid` and `fract`; the checker
-    holds the complete list for the pinned toolchain, called by any path or receiver). The five
+    holds the complete list for the pinned toolchain), whether called as a method on any receiver
+    (a turbofish between the name and the parentheses changes nothing) or through a
+    `Name::method` path. A method that user code defines under one of these names fails too, so a
+    user method may not reuse a float-method name. The five
     exactly specified operations come from `oa-ieee` and the rest from `oa-math`. The standard
     library's versions call the platform maths library, whose results differ between machines in
     the last bit, and the compiler does not refuse them in a `no_std` crate once `std` is linked
@@ -158,18 +166,35 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     fn pointer, and `size_of`/`align_of` only inside a `const _: () = assert!(..)` size guard (a
     report that prints a size states the number as a constant and asserts it beside it); no
     `concat!`, `stringify!` or `format_args!`, which could build a `{:p}` format string the scan
-    does not see. Known limit: `{:?}` of a fn item or pointer, and `f as usize` of a fn item, print
-    or cast an address and cannot be told from other uses lexically; the fn-pointer cast ban, the
-    banned module list and the `{:p}` ban narrow the ways to reach them, review catches the rest;
+    does not see; no `&raw`, no `Pointer` (`fmt::Pointer`) and no alias of `usize` or `isize`
+    (`Alias::MAX` would hide the width); no `cfg`, `cfg!` or `cfg_attr` on `debug_assertions`
+    (`debug_assert!` stays: it can only panic). `format!` and `alloc::format` are allowed: the
+    `{:p}` ban covers addresses;
   - does not silence the type-name lint (`non_camel_case_types`, `nonstandard_style`, `bad_style`)
     and defines no type alias that is not CamelCase, so a lowercase `type fl = f64;` cannot hide
     a float method; a `Name::<float method>` path is allowed only when the qualifier is `oa_math`,
     `oa_ieee`, a core workspace crate, `self`/`super`/`crate`, a module the crate declares or (for
     `rem_euclid` and `div_euclid`) an integer type, and fails on any other qualifier;
-  - takes the bits of a float (`to_bits`) only from `oa_math::canon_nan(x)` (`oa-math` itself
-    excepted): IEEE-754 fixes that an invalid operation gives a NaN, not which one, and its sign
+  - takes the bits of a float (`to_bits`, `f64::to_bits(x)`, `to_le_bytes`, `to_be_bytes` and
+    `to_ne_bytes` on a float) only from `oa_math::canon_nan(x)` or `canon_nan_f32(x)` (`oa-math`
+    itself excepted), and those names are `oa_math`'s: imported from it or called through it, never
+    defined, shadowed or imported from anywhere else. IEEE-754 fixes that an invalid operation gives a NaN, not which one, and its sign
     and payload differ between a compile-time fold, x86-64 and aarch64, so a float that feeds a
     hash, a digest or a written output is made canonical first (B6).
+
+  Known lexical limits (the checker reads tokens; it resolves no names and infers no types):
+  - `{:?}` or `{}` of a fn item or fn pointer, and `f as usize` of a fn item, print or cast an
+    address and look like other uses; the fn-pointer cast ban, the `{:p}` ban and the module list
+    narrow the ways to reach them, review catches the rest;
+  - `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` on a float are recognised only by a float literal,
+    an `as f32`/`as f64` cast, the `f32::`/`f64::` path form, or a receiver name that the same `fn`
+    declares `f32`/`f64` (parameters and typed `let`s, closure parameters included), indexed or not,
+    or a struct field the crate declares so; a float that reaches the call through an inferred type
+    (a `for` loop over a float slice, a function's return value) is not seen;
+  - a shell `impl` that a macro generates through a `$` fragment is not seen, and a shell `impl` of a
+    trait or type that another core crate defines is not seen (an `impl` of this crate's own core
+    types and traits is);
+  - test-only code is judged by its attribute (`cfg(test)`, `cfg(kani)`), not by what it does.
 
   A core or split crate has no `build.rs` and no custom `[lib]` or `[[bin]]` path. A core crate
   has no dependency, in any dependency table and however renamed, on anything but core
@@ -185,7 +210,14 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   the pinned toolchain. (A NaN result, such as the square root of a negative number, is required
   to be a NaN but not which one: its sign and payload differ between machines. B8 makes any float
   that is hashed or written pass through `oa_math::canon_nan`.) The repository root pins the
-  toolchain: `rust-toolchain.toml` holds 1.89.0 with `clippy` and `rustfmt`, as CI installs it. A split
+  toolchain: `rust-toolchain.toml` holds 1.89.0 with `clippy` and `rustfmt`. What CI installs, by
+  job: `check` installs 1.89.0 with `clippy` and `rustfmt`; the test jobs install 1.89.0 with no
+  components; `fuzz-smoke` installs `nightly-2026-08-21` with `rust-src`; the proof workflow
+  installs 1.89.0, `nightly-2026-08-21` (with `llvm-tools`, `rustc-dev`, `rust-src`, `rustfmt`, for
+  the Kani installer) and, for Miri, `nightly-2026-08-21` with `miri` and `rust-src`. Every `cargo`
+  or `rustc` step in a workflow names its toolchain with `+toolchain`, so the root file does not
+  choose for it; `fuzz/` pins the fuzz nightly and `validation/oa-creusot-check/` the Creusot
+  nightly (`nightly-2026-08-03`, Creusot v0.14.0's own pin) in their own files. A split
   crate cannot be `no_std` as a whole, so its core module relies on the B8 scan; core code that
   grows large is moved into its own core crate.
 - **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every

@@ -19,3 +19,13 @@ pub fn canon_nan(x: f64) -> f64 {
         x
     }
 }
+
+/// [`canon_nan`] for an `f32`: every NaN becomes `0x7fc0_0000`, every other value is unchanged.
+#[inline]
+pub fn canon_nan_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        x
+    }
+}

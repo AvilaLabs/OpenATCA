@@ -47,7 +47,7 @@ const ALLOWED_MODULES: &[&str] = &[
     "fmt", "ops", "cmp", "mem", "num", "convert", "iter", "slice", "array", "str", "char", "ascii",
     "option", "result", "marker", "default", "clone", "borrow", "hint", "error", "f32", "f64",
     "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "vec",
-    "boxed", "string",
+    "boxed", "string", "format",
 ];
 const ALLOWED_COLLECTIONS: &[&str] = &["BTreeMap", "BTreeSet", "VecDeque", "BinaryHeap"];
 const FORBIDDEN_MACROS: &[&str] = &[
@@ -794,6 +794,35 @@ fn tokenize(masked: &str) -> Vec<Tok> {
     out
 }
 
+/// Index just past a turbofish `:: < .. >` that starts at `toks[i]`, or `i` when there is none.
+fn skip_turbofish(toks: &[Tok], i: usize) -> usize {
+    if s(toks, i) != "::" || s(toks, i + 1) != "<" {
+        return i;
+    }
+    let mut depth = 0usize;
+    let mut j = i + 1;
+    while j < toks.len() {
+        match s(toks, j) {
+            "<" => depth += 1,
+            ">" if s(toks, j - 1) != "-" => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    toks.len()
+}
+
+/// Whether a call's `(` starts at `toks[i]`, a turbofish (`::<T>`) allowed before it: the token
+/// after a method or function name.
+fn call_at(toks: &[Tok], i: usize) -> bool {
+    s(toks, skip_turbofish(toks, i)) == "("
+}
+
 fn s(toks: &[Tok], i: usize) -> &str {
     toks.get(i).map_or("", |t| t.s.as_str())
 }
@@ -1038,6 +1067,9 @@ pub struct Ctx<'a> {
     /// Modules the crate declares (`mod x`): a lowercase path qualifier is one of these, a
     /// crate, or it fails.
     pub modules: &'a BTreeSet<String>,
+    /// Names of the float fields (`name: f64`) the crate's structs declare: a `.field` receiver of
+    /// `to_*_bytes` that is one skips `canon_nan`. A bare name is judged inside its own fn.
+    pub float_names: &'a BTreeSet<String>,
     /// Class of every workspace crate by name.
     pub classes: &'a BTreeMap<String, Class>,
     /// Identifier used in source -> workspace crate it names (own name, dependency keys).
@@ -1091,7 +1123,7 @@ fn module_hint(seg: &str) -> &'static str {
         "collections" => "use alloc::collections::{BTreeMap, BTreeSet, VecDeque, BinaryHeap}",
         "sync" | "cell" | "thread" => "state is passed in as a value; no globals or threads in core",
         "fs" | "net" | "env" | "process" | "os" | "path" | "ffi" => "that is I/O and belongs in the shell",
-        _ => "allowed: fmt, ops, cmp, mem, num, convert, iter, slice, array, str, char, ascii, option, result, marker, default, clone, borrow, hint, error, f32, f64, integer modules, vec (alloc::vec), boxed, string, collections (BTreeMap, BTreeSet, VecDeque, BinaryHeap), core::time::Duration",
+        _ => "allowed: fmt, ops, cmp, mem, num, convert, iter, slice, array, str, char, ascii, option, result, marker, default, clone, borrow, hint, error, f32, f64, integer modules, vec (alloc::vec), boxed, string, format (alloc::format!), collections (BTreeMap, BTreeSet, VecDeque, BinaryHeap), core::time::Duration",
     }
 }
 
@@ -1208,7 +1240,9 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
         }
         let in_use = use_start.is_some();
         let start = is_path_start(toks, i);
-        if !ctx.ieee && FLOAT_METHODS.contains(&w) && ((prev == "." && next == "(") || prev == "::")
+        if !ctx.ieee
+            && FLOAT_METHODS.contains(&w)
+            && ((prev == "." && call_at(toks, i + 1)) || prev == "::")
         {
             // after `.` (a method call) the receiver is any value; after `::` the qualifier must
             // be a path the scan knows: `oa_math`/`oa_ieee`, a core crate, a module this crate
@@ -1257,6 +1291,13 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
         {
             let open = if next == "(" { i + 1 } else { i + 2 };
             let end = skip_group(toks, open);
+            if (open..end).any(|k| s(toks, k) == "debug_assertions") {
+                hits.push(hit(
+                    t.line,
+                    "debug_assertions",
+                    "B8: core code does not branch on `debug_assertions`, a debug and a release build must compute the same (`debug_assert!` stays: it can only panic)",
+                ));
+            }
             let target = (open..end).find_map(|k| {
                 let x = s(toks, k);
                 (x.starts_with("target_") || matches!(x, "unix" | "windows")).then_some(x)
@@ -1358,7 +1399,7 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
             }
         }
     }
-    harden::token_bans(toks, ctx.math, &mut hits);
+    harden::token_bans(toks, ctx, &mut hits);
     hits
 }
 
@@ -2235,6 +2276,7 @@ fn check_member(
     // modules the crate declares, and the type and trait names its core files define
     let mut modules: BTreeSet<String> = BTreeSet::new();
     let mut core_types: BTreeSet<String> = BTreeSet::new();
+    let mut float_names: BTreeSet<String> = BTreeSet::new();
     for (_, text) in &texts {
         let toks = tokenize(&mask(text));
         for (i, t) in toks.iter().enumerate() {
@@ -2243,6 +2285,7 @@ fn check_member(
             }
         }
         core_types.extend(harden::defined_types(text));
+        float_names.extend(harden::float_fields(text));
     }
     let mut scans = Vec::new();
     for (f, text) in &texts {
@@ -2251,6 +2294,7 @@ fn check_member(
             ieee,
             math: m.name == "oa-math",
             modules: &modules,
+            float_names: &float_names,
             depth: module_depth(&src, f),
             classes: w.classes,
             aliases: &aliases,

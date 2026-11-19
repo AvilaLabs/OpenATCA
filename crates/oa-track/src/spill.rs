@@ -155,16 +155,25 @@ pub fn spill_create(dir: &Path) -> io::Result<SpillWriter> {
 
 /// Appends every row of `o` (the caller clears `o` afterwards).
 pub fn spill_append(w: &mut SpillWriter, o: &TrackOutput) -> io::Result<()> {
-    let f32s =
-        |v: &Vec<f32>| -> Vec<u8> { v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect() };
+    let f32s = |v: &Vec<f32>| -> Vec<u8> {
+        v.iter()
+            .flat_map(|x| oa_math::canon_nan_f32(*x).to_bits().to_le_bytes())
+            .collect()
+    };
     let arr = |v: &Vec<[f32; 3]>| -> Vec<u8> {
         v.iter()
-            .flat_map(|c| c.iter().flat_map(|x| x.to_bits().to_le_bytes()))
+            .flat_map(|c| {
+                c.iter()
+                    .flat_map(|x| oa_math::canon_nan_f32(*x).to_bits().to_le_bytes())
+            })
             .collect()
     };
     let arr2 = |v: &Vec<[f32; 2]>| -> Vec<u8> {
         v.iter()
-            .flat_map(|c| c.iter().flat_map(|x| x.to_bits().to_le_bytes()))
+            .flat_map(|c| {
+                c.iter()
+                    .flat_map(|x| oa_math::canon_nan_f32(*x).to_bits().to_le_bytes())
+            })
             .collect()
     };
     let cols: [Vec<u8>; 15] = [

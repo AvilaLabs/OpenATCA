@@ -116,7 +116,7 @@ fn a_row_encodes_to_fixed_width_little_endian_fields_at_fixed_offsets() {
 
 // REQ: OA-TRK-360
 #[test]
-fn a_nan_keeps_its_bit_pattern_and_row_at_matches_row() {
+fn every_nan_becomes_the_one_fixed_nan_and_row_at_matches_row() {
     let quiet = f32::from_bits(0x7fc0_0000);
     let payload = f32::from_bits(0x7fc0_1234);
     let neg = f32::from_bits(0xffc0_0001);
@@ -125,8 +125,8 @@ fn a_nan_keeps_its_bit_pattern_and_row_at_matches_row() {
     r.vrate_fpm = neg;
     r.alt_var_ft2 = quiet;
     let b = canon_row(&r);
-    assert_eq!(b[OFF_ALT..OFF_ALT + 4], 0x7fc0_1234u32.to_le_bytes());
-    assert_eq!(b[OFF_VRATE..OFF_VRATE + 4], 0xffc0_0001u32.to_le_bytes());
+    assert_eq!(b[OFF_ALT..OFF_ALT + 4], 0x7fc0_0000u32.to_le_bytes());
+    assert_eq!(b[OFF_VRATE..OFF_VRATE + 4], 0x7fc0_0000u32.to_le_bytes());
     assert_eq!(
         b[OFF_ALT_VAR..OFF_ALT_VAR + 4],
         0x7fc0_0000u32.to_le_bytes()
