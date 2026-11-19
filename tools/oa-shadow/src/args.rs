@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-shadow --adsb <clip.oaf> --sfdps-dir <dir> --out <dir>";
+pub const USAGE: &str = "usage: oa-shadow [screen] --adsb <clip.oaf> --sfdps-dir <dir> --out <dir>";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived

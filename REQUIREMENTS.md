@@ -5262,3 +5262,48 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   count of hidden lines.
 - **OA-DSP-071** The banner box is opaque; targets whose symbol is under it are counted on it
   (`TARGETS UNDER BANNER: n`) and in the stats.
+- **OA-SHD-030** `oa-shadow screen` compares ADS-B with ERAM's reports of address-paired aircraft: ADS-B is
+  evaluated at each ERAM report time by oa-truth's smoother (default settings) and the offset ADS-B minus ERAM is
+  resolved along and across the ADS-B velocity direction. The along offset is `c - L x speed`: L is the apparent
+  latency, positive when ADS-B is late (a late report is behind); b is the mean cross offset, positive to the right.
+  A known injected latency and offset are recovered within the bootstrap interval.
+- **OA-SHD-031** Two stages, because one aircraft's speed barely varies and its c and L are collinear: (a) the fleet
+  fit of c and L over all samples of the screened aircraft, by Theil-Sen (the reference: all pairs of 12 evenly
+  spaced samples of each aircraft, the same for the point fit and every bootstrap resample; a bootstrap over
+  aircraft for its interval) and by least squares (pulled by lagged aircraft); (b) per aircraft L_i alone, the
+  median of (c_fleet - along) / speed, and its latency excess L_i - fleet L; the cross offset b is the median cross
+  offset. A constant along-track offset and a latency are indistinguishable at constant speed, so a constant-speed
+  aircraft is identified only through stage (b). The two-parameter per-aircraft fit is a cross-check for aircraft
+  whose speed (5th to 95th percentile) spans 50 kt or more. Aircraft are listed by ascending address.
+- **OA-SHD-032** LAG is the lower 95 % bound of the latency excess strictly over 0.1 s, meaning an along-track
+  excess equivalent to a latency of 0.1 s or more; EARLY is the upper bound strictly under -0.1 s (counted, not a
+  LAG). BIAS is |b - fleet cross reference| (the reference: the median of the aircraft's median cross offsets)
+  strictly over max(3 x the 95 % bound of the aircraft's median NACp, the fleet's p95 of |b - reference|) with the
+  lower 95 % bound of it strictly over it too; an unknown NACp never flags BIAS. A LAG or BIAS stays only if the
+  aircraft recomputed without the one sample that most supports it still has it; the counts before and after are
+  printed. LAG is also given with c at both ends of the Theil-Sen c interval and under the least-squares fleet fit.
+- **OA-SHD-033** The aircraft interval is a block bootstrap (blocks of 10 consecutive samples, circular starts,
+  1000 resamples) seeded from the aircraft address, the fleet interval a seeded bootstrap over aircraft (200
+  resamples), so two runs give identical values; the valid replicates behind each interval are printed.
+- **OA-SHD-034** A sample needs a smoother state, |ADS-B - ERAM| at most 2000 m, a direction of travel (over
+  2 kt), a 95 % horizontal radius of at most 15 m, a turn rate (heading change over 2 s either side) of at most
+  0.5 deg/s, a vertical rate of at most 500 ft/min in magnitude (edges kept) and finite offsets; an ERAM report is
+  left out for the first reason that applies, in that order, and every reason is counted. No gap rule applies: a
+  thinned ADS-B trace still gives samples; the distance of a used sample to the nearest raw report is printed. An
+  unknown ERAM altitude has its own band code.
+- **OA-SHD-035** Left out of the screen and counted: ERAM reports in a duplicate-track overlap (a flight lends its
+  span only over the reports that survive the contradiction rule), in a contradicted address span (3 or more
+  consecutive reports over 20 NM from the smoother), and coasted ones; the reasons of OA-SHD-034; the counts add up
+  to the ERAM reports.
+- **OA-SHD-036** Two minimums, both printed: the fleet fit and cross reference use every aircraft with 30 or more
+  samples over 10 minutes or more; only aircraft with 100 or more samples (ten blocks) over 10 minutes or more are
+  screened for flags, and every prevalence line is over those. Aircraft out of the fit are counted under their
+  reason; an aircraft eligible for flags that cannot be screened is an error, so screened equals eligible; with
+  fewer than 30 screened the summary says the day has too few long, gated tracks for a prevalence estimate.
+- **OA-SHD-037** The screen summary carries the fixed caveat text and the statement that an offset and a latency are
+  indistinguishable at constant speed, the fleet c and L with intervals, the BIAS threshold rule and both its terms,
+  the counts and fractions of LAG, BIAS and EARLY, the distributions (p05, p50, p95) and a digest over
+  `aircraft.csv` and the summary; the summary names no address.
+- **OA-SHD-038** The screen reads only usable raw ADS-B positions (not stale, not on the ground, an ADS-B source, a
+  non-zero latitude), one per millisecond per address, with the NACp carried forward from the last known value
+  (1 to 15) within the truth configuration's carry age; an absent or zero NACp is unknown.

@@ -8,10 +8,15 @@ use std::time::Instant;
 
 use oa_shadow::args::{parse, USAGE};
 use oa_shadow::guard::refuse_sealed;
-use oa_shadow::run::run;
+use oa_shadow::run::{run, run_screen};
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // `oa-shadow screen ...` runs the ADS-B persistent-error screen with the same arguments.
+    let screen = argv.first().is_some_and(|a| a == "screen");
+    if screen {
+        argv.remove(0);
+    }
     let args = match parse(&argv) {
         Ok(a) => a,
         Err(e) => {
@@ -27,7 +32,12 @@ fn main() -> ExitCode {
         }
     }
     let t0 = Instant::now();
-    match run(&args) {
+    let result = if screen {
+        run_screen(&args)
+    } else {
+        run(&args)
+    };
+    match result {
         Ok(summary) => {
             print!("{summary}");
             eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());
