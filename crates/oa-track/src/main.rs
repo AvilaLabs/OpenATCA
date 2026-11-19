@@ -36,7 +36,7 @@ use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig, AdsbStats};
-use oa_track::canon::write_canon;
+use oa_track::canon_spill::write_canon;
 use oa_track::latency::{
     latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
@@ -686,6 +686,7 @@ fn outliers_csv(rows: &[(&str, &Scored)]) -> (String, String) {
 
 /// Where `--digest` and `--rows` write.
 #[derive(Default)]
+// A7.2: cold struct, size guard waived
 struct CanonOut {
     digest: Option<PathBuf>,
     rows: Option<PathBuf>,

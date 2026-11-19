@@ -4350,3 +4350,47 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-RDF-006** `tools/replay_compare.sh` accepts only commit hashes or refs of the repository,
   refuses a working-tree or option-like spec, builds each commit in its own clean detached worktree,
   one build at a time, and records both commits and the clip's SHA-256 in its report.
+- **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
+  fields tile bytes 0 to 84 of the row once each, entry `i` of the field table is column `i`, and
+  every field range is checked before use, so there is no write that lands nowhere. Hex hashes
+  parse only as 64 lowercase digits.
+- **OA-TRK-371** A digest accepts at most 2^20 seconds and 2^20 rows in one second; a row that
+  would pass either is an error and is not counted, and the rows-file writer therefore never holds
+  a whole oversized second.
+- **OA-TRK-372** The header of a rows file is checked in full (magic, version, row size, exact
+  length), and the hash of a second's rows is computable from the rows alone (`hash_rows`).
+- **OA-TRK-373** The scorer's flag join counts duplicate (address, millisecond) keys and never
+  overwrites one; rows that disagree make the key a conflict. A sample with no tracker row, or only
+  a conflicting one, is a third state, scored in its own `UNMATCHED` group and written as
+  `unmatched`, never as "no". A run that is neither `--development` nor `--allow-dirty` fails if
+  any sample is unmatched.
+- **OA-TRK-374** In every coverage-penalised metric (M4, M4t, M7, M7t) a present value that is not a
+  number is a failure, and the count of such values is printed; aircraft with no usable time fit are
+  counted per system with their samples and are scored unfitted (offset 0), and the output says so.
+- **OA-RDF-007** A digest is accepted only with the `v1` header as its first line and with every
+  chain hash equal to the chain recomputed from the line and the lines before it; a line that fails
+  is named.
+- **OA-RDF-008** A digest or expect file over its size limit, a second with no rows or over 2^20
+  rows, and row counts that overflow are errors (exit 2), never a panic; a failing standard output
+  (a closed pipe) is exit 2 with a message.
+- **OA-RDF-009** Rows with the same address, time and tick flag in one second are ambiguous
+  pairings: they are counted per second and in total (`ambiguous_pairs`) and are a class that a
+  declared difference must name (`ambiguous`). Rows left over with the same address and time but
+  another tick flag are one changed row (class `flags`), not a removal and an addition.
+- **OA-RDF-010** `order` is read from the matched rows alone, whatever else differs, so a declared
+  class next to an undeclared reorder fails the expectation.
+- **OA-RDF-011** Digests that differ only in a chain hash are different (exit 1, `chain_only`),
+  and no declaration makes them pass.
+- **OA-RDF-012** A rows file is used only after the hash and count of every one of its seconds are
+  recomputed and found equal to its digest line, no digest second is missing from it and none is in
+  it that the digest lacks; the first bad second is named and the exit is 2.
+- **OA-RDF-013** A rows file whose header count differs from its digest's total, that has bytes after
+  its last row, or that ends early is an error (exit 2).
+- **OA-RDF-014** `tools/replay_overlay_apply.sh` applies the overlay patch only to files whose blob
+  is the patch's preimage, at zero fuzz, checks the postimage blobs, and records the sha256 of the
+  patch and of every patched file; any mismatch is a refusal (exit 2).
+- **OA-RDF-015** The canonical format constants of the overlay's `canon.rs` equal those of
+  `crates/oa-track/src/canon.rs`.
+- **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with `RUSTFLAGS`,
+  `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS` removed, and its report
+  states that they were cleared, what they held and the toolchain.

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run --release -p oa-track --example p002 -- \
-//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty]
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development]
 //! ```
 //!
 //! Written from the comparison's scoring protocol P-002 and its amendment P-003, fixed by their
@@ -19,7 +19,10 @@
 //! coasting, uncertain (`O_UNCERTAIN`) and reacquired (`O_REACQUIRED`) flags report M1, M3t and M5
 //! with sample counts, on the same resamples. The scorer records `git rev-parse HEAD` and
 //! refuses a tree that `git status --porcelain` lists as modified unless `--allow-dirty` is
-//! given, and then stamps every output file as not valid for hold-out scoring.
+//! given, and then stamps every output file as not valid for hold-out scoring. `--development`
+//! marks a run on development data the same way (stamped, not a hold-out score); a run with
+//! neither flag is a hold-out run and fails if any OpenATCA sample has no tracker row for its
+//! flags, or only an ambiguous one (see "The flag join").
 //!
 //! Writes `p002.txt` (tables M1 to M7 and M2t, M3t, M4t, M7t with bootstrap intervals,
 //! breakdowns by phase, altitude and the three flags, exclusions, offsets, digests, commit) and
@@ -71,6 +74,10 @@ const FLOOR_SHARE: f64 = 0.10;
 const ROUND_TOL_S: f64 = 0.5;
 /// The stamp on every output file of a run on a modified tree (P-003 section 2, item 13).
 const DIRTY_STAMP: &str = "DIRTY TREE \u{2014} not valid for hold-out scoring";
+/// The time offset of an aircraft with no usable fit: none (scored unfitted, counted).
+const UNFITTED_TAU_S: f64 = 0.0;
+/// The stamp on every output file of a run marked `--development`.
+const DEV_STAMP: &str = "DEVELOPMENT RUN \u{2014} not a hold-out score";
 
 const SYS: [&str; 3] = ["OpenATCA", "ERAM", "Passthrough"];
 const OA: usize = 0;
@@ -81,10 +88,14 @@ const STATS: [&str; 3] = ["median", "p95", "rms"];
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut sfdps, mut out, mut label) = (None, None, None, String::new());
-    let mut allow_dirty = false;
+    let (mut allow_dirty, mut development) = (false, false);
     while let Some(a) = args.next() {
         if a == "--allow-dirty" {
             allow_dirty = true;
+            continue;
+        }
+        if a == "--development" {
+            development = true;
             continue;
         }
         let v = args.next();
@@ -101,19 +112,24 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty]"
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development]"
         );
         return ExitCode::from(2);
     };
     let git = git_state();
-    if git.is_dirty() && !allow_dirty {
+    if git_is_dirty(&git) && !allow_dirty {
         eprintln!(
             "p002: refused: the working tree is not clean ({}); a hold-out score is valid only from a clean checkout at the frozen commit (--allow-dirty runs it, stamped as not valid)",
-            git.tree_text()
+            git_tree_text(&git)
         );
         return ExitCode::from(2);
     }
-    match run(&adsb, &sfdps, &out, &label, &git) {
+    // A hold-out run is one that is neither marked development nor allowed on a dirty tree.
+    let mode = Mode {
+        holdout: !allow_dirty && !development,
+        development,
+    };
+    match run(&adsb, &sfdps, &out, &label, &git, mode) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -130,6 +146,7 @@ fn main() -> ExitCode {
 // ---------------------------------------------------------------------------------------------
 
 /// splitmix64 (Steele, Lea, Flood): the bootstrap's generator.
+// A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct SplitMix(u64);
 
 impl SplitMix {
@@ -203,8 +220,40 @@ fn signed_rank(v: &[f64], p: u64) -> f64 {
 // Samples per system.
 // ---------------------------------------------------------------------------------------------
 
+/// A flag of a tracker row, or no tracker row to read it from (E6: never a default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Tri {
+    /// No tracker row matched the sample, or the rows that matched it disagree.
+    Unmatched = 0,
+    No = 1,
+    Yes = 2,
+}
+
+/// `0`, `1` or `unmatched`, for the CSV.
+fn tri_text(t: Tri) -> String {
+    match t {
+        Tri::Unmatched => "unmatched".to_string(),
+        Tri::No => "0".to_string(),
+        Tri::Yes => "1".to_string(),
+    }
+}
+
+fn tri_of(b: bool) -> Tri {
+    if b {
+        Tri::Yes
+    } else {
+        Tri::No
+    }
+}
+
 /// One system's paired sample at its own row time.
+///
+/// A7: held per grid sample and system, so the size is asserted. 56 bytes: six 8-byte numbers,
+/// five 1-byte fields, padding to 8. A7.1: `Tri` replaces the two `bool` flags of P-003 at the
+/// same width, so the flags added no bytes (they sit in what was padding).
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct Pt {
     t: i64,
     cross: f64,
@@ -217,15 +266,17 @@ struct Pt {
     hdg: f64,
     coast: u8,
     /// The tracker's `O_UNCERTAIN` and `O_REACQUIRED` flags of the row (OpenATCA only).
-    uncertain: bool,
-    reacquired: bool,
+    uncertain: Tri,
+    reacquired: Tri,
     phase: u8,
     band: u8,
 }
+const _: () = assert!(core::mem::size_of::<Pt>() == 56);
 
 type PerAc = BTreeMap<u32, Vec<Pt>>;
 
 #[derive(Default, Clone, Copy)]
+// A7.2: cold struct, size guard waived
 struct Dropped {
     other_flight: u64,
     no_cross_along: u64,
@@ -281,8 +332,8 @@ fn points_of(p: &PairTable, per: &mut PerAc, dropped: &mut Dropped) {
             spd: g(&p.speed_err_kt, nan) * KT_MPS,
             hdg: g(&p.hdg_err_deg, nan),
             coast: p.coast.get(i).copied().unwrap_or(0),
-            uncertain: false,
-            reacquired: false,
+            uncertain: Tri::Unmatched,
+            reacquired: Tri::Unmatched,
             phase: p.phase.get(i).copied().unwrap_or(0),
             band: p.band.get(i).copied().unwrap_or(0),
         });
@@ -293,6 +344,85 @@ fn points_of(p: &PairTable, per: &mut PerAc, dropped: &mut Dropped) {
         v.dedup_by_key(|s| s.t);
         dropped.duplicate_time += (before - v.len()) as u64;
         per.entry(a).or_default().extend(v);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The flag join.
+// ---------------------------------------------------------------------------------------------
+
+/// What the tracker rows at one (address, millisecond) say of the two flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlagEntry {
+    One {
+        uncertain: bool,
+        reacquired: bool,
+    },
+    /// Two or more rows at the key that disagree: the flags of a sample there are unknown.
+    Conflict,
+}
+
+/// The tracker's flags by (address, row time in whole milliseconds).
+///
+/// The join key is the finest time both sources carry: the pair table that gives a sample its
+/// time holds whole milliseconds (`t_ns` floored, as `legacy_from_track_samples_by_leg` does), so
+/// two tracker rows within one millisecond share a key. Such keys are counted, never overwritten:
+/// rows that agree stay one entry, rows that disagree make the key a conflict.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Default)]
+struct FlagJoin {
+    map: BTreeMap<(u32, i64), FlagEntry>,
+    /// Rows whose key already held a row.
+    duplicate_rows: u64,
+    /// Keys whose rows disagree on a flag.
+    conflict_keys: u64,
+}
+
+/// Builds the join from a range's tracker rows; the columns must be as long as `addr`.
+fn flag_join(
+    addr: &[u32],
+    t_ns: &[i64],
+    uncertain: &[bool],
+    reacquired: &[bool],
+) -> Result<FlagJoin, String> {
+    let n = addr.len();
+    if [t_ns.len(), uncertain.len(), reacquired.len()]
+        .iter()
+        .any(|&l| l != n)
+    {
+        return Err("tracker row columns have different lengths".to_string());
+    }
+    let mut j = FlagJoin::default();
+    for (((&a, &t), &u), &re) in addr.iter().zip(t_ns).zip(uncertain).zip(reacquired) {
+        let new = FlagEntry::One {
+            uncertain: u,
+            reacquired: re,
+        };
+        match j.map.entry((a, t.div_euclid(1_000_000))) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(new);
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                j.duplicate_rows = j.duplicate_rows.saturating_add(1);
+                if *e.get() != new && *e.get() != FlagEntry::Conflict {
+                    j.conflict_keys = j.conflict_keys.saturating_add(1);
+                    e.insert(FlagEntry::Conflict);
+                }
+            }
+        }
+    }
+    Ok(j)
+}
+
+/// The `(uncertain, reacquired)` states of a sample: unmatched when no tracker row has its key or
+/// the rows there disagree.
+fn flag_lookup(j: &FlagJoin, addr: u32, t_ms: i64) -> (Tri, Tri) {
+    match j.map.get(&(addr, t_ms)) {
+        Some(FlagEntry::One {
+            uncertain,
+            reacquired,
+        }) => (tri_of(*uncertain), tri_of(*reacquired)),
+        Some(FlagEntry::Conflict) | None => (Tri::Unmatched, Tri::Unmatched),
     }
 }
 
@@ -316,6 +446,7 @@ fn nearest(v: &[Pt], t: i64) -> Option<&Pt> {
 }
 
 /// Association, pairing and exclusions of one legacy table against the reference.
+// A7.2: cold struct, size guard waived
 struct Paired {
     pairs: PairTable,
     ex: Exclusions,
@@ -338,7 +469,13 @@ fn pair_legacy(leg: &Legacy, truth: &Truth<'_>, tix: &TruthIndex, rcfg: &RunConf
 // ---------------------------------------------------------------------------------------------
 
 /// One system's value at a grid sample, with its fitted-time quantities.
+///
+/// A7: held per grid sample and system. 96 bytes: a [`Pt`] (56) and five 8-byte quantities.
+/// A7.1: P-003 added `along_tol` and `h_tol` (+16 bytes), the rounding-tolerant errors M2t and M3t
+/// the metrics read per sample; they are stored, not recomputed, because every table, bootstrap
+/// resample and the CSV read them. This is an offline scorer on a few million samples.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct Val {
     pt: Pt,
     along_fit: f64,
@@ -348,18 +485,26 @@ struct Val {
     along_tol: f64,
     h_tol: f64,
 }
+const _: () = assert!(core::mem::size_of::<Val>() == 96);
 
+/// A grid sample: its three systems' values.
+///
+/// A7: one per grid sample. 312 bytes: `ac` and `t` (16), `addr` and two 1-byte strata (8 with
+/// padding), and three `Option<Val>` of 96 (the `Tri` niche leaves no tag). A7.1: grew with `Val`
+/// (+48 bytes for three systems), see there.
 #[derive(Clone, Debug)]
+#[repr(C)]
 struct Row {
     /// Index of the aircraft among the grid aircraft.
     ac: usize,
-    addr: u32,
     t: i64,
+    addr: u32,
     /// Phase and altitude band of the ERAM sample (the stratum of every system's value).
     phase: u8,
     band: u8,
     val: [Option<Val>; 3],
 }
+const _: () = assert!(core::mem::size_of::<Row>() == 312);
 
 impl Row {
     fn common(&self) -> bool {
@@ -386,6 +531,34 @@ fn fit_tau(it: impl Iterator<Item = (f64, f64)>) -> Option<f64> {
     (svv > 0.0).then(|| sev / svv)
 }
 
+/// Per system, the aircraft with a value but no usable time fit, and their samples with a value:
+/// `(aircraft, samples)`. Such samples are scored unfitted (P-003 resolution 1).
+fn unfitted_counts(rows: &[Row], taus: &[[Option<f64>; 3]]) -> [(u64, u64); 3] {
+    let mut acs: [BTreeSet<usize>; 3] = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
+    let mut samples = [0u64; 3];
+    for r in rows {
+        let tau = taus.get(r.ac).copied().unwrap_or([None; 3]);
+        for (((v, t), set), n) in r.val.iter().zip(tau).zip(acs.iter_mut()).zip(&mut samples) {
+            if v.is_some() && t.is_none() {
+                set.insert(r.ac);
+                *n += 1;
+            }
+        }
+    }
+    let mut out = [(0u64, 0u64); 3];
+    for ((o, set), n) in out.iter_mut().zip(&acs).zip(samples) {
+        *o = (set.len() as u64, n);
+    }
+    out
+}
+
+/// Whether an error counts as a failure over `limit` in a coverage-penalised metric: over it, or
+/// not a number. A value that cannot be computed is never a pass (E6, G6); M4 reads `h <= thr` as
+/// the pass and so does this.
+fn fails_over(h: f64, limit: f64) -> bool {
+    h.is_nan() || h > limit
+}
+
 /// P-003 rounding-tolerant along-track error: the fitted error `a` less `0.5 s * v` of travel at
 /// the reference ground speed `v`, floored at zero and keeping the sign of `a`. NaN when either
 /// is not finite.
@@ -402,27 +575,34 @@ fn along_tol(a: f64, v: f64) -> f64 {
 }
 
 /// What `git` said of the tree the scorer was built from.
+// A7.2: cold struct, size guard waived
 struct GitState {
     head: String,
     /// `git status --porcelain` output; `None` when git could not say.
     porcelain: Option<String>,
 }
 
-impl GitState {
-    fn is_dirty(&self) -> bool {
-        tree_is_dirty(self.porcelain.as_deref())
-    }
+/// How a run was started: a hold-out run is neither marked development nor allowed dirty.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy)]
+struct Mode {
+    holdout: bool,
+    development: bool,
+}
 
-    fn tree_text(&self) -> String {
-        match self.porcelain.as_deref() {
-            None => "git status unavailable".to_string(),
-            Some(p) => {
-                let n = p.lines().filter(|l| !l.trim().is_empty()).count();
-                if n == 0 {
-                    "clean".to_string()
-                } else {
-                    format!("{n} paths modified or untracked")
-                }
+fn git_is_dirty(g: &GitState) -> bool {
+    tree_is_dirty(g.porcelain.as_deref())
+}
+
+fn git_tree_text(g: &GitState) -> String {
+    match g.porcelain.as_deref() {
+        None => "git status unavailable".to_string(),
+        Some(p) => {
+            let n = p.lines().filter(|l| !l.trim().is_empty()).count();
+            if n == 0 {
+                "clean".to_string()
+            } else {
+                format!("{n} paths modified or untracked")
             }
         }
     }
@@ -473,6 +653,7 @@ fn common_for(r: &Row, k: Kind) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 /// Values per aircraft, concatenated: aircraft `i` owns `data[start[i]..start[i + 1]]`.
+// A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct Col {
     start: Vec<usize>,
     data: Vec<f64>,
@@ -528,6 +709,7 @@ impl Col {
 }
 
 /// Per-aircraft counts of a share: `num` successes of `den` samples.
+// A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct Cnt {
     num: Vec<u64>,
     den: Vec<u64>,
@@ -601,6 +783,7 @@ fn draws_of(n_ac: usize) -> Vec<Vec<u32>> {
 }
 
 /// One metric over the three systems: values, and the resampled statistics.
+// A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct Metric {
     n: [usize; 3],
     pt: [[f64; 3]; 3],
@@ -773,20 +956,25 @@ type Keep = Box<dyn Fn(&Row) -> bool>;
 fn flag_groups() -> Vec<(String, Keep)> {
     let oa = |r: &Row| r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
     let mut g: Vec<(String, Keep)> = Vec::new();
-    type Flag = fn(&Pt) -> bool;
+    type Flag = fn(&Pt) -> Tri;
     let flags: [(&str, Flag); 3] = [
-        ("coasting", |p| p.coast != 0),
+        ("coasting", |p| tri_of(p.coast != 0)),
         ("uncertain", |p| p.uncertain),
         ("reacquired", |p| p.reacquired),
     ];
     for (name, f) in flags {
         g.push((
             format!("OpenATCA not {name}"),
-            Box::new(move |r: &Row| oa(r).is_some_and(|p| !f(&p))),
+            Box::new(move |r: &Row| oa(r).is_some_and(|p| f(&p) == Tri::No)),
         ));
         g.push((
             format!("OpenATCA {name}"),
-            Box::new(move |r: &Row| oa(r).is_some_and(|p| f(&p))),
+            Box::new(move |r: &Row| oa(r).is_some_and(|p| f(&p) == Tri::Yes)),
+        ));
+        // A sample with no tracker row to read the flag from is in neither group above.
+        g.push((
+            format!("OpenATCA {name} UNMATCHED"),
+            Box::new(move |r: &Row| oa(r).is_some_and(|p| f(&p) == Tri::Unmatched)),
         ));
     }
     g
@@ -891,6 +1079,7 @@ fn run(
     out_dir: &Path,
     label: &str,
     git: &GitState,
+    mode: Mode,
 ) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let t_start = Instant::now();
@@ -939,7 +1128,7 @@ fn run(
     let mut oa_ex = Exclusions::new();
     let mut oa_assoc = [0u64; astatus::COUNT];
     let mut oa_rows = 0u64;
-    let mut flag_unmatched = 0u64;
+    let (mut flag_unmatched, mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64, 0u64);
     let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
     for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
         let r = run
@@ -960,27 +1149,21 @@ fn run(
         )
         .map_err(|e| format!("track samples: {e:?}"))?;
         oa_rows += r.addr.len() as u64;
-        // The tracker's flags by (address, row time, ms); one row per address and time.
-        let flags_of: BTreeMap<(u32, i64), (bool, bool)> = (0..r.addr.len())
-            .filter_map(|i| {
-                Some((
-                    (*r.addr.get(i)?, r.t_ns.get(i)?.div_euclid(1_000_000)),
-                    (*r.uncertain.get(i)?, *r.reacquired.get(i)?),
-                ))
-            })
-            .collect();
+        // The tracker's flags by (address, row time in ms), duplicates counted.
+        let flags = flag_join(&r.addr, &r.t_ns, &r.uncertain, &r.reacquired)?;
         drop(r);
+        flag_dup_rows += flags.duplicate_rows;
+        flag_conflicts += flags.conflict_keys;
         let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
-        let first_new: BTreeSet<u32> = flags_of.keys().map(|k| k.0).collect();
+        let first_new: BTreeSet<u32> = flags.map.keys().map(|k| k.0).collect();
         points_of(&p.pairs, &mut oa_pts, &mut oa_drop);
         for a in first_new {
             for pt in oa_pts.get_mut(&a).into_iter().flatten() {
-                match flags_of.get(&(a, pt.t)) {
-                    Some(&(u, re)) => {
-                        pt.uncertain = u;
-                        pt.reacquired = re;
-                    }
-                    None => flag_unmatched += 1,
+                let (u, re) = flag_lookup(&flags, a, pt.t);
+                pt.uncertain = u;
+                pt.reacquired = re;
+                if u == Tri::Unmatched {
+                    flag_unmatched += 1;
                 }
             }
         }
@@ -994,6 +1177,13 @@ fn run(
     drop(run);
     let _ = fs::remove_dir_all(&spill);
     eprintln!("OpenATCA paired aircraft: {}", oa_pts.len());
+    // A hold-out score needs every sample's flags: an unmatched sample is not scored as if its
+    // flags were "no" (E6, G6).
+    if mode.holdout && flag_unmatched > 0 {
+        return Err(format!(
+            "hold-out run refused: {flag_unmatched} OpenATCA samples have no tracker row (or only conflicting rows) for their flags; {flag_conflicts} keys conflict, {flag_dup_rows} duplicate rows (use --development for a non-hold-out run)"
+        ));
+    }
 
     // ERAM pairs.
     let loaded = load(&[FeedInput {
@@ -1185,11 +1375,14 @@ fn run(
             );
         }
     }
+    let unfitted = unfitted_counts(&rows, &taus);
     for r in &mut rows {
         let tau = taus.get(r.ac).copied().unwrap_or([None; 3]);
         for (s, v) in r.val.iter_mut().enumerate() {
             if let Some(v) = v {
-                let t = tau.get(s).copied().flatten().unwrap_or(0.0);
+                // P-003 resolution 1: an aircraft with no usable samples for a system's fit is
+                // scored unfitted (offset 0), and counted in `unfitted` and printed below.
+                let t = tau.get(s).copied().flatten().unwrap_or(UNFITTED_TAU_S);
                 v.along_fit = v.pt.along - t * v.pt.v;
                 v.h_fit = v.pt.cross.hypot(v.along_fit);
                 v.along_tol = along_tol(v.along_fit, v.pt.v);
@@ -1213,8 +1406,11 @@ fn run(
     eprintln!("main metrics bootstrapped");
 
     let mut o = String::new();
-    if git.is_dirty() {
+    if git_is_dirty(git) {
         let _ = writeln!(o, "{DIRTY_STAMP}");
+    }
+    if mode.development {
+        let _ = writeln!(o, "{DEV_STAMP}");
     }
     let _ = writeln!(
         o,
@@ -1227,7 +1423,7 @@ fn run(
         o,
         "  git commit: {} (working tree: {})",
         git.head,
-        git.tree_text()
+        git_tree_text(git)
     );
     let _ = writeln!(
         o,
@@ -1291,6 +1487,12 @@ fn run(
             grid - valued,
             miss.get(s).map_or(0, |m| m[0]),
             miss.get(s).map_or(0, |m| m[1]),
+        );
+    }
+    for (sys, (n_ac_unfit, n_samples)) in SYS.iter().zip(unfitted) {
+        let _ = writeln!(
+            o,
+            "  {sys}: aircraft with no usable time fit (no common sample at {FIT_MIN_SPEED_MPS} m/s or more): {n_ac_unfit}, with {n_samples} samples, scored UNFITTED (offset 0 s) in M2, M3, M2t, M3t, M4, M6 and M7 per P-003 resolution 1"
         );
     }
     let _ = writeln!(
@@ -1511,10 +1713,16 @@ fn run(
     let mut over_only = [0u64; 3];
     let mut m7: [Cnt; 3] = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
     let mut raw_over = [0u64; 3];
+    let mut nan_fit = [0u64; 3];
     for r in &rows {
         for (s, cs) in m7.iter_mut().enumerate() {
             let v = r.val.get(s).and_then(|v| v.as_ref());
-            let big = v.is_some_and(|v| v.h_fit > LARGE_M);
+            if v.is_some_and(|v| v.h_fit.is_nan()) {
+                if let Some(c) = nan_fit.get_mut(s) {
+                    *c += 1;
+                }
+            }
+            let big = v.is_some_and(|v| fails_over(v.h_fit, LARGE_M));
             if big {
                 if let Some(c) = over_only.get_mut(s) {
                     *c += 1;
@@ -1537,8 +1745,9 @@ fn run(
                 .count();
         let _ = writeln!(
             o,
-            "  {sys}: failures {f} = {} over {LARGE_M} m + {misses} misses (raw, unfitted over {LARGE_M} m: {})",
+            "  {sys}: failures {f} = {} over {LARGE_M} m or not a number (of which {} not a number) + {misses} misses (raw, unfitted over {LARGE_M} m: {})",
             over_only.get(s).copied().unwrap_or(0),
+            nan_fit.get(s).copied().unwrap_or(0),
             raw_over.get(s).copied().unwrap_or(0)
         );
     }
@@ -1549,15 +1758,28 @@ fn run(
         "M7t large errors on the rounding-tolerant horizontal error (M3t, P-003): samples over {LARGE_M} m on ALL {grid} grid samples; a miss is counted as a failure"
     );
     let mut m7t: [Cnt; 3] = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
+    let mut nan_tol = [0u64; 3];
     for r in &rows {
         for (s, cs) in m7t.iter_mut().enumerate() {
             let v = r.val.get(s).and_then(|v| v.as_ref());
-            cs.add(r.ac, v.is_none() || v.is_some_and(|v| v.h_tol > LARGE_M));
+            if v.is_some_and(|v| v.h_tol.is_nan()) {
+                if let Some(c) = nan_tol.get_mut(s) {
+                    *c += 1;
+                }
+            }
+            cs.add(
+                r.ac,
+                v.is_none() || v.is_some_and(|v| fails_over(v.h_tol, LARGE_M)),
+            );
         }
     }
     for (s, sys) in SYS.iter().enumerate() {
         let (f, _) = m7t.get(s).map_or((0, 0), Cnt::point);
-        let _ = writeln!(o, "  {sys}: failures {f} (over {LARGE_M} m or missed)");
+        let _ = writeln!(
+            o,
+            "  {sys}: failures {f} (over {LARGE_M} m, or not a number: {}, or missed)",
+            nan_tol.get(s).copied().unwrap_or(0)
+        );
     }
     write_share(&mut o, &m7t, &draws, 10_000.0);
     let _ = writeln!(o);
@@ -1638,13 +1860,17 @@ fn run(
     );
     let _ = writeln!(
         o,
-        "NOTE: OpenATCA's uncertain and reacquired flags are joined to the paired samples by address and row time; paired OpenATCA samples with no matching tracker row: {flag_unmatched}"
+        "NOTE: OpenATCA's uncertain and reacquired flags are joined to the paired samples by address and row time in whole milliseconds (the finest time the pair table carries; tracker times are floored to the millisecond); paired OpenATCA samples with no tracker row to read the flags from (or only rows that disagree), shown as the UNMATCHED groups and as `unmatched` in samples.csv: {flag_unmatched}; tracker rows sharing a key with an earlier row: {flag_dup_rows}; keys whose rows disagree: {flag_conflicts}; run is a {} run",
+        if mode.holdout { "hold-out" } else { "non-hold-out" }
     );
 
     // samples.csv.
     let mut csv = String::new();
-    if git.is_dirty() {
+    if git_is_dirty(git) {
         let _ = writeln!(csv, "# {DIRTY_STAMP}");
+    }
+    if mode.development {
+        let _ = writeln!(csv, "# {DEV_STAMP}");
     }
     csv.push_str("addr,t_ms,phase,band,common");
     for p in ["oa", "eram", "pt"] {
@@ -1692,8 +1918,8 @@ fn run(
             csv,
             ",{},{},{}",
             oa.map_or(String::new(), |p| p.coast.to_string()),
-            oa.map_or(String::new(), |p| u8::from(p.uncertain).to_string()),
-            oa.map_or(String::new(), |p| u8::from(p.reacquired).to_string())
+            oa.map_or(String::new(), |p| tri_text(p.uncertain)),
+            oa.map_or(String::new(), |p| tri_text(p.reacquired))
         );
     }
     fs::write(out_dir.join("samples.csv"), &csv).map_err(|e| e.to_string())?;
@@ -1861,8 +2087,8 @@ mod tests {
             spd: 0.0,
             hdg: 0.0,
             coast: 0,
-            uncertain: false,
-            reacquired: false,
+            uncertain: Tri::No,
+            reacquired: Tri::No,
             phase: 0,
             band: 0,
         };
@@ -1871,6 +2097,145 @@ mod tests {
         assert_eq!(nearest(&v, 1500).unwrap().t, 1000);
         assert!(nearest(&v, 1501).is_some());
         assert!(nearest(&v, 3000).is_none());
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn a_duplicate_flag_key_is_counted_and_never_overwritten() {
+        let ns = |ms: i64| ms * 1_000_000;
+        // Two rows in one millisecond that agree, then two that disagree, then a unique key.
+        let j = flag_join(
+            &[1, 1, 2, 2, 3],
+            &[ns(5), ns(5) + 400_000, ns(7), ns(7) + 1, ns(9)],
+            &[true, true, false, true, false],
+            &[false, false, false, false, true],
+        )
+        .unwrap();
+        assert_eq!((j.duplicate_rows, j.conflict_keys), (2, 1));
+        assert_eq!(flag_lookup(&j, 1, 5), (Tri::Yes, Tri::No));
+        // Disagreeing rows: neither wins; the sample is unmatched.
+        assert_eq!(flag_lookup(&j, 2, 7), (Tri::Unmatched, Tri::Unmatched));
+        assert_eq!(flag_lookup(&j, 3, 9), (Tri::No, Tri::Yes));
+        // A key with no tracker row is unmatched, not "no".
+        assert_eq!(flag_lookup(&j, 3, 10), (Tri::Unmatched, Tri::Unmatched));
+        assert_eq!(flag_lookup(&j, 4, 9), (Tri::Unmatched, Tri::Unmatched));
+        // A third row after a conflict does not count the key twice.
+        let j = flag_join(
+            &[1, 1, 1],
+            &[ns(1), ns(1), ns(1)],
+            &[true, false, true],
+            &[false; 3],
+        )
+        .unwrap();
+        assert_eq!((j.duplicate_rows, j.conflict_keys), (2, 1));
+        // Columns of different lengths are refused.
+        assert!(flag_join(&[1], &[1, 2], &[true], &[true]).is_err());
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn an_unmatched_sample_is_in_its_own_group_and_not_in_no() {
+        let pt = |u| Pt {
+            t: 0,
+            cross: 0.0,
+            along: 0.0,
+            v: 0.0,
+            spd: 0.0,
+            hdg: 0.0,
+            coast: 0,
+            uncertain: u,
+            reacquired: Tri::No,
+            phase: 0,
+            band: 0,
+        };
+        let val = |u| Val {
+            pt: pt(u),
+            along_fit: 0.0,
+            h_raw: 0.0,
+            h_fit: 0.0,
+            along_tol: 0.0,
+            h_tol: 0.0,
+        };
+        let row = |u| Row {
+            ac: 0,
+            t: 0,
+            addr: 1,
+            phase: 0,
+            band: 0,
+            val: [Some(val(u)), None, None],
+        };
+        let groups = flag_groups();
+        let find = |name: &str| groups.iter().find(|g| g.0 == name).unwrap();
+        for (u, no, yes, un) in [
+            (Tri::No, true, false, false),
+            (Tri::Yes, false, true, false),
+            (Tri::Unmatched, false, false, true),
+        ] {
+            let r = row(u);
+            assert_eq!((find("OpenATCA not uncertain").1)(&r), no);
+            assert_eq!((find("OpenATCA uncertain").1)(&r), yes);
+            assert_eq!((find("OpenATCA uncertain UNMATCHED").1)(&r), un);
+        }
+    }
+
+    // REQ: OA-TRK-374
+    #[test]
+    fn a_not_a_number_error_is_a_failure_in_the_large_error_metrics() {
+        assert!(fails_over(f64::NAN, LARGE_M));
+        assert!(fails_over(LARGE_M + 1.0, LARGE_M));
+        assert!(fails_over(f64::INFINITY, LARGE_M));
+        assert!(!fails_over(LARGE_M, LARGE_M));
+        assert!(!fails_over(0.0, LARGE_M));
+        // The same sample is a failure of the M4 test as well: `h <= thr` is false for NaN.
+        assert!(f64::NAN.partial_cmp(&100.0).is_none());
+        // A sample whose truth speed is not known has a not-a-number M3t and fails M7t.
+        let h_tol = 5.0f64.hypot(along_tol(3.0, f64::NAN));
+        assert!(h_tol.is_nan() && fails_over(h_tol, LARGE_M));
+    }
+
+    // REQ: OA-TRK-374
+    #[test]
+    fn aircraft_with_no_time_fit_are_counted_and_their_samples_are_named() {
+        let pt = Pt {
+            t: 0,
+            cross: 1.0,
+            along: 1.0,
+            v: 100.0,
+            spd: 0.0,
+            hdg: 0.0,
+            coast: 0,
+            uncertain: Tri::No,
+            reacquired: Tri::No,
+            phase: 0,
+            band: 0,
+        };
+        let val = Val {
+            pt,
+            along_fit: 1.0,
+            h_raw: 1.0,
+            h_fit: 1.0,
+            along_tol: 1.0,
+            h_tol: 1.0,
+        };
+        let row = |ac, vals: [Option<Val>; 3]| Row {
+            ac,
+            t: 0,
+            addr: ac as u32,
+            phase: 0,
+            band: 0,
+            val: vals,
+        };
+        let rows = vec![
+            row(0, [Some(val), Some(val), None]),
+            row(0, [Some(val), Some(val), None]),
+            row(1, [Some(val), None, None]),
+        ];
+        // Aircraft 0 is fitted for OpenATCA only; aircraft 1 has no fit at all.
+        let taus = vec![[Some(0.1), None, None], [None, None, None]];
+        let u = unfitted_counts(&rows, &taus);
+        assert_eq!(u[0], (1, 1)); // OpenATCA: aircraft 1, one sample
+        assert_eq!(u[1], (1, 2)); // ERAM: aircraft 0, two samples
+        assert_eq!(u[2], (0, 0)); // passthrough has no values: nothing to count
     }
 
     #[test]

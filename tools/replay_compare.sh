@@ -16,6 +16,14 @@
 #   REPLAY_COMPARE_TOOLCHAIN  rustup toolchain (default 1.89.0, the pinned one)
 #   CARGO_BUILD_JOBS          default 2
 #   REPLAY_COMPARE_KEEP_ROWS  1 keeps the two rows files in <outdir>
+#
+# Both builds run with RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS and RUSTDOCFLAGS
+# removed from the environment (flags such as -C target-cpu=native change float results, which is
+# what is being compared) and with --locked. The report records that they were cleared and what
+# they held, the toolchain (`rustc -vV`), the sha256 of the overlay patch and of every file it
+# patched, and the sha256 of every compared binary input. A commit that predates --digest/--rows
+# gets the frozen overlay only if its files are exactly the ones the patch was made against
+# (replay_overlay_apply.sh); anything else is refused.
 set -euo pipefail
 
 usage() {
@@ -94,6 +102,10 @@ toolchain="${REPLAY_COMPARE_TOOLCHAIN:-1.89.0}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
 clip_sha="$(sha256sum "$clip" | cut -d' ' -f1)"
+# What the caller's environment held, recorded before it is cleared for the builds.
+flags_before="RUSTFLAGS=[${RUSTFLAGS-}] CARGO_ENCODED_RUSTFLAGS=[${CARGO_ENCODED_RUSTFLAGS-}] CARGO_BUILD_RUSTFLAGS=[${CARGO_BUILD_RUSTFLAGS-}] RUSTDOCFLAGS=[${RUSTDOCFLAGS-}]"
+clean_env=(env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS -u RUSTDOCFLAGS)
+rustc_vv="$("${clean_env[@]}" rustc "+$toolchain" -vV 2>&1)" || die "no rustc for toolchain $toolchain"
 worktrees=()
 cleanup() {
     for w in "${worktrees[@]}"; do
@@ -110,19 +122,25 @@ build_and_run() {
     local label="$1" commit="$2" wt="$scratch/wt-$1" tgt="$scratch/target-$1"
     git -C "$repo" worktree add --detach "$wt" "$commit" >/dev/null
     worktrees+=("$wt")
-    # A commit from before the digest flags existed gets the frozen overlay patch.
-    if ! grep -q -- '--digest' "$wt/crates/oa-track/src/main.rs"; then
-        # Fuzz 3: the commit's main.rs may differ in the lines around the patched ones.
-        if ! (cd "$wt" && patch -p1 -F3 --no-backup-if-mismatch -s <"$here/replay_compare_overlay.patch"); then
-            die "$commit has no --digest/--rows and the overlay patch does not apply to it"
-        fi
+    # A commit from before the digest flags existed gets the frozen overlay patch, but only
+    # if it has neither the canonical module nor the flags; one with exactly one of them is a
+    # half-way commit and is refused.
+    local has_canon=0 has_flag=0
+    git -C "$repo" cat-file -e "$commit:crates/oa-track/src/canon.rs" 2>/dev/null && has_canon=1
+    grep -q -- '"--digest"' "$wt/crates/oa-track/src/main.rs" && has_flag=1
+    if [ "$has_canon" = 0 ] && [ "$has_flag" = 0 ]; then
+        "$here/replay_overlay_apply.sh" "$wt" "$commit" "$here/replay_compare_overlay.patch" \
+            "$outdir/overlay-$label.txt" 2>"$outdir/overlay-$label.err" ||
+            die "$commit has no --digest/--rows and the overlay patch is refused for it: $(cat "$outdir/overlay-$label.err")"
         echo "$label: overlay applied (commit predates --digest/--rows)" >&2
+    elif [ "$has_canon" != "$has_flag" ]; then
+        die "$commit has the canonical module or the --digest flag but not both (half-way commit); refusing"
     fi
     echo "$label: building $commit" >&2
     (
         cd "$wt"
-        CARGO_TARGET_DIR="$tgt" "${guard[@]}" env CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
-            CARGO_TARGET_DIR="$tgt" cargo "+$toolchain" build --release \
+        CARGO_TARGET_DIR="$tgt" "${guard[@]}" "${clean_env[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+            CARGO_TARGET_DIR="$tgt" cargo "+$toolchain" build --release --locked \
             -p oa-track --bin oa-track-run >"$outdir/build-$label.log" 2>&1
     ) || die "build of $commit failed (see $outdir/build-$label.log)"
     echo "$label: running" >&2
@@ -146,8 +164,8 @@ build_and_run B "$commit_b"
 echo "building oa-replay-diff" >&2
 (
     cd "$repo"
-    "${guard[@]}" env CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
-        cargo "+$toolchain" build --release -p oa-replay-diff >"$outdir/build-diff.log" 2>&1
+    "${guard[@]}" "${clean_env[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+        cargo "+$toolchain" build --release --locked -p oa-replay-diff >"$outdir/build-diff.log" 2>&1
 ) || die "build of oa-replay-diff failed (see $outdir/build-diff.log)"
 diff_bin="${CARGO_TARGET_DIR:-$repo/target}/release/oa-replay-diff"
 
@@ -163,6 +181,17 @@ status=0
     echo "commit B: $commit_b ($spec_b)"
     echo "clip: $clip"
     echo "clip sha256: $clip_sha"
+    echo "environment flags cleared for the builds: $flags_before"
+    echo "toolchain: $toolchain"
+    echo "$rustc_vv"
+    for l in A B; do
+        if [ -f "$outdir/overlay-$l.txt" ]; then
+            echo "overlay applied to commit $l:"
+            sed 's/^/  /' "$outdir/overlay-$l.txt"
+        else
+            echo "overlay for commit $l: none (the commit has --digest/--rows)"
+        fi
+    done
     [ -z "$expect" ] || echo "expect file: $expect"
     echo "oa-replay-diff exit status: $status"
     echo
@@ -173,6 +202,12 @@ status=0
     echo "commit_a=$commit_a"
     echo "commit_b=$commit_b"
     echo "clip_sha256=$clip_sha"
+    echo "rustflags_cleared=yes"
+    echo "rustflags_before=$flags_before"
+    echo "toolchain=$toolchain"
+    for l in A B; do
+        if [ -f "$outdir/overlay-$l.txt" ]; then echo "overlay_$l=applied"; else echo "overlay_$l=none"; fi
+    done
     echo "status=$status"
 } >>"$outdir/summary.txt"
 if [ "${REPLAY_COMPARE_KEEP_ROWS:-0}" != 1 ]; then

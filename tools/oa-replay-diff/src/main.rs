@@ -8,16 +8,15 @@
 //! ```
 //!
 //! Exit code 0: identical (or, with `--expect`, every difference is declared); 1: different;
-//! 2: error.
+//! 2: error (a malformed or inconsistent input, an unwritable output, a closed pipe).
 
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oa_replay_diff::{
-    compare_digests, compare_rows, parse_digest, parse_expect, render_report, render_summary,
-    verdict, Comparison, RowsReader,
+    compare_digests, compare_rows, digest_rows, load_digest_text, load_expect_text, open_rows,
+    parse_digest, parse_expect, render_report, render_summary, verdict, write_out, Comparison,
 };
 
 const USAGE: &str = "usage: oa-replay-diff <digest-a> <digest-b> [--rows-a <file> --rows-b <file>] [--expect <file>] [--summary <file>] [--max-detail <n>]";
@@ -62,8 +61,7 @@ fn run() -> Result<u8, String> {
         return Err("--rows-a and --rows-b go together".to_string());
     }
     let read = |p: &PathBuf| {
-        fs::read_to_string(p)
-            .map_err(|e| format!("{}: {e}", p.display()))
+        load_digest_text(p)
             .and_then(|t| parse_digest(&t).map_err(|e| format!("{}: {e}", p.display())))
     };
     let (la, lb) = (read(pa)?, read(pb)?);
@@ -72,7 +70,7 @@ fn run() -> Result<u8, String> {
             if rows_a.is_none() {
                 return Err("--expect needs the rows files to know what differs".to_string());
             }
-            let t = fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let t = load_expect_text(p)?;
             Some(parse_expect(&t).map_err(|e| format!("{}: {e}", p.display()))?)
         }
         None => None,
@@ -80,24 +78,24 @@ fn run() -> Result<u8, String> {
     let digest = compare_digests(&la, &lb);
     let rows = match (&rows_a, &rows_b) {
         (Some(x), Some(y)) if !digest.identical => {
-            let open = |p: &PathBuf| {
-                File::open(p)
-                    .map_err(|e| format!("{}: {e}", p.display()))
-                    .and_then(|f| {
-                        RowsReader::new(BufReader::with_capacity(1 << 20, f))
-                            .map_err(|e| format!("{}: {e}", p.display()))
-                    })
-            };
-            Some(compare_rows(&digest, &la, &lb, open(x)?, open(y)?)?)
+            let (ra, rb) = (
+                open_rows(x, digest_rows(&la))?,
+                open_rows(y, digest_rows(&lb))?,
+            );
+            Some(compare_rows(&digest, &la, &lb, ra, rb)?)
         }
         _ => None,
     };
     let c = Comparison { digest, rows };
     let text = render_report(&c, max_detail);
     let sum = render_summary(&c, allowed.as_ref());
-    print!("{text}\n[summary]\n{sum}");
     if let Some(p) = summary {
         fs::write(&p, &sum).map_err(|e| format!("{}: {e}", p.display()))?;
     }
+    // Not `print!`: a closed pipe is an error and exit 2, never a panic.
+    write_out(
+        &mut std::io::stdout().lock(),
+        &format!("{text}\n[summary]\n{sum}"),
+    )?;
     Ok(verdict(&c, allowed.as_ref()))
 }
