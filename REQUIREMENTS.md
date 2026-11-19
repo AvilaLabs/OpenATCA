@@ -4457,9 +4457,11 @@ scope.
 - **OA-CMP-025** `--inputs all` runs the clip through `oa_track::score::split_reports_with` (the scorer's split
   function) with the halving off: copies removed, every conflicting report kept (rule stated), counts printed in
   the README; the same reports feed the tracker and `adsb.ast`.
-- **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 3, DSType "ADSB", a string of the COMPASS manual's set); the README states
+- **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 13, DSType "ADSB", a string of the COMPASS manual's set); the README states
   the Ed 2.4 format, how each value was made, every omission with its count, and that a reference built from
   `adsb.ast` is not independent of OpenATCA's inputs (UK-008) and that ERAM also uses ADS-B.
+- **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
+  each; 255/1 is left free because COMPASS writes its reference there, and the README says so.
 - **OA-CMP-028** I090 is in every ADS-B record: with nothing known the primary subfield at NACv 0 / NIC 0, and
   an extension only when a bit in it is 1; NIC or NACp above 11 and NACv above 4 are not encoded and counted;
   a missing SIL type (SILS), the unverified NIC mapping under MOPS version 2 and the GBS assertion are counted;

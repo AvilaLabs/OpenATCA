@@ -54,7 +54,7 @@
 //!
 //! The time is I073, the time the receiver network stamped the report; I071 (an avionics time)
 //! and I075 (a separate time for the velocity) are not in the source. The data source is
-//! SAC 255, SIC 3 (a test pair, like the two trackers').
+//! SAC 255, SIC 13 (a test pair, like the two trackers': 11 and 12; SIC 1 is left free because COMPASS uses 255/1 for its reference).
 
 pub mod core;
 pub mod shell;

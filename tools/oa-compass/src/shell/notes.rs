@@ -26,15 +26,15 @@ use crate::core::convert::{
 ///
 /// The ASTERIX specification (Part 1 Ed 3.1, 6.2.1) assigns SACs through the ASTERIX Manager and
 /// the editions held here carry no list and no test range. This export therefore uses a pair of
-/// its own, SAC 255 with SIC 1 for OpenATCA and SIC 2 for ERAM: a test pair chosen by us, not an
+/// its own, SAC 255 with SIC 11 for OpenATCA, 12 for ERAM and 13 for ADS-B (SIC 1 is left free: COMPASS writes its own reference under 255/1): a test pair chosen by us, not an
 /// allocation. It must not be used on a live link; check the published SAC list before using
 /// any pair outside the lab.
-pub const OPENATCA_SOURCE: SourceId = SourceId { sac: 255, sic: 1 };
+pub const OPENATCA_SOURCE: SourceId = SourceId { sac: 255, sic: 11 };
 /// The data source of the ERAM tracks (see [`OPENATCA_SOURCE`]).
-pub const ERAM_SOURCE: SourceId = SourceId { sac: 255, sic: 2 };
+pub const ERAM_SOURCE: SourceId = SourceId { sac: 255, sic: 12 };
 
 /// The data source of the ADS-B reports file (see [`OPENATCA_SOURCE`]).
-pub const ADSB_SOURCE: SourceId = SourceId { sac: 255, sic: 3 };
+pub const ADSB_SOURCE: SourceId = SourceId { sac: 255, sic: 13 };
 
 /// The `ds_type` strings the COMPASS manual's data-source example uses.
 pub const DS_TYPES: [&str; 6] = ["Radar", "MLAT", "ADSB", "Tracker", "RefTraj", "Other"];
@@ -219,7 +219,7 @@ pub fn readme_with(
     }
     let _ = writeln!(o, "\nFormat: ASTERIX category 062 Edition 1.21 (EUROCONTROL-SPEC-0149-9), raw data blocks (CAT, LEN, records), no framing, records in time order, up to 256 records per block.");
     let _ = writeln!(o, "Encoder: oa-asterix of this repository, written from the specification; build {build}.");
-    let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2). SAC 255 is a test pair chosen by this export, not an allocation: the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.");
+    let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2). SAC 255 is a test range chosen by this export, not an allocation (OpenATCA 255/11, ERAM 255/12, ADS-B 255/13; 255/1 is left free because COMPASS uses it for its own reference): the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.");
     let _ = writeln!(o, "Import openatca.ast and eram.ast as ASTERIX CAT062 and, if present, adsb.ast as ASTERIX CAT021 (Ed 2.4), with the UTC Day above; nothing in the files needs a time-of-day override.\n");
     let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: CNF = 0 (confirmed: the tracker publishes confirmed tracks only); MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor, and MON = 0 for ERAM because it fuses radar and ADS-B; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.\n");
     let _ = writeln!(o, "Altitude: OpenATCA's altitude is ADS-B barometric (pressure) altitude, filtered: I135 with QNH = 0. ERAM's altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, an inference and not a statement of the feed: at or above 18 000 ft the value is I136 (measured flight level), below it I135 with QNH = 1.\n");

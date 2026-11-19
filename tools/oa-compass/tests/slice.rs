@@ -215,7 +215,7 @@ fn block_21(times: &[u32]) -> Vec<u8> {
     let recs: Vec<Cat021> = times
         .iter()
         .map(|&t| Cat021 {
-            source: SourceId { sac: 255, sic: 3 },
+            source: SourceId { sac: 255, sic: 13 },
             tomr_position: Some(t),
             ..Cat021::default()
         })

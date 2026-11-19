@@ -384,7 +384,7 @@ fn the_file_decodes_as_ed24_with_every_value_and_position_error_within_bounds() 
     }
     assert_eq!(recs.len(), 700);
     for (rec, (c, r)) in recs.iter().zip(want.iter()) {
-        assert_eq!(rec.source, SourceId { sac: 255, sic: 3 });
+        assert_eq!(rec.source, SourceId { sac: 255, sic: 13 });
         assert_eq!(rec.address, Some(c.values.address));
         assert_eq!(rec.tomr_position, Some(c.values.time));
         assert_eq!(rec.flight_level, c.values.flight_level);
@@ -550,9 +550,9 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let list = doc.get(oa_json::NodeIx(0), "data_sources").unwrap();
     let third = doc.elements(list).nth(2).unwrap();
     assert_eq!(doc.str(doc.get(third, "ds_type").unwrap()), Some("ADSB"));
-    assert_eq!(doc.as_i64(doc.get(third, "sic").unwrap()), Some(3));
-    assert!(text.contains(r#""ds_type":"ADSB","name":"ADS-B","sac":255,"sic":3"#), "{text}");
-    assert!(text.contains(r#""name":"OpenATCA","sac":255,"sic":1"#));
+    assert_eq!(doc.as_i64(doc.get(third, "sic").unwrap()), Some(13));
+    assert!(text.contains(r#""ds_type":"ADSB","name":"ADS-B","sac":255,"sic":13"#), "{text}");
+    assert!(text.contains(r#""name":"OpenATCA","sac":255,"sic":11"#));
     // README.
     let (lay, _) = layout("readme", false);
     let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
@@ -601,7 +601,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     );
     for needle in [
         "CAT021 Ed 2.4",
-        "SAC 255 SIC 3",
+        "SAC 255 SIC 13",
         "split_reports_with",
         "KEEP ALL",
         "3 duplicate reports removed",

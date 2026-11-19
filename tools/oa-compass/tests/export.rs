@@ -461,9 +461,9 @@ fn the_data_source_file_parses_and_names_both_systems() {
         ["Radar", "MLAT", "ADSB", "Tracker", "RefTraj", "Other"]
     );
     let want = [
-        ("OpenATCA", 255, 1, "Tracker"),
-        ("ERAM", 255, 2, "Tracker"),
-        ("ADS-B", 255, 3, "ADSB"),
+        ("OpenATCA", 255, 11, "Tracker"),
+        ("ERAM", 255, 12, "Tracker"),
+        ("ADS-B", 255, 13, "ADSB"),
     ];
     for (it, (name, sac, sic, ty)) in items.iter().zip(want) {
         assert_eq!(doc.str(get(*it, "ds_type")), Some(ty));
@@ -472,8 +472,8 @@ fn the_data_source_file_parses_and_names_both_systems() {
         assert_eq!(doc.as_i64(get(*it, "sac")), Some(sac));
         assert_eq!(doc.as_i64(get(*it, "sic")), Some(sic));
     }
-    assert_eq!(OPENATCA_SOURCE, SourceId { sac: 255, sic: 1 });
-    assert_eq!(ERAM_SOURCE, SourceId { sac: 255, sic: 2 });
+    assert_eq!(OPENATCA_SOURCE, SourceId { sac: 255, sic: 11 });
+    assert_eq!(ERAM_SOURCE, SourceId { sac: 255, sic: 12 });
 }
 
 // REQ: OA-CMP-015
@@ -494,7 +494,8 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
     let text = readme(DAY, &[&rep], "commit test", false, None);
     for needle in [
         "UTC date to give at import (UTC Day): 2026.11.15",
-        "ERAM  (SAC 255 SIC 2)",
+        "ERAM  (SAC 255 SIC 12)",
+        "255/1 is left free because COMPASS uses it for its own reference",
         "records written: 4 in 1 data blocks",
         "I136 measured flight level (ERAM at or above 18 000 ft): 3",
         "I500 accuracies, APW only: 0",
@@ -511,7 +512,7 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
         "input: test input",
         "Edition 1.21",
         "commit test",
-        "SAC 255 is a test pair",
+        "SAC 255 is a test range",
         "00:00:00.000 to 00:00:12.000 UTC",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in\n{text}");
@@ -675,4 +676,15 @@ fn the_verification_compares_a_wrapped_longitude_around_the_circle() {
     let (bytes, stats) = sink.finish().unwrap();
     assert!(stats.max_lon_error_e7 <= 27, "{}", stats.max_lon_error_e7);
     assert_eq!(decode_all(&bytes)[0].position.unwrap().lon, -(1 << 25));
+}
+
+// REQ: OA-CMP-029
+#[test]
+fn the_sources_are_255_11_12_13_and_the_readme_says_255_1_is_left_free() {
+    use oa_compass::shell::notes::ADSB_SOURCE;
+    assert_eq!(OPENATCA_SOURCE, SourceId { sac: 255, sic: 11 });
+    assert_eq!(ERAM_SOURCE, SourceId { sac: 255, sic: 12 });
+    assert_eq!(ADSB_SOURCE, SourceId { sac: 255, sic: 13 });
+    let text = readme(DAY, &[], "b", false, None);
+    assert!(text.contains("255/1 is left free because COMPASS uses it for its own reference"));
 }

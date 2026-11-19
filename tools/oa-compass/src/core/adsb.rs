@@ -6,7 +6,7 @@
 //!
 //! # What each item is made from
 //!
-//! * I010: the shell's data source (SAC 255, SIC 3).
+//! * I010: the shell's data source (SAC 255, SIC 13).
 //! * I040: ATP 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; ARC 2 (unknown: the
 //!   source has no altitude reporting capability); GBS from the report's ground flag; CL 2 (no
 //!   information: the source has no confidence level); GBS 0 asserts "ground bit not set" for a
