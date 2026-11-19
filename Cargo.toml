@@ -5,6 +5,7 @@ exclude = ["fuzz", "validation/oa-alloc-check", "validation/oa-creusot-check"]
 members = [
     "crates/oa-csv",
     "crates/oa-geo",
+    "crates/oa-ieee",
     "crates/oa-math",
     "crates/oa-nasr",
     "crates/oa-arinc424",

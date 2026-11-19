@@ -51,9 +51,13 @@ fn manifest_declares_no_dependencies() {
             continue;
         }
         if section == "[dependencies]" {
-            // The one workspace crate allowed: the elementary functions (RULESET F1).
+            // The workspace crates allowed: the elementary functions and the IEEE-754
+            // operations `core` lacks (RULESET F1).
             assert!(
-                t.is_empty() || t.starts_with('#') || t == "oa-math = { path = \"../oa-math\" }",
+                t.is_empty()
+                    || t.starts_with('#')
+                    || t == "oa-math = { path = \"../oa-math\" }"
+                    || t == "oa-ieee = { path = \"../oa-ieee\" }",
                 "dependency declared: {t}"
             );
         }
@@ -188,4 +192,36 @@ fn random_valid_points_and_polygons_never_panic() {
             let _ = e.rhumb_inverse(a, b);
         }
     }
+}
+
+// REQ: OA-GEN-002
+#[test]
+fn library_is_no_std_and_uses_no_std_only_float_methods() {
+    // With oa-ieee in the dependency graph the compiler still resolves `f64::sqrt` and the
+    // other std-only inherent methods, so this scan is what keeps them out.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let lib = std::fs::read_to_string(dir.join("lib.rs")).unwrap();
+    assert!(lib.contains("#![cfg_attr(not(test), no_std)]"));
+    let banned = [
+        "sqrt", "round", "floor", "ceil", "trunc", "hypot", "powi", "powf", "mul_add",
+    ];
+    let mut hits = Vec::new();
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Everything from the first `#[cfg(test)]` on is test code, which has std.
+        let body = text.split("#[cfg(test)]").next().unwrap();
+        scanned += 1;
+        for (n, line) in body.lines().enumerate() {
+            let code = line.split("//").next().unwrap();
+            for b in banned {
+                if code.contains(&format!(".{b}(")) || code.contains(&format!("f64::{b}")) {
+                    hits.push(format!("{}:{}: {b}", path.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(scanned >= 8);
+    assert!(hits.is_empty(), "{hits:#?}");
 }

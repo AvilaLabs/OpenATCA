@@ -1,6 +1,6 @@
 //! Error type shared by every fallible operation in this crate.
 
-use std::fmt;
+use core::fmt;
 
 /// Why an input was rejected or a computation could not be completed.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,4 +50,4 @@ impl fmt::Display for GeoError {
     }
 }
 
-impl std::error::Error for GeoError {}
+impl core::error::Error for GeoError {}
