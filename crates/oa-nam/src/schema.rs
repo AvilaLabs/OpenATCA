@@ -1,12 +1,13 @@
 //! The message set as data: for every message the fields it carries, in wire order, and which
 //! elements are required, optional or not used (Part II Tables 3 to 27, Rev G, with the
 //! Attachment 2 additions). The parser and the encoder both read this one table; adding or
-//! correcting a message is a table row.
+//! correcting a message is a table row. Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
 
 use crate::model::{Kind, Profile};
 
 /// An element's presence rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: constant definition table, read once per message
 pub enum Req {
     /// Not used in this message: present is a refusal.
     No,
@@ -16,6 +17,7 @@ pub enum Req {
 
 /// How a Field 18 is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: constant definition table, read once per message
 pub enum F18Rule {
     /// `0` or indicator elements (FPL, CPL, CHG, CNL).
     Any,
@@ -29,6 +31,7 @@ pub enum F18Rule {
 
 /// One field of a message, in wire order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: constant definition table, read once per message
 pub enum Rule {
     /// `ssr` is 07(b) and (c); `functional` allows a functional address in 07(a).
     F07 {
@@ -68,6 +71,7 @@ pub enum Rule {
 
 /// A message type's definition.
 #[derive(Debug, Clone, Copy)]
+// A7.2: cold struct, size guard waived: constant definition table, read once per message
 pub struct Spec {
     pub kind: Kind,
     pub mnemonic: &'static str,
@@ -387,11 +391,15 @@ pub const SPECS: [Spec; 25] = [
     },
 ];
 
-/// The definition of a message type.
-pub fn spec(kind: Kind) -> &'static Spec {
-    // SPECS lists every Kind once, in ALL_KINDS order, so the position is the discriminant
-    // order; the tests check it.
-    SPECS.iter().find(|s| s.kind == kind).unwrap_or(&SPECS[0])
+/// The definition of a message type, or `None` if `SPECS` has none (E6: never another
+/// message's definition). A test checks that every [`Kind`] has one.
+pub fn spec(kind: Kind) -> Option<&'static Spec> {
+    spec_in(&SPECS, kind)
+}
+
+/// The entry for `kind` in `table`, `None` when the table has none.
+pub fn spec_in(table: &[Spec], kind: Kind) -> Option<&Spec> {
+    table.iter().find(|s| s.kind == kind)
 }
 
 /// Rev E (NAS-IC-21009205, 15 April 2016) differs from Rev G in four messages: the ASM carries
@@ -450,10 +458,10 @@ const REV_E_SPECS: [Spec; 4] = [
 
 /// The definition of a message type under a profile: [`spec`], except the four messages Rev E
 /// defines differently under [`Profile::RevE`].
-pub fn spec_for(kind: Kind, profile: Profile) -> &'static Spec {
+pub fn spec_for(kind: Kind, profile: Profile) -> Option<&'static Spec> {
     if profile == Profile::RevE {
-        if let Some(s) = REV_E_SPECS.iter().find(|s| s.kind == kind) {
-            return s;
+        if let Some(s) = spec_in(&REV_E_SPECS, kind) {
+            return Some(s);
         }
     }
     spec(kind)
@@ -465,4 +473,25 @@ pub fn kind_of(mnemonic: &[u8]) -> Option<Kind> {
         .iter()
         .find(|s| s.mnemonic.as_bytes() == mnemonic)
         .map(|s| s.kind)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::model::ALL_KINDS;
+
+    // REQ: OA-NAM-032
+    #[test]
+    fn an_unknown_kind_has_no_spec_never_another_messages() {
+        // A table that lacks the kind gives None, not the first entry (E6).
+        let short = &SPECS[..1];
+        assert_eq!(spec_in(short, Kind::Fpl).map(|s| s.kind), Some(Kind::Fpl));
+        assert!(spec_in(short, Kind::Lrm).is_none());
+        assert!(spec_in(&[], Kind::Fpl).is_none());
+        for k in ALL_KINDS {
+            assert_eq!(spec(k).unwrap().kind, k);
+            assert_eq!(spec_for(k, Profile::RevE).unwrap().kind, k);
+        }
+    }
 }

@@ -1,9 +1,14 @@
 //! LRM error codes: Rev G Appendix A Table A-1 (codes 1 to 91), Attachment 3 2.8 (92 to 94,
 //! the Cuba/US interface) and Attachment 2 Table 2-2 (99 to 116, the radar handoff codes of the
-//! Canada/US interface). Data only. Core (pure).
+//! Canada/US interface). Data only.
+//! Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
+
+use crate::error::{lrm_code, ErrorKind, NamError};
+use crate::model::{Kind, Profile};
 
 /// One row of an error code table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: constant code table, looked up on the refusal path
 pub struct LrmEntry {
     pub code: u8,
     /// The "Field Number" column as printed: `Header`, `07`, `13, 16`, ..., or empty.
@@ -197,4 +202,34 @@ pub fn lrm_field(code: u8, profile: crate::model::Profile) -> Option<&'static st
         }
     }
     Some(base)
+}
+
+/// The Table A-1 error code and field a refusal is reported with in an LRM
+/// (`RMK/<code>/<field>/<text>`).
+pub fn lrm(e: &NamError) -> (u8, u8) {
+    lrm_for(e, Profile::default(), None)
+}
+
+/// The code and field under `profile`, for a refused message of kind `msg` when known (see
+/// [`crate::message::peek_kind`]). Table A-1 gives one code per refusal; Attachment 2 Table
+/// 2-2 differs in three places, applied under [`Profile::EramAttachment2`]:
+/// * a bad message number is 57, not 4 ("N/A to ERAM/CAATS interface");
+/// * Field 03 syntax failing in an RTI, RTA, RLA or RTU is 57, including a bad 03(c);
+/// * a missing time designator in 13 or 16 is 21 (expected time designator not found),
+///   in 14 it is 24.
+pub fn lrm_for(e: &NamError, profile: Profile, msg: Option<Kind>) -> (u8, u8) {
+    let (mut code, default_field) = lrm_code(e.kind);
+    let field = if e.field != 0 { e.field } else { default_field };
+    if e.kind == ErrorKind::TimeMissing && matches!(field, 13 | 16) {
+        code = 21;
+    }
+    if profile == Profile::EramAttachment2 {
+        let handoff = matches!(msg, Some(Kind::Rti | Kind::Rta | Kind::Rla | Kind::Rtu));
+        match e.kind {
+            ErrorKind::MessageNumber => code = 57,
+            ErrorKind::Reference if handoff => code = 57,
+            _ => {}
+        }
+    }
+    (code, field)
 }

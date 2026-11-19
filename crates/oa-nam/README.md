@@ -25,11 +25,18 @@ place where this crate decided something the ICD did not. Validation runs under 
 | Codec | `message::{parse, parse_tolerant, encode}` | One table of message definitions drives both directions. `encode` refuses an invalid value, and re-parses its own output and compares it with the input. |
 | Transport | `frame` | The four-hex-digit length header, 17 to 1800 byte messages. |
 | Session | `session` | INACTIVE / ACTIVATING / ACTIVE / DEACTIVATING as the pure function `step(config, session, event, now) -> (session, actions)`; message numbers 000 to 999; unanswered-message table; ASM keep-alive; IRQ retry; TRQ/TRS. |
-| Errors | `error`, `lrm` | Every refusal carries the Table A-1 code and field a receiver would answer with in an LRM (`NamError::lrm`). The code tables (Table A-1, 1 to 91; Attachment 3, 92 to 94; Attachment 2, 99 to 116) are in `lrm::LRM_TABLE`. |
+| Errors | `error`, `lrm` | Every refusal carries the Table A-1 code and field a receiver would answer with in an LRM (`lrm::lrm`). The code tables (Table A-1, 1 to 91; Attachment 3, 92 to 94; Attachment 2, 99 to 116) are in `lrm::LRM_TABLE`. |
 | Workload | `workload` | The ICD's rate, size and latency figures as data (below). |
 
-All of it is core in the RULESET sense (B1): functions of bytes and values. A shell supplies bytes
-from a socket and the time, and sends what the actions say.
+Classification (RULESET B1):
+
+| Module | Class | Why |
+|---|---|---|
+| `session` | core (pure) | `step(config, session, event, now)` is a function of its inputs, allocates nothing, fixed named capacities; checked under a counting allocator (C5, `validation/oa-alloc-check`, fixture `nam_session_activate_traffic_retry_full_deactivate`). |
+| `message`, `field`, `model`, `schema`, `frame`, `lrm`, `error`, `workload` (the codec) | shell, input-format adapter (D1, C6) | Pure functions of bytes and values, no clock and no I/O, but they allocate per message (`Vec`, `String`), so they are not real-time core and are not held to C1 or C3. Their structs are cold (A7.2). |
+
+A shell supplies bytes from a socket and the time, runs the codec, feeds the session the parsed
+headers, and sends what the actions say.
 
 ### Round trip
 

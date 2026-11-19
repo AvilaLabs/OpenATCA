@@ -1,10 +1,10 @@
 //! Whole-message parse and encode, driven by the table in [`crate::schema`] (Part II section 3,
-//! Part III 2.4). Core (pure). `parse` is strict: it accepts exactly the canonical text of every
+//! Part III 2.4). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1). `parse` is strict: it accepts exactly the canonical text of every
 //! message it understands and refuses the rest with the LRM code a receiver would answer with.
 //! [`parse_tolerant`] additionally accepts the one deviation the ICD's own examples show
 //! (spaces next to a field separator), and says that it did.
 
-use crate::error::{ErrorKind as K, NamError};
+use crate::error::{ErrorKind as K, NamError, NO_OFFSET};
 use crate::field::*;
 use crate::model::*;
 use crate::schema::{kind_of, spec, spec_for, F18Rule, Req, Rule, Spec};
@@ -41,7 +41,7 @@ fn msg_id(b: &[u8], first: K, offset: usize) -> Result<MsgId, NamError> {
     };
     let sender = facility(g(0, 4), sk, offset)?;
     let receiver = facility(g(5, 9), rk, offset + 5)?;
-    let number = num(g(9, 12)).ok_or(err(nk, 3, offset + 9))? as u16;
+    let number = num_u16(g(9, 12)).ok_or(err(nk, 3, offset + 9))?;
     Ok(MsgId {
         sender,
         receiver,
@@ -73,7 +73,8 @@ pub fn parse_header_with(b: &[u8], profile: Profile) -> Result<Header, NamError>
         24 => Some(msg_id(rest.get(12..).unwrap_or(&[]), K::Reference, 15)?),
         _ => return Err(err(K::Field03Syntax, 3, 3)),
     };
-    match (spec_for(kind, profile).reference, reference.is_some()) {
+    let sp = spec_for(kind, profile).ok_or(err(K::Mnemonic, 3, 0))?;
+    match (sp.reference, reference.is_some()) {
         (Req::No, true) | (Req::Yes, false) => return Err(err(K::ReferencePresence, 3, 3)),
         _ => {}
     }
@@ -84,16 +85,19 @@ pub fn parse_header_with(b: &[u8], profile: Profile) -> Result<Header, NamError>
     })
 }
 
-pub fn fmt_header(h: &Header, out: &mut String) {
-    out.push_str(spec(h.kind).mnemonic);
+pub fn fmt_header(h: &Header, out: &mut String) -> Result<(), NamError> {
+    // E6: a kind with no definition is an error, never another message's mnemonic.
+    out.push_str(spec(h.kind).ok_or(err(K::Mnemonic, 3, NO_OFFSET))?.mnemonic);
     fmt_msg_id(&h.id, out);
     if let Some(r) = &h.reference {
         fmt_msg_id(r, out);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------- parse
 
+// A7.2: cold struct, size guard waived: per-message codec scratch, not held in quantity
 struct Chunk<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -193,7 +197,7 @@ pub fn parse(b: &[u8]) -> Result<Message, NamError> {
 
 /// The kind named by the three letters after the opening parenthesis, if they name a core
 /// message: what a receiver needs to pick the LRM code of a refused message
-/// ([`NamError::lrm_for`]) even though the message did not parse.
+/// ([`crate::lrm::lrm_for`]) even though the message did not parse.
 pub fn peek_kind(b: &[u8]) -> Option<Kind> {
     b.get(1..4).and_then(kind_of)
 }
@@ -234,13 +238,13 @@ pub fn parse_with(b: &[u8], profile: Profile) -> Result<Message, NamError> {
         return Err(NamError::new(K::Length, 0));
     };
     let header = parse_header_with(first.bytes, profile).map_err(|e| {
-        if e.offset == crate::error::NO_OFFSET {
+        if e.offset == NO_OFFSET {
             e
         } else {
             e.at(e.offset + first.offset)
         }
     })?;
-    let sp = spec_for(header.kind, profile);
+    let sp = spec_for(header.kind, profile).ok_or(err(K::Mnemonic, 3, first.offset))?;
     let mut m = bare(header);
     let body: Vec<&Chunk> = it.collect();
     consume_fields(&mut m, sp, &body, profile)?;
@@ -410,6 +414,7 @@ fn time_check(rule: Req, present: bool, field: u8) -> Result<(), NamError> {
 
 /// What [`parse_tolerant`] had to normalise. All zero means the input was canonical.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: per-message codec scratch, not held in quantity
 pub struct Deviations {
     /// Spaces immediately before a field separator hyphen (the ICD prints `-IG -C172/L`).
     pub space_before_hyphen: u16,
@@ -466,9 +471,9 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, NamError> {
 
 /// [`encode`] under an explicit validation [`Profile`].
 pub fn encode_with(m: &Message, profile: Profile) -> Result<Vec<u8>, NamError> {
-    let sp = spec_for(m.header.kind, profile);
+    let sp = spec_for(m.header.kind, profile).ok_or(err(K::Mnemonic, 3, NO_OFFSET))?;
     let mut s = String::from("(");
-    fmt_header(&m.header, &mut s);
+    fmt_header(&m.header, &mut s)?;
     // Fields the message type does not carry must be empty.
     let carries = |n: u8| sp.fields.iter().any(|r| field_number(r) == n);
     if !carries(7) {

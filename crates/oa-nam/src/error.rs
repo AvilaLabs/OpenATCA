@@ -1,12 +1,11 @@
 //! The one error type of the codec: every refusal names why, which field, where, and the LRM
 //! error code a receiving system would answer with (Rev G Appendix A, Table A-1, and Attachment
-//! 2 Table 2-2). Plain data (A1).
-
-use crate::model::{Kind, Profile};
+//! 2 Table 2-2). Plain data (A1). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
 
 /// Why an input or a value was refused. Each variant maps to the Table A-1 code in
-/// [`ErrorKind::lrm_code`].
+/// [`lrm_code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: error vocabulary, only on the refusal path
 pub enum ErrorKind {
     // --- whole message
     /// Shorter than 17 bytes, longer than 1800, or a frame header disagrees with the length.
@@ -143,45 +142,11 @@ impl NamError {
         self.offset = offset;
         self
     }
-
-    /// The Table A-1 error code and field this refusal is reported with in an LRM
-    /// (`RMK/<code>/<field>/<text>`).
-    pub fn lrm(&self) -> (u8, u8) {
-        self.lrm_for(Profile::default(), None)
-    }
-
-    /// The code and field under `profile`, for a refused message of kind `msg` when known (see
-    /// [`crate::message::peek_kind`]). Table A-1 gives one code per refusal; Attachment 2 Table
-    /// 2-2 differs in three places, applied under [`Profile::EramAttachment2`]:
-    /// * a bad message number is 57, not 4 ("N/A to ERAM/CAATS interface");
-    /// * Field 03 syntax failing in an RTI, RTA, RLA or RTU is 57, including a bad 03(c);
-    /// * a missing time designator in 13 or 16 is 21 (expected time designator not found),
-    ///   in 14 it is 24.
-    pub fn lrm_for(&self, profile: Profile, msg: Option<Kind>) -> (u8, u8) {
-        let (mut code, default_field) = lrm_code(self.kind);
-        let field = if self.field != 0 {
-            self.field
-        } else {
-            default_field
-        };
-        if self.kind == ErrorKind::TimeMissing && matches!(field, 13 | 16) {
-            code = 21;
-        }
-        if profile == Profile::EramAttachment2 {
-            let handoff = matches!(msg, Some(Kind::Rti | Kind::Rta | Kind::Rla | Kind::Rtu));
-            match self.kind {
-                ErrorKind::MessageNumber => code = 57,
-                ErrorKind::Reference if handoff => code = 57,
-                _ => {}
-            }
-        }
-        (code, field)
-    }
 }
 
 impl std::fmt::Display for NamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (code, field) = self.lrm();
+        let (code, field) = crate::lrm::lrm(self);
         write!(f, "{:?} (LRM {code:02}/{field:02}", self.kind)?;
         if self.offset != NO_OFFSET {
             write!(f, ", byte {}", self.offset)?;
@@ -193,7 +158,7 @@ impl std::fmt::Display for NamError {
 impl std::error::Error for NamError {}
 
 /// Table A-1 code and field number for a refusal. Codes 51 and 54 carry the field number of
-/// the field at fault, so their field here is 0 and [`NamError::lrm`] fills it in.
+/// the field at fault, so their field here is 0 and [`crate::lrm::lrm`] fills it in.
 pub const fn lrm_code(kind: ErrorKind) -> (u8, u8) {
     use ErrorKind::*;
     match kind {

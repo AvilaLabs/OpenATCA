@@ -1,9 +1,11 @@
 //! The session layer of NAS-IC-82422100 3.2.2.4 and Figure 3-3 (with NAS-IR-82422100 3.2.2.4
 //! and the NAM ICD Rev G B.1.6 to B.1.8 and B.2.1): the INACTIVE / ACTIVATING / ACTIVE /
 //! DEACTIVATING state machine, message numbering, and the bookkeeping of unanswered messages.
-//! Core (pure): [`step`] is a function `(config, session, event, now) -> (session, actions)`.
+//! Core (pure, B1): [`step`] is a function `(config, session, event, now) -> (session, actions)`.
 //! It reads no clock (time is the `now` argument, B4), does no I/O, allocates nothing, and is
-//! bounded: [`MAX_PENDING`] unanswered messages, [`MAX_ACTIONS`] actions per step (C1, C2).
+//! bounded: [`MAX_PENDING`] unanswered messages, [`MAX_ACTIONS`] actions per step (C1, C2). It
+//! is the only core module of this crate; the codec is an input-format adapter (see lib.rs).
+//! The counting-allocator check of C5 is the `nam_session` route of `validation/oa-alloc-check`.
 //!
 //! The shell turns [`Action`]s into bytes ([`crate::message::encode`], [`crate::frame::frame`])
 //! and sends them, feeds received messages in as [`Event::Received`], and calls [`Event::Tick`]
@@ -115,12 +117,16 @@ pub const fn detection_time_ms(c: &Config) -> Millis {
 
 /// A message of ours waiting for its logical response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Pending {
-    pub kind: Kind,
-    pub number: u16,
     pub deadline: Millis,
+    pub number: u16,
+    pub kind: Kind,
     pub resends_left: u8,
 }
+// Budget: 8 (deadline) + 2 (number) + 1 (kind) + 1 (resends_left) = 12, padded to the u64's
+// alignment: 16. Held 128 at a time and scanned on every tick.
+const _: () = assert!(core::mem::size_of::<Pending>() == 16);
 
 const NO_PENDING: Pending = Pending {
     kind: Kind::Lam,
@@ -130,9 +136,10 @@ const NO_PENDING: Pending = Pending {
 };
 
 /// The whole mutable state of one session with one partner. Plain data (A1); it is copied in
-/// and out of [`step`]. A7.2: one per partner, not held in quantity.
+/// and out of [`step`] on every event, so it is guarded (A7), not claimed cold: the 128-entry
+/// pending table dominates its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// A7.2: cold struct, size guard waived
+#[repr(C)]
 pub struct Session {
     pub state: State,
     /// The number the next message we send takes.
@@ -147,13 +154,23 @@ pub struct Session {
     pub irq_retries: u32,
     /// Messages refused for a wrong sender or receiver (LRM codes 1 and 2).
     pub rejected: u32,
+    /// Received messages discarded, per [`Discard`] reason (E6); read with [`discard_count`].
+    /// Saturating.
+    discards: [u32; DISCARD_REASONS],
+    /// Requests refused, per [`Refusal`] reason (E6); read with [`refusal_count`]. Saturating.
+    refusals: [u32; REFUSAL_REASONS],
     irq_numbers: [u16; IRQ_HISTORY],
     irq_len: u8,
     /// The ASM awaiting its LAM: number and deadline.
     pub asm: Option<(u16, Millis)>,
+    // A3: array of structs by exception: 128 entries, a scan reads deadline, number and kind
+    // together (and a removal moves whole entries), so a split would add indexing, not speed.
     pending: [Pending; MAX_PENDING],
     pending_len: u16,
 }
+// Budget: dominated by the 128 x 16 byte pending table (2048); the rest is the state, counters,
+// timers and the 8-entry IRQ history. Copied in and out of every step.
+const _: () = assert!(core::mem::size_of::<Session>() == 2216);
 
 /// A new session: INACTIVE, the first message number 000.
 pub const fn new_session() -> Session {
@@ -166,6 +183,8 @@ pub const fn new_session() -> Session {
         trs_deadline: None,
         irq_retries: 0,
         rejected: 0,
+        discards: [0; DISCARD_REASONS],
+        refusals: [0; REFUSAL_REASONS],
         irq_numbers: [0; IRQ_HISTORY],
         irq_len: 0,
         asm: None,
@@ -180,6 +199,50 @@ impl Session {
         self.pending
             .get(..usize::from(self.pending_len))
             .unwrap_or(&[])
+    }
+}
+
+/// Number of [`Discard`] reasons (the length of the per-reason counters).
+pub const DISCARD_REASONS: usize = 8;
+/// Number of [`Refusal`] reasons.
+pub const REFUSAL_REASONS: usize = 5;
+
+/// Messages discarded for `reason` since the session was created (saturating, E6).
+pub fn discard_count(s: &Session, reason: Discard) -> u32 {
+    s.discards
+        .get(discard_index(reason))
+        .copied()
+        .unwrap_or(u32::MAX)
+}
+
+/// Send requests refused for `reason` since the session was created (saturating, E6).
+pub fn refusal_count(s: &Session, reason: Refusal) -> u32 {
+    s.refusals
+        .get(refusal_index(reason))
+        .copied()
+        .unwrap_or(u32::MAX)
+}
+
+const fn discard_index(r: Discard) -> usize {
+    match r {
+        Discard::WrongSender => 0,
+        Discard::WrongReceiver => 1,
+        Discard::IgnoredInState => 2,
+        Discard::UnexpectedIrs => 3,
+        Discard::UnmatchedResponse => 4,
+        Discard::MissingReference => 5,
+        Discard::ForeignReference => 6,
+        Discard::WrongUnitLrm => 7,
+    }
+}
+
+const fn refusal_index(r: Refusal) -> usize {
+    match r {
+        Refusal::NotActive => 0,
+        Refusal::ResponseNotAllowed => 1,
+        Refusal::NotAnAtmMessage => 2,
+        Refusal::NotAResponse => 3,
+        Refusal::PendingFull => 4,
     }
 }
 
@@ -204,6 +267,9 @@ pub enum Event {
     /// message; the session numbers it.
     SendResponse { kind: Kind, reference: MsgId },
 }
+
+// Budget: Header (24) plus the tag, the largest variant is Received; passed in on every step.
+const _: () = assert!(core::mem::size_of::<Event>() == 24);
 
 /// Where an inbound message number stands against the last one (B.2.1: implementers should
 /// check for out-of-sequence and duplicate messages).
@@ -352,8 +418,14 @@ pub enum Action {
     },
 }
 
+// Budget: 30 bytes. The largest variants are SendResponse (kind, number, 10-byte reference), Deliver and
+// Response (a 24-byte Header plus a Seq or Kind) and the 2-byte tag; not `repr(C)`, which is not
+// meaningful for a data-carrying enum, so the exact size is the guard. Returned in quantity.
+const _: () = assert!(core::mem::size_of::<Action>() == 30);
+
 /// The actions of one step, in the order to perform them. A fixed-capacity list (C1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Actions {
     items: [Action; MAX_ACTIONS],
     len: u8,
@@ -361,6 +433,9 @@ pub struct Actions {
     /// stays zero, and a non-zero value is never silent (E6).
     pub dropped: u8,
 }
+
+// Budget: MAX_ACTIONS (8) x the action size, plus len and dropped; returned by every step.
+const _: () = assert!(core::mem::size_of::<Actions>() == 242);
 
 impl Actions {
     pub const fn new() -> Actions {
@@ -431,8 +506,10 @@ pub fn answers(req: Kind, resp: Kind) -> bool {
         }
 }
 
+// E8: `next_number` and message numbers are `pub u16`, so a hand-built value can exceed 999.
+// Reduce modulo the modulus first; then every sum below is at most 2 x 1000 and cannot overflow.
 fn take_number(s: &mut Session) -> u16 {
-    let n = s.next_number;
+    let n = s.next_number % NUMBER_MODULUS;
     s.next_number = (n + 1) % NUMBER_MODULUS;
     n
 }
@@ -441,7 +518,7 @@ fn seq_of(last: Option<u16>, n: u16) -> Seq {
     match last {
         None => Seq::First,
         Some(l) => {
-            let d = (n + NUMBER_MODULUS - l) % NUMBER_MODULUS;
+            let d = (n % NUMBER_MODULUS + NUMBER_MODULUS - l % NUMBER_MODULUS) % NUMBER_MODULUS;
             match d {
                 0 => Seq::Duplicate,
                 1 => Seq::InOrder,
@@ -867,7 +944,22 @@ pub fn step(cfg: &Config, s: Session, ev: Event, now: Millis) -> (Session, Actio
             }
         }
     }
+    count_reasons(&mut s, &a);
     (s, a)
+}
+
+/// Counts every discard and refusal the step returned under its reason (E6), saturating.
+fn count_reasons(s: &mut Session, a: &Actions) {
+    for act in a.as_slice() {
+        let slot = match act {
+            Action::Discard { reason } => s.discards.get_mut(discard_index(*reason)),
+            Action::Refuse { reason } => s.refusals.get_mut(refusal_index(*reason)),
+            _ => None,
+        };
+        if let Some(c) = slot {
+            *c = c.saturating_add(1);
+        }
+    }
 }
 
 /// The earliest time a [`Event::Tick`] would do something, or `None` if no timer is running.

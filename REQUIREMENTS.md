@@ -4117,6 +4117,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the POI does not, the POA carries 07 a, b, c, the POJ is a Field 18 reason, metric altitude is
   allowed in Field 32(e), none of the Attachment 2 additions apply, and a POA or POJ expects no
   response. All other messages and fields are as under `Core`.
+- **OA-NAM-032** A message kind with no definition in the schema is an error (`Mnemonic`, code 60),
+  never another message's definition: `spec` and `spec_for` return `None`, and `parse_header`,
+  `fmt_header` and `encode` refuse.
+- **OA-NAM-033** Message-number arithmetic in the session is reduced modulo 1000 before it is
+  used, so no `u16` value in `next_number`, `rx_last_number` or a header number can overflow it.
+- **OA-NAM-034** The session counts every discard and every refused send under its reason
+  (saturating, `discard_count` and `refusal_count`), in addition to returning it as an action.
+- **OA-NAM-035** After `new_session`, `session::step` allocates nothing through activation,
+  message traffic, retries, a full pending table and deactivation (the `nam_session` route of
+  `validation/oa-alloc-check`).
 
 ## Release replay comparison (oa-track canonical output, oa-replay-diff)
 - **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,

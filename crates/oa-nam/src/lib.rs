@@ -3,8 +3,18 @@
 //! NAS-IC-21009205 Revision G (15 December 2022), and the session layer ERAM runs it over,
 //! NAS-IC-82422100 (ERAM / NAM Non-US ACC System ICD, 7 May 2019) with NAS-IR-82422100. It is
 //! the message protocol ERAM speaks with the adjacent Canadian and Mexican (and Cuban,
-//! Dominican, Central American) centres. All of it is core, pure functions of bytes and values
-//! (RULESET B1, B2): no sockets, no clock. The shell supplies bytes and the time.
+//! Dominican, Central American) centres. No sockets, no clock: the shell supplies bytes and
+//! the time.
+//!
+//! # Classification (B1)
+//!
+//! [`session`] is the only core module: a pure function of its inputs that allocates nothing
+//! and holds fixed, named capacities (C1, C2), checked under a counting allocator (C5). Every
+//! other module (the codec: [`field`], [`message`], [`model`], [`schema`], [`frame`], [`lrm`],
+//! [`error`], [`workload`]) is an input-format adapter under the shell and offline rules (D1,
+//! C6, as the other decoders of this repository). It is a pure function of bytes and values,
+//! but it allocates per message (`Vec`, `String`), so it is not real-time core and is not held
+//! to C1 or C3. Its structs are cold under A7.2.
 //!
 //! # Layers
 //!
@@ -23,7 +33,7 @@
 //! # Refusal (E5)
 //!
 //! Input that breaks a rule is refused with a [`NamError`] that carries the Table A-1 code and
-//! field a receiving system would put in its LRM ([`NamError::lrm`]); nothing is repaired. The
+//! field a receiving system would put in its LRM ([`lrm::lrm`]); nothing is repaired. The
 //! only tolerance is [`parse_tolerant`], which drops spaces beside a hyphen (the ICD's own
 //! examples have them) and reports that it did.
 //!
