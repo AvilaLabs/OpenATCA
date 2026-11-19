@@ -1074,10 +1074,12 @@ fn merge_sort_by<T: Copy>(
     data: &mut [T],
     tmp: &mut [T],
     cmp: &mut dyn FnMut(&T, &T) -> std::cmp::Ordering,
-) {
+) -> Result<(), DisplayError> {
     let n = data.len();
     if tmp.len() != n {
-        return;
+        return Err(DisplayError::BadView(
+            "label sort scratch length differs from the candidates",
+        ));
     }
     let mut width = 1usize;
     let mut in_data = true;
@@ -1094,6 +1096,7 @@ fn merge_sort_by<T: Copy>(
     if !in_data {
         data.copy_from_slice(tmp);
     }
+    Ok(())
 }
 
 /// One pass: merges each pair of adjacent runs of `width` from `src` into `dst`.
@@ -1539,11 +1542,12 @@ fn labels(
     let mut tmp = std::mem::take(&mut sc.order_tmp);
     tmp.clear();
     tmp.resize(order.len(), 0);
-    merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
+    let sorted = merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
         key(sc, *a).cmp(&key(sc, *b))
     });
     sc.order = order;
     sc.order_tmp = tmp;
+    sorted?;
     let placed = place_labels(sc);
     st.labels = placed;
     st.labels_dropped = (n as u32 - placed).saturating_add(sc.overflow);
@@ -1954,8 +1958,21 @@ mod work_budget_tests {
         merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
             count += 1;
             (vals[*a as usize], *a).cmp(&(vals[*b as usize], *b))
-        });
+        })
+        .unwrap();
         (order, count)
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn merge_sort_refuses_a_scratch_of_the_wrong_length_and_leaves_the_data() {
+        for tmp_len in [0usize, 3, 5] {
+            let mut data = [3u32, 1, 2, 0];
+            let mut tmp = vec![0u32; tmp_len];
+            let r = merge_sort_by(&mut data, &mut tmp, &mut |a, b| a.cmp(b));
+            assert!(matches!(r, Err(DisplayError::BadView(_))), "{tmp_len}");
+            assert_eq!(data, [3, 1, 2, 0]);
+        }
     }
 
     // REQ: OA-DSP-054

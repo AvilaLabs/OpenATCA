@@ -304,17 +304,26 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                     match reader.push_with_remaining_budget(rest, &mut work) {
                         Ok(took) => {
                             if took == 0 {
-                                if let Verdict::Cancel(error) = judge(
+                                let input_bytes = chunk.len().saturating_sub(*offset);
+                                // A push that took nothing can never be retried: a Defer here
+                                // would loop forever, so it cancels as well.
+                                let error = match judge(
                                     Work::PushStalled,
                                     fresh_work_profile,
                                     reader.buffered_len(),
-                                    chunk.len().saturating_sub(*offset),
+                                    input_bytes,
                                     work_deferrals,
                                 ) {
-                                    terminal_error = Some(error);
-                                    exit = ExitCode::FAILURE;
-                                    break 'service;
-                                }
+                                    Verdict::Cancel(error) => error,
+                                    Verdict::Defer { .. } => stall_message(
+                                        reader.buffered_len(),
+                                        input_bytes,
+                                        work_deferrals,
+                                    ),
+                                };
+                                terminal_error = Some(error);
+                                exit = ExitCode::FAILURE;
+                                break 'service;
                             }
                             *offset += took;
                             let input_bytes = chunk.len().saturating_sub(*offset);
@@ -524,9 +533,7 @@ fn judge(
 ) -> Verdict {
     let (refusal, drain_pending) = match work {
         Work::PushStalled => {
-            return Verdict::Cancel(format!(
-                "frame reader made no progress; live stream canceled with {reader_bytes} reader-buffer bytes and {input_bytes} unpushed input bytes after {deferrals} deferrals"
-            ));
+            return Verdict::Cancel(stall_message(reader_bytes, input_bytes, deferrals));
         }
         Work::PushRefused(r) => (r, false),
         Work::DrainRefused(r) => (r, true),
@@ -541,6 +548,12 @@ fn judge(
             deferrals,
         ))
     }
+}
+
+fn stall_message(reader_bytes: usize, input_bytes: usize, deferrals: u64) -> String {
+    format!(
+        "frame reader made no progress; live stream canceled with {reader_bytes} reader-buffer bytes and {input_bytes} unpushed input bytes after {deferrals} deferrals"
+    )
 }
 
 /// Counts a deferral and, each time the count reaches a power of two of 1024 or more, warns
@@ -786,39 +799,46 @@ mod tests {
 
     // REQ: OA-FEED-186
     #[test]
-    fn refusals_a_fresh_allowance_cannot_satisfy_cancel_with_the_reported_error() {
+    fn the_fresh_allowance_is_the_exact_boundary_between_defer_and_cancel() {
         let f = fresh();
         for kind in [
             FrameWorkKind::ScanPositions,
             FrameWorkKind::CrcBytes,
             FrameWorkKind::CopiedBytes,
             FrameWorkKind::CompactedBytes,
-            FrameWorkKind::CounterOverflow,
         ] {
-            // required = fresh + 1 violates `required <= fresh`: it must not be deferred.
-            let r = refusal(kind, u64::MAX);
-            for work in [Work::PushRefused(r), Work::DrainRefused(r)] {
-                let Verdict::Cancel(text) = judge(work, f, 11, 22, 5) else {
-                    panic!("{kind:?} was deferred");
-                };
-                assert!(text.contains("nonrenewable frame work refusal"), "{text}");
-                assert!(text.contains(&format!("{r:?}")), "{text}");
-                assert!(text.contains("11 reader-buffer bytes"), "{text}");
-                assert!(text.contains("22 unpushed input bytes"), "{text}");
-                assert!(text.contains("after 5 deferrals"), "{text}");
+            let allowance = match kind {
+                FrameWorkKind::ScanPositions => f.scan_positions,
+                FrameWorkKind::CrcBytes => f.crc_bytes,
+                FrameWorkKind::CopiedBytes => f.copied_bytes,
+                _ => f.compacted_bytes,
+            };
+            for (required, defers) in [(allowance, true), (allowance + 1, false)] {
+                let r = refusal(kind, required);
+                for work in [Work::PushRefused(r), Work::DrainRefused(r)] {
+                    match judge(work, f, 11, 22, 5) {
+                        Verdict::Defer { .. } => assert!(defers, "{kind:?} {required}"),
+                        Verdict::Cancel(text) => {
+                            assert!(!defers, "{kind:?} {required}");
+                            assert!(text.contains("nonrenewable frame work refusal"), "{text}");
+                            assert!(text.contains(&format!("{r:?}")), "{text}");
+                            assert!(text.contains("11 reader-buffer bytes"), "{text}");
+                            assert!(text.contains("22 unpushed input bytes"), "{text}");
+                            assert!(text.contains("after 5 deferrals"), "{text}");
+                        }
+                    }
+                }
             }
         }
-        // Counter overflow is permanent even with a tiny requirement.
-        assert!(matches!(
-            judge(
-                Work::DrainRefused(refusal(FrameWorkKind::CounterOverflow, 1)),
-                f,
-                0,
-                0,
-                0
-            ),
-            Verdict::Cancel(_)
-        ));
+        // Counter overflow is permanent whatever it requires.
+        for required in [0, 1, u64::MAX] {
+            for work in [
+                Work::PushRefused(refusal(FrameWorkKind::CounterOverflow, required)),
+                Work::DrainRefused(refusal(FrameWorkKind::CounterOverflow, required)),
+            ] {
+                assert!(matches!(judge(work, f, 0, 0, 0), Verdict::Cancel(_)));
+            }
+        }
     }
 
     // REQ: OA-FEED-186
