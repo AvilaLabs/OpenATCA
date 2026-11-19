@@ -1139,6 +1139,43 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   a window without reports is a plain failure.
 - **OA-DSP-045** Traffic layers draw above the map and below the legend strip's backdrop, so the legend is never covered
   by a target.
+- **OA-DSP-046** The traffic target set cannot hold an inconsistent or invalid target: its columns are private and the
+  only way in is the push, which refuses a target with a position or a history position off the globe, a trail longer
+  than 16, or unknown flag bits (counted, and `TARGETS MALFORMED: N` on the frame, as `TARGETS NOT DRAWN` is for a full
+  set). Nothing is defaulted for a missing column. Every part of a target that cannot be drawn is counted by reason
+  (a track outside [0, 3600), a leader or 95% circle the geodesic or projection could not place, a history dot that does
+  not project, a text that did not fit), an uncertain target with no usable 95% radius shows the tag `R95?`, and the
+  loss total names what was lost. A target carries `CS?` and its hex address when two callsigns were heard for the
+  address at one instant. `Target` has a size guard of 164 bytes.
+- **OA-DSP-047** Tracker rows are stored as plain columns per address and shown without substitution: columns of
+  different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
+  the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
+  address 2^18, rows 2^24) is refused and counted. An altitude beyond `i32` feet is clamped to one above the absent value
+  and counted, an altitude flagged present but not a number is counted and shown absent, a speed beyond the field is the
+  largest it holds, a 95% radius that is not a number or does not fit `f32` is unknown (counted) and a reacquired window
+  that could equal the absent age is refused. Time differences that do not fit an `i64` are older than any window and
+  an overflow in the history lookup is counted. The stored `Row` has a size guard of 32 bytes.
+- **OA-DSP-048** Callsigns are the newest heard at or before the frame's time, never a later one. Two different
+  callsigns for one address at one instant are a conflict, reported as such and the same whatever order the reports
+  came in; the conflict stands until the next report with a callsign. Callsign inputs of different lengths are an
+  error.
+- **OA-DSP-049** `--start` is parsed with integer arithmetic only: Unix seconds (digits, and a point with up to nine
+  more) or `YYYY-MM-DDTHH:MM:SS[.fffffffff]Z` with fields of fixed width, a year from 1970 to 2261 (the last whole year
+  an `i64` of nanoseconds holds), a day the month has (leap years included), no leap second. A time that does not fit
+  is refused with a usage error and never saturated; fractional nanoseconds are kept exactly. Durations and steps use
+  the same integer parser.
+- **OA-DSP-050** `oa-scope-replay` refuses an `--out-dir` that is not empty unless `--overwrite` is given, which deletes
+  only the files the tool writes (`frame-NNNN.ppm` and `hashes.txt`) before the run writes its own.
+- **OA-DSP-051** `oa-scope-replay` ends with a report of what it excluded or lost, each by named reason and with its
+  denominator (clip decode, quality-gate removals by reason, tracker refusals by reason, rows by reason, callsigns,
+  targets), and exits non-zero after writing its output when work was lost (damaged or undecodable clip frames, tracker
+  rows or measurements lost, rows refused by the store, targets refused or parts of targets not drawn) unless
+  `--allow-loss` is given. Targets off the map, rows before the window, ended tracks and values that are shown as
+  unknown are not loss.
+- **OA-DSP-052** A full traffic frame allocates nothing after the tables are built: the rows to targets conversion, the
+  traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
+  chain (map, traffic, stamp, pixels) run under a counting allocator (`validation/oa-display-alloc-check`) with zero
+  allocations, a positive control for each allocation call and a negative control that injects one.
 
 ### Replay and flight state (oa-replay)
 

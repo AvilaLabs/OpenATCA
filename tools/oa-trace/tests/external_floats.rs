@@ -51,12 +51,12 @@ const ALLOW: &[Allow] = &[
         reason: "bit-twiddling of an internal measurement to find its power of two; not an external value",
     },
     Allow {
-        file: "crates/oa-display/src/cli.rs",
+        file: "crates/oa-display/src/shell/cli.rs",
         needle: "text.parse::<f64>()",
         reason: "the crate's checked helper parse_finite for command-line numbers",
     },
     Allow {
-        file: "crates/oa-scope-replay/src/cli.rs",
+        file: "crates/oa-scope-replay/src/shell/cli.rs",
         needle: "text.parse::<f64>()",
         reason: "the crate's checked helper parse_finite for command-line numbers",
     },

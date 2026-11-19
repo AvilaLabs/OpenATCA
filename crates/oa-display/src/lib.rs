@@ -1,11 +1,10 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
-pub mod cli;
-pub mod font;
-pub mod list;
-pub mod palette;
-pub mod ppm;
-pub mod project;
-pub mod raster;
-pub mod scene;
-pub mod traffic;
+//! (Layout: `core` holds the pure modules, `shell` the ones that touch files; the modules are
+//! re-exported here so their paths are `oa_display::list`, `oa_display::traffic` and so on.)
+
+pub mod core;
+pub mod shell;
+
+pub use crate::core::{font, list, palette, project, raster, scene, text, traffic};
+pub use crate::shell::{cli, ppm};

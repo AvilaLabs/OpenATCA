@@ -204,6 +204,7 @@ dependencies = [
  "oa-geo",
  "oa-sha256",
  "oa-track",
+ "oa-truth",
 ]
 
 [[package]]

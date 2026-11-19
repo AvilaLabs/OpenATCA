@@ -12,8 +12,10 @@ use oa_airspace::model::{empty_model, Meta, Model};
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::traffic::{
-    targets_len, targets_new, NO_ALT, NO_REACQ, NO_U16, T_COAST, T_UNCERTAIN,
+    targets_clear, targets_columns, targets_len, targets_new, targets_refused, NO_ALT, NO_REACQ,
+    NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
+use oa_scope_replay::adapt::{callsigns_from_reports, row_columns};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
 use oa_scope_replay::rows::*;
@@ -66,8 +68,8 @@ fn push(
 
 fn store_of(o: &TrackOutput) -> RowStore {
     let mut s = RowStore::default();
-    store_add(&mut s, o, i64::MIN);
-    store_finish(&mut s);
+    store_add(&mut s, &row_columns(o), i64::MIN).unwrap();
+    assert_eq!(store_finish(&mut s), 0);
     s
 }
 
@@ -134,26 +136,36 @@ fn row_flags_altitude_and_radius_map_to_the_target() {
     let st = targets_at(&store, &c, T0 + S, &DEFAULT_CONVERT, &proj(), &mut set);
     assert_eq!((st.added, st.ended, st.off_map), (2, 0, 0));
     // Address order: 7 then 8.
-    assert_eq!(set.addr, vec![7, 8]);
-    assert_eq!((set.gs_dkt[0], set.track_ddeg[0]), (1944, 900));
-    assert_eq!(set.alt_ft[0], 35_000);
-    assert_eq!(set.flags[0], 0);
-    assert_eq!(set.alt_ft[1], NO_ALT, "no altitude flag, no altitude");
-    assert_eq!(set.flags[1], T_COAST | T_UNCERTAIN);
+    assert_eq!(targets_columns(&set).addr, vec![7, 8]);
+    assert_eq!(
+        (
+            targets_columns(&set).gs_dkt[0],
+            targets_columns(&set).track_ddeg[0]
+        ),
+        (1944, 900)
+    );
+    assert_eq!(targets_columns(&set).alt_ft[0], 35_000);
+    assert_eq!(targets_columns(&set).flags[0], 0);
+    assert_eq!(
+        targets_columns(&set).alt_ft[1],
+        NO_ALT,
+        "no altitude flag, no altitude"
+    );
+    assert_eq!(targets_columns(&set).flags[1], T_COAST | T_UNCERTAIN);
     // 95% radius of a covariance of 100 m^2 per axis: sqrt(5.991 * 100).
     assert!(
-        (f64::from(set.r95_m[0]) - 24.48).abs() < 0.05,
+        (f64::from(targets_columns(&set).r95_m[0]) - 24.48).abs() < 0.05,
         "{}",
-        set.r95_m[0]
+        targets_columns(&set).r95_m[0]
     );
-    assert!(set.r95_m[1] > 4000.0);
-    assert_eq!(set.reacq_age_s, vec![NO_REACQ, NO_REACQ]);
+    assert!(targets_columns(&set).r95_m[1] > 4000.0);
+    assert_eq!(targets_columns(&set).reacq_age_s, vec![NO_REACQ, NO_REACQ]);
     // A row with the altitude flag but a NaN altitude shows no altitude either.
     let mut o = output_new(2);
     push(&mut o, T0, 9, ORD, (1.0, 1.0), f32::NAN, COV, O_HAS_ALT);
     let mut set = targets_new(2).unwrap();
     targets_at(&store_of(&o), &c, T0, &DEFAULT_CONVERT, &proj(), &mut set);
-    assert_eq!(set.alt_ft, vec![NO_ALT]);
+    assert_eq!(targets_columns(&set).alt_ft, vec![NO_ALT]);
 }
 
 // REQ: OA-DSP-043
@@ -184,7 +196,7 @@ fn a_frame_uses_only_rows_up_to_its_time_and_drops_ended_tracks() {
         &proj(),
         &mut set,
     );
-    assert_eq!(set.lat_e7, vec![ORD.0 + 2000]);
+    assert_eq!(targets_columns(&set).lat_e7, vec![ORD.0 + 2000]);
     // Before the first row: nothing, and it is not an ended track.
     let mut set = targets_new(4).unwrap();
     let st = targets_at(&store, &c, T0 - S, &DEFAULT_CONVERT, &proj(), &mut set);
@@ -238,19 +250,19 @@ fn the_trail_takes_rows_a_step_apart_and_stops_at_the_start_of_the_track() {
     };
     let mut set = targets_new(2).unwrap();
     targets_at(&store, &c, T0 + 20 * S, &cfg, &proj(), &mut set);
-    assert_eq!(set.trail_len, vec![3]);
+    assert_eq!(targets_columns(&set).trail_len, vec![3]);
     assert_eq!(
-        &set.trail_lon_e7[..3],
+        &targets_columns(&set).trail_lon_e7[..3],
         &[ORD.1 + 15_000, ORD.1 + 10_000, ORD.1 + 5_000]
     );
     // Ten seconds in, two steps back have rows; at six seconds, one.
     let mut set = targets_new(2).unwrap();
     targets_at(&store, &c, T0 + 10 * S, &cfg, &proj(), &mut set);
-    assert_eq!(set.trail_len, vec![2]);
+    assert_eq!(targets_columns(&set).trail_len, vec![2]);
     let mut set = targets_new(2).unwrap();
     targets_at(&store, &c, T0 + 6 * S, &cfg, &proj(), &mut set);
-    assert_eq!(set.trail_len, vec![1]);
-    assert_eq!(set.trail_lon_e7[0], ORD.1 + 1_000);
+    assert_eq!(targets_columns(&set).trail_len, vec![1]);
+    assert_eq!(targets_columns(&set).trail_lon_e7[0], ORD.1 + 1_000);
 }
 
 // REQ: OA-DSP-043
@@ -270,7 +282,7 @@ fn reacquired_age_counts_from_the_flagged_row_inside_the_window() {
         };
         let mut set = targets_new(2).unwrap();
         targets_at(&store, &c, T0 + t * S, &cfg, &proj(), &mut set);
-        set.reacq_age_s[0]
+        targets_columns(&set).reacq_age_s[0]
     };
     assert_eq!(at(9, 10), NO_REACQ, "not yet");
     assert_eq!(at(10, 10), 0);
@@ -297,23 +309,18 @@ fn callsigns_are_the_newest_heard_by_the_time_of_the_frame() {
         row.callsign = calls(cs);
         reports_push(&mut r, &row);
     }
-    let c = callsigns_from_reports(&r);
-    assert_eq!(c.by_addr[&1].len(), 2, "a repeat is not a change");
-    assert_eq!(
-        callsign_at(&c, 1, T0 + 4 * S),
-        [0; 8],
-        "never from the future"
-    );
-    assert_eq!(callsign_at(&c, 1, T0 + 5 * S), calls("AAL1"));
-    assert_eq!(callsign_at(&c, 1, T0 + 19 * S), calls("AAL1"));
-    assert_eq!(callsign_at(&c, 1, T0 + 20 * S), calls("AAL2"));
-    assert_eq!(
-        callsign_at(&c, 2, T0 + 7 * S),
-        [0; 8],
-        "an empty callsign is not heard"
-    );
-    assert_eq!(callsign_at(&c, 2, T0 + 9 * S), calls("DAL9"));
-    assert_eq!(callsign_at(&c, 3, T0), [0; 8]);
+    let (c, st) = callsigns_from_reports(&r).unwrap();
+    assert_eq!(callsign_changes(&c, 1), 2, "a repeat is not a change");
+    assert_eq!((st.reports_in, st.empty, st.conflicts), (5, 1, 0));
+    let at = |addr: u32, t: i64| callsign_at(&c, addr, T0 + t * S);
+    assert_eq!(at(1, 4).callsign, [0; 8], "never from the future");
+    assert_eq!(at(1, 5).callsign, calls("AAL1"));
+    assert_eq!(at(1, 19).callsign, calls("AAL1"));
+    assert_eq!(at(1, 20).callsign, calls("AAL2"));
+    assert_eq!(at(2, 7).callsign, [0; 8], "an empty callsign is not heard");
+    assert_eq!(at(2, 9).callsign, calls("DAL9"));
+    assert_eq!(at(3, 0).callsign, [0; 8]);
+    assert!(!at(1, 20).conflict);
 }
 
 // REQ: OA-DSP-043
@@ -345,10 +352,11 @@ fn off_map_targets_do_not_use_capacity_and_a_full_set_counts_its_refusals() {
     );
     assert_eq!((st.added, st.off_map), (3, 1));
     assert_eq!(
-        set.refused, 1,
+        targets_refused(&set),
+        1,
         "the fourth on-map target was refused and counted"
     );
-    assert_eq!(set.addr, vec![1, 2, 3]);
+    assert_eq!(targets_columns(&set).addr, vec![1, 2, 3]);
 }
 
 fn frame_cfg() -> ReplayConfig {
@@ -568,6 +576,19 @@ fn the_command_writes_one_ppm_a_step_and_a_hashes_file_that_repeats() {
         "{said}"
     );
     assert!(said.contains("rows lost"), "{said}");
+    assert!(
+        said.contains("loss     none"),
+        "a clean run says so: {said}"
+    );
+    for line in [
+        "clip     ",
+        "adsb     ",
+        "rows     ",
+        "calls    ",
+        "targets  ",
+    ] {
+        assert!(said.contains(line), "{line:?} missing from {said}");
+    }
     let h1 = std::fs::read_to_string(o1.join("hashes.txt")).unwrap();
     let lines: Vec<&str> = h1.lines().collect();
     assert_eq!(lines.len(), 4);
@@ -607,7 +628,7 @@ fn the_command_writes_one_ppm_a_step_and_a_hashes_file_that_repeats() {
     // The traffic is really on the picture: with no targets allowed the frame differs.
     let o4 = dir.join("d");
     cli::run(
-        &cli_args(&snap, &oaf, &o4, &["--max-targets", "0"]),
+        &cli_args(&snap, &oaf, &o4, &["--max-targets", "0", "--allow-loss"]),
         &mut Vec::new(),
     )
     .unwrap();
@@ -694,4 +715,411 @@ fn times_parse_as_unix_seconds_or_utc_and_print_back() {
         "2026-11-15T20:00:01.500Z"
     );
     assert_eq!(cli::unix_text(T0 + 1_500_000_000), "1794772801.500");
+}
+
+/// Owned columns for `store_add`: every row at `T0` for address 1 at Chicago, standing still.
+struct Cols {
+    t: Vec<i64>,
+    addr: Vec<u32>,
+    lat: Vec<i32>,
+    lon: Vec<i32>,
+    v: Vec<f32>,
+    cov: Vec<[f32; 3]>,
+    alt: Vec<f32>,
+    flags: Vec<u8>,
+}
+
+fn cols(n: usize) -> Cols {
+    Cols {
+        t: vec![T0; n],
+        addr: vec![1; n],
+        lat: vec![ORD.0; n],
+        lon: vec![ORD.1; n],
+        v: vec![0.0; n],
+        cov: vec![COV; n],
+        alt: vec![0.0; n],
+        flags: vec![0; n],
+    }
+}
+
+fn view(c: &Cols) -> RowColumns<'_> {
+    RowColumns {
+        t_ns: &c.t,
+        addr: &c.addr,
+        lat_e7: &c.lat,
+        lon_e7: &c.lon,
+        vel_east_mps: &c.v,
+        vel_north_mps: &c.v,
+        pos_cov_m2: &c.cov,
+        alt_ft: &c.alt,
+        flags: &c.flags,
+    }
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn columns_of_different_lengths_are_an_error_before_any_row_is_read() {
+    let mut s = RowStore::default();
+    let mut c = cols(2);
+    c.lat.pop();
+    let e = store_add(&mut s, &view(&c), i64::MIN).unwrap_err();
+    assert_eq!(
+        e,
+        RowsError::ColumnLength {
+            column: "lat_e7",
+            got: 1,
+            want: 2
+        }
+    );
+    assert_eq!(store_rows(&s), 0, "nothing was stored");
+    assert!(e.to_string().contains("lat_e7"));
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn every_row_is_counted_by_reason_and_rows_before_the_window_are_not_a_loss() {
+    let mut s = RowStore::default();
+    let mut c = cols(3);
+    c.t = vec![T0 - 10 * S, T0, T0 + S];
+    c.addr = vec![1, 1, 2];
+    let st = store_add(&mut s, &view(&c), T0).unwrap();
+    assert_eq!((st.rows_in, st.before_window, st.kept), (3, 1, 2));
+    assert_eq!(store_loss(&st), 0);
+    assert_eq!((store_rows(&s), store_addresses(&s)), (2, 2));
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn a_value_that_does_not_fit_is_clamped_or_unknown_and_counted_never_the_absent_value() {
+    let mut s = RowStore::default();
+    let mut c = cols(5);
+    c.t = (0..5).map(|k| T0 + k * S).collect();
+    c.alt = vec![3.0e38, -3.0e9, f32::NAN, 35_000.0, 100.0];
+    c.flags = vec![O_HAS_ALT, O_HAS_ALT, O_HAS_ALT, 0, O_HAS_ALT];
+    c.cov[4] = [f32::NAN, 0.0, 1.0];
+    let st = store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!((st.alt_clamped, st.alt_not_finite, st.r95_bad), (2, 1, 1));
+    let mut set = targets_new(2).unwrap();
+    let alts: Vec<i32> =
+        c.t.iter()
+            .map(|&t| {
+                targets_clear(&mut set);
+                targets_at(
+                    &s,
+                    &Callsigns::default(),
+                    t,
+                    &DEFAULT_CONVERT,
+                    &proj(),
+                    &mut set,
+                );
+                targets_columns(&set).alt_ft[0]
+            })
+            .collect();
+    assert_eq!(alts[0], i32::MAX);
+    assert_eq!(
+        alts[1],
+        NO_ALT + 1,
+        "clamped to one above the sentinel, not the sentinel"
+    );
+    assert_eq!(
+        alts[2], NO_ALT,
+        "a flagged altitude that is not a number is counted and absent"
+    );
+    assert_eq!(alts[3], NO_ALT, "no altitude flag, no altitude");
+    assert_eq!(alts[4], 100);
+    // The unknown 95% radius is NaN on the target, which the display marks.
+    assert!(targets_columns(&set).r95_m[0].is_nan());
+    // A speed beyond the field is the largest the field holds, never the absent value.
+    let mut fast = cols(1);
+    fast.addr = vec![2];
+    fast.v = vec![1e9];
+    let st = store_add(&mut s, &view(&fast), i64::MIN).unwrap();
+    assert_eq!(st.speed_clamped, 1);
+    targets_clear(&mut set);
+    targets_at(
+        &s,
+        &Callsigns::default(),
+        T0,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+    );
+    assert!(targets_columns(&set).gs_dkt.contains(&(NO_U16 - 1)));
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn extreme_times_neither_panic_nor_show_a_row_as_current() {
+    let mut s = RowStore::default();
+    let mut old = cols(1);
+    old.t = vec![i64::MIN + 5];
+    old.flags = vec![O_REACQUIRED];
+    store_add(&mut s, &view(&old), i64::MIN).unwrap();
+    let mut set = targets_new(2).unwrap();
+    let st = targets_at(
+        &s,
+        &Callsigns::default(),
+        i64::MAX,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+    );
+    assert_eq!(
+        (st.ended, st.added),
+        (1, 0),
+        "a difference beyond i64 is an ended track"
+    );
+    // A trail step that overflows the arithmetic is counted, not wrapped.
+    let mut now = cols(1);
+    now.addr = vec![2];
+    store_add(&mut s, &view(&now), i64::MIN).unwrap();
+    let cfg = ConvertConfig {
+        trail_step_ns: i64::MAX,
+        ..DEFAULT_CONVERT
+    };
+    let st = targets_at(&s, &Callsigns::default(), T0, &cfg, &proj(), &mut set);
+    assert_eq!((st.added, st.time_overflow), (1, 1));
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn a_reacquired_window_that_could_reach_the_absent_age_is_refused() {
+    let cfg = ConvertConfig {
+        reacq_window_s: u16::MAX,
+        ..DEFAULT_CONVERT
+    };
+    assert!(convert_check(&cfg).is_err());
+    let c = ReplayConfig {
+        convert: cfg,
+        ..frame_cfg()
+    };
+    assert!(matches!(
+        replay_new(model(), &c),
+        Err(oa_scope_replay::frame::ReplayError::Config(_))
+    ));
+    assert!(convert_check(&ConvertConfig {
+        reacq_window_s: 65_534,
+        ..DEFAULT_CONVERT
+    })
+    .is_ok());
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn the_store_refuses_at_its_named_capacities_and_counts_each_refusal() {
+    // One row past the rows-per-address capacity.
+    let mut s = RowStore::default();
+    let mut c = cols(MAX_ROWS_PER_ADDRESS + 1);
+    c.t = (0..c.t.len() as i64).map(|k| T0 + k).collect();
+    let st = store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!(
+        (st.kept, st.address_rows_full),
+        (MAX_ROWS_PER_ADDRESS as u64, 1)
+    );
+    assert_eq!(store_loss(&st), 1);
+    // One address past the address table.
+    let mut s = RowStore::default();
+    let mut c = cols(MAX_STORE_ADDRESSES + 1);
+    c.addr = (0..c.addr.len() as u32).collect();
+    let st = store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!(
+        (st.kept, st.address_table_full),
+        (MAX_STORE_ADDRESSES as u64, 1)
+    );
+    assert_eq!(store_addresses(&s), MAX_STORE_ADDRESSES);
+}
+
+fn call_row(t: i64, addr: u32, cs: &str) -> (i64, u32, [u8; 8]) {
+    (T0 + t * S, addr, calls(cs))
+}
+
+fn build_calls(rows: &[(i64, u32, [u8; 8])]) -> (Callsigns, CallsignStats) {
+    let t: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    let a: Vec<u32> = rows.iter().map(|r| r.1).collect();
+    let c: Vec<[u8; 8]> = rows.iter().map(|r| r.2).collect();
+    callsigns_build(&t, &a, &c).unwrap()
+}
+
+// REQ: OA-DSP-048
+#[test]
+fn two_callsigns_for_one_address_at_one_instant_are_a_conflict_whatever_the_order() {
+    let rows = [
+        call_row(5, 1, "AAL1"),
+        call_row(9, 1, "UAL7"),
+        call_row(9, 1, "DAL3"),
+        call_row(12, 1, "AAL1"),
+    ];
+    let mut rev = rows;
+    rev.reverse();
+    let (a, sa) = build_calls(&rows);
+    let (b, sb) = build_calls(&rev);
+    assert_eq!(a, b, "the result does not depend on the order of the input");
+    assert_eq!((sa.conflicts, sb.conflicts), (1, 1));
+    let at = |t: i64| callsign_at(&a, 1, T0 + t * S);
+    assert_eq!((at(6).callsign, at(6).conflict), (calls("AAL1"), false));
+    assert_eq!((at(9).callsign, at(9).conflict), ([0; 8], true));
+    assert!(
+        at(11).conflict,
+        "a conflict stands until the next report with a callsign"
+    );
+    assert_eq!((at(12).callsign, at(12).conflict), (calls("AAL1"), false));
+    // The same callsign twice at one instant is no conflict.
+    let (c, sc) = build_calls(&[call_row(1, 2, "N1"), call_row(1, 2, "N1")]);
+    assert_eq!(sc.conflicts, 0);
+    assert!(!callsign_at(&c, 2, T0 + S).conflict);
+    // Mismatched columns are an error.
+    assert!(callsigns_build(&[1, 2], &[1], &[[0; 8]]).is_err());
+}
+
+// REQ: OA-DSP-048
+#[test]
+fn a_conflicting_target_carries_the_conflict_flag_and_no_callsign() {
+    let mut o = output_new(4);
+    push(&mut o, T0 + 9 * S, 1, ORD, (0.0, 0.0), 0.0, COV, 0);
+    let (c, _) = build_calls(&[call_row(9, 1, "UAL7"), call_row(9, 1, "DAL3")]);
+    let mut set = targets_new(2).unwrap();
+    targets_at(
+        &store_of(&o),
+        &c,
+        T0 + 9 * S,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+    );
+    let cols = targets_columns(&set);
+    assert_eq!(cols.flags[0] & T_CS_CONFLICT, T_CS_CONFLICT);
+    assert_eq!(cols.callsign[0], [0; 8]);
+}
+
+// REQ: OA-DSP-049
+#[test]
+fn start_times_are_integer_exact_calendar_checked_and_bounded() {
+    // Nanoseconds survive: an f64 could not hold 1.79e18 to the nanosecond.
+    assert_eq!(
+        cli::parse_time("2026-11-15T20:00:00.123456789Z").unwrap(),
+        T0 + 123_456_789
+    );
+    assert_eq!(
+        cli::parse_time("1794772800.123456789").unwrap(),
+        T0 + 123_456_789
+    );
+    assert_eq!(cli::parse_time("1794772800.5").unwrap(), T0 + S / 2);
+    // Leap years and the days of each month.
+    for (ok, text) in [
+        (true, "2024-02-29T00:00:00Z"),
+        (true, "2000-02-29T00:00:00Z"),
+        (false, "2025-02-29T00:00:00Z"),
+        (false, "2100-02-29T00:00:00Z"),
+        (false, "2026-02-30T00:00:00Z"),
+        (false, "2026-04-31T00:00:00Z"),
+        (true, "2026-04-30T23:59:59Z"),
+        (false, "2026-00-10T00:00:00Z"),
+        (false, "2026-11-00T00:00:00Z"),
+    ] {
+        assert_eq!(cli::parse_time(text).is_ok(), ok, "{text}");
+    }
+    // The last whole year an i64 of ns holds is 2261; 2262 and 1969 are refused, not saturated.
+    assert!(cli::parse_time("2261-12-31T23:59:59.999999999Z").is_ok());
+    assert!(cli::parse_time("2262-01-01T00:00:00Z").is_err());
+    assert!(cli::parse_time("1969-12-31T23:59:59Z").is_err());
+    assert_eq!(cli::parse_time("9223372036.854775807").unwrap(), i64::MAX);
+    assert!(cli::parse_time("9223372036.854775808").is_err());
+    assert!(
+        cli::parse_time("253402300799").is_err(),
+        "year 9999 does not fit ns"
+    );
+    // Not integer-exact forms.
+    for text in [
+        "1e9",
+        "inf",
+        "-5",
+        "+5",
+        "1794772800.",
+        ".5",
+        "1794772800.1234567891",
+        "2026-11-15T20:00:00.Z",
+        "2026-11-15T20:00:00.1234567891Z",
+        "2026-1-5T20:00:00Z",
+        "2026-11-15T20:00Z",
+    ] {
+        assert!(cli::parse_time(text).is_err(), "{text}");
+    }
+}
+
+// REQ: OA-DSP-050
+#[test]
+fn a_non_empty_out_dir_is_refused_unless_overwrite_and_overwrite_deletes_only_our_files() {
+    let dir = tmp("replay-cli-outdir");
+    let (snap, oaf) = write_inputs(&dir);
+    let out = dir.join("o");
+    cli::run(&cli_args(&snap, &oaf, &out, &[]), &mut Vec::new()).unwrap();
+    // An earlier, longer run left a frame that this run would not overwrite.
+    std::fs::write(out.join("frame-0007.ppm"), b"old").unwrap();
+    std::fs::write(out.join("notes.txt"), b"keep").unwrap();
+    std::fs::write(out.join("frame-x.ppm"), b"keep").unwrap();
+    let e = cli::run(&cli_args(&snap, &oaf, &out, &[]), &mut Vec::new()).unwrap_err();
+    assert!(matches!(e, cli::CliError::Failed(_)), "{e}");
+    assert!(e.to_string().contains("--overwrite"), "{e}");
+    assert!(
+        out.join("frame-0007.ppm").exists(),
+        "a refused run deletes nothing"
+    );
+    cli::run(
+        &cli_args(&snap, &oaf, &out, &["--overwrite"]),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        !out.join("frame-0007.ppm").exists(),
+        "the stray frame of the earlier run is gone"
+    );
+    assert!(out.join("notes.txt").exists() && out.join("frame-x.ppm").exists());
+    assert!(out.join("frame-0003.ppm").exists() && out.join("hashes.txt").exists());
+    // A directory that does not exist, and an empty one, are fine.
+    cli::run(
+        &cli_args(&snap, &oaf, &dir.join("new"), &[]),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    cli::run(&cli_args(&snap, &oaf, &empty, &[]), &mut Vec::new()).unwrap();
+}
+
+// REQ: OA-DSP-051
+#[test]
+fn a_run_that_loses_work_writes_everything_says_so_and_fails_unless_allowed() {
+    let dir = tmp("replay-cli-loss");
+    let (snap, oaf) = write_inputs(&dir);
+    // Room for one target of three: the display refuses the others, in every frame.
+    let (o1, o2) = (dir.join("a"), dir.join("b"));
+    let mut said = Vec::new();
+    let e = cli::run(
+        &cli_args(&snap, &oaf, &o1, &["--max-targets", "1"]),
+        &mut said,
+    )
+    .unwrap_err();
+    let said = String::from_utf8(said).unwrap();
+    assert!(matches!(e, cli::CliError::Loss(_)), "{e}");
+    assert!(
+        said.contains("loss     targets refused, display full (target-frames): 8"),
+        "{said}"
+    );
+    assert!(
+        o1.join("hashes.txt").exists(),
+        "the output is written before the verdict"
+    );
+    // With --allow-loss the same run succeeds, and the report still says what was lost.
+    let mut said2 = Vec::new();
+    cli::run(
+        &cli_args(&snap, &oaf, &o2, &["--max-targets", "1", "--allow-loss"]),
+        &mut said2,
+    )
+    .unwrap();
+    let said2 = String::from_utf8(said2).unwrap();
+    assert!(said2.contains("allowed by --allow-loss"), "{said2}");
+    assert_eq!(
+        std::fs::read_to_string(o1.join("hashes.txt")).unwrap(),
+        std::fs::read_to_string(o2.join("hashes.txt")).unwrap()
+    );
 }

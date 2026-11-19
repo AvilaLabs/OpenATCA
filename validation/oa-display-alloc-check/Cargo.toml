@@ -1,0 +1,26 @@
+[package]
+name = "oa-display-alloc-check"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[dependencies]
+# F1: validation-only links to the existing local crates; no external or product dependency.
+oa-display = { path = "../../crates/oa-display" }
+oa-scope-replay = { path = "../../crates/oa-scope-replay" }
+oa-airspace = { path = "../../crates/oa-airspace" }
+oa-geo = { path = "../../crates/oa-geo" }
+oa-track = { path = "../../crates/oa-track" }
+
+[profile.release]
+debug = 1
+overflow-checks = true

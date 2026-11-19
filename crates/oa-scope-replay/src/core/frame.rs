@@ -1,8 +1,11 @@
 //! The frame chain (**core**, B1): map and traffic into one display list, then pixels. Every
-//! table is allocated once in [`replay_new`]; a frame allocates nothing in the list or the buffer.
-//! The time text of the frame is an input (the shell formats it).
+//! public function here is core. Every table is allocated once in [`replay_new`]; a frame
+//! ([`replay_build`], [`replay_raster`]) allocates nothing: its text is written into a stack
+//! buffer. The time text of the frame is an input (the shell formats it).
 
-use crate::rows::{targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore};
+use crate::rows::{
+    convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
+};
 use oa_airspace::model::Model;
 use oa_display::list::{list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT};
 use oa_display::palette as pal;
@@ -11,9 +14,10 @@ use oa_display::scene::{
     build_scene, scene_caps, scene_index, scratch_for, view_new, SceneIndex, SceneStats, Scratch,
     View,
 };
+use oa_display::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
 use oa_display::traffic::{
-    build_traffic, caps_add, targets_clear, targets_new, traffic_caps, TargetSet, TrafficStats,
-    TrafficStyle, LAYER_BLOCK,
+    build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
+    traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK,
 };
 use std::fmt;
 
@@ -29,6 +33,8 @@ const STAMP_BYTES: usize = 96;
 pub enum ReplayError {
     Display(DisplayError),
     Render(RenderError),
+    /// The conversion configuration is outside its ranges.
+    Config(RowsError),
 }
 
 impl fmt::Display for ReplayError {
@@ -36,6 +42,7 @@ impl fmt::Display for ReplayError {
         match self {
             ReplayError::Display(e) => write!(f, "display list: {e}"),
             ReplayError::Render(e) => write!(f, "render: {e}"),
+            ReplayError::Config(e) => write!(f, "configuration: {e}"),
         }
     }
 }
@@ -91,10 +98,15 @@ pub struct FrameInfo {
     pub convert: ConvertStats,
     /// Targets the set refused at capacity.
     pub refused: u32,
+    /// Targets the set refused as not valid.
+    pub malformed: u32,
+    /// The frame's own stamp text did not fit its buffer (LOSS: the stamp on the frame is short).
+    pub stamp_clipped: bool,
 }
 
 /// Allocates every table for the model and the configuration.
 pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayError> {
+    convert_check(&cfg.convert).map_err(ReplayError::Config)?;
     let view = view_new(
         cfg.centre_lat_e7,
         cfg.centre_lon_e7,
@@ -152,7 +164,10 @@ pub fn replay_build(
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
     let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
-    let text = format!("{stamp}  TARGETS {}", traffic.drawn);
+    let mut tb = text_new();
+    text_push_str(&mut tb, stamp);
+    text_push_str(&mut tb, "  TARGETS ");
+    text_push_dec(&mut tb, u64::from(traffic.drawn), 0);
     let y = i32::try_from(r.cfg.height)
         .unwrap_or(i32::MAX)
         .saturating_sub(STAMP_FROM_BOTTOM_PX)
@@ -168,13 +183,15 @@ pub fn replay_build(
         ALIGN_RIGHT,
         pal::TEXT,
         LAYER_BLOCK,
-        &text,
+        text_str(&tb),
     )?;
     Ok(FrameInfo {
         scene,
         traffic,
         convert,
-        refused: r.set.refused,
+        refused: targets_refused(&r.set),
+        malformed: targets_malformed(&r.set),
+        stamp_clipped: text_clipped(&tb),
     })
 }
 
