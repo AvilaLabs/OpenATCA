@@ -1,6 +1,6 @@
 # M5 — Safety nets: design
 
-Status: draft for Connor's approval, 2026-11-19. Nothing here is built.
+Status: approved by Connor 2026-11-19. Nothing here is built yet.
 
 ## Goal
 
