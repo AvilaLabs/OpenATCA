@@ -4,8 +4,8 @@
 //! into [`Target`]s (SCOPE design principle 7, RULESET D3).
 //!
 //! Every public item of this module is core. Nothing allocates after [`targets_new`] and
-//! [`crate::list::list_new`] (C1, C5): the data block text is written into a stack
-//! [`crate::text::TextBuf`], and the display list's own tables have their capacity from the start.
+//! [`crate::core::list::list_new`] (C1, C5): the data block text is written into a stack
+//! [`crate::core::text::TextBuf`], and the display list's own tables have their capacity from the start.
 //!
 //! # Symbols
 //!
@@ -13,16 +13,16 @@
 //!
 //! | state                  | drawing                                                          |
 //! |------------------------|------------------------------------------------------------------|
-//! | tracking               | 8 px square outline and a centre dot, [`pal::TARGET`]            |
+//! | tracking               | 8 px square outline and a centre dot, [`palette::TARGET`]            |
 //! | coasting               | the square with an X through it; data block tag `CST`            |
 //! | uncertain              | a 12 px diamond and a centre dot, and the 95% radius drawn as a circle of true scale; tag `UNC` (and `R95?` when the radius is unknown or cannot be drawn) |
 //! | coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`     |
-//! | reacquired             | any of the above plus a 9 px radius circle in [`pal::ALERT`] for [`TrafficStyle::reacquired_s`] seconds after the reacquisition; tag `REACQ` |
+//! | reacquired             | any of the above plus a 9 px radius circle in [`palette::ALERT`] for [`TrafficStyle::reacquired_s`] seconds after the reacquisition; tag `REACQ` |
 //! | callsign conflict      | the hex address in place of the callsign and the tag `CS?` ([`T_CS_CONFLICT`]) |
 //!
 //! Every target also has a velocity leader (a line from the symbol along the ground track, as long
 //! as the target flies in [`TrafficStyle::leader_min`] minutes, absent without a velocity), a
-//! history trail of small [`pal::DIM_TEXT`] dots at the last [`TrafficStyle::trail_n`] positions,
+//! history trail of small [`palette::DIM_TEXT`] dots at the last [`TrafficStyle::trail_n`] positions,
 //! and a data block at a fixed offset: line 1 the callsign (the hex address without one, or with
 //! two callsigns heard for the address at one instant), line 2 the altitude in hundreds of feet
 //! and the ground speed in knots over ten (`---` or `--` when absent), line 3 the state tags
@@ -47,13 +47,13 @@
 //! The set's columns are private, so every target in it went through [`targets_push`] and has
 //! the same number of entries in every column: no default stands in for a missing column.
 
-use crate::list::{
+use crate::core::list::{
     check_limit, push_circle, push_line, push_rect, push_text, DisplayError, DisplayList, ListCaps,
     ALIGN_LEFT, MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
 };
-use crate::palette as pal;
-use crate::project::{project, Projection};
-use crate::text::{
+use crate::core::palette;
+use crate::core::project::{project, Projection};
+use crate::core::text::{
     text_clear, text_clipped, text_is_empty, text_new, text_push_char, text_push_dec,
     text_push_hex, text_push_str, text_str, TextBuf,
 };
@@ -115,7 +115,7 @@ const NOTICE_PITCH: i32 = 14;
 const NOTICES: usize = 2;
 const MAX_BLOCK_LINES: usize = 3;
 /// Text bytes one target can need: line 1 at most 8 (a callsign) or 7 (a hex address), line 2 at
-/// most 7 (`999 655`), line 3 at most 22 (`CST UNC CS? R95? REACQ`); 37 in all, 64 allowed.
+/// most 8 (`999+ 655`), line 3 at most 22 (`CST UNC CS? R95? REACQ`); 37 in all, 64 allowed.
 const BYTES_PER_TARGET: usize = 64;
 const NOTICE_BYTES: usize = 96;
 
@@ -400,8 +400,8 @@ impl Default for TrafficStyle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrafficStats {
     pub drawn: u32,
-    /// Targets whose position is off the map area, under the legend strip or not projectable.
-    /// Not a loss: a scope's edge.
+    /// Targets whose position is placed but off the map area or under the legend strip. Not a
+    /// loss: a scope's edge.
     pub off_screen: u32,
     /// Targets the set refused at capacity. Shown on the frame.
     pub refused: u32,
@@ -427,6 +427,14 @@ pub struct TrafficStats {
     pub circle_failed: u32,
     /// History dots not drawn because the position did not project.
     pub trail_dropped: u32,
+    /// Altitudes beyond what the data block can show, written `999+` or `-99-`: shown, not lost.
+    pub alt_display_clamped: u32,
+    /// LOSS: targets whose position is not on the globe (cannot happen through [`targets_push`]);
+    /// not the scope's edge.
+    pub invalid_position: u32,
+    /// LOSS: targets with a valid position that does not project (a pole, a failed projection);
+    /// not the scope's edge.
+    pub unprojectable: u32,
     /// Texts the frame could not hold (a text buffer clip).
     pub text_clipped: u32,
 }
@@ -438,6 +446,8 @@ pub fn traffic_loss(s: &TrafficStats) -> u64 {
         s.refused,
         s.malformed,
         s.inconsistent,
+        s.invalid_position,
+        s.unprojectable,
         s.leader_bad_track,
         s.leader_failed,
         s.circle_failed,
@@ -506,11 +516,13 @@ pub fn caps_add(a: &ListCaps, b: &ListCaps) -> Result<ListCaps, DisplayError> {
 
 /// Writes the altitude as the data block shows it into `b`: hundreds of feet, rounded to the
 /// nearest (halves away from zero), at least two digits, three for flight levels; `---` when
-/// absent.
-pub fn alt_text(b: &mut TextBuf, alt_ft: i32) {
+/// absent. An altitude beyond what three digits (`999`, 99 950 ft) or `-99` (-9 950 ft) can show
+/// is written with a marker, `999+` or `-99-`, and the call returns true so that it is counted:
+/// a garbage altitude is never a plausible flight level (E6).
+pub fn alt_text(b: &mut TextBuf, alt_ft: i32) -> bool {
     if alt_ft == NO_ALT {
         text_push_str(b, "---");
-        return;
+        return false;
     }
     let a = i64::from(alt_ft);
     let h = if a >= 0 {
@@ -521,9 +533,18 @@ pub fn alt_text(b: &mut TextBuf, alt_ft: i32) {
     if h < 0 {
         text_push_char(b, b'-');
         text_push_dec(b, (-h).min(99) as u64, 2);
+        if h < -99 {
+            text_push_char(b, b'-');
+            return true;
+        }
     } else {
         text_push_dec(b, h.min(999) as u64, 3);
+        if h > 999 {
+            text_push_char(b, b'+');
+            return true;
+        }
     }
+    false
 }
 
 /// Writes the ground speed as the data block shows it into `b`: knots over ten, rounded to the
@@ -603,18 +624,45 @@ fn to_e7(deg: f64) -> Option<i32> {
     (v.is_finite() && v.abs() <= 1.8e9).then_some(v as i32)
 }
 
-/// True when a position projects onto the map area: on the screen and not under the legend
-/// strip. What [`build_traffic`] counts as drawn; a shell uses it to keep targets that are off
-/// the map out of a capacity-limited set.
-pub fn on_map(proj: &Projection, lat_e7: i32, lon_e7: i32) -> bool {
+/// Where a position is on the map (N6): a position that is not on the globe, or does not project,
+/// is its own answer and never the edge of the scope.
+// A7.2: cold struct, size guard waived (one per target, on the stack).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapPos {
+    /// Not a latitude and longitude (outside 90 and 180 degrees).
+    Invalid,
+    /// A valid position the projection cannot place.
+    Unprojectable,
+    /// Placed, but off the screen or under the legend strip.
+    Off,
+    /// On the map area, 1/16 pixel.
+    On((i32, i32)),
+}
+
+/// Classifies a position against the map area (see [`MapPos`]).
+pub fn map_position(proj: &Projection, lat_e7: i32, lon_e7: i32) -> MapPos {
+    if !position_ok(lat_e7, lon_e7) {
+        return MapPos::Invalid;
+    }
     let Some((x, y)) = project(proj, lat_e7, lon_e7) else {
-        return false;
+        return MapPos::Unprojectable;
     };
-    let (x, y) = (i64::from(x), i64::from(y));
-    x >= 0
-        && x <= i64::from(proj.width) * 16
-        && y >= i64::from(proj.top_inset) * 16
-        && y <= i64::from(proj.height) * 16
+    let (xl, yl) = (i64::from(x), i64::from(y));
+    let on = xl >= 0
+        && xl <= i64::from(proj.width) * 16
+        && yl >= i64::from(proj.top_inset) * 16
+        && yl <= i64::from(proj.height) * 16;
+    if on {
+        MapPos::On((x, y))
+    } else {
+        MapPos::Off
+    }
+}
+
+/// True when a position projects onto the map area: on the screen and not under the legend
+/// strip. What [`build_traffic`] counts as drawn.
+pub fn on_map(proj: &Projection, lat_e7: i32, lon_e7: i32) -> bool {
+    matches!(map_position(proj, lat_e7, lon_e7), MapPos::On(_))
 }
 
 /// What became of a target's velocity leader.
@@ -666,7 +714,7 @@ fn square(l: &mut DisplayList, c: (i32, i32), h: i32) -> Result<(), DisplayError
         add(c, -px(h), px(h)),
     );
     for (p, q) in [(a, b), (b, d), (d, e), (e, a)] {
-        push_line(l, p, q, pal::TARGET, LAYER_SYMBOL)?;
+        push_line(l, p, q, palette::TARGET, LAYER_SYMBOL)?;
     }
     Ok(())
 }
@@ -680,7 +728,7 @@ fn diamond(l: &mut DisplayList, c: (i32, i32), h: i32) -> Result<(), DisplayErro
         add(c, -px(h), 0),
     );
     for (p, q) in [(n, e), (e, s), (s, w), (w, n)] {
-        push_line(l, p, q, pal::TARGET, LAYER_SYMBOL)?;
+        push_line(l, p, q, palette::TARGET, LAYER_SYMBOL)?;
     }
     Ok(())
 }
@@ -738,7 +786,7 @@ fn block_line(
         *at_b,
         BLOCK_SIZE,
         ALIGN_LEFT,
-        pal::TARGET,
+        palette::TARGET,
         LAYER_BLOCK,
         text_str(tb),
     )?;
@@ -768,9 +816,20 @@ pub fn build_traffic(
             stats.inconsistent += 1;
             continue;
         };
-        let Some(c) = project(proj, t.lat, t.lon).filter(|_| on_map(proj, t.lat, t.lon)) else {
-            stats.off_screen += 1;
-            continue;
+        let c = match map_position(proj, t.lat, t.lon) {
+            MapPos::On(c) => c,
+            MapPos::Off => {
+                stats.off_screen += 1;
+                continue;
+            }
+            MapPos::Invalid => {
+                stats.invalid_position += 1;
+                continue;
+            }
+            MapPos::Unprojectable => {
+                stats.unprojectable += 1;
+                continue;
+            }
         };
         let coast = t.flags & T_COAST != 0;
         let uncertain = t.flags & T_UNCERTAIN != 0;
@@ -792,7 +851,7 @@ pub fn build_traffic(
                     l,
                     add(p, -px(TRAIL_HALF), -px(TRAIL_HALF)),
                     add(p, px(TRAIL_HALF), px(TRAIL_HALF)),
-                    pal::DIM_TEXT,
+                    palette::DIM_TEXT,
                     LAYER_TRAIL,
                 )?,
                 None => stats.trail_dropped += 1,
@@ -802,7 +861,7 @@ pub fn build_traffic(
         // The velocity leader.
         match leader_end(proj, ell, at, t.track, t.gs, st.leader_min) {
             Leader::End(end) => {
-                push_line(l, c, end, pal::TARGET, LAYER_LEADER)?;
+                push_line(l, c, end, palette::TARGET, LAYER_LEADER)?;
                 stats.with_leader += 1;
             }
             Leader::BadTrack => stats.leader_bad_track += 1,
@@ -823,19 +882,25 @@ pub fn build_traffic(
                 l,
                 add(c, -px(half), -px(half)),
                 add(c, px(half), px(half)),
-                pal::TARGET,
+                palette::TARGET,
                 LAYER_SYMBOL,
             )?;
             push_line(
                 l,
                 add(c, -px(half), px(half)),
                 add(c, px(half), -px(half)),
-                pal::TARGET,
+                palette::TARGET,
                 LAYER_SYMBOL,
             )?;
             stats.coasting += 1;
         } else {
-            push_rect(l, add(c, -8, -8), add(c, 8, 8), pal::TARGET, LAYER_SYMBOL)?;
+            push_rect(
+                l,
+                add(c, -8, -8),
+                add(c, 8, 8),
+                palette::TARGET,
+                LAYER_SYMBOL,
+            )?;
         }
         // An uncertain target without its circle says so on the data block (`R95?`), whether
         // the radius was unknown or the circle could not be placed.
@@ -845,7 +910,7 @@ pub fn build_traffic(
             if t.r95.is_finite() && t.r95 > 0.0 {
                 let r = at.and_then(|a| true_radius16(proj, ell, c, a, f64::from(t.r95)));
                 match r {
-                    Some(r) => push_circle(l, c, r, pal::TARGET, LAYER_SYMBOL)?,
+                    Some(r) => push_circle(l, c, r, palette::TARGET, LAYER_SYMBOL)?,
                     None => {
                         stats.circle_failed += 1;
                         no_circle = true;
@@ -857,7 +922,7 @@ pub fn build_traffic(
             }
         }
         if reacq {
-            push_circle(l, c, px(REACQ_RADIUS), pal::ALERT, LAYER_SYMBOL)?;
+            push_circle(l, c, px(REACQ_RADIUS), palette::ALERT, LAYER_SYMBOL)?;
             stats.reacquired += 1;
         }
 
@@ -867,7 +932,9 @@ pub fn build_traffic(
         ident_text(&mut tb, &t.callsign, t.addr, conflict);
         block_line(l, &mut at_b, &tb, &mut stats)?;
         text_clear(&mut tb);
-        alt_text(&mut tb, t.alt);
+        if alt_text(&mut tb, t.alt) {
+            stats.alt_display_clamped += 1;
+        }
         text_push_char(&mut tb, b' ');
         speed_text(&mut tb, t.gs);
         block_line(l, &mut at_b, &tb, &mut stats)?;
@@ -919,7 +986,7 @@ fn notice(
         at_n,
         NOTICE_SIZE,
         ALIGN_LEFT,
-        pal::ALERT,
+        palette::ALERT,
         LAYER_BLOCK,
         text_str(tb),
     )

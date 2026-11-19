@@ -1146,11 +1146,16 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   (a track outside [0, 3600), a leader or 95% circle the geodesic or projection could not place, a history dot that does
   not project, a text that did not fit), an uncertain target with no usable 95% radius shows the tag `R95?`, and the
   loss total names what was lost. A target carries `CS?` and its hex address when two callsigns were heard for the
-  address at one instant. `Target` has a size guard of 164 bytes.
+  address at one instant. A position is validated before it can count as off the map: a position off the globe
+  and one that does not project are loss, counted apart from off-map, which is not. An altitude beyond what the data
+  block holds is written `999+` or `-99-` and counted, never shown as a flight level. `Target` has a size guard of 164
+  bytes.
 - **OA-DSP-047** Tracker rows are stored as plain columns per address and shown without substitution: columns of
   different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
   the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
-  address 2^18, rows 2^24) is refused and counted. An altitude beyond `i32` feet is clamped to one above the absent value
+  address 2^18, rows 2^24) is refused and counted, except that the total-rows cap is checked from the sizes the input declares
+  before any row is stored and aborts the run with an error before the frame loop. The work of one frame is bounded
+  by those capacities and stated beside them in the source. An altitude beyond `i32` feet is clamped to one above the absent value
   and counted, an altitude flagged present but not a number is counted and shown absent, a speed beyond the field is the
   largest it holds, a 95% radius that is not a number or does not fit `f32` is unknown (counted) and a reacquired window
   that could equal the absent age is refused. Time differences that do not fit an `i64` are older than any window and
@@ -1170,12 +1175,17 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   denominator (clip decode, quality-gate removals by reason, tracker refusals by reason, rows by reason, callsigns,
   targets), and exits non-zero after writing its output when work was lost (damaged or undecodable clip frames, tracker
   rows or measurements lost, rows refused by the store, targets refused or parts of targets not drawn) unless
-  `--allow-loss` is given. Targets off the map, rows before the window, ended tracks and values that are shown as
-  unknown are not loss.
+  `--allow-loss` is given. Loss is counted by reason and is any one of: the damaged, undecodable or unusable input
+  frames, tracker rows or measurements dropped or refused, store refusals and inconsistent columns, targets refused at
+  capacity or malformed, positions off the globe or that do not project, and parts of a target that could not be
+  drawn. There is no limit on a fraction removed by the quality gates: they are reported by reason, as designed, and
+  are not loss. Targets off the map, rows before the window, ended tracks, altitudes marked `999+`, and values shown
+  as unknown are not loss. Exit codes: 0 success, 1 failure, 2 usage error (including a duration that is not a
+  multiple of the step), 3 work was lost.
 - **OA-DSP-052** A full traffic frame allocates nothing after the tables are built: the rows to targets conversion, the
   traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
-  chain (map, traffic, stamp, pixels) run under a counting allocator (`validation/oa-display-alloc-check`) with zero
-  allocations, a positive control for each allocation call and a negative control that injects one.
+  chain (a non-empty airspace map, traffic, stamp, pixels) run under the counting allocator of `validation/oa-alloc-check`
+  (window `display_window`) with zero allocations, a positive control for each allocation call and a negative control that injects one.
 
 ### Replay and flight state (oa-replay)
 

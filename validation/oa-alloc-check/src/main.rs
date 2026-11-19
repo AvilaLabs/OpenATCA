@@ -2,8 +2,10 @@
 //! Standalone allocation validation. Shell (B3): fixtures, execution and reports.
 
 mod allocator;
+mod display_window;
 mod nam_window;
 mod pending_windows;
+use display_window::{display_window, DisplayEvidence};
 use nam_window::{nam_session_window, NamEvidence};
 use pending_windows::{adsb_pending_window, plot_pending_window, PendingWindowEvidence};
 
@@ -138,6 +140,7 @@ struct AllocationEvidence<'a> {
     plot_pending: &'a PendingWindowEvidence,
     fusion: &'a FusionEvidence,
     nam_session: &'a NamEvidence,
+    display_frame: &'a DisplayEvidence,
 }
 
 fn emit_evidence(
@@ -156,9 +159,10 @@ fn emit_evidence(
         plot_pending,
         fusion,
         nam_session,
+        display_frame,
     } = evidence;
     println!(
-        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"fusion_adsb_hard_assoc_registration\",\"fusion_adsb_pending_queue_capacity_recovery\",\"fusion_anonymous_init_and_assoc\",\"fusion_bucket_plot_cap_refusal_recovery\",\"fusion_plot_pending_queue_capacity_recovery\",\"nam_session_activate_traffic_retry_full_deactivate\",\"tracker_clock_hold_stepback_recovery\",\"tracker_default_4096_capacity_recovery\",\"tracker_output_log_overflow_reuse\",\"tracker_update_ooo_refusal_capacity_advance_flush\"],\"route_ids\":[\"fusion_adsb_ingest\",\"fusion_adsb_pending_drain\",\"fusion_adsb_pending_overflow\",\"fusion_adsb_pending_recovery\",\"fusion_advance\",\"fusion_anonymous_initiation\",\"fusion_bucket_capacity_recovery\",\"fusion_bucket_known_match\",\"fusion_bucket_plot_cap\",\"fusion_bucket_unknown_identity\",\"fusion_finish\",\"fusion_local_association\",\"fusion_plot_ingest\",\"fusion_plot_pending_bucket_cap\",\"fusion_plot_pending_overflow\",\"fusion_plot_pending_recovery\",\"fusion_registration\",\"nam_session_abandon\",\"nam_session_activation\",\"nam_session_deactivation\",\"nam_session_deliver\",\"nam_session_discard\",\"nam_session_keepalive\",\"nam_session_pending_full\",\"nam_session_peer_silent\",\"nam_session_resend\",\"nam_session_response\",\"nam_session_timeout\",\"nam_session_traffic\",\"tracker_advance\",\"tracker_capacity_recovery\",\"tracker_capacity_refusal\",\"tracker_clock_backstep\",\"tracker_clock_forward_recovery\",\"tracker_clock_hold\",\"tracker_clock_recovery\",\"tracker_default_capacity\",\"tracker_default_confirmed_capacity\",\"tracker_flush\",\"tracker_history_retention_refusal\",\"tracker_history_wrap_refilter\",\"tracker_history_wrap_replay\",\"tracker_invalid_input_refusal\",\"tracker_log_overflow\",\"tracker_out_of_order_refilter\",\"tracker_output_overflow\",\"tracker_output_payload_stability\",\"tracker_output_reuse\",\"tracker_prediction\",\"tracker_update\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"default_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"occupied\":{},\"confirmed\":{},\"refused\":{},\"recovered\":{},\"history_refiltered\":{},\"history_replayed\":{},\"late_ring\":{}}},\"output_log\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"output_overflow\":{},\"output_rows_after_reuse\":{},\"output_aligned\":{},\"output_preserved_addr\":{},\"output_payload_unchanged\":{},\"log_overflow\":{},\"log_rows\":{},\"log_aligned\":{}}},\"clock_gate\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"held\":{},\"held_applied\":{},\"step_forward\":{},\"late\":{},\"step_back\":{},\"future_dropped\":{},\"recovered\":{}}},\"bucket_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots_offered\":{},\"bucket_plot_overflow\":{},\"known_hard_applied\":{},\"unmatched_hard_no_track\":{},\"recovery_applied\":{}}},\"adsb_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{},\"tracker_applied\":{},\"tracker_duplicates\":{},\"tracker_refused\":{},\"tracker_capacity_refused\":{},\"tracker_late_window\":{},\"tracker_late_ring\":{},\"tracker_jump_rejected\":{},\"tracker_numerical_refused\":{},\"hard_extra\":{},\"hard_mismatch\":{}}},\"plot_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{},\"tracker_applied\":{},\"tracker_duplicates\":{},\"tracker_refused\":{},\"tracker_capacity_refused\":{},\"tracker_late_window\":{},\"tracker_late_ring\":{},\"tracker_jump_rejected\":{},\"tracker_numerical_refused\":{},\"hard_extra\":{},\"hard_mismatch\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}},\"nam_session\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"irq_sent\":{},\"atm_sent\":{},\"resent\":{},\"timed_out\":{},\"delivered\":{},\"responses\":{},\"asm_sent\":{},\"peer_silent\":{},\"lrm_sent\":{},\"trq_sent\":{},\"abandoned\":{},\"peak_pending\":{},\"pending_full\":{},\"discards\":{},\"dropped\":{},\"script_errors\":{},\"final_inactive\":{}}}}}",
+        "{{\"status\":\"{}\",\"injection_requested\":{},\"fixture_ids\":[\"fusion_adsb_hard_assoc_registration\",\"fusion_adsb_pending_queue_capacity_recovery\",\"fusion_anonymous_init_and_assoc\",\"fusion_bucket_plot_cap_refusal_recovery\",\"fusion_plot_pending_queue_capacity_recovery\",\"display_rows_traffic_frame_refusal\",\"nam_session_activate_traffic_retry_full_deactivate\",\"tracker_clock_hold_stepback_recovery\",\"tracker_default_4096_capacity_recovery\",\"tracker_output_log_overflow_reuse\",\"tracker_update_ooo_refusal_capacity_advance_flush\"],\"route_ids\":[\"display_altitude_marker\",\"display_callsign_conflict\",\"display_frame_chain\",\"display_frame_refusal\",\"display_malformed_target\",\"display_map_scene\",\"display_rows_to_targets\",\"display_set_refusal\",\"display_track_end\",\"display_traffic_draw\",\"display_uncertain_radius\",\"fusion_adsb_ingest\",\"fusion_adsb_pending_drain\",\"fusion_adsb_pending_overflow\",\"fusion_adsb_pending_recovery\",\"fusion_advance\",\"fusion_anonymous_initiation\",\"fusion_bucket_capacity_recovery\",\"fusion_bucket_known_match\",\"fusion_bucket_plot_cap\",\"fusion_bucket_unknown_identity\",\"fusion_finish\",\"fusion_local_association\",\"fusion_plot_ingest\",\"fusion_plot_pending_bucket_cap\",\"fusion_plot_pending_overflow\",\"fusion_plot_pending_recovery\",\"fusion_registration\",\"nam_session_abandon\",\"nam_session_activation\",\"nam_session_deactivation\",\"nam_session_deliver\",\"nam_session_discard\",\"nam_session_keepalive\",\"nam_session_pending_full\",\"nam_session_peer_silent\",\"nam_session_resend\",\"nam_session_response\",\"nam_session_timeout\",\"nam_session_traffic\",\"tracker_advance\",\"tracker_capacity_recovery\",\"tracker_capacity_refusal\",\"tracker_clock_backstep\",\"tracker_clock_forward_recovery\",\"tracker_clock_hold\",\"tracker_clock_recovery\",\"tracker_default_capacity\",\"tracker_default_confirmed_capacity\",\"tracker_flush\",\"tracker_history_retention_refusal\",\"tracker_history_wrap_refilter\",\"tracker_history_wrap_replay\",\"tracker_invalid_input_refusal\",\"tracker_log_overflow\",\"tracker_out_of_order_refilter\",\"tracker_output_overflow\",\"tracker_output_payload_stability\",\"tracker_output_reuse\",\"tracker_prediction\",\"tracker_update\"],\"controls\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{}}},\"tracker\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"applied\":{},\"refiltered\":{},\"refused\":{},\"capacity_refused\":{},\"full_capacity\":{},\"recovery_applied\":{},\"rows\":{},\"predictions\":{},\"advance_rows\":{},\"flush_rows\":{},\"ended\":{}}},\"default_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"occupied\":{},\"confirmed\":{},\"refused\":{},\"recovered\":{},\"history_refiltered\":{},\"history_replayed\":{},\"late_ring\":{}}},\"output_log\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"output_overflow\":{},\"output_rows_after_reuse\":{},\"output_aligned\":{},\"output_preserved_addr\":{},\"output_payload_unchanged\":{},\"log_overflow\":{},\"log_rows\":{},\"log_aligned\":{}}},\"clock_gate\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"held\":{},\"held_applied\":{},\"step_forward\":{},\"late\":{},\"step_back\":{},\"future_dropped\":{},\"recovered\":{}}},\"bucket_capacity\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots_offered\":{},\"bucket_plot_overflow\":{},\"known_hard_applied\":{},\"unmatched_hard_no_track\":{},\"recovery_applied\":{}}},\"adsb_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{},\"tracker_applied\":{},\"tracker_duplicates\":{},\"tracker_refused\":{},\"tracker_capacity_refused\":{},\"tracker_late_window\":{},\"tracker_late_ring\":{},\"tracker_jump_rejected\":{},\"tracker_numerical_refused\":{},\"hard_extra\":{},\"hard_mismatch\":{}}},\"plot_pending\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"offered\":{},\"pending_overflow\":{},\"drained\":{},\"bucket_plot_overflow\":{},\"recovery_applied\":{},\"tracker_applied\":{},\"tracker_duplicates\":{},\"tracker_refused\":{},\"tracker_capacity_refused\":{},\"tracker_late_window\":{},\"tracker_late_ring\":{},\"tracker_jump_rejected\":{},\"tracker_numerical_refused\":{},\"hard_extra\":{},\"hard_mismatch\":{}}},\"fusion\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"plots\":{},\"hard_applied\":{},\"anon_applied\":{},\"candidates_confirmed\":{},\"init_visits\":{},\"init_tests\":{},\"refused\":{},\"rows\":{},\"local_rows\":{},\"radar_tracks\":{},\"registration_used\":{},\"registration_history\":{},\"quiet_advance_rows\":{},\"coast_rows\":{}}},\"nam_session\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"irq_sent\":{},\"atm_sent\":{},\"resent\":{},\"timed_out\":{},\"delivered\":{},\"responses\":{},\"asm_sent\":{},\"peer_silent\":{},\"lrm_sent\":{},\"trq_sent\":{},\"abandoned\":{},\"peak_pending\":{},\"pending_full\":{},\"discards\":{},\"dropped\":{},\"script_errors\":{},\"final_inactive\":{}}},\"display_frame\":{{\"overflow\":{},\"alloc\":{},\"zeroed\":{},\"realloc\":{},\"convert_added\":{},\"convert_ended\":{},\"traffic_drawn\":{},\"uncertain\":{},\"cs_conflict\":{},\"r95_unknown\":{},\"refused\":{},\"alt_clamped\":{},\"malformed\":{},\"frame_drawn\":{},\"scene_items\":{},\"refusing_refused\":{}}}}}",
         status,
         injection_requested,
         controls.overflow,
@@ -300,6 +304,22 @@ fn emit_evidence(
         nam_session.dropped,
         nam_session.script_errors,
         nam_session.final_inactive,
+        display_frame.counts.overflow,
+        display_frame.counts.alloc,
+        display_frame.counts.zeroed,
+        display_frame.counts.realloc,
+        display_frame.convert_added,
+        display_frame.convert_ended,
+        display_frame.traffic_drawn,
+        display_frame.uncertain,
+        display_frame.cs_conflict,
+        display_frame.r95_unknown,
+        display_frame.refused,
+        display_frame.alt_clamped,
+        display_frame.malformed,
+        display_frame.frame_drawn,
+        display_frame.scene_items,
+        display_frame.refusing_refused,
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
@@ -987,6 +1007,11 @@ fn main() {
         Err(message) => fail(message),
     };
 
+    let display_frame = match display_window(inject) {
+        Ok(evidence) => evidence,
+        Err(message) => fail(message),
+    };
+
     let evidence = AllocationEvidence {
         controls: control_counts,
         tracker: &tracker,
@@ -998,6 +1023,7 @@ fn main() {
         plot_pending: &plot_pending,
         fusion: &fusion,
         nam_session: &nam_session,
+        display_frame: &display_frame,
     };
 
     if tracker.applied < 4
@@ -1107,6 +1133,22 @@ fn main() {
         emit_evidence("FAIL_M3_COVERAGE", inject, &evidence);
         fail("NAM session fixture did not prove activation, traffic, retries, a full table and deactivation");
     }
+    if display_frame.convert_added < 50
+        || display_frame.convert_ended == 0
+        || display_frame.traffic_drawn < 30
+        || display_frame.uncertain == 0
+        || display_frame.cs_conflict == 0
+        || display_frame.r95_unknown == 0
+        || display_frame.refused == 0
+        || display_frame.alt_clamped == 0
+        || display_frame.malformed != 1
+        || display_frame.frame_drawn < 50
+        || display_frame.scene_items == 0
+        || display_frame.refusing_refused == 0
+    {
+        emit_evidence("FAIL_M3_COVERAGE", inject, &evidence);
+        fail("display fixture did not draw rows, every target state, the map and the refusals");
+    }
     if !tracker.injected
         || !default_capacity.injected
         || !output_log.injected
@@ -1116,6 +1158,7 @@ fn main() {
         || !plot_pending.injected
         || !fusion.injected
         || !nam_session.injected
+        || !display_frame.injected
     {
         emit_evidence("FAIL_M3_INJECTION_NOT_OBSERVED", inject, &evidence);
         std::process::exit(1);
@@ -1129,6 +1172,7 @@ fn main() {
         || !counts_zero(plot_pending.counts)
         || !counts_zero(fusion.counts)
         || !counts_zero(nam_session.counts)
+        || !counts_zero(display_frame.counts)
     {
         emit_evidence("FAIL_M3_ALLOCATION", inject, &evidence);
         std::process::exit(1);

@@ -363,7 +363,15 @@ fn data_block_text_rounds_and_shows_what_is_missing() {
     assert_eq!(alt(-200), "-02");
     assert_eq!(alt(-49), "000");
     assert_eq!(alt(NO_ALT), "---");
-    assert_eq!(alt(i32::MAX), "999");
+    assert_eq!(alt(99_949), "999");
+    assert_eq!(
+        alt(99_950),
+        "999+",
+        "beyond three digits is marked, not shown as a flight level"
+    );
+    assert_eq!(alt(i32::MAX), "999+");
+    assert_eq!(alt(-9_949), "-99");
+    assert_eq!(alt(-9_950), "-99-");
     assert_eq!(speed(4_200), "42");
     assert_eq!(speed(4_249), "42");
     assert_eq!(speed(4_250), "43");
@@ -715,8 +723,32 @@ fn the_longest_data_block_fits_the_per_target_text_budget_and_is_never_clipped()
     let (l, st) = draw(&[t], &DEFAULT_STYLE);
     let tx = texts_of(&l);
     assert_eq!(tx[0].0, "1FFFFFF");
-    assert_eq!(tx[1].0, "-99 655");
+    assert_eq!(tx[1].0, "-99- 655");
     assert_eq!(tx[2].0, "CST UNC CS? R95? REACQ");
     assert!(l.text.len() <= 64, "{} bytes", l.text.len());
     assert_eq!(st.text_clipped, 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn an_altitude_beyond_the_data_block_is_marked_and_counted() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.alt_ft = 250_000;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    assert_eq!(texts_of(&l)[1].0, "999+ --");
+    assert_eq!(st.alt_display_clamped, 1);
+    assert_eq!(traffic_loss(&st), 0, "it is shown, not lost");
+    t.alt_ft = 35_000;
+    assert_eq!(draw(&[t], &DEFAULT_STYLE).1.alt_display_clamped, 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_position_is_checked_before_it_can_count_as_the_edge_of_the_scope() {
+    let p = proj();
+    assert_eq!(map_position(&p, 900_000_001, 0), MapPos::Invalid);
+    assert_eq!(map_position(&p, 0, -1_800_000_001), MapPos::Invalid);
+    assert_eq!(map_position(&p, ORD.0 + 100_000_000, ORD.1), MapPos::Off);
+    assert!(matches!(map_position(&p, ORD.0, ORD.1), MapPos::On(_)));
+    assert!(on_map(&p, ORD.0, ORD.1) && !on_map(&p, 900_000_001, 0));
 }

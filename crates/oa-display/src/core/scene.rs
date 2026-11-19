@@ -67,14 +67,14 @@
 //! Strata other than ARTCC HIGH and LOW (class airspace, special-use airspace, FIR) are in the
 //! model but not drawn in this map.
 
-use crate::font::{text_width_units, CAP_HEIGHT};
-use crate::list::{
+use crate::core::font::{text_width_units, CAP_HEIGHT};
+use crate::core::list::{
     begin_polyline_w, check_limit, list_clear, push_circle, push_line, push_line_w, push_rect,
     push_text, push_vertex, DisplayError, DisplayList, ListCaps, ALIGN_LEFT, ALIGN_RIGHT,
     MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
 };
-use crate::palette as pal;
-use crate::project::{
+use crate::core::palette;
+use crate::core::project::{
     dlon_e7, in_bbox, project, project_rad, projection_new, ring_radius16, view_bbox, Bbox,
     Projection, MAX_RANGE_NM, MIN_RANGE_NM, NM_M,
 };
@@ -91,7 +91,7 @@ pub const LAYER_ARTCC_LOW: u8 = 3;
 pub const LAYER_ARTCC_HIGH: u8 = 4;
 pub const LAYER_SYMBOL: u8 = 5;
 pub const LAYER_TEXT: u8 = 6;
-// Layers 7 to 10 hold the live traffic (`crate::traffic`); the legend strip covers it.
+// Layers 7 to 10 hold the live traffic (`crate::core::traffic`); the legend strip covers it.
 pub const LAYER_LEGEND_BG: u8 = 11;
 pub const LAYER_LEGEND: u8 = 12;
 
@@ -971,7 +971,7 @@ fn rings(
         if f64::from(r) > half_diag16 {
             break;
         }
-        push_circle(l, centre, r, pal::RING, LAYER_RING)?;
+        push_circle(l, centre, r, palette::RING, LAYER_RING)?;
         st.rings += 1;
         // cos 45 degrees as 181 / 256, exact integer arithmetic.
         let d = i64::from(r) * 181 / 256;
@@ -999,7 +999,7 @@ fn rings(
                 (lx as i32, ly as i32),
                 LABEL_SIZE,
                 ALIGN_LEFT,
-                pal::DIM_TEXT,
+                palette::DIM_TEXT,
                 LAYER_TEXT,
                 label_str(&t),
             )?;
@@ -1011,14 +1011,14 @@ fn rings(
         l,
         add(centre, -arm, 0),
         add(centre, arm, 0),
-        pal::DIM_TEXT,
+        palette::DIM_TEXT,
         LAYER_RING,
     )?;
     push_line(
         l,
         add(centre, 0, -arm),
         add(centre, 0, arm),
-        pal::DIM_TEXT,
+        palette::DIM_TEXT,
         LAYER_RING,
     )?;
     Ok(())
@@ -1039,10 +1039,10 @@ fn boundaries(
             continue;
         }
         let (colour, layer, width) = match (*s, own) {
-            (stratum::ARTCC_HIGH, true) => (pal::ARTCC_HIGH, LAYER_ARTCC_HIGH, 2),
-            (stratum::ARTCC_LOW, true) => (pal::ARTCC_LOW, LAYER_ARTCC_LOW, 2),
-            (stratum::ARTCC_HIGH, false) => (pal::NEIGHBOUR_HIGH, LAYER_NEIGHBOUR, 1),
-            (stratum::ARTCC_LOW, false) => (pal::NEIGHBOUR_LOW, LAYER_NEIGHBOUR, 1),
+            (stratum::ARTCC_HIGH, true) => (palette::ARTCC_HIGH, LAYER_ARTCC_HIGH, 2),
+            (stratum::ARTCC_LOW, true) => (palette::ARTCC_LOW, LAYER_ARTCC_LOW, 2),
+            (stratum::ARTCC_HIGH, false) => (palette::NEIGHBOUR_HIGH, LAYER_NEIGHBOUR, 1),
+            (stratum::ARTCC_LOW, false) => (palette::NEIGHBOUR_LOW, LAYER_NEIGHBOUR, 1),
             _ => continue,
         };
         let start = span.start.row();
@@ -1135,7 +1135,7 @@ fn airways(
         let mut prev = e.pa;
         for i in 1..=e.pieces {
             if let Some(cur) = edge_point(p, &e, i) {
-                push_line(l, prev, cur, pal::AIRWAY, LAYER_AIRWAY)?;
+                push_line(l, prev, cur, palette::AIRWAY, LAYER_AIRWAY)?;
                 prev = cur;
             }
         }
@@ -1196,9 +1196,9 @@ fn points(
                 let top = add(c, 0, -SYM);
                 let bl = add(c, -SYM, SYM * 3 / 4);
                 let br = add(c, SYM, SYM * 3 / 4);
-                push_line(l, top, bl, pal::FIX, LAYER_SYMBOL)?;
-                push_line(l, bl, br, pal::FIX, LAYER_SYMBOL)?;
-                push_line(l, br, top, pal::FIX, LAYER_SYMBOL)?;
+                push_line(l, top, bl, palette::FIX, LAYER_SYMBOL)?;
+                push_line(l, bl, br, palette::FIX, LAYER_SYMBOL)?;
+                push_line(l, br, top, palette::FIX, LAYER_SYMBOL)?;
                 st.fixes += 1;
                 (4, SYM + 4 * 16)
             }
@@ -1207,16 +1207,28 @@ fn points(
                 let top = add(c, 0, -h);
                 let bl = add(c, -h, h * 3 / 4);
                 let br = add(c, h, h * 3 / 4);
-                push_line(l, top, bl, pal::FIX, LAYER_SYMBOL)?;
-                push_line(l, bl, br, pal::FIX, LAYER_SYMBOL)?;
-                push_line(l, br, top, pal::FIX, LAYER_SYMBOL)?;
+                push_line(l, top, bl, palette::FIX, LAYER_SYMBOL)?;
+                push_line(l, bl, br, palette::FIX, LAYER_SYMBOL)?;
+                push_line(l, br, top, palette::FIX, LAYER_SYMBOL)?;
                 st.terminal_waypoints += 1;
                 (5, h + 4 * 16)
             }
             point_kind::THRESHOLD => {
                 let h = SYM / 2;
-                push_line(l, add(c, -h, 0), add(c, h, 0), pal::DIM_TEXT, LAYER_SYMBOL)?;
-                push_line(l, add(c, 0, -h), add(c, 0, h), pal::DIM_TEXT, LAYER_SYMBOL)?;
+                push_line(
+                    l,
+                    add(c, -h, 0),
+                    add(c, h, 0),
+                    palette::DIM_TEXT,
+                    LAYER_SYMBOL,
+                )?;
+                push_line(
+                    l,
+                    add(c, 0, -h),
+                    add(c, 0, h),
+                    palette::DIM_TEXT,
+                    LAYER_SYMBOL,
+                )?;
                 st.runway_symbols += 1;
                 (0, 0)
             }
@@ -1224,20 +1236,20 @@ fn points(
                 let h = SYM * 3 / 4;
                 let (n, e, s_, w) = (add(c, 0, -h), add(c, h, 0), add(c, 0, h), add(c, -h, 0));
                 for (a, b) in [(n, e), (e, s_), (s_, w), (w, n)] {
-                    push_line(l, a, b, pal::DIM_TEXT, LAYER_SYMBOL)?;
+                    push_line(l, a, b, palette::DIM_TEXT, LAYER_SYMBOL)?;
                 }
                 st.runway_symbols += 1;
                 (0, 0)
             }
             point_kind::AIRPORT => {
-                push_circle(l, c, SYM * 5 / 4, pal::AIRPORT, LAYER_SYMBOL)?;
-                push_line(l, c, c, pal::AIRPORT, LAYER_SYMBOL)?;
+                push_circle(l, c, SYM * 5 / 4, palette::AIRPORT, LAYER_SYMBOL)?;
+                push_line(l, c, c, palette::AIRPORT, LAYER_SYMBOL)?;
                 st.airports += 1;
                 (if ifr { 2 } else { 3 }, SYM * 5 / 4 + 4 * 16)
             }
             kind => {
-                push_circle(l, c, SYM, pal::FIX, LAYER_SYMBOL)?;
-                push_line(l, c, c, pal::FIX, LAYER_SYMBOL)?;
+                push_circle(l, c, SYM, palette::FIX, LAYER_SYMBOL)?;
+                push_line(l, c, c, palette::FIX, LAYER_SYMBOL)?;
                 st.navaids += 1;
                 let vor = matches!(
                     kind,
@@ -1330,9 +1342,9 @@ fn labels(
             .get(row as usize)
             .map_or("", |i| str_or_empty(&m.strings, *i));
         let colour = if prio == 2 || prio == 3 {
-            pal::AIRPORT
+            palette::AIRPORT
         } else {
-            pal::TEXT
+            palette::TEXT
         };
         push_text(l, (ax, ay), LABEL_SIZE, align, colour, LAYER_TEXT, name)?;
     }
@@ -1421,7 +1433,7 @@ fn legend_text(
             l,
             (bx, at.1),
             (bx, at.1.saturating_add(i32::from(LEGEND_SIZE) * 16)),
-            pal::TEXT,
+            palette::TEXT,
             LAYER_LEGEND,
             2,
         )?;
@@ -1446,14 +1458,14 @@ fn legend(
         l,
         (0, 0),
         (width16, strip16),
-        pal::BACKGROUND,
+        palette::BACKGROUND,
         LAYER_LEGEND_BG,
     )?;
     push_line(
         l,
         (0, strip16 - 8),
         (width16, strip16 - 8),
-        pal::RING,
+        palette::RING,
         LAYER_LEGEND,
     )?;
 
@@ -1467,16 +1479,16 @@ fn legend(
     let _ = write!(t, " NM  RINGS ");
     put_nm(&mut t, ring_step_nm(p));
     let _ = write!(t, " NM");
-    legend_text(l, st, width16, (x, y), pal::TEXT, label_str(&t))?;
+    legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&t))?;
     y += pitch;
 
     // The boundary key: own facility two pixels, neighbours dimmer.
     let mut kx = x;
     for (name, colour, own) in [
-        ("HIGH", pal::ARTCC_HIGH, true),
-        ("LOW", pal::ARTCC_LOW, true),
-        ("NEIGHBOUR HIGH", pal::NEIGHBOUR_HIGH, false),
-        ("NEIGHBOUR LOW", pal::NEIGHBOUR_LOW, false),
+        ("HIGH", palette::ARTCC_HIGH, true),
+        ("LOW", palette::ARTCC_LOW, true),
+        ("NEIGHBOUR HIGH", palette::NEIGHBOUR_HIGH, false),
+        ("NEIGHBOUR LOW", palette::NEIGHBOUR_LOW, false),
     ] {
         let mut k = label();
         if own {
@@ -1492,14 +1504,14 @@ fn legend(
     y += pitch;
 
     let h = hidden_line(v);
-    legend_text(l, st, width16, (x, y), pal::TEXT, label_str(&h))?;
+    legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&h))?;
     y += pitch;
 
     let mut nx = x;
     if st.legs_at_border > 0 {
         let mut t = label();
         let _ = write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border);
-        legend_text(l, st, width16, (nx, y), pal::TEXT, label_str(&t))?;
+        legend_text(l, st, width16, (nx, y), palette::TEXT, label_str(&t))?;
         nx = nx
             .saturating_add(legend_width16(t.len))
             .saturating_add(legend_width16(3));
@@ -1508,7 +1520,7 @@ fn legend(
     if st.labels + st.labels_dropped > 0 {
         let mut t = label();
         let _ = write!(t, "LABELS DROPPED: {}", st.labels_dropped);
-        legend_text(l, st, width16, (nx, y), pal::TEXT, label_str(&t))?;
+        legend_text(l, st, width16, (nx, y), palette::TEXT, label_str(&t))?;
     }
     y += pitch;
 
@@ -1520,7 +1532,7 @@ fn legend(
             "NOT PLACED {} PTS {} LEGS {} EDGES",
             st.points_unplaced, st.legs_unplaced, st.edges_unplaced
         );
-        legend_text(l, st, width16, (x, y), pal::ALERT, label_str(&t))?;
+        legend_text(l, st, width16, (x, y), palette::ALERT, label_str(&t))?;
     }
     Ok(())
 }

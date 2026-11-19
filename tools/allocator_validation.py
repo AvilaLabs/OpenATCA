@@ -11,8 +11,12 @@ import tomllib
 
 
 HARNESS = Path("validation/oa-alloc-check")
-HARNESS_DEPS = {"oa-track": "../../crates/oa-track", "oa-nam": "../../crates/oa-nam"}
-HELPER_MODULES = ("pending_windows.rs", "nam_window.rs")
+HARNESS_DEPS = {
+    "oa-track": "../../crates/oa-track", "oa-nam": "../../crates/oa-nam",
+    "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
+    "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
+}
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -24,6 +28,7 @@ FIXTURE_IDS = {
     "fusion_adsb_hard_assoc_registration",
     "fusion_anonymous_init_and_assoc",
     "nam_session_activate_traffic_retry_full_deactivate",
+    "display_rows_traffic_frame_refusal",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -92,6 +97,17 @@ ROUTE_LEDGER = {
     "nam_session_discard": ("crates/oa-nam/src/session.rs", "nam_session.discards"),
     "nam_session_abandon": ("crates/oa-nam/src/session.rs", "nam_session.abandoned"),
     "nam_session_deactivation": ("crates/oa-nam/src/session.rs", "nam_session.trq_sent"),
+    "display_rows_to_targets": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_added"),
+    "display_track_end": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_ended"),
+    "display_traffic_draw": ("crates/oa-display/src/core/traffic.rs", "display_frame.traffic_drawn"),
+    "display_uncertain_radius": ("crates/oa-display/src/core/traffic.rs", "display_frame.r95_unknown"),
+    "display_callsign_conflict": ("crates/oa-display/src/core/traffic.rs", "display_frame.cs_conflict"),
+    "display_altitude_marker": ("crates/oa-display/src/core/traffic.rs", "display_frame.alt_clamped"),
+    "display_set_refusal": ("crates/oa-display/src/core/traffic.rs", "display_frame.refused"),
+    "display_malformed_target": ("crates/oa-display/src/core/traffic.rs", "display_frame.malformed"),
+    "display_frame_chain": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.frame_drawn"),
+    "display_map_scene": ("crates/oa-display/src/core/scene.rs", "display_frame.scene_items"),
+    "display_frame_refusal": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.refusing_refused"),
 }
 
 ROUTE_SYMBOLS = {
@@ -138,6 +154,12 @@ ROUTE_SYMBOLS = {
     "nam_session_discard": "step",
     "nam_session_abandon": "step",
     "nam_session_deactivation": "step",
+    "display_rows_to_targets": "targets_at", "display_track_end": "targets_at",
+    "display_traffic_draw": "build_traffic", "display_uncertain_radius": "build_traffic",
+    "display_callsign_conflict": "build_traffic", "display_altitude_marker": "alt_text",
+    "display_set_refusal": "targets_push", "display_malformed_target": "targets_push",
+    "display_frame_chain": "replay_build", "display_map_scene": "build_scene",
+    "display_frame_refusal": "replay_build",
 }
 
 
@@ -450,7 +472,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         errors.append("allocator harness must deny the four strict runtime lints")
     deps = harness.get("dependencies", {})
     if not isinstance(deps, dict) or set(deps) != set(HARNESS_DEPS):
-        errors.append("allocator harness may declare only the oa-track and oa-nam dependencies")
+        errors.append("allocator harness may declare only its declared local crate dependencies")
     else:
         for name, crate_path in HARNESS_DEPS.items():
             if (not isinstance(deps[name], dict) or deps[name].get("path") != crate_path
@@ -472,7 +494,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
     elif root_sources == ["allocator.rs", "main.rs"] and not src_dir.exists():
         base = harness_dir
     else:
-        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs and nam_window.rs")
+        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs, nam_window.rs and display_window.rs")
         base = src_dir if src_dir.is_dir() else harness_dir
     try:
         if base.is_dir() and any(p.is_symlink() or p.is_dir() for p in base.iterdir()):
@@ -547,7 +569,8 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         return ["result must be a JSON object"]
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
-                     "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session"}
+                     "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
+                     "display_frame"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -648,6 +671,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                         "delivered": 1, "responses": 1, "asm_sent": 1, "peer_silent": 1,
                         "lrm_sent": 1, "trq_sent": 1, "abandoned": 128, "peak_pending": 128,
                         "pending_full": 1, "discards": 1, "dropped": 0, "script_errors": 0},
+        "display_frame": {"convert_added": 1, "convert_ended": 1, "traffic_drawn": 30,
+                          "uncertain": 1, "cs_conflict": 1, "r95_unknown": 1, "refused": 1,
+                          "alt_clamped": 1, "malformed": 1, "frame_drawn": 50,
+                          "scene_items": 1, "refusing_refused": 1},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
                          "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1,
                          "tracker_applied": 1, "tracker_duplicates": 1_048_575,
@@ -694,6 +721,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},
+        "display_frame": {"traffic_drawn": 64, "refused": 5, "malformed": 1},
         "nam_session": {"peak_pending": 128, "pending_full": 1, "abandoned": 128,
                         "peer_silent": 1, "lrm_sent": 1, "dropped": 0, "script_errors": 0},
         "clock_gate": {"held": 2, "held_applied": 2, "step_forward": 1, "late": 5,

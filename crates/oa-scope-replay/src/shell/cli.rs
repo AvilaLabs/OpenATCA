@@ -31,10 +31,14 @@
 //! * Any loss makes the run exit non-zero, after the pictures and the report are written, unless
 //!   `--allow-loss` is given (the report still says what was lost).
 //!
+//! Exit codes (see the binary): 0 success, 1 a failure (a file, a clip, the tracker), 2 a usage
+//! error, 3 work was lost (the output is written). A `--duration-s` that is not a whole number of
+//! `--step-s` steps is a usage error.
+//!
 //! `--out-dir` must be empty or new unless `--overwrite` is given, which deletes only the files
 //! this tool writes there: `frame-NNNN.ppm` and `hashes.txt`.
 
-use crate::adapt::{callsigns_from_reports, row_columns};
+use crate::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use crate::frame::{replay_build, replay_new, replay_raster, ReplayConfig, ReplayError};
 use crate::rows::{
     convert_check, store_add, store_addresses, store_finish, store_loss, store_rows,
@@ -55,11 +59,29 @@ use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_new, tracker_stats,
     tracker_update, DEFAULT_CONFIG, REFUSE_KINDS, REFUSE_NAMES,
 };
-use oa_truth::REMOVE_NAMES;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Why a report was removed by the ADS-B quality gates, indexing `AdsbStats::removed`. These are
+/// the names of `oa_truth::REMOVE_NAMES`, kept here so that this crate does not link `oa-truth`;
+/// the test `removal_names_match_oa_truth` holds them equal to it.
+pub const REMOVE_NAMES: [&str; 13] = [
+    "invalid",
+    "stale_flag",
+    "source_not_adsb",
+    "no_quality_in_age",
+    "nacp",
+    "nic",
+    "sil",
+    "version",
+    "duplicate_time",
+    "jump",
+    "short_leg",
+    "oversized_same_time_group",
+    "ambiguous_same_time_altitude",
+];
 
 /// Most frames one run writes.
 pub const MAX_FRAMES: u64 = 100_000;
@@ -372,6 +394,11 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
             MIN_STEP_NS as f64 / 1e9
         )));
     }
+    if duration_ns % step_ns != 0 {
+        return Err(CliError::Usage(
+            "--duration-s is not a whole number of --step-s steps".into(),
+        ));
+    }
     let frames = u64::try_from(duration_ns / step_ns).unwrap_or(0);
     if frames == 0 || frames > MAX_FRAMES {
         return Err(CliError::Usage(format!(
@@ -578,8 +605,9 @@ pub fn track_window(
     let mut t = tracker_new(&cfg).map_err(|e| failed("tracker", e))?;
     let mut scratch = output_new(cfg.out_capacity);
     let mut store = RowStore::default();
+    let mut colbuf = ColumnBuf::default();
     let mut keep = |store: &mut RowStore, out: &oa_track::TrackOutput| -> Result<(), CliError> {
-        let st = store_add(store, &row_columns(out), keep_from_ns)
+        let st = store_add(store, &row_columns(out, &mut colbuf), keep_from_ns)
             .map_err(|e| failed("tracker rows", e))?;
         store_stats_add(&mut sum.store, &st);
         Ok(())
@@ -625,8 +653,12 @@ fn is_ours(name: &str) -> bool {
 /// Refuses an output directory that holds anything, unless `overwrite`. A directory that does not
 /// exist is fine.
 fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
-    let Ok(mut entries) = std::fs::read_dir(dir) else {
-        return Ok(());
+    let mut entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // A directory that does not exist yet is fine; any other failure (permission, not a
+        // directory) is a failure now, not later.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(&format!("read {}", dir.display()), e)),
     };
     if !overwrite && entries.next().is_some() {
         return Err(CliError::Failed(format!(
@@ -802,7 +834,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             .saturating_sub(u64::from(tf.malformed));
         tot.convert += u64::from(cv.reacq_age_unrepresentable)
             + u64::from(cv.time_overflow)
-            + u64::from(cv.columns_inconsistent);
+            + u64::from(cv.columns_inconsistent)
+            + u64::from(cv.invalid_position)
+            + u64::from(cv.unprojectable);
         tot.stamp_clipped += u64::from(info.stamp_clipped);
     }
     let hashes_path = a.out_dir.join("hashes.txt");

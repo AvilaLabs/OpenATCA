@@ -103,7 +103,7 @@ the last 5 positions) and a data block 14 px right and 30 px above the symbol: c
 without one), altitude in hundreds of feet and ground speed in knots over ten (`---` and `--` when
 absent), then the tags (`CST UNC CS? R95? REACQ`). Data blocks do not yet avoid one another (LS-401).
 A frame allocates nothing: the data block text is written into a stack buffer, and the list's tables
-are sized once (checked by `validation/oa-display-alloc-check`).
+are sized once (checked by `validation/oa-alloc-check`).
 
 A `TargetSet` has a fixed capacity and private columns: the only way in is `targets_push`. A push past
 the capacity is refused, counted and returns `TrafficError::Full`; a target that is not valid (a
@@ -124,8 +124,15 @@ oa-scope-replay --snapshot <file> --adsb <clip.oaf> --centre <lat,lon> --range-n
 
 It writes `frame-NNNN.ppm` per step and `hashes.txt` (`frame_index time sha256`) into an empty or new
 directory (`--overwrite` deletes the files of an earlier run first). It ends with a report of
-everything it excluded or lost, by reason, and exits non-zero if work was lost unless `--allow-loss`
-is given. The tracker is linked in that crate and not here, so the display stays free of it.
+everything it excluded or lost, by reason, and ends with exit code 3 if work was lost unless
+`--allow-loss` is given (0 success, 1 failure, 2 usage error, a duration that is not a whole number
+of steps among them). The tracker is linked in that crate and not here, so the display stays free of it.
+
+Peak memory of a run, from the named capacities: the row store is at most 2^24 rows of 32 bytes
+(512 MiB); the callsign changes at most 2^25 entries of about 17 bytes (about 544 MiB, far less in
+practice); one tracker output table, the display tables and the frame buffer (`width * height * 4`,
+8 MiB at 1920x1080) are small beside them. Together at most about 1.1 GiB, reached only by a
+window larger than any clip this tool is sized for; a typical hour is a few hundred MiB.
 
 ## Display list
 

@@ -15,7 +15,7 @@ use oa_display::traffic::{
     targets_clear, targets_columns, targets_len, targets_new, targets_refused, NO_ALT, NO_REACQ,
     NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
-use oa_scope_replay::adapt::{callsigns_from_reports, row_columns};
+use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
 use oa_scope_replay::rows::*;
@@ -68,7 +68,7 @@ fn push(
 
 fn store_of(o: &TrackOutput) -> RowStore {
     let mut s = RowStore::default();
-    store_add(&mut s, &row_columns(o), i64::MIN).unwrap();
+    store_add(&mut s, &row_columns(o, &mut ColumnBuf::default()), i64::MIN).unwrap();
     assert_eq!(store_finish(&mut s), 0);
     s
 }
@@ -724,7 +724,7 @@ struct Cols {
     lat: Vec<i32>,
     lon: Vec<i32>,
     v: Vec<f32>,
-    cov: Vec<[f32; 3]>,
+    r95: Vec<f64>,
     alt: Vec<f32>,
     flags: Vec<u8>,
 }
@@ -736,7 +736,7 @@ fn cols(n: usize) -> Cols {
         lat: vec![ORD.0; n],
         lon: vec![ORD.1; n],
         v: vec![0.0; n],
-        cov: vec![COV; n],
+        r95: vec![oa_track::r95_m_of(&COV); n],
         alt: vec![0.0; n],
         flags: vec![0; n],
     }
@@ -750,7 +750,7 @@ fn view(c: &Cols) -> RowColumns<'_> {
         lon_e7: &c.lon,
         vel_east_mps: &c.v,
         vel_north_mps: &c.v,
-        pos_cov_m2: &c.cov,
+        r95_m: &c.r95,
         alt_ft: &c.alt,
         flags: &c.flags,
     }
@@ -795,8 +795,8 @@ fn a_value_that_does_not_fit_is_clamped_or_unknown_and_counted_never_the_absent_
     let mut c = cols(5);
     c.t = (0..5).map(|k| T0 + k * S).collect();
     c.alt = vec![3.0e38, -3.0e9, f32::NAN, 35_000.0, 100.0];
-    c.flags = vec![O_HAS_ALT, O_HAS_ALT, O_HAS_ALT, 0, O_HAS_ALT];
-    c.cov[4] = [f32::NAN, 0.0, 1.0];
+    c.flags = vec![RF_HAS_ALT, RF_HAS_ALT, RF_HAS_ALT, 0, RF_HAS_ALT];
+    c.r95[4] = f64::NAN;
     let st = store_add(&mut s, &view(&c), i64::MIN).unwrap();
     assert_eq!((st.alt_clamped, st.alt_not_finite, st.r95_bad), (2, 1, 1));
     let mut set = targets_new(2).unwrap();
@@ -853,7 +853,7 @@ fn extreme_times_neither_panic_nor_show_a_row_as_current() {
     let mut s = RowStore::default();
     let mut old = cols(1);
     old.t = vec![i64::MIN + 5];
-    old.flags = vec![O_REACQUIRED];
+    old.flags = vec![RF_REACQUIRED];
     store_add(&mut s, &view(&old), i64::MIN).unwrap();
     let mut set = targets_new(2).unwrap();
     let st = targets_at(
@@ -1122,4 +1122,44 @@ fn a_run_that_loses_work_writes_everything_says_so_and_fails_unless_allowed() {
         std::fs::read_to_string(o1.join("hashes.txt")).unwrap(),
         std::fs::read_to_string(o2.join("hashes.txt")).unwrap()
     );
+}
+
+// REQ: OA-DSP-051
+#[test]
+fn removal_names_match_oa_truth() {
+    assert_eq!(cli::REMOVE_NAMES, oa_truth::REMOVE_NAMES);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_position_off_the_globe_is_a_loss_not_the_edge_of_the_scope() {
+    let mut s = RowStore::default();
+    let mut bad = cols(2);
+    bad.addr = vec![1, 2];
+    bad.lat = vec![ORD.0, 900_000_001];
+    store_add(&mut s, &view(&bad), i64::MIN).unwrap();
+    let mut set = targets_new(4).unwrap();
+    let st = targets_at(
+        &s,
+        &Callsigns::default(),
+        T0,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+    );
+    assert_eq!((st.added, st.off_map, st.invalid_position), (1, 0, 1));
+}
+
+// REQ: OA-DSP-049
+#[test]
+fn a_duration_that_is_not_a_whole_number_of_steps_is_a_usage_error() {
+    let dir = tmp("replay-cli-multiple");
+    let (snap, oaf) = write_inputs(&dir);
+    let mut a = cli_args(&snap, &oaf, &dir.join("o"), &[]);
+    let i = a.iter().position(|x| x == "--duration-s").unwrap();
+    a[i + 1] = "4.5".into();
+    assert!(matches!(
+        cli::run(&a, &mut Vec::new()),
+        Err(cli::CliError::Usage(_))
+    ));
 }

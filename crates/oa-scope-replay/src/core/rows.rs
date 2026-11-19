@@ -4,14 +4,14 @@
 //! the first frame (C1, C6); [`targets_at`] and everything it calls allocate nothing.
 //!
 //! The core sees no tracker or decoder type (D3): the shell hands over [`RowColumns`], plain
-//! slices. The one tracker item read here is the pure function [`oa_track::r95_m_of`] and the
-//! `O_*` flag bits, which are the output row's own definition.
+//! slices, with the 95% radius already reduced to a value and the flags in this module's own
+//! `RF_*` bits.
 //!
 //! A frame at time `t` shows, for each address, the newest row at or before `t`, unless that row
 //! is older than [`ConvertConfig::stale_ns`] (the track has ended: a live track, coasting
 //! included, has a row every tick). History positions are the newest rows at or before `t - k *
 //! trail_step` for `k = 1..=trail_n`. A track counts as reacquired when a row with
-//! `O_REACQUIRED` lies within the reacquired window before `t`. Callsigns are the newest one
+//! `RF_REACQUIRED` lies within the reacquired window before `t`. Callsigns are the newest one
 //! heard at or before `t`, never a later one; two different callsigns heard for one address at
 //! one instant are a conflict, reported as such and not resolved by sort order (E6).
 //!
@@ -24,12 +24,11 @@
 //! ([`NO_ALT`], [`NO_U16`], [`NO_REACQ`]) are unreachable from real data. A time difference that
 //! does not fit an `i64` is larger than any window, and is treated as such.
 
-use oa_display::project::Projection;
-use oa_display::traffic::{
-    on_map, targets_push, Target, TargetSet, MAX_REACQ_AGE_S, MAX_TRAIL, NO_ALT, NO_REACQ, NO_U16,
-    T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+use oa_display::core::project::Projection;
+use oa_display::core::traffic::{
+    map_position, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S, MAX_TRAIL, NO_ALT,
+    NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
-use oa_track::{r95_m_of, O_COAST, O_HAS_ALT, O_REACQUIRED, O_UNCERTAIN};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -37,6 +36,15 @@ pub const NS_PER_S: i64 = 1_000_000_000;
 const MPS_TO_KT: f64 = 1.0 / 0.514_444_444_444;
 /// Below this ground speed the track angle is noise and no leader is drawn, knots.
 const MIN_TRACK_KT: f64 = 1.0;
+
+/// [`RowColumns::flags`] and [`Row::flags`]: the track is coasting.
+pub const RF_COAST: u8 = 1;
+/// The row has an altitude.
+pub const RF_HAS_ALT: u8 = 2;
+/// The row is one at which the track was reacquired.
+pub const RF_REACQUIRED: u8 = 4;
+/// The position is uncertain.
+pub const RF_UNCERTAIN: u8 = 8;
 
 /// Most distinct addresses the store holds. Analysis: the tracker holds at most 4096 tracks at a
 /// time (`DEFAULT_CONFIG.max_tracks`); a clip window of up to a day can see every address in the
@@ -50,6 +58,15 @@ pub const MAX_ROWS_PER_ADDRESS: usize = 1 << 18;
 /// about 4096 s is 2^24 = 16.7 million rows (about 0.5 GB at 29 bytes a row) which is the largest
 /// window this tool is sized for.
 pub const MAX_STORE_ROWS: usize = 1 << 24;
+// Work per frame (C7), in terms of the capacities above. `targets_at` walks the addresses once:
+// at most MAX_STORE_ADDRESSES (2^17) binary searches of at most 18 steps each. For each address
+// shown it looks back over the rows of the window of the reacquired mark (reacq_window_s, at most
+// 65534 s, one row a second for a live track) and does at most 16 binary searches for the trail,
+// so the work per address is at most MAX_ROWS_PER_ADDRESS (2^18) rows, and the worst case of a
+// frame is MAX_STORE_ADDRESSES * MAX_ROWS_PER_ADDRESS row visits, which no real store reaches (it
+// is also capped at MAX_STORE_ROWS, 2^24, in all): the look-back and the walk are bounded by the
+// store's named capacities, not by a budget checked in the loop.
+
 /// Most reports `callsigns_build` takes: the same bound as the clip window of the shell.
 pub const MAX_CALLSIGN_REPORTS: usize = 1 << 25;
 
@@ -100,9 +117,10 @@ pub struct RowColumns<'a> {
     pub lon_e7: &'a [i32],
     pub vel_east_mps: &'a [f32],
     pub vel_north_mps: &'a [f32],
-    pub pos_cov_m2: &'a [[f32; 3]],
+    /// 95% horizontal radius, metres (the shell reduces the covariance); NaN when not computed.
+    pub r95_m: &'a [f64],
     pub alt_ft: &'a [f32],
-    /// The tracker's `O_*` flags.
+    /// `RF_*` bits.
     pub flags: &'a [u8],
 }
 
@@ -128,7 +146,7 @@ pub struct Row {
     pub gs_dkt: u16,
     /// Track 0.1 degree, or [`NO_U16`].
     pub track_ddeg: u16,
-    /// The tracker's `O_*` flags.
+    /// `RF_*` bits.
     pub flags: u8,
 }
 const _: () = assert!(core::mem::size_of::<Row>() == 32);
@@ -251,7 +269,7 @@ pub fn store_add(
     check_len("lon_e7", cols.lon_e7.len(), n)?;
     check_len("vel_east_mps", cols.vel_east_mps.len(), n)?;
     check_len("vel_north_mps", cols.vel_north_mps.len(), n)?;
-    check_len("pos_cov_m2", cols.pos_cov_m2.len(), n)?;
+    check_len("r95_m", cols.r95_m.len(), n)?;
     check_len("alt_ft", cols.alt_ft.len(), n)?;
     check_len("flags", cols.flags.len(), n)?;
     // Room, from the sizes the input declares, before the work (C7).
@@ -275,7 +293,7 @@ pub fn store_add(
             Some(&lon_e7),
             Some(&ve),
             Some(&vn),
-            Some(cov),
+            Some(&r95),
             Some(&alt),
             Some(&flags),
         ) = (
@@ -285,7 +303,7 @@ pub fn store_add(
             cols.lon_e7.get(i),
             cols.vel_east_mps.get(i),
             cols.vel_north_mps.get(i),
-            cols.pos_cov_m2.get(i),
+            cols.r95_m.get(i),
             cols.alt_ft.get(i),
             cols.flags.get(i),
         )
@@ -301,7 +319,7 @@ pub fn store_add(
         if gs_dkt >= NO_U16 - 1 {
             st.speed_clamped += 1;
         }
-        let alt_ft = if flags & O_HAS_ALT != 0 {
+        let alt_ft = if flags & RF_HAS_ALT != 0 {
             if alt.is_finite() {
                 let (a, clamped) = alt_to_ft(alt);
                 st.alt_clamped += u64::from(clamped);
@@ -313,7 +331,6 @@ pub fn store_add(
         } else {
             NO_ALT
         };
-        let r95 = r95_m_of(cov);
         let r95_m = if r95.is_finite() && r95 <= f64::from(f32::MAX) {
             r95 as f32
         } else {
@@ -558,7 +575,8 @@ pub fn convert_check(cfg: &ConvertConfig) -> Result<(), RowsError> {
 pub struct ConvertStats {
     /// Addresses with a row at or before the time, but too old (tracks that ended). Not a loss.
     pub ended: u32,
-    /// Targets off the map area, kept out of the set so they cannot use its capacity. Not a loss.
+    /// Targets placed off the map area, kept out of the set so they cannot use its capacity. Not a
+    /// loss.
     pub off_map: u32,
     /// Targets put in the set (the set counts those it refused itself).
     pub added: u32,
@@ -567,6 +585,10 @@ pub struct ConvertStats {
     pub reacq_age_unrepresentable: u32,
     /// LOSS: history positions not looked up because the time arithmetic overflowed.
     pub time_overflow: u32,
+    /// LOSS: rows whose position is not on the globe, not the scope's edge.
+    pub invalid_position: u32,
+    /// LOSS: rows with a valid position that does not project, not the scope's edge.
+    pub unprojectable: u32,
     /// LOSS: a stored row whose columns could not all be read (cannot happen: they have one length).
     pub columns_inconsistent: u32,
 }
@@ -626,10 +648,10 @@ fn target_of(
     st: &mut ConvertStats,
 ) -> Target {
     let mut flags = 0;
-    if row.flags & O_COAST != 0 {
+    if row.flags & RF_COAST != 0 {
         flags |= T_COAST;
     }
-    if row.flags & O_UNCERTAIN != 0 {
+    if row.flags & RF_UNCERTAIN != 0 {
         flags |= T_UNCERTAIN;
     }
     let call = callsign_at(calls, addr, t_ns);
@@ -650,7 +672,7 @@ fn target_of(
         else {
             break;
         };
-        if v.flags.get(k).is_some_and(|f| f & O_REACQUIRED != 0) {
+        if v.flags.get(k).is_some_and(|f| f & RF_REACQUIRED != 0) {
             match u16::try_from(age / NS_PER_S)
                 .ok()
                 .filter(|&a| a <= MAX_REACQ_AGE_S)
@@ -726,9 +748,20 @@ pub fn targets_at(
             st.ended += 1;
             continue;
         }
-        if !on_map(proj, row.lat_e7, row.lon_e7) {
-            st.off_map += 1;
-            continue;
+        match map_position(proj, row.lat_e7, row.lon_e7) {
+            MapPos::On(_) => {}
+            MapPos::Off => {
+                st.off_map += 1;
+                continue;
+            }
+            MapPos::Invalid => {
+                st.invalid_position += 1;
+                continue;
+            }
+            MapPos::Unprojectable => {
+                st.unprojectable += 1;
+                continue;
+            }
         }
         let t = target_of(v, i, &row, addr, calls, t_ns, cfg, &mut st);
         // A refusal is counted by the set and shown on the frame.

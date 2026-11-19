@@ -3,19 +3,21 @@
 //! ([`replay_build`], [`replay_raster`]) allocates nothing: its text is written into a stack
 //! buffer. The time text of the frame is an input (the shell formats it).
 
-use crate::rows::{
+use crate::core::rows::{
     convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
 use oa_airspace::model::Model;
-use oa_display::list::{list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT};
-use oa_display::palette as pal;
-use oa_display::raster::{frame_len, rasterize, FrameSpec, RenderError};
-use oa_display::scene::{
+use oa_display::core::list::{
+    list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT,
+};
+use oa_display::core::palette;
+use oa_display::core::raster::{frame_len, rasterize, FrameSpec, RenderError};
+use oa_display::core::scene::{
     build_scene, scene_caps, scene_index, scratch_for, view_new, SceneIndex, SceneStats, Scratch,
     View,
 };
-use oa_display::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
-use oa_display::traffic::{
+use oa_display::core::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
+use oa_display::core::traffic::{
     build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
     traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK,
 };
@@ -181,7 +183,7 @@ pub fn replay_build(
         (x, y),
         STAMP_SIZE,
         ALIGN_RIGHT,
-        pal::TEXT,
+        palette::TEXT,
         LAYER_BLOCK,
         text_str(&tb),
     )?;

@@ -14,6 +14,5 @@ oa-geo = { path = "../oa-geo" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-airspace = { path = "../oa-airspace" }
 
-[[bin]]
-name = "oa-scope"
-path = "src/bin/oa-scope.rs"
+[package.metadata.openatca]
+class = "split"

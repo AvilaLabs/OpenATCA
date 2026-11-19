@@ -17,9 +17,9 @@
 //! last defence. All arithmetic is `i64` on coordinates saturated to 2^30 (1/16 pixel), so
 //! nothing overflows.
 
-use crate::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT};
-use crate::list::{DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS};
-use crate::palette::{bytes_of, BACKGROUND, PALETTE_LEN};
+use crate::core::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT};
+use crate::core::list::{DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS};
+use crate::core::palette::{bytes_of, BACKGROUND, PALETTE_LEN};
 use oa_sha256::{Digest, Sha256};
 use std::fmt;
 
@@ -333,7 +333,7 @@ fn draw_text(
 }
 
 /// Checks a list's internal consistency. The fields are public, so the rasterizer does not trust
-/// that [`crate::list`]'s pushes built it.
+/// that [`crate::core::list`]'s pushes built it.
 pub fn validate_list(l: &DisplayList) -> Result<(), RenderError> {
     if l.faulted {
         return Err(RenderError::FaultedList);
@@ -633,8 +633,8 @@ pub fn render(l: &DisplayList, spec: &FrameSpec, buf: &mut [u8]) -> Result<Diges
 )]
 mod tests {
     use super::*;
-    use crate::list::*;
-    use crate::palette::{PALETTE, TEXT};
+    use crate::core::list::*;
+    use crate::core::palette::{PALETTE, TEXT};
     use oa_sha256::to_hex;
 
     const GUARD: usize = 64;

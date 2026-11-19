@@ -14,14 +14,15 @@ workspace = true
 [dependencies]
 oa-display = { path = "../oa-display" }
 oa-track = { path = "../oa-track" }
-# Workspace crate, already linked through oa-track; named here for the removal reasons the report prints.
-oa-truth = { path = "../oa-truth" }
 oa-adsb = { path = "../oa-adsb" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-airspace = { path = "../oa-airspace" }
 
-[[bin]]
-name = "oa-scope-replay"
-path = "src/bin/oa-scope-replay.rs"
+# Test only: the removal-reason names kept in the shell are held equal to oa-truth's.
+[dev-dependencies]
+oa-truth = { path = "../oa-truth" }
+
+[package.metadata.openatca]
+class = "split"

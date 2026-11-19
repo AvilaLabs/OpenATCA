@@ -19,6 +19,12 @@ oa-track = { path = "../../crates/oa-track" }
 # F1: the NAM session core, also by local path only.
 oa-nam = { path = "../../crates/oa-nam" }
 
+# F1: the display core and the replay shell, and what their fixtures use, by local path only.
+oa-display = { path = "../../crates/oa-display" }
+oa-scope-replay = { path = "../../crates/oa-scope-replay" }
+oa-airspace = { path = "../../crates/oa-airspace" }
+oa-geo = { path = "../../crates/oa-geo" }
+
 [profile.release]
 debug = 1
 overflow-checks = true

@@ -28,7 +28,11 @@ dependencies = [
 name = "oa-alloc-check"
 version = "0.0.0"
 dependencies = [
+ "oa-airspace",
+ "oa-display",
+ "oa-geo",
  "oa-nam",
+ "oa-scope-replay",
  "oa-track",
 ]
 
@@ -75,6 +79,15 @@ name = "oa-deflate"
 version = "0.0.1"
 dependencies = [
  "oa-zip",
+]
+
+[[package]]
+name = "oa-display"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-geo",
+ "oa-sha256",
 ]
 
 [[package]]
@@ -140,6 +153,19 @@ dependencies = [
  "oa-tfms",
  "oa-xml",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-scope-replay"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-airspace",
+ "oa-display",
+ "oa-feed",
+ "oa-geo",
+ "oa-sha256",
+ "oa-track",
 ]
 
 [[package]]

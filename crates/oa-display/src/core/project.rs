@@ -27,7 +27,7 @@
 //! move a point by one 1/16 pixel on rare inputs; the rasterizer, which is where bit-for-bit
 //! reproducibility is claimed, is integer only and takes the display list as given.
 
-use crate::list::DisplayError;
+use crate::core::list::DisplayError;
 use oa_geo::wgs84;
 
 /// Metres in a nautical mile.
