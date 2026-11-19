@@ -1,4 +1,4 @@
-"""Static contract tests for comparison protocol requirements OA-CMP-200..209.
+"""Static contract tests for comparison protocol requirements OA-CPR-200..209.
 
 These tests intentionally assert the frozen protocol values rather than run a
 comparison. They are standard-library only so the coordinator can execute them
@@ -24,7 +24,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = read_manifest()
 
-    # REQ: OA-CMP-200
+    # REQ: OA-CPR-200
     def test_oa_cmp_200_development_and_qualification_seeds_are_disjoint(self):
         seeds = self.manifest["seeds_and_holdout"]
         dev = set(seeds["development_seeds"]["seed_ids"])
@@ -32,14 +32,14 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         qualification = set(seeds["qualification"]["seed_ids"])
         self.assertTrue(dev.isdisjoint(qualification), "development seed overlaps qualification")
 
-    # REQ: OA-CMP-201
+    # REQ: OA-CPR-201
     def test_oa_cmp_201_qualification_seed_ids_are_unique_and_counted(self):
         qualification = self.manifest["seeds_and_holdout"]["qualification"]
         seed_ids = qualification["seed_ids"]
         self.assertEqual(len(seed_ids), len(set(seed_ids)), "qualification seed IDs must be unique")
         self.assertEqual(len(seed_ids), qualification["seed_count"])
 
-    # REQ: OA-CMP-202
+    # REQ: OA-CPR-202
     def test_oa_cmp_202_competitive_thresholds_are_frozen(self):
         goals = self.manifest["scorecard"]["competitive_relative_goals"]
         self.assertEqual(goals["position_rms_ratio_max"], 0.70)
@@ -49,7 +49,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertIs(goals["same_quality_required"], True)
         self.assertIs(goals["same_resource_envelope_required"], True)
 
-    # REQ: OA-CMP-203
+    # REQ: OA-CPR-203
     def test_oa_cmp_203_csv_headers_and_claim_stages_are_supported_contract(self):
         self.assertEqual(
             self.manifest["csv"]["truth"],
@@ -70,7 +70,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(self.manifest["profile"]["external_reference_stage"], "unknown_until_a_qualified_artifact_and_approved_run_are_recorded")
 
-    # REQ: OA-CMP-204
+    # REQ: OA-CPR-204
     def test_oa_cmp_204_qualification_aircraft_hours_meet_exact_allocation(self):
         qualification = self.manifest["seeds_and_holdout"]["qualification"]
         allocation = qualification["allocation"]
@@ -87,13 +87,13 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertEqual(sum(scenario_allocation.values()), len(qualification["seed_ids"]))
         self.assertEqual(scenario_allocation["dropout"], 0)
 
-    # REQ: OA-CMP-205
+    # REQ: OA-CPR-205
     def test_oa_cmp_205_qualification_uses_frozen_nonoverlapping_seed_ids(self):
         qualification = self.manifest["seeds_and_holdout"]["qualification"]
         self.assertEqual(qualification["seed_ids"], list(range(1_000_001, 1_000_101)))
         self.assertIs(qualification["generator_distributions_and_allocation_frozen_before_candidate_freeze"], True)
 
-    # REQ: OA-CMP-206
+    # REQ: OA-CPR-206
     def test_oa_cmp_206_input_output_ledgers_require_zero_unaccounted_work(self):
         ledger = self.manifest["run_ledger"]
         gates = self.manifest["strict_gates"]
@@ -103,7 +103,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertEqual(gates["unaccounted_input_or_output_loss_allowed"], 0)
         self.assertIs(gates["missing_rows_scored_not_omitted"], True)
 
-    # REQ: OA-CMP-207
+    # REQ: OA-CPR-207
     def test_oa_cmp_207_holdout_is_single_use_and_reclassified_after_tuning(self):
         holdout = self.manifest["seeds_and_holdout"]["actual_holdout"]
         self.assertIs(holdout["consume_once"], True)
@@ -111,14 +111,14 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertIn("reclassify", holdout["if_outcome_informs_change"])
         self.assertIs(holdout["publish_consumption_and_reclassification_state"], True)
 
-    # REQ: OA-CMP-208
+    # REQ: OA-CPR-208
     def test_oa_cmp_208_no_unqualified_or_synthetic_professional_baseline_is_claimed(self):
         baseline = self.manifest["baseline_status"]
         self.assertEqual(baseline["professional_tracker"], "unknown_no_qualified_artifact_or_approved_run")
         self.assertEqual(baseline["legacy_export"], "unknown_no_authenticated_permitted_export")
         self.assertIs(baseline["python_or_controlled_legacy_may_be_labeled_as_professional"], False)
 
-    # REQ: OA-CMP-209
+    # REQ: OA-CPR-209
     def test_oa_cmp_209_seed_replicates_are_not_independent_references(self):
         qualification = self.manifest["seeds_and_holdout"]["qualification"]
         statistics = self.manifest["statistics_and_exclusions"]
@@ -130,7 +130,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
             "scenario seeds do not create independent physical or world-reference models",
         )
 
-    # REQ: OA-CMP-210
+    # REQ: OA-CPR-210
     def test_oa_cmp_210_missing_output_has_explicit_canonical_payload(self):
         missing = self.manifest["csv"]["missing_output_row"]
         self.assertIs(missing["score_ns_equals_publish_ns"], True)
@@ -138,7 +138,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertEqual(missing["state_fields_empty"], ["lat_deg", "lon_deg", "ve_mps", "vn_mps"])
         self.assertIs(missing["row_required_for_each_missing_grid_point"], True)
 
-    # REQ: OA-CMP-211, OA-CMP-212, OA-CMP-213, OA-CMP-214, OA-CMP-215, OA-CMP-216, OA-CMP-218
+    # REQ: OA-CPR-211, OA-CPR-212, OA-CPR-213, OA-CPR-214, OA-CPR-215, OA-CPR-216, OA-CPR-218
     def test_oa_cmp_211_to_216_freeze_initialization_windows_and_scenario_roles(self):
         self.assertEqual(self.manifest["version"], "1.0.3")
         init = self.manifest["initialization_and_qualification"]
@@ -166,7 +166,7 @@ class ComparisonProtocolContractTests(unittest.TestCase):
         self.assertIs(paired["retain_raw_per_system_metrics_on_mismatch"], True)
         self.assertIs(paired["report_keyset_intersection_and_difference_counts"], True)
 
-    # REQ: OA-CMP-217
+    # REQ: OA-CPR-217
     def test_oa_cmp_217_separate_dropout_fault_cohort_blocks_all_quality(self):
         cohort = self.manifest["fault_mode_cohort"]
         self.assertEqual(cohort["status"], "BLOCKED_NOT_IMPLEMENTED_OR_REVIEWED")

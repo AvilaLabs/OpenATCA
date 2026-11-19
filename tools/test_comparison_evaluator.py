@@ -37,11 +37,11 @@ class ComparisonTests(unittest.TestCase):
         write(self.t,TRUTH,truth_rows()); write(self.m,MEAS,[])
         write(self.c,OUT,output_rows()); write(self.b,OUT,output_rows(offset=100))
     def tearDown(self): self.tmp.cleanup()
-    # REQ: OA-CMP-001, OA-CMP-010
+    # REQ: OA-CPR-001, OA-CPR-010
     def test_analytic_wgs84_offset_is_approximately_one_hundred_metres(self):
         error=ce.horizontal_error_m((0,0),(0,100/111195))
         self.assertAlmostEqual(error,100,delta=.2)
-    # REQ: OA-CMP-003
+    # REQ: OA-CPR-003
     def test_interleaved_truth_grid_is_ordered_by_scenario_time_then_flight(self):
         keys=[("s",str(f),t) for t in (0,1_000_000_000) for f in range(12)]
         truth=[dict(scenario_id=s,flight_id=f,time_ns=t,lat_deg=0,lon_deg=0,ve_mps=0,vn_mps=0,phase="cruise") for s,f,t in keys]
@@ -49,7 +49,7 @@ class ComparisonTests(unittest.TestCase):
         write(self.t,TRUTH,truth); write(self.m,MEAS,[]); write(self.c,OUT,outputs); write(self.b,OUT,outputs)
         result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertEqual(result["accounting"]["truth_grid_rows"],24)
-    # REQ: OA-CMP-010
+    # REQ: OA-CPR-010
     def test_baseline_geodesic_inverse_direct_roundtrip(self):
         for origin,distance,azimuth in (((45.0,-90.0),100_000,0.8),((10.0,179.8),50_000,1.4),((-30.0,20.0),250_000,2.1)):
             lat,lon,final=cb._vincenty_direct(*origin,azimuth,distance)
@@ -58,7 +58,7 @@ class ComparisonTests(unittest.TestCase):
             self.assertAlmostEqual(math.sin(first-azimuth),0,delta=1e-9)
             self.assertAlmostEqual(math.cos(first-azimuth),1,delta=1e-9)
             self.assertAlmostEqual(math.sin(last-final),0,delta=1e-9)
-    # REQ: OA-CMP-010
+    # REQ: OA-CPR-010
     def test_geodesic_velocity_basis_rotation_matches_finite_difference(self):
         origin=(60.0,-100.0); lat2,lon2,final=cb._vincenty_direct(*origin,1.1,120_000)
         lat3,lon3,_=cb._vincenty_direct(lat2,lon2,final,1.0)
@@ -66,7 +66,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertAlmostEqual(distance,120_001,delta=1e-5)
         self.assertAlmostEqual(math.sin(first_after-1.1),0,delta=1e-8)
         self.assertAlmostEqual(math.cos(first_after-1.1),1,delta=1e-8)
-    # REQ: OA-CMP-002, OA-CMP-011, OA-CMP-013, OA-CMP-015, OA-CMP-016, OA-CMP-017, OA-CMP-019, OA-CMP-020, OA-CMP-028, OA-CMP-042
+    # REQ: OA-CPR-002, OA-CPR-011, OA-CPR-013, OA-CPR-015, OA-CPR-016, OA-CPR-017, OA-CPR-019, OA-CPR-020, OA-CPR-028, OA-CPR-042
     def test_analytic_velocity_and_delay_metrics(self):
         write(self.c,OUT,output_rows(delay=500_000_000))
         rows=[dict(event_id=f"e{i}",scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=i*1_000_000_000-500_000_000,receive_ns=i*1_000_000_000-500_000_000,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,sigma_pos_m=5,sigma_vel_mps=2) for i in range(3)]
@@ -77,31 +77,31 @@ class ComparisonTests(unittest.TestCase):
         rows[0]["receive_ns"]=1; write(self.m,MEAS,rows)
         with self.assertRaisesRegex(ce.EvaluationError,"precedes its input receive time"):
             ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-004, OA-CMP-043
+    # REQ: OA-CPR-004, OA-CPR-043
     def test_output_flight_swap_is_counted_as_false_identity(self):
         write(self.c,OUT,output_rows(flight="other"))
         result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertEqual(result["accounting"]["false_identity_rows"],3)
-    # REQ: OA-CMP-005
+    # REQ: OA-CPR-005
     def test_duplicate_output_grid_key_is_counted(self):
         rows=output_rows(); write(self.c,OUT,rows+[rows[0]])
         result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertEqual(result["accounting"]["candidate_duplicate_rows"],1)
-    # REQ: OA-CMP-008
+    # REQ: OA-CPR-008
     def test_mismatched_accuracy_and_publish_times_are_rejected(self):
         rows=output_rows(); rows[0]["score_ns"]="99"; write(self.c,OUT,rows)
         with self.assertRaisesRegex(ce.EvaluationError,"score time differs from publish time"): ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-009
+    # REQ: OA-CPR-009
     def test_bad_source_publish_order_is_rejected(self):
         rows=output_rows(); rows[0]["source_ns"]="2"; write(self.c,OUT,rows)
         with self.assertRaisesRegex(ce.EvaluationError,"source_ns after publish_ns"): ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-032, OA-CMP-036, OA-CMP-048
+    # REQ: OA-CPR-032, OA-CPR-036, OA-CPR-048
     def test_baseline_is_development_control_and_writes_grid(self):
         measurements=[dict(event_id="e",scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=0,receive_ns=0,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,sigma_pos_m=5,sigma_vel_mps=2)]
         write(self.m,MEAS,measurements); manifest=cb.run(self.t,self.m,self.b)
         rows=ce._csv(self.b,"output")
         self.assertEqual(len(rows),3); self.assertEqual(manifest["comparison_class"],"development_control")
-    # REQ: OA-CMP-032, OA-CMP-033, OA-CMP-049
+    # REQ: OA-CPR-032, OA-CPR-033, OA-CPR-049
     def test_baseline_accepts_key_only_grid_manifest(self):
         grid=os.path.join(self.d,"grid.csv")
         write(grid,["scenario_id","flight_id","time_ns"],[{k:r[k] for k in ("scenario_id","flight_id","time_ns")} for r in truth_rows()])
@@ -109,14 +109,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(manifest["output_rows"],3)
         with open(grid,"w") as f: f.write("scenario_id,flight_id,time_ns,phase\ns,f,0,cruise\n")
         with self.assertRaisesRegex(ce.EvaluationError,"grid must contain only"): cb.run(None,self.m,self.b,grid_path=grid)
-    # REQ: OA-CMP-034
+    # REQ: OA-CPR-034
     def test_baseline_does_not_use_measurement_with_future_sensor_time(self):
         rows=[dict(event_id="future",scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=5_000_000_000,receive_ns=0,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,sigma_pos_m=5,sigma_vel_mps=2)]
         write(self.m,MEAS,rows); cb.run(self.t,self.m,self.b)
         outputs=ce._csv(self.b,"output")
         self.assertTrue(all(row["status"]=="missing" for row in outputs))
         self.assertTrue(all(row["source_ns"]=="" and row["lat_deg"]=="" for row in outputs))
-    # REQ: OA-CMP-035, OA-CMP-048
+    # REQ: OA-CPR-035, OA-CPR-048
     def test_baseline_uses_mofn2_and_coasts_after_source_age_limit(self):
         times=[0,1_000_000_000,2_000_000_000,3_000_000_000,4_000_000_000]
         write(self.t,TRUTH,[dict(scenario_id="s",flight_id="f",time_ns=t,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,phase="cruise") for t in times])
@@ -125,7 +125,7 @@ class ComparisonTests(unittest.TestCase):
         outputs=ce._csv(self.b,"output")
         self.assertEqual([row["status"] for row in outputs],["missing","valid","valid","valid","coast"])
         self.assertEqual(manifest["confirmation_profile"],{"hits":2,"window_reports":3})
-    # REQ: OA-CMP-032
+    # REQ: OA-CPR-032
     def test_baseline_refuses_empty_or_duplicate_event_ids_globally(self):
         duplicate=[dict(event_id="same",scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=i,receive_ns=i,lat_deg=0,lon_deg=0,ve_mps=0,vn_mps=0,sigma_pos_m=1,sigma_vel_mps=1) for i in (0,1)]
         write(self.m,MEAS,duplicate)
@@ -135,7 +135,7 @@ class ComparisonTests(unittest.TestCase):
         duplicate[0]["event_id"]=""
         write(self.m,MEAS,duplicate)
         with self.assertRaisesRegex(ce.EvaluationError,"duplicate/empty event_id"): cb.run(self.t,self.m,self.b)
-    # REQ: OA-CMP-035
+    # REQ: OA-CPR-035
     def test_two_distinct_event_ids_at_same_sensor_time_confirm_mofn2(self):
         rows=[dict(event_id=f"same-time-{i}",scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=0,receive_ns=i*100_000_000,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,sigma_pos_m=5,sigma_vel_mps=2) for i in range(2)]
         write(self.m,MEAS,rows); cb.run(self.t,self.m,self.b)
@@ -143,13 +143,13 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(outputs[0]["status"],"missing")
         self.assertEqual(outputs[1]["status"],"valid")
 
-    # REQ: OA-CMP-003, OA-CMP-032, OA-CMP-035
+    # REQ: OA-CPR-003, OA-CPR-032, OA-CPR-035
     def test_numeric_event_ids_sort_numerically_across_digit_boundary(self):
         events=[dict(event_id=str(i),scenario_id="s",flight_id="f",sensor_id="x",sensor_ns=0,receive_ns=0,lat_deg=0,lon_deg=0,ve_mps=100,vn_mps=0,sigma_pos_m=5,sigma_vel_mps=2) for i in range(1,13)]
         write(self.m,MEAS,events); cb.run(self.t,self.m,self.b)
         outputs=ce._csv(self.b,"output")
         self.assertEqual(outputs[0]["status"],"valid")
-    # REQ: OA-CMP-043
+    # REQ: OA-CPR-043
     def test_identity_binding_requires_track_to_truth_flight_match(self):
         rows=output_rows(); keys={("s","f",i*1_000_000_000) for i in range(3)}
         outputs={"candidate":rows,"baseline":rows}
@@ -159,21 +159,21 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(ce._validate_identity_binding(path,keys,outputs)[0])
         bindings[0]["truth_flight_id"]="other"; write(path,header,bindings)
         self.assertFalse(ce._validate_identity_binding(path,keys,outputs)[0])
-    # REQ: OA-CMP-008, OA-CMP-037
+    # REQ: OA-CPR-008, OA-CPR-037
     def test_malformed_inputs_fail_closed(self):
         with open(self.t,"w") as f: f.write("scenario_id,flight_id\ns,f\n")
         with self.assertRaisesRegex(ce.EvaluationError,"schema mismatch"): ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-006, OA-CMP-014, OA-CMP-047
+    # REQ: OA-CPR-006, OA-CPR-014, OA-CPR-047
     def test_missing_track_rows_are_counted_for_each_system(self):
         blank=dict(scenario_id="s",flight_id="f",score_ns=1_000_000_000,source_ns="",publish_ns=1_000_000_000,lat_deg="",lon_deg="",ve_mps="",vn_mps="",status="missing")
         write(self.c,OUT,output_rows()[:1]+[blank]); result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertEqual(result["accounting"]["candidate_missing_rows"],2)
-    # REQ: OA-CMP-006
+    # REQ: OA-CPR-006
     def test_missing_status_rejects_numeric_estimate_payload(self):
         row=dict(scenario_id="s",flight_id="f",score_ns=0,source_ns="",publish_ns=0,lat_deg=0,lon_deg="",ve_mps="",vn_mps="",status="missing")
         write(self.c,OUT,[row])
         with self.assertRaisesRegex(ce.EvaluationError,"missing output must have blank estimate fields"): ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-006, OA-CMP-014, OA-CMP-018, OA-CMP-047
+    # REQ: OA-CPR-006, OA-CPR-014, OA-CPR-018, OA-CPR-047
     def test_cold_start_is_reported_separately_and_all_missing_fails_coverage(self):
         times=[0,1_000_000_000,2_000_000_000,3_000_000_000,4_000_000_000]
         tr=[dict(scenario_id="s",flight_id="f",time_ns=t,lat_deg=0,lon_deg=0,ve_mps=0,vn_mps=0,phase="cruise") for t in times]
@@ -193,7 +193,7 @@ class ComparisonTests(unittest.TestCase):
         write(self.c,OUT,rows(["missing"]*5)); result=ce.evaluate(self.t,self.m,self.c,self.b,meta)
         self.assertEqual(result["logical_metrics"]["candidate"]["cold_start_position_error_m"]["count"],0)
         self.assertEqual(result["profile_qualification"]["status"],"unknown_scenario_role")
-    # REQ: OA-CMP-007
+    # REQ: OA-CPR-007
     def test_equal_coverage_with_different_missing_postinit_keys_fails_pairing(self):
         times=[0]+list(range(2_000_000_000,1_002_000_000_000,1_000_000_000))
         truth=[dict(scenario_id="s",flight_id="f",time_ns=t,lat_deg=0,lon_deg=0,ve_mps=0,vn_mps=0,phase="cruise") for t in times]
@@ -213,17 +213,17 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result["paired_grid"]["candidate_excluded_from_pairing"],1)
         self.assertEqual(result["paired_grid"]["baseline_excluded_from_pairing"],1)
         self.assertFalse(result["accuracy_qualification"]["pass"])
-    # REQ: OA-CMP-021, OA-CMP-046
+    # REQ: OA-CPR-021, OA-CPR-046
     def test_zero_reference_error_has_no_fabricated_ratio(self):
         exact=[dict(scenario_id="s",flight_id="f",score_ns=i*1_000_000_000,source_ns=i*1_000_000_000,publish_ns=i*1_000_000_000,lat_deg=0,lon_deg=i*100/111195,ve_mps=100,vn_mps=0,status="valid") for i in range(3)]
         write(self.c,OUT,exact); write(self.b,OUT,exact); result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertIsNone(result["ratios"]["rms"])
         self.assertNotEqual(result["accuracy_qualification"]["status"],"qualified_pass")
-    # REQ: OA-CMP-031
+    # REQ: OA-CPR-031
     def test_one_flight_has_no_cluster_confidence_bounds(self):
         result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertIsNone(result["paired_confidence"]["rms_ratio"]["low95"])
-    # REQ: OA-CMP-029, OA-CMP-030
+    # REQ: OA-CPR-029, OA-CPR-030
     def test_hierarchical_bootstrap_clusters_scenarios_and_skips_zero_denominators(self):
         groups={("s1","f1"):([1.0],[2.0]),("s2","f2"):([1.0],[2.0])}
         result=ce._bootstrap_ratio(groups,"rms")
@@ -231,7 +231,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result["low95"],0.5)
         zeros={("s1","f1"):([1.0],[0.0]),("s2","f2"):([1.0],[0.0])}
         self.assertIsNone(ce._bootstrap_ratio(zeros,"rms")["high95"])
-    # REQ: OA-CMP-018
+    # REQ: OA-CPR-018
     def test_profile_gate_separates_nominal_and_diagnostic_dropout(self):
         coverage={"candidate":{"usable_fraction":1.0,"coast_profile_violations":0},"baseline":{"usable_fraction":.999,"coast_profile_violations":0}}
         nominal=ce._profile_gate("nominal",2_000_000_000,2_000_000_000,True,coverage,cohort_id="nominal-v1")
@@ -251,12 +251,12 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result["profile_qualification"]["status"],"unknown_scenario_role")
         self.assertFalse(result["accuracy_qualification"]["pass"])
         self.assertFalse(result["accuracy_qualification"]["all_quality_pass"])
-    # REQ: OA-CMP-022, OA-CMP-023, OA-CMP-024, OA-CMP-039
+    # REQ: OA-CPR-022, OA-CPR-023, OA-CPR-024, OA-CPR-039
     def test_unknown_comparison_class_is_not_a_qualified_class(self):
         self.assertFalse(ce._known_comparison_class("unregistered_reference"))
         self.assertFalse(ce._claim_class("development_control"))
         self.assertTrue(ce._claim_class("professional_tracker"))
-    # REQ: OA-CMP-022, OA-CMP-024, OA-CMP-039
+    # REQ: OA-CPR-022, OA-CPR-024, OA-CPR-039
     def test_profile_role_and_cohort_derive_from_frozen_protocol_and_manifest(self):
         protocol={"initialization_and_qualification":{"nominal_scenarios":{"straight":{}},"diagnostic_scenarios":{"dropout":{}}},"seeds_and_holdout":{"development_seeds":{"set_id":"development-set-v1","seed_ids":list(range(32))},"qualification":{"set_id":"qualification-set-v1","seed_ids":list(range(1_000_001,1_000_101))}},"fault_mode_cohort":{"cohort_id":"dropout_fault_v1","scenario":"dropout","seed_ids":list(range(1_000_101,1_000_121))}}
         nominal=ce._derive_profile(protocol,{"scenario_id":"straight","seed":12})
@@ -269,7 +269,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertFalse(ce._derive_profile(protocol,{"scenario_id":"straight","seed":700})["valid"])
         self.assertFalse(ce._derive_profile(protocol,{"scenario_id":"unknown","seed":12})["valid"])
 
-    # REQ: OA-CMP-022, OA-CMP-039
+    # REQ: OA-CPR-022, OA-CPR-039
     def test_mutated_role_or_cohort_does_not_match_hashed_scoring_manifest(self):
         protocol={"initialization_and_qualification":{"nominal_scenarios":{"straight":{}},"diagnostic_scenarios":{"dropout":{}}},"seeds_and_holdout":{"development_seeds":{"set_id":"development-set-v1","seed_ids":list(range(32))},"qualification":{"set_id":"qualification-set-v1","seed_ids":list(range(1_000_001,1_000_101))}},"fault_mode_cohort":{"cohort_id":"dropout_fault_v1","scenario":"dropout","seed_ids":list(range(1_000_101,1_000_121))}}
         derived=ce._derive_profile(protocol,{"scenario_id":"straight","seed":1})
@@ -283,13 +283,13 @@ class ComparisonTests(unittest.TestCase):
         metadata["cohort_id"]="development-set-v1"; scoring["cohort_id"]="tampered"
         self.assertFalse(ce._profile_binding_valid(derived,metadata,scoring))
 
-    # REQ: OA-CMP-012, OA-CMP-044, OA-CMP-045
+    # REQ: OA-CPR-012, OA-CPR-044, OA-CPR-045
     def test_metric_statistics_use_nearest_rank_and_empty_is_null(self):
         stats=ce._stats(list(range(1,21)))
         self.assertEqual(stats["count"],20); self.assertEqual(stats["p95"],19); self.assertEqual(stats["p99"],20)
         self.assertEqual(ce._stats([]),{"count":0,"rms":None,"p95":None,"p99":None,"mean":None})
 
-    # REQ: OA-CMP-026, OA-CMP-027, OA-CMP-040, OA-CMP-041
+    # REQ: OA-CPR-026, OA-CPR-027, OA-CPR-040, OA-CPR-041
     def test_timing_ledger_is_hash_bound_and_drained(self):
         path=os.path.join(self.d,"timing.json")
         ledger={"clock_kind":"monotonic_wall","elapsed_ns":2_000_000_000,"work_units":4,"drained":True,"input_fingerprint":"abc","loss_counters":{"missing":0}}
@@ -305,7 +305,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertIsNone(ce._load_timing_ledger({"path":path,"sha256":ce._sha256(path)},"abc"))
         self.assertIsNone(ce._load_timing_ledger(spec,"abc"))
 
-    # REQ: OA-CMP-037, OA-CMP-038
+    # REQ: OA-CPR-037, OA-CPR-038
     def test_cli_returns_error_for_bad_metadata_and_writes_json_on_success(self):
         bad=os.path.join(self.d,"bad.json"); out=os.path.join(self.d,"report.json")
         with open(bad,"w") as f: f.write("{")
@@ -317,7 +317,7 @@ class ComparisonTests(unittest.TestCase):
         with open(out) as f: report=json.load(f)
         self.assertIn("logical_metrics",report); self.assertIn("accuracy_qualification",report); self.assertIn("accounting",report)
 
-    # REQ: OA-CMP-025
+    # REQ: OA-CPR-025
     def test_protocol_artifact_must_match_canonical_bytes(self):
         canonical=os.path.join(self.d,"canonical.json"); artifact=os.path.join(self.d,"protocol.json")
         with open(canonical,"w") as f: f.write('{"protocol":"v1"}\n')
@@ -326,7 +326,7 @@ class ComparisonTests(unittest.TestCase):
         with open(artifact,"w") as f: f.write('{"protocol":"other"}\n')
         self.assertFalse(ce._files_match(canonical,artifact))
 
-    # REQ: OA-CMP-219
+    # REQ: OA-CPR-219
     def test_protocol_hash_is_pinned_and_thresholds_come_from_the_verified_protocol(self):
         canonical=ce.CANONICAL_PROTOCOL
         with open(canonical,"rb") as f: self.assertEqual(hashlib.sha256(f.read()).hexdigest(),ce.PROTOCOL_V1_SHA256)
@@ -335,7 +335,7 @@ class ComparisonTests(unittest.TestCase):
         result=ce.evaluate(self.t,self.m,self.c,self.b,{})
         self.assertEqual(result["thresholds"],expected)
         self.assertTrue(result["qualification_evidence"]["protocol_frozen"]["ok"])
-    # REQ: OA-CMP-219
+    # REQ: OA-CPR-219
     def test_changed_protocol_bytes_fail_closed_as_unqualified(self):
         altered=os.path.join(self.d,"protocol.json")
         with open(ce.CANONICAL_PROTOCOL,"rb") as f: data=f.read()
@@ -350,7 +350,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertIsNone(result["thresholds"])
         with mock.patch.object(ce,"PROTOCOL_V1_SHA256","0"*64):
             self.assertEqual(ce.evaluate(self.t,self.m,self.c,self.b,{})["accuracy_qualification"]["status"],"unqualified_protocol_hash_mismatch")
-    # REQ: OA-CMP-220
+    # REQ: OA-CPR-220
     def test_every_unpaired_statistic_carries_its_coverage(self):
         keys=[("s","f",i*1_000_000_000) for i in range(4)]
         truth=[dict(scenario_id=s,flight_id=f,time_ns=t,lat_deg=0,lon_deg=i*100/111195,ve_mps=100,vn_mps=0,phase="cruise") for i,(s,f,t) in enumerate(keys)]
@@ -364,7 +364,7 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(metrics["candidate"][name]["count"],2)
         self.assertEqual(metrics["candidate"]["per_flight_position_error_m"]["('s', 'f')"]["coverage"]["fraction"],0.5)
         self.assertEqual(metrics["candidate"]["per_scenario_velocity_error_mps"]["s"]["coverage"]["rows_expected"],4)
-    # REQ: OA-CMP-221
+    # REQ: OA-CPR-221
     def test_numeric_text_must_be_strict(self):
         for bad in ("1_000","1 000"," 1","+1","inf","nan","Infinity","0x10","1e","--1",""):
             with self.assertRaises(ce.EvaluationError,msg=bad): ce._num({"v":bad},"v","t",True)
@@ -375,7 +375,7 @@ class ComparisonTests(unittest.TestCase):
         rows=truth_rows(); rows[1]["time_ns"]="1_000_000_000"
         write(self.t,TRUTH,rows)
         with self.assertRaises(ce.EvaluationError): ce.evaluate(self.t,self.m,self.c,self.b,{})
-    # REQ: OA-CMP-222
+    # REQ: OA-CPR-222
     def test_bootstrap_reports_replicates_and_dropped_count(self):
         good=ce._bootstrap_ratio({("s1","f1"):([1.0],[2.0]),("s2","f2"):([1.0],[2.0])},"rms")
         self.assertEqual((good["replicates"],good["replicates_dropped"]),(2000,0))

@@ -17,7 +17,7 @@ from tools import run_comparison as wrapper
 
 
 class ComparisonWrapperTests(unittest.TestCase):
-    # REQ: OA-CMP-050
+    # REQ: OA-CPR-050
     def test_cmp_050_output_must_be_fresh_and_outside_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -30,7 +30,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             external.mkdir()
             self.assertTrue(external.exists())
 
-    # REQ: OA-CMP-051
+    # REQ: OA-CPR-051
     def test_cmp_051_snapshot_changes_when_tracked_source_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -46,7 +46,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             after = wrapper._source_snapshot(repo)
             self.assertNotEqual(before["snapshot_sha256"], after["snapshot_sha256"])
 
-    # REQ: OA-CMP-062
+    # REQ: OA-CPR-062
     def test_cmp_052_nonzero_stage_keeps_bounded_command_logs(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp) / "run"
@@ -58,7 +58,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             self.assertTrue((out / "logs" / "001-failure.stderr.txt").is_file())
             self.assertEqual(recorder.records[0]["exit_code"], 7)
 
-    # REQ: OA-CMP-053
+    # REQ: OA-CPR-053
     def test_cmp_053_artifact_and_captured_streams_have_known_sha256_digests(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp) / "run"
@@ -78,7 +78,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             self.assertEqual(record["stdout_sha256"], hashlib.sha256(b"out\n").hexdigest())
             self.assertEqual(record["stderr_sha256"], hashlib.sha256(b"err\n").hexdigest())
 
-    # REQ: OA-CMP-065
+    # REQ: OA-CPR-065
     def test_cmp_064_live_output_cap_stops_child_and_bounds_log_size(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp) / "run"
@@ -96,7 +96,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             self.assertLessEqual(Path(recorder.records[0]["stdout"]).stat().st_size, 1024)
 
     @unittest.skipUnless(os.name == "posix", "process group cleanup test requires POSIX")
-    # REQ: OA-CMP-065
+    # REQ: OA-CPR-065
     def test_cmp_065_timeout_kills_descendant_process_group(self):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp) / "run"
@@ -110,13 +110,13 @@ class ComparisonWrapperTests(unittest.TestCase):
             time.sleep(0.8)
             self.assertFalse(marker.exists())
 
-    # REQ: OA-CMP-059
+    # REQ: OA-CPR-059
     def test_cmp_053_loss_counters_must_be_explicit(self):
         with self.assertRaises(wrapper.ComparisonRunError):
             wrapper._loss_counts({"measurement_refused": 0})
         self.assertEqual(wrapper._loss_counts({"loss_counters": {"unprocessed": 0}}), {"unprocessed": 0})
 
-    # REQ: OA-CMP-063
+    # REQ: OA-CPR-063
     def test_cmp_063_json_artifacts_reject_nonfinite_and_nonobject_values(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "artifact.json"
@@ -127,7 +127,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             with self.assertRaises(wrapper.ComparisonRunError):
                 wrapper._read_json(path)
 
-    # REQ: OA-CMP-054
+    # REQ: OA-CPR-054
     def test_cmp_054_all_scenarios_have_isolated_case_directories(self):
         self.assertEqual(wrapper._selected_scenarios("all"), wrapper.SCENARIOS)
         with tempfile.TemporaryDirectory() as temp:
@@ -137,7 +137,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             self.assertTrue(all(path.parent == out / "cases" for path in case_paths))
             self.assertEqual(wrapper._selected_scenarios("turn"), ("turn",))
 
-    # REQ: OA-CMP-055
+    # REQ: OA-CPR-055
     def test_cmp_055_grid_exposes_only_scenario_flight_and_time(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -154,7 +154,7 @@ class ComparisonWrapperTests(unittest.TestCase):
                 self.assertEqual(reader.fieldnames, ["scenario_id", "flight_id", "time_ns"])
                 self.assertEqual(next(reader), {"scenario_id": "straight", "flight_id": "4", "time_ns": "100"})
 
-    # REQ: OA-CMP-056
+    # REQ: OA-CPR-056
     def test_cmp_055_identity_binding_rejects_missing_or_extra_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -178,7 +178,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             with self.assertRaises(wrapper.ComparisonRunError):
                 wrapper._create_identity_binding(identity, candidate, baseline, grid, root / "binding.csv")
 
-    # REQ: OA-CMP-061
+    # REQ: OA-CPR-061
     def test_cmp_056_competitive_gate_requires_every_quality_and_speed_bar(self):
         passing = {"scenario_role": "nominal", "profile_gate": {"status": "nominal_profile_pass", "usable_keysets_match": True}, "accuracy_qualification": {"pass": True, "all_quality_pass": True}, "fault_mode_cohort_status": "PASS", "speed_coverage": {"pass": True}}
         self.assertTrue(wrapper._competitive_pass([passing]))
@@ -190,13 +190,13 @@ class ComparisonWrapperTests(unittest.TestCase):
         self.assertEqual(wrapper._require_gate_exit([], require=True), 1)
         self.assertEqual(wrapper._require_gate_exit([passing], require=True), 0)
 
-    # REQ: OA-CMP-057
+    # REQ: OA-CPR-057
     def test_cmp_057_python_control_is_never_classified_as_professional(self):
         # The wrapper stamps every run development_control, regardless of baseline metrics.
         self.assertEqual(wrapper.COMPARISON_CLASS, "development_control")
         self.assertFalse(wrapper._competitive_pass([{"accuracy_qualification": {"pass": True, "all_quality_pass": False}, "speed_coverage": {"pass": True}}]))
 
-    # REQ: OA-CMP-059
+    # REQ: OA-CPR-059
     def test_cmp_059_model_reference_requires_hash_bound_pass(self):
         valid = {
             "status": "PASS", "validation_status": "PASS", "reference_kind": "independent_simulation",
@@ -209,13 +209,13 @@ class ComparisonWrapperTests(unittest.TestCase):
         self.assertFalse(wrapper._reference_qualified({**valid, "runner_source_sha256": "other"}, "abc", "t", "m", "p"))
         self.assertFalse(wrapper._reference_qualified({**valid, "status": "FAIL"}, "abc", "t", "m", "p"))
 
-    # REQ: OA-CMP-058
+    # REQ: OA-CPR-058
     def test_cmp_058_replay_call_cost_never_becomes_first_use_latency_claim(self):
         self.assertIn("not first-use wall timing", wrapper._speed_claim("replay_call_cost"))
         self.assertIn("no validated", wrapper._speed_claim(None))
         self.assertIn("does not qualify", wrapper._speed_claim("wall_clock", {"elapsed_ns": [10]}))
 
-    # REQ: OA-CMP-051
+    # REQ: OA-CPR-051
     def test_cmp_051_changed_source_snapshot_stops_pipeline_and_keeps_record(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -248,7 +248,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             self.assertIn("source changed", summary["error"])
             self.assertTrue(summary["artifacts_retained"])
 
-    # REQ: OA-CMP-060
+    # REQ: OA-CPR-060
     def test_cmp_060_default_cli_is_development_only_seed_one(self):
         args = wrapper.build_parser().parse_args(["--out", "/tmp/fresh-comparison"])
         self.assertEqual(args.seed, 1)
@@ -259,7 +259,7 @@ class ComparisonWrapperTests(unittest.TestCase):
         self.assertEqual(wrapper.MAX_DURATION_S, 1200)
         self.assertEqual(wrapper.SCENARIOS, ("straight", "turn", "acceleration", "crossing", "dropout", "delayed"))
 
-    # REQ: OA-CMP-052
+    # REQ: OA-CPR-052
     def test_cmp_052_build_is_pinned_locked_offline_and_single_job(self):
         target = Path("/external/target")
         command = wrapper._build_command(Path("/checkout"), target)
@@ -271,14 +271,14 @@ class ComparisonWrapperTests(unittest.TestCase):
         self.assertEqual(env["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(env["CARGO_TARGET_DIR"], str(target))
 
-    # REQ: OA-CMP-064
+    # REQ: OA-CPR-064
     def test_cmp_064_runner_bounds_match_frozen_runner(self):
         wrapper._validate_runner_bounds(300, 1200)
         for aircraft_count, duration_s in ((301, 1200), (300, 1201), (0, 60)):
             with self.assertRaises(wrapper.ComparisonRunError):
                 wrapper._validate_runner_bounds(aircraft_count, duration_s)
 
-    # REQ: OA-CMP-066
+    # REQ: OA-CPR-066
     def test_cmp_066_cohort_and_scenario_role_are_bound_to_protocol_and_raw_manifest(self):
         protocol = wrapper._read_json(Path(__file__).resolve().parents[1] / wrapper.PROTOCOL_REL)
         manifest = {"seed": 1, "scenario_id": "straight"}
@@ -291,7 +291,7 @@ class ComparisonWrapperTests(unittest.TestCase):
             wrapper._cohort_id_for_run(protocol, {**manifest, "scenario_id": "turn"}, 1, "straight")
 
 
-    # REQ: OA-CMP-067
+    # REQ: OA-CPR-067
     def test_cmp_067_protocol_hash_is_pinned_and_mismatch_fails_closed(self):
         import comparison_evaluator as ce
         root = Path(__file__).resolve().parents[1]
@@ -301,7 +301,7 @@ class ComparisonWrapperTests(unittest.TestCase):
         with self.assertRaisesRegex(wrapper.ComparisonRunError, "does not match the frozen v1 hash"):
             wrapper._check_protocol_hash("0" * 64)
 
-    # REQ: OA-CMP-068
+    # REQ: OA-CPR-068
     def test_cmp_068_only_a_completed_run_exits_zero_for_every_status(self):
         cases = [
             ((True, False, False), "completed", 0),
@@ -316,7 +316,7 @@ class ComparisonWrapperTests(unittest.TestCase):
         self.assertEqual(wrapper._exit_code("failed"), 3)
         self.assertEqual(wrapper._exit_code("anything else"), 3)
 
-    # REQ: OA-CMP-068
+    # REQ: OA-CPR-068
     def test_cmp_068_dirty_source_tree_run_is_exploratory_and_exits_nonzero(self):
         import types
         with tempfile.TemporaryDirectory() as temp:

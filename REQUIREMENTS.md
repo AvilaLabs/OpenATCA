@@ -4353,163 +4353,163 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 
 ## Comparison protocol
 
-- **OA-CMP-200** The frozen development seed set, including its default seed, is disjoint from every
+- **OA-CPR-200** The frozen development seed set, including its default seed, is disjoint from every
   qualification seed; protocol validation rejects any overlap.
-- **OA-CMP-201** Qualification seed IDs are unique and their declared count equals the list length;
+- **OA-CPR-201** Qualification seed IDs are unique and their declared count equals the list length;
   duplicate IDs or a count mismatch fail protocol validation.
-- **OA-CMP-202** Competitive thresholds remain fixed at position RMS ratio ≤0.70, p99 position
+- **OA-CPR-202** Competitive thresholds remain fixed at position RMS ratio ≤0.70, p99 position
   error ratio ≤0.80, p99 receive-to-usable latency ratio ≤0.50, and throughput ratio ≥2.0, with
   equal quality and resource envelope required; mutation fails protocol validation.
-- **OA-CMP-203** The truth, measurement, and output CSV headers and allowed comparison stages are
+- **OA-CPR-203** The truth, measurement, and output CSV headers and allowed comparison stages are
   versioned contract values; unsupported headers or claim stages fail protocol validation.
-- **OA-CMP-204** Qualification declares at least 10,000 simulated aircraft-hours and a seed ×
+- **OA-CPR-204** Qualification declares at least 10,000 simulated aircraft-hours and a seed ×
   aircraft × duration allocation whose arithmetic exactly matches the declared total, with the
   100 qualification seeds assigned 20 each to the five nominal scenarios and zero to dropout.
-- **OA-CMP-205** The qualification uses the frozen IDs 1,000,001 through 1,000,100, distinct from
+- **OA-CPR-205** The qualification uses the frozen IDs 1,000,001 through 1,000,100, distinct from
   development IDs 0 through 31; generator, distribution, and allocation are frozen before candidate
   freeze.
-- **OA-CMP-206** A frozen input/output ledger gives each event exactly one terminal disposition
+- **OA-CPR-206** A frozen input/output ledger gives each event exactly one terminal disposition
   and each required score-grid point exactly one status; missing outputs are scored and any
   unaccounted work fails the strict gate.
-- **OA-CMP-207** The actual holdout is consumed once after freeze, is unavailable for tuning, and
+- **OA-CPR-207** The actual holdout is consumed once after freeze, is unavailable for tuning, and
   is reclassified as development if its outcome informs a change; consumption state is published.
-- **OA-CMP-208** No unqualified professional tracker or unauthenticated legacy export is claimed;
+- **OA-CPR-208** No unqualified professional tracker or unauthenticated legacy export is claimed;
   a controlled or Python baseline cannot be labelled as a professional reference.
-- **OA-CMP-209** Qualification seed replicates are not represented as independent references or
+- **OA-CPR-209** Qualification seed replicates are not represented as independent references or
   aircraft; shared world/reference-model dependence is stated in the protocol.
 
 ## Independent comparison evaluator (OA-CMP)
 
-- **OA-CMP-001** The evaluator parses the shared truth, measurement and output CSV schemas by header name and refuses absent required columns.
-- **OA-CMP-002** CSV byte, row and field sizes are bounded and malformed, non-UTF-8, duplicate-header and non-finite numeric values are refused with source context.
-- **OA-CMP-003** Truth keys are unique and strictly ordered by scenario, time and flight; numeric flight IDs compare numerically.
-- **OA-CMP-004** Output score keys outside the truth grid are counted as false-identity rows and prevent qualification.
-- **OA-CMP-005** Duplicate output grid keys are counted and prevent qualification.
-- **OA-CMP-006** Missing output rows and explicit missing statuses are counted for each system.
-- **OA-CMP-007** Candidate and baseline outputs are evaluated on the common truth grid.
-- **OA-CMP-008** Output timestamps require score time equal publish time for logical accuracy scoring.
-- **OA-CMP-009** Outputs whose source time follows publish time are refused.
-- **OA-CMP-010** The evaluator checks coordinate ranges and computes horizontal position error in a local tangent plane from Earth-centered coordinates.
-- **OA-CMP-011** The evaluator reports velocity error separately from position error.
-- **OA-CMP-012** Aggregate position and velocity results report sample count, RMS, mean and nearest-rank 95th and 99th percentiles.
-- **OA-CMP-013** Position and velocity metrics are split by scenario, flight and truth phase.
-- **OA-CMP-014** Coast, missing and refused outputs are accounted separately from valid outputs, with each status count and fraction of the full truth grid.
-- **OA-CMP-015** A source-timestamp join to input receive time is reported only as a labeled diagnostic proxy; receive-to-usable delay requires an event-level first-valid-use ledger.
-- **OA-CMP-016** Receive-to-usable delay and its competitive ratio are unavailable without a complete event-level first-use ledger that records no-usable-completion dispositions.
-- **OA-CMP-017** A negative receive-to-usable delay is refused.
-- **OA-CMP-018** The evaluator uses fixed thresholds of 0.70 RMS ratio and 0.80 p99 position-error ratio, with hierarchical 95% upper bounds under those thresholds; nominal scoring starts at scenario epoch plus the predeclared two-second initialization window.
-- **OA-CMP-019** A speed claim requires a complete event-level first-use ledger, p99 receive-to-usable delay no greater than 0.50 of reference, and at least 2.0 throughput ratio.
-- **OA-CMP-020** Accuracy and speed qualifications are reported separately from measured logical metrics.
-- **OA-CMP-021** A zero or near-zero reference error produces an explicit unqualified ratio, never a fabricated finite ratio.
-- **OA-CMP-022** Development-control comparisons cannot qualify performance claims.
-- **OA-CMP-023** Missing comparison provenance disables qualification.
-- **OA-CMP-024** Qualification requires an explicit reference qualification state and input fingerprint.
-- **OA-CMP-025** Qualification requires content-validated, matching-input timing ledgers for candidate and reference.
-- **OA-CMP-026** Hashed timing ledger contents identify the monotonic wall clock, elapsed wall time, work units, drain state and input fingerprint.
-- **OA-CMP-027** Speed qualification requires a drained workload and zero reported loss counters.
-- **OA-CMP-028** The evaluator never derives a speed claim from Python runtime measurements.
-- **OA-CMP-029** Paired uncertainty resamples scenario clusters and flight clusters within each scenario rather than individual pings.
-- **OA-CMP-030** The hierarchical cluster bootstrap is deterministic and reports scenario and flight cluster counts.
-- **OA-CMP-031** Fewer than two paired scenario clusters produce unavailable confidence bounds.
-- **OA-CMP-032** The independent CV Kalman baseline consumes measurements and emits outputs on the supplied truth grid.
-- **OA-CMP-033** The baseline estimator does not consume truth coordinates, truth velocity, or truth phase.
-- **OA-CMP-034** The baseline estimator does not apply measurements whose sensor time follows the output grid time.
-- **OA-CMP-035** The baseline uses fixed, declared process noise and measurement uncertainty fields, confirms after two of the last three distinct reports, and marks output coast when source age exceeds two seconds.
-- **OA-CMP-036** The baseline identifies itself as a development control and is never a speed reference.
-- **OA-CMP-037** The command line reports malformed input or metadata with a nonzero exit status.
-- **OA-CMP-038** The command line writes machine-readable JSON with distinct metrics, qualification and accounting sections.
-- **OA-CMP-039** Qualification metadata uses only registered comparison classes and records reference status and input fingerprint.
-- **OA-CMP-040** Throughput is derived from hashed ledger work units and elapsed wall time for equal workload counts.
-- **OA-CMP-041** Timing evidence binds both system timing ledgers to their recorded hashes, and each ledger's contents are parsed and validated.
-- **OA-CMP-042** The evaluator reports the number of measurement events independently of output rows.
-- **OA-CMP-043** The evaluator validates a hashed independent system/scenario/flight/time/track/truth-flight binding and does not silently discard false flight identities.
-- **OA-CMP-044** Empty metric populations report count zero and null statistics.
-- **OA-CMP-045** Percentiles use nearest-rank selection with no interpolation.
-- **OA-CMP-046** The evaluator never divides by a zero reference metric.
-- **OA-CMP-047** Loss, refusal, missing and stale-output coverage remain visible even if accuracy is measurable; nominal post-initialization usable coverage must be at least 99.9% for both systems and candidate coverage cannot be below reference coverage, while dropout runs remain diagnostic-only and cold-start rows stay reported separately.
-- **OA-CMP-048** The baseline emits one valid, coast or missing row per truth grid key; it reports matching M-of-N startup and source-age coast behavior.
-- **OA-CMP-049** The evaluator and baseline use only Python standard-library modules.
+- **OA-CPR-001** The evaluator parses the shared truth, measurement and output CSV schemas by header name and refuses absent required columns.
+- **OA-CPR-002** CSV byte, row and field sizes are bounded and malformed, non-UTF-8, duplicate-header and non-finite numeric values are refused with source context.
+- **OA-CPR-003** Truth keys are unique and strictly ordered by scenario, time and flight; numeric flight IDs compare numerically.
+- **OA-CPR-004** Output score keys outside the truth grid are counted as false-identity rows and prevent qualification.
+- **OA-CPR-005** Duplicate output grid keys are counted and prevent qualification.
+- **OA-CPR-006** Missing output rows and explicit missing statuses are counted for each system.
+- **OA-CPR-007** Candidate and baseline outputs are evaluated on the common truth grid.
+- **OA-CPR-008** Output timestamps require score time equal publish time for logical accuracy scoring.
+- **OA-CPR-009** Outputs whose source time follows publish time are refused.
+- **OA-CPR-010** The evaluator checks coordinate ranges and computes horizontal position error in a local tangent plane from Earth-centered coordinates.
+- **OA-CPR-011** The evaluator reports velocity error separately from position error.
+- **OA-CPR-012** Aggregate position and velocity results report sample count, RMS, mean and nearest-rank 95th and 99th percentiles.
+- **OA-CPR-013** Position and velocity metrics are split by scenario, flight and truth phase.
+- **OA-CPR-014** Coast, missing and refused outputs are accounted separately from valid outputs, with each status count and fraction of the full truth grid.
+- **OA-CPR-015** A source-timestamp join to input receive time is reported only as a labeled diagnostic proxy; receive-to-usable delay requires an event-level first-valid-use ledger.
+- **OA-CPR-016** Receive-to-usable delay and its competitive ratio are unavailable without a complete event-level first-use ledger that records no-usable-completion dispositions.
+- **OA-CPR-017** A negative receive-to-usable delay is refused.
+- **OA-CPR-018** The evaluator uses fixed thresholds of 0.70 RMS ratio and 0.80 p99 position-error ratio, with hierarchical 95% upper bounds under those thresholds; nominal scoring starts at scenario epoch plus the predeclared two-second initialization window.
+- **OA-CPR-019** A speed claim requires a complete event-level first-use ledger, p99 receive-to-usable delay no greater than 0.50 of reference, and at least 2.0 throughput ratio.
+- **OA-CPR-020** Accuracy and speed qualifications are reported separately from measured logical metrics.
+- **OA-CPR-021** A zero or near-zero reference error produces an explicit unqualified ratio, never a fabricated finite ratio.
+- **OA-CPR-022** Development-control comparisons cannot qualify performance claims.
+- **OA-CPR-023** Missing comparison provenance disables qualification.
+- **OA-CPR-024** Qualification requires an explicit reference qualification state and input fingerprint.
+- **OA-CPR-025** Qualification requires content-validated, matching-input timing ledgers for candidate and reference.
+- **OA-CPR-026** Hashed timing ledger contents identify the monotonic wall clock, elapsed wall time, work units, drain state and input fingerprint.
+- **OA-CPR-027** Speed qualification requires a drained workload and zero reported loss counters.
+- **OA-CPR-028** The evaluator never derives a speed claim from Python runtime measurements.
+- **OA-CPR-029** Paired uncertainty resamples scenario clusters and flight clusters within each scenario rather than individual pings.
+- **OA-CPR-030** The hierarchical cluster bootstrap is deterministic and reports scenario and flight cluster counts.
+- **OA-CPR-031** Fewer than two paired scenario clusters produce unavailable confidence bounds.
+- **OA-CPR-032** The independent CV Kalman baseline consumes measurements and emits outputs on the supplied truth grid.
+- **OA-CPR-033** The baseline estimator does not consume truth coordinates, truth velocity, or truth phase.
+- **OA-CPR-034** The baseline estimator does not apply measurements whose sensor time follows the output grid time.
+- **OA-CPR-035** The baseline uses fixed, declared process noise and measurement uncertainty fields, confirms after two of the last three distinct reports, and marks output coast when source age exceeds two seconds.
+- **OA-CPR-036** The baseline identifies itself as a development control and is never a speed reference.
+- **OA-CPR-037** The command line reports malformed input or metadata with a nonzero exit status.
+- **OA-CPR-038** The command line writes machine-readable JSON with distinct metrics, qualification and accounting sections.
+- **OA-CPR-039** Qualification metadata uses only registered comparison classes and records reference status and input fingerprint.
+- **OA-CPR-040** Throughput is derived from hashed ledger work units and elapsed wall time for equal workload counts.
+- **OA-CPR-041** Timing evidence binds both system timing ledgers to their recorded hashes, and each ledger's contents are parsed and validated.
+- **OA-CPR-042** The evaluator reports the number of measurement events independently of output rows.
+- **OA-CPR-043** The evaluator validates a hashed independent system/scenario/flight/time/track/truth-flight binding and does not silently discard false flight identities.
+- **OA-CPR-044** Empty metric populations report count zero and null statistics.
+- **OA-CPR-045** Percentiles use nearest-rank selection with no interpolation.
+- **OA-CPR-046** The evaluator never divides by a zero reference metric.
+- **OA-CPR-047** Loss, refusal, missing and stale-output coverage remain visible even if accuracy is measurable; nominal post-initialization usable coverage must be at least 99.9% for both systems and candidate coverage cannot be below reference coverage, while dropout runs remain diagnostic-only and cold-start rows stay reported separately.
+- **OA-CPR-048** The baseline emits one valid, coast or missing row per truth grid key; it reports matching M-of-N startup and source-age coast behavior.
+- **OA-CPR-049** The evaluator and baseline use only Python standard-library modules.
 
-- **OA-CMP-050** The comparison command requires a fresh output directory outside the checkout and
+- **OA-CPR-050** The comparison command requires a fresh output directory outside the checkout and
   never writes build artifacts under the checkout; output and target directories cannot overlap.
-- **OA-CMP-051** Every run records Git head, dirty status, tracked source digest, patch digest,
+- **OA-CPR-051** Every run records Git head, dirty status, tracked source digest, patch digest,
   untracked source digests, and before/after snapshots; a changed source snapshot fails the run.
-- **OA-CMP-052** Without a prebuilt binary, the command checks Cargo 1.89.0 and builds the standalone
+- **OA-CPR-052** Without a prebuilt binary, the command checks Cargo 1.89.0 and builds the standalone
   runner with the locked release manifest in offline mode, one Cargo job, and an external target
   directory; every subprocess has a fixed timeout and retained bounded logs.
-- **OA-CMP-053** The command records hashes for the runner binary, run configuration, every CSV/JSON
+- **OA-CPR-053** The command records hashes for the runner binary, run configuration, every CSV/JSON
   input and output, stdout, stderr, command list, and comparison result.
-- **OA-CMP-054** The CLI supports a named scenario or `all`; `all` executes six scenarios in fresh
+- **OA-CPR-054** The CLI supports a named scenario or `all`; `all` executes six scenarios in fresh
   isolated directories, then reports each result without turning process success into a score pass.
-- **OA-CMP-055** Baseline generation receives only a derived grid containing `scenario_id`,
+- **OA-CPR-055** Baseline generation receives only a derived grid containing `scenario_id`,
   `flight_id`, and `time_ns`, plus the shared measurements; truth coordinates and phase are not
   passed to the baseline.
-- **OA-CMP-056** The wrapper validates candidate and baseline output coverage against the truth grid
+- **OA-CPR-056** The wrapper validates candidate and baseline output coverage against the truth grid
   and emits one identity binding per output row, normalizing runner identity to `candidate` and
   deriving baseline mapping only from known input flight identifiers.
-- **OA-CMP-057** Wrapper metadata labels the Python constant-velocity control `development_control`
+- **OA-CPR-057** Wrapper metadata labels the Python constant-velocity control `development_control`
   and never represents it as a professional tracker or qualified comparison baseline.
-- **OA-CMP-058** Replay-call-cost timing is preserved as such and is never converted to first-use
+- **OA-CPR-058** Replay-call-cost timing is preserved as such and is never converted to first-use
   wall latency; absent valid timing ledgers leave speed comparison unknown.
-- **OA-CMP-059** The reference validator's evidence status is recorded exactly; a failed or unknown
+- **OA-CPR-059** The reference validator's evidence status is recorded exactly; a failed or unknown
   reference cannot be upgraded by the wrapper to qualified evidence.
-- **OA-CMP-060** The qualification seed set is not launched by the development wrapper; runs use the
+- **OA-CPR-060** The qualification seed set is not launched by the development wrapper; runs use the
   explicit development seed and record source cleanliness and seed/configuration identity.
-- **OA-CMP-061** `--require-competitive-pass` returns nonzero unless every scenario passes accuracy,
+- **OA-CPR-061** `--require-competitive-pass` returns nonzero unless every scenario passes accuracy,
   all-quality, and speed bars; missing, unqualified, or unknown evidence fails that option.
-- **OA-CMP-062** Any build, runner, validator, or evaluator failure exits nonzero and retains the
+- **OA-CPR-062** Any build, runner, validator, or evaluator failure exits nonzero and retains the
   command record, logs, source snapshots, and all outputs created before failure.
-- **OA-CMP-063** JSON artifacts are size bounded, parse as a JSON object with finite values, and
+- **OA-CPR-063** JSON artifacts are size bounded, parse as a JSON object with finite values, and
   malformed content fails with a retained error record when execution has begun.
-- **OA-CMP-064** The command wrapper's aircraft and duration bounds match the standalone runner's
+- **OA-CPR-064** The command wrapper's aircraft and duration bounds match the standalone runner's
   300-aircraft / 1,200-second profile and report the normative profile ID separately from the
   runner implementation model ID.
-- **OA-CMP-065** Standard output and error are drained into fixed-size bounded buffers while the
+- **OA-CPR-065** Standard output and error are drained into fixed-size bounded buffers while the
   process runs; exceeding a limit or timeout terminates the entire child process group and records
   the failure.
-- **OA-CMP-066** Each run binds its cohort ID and scoring role to the frozen protocol plus the raw
+- **OA-CPR-066** Each run binds its cohort ID and scoring role to the frozen protocol plus the raw
   runner manifest seed/scenario; metadata must agree, and the development command cannot launch
   nominal qualification or sealed fault-cohort seeds.
-- **OA-CMP-067** The wrapper pins the comparison protocol hash (equal to the evaluator's pinned value) and refuses a protocol file or recorded `protocol_sha256` that differs.
-- **OA-CMP-068** A run's status is `completed` only for a clean, reference-validated run; a dirty source tree gives `exploratory (source tree not clean)`, and every status other than `completed`, including `reference_failure`, exits 3 whether or not `--require-competitive-pass` is given.
-- **OA-CMP-210** A `missing` output is an explicit row with scheduled `score_ns == publish_ns`,
+- **OA-CPR-067** The wrapper pins the comparison protocol hash (equal to the evaluator's pinned value) and refuses a protocol file or recorded `protocol_sha256` that differs.
+- **OA-CPR-068** A run's status is `completed` only for a clean, reference-validated run; a dirty source tree gives `exploratory (source tree not clean)`, and every status other than `completed`, including `reference_failure`, exits 3 whether or not `--require-competitive-pass` is given.
+- **OA-CPR-210** A `missing` output is an explicit row with scheduled `score_ns == publish_ns`,
   empty `source_ns` and empty position/velocity values; no required grid row may be omitted.
 
 ## Independent synthetic comparison reference
 
-- **OA-CMP-150** The stdlib-only reference validator accepts explicit truth, measurements, manifest, protocol and output paths, applies bounded strict CSV/JSON parsing, and rejects malformed, non-finite, duplicate, reordered or incomplete rows.
-- **OA-CMP-151** The validator independently recomputes supported v2 scenario truth (including all-positive turns and alternating crossing signs), WGS84 ground velocity and regional extent, and sanity-checks velocity with ECEF central differences.
-- **OA-CMP-152** Measurement IDs, causal receive schedule, dropout denominator and reported covariance reconcile with the manifest, including truth-grid event ordinals absent from dropout measurements.
-- **OA-CMP-153** The declared Box-Muller seed/event/axis noise model is checked against deterministic latents, distinct axis keys and finite-sample residual bounds.
-- **OA-CMP-154** Evidence records bind input artifacts and protocol by SHA-256; a passing result requires the supplied runner source bytes to match the manifest's declared implementation SHA-256.
-- **OA-CMP-155** Passing evidence is labeled `independent_simulation` with `declared_model_only` scope and explicitly makes no physical-accuracy claim; it preserves the exact recognized protocol version/status and reports the v1.0.3 dropout fault gate as blocked.
-- **OA-CMP-156** Unknown model/protocol versions or missing required artifacts produce `UNQUALIFIED`; readable contradictions produce `FAIL` with a reason.
-- **OA-CMP-157** The validator checks v1.0.3 paired post-init key-set rules and the separate 20-seed dropout fault cohort, exact allocation and pending gates; it never presents that blocked cohort as a passed quality gate. Unit tests cover evidence hashes, negative controls, and missing/mismatched runner source.
+- **OA-CPR-150** The stdlib-only reference validator accepts explicit truth, measurements, manifest, protocol and output paths, applies bounded strict CSV/JSON parsing, and rejects malformed, non-finite, duplicate, reordered or incomplete rows.
+- **OA-CPR-151** The validator independently recomputes supported v2 scenario truth (including all-positive turns and alternating crossing signs), WGS84 ground velocity and regional extent, and sanity-checks velocity with ECEF central differences.
+- **OA-CPR-152** Measurement IDs, causal receive schedule, dropout denominator and reported covariance reconcile with the manifest, including truth-grid event ordinals absent from dropout measurements.
+- **OA-CPR-153** The declared Box-Muller seed/event/axis noise model is checked against deterministic latents, distinct axis keys and finite-sample residual bounds.
+- **OA-CPR-154** Evidence records bind input artifacts and protocol by SHA-256; a passing result requires the supplied runner source bytes to match the manifest's declared implementation SHA-256.
+- **OA-CPR-155** Passing evidence is labeled `independent_simulation` with `declared_model_only` scope and explicitly makes no physical-accuracy claim; it preserves the exact recognized protocol version/status and reports the v1.0.3 dropout fault gate as blocked.
+- **OA-CPR-156** Unknown model/protocol versions or missing required artifacts produce `UNQUALIFIED`; readable contradictions produce `FAIL` with a reason.
+- **OA-CPR-157** The validator checks v1.0.3 paired post-init key-set rules and the separate 20-seed dropout fault cohort, exact allocation and pending gates; it never presents that blocked cohort as a passed quality gate. Unit tests cover evidence hashes, negative controls, and missing/mismatched runner source.
 
-- **OA-CMP-211** The scenario epoch is the score origin; candidate initialization is 2-of-3 distinct
+- **OA-CPR-211** The scenario epoch is the score origin; candidate initialization is 2-of-3 distinct
   events, and the development control requires two distinct input events before usable output.
-- **OA-CMP-212** Every run retains raw cold-start and all-grid results and separately scores only
+- **OA-CPR-212** Every run retains raw cold-start and all-grid results and separately scores only
   `time_ns >= epoch + 2 s` as post-initialization metrics.
-- **OA-CMP-213** Coast status is determined from actual supporting source age and is required when
+- **OA-CPR-213** Coast status is determined from actual supporting source age and is required when
   that age exceeds two seconds; only `valid` rows count as usable in post-initialization coverage.
-- **OA-CMP-214** Nominal scenarios straight, turn, acceleration, crossing, and delayed require
+- **OA-CPR-214** Nominal scenarios straight, turn, acceleration, crossing, and delayed require
   post-initialization usable coverage ≥0.999 and candidate coverage no lower than baseline.
-- **OA-CMP-215** Dropout is diagnostic-only under v1 and is excluded from qualification gates for
+- **OA-CPR-215** Dropout is diagnostic-only under v1 and is excluded from qualification gates for
   its predeclared 4-of-12 absent-source schedule and resulting 2-of-12 coast interval.
-- **OA-CMP-216** The runner, reference validator, evaluator, and wrapper preserve and report the
+- **OA-CPR-216** The runner, reference validator, evaluator, and wrapper preserve and report the
   frozen v1.0.3 initialization, scenario-role, paired-key, and fault-cohort values without tuning
   them from candidate results.
-- **OA-CMP-217** The v1 dropout fault cohort is separate from the 100 nominal performance seeds,
+- **OA-CPR-217** The v1 dropout fault cohort is separate from the 100 nominal performance seeds,
   uses seeds 1,000,101 through 1,000,120 and 2,000 additional simulated aircraft-hours, remains
   unopened, and blocks any all-quality pass until every independently reviewed fault gate is
   measured and passes; nominal seed count cannot erase the fault-mode gate.
-- **OA-CMP-218** Qualified v1 accuracy requires identical candidate and baseline usable post-init
+- **OA-CPR-218** Qualified v1 accuracy requires identical candidate and baseline usable post-init
   truth-grid key sets; a mismatch blocks qualified accuracy while raw per-system metrics and
   keyset intersection/difference counts remain reported.
-- **OA-CMP-219** The evaluator pins the SHA-256 of `validation/comparison-protocol-v1.json`; any other protocol bytes make accuracy qualification `unqualified_protocol_hash_mismatch` with the reason "protocol file does not match the frozen v1 hash", and every threshold it applies (ratios, coverage minimum, coast age, initialization window) is read from the verified protocol.
-- **OA-CMP-220** Every unpaired position, velocity, age and per-group statistic carries its coverage (rows used, rows expected, fraction) in the same object as its figures.
-- **OA-CMP-221** Parsed integers and numbers must match a strict decimal pattern; underscores, spaces, a leading plus sign, and inf/nan text are refused.
-- **OA-CMP-222** The cluster bootstrap reports its replicate count and how many replicates were dropped for a zero denominator.
+- **OA-CPR-219** The evaluator pins the SHA-256 of `validation/comparison-protocol-v1.json`; any other protocol bytes make accuracy qualification `unqualified_protocol_hash_mismatch` with the reason "protocol file does not match the frozen v1 hash", and every threshold it applies (ratios, coverage minimum, coast age, initialization window) is read from the verified protocol.
+- **OA-CPR-220** Every unpaired position, velocity, age and per-group statistic carries its coverage (rows used, rows expected, fraction) in the same object as its figures.
+- **OA-CPR-221** Parsed integers and numbers must match a strict decimal pattern; underscores, spaces, a leading plus sign, and inf/nan text are refused.
+- **OA-CPR-222** The cluster bootstrap reports its replicate count and how many replicates were dropped for a zero denominator.
 
 ## Motion-model development study
 

@@ -1,4 +1,4 @@
-"""Focused unit and negative-control tests for OA-CMP-150..179."""
+"""Focused unit and negative-control tests for OA-CPR-150..179."""
 
 from __future__ import annotations
 
@@ -229,7 +229,7 @@ class ComparisonReferenceTests(unittest.TestCase):
     def write_manifest(self, manifest: dict) -> None:
         (self.root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
-    # REQ: OA-CMP-151, OA-CMP-152, OA-CMP-153, OA-CMP-155
+    # REQ: OA-CPR-151, OA-CPR-152, OA-CPR-153, OA-CPR-155
     def test_all_declared_scenarios_pass_closed_form_and_noise_checks(self) -> None:
         for scenario, duration in (("straight", 8), ("turn", 8), ("acceleration", 8),
                                    ("crossing", 8), ("dropout", 13), ("delayed", 8)):
@@ -240,7 +240,7 @@ class ComparisonReferenceTests(unittest.TestCase):
                 self.assertFalse(result["physical_accuracy_claim"])
                 self.assertEqual(result["reference_kind"], "independent_simulation")
 
-    # REQ: OA-CMP-151
+    # REQ: OA-CPR-151
     def test_even_and_odd_turn_directions_match_independent_vectors_and_reject_wrong_sign(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root, "turn", aircraft=2, duration=60)
         truth_rows = self.read_csv(truth)
@@ -275,7 +275,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(bad["status"], "FAIL")
         self.assertIn("analytic WGS84 velocity mismatch", bad["reason"])
 
-    # REQ: OA-CMP-151
+    # REQ: OA-CPR-151
     def test_100m_truth_shift_fails(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         rows = self.read_csv(truth)
@@ -285,7 +285,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("analytic trajectory position mismatch", result["reason"])
 
-    # REQ: OA-CMP-151
+    # REQ: OA-CPR-151
     def test_velocity_inconsistency_fails(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         rows = self.read_csv(truth)
@@ -295,7 +295,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("analytic WGS84 velocity mismatch", result["reason"])
 
-    # REQ: OA-CMP-152
+    # REQ: OA-CPR-152
     def test_negative_and_wrong_future_receive_times_fail(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         rows = self.read_csv(measurements)
@@ -315,7 +315,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("causal delay schedule", result["reason"])
 
-    # REQ: OA-CMP-150, OA-CMP-152
+    # REQ: OA-CPR-150, OA-CPR-152
     def test_measurement_reorder_duplicate_and_missing_event_fail(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root, "delayed", duration=8)
         rows = self.read_csv(measurements)
@@ -341,7 +341,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("row count", result["reason"])
 
-    # REQ: OA-CMP-153
+    # REQ: OA-CPR-153
     def test_independent_noise_metadata_rejects_aliased_axis(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         data = self.read_manifest()
@@ -351,7 +351,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("four distinct axis", result["reason"])
 
-    # REQ: OA-CMP-150
+    # REQ: OA-CPR-150
     def test_truth_schema_and_nonfinite_values_are_rejected(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         rows = self.read_csv(truth)
@@ -376,7 +376,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("protocol row limit", result["reason"])
 
-    # REQ: OA-CMP-156
+    # REQ: OA-CPR-156
     def test_unknown_world_model_is_unqualified(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         data = self.read_manifest()
@@ -385,7 +385,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         result = ref.validate(truth, measurements, manifest, protocol, truth.parent / "runner.rs")
         self.assertEqual(result["validation_status"], "UNQUALIFIED")
 
-    # REQ: OA-CMP-154, OA-CMP-155
+    # REQ: OA-CPR-154, OA-CPR-155
     def test_output_hash_bindings_are_present(self) -> None:
         truth, measurements, manifest, protocol = make_case(self.root)
         result = ref.validate(truth, measurements, manifest, protocol, truth.parent / "runner.rs")
@@ -400,7 +400,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(result["all_quality_claim_status"], "BLOCKED_UNTIL_ALL_REQUIRED_GATES_PASS_ON_SEPARATE_COHORT")
         self.assertTrue(result["runner_source_hash_verified"])
 
-    # REQ: OA-CMP-154, OA-CMP-156
+    # REQ: OA-CPR-154, OA-CPR-156
     def test_pass_requires_matching_runner_source_hash(self) -> None:
         files = make_case(self.root)
         unbound = ref.validate(*files)
@@ -413,7 +413,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.assertEqual(mismatch["validation_status"], "FAIL")
         self.assertIn("does not match manifest", mismatch["reason"])
 
-    # REQ: OA-CMP-157
+    # REQ: OA-CPR-157
     def test_protocol_fault_cohort_ids_are_frozen_and_blocked(self) -> None:
         files = make_case(self.root)
         protocol_data = json.loads(files[3].read_text(encoding="utf-8"))
