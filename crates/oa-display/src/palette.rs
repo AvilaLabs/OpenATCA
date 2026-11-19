@@ -20,8 +20,10 @@ pub const ALERT: u8 = 9;
 /// Boundaries of neighbouring facilities: the same hues as the own boundary, dimmer.
 pub const NEIGHBOUR_HIGH: u8 = 10;
 pub const NEIGHBOUR_LOW: u8 = 11;
+/// Live targets: the position symbol, velocity leader and data block (light mint).
+pub const TARGET: u8 = 12;
 
-/// XRGB8888 values: `0x00RRGGBB`. Entries 12 to 15 are reserved and black.
+/// XRGB8888 values: `0x00RRGGBB`. Entries 13 to 15 are reserved and black.
 pub const PALETTE: [u32; PALETTE_LEN] = [
     0x000B_0F14, // background
     0x00E8_EDF2, // text
@@ -35,7 +37,7 @@ pub const PALETTE: [u32; PALETTE_LEN] = [
     0x00FF_5A4F, // alert
     0x002F_6F96, // neighbour ARTCC HIGH (dim sky blue)
     0x009A_6B00, // neighbour ARTCC LOW (dim orange)
-    0,
+    0x007F_E0B0, // target (light mint: apart from every data colour under all three deficiencies)
     0,
     0,
     0,
@@ -123,6 +125,7 @@ mod tests {
             ("airport", AIRPORT),
             ("dim text", DIM_TEXT),
             ("alert", ALERT),
+            ("target", TARGET),
         ] {
             let c = contrast(BACKGROUND, i);
             assert!(c >= 4.5, "{name} has contrast {c:.2}:1");
@@ -166,6 +169,7 @@ mod tests {
             NEIGHBOUR_HIGH,
             NEIGHBOUR_LOW,
             AIRWAY,
+            TARGET,
             FIX,
             AIRPORT,
             ALERT,

@@ -56,6 +56,11 @@ const ALLOW: &[Allow] = &[
         reason: "the crate's checked helper parse_finite for command-line numbers",
     },
     Allow {
+        file: "crates/oa-scope-replay/src/cli.rs",
+        needle: "text.parse::<f64>()",
+        reason: "the crate's checked helper parse_finite for command-line numbers",
+    },
+    Allow {
         file: "crates/oa-grib2/src/bits.rs",
         needle: "map(f32::from_bits)",
         reason: "the only caller, the data representation section, refuses a non-finite reference value",

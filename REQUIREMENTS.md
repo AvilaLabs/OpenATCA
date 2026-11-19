@@ -1106,6 +1106,39 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   `DisplayError::TooLarge`, not an allocation.
 - **OA-DSP-037** `build_scene` refuses a view whose range thresholds are NaN, infinite or negative, or whose
   projection has a non-finite constant or an empty screen, with `DisplayError::BadView`.
+- **OA-DSP-038** Live traffic enters the display as plain data: one displayed target (position, ground track and
+  speed, altitude if known, address, callsign, coasting and uncertain flags, the age of the last reacquisition,
+  the 95% radius in metres, a bounded history) and a fixed-capacity set of them per frame. The display crate does
+  not depend on the tracker. A style with a leader outside 0 to 30 minutes, a trail above 16 positions, or a
+  capacity above 2^20 targets is refused, and nothing is allocated for it.
+- **OA-DSP-039** Each target state has its own drawing, never colour alone: a tracking target is an 8 px square with a
+  centre dot; coasting adds an X through the symbol and the data block tag `CST`; uncertain is a 12 px diamond with
+  its 95% radius drawn as a circle of true scale and the tag `UNC`; a track reacquired within the configured seconds
+  has a 9 px circle in the alert colour and the tag `REACQ`. Flags map to symbols exactly as the table in the
+  `traffic` module says.
+- **OA-DSP-040** Each target has a velocity leader along its ground track as long as it flies in the configured
+  minutes (default 1; none without a velocity), a history trail of the last N positions (default 5) as small dots
+  in the dim colour, and a data block at a fixed offset: callsign (the hex address without one), altitude in hundreds
+  of feet and ground speed in knots over ten, each rounded to the nearest, `---` or `--` when absent, then the state
+  tags. Data blocks do not yet avoid one another (LS-401, M8).
+- **OA-DSP-041** A target set at capacity refuses the target, counts it and returns a typed error; it never truncates
+  silently, and the frame shows `TARGETS NOT DRAWN: N` in the alert colour. Targets off the map area or under the
+  legend strip are counted as off screen, not as refused. The traffic tables are sized for the set's capacity and a
+  frame allocates nothing in the list.
+- **OA-DSP-042** The traffic of a frame is a pure function of the set, the projection and the style: the same
+  input gives the same display list and the same frame hash, and a synthetic scene has a golden hash.
+- **OA-DSP-043** The shell (`oa-scope-replay`, which links the tracker; the display crate does not) converts tracker
+  rows into targets: the newest row at or before the frame's time, none from a track silent for more than 3 s, ground
+  speed and track from the velocity (no track under 1 knot), the altitude only with the altitude flag, the
+  coasting and uncertain flags, the radius from the covariance, history rows a fixed step apart, the reacquired age
+  from the newest flagged row inside the window, the newest callsign heard at or before the time (never a later one).
+  Targets off the map are kept out of the set so they cannot use its capacity.
+- **OA-DSP-044** `oa-scope-replay` runs the tracker over an ADS-B clip from a warm-up before a start time and writes one
+  PPM per step with a `hashes.txt` of `frame_index time sha256` lines. The same inputs give the same hashes, with
+  or without the images; a frame does not depend on earlier frames. A bad number, time or step is a usage error and
+  a window without reports is a plain failure.
+- **OA-DSP-045** Traffic layers draw above the map and below the legend strip's backdrop, so the legend is never covered
+  by a target.
 
 ### Replay and flight state (oa-replay)
 

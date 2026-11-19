@@ -187,6 +187,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-scope-replay"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-airspace",
+ "oa-display",
+ "oa-feed",
+ "oa-geo",
+ "oa-sha256",
+ "oa-track",
+]
+
+[[package]]
 name = "oa-sensorsim"
 version = "0.0.1"
 dependencies = [
