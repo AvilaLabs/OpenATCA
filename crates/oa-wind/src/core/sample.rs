@@ -1,9 +1,9 @@
-//! The query: horizontal bilinear, vertical linear in log-pressure, linear in time. Core (pure).
+//! The query: horizontal bilinear, vertical linear in log-pressure, linear in time. Core (pure, B7).
 //! See the crate docs for the model; every refusal is a [`Refusal`], nothing is extrapolated.
 
-use crate::error::Refusal;
-use crate::hour::Hour;
-use crate::isa::pressure_hpa_from_altitude_ft;
+use crate::core::error::Refusal;
+use crate::core::hour::Hour;
+use crate::core::isa::pressure_hpa_from_altitude_ft;
 use oa_grib2::{latlon_to_ij, to_earth_relative};
 
 /// A query: position, pressure altitude and time.

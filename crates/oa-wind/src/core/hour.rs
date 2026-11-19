@@ -6,8 +6,8 @@
 //! `oa_grib2::latlon_to_ij` returns). Levels are in ascending pressure (top of the atmosphere
 //! first). U and V are as the file stores them (grid-relative on RAP); see the crate docs.
 
-use crate::error::LoadError;
-use crate::{MAX_HOUR_VALUES, MAX_LEVELS};
+use crate::core::error::LoadError;
+use crate::core::limits::{MAX_HOUR_VALUES, MAX_LEVELS};
 use oa_grib2::{
     byte_range, decode_message, forecast_seconds, grid_dims, inspect_stream, parameter_name,
     parse_idx, ref_unix_seconds, scan_messages, Field, FieldInfo, Grid, Idx, Parameter,

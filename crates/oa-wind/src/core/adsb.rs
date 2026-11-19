@@ -4,9 +4,9 @@
 //! statistics are tested on synthetic hours and run against the archive by `oa-wind-check`.
 //! What the readsb values mean and their limits are in the `oa-adsb` crate documentation.
 
-use crate::check::{obs_components, refusal_name, summarize, Summary};
-use crate::error::{LoadError, QueryError};
-use crate::sample::{Query, Sample};
+use crate::core::check::{obs_components, refusal_name, summarize, Summary};
+use crate::core::error::{LoadError, QueryError};
+use crate::core::sample::{Query, Sample};
 use oa_adsb::{reports_len, Reports, F_GROUND, NONE_I16, NONE_I32, NONE_U16};
 
 /// Limit: observations held for one comparison. At one observation per aircraft per

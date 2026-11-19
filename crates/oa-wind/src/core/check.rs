@@ -1,10 +1,9 @@
 //! Validation statistics for `oa-wind-check`: the model against `oa-grib2`'s own decoded values,
 //! against HRRR, and against pilot-reported winds. Core (pure): the binary reads the files.
 
-use crate::archive::{archive_sample, Archive};
-use crate::error::{LoadError, QueryError, Refusal};
-use crate::hour::Hour;
-use crate::sample::{sample_hour_pressure, sample_hour_unrotated, Query};
+use crate::core::error::Refusal;
+use crate::core::hour::Hour;
+use crate::core::sample::{sample_hour_pressure, sample_hour_unrotated};
 use oa_grib2::{ij_to_latlon, sample_bilinear, wind_at, Field, Parameter, LEVEL_ISOBARIC};
 
 /// Median, 95th percentile (linear between ranks), mean and largest of a list of values.
@@ -159,7 +158,7 @@ pub fn refusal_name(r: &Refusal) -> &'static str {
     }
 }
 
-fn count(list: &mut Vec<(&'static str, usize)>, name: &'static str) {
+pub(crate) fn count(list: &mut Vec<(&'static str, usize)>, name: &'static str) {
     match list.iter_mut().find(|(n, _)| *n == name) {
         Some(e) => e.1 += 1,
         None => list.push((name, 1)),
@@ -231,43 +230,4 @@ pub fn obs_components(wdir_deg: f64, wspd_kt: f64) -> (f64, f64) {
     let ms = wspd_kt * 1852.0 / 3600.0;
     let (s, c) = wdir_deg.to_radians().sin_cos();
     (-ms * s, -ms * c)
-}
-
-/// Compares the archive's query with observations, in the order given (time order keeps the
-/// cache from reloading). A refused query is counted by reason and left out of the statistics;
-/// a failed file load stops with its error.
-pub fn compare_obs(a: &mut Archive, obs: &[ObsWind]) -> Result<VectorCompare, LoadError> {
-    let (mut d, mut sp) = (Vec::new(), Vec::new());
-    let (mut bu, mut bv) = (0.0, 0.0);
-    let mut refused = Vec::new();
-    for o in obs {
-        let q = Query {
-            lat: o.lat,
-            lon: o.lon,
-            alt_ft: o.alt_ft,
-            time_s: o.time_s,
-        };
-        match archive_sample(a, &q) {
-            Ok(s) => {
-                let (ou, ov) = obs_components(o.wdir_deg, o.wspd_kt);
-                d.push((s.u_ms - ou).hypot(s.v_ms - ov));
-                sp.push((s.u_ms.hypot(s.v_ms) - ou.hypot(ov)).abs());
-                bu += s.u_ms - ou;
-                bv += s.v_ms - ov;
-            }
-            Err(QueryError::Refused(r)) => count(&mut refused, refusal_name(&r)),
-            Err(QueryError::Load(e)) => return Err(e),
-        }
-    }
-    let n = d.len();
-    let nf = n.max(1) as f64;
-    Ok(VectorCompare {
-        n,
-        refused,
-        diff: summarize(&mut d),
-        diff_unrotated: None,
-        bias_u: bu / nf,
-        bias_v: bv / nf,
-        speed_diff: summarize(&mut sp),
-    })
 }

@@ -9,9 +9,9 @@
 
 use crate::archive::*;
 use crate::check::*;
+use crate::compare_obs;
 use crate::error::*;
 use crate::hour::*;
-use crate::isa::*;
 use crate::sample::*;
 use crate::*;
 use oa_grib2::{
@@ -820,7 +820,7 @@ fn adsb_comparison_groups_by_altitude_and_turning_and_compares_temperature() {
     let e = compare_adsb(&obs, &mut |_| {
         Err(QueryError::Load(LoadError::Io {
             path: "x".into(),
-            kind: std::io::ErrorKind::NotFound,
+            kind: std::io::ErrorKind::NotFound.to_string(),
         }))
     });
     assert!(matches!(e, Err(LoadError::Io { .. })));
@@ -1097,7 +1097,7 @@ fn an_exact_hour_does_not_read_the_unused_archive_file() {
             "c" => Ok(linear_hour(14)),
             _ => Err(LoadError::Io {
                 path: name,
-                kind: std::io::ErrorKind::NotFound,
+                kind: std::io::ErrorKind::NotFound.to_string(),
             }),
         }
     };

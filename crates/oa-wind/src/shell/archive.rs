@@ -1,4 +1,4 @@
-//! Hour files on disk and a bounded cache of hours. Shell: owns the files; the model and the
+//! Hour files on disk and a bounded cache of hours. Shell (B7): owns the files; the model and the
 //! query are in [`crate::hour`] and [`crate::sample`].
 //!
 //! The NOAA files hold many messages of which an hour needs four parameters on isobaric levels.
@@ -44,7 +44,7 @@ pub struct Archive {
 fn io_err(path: &Path, e: &std::io::Error) -> LoadError {
     LoadError::Io {
         path: path.display().to_string(),
-        kind: e.kind(),
+        kind: e.kind().to_string(),
     }
 }
 
@@ -288,7 +288,7 @@ pub fn read_hour_file_report(path: &Path) -> Result<(Hour, IndexUse), LoadError>
     if meta.len() > MAX_FILE_BYTES {
         return Err(LoadError::Io {
             path: path.display().to_string(),
-            kind: std::io::ErrorKind::InvalidInput,
+            kind: std::io::ErrorKind::InvalidInput.to_string(),
         });
     }
     let mut idx_path = path.as_os_str().to_owned();

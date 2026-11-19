@@ -1,4 +1,4 @@
-//! The ICAO standard atmosphere (ISO 2533), pressure altitude to pressure and back. Core (pure).
+//! The ICAO standard atmosphere (ISO 2533), pressure altitude to pressure and back. Core (pure, B7).
 //!
 //! Pressure altitude is defined as the altitude, in the standard atmosphere, at which the
 //! pressure equals the measured static pressure. Converting it to pressure with the standard
@@ -8,7 +8,7 @@
 //! Two layers cover -5000 m to 20 000 m geopotential: the troposphere (lapse 6.5 K/km, to
 //! 11 000 m) and the isothermal layer (216.65 K, 11 000 to 20 000 m).
 
-use crate::error::Refusal;
+use crate::core::error::Refusal;
 
 /// Sea-level standard pressure, hPa.
 pub const P0_HPA: f64 = 1013.25;
