@@ -5,7 +5,13 @@
 #
 #   tools/replay_overlay_apply.sh <worktree> <commit> <patch> <report>
 #
+# Exit status: 0 applied; 2 refused or failed (every refusal below, a patch that deletes a file,
+# a patch whose `diff --git` count differs from its `index` line count, a report directory that
+# does not exist, a missing worktree, patch or commit).
+#
 # Checks, in order, each a refusal (exit 2) when it fails:
+#   0. the report directory exists, the patch deletes no file, and it has one `index` line for
+#      every `diff --git` line (a mode change or rename has none and is refused);
 #   1. every file the patch changes has, at <commit>, the blob the patch's `index` line names as
 #      its preimage (a file the patch creates must not exist at <commit>);
 #   2. `git apply --check` accepts the patch (git apply allows no fuzz: context must match);
@@ -28,7 +34,9 @@ report="$4"
 [ -f "$patch" ] || die "no such patch: $patch"
 # git -C changes directory: the patch and the report are named by absolute path.
 patch="$(cd "$(dirname "$patch")" && pwd)/$(basename "$patch")"
+[ -d "$(dirname "$report")" ] || die "the report directory does not exist: $(dirname "$report")"
 report="$(cd "$(dirname "$report")" && pwd)/$(basename "$report")"
+[ ! -d "$report" ] || die "the report path is a directory: $report"
 git -C "$wt" rev-parse --verify --quiet "$commit^{commit}" >/dev/null || die "no such commit: $commit"
 
 # "<path> <preimage> <postimage>" for every file of the patch, from `diff --git` and `index`.
@@ -37,11 +45,17 @@ mapfile -t entries < <(awk '
     /^index [0-9a-f]+\.\.[0-9a-f]+/ { split($2, ids, "\\.\\."); print path, ids[1], ids[2] }
 ' "$patch")
 [ "${#entries[@]}" -gt 0 ] || die "the patch names no file blobs (no index lines)"
+diffs="$(grep -c '^diff --git ' "$patch" || true)"
+[ "$diffs" -eq "${#entries[@]}" ] || die "the patch has $diffs files but ${#entries[@]} index lines (a mode change or rename?)"
+if grep -q -e '^deleted file mode' -e '^rename ' -e '^copy ' "$patch"; then
+    die "the patch deletes, renames or copies a file"
+fi
 
 zeros() { [[ "$1" =~ ^0+$ ]]; }
 
 for e in "${entries[@]}"; do
-    read -r path pre _ <<<"$e"
+    read -r path pre post <<<"$e"
+    ! zeros "$post" || die "the patch deletes $path"
     if zeros "$pre"; then
         if git -C "$wt" cat-file -e "$commit:$path" 2>/dev/null; then
             die "$path exists at $commit, but the patch creates it"

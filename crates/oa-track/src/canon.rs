@@ -8,7 +8,7 @@
 //! |---|---|
 //! | [`ROW_BYTES`], `OFF_*`, [`DIGEST_HEADER`], [`ROWS_MAGIC`], [`ROWS_VERSION`], [`ROWS_HEADER_BYTES`], [`MAX_ROWS_PER_SECOND`], [`MAX_SECONDS`], [`CANON_FIELDS`] | core (constants) |
 //! | [`canon_row`], [`canon_row_at`], [`row_second`], [`field_at`] | core, pure |
-//! | [`second_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
+//! | [`second_line`], [`digest_end_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
 //! | [`Digester`] (`new`, `push`, `finish`) | core, pure (a subsystem under D5: owns its sums) |
 //! | [`rows_header`], [`parse_rows_header`], [`limit_text`] | core, pure |
 //! | [`SecondEntry`], [`LimitError`], [`CanonRow`] | plain data |
@@ -61,8 +61,10 @@ pub const OFF_FLAGS: usize = 84;
 /// One canonical row.
 pub type CanonRow = [u8; ROW_BYTES];
 
-/// First line of a digest file.
-pub const DIGEST_HEADER: &str = "# oa-track digest v1: second chain_hash second_hash rows";
+/// First line of a digest file. v2 ends the file with an `end` line ([`digest_end_line`]), so a
+/// digest cut at a line boundary is not mistaken for a shorter run.
+pub const DIGEST_HEADER: &str =
+    "# oa-track digest v2: second chain_hash second_hash rows; last line: end seconds rows chain";
 /// Magic of a rows file; then `u32` version, `u32` row size, `u64` row count (little-endian).
 pub const ROWS_MAGIC: &[u8; 8] = b"OATKROWS";
 pub const ROWS_VERSION: u32 = 1;
@@ -221,6 +223,15 @@ pub fn second_line(e: &SecondEntry) -> String {
         to_hex(&e.hash),
         e.rows
     )
+}
+
+/// The last line of a digest file: `end <seconds> <rows> <chain hash of the last second>` (32
+/// zero bytes, in hex, for a run with no seconds). The reader recomputes all three from the lines
+/// before it and requires equality.
+pub fn digest_end_line(entries: &[SecondEntry]) -> String {
+    let rows = entries.iter().fold(0u64, |a, e| a.saturating_add(e.rows));
+    let chain = entries.last().map_or([0u8; 32], |e| e.chain);
+    format!("end {} {} {}", entries.len(), rows, to_hex(&chain))
 }
 
 /// Lowercase hex of 32 bytes.

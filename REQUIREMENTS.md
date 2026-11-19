@@ -4363,11 +4363,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   overwrites one; rows that disagree make the key a conflict. A sample with no tracker row, or only
   a conflicting one, is a third state, scored in its own `UNMATCHED` group and written as
   `unmatched`, never as "no". A run that is neither `--development` nor `--allow-dirty` fails if
-  any sample is unmatched.
+  any sample is unmatched, counted over every point after the join.
 - **OA-TRK-374** In every coverage-penalised metric (M4, M4t, M7, M7t) a present value that is not a
-  number is a failure, and the count of such values is printed; aircraft with no usable time fit are
+  number is a failure, and the count of such values is printed; an aircraft whose M6 RMS is not a
+  number is a failure for the share and is left out of the sign test; samples left out of a metric's
+  common set for a non-finite value are counted per system apart from samples not in all three; aircraft with no usable time fit are
   counted per system with their samples and are scored unfitted (offset 0), and the output says so.
-- **OA-RDF-007** A digest is accepted only with the `v1` header as its first line and with every
+- **OA-RDF-007** A digest is accepted only with the `v2` header as its first line and with every
   chain hash equal to the chain recomputed from the line and the lines before it; a line that fails
   is named.
 - **OA-RDF-008** A digest or expect file over its size limit, a second with no rows or over 2^20
@@ -4389,8 +4391,23 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-RDF-014** `tools/replay_overlay_apply.sh` applies the overlay patch only to files whose blob
   is the patch's preimage, at zero fuzz, checks the postimage blobs, and records the sha256 of the
   patch and of every patched file; any mismatch is a refusal (exit 2).
-- **OA-RDF-015** The canonical format constants of the overlay's `canon.rs` equal those of
-  `crates/oa-track/src/canon.rs`.
+- **OA-RDF-015** The overlay patch creates `canon.rs` and `canon_spill.rs` byte for byte as they are in
+  `crates/oa-track/src/`, so an old commit writes the digest line, second hash, chain and end line
+  of the tree.
 - **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with `RUSTFLAGS`,
   `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS` removed, and its report
   states that they were cleared, what they held and the toolchain.
+- **OA-RDF-017** A digest ends with `end <seconds> <rows> <chain>` (format v2), which the reader
+  recomputes from the lines before it and requires; a digest cut at a line boundary, an end line that
+  disagrees, or text after it is an error.
+- **OA-RDF-018** Two digests that both have no seconds are exit 2 ("no seconds to compare"), not
+  identical.
+- **OA-RDF-019** When both rows files are given they are verified against their digests whether or
+  not the digests are identical, and the summary says `rows_known=true`.
+- **OA-RDF-020** A second the digests call different but whose rows do not differ, or a differing
+  second that was not diffed, is an inconsistency: exit 2, never a pass.
+- **OA-RDF-021** An option given twice is a usage error (exit 2).
+- **OA-RDF-022** `tools/replay_compare.sh` runs cargo and rustc under `env -i` with only PATH, HOME,
+  RUSTUP_HOME, CARGO_HOME, TMPDIR and the two variables it sets, with `--config build.rustflags=[]`;
+  it records the dropped variable names, the sha256 of both digests, both rows files, both
+  tracker binaries and the diff binary, and a missing diff binary is exit 2.

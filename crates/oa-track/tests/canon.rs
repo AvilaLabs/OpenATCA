@@ -197,7 +197,10 @@ fn the_files_of_a_spilled_run_hold_the_digest_and_the_rows_grouped_by_second() {
     let mut lines = text.lines();
     assert_eq!(lines.next(), Some(DIGEST_HEADER));
     let want: Vec<String> = digest_of(&rows).iter().map(second_line).collect();
-    assert_eq!(lines.map(str::to_string).collect::<Vec<_>>(), want);
+    let got: Vec<String> = lines.map(str::to_string).collect();
+    assert_eq!(got[..got.len() - 1], want[..]);
+    assert_eq!(got.last().unwrap(), &digest_end_line(&digest_of(&rows)));
+    assert!(got.last().unwrap().starts_with("end 3 4 "));
     let bin = fs::read(&rp).unwrap();
     assert_eq!(bin[..ROWS_HEADER_BYTES], rows_header(4));
     assert_eq!(bin[..8], *ROWS_MAGIC);

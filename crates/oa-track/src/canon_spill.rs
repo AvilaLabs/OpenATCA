@@ -22,8 +22,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::canon::{
-    limit_text, row_second, rows_header, second_line, CanonRow, Digester, DIGEST_HEADER, FIELDS,
-    MAX_ROWS_PER_SECOND, ROW_BYTES,
+    digest_end_line, limit_text, row_second, rows_header, second_line, CanonRow, Digester,
+    DIGEST_HEADER, FIELDS, MAX_ROWS_PER_SECOND, ROW_BYTES,
 };
 use crate::spill::{check_columns, ColReader, SpilledRun, WIDTHS};
 
@@ -114,6 +114,7 @@ pub fn write_canon(
         for e in &entries {
             writeln!(w, "{}", second_line(e))?;
         }
+        writeln!(w, "{}", digest_end_line(&entries))?;
         w.flush()?;
     }
     if let Some(p) = rows {

@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oa_replay_diff::{
-    compare_digests, compare_rows, digest_rows, load_digest_text, load_expect_text, open_rows,
-    parse_digest, parse_expect, render_report, render_summary, verdict, write_out, Comparison,
+    compare_digests, compare_rows, digest_rows, load_digest_text, load_expect_text,
+    nothing_to_compare, open_rows, parse_digest, parse_expect, render_report, render_summary,
+    verdict, write_out, Comparison,
 };
 
 const USAGE: &str = "usage: oa-replay-diff <digest-a> <digest-b> [--rows-a <file> --rows-b <file>] [--expect <file>] [--summary <file>] [--max-detail <n>]";
@@ -31,9 +32,19 @@ fn main() -> ExitCode {
     }
 }
 
+/// Sets an option that may be given once; a repeat is a usage error, not a silent override.
+fn once(slot: &mut Option<PathBuf>, name: &str, v: String) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(format!("{name} given twice\n{USAGE}"));
+    }
+    *slot = Some(PathBuf::from(v));
+    Ok(())
+}
+
 fn run() -> Result<u8, String> {
     let (mut pos, mut rows_a, mut rows_b) = (Vec::new(), None, None);
     let (mut expect, mut summary, mut max_detail) = (None, None, 50usize);
+    let mut seen_max_detail = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if !a.starts_with("--") {
@@ -44,11 +55,15 @@ fn run() -> Result<u8, String> {
             .next()
             .ok_or_else(|| format!("{a} needs a value\n{USAGE}"))?;
         match a.as_str() {
-            "--rows-a" => rows_a = Some(PathBuf::from(v)),
-            "--rows-b" => rows_b = Some(PathBuf::from(v)),
-            "--expect" => expect = Some(PathBuf::from(v)),
-            "--summary" => summary = Some(PathBuf::from(v)),
+            "--rows-a" => once(&mut rows_a, &a, v)?,
+            "--rows-b" => once(&mut rows_b, &a, v)?,
+            "--expect" => once(&mut expect, &a, v)?,
+            "--summary" => once(&mut summary, &a, v)?,
             "--max-detail" => {
+                if seen_max_detail {
+                    return Err(format!("{a} given twice\n{USAGE}"));
+                }
+                seen_max_detail = true;
                 max_detail = v.parse().map_err(|_| format!("bad --max-detail `{v}`"))?;
             }
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
@@ -75,9 +90,12 @@ fn run() -> Result<u8, String> {
         }
         None => None,
     };
+    nothing_to_compare(&la, &lb)?;
     let digest = compare_digests(&la, &lb);
+    // Rows files, when given, are verified against their digests whether or not the digests
+    // differ.
     let rows = match (&rows_a, &rows_b) {
-        (Some(x), Some(y)) if !digest.identical => {
+        (Some(x), Some(y)) => {
             let (ra, rb) = (
                 open_rows(x, digest_rows(&la))?,
                 open_rows(y, digest_rows(&lb))?,

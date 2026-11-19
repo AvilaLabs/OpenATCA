@@ -552,6 +552,141 @@ fn unfitted_counts(rows: &[Row], taus: &[[Option<f64>; 3]]) -> [(u64, u64); 3] {
     out
 }
 
+/// M4: per system, the samples within `thr` over ALL grid samples (a miss, and a value that is
+/// not a number, are failures), and the number of present values that are not a number.
+fn m4_counts(rows: &[Row], n_ac: usize, h: fn(&Val) -> f64, thr: f64) -> ([Cnt; 3], [u64; 3]) {
+    let mut c = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
+    let mut nan = [0u64; 3];
+    for r in rows {
+        for ((cs, n), v) in c.iter_mut().zip(nan.iter_mut()).zip(&r.val) {
+            if v.as_ref().is_some_and(|v| h(v).is_nan()) {
+                *n += 1;
+            }
+            cs.add(r.ac, v.as_ref().is_some_and(|v| h(v) <= thr));
+        }
+    }
+    (c, nan)
+}
+
+/// M7 and M7t: failures over `LARGE_M` of the horizontal error `h`, a miss and a value that is not
+/// a number counting as failures.
+// A7.2: cold struct, size guard waived
+struct Large {
+    cnt: [Cnt; 3],
+    /// Present values over the limit or not a number.
+    over: [u64; 3],
+    /// Present values that are not a number (counted in `over`).
+    nan: [u64; 3],
+    /// Present raw (unfitted) values over the limit.
+    raw_over: [u64; 3],
+}
+
+fn large_counts(rows: &[Row], n_ac: usize, h: fn(&Val) -> f64) -> Large {
+    let mut l = Large {
+        cnt: [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)],
+        over: [0; 3],
+        nan: [0; 3],
+        raw_over: [0; 3],
+    };
+    for r in rows {
+        for (s, v) in r.val.iter().enumerate() {
+            let big = v.as_ref().is_some_and(|v| fails_over(h(v), LARGE_M));
+            if let (Some(v), Some(n)) = (v, l.nan.get_mut(s)) {
+                *n += u64::from(h(v).is_nan());
+            }
+            if let (true, Some(n)) = (big, l.over.get_mut(s)) {
+                *n += 1;
+            }
+            if let (true, Some(n)) = (
+                v.as_ref().is_some_and(|v| v.h_raw > LARGE_M),
+                l.raw_over.get_mut(s),
+            ) {
+                *n += 1;
+            }
+            if let Some(c) = l.cnt.get_mut(s) {
+                c.add(r.ac, v.is_none() || big);
+            }
+        }
+    }
+    l
+}
+
+/// M6: per aircraft with common samples, whether OpenATCA's RMS of the fitted horizontal error is
+/// lower than ERAM's. An aircraft whose RMS is not finite for either system is a failure for the
+/// share, is counted per system in `nan`, and is left out of the win, lose, tie counts and the
+/// sign test (a comparison with NaN is not a tie).
+// A7.2: cold struct, size guard waived
+struct M6 {
+    win: u64,
+    lose: u64,
+    tie: u64,
+    /// Aircraft with a non-finite RMS: `[OpenATCA, ERAM]`.
+    nan: [u64; 2],
+    share: Cnt,
+}
+
+fn m6_counts(rows: &[Row], n_ac: usize) -> M6 {
+    let mut m = M6 {
+        win: 0,
+        lose: 0,
+        tie: 0,
+        nan: [0; 2],
+        share: Cnt::new(n_ac),
+    };
+    for ac in 0..n_ac {
+        let mut ss = [(0.0f64, 0u64); 2];
+        for r in of_ac(rows, ac).iter().filter(|r| r.common()) {
+            for (k, s) in [OA, ER].into_iter().enumerate() {
+                if let (Some(v), Some(slot)) =
+                    (r.val.get(s).and_then(|v| v.as_ref()), ss.get_mut(k))
+                {
+                    slot.0 += v.h_fit * v.h_fit;
+                    slot.1 += 1;
+                }
+            }
+        }
+        let (a, b) = (ss[0], ss[1]);
+        if a.1 == 0 {
+            continue;
+        }
+        let (ra, rb) = ((a.0 / a.1 as f64).sqrt(), (b.0 / b.1 as f64).sqrt());
+        if !(ra.is_finite() && rb.is_finite()) {
+            m.nan[0] += u64::from(!ra.is_finite());
+            m.nan[1] += u64::from(!rb.is_finite());
+            m.share.add(ac, false);
+            continue;
+        }
+        if ra < rb {
+            m.win += 1;
+        } else if ra > rb {
+            m.lose += 1;
+        } else {
+            m.tie += 1;
+        }
+        m.share.add(ac, ra < rb);
+    }
+    m
+}
+
+/// Samples of all flagged OpenATCA points still without a tracker row for their flags, counted
+/// over every point (not only the addresses the join saw).
+fn unmatched_points(pts: &PerAc) -> u64 {
+    pts.values()
+        .flatten()
+        .filter(|p| p.uncertain == Tri::Unmatched || p.reacquired == Tri::Unmatched)
+        .count() as u64
+}
+
+/// The hold-out gate: a hold-out run with any unmatched sample is refused.
+fn flag_gate(mode: Mode, unmatched: u64, dup_rows: u64, conflicts: u64) -> Result<(), String> {
+    if mode.holdout && unmatched > 0 {
+        return Err(format!(
+            "hold-out run refused: {unmatched} OpenATCA samples have no tracker row (or only conflicting rows) for their flags; {conflicts} keys conflict, {dup_rows} duplicate rows (use --development for a non-hold-out run)"
+        ));
+    }
+    Ok(())
+}
+
 /// Whether an error counts as a failure over `limit` in a coverage-penalised metric: over it, or
 /// not a number. A value that cannot be computed is never a pass (E6, G6); M4 reads `h <= thr` as
 /// the pass and so does this.
@@ -786,6 +921,9 @@ fn draws_of(n_ac: usize) -> Vec<Vec<u32>> {
 // A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct Metric {
     n: [usize; 3],
+    /// Samples present in all three systems and kept by the group, left out of the common set
+    /// because this system's value is not finite (E6): reported apart from "not common".
+    nonfinite: [usize; 3],
     pt: [[f64; 3]; 3],
     boot: [Vec<[f64; 3]>; 3],
 }
@@ -807,7 +945,19 @@ fn metric(
         })
     };
     let cols = [col(OA), col(ER), col(PT)];
+    let mut nonfinite = [0usize; 3];
+    for r in rows
+        .iter()
+        .filter(|r| keep(r) && r.common() && !common_for(r, k))
+    {
+        for (n, v) in nonfinite.iter_mut().zip(&r.val) {
+            if v.as_ref().is_some_and(|v| !k.get(v).is_finite()) {
+                *n += 1;
+            }
+        }
+    }
     Metric {
+        nonfinite,
         n: [cols[0].data.len(), cols[1].data.len(), cols[2].data.len()],
         pt: [cols[0].point(), cols[1].point(), cols[2].point()],
         boot: [
@@ -898,7 +1048,17 @@ fn write_metric(o: &mut String, title: &str, unit: &str, m: &Metric) {
             floor_note(pv(m, OA, k), pv(m, PT, k))
         );
     }
+    let _ = writeln!(o, "  {}", nonfinite_text(m));
     let _ = writeln!(o);
+}
+
+/// The samples a metric left out for a value that is not finite, per system, apart from the
+/// samples that were simply not in all three systems.
+fn nonfinite_text(m: &Metric) -> String {
+    format!(
+        "left out of the common set for a non-finite value (present in all three systems): OpenATCA {}, ERAM {}, Passthrough {}",
+        m.nonfinite[0], m.nonfinite[1], m.nonfinite[2]
+    )
 }
 
 /// A breakdown: one block per stratum, medians with intervals and the difference, p95 and RMS as
@@ -1012,6 +1172,9 @@ fn write_groups(
             continue;
         }
         let _ = writeln!(o, "  {name:<28} n={n}");
+        if m.nonfinite.iter().any(|&x| x > 0) {
+            let _ = writeln!(o, "      {}", nonfinite_text(&m));
+        }
         let _ = writeln!(
             o,
             "      median  OpenATCA {}  ERAM {}  Passthrough {}  OpenATCA minus ERAM {}",
@@ -1128,7 +1291,7 @@ fn run(
     let mut oa_ex = Exclusions::new();
     let mut oa_assoc = [0u64; astatus::COUNT];
     let mut oa_rows = 0u64;
-    let (mut flag_unmatched, mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64, 0u64);
+    let (mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64);
     let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
     for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
         let r = run
@@ -1162,9 +1325,6 @@ fn run(
                 let (u, re) = flag_lookup(&flags, a, pt.t);
                 pt.uncertain = u;
                 pt.reacquired = re;
-                if u == Tri::Unmatched {
-                    flag_unmatched += 1;
-                }
             }
         }
         for (k, v) in p.ex {
@@ -1178,12 +1338,9 @@ fn run(
     let _ = fs::remove_dir_all(&spill);
     eprintln!("OpenATCA paired aircraft: {}", oa_pts.len());
     // A hold-out score needs every sample's flags: an unmatched sample is not scored as if its
-    // flags were "no" (E6, G6).
-    if mode.holdout && flag_unmatched > 0 {
-        return Err(format!(
-            "hold-out run refused: {flag_unmatched} OpenATCA samples have no tracker row (or only conflicting rows) for their flags; {flag_conflicts} keys conflict, {flag_dup_rows} duplicate rows (use --development for a non-hold-out run)"
-        ));
-    }
+    // flags were "no" (E6, G6). Every point is counted, whichever way the join reached it.
+    let flag_unmatched = unmatched_points(&oa_pts);
+    flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
 
     // ERAM pairs.
     let loaded = load(&[FeedInput {
@@ -1637,62 +1794,32 @@ fn run(
             if what.contains("M3t") { "t" } else { "" }
         );
         for (name, thr) in [("within 100 m", 100.0), ("within 300 m", 300.0)] {
-            let mut c = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
-            for r in &rows {
-                for (s, cs) in c.iter_mut().enumerate() {
-                    let ok = r
-                        .val
-                        .get(s)
-                        .and_then(|v| v.as_ref())
-                        .is_some_and(|v| h(v) <= thr);
-                    cs.add(r.ac, ok);
-                }
-            }
-            let _ = writeln!(o, "  {name}:");
+            let (c, nan) = m4_counts(&rows, n_ac, h, thr);
+            let _ = writeln!(
+                o,
+                "  {name} (present values not a number, counted as failures: OpenATCA {}, ERAM {}, Passthrough {}):",
+                nan[0], nan[1], nan[2]
+            );
             write_share(&mut o, &c, &draws, 1.0);
         }
         let _ = writeln!(o);
     }
 
     // M6.
-    let (mut win, mut lose, mut tie) = (0u64, 0u64, 0u64);
-    let mut m6 = Cnt::new(n_ac);
-    for ac in 0..n_ac {
-        let mut ss = [(0.0f64, 0u64); 2];
-        for r in of_ac(&rows, ac).iter().filter(|r| r.common()) {
-            for (k, s) in [OA, ER].into_iter().enumerate() {
-                if let (Some(v), Some(slot)) =
-                    (r.val.get(s).and_then(|v| v.as_ref()), ss.get_mut(k))
-                {
-                    slot.0 += v.h_fit * v.h_fit;
-                    slot.1 += 1;
-                }
-            }
-        }
-        let (a, b) = (ss[0], ss[1]);
-        if a.1 == 0 {
-            continue;
-        }
-        let (ra, rb) = ((a.0 / a.1 as f64).sqrt(), (b.0 / b.1 as f64).sqrt());
-        if ra < rb {
-            win += 1;
-        } else if ra > rb {
-            lose += 1;
-        } else {
-            tie += 1;
-        }
-        m6.add(ac, ra < rb);
-    }
+    let m6r = m6_counts(&rows, n_ac);
+    let (win, lose, tie) = (m6r.win, m6r.lose, m6r.tie);
     let _ = writeln!(
         o,
         "M6 per-aircraft: share of aircraft (with common samples) where OpenATCA's M3 RMS is lower than ERAM's"
     );
     let _ = writeln!(
         o,
-        "  OpenATCA lower {win}, ERAM lower {lose}, tied {tie}; aircraft compared {}",
-        win + lose + tie
+        "  OpenATCA lower {win}, ERAM lower {lose}, tied {tie}; aircraft compared {}; aircraft with an RMS that is not a number (a failure for the share, left out of the counts and the sign test): OpenATCA {}, ERAM {}",
+        win + lose + tie,
+        m6r.nan[0],
+        m6r.nan[1]
     );
-    write_share(&mut o, &[m6], &draws, 1.0);
+    write_share(&mut o, &[m6r.share], &draws, 1.0);
     let _ = writeln!(
         o,
         "  sign test (exact binomial, p = 1/2, ties dropped, two-sided): p = {:.3e} on {win} of {}",
@@ -1710,34 +1837,9 @@ fn run(
         o,
         "M7 large errors: samples over {LARGE_M} m (time-fitted horizontal) on ALL {grid} grid samples; a miss is counted as a failure"
     );
-    let mut over_only = [0u64; 3];
-    let mut m7: [Cnt; 3] = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
-    let mut raw_over = [0u64; 3];
-    let mut nan_fit = [0u64; 3];
-    for r in &rows {
-        for (s, cs) in m7.iter_mut().enumerate() {
-            let v = r.val.get(s).and_then(|v| v.as_ref());
-            if v.is_some_and(|v| v.h_fit.is_nan()) {
-                if let Some(c) = nan_fit.get_mut(s) {
-                    *c += 1;
-                }
-            }
-            let big = v.is_some_and(|v| fails_over(v.h_fit, LARGE_M));
-            if big {
-                if let Some(c) = over_only.get_mut(s) {
-                    *c += 1;
-                }
-            }
-            if v.is_some_and(|v| v.h_raw > LARGE_M) {
-                if let Some(c) = raw_over.get_mut(s) {
-                    *c += 1;
-                }
-            }
-            cs.add(r.ac, v.is_none() || big);
-        }
-    }
+    let l7 = large_counts(&rows, n_ac, |v| v.h_fit);
     for (s, sys) in SYS.iter().enumerate() {
-        let (f, _) = m7.get(s).map_or((0, 0), Cnt::point);
+        let (f, _) = l7.cnt.get(s).map_or((0, 0), Cnt::point);
         let misses = grid
             - rows
                 .iter()
@@ -1746,42 +1848,27 @@ fn run(
         let _ = writeln!(
             o,
             "  {sys}: failures {f} = {} over {LARGE_M} m or not a number (of which {} not a number) + {misses} misses (raw, unfitted over {LARGE_M} m: {})",
-            over_only.get(s).copied().unwrap_or(0),
-            nan_fit.get(s).copied().unwrap_or(0),
-            raw_over.get(s).copied().unwrap_or(0)
+            l7.over.get(s).copied().unwrap_or(0),
+            l7.nan.get(s).copied().unwrap_or(0),
+            l7.raw_over.get(s).copied().unwrap_or(0)
         );
     }
-    write_share(&mut o, &m7, &draws, 10_000.0);
+    write_share(&mut o, &l7.cnt, &draws, 10_000.0);
     let _ = writeln!(o);
     let _ = writeln!(
         o,
         "M7t large errors on the rounding-tolerant horizontal error (M3t, P-003): samples over {LARGE_M} m on ALL {grid} grid samples; a miss is counted as a failure"
     );
-    let mut m7t: [Cnt; 3] = [Cnt::new(n_ac), Cnt::new(n_ac), Cnt::new(n_ac)];
-    let mut nan_tol = [0u64; 3];
-    for r in &rows {
-        for (s, cs) in m7t.iter_mut().enumerate() {
-            let v = r.val.get(s).and_then(|v| v.as_ref());
-            if v.is_some_and(|v| v.h_tol.is_nan()) {
-                if let Some(c) = nan_tol.get_mut(s) {
-                    *c += 1;
-                }
-            }
-            cs.add(
-                r.ac,
-                v.is_none() || v.is_some_and(|v| fails_over(v.h_tol, LARGE_M)),
-            );
-        }
-    }
+    let l7t = large_counts(&rows, n_ac, |v| v.h_tol);
     for (s, sys) in SYS.iter().enumerate() {
-        let (f, _) = m7t.get(s).map_or((0, 0), Cnt::point);
+        let (f, _) = l7t.cnt.get(s).map_or((0, 0), Cnt::point);
         let _ = writeln!(
             o,
             "  {sys}: failures {f} (over {LARGE_M} m, or not a number: {}, or missed)",
-            nan_tol.get(s).copied().unwrap_or(0)
+            l7t.nan.get(s).copied().unwrap_or(0)
         );
     }
-    write_share(&mut o, &m7t, &draws, 10_000.0);
+    write_share(&mut o, &l7t.cnt, &draws, 10_000.0);
     let _ = writeln!(o);
 
     // Breakdowns.
@@ -2236,6 +2323,127 @@ mod tests {
         assert_eq!(u[0], (1, 1)); // OpenATCA: aircraft 1, one sample
         assert_eq!(u[1], (1, 2)); // ERAM: aircraft 0, two samples
         assert_eq!(u[2], (0, 0)); // passthrough has no values: nothing to count
+    }
+
+    fn fx_pt() -> Pt {
+        Pt {
+            t: 0,
+            cross: 1.0,
+            along: 1.0,
+            v: 100.0,
+            spd: 0.0,
+            hdg: 0.0,
+            coast: 0,
+            uncertain: Tri::No,
+            reacquired: Tri::No,
+            phase: 0,
+            band: 0,
+        }
+    }
+
+    fn fx_val(h: f64) -> Val {
+        Val {
+            pt: fx_pt(),
+            along_fit: 0.0,
+            h_raw: 1.0,
+            h_fit: h,
+            along_tol: 0.0,
+            h_tol: h,
+        }
+    }
+
+    fn fx_row(ac: usize, h: [Option<f64>; 3]) -> Row {
+        Row {
+            ac,
+            t: 0,
+            addr: ac as u32,
+            phase: 0,
+            band: 0,
+            val: h.map(|x| x.map(fx_val)),
+        }
+    }
+
+    // REQ: OA-TRK-374
+    #[test]
+    fn the_m4_and_m7_loops_count_a_nan_as_a_failure_and_print_the_count() {
+        let rows = vec![
+            fx_row(0, [Some(50.0), Some(f64::NAN), Some(500.0)]),
+            fx_row(0, [Some(f64::NAN), Some(50.0), None]),
+            fx_row(1, [Some(2000.0), Some(50.0), Some(50.0)]),
+        ];
+        let (c, nan) = m4_counts(&rows, 2, |v| v.h_fit, 100.0);
+        assert_eq!(nan, [1, 1, 0]);
+        // Within 100 m: OpenATCA 1 of 3 (50; NaN and 2000 fail), ERAM 2 of 3, passthrough 1 of 3.
+        assert_eq!(c[0].point(), (1, 3));
+        assert_eq!(c[1].point(), (2, 3));
+        assert_eq!(c[2].point(), (1, 3));
+        let l = large_counts(&rows, 2, |v| v.h_tol);
+        assert_eq!(l.nan, [1, 1, 0]);
+        assert_eq!(l.over, [2, 1, 0]);
+        // Failures: over-or-NaN plus the miss of passthrough in row 2.
+        assert_eq!(l.cnt[0].point(), (2, 3));
+        assert_eq!(l.cnt[1].point(), (1, 3));
+        assert_eq!(l.cnt[2].point(), (1, 3));
+    }
+
+    // REQ: OA-TRK-374
+    #[test]
+    fn m6_does_not_turn_a_nan_into_a_tie() {
+        let rows = vec![
+            fx_row(0, [Some(10.0), Some(20.0), Some(1.0)]),
+            fx_row(1, [Some(f64::NAN), Some(20.0), Some(1.0)]),
+            fx_row(2, [Some(30.0), Some(20.0), Some(1.0)]),
+            fx_row(3, [Some(5.0), Some(f64::NAN), Some(1.0)]),
+        ];
+        let m = m6_counts(&rows, 4);
+        assert_eq!((m.win, m.lose, m.tie), (1, 1, 0));
+        assert_eq!(m.nan, [1, 1]);
+        // The two NaN aircraft are failures of the share, in a denominator of four.
+        assert_eq!(m.share.point(), (1, 4));
+    }
+
+    // REQ: OA-TRK-374
+    #[test]
+    fn a_non_finite_sample_is_counted_apart_from_not_common() {
+        let mut rows = vec![
+            fx_row(0, [Some(10.0), Some(20.0), Some(30.0)]),
+            fx_row(0, [Some(f64::NAN), Some(20.0), Some(30.0)]),
+            fx_row(0, [None, Some(20.0), Some(30.0)]),
+        ];
+        // Cross-track is finite everywhere; use the fitted horizontal error as the kind.
+        let m = metric(&rows, 1, &draws_of(1), Kind::HFit, &|_| true);
+        assert_eq!(m.n, [1, 1, 1]);
+        assert_eq!(m.nonfinite, [1, 0, 0]);
+        assert!(nonfinite_text(&m).contains("OpenATCA 1, ERAM 0"));
+        rows.clear();
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn the_hold_out_gate_refuses_any_unmatched_sample_and_counts_every_point() {
+        let pts = |u| {
+            let mut p = fx_pt();
+            p.uncertain = u;
+            p
+        };
+        let mut per: PerAc = BTreeMap::new();
+        per.insert(1, vec![pts(Tri::No), pts(Tri::Yes)]);
+        assert_eq!(unmatched_points(&per), 0);
+        // An unmatched point on an address the join never saw is still counted.
+        per.insert(9, vec![pts(Tri::Unmatched)]);
+        assert_eq!(unmatched_points(&per), 1);
+        let hold = Mode {
+            holdout: true,
+            development: false,
+        };
+        let dev = Mode {
+            holdout: false,
+            development: true,
+        };
+        assert!(flag_gate(hold, 0, 3, 1).is_ok());
+        let e = flag_gate(hold, 1, 3, 1).unwrap_err();
+        assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
+        assert!(flag_gate(dev, 5, 0, 0).is_ok());
     }
 
     #[test]

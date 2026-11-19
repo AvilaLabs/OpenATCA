@@ -75,10 +75,11 @@ pub struct DigestLine {
 }
 
 /// Parses a digest file. The first non-blank line must be the version header
-/// ([`DIGEST_HEADER`]); every other non-blank line is `second chain_hash second_hash rows`, the
-/// seconds strictly increasing. A line count, byte count or row count above the named limits, a
-/// total that overflows, and a chain hash that is not the chain of the lines before it are errors
-/// naming the line.
+/// ([`DIGEST_HEADER`]); the last must be `end <seconds> <rows> <chain>` and equal what the lines
+/// before it give (a file cut at a line boundary has no such line); every other non-blank line
+/// is `second chain_hash second_hash rows`, the seconds strictly increasing. A line count, byte
+/// count or row count above the named limits, a total that overflows, and a chain hash that is
+/// not the chain of the lines before it are errors naming the line.
 pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
     if count(text.len()) > MAX_DIGEST_BYTES {
         return Err(format!(
@@ -88,12 +89,16 @@ pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
     }
     let mut out: Vec<DigestLine> = Vec::new();
     let mut header = false;
+    let mut ended = false;
     let mut prev = [0u8; 32];
     let mut total = 0u64;
     for (n, line) in text.lines().enumerate() {
         let n = n.saturating_add(1);
         if line.trim().is_empty() {
             continue;
+        }
+        if ended {
+            return Err(format!("line {n}: text after the end line"));
         }
         if !header {
             if line.trim_end() != DIGEST_HEADER {
@@ -102,6 +107,22 @@ pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
                 ));
             }
             header = true;
+            continue;
+        }
+        if line.split_whitespace().next() == Some("end") {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let want = format!(
+                "end {} {} {}",
+                out.len(),
+                total,
+                oa_track::canon::hex32(&prev)
+            );
+            if f.len() != 4 || f.join(" ") != want {
+                return Err(format!(
+                    "line {n}: the end line does not match the lines before it (expected `{want}`)"
+                ));
+            }
+            ended = true;
             continue;
         }
         if out.len() >= MAX_DIGEST_LINES {
@@ -149,12 +170,24 @@ pub fn parse_digest(text: &str) -> Result<Vec<DigestLine>, String> {
     if !header {
         return Err(format!("no digest header `{DIGEST_HEADER}`"));
     }
+    if !ended {
+        return Err("no end line: the digest is cut short or was not finished".to_string());
+    }
     Ok(out)
 }
 
 /// The total rows of a digest (saturating; a parsed digest cannot overflow).
 pub fn digest_rows(lines: &[DigestLine]) -> u64 {
     lines.iter().fold(0u64, |a, l| a.saturating_add(l.rows))
+}
+
+/// Two digests with no seconds have nothing to compare; calling them identical would pass an
+/// empty run against an empty run.
+pub fn nothing_to_compare(a: &[DigestLine], b: &[DigestLine]) -> Result<(), String> {
+    if a.is_empty() && b.is_empty() {
+        return Err("no seconds to compare: both digests are empty".to_string());
+    }
+    Ok(())
 }
 
 /// How two digests compare.
@@ -892,6 +925,11 @@ where
         let rb = step(&mut gb, s, &mut vb, &mut b)?;
         if digest.differing.binary_search(&s).is_ok() {
             let d = diff_second(&ra, &rb)?;
+            if second_diff_is_empty(&d) {
+                return Err(format!(
+                    "second {s}: the digests differ but the rows do not (inconsistent inputs)"
+                ));
+            }
             totals_add(&mut totals, &d);
             per_second.push((s, d));
         }
@@ -982,6 +1020,13 @@ pub fn render_report(c: &Comparison, max_detail: usize) -> String {
         d.seconds_a, d.rows_a, d.seconds_b, d.rows_b
     );
     if d.identical {
+        if let Some(r) = &c.rows {
+            let _ = writeln!(
+                o,
+                "rows files verified against their digests: {} rows of A, {} rows of B (hash and count of every second recomputed)",
+                r.verified_rows_a, r.verified_rows_b
+            );
+        }
         return o;
     }
     let _ = writeln!(
@@ -1146,13 +1191,22 @@ pub fn render_summary(c: &Comparison, expect: Option<&BTreeSet<String>>) -> Stri
 }
 
 /// The exit code: 0 identical (or, with a declared-difference list, every difference declared),
-/// 1 otherwise. A difference no row explains (the chain alone) is never declared away.
+/// 1 different, 2 when the rows do not account for the digests' differing seconds. A difference no row explains (the chain alone) is never declared away.
 pub fn verdict(c: &Comparison, expect: Option<&BTreeSet<String>>) -> u8 {
     if c.digest.identical {
         return 0;
     }
     if c.digest.chain_only {
         return 1;
+    }
+    // Every differing second must have been diffed and have a difference: anything else is an
+    // inconsistency, not a comparison.
+    if let Some(r) = &c.rows {
+        if r.per_second.len() != c.digest.differing.len()
+            || r.per_second.iter().any(|(_, d)| second_diff_is_empty(d))
+        {
+            return 2;
+        }
     }
     match (expect, &c.rows) {
         (Some(allowed), Some(r)) if undeclared(&r.totals, allowed).is_empty() => 0,
@@ -1169,7 +1223,7 @@ pub fn verdict(c: &Comparison, expect: Option<&BTreeSet<String>>) -> u8 {
 )]
 mod tests {
     use super::*;
-    use oa_track::canon::{canon_row, second_line, Digester};
+    use oa_track::canon::{canon_row, digest_end_line, second_line, Digester};
     use oa_track::OutRow;
 
     const S: i64 = 1_000_000_000;
@@ -1204,10 +1258,13 @@ mod tests {
             d.push(&canon_row(x)).unwrap();
         }
         let mut s = format!("{DIGEST_HEADER}\n");
-        for e in d.finish() {
-            s.push_str(&second_line(&e));
+        let entries = d.finish();
+        for e in &entries {
+            s.push_str(&second_line(e));
             s.push('\n');
         }
+        s.push_str(&digest_end_line(&entries));
+        s.push('\n');
         s
     }
 
@@ -1288,8 +1345,11 @@ mod tests {
             let e = parse_digest(&bad).unwrap_err();
             assert!(e.contains(at), "{e}");
         }
-        // A header-only digest is an empty run; no header at all is not a digest.
-        assert!(parse_digest(&hdr).unwrap().is_empty());
+        // A header and an end line with nothing between is an empty run; the header alone is a
+        // truncated file; no header at all is not a digest.
+        let empty = format!("{hdr}{}\n", digest_end_line(&[]));
+        assert!(parse_digest(&empty).unwrap().is_empty());
+        assert!(parse_digest(&hdr).unwrap_err().contains("end line"));
         assert!(parse_digest("").unwrap_err().contains("header"));
     }
 
@@ -1299,7 +1359,7 @@ mod tests {
         let good = digest_text(&[r(10 * S, 1), r(11 * S, 1), r(12 * S, 1)]);
         assert_eq!(parse_digest(&good).unwrap().len(), 3);
         // Another version header, a comment instead of the header, the header missing.
-        let v2 = good.replacen("digest v1", "digest v2", 1);
+        let v2 = good.replacen("digest v2", "digest v1", 1);
         assert!(parse_digest(&v2).unwrap_err().contains("line 1"));
         let comment = good.replacen(DIGEST_HEADER, "# a comment", 1);
         assert!(parse_digest(&comment).unwrap_err().contains("line 1"));
@@ -1317,6 +1377,110 @@ mod tests {
         // Dropping a line breaks the chain of the next.
         let dropped = format!("{}\n{}\n{}\n", lines[0], lines[1], lines[3]);
         assert!(parse_digest(&dropped).unwrap_err().contains("line 3"));
+    }
+
+    // REQ: OA-RDF-017
+    #[test]
+    fn a_digest_cut_at_a_line_boundary_or_with_a_wrong_end_line_is_refused() {
+        let good = digest_text(&[r(10 * S, 1), r(11 * S, 1), r(12 * S, 1)]);
+        assert_eq!(parse_digest(&good).unwrap().len(), 3);
+        let lines: Vec<&str> = good.lines().collect();
+        // Cut after any data line: the end line is gone.
+        for keep in 1..lines.len() - 1 {
+            let cut: String = lines[..keep].iter().map(|l| format!("{l}\n")).collect();
+            assert!(
+                parse_digest(&cut).unwrap_err().contains("end line"),
+                "{keep}"
+            );
+        }
+        // Cut in the middle but with the original end line pasted back: the counts disagree.
+        let mut forged: Vec<&str> = lines[..3].to_vec();
+        forged.push(lines[lines.len() - 1]);
+        let forged: String = forged.iter().map(|l| format!("{l}\n")).collect();
+        let e = parse_digest(&forged).unwrap_err();
+        assert!(
+            e.contains("line 4") && e.contains("end line does not match"),
+            "{e}"
+        );
+        // Text after the end line.
+        let extra = format!("{good}{}\n", lines[1]);
+        assert!(parse_digest(&extra)
+            .unwrap_err()
+            .contains("after the end line"));
+    }
+
+    // REQ: OA-RDF-018
+    #[test]
+    fn two_empty_digests_are_nothing_to_compare() {
+        let none: Vec<DigestLine> = Vec::new();
+        let some = parse_digest(&digest_text(&[r(10 * S, 1)])).unwrap();
+        assert!(nothing_to_compare(&none, &none)
+            .unwrap_err()
+            .contains("no seconds"));
+        assert!(nothing_to_compare(&none, &some).is_ok());
+        assert!(nothing_to_compare(&some, &some).is_ok());
+    }
+
+    // REQ: OA-RDF-019
+    #[test]
+    fn rows_files_are_verified_even_when_the_digests_are_identical() {
+        let a = vec![r(10 * S, 1), r(11 * S, 1)];
+        let la = parse_digest(&digest_text(&a)).unwrap();
+        let dd = compare_digests(&la, &la);
+        assert!(dd.identical);
+        let ok = compare_rows(&dd, &la, &la, groups(&rows(&a)), groups(&rows(&a))).unwrap();
+        assert_eq!((ok.verified_rows_a, ok.verified_rows_b), (2, 2));
+        let c = Comparison {
+            digest: dd.clone(),
+            rows: Some(ok),
+        };
+        assert!(render_summary(&c, None).contains("rows_known=true\n"));
+        assert!(render_report(&c, 5).contains("verified against their digests"));
+        // A rows file of other bytes is refused although the digests are equal.
+        let mut other = a.clone();
+        other[1].lat_e7 += 1;
+        let e = compare_rows(&dd, &la, &la, groups(&rows(&a)), groups(&rows(&other))).unwrap_err();
+        assert!(e.contains("second 11") && e.contains("rows file B"), "{e}");
+    }
+
+    // REQ: OA-RDF-020
+    #[test]
+    fn a_differing_second_without_a_difference_is_inconsistent_not_a_pass() {
+        // Digests that say second 10 differs, rows files that are equal there.
+        let a = vec![r(10 * S, 1)];
+        let mut b = a.clone();
+        b[0].lat_e7 += 1;
+        let (la, lb) = (
+            parse_digest(&digest_text(&a)).unwrap(),
+            parse_digest(&digest_text(&b)).unwrap(),
+        );
+        let dd = compare_digests(&la, &lb);
+        // Rows of A supplied for B: B's rows then do not match its digest line at all.
+        assert!(compare_rows(&dd, &la, &lb, groups(&rows(&a)), groups(&rows(&a))).is_err());
+        // A hand-built result with an empty diff for a differing second gives exit 2.
+        let c = Comparison {
+            digest: dd.clone(),
+            rows: Some(RowsResult {
+                per_second: vec![(10, SecondDiff::default())],
+                totals: Totals::default(),
+                verified_rows_a: 1,
+                verified_rows_b: 1,
+            }),
+        };
+        assert_eq!(verdict(&c, None), 2);
+        let missing = Comparison {
+            digest: dd,
+            rows: Some(RowsResult {
+                per_second: Vec::new(),
+                totals: Totals::default(),
+                verified_rows_a: 1,
+                verified_rows_b: 1,
+            }),
+        };
+        assert_eq!(
+            verdict(&missing, Some(&parse_expect("position\n").unwrap())),
+            2
+        );
     }
 
     // REQ: OA-RDF-008

@@ -79,6 +79,11 @@ class ReplayCompareArguments(unittest.TestCase):
         self.assertEqual((self.out / "report.txt").read_text(), "old")
 
 
+def json_q(text):
+    """A shell single-quoted string of `text`."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
 def git(cwd, *args):
     return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
@@ -158,15 +163,20 @@ class OverlayApply(unittest.TestCase):
 
     # REQ: OA-RDF-014
     def test_the_real_overlay_applies_to_the_commit_it_was_made_for_and_not_to_head(self):
-        for rev in ["e251fdb"]:
-            if subprocess.run(["git", "cat-file", "-e", rev + "^{commit}"], cwd=REPO).returncode != 0:
-                self.skipTest("history not available")
+        # The preimage commit must be in the history this test runs in: a missing commit is a
+        # failure (a shallow checkout would otherwise pass this test by skipping it).
+        have = lambda: subprocess.run(
+            ["git", "cat-file", "-e", "e251fdb^{commit}"], cwd=REPO, capture_output=True
+        ).returncode == 0
+        if not have():
+            subprocess.run(["git", "fetch", "--quiet", "origin", "e251fdb"], cwd=REPO, capture_output=True)
+        self.assertTrue(have(), "commit e251fdb (the overlay's preimage) is not in this clone's history")
         wt = self.dir / "wt"
         git(REPO, "worktree", "add", "--detach", str(wt), "e251fdb")
         try:
             res = self.apply(wt, OVERLAY_PATCH, "e251fdb")
             self.assertEqual(res.returncode, 0, res.stderr)
-            self.assertIn("canon.rs", (self.dir / "rep.txt").read_text())
+            self.assertIn("canon_spill.rs", (self.dir / "rep.txt").read_text())
         finally:
             git(REPO, "worktree", "remove", "--force", str(wt))
         head = self.dir / "head"
@@ -177,47 +187,164 @@ class OverlayApply(unittest.TestCase):
         finally:
             git(REPO, "worktree", "remove", "--force", str(head))
 
+    # REQ: OA-RDF-014
+    def test_a_wrong_postimage_a_deleted_file_a_file_count_mismatch_and_a_missing_report_dir_are_refused(self):
+        base = "one\ntwo\nthree\nfour\nfive\n"
+        r = self.repo_with(base)
+        p = self.patch_for(r)
+        text = p.read_text()
+        # Postimage: change the second blob id of the index line.
+        m = re.search(r"^index ([0-9a-f]+)\.\.([0-9a-f]+)", text, re.M)
+        bad = text.replace(m.group(0), f"index {m.group(1)}..{'0' * 3}{m.group(2)[3:]}")
+        bp = self.dir / "bad_post.patch"
+        bp.write_text(bad)
+        res = self.apply(r, bp)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("postimage mismatch", res.stderr)
+        git(r, "checkout", "-q", "--", "f.txt")
+        # A patch that deletes a file.
+        (r / "f.txt").unlink()
+        dele = git(r, "diff", "--no-color")
+        git(r, "checkout", "-q", "--", "f.txt")
+        dp = self.dir / "del.patch"
+        dp.write_text(dele)
+        res = self.apply(r, dp)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("deletes", res.stderr)
+        # More files than index lines: a mode change.
+        os.chmod(r / "f.txt", 0o755)
+        mode = git(r, "diff", "--no-color")
+        os.chmod(r / "f.txt", 0o644)
+        mp = self.dir / "mode.patch"
+        mp.write_text(mode)
+        res = self.apply(r, mp)
+        self.assertEqual(res.returncode, 2)
+        self.assertTrue("index lines" in res.stderr or "names no file blobs" in res.stderr, res.stderr)
+        # A report directory that does not exist is refused before anything is applied.
+        res = subprocess.run(
+            ["bash", str(OVERLAY_SCRIPT), str(r), "HEAD", str(p), str(self.dir / "nodir" / "rep.txt")],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("report directory", res.stderr)
+        self.assertEqual((r / "f.txt").read_text(), base)
+
     # REQ: OA-RDF-015
-    def test_the_overlay_writes_the_same_canonical_format_as_the_tree(self):
-        consts = re.compile(
-            r"pub const (ROW_BYTES|OFF_[A-Z_]+|ROWS_VERSION|ROWS_HEADER_BYTES|DIGEST_HEADER|ROWS_MAGIC)\b[^=]*= ([^;]+);"
-        )
-        patch = OVERLAY_PATCH.read_text()
-        canon_in_patch = "\n".join(
-            l[1:] for l in patch.splitlines() if l.startswith("+") and not l.startswith("+++")
-        )
-        now = (REPO / "crates/oa-track/src/canon.rs").read_text()
-        a = dict(consts.findall(canon_in_patch))
-        b = dict(consts.findall(now))
-        self.assertGreater(len(a), 16)
-        self.assertEqual(a, b)
+    def test_the_overlay_carries_the_trees_canonical_code_byte_for_byte(self):
+        # The overlay creates canon.rs and canon_spill.rs; they must be the files of this tree,
+        # which are what writes the digest line, the hash of a second and the chain.
+        sections = re.split(r"(?m)^diff --git ", OVERLAY_PATCH.read_text())
+        for name in ["canon.rs", "canon_spill.rs"]:
+            sec = [x for x in sections if x.startswith(f"a/crates/oa-track/src/{name} ")]
+            self.assertEqual(len(sec), 1, name)
+            lines = [
+                l[1:]
+                for l in sec[0].splitlines()
+                if l.startswith("+") and not l.startswith("+++")
+            ]
+            now = (REPO / "crates/oa-track/src" / name).read_text().splitlines()
+            self.assertEqual(lines, now, f"{name} in the overlay differs from the tree")
 
     # REQ: OA-RDF-016
-    def test_builds_run_locked_with_the_flag_environment_cleared_and_recorded(self):
-        # Stub cargo and rustc record what they see; the build is made to fail after that.
+    def test_builds_run_locked_in_a_clean_environment_and_the_report_records_it(self):
         bindir = self.dir / "bin"
         bindir.mkdir()
         log = self.dir / "calls.log"
-        stub = "#!/usr/bin/env bash\necho \"$(basename $0) $* RUSTFLAGS=[${RUSTFLAGS-unset}] ENC=[${CARGO_ENCODED_RUSTFLAGS-unset}]\" >>" + str(log) + "\n"
-        for name in ["cargo", "rustc"]:
-            (bindir / name).write_text(stub + ('echo "rustc 1.89.0 stub"\n' if name == "rustc" else "exit 1\n"))
-            (bindir / name).chmod(0o755)
+        tgt = self.dir / "tgt"
+        run_stub = (
+            "#!/usr/bin/env bash\n"
+            'while [ $# -gt 0 ]; do case "$1" in --digest) echo digest-stub >"$2";; --rows) echo rows-stub >"$2";; esac; shift; done\n'
+        )
+        diff_stub = (
+            "#!/usr/bin/env bash\n"
+            'while [ $# -gt 0 ]; do case "$1" in --summary) echo identical=true >"$2";; esac; shift; done\n'
+            "echo 'result: identical'\n"
+        )
+        cargo = (
+            "#!/usr/bin/env bash\n"
+            f'{{ echo "CALL cargo $*"; env | sort | sed "s/^/ENV /"; }} >>{log}\n'
+            'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            f'case "$pkg" in oa-track) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
+            f'oa-replay-diff) printf %s {json_q(diff_stub)} >"$CARGO_TARGET_DIR/release/oa-replay-diff"; chmod +x "$CARGO_TARGET_DIR/release/oa-replay-diff";; esac\n'
+        )
+        (bindir / "cargo").write_text(cargo)
+        (bindir / "rustc").write_text('#!/usr/bin/env bash\necho "rustc 1.89.0 stub"\n')
+        for n in ["cargo", "rustc"]:
+            (bindir / n).chmod(0o755)
         clip = self.dir / "clip.oaf"
         clip.write_bytes(b"x")
-        env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", RUSTFLAGS="-C target-cpu=native",
-                   CARGO_ENCODED_RUSTFLAGS="-Ctarget-cpu=native", REPLAY_COMPARE_GUARD="")
+        env = dict(
+            os.environ,
+            PATH=f"{bindir}:{os.environ['PATH']}",
+            RUSTFLAGS="-C target-cpu=native",
+            CARGO_ENCODED_RUSTFLAGS="-Ctarget-cpu=native",
+            CARGO_BUILD_RUSTFLAGS="-Cdebuginfo=2",
+            RUSTDOCFLAGS="--cfg x",
+            AN_UNRELATED_TEST_VARIABLE="1",
+            CARGO_TARGET_DIR=str(tgt),
+            REPLAY_COMPARE_GUARD="",
+        )
         out = self.dir / "out"
         res = subprocess.run(
             ["bash", str(SCRIPT), "HEAD", "HEAD", str(clip), str(out), str(self.dir / "scratch")],
-            capture_output=True, text=True, env=env, timeout=120,
+            capture_output=True, text=True, env=env, timeout=180,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        calls = log.read_text()
+        builds = [l for l in calls.splitlines() if l.startswith("CALL cargo")]
+        self.assertEqual(len(builds), 3)  # A, B, and the diff tool
+        for b in builds:
+            self.assertIn("--locked", b)
+            self.assertIn("--config build.rustflags=[]", b)
+        names = {l[4:].split("=")[0] for l in calls.splitlines() if l.startswith("ENV ")}
+        allowed = {"PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR", "CARGO_BUILD_JOBS",
+                   "CARGO_TARGET_DIR", "PWD", "SHLVL", "OLDPWD", "_"}
+        self.assertLessEqual(names, allowed, names - allowed)
+        report = (out / "report.txt").read_text()
+        for v in ["RUSTFLAGS=[-C target-cpu=native]", "CARGO_ENCODED_RUSTFLAGS=[-Ctarget-cpu=native]",
+                  "CARGO_BUILD_RUSTFLAGS=[-Cdebuginfo=2]", "RUSTDOCFLAGS=[--cfg x]",
+                  "AN_UNRELATED_TEST_VARIABLE", "environment variables dropped:",
+                  "rustc 1.89.0 stub", "diff tool:", "overlay for commit A: none"]:
+            self.assertIn(v, report)
+        self.assertEqual(len(re.findall(r"digest sha256: [0-9a-f]{64}", report)), 2)
+        self.assertEqual(len(re.findall(r"rows sha256: [0-9a-f]{64}", report)), 2)
+        self.assertEqual(len(re.findall(r"(?<!diff )binary sha256: [0-9a-f]{64}", report)), 2)
+        self.assertRegex(report, r"diff binary sha256: [0-9a-f]{64}")
+        summary = (out / "summary.txt").read_text()
+        self.assertIn("rustflags_cleared=yes", summary)
+        self.assertRegex(summary, r"digest_A=[0-9a-f]{64}")
+        self.assertRegex(summary, r"rows_B=[0-9a-f]{64}")
+
+    # REQ: OA-RDF-022
+    def test_a_missing_diff_binary_is_exit_2(self):
+        bindir = self.dir / "bin"
+        bindir.mkdir()
+        # A cargo that builds only the tracker: the diff binary is never produced.
+        (bindir / "run_src").write_text(
+            "#!/usr/bin/env bash\n"
+            'while [ $# -gt 0 ]; do case "$1" in --digest) echo d >"$2";; --rows) echo r >"$2";; esac; shift; done\n'
+        )
+        (bindir / "cargo").write_text(
+            "#!/usr/bin/env bash\n"
+            'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            f'[ "$pkg" = oa-track ] && {{ cp {bindir}/run_src "$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run"; }}\n'
+            "exit 0\n"
+        )
+        (bindir / "rustc").write_text('#!/usr/bin/env bash\necho stub\n')
+        for n in ["cargo", "rustc"]:
+            (bindir / n).chmod(0o755)
+        clip = self.dir / "clip.oaf"
+        clip.write_bytes(b"x")
+        env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REPLAY_COMPARE_GUARD="",
+                   CARGO_TARGET_DIR=str(self.dir / "tgt"))
+        res = subprocess.run(
+            ["bash", str(SCRIPT), "HEAD", "HEAD", str(clip), str(self.dir / "out"), str(self.dir / "scratch")],
+            capture_output=True, text=True, env=env, timeout=180,
         )
         self.assertEqual(res.returncode, 2, res.stderr)
-        self.assertIn("build of", res.stderr)
-        calls = log.read_text()
-        build = [l for l in calls.splitlines() if l.startswith("cargo")][0]
-        self.assertIn("--locked", build)
-        self.assertIn("RUSTFLAGS=[unset]", build)
-        self.assertIn("ENC=[unset]", build)
+        self.assertIn("is not at", res.stderr)
 
 
 if __name__ == "__main__":

@@ -8,8 +8,8 @@ Compares two tracker runs of the same clip.
 oa-track-run --adsb clip.oaf --out dir --no-score --digest digest.txt --rows rows.bin
 ```
 
-`digest.txt`: a `#` header line, then one line per output second (Unix second of the row time):
-`second chain_hash second_hash rows`. `rows.bin`: a 24-byte header (`OATKROWS`, version `1`, row size
+`digest.txt`: a `#` header line (format v2), then one line per output second (Unix second of the
+row time): `second chain_hash second_hash rows`, then `end seconds rows last_chain`. `rows.bin`: a 24-byte header (`OATKROWS`, version `1`, row size
 85, row count, little-endian) and the canonical 85-byte rows grouped by ascending second
 (`oa_track::canon` lists the field offsets). Without the two flags `oa-track-run` writes nothing
 extra.

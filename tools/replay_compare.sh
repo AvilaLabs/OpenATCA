@@ -17,13 +17,17 @@
 #   CARGO_BUILD_JOBS          default 2
 #   REPLAY_COMPARE_KEEP_ROWS  1 keeps the two rows files in <outdir>
 #
-# Both builds run with RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS and RUSTDOCFLAGS
-# removed from the environment (flags such as -C target-cpu=native change float results, which is
-# what is being compared) and with --locked. The report records that they were cleared and what
-# they held, the toolchain (`rustc -vV`), the sha256 of the overlay patch and of every file it
-# patched, and the sha256 of every compared binary input. A commit that predates --digest/--rows
-# gets the frozen overlay only if its files are exactly the ones the patch was made against
-# (replay_overlay_apply.sh); anything else is refused.
+# Every cargo and rustc call (both builds, the diff tool's build, the toolchain query) runs under
+# `env -i` with only PATH, HOME, RUSTUP_HOME, CARGO_HOME and TMPDIR (those that are set) and the
+# two variables this script sets itself (CARGO_BUILD_JOBS, CARGO_TARGET_DIR), and with
+# `--config build.rustflags=[]`, so no RUSTFLAGS-like variable or user config can change float
+# results (-C target-cpu=native does) between the two builds. Builds use --locked. The report
+# records the names of every environment variable that was dropped and the values of the flag
+# variables among them, the toolchain (`rustc -vV`), the sha256 of the overlay patch and of every
+# file it patched, and the sha256 of both digests, both rows files (before they are deleted) and
+# both compared binaries. A commit that predates --digest/--rows gets the frozen overlay only if
+# its files are exactly the ones the patch was made against (replay_overlay_apply.sh); anything
+# else is refused.
 set -euo pipefail
 
 usage() {
@@ -104,8 +108,15 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 clip_sha="$(sha256sum "$clip" | cut -d' ' -f1)"
 # What the caller's environment held, recorded before it is cleared for the builds.
 flags_before="RUSTFLAGS=[${RUSTFLAGS-}] CARGO_ENCODED_RUSTFLAGS=[${CARGO_ENCODED_RUSTFLAGS-}] CARGO_BUILD_RUSTFLAGS=[${CARGO_BUILD_RUSTFLAGS-}] RUSTDOCFLAGS=[${RUSTDOCFLAGS-}]"
-clean_env=(env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS -u RUSTDOCFLAGS)
-rustc_vv="$("${clean_env[@]}" rustc "+$toolchain" -vV 2>&1)" || die "no rustc for toolchain $toolchain"
+kept_vars=" PATH HOME RUSTUP_HOME CARGO_HOME TMPDIR "
+dropped_vars="$(env | cut -d= -f1 | sort | while read -r n; do case "$kept_vars" in *" $n "*) ;; *) echo "$n" ;; esac; done | tr '\n' ' ')"
+# The environment cargo and rustc run in: nothing but these.
+clean_env_prefix=(env -i "PATH=$PATH" "HOME=${HOME-}")
+[ -z "${RUSTUP_HOME+x}" ] || clean_env_prefix+=("RUSTUP_HOME=$RUSTUP_HOME")
+[ -z "${CARGO_HOME+x}" ] || clean_env_prefix+=("CARGO_HOME=$CARGO_HOME")
+[ -z "${TMPDIR+x}" ] || clean_env_prefix+=("TMPDIR=$TMPDIR")
+rustc_vv="$("${clean_env_prefix[@]}" rustc "+$toolchain" -vV 2>&1)" || die "no rustc for toolchain $toolchain"
+sha() { sha256sum "$1" | cut -d' ' -f1; }
 worktrees=()
 cleanup() {
     for w in "${worktrees[@]}"; do
@@ -139,9 +150,9 @@ build_and_run() {
     echo "$label: building $commit" >&2
     (
         cd "$wt"
-        CARGO_TARGET_DIR="$tgt" "${guard[@]}" "${clean_env[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+        "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
             CARGO_TARGET_DIR="$tgt" cargo "+$toolchain" build --release --locked \
-            -p oa-track --bin oa-track-run >"$outdir/build-$label.log" 2>&1
+            --config 'build.rustflags=[]' -p oa-track --bin oa-track-run >"$outdir/build-$label.log" 2>&1
     ) || die "build of $commit failed (see $outdir/build-$label.log)"
     echo "$label: running" >&2
     mkdir -p "$scratch/run-$label"
@@ -153,6 +164,12 @@ build_and_run() {
         --out "$scratch/run-$label" --no-score \
         --digest "$outdir/digest-$label.txt" --rows "$outdir/rows-$label.bin" \
         >"$outdir/run-$label.log" 2>&1 || die "run of $commit failed (see $outdir/run-$label.log)"
+    # What was compared, hashed before anything is deleted.
+    {
+        echo "digest sha256: $(sha "$outdir/digest-$label.txt")"
+        echo "rows sha256: $(sha "$outdir/rows-$label.bin")"
+        echo "binary sha256: $(sha "$tgt/release/oa-track-run")"
+    } >"$outdir/hashes-$label.txt"
     git -C "$repo" worktree remove --force "$wt" >/dev/null
     rm -rf "$tgt" "$scratch/run-$label"
 }
@@ -162,12 +179,16 @@ build_and_run B "$commit_b"
 
 # oa-replay-diff comes from the current checkout, not from either commit under test.
 echo "building oa-replay-diff" >&2
+diff_tgt="${CARGO_TARGET_DIR:-$repo/target}"
 (
     cd "$repo"
-    "${guard[@]}" "${clean_env[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
-        cargo "+$toolchain" build --release --locked -p oa-replay-diff >"$outdir/build-diff.log" 2>&1
+    "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+        CARGO_TARGET_DIR="$diff_tgt" cargo "+$toolchain" build --release --locked \
+        --config 'build.rustflags=[]' -p oa-replay-diff >"$outdir/build-diff.log" 2>&1
 ) || die "build of oa-replay-diff failed (see $outdir/build-diff.log)"
-diff_bin="${CARGO_TARGET_DIR:-$repo/target}/release/oa-replay-diff"
+diff_bin="$diff_tgt/release/oa-replay-diff"
+[ -x "$diff_bin" ] || die "the built oa-replay-diff is not at $diff_bin"
+echo "diff binary sha256: $(sha "$diff_bin")" >"$outdir/hashes-diff.txt"
 
 args=("$outdir/digest-A.txt" "$outdir/digest-B.txt"
     --rows-a "$outdir/rows-A.bin" --rows-b "$outdir/rows-B.bin"
@@ -181,7 +202,9 @@ status=0
     echo "commit B: $commit_b ($spec_b)"
     echo "clip: $clip"
     echo "clip sha256: $clip_sha"
+    echo "builds ran under env -i with only PATH, HOME, RUSTUP_HOME, CARGO_HOME, TMPDIR, CARGO_BUILD_JOBS, CARGO_TARGET_DIR, and --config build.rustflags=[]"
     echo "environment flags cleared for the builds: $flags_before"
+    echo "environment variables dropped: $dropped_vars"
     echo "toolchain: $toolchain"
     echo "$rustc_vv"
     for l in A B; do
@@ -192,6 +215,12 @@ status=0
             echo "overlay for commit $l: none (the commit has --digest/--rows)"
         fi
     done
+    for l in A B; do
+        echo "run $l inputs and outputs:"
+        sed 's/^/  /' "$outdir/hashes-$l.txt"
+    done
+    echo "diff tool:"
+    sed 's/^/  /' "$outdir/hashes-diff.txt"
     [ -z "$expect" ] || echo "expect file: $expect"
     echo "oa-replay-diff exit status: $status"
     echo
@@ -203,6 +232,10 @@ status=0
     echo "commit_b=$commit_b"
     echo "clip_sha256=$clip_sha"
     echo "rustflags_cleared=yes"
+    echo "env_dropped=$dropped_vars"
+    for l in A B; do
+        sed "s/^\\([a-z ]*\\) sha256: \\(.*\\)$/\\1_$l=\\2/; s/ /_/g" "$outdir/hashes-$l.txt"
+    done
     echo "rustflags_before=$flags_before"
     echo "toolchain=$toolchain"
     for l in A B; do
