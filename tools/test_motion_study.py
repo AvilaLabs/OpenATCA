@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from tools import motion_study as ms
+import motion_study as ms
 
 TRUTH=ms.TRUTH_FIELDS
 MEAS=ms.MEAS_FIELDS

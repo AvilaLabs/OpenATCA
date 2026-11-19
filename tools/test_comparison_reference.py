@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools import comparison_reference as ref
+import comparison_reference as ref
 
 
 START_NS = 1_800_000_000_000_000_000

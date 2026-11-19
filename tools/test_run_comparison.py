@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from tools import run_comparison as wrapper
+import run_comparison as wrapper
 
 
 class ComparisonWrapperTests(unittest.TestCase):

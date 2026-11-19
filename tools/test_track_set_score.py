@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools import track_set_score as scorer
+import track_set_score as scorer
 
 
 TRUTH_FIELDS = scorer.TRUTH_FIELDS
