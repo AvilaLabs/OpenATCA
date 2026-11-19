@@ -1,0 +1,3 @@
+fx-shell   # no longer unsplit: stale
+fx-ghost
+fx-newold2

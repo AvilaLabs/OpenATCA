@@ -1,0 +1,10 @@
+[package]
+name = "fx-split"
+version = "0.0.1"
+
+[package.metadata.openatca]
+class = "split"
+
+[dependencies]
+fx-core = { path = "../fx-core" }
+fx-shell = { path = "../fx-shell" }

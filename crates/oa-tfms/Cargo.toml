@@ -13,3 +13,6 @@ workspace = true
 oa-xml = { path = "../oa-xml" }
 # Linkage against SFDPS rows only (src/link.rs); the decoder itself does not use it.
 oa-fixm = { path = "../oa-fixm" }
+
+[package.metadata.openatca]
+class = "shell"

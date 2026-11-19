@@ -1,0 +1,5 @@
+[package]
+name = "fx-newold"
+
+[package.metadata.openatca]
+class = "unsplit"
