@@ -20,6 +20,9 @@ paired p99 and coverage comparison as a descriptive gate. Per-scenario covarianc
 candidate-local ENU errors and the emitted covariance. The study reports undercoverage and
 overcoverage; it makes no NIS claim because the public pre-gate API does not expose NIS.
 
+The study file `validation/motion-study-v1.json` is pinned by its SHA-256 in
+`tools/motion_study.py`; a changed file stops the study before any run.
+
 This is a developmental model check. It cannot establish physical accuracy, professional tracker
 performance, or independent qualification. It does not use qualification or sealed fault seeds,
 and results cannot change the thresholds or settings after the registered single check candidate.

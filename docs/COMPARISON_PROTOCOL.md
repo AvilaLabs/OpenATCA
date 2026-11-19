@@ -189,11 +189,23 @@ aggregate after the frozen run. If holdout results lead to any change, label the
 start a new holdout. Baselines may not be deliberately weakened, starved of inputs, or run with a
 different resource cap to manufacture a margin.
 
-## 6. Current evidence boundary
+## 6. How the tools hold the freeze
 
-The existing candidate record includes 68 generated-proof uncertainties, a measured full-catchup
-time of 5.84 seconds for one target, no fresh 48-target proof under this protocol, and no qualified
-independent RTK reference. These facts remain explicit open evidence items. Component tests do
-not require external data access; an unavailable external source leaves its associated comparison
-unmeasured and does not invalidate unrelated local component evidence. No result should claim
-these gaps are closed until the corresponding frozen gate has evidence.
+The SHA-256 of `validation/comparison-protocol-v1.json` is a constant in
+`tools/comparison_evaluator.py` and `tools/run_comparison.py`. If the file does not match it, the
+evaluator gives no thresholds and the status `unqualified_protocol_hash_mismatch`; a run cannot
+qualify. Every threshold the evaluator applies is read from the verified file, not written in the
+code. A run started from a source tree with uncommitted changes is `exploratory (source tree not
+clean)` and can never pass. `run_comparison.py` exits 0 only for a completed run; every other
+status, including a failed reference, exits 3. Every pooled accuracy figure carries its coverage:
+rows used, rows expected and their ratio.
+
+## 7. Current evidence boundary
+
+No qualification measurement has been made under this protocol. The synthetic comparison runner
+(`validation/oa-comparison-runner`) is not in the repository yet: it needs tracker work counters
+that have not landed, so `run_comparison.py` stops with "missing runner crate" before writing
+anything. There is no qualified independent RTK reference. Component tests need no external
+data; a comparison whose source is unavailable stays unmeasured and does not change unrelated
+component evidence. No result may claim one of these gaps closed before its frozen gate has
+evidence.
