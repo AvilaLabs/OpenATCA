@@ -1,4 +1,4 @@
-//! The airspace model: plain tables, typed indexes, fixed-point units. **Core** (B1): pure data
+//! The airspace model: plain tables, typed indexes, fixed-point units. **Core** (B1, B7): pure data
 //! and pure functions over it; nothing here does I/O.
 //!
 //! Layout rules (docs/M0_DESIGN.md "Model layout", RULESET A1, A3, A4, A6, A7, A9):

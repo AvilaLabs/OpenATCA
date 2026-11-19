@@ -1,4 +1,4 @@
-//! The `oa-adapt` command line. **Shell** (B1): argument parsing, file reads and writes, output.
+//! The `oa-adapt` command line. **Shell** (B1, B7): argument parsing, file reads and writes, output.
 //! All decisions are made by the core modules it calls.
 //!
 //! ```text

@@ -1,4 +1,4 @@
-//! Diffing two snapshots (OA-ASP-007). **Core** (B1): pure functions over two models.
+//! Diffing two snapshots (OA-ASP-007). **Core** (B1, B7): pure functions over two models.
 //!
 //! Every object class is flattened into `key -> [(field, value)]` where the key is the object's
 //! stable identity and the values are rendered with the string table resolved, so a change in
@@ -6,7 +6,7 @@
 //! changed objects; a changed object lists exactly the fields that differ. Output order is
 //! fixed: object classes in a fixed order, keys in sorted order, fields in declaration order.
 
-use crate::model::*;
+use super::model::*;
 use oa_sha256::to_hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;

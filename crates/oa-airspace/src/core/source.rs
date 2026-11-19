@@ -1,5 +1,5 @@
 //! The plain values the shell hands the core: everything parsed out of the two archives.
-//! **Core** (B1): data only, no behaviour (A1). Built by `load` (shell), consumed by `build`
+//! **Core** (B1, B7): data only, no behaviour (A1). Built by `load` (shell), consumed by `build`
 //! (core); tests build it from fixtures or by hand.
 //!
 //! The record types are the ones the parser crates define; nothing is copied or reshaped here,

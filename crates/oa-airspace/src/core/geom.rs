@@ -1,4 +1,4 @@
-//! Geometry the selection and the report need, on top of `oa-geo`. **Core** (B1): pure functions
+//! Geometry the selection and the report need, on top of `oa-geo`. **Core** (B1, B7): pure functions
 //! of coordinates.
 //!
 //! * [`Area`]: the selection area, the union of the ARTCC's HIGH and LOW polygons and a buffer

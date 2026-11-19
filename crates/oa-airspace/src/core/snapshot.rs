@@ -1,4 +1,4 @@
-//! Snapshot encoding and decoding (OA-ASP-006, RULESET A8). **Core** (B1): pure functions between
+//! Snapshot encoding and decoding (OA-ASP-006, RULESET A8). **Core** (B1, B7): pure functions between
 //! a [`Model`] and bytes; reading and writing the file is the shell's job.
 //!
 //! Format, all integers little-endian, nothing implicit:
@@ -24,7 +24,7 @@
 //! bytes left, before anything is allocated) and every index and span are checked, and no input
 //! makes it panic. Trailing bytes are an error.
 
-use crate::model::*;
+use super::model::*;
 use std::fmt;
 
 /// File magic.

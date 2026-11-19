@@ -1,4 +1,4 @@
-//! AIRAC cycles (OA-ASP-072). **Core** (B1): pure date arithmetic. NASR (effective date) and
+//! AIRAC cycles (OA-ASP-072). **Core** (B1, B7): pure date arithmetic. NASR (effective date) and
 //! CIFP (header cycle `YYRR`) are both published on the 28-day AIRAC cycle; this maps a date to
 //! the cycle that contains it, so the two sources can be checked against each other.
 

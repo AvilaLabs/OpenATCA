@@ -1,4 +1,4 @@
-//! The build report (OA-ASP-003, 004, 005; docs/M0_DESIGN.md "Report"). **Core** (B1): a pure
+//! The build report (OA-ASP-003, 004, 005; docs/M0_DESIGN.md "Report"). **Core** (B1, B7): a pure
 //! function from the model, what the build learned, the diagnostics and the snapshot hash to
 //! text. The shell writes the text beside the snapshot.
 //!
@@ -8,10 +8,12 @@
 //! references (all), boundary geometry (the geodesic-versus-rhumb Unknown, UK-001),
 //! fixed-point rounding, other findings, snapshot identity.
 
-use crate::build::{BuildInfo, DISAGREE_M, MAX_AIRPORT_PAIR_M, MAX_PAIR_M, POSITION_DEFECT_DEG};
-use crate::geom::{e7_to_deg, edge_separations, latlon_e7, RingSeparation};
-use crate::model::*;
-use crate::source::{ArchiveInfo, Diagnostics};
+use super::build_info::{
+    BuildInfo, DISAGREE_M, MAX_AIRPORT_PAIR_M, MAX_PAIR_M, POSITION_DEFECT_DEG,
+};
+use super::geom::{e7_to_deg, edge_separations, latlon_e7, RingSeparation};
+use super::model::*;
+use super::source::{ArchiveInfo, Diagnostics};
 use oa_geo::{wgs84, LatLon};
 use oa_nasr::schema::{SchemaViolation, ViolationKind};
 use oa_sha256::to_hex;
