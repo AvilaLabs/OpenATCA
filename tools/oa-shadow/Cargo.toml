@@ -1,0 +1,27 @@
+[package]
+name = "oa-shadow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-bench = { path = "../../crates/oa-bench" }
+oa-math = { path = "../../crates/oa-math" }
+oa-replay = { path = "../../crates/oa-replay" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+oa-track = { path = "../../crates/oa-track" }
+oa-truth = { path = "../../crates/oa-truth" }
+
+[[bin]]
+name = "oa-shadow"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"
