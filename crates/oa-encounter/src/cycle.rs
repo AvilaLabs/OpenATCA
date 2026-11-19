@@ -129,7 +129,13 @@ fn evaluate(st: &mut EncounterState, i: usize, j: usize, t_ns: i64, stats: &mut 
                 start_ns: t_ns,
                 end_ns: t_ns,
                 closest_ns: t_ns,
+                interp_ns: t_ns,
                 min_h_m: f32::INFINITY,
+                min_h_interp_m: f32::INFINITY,
+                min_v_ft: f32::NAN,
+                vrate_a_fpm: f32::NAN,
+                vrate_b_fpm: f32::NAN,
+                max_abs_vrate_fpm: f32::NAN,
                 v_at_closest_ft: f32::NAN,
                 min_scaled_m: f32::NAN,
                 alt_ft: f32::NAN,
@@ -143,15 +149,57 @@ fn evaluate(st: &mut EncounterState, i: usize, j: usize, t_ns: i64, stats: &mut 
                 ground_either: 0,
                 class: CLASS_ALT_UNKNOWN,
             };
-            st.open.insert(p, Open { key, e });
+            st.open.insert(
+                p,
+                Open {
+                    key,
+                    e,
+                    prev_t: i64::MIN,
+                    prev_x: 0.0,
+                    prev_y: 0.0,
+                },
+            );
             stats.opened += 1;
             p
         }
     };
+    let valid_prev = st.prev_ns != i64::MIN;
+    let prev_ns = st.prev_ns;
     let Some(open) = st.open.get_mut(at) else {
         return;
     };
+    // The true minimum: the relative position moves in a straight line between consecutive ticks.
+    let h32 = h as f32;
+    if h32 < open.e.min_h_interp_m {
+        open.e.min_h_interp_m = h32;
+        open.e.interp_ns = t_ns;
+    }
+    if valid_prev && open.prev_t == prev_ns {
+        let (dx, dy) = (x - open.prev_x, y - open.prev_y);
+        let dd = dx * dx + dy * dy;
+        let s = if dd > 0.0 {
+            oa_math::clamp_f64(-(open.prev_x * dx + open.prev_y * dy) / dd, 0.0, 1.0)
+        } else {
+            0.0
+        };
+        let m = oa_math::hypot(open.prev_x + s * dx, open.prev_y + s * dy) as f32;
+        if m < open.e.min_h_interp_m {
+            open.e.min_h_interp_m = m;
+            open.e.interp_ns = open.prev_t + oa_ieee::round(s * (t_ns - open.prev_t) as f64) as i64;
+        }
+    }
+    open.prev_t = t_ns;
+    open.prev_x = x;
+    open.prev_y = y;
     let e = &mut open.e;
+    for vr in [oi.vrate_fpm, oj.vrate_fpm] {
+        if vr.is_finite() {
+            let a = vr.abs();
+            if e.max_abs_vrate_fpm.is_nan() || a > e.max_abs_vrate_fpm {
+                e.max_abs_vrate_fpm = a;
+            }
+        }
+    }
     e.end_ns = t_ns;
     e.ticks_inside = e.ticks_inside.saturating_add(1);
     if v.is_nan() {
@@ -161,14 +209,19 @@ fn evaluate(st: &mut EncounterState, i: usize, j: usize, t_ns: i64, stats: &mut 
         if c < e.class {
             e.class = c;
         }
+        let v32 = v as f32;
+        if e.min_v_ft.is_nan() || v32 < e.min_v_ft {
+            e.min_v_ft = v32;
+        }
         let s = oa_math::hypot(h, v / cfg.volume_v_ft * cfg.volume_h_m) as f32;
         if e.min_scaled_m.is_nan() || s < e.min_scaled_m {
             e.min_scaled_m = s;
         }
     }
-    let h32 = h as f32;
     if h32 < e.min_h_m {
         e.min_h_m = h32;
+        e.vrate_a_fpm = oi.vrate_fpm;
+        e.vrate_b_fpm = oj.vrate_fpm;
         e.closest_ns = t_ns;
         e.v_at_closest_ft = v as f32;
         e.alt_ft = if v.is_nan() {
@@ -213,6 +266,7 @@ pub fn encounter_cycle(
         return stats;
     }
     st.started = true;
+    st.prev_ns = st.last_ns;
     st.last_ns = t_ns;
     stats.cycles = 1;
     load(st, rows, &mut stats);

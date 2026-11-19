@@ -75,33 +75,105 @@ fn secs(ns: i64) -> String {
     format!("{:.3}", ns as f64 / 1e9)
 }
 
+/// A public airport: where it is and how high the field is.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Airport {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub elev_ft: f64,
+}
+
+/// The surface rule: an encounter is SURFACE when either aircraft was on the ground at the
+/// closest approach, or the closest approach was within this many NM of a public airport and
+/// the mean pressure altitude there was under the field elevation plus [`SURFACE_MARGIN_FT`].
+pub const SURFACE_NM: f64 = 5.0;
+pub const SURFACE_MARGIN_FT: f64 = 200.0;
+/// Contexts, in the order the summary leads with them.
+pub const CONTEXT_NAMES: [&str; 4] = [
+    "AIRBORNE",
+    "AIRBORNE_ALT_UNKNOWN",
+    "SURFACE",
+    "DEGRADED_TRACK",
+];
+const CTX_AIRBORNE: usize = 0;
+const CTX_ALT_UNKNOWN: usize = 1;
+const CTX_SURFACE: usize = 2;
+const CTX_DEGRADED: usize = 3;
+/// One line for each context, said once in the summary.
+const CONTEXT_RULES: [&str; 4] = [
+    "both aircraft airborne or not stated on the ground, both altitudes known at the closest approach, neither track coasting or uncertain",
+    "not surface, neither track coasting or uncertain, an altitude unknown on at least one track at the closest approach",
+    "either aircraft on the ground at the closest approach, or within 5 NM of a public airport and under its field elevation plus 200 ft (taxiing, gates, ramp)",
+    "either track coasting or uncertain at the closest approach, and not surface (position not known well, or stale)",
+];
+
+/// The context of an encounter at its closest approach (an index into [`CONTEXT_NAMES`]).
+pub fn context_of(e: &Encounter, airports: &[Airport]) -> usize {
+    let (lat, lon) = (f64::from(e.lat_e7) / 1e7, f64::from(e.lon_e7) / 1e7);
+    let low = !e.alt_ft.is_nan()
+        && airports.iter().any(|a| {
+            // Flat-earth test; the margin is metres, not precision.
+            let dy = (a.lat_deg - lat) * 60.0;
+            if dy.abs() > SURFACE_NM {
+                return false;
+            }
+            let mut dl = a.lon_deg - lon;
+            if dl > 180.0 {
+                dl -= 360.0;
+            } else if dl < -180.0 {
+                dl += 360.0;
+            }
+            let dx = dl * lat.to_radians().cos() * 60.0;
+            dx.hypot(dy) <= SURFACE_NM && f64::from(e.alt_ft) < a.elev_ft + SURFACE_MARGIN_FT
+        });
+    if e.ground_either != 0 || low {
+        CTX_SURFACE
+    } else if (e.flags_a | e.flags_b) & (O_COAST | O_UNCERTAIN) != 0 {
+        CTX_DEGRADED
+    } else if e.v_at_closest_ft.is_nan() {
+        CTX_ALT_UNKNOWN
+    } else {
+        CTX_AIRBORNE
+    }
+}
+
 /// `encounters.csv`: one row per encounter, sorted by start time then addresses.
-pub fn encounters_csv(encounters: &[Encounter]) -> String {
+pub fn encounters_csv(encounters: &[Encounter], airports: &[Airport]) -> String {
     let mut o = String::from(
-        "address_a_hex,address_b_hex,start_s,end_s,closest_s,min_horizontal_m,vertical_at_closest_ft,min_scaled_m,class,altitude_band,mean_altitude_ft,lat_deg,lon_deg,flags_a,flags_b,ground_either,ticks_inside,ticks_alt_unknown,ticks_unevaluated\n",
+        "address_a_hex,address_b_hex,start_s,end_s,closest_s,min_horizontal_m,interp_closest_s,min_horizontal_interp_m,vertical_at_closest_ft,min_vertical_ft,min_scaled_m,context,class,altitude_band,mean_altitude_ft,lat_deg,lon_deg,flags_a,flags_b,flags_a_raw,flags_b_raw,vrate_a_fpm,vrate_b_fpm,max_abs_vrate_fpm,ground_either,ticks_inside,ticks_alt_unknown,ticks_unevaluated\n",
     );
     for e in sorted(encounters) {
         let _ = writeln!(
             o,
-            "{:06X},{:06X},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{}",
+            "{:06X},{:06X},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
             e.addr_a & 0xFF_FFFF,
             e.addr_b & 0xFF_FFFF,
             secs(e.start_ns),
             secs(e.end_ns),
             secs(e.closest_ns),
             f(e.min_h_m, 1),
+            secs(e.interp_ns),
+            f(e.min_h_interp_m, 1),
             f(e.v_at_closest_ft, 0),
+            f(e.min_v_ft, 0),
             f(e.min_scaled_m, 1),
-            class_name(e.class),
-            BAND_NAMES
-                .get(band_of(e.alt_ft))
+            CONTEXT_NAMES
+                .get(context_of(&e, airports))
                 .copied()
-                .unwrap_or("unknown"),
+                .unwrap_or("?"),
+            class_name(e.class),
+            BAND_NAMES.get(band_of(e.alt_ft)).copied().unwrap_or("unknown"),
             f(e.alt_ft, 0),
             f64::from(e.lat_e7) / 1e7,
             f64::from(e.lon_e7) / 1e7,
             flags_text(e.flags_a),
             flags_text(e.flags_b),
+            e.flags_a,
+            e.flags_b,
+            f(e.vrate_a_fpm, 0),
+            f(e.vrate_b_fpm, 0),
+            f(e.max_abs_vrate_fpm, 0),
             e.ground_either,
             e.ticks_inside,
             e.ticks_alt_unknown,
@@ -136,6 +208,12 @@ fn hour_label(hour_since_epoch: i64) -> String {
 pub struct SummaryInput<'a> {
     pub cfg: &'a EncounterConfig,
     pub encounters: &'a [Encounter],
+    pub airports: &'a [Airport],
+    /// What the airports came from, for the summary's header.
+    pub airports_from: &'a str,
+    /// Smallest separation of the two aircraft's own reports near the encounter, metres, by
+    /// address pair, for the encounters at or above 18,000 ft.
+    pub report_sep_m: &'a BTreeMap<(u32, u32), f32>,
     pub totals: CycleStats,
     /// Encounters the tool's log lost (must be 0).
     pub log_overflow: u64,
@@ -148,6 +226,13 @@ pub struct SummaryInput<'a> {
     pub scope: &'a str,
     pub csv_sha256: &'a str,
 }
+
+/// A climb or descent: either aircraft's vertical rate at or over this, feet per minute.
+pub const CLIMB_FPM: f32 = 300.0;
+/// The two aircraft's own reports within this of each other, metres, count as coinciding.
+pub const COINCIDE_M: f32 = 50.0;
+/// Vertical separation at or over this (1,000 ft levels with 25 ft quantisation), feet.
+pub const LEVEL_FT: f32 = 975.0;
 
 fn class_limits(cfg: &EncounterConfig) -> String {
     let mut s = String::new();
@@ -166,11 +251,39 @@ fn class_limits(cfg: &EncounterConfig) -> String {
     s
 }
 
-/// `summary.txt`: counts only. No address, callsign or squawk appears in it.
+fn class_counts(o: &mut String, es: &[(&Encounter, usize)], ctx: usize) {
+    let mut by: BTreeMap<u8, u64> = BTreeMap::new();
+    for (e, c) in es {
+        if *c == ctx {
+            *by.entry(e.class).or_default() += 1;
+        }
+    }
+    for (c, n) in &by {
+        let _ = writeln!(o, "  {}: {n}", class_name(*c));
+    }
+}
+
+/// `summary.txt`: counts only (the per-event table of the encounters at or above 18,000 ft has no
+/// address). No address, callsign or squawk appears in it.
 pub fn summary_text(i: &SummaryInput) -> String {
     let cfg = i.cfg;
     let t = &i.totals;
     let mut o = String::new();
+    let ctx_of: Vec<usize> = i
+        .encounters
+        .iter()
+        .map(|e| context_of(e, i.airports))
+        .collect();
+    let es: Vec<(&Encounter, usize)> = i.encounters.iter().zip(ctx_of.iter().copied()).collect();
+    let degraded = t.not_evaluated
+        + t.tracks_unscanned
+        + t.candidates_dropped
+        + t.open_dropped
+        + i.log_overflow
+        + t.out_of_order
+        + t.rows_over_capacity
+        + i.tracker_overflow
+        > 0;
     let _ = writeln!(o, "oa-encounter summary");
     let _ = writeln!(o, "clip: {} sha256 {}", i.clip_name, i.clip_sha256);
     let _ = writeln!(o, "tracks from: {}", i.scope);
@@ -182,22 +295,243 @@ pub fn summary_text(i: &SummaryInput) -> String {
         cfg.volume_v_ft,
         cfg.hysteresis_ns / 1_000_000_000
     );
-    let _ = writeln!(o, "classes (tightest first; strict limits):");
+    let _ = writeln!(o, "classes within each context (tightest first; strict limits; by the sampled one-second ticks):");
     o.push_str(&class_limits(cfg));
     let _ = writeln!(
         o,
-        "  ALT_UNKNOWN: altitude unknown on either track at every tick inside; by horizontal distance below"
+        "  ALT_UNKNOWN: altitude unknown on either track at every tick inside"
     );
     let _ = writeln!(
         o,
-        "altitude bands: pressure altitude at the closest approach (surface to 1,000 ft above ground is not available)"
+        "altitude: barometric pressure altitude as the tracker holds it (surface to 1,000 ft above ground is not available)"
+    );
+    let _ = writeln!(o, "airports for the surface rule: {}", i.airports_from);
+    let _ = writeln!(
+        o,
+        "record state: {}",
+        if degraded {
+            "DEGRADED (a shortfall under work and overflow is non-zero)"
+        } else {
+            "complete (no shortfall)"
+        }
+    );
+    let _ = writeln!(o, "\nencounters: {}", es.len());
+    let _ = writeln!(o, "\ncontexts (one per encounter, at the closest approach)");
+    for (k, name) in CONTEXT_NAMES.iter().enumerate() {
+        let n = ctx_of.iter().filter(|&&c| c == k).count();
+        let _ = writeln!(
+            o,
+            "  {name}: {n}  [{}]",
+            CONTEXT_RULES.get(k).copied().unwrap_or("")
+        );
+    }
+    // AIRBORNE.
+    let _ = writeln!(o, "\nAIRBORNE by class");
+    class_counts(&mut o, &es, CTX_AIRBORNE);
+    let mut by_band = [0u64; 5];
+    let mut cross: BTreeMap<(u8, usize), u64> = BTreeMap::new();
+    let mut hist = [0u64; 4];
+    let (mut v_under, mut v_total) = (0u64, 0u64);
+    for (e, c) in &es {
+        if *c != CTX_AIRBORNE {
+            continue;
+        }
+        let b = band_of(e.alt_ft);
+        if let Some(x) = by_band.get_mut(b) {
+            *x += 1;
+        }
+        *cross.entry((e.class, b)).or_default() += 1;
+        v_total += 1;
+        if e.v_at_closest_ft < 900.0 {
+            v_under += 1;
+        } else {
+            let k = ((e.v_at_closest_ft - 900.0) / 25.0) as usize;
+            if let Some(x) = hist.get_mut(k) {
+                *x += 1;
+            }
+        }
+    }
+    let _ = writeln!(o, "\nAIRBORNE by pressure-altitude band (closest approach)");
+    for (name, n) in BAND_NAMES.iter().zip(by_band.iter()) {
+        let _ = writeln!(o, "  {name} ft: {n}");
+    }
+    let _ = writeln!(o, "\nAIRBORNE class by band");
+    for ((c, b), n) in &cross {
+        let _ = writeln!(
+            o,
+            "  {} {} ft: {n}",
+            class_name(*c),
+            BAND_NAMES.get(*b).copied().unwrap_or("unknown")
+        );
+    }
+    let _ = writeln!(
+        o,
+        "\nAIRBORNE vertical separation at the closest approach, near 1,000 ft (feet; the volume's edge is strict at 1,000)"
+    );
+    let _ = writeln!(o, "  under 900: {v_under} of {v_total}");
+    for (k, n) in hist.iter().enumerate() {
+        let lo = 900 + 25 * k;
+        let _ = writeln!(o, "  {lo} to {}: {n}", lo + 25);
+    }
+    // AIRBORNE_ALT_UNKNOWN.
+    let _ = writeln!(o, "\nAIRBORNE_ALT_UNKNOWN by class");
+    class_counts(&mut o, &es, CTX_ALT_UNKNOWN);
+    let mut unknown_h = [0u64; 8];
+    for (e, c) in &es {
+        if *c == CTX_ALT_UNKNOWN && e.class == CLASS_ALT_UNKNOWN {
+            let h = f64::from(e.min_h_m);
+            let mut slot = cfg.n_classes.min(7);
+            for (k, cl) in cfg.classes.iter().take(cfg.n_classes).enumerate() {
+                if h < cl.h_m {
+                    slot = k;
+                    break;
+                }
+            }
+            if let Some(x) = unknown_h.get_mut(slot) {
+                *x += 1;
+            }
+        }
+    }
+    let _ = writeln!(
+        o,
+        "AIRBORNE_ALT_UNKNOWN, class ALT_UNKNOWN, by minimum horizontal distance"
+    );
+    for (k, c) in cfg.classes.iter().take(cfg.n_classes).enumerate() {
+        let _ = writeln!(
+            o,
+            "  under {:.0} ft ({:.2} NM): {}",
+            c.h_m / FT,
+            c.h_m / NM,
+            unknown_h.get(k).copied().unwrap_or(0)
+        );
+    }
+    // SURFACE and DEGRADED_TRACK.
+    let _ = writeln!(
+        o,
+        "\nSURFACE by class (counted, not analysed: {})",
+        CONTEXT_RULES.get(CTX_SURFACE).copied().unwrap_or("")
+    );
+    class_counts(&mut o, &es, CTX_SURFACE);
+    let _ = writeln!(
+        o,
+        "\nDEGRADED_TRACK by class (counted, not analysed: {})",
+        CONTEXT_RULES.get(CTX_DEGRADED).copied().unwrap_or("")
+    );
+    class_counts(&mut o, &es, CTX_DEGRADED);
+    let _ = writeln!(o, "\ncontext by class");
+    let mut grid: BTreeMap<(usize, u8), u64> = BTreeMap::new();
+    for (e, c) in &es {
+        *grid.entry((*c, e.class)).or_default() += 1;
+    }
+    for ((c, k), n) in &grid {
+        let _ = writeln!(
+            o,
+            "  {} {}: {n}",
+            CONTEXT_NAMES.get(*c).copied().unwrap_or("?"),
+            class_name(*k)
+        );
+    }
+    // At and above 18,000 ft.
+    let hi: Vec<&(&Encounter, usize)> = es.iter().filter(|(e, _)| band_of(e.alt_ft) == 3).collect();
+    let _ = writeln!(
+        o,
+        "\nat or above 18,000 ft pressure altitude at the closest approach: {} encounters (all contexts; altitude source barometric)",
+        hi.len()
     );
     let _ = writeln!(
         o,
-        "budgets per cycle: grid work {}, pair evaluations {}, candidates kept {}; capacity: tracks {}, open encounters {}",
+        "  columns: context, class, vertical at closest ft, minimum vertical ft, minimum horizontal sampled m, interpolated m, duration s, vertical rate a/b at closest fpm, largest |vertical rate| fpm, flags a / b, smallest separation of the aircraft's own reports m"
+    );
+    let (mut n_level, mut n_climb, mut n_other) = (0u64, 0u64, 0u64);
+    let (mut n_degraded, mut n_coincide) = (0u64, 0u64);
+    for (e, c) in &hi {
+        let sep = i.report_sep_m.get(&(e.addr_a, e.addr_b)).copied();
+        let sep_text = sep.map_or_else(|| "n/a".to_string(), |s| format!("{s:.1}"));
+        let _ = writeln!(
+            o,
+            "  {}, {}, {}, {}, {}, {}, {:.0}, {}/{}, {}, {} / {}, {}",
+            CONTEXT_NAMES.get(*c).copied().unwrap_or("?"),
+            class_name(e.class),
+            f(e.v_at_closest_ft, 0),
+            f(e.min_v_ft, 0),
+            f(e.min_h_m, 1),
+            f(e.min_h_interp_m, 1),
+            (e.end_ns - e.start_ns) as f64 / 1e9,
+            f(e.vrate_a_fpm, 0),
+            f(e.vrate_b_fpm, 0),
+            f(e.max_abs_vrate_fpm, 0),
+            flags_text(e.flags_a),
+            flags_text(e.flags_b),
+            sep_text
+        );
+        if e.v_at_closest_ft >= LEVEL_FT {
+            n_level += 1;
+        } else if e.max_abs_vrate_fpm >= CLIMB_FPM {
+            n_climb += 1;
+        } else {
+            n_other += 1;
+        }
+        if (e.flags_a | e.flags_b) & (O_COAST | O_UNCERTAIN) != 0 {
+            n_degraded += 1;
+        }
+        if sep.is_some_and(|s| s <= COINCIDE_M) {
+            n_coincide += 1;
+        }
+    }
+    let _ = writeln!(
+        o,
+        "  breakdown of the {} (each in the first that fits):",
+        hi.len()
+    );
+    let _ = writeln!(o, "    vertical at closest at or over {LEVEL_FT:.0} ft (1,000 ft levels, 25 ft quantisation): {n_level}");
+    let _ = writeln!(o, "    under that, with a vertical rate of {CLIMB_FPM:.0} fpm or more on either (climb or descent): {n_climb}");
+    let _ = writeln!(o, "    anything else: {n_other}");
+    let _ = writeln!(o, "  of the {}: either track coasting or uncertain: {n_degraded}; the aircraft's own reports within {COINCIDE_M:.0} m of each other at some time: {n_coincide}", hi.len());
+    // Hour and cell, for the encounters that can be taken at face value.
+    let mut by_hour: BTreeMap<i64, (u64, u64)> = BTreeMap::new();
+    let mut by_cell: BTreeMap<(i32, i32), (u64, u64)> = BTreeMap::new();
+    for (e, c) in &es {
+        if *c > CTX_ALT_UNKNOWN {
+            continue;
+        }
+        let hard = u64::from(usize::from(e.class) < 2);
+        let h = by_hour
+            .entry((e.start_ns / 1_000_000_000).div_euclid(3600))
+            .or_default();
+        h.0 += 1;
+        h.1 += hard;
+        let c = by_cell
+            .entry((
+                e.lat_e7.div_euclid(2_500_000),
+                e.lon_e7.div_euclid(2_500_000),
+            ))
+            .or_default();
+        c.0 += 1;
+        c.1 += hard;
+    }
+    let _ = writeln!(
+        o,
+        "\nper hour of start (UTC), AIRBORNE and AIRBORNE_ALT_UNKNOWN: all, C1 and C2"
+    );
+    for (h, (n, hard)) in &by_hour {
+        let _ = writeln!(o, "  {}: {n}, {hard}", hour_label(*h));
+    }
+    let _ = writeln!(o, "\nper 0.25 degree cell of the closest approach, AIRBORNE and AIRBORNE_ALT_UNKNOWN: all, C1 and C2");
+    for ((la, lo), (n, hard)) in &by_cell {
+        let (la, lo) = (f64::from(*la) * 0.25, f64::from(*lo) * 0.25);
+        let _ = writeln!(
+            o,
+            "  lat {la:.2} to {:.2}, lon {lo:.2} to {:.2}: {n}, {hard}",
+            la + 0.25,
+            lo + 0.25
+        );
+    }
+    let _ = writeln!(o, "\nwork and overflow");
+    let _ = writeln!(
+        o,
+        "  budgets per cycle: grid work {}, pair evaluations {}, candidates kept {}; capacity: tracks {}, open encounters {}",
         cfg.work_budget, cfg.eval_budget, cfg.max_candidates, cfg.max_tracks, cfg.max_open
     );
-    let _ = writeln!(o, "\nwork and overflow");
     let _ = writeln!(
         o,
         "  measurements {}, tracker tick rows {}, tracker output rows lost {}",
@@ -224,132 +558,6 @@ pub fn summary_text(i: &SummaryInput) -> String {
         ("encounters lost (log full)", i.log_overflow),
     ] {
         let _ = writeln!(o, "  {name}: {v}");
-    }
-    let degraded = t.not_evaluated
-        + t.tracks_unscanned
-        + t.candidates_dropped
-        + t.open_dropped
-        + i.log_overflow
-        + t.out_of_order
-        + t.rows_over_capacity
-        + i.tracker_overflow
-        > 0;
-    let _ = writeln!(
-        o,
-        "  record state: {}",
-        if degraded {
-            "DEGRADED (a shortfall above is non-zero)"
-        } else {
-            "complete (no shortfall)"
-        }
-    );
-    let es = i.encounters;
-    let _ = writeln!(o, "\nencounters: {}", es.len());
-    // Class, band, hour and cell tables.
-    let mut by_class: BTreeMap<u8, u64> = BTreeMap::new();
-    let mut by_band = [0u64; 5];
-    let mut cross: BTreeMap<(u8, usize), u64> = BTreeMap::new();
-    let mut by_hour: BTreeMap<i64, (u64, u64)> = BTreeMap::new();
-    let mut by_cell: BTreeMap<(i32, i32), (u64, u64)> = BTreeMap::new();
-    let mut unknown_h = [0u64; 8];
-    let mut ground = 0u64;
-    let mut ground_unknown = 0u64;
-    let hard = |c: u8| usize::from(c) < 2;
-    for e in es {
-        *by_class.entry(e.class).or_default() += 1;
-        let b = band_of(e.alt_ft);
-        if let Some(x) = by_band.get_mut(b) {
-            *x += 1;
-        }
-        *cross.entry((e.class, b)).or_default() += 1;
-        let h = by_hour
-            .entry((e.start_ns / 1_000_000_000).div_euclid(3600))
-            .or_default();
-        h.0 += 1;
-        h.1 += u64::from(hard(e.class));
-        let c = by_cell
-            .entry((
-                e.lat_e7.div_euclid(2_500_000),
-                e.lon_e7.div_euclid(2_500_000),
-            ))
-            .or_default();
-        c.0 += 1;
-        c.1 += u64::from(hard(e.class));
-        if e.ground_either != 0 {
-            ground += 1;
-        }
-        if e.class == CLASS_ALT_UNKNOWN {
-            if e.ground_either != 0 {
-                ground_unknown += 1;
-            }
-            let h = f64::from(e.min_h_m);
-            let mut slot = cfg.n_classes.min(7);
-            for (k, c) in cfg.classes.iter().take(cfg.n_classes).enumerate() {
-                if h < c.h_m {
-                    slot = k;
-                    break;
-                }
-            }
-            if let Some(x) = unknown_h.get_mut(slot) {
-                *x += 1;
-            }
-        }
-    }
-    let _ = writeln!(
-        o,
-        "\nby class (tightest class any tick with known altitude met)"
-    );
-    for (c, n) in &by_class {
-        let _ = writeln!(o, "  {}: {n}", class_name(*c));
-    }
-    let _ = writeln!(o, "\nby pressure-altitude band (closest approach)");
-    for (name, n) in BAND_NAMES.iter().zip(by_band.iter()) {
-        let _ = writeln!(o, "  {name} ft: {n}");
-    }
-    let _ = writeln!(o, "\nclass by band");
-    for ((c, b), n) in &cross {
-        let _ = writeln!(
-            o,
-            "  {} {} ft: {n}",
-            class_name(*c),
-            BAND_NAMES.get(*b).copied().unwrap_or("unknown")
-        );
-    }
-    let _ = writeln!(o, "\nALT_UNKNOWN by minimum horizontal distance");
-    for (k, c) in cfg.classes.iter().take(cfg.n_classes).enumerate() {
-        let _ = writeln!(
-            o,
-            "  under {:.0} ft ({:.2} NM): {}",
-            c.h_m / FT,
-            c.h_m / NM,
-            unknown_h.get(k).copied().unwrap_or(0)
-        );
-    }
-    let _ = writeln!(
-        o,
-        "  outside the classes' distances: {}",
-        unknown_h.get(cfg.n_classes.min(7)).copied().unwrap_or(0)
-    );
-    let _ = writeln!(
-        o,
-        "\nencounters with either aircraft on the ground at the closest approach: {ground} (of them ALT_UNKNOWN: {ground_unknown})"
-    );
-    let _ = writeln!(o, "\nper hour of start (UTC): all, C1 and C2");
-    for (h, (n, hard)) in &by_hour {
-        let _ = writeln!(o, "  {}: {n}, {hard}", hour_label(*h));
-    }
-    let _ = writeln!(
-        o,
-        "\nper 0.25 degree cell of the closest approach: all, C1 and C2"
-    );
-    for ((la, lo), (n, hard)) in &by_cell {
-        let (la, lo) = (f64::from(*la) * 0.25, f64::from(*lo) * 0.25);
-        let _ = writeln!(
-            o,
-            "  lat {la:.2} to {:.2}, lon {lo:.2} to {:.2}: {n}, {hard}",
-            la + 0.25,
-            lo + 0.25
-        );
     }
     let _ = writeln!(o, "\ndigest: encounters.csv sha256 {}", i.csv_sha256);
     o

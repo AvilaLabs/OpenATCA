@@ -132,8 +132,10 @@ dependencies = [
  "oa-adsb",
  "oa-bench",
  "oa-encounter",
+ "oa-nasr",
  "oa-sha256",
  "oa-track",
+ "oa-zip",
 ]
 
 [[package]]

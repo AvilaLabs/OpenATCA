@@ -55,6 +55,7 @@ fn obs(addr: u32, lat: f64, lon: f64, alt: f32) -> Obs {
         lon_deg: lon,
         addr,
         alt_ft: alt,
+        vrate_fpm: 0.0,
         flags: 0,
         ground: AIRBORNE,
     }
@@ -497,4 +498,56 @@ fn a_cycle_not_after_the_last_is_refused_and_a_bad_configuration_is_too() {
     run(&mut st, &mut log, 0, &pair(1000.0, 1.0, 1.0));
     encounter_finish(&mut st, &mut log);
     assert_eq!((log.items.len(), log.overflow), (0, 1));
+}
+
+// REQ: OA-ENC-013
+#[test]
+fn the_true_minimum_is_interpolated_between_ticks_and_the_sampled_one_kept() {
+    let (mut st, mut log) = fresh();
+    // B passes A at 100 m abeam, 600 m per tick: no tick is nearer than 316 m.
+    for (t, x) in [-900.0, -300.0, 300.0, 900.0].into_iter().enumerate() {
+        let (lat, lon) = offset(40.0, -90.0, x, 100.0);
+        let mut b = obs(2, lat, lon, 5300.0);
+        b.vrate_fpm = if t == 2 { -700.0 } else { 100.0 };
+        let mut a = obs(1, 40.0, -90.0, 5000.0);
+        a.vrate_fpm = 50.0;
+        run(&mut st, &mut log, t as i64, &[a, b]);
+    }
+    encounter_finish(&mut st, &mut log);
+    let e = log.items[0];
+    assert!((f64::from(e.min_h_m) - 316.2).abs() < 0.5, "{}", e.min_h_m);
+    assert!(e.closest_ns == S || e.closest_ns == 2 * S);
+    assert!(
+        (f64::from(e.min_h_interp_m) - 100.0).abs() < 0.5,
+        "{}",
+        e.min_h_interp_m
+    );
+    assert!(
+        (e.interp_ns - 3 * S / 2).abs() < 2_000_000,
+        "{}",
+        e.interp_ns
+    );
+    assert!(e.min_h_interp_m <= e.min_h_m);
+    // Vertical and rates: the separation is 300 ft throughout; the largest rate is 700 fpm.
+    assert_eq!(e.min_v_ft, 300.0);
+    assert_eq!(e.max_abs_vrate_fpm, 700.0);
+    assert!(e.vrate_a_fpm == 50.0 && (e.vrate_b_fpm == 100.0 || e.vrate_b_fpm == -700.0));
+    // A tick outside the volume between two inside ones: the straight line is not trusted
+    // across it.
+    let (mut st, mut log) = fresh();
+    for (t, x) in [(0i64, -900.0), (1, 30_000.0), (2, 900.0)] {
+        let (lat, lon) = offset(40.0, -90.0, x, 100.0);
+        run(
+            &mut st,
+            &mut log,
+            t,
+            &[obs(1, 40.0, -90.0, 5000.0), obs(2, lat, lon, 5000.0)],
+        );
+    }
+    encounter_finish(&mut st, &mut log);
+    assert!(
+        log.items[0].min_h_interp_m > 800.0,
+        "{}",
+        log.items[0].min_h_interp_m
+    );
 }

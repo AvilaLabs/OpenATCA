@@ -1,6 +1,6 @@
 //! The run: clip, tracker, record, files. Shell (B3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use oa_adsb::{reports_len, Reports, F_GROUND, NONE_I32};
@@ -19,7 +19,7 @@ use oa_track::{
 };
 
 use crate::args::Args;
-use crate::report::{encounters_csv, summary_text, SummaryInput};
+use crate::report::{band_of, encounters_csv, summary_text, Airport, SummaryInput};
 
 const NM: f64 = 1852.0;
 const FT: f64 = 0.3048;
@@ -139,13 +139,14 @@ fn flush(f: &mut Feed) {
 /// table; a change of time ends the cycle.
 fn consume(f: &mut Feed, o: &TrackOutput) {
     for k in 0..output_len(o) {
-        let (Some(&fl), Some(&t), Some(&addr), Some(&la), Some(&lo), Some(&alt)) = (
+        let (Some(&fl), Some(&t), Some(&addr), Some(&la), Some(&lo), Some(&alt), Some(&vr)) = (
             o.flags.get(k),
             o.t_ns.get(k),
             o.addr.get(k),
             o.lat_e7.get(k),
             o.lon_e7.get(k),
             o.alt_ft.get(k),
+            o.vrate_fpm.get(k),
         ) else {
             continue;
         };
@@ -162,6 +163,7 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             lon_deg: f64::from(lo) / 1e7,
             addr,
             alt_ft: if fl & O_HAS_ALT != 0 { alt } else { f32::NAN },
+            vrate_fpm: if fl & O_HAS_ALT != 0 { vr } else { f32::NAN },
             flags: fl,
             ground: ground_at(f.ground, addr, t),
         });
@@ -214,6 +216,77 @@ pub fn track_and_record(
     })
 }
 
+/// The public airports of an NASR CSV archive (`APT_BASE.csv`: site type airport, public use).
+pub fn load_airports(path: &std::path::Path) -> Result<Vec<Airport>, String> {
+    let bytes = oa_zip::read_archive_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let zip = oa_zip::Archive::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let csv = zip
+        .extract("APT_BASE.csv")
+        .map_err(|e| format!("{}: APT_BASE.csv: {e}", path.display()))?;
+    let parsed = oa_nasr::apt::parse_airports("APT_BASE.csv", &csv[..])
+        .map_err(|e| format!("{}: APT_BASE.csv: {e}", path.display()))?;
+    Ok(parsed
+        .records
+        .iter()
+        .filter(|a| a.site_type_code == "A" && a.facility_use_code == "PU")
+        .map(|a| Airport {
+            lat_deg: a.position.lat,
+            lon_deg: a.position.lon,
+            elev_ft: a.elev,
+        })
+        .collect())
+}
+
+/// For each encounter at or above 18,000 ft pressure altitude, the smallest separation between
+/// reports of its two aircraft, metres: each report of one against the nearest-in-time report of
+/// the other within 2 s, over the encounter's time with 2 s each side. Keyed by address pair.
+pub fn report_separations(
+    meas: &[Measurement],
+    encounters: &[Encounter],
+) -> BTreeMap<(u32, u32), f32> {
+    let hi: Vec<&Encounter> = encounters
+        .iter()
+        .filter(|e| band_of(e.alt_ft) == 3)
+        .collect();
+    let wanted: BTreeSet<u32> = hi.iter().flat_map(|e| [e.addr_a, e.addr_b]).collect();
+    let mut by: BTreeMap<u32, Vec<(i64, f64, f64)>> = BTreeMap::new();
+    for m in meas.iter().filter(|m| wanted.contains(&m.addr)) {
+        by.entry(m.addr).or_default().push((
+            m.toa_ns,
+            f64::from(m.lat_e7) / 1e7,
+            f64::from(m.lon_e7) / 1e7,
+        ));
+    }
+    let mut out = BTreeMap::new();
+    let none = Vec::new();
+    for e in hi {
+        let (a, b) = (
+            by.get(&e.addr_a).unwrap_or(&none),
+            by.get(&e.addr_b).unwrap_or(&none),
+        );
+        let (lo, hi_t) = (e.start_ns - 2 * S_NS, e.end_ns + 2 * S_NS);
+        let mut best = f64::INFINITY;
+        for &(t, la, lo_a) in a.iter().filter(|r| r.0 >= lo && r.0 <= hi_t) {
+            let k = b.partition_point(|r| r.0 < t);
+            for r in [k.checked_sub(1), Some(k)].into_iter().flatten() {
+                let Some(&(tb, lb, lo_b)) = b.get(r) else {
+                    continue;
+                };
+                if (tb - t).abs() > 2 * S_NS {
+                    continue;
+                }
+                let dy = (lb - la) * 111_200.0;
+                let dx = (lo_b - lo_a) * 111_200.0 * la.to_radians().cos();
+                best = best.min(dx.hypot(dy));
+            }
+        }
+        if best.is_finite() {
+            out.insert((e.addr_a, e.addr_b), best as f32);
+        }
+    }
+    out
+}
+
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
@@ -245,7 +318,26 @@ pub fn run(args: &Args) -> Result<String, String> {
     let ecfg = tool_config();
     let rec = track_and_record(&meas, &cfg, &ground, &ecfg)?;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
-    let csv = encounters_csv(&rec.encounters);
+    let (airports, airports_from) = match &args.nasr {
+        Some(p) => {
+            let a = load_airports(p)?;
+            let n = a.len();
+            (
+                a,
+                format!(
+                    "{n} public airports of {}",
+                    p.file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                ),
+            )
+        }
+        None => (
+            Vec::new(),
+            "none (no --nasr: the surface rule uses the ground state only)".to_string(),
+        ),
+    };
+    let report_sep = report_separations(&meas, &rec.encounters);
+    let csv = encounters_csv(&rec.encounters, &airports);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name = args
         .adsb
@@ -254,6 +346,9 @@ pub fn run(args: &Args) -> Result<String, String> {
     let summary = summary_text(&SummaryInput {
         cfg: &ecfg,
         encounters: &rec.encounters,
+        airports: &airports,
+        airports_from: &airports_from,
+        report_sep_m: &report_sep,
         totals: rec.totals,
         log_overflow: rec.log_overflow,
         tracker_overflow: rec.tracker_overflow,

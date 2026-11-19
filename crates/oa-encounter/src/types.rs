@@ -29,6 +29,8 @@ pub struct Obs {
     pub addr: u32,
     /// Barometric altitude, feet; NaN when the row has none.
     pub alt_ft: f32,
+    /// Vertical rate, feet per minute; NaN when the row has none.
+    pub vrate_fpm: f32,
     /// The tracker's flag byte, kept as given for the record.
     pub flags: u8,
     /// [`GROUND_UNKNOWN`], [`AIRBORNE`] or [`ON_GROUND`].
@@ -83,8 +85,20 @@ pub struct Encounter {
     pub end_ns: i64,
     /// Tick of the closest horizontal approach (the first, if several are equal), Unix ns.
     pub closest_ns: i64,
-    /// Smallest horizontal separation of any tick, metres.
+    /// Time of the true minimum horizontal separation, from the relative position taken as
+    /// moving in a straight line between two consecutive ticks, Unix ns.
+    pub interp_ns: i64,
+    /// Smallest horizontal separation of any tick, metres (the sampled minimum).
     pub min_h_m: f32,
+    /// The interpolated minimum horizontal separation, metres; never above `min_h_m`.
+    pub min_h_interp_m: f32,
+    /// Smallest vertical separation of any tick with a known altitude, feet; NaN if none.
+    pub min_v_ft: f32,
+    /// Vertical rates of aircraft `a` and `b` at the closest approach, feet per minute (NaN if
+    /// unknown), and the largest magnitude of either over every tick inside (NaN if never known).
+    pub vrate_a_fpm: f32,
+    pub vrate_b_fpm: f32,
+    pub max_abs_vrate_fpm: f32,
     /// Vertical separation at the closest approach, feet; NaN if unknown there.
     pub v_at_closest_ft: f32,
     /// Smallest separation with the vertical scaled so the record volume is a cylinder of equal
@@ -110,7 +124,7 @@ pub struct Encounter {
     pub class: u8,
 }
 // Budget: one per open encounter, scanned every cycle.
-const _: () = assert!(core::mem::size_of::<Encounter>() == 72);
+const _: () = assert!(core::mem::size_of::<Encounter>() == 104);
 
 /// The finished encounters of a run of cycles, bounded: a push past the capacity is counted in
 /// `overflow` and the encounter is lost (RULESET C2). The consumer clears it after reading.

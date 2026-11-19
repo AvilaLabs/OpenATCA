@@ -7,6 +7,7 @@
     clippy::panic
 )]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,9 +15,12 @@ use oa_encounter::{CycleStats, Encounter, CLASS_ALT_UNKNOWN};
 use oa_encounter_run::args::parse;
 use oa_encounter_run::guard::refuse_sealed;
 use oa_encounter_run::report::{
-    band_of, class_name, encounters_csv, flags_text, summary_text, SummaryInput,
+    band_of, class_name, context_of, encounters_csv, flags_text, summary_text, Airport,
+    SummaryInput, CONTEXT_NAMES,
 };
-use oa_encounter_run::run::{ground_at, tool_config, track_and_record, GroundTable};
+use oa_encounter_run::run::{
+    ground_at, report_separations, tool_config, track_and_record, GroundTable,
+};
 use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
 fn scratch(name: &str) -> PathBuf {
@@ -113,6 +117,12 @@ fn arguments_are_strict() {
     let ok = a(&["--adsb", "a", "--out", "c", "--scorer-half"]).unwrap();
     assert!(ok.scorer_half);
     assert!(!a(&["--adsb", "a", "--out", "c"]).unwrap().scorer_half);
+    assert_eq!(
+        a(&["--adsb", "a", "--out", "c", "--nasr", "n.zip"])
+            .unwrap()
+            .nasr,
+        Some(PathBuf::from("n.zip"))
+    );
     assert!(a(&["--adsb", "a"]).is_err());
     assert!(a(&["--adsb", "a", "--adsb", "b", "--out", "c"]).is_err());
     assert!(a(&["--adsb", "--out", "c"]).is_err());
@@ -133,13 +143,23 @@ fn enc(a: u32, b: u32, start_s: i64, class: u8, alt: f32, min_h: f32) -> Encount
             120.0
         },
         min_scaled_m: 800.5,
+        interp_ns: (start_s + 2) * 1_000_000_000 + 400_000_000,
+        min_h_interp_m: min_h - 3.0,
+        min_v_ft: if class == CLASS_ALT_UNKNOWN {
+            f32::NAN
+        } else {
+            100.0
+        },
+        vrate_a_fpm: 0.0,
+        vrate_b_fpm: -64.0,
+        max_abs_vrate_fpm: 64.0,
         alt_ft: alt,
         lat_e7: 411_234_567,
         lon_e7: -881_234_567,
         ticks_inside: 6,
         ticks_alt_unknown: 0,
         ticks_unevaluated: 0,
-        flags_a: 1,
+        flags_a: u8::from(a == 0xABCDEF),
         flags_b: 0,
         ground_either: 0,
         class,
@@ -158,8 +178,8 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     ];
     let mut rev = list.clone();
     rev.reverse();
-    let csv = encounters_csv(&list);
-    assert_eq!(csv, encounters_csv(&rev));
+    let csv = encounters_csv(&list, &[]);
+    assert_eq!(csv, encounters_csv(&rev, &[]));
     // Sorted by start time; addresses appear here.
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 5);
@@ -171,6 +191,9 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
         summary_text(&SummaryInput {
             cfg: &cfg,
             encounters: l,
+            airports: &[],
+            airports_from: "none",
+            report_sep_m: &BTreeMap::new(),
             totals: CycleStats {
                 cycles: 4,
                 ..CycleStats::default()
@@ -193,12 +216,27 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
         assert!(!s.to_uppercase().contains(hidden), "{hidden}");
     }
     assert!(s.contains("encounters: 4"));
+    assert!(s.contains("  AIRBORNE: 2  ["));
+    assert!(s.contains("  AIRBORNE_ALT_UNKNOWN: 1  ["));
+    assert!(s.contains("  SURFACE: 0  ["));
+    assert!(s.contains("  DEGRADED_TRACK: 1  ["));
+    assert!(s.contains("AIRBORNE by class\n  C2: 1\n  C3: 1\n"));
+    assert!(
+        s.find("\nAIRBORNE by class").unwrap() < s.find("\nAIRBORNE_ALT_UNKNOWN by class").unwrap()
+    );
+    assert!(
+        s.find("\nAIRBORNE_ALT_UNKNOWN by class").unwrap() < s.find("\nSURFACE by class").unwrap()
+    );
+    assert!(s.contains("  under 900: 2 of 2\n  900 to 925: 0\n"));
+    assert!(s.contains("columns: context, class,"));
+    assert!(s.contains("AIRBORNE, C3, 120, 100, 4000.0, 3997.0, 5, 0/-64, 64, "));
     assert!(s.contains("C1: 1") && s.contains("ALT_UNKNOWN: 1"));
     assert!(s.contains("1970-01-01 00:00Z: 2, 1"));
-    assert!(s.contains("1970-01-01 01:00Z: 1, 1"));
+    assert!(s.contains("1970-01-01 11:00Z: 1, 0"));
+    assert!(!s.contains("1970-01-01 01:00Z"));
     assert!(s.contains("record state: complete"));
     assert!(s.contains(&format!("digest: encounters.csv sha256 {}", "1".repeat(64))));
-    assert!(s.contains("lat 41.00 to 41.25, lon -88.25 to -88.00: 4, 2"));
+    assert!(s.contains("lat 41.00 to 41.25, lon -88.25 to -88.00: 3, 1"));
     // A shortfall is stated.
     let t = CycleStats {
         not_evaluated: 3,
@@ -207,6 +245,9 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     let s = summary_text(&SummaryInput {
         cfg: &cfg,
         encounters: &[],
+        airports: &[],
+        airports_from: "",
+        report_sep_m: &BTreeMap::new(),
         totals: t,
         log_overflow: 0,
         tracker_overflow: 0,
@@ -285,8 +326,8 @@ fn a_close_pass_through_the_tracker_is_one_c1_encounter_and_repeats_exactly() {
     assert_eq!(r.totals.not_evaluated + r.totals.tracks_unscanned, 0);
     let again = go(&pass(5100), &none);
     assert_eq!(
-        encounters_csv(&r.encounters),
-        encounters_csv(&again.encounters)
+        encounters_csv(&r.encounters, &[]),
+        encounters_csv(&again.encounters, &[])
     );
     assert_eq!(r.totals, again.totals);
     // The same pass 5,000 ft apart vertically is not an encounter.
@@ -319,4 +360,124 @@ fn the_ground_state_at_a_tick_is_the_latest_report_not_too_old() {
     assert_eq!(at(50), 1);
     assert_eq!(at(51), 0);
     assert_eq!(ground_at(&g, 8, 15_000_000_000), 0);
+}
+
+fn at(addr_a: u32, alt: f32, v: f32, vr: f32, flags: u8) -> Encounter {
+    let mut e = enc(addr_a, addr_a + 1, 10, 2, alt, 3000.0);
+    e.v_at_closest_ft = v;
+    e.max_abs_vrate_fpm = vr;
+    e.flags_a = flags;
+    e
+}
+
+// REQ: OA-ENC-014
+#[test]
+fn the_context_is_surface_then_degraded_then_by_altitude_knowledge() {
+    let ap = |dlat_nm: f64, elev: f64| Airport {
+        lat_deg: 41.1234567 + dlat_nm / 60.0,
+        lon_deg: -88.1234567,
+        elev_ft: elev,
+    };
+    let base = enc(1, 2, 10, 1, 500.0, 900.0);
+    let ctx = |e: &Encounter, a: &[Airport]| CONTEXT_NAMES[context_of(e, a)];
+    assert_eq!(ctx(&base, &[]), "AIRBORNE");
+    // Within 5 NM and under the field elevation plus 200 ft: surface; at the limit or over it, not.
+    assert_eq!(ctx(&base, &[ap(0.0, 700.0)]), "SURFACE");
+    assert_eq!(ctx(&base, &[ap(4.9, 1000.0)]), "SURFACE");
+    assert_eq!(ctx(&base, &[ap(0.0, 300.0)]), "AIRBORNE");
+    assert_eq!(ctx(&base, &[ap(0.0, 299.0)]), "AIRBORNE");
+    assert_eq!(ctx(&base, &[ap(0.0, 301.0)]), "SURFACE");
+    assert_eq!(ctx(&base, &[ap(5.2, 1000.0)]), "AIRBORNE");
+    // The ground flag alone is surface; an unknown altitude does not meet the airport rule.
+    let mut g = base;
+    g.ground_either = 1;
+    assert_eq!(ctx(&g, &[]), "SURFACE");
+    let mut unk = base;
+    unk.alt_ft = f32::NAN;
+    unk.v_at_closest_ft = f32::NAN;
+    assert_eq!(ctx(&unk, &[ap(0.0, 700.0)]), "AIRBORNE_ALT_UNKNOWN");
+    // Coasting or uncertain, on either track, is degraded unless it is surface.
+    for (a, b) in [(1u8, 0u8), (0, 32), (33, 1)] {
+        let mut d = base;
+        d.flags_a = a;
+        d.flags_b = b;
+        assert_eq!(ctx(&d, &[]), "DEGRADED_TRACK");
+        assert_eq!(ctx(&d, &[ap(0.0, 700.0)]), "SURFACE");
+    }
+    // Other flags do not degrade.
+    let mut r = base;
+    r.flags_a = 16 | 64;
+    assert_eq!(ctx(&r, &[]), "AIRBORNE");
+}
+
+// REQ: OA-ENC-015
+#[test]
+fn the_high_altitude_table_and_breakdown_and_the_vertical_histogram() {
+    let cfg = tool_config();
+    let es = vec![
+        at(0x100, 30_000.0, 990.0, 0.0, 0),
+        at(0x200, 30_000.0, 975.0, 1500.0, 0),
+        at(0x300, 30_000.0, 600.0, 1500.0, 0),
+        at(0x400, 30_000.0, 600.0, 100.0, 1),
+        at(0x500, 30_000.0, 800.0, 0.0, 0),
+        at(0x600, 12_000.0, 930.0, 0.0, 0),
+    ];
+    let mut sep = BTreeMap::new();
+    sep.insert((0x300, 0x301), 12.5f32);
+    sep.insert((0x400, 0x401), 400.0f32);
+    let s = summary_text(&SummaryInput {
+        cfg: &cfg,
+        encounters: &es,
+        airports: &[],
+        airports_from: "none",
+        report_sep_m: &sep,
+        totals: CycleStats::default(),
+        log_overflow: 0,
+        tracker_overflow: 0,
+        measurements: 0,
+        tick_rows: 0,
+        clip_name: "c",
+        clip_sha256: "",
+        scope: "",
+        csv_sha256: "",
+    });
+    assert!(s.contains("pressure altitude at the closest approach: 5 encounters"));
+    assert!(s.contains("at or over 975 ft (1,000 ft levels, 25 ft quantisation): 2"));
+    assert!(s.contains("a vertical rate of 300 fpm or more on either (climb or descent): 1"));
+    assert!(s.contains("anything else: 2"));
+    assert!(s.contains("either track coasting or uncertain: 1;"));
+    assert!(s.contains("within 50 m of each other at some time: 1"));
+    // The coasting one is degraded, so the other five are airborne; the histogram bins by 25 ft.
+    assert!(s.contains("  under 900: 2 of 5\n  900 to 925: 0\n  925 to 950: 1\n  950 to 975: 0\n  975 to 1000: 2\n"));
+    assert!(s.contains("12.5\n") && s.contains("n/a\n"));
+    for hidden in ["000100", "000300"] {
+        assert!(!s.to_uppercase().contains(hidden));
+    }
+}
+
+// REQ: OA-ENC-016
+#[test]
+fn report_level_separation_is_found_for_the_high_altitude_pairs_only() {
+    let mut m = Vec::new();
+    for t in 0..10 {
+        m.push(meas(t, 0x100001, 200.0 * t as f64, 0.0, 30_000));
+        m.push(meas(t, 0x100002, 200.0 * t as f64, 400.0, 30_000));
+        m.push(meas(t, 0x100003, 200.0 * t as f64, 400.0, 5_000));
+    }
+    let mk = |a: u32, b: u32, alt: f32| {
+        let mut e = enc(a, b, 0, 1, alt, 400.0);
+        e.end_ns = 9 * 1_000_000_000;
+        e
+    };
+    let es = vec![
+        mk(0x100001, 0x100002, 30_000.0),
+        mk(0x100001, 0x100003, 5_000.0),
+    ];
+    let r = report_separations(&m, &es);
+    assert_eq!(r.len(), 1);
+    let d = r[&(0x100001, 0x100002)];
+    assert!((d - 400.0).abs() < 3.0, "{d}");
+    // A pair that never reported together within 2 s has none.
+    let far = vec![mk(0x100001, 0x999999, 30_000.0)];
+    assert!(report_separations(&m, &far).is_empty());
 }

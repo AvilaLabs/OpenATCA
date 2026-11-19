@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half]";
+pub const USAGE: &str =
+    "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half] [--nasr <NASR_CSV.zip>]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -13,12 +14,15 @@ pub struct Args {
     /// Track only the scorer's half A of the clip (the reports the scoring harness gives the
     /// tracker), not every report.
     pub scorer_half: bool,
+    /// The NASR CSV archive whose `APT_BASE.csv` gives the public airports of the surface rule.
+    pub nasr: Option<PathBuf>,
 }
 
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
 /// value; a repeated flag, an unknown flag and a missing flag are errors.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let (mut adsb, mut out): (Option<PathBuf>, Option<PathBuf>) = (None, None);
+    let (mut adsb, mut out, mut nasr): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) =
+        (None, None, None);
     let mut scorer_half = false;
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -31,6 +35,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--adsb" => &mut adsb,
             "--out" => &mut out,
+            "--nasr" => &mut nasr,
             _ => return Err(format!("unknown argument {flag}")),
         };
         let value = it
@@ -46,6 +51,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             adsb,
             out,
             scorer_half,
+            nasr,
         }),
         _ => Err("--adsb and --out are both required".to_string()),
     }

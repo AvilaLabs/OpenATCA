@@ -18,10 +18,18 @@ const _: () = assert!(core::mem::size_of::<Cand>() == 16);
 
 /// An open encounter under its pair key (`addr_a << 32 | addr_b`).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub(crate) struct Open {
-    pub(crate) key: u64,
     pub(crate) e: Encounter,
+    pub(crate) key: u64,
+    /// The pair's relative position (east, north of the second from the first, metres) and time
+    /// at the last tick it was evaluated, to interpolate to the next.
+    pub(crate) prev_t: i64,
+    pub(crate) prev_x: f64,
+    pub(crate) prev_y: f64,
 }
+// Budget: one per open encounter, searched every evaluated pair.
+const _: () = assert!(core::mem::size_of::<Open>() == 136);
 
 /// The record of one facility. A subsystem (D5): fields private to the crate, interface the free
 /// functions. Rows are one array of structs, sorted by address each cycle: every evaluation reads
@@ -41,6 +49,7 @@ pub struct EncounterState {
     pub(crate) cands: Vec<Cand>,
     pub(crate) open: Vec<Open>,
     pub(crate) last_ns: i64,
+    pub(crate) prev_ns: i64,
     pub(crate) started: bool,
     pub(crate) totals: CycleStats,
 }
@@ -105,6 +114,7 @@ pub fn encounter_new(cfg: &EncounterConfig) -> Result<EncounterState, &'static s
         cands: Vec::with_capacity(cfg.max_candidates),
         open: Vec::with_capacity(cfg.max_open),
         last_ns: i64::MIN,
+        prev_ns: i64::MIN,
         started: false,
         totals: CycleStats::default(),
     })
