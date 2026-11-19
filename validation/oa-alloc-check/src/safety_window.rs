@@ -11,6 +11,7 @@ use oa_display::safety::{
     build_safety, safety_caps, FeedState, FeedStatus, SafetyScene, FEED_NAME_BYTES,
 };
 use oa_display::scene::LEGEND_STRIP_PX;
+use oa_display::traffic::targets_new;
 use oa_safety::geom::Vertex;
 use oa_safety::inhibit::{
     events_take, inhibit_config_none, inhibit_create, inhibit_expire, inhibit_remove,
@@ -118,6 +119,7 @@ pub(super) fn safety_window(inject: bool) -> Result<SafetyEvidence, &'static str
     let none = inhibit_config_none();
     let area = square(ORD.0, ORD.1, 1_000_000);
     let bad_area: [Vertex; 3] = [(0, 0), (10, 10), (20, 20)];
+    let targets = targets_new(1).map_err(|_| "targets_new")?;
     let mut inh = Box::new(inhibits_new());
     let mut st = state_table_new(10 * S, 5 * S).map_err(|_| "state_table_new")?;
     let mut ev = [Event {
@@ -333,7 +335,7 @@ pub(super) fn safety_window(inject: bool) -> Result<SafetyEvidence, &'static str
             // Older than the limit: the picture is frozen.
             newest_track_ns: Some(NOW - 30 * S),
             frozen_limit_ns: 5 * S,
-            targets: None,
+            targets: &targets,
         };
         match build_safety(&mut list, &proj, &sc) {
             Ok(s) => {
@@ -362,7 +364,7 @@ pub(super) fn safety_window(inject: bool) -> Result<SafetyEvidence, &'static str
             feeds: &feeds,
             newest_track_ns: Some(NOW - 30 * S),
             frozen_limit_ns: 5 * S,
-            targets: None,
+            targets: &targets,
         };
         if let Ok(s) = build_safety(&mut list, &small, &sc) {
             hidden += u64::from(s.banner_hidden);

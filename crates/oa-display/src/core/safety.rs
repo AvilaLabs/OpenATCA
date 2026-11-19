@@ -17,7 +17,8 @@
 //! and nothing else, so it lasts exactly as long as the condition. The box has an **opaque**
 //! background (a safety banner must be legible over any map), so it hides what is under it; the
 //! simpler of the two remedies is taken: targets whose symbol is under the box are counted on the
-//! banner, `TARGETS UNDER BANNER: n`, when a set of targets is given.
+//! banner, `TARGETS UNDER BANNER: n`. The target set is a required input (an empty set is a real
+//! value that says there are none), so the count never silently reads nothing.
 //!
 //! Lines, in priority order:
 //! * `PICTURE FROZEN <age>` when the newest track update is at least the configured limit old
@@ -145,8 +146,8 @@ pub struct SafetyScene<'a> {
     /// The picture is frozen when the newest update is at least this old. From configuration, no
     /// default; positive.
     pub frozen_limit_ns: i64,
-    /// The targets drawn, if the shell has them: those under the opaque banner are counted on it.
-    pub targets: Option<&'a TargetSet>,
+    /// The targets drawn: those under the opaque banner are counted on it. Required.
+    pub targets: &'a TargetSet,
 }
 
 /// What a safety build drew. A7.2: cold struct, size guard waived (one per frame).
@@ -438,10 +439,7 @@ fn widest(b: &Banner) -> i32 {
 }
 
 /// Targets whose symbol is under the box (opaque, so they are hidden by it).
-fn targets_under(set: Option<&TargetSet>, proj: &Projection, bx: (i32, i32, i32, i32)) -> u32 {
-    let Some(set) = set else {
-        return 0;
-    };
+fn targets_under(set: &TargetSet, proj: &Projection, bx: (i32, i32, i32, i32)) -> u32 {
     let c = targets_columns(set);
     let n = c
         .lat_e7
@@ -459,7 +457,7 @@ fn banner_draw(
     proj: &Projection,
     b: &mut Banner,
     tb: &mut TextBuf,
-    targets: Option<&TargetSet>,
+    targets: &TargetSet,
     st: &mut SafetyStats,
 ) -> Result<(), DisplayError> {
     let fit = rows_that_fit(proj);
@@ -707,7 +705,7 @@ pub fn build_safety(
                 text_push_dec(&mut tb, error_code(&e), 0);
                 banner_insert(&mut b, 0, &tb, &mut st);
                 // Best effort: a failure here leaves the list faulted, which the caller sees.
-                let _ = banner_draw(l, proj, &mut b, &mut tb, None, &mut st);
+                let _ = banner_draw(l, proj, &mut b, &mut tb, s.targets, &mut st);
             }
             Err(e)
         }

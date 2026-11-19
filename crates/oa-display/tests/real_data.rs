@@ -131,7 +131,7 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
                 feeds: &feeds,
                 newest_track_ns: Some(now - 1_000_000_000),
                 frozen_limit_ns: 5_000_000_000,
-                targets: None,
+                targets: &oa_display::traffic::targets_new(1).unwrap(),
             };
             let proj =
                 oa_display::project::projection_new(lat, lon, range, 1920, 1080, 104).unwrap();

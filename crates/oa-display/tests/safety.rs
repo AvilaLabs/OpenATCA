@@ -35,6 +35,12 @@ const SQUARE: [Vertex; 4] = [
     (418_786_000, -878_048_000),
 ];
 
+/// An empty target set: the honest value for "no targets drawn".
+fn no_targets() -> &'static TargetSet {
+    static EMPTY: std::sync::OnceLock<TargetSet> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| targets_new(1).unwrap())
+}
+
 fn well() -> (StateTable, Box<InhibitTable>, Vec<FeedStatus>) {
     let mut st = state_table_new(10 * S, 5 * S).unwrap();
     for n in NETS {
@@ -65,7 +71,7 @@ fn scene<'a>(
         feeds,
         newest_track_ns: Some(NOW - S),
         frozen_limit_ns: 5 * S,
-        targets: None,
+        targets: no_targets(),
     }
 }
 
@@ -564,7 +570,7 @@ fn targets_under_the_opaque_banner_are_counted_on_it() {
         targets_push(&mut set, &t).unwrap();
     }
     let mut sc = scene(&st, &inh, &feeds);
-    sc.targets = Some(&set);
+    sc.targets = &set;
     let (l, stats) = draw(&sc);
     assert_eq!(stats.targets_under_banner, 2);
     assert!(
@@ -575,6 +581,6 @@ fn targets_under_the_opaque_banner_are_counted_on_it() {
     // None under it: no such line.
     let mut empty_set = targets_new(1).unwrap();
     targets_push(&mut empty_set, &target()).unwrap();
-    sc.targets = Some(&empty_set);
+    sc.targets = &empty_set;
     assert_eq!(texts(&draw(&sc).0).len(), 1);
 }
