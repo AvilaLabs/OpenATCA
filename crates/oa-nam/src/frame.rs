@@ -1,6 +1,7 @@
 //! The transport framing of NAS-IC-82422100 3.2.2.3.1: a four byte header of uppercase ASCII
 //! hexadecimal characters giving the length of the message that follows (header excluded),
-//! then the message. Smallest valid message 17 bytes (an IRQ), largest 1800. Core (pure).
+//! then the message. Smallest valid message 17 bytes (an IRQ), largest 1800.
+//! Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
 
 use crate::error::{ErrorKind as K, NamError};
 use crate::field::MAX_MESSAGE_LEN;

@@ -28,6 +28,7 @@ dependencies = [
 name = "oa-alloc-check"
 version = "0.0.0"
 dependencies = [
+ "oa-nam",
  "oa-track",
 ]
 
@@ -104,6 +105,10 @@ version = "0.0.1"
 
 [[package]]
 name = "oa-math"
+version = "0.0.1"
+
+[[package]]
+name = "oa-nam"
 version = "0.0.1"
 
 [[package]]

@@ -116,7 +116,7 @@ fn arbitrary_bytes_never_panic() {
 fn every_kind_has_a_spec_and_a_mnemonic_that_parses_back() {
     for k in ALL_KINDS {
         assert_eq!(
-            schema::kind_of(schema::spec(k).mnemonic.as_bytes()),
+            schema::kind_of(schema::spec(k).unwrap().mnemonic.as_bytes()),
             Some(k)
         );
     }

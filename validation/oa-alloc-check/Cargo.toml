@@ -16,6 +16,8 @@ indexing_slicing = "deny"
 [dependencies]
 # F1: validation-only links to the existing local core; no external or product dependency.
 oa-track = { path = "../../crates/oa-track" }
+# F1: the NAM session core, also by local path only.
+oa-nam = { path = "../../crates/oa-nam" }
 
 [profile.release]
 debug = 1

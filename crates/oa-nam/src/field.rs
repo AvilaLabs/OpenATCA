@@ -1,5 +1,5 @@
-//! Field and element parsers and formatters (Part II section 2, Part I section 3). Core (pure):
-//! functions of bytes and values (RULESET B1, B2). Every `parse_*` takes the bytes of one field
+//! Field and element parsers and formatters (Part II section 2, Part I section 3). Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
+//! Functions of bytes and values (B2), no clock, no I/O. Every `parse_*` takes the bytes of one field
 //! (no leading hyphen) and refuses what the field definition does not allow; every `fmt_*`
 //! writes the one canonical form. Nothing here indexes a slice: lengths are checked and slice
 //! patterns or `get` are used, so no input can panic (E3).
@@ -46,6 +46,16 @@ pub(crate) fn num(b: &[u8]) -> Option<u32> {
     Some(v)
 }
 
+/// [`num`] that must fit a `u16` (E8: `try_from`, not a cast).
+pub(crate) fn num_u16(b: &[u8]) -> Option<u16> {
+    num(b).and_then(|v| u16::try_from(v).ok())
+}
+
+/// [`num`] that must fit a `u8`.
+pub(crate) fn num_u8(b: &[u8]) -> Option<u8> {
+    num(b).and_then(|v| u8::try_from(v).ok())
+}
+
 pub(crate) fn text(b: &[u8]) -> String {
     b.iter().map(|&c| c as char).collect()
 }
@@ -75,8 +85,8 @@ pub(crate) fn is_free_text(c: u8) -> bool {
 pub fn parse_hhmm(b: &[u8], kind: K, field: u8) -> Result<Hhmm, NamError> {
     match (b.len(), num(b)) {
         (4, Some(v)) if v / 100 <= 23 && v % 100 <= 59 => Ok(Hhmm {
-            hour: (v / 100) as u8,
-            minute: (v % 100) as u8,
+            hour: u8::try_from(v / 100).map_err(|_| e(kind, field))?,
+            minute: u8::try_from(v % 100).map_err(|_| e(kind, field))?,
         }),
         _ => Err(e(kind, field)),
     }
@@ -91,7 +101,7 @@ pub fn fmt_hhmm(t: &Hhmm, out: &mut String) {
 pub fn parse_level(b: &[u8], metric: bool) -> Option<Level> {
     match b {
         [c @ (b'A' | b'F'), d @ ..] if d.len() == 3 => {
-            let v = num(d)? as u16;
+            let v = num_u16(d)?;
             match c {
                 b'A' if v < 180 => Some(Level::Altitude(v)),
                 b'F' if v >= 180 => Some(Level::FlightLevel(v)),
@@ -99,7 +109,7 @@ pub fn parse_level(b: &[u8], metric: bool) -> Option<Level> {
             }
         }
         [c @ (b'S' | b'M'), d @ ..] if metric && d.len() == 4 => {
-            let v = num(d)? as u16;
+            let v = num_u16(d)?;
             if *c == b'S' {
                 Some(Level::MetricLevel(v))
             } else {
@@ -131,15 +141,15 @@ pub fn fmt_level(l: &Level, out: &mut String) {
 pub fn parse_speed(b: &[u8], kmh: bool) -> Option<Speed> {
     match b {
         [b'N', d @ ..] if d.len() == 4 => {
-            let v = num(d)? as u16;
+            let v = num_u16(d)?;
             (v > 0).then_some(Speed::Knots(v))
         }
         [b'M', d @ ..] if d.len() == 3 => {
-            let v = num(d)? as u16;
+            let v = num_u16(d)?;
             (v > 0).then_some(Speed::Mach(v))
         }
         [b'K', d @ ..] if kmh && d.len() == 4 => {
-            let v = num(d)? as u16;
+            let v = num_u16(d)?;
             (v > 0).then_some(Speed::Kmh(v))
         }
         _ => None,
@@ -319,7 +329,8 @@ pub fn parse_f09(b: &[u8]) -> Result<Field09, NamError> {
     } else {
         match num(count) {
             Some(v) if v >= 1 && !(count.len() == 2 && count.first() == Some(&b'0')) => {
-                Some(v as u8)
+                // Bounded: `digits <= 2` above, so v <= 99.
+                u8::try_from(v).ok()
             }
             _ => return Err(e(K::AircraftCount, 9)),
         }
@@ -611,11 +622,10 @@ pub fn parse_f14(b: &[u8], profile: Profile) -> Result<Field14, NamError> {
         if profile != Profile::EramAttachment2 {
             return Err(e(K::Level, 14));
         }
-        let high = num(sub(lv, pos + 1, pos + 4)).filter(|_| lv.len() >= pos + 4);
+        let high = num_u16(sub(lv, pos + 1, pos + 4)).filter(|_| lv.len() >= pos + 4);
         let (Some(high), Level::Altitude(low) | Level::FlightLevel(low)) = (high, first) else {
             return Err(e(K::Level, 14));
         };
-        let high = high as u16;
         let flight_level = matches!(first, Level::FlightLevel(_));
         let ok = low < high
             && if flight_level {
@@ -715,6 +725,7 @@ fn speed_levels_ok(b: &[u8], max_levels: usize, plus: bool) -> bool {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
+// A7.2: cold struct, size guard waived: per-field codec value, built per message
 enum Tok {
     Point,
     Dct,
@@ -967,6 +978,7 @@ pub fn remark_text(f: &Field18) -> Option<&str> {
 /// An LRM's remark: error code (two or three digits, 1 to 255), field in error (two digits, 00
 /// when not field-specific) and text, separated by oblique strokes (Table 17).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: per-field codec value, built per message
 pub struct LrmText {
     pub code: u8,
     pub field: u8,
@@ -981,13 +993,11 @@ pub fn parse_lrm_text(t: &str) -> Result<LrmText, NamError> {
     if !(2..=3).contains(&code.len()) || field.len() != 2 || text_b.is_empty() {
         return Err(bad());
     }
-    let code = num(code)
-        .filter(|&c| (1..=255).contains(&c))
-        .ok_or_else(bad)?;
-    let field = num(field).ok_or_else(bad)?;
+    let code = num_u8(code).filter(|&c| c >= 1).ok_or_else(bad)?;
+    let field = num_u8(field).ok_or_else(bad)?;
     Ok(LrmText {
-        code: code as u8,
-        field: field as u8,
+        code,
+        field,
         text: text(text_b),
     })
 }
@@ -1022,7 +1032,7 @@ pub fn parse_amendment(b: &[u8], profile: Profile) -> Result<Amendment, NamError
     if ind.is_empty() || ind.len() > 2 {
         return Err(bad());
     }
-    let n = num(ind).ok_or_else(bad)? as u8;
+    let n = num_u8(ind).ok_or_else(bad)?;
     let padded = ind.len() == 2;
     let data = match n {
         7 => AmendData::F07(parse_f07(data, false)?),
@@ -1063,6 +1073,7 @@ pub fn fmt_amendment(a: &Amendment, out: &mut String) {
 
 /// What Field 31(c) may hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: per-field codec value, built per message
 pub enum Text31 {
     /// Part II 2.12: up to 20 alphanumeric characters (POI, PLA, POA, POJ, RLA).
     Plain,
@@ -1127,6 +1138,7 @@ pub fn fmt_f31(f: &Field31, out: &mut String) {
 /// The CPDLC contact data of an RTA acceptance in 31(c) (Attachment 2 2.17): frequency,
 /// facility name, facility function.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived: per-field codec value, built per message
 pub struct Contact {
     /// `ddd.ddd` MHz, or `dddd`/`ddddd` kHz, or `000.000` for none.
     pub frequency: String,
@@ -1179,9 +1191,9 @@ fn angle(b: &[u8], deg_digits: usize, hemis: [u8; 2], max_deg: u16) -> Option<An
     if b.len() != n + 1 {
         return None;
     }
-    let degrees = num(sub(b, 0, deg_digits))? as u16;
-    let minutes = num(sub(b, deg_digits, deg_digits + 2))? as u8;
-    let seconds = num(sub(b, deg_digits + 2, n))? as u8;
+    let degrees = num_u16(sub(b, 0, deg_digits))?;
+    let minutes = num_u8(sub(b, deg_digits, deg_digits + 2))?;
+    let seconds = num_u8(sub(b, deg_digits + 2, n))?;
     let h = *b.get(n)?;
     if !hemis.contains(&h) || minutes > 59 || seconds > 59 || degrees > max_deg {
         return None;
@@ -1208,10 +1220,10 @@ pub fn parse_f32(b: &[u8], profile: Profile) -> Result<Field32, NamError> {
     }
     let t = sub(b, 0, 8);
     let (h, m, s, d) = (
-        num(sub(t, 0, 2)).ok_or_else(bad)?,
-        num(sub(t, 2, 4)).ok_or_else(bad)?,
-        num(sub(t, 4, 6)).ok_or_else(bad)?,
-        num(sub(t, 6, 8)).ok_or_else(bad)?,
+        num_u8(sub(t, 0, 2)).ok_or_else(bad)?,
+        num_u8(sub(t, 2, 4)).ok_or_else(bad)?,
+        num_u8(sub(t, 4, 6)).ok_or_else(bad)?,
+        num_u8(sub(t, 6, 8)).ok_or_else(bad)?,
     );
     if h > 23 || m > 59 || s > 59 {
         return Err(bad());
@@ -1223,7 +1235,7 @@ pub fn parse_f32(b: &[u8], profile: Profile) -> Result<Field32, NamError> {
         // `N9999` means unknown only where Attachment 2 2.15 says so.
         [b'N', d @ ..] => match num(d).ok_or_else(bad)? {
             9999 => return Err(bad()),
-            v => GroundSpeed::Knots(v as u16),
+            v => GroundSpeed::Knots(u16::try_from(v).map_err(|_| bad())?),
         },
         _ => return Err(bad()),
     };
@@ -1231,7 +1243,7 @@ pub fn parse_f32(b: &[u8], profile: Profile) -> Result<Field32, NamError> {
         let h = sub(b, 28, 33);
         match num(h).ok_or_else(bad)? {
             99999 if profile == Profile::EramAttachment2 => Heading::Unknown,
-            v if v <= 35999 => Heading::Hundredths(v as u16),
+            v if v <= 35999 => Heading::Hundredths(u16::try_from(v).map_err(|_| bad())?),
             _ => return Err(bad()),
         }
     };
@@ -1239,10 +1251,10 @@ pub fn parse_f32(b: &[u8], profile: Profile) -> Result<Field32, NamError> {
     let altitude = parse_level(tail(b, 33), profile == Profile::RevE).ok_or_else(bad)?;
     Ok(Field32 {
         time: Time32 {
-            hour: h as u8,
-            minute: m as u8,
-            second: s as u8,
-            hundredths: d as u8,
+            hour: h,
+            minute: m,
+            second: s,
+            hundredths: d,
         },
         latitude,
         longitude,

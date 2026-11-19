@@ -1,12 +1,14 @@
 //! The ICD's workload and latency figures, as data, for conformance tests that need them: the
 //! per-flight message counts and sizes of NAS-IC-21009205 Rev G Table 29, the peak per-minute
 //! rates of the CAATS design workload of NAS-IC-82422100 Table 3-IV (NAS-IR-82422100 Table
-//! 3-II), and the latency, availability and size bounds. Plain constants (core, B1).
+//! 3-II), and the latency, availability and size bounds. Plain constants.
+//! Shell (input-format adapter, B1, C6): allocates per message, so not real-time core (C1).
 
 use crate::model::Kind;
 
 /// One row of Table 29 "Expected Message Rates and Sizes" (planning estimates).
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived: constant figures for conformance tests
 pub struct PerFlight {
     pub kind: Kind,
     /// Average messages of this type per flight.
@@ -144,6 +146,7 @@ pub const TABLE29_RTU_DURATION_S: u32 = 30;
 
 /// One row of the CAATS design workload (NAS-IC-82422100 Table 3-IV).
 #[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived: constant figures for conformance tests
 pub struct PeakRate {
     pub kind: Kind,
     /// Peak rate for one ARTCC, messages per minute.

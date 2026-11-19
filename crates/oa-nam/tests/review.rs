@@ -7,7 +7,7 @@
     clippy::indexing_slicing
 )]
 
-use oa_nam::lrm::{lrm_entry, lrm_field};
+use oa_nam::lrm::{lrm, lrm_entry, lrm_field, lrm_for};
 use oa_nam::*;
 
 const FPL: &str = "(FPLCZUL/KZBW043-N12345-IG-C172/L-SD/C-CYST2055-N0120A070 CYSC DCT YSC V447 MPV DCT KMPV-KMPV0053-EET/KZBW0003)";
@@ -111,11 +111,8 @@ fn field_10_surveillance_syntax() {
 // REQ: OA-NAM-020
 #[test]
 fn field_10_error_codes_are_the_table_a1_codes() {
-    let code = |a: &str, b: &str| {
-        parse(fpl_with(&format!("{a}/{b}"), "0").as_bytes())
-            .unwrap_err()
-            .lrm()
-    };
+    let code =
+        |a: &str, b: &str| lrm(&parse(fpl_with(&format!("{a}/{b}"), "0").as_bytes()).unwrap_err());
     assert_eq!(code("SDD", "C"), (71, 10));
     assert_eq!(code("SD", "SS"), (72, 10));
     assert_eq!(code("Q", "C"), (73, 10));
@@ -131,27 +128,23 @@ fn field_10_error_codes_are_the_table_a1_codes() {
 fn items_10_and_18_must_agree() {
     let r = |a: &str, f18: &str| parse(fpl_with(&format!("{a}/C"), f18).as_bytes());
     // R needs PBN/, Z needs COM/NAV/DAT, G needs NAV/ (91).
-    assert_eq!(r("SR", "0").unwrap_err().lrm(), (91, 10));
-    assert_eq!(r("SZ", "RMK/X").unwrap_err().lrm(), (91, 10));
-    assert_eq!(r("SG", "RMK/X").unwrap_err().lrm(), (91, 10));
+    assert_eq!(lrm(&r("SR", "0").unwrap_err()), (91, 10));
+    assert_eq!(lrm(&r("SZ", "RMK/X").unwrap_err()), (91, 10));
+    assert_eq!(lrm(&r("SG", "RMK/X").unwrap_err()), (91, 10));
     assert!(r("SR", "PBN/D2").is_ok());
     assert!(r("SZ", "COM/TCAS").is_ok());
     assert!(r("SG", "NAV/GBAS").is_ok());
     // PBN/ without R (86).
-    assert_eq!(r("SD", "PBN/D2").unwrap_err().lrm(), (86, 18));
+    assert_eq!(lrm(&r("SD", "PBN/D2").unwrap_err()), (86, 18));
     // N with COM/NAV/DAT (64).
-    assert_eq!(r("N", "NAV/RNVD1E2A1").unwrap_err().lrm(), (64, 10));
+    assert_eq!(lrm(&r("N", "NAV/RNVD1E2A1").unwrap_err()), (64, 10));
     assert!(r("N", "RMK/X").is_ok());
 }
 
 // REQ: OA-NAM-020
 #[test]
 fn pbn_more_than_eight_is_84_not_77() {
-    let r = |p: &str| {
-        parse(fpl_with("SR/C", &format!("PBN/{p}")).as_bytes())
-            .unwrap_err()
-            .lrm()
-    };
+    let r = |p: &str| lrm(&parse(fpl_with("SR/C", &format!("PBN/{p}")).as_bytes()).unwrap_err());
     assert_eq!(r("A1B1C1D1E1F1G1H1I1"), (84, 18));
     assert_eq!(r("A1B1C"), (77, 18));
     assert_eq!(r("a1"), (77, 18));
@@ -279,38 +272,41 @@ fn lrm_code_for_missing_time_depends_on_the_field() {
     let t = "(FPLCZUL/KZBW043-N12345-IG-C172/L-SD/C-CYST-N0120A070 CYSC DCT KMPV-KMPV0053-0)";
     let e = parse(t.as_bytes()).unwrap_err();
     assert_eq!((e.kind, e.field), (ErrorKind::TimeMissing, 13));
-    assert_eq!(e.lrm(), (21, 13));
+    assert_eq!(lrm(&e), (21, 13));
     // In Field 14 it stays 24.
     let c = "(CPLKZHU/MMTY005-UAL1021/A2173-IX-A320/M-SD/C-KIAD-MAM/F350-N0420F350 MAM DCT-MMMX-0)";
     let e = parse(c.as_bytes()).unwrap_err();
     if e.kind == ErrorKind::TimeMissing {
-        assert_eq!(e.lrm().0, if e.field == 14 { 24 } else { 21 });
+        assert_eq!(lrm(&e).0, if e.field == 14 { 24 } else { 21 });
     }
-    assert_eq!(NamError::new(ErrorKind::TimeMissing, 14).lrm(), (24, 14));
-    assert_eq!(NamError::new(ErrorKind::TimeMissing, 16).lrm(), (21, 16));
+    assert_eq!(lrm(&NamError::new(ErrorKind::TimeMissing, 14)), (24, 14));
+    assert_eq!(lrm(&NamError::new(ErrorKind::TimeMissing, 16)), (21, 16));
 }
 
 // REQ: OA-NAM-028
 #[test]
 fn attachment_2_remaps_message_number_and_handoff_field_03_errors() {
     let num = NamError::new(ErrorKind::MessageNumber, 3);
-    assert_eq!(num.lrm_for(Profile::Core, None), (4, 3));
-    assert_eq!(num.lrm_for(Profile::EramAttachment2, None), (57, 3));
+    assert_eq!(lrm_for(&num, Profile::Core, None), (4, 3));
+    assert_eq!(lrm_for(&num, Profile::EramAttachment2, None), (57, 3));
     let r = NamError::new(ErrorKind::Reference, 3);
-    assert_eq!(r.lrm_for(Profile::EramAttachment2, Some(Kind::Fpl)), (5, 3));
+    assert_eq!(
+        lrm_for(&r, Profile::EramAttachment2, Some(Kind::Fpl)),
+        (5, 3)
+    );
     for k in [Kind::Rti, Kind::Rta, Kind::Rla, Kind::Rtu] {
         assert_eq!(
-            r.lrm_for(Profile::EramAttachment2, Some(k)),
+            lrm_for(&r, Profile::EramAttachment2, Some(k)),
             (57, 3),
             "{k:?}"
         );
-        assert_eq!(r.lrm_for(Profile::Core, Some(k)), (5, 3), "{k:?}");
+        assert_eq!(lrm_for(&r, Profile::Core, Some(k)), (5, 3), "{k:?}");
     }
     // peek_kind names the message of a refused text.
     let bad = b"(RTAKZMP/CZWG222KZMP/CZWG81-DLH499/A4222-KZMP-CYOW-KZMP42)";
     assert_eq!(peek_kind(bad), Some(Kind::Rta));
     let e = parse(bad).unwrap_err();
-    assert_eq!(e.lrm_for(Profile::default(), peek_kind(bad)).0, 57);
+    assert_eq!(lrm_for(&e, Profile::default(), peek_kind(bad)).0, 57);
     assert_eq!(peek_kind(b"(XYZ"), None);
 }
 
@@ -331,8 +327,8 @@ fn lrm_field_column_follows_the_profile() {
 // REQ: OA-NAM-028
 #[test]
 fn field_32_and_item_errors_keep_their_codes() {
-    assert_eq!(NamError::new(ErrorKind::PbnTooMany, 18).lrm(), (84, 18));
-    assert_eq!(NamError::new(ErrorKind::Pbn, 18).lrm(), (77, 18));
+    assert_eq!(lrm(&NamError::new(ErrorKind::PbnTooMany, 18)), (84, 18));
+    assert_eq!(lrm(&NamError::new(ErrorKind::Pbn, 18)), (77, 18));
 }
 
 // ---- ABI order (L15)

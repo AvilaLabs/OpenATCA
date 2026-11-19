@@ -28,6 +28,7 @@ def result(injected=False):
             "fusion_plot_pending_queue_capacity_recovery",
             "fusion_adsb_hard_assoc_registration",
             "fusion_anonymous_init_and_assoc",
+            "nam_session_activate_traffic_retry_full_deactivate",
         ],
         "route_ids": [
             'fusion_adsb_ingest',
@@ -47,6 +48,18 @@ def result(injected=False):
             'fusion_plot_pending_overflow',
             'fusion_plot_pending_recovery',
             'fusion_registration',
+            'nam_session_activation',
+            'nam_session_traffic',
+            'nam_session_resend',
+            'nam_session_timeout',
+            'nam_session_deliver',
+            'nam_session_response',
+            'nam_session_keepalive',
+            'nam_session_peer_silent',
+            'nam_session_pending_full',
+            'nam_session_discard',
+            'nam_session_abandon',
+            'nam_session_deactivation',
             'tracker_advance',
             'tracker_capacity_recovery',
             'tracker_capacity_refusal',
@@ -129,6 +142,13 @@ def result(injected=False):
             "registration_history": 3, "anon_applied": 2, "local_rows": 5,
             "init_visits": 3, "init_tests": 2, "coast_rows": 4, "quiet_advance_rows": 3,
         },
+        "nam_session": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "irq_sent": 4, "atm_sent": 132, "resent": 2, "timed_out": 2, "delivered": 2,
+            "responses": 2, "asm_sent": 1, "peer_silent": 1, "lrm_sent": 1, "trq_sent": 1,
+            "abandoned": 128, "peak_pending": 128, "pending_full": 1, "discards": 3,
+            "dropped": 0, "script_errors": 0, "final_inactive": True,
+        },
     }
 
 
@@ -167,6 +187,7 @@ panic = "deny"
 indexing_slicing = "deny"
 [dependencies]
 oa-track = { path = "../../crates/oa-track" }
+oa-nam = { path = "../../crates/oa-nam" }
 ''')
     write(root / "validation/oa-alloc-check/src/main.rs", '''
 #![deny(unsafe_code)]
@@ -362,6 +383,25 @@ probe = { path = "../../validation/oa-alloc-check" }
             self.assertEqual(gate.allocation_layout_errors(root), [])
             helper.write_text("#![allow(unsafe_code)]\nunsafe fn fixture() {}\n")
             self.assertTrue(any("pending_windows.rs" in e for e in gate.allocation_layout_errors(root)))
+
+    def test_nam_window_module_is_allowed_when_safe_and_rejected_when_unsafe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            helper = root / "validation/oa-alloc-check/src/nam_window.rs"
+            helper.write_text("#![forbid(unsafe_code)]\nfn fixture() {}\n")
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+            helper.write_text("#![allow(unsafe_code)]\nunsafe fn fixture() {}\n")
+            self.assertTrue(any("nam_window.rs" in e for e in gate.allocation_layout_errors(root)))
+
+    def test_nam_session_evidence_must_be_exact(self):
+        value = result()
+        value["nam_session"]["peak_pending"] = 127
+        self.assertTrue(any("nam_session.peak_pending" in e for e in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["nam_session"]["final_inactive"] = False
+        self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
 
     def test_repository_allocator_layout_is_valid(self):
         self.assertEqual(gate.allocation_layout_errors(Path(__file__).resolve().parents[1]), [])
