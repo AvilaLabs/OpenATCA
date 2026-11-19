@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -360,6 +361,34 @@ class TrackSetScoreTests(unittest.TestCase):
         bad = scorer.score(*paths)
         self.assertEqual(bad["status"], "UNQUALIFIED")
         self.assertEqual(bad["counts"]["malformed_output_rows"], 1)
+
+    # REQ: OA-ACC-074, OA-ACC-098
+    def test_optimal_assignment_beats_greedy_nearest_neighbour(self) -> None:
+        # Truth at 0 m and 600 m, outputs at 400 m and 1200 m on one parallel. Greedy takes the
+        # globally nearest pair (600 m truth with 400 m output, 200 m apart) and strands both others.
+        to_lon = lambda metres: math.degrees(metres / scorer.WGS84_A_M)
+        truth_lons = [to_lon(0.0), to_lon(600.0)]
+        output_lons = [to_lon(400.0), to_lon(1200.0)]
+        left = [scorer.Point("s", 0, f"T{i}", 0.0, lon) for i, lon in enumerate(truth_lons)]
+        right = [scorer.Point("s", 0, f"O{j}", 0.0, lon) for j, lon in enumerate(output_lons)]
+        observed = scorer._assign_snapshot(left, right, [0], [0], [0])["gospa_cost_m2"]
+        optimum = 400.0 ** 2 + 600.0 ** 2
+        greedy = 200.0 ** 2 + scorer.CUTOFF_SQUARED_M2
+        self.assertAlmostEqual(observed, optimum, delta=1.0)
+        self.assertLess(observed, greedy)
+        self.assertAlmostEqual(observed, brute_gospa(truth_lons, output_lons), delta=1e-5)
+
+    # REQ: OA-ACC-074, OA-ACC-098
+    def test_assignment_matches_bruteforce_on_seeded_random_instances_up_to_five_by_five(self) -> None:
+        rng = random.Random(7)
+        for case in range(50):
+            n, m = rng.randint(0, 5), rng.randint(0, 5)
+            truth_lons = [math.degrees(rng.uniform(0.0, 2500.0) / scorer.WGS84_A_M) for _ in range(n)]
+            output_lons = [math.degrees(rng.uniform(0.0, 2500.0) / scorer.WGS84_A_M) for _ in range(m)]
+            left = [scorer.Point("s", 0, f"T{i}", 0.0, lon) for i, lon in enumerate(truth_lons)]
+            right = [scorer.Point("s", 0, f"O{j}", 0.0, lon) for j, lon in enumerate(output_lons)]
+            observed = scorer._assign_snapshot(left, right, [0], [0], [0])["gospa_cost_m2"]
+            self.assertAlmostEqual(observed, brute_gospa(truth_lons, output_lons), delta=1e-4, msg=f"case {case} n={n} m={m}")
 
     # REQ: OA-ACC-074, OA-ACC-078, OA-ACC-079, OA-ACC-080, OA-ACC-098
     def test_assignment_matches_bruteforce_for_all_sizes_through_four(self) -> None:

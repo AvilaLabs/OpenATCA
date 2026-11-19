@@ -14,6 +14,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -92,7 +93,7 @@ def _bounded_csv(path: Path, expected_fields: tuple[str, ...], kind: str) -> tup
 
 
 def _integer(raw: str, label: str) -> int:
-    if not raw or raw.strip() != raw or any(c in raw for c in ".eE+"):
+    if not raw or raw.strip() != raw or any(c in raw for c in ".eE+") or re.fullmatch(r"-?[0-9]+", raw) is None:
         raise ScoreError(f"{label} must be a canonical base-10 integer")
     try:
         value = int(raw, 10)
@@ -105,6 +106,8 @@ def _integer(raw: str, label: str) -> int:
 
 def _finite(raw: str, label: str) -> float:
     try:
+        if re.fullmatch(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?", raw) is None:
+            raise ValueError("not strict numeric text")
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise ScoreError(f"{label} must be numeric") from exc

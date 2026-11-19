@@ -14,6 +14,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import os
 import sys
 from dataclasses import dataclass
@@ -115,6 +116,8 @@ def _read_json(path: Path, max_bytes: int) -> dict[str, Any]:
 
 def _finite_float(value: str, label: str) -> float:
     try:
+        if re.fullmatch(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?", value) is None:
+            raise ValueError("not strict numeric text")
         out = float(value)
     except (TypeError, ValueError) as e:
         raise ValidationError(f"{label} is not numeric") from e
@@ -126,7 +129,7 @@ def _finite_float(value: str, label: str) -> float:
 def _int(value: str, label: str) -> int:
     try:
         # Reject integral-looking floats and whitespace-only strings.
-        if not value or value.strip() != value or any(ch in value for ch in ".eE+"):
+        if not value or value.strip() != value or any(ch in value for ch in ".eE+") or re.fullmatch(r"-?[0-9]+", value) is None:
             raise ValueError("not a canonical integer")
         return int(value, 10)
     except (TypeError, ValueError) as e:

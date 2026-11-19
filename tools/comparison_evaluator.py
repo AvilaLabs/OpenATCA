@@ -5,8 +5,8 @@ import csv
 import json
 import math
 import hashlib
-import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -16,6 +16,13 @@ MAX_FIELD = 4096
 WGS84_A_M = 6378137.0
 WGS84_F = 1 / 298.257223563
 WGS84_E2 = WGS84_F * (2 - WGS84_F)
+CANONICAL_PROTOCOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "validation", "comparison-protocol-v1.json")
+# Freeze: SHA-256 of validation/comparison-protocol-v1.json. Any other bytes fail closed.
+PROTOCOL_V1_SHA256 = "5463f6954a5a0dcbfa8de5034242b7c4c8a8c73f4ea06c2920a80b90171c2f46"
+PROTOCOL_MISMATCH_REASON = "protocol file does not match the frozen v1 hash"
+# Strict numeric text: no underscores, spaces, leading '+', or inf/nan words.
+_INT_RE = re.compile(r"-?[0-9]+")
+_FLOAT_RE = re.compile(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?")
 EXPECTED = {
     "truth": ["scenario_id", "flight_id", "time_ns", "lat_deg", "lon_deg", "ve_mps", "vn_mps", "phase"],
     "measurements": ["event_id", "scenario_id", "flight_id", "sensor_id", "sensor_ns", "receive_ns", "lat_deg", "lon_deg", "ve_mps", "vn_mps", "sigma_pos_m", "sigma_vel_mps"],
@@ -25,6 +32,17 @@ EXPECTED = {
 
 class EvaluationError(ValueError):
     pass
+
+def _parse_int(text):
+    if isinstance(text, int) and not isinstance(text, bool): return text  # already-parsed in-memory row
+    if not isinstance(text, str) or _INT_RE.fullmatch(text) is None:
+        raise ValueError(f"not a strict integer: {text!r}")
+    return int(text)
+
+def _parse_float(text):
+    if not isinstance(text, str) or _FLOAT_RE.fullmatch(text) is None:
+        raise ValueError(f"not a strict number: {text!r}")
+    return float(text)
 
 def _csv(path, kind):
     try:
@@ -51,7 +69,7 @@ def _csv(path, kind):
                 previous=None
                 for n,row in enumerate(rows,2):
                     try:
-                        values=tuple(int(row[field]) if field in ("time_ns","receive_ns") else (_id_order(row[field]) if field in ("flight_id","event_id") else row[field]) for field in order_fields)
+                        values=tuple(_parse_int(row[field]) if field in ("time_ns","receive_ns") else (_id_order(row[field]) if field in ("flight_id","event_id") else row[field]) for field in order_fields)
                     except ValueError as exc: raise EvaluationError(f"{path}:{n}: invalid ordering timestamp") from exc
                     if previous is not None and values<=previous:
                         raise EvaluationError(f"{path}:{n}: rows must be ordered by {', '.join(order_fields)}")
@@ -62,7 +80,7 @@ def _csv(path, kind):
 
 def _num(row, key, where, integer=False):
     try:
-        value = int(row[key]) if integer else float(row[key])
+        value = _parse_int(row[key]) if integer else _parse_float(row[key])
     except (ValueError, TypeError, KeyError) as exc:
         raise EvaluationError(f"{where}: invalid {key}") from exc
     if integer and abs(value)>9_223_372_036_854_775_807:
@@ -75,7 +93,7 @@ def _key(row):
     return row["scenario_id"], row["flight_id"]
 
 def _id_order(value):
-    try: return 0,int(value)
+    try: return 0,_parse_int(value)
     except ValueError: return 1,value
 
 def _xyz(lat, lon):
@@ -84,7 +102,7 @@ def _xyz(lat, lon):
     return n*math.cos(a)*math.cos(b), n*math.cos(a)*math.sin(b), n*(1-WGS84_E2)*math.sin(a)
 
 def horizontal_error_m(a, b):
-    """WGS84 ECEF to local ENU horizontal separation, including dateline wrap."""
+    """Horizontal distance in the local tangent plane at the truth point (ECEF chord projected), not geodesic."""
     alat, alon = math.radians(a[0]), math.radians(a[1])
     x1, y1, z1 = _xyz(a[0], a[1]); x2, y2, z2 = _xyz(b[0], b[1])
     dx, dy, dz = x2-x1, y2-y1, z2-z1
@@ -92,7 +110,16 @@ def horizontal_error_m(a, b):
     north = -math.sin(alat)*math.cos(alon)*dx - math.sin(alat)*math.sin(alon)*dy + math.cos(alat)*dz
     return math.hypot(east, north)
 
-def _stats(values):
+def _coverage(used, expected):
+    return {"rows_used": used, "rows_expected": expected, "fraction": used/expected if expected else None}
+
+def _stats(values, expected=None):
+    """Summary statistics; `count` is the n behind every figure. With `expected`, coverage rides in the same object."""
+    result=_stats_core(values)
+    if expected is not None: result["coverage"]=_coverage(len(values),expected)
+    return result
+
+def _stats_core(values):
     if not values: return {"count": 0, "rms": None, "p95": None, "p99": None, "mean": None}
     ordered = sorted(values)
     def pct(p): return ordered[min(len(ordered)-1, math.ceil(p*len(ordered))-1)]
@@ -146,11 +173,14 @@ def _derive_profile(protocol,manifest):
 def _profile_binding_valid(derived,metadata,scoring_manifest):
     return (derived.get("valid") is True and metadata.get("scenario_role")==derived.get("role") and metadata.get("cohort_id")==derived.get("cohort_id") and scoring_manifest.get("scenario_role")==derived.get("role") and scoring_manifest.get("cohort_id")==derived.get("cohort_id"))
 
-def _profile_gate(role,init_ns,coast_limit_ns,epochs_complete,coverage,minimum=.999,cohort_id=None,same_usable_keys=True):
+def _profile_gate(role,init_ns,coast_limit_ns,epochs_complete,coverage,minimum=None,cohort_id=None,same_usable_keys=True,required_ns=None):
+    frozen=_thresholds(_frozen_protocol() or {})
+    if minimum is None: minimum=frozen["postinit_usable_ratio_min"] if frozen else 2.0
+    if required_ns is None: required_ns=(frozen["initialization_ns"],frozen["coast_age_ns"]) if frozen else (None,None)
     result={"cohort_id":cohort_id,"role":role,"minimum_usable_fraction":minimum,"candidate_usable_fraction":coverage.get("candidate",{}).get("usable_fraction"),"baseline_usable_fraction":coverage.get("baseline",{}).get("usable_fraction"),"candidate_at_least_baseline":False,"same_post_initialization_usable_keys":same_usable_keys,"status":"unqualified"}
     if role=="diagnostic_only": result["status"]="diagnostic_only"; return result
     if role!="nominal": result["status"]="unknown_scenario_role"; return result
-    if init_ns!=2_000_000_000 or coast_limit_ns!=2_000_000_000 or not epochs_complete:
+    if required_ns[0] is None or init_ns!=required_ns[0] or coast_limit_ns!=required_ns[1] or not epochs_complete:
         result["status"]="profile_or_epoch_mismatch"; return result
     c=result["candidate_usable_fraction"]; b=result["baseline_usable_fraction"]
     if c is None or b is None: result["status"]="no_post_initialization_samples"; return result
@@ -165,13 +195,41 @@ def _profile_gate(role,init_ns,coast_limit_ns,epochs_complete,coverage,minimum=.
 
 def _read_json(path):
     if os.path.getsize(path)>MAX_FILE_BYTES: raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
+    with open(path,encoding="utf-8") as f: return _loads_json(f.read())
+
+def _loads_json(text):
     def unique(pairs):
         result={}
         for key,value in pairs:
             if key in result: raise ValueError(f"duplicate JSON key: {key}")
             result[key]=value
         return result
-    with open(path,encoding="utf-8") as f: return json.load(f,object_pairs_hook=unique,parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid JSON constant {value}")))
+    return json.loads(text,object_pairs_hook=unique,parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid JSON constant {value}")))
+
+def _frozen_protocol(path=None):
+    """Return the canonical protocol only if its bytes hash to the pinned v1 digest, else None."""
+    path=path or CANONICAL_PROTOCOL
+    try:
+        if os.path.getsize(path)>MAX_FILE_BYTES: return None
+        with open(path,"rb") as f: raw=f.read()
+        if hashlib.sha256(raw).hexdigest()!=PROTOCOL_V1_SHA256: return None
+        data=_loads_json(raw.decode("utf-8"))
+        return data if isinstance(data,dict) else None
+    except (OSError,UnicodeError,ValueError): return None
+
+def _thresholds(protocol):
+    """Every protocol number the evaluator applies, read from the verified protocol; None if absent or malformed."""
+    try:
+        goals=protocol["scorecard"]["competitive_relative_goals"]
+        setup=protocol["initialization_and_qualification"]
+        coast=setup["coast_when_actual_source_age_ns_greater_than"]
+        offset=re.search(r"\+\s*([0-9]+)\s*$",setup["post_initialization_window"]["start_ns"])
+        minima={name:spec["postinit_usable_ratio_min"] for name,spec in setup["nominal_scenarios"].items()}
+        result={"rms_ratio_max":goals["position_rms_ratio_max"],"p99_error_ratio_max":goals["p99_position_error_ratio_max"],"p99_receive_to_usable_ratio_max":goals["p99_receive_to_usable_latency_ratio_max"],"throughput_ratio_min":goals["throughput_ratio_min"],"coast_age_ns":coast,"initialization_ns":int(offset.group(1)) if offset else None,"postinit_usable_ratio_min":max(minima.values()) if minima else None,"zero_loss_required":True}
+    except (KeyError,TypeError,ValueError,AttributeError): return None
+    numbers=[v for k,v in result.items() if k!="zero_loss_required"]
+    if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v<=0 for v in numbers): return None
+    return result
 
 def _zero_losses(value):
     if isinstance(value,bool): return False
@@ -203,11 +261,11 @@ def _validate_identity_binding(path, truth_keys, output_rows):
             reader=csv.DictReader(f,strict=True)
             if reader.fieldnames!=fields: return False,"identity_binding_schema_mismatch"
             seen=set(); track_truth={}; bound={"candidate":set(),"baseline":set()}
-            outputs={name:{(*_key(r),int(r["score_ns"])):r for r in rows} for name,rows in output_rows.items()}
+            outputs={name:{(*_key(r),_parse_int(r["score_ns"])):r for r in rows} for name,rows in output_rows.items()}
             for row in reader:
                 system=row["system"]
                 if system not in bound: return False,"identity_binding_unknown_system"
-                key=(row["scenario_id"],row["flight_id"],int(row["score_ns"]))
+                key=(row["scenario_id"],row["flight_id"],_parse_int(row["score_ns"]))
                 skey=(system,*key)
                 if skey in seen or key not in truth_keys or key not in outputs[system]: return False,"identity_binding_unexpected_or_duplicate_key"
                 seen.add(skey); bound[system].add(key)
@@ -231,9 +289,9 @@ def _bootstrap_ratio(groups, metric="rms", seed=173):
     scenarios=defaultdict(list)
     for (scenario,flight),values in groups.items(): scenarios[scenario].append((flight,values))
     if len(scenarios) < 2 or sum(len(v) for v in scenarios.values()) < 2:
-        return {"low95": None, "high95": None, "scenario_clusters":len(scenarios),"flight_clusters":len(groups)}
-    rng = random.Random(seed); names=sorted(scenarios); samples=[]
-    for _ in range(2000):
+        return {"low95": None, "high95": None, "scenario_clusters":len(scenarios),"flight_clusters":len(groups),"replicates":0,"replicates_dropped":0}
+    rng = random.Random(seed); names=sorted(scenarios); samples=[]; replicates=2000
+    for _ in range(replicates):
         chosen=[]
         for _s in names:
             s=rng.choice(names); flights=scenarios[s]
@@ -243,17 +301,19 @@ def _bootstrap_ratio(groups, metric="rms", seed=173):
         if metric=="rms": num=_stats(ca)["rms"]; den=_stats(ba)["rms"]
         else: num=_stats(ca)["p99"]; den=_stats(ba)["p99"]
         if den>1e-9: samples.append(num/den)
-    if not samples: return {"low95":None,"high95":None,"scenario_clusters":len(scenarios),"flight_clusters":len(groups)}
+    dropped=replicates-len(samples)
+    if not samples: return {"low95":None,"high95":None,"scenario_clusters":len(scenarios),"flight_clusters":len(groups),"replicates":replicates,"replicates_dropped":dropped}
     samples.sort()
-    return {"low95": samples[int(.025*len(samples))], "high95": samples[min(len(samples)-1, int(.975*len(samples)))], "scenario_clusters":len(scenarios),"flight_clusters":len(groups)}
+    return {"low95": samples[int(.025*len(samples))], "high95": samples[min(len(samples)-1, int(.975*len(samples)))], "scenario_clusters":len(scenarios),"flight_clusters":len(groups),"replicates":replicates,"replicates_dropped":dropped}
 
 def evaluate(truth_path, measurements_path, candidate_path, baseline_path, metadata=None):
     truth = _csv(truth_path, "truth"); measurements = _csv(measurements_path, "measurements")
     candidate = _csv(candidate_path, "output"); baseline = _csv(baseline_path, "output")
     meta = metadata or {}
-    canonical_protocol=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),"validation","comparison-protocol-v1.json")
-    try: scoring_protocol=_read_json(canonical_protocol)
-    except (OSError,EvaluationError,ValueError,json.JSONDecodeError): scoring_protocol={}
+    canonical_protocol=CANONICAL_PROTOCOL
+    scoring_protocol=_frozen_protocol(canonical_protocol) or {}
+    limits=_thresholds(scoring_protocol)
+    protocol_frozen=limits is not None
     early_artifacts=meta.get("artifacts",{})
     manifest_spec=(early_artifacts.get("comparison_manifest") or early_artifacts.get("manifest",{})) if isinstance(early_artifacts,dict) else {}
     manifest_path=manifest_spec.get("path") if isinstance(manifest_spec,dict) else None
@@ -269,7 +329,7 @@ def evaluate(truth_path, measurements_path, candidate_path, baseline_path, metad
         if not isinstance(raw_manifest,dict): raw_manifest={}
     except (OSError,EvaluationError,ValueError,json.JSONDecodeError):
         raw_manifest={}
-    truth_by={}; ordered_keys=[]; phases=defaultdict(list); first_grid_time={}
+    truth_by={}; ordered_keys=[]; phases=defaultdict(list); first_grid_time={}; truth_per_scenario=defaultdict(int); truth_per_flight=defaultdict(int)
     for i,r in enumerate(truth,2):
         k=(*_key(r),_num(r,"time_ns",f"truth:{i}",True))
         if k in truth_by: raise EvaluationError(f"truth:{i}: duplicate grid key {k}")
@@ -278,7 +338,7 @@ def evaluate(truth_path, measurements_path, candidate_path, baseline_path, metad
         first_grid_time.setdefault(k[:2],k[2])
         vals={c:_num(r,c,f"truth:{i}") for c in ("lat_deg","lon_deg","ve_mps","vn_mps")}
         if abs(vals["lat_deg"])>90 or abs(vals["lon_deg"])>180: raise EvaluationError(f"truth:{i}: coordinate out of range")
-        truth_by[k]=(vals,r["phase"]); phases[(k[0],k[1],r["phase"])].append(k)
+        truth_by[k]=(vals,r["phase"]); phases[(k[0],k[1],r["phase"])].append(k); truth_per_scenario[k[0]]+=1; truth_per_flight[k[:2]]+=1
     meas_events=set(); received_at={}
     for i,r in enumerate(measurements,2):
         if not r["event_id"] or r["event_id"] in meas_events: raise EvaluationError(f"measurements:{i}: duplicate/empty event_id")
@@ -360,17 +420,18 @@ def evaluate(truth_path, measurements_path, candidate_path, baseline_path, metad
                 if latency < 0: raise EvaluationError(f"{name}: usable output precedes its input receive time")
                 latencies.append(latency/1e6)
         total=len(truth_by); coverage={"truth_rows":post_den,"valid_rows":post_valid,"coast_rows":post_coast,"missing_rows":post_missing,"usable_rows":post_usable,"usable_fraction":post_usable/post_den if post_den else None,"coast_profile_violations":post_coast_violations}
-        by_system[name]={"position_error_m":_stats(errors),"velocity_error_mps":_stats(velocity),"post_initialization_position_error_m":_stats(post_errors),"post_initialization_velocity_error_mps":_stats(post_velocity),"cold_start_position_error_m":_stats(cold_errors),"cold_start_velocity_error_mps":_stats(cold_velocity),"post_initialization_coverage":coverage,"valid_count":valid,"valid_fraction":valid/total if total else None,"stale_coast":stale,"coast_fraction":stale/total if total else None,"missing":missing,"missing_fraction":missing/total if total else None,"absent_output_rows":absent,"explicit_missing_rows":explicit_missing,"source_age_ms":_stats(source_ages),"coast_source_age_ms":_stats(coast_ages),"source_timestamp_delay_proxy_ms":_stats(latencies),"receive_to_usable_ms":_stats([]),"receive_to_usable_evidence":"unavailable_without_first_use_event_ledger","source_timestamp_unmatched_rows":len(errors)-len(latencies),"per_scenario_position_error_m":{str(k):_stats(v) for k,v in scenario_errors.items()},"per_flight_position_error_m":{str(k):_stats(v) for k,v in flights.items()},"phase_position_error_m":{str(k):_stats(v) for k,v in phase_errors.items()},"per_scenario_velocity_error_mps":{str(k):_stats(v) for k,v in scenario_velocity.items()},"per_flight_velocity_error_mps":{str(k):_stats(v) for k,v in flight_velocity.items()},"phase_velocity_error_mps":{str(k):_stats(v) for k,v in phase_velocity.items()}}
+        by_system[name]={"position_error_m":_stats(errors,total),"velocity_error_mps":_stats(velocity,total),"post_initialization_position_error_m":_stats(post_errors,post_den),"post_initialization_velocity_error_mps":_stats(post_velocity,post_den),"cold_start_position_error_m":_stats(cold_errors,total-post_den),"cold_start_velocity_error_mps":_stats(cold_velocity,total-post_den),"post_initialization_coverage":coverage,"valid_count":valid,"valid_fraction":valid/total if total else None,"stale_coast":stale,"coast_fraction":stale/total if total else None,"missing":missing,"missing_fraction":missing/total if total else None,"absent_output_rows":absent,"explicit_missing_rows":explicit_missing,"source_age_ms":_stats(source_ages,total),"coast_source_age_ms":_stats(coast_ages,total),"source_timestamp_delay_proxy_ms":_stats(latencies,total),"receive_to_usable_ms":_stats([]),"receive_to_usable_evidence":"unavailable_without_first_use_event_ledger","source_timestamp_unmatched_rows":len(errors)-len(latencies),"per_scenario_position_error_m":{str(k):_stats(v,truth_per_scenario[k]) for k,v in scenario_errors.items()},"per_flight_position_error_m":{str(k):_stats(v,truth_per_flight[k]) for k,v in flights.items()},"phase_position_error_m":{str(k):_stats(v,len(phases[k])) for k,v in phase_errors.items()},"per_scenario_velocity_error_mps":{str(k):_stats(v,truth_per_scenario[k]) for k,v in scenario_velocity.items()},"per_flight_velocity_error_mps":{str(k):_stats(v,truth_per_flight[k]) for k,v in flight_velocity.items()},"phase_velocity_error_mps":{str(k):_stats(v,len(phases[k])) for k,v in phase_velocity.items()}}
         rows_by_flight[name]=post_flights; post_totals[name]=coverage; post_usable_keysets[name]=usable_keys
     same_usable_keys=post_usable_keysets["candidate"]==post_usable_keysets["baseline"]
     derived_profile=_derive_profile(scoring_protocol,raw_manifest)
     profile_binding_valid=_profile_binding_valid(derived_profile,meta,scoring_manifest)
-    profile_gate=_profile_gate(derived_profile.get("role") if profile_binding_valid else None,init_ns,coast_limit_ns,epochs_complete,post_totals,cohort_id=derived_profile.get("cohort_id") if profile_binding_valid else None,same_usable_keys=same_usable_keys)
+    profile_gate=_profile_gate(derived_profile.get("role") if profile_binding_valid else None,init_ns,coast_limit_ns,epochs_complete,post_totals,cohort_id=derived_profile.get("cohort_id") if profile_binding_valid else None,same_usable_keys=same_usable_keys,minimum=limits["postinit_usable_ratio_min"] if limits else 2.0,required_ns=(limits["initialization_ns"],limits["coast_age_ns"]) if limits else (None,None))
     common=post_usable_keysets["candidate"]&post_usable_keysets["baseline"]; groups=defaultdict(lambda:([],[]))
     for k in common:
         t,_phase=truth_by[k]; c=cand[k]; b=base[k]
         ce=horizontal_error_m((t["lat_deg"],t["lon_deg"]),(_num(c,"lat_deg",f"candidate:{k}"),_num(c,"lon_deg",f"candidate:{k}")))
         be=horizontal_error_m((t["lat_deg"],t["lon_deg"]),(_num(b,"lat_deg",f"baseline:{k}"),_num(b,"lon_deg",f"baseline:{k}")))
+        # Baseline rows also feed the unpaired stats above; harmless, as the paired lists are rebuilt from the same immutable rows.
         groups[k[:2]][0].append(ce); groups[k[:2]][1].append(be)
     paired_rms=_bootstrap_ratio(groups,"rms"); paired_p99=_bootstrap_ratio(groups,"p99",seed=271)
     paired_candidate=[x for cvals,bvals in groups.values() for x in cvals]
@@ -425,29 +486,30 @@ def evaluate(truth_path, measurements_path, candidate_path, baseline_path, metad
     run_bound=(run_manifest.get("truth_sha256")==meta.get("truth_sha256") and run_manifest.get("measurements_sha256")==meta.get("measurements_sha256"))
     raw_manifest_ref=next((scoring_manifest.get(k) for k in ("raw_manifest_sha256","manifest_sha256","runner_manifest_sha256") if scoring_manifest.get(k)),None)
     comparison_bound=(scoring_manifest.get("truth_sha256")==meta.get("truth_sha256") and scoring_manifest.get("measurements_sha256")==meta.get("measurements_sha256") and raw_manifest_ref==meta.get("manifest_sha256") and scoring_manifest.get("initialization_ns")==init_ns and scoring_manifest.get("coast_max_age_ns")==coast_limit_ns)
-    accuracy_eligible=(not missing_meta and _claim_class(meta.get("comparison_class")) and _known_comparison_class(meta.get("comparison_class")) and meta.get("reference_qualified") is True and meta.get("reference_validation_status")=="PASS" and ref_manifest.get("validation_status")=="PASS" and ref_bound and run_bound and comparison_bound and meta.get("reference_kind") in ("independent_simulation","independent_physical") and meta.get("same_input_fingerprint") is True and meta.get("input_fingerprint")==meta.get("measurements_sha256") and artifact_integrity and flat_integrity and protocol_integrity and profile_binding_valid and meta.get("identity_source")=="scenario_manifest_not_candidate_output" and identity_valid and _zero_losses(run_manifest.get("loss_counters")) and identity_clean and profile_gate["status"]=="nominal_profile_pass")
+    accuracy_eligible=(not missing_meta and _claim_class(meta.get("comparison_class")) and _known_comparison_class(meta.get("comparison_class")) and meta.get("reference_qualified") is True and meta.get("reference_validation_status")=="PASS" and ref_manifest.get("validation_status")=="PASS" and ref_bound and run_bound and comparison_bound and meta.get("reference_kind") in ("independent_simulation","independent_physical") and meta.get("same_input_fingerprint") is True and meta.get("input_fingerprint")==meta.get("measurements_sha256") and artifact_integrity and flat_integrity and protocol_integrity and profile_binding_valid and meta.get("identity_source")=="scenario_manifest_not_candidate_output" and protocol_frozen and identity_valid and _zero_losses(run_manifest.get("loss_counters")) and identity_clean and profile_gate["status"]=="nominal_profile_pass")
     ledger_c=timing_data.get("candidate",{}); ledger_b=timing_data.get("baseline",{})
     throughput_c=_ledger_throughput(ledger_c) or 0
     throughput_b=_ledger_throughput(ledger_b) or 0
     speed_eligible=False
-    accuracy_claim=accuracy_eligible and rms_ratio is not None and p99_ratio is not None and rms_ratio<=.70 and p99_ratio<=.80 and paired_rms["high95"] is not None and paired_rms["high95"]<=.70 and paired_p99["high95"] is not None and paired_p99["high95"]<=.80
-    speed_claim=speed_eligible and latency_ratio is not None and latency_ratio<=.50 and throughput_c>=2*throughput_b
-    if profile_gate["status"]!="nominal_profile_pass": accuracy_status=profile_gate["status"]
+    accuracy_claim=accuracy_eligible and rms_ratio is not None and p99_ratio is not None and protocol_frozen and rms_ratio<=limits["rms_ratio_max"] and p99_ratio<=limits["p99_error_ratio_max"] and paired_rms["high95"] is not None and paired_rms["high95"]<=limits["rms_ratio_max"] and paired_p99["high95"] is not None and paired_p99["high95"]<=limits["p99_error_ratio_max"]
+    speed_claim=speed_eligible and protocol_frozen and latency_ratio is not None and latency_ratio<=limits["p99_receive_to_usable_ratio_max"] and throughput_c>=limits["throughput_ratio_min"]*throughput_b
+    if not protocol_frozen: accuracy_status="unqualified_protocol_hash_mismatch"
+    elif profile_gate["status"]!="nominal_profile_pass": accuracy_status=profile_gate["status"]
     elif by_system["candidate"]["post_initialization_position_error_m"]["count"]==0 or by_system["baseline"]["post_initialization_position_error_m"]["count"]==0: accuracy_status="no_post_initialization_samples"
     elif rms_ratio is None or p99_ratio is None: accuracy_status="unqualified_near_zero_baseline"
     elif not accuracy_eligible: accuracy_status="disabled_unqualified_comparison"
     else: accuracy_status="qualified_pass" if accuracy_claim else "qualified_not_met"
     return {
         "schema":"openatca-comparison-v1",
-        "thresholds":{"rms_ratio_max":.70,"p99_error_ratio_max":.80,"p99_receive_to_usable_ratio_max":.50,"throughput_ratio_min":2.0,"zero_loss_required":True},
+        "thresholds":limits,
         "logical_metrics":by_system,
         "profile_qualification":{**profile_gate,"usable_keysets_match":same_usable_keys},
         "paired_grid":paired_grid,
         "paired_confidence":{"rms_ratio":paired_rms,"p99_error_ratio":paired_p99},
         "ratios":{"rms":rms_ratio,"p99_error":p99_ratio,"p99_receive_to_usable":latency_ratio},
-        "accuracy_qualification":{"scope":"kinematic_component","status":accuracy_status,"enabled":accuracy_eligible,"pass":bool(accuracy_claim),"all_quality_pass":False,"all_quality_status":"not_qualified_v1_scope"},
+        "accuracy_qualification":{"scope":"kinematic_component","status":accuracy_status,"reason":None if protocol_frozen else PROTOCOL_MISMATCH_REASON,"enabled":accuracy_eligible,"pass":bool(accuracy_claim),"all_quality_pass":False,"all_quality_status":"not_qualified_v1_scope"},
         "speed_coverage":{"status":"not_qualified_missing_first_use_event_ledger","enabled":speed_eligible,"pass":bool(speed_claim),"throughput_ratio":throughput_c/throughput_b if throughput_b>0 else None,"reason":"first_use_event_timing_not_available_in_v1"},
-        "qualification_evidence":{"artifacts":artifact_checks,"protocol_matches_canonical":protocol_integrity,"comparison_class_recognized":_known_comparison_class(meta.get("comparison_class")),"profile_manifest_binding_valid":profile_binding_valid,"derived_profile":derived_profile,"identity_binding_valid":identity_valid,"identity_scope":identity_scope,"uncovered_metrics":["anonymous_track_identity","first_causal_event_use_latency","full_quality_competitive_pass"]},
+        "qualification_evidence":{"artifacts":artifact_checks,"protocol_matches_canonical":protocol_integrity,"protocol_frozen":{"ok":protocol_frozen,"pinned_sha256":PROTOCOL_V1_SHA256,"reason":None if protocol_frozen else PROTOCOL_MISMATCH_REASON},"comparison_class_recognized":_known_comparison_class(meta.get("comparison_class")),"profile_manifest_binding_valid":profile_binding_valid,"derived_profile":derived_profile,"identity_binding_valid":identity_valid,"identity_scope":identity_scope,"uncovered_metrics":["anonymous_track_identity","first_causal_event_use_latency","full_quality_competitive_pass"]},
         "accounting":{"truth_grid_rows":len(truth_by),"measurement_events":len(meas_events),"candidate_output_rows":len(candidate),"baseline_output_rows":len(baseline),"candidate_missing_rows":by_system["candidate"]["missing"],"baseline_missing_rows":by_system["baseline"]["missing"],"candidate_duplicate_rows":cand_duplicates,"baseline_duplicate_rows":base_duplicates,"false_identity_rows":false_identity}
     }
 

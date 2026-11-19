@@ -2,6 +2,7 @@
 import ast
 import contextlib
 import csv
+import hashlib
 import io
 import sys
 import json
@@ -9,6 +10,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import comparison_evaluator as ce
 import comparison_baseline as cb
@@ -323,5 +325,62 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(ce._files_match(canonical,artifact))
         with open(artifact,"w") as f: f.write('{"protocol":"other"}\n')
         self.assertFalse(ce._files_match(canonical,artifact))
+
+    # REQ: OA-CMP-219
+    def test_protocol_hash_is_pinned_and_thresholds_come_from_the_verified_protocol(self):
+        canonical=ce.CANONICAL_PROTOCOL
+        with open(canonical,"rb") as f: self.assertEqual(hashlib.sha256(f.read()).hexdigest(),ce.PROTOCOL_V1_SHA256)
+        expected={"rms_ratio_max":.70,"p99_error_ratio_max":.80,"p99_receive_to_usable_ratio_max":.50,"throughput_ratio_min":2.0,"coast_age_ns":2_000_000_000,"initialization_ns":2_000_000_000,"postinit_usable_ratio_min":.999,"zero_loss_required":True}
+        self.assertEqual(ce._thresholds(ce._frozen_protocol()),expected)
+        result=ce.evaluate(self.t,self.m,self.c,self.b,{})
+        self.assertEqual(result["thresholds"],expected)
+        self.assertTrue(result["qualification_evidence"]["protocol_frozen"]["ok"])
+    # REQ: OA-CMP-219
+    def test_changed_protocol_bytes_fail_closed_as_unqualified(self):
+        altered=os.path.join(self.d,"protocol.json")
+        with open(ce.CANONICAL_PROTOCOL,"rb") as f: data=f.read()
+        with open(altered,"wb") as f: f.write(data.replace(b"0.70",b"0.95",1))
+        self.assertNotEqual(data,open(altered,"rb").read())
+        self.assertIsNone(ce._frozen_protocol(altered))
+        with mock.patch.object(ce,"CANONICAL_PROTOCOL",altered):
+            result=ce.evaluate(self.t,self.m,self.c,self.b,{})
+        self.assertEqual(result["accuracy_qualification"]["status"],"unqualified_protocol_hash_mismatch")
+        self.assertEqual(result["accuracy_qualification"]["reason"],"protocol file does not match the frozen v1 hash")
+        self.assertFalse(result["accuracy_qualification"]["pass"]); self.assertFalse(result["accuracy_qualification"]["enabled"])
+        self.assertIsNone(result["thresholds"])
+        with mock.patch.object(ce,"PROTOCOL_V1_SHA256","0"*64):
+            self.assertEqual(ce.evaluate(self.t,self.m,self.c,self.b,{})["accuracy_qualification"]["status"],"unqualified_protocol_hash_mismatch")
+    # REQ: OA-CMP-220
+    def test_every_unpaired_statistic_carries_its_coverage(self):
+        keys=[("s","f",i*1_000_000_000) for i in range(4)]
+        truth=[dict(scenario_id=s,flight_id=f,time_ns=t,lat_deg=0,lon_deg=i*100/111195,ve_mps=100,vn_mps=0,phase="cruise") for i,(s,f,t) in enumerate(keys)]
+        full=output_rows(); full=[dict(r) for r in [dict(scenario_id="s",flight_id="f",score_ns=t,source_ns=t,publish_ns=t,lat_deg=0,lon_deg=i*100/111195,ve_mps=100,vn_mps=0,status="valid") for i,(s,f,t) in enumerate(keys)]]
+        half=[r if i<2 else dict(scenario_id="s",flight_id="f",score_ns=r["score_ns"],source_ns="",publish_ns=r["publish_ns"],lat_deg="",lon_deg="",ve_mps="",vn_mps="",status="missing") for i,r in enumerate(full)]
+        write(self.t,TRUTH,truth); write(self.m,MEAS,[]); write(self.c,OUT,half); write(self.b,OUT,full)
+        metrics=ce.evaluate(self.t,self.m,self.c,self.b,{})["logical_metrics"]
+        for name in ("position_error_m","velocity_error_mps","cold_start_position_error_m","source_age_ms"):
+            self.assertEqual(metrics["candidate"][name]["coverage"],{"rows_used":2,"rows_expected":4,"fraction":0.5},name)
+            self.assertEqual(metrics["baseline"][name]["coverage"]["fraction"],1.0,name)
+            self.assertEqual(metrics["candidate"][name]["count"],2)
+        self.assertEqual(metrics["candidate"]["per_flight_position_error_m"]["('s', 'f')"]["coverage"]["fraction"],0.5)
+        self.assertEqual(metrics["candidate"]["per_scenario_velocity_error_mps"]["s"]["coverage"]["rows_expected"],4)
+    # REQ: OA-CMP-221
+    def test_numeric_text_must_be_strict(self):
+        for bad in ("1_000","1 000"," 1","+1","inf","nan","Infinity","0x10","1e","--1",""):
+            with self.assertRaises(ce.EvaluationError,msg=bad): ce._num({"v":bad},"v","t",True)
+        for bad in ("1_0.5","+1.5","inf","-nan","1.5 ","1,5","1e+","_1"):
+            with self.assertRaises(ce.EvaluationError,msg=bad): ce._num({"v":bad},"v","t")
+        self.assertEqual(ce._num({"v":"-12"},"v","t",True),-12)
+        self.assertEqual(ce._num({"v":"1.5e3"},"v","t"),1500.0); self.assertEqual(ce._num({"v":"-.25"},"v","t"),-0.25)
+        rows=truth_rows(); rows[1]["time_ns"]="1_000_000_000"
+        write(self.t,TRUTH,rows)
+        with self.assertRaises(ce.EvaluationError): ce.evaluate(self.t,self.m,self.c,self.b,{})
+    # REQ: OA-CMP-222
+    def test_bootstrap_reports_replicates_and_dropped_count(self):
+        good=ce._bootstrap_ratio({("s1","f1"):([1.0],[2.0]),("s2","f2"):([1.0],[2.0])},"rms")
+        self.assertEqual((good["replicates"],good["replicates_dropped"]),(2000,0))
+        zeros=ce._bootstrap_ratio({("s1","f1"):([1.0],[0.0]),("s2","f2"):([1.0],[0.0])},"rms")
+        self.assertEqual((zeros["replicates"],zeros["replicates_dropped"]),(2000,2000))
+        self.assertEqual(ce._bootstrap_ratio({("s","f"):([1.0],[2.0])},"rms")["replicates_dropped"],0)
 
 if __name__=="__main__": unittest.main()

@@ -366,7 +366,7 @@ class ComparisonReferenceTests(unittest.TestCase):
         self.rewrite_csv(truth, rows, ref.TRUTH_FIELDS)
         result = ref.validate(truth, measurements, manifest, protocol, truth.parent / "runner.rs")
         self.assertEqual(result["status"], "FAIL")
-        self.assertIn("must be finite", result["reason"])
+        self.assertIn("is not numeric", result["reason"])
 
         truth, measurements, manifest, protocol = make_case(self.root)
         protocol_data = json.loads(protocol.read_text(encoding="utf-8"))
