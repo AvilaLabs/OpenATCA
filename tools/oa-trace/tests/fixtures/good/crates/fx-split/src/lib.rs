@@ -4,8 +4,8 @@
 pub mod core;
 pub mod shell;
 
-pub use core::double;
-pub use shell::load;
+pub use self::core::double;
+pub use self::shell::load;
 
 #[cfg(test)]
 mod tests {
