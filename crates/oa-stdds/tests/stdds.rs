@@ -752,3 +752,63 @@ fn messages_framed_in_a_feed_parse_to_the_same_counts_as_direct_parsing() {
     assert_eq!(framed.tais_present, direct.tais_present);
     assert_eq!(framed.messages, 5);
 }
+
+// REQ: OA-STD-024
+#[test]
+fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+    let exe = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/stdds_summary");
+    if !exe.exists() {
+        panic!("example binary not built: {}", exe.display());
+    }
+    let run = |p: &std::path::Path| Command::new(&exe).arg(p).output().unwrap();
+    let root = std::env::temp_dir().join(format!("oa-stdds-seal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for name in [
+        "rec-20261119",
+        "stdds-20261119-holdout",
+        "stdds-smoke-20261119",
+    ] {
+        let dir = root.join("scds").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.oaf");
+        std::fs::write(&file, b"").unwrap();
+        // As given.
+        let o = run(&file);
+        assert_eq!(o.status.code(), Some(2), "{name}");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("refused"));
+        // A link to the file, and a link to the folder, from outside `scds`.
+        let outside = root.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let l1 = outside.join(format!("file-{name}"));
+        symlink(&file, &l1).unwrap();
+        assert_eq!(run(&l1).status.code(), Some(2), "file link {name}");
+        let l2 = outside.join(format!("dir-{name}"));
+        symlink(&dir, &l2).unwrap();
+        assert_eq!(
+            run(&l2.join("a.oaf")).status.code(),
+            Some(2),
+            "dir link {name}"
+        );
+        // A link to a link.
+        let l3 = outside.join(format!("chain-{name}"));
+        symlink(&l2, &l3).unwrap();
+        assert_eq!(
+            run(&l3.join("a.oaf")).status.code(),
+            Some(2),
+            "chain {name}"
+        );
+    }
+    // A similar but different folder is not refused (it fails later, as a missing file).
+    let ok = root.join("scds").join("rec-20261118");
+    std::fs::create_dir_all(&ok).unwrap();
+    assert_ne!(run(&ok.join("none.oaf")).status.code(), Some(2));
+    std::fs::remove_dir_all(&root).unwrap();
+}

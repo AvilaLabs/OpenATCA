@@ -4590,4 +4590,7 @@ scope.
   classification, but the shape of the namespace (`...:terminal:entities:vN-M:service:name`) is.
 - **OA-STD-023** Message frames of a recorded feed parse to the same counts as the same bytes parsed
   directly; the summary example reads such a feed (raw or gzip) and prints counts and schema names only,
-  never a position, identity or time, and refuses the sealed hold-out recording.
+  never a position, identity or time.
+- **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
+  resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
+  `scds/stdds-smoke-20261119`, including through a link to the file, to the folder or to a link.

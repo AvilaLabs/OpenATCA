@@ -3,7 +3,7 @@
 //! reader, parses every message frame and prints per-kind counts, parse-error counts and
 //! per-field presence counts. It prints no position, identity, time or other message value;
 //! the unknown-path and unknown-root lines are element and namespace names (schema text).
-//! The sealed hold-out recording (`scds/rec-20261119`) is refused.
+//! Paths under `scds/rec-20261119`, `scds/stdds-20261119-holdout` and `scds/stdds-smoke-20261119` are refused.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -64,15 +64,38 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx, data: &[u8]) {
     }
 }
 
+/// Recordings under `scds/` that are sealed hold-outs or smoke sets and are never read.
+const SEALED: [&str; 3] = [
+    "rec-20261119",
+    "stdds-20261119-holdout",
+    "stdds-smoke-20261119",
+];
+
+/// Whether the components of `p` contain `scds` immediately followed by a sealed name.
+fn names_sealed(p: &std::path::Path) -> bool {
+    let c: Vec<_> = p
+        .components()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    c.windows(2)
+        .any(|w| w[0] == "scds" && SEALED.iter().any(|s| w[1] == *s))
+}
+
+/// Refuses (exit 2, before the file is opened) a path that names a sealed folder as given, or
+/// whose every prefix, with links resolved, does.
 fn refuse_sealed(path: &str) {
-    let canon = std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    for p in [path, canon.as_str()] {
-        if p.replace('\\', "/").contains("scds/rec-20261119") {
-            eprintln!("refused: the sealed hold-out recording is not read");
-            std::process::exit(2);
+    let given = std::path::Path::new(path);
+    let mut bad = names_sealed(given);
+    let mut prefix = std::path::PathBuf::new();
+    for comp in given.components() {
+        prefix.push(comp);
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            bad |= names_sealed(&real);
         }
+    }
+    if bad {
+        eprintln!("refused: the sealed hold-out recording is not read");
+        std::process::exit(2);
     }
 }
 
