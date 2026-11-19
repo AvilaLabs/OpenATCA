@@ -114,6 +114,8 @@ fn a_full_report_converts_to_the_counts_the_item_definitions_give() {
     // Only what the source never has is noted.
     let mut expect = ALWAYS.to_vec();
     expect.push(ANOTE_LTT);
+    expect.push(ANOTE_GBS);
+    expect.push(ANOTE_NIC_V2);
     expect.sort_unstable();
     assert_eq!(noted(&c), expect);
 }
@@ -141,7 +143,12 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     assert!(v.flight_level.is_none() && v.geometric_height.is_none());
     assert!(v.baro_rate.is_none() && v.geometric_rate.is_none());
     assert!(v.ground_vector.is_none() && v.ident.is_none() && v.category.is_none());
-    assert!(v.quality.is_none() && v.mops_version.is_none());
+    // I090 is in every record: the primary at the unknown codes.
+    assert_eq!(
+        v.quality,
+        Some(QualityValues { nacv: 0, nic: 0, nacp: 0, sil: 0, sils: false, sda: 0, gva: 0 })
+    );
+    assert!(v.mops_version.is_none());
     let n = noted(&c);
     for i in [
         ANOTE_FL_ABSENT,
@@ -155,8 +162,8 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     ] {
         assert!(n.contains(&i), "{}", ADSB_NOTE_NAMES[i]);
     }
-    // No quality item: no NICBARO or PIC to note, and no LTT without I210.
-    assert!(!n.contains(&ANOTE_NICBARO) && !n.contains(&ANOTE_PIC) && !n.contains(&ANOTE_LTT));
+    // No I210, so no LTT to note; NICBARO and PIC are still not in the source.
+    assert!(n.contains(&ANOTE_NICBARO) && n.contains(&ANOTE_PIC) && !n.contains(&ANOTE_LTT));
     // A callsign padded with NULs is the callsign with spaces; a NUL inside it is refused.
     let mut p = full();
     p.callsign = *b"N911ZP\0\0";
@@ -171,6 +178,9 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     let c = adsb_record(&g).unwrap();
     assert!(c.values.ground && c.values.flight_level.is_none());
     assert!(noted(&c).contains(&ANOTE_FL_ABSENT) && noted(&c).contains(&ANOTE_IDENT_ABSENT));
+    // I160 is the airborne vector: omitted and counted on the ground, though the report has it.
+    assert!(c.values.ground_vector.is_none());
+    assert!(noted(&c).contains(&ANOTE_VECTOR_GROUND) && !noted(&c).contains(&ANOTE_GBS));
 }
 
 // REQ: OA-CMP-020
@@ -566,6 +576,17 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
             ..Default::default()
         },
         adsb: None,
+        gate: oa_track::adsb::AdsbStats {
+            rows_in: 10,
+            passed: 6,
+            removed: {
+                let mut r = [0u64; 13];
+                r[4] = 3;
+                r[2] = 1;
+                r
+            },
+            ..Default::default()
+        },
     };
     let text = readme_with(
         DAY,
@@ -586,6 +607,15 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "3 duplicate reports removed",
         "1 conflicting (address, time) groups holding 2 reports",
         "INDEPENDENCE",
+        "NOT the set the tracker used",
+        "superset of what the tracker was fed",
+        "Of the 10 reports offered to the tracker, 6 became measurements",
+        "nacp 3;",
+        "source_not_adsb 1;",
+        "TIS-B, ADS-R and MLAT",
+        "UNVERIFIED",
+        "not according to Ed 2.4 itself",
+        "asserts \"not on ground\"",
         "UK-008",
         "NOT independent of OpenATCA's inputs",
         "ERAM also uses ADS-B",
@@ -644,4 +674,79 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
         assert_eq!(d.read_back_records, d.stats.records);
     }
     let _ = decode_stream; // the whole-file decode is the read-back above
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn quality_is_in_every_record_with_extensions_only_where_a_bit_is_set() {
+    use oa_compass::shell::adsb_export::cat021_record;
+    let ext_of = |f: &dyn Fn(&mut AdsbRow)| {
+        let mut r = full();
+        f(&mut r);
+        let v = adsb_record(&r).unwrap().values;
+        cat021_record(&v, ADSB_SOURCE).quality.unwrap()
+    };
+    let zero = |r: &mut AdsbRow| {
+        r.nic = Some(0);
+        r.nac_p = Some(0);
+        r.nac_v = Some(0);
+        r.sil = Some(0);
+        r.sil_per_sample = Some(false);
+        r.sda = Some(0);
+        r.gva = Some(0);
+    };
+    // Nothing set: the primary subfield alone, no extension.
+    let q = ext_of(&zero);
+    assert_eq!((q.nacv, q.nic, q.ext.len()), (0, 0, 0));
+    // Only NACp: the first extension alone (FX 0), NACp in bits 5/2.
+    let q = ext_of(&|r| {
+        zero(r);
+        r.nac_p = Some(9);
+    });
+    assert_eq!(q.ext, vec![9 << 1]);
+    // Only GVA: the second extension, with the first (all zero, FX 1) in front of it.
+    let q = ext_of(&|r| {
+        zero(r);
+        r.gva = Some(2);
+    });
+    assert_eq!(q.ext, vec![0x01, 2 << 1]);
+    // A report without any quality data still carries I090.
+    let q = ext_of(&|r| {
+        r.nic = None;
+        r.nac_p = None;
+        r.nac_v = None;
+        r.sil = None;
+        r.sda = None;
+        r.gva = None;
+        r.sil_per_sample = None;
+    });
+    assert_eq!((q.nacv, q.nic, q.ext.len()), (0, 0, 0));
+    // The records decode as Ed 2.4 and every one has I090 (checked in the file test below).
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn values_outside_the_mops_are_not_encoded_and_the_notes_name_sils_and_nic_v2() {
+    let mut r = full();
+    r.nic = Some(12);
+    r.nac_p = Some(12);
+    r.nac_v = Some(5);
+    let c = adsb_record(&r).unwrap();
+    let q = c.values.quality.unwrap();
+    assert_eq!((q.nic, q.nacp, q.nacv), (0, 0, 0));
+    assert!(noted(&c).contains(&ANOTE_QUALITY_RANGE) && noted(&c).contains(&ANOTE_QUALITY_PARTIAL));
+    // The limits themselves are encoded.
+    let mut r = full();
+    r.nic = Some(11);
+    r.nac_p = Some(11);
+    r.nac_v = Some(4);
+    let q = adsb_record(&r).unwrap().values.quality.unwrap();
+    assert_eq!((q.nic, q.nacp, q.nacv), (11, 11, 4));
+    // No SIL type with a SIL: SILS written 0 and noted; version 2 with a NIC: mapping unverified.
+    let mut r = full();
+    r.sil_per_sample = None;
+    let c = adsb_record(&r).unwrap();
+    assert!(noted(&c).contains(&ANOTE_SILS) && noted(&c).contains(&ANOTE_NIC_V2));
+    r.version = Some(1);
+    assert!(!noted(&adsb_record(&r).unwrap()).contains(&ANOTE_NIC_V2));
 }

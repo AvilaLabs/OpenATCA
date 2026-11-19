@@ -13,8 +13,8 @@ use super::run::{ClipInfo, InputsMode};
 use crate::core::adsb::{
     ADSB_NOTES, ADSB_NOTE_NAMES, ANOTE_CATEGORY_ABSENT, ANOTE_CATEGORY_NO_CODE, ANOTE_FL_ABSENT,
     ANOTE_FL_RANGE, ANOTE_HEIGHT_ABSENT, ANOTE_HEIGHT_RANGE, ANOTE_IDENT_ABSENT, ANOTE_IDENT_CHARS,
-    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_QUALITY_ABSENT, ANOTE_RATE_ABSENT,
-    ANOTE_RATE_RANGE, ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_RANGE,
+    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_RATE_ABSENT,
+    ANOTE_RATE_RANGE, ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
 };
 use crate::core::convert::{
     NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_QNH, NOTE_ALT_RANGE, NOTE_CLIMB_ABSENT,
@@ -242,7 +242,7 @@ pub fn readme_with(
         let _ = writeln!(o);
     }
     if let Some(a) = extras.adsb {
-        adsb_section(&mut o, a, day);
+        adsb_section(&mut o, a, day, extras.clip);
         let _ = writeln!(o);
     }
     for s in systems {
@@ -265,7 +265,7 @@ fn dedup_text(c: &ClipInfo, mode: Option<InputsMode>) -> String {
 }
 
 /// The ADS-B file's section for `day`.
-fn adsb_section(out: &mut String, report: &AdsbReport, day: i64) {
+fn adsb_section(out: &mut String, report: &AdsbReport, day: i64, clip: Option<&ClipInfo>) {
     let _ = writeln!(
         out,
         "ADS-B reports, CAT021 Ed 2.4  (SAC {} SIC {})",
@@ -275,10 +275,10 @@ fn adsb_section(out: &mut String, report: &AdsbReport, day: i64) {
         let _ = writeln!(out, "  no reports on this day; no file written");
         return;
     };
-    adsb_day_lines(out, d);
+    adsb_day_lines(out, d, clip);
 }
 
-fn adsb_day_lines(out: &mut String, d: &AdsbDayReport) {
+fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) {
     let rows = d.stats.records;
     let n = |i: usize| d.notes.get(i).copied().unwrap_or(0);
     let _ = writeln!(out, "  file: {}", d.file);
@@ -315,10 +315,10 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport) {
     item("I145 flight level", less(n(ANOTE_FL_ABSENT) + n(ANOTE_FL_RANGE)));
     item("I140 geometric height", less(n(ANOTE_HEIGHT_ABSENT) + n(ANOTE_HEIGHT_RANGE)));
     item("I155 barometric or I157 geometric vertical rate (as the report says)", less(n(ANOTE_RATE_ABSENT) + n(ANOTE_RATE_RANGE)));
-    item("I160 airborne ground vector", less(n(ANOTE_VECTOR_ABSENT) + n(ANOTE_VECTOR_RANGE)));
+    item("I160 airborne ground vector (none on the ground)", less(n(ANOTE_VECTOR_ABSENT) + n(ANOTE_VECTOR_RANGE) + n(ANOTE_VECTOR_GROUND)));
     item("I170 target identification", less(n(ANOTE_IDENT_ABSENT) + n(ANOTE_IDENT_CHARS)));
     item("I020 emitter category", less(n(ANOTE_CATEGORY_ABSENT) + n(ANOTE_CATEGORY_NO_CODE)));
-    item("I090 quality indicators (primary, first and second extension)", less(n(ANOTE_QUALITY_ABSENT)));
+    item("I090 quality indicators (in every record; the extensions only when a bit in them is 1)", rows);
     item("I210 MOPS version", less(n(ANOTE_MOPS_ABSENT) + n(ANOTE_MOPS_VERSION)));
     let _ = writeln!(
         out,
@@ -336,19 +336,52 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport) {
     for l in ADSB_BASIS {
         let _ = writeln!(out, "    {l}");
     }
+    let _ = writeln!(out, "    {}", tracker_relation(clip, rows));
+    let _ = writeln!(out, "    {INDEPENDENCE}");
 }
 
 /// How the ADS-B file's values were made and what it is (README lines).
-const ADSB_BASIS: [&str; 8] = [
+const ADSB_BASIS: [&str; 9] = [
     "Time: I073 is the report's own time, when the receiver network stamped it (1/128 s, rounded to nearest, error at most 1/256 s). The source has no avionics time of applicability (I071) and no separate reception time for velocity (I075).",
     "Position: I131, 180/2^30 degrees, from the 1e-7 degree of the source; a longitude of +180 is written as -180.",
     "Altitude: I145 is the barometric (pressure) altitude of the report in 1/4 FL (25 ft steps, rounding at most 12.5 ft); I140 is the geometric height in 6.25 ft steps. Neither is clipped: a value outside the item's range is omitted and counted.",
     "I040: ATP is 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; Ed 2.4 does not say how to code the latter, and the Ed 2.7 note recommends 3. ARC is 2 (unknown), CL is 2 (no information), and DCR, SIM, TST, SAA, RC and RAB are the specification's default 0 because the source has none of them.",
     "I090 and I210: values are those of the report after the scorer's quality handling, which carries the last known NIC, NACp, NACv, SIL and version forward within an aircraft's sequence; a field the aircraft never sent is written 0, the code for unknown. Defaults written because the format has no absent value: NICBARO is not in the source and Ed 2.4 has no unknown code for it, so it is written 0 (in ED-102A/DO-260B: barometric altitude not cross-checked, the conservative value); I210 LTT is written 0 (other, claiming neither 1090 ES, UAT nor VDL 4) because the source does not say which link carried the report; SILS, when the report has no SIL type, is written 0 (per flight-hour, the default; the bit has no unknown code); DCR, SIM, TST, SAA, RC, RAB are written 0, the specification's defaults. PIC is omitted (the extension is optional). NACv and NIC are to be read with the version in I210.",
     "Source filter: only reports of ADS-B source types (adsb_icao, adsb_icao_nt, adsb_other; or a clip without a source column) are written; other source types and positions the source marks stale are left out and counted.",
-    "INDEPENDENCE: adsb.ast holds the same reports, after the same duplicate removal, that were fed to the OpenATCA tracker. A reference or track built from it is therefore NOT independent of OpenATCA's inputs (this project's uncertainty UK-008: the ADS-B reports are not an independent truth for the OpenATCA output).",
-    "ERAM also uses ADS-B: its inputs include ADS-B reports (from its own receivers, not this clip), so ADS-B is not independent of ERAM's output either.",
+    "I040 GBS is written from the report's ground flag: 1 when the source says ground, 0 otherwise. The source sets the flag only when it says ground, so a 0 asserts \"not on ground\" without the source saying so. I160 is the airborne vector (5.2.30) and is omitted for a report on the ground.",
+    "NIC under MOPS version 2: Ed 2.4 says version 2 NIC values shall be mapped accordingly to the primary subfield; no mapping table is in the documents held, so the raw NIC is written and that mapping is UNVERIFIED. NIC and NACp above 11 and NACv above 4 are not encoded.",
+    "Where a field is written 0 because the report lacks it: 0 means unknown for NIC, NACp, NACv, SIL, SDA and GVA according to the MOPS (ED-102A/DO-260B), not according to Ed 2.4 itself, which gives these items no value text; for NICBARO (0 = not cross-checked), SILS (0 = per flight-hour), LTT (0 = other) and the I040 bits the format has no unknown code and the 0 is a claim, counted above.",
 ];
+
+/// The relation between `adsb.ast` and what the tracker was fed.
+fn tracker_relation(clip: Option<&ClipInfo>, written: u64) -> String {
+    let mut t = format!(
+        "RELATION TO THE TRACKER'S INPUT: adsb.ast holds the reports after the duplicate removal above, minus those left out here (positions marked stale, source types that are not ADS-B, impossible positions): {written} reports on this day. It is NOT the set the tracker used. The tracker's own adapter (oa-truth's quality gates, run by oa-track) also drops reports below its quality gates (NACp >= {}, NIC >= {}, SIL = {}, MOPS version >= {}) and leaves out TIS-B, ADS-R and MLAT reports and stale rows too, so adsb.ast is a superset of what the tracker was fed.",
+        oa_track::adsb::AdsbConfig::default().gates.min_nacp,
+        oa_track::adsb::AdsbConfig::default().gates.min_nic,
+        oa_track::adsb::AdsbConfig::default().gates.required_sil,
+        oa_track::adsb::AdsbConfig::default().gates.min_version,
+    );
+    if let Some(c) = clip {
+        let g = &c.gate;
+        let _ = write!(
+            t,
+            " Of the {} reports offered to the tracker, {} became measurements (the \"measurements offered to the tracker\" total) and {} were dropped by its adapter:",
+            g.rows_in,
+            g.passed,
+            g.rows_in.saturating_sub(g.passed)
+        );
+        for (name, &n) in oa_truth::REMOVE_NAMES.iter().zip(g.removed.iter()) {
+            if n > 0 {
+                let _ = write!(t, " {name} {n};");
+            }
+        }
+    }
+    t
+}
+
+/// The independence statement (UK-008).
+const INDEPENDENCE: &str = "INDEPENDENCE: every report in adsb.ast comes from the same clip that fed the OpenATCA tracker. A reference or track built from it is therefore NOT independent of OpenATCA's inputs (this project's uncertainty UK-008: the ADS-B reports are not an independent truth for the OpenATCA output). ERAM also uses ADS-B: its inputs include ADS-B reports (from its own receivers, not this clip), so ADS-B is not independent of ERAM's output either.";
 
 fn adsb_run_lines(out: &mut String, report: &AdsbReport) {
     let _ = writeln!(out, "  run totals for ADS-B over all days:");

@@ -9,7 +9,9 @@
 //! * I010: the shell's data source (SAC 255, SIC 3).
 //! * I040: ATP 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; ARC 2 (unknown: the
 //!   source has no altitude reporting capability); GBS from the report's ground flag; CL 2 (no
-//!   information: the source has no confidence level); RC, RAB, DCR, SIM, TST, SAA and the
+//!   information: the source has no confidence level); GBS 0 asserts "ground bit not set" for a
+//!   report that is not flagged on the ground, which the source does not say in so many words;
+//!   RC, RAB, DCR, SIM, TST, SAA and the
 //!   error-condition extension at the specification's default 0 because the source has none of
 //!   them. The first extension is always sent (it carries GBS and CL).
 //! * I080: the 24-bit address.
@@ -26,14 +28,21 @@
 //! * I140 geometric height, 6.25 ft, -1500 ft to 150 000 ft.
 //! * I155 barometric or I157 geometric vertical rate (whichever the source row says it is),
 //!   6.25 ft/min, 15 bits.
-//! * I160 ground speed (2^-14 NM/s) and track angle (360/2^16 degrees); both or neither.
+//! * I160 airborne ground vector (5.2.30): ground speed (2^-14 NM/s) and track angle (360/2^16
+//!   degrees); both or neither, and none for a report on the ground.
 //! * I170 identification, I020 emitter category (table below).
-//! * I090 quality: NACv and NIC in the primary subfield; first extension NICBARO (not in the
-//!   source and the item has no unknown code: written 0 = not cross-checked, the conservative
-//!   value), SIL and NACp; second extension SILS, SDA and GVA. A field the source
-//!   lacks is written 0, the specification's "unknown" code for each of them. PIC (third
-//!   extension) is not in the source and is left out. How NACv and NIC are to be read depends on
-//!   the MOPS version (I210/VN), which is why I210 is sent with them.
+//! * I090 quality, in every record (5.2.16 "shall be present in every ASTERIX record"): NACv and
+//!   NIC in the primary subfield; extensions only when a bit in them is 1 (the encoding rule): the
+//!   first holds NICBARO (not in the source and the item has no unknown code: written 0 = not
+//!   cross-checked, the conservative value), SIL and NACp; the second SILS, SDA and GVA (SILS has
+//!   no unknown code either: a missing SIL type is written 0 = per flight-hour). A field the
+//!   source lacks is written 0; that 0 means "unknown" for NIC, NACp, NACv, SIL, SDA and GVA in
+//!   the MOPS (ED-102A/DO-260B), not in Ed 2.4. With nothing known the item is the primary
+//!   subfield at NACv 0, NIC 0. NIC and NACp above 11 and NACv above 4 are outside what the MOPS
+//!   defines and are not encoded. PIC (third extension) is not in the source and is left out.
+//!   Under MOPS version 2 Ed 2.4 says the NIC values "shall be mapped accordingly" without a
+//!   table in the documents held: the raw NIC is written and the mapping is unverified. How NACv
+//!   and NIC are to be read depends on the MOPS version (I210/VN), which is why I210 is sent.
 //! * I210: VN from the report's version, 0 to 2 (Ed 2.4 does not define 3); LTT 0 (other),
 //!   because the source does not say whether the report came by 1090 ES, UAT or VDL 4 and the item
 //!   has no unknown code (0 = other claims none of the three).
@@ -47,7 +56,7 @@ use oa_ieee::round;
 use super::time::{day_time_of_ns, DayTime};
 
 /// Number of notes.
-pub const ADSB_NOTES: usize = 25;
+pub const ADSB_NOTES: usize = 30;
 
 pub const ANOTE_TRACK_NUMBER: usize = 0;
 pub const ANOTE_TOA_POSITION: usize = 1;
@@ -74,6 +83,11 @@ pub const ANOTE_MOPS_ABSENT: usize = 21;
 pub const ANOTE_MOPS_VERSION: usize = 22;
 pub const ANOTE_LON_WRAPPED: usize = 23;
 pub const ANOTE_LTT: usize = 24;
+pub const ANOTE_SILS: usize = 25;
+pub const ANOTE_QUALITY_RANGE: usize = 26;
+pub const ANOTE_VECTOR_GROUND: usize = 27;
+pub const ANOTE_GBS: usize = 28;
+pub const ANOTE_NIC_V2: usize = 29;
 
 /// What each note means, in index order. The first words name the item.
 pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
@@ -94,14 +108,19 @@ pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
     "I170 target identification: a character outside A-Z, 0-9 and space (item omitted)",
     "I020 emitter category: report has none (item omitted)",
     "I020 emitter category: the category has no I020 code (item omitted)",
-    "I090 quality indicators: report has none of NIC, NACp, NACv, SIL, SDA, GVA (item omitted)",
+    "I090 quality indicators: report has none of NIC, NACp, NACv, SIL, SDA, GVA; the item must be in every record, so the primary subfield is written with NACv 0 and NIC 0 (the MOPS unknown codes) and no extension",
     "I090 NICBARO: source has no NIC_baro; the item has no unknown code, so written 0 = not cross-checked, the conservative value",
     "I090 PIC: not in the source (third extension omitted)",
-    "I090 NIC, NACp, NACv, SIL, SILS, SDA or GVA: at least one the report lacks or that does not fit its bits (written 0, unknown)",
+    "I090 NIC, NACp, NACv, SIL, SDA or GVA: at least one the report lacks (written 0; '0 = unknown' for these comes from the MOPS, ED-102A/DO-260B, not from Ed 2.4)",
     "I210 MOPS version: report has none (item omitted)",
     "I210 MOPS version: 3 or more, not defined in Ed 2.4 (item omitted)",
     "I131 longitude: +180 degrees (written as -180)",
     "I210 LTT link technology: source does not say; the item has no unknown code, so written 0 = other (claims neither 1090 ES, UAT nor VDL 4)",
+    "I090 SILS: the report has no SIL type; the bit has no unknown code, so written 0 = SIL per flight-hour, the default (a claim)",
+    "I090 NIC or NACp above 11 or NACv above 4: outside the values the MOPS defines (not encoded; written 0)",
+    "I160 airborne ground vector: report is on the ground and 5.2.30 defines the airborne vector only (item omitted)",
+    "I040 GBS: written 0 = ground bit not set for a report whose ground flag is not set; the source flags ground only when it says ground, so 0 asserts \"not on ground\" without the source saying so",
+    "I090 NIC with MOPS version 2: Ed 2.4 says version 2 NIC values \"shall be mapped accordingly\"; no mapping is in the documents held, so the raw NIC is written and the mapping is unverified",
 ];
 
 /// One ADS-B report as the conversion needs it: the optional fields opened out and the address
@@ -184,6 +203,7 @@ pub struct AdsbValues {
     pub ground_vector: Option<(u16, u16)>,
     pub ident: Option<[u8; 8]>,
     pub category: Option<u8>,
+    /// I090, always present.
     pub quality: Option<QualityValues>,
     /// I210 VN.
     pub mops_version: Option<u8>,
@@ -296,6 +316,9 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
     if r.non_icao {
         notes |= bit(ANOTE_ATP_ANONYMOUS);
     }
+    if !r.ground {
+        notes |= bit(ANOTE_GBS);
+    }
     // I145: 25 ft, -15 FL to 1500 FL.
     let flight_level = match r.baro_alt_ft {
         Some(ft) if !r.ground => match count_in(f64::from(ft) / 25.0, -60, 6000) {
@@ -337,6 +360,10 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
     // I160: ground speed 2^-14 NM/s (0.1 kt = 1/36000 NM/s), track 360/2^16 degrees (0.1 degree
     // = 2^16/3600 counts).
     let ground_vector = match (r.gs_dkt, r.track_ddeg) {
+        _ if r.ground => {
+            notes |= bit(ANOTE_VECTOR_GROUND);
+            None
+        }
         (Some(gs), Some(tr)) => {
             let s = count_in(f64::from(gs) * (16_384.0 / 36_000.0), 0, 32_767);
             let a = count_in(f64::from(tr) * (65_536.0 / 3600.0), 0, 65_535);
@@ -374,30 +401,37 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
         }
         c
     };
-    // A value that does not fit its bits counts as absent: NIC 4 bits, NACp 4, NACv 3, SIL 2,
-    // GVA 2, SDA 2.
+    // A value outside what the MOPS defines counts as absent (and is noted): NIC and NACp 0 to 11,
+    // NACv 0 to 4; SIL, GVA and SDA are two bits.
     let fit = |v: Option<u8>, max: u8| v.filter(|&x| x <= max);
-    let (nic, nac_p, nac_v) = (fit(r.nic, 15), fit(r.nac_p, 15), fit(r.nac_v, 7));
+    let (nic, nac_p, nac_v) = (fit(r.nic, 11), fit(r.nac_p, 11), fit(r.nac_v, 4));
+    if r.nic.is_some_and(|v| v > 11) || r.nac_p.is_some_and(|v| v > 11) || r.nac_v.is_some_and(|v| v > 4) {
+        notes |= bit(ANOTE_QUALITY_RANGE);
+    }
     let (sil, gva, sda) = (fit(r.sil, 3), fit(r.gva, 3), fit(r.sda, 3));
     let known = [nic, nac_p, nac_v, sil, gva, sda];
-    let quality = if known.iter().all(Option::is_none) {
+    // I090 must be in every record (5.2.16): with nothing known it is the primary subfield at the
+    // unknown codes.
+    if known.iter().all(Option::is_none) {
         notes |= bit(ANOTE_QUALITY_ABSENT);
-        notes &= !(bit(ANOTE_NICBARO) | bit(ANOTE_PIC));
-        None
-    } else {
-        if known.iter().any(Option::is_none) || r.sil_per_sample.is_none() {
-            notes |= bit(ANOTE_QUALITY_PARTIAL);
-        }
-        Some(QualityValues {
-            nacv: nac_v.unwrap_or(0),
-            nic: nic.unwrap_or(0),
-            nacp: nac_p.unwrap_or(0),
-            sil: sil.unwrap_or(0),
-            sils: r.sil_per_sample.unwrap_or(false),
-            sda: sda.unwrap_or(0),
-            gva: gva.unwrap_or(0),
-        })
-    };
+    } else if known.iter().any(Option::is_none) {
+        notes |= bit(ANOTE_QUALITY_PARTIAL);
+    }
+    if r.sil_per_sample.is_none() && sil.is_some() {
+        notes |= bit(ANOTE_SILS);
+    }
+    if r.version == Some(2) && nic.is_some() {
+        notes |= bit(ANOTE_NIC_V2);
+    }
+    let quality = Some(QualityValues {
+        nacv: nac_v.unwrap_or(0),
+        nic: nic.unwrap_or(0),
+        nacp: nac_p.unwrap_or(0),
+        sil: sil.unwrap_or(0),
+        sils: r.sil_per_sample.unwrap_or(false),
+        sda: sda.unwrap_or(0),
+        gva: gva.unwrap_or(0),
+    });
     let mops_version = match r.version {
         None => {
             notes |= bit(ANOTE_MOPS_ABSENT);

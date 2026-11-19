@@ -266,7 +266,13 @@ fn export_all(
                     .push((format!("reports left out: source type {name}, not ADS-B"), *v));
             }
         }
-        let mut f = ex.finish()?;
+        let mut f = match ex.finish() {
+            Ok(f) => f,
+            Err(e) => {
+                ax.abort();
+                return Err(e);
+            }
+        };
         f.report.inputs.push(format!("ADS-B clip {}", clip.display()));
         done.systems.push(f);
         done.adsb = Some(ax.finish()?);

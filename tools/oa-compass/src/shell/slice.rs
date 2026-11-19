@@ -4,6 +4,10 @@
 //! CAT062, I073 for CAT021) are re-encoded into blocks, every block is decoded again and
 //! compared, and the written file is read back from disk like the main export's files. The
 //! window is one UTC day: it cannot cross midnight (E5), because the times are times of day.
+//!
+//! All files are written as `.partial` and renamed together only after every file has been
+//! verified; a refusal at any point removes them all. The output directory must be new or empty
+//! and not the input directory.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -132,7 +136,7 @@ fn slice_file(
     out_path: &Path,
     from: u32,
     to: u32,
-) -> Result<SliceFile, ExportError> {
+) -> Result<(SliceFile, Option<PathBuf>), ExportError> {
     let name = input
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -154,9 +158,16 @@ fn slice_file(
     };
     let mut source = None;
     let mut cat = 0u8;
+    let mut late = 0u64;
     let result: Result<(), ExportError> = (|| {
         while next_block(&mut r, &mut buf, input)? {
-            cat = buf.first().copied().unwrap_or(0);
+            let this = buf.first().copied().unwrap_or(0);
+            if cat != 0 && this != cat {
+                return Err(ExportError::Input(format!(
+                    "{name}: a file with blocks of category {cat} and {this}"
+                )));
+            }
+            cat = this;
             let ed = edition_of(cat)?;
             let (block, used) = decode_block_with(&buf, ed)
                 .map_err(|e| ExportError::Verify(format!("{}: {e:?}", input.display())))?;
@@ -171,7 +182,10 @@ fn slice_file(
                         "{name}: a record without its time item"
                     )));
                 };
-                info.records_in += 1;
+                info.records_in = info.records_in.saturating_add(1);
+                if i64::from(*t) >= UNITS_PER_DAY {
+                    late = late.saturating_add(1);
+                }
                 let k = (from..to).contains(t);
                 keep.push(k);
                 if k {
@@ -190,6 +204,11 @@ fn slice_file(
             }
         }
         flush(&mut pending, &mut pending_n, cat, &mut w, &mut info)?;
+        if late > 0 {
+            return Err(ExportError::Verify(format!(
+                "{name}: {late} records with a time of day of 24:00:00 or later (a time of day is below 86400 s)"
+            )));
+        }
         w.flush().map_err(|e| io_err(&partial, &e))
     })();
     drop(w);
@@ -200,7 +219,7 @@ fn slice_file(
     info.category = cat;
     if info.records_kept == 0 {
         let _ = fs::remove_file(&partial);
-        return Ok(info);
+        return Ok((info, None));
     }
     let src = source.unwrap_or_default();
     let read = if cat == 21 {
@@ -219,8 +238,7 @@ fn slice_file(
             return Err(e);
         }
     }
-    fs::rename(&partial, out_path).map_err(|e| io_err(out_path, &e))?;
-    Ok(info)
+    Ok((info, Some(partial)))
 }
 
 /// Merges the pending kept records into blocks of at most [`RECORDS_PER_BLOCK`], encodes each,
@@ -258,9 +276,13 @@ fn flush(
         }
         w.write_all(&bytes)
             .map_err(|e| ExportError::Io(format!("{}: write: {e}", info.name)))?;
-        info.records_kept += len_of(&block) as u64;
-        info.blocks += 1;
-        info.bytes += bytes.len() as u64;
+        info.records_kept = info
+            .records_kept
+            .saturating_add(u64::try_from(len_of(&block)).unwrap_or(u64::MAX));
+        info.blocks = info.blocks.saturating_add(1);
+        info.bytes = info
+            .bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
     }
     Ok(())
 }
@@ -285,10 +307,47 @@ pub fn slice_dir(
         return Err(ExportError::Input(format!("{}: no .ast files", input.display())));
     }
     fs::create_dir_all(out).map_err(|e| io_err(out, &e))?;
+    // Not the input directory (by canonical path), and empty: nothing of an earlier run is mixed in.
+    let (cin, cout) = (
+        fs::canonicalize(input).map_err(|e| io_err(input, &e))?,
+        fs::canonicalize(out).map_err(|e| io_err(out, &e))?,
+    );
+    if cin == cout {
+        return Err(ExportError::Input("--out is the --in directory".into()));
+    }
+    let occupied = fs::read_dir(out).map_err(|e| io_err(out, &e))?.next().is_some();
+    if occupied {
+        return Err(ExportError::Input(format!(
+            "{}: the output directory is not empty",
+            out.display()
+        )));
+    }
     let mut files = Vec::new();
+    let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut failure = None;
     for p in &names {
         let dest = out.join(p.file_name().unwrap_or_default());
-        files.push(slice_file(p, &dest, from, to)?);
+        match slice_file(p, &dest, from, to) {
+            Ok((info, partial)) => {
+                files.push(info);
+                if let Some(pp) = partial {
+                    renames.push((pp, dest));
+                }
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(e) = failure {
+        for (from, _) in &renames {
+            let _ = fs::remove_file(from);
+        }
+        return Err(e);
+    }
+    for (from, to) in &renames {
+        fs::rename(from, to).map_err(|e| io_err(to, &e))?;
     }
     let ds = input.join("data_sources.json");
     if ds.exists() {

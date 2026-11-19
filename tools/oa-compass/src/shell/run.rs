@@ -162,6 +162,9 @@ pub struct ClipInfo {
     pub split: SplitStats,
     /// The ADS-B file, when one was asked for.
     pub adsb: Option<AdsbInfo>,
+    /// What the tracker's own adapter (oa-truth's quality gates and the rest) removed from the
+    /// reports it was fed.
+    pub gate: oa_track::adsb::AdsbStats,
 }
 
 /// What became of the reports offered to the ADS-B file. A7.2: cold.
@@ -286,13 +289,15 @@ pub fn export_adsb_clip(
         left: oa_adsb::reports_len(&other) as u64,
         split,
         adsb: None,
+        gate: oa_track::adsb::AdsbStats::default(),
     };
     drop(other);
     if let Some(ax) = adsb {
         info.adsb = Some(export_adsb_reports(&fed_set, ax)?);
     }
-    let (meas, _) =
+    let (meas, gate) =
         oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());
+    info.gate = gate;
     drop(fed_set);
     let cfg = scorer_config(&meas);
     let run = run_tracker(&meas, &cfg, ex, true)?;

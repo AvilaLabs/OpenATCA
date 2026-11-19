@@ -52,15 +52,24 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         address: Some(v.address),
         tomr_position: Some(v.time),
         geometric_height: v.geometric_height,
-        quality: v.quality.map(|q| Quality021 {
-            nacv: q.nacv,
-            nic: q.nic,
-            // First extension: NICBARO 0 (bit 8), SIL (bits 7/6), NACp (bits 5/2), FX 1; second:
-            // SILS (bit 6), SDA (bits 5/4), GVA (bits 3/2), FX 0.
-            ext: vec![
-                (q.sil << 5) | (q.nacp << 1) | 1,
-                (u8::from(q.sils) << 5) | (q.sda << 3) | (q.gva << 1),
-            ],
+        quality: v.quality.map(|q| {
+            // First extension: NICBARO 0 (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
+            // (bit 6), SDA (bits 5/4), GVA (bits 3/2). Extensions are sent only if a bit in them
+            // is 1 (5.2.16 encoding rule); the second needs the first to chain to.
+            let ext1 = (q.sil << 5) | (q.nacp << 1);
+            let ext2 = (u8::from(q.sils) << 5) | (q.sda << 3) | (q.gva << 1);
+            let ext = if ext2 != 0 {
+                vec![ext1 | 1, ext2]
+            } else if ext1 != 0 {
+                vec![ext1]
+            } else {
+                Vec::new()
+            };
+            Quality021 {
+                nacv: q.nacv,
+                nic: q.nic,
+                ext,
+            }
         }),
         mops: v.mops_version.map(|version| Mops {
             not_supported: false,

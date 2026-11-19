@@ -4457,9 +4457,14 @@ scope.
 - **OA-CMP-025** `--inputs all` runs the clip through `oa_track::score::split_reports_with` (the scorer's split
   function) with the halving off: copies removed, every conflicting report kept (rule stated), counts printed in
   the README; the same reports feed the tracker and `adsb.ast`.
-- **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 3, DSType "ADS-B"); the README states
+- **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 3, DSType "ADSB", a string of the COMPASS manual's set); the README states
   the Ed 2.4 format, how each value was made, every omission with its count, and that a reference built from
   `adsb.ast` is not independent of OpenATCA's inputs (UK-008) and that ERAM also uses ADS-B.
+- **OA-CMP-028** I090 is in every ADS-B record: with nothing known the primary subfield at NACv 0 / NIC 0, and
+  an extension only when a bit in it is 1; NIC or NACp above 11 and NACv above 4 are not encoded and counted;
+  a missing SIL type (SILS), the unverified NIC mapping under MOPS version 2 and the GBS assertion are counted;
+  I160 is omitted on a ground report and counted; the README states that adsb.ast is a superset of what the
+  tracker was fed, with the tracker adapter's removals per reason, and keeps the independence statement (UK-008).
 - **OA-CMP-027** `oa-compass slice --in DIR --from HH:MM:SS --to HH:MM:SS --out DIR2` reads each `.ast` file with
   the decoder (CAT062 Ed 1.21, CAT021 Ed 2.4), keeps the records with I070 or I073 in [from, to), writes them
   again unchanged in verified blocks, reads each file back, copies `data_sources.json` and writes a README with

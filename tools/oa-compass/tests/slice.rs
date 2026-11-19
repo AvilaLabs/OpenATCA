@@ -208,3 +208,66 @@ fn a_file_of_another_category_or_a_damaged_one_is_refused_and_leaves_no_partial_
     assert!(slice_dir(&inp, &out, units(1, 0, 0), units(2, 0, 0)).is_err());
     assert!(!out.join("zz.ast.partial").exists());
 }
+
+fn block_21(times: &[u32]) -> Vec<u8> {
+    use oa_asterix::cat021::Cat021;
+    use oa_asterix::{encode_block_with, SourceId};
+    let recs: Vec<Cat021> = times
+        .iter()
+        .map(|&t| Cat021 {
+            source: SourceId { sac: 255, sic: 3 },
+            tomr_position: Some(t),
+            ..Cat021::default()
+        })
+        .collect();
+    encode_block_with(&Block::Cat021(recs), Cat021Edition::Ed24).unwrap()
+}
+
+// REQ: OA-CMP-027
+#[test]
+fn the_output_must_be_new_empty_and_not_the_input() {
+    let inp = source("in6");
+    assert!(slice_dir(&inp, &inp, units(1, 0, 0), units(2, 0, 0)).is_err());
+    // The same directory by another spelling.
+    let alias = inp.join("..").join(inp.file_name().unwrap());
+    assert!(slice_dir(&inp, &alias, units(1, 0, 0), units(2, 0, 0)).is_err());
+    let out = tmp("out6");
+    fs::write(out.join("old.txt"), "x").unwrap();
+    assert!(slice_dir(&inp, &out, units(1, 0, 0), units(2, 0, 0)).is_err());
+    assert!(!out.join("adsb.ast").exists());
+}
+
+// REQ: OA-CMP-027
+#[test]
+fn a_failure_in_any_file_leaves_no_file_of_the_others() {
+    let inp = source("in7");
+    // "zz.ast" sorts after the good files: they are sliced first and must not be left behind.
+    fs::write(inp.join("zz.ast"), [48u8, 0, 4, 0x80]).unwrap();
+    let out = tmp("out7");
+    assert!(slice_dir(&inp, &out, units(1, 0, 0), units(2, 0, 0)).is_err());
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+}
+
+// REQ: OA-CMP-027
+#[test]
+fn a_time_of_day_of_24_hours_and_a_file_mixing_categories_are_refused() {
+    let inp = tmp("in8");
+    // I073 holds 24 bits; 86400 * 128 = 11 059 200 is not a time of day.
+    fs::write(inp.join("a.ast"), block_21(&[units(1, 0, 0), 11_059_200])).unwrap();
+    let out = tmp("out8");
+    let e = slice_dir(&inp, &out, units(0, 0, 0), units(2, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("1 records with a time of day of 24:00:00"), "{e}");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+    // A CAT021 block followed by a CAT062 block in one file.
+    let src = source("in9");
+    let mut mixed = fs::read(src.join("adsb.ast")).unwrap()[..0].to_vec();
+    mixed.extend(block_21(&[units(1, 0, 0)]));
+    let c62 = fs::read(src.join("openatca.ast")).unwrap();
+    let len = usize::from(u16::from_be_bytes([c62[1], c62[2]]));
+    mixed.extend_from_slice(&c62[..len]);
+    let inp2 = tmp("in10");
+    fs::write(inp2.join("m.ast"), mixed).unwrap();
+    let out = tmp("out9");
+    let e = slice_dir(&inp2, &out, units(0, 0, 0), units(2, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("category 21 and 62"), "{e}");
+}
