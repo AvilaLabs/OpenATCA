@@ -37,7 +37,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use oa_feed::replay::REPLAY_LIMITS;
-use oa_feed::{ErrorKind, FrameError, FrameReader, Kind, MAX_FRAME_LEN};
+use oa_feed::{
+    ErrorKind, FrameError, FrameReader, FrameWorkBudget, FrameWorkStats, Kind, MAX_FRAME_LEN,
+};
 use oa_zip::GzipReader;
 
 use crate::errors::{count_error, ErrKind, Errors, ERR_COUNT};
@@ -149,6 +151,12 @@ struct Stream<'b> {
     frame_errors: Vec<FrameError>,
 }
 
+enum AdvanceStep {
+    Continue,
+    Frame,
+    End,
+}
+
 fn note_error(errors: &mut Errors, kept: &mut Vec<FrameError>, e: FrameError) {
     let k = match e.kind {
         ErrorKind::BadMagic { .. } => ErrKind::FrameBadMagic,
@@ -164,59 +172,125 @@ fn note_error(errors: &mut Errors, kept: &mut Vec<FrameError>, e: FrameError) {
     }
 }
 
+impl<'b> Stream<'b> {
+    fn new(spec: StreamSpec, reader: FrameReader<'b>, chunk: usize) -> Self {
+        Stream {
+            feed: spec.feed,
+            reader,
+            open: spec.open,
+            cur: None,
+            mode: Mode::Raw,
+            undetermined: false,
+            eof: false,
+            inbuf: vec![0u8; chunk.clamp(2, MAX_CHUNK)],
+            pending: Vec::new(),
+            pend_at: 0,
+            head: Head {
+                recv_ns: 0,
+                mono_ns: None,
+                seq: 0,
+                offset: 0,
+                kind: Kind::Message,
+                payload: Vec::new(),
+            },
+            bytes: 0,
+            files: 0,
+            errors: [0; ERR_COUNT],
+            frame_errors: Vec::new(),
+        }
+    }
+}
+
 impl Stream<'_> {
     /// Moves to the stream's next frame, which lands in `head`. `Ok(false)` at the end.
+    ///
+    /// This is an offline file iterator: it renews the finite per-step reader allowance until it
+    /// finds a frame or reaches EOF. A file may be arbitrarily long, so this search has no
+    /// whole-file deadline bound.
     fn advance(&mut self) -> io::Result<bool> {
+        self.advance_observed(&mut |_| {})
+    }
+
+    /// [`advance`](Self::advance), reporting the reader work each bounded step measured.
+    fn advance_observed(&mut self, on_step: &mut dyn FnMut(FrameWorkStats)) -> io::Result<bool> {
         loop {
-            match self.reader.next() {
-                Some(Ok(f)) => {
-                    self.head.recv_ns = f.recv_unix_ns;
-                    self.head.mono_ns = f.mono_ns();
-                    self.head.seq = f.seq;
-                    self.head.offset = f.offset;
-                    self.head.kind = f.kind;
-                    self.head.payload.clear();
-                    self.head.payload.extend_from_slice(f.payload);
-                    return Ok(true);
-                }
-                Some(Err(e)) => {
-                    note_error(&mut self.errors, &mut self.frame_errors, e);
-                    continue;
-                }
-                None => {}
+            let mut work = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
+            let before = self.reader.work_stats();
+            let step = self.advance_step(&mut work)?;
+            let after = self.reader.work_stats();
+            on_step(FrameWorkStats {
+                scan_positions: after.scan_positions - before.scan_positions,
+                crc_bytes: after.crc_bytes - before.crc_bytes,
+                copied_bytes: after.copied_bytes - before.copied_bytes,
+                compacted_bytes: after.compacted_bytes - before.compacted_bytes,
+            });
+            match step {
+                AdvanceStep::Continue => {}
+                AdvanceStep::Frame => return Ok(true),
+                AdvanceStep::End => return Ok(false),
             }
-            if let Some(rest) = self.pending.get(self.pend_at..).filter(|r| !r.is_empty()) {
-                let took = self.reader.push(rest);
-                if took == 0 {
-                    return Err(io::Error::other("frame reader made no progress"));
-                }
-                self.pend_at += took;
-                continue;
-            }
-            self.pending.clear();
-            self.pend_at = 0;
-            if self.eof {
-                if let Some(e) = self.reader.finish() {
-                    note_error(&mut self.errors, &mut self.frame_errors, e);
-                }
-                self.eof = false;
-                self.cur = None;
-                continue;
-            }
-            if self.cur.is_none() {
-                match (self.open)() {
-                    None => return Ok(false),
-                    Some(Err(e)) => return Err(e),
-                    Some(Ok(r)) => {
-                        self.cur = Some(r);
-                        self.files += 1;
-                        self.undetermined = true;
-                        self.mode = Mode::Raw;
-                    }
-                }
-            }
-            self.read_more()?;
         }
+    }
+
+    /// One bounded reader step. The offline wrapper renews its allowance only between these
+    /// steps; bytes and decompressor state remain owned by this stream across renewals.
+    fn advance_step(&mut self, work: &mut FrameWorkBudget) -> io::Result<AdvanceStep> {
+        match self
+            .reader
+            .next_with_remaining_budget(work)
+            .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?
+        {
+            Some(Ok(f)) => {
+                self.head.recv_ns = f.recv_unix_ns;
+                self.head.mono_ns = f.mono_ns();
+                self.head.seq = f.seq;
+                self.head.offset = f.offset;
+                self.head.kind = f.kind;
+                self.head.payload.clear();
+                self.head.payload.extend_from_slice(f.payload);
+                return Ok(AdvanceStep::Frame);
+            }
+            Some(Err(e)) => {
+                note_error(&mut self.errors, &mut self.frame_errors, e);
+                return Ok(AdvanceStep::Continue);
+            }
+            None => {}
+        }
+        if let Some(rest) = self.pending.get(self.pend_at..).filter(|r| !r.is_empty()) {
+            let took = self
+                .reader
+                .push_with_remaining_budget(rest, work)
+                .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?;
+            if took == 0 {
+                return Err(io::Error::other("frame reader made no progress"));
+            }
+            self.pend_at += took;
+            return Ok(AdvanceStep::Continue);
+        }
+        self.pending.clear();
+        self.pend_at = 0;
+        if self.eof {
+            if let Some(e) = self.reader.finish() {
+                note_error(&mut self.errors, &mut self.frame_errors, e);
+            }
+            self.eof = false;
+            self.cur = None;
+            return Ok(AdvanceStep::Continue);
+        }
+        if self.cur.is_none() {
+            match (self.open)() {
+                None => return Ok(AdvanceStep::End),
+                Some(Err(e)) => return Err(e),
+                Some(Ok(r)) => {
+                    self.cur = Some(r);
+                    self.files += 1;
+                    self.undetermined = true;
+                    self.mode = Mode::Raw;
+                }
+            }
+        }
+        self.read_more()?;
+        Ok(AdvanceStep::Continue)
     }
 
     /// Reads the next piece of the current file into `pending`, or marks its end.
@@ -369,30 +443,7 @@ fn merge_counted(
                 Err(io::Error::other("reader buffer too small")),
             );
         };
-        streams.push(Stream {
-            feed: spec.feed,
-            reader,
-            open: spec.open,
-            cur: None,
-            mode: Mode::Raw,
-            undetermined: false,
-            eof: false,
-            inbuf: vec![0u8; chunk.clamp(2, MAX_CHUNK)],
-            pending: Vec::new(),
-            pend_at: 0,
-            head: Head {
-                recv_ns: 0,
-                mono_ns: None,
-                seq: 0,
-                offset: 0,
-                kind: Kind::Message,
-                payload: Vec::new(),
-            },
-            bytes: 0,
-            files: 0,
-            errors: [0; ERR_COUNT],
-            frame_errors: Vec::new(),
-        });
+        streams.push(Stream::new(spec, reader, chunk));
     }
     // Capacity n, never more: one entry per stream that still has a frame.
     let mut heap: BinaryHeap<Reverse<(MergeKey, usize)>> = BinaryHeap::with_capacity(n);
@@ -483,4 +534,53 @@ pub fn run_streams_with(
         *a = a.saturating_add(*b);
     }
     end.map(|()| report)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    // REQ: OA-RPL-276
+    #[test]
+    fn no_offline_step_exceeds_one_reader_quota() {
+        let quota = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
+        // At least five scan quotas of garbage, then one valid frame.
+        let garbage = 6 * quota.scan_positions as usize;
+        let payload = b"state=up\n";
+        let mut tail = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+        let n = oa_feed::encode_frame(&mut tail, 3, 0, 1, 1, 0, payload).unwrap();
+        tail.truncate(n);
+        let mut bytes = vec![0u8; garbage];
+        bytes.extend_from_slice(&tail);
+        let total = bytes.len();
+
+        let mut storage = vec![0u8; MAX_FRAME_LEN];
+        let reader = FrameReader::new(&mut storage).unwrap();
+        let mut stream = Stream::new(
+            spec_from_bytes(FeedKind::Sfdps, vec![bytes]),
+            reader,
+            MAX_CHUNK,
+        );
+        let (mut steps, mut worst_scan, mut worst_copy, mut worst_compact, mut worst_crc) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
+        assert!(stream
+            .advance_observed(&mut |w| {
+                steps += 1;
+                worst_scan = worst_scan.max(w.scan_positions);
+                worst_copy = worst_copy.max(w.copied_bytes);
+                worst_compact = worst_compact.max(w.compacted_bytes);
+                worst_crc = worst_crc.max(w.crc_bytes);
+            })
+            .unwrap());
+        assert_eq!(stream.head.seq, 1);
+        assert!(worst_scan <= quota.scan_positions);
+        assert!(worst_copy <= quota.copied_bytes);
+        assert!(worst_compact <= quota.compacted_bytes);
+        assert!(worst_crc <= quota.crc_bytes);
+        // The search really spans many steps, and the reader scanned about the whole garbage.
+        assert!(steps >= 5, "{steps}");
+        assert!(stream.reader.work_stats().scan_positions >= 5 * quota.scan_positions);
+        assert_eq!(stream.reader.work_stats().copied_bytes, total as u64);
+    }
 }

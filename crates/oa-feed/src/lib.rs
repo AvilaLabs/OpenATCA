@@ -39,6 +39,9 @@ pub use crate::core::frame::{
 pub use crate::core::health::{
     observe_error, observe_frame, observe_skipped, rates_milli, FeedHealth,
 };
-pub use crate::core::reader::{BufferTooSmall, FrameReader};
+pub use crate::core::reader::{
+    frame_work_refusal_retryable, BufferTooSmall, FrameReader, FrameWorkBudget, FrameWorkKind,
+    FrameWorkRefusal, FrameWorkStats, DEFAULT_FRAME_WORK_LIMIT,
+};
 pub use crate::shell::stream::read_frames;
 pub use crate::shell::summary::format_summary;

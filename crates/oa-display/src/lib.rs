@@ -10,5 +10,6 @@ compile_error!("this crate supports 64-bit targets only");
 pub mod core;
 pub mod shell;
 
+pub use crate::core::raster::MAX_DISPLAY_PIXELS;
 pub use crate::core::{font, list, palette, project, raster, scene, text, traffic};
 pub use crate::shell::{cli, ppm};

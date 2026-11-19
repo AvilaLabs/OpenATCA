@@ -415,6 +415,10 @@ pub const GLYPHS: &[Glyph] = &[
     },
 ];
 
+/// Maximum line strokes for any built-in glyph, including lowercase folding and unknown-byte
+/// fallback. Keep the raster work charge tied to this ceiling and test it against every glyph.
+pub const MAX_GLYPH_STROKES: usize = 15;
+
 /// The strokes drawn for `ch`: its glyph, the capital's glyph for a lowercase letter, or
 /// [`MISSING`].
 pub fn strokes_of(ch: char) -> &'static [Stroke] {
@@ -479,6 +483,18 @@ mod tests {
 
     fn glyph_bits(ch: char) -> u64 {
         bitmap(strokes_of(ch))
+    }
+
+    // REQ: OA-DSP-056
+    #[test]
+    fn raster_stroke_ceiling_covers_every_glyph_and_u8_input() {
+        let observed = GLYPHS.iter().map(|g| g.strokes.len()).max();
+        assert_eq!(observed, Some(MAX_GLYPH_STROKES));
+        assert!(MISSING.len() <= MAX_GLYPH_STROKES);
+        for byte in 0..=u8::MAX {
+            assert!(strokes_of(char::from(byte)).len() <= MAX_GLYPH_STROKES);
+        }
+        assert_eq!(strokes_of('8').len(), MAX_GLYPH_STROKES);
     }
 
     // REQ: OA-DSP-007

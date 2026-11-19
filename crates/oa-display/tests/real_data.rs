@@ -11,8 +11,12 @@
 use oa_airspace::model::{stratum, validate_model};
 use oa_airspace::snapshot::decode;
 use oa_display::list::{list_capacities, list_clear, list_new};
-use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
-use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
+use oa_display::raster::{
+    frame_digest, frame_len, rasterize, render_work_charge, FrameSpec, MAX_RENDER_WORK,
+};
+use oa_display::scene::{
+    build_scene, scene_caps, scene_index, scene_work_charge, scratch_for, view_new, MAX_SCENE_WORK,
+};
 use oa_sha256::to_hex;
 use std::time::Instant;
 
@@ -161,4 +165,35 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         l.poly_x.clear();
         l.poly_y.clear();
     });
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_real_zau_snapshot_fits_the_work_limits_at_8192_by_8192() {
+    let Some(path) = std::env::var_os("OPENATCA_SNAPSHOT") else {
+        eprintln!("OPENATCA_SNAPSHOT is not set; skipping real-data test");
+        return;
+    };
+    let model = decode(&std::fs::read(&path).unwrap()).unwrap();
+    let spec = FrameSpec {
+        width: 8192,
+        height: 8192,
+        stride: 8192 * 4,
+    };
+    let index = scene_index(&model);
+    let mut list = list_new(scene_caps(&model).unwrap()).unwrap();
+    let view = view_new(419_800_000, -879_000_000, 250.0, 8192, 8192).unwrap();
+    let mut scratch = scratch_for(&model, &view).unwrap();
+    let scene_charge = scene_work_charge(&model, &scratch, &view);
+    build_scene(&mut list, &model, &index, &view, &mut scratch).unwrap();
+    let render_charge = render_work_charge(&list, &spec).unwrap();
+    let mut buf = vec![0u8; frame_len(&spec)];
+    rasterize(&list, &spec, &mut buf).unwrap();
+    eprintln!(
+        "ZAU 8192x8192: points={} legs={} strings={} B; scene charge {scene_charge} of {MAX_SCENE_WORK}; render charge {render_charge} of {MAX_RENDER_WORK}",
+        model.points.kind.len(),
+        model.airway_legs.from.len(),
+        model.strings.text.len(),
+    );
+    assert!(scene_charge <= MAX_SCENE_WORK && render_charge <= MAX_RENDER_WORK);
 }

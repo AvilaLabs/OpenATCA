@@ -910,6 +910,41 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   `Recorder::open` refuses one again before touching the directory.
 - **OA-FEED-180** `utc_stamp` and `utc_iso` accept Unix times from 0001-01-01T00:00:00Z to
   9999-12-31T23:59:59Z and return `None` outside them; a recording is not named from a clock outside that range.
+- **OA-FEED-181** A CRC-work refusal leaves a complete frame buffered at the same offset with no CRC
+  bytes charged; retry with sufficient allowance returns that frame and charges exactly the CRC input bytes.
+- **OA-FEED-182** A copy-work refusal leaves the reader unchanged and charges no copied bytes; retry copies
+  the complete offered input exactly once. A copy allowance equal to the bytes taken passes and one byte less
+  is refused; likewise a compaction allowance equal to the buffered bytes that must move passes and one byte
+  less is refused with nothing moved.
+- **OA-FEED-183** A maximum-size frame with a damaged CRC is refused when its exact CRC byte allowance is one
+  short, then reported as a CRC error after retry with the full allowance and charges exactly those bytes.
+- **OA-FEED-184** After the first bad-magic byte is reported, a resynchronisation scan refused with zero
+  candidate-position allowance retains the unexamined suffix at its current offset; retry finds the next frame,
+  counts each examined start position and records every skipped prefix byte. The scan is charged the buffered
+  bytes minus three: that allowance passes and one position less is refused.
+- **OA-FEED-185** A shared remaining allowance across overlapping corrupt maximum-size frames stops CRC work
+  at its exact cap, retains the next candidate on refusal, and after budget renewal yields the valid tail frame.
+- **OA-FEED-186** A work refusal is renewable only when its kind-specific required amount fits a fresh profile;
+  cumulative counter overflow and amounts above the fresh allowance require explicit stream cancellation. The live
+  loop decides each turn by pure functions: it stops only when stopping, the stop condition holds and no input
+  or drain is owed; it services when input or a drain is owed, else it receives. A retryable push refusal
+  defers with no drain pending, a retryable drain refusal defers with a drain pending, and a refusal a fresh
+  allowance cannot satisfy, a counter overflow, or a push that takes no bytes cancels the stream with an error
+  naming the refusal, the reader-buffer bytes, the unpushed input bytes and the deferral count.
+- **OA-FEED-187** Work cancellation leaves complete buffered frames unclassified as malformed and retains them
+  for explicit disposition; only normal end-of-stream finalization reports a truncated tail.
+- **OA-FEED-188** The release binary `oa-feed-work-check` reports the maximum service-turn wall time and exits
+  nonzero above 1 s; the `ci` workflow runs it in release. It separately labels valid-capacity and malformed-input safety
+  cases, accounts CRC refusals/skips as rejection rather than valid-frame loss, and checks defer/resume and
+  compaction ownership exactly; its `#[test]` asserts only these deterministic checks, not wall time.
+- **OA-FEED-189** Recorder startup inspects at most 16,384 directory entries when summing existing recording
+  bytes; unrelated and zero-byte entries count toward the cap, and an excess entry returns an explicit error.
+  `Recorder::open` accepts a directory of exactly 16,384 entries and refuses one of 16,385.
+- **OA-FEED-190** The compatibility `FrameReader::push` and `next` use a work allowance sized to the reader's own
+  buffer, so a large buffer never stalls silently: an 8 MiB buffer takes 6 MiB offered in one `push`, decodes it
+  with `next`, and reports no work refusal.
+- **OA-FEED-191** The live loop prints a stderr warning (not recorded output) once each time the work-deferral
+  count reaches a power of two of 1,024 or more, and not at any other count.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1399,6 +1434,18 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
   chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
   (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
+- **OA-DSP-053** The display API accepts exactly 2^26 pixels (8192 by 8192, 16384 by 4096 and 65536 by 1024 alike)
+  through `check_frame`, `scratch_for`, `build_scene` and `rasterize`, and refuses the smallest larger product
+  (65536 by 1025) at each before writing pixels; it refuses frame/list combinations whose conservative preflight
+  work charge, including repeated polyline/text span visits and the tested maximum glyph stroke count, exceeds
+  `MAX_RENDER_WORK` (a charge equal to it is accepted, one more is refused); a smaller retry succeeds.
+- **OA-DSP-054** `build_scene` precharges, against `MAX_SCENE_WORK` and before clearing the destination list, table scans,
+  per-boundary-span subdivision (including overlapping and zero-length spans), airway-leg subdivision, the point-label
+  sort (the in-crate bottom-up merge sort's bound of n * ceil(log2 n) comparisons, 0 for n <= 1, each costing the longest identifier plus 4, not the string pool) and label-grid slot inspections; each term moves the
+  bound by its own cost, a charge equal to the limit is accepted and one more is refused, over-limit work leaves the previous
+  complete list intact, and a valid retry succeeds.
+- **OA-DSP-055** `scratch_for` refuses a display profile above `MAX_SCENE_PIXELS` before allocating grid storage, while preserving the earlier `MAX_GRID_BOXES` refusal precedence; a profile within the limit succeeds.
+- **OA-DSP-056** The raster text stroke-work ceiling equals the largest built-in glyph and covers all glyphs, the fallback glyph and every byte-valued input character.
 
 ### Replay and flight state (oa-replay)
 
@@ -1793,6 +1840,9 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-254** The progress line's replayed span is computed with saturating arithmetic: a stream whose
   clock steps are each representable but whose total span is not does not stop the run.
 - **OA-RPL-255** A file is read in pieces of at most `MAX_CHUNK` bytes; its size never sets an allocation.
+- **OA-RPL-276** Offline stream advance renews its finite reader allowance only between bounded steps; over input of
+  six scan quotas of garbage followed by a valid frame it emits that frame, conserves source bytes, takes at least
+  five steps, and no step's measured scan, CRC, copy or compaction work exceeds one quota.
 - **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
   report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
   a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.
