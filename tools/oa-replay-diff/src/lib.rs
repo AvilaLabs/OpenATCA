@@ -1121,7 +1121,7 @@ mod tests {
         let mut a = vec![r(10 * S, 1)];
         let mut b = a.clone();
         a[0].alt_ft = f32::from_bits(0x7fc0_0000);
-        b[0].alt_ft = f32::from_bits(0x7fc0_0001);
+        b[0].alt_ft = 5.0;
         let d = diff_second(&rows(&a), &rows(&b));
         let i = real_fields().find(|(_, f)| f.name == "alt_ft").unwrap().0;
         assert_eq!(
@@ -1129,9 +1129,14 @@ mod tests {
             (1, 1, 0.0)
         );
         assert_eq!(d.class_rows[Class::Position.index()], 1);
-        // NaN against a number is a difference too.
-        b[0].alt_ft = 5.0;
+        // Infinity against a number is counted the same way.
+        a[0].alt_ft = f32::INFINITY;
         assert_eq!(diff_second(&rows(&a), &rows(&b)).field_nonfinite[i], 1);
+        // Two NaNs that differ only in payload are one canonical NaN in a row (OA-TRK-360), so
+        // they are not a difference.
+        a[0].alt_ft = f32::from_bits(0x7fc0_0000);
+        b[0].alt_ft = f32::from_bits(0x7fc0_0001);
+        assert!(diff_second(&rows(&a), &rows(&b)).is_empty());
     }
 
     // REQ: OA-RDF-004
