@@ -110,7 +110,9 @@ fn comments_strings_and_char_literals_never_match() {
     for bad in ["std", "HashMap", "HashSet", "println", "dbg", "static"] {
         assert!(!masked.contains(bad), "{bad} survived: {masked}");
     }
-    assert!(masked.contains("fn f<'a>(x: &'a str)"));
+    // a lifetime is blanked too, so `&'static mut T` is not `static mut`
+    assert!(masked.contains("fn f<") && !masked.contains("'a"));
+    assert!(tokens("pub fn f(x: &'static mut u8) {}\n").is_empty());
     let hits = scan(src).hits;
     assert!(hits.is_empty(), "{hits:?}");
     // the same names in code are hits, and a path split over lines is still found
@@ -160,8 +162,12 @@ fn core_code_may_name_only_core_crates_and_the_core_module_of_split_crates() {
         rep.failures
     );
     assert!(
-        !has(&rep.failures, "fx-badcore: fx-cleansplit"),
-        "a split crate is allowed as a dependency"
+        has(
+            &rep.failures,
+            "fx-badcore: fx-cleansplit: B8: core crate depends on split crate"
+        ),
+        "a core crate depends only on core crates: {:#?}",
+        rep.failures
     );
     assert!(
         has(
@@ -205,7 +211,11 @@ fn a_split_crate_needs_both_modules_and_a_lib_rs_declaring_exactly_them() {
         "{:#?}",
         rep.failures
     );
-    assert!(!has(&rep.failures, "fx-cleansplit"), "{:#?}", rep.failures);
+    assert!(
+        !has(&rep.failures, "crates/fx-cleansplit"),
+        "{:#?}",
+        rep.failures
+    );
     let ok = "#![forbid(unsafe_code)]\n//! doc\npub mod core;\npub(crate) mod shell;\npub use self::core::{a, b};\n#[cfg(test)]\nmod tests { fn t() {} }\n";
     assert!(lib_rs_problems(ok).is_empty());
     for bad in [
@@ -831,7 +841,7 @@ fn a_core_crate_must_be_no_std() {
 // REQ: OA-TRC-220
 #[test]
 fn oa_ieee_exposes_exactly_five_functions_and_may_use_float_methods() {
-    let api = "pub fn sqrt(x: f64) -> f64 { x.sqrt() }\npub fn floor(x: f64) -> f64 { x.floor() }\npub fn ceil(x: f64) -> f64 { x.ceil() }\npub fn trunc(x: f64) -> f64 { x.trunc() }\npub fn round(x: f64) -> f64 { f64::round(x) }\nfn private(x: f64) -> f64 { x.sin() * 0.0 }\npub(crate) fn inner() {}\n#[cfg(test)]\nmod tests { pub fn extra() {} }\n";
+    let api = "pub fn sqrt(v: f64) -> f64 { v.sqrt() }\npub fn floor(v: f64) -> f64 { v.floor() }\npub fn ceil(v: f64) -> f64 { v.ceil() }\npub fn trunc(v: f64) -> f64 { v.trunc() }\npub fn round(v: f64) -> f64 { v.round() }\nfn private(x: f64) -> f64 { x.sin() * 0.0 }\npub(crate) fn inner() {}\n#[cfg(test)]\nmod tests { pub fn extra() {} }\n";
     let ok = Ws::named("i0", "oa-ieee", "core", &[("src/lib.rs", api)]);
     // std is allowed in oa-ieee: no no_std needed; the float rule is waived (a private `.sin()`
     // is its own business only for the five operations, so it is also waived here)
@@ -862,14 +872,405 @@ fn oa_ieee_exposes_exactly_five_functions_and_may_use_float_methods() {
         "i7",
         "oa-ieee",
         "core",
-        &[("src/lib.rs", "pub fn sqrt(x: f64) -> f64 { x.sqrt() }\n")],
+        &[("src/lib.rs", "pub fn sqrt(v: f64) -> f64 { v.sqrt() }\n")],
     );
     assert!(has(&ws.failures(), "B10: the public API of oa-ieee"));
     let ws = Ws::named(
         "i8",
         "fx-a",
         "core",
-        &[("src/lib.rs", "pub fn sqrt(x: f64) -> f64 { x.sqrt() }\n")],
+        &[("src/lib.rs", "pub fn sqrt(v: f64) -> f64 { v.sqrt() }\n")],
     );
     assert!(has(&ws.failures(), "B8: the standard library"));
+}
+
+// REQ: OA-TRC-221
+#[test]
+fn the_float_list_is_the_probe_set_and_every_call_form_is_caught() {
+    // Derived on 1.89.0 by compiling a throwaway no_std probe that called every f64 (and f32)
+    // method of std's docs and keeping those rustc reports as "no method named".
+    let probe = [
+        "abs_sub",
+        "acos",
+        "acosh",
+        "asin",
+        "asinh",
+        "atan",
+        "atan2",
+        "atanh",
+        "cbrt",
+        "ceil",
+        "cos",
+        "cosh",
+        "div_euclid",
+        "erf",
+        "erfc",
+        "exp",
+        "exp2",
+        "exp_m1",
+        "floor",
+        "fract",
+        "gamma",
+        "hypot",
+        "lerp",
+        "ln",
+        "ln_1p",
+        "ln_gamma",
+        "log",
+        "log10",
+        "log2",
+        "mul_add",
+        "powf",
+        "powi",
+        "rem_euclid",
+        "round",
+        "round_ties_even",
+        "sin",
+        "sin_cos",
+        "sinh",
+        "sqrt",
+        "tan",
+        "tanh",
+        "trunc",
+    ];
+    assert_eq!(oa_trace::classcheck::FLOAT_METHODS, probe);
+    for (tag, src, tok) in [
+        ("g0", "pub fn f(x: f64) -> f64 { x.exp2() }\n", "exp2"),
+        (
+            "g1",
+            "pub fn f(x: f64) -> (f64, f64) { x.sin_cos() }\n",
+            "sin_cos",
+        ),
+        (
+            "g2",
+            "pub fn f(x: f64) -> f64 { x.asinh() + x.acosh() + x.atanh() }\n",
+            "asinh",
+        ),
+        (
+            "g3",
+            "pub fn f(x: f64) -> f64 { x.abs_sub(1.0) }\n",
+            "abs_sub",
+        ),
+        (
+            "g4",
+            "pub fn f(x: f64) -> f64 { x.round_ties_even() }\n",
+            "round_ties_even",
+        ),
+        ("g5", "pub fn f(x: f64) -> f64 { <f64>::sqrt(x) }\n", "sqrt"),
+        (
+            "g6",
+            "pub trait T { fn f(x: f64) -> f64 { Self::sin(x) } }\n",
+            "sin",
+        ),
+        (
+            "g7",
+            "pub fn f<R: Copy>(x: f64) -> f64 { R::sin(x) }\n",
+            "sin",
+        ),
+        (
+            "g8",
+            "pub fn f(x: &[f64]) { let _ = x.iter().copied().map(f64::sin); }\n",
+            "sin",
+        ),
+        ("g9", "pub fn f(x: f32) -> f32 { f32::exp2(x) }\n", "exp2"),
+        (
+            "g10",
+            "pub fn f(x: i64) -> i64 { x.rem_euclid(3) }\n",
+            "rem_euclid",
+        ),
+        (
+            "g11",
+            "pub fn f(x: f64) -> f64 { f64::powi(x, 2) }\n",
+            "powi",
+        ),
+    ] {
+        let f = core_ws(tag, src).failures();
+        assert!(
+            f.iter()
+                .any(|m| m.contains(&format!(": {tok}: B8: the standard library"))),
+            "{tag}: {f:#?}"
+        );
+    }
+    // oa_ieee and oa_math paths, the integer path form, and plain names pass
+    let ws = core_ws(
+        "g12",
+        "pub fn f(x: f64, a: i64) -> f64 { let _ = i64::rem_euclid(a, 3); let _ = u8::div_euclid(7, 2); oa_ieee::sqrt(x) + oa_math::pow(x, x) + oa_math::sin(x) }\n",
+    );
+    assert!(
+        !has(&ws.failures(), "B8: the standard library"),
+        "{:#?}",
+        ws.failures()
+    );
+    // the alternatives are named
+    let f = core_ws(
+        "g13",
+        "pub fn f(x: f64) -> f64 { x.powf(2.0) + x.sqrt() + x.sin() }\n",
+    )
+    .failures();
+    assert!(
+        has(&f, "use oa_math::pow") && has(&f, "use oa_ieee::sqrt") && has(&f, "use oa_math::sin")
+    );
+}
+
+// REQ: OA-TRC-222
+#[test]
+fn macros_raw_identifiers_target_code_pointers_and_pointer_formats_are_rejected() {
+    for (tag, src, tok) in [
+        ("b0", "macro_rules! m { () => {}; }\n", "macro_rules"),
+        (
+            "b1",
+            "pub fn f() { let r#type = 1; let _ = r#type; }\n",
+            "r#type",
+        ),
+        (
+            "b2",
+            "pub fn f() -> bool { cfg!(target_os = \"linux\") }\n",
+            "target_os",
+        ),
+        (
+            "b3",
+            "#[cfg(target_pointer_width = \"64\")]\npub fn f() {}\n",
+            "target_pointer_width",
+        ),
+        (
+            "b4",
+            "#[cfg_attr(target_endian = \"big\", derive(Clone))]\npub struct S;\n",
+            "target_endian",
+        ),
+        ("b5", "pub fn f(_p: *const u8) {}\n", "*const"),
+        ("b6", "pub fn f(_p: *mut u8) {}\n", "*mut"),
+        (
+            "b7",
+            "pub fn f(x: &u8) -> core::fmt::Arguments<'_> { format_args!(\"{:p}\", x) }\n",
+            "{:p}",
+        ),
+        (
+            "b8",
+            "pub fn f() -> &'static str { \"a {x:#18p} b\" }\n",
+            "{:p}",
+        ),
+        ("b9", "#[cfg(unix)]\npub fn f() {}\n", "unix"),
+    ] {
+        let f = core_ws(tag, src).failures();
+        assert!(has(&f, &format!("lib.rs:1: {tok}")), "{tag}: {f:#?}");
+    }
+    // the `$` of a fragment is rejected on its own
+    assert!(tokens("pub fn f() { let _ = $x; }\n").contains(&"$".to_string()));
+    // none of these is a hit: references, multiplication, other formats, comments and cfg(test)
+    let ws = core_ws(
+        "b10",
+        "// {:p} *const r#x macro_rules!\npub fn f(a: u8, b: u8) -> u8 { let _s = \"{:?} {:x} {p}\"; let _ = &a as *const u8 as usize; a * b }\n",
+    );
+    let f = ws.failures();
+    assert!(has(&f, "*const"), "{f:#?}");
+    assert!(
+        !has(&f, "{:p}") && !has(&f, "macro_rules") && !has(&f, "r#x"),
+        "{f:#?}"
+    );
+    let ws = core_ws("b11", "#[cfg(all(test, target_os = \"linux\"))]\nmod t { }\npub fn f(a: u8, b: u8) -> u8 { a * b }\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-223
+#[test]
+fn a_core_lib_rs_declares_no_main_or_bin_module() {
+    for (tag, lib) in [
+        ("c0", "mod main;\n"),
+        ("c1", "pub mod bin;\n"),
+        ("c2", "pub(crate) mod main { pub fn f() {} }\n"),
+        ("c3", "mod bin { }\n"),
+    ] {
+        let ws = core_ws(tag, lib);
+        ws.put("crates/fx-a/src/main.rs", "use std::fs;\n");
+        ws.put("crates/fx-a/src/bin.rs", "use std::fs;\n");
+        let f = ws.failures();
+        assert!(has(&f, "lib.rs:1: mod "), "{tag}: {f:#?}");
+    }
+}
+
+// REQ: OA-TRC-224
+#[test]
+fn a_test_only_module_file_inside_an_inline_module_is_scanned() {
+    let ws = core_ws("i0", "mod outer {\n    #[cfg(test)]\n    mod t;\n}\n");
+    ws.put("crates/fx-a/src/outer/t.rs", "use std::fs;\n");
+    assert!(
+        has(&ws.failures(), "src/outer/t.rs:1: std::fs"),
+        "{:#?}",
+        ws.failures()
+    );
+    // at the top level of the file it is still skipped
+    let ws = core_ws("i1", "#[cfg(test)]\nmod t;\n");
+    ws.put("crates/fx-a/src/t.rs", "use std::fs;\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-225
+#[test]
+fn dependencies_resolve_through_the_workspace_table_lib_names_and_fail_when_unresolved() {
+    let head = "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"core\"\n\n";
+    let root = "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\n\n[workspace.dependencies]\nfx-b = { path = \"crates/fx-b\" }\n";
+    // `workspace = true`, in both spellings, reaches the shell crate through the root table
+    for (tag, dep) in [
+        ("w0", "[dependencies]\nfx-b.workspace = true\n"),
+        ("w1", "[dependencies]\nfx-b = { workspace = true }\n"),
+        ("w2", "[dependencies.fx-b]\nworkspace = true\n"),
+    ] {
+        let ws = core_ws(tag, "pub fn f() {}\n");
+        ws.put("Cargo.toml", root);
+        ws.put("crates/fx-a/Cargo.toml", &format!("{head}{dep}"));
+        assert!(
+            has(&ws.failures(), "core crate depends on shell crate fx-b"),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+    // a `workspace = true` entry the root does not have
+    let ws = core_ws("w3", "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}[dependencies]\nfx-b.workspace = true\n"),
+    );
+    assert!(
+        has(&ws.failures(), "no [workspace.dependencies] entry"),
+        "{:#?}",
+        ws.failures()
+    );
+    // an outside crate, and an outside one in a split crate, cannot be resolved to a workspace crate
+    let ws = core_ws("w4", "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}[dependencies]\nserde = \"1\"\n"),
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "serde: B8: dependency \"serde\" cannot be resolved"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    let ws = split_ws("w5", SPLIT_LIB, "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"split\"\n\n[dependencies]\nserde = \"1\"\nfx-b = { path = \"../fx-b\" }\n",
+    );
+    let f = ws.failures();
+    assert!(has(&f, "serde: B8: dependency"), "{f:#?}");
+    assert!(
+        !has(&f, "fx-b: B8"),
+        "a split crate may depend on a shell crate: {f:#?}"
+    );
+    // a `[lib] name` is the name source uses
+    let ws = core_ws("w6", "pub fn f() { let _ = other_b::go(); }\n");
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!("{head}[dependencies]\nfx-b = {{ path = \"../fx-b\" }}\n"),
+    );
+    ws.put(
+        "crates/fx-b/Cargo.toml",
+        "[package]\nname = \"fx-b\"\n\n[lib]\nname = \"other_b\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n",
+    );
+    assert!(
+        has(&ws.failures(), "lib.rs:1: other_b: B8: names a shell"),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+// REQ: OA-TRC-226
+#[test]
+fn self_super_counts_as_super() {
+    for (tag, core) in [
+        ("s0", "use self::super::util::r;\n"),
+        ("s1", "pub fn f() { self::super::g(); }\n"),
+        ("s2", "pub fn f() { self::super::super::g(); }\n"),
+    ] {
+        let ws = split_ws(tag, SPLIT_LIB, core);
+        assert!(
+            has(
+                &ws.failures(),
+                "super: B8: `super::` reaches the crate root"
+            ),
+            "{tag}: {:#?}",
+            ws.failures()
+        );
+    }
+}
+
+// REQ: OA-TRC-227
+#[test]
+fn no_std_must_be_a_top_of_file_inner_attribute() {
+    let ws = Ws::new(
+        "n1",
+        "core",
+        &[("src/lib.rs", "#![no_std]\npub fn f() {}\n")],
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    for bad in [
+        "pub fn f() {}\n#![no_std]\n",
+        "mod m { #![no_std] }\n",
+        "#[cfg(any())]\nmod m { #![no_std] }\npub fn f() {}\n",
+        "#[no_std]\npub fn f() {}\n",
+        "#![forbid(unsafe_code)]\npub fn f() {}\n#![no_std]\n",
+    ] {
+        ws.put("crates/fx-a/src/lib.rs", bad);
+        assert!(
+            has(
+                &ws.failures(),
+                "fx-a: B10: src/lib.rs of a core crate must have"
+            ),
+            "{bad}: {:#?}",
+            ws.failures()
+        );
+    }
+    // other inner attributes may come first
+    ws.put(
+        "crates/fx-a/src/lib.rs",
+        "#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\npub fn f() {}\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-228
+#[test]
+fn each_oa_ieee_function_body_is_exactly_the_one_method_call() {
+    let f = |body: &str| {
+        format!(
+            "pub fn sqrt(v: f64) -> f64 {{ {body} }}\npub fn floor(v: f64) -> f64 {{ v.floor() }}\npub fn ceil(v: f64) -> f64 {{ v.ceil() }}\npub fn trunc(v: f64) -> f64 {{ v.trunc() }}\npub fn round(v: f64) -> f64 {{ v.round() }}\n"
+        )
+    };
+    assert!(ieee_api_problems(&f("v.sqrt()")).is_empty());
+    for bad in [
+        "v.sqrt() + v.sin()",
+        "v.floor()",
+        "v.sqrt().abs()",
+        "{ v.sqrt() }",
+        "oa_x::go(v); v.sqrt()",
+        "",
+    ] {
+        let hits = ieee_api_problems(&f(bad));
+        assert!(
+            hits.iter()
+                .any(|h| h.message.contains("exactly `v.<same name>()`")),
+            "{bad}: {hits:?}"
+        );
+    }
+}
+
+// REQ: OA-TRC-229
+#[test]
+fn an_exclude_entry_that_does_not_normalise_fails() {
+    let ws = core_ws("x0", "pub fn f() {}\n");
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\"]\nexclude = [\"../outside\"]\n",
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "exclude entry \"../outside\" leaves the workspace"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
 }

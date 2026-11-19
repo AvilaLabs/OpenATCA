@@ -58,44 +58,81 @@ const FORBIDDEN_MACROS: &[&str] = &[
     "option_env",
     "file",
 ];
-/// Float methods `core` lacks on the pinned toolchain; the platform maths library gives machine-
-/// dependent last bits. The five exactly specified ones come from `oa-ieee`, the rest from `oa-math`.
-const FLOAT_METHODS: &[&str] = &[
-    "sqrt",
-    "floor",
-    "ceil",
-    "trunc",
-    "round",
-    "powi",
-    "powf",
-    "exp",
-    "exp_m1",
-    "ln",
-    "ln_1p",
-    "log",
-    "log2",
-    "log10",
-    "sin",
-    "cos",
-    "tan",
-    "asin",
+/// Inherent `f32`/`f64` methods absent from `core` on the pinned toolchain (1.89.0). Derived by
+/// compiling a throwaway `#![no_std]` probe that called every method listed in the standard
+/// library documentation for `f64` (and `f32`, which gave the same set) and keeping each that
+/// rustc reported as "no method named ..." (E0599). `abs`, `signum`, `copysign`, `recip`,
+/// `to_degrees`, `to_radians`, `min`, `max`, `clamp`, `midpoint`, `total_cmp` and the
+/// classification methods compile in `no_std`, so they are not here; `lerp`, `gamma`, `ln_gamma`,
+/// `erf` and `erfc` are unstable in `std` and also absent from `core`. The standard library's
+/// versions call the platform maths library, whose last bit differs between machines.
+pub const FLOAT_METHODS: &[&str] = &[
+    "abs_sub",
     "acos",
+    "acosh",
+    "asin",
+    "asinh",
     "atan",
     "atan2",
-    "sinh",
-    "cosh",
-    "tanh",
-    "hypot",
+    "atanh",
     "cbrt",
-    "mul_add",
-    "rem_euclid",
+    "ceil",
+    "cos",
+    "cosh",
     "div_euclid",
+    "erf",
+    "erfc",
+    "exp",
+    "exp2",
+    "exp_m1",
+    "floor",
     "fract",
+    "gamma",
+    "hypot",
+    "lerp",
+    "ln",
+    "ln_1p",
+    "ln_gamma",
+    "log",
+    "log10",
+    "log2",
+    "mul_add",
+    "powf",
+    "powi",
+    "rem_euclid",
+    "round",
+    "round_ties_even",
+    "sin",
+    "sin_cos",
+    "sinh",
+    "sqrt",
+    "tan",
+    "tanh",
+    "trunc",
 ];
 /// The one crate that wraps the standard library's exactly specified float operations (B10).
 const IEEE_CRATE: &str = "oa-ieee";
 /// The public API of [`IEEE_CRATE`], exactly.
 const IEEE_API: [&str; 5] = ["sqrt", "floor", "ceil", "trunc", "round"];
+/// Integer types: `i64::rem_euclid(a, b)` is `core`'s and is allowed in path form.
+const INT_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+];
+
+/// The failure text for a call of the float method `w` that `core` lacks.
+fn float_message(w: &str) -> String {
+    let alt = match w {
+        _ if IEEE_API.contains(&w) => format!("use oa_ieee::{w}"),
+        "powf" => "use oa_math::pow".to_string(),
+        "rem_euclid" | "div_euclid" => format!(
+            "for an integer write `i64::{w}(a, b)` (the path form, which `core` has); for a float use oa_math::{w}"
+        ),
+        _ => format!("use oa_math::{w}"),
+    };
+    format!(
+        "B8: the standard library's float `{w}` differs between machines; {alt}. A user-defined method of this name is disallowed in core code too"
+    )
+}
 const FORBIDDEN_IDENTS: &[&str] = &["HashMap", "HashSet", "RandomState"];
 
 /// Result of the class check.
@@ -156,6 +193,8 @@ pub struct Dep {
     pub package: Option<String>,
     /// `path = "..."`, if any.
     pub path: Option<String>,
+    /// `workspace = true`: the entry is the root `[workspace.dependencies]` one of that key.
+    pub workspace: bool,
 }
 
 /// What the check needs from one Cargo.toml.
@@ -168,6 +207,10 @@ pub struct Manifest {
     /// Entries of every dependency table (`dependencies`, `dev-dependencies`,
     /// `build-dependencies`, under `[target.*]` too), merged by key.
     pub deps: Vec<Dep>,
+    /// Entries of the root `[workspace.dependencies]`.
+    pub ws_deps: Vec<Dep>,
+    /// `[lib] name`: the name the crate is used by in source, if not the package name.
+    pub lib_name: Option<String>,
     /// `[lib]` has a `path`.
     pub lib_path: bool,
     /// `path` of every `[[bin]]`.
@@ -248,6 +291,18 @@ fn inline_str(value: &str, key: &str) -> Option<String> {
     None
 }
 
+/// `key = true` inside an inline table `{ ... }`.
+fn inline_true(value: &str, key: &str) -> bool {
+    value.match_indices(key).any(|(i, _)| {
+        let before = value.get(..i).unwrap_or("").chars().next_back();
+        let rest = value.get(i + key.len()..).unwrap_or("").trim_start();
+        before.is_none_or(|c| c == '{' || c == ',' || c.is_whitespace())
+            && rest
+                .strip_prefix('=')
+                .is_some_and(|r| r.trim_start().starts_with("true"))
+    })
+}
+
 /// Runs `f` on the entry for `key`, adding it first if the table has none yet.
 fn with_dep(deps: &mut Vec<Dep>, key: &str, f: impl FnOnce(&mut Dep)) {
     let i = match deps.iter().position(|d| d.key == key) {
@@ -290,8 +345,8 @@ pub fn parse_manifest(text: &str) -> Manifest {
         Meta,
         Lib,
         Bin,
-        DepTable,
-        DepNamed(String),
+        DepTable(bool),
+        DepNamed(String, bool),
     }
     let mut m = Manifest::default();
     let mut sec = Sec::Other;
@@ -313,13 +368,18 @@ pub fn parse_manifest(text: &str) -> Manifest {
                     m.bin_paths.push(String::new());
                     Sec::Bin
                 }
+                ["workspace", "dependencies"] => Sec::DepTable(true),
+                ["workspace", "dependencies", name] => {
+                    with_dep(&mut m.ws_deps, name, |_| {});
+                    Sec::DepNamed((*name).to_string(), true)
+                }
                 ["workspace", ..] => Sec::Other,
                 _ => match segs.iter().position(|s| is_dep_table(s)) {
-                    Some(i) if i + 1 == segs.len() => Sec::DepTable,
+                    Some(i) if i + 1 == segs.len() => Sec::DepTable(false),
                     Some(i) if i + 2 == segs.len() => {
                         let name = segs.get(i + 1).copied().unwrap_or("").to_string();
                         with_dep(&mut m.deps, &name, |_| {});
-                        Sec::DepNamed(name)
+                        Sec::DepNamed(name, false)
                     }
                     _ => Sec::Other,
                 },
@@ -342,32 +402,38 @@ pub fn parse_manifest(text: &str) -> Manifest {
                 m.class = Some(unquote(value).unwrap_or_else(|| value.to_string()));
             }
             Sec::Lib if key == "path" => m.lib_path = true,
+            Sec::Lib if key == "name" => m.lib_name = unquote(value),
             Sec::Bin if key == "path" => {
                 if let Some(last) = m.bin_paths.last_mut() {
                     *last = unquote(value).unwrap_or_else(|| value.to_string());
                 }
             }
-            Sec::DepNamed(name) => {
-                with_dep(&mut m.deps, name, |d| match key {
+            Sec::DepNamed(name, ws) => {
+                let deps = if *ws { &mut m.ws_deps } else { &mut m.deps };
+                with_dep(deps, name, |d| match key {
                     "path" => d.path = unquote(value),
                     "package" => d.package = unquote(value),
+                    "workspace" => d.workspace = value == "true",
                     _ => {}
                 });
             }
-            Sec::DepTable => {
+            Sec::DepTable(ws) => {
                 let parts = split_outside_quotes(key, '.');
                 let name = parts
                     .first()
                     .map(|p| unquote(p).unwrap_or_else(|| p.trim().to_string()))
                     .unwrap_or_default();
                 let sub = parts.get(1).map(|p| p.trim());
-                with_dep(&mut m.deps, &name, |d| match sub {
+                let deps = if *ws { &mut m.ws_deps } else { &mut m.deps };
+                with_dep(deps, &name, |d| match sub {
                     Some("path") => d.path = unquote(value),
                     Some("package") => d.package = unquote(value),
+                    Some("workspace") => d.workspace = value == "true",
                     Some(_) => {}
                     None if value.starts_with('{') => {
                         d.path = inline_str(value, "path").or(d.path.take());
                         d.package = inline_str(value, "package").or(d.package.take());
+                        d.workspace |= inline_true(value, "workspace");
                     }
                     None => {}
                 });
@@ -474,9 +540,15 @@ fn normalize(base: &str, path: &str) -> Option<String> {
 // ---------------------------------------------------------------------------------------------
 // Lexer
 
-/// `src` with comments, string literals and character literals replaced by spaces; line breaks
-/// are kept so line numbers still match. Lifetimes (`'a`) are left alone.
+/// `src` with comments, string literals, character literals and lifetimes (`'a`, `'static`)
+/// replaced by spaces; line breaks are kept so line numbers still match.
 pub fn mask(src: &str) -> String {
+    mask_with_strings(src).0
+}
+
+/// [`mask`], and the character ranges (start, end) of every string literal in `src`.
+pub fn mask_with_strings(src: &str) -> (String, Vec<(usize, usize)>) {
+    let mut strings = Vec::new();
     let c: Vec<char> = src.chars().collect();
     let at = |i: usize| c.get(i).copied().unwrap_or('\0');
     let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
@@ -528,6 +600,7 @@ pub fn mask(src: &str) -> String {
                 j += 1;
             }
             // j is at the opening quote
+            let from = i;
             for _ in i..=j {
                 out.push(' ');
             }
@@ -543,7 +616,9 @@ pub fn mask(src: &str) -> String {
                 blank(&mut out, at(i));
                 i += 1;
             }
+            strings.push((from, i));
         } else if ch == '"' {
+            let from = i;
             out.push(' ');
             i += 1;
             while i < c.len() {
@@ -561,6 +636,7 @@ pub fn mask(src: &str) -> String {
                     i += 1;
                 }
             }
+            strings.push((from, i));
         } else if ch == '\'' {
             if at(i + 1) == '\\' {
                 // '\n', '\'', '\u{..}': skip the escaped character, then up to the closing quote
@@ -577,6 +653,14 @@ pub fn mask(src: &str) -> String {
             } else if at(i + 2) == '\'' && at(i + 1) != '\'' {
                 out.push_str("   ");
                 i += 3;
+            } else if at(i + 1).is_alphabetic() || at(i + 1) == '_' {
+                // a lifetime or label: blank it, so `&'static mut T` is not `static mut`
+                out.push(' ');
+                i += 1;
+                while is_ident(at(i)) {
+                    out.push(' ');
+                    i += 1;
+                }
             } else {
                 out.push(ch);
                 i += 1;
@@ -586,10 +670,11 @@ pub fn mask(src: &str) -> String {
             i += 1;
         }
     }
-    out
+    (out, strings)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
 struct Tok {
     s: String,
     line: usize,
@@ -682,6 +767,7 @@ fn skip_modifiers(toks: &[Tok], mut i: usize) -> usize {
 }
 
 /// What [`strip_test_items`] found.
+// A7.2: cold struct, size guard waived
 struct Stripped {
     toks: Vec<Tok>,
     /// Names of out-of-line test-only modules (`#[cfg(test)] mod x;`).
@@ -751,6 +837,9 @@ fn strip_test_items(toks: Vec<Tok>) -> Stripped {
     let mut out = Vec::new();
     let mut test_mods = Vec::new();
     let mut whole_file = false;
+    // open `{` of the tokens kept so far: a test-only `mod x;` inside an inline module resolves
+    // below that module's directory, which is not modelled, so it is not skipped (fail closed)
+    let mut depth = 0usize;
     let mut i = 0;
     while i < toks.len() {
         let inner = s(&toks, i) == "#" && s(&toks, i + 1) == "!";
@@ -764,6 +853,11 @@ fn strip_test_items(toks: Vec<Tok>) -> Stripped {
             && s(&toks, p) == ")"
             && s(&toks, p + 1) == "]";
         if !is_test {
+            match s(&toks, i) {
+                "{" => depth += 1,
+                "}" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             if let Some(t) = toks.get(i) {
                 out.push(t.clone());
             }
@@ -796,7 +890,7 @@ fn strip_test_items(toks: Vec<Tok>) -> Stripped {
             i += 1;
             continue;
         }
-        if kw == "mod" && s(&toks, j + 2) == ";" {
+        if kw == "mod" && s(&toks, j + 2) == ";" && depth == 0 {
             test_mods.push(s(&toks, j + 1).to_string());
         }
         let to_semicolon = match kw.as_str() {
@@ -1034,22 +1128,63 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
         }
         let in_use = use_start.is_some();
         let start = is_path_start(toks, i);
-        if !ctx.ieee
-            && FLOAT_METHODS.contains(&w)
-            && ((prev == "." && next == "(")
-                || (prev == "::" && i >= 2 && matches!(s(toks, i - 2), "f64" | "f32")))
+        if !ctx.ieee && FLOAT_METHODS.contains(&w) && ((prev == "." && next == "(") || prev == "::")
         {
+            // after `.` (a method call) or after `::` whatever precedes it (`f64::sin`,
+            // `<f64>::sin`, `Self::sin`, `R::sin`), called or not
+            let qual = if prev == "::" && i >= 2 {
+                s(toks, i - 2)
+            } else {
+                ""
+            };
+            let blessed = prev == "::"
+                && (matches!(qual, "oa_math" | "oa_ieee")
+                    || ctx
+                        .aliases
+                        .get(qual)
+                        .is_some_and(|t| t == "oa-math" || t == "oa-ieee"));
+            let int_euclid = prev == "::"
+                && matches!(w, "rem_euclid" | "div_euclid")
+                && INT_TYPES.contains(&qual);
+            if !blessed && !int_euclid {
+                hits.push(hit(t.line, w, &float_message(w)));
+            }
+        }
+        if w == "macro_rules" {
             hits.push(hit(
                 t.line,
-                w,
-                &format!(
-                    "B8: the standard library's float `{w}` differs between machines; use {} instead. A user-defined method of this name is disallowed in core code too",
-                    if IEEE_API.contains(&w) {
-                        format!("oa_ieee::{w}")
-                    } else {
-                        format!("oa_math::{w}")
-                    }
-                ),
+                "macro_rules",
+                "B8: core code defines no macro, so every name the scan reads is the name the compiler resolves",
+            ));
+        } else if w == "$" {
+            hits.push(hit(t.line, "$", "B8: core code has no macro fragments"));
+        } else if w == "r" && next == "#" && is_word(s(toks, i + 2)) {
+            hits.push(hit(
+                t.line,
+                &format!("r#{}", s(toks, i + 2)),
+                "B8: core code uses no raw identifier",
+            ));
+        } else if matches!(w, "cfg" | "cfg_attr")
+            && (next == "(" || (next == "!" && s(toks, i + 2) == "("))
+        {
+            let open = if next == "(" { i + 1 } else { i + 2 };
+            let end = skip_group(toks, open);
+            let target = (open..end).find_map(|k| {
+                let x = s(toks, k);
+                (x.starts_with("target_") || matches!(x, "unix" | "windows")).then_some(x)
+            });
+            if let Some(x) = target {
+                hits.push(hit(
+                    t.line,
+                    x,
+                    "B8: core code has no target-dependent cfg, so it behaves the same on every machine",
+                ));
+            }
+        } else if w == "*" && matches!(next, "const" | "mut") {
+            hits.push(hit(
+                t.line,
+                &format!("*{next}"),
+                "B8: core code has no raw pointer type",
             ));
         }
         if w == "extern" && next == "crate" {
@@ -1114,7 +1249,11 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
                 &format!("crate::{}", s(toks, i + 2)),
                 "B8: core code of a split crate names `crate::` only under `crate::core::`",
             ));
-        } else if ctx.split && start && w == "super" && next == "::" && prev != "::" {
+        } else if ctx.split
+            && w == "super"
+            && next == "::"
+            && (prev != "::" || (i >= 2 && s(toks, i - 2) == "self"))
+        {
             let mut j = i;
             let mut up = 0;
             while s(toks, j) == "super" && s(toks, j + 1) == "::" {
@@ -1179,6 +1318,41 @@ fn path_attr_lines(toks: &[Tok]) -> Vec<usize> {
     out
 }
 
+/// `{:p}` (and `{x:p}`, `{:#18p}`) in a string literal: it prints an address, which differs
+/// between runs and machines.
+fn pointer_format_hits(src: &str, strings: &[(usize, usize)]) -> Vec<Hit> {
+    let c: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    for &(from, to) in strings {
+        let body = c.get(from..to).unwrap_or(&[]);
+        for (k, ch) in body.iter().enumerate() {
+            if *ch != '}' || k == 0 || body.get(k - 1) != Some(&'p') {
+                continue;
+            }
+            // the `{` that opens this group, with a `:` between
+            let open = body
+                .get(..k)
+                .and_then(|b| b.iter().rposition(|x| *x == '{'));
+            let Some(open) = open else { continue };
+            let spec = body.get(open + 1..k).unwrap_or(&[]);
+            if spec.contains(&':') && !spec.contains(&'}') {
+                let line = 1 + c
+                    .get(..from + k)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|x| **x == '\n')
+                    .count();
+                out.push(hit(
+                    line,
+                    "{:p}",
+                    "B8: core code does not format pointers, an address differs between runs",
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Result of scanning one file of core code.
 #[derive(Debug, Default)]
 // A7.2: cold struct, size guard waived
@@ -1192,11 +1366,13 @@ pub struct FileScan {
 
 /// Scans one file of core code.
 pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
-    let raw = tokenize(&mask(src));
+    let (masked, strings) = mask_with_strings(src);
+    let raw = tokenize(&masked);
     let mut hits: Vec<Hit> = path_attr_lines(&raw)
         .into_iter()
         .map(|l| hit(l, "#[path]", "B8: core code uses no `#[path]` attribute"))
         .collect();
+    hits.extend(pointer_format_hits(src, &strings));
     let st = strip_test_items(raw);
     hits.extend(scan_tokens(&st.toks, ctx));
     FileScan {
@@ -1208,26 +1384,39 @@ pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
 
 /// Whether `lib.rs` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]` (B10).
 pub fn has_no_std(src: &str) -> bool {
+    // only the inner attributes at the top of the file count: before any item, in no module
     let toks = tokenize(&mask(src));
     let mut i = 0;
-    while i < toks.len() {
-        if s(&toks, i) == "#" && s(&toks, i + 1) == "!" && s(&toks, i + 2) == "[" {
-            let end = skip_group(&toks, i + 2);
-            let body: String = toks
-                .get(i + 3..end.saturating_sub(1))
-                .unwrap_or(&[])
-                .iter()
-                .map(|t| t.s.as_str())
-                .collect();
-            if body == "no_std" || body == "cfg_attr(not(test),no_std)" {
-                return true;
-            }
-            i = end;
-        } else {
-            i += 1;
+    while s(&toks, i) == "#" && s(&toks, i + 1) == "!" && s(&toks, i + 2) == "[" {
+        let end = skip_group(&toks, i + 2);
+        let body: String = toks
+            .get(i + 3..end.saturating_sub(1))
+            .unwrap_or(&[])
+            .iter()
+            .map(|t| t.s.as_str())
+            .collect();
+        if body == "no_std" || body == "cfg_attr(not(test),no_std)" {
+            return true;
         }
+        i = end;
     }
     false
+}
+
+/// Whether `lib.rs` declares a module named `main` or `bin`, in any visibility, inline or in a
+/// file: it would load `src/main.rs` or `src/bin*`, which the core scan does not read.
+pub fn declares_main_or_bin(src: &str) -> Vec<Hit> {
+    let toks = tokenize(&mask(src));
+    (0..toks.len())
+        .filter(|&i| s(&toks, i) == "mod" && matches!(s(&toks, i + 1), "main" | "bin"))
+        .map(|i| {
+            hit(
+                toks.get(i).map_or(0, |t| t.line),
+                &format!("mod {}", s(&toks, i + 1)),
+                "B8: lib.rs of a core crate declares no module named `main` or `bin`",
+            )
+        })
+        .collect()
 }
 
 /// Problems with the public API of `oa-ieee`'s `lib.rs` (B10): exactly the five `pub fn`s, and
@@ -1247,7 +1436,25 @@ pub fn ieee_api_problems(src: &str) -> Vec<Hit> {
             "}" | ")" | "]" => depth = depth.saturating_sub(1),
             "pub" if depth == 0 && s(&toks, i + 1) != "(" => {
                 if s(&toks, i + 1) == "fn" && IEEE_API.contains(&s(&toks, i + 2)) {
-                    seen.push(s(&toks, i + 2).to_string());
+                    let name = s(&toks, i + 2).to_string();
+                    // the body is exactly `v.<name>()`, so no other float call hides in it
+                    let open = (i + 3..toks.len()).find(|&j| s(&toks, j) == "{");
+                    let body: Vec<&str> = open.map_or(Vec::new(), |o| {
+                        let end = skip_group(&toks, o);
+                        toks.get(o + 1..end.saturating_sub(1))
+                            .unwrap_or(&[])
+                            .iter()
+                            .map(|t| t.s.as_str())
+                            .collect()
+                    });
+                    if body != ["v", ".", name.as_str(), "(", ")"] {
+                        out.push(hit(
+                            line,
+                            &name,
+                            "B10: the body of each oa-ieee function is exactly `v.<same name>()`",
+                        ));
+                    }
+                    seen.push(name);
                 } else {
                     out.push(hit(line, s(&toks, i + 1), msg));
                 }
@@ -1371,6 +1578,7 @@ fn rel(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+// A7.2: cold struct, size guard waived
 struct Member {
     name: String,
     /// Directory relative to the workspace root, normalized.
@@ -1412,17 +1620,37 @@ fn module_depth(src: &Path, file: &Path) -> usize {
 fn resolve_dep(
     d: &Dep,
     rel_dir: &str,
+    ws_deps: &[Dep],
     by_dir: &BTreeMap<String, String>,
     classes: &BTreeMap<String, Class>,
-) -> Result<Option<String>, String> {
-    if let Some(p) = &d.path {
-        return match normalize(rel_dir, p).and_then(|n| by_dir.get(&n).cloned()) {
-            Some(name) => Ok(Some(name)),
-            None => Err(format!("path dependency {:?} is not a workspace member", p)),
+) -> Result<String, String> {
+    // `workspace = true` takes the root `[workspace.dependencies]` entry, whose paths are
+    // relative to the root
+    let (d, base) =
+        if d.workspace {
+            match ws_deps.iter().find(|w| w.key == d.key) {
+                Some(w) => (w, ""),
+                None => return Err(
+                    "`workspace = true` but the root has no [workspace.dependencies] entry for it"
+                        .to_string(),
+                ),
+            }
+        } else {
+            (d, rel_dir)
         };
+    if let Some(p) = &d.path {
+        return normalize(base, p)
+            .and_then(|n| by_dir.get(&n).cloned())
+            .ok_or_else(|| format!("path dependency {p:?} is not a workspace member"));
     }
     let name = d.package.clone().unwrap_or_else(|| d.key.clone());
-    Ok(classes.contains_key(&name).then_some(name))
+    if classes.contains_key(&name) {
+        Ok(name)
+    } else {
+        Err(format!(
+            "dependency {name:?} cannot be resolved to a workspace crate (F6: no outside code)"
+        ))
+    }
 }
 
 /// Checks every workspace member under `root` (B7 to B9) against [`UNSPLIT_ALLOWED`].
@@ -1469,7 +1697,18 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
             n
         })
         .collect();
-    let exclude: Vec<String> = exclude.iter().filter_map(|d| normalize("", d)).collect();
+    let exclude: Vec<String> = exclude
+        .iter()
+        .filter_map(|d| {
+            let n = normalize("", d);
+            if n.is_none() {
+                rep.failures.push(format!(
+                    "Cargo.toml: exclude entry {d:?} leaves the workspace"
+                ));
+            }
+            n
+        })
+        .collect();
     cross_check_dirs(root, &member_dirs, &exclude, &mut rep.failures);
 
     let mut members = Vec::new();
@@ -1518,6 +1757,14 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
     rep.unsplit.sort();
     let classes: BTreeMap<String, Class> =
         members.iter().map(|m| (m.name.clone(), m.class)).collect();
+    let libs: BTreeMap<String, String> = members
+        .iter()
+        .map(|m| {
+            let lib = m.man.lib_name.clone().unwrap_or_else(|| m.name.clone());
+            (m.name.clone(), lib.replace('-', "_"))
+        })
+        .collect();
+    let ws_deps = parse_manifest(&text).ws_deps;
     let by_dir: BTreeMap<String, String> = members
         .iter()
         .map(|m| (m.rel_dir.clone(), m.name.clone()))
@@ -1525,7 +1772,15 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
 
     for m in &members {
         if matches!(m.class, Class::Core | Class::Split) {
-            check_member(root, m, &classes, &by_dir, &mut rep.failures);
+            check_member(
+                root,
+                m,
+                &classes,
+                &by_dir,
+                &ws_deps,
+                &libs,
+                &mut rep.failures,
+            );
         }
     }
 
@@ -1613,6 +1868,8 @@ fn check_member(
     m: &Member,
     classes: &BTreeMap<String, Class>,
     by_dir: &BTreeMap<String, String>,
+    ws_deps: &[Dep],
+    libs: &BTreeMap<String, String>,
     fails: &mut Vec<String>,
 ) {
     let name = &m.name;
@@ -1624,27 +1881,22 @@ fn check_member(
     if m.man.build_key || m.dir.join("build.rs").exists() {
         fails.push(format!("{name}: B8: no build.rs in a core or split crate"));
     }
-    // dependencies: resolved by path, then package, then key
-    let mut aliases: BTreeMap<String, String> = classes
-        .keys()
-        .map(|n| (n.replace('-', "_"), n.clone()))
-        .collect();
+    // dependencies: resolved by path (a `workspace = true` entry through the root table), then
+    // package, then key; one that cannot be resolved fails. Source names a crate by its `[lib]`
+    // name, or by the dependency key when renamed.
+    let mut aliases: BTreeMap<String, String> =
+        libs.iter().map(|(n, l)| (l.clone(), n.clone())).collect();
     for d in &m.man.deps {
-        match resolve_dep(d, &m.rel_dir, by_dir, classes) {
+        match resolve_dep(d, &m.rel_dir, ws_deps, by_dir, classes) {
             Err(e) => fails.push(format!("{name}: {}: B8: {e}", d.key)),
-            Ok(None) => {}
-            Ok(Some(target)) => {
+            Ok(target) => {
                 if m.class == Class::Core {
-                    match classes.get(&target) {
-                        Some(Class::Shell) => fails.push(format!(
-                            "{name}: {}: B8: core crate depends on shell crate {target}",
-                            d.key
-                        )),
-                        Some(Class::Unsplit) => fails.push(format!(
-                            "{name}: {}: B8: core crate depends on unsplit crate {target}",
-                            d.key
-                        )),
-                        _ => {}
+                    if let Some(c) = classes.get(&target).filter(|c| **c != Class::Core) {
+                        fails.push(format!(
+                            "{name}: {}: B8: core crate depends on {} crate {target}; a core crate depends only on core crates (F6)",
+                            d.key,
+                            class_name(*c)
+                        ));
                     }
                 }
                 aliases.insert(d.key.replace('-', "_"), target);
@@ -1658,6 +1910,15 @@ fn check_member(
         match fs::read_to_string(src.join("lib.rs")) {
             Err(e) => fails.push(format!("{name}: cannot read src/lib.rs: {e}")),
             Ok(text) if ieee => {
+                for h in declares_main_or_bin(&text) {
+                    fails.push(format!(
+                        "{}:{}: {}: {}",
+                        rel(root, &src.join("lib.rs")),
+                        h.line,
+                        h.token,
+                        h.message
+                    ));
+                }
                 for h in ieee_api_problems(&text) {
                     fails.push(format!(
                         "{}:{}: {}: {}",
@@ -1669,9 +1930,18 @@ fn check_member(
                 }
             }
             Ok(text) => {
+                for h in declares_main_or_bin(&text) {
+                    fails.push(format!(
+                        "{}:{}: {}: {}",
+                        rel(root, &src.join("lib.rs")),
+                        h.line,
+                        h.token,
+                        h.message
+                    ));
+                }
                 if !has_no_std(&text) {
                     fails.push(format!(
-                        "{name}: B10: src/lib.rs of a core crate has `#![cfg_attr(not(test), no_std)]` (or `#![no_std]`)"
+                        "{name}: B10: src/lib.rs of a core crate must have `#![cfg_attr(not(test), no_std)]` (or `#![no_std]`) as an inner attribute at the top, before any item"
                     ));
                 }
             }
