@@ -7,7 +7,7 @@
 //! fixed: object classes in a fixed order, keys in sorted order, fields in declaration order.
 
 use super::model::*;
-use oa_sha256::core::hex::to_hex;
+use oa_sha256::core::hex::Hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -555,13 +555,13 @@ fn header_changes(a: &Model, b: &Model) -> Vec<FieldChange> {
     );
     push(
         "NASR archive sha256",
-        to_hex(&a.meta.nasr_sha256),
-        to_hex(&b.meta.nasr_sha256),
+        Hex(&a.meta.nasr_sha256).to_string(),
+        Hex(&b.meta.nasr_sha256).to_string(),
     );
     push(
         "CIFP archive sha256",
-        to_hex(&a.meta.cifp_sha256),
-        to_hex(&b.meta.cifp_sha256),
+        Hex(&a.meta.cifp_sha256).to_string(),
+        Hex(&b.meta.cifp_sha256).to_string(),
     );
     out
 }

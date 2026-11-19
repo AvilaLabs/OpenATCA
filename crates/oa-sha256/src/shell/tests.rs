@@ -127,6 +127,20 @@ fn known_strings_and_hex() {
     assert_eq!(to_hex(&[0x00, 0xff, 0x1a]), "00ff1a");
 }
 
+// REQ: OA-SHA-001
+#[test]
+fn the_core_hex_writer_matches_the_string_form() {
+    for msg in [&b""[..], b"abc", &[0xffu8; 200]] {
+        let d = sha256(msg);
+        let mut out = [0u8; 64];
+        to_hex_into(&d, &mut out);
+        assert_eq!(std::str::from_utf8(&out).unwrap(), to_hex(&d));
+        assert_eq!(Hex(&d).to_string(), to_hex(&d));
+    }
+    assert_eq!(hex_byte(0x0a), *b"0a");
+    assert_eq!(hex_byte(0xf0), *b"f0");
+}
+
 // REQ: OA-SHA-001, OA-GEN-004
 #[test]
 fn padding_boundaries_match_known_digests() {

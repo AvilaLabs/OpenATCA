@@ -15,7 +15,7 @@ use super::geom::{e7_to_deg, edge_separations, latlon_e7, RingSeparation};
 use super::model::*;
 use super::source::{ArchiveInfo, Diagnostics};
 use oa_geo::{wgs84, LatLon};
-use oa_sha256::core::hex::to_hex;
+use oa_sha256::core::hex::Hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -314,7 +314,7 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
     let _ = writeln!(o, "## Inputs\n");
     for (label, a) in [("NASR CSV archive", r.nasr), ("CIFP archive", r.cifp)] {
         let _ = writeln!(o, "{label}: {} ({} bytes)", a.name, a.bytes);
-        let _ = writeln!(o, "    sha256 {}", to_hex(&a.sha256));
+        let _ = writeln!(o, "    sha256 {}", Hex(&a.sha256));
         match a.expected {
             Some(_) => {
                 let _ = writeln!(o, "    matches the --expect-sha256 value given");
@@ -707,7 +707,7 @@ pub fn render_report(r: &ReportInput<'_>) -> String {
 
     let _ = writeln!(o, "## Snapshot\n");
     let _ = writeln!(o, "size {} bytes", r.snapshot_bytes);
-    let _ = writeln!(o, "sha256 {}", to_hex(&r.snapshot_sha256));
+    let _ = writeln!(o, "sha256 {}", Hex(&r.snapshot_sha256));
     let _ = writeln!(o, "Defects found here are held and batched under the Avila Labs defect reporting policy; nothing is sent");
     let _ = writeln!(o, "to the FAA without approval. CIFP customer terms: report discovered CIFP errors to FAA AIS and notify users.");
     o

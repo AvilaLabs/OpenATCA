@@ -60,9 +60,9 @@ use oa_notam::{
 };
 use oa_sha256::Sha256;
 
-use crate::core::hash::stale_hash_into;
 use crate::core::index::hash_bytes;
 use crate::core::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release, Slots};
+use crate::shell::hash::stale_hash_into;
 
 /// NOTAMs the table holds: 32,768. The United States has a few thousand NOTAMs in force at any
 /// time; this is several times that.

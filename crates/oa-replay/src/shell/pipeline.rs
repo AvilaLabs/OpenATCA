@@ -54,7 +54,6 @@ use oa_xml::Parser;
 use crate::core::clock::{clock_observe_mono, Clock, Tick};
 use crate::core::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
 pub use crate::core::feed::{FeedKind, FEED_COUNT, FEED_NAMES};
-use crate::core::hash::state_hash;
 use crate::core::table::{
     advance_time, new_table, shift_times, stale_count, ConfigError, FlightTable, TableConfig,
     NS_PER_S,
@@ -68,6 +67,7 @@ use crate::shell::fns::{
     apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
     new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
 };
+use crate::shell::hash::state_hash;
 use crate::shell::tfms::{
     apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_stale_count,
     flow_sweep, new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times,

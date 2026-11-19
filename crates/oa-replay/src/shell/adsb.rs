@@ -52,8 +52,8 @@
 use oa_adsb::{reports_row, Reports, NONE_I32, NONE_U16, NONE_U8};
 use oa_sha256::Sha256;
 
-use crate::core::hash::stale_hash_into;
 use crate::core::index::{index_find, index_insert, index_remove, mix64, new_index, Index};
+use crate::shell::hash::stale_hash_into;
 
 /// Aircraft the table holds: 65,536. One centre's box sees a few thousand aircraft a day.
 pub const ADSB_CAPACITY: usize = 1 << 16;

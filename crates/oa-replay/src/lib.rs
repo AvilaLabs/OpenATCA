@@ -8,9 +8,12 @@
 //!
 //! * Core (pure, no I/O, no clock, no allocation after construction, B1-B5): [`index`] (a
 //!   fixed-size open-addressing hash index), [`table`] ([`FlightTable`], a struct-of-arrays of
-//!   fixed capacity, and its eviction), [`hash`] ([`state_hash`] of the flight table),
+//!   fixed capacity, and its eviction),
 //!   [`slots`] (slot bookkeeping shared by the TFMS and FNS tables), [`clock`], [`errors`] and
 //!   [`feed`] ([`FeedKind`]).
+//! * Shell, allocating at checkpoints (C6): [`hash`] ([`state_hash`] of the flight table). It
+//!   sorts the live flights into GUFI order in a list allocated per call, which core may not do
+//!   (B1); nothing in core calls it.
 //! * Shell, pure but naming the decoder crates (B8): [`pipeline`] (frames in, state and counters
 //!   out; replay time is each frame's `recv_unix_ns`), [`apply`] ([`apply_sfdps`],
 //!   [`apply_tbfm`]), [`adsb`] ([`AdsbTable`], the latest ADS-B report per aircraft address,
@@ -35,8 +38,8 @@
 pub mod core;
 pub mod shell;
 
-pub use crate::core::{clock, errors, feed, hash, index, slots, table};
-pub use crate::shell::{adsb, apply, cli, fns, pipeline, report, source, tfms};
+pub use crate::core::{clock, errors, feed, index, slots, table};
+pub use crate::shell::{adsb, apply, cli, fns, hash, pipeline, report, source, tfms};
 
 pub use adsb::{
     adsb_advance, adsb_shift_times, adsb_slot_of, adsb_stale_count, adsb_sweep, apply_adsb,

@@ -1,4 +1,4 @@
-//! The state hash: SHA-256 over a canonical serialisation of the flight table. Core (pure, B1).
+//! The state hash: SHA-256 over a canonical serialisation of the flight table. Shell (B1, C6).
 //!
 //! Flights are visited in GUFI order, not slot order, so the hash does not depend on the order
 //! flights were inserted, on which slots they landed in, or on slots recycled by eviction. Every
@@ -21,7 +21,8 @@
 //! with the same input and different settings differ through the state itself).
 //!
 //! The sort allocates a slot list: the hash is taken at checkpoints, not per update, so this is
-//! a stated exception to C1 (offline harness, C6).
+//! a stated exception to C1 (offline harness, C6). That allocation is why this module is shell
+//! and not core; nothing in core uses it.
 
 use oa_sha256::core::sha256::{Digest, Sha256};
 

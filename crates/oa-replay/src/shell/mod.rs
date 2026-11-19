@@ -4,12 +4,14 @@
 //! decoders), `apply` (decoded SFDPS and TBFM rows to the flight table) and the tables of
 //! decoded rows, `adsb`, `tfms` and `fns`. They are pure and keep the replay's rule of no
 //! allocation after construction (C1, C5, checked by `tests/alloc.rs`); they are shell because
-//! of what they name, not because they do I/O.
+//! of what they name, not because they do I/O. `hash` (the state hash) is shell because it
+//! allocates a slot list per checkpoint (C6).
 
 pub mod adsb;
 pub mod apply;
 pub mod cli;
 pub mod fns;
+pub mod hash;
 pub mod pipeline;
 pub mod report;
 pub mod source;
