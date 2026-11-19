@@ -11,6 +11,7 @@ use oa_display::list::*;
 use oa_display::palette as pal;
 use oa_display::project::{project, projection_new, Projection};
 use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
+use oa_display::text::{text_new, text_str};
 use oa_display::traffic::*;
 use oa_sha256::to_hex;
 
@@ -52,7 +53,7 @@ fn draw(ts: &[Target], style: &TrafficStyle) -> (DisplayList, TrafficStats) {
     for t in ts {
         targets_push(&mut set, t).unwrap();
     }
-    let mut l = list_new(traffic_caps(set.capacity, style).unwrap()).unwrap();
+    let mut l = list_new(traffic_caps(targets_capacity(&set), style).unwrap()).unwrap();
     let st = build_traffic(&mut l, &p, &oa_geo::wgs84(), &set, style).unwrap();
     (l, st)
 }
@@ -83,6 +84,30 @@ fn texts_of(l: &DisplayList) -> Vec<(String, (i32, i32), u8)> {
             )
         })
         .collect()
+}
+
+fn alt(a: i32) -> String {
+    let mut b = text_new();
+    alt_text(&mut b, a);
+    text_str(&b).to_string()
+}
+
+fn speed(g: u16) -> String {
+    let mut b = text_new();
+    speed_text(&mut b, g);
+    text_str(&b).to_string()
+}
+
+fn ident(c: &[u8; 8], addr: u32) -> String {
+    let mut b = text_new();
+    ident_text(&mut b, c, addr, false);
+    text_str(&b).to_string()
+}
+
+fn tags(flags: u8, reacq: bool, r95: bool) -> String {
+    let mut b = text_new();
+    tags_text(&mut b, flags, reacq, r95);
+    text_str(&b).to_string()
 }
 
 fn centre() -> (i32, i32) {
@@ -187,7 +212,7 @@ fn an_uncertain_coasting_target_has_the_diamond_the_x_and_both_tags() {
     let mut t = plain(ORD.0, ORD.1);
     t.flags = T_UNCERTAIN | T_COAST;
     t.r95_m = f32::NAN;
-    let (l, _) = draw(&[t], &DEFAULT_STYLE);
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
     let c = centre();
     let ls = lines_of(&l);
     assert_eq!(ls.len(), 6);
@@ -195,9 +220,11 @@ fn an_uncertain_coasting_target_has_the_diamond_the_x_and_both_tags() {
         ls[4],
         (off(c, -6, -6), off(c, 6, 6), pal::TARGET, LAYER_SYMBOL)
     );
-    // No usable r95: no circle, and still the diamond and the tag, never a guess.
+    // No usable r95: no circle, and still the diamond and the tag, never a guess; the data block
+    // says the radius is missing and the frame counts it.
     assert!(l.circles.x.is_empty());
-    assert_eq!(texts_of(&l).last().unwrap().0, "CST UNC");
+    assert_eq!(texts_of(&l).last().unwrap().0, "CST UNC R95?");
+    assert_eq!(st.r95_unknown, 1);
 }
 
 // REQ: OA-DSP-039
@@ -326,38 +353,50 @@ fn the_trail_is_the_last_n_positions_as_dim_dots_newest_first() {
 // REQ: OA-DSP-040
 #[test]
 fn data_block_text_rounds_and_shows_what_is_missing() {
-    assert_eq!(alt_text(35_000), "350");
-    assert_eq!(alt_text(34_949), "349");
-    assert_eq!(alt_text(34_950), "350");
-    assert_eq!(alt_text(800), "008");
-    assert_eq!(alt_text(0), "000");
-    assert_eq!(alt_text(49), "000");
-    assert_eq!(alt_text(50), "001");
-    assert_eq!(alt_text(-200), "-02");
-    assert_eq!(alt_text(-49), "000");
-    assert_eq!(alt_text(NO_ALT), "---");
-    assert_eq!(alt_text(i32::MAX), "999");
-    assert_eq!(speed_text(4_200), "42");
-    assert_eq!(speed_text(4_249), "42");
-    assert_eq!(speed_text(4_250), "43");
-    assert_eq!(speed_text(0), "00");
-    assert_eq!(speed_text(60), "01");
-    assert_eq!(speed_text(NO_U16 - 1), "655");
-    assert_eq!(speed_text(NO_U16), "--");
-    assert_eq!(ident_text(&callsign("DAL9"), 1), "DAL9");
-    assert_eq!(ident_text(&callsign("DAL9   "), 1), "DAL9");
-    assert_eq!(ident_text(&callsign("AAL1234T"), 1), "AAL1234T");
-    assert_eq!(ident_text(&[0; 8], 0xA1B2C3), "A1B2C3");
-    assert_eq!(ident_text(&[0; 8], 0xABC), "000ABC");
+    assert_eq!(alt(35_000), "350");
+    assert_eq!(alt(34_949), "349");
+    assert_eq!(alt(34_950), "350");
+    assert_eq!(alt(800), "008");
+    assert_eq!(alt(0), "000");
+    assert_eq!(alt(49), "000");
+    assert_eq!(alt(50), "001");
+    assert_eq!(alt(-200), "-02");
+    assert_eq!(alt(-49), "000");
+    assert_eq!(alt(NO_ALT), "---");
+    assert_eq!(alt(99_949), "999");
     assert_eq!(
-        ident_text(&[0; 8], 0x0100_0ABC),
+        alt(99_950),
+        "999+",
+        "beyond three digits is marked, not shown as a flight level"
+    );
+    assert_eq!(alt(i32::MAX), "999+");
+    assert_eq!(alt(-9_949), "-99");
+    assert_eq!(alt(-9_950), "-99-");
+    assert_eq!(speed(4_200), "42");
+    assert_eq!(speed(4_249), "42");
+    assert_eq!(speed(4_250), "43");
+    assert_eq!(speed(0), "00");
+    assert_eq!(speed(60), "01");
+    assert_eq!(speed(NO_U16 - 1), "655");
+    assert_eq!(speed(NO_U16), "--");
+    assert_eq!(ident(&callsign("DAL9"), 1), "DAL9");
+    assert_eq!(ident(&callsign("DAL9   "), 1), "DAL9");
+    assert_eq!(ident(&callsign("AAL1234T"), 1), "AAL1234T");
+    assert_eq!(ident(&[0; 8], 0xA1B2C3), "A1B2C3");
+    assert_eq!(ident(&[0; 8], 0xABC), "000ABC");
+    assert_eq!(
+        ident(&[0; 8], 0x0100_0ABC),
         "1000ABC",
         "non-ICAO shows its bit 24"
     );
-    assert_eq!(ident_text(&[b' '; 8], 0x1), "000001");
-    assert_eq!(ident_text(&[b'A', 0x07, b'B', 0, 0, 0, 0, 0], 1), "A#B");
-    assert_eq!(tags_text(0, false), "");
-    assert_eq!(tags_text(T_COAST | T_UNCERTAIN, true), "CST UNC REACQ");
+    assert_eq!(ident(&[b' '; 8], 0x1), "000001");
+    assert_eq!(ident(&[b'A', 0x07, b'B', 0, 0, 0, 0, 0], 1), "A#B");
+    assert_eq!(tags(0, false, false), "");
+    assert_eq!(tags(T_COAST | T_UNCERTAIN, true, false), "CST UNC REACQ");
+    assert_eq!(
+        tags(T_COAST | T_UNCERTAIN | T_CS_CONFLICT, true, true),
+        "CST UNC CS? R95? REACQ"
+    );
 }
 
 // REQ: OA-DSP-040
@@ -391,7 +430,7 @@ fn a_full_set_refuses_counts_and_the_frame_says_so() {
         .unwrap_err()
         .to_string()
         .contains("refused"));
-    assert_eq!((targets_len(&set), set.refused), (2, 2));
+    assert_eq!((targets_len(&set), targets_refused(&set)), (2, 2));
     let mut l = list_new(traffic_caps(2, &DEFAULT_STYLE).unwrap()).unwrap();
     let st = build_traffic(&mut l, &p, &oa_geo::wgs84(), &set, &DEFAULT_STYLE).unwrap();
     assert_eq!((st.drawn, st.refused), (2, 2));
@@ -404,7 +443,7 @@ fn a_full_set_refuses_counts_and_the_frame_says_so() {
     assert_eq!(notice.1, (8 * 16, 600 * 16 - 22 * 16));
     // The next frame starts clean, and with no refusal there is no notice.
     targets_clear(&mut set);
-    assert_eq!((targets_len(&set), set.refused), (0, 0));
+    assert_eq!((targets_len(&set), targets_refused(&set)), (0, 0));
     assert!(targets_push(&mut set, &t).is_ok());
     let mut l = list_new(traffic_caps(2, &DEFAULT_STYLE).unwrap()).unwrap();
     build_traffic(&mut l, &p, &oa_geo::wgs84(), &set, &DEFAULT_STYLE).unwrap();
@@ -584,4 +623,193 @@ fn traffic_draws_above_the_map_and_under_the_legend_strip() {
     // The traffic of a scene marks exactly its own layers.
     let (l, _) = draw(&scene(), &DEFAULT_STYLE);
     assert_eq!(l.layers_used & !0b0111_1000_0000, 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn an_invalid_target_is_refused_counted_and_said_on_the_frame_never_defaulted() {
+    let p = proj();
+    let mut set = targets_new(8).unwrap();
+    let mut off_globe = plain(ORD.0, ORD.1);
+    off_globe.lat_e7 = 900_000_001;
+    let mut long_trail = plain(ORD.0, ORD.1);
+    long_trail.trail_len = MAX_TRAIL as u8 + 1;
+    let mut bad_history = plain(ORD.0, ORD.1);
+    bad_history.trail_len = 1;
+    bad_history.trail[0] = (0, 1_800_000_001);
+    let mut bad_flags = plain(ORD.0, ORD.1);
+    bad_flags.flags = 8;
+    for t in [off_globe, long_trail, bad_history, bad_flags] {
+        assert!(matches!(
+            targets_push(&mut set, &t),
+            Err(TrafficError::Malformed { .. })
+        ));
+    }
+    assert!(targets_push(&mut set, &plain(ORD.0, ORD.1)).is_ok());
+    assert_eq!(
+        (
+            targets_len(&set),
+            targets_malformed(&set),
+            targets_refused(&set)
+        ),
+        (1, 4, 0)
+    );
+    // Every column has one entry for the one target.
+    let c = targets_columns(&set);
+    assert_eq!(
+        (
+            c.lat_e7.len(),
+            c.addr.len(),
+            c.callsign.len(),
+            c.trail_lat_e7.len()
+        ),
+        (1, 1, 1, MAX_TRAIL)
+    );
+    let mut l = list_new(traffic_caps(8, &DEFAULT_STYLE).unwrap()).unwrap();
+    let st = build_traffic(&mut l, &p, &oa_geo::wgs84(), &set, &DEFAULT_STYLE).unwrap();
+    assert_eq!((st.drawn, st.malformed, st.refused), (1, 4, 0));
+    assert_eq!(traffic_loss(&st), 4);
+    let notice = texts_of(&l)
+        .into_iter()
+        .find(|t| t.0.starts_with("TARGETS MALFORMED"))
+        .unwrap();
+    assert_eq!(notice.0, "TARGETS MALFORMED: 4 (REFUSED)");
+    assert_eq!(notice.2, pal::ALERT);
+    // One line above the targets-not-drawn notice.
+    assert_eq!(notice.1, (8 * 16, 600 * 16 - 36 * 16));
+    targets_clear(&mut set);
+    assert_eq!(targets_malformed(&set), 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_callsign_conflict_shows_the_address_and_the_tag_not_either_callsign() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.callsign = callsign("UAL123");
+    t.flags = T_CS_CONFLICT;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    let tx = texts_of(&l);
+    assert_eq!(tx[0].0, "A1B2C3");
+    assert_eq!(tx.last().unwrap().0, "CS?");
+    assert_eq!(st.cs_conflict, 1);
+    assert_eq!(traffic_loss(&st), 0, "it is shown, not lost");
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_track_outside_the_circle_is_counted_not_silently_left_without_a_leader() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.gs_dkt = 4_000;
+    t.track_ddeg = 3_600;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    assert_eq!((st.with_leader, st.leader_bad_track), (0, 1));
+    assert_eq!(traffic_loss(&st), 1);
+    assert!(lines_of(&l).iter().all(|x| x.3 != LAYER_LEADER));
+    // No velocity at all is not a loss.
+    let (_, st) = draw(&[plain(ORD.0, ORD.1)], &DEFAULT_STYLE);
+    assert_eq!(traffic_loss(&st), 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn the_longest_data_block_fits_the_per_target_text_budget_and_is_never_clipped() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.flags = T_COAST | T_UNCERTAIN | T_CS_CONFLICT;
+    t.r95_m = f32::NAN;
+    t.reacq_age_s = 0;
+    t.addr = 0x1FF_FFFF;
+    t.alt_ft = -1_200_000;
+    t.gs_dkt = NO_U16 - 1;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    let tx = texts_of(&l);
+    assert_eq!(tx[0].0, "1FFFFFF");
+    assert_eq!(tx[1].0, "-99- 655");
+    assert_eq!(tx[2].0, "CST UNC CS? R95? REACQ");
+    assert!(l.text.len() <= 64, "{} bytes", l.text.len());
+    assert_eq!(st.text_clipped, 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn an_altitude_beyond_the_data_block_is_marked_and_counted() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.alt_ft = 250_000;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    assert_eq!(texts_of(&l)[1].0, "999+ --");
+    assert_eq!(st.alt_display_clamped, 1);
+    assert_eq!(traffic_loss(&st), 0, "it is shown, not lost");
+    t.alt_ft = 35_000;
+    assert_eq!(draw(&[t], &DEFAULT_STYLE).1.alt_display_clamped, 0);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_position_is_checked_before_it_can_count_as_the_edge_of_the_scope() {
+    let p = proj();
+    assert_eq!(map_position(&p, 900_000_001, 0), MapPos::Invalid);
+    assert_eq!(map_position(&p, 0, -1_800_000_001), MapPos::Invalid);
+    assert_eq!(map_position(&p, ORD.0 + 100_000_000, ORD.1), MapPos::Off);
+    assert!(matches!(map_position(&p, ORD.0, ORD.1), MapPos::On(_)));
+    assert!(on_map(&p, ORD.0, ORD.1) && !on_map(&p, 900_000_001, 0));
+}
+
+/// A valid position that `proj()` cannot place: opposite the centre.
+const UNPLACED: (i32, i32) = (-422_586_000, 918_952_000);
+
+/// Draws `ts` with the projection `p`.
+fn draw_with(p: &Projection, ts: &[Target]) -> TrafficStats {
+    let mut set = targets_new(ts.len().max(1)).unwrap();
+    for t in ts {
+        targets_push(&mut set, t).unwrap();
+    }
+    let st = DEFAULT_STYLE;
+    let mut l = list_new(traffic_caps(targets_capacity(&set), &st).unwrap()).unwrap();
+    build_traffic(&mut l, p, &oa_geo::wgs84(), &set, &st).unwrap()
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn the_antipode_is_a_valid_position_that_does_not_project() {
+    // Unprojectable is reachable: the point opposite the centre is on the globe and has no place
+    // on the plane (the projection's denominator is below its floor there).
+    let p = proj();
+    // (The antipode of the conformal sphere, not of the ellipsoid: found by scanning.)
+    assert_eq!(
+        map_position(&p, UNPLACED.0, UNPLACED.1),
+        MapPos::Unprojectable
+    );
+    // A degree away the position projects, and is far off the screen.
+    assert_eq!(
+        map_position(&p, UNPLACED.0 + 10_000_000, UNPLACED.1),
+        MapPos::Off
+    );
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_target_that_cannot_be_placed_is_counted_as_unprojectable_not_as_off_screen() {
+    let t = plain(UNPLACED.0, UNPLACED.1);
+    let st = draw_with(&proj(), &[t]);
+    assert_eq!((st.unprojectable, st.off_screen, st.drawn), (1, 0, 0));
+    assert_eq!(traffic_loss(&st), 1);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_95_percent_radius_that_does_not_fit_the_list_is_clamped_and_counted() {
+    // A 0.05 NM scope is about 10 pixels a metre; a radius of 20 000 km is beyond 2^28 sixteenths.
+    let p = projection_new(ORD.0, ORD.1, 0.05, 800, 600, 0).unwrap();
+    let mut t = plain(ORD.0, ORD.1);
+    t.flags = T_UNCERTAIN;
+    t.r95_m = 1.0e5;
+    let near = draw_with(&p, &[t]);
+    assert_eq!(near.circle_radius_clamped, 0);
+    t.r95_m = 1.0e7;
+    let far = draw_with(&p, &[t]);
+    assert_eq!(
+        (far.circle_radius_clamped, far.circle_failed),
+        (1, 0),
+        "{far:?}"
+    );
+    assert_eq!(traffic_loss(&far), 1);
 }

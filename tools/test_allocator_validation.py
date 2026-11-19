@@ -29,6 +29,7 @@ def result(injected=False):
             "fusion_adsb_hard_assoc_registration",
             "fusion_anonymous_init_and_assoc",
             "nam_session_activate_traffic_retry_full_deactivate",
+            "display_rows_traffic_frame_refusal",
         ],
         "route_ids": [
             'fusion_adsb_ingest',
@@ -48,6 +49,24 @@ def result(injected=False):
             'fusion_plot_pending_overflow',
             'fusion_plot_pending_recovery',
             'fusion_registration',
+            'display_rows_to_targets',
+            'display_track_end',
+            'display_traffic_draw',
+            'display_uncertain_radius',
+            'display_callsign_conflict',
+            'display_altitude_marker',
+            'display_set_refusal',
+            'display_malformed_target',
+            'display_frame_chain',
+            'display_map_scene',
+            'display_invalid_position',
+            'display_unprojectable',
+            'display_history_dot_dropped',
+            'display_time_overflow',
+            'display_unplaced_history_dot',
+            'display_stamp_clipped',
+            'display_frame_digest',
+            'display_frame_refusal',
             'nam_session_activation',
             'nam_session_traffic',
             'nam_session_resend',
@@ -149,6 +168,15 @@ def result(injected=False):
             "abandoned": 128, "peak_pending": 128, "pending_full": 1, "discards": 3,
             "dropped": 0, "script_errors": 0, "final_inactive": True,
         },
+        "display_frame": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "convert_added": 1080, "convert_ended": 1300, "traffic_drawn": 64, "uncertain": 631,
+            "cs_conflict": 20, "r95_unknown": 269, "refused": 100, "alt_clamped": 4,
+            "malformed": 20, "frame_drawn": 2718, "scene_items": 140, "refusing_refused": 2574,
+            "convert_invalid_position": 18, "convert_unprojectable": 18,
+            "convert_trail_dropped": 63, "convert_time_overflow": 2718,
+            "draw_trail_dropped": 20, "stamp_clipped": 5, "digests": 20,
+        },
     }
 
 
@@ -188,6 +216,10 @@ indexing_slicing = "deny"
 [dependencies]
 oa-track = { path = "../../crates/oa-track" }
 oa-nam = { path = "../../crates/oa-nam" }
+oa-display = { path = "../../crates/oa-display" }
+oa-scope-replay = { path = "../../crates/oa-scope-replay" }
+oa-airspace = { path = "../../crates/oa-airspace" }
+oa-geo = { path = "../../crates/oa-geo" }
 ''')
     write(root / "validation/oa-alloc-check/src/main.rs", '''
 #![deny(unsafe_code)]
@@ -332,7 +364,7 @@ probe = { path = "../../validation/oa-alloc-check" }
             layout_tree(root)
             manifest = root / "validation/oa-alloc-check/Cargo.toml"
             manifest.write_text(manifest.read_text().replace('oa-track = {', 'track-alias = {'), encoding="utf-8")
-            self.assertTrue(any("only the oa-track" in e for e in gate.allocation_layout_errors(root)))
+            self.assertTrue(any("only its declared local crate" in e for e in gate.allocation_layout_errors(root)))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             layout_tree(root)
@@ -401,6 +433,29 @@ probe = { path = "../../validation/oa-alloc-check" }
                             gate.evaluate_allocator_result(json.dumps(value))))
         value = result()
         value["nam_session"]["final_inactive"] = False
+        self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
+
+    def test_display_window_module_is_allowed_when_safe_and_rejected_when_unsafe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            helper = root / "validation/oa-alloc-check/src/display_window.rs"
+            helper.write_text("#![forbid(unsafe_code)]\nfn fixture() {}\n")
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+            helper.write_text("#![allow(unsafe_code)]\nunsafe fn fixture() {}\n")
+            self.assertTrue(any("display_window.rs" in e for e in gate.allocation_layout_errors(root)))
+
+    def test_display_frame_evidence_must_be_exact_and_exercised(self):
+        value = result()
+        value["display_frame"]["malformed"] = 0
+        self.assertTrue(any("display_frame.malformed" in e for e in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["display_frame"]["scene_items"] = 0
+        self.assertTrue(any("display_frame.scene_items" in e for e in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["display_frame"]["alloc"] = 1
         self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
 
     def test_repository_allocator_layout_is_valid(self):

@@ -1217,6 +1217,63 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   a window without reports is a plain failure.
 - **OA-DSP-045** Traffic layers draw above the map and below the legend strip's backdrop, so the legend is never covered
   by a target.
+- **OA-DSP-046** The traffic target set cannot hold an inconsistent or invalid target: its columns are private and the
+  only way in is the push, which refuses a target with a position or a history position off the globe, a trail longer
+  than 16, or unknown flag bits (counted, and `TARGETS MALFORMED: N` on the frame, as `TARGETS NOT DRAWN` is for a full
+  set). Nothing is defaulted for a missing column. Every part of a target that cannot be drawn is counted by reason
+  (a track outside [0, 3600), a leader or 95% circle the geodesic or projection could not place, a history dot that does
+  not project, a text that did not fit), an uncertain target with no usable 95% radius shows the tag `R95?`, and the
+  loss total names what was lost. A target carries `CS?` and its hex address when two callsigns were heard for the
+  address at one instant. A position is validated before it can count as off the map: a position off the globe
+  and one that does not project are loss, counted apart from off-map, which is not. An altitude beyond what the data
+  block holds is written `999+` or `-99-` and counted, never shown as a flight level. `Target` has a size guard of 164
+  bytes.
+- **OA-DSP-047** Tracker rows are stored as plain columns per address and shown without substitution: columns of
+  different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
+  the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
+  address 2^18, rows 2^24) is refused and counted, except that the total-rows cap is checked from the sizes the input declares
+  before any row is stored and aborts the run with an error before the frame loop. The store and the callsigns are built by the shell, once per drain, with the capacities a parameter; the core reads
+  them without allocating. The work of one frame is a fixed number of binary searches per address (the newest row, the
+  callsign, the newest reacquired row, the history dots), stated beside the capacities. Rows of one address at one
+  time keep the order the tracker wrote them and the later one wins. A velocity that is not a number is counted and
+  shown unknown; a history dot whose position is off the globe is dropped and counted, and the target stays. An altitude beyond `i32` feet is clamped to one above the absent value
+  and counted, an altitude flagged present but not a number is counted and shown absent, a speed beyond the field is the
+  largest it holds, a 95% radius that is not a number or does not fit `f32` is unknown (counted) and a reacquired window
+  that could equal the absent age is refused. Time differences that do not fit an `i64` are older than any window and
+  an overflow in the history lookup is counted. The stored `Row` has a size guard of 32 bytes.
+- **OA-DSP-048** Callsigns are the newest heard at or before the frame's time, never a later one. Two different
+  callsigns for one address at one instant are a conflict, reported as such and the same whatever order the reports
+  came in; the conflict stands until the next report with a callsign. Callsign inputs of different lengths are an
+  error.
+- **OA-DSP-049** `--start` is parsed with integer arithmetic only: Unix seconds (digits, and a point with up to nine
+  more) or `YYYY-MM-DDTHH:MM:SS[.fffffffff]Z` with fields of fixed width, a year from 1970 to 2261 (the last whole year
+  an `i64` of nanoseconds holds), a day the month has (leap years included), no leap second. A time that does not fit
+  is refused with a usage error and never saturated; fractional nanoseconds are kept exactly. Durations and steps use
+  the same integer parser.
+- **OA-DSP-050** `oa-scope-replay` refuses an `--out-dir` that is not empty unless `--overwrite` is given, which deletes
+  only the files the tool writes (`frame-NNNN.ppm` and `hashes.txt`) before the run writes its own.
+- **OA-DSP-051** `oa-scope-replay` ends with a report of what it excluded or lost, each reason named on its own and
+  with its denominator (clip frames by kind, decode, quality-gate removals by reason, tracker refusals by reason, rows
+  by reason, callsigns, every part of a target by reason), and exits with code 3 after writing its output when work
+  was lost, unless `--allow-loss` is given. Exit codes: 0 success, 1 a failure, 2 a usage error (including a duration
+  that is not a multiple of the step), 3 work was lost.
+  **Loss** is work the run was asked to do and did not: damaged clip frames, payloads that could not be decoded,
+  reject frames (messages the bridge refused to frame, so input that never arrived), tracker output rows that
+  overflowed, valid measurements the tracker could not use (no track slot, a numerical failure), rows the store
+  refused (address table, rows per address, a missing column), addresses that could not be put in time order, targets
+  the display refused (full, malformed, columns unreadable), positions off the globe or that do not project, a leader,
+  a circle (or one drawn smaller than true), a history dot or a text that could not be drawn, a stamp clipped, and
+  history dots dropped for a position off the globe.
+  **Not loss**, because the system did what it is for or the screen says so: reports removed by the ADS-B quality gates
+  and records the decoder dropped as invalid, and measurements the tracker refused as invalid or rejected by the jump
+  rule (input that is wrong is refused and counted by reason, not work lost), status frames, clip frames and tracker
+  rows outside the window, tracks that ended, targets off the map, empty callsigns, callsign conflicts (shown as
+  `CS?`), values clamped or shown unknown (velocity or altitude not a number, a 95% radius unknown), and altitudes
+  beyond the data block, written `999+` or `-99-`. There is no limit on a fraction removed by the quality gates.
+- **OA-DSP-052** A full traffic frame allocates nothing after the tables are built: the rows to targets conversion, the
+  traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
+  chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
+  (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
 
 ### Replay and flight state (oa-replay)
 

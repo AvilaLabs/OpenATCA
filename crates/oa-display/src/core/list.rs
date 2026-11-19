@@ -1,5 +1,5 @@
 //! The display list (**core**, B1, A3): a flat, struct-of-arrays list of drawing primitives, built
-//! fresh each frame by pure functions and drawn by [`crate::raster`].
+//! fresh each frame by pure functions and drawn by [`crate::core::raster`].
 //!
 //! Primitives: line segment, polyline (a span of a shared vertex array), filled rectangle, circle
 //! outline and text. Every primitive carries a palette index and a layer. Coordinates are `i32`
@@ -11,7 +11,7 @@
 //! a partial frame is never drawn by mistake. [`list_clear`] resets the list for the next frame
 //! and keeps all capacity.
 
-use crate::palette::PALETTE_LEN;
+use crate::core::palette::PALETTE_LEN;
 use std::fmt;
 
 /// Most rows any one table of a display list may be given. A table of 2^24 rows of 4-byte
@@ -352,7 +352,7 @@ pub fn push_line(
     push_line_w(l, p0, p1, colour, layer, 1)
 }
 
-/// Adds a line segment `width` pixels wide, 1 or 2 (see [`crate::raster`] for how 2 is drawn).
+/// Adds a line segment `width` pixels wide, 1 or 2 (see [`crate::core::raster`] for how 2 is drawn).
 pub fn push_line_w(
     l: &mut DisplayList,
     (x0, y0): (i32, i32),
@@ -458,7 +458,7 @@ pub fn push_vertex(l: &mut DisplayList, x: i32, y: i32) -> Result<(), DisplayErr
 }
 
 /// Adds text. `size` is the cap height in pixels, 1 to 255. Characters the font lacks are drawn
-/// as the missing-glyph box (see [`crate::font`]), never skipped.
+/// as the missing-glyph box (see [`crate::core::font`]), never skipped.
 pub fn push_text(
     l: &mut DisplayList,
     (x, y): (i32, i32),
