@@ -151,6 +151,13 @@ pub const CONFIRM_WINDOW_INTERVALS: i64 = 4;
 /// The deciding report is at least this long, ns, after the move: a copy of the same message,
 /// or a burst within one squitter, is not a second report.
 pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;
+/// How many reports at one place decide a move, either way (RT-273): the move's own report counts
+/// for the moved place, so one more report there confirms it, and the old path needs two reports
+/// of its own, at least [`CONFIRM_MIN_SEP_NS`] apart, to roll it back (one report, the case of a
+/// forger who replays the old place, or of a genuine relocation seen by one stray plot, decides
+/// nothing). The rule is written for two: the moved side needs one more, the old side keeps one
+/// earlier vote (`const` assertion in `confirm`).
+pub const CONFIRM_REPORTS: u8 = 2;
 /// How many unconfirmed moves can hold a rollback snapshot at once (2200 bytes each): 64, 141 kB.
 /// Measured on the two development days (the 2026-11-14 day to choose, 2026-11-15 as the
 /// check): the most tracks with an unconfirmed move at once was 7 on 2026-11-14 and

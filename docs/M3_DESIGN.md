@@ -167,8 +167,10 @@ tracker therefore applies a report that passes the gate but lies more than 926 m
 position at once, as before, but keeps the track's state from before it (a pool of 64 snapshots,
 2.2 kB each), marks every row and every forecast of the track `O_MOVE_UNCONFIRMED` with a 95%
 radius wide enough to cover the old path, and lets the track's next report decide, if that report
-is itself applied: it agrees with the moved track (confirmed), with the old path (rolled back to
-the snapshot, the report applied to that), or with neither or comes after four expected report
+is itself applied: it agrees with the moved track (confirmed), with the old path (the first such
+report is only a vote and the second, 0.5 s or more after it, rolls back to the snapshot with
+the report applied to that, so that one stray plot or a forger's replay of the old place cannot
+undo a genuine relocation), or with neither or comes after four expected report
 intervals (5 s at least), in which case the move stands. A report the gate refuses decides
 nothing and the mark stays. Every move ends in exactly one counted outcome (confirmed, rolled
 back, undecided, or abandoned because the track ended, restarted, resynchronised or was demoted),

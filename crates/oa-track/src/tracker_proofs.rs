@@ -254,6 +254,8 @@ fn arbitrary_stats() -> TrackerStats {
         move_no_snapshot: kani::any(),
         move_widen_failed: kani::any(),
         moves_internal_refused: kani::any(),
+        moves_old_path_votes: kani::any(),
+        moves_old_path_unpredictable: kani::any(),
         moves_peak_active: kani::any(),
         nis_sum: kani::any(),
         nis_n: kani::any(),
@@ -451,6 +453,11 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.move_no_snapshot, b.move_no_snapshot);
     assert_eq!(a.move_widen_failed, b.move_widen_failed);
     assert_eq!(a.moves_internal_refused, b.moves_internal_refused);
+    assert_eq!(a.moves_old_path_votes, b.moves_old_path_votes);
+    assert_eq!(
+        a.moves_old_path_unpredictable,
+        b.moves_old_path_unpredictable
+    );
     assert_eq!(a.moves_peak_active, b.moves_peak_active);
     assert_f64_bits(a.nis_sum, b.nis_sum);
     assert_eq!(a.nis_n, b.nis_n);
@@ -1214,13 +1221,16 @@ fn any_radius(_: &[f32; 3]) -> f64 {
     r
 }
 
-// What this proves: the production `update_in_order`, given a decision `Moved`, starts the
-// track's unconfirmed move (the mark is set by production, not by the harness), and the
-// production `emit` marks the row it makes, whether or not the old path's row exists and
+// What this proves, and only this: the production `update_in_order`, given a decision `Moved`,
+// starts the track's unconfirmed move (the mark is set by production, not by the harness), and
+// the production `emit` that it calls marks the row it makes, whether or not the old path's row
+// exists and
 // whatever the distance and radii are (stubbed to any value): a row with an old path that
 // differs from the new one is widened or left as it is, a row whose widening cannot be computed
-// gets the fail-closed covariance (500 km) and is counted. What it does not prove: the value of the widened
-// radius (the sqrt and the scaling; the integration tests check it against the old path).
+// gets the fail-closed covariance (500 km) and is counted. Not covered by this proof (integration
+// tests only): `update_in_order_held`, the tick rows, the forecast (`tracker_forecast`), the rows
+// a late replay emits (`widen_replay_row`), and the value of the widened radius (the sqrt and the
+// scaling).
 // REQ: OA-TRK-347
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -1228,7 +1238,7 @@ fn any_radius(_: &[f32; 3]) -> f64 {
 #[kani::stub(filter_output, move_row_or_none)]
 #[kani::stub(filter_row_distance_m, any_distance)]
 #[kani::stub(r95_m, any_radius)]
-fn a_move_made_by_production_marks_the_row_it_emits_and_widens_or_fails_closed() {
+fn update_in_order_with_a_large_move_starts_it_and_emit_marks_the_row_it_makes() {
     let mut t = proof_tracker_with_pool(CONFIRMED, 1);
     t.cur[PROOF_SLOT].t_ns = OLD_T;
     let mut out = crate::types::output_new(1);
@@ -1255,17 +1265,19 @@ fn a_move_made_by_production_marks_the_row_it_emits_and_widens_or_fails_closed()
     );
 }
 
-// What this proves (pure): a report under 0.5 s after the move decides nothing; `Confirm` or
-// `Rollback` only for a report at least 0.5 s after the move, within the window, whose distance
-// from the moved track (confirm) or the old path (rollback) is within the agreement limit,
-// which never passes `confirm_move_m`; Confirm against Rollback: a report nearer the old path
-// than the moved track (both within the limit) rolls back, a tie or an unknown old path
-// confirms, a report that does not agree with the moved track and is within the limit of the
-// old path rolls back, and a report within the limit of neither is undecided.
+// What this proves (the pure function `resolve_decide` only; nothing of the tracker around it):
+// a report under 0.5 s after the move decides nothing; `Confirm` or `Rollback` only for a report
+// at least 0.5 s after the move, within the window, whose distance from the moved track (confirm)
+// or the old path (rollback) is within the agreement limit, which never passes `confirm_move_m`;
+// `Rollback` only after an earlier old-path report at least 0.5 s before it (RT-273: the same
+// corroboration as confirming, two reports at a place), the first being `OldVote`; a tie or a move
+// with no snapshot confirms; with a snapshot an old path that cannot be predicted confirms and
+// rolls back nothing (`OldUnpredictable`, RT-276); a report within the limit of neither is
+// undecided. Not proved: that `update_in_order_held` acts on the verdict as described.
 // REQ: OA-TRK-348
 #[kani::proof]
 #[kani::solver(cadical)]
-fn a_single_far_report_marks_every_row_until_a_second_report_decides() {
+fn resolve_decide_needs_apart_reports_to_confirm_and_two_to_roll_back() {
     // Any configuration the checker accepts, any times, any distances (so any gap and any
     // covariance behind them: the decision does not see them), any window from the floor up.
     let cfg = TrackerConfig {
@@ -1282,116 +1294,218 @@ fn a_single_far_report_marks_every_row_until_a_second_report_decides() {
     kani::assume(window_ns >= cfg.confirm_window_ns);
     let cur_m: f64 = kani::any();
     let old_m: f64 = kani::any();
-    let v = crate::confirm::resolve_decide(start_ns, now_ns, cur_m, old_m, window_ns, &cfg);
+    let has_old: bool = kani::any();
+    // Without a snapshot the old path is unknown (not a number).
+    kani::assume(has_old || old_m.is_nan());
+    let vote_ns: i64 = kani::any();
+    let seen = crate::confirm::Seen {
+        cur_m,
+        old_m,
+        has_old,
+        old_vote_ns: vote_ns,
+    };
+    let v = crate::confirm::resolve_decide(start_ns, now_ns, &seen, window_ns, &cfg);
     let sep = now_ns.saturating_sub(start_ns);
-    // Nothing but a second report, apart from the move and from the window, decides it.
-    if v == crate::confirm::Resolve::Wait {
-        assert!(sep < crate::params::CONFIRM_MIN_SEP_NS);
-    } else {
-        assert!(sep >= crate::params::CONFIRM_MIN_SEP_NS);
+    use crate::confirm::Resolve as R;
+    // Nothing but a report apart from the move and inside the window decides it.
+    if v == R::Wait && sep >= crate::params::CONFIRM_MIN_SEP_NS {
+        // Only the burst after a vote waits once past the move's own separation.
+        assert!(vote_ns != crate::confirm::NO_VOTE_NS);
+        assert!(now_ns.saturating_sub(vote_ns) < crate::params::CONFIRM_MIN_SEP_NS);
     }
-    if v == crate::confirm::Resolve::Confirm || v == crate::confirm::Resolve::Rollback {
-        assert!(sep <= window_ns);
-        let near = if v == crate::confirm::Resolve::Confirm {
-            cur_m
-        } else {
-            old_m
-        };
+    if sep < crate::params::CONFIRM_MIN_SEP_NS {
+        assert!(v == R::Wait);
+    }
+    if v == R::Confirm || v == R::Rollback || v == R::OldVote {
+        assert!(sep >= crate::params::CONFIRM_MIN_SEP_NS && sep <= window_ns);
+    }
+    if v == R::Confirm {
         // However long the wait, the agreement never loosens past the fixed move distance.
-        assert!(near <= cfg.confirm_move_m);
+        assert!(cur_m <= cfg.confirm_move_m);
+        // Never against a snapshot whose prediction failed, never when the old path is nearer.
+        assert!(!has_old || (!old_m.is_nan() && old_m >= cur_m));
     }
-    // Ordering: Confirm needs the moved track no farther than the old path (or the old path
-    // unknown); Rollback needs the old path strictly nearer or the moved track out of reach.
-    if v == crate::confirm::Resolve::Confirm {
-        assert!(old_m.is_nan() || old_m >= cur_m);
-    }
-    if v == crate::confirm::Resolve::Rollback {
+    if v == R::Rollback || v == R::OldVote {
+        assert!(has_old && old_m <= cfg.confirm_move_m);
         assert!(old_m < cur_m || cur_m.is_nan() || cur_m > cfg.confirm_move_m);
     }
-    if cur_m == old_m
-        && v != crate::confirm::Resolve::Wait
-        && v != crate::confirm::Resolve::Undecided
-    {
-        assert!(v == crate::confirm::Resolve::Confirm);
+    // One report on the old path never rolls back: it needs an earlier one, apart from it.
+    if v == R::Rollback {
+        assert!(vote_ns != crate::confirm::NO_VOTE_NS);
+        assert!(now_ns.saturating_sub(vote_ns) >= crate::params::CONFIRM_MIN_SEP_NS);
     }
-    kani::cover!(v == crate::confirm::Resolve::Confirm, "confirmed");
-    kani::cover!(v == crate::confirm::Resolve::Rollback, "rolled back");
-    kani::cover!(v == crate::confirm::Resolve::Undecided, "undecided");
-    kani::cover!(v == crate::confirm::Resolve::Wait, "too soon");
-    kani::cover!(
-        cur_m == old_m && v == crate::confirm::Resolve::Confirm,
-        "a tie confirms"
-    );
+    if vote_ns == crate::confirm::NO_VOTE_NS {
+        assert!(v != R::Rollback);
+    }
+    if v == R::OldUnpredictable {
+        assert!(has_old && old_m.is_nan());
+    }
+    if cur_m == old_m && (v == R::Confirm || v == R::Rollback || v == R::OldVote) {
+        assert!(v == R::Confirm);
+    }
+    kani::cover!(v == R::Confirm, "confirmed");
+    kani::cover!(v == R::Rollback, "rolled back");
+    kani::cover!(v == R::OldVote, "a first report on the old path");
+    kani::cover!(v == R::OldUnpredictable, "old path cannot be predicted");
+    kani::cover!(v == R::Undecided, "undecided");
+    kani::cover!(v == R::Wait, "too soon");
+    kani::cover!(cur_m == old_m && v == R::Confirm, "a tie confirms");
 }
 
 fn any_miss(_: &Filter, _: &Measurement) -> f64 {
     kani::any()
 }
 
-/// The filter refuses the report and changes nothing (what a refused report leaves of the run of
-/// refusals is not what these proofs are about).
-fn filter_apply_refuses(
-    _: &mut Filter,
+/// What the real `Rejected` path of `decide` does to the track: one more jump rejection counted
+/// and one more in the filter's run of refusals (`reject_jump` with no consistent-run rule).
+fn decide_rejected_as_the_real_path(t: &mut Tracker, slot: usize, _: &Measurement) -> Step {
+    t.stats.jump_rejected += 1;
+    t.cur[slot].rej_h = t.cur[slot].rej_h.saturating_add(1);
+    Step::Rejected
+}
+
+/// The same refusal of `filter_apply` (the counter goes to the scratch statistics it is given).
+fn filter_apply_rejects_as_the_real_path(
+    f: &mut Filter,
     _: &Measurement,
-    _: &mut TrackerStats,
+    stats: &mut TrackerStats,
     _: &TrackerConfig,
 ) -> Applied {
+    stats.jump_rejected += 1;
+    f.rej_h = f.rej_h.saturating_add(1);
     Applied::Rejected
 }
 
-// What this proves: the production `update_in_order_held` with the decision stubbed to "the
-// report is not applied" (rejected) and any distances (so any verdict): the unconfirmed move is
-// still there, with its snapshot, no outcome is counted (confirmed, rolled back, undecided), and
-// the columns it checks (the current filter's time, the newest update time, the update count, the
-// state and the hit count) are as they were before the call (a verdict of rollback is undone);
-// no row is made. The rest of the track's columns, and the filters and the ring, are not
-// compared here. What rests on the integration tests: that a report applied by the real filter
-// decides.
-// REQ: OA-TRK-348
-#[kani::proof]
-#[kani::solver(cadical)]
-#[kani::stub(decide, decide_rejected)]
-#[kani::stub(filter_miss_m, any_miss)]
-#[kani::stub(filter_apply, filter_apply_refuses)]
-fn a_report_that_is_not_applied_decides_nothing_whatever_the_verdict() {
-    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+/// The not-applied scenario: an unconfirmed move holding a snapshot, the track since moved, a
+/// report that is not applied. Returns the track as the capture sees it before and after, the
+/// vote time before and the report's.
+fn not_applied_scenario(t: &mut Tracker) -> (TrackTxn, TrackTxn, i64, Measurement) {
     t.cur[PROOF_SLOT].t_ns = OLD_T;
-    // An unconfirmed move holding a snapshot, the track since moved.
     t.mv_on[PROOF_SLOT] = 1;
     t.mv_live = 1;
     t.mv_start_ns[PROOF_SLOT] = kani::any();
-    t.snaps[0] = snap_take(&t, PROOF_SLOT);
+    t.mv_old_vote_ns[PROOF_SLOT] = if kani::any() {
+        crate::confirm::NO_VOTE_NS
+    } else {
+        kani::any()
+    };
+    t.snaps[0] = snap_take(t, PROOF_SLOT);
     t.snap_free.clear();
     t.mv_snap[PROOF_SLOT] = 0;
     t.cur[PROOF_SLOT].t_ns = NEW_T;
-    t.last_ns[PROOF_SLOT] = kani::any();
-    t.updates[PROOF_SLOT] = kani::any();
-    let before = snap_take(&t, PROOF_SLOT);
+    let before = track_txn(t, PROOF_SLOT);
+    let vote = t.mv_old_vote_ns[PROOF_SLOT];
     let mut out = crate::types::output_new(1);
     let m = proof_measurement();
-    update_in_order_held(&mut t, PROOF_SLOT, &m, &mut out);
-    let after = snap_take(&t, PROOF_SLOT);
-    assert!(move_active(&t, PROOF_SLOT));
-    assert_eq!(t.mv_snap[PROOF_SLOT], 0);
-    assert_eq!(t.stats.moves_confirmed, 0);
-    assert_eq!(t.stats.moves_rolled_back, 0);
-    assert_eq!(t.stats.moves_undecided, 0);
-    assert!(
-        after.cur.t_ns == before.cur.t_ns
-            && after.last_ns == before.last_ns
-            && after.updates == before.updates
-            && after.state == before.state
-            && after.hits == before.hits
-    );
+    update_in_order_held(t, PROOF_SLOT, &m, &mut out);
     assert_eq!(out.t_ns.len(), 0);
-    kani::cover!(
-        t.stats.moves_decision_rejected == 1,
-        "a deciding report was refused"
-    );
-    kani::cover!(t.stats.moves_decision_rejected == 0, "too soon to decide");
+    let after = track_txn(t, PROOF_SLOT);
+    (before, after, vote, m)
 }
 
-// What this proves: the rollback of an unconfirmed move (`snap_restore` from the move's
+// What these three prove, and only this: the production `update_in_order_held`, with `decide`
+// stubbed to what the real rejected path does (one more jump rejection counted, one more in the
+// filter's run of refusals), `filter_apply` stubbed likewise, and any distances (so every
+// verdict of `resolve_decide`), given a report that is not applied, leaves the whole track as
+// the transaction capture sees it as it was, except the current filter's run of refusals (one
+// more, as the real rejected path adds it), and the move as it was (still active, the same
+// snapshot index and start, the snapshot still held), apart from the counters `jump_rejected`
+// (one more) and at most one of `moves_decision_rejected`, `moves_old_path_votes`,
+// `moves_old_path_unpredictable` (one more, the vote also setting the old-path vote time to the
+// report's); no outcome is counted, no row is made. Three harnesses, one for each part of the
+// track (the scalar columns, the category, the counters and the move; the two filters; the ring),
+// because a proof comparing every float at once does not fit the memory budget. Not covered by
+// any of them (integration tests only): a report that is applied, a report that is a large move,
+// ticks and forecasts of the marked track, and the late replay.
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_scalars_and_counters(
+) {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, vote, m) = not_applied_scenario(&mut t);
+    assert!(move_active(&t, PROOF_SLOT));
+    assert_eq!(t.mv_snap[PROOF_SLOT], 0);
+    assert_eq!(t.mv_live, 1);
+    assert!(t.snap_free.is_empty());
+    assert_eq!(t.snaps[0].last_ns, before.last_ns);
+    assert_eq!(t.snaps[0].updates, before.updates);
+    assert_eq!(after.first_ns, before.first_ns);
+    assert_eq!(after.confirmed_ns, before.confirmed_ns);
+    assert_eq!(after.last_ns, before.last_ns);
+    assert_eq!(after.disagree_until_ns, before.disagree_until_ns);
+    assert_eq!(after.expected_ns, before.expected_ns);
+    assert_eq!(after.newest_update_ns, before.newest_update_ns);
+    assert_eq!(after.cat.trusted, before.cat.trusted);
+    assert_eq!(after.cat.cand, before.cat.cand);
+    assert_eq!(after.cat.cand_n, before.cat.cand_n);
+    assert_eq!(after.updates, before.updates);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.hits, before.hits);
+    assert_eq!(after.ring_len, before.ring_len);
+    assert_eq!(after.ring_head, before.ring_head);
+    let (b, a) = (&before.stats, &after.stats);
+    assert_eq!(a.jump_rejected, b.jump_rejected + 1);
+    let votes = a.moves_old_path_votes - b.moves_old_path_votes;
+    let unpredictable = a.moves_old_path_unpredictable - b.moves_old_path_unpredictable;
+    let decision_rejected = a.moves_decision_rejected - b.moves_decision_rejected;
+    assert!(votes + unpredictable + decision_rejected <= 1);
+    assert_eq!(
+        t.mv_old_vote_ns[PROOF_SLOT],
+        if votes == 1 { m.toa_ns } else { vote }
+    );
+    let mut same = *a;
+    same.jump_rejected = b.jump_rejected;
+    same.moves_old_path_votes = b.moves_old_path_votes;
+    same.moves_old_path_unpredictable = b.moves_old_path_unpredictable;
+    same.moves_decision_rejected = b.moves_decision_rejected;
+    assert_stats_eq(&same, b);
+    kani::cover!(decision_rejected == 1, "a deciding report was refused");
+    kani::cover!(votes == 1, "a first report on the old path");
+    kani::cover!(unpredictable == 1, "an old path that cannot be predicted");
+    kani::cover!(
+        votes + unpredictable + decision_rejected == 0,
+        "too soon to decide"
+    );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_filters() {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _) = not_applied_scenario(&mut t);
+    // The current filter's run of refusals grew by one; the rest of it is as it was.
+    let mut expected = before.cur;
+    expected.rej_h = expected.rej_h.saturating_add(1);
+    assert_filter_bits(&after.cur, &expected);
+    assert_filter_bits(&after.anchor, &before.anchor);
+    // The snapshot's current filter is the old one, untouched.
+    assert_eq!(t.snaps[0].cur.t_ns, OLD_T);
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_ring() {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _) = not_applied_scenario(&mut t);
+    for k in 0..RING_DEPTH {
+        assert_measurement_bits(&after.ring[k], &before.ring[k]);
+    }
+}
+
+// What this proves, and only this (the functions `snap_restore` and `end_move`, not the tracker's
+// rollback as a whole): the rollback of an unconfirmed move (`snap_restore` from the move's
 // snapshot, taken from the production capture `track_txn`) puts back the scalar columns, the
 // category, and the current filter's time and first state value as they were before the move,
 // leaves the columns written from outside the update path (`disagree_until_ns`, `expected_ns`)
@@ -1405,7 +1519,7 @@ fn a_report_that_is_not_applied_decides_nothing_whatever_the_verdict() {
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
-fn rolling_back_restores_measurement_state_and_leaves_the_outside_columns() {
+fn snap_restore_from_the_moves_snapshot_and_end_move_put_back_the_listed_columns() {
     let mut t = proof_tracker_with_pool(CONFIRMED, 1);
     t.state[PROOF_SLOT] = kani::any();
     t.first_ns[PROOF_SLOT] = kani::any();
@@ -1551,5 +1665,95 @@ fn taking_then_restoring_a_snapshot_restores_the_ring() {
     assert_eq!(
         (t.ring_len[PROOF_SLOT], t.ring_head[PROOF_SLOT]),
         (len, head)
+    );
+}
+
+/// Every field of two snapshots equal, bit for bit.
+fn assert_snap_bits(a: &TrackSnap, b: &TrackSnap) {
+    assert_filter_bits(&a.cur, &b.cur);
+    assert_filter_bits(&a.anchor, &b.anchor);
+    for k in 0..RING_DEPTH {
+        assert_measurement_bits(&a.ring[k], &b.ring[k]);
+    }
+    assert_eq!(a.first_ns, b.first_ns);
+    assert_eq!(a.confirmed_ns, b.confirmed_ns);
+    assert_eq!(a.last_ns, b.last_ns);
+    assert_eq!(a.cat.trusted, b.cat.trusted);
+    assert_eq!(a.cat.cand, b.cat.cand);
+    assert_eq!(a.cat.cand_n, b.cat.cand_n);
+    assert_eq!(a.updates, b.updates);
+    assert_eq!(a.state, b.state);
+    assert_eq!(a.hits, b.hits);
+    assert_eq!(a.ring_len, b.ring_len);
+    assert_eq!(a.ring_head, b.ring_head);
+}
+
+// What these four prove (RT-274): `snap_of_txn(&track_txn(t))`, the move's rollback point, equals
+// `snap_take(t)`, the track's state as it is now, in every field (each harness compares all of
+// them bit for bit, with one group of the track's columns symbolic: the scalars and the category,
+// the current filter, the anchor filter, the ring; a proof with all of them symbolic at once does
+// not fit the memory budget, and each field is copied by its own assignment, so the four cover
+// every field). The unit test `the_snapshot_of_the_capture_equals_the_snapshot_taken_in_every_
+// field` compares every field of a real track.
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn the_capture_snapshot_equals_the_snapshot_taken_scalars_and_category() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.state[PROOF_SLOT] = kani::any();
+    t.first_ns[PROOF_SLOT] = kani::any();
+    t.confirmed_ns[PROOF_SLOT] = kani::any();
+    t.last_ns[PROOF_SLOT] = kani::any();
+    t.updates[PROOF_SLOT] = kani::any();
+    t.hits[PROOF_SLOT] = kani::any();
+    t.ring_len[PROOF_SLOT] = kani::any();
+    t.ring_head[PROOF_SLOT] = kani::any();
+    t.cat[PROOF_SLOT] = arbitrary_category_state();
+    assert_snap_bits(
+        &snap_of_txn(&track_txn(&t, PROOF_SLOT)),
+        &snap_take(&t, PROOF_SLOT),
+    );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn the_capture_snapshot_equals_the_snapshot_taken_current_filter() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.cur[PROOF_SLOT] = arbitrary_filter();
+    assert_snap_bits(
+        &snap_of_txn(&track_txn(&t, PROOF_SLOT)),
+        &snap_take(&t, PROOF_SLOT),
+    );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn the_capture_snapshot_equals_the_snapshot_taken_anchor_filter() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.anchor[PROOF_SLOT] = arbitrary_filter();
+    assert_snap_bits(
+        &snap_of_txn(&track_txn(&t, PROOF_SLOT)),
+        &snap_take(&t, PROOF_SLOT),
+    );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn the_capture_snapshot_equals_the_snapshot_taken_ring() {
+    let mut t = proof_tracker(CONFIRMED);
+    let start = PROOF_SLOT * RING_DEPTH;
+    for k in 0..RING_DEPTH {
+        t.ring_m[start + k] = arbitrary_measurement();
+    }
+    assert_snap_bits(
+        &snap_of_txn(&track_txn(&t, PROOF_SLOT)),
+        &snap_take(&t, PROOF_SLOT),
     );
 }

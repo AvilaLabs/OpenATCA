@@ -16,7 +16,7 @@ use common::*;
 use oa_track::{
     output_new, r95_m_of, tracker_moves_active, tracker_new, tracker_note_radar_disagreement,
     tracker_predict, tracker_stats, tracker_update, Measurement, TrackOutput, Tracker,
-    TrackerConfig, TrackerStats, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK,
+    TrackerConfig, TrackerStats, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, O_UNCERTAIN,
 };
 
 const ADDR: u32 = 0xA0_0001;
@@ -132,9 +132,12 @@ fn a_forged_far_report_is_marked_and_rolled_back_by_the_genuine_one_after_it() {
         assert_eq!(s.moves_unconfirmed, moved, "gap {gap}");
         assert_eq!(s.moves_rolled_back, moved, "gap {gap}");
         assert_eq!((s.moves_confirmed, s.moves_undecided), (0, 0), "gap {gap}");
-        assert_eq!(s.jump_rejected, 1 - moved, "gap {gap}");
+        // The forged report where the gate refuses it, else the old-path vote (the moved track's
+        // gate refuses that).
+        assert_eq!(s.jump_rejected, 1, "gap {gap}");
         // Without the rule the forged report moves the track (the finding).
-        assert_eq!(s.applied, c.applied + moved, "gap {gap}");
+        // (The forged report is applied, the vote after it is not: the same count.)
+        assert_eq!(s.applied, c.applied, "gap {gap}");
         if moved == 1 {
             // The forged report's own row is marked and its radius covers the old path.
             let i = update_row(&out, (forged_at * 1.0e9) as i64);
@@ -143,14 +146,28 @@ fn a_forged_far_report_is_marked_and_rolled_back_by_the_genuine_one_after_it() {
             assert!(r95_m_of(&out.pos_cov_m2[i]) > 800.0, "gap {gap}");
             // Every row of the track from the move to the rollback carries the mark.
             let t0 = (forged_at * 1.0e9) as i64;
-            let t1 = ((forged_at + 1.0) * 1.0e9) as i64;
+            // The first report on the old path (a second after) is a vote, not a rollback
+            // (RT-273); the second, a second later, rolls back.
+            let t1 = ((forged_at + 2.0) * 1.0e9) as i64;
             for k in 0..out.t_ns.len() {
                 if out.t_ns[k] >= t0 && out.t_ns[k] < t1 {
                     assert_ne!(out.flags[k] & O_MOVE_UNCONFIRMED, 0, "gap {gap} row {k}");
                 }
             }
-            // After the rollback the track is the control's, bit for bit, rows included.
-            assert_eq!(rows_after(&out, t1), rows_after(&cout, t1), "gap {gap}");
+            assert_eq!(s.moves_old_path_votes, 1, "gap {gap}");
+            // After the rollback the track is the control's but for the vote's report, which it
+            // did not take: the same rows, flags and, within 25 m, positions.
+            let (a, b) = (rows_after(&out, t1), rows_after(&cout, t1));
+            assert_eq!(a.len(), b.len(), "gap {gap}");
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_eq!((x.0, x.3), (y.0, y.3), "gap {gap}");
+                assert!(
+                    (x.1 - y.1).abs() < 2000 && (x.2 - y.2).abs() < 2000,
+                    "gap {gap} {} {}",
+                    x.1 - y.1,
+                    x.2 - y.2
+                );
+            }
         } else {
             assert_eq!(
                 out.flags
@@ -311,7 +328,10 @@ fn a_report_that_is_not_applied_decides_nothing_and_the_mark_survives() {
     assert_eq!(tracker_moves_active(&l.t), 1);
     let (row, _, _) = tracker_predict(&l.t, ADDR, 41 * S).unwrap();
     assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
+    // The junk report is no vote; the genuine ones after it are, two apart (RT-273).
     l.feed(&[report_of(&mut rng, 42.0, &truth(42.0, 0.0))]);
+    assert_eq!(l.s().moves_rolled_back, 0);
+    l.feed(&[report_of(&mut rng, 43.0, &truth(43.0, 0.0))]);
     let s = l.s();
     assert_eq!(
         (s.moves_rolled_back, s.moves_decision_rejected),
@@ -431,7 +451,10 @@ fn a_later_large_move_keeps_the_original_snapshot_and_a_refuting_report_rolls_ba
     assert_eq!(tracker_moves_active(&l.t), 1);
     assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     balanced(&l.t);
+    // Two reports on the old path (RT-273): the first a vote, the second rolls back.
     l.feed(&[report_of(&mut rng, 53.0, &truth(53.0, 0.0))]);
+    assert_eq!(l.s().moves_rolled_back, 0);
+    l.feed(&[report_of(&mut rng, 54.0, &truth(54.0, 0.0))]);
     let s = l.s();
     assert_eq!(s.moves_rolled_back, 1, "{s:?}");
     assert_eq!(tracker_moves_active(&l.t), 0);
@@ -533,6 +556,7 @@ fn a_rollback_does_not_undo_what_the_fusion_layer_set_in_between() {
     l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
     assert!(tracker_note_radar_disagreement(&mut l.t, ADDR, 100 * S));
     l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
+    l.feed(&[report_of(&mut rng, 42.0, &truth(42.0, 0.0))]);
     assert_eq!(l.s().moves_rolled_back, 1);
     let i = l.out.flags.len() - 1;
     assert_ne!(l.out.flags[i] & O_RADAR_DISAGREES, 0);
@@ -558,7 +582,8 @@ fn the_forecast_of_a_marked_track_carries_the_mark_and_the_widened_radius() {
     assert_eq!(calm.flags & O_MOVE_UNCONFIRMED, 0);
     // The same row the tracker emits at that time.
     l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
-    let (row, _, _) = tracker_predict(&l.t, ADDR, 42 * S).unwrap();
+    l.feed(&[report_of(&mut rng, 42.0, &truth(42.0, 0.0))]);
+    let (row, _, _) = tracker_predict(&l.t, ADDR, 43 * S).unwrap();
     assert_eq!(row.flags & O_MOVE_UNCONFIRMED, 0);
 }
 
@@ -609,8 +634,10 @@ fn with_no_snapshot_the_move_is_marked_and_the_radius_fails_closed() {
     assert!((499_999.0..500_010.0).contains(&r), "{r}");
     assert!(s.move_widen_failed >= 1, "{s:?}");
     // The refuting report: the first track rolls back, the second cannot.
-    l.feed(&[report_for(&mut rng, 0xA0_0001, 44.0, 0.0)]);
-    l.feed(&[report_for(&mut rng, 0xA0_0002, 44.0, 0.0)]);
+    for t in [44.0, 45.0] {
+        l.feed(&[report_for(&mut rng, 0xA0_0001, t, 0.0)]);
+        l.feed(&[report_for(&mut rng, 0xA0_0002, t, 0.0)]);
+    }
     let s = l.s();
     assert_eq!(s.moves_rolled_back, 1, "{s:?}");
     assert!(tracker_moves_active(&l.t) <= 1);
@@ -676,9 +703,11 @@ fn a_late_report_from_a_second_sensor_during_a_move_leaves_the_rollback_in_place
     assert_eq!(s.refiltered, 1, "{s:?}");
     assert_eq!(s.moves_rollback_lost_late, 0, "{s:?}");
     assert_eq!(tracker_moves_active(&l.t), 1);
-    let refuting = report_of(&mut rng, 41.0, &truth(41.0, 0.0));
-    l.feed(&[refuting]);
-    control.feed(&[refuting]);
+    for t in [41.0, 42.0] {
+        let refuting = report_of(&mut rng, t, &truth(t, 0.0));
+        l.feed(&[refuting]);
+        control.feed(&[refuting]);
+    }
     let s = l.s();
     assert_eq!((s.moves_rolled_back, s.moves_confirmed), (1, 0), "{s:?}");
     assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
@@ -688,7 +717,8 @@ fn a_late_report_from_a_second_sensor_during_a_move_leaves_the_rollback_in_place
     let d = ((f64::from(a.lat_e7 - b.lat_e7) * 0.011_119_5).powi(2)
         + (f64::from(a.lon_e7 - b.lon_e7) * 0.011_119_5).powi(2))
     .sqrt();
-    assert!(d < 5.0, "{d} m from the track without the forgery");
+    // (The control also took the report at 41 s that the rolled-back track had only as a vote.)
+    assert!(d < 30.0, "{d} m from the track without the forgery");
     balanced(&l.t);
 }
 
@@ -720,12 +750,17 @@ fn a_late_replay_that_moves_the_estimate_far_marks_the_track() {
     assert_ne!(tracker_moves_active(&l.t), 0);
     let (row, _, _) = tracker_predict(&l.t, ADDR, 125 * S).unwrap();
     assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
-    // The row the replay itself emitted is marked too.
+    // The row the replay itself emitted is marked too, and widened like any marked row (RT-275):
+    // its radius covers the old path (the track as it was before the late report, about 2 km
+    // away), so it is uncertain.
     let i = (0..l.out.t_ns.len())
         .rev()
         .find(|&i| l.out.t_ns[i] == 119_600_000_000 && l.out.flags[i] & O_TICK == 0)
         .unwrap();
     assert_ne!(l.out.flags[i] & O_MOVE_UNCONFIRMED, 0);
+    assert_ne!(l.out.flags[i] & O_UNCERTAIN, 0);
+    let r = r95_m_of(&l.out.pos_cov_m2[i]);
+    assert!(r > 1_500.0, "{r}");
     balanced(&l.t);
 }
 
@@ -821,4 +856,71 @@ fn the_rule_has_defaults_that_are_on_and_checked() {
     assert!(bad(&|c| c.drop_after_ns = c.confirm_window_ns - 1));
     assert!(!bad(&|c| c.confirm_move_m = 2_000.0));
     assert!(!bad(&|c| c.confirm_moves = false));
+}
+
+/// A report of a track that stands still `north_m` north of the origin.
+fn still(rng: &mut Rng, t_s: f64, north_m: f64) -> Measurement {
+    let tr = Truth {
+        e: 0.0,
+        n: north_m,
+        ve: 0.0,
+        vn: 0.0,
+        alt_ft: 35_000.0,
+        vrate_fpm: 0.0,
+    };
+    report_of(rng, t_s, &tr)
+}
+
+// REQ: OA-TRK-352
+#[test]
+fn one_report_at_the_old_place_does_not_roll_back_a_genuine_relocation() {
+    // A stationary track, a 40 s gap, then a genuine 2 km relocation. One stray report at the old
+    // place a second later is a vote for the old path, nothing more (RT-273): the move is not
+    // rolled back and the genuine continuation confirms it.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    for t in seconds(0.0, 20.0) {
+        l.feed(&[still(&mut rng, t, 0.0)]);
+    }
+    l.feed(&[still(&mut rng, 60.0, 2_000.0)]);
+    let s = l.s();
+    assert_eq!(s.moves_unconfirmed, 1, "{s:?}");
+    l.feed(&[still(&mut rng, 61.0, 0.0)]);
+    let s = l.s();
+    assert_eq!(
+        (s.moves_rolled_back, s.moves_old_path_votes),
+        (0, 1),
+        "{s:?}"
+    );
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    l.feed(&[still(&mut rng, 62.0, 2_000.0)]);
+    let s = l.s();
+    assert_eq!((s.moves_rolled_back, s.moves_confirmed), (0, 1), "{s:?}");
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-352
+#[test]
+fn two_reports_at_the_old_place_roll_back_a_forged_move_but_not_two_in_a_burst() {
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    for t in seconds(0.0, 20.0) {
+        l.feed(&[still(&mut rng, t, 0.0)]);
+    }
+    l.feed(&[still(&mut rng, 60.0, 2_000.0)]);
+    // Two reports less than 0.5 s apart are one vote.
+    l.feed(&[still(&mut rng, 61.0, 0.0)]);
+    l.feed(&[still(&mut rng, 61.3, 0.0)]);
+    let s = l.s();
+    assert_eq!(
+        (s.moves_rolled_back, s.moves_old_path_votes),
+        (0, 1),
+        "{s:?}"
+    );
+    l.feed(&[still(&mut rng, 62.0, 0.0)]);
+    let s = l.s();
+    assert_eq!(s.moves_rolled_back, 1, "{s:?}");
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
 }

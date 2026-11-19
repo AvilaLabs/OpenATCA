@@ -4165,7 +4165,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted in `moves_unconfirmed`. The track keeps its measurement state from before the report
   (the update's own transaction capture without the tracker's counters, 2200 bytes) in a bounded
   pool of `confirm_pool` entries (64 by default, allocated once; the per-track columns are
-  23 bytes: the move's flag, start, first report and snapshot index); a move that finds the pool full is applied and marked all the same, without a
+  31 bytes: the move's flag, start, first report, old-path vote time and snapshot index); a move that finds the pool full is applied and marked all the same, without a
   snapshot (`move_no_snapshot`): it can be confirmed or left standing but not rolled back. Until
   the next report decides (OA-TRK-348) every row the track emits, update row or tick row, and
   every forecast of it carries the flag `O_MOVE_UNCONFIRMED` (128), and the row's position
@@ -4186,11 +4186,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   is not covered (its second report has no velocity and moves far from its prediction as a
   matter of course; the plausibility rule judges it). The rule is on by default;
   `confirm_moves = false` turns it off only by an explicit choice. The move's report refreshes
-  the drop timer like any update. A display must show the flag (follow-up). (Kani, what it
-  proves: production `update_in_order`, given a large move, starts the move and `emit` marks the
-  row it makes whether or not the old path's row exists; a row whose widening cannot be computed
-  carries the fail-closed covariance (500 km) and is counted. Not proved: the numeric value of the widened
-  radius, which the integration tests check against the old path.)
+  the drop timer like any update. A display must show the flag (follow-up). The row a late replay emits
+  (before the move starts) is flagged and widened too (RT-275): its radius at least the distance
+  to the old path's position at the row's time, the track as it was before the late report,
+  derived from the ring, plus the old path's radius, `O_UNCERTAIN` set if that is over the
+  threshold (`rows_uncertain` follows), the fail-closed radius if it cannot be derived; no other
+  row changes. (Kani, what it proves, and only this: production `update_in_order`, given a large
+  move, starts the move and the `emit` it calls marks the row it makes whether or not the old
+  path's row exists; a row whose widening cannot be computed carries the fail-closed covariance
+  (500 km) and is counted. Not covered by it, integration tests only: `update_in_order_held`,
+  tick rows, the forecast, the rows of a late replay, the numeric value of the widened radius.)
 - **OA-TRK-348** The track's next report decides an unconfirmed move, by distances from the report
   to the moved track's prediction and to the old path's (the snapshot's) at the report's time,
   and only if it is itself applied: the normal update path runs and the decision is committed by
@@ -4202,8 +4207,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   track (within the agreement limit, and not nearer the old path; a tie or a move with no
   snapshot counts as agreeing with the moved track) and the move is confirmed once the report
   is applied to the moved track, the flag cleared, the snapshot returned to the pool
-  (`moves_confirmed`); or it agrees with the old path and not with the moved track and the move
-  is rolled back (OA-TRK-349, `moves_rolled_back`); or it agrees with neither, or comes after the
+  (`moves_confirmed`); or it agrees with the old path and not with the moved track, which a first time is a vote
+  (`moves_old_path_votes`: applied as it is, the move stays, marked) and a second time, at
+  least 0.5 s after the first, rolls the move back (OA-TRK-349, `moves_rolled_back`; OA-TRK-352); or it agrees with neither, or comes after the
   window, and the move stands once the report is applied (`moves_undecided`), the flag cleared. If
   the report is then itself a large move, the track stays marked, keeps the original snapshot, and
   the window runs from the later move (the earlier move counts as undecided, the later as a new
@@ -4214,20 +4220,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `drop_after_ns` (`check_config` refuses `drop_after_ns` under `confirm_window_ns`). The
   agreement limit is `confirm_agree_m` (300 m) plus `0.5 a t^2` (`a` the gate's manoeuvre
   allowance, `t` the time since the move), never over `confirm_move_m`. A distance that is not
-  a number agrees with nothing. Every unconfirmed move ends in exactly one counted outcome:
+  a number agrees with nothing, and with a snapshot present an old path that cannot be predicted
+  at the report's time is no agreement either (OA-TRK-353). Every unconfirmed move ends in exactly one counted outcome:
   confirmed, rolled back, undecided, or abandoned (the track ended, restarted, the filter
   resynchronised, or a late re-filter demoted the track: `moves_abandoned_ended`, `_restarted`,
   `_resync`, `_demoted`), so that
   `moves_unconfirmed` equals the sum of the outcomes plus the moves still unconfirmed
-  (`tracker_moves_active`); the report prints it. (Kani, what it proves: `resolve_decide` is a
-  pure function of times, distances and the configuration; for every configuration `check_config`
-  accepts and every time and distance a lone move decides nothing, a confirmation or rollback
-  needs a report at least 0.5 s after the move, within the window and within the limit, a tie
-  confirms and a report nearer the old path rolls back; and production
-  `update_in_order_held`, with the decision stubbed to "not applied" and any distances,
-  leaves the move, its snapshot and the track's columns as they were, counting no outcome. Not
-  proved: that the real filter's applied report decides as described, which the integration
-  tests check.) Residual risk, stated, every way to a false track that is not marked: (1)
+  (`tracker_moves_active`); the report prints it. (Kani, what it proves: the pure
+  function `resolve_decide`, of times, distances and the configuration only, for every
+  configuration `check_config` accepts and every time and distance: a lone move decides nothing,
+  a confirmation or rollback needs a report at least 0.5 s after the move, within the window and
+  within the limit, a rollback an earlier old-path report 0.5 s before it, a tie confirms, an
+  unpredictable old path confirms and rolls back nothing; and, separately, production
+  `update_in_order_held` with a report that is not applied, see OA-TRK-354. Not proved: that
+  the real filter's applied report decides as described, which the integration tests check.) Residual risk, stated, every way to a false track that is not marked: (1)
   a second forged report at least 0.5 s after the first that agrees with the moved track and
   not with the old path confirms the move (`moves_confirmed`): the track is unmarked at the
   false place and nothing in the tracker refutes it; (2) a report in the gate that agrees with
@@ -4257,6 +4263,35 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   current filter, the anchor filter and the ring with its length and head, bit for bit, one proof
   each. The rollback uses `snap_restore`, not `restore_track_columns`, which the OA-TRK-335
   proofs are of.)
+- **OA-TRK-352** A rollback to the old path needs the same corroboration as confirming a move,
+  and the two are symmetric (RT-273): `CONFIRM_REPORTS` (2) reports at a place decide a move,
+  the move's own report counting for the moved place, so one further report at least 0.5 s
+  after confirms it, and the old path needs two reports of its own at least 0.5 s apart. The
+  first report agreeing with the old path (and not the moved track) is a vote: applied as it is
+  (the gate usually refuses it), the move stays on the moved state, marked, the time kept
+  (`moves_old_path_votes`); a second one, at least 0.5 s after the vote and inside the window,
+  rolls back; one less than 0.5 s after it waits. A report that agrees with the moved track
+  confirms as before and ends the count. One stray report at the old place, or one replayed by a
+  forger, therefore cannot undo a genuine relocation. (Kani: `resolve_decide`, OA-TRK-348.)
+- **OA-TRK-353** An old path that has a snapshot but cannot be predicted at the report's time
+  (its distance is not a number) is not agreement with anything (RT-276): the report is applied
+  as it is, `moves_old_path_unpredictable` counts it, and the move stays, marked, until the
+  window ends, when the next applied report leaves it standing (undecided) as usual. A report
+  that agrees with the moved track does not confirm the move meanwhile; with no snapshot at all
+  (the pool was full) the old path is unknown, not unpredictable, and the moved track decides
+  as before.
+- **OA-TRK-354** What the rule's proofs say, exactly (RT-274). The snapshot taken from the
+  update's own capture equals the track's state taken apart from it in every field (unit test
+  on a track with a wrapped ring; four Kani proofs with the scalars and category, the current
+  filter, the anchor filter and the ring symbolic in turn, each comparing every field).
+  `update_in_order_held`, with `decide` and `filter_apply` stubbed to what the real rejected
+  path does and any distances, given a report that is not applied: the whole track as the
+  transaction capture sees it, its move columns and its snapshot are as before, except the
+  current filter's run of refusals and the counters `jump_rejected` (one more),
+  `moves_decision_rejected`, `moves_old_path_votes`, `moves_old_path_unpredictable` (at most one
+  of them one more), which change as the real rejected path changes them; no row, no outcome.
+  Not covered by any proof (integration tests): a report that is applied or is itself a large
+  move, ticks, forecasts, the late replay and the rows it emits.
 - **OA-TRK-350** A report whose distance from the predicted position is at most `confirm_move_m`
   is applied exactly as before: its outputs are bit for bit those of a tracker with the rule off.
   A move over it is applied exactly as without the rule too: a confirmed move leaves every row's
@@ -4266,8 +4301,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-351** `check_config` requires `confirm_move_m` finite and positive, `confirm_agree_m`
   positive, finite and below `confirm_move_m`, `confirm_window_ns` over 0.5 s (and at most one
   day) and not over `drop_after_ns`, and `confirm_pool` at most 2^20. The counters are in the
-  statistics and the report. The tracker's tables hold 23 bytes of columns per track and the
-  pool: the tables go from 8.66 MiB to 8.88 MiB at 4096 tracks and from 80.5 MiB to 81.5 MiB at 38,000 (141 kB of pool and its free list, and 23 bytes a track). The pool's size is analysed beside `CONFIRM_POOL`: the most moves unconfirmed at once on the two development days was 7 on each (the 2026-11-14 day, and the 2026-11-15 day as the check), and a forger who fills it costs rollback, never the mark.
+  statistics and the report. The tracker's tables hold 31 bytes of columns per track and the
+  pool: the tables go from 8.66 MiB to 8.91 MiB at 4096 tracks and from 80.5 MiB to 81.8 MiB at 38,000 (141 kB of pool and its free list, and 31 bytes a track). The pool's size is analysed beside `CONFIRM_POOL`: the most moves unconfirmed at once on the two development days was 7 on each (the 2026-11-14 day, and the 2026-11-15 day as the check), and a forger who fills it costs rollback, never the mark.
   A report the filter holds back as a large move when the rule is off cannot happen; it is
   refused and counted (`moves_internal_refused`), never applied.
 

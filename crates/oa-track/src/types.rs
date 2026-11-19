@@ -637,6 +637,12 @@ pub struct TrackerStats {
     pub moves_abandoned_resync: u64,
     /// Moves that ended with the track demoted to tentative by a late re-filter.
     pub moves_abandoned_demoted: u64,
+    /// Reports that agreed with the old path of an unconfirmed move for the first time: a vote,
+    /// not a rollback (a rollback needs a second, RT-273).
+    pub moves_old_path_votes: u64,
+    /// Deciding reports of an unconfirmed move whose old path has a snapshot that cannot be
+    /// predicted at the report's time: no agreement with anything, the move stands (RT-276).
+    pub moves_old_path_unpredictable: u64,
     /// Moves applied and marked without a rollback snapshot: the pool was full.
     pub move_no_snapshot: u64,
     /// Rows of a marked track whose widened radius could not be computed: they carry a radius of

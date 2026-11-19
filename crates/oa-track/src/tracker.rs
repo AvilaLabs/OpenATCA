@@ -58,7 +58,7 @@ use oa_adsb::{
     NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
-use crate::confirm::{confirm_window_ns, move_is_large, resolve_decide, Resolve};
+use crate::confirm::{confirm_window_ns, move_is_large, resolve_decide, Resolve, Seen, NO_VOTE_NS};
 use crate::filter::{
     filter_apply, filter_init, filter_miss_m, filter_output, filter_output_checked, filter_replay,
     filter_row_distance_m, Applied, Filter,
@@ -141,6 +141,9 @@ pub struct Tracker {
     /// point before.
     mv_first_ns: Vec<i64>,
     mv_first_sens: Vec<u16>,
+    /// The time of the earlier report that agreed with the old path, [`NO_VOTE_NS`] if none: a
+    /// rollback needs a second one (RT-273).
+    mv_old_vote_ns: Vec<i64>,
     /// The pool entry holding the state from before the move, [`NO_SNAP`] if there is none.
     mv_snap: Vec<u32>,
     /// The pool of rollback snapshots: `confirm_pool` entries (at most `max_tracks`).
@@ -251,6 +254,7 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         mv_start_ns: vec![0; n],
         mv_first_ns: vec![0; n],
         mv_first_sens: vec![0; n],
+        mv_old_vote_ns: vec![NO_VOTE_NS; n],
         mv_snap: vec![NO_SNAP; n],
         snaps: vec![blank_snap(); pool_n],
         snap_free: (0..pool_n as u32).rev().collect(),
@@ -305,7 +309,7 @@ pub fn tracker_bytes(t: &Tracker) -> usize {
         + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
-        + t.mv_on.len() * (1 + 8 + 4 + 8 + 2)
+        + t.mv_on.len() * (1 + 8 + 4 + 8 + 2 + 8)
         + t.snaps.len() * core::mem::size_of::<TrackSnap>()
         + t.snap_free.capacity() * 4
         + t.index.len() * 4
@@ -337,6 +341,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.mv_start_ns),
         of(&t.mv_first_ns),
         of(&t.mv_first_sens),
+        of(&t.mv_old_vote_ns),
         of(&t.mv_snap),
         of(&t.snaps),
         of(&t.snap_free),
@@ -863,11 +868,11 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 448-byte statistics (328 before
-// the fifteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
+// Budget: two 648-byte filters, twelve 72-byte measurements, 464-byte statistics (328 before
+// the seventeen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2672);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2688);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
@@ -1014,6 +1019,7 @@ fn end_move(t: &mut Tracker, slot: usize, why: MoveEnd) {
         return;
     }
     release_snap(t, slot);
+    put(&mut t.mv_old_vote_ns, slot, NO_VOTE_NS);
     put(&mut t.mv_on, slot, 0);
     t.mv_live = t.mv_live.saturating_sub(1);
     let c = match why {
@@ -1040,6 +1046,8 @@ fn start_move(
     start_ns: i64,
 ) {
     put(&mut t.mv_start_ns, slot, start_ns);
+    // A move at a new place starts the count of old-path reports again.
+    put(&mut t.mv_old_vote_ns, slot, NO_VOTE_NS);
     if move_active(t, slot) {
         return;
     }
@@ -1309,24 +1317,31 @@ fn settle(t: &mut Tracker, slot: usize, step: Step, out: &mut TrackOutput) -> bo
     true
 }
 
-/// The distances of `m` from the track's predicted position and from the old path's (the
-/// unconfirmed move's snapshot predicted the same way), at the report's time, metres. The old
-/// path's is not a number if the move has no snapshot.
-fn move_geometry(t: &Tracker, slot: usize, m: &Measurement) -> (f64, f64) {
+/// What `m` is measured against by the move's decision: its distances from the track's predicted
+/// position and from the old path's (the unconfirmed move's snapshot predicted the same way), at
+/// the report's time, metres; whether the move has a snapshot; the time of the earlier report that
+/// agreed with the old path. The old path's distance is not a number if the move has no snapshot
+/// or the snapshot cannot be predicted (told apart by `has_old`).
+fn move_geometry(t: &Tracker, slot: usize, m: &Measurement) -> Seen {
     let cur = col(&t.cur, slot, blank_filter());
-    let old = move_snap_ix(t, slot)
-        .and_then(|i| t.snaps.get(i))
-        .map_or(f64::NAN, |v| filter_miss_m(&v.cur, m));
-    (filter_miss_m(&cur, m), old)
+    let snap = move_snap_ix(t, slot).and_then(|i| t.snaps.get(i));
+    Seen {
+        cur_m: filter_miss_m(&cur, m),
+        old_m: snap.map_or(f64::NAN, |v| filter_miss_m(&v.cur, m)),
+        has_old: snap.is_some(),
+        old_vote_ns: col(&t.mv_old_vote_ns, slot, NO_VOTE_NS),
+    }
 }
 
 /// Applies a measurement newer than or equal to the track's newest update, with the large-move
 /// rule on (RT-239). If the track has an unconfirmed move, the measurement decides it
 /// (`crate::confirm::resolve_decide`), but only if it is itself applied: the normal path runs
 /// and the decision is committed by what it did, before the row of the report is made (so that
-/// row is the decided track's). Confirmed: applied to the moved track. Rolled back: the track is
-/// put back as the snapshot held it and the measurement applied to that; if it is then not
-/// applied, the rollback is undone and the move stays. Undecided: the move stands once the
+/// row is the decided track's). Confirmed: applied to the moved track. Rolled back, only for a
+/// second report on the old path apart from the first (the first, an old-path vote, decides
+/// nothing, RT-273): the track is put back as the snapshot held it and the measurement applied to
+/// that; if it is then not applied, the rollback is undone and the move stays. An old path that
+/// cannot be predicted agrees with nothing (RT-276): the move stands, marked. Undecided: the move stands once the
 /// measurement is applied (if that measurement is a large move too, the track stays marked with
 /// the original snapshot, the window running from the later move). A measurement that is not
 /// applied decides nothing (`moves_decision_rejected`).
@@ -1338,14 +1353,32 @@ fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut
         t.hold_on = false;
         return;
     }
-    let (cur_m, old_m) = move_geometry(t, slot, m);
+    let seen = move_geometry(t, slot, m);
     let start = col(&t.mv_start_ns, slot, 0);
     let window = confirm_window_ns(&t.cfg, col(&t.expected_ns, slot, 0));
-    let verdict = resolve_decide(start, m.toa_ns, cur_m, old_m, window, &t.cfg);
+    let verdict = resolve_decide(start, m.toa_ns, &seen, window, &t.cfg);
     match verdict {
         // Too soon to be a second report: applied as it is, the move stays unconfirmed.
         Resolve::Wait => {
             t.hold_on = false;
+            update_in_order(t, slot, m, out);
+        }
+        // The first report on the old path: one report decides nothing (RT-273). Applied as it
+        // is; the move stays, marked, and the report is the old path's vote.
+        Resolve::OldVote => {
+            t.hold_on = false;
+            let step = update_in_order(t, slot, m, out);
+            if step != Step::NumericalRefused && move_active(t, slot) {
+                put(&mut t.mv_old_vote_ns, slot, m.toa_ns);
+                t.stats.moves_old_path_votes += 1;
+            }
+        }
+        // An old path that cannot be predicted is no agreement with anything (RT-276): counted,
+        // and the move stands, marked, until the window ends (a report agreeing with the moved
+        // track does not confirm it meanwhile).
+        Resolve::OldUnpredictable => {
+            t.hold_on = false;
+            t.stats.moves_old_path_unpredictable += 1;
             update_in_order(t, slot, m, out);
         }
         Resolve::Confirm => {
@@ -1648,6 +1681,61 @@ fn snap_before_entry(t: &Tracker, slot: usize, first: (i64, u16)) -> Option<Trac
     Some(s)
 }
 
+/// Marks the row `i` the late replay emitted (before its move started), and widens it like any
+/// marked row: its radius at least the distance to the old path's position at the row's time plus
+/// the old path's own radius (RT-275). The old path here is the track as it was before the late
+/// report `m`, predicted to the row's time (derived from the ring as the rollback point is); if
+/// that cannot be derived the row gets the fail-closed radius. Only this row changes, and
+/// `rows_uncertain` follows its flag.
+fn widen_replay_row(
+    t: &mut Tracker,
+    slot: usize,
+    out: &mut TrackOutput,
+    i: usize,
+    m: &Measurement,
+) {
+    let Some(mut row) = out_row_at(out, i) else {
+        return;
+    };
+    let old = snap_before_entry(t, slot, (m.toa_ns, m.sensor))
+        .and_then(|s| filter_output(&s.cur, row.t_ns));
+    let mut r95 = r95_m(&row.pos_cov_m2);
+    if !mark_row(&mut row, &mut r95, old.as_ref()) {
+        t.stats.move_widen_failed += 1;
+    }
+    if let Some(c) = out.pos_cov_m2.get_mut(i) {
+        *c = row.pos_cov_m2;
+    }
+    if r95 > t.cfg.coast_max_r95_m && row.flags & O_UNCERTAIN == 0 {
+        row.flags |= O_UNCERTAIN;
+        t.stats.rows_uncertain += 1;
+    }
+    if let Some(f) = out.flags.get_mut(i) {
+        *f = row.flags;
+    }
+}
+
+/// Row `i` of an output table as an [`OutRow`].
+fn out_row_at(out: &TrackOutput, i: usize) -> Option<OutRow> {
+    Some(OutRow {
+        t_ns: *out.t_ns.get(i)?,
+        addr: *out.addr.get(i)?,
+        lat_e7: *out.lat_e7.get(i)?,
+        lon_e7: *out.lon_e7.get(i)?,
+        vel_east_mps: *out.vel_east_mps.get(i)?,
+        vel_north_mps: *out.vel_north_mps.get(i)?,
+        pos_cov_m2: *out.pos_cov_m2.get(i)?,
+        vel_cov_m2s2: *out.vel_cov_m2s2.get(i)?,
+        turn_rate_rps: *out.turn_rate_rps.get(i)?,
+        alt_ft: *out.alt_ft.get(i)?,
+        alt_var_ft2: *out.alt_var_ft2.get(i)?,
+        vrate_fpm: *out.vrate_fpm.get(i)?,
+        mu_h: *out.mu_h.get(i)?,
+        mu_v: *out.mu_v.get(i)?,
+        flags: *out.flags.get(i)?,
+    })
+}
+
 /// [`update_late`] with the large-move rule (RT-239) around it. A late replay that moves the
 /// current estimate of a confirmed track by more than `confirm_move_m` from where it was marks
 /// the track with the state from before the replay (`moves_late`, and the rows the replay
@@ -1726,9 +1814,7 @@ fn update_late_marked(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut T
         let key = col(&t.key, slot, NO_ADDR);
         for i in rows..out.t_ns.len() {
             if out.addr.get(i) == Some(&key) {
-                if let Some(f) = out.flags.get_mut(i) {
-                    *f |= O_MOVE_UNCONFIRMED;
-                }
+                widen_replay_row(t, slot, out, i, m);
             }
         }
     }
@@ -2881,5 +2967,86 @@ mod tests {
                 + t.stats.moves_abandoned_demoted
                 + tracker_moves_active(&t) as u64
         );
+    }
+
+    // REQ: OA-TRK-353
+    #[test]
+    fn an_old_path_that_cannot_be_predicted_confirms_nothing_and_the_move_stays_marked() {
+        // RT-276: with a snapshot present, an old path that cannot be predicted is no
+        // agreement: a report on the moved track does not confirm the move (it would have, as
+        // "the old path is unknown", with no snapshot at all); the move stays, marked, counted,
+        // until the window ends (or the filter resynchronises: the single far report moved the filter
+        // only part of the way, so these reports are refused by the gate and counted as such).
+        let c = TrackerConfig {
+            tick_ns: 100_000 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..=20 {
+            tracker_update(&mut t, &at(k, 0, 100.0), &mut out);
+        }
+        tracker_update(&mut t, &north(40_000, 225_000), &mut out);
+        let slot = lookup(&t, ADDR).unwrap();
+        assert!(move_active(&t, slot));
+        let ix = move_snap_ix(&t, slot).unwrap();
+        t.snaps[ix].cur.h.m[1].x[0] = f64::NAN;
+
+        for sec in 41..=43 {
+            tracker_update(&mut t, &north(sec * 1_000, 225_000), &mut out);
+            assert_eq!(t.stats.moves_old_path_unpredictable, (sec - 40) as u64);
+            assert_eq!(t.stats.moves_confirmed, 0);
+            assert!(move_active(&t, slot), "{sec} {:?}", t.stats);
+            assert_ne!(*out.flags.last().unwrap() & O_MOVE_UNCONFIRMED, 0);
+        }
+    }
+
+    // REQ: OA-TRK-354
+    #[test]
+    fn the_snapshot_of_the_capture_equals_the_snapshot_taken_in_every_field() {
+        // A track with a wrapped ring (more updates than it holds), a changed category and a
+        // run of refusals: every field of the two snapshots is compared, the filters and the
+        // ring included.
+        let c = TrackerConfig {
+            tick_ns: 100_000 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..(RING_DEPTH as i64 + 5) {
+            let mut m = at(k, (k * 37) as i32, 100.0 + k as f32);
+            m.category = (k % 3) as u8;
+            tracker_update(&mut t, &m, &mut out);
+        }
+        let slot = lookup(&t, ADDR).unwrap();
+        t.cat[slot] = CategoryState {
+            trusted: 0xA3,
+            cand: 0xA6,
+            cand_n: 2,
+        };
+        assert_ne!(t.ring_head[slot], 0, "the ring has wrapped");
+        let (a, b) = (snap_of_txn(&track_txn(&t, slot)), snap_take(&t, slot));
+        assert!(a.cur == b.cur && a.anchor == b.anchor);
+        assert!(a.ring == b.ring);
+        assert!(a.cat == b.cat);
+        assert_eq!(
+            (
+                a.first_ns,
+                a.confirmed_ns,
+                a.last_ns,
+                a.updates,
+                a.state,
+                a.hits
+            ),
+            (
+                b.first_ns,
+                b.confirmed_ns,
+                b.last_ns,
+                b.updates,
+                b.state,
+                b.hits
+            )
+        );
+        assert_eq!((a.ring_len, a.ring_head), (b.ring_len, b.ring_head));
     }
 }
