@@ -1,11 +1,11 @@
-//! Queries on a built [`Truth`], its accessors and its digest. Core (pure).
+//! Queries on a built [`Truth`], its accessors and its digest. Core (pure, B7).
 
 use oa_adsb::NONE_I32;
 use oa_sha256::Sha256;
 
-use crate::frame::{frame_new, try_frame_velocity, unproject};
-use crate::smooth::{interp, sigma95_h_m, LegView};
-use crate::{LegIx, LegRange, Truth, TruthQuery, TruthSample, TRUTH_HASH_TAG};
+use super::frame::{frame_new, try_frame_velocity, unproject};
+use super::smooth::{interp, sigma95_h_m, LegView};
+use super::types::{LegIx, LegRange, Truth, TruthQuery, TruthSample, TRUTH_HASH_TAG};
 
 const NS_PER_MS: i64 = 1_000_000;
 

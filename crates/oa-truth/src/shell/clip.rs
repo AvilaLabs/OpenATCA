@@ -1,4 +1,4 @@
-//! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports, with caps. Shell: owns the file.
+//! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports, with caps. Shell (B7): owns the file.
 //! Shared by `oa-truth-check` and `oa-sensorsim`.
 
 use std::fs::File;

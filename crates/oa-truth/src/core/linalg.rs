@@ -1,4 +1,4 @@
-//! 3 x 3 linear algebra for the smoother. Core (pure). Plain arrays and destructuring, no
+//! 3 x 3 linear algebra for the smoother. Core (pure, B7). Plain arrays and destructuring, no
 //! indexing, so no operation can panic (E3). Every sum is written out in a fixed order, which
 //! is part of the determinism guarantee (see the crate documentation).
 

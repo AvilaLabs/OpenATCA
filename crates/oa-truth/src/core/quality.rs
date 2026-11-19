@@ -1,4 +1,4 @@
-//! The quality rules of truth selection, shared with the tracker. Core (pure).
+//! The quality rules of truth selection, shared with the tracker. Core (pure, B7).
 //!
 //! A readsb trace row prints NACp, NIC, SIL and the version on a minority of rows, so each is
 //! carried forward within an aircraft for at most [`crate::QUALITY_CARRY_MS`]; a row with no
@@ -9,7 +9,7 @@
 
 use oa_adsb::{Row, F_STALE, NONE_U8};
 
-use crate::{
+use super::types::{
     TruthConfig, ADSB_SOURCES, REM_INVALID, REM_NACP, REM_NIC, REM_NO_QUALITY, REM_SIL, REM_SOURCE,
     REM_STALE, REM_VERSION,
 };

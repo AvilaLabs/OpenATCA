@@ -1,4 +1,4 @@
-//! The fixed-interval Rauch-Tung-Striebel smoother and its interpolation. Core (pure).
+//! The fixed-interval Rauch-Tung-Striebel smoother and its interpolation. Core (pure, B7).
 //!
 //! Per axis the state is `[position, velocity, acceleration]` with a nearly-constant-acceleration
 //! model: the acceleration is a random walk, i.e. white jerk of spectral density `q`
@@ -10,7 +10,7 @@
 //! the earlier report is predicted to the query time and then smoothed against the smoothed
 //! estimate at the later report, so the covariance between reports is not an approximation.
 
-use crate::linalg::{
+use super::linalg::{
     add, add_v, inv, matvec, mul, pack, predict_cov, proc_noise, sub, sub_v, trans, transpose,
     unpack, M3, P6, V3,
 };

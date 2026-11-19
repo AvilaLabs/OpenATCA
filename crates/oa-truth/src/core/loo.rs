@@ -1,4 +1,4 @@
-//! Leave-one-out accuracy (design section 1.5). Core (pure).
+//! Leave-one-out accuracy (design section 1.5). Core (pure, B7).
 //!
 //! Every `loo_stride`-th report of a leg (by position in the leg, so the hidden set does not
 //! depend on anything else) is hidden, the leg is smoothed again from the rest, and each hidden
@@ -7,8 +7,8 @@
 
 use oa_adsb::NONE_I32;
 
-use crate::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
-use crate::{Dist, Fraction, LooStats, TruthConfig};
+use super::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
+use super::types::{Dist, Fraction, LooStats, TruthConfig};
 
 const NS_PER_MS: i64 = 1_000_000;
 
@@ -179,7 +179,7 @@ pub(crate) fn dist_of(v: &[f64]) -> Dist {
 #[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::DEFAULT_CONFIG;
+    use crate::core::types::DEFAULT_CONFIG;
     use oa_adsb::NONE_I32;
 
     const S: i64 = 1_000_000_000;

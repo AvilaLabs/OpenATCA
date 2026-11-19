@@ -1,14 +1,14 @@
-//! Truth construction: selection, legs, smoothing. Core (pure).
+//! Truth construction: selection, legs, smoothing. Shell (B7): pure in its output, but it counts same-time distance evaluations in a `thread_local!` (the test hook `pair_evals_this_thread`), which B8 keeps out of core.
 
 use oa_adsb::{
     category_observe, is_reserved_address, jump_verdict, reports_len, reports_row, CategoryState,
     JumpPair, JumpVerdict, Reports, F_NEW_LEG, NONE_I32, NONE_U16,
 };
 
-use crate::frame::{frame_angle, frame_new, project, Frame};
-use crate::loo::{loo_finish, loo_leg, LooAcc};
-use crate::quality::{nacp_epu_m, quality_eval, QualityState};
-use crate::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
+use crate::core::frame::{frame_angle, frame_new, project, Frame};
+use crate::core::loo::{loo_finish, loo_leg, LooAcc};
+use crate::core::quality::{nacp_epu_m, quality_eval, QualityState};
+use crate::core::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
 use crate::{
     Fraction, Truth, TruthConfig, TruthError, TruthStats, ALT_QUANTUM_FT, MAX_FRAME_ARC_RAD,
     MAX_REPORTS, MAX_SAME_TIME_DISTINCT, REM_AMBIGUOUS, REM_DUPLICATE, REM_INVALID, REM_JUMP,
