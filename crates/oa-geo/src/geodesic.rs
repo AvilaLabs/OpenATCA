@@ -143,7 +143,7 @@ pub(crate) fn atan2d(y: f64, x: f64) -> f64 {
     }
     let ang = oa_math::atan2(y, x).to_degrees();
     match q {
-        1 => 180.0_f64.copysign(y) - ang,
+        1 => oa_math::copysign_canon_f64(180.0, y) - ang,
         2 => 90.0 - ang,
         3 => -90.0 + ang,
         _ => ang,
@@ -187,7 +187,7 @@ fn ang_diff(x: f64, y: f64) -> (f64, f64) {
     let (d, e) = two_sum(remainder360(-x), remainder360(y));
     let (d, e) = two_sum(remainder360(d), e);
     let d = if d == 0.0 || d.abs() == 180.0 {
-        d.copysign(if e == 0.0 { y - x } else { -e })
+        oa_math::copysign_canon_f64(d, if e == 0.0 { y - x } else { -e })
     } else {
         d
     };
@@ -200,7 +200,7 @@ fn ang_round(x: f64) -> f64 {
     let z = 1.0 / 16.0;
     let y = x.abs();
     let w = if y < z { z - (z - y) } else { y };
-    w.copysign(x)
+    oa_math::copysign_canon_f64(w, x)
 }
 
 /// sum_{k=1..6} c[k-1] sin(2 k x) by Clenshaw summation.
@@ -544,7 +544,10 @@ impl Ellipsoid {
         let ssig12 = oa_math::hypot(st.salp1, st.calp1);
         let csig12 = sbet1 * sbet2 + cbet1 * cbet2 * comg12;
         let etol2 = 0.1 * TOL2
-            / oa_ieee::sqrt(self.f.abs().max(0.001) * (1.0_f64).min(1.0 - self.f / 2.0) / 2.0);
+            / oa_ieee::sqrt(
+                oa_math::max_f64(self.f.abs(), 0.001) * oa_math::min_f64(1.0, 1.0 - self.f / 2.0)
+                    / 2.0,
+            );
         if shortline && ssig12 < etol2 {
             st.salp2 = cbet1 * somg12;
             st.calp2 = sbet12
@@ -593,7 +596,11 @@ impl Ellipsoid {
     pub fn inverse(&self, p1: LatLon, p2: LatLon) -> Result<Inverse, GeoError> {
         let (lat1, lon1, lat2, lon2) = (p1.lat(), p1.lon(), p2.lat(), p2.lon());
         let (lon12, e) = ang_diff(lon1, lon2);
-        let lonsign = if lon12.is_sign_negative() { -1.0 } else { 1.0 };
+        let lonsign = if oa_math::is_sign_negative_canon_f64(lon12) {
+            -1.0
+        } else {
+            1.0
+        };
         let lon12 = lon12 * lonsign;
         let e = e * lonsign;
         let lon12s = ang_round((180.0 - lon12) - e);
@@ -614,21 +621,25 @@ impl Ellipsoid {
         } else {
             1.0
         };
-        let latsign = if lat1.is_sign_negative() { 1.0 } else { -1.0 };
+        let latsign = if oa_math::is_sign_negative_canon_f64(lat1) {
+            1.0
+        } else {
+            -1.0
+        };
         lat1 *= latsign;
         lat2 *= latsign;
 
         let (mut sbet1, mut cbet1) = sincosd(lat1);
         sbet1 *= self.f1;
         (sbet1, cbet1) = norm2(sbet1, cbet1);
-        cbet1 = cbet1.max(TINY);
+        cbet1 = oa_math::max_f64(cbet1, TINY);
         let (mut sbet2, mut cbet2) = sincosd(lat2);
         sbet2 *= self.f1;
         (sbet2, cbet2) = norm2(sbet2, cbet2);
-        cbet2 = cbet2.max(TINY);
+        cbet2 = oa_math::max_f64(cbet2, TINY);
         if cbet1 < -sbet1 {
             if cbet2 == cbet1 {
-                sbet2 = sbet1.copysign(sbet2);
+                sbet2 = oa_math::copysign_canon_f64(sbet1, sbet2);
             }
         } else if sbet2.abs() == -sbet1 {
             cbet2 = cbet1;
@@ -796,7 +807,7 @@ impl Ellipsoid {
         if !(lat2.is_finite() && lon12.is_finite() && azi2.is_finite()) {
             return Err(GeoError::NoConvergence("direct problem"));
         }
-        let lat2 = lat2.clamp(-90.0, 90.0);
+        let lat2 = oa_math::clamp_f64(lat2, -90.0, 90.0);
         let lon2 = ang_normalize(p1.lon() + ang_normalize(lon12));
         let position = LatLon::new(lat2, lon2)?;
         Ok(Direct {
@@ -814,7 +825,7 @@ impl Ellipsoid {
         let (mut sbet1, mut cbet1) = sincosd(ang_round(lat1));
         sbet1 *= self.f1;
         (sbet1, cbet1) = norm2(sbet1, cbet1);
-        cbet1 = cbet1.max(TINY);
+        cbet1 = oa_math::max_f64(cbet1, TINY);
         let salp0 = salp1 * cbet1;
         let calp0 = oa_math::hypot(calp1, salp1 * sbet1);
         let mut ssig1 = sbet1;
@@ -857,7 +868,7 @@ impl Ellipsoid {
         let calp2 = calp0 * csig2c;
         let somg2 = salp0 * ssig2;
         let comg2 = csig2c;
-        let e = 1.0_f64.copysign(salp0);
+        let e = oa_math::copysign_canon_f64(1.0, salp0);
         let omg12 = e
             * (sig12 - (oa_math::atan2(ssig2, csig2c) - oa_math::atan2(ssig1, csig1))
                 + (oa_math::atan2(e * somg2, comg2) - oa_math::atan2(e * somg1, comg1)));

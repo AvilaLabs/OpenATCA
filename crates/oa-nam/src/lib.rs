@@ -45,6 +45,10 @@
 //! at most [`session::MAX_PENDING`] unanswered messages and returns at most
 //! [`session::MAX_ACTIONS`] actions per step.
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 

@@ -35,6 +35,10 @@
 //! full refuses and counts new flights instead of evicting early (INTERFACES IF-R1), and every
 //! parse, decode and apply failure is counted by kind (IF-R5, IF-R6).
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 

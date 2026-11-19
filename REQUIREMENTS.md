@@ -213,6 +213,21 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   an invalid operation makes at run time (`0.0 / 0.0`, `inf - inf`, `inf * 0.0`, `oa_ieee::sqrt(-1.0)`, tried
   under `black_box` so the compiler cannot fold them), negative and payload NaNs, and every other value
   (signed zeros, subnormals, infinities) unchanged bit for bit.
+- **OA-MATH-035** `cmp_canon_f64`/`_f32` order two floats by the IEEE-754 total order after both went through
+  `canon_nan` (`-inf < negatives < -0.0 < +0.0 < positives < +inf < NaN`, every NaN equal to every other, a
+  negative or payload NaN included); `is_sign_negative_canon_f64`/`_f32` read the sign bit after `canon_nan`
+  (true for `-0.0`, false for every NaN); `copysign_canon_f64`/`_f32` give the magnitude of the first
+  argument with the sign of the second after `canon_nan` (a NaN magnitude gives the canonical NaN). Core
+  code calls these in place of `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign`, whose
+  results depend on the sign and payload of a NaN (see OA-TRC-247).
+- **OA-MATH-036** `min_f64`/`max_f64`/`clamp_f64` and the `f32` forms ignore a NaN argument (the other is
+  returned; two NaNs, or a NaN `x` in `clamp`, give the canonical NaN), return `-0.0` from `min` and `0.0`
+  from `max` for the two zeros in either argument order, and never panic (`clamp` with `lo > hi` gives `hi`).
+  Tested for every combination of sign, zero, infinity and NaN. Core code calls these in place of the
+  float `min`, `max` and `clamp` (see OA-TRC-251).
+- **OA-MATH-037** Outside `order.rs`, no source of `oa-math` calls `total_cmp`, `is_sign_negative` or
+  `is_sign_positive` (method, path call or path as a value): the sign and order of a NaN come from the `*_canon_*`
+  functions only. The purity scan fails on one, and a planted-detection test shows the matcher finds each form.
 
 ### NASR (oa-nasr)
 
@@ -490,6 +505,73 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-243** `&raw const`/`&raw mut`, the identifier `Pointer`, `type X = usize;` and `isize`, `<usize>::MAX`
   and a `cfg`, `cfg!` or `cfg_attr` naming `debug_assertions` fail in core code; `debug_assert!`, `alloc::format`
   and `format!` pass; `core::hash`, `core::cell` and `alloc::rc` still fail.
+- **OA-TRC-244** Every `pub trait` (unrestricted `pub`, `unsafe` included) in core code is sealed, meaning one of
+  its supertraits is reached through a module the crate declares non-public (`mod sealed { pub trait Sealed {} }`
+  and `pub trait T: sealed::Sealed`, or `Sealed` imported through that module), or is listed in
+  `tools/oa-trace/core-callbacks-allowlist.txt` as `crate file.rs::TraitName reason`. A `pub use` of the sealing
+  trait and a blanket `impl<X> sealed::Sealed for X` un-seal it and fail. The sealing trait itself, `pub(crate)`
+  and private traits and test-only ones are not listed.
+- **OA-TRC-245** In an item the shell can reach (plain `pub`; a method of a `pub trait`; a `pub` field), every
+  generic bound (angle brackets, `where`, the `impl` block around a method) and every `impl Trait` argument is
+  `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate (`Copy` is not, it implies `Clone`); `Clone`, `PartialEq`, `Eq`,
+  `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into` and every other trait fail unless the
+  allowlist names the item. Private and `pub(crate)` items may carry any bound, a type parameter with no bound
+  is not checked; the header of an `impl` is OA-TRC-252. A bound is read through parentheses, `?` and
+  `for<..>`; one that still has no name (anything but `?Sized` or a lifetime) fails.
+- **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer in the signature of a reachable item (OA-TRC-245),
+  in a `pub` field of a `pub` struct or union, in the body of a `pub enum` or `pub type`, or by naming a type
+  alias of the same crate (private or not) whose body holds one, fail unless the allowlist names the item.
+  Private and `pub(crate)` items, and bodies, may use closures, `dyn` and fn pointers.
+- **OA-TRC-247** `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign` are banned in core code (`oa-math`
+  excepted), method or path, and so is `signum` on a float (an integer's `signum` is not seen); the failure names
+  `oa_math::cmp_canon_f64`/`_f32`, `is_sign_negative_canon_f64`/`_f32` and `copysign_canon_f64`/`_f32`, which
+  take the sign and order after `canon_nan`. Every use in the real core crates is migrated.
+- **OA-TRC-248** `to_bits` and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float are found also as a path used
+  as a value (`.map(f64::to_bits)`), as `<f64>::to_bits(..)` and `<f32>::..`, on a tuple-struct float field
+  (`struct P(f64)`, `self.0`), on a name bound by a tuple pattern with float types (`let (a, b): (f64, f64)`) or
+  a tuple type, on a name bound by an untyped `let` whose initializer mentions a float literal, a float-typed
+  name, a float field, a float method or function or an `as f64` cast (an integer cast at the end of the
+  initializer, or a later `let` of the same name, makes it not a float), and on a field, tuple field, function
+  return type or constant that any other core crate declares as a float. Whatever is left is stated in the
+  RULESET's known lexical limits.
+- **OA-TRC-249** `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
+  `as_mut_ptr_range`, `addr_of`, `addr_of_mut`, `.addr(`, `expose_provenance` and `with_exposed_provenance` fail
+  in core code.
+- **OA-TRC-250** The `src/lib.rs` of every crate of class core (`oa-ieee` included) and split has, at the top level and
+  outside test code, `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, so the crate does
+  not build for a target whose `usize` is not 64 bits. The attribute stands alone: at the start of the file, or
+  after the `]` of an inner attribute, a `;` or a `}`, never directly after another outer attribute
+  (`#[cfg(any())]` stacked on it). In a split crate's `lib.rs` this is the one attribute and the one macro call
+  allowed besides `mod core;`, `mod shell;` and re-exports (B7). That is the one target cfg core code may have;
+  any other, any other `target_pointer_width` cfg included, still fails. The check reads the string, so `"32"`, a
+  missing `compile_error!` or a guard inside a module fails.
+- **OA-TRC-251** A float `min`, `max` or `clamp` (a float receiver or float argument by the evidence of
+  OA-TRC-248, or the path `f64::max`, `<f32>::min` and so on, also as a value in `fold(.., f64::max)`) fails in
+  core code (`oa-math` excepted), with `oa_math::min_f64`/`max_f64`/`clamp_f64` (and the `f32` forms) named, whose
+  results for the zeros and the NaN are defined (OA-MATH-036). Integer and iterator `min`/`max`/`clamp` pass.
+- **OA-TRC-252** The header of every `impl` in core code (inherent or trait, any self type: `&F`, `Box<F>`,
+  `Wrap<T>`, `Box<dyn Fn()>`) is a boundary: its generic bounds, `where` clause and callback types are judged
+  like those of a reachable item (OA-TRC-245, 246), and a trait `impl`'s are judged whether or not it has `pub`
+  methods; the body of an impl is core's own code. An inherent `impl` header counts for its plain `pub` methods.
+  The allowlist names a header by trait and self type with their generic arguments and no spaces
+  (`impl@Default/for/Wrap<T>`, `impl@Wrap<T>`), not by a head word.
+- **OA-TRC-253** A `pub trait` is sealed only by the leading path of a supertrait (`sealed::Sealed`), never by a
+  path inside its generic arguments (`Iterator<Item = sealed::Private>`), and a `use` tree is read per item
+  (`use crate::{sealed::Sealed, open::Other}` seals through `Sealed` only). `pub use` of any glob, and of a sealing
+  trait, fails, and so does a `pub use` of a module that holds one (`crate::sealed`, `sealed::{self}`).
+  A module is reachable only if it and every module around it is `pub`, so a `pub mod` inside a private module
+  seals. A blanket impl of a sealing trait fails when a type parameter appears anywhere in the self type.
+- **OA-TRC-254** A type alias that holds an `Fn*`, `dyn` or `fn(..)` is resolved through other aliases of the crate
+  (`type B = Vec<A>;`, in any order, generic or not), so a reachable signature or field that names any of them
+  fails. An `as` rename in any `use` of core code fails.
+- **OA-TRC-255** The float evidence of OA-TRC-248 follows type aliases whose body mentions a float (`type V3 =
+  [f64; 3]`, `(f64, f64)`, `f64`, and an alias of an alias), also in struct fields, and follows functions that
+  return a float aggregate (`pair().0`, `make()[0]`, `let p = make();`). Aliases are matched by name over all core
+  crates; the rest is in the RULESET's known lexical limits.
+- **OA-TRC-256** A name bound to an expression whose outermost shape is an integer (`.count()`, `.len()`,
+  `usize::try_from(..)` with `?`/`.unwrap()`, or a final `as <integer>`) is not float evidence, whatever the
+  expression mentions inside.
+- **OA-TRC-257** `fmt::Arguments` (it carries the caller's `Display` impls) is not taken by a reachable item.
 
 ### Hashing (oa-sha256)
 
@@ -2538,6 +2620,10 @@ decoder is OA-GRIB-021.
   obstacle columns of different lengths, a terrain grid without a valid lattice or shorter than its
   dimensions, and work over `MAX_CLEARANCE_WORK` (rows, edge rows, cells, pair tests, counted before
   they are built); a NaN percentile is NaN.
+- **OA-MVA-085** The overlaps of a chart come out in one fixed order: largest first, then by sector name, then
+  (two pairs that tie on both) by the sector pair as the model orders the sectors, and the pairs are collected in
+  an ordered map, never a hash map, so the report is the same on every run and whatever order the pairs were
+  found in. Tested with two pairs that tie on cells and names, collected in every order.
 
 ## M2 — Weather inputs
 

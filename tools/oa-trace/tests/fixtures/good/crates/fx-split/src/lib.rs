@@ -4,6 +4,9 @@
 pub mod core;
 pub mod shell;
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("64-bit only");
+
 pub use self::core::double;
 pub use self::shell::load;
 

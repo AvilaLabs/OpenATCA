@@ -199,7 +199,7 @@ fn chi_sin_cos(c: f64, w_over_c: f64) -> (f64, f64) {
 fn saturate(v: f64) -> i32 {
     let lim = f64::from(COORD_LIMIT);
     // Finite by the callers' checks; a NaN would saturate to 0 and is excluded before this.
-    oa_ieee::round(v).clamp(-lim, lim) as i32
+    oa_math::clamp_f64(oa_ieee::round(v), -lim, lim) as i32
 }
 
 /// Screen position, 1/16 pixel, of a point given in radians. `None` if not finite or at the
@@ -249,7 +249,11 @@ pub fn unproject(p: &Projection, x16: i32, y16: i32) -> Option<(i32, i32)> {
     let (chi, d) = if rho == 0.0 {
         (oa_math::asin(p.sin_chi0), 0.0)
     } else {
-        let chi = oa_math::asin((ca * p.sin_chi0 + y * sa * p.cos_chi0 / rho).clamp(-1.0, 1.0));
+        let chi = oa_math::asin(oa_math::clamp_f64(
+            ca * p.sin_chi0 + y * sa * p.cos_chi0 / rho,
+            -1.0,
+            1.0,
+        ));
         let d = oa_math::atan2(x * sa, rho * p.cos_chi0 * ca - y * p.sin_chi0 * sa);
         (chi, d)
     };

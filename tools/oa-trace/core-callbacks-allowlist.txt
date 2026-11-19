@@ -1,16 +1,14 @@
-# Core `pub fn` signatures that take a callback (`Fn`, `FnMut`, `FnOnce`, `dyn`, `impl Trait`
-# parameter) or a trait-bound generic: the one way shell code can hand behaviour to the core
-# (RULESET B5). Each line is `crate file.rs::fn reason`, the file relative to the crate's
-# `src/`. oa-trace fails on a signature missing from this list and on an entry no signature
-# matches, so the list is reviewed whenever it changes.
-#
-# Private fns (oa-display core/raster.rs `first_true`, oa-truth core/linalg.rs `zip_v`,
-# oa-airspace core/snapshot.rs and core/model.rs helpers, oa-geo rhumb.rs integrators) take
-# closures too, but only core code can call them: there is no boundary, so no entry.
+# Core items the shell can reach (plain `pub`, a method of a `pub` trait, a `pub` field) that let it
+# hand behaviour to the core (RULESET B5): a `pub trait` that is not sealed; a generic bound or
+# `impl Trait` argument that is not `Copy`, `Sized` or a sealed trait; `Fn*`, `dyn` or `fn(..)` in
+# the signature, a `pub` field or an alias they name. Each line is `crate file.rs::name reason`, the
+# file relative to the crate's `src/`, the name that of the fn, method, struct, enum, type or trait
+# that holds it. oa-trace fails on an item missing from this list and on an entry nothing matches,
+# so the list is reviewed whenever it changes.
 #
 # OPEN means the type system does not stop a caller from passing a closure that does I/O; the
 # callers named were read and each passes a pure key comparison or key hash over its own tables.
 oa-replay core/index.rs::index_find OPEN: `eq` is called with a slot number during the probe; callers read: core/table.rs (by_gufi, by_plan, by_tma), core/slots.rs, shell/adsb.rs adsb_slot_of; each compares a key column
 oa-replay core/index.rs::index_remove OPEN: `home` is called with a slot number to re-hash it while the probe chain is repaired; callers read: core/table.rs, core/slots.rs, shell/adsb.rs; each hashes a key column
 oa-replay core/slots.rs::slots_find OPEN: forwards `eq` to index_find; callers read: shell/tfms.rs, shell/fns.rs; each compares a key column
-oa-airspace core/model.rs::at bound is `T: Copy`, a marker with no method: the function only copies an element out of a slice, no behaviour is called through it
+oa-airspace core/model.rs::at bound `T: Copy`; the body only indexes a slice and returns the element by implicit copy (no Clone call); reviewed 2026-11-19

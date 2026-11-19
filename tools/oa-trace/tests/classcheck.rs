@@ -8,7 +8,7 @@
 
 use oa_trace::classcheck::{
     check, check_with, ieee_api_problems, lib_rs_problems, mask, parse_manifest, parse_members,
-    render_text, scan_source, Class, Ctx, UNSPLIT_ALLOWED,
+    render_text, scan_source, Class, Ctx, FloatFacts, UNSPLIT_ALLOWED,
 };
 use oa_trace::classcheck::{float_method_advice, FLOAT_METHODS};
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,6 +123,11 @@ fn comments_strings_and_char_literals_never_match() {
 }
 
 fn scan(src: &str) -> oa_trace::classcheck::FileScan {
+    scan_with(src, false, &FloatFacts::default())
+}
+
+/// [`scan`] with the float facts of the other core files (`facts`) and `oa-math`'s exemption.
+fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck::FileScan {
     let classes: BTreeMap<String, Class> = [
         ("fx-core".to_string(), Class::Core),
         ("fx-shell".to_string(), Class::Shell),
@@ -134,14 +139,20 @@ fn scan(src: &str) -> oa_trace::classcheck::FileScan {
         .keys()
         .map(|n| (n.replace('-', "_"), n.clone()))
         .collect();
+    let cb_types = oa_trace::classcheck::callback_aliases([src]);
     scan_source(
         src,
         &Ctx {
             split: false,
             ieee: false,
-            math: false,
+            math,
             modules: &BTreeSet::new(),
-            float_names: &BTreeSet::new(),
+            floats: facts,
+            private_mods: &BTreeSet::new(),
+            sealed: &BTreeSet::new(),
+            sealing: &BTreeSet::new(),
+            sealing_mods: &BTreeSet::new(),
+            cb_types: &cb_types,
             depth: 1,
             classes: &classes,
             aliases: &aliases,
@@ -151,6 +162,18 @@ fn scan(src: &str) -> oa_trace::classcheck::FileScan {
 
 fn tokens(src: &str) -> Vec<String> {
     scan(src).hits.into_iter().map(|h| h.token).collect()
+}
+
+/// The hit tokens of `src` when other core files declared `others` (struct fields, tuple structs,
+/// `-> f64` functions, constants).
+fn tokens_with(src: &str, others: &str) -> Vec<String> {
+    let mut facts = FloatFacts::default();
+    facts.add_source(others);
+    scan_with(src, false, &facts)
+        .hits
+        .into_iter()
+        .map(|h| h.token)
+        .collect()
 }
 
 // REQ: OA-TRC-205
@@ -316,7 +339,8 @@ impl Ws {
     }
 
     /// As [`Ws::new`] with the package name of the crate in `crates/fx-a` set. A core crate's
-    /// `src/lib.rs` gets `#![cfg_attr(not(test), no_std)]` on its first line (B10) unless it has one.
+    /// `src/lib.rs` gets `#![cfg_attr(not(test), no_std)]` on its first line (B10) unless it has one, and the
+    /// 64-bit guard (B10) after its last line.
     fn named(tag: &str, pkg: &str, class: &str, files: &[(&str, &str)]) -> Ws {
         // one directory per workspace, so equal tags in parallel tests do not share it
         static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -345,6 +369,9 @@ impl Ws {
         ws.put("crates/fx-b/src/lib.rs", "pub fn go() {}\n");
         for (p, c) in files {
             let mut c = (*c).to_string();
+            if class == "core" && *p == "src/lib.rs" && !c.contains("compile_error") {
+                c = format!("{c}\n#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"64-bit only\");\n");
+            }
             if class == "core" && *p == "src/lib.rs" && !c.contains("no_std") {
                 c = format!("#![cfg_attr(not(test), no_std)] {c}");
             }
@@ -399,7 +426,11 @@ fn split_ws(tag: &str, lib: &str, core: &str) -> Ws {
     )
 }
 
-const SPLIT_LIB: &str = "mod core;\nmod shell;\n";
+const SPLIT_LIB: &str = "mod core;\nmod shell;\n#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"64-bit only\");\n";
+
+/// The 64-bit guard a core crate's `lib.rs` carries (B10).
+const GUARD: &str =
+    "#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"64-bit only\");\n";
 
 // REQ: OA-TRC-209
 #[test]
@@ -836,16 +867,21 @@ fn float_methods_core_lacks_are_rejected_in_core_code() {
 #[test]
 fn a_core_crate_must_be_no_std() {
     let ws = Ws::new("n0", "core", &[("src/lib.rs", "pub fn f() {}\n")]);
-    ws.put("crates/fx-a/src/lib.rs", "pub fn f() {}\n");
+    ws.put(
+        "crates/fx-a/src/lib.rs",
+        &format!("pub fn f() {{}}\n{GUARD}"),
+    );
     assert!(has(&ws.failures(), "fx-a: B10"), "{:#?}", ws.failures());
     ws.put(
         "crates/fx-a/src/lib.rs",
-        "#![forbid(unsafe_code)]\n#![no_std]\npub fn f() {}\n",
+        &format!("#![forbid(unsafe_code)]\n#![no_std]\npub fn f() {{}}\n{GUARD}"),
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     ws.put(
         "crates/fx-a/src/lib.rs",
-        "#![forbid(unsafe_code)]\n#![cfg_attr( not(test) , no_std )]\npub fn f() {}\n",
+        &format!(
+            "#![forbid(unsafe_code)]\n#![cfg_attr( not(test) , no_std )]\npub fn f() {{}}\n{GUARD}"
+        ),
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     // in a comment, a string, or the wrong cfg it does not count
@@ -855,9 +891,12 @@ fn a_core_crate_must_be_no_std() {
         "#![cfg_attr(test, no_std)]\npub fn f() {}\n",
         "pub const S: &str = \"#![no_std]\";\n",
     ] {
-        ws.put("crates/fx-a/src/lib.rs", bad);
+        ws.put("crates/fx-a/src/lib.rs", &format!("{bad}{GUARD}"));
         assert!(
-            has(&ws.failures(), "fx-a: B10"),
+            has(
+                &ws.failures(),
+                "fx-a: B10: src/lib.rs of a core crate must have `#!["
+            ),
             "{bad}: {:#?}",
             ws.failures()
         );
@@ -1244,11 +1283,11 @@ fn no_std_must_be_a_top_of_file_inner_attribute() {
         "#[no_std]\npub fn f() {}\n",
         "#![forbid(unsafe_code)]\npub fn f() {}\n#![no_std]\n",
     ] {
-        ws.put("crates/fx-a/src/lib.rs", bad);
+        ws.put("crates/fx-a/src/lib.rs", &format!("{bad}{GUARD}"));
         assert!(
             has(
                 &ws.failures(),
-                "fx-a: B10: src/lib.rs of a core crate must have"
+                "fx-a: B10: src/lib.rs of a core crate must have `#!["
             ),
             "{bad}: {:#?}",
             ws.failures()
@@ -1257,7 +1296,9 @@ fn no_std_must_be_a_top_of_file_inner_attribute() {
     // other inner attributes may come first
     ws.put(
         "crates/fx-a/src/lib.rs",
-        "#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\npub fn f() {}\n",
+        &format!(
+            "#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\npub fn f() {{}}\n{GUARD}"
+        ),
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
@@ -1446,7 +1487,7 @@ fn an_attribute_on_a_split_module_or_an_exported_shell_macro_cannot_reach_the_co
 // REQ: OA-TRC-231
 #[test]
 fn shell_code_may_not_impl_a_core_type_or_a_core_trait() {
-    let core = "pub struct Rec { pub x: u8 }\npub trait Tr { fn t(&self) -> u8; }\n";
+    let core = "pub struct Rec { pub x: u8 }\npub trait Tr: sealed::Sealed { fn t(&self) -> u8; }\nmod sealed { pub trait Sealed {} }\n";
     for (tag, shell) in [
         // an inherent impl and a trait impl on a core type, imported
         ("i0", "use crate::core::Rec;\nimpl Rec { pub fn go(&self) -> u8 { 1 } }\n"),
@@ -1754,13 +1795,16 @@ fn addresses_platform_sizes_and_built_format_strings_are_banned_in_core() {
 fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
     let sigs = [
         ("f", "pub fn f(g: impl Fn(u8) -> u8) -> u8 { g(1) }"),
-        ("h", "pub fn h<T: Copy>(x: T) -> T { x }"),
+        ("h", "pub fn h<T: Ord>(v: &mut [T]) { let _ = v; }"),
         (
             "d",
             "pub fn d(x: &dyn core::fmt::Debug) -> usize { let _ = x; 0 }",
         ),
         ("w", "pub fn w<T>(x: T) -> T where T: Clone { x }"),
-        ("p", "pub(crate) fn p(g: impl FnMut()) { let _ = g; }"),
+        (
+            "p",
+            "type G = Box<dyn FnMut()>;\npub fn p(g: G) { let _ = g; }",
+        ),
         ("b", "pub fn b(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }"),
         ("c", "pub const fn c<F: Fn()>(g: F) { let _ = g; }"),
     ];
@@ -1769,7 +1813,7 @@ fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
         assert!(
             has(
                 &ws.failures(),
-                &format!("{name}: B5: a core `pub fn` takes a callback or a bound")
+                &format!("{name}: B5: core code lets the shell hand in behaviour")
             ),
             "{sig}: {:#?}",
             ws.failures()
@@ -1781,11 +1825,12 @@ fn a_core_pub_fn_with_a_callback_or_a_bound_needs_a_reviewed_allowlist_line() {
         );
         assert!(ws.failures().is_empty(), "{sig}: {:#?}", ws.failures());
     }
-    // not boundaries: a private fn, a plain generic, an `impl` in return position, a method
-    // without a bound in a type's impl
+    // not boundaries: a plain generic, a `Sized` bound, an `impl` in return position,
+    // a method without a bound in a type's impl, and anything the shell cannot name: a private
+    // or `pub(crate)` fn may take closures, `impl Iterator`, `impl Into` and any bound
     let ws = core_ws(
         "c1",
-        "fn q(g: impl Fn()) { g() }\npub fn r<T>(x: T) -> T { x }\npub fn s() -> impl Iterator<Item = u8> { core::iter::empty() }\npub struct S;\nimpl S { pub fn m(&self) -> u8 { 0 } }\n",
+        "pub fn r<T>(x: T) -> T { x }\npub fn s() -> impl Iterator<Item = u8> { core::iter::empty() }\npub struct S;\nimpl S { pub fn m(&self) -> u8 { 0 } }\npub fn h<T: Sized>(x: T) -> T { x }\npub fn z<T: Sized + ?Sized>(x: &T) -> usize { 0 }\npub(crate) fn p(g: impl FnMut()) { let _ = g; }\nfn q(g: impl Fn()) { g() }\nfn i(x: impl Iterator<Item = u8>, y: impl Into<u8>) {}\nfn o<T: Ord>(v: &mut [T]) { let _ = v; }\ntype Cb = Box<dyn Fn()>;\nfn u(f: Cb) { f() }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     // a method of an impl block is a signature too
@@ -2037,8 +2082,8 @@ fn callbacks_through_impl_bounds_fn_pointers_and_struct_fields_need_the_allowlis
         ("run", "pub fn run(f: &fn()) {}\n"),
         ("run", "pub fn run() -> fn() { || () }\n"),
         ("S", "pub struct S { pub cb: fn(u8) }\n"),
-        ("S", "pub struct S { cb: Box<dyn FnMut()> }\n"),
-        ("S", "pub struct S(Box<dyn Fn()>);\n"),
+        ("S", "pub struct S { pub cb: Box<dyn FnMut()> }\n"),
+        ("S", "pub struct S(pub Box<dyn Fn()>);\n"),
         ("E", "pub enum E { A(fn()), B }\n"),
         ("T", "pub type T = fn(u8) -> u8;\n"),
     ] {
@@ -2046,21 +2091,32 @@ fn callbacks_through_impl_bounds_fn_pointers_and_struct_fields_need_the_allowlis
         assert!(
             has(
                 &ws.failures(),
-                &format!("{name}: B5: a core `pub fn` takes a callback or a bound")
+                &format!("{name}: B5: core code lets the shell hand in behaviour")
             ),
             "{src}: {:#?}",
             ws.failures()
         );
-        ws.put(
-            CALLBACKS,
-            &format!("fx-a lib.rs::{name} reason: reviewed, the caller passes a pure function\n"),
-        );
-        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+        // every name the check flags is listed (an `impl` block as `impl@Type`, a struct that
+        // stores an unbounded parameter by its own name)
+        let listed: String = ["W", "impl@W", name]
+            .iter()
+            .map(|n| {
+                format!("fx-a lib.rs::{n} reason: reviewed, the caller passes a pure function\n")
+            })
+            .collect();
+        ws.put(CALLBACKS, &listed);
+        let left: Vec<String> = ws
+            .failures()
+            .into_iter()
+            .filter(|f| !f.contains("listed but no core"))
+            .collect();
+        assert!(left.is_empty(), "{src}: {left:#?}");
     }
-    // data-only items and an impl without bounds are not boundaries
+    // data-only items and an impl without bounds are not boundaries, nor is a callback in a
+    // private field or an unbounded parameter stored in a pub type (core cannot call into it)
     let ws = core_ws(
         "z2",
-        "pub struct S { pub a: u8, pub f: f64 }\npub enum E { A(u8) }\npub type T = u32;\npub struct W<F>(F);\nimpl<F> W<F> { pub fn get(&self) -> u8 { 0 } }\n",
+        "pub struct S { pub a: u8, pub f: f64 }\npub enum E { A(u8) }\npub type T = u32;\npub struct W<F: Sized>(F);\nimpl W<u8> { pub fn get(&self) -> u8 { 0 } }\npub struct P { cb: Box<dyn FnMut()> }\npub struct Q(Box<dyn Fn()>);\npub struct U<T>(T);\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
 }
@@ -2167,5 +2223,1328 @@ fn raw_borrows_fmt_pointer_width_aliases_and_debug_assertion_branches_are_banned
         ("za", "use alloc::rc::Rc;\n"),
     ] {
         assert!(!core_ws(tag, src).failures().is_empty(), "{src}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Round four: sealed traits, generic bounds, callbacks anywhere, NaN sign, float bits, address
+// names, the 64-bit guard, signed zero.
+
+const SEALED: &str = "mod sealed { pub trait Sealed {} }\n";
+
+// REQ: OA-TRC-244
+#[test]
+fn a_pub_trait_in_core_is_sealed_or_on_the_reviewed_list() {
+    // planted: a `pub trait` the shell can implement
+    let ws = core_ws("t0", "pub trait T { fn t(&self) -> u8; }\n");
+    assert!(
+        has(
+            &ws.failures(),
+            "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    // a reviewed allowlist line lets it through, and goes stale when the trait goes
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::T reason: reviewed, every implementor is a core type\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // `pub unsafe trait` is a `pub trait`; `pub(crate)`, private and test-only ones are not
+    assert!(has(
+        &core_ws("t0b", "pub unsafe trait T {}\n").failures(),
+        "T: B5"
+    ));
+    for (tag, src) in [
+        ("t0c", "pub(crate) trait T {}\n"),
+        ("t0d", "trait T {}\n"),
+        ("t0e", "#[cfg(test)]\nmod t { pub trait T {} }\n"),
+    ] {
+        assert!(core_ws(tag, src).failures().is_empty(), "{src}");
+    }
+    // clean: sealed by a supertrait from a private module, however it is named
+    for (tag, src) in [
+        ("t1", format!("{SEALED}pub trait T: sealed::Sealed {{ fn t(&self) -> u8; }}\nimpl sealed::Sealed for u8 {{}}\n")),
+        ("t2", format!("{SEALED}use sealed::Sealed;\npub trait T: Sealed {{}}\n")),
+        ("t3", format!("{SEALED}pub trait T: Clone + crate::sealed::Sealed {{}}\n")),
+        ("t4", "pub(crate) mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n".to_string()),
+        ("t5", format!("{SEALED}pub trait T<X>: sealed::Sealed where X: Sized {{}}\n")),
+    ] {
+        let ws = core_ws(tag, &src);
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+    // a supertrait from a public module seals nothing, and neither does a plain std one
+    for (tag, src) in [
+        (
+            "t6",
+            "pub mod open { pub trait Marker {} }\npub trait T: open::Marker {}\n",
+        ),
+        ("t7", "pub trait T: Clone {}\n"),
+    ] {
+        assert!(has(&core_ws(tag, src).failures(), "T: B5"), "{src}");
+    }
+    // the seal handed out again: a `pub use` of the sealing trait, a blanket impl of it
+    let ws = core_ws(
+        "t8",
+        &format!("{SEALED}pub use sealed::Sealed;\npub trait T: sealed::Sealed {{}}\n"),
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "Sealed: B5: core code lets the shell hand in behaviour (`pub use` of a sealing trait"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    let ws = core_ws(
+        "t9",
+        &format!("{SEALED}pub trait T: sealed::Sealed {{}}\nimpl<X> sealed::Sealed for X {{}}\n"),
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "impl@sealed::Sealed/for/X: B5: core code lets the shell hand in behaviour (a blanket impl"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    // and a private module is not a seal in a crate that re-exports an ordinary item from it
+    let ws = core_ws(
+        "ta",
+        "mod inner { pub struct P { pub x: u8 } }\npub use inner::P;\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-245
+#[test]
+fn a_reachable_generic_is_bounded_only_by_sized_or_sealed_traits() {
+    // planted, each in an item the shell can name (plain `pub`)
+    for (name, src) in [
+        ("f", "pub fn f<T: Iterator<Item = u8>>(x: T) -> u8 { 0 }\n"),
+        (
+            "f",
+            "pub fn f<T>(x: T) -> u8 where T: Into<u8> { x.into() }\n",
+        ),
+        ("f", "pub fn f<T: Copy + AsRef<[u8]>>(x: T) -> u8 { 0 }\n"),
+        ("f", "pub fn f(x: impl Into<u8>) -> u8 { x.into() }\n"),
+        ("f", "pub fn f<T: Ord>(v: &mut [T]) { v.sort(); }\n"),
+        // `Copy: Clone`, and `vec![x; n]`, `resize`, `to_vec` and `fill` run a hand-written clone
+        ("f", "pub fn f<T: Copy>(x: T) -> T { x }\n"),
+        ("f", "pub fn f<T>(x: T) -> T where T: Copy { x }\n"),
+        ("f", "pub fn f<T: Eq>(x: T) {}\n"),
+        ("f", "pub fn f<T: Clone>(x: T) {}\n"),
+        ("f", "pub fn f<T: Default>() -> T { T::default() }\n"),
+        ("f", "pub fn f<T: core::fmt::Debug>(x: T) {}\n"),
+        ("f", "pub fn f<T: core::hash::Hash>(x: T) {}\n"),
+        ("f", "pub fn f<T: PartialOrd>(x: T) {}\n"),
+        (
+            "f",
+            "pub fn f<T>(x: T) -> u8 where for<'a> &'a T: Into<u8> { 0 }\n",
+        ),
+        ("S", "pub struct S<T: AsRef<u8>>(T);\n"),
+        ("E", "pub enum E<T> where T: Iterator { A(T) }\n"),
+        (
+            "m",
+            "pub struct S<T>(T);\nimpl<T: Iterator> S<T> { pub fn m(&self) {} }\n",
+        ),
+        (
+            "m",
+            "pub struct S<T>(T);\nimpl<T> S<T> where T: Into<u8> { pub fn m(&self) {} }\n",
+        ),
+        (
+            "m",
+            "pub struct S;\nimpl S { pub fn m<X: AsRef<u8>>(&self, x: X) {} }\n",
+        ),
+        ("T", "pub type T<X: Iterator> = Vec<X>;\n"),
+    ] {
+        let ws = core_ws("g0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                &format!("{name}: B5: core code lets the shell hand in behaviour (")
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+        ws.put(
+            CALLBACKS,
+            &format!("fx-a lib.rs::{name} reason: reviewed, the bound is a pure trait\n"),
+        );
+        // the allowlist covers the flagged name
+        let left = ws.failures();
+        assert!(
+            left.iter().all(|f| !f.contains(&format!("{name}: B5"))),
+            "{src}: {left:#?}"
+        );
+    }
+    // a method of a `pub trait` is reachable
+    let ws = core_ws(
+        "g0t",
+        &format!("{SEALED}pub trait Tr: sealed::Sealed {{ fn m<X: Iterator>(&self, x: X); }}\n"),
+    );
+    assert!(has(&ws.failures(), "m: B5"), "{:#?}", ws.failures());
+    // clean: `Sized`, `?Sized`, lifetimes, const generics, a sealed trait, an unbounded
+    // parameter, and any bound at all on an item the shell cannot name
+    for (tag, src) in [
+        ("g1", "pub fn f<T: Sized + Sized>(x: T) -> T { x }\n".to_string()),
+        ("g2", "pub fn f<T: ?Sized>(x: &T) -> usize { 0 }\npub fn g<'a, const N: usize, T: Sized + 'a>(x: &'a [T; N]) -> usize { N }\n".to_string()),
+        ("g3", "pub fn f<T>(x: T) -> T where T: Sized, u8: Sized { x }\n".to_string()),
+        ("g4", "struct S<T: Ord>(T);\nimpl<T: Ord> S<T> { fn m(&self) {} }\npub(crate) fn p<T: Ord + Clone>(x: T) {}\n".to_string()),
+        ("g5", format!("{SEALED}pub trait Sh: sealed::Sealed {{}}\npub fn f<T: Sh>(x: &T) -> usize {{ 0 }}\npub fn g<T>(x: &T) where T: Sh + Sized {{}}\n")),
+        ("g6", "pub fn f(x: impl Sized + Sized) -> u8 { 0 }\nfn g(x: impl Clone + Iterator) {}\n".to_string()),
+        ("g7", "#[cfg(test)]\nmod t { pub fn f<T: Iterator>(x: T) {} }\n".to_string()),
+        ("g8", "pub struct W<T>(T);\npub enum E<T> { A(T), B }\npub struct V<T> { pub x: T }\n".to_string()),
+        ("g9", "pub struct W<T: Sized>(T);\n".to_string()),
+        ("ga", "impl PartialOrd for X { fn partial_cmp(&self, o: &X) -> Option<core::cmp::Ordering> { None } }\n".to_string()),
+    ] {
+        let ws = core_ws(tag, &src);
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+}
+
+// REQ: OA-TRC-246
+#[test]
+fn a_function_pointer_fn_trait_or_dyn_in_a_reachable_item_needs_the_allowlist() {
+    for (name, src) in [
+        ("q", "pub fn q(g: impl Fn(u8) -> u8) -> u8 { g(1) }\n"),
+        ("q", "pub fn q(g: &mut dyn FnMut()) { g() }\n"),
+        ("q", "pub fn q(g: Box<dyn FnOnce() -> u8>) -> u8 { g() }\n"),
+        ("q", "pub fn q(d: &dyn core::fmt::Debug) {}\n"),
+        ("q", "pub fn q(f: fn(u8) -> u8) -> u8 { f(1) }\n"),
+        // a private alias that holds one makes every reachable signature that names it fail
+        (
+            "q",
+            "type F = Box<dyn Fn(u8) -> u8>;\npub fn q(f: F) -> u8 { f(1) }\n",
+        ),
+        (
+            "q",
+            "type F = fn(u8) -> u8;\npub fn q() -> Option<F> { None }\n",
+        ),
+        ("S", "type F = fn(u8) -> u8;\npub struct S { pub f: F }\n"),
+        (
+            "m",
+            "pub struct S;\nimpl S { pub fn m(&self, f: &dyn Fn()) { f() } }\n",
+        ),
+        (
+            "x",
+            "pub struct S;\nimpl dyn core::fmt::Debug { pub fn x(&self) {} }\n",
+        ),
+        ("F", "pub type F = fn(u8) -> u8;\n"),
+        ("F", "pub type F = Box<dyn Fn(u8) -> u8>;\n"),
+        ("S", "pub struct S { pub cb: fn(u8) }\n"),
+    ] {
+        let ws = core_ws("f0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                &format!("{name}: B5: core code lets the shell hand in behaviour")
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    // a method declared in a `pub trait`
+    let ws = core_ws(
+        "f0t",
+        &format!("{SEALED}pub trait Tr: sealed::Sealed {{ fn m(&self, f: fn(u8) -> u8); }}\n"),
+    );
+    assert!(has(&ws.failures(), "m: B5"), "{:#?}", ws.failures());
+    // the allowlist line is by the name of the item that holds it, and covers all of its hits
+    let ws = core_ws("f1", "pub fn q(g: &dyn Fn(u8) -> u8) -> u8 { g(1) }\n");
+    assert!(!ws.failures().is_empty());
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::q reason: reviewed, called with a pure closure only\n",
+    );
+    let left = ws.failures();
+    assert!(left.is_empty(), "{left:#?}");
+    // clean: private items use closures, `dyn`, fn pointers and aliases of them freely; closures
+    // in a body, `impl Trait` in return position, a `pub(crate)` fn, test code
+    let ws = core_ws(
+        "f2",
+        "pub fn s(v: &[u8]) -> u8 { v.iter().map(|x| x.wrapping_add(1)).fold(0, |a, b| a ^ b) }\nfn h(x: u8) -> u8 { x }\npub fn r() -> impl Iterator<Item = u8> { core::iter::empty() }\n#[cfg(test)]\nmod t { pub fn q(g: &dyn Fn()) { g() } }\nfn p(g: impl Fn(u8) -> u8) -> u8 { g(1) }\nfn d(g: &mut dyn FnMut()) { g() }\nfn fp(f: fn(u8) -> u8) -> u8 { f(1) }\ntype F = Box<dyn Fn(u8) -> u8>;\nfn a(f: F) -> u8 { f(1) }\nstruct S { cb: fn(u8) }\npub struct P { cb: Box<dyn FnMut()> }\nstatic T: [fn(); 1] = [n];\nfn n() {}\npub(crate) fn pc(g: impl Fn()) { g() }\ntrait Tr { fn m(&self, f: fn(u8) -> u8); }\nimpl dyn core::fmt::Debug { fn x(&self) {} }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-247
+#[test]
+fn nan_sign_and_total_order_come_from_oa_math_never_from_the_float_methods() {
+    for (src, want) in [
+        (
+            "pub fn f(a: f64, b: f64) -> core::cmp::Ordering { a.total_cmp(&b) }\n",
+            "total_cmp",
+        ),
+        (
+            "pub fn f(v: &mut [f64]) { v.sort_by(f64::total_cmp); }\n",
+            "total_cmp",
+        ),
+        (
+            "pub fn f(v: &mut [f32]) { v.sort_by(|a, b| a.total_cmp(b)); }\n",
+            "total_cmp",
+        ),
+        (
+            "pub fn f(x: f64) -> bool { x.is_sign_negative() }\n",
+            "is_sign_negative",
+        ),
+        (
+            "pub fn f(x: f32) -> bool { x.is_sign_positive() }\n",
+            "is_sign_positive",
+        ),
+        (
+            "pub fn f(x: f64) -> bool { <f64>::is_sign_negative(x) }\n",
+            "is_sign_negative",
+        ),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { a.copysign(b) }\n",
+            "copysign",
+        ),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { f64::copysign(a, b) }\n",
+            "copysign",
+        ),
+        (
+            "pub fn f(a: f64) -> f64 { 1.0_f64.copysign(a) }\n",
+            "copysign",
+        ),
+        ("pub fn f(x: f64) -> f64 { x.signum() }\n", "signum"),
+        ("pub fn f(x: f32) -> f32 { f32::signum(x) }\n", "signum"),
+        ("pub fn f(x: f64) -> f64 { (x * 2.0).signum() }\n", "signum"),
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // integers have a `signum`; the oa_math functions are the way
+    for src in [
+        "pub fn f(x: i64) -> i64 { x.signum() }\n",
+        "pub fn f(a: u32, b: u32) -> core::cmp::Ordering { a.cmp(&b) }\n",
+        "pub fn f(a: f64, b: f64) -> core::cmp::Ordering { oa_math::cmp_canon_f64(a, b) }\n",
+        "pub fn f(x: f64) -> bool { oa_math::is_sign_negative_canon_f64(x) }\n",
+        "pub fn f(a: f64, b: f64) -> f64 { oa_math::copysign_canon_f64(a, b) }\n",
+    ] {
+        assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
+    }
+    // oa-math itself implements them
+    let src = "pub fn c(a: f64, b: f64) -> core::cmp::Ordering { a.total_cmp(&b) }\n";
+    assert!(scan_with(src, true, &FloatFacts::default()).hits.is_empty());
+}
+
+// REQ: OA-TRC-248
+#[test]
+fn float_bits_are_found_through_paths_values_tuples_untyped_lets_and_fields_of_other_crates() {
+    for (src, want) in [
+        // a path used as a value, in `UFCS`, with a qualified type
+        ("pub fn f() -> u64 { let g = f64::to_bits; g(1.0) }\n", "to_bits"),
+        ("pub fn f(v: &[f64]) -> Vec<u64> { v.iter().copied().map(f64::to_bits).collect() }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { <f64>::to_bits(x) }\n", "to_bits"),
+        ("pub fn f(x: f32) -> u32 { <f32>::to_bits(x) }\n", "to_bits"),
+        ("pub fn f() -> [u8; 4] { let g = f32::to_le_bytes; g(1.0) }\n", "to_le_bytes"),
+        ("pub fn f(x: f64) -> [u8; 8] { <f64>::to_be_bytes(x) }\n", "to_be_bytes"),
+        ("pub fn f(v: &[f64]) { let _: Vec<[u8; 8]> = v.iter().copied().map(f64::to_ne_bytes).collect(); }\n", "to_ne_bytes"),
+        // a tuple pattern with float types
+        ("pub fn f() -> [u8; 8] { let (a, b): (f64, f64) = (1.0, 2.0); let _ = b; a.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f() -> [u8; 8] { let (a, b): (u8, f64) = (1, 2.0); let _ = a; b.to_be_bytes() }\n", "to_be_bytes"),
+        ("pub fn f(p: (u8, f64)) -> [u8; 8] { p.1.to_le_bytes() }\n", "to_le_bytes"),
+        // untyped lets: a literal, a float name, a method, a cast, and one let from another
+        ("pub fn f() -> [u8; 8] { let x = 1.5; x.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f() -> [u8; 4] { let x = 2f32; x.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f() -> [u8; 8] { let x = 1e3; x.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(a: f64) -> [u8; 8] { let y = a; y.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(a: f64) -> [u8; 8] { let y = a * 2.0; let z = y + 1.0; z.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(n: usize) -> [u8; 8] { let y = n as f64; y.to_be_bytes() }\n", "to_be_bytes"),
+        ("pub fn f(a: f64) -> [u8; 8] { let y = oa_math::exp(a); y.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f() -> [u8; 8] { let y = f64::MAX; y.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(v: &[f64]) -> [u8; 8] { let y = v[0]; y.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(v: &[f64]) -> [u8; 8] { let y = v.iter().sum::<f64>(); y.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(x: f64) -> [u8; 8] { let (a, b) = (x, 1u8); let _ = b; a.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(v: &[f64]) -> [u8; 8] { let m = v.iter().fold(0.0, |acc, x| acc + x); m.to_le_bytes() }\n", "to_le_bytes"),
+    ] {
+        assert!(tokens(src).iter().any(|t| t == want), "{src}: {:?}", tokens(src));
+    }
+    // a float field, a tuple-struct field and a float function that another core file declares
+    for (src, others, want) in [
+        (
+            "pub fn f(s: &S) -> [u8; 8] { s.w.to_le_bytes() }\n",
+            "pub struct S { pub w: f64 }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(s: &S) -> [u8; 8] { let y = s.w; y.to_le_bytes() }\n",
+            "pub struct S { pub w: f64 }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub struct P2; impl P { pub fn b(&self) -> [u8; 8] { self.0.to_le_bytes() } }\n",
+            "pub struct P(f64);\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(p: &P) -> [u8; 8] { p.1.to_be_bytes() }\n",
+            "pub struct P(u8, pub f32);\n",
+            "to_be_bytes",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { let y = g(); y.to_le_bytes() }\n",
+            "pub fn g() -> f64 { 1.0 }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { let y = other::g(); y.to_le_bytes() }\n",
+            "pub fn g() -> f64 { 1.0 }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { EPS.to_le_bytes() }\n",
+            "pub const EPS: f64 = 1e-9;\n",
+            "to_le_bytes",
+        ),
+    ] {
+        let t = tokens_with(src, others);
+        assert!(t.iter().any(|x| x == want), "{src}: {t:?}");
+        // without the declaration in the other file there is nothing to see
+        assert!(
+            !tokens(src).iter().any(|x| x == want),
+            "{src} (no facts): {:?}",
+            tokens(src)
+        );
+    }
+    // integers, and ints from a cast, an int tuple field and an int field of the same name
+    for (src, others) in [
+        ("pub fn f(x: u32) -> [u8; 4] { x.to_le_bytes() }\n", ""),
+        ("pub fn f() -> [u8; 4] { let n = 3; n.to_le_bytes() }\n", ""),
+        ("pub fn f(a: f64) -> [u8; 4] { let n = (a * 2.0) as u32; n.to_le_bytes() }\n", ""),
+        ("pub fn f(a: f64) -> [u8; 8] { let n = a as u64; let n = n + 1; n.to_le_bytes() }\n", ""),
+        ("pub fn f(a: f64) -> [u8; 8] { let y = a; let y = y as u64; y.to_le_bytes() }\n", ""),
+        ("pub fn f(v: &[f64]) -> [u8; 8] { let n = v.len(); n.to_le_bytes() }\n", ""),
+        ("pub struct Id(u32);\nimpl Id { pub fn b(&self) -> [u8; 4] { self.0.to_le_bytes() } }\n", "pub struct Id(u32);\npub struct P(f64);\n"),
+        ("pub fn f(p: &Id) -> [u8; 4] { p.0.to_le_bytes() }\n", "pub struct Id(u32);\npub struct P(f64);\n"),
+        ("pub fn f(t: (f64, u32)) -> [u8; 4] { t.1.to_le_bytes() }\n", ""),
+        ("pub fn f() -> [u8; 4] { let (a, b): (f64, u32) = (1.0, 2); let _ = a; b.to_le_bytes() }\n", ""),
+        ("pub fn f(x: f64) -> [u8; 8] { oa_math::canon_nan(x).to_bits().to_le_bytes() }\n", ""),
+        ("pub fn f(x: f64) -> u64 { f64::to_bits(oa_math::canon_nan(x)) }\n", ""),
+        ("pub fn f(x: f64) -> u64 { <f64>::to_bits(oa_math::canon_nan(x)) }\n", ""),
+    ] {
+        let t = tokens_with(src, others);
+        assert!(
+            !t.iter().any(|x| x.contains("bytes") || x == "to_bits"),
+            "{src}: {t:?}"
+        );
+    }
+    // a float field of another core crate reaches the whole workspace check
+    let ws = core_ws(
+        "b0",
+        "pub fn f(s: &crate::S) -> [u8; 8] { s.w.to_le_bytes() }\npub struct S { pub n: u8 }\n",
+    );
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\", \"crates/fx-c\"]\n",
+    );
+    for (field, hit) in [("f64", true), ("u64", false)] {
+        ws.put(
+            "crates/fx-c/Cargo.toml",
+            "[package]\nname = \"fx-c\"\n\n[package.metadata.openatca]\nclass = \"core\"\n\n[lints]\nworkspace = true\n",
+        );
+        ws.put(
+            "crates/fx-c/src/lib.rs",
+            &format!("#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\n{GUARD}pub struct T {{ pub w: {field} }}\n"),
+        );
+        assert_eq!(
+            has(&ws.failures(), "fx-a/src/lib.rs:1: to_le_bytes"),
+            hit,
+            "{field}: {:#?}",
+            ws.failures()
+        );
+    }
+}
+
+// REQ: OA-TRC-249
+#[test]
+fn every_way_to_leak_or_take_an_address_is_named_and_banned() {
+    for (src, want) in [
+        ("pub fn f(b: alloc::boxed::Box<u8>) -> &'static mut u8 { alloc::boxed::Box::leak(b) }\n", "leak"),
+        ("pub fn f(v: alloc::vec::Vec<u8>) -> &'static mut [u8] { v.leak() }\n", "leak"),
+        ("pub fn f(b: alloc::boxed::Box<u8>) { let _ = alloc::boxed::Box::into_raw(b); }\n", "into_raw"),
+        ("pub fn f(v: alloc::vec::Vec<u8>) { let _ = v.into_raw_parts(); }\n", "into_raw_parts"),
+        ("pub fn f(p: u8) { let _ = alloc::boxed::Box::from_raw(p); }\n", "from_raw"),
+        ("pub fn f(s: &[u8]) { let _ = s.as_ptr_range(); }\n", "as_ptr_range"),
+        ("pub fn f(s: &mut [u8]) { let _ = s.as_mut_ptr_range(); }\n", "as_mut_ptr_range"),
+        ("pub fn f(x: &u8) { let _ = core::ptr::addr_of!(*x); }\n", "addr_of"),
+        ("pub fn f(x: &mut u8) { let _ = core::ptr::addr_of_mut!(*x); }\n", "addr_of_mut"),
+        // already banned, kept
+        ("pub fn f(s: &[u8]) { let _ = s.as_ptr(); }\n", "as_ptr"),
+        ("pub fn f(s: &mut [u8]) { let _ = s.as_mut_ptr(); }\n", "as_mut_ptr"),
+        ("pub fn f(p: *const u8) -> usize { p.addr() }\n", ".addr("),
+        ("pub fn f(p: usize) { let _ = core::ptr::with_exposed_provenance::<u8>(p); }\n", "with_exposed_provenance"),
+        ("pub fn f(p: *const u8) -> usize { p.expose_provenance() }\n", "expose_provenance"),
+    ] {
+        assert!(tokens(src).iter().any(|t| t == want), "{src}: {:?}", tokens(src));
+    }
+    // other names that merely contain them are fine
+    let t = tokens("pub fn leakage(leaked: u8, as_ptr_free: u8) -> u8 { leaked + as_ptr_free }\npub fn into_raw_text() {}\n");
+    assert!(t.is_empty(), "{t:?}");
+}
+
+// REQ: OA-TRC-250
+#[test]
+fn a_core_crate_refuses_a_non_64_bit_target_in_its_lib_rs() {
+    let planted = |tag: &str, lib: &str| {
+        let ws = Ws::new(tag, "core", &[("src/lib.rs", "pub fn f() {}\n")]);
+        ws.put(
+            "crates/fx-a/src/lib.rs",
+            &format!("#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\n{lib}"),
+        );
+        ws.failures()
+    };
+    const WHY: &str =
+        "fx-a: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width";
+    // clean
+    assert!(planted("w0", &format!("{GUARD}pub fn f() {{}}\n")).is_empty());
+    assert!(planted(
+        "w1",
+        "pub fn f() {}\n#[cfg( not ( target_pointer_width = \"64\" ) )]\ncompile_error!(\"x\");\n"
+    )
+    .is_empty());
+    // missing, wrong width, wrong cfg, no compile_error, inside a module, test-only, in a comment
+    for (tag, lib) in [
+        ("w2", "pub fn f() {}\n"),
+        ("w3", "#[cfg(not(target_pointer_width = \"32\"))]\ncompile_error!(\"x\");\n"),
+        ("w4", "#[cfg(target_pointer_width = \"64\")]\ncompile_error!(\"x\");\n"),
+        ("w5", "#[cfg(not(target_pointer_width = \"64\"))]\npub fn f() {}\n"),
+        ("w6", "compile_error!(\"x\");\n"),
+        ("w7", "mod m {\n#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"x\");\n}\n"),
+        ("w8", "#[cfg(test)]\nmod t {\n#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"x\");\n}\n"),
+        ("w9", "// #[cfg(not(target_pointer_width = \"64\"))]\n// compile_error!(\"x\");\n"),
+        ("wa", "const S: &str = \"#[cfg(not(target_pointer_width = \\\"64\\\"))] compile_error!(x);\";\n"),
+    ] {
+        let f = planted(tag, lib);
+        assert!(has(&f, WHY), "{lib}: {f:#?}");
+    }
+    // the guard is the one target cfg core code may have: the rest still fail
+    for (tag, lib) in [
+        ("wb", "#[cfg(target_os = \"linux\")]\npub fn f() {}\n"),
+        (
+            "wc",
+            "#[cfg(not(target_pointer_width = \"64\"))]\npub fn f() {}\n",
+        ),
+    ] {
+        let f = planted(tag, &format!("{GUARD}{lib}"));
+        assert!(has(&f, "no target-dependent cfg"), "{lib}: {f:#?}");
+    }
+    assert!(!has(&planted("wd", GUARD), "no target-dependent cfg"));
+    // oa-ieee is a core crate too
+    let ws = Ws::named("we", "oa-ieee", "core", &[("src/lib.rs", "pub fn sqrt(v: f64) -> f64 { v.sqrt() }\npub fn floor(v: f64) -> f64 { v.floor() }\npub fn ceil(v: f64) -> f64 { v.ceil() }\npub fn trunc(v: f64) -> f64 { v.trunc() }\npub fn round(v: f64) -> f64 { v.round() }\n")]);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    let lib = fs::read_to_string(ws.root.join("crates/fx-a/src/lib.rs")).unwrap();
+    ws.put(
+        "crates/fx-a/src/lib.rs",
+        &lib.replace("compile_error", "compile_errors"),
+    );
+    assert!(
+        has(&ws.failures(), &WHY.replace("fx-a", "oa-ieee")),
+        "{:#?}",
+        ws.failures()
+    );
+    // the checker reads the real ones
+    for c in ["oa-geo", "oa-math", "oa-ieee"] {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../crates/{c}/src/lib.rs"));
+        assert!(
+            oa_trace::classcheck::has_pointer_width_guard(&fs::read_to_string(p).unwrap()),
+            "{c}"
+        );
+    }
+}
+
+// REQ: OA-TRC-251
+#[test]
+fn float_min_max_clamp_are_oa_maths_so_the_zeros_and_the_nan_are_defined() {
+    for (src, want) in [
+        ("pub fn f(a: f64, b: f64) -> f64 { a.max(b) }\n", "max"),
+        ("pub fn f(a: f64, b: f64) -> f64 { a.min(b) }\n", "min"),
+        ("pub fn f(a: f32, b: f32) -> f32 { a.min(b) }\n", "min"),
+        ("pub fn f(a: f64) -> f64 { a.clamp(-1.0, 1.0) }\n", "clamp"),
+        ("pub fn f(a: f64) -> f64 { a.max(0.0) }\n", "max"),
+        (
+            "pub fn f(a: u8, b: f64) -> f64 { f64::from(a).min(b) }\n",
+            "min",
+        ),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { (a * 2.0).min(b) }\n",
+            "min",
+        ),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { a.abs().max(b) }\n",
+            "max",
+        ),
+        ("pub fn f(n: usize) -> f64 { (n as f64).max(1.0) }\n", "max"),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { f64::max(a, b) }\n",
+            "max",
+        ),
+        (
+            "pub fn f(a: f32, b: f32) -> f32 { f32::min(a, b) }\n",
+            "min",
+        ),
+        (
+            "pub fn f(a: f64, b: f64) -> f64 { <f64>::clamp(a, b, b) }\n",
+            "clamp",
+        ),
+        (
+            "pub fn f(v: &[f64]) -> f64 { v.iter().copied().fold(f64::NEG_INFINITY, f64::max) }\n",
+            "max",
+        ),
+        (
+            "pub fn f(v: &[f64]) -> f64 { v.iter().copied().fold(f64::INFINITY, f64::min) }\n",
+            "min",
+        ),
+        ("pub fn f(v: &[f64]) -> f64 { v[0].max(v[1]) }\n", "max"),
+        (
+            "pub fn f(v: &[f64]) -> f64 { let m = v.iter().fold(0.0, |m, x| m.max(*x)); m }\n",
+            "max",
+        ),
+        ("pub fn f() -> f64 { let m = 1.0; m.min(g()) }\n", "min"),
+        ("pub fn f(x: f64) -> f64 { x.sqrt().max(0.0) }\n", "max"),
+        (
+            "pub fn f(x: f64) -> f64 { oa_math::sin(x).max(0.5) }\n",
+            "max",
+        ),
+        ("pub fn f(a: f64) -> f64 { a.signum() }\n", "signum"),
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == want),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    // a float field and a float function that another core file declares
+    for (src, others, want) in [
+        ("pub fn f(s: &S) -> f64 { s.w.min(s.x) }\n", "pub struct S { pub w: f64, pub x: f64 }\n", "min"),
+        ("pub fn f(s: &S, k: &T) -> f64 { k.max(s.w) }\n", "pub struct S { pub w: f64 }\n", "max"),
+        ("pub fn f(a: &T) -> f64 { a.lat().min(a.lon()) }\n", "pub fn lat() -> f64 { 0.0 }\npub fn lon() -> f64 { 0.0 }\n", "min"),
+        ("pub struct P(f64);\nimpl P { pub fn c(&self, lo: &T, hi: &T) -> f64 { self.0.clamp(lo, hi) } }\n", "pub struct P(f64);\n", "clamp"),
+    ] {
+        let t = tokens_with(src, others);
+        assert!(t.iter().any(|x| x == want), "{src}: {t:?}");
+        assert!(!tokens(src).iter().any(|x| x == want), "{src} (no facts): {:?}", tokens(src));
+    }
+    // integers, iterators and the oa_math forms are fine
+    for src in [
+        "pub fn f(a: usize, b: usize) -> usize { a.max(b) }\n",
+        "pub fn f(a: i64) -> i64 { a.clamp(1, 9) }\n",
+        "pub fn f(v: &[u8]) -> Option<&u8> { v.iter().max() }\n",
+        "pub fn f(v: &[u8]) -> u8 { v.iter().copied().min().unwrap_or(0) }\n",
+        "pub fn f(x: f64) -> usize { let n = (x * 2.0) as usize; n.max(1) }\n",
+        "pub fn f(x: f64, v: &[f64]) -> usize { let n = v.len(); n.min(x as usize) }\n",
+        "pub fn f(x: f64) -> usize { (x as usize).min(3) }\n",
+        "pub fn f(x: f64) -> f64 { oa_math::max_f64(x, 0.0) }\n",
+        "pub fn f(x: f64) -> f64 { oa_math::clamp_f64(x, -1.0, 1.0) }\n",
+        "pub fn f(a: f64) -> usize { let n = if a > 0.5 { 3 } else { 1 }; n.max(2) }\n",
+        "pub fn f(a: u8) -> u8 { let a = a.max(1); a.min(9) }\n",
+        "pub fn f(a: f64, n: u32) -> u32 { for i in 0..n { let _ = i.max(2); } let _ = a; 0 }\n",
+        "pub fn f(a: f64) -> usize { let p = (0usize, a); (p.0 + 1).min(4) }\n",
+    ] {
+        assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
+    }
+    // a later `let` of the same name hides an earlier float
+    let t = tokens("pub fn f(a: f64) -> u32 { let b = a * 2.0; let b = b as u32; b.max(1) }\n");
+    assert!(t.is_empty(), "{t:?}");
+    // oa-math itself implements them
+    let src = "pub fn m(a: f64, b: f64) -> f64 { if a.max(b) > a { b } else { a } }\n";
+    assert!(scan_with(src, true, &FloatFacts::default()).hits.is_empty());
+}
+
+// REQ: OA-TRC-252
+#[test]
+fn the_header_of_every_impl_is_a_boundary_trait_impls_included() {
+    for (name, src) in [
+        (
+            "impl@Hook/for/&F",
+            "trait Hook {}\nimpl<F: Fn() -> f64> Hook for &F {}\n",
+        ),
+        (
+            "impl@Hook/for/Wrap<T>",
+            "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T: Into<f64> + Copy> Hook for Wrap<T> {}\n",
+        ),
+        (
+            "impl@Hook/for/Box<dyn_Fn()->f64>",
+            "trait Hook {}\nimpl Hook for Box<dyn Fn() -> f64> {}\n",
+        ),
+        (
+            "impl@Default/for/Wrap<T>",
+            "pub struct Wrap<T>(T);\nimpl<T: Clone> Default for Wrap<T> { fn default() -> Self { unreachable!() } }\n",
+        ),
+        (
+            "impl@Hook/for/Wrap<T>",
+            "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T> Hook for Wrap<T> where T: Iterator {}\n",
+        ),
+        (
+            "impl@Hook/for/Wrap<T>",
+            "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T: Copy> Hook for Wrap<T> {}\n",
+        ),
+        (
+            "impl@Hook/for/&mut_dyn_Dbg",
+            "trait Hook {}\nimpl Hook for &mut dyn Dbg {}\ntrait Dbg {}\n",
+        ),
+    ] {
+        let ws = core_ws("ih0", src);
+        assert!(
+            has(&ws.failures(), &format!("{name}: B5: core code lets the shell hand in behaviour")),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    // clean: no generics, `Sized`, a sealed trait, an inherent impl without a bound, a test impl
+    for (tag, src) in [
+        ("ih1", "pub struct CoreType;\ntrait Hook {}\nimpl Hook for CoreType {}\n".to_string()),
+        ("ih2", "pub struct Wrap<T>(T);\ntrait Hook {}\nimpl<T: Sized> Hook for Wrap<T> {}\n".to_string()),
+        ("ih3", format!("{SEALED}pub trait Sh: sealed::Sealed {{}}\npub struct Wrap<T>(T);\ntrait Hook {{}}\nimpl<T: Sh> Hook for Wrap<T> {{}}\nimpl<T> Hook for &Wrap<T> {{}}\n")),
+        ("ih4", "pub struct Wrap<T>(T);\ntrait Hook {}\n#[cfg(test)]\nmod t { impl<T: Clone> Hook for Wrap<T> {} }\n".to_string()),
+    ] {
+        let ws = core_ws(tag, &src);
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+    // the allowlist names it as `impl@Type`
+    let ws = core_ws("ih5", "trait Hook {}\nimpl<F: Fn()> Hook for &F {}\n");
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::impl@Hook/for/&F reason: reviewed, a pure closure only\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-253
+#[test]
+fn a_seal_is_read_from_the_leading_path_and_a_glob_reexport_fails() {
+    let seal = "mod sealed { pub trait Sealed {} pub struct Private; }\npub mod open { pub trait Other {} }\n";
+    // not seals: a private path inside the generic arguments, a trait of a public module imported
+    // next to a sealing one in one grouped `use`
+    for (name, src) in [
+        ("T", format!("{seal}pub trait T: Iterator<Item = sealed::Private> {{}}\n")),
+        (
+            "U",
+            format!("{seal}use crate::{{sealed::Sealed, open::Other}};\npub trait T: Sealed {{}}\npub trait U: Other {{}}\n"),
+        ),
+        (
+            "U",
+            format!("{seal}use crate::open::{{Other}};\nuse crate::sealed::Sealed;\npub trait T: Sealed {{}}\npub trait U: Other {{}}\n"),
+        ),
+    ] {
+        let ws = core_ws("sl0", &src);
+        let f = ws.failures();
+        assert!(
+            has(&f, &format!("{name}: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed")),
+            "{src}: {f:#?}"
+        );
+        assert!(!has(&f, "T: B5") || name == "T", "{src}: {f:#?}");
+    }
+    // a glob re-export, and a grouped `pub use` of a sealing trait
+    let ws = core_ws("sl1", &format!("{seal}pub use sealed::*;\n"));
+    assert!(
+        has(
+            &ws.failures(),
+            "*: B5: core code lets the shell hand in behaviour (a `pub use` glob"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    let ws = core_ws("sl2", &format!("{seal}pub use open::*;\n"));
+    assert!(has(&ws.failures(), "*: B5"), "{:#?}", ws.failures());
+    let ws = core_ws(
+        "sl3",
+        &format!("{seal}pub trait T: sealed::Sealed {{}}\npub use crate::{{sealed::Sealed, open::Other}};\n"),
+    );
+    let f = ws.failures();
+    assert!(
+        has(
+            &f,
+            "Sealed: B5: core code lets the shell hand in behaviour (`pub use` of a sealing trait"
+        ),
+        "{f:#?}"
+    );
+    assert!(
+        !has(
+            &f,
+            "Other: B5: core code lets the shell hand in behaviour (`pub use`"
+        ),
+        "{f:#?}"
+    );
+    // clean: a grouped import through the private module of a sealing trait
+    let ws = core_ws(
+        "sl4",
+        &format!(
+            "{seal}use crate::{{sealed::Sealed, open::Other}};\npub trait T: Sealed + Other {{}}\n"
+        ),
+    );
+    // `Other` is a `pub trait` of a public module: it alone is flagged
+    let f = ws.failures();
+    assert!(has(&f, "Other: B5"), "{f:#?}");
+    assert!(!has(&f, "T: B5") && !has(&f, "Sealed: B5"), "{f:#?}");
+}
+
+// REQ: OA-TRC-250
+#[test]
+fn the_guard_stands_alone_at_the_top_level_and_split_crates_carry_it_too() {
+    let inner = "#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\n";
+    // planted: stacked on another outer attribute, inside a module, for the wrong width
+    for (tag, lib) in [
+        (
+            "gs0",
+            format!("{inner}#[cfg(any())]\n{GUARD}pub fn f() {{}}\n"),
+        ),
+        ("gs1", format!("{inner}#[inline]\n{GUARD}pub fn f() {{}}\n")),
+        (
+            "gs2",
+            format!("{inner}mod m {{ {GUARD} }}\npub fn f() {{}}\n"),
+        ),
+        (
+            "gs3",
+            format!("{inner}{}pub fn f() {{}}\n", GUARD.replace("64", "32")),
+        ),
+    ] {
+        let ws = core_ws(tag, &lib);
+        assert!(
+            has(&ws.failures(), "B10: src/lib.rs of a core crate must have"),
+            "{lib}: {:#?}",
+            ws.failures()
+        );
+    }
+    // the stacked one is also a target cfg the scan does not excuse
+    let ws = core_ws(
+        "gs4",
+        &format!("{inner}#[cfg(any())]\n{GUARD}pub fn f() {{}}\n"),
+    );
+    assert!(
+        has(&ws.failures(), "target_pointer_width: B8"),
+        "{:#?}",
+        ws.failures()
+    );
+    // any other pointer-width cfg in core code fails
+    let ws = core_ws("gs5", &format!("{inner}{GUARD}#[cfg(target_pointer_width = \"32\")]\npub fn g() {{}}\npub fn f() {{}}\n"));
+    assert!(
+        has(&ws.failures(), "target_pointer_width: B8"),
+        "{:#?}",
+        ws.failures()
+    );
+    // ok: after the inner attributes, after an item, after a closing brace, with a doc comment
+    for (tag, lib) in [
+        ("gs6", format!("{inner}{GUARD}pub fn f() {{}}\n")),
+        ("gs7", format!("{inner}pub fn f() {{}}\n{GUARD}")),
+        ("gs8", format!("{inner}pub struct S {{}}\n{GUARD}")),
+        (
+            "gs9",
+            format!("{inner}/// the guard\n{GUARD}pub fn f() {{}}\n"),
+        ),
+    ] {
+        let ws = core_ws(tag, &lib);
+        assert!(ws.failures().is_empty(), "{lib}: {:#?}", ws.failures());
+    }
+    // a split crate: required in lib.rs, exactly that form, nothing else with it
+    let ws = split_ws(
+        "gt0",
+        "mod core;\nmod shell;\n",
+        "pub fn d(x: u8) -> u8 { x }\n",
+    );
+    assert!(
+        has(&ws.failures(), "B10: src/lib.rs of a split crate must have"),
+        "{:#?}",
+        ws.failures()
+    );
+    let ws = split_ws("gt1", SPLIT_LIB, "pub fn d(x: u8) -> u8 { x }\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    for (tag, lib) in [
+        ("gt2", "mod core;\nmod shell;\n#[cfg(any())]\n#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"x\");\n".to_string()),
+        ("gt3", "mod core;\nmod shell;\n#[cfg(not(target_pointer_width = \"32\"))]\ncompile_error!(\"x\");\n".to_string()),
+        ("gt4", "mod core;\nmod shell;\n#[cfg(unix)]\ncompile_error!(\"x\");\n".to_string()),
+        ("gt5", "mod core;\nmod shell;\n#[cfg(not(target_pointer_width = \"64\"))]\nconst X: u8 = 1;\n".to_string()),
+    ] {
+        let ws = split_ws(tag, &lib, "pub fn d(x: u8) -> u8 { x }\n");
+        assert!(!ws.failures().is_empty(), "{lib}");
+    }
+}
+
+// REQ: OA-TRC-254
+#[test]
+fn type_aliases_resolve_transitively_and_a_use_cannot_rename() {
+    for src in [
+        "type A = Box<dyn Fn()>;\ntype B = Vec<A>;\npub fn f(x: B) { let _ = x; }\n",
+        "type B = Vec<A>;\ntype A = Box<dyn Fn()>;\npub fn f(x: B) { let _ = x; }\n",
+        "type A = fn(u8) -> u8;\ntype B = Option<A>;\ntype C = (B, u8);\npub struct S { pub c: C }\n",
+        "type A = Box<dyn Fn()>;\ntype B = Vec<A>;\ntype C<T> = (T, B);\npub fn f(x: C<u8>) { let _ = x; }\n",
+    ] {
+        let ws = core_ws("al0", src);
+        assert!(has(&ws.failures(), ": B5: core code lets the shell hand in behaviour (the type alias"), "{src}: {:#?}", ws.failures());
+    }
+    // private items may use them; an alias with no callback is free
+    let ws = core_ws(
+        "al1",
+        "type A = Box<dyn Fn()>;\ntype B = Vec<A>;\nfn f(x: B) { let _ = x; }\npub type P = Vec<u8>;\npub fn g(x: P) { let _ = x; }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // every `as` in a `use` fails, whatever the path
+    for src in [
+        "use core::fmt as f;\n",
+        "use crate::util::Y as Z;\n",
+        "use self::a::b as c;\n",
+        "use core::fmt::Debug as _;\n",
+        "use a::{b as c, d};\n",
+        "pub use sealed::Sealed as Other;\n",
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == "as"),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+    assert!(
+        !tokens("use a::{b, c};\npub fn f(x: u8) -> u64 { x as u64 }\n")
+            .iter()
+            .any(|t| t == "as")
+    );
+}
+
+// REQ: OA-TRC-255
+#[test]
+fn float_evidence_follows_same_crate_aliases_and_functions_that_return_float_aggregates() {
+    for (src, others, want) in [
+        (
+            "pub fn f(p: V3) -> f64 { p[0].max(p[1]) }\n",
+            "pub type V3 = [f64; 3];\n",
+            "max",
+        ),
+        (
+            "pub fn f(p: P) -> [u8; 8] { p.0.to_le_bytes() }\n",
+            "type P = (f64, f64);\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(x: Real) -> [u8; 8] { x.to_le_bytes() }\n",
+            "type Real = f64;\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(p: W) -> f64 { p[2].clamp(0.0, 1.0) }\n",
+            "type V3 = [f64; 3];\ntype W = V3;\n",
+            "clamp",
+        ),
+        (
+            "pub fn f(p: W) -> f64 { p[2].clamp(0.0, 1.0) }\n",
+            "type W = V3;\ntype V3 = [f64; 3];\n",
+            "clamp",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { pair().0.to_le_bytes() }\n",
+            "pub fn pair() -> (f64, u8) { (1.0, 2) }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f() -> f64 { v()[0].max(1.0) }\n",
+            "type V3 = [f64; 3];\npub fn v() -> V3 { [0.0; 3] }\n",
+            "max",
+        ),
+        (
+            "pub fn f() -> f64 { let p = v(); p[1].max(1.0) }\n",
+            "type V3 = [f64; 3];\npub fn v() -> V3 { [0.0; 3] }\n",
+            "max",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { let p = pair(); p.0.to_le_bytes() }\n",
+            "pub fn pair() -> (f64, u8) { (1.0, 2) }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f() -> [u8; 8] { g().to_le_bytes() }\n",
+            "type Real = f64;\npub fn g() -> Real { 1.0 }\n",
+            "to_le_bytes",
+        ),
+        (
+            "pub fn f(s: &S) -> f64 { s.pos[0].max(1.0) }\n",
+            "type V3 = [f64; 3];\npub struct S { pub pos: V3 }\n",
+            "max",
+        ),
+        (
+            "pub fn f(p: &[f64; 2]) -> f64 { make()[0].min(p[0]) }\n",
+            "pub fn make() -> [f64; 2] { [0.0; 2] }\n",
+            "min",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).iter().any(|t| t == want),
+            "{src} with {others}: {:?}",
+            tokens_with(src, others)
+        );
+    }
+    // not floats: the integer element of a tuple, an alias of integers, a name that is no alias
+    for (src, others) in [
+        (
+            "pub fn f() -> u8 { pair().1.max(2) }\n",
+            "pub fn pair() -> (f64, u8) { (1.0, 2) }\n",
+        ),
+        (
+            "pub fn f(p: Ids) -> u32 { p[0].max(1) }\n",
+            "type Ids = [u32; 3];\n",
+        ),
+        (
+            "pub fn f(p: Other) -> u32 { p.0.max(1) }\n",
+            "type V = (f64, f64);\n",
+        ),
+        (
+            "pub fn f() -> u32 { ids()[0].max(1) }\n",
+            "pub fn ids() -> [u32; 2] { [0; 2] }\n",
+        ),
+        (
+            "pub fn f() -> u8 { let p = pair(); p.1.max(2) }\n",
+            "pub fn pair() -> (f64, u8) { (1.0, 2) }\n",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).is_empty(),
+            "{src}: {:?}",
+            tokens_with(src, others)
+        );
+    }
+}
+
+// REQ: OA-TRC-256
+#[test]
+fn an_integer_by_its_outermost_shape_is_not_a_float_whatever_it_mentions() {
+    for src in [
+        "pub fn f(v: &[f64]) -> usize { let n = v.iter().filter(|x| **x > 0.5).count(); n.max(1) }\n",
+        "pub fn f(v: &[f64]) -> usize { let n = v.iter().map(|x| x * 2.0).count(); n.max(1) }\n",
+        "pub fn f(v: &[f64]) -> usize { let n = v.iter().map(|x| *x as f64).len(); n.min(1) }\n",
+        "pub fn f(v: &[f64]) -> u32 { let k = u32::try_from(v.iter().map(|x| *x as f64).count()).unwrap(); k.max(3) }\n",
+        "pub fn f(x: f64) -> usize { let k = usize::try_from(x as u64 * 2).unwrap_or(0); k.max(3) }\n",
+        "pub fn f(x: f64) -> usize { let m = (x * 2.0) as usize; m.max(1) }\n",
+        "pub fn f(x: f64) -> usize { let m = (x * 2.0) as u8 as usize; m.max(1) }\n",
+    ] {
+        assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
+    }
+    // still floats: the same shapes inside another expression, and a plain float expression
+    for src in [
+        "pub fn f(x: f64) -> f64 { let m = x * 2.0; m.max(1.0) }\n",
+        "pub fn f(v: &[f64]) -> f64 { let n = v.len() as f64 * 2.0; n.max(1.0) }\n",
+        "pub fn f(v: &[f64]) -> f64 { let n = v.iter().count() as f64; n.max(1.0) }\n",
+    ] {
+        assert!(
+            tokens(src).iter().any(|t| t == "max"),
+            "{src}: {:?}",
+            tokens(src)
+        );
+    }
+}
+
+// REQ: OA-TRC-257
+#[test]
+fn fmt_arguments_is_not_taken_by_a_reachable_item() {
+    for src in [
+        "pub fn f(a: core::fmt::Arguments<'_>) { let _ = a; }\n",
+        "use core::fmt;\npub fn f(a: fmt::Arguments<'_>) { let _ = a; }\n",
+        "pub struct S;\nimpl S { pub fn m(&self, a: core::fmt::Arguments<'_>) { let _ = a; } }\n",
+        "pub struct S { pub a: core::fmt::Arguments<'static> }\n",
+    ] {
+        let ws = core_ws("fa0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                "B5: core code lets the shell hand in behaviour (`fmt::Arguments`"
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    let ws = core_ws(
+        "fa1",
+        "fn f(a: core::fmt::Arguments<'_>) { let _ = a; }\npub(crate) fn g(a: core::fmt::Arguments<'_>) { let _ = a; }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-253
+#[test]
+fn a_private_module_cannot_be_published_and_a_pub_mod_seals_nothing() {
+    let seal = "mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n";
+    for src in [
+        format!("{seal}pub use self::sealed;\n"),
+        format!("{seal}pub use crate::sealed;\n"),
+        format!("{seal}pub mod api {{ pub use super::sealed; }}\n"),
+    ] {
+        let ws = core_ws("pm0", &src);
+        assert!(
+            has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds a sealing trait"),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    // a plain import is not a re-export
+    let ws = core_ws("pm1", &format!("{seal}use crate::sealed;\n"));
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+    // a sealing trait in a `pub mod` is no seal, and neither is one when the name is also declared
+    // public anywhere in the crate
+    for src in [
+        "pub mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n",
+        "mod sealed { pub trait Sealed {} }\npub mod api { pub mod sealed { pub trait Sealed {} } }\npub trait T: sealed::Sealed {}\n",
+    ] {
+        let ws = core_ws("pm2", src);
+        assert!(has(&ws.failures(), "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"), "{src}: {:#?}", ws.failures());
+    }
+}
+
+// REQ: OA-TRC-245
+#[test]
+fn a_parenthesised_bound_is_read_through_and_one_that_cannot_be_read_fails() {
+    for src in [
+        "pub fn f<T: (Clone)>(x: T) {}\n",
+        "pub fn f<T: ((Clone))>(x: T) {}\n",
+        "pub fn f<T>(x: T) where T: (Iterator<Item = u8>) {}\n",
+        "pub fn f(x: impl (Into<u8>)) {}\n",
+        "pub fn f<T: Sized + (Ord)>(x: T) {}\n",
+        "pub fn f<T: for<'a> (Clone)>(x: T) {}\n",
+        "pub fn f<T: ?Send>(x: T) {}\n",
+        "pub fn f<T: (?Send)>(x: T) {}\n",
+        "pub struct S<T: (Clone)>(T);\n",
+    ] {
+        let ws = core_ws("pb0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                ": B5: core code lets the shell hand in behaviour"
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    for (tag, src) in [
+        ("pb1", "pub fn f<T: (Sized)>(x: &T) {}\n"),
+        ("pb2", "pub fn f<T: ?Sized>(x: &T) {}\n"),
+        ("pb3", "pub fn f<'a, T: 'a + ?Sized>(x: &'a T) {}\n"),
+        ("pb4", "pub fn f<T>(x: &T) where T: ?Sized + 'static {}\n"),
+        ("pb5", "pub fn f<T: (?Sized)>(x: &T) {}\n"),
+    ] {
+        let ws = core_ws(tag, src);
+        assert!(ws.failures().is_empty(), "{src}: {:#?}", ws.failures());
+    }
+}
+
+// REQ: OA-TRC-253
+#[test]
+fn a_self_leaf_a_nested_pub_mod_and_every_blanket_self_type_are_judged() {
+    let seal = "mod sealed { pub trait Sealed {} }\npub trait T: sealed::Sealed {}\n";
+    for src in [
+        format!("{seal}pub use crate::sealed::{{self}};\n"),
+        format!("{seal}pub use self::sealed::{{self}};\n"),
+        format!("{seal}pub use crate::{{sealed::{{self}}, T as _x}};\n"),
+    ] {
+        let ws = core_ws("sf0", &src);
+        assert!(has(&ws.failures(), "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds a sealing trait"), "{src}: {:#?}", ws.failures());
+    }
+    // a `pub mod` inside a private module is not public: the trait is sealed, and the module
+    // cannot be re-exported
+    let ws = core_ws(
+        "sf1",
+        "mod inner { pub mod sealed { pub trait Sealed {} } }\npub trait T: inner::sealed::Sealed {}\npub use inner::sealed;\n",
+    );
+    let f = ws.failures();
+    assert!(has(&f, "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds"), "{f:#?}");
+    assert!(!has(&f, "T: B5"), "{f:#?}");
+    // the same through files: `mod a;` is private, so `pub mod sealed` inside a.rs is too
+    let ws = Ws::new(
+        "sf2",
+        "core",
+        &[
+            (
+                "src/lib.rs",
+                "mod a;\npub trait T: a::sealed::Sealed {}\npub use a::sealed;\n",
+            ),
+            ("src/a.rs", "pub mod sealed { pub trait Sealed {} }\n"),
+        ],
+    );
+    let f = ws.failures();
+    assert!(has(&f, "sealed: B5: core code lets the shell hand in behaviour (a `pub use` of a module that holds"), "{f:#?}");
+    assert!(!has(&f, "T: B5"), "{f:#?}");
+    // and a public chain seals nothing
+    let ws = Ws::new(
+        "sf3",
+        "core",
+        &[
+            (
+                "src/lib.rs",
+                "pub mod a;\npub trait T: a::sealed::Sealed {}\n",
+            ),
+            ("src/a.rs", "pub mod sealed { pub trait Sealed {} }\n"),
+        ],
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "T: B5: core code lets the shell hand in behaviour (a `pub trait` that is not sealed"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+    // a blanket impl of a sealing trait, whatever shape the self type has around the parameter
+    for self_ty in [
+        "X",
+        "&X",
+        "&mut X",
+        "Box<X>",
+        "Wrap<X>",
+        "[X]",
+        "(X, u8)",
+        "&'static [X; 2]",
+    ] {
+        let src =
+            format!("{seal}pub struct Wrap<Y>(Y);\nimpl<X> sealed::Sealed for {self_ty} {{}}\n");
+        let ws = core_ws("sf4", &src);
+        assert!(
+            has(&ws.failures(), "a blanket impl of a sealing trait"),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    let src = format!("{seal}impl<X> sealed::Sealed for Vec<X> where X: Sized {{}}\n");
+    assert!(has(
+        &core_ws("sf5", &src).failures(),
+        "a blanket impl of a sealing trait"
+    ));
+    // not blanket: a concrete self type, and an impl of a trait that seals nothing
+    let src = format!("{seal}pub struct CoreType;\nimpl sealed::Sealed for CoreType {{}}\nimpl sealed::Sealed for Option<u8> {{}}\ntrait Plain {{}}\nimpl<X> Plain for &X {{}}\n");
+    assert!(
+        core_ws("sf6", &src).failures().is_empty(),
+        "{:#?}",
+        core_ws("sf6", &src).failures()
+    );
+}
+
+// REQ: OA-TRC-257
+#[test]
+fn the_word_arguments_in_a_reachable_signature_fails_however_it_was_named() {
+    for src in [
+        "use core::fmt::Arguments;\npub fn f(a: Arguments<'_>) { let _ = a; }\n",
+        "use core::fmt::{self, Arguments};\npub fn f(a: Arguments<'_>) { let _ = a; }\n",
+        "pub fn f(a: core::fmt::Arguments<'_>) { let _ = a; }\n",
+        "type A = core::fmt::Arguments<'static>;\npub fn f(a: A) { let _ = a; }\n",
+        "use core::fmt::Arguments;\ntype A = Arguments<'static>;\ntype B = Option<A>;\npub fn f(a: B) { let _ = a; }\n",
+    ] {
+        let ws = core_ws("ar0", src);
+        assert!(has(&ws.failures(), ": B5: core code lets the shell hand in behaviour"), "{src}: {:#?}", ws.failures());
+    }
+    let ws = core_ws("ar1", "use core::fmt::Arguments;\nfn f(a: Arguments<'_>) { let _ = a; }\ntype A = Arguments<'static>;\nfn g(a: A) { let _ = a; }\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-246
+#[test]
+fn the_header_of_a_pub_struct_or_union_is_checked_for_callbacks_and_bounds() {
+    for src in [
+        "pub struct W<F: Fn() -> u8>(F);\n",
+        "pub struct W<F>(F) where F: Fn();\n",
+        "pub struct W<F: Fn()> { x: F }\n",
+        "pub struct W<F> where F: FnMut() { x: F }\n",
+        "pub struct W<F: Clone>(F);\n",
+        "pub union U<F: Fn() + Copy> { a: F, b: u8 }\n",
+        "pub struct W<F = fn(u8)>(F);\n",
+        "pub struct W<F: Fn() -> u8> where F: Clone { pub x: u8 }\n",
+    ] {
+        let ws = core_ws("sh0", src);
+        assert!(
+            has(
+                &ws.failures(),
+                "W: B5: core code lets the shell hand in behaviour"
+            ) || has(
+                &ws.failures(),
+                "U: B5: core code lets the shell hand in behaviour"
+            ),
+            "{src}: {:#?}",
+            ws.failures()
+        );
+    }
+    let ws = core_ws(
+        "sh1",
+        "struct W<F: Fn() -> u8>(F);\npub struct P<T: Sized> { cb: Box<dyn Fn()>, pub x: T }\n",
+    );
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+}
+
+// REQ: OA-TRC-252
+#[test]
+fn an_impl_is_allowlisted_by_its_trait_and_self_type_not_by_a_head_word() {
+    let src = "pub struct Wrap<T>(T);\nimpl<T: Clone> Default for Wrap<T> { fn default() -> Self { unreachable!() } }\nimpl<T: Clone> From<u8> for Wrap<T> { fn from(_: u8) -> Self { unreachable!() } }\nimpl<T: Clone> Wrap<T> { fn m(&self) {} }\n";
+    let ws = core_ws("ik0", src);
+    let f = ws.failures();
+    assert!(has(&f, "impl@Default/for/Wrap<T>: B5"), "{f:#?}");
+    assert!(has(&f, "impl@From<u8>/for/Wrap<T>: B5"), "{f:#?}");
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::impl@Default/for/Wrap<T> reason: reviewed, a pure clone\n",
+    );
+    let f = ws.failures();
+    assert!(!has(&f, "impl@Default/for/Wrap<T>: B5"), "{f:#?}");
+    assert!(has(&f, "impl@From<u8>/for/Wrap<T>: B5"), "{f:#?}");
+    // the old head-word keys cover nothing
+    ws.put(
+        CALLBACKS,
+        "fx-a lib.rs::impl@Wrap reason: reviewed, a pure clone\n",
+    );
+    let f = ws.failures();
+    assert!(
+        has(&f, "impl@Default/for/Wrap<T>: B5") && has(&f, "listed but no core"),
+        "{f:#?}"
+    );
+}
+
+// REQ: OA-TRC-255
+#[test]
+fn a_value_unwrapped_from_a_result_or_option_that_holds_a_float_is_float_evidence() {
+    for (src, others, want) in [
+        (
+            "pub fn g() -> Result<f64, u8> { let v = f()?; Ok(v.max(1.0)) }\n",
+            "pub fn f() -> Result<f64, u8> { Ok(1.0) }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let v = f().unwrap(); v.max(1.0) }\n",
+            "pub fn f() -> Option<f64> { None }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let p = f().expect(\"p\"); p.0.max(1.0) }\n",
+            "pub fn f() -> Option<(f64, u8)> { None }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> f64 { let v = f().unwrap(); v[0].max(1.0) }\n",
+            "type V3 = [f64; 3];\npub fn f() -> Result<V3, u8> { Err(0) }\n",
+            "max",
+        ),
+        (
+            "pub fn g() -> Result<f64, u8> { let v = m::f()?; Ok(v.min(1.0)) }\n",
+            "pub fn f() -> Result<Real, u8> { Ok(1.0) }\ntype Real = f64;\n",
+            "min",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).iter().any(|t| t == want),
+            "{src}: {:?}",
+            tokens_with(src, others)
+        );
+    }
+    for (src, others) in [
+        (
+            "pub fn g() -> Result<u8, u8> { let v = f()?; Ok(v.max(1)) }\n",
+            "pub fn f() -> Result<u8, u8> { Ok(1) }\n",
+        ),
+        (
+            "pub fn g() -> u8 { let p = f().unwrap(); p.1.max(1) }\n",
+            "pub fn f() -> Option<(f64, u8)> { None }\n",
+        ),
+    ] {
+        assert!(
+            tokens_with(src, others).is_empty(),
+            "{src}: {:?}",
+            tokens_with(src, others)
+        );
     }
 }

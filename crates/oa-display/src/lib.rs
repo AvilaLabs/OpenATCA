@@ -3,6 +3,10 @@
 //! (Layout: `core` holds the pure modules, `shell` the ones that touch files; the modules are
 //! re-exported here so their paths are `oa_display::list`, `oa_display::traffic` and so on.)
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 

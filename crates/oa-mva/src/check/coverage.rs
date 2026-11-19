@@ -17,7 +17,7 @@ use crate::model::{
 };
 use crate::query::sectors_containing;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Raster cell size, degrees (about 220 m north-south, 165 m east-west at 42 N).
 pub const COVERAGE_CELL_DEG: f64 = 0.002;
@@ -128,6 +128,20 @@ fn charge(spent: &Cell<u64>, budget: u64, n: u64) -> bool {
     // Past the budget the count stops at one over it: the work asked for is not the work done.
     spent.set(v.min(budget.saturating_add(1)));
     v <= budget
+}
+
+/// The overlaps largest first, then by sector name; two that tie on both (E6: the order may not
+/// depend on a hash map's order or on how the pairs were found) go by their sector pair, the
+/// order the model keeps the sectors in.
+fn sort_overlaps(mut keyed: Vec<((u16, u16), Overlap)>) -> Vec<Overlap> {
+    keyed.sort_by(|(kx, x), (ky, y)| {
+        y.cells
+            .cmp(&x.cells)
+            .then(x.a.cmp(&y.a))
+            .then(x.b.cmp(&y.b))
+            .then(kx.cmp(ky))
+    });
+    keyed.into_iter().map(|(_, o)| o).collect()
 }
 
 /// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`, until it
@@ -345,7 +359,9 @@ fn coverage_inner(
     }
     // Every unordered pair of owners of each cell, the earlier sector first.
     extra.sort_unstable();
-    let mut pairs: HashMap<(u16, u16), Pair> = HashMap::new();
+    // Ordered by the sector pair, so two overlaps that tie on cells and names (two sectors of one
+    // name) come out in the same order on every run; a hash map's order changes per run.
+    let mut pairs: BTreeMap<(u16, u16), Pair> = BTreeMap::new();
     let mut s0 = 0;
     while let Some(&(cell, _)) = extra.get(s0) {
         let mut s1 = s0;
@@ -473,7 +489,7 @@ fn coverage_inner(
             m.min_alt_ft.get(ix).copied().unwrap_or(0),
         )
     };
-    let mut overlaps: Vec<Overlap> = pairs
+    let keyed: Vec<((u16, u16), Overlap)> = pairs
         .into_iter()
         .map(|((x, y), p)| {
             let (a, alt_a) = name(x);
@@ -482,25 +498,23 @@ fn coverage_inner(
             let (nm_lat, nm_lon) = nm_per_deg(lat_mid);
             let dy = (p.j.1 - p.j.0 + 1) as f64 * c * nm_lat;
             let dx = (p.i.1 - p.i.0 + 1) as f64 * c * nm_lon;
-            Overlap {
-                a,
-                b,
-                alt_a,
-                alt_b,
-                cells: p.cells,
-                area_nm2: p.area,
-                extent_nm: dx.max(dy),
-                lat: lat_mid,
-                lon: g.lon0 + ((p.i.0 + p.i.1) as f64 / 2.0 + 0.5) * c,
-            }
+            (
+                (x, y),
+                Overlap {
+                    a,
+                    b,
+                    alt_a,
+                    alt_b,
+                    cells: p.cells,
+                    area_nm2: p.area,
+                    extent_nm: dx.max(dy),
+                    lat: lat_mid,
+                    lon: g.lon0 + ((p.i.0 + p.i.1) as f64 / 2.0 + 0.5) * c,
+                },
+            )
         })
         .collect();
-    overlaps.sort_by(|x, y| {
-        y.cells
-            .cmp(&x.cells)
-            .then(x.a.cmp(&y.a))
-            .then(x.b.cmp(&y.b))
-    });
+    let overlaps = sort_overlaps(keyed);
     Ok(CoverageReport {
         facility: fac,
         set: set.name(),
@@ -546,5 +560,41 @@ mod tests {
         let j = ((45.0 - 44.0) / COVERAGE_CELL_DEG) as usize;
         let want = patch_area_nm2(g.lat0 + (j as f64 + 0.5) * COVERAGE_CELL_DEG, 0.002, 0.002);
         assert!((cell_area_nm2(&g, j) - want).abs() < 1e-12);
+    }
+    // REQ: OA-MVA-085
+    #[test]
+    fn overlaps_that_tie_on_cells_and_names_keep_the_sector_pair_order() {
+        let ov = |a: &str, b: &str, cells: usize, lat: f64| Overlap {
+            a: a.to_string(),
+            b: b.to_string(),
+            alt_a: 2500,
+            alt_b: 3000,
+            cells,
+            area_nm2: cells as f64,
+            extent_nm: 1.0,
+            lat,
+            lon: 0.0,
+        };
+        // two pairs that tie on cells and on both names, found in either order, and one larger
+        let items = [
+            ((1u16, 4u16), ov("A", "B", 10, 1.0)),
+            ((2u16, 3u16), ov("A", "B", 10, 2.0)),
+            ((5u16, 6u16), ov("C", "D", 12, 3.0)),
+        ];
+        let want: Vec<f64> = vec![3.0, 1.0, 2.0];
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for o in orders {
+            let keyed: Vec<((u16, u16), Overlap)> =
+                o.iter().filter_map(|&i| items.get(i).cloned()).collect();
+            let got: Vec<f64> = sort_overlaps(keyed).iter().map(|x| x.lat).collect();
+            assert_eq!(got, want, "collected in order {o:?}");
+        }
     }
 }

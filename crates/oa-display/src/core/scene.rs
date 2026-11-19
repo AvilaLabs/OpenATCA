@@ -780,7 +780,7 @@ fn edge_plan(proj: &Projection, a: (i32, i32), b: (i32, i32), max_pieces: u32) -
         });
     }
     let (ua, ub) = (unit(a.0, a.1), unit(b.0, b.1));
-    let dot = (ua[0] * ub[0] + ua[1] * ub[1] + ua[2] * ub[2]).clamp(-1.0, 1.0);
+    let dot = oa_math::clamp_f64(ua[0] * ub[0] + ua[1] * ub[1] + ua[2] * ub[2], -1.0, 1.0);
     let ground = oa_math::acos(dot) * proj.radius_m;
     let by_px = (chord + PIECE_16 - 1) / PIECE_16;
     let by_ground = oa_ieee::ceil(ground / PIECE_M);
@@ -820,7 +820,7 @@ fn edge_point(proj: &Projection, e: &Edge, i: u32) -> Option<(i32, i32)> {
     }
     project_rad(
         proj,
-        oa_math::asin((v[2] / n).clamp(-1.0, 1.0)),
+        oa_math::asin(oa_math::clamp_f64(v[2] / n, -1.0, 1.0)),
         oa_math::atan2(v[1], v[0]),
     )
 }

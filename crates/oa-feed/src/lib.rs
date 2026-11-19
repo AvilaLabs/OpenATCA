@@ -21,6 +21,10 @@
 //! bytes it skipped. Health is a function of frame fields and injected times only, so replaying
 //! a recording gives the same summary every time (B6).
 
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
+
 pub mod core;
 pub mod shell;
 
