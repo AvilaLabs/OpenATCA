@@ -181,10 +181,9 @@ fn feed_frames(
 ) -> Result<(), FrameWorkRefusal> {
     let mut off = 0usize;
     while off < data.len() {
-        let took = reader.push_with_budget(
-            data.get(off..).unwrap_or(&[]),
-            FrameWorkBudget::for_capacity(MAX_FRAME_LEN),
-        )?;
+        // The allowance follows the reader's real buffer, not a frame's worth of it.
+        let budget = FrameWorkBudget::for_capacity(reader.capacity());
+        let took = reader.push_with_budget(data.get(off..).unwrap_or(&[]), budget)?;
         off += took;
         drain(reader, health, errors, file)?;
         if took == 0 {
@@ -201,7 +200,8 @@ fn drain(
     file: usize,
 ) -> Result<(), FrameWorkRefusal> {
     loop {
-        let Some(ev) = r.next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN))? else {
+        let budget = FrameWorkBudget::for_capacity(r.capacity());
+        let Some(ev) = r.next_with_budget(budget)? else {
             return Ok(());
         };
         match ev {

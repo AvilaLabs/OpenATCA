@@ -458,7 +458,8 @@ fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "recording directory entry limit exceeded ({entry_limit} entries; all entries count)"
+                    "recording directory entry limit exceeded: {found} entries found (counting stopped there) against a limit of {entry_limit}; unrelated files count too; no existing file was touched and nothing was created",
+                    found = entries.saturating_add(1)
                 ),
             ));
         }
@@ -558,7 +559,11 @@ mod directory_limit_tests {
 
         let refused = existing_recording_bytes(&dir, 2).expect_err("third entry exceeds limit");
         assert_eq!(refused.kind(), ErrorKind::InvalidData);
-        assert!(refused.to_string().contains("entry limit exceeded"));
+        let text = refused.to_string();
+        assert!(text.contains("entry limit exceeded"));
+        assert!(text.contains("3 entries found"), "{text}");
+        assert!(text.contains("limit of 2"), "{text}");
+        assert!(text.contains("no existing file was touched"), "{text}");
         assert_eq!(
             existing_recording_bytes(&dir, 3).expect("exact entry allowance"),
             3
