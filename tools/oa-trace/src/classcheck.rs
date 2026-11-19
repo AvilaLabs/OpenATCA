@@ -92,6 +92,29 @@ const FLOAT_METHODS: &[&str] = &[
     "div_euclid",
     "fract",
 ];
+/// What to write instead of the float method `w` in core code. Every `oa_ieee::` or `oa_math::`
+/// name in the text is a real public function of that crate (a test reads their sources).
+pub fn float_method_advice(w: &str) -> String {
+    let text = match w {
+        "rem_euclid" => {
+            "for an integer write it in path form, e.g. `i64::rem_euclid(a, b)`; for a float use oa_math::rem_euclid"
+        }
+        "div_euclid" => {
+            "for an integer write it in path form, e.g. `i64::div_euclid(a, b)`; for a float take oa_ieee::trunc of the quotient and adjust by the sign of oa_math::rem_euclid, as std does"
+        }
+        "powf" => "use oa_math::pow",
+        "log" => "use oa_math::ln, as oa_math::ln(x) / oa_math::ln(base)",
+        "log2" | "log10" => "use oa_math::ln divided by oa_math::ln of the base",
+        "mul_add" => "write the multiply and the add separately (a fused multiply-add is not portable)",
+        "fract" => "write x - oa_ieee::trunc(x)",
+        "exp_m1" => "write oa_math::exp(x) - 1.0, or a series where x is small",
+        "ln_1p" => "write oa_math::ln(1.0 + x), or a series where x is small",
+        "sinh" | "cosh" | "tanh" => "build it from oa_math::exp",
+        _ if IEEE_API.contains(&w) => return format!("use oa_ieee::{w}"),
+        _ => return format!("use oa_math::{w}"),
+    };
+    text.to_string()
+}
 /// The one crate that wraps the standard library's exactly specified float operations (B10).
 const IEEE_CRATE: &str = "oa-ieee";
 /// The public API of [`IEEE_CRATE`], exactly.
@@ -1043,12 +1066,8 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
                 t.line,
                 w,
                 &format!(
-                    "B8: the standard library's float `{w}` differs between machines; use {} instead. A user-defined method of this name is disallowed in core code too",
-                    if IEEE_API.contains(&w) {
-                        format!("oa_ieee::{w}")
-                    } else {
-                        format!("oa_math::{w}")
-                    }
+                    "B8: the standard library's float `{w}` differs between machines; {}. A user-defined method of this name is disallowed in core code too",
+                    float_method_advice(w)
                 ),
             ));
         }

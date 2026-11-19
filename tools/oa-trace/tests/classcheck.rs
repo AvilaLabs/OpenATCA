@@ -7,8 +7,8 @@
 )]
 
 use oa_trace::classcheck::{
-    check, check_with, ieee_api_problems, lib_rs_problems, mask, parse_manifest, parse_members,
-    scan_source, Class, Ctx, UNSPLIT_ALLOWED,
+    check, check_with, float_method_advice, ieee_api_problems, lib_rs_problems, mask,
+    parse_manifest, parse_members, scan_source, Class, Ctx, UNSPLIT_ALLOWED,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -733,7 +733,12 @@ fn the_real_workspace_passes() {
     assert!(rep.ok(), "{:#?}", rep.failures);
     assert_eq!(
         rep.unsplit,
-        ["oa-display", "oa-replay-diff", "oa-scope-replay", "oa-track"]
+        [
+            "oa-display",
+            "oa-replay-diff",
+            "oa-scope-replay",
+            "oa-track"
+        ]
     );
 }
 
@@ -873,4 +878,97 @@ fn oa_ieee_exposes_exactly_five_functions_and_may_use_float_methods() {
         &[("src/lib.rs", "pub fn sqrt(x: f64) -> f64 { x.sqrt() }\n")],
     );
     assert!(has(&ws.failures(), "B8: the standard library"));
+}
+
+/// The public function names of an `oa-math` or `oa-ieee` source: `pub fn name` and the names in
+/// `pub use module::{a, b};` or `pub use module::a;` lines of its `lib.rs`, plus `extra` files.
+fn public_functions(crate_dir: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+    let text = fs::read_to_string(root.join(crate_dir).join("src/lib.rs")).unwrap();
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("pub fn ") {
+        let name: String = rest[at + 7..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        out.push(name);
+        rest = &rest[at + 7..];
+    }
+    for line in text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("pub use "))
+    {
+        let tail = line.rsplit("::").next().unwrap_or("");
+        out.extend(
+            tail.trim_matches(|c: char| "{}; ".contains(c))
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty()),
+        );
+    }
+    out
+}
+
+// REQ: OA-TRC-218
+#[test]
+fn every_suggested_float_alternative_is_a_real_public_function() {
+    let math = public_functions("oa-math");
+    let ieee = public_functions("oa-ieee");
+    assert!(math.contains(&"pow".to_string()) && math.contains(&"rem_euclid".to_string()));
+    assert!(ieee.contains(&"sqrt".to_string()) && ieee.len() == 5);
+    let methods = [
+        "sqrt",
+        "floor",
+        "ceil",
+        "trunc",
+        "round",
+        "powi",
+        "powf",
+        "exp",
+        "exp_m1",
+        "ln",
+        "ln_1p",
+        "log",
+        "log2",
+        "log10",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "sinh",
+        "cosh",
+        "tanh",
+        "hypot",
+        "cbrt",
+        "mul_add",
+        "rem_euclid",
+        "div_euclid",
+        "fract",
+    ];
+    for w in methods {
+        let advice = float_method_advice(w);
+        let mut named = 0;
+        for (prefix, api) in [("oa_math::", &math), ("oa_ieee::", &ieee)] {
+            for (at, _) in advice.match_indices(prefix) {
+                let name: String = advice[at + prefix.len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                assert!(
+                    api.contains(&name),
+                    "`{w}`: advice names {prefix}{name}: {advice}"
+                );
+                named += 1;
+            }
+        }
+        // a method with nothing exact to name must say what to write instead
+        assert!(named > 0 || advice.contains("write"), "`{w}`: {advice}");
+    }
+    assert!(float_method_advice("powf").contains("oa_math::pow"));
+    assert!(float_method_advice("div_euclid").contains("`i64::div_euclid(a, b)`"));
+    assert!(float_method_advice("rem_euclid").contains("for a float use oa_math::rem_euclid"));
 }

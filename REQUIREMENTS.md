@@ -162,7 +162,7 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   target the crate is built for (x86-64 and wasm32 checked).
 - **OA-MATH-019** The crate sources contain no call to a platform maths function (`sin`, `exp`,
   `powf`, `floor`, `mul_add` and the rest of a fixed list, as methods, `f64::` calls or bare
-  `f64::` paths used as values), no float `%` (only the listed integer shifts), no `unsafe`, and the
+  `f64::` paths used as values), no float `%` (only the listed integer shifts and the exact `fmod` line of `rem_euclid`), no `unsafe`, and the
   manifest lists no dependency; the check is itself tested against planted calls.
 - **OA-MATH-020** Every NaN returned has one fixed bit pattern (positive quiet NaN), whatever the
   NaN bits of the input.
@@ -206,6 +206,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-MATH-032** Proved (Kani, `cut_split_halves_are_exact_and_short`): the split of `two_prod_cut` gives
   a high half of at most 26 bits and a low half of at most 27 bits of the mantissa, each exact, whose sum
   is the input, for every normal double whose low half is normal.
+- **OA-MATH-033** `rem_euclid(a, b)` equals the standard library's `f64::rem_euclid` bit for bit on two
+  million inputs (bearing wraps, mixed signs, arbitrary bit patterns, wide exponent range) and on the
+  edge values, a NaN result excepted, which has the crate's one fixed bit pattern.
 
 ### NASR (oa-nasr)
 

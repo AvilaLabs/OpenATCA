@@ -65,6 +65,9 @@ const BANNED: &[&str] = &[
 /// The lines that use `%` on integers (bit positions in the Payne-Hanek code).
 const INTEGER_REM: &[&str] = &["let s = pos % 64;", "let s = lo % 64;", "let s = lz % 64;"];
 
+/// The one float `%` allowed: `fmod` is an exact operation, and `rem_euclid` is built on it.
+const EXACT_FLOAT_REM: &str = "let r = a % b;";
+
 fn sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
@@ -117,8 +120,12 @@ fn sources_call_no_platform_maths_function() {
                     }
                 }
             }
-            // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below.
-            if code.contains('%') && !INTEGER_REM.contains(&code.trim()) {
+            // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below
+            // and the exact `fmod` of `rem_euclid`.
+            if code.contains('%')
+                && !INTEGER_REM.contains(&code.trim())
+                && !(name == "rem.rs" && code.trim() == EXACT_FLOAT_REM)
+            {
                 hits.push(format!("{name}:{}: `%` (float remainder is fmod)", n + 1));
             }
             for word in [
@@ -166,6 +173,8 @@ fn the_check_also_finds_a_bare_path_and_a_float_remainder() {
     });
     assert!(found);
     assert!(!INTEGER_REM.contains(&"let r = x % 2.0;"));
+    // the one allowed float remainder is that exact line only, and only in rem.rs
+    assert_ne!("let r = x % 2.0;", EXACT_FLOAT_REM);
 }
 
 // REQ: OA-MATH-019
