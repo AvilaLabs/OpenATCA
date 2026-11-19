@@ -10,3 +10,6 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+
+[package.metadata.openatca]
+class = "core"

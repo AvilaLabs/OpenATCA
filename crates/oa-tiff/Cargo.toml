@@ -19,3 +19,6 @@ oa-zip = { path = "../oa-zip" }
 oa-deflate = { path = "../oa-deflate" }
 oa-nasr = { path = "../oa-nasr" }
 oa-dof = { path = "../oa-dof" }
+
+[package.metadata.openatca]
+class = "shell"

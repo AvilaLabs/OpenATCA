@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/fx-badcore",
+    "crates/fx-nocls",
+    "crates/fx-weird",
+    "crates/fx-badsplit",
+    "crates/fx-newold",
+    "crates/fx-shell",
+    "crates/fx-cleansplit",
+]

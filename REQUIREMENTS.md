@@ -369,6 +369,30 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-104** For Python source, `oa-trace` discovers only `test_*.py` modules and links a `# REQ:` tag directly above a
   Python `def test_*` as a test (not a proof), and reports malformed IDs and tags attached to non-test
   definitions.
+- **OA-TRC-200** `cargo run -p oa-trace` reads the class of every workspace member and passes a workspace
+  whose crates are all classified and whose core code is clean (RULESET B7 to B9). Core code excludes
+  `src/bin/`, `src/main.rs`, test files and `#[cfg(test)]` or `#[cfg(kani)]` items.
+- **OA-TRC-201** A member with no `[package.metadata.openatca] class`, or one other than `core`, `shell`, `split`
+  or `unsplit`, fails the check and the failure names the crate.
+- **OA-TRC-202** Core code (all of `src/` for a core crate, `src/core/` for a split crate) that names `std::fs`,
+  `std::net`, `std::io`, `std::env`, `std::process`, `std::thread`, `std::time`, `std::sync`, `thread_local!`,
+  `static mut`, `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `HashMap`, `HashSet` or `RandomState` fails,
+  and each hit is reported as `file:line: token`; a path split over lines or inside a `use std::{..}` group is
+  still found.
+- **OA-TRC-203** Core code that names a path into a `shell` module (`crate::shell`, `super::shell`,
+  `<crate>::shell`, or `shell` in a `use` group) fails.
+- **OA-TRC-204** Comments (line, block, nested), string literals (plain and raw), and character literals are
+  blanked before the scan, so a forbidden name inside them is not a hit; lifetimes are not mistaken for
+  character literals; line numbers are kept.
+- **OA-TRC-205** A core crate lists no shell or unsplit crate in `[dependencies]`; core code names a workspace
+  crate only if it is core, or by its `::core::` path if it is split.
+- **OA-TRC-206** A split crate has `src/core/` and `src/shell/`, and its `src/lib.rs` holds only module
+  declarations without bodies, re-exports and attributes.
+- **OA-TRC-207** Every `unsplit` crate is in `tools/oa-trace/unsplit-allowlist.txt`, the count is printed as
+  migration debt, and an allowlist entry for a crate that is not unsplit (migrated, renamed or unknown) fails, so
+  the list only shrinks (RULESET B9).
+- **OA-TRC-208** `oa-trace` reads the package name, class and `[dependencies]` of each Cargo.toml and the root
+  `members` list with its own small reader, without a dependency.
 
 ### Hashing (oa-sha256)
 

@@ -20,3 +20,6 @@ oa-truth = { path = "../oa-truth" }
 [[bin]]
 name = "oa-sensorsim"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

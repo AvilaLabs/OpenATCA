@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 oa-csv = { path = "../oa-csv" }
+
+[package.metadata.openatca]
+class = "shell"
