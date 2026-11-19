@@ -592,11 +592,11 @@ fn arc_sweep(
     a: LatLon,
     b: LatLon,
 ) -> Result<(f64, f64), GeoError> {
-    use crate::model::via as v;
+    use crate::core::model::via;
     let from = ell.inverse(centre, a)?.azimuth1_deg;
     let to = ell.inverse(centre, b)?.azimuth1_deg;
     let cw = (to - from).rem_euclid(360.0);
-    Ok((from, if via == v::ARC_CW { cw } else { cw - 360.0 }))
+    Ok((from, if via == via::ARC_CW { cw } else { cw - 360.0 }))
 }
 
 /// Dense points of an ARINC 424 style boundary: geodesic edges as geodesics and rhumb edges as
@@ -604,7 +604,7 @@ fn arc_sweep(
 /// centres, with the arc's ends at the stored points. Only used to test whether the volume
 /// touches the area; the model keeps the exact description.
 pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, GeoError> {
-    use crate::model::via;
+    use crate::core::model::via;
     let mut out = Vec::new();
     let mut remaining = MAX_BOUNDARY_SAMPLES;
     for (i, s) in segs.iter().enumerate() {
@@ -658,7 +658,7 @@ pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, G
 /// ends. The sampler uses the coded radius (what the model stores), so a gap here is a volume
 /// whose stored description disagrees with itself.
 pub fn arc_radius_gap_m(ell: &Ellipsoid, segs: &[SegIn]) -> Result<f64, GeoError> {
-    use crate::model::via;
+    use crate::core::model::via;
     let mut worst = 0.0_f64;
     for (i, s) in segs.iter().enumerate() {
         if !matches!(s.via, via::ARC_CW | via::ARC_CCW) {
