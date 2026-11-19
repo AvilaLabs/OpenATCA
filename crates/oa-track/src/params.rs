@@ -149,6 +149,18 @@ pub const CONFIRM_WINDOW_INTERVALS: i64 = 4;
 /// The confirming report is at least this long, ns, after the held one: a copy of the same
 /// message, or a burst within one squitter, is not a second report.
 pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;
+/// How many unconfirmed moves can hold a rollback snapshot at once (2200 bytes each): 64, 141 kB.
+/// Measured on the two development days (the 2026-11-14 day to choose, 2026-11-15 as the
+/// check): the most tracks with an unconfirmed move at once was 7 on 2026-11-14 and
+/// 7 on 2026-11-15, so 64 is about nine times the largest peak seen; a move is open
+/// for the window of its track (5 s at 1 Hz, 28 s on a 7 s feed) unless its track goes silent,
+/// when it stays until the track is dropped (120 s). What a forger can force: one gate-passing
+/// far report on each of many confirmed aircraft addresses at once, each holding a snapshot until
+/// the track's next report decides it or the track ends. With the pool full the move is still
+/// applied and marked, only without a snapshot, so such a flood costs rollback and never the
+/// mark (`move_no_snapshot` counts it); it needs a live confirmed track and a gap of 10 s or more
+/// on it for every slot taken, and it cannot grow memory, which is allocated once.
+pub const CONFIRM_POOL: usize = 64;
 /// An altitude innovation above this many standard deviations is not applied.
 pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the

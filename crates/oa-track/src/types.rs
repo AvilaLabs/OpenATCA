@@ -161,6 +161,11 @@ pub struct TrackerConfig {
     pub confirm_window_ns: i64,
     /// The large-move rule is on. True by default; false only by an explicit choice.
     pub confirm_moves: bool,
+    /// How many unconfirmed moves can keep a rollback snapshot at once ([`crate::params::CONFIRM_POOL`],
+    /// with the analysis of its size). The pool is allocated once, at most `max_tracks` entries
+    /// of about 2.2 kB. A move that finds it full is applied and marked all the same, without a
+    /// snapshot: it can be confirmed or left standing but not rolled back (`move_no_snapshot`).
+    pub confirm_pool: usize,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
     /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
@@ -194,6 +199,7 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     confirm_agree_m: crate::params::CONFIRM_AGREE_M,
     confirm_window_ns: crate::params::CONFIRM_WINDOW_NS,
     confirm_moves: true,
+    confirm_pool: crate::params::CONFIRM_POOL,
     ooo_window_ns: OOO_WINDOW_NS,
     clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
@@ -276,6 +282,12 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
         || c.confirm_window_ns > 86_400 * 1_000_000_000
     {
         return bad("confirm_window_ns");
+    }
+    if c.drop_after_ns < c.confirm_window_ns {
+        return bad("drop_after_ns below confirm_window_ns");
+    }
+    if c.confirm_pool > (1 << 20) {
+        return bad("confirm_pool");
     }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
@@ -605,8 +617,37 @@ pub struct TrackerStats {
     /// so the track was restored to its state from before the move and the report applied to it.
     pub moves_rolled_back: u64,
     /// Moves the next report neither confirmed nor refuted (it agreed with neither path, or came
-    /// after the window): the move stands, the mark is cleared.
+    /// after the window) and that report was applied: the move stands, the mark is cleared.
     pub moves_undecided: u64,
+    /// Deciding reports that were not applied (the gate rejected them, or the update was
+    /// refused): they decide nothing, the mark and the snapshot stay.
+    pub moves_decision_rejected: u64,
+    /// Late re-filters that moved a confirmed track's estimate by more than `confirm_move_m`:
+    /// counted in `moves_unconfirmed` too, marked with the state from before the replay.
+    pub moves_late: u64,
+    /// Late re-filters while a move was unconfirmed: its snapshot no longer matches the history
+    /// and is dropped (the mark stays, a refuting report cannot roll back).
+    pub moves_rollback_lost_late: u64,
+    /// Moves that ended with the track: it ended (dropped, expired, flushed).
+    pub moves_abandoned_ended: u64,
+    /// Moves that ended with the track restarted (initiation window, implausible report).
+    pub moves_abandoned_restarted: u64,
+    /// Moves that ended with the filter re-synchronised.
+    pub moves_abandoned_resync: u64,
+    /// Moves that ended with the track demoted to tentative by a late re-filter.
+    pub moves_abandoned_demoted: u64,
+    /// Moves that ended with a numerical refusal of the update that had made them.
+    pub moves_abandoned_numerical: u64,
+    /// Moves applied and marked without a rollback snapshot: the pool was full.
+    pub move_no_snapshot: u64,
+    /// Rows of a marked track whose widened radius could not be computed: they carry the widest
+    /// radius the format holds instead (fail closed).
+    pub move_widen_failed: u64,
+    /// A report the filter held back as a large move although the rule was off (cannot happen):
+    /// refused and counted.
+    pub moves_internal_refused: u64,
+    /// The most tracks with an unconfirmed move at once.
+    pub moves_peak_active: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

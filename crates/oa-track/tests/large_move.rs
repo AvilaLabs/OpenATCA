@@ -14,8 +14,9 @@ mod common;
 
 use common::*;
 use oa_track::{
-    r95_m_of, tracker_stats, Measurement, TrackOutput, TrackerConfig, TrackerStats,
-    O_MOVE_UNCONFIRMED, O_TICK,
+    output_new, r95_m_of, tracker_moves_active, tracker_new, tracker_note_radar_disagreement,
+    tracker_predict, tracker_stats, tracker_update, Measurement, TrackOutput, Tracker,
+    TrackerConfig, TrackerStats, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK,
 };
 
 const ADDR: u32 = 0xA0_0001;
@@ -197,9 +198,20 @@ fn a_genuine_reacquisition_is_confirmed_and_its_rows_are_main_s_but_for_the_mark
             (1, 1, 0, 0),
             "gap {gap}"
         );
-        // Every report is applied exactly as without the rule.
-        assert_eq!(s.applied, m.applied);
-        assert_eq!((s.jump_rejected, s.resyncs), (m.jump_rejected, m.resyncs));
+        // Every report is applied exactly as without the rule: every counter that is not the
+        // rule's own is equal. `rows_uncertain` differs on purpose: a marked row's radius is
+        // widened to cover the old path, so it can be uncertain by definition.
+        assert!(s.rows_uncertain >= m.rows_uncertain);
+        let plain = |x: &TrackerStats| TrackerStats {
+            moves_unconfirmed: 0,
+            moves_confirmed: 0,
+            moves_abandoned_ended: 0,
+            moves_decision_rejected: 0,
+            moves_peak_active: 0,
+            rows_uncertain: 0,
+            ..*x
+        };
+        assert_eq!(plain(&s), plain(&m), "gap {gap}");
         // Rows: the same positions at the same times; the flags and covariances are the same
         // except on the rows marked unconfirmed.
         assert_eq!(out.t_ns, main_out.t_ns);
@@ -224,16 +236,105 @@ fn a_genuine_reacquisition_is_confirmed_and_its_rows_are_main_s_but_for_the_mark
     }
 }
 
+/// Every unconfirmed move ends in exactly one counted outcome (E6): the moves made equal the
+/// confirmed, rolled back, undecided and abandoned ones plus those still unconfirmed.
+fn balanced(t: &Tracker) {
+    let s = tracker_stats(t);
+    let outcomes = s.moves_confirmed
+        + s.moves_rolled_back
+        + s.moves_undecided
+        + s.moves_abandoned_ended
+        + s.moves_abandoned_restarted
+        + s.moves_abandoned_resync
+        + s.moves_abandoned_demoted
+        + s.moves_abandoned_numerical;
+    assert_eq!(
+        s.moves_unconfirmed,
+        outcomes + tracker_moves_active(t) as u64,
+        "{s:?}"
+    );
+}
+
+/// A live tracker fed one report at a time, so a test can look between them.
+struct Live {
+    t: Tracker,
+    out: TrackOutput,
+}
+
+impl Live {
+    fn new(cfg: &TrackerConfig) -> Self {
+        Live {
+            t: tracker_new(cfg).unwrap(),
+            out: output_new(cfg.out_capacity),
+        }
+    }
+    fn feed(&mut self, ms: &[Measurement]) {
+        for m in ms {
+            tracker_update(&mut self.t, m, &mut self.out);
+        }
+    }
+    fn s(&self) -> TrackerStats {
+        *tracker_stats(&self.t)
+    }
+    /// The flags of the newest row of the track.
+    fn last_flags(&self) -> u8 {
+        *self.out.flags.last().unwrap()
+    }
+}
+
+/// A report of the moved track's own predicted position at `t_s`, shifted `north_m` north.
+fn on_track(l: &Live, rng: &mut Rng, t_s: f64, north_m: f64) -> Measurement {
+    let (row, _, _) = tracker_predict(&l.t, ADDR, (t_s * 1.0e9) as i64).unwrap();
+    let mut m = report_of(rng, t_s, &truth(t_s, 0.0));
+    m.lat_e7 = row.lat_e7 + (north_m / 0.011_119_5) as i32;
+    m.lon_e7 = row.lon_e7;
+    m
+}
+
+// REQ: OA-TRK-348
+#[test]
+fn a_report_that_is_not_applied_decides_nothing_and_the_mark_survives() {
+    // Forged at 40 s (marked); a junk report a second later 5 km away is refused by the gate:
+    // the mark and the snapshot stay (the review's finding), and the genuine report after it,
+    // on the old path, still rolls the move back.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 5_000.0))]);
+    let s = l.s();
+    assert_eq!(s.moves_decision_rejected, 1, "{s:?}");
+    assert_eq!(
+        (s.moves_confirmed, s.moves_rolled_back, s.moves_undecided),
+        (0, 0, 0)
+    );
+    assert_eq!(tracker_moves_active(&l.t), 1);
+    let (row, _, _) = tracker_predict(&l.t, ADDR, 41 * S).unwrap();
+    assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
+    l.feed(&[report_of(&mut rng, 42.0, &truth(42.0, 0.0))]);
+    let s = l.s();
+    assert_eq!(
+        (s.moves_rolled_back, s.moves_decision_rejected),
+        (1, 1),
+        "{s:?}"
+    );
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
+}
+
 // REQ: OA-TRK-348
 #[test]
 fn a_report_after_the_window_or_agreeing_with_neither_leaves_the_move_standing() {
-    // The forged report at 40 s; the genuine one on the old path only at 46 s, past the 5 s window
-    // of this 1 s feed: undecided, the move stands, the mark is cleared.
+    // Past the window (5 s on a 1 s feed) a report on the moved track is applied and the move
+    // stands (undecided): the mark goes only because the report was applied.
     let mut rng = Rng(7);
-    let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
-    ms.push(report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M)));
-    ms.push(report_of(&mut rng, 46.0, &truth(46.0, 0.0)));
-    let (s, out) = stats_of(&big_config(), &ms, 60.0);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    let m = on_track(&l, &mut rng, 46.0, 0.0);
+    l.feed(&[m]);
+    let s = l.s();
     assert_eq!(
         (
             s.moves_unconfirmed,
@@ -241,82 +342,157 @@ fn a_report_after_the_window_or_agreeing_with_neither_leaves_the_move_standing()
             s.moves_rolled_back,
             s.moves_undecided
         ),
-        (1, 0, 0, 1)
+        (1, 0, 0, 1),
+        "{s:?}"
     );
-    let last_marked = (0..out.t_ns.len())
-        .rev()
-        .find(|&i| out.flags[i] & O_MOVE_UNCONFIRMED != 0)
-        .unwrap();
-    assert!(out.t_ns[last_marked] < 46 * S);
-    // A report agreeing with neither: 2 km north, then 2 km south.
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
+    // The genuine report on the old path only at 46 s is refused by the gate (the track is on
+    // the forged path): it decides nothing, the mark stays.
     let mut rng = Rng(7);
-    let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
-    ms.push(report_of(&mut rng, 40.0, &truth(40.0, 2_000.0)));
-    ms.push(report_of(&mut rng, 41.0, &truth(41.0, -2_000.0)));
-    let (s, _) = stats_of(&big_config(), &ms, 60.0);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    l.feed(&[report_of(&mut rng, 46.0, &truth(46.0, 0.0))]);
+    let s = l.s();
     assert_eq!(
-        (s.moves_confirmed, s.moves_rolled_back, s.moves_undecided),
-        (0, 0, 1)
+        (s.moves_undecided, s.moves_decision_rejected),
+        (0, 1),
+        "{s:?}"
     );
-    // A report a quarter second after the move is not a second report: nothing is decided.
+    assert_ne!(tracker_moves_active(&l.t), 0);
+    balanced(&l.t);
+    // A report that agrees with neither path and is applied (a thinned feed, a 12 s gap that
+    // lets the gate pass 600 m off the moved track): the move stands.
+    let cfg = TrackerConfig {
+        expected_interval_ns: 7 * S,
+        init_interval_ns: 7 * S,
+        ..big_config()
+    };
     let mut rng = Rng(7);
-    let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
-    ms.push(report_of(&mut rng, 40.0, &truth(40.0, 2_000.0)));
-    ms.push(report_of(&mut rng, 40.25, &truth(40.25, 2_000.0)));
-    let (s, _) = stats_of(&big_config(), &ms, 60.0);
+    let mut l = Live::new(&cfg);
+    let ms: Vec<Measurement> = (0..=5)
+        .map(|k| f64::from(k) * 7.0)
+        .map(|t| report_of(&mut rng, t, &truth(t, 0.0)))
+        .collect();
+    l.feed(&ms);
+    l.feed(&[report_of(&mut rng, 70.0, &truth(70.0, FORGED_OFFSET_M))]);
+    let m = on_track(&l, &mut rng, 82.0, 850.0);
+    l.feed(&[m]);
+    let s = l.s();
     assert_eq!(
-        (s.moves_confirmed, s.moves_rolled_back, s.moves_undecided),
-        (0, 0, 0)
+        (
+            s.moves_unconfirmed,
+            s.moves_confirmed,
+            s.moves_rolled_back,
+            s.moves_undecided
+        ),
+        (1, 0, 0, 1),
+        "{s:?}"
     );
+    balanced(&l.t);
+    // A report a quarter second after the move is not a second report: nothing is decided and
+    // the mark stays.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    let m = on_track(&l, &mut rng, 40.25, 0.0);
+    l.feed(&[m]);
+    let s = l.s();
+    assert_eq!(
+        (
+            s.moves_confirmed,
+            s.moves_rolled_back,
+            s.moves_undecided,
+            s.moves_decision_rejected
+        ),
+        (0, 0, 0, 0),
+        "{s:?}"
+    );
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
 }
 
 // REQ: OA-TRK-348
 #[test]
-fn a_forger_sending_two_agreeing_reports_is_confirmed() {
-    // The residual risk, written down: two forged reports a second apart that agree with each
-    // other confirm each other. Only a second source (radar) can refute them.
+fn a_later_large_move_keeps_the_original_snapshot_and_a_refuting_report_rolls_back_to_it() {
+    // A forged move at 40 s, undecided by a second large move 12 s later (past the window): the
+    // track stays marked, with the snapshot from before the first move; the genuine report
+    // after rolls back to it.
     let mut rng = Rng(7);
-    let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
-    ms.push(report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M)));
-    ms.push(report_of(&mut rng, 41.0, &truth(41.0, FORGED_OFFSET_M)));
-    let (s, out) = stats_of(&big_config(), &ms, 60.0);
-    assert_eq!(
-        (s.moves_unconfirmed, s.moves_confirmed, s.moves_rolled_back),
-        (1, 1, 0)
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    let m = on_track(&l, &mut rng, 52.0, 1_400.0);
+    l.feed(&[m]);
+    let s = l.s();
+    println!("{s:?}");
+    assert_eq!((s.moves_unconfirmed, s.moves_undecided), (2, 1), "{s:?}");
+    assert_eq!(tracker_moves_active(&l.t), 1);
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
+    l.feed(&[report_of(&mut rng, 53.0, &truth(53.0, 0.0))]);
+    let s = l.s();
+    assert_eq!(s.moves_rolled_back, 1, "{s:?}");
+    assert_eq!(tracker_moves_active(&l.t), 0);
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-348
+#[test]
+fn a_forger_who_keeps_sending_the_same_false_place_is_resynchronised_onto_it() {
+    // The residual risk, written down: reports that keep agreeing with each other on a false
+    // place are refused by the gate (it is far from the track's estimate) until the filter
+    // resynchronises onto them; that ends the move as abandoned, and the track is unmarked at
+    // the false place. Only a second source (radar) can refute that.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    for k in 0..8 {
+        let tt = 40.0 + f64::from(k);
+        l.feed(&[report_of(&mut rng, tt, &truth(tt, FORGED_OFFSET_M))]);
+    }
+    let s = l.s();
+    assert_eq!(s.moves_unconfirmed, 1, "{s:?}");
+    assert!(s.resyncs >= 1 || s.moves_confirmed == 1, "{s:?}");
+    assert!(
+        s.moves_decision_rejected >= 1 || s.moves_confirmed == 1,
+        "{s:?}"
     );
-    assert_eq!(out.flags.last().unwrap() & O_MOVE_UNCONFIRMED, 0);
+    assert_eq!(tracker_moves_active(&l.t), 0, "{s:?}");
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
 }
 
 // REQ: OA-TRK-349
 #[test]
-fn a_track_that_ends_or_restarts_forgets_its_unconfirmed_move() {
-    // Forged at 40 s, then nothing: the track is dropped at the drop age (the rows are marked
-    // while it lives), and a new track of the address starts unmarked.
+fn a_track_that_ends_or_restarts_ends_its_unconfirmed_move_with_a_count() {
+    // Forged at 40 s, then nothing: the track is dropped at the drop age; the move is counted as
+    // abandoned (ended), and a new track of the address starts unmarked.
     let mut rng = Rng(7);
     let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
     ms.push(report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M)));
     let (t, _) = run(&big_config(), &ms, 41.0);
     assert_eq!(tracker_stats(&t).moves_unconfirmed, 1);
+    balanced(&t);
     let mut ms2 = ms.clone();
     for k in 0..4 {
         let tt = 200.0 + f64::from(k);
         ms2.push(report_of(&mut rng, tt, &truth(tt, 0.0)));
     }
-    let (s, out) = stats_of(&big_config(), &ms2, 220.0);
+    let (t, out) = run(&big_config(), &ms2, 220.0);
+    let s = tracker_stats(&t);
     assert_eq!(s.started, 2);
-    assert_eq!(
-        s.moves_undecided + s.moves_confirmed + s.moves_rolled_back,
-        0
-    );
-    let first_new =
-        (0..out.t_ns.len()).find(|&i| out.t_ns[i] >= 200 * S && out.flags[i] & O_TICK == 0);
+    assert_eq!(s.moves_abandoned_ended, 1, "{s:?}");
+    balanced(&t);
     for i in 0..out.t_ns.len() {
         if out.t_ns[i] >= 200 * S {
             assert_eq!(out.flags[i] & O_MOVE_UNCONFIRMED, 0);
         }
     }
-    let _ = first_new;
-    // A resynchronisation clears it too: forged, then reports at a third place until the filter
+    // A resynchronisation ends it too: forged, then reports at a third place until the filter
     // restarts.
     let mut rng = Rng(7);
     let mut ms = genuine(&mut rng, &seconds(0.0, 20.0));
@@ -325,10 +501,172 @@ fn a_track_that_ends_or_restarts_forgets_its_unconfirmed_move() {
         let tt = 41.0 + f64::from(k);
         ms.push(report_of(&mut rng, tt, &truth(tt, -6_000.0)));
     }
-    let (s, out) = stats_of(&big_config(), &ms, 60.0);
-    assert_eq!(s.moves_undecided, 1);
+    let (t, out) = run(&big_config(), &ms, 60.0);
+    let s = tracker_stats(&t);
     assert!(s.resyncs >= 1, "{s:?}");
+    assert_eq!(s.moves_abandoned_resync, 1, "{s:?}");
     assert_eq!(out.flags.last().unwrap() & O_MOVE_UNCONFIRMED, 0);
+    balanced(&t);
+}
+
+// REQ: OA-TRK-349
+#[test]
+fn a_rollback_does_not_undo_what_the_fusion_layer_set_in_between() {
+    // The radar-disagreement mark is written from outside the update path after the move; the
+    // rollback restores measurement state only (the expected interval, the other such column, is
+    // outside the snapshot too and set by the fusion layer, which these tests do not run).
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    assert!(tracker_note_radar_disagreement(&mut l.t, ADDR, 100 * S));
+    l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
+    assert_eq!(l.s().moves_rolled_back, 1);
+    let i = l.out.flags.len() - 1;
+    assert_ne!(l.out.flags[i] & O_RADAR_DISAGREES, 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-347
+#[test]
+fn the_forecast_of_a_marked_track_carries_the_mark_and_the_widened_radius() {
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    let (calm, _, _) = tracker_predict(&l.t, ADDR, 30 * S).unwrap();
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    let (row, confirmed, _) = tracker_predict(&l.t, ADDR, 41 * S).unwrap();
+    assert!(confirmed);
+    assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
+    assert!(
+        r95_m_of(&row.pos_cov_m2) > 800.0,
+        "{}",
+        r95_m_of(&row.pos_cov_m2)
+    );
+    assert_eq!(calm.flags & O_MOVE_UNCONFIRMED, 0);
+    // The same row the tracker emits at that time.
+    l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
+    let (row, _, _) = tracker_predict(&l.t, ADDR, 42 * S).unwrap();
+    assert_eq!(row.flags & O_MOVE_UNCONFIRMED, 0);
+}
+
+/// A report of aircraft `addr` at `t_s`, `off_n` metres north of the steady track.
+fn report_for(rng: &mut Rng, addr: u32, t_s: f64, off_n: f64) -> Measurement {
+    let mut m = report_of(rng, t_s, &truth(t_s, off_n));
+    m.addr = addr;
+    m
+}
+
+// REQ: OA-TRK-347
+#[test]
+fn with_no_snapshot_the_move_is_marked_and_the_radius_fails_closed() {
+    // A pool of one entry: the second track's move has no snapshot; it is applied and marked,
+    // its rows carry the widest radius the format holds (the old path is unknown), a refuting
+    // report cannot roll it back, and the count says so. The first track's snapshot returns to
+    // the pool when its move is decided, and the next move takes it.
+    let cfg = TrackerConfig {
+        confirm_pool: 1,
+        ..big_config()
+    };
+    let mut rng = Rng(7);
+    let mut l = Live::new(&cfg);
+    // A third aircraft reports every second throughout, so the clock keeps up and the two
+    // others have the 20 s gap the gate needs to pass the forged report.
+    for t in seconds(0.0, 42.0) {
+        for addr in [0xA0_0001u32, 0xA0_0002, 0xA0_0003] {
+            if t > 20.0 && addr != 0xA0_0003 {
+                continue;
+            }
+            let mut m = report_of(&mut rng, t, &truth(t, 0.0));
+            m.addr = addr;
+            l.feed(&[m]);
+        }
+    }
+    l.feed(&[report_for(&mut rng, 0xA0_0001, 43.0, FORGED_OFFSET_M)]);
+    l.feed(&[report_for(&mut rng, 0xA0_0002, 43.0, FORGED_OFFSET_M)]);
+    let s = l.s();
+    assert_eq!(
+        (s.moves_unconfirmed, s.move_no_snapshot, s.moves_peak_active),
+        (2, 1, 2),
+        "{s:?}"
+    );
+    let (row, _, _) = tracker_predict(&l.t, 0xA0_0002, 44 * S).unwrap();
+    assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
+    assert!(r95_m_of(&row.pos_cov_m2) > 1.0e15);
+    assert!(s.move_widen_failed >= 1, "{s:?}");
+    // The refuting report: the first track rolls back, the second cannot.
+    l.feed(&[report_for(&mut rng, 0xA0_0001, 44.0, 0.0)]);
+    l.feed(&[report_for(&mut rng, 0xA0_0002, 44.0, 0.0)]);
+    let s = l.s();
+    assert_eq!(s.moves_rolled_back, 1, "{s:?}");
+    assert!(tracker_moves_active(&l.t) <= 1);
+    balanced(&l.t);
+    // The freed snapshot serves the next move.
+    for t in seconds(45.0, 69.0) {
+        let mut m = report_of(&mut rng, t, &truth(t, 0.0));
+        m.addr = 0xA0_0003;
+        l.feed(&[m]);
+    }
+    l.feed(&[report_for(&mut rng, 0xA0_0001, 70.0, FORGED_OFFSET_M)]);
+    let s = l.s();
+    assert_eq!(s.move_no_snapshot, 1, "{s:?}");
+}
+
+// REQ: OA-TRK-349
+#[test]
+fn a_late_replay_while_a_move_is_unconfirmed_drops_the_snapshot_and_keeps_the_mark() {
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    // A genuine report from 39.6 s arrives late, inside the out-of-order window.
+    l.feed(&[report_of(&mut rng, 39.6, &truth(39.6, 0.0))]);
+    let s = l.s();
+    assert_eq!(s.refiltered, 1, "{s:?}");
+    assert_eq!(s.moves_rollback_lost_late, 1, "{s:?}");
+    assert_ne!(tracker_moves_active(&l.t), 0);
+    // A refuting report cannot roll back: it is not applied (the track is at the moved place)
+    // and decides nothing.
+    l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
+    assert_eq!(l.s().moves_rolled_back, 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-347
+#[test]
+fn a_late_replay_that_moves_the_estimate_far_marks_the_track() {
+    // Sparse reports (20 s apart): a forged report arrives late, between two stored ones, and the
+    // re-filter moves the current estimate by over 926 m.
+    let cfg = TrackerConfig {
+        expected_interval_ns: 20 * S,
+        init_interval_ns: 20 * S,
+        ooo_window_ns: 60 * S,
+        clock_step_limit_ns: 120 * S,
+        drop_after_ns: 300 * S,
+        ..big_config()
+    };
+    let mut rng = Rng(7);
+    let mut l = Live::new(&cfg);
+    let ms: Vec<Measurement> = (0..=6)
+        .map(|k| f64::from(k) * 20.0)
+        .map(|t| report_of(&mut rng, t, &truth(t, 0.0)))
+        .collect();
+    l.feed(&ms);
+    let before = l.s();
+    l.feed(&[report_of(&mut rng, 119.6, &truth(119.6, 2000.0))]);
+    let s = l.s();
+    assert_eq!(s.refiltered, before.refiltered + 1, "{s:?}");
+    assert_eq!((s.moves_late, s.moves_unconfirmed), (1, 1), "{s:?}");
+    assert_ne!(tracker_moves_active(&l.t), 0);
+    let (row, _, _) = tracker_predict(&l.t, ADDR, 125 * S).unwrap();
+    assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
+    // The row the replay itself emitted is marked too.
+    let i = (0..l.out.t_ns.len())
+        .rev()
+        .find(|&i| l.out.t_ns[i] == 119_600_000_000 && l.out.flags[i] & O_TICK == 0)
+        .unwrap();
+    assert_ne!(l.out.flags[i] & O_MOVE_UNCONFIRMED, 0);
+    balanced(&l.t);
 }
 
 // REQ: OA-TRK-350
@@ -419,6 +757,8 @@ fn the_rule_has_defaults_that_are_on_and_checked() {
     assert!(bad(&|c| c.confirm_agree_m = c.confirm_move_m));
     assert!(bad(&|c| c.confirm_window_ns = 500_000_000));
     assert!(bad(&|c| c.confirm_window_ns = 0));
+    // The window cannot be longer than the drop age.
+    assert!(bad(&|c| c.drop_after_ns = c.confirm_window_ns - 1));
     assert!(!bad(&|c| c.confirm_move_m = 2_000.0));
     assert!(!bad(&|c| c.confirm_moves = false));
 }

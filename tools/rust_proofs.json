@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 51,
+  "expected_proof_count": 52,
   "proofs": [
     {
       "id": "output-append",
@@ -381,7 +381,7 @@
     },
     {
       "id": "large-move-decision",
-      "requirement": "OA-TRK-348: a lone large move decides nothing; a confirmation or rollback needs a second report at least 0.5 s after it, within the window and within the agreement limit, for every gap and covariance.",
+      "requirement": "OA-TRK-348: a lone large move decides nothing; a confirmation or rollback needs a second report at least 0.5 s after it, within the window and within the agreement limit, for every gap and covariance; a tie or an unknown old path confirms, a report nearer the old path rolls back.",
       "package": "oa-track",
       "harness": "tracker::proofs::a_single_far_report_marks_every_row_until_a_second_report_decides",
       "enabled": true,
@@ -390,7 +390,8 @@
         "confirmed",
         "rolled back",
         "undecided",
-        "too soon"
+        "too soon",
+        "a tie confirms"
       ],
       "stubbing": false,
       "stub_summaries": [],
@@ -401,17 +402,42 @@
     },
     {
       "id": "large-move-marks-rows",
-      "requirement": "OA-TRK-348: every row (update or tick) of a track with an unconfirmed move carries the unconfirmed flag.",
+      "requirement": "OA-TRK-347: production, given a large move, starts the unconfirmed move and marks the row it emits (widened, or fail closed with the widest covariance and a count).",
       "package": "oa-track",
-      "harness": "tracker::proofs::every_row_of_a_track_with_an_unconfirmed_move_is_marked",
+      "harness": "tracker::proofs::a_move_made_by_production_marks_the_row_it_emits_and_widens_or_fails_closed",
       "enabled": true,
       "experimental": false,
       "required_covers": [
-        "a marked row is made"
+        "the widening cannot be computed",
+        "the row is widened over an old path that differs",
+        "the row is already wide enough"
       ],
       "stubbing": true,
       "stub_summaries": [
-        "filter_output returns a representable row; production emit, the marking and output append remain in path."
+        "decide returns a large move (Step::Moved).",
+        "filter_output returns a row for the new filter and, for the snapshot's filter, a row at another position or none.",
+        "filter_row_distance_m and r95_m return any value (any non-NaN non-negative radius)."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "large-move-decision-rejected",
+      "requirement": "OA-TRK-348: a deciding report that is not applied decides nothing: the move and its snapshot stay, no outcome is counted, the track is as before, whatever the verdict.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::a_report_that_is_not_applied_decides_nothing_whatever_the_verdict",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a deciding report was refused",
+        "too soon to decide"
+      ],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide returns Rejected.",
+        "filter_miss_m returns any distance, so any verdict."
       ],
       "cfgs": [],
       "harness_timeout_seconds": 300,
@@ -420,9 +446,9 @@
     },
     {
       "id": "large-move-rollback",
-      "requirement": "OA-TRK-349: rolling back restores every column of the track bit for bit as it was before the move.",
+      "requirement": "OA-TRK-349: rolling back restores the measurement state of the track bit for bit, leaves the columns the fusion layer writes, returns the snapshot to the pool.",
       "package": "oa-track",
-      "harness": "tracker::proofs::rolling_back_restores_the_track_as_it_was_before_the_move",
+      "harness": "tracker::proofs::rolling_back_restores_measurement_state_and_leaves_the_outside_columns",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
