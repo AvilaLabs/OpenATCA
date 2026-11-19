@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::adsb_export::AdsbExport;
 use super::error::ExportError;
 use super::export::SystemExport;
+use super::guard::guarded_opener;
 use crate::core::addrcheck::{check_flight, RefPoint, Verdict};
 use crate::core::adsb::{adsb_record, AdsbRow};
 use crate::core::convert::{eram_record, eram_refusal, track_record, EramRow, TrackRow};
@@ -366,7 +367,7 @@ pub fn export_adsb_clip(
     mode: InputsMode,
     rows: OpenatcaRows,
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
-    let clip = oa_bench::input::load_adsb(path)
+    let clip = oa_bench::input::load_adsb_with(path, &guarded_opener())
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
     let positions = ref_points(&clip.reports);
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);

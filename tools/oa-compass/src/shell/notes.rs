@@ -133,8 +133,8 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
     let _ = writeln!(out, "  file: {}", d.file);
     let _ = writeln!(
         out,
-        "  records written: {rows} in {} data blocks, {} octets, {} tracks (I040 numbers 1 to {})",
-        d.sink.blocks, d.sink.bytes, d.tracks, d.tracks
+        "  records written: {rows} in {} data blocks, {} octets, {} track segments (I040 numbers 1 to {}) of {} keys, {} keys with more than one segment",
+        d.sink.blocks, d.sink.bytes, d.tracks, d.tracks, d.keys, d.keys_multi_segment
     );
     let _ = writeln!(
         out,
@@ -366,7 +366,7 @@ pub fn readme_with(
         } else {
             ""
         };
-        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
+        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, true east (Vx) and true north (Vy) at the target's own position, the frame the CAT062 specification gives for I062/185 (y-axis to geographical north at the location of the target), not a system plane. I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
     }
     if has_oa {
         let _ = writeln!(o, "Altitude (OpenATCA): the tracker's altitude is ADS-B barometric (pressure) altitude, filtered: it is a CALCULATED altitude, I135 with QNH = 0. OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it.\n");

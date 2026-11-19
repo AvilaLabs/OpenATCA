@@ -17,6 +17,7 @@ use oa_asterix::{
 
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Layout};
+use super::guard::refuse_sealed_row;
 use crate::core::adsb::{count_adsb_notes, AdsbConverted, AdsbRefusal, AdsbValues, ADSB_NOTES};
 
 /// Edition written and read back.
@@ -211,6 +212,7 @@ impl AdsbExport {
     /// previous report of its day, and one on another day than the requested one unless the
     /// layout splits days.
     pub fn push(&mut self, c: &AdsbConverted, src_e7: (i32, i32)) -> Result<(), ExportError> {
+        refuse_sealed_row(SYSTEM, c.day)?;
         if !self.layout.split && c.day != self.layout.day {
             return Err(ExportError::CrossesMidnight {
                 system: SYSTEM,

@@ -1344,3 +1344,213 @@ fn the_modified_flag_of_the_build_commit_follows_the_tracked_files_of_the_built_
         }
     }
 }
+
+fn row_with_velocity(east: f32, north: f32) -> TrackRow {
+    TrackRow {
+        t_ns: T0_NS,
+        lat_e7: 410_000_000,
+        lon_e7: -880_000_000,
+        vel_east_mps: east,
+        vel_north_mps: north,
+        pos_cov_m2: [25.0, 0.0, 25.0],
+        alt_ft: 10_000.0,
+        has_alt: true,
+        vrate_fpm: 0.0,
+        coast: false,
+        radar_disagrees: false,
+        uncertain: false,
+        reacquired: false,
+        identity_unconfirmed: false,
+        address: Some(ADDR),
+        monosensor: true,
+    }
+}
+
+// REQ: OA-CMP-050
+#[test]
+fn i062_185_is_true_east_and_north_at_the_target_and_the_readme_says_so() {
+    // Vx is the east component and Vy the north one, 0.25 m/s per count: 100 m/s east and
+    // 50 m/s north are (400, 200); a westward 30 m/s is (-120, 0).
+    let v = |e, n| {
+        track_record(&row_with_velocity(e, n))
+            .unwrap()
+            .values
+            .velocity
+    };
+    assert_eq!(v(100.0, 50.0), Some((400, 200)));
+    assert_eq!(v(-30.0, 0.0), Some((-120, 0)));
+    assert_eq!(v(0.0, -25.0), Some((0, -100)));
+    let work = tmp("frame");
+    let out = work.join("out");
+    run(job(
+        &out,
+        Some(write_clip(&work, 30)),
+        false,
+        false,
+        OpenatcaRows::Ticks,
+    ))
+    .unwrap();
+    let r = fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(
+        r.contains("true east (Vx) and true north (Vy) at the target's own position"),
+        "{r}"
+    );
+}
+
+/// The track numbers (in file order), track count and keys with several segments of one
+/// aircraft whose rows are at the given seconds, exported with the restart rule.
+fn numbers_for(name: &str, times_s: &[i64]) -> (Vec<u16>, u64, u64) {
+    let out = tmp(name);
+    let lay = Layout {
+        out: out.clone(),
+        day: DAY,
+        split: false,
+    };
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
+    ex.set_segment_gap(15_360); // 120 s in 1/128 s
+    let mut info = TrackRunInfo::default();
+    let rows: Vec<(u8, i64, u32)> = times_s.iter().map(|&t| (oa_track::O_TICK, t, 7)).collect();
+    export_output(
+        &track_output(&rows),
+        &mut ex,
+        &mut info,
+        true,
+        OpenatcaRows::Ticks,
+    )
+    .unwrap();
+    let f = ex.finish().unwrap();
+    let (tracks, multi) = (f.report.days[0].tracks, f.report.days[0].keys_multi_segment);
+    f.commit().unwrap();
+    let nums = records_062(&out.join("openatca.ast"))
+        .iter()
+        .map(|r| r.track_number.unwrap())
+        .collect();
+    (nums, tracks, multi)
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn a_track_restart_after_more_than_the_drop_time_gets_a_new_track_number() {
+    // The tracker's own drop time, the constant the export reads.
+    assert_eq!(oa_track::score::SCORE_DROP_AFTER_NS, 120 * 1_000_000_000);
+    // Two legs 121 s apart: two numbers; 119 s and exactly 120 s: one.
+    let (n, tracks, multi) = numbers_for("seg-a", &[1, 2, 3, 124, 125]);
+    assert_eq!(n, [1, 1, 1, 2, 2]);
+    assert_eq!((tracks, multi), (2, 1));
+    let (n, tracks, multi) = numbers_for("seg-b", &[1, 2, 3, 122, 123]);
+    assert_eq!(n, [1, 1, 1, 1, 1]);
+    assert_eq!((tracks, multi), (1, 0));
+    let (n, ..) = numbers_for("seg-c", &[1, 2, 3, 123, 124]);
+    assert_eq!(
+        n,
+        [1, 1, 1, 1, 1],
+        "exactly 120 s is not over the drop time"
+    );
+}
+
+// REQ: OA-CMP-049
+#[test]
+fn track_segments_are_numbered_in_order_reported_and_the_space_is_checked() {
+    // Aircraft 7 restarts twice and aircraft 8 not at all: the numbers follow the first appearance of
+    // each segment. The rows are exported in time order.
+    let out = tmp("segs");
+    let lay = Layout {
+        out: out.clone(),
+        day: DAY,
+        split: false,
+    };
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
+    ex.set_segment_gap(15_360);
+    let mut info = TrackRunInfo::default();
+    for (t, a) in [(1, 7), (2, 8), (100, 8), (200, 7), (400, 7)] {
+        let o = track_output(&[(oa_track::O_TICK, t, a)]);
+        export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Ticks).unwrap();
+    }
+    let f = ex.finish().unwrap();
+    let d = &f.report.days[0];
+    assert_eq!((d.tracks, d.keys, d.keys_multi_segment), (4, 2, 1));
+    f.commit().unwrap();
+    let nums: Vec<u16> = records_062(&out.join("openatca.ast"))
+        .iter()
+        .map(|r| r.track_number.unwrap())
+        .collect();
+    assert_eq!(nums, [1, 2, 2, 3, 4]);
+    // The 16-bit space: 65 535 numbers are given, one more is refused.
+    let lay = Layout {
+        out: tmp("segfull"),
+        day: DAY,
+        split: false,
+    };
+    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
+    let c = track_record(&row_with_velocity(1.0, 1.0)).unwrap();
+    for k in 0..65_535u32 {
+        ex.push(&c, k, (410_000_000, -880_000_000)).unwrap();
+    }
+    assert!(matches!(
+        ex.push(&c, 65_535, (410_000_000, -880_000_000)),
+        Err(ExportError::TrackNumbers { .. })
+    ));
+    ex.abort();
+}
+
+// REQ: OA-CMP-047
+#[test]
+fn a_row_on_the_sealed_day_refuses_the_run_and_the_day_before_passes() {
+    use oa_compass::shell::guard::SEALED_DAY;
+    assert_eq!(
+        oa_compass::core::time::days_from_civil(2026, 11, 19),
+        Some(SEALED_DAY)
+    );
+    let work = tmp("sealed");
+    let clip_of = |name: &str, rows: &[(i64, i64)]| -> PathBuf {
+        let mut all = Reports::default();
+        for &(d, s) in rows {
+            let row = oa_adsb::Row {
+                icao: ADDR,
+                time_ns: d * 86_400 * 1_000_000_000 + s * 1_000_000_000,
+                lat_e7: 410_000_000,
+                lon_e7: -880_000_000,
+                baro_alt_ft: 20_000,
+                gs_dkt: 3500,
+                track_ddeg: 0,
+                nic: 8,
+                nac_p: 9,
+                nac_v: 2,
+                sil: 3,
+                version: 2,
+                source: 0,
+                ..ROW_EMPTY
+            };
+            reports_push(&mut all, &row);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &all, 0, oa_adsb::reports_len(&all)).unwrap();
+        let mut buf = vec![0u8; payload.len() + 256];
+        let n = oa_feed::encode_frame(&mut buf, 1, 0, 0, T0_NS, 0, &payload).unwrap();
+        let p = work.join(name);
+        fs::write(&p, &buf[..n]).unwrap();
+        p
+    };
+    // Split days: one row on 2026-11-18 and one on the sealed day: refused, nothing written.
+    let clip = clip_of("sealed.oaf", &[(20_775, 86_399), (20_776, 0)]);
+    let out = work.join("a").join("out");
+    let mut j = job(&out, Some(clip), false, true, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    let e = run(j).unwrap_err().to_string();
+    assert!(e.contains("sealed hold-out day"), "{e}");
+    assert!(!work.join("a").exists());
+    // 2026-11-18 23:59:59 alone passes.
+    let clip = clip_of("ok.oaf", &[(20_775, 86_399)]);
+    let out = work.join("b");
+    let mut j = job(&out, Some(clip), false, true, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    run(j).unwrap();
+    assert!(!names(&out).is_empty());
+    // The date itself, even with no input.
+    let mut j = job(&work.join("c"), None, true, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_776;
+    assert!(run(j)
+        .unwrap_err()
+        .to_string()
+        .contains("sealed hold-out day"));
+}

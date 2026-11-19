@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use super::guard::{SEALED_DAY, SEALED_DAY_TEXT};
 use super::run::{EramAddress, InputsMode, OpenatcaRows};
 use super::slice;
 use crate::core::time::days_from_civil;
@@ -110,6 +111,11 @@ pub fn parse_export(args: &[String]) -> Result<ExportArgs, String> {
     let Some(day) = parse_date(&date) else {
         return Err(format!("--date {date} is not a date (YYYY.MM.DD)"));
     };
+    if day == SEALED_DAY {
+        return Err(format!(
+            "{SEALED_DAY_TEXT} is the sealed hold-out day; it is never exported"
+        ));
+    }
     if adsb.is_none() && sfdps.is_none() {
         return Err("give --adsb, --sfdps-dir or both".into());
     }

@@ -355,6 +355,17 @@ pub fn slice_dir_with(
         )));
     }
     refuse_holdout(input)?;
+    // Every file this run reads, by its resolved path: a link inside an innocent directory
+    // that points into the sealed recording is caught.
+    for p in &names {
+        refuse_holdout(p)?;
+    }
+    for f in ["README.txt", "data_sources.json"] {
+        let p = input.join(f);
+        if p.exists() {
+            refuse_holdout(&p)?;
+        }
+    }
     // Not the input directory (by canonical path), and new or empty: nothing of an earlier run is
     // mixed in; a directory of only partial files says so.
     if out.exists() {

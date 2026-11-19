@@ -4699,9 +4699,6 @@ scope.
 - **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
 - **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
   (the build script reruns on the git index and on those trees).
-- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
-  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
-  repeated flag is an error.
 
 - **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
   fields tile bytes 0 to 84 of the row once each, entry `i` of the field table is column `i`, and
@@ -5024,3 +5021,16 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
+- **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
+  refused in every date syntax, and any input row (ADS-B, SFDPS, tracker) on that UTC day refuses the whole run
+  before anything is committed. Any input path with the components `scds/rec-20261119`, and every file the run
+  opens (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is
+  refused by its resolved path, so a link into it is caught. A flag value that starts with `--` is a missing
+  value and a repeated flag is an error.
+- **OA-CMP-048** A track restart gets a new I062/040 number: a row of one key (aircraft address) more than the
+  tracker's drop time (`oa_track::score::SCORE_DROP_AFTER_NS`, 120 s) after the previous row of the key starts a
+  new segment; exactly the drop time does not.
+- **OA-CMP-049** Track numbers are one per (key, segment), allocated in order of first appearance, refused when
+  the 16-bit space is exhausted; the README gives track segments, keys and keys with more than one segment.
+- **OA-CMP-050** I062/185 Vx and Vy are the true east and north velocity at the target (the frame of the CAT062
+  specification and of COMPASS); the README names the frame.

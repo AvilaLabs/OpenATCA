@@ -21,6 +21,7 @@ use oa_asterix::{decode_block, Block, SourceId};
 
 use super::encode::{BlockSink, SinkStats};
 use super::error::{io_err, ExportError};
+use super::guard::refuse_sealed_row;
 use crate::core::convert::{count_notes, Converted, Refusal, NOTES};
 use crate::core::stats::{summarize, IntervalSummary};
 use crate::core::time::civil_from_days;
@@ -62,7 +63,12 @@ pub struct DayReport {
     pub day: i64,
     pub file: String,
     pub sink: SinkStats,
+    /// Track numbers used (I040): one per segment of a key.
     pub tracks: u64,
+    /// Distinct keys (an address for OpenATCA, a flight for ERAM).
+    pub keys: u64,
+    /// Keys that have more than one segment (a track restart).
+    pub keys_multi_segment: u64,
     pub notes: [u64; NOTES],
     /// Time between consecutive rows of one track, over all tracks of the file.
     pub intervals: IntervalSummary,
@@ -94,7 +100,9 @@ struct DayFile {
     partial: PathBuf,
     path: PathBuf,
     /// Key to (track number, time of its last row).
-    tracks: BTreeMap<u32, (u16, u32)>,
+    tracks: BTreeMap<u32, (u16, u32, u32)>,
+    /// Last track number allocated.
+    last_number: u16,
     notes: [u64; NOTES],
     /// Histogram of the interval between consecutive rows of one track, 1/128 s to count.
     intervals: BTreeMap<u32, u64>,
@@ -112,6 +120,9 @@ pub struct SystemExport {
     pub counts: Vec<(String, u64)>,
     /// Added to the latitude of every source position (a verification self-test, 0 normally).
     source_offset_e7: i32,
+    /// Time (1/128 s) of silence of one key after which its next row starts a new segment, and
+    /// so a new track number; none for a system whose key is a track already.
+    segment_gap: Option<u32>,
 }
 
 /// The renames that make a finished export visible.
@@ -159,7 +170,14 @@ impl SystemExport {
             refused: [0; 2],
             counts: Vec::new(),
             source_offset_e7: 0,
+            segment_gap: None,
         }
+    }
+
+    /// A row of a key more than `units` (1/128 s) after its previous row starts a new segment of
+    /// the key, with a new track number.
+    pub fn set_segment_gap(&mut self, units: u32) {
+        self.segment_gap = Some(units);
     }
 
     /// Sets the verification self-test offset (see `Job::self_test_position_offset_e7`).
@@ -176,6 +194,7 @@ impl SystemExport {
 
     /// Adds a converted row of track `key` (the position it came from is `src_e7`).
     pub fn push(&mut self, c: &Converted, key: u32, src_e7: (i32, i32)) -> Result<(), ExportError> {
+        refuse_sealed_row(self.name, c.day)?;
         if !self.layout.split && c.day != self.layout.day {
             return Err(ExportError::CrossesMidnight {
                 system: self.name,
@@ -200,6 +219,7 @@ impl SystemExport {
                     partial,
                     path,
                     tracks: BTreeMap::new(),
+                    last_number: 0,
                     notes: [0; NOTES],
                     intervals: BTreeMap::new(),
                 },
@@ -210,22 +230,38 @@ impl SystemExport {
         };
         let time = c.values.time;
         let number = match file.tracks.get_mut(&key) {
-            Some((n, last)) => {
+            Some((n, last, segs)) => {
                 // Rows are in time order (the sink refuses otherwise), so this does not wrap.
                 let gap = time.saturating_sub(*last);
                 *last = time;
-                let slot = file.intervals.entry(gap).or_insert(0);
-                *slot = slot.saturating_add(1);
+                if self.segment_gap.is_some_and(|g| gap > g) {
+                    // A track restart: a new segment gets a new number.
+                    let next =
+                        file.last_number
+                            .checked_add(1)
+                            .ok_or(ExportError::TrackNumbers {
+                                system: self.name,
+                                day: date_text(c.day),
+                            })?;
+                    file.last_number = next;
+                    *n = next;
+                    *segs = segs.saturating_add(1);
+                } else {
+                    let slot = file.intervals.entry(gap).or_insert(0);
+                    *slot = slot.saturating_add(1);
+                }
                 *n
             }
             None => {
-                let next = u16::try_from(file.tracks.len() + 1).map_err(|_| {
-                    ExportError::TrackNumbers {
+                let next = file
+                    .last_number
+                    .checked_add(1)
+                    .ok_or(ExportError::TrackNumbers {
                         system: self.name,
                         day: date_text(c.day),
-                    }
-                })?;
-                file.tracks.insert(key, (next, time));
+                    })?;
+                file.last_number = next;
+                file.tracks.insert(key, (next, time, 1));
                 next
             }
         };
@@ -259,6 +295,8 @@ impl SystemExport {
         let mut failure = None;
         for (day, f) in self.files {
             let (partial, path, tracks, notes) = (f.partial, f.path, f.tracks, f.notes);
+            let numbers = u64::from(f.last_number);
+            let multi = tracks.values().filter(|t| t.2 > 1).count() as u64;
             let hist: Vec<(u32, u64)> = f.intervals.into_iter().collect();
             renames.push((partial.clone(), path.clone()));
             if failure.is_some() {
@@ -275,7 +313,9 @@ impl SystemExport {
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default(),
                             sink,
-                            tracks: tracks.len() as u64,
+                            tracks: numbers,
+                            keys: tracks.len() as u64,
+                            keys_multi_segment: multi,
                             notes,
                             intervals: summarize(&hist),
                             read_back_records: records,

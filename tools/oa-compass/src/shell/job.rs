@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use oa_bench::input::{load, FeedInput};
+use oa_bench::input::{load_with, FeedInput};
 use oa_bench::legacy::Legacy;
 use oa_replay::FeedKind;
 
@@ -18,7 +18,7 @@ use super::adsb_export::{AdsbExport, AdsbFinished};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Finished, Layout, SystemExport, SystemReport};
-use super::guard::refuse_holdout;
+use super::guard::{guarded_opener, refuse_holdout, refuse_sealed_date};
 use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
@@ -87,6 +87,7 @@ pub fn run_job(
     // The refusals that need no output directory come first: the sealed recording, a missing
     // input, a directory that is not new or empty. `out` is created after them, and every level
     // created is recorded so that a failed run removes them all.
+    refuse_sealed_date(job.layout.day)?;
     if let Some(p) = &job.adsb {
         refuse_holdout(p)?;
     }
@@ -135,6 +136,14 @@ fn remove_run_dirs(out: &Path, layout: &Layout, created: &[PathBuf], run_dirs: &
         }
     }
     remove_created(run_dirs);
+}
+
+/// The silence of one aircraft address after which the tracker has dropped its track, in 1/128 s:
+/// a row after more is a new track (a restart), so it gets a new I040 number. Read from the
+/// tracker's own drop time as the scorer configures it.
+fn openatca_segment_gap() -> u32 {
+    let units = oa_track::score::SCORE_DROP_AFTER_NS.saturating_mul(128) / 1_000_000_000;
+    u32::try_from(units).unwrap_or(u32::MAX)
 }
 
 fn eram_counts(info: &EramInfo) -> Vec<(String, u64)> {
@@ -269,6 +278,7 @@ fn export_all(
     let mut positions = Vec::new();
     if let Some(clip) = &job.adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
+        ex.set_segment_gap(openatca_segment_gap());
         let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
         ax.set_source_offset(job.self_test_adsb_offset_e7);
         let r = export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows);
@@ -327,10 +337,13 @@ fn export_all(
         let refs = job.adsb.is_some().then_some(positions.as_slice());
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
-                let loaded = load(&[FeedInput {
-                    feed: FeedKind::Sfdps,
-                    dir: dir.clone(),
-                }])
+                let loaded = load_with(
+                    &[FeedInput {
+                        feed: FeedKind::Sfdps,
+                        dir: dir.clone(),
+                    }],
+                    &guarded_opener(),
+                )
                 .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
                 log(format!(
                     "ERAM loaded at {:.1} s",
@@ -551,7 +564,7 @@ fn commit_staged(
     for r in &reports {
         for d in &r.days {
             lines.push(format!(
-                "{} {}: {} records, {} blocks, {} octets, {} tracks",
+                "{} {}: {} records, {} blocks, {} octets, {} track segments",
                 r.name,
                 date_text(d.day),
                 d.sink.records,
