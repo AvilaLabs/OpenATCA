@@ -1,0 +1,28 @@
+# Standalone path-only dependency graph; no external packages.
+version = 4
+
+[[package]]
+name = "oa-deflate"
+version = "0.0.1"
+dependencies = [
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-feed"
+version = "0.0.1"
+dependencies = [
+ "oa-deflate",
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-feed-work-check"
+version = "0.0.0"
+dependencies = [
+ "oa-feed",
+]
+
+[[package]]
+name = "oa-zip"
+version = "0.0.1"

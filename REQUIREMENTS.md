@@ -843,6 +843,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   cumulative counter overflow and amounts above the fresh allowance require explicit stream cancellation.
 - **OA-FEED-187** Work cancellation leaves complete buffered frames unclassified as malformed and retains them
   for explicit disposition; only normal end-of-stream finalization reports a truncated tail.
+- **OA-FEED-188** The standalone in-memory work fixture separately labels valid-capacity and malformed-input
+  safety cases, accounts CRC refusals/skips as rejection rather than valid-frame loss, checks defer/resume and
+  compaction ownership exactly, and reports max service-turn wall time against an experimental 1 s fixture limit.
 - **OA-FEED-189** Recorder startup inspects at most 16,384 directory entries when summing existing recording
   bytes; unrelated and zero-byte entries count toward the cap, and an excess entry returns an explicit error.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
