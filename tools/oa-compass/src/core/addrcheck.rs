@@ -124,7 +124,7 @@ pub fn check_flight(address: u32, samples: &[(i64, i32, i32)], refs: &[RefPoint]
     if pairs < MIN_PAIRS {
         return Verdict::NotChecked { pairs };
     }
-    km.sort_by(f64::total_cmp);
+    km.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     // Lower middle element: index (n - 1) / 2, in range because n >= MIN_PAIRS.
     let median_km = km
         .get(pairs.saturating_sub(1) / 2)
