@@ -65,32 +65,30 @@ impl Default for Sha256 {
     }
 }
 
-/// One round of the compression function. The eight working variables are passed in rotated
-/// order, so no register shuffling happens between rounds: `d` and `h` are the only two updated.
-macro_rules! round {
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $k:expr, $w:expr) => {
-        let t1 = $h
-            .wrapping_add($e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25))
-            .wrapping_add($g ^ ($e & ($f ^ $g)))
-            .wrapping_add($k)
-            .wrapping_add($w);
-        $d = $d.wrapping_add(t1);
-        $h = t1
-            .wrapping_add($a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22))
-            .wrapping_add(($a & $b) | ($c & ($a | $b)));
-    };
+/// One round of the compression function, returning the new `d` and `h`. The eight working
+/// variables are passed in rotated order, so no register shuffling happens between rounds: `d`
+/// and `h` are the only two updated. `kw` is the round constant plus the schedule word.
+// B8: a function, not a macro, so the scan reads the names the compiler resolves; the inlining
+// is forced so the unrolled rounds compile to the same straight-line code.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn round(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, kw: u32) -> (u32, u32) {
+    let t1 = h
+        .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+        .wrapping_add(g ^ (e & (f ^ g)))
+        .wrapping_add(kw);
+    let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+        .wrapping_add((a & b) | (c & (a | b)));
+    (d.wrapping_add(t1), t1.wrapping_add(t2))
 }
 
-/// Advance word `$i` of the 16-word rolling message schedule in place.
-macro_rules! expand {
-    ($w:ident, $i:literal, $i1:literal, $i9:literal, $i14:literal) => {
-        let x = $w[$i1];
-        let y = $w[$i14];
-        $w[$i] = $w[$i]
-            .wrapping_add(x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3))
-            .wrapping_add($w[$i9])
-            .wrapping_add(y.rotate_right(17) ^ y.rotate_right(19) ^ (y >> 10));
-    };
+/// The next value of schedule word `w0` from `w1`, `w9` and `w14` (the words 1, 9 and 14 places
+/// on in the 16-word rolling window).
+#[inline(always)]
+fn expand(w0: u32, w1: u32, w9: u32, w14: u32) -> u32 {
+    w0.wrapping_add(w1.rotate_right(7) ^ w1.rotate_right(18) ^ (w1 >> 3))
+        .wrapping_add(w9)
+        .wrapping_add(w14.rotate_right(17) ^ w14.rotate_right(19) ^ (w14 >> 10))
 }
 
 /// Process one 64-byte block into the chaining state.
@@ -109,118 +107,118 @@ fn compress(h: &mut [u32; 8], block: &[u8; BLOCK_LEN]) {
         *wi = u32::from_be_bytes(*c);
     }
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
-    round!(a, b, c, d, e, f, g, hh, K[0], w[0]);
-    round!(hh, a, b, c, d, e, f, g, K[1], w[1]);
-    round!(g, hh, a, b, c, d, e, f, K[2], w[2]);
-    round!(f, g, hh, a, b, c, d, e, K[3], w[3]);
-    round!(e, f, g, hh, a, b, c, d, K[4], w[4]);
-    round!(d, e, f, g, hh, a, b, c, K[5], w[5]);
-    round!(c, d, e, f, g, hh, a, b, K[6], w[6]);
-    round!(b, c, d, e, f, g, hh, a, K[7], w[7]);
-    round!(a, b, c, d, e, f, g, hh, K[8], w[8]);
-    round!(hh, a, b, c, d, e, f, g, K[9], w[9]);
-    round!(g, hh, a, b, c, d, e, f, K[10], w[10]);
-    round!(f, g, hh, a, b, c, d, e, K[11], w[11]);
-    round!(e, f, g, hh, a, b, c, d, K[12], w[12]);
-    round!(d, e, f, g, hh, a, b, c, K[13], w[13]);
-    round!(c, d, e, f, g, hh, a, b, K[14], w[14]);
-    round!(b, c, d, e, f, g, hh, a, K[15], w[15]);
-    expand!(w, 0, 1, 9, 14);
-    round!(a, b, c, d, e, f, g, hh, K[16], w[0]);
-    expand!(w, 1, 2, 10, 15);
-    round!(hh, a, b, c, d, e, f, g, K[17], w[1]);
-    expand!(w, 2, 3, 11, 0);
-    round!(g, hh, a, b, c, d, e, f, K[18], w[2]);
-    expand!(w, 3, 4, 12, 1);
-    round!(f, g, hh, a, b, c, d, e, K[19], w[3]);
-    expand!(w, 4, 5, 13, 2);
-    round!(e, f, g, hh, a, b, c, d, K[20], w[4]);
-    expand!(w, 5, 6, 14, 3);
-    round!(d, e, f, g, hh, a, b, c, K[21], w[5]);
-    expand!(w, 6, 7, 15, 4);
-    round!(c, d, e, f, g, hh, a, b, K[22], w[6]);
-    expand!(w, 7, 8, 0, 5);
-    round!(b, c, d, e, f, g, hh, a, K[23], w[7]);
-    expand!(w, 8, 9, 1, 6);
-    round!(a, b, c, d, e, f, g, hh, K[24], w[8]);
-    expand!(w, 9, 10, 2, 7);
-    round!(hh, a, b, c, d, e, f, g, K[25], w[9]);
-    expand!(w, 10, 11, 3, 8);
-    round!(g, hh, a, b, c, d, e, f, K[26], w[10]);
-    expand!(w, 11, 12, 4, 9);
-    round!(f, g, hh, a, b, c, d, e, K[27], w[11]);
-    expand!(w, 12, 13, 5, 10);
-    round!(e, f, g, hh, a, b, c, d, K[28], w[12]);
-    expand!(w, 13, 14, 6, 11);
-    round!(d, e, f, g, hh, a, b, c, K[29], w[13]);
-    expand!(w, 14, 15, 7, 12);
-    round!(c, d, e, f, g, hh, a, b, K[30], w[14]);
-    expand!(w, 15, 0, 8, 13);
-    round!(b, c, d, e, f, g, hh, a, K[31], w[15]);
-    expand!(w, 0, 1, 9, 14);
-    round!(a, b, c, d, e, f, g, hh, K[32], w[0]);
-    expand!(w, 1, 2, 10, 15);
-    round!(hh, a, b, c, d, e, f, g, K[33], w[1]);
-    expand!(w, 2, 3, 11, 0);
-    round!(g, hh, a, b, c, d, e, f, K[34], w[2]);
-    expand!(w, 3, 4, 12, 1);
-    round!(f, g, hh, a, b, c, d, e, K[35], w[3]);
-    expand!(w, 4, 5, 13, 2);
-    round!(e, f, g, hh, a, b, c, d, K[36], w[4]);
-    expand!(w, 5, 6, 14, 3);
-    round!(d, e, f, g, hh, a, b, c, K[37], w[5]);
-    expand!(w, 6, 7, 15, 4);
-    round!(c, d, e, f, g, hh, a, b, K[38], w[6]);
-    expand!(w, 7, 8, 0, 5);
-    round!(b, c, d, e, f, g, hh, a, K[39], w[7]);
-    expand!(w, 8, 9, 1, 6);
-    round!(a, b, c, d, e, f, g, hh, K[40], w[8]);
-    expand!(w, 9, 10, 2, 7);
-    round!(hh, a, b, c, d, e, f, g, K[41], w[9]);
-    expand!(w, 10, 11, 3, 8);
-    round!(g, hh, a, b, c, d, e, f, K[42], w[10]);
-    expand!(w, 11, 12, 4, 9);
-    round!(f, g, hh, a, b, c, d, e, K[43], w[11]);
-    expand!(w, 12, 13, 5, 10);
-    round!(e, f, g, hh, a, b, c, d, K[44], w[12]);
-    expand!(w, 13, 14, 6, 11);
-    round!(d, e, f, g, hh, a, b, c, K[45], w[13]);
-    expand!(w, 14, 15, 7, 12);
-    round!(c, d, e, f, g, hh, a, b, K[46], w[14]);
-    expand!(w, 15, 0, 8, 13);
-    round!(b, c, d, e, f, g, hh, a, K[47], w[15]);
-    expand!(w, 0, 1, 9, 14);
-    round!(a, b, c, d, e, f, g, hh, K[48], w[0]);
-    expand!(w, 1, 2, 10, 15);
-    round!(hh, a, b, c, d, e, f, g, K[49], w[1]);
-    expand!(w, 2, 3, 11, 0);
-    round!(g, hh, a, b, c, d, e, f, K[50], w[2]);
-    expand!(w, 3, 4, 12, 1);
-    round!(f, g, hh, a, b, c, d, e, K[51], w[3]);
-    expand!(w, 4, 5, 13, 2);
-    round!(e, f, g, hh, a, b, c, d, K[52], w[4]);
-    expand!(w, 5, 6, 14, 3);
-    round!(d, e, f, g, hh, a, b, c, K[53], w[5]);
-    expand!(w, 6, 7, 15, 4);
-    round!(c, d, e, f, g, hh, a, b, K[54], w[6]);
-    expand!(w, 7, 8, 0, 5);
-    round!(b, c, d, e, f, g, hh, a, K[55], w[7]);
-    expand!(w, 8, 9, 1, 6);
-    round!(a, b, c, d, e, f, g, hh, K[56], w[8]);
-    expand!(w, 9, 10, 2, 7);
-    round!(hh, a, b, c, d, e, f, g, K[57], w[9]);
-    expand!(w, 10, 11, 3, 8);
-    round!(g, hh, a, b, c, d, e, f, K[58], w[10]);
-    expand!(w, 11, 12, 4, 9);
-    round!(f, g, hh, a, b, c, d, e, K[59], w[11]);
-    expand!(w, 12, 13, 5, 10);
-    round!(e, f, g, hh, a, b, c, d, K[60], w[12]);
-    expand!(w, 13, 14, 6, 11);
-    round!(d, e, f, g, hh, a, b, c, K[61], w[13]);
-    expand!(w, 14, 15, 7, 12);
-    round!(c, d, e, f, g, hh, a, b, K[62], w[14]);
-    expand!(w, 15, 0, 8, 13);
-    round!(b, c, d, e, f, g, hh, a, K[63], w[15]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[0].wrapping_add(w[0]));
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[1].wrapping_add(w[1]));
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[2].wrapping_add(w[2]));
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[3].wrapping_add(w[3]));
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[4].wrapping_add(w[4]));
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[5].wrapping_add(w[5]));
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[6].wrapping_add(w[6]));
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[7].wrapping_add(w[7]));
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[8].wrapping_add(w[8]));
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[9].wrapping_add(w[9]));
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[10].wrapping_add(w[10]));
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[11].wrapping_add(w[11]));
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[12].wrapping_add(w[12]));
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[13].wrapping_add(w[13]));
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[14].wrapping_add(w[14]));
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[15].wrapping_add(w[15]));
+    w[0] = expand(w[0], w[1], w[9], w[14]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[16].wrapping_add(w[0]));
+    w[1] = expand(w[1], w[2], w[10], w[15]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[17].wrapping_add(w[1]));
+    w[2] = expand(w[2], w[3], w[11], w[0]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[18].wrapping_add(w[2]));
+    w[3] = expand(w[3], w[4], w[12], w[1]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[19].wrapping_add(w[3]));
+    w[4] = expand(w[4], w[5], w[13], w[2]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[20].wrapping_add(w[4]));
+    w[5] = expand(w[5], w[6], w[14], w[3]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[21].wrapping_add(w[5]));
+    w[6] = expand(w[6], w[7], w[15], w[4]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[22].wrapping_add(w[6]));
+    w[7] = expand(w[7], w[8], w[0], w[5]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[23].wrapping_add(w[7]));
+    w[8] = expand(w[8], w[9], w[1], w[6]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[24].wrapping_add(w[8]));
+    w[9] = expand(w[9], w[10], w[2], w[7]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[25].wrapping_add(w[9]));
+    w[10] = expand(w[10], w[11], w[3], w[8]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[26].wrapping_add(w[10]));
+    w[11] = expand(w[11], w[12], w[4], w[9]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[27].wrapping_add(w[11]));
+    w[12] = expand(w[12], w[13], w[5], w[10]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[28].wrapping_add(w[12]));
+    w[13] = expand(w[13], w[14], w[6], w[11]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[29].wrapping_add(w[13]));
+    w[14] = expand(w[14], w[15], w[7], w[12]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[30].wrapping_add(w[14]));
+    w[15] = expand(w[15], w[0], w[8], w[13]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[31].wrapping_add(w[15]));
+    w[0] = expand(w[0], w[1], w[9], w[14]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[32].wrapping_add(w[0]));
+    w[1] = expand(w[1], w[2], w[10], w[15]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[33].wrapping_add(w[1]));
+    w[2] = expand(w[2], w[3], w[11], w[0]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[34].wrapping_add(w[2]));
+    w[3] = expand(w[3], w[4], w[12], w[1]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[35].wrapping_add(w[3]));
+    w[4] = expand(w[4], w[5], w[13], w[2]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[36].wrapping_add(w[4]));
+    w[5] = expand(w[5], w[6], w[14], w[3]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[37].wrapping_add(w[5]));
+    w[6] = expand(w[6], w[7], w[15], w[4]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[38].wrapping_add(w[6]));
+    w[7] = expand(w[7], w[8], w[0], w[5]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[39].wrapping_add(w[7]));
+    w[8] = expand(w[8], w[9], w[1], w[6]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[40].wrapping_add(w[8]));
+    w[9] = expand(w[9], w[10], w[2], w[7]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[41].wrapping_add(w[9]));
+    w[10] = expand(w[10], w[11], w[3], w[8]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[42].wrapping_add(w[10]));
+    w[11] = expand(w[11], w[12], w[4], w[9]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[43].wrapping_add(w[11]));
+    w[12] = expand(w[12], w[13], w[5], w[10]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[44].wrapping_add(w[12]));
+    w[13] = expand(w[13], w[14], w[6], w[11]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[45].wrapping_add(w[13]));
+    w[14] = expand(w[14], w[15], w[7], w[12]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[46].wrapping_add(w[14]));
+    w[15] = expand(w[15], w[0], w[8], w[13]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[47].wrapping_add(w[15]));
+    w[0] = expand(w[0], w[1], w[9], w[14]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[48].wrapping_add(w[0]));
+    w[1] = expand(w[1], w[2], w[10], w[15]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[49].wrapping_add(w[1]));
+    w[2] = expand(w[2], w[3], w[11], w[0]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[50].wrapping_add(w[2]));
+    w[3] = expand(w[3], w[4], w[12], w[1]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[51].wrapping_add(w[3]));
+    w[4] = expand(w[4], w[5], w[13], w[2]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[52].wrapping_add(w[4]));
+    w[5] = expand(w[5], w[6], w[14], w[3]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[53].wrapping_add(w[5]));
+    w[6] = expand(w[6], w[7], w[15], w[4]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[54].wrapping_add(w[6]));
+    w[7] = expand(w[7], w[8], w[0], w[5]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[55].wrapping_add(w[7]));
+    w[8] = expand(w[8], w[9], w[1], w[6]);
+    (d, hh) = round(a, b, c, d, e, f, g, hh, K[56].wrapping_add(w[8]));
+    w[9] = expand(w[9], w[10], w[2], w[7]);
+    (c, g) = round(hh, a, b, c, d, e, f, g, K[57].wrapping_add(w[9]));
+    w[10] = expand(w[10], w[11], w[3], w[8]);
+    (b, f) = round(g, hh, a, b, c, d, e, f, K[58].wrapping_add(w[10]));
+    w[11] = expand(w[11], w[12], w[4], w[9]);
+    (a, e) = round(f, g, hh, a, b, c, d, e, K[59].wrapping_add(w[11]));
+    w[12] = expand(w[12], w[13], w[5], w[10]);
+    (hh, d) = round(e, f, g, hh, a, b, c, d, K[60].wrapping_add(w[12]));
+    w[13] = expand(w[13], w[14], w[6], w[11]);
+    (g, c) = round(d, e, f, g, hh, a, b, c, K[61].wrapping_add(w[13]));
+    w[14] = expand(w[14], w[15], w[7], w[12]);
+    (f, b) = round(c, d, e, f, g, hh, a, b, K[62].wrapping_add(w[14]));
+    w[15] = expand(w[15], w[0], w[8], w[13]);
+    (e, a) = round(b, c, d, e, f, g, hh, a, K[63].wrapping_add(w[15]));
     for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
         *x = x.wrapping_add(y);
     }
