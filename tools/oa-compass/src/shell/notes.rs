@@ -257,7 +257,7 @@ pub fn readme_with(
             let _ = writeln!(o, "OpenATCA inputs: ALL (--inputs all). The tracker's ADS-B adapter was offered every ADS-B report of the day's clip (it keeps those that pass its quality gates, counted below), as ERAM gets all its inputs, so the two files are like-for-like in what they were given (ERAM additionally has radar, and ADS-B reports from its own receivers, which OpenATCA does not). Because every report was offered to it, no half of the clip is independent of this OpenATCA output: a reference built from the same ADS-B clip is not independent truth for it.\n");
         }
         Some(InputsMode::Split) => {
-            let _ = writeln!(o, "OpenATCA inputs: SPLIT (--inputs split). The tracker was fed set A only, half of the ADS-B reports (the scorer's split); ERAM got all its inputs, so the two files are NOT like-for-like in what they were given. Set B, the other half, is the only half independent of this OpenATCA output: a reference built from set A would be leaked truth.\n");
+            let _ = writeln!(o, "OpenATCA inputs: SPLIT (--inputs split). The tracker's adapter was offered set A only, half of the ADS-B reports (the scorer's split); ERAM got all its inputs, so the two files are NOT like-for-like in what they were given. Set B, the other half, is the only half independent of this OpenATCA output: a reference built from set A would be leaked truth.\n");
         }
         None => {}
     }
@@ -292,7 +292,7 @@ fn dedup_text(c: &ClipInfo, mode: Option<InputsMode>) -> String {
     };
     format!(
         "ADS-B reports before the tracker: the clip's reports go through the same function the scorer's split uses, oa-track's split_reports_with, with the halving {halving}. It removes copies (a report with the address, time and content of one already kept), puts the quality fields through the same carry-forward handling, and keeps every report of different content at one (address, time): the conflict rule is KEEP ALL such reports (in one fixed order), also with the halving off, because nothing says which one is right. Counts: {} reports read, {} aircraft, {} duplicate reports removed, {} conflicting (address, time) groups holding {} reports, {} unreadable rows left out; {} reports offered to the tracker's adapter and to adsb.ast, {} not offered.",
-        st.rows_in, st.aircraft, st.duplicates_removed, st.conflict_groups, st.conflict_rows, st.rows_invalid, c.fed, c.left
+        st.rows_in, st.aircraft, st.duplicates_removed, st.conflict_groups, st.conflict_rows, st.rows_invalid, c.offered, c.not_offered
     )
 }
 
@@ -415,10 +415,10 @@ const ADSB_BASIS: [&str; 9] = [
     "Where a field is written 0 because the report lacks it: 0 means unknown for NIC, NACp, NACv, SIL, SDA and GVA according to the MOPS (ED-102A/DO-260B), not according to Ed 2.4 itself, which gives these items no value text; for NICBARO (0 = not cross-checked), SILS (0 = per flight-hour), LTT (0 = other) and the I040 bits the format has no unknown code and the 0 is a claim, counted above.",
 ];
 
-/// The relation between `adsb.ast` and what the tracker was fed.
+/// The relation between `adsb.ast` and what the tracker's adapter was offered.
 fn tracker_relation(clip: Option<&ClipInfo>, written: u64) -> String {
     let mut t = format!(
-        "RELATION TO THE TRACKER'S INPUT: adsb.ast holds the reports after the duplicate removal above, minus those left out here (positions marked stale, source types that are not ADS-B, impossible positions): {written} reports on this day. It is NOT the set the tracker used. The tracker's own adapter (oa-truth's quality gates, run by oa-track) also drops reports below its quality gates (NACp >= {}, NIC >= {}, SIL = {}, MOPS version >= {}) and leaves out TIS-B, ADS-R and MLAT reports and stale rows too, so adsb.ast is a superset of what the tracker was fed.",
+        "RELATION TO THE TRACKER'S INPUT: adsb.ast holds the reports after the duplicate removal above, minus those left out here (positions marked stale, source types that are not ADS-B, impossible positions): {written} reports on this day. It is NOT the set the tracker used. The tracker's own adapter (oa-truth's quality gates, run by oa-track) also drops reports below its quality gates (NACp >= {}, NIC >= {}, SIL = {}, MOPS version >= {}) and leaves out TIS-B, ADS-R and MLAT reports and stale rows too, so adsb.ast is a superset of the reports the tracker used.",
         oa_track::adsb::AdsbConfig::default().gates.min_nacp,
         oa_track::adsb::AdsbConfig::default().gates.min_nic,
         oa_track::adsb::AdsbConfig::default().gates.required_sil,
@@ -443,7 +443,7 @@ fn tracker_relation(clip: Option<&ClipInfo>, written: u64) -> String {
 }
 
 /// The independence statement (UK-008).
-const INDEPENDENCE: &str = "INDEPENDENCE: every report in adsb.ast comes from the same clip that fed the OpenATCA tracker. A reference or track built from it is therefore NOT independent of OpenATCA's inputs (this project's uncertainty UK-008: the ADS-B reports are not an independent truth for the OpenATCA output). ERAM also uses ADS-B: its inputs include ADS-B reports (from its own receivers, not this clip), so ADS-B is not independent of ERAM's output either.";
+const INDEPENDENCE: &str = "INDEPENDENCE: every report in adsb.ast comes from the same clip whose reports were offered to the OpenATCA tracker. A reference or track built from it is therefore NOT independent of OpenATCA's inputs (this project's uncertainty UK-008: the ADS-B reports are not an independent truth for the OpenATCA output). ERAM also uses ADS-B: its inputs include ADS-B reports (from its own receivers, not this clip), so ADS-B is not independent of ERAM's output either.";
 
 fn adsb_run_lines(out: &mut String, report: &AdsbReport) {
     let _ = writeln!(out, "  run totals for ADS-B over all days:");

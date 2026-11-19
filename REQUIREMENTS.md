@@ -4429,7 +4429,7 @@ scope.
   counts) is printed in the README's ERAM block with its reason, and the export is refused if the flight table or
   the track-sample table overflowed (rows were lost). Counters saturate, and an index that does not fit a
   `u32` is a refusal, not a truncation.
-- **OA-CMP-018** `--inputs all` (default) feeds the OpenATCA tracker every ADS-B report of the clip, `--inputs split`
+- **OA-CMP-018** `--inputs all` (default) offers the OpenATCA tracker's adapter every ADS-B report of the clip, `--inputs split`
   only set A of the scorer's split; the README states the mode, whether the two files are like-for-like, and, for
   `split`, that a reference built from set A would be leaked truth. I062/080 MON is 1 for OpenATCA (ADS-B only) and
   0 for ERAM; the README says why. ERAM altitude, whose reference the feed does not state, is I136 at or above

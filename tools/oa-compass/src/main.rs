@@ -257,10 +257,13 @@ fn export_all(
             info.tick_rows
         );
         for (l, v) in [
-            ("ADS-B reports fed to the tracker", cinfo.fed),
             (
-                "ADS-B reports not fed to the tracker (the other half under --inputs split)",
-                cinfo.left,
+                "ADS-B reports offered to the tracker's adapter",
+                cinfo.offered,
+            ),
+            (
+                "ADS-B reports not offered to the tracker (the other half under --inputs split)",
+                cinfo.not_offered,
             ),
             ("measurements offered to the tracker", info.measurements),
             (

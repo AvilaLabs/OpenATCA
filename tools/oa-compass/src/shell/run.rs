@@ -139,7 +139,7 @@ pub fn scorer_config(meas: &[Measurement]) -> TrackerConfig {
     scoring_config(&DEFAULT_CONFIG, &iv)
 }
 
-/// Which ADS-B reports the tracker is fed.
+/// Which ADS-B reports the tracker's adapter is offered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputsMode {
     /// Set A of the scorer's split only (half of the reports; set B is the independent
@@ -153,16 +153,16 @@ pub enum InputsMode {
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClipInfo {
-    /// Reports fed to the tracker.
-    pub fed: u64,
-    /// Reports not fed (set B of the split, empty in `all` mode).
-    pub left: u64,
+    /// Reports offered to the tracker's adapter.
+    pub offered: u64,
+    /// Reports not offered (set B of the split, empty in `all` mode).
+    pub not_offered: u64,
     /// What the shared split code removed and kept.
     pub split: SplitStats,
     /// The ADS-B file, when one was asked for.
     pub adsb: Option<AdsbInfo>,
     /// What the tracker's own adapter (oa-truth's quality gates and the rest) removed from the
-    /// reports it was fed.
+    /// reports it was offered.
     pub gate: oa_track::adsb::AdsbStats,
 }
 
@@ -269,7 +269,7 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
 /// Loads the ADS-B clip at `path`, removes the copies of reports through the scorer's own split
 /// code (`split_reports_with`: the same function the scorer calls, with the halving on for
 /// `Split` and off for `All`), runs the tracker on the reports `mode` selects and exports its
-/// tick rows. The reports the tracker is fed are also written to `adsb`, if given. The tracker is
+/// tick rows. The reports offered to the tracker's adapter are also written to `adsb`, if given. The tracker is
 /// fed ADS-B only, so the tracks are monosensor.
 ///
 /// Conflict rule: reports of one address and time with different content are all kept, in one
@@ -286,8 +286,8 @@ pub fn export_adsb_clip(
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
     drop(clip);
     let mut info = ClipInfo {
-        fed: oa_adsb::reports_len(&fed_set) as u64,
-        left: oa_adsb::reports_len(&other) as u64,
+        offered: oa_adsb::reports_len(&fed_set) as u64,
+        not_offered: oa_adsb::reports_len(&other) as u64,
         split,
         adsb: None,
         gate: oa_track::adsb::AdsbStats::default(),

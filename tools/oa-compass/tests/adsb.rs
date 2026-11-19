@@ -616,8 +616,8 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     ex.counts.push(("reports written".into(), 10));
     let rep = ex.finish().unwrap().commit().unwrap();
     let clip = ClipInfo {
-        fed: 10,
-        left: 0,
+        offered: 10,
+        not_offered: 0,
         split: oa_track::score::SplitStats {
             rows_in: 14,
             aircraft: 1,
@@ -661,7 +661,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "1 conflicting (address, time) groups holding 2 reports",
         "INDEPENDENCE",
         "NOT the set the tracker used",
-        "superset of what the tracker was fed",
+        "superset of the reports the tracker used",
         "Of the 10 reports of the whole clip offered to the tracker, 6 became measurements",
         "nacp 3;",
         "source_not_adsb 1;",
@@ -709,10 +709,10 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
         oa_compass::shell::run::export_adsb_clip(&clip, &mut ex, Some(&mut ax), InputsMode::All)
             .unwrap();
     assert!(run.tick_rows > 1000);
-    assert_eq!(info.left, 0);
+    assert_eq!(info.not_offered, 0);
     let a = info.adsb.as_ref().unwrap();
-    assert_eq!(info.fed, info.split.set_a);
-    assert_eq!(a.rows_in, info.fed);
+    assert_eq!(info.offered, info.split.set_a);
+    assert_eq!(a.rows_in, info.offered);
     assert_eq!(
         a.converted + a.stale + a.other_sources.iter().map(|x| x.1).sum::<u64>(),
         a.rows_in
