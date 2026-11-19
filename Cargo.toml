@@ -33,6 +33,7 @@ members = [
     "crates/oa-bench",
     "crates/oa-wind",
     "crates/oa-asterix",
+    "crates/oa-nam",
     "crates/oa-sensorsim",
     "crates/oa-track",
     "tools/oa-perf",

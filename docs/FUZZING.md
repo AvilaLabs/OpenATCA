@@ -109,6 +109,7 @@ error is the correct outcome for bad input and is not a finding. Where a decoder
 | `arinc424` | `oa_arinc424::parse_bytes` and `parse_reader` (7-byte buffer), the file accessors on the result, `parse_record` and `record_meta` on each line (as is and padded to 132 bytes), `parse_lat`, `parse_lon`, `parse_path_terminator`, `parse_cycle` | |
 | `nasr` | first byte selects a parser: airports, runways, runway ends, fixes, fix navaids, navaids, airway bases and segments, airways, ARB base and boundaries, class airspace, STAR/DP bases, airports and procedures, `parse_schemas`, `validate`; the rest is the CSV (form feed between files for the multi-file parsers) | every parser takes a `BufRead`, so the byte entry is the public one |
 | `notam` | `oa_notam::decode_bytes`, then every row accessor, plus the `scalar` field parsers on the raw bytes | `cross_check` needs an `oa-mva` model and is not fuzzed |
+| `nam` | `oa_nam::frame::read_header`, `unframe`, `parse`, `parse_tolerant`, then `encode` of every accepted message (byte-exact for `parse`, re-parse for `parse_tolerant`) | NAM ACC-to-ACC messages; seeds are the ICD examples |
 | `mva` | `oa_mva::load_message`, then the model accessors and every query (`sectors_containing`, `min_altitude_at`, `min_altitude_with_sub`, `sector_distance_nm`, `sectors_within_radius`) at a vertex of the chart | |
 
 Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mva`, `oa-nasr`,
@@ -118,6 +119,7 @@ Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mv
 
 | Target | Seeds (local corpus only unless noted) |
 |---|---|
+| nam | 35 of the Rev G example messages, bare and framed, and one with the printed spacing (committed, `fuzz/seeds/nam`) |
 | asterix | the GPL-2.0 captures in `raw/asterix-samples`, split into packets and blocks. Local only, never committed. |
 | adsb-payload | three synthetic payloads (committed) |
 | adsb-trace | 232 real adsb.lol trace files (ODbL), from the first part of the 2026-11-13 archive |

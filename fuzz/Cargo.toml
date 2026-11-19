@@ -33,6 +33,7 @@ oa-arinc424 = { path = "../crates/oa-arinc424" }
 oa-nasr = { path = "../crates/oa-nasr" }
 oa-notam = { path = "../crates/oa-notam" }
 oa-mva = { path = "../crates/oa-mva" }
+oa-nam = { path = "../crates/oa-nam" }
 
 [profile.release]
 debug = 1
@@ -181,6 +182,13 @@ bench = false
 [[bin]]
 name = "mva"
 path = "fuzz_targets/mva.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nam"
+path = "fuzz_targets/nam.rs"
 test = false
 doc = false
 bench = false

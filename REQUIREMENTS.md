@@ -3934,3 +3934,98 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   with a covariance that is not a number, is withheld and counted in `rows_coast_withheld`. The
   track is kept until its drop age, and its next update is published as usual. Withheld rows are
   designed behaviour, not lost work, in capacity checks.
+
+## NAM ACC-to-ACC interface (oa-nam)
+- **OA-NAM-001** The crate models exactly the 25 messages of the NAM Common Coordination ICD
+  (NAS-IC-21009205 Rev G, Part II Table 2): FPL CHG EST CNL CPL MOD ABI MIS IRQ IRS TRQ TRS ASM RTI
+  RTU RLA RTA POI PLA POA POJ TOC AOC LAM LRM; any other mnemonic is refused with Table A-1 code 60.
+- **OA-NAM-002** Whatever `parse` accepts, `encode` reproduces byte for byte, and whatever `encode`
+  produces parses back to the same value; where the ICD allows more than one spelling the model
+  keeps which one was used. Arbitrary bytes never panic any parser.
+- **OA-NAM-003** Every example message printed in Part II (sections 3.1.1 to 3.8.2) parses, encodes
+  to its canonical text, and frames and unframes, each with its section and page as the citation.
+- **OA-NAM-004** The tolerant parser accepts the typography of the printed examples (en dashes,
+  a space beside a hyphen), counts the spaces it dropped, and refuses an example with a real
+  defect (POA 3.7.3.3); the strict parser refuses any space beside a hyphen.
+- **OA-NAM-005** An input that breaks a field rule is refused, never repaired, with an error that
+  names the reason, the field, the offset and the Table A-1 LRM code a receiver would send.
+- **OA-NAM-006** A message is 17 to 1800 bytes of printable ASCII between one pair of parentheses;
+  shorter, longer, non-ASCII, or with parentheses inside is refused, and no input panics.
+- **OA-NAM-007** The transport frame is a four-digit uppercase hexadecimal length followed by the
+  message; partial input waits, lowercase or non-hex digits and lengths outside 17 to 1800 are
+  refused, and the frame length must match the message.
+- **OA-NAM-008** Field 22 amendments are accepted with or without a leading zero in the indicator,
+  keep the spelling used, and obey the per-message rules (CHG and MOD change 07(a) alone; ABI
+  carries fields 9 and 15).
+- **OA-NAM-009** The Field 18 of an LRM is `RMK/` followed by an error code, a field number and
+  text separated by oblique strokes; the LRM code tables of Table A-1 and Attachments 2 and 3 are
+  data.
+- **OA-NAM-010** In INACTIVE, an Activate request sends an IRQ and goes to ACTIVATING; every
+  other event is ignored, and a request to send is refused (NAS-IC-82422100 Figure 3-3).
+- **OA-NAM-011** In ACTIVATING, an IRS answering one of our IRQs goes to ACTIVE; an IRS timeout
+  resends the IRQ; the optional retry limit sends a TRQ and goes to INACTIVE; a received IRQ is
+  answered with an IRQ and an IRS; a received TRQ is answered with a TRS; a Deactivate request
+  sends a TRQ and goes to INACTIVE; anything else is ignored (3.2.2.4.1.2).
+- **OA-NAM-012** In ACTIVE, silence for the idle time sends an ASM; a LAM clears it; no LAM in time
+  sends an IRQ and goes to ACTIVATING; a received ASM is answered with a LAM and a received IRQ
+  with an IRS; a received TRQ is answered with a TRS and the session re-activates; a Deactivate
+  request sends a TRQ and goes to DEACTIVATING (3.2.2.4.1.3).
+- **OA-NAM-013** In DEACTIVATING, a TRS or a TRQ or the TRS timeout goes to INACTIVE; responses are
+  still processed and sent; pending messages are abandoned and counted when the session ends
+  (3.2.2.4.1.4).
+- **OA-NAM-014** Message numbers run 000 to 999 and wrap; a received message from or to the wrong
+  unit is discarded; received numbers are classified first, in order, duplicate or gap.
+- **OA-NAM-015** An answered-message table of at most 128 entries matches each LAM, RLA, PLA or LRM
+  to the message it answers by kind and number, reports an overdue one (resending first when
+  configured), and refuses a new message, numbering nothing, when full.
+- **OA-NAM-016** The session step is a pure function of configuration, state, event and time; it
+  returns at most 8 actions, never reads a clock, and reports the next timer deadline.
+- **OA-NAM-017** Every LRM code the codec can produce is in the code table, in increasing order,
+  with the ICD's field and text.
+- **OA-NAM-018** The ICD workload figures (Table 29 per-flight counts, Table 3-IV peak rates, the
+  13.2 RTUs per handoff arithmetic, the latency and size bounds) are carried as data and agree
+  with each other and with the codec's size limits.
+
+## NAM ACC-to-ACC interface, review corrections (oa-nam)
+- **OA-NAM-019** A CHG carries 13(b) and Field 18 (Table 4), except that a change of the ACID
+  alone, a Field 22 holding the single amendment `07/`, may omit both (3.1.2.3, the ICD's own
+  example); a CHG that changes anything else without them is refused with the missing field.
+- **OA-NAM-020** Field 10 is checked for syntax: 10(a) designators valid and not repeated (codes
+  71, 73), `N` alone and not `S` with `V`, `O` or `L` (75); 10(b) valid, not repeated, one Mode S
+  letter at most, ADS-B `B1 B2 U1 U2 V1 V2` and ADS-C `D1 G1` (65, 66, 72, 74, 76); and, where the
+  message carries Field 18, `N` with COM/, NAV/ or DAT/ (64), PBN/ without `R` (86), `R` without
+  PBN/, `Z` without COM/, NAV/ or DAT/, `G` without NAV/ (91); more than eight PBN values is 84.
+  Checks that need flight-plan state are not made and are listed in the README.
+- **OA-NAM-021** Validation runs under a profile, `Core` (Part II) or `EramAttachment2` (the
+  default); block altitudes in 14(c), unknown speed and heading in Field 32, and the RTA contact
+  data in 31(c) (28 characters, `frequency/name/function`) are accepted only under
+  `EramAttachment2`, and Field 31(c) of every other message is 20 alphanumeric characters.
+  Supersedes the single 28-character text rule of OA-NAM-003 for those messages.
+- **OA-NAM-022** An IRQ received in INACTIVE is reported to the application and nothing is sent
+  (Rev G B.1.6); with `inactive_ignores_irq` it is ignored as in the IRD Figure 3-3. Supersedes
+  "every other event is ignored" of OA-NAM-010.
+- **OA-NAM-023** Messages awaiting a response stay pending across ACTIVE to ACTIVATING, are timed
+  out while ACTIVATING, and a late response still matches; they are abandoned only when the
+  session goes INACTIVE. Supersedes the abandonment on re-activation implied by OA-NAM-012.
+- **OA-NAM-024** A message whose sender or receiver in 03(b) is not the partner or us is counted
+  and answered with an LRM action (code 1 or 2, field 3), never dropped silently, except an LRM,
+  which is counted and not answered, and in INACTIVE, where it is ignored and counted.
+  Supersedes "discarded" in OA-NAM-014.
+- **OA-NAM-025** An LRM that answers no message of ours still pending, or answers our ASM, is
+  delivered to the application with its reference; other unmatched responses are discarded.
+- **OA-NAM-026** A response whose 03(c) names other units is discarded as a foreign reference;
+  the received-number sequence counts only messages the session processes; an ASM's LAM is still
+  processed in DEACTIVATING.
+- **OA-NAM-027** The retry number of a repeated IRQ follows the profile: the same number under
+  `Core` (Rev G B.1.6), a new number under `EramAttachment2` (Attachment 2 2.10).
+- **OA-NAM-028** The LRM code and field follow the profile: a missing time in 13 or 16 is code 21
+  and in 14 is 24; under `EramAttachment2` a bad message number and a bad 03(c) in RTI, RTA, RLA
+  and RTU are 57, and codes 17 and 63 to 66 take the field of Attachment 2 Table 2-2.
+- **OA-NAM-029** The amendments of an ABI Field 22 may come in any order, each of 8, 9, 10, 15, 18
+  at most once. Supersedes the ascending-order rule of the first version.
+- **OA-NAM-030** A POA with the SSR of Rev F in 07 parses and encodes back to itself; a POJ with
+  one is refused.
+- **OA-NAM-031** `Profile::RevE` validates Part II of Rev E (15 April 2016): the ASM carries 03(c),
+  the POI does not, the POA carries 07 a, b, c, the POJ is a Field 18 reason, metric altitude is
+  allowed in Field 32(e), none of the Attachment 2 additions apply, and a POA or POJ expects no
+  response. All other messages and fields are as under `Core`.

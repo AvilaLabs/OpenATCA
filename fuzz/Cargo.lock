@@ -153,6 +153,7 @@ dependencies = [
  "oa-j2k",
  "oa-json",
  "oa-mva",
+ "oa-nam",
  "oa-nasr",
  "oa-notam",
  "oa-tar",
@@ -198,6 +199,10 @@ dependencies = [
  "oa-xml",
  "oa-zip",
 ]
+
+[[package]]
+name = "oa-nam"
+version = "0.0.1"
 
 [[package]]
 name = "oa-nasr"

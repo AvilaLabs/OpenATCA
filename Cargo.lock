@@ -141,6 +141,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-nam"
+version = "0.0.1"
+
+[[package]]
 name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
