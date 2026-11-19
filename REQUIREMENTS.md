@@ -4594,3 +4594,31 @@ scope.
 - **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
   resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
   `scds/stdds-smoke-20261119`, including through a link to the file, to the folder or to a link.
+
+## Scoring against STDDS terminal tracks (oa-stdds-ref)
+
+- **OA-SRF-001** A STDDS record is paired with the tracker and the ADS-B truth by its Mode S address
+  (`acAddress`, 24 bits) only; a record without an address is counted and never paired.
+- **OA-SRF-002** Every STDDS record has an independence class from one function; it returns `unknown` for
+  every record until real data shows which field separates fused from radar-only tracks.
+- **OA-SRF-003** Every metric, count and time-offset distribution is reported per class; no line or section
+  blends the classes.
+- **OA-SRF-004** Per class, three error sets are computed on the same paired samples: tracker minus STDDS,
+  ADS-B truth minus STDDS, tracker minus ADS-B truth (the second is the diagnostic for STDDS following ADS-B).
+- **OA-SRF-005** Per STDDS track the stamp offset is fitted against the ADS-B truth only, never the tracker,
+  over -15 s to +15 s in 0.1 s steps minimising along-track error, ties toward zero; every metric is reported
+  at offset 0 and at the fitted offset, and a track with no fit has no fitted samples.
+- **OA-SRF-006** The offset search is exact at its edges, flags an offset at either end of the range, and
+  refuses a fit with fewer than 8 samples that have a moving truth at every offset.
+- **OA-SRF-007** Tracker fixes are interpolated between rows at most 5 s apart; at a track end a fix is
+  extrapolated by the end row's velocity up to 1 s and counted, and refused beyond that.
+- **OA-SRF-008** Per set: horizontal error, along and cross track, altitude difference (feet) and velocity
+  difference (m/s), each with n, rms, mean, p50, p95 and p99; an absent value is no data, never 0.
+- **OA-SRF-009** The summary and the per-sample CSV are byte-identical for the same inputs and carry the
+  input file digests and a digest of the output.
+- **OA-SRF-010** The tool exits 2 before opening anything when an input path, as given or with links
+  resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
+  `scds/stdds-smoke-20261119`.
+- **OA-SRF-011** A `.oaf` or `.oaf.gz` recording is read into records with counts of frames, other products
+  and damage, and the SHA-256 of the file's stored bytes.
+- **OA-SRF-012** A record with no time or no position is counted as its own unpaired reason, never paired.
