@@ -20,12 +20,39 @@ from kani_validation import (
     _loop_unwind_configuration,
     _loop_unwind_argument,
     _validate_loop_unwind_source,
+    bind_loop_unwind_discovery,
     changed_source_paths,
+    discover_loop_unwind_loops,
     evaluate_kani_binding,
     evaluate_kani_report,
     main as kani_runner_main,
+    resolve_loop_unwind_preset,
     run_limited_process,
 )
+
+
+DISAMBIGUATOR = "s54ksHOfKhD"
+OTHER_DISAMBIGUATOR = "seRq8xMCbGsa"
+LATE_LOOP_LINES = [984, 1003, 1041, 1071]
+
+
+def late_goto_loops(disambiguator=DISAMBIGUATOR, lines=LATE_LOOP_LINES, function="tracker::update_late"):
+    """`goto-instrument --show-loops` text: update_late loops plus unrelated ones."""
+    text = [
+        "Loop __rust_alloc.0:\n  file /k/kani_lib.c line 43 function __rust_alloc\n",
+        "Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker10ring_state.0:\n"
+        "  file crates/oa-track/src/tracker.rs line 444 column 5 function tracker::ring_state\n",
+    ]
+    for index, line in enumerate(lines):
+        text.append(
+            f"Loop _RNvNtC{disambiguator}_8oa_track7tracker11update_late.{index}:\n"
+            f"  file crates/oa-track/src/tracker.rs line {line} column 5 function {function}\n"
+        )
+    return "\n".join(text)
+
+
+def discovery_record(preset_name, disambiguator=DISAMBIGUATOR):
+    return discover_loop_unwind_loops(preset_name, late_goto_loops(disambiguator))
 
 
 HARNESS = "tracker::proofs::bounded_dispatch"
@@ -416,11 +443,12 @@ class KaniBindingTests(unittest.TestCase):
 
     def test_scoped_unwind_requires_exact_preset_command_and_logged_bound(self):
         preset_name = "late-replay-two-events"
-        preset = LOOP_UNWIND_PRESETS[preset_name]
+        preset = resolve_loop_unwind_preset(preset_name, DISAMBIGUATOR)
         harness = sorted(preset["harnesses"])[0]
         report = fixture_report()
         report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
         record = fixture_binding(report_text)
+        record["loop_unwind_discovery"] = discovery_record(preset_name)
         record["harness"] = harness
         record["command"][record["command"].index("--harness") + 1] = harness
         record["command"] += [
@@ -450,12 +478,12 @@ class KaniBindingTests(unittest.TestCase):
         self.assertTrue(any("log line" in error for error in evaluate_kani_binding(report_text, wrong_line)))
 
     def test_scoped_unwind_log_check_rejects_wrong_id_or_wrong_source_location(self):
-        preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
+        preset = resolve_loop_unwind_preset("late-replay-two-events", DISAMBIGUATOR)
         line = (
             f"Not unwinding loop {preset['loop_id']} iteration 3 file "
             f"crates/oa-track/src/tracker.rs line 1071 column 5 function tracker::update_late thread 0"
         )
-        self.assertTrue(_check_loop_unwind_log("late-replay-two-events", line, "")["passed"])
+        self.assertTrue(_check_loop_unwind_log("late-replay-two-events", line, "", DISAMBIGUATOR)["passed"])
         for malformed in (
             line.replace(preset["loop_id"], "stale.id"),
             line.replace("iteration 3", "iteration 2"),
@@ -467,11 +495,11 @@ class KaniBindingTests(unittest.TestCase):
             line.replace("crates/oa-track/src", "other/src"),
         ):
             with self.subTest(malformed=malformed):
-                self.assertFalse(_check_loop_unwind_log("late-replay-two-events", malformed, "")["passed"])
+                self.assertFalse(_check_loop_unwind_log("late-replay-two-events", malformed, "", DISAMBIGUATOR)["passed"])
 
     def test_all_late_loop_preset_checks_every_loop_and_exact_bound_location(self):
         preset_name = "late-replay-two-events-all-loops"
-        preset = LOOP_UNWIND_PRESETS[preset_name]
+        preset = resolve_loop_unwind_preset(preset_name, DISAMBIGUATOR)
         lines = []
         for loop in preset["loops"]:
             if loop.get("log_mode") == "completed_before_bound":
@@ -486,7 +514,7 @@ class KaniBindingTests(unittest.TestCase):
                 f"function tracker::update_late thread 0"
                 for iteration in iterations
             )
-        check = _check_loop_unwind_log(preset_name, "\n".join(lines), "")
+        check = _check_loop_unwind_log(preset_name, "\n".join(lines), "", DISAMBIGUATOR)
         self.assertTrue(check["passed"])
         self.assertEqual(check["matched_lines"], lines)
         self.assertEqual(
@@ -503,34 +531,26 @@ class KaniBindingTests(unittest.TestCase):
             bad_lines = list(lines)
             bad_lines[index] = malformed
             with self.subTest(index=index, malformed=malformed):
-                self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(bad_lines), "")["passed"])
-        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(lines[:1] + lines[2:]), "")["passed"])
+                self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(bad_lines), "", DISAMBIGUATOR)["passed"])
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(lines[:1] + lines[2:]), "", DISAMBIGUATOR)["passed"])
 
     # REQ: OA-GEN-006
-    def test_pinned_cargo_late_preset_uses_ci_mangled_loop_ids(self):
+    def test_pinned_cargo_late_preset_follows_the_discovered_disambiguator(self):
         preset_name = "late-replay-two-events-pinned-cargo"
-        preset = LOOP_UNWIND_PRESETS[preset_name]
-        self.assertEqual(preset["cargo_toolchain"], "1.89.0")
-        local_ids = ["_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late." + str(i) for i in range(4)]
-        ci_ids = ["_RNvNtCseRq8xMCbGsa_8oa_track7tracker11update_late." + str(i) for i in range(4)]
-        self.assertEqual(preset["log_families"], {"local": local_ids, "ci": ci_ids})
-        selectors = _loop_unwind_argument(preset).split(",")
-        self.assertEqual(len(selectors), 8)
-        self.assertEqual(
-            {selector.rsplit(":", 1)[0] for selector in selectors},
-            set(local_ids) | set(ci_ids),
-        )
+        template = LOOP_UNWIND_PRESETS[preset_name]
+        self.assertEqual(template["cargo_toolchain"], "1.89.0")
+        self.assertNotIn("Cs", json.dumps(_loop_unwind_configuration(preset_name)))
 
-        def family_lines(family):
+        def family_lines(preset):
+            ids = preset["log_families"]["discovered"]
             result = []
-            ids = preset["log_families"][family]
             for loop, loop_id in zip(preset["loops"], ids):
                 if loop.get("log_mode") == "completed_before_bound":
-                    prefix, iterations = "Unwinding", loop["iterations"]
+                    iterations = loop["iterations"]
                 else:
-                    prefix, iterations = "Unwinding", list(range(1, loop["bound"]))
+                    iterations = list(range(1, loop["bound"]))
                 result.extend(
-                    f"{prefix} loop {loop_id} iteration {iteration} file "
+                    f"Unwinding loop {loop_id} iteration {iteration} file "
                     f"crates/oa-track/src/tracker.rs line {loop['line']} column 5 "
                     "function tracker::update_late thread 0"
                     for iteration in iterations
@@ -543,63 +563,73 @@ class KaniBindingTests(unittest.TestCase):
                     )
             return result
 
-        local_lines, ci_lines = family_lines("local"), family_lines("ci")
-        for family, lines in (("local", local_lines), ("ci", ci_lines)):
-            with self.subTest(family=family):
-                check = _check_loop_unwind_log(preset_name, "\n".join(lines), "")
+        for disambiguator in (DISAMBIGUATOR, OTHER_DISAMBIGUATOR, "s1K5hzcfmox7"):
+            with self.subTest(disambiguator=disambiguator):
+                preset = resolve_loop_unwind_preset(preset_name, disambiguator)
+                ids = [f"_RNvNtC{disambiguator}_8oa_track7tracker11update_late.{i}" for i in range(4)]
+                self.assertEqual(preset["log_families"], {"discovered": ids})
+                self.assertEqual(
+                    _loop_unwind_argument(preset),
+                    ",".join(f"{loop_id}:{bound}" for loop_id, bound in zip(ids, (3, 2, 2, 3))),
+                )
+                lines = family_lines(preset)
+                check = _check_loop_unwind_log(preset_name, "\n".join(lines), "", disambiguator)
                 self.assertTrue(check["passed"])
-                self.assertEqual(check["matched_family"], family)
-        mixed = [local_lines[0], *ci_lines[1:]]
-        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(mixed), "")["passed"])
+                self.assertEqual(check["matched_family"], "discovered")
+        # A log from another disambiguator (stale ids) is not accepted.
+        stale = family_lines(resolve_loop_unwind_preset(preset_name, OTHER_DISAMBIGUATOR))
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(stale), "", DISAMBIGUATOR)["passed"])
+
+        preset = resolve_loop_unwind_preset(preset_name, DISAMBIGUATOR)
+        ci_lines = family_lines(preset)
+        ids = preset["log_families"]["discovered"]
+        mixed = [ci_lines[0], *family_lines(resolve_loop_unwind_preset(preset_name, OTHER_DISAMBIGUATOR))[1:]]
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(mixed), "", DISAMBIGUATOR)["passed"])
         unknown = list(ci_lines)
-        unknown[2] = unknown[2].replace(ci_ids[1], "_RNvNtCunknown_8oa_track7tracker11update_late.1")
-        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(unknown), "")["passed"])
+        unknown[2] = unknown[2].replace(ids[1], "_RNvNtCunknown_8oa_track7tracker11update_late.1")
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(unknown), "", DISAMBIGUATOR)["passed"])
         wrong_bound = list(ci_lines)
         wrong_bound[3] = wrong_bound[3].replace("iteration 2", "iteration 3")
-        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(wrong_bound), "")["passed"])
-        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(ci_lines[:-1]), "")["passed"])
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(wrong_bound), "", DISAMBIGUATOR)["passed"])
+        self.assertFalse(_check_loop_unwind_log(preset_name, "\n".join(ci_lines[:-1]), "", DISAMBIGUATOR)["passed"])
+
         one_name = "late-replay-two-events-pinned-cargo-one-loop"
-        one = LOOP_UNWIND_PRESETS[one_name]
-        self.assertEqual(
-            _loop_unwind_argument(one),
-            f"{local_ids[3]}:3,{ci_ids[3]}:3",
-        )
-        for family, loop_id in (("local", local_ids[3]), ("ci", ci_ids[3])):
-            lines = []
-            for loop_index, source_line in ((0, 984), (1, 1003), (2, 1041)):
-                unrequested_id = local_ids[loop_index]
-                iterations = (1, 2) if loop_index == 0 else range(1, 16)
-                lines.extend(
-                    f"Unwinding loop {unrequested_id} iteration {iteration} file "
+        one = resolve_loop_unwind_preset(one_name, DISAMBIGUATOR)
+        self.assertEqual(_loop_unwind_argument(one), f"{ids[3]}:3")
+        lines = []
+        for loop_index, source_line in ((0, 984), (1, 1003), (2, 1041)):
+            unrequested_id = ids[loop_index]
+            iterations = (1, 2) if loop_index == 0 else range(1, 16)
+            lines.extend(
+                f"Unwinding loop {unrequested_id} iteration {iteration} file "
+                f"crates/oa-track/src/tracker.rs line {source_line} column 5 "
+                "function tracker::update_late thread 0"
+                for iteration in iterations
+            )
+            if loop_index in (1, 2):
+                lines.append(
+                    f"Not unwinding loop {unrequested_id} iteration 16 file "
                     f"crates/oa-track/src/tracker.rs line {source_line} column 5 "
                     "function tracker::update_late thread 0"
-                    for iteration in iterations
                 )
-                if loop_index in (1, 2):
-                    lines.append(
-                        f"Not unwinding loop {unrequested_id} iteration 16 file "
-                        f"crates/oa-track/src/tracker.rs line {source_line} column 5 "
-                        "function tracker::update_late thread 0"
-                    )
-            lines.extend([
-                f"Unwinding loop {loop_id} iteration {iteration} file "
-                "crates/oa-track/src/tracker.rs line 1071 column 5 "
-                "function tracker::update_late thread 0"
-                for iteration in (1, 2)
-            ])
-            lines.append(
-                f"Not unwinding loop {loop_id} iteration 3 file "
-                "crates/oa-track/src/tracker.rs line 1071 column 5 "
-                "function tracker::update_late thread 0"
-            )
-            check = _check_loop_unwind_log(one_name, "\n".join(lines), "")
-            self.assertTrue(check["passed"])
-            self.assertEqual(check["matched_family"], family)
-            unknown_requested = list(lines)
-            unknown_requested[-1] = unknown_requested[-1].replace(
-                loop_id, "_RNvNtCunknown_8oa_track7tracker11update_late.3"
-            )
-            self.assertFalse(_check_loop_unwind_log(one_name, "\n".join(unknown_requested), "")["passed"])
+        lines.extend([
+            f"Unwinding loop {ids[3]} iteration {iteration} file "
+            "crates/oa-track/src/tracker.rs line 1071 column 5 "
+            "function tracker::update_late thread 0"
+            for iteration in (1, 2)
+        ])
+        lines.append(
+            f"Not unwinding loop {ids[3]} iteration 3 file "
+            "crates/oa-track/src/tracker.rs line 1071 column 5 "
+            "function tracker::update_late thread 0"
+        )
+        self.assertTrue(_check_loop_unwind_log(one_name, "\n".join(lines), "", DISAMBIGUATOR)["passed"])
+        unknown_requested = list(lines)
+        unknown_requested[-1] = unknown_requested[-1].replace(
+            ids[3], "_RNvNtCunknown_8oa_track7tracker11update_late.3"
+        )
+        self.assertFalse(_check_loop_unwind_log(one_name, "\n".join(unknown_requested), "", DISAMBIGUATOR)["passed"])
+
         harness = sorted(preset["harnesses"])[0]
         report = fixture_report()
         report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
@@ -612,17 +642,72 @@ class KaniBindingTests(unittest.TestCase):
         record["cargo_version"] = "cargo 1.89.0 (pinned test cargo)"
         record["loop_unwind_preset"] = preset_name
         record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
-        record["loop_unwind_log_check"] = _check_loop_unwind_log(preset_name, "\n".join(ci_lines), "")
+        record["loop_unwind_discovery"] = discovery_record(preset_name)
+        record["loop_unwind_log_check"] = _check_loop_unwind_log(
+            preset_name, "\n".join(ci_lines), "", DISAMBIGUATOR
+        )
         self.assertEqual(evaluate_kani_binding(report_text, record), [])
         stale = json.loads(json.dumps(record))
         stale["command"][1] = "+1.98.0"
         stale["command_sha256"] = _canonical_sha(stale["command"])
         self.assertTrue(any("pinned" in error for error in evaluate_kani_binding(report_text, stale)))
+        # A command whose unwindset names another disambiguator than the record's discovery is rejected.
+        other = json.loads(json.dumps(record))
+        other["command"][-2] = _loop_unwind_argument(resolve_loop_unwind_preset(preset_name, OTHER_DISAMBIGUATOR))
+        other["command_sha256"] = _canonical_sha(other["command"])
+        self.assertTrue(any("exact registered" in error for error in evaluate_kani_binding(report_text, other)))
+        # A record without a discovery, or with a tampered one, is rejected.
+        missing = json.loads(json.dumps(record))
+        missing["loop_unwind_discovery"] = None
+        self.assertTrue(any("discovery" in error for error in evaluate_kani_binding(report_text, missing)))
+        moved = json.loads(json.dumps(record))
+        moved["loop_unwind_discovery"]["loops"][3]["line"] = 1072
+        self.assertTrue(any("discovery" in error for error in evaluate_kani_binding(report_text, moved)))
         for harness in sorted(preset["harnesses"]):
             with self.subTest(harness=harness):
                 _validate_loop_unwind_source(
                     Path(__file__).resolve().parents[1], preset_name, "oa-track", harness
                 )
+
+    def test_loop_discovery_binds_ids_to_registered_locations(self):
+        for name in (
+            "late-replay-two-events",
+            "late-replay-two-events-all-loops",
+            "late-replay-two-events-pinned-cargo",
+            "late-replay-two-events-pinned-cargo-one-loop",
+        ):
+            for disambiguator in (DISAMBIGUATOR, OTHER_DISAMBIGUATOR):
+                with self.subTest(preset=name, disambiguator=disambiguator):
+                    found = discover_loop_unwind_loops(name, late_goto_loops(disambiguator))
+                    self.assertEqual(found["disambiguator"], disambiguator)
+                    self.assertEqual([entry["index"] for entry in found["loops"]], [0, 1, 2, 3])
+                    self.assertEqual([entry["line"] for entry in found["loops"]], LATE_LOOP_LINES)
+                    self.assertEqual(bind_loop_unwind_discovery(name, found["loops"]), found)
+        name = "late-replay-two-events-pinned-cargo"
+        # A wrong source line, function, or file fails.
+        for lines in ([984, 1003, 1041, 1072], [985, 1003, 1041, 1071]):
+            with self.assertRaisesRegex(ValueError, "registered"):
+                discover_loop_unwind_loops(name, late_goto_loops(lines=lines))
+        with self.assertRaisesRegex(ValueError, "registered"):
+            discover_loop_unwind_loops(name, late_goto_loops(function="tracker::other"))
+        with self.assertRaisesRegex(ValueError, "registered"):
+            discover_loop_unwind_loops(name, late_goto_loops().replace("crates/oa-track/src/tracker.rs", "crates/oa-track/src/other.rs"))
+        # A missing or an extra loop of update_late fails.
+        with self.assertRaisesRegex(ValueError, "indexes"):
+            discover_loop_unwind_loops(name, late_goto_loops(lines=LATE_LOOP_LINES[:3]))
+        with self.assertRaisesRegex(ValueError, "indexes"):
+            discover_loop_unwind_loops(name, late_goto_loops(lines=LATE_LOOP_LINES + [1200]))
+        with self.assertRaisesRegex(ValueError, "indexes"):
+            discover_loop_unwind_loops(name, "")
+        # Two instances (different disambiguators) of the function are ambiguous.
+        with self.assertRaisesRegex(ValueError, "disambiguator"):
+            discover_loop_unwind_loops(
+                name, late_goto_loops() + "\n" + late_goto_loops(OTHER_DISAMBIGUATOR)
+            )
+        # Another function's loops, even at the registered lines, are not selected.
+        other_function = late_goto_loops().replace("11update_late", "10update_new")
+        with self.assertRaisesRegex(ValueError, "indexes"):
+            discover_loop_unwind_loops(name, other_function)
 
     def test_all_late_loop_preset_source_and_fixture_guards_cover_every_harness(self):
         preset_name = "late-replay-two-events-all-loops"
@@ -632,11 +717,12 @@ class KaniBindingTests(unittest.TestCase):
 
     def test_all_late_loop_record_binds_all_loop_args_and_log_lines(self):
         preset_name = "late-replay-two-events-all-loops"
-        preset = LOOP_UNWIND_PRESETS[preset_name]
+        preset = resolve_loop_unwind_preset(preset_name, DISAMBIGUATOR)
         harness = sorted(preset["harnesses"])[0]
         report = fixture_report()
         report_text = json.dumps(report, separators=(",", ":")).replace(HARNESS, harness)
         record = fixture_binding(report_text)
+        record["loop_unwind_discovery"] = discovery_record(preset_name)
         record["harness"] = harness
         record["command"][record["command"].index("--harness") + 1] = harness
         record["command"] += ["--cbmc-args", "--unwindset", _loop_unwind_argument(preset), "--unwinding-assertions"]
