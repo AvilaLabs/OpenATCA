@@ -351,7 +351,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         ),
     };
     let report_sep = report_separations(&meas, &rec.encounters);
-    let csv = encounters_csv(&rec.encounters, &airports);
+    let csv = encounters_csv(&rec.encounters, &airports, ecfg.volume_v_ft as f32);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name = args
         .adsb

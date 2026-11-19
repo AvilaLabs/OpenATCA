@@ -15,11 +15,11 @@ use oa_encounter::{CycleStats, Encounter, CLASS_ALT_UNKNOWN};
 use oa_encounter_run::args::parse;
 use oa_encounter_run::guard::refuse_sealed;
 use oa_encounter_run::report::{
-    band_of, class_name, context_of, encounters_csv, flags_text, summary_text, Airport,
-    SummaryInput, CONTEXT_NAMES,
+    at_vertical_minimum, band_of, class_name, context_of, encounters_csv, flags_text, summary_text,
+    Airport, SummaryInput, CONTEXT_NAMES,
 };
 use oa_encounter_run::run::{
-    ground_at, report_separations, tool_config, track_and_record, GroundTable,
+    ground_at, load_airports, report_separations, tool_config, track_and_record, GroundTable,
 };
 use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
@@ -178,8 +178,8 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     ];
     let mut rev = list.clone();
     rev.reverse();
-    let csv = encounters_csv(&list, &[]);
-    assert_eq!(csv, encounters_csv(&rev, &[]));
+    let csv = encounters_csv(&list, &[], 1000.0);
+    assert_eq!(csv, encounters_csv(&rev, &[], 1000.0));
     // Sorted by start time; addresses appear here.
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 5);
@@ -220,9 +220,11 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     assert!(s.contains("  AIRBORNE_ALT_UNKNOWN: 1  ["));
     assert!(s.contains("  SURFACE: 0  ["));
     assert!(s.contains("  DEGRADED_TRACK: 1  ["));
-    assert!(s.contains("AIRBORNE by class\n  C2: 1\n  C3: 1\n"));
+    assert!(s.contains("minimum, by class\n  C2: 1\n  C3: 1\n"));
     assert!(
-        s.find("\nAIRBORNE by class").unwrap() < s.find("\nAIRBORNE_ALT_UNKNOWN by class").unwrap()
+        s.find("\nAIRBORNE, vertically converging or below the minimum, by class")
+            .unwrap()
+            < s.find("\nAIRBORNE_ALT_UNKNOWN by class").unwrap()
     );
     assert!(
         s.find("\nAIRBORNE_ALT_UNKNOWN by class").unwrap() < s.find("\nSURFACE by class").unwrap()
@@ -326,8 +328,8 @@ fn a_close_pass_through_the_tracker_is_one_c1_encounter_and_repeats_exactly() {
     assert_eq!(r.totals.not_evaluated + r.totals.tracks_unscanned, 0);
     let again = go(&pass(5100), &none);
     assert_eq!(
-        encounters_csv(&r.encounters, &[]),
-        encounters_csv(&again.encounters, &[])
+        encounters_csv(&r.encounters, &[], 1000.0),
+        encounters_csv(&again.encounters, &[], 1000.0)
     );
     assert_eq!(r.totals, again.totals);
     // The same pass 5,000 ft apart vertically is not an encounter.
@@ -480,4 +482,157 @@ fn report_level_separation_is_found_for_the_high_altitude_pairs_only() {
     // A pair that never reported together within 2 s has none.
     let far = vec![mk(0x100001, 0x999999, 30_000.0)];
     assert!(report_separations(&m, &far).is_empty());
+}
+
+// REQ: OA-ENC-017
+#[test]
+fn aircraft_a_level_apart_are_kept_and_counted_apart_from_the_class_tables() {
+    let mk = |v: f32, va: f32, vb: f32| {
+        let mut e = enc(1, 2, 10, 2, 5000.0, 3000.0);
+        e.v_at_closest_ft = v;
+        e.vrate_a_fpm = va;
+        e.vrate_b_fpm = vb;
+        e
+    };
+    // At the limit (1,000 less one quantum) and both level: in; one under, or either climbing: out.
+    assert!(at_vertical_minimum(&mk(975.0, 0.0, 0.0), 1000.0));
+    assert!(at_vertical_minimum(&mk(999.0, 299.0, -299.0), 1000.0));
+    assert!(!at_vertical_minimum(&mk(974.0, 0.0, 0.0), 1000.0));
+    assert!(!at_vertical_minimum(&mk(990.0, 300.0, 0.0), 1000.0));
+    assert!(!at_vertical_minimum(&mk(990.0, 0.0, -300.0), 1000.0));
+    assert!(!at_vertical_minimum(&mk(990.0, f32::NAN, 0.0), 1000.0));
+    let cfg = tool_config();
+    let es = vec![
+        mk(990.0, 0.0, 0.0),
+        mk(980.0, 10.0, 10.0),
+        mk(990.0, 800.0, 0.0),
+        mk(500.0, 0.0, 0.0),
+    ];
+    let s = summary_text(&SummaryInput {
+        cfg: &cfg,
+        encounters: &es,
+        airports: &[],
+        airports_from: "none",
+        report_sep_m: &BTreeMap::new(),
+        totals: CycleStats::default(),
+        log_overflow: 0,
+        tracker_overflow: 0,
+        measurements: 0,
+        tick_rows: 0,
+        clip_name: "c",
+        clip_sha256: "",
+        scope: "",
+        csv_sha256: "",
+    });
+    assert!(s.contains("  AIRBORNE: 4  ["));
+    assert!(s.contains("    of which AT_VERTICAL_MINIMUM: 2  [vertical separation at the closest approach at least 975 ft"));
+    assert!(s.contains("AIRBORNE, vertically converging or below the minimum, by class\n  C3: 2\n"));
+    assert!(s.contains("AIRBORNE/AT_VERTICAL_MINIMUM by class\n  C3: 2\n"));
+    assert!(s.contains("  AIRBORNE/AT_VERTICAL_MINIMUM C3: 2"));
+    // The record keeps them: the column says which.
+    let csv = encounters_csv(&es, &[], 1000.0);
+    let col = csv
+        .lines()
+        .next()
+        .unwrap()
+        .split(',')
+        .position(|c| c == "at_vertical_minimum")
+        .unwrap();
+    let flags: Vec<&str> = csv
+        .lines()
+        .skip(1)
+        .map(|l| l.split(',').nth(col).unwrap())
+        .collect();
+    assert_eq!(flags, ["1", "1", "0", "0"]);
+}
+
+fn crc32(d: &[u8]) -> u32 {
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in d {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
+}
+
+/// A zip of one stored file, written by hand.
+fn stored_zip(name: &str, data: &[u8]) -> Vec<u8> {
+    let crc = crc32(data);
+    let mut z = Vec::new();
+    let u16le = |z: &mut Vec<u8>, v: u16| z.extend_from_slice(&v.to_le_bytes());
+    let u32le = |z: &mut Vec<u8>, v: u32| z.extend_from_slice(&v.to_le_bytes());
+    z.extend_from_slice(b"PK\x03\x04");
+    for v in [20u16, 0, 0, 0, 0x21] {
+        u16le(&mut z, v);
+    }
+    u32le(&mut z, crc);
+    u32le(&mut z, data.len() as u32);
+    u32le(&mut z, data.len() as u32);
+    u16le(&mut z, name.len() as u16);
+    u16le(&mut z, 0);
+    z.extend_from_slice(name.as_bytes());
+    z.extend_from_slice(data);
+    let cd = z.len() as u32;
+    z.extend_from_slice(b"PK\x01\x02");
+    for v in [20u16, 20, 0, 0, 0, 0x21] {
+        u16le(&mut z, v);
+    }
+    u32le(&mut z, crc);
+    u32le(&mut z, data.len() as u32);
+    u32le(&mut z, data.len() as u32);
+    u16le(&mut z, name.len() as u16);
+    for v in [0u16, 0, 0, 0] {
+        u16le(&mut z, v);
+    }
+    u32le(&mut z, 0);
+    u32le(&mut z, 0);
+    z.extend_from_slice(name.as_bytes());
+    let cd_len = z.len() as u32 - cd;
+    z.extend_from_slice(b"PK\x05\x06");
+    for v in [0u16, 0, 1, 1] {
+        u16le(&mut z, v);
+    }
+    u32le(&mut z, cd_len);
+    u32le(&mut z, cd);
+    u16le(&mut z, 0);
+    z
+}
+
+// REQ: OA-ENC-018
+#[test]
+fn airports_are_read_from_apt_base_public_airports_only_with_their_elevation() {
+    let head = "EFF_DATE,SITE_NO,SITE_TYPE_CODE,STATE_CODE,ARPT_ID,CITY,COUNTRY_CODE,REGION_CODE,ARPT_NAME,FACILITY_USE_CODE,LAT_DEG,LAT_MIN,LAT_SEC,LAT_HEMIS,LAT_DECIMAL,LONG_DEG,LONG_MIN,LONG_SEC,LONG_HEMIS,LONG_DECIMAL,ELEV,MAG_VARN,MAG_HEMIS,MAG_VARN_YEAR,TPA,RESP_ARTCC_ID,COMPUTER_ID,ARPT_STATUS,TWR_TYPE_CODE,ICAO_ID";
+    // lat 41 30 0 N = 41.5, lon 88 15 0 W = -88.25
+    let row = |id: &str, site: &str, usage: &str, elev: &str| {
+        format!(
+            "2026/10/29,0001.,{site},IL,{id},CITY,US,AGL,NAME {id},{usage},41,30,0.000,N,41.50000000,88,15,0.000,W,-88.25000000,{elev},3,W,2020,,ZAU,{id},O,NON-ATCT,"
+        )
+    };
+    let csv = format!(
+        "{head}\n{}\n{}\n{}\n{}\n",
+        row("PUB", "A", "PU", "679.4"),
+        row("PRV", "A", "PR", "500.0"),
+        row("HEL", "H", "PU", "100.0"),
+        row("LOW", "A", "PU", "-12.5"),
+    );
+    let dir = scratch("nasr");
+    let zip = dir.join("NASR.zip");
+    std::fs::write(&zip, stored_zip("APT_BASE.csv", csv.as_bytes())).unwrap();
+    let a = load_airports(&zip).unwrap();
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert_eq!(a[0].elev_ft, 679.4);
+    assert_eq!(a[1].elev_ft, -12.5);
+    assert!((a[0].lat_deg - 41.5).abs() < 1e-6 && (a[0].lon_deg + 88.25).abs() < 1e-6);
+    // An archive without the file, and a file that is not an archive, are errors.
+    std::fs::write(&zip, stored_zip("OTHER.csv", csv.as_bytes())).unwrap();
+    assert!(load_airports(&zip).unwrap_err().contains("APT_BASE.csv"));
+    std::fs::write(&zip, b"not a zip").unwrap();
+    assert!(load_airports(&zip).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

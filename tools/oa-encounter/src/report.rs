@@ -89,6 +89,20 @@ pub struct Airport {
 /// the mean pressure altitude there was under the field elevation plus [`SURFACE_MARGIN_FT`].
 pub const SURFACE_NM: f64 = 5.0;
 pub const SURFACE_MARGIN_FT: f64 = 200.0;
+/// One altitude quantum of the barometric altitude, feet (25 ft steps).
+pub const ALT_QUANTUM_FT: f32 = 25.0;
+/// The level-flight rate: both aircraft under this, feet per minute, is not converging.
+pub const LEVEL_RATE_FPM: f32 = 300.0;
+/// AT_VERTICAL_MINIMUM: an AIRBORNE encounter whose vertical separation at the closest approach
+/// is at least the record volume's 1,000 ft less one quantum, with neither aircraft climbing or
+/// descending. Aircraft on levels 1,000 ft apart read 975 to 1,000 ft in 25 ft steps and so are
+/// inside the strict 1,000 ft edge only through quantisation; they are kept, counted apart.
+pub fn at_vertical_minimum(e: &Encounter, volume_v_ft: f32) -> bool {
+    e.v_at_closest_ft >= volume_v_ft - ALT_QUANTUM_FT
+        && e.vrate_a_fpm.abs() < LEVEL_RATE_FPM
+        && e.vrate_b_fpm.abs() < LEVEL_RATE_FPM
+}
+
 /// Contexts, in the order the summary leads with them.
 pub const CONTEXT_NAMES: [&str; 4] = [
     "AIRBORNE",
@@ -100,6 +114,18 @@ const CTX_AIRBORNE: usize = 0;
 const CTX_ALT_UNKNOWN: usize = 1;
 const CTX_SURFACE: usize = 2;
 const CTX_DEGRADED: usize = 3;
+/// The AIRBORNE subgroup of [`at_vertical_minimum`], a context of the summary only.
+const CTX_AT_MIN: usize = 4;
+const SUMMARY_NAMES: [&str; 5] = [
+    "AIRBORNE",
+    "AIRBORNE_ALT_UNKNOWN",
+    "SURFACE",
+    "DEGRADED_TRACK",
+    "AIRBORNE/AT_VERTICAL_MINIMUM",
+];
+fn ctx_name(c: usize) -> &'static str {
+    SUMMARY_NAMES.get(c).copied().unwrap_or("?")
+}
 /// One line for each context, said once in the summary.
 const CONTEXT_RULES: [&str; 4] = [
     "both aircraft airborne or not stated on the ground, both altitudes known at the closest approach, neither track coasting or uncertain",
@@ -139,14 +165,14 @@ pub fn context_of(e: &Encounter, airports: &[Airport]) -> usize {
 }
 
 /// `encounters.csv`: one row per encounter, sorted by start time then addresses.
-pub fn encounters_csv(encounters: &[Encounter], airports: &[Airport]) -> String {
+pub fn encounters_csv(encounters: &[Encounter], airports: &[Airport], volume_v_ft: f32) -> String {
     let mut o = String::from(
-        "address_a_hex,address_b_hex,start_s,end_s,closest_s,min_horizontal_m,interp_closest_s,min_horizontal_interp_m,vertical_at_closest_ft,min_vertical_ft,min_scaled_m,context,class,altitude_band,mean_altitude_ft,lat_deg,lon_deg,flags_a,flags_b,flags_a_raw,flags_b_raw,vrate_a_fpm,vrate_b_fpm,max_abs_vrate_fpm,ground_either,ticks_inside,ticks_alt_unknown,ticks_unevaluated\n",
+        "address_a_hex,address_b_hex,start_s,end_s,closest_s,min_horizontal_m,interp_closest_s,min_horizontal_interp_m,vertical_at_closest_ft,min_vertical_ft,min_scaled_m,context,at_vertical_minimum,class,altitude_band,mean_altitude_ft,lat_deg,lon_deg,flags_a,flags_b,flags_a_raw,flags_b_raw,vrate_a_fpm,vrate_b_fpm,max_abs_vrate_fpm,ground_either,ticks_inside,ticks_alt_unknown,ticks_unevaluated\n",
     );
     for e in sorted(encounters) {
         let _ = writeln!(
             o,
-            "{:06X},{:06X},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
+            "{:06X},{:06X},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
             e.addr_a & 0xFF_FFFF,
             e.addr_b & 0xFF_FFFF,
             secs(e.start_ns),
@@ -162,6 +188,7 @@ pub fn encounters_csv(encounters: &[Encounter], airports: &[Airport]) -> String 
                 .get(context_of(&e, airports))
                 .copied()
                 .unwrap_or("?"),
+            u8::from(context_of(&e, airports) == CTX_AIRBORNE && at_vertical_minimum(&e, volume_v_ft)),
             class_name(e.class),
             BAND_NAMES.get(band_of(e.alt_ft)).copied().unwrap_or("unknown"),
             f(e.alt_ft, 0),
@@ -272,7 +299,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let ctx_of: Vec<usize> = i
         .encounters
         .iter()
-        .map(|e| context_of(e, i.airports))
+        .map(|e| {
+            let c = context_of(e, i.airports);
+            if c == CTX_AIRBORNE && at_vertical_minimum(e, cfg.volume_v_ft as f32) {
+                CTX_AT_MIN
+            } else {
+                c
+            }
+        })
         .collect();
     let es: Vec<(&Encounter, usize)> = i.encounters.iter().zip(ctx_of.iter().copied()).collect();
     let degraded = t.not_evaluated
@@ -318,29 +352,46 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "\nencounters: {}", es.len());
     let _ = writeln!(o, "\ncontexts (one per encounter, at the closest approach)");
     for (k, name) in CONTEXT_NAMES.iter().enumerate() {
-        let n = ctx_of.iter().filter(|&&c| c == k).count();
+        let n = ctx_of
+            .iter()
+            .filter(|&&c| c == k || (k == CTX_AIRBORNE && c == CTX_AT_MIN))
+            .count();
         let _ = writeln!(
             o,
             "  {name}: {n}  [{}]",
             CONTEXT_RULES.get(k).copied().unwrap_or("")
         );
+        if k == CTX_AIRBORNE {
+            let m = ctx_of.iter().filter(|&&c| c == CTX_AT_MIN).count();
+            let _ = writeln!(
+                o,
+                "    of which AT_VERTICAL_MINIMUM: {m}  [vertical separation at the closest approach at least {:.0} ft (the volume's {:.0} ft less one {ALT_QUANTUM_FT:.0} ft altitude quantum) and both vertical rates under {LEVEL_RATE_FPM:.0} fpm: aircraft on levels 1,000 ft apart, inside the strict edge only because altitude is reported in {ALT_QUANTUM_FT:.0} ft steps; kept in the record and counted apart, not in the class tables below]",
+                cfg.volume_v_ft as f32 - ALT_QUANTUM_FT,
+                cfg.volume_v_ft
+            );
+        }
     }
     // AIRBORNE.
-    let _ = writeln!(o, "\nAIRBORNE by class");
+    let _ = writeln!(
+        o,
+        "\nAIRBORNE, vertically converging or below the minimum, by class"
+    );
     class_counts(&mut o, &es, CTX_AIRBORNE);
     let mut by_band = [0u64; 5];
     let mut cross: BTreeMap<(u8, usize), u64> = BTreeMap::new();
     let mut hist = [0u64; 4];
     let (mut v_under, mut v_total) = (0u64, 0u64);
     for (e, c) in &es {
-        if *c != CTX_AIRBORNE {
+        if *c != CTX_AIRBORNE && *c != CTX_AT_MIN {
             continue;
         }
-        let b = band_of(e.alt_ft);
-        if let Some(x) = by_band.get_mut(b) {
-            *x += 1;
+        if *c == CTX_AIRBORNE {
+            let b = band_of(e.alt_ft);
+            if let Some(x) = by_band.get_mut(b) {
+                *x += 1;
+            }
+            *cross.entry((e.class, b)).or_default() += 1;
         }
-        *cross.entry((e.class, b)).or_default() += 1;
         v_total += 1;
         if e.v_at_closest_ft < 900.0 {
             v_under += 1;
@@ -351,11 +402,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
             }
         }
     }
-    let _ = writeln!(o, "\nAIRBORNE by pressure-altitude band (closest approach)");
+    let _ = writeln!(o, "\nAIRBORNE, vertically converging or below the minimum, by pressure-altitude band (closest approach)");
     for (name, n) in BAND_NAMES.iter().zip(by_band.iter()) {
         let _ = writeln!(o, "  {name} ft: {n}");
     }
-    let _ = writeln!(o, "\nAIRBORNE class by band");
+    let _ = writeln!(
+        o,
+        "\nAIRBORNE, vertically converging or below the minimum, class by band"
+    );
     for ((c, b), n) in &cross {
         let _ = writeln!(
             o,
@@ -366,13 +420,15 @@ pub fn summary_text(i: &SummaryInput) -> String {
     }
     let _ = writeln!(
         o,
-        "\nAIRBORNE vertical separation at the closest approach, near 1,000 ft (feet; the volume's edge is strict at 1,000)"
+        "\nAIRBORNE (all, with AT_VERTICAL_MINIMUM) vertical separation at the closest approach, near 1,000 ft (feet; the volume's edge is strict at 1,000)"
     );
     let _ = writeln!(o, "  under 900: {v_under} of {v_total}");
     for (k, n) in hist.iter().enumerate() {
         let lo = 900 + 25 * k;
         let _ = writeln!(o, "  {lo} to {}: {n}", lo + 25);
     }
+    let _ = writeln!(o, "\nAIRBORNE/AT_VERTICAL_MINIMUM by class");
+    class_counts(&mut o, &es, CTX_AT_MIN);
     // AIRBORNE_ALT_UNKNOWN.
     let _ = writeln!(o, "\nAIRBORNE_ALT_UNKNOWN by class");
     class_counts(&mut o, &es, CTX_ALT_UNKNOWN);
@@ -424,12 +480,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         *grid.entry((*c, e.class)).or_default() += 1;
     }
     for ((c, k), n) in &grid {
-        let _ = writeln!(
-            o,
-            "  {} {}: {n}",
-            CONTEXT_NAMES.get(*c).copied().unwrap_or("?"),
-            class_name(*k)
-        );
+        let _ = writeln!(o, "  {} {}: {n}", ctx_name(*c), class_name(*k));
     }
     // At and above 18,000 ft.
     let hi: Vec<&(&Encounter, usize)> = es.iter().filter(|(e, _)| band_of(e.alt_ft) == 3).collect();
@@ -450,7 +501,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         let _ = writeln!(
             o,
             "  {}, {}, {}, {}, {}, {}, {:.0}, {}/{}, {}, {} / {}, {}",
-            CONTEXT_NAMES.get(*c).copied().unwrap_or("?"),
+            ctx_name(*c),
             class_name(e.class),
             f(e.v_at_closest_ft, 0),
             f(e.min_v_ft, 0),
