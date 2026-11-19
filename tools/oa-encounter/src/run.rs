@@ -239,7 +239,7 @@ pub fn load_airports(path: &std::path::Path) -> Result<Vec<Airport>, String> {
 
 /// For each encounter at or above 18,000 ft pressure altitude, the smallest separation between
 /// reports of its two aircraft, metres: each report of one against the other's position at that
-/// time (its own report, or the line between its two reports around it, not over 15 s apart),
+/// time (its own report, or the line between its two reports around it, not over 30 s apart),
 /// over the encounter's time with 5 s each side, in both directions. Keyed by address pair.
 pub fn report_separations(
     meas: &[Measurement],
@@ -270,7 +270,7 @@ pub fn report_separations(
         for (a, b) in [(ra, rb), (rb, ra)] {
             for &(t, la, lo_a) in a.iter().filter(|r| r.0 >= lo && r.0 <= hi_t) {
                 // The other aircraft's position at this time: its own report, or the straight line
-                // between the two reports around it when they are not more than 15 s apart.
+                // between the two reports around it when they are not more than 30 s apart.
                 let k = b.partition_point(|r| r.0 < t);
                 let (Some(&(t1, la1, lo1)), prev) =
                     (b.get(k), k.checked_sub(1).and_then(|p| b.get(p)))
@@ -283,7 +283,7 @@ pub fn report_separations(
                     let Some(&(t0, la0, lo0)) = prev else {
                         continue;
                     };
-                    if t1 - t0 > 15 * S_NS {
+                    if t1 - t0 > 30 * S_NS {
                         continue;
                     }
                     let w = (t - t0) as f64 / (t1 - t0) as f64;
