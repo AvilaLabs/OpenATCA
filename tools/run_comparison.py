@@ -34,6 +34,12 @@ MAX_AIRCRAFT_COUNT = 300
 MAX_DURATION_S = 1200
 RUNNER_REL = Path("validation/oa-comparison-runner")
 PROTOCOL_REL = Path("validation/comparison-protocol-v1.json")
+# Freeze: must equal comparison_evaluator.PROTOCOL_V1_SHA256 (a test pins the two together).
+PROTOCOL_V1_SHA256 = "5463f6954a5a0dcbfa8de5034242b7c4c8a8c73f4ea06c2920a80b90171c2f46"
+PROTOCOL_MISMATCH_REASON = "protocol file does not match the frozen v1 hash"
+STATUS_COMPLETED = "completed"
+STATUS_EXPLORATORY = "exploratory (source tree not clean)"
+EXIT_NOT_COMPLETED = 3
 REFERENCE_TOOL_REL = Path("tools/comparison_reference.py")
 BASELINE_TOOL_REL = Path("tools/comparison_baseline.py")
 EVALUATOR_TOOL_REL = Path("tools/comparison_evaluator.py")
@@ -387,6 +393,27 @@ def _require_gate_exit(results: list[dict[str, Any]], require: bool) -> int:
     return 1 if require and not _competitive_pass(results) else 0
 
 
+def _check_protocol_hash(recorded: str) -> None:
+    if recorded != PROTOCOL_V1_SHA256:
+        raise ComparisonRunError(PROTOCOL_MISMATCH_REASON)
+
+
+def _final_status(clean: bool, reference_failure: bool, gate_failed: bool) -> str:
+    """Run status; only a clean, reference-validated, gate-satisfying run is 'completed'."""
+    if reference_failure:
+        return "reference_failure"
+    if gate_failed:
+        return "competitive_gate_failed"
+    if not clean:
+        return STATUS_EXPLORATORY
+    return STATUS_COMPLETED
+
+
+def _exit_code(status: str) -> int:
+    """Zero only for a completed run; every other status exits 3."""
+    return 0 if status == STATUS_COMPLETED else EXIT_NOT_COMPLETED
+
+
 def _reference_qualified(
     result: dict[str, Any], source_hash: str, truth_hash: str, measurements_hash: str, protocol_hash: str
 ) -> bool:
@@ -522,6 +549,7 @@ def _run_case(
     expected_ref_exit = 0 if reference_result["status"] == "PASS" else 1
     if ref_command["exit_code"] != expected_ref_exit:
         raise ComparisonRunError("reference validator exit code contradicts its evidence status")
+    _check_protocol_hash(_sha256(protocol_path))
     reference_qualified = _reference_qualified(
         reference_result,
         source_hash,
@@ -634,6 +662,7 @@ def _run_case(
     }
     for name, field in flat.items():
         metadata[field] = artifacts[name]["sha256"]
+    _check_protocol_hash(metadata["protocol_sha256"])
     metadata_path = case_out / "metadata.json"
     _write_json(metadata_path, metadata)
     comparison_path = case_out / "comparison.json"
@@ -719,6 +748,7 @@ def run(args: argparse.Namespace) -> int:
         start_snapshot = _source_snapshot(repo)
         _write_json(out / "source-before.json", start_snapshot)
         clean = not start_snapshot["status_porcelain"]
+        _check_protocol_hash(_sha256(repo / PROTOCOL_REL))
         protocol = _read_json(repo / PROTOCOL_REL)
         protocol_version = protocol.get("version")
         if protocol.get("protocol_id") != "openatca-comparison" or not isinstance(protocol_version, str):
@@ -805,13 +835,14 @@ def run(args: argparse.Namespace) -> int:
             "speed_claim": _speed_claim("replay_call_cost"),
         }
         competitive = _competitive_pass(results)
-        if summary["reference_workflow_status"] == "reference_failure":
-            summary["status"] = "reference_failure"
-        summary["competitive_gate"] = "pass" if competitive else "fail_or_unknown"
-        if _require_gate_exit(results, args.require_competitive_pass):
-            summary["status"] = "competitive_gate_failed"
+        summary["competitive_gate"] = "pass" if competitive and clean else "fail_or_unknown"
+        summary["status"] = _final_status(
+            clean,
+            summary["reference_workflow_status"] == "reference_failure",
+            bool(_require_gate_exit(results, args.require_competitive_pass)),
+        )
         _write_json(out / "summary.json", summary)
-        return _require_gate_exit(results, args.require_competitive_pass)
+        return _exit_code(summary["status"])
     except Exception as exc:
         end_snapshot = None
         try:
@@ -831,7 +862,7 @@ def run(args: argparse.Namespace) -> int:
                 "artifacts_retained": True,
             },
         )
-        return 1
+        return _exit_code("failed")
 
 
 def main(argv: list[str] | None = None) -> int:

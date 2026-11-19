@@ -240,9 +240,10 @@ class ComparisonWrapperTests(unittest.TestCase):
             before = {"snapshot_sha256": "a", "status_porcelain": " M file"}
             after = {"snapshot_sha256": "b", "status_porcelain": " M changed"}
             args = wrapper.build_parser().parse_args(["--repo", str(repo), "--out", str(output), "--runner", str(binary)])
-            with mock.patch.object(wrapper, "_source_snapshot", side_effect=[before, after, after]):
+            pinned = hashlib.sha256((repo / wrapper.PROTOCOL_REL).read_bytes()).hexdigest()
+            with mock.patch.object(wrapper, "PROTOCOL_V1_SHA256", pinned), mock.patch.object(wrapper, "_source_snapshot", side_effect=[before, after, after]):
                 code = wrapper.run(args)
-            self.assertEqual(code, 1)
+            self.assertEqual(code, 3)
             summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
             self.assertIn("source changed", summary["error"])
             self.assertTrue(summary["artifacts_retained"])
@@ -289,6 +290,60 @@ class ComparisonWrapperTests(unittest.TestCase):
         with self.assertRaises(wrapper.ComparisonRunError):
             wrapper._cohort_id_for_run(protocol, {**manifest, "scenario_id": "turn"}, 1, "straight")
 
+
+    # REQ: OA-CMP-067
+    def test_cmp_067_protocol_hash_is_pinned_and_mismatch_fails_closed(self):
+        import comparison_evaluator as ce
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(wrapper.PROTOCOL_V1_SHA256, ce.PROTOCOL_V1_SHA256)
+        self.assertEqual(wrapper._sha256(root / wrapper.PROTOCOL_REL), wrapper.PROTOCOL_V1_SHA256)
+        wrapper._check_protocol_hash(wrapper.PROTOCOL_V1_SHA256)
+        with self.assertRaisesRegex(wrapper.ComparisonRunError, "does not match the frozen v1 hash"):
+            wrapper._check_protocol_hash("0" * 64)
+
+    # REQ: OA-CMP-068
+    def test_cmp_068_only_a_completed_run_exits_zero_for_every_status(self):
+        cases = [
+            ((True, False, False), "completed", 0),
+            ((False, False, False), "exploratory (source tree not clean)", 3),
+            ((True, True, False), "reference_failure", 3),
+            ((False, True, False), "reference_failure", 3),
+            ((True, False, True), "competitive_gate_failed", 3),
+        ]
+        for (clean, ref_failure, gate_failed), status, code in cases:
+            self.assertEqual(wrapper._final_status(clean, ref_failure, gate_failed), status)
+            self.assertEqual(wrapper._exit_code(status), code)
+        self.assertEqual(wrapper._exit_code("failed"), 3)
+        self.assertEqual(wrapper._exit_code("anything else"), 3)
+
+    # REQ: OA-CMP-068
+    def test_cmp_068_dirty_source_tree_run_is_exploratory_and_exits_nonzero(self):
+        import types
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / ".git").mkdir(parents=True)
+            (repo / wrapper.RUNNER_REL / "src").mkdir(parents=True)
+            (repo / wrapper.RUNNER_REL / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+            (repo / wrapper.RUNNER_REL / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+            for rel in (wrapper.PROTOCOL_REL, wrapper.REFERENCE_TOOL_REL, wrapper.BASELINE_TOOL_REL, wrapper.EVALUATOR_TOOL_REL):
+                path = repo / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"protocol_id": "openatca-comparison", "version": "1.0.3", "seeds_and_holdout": {"development_seeds": {"seed_ids": [0, 1]}}}) + "\n" if rel == wrapper.PROTOCOL_REL else "{}\n", encoding="utf-8")
+            binary = root / "runner"
+            binary.write_bytes(b"runner")
+            output = root / "output"
+            snapshot = {"snapshot_sha256": "a", "status_porcelain": " M file"}
+            args = wrapper.build_parser().parse_args(["--repo", str(repo), "--out", str(output), "--runner", str(binary), "--scenario", "straight"])
+            case = {"scenario": "straight", "scenario_role": "nominal", "status": "completed", "runner_model_id": "m", "artifact_directory": str(root)}
+            (root / "configuration.json").write_text("{}\n", encoding="utf-8")
+            pinned = hashlib.sha256((repo / wrapper.PROTOCOL_REL).read_bytes()).hexdigest()
+            with mock.patch.object(wrapper, "PROTOCOL_V1_SHA256", pinned), mock.patch.object(wrapper, "_source_snapshot", return_value=snapshot), mock.patch.object(wrapper, "_run_case", side_effect=lambda *a, **k: [(output / "commands.json").write_text("[]\n", encoding="utf-8"), case][1]):
+                code = wrapper.run(args)
+            summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "exploratory (source tree not clean)", summary.get("error"))
+            self.assertFalse(summary["source_clean_at_start"])
+            self.assertEqual(code, 3)
 
 if __name__ == "__main__":
     unittest.main()
