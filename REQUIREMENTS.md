@@ -3303,6 +3303,9 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-133** The flight table keeps the last transponder code an SFDPS message gave
   (`currentBeaconCode`, four octal digits read as a decimal number like the ADS-B squawk) in `Flights::beacon`, and
   `NO_BEACON` when no message carried one; a message without a valid code leaves the stored one.
+- **OA-BENCH-133** `Legacy::beacons` holds one row (flight, message time, code) each time a message gives a flight a
+  code other than the one it had, the first code included, so the code in force at a time is the last row of the
+  flight at or before it. The table is capped; a row that does not fit is counted under the notes.
 
 ## Winds aloft (oa-wind)
 
@@ -5034,46 +5037,55 @@ A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker bes
 difference: a live shadow has no truth. Every threshold is a value of one table (`thresholds::THRESHOLDS`) and a
 value is a difference only when strictly greater than it.
 
-- **OA-SHD-001** Flights are paired by exactly one rule. An ERAM flight with a Mode S address pairs with the
-  OpenATCA aircraft of that address. An ERAM flight without one but with a beacon code pairs with the OpenATCA
-  aircraft that is not paired by address, was offered that squawk within the flight's span plus 30 s, and is
-  nearest to ERAM's first report of the flight within 5 NM (ties to the lowest address). Several ERAM flights of
-  one aircraft form one group.
+- **OA-SHD-001** Flights are paired by exactly one rule. An ERAM flight with a Mode S address that OpenATCA has an
+  aircraft for pairs with that aircraft. Any other ERAM flight with a beacon code pairs with the OpenATCA aircraft
+  that is not already paired (by address or by beacon) to an ERAM flight whose span overlaps this one's (beacon
+  claims are exclusive within overlapping spans), was offered the code within the flight's span plus 30 s, and is
+  nearest to ERAM's first in-box, in-window report of the flight within 5 NM (ties to the lowest address). The code
+  is the one in force at that first report, or the earliest if the first message came later. Several ERAM flights
+  of one aircraft form one group.
 - **OA-SHD-002** A flight or aircraft with no partner is a difference (`UNPAIRED_ERAM`, `UNPAIRED_OA`) with its
   first and last time and duration and its own row in the flight table; it is not dropped.
-- **OA-SHD-003** At each ERAM report time the cross-track and along-track separations from OpenATCA are judged
-  separately against 0.5 NM (926 m) and 1 NM (1852 m): above 0.5 NM is `POS_*_GT_0.5NM`, above 1 NM is
-  `POS_*_GT_1NM`, a separation exactly at a threshold is not a difference.
-- **OA-SHD-004** ERAM stamps whole seconds. The along-track separation is reduced by OpenATCA's ground speed times
-  1 s either way (zero when within it), the cross-track separation is not; the raw and the adjusted along-track
-  values are both written. Below 2 kt the direction is undefined and the whole separation counts as cross-track.
+- **OA-SHD-003** At each ERAM report time the raw cross-track and along-track separations from OpenATCA are judged
+  separately: above 0.5 NM (926 m) and up to 1 NM (1852 m) is `POS_*_0P5_TO_1NM`, above 1 NM is `POS_*_GT_1NM`; a
+  separation exactly at a threshold is not in the class above it.
+- **OA-SHD-004** ERAM stamps whole seconds. The classification uses the raw along-track separation; the event
+  carries OpenATCA's ground speed times 1 s (`along_credit_m`) and a flag `within_1s_stamp_allowance`, true when the
+  raw separation less that credit is not over the event's threshold; the summary counts the events with and
+  without the flag. Cross-track events carry no flag. Below 2 kt the direction is undefined and the whole
+  separation counts as cross-track.
 - **OA-SHD-005** OpenATCA is linearly interpolated to the ERAM report time between two of its one-second rows at
   most 2 s apart, or taken from the row at that time; with no such rows it has no sample there.
 - **OA-SHD-006** An altitude difference above 300 ft either way is `ALT_GT_300FT`, only where both systems have an
   altitude; the others are counted as not comparable. Each event names the band of ERAM's altitude (below or at or
   above 18,000 ft), and the summary gives the event counts and the median signed difference of both bands (no
   altimeter setting is applied).
-- **OA-SHD-007** Identity: an ERAM beacon code that is not among the squawks the OpenATCA adapter was offered for
-  that aircraft near the flight's span (`ID_BEACON`), and an ERAM callsign not among the callsigns offered
-  (`ID_CALLSIGN`, case and padding ignored); nothing is compared where either side has none.
-- **OA-SHD-008** A paired aircraft's ERAM track segment (gaps over 30 s split segments) and the OpenATCA segment
-  it overlaps most differ in start or in drop by more than 12 s either way: `START_GT_12S`, `DROP_GT_12S`, with
-  the direction.
-- **OA-SHD-009** ERAM reports with no OpenATCA sample are `ERAM_ONLY_SPAN` (consecutive reports one span, first to
-  last report as the duration); OpenATCA rows outside every ERAM segment widened by 12 s are `OA_ONLY_SPAN`
-  (consecutive rows one span).
-- **OA-SHD-010** Where ERAM and OpenATCA both have a sample, ERAM flagging coast and OpenATCA not is
-  `COAST_ERAM_ONLY` and the reverse is `COAST_OA_ONLY`.
-- **OA-SHD-011** With truth, each position event also names which system was closer to it (`ERAM`, `OpenATCA`,
-  `tie` within 1 m, or empty without truth), computed after classification: ERAM's distance is to the truth path
-  over the whole-second quantum, OpenATCA's to the truth at the stamp. The events, their order and values are the
-  same with and without truth.
+- **OA-SHD-007** Identity: at each report, ERAM's beacon code in force (each message's code carried forward) is
+  compared with the squawk in force that the OpenATCA adapter was offered (`ID_BEACON`, nothing is compared where
+  either side has none); an ERAM callsign not among the callsigns offered near the flight's span is `ID_CALLSIGN`
+  (case and padding ignored).
+- **OA-SHD-008** A paired aircraft's ERAM track segment (gaps over 30 s split segments) and the OpenATCA segment it
+  overlaps most differ in start or in drop by more than 12 s plus the ERAM report interval at that end (to the next
+  or previous report of the segment): `START_TIMING`, `DROP_TIMING`, with the direction. The summary prints the
+  median ERAM report interval.
+- **OA-SHD-009** ERAM reports with no OpenATCA sample are `ERAM_ONLY_SPAN` (consecutive reports one span);
+  OpenATCA rows outside the span of every ERAM flight of the aircraft, each widened by 12 s plus the report interval
+  at that end, are `OA_ONLY_SPAN` (consecutive rows one span). A span's duration is first to last plus half the
+  local sample interval at each end (a lone sample gets one interval; an interval counts at most 30 s).
+- **OA-SHD-010** Where ERAM has a report and OpenATCA has a row at exactly that time, ERAM flagging coast and
+  OpenATCA not is `COAST_ERAM_ONLY` and the reverse is `COAST_OA_ONLY`; the flag is not interpolated and the summary
+  says the two flags are different concepts.
+- **OA-SHD-011** With truth, each position event also names which system was closer to the truth at the ERAM
+  report time (`ERAM`, `OpenATCA`, `tie` within 1 m, or empty without truth), computed after classification. The
+  events, their order and values are the same with and without truth. The summary states that the truth shares
+  its source with OpenATCA's input and favours OpenATCA, and counts the truth queries that gave no answer.
 - **OA-SHD-012** The report is deterministic: `events.csv`, `flights.csv` and `summary.txt` are byte-identical for
   the same inputs; the summary holds no path, clock or run time and ends with a digest line over the three texts;
-  it counts every class (events, flights, span, largest) and gives no aircraft address or callsign.
+  it counts every class (events, flights, span, largest) and gives no aircraft address or callsign. A value that
+  rounds to zero is written without a sign.
 - **OA-SHD-013** The thresholds are one table and the summary prints every one.
 - **OA-SHD-014** The flight table has one row per group and per unpaired flight or aircraft, with a flight index
-  (the only name in the summary), the compared count and the worst cross-track, adjusted along-track and altitude
+  (the only name in the summary), the compared count and the worst cross-track, along-track and altitude
   difference.
 - **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
   identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
@@ -5083,6 +5095,16 @@ value is a difference only when strictly greater than it.
   opened, exit 2.
 - **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
   error, exit 2.
-- **OA-SHD-018** The two recordings are cut to the overlap of their recorded extents (ERAM's track positions
-  anywhere, OpenATCA's rows in the box) before anything is compared, edges inclusive; a flight or aircraft left with
-  no samples is gone, and the summary states the window in UTC. Recordings that do not overlap are an error.
+- **OA-SHD-018** The two recordings are cut to the overlap of their in-box recorded extents (ERAM's in-box track
+  positions, OpenATCA's rows) before anything is compared, edges inclusive; a flight or aircraft left with no
+  samples is gone, and the summary states the window in UTC. Recordings that do not overlap are an error.
+- **OA-SHD-019** A gap of more than 30 s between two reports of one ERAM flight is `ERAM_REPORT_GAP` with its
+  length; OpenATCA rows inside the flight's span are not `OA_ONLY_SPAN`.
+- **OA-SHD-020** Two ERAM flights of one aircraft with overlapping spans: the overlap is `DUP_ERAM_TRACK` (its
+  duration), and inside it only the flight with the earliest first report (ties: the lower flight index) is
+  compared. Each (aircraft, ERAM time) is compared once.
+- **OA-SHD-021** An address-paired ERAM flight more than 20 NM from the paired aircraft for 3 or more consecutive
+  reports is `ADDR_CONTRADICTS_TRACK` (with the span) and its reports in the span are left out of the position
+  classes and of the worst-case columns.
+- **OA-SHD-022** Every file the run opens is canonicalised and refused when it resolves into a sealed recording, so a
+  link inside an unsealed directory is caught; the run itself checks its arguments before creating anything.

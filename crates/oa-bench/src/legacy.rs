@@ -159,6 +159,22 @@ pub struct ThTable {
     pub coast: Vec<u8>,
 }
 
+/// Transponder code changes of ERAM flights: one row each time a message gave a flight a code
+/// other than the one it had (the first code counts), so the code in force at a time is the last
+/// row of the flight at or before it. Capped at [`MAX_BEACON_ROWS`]; a row that does not fit is
+/// counted, not stored.
+// A3: one Vec per column.
+#[derive(Clone, Debug, Default)]
+pub struct BeaconTable {
+    pub flight: Vec<u32>,
+    /// Message timestamp, Unix ms.
+    pub ts_ms: Vec<i64>,
+    pub code: Vec<u16>,
+}
+
+/// Most beacon change rows (a flight changes code a few times).
+pub const MAX_BEACON_ROWS: usize = 1 << 22;
+
 /// Handoff events.
 // A3: one Vec per column.
 #[derive(Clone, Debug, Default)]
@@ -284,6 +300,7 @@ impl Counts {
 pub struct Legacy {
     pub flights: Flights,
     pub th: ThTable,
+    pub beacons: BeaconTable,
     pub handoffs: HandoffTable,
     pub routes: RouteTable,
     pub route_points: RoutePoints,

@@ -56,7 +56,7 @@ fn with_squawk(mut a: oa_shadow::model::OaAircraft, sq: u16) -> oa_shadow::model
 #[test]
 fn a_flight_without_an_address_pairs_by_beacon_and_proximity_within_five_miles() {
     let mut f = track(None, 0, 96);
-    f.beacon = Some(1234);
+    f.beacons = vec![(T0, 1234)];
     // The right squawk and near: paired.
     let oa = oa_map(vec![with_squawk(oa_north(0x30, 0, 100, 100.0), 1234)]);
     let p = pair(&[f.clone()], &oa);
@@ -78,7 +78,7 @@ fn a_flight_without_an_address_pairs_by_beacon_and_proximity_within_five_miles()
     assert_eq!(near(9265.0), 0);
     // No beacon either: unpaired.
     let mut g = f;
-    g.beacon = None;
+    g.beacons.clear();
     let oa = oa_map(vec![with_squawk(oa_north(0x30, 0, 100, 100.0), 1234)]);
     assert_eq!(pair(&[g], &oa).unpaired_eram, vec![0]);
 }
@@ -87,7 +87,7 @@ fn a_flight_without_an_address_pairs_by_beacon_and_proximity_within_five_miles()
 #[test]
 fn beacon_pairing_takes_the_nearest_then_the_lowest_address_and_skips_address_paired_aircraft() {
     let mut f = track(None, 0, 96);
-    f.beacon = Some(7);
+    f.beacons = vec![(T0, 7)];
     let mut near = with_squawk(oa_north(0x50, 0, 100, 100.0), 7);
     let mut far = with_squawk(oa_north(0x40, 0, 100, 100.0), 7);
     for s in &mut far.samples {
@@ -117,12 +117,12 @@ fn unpaired_tracks_are_events_with_their_duration() {
     let c = compare_all(&eram, &oa, None);
     let e = of(&c, Class::UnpairedEram);
     assert_eq!(e.len(), 1);
-    assert_eq!(e[0].value, 96.0);
+    assert_eq!(e[0].value, 108.0); // 96 s plus half of 12 s at each end
     assert_eq!((e[0].t_ms, e[0].end_ms), (T0, T0 + 96_000));
     let o = of(&c, Class::UnpairedOa);
     assert_eq!(o.len(), 1);
-    assert_eq!(o[0].value, 60.0);
-    // Each has its own flight row and index.
+    assert_eq!(o[0].value, 61.0); // 60 s plus half of 1 s at each end
+                                  // Each has its own flight row and index.
     assert_eq!(c.flights.len(), 2);
     assert_eq!(c.flights[0].kind, "eram_only");
     assert_eq!(c.flights[1].kind, "oa_only");
@@ -131,7 +131,7 @@ fn unpaired_tracks_are_events_with_their_duration() {
 
 // REQ: OA-SHD-009
 #[test]
-fn eram_reports_without_an_openatca_sample_are_one_span_with_a_duration() {
+fn eram_reports_without_an_openatca_sample_are_one_span_with_a_padded_duration() {
     // OpenATCA has rows 0..=40 s and 70..=120 s; ERAM reports every 12 s from 12 to 108 s.
     let mut oa = oa_north(1, 0, 120, 100.0);
     oa.samples
@@ -141,18 +141,33 @@ fn eram_reports_without_an_openatca_sample_are_one_span_with_a_duration() {
         .collect();
     let c = compare_all(&[flight(Some(1), samples)], &oa_map(vec![oa]), None);
     let e = of(&c, Class::EramOnlySpan);
-    // Reports at 48, 60 and 72?? 72 is covered (row at 72); uncovered: 48 and 60.
+    // Uncovered: the reports at 48 and 60 s (72 s has a row). 12 s between them plus half the
+    // 12 s interval at each end.
     assert_eq!(e.len(), 1);
     assert_eq!((e[0].t_ms, e[0].end_ms), (T0 + 48_000, T0 + 60_000));
-    assert_eq!(e[0].value, 12.0);
-    assert_eq!(c.flights[0].eram_only_s, 12.0);
+    assert_eq!(e[0].value, 24.0);
+    assert_eq!(c.flights[0].eram_only_s, 24.0);
+}
+
+#[test]
+fn a_lone_report_gets_one_interval_and_the_interval_is_capped_at_the_segment_gap() {
+    use oa_shadow::compare::padded_ms;
+    assert_eq!(padded_ms(&[0, 12_000, 24_000], 1, 1), 12_000);
+    assert_eq!(
+        padded_ms(&[0, 12_000, 24_000], 0, 2),
+        24_000 + 6_000 + 6_000
+    );
+    assert_eq!(padded_ms(&[0, 12_000, 24_000], 0, 0), 12_000);
+    assert_eq!(padded_ms(&[5], 0, 0), 0);
+    // A neighbour 10 minutes away counts as one segment gap (30 s), half of it at the end.
+    assert_eq!(padded_ms(&[0, 600_000], 1, 1), 30_000);
 }
 
 // REQ: OA-SHD-009
 #[test]
-fn openatca_rows_beyond_the_timing_threshold_of_eram_are_an_openatca_only_span() {
-    // ERAM reports 24..=60 s; OpenATCA rows 0..=100 s. Rows more than 12 s before 24 s (t < 12)
-    // and after 72 s are OpenATCA only; those at exactly 12 s and 72 s are not.
+fn openatca_rows_outside_every_eram_flight_span_are_an_openatca_only_span() {
+    // ERAM reports 24..=60 s (12 s apart); OpenATCA rows 0..=100 s. A span is widened by 12 s
+    // plus the 12 s interval either side: [0, 84]. Rows 85..=100 are OpenATCA only.
     let samples = (2..=5)
         .map(|k| eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, 0.0))
         .collect();
@@ -162,10 +177,44 @@ fn openatca_rows_beyond_the_timing_threshold_of_eram_are_an_openatca_only_span()
         None,
     );
     let e = of(&c, Class::OaOnlySpan);
-    assert_eq!(e.len(), 2);
-    assert_eq!((e[0].t_ms, e[0].end_ms), (T0, T0 + 11_000));
-    assert_eq!((e[1].t_ms, e[1].end_ms), (T0 + 73_000, T0 + 100_000));
-    assert_eq!(c.flights[0].oa_only_s, 11.0 + 27.0);
+    assert_eq!(e.len(), 1);
+    assert_eq!((e[0].t_ms, e[0].end_ms), (T0 + 85_000, T0 + 100_000));
+    assert_eq!(e[0].value, 16.0);
+    assert_eq!(c.flights[0].oa_only_s, 16.0);
+}
+
+// REQ: OA-SHD-019
+#[test]
+fn a_gap_inside_one_eram_flight_is_a_report_gap_not_an_openatca_only_span() {
+    // Reports 12, 24, then 24 + 31 = 55 s and 67 s; OpenATCA flies through the gap.
+    let times = [12, 24, 55, 67];
+    let samples = times
+        .iter()
+        .map(|&t| eram_at(t, t as f64, 100.0, 0.0, 0.0))
+        .collect();
+    let c = compare_all(
+        &[flight(Some(1), samples)],
+        &oa_map(vec![oa_north(1, 0, 80, 100.0)]),
+        None,
+    );
+    let g = of(&c, Class::EramReportGap);
+    assert_eq!(g.len(), 1);
+    assert_eq!(
+        (g[0].t_ms, g[0].end_ms, g[0].value),
+        (T0 + 24_000, T0 + 55_000, 31.0)
+    );
+    assert_eq!(count(&c, Class::OaOnlySpan), 0);
+    // Exactly 30 s is not a gap.
+    let samples = [12, 42]
+        .iter()
+        .map(|&t| eram_at(t, t as f64, 100.0, 0.0, 0.0))
+        .collect();
+    let c = compare_all(
+        &[flight(Some(1), samples)],
+        &oa_map(vec![oa_north(1, 0, 80, 100.0)]),
+        None,
+    );
+    assert_eq!(count(&c, Class::EramReportGap), 0);
 }
 
 /// An aircraft northbound at 100 m/s with rows every second from `start_ms` to `end_ms` after
@@ -195,20 +244,22 @@ fn eram_24_to_60() -> EramFlight {
 
 // REQ: OA-SHD-008
 #[test]
-fn start_and_drop_timing_differences_are_over_twelve_seconds_either_sign() {
-    assert!(!THRESHOLDS.timing_differs(12_000));
-    assert!(!THRESHOLDS.timing_differs(-12_000));
-    assert!(THRESHOLDS.timing_differs(12_001));
-    assert!(THRESHOLDS.timing_differs(-12_001));
-    // ERAM 24..=60 s; OpenATCA starts at 24 s + d and drops at 60 s + e (milliseconds).
+fn start_and_drop_differences_must_exceed_twelve_seconds_plus_the_eram_report_interval() {
+    assert!(!THRESHOLDS.timing_differs(12_000, 0));
+    assert!(THRESHOLDS.timing_differs(12_001, 0));
+    assert!(!THRESHOLDS.timing_differs(-24_000, 12_000));
+    assert!(THRESHOLDS.timing_differs(-24_001, 12_000));
+    // ERAM 24..=60 s, a report every 12 s, so the threshold is 24 s at either end.
     for (d, e, starts, drops) in [
         (0i64, 0i64, 0usize, 0usize),
-        (12_000, -12_000, 0, 0),
-        (12_001, -12_001, 1, 1),
-        (-12_000, 12_000, 0, 0),
-        (-12_001, 12_001, 1, 1),
-        (30_000, 0, 1, 0),
-        (0, 30_000, 0, 1),
+        (24_000, 0, 0, 0),
+        (24_001, 0, 1, 0),
+        (-24_000, 0, 0, 0),
+        (-24_001, 0, 1, 0),
+        (0, 24_000, 0, 0),
+        (0, 24_001, 0, 1),
+        (0, -24_000, 0, 0),
+        (0, -24_001, 0, 1),
     ] {
         let oa = oa_between(1, 24_000 + d, 60_000 + e);
         let c = compare_all(&[eram_24_to_60()], &oa_map(vec![oa]), None);
@@ -218,6 +269,13 @@ fn start_and_drop_timing_differences_are_over_twelve_seconds_either_sign() {
             "d {d} e {e}"
         );
     }
+    // The median ERAM report interval is recorded for the summary.
+    let c = compare_all(
+        &[eram_24_to_60()],
+        &oa_map(vec![oa_between(1, 0, 100_000)]),
+        None,
+    );
+    assert_eq!(c.totals.eram_intervals_ms, vec![12_000, 12_000, 12_000]);
 }
 
 // REQ: OA-SHD-008
@@ -257,37 +315,38 @@ fn segments_split_on_gaps_over_the_limit_only() {
 
 // REQ: OA-SHD-007
 #[test]
-fn identity_differences_are_beacon_and_callsign_not_offered_near_the_flight() {
+fn beacon_is_compared_per_report_with_the_code_in_force_on_each_side() {
     let mut oa = oa_north(1, 0, 120, 100.0);
     oa.idents = vec![
         ident(0, Some(1200), Some("N123AB")),
         ident(60, Some(2000), None),
     ];
-    let mk = |beacon: Option<u16>, cs: Option<&str>| {
+    let mk = |beacons: Vec<(i64, u16)>, cs: Option<&str>| {
         let mut f = track(Some(1), 12, 108);
-        f.beacon = beacon;
+        f.beacons = beacons;
         f.callsign = cs.map(cs8);
         compare_all(&[f], &oa_map(vec![oa.clone()]), None)
     };
-    // Agreeing on either of the squawks offered, case and padding ignored.
-    let c = mk(Some(2000), Some("n123ab"));
+    // Agreeing at every report, ERAM changing code when OpenATCA's squawk changes.
+    let c = mk(vec![(T0, 1200), (T0 + 60_000, 2000)], Some("n123ab"));
     assert_eq!(
         (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
         (0, 0)
     );
-    let c = mk(Some(1200), Some("N123AB  "));
-    assert_eq!(
-        (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
-        (0, 0)
-    );
-    // Disagreeing.
-    let c = mk(Some(7000), Some("DAL9"));
-    assert_eq!(count(&c, Class::IdBeacon), 1);
+    assert_eq!(c.totals.beacon_compared, 9);
+    // ERAM's code is only in force from its message: a report before the first message has none.
+    let c = mk(vec![(T0 + 30_000, 1200)], None);
+    assert_eq!(c.totals.beacon_compared, 7);
+    assert_eq!(count(&c, Class::IdBeacon), 5); // reports 60..=108 s disagree with 2000
+                                               // Disagreeing at every report, and on the callsign.
+    let c = mk(vec![(T0, 7000)], Some("DAL9"));
+    assert_eq!(count(&c, Class::IdBeacon), 9);
     assert_eq!(count(&c, Class::IdCallsign), 1);
-    assert_eq!(of(&c, Class::IdBeacon)[0].detail, "eram=7000 oa=1200,2000");
+    assert_eq!(of(&c, Class::IdBeacon)[0].detail, "eram=7000 oa=1200");
+    assert_eq!(of(&c, Class::IdBeacon)[8].detail, "eram=7000 oa=2000");
     assert_eq!(of(&c, Class::IdCallsign)[0].detail, "eram=DAL9 oa=N123AB");
-    // Where either side has none, there is nothing to compare.
-    let c = mk(None, None);
+    // Nothing to compare where either side has none.
+    let c = mk(vec![], None);
     assert_eq!(
         (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
         (0, 0)
@@ -295,7 +354,7 @@ fn identity_differences_are_beacon_and_callsign_not_offered_near_the_flight() {
     let mut bare = oa.clone();
     bare.idents.clear();
     let mut f = track(Some(1), 12, 108);
-    f.beacon = Some(7000);
+    f.beacons = vec![(T0, 7000)];
     f.callsign = Some(cs8("DAL9"));
     let c = compare_all(&[f], &oa_map(vec![bare]), None);
     assert_eq!(
@@ -306,23 +365,197 @@ fn identity_differences_are_beacon_and_callsign_not_offered_near_the_flight() {
 
 // REQ: OA-SHD-007
 #[test]
-fn identity_points_outside_the_flights_span_do_not_count_except_the_one_in_force() {
-    let mut oa = oa_north(1, 0, 400, 100.0);
+fn the_squawk_in_force_is_the_last_point_at_or_before_the_time() {
+    let mut oa = oa_north(1, 0, 10, 100.0);
     oa.idents = vec![
         ident(0, Some(1111), None),
         ident(100, Some(2222), None),
-        ident(300, Some(3333), None),
+        ident(300, None, None),
     ];
-    // The flight is at 150..=200 s: the point in force at the start is 2222 (from 100 s); 3333
-    // starts 100 s after the span plus one segment gap (30 s), and 1111 is superseded.
-    let mut f = track(Some(1), 150, 198);
-    f.beacon = Some(2222);
-    let c = compare_all(&[f.clone()], &oa_map(vec![oa.clone()]), None);
-    assert_eq!(count(&c, Class::IdBeacon), 0);
-    f.beacon = Some(1111);
-    let c = compare_all(&[f.clone()], &oa_map(vec![oa.clone()]), None);
-    assert_eq!(count(&c, Class::IdBeacon), 1);
-    f.beacon = Some(3333);
+    assert_eq!(oa.squawk_at(T0 - 1), None);
+    assert_eq!(oa.squawk_at(T0), Some(1111));
+    assert_eq!(oa.squawk_at(T0 + 99_999), Some(1111));
+    assert_eq!(oa.squawk_at(T0 + 100_000), Some(2222));
+    assert_eq!(oa.squawk_at(T0 + 300_000), None);
+}
+
+// REQ: OA-SHD-020
+#[test]
+fn two_overlapping_eram_flights_of_one_aircraft_are_compared_once() {
+    // Flight A reports 12..=108 s on the path; flight B (a duplicate track) reports 48..=120 s
+    // 1000 m east of it. Inside the overlap only A is compared.
+    let a = track(Some(0xA), 12, 108);
+    let mut b = flight(
+        Some(0xA),
+        (48..=120)
+            .step_by(12)
+            .map(|s| eram_at(s, s as f64, 100.0, 1000.0, 0.0))
+            .collect(),
+    );
+    b.gufi = 2;
+    let c = compare_all(
+        &[a.clone(), b.clone()],
+        &oa_map(vec![oa_north(0xA, 0, 130, 100.0)]),
+        None,
+    );
+    let d = of(&c, Class::DupEramTrack);
+    assert_eq!(d.len(), 1);
+    assert_eq!(
+        (d[0].t_ms, d[0].end_ms, d[0].value),
+        (T0 + 48_000, T0 + 108_000, 60.0)
+    );
+    // A's 9 reports and B's one report after the overlap (120 s): each time once.
+    assert_eq!(c.totals.compared, 10);
+    assert_eq!(c.flights.len(), 1);
+    // B's reports inside the overlap are not compared, the one after is.
+    assert_eq!(count(&c, Class::PosCross05), 1);
+    assert_eq!(of(&c, Class::PosCross05)[0].t_ms, T0 + 120_000);
+    // The flight with the earliest first report is the primary whatever the input order.
+    let c2 = compare_all(
+        &[b.clone(), a.clone()],
+        &oa_map(vec![oa_north(0xA, 0, 130, 100.0)]),
+        None,
+    );
+    assert_eq!(c2.totals.compared, 10);
+    assert_eq!(count(&c2, Class::PosCross05), 1);
+    // Equal first reports: the lower flight index is the primary.
+    let mut b0 = b.clone();
+    b0.samples = (12..=108)
+        .step_by(12)
+        .map(|s| eram_at(s, s as f64, 100.0, 1000.0, 0.0))
+        .collect();
+    let c3 = compare_all(
+        &[a.clone(), b0.clone()],
+        &oa_map(vec![oa_north(0xA, 0, 130, 100.0)]),
+        None,
+    );
+    assert_eq!((c3.totals.compared, count(&c3, Class::PosCross05)), (9, 0));
+    let c4 = compare_all(&[b0, a], &oa_map(vec![oa_north(0xA, 0, 130, 100.0)]), None);
+    assert_eq!((c4.totals.compared, count(&c4, Class::PosCross05)), (9, 9));
+    // Disjoint spans of one aircraft are not duplicates.
+    let c5 = compare_all(
+        &[track(Some(0xA), 12, 48), track(Some(0xA), 72, 108)],
+        &oa_map(vec![oa_north(0xA, 0, 130, 100.0)]),
+        None,
+    );
+    assert_eq!(count(&c5, Class::DupEramTrack), 0);
+    assert_eq!(c5.totals.compared, 4 + 4);
+}
+
+// REQ: OA-SHD-021
+#[test]
+fn an_address_far_from_its_aircraft_for_three_reports_is_contradicted_and_left_out_of_position() {
+    // 20 NM = 37.04 km. Reports 12..=108 s: 48..=72 s (three) are 50 km north of the aircraft.
+    let far = |t: i64| {
+        if (48..=72).contains(&t) {
+            50_000.0
+        } else {
+            0.0
+        }
+    };
+    let samples: Vec<_> = (1..=9)
+        .map(|k| eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, far(k * 12)))
+        .collect();
+    let c = compare_all(
+        &[flight(Some(1), samples.clone())],
+        &oa_map(vec![oa_north(1, 0, 120, 100.0)]),
+        None,
+    );
+    let e = of(&c, Class::AddrContradictsTrack);
+    assert_eq!(e.len(), 1);
+    assert_eq!((e[0].t_ms, e[0].end_ms), (T0 + 48_000, T0 + 72_000));
+    assert_eq!(e[0].value, 24.0 + 12.0); // 24 s between the reports plus half of 12 s each end
+    assert_eq!(e[0].detail, "reports=3");
+    assert_eq!(
+        count(&c, Class::PosAlong10) + count(&c, Class::PosCross10),
+        0
+    );
+    assert!(c.flights[0].worst_along_m < 1.0);
+    // Two far reports are not enough: they stay position events.
+    let two: Vec<_> = (1..=9)
+        .map(|k| {
+            eram_at(
+                k * 12,
+                (k * 12) as f64,
+                100.0,
+                0.0,
+                if (48..=60).contains(&(k * 12)) {
+                    50_000.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .collect();
+    let c = compare_all(
+        &[flight(Some(1), two)],
+        &oa_map(vec![oa_north(1, 0, 120, 100.0)]),
+        None,
+    );
+    assert_eq!(count(&c, Class::AddrContradictsTrack), 0);
+    assert_eq!(count(&c, Class::PosAlong10), 2);
+    // A beacon-paired flight is not judged by its address.
+    let mut f = flight(None, samples);
+    f.beacons = vec![(T0, 5)];
+    let mut oa = oa_north(1, 0, 120, 100.0);
+    oa.idents = vec![ident(0, Some(5), None)];
     let c = compare_all(&[f], &oa_map(vec![oa]), None);
-    assert_eq!(count(&c, Class::IdBeacon), 1);
+    assert_eq!(count(&c, Class::AddrContradictsTrack), 0);
+}
+
+// REQ: OA-SHD-001
+#[test]
+fn an_address_openatca_has_no_aircraft_for_falls_through_to_the_beacon_rule() {
+    let mut f = track(Some(0xDEAD), 0, 96);
+    f.beacons = vec![(T0, 1234)];
+    let oa = oa_map(vec![with_squawk(oa_north(0x30, 0, 100, 100.0), 1234)]);
+    let p = pair(&[f.clone()], &oa);
+    assert_eq!(p.groups.len(), 1);
+    assert_eq!(p.groups[0].oa_addr, 0x30);
+    assert_eq!(p.groups[0].eram, vec![(0, Rule::BeaconProximity)]);
+    // Without a beacon it stays unpaired.
+    f.beacons.clear();
+    assert_eq!(pair(&[f], &oa).unpaired_eram, vec![0]);
+}
+
+// REQ: OA-SHD-001
+#[test]
+fn beacon_claims_are_exclusive_only_within_overlapping_spans() {
+    let oa = oa_map(vec![with_squawk(oa_north(0x30, 0, 400, 100.0), 7)]);
+    let mk = |from: i64, to: i64, addr: Option<u32>| {
+        let mut f = track(addr, from, to);
+        f.beacons = vec![(T0, 7)];
+        f
+    };
+    // Paired by address over 0..=96 s; a beacon flight over 60..=156 s overlaps it: refused.
+    let p = pair(&[mk(0, 96, Some(0x30)), mk(60, 156, None)], &oa);
+    assert_eq!(p.unpaired_eram, vec![1]);
+    // One over 120..=200 s does not overlap: it pairs.
+    let p = pair(&[mk(0, 96, Some(0x30)), mk(120, 204, None)], &oa);
+    assert_eq!(
+        p.groups[0].eram,
+        vec![(0, Rule::Address), (1, Rule::BeaconProximity)]
+    );
+    // Two beacon flights at once: the first claims, the second is refused.
+    let p = pair(&[mk(0, 96, None), mk(24, 120, None)], &oa);
+    assert_eq!(
+        (p.groups[0].eram.len(), p.unpaired_eram.clone()),
+        (1, vec![1])
+    );
+    // One after the other: both pair.
+    let p = pair(&[mk(0, 48, None), mk(96, 144, None)], &oa);
+    assert_eq!(p.groups[0].eram.len(), 2);
+}
+
+// REQ: OA-SHD-001
+#[test]
+fn the_beacon_in_force_at_the_first_report_pairs_the_flight() {
+    let oa = oa_map(vec![with_squawk(oa_north(0x30, 0, 100, 100.0), 9)]);
+    let mut f = track(None, 12, 96);
+    // 5 from the start, 9 only from 40 s: the code in force at the first report (5) is used.
+    f.beacons = vec![(T0, 5), (T0 + 40_000, 9)];
+    assert_eq!(pair(&[f.clone()], &oa).unpaired_eram, vec![0]);
+    // A first message after the first report: the earliest code is used.
+    f.beacons = vec![(T0 + 40_000, 9)];
+    assert_eq!(pair(&[f], &oa).groups.len(), 1);
 }

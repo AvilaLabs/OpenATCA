@@ -9,8 +9,11 @@ use std::fs;
 
 use oa_adsb::{Reports, NONE_U16, ZAU_BOX};
 use oa_bench::adsb_truth;
-use oa_bench::input::{load, load_adsb, FeedInput};
-use oa_bench::legacy::{NONE, NO_ALT, NO_BEACON};
+use std::io;
+use std::rc::Rc;
+
+use oa_bench::input::{file_opener, load_adsb_with, load_with, FeedInput, Opener};
+use oa_bench::legacy::{NONE, NO_ALT};
 use oa_replay::FeedKind;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
@@ -24,9 +27,10 @@ use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
 use crate::args::Args;
 use crate::compare::compare_all;
+use crate::guard::refuse_sealed;
 use crate::model::{EramFlight, EramSample, IdentPoint, OaAircraft, OaSample};
 use crate::report::render;
-use crate::window::{overlap, restrict_eram, restrict_oa, utc_text};
+use crate::window::{extent, overlap, restrict_eram, restrict_oa, utc_text};
 
 /// Whether a position (1e-7 degree) is inside the clip box both systems are restricted to.
 pub fn in_box(lat_e7: i32, lon_e7: i32) -> bool {
@@ -104,14 +108,29 @@ fn collect_ticks(out: &TrackOutput, rows: &mut BTreeMap<u32, Vec<OaSample>>) {
     }
 }
 
+/// The opener every input file goes through: the path is canonicalised and a sealed target is
+/// refused before the file is opened, so a link inside an unsealed directory is caught too.
+pub fn guarded_opener() -> Opener {
+    let inner = file_opener();
+    Rc::new(move |p: &std::path::Path| {
+        refuse_sealed(p).map_err(io::Error::other)?;
+        inner(p)
+    })
+}
+
 /// Runs the whole comparison and writes `events.csv`, `flights.csv` and `summary.txt` to the
 /// output directory; returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    for p in [&args.adsb, &args.sfdps_dir, &args.out] {
+        refuse_sealed(p)?;
+    }
+    let open = guarded_opener();
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let mut header: Vec<String> = Vec::new();
 
     // OpenATCA: the tracker on set A.
-    let clip = load_adsb(&args.adsb).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
+    let clip =
+        load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -174,10 +193,13 @@ pub fn run(args: &Args) -> Result<String, String> {
         .collect();
 
     // ERAM: the SFDPS track positions in the box.
-    let loaded = load(&[FeedInput {
-        feed: FeedKind::Sfdps,
-        dir: args.sfdps_dir.clone(),
-    }])
+    let loaded = load_with(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: args.sfdps_dir.clone(),
+        }],
+        &open,
+    )
     .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     for i in &loaded.inputs {
         header.push(format!(
@@ -186,29 +208,6 @@ pub fn run(args: &Args) -> Result<String, String> {
         ));
     }
     let leg = &loaded.legacy;
-    // The recorded extent of ERAM's track positions, anywhere (not only in the box).
-    let eram_extent = leg
-        .th
-        .pos_ms
-        .iter()
-        .fold(None, |e: Option<(i64, i64)>, &t| {
-            Some(e.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
-        });
-    let oa_extent = oa
-        .values()
-        .flat_map(|a| a.samples.first().zip(a.samples.last()))
-        .fold(None, |e: Option<(i64, i64)>, (f, l)| {
-            Some(e.map_or((f.t_ms, l.t_ms), |(a, b)| (a.min(f.t_ms), b.max(l.t_ms))))
-        });
-    let (lo, hi) = eram_extent
-        .zip(oa_extent)
-        .and_then(|(a, b)| overlap(a, b))
-        .ok_or("the two recordings do not overlap in time")?;
-    header.push(format!(
-        "comparison window (overlap of the two recordings, both cut to it): {} to {} UTC",
-        utc_text(lo),
-        utc_text(hi)
-    ));
     let mut by_flight: BTreeMap<u32, Vec<EramSample>> = BTreeMap::new();
     for i in 0..leg.th.flight.len() {
         let (Some(&f), Some(&t), Some(&lat), Some(&lon), Some(&alt), Some(&coast)) = (
@@ -231,6 +230,35 @@ pub fn run(args: &Args) -> Result<String, String> {
             });
         }
     }
+    // The recorded extents inside the box (the clip is boxed, so only those are comparable).
+    let eram_extent = extent(by_flight.values().flat_map(|v| v.iter().map(|s| s.t_ms)));
+    let oa_extent = extent(
+        oa.values()
+            .flat_map(|a| a.samples.first().zip(a.samples.last()))
+            .flat_map(|(f, l)| [f.t_ms, l.t_ms]),
+    );
+    let (lo, hi) = eram_extent
+        .zip(oa_extent)
+        .and_then(|(a, b)| overlap(a, b))
+        .ok_or("the two recordings do not overlap in time")?;
+    header.push(format!(
+        "comparison window (overlap of the two in-box recorded extents, both cut to it): {} to {} UTC",
+        utc_text(lo),
+        utc_text(hi)
+    ));
+    let mut beacons: BTreeMap<u32, Vec<(i64, u16)>> = BTreeMap::new();
+    for i in 0..leg.beacons.flight.len() {
+        if let (Some(&f), Some(&t), Some(&c)) = (
+            leg.beacons.flight.get(i),
+            leg.beacons.ts_ms.get(i),
+            leg.beacons.code.get(i),
+        ) {
+            beacons.entry(f).or_default().push((t, c));
+        }
+    }
+    for v in beacons.values_mut() {
+        v.sort_by_key(|b| b.0);
+    }
     let mut eram: Vec<EramFlight> = Vec::new();
     for (f, mut samples) in by_flight {
         let fi = f as usize;
@@ -241,12 +269,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         eram.push(EramFlight {
             gufi,
             addr: leg.flights.addr.get(fi).copied().filter(|&a| a != NONE),
-            beacon: leg
-                .flights
-                .beacon
-                .get(fi)
-                .copied()
-                .filter(|&b| b != NO_BEACON),
+            beacons: beacons.remove(&f).unwrap_or_default(),
             callsign: leg.flights.callsign.get(fi).copied().and_then(text8),
             samples,
         });

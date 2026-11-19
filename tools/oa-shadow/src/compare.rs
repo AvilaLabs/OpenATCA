@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::geo::{adjudicate, oa_at, separation, Closer, OaPoint};
+use crate::geo::{adjudicate, oa_at, oa_exact, separation, Closer, OaPoint, Separation};
 use crate::model::{callsign_text, EramFlight, EramSample, OaAircraft};
 use crate::pairing::{pair, Rule};
 use crate::thresholds::THRESHOLDS;
@@ -16,10 +16,20 @@ pub enum Class {
     UnpairedEram,
     /// An OpenATCA aircraft with no ERAM flight; the span is its in-box rows.
     UnpairedOa,
-    /// A paired aircraft: ERAM reports where OpenATCA has no sample (first to last such report).
+    /// Two ERAM flights of one aircraft over the same time: the overlap; inside it only the
+    /// flight with the earliest first report is compared.
+    DupEramTrack,
+    /// An address-paired ERAM flight far from the aircraft of its address; its reports in the
+    /// span are left out of the position classes.
+    AddrContradictsTrack,
+    /// A paired aircraft: ERAM reports where OpenATCA has no sample.
     EramOnlySpan,
-    /// A paired aircraft: OpenATCA rows outside ERAM's track by more than the timing threshold.
+    /// A paired aircraft: OpenATCA rows outside the span of every ERAM flight (widened by the
+    /// start/drop allowance).
     OaOnlySpan,
+    /// A gap over the segment gap between two reports of one ERAM flight.
+    EramReportGap,
+    /// Position beyond 0.5 NM, up to 1 NM.
     PosCross05,
     PosCross10,
     PosAlong05,
@@ -36,11 +46,14 @@ pub enum Class {
 }
 
 /// All classes in report order.
-pub const CLASSES: [Class; 15] = [
+pub const CLASSES: [Class; 18] = [
     Class::UnpairedEram,
     Class::UnpairedOa,
+    Class::DupEramTrack,
+    Class::AddrContradictsTrack,
     Class::EramOnlySpan,
     Class::OaOnlySpan,
+    Class::EramReportGap,
     Class::PosCross05,
     Class::PosCross10,
     Class::PosAlong05,
@@ -59,17 +72,20 @@ impl Class {
         match self {
             Class::UnpairedEram => "UNPAIRED_ERAM",
             Class::UnpairedOa => "UNPAIRED_OA",
+            Class::DupEramTrack => "DUP_ERAM_TRACK",
+            Class::AddrContradictsTrack => "ADDR_CONTRADICTS_TRACK",
             Class::EramOnlySpan => "ERAM_ONLY_SPAN",
             Class::OaOnlySpan => "OA_ONLY_SPAN",
-            Class::PosCross05 => "POS_CROSS_GT_0.5NM",
+            Class::EramReportGap => "ERAM_REPORT_GAP",
+            Class::PosCross05 => "POS_CROSS_0P5_TO_1NM",
             Class::PosCross10 => "POS_CROSS_GT_1NM",
-            Class::PosAlong05 => "POS_ALONG_GT_0.5NM",
+            Class::PosAlong05 => "POS_ALONG_0P5_TO_1NM",
             Class::PosAlong10 => "POS_ALONG_GT_1NM",
             Class::Alt => "ALT_GT_300FT",
             Class::IdBeacon => "ID_BEACON",
             Class::IdCallsign => "ID_CALLSIGN",
-            Class::StartTiming => "START_GT_12S",
-            Class::DropTiming => "DROP_GT_12S",
+            Class::StartTiming => "START_TIMING",
+            Class::DropTiming => "DROP_TIMING",
             Class::CoastEramOnly => "COAST_ERAM_ONLY",
             Class::CoastOaOnly => "COAST_OA_ONLY",
         }
@@ -83,11 +99,22 @@ impl Class {
         )
     }
 
-    /// Whether the event describes a span of time (its duration is the statistic).
+    /// Whether the event is an along-track position divergence.
+    pub fn is_along(self) -> bool {
+        matches!(self, Class::PosAlong05 | Class::PosAlong10)
+    }
+
+    /// Whether the event describes a span of time (its value is a duration, seconds).
     pub fn is_span(self) -> bool {
         matches!(
             self,
-            Class::UnpairedEram | Class::UnpairedOa | Class::EramOnlySpan | Class::OaOnlySpan
+            Class::UnpairedEram
+                | Class::UnpairedOa
+                | Class::DupEramTrack
+                | Class::AddrContradictsTrack
+                | Class::EramOnlySpan
+                | Class::OaOnlySpan
+                | Class::EramReportGap
         )
     }
 }
@@ -103,13 +130,16 @@ pub struct Event {
     pub t_ms: i64,
     /// End time for a span; for a timing event the OpenATCA time; else equal to `t_ms`.
     pub end_ms: i64,
-    /// The class's statistic: span seconds, separation metres, altitude feet or timing seconds
-    /// (magnitudes).
+    /// The class's statistic: span seconds (padded, see [`padded_ms`]), separation metres,
+    /// altitude feet or timing seconds (magnitudes).
     pub value: f64,
     pub cross_m: f64,
-    pub along_raw_m: f64,
-    pub along_adj_m: f64,
-    pub horiz_adj_m: f64,
+    pub along_m: f64,
+    pub credit_m: f64,
+    pub horiz_m: f64,
+    /// Along-track events: whether ground speed times 1 s would bring the along-track
+    /// separation under this event's threshold (the ERAM whole-second stamp could explain it).
+    pub within_stamp_allowance: Option<bool>,
     /// Signed ERAM minus OpenATCA, feet.
     pub alt_diff_ft: f64,
     pub detail: String,
@@ -124,9 +154,10 @@ fn event(flight: u32, class: Class, t_ms: i64) -> Event {
         end_ms: t_ms,
         value: f64::NAN,
         cross_m: f64::NAN,
-        along_raw_m: f64::NAN,
-        along_adj_m: f64::NAN,
-        horiz_adj_m: f64::NAN,
+        along_m: f64::NAN,
+        credit_m: f64::NAN,
+        horiz_m: f64::NAN,
+        within_stamp_allowance: None,
         alt_diff_ft: f64::NAN,
         detail: String::new(),
         closer: Closer::NoTruth,
@@ -147,7 +178,7 @@ pub struct FlightRow {
     pub eram_samples: u64,
     pub compared: u64,
     pub worst_cross_m: f64,
-    pub worst_along_adj_m: f64,
+    pub worst_along_m: f64,
     pub worst_alt_ft: f64,
     pub events: u64,
     pub eram_only_s: f64,
@@ -168,10 +199,14 @@ pub struct Totals {
     pub compared: u64,
     pub alt_compared: u64,
     pub alt_not_comparable: u64,
+    /// Reports with an OpenATCA row at exactly the report time.
     pub coast_compared: u64,
+    pub beacon_compared: u64,
     /// Signed ERAM minus OpenATCA altitude, by ERAM altitude below and at/above 18,000 ft.
     pub alt_diffs_below_fl180: Vec<f64>,
     pub alt_diffs_at_or_above_fl180: Vec<f64>,
+    /// Intervals between consecutive reports of the compared ERAM tracks (within a segment).
+    pub eram_intervals_ms: Vec<i64>,
 }
 
 /// The whole comparison.
@@ -190,11 +225,20 @@ pub type TruthAt<'a> = &'a dyn Fn(u32, i64) -> Option<(f64, f64)>;
 
 /// Maximal runs of times (in order) with no gap over `gap_ms`, as `(first, last)`.
 pub fn segments(times: &[i64], gap_ms: i64) -> Vec<(i64, i64)> {
-    let mut out: Vec<(i64, i64)> = Vec::new();
-    for &t in times {
-        match out.last_mut() {
-            Some(s) if t - s.1 <= gap_ms => s.1 = t.max(s.1),
-            _ => out.push((t, t)),
+    segment_ix(times, gap_ms)
+        .into_iter()
+        .filter_map(|(i, j)| Some((*times.get(i)?, *times.get(j)?)))
+        .collect()
+}
+
+/// The same runs as index ranges `(first, last)`.
+pub fn segment_ix(times: &[i64], gap_ms: i64) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (k, &t) in times.iter().enumerate() {
+        let prev = k.checked_sub(1).and_then(|p| times.get(p));
+        match (out.last_mut(), prev) {
+            (Some(s), Some(&p)) if t - p <= gap_ms => s.1 = k,
+            _ => out.push((k, k)),
         }
     }
     out
@@ -202,6 +246,37 @@ pub fn segments(times: &[i64], gap_ms: i64) -> Vec<(i64, i64)> {
 
 fn seconds(ms: i64) -> f64 {
     ms as f64 / 1000.0
+}
+
+/// The duration, ms, of the run of samples `i..=j` of `times` with half the local sample
+/// interval added at each end: the interval on the end's own side, or the other side's when it
+/// has no neighbour; a lone sample gets one interval. An interval is at most the segment gap.
+pub fn padded_ms(times: &[i64], i: usize, j: usize) -> i64 {
+    let gap = THRESHOLDS.segment_gap_ms;
+    let iv = |a: usize, b: usize| match (times.get(a), times.get(b)) {
+        (Some(x), Some(y)) => (y - x).abs().min(gap),
+        _ => 0,
+    };
+    let n = times.len();
+    let left = if i > 0 {
+        iv(i - 1, i)
+    } else if i + 1 < n {
+        iv(i, i + 1)
+    } else {
+        0
+    };
+    let right = if j + 1 < n {
+        iv(j, j + 1)
+    } else if j > 0 {
+        iv(j - 1, j)
+    } else {
+        0
+    };
+    let core = match (times.get(i), times.get(j)) {
+        (Some(a), Some(b)) => b - a,
+        _ => 0,
+    };
+    core + left / 2 + right / 2
 }
 
 /// Compares `eram` with `oa`. `eram` flights and each flight's samples must be in a fixed order
@@ -228,8 +303,11 @@ pub fn compare_all(
         let Some(ac) = oa.get(&g.oa_addr) else {
             continue;
         };
-        let flights_of: Vec<&EramFlight> =
-            g.eram.iter().filter_map(|&(i, _)| eram.get(i)).collect();
+        let flights_of: Vec<(&EramFlight, Rule)> = g
+            .eram
+            .iter()
+            .filter_map(|&(i, r)| eram.get(i).map(|f| (f, r)))
+            .collect();
         for &(_, r) in &g.eram {
             match r {
                 Rule::Address => totals.paired_by_address += 1,
@@ -247,62 +325,59 @@ pub fn compare_all(
             eram_samples: 0,
             compared: 0,
             worst_cross_m: 0.0,
-            worst_along_adj_m: 0.0,
+            worst_along_m: 0.0,
             worst_alt_ft: 0.0,
             events: 0,
             eram_only_s: 0.0,
             oa_only_s: 0.0,
         };
         let before = events.len();
-        compare_group(
-            flight,
-            ac,
-            &flights_of,
-            truth,
-            &mut events,
-            &mut row,
-            &mut totals,
-        );
+        let ctx = Ctx { flight, ac, truth };
+        compare_group(&ctx, &flights_of, &mut events, &mut row, &mut totals);
         row.events = (events.len() - before) as u64;
         flights.push(row);
     }
     for &i in &pairing.unpaired_eram {
         let Some(f) = eram.get(i) else { continue };
         let flight = flights.len() as u32;
-        let (Some(a), Some(b)) = (f.samples.first(), f.samples.last()) else {
+        let times: Vec<i64> = f.samples.iter().map(|s| s.t_ms).collect();
+        let (Some(&a), Some(&b)) = (times.first(), times.last()) else {
             continue;
         };
-        let mut e = event(flight, Class::UnpairedEram, a.t_ms);
-        e.end_ms = b.t_ms;
-        e.value = seconds(b.t_ms - a.t_ms);
+        let mut e = event(flight, Class::UnpairedEram, a);
+        e.end_ms = b;
+        e.value = seconds(padded_ms(&times, 0, times.len() - 1));
         e.detail = format!("samples={}", f.samples.len());
+        let v = e.value;
         events.push(e);
         flights.push(lone_row(
             flight,
             f.addr,
             "eram_only",
             f.samples.len() as u64,
-            seconds(b.t_ms - a.t_ms),
+            v,
             true,
         ));
     }
     for &addr in &pairing.unpaired_oa {
         let Some(ac) = oa.get(&addr) else { continue };
         let flight = flights.len() as u32;
-        let (Some(a), Some(b)) = (ac.samples.first(), ac.samples.last()) else {
+        let times: Vec<i64> = ac.samples.iter().map(|s| s.t_ms).collect();
+        let (Some(&a), Some(&b)) = (times.first(), times.last()) else {
             continue;
         };
-        let mut e = event(flight, Class::UnpairedOa, a.t_ms);
-        e.end_ms = b.t_ms;
-        e.value = seconds(b.t_ms - a.t_ms);
+        let mut e = event(flight, Class::UnpairedOa, a);
+        e.end_ms = b;
+        e.value = seconds(padded_ms(&times, 0, times.len() - 1));
         e.detail = format!("rows={}", ac.samples.len());
+        let v = e.value;
         events.push(e);
         flights.push(lone_row(
             flight,
             Some(addr),
             "oa_only",
             ac.samples.len() as u64,
-            seconds(b.t_ms - a.t_ms),
+            v,
             false,
         ));
     }
@@ -332,7 +407,7 @@ fn lone_row(
         eram_samples: if eram { samples } else { 0 },
         compared: 0,
         worst_cross_m: f64::NAN,
-        worst_along_adj_m: f64::NAN,
+        worst_along_m: f64::NAN,
         worst_alt_ft: f64::NAN,
         events: 1,
         eram_only_s: if eram { span_s } else { 0.0 },
@@ -340,39 +415,42 @@ fn lone_row(
     }
 }
 
-/// Coalesces a run of uncovered times into one span event each; `covered` marks each time.
+/// Runs of uncovered times as one span event each (a covered time ends a run, and so does a gap
+/// over the segment gap); returns the total of the spans' seconds.
 fn span_events(
     flight: u32,
     class: Class,
-    marks: &[(i64, bool)],
-    gap_ms: i64,
+    times: &[i64],
+    covered: &[bool],
     out: &mut Vec<Event>,
 ) -> f64 {
+    let gap = THRESHOLDS.segment_gap_ms;
     let mut total_s = 0.0;
-    let mut run: Option<(i64, i64, u64)> = None;
-    let mut flush = |run: &mut Option<(i64, i64, u64)>, out: &mut Vec<Event>| {
-        if let Some((a, b, n)) = run.take() {
-            let mut e = event(flight, class, a);
-            e.end_ms = b;
-            e.value = seconds(b - a);
-            e.detail = format!("reports={n}");
-            total_s += e.value;
-            out.push(e);
+    let mut run: Option<(usize, usize)> = None;
+    let mut flush = |run: &mut Option<(usize, usize)>, out: &mut Vec<Event>| {
+        if let Some((i, j)) = run.take() {
+            if let (Some(&a), Some(&b)) = (times.get(i), times.get(j)) {
+                let mut e = event(flight, class, a);
+                e.end_ms = b;
+                e.value = seconds(padded_ms(times, i, j));
+                e.detail = format!("reports={}", j - i + 1);
+                total_s += e.value;
+                out.push(e);
+            }
         }
     };
-    for &(t, covered) in marks {
-        if covered {
+    for (k, &t) in times.iter().enumerate() {
+        if covered.get(k).copied().unwrap_or(true) {
             flush(&mut run, out);
             continue;
         }
-        match run.as_mut() {
-            Some(r) if t - r.1 <= gap_ms => {
-                r.1 = t;
-                r.2 += 1;
+        match run {
+            Some((_, j)) if times.get(j).is_some_and(|&p| t - p <= gap) => {
+                run = run.map(|(i, _)| (i, k));
             }
             _ => {
                 flush(&mut run, out);
-                run = Some((t, t, 1));
+                run = Some((k, k));
             }
         }
     }
@@ -380,68 +458,203 @@ fn span_events(
     total_s
 }
 
-fn compare_group(
+/// What one group's comparison shares.
+struct Ctx<'a> {
     flight: u32,
-    ac: &OaAircraft,
-    flights: &[&EramFlight],
-    truth: Option<TruthAt<'_>>,
+    ac: &'a OaAircraft,
+    truth: Option<TruthAt<'a>>,
+}
+
+/// One ERAM report being compared.
+struct Rep<'a> {
+    flight_pos: usize,
+    s: &'a EramSample,
+    p: Option<OaPoint>,
+    sep: Option<Separation>,
+    contradicts: bool,
+}
+
+fn compare_group(
+    ctx: &Ctx<'_>,
+    flights: &[(&EramFlight, Rule)],
     events: &mut Vec<Event>,
     row: &mut FlightRow,
     totals: &mut Totals,
 ) {
     let th = &THRESHOLDS;
-    // ERAM's samples of every flight of the group, in time order (equal times keep flight order).
-    let mut eram: Vec<&EramSample> = flights.iter().flat_map(|f| f.samples.iter()).collect();
-    eram.sort_by_key(|s| s.t_ms);
-    row.eram_samples = eram.len() as u64;
+    let (flight, ac) = (ctx.flight, ctx.ac);
+    row.eram_samples = flights.iter().map(|f| f.0.samples.len() as u64).sum();
 
-    // Per report: position, altitude, coast; presence of OpenATCA.
-    let mut eram_marks: Vec<(i64, bool)> = Vec::with_capacity(eram.len());
-    for s in &eram {
-        let Some(p) = oa_at(&ac.samples, s.t_ms, th) else {
-            eram_marks.push((s.t_ms, false));
+    // Priority: the earliest first report, then the lower flight index (the position here).
+    let spans: Vec<Option<(i64, i64)>> = flights.iter().map(|f| f.0.span()).collect();
+    let mut order: Vec<usize> = (0..flights.len()).collect();
+    order.sort_by_key(|&k| (spans.get(k).copied().flatten().map_or(i64::MAX, |s| s.0), k));
+
+    // Duplicate tracks: inside an overlap with a higher-priority flight a flight is not compared.
+    let mut reps: Vec<Rep<'_>> = Vec::new();
+    for (rank, &k) in order.iter().enumerate() {
+        let (Some((a, b)), Some(f)) = (spans.get(k).copied().flatten(), flights.get(k)) else {
             continue;
         };
-        eram_marks.push((s.t_ms, true));
+        let mut earlier: Vec<(i64, i64)> = Vec::new();
+        for &i in order.iter().take(rank) {
+            if let Some((c, d)) = spans.get(i).copied().flatten() {
+                let (lo, hi) = (a.max(c), b.min(d));
+                if lo <= hi {
+                    let mut e = event(flight, Class::DupEramTrack, lo);
+                    e.end_ms = hi;
+                    e.value = seconds(hi - lo);
+                    e.detail = format!(
+                        "primary_rank={}",
+                        order.iter().position(|&x| x == i).unwrap_or(0)
+                    );
+                    events.push(e);
+                    earlier.push((c, d));
+                }
+            }
+        }
+        for s in &f.0.samples {
+            if earlier.iter().any(|&(c, d)| s.t_ms >= c && s.t_ms <= d) {
+                continue;
+            }
+            let p = oa_at(&ac.samples, s.t_ms, th);
+            let sep = p.as_ref().map(|p| separation(s, p, th));
+            reps.push(Rep {
+                flight_pos: k,
+                s,
+                p,
+                sep,
+                contradicts: false,
+            });
+        }
+    }
+    reps.sort_by_key(|r| (r.s.t_ms, r.flight_pos));
+
+    // Address contradicts track: a run of far reports of one address-paired flight.
+    for (k, (_, rule)) in flights.iter().enumerate() {
+        if *rule != Rule::Address {
+            continue;
+        }
+        let idx: Vec<usize> = reps
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.flight_pos == k)
+            .map(|(i, _)| i)
+            .collect();
+        let times: Vec<i64> = idx
+            .iter()
+            .filter_map(|&i| reps.get(i).map(|r| r.s.t_ms))
+            .collect();
+        let far: Vec<bool> = idx
+            .iter()
+            .map(|&i| {
+                reps.get(i)
+                    .and_then(|r| r.sep)
+                    .is_some_and(|s| s.horiz_m > th.contradict_m)
+            })
+            .collect();
+        let mut m = 0;
+        while m < far.len() {
+            if !far.get(m).copied().unwrap_or(false) {
+                m += 1;
+                continue;
+            }
+            let mut n = m;
+            while far.get(n + 1).copied().unwrap_or(false) {
+                n += 1;
+            }
+            if n + 1 - m >= th.contradict_run {
+                if let (Some(&a), Some(&b)) = (times.get(m), times.get(n)) {
+                    let mut e = event(flight, Class::AddrContradictsTrack, a);
+                    e.end_ms = b;
+                    e.value = seconds(padded_ms(&times, m, n));
+                    e.detail = format!("reports={}", n + 1 - m);
+                    events.push(e);
+                }
+                for &i in idx.get(m..=n).unwrap_or(&[]) {
+                    if let Some(r) = reps.get_mut(i) {
+                        r.contradicts = true;
+                    }
+                }
+            }
+            m = n + 1;
+        }
+    }
+
+    for r in &reps {
+        let Some(p) = &r.p else { continue };
         row.compared += 1;
         totals.compared += 1;
-        compare_sample(flight, ac.addr, s, &p, truth, events, row, totals);
+        compare_sample(ctx, r, p, flights, events, row, totals);
     }
-    row.eram_only_s = span_events(
-        flight,
-        Class::EramOnlySpan,
-        &eram_marks,
-        th.segment_gap_ms,
-        events,
-    );
 
-    // OpenATCA rows outside ERAM's track (each ERAM segment widened by the timing threshold).
-    let eram_times: Vec<i64> = eram.iter().map(|s| s.t_ms).collect();
-    let eram_segs = segments(&eram_times, th.segment_gap_ms);
-    let oa_marks: Vec<(i64, bool)> = ac
-        .samples
+    // Presence of OpenATCA at ERAM's reports.
+    let times: Vec<i64> = reps.iter().map(|r| r.s.t_ms).collect();
+    let covered: Vec<bool> = reps.iter().map(|r| r.p.is_some()).collect();
+    row.eram_only_s = span_events(flight, Class::EramOnlySpan, &times, &covered, events);
+
+    // OpenATCA rows outside every ERAM flight's span, each widened by the timing threshold and
+    // the report interval at that end.
+    let widened: Vec<(i64, i64)> = flights
         .iter()
-        .map(|s| {
-            let i = eram_segs.partition_point(|g| g.0 - th.timing_ms <= s.t_ms);
-            let covered = i
-                .checked_sub(1)
-                .and_then(|j| eram_segs.get(j))
-                .is_some_and(|g| s.t_ms <= g.1 + th.timing_ms);
-            (s.t_ms, covered)
+        .filter_map(|f| {
+            let t: Vec<i64> = f.0.samples.iter().map(|s| s.t_ms).collect();
+            let (a, b) = (*t.first()?, *t.last()?);
+            let ia = t.get(1).map_or(0, |&x| x - a);
+            let ib = t
+                .len()
+                .checked_sub(2)
+                .and_then(|k| t.get(k))
+                .map_or(0, |&x| b - x);
+            Some((a - th.timing_ms - ia, b + th.timing_ms + ib))
         })
         .collect();
-    row.oa_only_s = span_events(
-        flight,
-        Class::OaOnlySpan,
-        &oa_marks,
-        th.segment_gap_ms,
-        events,
-    );
-
-    // Start and drop timing: each ERAM segment against the OpenATCA segment it overlaps most.
     let oa_times: Vec<i64> = ac.samples.iter().map(|s| s.t_ms).collect();
+    let oa_covered: Vec<bool> = oa_times
+        .iter()
+        .map(|&t| widened.iter().any(|&(a, b)| t >= a && t <= b))
+        .collect();
+    row.oa_only_s = span_events(flight, Class::OaOnlySpan, &oa_times, &oa_covered, events);
+
+    // Gaps inside one ERAM flight.
+    for (f, _) in flights {
+        for w in f.samples.windows(2) {
+            if let [a, b] = w {
+                if b.t_ms - a.t_ms > th.segment_gap_ms {
+                    let mut e = event(flight, Class::EramReportGap, a.t_ms);
+                    e.end_ms = b.t_ms;
+                    e.value = seconds(b.t_ms - a.t_ms);
+                    events.push(e);
+                }
+            }
+        }
+    }
+
+    // Start and drop timing: each ERAM segment against the OpenATCA segment it overlaps most,
+    // a difference only beyond the threshold plus the ERAM report interval at that end.
+    let eram_ix = segment_ix(&times, th.segment_gap_ms);
     let oa_segs = segments(&oa_times, th.segment_gap_ms);
-    for &(es, ee) in &eram_segs {
+    for &(i, j) in &eram_ix {
+        let (Some(&es), Some(&ee)) = (times.get(i), times.get(j)) else {
+            continue;
+        };
+        for w in times.get(i..=j).unwrap_or(&[]).windows(2) {
+            if let [a, b] = w {
+                totals.eram_intervals_ms.push(b - a);
+            }
+        }
+        let start_iv = if j > i {
+            times.get(i + 1).map_or(0, |&x| x - es)
+        } else {
+            0
+        };
+        let end_iv = if j > i {
+            j.checked_sub(1)
+                .and_then(|k| times.get(k))
+                .map_or(0, |&x| ee - x)
+        } else {
+            0
+        };
         let mut best: Option<(i64, (i64, i64))> = None;
         for &(os, oe) in &oa_segs {
             let overlap = ee.min(oe) - es.max(os);
@@ -450,9 +663,12 @@ fn compare_group(
             }
         }
         let Some((_, (os, oe))) = best else { continue };
-        for (class, e_t, o_t) in [(Class::StartTiming, es, os), (Class::DropTiming, ee, oe)] {
+        for (class, e_t, o_t, iv) in [
+            (Class::StartTiming, es, os, start_iv),
+            (Class::DropTiming, ee, oe, end_iv),
+        ] {
             let delta = o_t - e_t;
-            if th.timing_differs(delta) {
+            if th.timing_differs(delta, iv) {
                 let mut e = event(flight, class, e_t);
                 e.end_ms = o_t;
                 e.value = seconds(delta.abs());
@@ -462,32 +678,12 @@ fn compare_group(
         }
     }
 
-    // Identity, once per ERAM flight against what the adapter was offered near its span.
-    for f in flights {
+    // Callsign, once per ERAM flight against what the adapter was offered near its span.
+    for (f, _) in flights {
         let (Some(a), Some(b)) = (f.samples.first(), f.samples.last()) else {
             continue;
         };
         let offered = ac.idents_in(a.t_ms - th.segment_gap_ms, b.t_ms + th.segment_gap_ms);
-        let squawks: Vec<u16> = {
-            let mut v: Vec<u16> = offered.iter().filter_map(|p| p.squawk).collect();
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
-        if let Some(b0) = f.beacon {
-            if !squawks.is_empty() && !squawks.contains(&b0) {
-                let mut e = event(flight, Class::IdBeacon, a.t_ms);
-                e.detail = format!(
-                    "eram={b0:04} oa={}",
-                    squawks
-                        .iter()
-                        .map(|s| format!("{s:04}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-                events.push(e);
-            }
-        }
         let names: Vec<String> = {
             let mut v: Vec<String> = offered
                 .iter()
@@ -513,61 +709,50 @@ fn compare_group(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compare_sample(
-    flight: u32,
-    addr: u32,
-    s: &EramSample,
+    ctx: &Ctx<'_>,
+    r: &Rep<'_>,
     p: &OaPoint,
-    truth: Option<TruthAt<'_>>,
+    flights: &[(&EramFlight, Rule)],
     events: &mut Vec<Event>,
     row: &mut FlightRow,
     totals: &mut Totals,
 ) {
     let th = &THRESHOLDS;
-    let sep = separation(s, p, th);
-    if sep.cross_m.abs() > row.worst_cross_m {
-        row.worst_cross_m = sep.cross_m.abs();
-    }
-    if sep.along_adj_m.abs() > row.worst_along_adj_m {
-        row.worst_along_adj_m = sep.along_adj_m.abs();
-    }
-    let levels = [
-        (sep.cross_m.abs(), [Class::PosCross05, Class::PosCross10]),
-        (
-            sep.along_adj_m.abs(),
-            [Class::PosAlong05, Class::PosAlong10],
-        ),
-    ];
-    let mut closer: Option<Closer> = None;
-    for (m, classes) in levels {
-        let Some(level) = th.pos_level(m) else {
-            continue;
-        };
-        let Some(&class) = classes.get(level) else {
-            continue;
-        };
-        // Adjudication, after the class is decided; one answer per report.
-        let c = *closer.get_or_insert_with(|| match truth {
-            Some(q) => {
-                let at = |t: i64| q(addr, t);
-                let q3 = [
-                    at(s.t_ms - th.eram_time_quant_ms),
-                    at(s.t_ms),
-                    at(s.t_ms + th.eram_time_quant_ms),
-                ];
-                adjudicate(s, p, q3, th)
+    let (flight, s) = (ctx.flight, r.s);
+    if let (Some(sep), false) = (r.sep, r.contradicts) {
+        row.worst_cross_m = row.worst_cross_m.max(sep.cross_m.abs());
+        row.worst_along_m = row.worst_along_m.max(sep.along_m.abs());
+        let levels = [
+            (sep.cross_m.abs(), [Class::PosCross05, Class::PosCross10]),
+            (sep.along_m.abs(), [Class::PosAlong05, Class::PosAlong10]),
+        ];
+        let mut closer: Option<Closer> = None;
+        for (m, classes) in levels {
+            let Some(level) = th.pos_level(m) else {
+                continue;
+            };
+            let Some(&class) = classes.get(level) else {
+                continue;
+            };
+            // Adjudication, after the class is decided; one answer per report.
+            let c = *closer.get_or_insert_with(|| match ctx.truth {
+                Some(q) => adjudicate(s, p, q(ctx.ac.addr, s.t_ms), th),
+                None => Closer::NoTruth,
+            });
+            let mut e = event(flight, class, s.t_ms);
+            e.value = m;
+            e.cross_m = sep.cross_m;
+            e.along_m = sep.along_m;
+            e.credit_m = sep.credit_m;
+            e.horiz_m = sep.horiz_m;
+            if class.is_along() {
+                let threshold = th.pos_m.get(level).copied().unwrap_or(f64::NAN);
+                e.within_stamp_allowance = Some(m - sep.credit_m <= threshold);
             }
-            None => Closer::NoTruth,
-        });
-        let mut e = event(flight, class, s.t_ms);
-        e.value = m;
-        e.cross_m = sep.cross_m;
-        e.along_raw_m = sep.along_raw_m;
-        e.along_adj_m = sep.along_adj_m;
-        e.horiz_adj_m = sep.horiz_adj_m;
-        e.closer = c;
-        events.push(e);
+            e.closer = c;
+            events.push(e);
+        }
     }
     match (s.alt_ft, p.alt_ft) {
         (Some(ea), Some(oa_alt)) => {
@@ -578,9 +763,7 @@ fn compare_sample(
             } else {
                 totals.alt_diffs_at_or_above_fl180.push(diff);
             }
-            if diff.abs() > row.worst_alt_ft {
-                row.worst_alt_ft = diff.abs();
-            }
+            row.worst_alt_ft = row.worst_alt_ft.max(diff.abs());
             if th.alt_differs(diff) {
                 let mut e = event(flight, Class::Alt, s.t_ms);
                 e.detail = if ea < 18_000 {
@@ -596,13 +779,28 @@ fn compare_sample(
         }
         _ => totals.alt_not_comparable += 1,
     }
-    totals.coast_compared += 1;
-    if s.coast != p.coast {
-        let class = if s.coast {
-            Class::CoastEramOnly
-        } else {
-            Class::CoastOaOnly
-        };
-        events.push(event(flight, class, s.t_ms));
+    // Coast flags only at an OpenATCA row at exactly the ERAM time: a flag is not interpolated.
+    if let Some(o) = oa_exact(&ctx.ac.samples, s.t_ms) {
+        totals.coast_compared += 1;
+        if s.coast != o.coast {
+            let class = if s.coast {
+                Class::CoastEramOnly
+            } else {
+                Class::CoastOaOnly
+            };
+            events.push(event(flight, class, s.t_ms));
+        }
+    }
+    // Beacon per report: ERAM's code in force against the squawk the adapter had in force.
+    let eram_code = flights
+        .get(r.flight_pos)
+        .and_then(|f| f.0.beacon_at(s.t_ms));
+    if let (Some(e_code), Some(o_code)) = (eram_code, ctx.ac.squawk_at(s.t_ms)) {
+        totals.beacon_compared += 1;
+        if e_code != o_code {
+            let mut e = event(flight, Class::IdBeacon, s.t_ms);
+            e.detail = format!("eram={e_code:04} oa={o_code:04}");
+            events.push(e);
+        }
     }
 }

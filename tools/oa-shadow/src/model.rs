@@ -32,8 +32,9 @@ pub struct EramFlight {
     pub gufi: u128,
     /// 24-bit Mode S address, when a message carried one.
     pub addr: Option<u32>,
-    /// Last beacon code a message gave, four octal digits read as a decimal number.
-    pub beacon: Option<u16>,
+    /// Beacon codes by message time, four octal digits read as a decimal number; each holds
+    /// until the next entry.
+    pub beacons: Vec<(i64, u16)>,
     /// Flight identification, zero or space padded.
     pub callsign: Option<[u8; 8]>,
     pub samples: Vec<EramSample>,
@@ -58,7 +59,33 @@ pub struct OaAircraft {
     pub idents: Vec<IdentPoint>,
 }
 
+impl EramFlight {
+    /// The code in force at `t_ms`: the last entry at or before it.
+    pub fn beacon_at(&self, t_ms: i64) -> Option<u16> {
+        let i = self.beacons.partition_point(|b| b.0 <= t_ms);
+        self.beacons.get(i.checked_sub(1)?).map(|b| b.1)
+    }
+
+    /// The code used to pair the flight: the one in force at `t_ms`, else (a first message that
+    /// came after it) the earliest.
+    pub fn beacon_for_pairing(&self, t_ms: i64) -> Option<u16> {
+        self.beacon_at(t_ms)
+            .or_else(|| self.beacons.first().map(|b| b.1))
+    }
+
+    /// First and last sample times.
+    pub fn span(&self) -> Option<(i64, i64)> {
+        Some((self.samples.first()?.t_ms, self.samples.last()?.t_ms))
+    }
+}
+
 impl OaAircraft {
+    /// The squawk in force at `t_ms` (carried forward from the reports), if any.
+    pub fn squawk_at(&self, t_ms: i64) -> Option<u16> {
+        let i = self.idents.partition_point(|p| p.t_ms <= t_ms);
+        self.idents.get(i.checked_sub(1)?)?.squawk
+    }
+
     /// The identity points that apply in `[from_ms, to_ms]`: those inside it and the last one
     /// before it (still in force at its start).
     pub fn idents_in(&self, from_ms: i64, to_ms: i64) -> Vec<&IdentPoint> {

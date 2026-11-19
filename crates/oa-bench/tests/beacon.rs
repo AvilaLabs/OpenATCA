@@ -54,3 +54,24 @@ fn the_flight_keeps_its_last_beacon_code_and_none_when_never_given() {
     ingest_sfdps(&mut leg, &mut r, doc("CL", b, "").as_bytes(), NO_TIME);
     assert_eq!(leg.flights.beacon[1], NO_BEACON);
 }
+
+// REQ: OA-BENCH-133
+#[test]
+fn beacon_changes_are_kept_with_their_message_time() {
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    let a = "11111111-2222-4333-8444-555555555555";
+    for code in ["0123", "0123", "7700"] {
+        ingest_sfdps(
+            &mut leg,
+            &mut r,
+            doc("BA", a, &ba(code)).as_bytes(),
+            NO_TIME,
+        );
+    }
+    // The repeated code adds no row; the change does. The time is the message's own.
+    assert_eq!(leg.beacons.code, vec![123, 7700]);
+    assert_eq!(leg.beacons.flight, vec![0, 0]);
+    assert_eq!(leg.beacons.ts_ms[0], leg.beacons.ts_ms[1]);
+    assert!(leg.beacons.ts_ms[0] > 0);
+}

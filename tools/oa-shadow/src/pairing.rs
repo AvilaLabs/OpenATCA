@@ -1,14 +1,15 @@
 //! Pairing ERAM flights with OpenATCA aircraft by one rule.
 //!
-//! The rule: an ERAM flight that carries a Mode S address is paired with the OpenATCA aircraft
-//! of that address. An ERAM flight with no address, but with a beacon code, is paired with the
-//! one OpenATCA aircraft that (a) is not already paired by address, (b) was offered that squawk
+//! The rule: an ERAM flight that carries a Mode S address OpenATCA has an aircraft for is paired
+//! with that aircraft. Any other ERAM flight with a beacon code (the code in force at its first
+//! report) is paired with the one OpenATCA aircraft that (a) is not already paired to an ERAM
+//! flight whose span overlaps this one's, (b) was offered that squawk
 //! within the flight's span (plus one segment gap either side), and (c) is nearest to ERAM's
 //! first report of the flight, within the beacon pairing radius at that time; ties go to the
 //! lowest address. Anything else is unpaired. Several ERAM flights (legs, duplicate tracks) may
 //! pair with one aircraft; they form one group.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::geo::{deg, enu_m, oa_at};
 use crate::model::{EramFlight, OaAircraft};
@@ -50,25 +51,36 @@ pub struct Pairing {
     pub unpaired_oa: Vec<u32>,
 }
 
-/// Pairs `eram` (in a fixed order, the order breaks no ties but fixes group order) with `oa`.
+/// Pairs `eram` (in a fixed order: it fixes group order and which flight claims first) with `oa`.
 pub fn pair(eram: &[EramFlight], oa: &BTreeMap<u32, OaAircraft>) -> Pairing {
     let mut groups: BTreeMap<u32, Vec<(usize, Rule)>> = BTreeMap::new();
+    // The spans already paired to each aircraft, for the exclusivity of beacon claims.
+    let mut claimed: BTreeMap<u32, Vec<(i64, i64)>> = BTreeMap::new();
     let mut unpaired_eram = Vec::new();
     let mut later: Vec<usize> = Vec::new();
     for (i, f) in eram.iter().enumerate() {
-        match f.addr {
-            Some(a) if oa.contains_key(&a) => groups.entry(a).or_default().push((i, Rule::Address)),
-            Some(_) => unpaired_eram.push(i),
-            None => later.push(i),
+        match (f.addr.filter(|a| oa.contains_key(a)), f.span()) {
+            (Some(a), Some(span)) => {
+                groups.entry(a).or_default().push((i, Rule::Address));
+                claimed.entry(a).or_default().push(span);
+            }
+            (Some(a), None) => groups.entry(a).or_default().push((i, Rule::Address)),
+            // No address, or one OpenATCA has no aircraft for: the beacon rule.
+            (None, _) => later.push(i),
         }
     }
-    let by_address: BTreeSet<u32> = groups.keys().copied().collect();
     for i in later {
-        match beacon_match(eram.get(i), oa, &by_address) {
-            Some(a) => groups
-                .entry(a)
-                .or_default()
-                .push((i, Rule::BeaconProximity)),
+        let Some(f) = eram.get(i) else { continue };
+        match beacon_match(f, oa, &claimed) {
+            Some(a) => {
+                groups
+                    .entry(a)
+                    .or_default()
+                    .push((i, Rule::BeaconProximity));
+                if let Some(span) = f.span() {
+                    claimed.entry(a).or_default().push(span);
+                }
+            }
             None => unpaired_eram.push(i),
         }
     }
@@ -92,18 +104,22 @@ pub fn pair(eram: &[EramFlight], oa: &BTreeMap<u32, OaAircraft>) -> Pairing {
 }
 
 fn beacon_match(
-    f: Option<&EramFlight>,
+    f: &EramFlight,
     oa: &BTreeMap<u32, OaAircraft>,
-    by_address: &BTreeSet<u32>,
+    claimed: &BTreeMap<u32, Vec<(i64, i64)>>,
 ) -> Option<u32> {
-    let f = f?;
-    let beacon = f.beacon?;
     let first = f.samples.first()?;
     let last = f.samples.last()?;
+    let beacon = f.beacon_for_pairing(first.t_ms)?;
     let gap = THRESHOLDS.segment_gap_ms;
     let mut best: Option<(f64, u32)> = None;
     for (&addr, ac) in oa {
-        if by_address.contains(&addr) {
+        // Exclusive within overlapping spans: an aircraft already paired to a flight that is
+        // there at the same time is not a candidate.
+        if claimed
+            .get(&addr)
+            .is_some_and(|v| v.iter().any(|&(a, b)| a <= last.t_ms && first.t_ms <= b))
+        {
             continue;
         }
         let offered = ac

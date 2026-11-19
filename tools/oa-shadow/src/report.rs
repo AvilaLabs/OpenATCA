@@ -23,10 +23,15 @@ pub struct Rendered {
 }
 
 fn num(v: f64, dec: usize) -> String {
-    if v.is_finite() {
-        format!("{v:.dec$}")
+    if !v.is_finite() {
+        return String::new();
+    }
+    let s = format!("{v:.dec$}");
+    // A value that rounds to zero is written without a sign.
+    if s.starts_with('-') && s.chars().all(|c| matches!(c, '-' | '0' | '.')) {
+        s.trim_start_matches('-').to_string()
     } else {
-        String::new()
+        s
     }
 }
 
@@ -46,22 +51,24 @@ fn addr_text(a: Option<u32>) -> String {
 /// The events CSV. The aircraft address is a column; the summary never names one.
 pub fn events_csv(c: &Comparison) -> String {
     let mut o = String::from(
-        "flight,addr,class,t_ms,end_ms,duration_s,value,cross_m,along_raw_m,along_adj_m,horiz_adj_m,alt_diff_ft,closer,detail\n",
+        "flight,addr,class,t_ms,end_ms,duration_s,value,cross_m,along_m,along_credit_m,horiz_m,within_1s_stamp_allowance,alt_diff_ft,closer,detail\n",
     );
     for e in &c.events {
         let addr = c
             .flights
             .get(e.flight as usize)
             .map_or(String::new(), |f| addr_text(f.addr));
-        let duration =
-            if e.class.is_span() || matches!(e.class, Class::StartTiming | Class::DropTiming) {
-                num(e.value, 1)
-            } else {
-                String::new()
-            };
+        let duration = if e.class.is_span() {
+            num(e.value, 1)
+        } else {
+            String::new()
+        };
+        let flag = e
+            .within_stamp_allowance
+            .map_or(String::new(), |b| b.to_string());
         let _ = writeln!(
             o,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             e.flight,
             addr,
             e.class.name(),
@@ -70,9 +77,10 @@ pub fn events_csv(c: &Comparison) -> String {
             duration,
             num(e.value, 1),
             num(e.cross_m, 1),
-            num(e.along_raw_m, 1),
-            num(e.along_adj_m, 1),
-            num(e.horiz_adj_m, 1),
+            num(e.along_m, 1),
+            num(e.credit_m, 1),
+            num(e.horiz_m, 1),
+            flag,
             num(e.alt_diff_ft, 1),
             e.closer.name(),
             field(&e.detail)
@@ -84,7 +92,7 @@ pub fn events_csv(c: &Comparison) -> String {
 /// The per-flight CSV: counts and the worst case of each measure.
 pub fn flights_csv(c: &Comparison) -> String {
     let mut o = String::from(
-        "flight,addr,kind,rules,eram_samples,compared,worst_cross_m,worst_along_adj_m,worst_alt_ft,events,eram_only_s,oa_only_s\n",
+        "flight,addr,kind,rules,eram_samples,compared,worst_cross_m,worst_along_m,worst_alt_ft,events,eram_only_s,oa_only_s\n",
     );
     for f in &c.flights {
         let _ = writeln!(
@@ -97,7 +105,7 @@ pub fn flights_csv(c: &Comparison) -> String {
             f.eram_samples,
             f.compared,
             num(f.worst_cross_m, 1),
-            num(f.worst_along_adj_m, 1),
+            num(f.worst_along_m, 1),
             num(f.worst_alt_ft, 1),
             f.events,
             num(f.eram_only_s, 1),
@@ -107,6 +115,13 @@ pub fn flights_csv(c: &Comparison) -> String {
     o
 }
 
+fn median_ms(v: &[i64]) -> Option<i64> {
+    let mut s = v.to_vec();
+    s.sort_unstable();
+    // The lower middle value.
+    s.get(s.len().checked_sub(1)? / 2).copied()
+}
+
 fn median(v: &[f64]) -> Option<f64> {
     let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
     s.sort_by(f64::total_cmp);
@@ -114,15 +129,15 @@ fn median(v: &[f64]) -> Option<f64> {
     s.get(s.len().checked_sub(1)? / 2).copied()
 }
 
-/// The `n` largest position divergences, one per (flight, time): `(horiz_adj_m, flight, t_ms)`,
+/// The `n` largest position divergences, one per (flight, time): `(horiz_m, flight, t_ms)`,
 /// largest first, ties by flight then time.
 pub fn largest_divergences(events: &[Event], n: usize) -> Vec<(f64, u32, i64)> {
     let mut v: Vec<(f64, u32, i64)> = Vec::new();
     for e in events.iter().filter(|e| e.class.is_position()) {
         if let Some(x) = v.iter_mut().find(|x| x.1 == e.flight && x.2 == e.t_ms) {
-            x.0 = x.0.max(e.horiz_adj_m);
+            x.0 = x.0.max(e.horiz_m);
         } else {
-            v.push((e.horiz_adj_m, e.flight, e.t_ms));
+            v.push((e.horiz_m, e.flight, e.t_ms));
         }
     }
     v.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
@@ -184,6 +199,22 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
     );
     let _ = writeln!(
         s,
+        "  median ERAM report interval (consecutive reports within a track segment, {} intervals): {} s",
+        t.eram_intervals_ms.len(),
+        median_ms(&t.eram_intervals_ms)
+            .map_or("n/a".into(), |m| format!("{:.1}", m as f64 / 1000.0))
+    );
+    let _ = writeln!(
+        s,
+        "  Coast flags are not the same concept: ERAM's is a message indicator in SFDPS, OpenATCA's is the tracker's own state when no measurement arrived. Compared only at OpenATCA rows at the exact ERAM report time."
+    );
+    let _ = writeln!(
+        s,
+        "  coast compared {}; beacon compared {}",
+        t.coast_compared, t.beacon_compared
+    );
+    let _ = writeln!(
+        s,
         "\nDifferences by class (events, flights affected, total span s, largest):"
     );
     for class in CLASSES {
@@ -210,7 +241,7 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
         };
         let _ = writeln!(
             s,
-            "  {:<20} events {:>8}  flights {:>6}  span {:>10.1} s  largest {}{}",
+            "  {:<22} events {:>8}  flights {:>6}  span {:>10.1} s  largest {}{}",
             class.name(),
             ev.len(),
             fs.len(),
@@ -230,7 +261,32 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
         "  ALT_GT_300FT by ERAM altitude: below 18,000 ft {alt_low}, at or above {}",
         alt_all - alt_low
     );
-    let _ = writeln!(s, "\nAdjudication (position events only, named after classification; not used to decide a class):");
+    for class in [Class::PosAlong05, Class::PosAlong10] {
+        let n = |flag: bool| {
+            c.events
+                .iter()
+                .filter(|e| e.class == class && e.within_stamp_allowance == Some(flag))
+                .count()
+        };
+        let _ = writeln!(
+            s,
+            "  {:<22} within_1s_stamp_allowance: true {}, false {}",
+            class.name(),
+            n(true),
+            n(false)
+        );
+    }
+    let pos: Vec<&Event> = c.events.iter().filter(|e| e.class.is_position()).collect();
+    let _ = writeln!(
+        s,
+        "\nAdjudication: distance of each system to the ADS-B truth at the ERAM report time. The truth is built from ADS-B reports (set B) of the same aircraft whose other reports (set A) feed OpenATCA, so their errors are correlated and this column favours OpenATCA; the count of events where ERAM is closer is the more informative one."
+    );
+    let _ = writeln!(
+        s,
+        "  position events {}; truth query gave no answer for {}",
+        pos.len(),
+        pos.iter().filter(|e| e.closer == Closer::NoTruth).count()
+    );
     for class in [
         Class::PosCross05,
         Class::PosCross10,
@@ -245,7 +301,7 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
         };
         let _ = writeln!(
             s,
-            "  {:<20} ERAM closer {:>7}  OpenATCA closer {:>7}  tie {:>6}  no truth {:>7}",
+            "  {:<22} ERAM closer {:>7}  OpenATCA closer {:>7}  tie {:>6}  no truth {:>7}",
             class.name(),
             n(Closer::Eram),
             n(Closer::OpenAtca),
@@ -255,7 +311,7 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
     }
     let _ = writeln!(
         s,
-        "\nLargest position divergences after the time allowance (flight index, time ms, metres):"
+        "\nLargest position divergences (raw) (flight index, time ms, metres):"
     );
     for (m, f, t_ms) in largest_divergences(&c.events, 10) {
         let _ = writeln!(s, "  flight {f:>6}  t {t_ms}  {m:.1} m");

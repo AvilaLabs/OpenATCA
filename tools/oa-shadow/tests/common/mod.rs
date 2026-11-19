@@ -67,7 +67,7 @@ pub fn flight(addr: Option<u32>, samples: Vec<EramSample>) -> EramFlight {
     EramFlight {
         gufi: 1,
         addr,
-        beacon: None,
+        beacons: Vec::new(),
         callsign: None,
         samples,
     }

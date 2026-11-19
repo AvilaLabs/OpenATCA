@@ -111,10 +111,9 @@ fn adjudication_names_the_closer_system_and_never_changes_a_class() {
 
 // REQ: OA-SHD-011
 #[test]
-fn eram_is_credited_with_its_time_quantum_against_truth_but_openatca_is_not() {
-    // Truth is the OpenATCA path. ERAM sits 100 m ahead (one second at 100 m/s) and 1000 m
-    // east: its distance to the truth path over the quantum is 1000 m; OpenATCA is 0 m.
-    // With ERAM 100 m ahead and zero east, ERAM's distance is 0 and it ties OpenATCA.
+fn both_distances_are_to_the_truth_at_the_eram_time_with_no_time_credit_for_eram() {
+    // Truth is the OpenATCA path. ERAM sits 1000 m east and 100 m ahead (one second at 100 m/s).
+    // Judged at the report time ERAM is 1005 m from the truth and OpenATCA 0 m.
     let oa = oa_map(vec![oa_north(1, 0, 40, 100.0)]);
     let truth = |_: u32, t_ms: i64| {
         let (lat, lon) = displaced(0.0, 100.0 * (t_ms - T0) as f64 / 1000.0);
@@ -123,6 +122,44 @@ fn eram_is_credited_with_its_time_quantum_against_truth_but_openatca_is_not() {
     let s = eram_at(24, 24.0, 100.0, 1000.0, 100.0);
     let c = compare_all(&[flight(Some(1), vec![s])], &oa, Some(&truth));
     assert_eq!(of(&c, Class::PosCross05)[0].closer, Closer::OpenAtca);
+    // ERAM 100 m ahead of the truth path with OpenATCA 150 m east of it: along-track credit does
+    // not apply to the adjudication, so ERAM (100 m) is closer than OpenATCA (150 m) only by raw
+    // distance, and with OpenATCA on the path and ERAM ahead OpenATCA is closer.
+    let c = compare_all(
+        &[flight(Some(1), vec![eram_at(24, 24.0, 100.0, 1000.0, 0.0)])],
+        &oa,
+        Some(&truth),
+    );
+    assert_eq!(of(&c, Class::PosCross05)[0].closer, Closer::OpenAtca);
+}
+
+// REQ: OA-SHD-011
+#[test]
+fn a_truth_query_with_no_answer_is_counted_in_the_summary() {
+    let (eram, oa) = world();
+    let none = |_: u32, _: i64| None;
+    let c = compare_all(&eram, &oa, Some(&none));
+    let r = render(&c, &[]);
+    assert!(
+        r.summary
+            .contains("position events 4; truth query gave no answer for 4"),
+        "{}",
+        r.summary
+    );
+    assert!(r.summary.contains("Adjudication: distance of each system to the ADS-B truth at the ERAM report time. The truth is built from ADS-B reports (set B) of the same aircraft whose other reports (set A) feed OpenATCA, so their errors are correlated and this column favours OpenATCA; the count of events where ERAM is closer is the more informative one."));
+}
+
+// REQ: OA-SHD-012
+#[test]
+fn a_value_that_rounds_to_zero_is_written_without_a_sign() {
+    let (eram, oa) = world();
+    let mut c = compare_all(&eram, &oa, None);
+    c.events[0].cross_m = -0.04;
+    c.events[0].along_m = -0.0;
+    let csv = oa_shadow::report::events_csv(&c);
+    let row = csv.lines().nth(1).unwrap();
+    assert!(!row.contains("-0.0"), "{row}");
+    assert!(row.contains(",0.0,"), "{row}");
 }
 
 // REQ: OA-SHD-012
@@ -187,13 +224,15 @@ fn the_summary_counts_each_class_and_names_no_aircraft_or_path() {
             .to_string()
     };
     assert!(
-        line("POS_CROSS_GT_0.5NM").contains("events        4"),
+        line("POS_CROSS_0P5_TO_1NM").contains("events        4"),
         "{}",
-        line("POS_CROSS_GT_0.5NM")
+        line("POS_CROSS_0P5_TO_1NM")
     );
     assert!(line("UNPAIRED_ERAM").contains("events        1"));
     assert!(line("UNPAIRED_OA").contains("events        1"));
     // No aircraft address and no callsign in the summary; the events file has the address.
+    assert!(r.summary.contains("Coast flags are not the same concept: ERAM's is a message indicator in SFDPS, OpenATCA's is the tracker's own state when no measurement arrived. Compared only at OpenATCA rows at the exact ERAM report time."));
+    assert!(r.summary.contains("median ERAM report interval"));
     assert!(!r.summary.contains("ABC1") && !r.summary.contains(",000001,"));
     assert!(r.events_csv.contains(",000001,"));
     assert!(
@@ -219,9 +258,9 @@ fn every_threshold_is_in_the_table_and_printed_in_the_summary() {
     for l in t.lines() {
         assert!(r.summary.contains(&l), "{l}");
     }
-    assert!(r.summary.contains("> 0.5 NM and > 1.0 NM"));
+    assert!(r.summary.contains("0.5 to 1.0 NM and > 1.0 NM"));
     assert!(r.summary.contains("> 300 ft"));
-    assert!(r.summary.contains("> 12 s"));
+    assert!(r.summary.contains("> 12 s plus the ERAM report interval"));
 }
 
 // REQ: OA-SHD-014
@@ -237,7 +276,7 @@ fn per_flight_rows_hold_the_worst_cases_and_a_flight_index() {
         ("paired", Some(1), 9, 9)
     );
     assert!((f0.worst_cross_m - 1000.0).abs() < 2.0);
-    assert!(f0.worst_along_adj_m < 1.0);
+    assert!(f0.worst_along_m < 1.0);
     assert_eq!(f0.events, 4);
     assert_eq!(r.flights_csv.lines().count(), 5);
     assert!(r
@@ -361,4 +400,13 @@ fn altitude_events_name_the_band_of_eram_altitude_and_the_summary_counts_both() 
         "{}",
         r.summary
     );
+}
+
+// REQ: OA-SHD-018
+#[test]
+fn the_extent_of_a_set_of_times_is_its_first_and_last() {
+    use oa_shadow::window::extent;
+    assert_eq!(extent([5, 1, 9, 3].into_iter()), Some((1, 9)));
+    assert_eq!(extent(std::iter::empty()), None);
+    assert_eq!(extent([4].into_iter()), Some((4, 4)));
 }

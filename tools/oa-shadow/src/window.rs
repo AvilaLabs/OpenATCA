@@ -12,6 +12,13 @@ pub fn overlap(a: (i64, i64), b: (i64, i64)) -> Option<(i64, i64)> {
     (lo <= hi).then_some((lo, hi))
 }
 
+/// The first and last of a set of times, `None` for none.
+pub fn extent(times: impl Iterator<Item = i64>) -> Option<(i64, i64)> {
+    times.fold(None, |e: Option<(i64, i64)>, t| {
+        Some(e.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
+    })
+}
+
 /// Keeps the ERAM samples inside `[lo, hi]` and drops the flights left with none.
 pub fn restrict_eram(flights: &mut Vec<EramFlight>, lo: i64, hi: i64) {
     for f in flights.iter_mut() {

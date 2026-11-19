@@ -137,3 +137,40 @@ fn arguments_are_strict() {
     assert!(a(&["--adsb", "a", "--sfdps-dir", "b", "--out", "c", "--x", "y"]).is_err());
     assert!(a(&[]).is_err());
 }
+
+// REQ: OA-SHD-022
+#[test]
+#[cfg(unix)]
+fn every_file_opened_is_canonicalised_so_a_link_in_an_unsealed_directory_is_refused() {
+    use oa_shadow::run::guarded_opener;
+    let root = scratch("opener");
+    let sealed = root.join("scds").join("rec-20261119");
+    std::fs::create_dir_all(&sealed).unwrap();
+    let target = sealed.join("a.msg");
+    std::fs::write(&target, b"x").unwrap();
+    let plain = root.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("ok.msg"), b"x").unwrap();
+    let link = plain.join("innocent.msg");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let open = guarded_opener();
+    assert!(open(&link).is_err());
+    assert!(open(&plain.join("ok.msg")).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// REQ: OA-SHD-022
+#[test]
+fn run_itself_refuses_a_sealed_argument_before_creating_anything() {
+    use oa_shadow::args::Args;
+    let out = scratch("runrefuse");
+    let made = out.join("o");
+    let r = oa_shadow::run::run(&Args {
+        adsb: PathBuf::from("/x/scds/rec-20261119/a.oaf"),
+        sfdps_dir: out.join("fine"),
+        out: made.clone(),
+    });
+    assert!(r.unwrap_err().contains("sealed"));
+    assert!(!made.exists());
+    let _ = std::fs::remove_dir_all(&out);
+}

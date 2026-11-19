@@ -50,7 +50,7 @@ fn cross_track_divergence_classes_either_side_of_each_threshold() {
                     "east {east}: {rows:?}"
                 );
                 // Cross-track only; the along-track part is within the allowance.
-                assert!(rows.iter().all(|e| e.along_adj_m.abs() < 1.0));
+                assert!(rows.iter().all(|e| e.along_m.abs() < 1.0));
             }
         }
     }
@@ -58,14 +58,16 @@ fn cross_track_divergence_classes_either_side_of_each_threshold() {
 
 // REQ: OA-SHD-003
 #[test]
-fn along_track_divergence_is_judged_after_the_time_allowance_and_separately() {
-    // 100 m/s: the allowance is 100 m. ERAM 100 + x metres ahead is x metres adjusted.
-    for (north, want) in [
-        (100.0 + 924.0, None),
-        (100.0 + 928.0, Some(Class::PosAlong05)),
-        (100.0 + 1854.0, Some(Class::PosAlong10)),
-        (-100.0 - 928.0, Some(Class::PosAlong05)),
-        (-100.0 - 1854.0, Some(Class::PosAlong10)),
+fn along_track_divergence_is_raw_and_flagged_for_the_whole_second_stamp() {
+    // 100 m/s: one second of travel is 100 m. The classification uses the raw separation.
+    for (north, want, flag) in [
+        (924.0, None, false),
+        (928.0, Some(Class::PosAlong05), true), // 828 m after the allowance: under 926
+        (1100.0, Some(Class::PosAlong05), false), // 1000 m after it: still over
+        (1854.0, Some(Class::PosAlong10), true), // 1754 m after it: under 1852
+        (2000.0, Some(Class::PosAlong10), false),
+        (-928.0, Some(Class::PosAlong05), true),
+        (-1854.0, Some(Class::PosAlong10), true),
     ] {
         let c = one_pair(0.0, north);
         let rows: Vec<_> = c.events.iter().filter(|e| e.class.is_position()).collect();
@@ -73,20 +75,28 @@ fn along_track_divergence_is_judged_after_the_time_allowance_and_separately() {
             None => assert!(rows.is_empty(), "north {north}: {rows:?}"),
             Some(class) => {
                 assert_eq!(rows.len(), 9, "north {north}");
-                assert!(rows.iter().all(|e| e.class == class));
+                assert!(rows.iter().all(|e| e.class == class), "north {north}");
                 assert!(rows.iter().all(|e| e.cross_m.abs() < 1.0));
+                assert!(
+                    rows.iter().all(|e| e.within_stamp_allowance == Some(flag)),
+                    "north {north}"
+                );
+                assert!(rows.iter().all(|e| (e.credit_m - 100.0).abs() < 0.01));
             }
         }
     }
-    // Both axes over: two rows per report, one for each axis.
+    // Cross-track events carry no flag. Both axes over: one row for each axis per report.
     let c = one_pair(1000.0, 1100.0);
     assert_eq!(count(&c, Class::PosCross05), 9);
     assert_eq!(count(&c, Class::PosAlong05), 9);
+    assert!(of(&c, Class::PosCross05)
+        .iter()
+        .all(|e| e.within_stamp_allowance.is_none()));
 }
 
 // REQ: OA-SHD-004
 #[test]
-fn eram_whole_second_stamp_is_allowed_for_along_track_only() {
+fn separation_is_raw_with_the_stamp_credit_beside_it() {
     let th = &THRESHOLDS;
     let oa = OaPoint {
         lat_deg: deg(LAT),
@@ -110,18 +120,13 @@ fn eram_whole_second_stamp_is_allowed_for_along_track_only() {
             th,
         )
     };
-    // Within one second of travel (200 m) either way: no along-track difference.
-    for n in [-199.0, -100.0, 0.0, 100.0, 199.0] {
-        assert!(at(0.0, n).along_adj_m.abs() < 1.0, "{n}");
-    }
-    // Beyond it: the excess.
-    assert!((at(0.0, 300.0).along_adj_m - 100.0).abs() < 1.0);
-    assert!((at(0.0, -300.0).along_adj_m + 100.0).abs() < 1.0);
-    assert!((at(0.0, 300.0).along_raw_m - 300.0).abs() < 1.0);
-    // Cross-track gets no allowance, right of travel is positive.
+    assert!((at(0.0, 300.0).along_m - 300.0).abs() < 1.0);
+    assert!((at(0.0, -300.0).along_m + 300.0).abs() < 1.0);
+    assert!((at(0.0, 300.0).credit_m - 200.0).abs() < 1e-9);
+    // Right of travel is positive; cross-track is untouched by time.
     assert!((at(150.0, 0.0).cross_m - 150.0).abs() < 1.0);
     assert!((at(-150.0, 0.0).cross_m + 150.0).abs() < 1.0);
-    assert!((at(150.0, 0.0).horiz_adj_m - 150.0).abs() < 1.0);
+    assert!((at(150.0, 0.0).horiz_m - 150.0).abs() < 1.0);
 }
 
 // REQ: OA-SHD-004
@@ -149,7 +154,7 @@ fn a_slow_aircraft_has_no_direction_and_its_separation_is_cross_track() {
         th,
     );
     assert!((s.cross_m - 50.0).abs() < 0.1);
-    assert_eq!((s.along_raw_m, s.along_adj_m), (0.0, 0.0));
+    assert_eq!((s.along_m, s.credit_m), (0.0, 0.0));
 }
 
 // REQ: OA-SHD-005
@@ -250,6 +255,27 @@ fn coast_status_differences_are_classed_by_which_system_coasts() {
     let c = compare_all(&[flight(Some(1), vec![e])], &oa_map(vec![oa]), None);
     assert_eq!(
         count(&c, Class::CoastEramOnly) + count(&c, Class::CoastOaOnly),
+        0
+    );
+}
+
+// REQ: OA-SHD-010
+#[test]
+fn coast_is_compared_only_at_an_openatca_row_at_the_exact_eram_time() {
+    // OpenATCA rows at half seconds: position is interpolated, the coast flag is not.
+    let mut oa = oa_north(1, 0, 40, 100.0);
+    for s in &mut oa.samples {
+        s.t_ms += 500;
+        s.coast = true;
+    }
+    let samples = (1..=3)
+        .map(|k| eram_at(k * 12, (k * 12) as f64 + 0.5, 100.0, 0.0, 0.0))
+        .collect();
+    let c = compare_all(&[flight(Some(1), samples)], &oa_map(vec![oa]), None);
+    assert_eq!(c.totals.compared, 3);
+    assert_eq!(c.totals.coast_compared, 0);
+    assert_eq!(
+        count(&c, Class::CoastOaOnly) + count(&c, Class::CoastEramOnly),
         0
     );
 }
