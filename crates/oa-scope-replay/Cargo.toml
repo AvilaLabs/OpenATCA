@@ -23,3 +23,6 @@ oa-airspace = { path = "../oa-airspace" }
 [[bin]]
 name = "oa-scope-replay"
 path = "src/bin/oa-scope-replay.rs"
+
+[package.metadata.openatca]
+class = "unsplit"

@@ -17,3 +17,6 @@ oa-airspace = { path = "../oa-airspace" }
 [[bin]]
 name = "oa-scope"
 path = "src/bin/oa-scope.rs"
+
+[package.metadata.openatca]
+class = "unsplit"

@@ -1,0 +1,13 @@
+# Crates allowed to be `class = "unsplit"` (RULESET B9). This list only shrinks: split the crate, set its class, delete its line.
+oa-airspace
+oa-bench
+oa-display
+oa-feed
+oa-nam
+oa-replay
+oa-replay-diff
+oa-scope-replay
+oa-sha256
+oa-track
+oa-truth
+oa-wind

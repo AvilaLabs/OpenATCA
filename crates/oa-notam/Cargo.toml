@@ -13,3 +13,6 @@ workspace = true
 oa-xml = { path = "../oa-xml" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
+
+[package.metadata.openatca]
+class = "shell"

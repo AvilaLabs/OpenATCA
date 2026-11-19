@@ -1,0 +1,5 @@
+[package]
+name = "fx-badsplit"
+
+[package.metadata.openatca]
+class = "split"

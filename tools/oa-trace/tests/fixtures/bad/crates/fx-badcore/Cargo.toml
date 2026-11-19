@@ -1,0 +1,9 @@
+[package]
+name = "fx-badcore"
+
+[package.metadata.openatca]
+class = "core"
+
+[dependencies]
+fx-shell = { path = "../fx-shell" }
+fx-cleansplit = { path = "../fx-cleansplit" }

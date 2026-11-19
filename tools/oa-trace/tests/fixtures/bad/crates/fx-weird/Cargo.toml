@@ -1,0 +1,5 @@
+[package]
+name = "fx-weird"
+
+[package.metadata.openatca]
+class = "banana"

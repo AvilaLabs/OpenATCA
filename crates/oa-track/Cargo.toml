@@ -36,3 +36,6 @@ path = "src/fusion_main.rs"
 [dev-dependencies]
 # Workspace crate, examples only.
 oa-replay = { path = "../oa-replay" }
+
+[package.metadata.openatca]
+class = "unsplit"

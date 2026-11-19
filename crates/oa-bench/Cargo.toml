@@ -27,3 +27,6 @@ oa-geo = { path = "../oa-geo" }
 [[bin]]
 name = "oa-bench"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "unsplit"
