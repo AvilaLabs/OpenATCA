@@ -1,23 +1,38 @@
-//! The canonical bytes of a tracker output row, the per-second digest over them, and the rows
-//! file that explains a difference between two runs. Core: [`canon_row`], [`Digester`] and
-//! [`chain_next`] are pure. Shell: [`write_canon`] reads a spilled run back and writes the files.
+//! The canonical bytes of a tracker output row, the per-second digest over them, and the header
+//! of the rows file that explains a difference between two runs. Core (B1): every item here is
+//! pure and does no I/O; the files are written by [`crate::canon_spill`] (shell).
+//!
+//! Classification of every public item:
+//!
+//! | item | class |
+//! |---|---|
+//! | [`ROW_BYTES`], `OFF_*`, [`DIGEST_HEADER`], [`ROWS_MAGIC`], [`ROWS_VERSION`], [`ROWS_HEADER_BYTES`], [`MAX_ROWS_PER_SECOND`], [`MAX_SECONDS`], [`CANON_FIELDS`], [`CANON_NAN_F32`] | core (constants) |
+//! | [`canon_row`], [`canon_row_at`], [`canon_row_floats`], [`row_second`], [`field_at`] | core, pure |
+//! | [`second_line`], [`digest_end_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
+//! | [`Digester`] (`new`, `push`, `finish`) | core, pure (a subsystem under D5: owns its sums) |
+//! | [`rows_header`], [`parse_rows_header`], [`limit_text`] | core, pure |
+//! | [`SecondEntry`], [`LimitError`], [`CanonRow`] | plain data |
 //!
 //! A row is [`ROW_BYTES`] bytes, every field little-endian at a fixed offset, floats as their
-//! IEEE bits (every NaN becomes the one fixed NaN, `oa_math::canon_nan_f32`; nothing else is zeroed or normalised). Rows are
+//! IEEE bits (every NaN becomes the one fixed NaN, [`CANON_NAN_F32`]; nothing else is zeroed or normalised). Rows are
 //! grouped by the Unix second of their time (`t_ns` floored to a second). The digest of a second
 //! is the SHA-256 of its rows in the order the tracker emitted them; the chain hash of a second
 //! is the SHA-256 of the chain hash of the second before it (32 zero bytes for the first), the
 //! second as `i64` little-endian, the second's digest and its row count as `u64` little-endian.
 //! No floating-point value is decoded here: the rows are moved and hashed as bytes.
+//!
+//! # Limits (C2, C7)
+//!
+//! A digest holds at most [`MAX_SECONDS`] seconds and a second at most [`MAX_ROWS_PER_SECOND`]
+//! rows (about 89 MB held whole by a reader). [`Digester::push`] refuses a row that would pass
+//! either, as an error, before the row is counted; the readers of a digest and of a rows file
+//! refuse a declared size above them before any loop runs.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
-use std::path::Path;
 
 use oa_sha256::{sha256, to_hex, Sha256};
 
-use crate::spill::{check_columns, ColReader, SpilledRun, WIDTHS};
+use crate::spill::WIDTHS;
 use crate::types::{OutRow, TrackOutput};
 
 /// Bytes of one canonical row.
@@ -46,17 +61,25 @@ pub const OFF_FLAGS: usize = 84;
 /// One canonical row.
 pub type CanonRow = [u8; ROW_BYTES];
 
-/// First line of a digest file.
-pub const DIGEST_HEADER: &str = "# oa-track digest v1: second chain_hash second_hash rows";
+/// First line of a digest file. v2 ends the file with an `end` line ([`digest_end_line`]), so a
+/// digest cut at a line boundary is not mistaken for a shorter run.
+pub const DIGEST_HEADER: &str =
+    "# oa-track digest v2: second chain_hash second_hash rows; last line: end seconds rows chain";
 /// Magic of a rows file; then `u32` version, `u32` row size, `u64` row count (little-endian).
 pub const ROWS_MAGIC: &[u8; 8] = b"OATKROWS";
 pub const ROWS_VERSION: u32 = 1;
 pub const ROWS_HEADER_BYTES: usize = 24;
-/// Rows held in memory at once when a rows file has to be written out of emission order.
-const CHUNK_ROWS: u64 = 1 << 22;
+/// Most rows one Unix second may hold (C2): about 89 MB of canonical rows, three orders of
+/// magnitude above the busiest second of the national airspace. A reader holds one second whole.
+pub const MAX_ROWS_PER_SECOND: u64 = 1 << 20;
+/// Most distinct seconds one digest may list (C2): about twelve days.
+pub const MAX_SECONDS: usize = 1 << 20;
+
+/// Number of fields of the spill column table that make up a canonical row.
+pub const CANON_FIELDS: usize = 15;
 
 /// `(spill column, offset in the canonical row)` of every field, in column order.
-const FIELDS: [(usize, usize); 15] = [
+pub(crate) const FIELDS: [(usize, usize); CANON_FIELDS] = [
     (0, OFF_T_NS),
     (1, OFF_ADDR),
     (2, OFF_LAT),
@@ -74,40 +97,112 @@ const FIELDS: [(usize, usize); 15] = [
     (14, OFF_FLAGS),
 ];
 
-fn put(row: &mut CanonRow, off: usize, bytes: &[u8]) {
-    if let Some(dst) = row.get_mut(off..off + bytes.len()) {
-        dst.copy_from_slice(bytes);
+// D4/F18: the layout is stated here and in the spill column table; these tie them together at
+// compile time. The column of entry `i` is `i`, its width fits in the row, and the fields tile
+// bytes 0..ROW_BYTES exactly once each, with no gap and no overlap. A failure is a compile error,
+// so the indexing here cannot panic at run time.
+#[allow(clippy::indexing_slicing)]
+const _: () = {
+    let mut seen = [false; ROW_BYTES];
+    let mut i = 0;
+    while i < CANON_FIELDS {
+        assert!(FIELDS[i].0 == i);
+        let (off, w) = (FIELDS[i].1, WIDTHS[i] as usize);
+        assert!(off + w <= ROW_BYTES);
+        let mut b = off;
+        while b < off + w {
+            assert!(!seen[b], "two canonical fields overlap");
+            seen[b] = true;
+            b += 1;
+        }
+        i += 1;
+    }
+    let mut b = 0;
+    while b < ROW_BYTES {
+        assert!(seen[b], "a byte of the canonical row belongs to no field");
+        b += 1;
+    }
+    assert!(WIDTHS.len() == CANON_FIELDS);
+};
+
+// One second's rows hash in far fewer bytes than the hasher's message limit (u64::MAX / 8).
+const _: () = assert!((MAX_ROWS_PER_SECOND as u128) * (ROW_BYTES as u128) < (u64::MAX / 8) as u128);
+
+/// Writes `bytes` at `OFF`. The range is checked at compile time, so there is no runtime case
+/// in which the bytes land nowhere.
+fn put<const OFF: usize, const N: usize>(row: &mut CanonRow, bytes: [u8; N]) {
+    const { assert!(OFF + N <= ROW_BYTES) };
+    for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
+        *d = s;
     }
 }
 
-fn put_f32s(row: &mut CanonRow, off: usize, v: &[f32]) {
-    for (i, x) in v.iter().enumerate() {
-        put(
-            row,
-            off + 4 * i,
-            &oa_math::canon_nan_f32(*x).to_bits().to_le_bytes(),
-        );
+/// The one NaN of a canonical row (positive, quiet, no payload). Local on purpose: this file is
+/// also carried by the replay overlay onto old commits, which have no newer `oa-math` item; the
+/// test `tests/canon_nan.rs` pins it to `oa_math::canon_nan_f32`.
+pub const CANON_NAN_F32: u32 = 0x7fc0_0000;
+
+/// The IEEE bits of `x`, every NaN as [`CANON_NAN_F32`].
+fn canon_f32_bits(x: f32) -> u32 {
+    if x.is_nan() {
+        CANON_NAN_F32
+    } else {
+        x.to_bits()
     }
+}
+
+/// Writes `N` little-endian `f32` bit patterns at `OFF`.
+fn put_f32s<const OFF: usize, const N: usize>(row: &mut CanonRow, v: [f32; N]) {
+    const { assert!(OFF + 4 * N <= ROW_BYTES) };
+    let bytes = v.into_iter().flat_map(|x| canon_f32_bits(x).to_le_bytes());
+    for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
+        *d = s;
+    }
+}
+
+/// Rewrites every NaN among the `f32` fields of a row (bytes `OFF_VE` up to `OFF_FLAGS`) as
+/// [`CANON_NAN_F32`]; the other bytes stay. A row read back from raw column bytes goes through
+/// this, so a base that spilled raw bits still yields canonical rows.
+pub fn canon_row_floats(row: &mut CanonRow) {
+    const { assert!(OFF_FLAGS > OFF_VE && (OFF_FLAGS - OFF_VE) % 4 == 0) };
+    let Some(floats) = row.get_mut(OFF_VE..OFF_FLAGS) else {
+        return;
+    };
+    for c in floats.chunks_exact_mut(4) {
+        if let Ok(b) = <[u8; 4]>::try_from(&*c) {
+            let bits = canon_f32_bits(f32::from_le_bytes(b));
+            c.copy_from_slice(&bits.to_le_bytes());
+        }
+    }
+}
+
+/// The `N` bytes at `OFF` of a row; the range is checked at compile time.
+pub fn field_at<const OFF: usize, const N: usize>(row: &CanonRow) -> [u8; N] {
+    const { assert!(OFF + N <= ROW_BYTES) };
+    let mut out = [0u8; N];
+    for (d, s) in out.iter_mut().zip(row.iter().skip(OFF)) {
+        *d = *s;
+    }
+    out
 }
 
 /// The canonical bytes of one row.
 pub fn canon_row(r: &OutRow) -> CanonRow {
     let mut b = [0u8; ROW_BYTES];
-    put(&mut b, OFF_ADDR, &r.addr.to_le_bytes());
-    put(&mut b, OFF_T_NS, &r.t_ns.to_le_bytes());
-    put(&mut b, OFF_LAT, &r.lat_e7.to_le_bytes());
-    put(&mut b, OFF_LON, &r.lon_e7.to_le_bytes());
-    put_f32s(&mut b, OFF_VE, &[r.vel_east_mps, r.vel_north_mps]);
-    put_f32s(
+    put::<OFF_ADDR, 4>(&mut b, r.addr.to_le_bytes());
+    put::<OFF_T_NS, 8>(&mut b, r.t_ns.to_le_bytes());
+    put::<OFF_LAT, 4>(&mut b, r.lat_e7.to_le_bytes());
+    put::<OFF_LON, 4>(&mut b, r.lon_e7.to_le_bytes());
+    put_f32s::<OFF_VE, 2>(&mut b, [r.vel_east_mps, r.vel_north_mps]);
+    put_f32s::<OFF_TURN, 4>(
         &mut b,
-        OFF_TURN,
-        &[r.turn_rate_rps, r.alt_ft, r.alt_var_ft2, r.vrate_fpm],
+        [r.turn_rate_rps, r.alt_ft, r.alt_var_ft2, r.vrate_fpm],
     );
-    put_f32s(&mut b, OFF_POS_COV, &r.pos_cov_m2);
-    put_f32s(&mut b, OFF_VEL_COV, &r.vel_cov_m2s2);
-    put_f32s(&mut b, OFF_MU_H, &r.mu_h);
-    put_f32s(&mut b, OFF_MU_V, &r.mu_v);
-    put(&mut b, OFF_FLAGS, &[r.flags]);
+    put_f32s::<OFF_POS_COV, 3>(&mut b, r.pos_cov_m2);
+    put_f32s::<OFF_VEL_COV, 3>(&mut b, r.vel_cov_m2s2);
+    put_f32s::<OFF_MU_H, 2>(&mut b, r.mu_h);
+    put_f32s::<OFF_MU_V, 2>(&mut b, r.mu_v);
+    put::<OFF_FLAGS, 1>(&mut b, [r.flags]);
     b
 }
 
@@ -134,9 +229,7 @@ pub fn canon_row_at(o: &TrackOutput, i: usize) -> Option<CanonRow> {
 
 /// The Unix second of a canonical row's time (floored).
 pub fn row_second(row: &CanonRow) -> i64 {
-    let mut t = [0u8; 8];
-    t.copy_from_slice(row.get(OFF_T_NS..OFF_T_NS + 8).unwrap_or(&[0; 8]));
-    i64::from_le_bytes(t).div_euclid(1_000_000_000)
+    i64::from_le_bytes(field_at::<OFF_T_NS, 8>(row)).div_euclid(1_000_000_000)
 }
 
 /// One output second of a digest.
@@ -149,17 +242,47 @@ pub struct SecondEntry {
     pub chain: [u8; 32],
 }
 
-impl SecondEntry {
-    /// `second chain_hash second_hash rows`.
-    pub fn line(&self) -> String {
-        format!(
-            "{} {} {} {}",
-            self.second,
-            to_hex(&self.chain),
-            to_hex(&self.hash),
-            self.rows
-        )
+/// The digest-file line of a second: `second chain_hash second_hash rows`.
+pub fn second_line(e: &SecondEntry) -> String {
+    format!(
+        "{} {} {} {}",
+        e.second,
+        to_hex(&e.chain),
+        to_hex(&e.hash),
+        e.rows
+    )
+}
+
+/// The last line of a digest file: `end <seconds> <rows> <chain hash of the last second>` (32
+/// zero bytes, in hex, for a run with no seconds). The reader recomputes all three from the lines
+/// before it and requires equality.
+pub fn digest_end_line(entries: &[SecondEntry]) -> String {
+    let rows = entries.iter().fold(0u64, |a, e| a.saturating_add(e.rows));
+    let chain = entries.last().map_or([0u8; 32], |e| e.chain);
+    format!("end {} {} {}", entries.len(), rows, to_hex(&chain))
+}
+
+/// Lowercase hex of 32 bytes.
+pub fn hex32(b: &[u8; 32]) -> String {
+    to_hex(b)
+}
+
+/// The 32 bytes of 64 lowercase hex digits; None for anything else (uppercase included).
+pub fn from_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
     }
+    let nib = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut out = [0u8; 32];
+    for (o, pair) in out.iter_mut().zip(s.as_bytes().chunks_exact(2)) {
+        let [hi, lo] = pair else { return None };
+        *o = nib(*hi)? << 4 | nib(*lo)?;
+    }
+    Some(out)
 }
 
 /// The chain hash after a second, given the one before it.
@@ -172,11 +295,53 @@ pub fn chain_next(prev: &[u8; 32], second: i64, hash: &[u8; 32], rows: u64) -> [
     sha256(&m)
 }
 
+/// The digest of one second given its rows in emission order: the SHA-256 of the rows back to
+/// back, as [`Digester`] computes it. None when the rows are more than the hasher can take
+/// (never, below [`MAX_ROWS_PER_SECOND`]).
+pub fn hash_rows(rows: &[CanonRow]) -> Option<[u8; 32]> {
+    let mut h = Sha256::new();
+    for r in rows {
+        h.update(r).ok()?;
+    }
+    Some(h.finalize())
+}
+
+/// A digest limit that a row would pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitError {
+    /// More than [`MAX_SECONDS`] distinct seconds.
+    TooManySeconds,
+    /// More than [`MAX_ROWS_PER_SECOND`] rows in one second.
+    SecondTooLarge { second: i64 },
+    /// The hasher refused the message length (not reachable below the limits).
+    Hash,
+}
+
+/// The sentence for a [`LimitError`].
+pub fn limit_text(e: LimitError) -> String {
+    match e {
+        LimitError::TooManySeconds => {
+            format!("more than {MAX_SECONDS} distinct seconds in one run (limit)")
+        }
+        LimitError::SecondTooLarge { second } => {
+            format!("second {second} has more than {MAX_ROWS_PER_SECOND} rows (limit)")
+        }
+        LimitError::Hash => "the hasher refused a second's message length".to_string(),
+    }
+}
+
 /// Accumulates rows (in emission order) into per-second digests.
-#[derive(Default)]
 // A7.2: cold struct, size guard waived
 pub struct Digester {
     seconds: BTreeMap<i64, (Sha256, u64)>,
+    max_seconds: usize,
+    max_rows: u64,
+}
+
+impl Default for Digester {
+    fn default() -> Digester {
+        Digester::with_limits(MAX_SECONDS, MAX_ROWS_PER_SECOND)
+    }
 }
 
 impl Digester {
@@ -184,14 +349,28 @@ impl Digester {
         Digester::default()
     }
 
-    pub fn push(&mut self, row: &CanonRow) {
-        let e = self
-            .seconds
-            .entry(row_second(row))
-            .or_insert_with(|| (Sha256::new(), 0));
-        // A row is 85 bytes; a second's rows cannot reach the hasher's length limit.
-        let _ = e.0.update(row);
-        e.1 += 1;
+    /// A digester with smaller limits than the named ones (a test of the refusal).
+    pub fn with_limits(max_seconds: usize, max_rows: u64) -> Digester {
+        Digester {
+            seconds: BTreeMap::new(),
+            max_seconds: max_seconds.min(MAX_SECONDS),
+            max_rows: max_rows.min(MAX_ROWS_PER_SECOND),
+        }
+    }
+
+    /// Adds a row. A row that would pass a limit is refused and not counted.
+    pub fn push(&mut self, row: &CanonRow) -> Result<(), LimitError> {
+        let s = row_second(row);
+        if !self.seconds.contains_key(&s) && self.seconds.len() >= self.max_seconds {
+            return Err(LimitError::TooManySeconds);
+        }
+        let e = self.seconds.entry(s).or_insert_with(|| (Sha256::new(), 0));
+        if e.1 >= self.max_rows {
+            return Err(LimitError::SecondTooLarge { second: s });
+        }
+        e.0.update(row).map_err(|_| LimitError::Hash)?;
+        e.1 = e.1.saturating_add(1);
+        Ok(())
     }
 
     /// The seconds in order, with their chain hashes.
@@ -212,138 +391,61 @@ impl Digester {
     }
 }
 
-/// Calls `f` with every row of a spilled run, canonical, in emission order.
-pub fn spill_canon_rows(
-    run: &SpilledRun,
-    f: &mut dyn FnMut(&CanonRow) -> io::Result<()>,
-) -> io::Result<()> {
-    check_columns(&run.dir, run.rows)?;
-    let mut cols = Vec::with_capacity(FIELDS.len());
-    for (c, _) in FIELDS {
-        let w = WIDTHS.get(c).copied().unwrap_or(1) as usize;
-        cols.push((ColReader::open(&run.dir, c, w)?, w));
-    }
-    let mut seen = 0u64;
-    loop {
-        let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(cols.len());
-        for (r, _) in &mut cols {
-            blocks.push(r.block()?.to_vec());
-        }
-        let n = blocks.first().map_or(0, |b| b.len() / 8);
-        if n == 0 {
-            break;
-        }
-        for i in 0..n {
-            let mut row = [0u8; ROW_BYTES];
-            for (k, ((_, w), (_, off))) in cols.iter().zip(FIELDS.iter()).enumerate() {
-                let src = blocks.get(k).and_then(|b| b.get(i * w..(i + 1) * w));
-                let Some(src) = src else {
-                    return Err(io::Error::other(
-                        "spill column files have different lengths",
-                    ));
-                };
-                put(&mut row, *off, src);
-            }
-            f(&row)?;
-            seen += 1;
-        }
-    }
-    if seen != run.rows {
-        return Err(io::Error::other("spill read back a different row count"));
-    }
-    Ok(())
-}
-
 /// The header of a rows file for `rows` rows.
 pub fn rows_header(rows: u64) -> [u8; ROWS_HEADER_BYTES] {
     let mut h = [0u8; ROWS_HEADER_BYTES];
-    put_hdr(&mut h, 0, ROWS_MAGIC);
-    put_hdr(&mut h, 8, &ROWS_VERSION.to_le_bytes());
-    put_hdr(&mut h, 12, &(ROW_BYTES as u32).to_le_bytes());
-    put_hdr(&mut h, 16, &rows.to_le_bytes());
+    for (d, s) in h.iter_mut().zip(
+        ROWS_MAGIC
+            .iter()
+            .copied()
+            .chain(ROWS_VERSION.to_le_bytes())
+            .chain((ROW_BYTES as u32).to_le_bytes())
+            .chain(rows.to_le_bytes()),
+    ) {
+        *d = s;
+    }
     h
 }
 
-fn put_hdr(h: &mut [u8; ROWS_HEADER_BYTES], off: usize, b: &[u8]) {
-    if let Some(d) = h.get_mut(off..off + b.len()) {
-        d.copy_from_slice(b);
+const _: () = assert!(8 + 4 + 4 + 8 == ROWS_HEADER_BYTES);
+
+/// Checks the header of a rows file in full (magic, version, row size, exact length) and returns
+/// the row count it declares.
+pub fn parse_rows_header(h: &[u8]) -> Result<u64, String> {
+    let Ok(h) = <[u8; ROWS_HEADER_BYTES]>::try_from(h) else {
+        return Err(format!(
+            "rows file header is {} bytes, expected {ROWS_HEADER_BYTES}",
+            h.len()
+        ));
+    };
+    let mut at = 0usize;
+    let mut take = |n: usize| {
+        let s: Vec<u8> = h.iter().skip(at).take(n).copied().collect();
+        at += n;
+        s
+    };
+    if take(8) != ROWS_MAGIC {
+        return Err("not a rows file (bad magic)".to_string());
     }
+    let ver = le_u32(&take(4));
+    if ver != ROWS_VERSION {
+        return Err(format!("rows file version {ver}, expected {ROWS_VERSION}"));
+    }
+    let size = le_u32(&take(4));
+    if usize::try_from(size).ok() != Some(ROW_BYTES) {
+        return Err(format!("rows file row size {size}, expected {ROW_BYTES}"));
+    }
+    let mut c = [0u8; 8];
+    for (d, s) in c.iter_mut().zip(take(8)) {
+        *d = s;
+    }
+    Ok(u64::from_le_bytes(c))
 }
 
-/// What [`write_canon`] wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// A7.2: cold struct, size guard waived
-pub struct CanonSummary {
-    pub seconds: u64,
-    pub rows: u64,
-    /// Whether the rows came out of the tracker with non-decreasing seconds.
-    pub in_order: bool,
-}
-
-/// Writes the digest file and/or the rows file of a spilled run. The rows file lists the rows
-/// grouped by second in ascending order, each second's rows in emission order.
-pub fn write_canon(
-    run: &SpilledRun,
-    digest: Option<&Path>,
-    rows: Option<&Path>,
-) -> io::Result<CanonSummary> {
-    let mut d = Digester::new();
-    let mut in_order = true;
-    let mut last = i64::MIN;
-    spill_canon_rows(run, &mut |r| {
-        let s = row_second(r);
-        in_order &= s >= last;
-        last = last.max(s);
-        d.push(r);
-        Ok(())
-    })?;
-    let entries = d.finish();
-    if let Some(p) = digest {
-        let mut w = BufWriter::new(File::create(p)?);
-        writeln!(w, "{DIGEST_HEADER}")?;
-        for e in &entries {
-            writeln!(w, "{}", e.line())?;
-        }
-        w.flush()?;
+fn le_u32(b: &[u8]) -> u32 {
+    let mut x = [0u8; 4];
+    for (d, s) in x.iter_mut().zip(b) {
+        *d = *s;
     }
-    if let Some(p) = rows {
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(p)?);
-        w.write_all(&rows_header(run.rows))?;
-        if in_order {
-            spill_canon_rows(run, &mut |r| w.write_all(r))?;
-        } else {
-            // Out of order: pass over the run once per chunk of seconds, so memory stays bounded.
-            let mut at = 0usize;
-            while let Some(first) = entries.get(at) {
-                let (lo, mut n) = (first.second, 0u64);
-                let mut hi = lo;
-                while let Some(e) = entries.get(at) {
-                    if n > 0 && n + e.rows > CHUNK_ROWS {
-                        break;
-                    }
-                    n += e.rows;
-                    hi = e.second;
-                    at += 1;
-                }
-                let mut held: Vec<(i64, CanonRow)> = Vec::new();
-                spill_canon_rows(run, &mut |r| {
-                    let s = row_second(r);
-                    if (lo..=hi).contains(&s) {
-                        held.push((s, *r));
-                    }
-                    Ok(())
-                })?;
-                held.sort_by_key(|(s, _)| *s);
-                for (_, r) in &held {
-                    w.write_all(r)?;
-                }
-            }
-        }
-        w.flush()?;
-    }
-    Ok(CanonSummary {
-        seconds: entries.len() as u64,
-        rows: run.rows,
-        in_order,
-    })
+    u32::from_le_bytes(x)
 }

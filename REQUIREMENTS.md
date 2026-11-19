@@ -4671,3 +4671,76 @@ scope.
 - **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
   refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
+
+- **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
+  fields tile bytes 0 to 84 of the row once each, entry `i` of the field table is column `i`, and
+  every field range is checked before use, so there is no write that lands nowhere. Hex hashes
+  parse only as 64 lowercase digits.
+- **OA-TRK-371** A digest accepts at most 2^20 seconds and 2^20 rows in one second; a row that
+  would pass either is an error and is not counted, and the rows-file writer therefore never holds
+  a whole oversized second.
+- **OA-TRK-372** The header of a rows file is checked in full (magic, version, row size, exact
+  length), and the hash of a second's rows is computable from the rows alone (`hash_rows`).
+- **OA-TRK-373** The scorer's flag join counts duplicate (address, millisecond) keys and never
+  overwrites one; rows that disagree make the key a conflict. A sample with no tracker row, or only
+  a conflicting one, is a third state, scored in its own `UNMATCHED` group and written as
+  `unmatched`, never as "no". A run that is neither `--development` nor `--allow-dirty` fails if
+  any sample is unmatched, counted over every point after the join.
+- **OA-TRK-374** In every coverage-penalised metric (M4, M4t, M7, M7t) a present value that is not a
+  number is a failure, and the count of such values is printed; an aircraft whose M6 RMS is not a
+  number is a failure for the share and is left out of the sign test; samples left out of a metric's
+  common set for a non-finite value are counted per system apart from samples not in all three; aircraft with no usable time fit are
+  counted per system with their samples and are scored unfitted (offset 0), and the output says so.
+- **OA-RDF-007** A digest is accepted only with the `v2` header as its first line and with every
+  chain hash equal to the chain recomputed from the line and the lines before it; a line that fails
+  is named. A `v1` digest is refused (there is no legacy path), and so is a blank line before the
+  header.
+- **OA-RDF-008** A digest or expect file over its size limit, a second with no rows or over 2^20
+  rows, and row counts that overflow are errors (exit 2), never a panic; a failing standard output
+  (a closed pipe) is exit 2 with a message.
+- **OA-RDF-009** Rows with the same address, time and tick flag in one second are ambiguous
+  pairings: they are counted per second and in total (`ambiguous_pairs`) and are a class that a
+  declared difference must name (`ambiguous`). Rows left over with the same address and time but
+  another tick flag are one changed row (class `flags`), not a removal and an addition.
+- **OA-RDF-010** `order` is read from the matched rows alone, whatever else differs, so a declared
+  class next to an undeclared reorder fails the expectation.
+- **OA-RDF-011** Digests that differ only in a chain hash are different (exit 1, `chain_only`),
+  and no declaration makes them pass.
+- **OA-RDF-012** A rows file is used only after the hash and count of every one of its seconds are
+  recomputed and found equal to its digest line, no digest second is missing from it and none is in
+  it that the digest lacks; the first bad second is named and the exit is 2.
+- **OA-RDF-013** A rows file whose header count differs from its digest's total, that has bytes after
+  its last row, or that ends early is an error (exit 2).
+- **OA-RDF-014** `tools/replay_overlay_apply.sh` applies the overlay patch only to files whose blob
+  is the patch's preimage, at zero fuzz, checks the postimage blobs, and records the sha256 of the
+  patch and of every patched file; any mismatch is a refusal (exit 2).
+- **OA-RDF-015** The overlay patch creates `canon.rs` and `canon_spill.rs` byte for byte as they are in
+  `crates/oa-track/src/`, so an old commit writes the digest line, second hash, chain and end line
+  of the tree. Reading the spill columns back turns every NaN among the `f32` fields into the one
+  canonical NaN, so rows are canonical whatever bits the old commit spilled.
+- **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with compiler flags
+  neutralised: the environment variables `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS`
+  are not passed, `CARGO_ENCODED_RUSTFLAGS` is passed empty (which cargo reads before every
+  config file, so a `target.<triple>.rustflags` or `target.<cfg>.rustflags` in the user's config
+  is not read), and `--config build.rustflags=[]` is given; its report states what the caller's
+  four flag variables held, that they were cleared, and the toolchain. Flags in a
+  `.cargo/config.toml` of the tree under test are not neutralised.
+- **OA-RDF-017** A digest ends with `end <seconds> <rows> <chain>` (format v2), which the reader
+  recomputes from the lines before it and requires, compared field by field on single spaces (tabs,
+  repeated or trailing spaces are refused); a digest cut at a line boundary, an end line that
+  disagrees, or text after it is an error.
+- **OA-RDF-018** Two digests that both have no seconds are exit 2 ("no seconds to compare"), not
+  identical.
+- **OA-RDF-019** When both rows files are given they are verified against their digests whether or
+  not the digests are identical, and the summary says `rows_known=true`.
+- **OA-RDF-020** A second the digests call different but whose rows do not differ, or a differing
+  second that was not diffed, is an inconsistency: exit 2, never a pass.
+- **OA-RDF-021** An option given twice is a usage error (exit 2).
+- **OA-RDF-022** `tools/replay_compare.sh` runs cargo and rustc under `env -i` with only PATH, HOME,
+  RUSTUP_HOME, CARGO_HOME, TMPDIR, an empty `CARGO_ENCODED_RUSTFLAGS` and the two variables it
+  sets, with `--config build.rustflags=[]`;
+  it records the dropped variable names, the sha256 of both digests, both rows files, both
+  tracker binaries and the diff binary, and a missing diff binary is exit 2.
+- **OA-RDF-023** `tools/replay_compare.sh` refuses an output directory that exists and is not
+  empty (exit 2, before any build, touching nothing), and a run that does not reach its end removes
+  the rows files it made.
