@@ -95,7 +95,7 @@ These are the design rules. How far the code meets each one today is in
 | `crates/oa-track` | M3 surveillance tracker: ADS-B and radar plots (exact plot conversion, global-nearest-neighbour association within a per-batch work limit whose cuts are counted, online radar registration against ADS-B) with horizontal and vertical interacting-multiple-model filters in a re-centred local frame, time-of-applicability ordering with re-filtering, M-of-N initiation, coasting, drop, fixed one-second output, split-report scoring against `oa-truth` and `oa-bench`, and the `oa-track-run` and `oa-track-fusion` tools |
 | `tools/oa-trace` | Requirements traceability checker |
 | `tools/oa-perf` | Speed and capacity harness for the tracker's fusion layer |
-| `tools/oa-compass` | Writes a recorded UTC day of OpenATCA tracker output and ERAM tracks as ASTERIX CAT062 Ed 1.21 (with the data-source file and import notes) for OpenATS COMPASS |
+| `tools/oa-compass` | Writes a recorded UTC day of OpenATCA tracker output and ERAM tracks as ASTERIX CAT062 Ed 1.21 and the ADS-B reports it was fed as CAT021 Ed 2.4 (with the data-source file and import notes) for OpenATS COMPASS |
 
 ## Building and testing
 

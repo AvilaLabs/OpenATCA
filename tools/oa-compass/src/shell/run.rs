@@ -5,7 +5,9 @@
 //! samples with the flight's address and callsign) are sorted by position time and written.
 
 use oa_bench::legacy::{Counts, Legacy, NONE, NO_ALT, NO_VEL};
-use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats, DRAIN_ROWS};
+use oa_track::score::{
+    interval_stats, scoring_config, split_reports_with, IntervalStats, SplitStats, DRAIN_ROWS,
+};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
     tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG,
@@ -14,7 +16,9 @@ use oa_track::{
 };
 
 use super::error::ExportError;
+use super::adsb_export::AdsbExport;
 use super::export::SystemExport;
+use crate::core::adsb::{adsb_record, AdsbRow};
 use crate::core::convert::{eram_record, track_record, EramRow, TrackRow};
 
 /// What a tracker run did besides the rows exported. A7.2: cold.
@@ -146,47 +150,159 @@ pub enum InputsMode {
     All,
 }
 
-/// Loads the ADS-B clip at `path`, runs the tracker on the reports `mode` selects and exports its
-/// tick rows. Returns the run's counts, the reports fed and the reports not fed. The tracker is
+/// What the clip's split and the ADS-B file did. A7.2: cold.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClipInfo {
+    /// Reports fed to the tracker.
+    pub fed: u64,
+    /// Reports not fed (set B of the split, empty in `all` mode).
+    pub left: u64,
+    /// What the shared split code removed and kept.
+    pub split: SplitStats,
+    /// The ADS-B file, when one was asked for.
+    pub adsb: Option<AdsbInfo>,
+}
+
+/// What became of the reports offered to the ADS-B file. A7.2: cold.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdsbInfo {
+    pub rows_in: u64,
+    /// Position marked stale by the source: not a current position, left out.
+    pub stale: u64,
+    /// Source types that are not ADS-B (`oa_truth::ADSB_SOURCES`), by name.
+    pub other_sources: Vec<(String, u64)>,
+    pub converted: u64,
+}
+
+/// The ADS-B reports as CAT021 rows, in time order (time, address, input order).
+pub fn export_adsb_reports(
+    reports: &oa_adsb::Reports,
+    ax: &mut AdsbExport,
+) -> Result<AdsbInfo, ExportError> {
+    let n = oa_adsb::reports_len(reports);
+    let mut order: Vec<(i64, u32, u32)> = Vec::with_capacity(n);
+    for (i, (&t, &a)) in reports.time_ns.iter().zip(reports.icao.iter()).enumerate() {
+        let Ok(ix) = u32::try_from(i) else {
+            return Err(ExportError::Input("more than 2^32 ADS-B reports".into()));
+        };
+        order.push((t, a, ix));
+    }
+    order.sort_unstable();
+    let mut info = AdsbInfo {
+        rows_in: n as u64,
+        ..AdsbInfo::default()
+    };
+    let mut other = [0u64; 256];
+    for &(_, _, i) in &order {
+        let Some(row) = oa_adsb::reports_row(reports, i as usize) else {
+            return Err(ExportError::Input(format!("ADS-B report {i} cannot be read back")));
+        };
+        if row.flags & oa_adsb::F_STALE != 0 {
+            info.stale = info.stale.saturating_add(1);
+            continue;
+        }
+        if row.source != oa_adsb::NONE_U8 && !oa_truth::ADSB_SOURCES.contains(&row.source) {
+            if let Some(c) = other.get_mut(usize::from(row.source)) {
+                *c = c.saturating_add(1);
+            }
+            continue;
+        }
+        match adsb_record(&adsb_row(&row)) {
+            Ok(c) => {
+                ax.push(&c, (row.lat_e7, row.lon_e7))?;
+                info.converted = info.converted.saturating_add(1);
+            }
+            Err(r) => ax.refuse(r),
+        }
+    }
+    for (s, &c) in other.iter().enumerate() {
+        if c > 0 {
+            let name = oa_adsb::SOURCE_NAMES
+                .get(s)
+                .map_or_else(|| format!("source {s}"), |n| (*n).to_string());
+            info.other_sources.push((name, c));
+        }
+    }
+    Ok(info)
+}
+
+/// The conversion row of a report.
+fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
+    use oa_adsb::{NONE_I32, NONE_U16, NONE_U8, NON_ICAO, SIL_PER_HOUR, SIL_PER_SAMPLE};
+    let u8_of = |v: u8| (v != NONE_U8).then_some(v);
+    AdsbRow {
+        time_ns: r.time_ns,
+        address: r.icao & 0xFF_FFFF,
+        non_icao: r.icao & NON_ICAO != 0,
+        lat_e7: r.lat_e7,
+        lon_e7: r.lon_e7,
+        baro_alt_ft: (r.baro_alt_ft != NONE_I32).then_some(r.baro_alt_ft),
+        geom_alt_ft: (r.geom_alt_ft != NONE_I32).then_some(r.geom_alt_ft),
+        ground: r.flags & oa_adsb::F_GROUND != 0,
+        vrate_fpm: (r.vrate_fpm != NONE_I32).then_some(r.vrate_fpm),
+        rate_geometric: r.flags & oa_adsb::F_RATE_GEOM != 0,
+        gs_dkt: (r.gs_dkt != NONE_U16).then_some(r.gs_dkt),
+        track_ddeg: (r.track_ddeg != NONE_U16).then_some(r.track_ddeg),
+        callsign: r.callsign,
+        category: r.category,
+        nic: u8_of(r.nic),
+        nac_p: u8_of(r.nac_p),
+        nac_v: u8_of(r.nac_v),
+        sil: u8_of(r.sil),
+        sil_per_sample: match r.sil_type {
+            SIL_PER_SAMPLE => Some(true),
+            SIL_PER_HOUR => Some(false),
+            _ => None,
+        },
+        version: u8_of(r.version),
+        gva: u8_of(r.gva),
+        sda: u8_of(r.sda),
+    }
+}
+
+/// Loads the ADS-B clip at `path`, removes the copies of reports through the scorer's own split
+/// code (`split_reports_with`: the same function the scorer calls, with the halving on for
+/// `Split` and off for `All`), runs the tracker on the reports `mode` selects and exports its
+/// tick rows. The reports the tracker is fed are also written to `adsb`, if given. The tracker is
 /// fed ADS-B only, so the tracks are monosensor.
+///
+/// Conflict rule: reports of one address and time with different content are all kept, in one
+/// fixed order (the tracker sees them as the scorer's split gives them); only exact copies are
+/// removed. This holds in both modes.
 pub fn export_adsb_clip(
     path: &std::path::Path,
     ex: &mut SystemExport,
+    adsb: Option<&mut AdsbExport>,
     mode: InputsMode,
-) -> Result<(TrackRunInfo, u64, u64), ExportError> {
+) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let clip = oa_bench::input::load_adsb(path)
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
-    let (fed, left) = match mode {
-        InputsMode::Split => {
-            let (set_a, set_b, _) = split_reports(&clip.reports);
-            let (a, b) = (
-                oa_adsb::reports_len(&set_a) as u64,
-                oa_adsb::reports_len(&set_b) as u64,
-            );
-            drop(clip);
-            drop(set_b);
-            let (meas, _) =
-                oa_track::adsb::adsb_measurements(&set_a, &oa_track::adsb::AdsbConfig::default());
-            drop(set_a);
-            return finish_run(&meas, ex, a, b);
-        }
-        InputsMode::All => (oa_adsb::reports_len(&clip.reports) as u64, 0),
-    };
-    let (meas, _) =
-        oa_track::adsb::adsb_measurements(&clip.reports, &oa_track::adsb::AdsbConfig::default());
+    let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
     drop(clip);
-    finish_run(&meas, ex, fed, left)
-}
-
-fn finish_run(
-    meas: &[Measurement],
-    ex: &mut SystemExport,
-    fed: u64,
-    left: u64,
-) -> Result<(TrackRunInfo, u64, u64), ExportError> {
-    let cfg = scorer_config(meas);
-    let info = run_tracker(meas, &cfg, ex, true)?;
-    Ok((info, fed, left))
+    let mut info = ClipInfo {
+        fed: oa_adsb::reports_len(&fed_set) as u64,
+        left: oa_adsb::reports_len(&other) as u64,
+        split,
+        adsb: None,
+    };
+    drop(other);
+    if let Some(ax) = adsb {
+        info.adsb = Some(export_adsb_reports(&fed_set, ax)?);
+    }
+    let (meas, _) =
+        oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());
+    drop(fed_set);
+    let cfg = scorer_config(&meas);
+    let run = run_tracker(&meas, &cfg, ex, true)?;
+    if run.overflow > 0 {
+        return Err(ExportError::Input(format!(
+            "the tracker lost {} output rows to a full table; the run is not complete",
+            run.overflow
+        )));
+    }
+    Ok((run, info))
 }
 
 /// ERAM rows of one input: how many, and what was dropped or kept as a conflict. A7.2: cold.

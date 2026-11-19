@@ -49,7 +49,7 @@ impl Rng {
 
 fn track_row(g: &mut Rng, t_ns: i64) -> TrackRow {
     let ve = ((g.unit() - 0.5) * 600.0) as f32;
-    let ve = if g.next() % 7 == 0 { f32::NAN } else { ve };
+    let ve = if g.next().is_multiple_of(7) { f32::NAN } else { ve };
     TrackRow {
         t_ns,
         lat_e7: ((g.unit() * 2.0 - 1.0) * 85.0e7) as i32,
@@ -62,13 +62,13 @@ fn track_row(g: &mut Rng, t_ns: i64) -> TrackRow {
             (g.unit() * 5000.0) as f32,
         ],
         alt_ft: ((g.unit() - 0.05) * 45_000.0) as f32,
-        has_alt: g.next() % 5 != 0,
+        has_alt: !g.next().is_multiple_of(5),
         vrate_fpm: ((g.unit() - 0.5) * 8000.0) as f32,
-        coast: g.next() % 4 == 0,
-        radar_disagrees: g.next() % 9 == 0,
-        uncertain: g.next() % 6 == 0,
-        reacquired: g.next() % 6 == 0,
-        address: (g.next() % 8 != 0).then(|| (g.next() % 0x100_0000) as u32),
+        coast: g.next().is_multiple_of(4),
+        radar_disagrees: g.next().is_multiple_of(9),
+        uncertain: g.next().is_multiple_of(6),
+        reacquired: g.next().is_multiple_of(6),
+        address: (!g.next().is_multiple_of(8)).then(|| (g.next() % 0x100_0000) as u32),
         monosensor: true,
     }
 }
@@ -154,12 +154,12 @@ fn eram_rows_round_trip_with_address_and_identification() {
             pos_ms: DAY_S * 1000 + i * 12_000,
             lat_e7: ((g.unit() * 2.0 - 1.0) * 80.0e7) as i32,
             lon_e7: ((g.unit() * 2.0 - 1.0) * 170.0e7) as i32,
-            alt_ft: (g.next() % 4 != 0).then(|| (g.next() % 45_000) as i32),
-            vel_dkt: (g.next() % 4 != 0)
+            alt_ft: (!g.next().is_multiple_of(4)).then(|| (g.next() % 45_000) as i32),
+            vel_dkt: (!g.next().is_multiple_of(4))
                 .then(|| ((g.next() % 6000) as i16 - 3000, (g.next() % 6000) as i16 - 3000)),
-            coast: g.next() % 3 == 0,
-            address: (g.next() % 3 != 0).then(|| (g.next() % 0x100_0000) as u32),
-            callsign: (g.next() % 3 != 0).then_some(*b"DAL42\0\0\0"),
+            coast: g.next().is_multiple_of(3),
+            address: (!g.next().is_multiple_of(3)).then(|| (g.next() % 0x100_0000) as u32),
+            callsign: (!g.next().is_multiple_of(3)).then_some(*b"DAL42\0\0\0"),
         };
         let mut c = eram_record(&e).unwrap();
         c.values.track_number = (i % 60 + 1) as u16;
@@ -454,10 +454,14 @@ fn the_data_source_file_parses_and_names_both_systems() {
     assert_eq!(doc.str(get(root, "content_version")), Some("0.2"));
     let list = get(root, "data_sources");
     let items: Vec<_> = doc.elements(list).collect();
-    assert_eq!(items.len(), 2);
-    let want = [("OpenATCA", 255, 1), ("ERAM", 255, 2)];
-    for (it, (name, sac, sic)) in items.iter().zip(want) {
-        assert_eq!(doc.str(get(*it, "ds_type")), Some("Tracker"));
+    assert_eq!(items.len(), 3);
+    let want = [
+        ("OpenATCA", 255, 1, "Tracker"),
+        ("ERAM", 255, 2, "Tracker"),
+        ("ADS-B", 255, 3, "ADS-B"),
+    ];
+    for (it, (name, sac, sic, ty)) in items.iter().zip(want) {
+        assert_eq!(doc.str(get(*it, "ds_type")), Some(ty));
         assert_eq!(doc.str(get(*it, "name")), Some(name));
         assert_eq!(doc.as_i64(get(*it, "sac")), Some(sac));
         assert_eq!(doc.as_i64(get(*it, "sic")), Some(sic));

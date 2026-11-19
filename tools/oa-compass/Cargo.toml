@@ -17,6 +17,7 @@ oa-bench = { path = "../../crates/oa-bench" }
 oa-ieee = { path = "../../crates/oa-ieee" }
 oa-math = { path = "../../crates/oa-math" }
 oa-replay = { path = "../../crates/oa-replay" }
+oa-truth = { path = "../../crates/oa-truth" }
 oa-track = { path = "../../crates/oa-track" }
 
 [dev-dependencies]

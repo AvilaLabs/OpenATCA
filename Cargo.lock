@@ -76,6 +76,7 @@ dependencies = [
  "oa-math",
  "oa-replay",
  "oa-track",
+ "oa-truth",
 ]
 
 [[package]]

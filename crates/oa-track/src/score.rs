@@ -110,6 +110,14 @@ pub struct SplitStats {
 
 /// Splits `r` into the two disjoint sets (see the module documentation). Rows keep every field.
 pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
+    split_reports_with(r, true)
+}
+
+/// [`split_reports`] with the halving switchable. With `halve` false every group goes to the
+/// first set and the second is empty: the same copy removal, conflict handling (all distinct
+/// observations of one (address, time) kept, in one fixed order) and quality handling, and no
+/// report is withheld.
+pub fn split_reports_with(r: &Reports, halve: bool) -> (Reports, Reports, SplitStats) {
     let n = reports_len(r);
     let mut order: Vec<(u32, i64, u32)> = Vec::with_capacity(n);
     for (i, (&a, &t)) in r.icao.iter().zip(r.time_ns.iter()).enumerate() {
@@ -162,7 +170,7 @@ pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
             continue;
         }
         // The whole group goes to one side: no physical observation is in both sets.
-        let to_a = k.is_multiple_of(2);
+        let to_a = !halve || k.is_multiple_of(2);
         for mut row in group {
             let v = quality_check(&mut q, &row, t, &DEFAULT_CONFIG);
             row.nac_p = v.nacp.unwrap_or(NONE_U8);

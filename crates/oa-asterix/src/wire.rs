@@ -26,7 +26,7 @@
 //!   unterminated.
 
 use crate::error::{AsterixError, ErrorKind, NO_ITEM, NO_RECORD};
-use crate::uap::{compound_subs, slot_of, uap_for, Field, Kind, Slot, Uap};
+use crate::uap::{compound_subs, slot_of, uap_for_edition, Cat021Edition, Field, Kind, Slot, Uap};
 
 /// Part 1 5.2.2: the LEN field has two octets, so a block is at most 65 535 octets.
 pub const MAX_BLOCK_LEN: usize = 65_535;
@@ -410,6 +410,15 @@ fn parse_record(
 /// Parses one data block at the start of `buf`. `base` is the offset of `buf[0]` in the
 /// caller's stream; offsets in errors include it. The bytes after LEN are not looked at.
 pub fn parse_block(buf: &[u8], base: usize) -> Result<RawBlock, AsterixError> {
+    parse_block_with(buf, base, Cat021Edition::Ed27)
+}
+
+/// [`parse_block`] with CAT021 read as edition `ed`.
+pub fn parse_block_with(
+    buf: &[u8],
+    base: usize,
+    ed: Cat021Edition,
+) -> Result<RawBlock, AsterixError> {
     let (Some(&cat), Some(&l0), Some(&l1)) = (buf.first(), buf.get(1), buf.get(2)) else {
         return Err(err(
             buf.first().copied().unwrap_or(0),
@@ -441,7 +450,7 @@ pub fn parse_block(buf: &[u8], base: usize) -> Result<RawBlock, AsterixError> {
             ErrorKind::BlockLengthExceedsInput,
         ));
     }
-    let Some(uap) = uap_for(cat) else {
+    let Some(uap) = uap_for_edition(cat, ed) else {
         return Err(err(
             cat,
             NO_RECORD,

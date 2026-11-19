@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 //! `oa-compass`: writes one UTC day of OpenATCA tracker output and ERAM tracks as ASTERIX CAT062
-//! Ed 1.21 for OpenATS COMPASS. Shell (B3): arguments, files, the clock and stdout.
+//! Ed 1.21, and the ADS-B reports the tracker was fed as CAT021 Ed 2.4, for OpenATS COMPASS. Shell (B3): arguments, files, the clock and stdout.
 //!
 //! ```text
 //! oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days]
 //!             [--inputs split|all]
 //! ```
 //!
-//! Writes `openatca.ast` (from `--adsb`: the tracker is run on the clip as the scorer runs it),
+//! Writes `openatca.ast` (from `--adsb`: the tracker is run on the clip as the scorer runs it) and
+//! `adsb.ast` (the reports fed to it, deduplicated by the scorer's own code),
 //! `eram.ast` (from `--sfdps-dir`: the ERAM tracks the scorer reads), `data_sources.json` and
 //! `README.txt` in `<dir>`. A file holds one UTC day: rows on another day than `--date` refuse the
 //! export unless `--split-days` is given, which writes one directory per day. Only development
@@ -22,9 +23,12 @@ use std::time::Instant;
 use oa_bench::input::{load, FeedInput};
 use oa_compass::core::time::days_from_civil;
 use oa_compass::shell::error::{io_err, ExportError};
+use oa_compass::shell::adsb_export::{AdsbExport, AdsbFinished};
 use oa_compass::shell::export::{date_text, Finished, Layout, SystemExport};
-use oa_compass::shell::notes::{data_sources_json, readme, ERAM_SOURCE, OPENATCA_SOURCE};
-use oa_compass::shell::run::{export_adsb_clip, export_eram, InputsMode};
+use oa_compass::shell::notes::{
+    data_sources_json, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
+};
+use oa_compass::shell::run::{export_adsb_clip, export_eram, ClipInfo, InputsMode};
 use oa_replay::FeedKind;
 
 const USAGE: &str = "usage: oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days] [--inputs split|all]";
@@ -103,6 +107,25 @@ fn main() -> ExitCode {
     }
 }
 
+/// What the export has produced and not yet committed.
+#[derive(Default)]
+struct Done {
+    systems: Vec<Finished>,
+    adsb: Option<AdsbFinished>,
+    clip: Option<ClipInfo>,
+}
+
+impl Done {
+    fn abort(self) {
+        for f in self.systems {
+            f.abort();
+        }
+        if let Some(a) = self.adsb {
+            a.abort();
+        }
+    }
+}
+
 fn run(
     layout: Layout,
     adsb: Option<PathBuf>,
@@ -111,33 +134,41 @@ fn run(
 ) -> Result<(), ExportError> {
     let t0 = Instant::now();
     fs::create_dir_all(&layout.out).map_err(|e| io_err(&layout.out, &e))?;
-    let mut finished: Vec<Finished> = Vec::new();
+    let mut done = Done::default();
     let has_adsb = adsb.is_some();
-    let result = export_all(&layout, adsb, sfdps, mode, &mut finished, t0);
+    let result = export_all(&layout, adsb, sfdps, mode, &mut done, t0);
     match result {
         Ok(()) => {
             let build = build_text();
             let adsb_mode = has_adsb.then_some(mode);
-            let reports: Vec<_> = finished.iter().map(|f| f.report.clone()).collect();
+            let reports: Vec<_> = done.systems.iter().map(|f| f.report.clone()).collect();
+            let adsb_report = done.adsb.as_ref().map(|a| a.report.clone());
+            let clip = done.clip.take();
             let mut days: Vec<i64> = reports
                 .iter()
                 .flat_map(|r| r.days.iter().map(|d| d.day))
+                .chain(adsb_report.iter().flat_map(|r| r.days.iter().map(|d| d.day)))
                 .collect();
             days.sort_unstable();
             days.dedup();
             if !days.contains(&layout.day) {
-                for f in finished {
-                    f.abort();
-                }
+                done.abort();
                 return Err(ExportError::Input(format!(
                     "no rows at all on {}: nothing to export",
                     date_text(layout.day)
                 )));
             }
-            for f in finished {
+            for f in done.systems {
                 f.commit()?;
             }
+            if let Some(a) = done.adsb {
+                a.commit()?;
+            }
             let refs: Vec<_> = reports.iter().collect();
+            let extras = Extras {
+                adsb: adsb_report.as_ref(),
+                clip: clip.as_ref(),
+            };
             for day in days {
                 let dir = layout.day_dir(day);
                 let w = |name: &str, text: String| {
@@ -145,7 +176,10 @@ fn run(
                     fs::write(&p, text).map_err(|e| io_err(&p, &e))
                 };
                 w("data_sources.json", data_sources_json())?;
-                w("README.txt", readme(day, &refs, &build, layout.split, adsb_mode))?;
+                w(
+                    "README.txt",
+                    readme_with(day, &refs, &build, layout.split, adsb_mode, &extras),
+                )?;
             }
             for r in &reports {
                 for d in &r.days {
@@ -160,13 +194,22 @@ fn run(
                     );
                 }
             }
+            if let Some(r) = &adsb_report {
+                for d in &r.days {
+                    println!(
+                        "ADS-B {}: {} records, {} blocks, {} octets",
+                        date_text(d.day),
+                        d.stats.records,
+                        d.stats.blocks,
+                        d.stats.bytes
+                    );
+                }
+            }
             println!("done in {:.1} s", t0.elapsed().as_secs_f64());
             Ok(())
         }
         Err(e) => {
-            for f in finished {
-                f.abort();
-            }
+            done.abort();
             Err(e)
         }
     }
@@ -177,23 +220,25 @@ fn export_all(
     adsb: Option<PathBuf>,
     sfdps: Option<PathBuf>,
     mode: InputsMode,
-    finished: &mut Vec<Finished>,
+    done: &mut Done,
     t0: Instant,
 ) -> Result<(), ExportError> {
     if let Some(clip) = adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
-        let r = export_adsb_clip(&clip, &mut ex, mode);
-        let (info, n_a, n_b) = match r {
+        let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
+        let r = export_adsb_clip(&clip, &mut ex, Some(&mut ax), mode);
+        let (info, cinfo) = match r {
             Ok(x) => x,
             Err(e) => {
                 ex.abort();
+                ax.abort();
                 return Err(e);
             }
         };
         eprintln!("OpenATCA done at {:.1} s: {} tick rows", t0.elapsed().as_secs_f64(), info.tick_rows);
         for (l, v) in [
-            ("ADS-B reports fed to the tracker", n_a),
-            ("ADS-B reports not fed to the tracker (the other half under --inputs split)", n_b),
+            ("ADS-B reports fed to the tracker", cinfo.fed),
+            ("ADS-B reports not fed to the tracker (the other half under --inputs split)", cinfo.left),
             ("measurements offered to the tracker", info.measurements),
             ("tick rows offered (one per second per confirmed track)", info.tick_rows),
             ("update rows not exported (tick rows only)", info.update_rows_not_exported),
@@ -204,9 +249,24 @@ fn export_all(
         ] {
             ex.counts.push((l.to_string(), v));
         }
+        if let Some(a) = &cinfo.adsb {
+            for (l, v) in [
+                ("ADS-B reports offered to the file", a.rows_in),
+                ("reports left out: position marked stale by the source", a.stale),
+                ("reports written", a.converted),
+            ] {
+                ax.counts.push((l.to_string(), v));
+            }
+            for (name, v) in &a.other_sources {
+                ax.counts
+                    .push((format!("reports left out: source type {name}, not ADS-B"), *v));
+            }
+        }
         let mut f = ex.finish()?;
         f.report.inputs.push(format!("ADS-B clip {}", clip.display()));
-        finished.push(f);
+        done.systems.push(f);
+        done.adsb = Some(ax.finish()?);
+        done.clip = Some(cinfo);
     }
     if let Some(dir) = sfdps {
         let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout.clone());
@@ -238,7 +298,7 @@ fn export_all(
         }
         let mut f = ex.finish()?;
         f.report.inputs = inputs;
-        finished.push(f);
+        done.systems.push(f);
     }
     Ok(())
 }

@@ -3467,6 +3467,19 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-AST-107** A CAT021 high-resolution position (I021/131, LSB 180/2^30 degrees) with a longitude beyond
   180 degrees is refused by the decoder and by the encoder as an invalid value of that item; exactly +-180
   degrees is accepted. The three-octet I021/130 cannot hold a longitude beyond 180 degrees.
+- **OA-AST-108** `uap_021(Cat021Edition::Ed24)` is Table 2 of CAT021 Ed 2.4 (section 5.3): 49 slots, the FRNs,
+  items and lengths of the table, FRN 43 to 47 unused, 48 RE, 49 SP.
+- **OA-AST-109** The Ed 2.4 and Ed 2.7 UAP tables are one table apart from the spare bits of I021/090
+  (the codec is parameterised by the edition, not copied).
+- **OA-AST-110** A record worked out by hand from the Ed 2.4 item definitions (I010, I040 with first extension,
+  I131, I080, I073, I140, I090 with two extensions, I210, I145, I155, I160, I170, I020) decodes to the expected
+  values and encodes to the same octets in Ed 2.4.
+- **OA-AST-111** Ed 2.4 refuses, on encode and on decode, what only Ed 2.7 defines (MOPS version 3, a third
+  extension of I021/040, a fourth of I021/090); Ed 2.7 accepts it.
+- **OA-AST-112** Bit 4 of the third I021/090 extension is a spare bit in Ed 2.4 (refused when set) and SRC in
+  Ed 2.7; bits 3/2 are spare in both.
+- **OA-AST-113** The functions without an edition are Ed 2.7; records at the limits of I021/131 and I021/073
+  round-trip in Ed 2.4.
 
 ## M3 — Surveillance tracking (oa-track)
 
@@ -4073,6 +4086,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   left out and counted.
 - **OA-TRK-273** The per-flight position RMS is per truth leg: two trips of one address are two flights,
   so a failing short trip is not pooled with a good long one and counts above the R4 value.
+- **OA-TRK-274** `split_reports_with(r, false)` is the split with the halving off: the same copy removal,
+  conflict handling and quality handling, every distinct report in the first set, the second empty, and the
+  same removal and conflict counts as the halving run.
 - **OA-TRK-260** A plot's position covariance, given in the target's own east-north axes, is mapped into
   the filter's plane as `J R J^T` (J the differential of the projection at the plot) before the gate and
   the update: at 89.99 degrees, 0 to 90 degrees east, the normalised innovation equals the one computed
@@ -4419,3 +4435,27 @@ scope.
   0 for ERAM; the README says why. ERAM altitude, whose reference the feed does not state, is I136 at or above
   18 000 ft and I135 with QNH = 1 below, stated in the README as an inference. A valid rate of climb is exported
   on a row without an altitude and counted; a longitude of +180 degrees is written as -180 and counted.
+- **OA-CMP-019** One ADS-B report converts to the counts of CAT021 Ed 2.4's items exactly as the item definitions
+  give them: I073 (1/128 s), I131 (180/2^30 degrees), I080, I145 (1/4 FL), I140 (6.25 ft), I155 or I157
+  (6.25 ft/min, by the report's rate flag), I160 (2^-14 NM/s, 360/2^16 degrees), I170, I020, I090, I210 and
+  I040 (ATP, GBS, CL 2); a full report notes only what the source never has.
+- **OA-CMP-020** What a report lacks, or has outside the range of its item (FL -15 to 1500, height -1500 to
+  150 000 ft, vertical rate 15 bits, a track of 360 degrees, a character outside A-Z 0-9 space, an emitter
+  category without an I020 code, MOPS version 3), is left out of the record and counted by item and reason;
+  nothing is clipped.
+- **OA-CMP-021** A non-ICAO address is written with ATP 3, a ground report sets GBS and has no flight level, a
+  field that does not fit its bits counts as absent, and the emitter categories map to the I020 codes.
+- **OA-CMP-022** A position beyond 90 or 180 degrees refuses the report; +180 degrees is written as -180 and
+  counted; the position error is at most 1 unit of 1e-7 degree; a time within 1/256 s before midnight belongs
+  to the next day.
+- **OA-CMP-023** `adsb.ast` decodes with the Ed 2.4 decoder to the values converted; every block is decoded
+  again before it is written and the file is read back from disk; reports are written in time order, and stale
+  positions and source types that are not ADS-B are left out and counted.
+- **OA-CMP-024** A report earlier than the one before it, or on another UTC day than the requested one, refuses
+  the export unless days are split, which writes one directory per day.
+- **OA-CMP-025** `--inputs all` runs the clip through `oa_track::score::split_reports_with` (the scorer's split
+  function) with the halving off: copies removed, every conflicting report kept (rule stated), counts printed in
+  the README; the same reports feed the tracker and `adsb.ast`.
+- **OA-CMP-026** `data_sources.json` lists the ADS-B source (SAC 255, SIC 3, DSType "ADS-B"); the README states
+  the Ed 2.4 format, how each value was made, every omission with its count, and that a reference built from
+  `adsb.ast` is not independent of OpenATCA's inputs (UK-008) and that ERAM also uses ADS-B.
