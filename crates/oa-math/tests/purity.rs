@@ -98,6 +98,8 @@ fn sources_call_no_platform_maths_function() {
     let files = sources();
     assert!(files.len() >= 10, "found {} source files", files.len());
     let mut hits = Vec::new();
+    // how many times the one allowed float remainder appears, in rem.rs only
+    let mut exact_rem = 0;
     for (name, text) in &files {
         for (n, line) in text.lines().enumerate() {
             let code = code_part(line);
@@ -122,10 +124,9 @@ fn sources_call_no_platform_maths_function() {
             }
             // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below
             // and the exact `fmod` of `rem_euclid`.
-            if code.contains('%')
-                && !INTEGER_REM.contains(&code.trim())
-                && !(name == "rem.rs" && code.trim() == EXACT_FLOAT_REM)
-            {
+            if name == "rem.rs" && code.trim() == EXACT_FLOAT_REM {
+                exact_rem += 1;
+            } else if code.contains('%') && !INTEGER_REM.contains(&code.trim()) {
                 hits.push(format!("{name}:{}: `%` (float remainder is fmod)", n + 1));
             }
             for word in [
@@ -143,6 +144,13 @@ fn sources_call_no_platform_maths_function() {
                 }
             }
         }
+    }
+    // exactly one occurrence, so a second `a % b` in rem.rs, or a file named rem.rs elsewhere,
+    // is not allowed by the same exception
+    if exact_rem != 1 {
+        hits.push(format!(
+            "`{EXACT_FLOAT_REM}` appears {exact_rem} times in rem.rs, expected exactly 1"
+        ));
     }
     assert!(
         hits.is_empty(),

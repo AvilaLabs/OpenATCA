@@ -2,8 +2,8 @@
 //! oa-truth: reference trajectories from ADS-B, the truth side of the M2 benchmark
 //! (docs/M2_DESIGN.md section 1). Class `split` (B7). Core (pure, B1): the smoother, the
 //! quality rules, the leave-one-out evaluation, the queries ([`truth_at`], [`truth_hash_into`])
-//! and the data types. Shell: [`build_truth`], pure in its output but carrying a global
-//! test-hook counter (see `shell/mod.rs`), the [`clip`] reader and the `oa-truth-check` binary
+//! and the data types. Shell: [`build_truth`], whose output is a function of its input but
+//! which carries a global test-hook counter and names `oa_adsb` (see `shell/mod.rs`), the [`clip`] reader and the `oa-truth-check` binary
 //! (both read files; the binary also reads the clock and writes stdout).
 //!
 //! # What it does

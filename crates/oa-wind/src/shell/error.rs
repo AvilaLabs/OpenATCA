@@ -47,9 +47,12 @@ pub enum LoadError {
     DuplicateHour(i64),
     /// More hour files than [`crate::MAX_ARCHIVE_FILES`].
     TooManyFiles(usize),
-    /// A file could not be read, or is over [`crate::MAX_FILE_BYTES`]. `kind` is the text of the
-    /// `std::io::ErrorKind` (a `String`, so this module, which is core, names no `std::io`).
-    Io { path: String, kind: String },
+    /// A file could not be read, or is over [`crate::MAX_FILE_BYTES`]. `kind` is the
+    /// `std::io::ErrorKind` of the failure (`InvalidInput` for a file over the cap).
+    Io {
+        path: String,
+        kind: std::io::ErrorKind,
+    },
 }
 
 impl fmt::Display for LoadError {

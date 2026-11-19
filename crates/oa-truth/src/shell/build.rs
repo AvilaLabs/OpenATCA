@@ -1,4 +1,7 @@
-//! Truth construction: selection, legs, smoothing. Shell (B7): pure in its output, but it counts same-time distance evaluations in a `thread_local!` (the test hook `pair_evals_this_thread`), which B8 keeps out of core.
+//! Truth construction: selection, legs, smoothing. Shell (B7). The output is a function of the
+//! clip rows (distances use `oa_math`, so the same bits on every machine), but two things keep
+//! the build out of core: a `thread_local!` counter of same-time distance evaluations (the test
+//! hook `pair_evals_this_thread`), and the `oa_adsb` types it names (B8).
 
 use oa_adsb::{
     category_observe, is_reserved_address, jump_verdict, reports_len, reports_row, CategoryState,
@@ -104,8 +107,12 @@ struct Builder<'a> {
 fn dist_m(lat1: i32, lon1: i32, lat2: i32, lon2: i32) -> f64 {
     let (p1, p2) = (deg(lat1).to_radians(), deg(lat2).to_radians());
     let dl = (deg(lon2) - deg(lon1)).to_radians();
-    let a = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
-    2.0 * EARTH_R_M * a.sqrt().min(1.0).asin()
+    // oa_math, not the standard library's methods: the distance decides which same-time rows are
+    // kept, so it must be the same bits on every machine (B6, B8).
+    let s1 = oa_math::sin((p2 - p1) / 2.0);
+    let s2 = oa_math::sin(dl / 2.0);
+    let a = oa_math::powi(s1, 2) + oa_math::cos(p1) * oa_math::cos(p2) * oa_math::powi(s2, 2);
+    2.0 * EARTH_R_M * oa_math::asin(a.sqrt().min(1.0))
 }
 
 fn deg(e7: i32) -> f64 {

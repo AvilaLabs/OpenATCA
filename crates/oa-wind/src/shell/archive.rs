@@ -44,7 +44,7 @@ pub struct Archive {
 fn io_err(path: &Path, e: &std::io::Error) -> LoadError {
     LoadError::Io {
         path: path.display().to_string(),
-        kind: e.kind().to_string(),
+        kind: e.kind(),
     }
 }
 
@@ -288,7 +288,7 @@ pub fn read_hour_file_report(path: &Path) -> Result<(Hour, IndexUse), LoadError>
     if meta.len() > MAX_FILE_BYTES {
         return Err(LoadError::Io {
             path: path.display().to_string(),
-            kind: std::io::ErrorKind::InvalidInput.to_string(),
+            kind: std::io::ErrorKind::InvalidInput,
         });
     }
     let mut idx_path = path.as_os_str().to_owned();

@@ -220,7 +220,9 @@ fn vertical(h: &Hour, p_hpa: f64) -> Result<(usize, f64), Refusal> {
         .min(n.saturating_sub(2));
     let a = f64::from(h.levels_pa.get(k).copied().unwrap_or(top)) / 100.0;
     let b = f64::from(h.levels_pa.get(k + 1).copied().unwrap_or(bottom)) / 100.0;
-    let w = snap(((p_hpa.ln() - a.ln()) / (b.ln() - a.ln())).clamp(0.0, 1.0));
+    let w = snap(
+        ((oa_math::ln(p_hpa) - oa_math::ln(a)) / (oa_math::ln(b) - oa_math::ln(a))).clamp(0.0, 1.0),
+    );
     Ok((k, w))
 }
 
