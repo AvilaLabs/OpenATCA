@@ -155,7 +155,9 @@ pub struct TrackerConfig {
     /// A confirming report agrees if within this, metres, of the held report propagated to its
     /// time ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
     pub confirm_agree_m: f64,
-    /// A held report is discarded after this long, ns ([`crate::params::CONFIRM_WINDOW_NS`]).
+    /// The floor of the time a held report waits before it is discarded, ns
+    /// ([`crate::params::CONFIRM_WINDOW_NS`]); the window is four expected report intervals, not
+    /// under this and not over `drop_after_ns`.
     /// Over 0.5 s (the least separation of the confirming report).
     pub confirm_window_ns: i64,
     /// The large-move hold is on. True by default; false only by an explicit choice.

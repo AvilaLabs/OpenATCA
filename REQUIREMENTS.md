@@ -4001,9 +4001,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   is refused, never read as "off", and `confirm_moves = false` turns it off only by an explicit
   choice. Fixed-size state only: one pending slot per track, no allocation.
 - **OA-TRK-348** A later report of the track confirms the pending one if it also passes the
-  gate and moves the track by more than `confirm_move_m`, arrives at least 0.5 s and at most
-  `confirm_window_ns` (5 s) after it, and lies within `confirm_agree_m` (300 m) of the pending
-  report propagated to its time by the pending report's velocity (the track's, without one). The
+  gate and moves the track by more than `confirm_move_m`, arrives at least 0.5 s after it and
+  within the track's window, and lies within the agreement limit of the pending report
+  propagated to its time by the pending report's velocity (the track's, without one). The
+  window is four of the track's expected report intervals (the track's own, else the
+  configuration's), not under `confirm_window_ns` (5 s: live 1 Hz data keeps it) and not over
+  `drop_after_ns`. The limit is `confirm_agree_m` (300 m) plus `0.5 a t^2` (`a` the gate's
+  manoeuvre allowance, `t` the time between the two reports), never over `confirm_move_m`: only
+  the agreement of two reports loosens with time, never the move that a single report may make. The
   pending report is then applied and then the confirming one, in measurement-time order, through
   the normal update path with the hold off (`moves_confirmed`). A report that does not agree
   replaces the pending one (newest wins, `moves_held` again). A pending report older than the
@@ -4022,9 +4027,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   pending report's time, the track's last update time, the report's time, its distances from the
   prediction and from the pending report, and the configuration (`confirm_decide`). For every
   configuration `check_config` accepts, every time and every distance (so every gap and every
-  covariance), a report over `confirm_move_m` is never applied without a confirming one: the
-  decision is `Confirm` only with a pending report that is not stale, at least 0.5 s before it
-  and within the window, that the report agrees with.
+  covariance), a report over `confirm_move_m` is never applied without a confirming one, whatever the
+  window: the decision is `Confirm` only with a pending report that is not stale, at least 0.5 s
+  before it and within the window, that the report agrees with within `confirm_move_m`.
 
 ## NAM ACC-to-ACC interface (oa-nam)
 - **OA-NAM-001** The crate models exactly the 25 messages of the NAM Common Coordination ICD

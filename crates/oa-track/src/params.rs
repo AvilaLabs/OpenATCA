@@ -139,9 +139,13 @@ pub const CONFIRM_MOVE_M: f64 = 926.0;
 /// propagated to its time by the held report's velocity (the track's, without one). Below
 /// [`CONFIRM_MOVE_M`]: the two reports must agree more closely than the move they confirm.
 pub const CONFIRM_AGREE_M: f64 = 300.0;
-/// A held report waits this long, ns, for its confirming report; past it, it is discarded and
-/// counted.
+/// The floor of the time a held report waits, ns, for its confirming report (see
+/// [`CONFIRM_WINDOW_INTERVALS`]); past the window it is discarded and counted.
 pub const CONFIRM_WINDOW_NS: i64 = 5 * NS_PER_S;
+/// The window follows the track's report rate: this many expected report intervals, with
+/// [`CONFIRM_WINDOW_NS`] as the floor and the drop age as the ceiling. Live 1 Hz data keeps the
+/// floor; the thinned clips (7 s median interval) wait about 28 s for the second report.
+pub const CONFIRM_WINDOW_INTERVALS: i64 = 4;
 /// The confirming report is at least this long, ns, after the held one: a copy of the same
 /// message, or a burst within one squitter, is not a second report.
 pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;

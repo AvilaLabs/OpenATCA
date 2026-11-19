@@ -5,7 +5,7 @@
 //! report of any plausible size; this distance is fixed and does not. Core (pure): the decision
 //! is a function of numbers only, so it is proved apart from the filter (`tracker_proofs`).
 
-use crate::params::CONFIRM_MIN_SEP_NS;
+use crate::params::{CONFIRM_MIN_SEP_NS, CONFIRM_WINDOW_INTERVALS};
 use crate::types::{Measurement, TrackerConfig};
 
 /// A track's pending report. Fixed size: one slot per track, no allocation.
@@ -43,18 +43,44 @@ pub(crate) fn pending_stale(pend_t_ns: i64, last_ns: i64, now_ns: i64, window_ns
     pend_t_ns < last_ns || now_ns.saturating_sub(pend_t_ns) > window_ns
 }
 
+/// The confirmation window of a track whose expected report interval is `expected_ns` (0: the
+/// configuration's): four intervals, not under `confirm_window_ns` (the floor, 5 s: live 1 Hz
+/// data keeps it) and not over the drop age. A thinned feed with a 7 s interval waits about 28 s
+/// or more, long enough for its next report.
+pub(crate) fn confirm_window_ns(cfg: &TrackerConfig, expected_ns: i64) -> i64 {
+    let interval = if expected_ns > 0 {
+        expected_ns
+    } else {
+        cfg.expected_interval_ns
+    };
+    interval
+        .saturating_mul(CONFIRM_WINDOW_INTERVALS)
+        .min(cfg.drop_after_ns)
+        .max(cfg.confirm_window_ns)
+}
+
+/// How closely a confirming report `sep_ns` after the pending one must agree with it, metres:
+/// `confirm_agree_m` plus what a manoeuvre of `gate_manoeuvre_mps2` could add in that time
+/// (`0.5 a t^2`), never over `confirm_move_m`. Only the agreement of two reports loosens with
+/// time; the move that starts the hold is a fixed distance.
+pub(crate) fn agree_limit_m(cfg: &TrackerConfig, sep_ns: i64) -> f64 {
+    let s = sep_ns.max(0) as f64 / 1.0e9;
+    (cfg.confirm_agree_m + 0.5 * cfg.gate_manoeuvre_mps2 * s * s).min(cfg.confirm_move_m)
+}
+
 /// The decision for a report at `rep_t_ns` that passed the gate, `miss_m` from the predicted
 /// position and `agree_m` from the pending report propagated to its time (not a number when
 /// there is no pending report or it could not be computed). `Confirm` only when the move is
-/// large, a pending report exists and is not stale, the report is at least the minimum
-/// separation after it, and `agree_m` is within `confirm_agree_m`. Nothing here depends on the
-/// time since the track's last update or on its covariance: that is the point.
+/// large, a pending report exists and is not stale (`window_ns`), the report is at least the
+/// minimum separation after it, and `agree_m` is within [`agree_limit_m`]. Nothing here depends
+/// on the time since the track's last update or on its covariance: that is the point.
 pub(crate) fn confirm_decide(
     pending_t_ns: Option<i64>,
     last_ns: i64,
     rep_t_ns: i64,
     miss_m: f64,
     agree_m: f64,
+    window_ns: i64,
     cfg: &TrackerConfig,
 ) -> Move {
     if !move_is_large(miss_m, cfg.confirm_move_m) {
@@ -63,10 +89,11 @@ pub(crate) fn confirm_decide(
     let Some(pt) = pending_t_ns else {
         return Move::Hold { expired: false };
     };
-    if pending_stale(pt, last_ns, rep_t_ns, cfg.confirm_window_ns) {
+    if pending_stale(pt, last_ns, rep_t_ns, window_ns) {
         return Move::Hold { expired: true };
     }
-    if rep_t_ns.saturating_sub(pt) >= CONFIRM_MIN_SEP_NS && agree_m <= cfg.confirm_agree_m {
+    let sep = rep_t_ns.saturating_sub(pt);
+    if sep >= CONFIRM_MIN_SEP_NS && agree_m <= agree_limit_m(cfg, sep) {
         Move::Confirm
     } else {
         Move::Hold { expired: false }
@@ -86,7 +113,7 @@ mod tests {
     fn the_decision_table() {
         let c = DEFAULT_CONFIG;
         let d = |pend: Option<i64>, last: i64, t: i64, miss: f64, agree: f64| {
-            confirm_decide(pend, last, t, miss, agree, &c)
+            confirm_decide(pend, last, t, miss, agree, c.confirm_window_ns, &c)
         };
         // Small moves are applied, whatever the rest says.
         assert_eq!(d(None, 0, 100 * S, 926.0, f64::NAN), Move::Apply);
@@ -107,7 +134,7 @@ mod tests {
         );
         // Not agreeing, too soon, too late, superseded by an applied update.
         assert_eq!(
-            d(Some(40 * S), 20 * S, 41 * S, 2000.0, 301.0),
+            d(Some(40 * S), 20 * S, 41 * S, 2000.0, 303.0),
             Move::Hold { expired: false }
         );
         assert_eq!(

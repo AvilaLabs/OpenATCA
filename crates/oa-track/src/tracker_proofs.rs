@@ -1162,18 +1162,25 @@ fn a_single_large_move_is_never_applied_without_an_agreeing_second_report() {
         confirm_move_m: kani::any(),
         confirm_agree_m: kani::any(),
         confirm_window_ns: kani::any(),
+        gate_manoeuvre_mps2: kani::any(),
         ..crate::types::DEFAULT_CONFIG
     };
     kani::assume(crate::types::check_config(&cfg).is_ok());
     let last_ns: i64 = kani::any();
     let rep_t_ns: i64 = kani::any();
+    // Any window the tracker can give a track: from the configured floor up (the per-track
+    // window, four expected intervals, is at most the drop age).
+    let window_ns: i64 = kani::any();
+    kani::assume(window_ns >= cfg.confirm_window_ns);
     let pending: Option<i64> = if kani::any() { Some(kani::any()) } else { None };
     let miss_m: f64 = kani::any();
     let agree_m: f64 = kani::any();
     // The report moves the track by more than the threshold (or by no number at all).
     kani::assume(!(miss_m <= cfg.confirm_move_m));
 
-    let v = crate::confirm::confirm_decide(pending, last_ns, rep_t_ns, miss_m, agree_m, &cfg);
+    let v = crate::confirm::confirm_decide(
+        pending, last_ns, rep_t_ns, miss_m, agree_m, window_ns, &cfg,
+    );
 
     // Never applied alone.
     assert!(v != crate::confirm::Move::Apply);
@@ -1185,8 +1192,9 @@ fn a_single_large_move_is_never_applied_without_an_agreeing_second_report() {
         };
         assert!(pt >= last_ns);
         assert!(rep_t_ns.saturating_sub(pt) >= crate::params::CONFIRM_MIN_SEP_NS);
-        assert!(rep_t_ns.saturating_sub(pt) <= cfg.confirm_window_ns);
-        assert!(agree_m <= cfg.confirm_agree_m);
+        assert!(rep_t_ns.saturating_sub(pt) <= window_ns);
+        // However long the wait, the agreement never loosens past the fixed move distance.
+        assert!(agree_m <= cfg.confirm_move_m);
     }
     if pending.is_none() {
         assert!(v == crate::confirm::Move::Hold { expired: false });

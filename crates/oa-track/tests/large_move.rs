@@ -293,3 +293,45 @@ fn the_hold_has_defaults_that_are_on_and_checked() {
     assert!(!bad(&|c| c.confirm_move_m = 2_000.0));
     assert!(!bad(&|c| c.confirm_moves = false));
 }
+
+// REQ: OA-TRK-348
+#[test]
+fn the_window_and_the_agreement_follow_the_report_rate() {
+    // A thinned feed (7 s between reports): the genuine second report of a move comes 7 s after
+    // the first, past a fixed 5 s window; the window of four intervals (28 s) takes it.
+    let mut rng = Rng(11);
+    let mut ms: Vec<Measurement> = (0..=4)
+        .map(|k| f64::from(k) * 7.0)
+        .map(|t| report_of(&mut rng, t, &truth(t, 0.0)))
+        .collect();
+    let after = |t: f64| Truth {
+        e: 5_000.0,
+        n: 1_800.0 + 200.0 * (t - 70.0),
+        ve: 0.0,
+        vn: 200.0,
+        alt_ft: 35_000.0,
+        vrate_fpm: 0.0,
+    };
+    for t in [70.0, 77.0, 84.0] {
+        ms.push(report_of(&mut rng, t, &after(t)));
+    }
+    let cfg = TrackerConfig {
+        expected_interval_ns: 7_000_000_000,
+        init_interval_ns: 7_000_000_000,
+        ..big_config()
+    };
+    let (s, _) = stats_of(&cfg, &ms, 100.0);
+    assert_eq!(
+        (s.moves_held, s.moves_confirmed, s.moves_expired),
+        (1, 1, 0)
+    );
+    // The same feed with the expected interval left at 1 s keeps the 5 s floor: the first is
+    // discarded.
+    let cfg = TrackerConfig {
+        expected_interval_ns: 1_000_000_000,
+        ..cfg
+    };
+    let (s, _) = stats_of(&cfg, &ms, 100.0);
+    assert_eq!(s.moves_confirmed, 0);
+    assert!(s.moves_expired >= 1);
+}

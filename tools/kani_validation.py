@@ -69,7 +69,7 @@ LOOP_UNWIND_PRESETS = {
         },
         "default_harness_source": "crates/oa-track/src/tracker_rollback_paths.rs",
         "source": "crates/oa-track/src/tracker.rs",
-        "line": 1191,
+        "line": 1192,
         "function": "update_late",
         "source_line": "while k < n_seq {",
     },
@@ -78,10 +78,10 @@ _late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
 LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
     **_late_base_preset,
     "loops": [
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.0", "bound": 3, "line": 1104, "guard_line": 1104, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.1", "bound": 2, "line": 1123, "guard_line": 1123, "source_line": "for k in (e + 1)..len {"},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.2", "bound": 2, "line": 1161, "source_line": "for k in 0..=e {"},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3", "bound": 3, "line": 1191, "source_line": "while k < n_seq {"},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.0", "bound": 3, "line": 1105, "guard_line": 1105, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.1", "bound": 2, "line": 1124, "guard_line": 1124, "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.2", "bound": 2, "line": 1162, "source_line": "for k in 0..=e {"},
+        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3", "bound": 3, "line": 1192, "source_line": "while k < n_seq {"},
     ],
     "fixture_source": "crates/oa-track/src/tracker_proofs.rs",
     "fixture_snippets": [

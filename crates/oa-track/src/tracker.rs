@@ -58,7 +58,7 @@ use oa_adsb::{
     NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
-use crate::confirm::{confirm_decide, pending_stale, Move, Pending};
+use crate::confirm::{confirm_decide, confirm_window_ns, pending_stale, Move, Pending};
 use crate::filter::{
     filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied,
     Filter, Probe,
@@ -948,7 +948,7 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
                 p.m.toa_ns,
                 col(&t.last_ns, slot, 0),
                 m.toa_ns,
-                cfg.confirm_window_ns,
+                confirm_window_ns(&cfg, col(&t.expected_ns, slot, 0)),
             )
         {
             put(&mut t.pend, slot, no_pending());
@@ -1015,6 +1015,7 @@ fn hold_or_confirm(
         m.toa_ns,
         probe.miss_m,
         probe.agree_m,
+        confirm_window_ns(cfg, col(&t.expected_ns, slot, 0)),
         cfg,
     );
     match verdict {
