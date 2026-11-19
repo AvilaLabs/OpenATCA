@@ -6,7 +6,7 @@
 //! entry needs no knowledge of the key layout. Eviction order is slot order, so what is evicted
 //! never depends on anything but the table's history.
 
-use crate::index::{index_find, index_insert, index_remove, new_index, Index};
+use crate::core::index::{index_find, index_insert, index_remove, new_index, Index};
 
 /// Slot bookkeeping. Plain data (A1); behaviour is in the free functions below.
 // A7.2: cold struct, size guard waived (one per table)

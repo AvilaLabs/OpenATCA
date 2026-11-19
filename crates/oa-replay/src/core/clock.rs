@@ -127,9 +127,9 @@
 //! the third, so the first two after the gap are processed at the old time, and the ages in the
 //! tables carry over the gap instead of running through it.
 
-use crate::mono_split;
-use crate::pipeline::FEED_COUNT;
-use crate::table::NS_PER_S;
+use super::mono_split;
+use crate::core::pipeline::FEED_COUNT;
+use crate::core::table::NS_PER_S;
 
 /// Largest difference between a frame's time and its feed's last frame, or the clock, accepted
 /// without confirmation: 2 minutes (see the module documentation).

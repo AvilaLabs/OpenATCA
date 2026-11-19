@@ -4,7 +4,7 @@
 //!
 //! A frame goes through four steps, each counted and none skipped silently:
 //!
-//! 1. the replay clock moves to the frame's time under the step rules of [`crate::clock`] (a
+//! 1. the replay clock moves to the frame's time under the step rules of [`crate::core::clock`] (a
 //!    frame earlier than one already seen of its feed is counted as a time regression and the
 //!    clock stays; a time more than 2 minutes from the clock and from its feed's last frame is
 //!    held until three frames in a row confirm it, and a confirmed step marks every row stale
@@ -51,23 +51,23 @@ use oa_tfms::{
 };
 use oa_xml::Parser;
 
-use crate::adsb::{
+use crate::core::adsb::{
     adsb_advance, adsb_hash_into, adsb_shift_times, adsb_stale_count, apply_adsb, new_adsb_table,
     AdsbApplied, AdsbTable, ADSB_CAPACITY,
 };
-use crate::apply::{apply_sfdps, apply_tbfm, Applied};
-use crate::clock::{clock_observe_mono, Clock, Tick};
-use crate::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
-use crate::fns::{
+use crate::core::apply::{apply_sfdps, apply_tbfm, Applied};
+use crate::core::clock::{clock_observe_mono, Clock, Tick};
+use crate::core::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
+use crate::core::fns::{
     apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
     new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
 };
-use crate::hash::state_hash;
-use crate::table::{
+use crate::core::hash::state_hash;
+use crate::core::table::{
     advance_time, new_table, shift_times, stale_count, ConfigError, FlightTable, TableConfig,
     NS_PER_S,
 };
-use crate::tfms::{
+use crate::core::tfms::{
     apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_stale_count,
     flow_sweep, new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times,
     tfms_stale_count, tfms_sweep, FlowApplied, FlowTable, TfmsApplied, TfmsTable, FLOW_CAPACITY,

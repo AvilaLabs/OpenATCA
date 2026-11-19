@@ -44,10 +44,10 @@ use oa_sha256::Sha256;
 use oa_tfms::rows::flag;
 use oa_tfms::{flag_get, flight_at, flow_at, text, Rows, StrRef, NO_NUM, NO_TIME};
 
-use crate::hash::stale_hash_into;
-use crate::index::{hash_bytes, mix64};
-use crate::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release, Slots};
-use crate::table::{find_plan, is_occupied, slot_of_gufi, FlightTable, Slot};
+use crate::core::hash::stale_hash_into;
+use crate::core::index::{hash_bytes, mix64};
+use crate::core::slots::{new_slots, slot_live, slots_alloc, slots_find, slots_release, Slots};
+use crate::core::table::{find_plan, is_occupied, slot_of_gufi, FlightTable, Slot};
 
 /// Flights the TFMS table holds: 65,536. A day of the NAS is about 50,000 flights with a TFMS
 /// reference, and a flight is evicted six hours after its last message.

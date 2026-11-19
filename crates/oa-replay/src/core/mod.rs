@@ -9,6 +9,7 @@ pub mod errors;
 pub mod fns;
 pub mod hash;
 pub mod index;
+pub(crate) mod mono_split;
 pub mod pipeline;
 pub mod slots;
 pub mod table;

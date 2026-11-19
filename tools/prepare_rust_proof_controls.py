@@ -308,7 +308,7 @@ def main() -> int:
             "                if ns <= oldest_ns {\n",
         ),
         "mono-split": (
-            "crates/oa-replay/src/mono_split.rs",
+            "crates/oa-replay/src/core/mono_split.rs",
             "    wall_ns\n        .checked_sub(mono_ns)\n        .map(|step_ns| (wall_ns, mono_ns, step_ns))\n",
             "    Some((wall_ns, mono_ns, wall_ns))\n",
         ),

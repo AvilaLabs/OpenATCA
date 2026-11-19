@@ -25,7 +25,7 @@
 
 use oa_tbfm::NO_TIME;
 
-use crate::index::{
+use crate::core::index::{
     hash_bytes, hash_u128, index_find, index_insert, index_remove, new_index, Index,
 };
 

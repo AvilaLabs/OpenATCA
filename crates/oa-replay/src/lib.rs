@@ -4,8 +4,7 @@
 //! against this replayed state.
 //!
 //! The crate is `split` (B7): the modules below marked core live under `core/`, the shell ones
-//! under `shell/`. `mono_split`, a core helper shared with the Creusot package, stays at
-//! `src/mono_split.rs` because the proof tooling pins that path and its hash.
+//! under `shell/`. `core/mono_split.rs` is the helper shared verbatim with the Creusot package.
 //!
 //! * Core (pure, no I/O, no clock, no allocation after construction, B1-B5): [`index`] (a
 //!   fixed-size open-addressing hash index), [`table`] ([`FlightTable`], a struct-of-arrays of
@@ -31,8 +30,6 @@
 //! parse, decode and apply failure is counted by kind (IF-R5, IF-R6).
 
 pub mod core;
-// Kept at its own path: the proof tooling and the Creusot package pin the file by path and hash.
-mod mono_split;
 pub mod shell;
 
 pub use crate::core::{adsb, apply, clock, errors, fns, hash, index, pipeline, slots, table, tfms};

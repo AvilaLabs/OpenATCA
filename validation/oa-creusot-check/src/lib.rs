@@ -2,5 +2,5 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
-#[path = "../../../crates/oa-replay/src/mono_split.rs"]
+#[path = "../../../crates/oa-replay/src/core/mono_split.rs"]
 mod mono_split;

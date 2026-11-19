@@ -26,7 +26,7 @@
 use oa_sha256::{Digest, Sha256};
 use oa_tbfm::NO_TIME;
 
-use crate::table::{is_occupied, slot_ref, FlightTable, Slot, SlotRef, TableStats};
+use crate::core::table::{is_occupied, slot_ref, FlightTable, Slot, SlotRef, TableStats};
 
 /// Tag and version of the canonical serialisation.
 pub const HASH_TAG: &[u8; 5] = b"OATS1";
@@ -146,7 +146,7 @@ pub fn state_hash(t: &FlightTable) -> Digest {
             );
         }
     }
-    if crate::table::stale_count(t) > 0 {
+    if crate::core::table::stale_count(t) > 0 {
         stale_hash_into(&mut h, &t.stale, order.iter().map(|&(_, i)| i as usize));
     }
     h.finalize()

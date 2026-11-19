@@ -63,7 +63,7 @@ use oa_fixm::{has_field, Events, Field};
 use oa_tbfm::rows::{change, pt, sch_flag, section};
 use oa_tbfm::{row_at, sch_get, Rows, NO_TIME};
 
-use crate::table::{
+use crate::core::table::{
     claim_plan, claim_tma, class_of_status, create_flight, find_gufi, find_plan, find_tma,
     rekey_flight, slot_mut, slot_ref, FlightTable, Slot, SlotMut, CLASS_MASK, FEED_SFDPS,
     FEED_TBFM, FROZEN, HAS_ALT, HAS_GS, HAS_POS, HAS_VEL, TBFM_ORIGIN,
