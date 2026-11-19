@@ -1155,8 +1155,11 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
         let start = is_path_start(toks, i);
         if !ctx.ieee && FLOAT_METHODS.contains(&w) && ((prev == "." && next == "(") || prev == "::")
         {
-            // after `.` (a method call) or after `::` whatever precedes it (`f64::sin`,
-            // `<f64>::sin`, `Self::sin`, `R::sin`), called or not
+            // after `.` (a method call) or after `::` when a type precedes it (`f64::sin`,
+            // `<f64>::sin`, `Self::sin`, `R::sin`), called or not. A lowercase segment is a
+            // module or crate path (`dd::sqrt`, `pub use exp::exp;`, `self::`, `oa_math::`),
+            // never a type: the workspace's `-D warnings` clippy run makes rustc's
+            // non_camel_case_types a failure, so a lowercase type alias cannot exist.
             let qual = if prev == "::" && i >= 2 {
                 s(toks, i - 2)
             } else {
@@ -1171,7 +1174,10 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
             let int_euclid = prev == "::"
                 && matches!(w, "rem_euclid" | "div_euclid")
                 && INT_TYPES.contains(&qual);
-            if !blessed && !int_euclid {
+            let type_path = prev != "::"
+                || matches!(qual, "f32" | "f64" | "Self" | ">")
+                || qual.starts_with(|c: char| c.is_ascii_uppercase());
+            if type_path && !blessed && !int_euclid {
                 hits.push(hit(t.line, w, &float_message(w)));
             }
         }

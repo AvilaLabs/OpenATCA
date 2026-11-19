@@ -788,6 +788,17 @@ fn float_methods_core_lacks_are_rejected_in_core_code() {
             "pub fn f(x: i32) -> i32 { x.rem_euclid(3) }\n",
             "rem_euclid",
         ),
+        (
+            "f6",
+            "pub fn f<R: Rt>(x: R) -> R { R::sin(x) }\n",
+            "sin",
+        ),
+        ("f7", "pub fn f(x: f64) -> f64 { <f64>::sqrt(x) }\n", "sqrt"),
+        (
+            "f8",
+            "pub struct S;\nimpl S { fn g(x: f64) -> f64 { Self::sin(x) } }\n",
+            "sin",
+        ),
     ] {
         let f = core_ws(tag, src).failures();
         assert!(
@@ -801,6 +812,13 @@ fn float_methods_core_lacks_are_rejected_in_core_code() {
     let ws = core_ws(
         "f5",
         "pub fn sqrt(x: f64) -> f64 { x }\npub fn f(x: f64) -> f64 { sqrt(x) + oa_ieee::sqrt(x) + oa_math::sin(x) }\n",
+    );
+    let f = ws.failures();
+    assert!(!has(&f, "B8: the standard library"), "{f:#?}");
+    // a lowercase segment before `::` is a module or crate path, never a type
+    let ws = core_ws(
+        "f9",
+        "mod dd { pub fn sqrt(x: f64) -> f64 { x } }\nmod exp { pub fn exp(x: f64) -> f64 { x } }\npub use exp::exp;\npub fn f(x: f64) -> f64 { dd::sqrt(x) + self::dd::sqrt(x) + crate::exp::exp(x) }\n",
     );
     let f = ws.failures();
     assert!(!has(&f, "B8: the standard library"), "{f:#?}");
