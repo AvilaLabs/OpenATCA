@@ -2585,3 +2585,157 @@ fn the_cores_crc32_agrees_with_the_zip_crates() {
         );
     }
 }
+
+// ------------------------------------------- exact-limit tests through the real entry points
+
+fn fresh_budget(capacity: usize) -> crate::FrameWorkBudget {
+    crate::FrameWorkBudget::for_capacity(capacity)
+}
+
+// REQ: OA-FEED-182
+#[test]
+fn push_copy_allowance_is_exact_at_the_limit_and_refused_one_below() {
+    let f = msg(5, b"copy allowance edge");
+    let mut buf = big_buf();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    let below = crate::FrameWorkBudget {
+        copied_bytes: f.len() as u64 - 1,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    let refusal = r.push_with_budget(&f, below).unwrap_err();
+    assert_eq!(refusal.kind, crate::FrameWorkKind::CopiedBytes);
+    assert_eq!(refusal.required, f.len() as u64);
+    assert_eq!(refusal.available, f.len() as u64 - 1);
+    assert_eq!(r.buffered_len(), 0);
+    assert_eq!(r.work_stats().copied_bytes, 0);
+    let exact = crate::FrameWorkBudget {
+        copied_bytes: f.len() as u64,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    assert_eq!(r.push_with_budget(&f, exact), Ok(f.len()));
+    assert_eq!(r.work_stats().copied_bytes, f.len() as u64);
+}
+
+// REQ: OA-FEED-182
+#[test]
+fn push_compaction_allowance_is_exact_at_the_limit_and_refused_one_below() {
+    let first = msg(1, b"first");
+    let second = msg(2, &[7u8; 1000]);
+    let partial = &second[..500];
+    let mut buf = big_buf();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    let wire = cat(&[&first, partial]);
+    assert_eq!(
+        r.push_with_budget(&wire, fresh_budget(MAX_FRAME_LEN)),
+        Ok(wire.len())
+    );
+    let got = r
+        .next_with_budget(fresh_budget(MAX_FRAME_LEN))
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .seq;
+    assert_eq!(got, 1);
+    // 500 bytes remain buffered after a consumed frame, so room is short for more than the
+    // tail and a push of free + 1 bytes must move those 500 bytes first.
+    assert_eq!(r.buffered_len(), 500);
+    let free = MAX_FRAME_LEN - wire.len();
+    let data = vec![0u8; free + 1];
+    let below = crate::FrameWorkBudget {
+        compacted_bytes: 499,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    let refusal = r.push_with_budget(&data, below).unwrap_err();
+    assert_eq!(refusal.kind, crate::FrameWorkKind::CompactedBytes);
+    assert_eq!(refusal.required, 500);
+    assert_eq!(refusal.available, 499);
+    assert_eq!(r.buffered_len(), 500);
+    assert_eq!(r.work_stats().compacted_bytes, 0);
+    let exact = crate::FrameWorkBudget {
+        compacted_bytes: 500,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    assert_eq!(r.push_with_budget(&data, exact), Ok(free + 1));
+    assert_eq!(r.work_stats().compacted_bytes, 500);
+    assert_eq!(r.buffered_len(), 500 + free + 1);
+}
+
+// REQ: OA-FEED-184
+#[test]
+fn resync_scan_allowance_is_exact_at_avail_minus_three_and_refused_below() {
+    let f = msg(27, b"after damaged prefix");
+    let input = cat(&[b"garbage", &f]);
+    let mut buf = big_buf();
+    let mut r = FrameReader::new(&mut buf).unwrap();
+    r.push_with_budget(&input, fresh_budget(MAX_FRAME_LEN))
+        .unwrap();
+    assert!(matches!(
+        r.next_with_budget(fresh_budget(MAX_FRAME_LEN)).unwrap(),
+        Some(Err(FrameError {
+            kind: ErrorKind::BadMagic { .. },
+            ..
+        }))
+    ));
+    let avail = r.buffered_len() as u64;
+    let below = crate::FrameWorkBudget {
+        scan_positions: avail - 4,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    let refusal = r.next_with_budget(below).unwrap_err();
+    assert_eq!(refusal.kind, crate::FrameWorkKind::ScanPositions);
+    assert_eq!(refusal.required, avail - 3);
+    assert_eq!(refusal.available, avail - 4);
+    assert_eq!(r.work_stats().scan_positions, 0);
+    let exact = crate::FrameWorkBudget {
+        scan_positions: avail - 3,
+        ..fresh_budget(MAX_FRAME_LEN)
+    };
+    assert_eq!(r.next_with_budget(exact).unwrap().unwrap().unwrap().seq, 27);
+}
+
+// REQ: OA-FEED-189
+#[test]
+fn recorder_open_uses_the_real_directory_limit_exactly() {
+    let limit = crate::record::DEFAULT_MAX_DIRECTORY_ENTRIES;
+    assert_eq!(limit, 16_384);
+    let dir = tmpdir("dir-limit-real");
+    for i in 0..limit {
+        std::fs::File::create(dir.join(format!("n{i}"))).unwrap();
+    }
+    let open = |dir: &std::path::Path| Recorder::open(dir, "feed", 1 << 20, 1 << 30, Format::Raw);
+    assert!(open(&dir).is_ok(), "exactly the limit must pass");
+    std::fs::File::create(dir.join("one-more")).unwrap();
+    let refused = open(&dir).err().expect("limit + 1 must be refused");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+    assert!(refused.to_string().contains("entry limit exceeded"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-FEED-190
+#[test]
+fn compatibility_push_and_next_scale_with_a_large_buffer() {
+    const CAP: usize = 8 << 20;
+    let one = msg(1, &[9u8; 100]);
+    let count = (6usize << 20).div_ceil(one.len());
+    let wire = one.repeat(count);
+    assert!(wire.len() >= 6 << 20);
+    let mut storage = vec![0u8; CAP];
+    let mut r = FrameReader::new(&mut storage).unwrap();
+    assert_eq!(r.push(&wire), wire.len(), "silent stall");
+    assert_eq!(r.last_work_refusal(), None);
+    let mut frames = 0usize;
+    while let Some(ev) = r.next() {
+        assert!(ev.is_ok());
+        frames += 1;
+    }
+    assert_eq!(frames, count);
+    assert_eq!(r.last_work_refusal(), None);
+    // Garbage of the same size resynchronises in one legacy call too.
+    let garbage = vec![0u8; 6 << 20];
+    let mut storage2 = vec![0u8; CAP];
+    let mut g = FrameReader::new(&mut storage2).unwrap();
+    assert_eq!(g.push(&garbage), garbage.len());
+    while g.next().is_some() {}
+    assert_eq!(g.last_work_refusal(), None);
+    assert!(g.skipped_total() >= (6 << 20) - 3);
+}

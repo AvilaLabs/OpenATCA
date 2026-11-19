@@ -323,7 +323,7 @@ fn a_file_is_read_in_bounded_pieces_whatever_its_size() {
 // REQ: OA-RPL-276
 #[test]
 fn offline_search_renews_bounded_steps_across_long_garbage_and_keeps_valid_tail() {
-    let garbage = 12 << 20;
+    let garbage = 24 << 20; // six scan quotas
     let payload = b"state=up\n";
     let mut tail = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
     let tail_len = oa_feed::encode_frame(&mut tail, 3, 0, 1, 1, 0, payload).unwrap();

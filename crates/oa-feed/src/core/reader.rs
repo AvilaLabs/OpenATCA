@@ -29,8 +29,8 @@ pub struct BufferTooSmall {
     pub need: usize,
 }
 
-/// Maximum per-call work used by the compatibility `next`/`push` profiles. Runtime readers
-/// with larger buffers should pass an explicit budget derived from their declared capacity.
+/// Work for one maximum-size frame. The compatibility `next`/`push` profiles use
+/// [`FrameWorkBudget::for_capacity`] of the reader's own buffer, so a large buffer never stalls.
 pub const DEFAULT_FRAME_WORK_LIMIT: u64 = MAX_FRAME_LEN as u64;
 
 /// Per-call work allowance. Units are exact byte operations, not time estimates.
@@ -47,20 +47,6 @@ pub struct FrameWorkBudget {
 }
 
 impl FrameWorkBudget {
-    const fn default_profile(capacity: usize) -> Self {
-        let limit = if capacity as u64 > DEFAULT_FRAME_WORK_LIMIT {
-            DEFAULT_FRAME_WORK_LIMIT
-        } else {
-            capacity as u64
-        };
-        Self {
-            scan_positions: limit,
-            crc_bytes: DEFAULT_FRAME_WORK_LIMIT,
-            copied_bytes: limit,
-            compacted_bytes: limit,
-        }
-    }
-
     /// A finite allowance sized to this reader's caller-owned buffer and one maximum frame.
     pub const fn for_capacity(capacity: usize) -> Self {
         let capacity = capacity as u64;
@@ -156,11 +142,11 @@ impl<'b> FrameReader<'b> {
         })
     }
 
-    /// Copies as much of `data` as fits under the finite compatibility profile and returns the
+    /// Copies as much of `data` as fits under the compatibility profile (one buffer's worth of work) and returns the
     /// count taken. A zero caused by refusal is exposed by [`last_work_refusal`](Self::last_work_refusal);
     /// use [`push_with_budget`](Self::push_with_budget) when the caller must handle refusal directly.
     pub fn push(&mut self, data: &[u8]) -> usize {
-        match self.push_with_budget(data, FrameWorkBudget::default_profile(self.buf.len())) {
+        match self.push_with_budget(data, FrameWorkBudget::for_capacity(self.buf.len())) {
             Ok(taken) => taken,
             Err(refusal) => {
                 self.refusal = Some(refusal);
@@ -243,7 +229,7 @@ impl<'b> FrameReader<'b> {
     /// that outcome directly.
     #[allow(clippy::should_implement_trait)] // borrows the reader, so it cannot be an Iterator
     pub fn next(&mut self) -> Option<Result<Frame<'_>, FrameError>> {
-        self.next_with_budget(FrameWorkBudget::default_profile(self.buf.len()))
+        self.next_with_budget(FrameWorkBudget::for_capacity(self.buf.len()))
             .ok()
             .flatten()
     }

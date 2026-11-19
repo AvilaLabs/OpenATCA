@@ -232,11 +232,13 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             }
         }
         // After asking the bridge to stop, give it a few seconds to flush, then stop reading.
-        if stopping
-            && (child.is_none() || now.duration_since(stop_at) > Duration::from_secs(6))
-            && pending_data.is_none()
-            && !deferred_drain
-        {
+        let plan = turn_plan(
+            stopping,
+            child.is_none() || now.duration_since(stop_at) > Duration::from_secs(6),
+            pending_data.is_some(),
+            deferred_drain,
+        );
+        if plan == TurnPlan::Stop {
             break;
         }
         let wake = if stopping {
@@ -249,7 +251,7 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 .saturating_duration_since(now)
                 .clamp(Duration::from_millis(1), Duration::from_millis(200))
         });
-        if pending_data.is_some() || deferred_drain {
+        if plan == TurnPlan::Service {
             update_pending_peak(&reader, &pending_data, &mut pending_peak_bytes);
             if let Some(recorder) = recorder.as_mut() {
                 if let Err(e) = recorder.idle_flush(now_ns().div_euclid(1_000_000_000)) {
@@ -273,17 +275,23 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 ) {
                     Ok(()) => deferred_drain = false,
                     Err(refusal) => {
-                        if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
-                            terminal_error = Some(work_refusal_cancel(
-                                refusal,
-                                reader.buffered_len(),
-                                pending_input_bytes(&pending_data),
-                                work_deferrals,
-                            ));
-                            exit = ExitCode::FAILURE;
-                            break 'service;
+                        match judge(
+                            Work::DrainRefused(refusal),
+                            fresh_work_profile,
+                            reader.buffered_len(),
+                            pending_input_bytes(&pending_data),
+                            work_deferrals,
+                        ) {
+                            Verdict::Cancel(error) => {
+                                terminal_error = Some(error);
+                                exit = ExitCode::FAILURE;
+                                break 'service;
+                            }
+                            Verdict::Defer { drain_pending } => {
+                                deferred_drain |= drain_pending;
+                                note_deferral(&cfg.feed, &mut work_deferrals);
+                            }
                         }
-                        work_deferrals = work_deferrals.saturating_add(1);
                         update_pending_peak(&reader, &pending_data, &mut pending_peak_bytes);
                         continue;
                     }
@@ -296,13 +304,17 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                     match reader.push_with_remaining_budget(rest, &mut work) {
                         Ok(took) => {
                             if took == 0 {
-                                let input_bytes = chunk.len().saturating_sub(*offset);
-                                terminal_error = Some(format!(
-                                    "frame reader made no progress; live stream canceled with {} reader-buffer bytes and {input_bytes} unpushed input bytes after {work_deferrals} deferrals",
-                                    reader.buffered_len()
-                                ));
-                                exit = ExitCode::FAILURE;
-                                break 'service;
+                                if let Verdict::Cancel(error) = judge(
+                                    Work::PushStalled,
+                                    fresh_work_profile,
+                                    reader.buffered_len(),
+                                    chunk.len().saturating_sub(*offset),
+                                    work_deferrals,
+                                ) {
+                                    terminal_error = Some(error);
+                                    exit = ExitCode::FAILURE;
+                                    break 'service;
+                                }
                             }
                             *offset += took;
                             let input_bytes = chunk.len().saturating_sub(*offset);
@@ -310,18 +322,23 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                                 .max(reader.buffered_len().saturating_add(input_bytes));
                         }
                         Err(refusal) => {
-                            if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
-                                let input_bytes = chunk.len().saturating_sub(*offset);
-                                terminal_error = Some(work_refusal_cancel(
-                                    refusal,
-                                    reader.buffered_len(),
-                                    input_bytes,
-                                    work_deferrals,
-                                ));
-                                exit = ExitCode::FAILURE;
-                                break 'service;
+                            match judge(
+                                Work::PushRefused(refusal),
+                                fresh_work_profile,
+                                reader.buffered_len(),
+                                chunk.len().saturating_sub(*offset),
+                                work_deferrals,
+                            ) {
+                                Verdict::Cancel(error) => {
+                                    terminal_error = Some(error);
+                                    exit = ExitCode::FAILURE;
+                                    break 'service;
+                                }
+                                Verdict::Defer { drain_pending } => {
+                                    deferred_drain |= drain_pending;
+                                    note_deferral(&cfg.feed, &mut work_deferrals);
+                                }
                             }
-                            work_deferrals = work_deferrals.saturating_add(1);
                             break;
                         }
                     }
@@ -336,19 +353,23 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                     ) {
                         Ok(()) => {}
                         Err(refusal) => {
-                            if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
-                                let input_bytes = chunk.len().saturating_sub(*offset);
-                                terminal_error = Some(work_refusal_cancel(
-                                    refusal,
-                                    reader.buffered_len(),
-                                    input_bytes,
-                                    work_deferrals,
-                                ));
-                                exit = ExitCode::FAILURE;
-                                break 'service;
+                            match judge(
+                                Work::DrainRefused(refusal),
+                                fresh_work_profile,
+                                reader.buffered_len(),
+                                chunk.len().saturating_sub(*offset),
+                                work_deferrals,
+                            ) {
+                                Verdict::Cancel(error) => {
+                                    terminal_error = Some(error);
+                                    exit = ExitCode::FAILURE;
+                                    break 'service;
+                                }
+                                Verdict::Defer { drain_pending } => {
+                                    deferred_drain |= drain_pending;
+                                    note_deferral(&cfg.feed, &mut work_deferrals);
+                                }
                             }
-                            work_deferrals = work_deferrals.saturating_add(1);
-                            deferred_drain = true;
                             deferred_mono = *mono;
                             break;
                         }
@@ -438,6 +459,107 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
         println!("{}", format_recording(&cfg.feed, r));
     }
     Ok(exit)
+}
+
+/// What the top of a live-loop turn does (the pure part of the decision, B2-style: inputs in,
+/// plan out).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnPlan {
+    /// The loop ends: stopping was requested, the bridge is gone or its grace period is over,
+    /// and no input or drain is owed.
+    Stop,
+    /// A held input chunk or a deferred drain is resumed with a fresh allowance.
+    Service,
+    /// Nothing is owed: wait for the next chunk from the source thread.
+    Receive,
+}
+
+fn turn_plan(
+    stopping: bool,
+    stop_ready: bool,
+    pending_data: bool,
+    deferred_drain: bool,
+) -> TurnPlan {
+    let owed = pending_data || deferred_drain;
+    if stopping && stop_ready && !owed {
+        TurnPlan::Stop
+    } else if owed {
+        TurnPlan::Service
+    } else {
+        TurnPlan::Receive
+    }
+}
+
+/// How one unit of service work ended without finishing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Work {
+    /// `push` took no bytes although the chunk has some left.
+    PushStalled,
+    /// The allowance refused a push.
+    PushRefused(FrameWorkRefusal),
+    /// The allowance refused a drain (`next`).
+    DrainRefused(FrameWorkRefusal),
+}
+
+/// The decision for an unfinished unit of work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Keep every byte and resume next turn with a fresh allowance; `drain_pending` is whether
+    /// the reader still has frames to drain before more input is pushed.
+    Defer { drain_pending: bool },
+    /// Cancel the stream with this error; the exit status is failure.
+    Cancel(String),
+}
+
+/// A refusal is deferred only when a fresh allowance can satisfy it (`required <= fresh`);
+/// otherwise, and for a push that makes no progress, the stream is canceled and the error says
+/// what was retained. An invariant break (a refusal that a fresh allowance cannot satisfy)
+/// therefore fails closed instead of retrying forever.
+fn judge(
+    work: Work,
+    fresh: FrameWorkBudget,
+    reader_bytes: usize,
+    input_bytes: usize,
+    deferrals: u64,
+) -> Verdict {
+    let (refusal, drain_pending) = match work {
+        Work::PushStalled => {
+            return Verdict::Cancel(format!(
+                "frame reader made no progress; live stream canceled with {reader_bytes} reader-buffer bytes and {input_bytes} unpushed input bytes after {deferrals} deferrals"
+            ));
+        }
+        Work::PushRefused(r) => (r, false),
+        Work::DrainRefused(r) => (r, true),
+    };
+    if frame_work_refusal_retryable(refusal, fresh) {
+        Verdict::Defer { drain_pending }
+    } else {
+        Verdict::Cancel(work_refusal_cancel(
+            refusal,
+            reader_bytes,
+            input_bytes,
+            deferrals,
+        ))
+    }
+}
+
+/// Counts a deferral and, each time the count reaches a power of two of 1024 or more, warns
+/// once on stderr (not recorded output).
+fn note_deferral(feed: &str, deferrals: &mut u64) {
+    let before = *deferrals;
+    *deferrals = before.saturating_add(1);
+    if deferral_warning(before, *deferrals) {
+        eprintln!(
+            "oa-feed: WARNING feed={feed} work_deferrals reached {}; the frame reader keeps \
+             hitting its work allowance, so the input is mostly damaged or the consumer is slow",
+            *deferrals
+        );
+    }
+}
+
+/// True when the count went from below to at or above a power of two that is 1024 or more.
+fn deferral_warning(before: u64, after: u64) -> bool {
+    after >= 1024 && before.leading_zeros() > after.leading_zeros()
 }
 
 fn update_pending_peak(
@@ -590,8 +712,138 @@ mod tests {
         clippy::unwrap_used
     )]
 
-    use super::finalize_reader;
-    use oa_feed::{encode_frame, ErrorKind, FeedHealth, FrameReader, MAX_FRAME_LEN, TRAILER_LEN};
+    use super::{deferral_warning, finalize_reader, judge, turn_plan, TurnPlan, Verdict, Work};
+    use oa_feed::{
+        encode_frame, ErrorKind, FeedHealth, FrameReader, FrameWorkBudget, FrameWorkKind,
+        FrameWorkRefusal, MAX_FRAME_LEN, TRAILER_LEN,
+    };
+
+    fn fresh() -> FrameWorkBudget {
+        FrameWorkBudget::for_capacity(MAX_FRAME_LEN * 2)
+    }
+
+    fn refusal(kind: FrameWorkKind, required: u64) -> FrameWorkRefusal {
+        FrameWorkRefusal {
+            kind,
+            required,
+            available: 0,
+        }
+    }
+
+    // REQ: OA-FEED-186
+    #[test]
+    fn turn_plan_covers_stop_service_and_receive() {
+        // (stopping, stop_ready, pending_data, deferred_drain) -> plan, all 16 inputs.
+        for bits in 0u8..16 {
+            let (stopping, ready, pending, deferred) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let want = if pending || deferred {
+                TurnPlan::Service
+            } else if stopping && ready {
+                TurnPlan::Stop
+            } else {
+                TurnPlan::Receive
+            };
+            assert_eq!(
+                turn_plan(stopping, ready, pending, deferred),
+                want,
+                "{bits}"
+            );
+        }
+    }
+
+    // REQ: OA-FEED-186
+    #[test]
+    fn retryable_refusals_defer_and_say_whether_a_drain_is_pending() {
+        let f = fresh();
+        for kind in [
+            FrameWorkKind::ScanPositions,
+            FrameWorkKind::CrcBytes,
+            FrameWorkKind::CopiedBytes,
+            FrameWorkKind::CompactedBytes,
+        ] {
+            let allowance = match kind {
+                FrameWorkKind::ScanPositions => f.scan_positions,
+                FrameWorkKind::CrcBytes => f.crc_bytes,
+                FrameWorkKind::CopiedBytes => f.copied_bytes,
+                _ => f.compacted_bytes,
+            };
+            // required == fresh is retryable; the allowance is renewed next turn.
+            assert_eq!(
+                judge(Work::PushRefused(refusal(kind, allowance)), f, 10, 20, 3),
+                Verdict::Defer {
+                    drain_pending: false
+                }
+            );
+            assert_eq!(
+                judge(Work::DrainRefused(refusal(kind, allowance)), f, 10, 20, 3),
+                Verdict::Defer {
+                    drain_pending: true
+                }
+            );
+        }
+    }
+
+    // REQ: OA-FEED-186
+    #[test]
+    fn refusals_a_fresh_allowance_cannot_satisfy_cancel_with_the_reported_error() {
+        let f = fresh();
+        for kind in [
+            FrameWorkKind::ScanPositions,
+            FrameWorkKind::CrcBytes,
+            FrameWorkKind::CopiedBytes,
+            FrameWorkKind::CompactedBytes,
+            FrameWorkKind::CounterOverflow,
+        ] {
+            // required = fresh + 1 violates `required <= fresh`: it must not be deferred.
+            let r = refusal(kind, u64::MAX);
+            for work in [Work::PushRefused(r), Work::DrainRefused(r)] {
+                let Verdict::Cancel(text) = judge(work, f, 11, 22, 5) else {
+                    panic!("{kind:?} was deferred");
+                };
+                assert!(text.contains("nonrenewable frame work refusal"), "{text}");
+                assert!(text.contains(&format!("{r:?}")), "{text}");
+                assert!(text.contains("11 reader-buffer bytes"), "{text}");
+                assert!(text.contains("22 unpushed input bytes"), "{text}");
+                assert!(text.contains("after 5 deferrals"), "{text}");
+            }
+        }
+        // Counter overflow is permanent even with a tiny requirement.
+        assert!(matches!(
+            judge(
+                Work::DrainRefused(refusal(FrameWorkKind::CounterOverflow, 1)),
+                f,
+                0,
+                0,
+                0
+            ),
+            Verdict::Cancel(_)
+        ));
+    }
+
+    // REQ: OA-FEED-186
+    #[test]
+    fn a_push_that_takes_nothing_cancels_with_the_retained_byte_counts() {
+        let Verdict::Cancel(text) = judge(Work::PushStalled, fresh(), 7, 9, 2) else {
+            panic!("stall was deferred");
+        };
+        assert!(text.contains("frame reader made no progress"), "{text}");
+        assert!(text.contains("7 reader-buffer bytes"), "{text}");
+        assert!(text.contains("9 unpushed input bytes"), "{text}");
+        assert!(text.contains("after 2 deferrals"), "{text}");
+    }
+
+    // REQ: OA-FEED-191
+    #[test]
+    fn deferral_warning_fires_once_per_power_of_two_from_1024() {
+        let fired: Vec<u64> = (1u64..=5000)
+            .filter(|&n| deferral_warning(n - 1, n))
+            .collect();
+        assert_eq!(fired, vec![1024, 2048, 4096]);
+        assert!(!deferral_warning(0, 1023));
+        assert!(deferral_warning(1000, 1024));
+        assert!(!deferral_warning(u64::MAX, u64::MAX));
+    }
 
     // REQ: OA-FEED-187
     #[test]
