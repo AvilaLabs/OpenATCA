@@ -1,8 +1,8 @@
 # ReplayClock: a TLA+ model of the replay clock
 
 `ReplayClock.tla` models how replay decides the current time from the feeds' frame times:
-`clock_observe` in `crates/oa-replay/src/clock.rs`, fed in the order `merge_streams` in
-`crates/oa-replay/src/source.rs` delivers frames. TLC checks the model exhaustively within
+`clock_observe` in `crates/oa-replay/src/core/clock.rs`, fed in the order `merge_streams` in
+`crates/oa-replay/src/shell/source.rs` delivers frames. TLC checks the model exhaustively within
 small bounds. The result is that, with merged delivery, the clock never leaves a feed
 behind, never freezes when a feed resumes and always finishes. With arbitrary delivery it
 does none of those, which is why replay depends on the merge.
@@ -154,4 +154,4 @@ The checks cover:
 They do not cover streams with several jumps, a regression smaller than TOL, longer streams,
 or three feeds that all jump.
 
-The model follows the rules in `clock.rs`; no tool checks that the two stay in step.
+The model follows the rules in `core/clock.rs`; no tool checks that the two stay in step.

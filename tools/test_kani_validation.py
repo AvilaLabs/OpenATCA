@@ -131,7 +131,7 @@ def report_with_cloned_cover_checks():
     next_id = 69
     for index, label in enumerate(FULL_COVER_LABELS):
         location = {
-            "file": "crates/oa-replay/src/mono_split.rs",
+            "file": "crates/oa-replay/src/core/mono_split.rs",
             "line": str(166 + index),
             "column": "9",
         }
@@ -721,7 +721,8 @@ class RunnerIsolationTests(unittest.TestCase):
             tracked.write_text("pub fn changed() {}\n")
             added = repo / "crates" / "oa-replay" / "src"
             added.mkdir(parents=True)
-            (added / "mono_split.rs").write_text("pub fn split_proof() {}\n")
+            (added / "core").mkdir()
+            (added / "core" / "mono_split.rs").write_text("pub fn split_proof() {}\n")
             (added / "fullmode.rs").write_text("pub fn fullmode_proof() {}\n")
             fixtures = repo / "tests" / "fixtures"
             fixtures.mkdir(parents=True)
@@ -729,7 +730,7 @@ class RunnerIsolationTests(unittest.TestCase):
 
             changed, untracked = changed_source_paths(repo)
             self.assertIn("crates/oa-track/src/lib.rs", changed)
-            self.assertIn("crates/oa-replay/src/mono_split.rs", untracked)
+            self.assertIn("crates/oa-replay/src/core/mono_split.rs", untracked)
             self.assertIn("crates/oa-replay/src/fullmode.rs", untracked)
             self.assertNotIn("tests/fixtures/large-generated.json", untracked)
 
@@ -738,7 +739,7 @@ class RunnerIsolationTests(unittest.TestCase):
             copies = _copy_source_artifacts(repo, out, changed + untracked)
             self.assertEqual(set(copies), set(changed + untracked))
             self.assertEqual(
-                (out / "source-files/crates/oa-replay/src/mono_split.rs").read_text(),
+                (out / "source-files/crates/oa-replay/src/core/mono_split.rs").read_text(),
                 "pub fn split_proof() {}\n",
             )
 

@@ -55,7 +55,7 @@ start again from near zero, which a replay takes as "not comparable" and falls b
 clock alone; a restart that leaves it larger than before cannot be seen, and the stream is the
 only run boundary replay knows. Replay uses it to split the wall time between two frames of one
 stream into time that passed (the monotonic time elapsed) and a step of the recorder's wall clock
-(the rest; under 2 minutes is noise), see `crates/oa-replay/src/clock.rs`, rule 7. Monotonic times
+(the rest; under 2 minutes is noise), see `crates/oa-replay/src/core/clock.rs`, rule 7. Monotonic times
 of different streams are never compared. The Linux monotonic clock does not run during suspend,
 so the hours of a suspend are a step.
 

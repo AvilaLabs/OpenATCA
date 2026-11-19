@@ -1,9 +1,9 @@
 ---------------------------- MODULE ReplayClock ----------------------------
 (***************************************************************************)
-(* The OpenATCA replay clock rules (crates/oa-replay/src/clock.rs,          *)
+(* The OpenATCA replay clock rules (crates/oa-replay/src/core/clock.rs,     *)
 (* clock_observe), in the form decided for the per-feed candidate rules     *)
 (* with backer voting and the lone-forward rule, together with the merge    *)
-(* order that feeds it (source.rs, merge_streams).                          *)
+(* order that feeds it (shell/source.rs, merge_streams).                    *)
 (*                                                                          *)
 (* Times are small integers.  NONE (-1) is the "no clock yet" value.  The   *)
 (* environment is a set of finite per-feed streams, chosen                 *)
