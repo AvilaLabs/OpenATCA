@@ -8,8 +8,8 @@
 //! has it:
 //!
 //! * **Position bias.** A chosen fraction of the aircraft get a constant horizontal offset, in a
-//!   random direction fixed per aircraft. The magnitude is `bias_mult` times one bound per
-//!   aircraft: the median of the aircraft's usable NACp 95 % bounds ([`oa_truth::nacp_epu_m`])
+//!   random direction fixed per aircraft. The magnitude is `bias_mult` times the aircraft's one
+//!   bound: the median of the aircraft's usable NACp 95 % bounds ([`oa_truth::nacp_epu_m`])
 //!   over its rows (the upper middle for an even count), or `bias_fallback_bound_m` when no row
 //!   has a usable NACp.
 //! * **Latency.** A chosen fraction of the aircraft report the position, velocity, barometric
@@ -20,7 +20,9 @@
 //!
 //! A lagged row whose time `t - L` the truth cannot answer (before the start of its leg) is
 //! taken from the truth at `t` stepped back by `L` along its velocity, and counted as
-//! extrapolated; it is left out only when the truth cannot answer at `t` either.
+//! extrapolated (by label and by reason); its barometric altitude and vertical rate, which the
+//! truth at `t` does not give for `t - L`, are blanked. It is left out only when the truth cannot
+//! answer at `t` either or its velocity is not finite.
 //!
 //! Optional per-report noise: each row gets an independent Gaussian offset (seeded per address
 //! and time) of standard deviation `hypot(noise_sigma_m, noise_bound_frac * bound)` per axis,
@@ -95,8 +97,12 @@ pub struct Errored {
     /// the rows left out.
     pub rows_by_label: [u64; 4],
     pub dropped_by_label: [u64; 4],
-    /// Lagged rows taken by stepping the truth at `t` back along its velocity.
+    /// Lagged rows taken by stepping the truth at `t` back along its velocity, in total, by the
+    /// label of their aircraft and by why the truth at `t - L` was refused (outside its legs, no
+    /// nearby report, any other reason).
     pub extrapolated_rows: u64,
+    pub extrapolated_by_label: [u64; 4],
+    pub extrapolated_by_reason: [u64; 3],
 }
 
 fn unit_fraction(f: f64) -> bool {
@@ -146,7 +152,11 @@ fn pick(addrs: &[u32], fraction: f64, seed: u64, stream: u64) -> Vec<u32> {
 pub fn adsb_error(truth: &Truth, base: &Reports, p: &ErrorParams) -> Result<Errored, SimError> {
     let (lag_lo_ms, lag_hi_ms) = check(p)?;
     let n = reports_len(base);
-    if base.time_ns.len() != n || base.lat_e7.len() != n || base.lon_e7.len() != n {
+    if base.time_ns.len() != n
+        || base.lat_e7.len() != n
+        || base.lon_e7.len() != n
+        || base.nac_p.len() != n
+    {
         return Err(SimError::ColumnLength);
     }
     let mut addrs: Vec<u32> = base.icao.clone();
@@ -203,13 +213,28 @@ pub fn adsb_error(truth: &Truth, base: &Reports, p: &ErrorParams) -> Result<Erro
         }
         let lag = lag_ms.unwrap_or(0);
         let mut back_m = 0.0;
+        let mut extrapolated = false;
         let s = match truth_at(truth, r.icao, at_ms - lag) {
             TruthQuery::Ok(s) => s,
-            _ => match truth_at(truth, r.icao, at_ms) {
-                TruthQuery::Ok(s) if lag > 0 => {
+            refused => match truth_at(truth, r.icao, at_ms) {
+                TruthQuery::Ok(s)
+                    if lag > 0 && s.vel_east_mps.is_finite() && s.vel_north_mps.is_finite() =>
+                {
                     // Before the leg began: the position it would have had, one step back.
                     back_m = hypot(s.vel_east_mps, s.vel_north_mps) * lag as f64 * 1.0e-3;
+                    extrapolated = true;
                     out.extrapolated_rows += 1;
+                    if let Some(c) = out.extrapolated_by_label.get_mut(kind) {
+                        *c += 1;
+                    }
+                    let why = match refused {
+                        TruthQuery::OutsideLegs => 0,
+                        TruthQuery::NoNearbyReport => 1,
+                        _ => 2,
+                    };
+                    if let Some(c) = out.extrapolated_by_reason.get_mut(why) {
+                        *c += 1;
+                    }
                     s
                 }
                 _ => {
@@ -264,11 +289,13 @@ pub fn adsb_error(truth: &Truth, base: &Reports, p: &ErrorParams) -> Result<Erro
         r.track_ddeg = ((trk * 10.0).round() as u16) % 3600;
         let blank = lag_ms.is_some();
         r.baro_alt_ft = match s.baro_alt_ft {
+            _ if extrapolated => NONE_I32,
             Some(a) => whole(a, r.baro_alt_ft),
             None if blank => NONE_I32,
             None => r.baro_alt_ft,
         };
         r.vrate_fpm = match s.vert_rate_fpm {
+            _ if extrapolated => NONE_I32,
             Some(v) => whole(v, r.vrate_fpm),
             None if blank => NONE_I32,
             None => r.vrate_fpm,

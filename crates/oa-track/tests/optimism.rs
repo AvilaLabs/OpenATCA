@@ -19,7 +19,9 @@
 //! answer between reports) and against the truth built from B (B score), on the rows both
 //! truths answer, so the samples are identical: the harness asserts equal pair counts, at least
 //! `MIN_PAIRS` Updates pairs per cell, and (for a lagged cell) that at most `MAX_DROP_SHARE` of
-//! the lagged aircraft's rows are left out.
+//! the lagged aircraft's rows are left out. The share of lagged rows taken by stepping the truth
+//! back (extrapolated) is printed by label and reason and must not exceed `MAX_EXTRAPOLATED_SHARE`
+//! (the failure is reported after every cell has run).
 //!
 //! Confound: a row is classed straight or turning by the truth it is scored against, so the A and B
 //! scores can class the same row differently. The per-class pair counts of both scores and the
@@ -49,6 +51,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 const MIN_PAIRS: usize = 10_000;
 const MAX_DROP_SHARE: f64 = 0.02;
+const MAX_EXTRAPOLATED_SHARE: f64 = 0.05;
 
 /// A run's rows restricted to those both truths answer.
 struct Both<'a> {
@@ -256,9 +259,13 @@ fn optimism() {
         }
     }
     println!(
-        "base rows {} of which the exact truth answers {}",
+        "base rows {} of which the exact truth answers {} (pre-filter left out {:.2} %)",
         oa_adsb::reports_len(&base),
-        oa_adsb::reports_len(&answered)
+        oa_adsb::reports_len(&answered),
+        100.0
+            * (1.0
+                - oa_adsb::reports_len(&answered) as f64
+                    / oa_adsb::reports_len(&base).max(1) as f64)
     );
     let base = answered;
     // The clip's own halves decide which rows are the tracker's and which the truth's.
@@ -269,6 +276,7 @@ fn optimism() {
         "exact truth built, base rows {}",
         oa_adsb::reports_len(&base)
     );
+    let mut failures: Vec<String> = Vec::new();
     for cell in cells(fallback.parse().unwrap()) {
         let e = adsb_error(&exact.truth, &base, &cell.p).unwrap();
         let clean = ErrorParams {
@@ -308,9 +316,26 @@ fn optimism() {
                 100.0 * f
             );
         }
+        assert_eq!(e.dropped_by_label[0] + e.dropped_by_label[1], 0);
         if !e.lag_addrs.is_empty() {
             let (_, _, f) = share(&[2, 3]);
             assert!(f <= MAX_DROP_SHARE, "dropped share of lagged rows {f}");
+            let lagged: u64 = e.rows_by_label[2] + e.rows_by_label[3];
+            let f = e.extrapolated_rows as f64 / lagged.max(1) as f64;
+            println!(
+                "EXTRAPOLATED {}: {} of {lagged} lagged rows ({:.2} %); by label none/bias/lag/both {:?}; by reason OutsideLegs/NoNearbyReport/other {:?}",
+                cell.name,
+                e.extrapolated_rows,
+                100.0 * f,
+                e.extrapolated_by_label,
+                e.extrapolated_by_reason
+            );
+            if f > MAX_EXTRAPOLATED_SHARE {
+                failures.push(format!(
+                    "cell {}: extrapolated share of lagged rows {f:.4} above {MAX_EXTRAPOLATED_SHARE}",
+                    cell.name
+                ));
+            }
         }
         let a_tab = rows_in(if cell.in_a { &e } else { &c }, &keys_a);
         let b_tab = rows_in(if cell.in_b { &e } else { &c }, &keys_b);
@@ -380,6 +405,9 @@ fn optimism() {
                 );
             }
             let m = confusion(&src, &exact, &built_b);
+            let total: u64 = m.iter().flatten().sum();
+            println!("CONFUSION total {total} updates_pairs {}", au.pairs);
+            assert_eq!(total, au.pairs as u64);
             println!(
                 "CONFUSION {} thin {ts} (rows A straight/turning/none, columns B straight/turning/none): {:?}",
                 cell.name, m
@@ -399,4 +427,5 @@ fn optimism() {
             println!("secs {:.0}", t0.elapsed().as_secs_f64());
         }
     }
+    assert!(failures.is_empty(), "{failures:?}");
 }

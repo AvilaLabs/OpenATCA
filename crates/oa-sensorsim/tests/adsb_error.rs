@@ -539,4 +539,30 @@ fn a_lagged_row_before_its_leg_began_is_stepped_back_along_the_velocity() {
         assert!((dist_m(control[&k], got[&k]) - 200.0).abs() < 0.5);
     }
     assert_eq!(e.dropped_rows, 0);
+    // The reasons and labels add up, and the extrapolated rows carry no altitude of the truth
+    // at t.
+    assert_eq!(
+        e.extrapolated_by_label.iter().sum::<u64>(),
+        e.extrapolated_rows
+    );
+    assert_eq!(
+        e.extrapolated_by_reason.iter().sum::<u64>(),
+        e.extrapolated_rows
+    );
+    assert_eq!(e.extrapolated_by_label[2], e.extrapolated_rows);
+    assert_eq!(
+        e.reports
+            .baro_alt_ft
+            .iter()
+            .filter(|&&a| a == oa_adsb::NONE_I32)
+            .count() as u64,
+        e.extrapolated_rows
+    );
+    // A short base column is refused.
+    let mut short = base();
+    short.nac_p.pop();
+    assert!(matches!(
+        adsb_error(&t, &short, &p),
+        Err(SimError::ColumnLength)
+    ));
 }

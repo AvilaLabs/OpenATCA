@@ -3575,7 +3575,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-SIM-047** Rows left out are counted in total and by the label their aircraft would have carried; the counts add
   up with the rows kept.
 - **OA-SIM-049** A lagged row whose time t - L the truth cannot answer is the truth at t stepped back along its
-  velocity by L (counted as extrapolated), and is left out only when the truth cannot answer at t.
+  velocity by L (counted as extrapolated, by label and by reason, with its altitude and vertical rate blank), and is
+  left out only when the truth cannot answer at t or its velocity is not finite. Base columns of different lengths
+  (including `nac_p`) are refused.
 - **OA-SIM-048** Per-report noise is seeded, independent per row, and per axis of standard deviation
   `hypot(noise_sigma_m, noise_bound_frac * row bound)`.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
