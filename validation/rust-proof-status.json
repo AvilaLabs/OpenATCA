@@ -1045,9 +1045,122 @@
         ],
         "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
         "source_snapshot_sha256": null
+      },
+      "7bc8677b354abdb57f7e4eff2045d7caa0d7ae9ff40d439b8920bb354a8d17e4": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "180c5c5f3fad87830a9aa885f2b0a87896c659a08dc4b3f00323147302f531dc",
+          "Cargo.lock": "3c8fec8668709c514551c722d3de982ca1b0a42e1c38e5bd3b5670077ec9dff7",
+          "Cargo.toml": "a7b0abf064b2ebbdecaaf857324e1011a7c536d9837aad31236fab085f378733",
+          "crates/oa-replay/Cargo.toml": "a75d0b2fe657185a6e985709839a73553ea7052ffe58f6541bfef6f9c94c5691",
+          "crates/oa-replay/src/core/mono_split.rs": "b74d7b8652fd4a972b1812c1024076ad82ecd1621883cb1cdabe214ed59f596c",
+          "tools/kani_validation.py": "009ed04c7a3426b5f70a0967e1f13ba68426c09094b9684f08ebf14e1c63f9c5",
+          "tools/rust_proof_suite.py": "738c01fffa05f593dadc25cedf3f09145191c2cb7ca21bdb13396d6192021db2",
+          "tools/rust_proofs.json": "27a9b506fcc7bfcabf1d52e7c8dec34e410b0125912517951cd3b552436518e1"
+        },
+        "source_revisions": [
+          "94207487a5b79cc18de509046f4d0950dd7c06ec"
+        ],
+        "source_set_sha256": "beac411a7b8c97b96a25cde92e26b3093cf34fb5d0a7fae52d727fa07ef6d645",
+        "source_snapshot_sha256": "7bc8677b354abdb57f7e4eff2045d7caa0d7ae9ff40d439b8920bb354a8d17e4"
       }
     },
-    "version": "0.68.0"
+    "version": "0.68.0",
+    "core_shell_split_reruns": {
+      "note": "After the core/shell split moved oa-replay's mono_split.rs to src/core/, the registered harness id gained the core:: prefix. The earlier prior-phase record above is kept unchanged under the old id. This is one new local run of the renamed harness on the source group below; the other registered proofs (oa-track) are unchanged in source and were not re-run. Local run only; CI is separate.",
+      "proofs": [
+        {
+          "cfgs": [],
+          "harness": "core::mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+          "id": "replay-monotonic-split",
+          "required_covers": [
+            "absent monotonic timestamp",
+            "invalid monotonic reference",
+            "different monotonic stream",
+            "monotonic regression",
+            "monotonic delta exceeds i64",
+            "wall delta underflow",
+            "wall delta overflow",
+            "clock step underflow",
+            "representable timestamp split"
+          ],
+          "result_sha256": "0f206d35ad4123e3e43ad0b468c195497a6e1efa39d3da0e6ff99084d7166b88",
+          "source_group_sha256": "7bc8677b354abdb57f7e4eff2045d7caa0d7ae9ff40d439b8920bb354a8d17e4",
+          "source_revision": "94207487a5b79cc18de509046f4d0950dd7c06ec",
+          "source_set_sha256": "beac411a7b8c97b96a25cde92e26b3093cf34fb5d0a7fae52d727fa07ef6d645",
+          "status": "PASS",
+          "stubbing": false,
+          "stub_summaries": [],
+          "elapsed_seconds": 9.9,
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 9,
+              "Success": 68,
+              "Unsatisfiable": 3
+            },
+            "check_category_counts": {
+              "assertion": 12,
+              "cover": 12,
+              "pointer_dereference": 48,
+              "unreachable": 8
+            },
+            "unsupported_construct_checks": [],
+            "code_coverage_instrumentation": false
+          }
+        }
+      ],
+      "other_moved_harnesses_rerun": [
+        {
+          "package": "oa-replay",
+          "harness": "clock_observe_total_and_confirms",
+          "file": "crates/oa-replay/src/core/clock.rs",
+          "status": "PASS",
+          "seconds": 13
+        },
+        {
+          "package": "oa-replay",
+          "harness": "clock_advances_by_at_most_the_tolerance_unless_the_feed_is_alone",
+          "file": "crates/oa-replay/src/core/clock.rs",
+          "status": "PASS",
+          "seconds": 20
+        },
+        {
+          "package": "oa-replay",
+          "harness": "clock_step_needs_three_candidates_and_the_vote",
+          "file": "crates/oa-replay/src/core/clock.rs",
+          "status": "PASS",
+          "seconds": 27
+        },
+        {
+          "package": "oa-replay",
+          "harness": "clock_observe_three_candidates_before_a_step",
+          "file": "crates/oa-replay/src/core/clock.rs",
+          "status": "PASS",
+          "seconds": 40
+        },
+        {
+          "package": "oa-feed",
+          "harness": "observe_seq_accumulation_saturates",
+          "file": "crates/oa-feed/src/core/health.rs",
+          "status": "PASS",
+          "seconds": 6
+        },
+        {
+          "package": "oa-truth",
+          "harness": "clip_row_count_refuses_exactly_when_the_total_crosses_the_cap",
+          "file": "crates/oa-truth/src/shell/clip.rs",
+          "status": "PASS",
+          "seconds": 1
+        },
+        {
+          "package": "oa-truth",
+          "harness": "clip_claim_rows_is_total",
+          "file": "crates/oa-truth/src/shell/clip.rs",
+          "status": "PASS",
+          "seconds": 1
+        }
+      ],
+      "other_moved_harnesses_note": "Plain cargo kani --lib runs, wall clock with compilation, jobs 1, Kani 0.68.0, Cargo 1.89.0, source revision above; not run through the registry runner, so no raw-result digest is recorded."
+    }
   },
   "miri": {
     "evidence_provenance": "Preserved from prior_phase_record; not rerun during this Kani aggregation.",
