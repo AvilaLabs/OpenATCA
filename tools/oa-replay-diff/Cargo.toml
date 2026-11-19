@@ -1,0 +1,18 @@
+[package]
+name = "oa-replay-diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crate; not an outside dependency (RULESET F1).
+oa-track = { path = "../../crates/oa-track" }
+
+[[bin]]
+name = "oa-replay-diff"
+path = "src/main.rs"

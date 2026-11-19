@@ -37,6 +37,7 @@ members = [
     "crates/oa-sensorsim",
     "crates/oa-track",
     "tools/oa-perf",
+    "tools/oa-replay-diff",
     "tools/oa-trace",
 ]
 
