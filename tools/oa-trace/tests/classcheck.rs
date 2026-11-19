@@ -728,12 +728,13 @@ fn every_dependency_table_and_rename_is_resolved_by_path() {
 // REQ: OA-TRC-216
 #[test]
 fn the_real_workspace_passes() {
-    // Passes only with lane-nostd merged (oa-math and oa-geo no_std, oa-ieee present): until then
-    // oa-geo fails B10 and its `std::cell` in rhumb.rs fails B8.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let rep = check(&root);
     assert!(rep.ok(), "{:#?}", rep.failures);
-    assert_eq!(rep.unsplit.len(), 12);
+    assert_eq!(
+        rep.unsplit,
+        ["oa-display", "oa-replay-diff", "oa-scope-replay", "oa-track"]
+    );
 }
 
 // REQ: OA-TRC-217

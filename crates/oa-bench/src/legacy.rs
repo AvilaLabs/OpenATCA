@@ -1,5 +1,6 @@
-//! The legacy samples: what ERAM, TBFM and TFMS published, as struct-of-arrays tables. Core
-//! (pure): the ingest functions take the bytes of one message and a receive time as input.
+//! The legacy samples: what ERAM, TBFM and TFMS published, as struct-of-arrays tables. Shell
+//! (B7: it keeps `HashMap` indexes, which B8 bans from core; lookups only, so no iteration order
+//! reaches an output): the ingest functions take the bytes of one message and a receive time as input.
 //!
 //! * [`Flights`] holds one row per SFDPS flight (the GUFI UUID is the flight key), with callsign,
 //!   `aircraftAddress` where any message carried it, the flight plan identifier (the key TBFM

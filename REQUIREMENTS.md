@@ -414,7 +414,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   the files below it; only the top-level `src/bin` and `src/main.rs` are skipped.
 - **OA-TRC-215** A core crate depending on a shell or unsplit crate fails whichever dependency table, rename or
   path form declares it; a path dependency that is not a workspace member fails.
-- **OA-TRC-216** The check passes on the real workspace, with twelve unsplit crates.
+- **OA-TRC-216** The check passes on the real workspace, and the unsplit crates are exactly those still listed
+  in the allowlist file.
 - **OA-TRC-217** In core code the only `extern crate` is `extern crate alloc;`.
 - **OA-TRC-218** In core code a call of a float method `core` lacks (`.sin(`, `f64::sqrt(`, and the rest of the
   RULESET B8 list) fails with `oa_ieee` or `oa_math` named as the alternative and the note that a user-defined

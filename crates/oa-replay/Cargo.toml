@@ -25,9 +25,5 @@ oa-notam = { path = "../oa-notam" }
 # Workspace crate: compresses test recordings to .oaf.gz.
 oa-deflate = { path = "../oa-deflate" }
 
-[[bin]]
-name = "oa-replay"
-path = "src/main.rs"
-
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"

@@ -29,4 +29,4 @@ name = "oa-bench"
 path = "src/main.rs"
 
 [package.metadata.openatca]
-class = "unsplit"
+class = "shell"

@@ -18,9 +18,5 @@ oa-adsb = { path = "../oa-adsb" }
 [dev-dependencies]
 oa-grib2 = { path = "../oa-grib2", features = ["testenc"] }
 
-[[bin]]
-name = "oa-wind-check"
-path = "src/main.rs"
-
 [package.metadata.openatca]
-class = "unsplit"
+class = "split"
