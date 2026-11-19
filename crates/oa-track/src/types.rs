@@ -147,6 +147,19 @@ pub struct TrackerConfig {
     /// position), besides the `RESYNC_AFTER` rule. 0 (the default) is off; otherwise 2 to
     /// `RESYNC_AFTER`.
     pub resync_consistent_k: u8,
+    /// Large-move hold (RT-239): a report that passes the position gate but lies farther than
+    /// this, metres, from the track's predicted position is held until a later report agrees
+    /// with it ([`crate::params::CONFIRM_MOVE_M`]). Positive and finite; a value of 0 is
+    /// refused, never read as "off" (`confirm_moves` turns the hold off).
+    pub confirm_move_m: f64,
+    /// A confirming report agrees if within this, metres, of the held report propagated to its
+    /// time ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
+    pub confirm_agree_m: f64,
+    /// A held report is discarded after this long, ns ([`crate::params::CONFIRM_WINDOW_NS`]).
+    /// Over 0.5 s (the least separation of the confirming report).
+    pub confirm_window_ns: i64,
+    /// The large-move hold is on. True by default; false only by an explicit choice.
+    pub confirm_moves: bool,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
     /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
@@ -176,6 +189,10 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     vel_gate_chi2: crate::params::VEL_GATE_CHI2,
     gate_manoeuvre_mps2: crate::params::GATE_MANOEUVRE_MPS2,
     resync_consistent_k: 0,
+    confirm_move_m: crate::params::CONFIRM_MOVE_M,
+    confirm_agree_m: crate::params::CONFIRM_AGREE_M,
+    confirm_window_ns: crate::params::CONFIRM_WINDOW_NS,
+    confirm_moves: true,
     ooo_window_ns: OOO_WINDOW_NS,
     clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
@@ -244,6 +261,20 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
         && !(2..=crate::params::RESYNC_AFTER).contains(&c.resync_consistent_k)
     {
         return bad("resync_consistent_k");
+    }
+    if !c.confirm_move_m.is_finite() || c.confirm_move_m <= 0.0 {
+        return bad("confirm_move_m");
+    }
+    if !c.confirm_agree_m.is_finite()
+        || c.confirm_agree_m <= 0.0
+        || c.confirm_agree_m >= c.confirm_move_m
+    {
+        return bad("confirm_agree_m");
+    }
+    if c.confirm_window_ns <= crate::params::CONFIRM_MIN_SEP_NS
+        || c.confirm_window_ns > 86_400 * 1_000_000_000
+    {
+        return bad("confirm_window_ns");
     }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
@@ -557,6 +588,15 @@ pub struct TrackerStats {
     pub time_future_dropped: u64,
     /// Sensor table entries reused while the table was full.
     pub time_sensor_evicted: u64,
+    /// Reports that passed the position gate but moved the track by more than `confirm_move_m`,
+    /// held (stored as the track's pending report) and not applied; a report that replaces a
+    /// pending one counts again.
+    pub moves_held: u64,
+    /// Pending reports confirmed by an agreeing later report and applied, with it.
+    pub moves_confirmed: u64,
+    /// Pending reports discarded for age (past `confirm_window_ns`) or because the track had
+    /// moved on past them.
+    pub moves_expired: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

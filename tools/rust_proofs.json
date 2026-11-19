@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 48,
+  "expected_proof_count": 49,
   "proofs": [
     {
       "id": "output-append",
@@ -378,6 +378,24 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288
+    },
+    {
+      "id": "large-move-hold",
+      "requirement": "OA-TRK-351: a report that moves a track by more than the fixed threshold is never applied without a second, agreeing report, for every gap and covariance.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::a_single_large_move_is_never_applied_without_an_agreeing_second_report",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a second report confirms",
+        "a stale pending report is replaced"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
     },
     {
       "id": "replay-monotonic-split",

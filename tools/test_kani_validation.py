@@ -432,7 +432,7 @@ class KaniBindingTests(unittest.TestCase):
         record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
         expected_line = (
             f"Not unwinding loop {preset['loop_id']} iteration 3 file "
-            f"crates/oa-track/src/tracker.rs line 1071 column 5 function tracker::update_late thread 0"
+            f"crates/oa-track/src/tracker.rs line 1191 column 5 function tracker::update_late thread 0"
         )
         record["loop_unwind_log_check"] = {"passed": True, "matched_line": expected_line}
         self.assertEqual(evaluate_kani_binding(report_text, record), [])
@@ -453,14 +453,14 @@ class KaniBindingTests(unittest.TestCase):
         preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
         line = (
             f"Not unwinding loop {preset['loop_id']} iteration 3 file "
-            f"crates/oa-track/src/tracker.rs line 1071 column 5 function tracker::update_late thread 0"
+            f"crates/oa-track/src/tracker.rs line 1191 column 5 function tracker::update_late thread 0"
         )
         self.assertTrue(_check_loop_unwind_log("late-replay-two-events", line, "")["passed"])
         for malformed in (
             line.replace(preset["loop_id"], "stale.id"),
             line.replace("iteration 3", "iteration 2"),
             line.replace("iteration 3", "iteration 4"),
-            line.replace("line 1071", "line 1070"),
+            line.replace("line 1191", "line 1190"),
             line.replace("tracker::update_late", "tracker::other_loop"),
             line.replace("tracker::update_late", "tracker::update_late_extra"),
             line.replace("tracker.rs", "other.rs"),
@@ -497,7 +497,7 @@ class KaniBindingTests(unittest.TestCase):
             (0, lines[0].replace(preset["loops"][0]["loop_id"], "stale.loop.id")),
             (0, lines[0].replace("iteration 1", "iteration 3")),
             (2, lines[2].replace("iteration 2", "iteration 3")),
-            (3, lines[3].replace("line 1041", "line 1040")),
+            (3, lines[3].replace("line 1161", "line 1160")),
             (4, lines[4].replace("tracker::update_late", "tracker::wrong_loop")),
         ):
             bad_lines = list(lines)
@@ -566,7 +566,7 @@ class KaniBindingTests(unittest.TestCase):
         )
         for family, loop_id in (("local", local_ids[3]), ("ci", ci_ids[3])):
             lines = []
-            for loop_index, source_line in ((0, 984), (1, 1003), (2, 1041)):
+            for loop_index, source_line in ((0, 1104), (1, 1123), (2, 1161)):
                 unrequested_id = local_ids[loop_index]
                 iterations = (1, 2) if loop_index == 0 else range(1, 16)
                 lines.extend(
@@ -583,13 +583,13 @@ class KaniBindingTests(unittest.TestCase):
                     )
             lines.extend([
                 f"Unwinding loop {loop_id} iteration {iteration} file "
-                "crates/oa-track/src/tracker.rs line 1071 column 5 "
+                "crates/oa-track/src/tracker.rs line 1191 column 5 "
                 "function tracker::update_late thread 0"
                 for iteration in (1, 2)
             ])
             lines.append(
                 f"Not unwinding loop {loop_id} iteration 3 file "
-                "crates/oa-track/src/tracker.rs line 1071 column 5 "
+                "crates/oa-track/src/tracker.rs line 1191 column 5 "
                 "function tracker::update_late thread 0"
             )
             check = _check_loop_unwind_log(one_name, "\n".join(lines), "")

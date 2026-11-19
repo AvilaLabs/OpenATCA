@@ -234,6 +234,9 @@ fn arbitrary_stats() -> TrackerStats {
         time_steps_back: kani::any(),
         time_future_dropped: kani::any(),
         time_sensor_evicted: kani::any(),
+        moves_held: kani::any(),
+        moves_confirmed: kani::any(),
+        moves_expired: kani::any(),
         nis_sum: kani::any(),
         nis_n: kani::any(),
     }
@@ -280,6 +283,7 @@ fn filter_apply_insert_then_refuse(
     m: &Measurement,
     stats: &mut TrackerStats,
     _: &TrackerConfig,
+    _: Option<&Measurement>,
 ) -> Applied {
     if m.toa_ns == LATE_INSERT_NS {
         f.t_ns = m.toa_ns;
@@ -302,6 +306,7 @@ fn filter_apply_symbolic_yes_or_resync(
     m: &Measurement,
     stats: &mut TrackerStats,
     _: &TrackerConfig,
+    _: Option<&Measurement>,
 ) -> Applied {
     f.t_ns = m.toa_ns;
     f.h.m[0].x[0] = 321.0;
@@ -416,6 +421,9 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.time_steps_back, b.time_steps_back);
     assert_eq!(a.time_future_dropped, b.time_future_dropped);
     assert_eq!(a.time_sensor_evicted, b.time_sensor_evicted);
+    assert_eq!(a.moves_held, b.moves_held);
+    assert_eq!(a.moves_confirmed, b.moves_confirmed);
+    assert_eq!(a.moves_expired, b.moves_expired);
     assert_f64_bits(a.nis_sum, b.nis_sum);
     assert_eq!(a.nis_n, b.nis_n);
 }
@@ -745,6 +753,7 @@ fn observe_track_fields_directly(t: &Tracker, slot: usize) -> TrackTxn {
         expected_ns: t.expected_ns[slot],
         newest_update_ns: t.newest_update_ns,
         cat: t.cat[slot],
+        pend: t.pend[slot],
         updates: t.updates[slot],
         state: t.state[slot],
         hits: t.hits[slot],
@@ -1142,3 +1151,52 @@ fn late_replay_restores_transaction_after_current_row_then_later_refusal() {
 
 #[path = "tracker_rollback_paths.rs"]
 mod rollback_paths;
+
+// REQ: OA-TRK-351
+#[kani::proof]
+#[kani::solver(cadical)]
+fn a_single_large_move_is_never_applied_without_an_agreeing_second_report() {
+    // Any configuration the checker accepts, any times (so any gap since the track's last
+    // update), any distances (so any covariance behind them: the decision does not see it).
+    let cfg = TrackerConfig {
+        confirm_move_m: kani::any(),
+        confirm_agree_m: kani::any(),
+        confirm_window_ns: kani::any(),
+        ..crate::types::DEFAULT_CONFIG
+    };
+    kani::assume(crate::types::check_config(&cfg).is_ok());
+    let last_ns: i64 = kani::any();
+    let rep_t_ns: i64 = kani::any();
+    let pending: Option<i64> = if kani::any() { Some(kani::any()) } else { None };
+    let miss_m: f64 = kani::any();
+    let agree_m: f64 = kani::any();
+    // The report moves the track by more than the threshold (or by no number at all).
+    kani::assume(!(miss_m <= cfg.confirm_move_m));
+
+    let v = crate::confirm::confirm_decide(pending, last_ns, rep_t_ns, miss_m, agree_m, &cfg);
+
+    // Never applied alone.
+    assert!(v != crate::confirm::Move::Apply);
+    // Confirmed only by a second report: a pending one, not stale, at least the separation
+    // before this one, that this one agrees with.
+    if v == crate::confirm::Move::Confirm {
+        let Some(pt) = pending else {
+            panic!("confirmed with no pending report");
+        };
+        assert!(pt >= last_ns);
+        assert!(rep_t_ns.saturating_sub(pt) >= crate::params::CONFIRM_MIN_SEP_NS);
+        assert!(rep_t_ns.saturating_sub(pt) <= cfg.confirm_window_ns);
+        assert!(agree_m <= cfg.confirm_agree_m);
+    }
+    if pending.is_none() {
+        assert!(v == crate::confirm::Move::Hold { expired: false });
+    }
+    kani::cover!(
+        v == crate::confirm::Move::Confirm,
+        "a second report confirms"
+    );
+    kani::cover!(
+        v == crate::confirm::Move::Hold { expired: true },
+        "a stale pending report is replaced"
+    );
+}

@@ -161,6 +161,16 @@ Injected attacks for the exit test: ghost aircraft, gradual position drift, repl
 aircraft's past track, and address duplication. Detection and false positives are reported as a
 confusion matrix against the published bars (≥95% detection; false positives ≤1e-3).
 
+Limit of the position gate (red-team finding RT-239). The gate widens with the time since the
+track's last update, so after a gap a single forged report of any plausible size passes it. The
+tracker therefore holds a report that passes the gate but lies more than 926 m from the predicted
+position, applies it only when a second report within 5 s agrees with it to 300 m, and counts
+`moves_held`, `moves_confirmed` and `moves_expired` (OA-TRK-347 to OA-TRK-351). Residual risk: a
+forger who sends two reports that agree with each other, 0.5 s to 5 s apart, is believed by the
+ADS-B-only tracker; only a second source (radar or multilateration, above) can refute that. A
+tentative track is not covered (its second report has no velocity and moves far from its
+prediction as a matter of course).
+
 ## 5. Flight plan correlation
 
 Track to plan by address (the plan's `aircraftAddress`, or the `ADSB_02M_52B` value SFDPS

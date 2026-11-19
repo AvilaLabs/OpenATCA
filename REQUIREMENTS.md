@@ -3989,6 +3989,42 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   re-tuning: position RMS 58.3 m (table and gate alone) against 32.0 m (allowance 5), jump_rejected
   22,624 against 3,257, resyncs 1,327 against 3; the variants with allowance 8 (31.3 m) and with
   the consistent-run resync (31.3 m) were not adopted, being chosen among on validation numbers.
+- **OA-TRK-347** (red-team finding RT-239) The position gate widens with the time since the track's
+  last update, so after a gap it passes a single forged report of any plausible size. A report of
+  a confirmed track that passes the gate but lies farther than `confirm_move_m` (926 m, a fixed
+  distance that does not scale with the gap or the covariance) from the track's predicted position
+  at the report's time is not applied: it is kept as the track's one pending report (position,
+  velocity if any, time, source and address) and counted in `moves_held`. A tentative track is
+  not held (its second report has no velocity and moves far from its prediction as a matter of
+  course; the plausibility rule judges it). A late report (older than the track's newest update)
+  is decided by the re-filter as before. The hold is on by default; a configuration value of 0
+  is refused, never read as "off", and `confirm_moves = false` turns it off only by an explicit
+  choice. Fixed-size state only: one pending slot per track, no allocation.
+- **OA-TRK-348** A later report of the track confirms the pending one if it also passes the
+  gate and moves the track by more than `confirm_move_m`, arrives at least 0.5 s and at most
+  `confirm_window_ns` (5 s) after it, and lies within `confirm_agree_m` (300 m) of the pending
+  report propagated to its time by the pending report's velocity (the track's, without one). The
+  pending report is then applied and then the confirming one, in measurement-time order, through
+  the normal update path with the hold off (`moves_confirmed`). A report that does not agree
+  replaces the pending one (newest wins, `moves_held` again). A pending report older than the
+  window, or older than the track's newest applied update, is discarded and counted in
+  `moves_expired` at the next report of the track. A track restart, a re-anchor or the end of
+  the track clears it. Residual risk, stated: a forger who sends two reports that agree with each
+  other confirms them; only a second source (radar) can refute that.
+- **OA-TRK-349** A report whose distance from the predicted position is at most `confirm_move_m`
+  is applied exactly as before: the outputs of every such report are bit for bit those of a
+  tracker with the hold off.
+- **OA-TRK-350** `check_config` requires `confirm_move_m` finite and positive, `confirm_agree_m`
+  positive, finite and below `confirm_move_m`, and `confirm_window_ns` over 0.5 s (and at most one
+  day). The counters `moves_held`, `moves_confirmed` and `moves_expired` are in the statistics.
+  The pending report adds 80 bytes per track and to the per-track transaction.
+- **OA-TRK-351** (Kani) The decision of OA-TRK-347 and OA-TRK-348 is a pure function of the
+  pending report's time, the track's last update time, the report's time, its distances from the
+  prediction and from the pending report, and the configuration (`confirm_decide`). For every
+  configuration `check_config` accepts, every time and every distance (so every gap and every
+  covariance), a report over `confirm_move_m` is never applied without a confirming one: the
+  decision is `Confirm` only with a pending report that is not stale, at least 0.5 s before it
+  and within the window, that the report agrees with.
 
 ## NAM ACC-to-ACC interface (oa-nam)
 - **OA-NAM-001** The crate models exactly the 25 messages of the NAM Common Coordination ICD

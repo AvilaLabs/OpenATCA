@@ -451,6 +451,11 @@ fn tracker_section(
     }
     let _ = writeln!(
         o,
+        "  large-move hold: held {}, confirmed {}, expired {}",
+        s.moves_held, s.moves_confirmed, s.moves_expired
+    );
+    let _ = writeln!(
+        o,
         "  tracks: started {}, confirmed {}, ended: {}; tentative restarted for implausible second report {}, for window passed {}",
         s.started,
         s.confirmed,

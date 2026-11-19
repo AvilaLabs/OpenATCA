@@ -58,8 +58,10 @@ use oa_adsb::{
     NONE_U16, SPEED_ENVELOPE_MPS,
 };
 
+use crate::confirm::{confirm_decide, pending_stale, Move, Pending};
 use crate::filter::{
-    filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied, Filter,
+    filter_apply, filter_init, filter_output, filter_output_checked, filter_replay, Applied,
+    Filter, Probe,
 };
 use crate::hfilter::{h_combine, HFilter};
 use crate::params::{CHI2_2_95, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
@@ -129,6 +131,15 @@ pub struct Tracker {
     anchor: Vec<Filter>,
     /// `max_tracks * RING_DEPTH` stored measurements.
     ring_m: Vec<Measurement>,
+    /// Each track's pending large move (RT-239): at most one report held until another agrees.
+    pend: Vec<Pending>,
+    /// The large-move hold is on for the decision being made: only the first decision of an
+    /// in-order measurement. Off for a history replayed after a late insertion, and for the
+    /// pending report and the report that confirmed it (both already passed the hold).
+    hold_on: bool,
+    /// The decision just made confirmed the track's pending report: the caller applies it and
+    /// then the measurement.
+    confirming: bool,
     /// Free slots (a stack, so reuse order is fixed).
     free: Vec<u32>,
     /// Open-addressing key index: slot numbers, [`EMPTY`] if unused; `mask + 1` entries.
@@ -167,6 +178,13 @@ fn blank_filter() -> Filter {
         h_mode: 0,
         rej_c: 0,
         reacq: 0,
+    }
+}
+
+fn no_pending() -> Pending {
+    Pending {
+        m: blank_measurement(),
+        valid: 0,
     }
 }
 
@@ -222,6 +240,9 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         cat: vec![CategoryState::default(); n],
         anchor: vec![blank_filter(); n],
         ring_m: vec![blank_measurement(); n * RING_DEPTH],
+        pend: vec![no_pending(); n],
+        hold_on: false,
+        confirming: false,
         // Popped from the end: slot 0 first.
         free: (0..n as u32).rev().collect(),
         index: vec![EMPTY; index_len],
@@ -271,6 +292,7 @@ pub fn tracker_bytes(t: &Tracker) -> usize {
         + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
+        + t.pend.len() * core::mem::size_of::<Pending>()
         + t.index.len() * 4
 }
 
@@ -296,6 +318,7 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.cat),
         of(&t.anchor),
         of(&t.ring_m),
+        of(&t.pend),
         of(&t.free),
         of(&t.index),
         of(&t.log.addr),
@@ -534,6 +557,7 @@ fn end_track(t: &mut Tracker, slot: usize, reason: u8) {
     }
     put(&mut t.state, slot, FREE);
     put(&mut t.key, slot, NO_ADDR);
+    put(&mut t.pend, slot, no_pending());
     ring_clear(t, slot);
     t.free.push(slot as u32);
     t.active = t.active.saturating_sub(1);
@@ -579,6 +603,7 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
     note_category(t, slot, m);
+    put(&mut t.pend, slot, no_pending());
     ring_clear(t, slot);
     if !ring_push(t, slot, m) {
         return false;
@@ -745,16 +770,18 @@ struct TrackTxn {
     expected_ns: i64,
     newest_update_ns: i64,
     cat: CategoryState,
+    pend: Pending,
     updates: u32,
     state: u8,
     hits: u8,
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 328-byte statistics,
-// six 8-byte times, 8-byte category, 4-byte update count and four byte fields.
+// Budget: two 648-byte filters, twelve 72-byte measurements, 352-byte statistics,
+// six 8-byte times, 8-byte category, 80-byte pending report (RT-239; 2552 before it, with
+// 328-byte statistics: 80 + 24 more), 4-byte update count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2552);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2656);
 
 fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
     let mut ring = [blank_measurement(); RING_DEPTH];
@@ -775,6 +802,7 @@ fn track_txn(t: &Tracker, slot: usize) -> TrackTxn {
         ring_len: col(&t.ring_len, slot, 0),
         ring_head: col(&t.ring_head, slot, 0),
         cat: col(&t.cat, slot, CategoryState::default()),
+        pend: col(&t.pend, slot, no_pending()),
         anchor: col(&t.anchor, slot, blank_filter()),
         ring,
         newest_update_ns: t.newest_update_ns,
@@ -795,6 +823,7 @@ fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
     put(&mut t.ring_len, slot, snapshot.ring_len);
     put(&mut t.ring_head, slot, snapshot.ring_head);
     put(&mut t.cat, slot, snapshot.cat);
+    put(&mut t.pend, slot, snapshot.pend);
     put(&mut t.anchor, slot, snapshot.anchor);
     let start = slot * RING_DEPTH;
     for (k, value) in snapshot.ring.into_iter().enumerate() {
@@ -871,6 +900,11 @@ enum Step {
     Resynced,
     /// The filter refused a numerical prediction; callers roll back the update.
     NumericalRefused,
+    /// A large move (RT-239): kept as the track's pending report, not applied.
+    Held,
+    /// A large move that agrees with the pending report: the caller applies the pending report
+    /// and then this one, with the hold off (`Tracker::confirming`).
+    Confirmed,
 }
 
 /// The per-measurement decision, the same for a measurement that arrives in order and for each
@@ -899,8 +933,33 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         }
     }
     let mut f = col(&t.cur, slot, blank_filter());
-    match filter_apply(&mut f, m, &mut t.stats, &t.cfg) {
+    // The hold is off for a replay and for the two reports of a confirmation, and for a track
+    // not yet confirmed (a second report with no velocity moves far from its prediction as a
+    // matter of course; the plausibility rule judges it). Elsewhere a pending report that can no
+    // longer be confirmed is discarded and counted.
+    let cfg = TrackerConfig {
+        confirm_moves: t.cfg.confirm_moves && t.hold_on && col(&t.state, slot, FREE) == CONFIRMED,
+        ..t.cfg
+    };
+    if cfg.confirm_moves {
+        let p = col(&t.pend, slot, no_pending());
+        if p.valid != 0
+            && pending_stale(
+                p.m.toa_ns,
+                col(&t.last_ns, slot, 0),
+                m.toa_ns,
+                cfg.confirm_window_ns,
+            )
+        {
+            put(&mut t.pend, slot, no_pending());
+            t.stats.moves_expired += 1;
+        }
+    }
+    let held = col(&t.pend, slot, no_pending());
+    let held = (held.valid != 0).then_some(held.m);
+    match filter_apply(&mut f, m, &mut t.stats, &cfg, held.as_ref()) {
         Applied::NumericalRefused => Step::NumericalRefused,
+        Applied::Large(probe) => hold_or_confirm(t, slot, m, probe, &cfg),
         Applied::Rejected => {
             // Keeps the count of rejections in a row, so repeated ones re-initialise.
             put(&mut t.cur, slot, f);
@@ -923,6 +982,7 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         Applied::Resync => {
             put(&mut t.cur, slot, f);
             put(&mut t.cat, slot, CategoryState::default());
+            put(&mut t.pend, slot, no_pending());
             note_category(t, slot, m);
             ring_clear(t, slot);
             if !ring_push(t, slot, m) {
@@ -936,25 +996,85 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
     }
 }
 
+/// The decision for a report that passed the position gate and moved the track by more than
+/// `confirm_move_m` (RT-239): the pure `confirm_decide` on the geometry the filter measured.
+/// Holds it as the pending report, or says the pending one is confirmed (the caller then applies
+/// both).
+fn hold_or_confirm(
+    t: &mut Tracker,
+    slot: usize,
+    m: &Measurement,
+    probe: Probe,
+    cfg: &TrackerConfig,
+) -> Step {
+    let p = col(&t.pend, slot, no_pending());
+    let held_ns = (p.valid != 0).then_some(p.m.toa_ns);
+    let verdict = confirm_decide(
+        held_ns,
+        col(&t.last_ns, slot, 0),
+        m.toa_ns,
+        probe.miss_m,
+        probe.agree_m,
+        cfg,
+    );
+    match verdict {
+        Move::Confirm => {
+            t.stats.moves_confirmed += 1;
+            t.confirming = true;
+            Step::Confirmed
+        }
+        Move::Hold { expired } => {
+            if expired {
+                t.stats.moves_expired += 1;
+            }
+            put(&mut t.pend, slot, Pending { m: *m, valid: 1 });
+            t.stats.moves_held += 1;
+            Step::Held
+        }
+        // The filter held it for a large move; a move that is not large cannot come here.
+        Move::Apply => Step::Rejected,
+    }
+}
+
+/// Counts and emits what [`decide`] did for one measurement; false if it must be rolled back.
+fn settle(t: &mut Tracker, slot: usize, step: Step, out: &mut TrackOutput) -> bool {
+    match step {
+        Step::NumericalRefused => return false,
+        Step::Begun => emit_if_confirmed(t, slot, out),
+        Step::Applied | Step::Resynced => {
+            t.stats.applied += 1;
+            emit_if_confirmed(t, slot, out);
+        }
+        Step::Rejected | Step::Held | Step::Confirmed => {}
+    }
+    true
+}
+
+/// Applies a measurement newer than or equal to the track's newest update, with the large-move
+/// hold on (RT-239). If the measurement confirms the track's pending report, the pending report
+/// is applied and then the measurement, in measurement-time order, with the hold off: each
+/// through the same [`update_in_order`] as any other measurement.
+fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
+    t.hold_on = true;
+    update_in_order(t, slot, m, out);
+    t.hold_on = false;
+    if t.confirming {
+        t.confirming = false;
+        let p = col(&t.pend, slot, no_pending());
+        put(&mut t.pend, slot, no_pending());
+        update_in_order(t, slot, &p.m, out);
+        update_in_order(t, slot, m, out);
+    }
+}
+
 /// Applies a measurement newer than or equal to the track's newest update.
 fn update_in_order(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOutput) {
     let snapshot = track_txn(t, slot);
     let output = output_txn(out);
-    match decide(t, slot, m) {
-        Step::NumericalRefused => {
-            restore_track_txn(t, slot, snapshot);
-            restore_output_txn(out, output);
-        }
-        Step::Begun => emit_if_confirmed(t, slot, out),
-        Step::Applied => {
-            t.stats.applied += 1;
-            emit_if_confirmed(t, slot, out);
-        }
-        Step::Resynced => {
-            t.stats.applied += 1;
-            emit_if_confirmed(t, slot, out);
-        }
-        Step::Rejected => {}
+    let step = decide(t, slot, m);
+    if !settle(t, slot, step, out) {
+        restore_track_txn(t, slot, snapshot);
+        restore_output_txn(out, output);
     }
 }
 
@@ -1086,7 +1206,9 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
                 t.stats.applied += 1;
                 t.stats.refiltered += 1;
             }
-            Step::Resynced | Step::Begun | Step::Rejected => disturbed = true,
+            Step::Resynced | Step::Begun | Step::Rejected | Step::Held | Step::Confirmed => {
+                disturbed = true;
+            }
             Step::NumericalRefused => {
                 restore_track_txn(t, slot, transaction);
                 restore_output_txn(out, output);
@@ -1287,11 +1409,11 @@ fn apply(t: &mut Tracker, m: &Measurement, out: &mut TrackOutput) {
         Some(slot) => {
             let last = col(&t.last_ns, slot, 0);
             if toa > last {
-                update_in_order(t, slot, m, out);
+                update_in_order_held(t, slot, m, out);
             } else if toa == last && ring_has(t, slot, toa, m.sensor) {
                 t.stats.duplicates += 1;
             } else if toa == last {
-                update_in_order(t, slot, m, out);
+                update_in_order_held(t, slot, m, out);
             } else {
                 update_late(t, slot, m, out);
             }

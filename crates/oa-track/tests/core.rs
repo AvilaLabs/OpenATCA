@@ -1479,8 +1479,9 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     // The index is the only part that is not exactly linear (a power of two entries).
     let per = |x: usize, n: usize| x as f64 / n as f64;
     assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
-    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track.
-    assert!(per(b, 38_000) < 2_300.0);
+    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The pending
+    // report of the large-move hold (RT-239) adds 80 bytes per track.
+    assert!(per(b, 38_000) < 2_400.0);
 }
 
 // REQ: OA-TRK-077

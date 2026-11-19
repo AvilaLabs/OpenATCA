@@ -129,6 +129,22 @@ pub const VEL_GATE_CHI2: f64 = 400.0;
 /// 85 %), chosen before the 2026-11-15 validation was seen; a forged 2 km report is accepted at
 /// 10 s of gap instead of 12 s.
 pub const GATE_MANOEUVRE_MPS2: f64 = 5.0;
+/// A report that passes the position gate but lies farther than this, metres, from the track's
+/// predicted position is held, not applied, until a second report agrees with it (RT-239). A
+/// fixed distance: it does not scale with the gap or the covariance, which is what lets the
+/// widening gate pass a single forged report after a gap. 926 m is 0.5 NM, the radius of
+/// [`COAST_MAX_R95_M`].
+pub const CONFIRM_MOVE_M: f64 = 926.0;
+/// A later report confirms the held one if it lies within this, metres, of the held report
+/// propagated to its time by the held report's velocity (the track's, without one). Below
+/// [`CONFIRM_MOVE_M`]: the two reports must agree more closely than the move they confirm.
+pub const CONFIRM_AGREE_M: f64 = 300.0;
+/// A held report waits this long, ns, for its confirming report; past it, it is discarded and
+/// counted.
+pub const CONFIRM_WINDOW_NS: i64 = 5 * NS_PER_S;
+/// The confirming report is at least this long, ns, after the held one: a copy of the same
+/// message, or a burst within one squitter, is not a second report.
+pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;
 /// An altitude innovation above this many standard deviations is not applied.
 pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
