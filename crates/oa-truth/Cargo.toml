@@ -19,3 +19,6 @@ oa-sha256 = { path = "../oa-sha256" }
 [[bin]]
 name = "oa-truth-check"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "unsplit"

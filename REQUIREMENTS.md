@@ -369,6 +369,60 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-104** For Python source, `oa-trace` discovers only `test_*.py` modules and links a `# REQ:` tag directly above a
   Python `def test_*` as a test (not a proof), and reports malformed IDs and tags attached to non-test
   definitions.
+- **OA-TRC-200** `cargo run -p oa-trace` reads the class of every workspace member and passes a workspace
+  whose crates are all classified and whose core code is clean (RULESET B7 to B9). Core code excludes
+  top-level `src/bin/`, `src/main.rs` and test-only items.
+- **OA-TRC-201** A member with no `[package.metadata.openatca] class`, or one other than `core`, `shell`, `split`
+  or `unsplit`, fails the check and the failure names the crate.
+- **OA-TRC-202** Core code (all of `src/` for a core crate, `src/core/` and `src/core.rs` for a split crate) may
+  name from `std`, `core` and `alloc` only the modules RULESET B8 allows; any other (`fs`, `io`, `net`, `env`,
+  `process`, `thread`, `sync`, `cell`, `os`, `path`, `std::time`, the hash-map family, `alloc::sync`) fails, each hit
+  is reported as `file:line: token` with the allowed alternative, and `static mut`, `thread_local!`, the print
+  and `dbg!` macros, `HashMap`, `HashSet` and `RandomState` fail. A path split over lines or inside a
+  `use std::{..}` group is still found.
+- **OA-TRC-203** Core code that names a path into a `shell` module (`crate::shell`, `super::shell`,
+  `<crate>::shell`, or `shell` in a `use` group) fails.
+- **OA-TRC-204** Comments (line, block, nested), string literals (plain and raw), and character literals are
+  blanked before the scan, so a forbidden name inside them is not a hit; lifetimes are not mistaken for
+  character literals; line numbers are kept.
+- **OA-TRC-205** A core crate lists no shell or unsplit crate in any dependency table; core code names a
+  workspace crate (under its own name or a rename) only if it is core, or by its `::core::` path if it is split.
+- **OA-TRC-206** A split crate has `src/core` (or `core.rs`) and `src/shell` (or `shell.rs`), nothing else but
+  `lib.rs`, `main.rs` and `bin/` in `src/`, and a `lib.rs` that declares exactly `mod core;` and `mod shell;`
+  plus re-exports and attributes.
+- **OA-TRC-207** Every `unsplit` crate is in the fixed list of twelve in `classcheck.rs`; the count is printed as
+  migration debt; the allowlist file may hold only crates of that list that are still unsplit, so the debt
+  only shrinks (RULESET B9).
+- **OA-TRC-208** `oa-trace` reads the package name, class, every dependency table (including `[target.*]`, with
+  `package` renames and `path`), `[lib]`/`[[bin]]` paths, a `build` key and the root `members` and `exclude`
+  lists with its own small reader, without a dependency.
+- **OA-TRC-209** `members` is read in either quote style across lines; zero members, an entry that is not a plain
+  quoted path (a glob included) and a `crates/`, `tools/` or `validation/` directory with a Cargo.toml that is
+  neither a member nor excluded all fail.
+- **OA-TRC-210** An unreadable directory or file, a symlink under a scanned source tree, a core or split crate
+  that scans no file, a custom `[lib]` or `[[bin]]` path, and a `build.rs` or `build` key in a core or split
+  crate fail.
+- **OA-TRC-211** `#[cfg(test)]`, `cfg(all(test, ..))` and an inner `#![cfg(test)]` strip an item only when an item
+  keyword follows; on a field, variant, match arm, parameter or statement nothing is stripped, and
+  `cfg(any(test, ..))` and `cfg(not(test))` strip nothing.
+- **OA-TRC-212** In core code, a `use` that renames (`as`) or globs (`*`) a std, core, alloc or workspace-crate
+  path, a bare `use std;` or `use <crate>;`, a leading `::` path, `extern crate`, `#[path]` and the macros
+  `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!` and `file!` fail.
+- **OA-TRC-213** In a split crate, a third module, a `crate::` path outside `crate::core::` and a `super::` that
+  reaches the crate root fail from core code; `src/core.rs` is scanned like `src/core/`.
+- **OA-TRC-214** No file is exempt by name; a test-only `mod x;` resolves the way rustc resolves it, together with
+  the files below it; only the top-level `src/bin` and `src/main.rs` are skipped.
+- **OA-TRC-215** A core crate depending on a shell or unsplit crate fails whichever dependency table, rename or
+  path form declares it; a path dependency that is not a workspace member fails.
+- **OA-TRC-216** The check passes on the real workspace, with twelve unsplit crates.
+- **OA-TRC-217** In core code the only `extern crate` is `extern crate alloc;`.
+- **OA-TRC-218** In core code a call of a float method `core` lacks (`.sin(`, `f64::sqrt(`, and the rest of the
+  RULESET B8 list) fails with `oa_ieee` or `oa_math` named as the alternative and the note that a user-defined
+  method of that name is disallowed too; only the crate `oa-ieee` is exempt.
+- **OA-TRC-219** Every crate of class core except `oa-ieee` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]`
+  in `src/lib.rs` (RULESET B10).
+- **OA-TRC-220** The public API of `oa-ieee` is exactly `pub fn` sqrt, floor, ceil, trunc and round: any other
+  public item, module, re-export or macro, or a missing function, fails.
 
 ### Hashing (oa-sha256)
 

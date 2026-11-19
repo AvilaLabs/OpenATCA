@@ -1,0 +1,5 @@
+[package]
+name = "fx-cleansplit"
+
+[package.metadata.openatca]
+class = "split"

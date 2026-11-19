@@ -12,3 +12,6 @@ workspace = true
 [dependencies]
 # Workspace crate, not an outside dependency (RULESET F1).
 oa-math = { path = "../oa-math" }
+
+[package.metadata.openatca]
+class = "core"

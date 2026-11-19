@@ -28,3 +28,6 @@ oa-deflate = { path = "../oa-deflate" }
 [[bin]]
 name = "oa-replay"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "unsplit"

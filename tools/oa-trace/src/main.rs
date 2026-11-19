@@ -33,7 +33,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if rep.ok() {
+    let classes = oa_trace::classcheck::check(&root);
+    print!("\n{}", oa_trace::classcheck::render_text(&classes));
+    if rep.ok() && classes.ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

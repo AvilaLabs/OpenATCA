@@ -1,0 +1,13 @@
+# Crates of the fixed unsplit list (UNSPLIT_ALLOWED in classcheck.rs, RULESET B9) that are still unsplit. Delete a line when its crate is split or reclassified; none may be added.
+oa-airspace
+oa-bench
+oa-display
+oa-feed
+oa-nam
+oa-replay
+oa-replay-diff
+oa-scope-replay
+oa-sha256
+oa-track
+oa-truth
+oa-wind

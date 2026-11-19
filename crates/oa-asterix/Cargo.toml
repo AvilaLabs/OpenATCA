@@ -15,3 +15,6 @@ workspace = true
 oa-adsb = { path = "../oa-adsb" }
 # Also workspace only: reads the upstream decoder's JSON expected output in the capture tests.
 oa-json = { path = "../oa-json" }
+
+[package.metadata.openatca]
+class = "shell"
