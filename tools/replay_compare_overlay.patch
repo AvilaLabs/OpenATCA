@@ -1,9 +1,9 @@
 diff --git a/crates/oa-track/src/canon.rs b/crates/oa-track/src/canon.rs
 new file mode 100644
-index 0000000..3c13cf1
+index 0000000..71a65e5
 --- /dev/null
 +++ b/crates/oa-track/src/canon.rs
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,423 @@
 +//! The canonical bytes of a tracker output row, the per-second digest over them, and the header
 +//! of the rows file that explains a difference between two runs. Core (B1): every item here is
 +//! pure and does no I/O; the files are written by [`crate::canon_spill`] (shell).
@@ -20,7 +20,7 @@ index 0000000..3c13cf1
 +//! | [`SecondEntry`], [`LimitError`], [`CanonRow`] | plain data |
 +//!
 +//! A row is [`ROW_BYTES`] bytes, every field little-endian at a fixed offset, floats as their
-+//! IEEE bits (a NaN keeps its payload and sign; nothing is zeroed or normalised). Rows are
++//! IEEE bits (every NaN becomes the one fixed NaN, `oa_math::canon_nan_f32`; nothing else is zeroed or normalised). Rows are
 +//! grouped by the Unix second of their time (`t_ns` floored to a second). The digest of a second
 +//! is the SHA-256 of its rows in the order the tracker emitted them; the chain hash of a second
 +//! is the SHA-256 of the chain hash of the second before it (32 zero bytes for the first), the
@@ -146,7 +146,9 @@ index 0000000..3c13cf1
 +/// Writes `N` little-endian `f32` bit patterns at `OFF`.
 +fn put_f32s<const OFF: usize, const N: usize>(row: &mut CanonRow, v: [f32; N]) {
 +    const { assert!(OFF + 4 * N <= ROW_BYTES) };
-+    let bytes = v.into_iter().flat_map(|x| x.to_bits().to_le_bytes());
++    let bytes = v
++        .into_iter()
++        .flat_map(|x| oa_math::canon_nan_f32(x).to_bits().to_le_bytes());
 +    for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
 +        *d = s;
 +    }

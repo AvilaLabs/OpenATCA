@@ -1704,7 +1704,9 @@ mod tests {
         // they are not a difference.
         a[0].alt_ft = f32::from_bits(0x7fc0_0000);
         b[0].alt_ft = f32::from_bits(0x7fc0_0001);
-        assert!(second_diff_is_empty(&diff_second(&rows(&a), &rows(&b)).unwrap()));
+        assert!(second_diff_is_empty(
+            &diff_second(&rows(&a), &rows(&b)).unwrap()
+        ));
     }
 
     // REQ: OA-RDF-004
