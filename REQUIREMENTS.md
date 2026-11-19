@@ -4981,3 +4981,15 @@ scope.
 - **OA-ACC-167** Onset-exit truth validation compares geographic velocity using the WGS84 Jacobian at each generated latitude while retaining the frozen position and velocity tolerances.
 - **OA-ACC-168** Containment uses position error in candidate-local ENU axes matching emitted covariance, and turn-rate residuals use the tracker's clockwise-positive sign convention.
 - **OA-ACC-169** The motion-study scorer, selector and checker load `validation/motion-study-v1.json` only if its bytes match the pinned v1 SHA-256, and otherwise fail closed with "protocol file does not match the frozen v1 hash".
+
+- **OA-RDF-024** `tools/replay_compare.sh` reads from each commit's tree, before any build, the
+  digest format it will emit (the header constant of its `canon.rs`, or v2 for a commit that gets
+  the overlay); a commit that would emit v1, a half-way commit (only one of `canon.rs` and
+  `--digest`) or an unknown header is exit 2. It runs both `oa-track-run` calls in the same
+  `env -i` environment as the builds, and records the diff tool's build commit and whether that
+  tree was clean in the report and in `summary.txt`.
+- **OA-TRK-377** A P-002 hold-out run (neither `--development` nor `--allow-dirty`) needs
+  `--frozen-commit <40 hex>` and is refused (exit 2) unless the commit embedded in the binary at
+  build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
+  and the working tree at run time is at that commit and clean. This gates which runs count as
+  hold-out scores; it does not change what is computed.

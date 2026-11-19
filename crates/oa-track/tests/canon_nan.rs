@@ -2,7 +2,7 @@
 //! constant (the replay overlay carries that file to old commits), so this test is what stops
 //! the two from drifting.
 
-use oa_track::canon::{canon_row, CANON_NAN_F32, OFF_VE};
+use oa_track::canon::{canon_nan_bits, canon_row, CANON_NAN_F32, OFF_VE};
 use oa_track::{OutRow, O_TICK};
 
 fn base() -> OutRow {
@@ -65,5 +65,18 @@ fn every_nan_in_a_row_is_written_as_the_canonical_one_and_nothing_else_changes()
         assert_eq!(b[OFF_VE..OFF_VE + 4], CANON_NAN_F32.to_le_bytes());
         let other = r.vel_north_mps.to_bits().to_le_bytes();
         assert_eq!(b[OFF_VE + 4..OFF_VE + 8], other);
+    }
+}
+
+// REQ: OA-TRK-360
+#[test]
+fn canon_nan_bits_agrees_with_is_nan_on_every_one_of_the_2_pow_32_patterns() {
+    for bits in 0..=u32::MAX {
+        let want = if f32::from_bits(bits).is_nan() {
+            CANON_NAN_F32
+        } else {
+            bits
+        };
+        assert_eq!(canon_nan_bits(bits), want, "{bits:#010x}");
     }
 }

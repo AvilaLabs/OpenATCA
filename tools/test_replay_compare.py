@@ -273,6 +273,7 @@ class OverlayApply(unittest.TestCase):
         tgt = self.dir / "tgt"
         run_stub = (
             "#!/usr/bin/env bash\n"
+            f'env | sort >>{log}.run\n'
             'while [ $# -gt 0 ]; do case "$1" in --digest) echo digest-stub >"$2";; --rows) echo rows-stub >"$2";; esac; shift; done\n'
         )
         diff_stub = (
@@ -321,6 +322,8 @@ class OverlayApply(unittest.TestCase):
         allowed = {"PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR", "CARGO_BUILD_JOBS",
                    "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "PWD", "SHLVL", "OLDPWD", "_"}
         self.assertLessEqual(names, allowed, names - allowed)
+        run_env = {l.split("=")[0] for l in Path(f"{log}.run").read_text().splitlines()}
+        self.assertLessEqual(run_env, allowed, run_env - allowed)
         report = (out / "report.txt").read_text()
         for v in ["RUSTFLAGS=[-C target-cpu=native]", "CARGO_ENCODED_RUSTFLAGS=[-Ctarget-cpu=native]",
                   "CARGO_BUILD_RUSTFLAGS=[-Cdebuginfo=2]", "RUSTDOCFLAGS=[--cfg x]",
@@ -332,6 +335,10 @@ class OverlayApply(unittest.TestCase):
         self.assertEqual(len(re.findall(r"(?<!diff )binary sha256: [0-9a-f]{64}", report)), 2)
         self.assertRegex(report, r"diff binary sha256: [0-9a-f]{64}")
         summary = (out / "summary.txt").read_text()
+        self.assertRegex(summary, r"diff_tool_commit=[0-9a-f]{40}")
+        self.assertRegex(summary, r"diff_tool_tree_clean=(yes|no)")
+        self.assertIn("digest_format_A=v2", summary)
+        self.assertIn("diff tool build commit:", report)
         self.assertIn("rustflags_cleared=yes", summary)
         self.assertRegex(summary, r"digest_A=[0-9a-f]{64}")
         self.assertRegex(summary, r"rows_B=[0-9a-f]{64}")
@@ -367,6 +374,58 @@ class OverlayApply(unittest.TestCase):
         self.assertIn("is not at", res.stderr)
         # A failed run leaves no rows file behind (OA-RDF-023).
         self.assertEqual(sorted(p.name for p in (self.dir / "out").glob("rows-*")), [])
+
+
+class DigestFormatRefusal(unittest.TestCase):
+    """A scratch repository with the script, so commits of any digest format can be named."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.repo = self.d / "r"
+        (self.repo / "tools").mkdir(parents=True)
+        (self.repo / "crates/oa-track/src").mkdir(parents=True)
+        for n in ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh"]:
+            (self.repo / "tools" / n).write_text((SCRIPT.parent / n).read_text())
+        git(self.repo, "init", "-q", "-b", "main")
+        self.commits = {}
+        for name, canon, main in [
+            ("v1", "// oa-track digest v1: header\n", 'x "--digest" y\n'),
+            ("v2", "// oa-track digest v2: header\n", 'x "--digest" y\n'),
+            ("half", "// oa-track digest v2: header\n", "no flag\n"),
+            ("odd", "// some other header\n", 'x "--digest" y\n'),
+        ]:
+            (self.repo / "crates/oa-track/src/canon.rs").write_text(canon)
+            (self.repo / "crates/oa-track/src/main.rs").write_text(main)
+            git(self.repo, "add", "-A")
+            git(self.repo, "commit", "-q", "-m", name)
+            self.commits[name] = git(self.repo, "rev-parse", "HEAD").strip()
+        self.clip = self.d / "clip.oaf"
+        self.clip.write_bytes(b"x")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def go(self, a, b):
+        out = self.d / "out"
+        r = subprocess.run(
+            ["bash", str(self.repo / "tools/replay_compare.sh"), self.commits[a], self.commits[b],
+             str(self.clip), str(out)],
+            capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, REPLAY_COMPARE_GUARD=""),
+        )
+        return r, out
+
+    # REQ: OA-RDF-024
+    def test_a_commit_that_would_emit_digest_v1_or_a_half_way_commit_is_refused_before_a_build(self):
+        for a, b, msg in [("v1", "v2", "would emit digest v1"), ("v2", "v1", "would emit digest v1"),
+                          ("half", "v2", "half-way"), ("v2", "odd", "does not know")]:
+            with self.subTest(a=a, b=b):
+                r, out = self.go(a, b)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(msg, r.stderr)
+                self.assertFalse((out / "work").exists())
+                self.assertFalse(any("building" in l for l in r.stderr.splitlines()))
 
 
 class CleanBuildEnvironment(unittest.TestCase):
