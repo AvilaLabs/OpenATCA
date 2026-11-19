@@ -1381,6 +1381,21 @@ fn points(
     let range = p.range_nm;
     let pts = &m.points;
     let rows = pts.kind.iter().zip(&pts.lat).zip(&pts.lon).zip(&pts.ident);
+    // Candidates the scratch can hold: its `cap`, and no more than the shortest buffer. The
+    // up-front preflight already guarantees every buffer holds the model's point count.
+    let lim = [
+        sc.prio.len(),
+        sc.x.len(),
+        sc.y.len(),
+        sc.gap.len(),
+        sc.w.len(),
+        sc.point.len(),
+        sc.order.len(),
+        sc.order_tmp.len(),
+        sc.outcome.len(),
+    ]
+    .into_iter()
+    .fold(sc.cap, usize::min);
     for (i, (((kind, lat), lon), ident)) in rows.enumerate() {
         let ifr = idx.point_ifr.get(i) == Some(&1);
         let shown = match *kind {
@@ -1494,24 +1509,10 @@ fn points(
                 };
         let name = str_or_empty(&m.strings, *ident);
         if wanted && !name.is_empty() {
-            if sc.used < sc.cap {
-                let k = sc.used;
+            if sc.used < lim {
                 let width = legend_width16(name.chars().count());
-                // The buffers hold at least `point_rows >= cap` entries (checked up front), so
-                // every write lands.
-                for (buf, v) in [(&mut sc.x, c.0), (&mut sc.y, c.1), (&mut sc.gap, gap)] {
-                    if let Some(slot) = buf.get_mut(k) {
-                        *slot = v;
-                    }
-                }
-                if let Some(slot) = sc.prio.get_mut(k) {
-                    *slot = prio;
-                }
-                if let Some(slot) = sc.w.get_mut(k) {
-                    *slot = width;
-                }
-                if let Some(slot) = sc.point.get_mut(k) {
-                    *slot = i as u32;
+                if set_candidate(sc, (c.0, c.1), gap, width, prio, i as u32).is_none() {
+                    return Err(DisplayError::BadView("label scratch write is out of range"));
                 }
                 sc.used += 1;
             } else {
@@ -1520,6 +1521,25 @@ fn points(
         }
     }
     labels(l, m, sc, st)
+}
+
+/// Writes the next candidate (index `sc.used`); `None` when that is outside any of its buffers.
+fn set_candidate(
+    sc: &mut Scratch,
+    centre: (i32, i32),
+    gap: i32,
+    width: i32,
+    prio: u8,
+    row: u32,
+) -> Option<()> {
+    let k = sc.used;
+    *sc.x.get_mut(k)? = centre.0;
+    *sc.y.get_mut(k)? = centre.1;
+    *sc.gap.get_mut(k)? = gap;
+    *sc.w.get_mut(k)? = width;
+    *sc.prio.get_mut(k)? = prio;
+    *sc.point.get_mut(k)? = row;
+    Some(())
 }
 
 /// Sorts the candidates (priority, ident, position, row), places them and draws the placed ones.
@@ -2024,64 +2044,5 @@ mod work_budget_tests {
                 }
             }
         }
-    }
-
-    // REQ: OA-DSP-054
-    #[test]
-    fn a_cloned_scratch_renders_the_same_scene_and_a_shortened_buffer_is_refused() {
-        let model = empty_display_model();
-        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
-        let index = scene_index(&model);
-        let scratch = scratch_for(&model, &view).unwrap();
-        let caps = ListCaps {
-            lines: 64,
-            rects: 8,
-            circles: 32,
-            polylines: 32,
-            poly_vertices: 64,
-            texts: 128,
-            text_bytes: 4096,
-        };
-        let mut list = list_new(caps).unwrap();
-        let mut original = scratch.clone();
-        let mut cloned = scratch.clone();
-        assert!(build_scene(&mut list, &model, &index, &view, &mut original).is_ok());
-        let mut list2 = list_new(caps).unwrap();
-        assert!(build_scene(&mut list2, &model, &index, &view, &mut cloned).is_ok());
-        assert_eq!(list.lines.x0, list2.lines.x0);
-
-        // One point, so every candidate buffer has length 1; shorten each in turn to 0.
-        let mut one = empty_display_model();
-        one.points.kind.push(0);
-        one.points.ident.push(oa_airspace::model::StrIx::NONE);
-        let sc = scratch_for(&one, &view).unwrap();
-        assert!(sc.prio.len() == 1 && sc.order_tmp.len() == 1 && sc.outcome.len() == 1);
-        let mut list = list_new(caps).unwrap();
-        let idx = scene_index(&one);
-        type Cut = fn(&mut Scratch);
-        let cuts: [Cut; 9] = [
-            |s| s.prio.clear(),
-            |s| s.x.clear(),
-            |s| s.y.clear(),
-            |s| s.gap.clear(),
-            |s| s.w.clear(),
-            |s| s.point.clear(),
-            |s| s.order.clear(),
-            |s| s.order_tmp.clear(),
-            |s| s.outcome.clear(),
-        ];
-        for (i, cut) in cuts.iter().enumerate() {
-            let mut broken = sc.clone();
-            cut(&mut broken);
-            assert!(
-                matches!(
-                    build_scene(&mut list, &one, &idx, &view, &mut broken),
-                    Err(DisplayError::BadView(_))
-                ),
-                "buffer {i}"
-            );
-        }
-        let mut ok = sc.clone();
-        assert!(build_scene(&mut list, &one, &idx, &view, &mut ok).is_ok());
     }
 }

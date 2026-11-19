@@ -1894,3 +1894,104 @@ fn a_projection_with_non_finite_numbers_is_refused_by_build_scene() {
         assert!(matches!(r, Err(DisplayError::BadView(_))), "{name}: {r:?}");
     }
 }
+
+fn three_named_points() -> Vec<(u8, String, i32, i32)> {
+    let (la, lo) = ORD;
+    vec![
+        (point_kind::VOR, "ABC".into(), la + 1_200_000, lo + 900_000),
+        (point_kind::FIX, "DEF".into(), la - 900_000, lo + 2_400_000),
+        (
+            point_kind::AIRPORT,
+            "GHI".into(),
+            la + 600_000,
+            lo - 2_000_000,
+        ),
+    ]
+}
+
+fn render_with(m: &Model, view: &View, sc: &mut Scratch) -> (DisplayList, SceneStats) {
+    let index = scene_index(m);
+    let mut l = list_new(scene_caps(m).unwrap()).unwrap();
+    let st = build_scene(&mut l, m, &index, view, sc).unwrap();
+    (l, st)
+}
+
+fn open_view() -> View {
+    let mut view = view_new(ORD.0, ORD.1, 20.0, 1920, 1080).unwrap();
+    all_open(&mut view);
+    view
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_cloned_scratch_renders_named_candidates_exactly_like_a_fresh_one() {
+    let m = points_model(&three_named_points());
+    let view = open_view();
+    let (fresh_list, fresh_st) = render_with(&m, &view, &mut scratch_for(&m, &view).unwrap());
+    assert!(fresh_st.labels == 3, "{fresh_st:?}");
+    let sized = scratch_for(&m, &view).unwrap();
+    let mut cloned = sized.clone();
+    let (cloned_list, cloned_st) = render_with(&m, &view, &mut cloned);
+    assert_eq!(cloned_list, fresh_list);
+    assert_eq!(cloned_st, fresh_st);
+    assert_eq!(cloned.used, 3);
+    // Cloning after a frame, and rendering again, still gives the same list.
+    let mut again = cloned.clone();
+    assert_eq!(render_with(&m, &view, &mut again).0, fresh_list);
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_reused_scratch_ignores_stale_entries_beyond_the_candidates_it_is_given() {
+    let big = points_model(&three_named_points());
+    let small = points_model(&three_named_points()[1..2]);
+    let view = open_view();
+    let mut sc = scratch_for(&big, &view).unwrap();
+    assert_eq!(render_with(&big, &view, &mut sc).1.labels, 3);
+    assert_eq!(sc.used, 3);
+    let (reused_list, reused_st) = render_with(&small, &view, &mut sc);
+    let (fresh_list, fresh_st) =
+        render_with(&small, &view, &mut scratch_for(&small, &view).unwrap());
+    assert_eq!(reused_list, fresh_list);
+    assert_eq!(reused_st, fresh_st);
+    assert_eq!(sc.used, 1);
+    // And back to the larger frame on the same scratch.
+    let (back, _) = render_with(&big, &view, &mut sc);
+    assert_eq!(
+        back,
+        render_with(&big, &view, &mut scratch_for(&big, &view).unwrap()).0
+    );
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_shortened_label_buffer_is_refused_on_a_model_with_named_candidates() {
+    let m = points_model(&three_named_points());
+    let view = open_view();
+    let index = scene_index(&m);
+    let good = scratch_for(&m, &view).unwrap();
+    type Cut = fn(&mut Scratch);
+    let cuts: [(&str, Cut); 9] = [
+        ("prio", |s| s.prio.truncate(2)),
+        ("x", |s| s.x.truncate(2)),
+        ("y", |s| s.y.truncate(2)),
+        ("gap", |s| s.gap.truncate(2)),
+        ("w", |s| s.w.truncate(2)),
+        ("point", |s| s.point.truncate(2)),
+        ("order", |s| s.order.truncate(2)),
+        ("order_tmp", |s| s.order_tmp.truncate(2)),
+        ("outcome", |s| s.outcome.truncate(2)),
+    ];
+    for (name, cut) in cuts {
+        let mut broken = good.clone();
+        cut(&mut broken);
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
+        assert!(
+            matches!(
+                build_scene(&mut l, &m, &index, &view, &mut broken),
+                Err(DisplayError::BadView(_))
+            ),
+            "{name}"
+        );
+    }
+}
