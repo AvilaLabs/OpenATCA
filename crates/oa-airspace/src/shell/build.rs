@@ -34,7 +34,7 @@ use crate::geom::{
     ARC_RADIUS_TOLERANCE_M,
 };
 use crate::model::*;
-use crate::source::Sources;
+use crate::sources::Sources;
 use oa_arinc424 as c424;
 use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon};
 use oa_nasr as nasr;

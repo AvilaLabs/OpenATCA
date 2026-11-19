@@ -13,7 +13,8 @@
 //! | `snapshot`   | core  | model to bytes and back, bounded reader                            |
 //! | `report`     | core  | the build report text and boundary-geometry unknowns               |
 //! | `diff`       | core  | two models to a change list                                        |
-//! | `source`     | core  | plain data passed from the shell to the core                       |
+//! | `source`     | core  | plain values (archive info, worded diagnostics) from shell to core |
+//! | `sources`    | shell | the parsed oa-nasr / oa-arinc424 records `load` hands to `build`   |
 //! | `build_info` | core  | what a build learns beside the model, and its thresholds           |
 //! | `build`      | shell | parsed sources to a model; its working maps are `HashMap`s         |
 //! | `load`       | shell | reads the archives, verifies hashes, parses with oa-nasr/oa-arinc424 |
@@ -23,4 +24,4 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::{airac, build_info, diff, geom, model, report, snapshot, source};
-pub use crate::shell::{build, cli, load};
+pub use crate::shell::{build, cli, load, sources};

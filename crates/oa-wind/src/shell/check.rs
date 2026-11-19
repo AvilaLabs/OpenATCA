@@ -1,9 +1,10 @@
 //! Validation statistics for `oa-wind-check`: the model against `oa-grib2`'s own decoded values,
-//! against HRRR, and against pilot-reported winds. Core (pure): the binary reads the files.
+//! against HRRR, and against pilot-reported winds. Shell (B1, B7, C6): pure but offline, over decoded fields; the binary reads
+//! the files.
 
 use crate::core::error::Refusal;
-use crate::core::hour::Hour;
-use crate::core::sample::{sample_hour_pressure, sample_hour_unrotated};
+use crate::shell::hour::Hour;
+use crate::shell::sample::{sample_hour_pressure, sample_hour_unrotated};
 use oa_grib2::{ij_to_latlon, sample_bilinear, wind_at, Field, Parameter, LEVEL_ISOBARIC};
 
 /// Median, 95th percentile (linear between ranks), mean and largest of a list of values.

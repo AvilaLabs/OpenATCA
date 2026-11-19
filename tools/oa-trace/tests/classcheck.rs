@@ -718,7 +718,8 @@ fn every_dependency_table_and_rename_is_resolved_by_path() {
 fn the_real_workspace_is_checked_and_only_known_debt_remains() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let rep = check(&root);
-    assert_eq!(rep.unsplit.len(), 12);
+    // Four crates remain unsplit (oa-display, oa-replay-diff, oa-scope-replay, oa-track).
+    assert_eq!(rep.unsplit.len(), 4);
     // oa-geo's `std::cell::Cell` in rhumb.rs is outside the B8 allowlist; it is reported to the
     // coordinator rather than allowed. Nothing else may fail.
     let rest: Vec<&String> = rep

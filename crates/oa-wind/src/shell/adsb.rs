@@ -1,12 +1,12 @@
 //! RAP against the winds and temperatures aircraft report over ADS-B (`oa-adsb` measurements):
 //! readsb's `ws`/`wd` (derived from true airspeed, true heading, ground speed and track) and
-//! `oat` (derived from Mach and true airspeed). Core (pure): the query is a closure, so the
-//! statistics are tested on synthetic hours and run against the archive by `oa-wind-check`.
+//! `oat` (derived from Mach and true airspeed). Shell (B1, B7, C6): pure, but it works on
+//! `oa-adsb` reports. The query is a closure, so the statistics are tested on synthetic hours and run against the archive by `oa-wind-check`.
 //! What the readsb values mean and their limits are in the `oa-adsb` crate documentation.
 
-use crate::core::check::{obs_components, refusal_name, summarize, Summary};
-use crate::core::error::{LoadError, QueryError};
-use crate::core::sample::{Query, Sample};
+use crate::shell::check::{obs_components, refusal_name, summarize, Summary};
+use crate::shell::error::{LoadError, QueryError};
+use crate::shell::sample::{Query, Sample};
 use oa_adsb::{reports_len, Reports, F_GROUND, NONE_I16, NONE_I32, NONE_U16};
 
 /// Limit: observations held for one comparison. At one observation per aircraft per

@@ -5,13 +5,15 @@
 //!
 //! * [`hour`]: one analysis hour as struct-of-arrays grids of U, V, T and geopotential height per
 //!   isobaric level (level-major, pressure ascending), built from decoded fields or from the
-//!   bytes of a file, and the `.idx` byte ranges that hold the needed fields. Core (pure).
+//!   bytes of a file, and the `.idx` byte ranges that hold the needed fields. Shell (it consumes
+//!   `oa-grib2` fields).
 //! * [`isa`]: the ICAO standard atmosphere, pressure altitude to pressure and back. Core.
-//! * [`sample`]: the query. Core.
+//! * [`sample`]: the query. Shell (pure, over an [`hour::Hour`]).
 //! * [`archive`]: files on disk, a bounded cache of hours ([`MAX_HOURS_HELD`]) and the query
 //!   over a set of hours. Shell (owns the files).
-//! * [`adsb`]: RAP against the winds and temperatures aircraft report over ADS-B. Core.
-//! * [`check`]: the validation statistics used by `oa-wind-check`. Core.
+//! * [`adsb`]: RAP against the winds and temperatures aircraft report over ADS-B.
+//!   Shell (pure, over `oa-adsb` reports).
+//! * [`check`]: the validation statistics used by `oa-wind-check`. Shell (pure, offline).
 //!
 //! Model of the query:
 //!
@@ -41,21 +43,22 @@
 pub mod core;
 pub mod shell;
 
-pub use crate::core::error::{LoadError, QueryError, Refusal};
-pub use crate::core::hour::{
-    build_hour, check_claims, head_claim, hour_bytes, hour_levels, index_claims, load_hour,
-    load_hour_claimed, needed_ranges, needed_ranges_text, Claim, Hour,
-};
+pub use crate::core::error::Refusal;
+pub use crate::core::isa;
 pub use crate::core::isa::{altitude_ft_from_pressure_hpa, pressure_hpa_from_altitude_ft};
 pub use crate::core::limits::*;
-pub use crate::core::sample::{
-    bracket, sample_blend, sample_hour_pressure, sample_hour_unrotated, sample_hours, Point, Query,
-    Sample,
-};
-pub use crate::core::{adsb, check, error, hour, isa, sample};
-pub use crate::shell::archive;
 pub use crate::shell::archive::{
     archive_files, archive_sample, index_files, new_archive, read_file_capped, read_hour_file,
     read_hour_file_report, Archive, HourFile, IndexUse,
 };
 pub use crate::shell::compare::compare_obs;
+pub use crate::shell::error::{LoadError, QueryError};
+pub use crate::shell::hour::{
+    build_hour, check_claims, head_claim, hour_bytes, hour_levels, index_claims, load_hour,
+    load_hour_claimed, needed_ranges, needed_ranges_text, Claim, Hour,
+};
+pub use crate::shell::sample::{
+    bracket, sample_blend, sample_hour_pressure, sample_hour_unrotated, sample_hours, Point, Query,
+    Sample,
+};
+pub use crate::shell::{adsb, archive, check, error, hour, sample};

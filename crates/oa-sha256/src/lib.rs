@@ -7,7 +7,8 @@
 pub mod core;
 pub mod shell;
 
+pub use crate::core::hex::to_hex;
 pub use crate::core::sha256::{
     sha256, Digest, MessageTooLong, Sha256, BLOCK_LEN, DIGEST_LEN, MAX_MESSAGE_BYTES,
 };
-pub use crate::shell::io::{sha256_reader, to_hex, Sha256Error, READ_CHUNK_LEN};
+pub use crate::shell::io::{sha256_reader, Sha256Error, READ_CHUNK_LEN};

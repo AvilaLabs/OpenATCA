@@ -1,13 +1,14 @@
 //! One analysis hour as struct-of-arrays grids, and how it is built from decoded fields or from
-//! the bytes of a file. Core (pure): bytes and fields in, plain data out.
+//! the bytes of a file. Shell (B1, B7, C6): pure, but it consumes `oa-grib2` fields and allocates
+//! an hour; bytes and fields in, plain data out.
 //!
 //! Layout: every array is level-major. The value of level `k` at column `i`, row `j` is at
 //! `k * nx * ny + j * nx + i`, with `(i, j)` in the grid's scan order (the order
 //! `oa_grib2::latlon_to_ij` returns). Levels are in ascending pressure (top of the atmosphere
 //! first). U and V are as the file stores them (grid-relative on RAP); see the crate docs.
 
-use crate::core::error::LoadError;
 use crate::core::limits::{MAX_HOUR_VALUES, MAX_LEVELS};
+use crate::shell::error::LoadError;
 use oa_grib2::{
     byte_range, decode_message, forecast_seconds, grid_dims, inspect_stream, parameter_name,
     parse_idx, ref_unix_seconds, scan_messages, Field, FieldInfo, Grid, Idx, Parameter,

@@ -9,10 +9,11 @@
 //! Memory: one archive entry is extracted at a time, validated against the FAA structure file,
 //! parsed, and dropped, so the peak is the archives plus one entry plus the parsed records.
 
-use crate::source::{ArchiveInfo, Diagnostics, FileDiag, NasrData, Sources};
+use crate::source::{ArchiveInfo, Diagnostics, FileDiag, ViolationNote};
+use crate::sources::{NasrData, Sources};
 use oa_arinc424 as cifp_lib;
 use oa_nasr::procedure::ProcedureKind;
-use oa_nasr::schema::{parse_schemas, validate, Schemas};
+use oa_nasr::schema::{parse_schemas, validate, Schemas, ViolationKind};
 use oa_nasr::{apt, arb, awy, cls, fix, nav, procedure, NasrError, Parsed, RowError};
 use oa_sha256::{sha256, to_hex};
 use oa_zip::{read_archive_file, Archive, ZipError};
@@ -277,7 +278,15 @@ impl NasrReader<'_> {
             Some(schema) => {
                 let v = validate(schema, file, &bytes[..])?;
                 d.rows = v.rows;
-                d.violations = v.violations;
+                d.violations = v
+                    .violations
+                    .iter()
+                    .map(|w| ViolationNote {
+                        column: w.column.clone(),
+                        kind: violation_kind(&w.kind),
+                        line: w.line,
+                    })
+                    .collect();
                 d.dropped = v.dropped;
             }
             None => d.schema_missing = true,
@@ -287,11 +296,28 @@ impl NasrReader<'_> {
     }
 }
 
+/// What a schema violation is, in words; the report groups violations on this text.
+fn violation_kind(k: &ViolationKind) -> String {
+    match k {
+        ViolationKind::MissingColumn => "column missing from the file".to_string(),
+        ViolationKind::UnexpectedColumn => "column not in the schema".to_string(),
+        ViolationKind::TooLong { max, .. } => format!("text longer than {max}"),
+        ViolationKind::NotNumeric(_) => "not numeric".to_string(),
+        ViolationKind::TooManyIntegerDigits { max, .. } => {
+            format!("more than {max} integer digits")
+        }
+        ViolationKind::TooManyFractionDigits { max, .. } => {
+            format!("more than {max} fraction digits")
+        }
+        ViolationKind::NullViolation => "empty in a non-nullable column".to_string(),
+    }
+}
+
 /// Files rejected rows to the diagnostics of the file they came from.
 fn attach(diag: &mut Diagnostics, rejected: Vec<RowError>, dropped: u64) {
     for r in rejected {
         if let Some(d) = diag.nasr_files.iter_mut().find(|d| d.file == r.file) {
-            d.rejected.push(r);
+            d.rejected.push(r.to_string());
         }
     }
     if let Some(d) = diag.nasr_files.last_mut() {

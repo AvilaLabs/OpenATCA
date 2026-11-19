@@ -13,7 +13,7 @@
 //! within that many bytes, so the reader can always make progress; nothing is ever dropped for
 //! lack of room, because `push` accepts only what fits and says how much it took.
 
-use oa_zip::crc32;
+use crate::core::crc32::crc32;
 
 use crate::core::frame::{
     ErrorKind, Frame, FrameError, Kind, HEADER_LEN, HEADER_LEN_V2, MAGIC, MAGIC_V2, MAX_FRAME_LEN,

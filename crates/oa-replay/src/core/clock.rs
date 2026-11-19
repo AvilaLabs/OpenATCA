@@ -128,7 +128,7 @@
 //! tables carry over the gap instead of running through it.
 
 use super::mono_split;
-use crate::core::pipeline::FEED_COUNT;
+use crate::core::feed::FEED_COUNT;
 use crate::core::table::NS_PER_S;
 
 /// Largest difference between a frame's time and its feed's last frame, or the clock, accepted

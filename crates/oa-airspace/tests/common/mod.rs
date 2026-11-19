@@ -10,7 +10,7 @@
 
 use oa_airspace::build::{build_model, BuildOutput, BuildParams};
 use oa_airspace::load::load_bytes;
-use oa_airspace::source::Sources;
+use oa_airspace::sources::Sources;
 use std::path::PathBuf;
 
 pub const NASR_NAME: &str = "NASR_CSV_FIXTURE.zip";

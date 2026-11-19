@@ -5,3 +5,4 @@
 pub mod build;
 pub mod cli;
 pub mod load;
+pub mod sources;

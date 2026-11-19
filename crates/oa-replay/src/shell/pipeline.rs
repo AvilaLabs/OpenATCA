@@ -36,7 +36,7 @@
 //! counted ([`CheckpointRing::dropped`]).
 
 use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, PayloadError, Reports};
-use oa_feed::Kind;
+use oa_feed::core::frame::Kind;
 use oa_fixm::{clear_events, new_events, Decoder, Events, FixmError, Limits, REJECT_COUNT};
 use oa_notam::{
     clear_notams, new_decoder, new_stats, notams_len, DocError as FnsDocError,
@@ -51,51 +51,29 @@ use oa_tfms::{
 };
 use oa_xml::Parser;
 
-use crate::core::adsb::{
-    adsb_advance, adsb_hash_into, adsb_shift_times, adsb_stale_count, apply_adsb, new_adsb_table,
-    AdsbApplied, AdsbTable, ADSB_CAPACITY,
-};
-use crate::core::apply::{apply_sfdps, apply_tbfm, Applied};
 use crate::core::clock::{clock_observe_mono, Clock, Tick};
 use crate::core::errors::{count_error, sfdps_reject_kind, ErrKind, Errors, ERR_COUNT};
-use crate::core::fns::{
-    apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
-    new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
-};
+pub use crate::core::feed::{FeedKind, FEED_COUNT, FEED_NAMES};
 use crate::core::hash::state_hash;
 use crate::core::table::{
     advance_time, new_table, shift_times, stale_count, ConfigError, FlightTable, TableConfig,
     NS_PER_S,
 };
-use crate::core::tfms::{
+use crate::shell::adsb::{
+    adsb_advance, adsb_hash_into, adsb_shift_times, adsb_stale_count, apply_adsb, new_adsb_table,
+    AdsbApplied, AdsbTable, ADSB_CAPACITY,
+};
+use crate::shell::apply::{apply_sfdps, apply_tbfm, Applied};
+use crate::shell::fns::{
+    apply_fns, fns_hash_into, fns_shift_times, fns_stale_count, fns_sweep, fns_tomb_basis_into,
+    new_fns_table, FnsApplied, FnsTable, FNS_CAPACITY,
+};
+use crate::shell::tfms::{
     apply_tfms_flight, apply_tfms_flow, flow_hash_into, flow_shift_times, flow_stale_count,
     flow_sweep, new_flow_table, new_tfms_table, tfms_due, tfms_hash_into, tfms_shift_times,
     tfms_stale_count, tfms_sweep, FlowApplied, FlowTable, TfmsApplied, TfmsTable, FLOW_CAPACITY,
     TFMS_CAPACITY,
 };
-
-/// Which feed a frame came from; chosen by the caller, never guessed from the payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum FeedKind {
-    /// SWIM SFDPS flight messages.
-    Sfdps = 0,
-    /// SWIM TBFM metering publication.
-    Tbfm = 1,
-    /// SWIM TFMS flight and flow data (`oa-tfms`).
-    Tfms = 2,
-    /// SWIM FNS notices (`oa-notam`).
-    Fns = 3,
-    /// ADS-B position reports (`docs/ADSB_PAYLOAD.md`). Sorts after every SWIM feed in the merge
-    /// tie-break (OA-RPL-021): at an equal receive time, SWIM frames come first.
-    Adsb = 4,
-}
-
-/// Number of [`FeedKind`] values.
-pub const FEED_COUNT: usize = 5;
-
-/// Display names, indexed by `FeedKind as usize`.
-pub const FEED_NAMES: [&str; FEED_COUNT] = ["sfdps", "tbfm", "tfms", "fns", "adsb"];
 
 /// Default spacing of checkpoints: 10 s of replay time.
 pub const DEFAULT_CHECKPOINT_NS: i64 = 10 * NS_PER_S;
@@ -112,7 +90,7 @@ pub const DEFAULT_CHECKPOINT_RING: usize = 8_640;
 /// ([`ErrKind::SfdpsRowCapacity`], [`ErrKind::SfdpsStringCapacity`], [`ErrKind::TbfmCapacity`],
 /// [`ErrKind::TfmsCapacity`]).
 pub const DOC_ROW_CAPACITY: usize = 4096;
-/// Elements, and text nodes, of one document. A frame carries at most `oa_feed::MAX_PAYLOAD`
+/// Elements, and text nodes, of one document. A frame carries at most `oa_feed::core::frame::MAX_PAYLOAD`
 /// (4 MiB), so the parser accepts any payload a frame can hold, and the largest document the
 /// measured feeds have shown (3,000 elements) is a hundredth of this.
 pub const DOC_MAX_ELEMENTS: usize = 262_144;
@@ -126,7 +104,7 @@ pub const DOC_STRING_BYTES: usize = 1 << 20;
 /// two accept the same files.
 pub fn doc_xml_limits() -> oa_xml::Limits {
     oa_xml::Limits {
-        max_input_bytes: oa_feed::MAX_PAYLOAD,
+        max_input_bytes: oa_feed::core::frame::MAX_PAYLOAD,
         max_elements: DOC_MAX_ELEMENTS,
         max_attributes: DOC_MAX_ATTRIBUTES,
         max_text_nodes: DOC_MAX_ELEMENTS,

@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use oa_zip::crc32;
+use crate::core::crc32::crc32;
 
 /// The four magic bytes that start every frame the bridge writes.
 pub const MAGIC: [u8; 4] = *b"OAF1";

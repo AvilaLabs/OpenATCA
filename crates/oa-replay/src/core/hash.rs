@@ -23,10 +23,9 @@
 //! The sort allocates a slot list: the hash is taken at checkpoints, not per update, so this is
 //! a stated exception to C1 (offline harness, C6).
 
-use oa_sha256::{Digest, Sha256};
-use oa_tbfm::NO_TIME;
+use oa_sha256::core::sha256::{Digest, Sha256};
 
-use crate::core::table::{is_occupied, slot_ref, FlightTable, Slot, SlotRef, TableStats};
+use crate::core::table::{is_occupied, slot_ref, FlightTable, Slot, SlotRef, TableStats, NO_TIME};
 
 /// Tag and version of the canonical serialisation.
 pub const HASH_TAG: &[u8; 5] = b"OATS1";

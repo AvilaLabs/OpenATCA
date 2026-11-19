@@ -24,10 +24,24 @@ pub const LEG_GAP_MS: i64 = 120_000;
 pub const BRACKET_MS: i64 = 10_000;
 /// Gate: truth with a 95 % horizontal radius above this is refused, metres.
 pub const MAX_SIGMA95_H_M: f64 = 50.0;
+// Plain values that `oa-adsb` defines (a shell crate, which core may not name, B8). The core
+// holds its own copy of each; `adsb_values_match_oa_adsb` below keeps them equal.
+/// Marks an absent 32-bit field in a report column (`oa_adsb::NONE_I32`).
+pub(crate) const NONE_I32: i32 = i32::MIN;
+/// Marks an absent 8-bit field (`oa_adsb::NONE_U8`).
+pub(crate) const NONE_U8: u8 = u8::MAX;
+/// The report flag "stale" (`oa_adsb::F_STALE`).
+pub(crate) const F_STALE: u8 = 1;
+/// The hard speed cap of the ordinary emitter classes, knots (`oa_adsb::CAP_ORDINARY_KT`).
+pub(crate) const ORDINARY_CAP_KT: f64 = 1000.0;
+/// The fastest ground speed any emitter class can report, m/s (`oa_adsb::SPEED_ENVELOPE_MPS`:
+/// 4088 kt at 0.514444444444 m/s per kt).
+pub(crate) const SPEED_ENVELOPE_MPS: f64 = 4088.0 * 0.514_444_444_444;
+
 /// Gate: the hard speed cap of the ordinary emitter classes, knots (`oa_adsb::CAP_ORDINARY_KT`).
 /// Whether a displacement between consecutive kept reports is a jump is decided by
 /// `oa_adsb::jump_verdict`: this cap, the aircraft's own reported ground speed and the time gap.
-pub const JUMP_CAP_KT: f64 = oa_adsb::CAP_ORDINARY_KT;
+pub const JUMP_CAP_KT: f64 = ORDINARY_CAP_KT;
 /// Allowance added to the jump distance so position noise at short intervals is not a jump, m.
 pub const JUMP_SLACK_M: f64 = 200.0;
 /// After this many jump rejections in a row the next report starts a new leg (the report the
@@ -351,4 +365,24 @@ pub struct TruthStats {
     pub unc_at_midpoints: Fraction,
     /// Leave-one-out accuracy; all zero if [`TruthConfig::loo`] was off.
     pub loo: LooStats,
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn adsb_values_match_oa_adsb() {
+        assert_eq!(NONE_I32, oa_adsb::NONE_I32);
+        assert_eq!(NONE_U8, oa_adsb::NONE_U8);
+        assert_eq!(F_STALE, oa_adsb::F_STALE);
+        assert_eq!(
+            ORDINARY_CAP_KT.to_bits(),
+            oa_adsb::CAP_ORDINARY_KT.to_bits()
+        );
+        assert_eq!(
+            SPEED_ENVELOPE_MPS.to_bits(),
+            oa_adsb::SPEED_ENVELOPE_MPS.to_bits()
+        );
+    }
 }

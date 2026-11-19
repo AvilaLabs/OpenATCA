@@ -65,8 +65,8 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::quality::{
-    nacp_epu_m, nacv_epu_mps, quality_check, quality_eval, Held, QualityState, QualityVerdict,
-    HELD_NONE,
+    nacp_epu_m, nacv_epu_mps, quality_check_row, quality_eval_row, Held, QualityRow, QualityState,
+    QualityVerdict, HELD_NONE,
 };
 pub use crate::core::query::{
     aircraft_addrs, leg_addr, leg_count, leg_end_ms, leg_end_ns, leg_reports, leg_start_ms,
@@ -76,3 +76,4 @@ pub use crate::core::smooth::{sigma95_h_m, SIGMA95};
 pub use crate::core::types::*;
 pub use crate::shell::build::{build_truth, pair_evals_this_thread};
 pub use crate::shell::clip;
+pub use crate::shell::quality::{quality_check, quality_eval};

@@ -1,17 +1,17 @@
-//! The quality rules of truth selection, shared with the tracker. Core (pure, B7).
+//! The quality rules of truth selection, shared with the tracker. Core (pure, B7). The rules
+//! take a [`QualityRow`], the nine plain fields they read; `shell::quality` fills one from an
+//! `oa_adsb::Row` and keeps the public `quality_check` and `quality_eval` signatures.
 //!
 //! A readsb trace row prints NACp, NIC, SIL and the version on a minority of rows, so each is
 //! carried forward within an aircraft for at most [`crate::QUALITY_CARRY_MS`]; a row with no
-//! value in that age fails (reason `no_quality_in_age`). [`quality_check`] holds exactly the
+//! value in that age fails (reason `no_quality_in_age`). [`quality_check_row`] holds exactly the
 //! per-row rules of [`crate::build_truth`] (validity, stale flag, source, the four gates) so the
 //! tracker's input gating is the same code, not a copy. NACv is carried the same way for the
 //! tracker's velocity noise; truth does not use it.
 
-use oa_adsb::{Row, F_STALE, NONE_U8};
-
 use super::types::{
-    TruthConfig, ADSB_SOURCES, REM_INVALID, REM_NACP, REM_NIC, REM_NO_QUALITY, REM_SIL, REM_SOURCE,
-    REM_STALE, REM_VERSION,
+    TruthConfig, ADSB_SOURCES, F_STALE, NONE_U8, REM_INVALID, REM_NACP, REM_NIC, REM_NO_QUALITY,
+    REM_SIL, REM_SOURCE, REM_STALE, REM_VERSION,
 };
 
 const NS_PER_MS: i64 = 1_000_000;
@@ -104,6 +104,21 @@ pub struct QualityVerdict {
     pub version: Option<u8>,
 }
 
+/// The fields of a report the quality rules read (the same names and values as the
+/// `oa_adsb::Row` fields); an absent 8-bit field is [`NONE_U8`]. Cold struct (A7.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualityRow {
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub flags: u8,
+    pub source: u8,
+    pub nac_p: u8,
+    pub nac_v: u8,
+    pub nic: u8,
+    pub sil: u8,
+    pub version: u8,
+}
+
 /// The value for a row: its own if present, else the held one if young enough.
 fn held_value(h: &mut Held, own: u8, t_ns: i64, carry_ns: i64, carried: &mut bool) -> Option<u8> {
     if own != NONE_U8 {
@@ -121,24 +136,24 @@ fn held_value(h: &mut Held, own: u8, t_ns: i64, carry_ns: i64, carried: &mut boo
 
 /// Applies the truth selection rules to one row at `t_ns` and commits the carried values (only
 /// for a row that is in range, not stale and from an ADS-B source). The first failing rule is the
-/// reason. [`quality_eval`] is the same without the commit.
-pub fn quality_check(
+/// reason. [`quality_eval_row`] is the same without the commit.
+pub fn quality_check_row(
     st: &mut QualityState,
-    row: &Row,
+    row: &QualityRow,
     t_ns: i64,
     cfg: &TruthConfig,
 ) -> QualityVerdict {
-    let (verdict, next) = quality_eval(st, row, t_ns, cfg);
+    let (verdict, next) = quality_eval_row(st, row, t_ns, cfg);
     *st = next;
     verdict
 }
 
-/// The rules of [`quality_check`] against `st`, which is not changed; returns the verdict and the
+/// The rules of [`quality_check_row`] against `st`, which is not changed; returns the verdict and the
 /// carried values to commit if the caller keeps the row (equal to `st` for a row that is out of
 /// range, stale or from another source).
-pub fn quality_eval(
+pub fn quality_eval_row(
     st: &QualityState,
-    row: &Row,
+    row: &QualityRow,
     t_ns: i64,
     cfg: &TruthConfig,
 ) -> (QualityVerdict, QualityState) {

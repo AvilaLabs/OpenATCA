@@ -23,8 +23,6 @@
 //! * A3: every column is a `Vec` allocated once at `capacity` and indexed by [`Slot`]. A4/A5: a
 //!   [`Slot`] never leaves this crate's table modules.
 
-use oa_tbfm::NO_TIME;
-
 use crate::core::index::{
     hash_bytes, hash_u128, index_find, index_insert, index_remove, new_index, Index,
 };
@@ -74,14 +72,22 @@ pub const CLASS_PROPOSED: u8 = 128;
 /// State class: the flight is completed, cancelled or dropped.
 pub const CLASS_FINISHED: u8 = 192;
 
+/// The "no time" marker of a time column (`oa_tbfm::NO_TIME`; `oa_tbfm` is a shell crate, which
+/// core may not name, B8, so the core holds its own copy and a test keeps them equal).
+pub const NO_TIME: i64 = i64::MIN;
+// The `oa_fixm` `STATUS_*` codes, for the same reason.
+const STATUS_PROPOSED: u8 = 1;
+const STATUS_ACTIVE: u8 = 2;
+const STATUS_COMPLETED: u8 = 3;
+const STATUS_CANCELLED: u8 = 4;
+const STATUS_DROPPED: u8 = 5;
+
 /// The state class of an `oa_fixm` `STATUS_*` code (0 for a code that is none of them).
 pub fn class_of_status(status: u8) -> u8 {
     match status {
-        oa_fixm::STATUS_ACTIVE => CLASS_ACTIVE,
-        oa_fixm::STATUS_PROPOSED => CLASS_PROPOSED,
-        oa_fixm::STATUS_COMPLETED | oa_fixm::STATUS_CANCELLED | oa_fixm::STATUS_DROPPED => {
-            CLASS_FINISHED
-        }
+        STATUS_ACTIVE => CLASS_ACTIVE,
+        STATUS_PROPOSED => CLASS_PROPOSED,
+        STATUS_COMPLETED | STATUS_CANCELLED | STATUS_DROPPED => CLASS_FINISHED,
         _ => 0,
     }
 }
@@ -829,4 +835,19 @@ pub fn flights_live(t: &FlightTable) -> usize {
 /// The slot of the flight with GUFI `g`, as the column index, for readers of the columns.
 pub fn slot_of_gufi(t: &FlightTable, g: u128) -> Option<usize> {
     find_gufi(t, g).map(|s| s.0 as usize)
+}
+
+#[cfg(test)]
+mod decoder_value_tests {
+    use super::*;
+
+    #[test]
+    fn decoder_values_match_the_decoder_crates() {
+        assert_eq!(NO_TIME, oa_tbfm::NO_TIME);
+        assert_eq!(STATUS_PROPOSED, oa_fixm::STATUS_PROPOSED);
+        assert_eq!(STATUS_ACTIVE, oa_fixm::STATUS_ACTIVE);
+        assert_eq!(STATUS_COMPLETED, oa_fixm::STATUS_COMPLETED);
+        assert_eq!(STATUS_CANCELLED, oa_fixm::STATUS_CANCELLED);
+        assert_eq!(STATUS_DROPPED, oa_fixm::STATUS_DROPPED);
+    }
 }

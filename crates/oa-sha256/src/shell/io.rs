@@ -1,6 +1,5 @@
 //! The I/O and text edges of the hasher. Shell (B1, B3, B7): [`sha256_reader`] pulls bytes from
-//! a caller-supplied reader, [`Sha256Error`] carries the reader's `std::io::Error`, and
-//! [`to_hex`] allocates a `String`.
+//! a caller-supplied reader and [`Sha256Error`] carries the reader's `std::io::Error`.
 
 use std::fmt;
 use std::io::Read;
@@ -56,15 +55,4 @@ pub fn sha256_reader<R: Read>(mut r: R) -> Result<Digest, Sha256Error> {
         }
     }
     Ok(h.finalize())
-}
-
-/// Lowercase hex encoding of bytes.
-pub fn to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }

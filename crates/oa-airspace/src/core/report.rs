@@ -15,8 +15,7 @@ use super::geom::{e7_to_deg, edge_separations, latlon_e7, RingSeparation};
 use super::model::*;
 use super::source::{ArchiveInfo, Diagnostics};
 use oa_geo::{wgs84, LatLon};
-use oa_nasr::schema::{SchemaViolation, ViolationKind};
-use oa_sha256::to_hex;
+use oa_sha256::core::hex::to_hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -206,22 +205,6 @@ fn point_label(m: &Model, ix: PointIx) -> String {
     }
 }
 
-fn violation_kind(k: &ViolationKind) -> String {
-    match k {
-        ViolationKind::MissingColumn => "column missing from the file".to_string(),
-        ViolationKind::UnexpectedColumn => "column not in the schema".to_string(),
-        ViolationKind::TooLong { max, .. } => format!("text longer than {max}"),
-        ViolationKind::NotNumeric(_) => "not numeric".to_string(),
-        ViolationKind::TooManyIntegerDigits { max, .. } => {
-            format!("more than {max} integer digits")
-        }
-        ViolationKind::TooManyFractionDigits { max, .. } => {
-            format!("more than {max} fraction digits")
-        }
-        ViolationKind::NullViolation => "empty in a non-nullable column".to_string(),
-    }
-}
-
 fn schema_section(out: &mut String, diag: &Diagnostics) {
     let _ = writeln!(out, "## NASR schema violations (oa-nasr validation against the FAA *_CSV_DATA_STRUCTURE files)\n");
     for w in &diag.schema_warnings {
@@ -248,18 +231,17 @@ fn schema_section(out: &mut String, diag: &Diagnostics) {
                 ""
             }
         );
-        let mut groups: BTreeMap<(String, String), (usize, &SchemaViolation)> = BTreeMap::new();
+        let mut groups: BTreeMap<(String, String), (usize, u64)> = BTreeMap::new();
         for v in &d.violations {
             let e = groups
-                .entry((v.column.clone(), violation_kind(&v.kind)))
-                .or_insert((0, v));
+                .entry((v.column.clone(), v.kind.clone()))
+                .or_insert((0, v.line));
             e.0 += 1;
         }
         for ((col, kind), (n, first)) in &groups {
             let _ = writeln!(
                 out,
-                "    column {col}: {kind}: {n} rows (first at line {})",
-                first.line
+                "    column {col}: {kind}: {n} rows (first at line {first})"
             );
         }
         let rejected = d.rejected.len();

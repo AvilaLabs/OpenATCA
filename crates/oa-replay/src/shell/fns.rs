@@ -50,7 +50,7 @@
 //! and leaves the table at the first sweep after its end time, or its cancelled time if that is
 //! earlier. A NOTAM with no end time (permanent, or with no usable end) leaves after
 //! [`FNS_OPEN_AGE_NS`] of replay time without an update. Sweeps run on the cadence of
-//! [`crate::core::tfms::tfms_due`].
+//! [`crate::shell::tfms::tfms_due`].
 //!
 //! The state is hashed by [`fns_hash_into`] in key order.
 
@@ -641,29 +641,29 @@ fn store(t: &mut FnsTable, s: usize, n: &Notams, i: usize, now_ns: i64, ntype: u
     set(
         &mut t.selection,
         s,
-        crate::core::tfms::pad(&cp(name(Field::Selection), &r.selection)),
+        crate::shell::tfms::pad(&cp(name(Field::Selection), &r.selection)),
     );
     set(&mut t.feat_kind, s, r.feat_kind);
     set(&mut t.feat_desig, s, r.feat_desig);
     set(
         &mut t.apt,
         s,
-        crate::core::tfms::pad(&cp(name(Field::Airport), &r.apt)),
+        crate::shell::tfms::pad(&cp(name(Field::Airport), &r.apt)),
     );
     set(
         &mut t.rwy,
         s,
-        crate::core::tfms::pad(&cp(name(Field::Runway), &r.rwy)),
+        crate::shell::tfms::pad(&cp(name(Field::Runway), &r.rwy)),
     );
     set(
         &mut t.navaid,
         s,
-        crate::core::tfms::pad(&cp(name(Field::Navaid), &r.navaid)),
+        crate::shell::tfms::pad(&cp(name(Field::Navaid), &r.navaid)),
     );
     set(
         &mut t.unit,
         s,
-        crate::core::tfms::pad(&cp(name(Field::Unit), &r.unit)),
+        crate::shell::tfms::pad(&cp(name(Field::Unit), &r.unit)),
     );
     let circle = usable(n, i, Field::Centre) && usable(n, i, Field::Radius);
     set(
@@ -831,7 +831,7 @@ fn lon_cover<'a>(
 }
 
 fn pad4(v: &[u8]) -> [u8; 4] {
-    crate::core::tfms::pad(v)
+    crate::shell::tfms::pad(v)
 }
 
 /// The time, Unix ms, at which slot `s` leaves the table, if it has one.

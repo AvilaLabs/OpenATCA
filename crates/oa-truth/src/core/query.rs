@@ -1,11 +1,12 @@
 //! Queries on a built [`Truth`], its accessors and its digest. Core (pure, B7).
 
-use oa_adsb::NONE_I32;
-use oa_sha256::Sha256;
+use oa_sha256::core::sha256::Sha256;
 
 use super::frame::{frame_new, try_frame_velocity, unproject};
 use super::smooth::{interp, sigma95_h_m, LegView};
-use super::types::{LegIx, LegRange, Truth, TruthQuery, TruthSample, TRUTH_HASH_TAG};
+use super::types::{
+    LegIx, LegRange, Truth, TruthQuery, TruthSample, NONE_I32, SPEED_ENVELOPE_MPS, TRUTH_HASH_TAG,
+};
 
 const NS_PER_MS: i64 = 1_000_000;
 
@@ -178,7 +179,7 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     // A non-finite state, or one moving faster than any ADS-B emitter class can report, is
     // unusable, not a position: finite is not the same as valid.
     if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite())
-        || vel_e.hypot(vel_n) > oa_adsb::SPEED_ENVELOPE_MPS
+        || vel_e.hypot(vel_n) > SPEED_ENVELOPE_MPS
     {
         return TruthQuery::TooUncertain;
     }

@@ -15,9 +15,5 @@ oa-zip = { path = "../oa-zip" }
 # Workspace crate (gzip compression of recordings); not an outside dependency (RULESET F1).
 oa-deflate = { path = "../oa-deflate" }
 
-[[bin]]
-name = "oa-feed"
-path = "src/main.rs"
-
 [package.metadata.openatca]
 class = "split"

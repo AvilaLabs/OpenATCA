@@ -5,10 +5,8 @@
 //! report is predicted at its own time with the same interpolation and the same bracket rule
 //! as a query: a real remaining report within the bracket on both sides, no extrapolation.
 
-use oa_adsb::NONE_I32;
-
 use super::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
-use super::types::{Dist, Fraction, LooStats, TruthConfig};
+use super::types::{Dist, Fraction, LooStats, TruthConfig, NONE_I32};
 
 const NS_PER_MS: i64 = 1_000_000;
 
@@ -180,7 +178,6 @@ pub(crate) fn dist_of(v: &[f64]) -> Dist {
 mod tests {
     use super::*;
     use crate::core::types::DEFAULT_CONFIG;
-    use oa_adsb::NONE_I32;
 
     const S: i64 = 1_000_000_000;
 

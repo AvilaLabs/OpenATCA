@@ -2339,3 +2339,18 @@ fn the_recorder_refuses_a_feed_label_that_could_leave_its_directory() {
     assert!(Recorder::open(&dir.join("rec"), "scds-x", u64::MAX, u64::MAX, Format::Raw).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_cores_crc32_agrees_with_the_zip_crates() {
+    // The core holds its own copy (B8: core may not name a shell crate); this keeps them equal.
+    let data: Vec<u8> = (0..4099u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    for n in [0, 1, 7, 8, 9, 63, 64, 1000, data.len()] {
+        assert_eq!(
+            crate::core::crc32::crc32(&data[..n]),
+            oa_zip::crc32(&data[..n]),
+            "{n} bytes"
+        );
+    }
+}

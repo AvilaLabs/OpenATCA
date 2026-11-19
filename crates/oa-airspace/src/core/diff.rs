@@ -7,7 +7,7 @@
 //! fixed: object classes in a fixed order, keys in sorted order, fields in declaration order.
 
 use super::model::*;
-use oa_sha256::to_hex;
+use oa_sha256::core::hex::to_hex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 

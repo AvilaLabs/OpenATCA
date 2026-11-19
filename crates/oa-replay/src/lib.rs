@@ -8,17 +8,20 @@
 //!
 //! * Core (pure, no I/O, no clock, no allocation after construction, B1-B5): [`index`] (a
 //!   fixed-size open-addressing hash index), [`table`] ([`FlightTable`], a struct-of-arrays of
-//!   fixed capacity, and its eviction), [`apply`] ([`apply_sfdps`], [`apply_tbfm`]), [`adsb`]
-//!   ([`AdsbTable`], the latest ADS-B report per aircraft address, bounded by
-//!   [`ADSB_CAPACITY`]), [`hash`] ([`state_hash`] of the flight table; [`replay_hash`] adds the
-//!   ADS-B, TFMS and FNS tables once a frame of that feed has been fed, so replays without them
-//!   hash as ever), [`tfms`] ([`TfmsTable`], the latest estimates per TFMS flight and their link
-//!   to SFDPS, and [`FlowTable`], the traffic management programmes), [`fns`] ([`FnsTable`], the
-//!   NOTAMs in force), [`slots`] (their shared slot bookkeeping), [`errors`] and [`pipeline`]
-//!   (frames in, state and counters out; replay time is each frame's `recv_unix_ns`).
-//! * Shell: [`source`] (reads `.oaf` and `.oaf.gz` recordings as streams and merges them into one
-//!   total order in constant memory), [`cli`] and the `oa-replay` binary (arguments, files, clock for the throughput
-//!   line, stdout).
+//!   fixed capacity, and its eviction), [`hash`] ([`state_hash`] of the flight table),
+//!   [`slots`] (slot bookkeeping shared by the TFMS and FNS tables), [`clock`], [`errors`] and
+//!   [`feed`] ([`FeedKind`]).
+//! * Shell, pure but naming the decoder crates (B8): [`pipeline`] (frames in, state and counters
+//!   out; replay time is each frame's `recv_unix_ns`), [`apply`] ([`apply_sfdps`],
+//!   [`apply_tbfm`]), [`adsb`] ([`AdsbTable`], the latest ADS-B report per aircraft address,
+//!   bounded by [`ADSB_CAPACITY`]), [`tfms`] ([`TfmsTable`], the latest estimates per TFMS
+//!   flight and their link to SFDPS, and [`FlowTable`], the traffic management programmes) and
+//!   [`fns`] ([`FnsTable`], the NOTAMs in force). [`replay_hash`] adds the ADS-B, TFMS and FNS
+//!   tables to the state hash once a frame of that feed has been fed, so replays without them
+//!   hash as ever.
+//! * Shell, I/O: [`source`] (reads `.oaf` and `.oaf.gz` recordings as streams and merges them
+//!   into one total order in constant memory), [`cli`] and the `oa-replay` binary (arguments,
+//!   files, clock for the throughput line, stdout).
 //!
 //! ADS-B reports (`docs/ADSB_PAYLOAD.md`, written by `oa-adsb-clip`) are a fifth feed kind. At an
 //! equal receive time the merge puts SWIM frames first (SFDPS, TBFM, TFMS, FNS) and ADS-B last;
@@ -32,8 +35,8 @@
 pub mod core;
 pub mod shell;
 
-pub use crate::core::{adsb, apply, clock, errors, fns, hash, index, pipeline, slots, table, tfms};
-pub use crate::shell::{cli, report, source};
+pub use crate::core::{clock, errors, feed, hash, index, slots, table};
+pub use crate::shell::{adsb, apply, cli, fns, pipeline, report, source, tfms};
 
 pub use adsb::{
     adsb_advance, adsb_shift_times, adsb_slot_of, adsb_stale_count, adsb_sweep, apply_adsb,

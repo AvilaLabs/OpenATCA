@@ -7,8 +7,9 @@ use oa_adsb::{
 
 use crate::core::frame::{frame_angle, frame_new, project, Frame};
 use crate::core::loo::{loo_finish, loo_leg, LooAcc};
-use crate::core::quality::{nacp_epu_m, quality_eval, QualityState};
+use crate::core::quality::{nacp_epu_m, QualityState};
 use crate::core::smooth::{interp, sigma95_h_m, smooth, LegView, SIGMA95};
+use crate::shell::quality::quality_eval;
 use crate::{
     Fraction, Truth, TruthConfig, TruthError, TruthStats, ALT_QUANTUM_FT, MAX_FRAME_ARC_RAD,
     MAX_REPORTS, MAX_SAME_TIME_DISTINCT, REM_AMBIGUOUS, REM_DUPLICATE, REM_INVALID, REM_JUMP,
