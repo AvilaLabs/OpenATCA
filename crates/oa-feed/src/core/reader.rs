@@ -15,7 +15,7 @@
 
 use oa_zip::crc32;
 
-use crate::frame::{
+use crate::core::frame::{
     ErrorKind, Frame, FrameError, Kind, HEADER_LEN, HEADER_LEN_V2, MAGIC, MAGIC_V2, MAX_FRAME_LEN,
     MAX_PAYLOAD, TRAILER_LEN,
 };

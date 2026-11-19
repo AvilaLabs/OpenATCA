@@ -27,7 +27,7 @@
 //!   600 s, then overflow. The summary prints p50 and p95 as the bin's upper edge in ms, never above the
 //!   exact maximum, which is also printed; anything in the overflow bin prints as `>=600000`.
 
-use crate::frame::{Frame, FrameError, Kind, FLAG_REDELIVERED};
+use crate::core::frame::{Frame, FrameError, Kind, FLAG_REDELIVERED};
 
 /// One-second slots in the rate ring (60 complete seconds plus the current one).
 pub const RING_SLOTS: usize = 61;
