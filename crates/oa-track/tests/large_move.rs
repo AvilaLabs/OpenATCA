@@ -246,8 +246,7 @@ fn balanced(t: &Tracker) {
         + s.moves_abandoned_ended
         + s.moves_abandoned_restarted
         + s.moves_abandoned_resync
-        + s.moves_abandoned_demoted
-        + s.moves_abandoned_numerical;
+        + s.moves_abandoned_demoted;
     assert_eq!(
         s.moves_unconfirmed,
         outcomes + tracker_moves_active(t) as u64,
@@ -442,11 +441,15 @@ fn a_later_large_move_keeps_the_original_snapshot_and_a_refuting_report_rolls_ba
 
 // REQ: OA-TRK-348
 #[test]
-fn a_forger_who_keeps_sending_the_same_false_place_is_resynchronised_onto_it() {
-    // The residual risk, written down: reports that keep agreeing with each other on a false
-    // place are refused by the gate (it is far from the track's estimate) until the filter
-    // resynchronises onto them; that ends the move as abandoned, and the track is unmarked at
-    // the false place. Only a second source (radar) can refute that.
+fn a_forger_who_repeats_the_same_false_place_is_confirmed_by_the_second_report() {
+    // The residual risk, written down exactly. The second forged report, a second after the
+    // first and agreeing with the moved track (the gate does not refuse it once the track is
+    // there) and not with the old path, confirms the move: the track is unmarked at
+    // the false place and nothing in the tracker refutes it, only a second source (radar) can.
+    // The other two ways to an unmarked false track are a report in the gate that agrees with
+    // neither path (undecided: `a_report_after_the_window_or_agreeing_with_neither...`) and a
+    // resynchronisation onto a consistent run of reports the gate refuses (resync: in
+    // `a_track_that_ends_or_restarts...`); each ends the move in its own counted outcome.
     let mut rng = Rng(7);
     let mut l = Live::new(&big_config());
     l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
@@ -455,12 +458,21 @@ fn a_forger_who_keeps_sending_the_same_false_place_is_resynchronised_onto_it() {
         l.feed(&[report_of(&mut rng, tt, &truth(tt, FORGED_OFFSET_M))]);
     }
     let s = l.s();
-    assert_eq!(s.moves_unconfirmed, 1, "{s:?}");
-    assert!(s.resyncs >= 1 || s.moves_confirmed == 1, "{s:?}");
-    assert!(
-        s.moves_decision_rejected >= 1 || s.moves_confirmed == 1,
+    assert_eq!(
+        (
+            s.moves_unconfirmed,
+            s.moves_confirmed,
+            s.moves_rolled_back,
+            s.moves_undecided
+        ),
+        (1, 1, 0, 0),
         "{s:?}"
     );
+    // (Some repeats are refused by the gate, the track having seen one report there and the
+    // noise of the feed being what it is: the one at 41 s decides nothing,
+    // `moves_decision_rejected`, and the one at 42 s confirms. The counts are those of this
+    // seeded feed.)
+    assert_eq!((s.resyncs, s.moves_decision_rejected), (0, 1), "{s:?}");
     assert_eq!(tracker_moves_active(&l.t), 0, "{s:?}");
     assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     balanced(&l.t);
@@ -561,7 +573,7 @@ fn report_for(rng: &mut Rng, addr: u32, t_s: f64, off_n: f64) -> Measurement {
 #[test]
 fn with_no_snapshot_the_move_is_marked_and_the_radius_fails_closed() {
     // A pool of one entry: the second track's move has no snapshot; it is applied and marked,
-    // its rows carry the widest radius the format holds (the old path is unknown), a refuting
+    // its rows carry a radius of 500 km (the old path is unknown), a refuting
     // report cannot roll it back, and the count says so. The first track's snapshot returns to
     // the pool when its move is decided, and the next move takes it.
     let cfg = TrackerConfig {
@@ -592,7 +604,9 @@ fn with_no_snapshot_the_move_is_marked_and_the_radius_fails_closed() {
     );
     let (row, _, _) = tracker_predict(&l.t, 0xA0_0002, 44 * S).unwrap();
     assert_ne!(row.flags & O_MOVE_UNCONFIRMED, 0);
-    assert!(r95_m_of(&row.pos_cov_m2) > 1.0e15);
+    // The finite cap (500 km), not the largest the format holds.
+    let r = r95_m_of(&row.pos_cov_m2);
+    assert!((499_999.0..500_010.0).contains(&r), "{r}");
     assert!(s.move_widen_failed >= 1, "{s:?}");
     // The refuting report: the first track rolls back, the second cannot.
     l.feed(&[report_for(&mut rng, 0xA0_0001, 44.0, 0.0)]);
@@ -614,21 +628,67 @@ fn with_no_snapshot_the_move_is_marked_and_the_radius_fails_closed() {
 
 // REQ: OA-TRK-349
 #[test]
-fn a_late_replay_while_a_move_is_unconfirmed_drops_the_snapshot_and_keeps_the_mark() {
+fn a_late_replay_that_refuses_the_forged_report_in_time_order_loses_the_rollback_and_counts_it() {
+    // A genuine report from 39.6 s arrives late: in time order the forged report at 40 s is a
+    // jump 0.4 s later and is refused, so it is no longer in the ring and the rollback point
+    // cannot be derived before it. The mark stays and the loss is counted.
     let mut rng = Rng(7);
     let mut l = Live::new(&big_config());
     l.feed(&genuine(&mut rng, &seconds(0.0, 20.0)));
     l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
-    // A genuine report from 39.6 s arrives late, inside the out-of-order window.
     l.feed(&[report_of(&mut rng, 39.6, &truth(39.6, 0.0))]);
     let s = l.s();
     assert_eq!(s.refiltered, 1, "{s:?}");
     assert_eq!(s.moves_rollback_lost_late, 1, "{s:?}");
     assert_ne!(tracker_moves_active(&l.t), 0);
-    // A refuting report cannot roll back: it is not applied (the track is at the moved place)
-    // and decides nothing.
+    // A refuting report cannot roll back, and decides nothing it can undo.
     l.feed(&[report_of(&mut rng, 41.0, &truth(41.0, 0.0))]);
     assert_eq!(l.s().moves_rolled_back, 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-349
+#[test]
+fn a_late_report_from_a_second_sensor_during_a_move_leaves_the_rollback_in_place() {
+    // The routine case with two sensors: a genuine report of a second sensor arrives late (from
+    // before the gap) while a forged move is unconfirmed. The replay re-derives the rollback point from the ring
+    // (the state before the forged report, the late one included), so the report that refutes
+    // the move afterwards still rolls the track back, to where a track that never saw the
+    // forgery would be.
+    let cfg = TrackerConfig {
+        ooo_window_ns: 30 * S,
+        clock_step_limit_ns: 30 * S,
+        drop_after_ns: 60 * S,
+        ..big_config()
+    };
+    let mut rng = Rng(7);
+    let mut l = Live::new(&cfg);
+    let mut control = Live::new(&cfg);
+    let early = genuine(&mut rng, &seconds(0.0, 20.0));
+    l.feed(&early);
+    control.feed(&early);
+    l.feed(&[report_of(&mut rng, 40.0, &truth(40.0, FORGED_OFFSET_M))]);
+    let mut late = report_of(&mut rng, 19.5, &truth(19.5, 0.0));
+    late.sensor = 2;
+    l.feed(&[late]);
+    control.feed(&[late]);
+    let s = l.s();
+    assert_eq!(s.refiltered, 1, "{s:?}");
+    assert_eq!(s.moves_rollback_lost_late, 0, "{s:?}");
+    assert_eq!(tracker_moves_active(&l.t), 1);
+    let refuting = report_of(&mut rng, 41.0, &truth(41.0, 0.0));
+    l.feed(&[refuting]);
+    control.feed(&[refuting]);
+    let s = l.s();
+    assert_eq!((s.moves_rolled_back, s.moves_confirmed), (1, 0), "{s:?}");
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    // Where the track is after the rollback: the control's, which never saw the forgery.
+    let (a, _, _) = tracker_predict(&l.t, ADDR, 42 * S).unwrap();
+    let (b, _, _) = tracker_predict(&control.t, ADDR, 42 * S).unwrap();
+    let d = ((f64::from(a.lat_e7 - b.lat_e7) * 0.011_119_5).powi(2)
+        + (f64::from(a.lon_e7 - b.lon_e7) * 0.011_119_5).powi(2))
+    .sqrt();
+    assert!(d < 5.0, "{d} m from the track without the forgery");
     balanced(&l.t);
 }
 

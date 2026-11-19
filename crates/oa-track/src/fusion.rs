@@ -1433,8 +1433,15 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         .map(|(_, t)| COARSE_M + 8.0 * t.sigma)
         .fold(0.0, f64::max);
     f.stats.assoc_runs += 1;
-    f.stats.coarse_width_sum_m += width as u64;
-    f.stats.coarse_width_max_m = f.stats.coarse_width_max_m.max(width as u64);
+    // A window width that is not a finite non-negative number (a huge covariance) is recorded as
+    // the largest count, and the sum saturates: the statistic never panics the fusion.
+    let width_m = if width.is_finite() && width >= 0.0 && width < u64::MAX as f64 {
+        width as u64
+    } else {
+        u64::MAX
+    };
+    f.stats.coarse_width_sum_m = f.stats.coarse_width_sum_m.saturating_add(width_m);
+    f.stats.coarse_width_max_m = f.stats.coarse_width_max_m.max(width_m);
     let mut pairs = std::mem::take(f.pairs_bufs.get_mut(radar)?);
     let mut infos = std::mem::take(f.infos_bufs.get_mut(radar)?);
     pairs.clear();
@@ -5512,6 +5519,80 @@ mod tests {
         assert_eq!(st.wide_tracks_sum, 3, "{st:?}");
         assert_eq!(st.wide_full, 5, "{st:?}");
         assert_eq!(st.scratch_full, 0, "{st:?}");
+    }
+
+    /// A track reported once a second for ten seconds at one place, then one report 2.5 km north
+    /// twenty seconds on: past the gate's widening, a large move (RT-239).
+    fn feed_forged_move(f: &mut Fusion, out: &mut TrackOutput) {
+        for k in 0..=10i64 {
+            fusion_adsb(f, &adsb_fix(0xA00001, k * NS_PER_S));
+            fusion_advance(f, k * NS_PER_S, out);
+        }
+        let mut forged = adsb_fix(0xA00001, 30 * NS_PER_S);
+        forged.lat_e7 += 225_000;
+        fusion_adsb(f, &forged);
+        fusion_advance(f, 32 * NS_PER_S, out);
+    }
+
+    // REQ: OA-TRK-349
+    #[test]
+    fn a_marked_track_with_a_full_pool_reaches_the_window_statistics_without_a_panic() {
+        // No snapshot room: the widening fails closed, and the radius is the finite cap.
+        let mut f = make_fusion(|c| c.tracker.confirm_pool = 0);
+        let mut out = output_new(1 << 12);
+        feed_forged_move(&mut f, &mut out);
+        let st = *fusion_tracker_stats(&f);
+        assert_eq!(st.moves_unconfirmed, 1, "{st:?}");
+        assert_eq!(st.move_no_snapshot, 1, "{st:?}");
+        assert!(st.move_widen_failed >= 1, "{st:?}");
+        let mut rows = Vec::with_capacity(8);
+        assert_eq!(tracks_at(&f, 0, 32 * NS_PER_S, &mut rows), (0, 0));
+        // The association statistics: the window of the marked track, and nothing overflows.
+        fusion_plots(&mut f, 0, &[mode_s_plot_at(NO_ADDR, 32 * NS_PER_S, 0)]);
+        fusion_advance(&mut f, 36 * NS_PER_S, &mut out);
+        assert!(fusion_stats(&f).assoc_runs >= 1);
+    }
+
+    // REQ: OA-TRK-349
+    #[test]
+    fn a_radar_plot_on_the_old_path_refutes_a_forged_move_by_its_own_covariance() {
+        // The track holds a forged move (unconfirmed); its forecast for association carries the
+        // filter's own covariance, so a Mode S plot where the aircraft really is lies far
+        // outside the gate and raises the disagreement flag. With the widened covariance the
+        // plot would have passed the gate and refuted nothing.
+        let mut f = make_fusion(|_| {});
+        let mut out = output_new(1 << 14);
+        feed_forged_move(&mut f, &mut out);
+        assert_eq!(fusion_tracker_stats(&f).moves_unconfirmed, 1);
+        let (row, _, _, wide) =
+            crate::tracker::tracker_forecast(fusion_tracker(&f), 0xA00001, 32 * NS_PER_S).unwrap();
+        assert!(row.flags & crate::types::O_MOVE_UNCONFIRMED != 0);
+        let own = crate::tracker::r95_m_of(&row.pos_cov_m2);
+        let shown = crate::tracker::r95_m_of(&wide.unwrap());
+        assert!(own < 500.0 && shown > 2_000.0, "{own} {shown}");
+        fusion_plots(&mut f, 0, &[mode_s_plot_at(0xA00001, 32 * NS_PER_S, 0)]);
+        fusion_advance(&mut f, 36 * NS_PER_S, &mut out);
+        let st = *fusion_stats(&f);
+        assert_eq!(st.radar_disagree, 1, "{st:?}");
+        let flagged = (0..output_len(&out)).any(|i| out.flags[i] & O_RADAR_DISAGREES != 0);
+        assert!(flagged);
+    }
+
+    // REQ: OA-TRK-349
+    #[test]
+    fn a_huge_covariance_saturates_the_window_statistics_instead_of_overflowing_them() {
+        let mut f = make_fusion_sites(&[SITE], 1_000);
+        let mut out = output_new(1 << 18);
+        let at = feed_with_fat_tracks(&mut f, &SITE, 100_000.0, 5, &[1.0e19], 11, 0x100000);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        // Two association runs: the sum would overflow at the second if it were not saturating.
+        fusion_plots(&mut f, 0, &plots_on(&SITE, &at, at.len(), 100.0, 3));
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+        fusion_plots(&mut f, 0, &plots_on(&SITE, &at, at.len(), 100.0, 4));
+        fusion_advance(&mut f, 9 * NS_PER_S, &mut out);
+        let st = *fusion_stats(&f);
+        assert!(st.coarse_width_max_m > 1_000_000_000, "{st:?}");
+        assert!(st.coarse_width_sum_m >= st.coarse_width_max_m, "{st:?}");
     }
 
     /// `n` radar-only aircraft over a square of `side_m`, straight at 100 to 250 m/s.

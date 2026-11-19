@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 52,
+  "expected_proof_count": 55,
   "proofs": [
     {
       "id": "output-append",
@@ -437,7 +437,8 @@
       "stubbing": true,
       "stub_summaries": [
         "decide returns Rejected.",
-        "filter_miss_m returns any distance, so any verdict."
+        "filter_miss_m returns any distance, so any verdict.",
+        "filter_apply refuses the report and changes nothing (the refusal counted in the moved track's run of refusals after a rollback was tried is not the proof's subject)."
       ],
       "cfgs": [],
       "harness_timeout_seconds": 300,
@@ -1085,6 +1086,57 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ]
+    },
+    {
+      "id": "snapshot-round-trip-current-filter",
+      "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the current filter back bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_current_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "current filter differs before the snapshot is restored"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "snapshot-round-trip-anchor-filter",
+      "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the anchor filter back bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_anchor_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "anchor filter differs before the snapshot is restored"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "snapshot-round-trip-ring",
+      "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the measurement ring, its length and head back bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_ring",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "ring differs before the snapshot is restored"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
     }
   ]
 }

@@ -64,7 +64,7 @@ use crate::filter::{
     filter_row_distance_m, Applied, Filter,
 };
 use crate::hfilter::{h_combine, HFilter};
-use crate::params::{CHI2_2_95, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
+use crate::params::{CHI2_2_95, FAIL_CLOSED_R95_M, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
 use crate::time_gate::{
     gate_decide, gate_new, gate_note_applied, gate_run_restarted, GateCfg, GateState, Verdict,
     RUN_BUF,
@@ -136,6 +136,11 @@ pub struct Tracker {
     /// The time of the report that made the move (the latest one, if a later report made
     /// another before the first was decided).
     mv_start_ns: Vec<i64>,
+    /// The time of applicability and sensor of the report that began the move (the first one,
+    /// whatever later ones moved it again): the entry a late re-filter rebuilds the rollback
+    /// point before.
+    mv_first_ns: Vec<i64>,
+    mv_first_sens: Vec<u16>,
     /// The pool entry holding the state from before the move, [`NO_SNAP`] if there is none.
     mv_snap: Vec<u32>,
     /// The pool of rollback snapshots: `confirm_pool` entries (at most `max_tracks`).
@@ -244,6 +249,8 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         ring_m: vec![blank_measurement(); n * RING_DEPTH],
         mv_on: vec![0; n],
         mv_start_ns: vec![0; n],
+        mv_first_ns: vec![0; n],
+        mv_first_sens: vec![0; n],
         mv_snap: vec![NO_SNAP; n],
         snaps: vec![blank_snap(); pool_n],
         snap_free: (0..pool_n as u32).rev().collect(),
@@ -298,8 +305,9 @@ pub fn tracker_bytes(t: &Tracker) -> usize {
         + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
-        + t.mv_on.len() * (1 + 8 + 4)
+        + t.mv_on.len() * (1 + 8 + 4 + 8 + 2)
         + t.snaps.len() * core::mem::size_of::<TrackSnap>()
+        + t.snap_free.capacity() * 4
         + t.index.len() * 4
 }
 
@@ -327,6 +335,8 @@ pub fn tracker_buffers(t: &Tracker) -> Vec<(usize, usize)> {
         of(&t.ring_m),
         of(&t.mv_on),
         of(&t.mv_start_ns),
+        of(&t.mv_first_ns),
+        of(&t.mv_first_sens),
         of(&t.mv_snap),
         of(&t.snaps),
         of(&t.snap_free),
@@ -614,7 +624,6 @@ fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
     note_category(t, slot, m);
-    end_move(t, slot, MoveEnd::Restarted);
     ring_clear(t, slot);
     if !ring_push(t, slot, m) {
         return false;
@@ -705,8 +714,8 @@ fn old_path_row(t: &Tracker, slot: usize, at_ns: i64) -> Option<OutRow> {
 /// from the old path's row to this one plus the old path's own radius: the row then covers where
 /// the track would be had the move been a forged report. The covariance is scaled, so its shape
 /// is kept. If that cannot be computed (no old path, an old position that cannot be
-/// represented, a result that is not finite) the row gets the widest covariance the format
-/// holds, so that the radius is never smaller than the truth: returns false then. The radius,
+/// represented, a result that is not finite) the row gets a circle of `FAIL_CLOSED_R95_M` (500 km), so that the radius is
+/// never smaller than the truth and stays finite: returns false then. The radius,
 /// the unwidened input and the widened result, are in `r95`.
 fn mark_row(row: &mut OutRow, r95: &mut f64, old: Option<&OutRow>) -> bool {
     row.flags |= O_MOVE_UNCONFIRMED;
@@ -721,8 +730,8 @@ fn mark_row(row: &mut OutRow, r95: &mut f64, old: Option<&OutRow>) -> bool {
         let scaled = if *r95 > 0.0 {
             let k = (wide / *r95) * (wide / *r95) * (1.0 + 1.0e-6);
             if !k.is_finite() {
-                row.pos_cov_m2 = WIDEST_COV;
-                *r95 = r95_m(&WIDEST_COV);
+                row.pos_cov_m2 = FAIL_CLOSED_COV;
+                *r95 = r95_m(&FAIL_CLOSED_COV);
                 return false;
             }
             row.pos_cov_m2.map(|c| (f64::from(c) * k) as f32)
@@ -737,13 +746,17 @@ fn mark_row(row: &mut OutRow, r95: &mut f64, old: Option<&OutRow>) -> bool {
             return true;
         }
     }
-    row.pos_cov_m2 = WIDEST_COV;
-    *r95 = r95_m(&WIDEST_COV);
+    row.pos_cov_m2 = FAIL_CLOSED_COV;
+    *r95 = r95_m(&FAIL_CLOSED_COV);
     false
 }
 
-/// The widest position covariance a row holds (the largest finite `f32` on both axes).
-const WIDEST_COV: [f32; 3] = [f32::MAX, 0.0, f32::MAX];
+/// The position covariance of a row whose widening failed: a circle of at least
+/// [`FAIL_CLOSED_R95_M`] 95% radius, finite everywhere it is read.
+const FAIL_CLOSED_COV: [f32; 3] = {
+    let v = (FAIL_CLOSED_R95_M * FAIL_CLOSED_R95_M / CHI2_2_95 * (1.0 + 1.0e-6)) as f32;
+    [v, 0.0, v]
+};
 
 /// The 95% horizontal uncertainty radius of a position covariance `[ee, en, nn]` (m^2), metres:
 /// the semi-major axis of the 95% ellipse, so the circle of this radius contains the ellipse.
@@ -850,11 +863,11 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 456-byte statistics (328 before
-// the sixteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
+// Budget: two 648-byte filters, twelve 72-byte measurements, 448-byte statistics (328 before
+// the fifteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2680);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2672);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
@@ -973,7 +986,6 @@ enum MoveEnd {
     Restarted,
     Resync,
     Demoted,
-    Numerical,
 }
 
 fn move_active(t: &Tracker, slot: usize) -> bool {
@@ -1012,20 +1024,27 @@ fn end_move(t: &mut Tracker, slot: usize, why: MoveEnd) {
         MoveEnd::Restarted => &mut t.stats.moves_abandoned_restarted,
         MoveEnd::Resync => &mut t.stats.moves_abandoned_resync,
         MoveEnd::Demoted => &mut t.stats.moves_abandoned_demoted,
-        MoveEnd::Numerical => &mut t.stats.moves_abandoned_numerical,
     };
     *c += 1;
 }
 
-/// Starts the track's unconfirmed move at the report time `start_ns`, with `before` as its
-/// rollback point. A track that already has one keeps its original snapshot (a later move that
+/// Starts the track's unconfirmed move, made by the report `first`, at the report time `start_ns`,
+/// with `before` as its rollback point. A track that already has one keeps its original snapshot (a later move that
 /// is not decided in between rolls back to before the first) and only moves the start, the time
 /// the window runs from. With the pool full the move has no snapshot (`move_no_snapshot`).
-fn start_move(t: &mut Tracker, slot: usize, before: &TrackSnap, start_ns: i64) {
+fn start_move(
+    t: &mut Tracker,
+    slot: usize,
+    before: &TrackSnap,
+    first: &Measurement,
+    start_ns: i64,
+) {
     put(&mut t.mv_start_ns, slot, start_ns);
     if move_active(t, slot) {
         return;
     }
+    put(&mut t.mv_first_ns, slot, first.toa_ns);
+    put(&mut t.mv_first_sens, slot, first.sensor);
     put(&mut t.mv_on, slot, 1);
     t.mv_live += 1;
     t.stats.moves_peak_active = t.stats.moves_peak_active.max(t.mv_live as u64);
@@ -1258,7 +1277,6 @@ fn decide(t: &mut Tracker, slot: usize, m: &Measurement) -> Step {
         Applied::Resync => {
             put(&mut t.cur, slot, f);
             put(&mut t.cat, slot, CategoryState::default());
-            end_move(t, slot, MoveEnd::Resync);
             note_category(t, slot, m);
             ring_clear(t, slot);
             if !ring_push(t, slot, m) {
@@ -1343,8 +1361,13 @@ fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut
             t.hold_on = false;
             let step = update_in_order_ending(t, slot, m, out, Some(MoveEnd::RolledBack));
             if decision_rejected(t, slot, step) {
-                // Not applied: the rollback is undone, the move stays as it was.
+                // Not applied: the rollback is undone, the move stays as it was. The refused
+                // report still counts in the moved track's run of refusals, as it would
+                // without the rule (the run that re-synchronises a filter).
                 snap_restore(t, slot, &moved);
+                if step == Step::Rejected {
+                    note_refusal_on_moved(t, slot, m);
+                }
             }
         }
         Resolve::Undecided => {
@@ -1360,6 +1383,20 @@ fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut
         }
     }
     t.hold_on = false;
+}
+
+/// Counts the report `m`, refused after a rollback was tried, in the run of refusals of the
+/// track as it stands (the moved one): the filter takes it as the rule-off tracker would, and
+/// only a refusal is kept (an application or a restart is not: the move stays unconfirmed).
+fn note_refusal_on_moved(t: &mut Tracker, slot: usize, m: &Measurement) {
+    let mut f = col(&t.cur, slot, blank_filter());
+    let plain = TrackerConfig {
+        confirm_moves: false,
+        ..t.cfg
+    };
+    if filter_apply(&mut f, m, &mut TrackerStats::default(), &plain) == Applied::Rejected {
+        put(&mut t.cur, slot, f);
+    }
 }
 
 /// Counts a deciding report that was not applied (its move is still unconfirmed): true then.
@@ -1389,21 +1426,26 @@ fn update_in_order_ending(
     let snapshot = track_txn(t, slot);
     let output = output_txn(out);
     let step = decide(t, slot, m);
-    if step == Step::Moved {
-        // The state from before the move is the rollback point (the update's own checkpoint);
-        // every row from here on is marked.
-        start_move(t, slot, &snap_of_txn(&snapshot), m.toa_ns);
-    } else if let (Step::Applied, Some(why)) = (step, ending) {
-        end_move(t, slot, why);
-    }
-    if !settle(t, slot, step, out) {
+    if step == Step::NumericalRefused {
+        // Nothing of the move was touched: `decide` leaves it to this commit.
         restore_track_txn(t, slot, snapshot);
         restore_output_txn(out, output);
-        if step == Step::Moved {
-            end_move(t, slot, MoveEnd::Numerical);
-        }
         return Step::NumericalRefused;
     }
+    // Committed: the move's change goes with it, before the report's row is made.
+    match (step, ending) {
+        // The state from before the move is the rollback point (the update's own checkpoint);
+        // every row from here on is marked.
+        (Step::Moved, _) => start_move(t, slot, &snap_of_txn(&snapshot), m, m.toa_ns),
+        (Step::Applied, Some(why)) => end_move(t, slot, why),
+        // The track began again or the filter was re-synchronised: nothing of the move's
+        // old path is left to compare with.
+        (Step::Begun, _) => end_move(t, slot, MoveEnd::Restarted),
+        (Step::Resynced, _) => end_move(t, slot, MoveEnd::Resync),
+        _ => {}
+    }
+    // `settle` fails only for a refused step, which returned above.
+    let _ = settle(t, slot, step, out);
     step
 }
 
@@ -1566,6 +1608,46 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     }
 }
 
+/// The track's measurement state as it was before the ring entry `first` (time of applicability
+/// and sensor): the state after the entry before it, derived as [`update_late`] derives the
+/// state after its base entry (the anchor with the entries applied again, the counts and the
+/// category from the entries held). Nothing is written. `None` if the entry is not in the ring,
+/// is its oldest (nothing before it is held), the track is not confirmed, or a numerical
+/// refusal: the rollback point cannot be derived then.
+fn snap_before_entry(t: &Tracker, slot: usize, first: (i64, u16)) -> Option<TrackSnap> {
+    let len = ring_len(t, slot);
+    let at = |j: usize| col(&t.ring_m, ring_ix(t, slot, j), blank_measurement());
+    let k = (0..len).find(|&j| (at(j).toa_ns, at(j).sensor) == first)?;
+    let e = k.checked_sub(1)?;
+    let base_ns = at(e).toa_ns;
+    if col(&t.state, slot, FREE) != CONFIRMED || col(&t.confirmed_ns, slot, i64::MIN) > base_ns {
+        return None;
+    }
+    let mut s = snap_take(t, slot);
+    s.cur = ring_state(t, slot, e)?;
+    let updates = col(&t.updates, slot, 0);
+    let mut cat = if (updates as usize) <= len {
+        CategoryState::default()
+    } else {
+        CategoryState {
+            trusted: col(&t.cat, slot, CategoryState::default()).trusted,
+            ..CategoryState::default()
+        }
+    };
+    for j in 0..=e {
+        category_observe(&mut cat, at(j).category);
+    }
+    let kept = len - (e + 1);
+    s.cat = cat;
+    s.updates = updates.saturating_sub(kept as u32).max(1);
+    s.hits = col(&t.hits, slot, 0)
+        .saturating_sub(kept.min(255) as u8)
+        .max(1);
+    s.ring_len = (e + 1) as u8;
+    s.last_ns = base_ns;
+    Some(s)
+}
+
 /// [`update_late`] with the large-move rule (RT-239) around it. A late replay that moves the
 /// current estimate of a confirmed track by more than `confirm_move_m` from where it was marks
 /// the track with the state from before the replay (`moves_late`, and the rows the replay
@@ -1585,8 +1667,14 @@ fn update_late_marked(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut T
         t.stats.duplicates,
         t.stats.numerical_refused,
     );
+    let (rs, iw, ip) = (
+        t.stats.resyncs,
+        t.stats.init_window_expired,
+        t.stats.init_implausible,
+    );
     update_late(t, slot, m, out);
-    // Nothing was replayed (older than the ring, a duplicate, or rolled back): nothing changed.
+    // Nothing was replayed (older than the ring, a duplicate, or rolled back): nothing changed,
+    // the move included (the replay does not touch it).
     if (lr, dup, nr)
         != (
             t.stats.late_ring,
@@ -1599,9 +1687,26 @@ fn update_late_marked(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut T
     if move_active(t, slot) {
         if col(&t.state, slot, FREE) != CONFIRMED {
             end_move(t, slot, MoveEnd::Demoted);
-        } else if move_snap_ix(t, slot).is_some() {
-            release_snap(t, slot);
-            t.stats.moves_rollback_lost_late += 1;
+        } else if t.stats.resyncs != rs {
+            end_move(t, slot, MoveEnd::Resync);
+        } else if (t.stats.init_window_expired, t.stats.init_implausible) != (iw, ip) {
+            end_move(t, slot, MoveEnd::Restarted);
+        } else if let Some(ix) = move_snap_ix(t, slot) {
+            // The history changed: the rollback point is derived again, as the track was
+            // before the report that made the move, from the ring now.
+            let first = (col(&t.mv_first_ns, slot, 0), col(&t.mv_first_sens, slot, 0));
+            match snap_before_entry(t, slot, first) {
+                Some(s) => {
+                    if let Some(e) = t.snaps.get_mut(ix) {
+                        *e = s;
+                    }
+                }
+                None => {
+                    // The report has left the ring (or nothing before it is held).
+                    release_snap(t, slot);
+                    t.stats.moves_rollback_lost_late += 1;
+                }
+            }
         }
         return;
     }
@@ -1615,7 +1720,7 @@ fn update_late_marked(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut T
         _ => f64::NAN,
     };
     if move_is_large(miss, t.cfg.confirm_move_m) {
-        start_move(t, slot, &before, col(&t.last_ns, slot, 0));
+        start_move(t, slot, &before, m, col(&t.last_ns, slot, 0));
         t.stats.moves_unconfirmed += 1;
         t.stats.moves_late += 1;
         let key = col(&t.key, slot, NO_ADDR);
@@ -1979,18 +2084,39 @@ pub fn tracker_live_iter(t: &Tracker) -> impl Iterator<Item = (u32, i64)> + '_ {
 /// A live track as the fusion layer sees it: the track keyed `key` predicted to `at_ns`, whether
 /// it is confirmed, and its newest update time. `None` if there is no such track, or if its position at `at_ns`
 /// cannot be represented. Nothing is stored; the filter is predicted on a copy, as for an output row.
+/// The row is as an output row is for display: a track with an unconfirmed move has the flag and
+/// the widened covariance (see [`tracker_forecast`]).
 pub fn tracker_predict(t: &Tracker, key: u32, at_ns: i64) -> Option<(OutRow, bool, i64)> {
-    tracker_predict_checked(t, key, at_ns).ok()
+    let (mut row, confirmed, last, wide) = tracker_forecast(t, key, at_ns).ok()?;
+    if let Some(w) = wide {
+        row.pos_cov_m2 = w;
+    }
+    Some((row, confirmed, last))
 }
 
-/// Forecast with a typed reason for absence or failure. Earlier query times use the newest
-/// stored state, as in `tracker_predict`. This read-only operation does not change counters;
-/// callers that discard work must record numerical or unrepresentable failures separately.
+/// Forecast with a typed reason for absence or failure, for association: the row carries the
+/// filter's own covariance, and for a track with an unconfirmed move the flag too. Earlier query
+/// times use the newest stored state, as in `tracker_predict`. This read-only operation does not
+/// change counters; callers that discard work must record numerical or unrepresentable
+/// failures separately.
 pub fn tracker_predict_checked(
     t: &Tracker,
     key: u32,
     at_ns: i64,
 ) -> Result<(OutRow, bool, i64), PredictError> {
+    tracker_forecast(t, key, at_ns).map(|(row, confirmed, last, _)| (row, confirmed, last))
+}
+
+/// A forecast: the row, whether the track is confirmed, its newest update time, and the widened
+/// covariance of a track with an unconfirmed move.
+pub type Forecast = (OutRow, bool, i64, Option<[f32; 3]>);
+
+/// A forecast with both covariances: the row has the filter's own (what association and the
+/// radar's disagreement test must use, so that a forged move can still be refuted by a plot on
+/// the old path), and for a track with an unconfirmed move the flag and, as the last element,
+/// the widened covariance for output and display (`None` if there is no move). A failure to
+/// widen is fail closed here, not counted: the call is read only.
+pub fn tracker_forecast(t: &Tracker, key: u32, at_ns: i64) -> Result<Forecast, PredictError> {
     let slot = lookup(t, key).ok_or(PredictError::NoTrack)?;
     if col(&t.state, slot, FREE) == FREE {
         return Err(PredictError::NoTrack);
@@ -2001,18 +2127,20 @@ pub fn tracker_predict_checked(
     if key >= RADAR_KEY_BASE {
         row.flags |= O_IDENTITY_UNCONFIRMED;
     }
+    let mut wide = None;
     if move_active(t, slot) {
-        // The forecast of a marked track carries the mark and the widened radius too, so that
-        // association and the radar's disagreement test see the uncertainty (a failure to widen
-        // is fail closed here, not counted: the call is read only).
+        let mut marked = row;
         let mut r95 = r95_m(&row.pos_cov_m2);
         let old = old_path_row(t, slot, at_ns.max(f.t_ns));
-        mark_row(&mut row, &mut r95, old.as_ref());
+        mark_row(&mut marked, &mut r95, old.as_ref());
+        row.flags |= O_MOVE_UNCONFIRMED;
+        wide = Some(marked.pos_cov_m2);
     }
     Ok((
         row,
         col(&t.state, slot, FREE) == CONFIRMED,
         col(&t.last_ns, slot, 0),
+        wide,
     ))
 }
 
@@ -2636,5 +2764,122 @@ mod tests {
         assert_eq!(history_snap(&t, slot), before);
         assert_same_output_bits(&out, &before_out);
         assert_only_numerical_refusal(&t, before_stats);
+    }
+
+    /// A stationary report at `t_ns` (since the start of the test clock), `dlat_e7` north.
+    fn north(t_ms: i64, dlat_e7: i32) -> Measurement {
+        let mut m = at(0, 0, 100.0);
+        m.toa_ns += t_ms * (S / 1_000);
+        m.lat_e7 = dlat_e7;
+        m
+    }
+
+    // REQ: OA-TRK-348
+    #[test]
+    fn a_late_replay_that_resyncs_and_then_refuses_numerically_keeps_the_whole_move() {
+        // A forged report at 40 s after a gap holds an unconfirmed move; reports a tenth of a
+        // second apart follow it (too soon to decide it). A late report then replays them, two
+        // of them are made to disagree with the replayed track in a way that re-synchronises the
+        // filter (at the second entry of the replay, not the first), and a later one is made to
+        // fail numerically: the replay is undone as a whole, the move with it (not ended by the
+        // resync that was undone, not unmarked).
+        let c = TrackerConfig {
+            tick_ns: 100_000 * S,
+            resync_consistent_k: 2,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..=20 {
+            tracker_update(&mut t, &at(k, 0, 100.0), &mut out);
+        }
+        for (ms, d) in [
+            (40_000, 225_000),
+            (40_100, 225_000),
+            (40_200, 225_000),
+            (40_300, 225_000),
+        ] {
+            tracker_update(&mut t, &north(ms, d), &mut out);
+        }
+        let slot = lookup(&t, ADDR).unwrap();
+        assert!(move_active(&t, slot));
+        assert_eq!(t.stats.moves_unconfirmed, 1, "{:?}", t.stats);
+        // The ring now: ..., 20 s, 40.0, 40.1, 40.2, 40.3. The late report is the base 20 s's
+        // successor, so the replay is [late, 40.0, 40.1, 40.2, 40.3].
+        let len = ring_len(&t, slot);
+        let at_ix = [3, 2, 1, 0].map(|back| ring_ix(&t, slot, len - 1 - back));
+        let ix = |back: usize| at_ix[3 - back];
+        // 40.0 and 40.1: 250 m off the replayed track, consistent with each other (rejected,
+        // then re-synchronised at the second).
+        for (back, ms) in [(3, 40_000), (2, 40_100)] {
+            let mut e = col(&t.ring_m, ix(back), blank_measurement());
+            e.lat_e7 = 22_500;
+            assert_eq!(e.toa_ns, north(ms, 0).toa_ns);
+            put(&mut t.ring_m, ix(back), e);
+        }
+        // 40.2: negative covariance, applied after the resync; 40.3 then fails to predict.
+        let anchor = filter_init(&col(&t.ring_m, ix(2), blank_measurement()), 0);
+        let mut bad = col(&t.ring_m, ix(1), blank_measurement());
+        bad.lat_e7 = 22_500;
+        let dt = (bad.toa_ns - col(&t.ring_m, ix(2), blank_measurement()).toa_ns) as f64 / S as f64;
+        let predicted = crate::hfilter::h_predict(
+            &anchor.h,
+            dt,
+            crate::hfilter::dwell_decay(dt),
+            anchor.h_mode,
+        )
+        .unwrap();
+        let negative = (-0.5 * predicted.m[1].p[0][0].min(predicted.m[1].p[1][1])) as f32;
+        bad.pos_cov_m2 = [negative, 0.0, negative];
+        put(&mut t.ring_m, ix(1), bad);
+        let mut last = col(&t.ring_m, ix(0), blank_measurement());
+        last.lat_e7 = 22_500;
+        put(&mut t.ring_m, ix(0), last);
+        let mut late = at(39, 0, 100.0);
+        late.sensor = 2;
+        let moves = |t: &Tracker| {
+            (
+                t.mv_on.clone(),
+                t.mv_start_ns.clone(),
+                t.mv_snap.clone(),
+                t.mv_live,
+                t.snap_free.clone(),
+                t.snaps
+                    .iter()
+                    .map(|e| (e.cur, e.updates, e.last_ns, e.ring_len))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (before, before_stats, before_moves) = (snap(&t), t.stats, moves(&t));
+        let before_out = out.clone();
+
+        tracker_update(&mut t, &late, &mut out);
+
+        assert_eq!(
+            t.stats.numerical_refused,
+            before_stats.numerical_refused + 1
+        );
+        assert_eq!(
+            t.stats.resyncs, before_stats.resyncs,
+            "the replay was undone"
+        );
+        assert_eq!(snap(&t), before);
+        assert!(move_active(&t, slot));
+        assert!(
+            moves(&t) == before_moves,
+            "the move, its snapshot and the pool are as they were"
+        );
+        assert_eq!(out.t_ns.len(), before_out.t_ns.len());
+        assert_eq!(
+            t.stats.moves_unconfirmed,
+            t.stats.moves_confirmed
+                + t.stats.moves_rolled_back
+                + t.stats.moves_undecided
+                + t.stats.moves_abandoned_ended
+                + t.stats.moves_abandoned_restarted
+                + t.stats.moves_abandoned_resync
+                + t.stats.moves_abandoned_demoted
+                + tracker_moves_active(&t) as u64
+        );
     }
 }

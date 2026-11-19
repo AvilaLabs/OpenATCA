@@ -1,15 +1,15 @@
 Reading GOTO program from 'oa_track-be393c5f130ea4dc__RNvNtNtNtCs54ksHOfKhD_8oa_track7tracker6proofs14rollback_paths36late_append_anchor_filter_projection.out'
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.0:
-  file crates/oa-track/src/tracker.rs line 1433 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1475 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.1:
-  file crates/oa-track/src/tracker.rs line 1452 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1494 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.2:
-  file crates/oa-track/src/tracker.rs line 1490 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1532 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.3:
-  file crates/oa-track/src/tracker.rs line 1520 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1562 column 5 function tracker::update_late
 
 Loop _RINvYINtNtNtCs8xvirJzNMvV_4core3ops5range5RangejENtNtNtNtBa_4iter6traits8iterator8Iterator8try_folduNCINvNvBL_3any5checkjNCNvNtCs54ksHOfKhD_8oa_track7tracker8ring_has0E0INtNtB8_12control_flow11ControlFlowuEEB21_.0:
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs line 2489 column 9 function <std::ops::Range<usize> as std::iter::Iterator>::try_fold::<(), {closure@std::iter::Iterator::any::check<usize, {closure@crates/oa-track/src/tracker.rs:458:32: 458:35}>::{closure#0}}, std::ops::ControlFlow<()>>

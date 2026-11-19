@@ -161,9 +161,12 @@ fn a_radar_only_track_goes_from_live_to_coasting_to_uncertain_and_is_never_absen
     assert!(seq.iter().any(|x| !x.0 && x.1));
     // Update rows count too: the radar's reports move this track by over 926 m now and then, and
     // such a row (marked as an unconfirmed move, RT-239) has its radius widened to cover the old
-    // path, so it may be uncertain.
+    // path, so it may be uncertain. The flag is checked against the radius of the row's own
+    // covariance, so the count does not rest on the flag it is a count of.
+    let over = |i: usize| r95_m_of(&out.pos_cov_m2[i]) > cfg.coast_max_r95_m;
+    assert!((0..out.t_ns.len()).all(|i| over(i) == (out.flags[i] & O_UNCERTAIN != 0)));
     assert_eq!(
         tracker_stats(&t).rows_uncertain,
-        out.flags.iter().filter(|&&f| f & O_UNCERTAIN != 0).count() as u64
+        (0..out.t_ns.len()).filter(|&i| over(i)).count() as u64
     );
 }

@@ -462,11 +462,10 @@ fn tracker_section(
         + s.moves_abandoned_ended
         + s.moves_abandoned_restarted
         + s.moves_abandoned_resync
-        + s.moves_abandoned_demoted
-        + s.moves_abandoned_numerical;
+        + s.moves_abandoned_demoted;
     let _ = writeln!(
         o,
-        "  large moves: unconfirmed {} (of which late re-filters {}), confirmed {}, rolled back {}, undecided {}, abandoned: ended {}, restarted {}, resync {}, demoted {}, numerical {}; every move ends once (all tracks are flushed at the end): {}",
+        "  large moves: unconfirmed {} (of which late re-filters {}), confirmed {}, rolled back {}, undecided {}, abandoned: ended {}, restarted {}, resync {}, demoted {}; every move ends once (all tracks are flushed at the end): {}",
         s.moves_unconfirmed,
         s.moves_late,
         s.moves_confirmed,
@@ -476,7 +475,6 @@ fn tracker_section(
         s.moves_abandoned_restarted,
         s.moves_abandoned_resync,
         s.moves_abandoned_demoted,
-        s.moves_abandoned_numerical,
         if outcomes == s.moves_unconfirmed { "yes" } else { "NO" }
     );
     let _ = writeln!(

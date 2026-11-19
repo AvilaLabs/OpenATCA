@@ -171,12 +171,15 @@ is itself applied: it agrees with the moved track (confirmed), with the old path
 the snapshot, the report applied to that), or with neither or comes after four expected report
 intervals (5 s at least), in which case the move stands. A report the gate refuses decides
 nothing and the mark stays. Every move ends in exactly one counted outcome (confirmed, rolled
-back, undecided, or abandoned because the track ended, restarted, resynchronised, was demoted or
-the update was refused), and the report prints that the count balances (OA-TRK-347 to
-OA-TRK-351). It protects against one forged or faulty report. It does not protect against a
-forger who keeps the false place up: the gate refuses reports that far from the estimate, but the
-filter's own run of refusals resynchronises it onto them, which ends the move unmarked (counted
-as abandoned, resync); only a second source (radar or multilateration, above) can refute that.
+back, undecided, or abandoned because the track ended, restarted, resynchronised or was demoted),
+and the report prints that the count balances (OA-TRK-347 to OA-TRK-351). It protects against one
+forged or faulty report. It does not protect against a forger who keeps the false place up, and
+the ways to an unmarked false track are exactly these, each counted: a second forged report at
+least 0.5 s later that agrees with the moved track and not the old path confirms the move
+(`moves_confirmed`); a report in the gate that agrees with neither path, or comes after the
+window, leaves the move standing (`moves_undecided`); and a run of consistent reports the gate
+refuses re-synchronises the filter onto them (`moves_abandoned_resync`). Only a second source
+(radar or multilateration, above) can refute any of them.
 A tentative track is not covered (its second report has no velocity and moves far from its
 prediction as a matter of course). With the pool full (a forger would need a confirmed track, a
 gap and a gate-passing report for every slot) the move is still marked, only without a

@@ -150,11 +150,11 @@ pub struct TrackerConfig {
     /// Large-move rule (RT-239): a report that passes the position gate but lies farther than
     /// this, metres, from the track's predicted position is applied but marked unconfirmed until
     /// the next report decides ([`crate::params::CONFIRM_MOVE_M`]). Positive and finite; a value of 0 is
-    /// refused, never read as "off" (`confirm_moves` turns the hold off).
+    /// refused, never read as "off" (`confirm_moves` turns the rule off).
     pub confirm_move_m: f64,
     /// A deciding report agrees with a path if within this, metres, of its prediction ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
     pub confirm_agree_m: f64,
-    /// The floor of the time a held report waits before it is discarded, ns
+    /// The floor of the time within which the next report decides a move, ns
     /// ([`crate::params::CONFIRM_WINDOW_NS`]); the window is four expected report intervals, not
     /// under this and not over `drop_after_ns`.
     /// Over 0.5 s (the least separation of the confirming report).
@@ -625,8 +625,9 @@ pub struct TrackerStats {
     /// Late re-filters that moved a confirmed track's estimate by more than `confirm_move_m`:
     /// counted in `moves_unconfirmed` too, marked with the state from before the replay.
     pub moves_late: u64,
-    /// Late re-filters while a move was unconfirmed: its snapshot no longer matches the history
-    /// and is dropped (the mark stays, a refuting report cannot roll back).
+    /// Late re-filters while a move was unconfirmed that could not derive the rollback point again
+    /// (the report that made the move is no longer in the ring, or nothing before it is held):
+    /// the snapshot is dropped, the mark stays and a refuting report cannot roll back.
     pub moves_rollback_lost_late: u64,
     /// Moves that ended with the track: it ended (dropped, expired, flushed).
     pub moves_abandoned_ended: u64,
@@ -636,15 +637,13 @@ pub struct TrackerStats {
     pub moves_abandoned_resync: u64,
     /// Moves that ended with the track demoted to tentative by a late re-filter.
     pub moves_abandoned_demoted: u64,
-    /// Moves that ended with a numerical refusal of the update that had made them.
-    pub moves_abandoned_numerical: u64,
     /// Moves applied and marked without a rollback snapshot: the pool was full.
     pub move_no_snapshot: u64,
-    /// Rows of a marked track whose widened radius could not be computed: they carry the widest
-    /// radius the format holds instead (fail closed).
+    /// Rows of a marked track whose widened radius could not be computed: they carry a radius of
+    /// [`crate::params::FAIL_CLOSED_R95_M`] (500 km) instead (fail closed).
     pub move_widen_failed: u64,
-    /// A report the filter held back as a large move although the rule was off (cannot happen):
-    /// refused and counted.
+    /// A report the filter returned as a large move although the rule was off for it (cannot
+    /// happen): refused and counted.
     pub moves_internal_refused: u64,
     /// The most tracks with an unconfirmed move at once.
     pub moves_peak_active: u64,

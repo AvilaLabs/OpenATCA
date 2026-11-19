@@ -251,7 +251,6 @@ fn arbitrary_stats() -> TrackerStats {
         moves_abandoned_restarted: kani::any(),
         moves_abandoned_resync: kani::any(),
         moves_abandoned_demoted: kani::any(),
-        moves_abandoned_numerical: kani::any(),
         move_no_snapshot: kani::any(),
         move_widen_failed: kani::any(),
         moves_internal_refused: kani::any(),
@@ -449,7 +448,6 @@ fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.moves_abandoned_restarted, b.moves_abandoned_restarted);
     assert_eq!(a.moves_abandoned_resync, b.moves_abandoned_resync);
     assert_eq!(a.moves_abandoned_demoted, b.moves_abandoned_demoted);
-    assert_eq!(a.moves_abandoned_numerical, b.moves_abandoned_numerical);
     assert_eq!(a.move_no_snapshot, b.move_no_snapshot);
     assert_eq!(a.move_widen_failed, b.move_widen_failed);
     assert_eq!(a.moves_internal_refused, b.moves_internal_refused);
@@ -1221,7 +1219,7 @@ fn any_radius(_: &[f32; 3]) -> f64 {
 // production `emit` marks the row it makes, whether or not the old path's row exists and
 // whatever the distance and radii are (stubbed to any value): a row with an old path that
 // differs from the new one is widened or left as it is, a row whose widening cannot be computed
-// gets the widest covariance and is counted. What it does not prove: the value of the widened
+// gets the fail-closed covariance (500 km) and is counted. What it does not prove: the value of the widened
 // radius (the sqrt and the scaling; the integration tests check it against the old path).
 // REQ: OA-TRK-347
 #[kani::proof]
@@ -1241,7 +1239,7 @@ fn a_move_made_by_production_marks_the_row_it_emits_and_widens_or_fails_closed()
     assert_eq!(out.t_ns.len(), 1);
     assert!(out.flags[0] & O_MOVE_UNCONFIRMED != 0);
     if t.stats.move_widen_failed == 1 {
-        assert_eq!(out.pos_cov_m2[0], WIDEST_COV);
+        assert_eq!(out.pos_cov_m2[0], FAIL_CLOSED_COV);
     }
     kani::cover!(
         t.stats.move_widen_failed == 1,
@@ -1330,16 +1328,31 @@ fn any_miss(_: &Filter, _: &Measurement) -> f64 {
     kani::any()
 }
 
+/// The filter refuses the report and changes nothing (what a refused report leaves of the run of
+/// refusals is not what these proofs are about).
+fn filter_apply_refuses(
+    _: &mut Filter,
+    _: &Measurement,
+    _: &mut TrackerStats,
+    _: &TrackerConfig,
+) -> Applied {
+    Applied::Rejected
+}
+
 // What this proves: the production `update_in_order_held` with the decision stubbed to "the
 // report is not applied" (rejected) and any distances (so any verdict): the unconfirmed move is
-// still there, no outcome is counted (confirmed, rolled back, undecided), and the track's
-// columns are exactly what they were before the call (a verdict of rollback is undone). What
-// rests on the integration tests: that a report applied by the real filter decides.
+// still there, with its snapshot, no outcome is counted (confirmed, rolled back, undecided), and
+// the columns it checks (the current filter's time, the newest update time, the update count, the
+// state and the hit count) are as they were before the call (a verdict of rollback is undone);
+// no row is made. The rest of the track's columns, and the filters and the ring, are not
+// compared here. What rests on the integration tests: that a report applied by the real filter
+// decides.
 // REQ: OA-TRK-348
 #[kani::proof]
 #[kani::solver(cadical)]
 #[kani::stub(decide, decide_rejected)]
 #[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_refuses)]
 fn a_report_that_is_not_applied_decides_nothing_whatever_the_verdict() {
     let mut t = proof_tracker_with_pool(CONFIRMED, 1);
     t.cur[PROOF_SLOT].t_ns = OLD_T;
@@ -1383,9 +1396,11 @@ fn a_report_that_is_not_applied_decides_nothing_whatever_the_verdict() {
 // category, and the current filter's time and first state value as they were before the move,
 // leaves the columns written from outside the update path (`disagree_until_ns`, `expected_ns`)
 // as they are after the move, and leaves the tracker's counters and its newest-update bound
-// alone. The whole filters and the ring are restored by the same function and covered by the
-// OA-TRK-335 component proofs on `restore_track_txn` (a proof with every float symbolic at once
-// does not fit 6 GiB).
+// alone. The whole filters and the ring come back through the same function, `snap_restore`, by
+// the three round-trip proofs below (`taking_then_restoring_a_snapshot_restores_...`: current
+// filter, anchor filter, ring), one each because a proof with every float symbolic at once does
+// not fit the memory budget. They are not the OA-TRK-335 proofs, which are of `restore_track_txn`
+// (the transaction of an update), a different function.
 // REQ: OA-TRK-349
 #[kani::proof]
 #[kani::unwind(16)]
@@ -1458,4 +1473,83 @@ fn rolling_back_restores_measurement_state_and_leaves_the_outside_columns() {
     assert_eq!(t.stats.moves_rolled_back, 1);
     // The snapshot is back in the pool.
     assert_eq!(t.snap_free.len(), 1);
+}
+
+// Round trip of the rollback point's own functions (the whole filters and the ring, one proof
+// each: a proof with all of them symbolic at once does not fit the memory budget).
+// REQ: OA-TRK-349
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn taking_then_restoring_a_snapshot_restores_the_current_filter() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.cur[PROOF_SLOT] = arbitrary_filter();
+    let expected = t.cur[PROOF_SLOT];
+    let s = snap_take(&t, PROOF_SLOT);
+    t.cur[PROOF_SLOT] = arbitrary_filter();
+    kani::cover!(
+        t.cur[PROOF_SLOT].h.m[0].x[0].to_bits() != expected.h.m[0].x[0].to_bits(),
+        "current filter differs before the snapshot is restored"
+    );
+
+    snap_restore(&mut t, PROOF_SLOT, &s);
+
+    assert_filter_bits(&t.cur[PROOF_SLOT], &expected);
+}
+
+// REQ: OA-TRK-349
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn taking_then_restoring_a_snapshot_restores_the_anchor_filter() {
+    let mut t = proof_tracker(CONFIRMED);
+    t.anchor[PROOF_SLOT] = arbitrary_filter();
+    let expected = t.anchor[PROOF_SLOT];
+    let s = snap_take(&t, PROOF_SLOT);
+    t.anchor[PROOF_SLOT] = arbitrary_filter();
+    kani::cover!(
+        t.anchor[PROOF_SLOT].h.m[0].x[0].to_bits() != expected.h.m[0].x[0].to_bits(),
+        "anchor filter differs before the snapshot is restored"
+    );
+
+    snap_restore(&mut t, PROOF_SLOT, &s);
+
+    assert_filter_bits(&t.anchor[PROOF_SLOT], &expected);
+}
+
+// REQ: OA-TRK-349
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn taking_then_restoring_a_snapshot_restores_the_ring() {
+    let mut t = proof_tracker(CONFIRMED);
+    let start = PROOF_SLOT * RING_DEPTH;
+    for k in 0..RING_DEPTH {
+        t.ring_m[start + k] = arbitrary_measurement();
+    }
+    let mut expected = [blank_measurement(); RING_DEPTH];
+    for k in 0..RING_DEPTH {
+        expected[k] = t.ring_m[start + k];
+    }
+    let (len, head) = (t.ring_len[PROOF_SLOT], t.ring_head[PROOF_SLOT]);
+    let s = snap_take(&t, PROOF_SLOT);
+    for k in 0..RING_DEPTH {
+        t.ring_m[start + k] = arbitrary_measurement();
+    }
+    kani::cover!(
+        t.ring_m[start].vel_east_mps.to_bits() != expected[0].vel_east_mps.to_bits(),
+        "ring differs before the snapshot is restored"
+    );
+    t.ring_len[PROOF_SLOT] = kani::any();
+    t.ring_head[PROOF_SLOT] = kani::any();
+
+    snap_restore(&mut t, PROOF_SLOT, &s);
+
+    for k in 0..RING_DEPTH {
+        assert_measurement_bits(&t.ring_m[start + k], &expected[k]);
+    }
+    assert_eq!(
+        (t.ring_len[PROOF_SLOT], t.ring_head[PROOF_SLOT]),
+        (len, head)
+    );
 }

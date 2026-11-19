@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 52)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 52)
+        self.assertEqual(registry["expected_proof_count"], 55)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 55)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 47)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 50)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
