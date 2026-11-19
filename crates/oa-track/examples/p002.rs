@@ -2533,7 +2533,7 @@ mod tests {
         assert!(flag_gate(dev, 5, 0, 0).is_ok());
     }
 
-    // REQ: OA-TRK-373
+    // REQ: OA-TRK-377
     #[test]
     fn a_hold_out_run_needs_the_frozen_commit_a_clean_build_and_a_clean_tree_at_it() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
