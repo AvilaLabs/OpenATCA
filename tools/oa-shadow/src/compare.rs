@@ -115,6 +115,8 @@ impl Class {
                 | Class::EramOnlySpan
                 | Class::OaOnlySpan
                 | Class::EramReportGap
+                | Class::IdBeacon
+                | Class::IdCallsign
         )
     }
 }
@@ -585,7 +587,7 @@ fn compare_group(
         let Some(p) = &r.p else { continue };
         row.compared += 1;
         totals.compared += 1;
-        compare_sample(ctx, r, p, flights, events, row, totals);
+        compare_sample(ctx, r, p, events, row, totals);
     }
 
     // Presence of OpenATCA at ERAM's reports.
@@ -678,34 +680,83 @@ fn compare_group(
         }
     }
 
-    // Callsign, once per ERAM flight against what the adapter was offered near its span.
-    for (f, _) in flights {
-        let (Some(a), Some(b)) = (f.samples.first(), f.samples.last()) else {
-            continue;
-        };
-        let offered = ac.idents_in(a.t_ms - th.segment_gap_ms, b.t_ms + th.segment_gap_ms);
-        let names: Vec<String> = {
-            let mut v: Vec<String> = offered
+    // Identity per flight: runs of reports whose beacon or callsign ERAM gave is not among those
+    // offered within the window of the report.
+    for (k, (f, _)) in flights.iter().enumerate() {
+        let mine: Vec<&Rep<'_>> = reps.iter().filter(|r| r.flight_pos == k).collect();
+        let times: Vec<i64> = mine.iter().map(|r| r.s.t_ms).collect();
+        let eram_cs = f
+            .callsign
+            .as_ref()
+            .map(callsign_text)
+            .filter(|s| !s.is_empty());
+        let mut beacon_marks: Vec<Option<String>> = Vec::new();
+        let mut call_marks: Vec<Option<String>> = Vec::new();
+        for r in &mine {
+            let t = r.s.t_ms;
+            let offered = ac.idents_in(t - th.ident_window_ms, t + th.ident_window_ms);
+            let mut codes: Vec<u16> = offered.iter().filter_map(|p| p.squawk).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            beacon_marks.push(match (f.beacon_at(t), codes.is_empty()) {
+                (Some(e), false) => {
+                    totals.beacon_compared += 1;
+                    (!codes.contains(&e)).then(|| {
+                        let o: Vec<String> = codes.iter().map(|c| format!("{c:04}")).collect();
+                        format!("eram={e:04} oa={}", o.join(","))
+                    })
+                }
+                _ => None,
+            });
+            let mut names: Vec<String> = offered
                 .iter()
                 .filter_map(|p| p.callsign.as_ref().map(callsign_text))
                 .filter(|s| !s.is_empty())
                 .collect();
-            v.sort();
-            v.dedup();
-            v
-        };
-        if let Some(cs) = f
-            .callsign
-            .as_ref()
-            .map(callsign_text)
-            .filter(|s| !s.is_empty())
-        {
-            if !names.is_empty() && !names.contains(&cs) {
-                let mut e = event(flight, Class::IdCallsign, a.t_ms);
-                e.detail = format!("eram={cs} oa={}", names.join(","));
+            names.sort();
+            names.dedup();
+            call_marks.push(match (&eram_cs, names.is_empty()) {
+                (Some(e), false) if !names.contains(e) => {
+                    Some(format!("eram={e} oa={}", names.join(",")))
+                }
+                _ => None,
+            });
+        }
+        run_events(flight, Class::IdBeacon, &times, &beacon_marks, events);
+        run_events(flight, Class::IdCallsign, &times, &call_marks, events);
+    }
+}
+
+/// One event per run of at least `ident_run` consecutive marked reports (the detail is the first
+/// marked report's); an unmarked report, agreeing or not compared, ends a run.
+fn run_events(
+    flight: u32,
+    class: Class,
+    times: &[i64],
+    marks: &[Option<String>],
+    events: &mut Vec<Event>,
+) {
+    let mut m = 0;
+    while m < marks.len() {
+        if marks.get(m).is_none_or(|x| x.is_none()) {
+            m += 1;
+            continue;
+        }
+        let mut n = m;
+        while marks.get(n + 1).is_some_and(|x| x.is_some()) {
+            n += 1;
+        }
+        if n + 1 - m >= THRESHOLDS.ident_run {
+            if let (Some(&a), Some(&b), Some(Some(d))) = (times.get(m), times.get(n), marks.get(m))
+            {
+                let mut e = event(flight, class, a);
+                e.end_ms = b;
+                e.value = seconds(padded_ms(times, m, n));
+                e.detail = format!("{d} reports={}", n + 1 - m);
                 events.push(e);
             }
         }
+        m = n + 1;
     }
 }
 
@@ -713,7 +764,6 @@ fn compare_sample(
     ctx: &Ctx<'_>,
     r: &Rep<'_>,
     p: &OaPoint,
-    flights: &[(&EramFlight, Rule)],
     events: &mut Vec<Event>,
     row: &mut FlightRow,
     totals: &mut Totals,
@@ -789,18 +839,6 @@ fn compare_sample(
                 Class::CoastOaOnly
             };
             events.push(event(flight, class, s.t_ms));
-        }
-    }
-    // Beacon per report: ERAM's code in force against the squawk the adapter had in force.
-    let eram_code = flights
-        .get(r.flight_pos)
-        .and_then(|f| f.0.beacon_at(s.t_ms));
-    if let (Some(e_code), Some(o_code)) = (eram_code, ctx.ac.squawk_at(s.t_ms)) {
-        totals.beacon_compared += 1;
-        if e_code != o_code {
-            let mut e = event(flight, Class::IdBeacon, s.t_ms);
-            e.detail = format!("eram={e_code:04} oa={o_code:04}");
-            events.push(e);
         }
     }
 }

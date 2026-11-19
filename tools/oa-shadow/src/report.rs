@@ -124,7 +124,7 @@ fn median_ms(v: &[i64]) -> Option<i64> {
 
 fn median(v: &[f64]) -> Option<f64> {
     let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     // The lower middle value.
     s.get(s.len().checked_sub(1)? / 2).copied()
 }
@@ -140,7 +140,11 @@ pub fn largest_divergences(events: &[Event], n: usize) -> Vec<(f64, u32, i64)> {
             v.push((e.horiz_m, e.flight, e.t_ms));
         }
     }
-    v.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    v.sort_by(|a, b| {
+        oa_math::cmp_canon_f64(b.0, a.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
     v.truncate(n);
     v
 }
@@ -235,7 +239,7 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
         let unit = match class {
             Class::Alt => "ft",
             Class::StartTiming | Class::DropTiming => "s",
-            Class::IdBeacon | Class::IdCallsign | Class::CoastEramOnly | Class::CoastOaOnly => "",
+            Class::CoastEramOnly | Class::CoastOaOnly => "",
             c if c.is_span() => "s",
             _ => "m",
         };

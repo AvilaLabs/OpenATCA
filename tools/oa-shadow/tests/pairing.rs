@@ -313,53 +313,128 @@ fn segments_split_on_gaps_over_the_limit_only() {
     assert_eq!(segments(&[], 30), vec![]);
 }
 
+fn ident_ms(t_ms: i64, squawk: u16) -> oa_shadow::model::IdentPoint {
+    oa_shadow::model::IdentPoint {
+        t_ms: T0 + t_ms,
+        squawk: Some(squawk),
+        callsign: None,
+    }
+}
+
+fn beacon_run(change_ms: i64, reports: &[i64]) -> usize {
+    // OpenATCA was offered 1200 from the start and 2000 from `change_ms`; ERAM says 2000.
+    let mut oa = oa_north(1, 0, 200, 100.0);
+    oa.idents = vec![ident_ms(0, 1200), ident_ms(change_ms, 2000)];
+    let mut f = flight(
+        Some(1),
+        reports
+            .iter()
+            .map(|&t| eram_at(t, t as f64, 100.0, 0.0, 0.0))
+            .collect(),
+    );
+    f.beacons = vec![(T0, 2000)];
+    let c = compare_all(&[f], &oa_map(vec![oa]), None);
+    count(&c, Class::IdBeacon)
+}
+
 // REQ: OA-SHD-007
 #[test]
-fn beacon_is_compared_per_report_with_the_code_in_force_on_each_side() {
-    let mut oa = oa_north(1, 0, 120, 100.0);
-    oa.idents = vec![
-        ident(0, Some(1200), Some("N123AB")),
-        ident(60, Some(2000), None),
-    ];
-    let mk = |beacons: Vec<(i64, u16)>, cs: Option<&str>| {
-        let mut f = track(Some(1), 12, 108);
-        f.beacons = beacons;
-        f.callsign = cs.map(cs8);
-        compare_all(&[f], &oa_map(vec![oa.clone()]), None)
-    };
-    // Agreeing at every report, ERAM changing code when OpenATCA's squawk changes.
-    let c = mk(vec![(T0, 1200), (T0 + 60_000, 2000)], Some("n123ab"));
-    assert_eq!(
-        (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
-        (0, 0)
-    );
-    assert_eq!(c.totals.beacon_compared, 9);
-    // ERAM's code is only in force from its message: a report before the first message has none.
-    let c = mk(vec![(T0 + 30_000, 1200)], None);
-    assert_eq!(c.totals.beacon_compared, 7);
-    assert_eq!(count(&c, Class::IdBeacon), 5); // reports 60..=108 s disagree with 2000
-                                               // Disagreeing at every report, and on the callsign.
-    let c = mk(vec![(T0, 7000)], Some("DAL9"));
-    assert_eq!(count(&c, Class::IdBeacon), 9);
-    assert_eq!(count(&c, Class::IdCallsign), 1);
-    assert_eq!(of(&c, Class::IdBeacon)[0].detail, "eram=7000 oa=1200");
-    assert_eq!(of(&c, Class::IdBeacon)[8].detail, "eram=7000 oa=2000");
-    assert_eq!(of(&c, Class::IdCallsign)[0].detail, "eram=DAL9 oa=N123AB");
-    // Nothing to compare where either side has none.
-    let c = mk(vec![], None);
-    assert_eq!(
-        (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
-        (0, 0)
-    );
-    let mut bare = oa.clone();
-    bare.idents.clear();
+fn a_beacon_disagrees_only_beyond_the_60_second_window_for_three_reports() {
+    // Reports at 12, 24, 36 s. 2000 is offered within +-60 s of a report when the change is at
+    // or before report + 60 s. A change at 96.000 s is exactly 60 s after the 36 s report: that
+    // report agrees, leaving two disagreeing reports (12, 24) which are not a run.
+    assert_eq!(beacon_run(96_000, &[12, 24, 36]), 0);
+    // One millisecond later all three disagree: one event.
+    assert_eq!(beacon_run(96_001, &[12, 24, 36]), 1);
+    // Two reports are never enough, however far off.
+    assert_eq!(beacon_run(150_000, &[12, 24]), 0);
+    // A change much later: three reports of one flight, one event not three.
+    assert_eq!(beacon_run(190_000, &[12, 24, 36, 48]), 1);
+}
+
+// REQ: OA-SHD-007
+#[test]
+fn a_beacon_run_is_one_event_with_its_span_and_the_codes() {
+    let mut oa = oa_north(1, 0, 200, 100.0);
+    oa.idents = vec![ident_ms(0, 1200)];
     let mut f = track(Some(1), 12, 108);
     f.beacons = vec![(T0, 7000)];
-    f.callsign = Some(cs8("DAL9"));
-    let c = compare_all(&[f], &oa_map(vec![bare]), None);
+    let c = compare_all(&[f.clone()], &oa_map(vec![oa.clone()]), None);
+    let e = of(&c, Class::IdBeacon);
+    assert_eq!(e.len(), 1);
+    assert_eq!((e[0].t_ms, e[0].end_ms), (T0 + 12_000, T0 + 108_000));
+    assert_eq!(e[0].value, 108.0); // 96 s plus half of 12 s each end
+    assert_eq!(e[0].detail, "eram=7000 oa=1200 reports=9");
+    assert_eq!(c.totals.beacon_compared, 9);
+    // Agreeing, no ERAM code, or no OpenATCA squawk: nothing.
+    f.beacons = vec![(T0, 1200)];
     assert_eq!(
-        (count(&c, Class::IdBeacon), count(&c, Class::IdCallsign)),
-        (0, 0)
+        count(
+            &compare_all(&[f.clone()], &oa_map(vec![oa.clone()]), None),
+            Class::IdBeacon
+        ),
+        0
+    );
+    f.beacons.clear();
+    assert_eq!(
+        count(
+            &compare_all(&[f.clone()], &oa_map(vec![oa.clone()]), None),
+            Class::IdBeacon
+        ),
+        0
+    );
+    f.beacons = vec![(T0, 7000)];
+    oa.idents.clear();
+    assert_eq!(
+        count(&compare_all(&[f], &oa_map(vec![oa]), None), Class::IdBeacon),
+        0
+    );
+}
+
+// REQ: OA-SHD-007
+#[test]
+fn a_callsign_disagrees_by_the_same_window_and_run_rule() {
+    let mk = |n: usize, cs: &str| {
+        let mut oa = oa_north(1, 0, 200, 100.0);
+        oa.idents = vec![ident(0, None, Some("N123AB"))];
+        let mut f = flight(
+            Some(1),
+            (1..=n as i64)
+                .map(|k| eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, 0.0))
+                .collect(),
+        );
+        f.callsign = Some(cs8(cs));
+        compare_all(&[f], &oa_map(vec![oa]), None)
+    };
+    assert_eq!(count(&mk(2, "DAL9"), Class::IdCallsign), 0);
+    let c = mk(3, "DAL9");
+    assert_eq!(count(&c, Class::IdCallsign), 1);
+    assert_eq!(
+        of(&c, Class::IdCallsign)[0].detail,
+        "eram=DAL9 oa=N123AB reports=3"
+    );
+    // Case and padding are ignored.
+    assert_eq!(count(&mk(5, "n123ab"), Class::IdCallsign), 0);
+    // A callsign offered by a point within 60 s counts as offered.
+    let mut oa = oa_north(1, 0, 200, 100.0);
+    oa.idents = vec![
+        ident(0, None, Some("N123AB")),
+        ident(96, None, Some("DAL9")),
+    ];
+    let mut f = flight(
+        Some(1),
+        (1..=3)
+            .map(|k| eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, 0.0))
+            .collect(),
+    );
+    f.callsign = Some(cs8("DAL9"));
+    // The 36 s report sees the 96 s point (exactly 60 s): 2 disagreeing reports, no run.
+    assert_eq!(
+        count(
+            &compare_all(&[f], &oa_map(vec![oa]), None),
+            Class::IdCallsign
+        ),
+        0
     );
 }
 

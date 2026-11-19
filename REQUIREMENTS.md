@@ -3303,7 +3303,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
 - **OA-BENCH-133** The flight table keeps the last transponder code an SFDPS message gave
   (`currentBeaconCode`, four octal digits read as a decimal number like the ADS-B squawk) in `Flights::beacon`, and
   `NO_BEACON` when no message carried one; a message without a valid code leaves the stored one.
-- **OA-BENCH-133** `Legacy::beacons` holds one row (flight, message time, code) each time a message gives a flight a
+- **OA-BENCH-134** `Legacy::beacons` holds one row (flight, message time, code) each time a message gives a flight a
   code other than the one it had, the first code included, so the code in force at a time is the last row of the
   flight at or before it. The table is capped; a row that does not fit is counted under the notes.
 
@@ -5060,10 +5060,12 @@ value is a difference only when strictly greater than it.
   altitude; the others are counted as not comparable. Each event names the band of ERAM's altitude (below or at or
   above 18,000 ft), and the summary gives the event counts and the median signed difference of both bands (no
   altimeter setting is applied).
-- **OA-SHD-007** Identity: at each report, ERAM's beacon code in force (each message's code carried forward) is
-  compared with the squawk in force that the OpenATCA adapter was offered (`ID_BEACON`, nothing is compared where
-  either side has none); an ERAM callsign not among the callsigns offered near the flight's span is `ID_CALLSIGN`
-  (case and padding ignored).
+- **OA-SHD-007** Identity: a report disagrees on the beacon when ERAM's code in force (each message's code carried
+  forward) differs from every squawk the OpenATCA adapter was offered within +-60 s of the report time (inclusive,
+  the one in force at the window start included); a disagreement counts only when it lasts at least 3 consecutive
+  reports of the ERAM flight, and each such run is one `ID_BEACON` event with its span (the first report's codes in
+  the detail). Nothing is compared where either side has no code, and a report that agrees or is not compared ends
+  a run. `ID_CALLSIGN` is the same for ERAM's callsign against the callsigns offered (case and padding ignored).
 - **OA-SHD-008** A paired aircraft's ERAM track segment (gaps over 30 s split segments) and the OpenATCA segment it
   overlaps most differ in start or in drop by more than 12 s plus the ERAM report interval at that end (to the next
   or previous report of the segment): `START_TIMING`, `DROP_TIMING`, with the direction. The summary prints the

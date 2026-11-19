@@ -55,7 +55,7 @@ fn the_flight_keeps_its_last_beacon_code_and_none_when_never_given() {
     assert_eq!(leg.flights.beacon[1], NO_BEACON);
 }
 
-// REQ: OA-BENCH-133
+// REQ: OA-BENCH-134
 #[test]
 fn beacon_changes_are_kept_with_their_message_time() {
     let mut leg = new_legacy();

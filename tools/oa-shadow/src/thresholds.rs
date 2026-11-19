@@ -28,6 +28,11 @@ pub struct Thresholds {
     pub pair_radius_m: f64,
     /// Below this ground speed the direction of travel is undefined, metres per second (2 kt).
     pub low_speed_mps: f64,
+    /// Identity: a report disagrees only if ERAM's code differs from every code the OpenATCA
+    /// adapter was offered within this of the report time, milliseconds (publication lag) ...
+    pub ident_window_ms: i64,
+    /// ... and the disagreement lasts at least this many consecutive reports.
+    pub ident_run: usize,
     /// An address-paired ERAM flight farther than this from the paired aircraft, metres, for at
     /// least `contradict_run` consecutive reports contradicts its address.
     pub contradict_m: f64,
@@ -46,6 +51,8 @@ pub const THRESHOLDS: Thresholds = Thresholds {
     eram_time_quant_ms: 1_000,
     pair_radius_m: 5.0 * M_PER_NM,
     low_speed_mps: 2.0 * M_PER_NM / 3600.0,
+    ident_window_ms: 60_000,
+    ident_run: 3,
     contradict_m: 20.0 * M_PER_NM,
     contradict_run: 3,
     tie_m: 1.0,
@@ -108,6 +115,11 @@ impl Thresholds {
             format!(
                 "direction of travel undefined below {:.2} m/s (2 kt): the whole separation counts as cross-track",
                 self.low_speed_mps
+            ),
+            format!(
+                "identity (beacon, callsign): ERAM's value differs from every value offered within +-{} s of the report, for {} or more consecutive reports",
+                self.ident_window_ms / 1000,
+                self.ident_run
             ),
             format!(
                 "address contradicts track: ERAM position over {:.0} NM from the paired aircraft for {} or more consecutive reports",
