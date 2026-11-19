@@ -10,10 +10,11 @@
 use std::path::PathBuf;
 
 use crate::cli::{self, Command, Source};
+use crate::format_summary;
 use crate::frame::{encode_frame, ErrorKind, Frame, FrameError, Kind};
 use crate::health::{
-    format_summary, lat_bin, lat_bin_upper_ms, latency_quantile_ms, observe_error, observe_frame,
-    observe_skipped, rates_milli, FeedHealth, LAT_BINS, STATE_CONNECTED, STATE_DISCONNECTED,
+    lat_bin, lat_bin_upper_ms, latency_quantile_ms, observe_error, observe_frame, observe_skipped,
+    rates_milli, FeedHealth, LAT_BINS, STATE_CONNECTED, STATE_DISCONNECTED,
 };
 use crate::reader::FrameReader;
 use crate::record::{format_recording, utc_stamp, Format, Opener, Outcome, Recorder};

@@ -1,4 +1,4 @@
-//! Reading a whole OAF1 stream through one [`FrameReader`]. Shell: owns the buffers and the
+//! Reading a whole OAF1 stream through one [`FrameReader`]. Shell (B7): owns the buffers and the
 //! reads; the framing is [`crate::reader`]'s.
 //!
 //! The one loop the loaders of recorded ADS-B clips share, so that none of them can forget the

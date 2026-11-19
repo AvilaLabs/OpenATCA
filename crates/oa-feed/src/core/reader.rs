@@ -1,4 +1,4 @@
-//! Streaming frame decoder with resynchronisation. Core (pure): no I/O, no clock, and no
+//! Streaming frame decoder with resynchronisation. Core (pure, B7): no I/O, no clock, and no
 //! allocation; it works in a buffer the caller supplies once.
 //!
 //! Bytes go in through [`FrameReader::push`] in any chunking; [`FrameReader::next`] yields

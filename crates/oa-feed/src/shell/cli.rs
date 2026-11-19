@@ -1,4 +1,4 @@
-//! Command-line parsing for `oa-feed`. Core (pure): a function from arguments to a command.
+//! Command-line parsing for `oa-feed`. Shell (B1, B7): a function from arguments to a command that allocates (`String`, `PathBuf`); not real-time core.
 //!
 //! ```text
 //! oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>]

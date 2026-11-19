@@ -1,4 +1,4 @@
-//! OAF1 and OAF2 frame layout, decoded-frame and error types, and a tiny encoder. Core (pure).
+//! OAF1 and OAF2 frame layout, decoded-frame and error types, and a tiny encoder. Core (pure, B7).
 //!
 //! Layout (all integers little-endian): magic `OAF1` (4), kind u8, flags u8, reserved u16 (0),
 //! seq u64, recv_unix_ns i64, jms_timestamp_ms i64, payload_len u32, payload, crc32 u32 over
