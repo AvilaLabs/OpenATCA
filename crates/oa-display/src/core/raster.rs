@@ -156,7 +156,7 @@ fn draw_line(c: &mut Canvas<'_>, bytes: [u8; 4], p0: (i64, i64), p1: (i64, i64))
         (m1, n1, m0, n0)
     };
     let dm = m1 - m0;
-    let dn = n1 - n0;
+    let dn: i64 = n1 - n0;
     let adn = dn.abs();
     let sgn = dn.signum();
     let (m_size, n_size) = if steep { (c.h, c.w) } else { (c.w, c.h) };

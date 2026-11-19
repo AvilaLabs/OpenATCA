@@ -176,7 +176,7 @@ fn rank_of(buf: &mut [f64], p: u64) -> f64 {
         return f64::NAN;
     }
     let k = (p * n).div_ceil(100).clamp(1, n) as usize - 1;
-    let (_, v, _) = buf.select_nth_unstable_by(k, f64::total_cmp);
+    let (_, v, _) = buf.select_nth_unstable_by(k, |a, b| oa_math::cmp_canon_f64(*a, *b));
     *v
 }
 
@@ -195,7 +195,7 @@ fn stat3(buf: &mut [f64]) -> [f64; 3] {
 /// Signed nearest-rank percentile of a sorted copy.
 fn signed_rank(v: &[f64], p: u64) -> f64 {
     let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     rank_of(&mut s, p)
 }
 
@@ -579,7 +579,7 @@ fn interval(v: impl Iterator<Item = f64>) -> (f64, f64) {
     if s.is_empty() {
         return (f64::NAN, f64::NAN);
     }
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let n = s.len() as u64;
     let lo = ((25 * n).div_ceil(1000)).clamp(1, n) as usize - 1;
     let hi = ((975 * n).div_ceil(1000)).clamp(1, n) as usize - 1;

@@ -48,7 +48,7 @@ pub fn dist_of(v: &[f64]) -> Dist {
     if s.is_empty() {
         return Dist::EMPTY;
     }
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let n = s.len();
     Dist {
         n,
@@ -73,7 +73,7 @@ pub fn dist_weighted(items: &[(f64, u64)]) -> Dist {
     if s.is_empty() {
         return Dist::EMPTY;
     }
-    s.sort_by(|a, b| f64::total_cmp(&a.0, &b.0));
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(a.0, b.0));
     let total: u64 = s.iter().map(|x| x.1).sum();
     let at = |q: f64| -> f64 {
         let want = ((q * total as f64 - 1.0e-9).ceil().max(1.0)) as u64;

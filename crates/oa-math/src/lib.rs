@@ -128,6 +128,7 @@ pub use nan::{canon_nan, canon_nan_f32};
 pub use order::{
     clamp_f32, clamp_f64, cmp_canon_f32, cmp_canon_f64, copysign_canon_f32, copysign_canon_f64,
     is_sign_negative_canon_f32, is_sign_negative_canon_f64, max_f32, max_f64, min_f32, min_f64,
+    signum_canon_f32, signum_canon_f64,
 };
 pub use pow::{pow, powi};
 pub use rem::rem_euclid;

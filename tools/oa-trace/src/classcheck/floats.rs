@@ -20,6 +20,8 @@ pub struct FloatFacts {
     pub fields: BTreeSet<String>,
     /// Tuple structs: name -> indexes of the fields that are floats (`struct P(f64, u8)` -> {0}).
     pub tuples: BTreeMap<String, BTreeSet<usize>>,
+    /// Tuple structs: name -> indexes of the fields declared with an integer type.
+    pub int_tuples: BTreeMap<String, BTreeSet<usize>>,
     /// What each function name returns, over every function of that name (see [`Agg`]).
     pub rets: BTreeMap<String, Vec<Agg>>,
     /// Type aliases whose body mentions a float: `type V3 = [f64; 3];`, `type P = (f64, f64);`,
@@ -27,6 +29,10 @@ pub struct FloatFacts {
     pub aliases: BTreeMap<String, Agg>,
     /// Named struct fields declared with an alias-looking type: field -> the type names.
     pub field_types: BTreeMap<String, BTreeSet<String>>,
+    /// Named struct fields declared with an integer type (`seq: u64`, `ids: Vec<u32>`, `[u8; 4]`).
+    pub int_fields: BTreeSet<String>,
+    /// `const` and `static` names declared with an integer type.
+    pub int_consts: BTreeSet<String>,
     /// `const` and `static` names declared `f64` or `f32`.
     pub consts: BTreeSet<String>,
 }
@@ -43,6 +49,8 @@ impl FloatFacts {
                 "const" | "static" if is_word(s(&toks, i + 1)) && s(&toks, i + 2) == ":" => {
                     if declared_float(&toks, i + 2) == Some(Shape::Scalar) {
                         self.consts.insert(s(&toks, i + 1).to_string());
+                    } else if type_is_int(&toks, i + 3) {
+                        self.int_consts.insert(s(&toks, i + 1).to_string());
                     }
                 }
                 _ => {}
@@ -62,6 +70,9 @@ impl FloatFacts {
                     if declared_float(toks, k).is_some() && is_word(s(toks, k - 1)) {
                         self.fields.insert(s(toks, k - 1).to_string());
                     } else if s(toks, k) == ":" && is_word(s(toks, k - 1)) {
+                        if type_is_int(toks, k + 1) {
+                            self.int_fields.insert(s(toks, k - 1).to_string());
+                        }
                         let end = (k + 1..toks.len())
                             .find(|&m| matches!(s(toks, m), "," | "}"))
                             .unwrap_or(toks.len());
@@ -77,6 +88,18 @@ impl FloatFacts {
             "(" => {
                 let end = skip_group(toks, open);
                 let idx = tuple_float_indexes(toks, open + 1, end.saturating_sub(1));
+                let ints: BTreeSet<usize> = chunks(toks, open + 1, end.saturating_sub(1))
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, (a, b))| type_is_int(toks, *a) && *a < *b)
+                    .map(|(n, _)| n)
+                    .collect();
+                if !ints.is_empty() {
+                    self.int_tuples
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(ints);
+                }
                 if !idx.is_empty() {
                     self.tuples.entry(name).or_default().extend(idx);
                 }
@@ -164,6 +187,13 @@ impl FloatFacts {
         })
     }
 
+    /// Whether every function of this name that the core crates declare returns an integer.
+    pub fn int_fn(&self, name: &str) -> bool {
+        self.rets.get(name).is_some_and(|v| {
+            !v.is_empty() && v.iter().all(|a| self.resolve(a, 0) == Some(Agg::Int))
+        })
+    }
+
     /// What every function of this name returns when it is a float aggregate: an array, `Vec` or
     /// `Option` of floats, or a tuple (the indexes that are floats in all of them).
     pub(super) fn agg_ret(&self, name: &str) -> Option<Agg> {
@@ -220,6 +250,28 @@ impl FloatFacts {
     }
 }
 
+/// Whether the type that starts at `toks[from]` (up to the next `,`, `)`, `=`, `;`, `{` or `|` outside
+/// brackets) mentions an integer type and no float: `u64`, `&u8`, `Option<u32>`, `[u8; 4]`, `Vec<u16>`.
+fn type_is_int(toks: &[Tok], from: usize) -> bool {
+    let (mut int, mut float) = (false, false);
+    let mut depth = 0usize;
+    let mut k = from;
+    while k < toks.len() {
+        match s(toks, k) {
+            "(" | "[" | "<" => depth += 1,
+            ")" | "]" if depth == 0 => break,
+            ")" | "]" => depth -= 1,
+            ">" if s(toks, k.wrapping_sub(1)) != "-" => depth = depth.saturating_sub(1),
+            "," | "=" | ";" | "{" | "|" if depth == 0 => break,
+            w if INT_TYPES.contains(&w) && s(toks, k + 1) != "::" => int = true,
+            "f32" | "f64" if s(toks, k + 1) != "::" => float = true,
+            _ => {}
+        }
+        k += 1;
+    }
+    int && !float
+}
+
 /// What a type is, as far as floats go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Agg {
@@ -233,6 +285,8 @@ pub enum Agg {
     Wrap(Box<Agg>),
     /// A path type that may be an alias (`V3`, `crate::P`): the last segment.
     Alias(String),
+    /// An integer type: `u64`, `usize`..
+    Int,
     /// Anything else, `()` included.
     Other,
 }
@@ -246,6 +300,9 @@ fn parse_type(toks: &[Tok], from: usize, to: usize) -> Agg {
     let w = s(toks, j);
     if matches!(w, "f32" | "f64") && s(toks, j + 1) != "::" {
         return Agg::Scalar;
+    }
+    if INT_TYPES.contains(&w) && s(toks, j + 1) != "::" {
+        return Agg::Int;
     }
     if w == "(" {
         let end = skip_group(toks, j);
@@ -394,6 +451,8 @@ fn tuple_float_indexes(toks: &[Tok], from: usize, to: usize) -> BTreeSet<usize> 
 enum Bind {
     Scalar,
     Container,
+    /// Declared with an integer type, or bound to an expression that is an integer.
+    Int,
     /// Bound to something that is not a float (an untyped `let` whose value shows no float, a
     /// `for` variable): it hides an earlier float of the same name.
     Other,
@@ -448,6 +507,37 @@ const AMBIGUOUS: &[&str] = &[
     "pow",
     "rem_euclid",
     "div_euclid",
+];
+/// Methods whose result is an integer, whatever the receiver is.
+const INT_METHODS: &[&str] = &[
+    "to_bits",
+    "len",
+    "count",
+    "count_ones",
+    "count_zeros",
+    "leading_zeros",
+    "trailing_zeros",
+    "abs_diff",
+    "unsigned_abs",
+];
+/// Integer methods that keep the integer type of the receiver.
+const INT_KEEP: &[&str] = &[
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "wrapping_neg",
+    "wrapping_shl",
+    "wrapping_shr",
+    "saturating_add",
+    "saturating_sub",
+    "saturating_mul",
+    "rotate_left",
+    "rotate_right",
+    "swap_bytes",
+    "reverse_bits",
+    "pow",
+    "min",
+    "max",
 ];
 /// Methods that hand the receiver's type through.
 const PASSTHROUGH: &[&str] = &[
@@ -624,6 +714,9 @@ impl<'a> Evidence<'a> {
                     j += 1;
                 }
                 let name = s(toks, m - 1).to_string();
+                if type_is_int(toks, m + 1) {
+                    sc.binds.push((m - 1, name.clone(), Bind::Int));
+                }
                 if s(toks, j) == "(" {
                     let end = skip_group(toks, j);
                     let idx = tuple_float_indexes(toks, j + 1, end.saturating_sub(1));
@@ -640,6 +733,7 @@ impl<'a> Evidence<'a> {
                     if head.starts_with(|c: char| c.is_ascii_uppercase()) {
                         match self.facts.alias_shape(head) {
                             Some(Agg::Scalar) => sc.binds.push((m - 1, name.clone(), Bind::Scalar)),
+                            Some(Agg::Int) => sc.binds.push((m - 1, name.clone(), Bind::Int)),
                             Some(Agg::Container) => {
                                 sc.binds.push((m - 1, name.clone(), Bind::Container));
                             }
@@ -746,6 +840,7 @@ impl<'a> Evidence<'a> {
                                 add.push((k, name, Bind::Other));
                             }
                             Agg::Scalar => add.push((k, name, Bind::Scalar)),
+                            Agg::Int => add.push((k, name, Bind::Int)),
                             _ => add.push((k, name, Bind::Container)),
                         }
                     } else if init_is_tuple && chunks(toks, init_from + 1, k - 1).len() > 1 {
@@ -761,6 +856,8 @@ impl<'a> Evidence<'a> {
                     } else {
                         let bind = if self.mentions_in(n, init_from, k) {
                             Bind::Scalar
+                        } else if k > init_from && self.int_recv(k - 1, 0) {
+                            Bind::Int
                         } else {
                             Bind::Other
                         };
@@ -820,7 +917,7 @@ impl<'a> Evidence<'a> {
                 .is_some_and(|(_, _, b)| match b {
                     Bind::Scalar => true,
                     Bind::Container => !scalar_only,
-                    Bind::Other => false,
+                    Bind::Int | Bind::Other => false,
                 })
         };
         match only {
@@ -1052,6 +1149,135 @@ impl<'a> Evidence<'a> {
         false
     }
 
+    /// Whether `name` at token `i` is bound to an integer (or a container of them) by the last
+    /// binding before `i`.
+    fn declared_int(&self, i: usize, name: &str) -> bool {
+        self.scopes_at(i).any(|f| {
+            f.binds
+                .iter()
+                .filter(|(p, n, _)| n == name && *p <= i)
+                .max_by_key(|(p, _, _)| *p)
+                .is_some_and(|(_, _, b)| *b == Bind::Int)
+        })
+    }
+
+    /// Whether the receiver expression that ends at `toks[end]` is an integer, or a float made
+    /// canonical, by shape: an integer literal with a suffix, a group that ends in `as <integer>`,
+    /// `u64::from(..)`, a call of `to_bits` or `oa_math::canon_nan*`, a name, parameter or field
+    /// declared with an integer type, a function declared to return one. Anything else is not
+    /// known to be an integer.
+    pub(super) fn recv_is_int(&self, end: usize) -> bool {
+        self.int_recv(end, 0)
+    }
+
+    fn int_recv(&self, end: usize, depth: usize) -> bool {
+        let toks = self.toks;
+        if depth > 8 {
+            return false;
+        }
+        let t = s(toks, end);
+        match t {
+            ")" => {
+                let Some(open) = open_of(toks, end) else {
+                    return false;
+                };
+                let name = s(toks, open.wrapping_sub(1));
+                if open >= 1 && is_word(name) && !NOT_CALLEE.contains(&name) {
+                    let before = s(toks, open.wrapping_sub(2));
+                    if before == "." {
+                        if INT_METHODS.contains(&name) {
+                            return true;
+                        }
+                        (INT_KEEP.contains(&name) || PASSTHROUGH.contains(&name))
+                            && open >= 3
+                            && self.int_recv(open - 3, depth + 1)
+                    } else if before == "::" {
+                        let qual = s(toks, open.wrapping_sub(3));
+                        (INT_TYPES.contains(&qual)
+                            && matches!(
+                                name,
+                                "from" | "from_le_bytes" | "from_be_bytes" | "from_ne_bytes"
+                            ))
+                            || (qual == "oa_math" && matches!(name, "canon_nan" | "canon_nan_f32"))
+                            || (module_qualifier(qual) && self.facts.int_fn(name))
+                    } else {
+                        self.facts.int_fn(name)
+                    }
+                } else if open >= 1 && s(toks, open - 1) == ">" {
+                    false
+                } else {
+                    // `(expr as u64)`
+                    self.ends_in_int_cast(open + 1, end)
+                }
+            }
+            "]" => match open_of(toks, end) {
+                Some(open) if open >= 1 => self.int_recv(open - 1, depth + 1),
+                _ => false,
+            },
+            _ if INT_TYPES.contains(&t) && s(toks, end.wrapping_sub(1)) == "as" => true,
+            _ if t.starts_with(|c: char| c.is_ascii_digit())
+                && s(toks, end.wrapping_sub(1)) == "." =>
+            {
+                self.int_tuple_field(end)
+            }
+            _ if t.starts_with(|c: char| c.is_ascii_digit()) => integer_literal(t),
+            _ if is_word(t) => {
+                let prev = s(toks, end.wrapping_sub(1));
+                if dot_access(toks, end) {
+                    self.facts.int_fields.contains(t) && !self.facts.fields.contains(t)
+                } else if prev == "::" {
+                    (INT_TYPES.contains(&s(toks, end.wrapping_sub(2)))
+                        && matches!(t, "MAX" | "MIN" | "BITS"))
+                        || self.facts.int_consts.contains(t)
+                } else {
+                    self.declared_int(end, t) || self.facts.int_consts.contains(t)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `toks[k]`, a number after `.`, is an integer field of a tuple struct: `self.0` in
+    /// an impl of it, or `p.0` of a name typed with it, and no tuple struct of that name has a
+    /// float there.
+    fn int_tuple_field(&self, k: usize) -> bool {
+        let Ok(idx) = s(self.toks, k).parse::<usize>() else {
+            return false;
+        };
+        let base = s(self.toks, k.wrapping_sub(2));
+        if !is_word(base) || self.tuple_field_float(k, None) {
+            return false;
+        }
+        let in_struct = |ty: &str| {
+            self.facts
+                .int_tuples
+                .get(ty)
+                .is_some_and(|t| t.contains(&idx))
+                && !self.facts.tuples.get(ty).is_some_and(|t| t.contains(&idx))
+        };
+        if base == "self" {
+            return self.impl_head(k).is_some_and(in_struct);
+        }
+        self.scopes_at(k)
+            .any(|f| f.types.get(base).is_some_and(|ty| in_struct(ty)))
+    }
+
+    /// Whether the last top-level `as T` of `toks[lo..hi]` casts to an integer and ends it.
+    fn ends_in_int_cast(&self, lo: usize, hi: usize) -> bool {
+        let toks = self.toks;
+        let mut depth = 0usize;
+        let mut last = None;
+        for k in lo..hi {
+            match s(toks, k) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                "as" if depth == 0 => last = Some(k),
+                _ => {}
+            }
+        }
+        last.is_some_and(|k| INT_TYPES.contains(&s(toks, k + 1)) && k + 2 == hi)
+    }
+
     /// Whether the receiver expression that ends at `toks[end]` (the token before a `.` or
     /// `::`) is a float, by shape: the last step of the chain decides.
     pub(super) fn recv_is_float(&self, end: usize) -> bool {
@@ -1172,4 +1398,28 @@ fn binding_name(toks: &[Tok], from: usize, to: usize) -> Option<String> {
         j += 1;
     }
     (j + 1 == to && is_word(s(toks, j)) && s(toks, j) != "_").then(|| s(toks, j).to_string())
+}
+
+/// Whether the number token `t` is an integer literal: digits (or `0x`, `0o`, `0b` digits) and
+/// underscores, with an optional integer suffix; a `.`, an exponent or an `f32`/`f64` suffix
+/// makes it a float.
+fn integer_literal(t: &str) -> bool {
+    let body = INT_TYPES
+        .iter()
+        .find_map(|i| t.strip_suffix(i))
+        .unwrap_or(t);
+    let hex = body.starts_with("0x");
+    let digits = body
+        .trim_start_matches("0x")
+        .trim_start_matches("0o")
+        .trim_start_matches("0b");
+    !digits.is_empty()
+        && digits.chars().all(|c| {
+            c == '_'
+                || if hex {
+                    c.is_ascii_hexdigit()
+                } else {
+                    c.is_ascii_digit()
+                }
+        })
 }

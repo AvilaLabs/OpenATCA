@@ -92,6 +92,26 @@ pub(super) fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
 
 /// The functions that make a float's bits canonical (RULESET B8).
 const CANON: &[&str] = &["canon_nan", "canon_nan_f32"];
+/// Every `oa_math` helper that core code must reach by qualified path (RULESET B8): the NaN
+/// canonicalisers and each public function of `order.rs` (a test keeps this list whole).
+pub const HELPERS: &[&str] = &[
+    "canon_nan",
+    "canon_nan_f32",
+    "cmp_canon_f64",
+    "cmp_canon_f32",
+    "is_sign_negative_canon_f64",
+    "is_sign_negative_canon_f32",
+    "copysign_canon_f64",
+    "copysign_canon_f32",
+    "signum_canon_f64",
+    "signum_canon_f32",
+    "min_f64",
+    "min_f32",
+    "max_f64",
+    "max_f32",
+    "clamp_f64",
+    "clamp_f32",
+];
 const BYTES: &[&str] = &["to_le_bytes", "to_be_bytes", "to_ne_bytes"];
 
 /// Whether `toks[i]` starts a call of `canon_nan(..)` or `canon_nan_f32(..)`, bare or through
@@ -130,67 +150,53 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
     let ev = Evidence::new(toks, ctx.floats);
     let is_math_root =
         |w: &str| w == "oa_math" || ctx.aliases.get(w).is_some_and(|t| t == "oa-math");
-    // `canon_nan` names must be oa_math's: imported from it, or called through it
-    let mut imported: BTreeSet<&str> = BTreeSet::new();
+    // oa_math's helpers are called by qualified path only: an import, a bare call or a local
+    // of the same name could be anything, and the scan reads no types
     for (from, to) in use_statements(toks) {
+        if math {
+            break;
+        }
+        for t in toks.get(from..to).unwrap_or(&[]) {
+            if HELPERS.contains(&t.s.as_str()) {
+                hits.push(hit(
+                    t.line,
+                    &t.s,
+                    "B8: oa_math's helpers are called as `oa_math::<name>(..)`, never imported",
+                ));
+            }
+        }
         let body = toks.get(from..to).unwrap_or(&[]);
         let from_math = body
             .iter()
             .enumerate()
             .any(|(k, t)| is_math_root(&t.s) && is_path_start(body, k));
-        for t in body.iter().filter(|t| CANON.contains(&t.s.as_str())) {
-            if from_math {
-                imported.insert(t.s.as_str());
-            } else if !math {
-                hits.push(hit(
-                    t.line,
-                    &t.s,
-                    "B8: `canon_nan` is imported from `oa_math` only",
-                ));
-            }
+        if from_math && body.iter().any(|t| t.s == "*") {
+            hits.push(hit(
+                body.first().map_or(0, |t| t.line),
+                "*",
+                "B8: `use oa_math::*` hides which helper a name is; call `oa_math::<name>(..)`",
+            ));
         }
     }
+    let in_use: BTreeSet<usize> = use_statements(toks)
+        .into_iter()
+        .flat_map(|(a, b)| a..b)
+        .collect();
     for (i, t) in toks.iter().enumerate() {
         let w = t.s.as_str();
         let prev = if i == 0 { "" } else { s(toks, i - 1) };
         let next = s(toks, i + 1);
         let qual = s(toks, i.wrapping_sub(2));
-        if CANON.contains(&w) && !math {
-            if matches!(
-                prev,
-                "fn" | "let"
-                    | "mut"
-                    | "const"
-                    | "static"
-                    | "type"
-                    | "struct"
-                    | "enum"
-                    | "trait"
-                    | "mod"
-                    | "impl"
-                    | "as"
-                    | "ref"
-                    | "."
-            ) {
-                hits.push(hit(
-                    t.line,
-                    w,
-                    "B8: core code defines or shadows nothing named `canon_nan`; it is oa_math's",
-                ));
-            } else if next == "(" {
-                let ours = if prev == "::" {
-                    is_math_root(qual)
-                } else {
-                    imported.contains(w)
-                };
-                if !ours {
-                    hits.push(hit(
-                        t.line,
-                        w,
-                        "B8: this `canon_nan` is not oa_math's: call `oa_math::canon_nan` or import it with `use oa_math::canon_nan;`",
-                    ));
-                }
-            }
+        if HELPERS.contains(&w)
+            && !math
+            && !in_use.contains(&i)
+            && (prev != "::" || !is_math_root(qual))
+        {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: this name is oa_math's: write `oa_math::<name>(..)`; core code defines, imports or shadows no helper of that name",
+            ));
         }
         if let Some((_, msg)) = BANNED_IDENTS.iter().find(|(n, _)| *n == w) {
             hits.push(hit(t.line, w, msg));
@@ -316,12 +322,23 @@ fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
                 ));
             }
         }
-        _ if BYTES.contains(&w) && (path || (method && i >= 2 && ev.recv_is_float(i - 2))) => {
-            hits.push(hit(
-                line,
-                w,
-                "B8: a float's bytes in core code come from `oa_math::canon_nan(x).to_bits()`, then the integer's bytes",
-            ));
+        _ if BYTES.contains(&w) && (prev == "::" || method) => {
+            // an integer's bytes only: the receiver (or the `u32::` of the path) must be shown to
+            // be an integer or a canonical float; unknown is not a pass
+            let ok = if method {
+                i >= 2 && ev.recv_is_int(i - 2)
+            } else {
+                let q = s(toks, i.wrapping_sub(2));
+                super::INT_TYPES.contains(&q)
+                    || (q == ">" && super::INT_TYPES.contains(&s(toks, i.wrapping_sub(3))))
+            };
+            if !ok {
+                hits.push(hit(
+                    line,
+                    w,
+                    "B8: cannot tell this receiver is not a float; canonicalise it (`oa_math::canon_nan(x).to_bits()`, then the integer's bytes) or give it an integer type",
+                ));
+            }
         }
         "total_cmp" | "is_sign_negative" | "is_sign_positive" | "copysign" => {
             let instead = match w {
@@ -358,6 +375,47 @@ fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
         }
         _ => {}
     }
+}
+
+/// Sign and order reads the whole workspace leaves to `oa_math` (RULESET B8, OA-TRC-260): the
+/// standard library's `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` and `signum`
+/// depend on the sign and payload of a NaN, which differ between machines, so a sort or a
+/// selection that reads them can pick differently on two of them. Returns the hits of the
+/// non-test tokens of `src`, the out-of-line test modules and whether the whole file is test code.
+/// `signum` of a receiver shown to be an integer is not a float read and passes.
+pub(super) fn sign_order_hits(src: &str) -> (Vec<Hit>, Vec<String>, bool) {
+    let st = strip_test_items(tokenize(&mask(src)));
+    let toks = &st.toks;
+    let mut facts = super::floats::FloatFacts::default();
+    facts.add_source(src);
+    let ev = Evidence::new(toks, &facts);
+    let mut hits = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let w = t.s.as_str();
+        let instead = match w {
+            "total_cmp" => "oa_math::cmp_canon_f64 or cmp_canon_f32",
+            "copysign" => "oa_math::copysign_canon_f64 or copysign_canon_f32",
+            "is_sign_negative" | "is_sign_positive" => {
+                "oa_math::is_sign_negative_canon_f64 or is_sign_negative_canon_f32 (is_sign_positive is its negation)"
+            }
+            "signum" => "oa_math::signum_canon_f64 or signum_canon_f32",
+            _ => continue,
+        };
+        if w == "signum" {
+            let q = s(toks, i.wrapping_sub(2));
+            let int_path = s(toks, i.wrapping_sub(1)) == "::" && super::INT_TYPES.contains(&q);
+            let int_method = s(toks, i.wrapping_sub(1)) == "." && i >= 2 && ev.recv_is_int(i - 2);
+            if int_path || int_method {
+                continue;
+            }
+        }
+        hits.push(hit(
+            t.line,
+            w,
+            &format!("B8: `{w}` reads the sign and payload of a NaN, which differ between machines; use {instead}"),
+        ));
+    }
+    (hits, st.test_mods, st.whole_file)
 }
 
 /// Item names a file defines with `struct`, `enum`, `union`, `trait` or `type` (the type and

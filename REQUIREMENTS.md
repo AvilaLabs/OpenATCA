@@ -217,9 +217,11 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `canon_nan` (`-inf < negatives < -0.0 < +0.0 < positives < +inf < NaN`, every NaN equal to every other, a
   negative or payload NaN included); `is_sign_negative_canon_f64`/`_f32` read the sign bit after `canon_nan`
   (true for `-0.0`, false for every NaN); `copysign_canon_f64`/`_f32` give the magnitude of the first
-  argument with the sign of the second after `canon_nan` (a NaN magnitude gives the canonical NaN). Core
-  code calls these in place of `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign`, whose
-  results depend on the sign and payload of a NaN (see OA-TRC-247).
+  argument with the sign of the second after `canon_nan` (a NaN magnitude gives the canonical NaN);
+  `signum_canon_f64`/`_f32` give `1.0` or `-1.0` by the sign bit (`-1.0` for `-0.0`) and the canonical NaN for
+  any NaN, tested over every kind of value. Code calls these in place of `total_cmp`, `is_sign_negative`,
+  `is_sign_positive`, `copysign` and `signum`, whose results depend on the sign and payload of a NaN (see
+  OA-TRC-247 and OA-TRC-260).
 - **OA-MATH-036** `min_f64`/`max_f64`/`clamp_f64` and the `f32` forms ignore a NaN argument (the other is
   returned; two NaNs, or a NaN `x` in `clamp`, give the canonical NaN), return `-0.0` from `min` and `0.0`
   from `max` for the two zeros in either argument order, and never panic (`clamp` with `lo > hi` gives `hi`).
@@ -498,8 +500,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-241** A core `pub fn` inside an `impl` whose generics or `where` clause carry a bound, with a bare
   `fn(..)` pointer type in its signature, and a `pub struct`, `enum`, `union` or `type` holding an `Fn*`, `dyn`
   or `fn(..)` type need an allowlist line like any other callback.
-- **OA-TRC-242** `canon_nan` and `canon_nan_f32` in core are `oa_math`'s: qualified through it or imported from
-  it; a fn, binding, method or import of that name from anywhere else fails. `f64::to_bits(x)`, `f32::to_bits(x)`
+- **OA-TRC-242** `canon_nan` and `canon_nan_f32` in core are `oa_math`'s: reached as `oa_math::canon_nan(..)`
+  (an import is no longer allowed, see OA-TRC-259); a fn, binding, method or import of that name from anywhere else fails. `f64::to_bits(x)`, `f32::to_bits(x)`
   and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float (a literal, an `as f64` cast, a name the same fn
   declares `f32`/`f64`, a struct field declared so, or the UFCS form) fail unless the value passed `canon_nan`.
 - **OA-TRC-243** `&raw const`/`&raw mut`, the identifier `Pointer`, `type X = usize;` and `isize`, `<usize>::MAX`
@@ -572,6 +574,24 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   `usize::try_from(..)` with `?`/`.unwrap()`, or a final `as <integer>`) is not float evidence, whatever the
   expression mentions inside.
 - **OA-TRC-257** `fmt::Arguments` (it carries the caller's `Display` impls) is not taken by a reachable item.
+- **OA-TRC-258** In core code every `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` fails unless its receiver
+  is shown to be an integer or canonical (an integer literal, an `as <integer>` cast, `u64::from(..)`, `.to_bits()`,
+  `.len()`, a name, parameter, `let`, struct field, tuple-struct field, constant or `fn` return declared with an
+  integer type, or `oa_math::canon_nan(x).to_bits()`; the path form only with an integer type). Anything else
+  fails with "cannot tell this receiver is not a float": an unknown call, a closure parameter, a `for` variable,
+  `oa_math::sqrt(v).to_le_bytes()`, `self.0` of a float tuple struct. A float's `to_bits` as a path or a value
+  (`map(f64::to_bits)`, `let f = f64::to_bits;`) always fails. Planted failing and passing cases.
+- **OA-TRC-259** In core code the helpers of `oa_math` (`canon_nan`, `canon_nan_f32` and every public function
+  of `order.rs`, listed in the checker and compared with the source by a test) are called only as
+  `oa_math::<name>(..)`. A `use` of one, `use oa_math::*`, and any other occurrence of the name (a bare call, a
+  local, a parameter, a definition, a path through another crate) fails. The planted case imports `canon_nan` and
+  passes a parameter of that name; it fails on both. `oa-math` itself defines them.
+- **OA-TRC-260** In non-test code of every crate of the workspace (`src`, `examples`, `benches`, any class), a
+  raw `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` or `signum` (method, path call or path as a
+  value) fails, except `signum` on a receiver shown to be an integer and the file `crates/oa-math/src/order.rs`.
+  Code uses `cmp_canon_*`, `is_sign_negative_canon_*`, `copysign_canon_*` and `signum_canon_*` of `oa_math`. A site
+  the core scan reports is reported once. Test directories, `#[cfg(test)]` items, comments and strings are not
+  read.
 
 ### Hashing (oa-sha256)
 
@@ -4172,6 +4192,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-263** A track's output position and velocity covariances are in east and north at the output
   point: a track started from a plot returns its covariance and velocity at the start, at 45 and 89.9999
   degrees and in the south, to 1e-4.
+- **OA-TRK-264** No order or selection in the tracker reads the sign or payload of a NaN: the greedy order of
+  a component larger than `MAX_COMPONENT` and the order in which a plot keeps coarse candidates (by
+  `coarse_distance`, then track number) use `oa_math::cmp_canon_f64`, so the same inputs with a positive, a
+  negative and a payload NaN choose the same tracks (the gate of OA-TRC-260 keeps the raw `total_cmp`,
+  `is_sign_negative`, `copysign` and `signum` out of every non-test source of the workspace).
 
 ## Speed and capacity harness (oa-perf)
 

@@ -11,6 +11,7 @@ use core::hint::black_box;
 use oa_math::{
     clamp_f32, clamp_f64, cmp_canon_f32, cmp_canon_f64, copysign_canon_f32, copysign_canon_f64,
     is_sign_negative_canon_f32, is_sign_negative_canon_f64, max_f32, max_f64, min_f32, min_f64,
+    signum_canon_f32, signum_canon_f64,
 };
 
 const CANON64: u64 = 0x7ff8_0000_0000_0000;
@@ -296,4 +297,30 @@ fn the_smallest_subnormals_are_ordered_and_extreme_like_any_other_number() {
     assert_eq!(clamp_f32(ntiny, 0.0, 1.0).to_bits(), 0.0f32.to_bits());
     assert_eq!(copysign_canon_f32(tiny, -1.0).to_bits(), ntiny.to_bits());
     assert!(is_sign_negative_canon_f32(ntiny) && !is_sign_negative_canon_f32(tiny));
+}
+
+// REQ: OA-MATH-035
+#[test]
+fn signum_is_one_with_the_sign_of_the_input_and_the_one_nan_for_any_nan() {
+    for x in all64() {
+        let got = signum_canon_f64(x);
+        if x.is_nan() {
+            assert_eq!(got.to_bits(), CANON64, "{:#018x}", x.to_bits());
+        } else {
+            let want = if x.is_sign_negative() { -1.0 } else { 1.0 };
+            assert_eq!(got.to_bits(), f64::to_bits(want), "{:#018x}", x.to_bits());
+        }
+    }
+    for x in all32() {
+        let got = signum_canon_f32(x);
+        if x.is_nan() {
+            assert_eq!(got.to_bits(), CANON32, "{:#010x}", x.to_bits());
+        } else {
+            let want = if x.is_sign_negative() { -1.0 } else { 1.0 };
+            assert_eq!(got.to_bits(), f32::to_bits(want), "{:#010x}", x.to_bits());
+        }
+    }
+    assert_eq!(signum_canon_f64(-0.0), -1.0);
+    assert_eq!(signum_canon_f64(0.0), 1.0);
+    assert_eq!(signum_canon_f32(f32::NEG_INFINITY), -1.0);
 }

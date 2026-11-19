@@ -44,6 +44,7 @@ version = "0.0.1"
 dependencies = [
  "oa-geo",
  "oa-json",
+ "oa-math",
 ]
 
 [[package]]
@@ -56,6 +57,7 @@ dependencies = [
  "oa-feed",
  "oa-fixm",
  "oa-geo",
+ "oa-math",
  "oa-replay",
  "oa-sha256",
  "oa-tbfm",
@@ -121,6 +123,7 @@ name = "oa-grib2"
 version = "0.0.1"
 dependencies = [
  "oa-j2k",
+ "oa-math",
 ]
 
 [[package]]
@@ -147,6 +150,7 @@ name = "oa-mva"
 version = "0.0.1"
 dependencies = [
  "oa-dof",
+ "oa-math",
  "oa-tiff",
  "oa-xml",
  "oa-zip",
@@ -177,6 +181,7 @@ name = "oa-perf"
 version = "0.0.1"
 dependencies = [
  "oa-geo",
+ "oa-math",
  "oa-sensorsim",
  "oa-track",
  "oa-truth",

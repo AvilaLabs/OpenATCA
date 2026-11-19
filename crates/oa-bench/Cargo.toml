@@ -23,6 +23,7 @@ oa-awc = { path = "../oa-awc" }
 oa-truth = { path = "../oa-truth" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
 
 [[bin]]
 name = "oa-bench"
