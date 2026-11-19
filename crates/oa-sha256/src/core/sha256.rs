@@ -288,13 +288,13 @@ impl Sha256 {
             block = [0u8; BLOCK_LEN];
         }
         if let Some(len) = block.last_chunk_mut::<8>() {
-            *len = bits.to_be_bytes();
+            *len = u64::to_be_bytes(bits);
         }
         compress(&mut self.h, &block);
         let mut out = [0u8; DIGEST_LEN];
         let (words, _) = out.as_chunks_mut::<4>();
         for (o, w) in words.iter_mut().zip(self.h) {
-            *o = w.to_be_bytes();
+            *o = u32::to_be_bytes(w);
         }
         out
     }

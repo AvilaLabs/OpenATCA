@@ -20,7 +20,7 @@ pub use boundary::{callback_aliases, module_visibility, sealed_traits, FIXED_BOU
 pub use floats::FloatFacts;
 pub use harden::{
     count_float_calls, parse_budget, parse_callbacks, scan_shell, CallbackEntry, CallbackSig,
-    CALLBACK_ALLOWLIST, FLOAT_BUDGET,
+    CALLBACK_ALLOWLIST, FLOAT_BUDGET, HELPERS,
 };
 
 /// The committed list of crates allowed to be `unsplit`, relative to the workspace root. It must
@@ -2158,6 +2158,7 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
         }
     }
     float_budget(root, &members, &mut rep);
+    sign_order(root, &members, &mut rep);
 
     // B9: the unsplit list is fixed in this source and only shrinks
     for name in &rep.unsplit {
@@ -2191,6 +2192,72 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
     rep.failures.sort();
     rep.failures.dedup();
     rep
+}
+
+/// The file `crates/oa-math/src/order.rs`, the one place the standard library's sign and order
+/// reads are allowed (RULESET B8).
+const ORDER_RS: &str = "crates/oa-math/src/order.rs";
+
+/// RULESET B8, OA-TRC-260: every crate of the workspace, whatever its class, reads the sign and
+/// order of a float through `oa_math`. Source under `src`, `examples` and `benches`, outside test
+/// code; `tests` directories are not scanned. A site the class check of core code already
+/// reports is not reported twice.
+fn sign_order(root: &Path, members: &[Member], rep: &mut ClassReport) {
+    let seen: BTreeSet<String> = rep
+        .failures
+        .iter()
+        .filter_map(|f| {
+            let mut it = f.splitn(3, ':');
+            Some(format!(
+                "{}:{}:{}",
+                it.next()?,
+                it.next()?,
+                it.next()?.trim()
+            ))
+        })
+        .collect();
+    for m in members {
+        let mut files = Vec::new();
+        let mut fails = Vec::new();
+        for d in ["src", "examples", "benches"] {
+            let dir = m.dir.join(d);
+            if dir.is_dir() {
+                walk_rs(&dir, &[], &mut files, &mut fails);
+            }
+        }
+        rep.failures.extend(fails);
+        files.sort();
+        let mut scanned = Vec::new();
+        for f in &files {
+            if rel(root, f) == ORDER_RS {
+                continue;
+            }
+            match fs::read_to_string(f) {
+                Ok(t) => scanned.push((f.clone(), harden::sign_order_hits(&t))),
+                Err(e) => rep
+                    .failures
+                    .push(format!("{}: cannot read: {e}", rel(root, f))),
+            }
+        }
+        let skips = TestSkips::new(scanned.iter().map(|(f, (_, tm, whole))| (f, tm, *whole)));
+        for (f, (hits, _, _)) in &scanned {
+            if skips.skips(f) {
+                continue;
+            }
+            for h in hits {
+                let key = format!("{}:{}:{}", rel(root, f), h.line, h.token);
+                if !seen.iter().any(|s| s.starts_with(&key)) {
+                    rep.failures.push(format!(
+                        "{}:{}: {}: {}",
+                        rel(root, f),
+                        h.line,
+                        h.token,
+                        h.message
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// The ratchet on unsplit crates (RULESET B9): platform float-method calls, counted per crate

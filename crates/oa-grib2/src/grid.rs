@@ -415,7 +415,7 @@ pub fn ij_to_latlon(g: &Grid, i: f64, j: f64) -> Option<(f64, f64)> {
             let x = l.x1 + i * l.step_x;
             let jy = if l.scan & SCAN_PLUS_J != 0 { j } else { -j };
             let y = l.y1 + jy * l.step_y;
-            let s = l.n.signum();
+            let s = oa_math::signum_canon_f64(l.n);
             let dy = l.rho0 - y;
             let rho = s * (x * x + dy * dy).sqrt();
             if rho == 0.0 {

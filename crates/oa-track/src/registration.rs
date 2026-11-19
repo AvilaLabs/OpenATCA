@@ -340,7 +340,7 @@ pub enum RegOutcome {
 /// The median of `v[..n]` (reordered); `n` at least 1.
 fn median(v: &mut [f64], n: usize) -> f64 {
     let s = v.get_mut(..n).unwrap_or(&mut []);
-    s.sort_unstable_by(f64::total_cmp);
+    s.sort_unstable_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let h = n / 2;
     let at = |i: usize| s.get(i).copied().unwrap_or(0.0);
     if n % 2 == 1 {

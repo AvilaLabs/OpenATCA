@@ -55,6 +55,27 @@ pub fn copysign_canon_f32(x: f32, sign: f32) -> f32 {
     })
 }
 
+/// The sign of `x` as `1.0` or `-1.0`, like the standard library's `signum` but with every NaN
+/// the canonical one: `-1.0` for `-0.0` and the negatives, `1.0` for `+0.0` and the positives.
+#[inline]
+pub fn signum_canon_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        canon_nan(x)
+    } else {
+        copysign_canon_f64(1.0, x)
+    }
+}
+
+/// [`signum_canon_f64`] for `f32`.
+#[inline]
+pub fn signum_canon_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        canon_nan_f32(x)
+    } else {
+        copysign_canon_f32(1.0, x)
+    }
+}
+
 /// The smaller of `a` and `b`. A NaN is ignored (the other is returned; two NaNs give the
 /// canonical NaN), and between `-0.0` and `0.0` the result is `-0.0`, whichever order they come in.
 #[inline]

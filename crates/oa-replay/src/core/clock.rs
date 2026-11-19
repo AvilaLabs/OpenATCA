@@ -267,8 +267,8 @@ fn log_decision(c: &mut Clock, kind: u8, wall_ns: i64, mono_ns: i64) {
     };
     for b in [kind]
         .into_iter()
-        .chain(wall_ns.to_le_bytes())
-        .chain(mono_ns.to_le_bytes())
+        .chain(i64::to_le_bytes(wall_ns))
+        .chain(i64::to_le_bytes(mono_ns))
     {
         h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
     }

@@ -471,7 +471,7 @@ fn tracker_section(
         s.init_window_expired
     );
     let (mut d, never) = initiation_delays(&run.log);
-    d.sort_by(f64::total_cmp);
+    d.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let _ = writeln!(
         o,
         "  initiation delay (first report to confirmation, 2 of 3): {} confirmed tracks, median {:.1} s, p95 {:.1} s, max {:.1} s; {} tracks never confirmed",
@@ -613,8 +613,7 @@ fn outliers_csv(rows: &[(&str, &Scored)]) -> (String, String) {
                 .position_rms_m
                 .filter(|_| b.position_samples >= PER_FLIGHT_MIN_N as u64);
             match (ar, br) {
-                (Some(x), Some(y)) => y
-                    .total_cmp(&x)
+                (Some(x), Some(y)) => oa_math::cmp_canon_f64(y, x)
                     .then_with(|| a.address.cmp(&b.address))
                     .then_with(|| a.leg_start_ms.cmp(&b.leg_start_ms))
                     .then_with(|| a.truth_leg_index.cmp(&b.truth_leg_index)),

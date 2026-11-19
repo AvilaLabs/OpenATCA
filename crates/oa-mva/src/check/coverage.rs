@@ -201,7 +201,7 @@ fn fill_sector(
         }
     }
     for (k, xs) in rows.iter_mut().enumerate() {
-        xs.sort_by(f64::total_cmp);
+        xs.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         for &[xa, xb] in xs.as_chunks::<2>().0 {
             let ia = (((xa - g.lon0) / c - 0.5).ceil().max(0.0)) as usize;
             let ib = ((((xb - g.lon0) / c - 0.5).ceil()).min(g.nx as f64).max(0.0)) as usize;

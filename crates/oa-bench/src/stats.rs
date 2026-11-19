@@ -244,7 +244,11 @@ pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
             abs.push(v.abs());
         }
     }
-    let Some(max) = abs.iter().copied().max_by(f64::total_cmp) else {
+    let Some(max) = abs
+        .iter()
+        .copied()
+        .max_by(|a, b| oa_math::cmp_canon_f64(*a, *b))
+    else {
         return Ok(Stats::EMPTY);
     };
     let n = abs.len() as f64;
@@ -277,7 +281,7 @@ pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
     if !mean.is_finite() || !rms.is_finite() {
         return Err("statistic not finite");
     }
-    abs.sort_by(f64::total_cmp);
+    abs.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     Ok(Stats {
         n: abs.len() as u64,
         mean,

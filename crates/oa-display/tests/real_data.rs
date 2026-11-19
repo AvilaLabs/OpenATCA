@@ -10,7 +10,8 @@
 
 use oa_airspace::model::{stratum, validate_model};
 use oa_airspace::snapshot::decode;
-use oa_display::list::{list_capacities, list_clear, list_new};
+use oa_display::list::{list_clear, list_new};
+use oa_display::probe::list_capacities;
 use oa_display::raster::{
     frame_digest, frame_len, rasterize, render_work_charge, FrameSpec, MAX_RENDER_WORK,
 };
