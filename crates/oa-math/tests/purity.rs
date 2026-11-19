@@ -173,7 +173,9 @@ fn the_check_also_finds_a_bare_path_and_a_float_remainder() {
 fn manifest_depends_only_on_oa_ieee() {
     let toml =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    // the [dependencies] table only, up to the next table header
     let after = toml.split("[dependencies]").nth(1).unwrap();
+    let after = after.split("\n[").next().unwrap();
     assert!(
         after.lines().all(|l| l.trim().is_empty()
             || l.trim().starts_with('#')
