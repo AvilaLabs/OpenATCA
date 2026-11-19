@@ -186,9 +186,9 @@ add-on.
    read from Linux input devices directly. KMS needs a few raw OS calls (ioctl, mmap); they live
    in one isolated module under a recorded exception to the no-unsafe rule (RULESET.md A0).
 
-8. **Every facility is a full node** (Connor, 2026-11-19). If the whole NAS fits on one laptop
-   (M9), the network no longer exists to divide the workload. It exists for resilience,
-   locality and independent checking:
+8. **Every facility is a full node** (Connor, 2026-11-19; design in docs/NODE_NETWORK.md). If the
+   whole NAS fits on one laptop (M9), the network no longer exists to divide the workload. It
+   exists for resilience, locality and independent checking:
    - **The whole picture everywhere.** Every facility can compute the national picture from
      sensor data, so any facility can take over a neighbour's airspace at once. After the fire
      at Chicago Center in September 2014, neighbouring centres took over its airspace under

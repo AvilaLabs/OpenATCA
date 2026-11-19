@@ -58,6 +58,7 @@ These are the design rules. How far the code meets each one today is in
 | [docs/ADSB_PAYLOAD.md](docs/ADSB_PAYLOAD.md) | ADS-B history reports carried in OAF1 frames |
 | [docs/FUZZING.md](docs/FUZZING.md) | Coverage-guided fuzzing of the decoders: the one dependency exception, how to run, results, limits |
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How we talk to systems we do not control, so we never cause or amplify their failures |
+| [docs/NODE_NETWORK.md](docs/NODE_NETWORK.md) | Node network design: every facility computes the national picture, checks its peers by hash, and survives alone; built from proven parts, with its limits |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 | `crates/oa-csv` | RFC 4180 reader |
 | `crates/oa-geo` | WGS-84 geodesy (Karney), rhumb lines, point-in-polygon |
