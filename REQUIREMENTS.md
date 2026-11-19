@@ -3547,6 +3547,25 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `simulate_radar` with `SimError::BadSite("epoch")`, and the scan index, the scan start and the beam
   azimuth use checked or widened arithmetic, so no epoch or window overflows.
 - **OA-SIM-032** A drift window across the whole time range does not overflow in the elapsed time.
+- **OA-SIM-033** `adsb_error` gives a position bias to round(`bias_fraction` * N) of the N distinct addresses and a
+  latency to round(`lag_fraction` * N), chosen by a seeded shuffle, exactly for every seed; the two sets are chosen
+  independently.
+- **OA-SIM-034** A biased aircraft's reports are offset from the truth by `bias_mult` times the row's NACp 95 % bound,
+  in a direction fixed per aircraft.
+- **OA-SIM-035** A row with no usable NACp takes `bias_fallback_bound_m` as its bound.
+- **OA-SIM-036** A lagged aircraft's report at time t carries the truth position and velocity of time t - L (whole
+  milliseconds), stamped at t.
+- **OA-SIM-037** Each lagged aircraft's L is constant and within `[lag_min_s, lag_max_s]`.
+- **OA-SIM-038** Each output row carries the label bits (`ERR_BIAS`, `ERR_LAG`) of the errors its aircraft has; a row
+  with no bits is the truth at its time.
+- **OA-SIM-039** The output depends only on the truth, the base reports and the parameters, and changes with the seed.
+- **OA-SIM-040** With no error the output is the truth at the base reports' times and addresses, every other field
+  copied, and rows the truth cannot answer are counted as dropped.
+- **OA-SIM-041** A fraction outside 0 to 1, a negative or non-finite multiple, bound or latency, an inverted latency
+  range or a latency above `MAX_LAG_S` is refused with `BadSpoof`.
+- **OA-SIM-042** With no error injected, a tracker run scored against the exact truth and against the truth rebuilt
+  from the generated reports gives the same position and speed RMS within the stated tolerance (the optimism
+  harness, with the clip set).
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
