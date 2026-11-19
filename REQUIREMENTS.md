@@ -1352,8 +1352,16 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
   chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
   (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
-- **OA-DSP-053** The display API refuses frames above the shared 2^26-pixel profile (which accepts 8192 by 8192) and frame/list combinations whose conservative preflight work charge, including repeated polyline/text span visits and the tested maximum glyph stroke count, exceeds `MAX_RENDER_WORK`, before writing pixels; a smaller retry succeeds.
-- **OA-DSP-054** `build_scene` precharges table scans, per-boundary-span subdivision work (including overlapping spans), point-label ordering, grid cell inspections and identifier comparisons against `MAX_SCENE_WORK` before clearing the destination list; over-limit work is refused with the previous complete list preserved, and a valid retry succeeds.
+- **OA-DSP-053** The display API accepts exactly 2^26 pixels (8192 by 8192, 16384 by 4096 and 65536 by 1024 alike)
+  through `check_frame`, `scratch_for`, `build_scene` and `rasterize`, and refuses the smallest larger product
+  (65536 by 1025) at each before writing pixels; it refuses frame/list combinations whose conservative preflight
+  work charge, including repeated polyline/text span visits and the tested maximum glyph stroke count, exceeds
+  `MAX_RENDER_WORK` (a charge equal to it is accepted, one more is refused); a smaller retry succeeds.
+- **OA-DSP-054** `build_scene` precharges, against `MAX_SCENE_WORK` and before clearing the destination list, table scans,
+  per-boundary-span subdivision (including overlapping and zero-length spans), airway-leg subdivision, the point-label
+  sort (comparisons times the longest identifier, not the string pool) and label-grid slot inspections; each term moves the
+  bound by its own cost, a charge equal to the limit is accepted and one more is refused, over-limit work leaves the previous
+  complete list intact, and a valid retry succeeds.
 - **OA-DSP-055** `scratch_for` refuses a display profile above `MAX_SCENE_PIXELS` before allocating grid storage, while preserving the earlier `MAX_GRID_BOXES` refusal precedence; a profile within the limit succeeds.
 - **OA-DSP-056** The raster text stroke-work ceiling equals the largest built-in glyph and covers all glyphs, the fallback glyph and every byte-valued input character.
 

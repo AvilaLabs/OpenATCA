@@ -84,7 +84,8 @@ use oa_airspace::core::model::{
 use std::fmt::Write;
 
 /// Maximum precharged work in one scene build. The charge covers table scans, declared span
-/// visits, edge subdivision, point-label sorting and worst-case label-grid slot inspection.
+/// visits, edge subdivision, point-label sorting (comparisons times the longest identifier) and
+/// worst-case label-grid slot inspection.
 pub const MAX_SCENE_WORK: u128 = 1 << 40;
 pub const MAX_SCENE_PIXELS: u128 = crate::core::raster::MAX_DISPLAY_PIXELS as u128;
 
@@ -1017,13 +1018,7 @@ pub fn build_scene(
             sum.saturating_add(u128::from(span.len))
         });
     let work = scene_work_bound(m, sc, cells, boundary_vertex_visits);
-    if work > MAX_SCENE_WORK {
-        return Err(DisplayError::TooLarge {
-            what: "scene work units",
-            requested: work,
-            limit: MAX_SCENE_WORK as usize,
-        });
-    }
+    check_scene_work(work)?;
     list_clear(l);
     scratch_clear(sc, &v.proj);
     let mut st = SceneStats::default();
@@ -1037,15 +1032,56 @@ pub fn build_scene(
     Ok(st)
 }
 
+/// The precharge [`build_scene`] checks against [`MAX_SCENE_WORK`] for `m` seen through `v` with
+/// scratch `sc`, for reporting.
+pub fn scene_work_charge(m: &Model, sc: &Scratch, v: &View) -> u128 {
+    let cells = (v.proj.width as usize).div_ceil(64).max(1) as u128
+        * (v.proj.height as usize).div_ceil(64).max(1) as u128;
+    let visits = m
+        .boundaries
+        .vertices
+        .iter()
+        .fold(0u128, |sum, span| sum.saturating_add(u128::from(span.len)));
+    scene_work_bound(m, sc, cells, visits)
+}
+
+/// Refuses a charge above [`MAX_SCENE_WORK`]; the charge equal to it is accepted.
+fn check_scene_work(work: u128) -> Result<(), DisplayError> {
+    if work > MAX_SCENE_WORK {
+        return Err(DisplayError::TooLarge {
+            what: "scene work units",
+            requested: work,
+            limit: MAX_SCENE_WORK as usize,
+        });
+    }
+    Ok(())
+}
+
+/// Upper bound on the point-label sort: `sort_unstable_by` makes at most `6 * n * (ceil(log2 n) + 1)`
+/// comparisons (an introsort that falls back to heapsort), and one comparison reads at most the
+/// longest identifier plus the four fixed key fields (priority, latitude, longitude, row).
+fn point_sort_work(m: &Model) -> u128 {
+    let n = m.points.kind.len() as u128;
+    let longest = m
+        .points
+        .ident
+        .iter()
+        .map(|i| str_or_empty(&m.strings, *i).len() as u128)
+        .max()
+        .unwrap_or(0);
+    let log2_ceil = u128::from(u128::BITS - n.saturating_sub(1).leading_zeros());
+    n.saturating_mul(6)
+        .saturating_mul(log2_ceil + 1)
+        .saturating_mul(longest + 4)
+}
+
 /// Upper bound for each input-derived loop in a frame scene. This preflight runs before clearing
 /// the caller's list, so a refused view/model leaves the previous complete scene available.
 fn scene_work_bound(m: &Model, sc: &Scratch, cells: u128, boundary_vertex_visits: u128) -> u128 {
     let points = m.points.kind.len() as u128;
     let boundaries = m.boundaries.stratum.len() as u128;
     let legs = m.airway_legs.from.len() as u128;
-    let point_sort = points
-        .saturating_mul(64)
-        .saturating_mul(m.strings.text.len() as u128);
+    let point_sort = point_sort_work(m);
     let grid = sc.cell_n.len() as u128;
     points
         .saturating_mul(34)
@@ -1749,5 +1785,87 @@ mod work_budget_tests {
         ));
         let accepted = view_new(0, 0, 50.0, 8192, 8192).unwrap();
         assert!(scratch_for(&model, &accepted).is_ok());
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn scene_work_limit_is_exact_and_one_above_is_refused() {
+        assert!(check_scene_work(MAX_SCENE_WORK).is_ok());
+        assert!(matches!(
+            check_scene_work(MAX_SCENE_WORK + 1),
+            Err(DisplayError::TooLarge {
+                what: "scene work units",
+                requested,
+                ..
+            }) if requested == MAX_SCENE_WORK + 1
+        ));
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn each_charged_term_moves_the_bound_by_its_own_cost() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        let cells = 510u128;
+        let base = scene_work_bound(&model, &scratch, cells, 0);
+
+        // Airway legs: SUBDIV_AIRWAY + 1 per leg.
+        model
+            .airway_legs
+            .from
+            .resize(3, oa_airspace::model::PointIx::new(0));
+        assert_eq!(
+            scene_work_bound(&model, &scratch, cells, 0) - base,
+            3 * (u128::from(SUBDIV_AIRWAY) + 1)
+        );
+        model.airway_legs.from.clear();
+
+        // Boundary vertex visits: SUBDIV_BOUNDARY each.
+        assert_eq!(
+            scene_work_bound(&model, &scratch, cells, 10) - base,
+            10 * u128::from(SUBDIV_BOUNDARY)
+        );
+
+        // Grid slots: one unit per cell of the scratch.
+        let mut bigger = scratch_for(&model, &view).unwrap();
+        bigger.cell_n.push(0);
+        assert_eq!(scene_work_bound(&model, &bigger, cells, 0) - base, 1);
+
+        // Point sort: 6 * n * (ceil(log2 n) + 1) comparisons, each the longest identifier plus
+        // four key fields, on top of 34 per point and the label-grid inspections.
+        let n = 5usize;
+        model.points.kind.resize(n, 0);
+        model.strings.text = "x".repeat(12);
+        model.strings.offsets = vec![0, 12];
+        model
+            .points
+            .ident
+            .resize(n, oa_airspace::model::StrIx::new(0));
+        let with_points = scene_work_bound(&model, &scratch, cells, 0);
+        let sort = 6 * n as u128 * (3 + 1) * (12 + 4);
+        let others = n as u128 * 34 + n as u128 * 5 * cells * CELL_CAP as u128;
+        assert_eq!(with_points - base, sort + others);
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn point_sort_charge_follows_identifier_length_not_the_string_pool() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        // A large pool of strings that no point uses must not change the charge.
+        model.points.kind.resize(1000, 0);
+        model.strings.text = "y".repeat(1 << 20);
+        model.strings.offsets = vec![0, 4];
+        model
+            .points
+            .ident
+            .resize(1000, oa_airspace::model::StrIx::new(0));
+        let small = scene_work_bound(&model, &scratch, 510, 0);
+        model.strings.offsets = vec![0, 4, 1 << 20];
+        let pool_only = scene_work_bound(&model, &scratch, 510, 0);
+        assert_eq!(small, pool_only);
+        assert!(small < MAX_SCENE_WORK);
     }
 }

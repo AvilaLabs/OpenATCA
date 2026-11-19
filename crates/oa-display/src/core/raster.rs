@@ -121,6 +121,12 @@ pub fn check_frame(spec: &FrameSpec, buf_len: usize) -> Result<(), RenderError> 
 /// Text is charged at the checked maximum stroke count per byte. Layer-table scans are
 /// charged for all layers because `draw_layer` visits each table once per used layer.
 fn check_render_work(l: &DisplayList, spec: &FrameSpec) -> Result<(), RenderError> {
+    check_charge(render_work_charge(l, spec)?)
+}
+
+/// The conservative work charge [`rasterize`] checks against [`MAX_RENDER_WORK`], for reporting.
+/// Refused with [`RenderError::WorkLimit`] when a table is beyond its row limit.
+pub fn render_work_charge(l: &DisplayList, spec: &FrameSpec) -> Result<u128, RenderError> {
     let w = u128::from(spec.width);
     let h = u128::from(spec.height);
     let pixels = w * h;
@@ -169,6 +175,11 @@ fn check_render_work(l: &DisplayList, spec: &FrameSpec) -> Result<(), RenderErro
         + (l.circles.x.len() as u128) * (axis * 64 + 128)
         + (l.lines.x0.len() as u128 + poly_visits) * (axis * 2 + 128)
         + text_visits * MAX_GLYPH_STROKES as u128 * (axis * 2 + 128);
+    Ok(charged)
+}
+
+/// Refuses a charge above [`MAX_RENDER_WORK`]; the charge equal to it is accepted.
+fn check_charge(charged: u128) -> Result<(), RenderError> {
     if charged > MAX_RENDER_WORK {
         return Err(RenderError::WorkLimit {
             requested: charged,
@@ -1730,5 +1741,17 @@ mod tests {
         // An unknown character is drawn as the crossed box, not skipped.
         let (xs, _) = extent(ALIGN_LEFT, "~");
         assert_eq!(xs.1 - xs.0, 8);
+    }
+
+    // REQ: OA-DSP-053
+    #[test]
+    fn render_work_limit_is_exact_and_one_above_is_refused() {
+        assert!(check_charge(MAX_RENDER_WORK).is_ok());
+        assert!(matches!(
+            check_charge(MAX_RENDER_WORK + 1),
+            Err(RenderError::WorkLimit { requested, limit })
+                if requested == MAX_RENDER_WORK + 1 && limit == MAX_RENDER_WORK
+        ));
+        assert_eq!(MAX_RENDER_WORK, 1 << 34);
     }
 }
