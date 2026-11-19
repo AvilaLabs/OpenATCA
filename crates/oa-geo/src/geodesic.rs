@@ -121,7 +121,7 @@ pub(crate) fn sincosd(x: f64) -> (f64, f64) {
     let q = oa_ieee::round(r / 90.0);
     let r = (r - 90.0 * q).to_radians();
     let (s, c) = oa_math::sin_cos(r);
-    let (s, c) = match (q as i64).rem_euclid(4) {
+    let (s, c) = match i64::rem_euclid(q as i64, 4) {
         0 => (s, c),
         1 => (c, -s),
         2 => (-s, -c),

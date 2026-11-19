@@ -334,18 +334,18 @@ impl Ellipsoid {
         let rhumb = self.rhumb_inverse(p1, p2)?;
         // The nearest geodesic point moves smoothly with the sample, so each solve starts from
         // the previous answer.
-        let foot = core::cell::Cell::new(f64::NAN);
-        let sep_at = |frac: f64| -> Result<f64, GeoError> {
+        let mut foot = f64::NAN;
+        let mut sep_at = |frac: f64| -> Result<f64, GeoError> {
             // The rhumb line was solved once above; only the direct problem varies per sample.
             let q = self.rhumb_direct(p1, rhumb.course_deg, rhumb.distance_m * frac)?;
-            let guess = if foot.get().is_nan() {
+            let guess = if foot.is_nan() {
                 frac * geo.distance_m
             } else {
-                foot.get()
+                foot
             };
             let (d, s) =
                 self.distance_to_geodesic(q, p1, geo.azimuth1_deg, geo.distance_m, guess)?;
-            foot.set(s);
+            foot = s;
             Ok(d)
         };
         let mut best = (0usize, 0.0f64);
