@@ -58,6 +58,44 @@ const FORBIDDEN_MACROS: &[&str] = &[
     "option_env",
     "file",
 ];
+/// Float methods `core` lacks on the pinned toolchain; the platform maths library gives machine-
+/// dependent last bits. The five exactly specified ones come from `oa-ieee`, the rest from `oa-math`.
+const FLOAT_METHODS: &[&str] = &[
+    "sqrt",
+    "floor",
+    "ceil",
+    "trunc",
+    "round",
+    "powi",
+    "powf",
+    "exp",
+    "exp_m1",
+    "ln",
+    "ln_1p",
+    "log",
+    "log2",
+    "log10",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "hypot",
+    "cbrt",
+    "mul_add",
+    "rem_euclid",
+    "div_euclid",
+    "fract",
+];
+/// The one crate that wraps the standard library's exactly specified float operations (B10).
+const IEEE_CRATE: &str = "oa-ieee";
+/// The public API of [`IEEE_CRATE`], exactly.
+const IEEE_API: [&str; 5] = ["sqrt", "floor", "ceil", "trunc", "round"];
 const FORBIDDEN_IDENTS: &[&str] = &["HashMap", "HashSet", "RandomState"];
 
 /// Result of the class check.
@@ -824,6 +862,8 @@ pub struct Ctx<'a> {
     pub split: bool,
     /// Module depth of the file below the crate root (`core.rs` and `core/mod.rs` are 1).
     pub depth: usize,
+    /// The crate is `oa-ieee`, whose purpose is the float methods B8 forbids elsewhere.
+    pub ieee: bool,
     /// Class of every workspace crate by name.
     pub classes: &'a BTreeMap<String, Class>,
     /// Identifier used in source -> workspace crate it names (own name, dependency keys).
@@ -994,12 +1034,32 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
         }
         let in_use = use_start.is_some();
         let start = is_path_start(toks, i);
-        if w == "extern" && next == "crate" {
+        if !ctx.ieee
+            && FLOAT_METHODS.contains(&w)
+            && ((prev == "." && next == "(")
+                || (prev == "::" && i >= 2 && matches!(s(toks, i - 2), "f64" | "f32")))
+        {
             hits.push(hit(
                 t.line,
-                "extern crate",
-                "B8: core code uses no `extern crate`",
+                w,
+                &format!(
+                    "B8: the standard library's float `{w}` differs between machines; use {} instead. A user-defined method of this name is disallowed in core code too",
+                    if IEEE_API.contains(&w) {
+                        format!("oa_ieee::{w}")
+                    } else {
+                        format!("oa_math::{w}")
+                    }
+                ),
             ));
+        }
+        if w == "extern" && next == "crate" {
+            if !(s(toks, i + 2) == "alloc" && s(toks, i + 3) == ";") {
+                hits.push(hit(
+                    t.line,
+                    "extern crate",
+                    "B8: the only `extern crate` core code may have is `extern crate alloc;`",
+                ));
+            }
         } else if w == "static" && next == "mut" {
             hits.push(hit(t.line, "static mut", "B8: core code names it"));
         } else if next == "!"
@@ -1144,6 +1204,69 @@ pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
         test_mods: st.test_mods,
         whole_file: st.whole_file,
     }
+}
+
+/// Whether `lib.rs` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]` (B10).
+pub fn has_no_std(src: &str) -> bool {
+    let toks = tokenize(&mask(src));
+    let mut i = 0;
+    while i < toks.len() {
+        if s(&toks, i) == "#" && s(&toks, i + 1) == "!" && s(&toks, i + 2) == "[" {
+            let end = skip_group(&toks, i + 2);
+            let body: String = toks
+                .get(i + 3..end.saturating_sub(1))
+                .unwrap_or(&[])
+                .iter()
+                .map(|t| t.s.as_str())
+                .collect();
+            if body == "no_std" || body == "cfg_attr(not(test),no_std)" {
+                return true;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Problems with the public API of `oa-ieee`'s `lib.rs` (B10): exactly the five `pub fn`s, and
+/// no other public item, module, re-export or macro.
+pub fn ieee_api_problems(src: &str) -> Vec<Hit> {
+    let toks = strip_test_items(tokenize(&mask(src))).toks;
+    let mut out = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let msg =
+        "B10: the public API of oa-ieee is exactly `pub fn` sqrt, floor, ceil, trunc and round";
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i < toks.len() {
+        let line = toks.get(i).map_or(0, |t| t.line);
+        match s(&toks, i) {
+            "{" | "(" | "[" => depth += 1,
+            "}" | ")" | "]" => depth = depth.saturating_sub(1),
+            "pub" if depth == 0 && s(&toks, i + 1) != "(" => {
+                if s(&toks, i + 1) == "fn" && IEEE_API.contains(&s(&toks, i + 2)) {
+                    seen.push(s(&toks, i + 2).to_string());
+                } else {
+                    out.push(hit(line, s(&toks, i + 1), msg));
+                }
+            }
+            "mod" | "macro_rules" | "macro_export" | "macro"
+                if depth == 0 || s(&toks, i) == "macro_export" =>
+            {
+                out.push(hit(line, s(&toks, i), msg));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    for api in IEEE_API {
+        if seen.iter().filter(|n| n.as_str() == api).count() != 1 {
+            out.push(hit(1, api, msg));
+        }
+    }
+    out
 }
 
 /// Problems with `lib.rs` of a split crate: it declares exactly `mod core;` and `mod shell;`
@@ -1530,6 +1653,30 @@ fn check_member(
     }
 
     let src = m.dir.join("src");
+    let ieee = m.name == IEEE_CRATE && m.class == Class::Core;
+    if m.class == Class::Core {
+        match fs::read_to_string(src.join("lib.rs")) {
+            Err(e) => fails.push(format!("{name}: cannot read src/lib.rs: {e}")),
+            Ok(text) if ieee => {
+                for h in ieee_api_problems(&text) {
+                    fails.push(format!(
+                        "{}:{}: {}: {}",
+                        rel(root, &src.join("lib.rs")),
+                        h.line,
+                        h.token,
+                        h.message
+                    ));
+                }
+            }
+            Ok(text) => {
+                if !has_no_std(&text) {
+                    fails.push(format!(
+                        "{name}: B10: src/lib.rs of a core crate has `#![cfg_attr(not(test), no_std)]` (or `#![no_std]`)"
+                    ));
+                }
+            }
+        }
+    }
     let mut files = Vec::new();
     let mut walk_fails = Vec::new();
     let split = m.class == Class::Split;
@@ -1556,6 +1703,7 @@ fn check_member(
         };
         let ctx = Ctx {
             split,
+            ieee,
             depth: module_depth(&src, f),
             classes,
             aliases: &aliases,
