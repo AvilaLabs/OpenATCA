@@ -105,6 +105,11 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
                 *slot = *c;
             }
         }
+        if row_has(ev, row, Field::Beacon) {
+            if let (Some(&b), Some(slot)) = (ev.beacon.get(row), leg.flights.beacon.get_mut(fi)) {
+                *slot = b;
+            }
+        }
         if row_has(ev, row, Field::FlightPlanId) {
             if let (Some(c), Some(slot)) = (ev.plan_id.get(row), leg.flights.plan_id.get_mut(fi)) {
                 *slot = *c;

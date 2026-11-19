@@ -28,6 +28,8 @@ pub const NO_TIME: i64 = i64::MIN;
 pub const NO_ALT: i32 = i32::MIN;
 /// Absent velocity component, 0.1 knot.
 pub const NO_VEL: i16 = i16::MIN;
+/// Absent transponder code.
+pub const NO_BEACON: u16 = u16::MAX;
 /// Absent coordinate, 1e-7 degree.
 pub const NO_COORD: i32 = i32::MIN;
 
@@ -128,6 +130,9 @@ pub struct Flights {
     /// `+` is dropped), [`NONE`] when absent. Unconfirmed in the FAA documentation; on the
     /// 2026-11-14 sample it equals `aircraftAddress` in 112 of the 115 flights that carry both.
     pub addr_hint: Vec<u32>,
+    /// The last transponder code a message gave (`currentBeaconCode`, four octal digits read as
+    /// a decimal number, as the ADS-B squawk is), [`NO_BEACON`] when no message carried one.
+    pub beacon: Vec<u16>,
     /// `flightPlan@identifier`, zero padded.
     pub plan_id: Vec<[u8; 12]>,
     pub dep: Vec<[u8; 12]>,
@@ -308,6 +313,7 @@ pub fn flight_ix(leg: &mut Legacy, gufi: u128) -> Option<u32> {
     leg.flights.callsign.push([0; 8]);
     leg.flights.addr.push(NONE);
     leg.flights.addr_hint.push(NONE);
+    leg.flights.beacon.push(NO_BEACON);
     leg.flights.plan_id.push([0; 12]);
     leg.flights.dep.push([0; 12]);
     leg.flights.arr.push([0; 12]);

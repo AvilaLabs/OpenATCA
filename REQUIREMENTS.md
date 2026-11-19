@@ -3300,6 +3300,9 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   rule off for protocols frozen before it. The case list holds the first 200 cases by severity; the ASSOC table
   counts the cases left out ("more cases not listed") and the truth addresses associated with more than one ERAM
   flight at the same time (time spans, first to last sample, that overlap; consecutive legs do not), and lists them.
+- **OA-BENCH-133** The flight table keeps the last transponder code an SFDPS message gave
+  (`currentBeaconCode`, four octal digits read as a decimal number like the ADS-B squawk) in `Flights::beacon`, and
+  `NO_BEACON` when no message carried one; a message without a valid code leaves the stored one.
 
 ## Winds aloft (oa-wind)
 
@@ -5024,3 +5027,62 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
+## Shadow comparator (oa-shadow)
+
+A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track
+(SFDPS) on a recording and reports where the two disagree. It uses neither system's accuracy to decide what is a
+difference: a live shadow has no truth. Every threshold is a value of one table (`thresholds::THRESHOLDS`) and a
+value is a difference only when strictly greater than it.
+
+- **OA-SHD-001** Flights are paired by exactly one rule. An ERAM flight with a Mode S address pairs with the
+  OpenATCA aircraft of that address. An ERAM flight without one but with a beacon code pairs with the OpenATCA
+  aircraft that is not paired by address, was offered that squawk within the flight's span plus 30 s, and is
+  nearest to ERAM's first report of the flight within 5 NM (ties to the lowest address). Several ERAM flights of
+  one aircraft form one group.
+- **OA-SHD-002** A flight or aircraft with no partner is a difference (`UNPAIRED_ERAM`, `UNPAIRED_OA`) with its
+  first and last time and duration and its own row in the flight table; it is not dropped.
+- **OA-SHD-003** At each ERAM report time the cross-track and along-track separations from OpenATCA are judged
+  separately against 0.5 NM (926 m) and 1 NM (1852 m): above 0.5 NM is `POS_*_GT_0.5NM`, above 1 NM is
+  `POS_*_GT_1NM`, a separation exactly at a threshold is not a difference.
+- **OA-SHD-004** ERAM stamps whole seconds. The along-track separation is reduced by OpenATCA's ground speed times
+  1 s either way (zero when within it), the cross-track separation is not; the raw and the adjusted along-track
+  values are both written. Below 2 kt the direction is undefined and the whole separation counts as cross-track.
+- **OA-SHD-005** OpenATCA is linearly interpolated to the ERAM report time between two of its one-second rows at
+  most 2 s apart, or taken from the row at that time; with no such rows it has no sample there.
+- **OA-SHD-006** An altitude difference above 300 ft either way is `ALT_GT_300FT`, only where both systems have an
+  altitude; the others are counted as not comparable. Each event names the band of ERAM's altitude (below or at or
+  above 18,000 ft), and the summary gives the event counts and the median signed difference of both bands (no
+  altimeter setting is applied).
+- **OA-SHD-007** Identity: an ERAM beacon code that is not among the squawks the OpenATCA adapter was offered for
+  that aircraft near the flight's span (`ID_BEACON`), and an ERAM callsign not among the callsigns offered
+  (`ID_CALLSIGN`, case and padding ignored); nothing is compared where either side has none.
+- **OA-SHD-008** A paired aircraft's ERAM track segment (gaps over 30 s split segments) and the OpenATCA segment
+  it overlaps most differ in start or in drop by more than 12 s either way: `START_GT_12S`, `DROP_GT_12S`, with
+  the direction.
+- **OA-SHD-009** ERAM reports with no OpenATCA sample are `ERAM_ONLY_SPAN` (consecutive reports one span, first to
+  last report as the duration); OpenATCA rows outside every ERAM segment widened by 12 s are `OA_ONLY_SPAN`
+  (consecutive rows one span).
+- **OA-SHD-010** Where ERAM and OpenATCA both have a sample, ERAM flagging coast and OpenATCA not is
+  `COAST_ERAM_ONLY` and the reverse is `COAST_OA_ONLY`.
+- **OA-SHD-011** With truth, each position event also names which system was closer to it (`ERAM`, `OpenATCA`,
+  `tie` within 1 m, or empty without truth), computed after classification: ERAM's distance is to the truth path
+  over the whole-second quantum, OpenATCA's to the truth at the stamp. The events, their order and values are the
+  same with and without truth.
+- **OA-SHD-012** The report is deterministic: `events.csv`, `flights.csv` and `summary.txt` are byte-identical for
+  the same inputs; the summary holds no path, clock or run time and ends with a digest line over the three texts;
+  it counts every class (events, flights, span, largest) and gives no aircraft address or callsign.
+- **OA-SHD-013** The thresholds are one table and the summary prints every one.
+- **OA-SHD-014** The flight table has one row per group and per unpaired flight or aircraft, with a flight index
+  (the only name in the summary), the compared count and the worst cross-track, adjusted along-track and altitude
+  difference.
+- **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
+  identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
+  per change.
+- **OA-SHD-016** An input or output path with the components `scds` then `rec-20261119`, `stdds-20261119-holdout` or
+  a name starting `stdds-smoke-20261119`, as given or after resolving links, is refused before anything is
+  opened, exit 2.
+- **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
+  error, exit 2.
+- **OA-SHD-018** The two recordings are cut to the overlap of their recorded extents (ERAM's track positions
+  anywhere, OpenATCA's rows in the box) before anything is compared, edges inclusive; a flight or aircraft left with
+  no samples is gone, and the summary states the window in UTC. Recordings that do not overlap are an error.

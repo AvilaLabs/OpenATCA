@@ -263,6 +263,18 @@ name = "oa-sha256"
 version = "0.0.1"
 
 [[package]]
+name = "oa-shadow"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-replay",
+ "oa-sha256",
+ "oa-track",
+ "oa-truth",
+]
+
+[[package]]
 name = "oa-tar"
 version = "0.0.1"
 
