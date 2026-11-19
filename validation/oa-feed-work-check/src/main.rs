@@ -87,7 +87,7 @@ fn main() -> ExitCode {
         "EXPERIMENTAL_SERVICE_TURN_LIMIT_NS={} scope=fixture-only; no universal hard-real-time claim",
         SERVICE_TURN_LIMIT.as_nanos()
     );
-    match run_all() {
+    match run_all(true) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("FAIL_OA_FEED_WORK: {error}");
@@ -96,7 +96,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_all() -> Result<(), String> {
+/// `enforce_time` applies the wall-clock service-turn limit; the unit test passes `false` and
+/// relies on the deterministic bounds (turn cap, refusal progress, byte conservation).
+fn run_all(enforce_time: bool) -> Result<(), String> {
     let valid = maximum_frame(false)?;
     let valid_work = (MAX_FRAME_LEN - TRAILER_LEN) as u64;
     let valid_row = run_fixture(
@@ -116,6 +118,7 @@ fn run_all() -> Result<(), String> {
             compacted_bytes: 0,
             refusals: 0,
         },
+        enforce_time,
     )?;
     print_row(&valid_row);
 
@@ -138,6 +141,7 @@ fn run_all() -> Result<(), String> {
             compacted_bytes: 0,
             refusals: 0,
         },
+        enforce_time,
     )?;
     print_row(&corrupt_row);
 
@@ -169,6 +173,7 @@ fn run_all() -> Result<(), String> {
             compacted_bytes: 0,
             refusals: 2,
         },
+        enforce_time,
     )?;
     print_row(&overlap_row);
 
@@ -191,6 +196,7 @@ fn run_all() -> Result<(), String> {
             compacted_bytes: compacted_expected,
             refusals: 2,
         },
+        enforce_time,
     )?;
     print_row(&compaction_row);
 
@@ -231,6 +237,7 @@ fn run_fixture(
     source: Vec<u8>,
     capacity: usize,
     expected: Expected,
+    enforce_time: bool,
 ) -> Result<ResultRow, String> {
     let offered_bytes = to_u64(source.len())?;
     let mut storage = vec![0u8; capacity];
@@ -270,7 +277,7 @@ fn run_fixture(
         totals.max_copied_bytes = totals.max_copied_bytes.max(turn_copy);
         totals.max_compacted_bytes = totals.max_compacted_bytes.max(turn_compact);
         totals.turns += 1;
-        if elapsed >= SERVICE_TURN_LIMIT {
+        if enforce_time && elapsed >= SERVICE_TURN_LIMIT {
             return Err(format!(
                 "{name}: service turn {} ns exceeded declared {} ns experimental limit",
                 elapsed.as_nanos(),
@@ -326,7 +333,7 @@ fn run_fixture(
     }
     let finish_elapsed = finish_started.elapsed();
     totals.finalize_ns = finish_elapsed.as_nanos();
-    if finish_elapsed >= SERVICE_TURN_LIMIT {
+    if enforce_time && finish_elapsed >= SERVICE_TURN_LIMIT {
         return Err(format!(
             "{name}: finalization exceeded declared service-turn limit"
         ));
@@ -640,6 +647,6 @@ mod tests {
     // REQ: OA-FEED-188
     #[test]
     fn bounded_fixtures_conserve_source_bytes_and_frame_identity() -> Result<(), String> {
-        run_all()
+        run_all(false)
     }
 }
