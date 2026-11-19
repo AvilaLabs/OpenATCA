@@ -357,3 +357,27 @@ fn only_flights_at_the_same_time_count_as_sharing_a_truth_address_and_a_chunked_
         assert_eq!(ca.cases, asc.cases);
     }
 }
+
+// REQ: OA-BENCH-132
+#[test]
+fn the_association_table_says_whether_the_hint_over_plan_rule_was_on() {
+    let legs = legs();
+    let truth = Truth {
+        query: &query,
+        legs: &legs,
+    };
+    let leg = world(&[(FAR, NEAR, 6)]);
+    let say = |cfg: &RunConfig| {
+        let out = run_benchmark(&leg, &truth, &env(), cfg);
+        let asc = find(&out, "ASSOC").unwrap();
+        asc.notes.clone()
+    };
+    // The default run, as vs_eram and the CLI make it.
+    assert!(say(&RunConfig::default()).contains(&"hint over plan: on".to_string()));
+    // The configuration p002 sets.
+    let mut p002 = RunConfig::default();
+    p002.assoc.hint_over_plan = false;
+    let notes = say(&p002);
+    assert!(notes.contains(&"hint over plan: off".to_string()));
+    assert!(!notes.contains(&"hint over plan: on".to_string()));
+}

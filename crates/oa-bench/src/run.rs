@@ -190,6 +190,10 @@ pub(crate) fn assoc_result(
         unchecked as f64,
     ));
     a.notes.push(format!(
+        "hint over plan: {}",
+        if cfg.hint_over_plan { "on" } else { "off" }
+    ));
+    a.notes.push(format!(
         "selection never uses ERAM accuracy: callsign flights are kept when truth overlaps in time and lies within {:.0} NM; the {:.0} NM / {:.0} ft check only splits the callsign method",
         cfg.region_m / crate::geo::NM_M,
         cfg.gate_h_m / crate::geo::NM_M,
