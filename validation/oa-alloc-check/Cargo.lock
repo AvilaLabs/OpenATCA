@@ -19,6 +19,8 @@ dependencies = [
  "oa-arinc424",
  "oa-csv",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-nasr",
  "oa-sha256",
  "oa-zip",
@@ -236,6 +238,8 @@ dependencies = [
  "oa-adsb",
  "oa-feed",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 
