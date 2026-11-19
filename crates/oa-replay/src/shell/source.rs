@@ -37,7 +37,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use oa_feed::replay::REPLAY_LIMITS;
-use oa_feed::{ErrorKind, FrameError, FrameReader, Kind, MAX_FRAME_LEN};
+use oa_feed::{ErrorKind, FrameError, FrameReader, FrameWorkBudget, Kind, MAX_FRAME_LEN};
 use oa_zip::GzipReader;
 
 use crate::errors::{count_error, ErrKind, Errors, ERR_COUNT};
@@ -149,6 +149,12 @@ struct Stream<'b> {
     frame_errors: Vec<FrameError>,
 }
 
+enum AdvanceStep {
+    Continue,
+    Frame,
+    End,
+}
+
 fn note_error(errors: &mut Errors, kept: &mut Vec<FrameError>, e: FrameError) {
     let k = match e.kind {
         ErrorKind::BadMagic { .. } => ErrKind::FrameBadMagic,
@@ -166,57 +172,80 @@ fn note_error(errors: &mut Errors, kept: &mut Vec<FrameError>, e: FrameError) {
 
 impl Stream<'_> {
     /// Moves to the stream's next frame, which lands in `head`. `Ok(false)` at the end.
+    ///
+    /// This is an offline file iterator: it renews the finite per-step reader allowance until it
+    /// finds a frame or reaches EOF. A file may be arbitrarily long, so this search has no
+    /// whole-file deadline bound.
     fn advance(&mut self) -> io::Result<bool> {
         loop {
-            match self.reader.next() {
-                Some(Ok(f)) => {
-                    self.head.recv_ns = f.recv_unix_ns;
-                    self.head.mono_ns = f.mono_ns();
-                    self.head.seq = f.seq;
-                    self.head.offset = f.offset;
-                    self.head.kind = f.kind;
-                    self.head.payload.clear();
-                    self.head.payload.extend_from_slice(f.payload);
-                    return Ok(true);
-                }
-                Some(Err(e)) => {
-                    note_error(&mut self.errors, &mut self.frame_errors, e);
-                    continue;
-                }
-                None => {}
+            let mut work = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
+            match self.advance_step(&mut work)? {
+                AdvanceStep::Continue => {}
+                AdvanceStep::Frame => return Ok(true),
+                AdvanceStep::End => return Ok(false),
             }
-            if let Some(rest) = self.pending.get(self.pend_at..).filter(|r| !r.is_empty()) {
-                let took = self.reader.push(rest);
-                if took == 0 {
-                    return Err(io::Error::other("frame reader made no progress"));
-                }
-                self.pend_at += took;
-                continue;
-            }
-            self.pending.clear();
-            self.pend_at = 0;
-            if self.eof {
-                if let Some(e) = self.reader.finish() {
-                    note_error(&mut self.errors, &mut self.frame_errors, e);
-                }
-                self.eof = false;
-                self.cur = None;
-                continue;
-            }
-            if self.cur.is_none() {
-                match (self.open)() {
-                    None => return Ok(false),
-                    Some(Err(e)) => return Err(e),
-                    Some(Ok(r)) => {
-                        self.cur = Some(r);
-                        self.files += 1;
-                        self.undetermined = true;
-                        self.mode = Mode::Raw;
-                    }
-                }
-            }
-            self.read_more()?;
         }
+    }
+
+    /// One bounded reader step. The offline wrapper renews its allowance only between these
+    /// steps; bytes and decompressor state remain owned by this stream across renewals.
+    fn advance_step(&mut self, work: &mut FrameWorkBudget) -> io::Result<AdvanceStep> {
+        match self
+            .reader
+            .next_with_remaining_budget(work)
+            .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?
+        {
+            Some(Ok(f)) => {
+                self.head.recv_ns = f.recv_unix_ns;
+                self.head.mono_ns = f.mono_ns();
+                self.head.seq = f.seq;
+                self.head.offset = f.offset;
+                self.head.kind = f.kind;
+                self.head.payload.clear();
+                self.head.payload.extend_from_slice(f.payload);
+                return Ok(AdvanceStep::Frame);
+            }
+            Some(Err(e)) => {
+                note_error(&mut self.errors, &mut self.frame_errors, e);
+                return Ok(AdvanceStep::Continue);
+            }
+            None => {}
+        }
+        if let Some(rest) = self.pending.get(self.pend_at..).filter(|r| !r.is_empty()) {
+            let took = self
+                .reader
+                .push_with_remaining_budget(rest, work)
+                .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?;
+            if took == 0 {
+                return Err(io::Error::other("frame reader made no progress"));
+            }
+            self.pend_at += took;
+            return Ok(AdvanceStep::Continue);
+        }
+        self.pending.clear();
+        self.pend_at = 0;
+        if self.eof {
+            if let Some(e) = self.reader.finish() {
+                note_error(&mut self.errors, &mut self.frame_errors, e);
+            }
+            self.eof = false;
+            self.cur = None;
+            return Ok(AdvanceStep::Continue);
+        }
+        if self.cur.is_none() {
+            match (self.open)() {
+                None => return Ok(AdvanceStep::End),
+                Some(Err(e)) => return Err(e),
+                Some(Ok(r)) => {
+                    self.cur = Some(r);
+                    self.files += 1;
+                    self.undetermined = true;
+                    self.mode = Mode::Raw;
+                }
+            }
+        }
+        self.read_more()?;
+        Ok(AdvanceStep::Continue)
     }
 
     /// Reads the next piece of the current file into `pending`, or marks its end.

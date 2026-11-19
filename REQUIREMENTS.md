@@ -828,6 +828,23 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   `Recorder::open` refuses one again before touching the directory.
 - **OA-FEED-180** `utc_stamp` and `utc_iso` accept Unix times from 0001-01-01T00:00:00Z to
   9999-12-31T23:59:59Z and return `None` outside them; a recording is not named from a clock outside that range.
+- **OA-FEED-181** A CRC-work refusal leaves a complete frame buffered at the same offset with no CRC
+  bytes charged; retry with sufficient allowance returns that frame and charges exactly the CRC input bytes.
+- **OA-FEED-182** A copy-work refusal leaves the reader unchanged and charges no copied bytes; retry copies
+  the complete offered input exactly once.
+- **OA-FEED-183** A maximum-size frame with a damaged CRC is refused when its exact CRC byte allowance is one
+  short, then reported as a CRC error after retry with the full allowance and charges exactly those bytes.
+- **OA-FEED-184** After the first bad-magic byte is reported, a resynchronisation scan refused with zero
+  candidate-position allowance retains the unexamined suffix at its current offset; retry finds the next frame,
+  counts each examined start position and records every skipped prefix byte.
+- **OA-FEED-185** A shared remaining allowance across overlapping corrupt maximum-size frames stops CRC work
+  at its exact cap, retains the next candidate on refusal, and after budget renewal yields the valid tail frame.
+- **OA-FEED-186** A work refusal is renewable only when its kind-specific required amount fits a fresh profile;
+  cumulative counter overflow and amounts above the fresh allowance require explicit stream cancellation.
+- **OA-FEED-187** Work cancellation leaves complete buffered frames unclassified as malformed and retains them
+  for explicit disposition; only normal end-of-stream finalization reports a truncated tail.
+- **OA-FEED-189** Recorder startup inspects at most 16,384 directory entries when summing existing recording
+  bytes; unrelated and zero-byte entries count toward the cap, and an excess entry returns an explicit error.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1711,6 +1728,8 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-254** The progress line's replayed span is computed with saturating arithmetic: a stream whose
   clock steps are each representable but whose total span is not does not stop the run.
 - **OA-RPL-255** A file is read in pieces of at most `MAX_CHUNK` bytes; its size never sets an allocation.
+- **OA-RPL-276** Offline stream advance renews its finite reader allowance only between bounded steps;
+  searching through more than three scan quotas of garbage still conserves source bytes and emits a valid tail frame.
 - **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
   report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
   a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.

@@ -20,7 +20,10 @@ use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
 use oa_feed::replay::{replay_files, GzNoteKind};
-use oa_feed::{encode_frame_mono, format_summary, FrameReader, MAX_FRAME_LEN};
+use oa_feed::{
+    encode_frame_mono, format_summary, frame_work_refusal_retryable, FrameReader, FrameWorkBudget,
+    FrameWorkRefusal, MAX_FRAME_LEN,
+};
 use oa_zip::TruncStage;
 
 const DEFAULT_JAR: &str = "adapters/scds-bridge/target/scds-bridge.jar";
@@ -207,8 +210,15 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     let mut stop_at = start;
     let mut end_reason: Option<String> = None;
     let mut exit = ExitCode::SUCCESS;
+    let mut terminal_error: Option<String> = None;
+    let mut pending_data: Option<(Vec<u8>, usize, u64)> = None;
+    let mut deferred_drain = false;
+    let mut deferred_mono = 0u64;
+    let mut work_deferrals = 0u64;
+    let mut pending_peak_bytes = 0usize;
+    let fresh_work_profile = FrameWorkBudget::for_capacity(MAX_FRAME_LEN * 2);
 
-    loop {
+    'service: loop {
         let now = Instant::now();
         if next_summary.is_some_and(|n| now >= n) {
             print_summary(&cfg.feed, &health);
@@ -222,7 +232,11 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             }
         }
         // After asking the bridge to stop, give it a few seconds to flush, then stop reading.
-        if stopping && (child.is_none() || now.duration_since(stop_at) > Duration::from_secs(6)) {
+        if stopping
+            && (child.is_none() || now.duration_since(stop_at) > Duration::from_secs(6))
+            && pending_data.is_none()
+            && !deferred_drain
+        {
             break;
         }
         let wake = if stopping {
@@ -235,24 +249,124 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 .saturating_duration_since(now)
                 .clamp(Duration::from_millis(1), Duration::from_millis(200))
         });
-        match rx.recv_timeout(wait) {
-            Ok(Msg::Data(chunk, mono)) => {
-                let mut off = 0usize;
-                while off < chunk.len() {
-                    let took = reader.push(chunk.get(off..).unwrap_or(&[]));
-                    off += took;
-                    drain(
+        if pending_data.is_some() || deferred_drain {
+            update_pending_peak(&reader, &pending_data, &mut pending_peak_bytes);
+            if let Some(recorder) = recorder.as_mut() {
+                if let Err(e) = recorder.idle_flush(now_ns().div_euclid(1_000_000_000)) {
+                    eprintln!(
+                        "oa-feed: ERROR feed={} recording failed: {e}; frames are no longer \
+                         saved, the feed is still consumed, the exit status will be failure",
+                        cfg.feed
+                    );
+                }
+            }
+            let mut work = fresh_work_profile;
+            if deferred_drain {
+                match drain(
+                    &mut reader,
+                    &mut health,
+                    &mut recorder,
+                    &cfg.feed,
+                    deferred_mono,
+                    &mut stamped,
+                    &mut work,
+                ) {
+                    Ok(()) => deferred_drain = false,
+                    Err(refusal) => {
+                        if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
+                            terminal_error = Some(work_refusal_cancel(
+                                refusal,
+                                reader.buffered_len(),
+                                pending_input_bytes(&pending_data),
+                                work_deferrals,
+                            ));
+                            exit = ExitCode::FAILURE;
+                            break 'service;
+                        }
+                        work_deferrals = work_deferrals.saturating_add(1);
+                        update_pending_peak(&reader, &pending_data, &mut pending_peak_bytes);
+                        continue;
+                    }
+                }
+            }
+            if let Some((chunk, offset, mono)) = pending_data.as_mut() {
+                let mut completed = false;
+                while *offset < chunk.len() {
+                    let rest = chunk.get(*offset..).unwrap_or(&[]);
+                    match reader.push_with_remaining_budget(rest, &mut work) {
+                        Ok(took) => {
+                            if took == 0 {
+                                let input_bytes = chunk.len().saturating_sub(*offset);
+                                terminal_error = Some(format!(
+                                    "frame reader made no progress; live stream canceled with {} reader-buffer bytes and {input_bytes} unpushed input bytes after {work_deferrals} deferrals",
+                                    reader.buffered_len()
+                                ));
+                                exit = ExitCode::FAILURE;
+                                break 'service;
+                            }
+                            *offset += took;
+                            let input_bytes = chunk.len().saturating_sub(*offset);
+                            pending_peak_bytes = pending_peak_bytes
+                                .max(reader.buffered_len().saturating_add(input_bytes));
+                        }
+                        Err(refusal) => {
+                            if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
+                                let input_bytes = chunk.len().saturating_sub(*offset);
+                                terminal_error = Some(work_refusal_cancel(
+                                    refusal,
+                                    reader.buffered_len(),
+                                    input_bytes,
+                                    work_deferrals,
+                                ));
+                                exit = ExitCode::FAILURE;
+                                break 'service;
+                            }
+                            work_deferrals = work_deferrals.saturating_add(1);
+                            break;
+                        }
+                    }
+                    match drain(
                         &mut reader,
                         &mut health,
                         &mut recorder,
                         &cfg.feed,
-                        mono,
+                        *mono,
                         &mut stamped,
-                    );
-                    if took == 0 {
-                        break;
+                        &mut work,
+                    ) {
+                        Ok(()) => {}
+                        Err(refusal) => {
+                            if !frame_work_refusal_retryable(refusal, fresh_work_profile) {
+                                let input_bytes = chunk.len().saturating_sub(*offset);
+                                terminal_error = Some(work_refusal_cancel(
+                                    refusal,
+                                    reader.buffered_len(),
+                                    input_bytes,
+                                    work_deferrals,
+                                ));
+                                exit = ExitCode::FAILURE;
+                                break 'service;
+                            }
+                            work_deferrals = work_deferrals.saturating_add(1);
+                            deferred_drain = true;
+                            deferred_mono = *mono;
+                            break;
+                        }
                     }
                 }
+                if *offset == chunk.len() {
+                    completed = true;
+                }
+                if completed {
+                    pending_data = None;
+                }
+            }
+            update_pending_peak(&reader, &pending_data, &mut pending_peak_bytes);
+            continue;
+        }
+        match rx.recv_timeout(wait) {
+            Ok(Msg::Data(chunk, mono)) => {
+                pending_data = Some((chunk, 0, mono));
             }
             Ok(Msg::End(reason)) => {
                 end_reason = reason;
@@ -277,11 +391,9 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    if let Some(e) = reader.finish() {
-        observe_error(&mut health, &e);
+    if let Some(e) = finalize_reader(&mut reader, &mut health, terminal_error.is_some()) {
         eprintln!("oa-feed: {e}");
     }
-    observe_skipped(&mut health, reader.skipped_total());
     if let Some(r) = end_reason {
         eprintln!("oa-feed: source read error: {r}");
         exit = ExitCode::FAILURE;
@@ -313,12 +425,61 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             );
         }
     }
+    if let Some(error) = terminal_error {
+        eprintln!("oa-feed: {error}");
+    }
     print!("final ");
     print_summary(&cfg.feed, &health);
+    eprintln!(
+        "oa-feed: feed={} work_deferrals={} pending_peak_bytes={}",
+        cfg.feed, work_deferrals, pending_peak_bytes
+    );
     if let Some(r) = &recorder {
         println!("{}", format_recording(&cfg.feed, r));
     }
     Ok(exit)
+}
+
+fn update_pending_peak(
+    reader: &FrameReader<'_>,
+    pending: &Option<(Vec<u8>, usize, u64)>,
+    peak: &mut usize,
+) {
+    let input_bytes = pending_input_bytes(pending);
+    let owned_bytes = reader.buffered_len().saturating_add(input_bytes);
+    *peak = (*peak).max(owned_bytes);
+}
+
+fn pending_input_bytes(pending: &Option<(Vec<u8>, usize, u64)>) -> usize {
+    pending
+        .as_ref()
+        .map_or(0, |(chunk, offset, _)| chunk.len().saturating_sub(*offset))
+}
+
+fn work_refusal_cancel(
+    refusal: FrameWorkRefusal,
+    reader_bytes: usize,
+    input_bytes: usize,
+    prior_deferrals: u64,
+) -> String {
+    // This is the exact retained domain: bytes in FrameReader plus the active chunk suffix.
+    // It does not claim a count for unread bytes still upstream or queued in the source channel.
+    format!(
+        "nonrenewable frame work refusal {refusal:?}; live stream canceled with {reader_bytes} reader-buffer bytes and {input_bytes} unpushed input bytes after {prior_deferrals} deferrals"
+    )
+}
+
+fn finalize_reader(
+    reader: &mut FrameReader<'_>,
+    health: &mut FeedHealth,
+    work_canceled: bool,
+) -> Option<oa_feed::FrameError> {
+    let error = if work_canceled { None } else { reader.finish() };
+    if let Some(ref e) = error {
+        observe_error(health, e);
+    }
+    observe_skipped(health, reader.skipped_total());
+    error
 }
 
 fn drain(
@@ -328,8 +489,20 @@ fn drain(
     feed: &str,
     mono: u64,
     stamped: &mut Vec<u8>,
-) {
-    while let Some(ev) = reader.next() {
+    work: &mut FrameWorkBudget,
+) -> Result<(), oa_feed::FrameWorkRefusal> {
+    loop {
+        let event = match reader.next_with_remaining_budget(work) {
+            Ok(event) => event,
+            Err(refusal) => {
+                observe_skipped(health, reader.skipped_total());
+                return Err(refusal);
+            }
+        };
+        let Some(ev) = event else {
+            observe_skipped(health, reader.skipped_total());
+            return Ok(());
+        };
         match ev {
             Ok(f) => {
                 observe_frame(health, &f, f.recv_unix_ns);
@@ -377,13 +550,13 @@ fn drain(
                     }
                 }
             }
+
             Err(e) => {
                 observe_error(health, &e);
                 eprintln!("oa-feed: feed={feed} {e}");
             }
         }
     }
-    observe_skipped(health, reader.skipped_total());
 }
 
 fn print_summary(feed: &str, h: &FeedHealth) {
@@ -405,5 +578,45 @@ fn terminate(c: &mut Child) {
         .unwrap_or(false);
     if !ok {
         let _ = c.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )]
+
+    use super::finalize_reader;
+    use oa_feed::{encode_frame, ErrorKind, FeedHealth, FrameReader, MAX_FRAME_LEN, TRAILER_LEN};
+
+    // REQ: OA-FEED-187
+    #[test]
+    fn work_cancellation_does_not_classify_a_buffered_complete_frame_as_truncated() {
+        let payload = b"complete frame retained on cancellation";
+        let mut wire = vec![0u8; oa_feed::HEADER_LEN + payload.len() + TRAILER_LEN];
+        let wire_len = encode_frame(&mut wire, 1, 0, 42, 7, 0, payload)
+            .expect("frame fits its exact-size buffer");
+        assert_eq!(wire_len, wire.len());
+        let mut storage = vec![0u8; MAX_FRAME_LEN];
+        let mut reader = FrameReader::new(&mut storage).unwrap();
+        assert_eq!(reader.push(&wire), wire.len());
+        let mut health = FeedHealth::new();
+
+        assert_eq!(finalize_reader(&mut reader, &mut health, true), None);
+        assert_eq!(health.frame_errors, 0);
+        assert_eq!(reader.buffered_len(), wire.len());
+        assert_eq!(reader.next().unwrap().unwrap().seq, 42);
+
+        let mut partial_storage = vec![0u8; MAX_FRAME_LEN];
+        let mut partial_reader = FrameReader::new(&mut partial_storage).unwrap();
+        assert_eq!(partial_reader.push(&wire[..wire.len() - 1]), wire.len() - 1);
+        let mut partial_health = FeedHealth::new();
+        let error = finalize_reader(&mut partial_reader, &mut partial_health, false).unwrap();
+        assert!(matches!(error.kind, ErrorKind::Truncated { .. }));
+        assert_eq!(partial_health.frame_errors, 1);
     }
 }
