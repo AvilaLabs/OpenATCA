@@ -122,7 +122,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   - calls no floating-point method that `core` lacks on the pinned toolchain (among them `sqrt`,
     `floor`, `ceil`, `trunc`, `round`, `powi`, `powf`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log`,
     `log2`, `log10`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
-    `tanh`, `hypot`, `cbrt`, `mul_add`, `rem_euclid`, `div_euclid` and `fract`). The five
+    `tanh`, `hypot`, `cbrt`, `mul_add`, `rem_euclid`, `div_euclid` and `fract`; the checker
+    holds the complete list for the pinned toolchain, called by any path or receiver). The five
     exactly specified operations come from `oa-ieee` and the rest from `oa-math`. The standard
     library's versions call the platform maths library, whose results differ between machines in
     the last bit, and the compiler does not refuse them in a `no_std` crate once `std` is linked
@@ -130,10 +131,18 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   - names `crate::` paths only under `crate::core::`, and another workspace crate only if that
     crate is core, or through its `core` module if it is split.
 
-  A core or split crate has no `build.rs`, no custom `[lib]` or `[[bin]]` path, and no
-  dependency, in any dependency table and however renamed, on a shell or unsplit crate. The
-  checker fails on anything it cannot read or parse, on symlinks, and on a core scan that finds
-  no files.
+  - defines no `macro_rules!` macro and uses no raw identifier (`r#name`), so every name the
+    scan reads is the name the compiler resolves;
+  - has no target-dependent code: no `cfg!(target_…)`, no `#[cfg(target_…)]` and no
+    `cfg_attr` on a target, no raw pointer type, and no `{:p}` formatting, so core behaves the
+    same on every machine (B6).
+
+  A core or split crate has no `build.rs` and no custom `[lib]` or `[[bin]]` path. A core crate
+  has no dependency, in any dependency table and however renamed, on anything but core
+  workspace crates (F6), and its `src/lib.rs` declares no module named `main` or `bin`. A split
+  crate may depend on shell crates, because its shell module needs them; its core code may not
+  name them, which the scan above checks. The checker fails on anything it cannot read or parse,
+  on a dependency it cannot resolve, on symlinks, and on a core scan that finds no files.
 - **B10 [MUST]** Every crate of class core is `#![cfg_attr(not(test), no_std)]`, so the compiler
   refuses every `std` path in it (amended 2026-11-19). The one exception is `oa-ieee`, the only
   standard-library code beneath the core, whose public API is exactly `sqrt`, `floor`, `ceil`,
