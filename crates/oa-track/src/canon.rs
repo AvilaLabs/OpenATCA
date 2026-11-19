@@ -7,7 +7,7 @@
 //! | item | class |
 //! |---|---|
 //! | [`ROW_BYTES`], `OFF_*`, [`DIGEST_HEADER`], [`ROWS_MAGIC`], [`ROWS_VERSION`], [`ROWS_HEADER_BYTES`], [`MAX_ROWS_PER_SECOND`], [`MAX_SECONDS`], [`CANON_FIELDS`], [`CANON_NAN_F32`] | core (constants) |
-//! | [`canon_row`], [`canon_row_at`], [`canon_row_floats`], [`row_second`], [`field_at`] | core, pure |
+//! | [`canon_row`], [`canon_row_at`], [`canon_row_floats`], [`canon_nan_bits`], [`row_second`], [`field_at`] | core, pure |
 //! | [`second_line`], [`digest_end_line`], [`chain_next`], [`hash_rows`], [`hex32`], [`from_hex32`] | core, pure |
 //! | [`Digester`] (`new`, `push`, `finish`) | core, pure (a subsystem under D5: owns its sums) |
 //! | [`rows_header`], [`parse_rows_header`], [`limit_text`] | core, pure |
@@ -142,19 +142,22 @@ fn put<const OFF: usize, const N: usize>(row: &mut CanonRow, bytes: [u8; N]) {
 /// test `tests/canon_nan.rs` pins it to `oa_math::canon_nan_f32`.
 pub const CANON_NAN_F32: u32 = 0x7fc0_0000;
 
-/// The IEEE bits of `x`, every NaN as [`CANON_NAN_F32`].
-fn canon_f32_bits(x: f32) -> u32 {
-    if x.is_nan() {
+/// `bits` (IEEE binary32), except that every NaN (exponent bits all set, fraction not zero)
+/// becomes [`CANON_NAN_F32`]. Works on the bits alone, so no float is built from raw bytes.
+pub const fn canon_nan_bits(bits: u32) -> u32 {
+    if bits & 0x7f80_0000 == 0x7f80_0000 && bits & 0x007f_ffff != 0 {
         CANON_NAN_F32
     } else {
-        x.to_bits()
+        bits
     }
 }
 
 /// Writes `N` little-endian `f32` bit patterns at `OFF`.
 fn put_f32s<const OFF: usize, const N: usize>(row: &mut CanonRow, v: [f32; N]) {
     const { assert!(OFF + 4 * N <= ROW_BYTES) };
-    let bytes = v.into_iter().flat_map(|x| canon_f32_bits(x).to_le_bytes());
+    let bytes = v
+        .into_iter()
+        .flat_map(|x| canon_nan_bits(x.to_bits()).to_le_bytes());
     for (d, s) in row.iter_mut().skip(OFF).zip(bytes) {
         *d = s;
     }
@@ -170,8 +173,8 @@ pub fn canon_row_floats(row: &mut CanonRow) {
     };
     for c in floats.chunks_exact_mut(4) {
         if let Ok(b) = <[u8; 4]>::try_from(&*c) {
-            let bits = canon_f32_bits(f32::from_le_bytes(b));
-            c.copy_from_slice(&bits.to_le_bytes());
+            let bits = canon_nan_bits(u32::from_le_bytes(b));
+            c.copy_from_slice(&u32::to_le_bytes(bits));
         }
     }
 }
