@@ -1,26 +1,49 @@
-//! Core/shell class check (OA-TRC-200 to OA-TRC-208; RULESET B7 to B9).
+//! Core/shell class check (OA-TRC-200 to OA-TRC-2xx; RULESET B7 to B9).
 //!
 //! Every workspace member declares `[package.metadata.openatca] class` in its Cargo.toml: `core`,
 //! `shell`, `split` or `unsplit`. The check reads the class of every member, scans core code
-//! (all of `src/` of a core crate, `src/core/` of a split crate; never binaries or test code) for
-//! the names B8 forbids, checks that core code depends only on core code, checks the shape of a
-//! split crate, and keeps the unsplit list ([`ALLOWLIST`]) from growing. Cargo.toml is read with
-//! a small parser of its own (F1: no TOML dependency); source is read by a lexer that blanks
-//! comments, string literals and character literals before looking for names.
+//! (all of `src/` of a core crate, `src/core/` and `src/core.rs` of a split crate; never
+//! binaries or test code) against the B8 allowlist, checks that core code depends only on core
+//! code, checks the shape of a split crate, and holds the unsplit list to [`UNSPLIT_ALLOWED`].
+//! Cargo.toml is read with a small parser of its own (F1: no TOML dependency); source is read by
+//! a lexer that blanks comments, string literals and character literals before looking at it.
+//! Anything the check cannot read, parse or resolve is a failure, never a silent skip.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The committed list of crates allowed to be `unsplit` (B9), relative to the workspace root. It
-/// only shrinks: an entry for a crate that is no longer unsplit fails until it is removed.
+/// The committed list of crates allowed to be `unsplit`, relative to the workspace root. It must
+/// be a subset of [`UNSPLIT_ALLOWED`] and only shrinks.
 pub const ALLOWLIST: &str = "tools/oa-trace/unsplit-allowlist.txt";
 
-/// Names core code must not use. Paths are written with `::`; each is matched on tokens, so
-/// whitespace and line breaks inside a path do not hide it.
-const FORBIDDEN_STD: &[&str] = &[
-    "fs", "net", "io", "env", "process", "thread", "time", "sync",
+/// The twelve crates that were unsplit on 2026-11-19 (RULESET B9). A crate may leave this list
+/// by being split or reclassified; no crate may join it. Only a reviewed change to this array
+/// can change it.
+pub const UNSPLIT_ALLOWED: [&str; 12] = [
+    "oa-airspace",
+    "oa-bench",
+    "oa-display",
+    "oa-feed",
+    "oa-nam",
+    "oa-replay",
+    "oa-replay-diff",
+    "oa-scope-replay",
+    "oa-sha256",
+    "oa-track",
+    "oa-truth",
+    "oa-wind",
 ];
+
+/// Modules of `std`, `core` and `alloc` core code may name (RULESET B8). `collections` and
+/// `time` are allowed only for the names in [`ALLOWED_COLLECTIONS`] and `core::time::Duration`.
+const ALLOWED_MODULES: &[&str] = &[
+    "fmt", "ops", "cmp", "mem", "num", "convert", "iter", "slice", "array", "str", "char", "ascii",
+    "option", "result", "marker", "default", "clone", "borrow", "hint", "error", "f32", "f64",
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "vec",
+    "boxed", "string",
+];
+const ALLOWED_COLLECTIONS: &[&str] = &["BTreeMap", "BTreeSet", "VecDeque", "BinaryHeap"];
 const FORBIDDEN_MACROS: &[&str] = &[
     "thread_local",
     "print",
@@ -28,6 +51,12 @@ const FORBIDDEN_MACROS: &[&str] = &[
     "eprint",
     "eprintln",
     "dbg",
+    "include",
+    "include_str",
+    "include_bytes",
+    "env",
+    "option_env",
+    "file",
 ];
 const FORBIDDEN_IDENTS: &[&str] = &["HashMap", "HashSet", "RandomState"];
 
@@ -49,7 +78,7 @@ impl ClassReport {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {
     Core,
     Shell,
@@ -67,8 +96,29 @@ fn parse_class(s: &str) -> Option<Class> {
     }
 }
 
+fn class_name(c: Class) -> &'static str {
+    match c {
+        Class::Core => "core",
+        Class::Shell => "shell",
+        Class::Split => "split",
+        Class::Unsplit => "unsplit",
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Cargo.toml, minimally
+
+/// One entry of a dependency table.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct Dep {
+    /// The name used in source (the table key).
+    pub key: String,
+    /// `package = "..."` (a rename), if any.
+    pub package: Option<String>,
+    /// `path = "..."`, if any.
+    pub path: Option<String>,
+}
 
 /// What the check needs from one Cargo.toml.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -77,45 +127,212 @@ pub struct Manifest {
     pub name: Option<String>,
     /// `Some(raw value)` if `[package.metadata.openatca]` has a `class` key.
     pub class: Option<String>,
-    /// Keys of `[dependencies]` (and `[dependencies.<name>]` tables).
-    pub deps: Vec<String>,
+    /// Entries of every dependency table (`dependencies`, `dev-dependencies`,
+    /// `build-dependencies`, under `[target.*]` too), merged by key.
+    pub deps: Vec<Dep>,
+    /// `[lib]` has a `path`.
+    pub lib_path: bool,
+    /// `path` of every `[[bin]]`.
+    pub bin_paths: Vec<String>,
+    /// `[package]` has a `build` key.
+    pub build_key: bool,
 }
 
+/// `line` without a trailing `# comment` (a `#` inside quotes is kept).
+fn strip_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    for (i, ch) in line.char_indices() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '#' => return line.get(..i).unwrap_or(line),
+            None => {}
+        }
+    }
+    line
+}
+
+/// Splits `text` at `sep` outside quotes.
+fn split_outside_quotes(text: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (i, ch) in text.char_indices() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == sep => {
+                out.push(text.get(start..i).unwrap_or(""));
+                start = i + ch.len_utf8();
+            }
+            None => {}
+        }
+    }
+    out.push(text.get(start..).unwrap_or(""));
+    out
+}
+
+/// The content of a `"..."` or `'...'` string, or `None` if `v` is not exactly one.
 fn unquote(v: &str) -> Option<String> {
     let v = v.trim();
-    let v = v.split('#').next().unwrap_or("").trim();
-    let inner = v.strip_prefix('"')?.strip_suffix('"')?;
-    Some(inner.to_string())
+    for q in ['"', '\''] {
+        if let Some(inner) = v.strip_prefix(q).and_then(|r| r.strip_suffix(q)) {
+            if !inner.contains(q) {
+                return Some(inner.to_string());
+            }
+        }
+    }
+    None
 }
 
-/// Reads the package name, the openatca class and the dependency names from Cargo.toml text.
+/// `key = "value"` inside an inline table `{ ... }`.
+fn inline_str(value: &str, key: &str) -> Option<String> {
+    for (i, _) in value.match_indices(key) {
+        let before = value.get(..i).unwrap_or("").chars().next_back();
+        if before.is_some_and(|c| !(c == '{' || c == ',' || c.is_whitespace())) {
+            continue;
+        }
+        let rest = value.get(i + key.len()..).unwrap_or("").trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let q = rest.chars().next()?;
+        if q != '"' && q != '\'' {
+            continue;
+        }
+        let body = rest.get(1..).unwrap_or("");
+        let end = body.find(q)?;
+        return Some(body.get(..end).unwrap_or("").to_string());
+    }
+    None
+}
+
+/// Runs `f` on the entry for `key`, adding it first if the table has none yet.
+fn with_dep(deps: &mut Vec<Dep>, key: &str, f: impl FnOnce(&mut Dep)) {
+    let i = match deps.iter().position(|d| d.key == key) {
+        Some(i) => i,
+        None => {
+            deps.push(Dep {
+                key: key.to_string(),
+                ..Dep::default()
+            });
+            deps.len() - 1
+        }
+    };
+    if let Some(d) = deps.get_mut(i) {
+        f(d);
+    }
+}
+
+/// Segments of a section header such as `target.'cfg(unix)'.dependencies.oa-x`.
+fn header_segments(h: &str) -> Vec<String> {
+    split_outside_quotes(h, '.')
+        .into_iter()
+        .map(|p| unquote(p).unwrap_or_else(|| p.trim().to_string()))
+        .collect()
+}
+
+fn is_dep_table(seg: &str) -> bool {
+    matches!(
+        seg,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    )
+}
+
+/// Reads the package name, the openatca class, the dependency tables, `[lib]`/`[[bin]]` paths and
+/// a `build` key from Cargo.toml text.
 pub fn parse_manifest(text: &str) -> Manifest {
+    #[derive(PartialEq)]
+    enum Sec {
+        Other,
+        Package,
+        Meta,
+        Lib,
+        Bin,
+        DepTable,
+        DepNamed(String),
+    }
     let mut m = Manifest::default();
-    let mut section = String::new();
+    let mut sec = Sec::Other;
     for raw in text.lines() {
-        let line = raw.trim();
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
         if let Some(h) = line.strip_prefix('[') {
-            let h = h.trim_end_matches(']').trim().to_string();
-            if let Some(dep) = h.strip_prefix("dependencies.") {
-                m.deps.push(dep.trim().trim_matches('"').to_string());
-            }
-            section = h;
+            let array = h.starts_with('[');
+            let h = h.trim_start_matches('[').trim_end_matches(']').trim();
+            let segs = header_segments(h);
+            let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+            sec = match segs.as_slice() {
+                ["package"] => Sec::Package,
+                ["package", "metadata", "openatca"] => Sec::Meta,
+                ["lib"] => Sec::Lib,
+                ["bin"] if array => {
+                    m.bin_paths.push(String::new());
+                    Sec::Bin
+                }
+                ["workspace", ..] => Sec::Other,
+                _ => match segs.iter().position(|s| is_dep_table(s)) {
+                    Some(i) if i + 1 == segs.len() => Sec::DepTable,
+                    Some(i) if i + 2 == segs.len() => {
+                        let name = segs.get(i + 1).copied().unwrap_or("").to_string();
+                        with_dep(&mut m.deps, &name, |_| {});
+                        Sec::DepNamed(name)
+                    }
+                    _ => Sec::Other,
+                },
+            };
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let key = key.trim();
-        match section.as_str() {
-            "package" if key == "name" => m.name = unquote(value),
-            "package.metadata.openatca" if key == "class" => {
-                m.class = Some(unquote(value).unwrap_or_else(|| value.trim().to_string()));
-            }
-            "dependencies" => {
-                let name = key.split('.').next().unwrap_or(key).trim_matches('"');
-                if !name.is_empty() && !name.starts_with('#') {
-                    m.deps.push(name.to_string());
+        let (key, value) = (key.trim(), value.trim());
+        match &sec {
+            Sec::Package => {
+                if key == "name" {
+                    m.name = unquote(value);
+                } else if key == "build" {
+                    m.build_key = true;
                 }
+            }
+            Sec::Meta if key == "class" => {
+                m.class = Some(unquote(value).unwrap_or_else(|| value.to_string()));
+            }
+            Sec::Lib if key == "path" => m.lib_path = true,
+            Sec::Bin if key == "path" => {
+                if let Some(last) = m.bin_paths.last_mut() {
+                    *last = unquote(value).unwrap_or_else(|| value.to_string());
+                }
+            }
+            Sec::DepNamed(name) => {
+                with_dep(&mut m.deps, name, |d| match key {
+                    "path" => d.path = unquote(value),
+                    "package" => d.package = unquote(value),
+                    _ => {}
+                });
+            }
+            Sec::DepTable => {
+                let parts = split_outside_quotes(key, '.');
+                let name = parts
+                    .first()
+                    .map(|p| unquote(p).unwrap_or_else(|| p.trim().to_string()))
+                    .unwrap_or_default();
+                let sub = parts.get(1).map(|p| p.trim());
+                with_dep(&mut m.deps, &name, |d| match sub {
+                    Some("path") => d.path = unquote(value),
+                    Some("package") => d.package = unquote(value),
+                    Some(_) => {}
+                    None if value.starts_with('{') => {
+                        d.path = inline_str(value, "path").or(d.path.take());
+                        d.package = inline_str(value, "package").or(d.package.take());
+                    }
+                    None => {}
+                });
             }
             _ => {}
         }
@@ -123,46 +340,97 @@ pub fn parse_manifest(text: &str) -> Manifest {
     m
 }
 
-/// The `members = [...]` list of the root Cargo.toml.
-pub fn parse_members(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    let mut in_workspace = false;
+/// The string list `key = [ ... ]` of the `[workspace]` table in the root Cargo.toml, read
+/// across lines with either quote style. Returns `None` if the key is absent, else the
+/// entries and the entries that are not a plain quoted string (each is a failure).
+pub fn parse_workspace_list(text: &str, key: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let mut in_ws = false;
+    let mut body = String::new();
+    let mut open = false;
+    let mut depth: i32;
+    let mut found = false;
+    let mut seen_open = false;
     for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.starts_with('[') {
-            in_workspace = line == "[workspace]";
-            inside = false;
-            continue;
-        }
-        if !in_workspace {
-            continue;
-        }
-        let mut rest = line;
-        if !inside {
-            let Some(r) = line.strip_prefix("members") else {
+        let line = strip_comment(raw).trim();
+        if !open {
+            if line.starts_with('[') {
+                in_ws = line == "[workspace]";
+                continue;
+            }
+            if !in_ws {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
                 continue;
             };
-            let Some((_, r)) = r.split_once('[') else {
+            if k.trim() != key {
                 continue;
-            };
-            inside = true;
-            rest = r;
+            }
+            found = true;
+            open = true;
+            body.push_str(v);
+        } else {
+            body.push(' ');
+            body.push_str(line);
         }
-        let (body, done) = match rest.split_once(']') {
-            Some((b, _)) => (b, true),
-            None => (rest, false),
-        };
-        out.extend(
-            body.split(',')
-                .filter_map(|p| unquote(p.trim()))
-                .filter(|p| !p.is_empty()),
-        );
-        if done {
-            inside = false;
+        depth = 0;
+        let mut q: Option<char> = None;
+        for ch in body.chars() {
+            match q {
+                Some(c) if ch == c => q = None,
+                Some(_) => {}
+                None if ch == '"' || ch == '\'' => q = Some(ch),
+                None if ch == '[' => {
+                    depth += 1;
+                    seen_open = true;
+                }
+                None if ch == ']' => depth -= 1,
+                None => {}
+            }
+        }
+        if seen_open && depth <= 0 {
+            break;
         }
     }
-    out
+    if !found {
+        return None;
+    }
+    let inner = body.trim();
+    let inner = inner.strip_prefix('[').unwrap_or(inner);
+    let inner = inner.trim_end().strip_suffix(']').unwrap_or(inner);
+    let mut items = Vec::new();
+    let mut bad = Vec::new();
+    for part in split_outside_quotes(inner, ',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        match unquote(p) {
+            Some(v) if !v.is_empty() && !v.contains('*') && !v.contains('?') => items.push(v),
+            _ => bad.push(p.to_string()),
+        }
+    }
+    Some((items, bad))
+}
+
+/// The `members` of the root Cargo.toml (entries and unparsed entries).
+pub fn parse_members(text: &str) -> (Vec<String>, Vec<String>) {
+    parse_workspace_list(text, "members").unwrap_or_default()
+}
+
+/// `path` joined to `base` with `.` and `..` resolved, `/`-separated; `None` if it leaves the root.
+fn normalize(base: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in base.split('/').chain(path.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            x => parts.push(x),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -375,40 +643,132 @@ fn skip_modifiers(toks: &[Tok], mut i: usize) -> usize {
     }
 }
 
-/// Removes `#[cfg(test)]` and `#[cfg(kani)]` items (B7: tests and proof harnesses are shell) and
-/// returns the remaining tokens and the names of out-of-line modules removed (`mod tests;`).
-fn strip_test_items(toks: Vec<Tok>) -> (Vec<Tok>, Vec<String>) {
+/// What [`strip_test_items`] found.
+struct Stripped {
+    toks: Vec<Tok>,
+    /// Names of out-of-line test-only modules (`#[cfg(test)] mod x;`).
+    test_mods: Vec<String>,
+    /// The file starts with `#![cfg(test)]`: all of it is test code.
+    whole_file: bool,
+}
+
+/// Item keywords that may follow a test-only attribute for it to apply to an item.
+const ITEM_KEYWORDS: &[&str] = &[
+    "fn",
+    "mod",
+    "use",
+    "impl",
+    "struct",
+    "enum",
+    "const",
+    "static",
+    "type",
+    "trait",
+    "macro_rules",
+    "union",
+    "extern",
+];
+
+/// Whether the cfg predicate at `*i` holds only under test or proof builds; advances past it.
+/// `test` and `kani` alone, and `all(..)` with such an argument, are; `any(..)` and `not(..)`
+/// never are (`cfg(any(test, unix))` is compiled in a product build).
+fn test_only(toks: &[Tok], i: &mut usize) -> bool {
+    let w = s(toks, *i).to_string();
+    match w.as_str() {
+        "test" | "kani" => {
+            *i += 1;
+            true
+        }
+        "all" | "any" | "not" if s(toks, *i + 1) == "(" => {
+            *i += 2;
+            let mut any_arg = false;
+            while *i < toks.len() && s(toks, *i) != ")" {
+                any_arg |= test_only(toks, i);
+                if s(toks, *i) == "," {
+                    *i += 1;
+                }
+            }
+            *i += 1;
+            w == "all" && any_arg
+        }
+        _ => {
+            // `feature = "x"`, `unix`, `target_os = ..`: not test-only; step over it
+            *i += 1;
+            while *i < toks.len() && !matches!(s(toks, *i), "," | ")") {
+                if s(toks, *i) == "(" {
+                    *i = skip_group(toks, *i);
+                } else {
+                    *i += 1;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Removes test-only items (B7: tests and proof harnesses are shell). A test-only attribute
+/// strips the item that follows it only if an item keyword follows; on a field, variant, match
+/// arm, parameter or statement it strips nothing.
+fn strip_test_items(toks: Vec<Tok>) -> Stripped {
     let mut out = Vec::new();
-    let mut files = Vec::new();
+    let mut test_mods = Vec::new();
+    let mut whole_file = false;
     let mut i = 0;
     while i < toks.len() {
-        let is_cfg = s(&toks, i) == "#"
-            && s(&toks, i + 1) == "["
-            && s(&toks, i + 2) == "cfg"
-            && s(&toks, i + 3) == "("
-            && matches!(s(&toks, i + 4), "test" | "kani")
-            && s(&toks, i + 5) == ")"
-            && s(&toks, i + 6) == "]";
-        if !is_cfg {
+        let inner = s(&toks, i) == "#" && s(&toks, i + 1) == "!";
+        let at = i + if inner { 2 } else { 1 };
+        let mut p = at + 3;
+        let is_test = s(&toks, i) == "#"
+            && s(&toks, at) == "["
+            && s(&toks, at + 1) == "cfg"
+            && s(&toks, at + 2) == "("
+            && test_only(&toks, &mut p)
+            && s(&toks, p) == ")"
+            && s(&toks, p + 1) == "]";
+        if !is_test {
             if let Some(t) = toks.get(i) {
                 out.push(t.clone());
             }
             i += 1;
             continue;
         }
-        i += 7;
-        // further attributes on the same item
-        while s(&toks, i) == "#" && s(&toks, i + 1) == "[" {
-            i = skip_group(&toks, i + 1);
+        if inner {
+            // `#![cfg(test)]` is a whole-file marker only before any item
+            if out.is_empty()
+                || out
+                    .iter()
+                    .all(|t| matches!(t.s.as_str(), "#" | "!" | "[" | "]"))
+            {
+                whole_file = true;
+            }
+            i = p + 2;
+            continue;
         }
-        i = skip_modifiers(&toks, i);
-        let kw = s(&toks, i).to_string();
-        if kw == "mod" && s(&toks, i + 2) == ";" {
-            files.push(s(&toks, i + 1).to_string());
+        let mut j = p + 2;
+        while s(&toks, j) == "#" && s(&toks, j + 1) == "[" {
+            j = skip_group(&toks, j + 1);
         }
-        let to_semicolon = matches!(kw.as_str(), "use" | "const" | "static" | "type" | "mod")
-            && !(kw == "mod" && s(&toks, i + 2) == "{");
+        j = skip_modifiers(&toks, j);
+        let kw = s(&toks, j).to_string();
+        if !ITEM_KEYWORDS.contains(&kw.as_str()) {
+            // not on an item: keep everything, strip nothing
+            if let Some(t) = toks.get(i) {
+                out.push(t.clone());
+            }
+            i += 1;
+            continue;
+        }
+        if kw == "mod" && s(&toks, j + 2) == ";" {
+            test_mods.push(s(&toks, j + 1).to_string());
+        }
+        let to_semicolon = match kw.as_str() {
+            "use" | "const" | "static" | "type" => true,
+            "mod" => s(&toks, j + 2) != "{",
+            "extern" => s(&toks, j + 1) == "crate",
+            _ => false,
+        };
         let mut depth = 0usize;
+        i = j;
         while i < toks.len() {
             match s(&toks, i) {
                 "(" | "[" | "{" => depth += 1,
@@ -429,7 +789,11 @@ fn strip_test_items(toks: Vec<Tok>) -> (Vec<Tok>, Vec<String>) {
             i += 1;
         }
     }
-    (out, files)
+    Stripped {
+        toks: out,
+        test_mods,
+        whole_file,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -452,50 +816,197 @@ fn hit(line: usize, token: &str, message: &str) -> Hit {
     }
 }
 
-/// Finds the B8 names in core tokens. `classes` maps every workspace crate to its class, for the
-/// dependency check; `own` is the scanned crate (naming itself is not a dependency).
-fn scan_tokens(toks: &[Tok], own: &str, classes: &BTreeMap<String, Class>) -> Vec<Hit> {
-    let mut hits = Vec::new();
-    let own_us = own.replace('-', "_");
-    let mut in_use = false;
-    for (i, t) in toks.iter().enumerate() {
-        let w = t.s.as_str();
-        match w {
-            "use" => in_use = true,
-            ";" => in_use = false,
-            _ => {}
+/// What a scan needs to know about the crate the file belongs to.
+// A7.2: cold struct, size guard waived
+pub struct Ctx<'a> {
+    /// The crate is split: `crate::` is allowed only under `crate::core::`, and `super::` may
+    /// not climb out of the core module.
+    pub split: bool,
+    /// Module depth of the file below the crate root (`core.rs` and `core/mod.rs` are 1).
+    pub depth: usize,
+    /// Class of every workspace crate by name.
+    pub classes: &'a BTreeMap<String, Class>,
+    /// Identifier used in source -> workspace crate it names (own name, dependency keys).
+    pub aliases: &'a BTreeMap<String, String>,
+}
+
+fn is_word(t: &str) -> bool {
+    t.chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Whether `toks[i]` starts a path (not a field, method or later segment of one).
+fn is_path_start(toks: &[Tok], i: usize) -> bool {
+    match if i == 0 { "" } else { s(toks, i - 1) } {
+        "." => false,
+        "::" => {
+            // a leading `::` follows a keyword or a delimiter, never a path segment
+            let before = if i >= 2 { s(toks, i - 2) } else { "" };
+            !is_word(before)
+                || matches!(
+                    before,
+                    "use"
+                        | "as"
+                        | "return"
+                        | "in"
+                        | "dyn"
+                        | "impl"
+                        | "for"
+                        | "where"
+                        | "mut"
+                        | "ref"
+                        | "move"
+                        | "else"
+                        | "match"
+                        | "if"
+                        | "while"
+                        | "loop"
+                        | "break"
+                )
         }
-        let prev = if i == 0 { "" } else { s(toks, i - 1) };
-        let next = s(toks, i + 1);
-        if w == "std" && next == "::" {
-            let after = s(toks, i + 2);
-            if FORBIDDEN_STD.contains(&after) {
+        _ => true,
+    }
+}
+
+/// What to use instead of the module a core path names.
+fn module_hint(seg: &str) -> &'static str {
+    match seg {
+        "time" => "use core::time::Duration; the clock is the shell's, time is an input",
+        "io" | "error" => "use core::fmt or an error type of your own; I/O is shell",
+        "collections" => "use alloc::collections::{BTreeMap, BTreeSet, VecDeque, BinaryHeap}",
+        "sync" | "cell" | "thread" => "state is passed in as a value; no globals or threads in core",
+        "fs" | "net" | "env" | "process" | "os" | "path" | "ffi" => "that is I/O and belongs in the shell",
+        _ => "allowed: fmt, ops, cmp, mem, num, convert, iter, slice, array, str, char, ascii, option, result, marker, default, clone, borrow, hint, error, f32, f64, integer modules, vec (alloc::vec), boxed, string, collections (BTreeMap, BTreeSet, VecDeque, BinaryHeap), core::time::Duration",
+    }
+}
+
+/// Checks the module list of a path under `root` (`std`, `core` or `alloc`) as it is read.
+fn check_segment(prefix: &[String], root: &str, line: usize, hits: &mut Vec<Hit>) {
+    let Some(first) = prefix.first() else { return };
+    let path = format!("{root}::{}", prefix.join("::"));
+    match prefix.len() {
+        1 => {
+            let ok = ALLOWED_MODULES.contains(&first.as_str())
+                || first == "collections"
+                || (first == "time" && root == "core");
+            if !ok {
                 hits.push(hit(
-                    t.line,
-                    &format!("std::{after}"),
-                    "B8: core code names it",
+                    line,
+                    &path,
+                    &format!("B8: not an allowed module; {}", module_hint(first)),
                 ));
-            } else if after == "{" {
-                // use std::{fs, io::Read};
-                let end = skip_group(toks, i + 2);
-                let mut depth = 0usize;
-                for j in i + 2..end {
-                    match s(toks, j) {
-                        "{" => depth += 1,
-                        "}" => depth = depth.saturating_sub(1),
-                        x if depth == 1
-                            && FORBIDDEN_STD.contains(&x)
-                            && matches!(s(toks, j - 1), "{" | ",") =>
-                        {
-                            hits.push(hit(t.line, &format!("std::{x}"), "B8: core code names it"));
-                        }
-                        _ => {}
-                    }
+            }
+        }
+        2 => {
+            let second = prefix.get(1).map_or("", String::as_str);
+            let bad = (first == "collections" && !ALLOWED_COLLECTIONS.contains(&second))
+                || (first == "time" && second != "Duration");
+            if bad {
+                hits.push(hit(
+                    line,
+                    &path,
+                    &format!("B8: not allowed; {}", module_hint(first)),
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walks the path or use-tree that starts at `toks[j]` (just after `root ::`), reporting every
+/// segment B8 does not allow. Returns the index past what it read.
+fn walk_path(
+    toks: &[Tok],
+    mut j: usize,
+    root: &str,
+    prefix: &mut Vec<String>,
+    hits: &mut Vec<Hit>,
+) -> usize {
+    let line = toks.get(j).map_or(0, |t| t.line);
+    let w = s(toks, j);
+    if w == "{" {
+        j += 1;
+        while j < toks.len() {
+            match s(toks, j) {
+                "}" => return j + 1,
+                "," => j += 1,
+                _ => {
+                    let mut p = prefix.clone();
+                    j = walk_path(toks, j, root, &mut p, hits).max(j + 1);
                 }
             }
+        }
+        j
+    } else if w == "*" {
+        hits.push(hit(
+            line,
+            "*",
+            "B8: no `*` glob on a std, core or alloc path",
+        ));
+        j + 1
+    } else if is_word(w) {
+        prefix.push(w.to_string());
+        check_segment(prefix, root, line, hits);
+        if s(toks, j + 1) == "::" && s(toks, j + 2) != "<" {
+            return walk_path(toks, j + 2, root, prefix, hits);
+        }
+        if prefix.len() == 1 && matches!(w, "collections" | "time") {
+            hits.push(hit(
+                line,
+                &format!("{root}::{w}"),
+                &format!("B8: name the item, not the module; {}", module_hint(w)),
+            ));
+        }
+        j + 1
+    } else {
+        hits.push(hit(
+            line,
+            w,
+            "B8: a std, core or alloc path must be spelled out",
+        ));
+        j + 1
+    }
+}
+
+/// Finds the B8 names in core tokens.
+fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    let mut use_start: Option<usize> = None;
+    // one entry per open `{`: true if it opens an inline `mod name {`
+    let mut braces: Vec<bool> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let w = t.s.as_str();
+        let prev = if i == 0 { "" } else { s(toks, i - 1) };
+        let next = s(toks, i + 1);
+        match w {
+            "use" if is_path_start(toks, i) && use_start.is_none() => use_start = Some(i + 1),
+            ";" => {
+                if let Some(from) = use_start.take() {
+                    check_use_statement(toks.get(from..i).unwrap_or(&[]), ctx, &mut hits);
+                }
+            }
+            "{" => braces.push(i >= 2 && s(toks, i - 2) == "mod" && is_word(prev)),
+            "}" => {
+                braces.pop();
+            }
+            _ => {}
+        }
+        let in_use = use_start.is_some();
+        let start = is_path_start(toks, i);
+        if w == "extern" && next == "crate" {
+            hits.push(hit(
+                t.line,
+                "extern crate",
+                "B8: core code uses no `extern crate`",
+            ));
         } else if w == "static" && next == "mut" {
             hits.push(hit(t.line, "static mut", "B8: core code names it"));
-        } else if next == "!" && FORBIDDEN_MACROS.contains(&w) && s(toks, i + 2) != "=" {
+        } else if next == "!"
+            && s(toks, i + 2) != "="
+            && prev != "."
+            && FORBIDDEN_MACROS.contains(&w)
+        {
             hits.push(hit(t.line, &format!("{w}!"), "B8: core code names it"));
         } else if FORBIDDEN_IDENTS.contains(&w) {
             hits.push(hit(t.line, w, "B8: core code names it"));
@@ -503,36 +1014,149 @@ fn scan_tokens(toks: &[Tok], own: &str, classes: &BTreeMap<String, Class>) -> Ve
             && (prev == "::" || next == "::" || (in_use && matches!(prev, "{" | ",")))
         {
             hits.push(hit(t.line, "shell", "B8: path into a shell module"));
-        } else if next == "::" && prev != "::" && w != own_us {
-            // a workspace crate named by its underscored name
-            match classes.get(&w.replace('_', "-")) {
-                Some(Class::Core) | None => {}
+        } else if start && matches!(w, "std" | "core" | "alloc") {
+            if next == "::" {
+                walk_path(toks, i + 2, w, &mut Vec::new(), &mut hits);
+            } else if in_use {
+                hits.push(hit(
+                    t.line,
+                    w,
+                    "B8: name the module path, not the bare crate",
+                ));
+            }
+        } else if start && ctx.aliases.contains_key(w) {
+            let Some(target) = ctx.aliases.get(w) else {
+                continue;
+            };
+            if next != "::" {
+                if in_use {
+                    hits.push(hit(
+                        t.line,
+                        w,
+                        "B8: name the module path, not the bare crate",
+                    ));
+                }
+                continue;
+            }
+            match ctx.classes.get(target) {
+                Some(Class::Core) => {}
                 Some(Class::Split) if s(toks, i + 2) == "core" => {}
                 Some(Class::Split) => hits.push(hit(
                     t.line,
                     w,
                     "B8: names a split crate outside its `core` module",
                 )),
-                Some(_) => hits.push(hit(t.line, w, "B8: names a shell or unsplit crate")),
+                _ => hits.push(hit(t.line, w, "B8: names a shell or unsplit crate")),
+            }
+        } else if ctx.split && start && w == "crate" && next == "::" && s(toks, i + 2) != "core" {
+            hits.push(hit(
+                t.line,
+                &format!("crate::{}", s(toks, i + 2)),
+                "B8: core code of a split crate names `crate::` only under `crate::core::`",
+            ));
+        } else if ctx.split && start && w == "super" && next == "::" && prev != "::" {
+            let mut j = i;
+            let mut up = 0;
+            while s(toks, j) == "super" && s(toks, j + 1) == "::" {
+                up += 1;
+                j += 2;
+            }
+            let depth = ctx.depth + braces.iter().filter(|b| **b).count();
+            if up >= depth && s(toks, j) != "core" {
+                hits.push(hit(
+                    t.line,
+                    "super",
+                    "B8: `super::` reaches the crate root; name `crate::core::` instead",
+                ));
             }
         }
     }
     hits
 }
 
-/// Scans one file of core code. Returns the hits and the out-of-line test modules it declares.
-pub fn scan_source(
-    src: &str,
-    own: &str,
-    classes: &BTreeMap<String, Class>,
-) -> (Vec<Hit>, Vec<String>) {
-    let (toks, test_mods) = strip_test_items(tokenize(&mask(src)));
-    (scan_tokens(&toks, own, classes), test_mods)
+/// The tokens of one `use` statement (after `use`, before `;`): no `as` and no `*` where a
+/// std, core, alloc or workspace-crate path is imported.
+fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
+    let has_root = stmt.iter().enumerate().any(|(k, t)| {
+        (matches!(t.s.as_str(), "std" | "core" | "alloc") || ctx.aliases.contains_key(t.s.as_str()))
+            && is_path_start(stmt, k)
+    });
+    if !has_root {
+        return;
+    }
+    for t in stmt {
+        if t.s == "as" || t.s == "*" {
+            hits.push(hit(
+                t.line,
+                &t.s,
+                "B8: no `as` rename and no `*` glob on a std, core, alloc or workspace-crate path",
+            ));
+        }
+    }
 }
 
-/// The first reason `lib.rs` is not only module declarations, re-exports and attributes.
-pub fn lib_rs_problem(src: &str) -> Option<Hit> {
-    let (toks, _) = strip_test_items(tokenize(&mask(src)));
+/// Lines of `#[path = ..]` attributes, also inside `cfg_attr`: they pull in a file the scan does
+/// not read.
+fn path_attr_lines(toks: &[Tok]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.s != "#" {
+            continue;
+        }
+        let at = if s(toks, i + 1) == "!" { i + 2 } else { i + 1 };
+        if s(toks, at) != "[" {
+            continue;
+        }
+        let end = skip_group(toks, at);
+        let head = s(toks, at + 1);
+        let bad = (head == "path" && s(toks, at + 2) == "=")
+            || (head == "cfg_attr"
+                && (at..end).any(|k| s(toks, k) == "path" && s(toks, k + 1) == "="));
+        if bad {
+            out.push(t.line);
+        }
+    }
+    out
+}
+
+/// Result of scanning one file of core code.
+#[derive(Debug, Default)]
+// A7.2: cold struct, size guard waived
+pub struct FileScan {
+    pub hits: Vec<Hit>,
+    /// Out-of-line test-only modules the file declares.
+    pub test_mods: Vec<String>,
+    /// The whole file is test code (`#![cfg(test)]`).
+    pub whole_file: bool,
+}
+
+/// Scans one file of core code.
+pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
+    let raw = tokenize(&mask(src));
+    let mut hits: Vec<Hit> = path_attr_lines(&raw)
+        .into_iter()
+        .map(|l| hit(l, "#[path]", "B8: core code uses no `#[path]` attribute"))
+        .collect();
+    let st = strip_test_items(raw);
+    hits.extend(scan_tokens(&st.toks, ctx));
+    FileScan {
+        hits,
+        test_mods: st.test_mods,
+        whole_file: st.whole_file,
+    }
+}
+
+/// Problems with `lib.rs` of a split crate: it declares exactly `mod core;` and `mod shell;`
+/// (any visibility), plus re-exports, attributes and doc comments, and nothing else.
+pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
+    let raw = tokenize(&mask(src));
+    let mut out: Vec<Hit> = path_attr_lines(&raw)
+        .into_iter()
+        .map(|l| hit(l, "#[path]", "B7: lib.rs uses no `#[path]` attribute"))
+        .collect();
+    let toks = strip_test_items(raw).toks;
+    let msg = "B7: lib.rs of a split crate declares exactly `mod core;` and `mod shell;`, re-exports and attributes";
+    let (mut core_n, mut shell_n) = (0, 0);
     let mut i = 0;
     while i < toks.len() {
         if s(&toks, i) == "#" {
@@ -541,66 +1165,80 @@ pub fn lib_rs_problem(src: &str) -> Option<Hit> {
                 i += 1;
             }
             if s(&toks, i) != "[" {
-                return Some(hit(
+                out.push(hit(
                     toks.get(i).map_or(0, |t| t.line),
                     s(&toks, i),
                     "stray `#`",
                 ));
+                break;
             }
             i = skip_group(&toks, i);
             continue;
         }
         let line = toks.get(i).map_or(0, |t| t.line);
         i = skip_modifiers(&toks, i);
-        let kw = s(&toks, i);
-        let end = (i..toks.len())
-            .find(|&j| matches!(s(&toks, j), ";" | "{"))
-            .unwrap_or(toks.len());
-        let ok = match kw {
-            "mod" => end == i + 2 && s(&toks, end) == ";",
-            "use" => {
-                // a use list may contain braces; the statement ends at the first `;`
-                (i..toks.len()).any(|j| s(&toks, j) == ";")
+        let kw = s(&toks, i).to_string();
+        let semi = (i..toks.len()).find(|&j| s(&toks, j) == ";");
+        match kw.as_str() {
+            "mod" if s(&toks, i + 2) == ";" && s(&toks, i + 1) == "core" => core_n += 1,
+            "mod" if s(&toks, i + 2) == ";" && s(&toks, i + 1) == "shell" => shell_n += 1,
+            "use" if semi.is_some() => {}
+            _ => {
+                out.push(hit(line, &kw, msg));
+                break;
             }
-            _ => false,
-        };
-        if !ok {
-            return Some(hit(
-                line,
-                kw,
-                "B7: lib.rs of a split crate holds only module declarations, re-exports and attributes",
-            ));
         }
-        i = (i..toks.len())
-            .find(|&j| s(&toks, j) == ";")
-            .map_or(toks.len(), |j| j + 1);
+        i = semi.map_or(toks.len(), |j| j + 1);
     }
-    None
+    if core_n != 1 || shell_n != 1 {
+        out.push(hit(1, "mod", msg));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
 // Workspace
 
-fn collect_rs(dir: &Path, skip_bin: bool, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_dir() {
-            if skip_bin && path.file_name().is_some_and(|n| n == "bin") {
+/// Every `.rs` file under `dir`, skipping the paths in `skip`. Unreadable entries and symlinks
+/// are failures.
+fn walk_rs(dir: &Path, skip: &[PathBuf], out: &mut Vec<PathBuf>, fails: &mut Vec<String>) {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            fails.push(format!("{}: cannot read directory: {e}", dir.display()));
+            return;
+        }
+    };
+    for entry in rd {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                fails.push(format!("{}: cannot read entry: {e}", dir.display()));
                 continue;
             }
-            collect_rs(&path, skip_bin, out);
-        } else if ft.is_file() && path.extension().is_some_and(|e| e == "rs") {
+        };
+        let path = entry.path();
+        if skip.contains(&path) {
+            continue;
+        }
+        let md = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                fails.push(format!("{}: cannot stat: {e}", path.display()));
+                continue;
+            }
+        };
+        if md.file_type().is_symlink() {
+            fails.push(format!(
+                "{}: symlink (cargo follows it, the scan must not be steered by it)",
+                path.display()
+            ));
+        } else if md.is_dir() {
+            walk_rs(&path, skip, out, fails);
+        } else if md.is_file() && path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
     }
-}
-
-fn is_test_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "tests.rs" || n.ends_with("_tests.rs"))
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -612,42 +1250,115 @@ fn rel(root: &Path, path: &Path) -> String {
 
 struct Member {
     name: String,
+    /// Directory relative to the workspace root, normalized.
+    rel_dir: String,
     dir: PathBuf,
     class: Class,
-    deps: Vec<String>,
+    man: Manifest,
 }
 
-/// The core files of a member: every `.rs` under `src/` except binaries (core), or under
-/// `src/core/` (split); sorted, with test files and out-of-line test modules left to the scan.
-fn core_files(m: &Member) -> Vec<PathBuf> {
-    let base = match m.class {
-        Class::Split => m.dir.join("src/core"),
-        _ => m.dir.join("src"),
+/// Where rustc looks for `mod x;` declared in `file`, and the directory holding its children.
+fn module_candidates(file: &Path, name: &str) -> (Vec<PathBuf>, PathBuf) {
+    let parent = file.parent().unwrap_or(Path::new(""));
+    let fname = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let base = if matches!(fname, "lib.rs" | "main.rs" | "mod.rs") {
+        parent.to_path_buf()
+    } else {
+        parent.join(file.file_stem().unwrap_or_default())
     };
-    let mut files = Vec::new();
-    collect_rs(&base, true, &mut files);
-    files.retain(|p| {
-        !(is_test_file(p) || m.class == Class::Core && p == &m.dir.join("src/main.rs"))
-    });
-    files.sort();
-    files
+    (
+        vec![
+            base.join(format!("{name}.rs")),
+            base.join(name).join("mod.rs"),
+        ],
+        base.join(name),
+    )
 }
 
-/// Checks every workspace member under `root` (B7 to B9).
+/// Depth of `file` below the crate root for the `super::` rule (`src/core.rs` is 1).
+fn module_depth(src: &Path, file: &Path) -> usize {
+    let r = file.strip_prefix(src).unwrap_or(file);
+    let mut n = r.components().count();
+    if r.file_name().is_some_and(|f| f == "mod.rs") {
+        n -= 1;
+    }
+    n.max(1)
+}
+
+/// Resolves a dependency to a workspace member name. `Err` if it has a path outside the members.
+fn resolve_dep(
+    d: &Dep,
+    rel_dir: &str,
+    by_dir: &BTreeMap<String, String>,
+    classes: &BTreeMap<String, Class>,
+) -> Result<Option<String>, String> {
+    if let Some(p) = &d.path {
+        return match normalize(rel_dir, p).and_then(|n| by_dir.get(&n).cloned()) {
+            Some(name) => Ok(Some(name)),
+            None => Err(format!("path dependency {:?} is not a workspace member", p)),
+        };
+    }
+    let name = d.package.clone().unwrap_or_else(|| d.key.clone());
+    Ok(classes.contains_key(&name).then_some(name))
+}
+
+/// Checks every workspace member under `root` (B7 to B9) against [`UNSPLIT_ALLOWED`].
 pub fn check(root: &Path) -> ClassReport {
+    check_with(root, &UNSPLIT_ALLOWED)
+}
+
+/// [`check`] with another fixed unsplit list (for the fixtures).
+pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
     let mut rep = ClassReport::default();
     let root_toml = root.join("Cargo.toml");
-    let Ok(text) = fs::read_to_string(&root_toml) else {
-        rep.failures
-            .push(format!("{}: cannot read", root_toml.display()));
-        return rep;
+    let text = match fs::read_to_string(&root_toml) {
+        Ok(t) => t,
+        Err(e) => {
+            rep.failures
+                .push(format!("{}: cannot read: {e}", root_toml.display()));
+            return rep;
+        }
     };
+    let (member_dirs, bad) = parse_members(&text);
+    for b in bad {
+        rep.failures.push(format!(
+            "Cargo.toml: workspace members entry {b} is not a plain quoted path (globs are not supported)"
+        ));
+    }
+    if member_dirs.is_empty() {
+        rep.failures
+            .push("Cargo.toml: no workspace members parsed".to_string());
+    }
+    let (exclude, bad_ex) = parse_workspace_list(&text, "exclude").unwrap_or_default();
+    for b in bad_ex {
+        rep.failures.push(format!(
+            "Cargo.toml: workspace exclude entry {b} is not a plain quoted path"
+        ));
+    }
+    let member_dirs: Vec<String> = member_dirs
+        .iter()
+        .filter_map(|d| {
+            let n = normalize("", d);
+            if n.is_none() {
+                rep.failures
+                    .push(format!("Cargo.toml: member {d:?} leaves the workspace"));
+            }
+            n
+        })
+        .collect();
+    let exclude: Vec<String> = exclude.iter().filter_map(|d| normalize("", d)).collect();
+    cross_check_dirs(root, &member_dirs, &exclude, &mut rep.failures);
+
     let mut members = Vec::new();
-    for dir in parse_members(&text) {
-        let path = root.join(&dir).join("Cargo.toml");
-        let Ok(t) = fs::read_to_string(&path) else {
-            rep.failures.push(format!("{dir}: cannot read Cargo.toml"));
-            continue;
+    for dir in &member_dirs {
+        let path = root.join(dir).join("Cargo.toml");
+        let t = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                rep.failures
+                    .push(format!("{dir}: cannot read Cargo.toml: {e}"));
+                continue;
+            }
         };
         let man = parse_manifest(&t);
         let name = man.name.clone().unwrap_or_else(|| dir.clone());
@@ -668,143 +1379,284 @@ pub fn check(root: &Path) -> ClassReport {
                 }
             },
         };
-        rep.classes.insert(
-            name.clone(),
-            match class {
-                Class::Core => "core",
-                Class::Shell => "shell",
-                Class::Split => "split",
-                Class::Unsplit => "unsplit",
-            }
-            .to_string(),
-        );
+        rep.classes
+            .insert(name.clone(), class_name(class).to_string());
         if class == Class::Unsplit {
             rep.unsplit.push(name.clone());
         }
         members.push(Member {
             name,
-            dir: root.join(&dir),
+            rel_dir: dir.clone(),
+            dir: root.join(dir),
             class,
-            deps: man.deps,
+            man,
         });
     }
     rep.unsplit.sort();
     let classes: BTreeMap<String, Class> =
         members.iter().map(|m| (m.name.clone(), m.class)).collect();
+    let by_dir: BTreeMap<String, String> = members
+        .iter()
+        .map(|m| (m.rel_dir.clone(), m.name.clone()))
+        .collect();
 
     for m in &members {
-        if !matches!(m.class, Class::Core | Class::Split) {
+        if matches!(m.class, Class::Core | Class::Split) {
+            check_member(root, m, &classes, &by_dir, &mut rep.failures);
+        }
+    }
+
+    // B9: the unsplit list is fixed in this source and only shrinks
+    for name in &rep.unsplit {
+        if !unsplit_allowed.contains(&name.as_str()) {
+            rep.failures.push(format!(
+                "{name}: B9: new unsplit crate; the fixed list in classcheck.rs does not hold it. Split it or classify it"
+            ));
+        }
+    }
+    match fs::read_to_string(root.join(ALLOWLIST)) {
+        Ok(text) => {
+            for l in text.lines() {
+                let name = l.split('#').next().unwrap_or("").trim();
+                if name.is_empty() {
+                    continue;
+                }
+                if !unsplit_allowed.contains(&name) {
+                    rep.failures.push(format!(
+                        "{ALLOWLIST}: {name}: B9: not in the fixed list in classcheck.rs; the list cannot grow"
+                    ));
+                }
+                if !rep.unsplit.iter().any(|u| u == name) {
+                    rep.failures.push(format!(
+                        "{ALLOWLIST}: {name}: B9: listed but not unsplit (migrated or unknown); remove the entry"
+                    ));
+                }
+            }
+        }
+        Err(e) => rep.failures.push(format!("{ALLOWLIST}: cannot read: {e}")),
+    }
+    rep.failures.sort();
+    rep.failures.dedup();
+    rep
+}
+
+/// Every Cargo.toml under `crates/`, `tools/` and `validation/` belongs to a member or is excluded.
+fn cross_check_dirs(root: &Path, members: &[String], exclude: &[String], fails: &mut Vec<String>) {
+    for base in ["crates", "tools", "validation"] {
+        let rd = match fs::read_dir(root.join(base)) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                fails.push(format!("{base}: cannot read directory: {e}"));
+                continue;
+            }
+        };
+        for entry in rd {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    fails.push(format!("{base}: cannot read entry: {e}"));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            match fs::symlink_metadata(&path) {
+                Ok(md) if md.is_dir() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    fails.push(format!("{}: cannot stat: {e}", path.display()));
+                    continue;
+                }
+            }
+            if !path.join("Cargo.toml").exists() {
+                continue;
+            }
+            let r = rel(root, &path);
+            let excluded = exclude
+                .iter()
+                .any(|x| r == *x || r.starts_with(&format!("{x}/")));
+            if !members.contains(&r) && !excluded {
+                fails.push(format!(
+                    "{r}: has a Cargo.toml but is neither a workspace member nor in `exclude`"
+                ));
+            }
+        }
+    }
+}
+
+/// B7 to B9 checks of one core or split crate.
+fn check_member(
+    root: &Path,
+    m: &Member,
+    classes: &BTreeMap<String, Class>,
+    by_dir: &BTreeMap<String, String>,
+    fails: &mut Vec<String>,
+) {
+    let name = &m.name;
+    if m.man.lib_path || !m.man.bin_paths.is_empty() {
+        fails.push(format!(
+            "{name}: B8: no custom [lib] or [[bin]] path in a core or split crate"
+        ));
+    }
+    if m.man.build_key || m.dir.join("build.rs").exists() {
+        fails.push(format!("{name}: B8: no build.rs in a core or split crate"));
+    }
+    // dependencies: resolved by path, then package, then key
+    let mut aliases: BTreeMap<String, String> = classes
+        .keys()
+        .map(|n| (n.replace('-', "_"), n.clone()))
+        .collect();
+    for d in &m.man.deps {
+        match resolve_dep(d, &m.rel_dir, by_dir, classes) {
+            Err(e) => fails.push(format!("{name}: {}: B8: {e}", d.key)),
+            Ok(None) => {}
+            Ok(Some(target)) => {
+                if m.class == Class::Core {
+                    match classes.get(&target) {
+                        Some(Class::Shell) => fails.push(format!(
+                            "{name}: {}: B8: core crate depends on shell crate {target}",
+                            d.key
+                        )),
+                        Some(Class::Unsplit) => fails.push(format!(
+                            "{name}: {}: B8: core crate depends on unsplit crate {target}",
+                            d.key
+                        )),
+                        _ => {}
+                    }
+                }
+                aliases.insert(d.key.replace('-', "_"), target);
+            }
+        }
+    }
+
+    let src = m.dir.join("src");
+    let mut files = Vec::new();
+    let mut walk_fails = Vec::new();
+    let split = m.class == Class::Split;
+    if split {
+        check_split_layout(root, m, &mut files, &mut walk_fails);
+    } else {
+        let skip = [src.join("bin"), src.join("main.rs")];
+        walk_rs(&src, &skip, &mut files, &mut walk_fails);
+    }
+    fails.extend(walk_fails);
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        fails.push(format!("{name}: B8: no core files found to scan"));
+    }
+    let mut scans = Vec::new();
+    for f in &files {
+        let text = match fs::read_to_string(f) {
+            Ok(t) => t,
+            Err(e) => {
+                fails.push(format!("{}: cannot read: {e}", rel(root, f)));
+                continue;
+            }
+        };
+        let ctx = Ctx {
+            split,
+            depth: module_depth(&src, f),
+            classes,
+            aliases: &aliases,
+        };
+        scans.push((f.clone(), scan_source(&text, &ctx)));
+    }
+    // test-only modules, resolved the way rustc does, and what sits under them
+    let mut skip_files: Vec<PathBuf> = Vec::new();
+    let mut skip_dirs: Vec<PathBuf> = Vec::new();
+    for (f, sc) in &scans {
+        for tm in &sc.test_mods {
+            let (cands, dir) = module_candidates(f, tm);
+            skip_files.extend(cands);
+            skip_dirs.push(dir);
+        }
+        if sc.whole_file {
+            skip_files.push(f.clone());
+            let (_, dir) = module_candidates(f, "");
+            skip_dirs.push(dir);
+        }
+    }
+    for (f, sc) in &scans {
+        if skip_files.contains(f) || skip_dirs.iter().any(|d| f.starts_with(d)) {
             continue;
         }
-        if m.class == Class::Core {
-            for d in &m.deps {
-                match classes.get(d) {
-                    Some(Class::Core | Class::Split) | None => {}
-                    Some(c) => rep.failures.push(format!(
-                        "{}: {d}: B8: core crate depends on a {} crate",
-                        m.name,
-                        if *c == Class::Shell {
-                            "shell"
-                        } else {
-                            "unsplit"
-                        }
+        for h in &sc.hits {
+            fails.push(format!(
+                "{}:{}: {}: {}",
+                rel(root, f),
+                h.line,
+                h.token,
+                h.message
+            ));
+        }
+    }
+}
+
+/// A split crate: `src/` holds only `lib.rs`, `core`, `shell`, `main.rs` and `bin`; `lib.rs`
+/// declares exactly the two modules; the core module (`core.rs` or `core/`) is collected.
+fn check_split_layout(root: &Path, m: &Member, files: &mut Vec<PathBuf>, fails: &mut Vec<String>) {
+    let name = &m.name;
+    let src = m.dir.join("src");
+    let mut has = [false; 4]; // core.rs, core/, shell.rs, shell/
+    match fs::read_dir(&src) {
+        Err(e) => fails.push(format!("{name}: cannot read src/: {e}")),
+        Ok(rd) => {
+            for entry in rd {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        fails.push(format!("{name}: cannot read src/ entry: {e}"));
+                        continue;
+                    }
+                };
+                let fname = entry.file_name().to_string_lossy().into_owned();
+                let is_dir = fs::symlink_metadata(entry.path()).is_ok_and(|md| md.is_dir());
+                match (fname.as_str(), is_dir) {
+                    ("lib.rs" | "main.rs", false) | ("bin", true) => {}
+                    ("core.rs", false) => has[0] = true,
+                    ("core", true) => has[1] = true,
+                    ("shell.rs", false) => has[2] = true,
+                    ("shell", true) => has[3] = true,
+                    _ => fails.push(format!(
+                        "{name}: B7: unexpected src/{fname} in a split crate (only lib.rs, core, shell, main.rs, bin)"
                     )),
                 }
             }
         }
-        if m.class == Class::Split {
-            for sub in ["core", "shell"] {
-                if !m.dir.join("src").join(sub).is_dir() {
-                    rep.failures
-                        .push(format!("{}: split crate has no src/{sub}/ (B7)", m.name));
-                }
-            }
-            let lib = m.dir.join("src/lib.rs");
-            match fs::read_to_string(&lib) {
-                Ok(src) => {
-                    if let Some(h) = lib_rs_problem(&src) {
-                        rep.failures.push(format!(
-                            "{}:{}: {}: {}",
-                            rel(root, &lib),
-                            h.line,
-                            h.token,
-                            h.message
-                        ));
-                    }
-                }
-                Err(e) => rep
-                    .failures
-                    .push(format!("{}: cannot read src/lib.rs: {e}", m.name)),
-            }
-        }
-        let files = core_files(m);
-        // out-of-line `#[cfg(test)] mod x;` files are tests, not core
-        let mut skip: Vec<PathBuf> = Vec::new();
-        let mut parsed = Vec::new();
-        for f in &files {
-            let Ok(src) = fs::read_to_string(f) else {
-                rep.failures.push(format!("{}: cannot read", rel(root, f)));
-                continue;
-            };
-            let (hits, test_mods) = scan_source(&src, &m.name, &classes);
-            if let Some(dir) = f.parent() {
-                for tm in test_mods {
-                    skip.push(dir.join(format!("{tm}.rs")));
-                    skip.push(dir.join(&tm).join("mod.rs"));
-                    if f.file_name()
-                        .is_some_and(|n| n != "lib.rs" && n != "mod.rs")
-                    {
-                        if let Some(stem) = f.file_stem() {
-                            skip.push(dir.join(stem).join(format!("{tm}.rs")));
-                        }
-                    }
-                }
-            }
-            parsed.push((f.clone(), hits));
-        }
-        for (f, hits) in parsed {
-            if skip.contains(&f) {
-                continue;
-            }
-            for h in hits {
-                rep.failures.push(format!(
+    }
+    if !(has[0] || has[1]) {
+        fails.push(format!("{name}: split crate has no src/core/ (B7)"));
+    }
+    if !(has[2] || has[3]) {
+        fails.push(format!("{name}: split crate has no src/shell/ (B7)"));
+    }
+    if has[0] && has[1] && src.join("core/mod.rs").exists() {
+        fails.push(format!(
+            "{name}: B7: both src/core.rs and src/core/mod.rs exist"
+        ));
+    }
+    let lib = src.join("lib.rs");
+    match fs::read_to_string(&lib) {
+        Ok(text) => {
+            for h in lib_rs_problems(&text) {
+                fails.push(format!(
                     "{}:{}: {}: {}",
-                    rel(root, &f),
+                    rel(root, &lib),
                     h.line,
                     h.token,
                     h.message
                 ));
             }
         }
+        Err(e) => fails.push(format!("{name}: cannot read src/lib.rs: {e}")),
     }
-
-    // B9: the unsplit list only shrinks
-    let allow: Vec<String> = fs::read_to_string(root.join(ALLOWLIST))
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if fs::metadata(root.join(ALLOWLIST)).is_err() {
-        rep.failures.push(format!("{ALLOWLIST}: cannot read"));
+    if has[0] {
+        files.push(src.join("core.rs"));
     }
-    for name in &rep.unsplit {
-        if !allow.contains(name) {
-            rep.failures.push(format!(
-                "{name}: B9: new unsplit crate, not in {ALLOWLIST}; split it or classify it"
-            ));
-        }
+    if has[1] {
+        walk_rs(&src.join("core"), &[], files, fails);
     }
-    for name in &allow {
-        if !rep.unsplit.contains(name) {
-            rep.failures.push(format!(
-                "{ALLOWLIST}: {name}: B9: listed but not unsplit (migrated or unknown); remove the entry"
-            ));
-        }
-    }
-    rep.failures.sort();
-    rep.failures.dedup();
-    rep
 }
 
 /// Plain-text report, deterministic.
