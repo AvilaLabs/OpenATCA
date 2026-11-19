@@ -1424,6 +1424,17 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
 /// The tokens of one `use` statement (after `use`, before `;`): no `as` and no `*` where a
 /// std, core, alloc or workspace-crate path is imported.
 fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
+    // an `as` rename hides what a name is (a sealing trait, a float type alias): banned on every
+    // `use` in core
+    for t in stmt {
+        if t.s == "as" {
+            hits.push(hit(
+                t.line,
+                "as",
+                "B8: core code has no `as` rename in a `use`",
+            ));
+        }
+    }
     let has_root = stmt.iter().enumerate().any(|(k, t)| {
         (matches!(t.s.as_str(), "std" | "core" | "alloc") || ctx.aliases.contains_key(t.s.as_str()))
             && is_path_start(stmt, k)
@@ -1432,11 +1443,11 @@ fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
         return;
     }
     for t in stmt {
-        if t.s == "as" || t.s == "*" {
+        if t.s == "*" {
             hits.push(hit(
                 t.line,
                 &t.s,
-                "B8: no `as` rename and no `*` glob on a std, core, alloc or workspace-crate path",
+                "B8: no `*` glob on a std, core, alloc or workspace-crate path",
             ));
         }
     }
@@ -1462,7 +1473,42 @@ fn pointer_width_guard(toks: &[Tok], i: usize) -> bool {
     i >= 2
         && s(toks, i - 1) == "["
         && s(toks, i - 2) == "#"
+        && guard_position(toks, i - 2)
         && want.iter().enumerate().all(|(k, w)| s(toks, i + k) == *w)
+}
+
+/// Whether the attribute that starts at the `#` at `toks[hash]` stands alone at an item
+/// boundary: at the start of the file, or after the `]` of an inner attribute, a `;` or a `}`.
+/// Another outer attribute directly before it (`#[cfg(any())]` stacked on the guard) does not.
+fn guard_position(toks: &[Tok], hash: usize) -> bool {
+    if hash == 0 {
+        return true;
+    }
+    match s(toks, hash - 1) {
+        ";" | "}" => true,
+        "]" => {
+            // walk back to the `[` that opens this `]`: an inner attribute is `# ! [`
+            let mut depth = 0usize;
+            let mut k = hash - 1;
+            loop {
+                match s(toks, k) {
+                    "]" => depth += 1,
+                    "[" => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return k >= 2 && s(toks, k - 1) == "!" && s(toks, k - 2) == "#";
+                        }
+                    }
+                    _ => {}
+                }
+                if k == 0 {
+                    return false;
+                }
+                k -= 1;
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Lines of `#[path = ..]` attributes, also inside `cfg_attr`: they pull in a file the scan does
@@ -1630,6 +1676,7 @@ pub fn has_pointer_width_guard(src: &str) -> bool {
             _ => {}
         }
         if depth == 0
+            && guard_position(&toks, i)
             && want.iter().enumerate().all(|(k, w)| s(&toks, i + k) == *w)
             && s(&toks, skip_group(&toks, i + want.len() - 1)) == ";"
         {
@@ -1771,6 +1818,17 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
             // only the attributes a lib.rs of a split crate needs: `forbid(unsafe_code)` and
             // `doc`; anything else (`macro_use` on a module, `allow`, `cfg_attr`, `path`) could
             // carry shell code into the core
+            // the 64-bit guard, exactly: the cfg and the `compile_error!(..);` after it (B10)
+            if !inner
+                && body == "cfg(not(target_pointer_width=))"
+                && s(&toks, end) == "compile_error"
+                && s(&toks, end + 1) == "!"
+                && s(&toks, end + 2) == "("
+                && s(&toks, skip_group(&toks, end + 2)) == ";"
+            {
+                i = skip_group(&toks, end + 2) + 1;
+                continue;
+            }
             let ok = body.starts_with("doc=")
                 || body.starts_with("doc(")
                 || (inner && body == "forbid(unsafe_code)");
@@ -2461,10 +2519,7 @@ fn check_member(
         }
         core_types.extend(harden::defined_types(text));
     }
-    let cb_types: BTreeSet<String> = texts
-        .iter()
-        .flat_map(|(_, text)| boundary::callback_aliases(text))
-        .collect();
+    let cb_types = boundary::callback_aliases(texts.iter().map(|(_, text)| text.as_str()));
     let mut scans = Vec::new();
     let empty = BTreeSet::new();
     let no_private = &w.private;
@@ -2619,6 +2674,11 @@ fn check_split_layout(
             if !has_forbid_unsafe(&text) {
                 fails.push(format!(
                     "{name}: A0: src/lib.rs of a split crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
+                ));
+            }
+            if !has_pointer_width_guard(&text) {
+                fails.push(format!(
+                    "{name}: B10: src/lib.rs of a split crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
                 ));
             }
             for h in lib_rs_problems(&text) {

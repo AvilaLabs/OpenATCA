@@ -130,10 +130,6 @@ fn charge(spent: &Cell<u64>, budget: u64, n: u64) -> bool {
     v <= budget
 }
 
-/// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`, until it
-/// returns `false`, which stops the sector at once. The row table (one entry per row the sector
-/// spans) and the rows each edge crosses are charged to `spent` before they are built, and the
-/// sector is not filled when they pass `budget`; false is returned then.
 /// The overlaps largest first, then by sector name; two that tie on both (E6: the order may not
 /// depend on a hash map's order or on how the pairs were found) go by their sector pair, the
 /// order the model keeps the sectors in.
@@ -148,6 +144,10 @@ fn sort_overlaps(mut keyed: Vec<((u16, u16), Overlap)>) -> Vec<Overlap> {
     keyed.into_iter().map(|(_, o)| o).collect()
 }
 
+/// Calls `paint(i, j)` for every cell of the raster whose centre is inside sector `s`, until it
+/// returns `false`, which stops the sector at once. The row table (one entry per row the sector
+/// spans) and the rows each edge crosses are charged to `spent` before they are built, and the
+/// sector is not filled when they pass `budget`; false is returned then.
 // E8: raster cells are at most MAX_RASTER_CELLS (64 million) and a chart has at most 500 sectors, so cell indexes, counts and the casts to u32 and u16 cannot overflow or truncate; float bounds are finite and clamped to the raster before the cast.
 #[allow(
     clippy::arithmetic_side_effects,

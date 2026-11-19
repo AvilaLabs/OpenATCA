@@ -510,10 +510,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   and private traits and test-only ones are not listed.
 - **OA-TRC-245** In an item the shell can reach (plain `pub`; a method of a `pub trait`; a `pub` field), every
   generic bound (angle brackets, `where`, the `impl` block around a method) and every `impl Trait` argument is
-  `Copy`, `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate; `Clone`, `PartialEq`, `Eq`,
+  `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate (`Copy` is not, it implies `Clone`); `Clone`, `PartialEq`, `Eq`,
   `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into` and every other trait fail unless the
   allowlist names the item. Private and `pub(crate)` items may carry any bound, a type parameter with no bound
-  is not checked, and an `impl` of a trait for a type is not checked.
+  is not checked; the header of an `impl` is OA-TRC-252.
 - **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer in the signature of a reachable item (OA-TRC-245),
   in a `pub` field of a `pub` struct or union, in the body of a `pub enum` or `pub type`, or by naming a type
   alias of the same crate (private or not) whose body holds one, fail unless the allowlist names the item.
@@ -533,14 +533,38 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-249** `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
   `as_mut_ptr_range`, `addr_of`, `addr_of_mut`, `.addr(`, `expose_provenance` and `with_exposed_provenance` fail
   in core code.
-- **OA-TRC-250** The `src/lib.rs` of every crate of class core (`oa-ieee` included) has, at the top level and outside
-  test code, `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, so the crate does not
-  build for a target whose `usize` is not 64 bits. That is the one target cfg core code may have; any other
-  still fails. The check reads the string, so `"32"`, a missing `compile_error!` or a guard inside a module fails.
+- **OA-TRC-250** The `src/lib.rs` of every crate of class core (`oa-ieee` included) and split has, at the top level and
+  outside test code, `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, so the crate does
+  not build for a target whose `usize` is not 64 bits. The attribute stands alone: at the start of the file, or
+  after the `]` of an inner attribute, a `;` or a `}`, never directly after another outer attribute
+  (`#[cfg(any())]` stacked on it). In a split crate's `lib.rs` this is the one attribute and the one macro call
+  allowed besides `mod core;`, `mod shell;` and re-exports (B7). That is the one target cfg core code may have;
+  any other, any other `target_pointer_width` cfg included, still fails. The check reads the string, so `"32"`, a
+  missing `compile_error!` or a guard inside a module fails.
 - **OA-TRC-251** A float `min`, `max` or `clamp` (a float receiver or float argument by the evidence of
   OA-TRC-248, or the path `f64::max`, `<f32>::min` and so on, also as a value in `fold(.., f64::max)`) fails in
   core code (`oa-math` excepted), with `oa_math::min_f64`/`max_f64`/`clamp_f64` (and the `f32` forms) named, whose
   results for the zeros and the NaN are defined (OA-MATH-036). Integer and iterator `min`/`max`/`clamp` pass.
+- **OA-TRC-252** The header of every `impl` in core code (inherent or trait, any self type: `&F`, `Box<F>`,
+  `Wrap<T>`, `Box<dyn Fn()>`) is a boundary: its generic bounds, `where` clause and callback types are judged
+  like those of a reachable item (OA-TRC-245, 246), and a trait `impl`'s are judged whether or not it has `pub`
+  methods; the body of an impl is core's own code. An inherent `impl` header counts for its plain `pub` methods.
+  The allowlist names a header as `impl@SelfType`.
+- **OA-TRC-253** A `pub trait` is sealed only by the leading path of a supertrait (`sealed::Sealed`), never by a
+  path inside its generic arguments (`Iterator<Item = sealed::Private>`), and a `use` tree is read per item
+  (`use crate::{sealed::Sealed, open::Other}` seals through `Sealed` only). `pub use` of any glob, and of a sealing
+  trait, fails.
+- **OA-TRC-254** A type alias that holds an `Fn*`, `dyn` or `fn(..)` is resolved through other aliases of the crate
+  (`type B = Vec<A>;`, in any order, generic or not), so a reachable signature or field that names any of them
+  fails. An `as` rename in any `use` of core code fails.
+- **OA-TRC-255** The float evidence of OA-TRC-248 follows type aliases whose body mentions a float (`type V3 =
+  [f64; 3]`, `(f64, f64)`, `f64`, and an alias of an alias), also in struct fields, and follows functions that
+  return a float aggregate (`pair().0`, `make()[0]`, `let p = make();`). Aliases are matched by name over all core
+  crates; the rest is in the RULESET's known lexical limits.
+- **OA-TRC-256** A name bound to an expression whose outermost shape is an integer (`.count()`, `.len()`,
+  `usize::try_from(..)` with `?`/`.unwrap()`, or a final `as <integer>`) is not float evidence, whatever the
+  expression mentions inside.
+- **OA-TRC-257** `fmt::Arguments` (it carries the caller's `Display` impls) is not taken by a reachable item.
 
 ### Hashing (oa-sha256)
 

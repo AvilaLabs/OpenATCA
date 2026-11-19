@@ -12,10 +12,10 @@ use super::{
 };
 use std::collections::BTreeSet;
 
-/// The bounds a reachable generic may carry besides a sealed trait: the two that have no method.
-/// Every other std trait (`Clone`, `PartialEq`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`,
-/// `Into`..) has methods a shell type can implement, and `Eq` counts as `PartialEq`.
-pub const FIXED_BOUNDS: &[&str] = &["Copy", "Sized"];
+/// The bounds a reachable generic may carry besides a sealed trait: `Sized`. Every other std
+/// trait has methods a shell type can implement, `Copy` included (`Copy: Clone`, and `vec![x; n]`,
+/// `resize`, `to_vec` and `fill` run a hand-written `Clone`), and `Eq` counts as `PartialEq`.
+pub const FIXED_BOUNDS: &[&str] = &["Sized"];
 const CALLBACK_WORDS: &[&str] = &[
     "Fn",
     "FnMut",
@@ -49,37 +49,131 @@ pub fn module_visibility(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     (private, public)
 }
 
-/// Whether the path `toks[from..to]` runs through a module in `private`: a segment other than
-/// the last is one (`sealed::Sealed`, `crate::sealed::Sealed`).
+/// Whether the path that starts at `toks[from]` runs through a module in `private`: one of its
+/// leading segments, before any `<..>`, other than the last (`sealed::Sealed`,
+/// `crate::sealed::Sealed`). A path inside the generic arguments
+/// (`Iterator<Item = sealed::Private>`) is not the bound's own path.
 fn through_private(toks: &[Tok], from: usize, to: usize, private: &BTreeSet<String>) -> bool {
-    (from..to).any(|k| {
-        s(toks, k + 1) == "::"
-            && private.contains(s(toks, k))
-            && !matches!(s(toks, k), "self" | "super" | "crate")
-    })
+    let mut j = from;
+    if s(toks, j) == "for" && s(toks, j + 1) == "<" {
+        j = angles_end(toks, j + 1);
+    }
+    while s(toks, j) == "::" || s(toks, j) == "?" {
+        j += 1;
+    }
+    while j < to && is_word(s(toks, j)) && s(toks, j + 1) == "::" {
+        if private.contains(s(toks, j)) && !matches!(s(toks, j), "self" | "super" | "crate") {
+            return true;
+        }
+        j += 2;
+    }
+    false
 }
 
-/// Names a file imports through a private module (`use sealed::Sealed;`,
-/// `use crate::sealed::{Sealed, Other};`).
-fn imported_via_private(toks: &[Tok], private: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+/// One name a `use` statement brings in: the path to it (the last segment is the item, or `*`)
+/// and the name it is bound to.
+struct UseLeaf {
+    path: Vec<String>,
+    name: String,
+}
+
+/// Expands the use tree at `toks[i..]` (up to `end`) into its leaves; returns the index after it.
+fn use_leaves(
+    toks: &[Tok],
+    mut i: usize,
+    end: usize,
+    prefix: &[String],
+    out: &mut Vec<UseLeaf>,
+) -> usize {
+    let mut path: Vec<String> = prefix.to_vec();
+    while i < end {
+        match s(toks, i) {
+            "::" => i += 1,
+            "{" => {
+                i += 1;
+                while i < end && s(toks, i) != "}" {
+                    i = use_leaves(toks, i, end, &path, out);
+                    if s(toks, i) == "," {
+                        i += 1;
+                    }
+                }
+                return i + 1;
+            }
+            "*" => {
+                path.push("*".to_string());
+                out.push(UseLeaf {
+                    name: "*".to_string(),
+                    path,
+                });
+                return i + 1;
+            }
+            w if is_word(w) => {
+                path.push(w.to_string());
+                i += 1;
+                if s(toks, i) == "::" {
+                    continue;
+                }
+                let mut name = w.to_string();
+                if s(toks, i) == "as" {
+                    name = s(toks, i + 1).to_string();
+                    i += 2;
+                }
+                out.push(UseLeaf { path, name });
+                return i;
+            }
+            _ => return i + 1,
+        }
+    }
+    i
+}
+
+/// Every leaf of every `use` statement in the tokens, with the line of the statement and whether
+/// it is a plain `pub use`.
+fn use_statements(toks: &[Tok]) -> Vec<(usize, bool, Vec<UseLeaf>)> {
+    let mut out = Vec::new();
     let mut i = 0;
     while i < toks.len() {
         if s(toks, i) == "use" && super::is_path_start(toks, i) {
             let end = (i..toks.len())
                 .find(|&k| s(toks, k) == ";")
                 .unwrap_or(toks.len());
-            let mut seen = false;
-            for k in i + 1..end {
-                if private.contains(s(toks, k)) && s(toks, k + 1) == "::" {
-                    seen = true;
-                } else if seen && is_word(s(toks, k)) && !matches!(s(toks, k + 1), "::") {
-                    out.insert(s(toks, k).to_string());
-                }
-            }
+            let mut leaves = Vec::new();
+            use_leaves(toks, i + 1, end, &[], &mut leaves);
+            out.push((
+                toks.get(i).map_or(0, |t| t.line),
+                i >= 1 && s(toks, i - 1) == "pub",
+                leaves,
+            ));
             i = end;
         }
         i += 1;
+    }
+    out
+}
+
+/// Whether a leaf's path runs through a module in `private`, other than by its last segment.
+fn leaf_via_private(leaf: &UseLeaf, private: &BTreeSet<String>) -> bool {
+    let n = leaf.path.len().saturating_sub(1);
+    leaf.path
+        .iter()
+        .take(n)
+        .any(|seg| private.contains(seg) && !matches!(seg.as_str(), "self" | "super" | "crate"))
+}
+
+/// Names a file imports through a private module (`use sealed::Sealed;`,
+/// `use crate::sealed::{Sealed, Other};`, `use crate::{sealed::Sealed, public::Other};`), per
+/// leaf of the use tree.
+fn imported_via_private(toks: &[Tok], private: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (_, _, leaves) in use_statements(toks) {
+        for leaf in &leaves {
+            if leaf_via_private(leaf, private) && leaf.name != "*" {
+                out.insert(leaf.name.clone());
+                if let Some(l) = leaf.path.last() {
+                    out.insert(l.clone());
+                }
+            }
+        }
     }
     out
 }
@@ -187,10 +281,34 @@ fn bad_bounds(toks: &[Tok], from: usize, to: usize, ctx: &Ctx<'_>) -> Vec<String
         .collect()
 }
 
+/// What the allowlist calls an `impl` block: `impl@Type`, the head word of its self type
+/// (after `for` in a trait impl, with `&`, `mut` and `dyn` skipped).
+fn impl_key(toks: &[Tok], from: usize, to: usize) -> String {
+    let from = if s(toks, from) == "<" {
+        angles_end(toks, from)
+    } else {
+        from
+    };
+    let mut angle = 0usize;
+    let mut head = from;
+    for k in from..to {
+        match s(toks, k) {
+            "<" => angle += 1,
+            ">" if s(toks, k - 1) != "-" => angle = angle.saturating_sub(1),
+            "for" if angle == 0 => head = k + 1,
+            _ => {}
+        }
+    }
+    while head < to && matches!(s(toks, head), "&" | "&&" | "mut" | "dyn" | "*" | "const") {
+        head += 1;
+    }
+    format!("impl@{}", s(toks, head))
+}
+
 fn note(why: &mut Vec<String>, bad: Vec<String>, what: &str) {
     for b in bad {
         why.push(format!(
-            "{what} bound `{b}` is not `Copy`, `Sized` or a sealed trait (a shell type can implement its methods)"
+            "{what} bound `{b}` is not `Sized` or a sealed trait (a shell type can implement its methods)"
         ));
     }
 }
@@ -290,6 +408,34 @@ fn pub_traits(toks: &[Tok], private: &BTreeSet<String>) -> Vec<PubTrait> {
 }
 
 fn seal_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
+    // a `pub use` hands out what it names: a sealing trait (by its own name; `as` is banned), and
+    // any glob, which cannot be told from one
+    for (line, public, leaves) in use_statements(toks) {
+        if !public {
+            continue;
+        }
+        for leaf in &leaves {
+            let why = if leaf.name == "*" {
+                Some(
+                    "a `pub use` glob re-exports whatever the module holds, a seal included"
+                        .to_string(),
+                )
+            } else if ctx.sealing.contains(&leaf.name)
+                || leaf.path.last().is_some_and(|l| ctx.sealing.contains(l))
+            {
+                Some("`pub use` of a sealing trait hands the seal out".to_string())
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                out.push(CallbackSig {
+                    name: leaf.name.clone(),
+                    line,
+                    why,
+                });
+            }
+        }
+    }
     for t in pub_traits(toks, ctx.private_mods) {
         // the trait that seals the others (`mod sealed { pub trait Sealed {} }`) is not itself
         // implementable from outside: no path to it leaves the private module
@@ -302,19 +448,6 @@ fn seal_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
         }
     }
     for (i, t) in toks.iter().enumerate() {
-        // `pub use sealed::Sealed;` hands the seal out
-        if t.s == "use" && i >= 1 && s(toks, i - 1) == "pub" {
-            let end = (i..toks.len())
-                .find(|&k| s(toks, k) == ";")
-                .unwrap_or(toks.len());
-            if let Some(k) = (i + 1..end).find(|&k| ctx.sealing.contains(s(toks, k))) {
-                out.push(CallbackSig {
-                    name: s(toks, k).to_string(),
-                    line: t.line,
-                    why: "`pub use` of a sealing trait hands the seal out".to_string(),
-                });
-            }
-        }
         // `impl<T> sealed::Sealed for T {}` seals nothing
         if t.s == "impl"
             && matches!(
@@ -350,19 +483,39 @@ fn seal_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
     }
 }
 
-/// Names of the type aliases of `src` (private or not) whose body holds an `Fn*`, `dyn` or `fn(..)`.
-pub fn callback_aliases(src: &str) -> BTreeSet<String> {
-    let toks = strip_test_items(tokenize(&mask(src))).toks;
-    let mut out = BTreeSet::new();
-    for (i, t) in toks.iter().enumerate() {
-        if t.s == "type" && is_word(s(&toks, i + 1)) {
-            let (end, _) = header_end(&toks, i + 2);
-            if (i + 2..end).any(|k| callback_at(&toks, k)) {
-                out.insert(s(&toks, i + 1).to_string());
+/// Names of the type aliases of the sources (one crate's files, private or not) whose body holds
+/// an `Fn*`, `dyn` or `fn(..)`, directly or through another alias of the crate (`type B =
+/// Vec<A>;` with `A` one).
+pub fn callback_aliases<'a>(srcs: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    // (name, the words of the body, whether the body holds a callback itself)
+    let mut aliases: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for src in srcs {
+        let toks = strip_test_items(tokenize(&mask(src))).toks;
+        for (i, t) in toks.iter().enumerate() {
+            if t.s == "type" && is_word(s(&toks, i + 1)) {
+                let (end, _) = header_end(&toks, i + 2);
+                let direct = (i + 2..end).any(|k| callback_at(&toks, k));
+                let words = (i + 2..end).map(|k| s(&toks, k).to_string()).collect();
+                aliases.push((s(&toks, i + 1).to_string(), words, direct));
             }
         }
     }
-    out
+    let mut out: BTreeSet<String> = aliases
+        .iter()
+        .filter(|a| a.2)
+        .map(|a| a.0.clone())
+        .collect();
+    loop {
+        let before = out.len();
+        for (name, words, _) in &aliases {
+            if words.iter().any(|w| out.contains(w)) {
+                out.insert(name.clone());
+            }
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
 }
 
 /// Whether `toks[k]` is `Fn`, `FnMut`, `FnOnce`, `dyn` or the `fn` of a `fn(..)` pointer type.
@@ -381,6 +534,11 @@ fn callback_whys(toks: &[Tok], from: usize, to: usize, ctx: &Ctx<'_>, why: &mut 
                 "`{}` in a signature the shell can reach: a callback or function pointer can carry platform behaviour",
                 if w == "fn" { "fn(..)" } else { w }
             ));
+        } else if s(toks, k) == "Arguments" && s(toks, k.saturating_sub(1)) == "::" {
+            why.push(
+                "`fmt::Arguments` in a signature the shell can reach carries a shell `Display` impl"
+                    .to_string(),
+            );
         } else if ctx.cb_types.contains(s(toks, k)) && (k == 0 || s(toks, k - 1) != ".") {
             why.push(format!(
                 "the type alias `{}` holds an `Fn`, `dyn` or `fn(..)` type",
@@ -463,6 +621,8 @@ fn pub_field_ranges(toks: &[Tok], from: usize) -> Vec<(usize, usize)> {
 fn reach_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
     // inherent `impl` blocks whose header carries a bound or a callback: (body span, reasons)
     let mut impls: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    // impls of a trait whose header has a problem: (key, line, reasons)
+    let mut headers: Vec<(String, usize, Vec<String>)> = Vec::new();
     for (i, t) in toks.iter().enumerate() {
         let prev = if i == 0 { "" } else { s(toks, i - 1) };
         if t.s != "impl" || !matches!(prev, "" | ";" | "}" | "{" | "]" | "unsafe") {
@@ -471,14 +631,19 @@ fn reach_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
         let mut why = Vec::new();
         let k = generics_whys(toks, i + 1, ctx, &mut why);
         let (stop, w) = header_end(toks, k);
-        // an impl of a trait is core's own code (a sealed trait's is internal)
-        let is_trait_impl = (k..stop).any(|m| s(toks, m) == "for" && s(toks, m + 1) != "<");
-        if is_trait_impl || s(toks, stop) != "{" {
+        if s(toks, stop) != "{" {
             continue;
         }
         where_whys(toks, w, stop, ctx, &mut why);
         callback_whys(toks, i + 1, stop, ctx, &mut why);
-        if !why.is_empty() {
+        // the body of an impl is core's code, its header is a boundary: whatever the shell can
+        // put in a generic of the header (`impl<F: Fn()> Hook for &F`) is called by the core
+        let is_trait_impl = (k..stop).any(|m| s(toks, m) == "for" && s(toks, m + 1) != "<");
+        if is_trait_impl {
+            if !why.is_empty() {
+                headers.push((impl_key(toks, i + 1, stop), t.line, why));
+            }
+        } else if !why.is_empty() {
             impls.push((stop, skip_group(toks, stop), why));
         }
     }
@@ -493,6 +658,9 @@ fn reach_rules(toks: &[Tok], ctx: &Ctx<'_>, out: &mut Vec<CallbackSig>) {
             });
         }
     };
+    for (key, line, why) in headers {
+        push(&key, line, why);
+    }
     for (i, t) in toks.iter().enumerate() {
         if t.s != "pub" || s(toks, i + 1) == "(" {
             continue;

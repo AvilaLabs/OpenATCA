@@ -1425,6 +1425,70 @@ fn every_pair_of_three_overlapping_sectors_is_reported_in_any_order() {
     }
 }
 
+// REQ: OA-MVA-085
+#[test]
+fn the_overlap_report_is_sorted_and_the_same_whatever_order_the_sectors_come_in() {
+    // two clusters of two identical squares: both pairs have the same number of cells, so only
+    // the names (and, for equal names, the sector pair) break the tie
+    let mk = |name, alt, y0| Fix {
+        name,
+        alt,
+        rings: vec![sq(0.0, y0, 0.1, y0 + 0.1)],
+    };
+    let all = |i: usize| match i {
+        0 => mk("A", 2500, 0.0),
+        1 => mk("B", 3000, 0.0),
+        2 => mk("C", 2600, 1.0),
+        _ => mk("D", 3100, 1.0),
+    };
+    let mut perms: Vec<[usize; 4]> = Vec::new();
+    for a in 0..4 {
+        for b in (0..4).filter(|&b| b != a) {
+            for c in (0..4).filter(|&c| c != a && c != b) {
+                let d = 6 - a - b - c;
+                perms.push([a, b, c, d]);
+            }
+        }
+    }
+    assert_eq!(perms.len(), 24);
+    let mut first: Option<Vec<(String, String, usize)>> = None;
+    for p in perms {
+        let secs: Vec<Fix> = p.iter().map(|&i| all(i)).collect();
+        let (m, _) = load("TIE_MVA_FUS3_2024", &secs).unwrap();
+        // the real computation, run twice on one model: the same report, bit for bit
+        let r1 = coverage::chart_coverage(&m, 0).unwrap();
+        let r2 = coverage::chart_coverage(&m, 0).unwrap();
+        assert_eq!(r1.overlaps, r2.overlaps, "order {p:?}");
+        assert_eq!(r1.overlaps.len(), 2, "{:?}", r1.overlaps);
+        // sorted: most cells first, then by names
+        let key = |o: &coverage::Overlap| (std::cmp::Reverse(o.cells), o.a.clone(), o.b.clone());
+        assert!(
+            r1.overlaps.windows(2).all(|w| key(&w[0]) < key(&w[1])),
+            "order {p:?}: {:?}",
+            r1.overlaps
+        );
+        assert_eq!(r1.overlaps[0].cells, r1.overlaps[1].cells);
+        // the same two pairs, whatever the order they were loaded in
+        let mut pairs: Vec<(String, String, usize)> = r1
+            .overlaps
+            .iter()
+            .map(|o| {
+                let (a, b) = if o.a < o.b {
+                    (&o.a, &o.b)
+                } else {
+                    (&o.b, &o.a)
+                };
+                (a.clone(), b.clone(), o.cells)
+            })
+            .collect();
+        pairs.sort();
+        match &first {
+            None => first = Some(pairs),
+            Some(f) => assert_eq!(f, &pairs, "order {p:?}"),
+        }
+    }
+}
+
 /// Real-chart visit counts are measured by the real-data suite; here, a chart built to be as
 /// expensive as the overlap cap allows.
 // REQ: OA-MVA-081

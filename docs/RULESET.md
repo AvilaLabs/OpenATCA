@@ -111,19 +111,27 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     a `pub` field of a `pub` struct or union, in the whole body of a `pub enum` and of a `pub type`;
     and the name of a type alias of the same crate, private or not, whose body holds one of them;
   - an `impl Trait` argument or a generic bound (`<T: Bound>`, `where`, also on the `impl` block
-    around a method, a `pub` struct, enum, union, type or trait) that is not `Copy`, `Sized`, `?Sized`,
-    a lifetime or a sealed trait of a core crate. `Clone`, `PartialEq`, `Eq` (it counts as
-    `PartialEq`), `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into`, `From` and
-    every other std trait fail, because each has methods that a shell type can implement and the
-    core would call (a shell `Ord` that reads a clock, passed to a `pub` generic sort);
+    around a method, a `pub` struct, enum, union, type or trait) that is not `Sized`, `?Sized`,
+    a lifetime, a const generic or a sealed trait of a core crate. `Copy` fails (it implies `Clone`,
+    and `vec![x; n]`, `resize`, `to_vec` and `fill` run a hand-written `Clone`), and so do `Clone`,
+    `PartialEq`, `Eq` (it counts as `PartialEq`), `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`,
+    `Iterator`, `Into`, `From` and every other std trait, because each has methods that a shell type
+    can implement and the core would call (a shell `Ord` that reads a clock, passed to a `pub`
+    generic sort);
+  - `fmt::Arguments` in a signature (it carries the caller's `Display` impls);
   - every `pub trait` that is not sealed: a supertrait from a private module (`mod sealed { pub trait
     Sealed {} }`, `pub trait T: sealed::Sealed`), or listed. A `pub use` of the sealing trait and a
     blanket `impl<X> sealed::Sealed for X` un-seal it and fail.
   Private and `pub(crate)` items may use closures, `dyn`, fn pointers, `impl Iterator`, `impl Into`
   and any bound: the shell cannot name them. A type parameter with no bound at all is not checked,
   stored or not: the core cannot call into a type it knows nothing about, so any behaviour needs a
-  bound, and the bound is checked. An `impl` of a trait for a type is not checked either: of a
-  sealed core trait it is internal, of a std trait for a core type it is core's own code.
+  bound, and the bound is checked. The body of an `impl` is core's own code, its header is a
+  boundary: the generics, `where` clause and callback types of every `impl` header, inherent or of a
+  trait, whatever its self type (`&F`, `Box<F>`, `Wrap<T>`, `Box<dyn Fn()>`), are judged like those of
+  a reachable item (an inherent one for its plain `pub` methods, a trait one always), so
+  `impl<F: Fn() -> f64> Hook for &F` and `impl<T: Clone> Default for Wrap<T>` fail and
+  `impl Hook for CoreType` does not. Type aliases that hold a callback are resolved through other
+  aliases of the crate.
   A listed entry states why the caller cannot inject platform behaviour, or is marked OPEN where
   the type system does not stop it and the callers were only read. An entry is by the name of the
   item that holds the token (the method or fn name, the struct, enum, type or trait name).
@@ -134,7 +142,9 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   declares `[package.metadata.openatca] class = "core"`, `"shell"` or `"split"`. In a split
   crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs`
   declares exactly those two modules plus re-exports, doc comments and the attributes
-  `#![forbid(unsafe_code)]` and `doc`: any other attribute, on `mod shell`, `mod core` or the crate
+  `#![forbid(unsafe_code)]` and `doc`, and the one 64-bit guard of B10 (the attribute
+  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, exactly that and
+  nothing else): any other attribute, on `mod shell`, `mod core` or the crate
   (`#[macro_use]`, `#[allow]`, `cfg_attr`), could carry shell code into the core and fails. Shell
   code does not export a macro (`#[macro_export]`) and does not `impl` a type or trait that the
   crate's core module defines, whether named, written as `crate::core::..`, renamed with `as` or
@@ -155,7 +165,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     randomness) fails. `core::hash` stays out because a `Hasher` is implemented by the caller, so
     passing one in is a callback from the shell (B5); `cell` and `rc` hide mutation and aliasing
     from the scan;
-  - uses no `as` rename and no `*` glob on a `std`, `core`, `alloc` or workspace-crate path, no
+  - uses no `as` rename in any `use` (a rename hides a sealing trait or a float alias), no `*`
+    glob on a `std`, `core`, `alloc` or workspace-crate path, no
     `extern crate` other than `extern crate alloc;`, no `#[path]`, no `include!`,
     `include_str!`, `include_bytes!`, `env!`, `option_env!` or `file!`, no `static mut`, no
     `thread_local!`, and no print or `dbg!` macro;
@@ -222,24 +233,38 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     the same `fn` declares or binds as a float (a typed parameter or `let`, a tuple pattern or tuple type,
     an untyped `let` whose initializer mentions a float, a `fold` accumulator started from a float), a
     field, tuple-struct field, `fn` return type or constant that some core crate declares as a float,
-    indexed or not, or the result of a float method. A float that reaches the call any other way is not
-    seen: a `for` loop variable, a closure parameter (`.map(|v| v.to_le_bytes())`), a `match` or
-    `if let` binding, a struct pattern, a generic `T` that is a float, the result of a method of the same
-    name as an integer one (`abs`, `max`) on an unknown receiver, a function whose name some other
-    function shares with a non-float return type, and a field of the same name that is a float in
-    one struct and an integer in another (the float one wins, a false alarm, never a miss). Bindings
-    are ordered by the source, so a later `let` of the same name replaces an earlier one; blocks are
-    not modelled;
+    indexed or not, a type alias whose body mentions a float (`type V3 = [f64; 3]`, `(f64, f64)`,
+    `f64`, an alias of an alias; also as a parameter, field or return type), a function that
+    returns a float aggregate (`pair().0`, `make()[0]`, `let p = make();`), or the result of a float
+    method. A float that reaches the call any other way is not seen: a `for` loop variable, a closure
+    parameter (`.map(|v| v.to_le_bytes())`), a `match` or `if let` binding, a struct pattern, a
+    generic `T` that is a float, an alias or struct that another crate declares under a name this
+    crate reuses for something else (aliases and fields are matched by name over all core crates,
+    which can only add false alarms), the elements of a tuple alias held in a field
+    (`s.pos.0`), a tuple pattern bound from a function call (`let (a, b) = pair();`), the result of a
+    method of the same name as an integer one (`abs`, `max`) on an unknown receiver, a function whose
+    name some other function shares with a non-float return type, and a field of the same name
+    that is a float in one struct and an integer in another (the float one wins, a false alarm,
+    never a miss). Bindings are ordered by the source, so a later `let` of the same name replaces an
+    earlier one; blocks are not modelled. An untyped `let` is an integer, not a float, when the
+    outermost expression of its initializer is `.count()`, `.len()`, `usize::try_from(..)` (also
+    `u32`, `i64`, .., with `?`, `.unwrap()`, `.expect(..)` or `.unwrap_or(..)` after it) or ends in
+    `as <integer type>`. Still false alarms: an integer or a `bool` that comes out of a float
+    expression by any other route (`let k = v.iter().position(|x| *x > 0.5)`, `let b = x > 0.5`, a
+    `format!` that mentions a float);
   - reachability for B5 is lexical: a plain-`pub` item counts as reachable even in a private module
     or when the type it belongs to is not exported, and a `pub` method of a private type is checked
     like any other (a false alarm, never a miss); a `pub use` of a private item is not followed; a
     macro-generated item is not seen;
   - a shell type's `Drop` runs when the core drops it: it can cause a side effect, and it cannot
     feed a value back into the core except by panicking, so it is not blocked;
-  - the sealing of a `pub trait` is judged by name: a supertrait is a seal if its path runs through
-    a module that the crate declares non-public, and a bound by a sealed trait is accepted for any
-    trait of that name in any core crate; a `pub trait Sealed` that happens to share a name with a seal
-    is exempt as one;
+  - the sealing of a `pub trait` is judged by name: a supertrait is a seal if the leading segments of
+    its path (before any `<..>`) run through a module that the crate declares non-public, or it is
+    imported through one (read per item of a `use` tree), and a bound by a sealed trait is accepted for
+    any trait of that name in any core crate; a `pub trait Sealed` that happens to share a name with a
+    seal is exempt as one. A `pub use` of a sealing trait by its name and any `pub use` glob fail; a
+    `pub use` of an ordinary item from a private module is allowed (the facade of `oa-geo` and
+    `oa-math` is that), since `as` renames are banned and the sealing traits are known by name;
   - a shell `impl` that a macro generates through a `$` fragment is not seen, and a shell `impl` of a
     trait or type that another core crate defines is not seen (an `impl` of this crate's own core
     types and traits is);
@@ -267,10 +292,13 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   or `rustc` step in a workflow names its toolchain with `+toolchain`, so the root file does not
   choose for it; `fuzz/` pins the fuzz nightly and `validation/oa-creusot-check/` the Creusot
   nightly (`nightly-2026-08-03`, Creusot v0.14.0's own pin) in their own files. The width of `usize` is fixed
-  by construction (amended 2026-11-19): the `src/lib.rs` of every core crate, `oa-ieee` included, has
-  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..)`, so no core crate builds for
+  by construction (amended 2026-11-19): the `src/lib.rs` of every core and split crate, `oa-ieee` included, has
+  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..)`, so no core or split crate builds for
   a target whose `usize` is not 64 bits, and the gate reads it (the string too: a guard for another width,
-  or one inside a module or test code, fails). That is the one target cfg core code may have. A split
+  or one inside a module or test code, or stacked directly on another outer attribute, fails; the
+  attribute stands at the start of the file or after the `]` of an inner attribute, a `;` or a `}`).
+  That is the one target cfg core code may have, and any other `target_pointer_width` cfg fails.
+  A split
   crate cannot be `no_std` as a whole, so its core module relies on the B8 scan; core code that
   grows large is moved into its own core crate.
 - **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every

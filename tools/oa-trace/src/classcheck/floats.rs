@@ -20,11 +20,13 @@ pub struct FloatFacts {
     pub fields: BTreeSet<String>,
     /// Tuple structs: name -> indexes of the fields that are floats (`struct P(f64, u8)` -> {0}).
     pub tuples: BTreeMap<String, BTreeSet<usize>>,
-    /// Functions declared `-> f64` or `-> f32`.
-    pub fns: BTreeSet<String>,
-    /// Names of functions declared with any other return type: a name in both sets (`get`) is
-    /// no evidence of a float.
-    pub other_fns: BTreeSet<String>,
+    /// What each function name returns, over every function of that name (see [`Agg`]).
+    pub rets: BTreeMap<String, Vec<Agg>>,
+    /// Type aliases whose body mentions a float: `type V3 = [f64; 3];`, `type P = (f64, f64);`,
+    /// `type Real = f64;`, `type W = V3;` (resolved by name, through other aliases).
+    pub aliases: BTreeMap<String, Agg>,
+    /// Named struct fields declared with an alias-looking type: field -> the type names.
+    pub field_types: BTreeMap<String, BTreeSet<String>>,
     /// `const` and `static` names declared `f64` or `f32`.
     pub consts: BTreeSet<String>,
 }
@@ -37,6 +39,7 @@ impl FloatFacts {
             match t.s.as_str() {
                 "struct" | "union" if is_word(s(&toks, i + 1)) => self.add_struct(&toks, i),
                 "fn" if is_word(s(&toks, i + 1)) => self.add_fn(&toks, i),
+                "type" if is_word(s(&toks, i + 1)) => self.add_alias(&toks, i),
                 "const" | "static" if is_word(s(&toks, i + 1)) && s(&toks, i + 2) == ":" => {
                     if declared_float(&toks, i + 2) == Some(Shape::Scalar) {
                         self.consts.insert(s(&toks, i + 1).to_string());
@@ -58,6 +61,16 @@ impl FloatFacts {
                 for k in open..skip_group(toks, open) {
                     if declared_float(toks, k).is_some() && is_word(s(toks, k - 1)) {
                         self.fields.insert(s(toks, k - 1).to_string());
+                    } else if s(toks, k) == ":" && is_word(s(toks, k - 1)) {
+                        let end = (k + 1..toks.len())
+                            .find(|&m| matches!(s(toks, m), "," | "}"))
+                            .unwrap_or(toks.len());
+                        if let Agg::Alias(n) = parse_type(toks, k + 1, end) {
+                            self.field_types
+                                .entry(s(toks, k - 1).to_string())
+                                .or_default()
+                                .insert(n);
+                        }
                     }
                 }
             }
@@ -81,22 +94,160 @@ impl FloatFacts {
             return;
         }
         k = skip_group(toks, k);
+        let mut ret = Agg::Other;
         if s(toks, k) == "-" && s(toks, k + 1) == ">" {
-            k += 2;
-            while matches!(s(toks, k), "&" | "mut") {
-                k += 1;
+            let from = k + 2;
+            let mut depth = 0usize;
+            let mut to = from;
+            while to < toks.len() {
+                match s(toks, to) {
+                    "(" | "[" | "<" => depth += 1,
+                    ")" | "]" => depth = depth.saturating_sub(1),
+                    ">" if s(toks, to - 1) != "-" => depth = depth.saturating_sub(1),
+                    "{" | ";" | "where" if depth == 0 => break,
+                    _ => {}
+                }
+                to += 1;
             }
-            if matches!(s(toks, k), "f32" | "f64") && s(toks, k + 1) != "::" {
-                self.fns.insert(s(toks, i + 1).to_string());
-                return;
-            }
+            ret = parse_type(toks, from, to);
         }
-        self.other_fns.insert(s(toks, i + 1).to_string());
+        self.rets
+            .entry(s(toks, i + 1).to_string())
+            .or_default()
+            .push(ret);
+    }
+
+    /// `type Name<..> = body;`
+    fn add_alias(&mut self, toks: &[Tok], i: usize) {
+        let mut k = i + 2;
+        if s(toks, k) == "<" {
+            k = skip_angles(toks, k);
+        }
+        if s(toks, k) != "=" {
+            return;
+        }
+        let from = k + 1;
+        let to = (from..toks.len())
+            .find(|&m| s(toks, m) == ";")
+            .unwrap_or(toks.len());
+        let shape = parse_type(toks, from, to);
+        if shape != Agg::Other {
+            self.aliases.insert(s(toks, i + 1).to_string(), shape);
+        }
+    }
+
+    /// What the alias, or the type word, resolves to: a float, an aggregate that holds floats, or
+    /// nothing (`depth` stops an alias that names itself).
+    fn resolve(&self, a: &Agg, depth: usize) -> Option<Agg> {
+        match a {
+            Agg::Other => None,
+            Agg::Alias(n) if depth < 8 => {
+                self.aliases.get(n).and_then(|b| self.resolve(b, depth + 1))
+            }
+            Agg::Alias(_) => None,
+            _ => Some(a.clone()),
+        }
+    }
+
+    /// The float aggregate a type name stands for (a bare float alias is a `Scalar`).
+    pub(super) fn alias_shape(&self, name: &str) -> Option<Agg> {
+        self.resolve(&Agg::Alias(name.to_string()), 0)
     }
 
     /// Whether every function of this name that the core crates declare returns a float.
     pub fn float_fn(&self, name: &str) -> bool {
-        self.fns.contains(name) && !self.other_fns.contains(name)
+        self.rets.get(name).is_some_and(|v| {
+            !v.is_empty() && v.iter().all(|a| self.resolve(a, 0) == Some(Agg::Scalar))
+        })
+    }
+
+    /// What every function of this name returns when it is a float aggregate: an array, `Vec` or
+    /// `Option` of floats, or a tuple (the indexes that are floats in all of them).
+    pub(super) fn agg_ret(&self, name: &str) -> Option<Agg> {
+        let rets: Vec<Agg> = self
+            .rets
+            .get(name)?
+            .iter()
+            .map(|a| self.resolve(a, 0))
+            .collect::<Option<Vec<_>>>()?;
+        let first = rets.first()?.clone();
+        match first {
+            Agg::Container if rets.iter().all(|r| *r == Agg::Container) => Some(Agg::Container),
+            Agg::Tuple(mut idx) => {
+                for r in &rets {
+                    match r {
+                        Agg::Tuple(o) => idx.retain(|x| o.contains(x)),
+                        _ => return None,
+                    }
+                }
+                (!idx.is_empty()).then_some(Agg::Tuple(idx))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a field of this name is a float: declared so, or with an alias type that is.
+    pub(super) fn field_float(&self, name: &str) -> bool {
+        self.fields.contains(name)
+            || self.field_types.get(name).is_some_and(|ts| {
+                ts.iter()
+                    .any(|t| matches!(self.alias_shape(t), Some(Agg::Scalar | Agg::Container)))
+            })
+    }
+}
+
+/// What a type is, as far as floats go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Agg {
+    /// `f32`, `f64`, `&f64`.
+    Scalar,
+    /// `[f64; N]`, `&[f64]`, `Vec<f64>`, `Option<f64>`: indexing gives a float.
+    Container,
+    /// `(f64, u8)`: the indexes that are floats.
+    Tuple(BTreeSet<usize>),
+    /// A path type that may be an alias (`V3`, `crate::P`): the last segment.
+    Alias(String),
+    /// Anything else, `()` included.
+    Other,
+}
+
+/// The type in `toks[from..to]`.
+fn parse_type(toks: &[Tok], from: usize, to: usize) -> Agg {
+    let mut j = from;
+    while j < to && matches!(s(toks, j), "&" | "mut") {
+        j += 1;
+    }
+    let w = s(toks, j);
+    if matches!(w, "f32" | "f64") && s(toks, j + 1) != "::" {
+        return Agg::Scalar;
+    }
+    if w == "(" {
+        let end = skip_group(toks, j);
+        let idx = tuple_float_indexes(toks, j + 1, end.saturating_sub(1));
+        return if idx.is_empty() {
+            Agg::Other
+        } else {
+            Agg::Tuple(idx)
+        };
+    }
+    let has_float = (j..to).any(|k| matches!(s(toks, k), "f32" | "f64") && s(toks, k + 1) != "::");
+    if (w == "[" || (matches!(w, "Vec" | "Option") && s(toks, j + 1) == "<")) && has_float {
+        return Agg::Container;
+    }
+    // a path: the last segment before any generic arguments
+    let mut last = None;
+    let mut m = j;
+    while m < to && is_word(s(toks, m)) {
+        last = Some(s(toks, m));
+        if s(toks, m + 1) == "::" {
+            m += 2;
+        } else {
+            break;
+        }
+    }
+    match last {
+        Some(n) if n.starts_with(|c: char| c.is_ascii_uppercase()) => Agg::Alias(n.to_string()),
+        _ => Agg::Other,
     }
 }
 
@@ -448,6 +599,16 @@ impl<'a> Evidence<'a> {
                         head = s(toks, j);
                     }
                     if head.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        match self.facts.alias_shape(head) {
+                            Some(Agg::Scalar) => sc.binds.push((m - 1, name.clone(), Bind::Scalar)),
+                            Some(Agg::Container) => {
+                                sc.binds.push((m - 1, name.clone(), Bind::Container));
+                            }
+                            Some(Agg::Tuple(idx)) => {
+                                sc.tuples.entry(name.clone()).or_default().extend(idx);
+                            }
+                            _ => {}
+                        }
                         sc.types.insert(name, head.to_string());
                     }
                 }
@@ -538,7 +699,16 @@ impl<'a> Evidence<'a> {
                         }
                     }
                 } else if let Some(name) = binding_name(toks, pat.0, pat.1) {
-                    if init_is_tuple && chunks(toks, init_from + 1, k - 1).len() > 1 {
+                    if let Some(shape) = self.init_agg(init_from, k) {
+                        // `let p = make_v3();`: an array or tuple of floats
+                        match shape {
+                            Agg::Tuple(idx) => {
+                                tuple = Some((name.clone(), idx));
+                                add.push((k, name, Bind::Other));
+                            }
+                            _ => add.push((k, name, Bind::Container)),
+                        }
+                    } else if init_is_tuple && chunks(toks, init_from + 1, k - 1).len() > 1 {
                         // `let best = (0, f64::MAX);`: a tuple, `best.1` is the float
                         let idx = chunks(toks, init_from + 1, k - 1)
                             .iter()
@@ -653,6 +823,83 @@ impl<'a> Evidence<'a> {
         })
     }
 
+    /// The float aggregate the call whose `)` is at `toks[close]` returns, by the name it calls.
+    fn call_agg(&self, close: usize) -> Option<Agg> {
+        let open = open_of(self.toks, close)?;
+        let name = s(self.toks, open.checked_sub(1)?);
+        (is_word(name) && !NOT_CALLEE.contains(&name))
+            .then(|| self.facts.agg_ret(name))
+            .flatten()
+    }
+
+    /// Whether `toks[k]`, a number after `call(..).`, is a float field of a tuple a function
+    /// returns: `foo().0`.
+    fn call_tuple_field(&self, k: usize) -> bool {
+        let Ok(idx) = s(self.toks, k).parse::<usize>() else {
+            return false;
+        };
+        k >= 2
+            && s(self.toks, k - 1) == "."
+            && s(self.toks, k - 2) == ")"
+            && matches!(self.call_agg(k - 2), Some(Agg::Tuple(t)) if t.contains(&idx))
+    }
+
+    /// Whether the initializer `toks[from..to]` is exactly one call of a function that returns a
+    /// float aggregate (`let p = make_v3();`, `let p = geom::make();`).
+    fn init_agg(&self, from: usize, to: usize) -> Option<Agg> {
+        let mut j = from;
+        while is_word(s(self.toks, j)) && s(self.toks, j + 1) == "::" {
+            j += 2;
+        }
+        if is_word(s(self.toks, j))
+            && s(self.toks, j + 1) == "("
+            && skip_group(self.toks, j + 1) == to
+        {
+            self.facts.agg_ret(s(self.toks, j))
+        } else {
+            None
+        }
+    }
+
+    /// Whether the outermost expression of `toks[from..to]` is an integer by its own shape,
+    /// whatever floats it mentions inside: `.count()`, `.len()`, `usize::try_from(..)` (with a
+    /// trailing `?`, `.unwrap()`, `.expect(..)`, `.unwrap_or(..)`).
+    fn integer_shape(&self, from: usize, to: usize) -> bool {
+        let toks = self.toks;
+        if to >= from + 4
+            && s(toks, to - 1) == ")"
+            && s(toks, to - 2) == "("
+            && matches!(s(toks, to - 3), "count" | "len")
+            && s(toks, to - 4) == "."
+        {
+            return true;
+        }
+        if INT_TYPES.contains(&s(toks, from))
+            && s(toks, from + 1) == "::"
+            && matches!(s(toks, from + 2), "try_from" | "from")
+            && s(toks, from + 3) == "("
+        {
+            let mut j = skip_group(toks, from + 3);
+            while j < to {
+                if s(toks, j) == "?" {
+                    j += 1;
+                } else if s(toks, j) == "."
+                    && matches!(
+                        s(toks, j + 1),
+                        "unwrap" | "expect" | "unwrap_or" | "unwrap_or_default"
+                    )
+                    && s(toks, j + 2) == "("
+                {
+                    j = skip_group(toks, j + 2);
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
+    }
+
     /// Whether the tokens `toks[lo..hi]` mention a float: a literal, an `as f64` cast, `f64::`,
     /// a float-typed name, a float field, a float method or function. An expression that ends in
     /// an integer cast is not a float whatever it mentions.
@@ -662,6 +909,9 @@ impl<'a> Evidence<'a> {
 
     fn mentions_with(&self, lo: usize, hi: usize, only: Option<usize>) -> bool {
         let toks = self.toks;
+        if self.integer_shape(lo, hi) {
+            return false;
+        }
         // `if c { a } else { b }` and `match x { .. }` have the type of their branches, not of the
         // condition: read from the first `{`, and any cast inside counts
         let mut lo = lo;
@@ -706,7 +956,9 @@ impl<'a> Evidence<'a> {
             {
                 return true;
             }
-            if w.starts_with(|c: char| c.is_ascii_digit()) && self.tuple_field_float(k, only) {
+            if w.starts_with(|c: char| c.is_ascii_digit())
+                && (self.tuple_field_float(k, only) || self.call_tuple_field(k))
+            {
                 return true;
             }
             if !is_word(w) || w.starts_with(|c: char| c.is_ascii_digit()) {
@@ -718,7 +970,7 @@ impl<'a> Evidence<'a> {
                     if float_only_method(w) || (self.facts.float_fn(w) && !AMBIGUOUS.contains(&w)) {
                         return true;
                     }
-                } else if self.facts.fields.contains(w) {
+                } else if self.facts.field_float(w) {
                     return true;
                 }
             } else if prev == "::" {
@@ -728,7 +980,10 @@ impl<'a> Evidence<'a> {
                     return true;
                 }
             } else if call {
-                if self.facts.float_fn(w) {
+                let close = skip_group(toks, k + 1);
+                if self.facts.float_fn(w)
+                    || (s(toks, close) == "[" && self.facts.agg_ret(w) == Some(Agg::Container))
+                {
                     return true;
                 }
             } else if next == "."
@@ -796,16 +1051,22 @@ impl<'a> Evidence<'a> {
                 }
             }
             "]" => match open_of(toks, end) {
+                Some(open) if open >= 1 && s(toks, open - 1) == ")" => {
+                    self.call_agg(open - 1) == Some(Agg::Container)
+                        || self.recv(open - 1, depth + 1)
+                }
                 Some(open) if open >= 1 => self.recv(open - 1, depth + 1),
                 _ => false,
             },
             _ if t.starts_with(|c: char| c.is_ascii_digit()) => {
-                float_literal_ends_at(toks, end) || self.tuple_field_float(end, None)
+                float_literal_ends_at(toks, end)
+                    || self.tuple_field_float(end, None)
+                    || self.call_tuple_field(end)
             }
             _ if is_word(t) => {
                 let prev = s(toks, end.wrapping_sub(1));
                 if dot_access(toks, end) {
-                    self.facts.fields.contains(t)
+                    self.facts.field_float(t)
                 } else if prev == "::" {
                     matches!(s(toks, end.wrapping_sub(2)), "f32" | "f64")
                         || (s(toks, end.wrapping_sub(2)) == ">"

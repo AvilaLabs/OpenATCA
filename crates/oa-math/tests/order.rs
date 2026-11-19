@@ -27,6 +27,9 @@ fn all64() -> Vec<f64> {
         -0.0,
         0.0,
         f64::MIN_POSITIVE,
+        // the smallest subnormals, both signs: not zero, below the smallest normal
+        f64::from_bits(1),
+        -f64::from_bits(1),
         3.0,
         f64::INFINITY,
         f64::NAN,
@@ -48,6 +51,8 @@ fn all32() -> Vec<f32> {
         -0.0,
         0.0,
         f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        -f32::from_bits(1),
         3.0,
         f32::INFINITY,
         f32::NAN,
@@ -265,4 +270,30 @@ fn clamp_is_total_and_follows_min_and_max() {
             }
         }
     }
+}
+
+// REQ: OA-MATH-036
+#[test]
+fn the_smallest_subnormals_are_ordered_and_extreme_like_any_other_number() {
+    let (tiny, ntiny) = (f64::from_bits(1), -f64::from_bits(1));
+    assert!(tiny > 0.0 && tiny < f64::MIN_POSITIVE);
+    assert_eq!(min_f64(tiny, 0.0).to_bits(), 0.0f64.to_bits());
+    assert_eq!(max_f64(tiny, 0.0).to_bits(), tiny.to_bits());
+    assert_eq!(min_f64(ntiny, -0.0).to_bits(), ntiny.to_bits());
+    assert_eq!(max_f64(ntiny, -0.0).to_bits(), (-0.0f64).to_bits());
+    assert_eq!(max_f64(ntiny, 0.0).to_bits(), 0.0f64.to_bits());
+    assert_eq!(cmp_canon_f64(ntiny, -0.0), Ordering::Less);
+    assert_eq!(cmp_canon_f64(0.0, tiny), Ordering::Less);
+    assert_eq!(clamp_f64(tiny, 0.0, 1.0).to_bits(), tiny.to_bits());
+    assert_eq!(clamp_f64(ntiny, 0.0, 1.0).to_bits(), 0.0f64.to_bits());
+    assert_eq!(copysign_canon_f64(tiny, -1.0).to_bits(), ntiny.to_bits());
+    assert!(is_sign_negative_canon_f64(ntiny) && !is_sign_negative_canon_f64(tiny));
+    let (tiny, ntiny) = (f32::from_bits(1), -f32::from_bits(1));
+    assert!(tiny > 0.0 && tiny < f32::MIN_POSITIVE);
+    assert_eq!(min_f32(tiny, 0.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(max_f32(ntiny, -0.0).to_bits(), (-0.0f32).to_bits());
+    assert_eq!(cmp_canon_f32(ntiny, -0.0), Ordering::Less);
+    assert_eq!(clamp_f32(ntiny, 0.0, 1.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(copysign_canon_f32(tiny, -1.0).to_bits(), ntiny.to_bits());
+    assert!(is_sign_negative_canon_f32(ntiny) && !is_sign_negative_canon_f32(tiny));
 }

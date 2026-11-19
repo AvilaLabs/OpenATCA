@@ -8,7 +8,6 @@ use crate::nan::{canon_nan, canon_nan_f32};
 use core::cmp::Ordering;
 
 const SIGN64: u64 = 0x8000_0000_0000_0000;
-const SIGN32: u32 = 0x8000_0000;
 
 /// The IEEE-754 total order of `a` and `b` after both went through [`canon_nan`]: `-NaN` does not
 /// exist, so the order is `-inf < negatives < -0.0 < +0.0 < positives < +inf < NaN`, and every NaN
@@ -48,8 +47,12 @@ pub fn copysign_canon_f64(x: f64, sign: f64) -> f64 {
 /// [`copysign_canon_f64`] for `f32`.
 #[inline]
 pub fn copysign_canon_f32(x: f32, sign: f32) -> f32 {
-    let bits = (x.to_bits() & !SIGN32) | (canon_nan_f32(sign).to_bits() & SIGN32);
-    canon_nan_f32(f32::from_bits(bits))
+    let mag = canon_nan_f32(x).abs();
+    canon_nan_f32(if is_sign_negative_canon_f32(sign) {
+        -mag
+    } else {
+        mag
+    })
 }
 
 /// The smaller of `a` and `b`. A NaN is ignored (the other is returned; two NaNs give the
