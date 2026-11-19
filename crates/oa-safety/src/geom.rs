@@ -186,3 +186,16 @@ pub fn polygon_contains(p: &Polygon, lat_e7: i32, lon_e7: i32) -> bool {
     }
     inside
 }
+
+/// The larger of the latitude extent and the longitude extent of the polygon's bounding box,
+/// 1e-7 degree.
+pub fn polygon_extent(p: &Polygon) -> i64 {
+    let n = usize::from(p.n);
+    let span = |v: &[i32]| {
+        let s = v.get(..n).unwrap_or(&[]);
+        let lo = s.iter().copied().min().unwrap_or(0);
+        let hi = s.iter().copied().max().unwrap_or(0);
+        i64::from(hi) - i64::from(lo)
+    };
+    span(&p.lat_e7).max(span(&p.lon_e7))
+}

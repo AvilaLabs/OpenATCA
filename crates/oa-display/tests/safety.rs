@@ -36,9 +36,9 @@ const SQUARE: [Vertex; 4] = [
 ];
 
 fn well() -> (StateTable, Box<InhibitTable>, Vec<FeedStatus>) {
-    let mut st = state_table_new(10 * S).unwrap();
+    let mut st = state_table_new(10 * S, 5 * S).unwrap();
     for n in NETS {
-        state_report(&mut st, n, NetReport::Running, NOW).unwrap();
+        state_report(&mut st, n, NetReport::Running, NOW, NOW).unwrap();
     }
     let feeds = vec![
         FeedStatus {
@@ -65,6 +65,7 @@ fn scene<'a>(
         feeds,
         newest_track_ns: Some(NOW - S),
         frozen_limit_ns: 5 * S,
+        targets: None,
     }
 }
 
@@ -145,7 +146,7 @@ fn nothing_is_drawn_when_every_net_runs_every_feed_is_live_and_the_picture_is_fr
 fn every_net_state_that_is_not_running_is_a_banner_line_in_the_alert_colour() {
     let (_, inh, feeds) = well();
     // The area proximity net last reported 11 s ago: stale. The approach net is running.
-    let mut st2 = state_table_new(10 * S).unwrap();
+    let mut st2 = state_table_new(10 * S, 5 * S).unwrap();
     for n in NETS {
         let rep = match n {
             NetId::ConflictAlert => NetReport::Degraded {
@@ -163,7 +164,7 @@ fn every_net_state_that_is_not_running_is_a_banner_line_in_the_alert_colour() {
         } else {
             NOW - 3 * S
         };
-        state_report(&mut st2, n, rep, at).unwrap();
+        state_report(&mut st2, n, rep, at, NOW).unwrap();
     }
     let (l, stats) = draw(&scene(&st2, &inh, &feeds));
     assert_eq!(stats.nets_shown, 3);
@@ -197,6 +198,8 @@ fn an_inhibition_is_drawn_as_a_labelled_outline_and_the_net_reads_inhibited() {
     let (st, mut inh, feeds) = well();
     let mut cfg = inhibit_config_none();
     cfg.max_duration_ns[net_index(NetId::Msaw)] = Some(3600 * S);
+    cfg.max_start_ahead_ns = Some(3600 * S);
+    cfg.max_extent_e7 = Some(100_000_000);
     let r = InhibitRequest {
         net: NetId::Msaw,
         vertices: &SQUARE,
@@ -282,7 +285,7 @@ fn a_feed_that_is_slow_or_lost_is_a_banner_line_with_its_age() {
 // REQ: OA-DSP-065
 #[test]
 fn the_worst_state_fits_the_capacities_and_the_work_budget() {
-    let mut st = state_table_new(10 * S).unwrap();
+    let mut st = state_table_new(10 * S, 5 * S).unwrap();
     for n in NETS {
         state_report(
             &mut st,
@@ -293,12 +296,15 @@ fn the_worst_state_fits_the_capacities_and_the_work_budget() {
                 count: u32::MAX,
             },
             NOW,
+            NOW,
         )
         .unwrap();
     }
     let mut inh = Box::new(inhibits_new());
     let mut cfg = inhibit_config_none();
     cfg.max_duration_ns = [Some(3600 * S); NET_COUNT];
+    cfg.max_start_ahead_ns = Some(3600 * S);
+    cfg.max_extent_e7 = Some(100_000_000);
     // A 32-vertex convex ring.
     let ring: Vec<Vertex> = (0..32)
         .map(|k| {
@@ -364,4 +370,211 @@ fn utc_time_is_civil_time_from_the_epoch() {
     assert_eq!(utc_parts(NOW + 1800 * S), (2026, 11, 19, 14, 30));
     let _ = utc_parts(i64::MIN);
     let _ = utc_parts(i64::MAX);
+}
+
+// REQ: OA-DSP-067
+#[test]
+fn a_track_update_dated_after_now_is_never_fresh() {
+    let (st, inh, feeds) = well();
+    let mut sc = scene(&st, &inh, &feeds);
+    sc.newest_track_ns = Some(NOW + 1);
+    let (l, stats) = draw(&sc);
+    assert!(stats.time_inconsistent && !stats.frozen);
+    assert_eq!(texts(&l), ["PICTURE TIME INCONSISTENT"]);
+    sc.newest_track_ns = Some(i64::MAX);
+    assert_eq!(texts(&draw(&sc).0), ["PICTURE TIME INCONSISTENT"]);
+    // Exactly now is fresh.
+    sc.newest_track_ns = Some(NOW);
+    assert!(empty(&draw(&sc).0));
+}
+
+// REQ: OA-DSP-068
+#[test]
+fn a_loss_in_the_safety_record_is_a_banner_line_and_marks_the_net() {
+    let (mut st, mut inh, feeds) = well();
+    let mut cfg = inhibit_config_none();
+    cfg.max_duration_ns = [Some(3600 * S); NET_COUNT];
+    cfg.max_start_ahead_ns = Some(3600 * S);
+    cfg.max_extent_e7 = Some(100_000_000);
+    let r = InhibitRequest {
+        net: NetId::Msaw,
+        vertices: &SQUARE,
+        alt_low_ft: 0,
+        alt_high_ft: 3000,
+        start_ns: NOW - S,
+        end_ns: NOW + 100 * S,
+        reason: "TEST",
+        author: "SUP",
+    };
+    inhibit_create(&mut inh, &cfg, &r, NOW - S).unwrap();
+    for k in 0..(SUPPRESSED_CAP + 2) {
+        inhibit_suppress(
+            &mut inh,
+            NetId::Msaw,
+            ORD.0,
+            ORD.1,
+            Some(100),
+            NOW + k as i64,
+        );
+    }
+    // A refused backdated report counts too.
+    assert!(state_report(&mut st, NetId::Msaw, NetReport::Running, NOW - 5 * S, NOW).is_err());
+    let (l, stats) = draw(&scene(&st, &inh, &feeds));
+    assert!(stats.record_incomplete);
+    let t = texts(&l);
+    assert!(
+        t.contains(&"SAFETY RECORD INCOMPLETE: SUPP 2, REJ 1".to_string()),
+        "{t:?}"
+    );
+    assert!(
+        t.iter()
+            .any(|s| s.starts_with("MSAW DEGRADED: SUPPRESSION LOG FULL, WHOLE, COUNT 2")),
+        "{t:?}"
+    );
+    // The record line comes before the net lines.
+    let at = |p: &str| t.iter().position(|s| s.starts_with(p)).unwrap();
+    assert!(at("SAFETY RECORD") < at("MSAW DEGRADED"));
+    // Expired inhibitions waiting for a full event log are counted too.
+    let (st, mut inh, feeds) = well();
+    let mut ev = [Event {
+        time_ns: 0,
+        id: 0,
+        kind: EventKind::Created,
+        net: NetId::Msaw,
+        by: [0; AUTHOR_BYTES],
+    }; 1];
+    let mut r2 = r;
+    r2.end_ns = NOW + 1;
+    while events_len(&inh) + 2 < EVENT_CAP {
+        inhibit_create(&mut inh, &cfg, &r2, NOW - S).unwrap();
+        let first = inhibits_slice(&inh)[0].id;
+        inhibit_remove(&mut inh, first, "SUP", NOW - S).unwrap();
+    }
+    inhibit_create(&mut inh, &cfg, &r2, NOW - S).unwrap();
+    inhibit_create(&mut inh, &cfg, &r2, NOW - S).unwrap();
+    assert_eq!(events_len(&inh), EVENT_CAP);
+    assert_eq!(inhibit_expire(&mut inh, NOW + 2), 0);
+    let mut sc = scene(&st, &inh, &feeds);
+    sc.now_ns = NOW + 2;
+    sc.newest_track_ns = Some(NOW + 1);
+    let (l, _) = draw(&sc);
+    assert!(
+        texts(&l).contains(&"SAFETY RECORD INCOMPLETE: EXP 2".to_string()),
+        "{:?}",
+        texts(&l)
+    );
+    let _ = events_take(&mut inh, &mut ev);
+}
+
+// REQ: OA-DSP-069
+#[test]
+fn a_failed_build_still_draws_the_net_lines_and_an_error_line() {
+    let (mut st, inh, feeds) = well();
+    state_report(
+        &mut st,
+        NetId::Msaw,
+        NetReport::Unavailable {
+            reason: Reason::InputMissing,
+        },
+        NOW,
+        NOW,
+    )
+    .unwrap();
+    let mut sc = scene(&st, &inh, &feeds);
+    sc.frozen_limit_ns = 0;
+    let mut l = list_new(safety_caps()).unwrap();
+    assert!(build_safety(&mut l, &proj(), &sc).is_err());
+    assert!(!l.faulted);
+    assert_eq!(
+        texts(&l),
+        [
+            "SAFETY DISPLAY ERROR 1",
+            "MSAW UNAVAILABLE: INPUT MISSING, AGE 0S"
+        ]
+    );
+    // A list with no room faults: nothing more can be drawn, and the error is returned.
+    let mut tiny = list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: 0,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 0,
+        text_bytes: 0,
+    })
+    .unwrap();
+    let sc = scene(&st, &inh, &feeds);
+    assert!(build_safety(&mut tiny, &proj(), &sc).is_err());
+}
+
+// REQ: OA-DSP-070
+#[test]
+fn a_banner_that_does_not_fit_the_frame_says_how_many_states_are_not_shown() {
+    let (mut st, inh, mut feeds) = well();
+    for n in NETS {
+        state_report(
+            &mut st,
+            n,
+            NetReport::Unavailable {
+                reason: Reason::Maintenance,
+            },
+            NOW,
+            NOW,
+        )
+        .unwrap();
+    }
+    feeds[0].state = FeedState::Lost { age_ms: 1000 };
+    let small = projection_new(ORD.0, ORD.1, 20.0, 800, 200, LEGEND_STRIP_PX).unwrap();
+    let mut l = list_new(safety_caps()).unwrap();
+    let stats = build_safety(&mut l, &small, &scene(&st, &inh, &feeds)).unwrap();
+    let t = texts(&l);
+    // 200 - 104 - 8 - 48 = 40 pixels: two rows.
+    assert_eq!(t.len(), 2, "{t:?}");
+    assert!(t[0].starts_with("CONFLICT ALERT UNAVAILABLE"));
+    assert_eq!(t[1], "+4 MORE STATES NOT SHOWN");
+    assert_eq!(stats.banner_hidden, 4);
+    // On a full frame all five lines are shown and no such line.
+    let t = texts(&draw(&scene(&st, &inh, &feeds)).0);
+    assert_eq!(t.len(), 5);
+}
+
+// REQ: OA-DSP-071
+#[test]
+fn targets_under_the_opaque_banner_are_counted_on_it() {
+    let (mut st, inh, feeds) = well();
+    state_report(
+        &mut st,
+        NetId::Msaw,
+        NetReport::Unavailable {
+            reason: Reason::Maintenance,
+        },
+        NOW,
+        NOW,
+    )
+    .unwrap();
+    let p = proj();
+    let mut set = targets_new(4).unwrap();
+    // The banner is at the top left under the strip; put two targets there and one far away.
+    let under =
+        oa_display::project::unproject(&p, 16 * 20, 16 * (LEGEND_STRIP_PX as i32 + 12)).unwrap();
+    for (la, lo) in [under, (under.0, under.1 + 1), ORD] {
+        let mut t = target();
+        t.lat_e7 = la;
+        t.lon_e7 = lo;
+        targets_push(&mut set, &t).unwrap();
+    }
+    let mut sc = scene(&st, &inh, &feeds);
+    sc.targets = Some(&set);
+    let (l, stats) = draw(&sc);
+    assert_eq!(stats.targets_under_banner, 2);
+    assert!(
+        texts(&l).contains(&"TARGETS UNDER BANNER: 2".to_string()),
+        "{:?}",
+        texts(&l)
+    );
+    // None under it: no such line.
+    let mut empty_set = targets_new(1).unwrap();
+    targets_push(&mut empty_set, &target()).unwrap();
+    sc.targets = Some(&empty_set);
+    assert_eq!(texts(&draw(&sc).0).len(), 1);
 }

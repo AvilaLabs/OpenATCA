@@ -115,9 +115,9 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         // fresh picture add nothing: the frame is the same bytes.
         {
             let now = 1_000_000_000_000i64;
-            let mut states = state_table_new(10_000_000_000).unwrap();
+            let mut states = state_table_new(10_000_000_000, 5_000_000_000).unwrap();
             for n in NETS {
-                state_report(&mut states, n, NetReport::Running, now).unwrap();
+                state_report(&mut states, n, NetReport::Running, now, now).unwrap();
             }
             let inhibits = Box::new(inhibits_new());
             let feeds = [FeedStatus {
@@ -131,6 +131,7 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
                 feeds: &feeds,
                 newest_track_ns: Some(now - 1_000_000_000),
                 frozen_limit_ns: 5_000_000_000,
+                targets: None,
             };
             let proj =
                 oa_display::project::projection_new(lat, lon, range, 1920, 1080, 104).unwrap();

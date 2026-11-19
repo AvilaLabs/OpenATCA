@@ -14,14 +14,28 @@
 //!
 //! One line per condition, in the alert colour, in a box with an outline at the top left under
 //! the legend strip, above everything else. It cannot be dismissed: it is a function of the state
-//! and nothing else, so it lasts exactly as long as the condition.
+//! and nothing else, so it lasts exactly as long as the condition. The box has an **opaque**
+//! background (a safety banner must be legible over any map), so it hides what is under it; the
+//! simpler of the two remedies is taken: targets whose symbol is under the box are counted on the
+//! banner, `TARGETS UNDER BANNER: n`, when a set of targets is given.
 //!
-//! * `PICTURE FROZEN <age>` when the newest track update is older than the configured limit (age
-//!   at or over the limit; one nanosecond under it, nothing), or when there has been none.
+//! Lines, in priority order:
+//! * `PICTURE FROZEN <age>` when the newest track update is at least the configured limit old
+//!   (an age one nanosecond under the limit shows nothing), or when there has been none;
+//!   `PICTURE TIME INCONSISTENT` when the newest update is dated after now.
+//! * `SAFETY RECORD INCOMPLETE: ...` when the record has lost something: event log overflow,
+//!   suppressions lost to a full log, expired inhibitions waiting for their review event,
+//!   refused state reports or clipped texts (counts of each that is not zero).
 //! * One line per net that is not plainly running: name, state, reason, area, count, age of the
-//!   state, and the number of inhibitions in force.
+//!   state, and the number of inhibitions in force. A net whose suppressions were lost to a full
+//!   log reads degraded (`SUPPRESSION LOG FULL`).
 //! * One line per feed that is not live: `FEED <name> SLOW <age>` or `FEED <name> LOST <age>`.
 //! * `INHIBITION AREAS NOT DRAWN: N` when an area has a vertex that does not project.
+//!
+//! If the lines do not fit the frame, the last visible line reads `+N MORE STATES NOT SHOWN`.
+//! A build that fails is an alarm (see [`build_safety`]). A line is longer than a small frame is
+//! wide on some screens; the rasterizer clips it at the frame edge, and the frame is meant for
+//! the facility display sizes.
 //!
 //! # Inhibition areas
 //!
@@ -50,12 +64,15 @@ use crate::core::text::{
     text_clear, text_clipped, text_new, text_push_char, text_push_dec, text_push_str, text_str,
     TextBuf, TEXT_BYTES,
 };
+use crate::core::traffic::{targets_columns, TargetSet};
 use oa_safety::geom::MAX_VERTICES;
 use oa_safety::inhibit::{
-    in_force, inhibits_slice, text_of, InhibitTable, Inhibition, INHIBIT_CAP,
+    events_overflow, in_force, inhibits_expired_waiting, inhibits_slice, suppressed_overflow,
+    text_of, InhibitTable, Inhibition, INHIBIT_CAP,
 };
 use oa_safety::net::{
-    net_name, net_statuses, reason_text, status_needs_banner, Area, NetState, NetStatus, StateTable,
+    net_name, net_statuses, reason_text, state_rejected, status_needs_banner, Area, NetState,
+    NetStatus, StateTable,
 };
 
 /// Inhibition outlines and labels share the map's text layer: above the map, below the traffic
@@ -71,10 +88,13 @@ pub const LAYER_BANNER: u8 = 15;
 pub const MAX_FEEDS: usize = 8;
 /// Bytes of a feed's name.
 pub const FEED_NAME_BYTES: usize = 8;
-/// Banner lines: the frozen picture, the four nets, the feeds and the unplaced-areas notice.
-pub const MAX_BANNER_LINES: usize = 1 + oa_safety::net::NET_COUNT + MAX_FEEDS + 1;
+/// Banner lines: the picture, the record, the four nets, the feeds, the unplaced-areas notice, the
+/// targets under the banner and the "more states" line that replaces a last one.
+pub const MAX_BANNER_LINES: usize = 1 + 1 + oa_safety::net::NET_COUNT + MAX_FEEDS + 1 + 1;
 
 const BANNER_SIZE: u8 = 12;
+/// Space left at the bottom of the frame for the traffic notices (`TARGETS NOT DRAWN` and the like).
+const BOTTOM_RESERVE: i32 = 48;
 const BANNER_PITCH: i32 = 16;
 const BANNER_X: i32 = 8;
 const BANNER_PAD: i32 = 4;
@@ -84,7 +104,7 @@ const LABEL_REASON_CHARS: usize = 16;
 
 /// Most the work charge of one build can be: every inhibition's vertices projected and drawn
 /// once, and every banner line and label written once. A7.1: the figure is the sum of these
-/// bounds, 64 * (32 + 1) vertices plus 78 texts of 96 bytes, about 10 thousand, not a measured
+/// bounds, 64 * (32 + 1) vertices plus 80 texts of 128 bytes, about 10 thousand, not a measured
 /// time; the build refuses a state whose charge is over it, which no valid state is.
 pub const MAX_SAFETY_WORK: usize =
     INHIBIT_CAP * (MAX_VERTICES + 1) + (INHIBIT_CAP + MAX_BANNER_LINES) * TEXT_BYTES;
@@ -125,6 +145,8 @@ pub struct SafetyScene<'a> {
     /// The picture is frozen when the newest update is at least this old. From configuration, no
     /// default; positive.
     pub frozen_limit_ns: i64,
+    /// The targets drawn, if the shell has them: those under the opaque banner are counted on it.
+    pub targets: Option<&'a TargetSet>,
 }
 
 /// What a safety build drew. A7.2: cold struct, size guard waived (one per frame).
@@ -138,6 +160,14 @@ pub struct SafetyStats {
     /// Areas not drawn because a vertex does not project. Said on the banner.
     pub inhibitions_unplaced: u32,
     pub text_clipped: u32,
+    /// The newest track update is dated after now.
+    pub time_inconsistent: bool,
+    /// A loss of the safety record is on the banner.
+    pub record_incomplete: bool,
+    /// Banner lines left out for want of room (said on the last line).
+    pub banner_hidden: u32,
+    /// Targets whose symbol is under the opaque banner box.
+    pub targets_under_banner: u32,
 }
 
 /// List capacities for every safety primitive the build can add, to be added to the map's and the
@@ -206,7 +236,7 @@ fn push_dec2(b: &mut TextBuf, v: u8) {
 
 /// Largest number a banner line writes in full: beyond it the line shows the cap and a `+`, so
 /// that the longest line (the longest reason, an area, a count, an age and the inhibitions) always
-/// fits the 96-byte text buffer and a line is never cut mid-way.
+/// fits the text buffer and a line is never cut mid-way.
 const SHOW_MAX: u64 = 999_999;
 
 fn push_capped(b: &mut TextBuf, v: u64, cap: u64) {
@@ -330,14 +360,206 @@ fn px(n: i32) -> i32 {
     n.saturating_mul(16)
 }
 
-/// Appends the safety indications to `l`: the inhibition areas in force, then the banner when
-/// anything is not well. Draws nothing when all is well. On an error the list is left faulted.
-/// Allocates nothing.
-pub fn build_safety(
+/// The banner's lines in priority order, and how many there are.
+// A7.2: cold struct, size guard waived (one per frame, on the stack).
+struct Banner {
+    lines: [TextBuf; MAX_BANNER_LINES],
+    n: usize,
+}
+
+fn banner_add(b: &mut Banner, tb: &TextBuf, st: &mut SafetyStats) {
+    if let Some(slot) = b.lines.get_mut(b.n) {
+        *slot = *tb;
+        b.n += 1;
+        if text_clipped(tb) {
+            st.text_clipped += 1;
+        }
+    }
+}
+
+/// Inserts `tb` at line `at` (or at the end), shifting the rest down.
+fn banner_insert(b: &mut Banner, at: usize, tb: &TextBuf, st: &mut SafetyStats) {
+    if b.n >= MAX_BANNER_LINES {
+        return;
+    }
+    let at = usize::min(at, b.n);
+    b.lines.copy_within(at..b.n, at + 1);
+    if let Some(slot) = b.lines.get_mut(at) {
+        *slot = *tb;
+        b.n += 1;
+        if text_clipped(tb) {
+            st.text_clipped += 1;
+        }
+    }
+}
+
+/// The net lines, in net order, for every net that is not plainly running.
+fn collect_nets(b: &mut Banner, tb: &mut TextBuf, s: &SafetyScene<'_>, st: &mut SafetyStats) {
+    for ns in net_statuses(s.states, s.inhibits, s.now_ns) {
+        if status_needs_banner(&ns) {
+            net_line(tb, &ns);
+            banner_add(b, tb, st);
+            st.nets_shown += 1;
+        }
+    }
+}
+
+/// Rows of banner text that fit the frame between the legend strip and the bottom notices.
+fn rows_that_fit(proj: &Projection) -> usize {
+    let free = i64::from(proj.height) - i64::from(LEGEND_STRIP_PX) - 8 - i64::from(BOTTOM_RESERVE);
+    usize::try_from((free / i64::from(BANNER_PITCH)).max(1)).unwrap_or(1)
+}
+
+/// The box of `n` lines whose widest has `widest_units` grid units, 1/16 pixel: left, top, right,
+/// bottom.
+fn box_of(n: usize, widest_units: i32) -> (i32, i32, i32, i32) {
+    let w = i32::try_from(i64::from(widest_units) * i64::from(BANNER_SIZE) / i64::from(CAP_HEIGHT))
+        .unwrap_or(i32::MAX);
+    let rows = i32::try_from(n).unwrap_or(i32::MAX);
+    let x0 = px(BANNER_X - BANNER_PAD);
+    let y0 = px(LEGEND_STRIP_PX as i32 + 8 - BANNER_PAD);
+    (
+        x0,
+        y0,
+        x0.saturating_add(px(w.saturating_add(2 * BANNER_PAD))),
+        y0.saturating_add(px(rows
+            .saturating_mul(BANNER_PITCH)
+            .saturating_add(BANNER_PAD))),
+    )
+}
+
+fn widest(b: &Banner) -> i32 {
+    b.lines
+        .iter()
+        .take(b.n)
+        .map(|t| text_width_units(text_str(t).len()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Targets whose symbol is under the box (opaque, so they are hidden by it).
+fn targets_under(set: Option<&TargetSet>, proj: &Projection, bx: (i32, i32, i32, i32)) -> u32 {
+    let Some(set) = set else {
+        return 0;
+    };
+    let c = targets_columns(set);
+    let n = c
+        .lat_e7
+        .iter()
+        .zip(c.lon_e7)
+        .filter_map(|(&la, &lo)| project(proj, la, lo))
+        .filter(|&(x, y)| x >= bx.0 && x <= bx.2 && y >= bx.1 && y <= bx.3)
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Clamps the banner to the frame, counts what the box hides and draws it.
+fn banner_draw(
+    l: &mut DisplayList,
+    proj: &Projection,
+    b: &mut Banner,
+    tb: &mut TextBuf,
+    targets: Option<&TargetSet>,
+    st: &mut SafetyStats,
+) -> Result<(), DisplayError> {
+    let fit = rows_that_fit(proj);
+    if b.n > fit {
+        // The last visible line says how many states are not shown: never silent.
+        let hidden = b.n - (fit - 1);
+        b.n = fit - 1;
+        text_clear(tb);
+        text_push_char(tb, b'+');
+        text_push_dec(tb, hidden as u64, 0);
+        text_push_str(tb, " MORE STATES NOT SHOWN");
+        banner_add(b, tb, st);
+        st.banner_hidden = u32::try_from(hidden).unwrap_or(u32::MAX);
+    }
+    if b.n == 0 {
+        return Ok(());
+    }
+    // Targets under the box, counted against the box with the counting line itself.
+    let under = targets_under(
+        targets,
+        proj,
+        box_of(b.n + 1, widest(b).max(text_width_units(30))),
+    );
+    if under > 0 && b.n < fit {
+        text_clear(tb);
+        text_push_str(tb, "TARGETS UNDER BANNER: ");
+        push_capped(tb, u64::from(under), SHOW_MAX);
+        banner_add(b, tb, st);
+    }
+    st.targets_under_banner = targets_under(targets, proj, box_of(b.n, widest(b)));
+    st.banner_lines = u32::try_from(b.n).unwrap_or(u32::MAX);
+    let (x0, y0, x1, y1) = box_of(b.n, widest(b));
+    push_rect(l, (x0, y0), (x1, y1), palette::BACKGROUND, LAYER_BANNER_BG)?;
+    for (p, q) in [
+        ((x0, y0), (x1, y0)),
+        ((x1, y0), (x1, y1)),
+        ((x1, y1), (x0, y1)),
+        ((x0, y1), (x0, y0)),
+    ] {
+        push_line(l, p, q, palette::ALERT, LAYER_BANNER)?;
+    }
+    let mut y = px(LEGEND_STRIP_PX as i32 + 8);
+    for t in b.lines.iter().take(b.n) {
+        push_text(
+            l,
+            (px(BANNER_X), y),
+            BANNER_SIZE,
+            ALIGN_LEFT,
+            palette::ALERT,
+            LAYER_BANNER,
+            text_str(t),
+        )?;
+        y = y.saturating_add(px(BANNER_PITCH));
+    }
+    Ok(())
+}
+
+/// The line for the losses the safety record has suffered: events, suppressions, expiries waiting,
+/// refused reports and clipped texts. Empty (and false) when there are none.
+fn record_line(tb: &mut TextBuf, s: &SafetyScene<'_>, clipped: u32) -> bool {
+    text_clear(tb);
+    text_push_str(tb, "SAFETY RECORD INCOMPLETE:");
+    let parts = [
+        (" EVT ", events_overflow(s.inhibits)),
+        (" SUPP ", suppressed_overflow(s.inhibits)),
+        (
+            " EXP ",
+            u64::from(inhibits_expired_waiting(s.inhibits, s.now_ns)),
+        ),
+        (" REJ ", u64::from(state_rejected(s.states))),
+        (" CLIP ", u64::from(clipped)),
+    ];
+    let mut any = false;
+    for (name, n) in parts {
+        if n > 0 {
+            text_push_str(tb, if any { "," } else { "" });
+            text_push_str(tb, name);
+            push_capped(tb, n, SHOW_MAX);
+            any = true;
+        }
+    }
+    any
+}
+
+/// A code for each reason a build can fail, shown on the banner.
+fn error_code(e: &DisplayError) -> u64 {
+    match e {
+        DisplayError::BadView(_) => 1,
+        DisplayError::TooLarge { .. } => 2,
+        DisplayError::Full { .. } => 3,
+        _ => 4,
+    }
+}
+
+fn build_inner(
     l: &mut DisplayList,
     proj: &Projection,
     s: &SafetyScene<'_>,
-) -> Result<SafetyStats, DisplayError> {
+    stats: &mut SafetyStats,
+) -> Result<(), DisplayError> {
     if s.frozen_limit_ns <= 0 {
         return Err(DisplayError::BadView("frozen limit must be positive"));
     }
@@ -352,7 +574,6 @@ pub fn build_safety(
             limit: MAX_SAFETY_WORK,
         });
     }
-    let mut stats = SafetyStats::default();
     let mut tb = text_new();
 
     // Inhibition areas in force.
@@ -409,36 +630,35 @@ pub fn build_safety(
         stats.inhibitions_drawn += 1;
     }
 
-    // The banner lines, in order: frozen picture, nets, feeds, unplaced areas.
-    let mut lines = [text_new(); MAX_BANNER_LINES];
-    let mut n_lines = 0usize;
-    let mut add = |lines: &mut [TextBuf; MAX_BANNER_LINES], b: &TextBuf, st: &mut SafetyStats| {
-        if let Some(slot) = lines.get_mut(n_lines) {
-            *slot = *b;
-            n_lines += 1;
-            if text_clipped(b) {
-                st.text_clipped += 1;
+    // The banner lines, in priority order: the picture, the record, nets, feeds, unplaced areas.
+    let mut b = Banner {
+        lines: [text_new(); MAX_BANNER_LINES],
+        n: 0,
+    };
+    match s.newest_track_ns {
+        // A track update dated after now is never "fresh": the clock or the data is wrong.
+        Some(t) if t > s.now_ns => {
+            text_clear(&mut tb);
+            text_push_str(&mut tb, "PICTURE TIME INCONSISTENT");
+            banner_add(&mut b, &tb, stats);
+            stats.time_inconsistent = true;
+        }
+        newest => {
+            let age = newest.map(|t| s.now_ns.saturating_sub(t));
+            // An age equal to the limit is frozen; one nanosecond under it is not.
+            if age.is_none_or(|a| a >= s.frozen_limit_ns) {
+                frozen_line(&mut tb, age);
+                banner_add(&mut b, &tb, stats);
+                stats.frozen = true;
             }
         }
-    };
-    let age = s.newest_track_ns.map(|t| s.now_ns.saturating_sub(t).max(0));
-    let frozen = age.is_none_or(|a| a >= s.frozen_limit_ns);
-    if frozen {
-        frozen_line(&mut tb, age);
-        add(&mut lines, &tb, &mut stats);
-        stats.frozen = true;
     }
-    for ns in net_statuses(s.states, s.inhibits, s.now_ns) {
-        if status_needs_banner(&ns) {
-            net_line(&mut tb, &ns);
-            add(&mut lines, &tb, &mut stats);
-            stats.nets_shown += 1;
-        }
-    }
+    let picture_lines = b.n;
+    collect_nets(&mut b, &mut tb, s, stats);
     for f in s.feeds {
         if f.state != FeedState::Live {
             feed_line(&mut tb, f);
-            add(&mut lines, &tb, &mut stats);
+            banner_add(&mut b, &tb, stats);
             stats.feeds_shown += 1;
         }
     }
@@ -446,50 +666,50 @@ pub fn build_safety(
         text_clear(&mut tb);
         text_push_str(&mut tb, "INHIBITION AREAS NOT DRAWN: ");
         text_push_dec(&mut tb, u64::from(stats.inhibitions_unplaced), 0);
-        add(&mut lines, &tb, &mut stats);
+        banner_add(&mut b, &tb, stats);
     }
-    stats.banner_lines = u32::try_from(n_lines).unwrap_or(u32::MAX);
-    if n_lines == 0 {
-        return Ok(stats);
+    // The record line comes last in the build (it counts the clips of every other line) and goes
+    // second in the banner.
+    if record_line(&mut tb, s, stats.text_clipped) {
+        banner_insert(&mut b, picture_lines, &tb, stats);
+        stats.record_incomplete = true;
     }
+    banner_draw(l, proj, &mut b, &mut tb, s.targets, stats)
+}
 
-    // The box: as wide as its widest line, an outline in the alert colour on the background.
-    let size = i64::from(BANNER_SIZE);
-    let widest = lines
-        .iter()
-        .take(n_lines)
-        .map(|b| text_width_units(text_str(b).len()))
-        .max()
-        .unwrap_or(0);
-    let w = i32::try_from(i64::from(widest) * size / i64::from(CAP_HEIGHT)).unwrap_or(i32::MAX);
-    let rows = i32::try_from(n_lines).unwrap_or(i32::MAX);
-    let x0 = px(BANNER_X - BANNER_PAD);
-    let y0 = px(LEGEND_STRIP_PX as i32 + 8 - BANNER_PAD);
-    let x1 = x0.saturating_add(px(w.saturating_add(2 * BANNER_PAD)));
-    let y1 = y0.saturating_add(px(rows
-        .saturating_mul(BANNER_PITCH)
-        .saturating_add(BANNER_PAD)));
-    push_rect(l, (x0, y0), (x1, y1), palette::BACKGROUND, LAYER_BANNER_BG)?;
-    for (p, q) in [
-        ((x0, y0), (x1, y0)),
-        ((x1, y0), (x1, y1)),
-        ((x1, y1), (x0, y1)),
-        ((x0, y1), (x0, y0)),
-    ] {
-        push_line(l, p, q, palette::ALERT, LAYER_BANNER)?;
+/// Appends the safety indications to `l`: the inhibition areas in force, then the banner when
+/// anything is not well. Draws nothing when all is well. Allocates nothing.
+///
+/// **An `Err` is an alarm, not a missing frame.** If the build fails before it has drawn anything
+/// into the list (a bad configuration, too much work), the net lines that can be drawn are drawn
+/// with a `SAFETY DISPLAY ERROR <code>` line, and the error is still returned. If the list itself
+/// is faulted nothing can be drawn and the caller's frame is not shown. In both cases the shell
+/// must treat `Err` as an alarm and say so by another route (aural alert, the supervisor).
+pub fn build_safety(
+    l: &mut DisplayList,
+    proj: &Projection,
+    s: &SafetyScene<'_>,
+) -> Result<SafetyStats, DisplayError> {
+    let mut stats = SafetyStats::default();
+    match build_inner(l, proj, s, &mut stats) {
+        Ok(()) => Ok(stats),
+        Err(e) => {
+            if !l.faulted {
+                let mut st = SafetyStats::default();
+                let mut tb = text_new();
+                let mut b = Banner {
+                    lines: [text_new(); MAX_BANNER_LINES],
+                    n: 0,
+                };
+                collect_nets(&mut b, &mut tb, s, &mut st);
+                text_clear(&mut tb);
+                text_push_str(&mut tb, "SAFETY DISPLAY ERROR ");
+                text_push_dec(&mut tb, error_code(&e), 0);
+                banner_insert(&mut b, 0, &tb, &mut st);
+                // Best effort: a failure here leaves the list faulted, which the caller sees.
+                let _ = banner_draw(l, proj, &mut b, &mut tb, None, &mut st);
+            }
+            Err(e)
+        }
     }
-    let mut y = px(LEGEND_STRIP_PX as i32 + 8);
-    for b in lines.iter().take(n_lines) {
-        push_text(
-            l,
-            (px(BANNER_X), y),
-            BANNER_SIZE,
-            ALIGN_LEFT,
-            palette::ALERT,
-            LAYER_BANNER,
-            text_str(b),
-        )?;
-        y = y.saturating_add(px(BANNER_PITCH));
-    }
-    Ok(stats)
 }

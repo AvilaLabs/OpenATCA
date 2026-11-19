@@ -8,7 +8,7 @@
 //! "Inhibited" is not reported by a net: it is derived from the inhibition table (at least one
 //! inhibition in force for the net), so a net cannot claim it and an inhibition cannot be hidden.
 
-use crate::inhibit::{inhibits_in_force, InhibitTable, TimeNs};
+use crate::inhibit::{inhibits_in_force, suppressed_overflow_net, InhibitTable, TimeNs};
 
 /// Number of safety nets.
 pub const NET_COUNT: usize = 4;
@@ -68,9 +68,12 @@ pub enum Reason {
     NeverReported = 8,
     /// The report is dated after the time of the query. Set by the table.
     TimeInconsistent = 9,
+    /// Suppressions on the net were lost because the suppressed-alert log was full: what an
+    /// inhibition hid is no longer fully recorded. Set by the table, not by a net.
+    SuppressionLogFull = 10,
 }
 
-/// The text of a reason: at most 17 characters, so that the longest banner line fits its buffer.
+/// The text of a reason: at most 20 characters, so that the longest banner line fits its buffer.
 pub fn reason_text(r: Reason) -> &'static str {
     match r {
         Reason::BudgetExceeded => "BUDGET EXCEEDED",
@@ -82,6 +85,7 @@ pub fn reason_text(r: Reason) -> &'static str {
         Reason::StateStale => "STATE STALE",
         Reason::NeverReported => "NEVER REPORTED",
         Reason::TimeInconsistent => "STATE DATED AHEAD",
+        Reason::SuppressionLogFull => "SUPPRESSION LOG FULL",
     }
 }
 
@@ -148,6 +152,8 @@ struct Slot {
     report: NetReport,
     at_ns: TimeNs,
     reported: bool,
+    /// The last report offered was refused as dated too far ahead; cleared by the next accepted one.
+    bad_time: bool,
 }
 
 /// The last report of each net and the staleness limit. Fixed size; no allocation.
@@ -156,7 +162,11 @@ struct Slot {
 pub struct StateTable {
     slots: [Slot; NET_COUNT],
     stale_limit_ns: i64,
+    /// A report may be dated at most this far after the report-time clock.
+    future_horizon_ns: i64,
     rejected: u32,
+    future_rejected: u32,
+    backdated_applied: u32,
 }
 
 /// Why a state table or report was refused.
@@ -164,38 +174,82 @@ pub struct StateTable {
 pub enum StateError {
     /// The staleness limit must be positive and is supplied by the configuration (no default).
     BadStaleLimit,
-    /// The report is dated before the net's previous report.
+    /// The future horizon must not be negative and is supplied by the configuration.
+    BadHorizon,
+    /// The report is dated before the net's previous report and is not worse than it.
     TimeBackwards,
+    /// The report is dated further ahead of the report-time clock than the horizon allows.
+    TimeAhead,
 }
 
-/// A table with the staleness limit from the configuration. Every net starts as never reported.
-pub fn state_table_new(stale_limit_ns: i64) -> Result<StateTable, StateError> {
+/// A table with the staleness limit and the future horizon from the configuration (neither has a
+/// default). Every net starts as never reported.
+pub fn state_table_new(
+    stale_limit_ns: i64,
+    future_horizon_ns: i64,
+) -> Result<StateTable, StateError> {
     if stale_limit_ns <= 0 {
         return Err(StateError::BadStaleLimit);
+    }
+    if future_horizon_ns < 0 {
+        return Err(StateError::BadHorizon);
     }
     Ok(StateTable {
         slots: [Slot {
             report: NetReport::Running,
             at_ns: 0,
             reported: false,
+            bad_time: false,
         }; NET_COUNT],
         stale_limit_ns,
+        future_horizon_ns,
         rejected: 0,
+        future_rejected: 0,
+        backdated_applied: 0,
     })
 }
 
-/// Records a net's report at `at_ns`. A report dated before the net's previous one is refused and
-/// counted; the previous report stands (and goes stale in time).
+/// How bad a report is: running 0, degraded 1, unavailable 2.
+fn severity(r: &NetReport) -> u8 {
+    match r {
+        NetReport::Running => 0,
+        NetReport::Degraded { .. } => 1,
+        NetReport::Unavailable { .. } => 2,
+    }
+}
+
+/// Records a net's report dated `at_ns`, offered at `now_ns` on the report-time clock.
+///
+/// * Dated more than the horizon after `now_ns`: refused and counted, and the net reads
+///   `Unavailable(TimeInconsistent)` until a valid report arrives. The stored report is untouched,
+///   so one bad timestamp cannot lock the net out.
+/// * Dated before the stored report: a report that is worse than the stored one (unavailable over
+///   degraded over running) replaces its state at once and keeps the later timestamp, so a late
+///   bad news is never lost; any other backdated report is refused and counted.
+/// * Otherwise it replaces the stored report.
 pub fn state_report(
     t: &mut StateTable,
     net: NetId,
     report: NetReport,
     at_ns: TimeNs,
+    now_ns: TimeNs,
 ) -> Result<(), StateError> {
+    let horizon = t.future_horizon_ns;
     let Some(slot) = t.slots.get_mut(net_index(net)) else {
         return Ok(());
     };
+    if at_ns > now_ns.saturating_add(horizon) {
+        slot.bad_time = true;
+        t.future_rejected = t.future_rejected.saturating_add(1);
+        return Err(StateError::TimeAhead);
+    }
     if slot.reported && at_ns < slot.at_ns {
+        if severity(&report) > severity(&slot.report) {
+            slot.report = report;
+            slot.bad_time = false;
+            t.backdated_applied = t.backdated_applied.saturating_add(1);
+            return Ok(());
+        }
         t.rejected = t.rejected.saturating_add(1);
         return Err(StateError::TimeBackwards);
     }
@@ -203,13 +257,24 @@ pub fn state_report(
         report,
         at_ns,
         reported: true,
+        bad_time: false,
     };
     Ok(())
 }
 
-/// Reports refused as dated backwards.
+/// Reports refused, dated before the stored one without being worse, or too far ahead.
 pub fn state_rejected(t: &StateTable) -> u32 {
-    t.rejected
+    t.rejected.saturating_add(t.future_rejected)
+}
+
+/// Reports refused as dated too far ahead of the report-time clock.
+pub fn state_future_rejected(t: &StateTable) -> u32 {
+    t.future_rejected
+}
+
+/// Backdated reports that were worse than the stored one and replaced its state.
+pub fn state_backdated_applied(t: &StateTable) -> u32 {
+    t.backdated_applied
 }
 
 /// The staleness limit, nanoseconds.
@@ -217,8 +282,9 @@ pub fn state_stale_limit(t: &StateTable) -> i64 {
     t.stale_limit_ns
 }
 
-/// The status of `net` at `now_ns`. A report older than the limit (strictly: age over the limit)
-/// is `Unavailable(StateStale)`; never reported is `Unavailable(NeverReported)`; a report dated
+/// The status of `net` at `now_ns`. A report older than the limit (strictly: an age equal to the
+/// limit is still current) is `Unavailable(StateStale)`; a net whose last offered report was
+/// refused as dated too far ahead is `Unavailable(TimeInconsistent)`; never reported is `Unavailable(NeverReported)`; a report dated
 /// after `now_ns` is `Unavailable(TimeInconsistent)`. A running net with an inhibition in force is
 /// `Inhibited`. Work: one pass over the inhibition table.
 pub fn net_status(st: &StateTable, inh: &InhibitTable, net: NetId, now_ns: TimeNs) -> NetStatus {
@@ -232,6 +298,9 @@ pub fn net_status(st: &StateTable, inh: &InhibitTable, net: NetId, now_ns: TimeN
     let Some(slot) = st.slots.get(net_index(net)) else {
         return unavailable(Reason::NeverReported, None);
     };
+    if slot.bad_time {
+        return unavailable(Reason::TimeInconsistent, None);
+    }
     if !slot.reported {
         return unavailable(Reason::NeverReported, None);
     }
@@ -244,7 +313,14 @@ pub fn net_status(st: &StateTable, inh: &InhibitTable, net: NetId, now_ns: TimeN
     if age > st.stale_limit_ns {
         return unavailable(Reason::StateStale, Some(age));
     }
+    // Suppressions were lost on this net since the log was last cleared: say so, whatever else.
+    let lost = suppressed_overflow_net(inh, net);
     let state = match slot.report {
+        NetReport::Running if lost > 0 => NetState::Degraded {
+            reason: Reason::SuppressionLogFull,
+            area: Area::Whole,
+            count: u32::try_from(lost).unwrap_or(u32::MAX),
+        },
         NetReport::Running if inhibitions > 0 => NetState::Inhibited,
         NetReport::Running => NetState::Running,
         NetReport::Degraded {

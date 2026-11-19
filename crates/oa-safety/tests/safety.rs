@@ -24,9 +24,20 @@ const SQUARE: [Vertex; 4] = [
 const INSIDE: (i32, i32) = (420_000_000, -880_000_000);
 const OUTSIDE: (i32, i32) = (420_000_000, -870_000_000);
 
+/// A report dated `at`, offered at `at` (the report-time clock reads the same instant).
+fn report(t: &mut StateTable, net: NetId, r: NetReport, at: i64) -> Result<(), StateError> {
+    state_report(t, net, r, at, at)
+}
+
+fn table_new(limit: i64) -> Result<StateTable, StateError> {
+    state_table_new(limit, 5 * S)
+}
+
 fn cfg(hours: i64) -> InhibitConfig {
     InhibitConfig {
         max_duration_ns: [Some(hours * H); NET_COUNT],
+        max_start_ahead_ns: Some(24 * H),
+        max_extent_e7: Some(20_000_000),
     }
 }
 
@@ -51,7 +62,7 @@ fn table() -> Box<InhibitTable> {
 #[test]
 fn a_net_that_never_reported_or_stopped_reporting_is_unavailable() {
     let inh = table();
-    let mut st = state_table_new(5 * S).unwrap();
+    let mut st = table_new(5 * S).unwrap();
     // Never reported.
     let s = net_status(&st, &inh, NetId::Msaw, 100 * S);
     assert_eq!(
@@ -62,7 +73,7 @@ fn a_net_that_never_reported_or_stopped_reporting_is_unavailable() {
     );
     assert_eq!(s.age_ns, None);
     assert!(status_needs_banner(&s));
-    state_report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
+    report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
     // Fresh, at the limit (not over it) and one ns over it.
     assert_eq!(
         net_status(&st, &inh, NetId::Msaw, 100 * S).state,
@@ -101,13 +112,20 @@ fn a_net_that_never_reported_or_stopped_reporting_is_unavailable() {
 // REQ: OA-SAF-002
 #[test]
 fn the_staleness_limit_comes_from_configuration_and_reports_cannot_go_back() {
-    assert_eq!(state_table_new(0).unwrap_err(), StateError::BadStaleLimit);
-    assert_eq!(state_table_new(-1).unwrap_err(), StateError::BadStaleLimit);
-    let mut st = state_table_new(S).unwrap();
-    assert_eq!(state_stale_limit(&st), S);
-    state_report(&mut st, NetId::Msaw, NetReport::Running, 10 * S).unwrap();
     assert_eq!(
-        state_report(&mut st, NetId::Msaw, NetReport::Running, 9 * S).unwrap_err(),
+        state_table_new(0, S).unwrap_err(),
+        StateError::BadStaleLimit
+    );
+    assert_eq!(
+        state_table_new(-1, S).unwrap_err(),
+        StateError::BadStaleLimit
+    );
+    assert_eq!(state_table_new(S, -1).unwrap_err(), StateError::BadHorizon);
+    let mut st = table_new(S).unwrap();
+    assert_eq!(state_stale_limit(&st), S);
+    report(&mut st, NetId::Msaw, NetReport::Running, 10 * S).unwrap();
+    assert_eq!(
+        report(&mut st, NetId::Msaw, NetReport::Running, 9 * S).unwrap_err(),
         StateError::TimeBackwards
     );
     assert_eq!(state_rejected(&st), 1);
@@ -120,8 +138,8 @@ fn the_staleness_limit_comes_from_configuration_and_reports_cannot_go_back() {
 #[test]
 fn each_state_is_reported_with_its_reason_area_count_and_age() {
     let inh = table();
-    let mut st = state_table_new(10 * S).unwrap();
-    state_report(
+    let mut st = table_new(10 * S).unwrap();
+    report(
         &mut st,
         NetId::ConflictAlert,
         NetReport::Degraded {
@@ -132,7 +150,7 @@ fn each_state_is_reported_with_its_reason_area_count_and_age() {
         50 * S,
     )
     .unwrap();
-    state_report(
+    report(
         &mut st,
         NetId::Msaw,
         NetReport::Unavailable {
@@ -141,7 +159,7 @@ fn each_state_is_reported_with_its_reason_area_count_and_age() {
         50 * S,
     )
     .unwrap();
-    state_report(&mut st, NetId::AreaProximity, NetReport::Running, 50 * S).unwrap();
+    report(&mut st, NetId::AreaProximity, NetReport::Running, 50 * S).unwrap();
     let all = net_statuses(&st, &inh, 53 * S);
     assert_eq!(all.map(|s| s.net), NETS);
     assert_eq!(
@@ -173,9 +191,9 @@ fn each_state_is_reported_with_its_reason_area_count_and_age() {
 #[test]
 fn a_running_net_with_an_inhibition_in_force_is_inhibited_and_a_degraded_one_says_both() {
     let mut inh = table();
-    let mut st = state_table_new(10 * S).unwrap();
-    state_report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
-    state_report(
+    let mut st = table_new(10 * S).unwrap();
+    report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
+    report(
         &mut st,
         NetId::ConflictAlert,
         NetReport::Degraded {
@@ -207,7 +225,7 @@ fn a_running_net_with_an_inhibition_in_force_is_inhibited_and_a_degraded_one_say
     assert!(matches!(c.state, NetState::Degraded { .. }));
     assert_eq!(c.inhibitions, 1);
     // After the inhibition ends the net reads as running again (its report is still fresh).
-    state_report(&mut st, NetId::Msaw, NetReport::Running, 100 * S + H).unwrap();
+    report(&mut st, NetId::Msaw, NetReport::Running, 100 * S + H).unwrap();
     assert_eq!(
         net_status(&st, &inh, NetId::Msaw, 100 * S + H).state,
         NetState::Running
@@ -452,9 +470,24 @@ fn every_suppression_is_logged_and_a_full_log_counts_the_overflow() {
     assert_eq!(suppressed_overflow(&inh), 3);
     assert_eq!(suppressed_log(&inh).len(), SUPPRESSED_CAP);
     assert_eq!(suppressed_log(&inh)[0].time_ns, 5 * S);
+    // The loss shows on the net: running reads degraded while the lost entries stand.
+    let mut st = table_new(10 * S).unwrap();
+    report(&mut st, NetId::Msaw, NetReport::Running, 9 * S).unwrap();
+    let ns = net_status(&st, &inh, NetId::Msaw, 9 * S);
+    assert_eq!(
+        ns.state,
+        NetState::Degraded {
+            reason: Reason::SuppressionLogFull,
+            area: Area::Whole,
+            count: 3
+        }
+    );
+    assert_eq!(suppressed_overflow_net(&inh, NetId::Msaw), 3);
+    assert_eq!(suppressed_overflow_net(&inh, NetId::ConflictAlert), 0);
     suppressed_clear(&mut inh);
     assert!(suppressed_log(&inh).is_empty());
     assert_eq!(suppressed_overflow(&inh), 3);
+    assert_eq!(suppressed_overflow_net(&inh, NetId::Msaw), 0);
 }
 
 // REQ: OA-SAF-011
@@ -537,16 +570,13 @@ fn an_expired_inhibition_is_reported_once_and_leaves_the_table() {
 fn an_expiry_that_cannot_be_logged_waits_in_the_table_and_is_never_lost() {
     let mut inh = table();
     let c = cfg(1);
-    // Fill the event log with creation events, one inhibition at a time.
+    // Fill the event log: create while there is room in the table, else remove the oldest.
     while events_len(&inh) < EVENT_CAP {
-        match inhibit_create(&mut inh, &c, &req(NetId::Msaw, 0, 10 * S), 0) {
-            Ok(_) => {}
-            Err(InhibitError::TableFull) => {
-                // Make room by removing the oldest: that logs too, so the log fills either way.
-                let first = inhibits_slice(&inh)[0].id;
-                inhibit_remove(&mut inh, first, "SUP J SMITH", 0).unwrap();
-            }
-            Err(e) => panic!("{e:?}"),
+        if inhibits_slice(&inh).len() < INHIBIT_CAP {
+            inhibit_create(&mut inh, &c, &req(NetId::Msaw, 0, 10 * S), 0).unwrap();
+        } else {
+            let first = inhibits_slice(&inh)[0].id;
+            inhibit_remove(&mut inh, first, "SUP J SMITH", 0).unwrap();
         }
     }
     assert!(inhibits_slice(&inh).len() > 1);
@@ -605,4 +635,243 @@ fn polygons_are_validated_and_tested_without_floating_point() {
     .unwrap();
     assert!(polygon_contains(&big, 0, 0));
     assert!(!polygon_contains(&big, 0, 800_000_001));
+}
+
+// REQ: OA-SAF-015
+#[test]
+fn a_backdated_report_that_is_worse_replaces_the_state_and_any_other_is_refused() {
+    let inh = table();
+    let unavailable = NetReport::Unavailable {
+        reason: Reason::InputMissing,
+    };
+    let degraded = NetReport::Degraded {
+        reason: Reason::BudgetExceeded,
+        area: Area::Whole,
+        count: 1,
+    };
+    let mut st = table_new(60 * S).unwrap();
+    report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
+    // Running, then a backdated unavailable: the bad news is not lost; the later time stands.
+    state_report(&mut st, NetId::Msaw, unavailable, 90 * S, 101 * S).unwrap();
+    let s = net_status(&st, &inh, NetId::Msaw, 102 * S);
+    assert_eq!(
+        s.state,
+        NetState::Unavailable {
+            reason: Reason::InputMissing
+        }
+    );
+    assert_eq!(s.age_ns, Some(2 * S));
+    assert_eq!(state_backdated_applied(&st), 1);
+    // A backdated running or degraded over the unavailable one is refused.
+    for r in [NetReport::Running, degraded, unavailable] {
+        assert_eq!(
+            state_report(&mut st, NetId::Msaw, r, 80 * S, 101 * S).unwrap_err(),
+            StateError::TimeBackwards
+        );
+    }
+    assert_eq!(state_rejected(&st), 3);
+    assert_eq!(
+        net_status(&st, &inh, NetId::Msaw, 102 * S).state,
+        NetState::Unavailable {
+            reason: Reason::InputMissing
+        }
+    );
+    // Running then a backdated degraded replaces; a later fresh running clears it again.
+    report(&mut st, NetId::ConflictAlert, NetReport::Running, 100 * S).unwrap();
+    state_report(&mut st, NetId::ConflictAlert, degraded, 99 * S, 100 * S).unwrap();
+    assert!(matches!(
+        net_status(&st, &inh, NetId::ConflictAlert, 100 * S).state,
+        NetState::Degraded { .. }
+    ));
+    report(&mut st, NetId::ConflictAlert, NetReport::Running, 101 * S).unwrap();
+    assert_eq!(
+        net_status(&st, &inh, NetId::ConflictAlert, 101 * S).state,
+        NetState::Running
+    );
+    // A backdated running over a stored degraded is refused.
+    report(&mut st, NetId::ApproachPath, degraded, 100 * S).unwrap();
+    assert!(state_report(
+        &mut st,
+        NetId::ApproachPath,
+        NetReport::Running,
+        50 * S,
+        100 * S
+    )
+    .is_err());
+}
+
+// REQ: OA-SAF-016
+#[test]
+fn a_report_dated_beyond_the_horizon_is_refused_and_cannot_lock_the_net_out() {
+    let inh = table();
+    let mut st = table_new(10 * S).unwrap();
+    // Never reported, then one bad timestamp: unavailable, inconsistent time.
+    assert_eq!(
+        state_report(&mut st, NetId::Msaw, NetReport::Running, i64::MAX, 100 * S).unwrap_err(),
+        StateError::TimeAhead
+    );
+    assert_eq!(state_future_rejected(&st), 1);
+    assert_eq!(
+        net_status(&st, &inh, NetId::Msaw, 100 * S).state,
+        NetState::Unavailable {
+            reason: Reason::TimeInconsistent
+        }
+    );
+    // A valid report ends it at once.
+    report(&mut st, NetId::Msaw, NetReport::Running, 100 * S).unwrap();
+    assert_eq!(
+        net_status(&st, &inh, NetId::Msaw, 100 * S).state,
+        NetState::Running
+    );
+    // After a good one, a bad timestamp makes it unavailable but stores nothing; the next good
+    // report (even older than the bad one) is accepted.
+    assert!(state_report(&mut st, NetId::Msaw, NetReport::Running, i64::MAX, 101 * S).is_err());
+    assert!(matches!(
+        net_status(&st, &inh, NetId::Msaw, 101 * S).state,
+        NetState::Unavailable {
+            reason: Reason::TimeInconsistent
+        }
+    ));
+    report(&mut st, NetId::Msaw, NetReport::Running, 102 * S).unwrap();
+    assert_eq!(
+        net_status(&st, &inh, NetId::Msaw, 102 * S).state,
+        NetState::Running
+    );
+    // Exactly the horizon is accepted, one nanosecond more is not; extremes do not overflow.
+    state_report(&mut st, NetId::Msaw, NetReport::Running, 107 * S, 102 * S).unwrap();
+    assert!(state_report(
+        &mut st,
+        NetId::Msaw,
+        NetReport::Running,
+        107 * S + 1,
+        102 * S
+    )
+    .is_err());
+    // Extreme clocks do not overflow.
+    let _ = state_report(&mut st, NetId::Msaw, NetReport::Running, 0, i64::MAX);
+    let _ = state_report(&mut st, NetId::Msaw, NetReport::Running, i64::MAX, i64::MAX);
+    let _ = state_report(&mut st, NetId::Msaw, NetReport::Running, i64::MIN, i64::MIN);
+}
+
+// REQ: OA-SAF-017
+#[test]
+fn a_full_event_log_refuses_creation_and_removal_and_loses_no_record() {
+    let mut inh = table();
+    let c = cfg(1);
+    let held = 32;
+    for _ in 0..held {
+        inhibit_create(&mut inh, &c, &req(NetId::Msaw, 0, 10 * S), 0).unwrap();
+    }
+    // Replace the oldest, two events at a time, until the log is exactly full.
+    while events_len(&inh) + 2 <= EVENT_CAP {
+        let first = inhibits_slice(&inh)[0].id;
+        inhibit_remove(&mut inh, first, "SUP J SMITH", 0).unwrap();
+        inhibit_create(&mut inh, &c, &req(NetId::Msaw, 0, 10 * S), 0).unwrap();
+    }
+    assert_eq!(events_len(&inh), EVENT_CAP);
+    assert!(held > 1);
+    // No room: creation is refused (counted), removal is refused and the inhibition stays.
+    assert_eq!(
+        inhibit_create(&mut inh, &c, &req(NetId::Msaw, 0, 10 * S), 0).unwrap_err(),
+        InhibitError::EventLogFull
+    );
+    assert_eq!(inhibits_refused_event_full(&inh), 1);
+    let id = inhibits_slice(&inh)[0].id;
+    assert_eq!(
+        inhibit_remove(&mut inh, id, "SUP J SMITH", 1).unwrap_err(),
+        RemoveError::EventLogFull
+    );
+    assert_eq!(inhibits_slice(&inh).len(), held);
+    assert_eq!(events_overflow(&inh), 0);
+    // One slot free: an inhibition in force can be removed; one that already ended waits for
+    // two (its review event, then the removal).
+    let mut ev = vec![EVENT_EMPTY_FOR_TEST; EVENT_CAP];
+    let mut one = [EVENT_EMPTY_FOR_TEST; 1];
+    assert_eq!(events_take(&mut inh, &mut one), 1);
+    assert_eq!(
+        inhibit_remove(&mut inh, id, "SUP J SMITH", 20 * S).unwrap_err(),
+        RemoveError::EventLogFull
+    );
+    assert_eq!(events_take(&mut inh, &mut one), 1);
+    inhibit_remove(&mut inh, id, "SUP J SMITH", 20 * S).unwrap();
+    let n = events_take(&mut inh, &mut ev);
+    let last: Vec<_> = ev[..n].iter().rev().take(2).map(|e| e.kind).collect();
+    assert_eq!(last, [EventKind::Removed, EventKind::Expired]);
+}
+
+// REQ: OA-SAF-018
+#[test]
+fn a_start_horizon_a_maximum_extent_and_ids_are_required_and_enforced() {
+    let mut inh = table();
+    let now = 100 * S;
+    let mut c = cfg(2);
+    let r = req(NetId::Msaw, now, now + H);
+    c.max_start_ahead_ns = None;
+    assert_eq!(
+        inhibit_create(&mut inh, &c, &r, now).unwrap_err(),
+        InhibitError::NoStartHorizonConfigured
+    );
+    let mut c = cfg(2);
+    c.max_extent_e7 = None;
+    assert_eq!(
+        inhibit_create(&mut inh, &c, &r, now).unwrap_err(),
+        InhibitError::NoExtentConfigured
+    );
+    let c = cfg(2);
+    // The start may be at most the horizon ahead.
+    let ahead = now + 24 * H;
+    assert!(inhibit_create(&mut inh, &c, &req(NetId::Msaw, ahead, ahead + H), now).is_ok());
+    assert_eq!(
+        inhibit_create(&mut inh, &c, &req(NetId::Msaw, ahead + 1, ahead + H), now).unwrap_err(),
+        InhibitError::StartTooFar
+    );
+    // The square spans 2 000 000 in each direction.
+    let mut small = cfg(2);
+    small.max_extent_e7 = Some(2_000_000);
+    assert!(inhibit_create(&mut inh, &small, &r, now).is_ok());
+    small.max_extent_e7 = Some(1_999_999);
+    assert_eq!(
+        inhibit_create(&mut inh, &small, &r, now).unwrap_err(),
+        InhibitError::AreaTooLarge
+    );
+}
+
+// REQ: OA-SAF-019
+#[test]
+fn lost_suppressions_mark_only_their_net_degraded_until_the_log_is_cleared() {
+    let mut inh = table();
+    let mut st = table_new(10 * S).unwrap();
+    for n in NETS {
+        report(&mut st, n, NetReport::Running, 5 * S).unwrap();
+    }
+    inhibit_create(&mut inh, &cfg(1), &req(NetId::Msaw, 0, H), 0).unwrap();
+    for k in 0..(SUPPRESSED_CAP + 1) {
+        inhibit_suppress(
+            &mut inh,
+            NetId::Msaw,
+            INSIDE.0,
+            INSIDE.1,
+            Some(2000),
+            5 * S + k as i64,
+        );
+    }
+    let all = net_statuses(&st, &inh, 5 * S);
+    assert!(matches!(
+        all[net_index(NetId::Msaw)].state,
+        NetState::Degraded {
+            reason: Reason::SuppressionLogFull,
+            count: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        all[net_index(NetId::ConflictAlert)].state,
+        NetState::Running
+    );
+    suppressed_clear(&mut inh);
+    assert_eq!(
+        net_status(&st, &inh, NetId::Msaw, 5 * S).state,
+        NetState::Inhibited
+    );
+    assert_eq!(suppressed_overflow(&inh), 1);
 }

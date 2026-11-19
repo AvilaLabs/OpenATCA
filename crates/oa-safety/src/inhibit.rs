@@ -18,7 +18,7 @@
 //! * The suppressed-alert log is bounded; an entry that does not fit is counted in
 //!   [`suppressed_overflow`], never silently lost.
 
-use crate::geom::{polygon_contains, polygon_new, Polygon, Vertex, POLYGON_EMPTY};
+use crate::geom::{polygon_contains, polygon_extent, polygon_new, Polygon, Vertex, POLYGON_EMPTY};
 use crate::net::{net_index, NetId, NET_COUNT};
 
 /// Most inhibitions held at once, all nets. C2: a facility runs a few deliberate inhibitions at a
@@ -78,12 +78,19 @@ const EMPTY: Inhibition = Inhibition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InhibitConfig {
     pub max_duration_ns: [Option<i64>; NET_COUNT],
+    /// An inhibition may start at most this far after the time of the request. No default.
+    pub max_start_ahead_ns: Option<i64>,
+    /// The latitude and the longitude extent of an inhibition area, 1e-7 degree, at most. No
+    /// default: an area is as large as the facility says and no larger.
+    pub max_extent_e7: Option<i32>,
 }
 
 /// A configuration that allows no inhibition on any net.
 pub const fn inhibit_config_none() -> InhibitConfig {
     InhibitConfig {
         max_duration_ns: [None; NET_COUNT],
+        max_start_ahead_ns: None,
+        max_extent_e7: None,
     }
 }
 
@@ -106,7 +113,20 @@ pub struct InhibitRequest<'a> {
 pub enum InhibitError {
     /// The configuration has no maximum duration for the net (or not a positive one).
     NoMaxConfigured,
+    /// The configuration has no start horizon (or not a non-negative one).
+    NoStartHorizonConfigured,
+    /// The configuration has no maximum extent (or not a positive one).
+    NoExtentConfigured,
     EndNotAfterStart,
+    /// The start is further ahead than the configured horizon.
+    StartTooFar,
+    /// The area is wider or taller than the configured maximum extent.
+    AreaTooLarge,
+    /// The event log has no room to record the creation: the request is refused, never made
+    /// without its record.
+    EventLogFull,
+    /// Every id has been used.
+    IdsExhausted,
     /// The end is already past at the time of the request.
     AlreadyExpired,
     TooLong,
@@ -124,6 +144,9 @@ pub enum InhibitError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoveError {
     NotFound,
+    /// The event log has no room for the record of the removal (two slots for an expired
+    /// inhibition still waiting): the inhibition stays, and stays visible.
+    EventLogFull,
     /// The author text is empty, too long or not printable ASCII: a removal names who did it.
     BadAuthor,
 }
@@ -204,7 +227,9 @@ pub struct InhibitTable {
     suppressed: [Suppressed; SUPPRESSED_CAP],
     suppressed_len: usize,
     suppressed_overflow: u64,
+    suppressed_overflow_net: [u64; NET_COUNT],
     refused_full: u32,
+    refused_event_full: u32,
     refused_invalid: u32,
 }
 
@@ -221,7 +246,9 @@ pub fn inhibits_new() -> InhibitTable {
         suppressed: [SUPPRESSED_EMPTY; SUPPRESSED_CAP],
         suppressed_len: 0,
         suppressed_overflow: 0,
+        suppressed_overflow_net: [0; NET_COUNT],
         refused_full: 0,
+        refused_event_full: 0,
         refused_invalid: 0,
     }
 }
@@ -289,11 +316,22 @@ fn validate(
         .flatten()
         .filter(|&m| m > 0)
         .ok_or(InhibitError::NoMaxConfigured)?;
+    let ahead = cfg
+        .max_start_ahead_ns
+        .filter(|&a| a >= 0)
+        .ok_or(InhibitError::NoStartHorizonConfigured)?;
+    let extent = cfg
+        .max_extent_e7
+        .filter(|&e| e > 0)
+        .ok_or(InhibitError::NoExtentConfigured)?;
     if r.end_ns <= r.start_ns {
         return Err(InhibitError::EndNotAfterStart);
     }
     if r.end_ns <= now_ns {
         return Err(InhibitError::AlreadyExpired);
+    }
+    if r.start_ns > now_ns.saturating_add(ahead) {
+        return Err(InhibitError::StartTooFar);
     }
     // A span that overflows i64 is longer than any maximum.
     match r.end_ns.checked_sub(r.start_ns) {
@@ -304,6 +342,9 @@ fn validate(
         return Err(InhibitError::BadBand);
     }
     let area = polygon_new(r.vertices).map_err(InhibitError::BadPolygon)?;
+    if polygon_extent(&area) > i64::from(extent) {
+        return Err(InhibitError::AreaTooLarge);
+    }
     let reason = text_put::<REASON_BYTES>(r.reason, InhibitError::EmptyReason)?;
     let author = text_put::<AUTHOR_BYTES>(r.author, InhibitError::EmptyAuthor)?;
     Ok((area, reason, author))
@@ -330,6 +371,14 @@ pub fn inhibit_create(
         t.refused_full = t.refused_full.saturating_add(1);
         return Err(InhibitError::TableFull);
     }
+    if t.events_len >= EVENT_CAP {
+        t.refused_event_full = t.refused_event_full.saturating_add(1);
+        return Err(InhibitError::EventLogFull);
+    }
+    if t.next_id == u32::MAX {
+        t.refused_invalid = t.refused_invalid.saturating_add(1);
+        return Err(InhibitError::IdsExhausted);
+    }
     let id = t.next_id;
     let Some(slot) = t.items.get_mut(t.len) else {
         t.refused_full = t.refused_full.saturating_add(1);
@@ -347,7 +396,7 @@ pub fn inhibit_create(
         net: r.net,
     };
     t.len += 1;
-    t.next_id = t.next_id.saturating_add(1);
+    t.next_id += 1;
     log_event(
         t,
         Event {
@@ -437,7 +486,12 @@ pub fn inhibit_suppress(
                 *slot = entry;
                 t.suppressed_len += 1;
             }
-            None => t.suppressed_overflow = t.suppressed_overflow.saturating_add(1),
+            None => {
+                t.suppressed_overflow = t.suppressed_overflow.saturating_add(1);
+                if let Some(n) = t.suppressed_overflow_net.get_mut(net_index(net)) {
+                    *n = n.saturating_add(1);
+                }
+            }
         }
     }
     s
@@ -453,9 +507,20 @@ pub fn suppressed_overflow(t: &InhibitTable) -> u64 {
     t.suppressed_overflow
 }
 
-/// Empties the suppressed-alert log once the shell has recorded it. The overflow count stays.
+/// Suppressions on `net` lost to a full log since the log was last cleared; while it is above
+/// zero the net's status reads degraded (`SuppressionLogFull`).
+pub fn suppressed_overflow_net(t: &InhibitTable, net: NetId) -> u64 {
+    t.suppressed_overflow_net
+        .get(net_index(net))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Empties the suppressed-alert log once the shell has recorded it, and the per-net marks that
+/// made the nets read degraded. The total overflow count stays: the loss happened.
 pub fn suppressed_clear(t: &mut InhibitTable) {
     t.suppressed_len = 0;
+    t.suppressed_overflow_net = [0; NET_COUNT];
 }
 
 /// Removes an inhibition before its end, by an explicit action that names who did it. Logged.
@@ -470,7 +535,29 @@ pub fn inhibit_remove(
     let Some(at) = inhibits_slice(t).iter().position(|i| i.id == id) else {
         return Err(RemoveError::NotFound);
     };
-    let net = t.items.get(at).map_or(NetId::ConflictAlert, |i| i.net);
+    let Some(it) = t.items.get(at).copied() else {
+        return Err(RemoveError::NotFound);
+    };
+    // One slot for the removal; an inhibition already past its end that still waits for its
+    // review event needs a second, for that event first.
+    let waiting = it.end_ns <= now_ns;
+    let need = if waiting { 2 } else { 1 };
+    if t.events_len.saturating_add(need) > EVENT_CAP {
+        return Err(RemoveError::EventLogFull);
+    }
+    let net = it.net;
+    if waiting {
+        log_event(
+            t,
+            Event {
+                time_ns: now_ns,
+                id,
+                kind: EventKind::Expired,
+                net,
+                by: it.author,
+            },
+        );
+    }
     remove_at(t, at);
     log_event(
         t,
@@ -567,6 +654,11 @@ pub fn events_overflow(t: &InhibitTable) -> u64 {
 /// Requests refused as not valid.
 pub fn inhibits_refused_invalid(t: &InhibitTable) -> u32 {
     t.refused_invalid
+}
+
+/// Requests refused because the event log had no room for their record.
+pub fn inhibits_refused_event_full(t: &InhibitTable) -> u32 {
+    t.refused_event_full
 }
 
 /// Requests refused because the table was full.

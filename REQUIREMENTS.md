@@ -5173,9 +5173,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   report is older than the staleness limit (age strictly over it) as `Unavailable(StateStale)` with
   its age, and one whose report is dated after the query as `Unavailable(TimeInconsistent)`: a net
   that stops reporting is never shown as running. Extreme times do not panic.
-- **OA-SAF-002** The staleness limit comes from configuration with no default (zero or negative is
-  refused), and a report dated before the net's previous one is refused, counted, and does not
-  replace it.
+- **OA-SAF-002** The staleness limit and the future horizon come from configuration with no default
+  (a non-positive limit or a negative horizon is refused); an age equal to the limit is still current.
 - **OA-SAF-003** Each net's state (running, degraded with reason, area and count, unavailable with
   reason) is reported with the age of the state, for every net, in a fixed order.
 - **OA-SAF-004** A running net with at least one inhibition in force reads as inhibited, derived
@@ -5186,7 +5185,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 - **OA-SAF-005** An inhibition request is refused, counted and changes nothing when: the
   configuration has no positive maximum duration for the net (there is no default), the end is not
-  after the start, the end is already past, the duration is over the maximum by one nanosecond (or
+  after the start, the end is already past, the start is further ahead than the configured horizon
+  (no horizon configured is refused too), the area is larger than the configured extent (likewise),
+  the duration is over the maximum by one nanosecond (or
   overflows), the polygon is not valid, the altitude band is reversed, or the reason or author is
   empty, longer than its field or not printable ASCII. A duration exactly the maximum is accepted.
 - **OA-SAF-006** A full table refuses the request and counts it; no inhibition is evicted, and an
@@ -5236,3 +5237,28 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   text and rasterizes.
 - **OA-DSP-066** The UTC date and time of an instant are integer civil time from the epoch,
   correct across leap days, the year 2000 and negative times, and total over every `i64`.
+- **OA-SAF-015** A report dated before the net's stored one that is worse than it (unavailable over
+  degraded over running) replaces its state at once and keeps the later time, and is counted; any
+  other backdated report is refused and counted.
+- **OA-SAF-016** A report dated more than the configured horizon after the report-time clock
+  (including `i64::MAX`) is refused and counted, and the net reads `Unavailable(TimeInconsistent)`
+  until a valid report arrives; the stored report is untouched, so no one timestamp locks a net out.
+- **OA-SAF-017** A request is refused while the event log has no room for its record (creation: one
+  slot, counted; removal: one slot, two for an expired inhibition still waiting, which then emits
+  its expiry and then the removal), the inhibition staying visible.
+- **OA-SAF-018** A start horizon and a maximum extent are required configuration (no default) and
+  enforced to the unit: a start exactly at the horizon is accepted, one nanosecond more is not; an
+  area exactly at the extent is accepted, one unit more is not.
+- **OA-SAF-019** Suppressions lost to a full log mark the net degraded (`SuppressionLogFull`, with
+  the count) until the log is cleared; the total lost stays counted.
+- **OA-DSP-067** A newest track update dated after now is never fresh: the banner says `PICTURE TIME
+  INCONSISTENT`.
+- **OA-DSP-068** Any loss in the safety record (event log overflow, suppressions lost, expired
+  inhibitions waiting, refused state reports, clipped texts) is a banner line `SAFETY RECORD
+  INCOMPLETE` with the counts, second in the banner, and a net with suppressions lost reads degraded.
+- **OA-DSP-069** A build that fails before drawing still draws the net lines and `SAFETY DISPLAY
+  ERROR <code>` and returns the error (an alarm to the shell); a faulted list returns the error.
+- **OA-DSP-070** A banner that does not fit the frame ends with `+N MORE STATES NOT SHOWN`, the
+  count of hidden lines.
+- **OA-DSP-071** The banner box is opaque; targets whose symbol is under it are counted on it
+  (`TARGETS UNDER BANNER: n`) and in the stats.
