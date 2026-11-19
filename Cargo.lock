@@ -187,6 +187,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-replay-diff"
+version = "0.0.1"
+dependencies = [
+ "oa-track",
+]
+
+[[package]]
 name = "oa-scope-replay"
 version = "0.0.1"
 dependencies = [

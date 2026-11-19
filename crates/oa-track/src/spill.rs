@@ -27,7 +27,7 @@ use oa_sha256::{to_hex, Sha256};
 use crate::types::{TrackLog, TrackOutput, TrackerStats, OUTPUT_HASH_TAG, O_HAS_ALT, O_TICK};
 
 /// The column files in the order the digest hashes them.
-const COLS: [&str; 15] = [
+pub(crate) const COLS: [&str; 15] = [
     "t_ns", "addr", "lat", "lon", "ve", "vn", "turn", "alt", "altvar", "vrate", "poscov", "velcov",
     "muh", "muv", "flags",
 ];
@@ -40,7 +40,7 @@ const VN: usize = 5;
 const ALT: usize = 7;
 const FLAGS: usize = 14;
 /// Bytes per row of each column file, in [`COLS`] order.
-const WIDTHS: [u64; 15] = [8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 8, 8, 1];
+pub(crate) const WIDTHS: [u64; 15] = [8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 8, 8, 1];
 /// Rows read per block when scoring reads the files back.
 const BLOCK_ROWS: usize = 1 << 13;
 
@@ -74,7 +74,7 @@ impl std::fmt::Display for SpillMismatch {
 impl std::error::Error for SpillMismatch {}
 
 /// Checks every column file of `dir` against `rows` rows.
-fn check_columns(dir: &Path, rows: u64) -> io::Result<()> {
+pub(crate) fn check_columns(dir: &Path, rows: u64) -> io::Result<()> {
     for (c, w) in COLS.iter().zip(WIDTHS.iter()) {
         let found = fs::metadata(dir.join(c))?.len();
         let expected = rows * w;
@@ -297,14 +297,14 @@ pub fn spill_finish(
 }
 
 /// Reads one column file in blocks of whole rows.
-struct ColReader {
+pub(crate) struct ColReader {
     f: BufReader<File>,
     width: usize,
     buf: Vec<u8>,
 }
 
 impl ColReader {
-    fn open(dir: &Path, col: usize, width: usize) -> io::Result<ColReader> {
+    pub(crate) fn open(dir: &Path, col: usize, width: usize) -> io::Result<ColReader> {
         let name = COLS.get(col).copied().unwrap_or("");
         Ok(ColReader {
             f: BufReader::with_capacity(1 << 16, File::open(dir.join(name))?),
@@ -314,7 +314,7 @@ impl ColReader {
     }
 
     /// The next block's bytes (whole rows), empty at the end.
-    fn block(&mut self) -> io::Result<&[u8]> {
+    pub(crate) fn block(&mut self) -> io::Result<&[u8]> {
         let mut at = 0usize;
         while at < self.buf.len() {
             let Some(dst) = self.buf.get_mut(at..) else {

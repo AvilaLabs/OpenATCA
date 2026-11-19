@@ -27,6 +27,7 @@ mod linalg;
 
 pub mod adsb;
 pub mod assoc;
+pub mod canon;
 pub mod coarse;
 mod filter;
 pub mod fixed_map;

@@ -4117,3 +4117,44 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the POI does not, the POA carries 07 a, b, c, the POJ is a Field 18 reason, metric altitude is
   allowed in Field 32(e), none of the Attachment 2 additions apply, and a POA or POJ expects no
   response. All other messages and fields are as under `Core`.
+
+## Release replay comparison (oa-track canonical output, oa-replay-diff)
+- **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
+  position, velocity, turn rate, altitude terms, position and velocity covariance terms, model
+  probabilities and flags, every field little-endian at a fixed offset (`oa_track::canon`), floats as
+  their IEEE bits so a NaN keeps its sign and payload, nothing zeroed or normalised. The same row
+  gives the same bytes on every call, and the form built from a row in memory equals the form built
+  from the column files of a spilled run.
+- **OA-TRK-361** The digest of an output second is the SHA-256 of the canonical rows whose time
+  falls in that Unix second, in the order the tracker emitted them; the chain hash of a second is the
+  SHA-256 of the chain hash before it (32 zero bytes at the start), the second, its digest and its row
+  count. A change to one second changes that second's digest and every chain hash from it on, and
+  leaves the digests of the other seconds unchanged.
+- **OA-TRK-362** `oa-track-run --digest <file>` writes the digest as text lines
+  `second chain_hash second_hash rows` after one `#` header line, and `--rows <file>` writes the
+  canonical rows, grouped by ascending second (each second in emission order), behind a versioned
+  binary header (magic, version, row size, row count). With neither flag the run does what it did
+  before and writes nothing more.
+- **OA-TRK-363** Two runs of the tracker on the same input write byte-identical digest and rows files.
+- **OA-RDF-001** `oa-replay-diff` calls two digests identical only when every line, chain hash
+  included, is equal; otherwise it reports the first differing second, the number of differing
+  seconds (a second whose rows differ in hash or count, or that only one run has) and how many seconds
+  only one run has.
+- **OA-RDF-002** A malformed digest file (wrong field count, a number or hash that does not parse,
+  seconds not strictly increasing) is an error naming the line, and the tool exits 2.
+- **OA-RDF-003** Given both rows files, for each differing second the tool reports the rows added,
+  removed and changed (rows matched by track address, time, tick flag and order among equals), the
+  tracks affected, the changed rows by class (position, velocity, covariance, flags, model), the
+  largest absolute difference of every field over finite values, the count of changed non-finite
+  values, and the flag bits that differ; a second whose rows are equal and only reordered is reported
+  as reordered. Totals follow, and a `key=value` summary.
+- **OA-RDF-004** With an expect file naming the declared classes (`position`, `velocity`,
+  `covariance`, `flags`, `model`, `added`, `removed`, `order`), a difference is accepted (exit 0) only
+  if every class present is declared; an undeclared class, or an expect file without rows files to
+  tell the classes, is a failure (exit 1 or 2), and an unknown class name is an error.
+- **OA-RDF-005** A rows file with a wrong magic, version or row size, truncated, not grouped by
+  ascending second, or whose row counts disagree with its digest file is an error (exit 2), never a
+  comparison.
+- **OA-RDF-006** `tools/replay_compare.sh` accepts only commit hashes or refs of the repository,
+  refuses a working-tree or option-like spec, builds each commit in its own clean detached worktree,
+  one build at a time, and records both commits and the clip's SHA-256 in its report.

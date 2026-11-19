@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]
+//!                [--digest <file>] [--rows <file>]
 //! ```
 //!
 //! The clip's reports are split into two disjoint halves (`oa_track::score::SPLIT_TEXT`); the
@@ -12,7 +13,9 @@
 //! the tracker section appended; `tracks.csv` lists every track and `esassp.csv` the straight
 //! and turning table. `--no-compare` skips the single-filter baselines. `--no-score` runs the
 //! tracker core and the latency replay only (no truth, no scoring, no files but `core.txt`), to
-//! measure the tracker's own memory and speed apart from the scoring harness.
+//! measure the tracker's own memory and speed apart from the scoring harness. `--digest` writes
+//! the per-second digest of the output rows and `--rows` the canonical rows themselves
+//! (`oa_track::canon`), for `oa-replay-diff`; without them nothing else changes.
 //!
 //! The tracker's output goes to column files under `<dir>/spill-<pid>` as it is produced and
 //! scoring reads it back one address range at a time, so memory does not grow with the run. The
@@ -33,6 +36,7 @@ use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig, AdsbStats};
+use oa_track::canon::write_canon;
 use oa_track::latency::{
     latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
@@ -50,20 +54,23 @@ use oa_track::{
 };
 use oa_truth::{DEFAULT_CONFIG as TRUTH_DEFAULT, REMOVE_NAMES};
 
-const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]";
+const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>]";
 
 fn main() -> ExitCode {
     let mut adsb: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut compare = true;
     let mut score_it = true;
+    let mut canon = CanonOut::default();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-compare" => compare = false,
             "--no-score" => score_it = false,
-            "--adsb" | "--out" => match args.next() {
+            "--adsb" | "--out" | "--digest" | "--rows" => match args.next() {
                 Some(v) if a == "--adsb" => adsb = Some(PathBuf::from(v)),
+                Some(v) if a == "--digest" => canon.digest = Some(PathBuf::from(v)),
+                Some(v) if a == "--rows" => canon.rows = Some(PathBuf::from(v)),
                 Some(v) => out = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("oa-track-run: {a} needs a value\n{USAGE}");
@@ -80,7 +87,7 @@ fn main() -> ExitCode {
         eprintln!("oa-track-run: --adsb and --out are required\n{USAGE}");
         return ExitCode::from(2);
     };
-    match run(&adsb, &out, compare, score_it) {
+    match run(&adsb, &out, compare, score_it, &canon) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oa-track-run: {e}");
@@ -677,7 +684,20 @@ fn outliers_csv(rows: &[(&str, &Scored)]) -> (String, String) {
     (csv, meta)
 }
 
-fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Result<(), String> {
+/// Where `--digest` and `--rows` write.
+#[derive(Default)]
+struct CanonOut {
+    digest: Option<PathBuf>,
+    rows: Option<PathBuf>,
+}
+
+fn run(
+    clip_path: &Path,
+    out_dir: &Path,
+    compare: bool,
+    score_it: bool,
+    canon: &CanonOut,
+) -> Result<(), String> {
     let mut phases = Phases::default();
     phases.mark("start");
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
@@ -717,6 +737,21 @@ fn run(clip_path: &Path, out_dir: &Path, compare: bool, score_it: bool) -> Resul
         run_tracker_spilled(&meas, &cfg, &spill_root.join("run")).map_err(|e| e.to_string())?;
     let spill_secs = secs(started);
     phases.mark("scoring run (output spilled to files)");
+    if canon.digest.is_some() || canon.rows.is_some() {
+        let sum = write_canon(&run, canon.digest.as_deref(), canon.rows.as_deref())
+            .map_err(|e| format!("canonical output: {e}"))?;
+        println!(
+            "canonical output: {} rows in {} seconds{}",
+            sum.rows,
+            sum.seconds,
+            if sum.in_order {
+                ""
+            } else {
+                " (emitted out of second order, grouped in the file)"
+            }
+        );
+        phases.mark("canonical digest and rows written");
+    }
     let latency = match replay_timed(clip_path, &meas, &cfg, &spill_root.join("replay")) {
         Ok((log, replay, elapsed, unmatched)) => {
             let ok = replay.digest == run.digest;
