@@ -4,7 +4,14 @@
 //! handoffs) against independent truth, with scoring code that will later score OpenATCA's own
 //! output unchanged.
 //!
-//! * Core (pure, B1): [`truth`] (the interface to `oa-truth`: a query function value and a list
+//! Class `shell` (B7), for the whole crate: no module is moved to a `core/` directory. Three
+//! facts keep every module that matters out of core, since [`legacy`] is the base of nearly all
+//! of them: `legacy` and `metrics_event` keep `HashMap` indexes (looked up only, never iterated),
+//! `geo` caches the WGS-84 tables in a `std::sync::OnceLock`, and `input` and `altimeters` read
+//! files. The modules below listed as "pure" are pure in what they do, and would be core once
+//! those are replaced (`BTreeMap` for the maps; the ellipsoid passed in for the cache).
+//!
+//! * Pure in what they do (B1): [`truth`] (the interface to `oa-truth`: a query function value and a list
 //!   of legs, plus the airspace lookups as function values), [`legacy`] (struct-of-arrays tables of
 //!   ERAM track samples, handoffs, expanded routes, TBFM and TFMS estimates), [`ingest`] and
 //!   [`scan`] (decoded messages into those tables), [`thindex`], [`assoc`] (address first, then
