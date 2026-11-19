@@ -61,6 +61,9 @@ tools/replay_compare.sh <commitA> <commitB> <clip.oaf> <outdir> [scratchdir] [--
 ```
 
 Builds each commit in a detached worktree and runs `oa-track-run --no-score --digest --rows`.
+`<outdir>` must be new or empty; a non-empty one is refused before anything is built, so no
+file of an earlier comparison can be read as this one's. On a failure the two rows files are
+removed.
 Writes `report.txt`, `summary.txt`, `digest-A.txt`, `digest-B.txt`, the run logs and, where
 `/usr/bin/time` exists, `time-A.txt` and `time-B.txt` (wall time and peak memory). The two
 rows files are removed unless `REPLAY_COMPARE_KEEP_ROWS=1`. A commit from before the

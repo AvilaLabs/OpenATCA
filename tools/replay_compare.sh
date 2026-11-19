@@ -5,8 +5,9 @@
 #
 # Each commit is built (oa-track-run, release) in its own clean detached worktree with its own
 # target directory, one build at a time, and run with --no-score --digest --rows. oa-replay-diff
-# then compares the two outputs. The worktrees and target directories are removed at the end;
-# the reports stay in <outdir>. Exit status is oa-replay-diff's (0 identical, 1 different,
+# then compares the two outputs. <outdir> must be new or empty (a non-empty one is refused before
+# any build). The worktrees and target directories are removed at the end, and the rows files on a
+# failure; the reports stay in <outdir>. Exit status is oa-replay-diff's (0 identical, 1 different,
 # 2 error). Only commit hashes or refs are accepted: never a working tree.
 #
 # Environment:
