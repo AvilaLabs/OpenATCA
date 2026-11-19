@@ -742,15 +742,7 @@ fn the_real_workspace_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let rep = check(&root);
     assert!(rep.ok(), "{:#?}", rep.failures);
-    assert_eq!(
-        rep.unsplit,
-        [
-            "oa-display",
-            "oa-replay-diff",
-            "oa-scope-replay",
-            "oa-track"
-        ]
-    );
+    assert_eq!(rep.unsplit, ["oa-replay-diff", "oa-track"]);
 }
 
 // REQ: OA-TRC-217
