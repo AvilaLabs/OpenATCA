@@ -23,8 +23,8 @@ use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     esassp_of, flight_error_summaries, initiation_delays, interval_stats, run_tracker,
     run_tracker_spilled, score, score_ranges, score_source, scored_altitude_ft, scoring_config,
-    split_reports, split_reports_with, transversal_accel, RowSet, RowSource, CLASS_STRAIGHT, CLASS_TURN,
-    SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
+    split_reports, split_reports_with, transversal_accel, RowSet, RowSource, CLASS_STRAIGHT,
+    CLASS_TURN, SCORE_CHUNK_ROWS, SCORE_DROP_AFTER_NS, TURN_ACCEL_MPS2,
 };
 use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;

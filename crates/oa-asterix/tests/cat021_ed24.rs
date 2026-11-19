@@ -75,7 +75,10 @@ fn the_ed24_uap_is_table_2_of_the_specification() {
         };
         assert_eq!(*got, id, "FRN {frn}");
         if len > 0 {
-            assert!(matches!(field.kind, Kind::Fixed(n) if n == len), "FRN {frn} length");
+            assert!(
+                matches!(field.kind, Kind::Fixed(n) if n == len),
+                "FRN {frn} length"
+            );
         }
     }
     // Variable-length "1+" items: 040 and 090 are extended, 220 and 110 compound, 271 extended,
@@ -84,7 +87,11 @@ fn the_ed24_uap_is_table_2_of_the_specification() {
         let Some(Slot::Item { field, .. }) = oa_asterix::uap::slot_of(uap, frn) else {
             panic!();
         };
-        assert_eq!(matches!(field.kind, Kind::Extended(1)), extended, "FRN {frn}");
+        assert_eq!(
+            matches!(field.kind, Kind::Extended(1)),
+            extended,
+            "FRN {frn}"
+        );
     }
     let Some(Slot::Item { field, .. }) = oa_asterix::uap::slot_of(uap, 39) else {
         panic!();
@@ -92,7 +99,10 @@ fn the_ed24_uap_is_table_2_of_the_specification() {
     assert!(matches!(field.kind, Kind::Repetitive { size: 8 }));
     // FRN 43 to 47 are not used, 48 is RE and 49 is SP.
     for frn in 43..=47 {
-        assert!(matches!(oa_asterix::uap::slot_of(uap, frn), Some(Slot::Unused)));
+        assert!(matches!(
+            oa_asterix::uap::slot_of(uap, frn),
+            Some(Slot::Unused)
+        ));
     }
     assert!(matches!(oa_asterix::uap::slot_of(uap, 48), Some(Slot::Re)));
     assert!(matches!(oa_asterix::uap::slot_of(uap, 49), Some(Slot::Sp)));
@@ -225,8 +235,14 @@ fn a_record_worked_out_from_the_ed24_item_definitions_decodes_and_encodes() {
     assert_eq!(quality_sils(&hand_values().quality.unwrap()), Some(1));
     assert_eq!(quality_sda(&hand_values().quality.unwrap()), Some(2));
     assert_eq!(quality_gva(&hand_values().quality.unwrap()), Some(2));
-    assert_eq!(descriptor_ground(&hand_values().descriptor.unwrap()), Some(true));
-    assert_eq!(descriptor_confidence(&hand_values().descriptor.unwrap()), Some(2));
+    assert_eq!(
+        descriptor_ground(&hand_values().descriptor.unwrap()),
+        Some(true)
+    );
+    assert_eq!(
+        descriptor_confidence(&hand_values().descriptor.unwrap()),
+        Some(2)
+    );
 }
 
 /// The record of [`hand_values`] with `f` applied, as one block.
@@ -281,7 +297,10 @@ fn bit_4_of_the_third_quality_extension_is_spare_in_ed24_and_the_source_bit_in_e
     // Spare bits 3/2 stay spare in both.
     let b = block_with(|r| r.quality.as_mut().unwrap().ext = vec![0xF1, 0x35, 0x50 | 0x04]);
     for ed in [ED24, ED27] {
-        assert_eq!(encode_block_with(&b, ed).unwrap_err().kind, ErrorKind::SpareBitSet);
+        assert_eq!(
+            encode_block_with(&b, ed).unwrap_err().kind,
+            ErrorKind::SpareBitSet
+        );
     }
 }
 
@@ -289,9 +308,15 @@ fn bit_4_of_the_third_quality_extension_is_spare_in_ed24_and_the_source_bit_in_e
 #[test]
 fn the_default_functions_are_ed27_and_the_ed24_codec_round_trips_what_it_accepts() {
     let b = Block::Cat021(vec![hand_values()]);
-    assert_eq!(encode_block(&b).unwrap(), encode_block_with(&b, ED27).unwrap());
+    assert_eq!(
+        encode_block(&b).unwrap(),
+        encode_block_with(&b, ED27).unwrap()
+    );
     let bytes = hand_block();
-    assert_eq!(decode_block(&bytes).unwrap(), decode_block_with(&bytes, ED27).unwrap());
+    assert_eq!(
+        decode_block(&bytes).unwrap(),
+        decode_block_with(&bytes, ED27).unwrap()
+    );
     // A position at the limits of I021/131 (latitude +-90, longitude -180) and a time at the
     // last count of the day round-trip in Ed 2.4.
     let edge = block_with(|r| {

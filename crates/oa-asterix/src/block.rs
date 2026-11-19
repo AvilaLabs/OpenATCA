@@ -236,7 +236,8 @@ pub fn encode_block_with(block: &Block, ed: Cat021Edition) -> Result<Vec<u8>, As
         let (typed, raws): (Result<Items, ItemError>, &[RawItem]) = match block {
             Block::Cat021(r) => match r.get(i) {
                 Some(x) => {
-                    cat021::check_edition(x, ed).map_err(|(frn, k)| enc_err(cat, i, uap, frn, k))?;
+                    cat021::check_edition(x, ed)
+                        .map_err(|(frn, k)| enc_err(cat, i, uap, frn, k))?;
                     (cat021::encode_items(x), &x.raw)
                 }
                 None => continue,

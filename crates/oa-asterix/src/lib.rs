@@ -54,15 +54,15 @@ pub use block::{
     decode_block, decode_block_at, decode_block_at_with, decode_block_with, decode_stream,
     encode_block, encode_block_with, Block,
 };
-pub use uap::Cat021Edition;
 pub use common::{
     e7_to_raw, ms_to_time128, raw_to_e7, time128_to_ms, Ident, Mode3a, RawItem, RawPosition,
     SelectedAltitude, SourceId,
 };
 pub use error::{AsterixError, ErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
+pub use uap::Cat021Edition;
 pub use wire::{
-    parse_block, parse_block_with, MAX_BLOCK_LEN, MAX_EXTENSIONS, MAX_PRIMARY_OCTETS, MAX_RECORDS_PER_BLOCK,
-    MAX_REPETITIONS,
+    parse_block, parse_block_with, MAX_BLOCK_LEN, MAX_EXTENSIONS, MAX_PRIMARY_OCTETS,
+    MAX_RECORDS_PER_BLOCK, MAX_REPETITIONS,
 };
 
 #[cfg(kani)]
