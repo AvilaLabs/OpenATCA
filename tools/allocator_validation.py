@@ -108,6 +108,13 @@ ROUTE_LEDGER = {
     "display_frame_chain": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.frame_drawn"),
     "display_map_scene": ("crates/oa-display/src/core/scene.rs", "display_frame.scene_items"),
     "display_frame_refusal": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.refusing_refused"),
+    "display_invalid_position": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_invalid_position"),
+    "display_unprojectable": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_unprojectable"),
+    "display_history_dot_dropped": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_trail_dropped"),
+    "display_time_overflow": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_time_overflow"),
+    "display_unplaced_history_dot": ("crates/oa-display/src/core/traffic.rs", "display_frame.draw_trail_dropped"),
+    "display_stamp_clipped": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.stamp_clipped"),
+    "display_frame_digest": ("crates/oa-display/src/core/raster.rs", "display_frame.digests"),
 }
 
 ROUTE_SYMBOLS = {
@@ -160,6 +167,13 @@ ROUTE_SYMBOLS = {
     "display_set_refusal": "targets_push", "display_malformed_target": "targets_push",
     "display_frame_chain": "replay_build", "display_map_scene": "build_scene",
     "display_frame_refusal": "replay_build",
+    "display_invalid_position": "targets_at",
+    "display_unprojectable": "targets_at",
+    "display_history_dot_dropped": "targets_at",
+    "display_time_overflow": "targets_at",
+    "display_unplaced_history_dot": "build_traffic",
+    "display_stamp_clipped": "replay_build",
+    "display_frame_digest": "frame_digest"
 }
 
 
@@ -674,7 +688,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "display_frame": {"convert_added": 1, "convert_ended": 1, "traffic_drawn": 30,
                           "uncertain": 1, "cs_conflict": 1, "r95_unknown": 1, "refused": 1,
                           "alt_clamped": 1, "malformed": 1, "frame_drawn": 50,
-                          "scene_items": 1, "refusing_refused": 1},
+                          "scene_items": 1, "refusing_refused": 1,
+                          "convert_invalid_position": 1, "convert_unprojectable": 1,
+                          "convert_trail_dropped": 1, "convert_time_overflow": 1,
+                          "draw_trail_dropped": 1, "stamp_clipped": 1, "digests": 20},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
                          "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1,
                          "tracker_applied": 1, "tracker_duplicates": 1_048_575,
@@ -721,7 +738,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},
-        "display_frame": {"traffic_drawn": 64, "refused": 5, "malformed": 1},
+        "display_frame": {"traffic_drawn": 64, "refused": 100, "malformed": 20, "digests": 20},
         "nam_session": {"peak_pending": 128, "pending_full": 1, "abandoned": 128,
                         "peer_silent": 1, "lrm_sent": 1, "dropped": 0, "script_errors": 0},
         "clock_gate": {"held": 2, "held_applied": 2, "step_forward": 1, "late": 5,

@@ -12,6 +12,7 @@ use oa_airspace::model::{
 };
 use oa_display::list::{list_clear, list_new};
 use oa_display::project::projection_new;
+use oa_display::raster::frame_digest;
 use oa_display::traffic::{
     build_traffic, caps_add, targets_clear, targets_new, targets_push, traffic_caps, Target,
     TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ, T_COAST, T_CS_CONFLICT,
@@ -19,7 +20,9 @@ use oa_display::traffic::{
 };
 use oa_scope_replay::adapt::row_flags;
 use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
-use oa_scope_replay::rows::{targets_at, ConvertStats, RowColumns, RowStore, DEFAULT_CONVERT};
+use oa_scope_replay::rows::{
+    targets_at, ConvertConfig, ConvertStats, RowColumns, RowStore, DEFAULT_CONVERT, RF_HAS_ALT,
+};
 use oa_scope_replay::store::{callsigns_build, store_add, store_finish};
 use oa_track::{r95_m_of, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK, O_UNCERTAIN};
 
@@ -30,6 +33,12 @@ const AIRCRAFT: u32 = 200;
 const SECONDS: i64 = 40;
 const FRAMES: i64 = 20;
 const FIRST_FRAME_S: i64 = 25;
+/// A valid position the projection cannot place (opposite the centre), see the display tests.
+const UNPLACED: (i32, i32) = (-422_586_000, 918_952_000);
+/// A position outside the globe.
+const OFF_GLOBE: i32 = 900_000_001;
+/// A stamp longer than the frame's stamp buffer: clipped, counted.
+const LONG_STAMP: &str = "2026-11-15T20:00:25Z 2026-11-15T20:00:25Z 2026-11-15T20:00:25Z 2026-11-15T20:00:25Z 2026-11-15T20:00:25Z 2026-11-15T20:00:25Z";
 
 /// A7.2: cold evidence for the display windows, summed over the frames of every window.
 pub(super) struct DisplayEvidence {
@@ -46,6 +55,13 @@ pub(super) struct DisplayEvidence {
     pub frame_drawn: u64,
     pub scene_items: u64,
     pub refusing_refused: u64,
+    pub convert_invalid_position: u64,
+    pub convert_unprojectable: u64,
+    pub convert_trail_dropped: u64,
+    pub convert_time_overflow: u64,
+    pub draw_trail_dropped: u64,
+    pub stamp_clipped: u64,
+    pub digests: u64,
     pub injected: bool,
 }
 
@@ -276,6 +292,27 @@ fn fixture_columns() -> Cols {
             c.flags.push(row_flags(flags));
         }
     }
+    // Rows the conversion must classify, one address each: a position off the globe, a valid
+    // position that does not project, and an aircraft whose older rows (its history) are off the
+    // globe while its newest are good.
+    for k in 0..SECONDS {
+        let good = (ORD.0 + 100_000, ORD.1 + 100_000 + (k as i32) * 900);
+        let rows = [
+            (0xB00001u32, (OFF_GLOBE, ORD.1)),
+            (0xB00002, UNPLACED),
+            (0xB00003, if k < 24 { (OFF_GLOBE, ORD.1) } else { good }),
+        ];
+        for (addr, (lat, lon)) in rows {
+            c.t.push(T0 + k * S);
+            c.addr.push(addr);
+            c.lat.push(lat);
+            c.lon.push(lon);
+            c.v.push(110.0);
+            c.r95.push(100.0);
+            c.alt.push(11_000.0);
+            c.flags.push(RF_HAS_ALT);
+        }
+    }
     c
 }
 
@@ -288,6 +325,13 @@ fn callsign(s: &str) -> [u8; 8] {
 }
 
 /// A target with every state on, for the standalone `build_traffic` window.
+///
+/// Not reached by any fixture, and why: a leader or a circle that fails (`leader_failed`,
+/// `circle_failed`) needs the geodesic to fail on a finite distance, which it does not, or its
+/// far end to fall in the few kilometres around the projection's antipode, which no leader
+/// (at most 6 000 km from an on-screen target) and no radius in a scan of forty wraps of the
+/// globe reached; `text_clipped` needs a buffer smaller than the longest block, which the
+/// display's own test shows is never clipped. Their counters stay, and are summed and reported.
 fn busy_target(n: i32) -> Target {
     let mut t = Target {
         lat_e7: ORD.0 + (n % 20 - 10) * 150_000,
@@ -324,6 +368,12 @@ fn busy_target(n: i32) -> Target {
         // Beyond what the data block shows: marked and counted.
         t.alt_ft = 250_000;
     }
+    if n == 11 {
+        // A history dot the projection cannot place: that dot is not drawn, counted.
+        if let Some(slot) = t.trail.get_mut(2) {
+            *slot = UNPLACED;
+        }
+    }
     t
 }
 
@@ -335,6 +385,7 @@ fn acc(a: &mut TrafficStats, b: &TrafficStats) {
     a.r95_unknown += b.r95_unknown;
     a.refused += b.refused;
     a.alt_display_clamped += b.alt_display_clamped;
+    a.trail_dropped += b.trail_dropped;
 }
 
 fn add_counts(a: &mut Counts, b: Counts) {
@@ -428,40 +479,51 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     };
     let mut convert = ConvertStats::default();
 
-    // Window 1: rows to targets, every frame from a cleared set.
+    // Window 1: rows to targets, every frame from a cleared set; a second conversion with a trail
+    // step so large that the history times overflow.
+    let wide = ConvertConfig {
+        trail_step_ns: i64::MAX / 2,
+        ..DEFAULT_CONVERT
+    };
     let c = measure(inject, FRAMES, |k| {
+        let t = T0 + (FIRST_FRAME_S + k) * S;
         targets_clear(&mut set);
-        let st = targets_at(
-            &store,
-            &calls,
-            T0 + (FIRST_FRAME_S + k) * S,
-            &DEFAULT_CONVERT,
-            &proj,
-            &mut set,
-        );
+        let st = targets_at(&store, &calls, t, &DEFAULT_CONVERT, &proj, &mut set);
         convert.added += st.added;
         convert.ended += st.ended;
         convert.off_map += st.off_map;
+        convert.invalid_position += st.invalid_position;
+        convert.unprojectable += st.unprojectable;
+        convert.trail_dropped += st.trail_dropped;
+        targets_clear(&mut set);
+        let st = targets_at(&store, &calls, t, &wide, &proj, &mut set);
+        convert.time_overflow += st.time_overflow;
     })?;
     add_counts(&mut counts, c);
 
-    // Window 2: a full set (some refused at capacity, one malformed) drawn into a cleared list.
-    targets_clear(&mut set);
+    // Window 2: every frame fills a cleared set (some targets refused at capacity, one
+    // malformed), then draws it into a cleared list.
     let mut malformed = 0u64;
-    for n in 0..70 {
-        let mut t = busy_target(n);
-        if n == 5 {
-            t.lat_e7 = 900_000_001;
-        }
-        if let Err(TrafficError::Malformed { .. }) = targets_push(&mut set, &t) {
-            malformed += 1;
-        }
-    }
+    let mut refused_full = 0u64;
     let mut traffic = TrafficStats::default();
+    let mut drawn_all = TrafficStats::default();
     let c = measure(inject, FRAMES, |_| {
+        targets_clear(&mut set);
+        for n in 0..70 {
+            let mut t = busy_target(n);
+            if n == 5 {
+                t.lat_e7 = OFF_GLOBE;
+            }
+            match targets_push(&mut set, &t) {
+                Ok(()) => {}
+                Err(TrafficError::Malformed { .. }) => malformed += 1,
+                Err(TrafficError::Full { .. }) => refused_full += 1,
+            }
+        }
         list_clear(&mut list);
         if let Ok(st) = build_traffic(&mut list, &proj, &ell, &set, &DEFAULT_STYLE) {
             traffic = st;
+            acc(&mut drawn_all, &st);
         }
     })?;
     add_counts(&mut counts, c);
@@ -470,10 +532,17 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     let mut frame = TrafficStats::default();
     let mut scene_items = 0u64;
     let mut frame_ok = true;
+    let (mut stamp_clipped, mut digests) = (0u64, 0u64);
     let c = measure(inject, FRAMES, |k| {
         let t = T0 + (FIRST_FRAME_S + k) * S;
-        match replay_build(&mut replay, &store, &calls, t, "2026-11-15T20:00:25Z") {
+        let stamp = if k % 4 == 3 {
+            LONG_STAMP
+        } else {
+            "2026-11-15T20:00:25Z"
+        };
+        match replay_build(&mut replay, &store, &calls, t, stamp) {
             Ok(info) => {
+                stamp_clipped += u64::from(info.stamp_clipped);
                 acc(&mut frame, &info.traffic);
                 let sc = &info.scene;
                 scene_items += u64::from(
@@ -483,6 +552,10 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
             Err(_) => frame_ok = false,
         }
         frame_ok &= replay_raster(&mut replay).is_ok();
+        match frame_digest(&replay.spec, &replay.buf) {
+            Ok(_) => digests += 1,
+            Err(_) => frame_ok = false,
+        }
     })?;
     add_counts(&mut counts, c);
     if !frame_ok {
@@ -513,12 +586,19 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         uncertain: u64::from(traffic.uncertain) + u64::from(frame.uncertain),
         cs_conflict: u64::from(traffic.cs_conflict) + u64::from(frame.cs_conflict),
         r95_unknown: u64::from(traffic.r95_unknown) + u64::from(frame.r95_unknown),
-        refused: u64::from(traffic.refused),
+        refused: refused_full,
         alt_clamped: u64::from(traffic.alt_display_clamped),
         malformed,
         frame_drawn: u64::from(frame.drawn),
         scene_items,
         refusing_refused: u64::from(refusing.refused),
+        convert_invalid_position: u64::from(convert.invalid_position),
+        convert_unprojectable: u64::from(convert.unprojectable),
+        convert_trail_dropped: u64::from(convert.trail_dropped),
+        convert_time_overflow: u64::from(convert.time_overflow),
+        draw_trail_dropped: u64::from(drawn_all.trail_dropped),
+        stamp_clipped,
+        digests,
         injected: true,
     })
 }

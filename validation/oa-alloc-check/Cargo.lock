@@ -87,6 +87,8 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 
@@ -109,8 +111,13 @@ dependencies = [
 name = "oa-geo"
 version = "0.0.1"
 dependencies = [
+ "oa-ieee",
  "oa-math",
 ]
+
+[[package]]
+name = "oa-ieee"
+version = "0.0.1"
 
 [[package]]
 name = "oa-json"
@@ -119,6 +126,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-math"
 version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+]
 
 [[package]]
 name = "oa-nam"
@@ -164,6 +174,8 @@ dependencies = [
  "oa-display",
  "oa-feed",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
  "oa-track",
 ]

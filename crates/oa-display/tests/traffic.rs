@@ -752,3 +752,64 @@ fn a_position_is_checked_before_it_can_count_as_the_edge_of_the_scope() {
     assert!(matches!(map_position(&p, ORD.0, ORD.1), MapPos::On(_)));
     assert!(on_map(&p, ORD.0, ORD.1) && !on_map(&p, 900_000_001, 0));
 }
+
+/// A valid position that `proj()` cannot place: opposite the centre.
+const UNPLACED: (i32, i32) = (-422_586_000, 918_952_000);
+
+/// Draws `ts` with the projection `p`.
+fn draw_with(p: &Projection, ts: &[Target]) -> TrafficStats {
+    let mut set = targets_new(ts.len().max(1)).unwrap();
+    for t in ts {
+        targets_push(&mut set, t).unwrap();
+    }
+    let st = DEFAULT_STYLE;
+    let mut l = list_new(traffic_caps(targets_capacity(&set), &st).unwrap()).unwrap();
+    build_traffic(&mut l, p, &oa_geo::wgs84(), &set, &st).unwrap()
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn the_antipode_is_a_valid_position_that_does_not_project() {
+    // Unprojectable is reachable: the point opposite the centre is on the globe and has no place
+    // on the plane (the projection's denominator is below its floor there).
+    let p = proj();
+    // (The antipode of the conformal sphere, not of the ellipsoid: found by scanning.)
+    assert_eq!(
+        map_position(&p, UNPLACED.0, UNPLACED.1),
+        MapPos::Unprojectable
+    );
+    // A degree away the position projects, and is far off the screen.
+    assert_eq!(
+        map_position(&p, UNPLACED.0 + 10_000_000, UNPLACED.1),
+        MapPos::Off
+    );
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_target_that_cannot_be_placed_is_counted_as_unprojectable_not_as_off_screen() {
+    let t = plain(UNPLACED.0, UNPLACED.1);
+    let st = draw_with(&proj(), &[t]);
+    assert_eq!((st.unprojectable, st.off_screen, st.drawn), (1, 0, 0));
+    assert_eq!(traffic_loss(&st), 1);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_95_percent_radius_that_does_not_fit_the_list_is_clamped_and_counted() {
+    // A 0.05 NM scope is about 10 pixels a metre; a radius of 20 000 km is beyond 2^28 sixteenths.
+    let p = projection_new(ORD.0, ORD.1, 0.05, 800, 600, 0).unwrap();
+    let mut t = plain(ORD.0, ORD.1);
+    t.flags = T_UNCERTAIN;
+    t.r95_m = 1.0e5;
+    let near = draw_with(&p, &[t]);
+    assert_eq!(near.circle_radius_clamped, 0);
+    t.r95_m = 1.0e7;
+    let far = draw_with(&p, &[t]);
+    assert_eq!(
+        (far.circle_radius_clamped, far.circle_failed),
+        (1, 0),
+        "{far:?}"
+    );
+    assert_eq!(traffic_loss(&far), 1);
+}

@@ -1164,3 +1164,280 @@ fn a_duration_that_is_not_a_whole_number_of_steps_is_a_usage_error() {
         Err(cli::CliError::Usage(_))
     ));
 }
+
+// REQ: OA-DSP-047
+#[test]
+fn the_capacities_are_a_parameter_and_each_refuses_with_a_named_error_or_count() {
+    // Total rows: checked from the declared sizes before any row is stored.
+    let caps = StoreCaps {
+        addresses: 2,
+        rows_per_address: 2,
+        rows: 3,
+    };
+    let mut s = RowStore::default();
+    let e = store_add_with(&mut s, &view(&cols(4)), i64::MIN, &caps).unwrap_err();
+    assert_eq!(
+        e,
+        RowsError::TooMany {
+            what: "stored tracker rows",
+            wanted: 4,
+            max: 3
+        }
+    );
+    assert_eq!(store_rows(&s), 0, "nothing was stored");
+    // Rows before the window do not count against the cap.
+    let mut c = cols(4);
+    c.t = vec![T0 - S, T0 - S, T0, T0];
+    let st = store_add_with(&mut s, &view(&c), T0, &caps).unwrap();
+    assert_eq!((st.kept, st.before_window), (2, 2));
+    // Rows per address and addresses, with the small caps.
+    let mut s = RowStore::default();
+    let mut c = cols(3);
+    c.addr = vec![1, 1, 1];
+    let st = store_add_with(&mut s, &view(&c), i64::MIN, &caps).unwrap();
+    assert_eq!((st.kept, st.address_rows_full), (2, 1));
+    let mut c = cols(3);
+    c.addr = vec![1, 2, 3];
+    let st = store_add_with(&mut RowStore::default(), &view(&c), i64::MIN, &caps).unwrap();
+    assert_eq!((st.kept, st.address_table_full), (2, 1));
+    // The production caps are the constants.
+    assert_eq!(STORE_CAPS.rows, MAX_STORE_ROWS);
+    // The callsign reports.
+    let e = callsigns_build_with(&[1, 2, 3], &[1, 1, 1], &[[0; 8]; 3], 2).unwrap_err();
+    assert_eq!(
+        e,
+        RowsError::TooMany {
+            what: "reports for callsigns",
+            wanted: 3,
+            max: 2
+        }
+    );
+    assert!(e.to_string().contains("over the limit of 2"));
+    assert!(callsigns_build_with(&[1, 2], &[1, 1], &[[0; 8]; 2], 2).is_ok());
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn a_velocity_that_is_not_a_number_is_counted_and_shown_as_unknown() {
+    let mut s = RowStore::default();
+    let mut c = cols(3);
+    c.addr = vec![1, 2, 3];
+    c.v = vec![f32::NAN, 0.0, f32::INFINITY];
+    let st = store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!((st.kept, st.velocity_not_finite), (3, 2));
+    assert_eq!(store_loss(&st), 0, "shown as unknown, not a loss");
+    let mut total = StoreStats::default();
+    store_stats_add(&mut total, &st);
+    store_stats_add(&mut total, &st);
+    assert_eq!(total.velocity_not_finite, 4);
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_bad_history_position_drops_that_dot_only_and_the_target_stays() {
+    let mut s = RowStore::default();
+    let mut c = cols(3);
+    c.t = vec![T0 - 10 * S, T0 - 5 * S, T0];
+    c.lat = vec![ORD.0, 900_000_001, ORD.0];
+    store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!(store_finish(&mut s), 0);
+    let mut set = targets_new(4).unwrap();
+    let cfg = ConvertConfig {
+        trail_n: 2,
+        trail_step_ns: 5 * S,
+        stale_ns: 3 * S,
+        reacq_window_s: 10,
+    };
+    let st = targets_at(&s, &Callsigns::default(), T0, &cfg, &proj(), &mut set);
+    assert_eq!((st.added, st.trail_dropped), (1, 1));
+    assert_eq!(oa_display::traffic::targets_malformed(&set), 0);
+    assert_eq!(
+        targets_columns(&set).trail_len,
+        vec![1],
+        "the good dot stays"
+    );
+}
+
+// REQ: OA-DSP-047
+#[test]
+fn the_reacquired_age_is_found_by_search_and_only_inside_the_window() {
+    let mut s = RowStore::default();
+    let mut c = cols(4);
+    c.t = vec![T0 - 30 * S, T0 - 6 * S, T0 - 2 * S, T0];
+    c.flags = vec![RF_REACQUIRED, RF_REACQUIRED, 0, 0];
+    store_add(&mut s, &view(&c), i64::MIN).unwrap();
+    assert_eq!(store_finish(&mut s), 0);
+    let ages = |win: u16, at: i64| {
+        let mut set = targets_new(2).unwrap();
+        let cfg = ConvertConfig {
+            reacq_window_s: win,
+            ..DEFAULT_CONVERT
+        };
+        targets_at(&s, &Callsigns::default(), at, &cfg, &proj(), &mut set);
+        targets_columns(&set).reacq_age_s.first().copied()
+    };
+    assert_eq!(ages(10, T0), Some(6), "the newest reacquired row, 6 s ago");
+    assert_eq!(ages(5, T0), Some(NO_REACQ), "outside a 5 s window");
+    assert_eq!(
+        ages(60, T0 - 2 * S),
+        Some(4),
+        "never a row later than the time asked"
+    );
+}
+
+// REQ: OA-DSP-048
+#[test]
+fn space_padding_and_nul_padding_are_the_same_callsign() {
+    let (c, st) = build_calls(&[
+        (T0, 1, *b"UAL1    "),
+        (T0, 1, *b"UAL1\0\0\0\0"),
+        (T0 + S, 2, *b"        "),
+    ]);
+    assert_eq!(st.conflicts, 0, "no conflict between two spellings");
+    assert_eq!(st.empty, 1, "spaces only is no callsign");
+    assert_eq!(callsign_at(&c, 1, T0).callsign, calls("UAL1"));
+}
+
+// REQ: OA-DSP-044
+#[test]
+fn replay_new_refuses_two_trail_lengths() {
+    let cfg = ReplayConfig {
+        centre_lat_e7: ORD.0,
+        centre_lon_e7: ORD.1,
+        range_nm: 30.0,
+        width: 320,
+        height: 240,
+        max_targets: 4,
+        style: oa_display::traffic::TrafficStyle {
+            trail_n: 3,
+            ..oa_display::traffic::DEFAULT_STYLE
+        },
+        convert: DEFAULT_CONVERT,
+    };
+    assert!(matches!(
+        replay_new(model(), &cfg),
+        Err(oa_scope_replay::frame::ReplayError::Config(_))
+    ));
+}
+
+/// The clip of `write_inputs` with `extra` bytes appended.
+fn clip_with(dir: &std::path::Path, extra: &[u8]) -> std::path::PathBuf {
+    let (_, oaf) = write_inputs(dir);
+    let mut bytes = std::fs::read(&oaf).unwrap();
+    bytes.extend_from_slice(extra);
+    let out = dir.join("clip2.oaf");
+    std::fs::write(&out, bytes).unwrap();
+    out
+}
+
+fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0u8; payload.len() + 256];
+    let n = oa_feed::encode_frame(&mut buf, kind, 0, 9_999, T0 + 120 * S, 0, payload).unwrap();
+    buf.truncate(n);
+    buf
+}
+
+fn run_text(a: &[String]) -> (Result<(), cli::CliError>, String) {
+    let mut said = Vec::new();
+    let r = cli::run(a, &mut said);
+    (r, String::from_utf8(said).unwrap())
+}
+
+// REQ: OA-DSP-051
+#[test]
+fn reject_frames_are_loss_and_status_frames_are_counted_not_loss() {
+    let dir = tmp("replay-cli-kinds");
+    let (snap, _) = write_inputs(&dir);
+    let reject = clip_with(&dir, &frame_bytes(2, b"too long"));
+    let (r, said) = run_text(&cli_args(&snap, &reject, &dir.join("a"), &[]));
+    assert!(matches!(r, Err(cli::CliError::Loss(_))), "{said}");
+    assert!(said.contains("1 reject frames"), "{said}");
+    assert!(
+        said.contains("clip reject frames (input refused upstream): 1"),
+        "{said}"
+    );
+    let status = clip_with(&dir, &frame_bytes(3, b"state=up\ndelay_ms=0\n"));
+    let (r, said) = run_text(&cli_args(&snap, &status, &dir.join("b"), &[]));
+    assert!(r.is_ok(), "{said}");
+    assert!(said.contains("1 status frames"), "{said}");
+    assert!(said.contains("loss     none"), "{said}");
+}
+
+// REQ: OA-DSP-051
+#[test]
+fn undecodable_and_damaged_clip_frames_are_loss_at_the_command_line() {
+    let dir = tmp("replay-cli-damaged");
+    let (snap, _) = write_inputs(&dir);
+    let undecodable = clip_with(&dir, &frame_bytes(1, b"this is not a payload"));
+    let (r, said) = run_text(&cli_args(&snap, &undecodable, &dir.join("a"), &[]));
+    assert!(matches!(r, Err(cli::CliError::Loss(_))), "{said}");
+    assert!(said.contains("undecodable clip payloads: 1"), "{said}");
+    // A frame whose bytes were damaged (the checksum no longer matches).
+    let mut bad = frame_bytes(1, b"payload bytes");
+    let last = bad.len() - 1;
+    bad[last] ^= 0xFF;
+    let damaged = clip_with(&dir, &bad);
+    let (r, said) = run_text(&cli_args(&snap, &damaged, &dir.join("b"), &[]));
+    assert!(matches!(r, Err(cli::CliError::Loss(_))), "{said}");
+    assert!(said.contains("damaged clip frames: "), "{said}");
+}
+
+// REQ: OA-DSP-051
+#[test]
+fn the_binary_maps_a_loss_to_3_a_usage_error_to_2_and_a_failure_to_1() {
+    let dir = tmp("replay-cli-exit");
+    let (snap, oaf) = write_inputs(&dir);
+    let bin = env!("CARGO_BIN_EXE_oa-scope-replay");
+    let code = |a: Vec<String>| {
+        std::process::Command::new(bin)
+            .args(a)
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(code(cli_args(&snap, &oaf, &dir.join("ok"), &[])), Some(0));
+    assert_eq!(
+        code(cli_args(
+            &snap,
+            &oaf,
+            &dir.join("loss"),
+            &["--max-targets", "1"]
+        )),
+        Some(3)
+    );
+    assert_eq!(code(args(&["--no-such-flag"])), Some(2));
+    // The output directory of the first run is not empty: a failure.
+    assert_eq!(code(cli_args(&snap, &oaf, &dir.join("ok"), &[])), Some(1));
+}
+
+// REQ: OA-DSP-050
+#[test]
+fn only_exact_output_names_are_ours_and_a_link_is_never_followed() {
+    let dir = tmp("replay-cli-links");
+    let (snap, oaf) = write_inputs(&dir);
+    let out = dir.join("o");
+    cli::run(&cli_args(&snap, &oaf, &out, &[]), &mut Vec::new()).unwrap();
+    // Five digits and no digits are not ours.
+    std::fs::write(out.join("frame-00007.ppm"), b"keep").unwrap();
+    std::fs::write(out.join("frame-.ppm"), b"keep").unwrap();
+    cli::run(
+        &cli_args(&snap, &oaf, &out, &["--overwrite"]),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(out.join("frame-00007.ppm").exists() && out.join("frame-.ppm").exists());
+    // A link named like an output fails the run, and its target is untouched.
+    let secret = dir.join("secret.txt");
+    std::fs::write(&secret, b"secret").unwrap();
+    std::fs::remove_file(out.join("frame-0001.ppm")).unwrap();
+    std::os::unix::fs::symlink(&secret, out.join("frame-0001.ppm")).unwrap();
+    let e = cli::run(
+        &cli_args(&snap, &oaf, &out, &["--overwrite"]),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(e, cli::CliError::Failed(_)), "{e}");
+    assert!(e.to_string().contains("not a plain file"), "{e}");
+    assert_eq!(std::fs::read(&secret).unwrap(), b"secret");
+}

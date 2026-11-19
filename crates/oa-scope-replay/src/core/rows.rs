@@ -59,14 +59,18 @@ pub const MAX_ROWS_PER_ADDRESS: usize = 1 << 18;
 /// about 4096 s is 2^24 = 16.7 million rows (about 0.5 GB at 29 bytes a row) which is the largest
 /// window this tool is sized for.
 pub const MAX_STORE_ROWS: usize = 1 << 24;
-// Work per frame (C7), in terms of the capacities above. `targets_at` walks the addresses once:
-// at most MAX_STORE_ADDRESSES (2^17) binary searches of at most 18 steps each. For each address
-// shown it looks back over the rows of the window of the reacquired mark (reacq_window_s, at most
-// 65534 s, one row a second for a live track) and does at most 16 binary searches for the trail,
-// so the work per address is at most MAX_ROWS_PER_ADDRESS (2^18) rows, and the worst case of a
-// frame is MAX_STORE_ADDRESSES * MAX_ROWS_PER_ADDRESS row visits, which no real store reaches (it
-// is also capped at MAX_STORE_ROWS, 2^24, in all): the look-back and the walk are bounded by the
-// store's named capacities, not by a budget checked in the loop.
+// Work per frame (C7), in terms of the capacities above. `targets_at` visits every address once:
+// at most MAX_STORE_ADDRESSES (2^17). For each it does a fixed number of binary searches over
+// that address's time-sorted columns, each of at most 18 steps (log2 of MAX_ROWS_PER_ADDRESS):
+// one for the newest row, one over the callsign changes, one over the reacquired times, and at
+// most MAX_TRAIL (16) for the history dots; so a frame is at most 2^17 * 19 searches of 18 steps
+// (about 4.5 * 10^7 steps), with no loop over rows. Nothing is looked at that is not found by
+// searching, so the work does not depend on the length of the reacquired window or on how many
+// rows an address holds beyond the logarithm.
+//
+// Rows of one address with the same time: the stable sort of `store_finish` keeps them in the
+// order the tracker wrote them, and the newest-row search (`partition_point(t <= time)`) picks the
+// last of them, so the later row written wins.
 
 /// Most reports `callsigns_build` takes: the same bound as the clip window of the shell.
 pub const MAX_CALLSIGN_REPORTS: usize = 1 << 25;
@@ -508,8 +512,8 @@ fn target_of(
 
 /// Fills `set` (which the caller has cleared) with the targets shown at `t_ns`, in address order.
 /// A set that fills up counts what it refuses; targets off the map are not offered to it. The
-/// work is bounded by the store's named capacities: at most [`MAX_STORE_ADDRESSES`] addresses and
-/// [`MAX_ROWS_PER_ADDRESS`] rows looked at for one. Allocates nothing.
+/// work is at most [`MAX_STORE_ADDRESSES`] addresses times a fixed number of binary searches
+/// (see the analysis above). Allocates nothing.
 pub fn targets_at(
     store: &RowStore,
     calls: &Callsigns,

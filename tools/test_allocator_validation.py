@@ -59,6 +59,13 @@ def result(injected=False):
             'display_malformed_target',
             'display_frame_chain',
             'display_map_scene',
+            'display_invalid_position',
+            'display_unprojectable',
+            'display_history_dot_dropped',
+            'display_time_overflow',
+            'display_unplaced_history_dot',
+            'display_stamp_clipped',
+            'display_frame_digest',
             'display_frame_refusal',
             'nam_session_activation',
             'nam_session_traffic',
@@ -164,8 +171,11 @@ def result(injected=False):
         "display_frame": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
             "convert_added": 1080, "convert_ended": 1300, "traffic_drawn": 64, "uncertain": 631,
-            "cs_conflict": 20, "r95_unknown": 269, "refused": 5, "alt_clamped": 4,
-            "malformed": 1, "frame_drawn": 2700, "scene_items": 140, "refusing_refused": 2556,
+            "cs_conflict": 20, "r95_unknown": 269, "refused": 100, "alt_clamped": 4,
+            "malformed": 20, "frame_drawn": 2718, "scene_items": 140, "refusing_refused": 2574,
+            "convert_invalid_position": 18, "convert_unprojectable": 18,
+            "convert_trail_dropped": 63, "convert_time_overflow": 2718,
+            "draw_trail_dropped": 20, "stamp_clipped": 5, "digests": 20,
         },
     }
 
