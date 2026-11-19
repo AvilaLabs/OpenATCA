@@ -86,8 +86,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 
 ## B. Purity and the core/shell split
 
-- **B1 [MUST]** Every unit of code is classified core (pure) or shell (impure), stated in the
-  module's doc comment. There is no third category.
+- **B1 [MUST]** Every unit of code is classified core (pure) or shell (impure), stated by where it
+  lives (B7) and in the module's doc comment. There is no third category.
 - **B2 [MUST]** Core functions are pure: same input, same output; no I/O; no mutation of external
   state; no clock, randomness or globals. Tracking, correlation, prediction, conflict detection
   and display-list construction are all core.
@@ -98,6 +98,22 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   into the shell.
 - **B6 [MUST]** Because of B2–B5, any run can be replayed bit for bit from its recorded inputs. A
   change that breaks replay determinism is a defect.
+- **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
+  classifications in doc comments that had drifted from the code). Every crate's Cargo.toml
+  declares `[package.metadata.openatca] class = "core"`, `"shell"` or `"split"`. In a split
+  crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs` only
+  declares those modules and re-exports. Binaries, tests, examples and benches are shell. A pure
+  decoder that allocates per message is shell under C6, not core.
+- **B8 [MUST]** The gate checks B7 mechanically (`oa-trace`). Outside comments and string
+  literals, core code names none of: `std::fs`, `std::net`, `std::io`, `std::env`,
+  `std::process`, `std::thread`, `std::time`, `std::sync`, `thread_local!`, `static mut`,
+  `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `HashMap`, `HashSet`, `RandomState`
+  (the default hasher is seeded from OS randomness, which breaks B2 and B6), or any path into
+  a `shell` module. Core code depends only on core crates and on the `core` modules of split
+  crates.
+- **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every
+  unsplit crate and fails if a new one appears. This class exists only until the migration ends,
+  and this rule is then removed.
 
 ## C. Memory
 
@@ -223,6 +239,7 @@ tracker (M3) is the first fully real-time core and is held to every rule from it
 - [ ] Every hot struct has an exact compile-time size assertion (A7), increases justified (A7.1)
 - [ ] Hot state in fixed-point units (A9)
 - [ ] Module classified core or shell; core pure; time is an input (B1–B4)
+- [ ] Crate class declared; core code under `core/` and passing the gate's scan (B7–B9)
 - [ ] Replay stays bit-exact (B6)
 - [ ] No allocation after init in the real-time core; capacities stated and analysed (C1, C2)
 - [ ] Counting-allocator test for the core (C5)
