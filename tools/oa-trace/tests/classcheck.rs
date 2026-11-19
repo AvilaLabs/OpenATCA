@@ -1900,8 +1900,8 @@ fn a_floats_bits_in_core_code_pass_through_canon_nan() {
     for src in [
         "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
         "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x * 2.0).to_bits() }\n",
-        "pub fn f(x: f64) -> [u8; 8] { oa_math::canon_nan(x).to_bits().to_le_bytes() }\npub fn g(x: f32) -> u32 { oa_math::canon_nan_f32(x).to_bits() }\n",
-        "pub fn f(x: f64) -> u64 { f64::to_bits(oa_math::canon_nan(x)) }\n",
+        "pub fn f(x: f64) -> [u8; 8] { u64::to_le_bytes(oa_math::canon_nan(x).to_bits()) }\npub fn g(x: f32) -> u32 { oa_math::canon_nan_f32(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { (oa_math::canon_nan(x)).to_bits() }\n",
         "#[cfg(test)]\nmod t { fn f(x: f64) -> u64 { x.to_bits() } }\n",
     ] {
         assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
@@ -1914,7 +1914,7 @@ fn a_floats_bits_in_core_code_pass_through_canon_nan() {
     assert!(
         has(
             &ws.failures(),
-            "fx-a/src/lib.rs:1: to_bits: B8: a float's bits"
+            "fx-a/src/lib.rs:1: to_bits: B8: `to_bits` in core code"
         ),
         "{:#?}",
         ws.failures()
@@ -2181,13 +2181,13 @@ fn only_oa_maths_canon_nan_counts_and_every_float_byte_path_goes_through_it() {
     // integers are not floats, and the canonical forms pass
     let ws = core_ws(
         "z4",
-        "pub fn f(x: u32, y: f64) -> [u8; 8] { let _ = x.to_le_bytes(); oa_math::canon_nan(y).to_bits().to_le_bytes() }\npub fn g(v: f64) -> u64 { let n: u32 = 1; let _ = n.to_le_bytes(); 0 }\n",
+        "pub fn f(x: u32, y: f64) -> [u8; 8] { let _ = u32::to_le_bytes(x); u64::to_le_bytes(oa_math::canon_nan(y).to_bits()) }\npub fn g(v: f64) -> u64 { let n: u32 = 1; let _ = u32::to_le_bytes(n); 0 }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     // a name that is a float in one fn is not a float in another
     let ws = core_ws(
         "z5",
-        "pub fn a(v: f64) -> f64 { v }\npub fn b(v: u32) -> [u8; 4] { v.to_le_bytes() }\n",
+        "pub fn a(v: f64) -> f64 { v }\npub fn b(v: u32) -> [u8; 4] { u32::to_le_bytes(v) }\n",
     );
     assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
     // oa-math itself may define and use them
@@ -2519,9 +2519,9 @@ fn nan_sign_and_total_order_come_from_oa_math_never_from_the_float_methods() {
             tokens(src)
         );
     }
-    // integers have a `signum`; the oa_math functions are the way
+    // integers have a `signum`, written as a path; the oa_math functions are the way
     for src in [
-        "pub fn f(x: i64) -> i64 { x.signum() }\n",
+        "pub fn f(x: i64) -> i64 { i64::signum(x) }\n",
         "pub fn f(a: u32, b: u32) -> core::cmp::Ordering { a.cmp(&b) }\n",
         "pub fn f(a: f64, b: f64) -> core::cmp::Ordering { oa_math::cmp_canon_f64(a, b) }\n",
         "pub fn f(x: f64) -> bool { oa_math::is_sign_negative_canon_f64(x) }\n",
@@ -2613,50 +2613,15 @@ fn float_bits_are_found_through_paths_values_tuples_untyped_lets_and_fields_of_o
             tokens(src)
         );
     }
-    // integers, and ints from a cast, an int tuple field and an int field of the same name
-    for (src, others) in [
-        ("pub fn f(x: u32) -> [u8; 4] { x.to_le_bytes() }\n", ""),
-        ("pub fn f() -> [u8; 4] { let n = 3; n.to_le_bytes() }\n", ""),
-        ("pub fn f(a: f64) -> [u8; 4] { let n = (a * 2.0) as u32; n.to_le_bytes() }\n", ""),
-        ("pub fn f(a: f64) -> [u8; 8] { let n = a as u64; let n = n + 1; n.to_le_bytes() }\n", ""),
-        ("pub fn f(a: f64) -> [u8; 8] { let y = a; let y = y as u64; y.to_le_bytes() }\n", ""),
-        ("pub fn f(v: &[f64]) -> [u8; 8] { let n = v.len(); n.to_le_bytes() }\n", ""),
-        ("pub struct Id(u32);\nimpl Id { pub fn b(&self) -> [u8; 4] { self.0.to_le_bytes() } }\n", "pub struct Id(u32);\npub struct P(f64);\n"),
-        ("pub fn f(p: &Id) -> [u8; 4] { p.0.to_le_bytes() }\n", "pub struct Id(u32);\npub struct P(f64);\n"),
-        ("pub fn f(x: f64) -> [u8; 8] { oa_math::canon_nan(x).to_bits().to_le_bytes() }\n", ""),
-        ("pub fn f(x: f64) -> u64 { f64::to_bits(oa_math::canon_nan(x)) }\n", ""),
-        ("pub fn f(x: f64) -> u64 { <f64>::to_bits(oa_math::canon_nan(x)) }\n", ""),
+    // the spellings that compile only for integers, and the canonical float, pass
+    for src in [
+        "pub fn f(x: u32) -> [u8; 4] { u32::to_le_bytes(x) }\n",
+        "pub fn f(a: f64) -> [u8; 4] { u32::to_le_bytes((a * 2.0) as u32) }\n",
+        "pub fn f(x: f64) -> [u8; 8] { u64::to_le_bytes(oa_math::canon_nan(x).to_bits()) }\n",
+        "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
     ] {
-        let t = tokens_with(src, others);
-        assert!(
-            !t.iter().any(|x| x.contains("bytes") || x == "to_bits"),
-            "{src}: {t:?}"
-        );
-    }
-    // a float field of another core crate reaches the whole workspace check
-    let ws = core_ws(
-        "b0",
-        "pub fn f(s: &crate::S) -> [u8; 8] { s.w.to_le_bytes() }\npub struct S { pub n: u8 }\n",
-    );
-    ws.put(
-        "Cargo.toml",
-        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\", \"crates/fx-c\"]\n",
-    );
-    for (field, hit) in [("f64", true), ("u64", false)] {
-        ws.put(
-            "crates/fx-c/Cargo.toml",
-            "[package]\nname = \"fx-c\"\n\n[package.metadata.openatca]\nclass = \"core\"\n\n[lints]\nworkspace = true\n",
-        );
-        ws.put(
-            "crates/fx-c/src/lib.rs",
-            &format!("#![forbid(unsafe_code)]\n#![cfg_attr(not(test), no_std)]\n{GUARD}pub struct T {{ pub w: {field} }}\n"),
-        );
-        assert_eq!(
-            has(&ws.failures(), "fx-a/src/lib.rs:1: to_le_bytes"),
-            hit,
-            "{field}: {:#?}",
-            ws.failures()
-        );
+        let t = tokens(src);
+        assert!(t.is_empty(), "{src}: {t:?}");
     }
 }
 
@@ -3549,59 +3514,74 @@ fn a_value_unwrapped_from_a_result_or_option_that_holds_a_float_is_float_evidenc
 
 // REQ: OA-TRC-258
 #[test]
-fn a_bytes_receiver_must_be_shown_to_be_an_integer_or_canonical_and_a_path_value_always_fails() {
+fn to_bits_follows_only_canon_nan_and_bytes_are_written_as_an_integer_path() {
+    // every one of these failed the name-based inference of round 5 or is a red-team fixture
     for (src, want) in [
-        (
-            "pub fn f(v: &[f64]) -> Vec<u64> { v.iter().copied().map(f64::to_bits).collect() }\n",
-            "to_bits",
-        ),
+        ("pub fn f(v: &[f64]) -> Vec<u64> { v.iter().copied().map(f64::to_bits).collect() }\n", "to_bits"),
         ("pub fn f() -> u64 { let f = f64::to_bits; f(1.0) }\n", "to_bits"),
-        (
-            "pub fn f(v: &[f32]) -> Vec<[u8; 4]> { v.iter().map(|x| x.to_le_bytes()).collect() }\n",
-            "to_le_bytes",
-        ),
-        (
-            "pub fn f(v: f64) -> [u8; 8] { oa_math::sqrt(v).to_le_bytes() }\n",
-            "to_le_bytes",
-        ),
-        (
-            "pub fn f(xs: &[f64]) -> u8 { let mut n = 0; for v in xs { n ^= v.to_le_bytes()[0]; } n }\n",
-            "to_le_bytes",
-        ),
-        (
-            "pub struct W(f64);\nimpl W { pub fn b(&self) -> [u8; 8] { self.0.to_le_bytes() } }\n",
-            "to_le_bytes",
-        ),
-        // unknown is not a pass: a call of something unseen, a field of an unseen type
-        ("pub fn f() -> [u8; 8] { g().to_le_bytes() }\n", "to_le_bytes"),
-        ("pub fn f(s: &S) -> [u8; 8] { s.v.to_be_bytes() }\n", "to_be_bytes"),
-        ("pub fn f(t: (f64, u32)) -> [u8; 4] { t.1.to_le_bytes() }\n", "to_le_bytes"),
-        ("pub fn f(x: u8) -> [u8; 4] { f32::to_le_bytes(x.into()) }\n", "to_le_bytes"),
+        ("type F = f64;\npub fn f(x: f64) -> u64 { F::to_bits(x) }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { <f64 as T>::to_bits(x) }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { T::to_bits(x) }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { x.to_bits() }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { foo(oa_math::canon_nan(x)).to_bits() }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { other::oa_math::canon_nan(x).to_bits() }\n", "to_bits"),
+        ("pub fn f(x: f64) -> u64 { oa_math::canon_nan(x).abs().to_bits() }\n", "to_bits"),
+        ("pub fn f(v: &[f32]) -> Vec<[u8; 4]> { v.iter().map(|x| x.to_le_bytes()).collect() }\n", "to_le_bytes"),
+        ("pub fn f(v: f64) -> [u8; 8] { oa_math::sqrt(v).to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f(xs: &[f64]) -> u8 { let mut n = 0; for v in xs { n ^= v.to_le_bytes()[0]; } n }\n", "to_le_bytes"),
+        ("pub struct W(f64);\nimpl W { pub fn b(&self) -> [u8; 8] { self.0.to_le_bytes() } }\n", "to_le_bytes"),
+        // the review's shadowing, match, user `len` and struct-literal bypasses
+        ("pub fn f(n: u64, v: &[f32]) { let _ = n; let _ = v.iter().map(|n| n.to_le_bytes()); }\n", "to_le_bytes"),
+        ("pub fn f(n: Option<f32>) -> [u8; 4] { match n { Some(n) => n.to_le_bytes(), None => [0; 4] } }\n", "to_le_bytes"),
+        ("pub fn len() -> f64 { 1.0 }\npub fn f() -> [u8; 8] { len().to_le_bytes() }\n", "to_le_bytes"),
+        ("pub struct S { pub v: f64 }\npub fn f() -> [u8; 8] { let s = S { v: 1.0 }; s.v.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn id() -> f32 { 1.0 }\npub fn f() -> [u8; 4] { id().to_le_bytes() }\n", "to_le_bytes"),
+        // integer receivers too: the method form fails whatever the receiver
+        ("pub fn f(n: u64) -> [u8; 8] { n.to_le_bytes() }\n", "to_le_bytes"),
+        ("pub fn f() -> [u8; 8] { 3u64.to_be_bytes() }\n", "to_be_bytes"),
+        ("pub fn f(x: f64) -> [u8; 8] { f64::to_le_bytes(x) }\n", "to_le_bytes"),
+        ("pub fn f(x: f64) -> [u8; 8] { <f64>::to_le_bytes(x) }\n", "to_le_bytes"),
+        ("pub fn f(x: f64) -> [u8; 8] { T::to_le_bytes(x) }\n", "to_le_bytes"),
+        ("pub fn f(v: &[f32]) -> Vec<[u8; 4]> { v.iter().copied().map(f32::to_ne_bytes).collect() }\n", "to_ne_bytes"),
+        ("pub mod u64 { pub fn to_le_bytes(x: f64) -> [u8; 8] { [0; 8] } }\n", "u64"),
+        // RT-281
+        ("fn h(c: &[f32], out: &mut Vec<u8>) { for v in c { out.extend(v.to_le_bytes()) } }\n", "to_le_bytes"),
     ] {
-        let t = tokens_with(src, src);
+        let t = tokens(src);
         assert!(t.iter().any(|x| x == want), "{src}: {t:?}");
-        let ws = core_ws("c0", src);
-        assert!(
-            has(&ws.failures(), "cannot tell this receiver is not a float") || want == "to_bits",
-            "{src}: {:#?}",
-            ws.failures()
-        );
     }
     for src in [
-        "pub fn f() -> [u8; 8] { 3u64.to_le_bytes() }\n",
-        "pub fn f(n: u64) -> [u8; 8] { n.to_le_bytes() }\n",
-        "pub fn f() -> [u8; 8] { let n: u64 = 7; n.to_be_bytes() }\n",
-        "pub fn f(x: f64) -> [u8; 8] { oa_math::canon_nan(x).to_bits().to_le_bytes() }\n",
-        "pub fn f(x: u8) -> [u8; 4] { u32::from(x).to_le_bytes() }\n",
-        "pub fn f(x: f64) -> [u8; 4] { (x as u32).to_le_bytes() }\n",
+        "pub fn f(x: u64) -> [u8; 8] { u64::to_le_bytes(x) }\n",
+        "pub fn f(x: i32) -> [u8; 4] { i32::to_be_bytes(x) }\n",
         "pub fn f(v: &[u16]) -> Vec<[u8; 2]> { v.iter().map(|x| u16::to_le_bytes(*x)).collect() }\n",
-        "pub struct S { pub seq: u64 }\npub fn f(s: &S) -> [u8; 8] { s.seq.to_le_bytes() }\n",
-        "pub struct Id(u32);\nimpl Id { pub fn b(&self) -> [u8; 4] { self.0.to_le_bytes() } }\n",
-        "pub fn f(v: &[u8]) -> [u8; 8] { (v.len() as u64).to_le_bytes() }\n",
-        "pub fn g() -> u32 { 1 }\npub fn f() -> [u8; 4] { g().to_le_bytes() }\n",
+        "pub fn f(v: &[u16]) -> Vec<[u8; 2]> { v.iter().copied().map(u16::to_le_bytes).collect() }\n",
+        "pub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
+        "pub fn f(x: f32) -> u32 { oa_math::canon_nan_f32(x).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { (oa_math::canon_nan(x)).to_bits() }\n",
+        "pub fn f(x: f64) -> u64 { ((oa_math::canon_nan(x * 2.0))).to_bits() }\n",
+        "pub fn f(x: f64) -> [u8; 8] { u64::to_le_bytes(oa_math::canon_nan(x).to_bits()) }\n",
+        "pub fn f(x: u8) -> [u8; 4] { u32::to_le_bytes(u32::from(x)) }\n",
     ] {
-        let t = tokens_with(src, src);
+        let t = tokens(src);
         assert!(t.is_empty(), "{src}: {t:?}");
+    }
+}
+
+// REQ: OA-TRC-261
+#[test]
+fn capacity_is_banned_in_core_code_where_the_allocator_chooses_it() {
+    for src in [
+        "pub fn f(v: &Vec<u8>) -> usize { v.capacity() }\n",
+        "pub fn f(s: &String) -> usize { String::capacity(s) }\n",
+    ] {
+        assert!(tokens(src).iter().any(|x| x == "capacity"), "{src}");
+    }
+    for src in [
+        "pub fn f() -> Vec<u8> { Vec::with_capacity(4) }\n",
+        "pub enum E { Full { capacity: usize } }\npub fn f(c: usize) -> E { E::Full { capacity: c } }\n",
+        "#[cfg(test)]\nmod t { fn f(v: &Vec<u8>) -> usize { v.capacity() } }\n",
+    ] {
+        assert!(tokens(src).is_empty(), "{src}: {:?}", tokens(src));
     }
 }
 
@@ -3634,6 +3614,17 @@ fn oa_maths_helpers_are_called_by_qualified_path_only_never_imported_or_shadowed
         let t = tokens(src);
         assert!(t.is_empty(), "{src}: {t:?}");
     }
+    // only the external crate `oa_math` is the root: a module, a rename or a local of that name fails
+    for src in [
+        "mod oa_math { pub fn canon_nan(x: f64) -> f64 { x } }\npub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
+        "use other as oa_math;\npub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
+        "extern crate other as oa_math;\npub fn f(x: f64) -> u64 { oa_math::canon_nan(x).to_bits() }\n",
+        "pub fn f(oa_math: &dyn Fn(f64) -> f64, x: f64) -> f64 { oa_math(x) }\n",
+        "pub fn f(x: f64) -> u64 { crate::oa_math::canon_nan(x).to_bits() }\n",
+    ] {
+        let t = tokens(src);
+        assert!(t.iter().any(|x| x == "oa_math"), "{src}: {t:?}");
+    }
     // oa-math itself defines them
     let ws = Ws::named(
         "h0",
@@ -3651,11 +3642,41 @@ fn oa_maths_helpers_are_called_by_qualified_path_only_never_imported_or_shadowed
 #[test]
 fn the_helper_list_holds_every_public_function_of_order_rs_and_nan_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |f: &str| fs::read_to_string(root.join(f)).unwrap();
+    // `pub fn`, `pub const fn` and `pub unsafe fn`, indented or not, in the two source files
     let mut found = BTreeSet::new();
     for f in ["crates/oa-math/src/order.rs", "crates/oa-math/src/nan.rs"] {
-        for line in fs::read_to_string(root.join(f)).unwrap().lines() {
-            if let Some(rest) = line.strip_prefix("pub fn ") {
-                found.insert(rest.split(['(', '<']).next().unwrap().to_string());
+        for line in read(f).lines() {
+            let mut rest = line.trim_start();
+            let Some(r) = rest.strip_prefix("pub ") else {
+                continue;
+            };
+            rest = r;
+            for q in ["const ", "unsafe ", "async "] {
+                rest = rest.strip_prefix(q).unwrap_or(rest);
+            }
+            if let Some(name) = rest.strip_prefix("fn ") {
+                found.insert(name.split(['(', '<', ' ']).next().unwrap().to_string());
+            }
+        }
+    }
+    // and what the crate root re-exports from those two modules
+    let lib = read("crates/oa-math/src/lib.rs");
+    let mut exported = BTreeSet::new();
+    for stmt in lib.split(';') {
+        let stmt = stmt.trim();
+        for m in ["order", "nan"] {
+            if let Some(list) = stmt.rfind(&format!("pub use {m}::")).map(|k| &stmt[k..]) {
+                let body = list.split_once("::").unwrap().1;
+                for n in body
+                    .trim_matches(|c| c == '{' || c == '}' || c == ' ')
+                    .split(',')
+                {
+                    let n = n.trim();
+                    if !n.is_empty() {
+                        exported.insert(n.to_string());
+                    }
+                }
             }
         }
     }
@@ -3664,7 +3685,8 @@ fn the_helper_list_holds_every_public_function_of_order_rs_and_nan_rs() {
         .map(|s| (*s).to_string())
         .collect();
     assert!(found.len() >= 16, "{found:?}");
-    assert_eq!(found, listed);
+    assert_eq!(found, listed, "public fns of order.rs and nan.rs");
+    assert_eq!(exported, listed, "re-exports of the crate root");
 }
 
 // REQ: OA-TRC-260
@@ -3694,6 +3716,11 @@ fn every_crate_reads_float_sign_and_order_through_oa_math_in_non_test_code() {
         ("pub fn f(x: f64) -> f64 { x.signum() }\n", "signum"),
         ("pub fn f(x: f64) -> f64 { (x * 2.0).signum() }\n", "signum"),
         (
+            "pub fn f(v: &[i64]) -> Vec<i64> { v.iter().map(|n| n.signum()).collect() }\n",
+            "signum",
+        ),
+        ("pub fn f(d: i64) -> i64 { d.signum() }\n", "signum"),
+        (
             "pub fn f(v: &[f64]) -> Vec<f64> { v.iter().copied().map(f64::signum).collect() }\n",
             "signum",
         ),
@@ -3715,7 +3742,7 @@ fn every_crate_reads_float_sign_and_order_through_oa_math_in_non_test_code() {
     }
     // an integer's signum, the canonical forms, test code, the tests directory and strings pass
     for src in [
-        "pub fn f(x: i64) -> i64 { x.signum() }\n",
+        "pub fn f(x: i64) -> i64 { i64::signum(x) }\n",
         "pub fn f(x: i32) -> i32 { i32::signum(x) }\n",
         "pub fn f(x: f64) -> f64 { oa_math::signum_canon_f64(x) }\n",
         "pub fn f(a: f64, b: f64) -> core::cmp::Ordering { oa_math::cmp_canon_f64(a, b) }\n",

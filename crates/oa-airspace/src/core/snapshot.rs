@@ -127,7 +127,7 @@ fn count(table: &'static str, n: usize) -> Result<u32, SnapshotError> {
 }
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_le_bytes());
+    out.extend_from_slice(&u32::to_le_bytes(v));
 }
 
 fn put_header(out: &mut Vec<u8>, tag: &[u8; 4], rows: u32) {

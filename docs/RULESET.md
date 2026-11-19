@@ -209,24 +209,23 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     a float method; a `Name::<float method>` path is allowed only when the qualifier is `oa_math`,
     `oa_ieee`, a core workspace crate, `self`/`super`/`crate`, a module the crate declares or (for
     `rem_euclid` and `div_euclid`) an integer type, and fails on any other qualifier;
-  - takes the bits of a float (`to_bits`, `f64::to_bits(x)`, `<f64>::to_bits(x)`, the path as a value
-    (`.map(f64::to_bits)`, `let f = f64::to_bits;`)) only from `oa_math::canon_nan(x)` or
-    `oa_math::canon_nan_f32(x)` (`oa-math` itself excepted). Amended 2026-11-19: every `to_le_bytes`,
-    `to_be_bytes` and `to_ne_bytes` in core code fails unless its receiver is shown to be an integer or
-    canonical, which is read from an integer literal (`3u64`, `7`), an `as <integer>` cast, `u64::from(..)`
-    and the like, `.to_bits()` or `.len()`, a name, parameter or `let` declared with an integer type in the
-    same `fn`, a struct field, tuple-struct field, constant or `fn` return type that some core crate declares
-    as an integer, or `oa_math::canon_nan(x).to_bits()`; the path form is allowed only with an integer type
-    (`u32::to_le_bytes(x)`). Anything else fails with "cannot tell this receiver is not a float;
-    canonicalise or give it an integer type": a closure parameter, a `for` variable, a call of an
-    unknown function, a field of an unseen type, `oa_math::sqrt(v).to_le_bytes()`. The helpers of `oa_math`
-    that core code uses (`canon_nan`, `canon_nan_f32` and every function of `order.rs`) are reached
-    only as `oa_math::<name>(..)`: a `use` of one (also `use oa_math::*`) fails, and so does any
-    other occurrence of such a name in core code, a bare call, a local, a parameter, a definition or a
-    path through another crate, because the scan reads no types and a bare name could be anything.
-    IEEE-754 fixes that an invalid operation gives a NaN, not which one, and its sign
-    and payload differ between a compile-time fold, x86-64 and aarch64, so a float that feeds a
-    hash, a digest or a written output is made canonical first (B6);
+  - takes the bits of a float only through `oa_math` (amended 2026-11-19, replacing the earlier reading of
+    what a receiver is, which a shadowing name or a type alias defeated): a `to_bits` token in core code
+    fails, method or path, whatever the qualifier, unless it is the method form directly on the result of
+    `oa_math::canon_nan(..)` or `oa_math::canon_nan_f32(..)`, the call alone or inside extra
+    parentheses. `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` are written only as a path with an integer
+    primitive qualifier, `u64::to_le_bytes(x)` (a float argument does not compile there); the method form
+    fails in core whatever the receiver, and so does a path with any other qualifier. A module named after
+    an integer primitive fails. The helpers of `oa_math` that core code uses (`canon_nan`, `canon_nan_f32` and
+    every function of `order.rs`) are reached only as `oa_math::<name>(..)`: a `use` of one (also
+    `use oa_math::*`) fails, and so does any other occurrence of such a name, a bare call, a local, a
+    parameter, a definition or a path through another crate. `oa_math` itself is only the external crate: a
+    core `mod oa_math`, `use .. as oa_math`, `extern crate .. as oa_math`, a local of that name, a
+    `crate::oa_math` path, or a dependency key `oa_math` that is not the oa-math package fails.
+    `capacity()` (a `Vec`, a `String`, any) fails in core code: the allocator chooses the value (an
+    allocation probe for tests lives in a shell module). IEEE-754 fixes that an invalid operation gives a
+    NaN, not which one, and its sign and payload differ between a compile-time fold, x86-64 and aarch64, so
+    a float that feeds a hash, a digest or a written output is made canonical first (B6);
   - takes the sign, order and extremes of floats only from `oa_math` (`oa-math` itself excepted): no
     `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` (their results depend on the sign
     and payload of a NaN, which differ between machines) and no float `signum`, `min`, `max` or `clamp`
@@ -234,20 +233,22 @@ the rule unless an exception is recorded at the site as a comment naming the rul
     different bits). `oa_math` has `cmp_canon_f64`/`_f32` (total order after `canon_nan`),
     `is_sign_negative_canon_f64`/`_f32`, `copysign_canon_f64`/`_f32` and `min_f64`/`max_f64`/`clamp_f64`
     (and `f32`) with defined results: a NaN argument is ignored, `-0.0` is the smaller zero;
-  - and, in every crate of the workspace whatever its class (new 2026-11-19), reads the sign and order
-    of a float only through `oa_math` in non-test code (`src`, `examples`, `benches`; not a `tests`
-    directory or `#[cfg(test)]` item): no `total_cmp`, `is_sign_negative`, `is_sign_positive`,
-    `copysign` and no `signum` whose receiver is not shown to be an integer, outside
+  - and, in every crate of the workspace whatever its class (new 2026-11-19), uses the five names
+    `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` and `signum` only through `oa_math`,
+    in non-test code (`src`, `examples`, `benches`; not a `tests` directory or `#[cfg(test)]` item), outside
     `crates/oa-math/src/order.rs`. A sort or a selection that reads them can order a NaN differently
-    on two machines, and a hash or an output taken after it would differ. `oa_math` has
-    `signum_canon_f64`/`_f32` beside the others. This reaches the unsplit and shell crates, which the
-    other float rules of this section do not;
+    on two machines, and a hash or an output taken after it would differ. `signum` is allowed only as the
+    integer path `i64::signum(x)` (the compiler checks the type) or as `oa_math::signum_canon_f64`/`_f32`;
+    the method form `.signum()` fails everywhere. The scan covers `src`, `examples` and `benches`; a crate-root
+    `build.rs` would not be scanned, and the workspace has none (the files named `build.rs` are modules under
+    `src/shell`, which are scanned). This reaches the unsplit and shell crates, which the other float rules
+    of this section do not;
 
   Known lexical limits (the checker reads tokens; it resolves no names and infers no types):
   - `{:?}` or `{}` of a fn item or fn pointer, and `f as usize` of a fn item, print or cast an
     address and look like other uses; the fn-pointer cast ban, the `{:p}` ban and the module list
     narrow the ways to reach them, review catches the rest;
-  - a float is recognised by evidence, never proved. The rules about `signum` (in core), `min`,
+  - a float is recognised by evidence, never proved. The rules about `min`,
     `max` and `clamp` see a float receiver (or, for `min`, `max`, `clamp`, a float argument) only when
     it is a float literal, an `as f32`/`as f64` cast, an `f32::`/`f64::`/`<f64>::` path, a name that
     the same `fn` declares or binds as a float (a typed parameter or `let`, a tuple pattern or tuple type,

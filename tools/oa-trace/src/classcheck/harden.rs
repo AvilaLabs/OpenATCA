@@ -114,14 +114,47 @@ pub const HELPERS: &[&str] = &[
 ];
 const BYTES: &[&str] = &["to_le_bytes", "to_be_bytes", "to_ne_bytes"];
 
-/// Whether `toks[i]` starts a call of `canon_nan(..)` or `canon_nan_f32(..)`, bare or through
-/// `oa_math::`; returns the index just past its argument group.
+/// Whether `toks[i]` starts a call `oa_math::canon_nan(..)` or `oa_math::canon_nan_f32(..)`, by
+/// that qualified path only; returns the index just past its argument group.
 fn canon_call_end(toks: &[Tok], i: usize) -> Option<usize> {
-    let mut j = i;
-    if matches!(s(toks, j), "oa_math") && s(toks, j + 1) == "::" {
-        j += 2;
+    (s(toks, i) == "oa_math"
+        && s(toks, i + 1) == "::"
+        && CANON.contains(&s(toks, i + 2))
+        && s(toks, i + 3) == "(")
+        .then(|| skip_group(toks, i + 3))
+}
+
+/// Whether the `to_bits` at `toks[i]` is the method form on the result of a qualified
+/// `oa_math::canon_nan(..)` / `canon_nan_f32(..)` call, the call alone or inside extra parentheses.
+fn canon_to_bits(toks: &[Tok], i: usize) -> bool {
+    if i < 2 || s(toks, i - 1) != "." || s(toks, i - 2) != ")" || !call_at(toks, i + 1) {
+        return false;
     }
-    (CANON.contains(&s(toks, j)) && s(toks, j + 1) == "(").then(|| skip_group(toks, j + 1))
+    let mut close = i - 2;
+    loop {
+        let Some(open) = open_of(toks, close) else {
+            return false;
+        };
+        // a call's own argument group: `oa_math::canon_nan(x)` directly before `.to_bits()`
+        if open >= 3 && canon_call_end(toks, open - 3) == Some(close + 1) {
+            return open < 4 || s(toks, open - 4) != "::";
+        }
+        // extra parentheses: not an argument group, so not after a name, `)`, `]`, `>` or `?`
+        let before = s(toks, open.wrapping_sub(1));
+        let argument = open >= 1
+            && ((is_word(before)
+                && !matches!(before, "return" | "in" | "if" | "match" | "else" | "while"))
+                || matches!(before, ")" | "]" | ">" | "?"));
+        if argument || open + 1 >= close {
+            return false;
+        }
+        if s(toks, open + 1) == "(" && skip_group(toks, open + 1) == close {
+            close = skip_group(toks, open + 1) - 1;
+            continue;
+        }
+        return canon_call_end(toks, open + 1) == Some(close)
+            && (open < 1 || s(toks, open - 1) != "::");
+    }
 }
 
 /// `use` statements of the file: token ranges from after `use` up to `;`.
@@ -148,8 +181,10 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
     let math = ctx.math;
     let guard = guard_mask(toks);
     let ev = Evidence::new(toks, ctx.floats);
-    let is_math_root =
-        |w: &str| w == "oa_math" || ctx.aliases.get(w).is_some_and(|t| t == "oa-math");
+    // only the external crate `oa_math` (the dependency key, when the crate declares one, must
+    // name the oa-math package); a module, import rename or local of that name is not it
+    let math_dep = ctx.aliases.get("oa_math").is_none_or(|t| t == "oa-math");
+    let is_math_root = |w: &str| w == "oa_math" && math_dep;
     // oa_math's helpers are called by qualified path only: an import, a bare call or a local
     // of the same name could be anything, and the scan reads no types
     for (from, to) in use_statements(toks) {
@@ -187,6 +222,49 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
         let prev = if i == 0 { "" } else { s(toks, i - 1) };
         let next = s(toks, i + 1);
         let qual = s(toks, i.wrapping_sub(2));
+        if w == "oa_math"
+            && !math
+            && (next != "::"
+                || prev == "::"
+                || matches!(
+                    prev,
+                    "mod"
+                        | "as"
+                        | "fn"
+                        | "let"
+                        | "mut"
+                        | "const"
+                        | "static"
+                        | "type"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "trait"
+                        | "ref"
+                        | "crate"
+                        | "impl"
+                ))
+        {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: `oa_math` in core code names only the external crate, as the head of a path `oa_math::..`; a module, rename, local or parameter of that name fails",
+            ));
+        }
+        if w == "capacity" && matches!(prev, "." | "::") && next == "(" {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: `capacity()` is a value the allocator chooses; compare lengths or keep an explicit capacity value",
+            ));
+        }
+        if super::INT_TYPES.contains(&w) && prev == "mod" && !math {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: a module named after an integer primitive would capture `u64::to_le_bytes(x)`",
+            ));
+        }
         if HELPERS.contains(&w)
             && !math
             && !in_use.contains(&i)
@@ -300,43 +378,30 @@ fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
     let path = float_path(toks, i);
     let method = prev == "." && call_at(toks, i + 1);
     match w {
-        "to_bits" if method || path => {
-            // the receiver (or the UFCS argument) must be `canon_nan(..)`: a NaN's sign and
-            // payload are not portable; a path used as a value (`.map(f64::to_bits)`) is not
-            let canon = if prev == "." {
-                i >= 2
-                    && s(toks, i - 2) == ")"
-                    && open_of(toks, i - 2)
-                        .is_some_and(|o| o >= 1 && CANON.contains(&s(toks, o - 1)))
-            } else if call_at(toks, i + 1) {
-                let open = skip_turbofish(toks, i + 1);
-                canon_call_end(toks, open + 1) == Some(skip_group(toks, open) - 1)
-            } else {
-                false
-            };
-            if !canon {
+        "to_bits" => {
+            // every `to_bits` token, method or path, any qualifier, fails unless it is the method
+            // on the result of `oa_math::canon_nan(..)`: a NaN's sign and payload are not portable
+            if !canon_to_bits(toks, i) {
                 hits.push(hit(
                     line,
                     "to_bits",
-                    "B8: a float's bits in core code come from `oa_math::canon_nan(x).to_bits()`, a NaN's sign and payload differ between machines",
+                    "B8: `to_bits` in core code is allowed only directly after `oa_math::canon_nan(x)` or `oa_math::canon_nan_f32(x)`, a NaN's sign and payload differ between machines",
                 ));
             }
         }
-        _ if BYTES.contains(&w) && (prev == "::" || method) => {
-            // an integer's bytes only: the receiver (or the `u32::` of the path) must be shown to
-            // be an integer or a canonical float; unknown is not a pass
-            let ok = if method {
-                i >= 2 && ev.recv_is_int(i - 2)
-            } else {
-                let q = s(toks, i.wrapping_sub(2));
-                super::INT_TYPES.contains(&q)
-                    || (q == ">" && super::INT_TYPES.contains(&s(toks, i.wrapping_sub(3))))
-            };
+        _ if BYTES.contains(&w) => {
+            // only `u64::to_le_bytes(x)` with an integer primitive qualifier: the compiler
+            // then rejects a float argument, which the scan cannot tell from any other receiver
+            let q = s(toks, i.wrapping_sub(2));
+            let ok = prev == "::"
+                && super::INT_TYPES.contains(&q)
+                && (s(toks, i.wrapping_sub(3)) != "::"
+                    || s(toks, i.wrapping_sub(4)) == "primitive");
             if !ok {
                 hits.push(hit(
                     line,
                     w,
-                    "B8: cannot tell this receiver is not a float; canonicalise it (`oa_math::canon_nan(x).to_bits()`, then the integer's bytes) or give it an integer type",
+                    &format!("B8: write `u64::{w}(x)` with an integer primitive as the qualifier (the compiler then refuses a float); a float's bytes come from `oa_math::canon_nan(x).to_bits()` and then the integer's"),
                 ));
             }
         }
@@ -382,13 +447,10 @@ fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
 /// depend on the sign and payload of a NaN, which differ between machines, so a sort or a
 /// selection that reads them can pick differently on two of them. Returns the hits of the
 /// non-test tokens of `src`, the out-of-line test modules and whether the whole file is test code.
-/// `signum` of a receiver shown to be an integer is not a float read and passes.
+/// `signum` is allowed only as the integer path `i64::signum(x)`, which the compiler checks.
 pub(super) fn sign_order_hits(src: &str) -> (Vec<Hit>, Vec<String>, bool) {
     let st = strip_test_items(tokenize(&mask(src)));
     let toks = &st.toks;
-    let mut facts = super::floats::FloatFacts::default();
-    facts.add_source(src);
-    let ev = Evidence::new(toks, &facts);
     let mut hits = Vec::new();
     for (i, t) in toks.iter().enumerate() {
         let w = t.s.as_str();
@@ -398,16 +460,14 @@ pub(super) fn sign_order_hits(src: &str) -> (Vec<Hit>, Vec<String>, bool) {
             "is_sign_negative" | "is_sign_positive" => {
                 "oa_math::is_sign_negative_canon_f64 or is_sign_negative_canon_f32 (is_sign_positive is its negation)"
             }
-            "signum" => "oa_math::signum_canon_f64 or signum_canon_f32",
+            "signum" => "oa_math::signum_canon_f64 or signum_canon_f32, or the integer path `i64::signum(x)`",
             _ => continue,
         };
-        if w == "signum" {
-            let q = s(toks, i.wrapping_sub(2));
-            let int_path = s(toks, i.wrapping_sub(1)) == "::" && super::INT_TYPES.contains(&q);
-            let int_method = s(toks, i.wrapping_sub(1)) == "." && i >= 2 && ev.recv_is_int(i - 2);
-            if int_path || int_method {
-                continue;
-            }
+        if w == "signum"
+            && s(toks, i.wrapping_sub(1)) == "::"
+            && super::INT_TYPES.contains(&s(toks, i.wrapping_sub(2)))
+        {
+            continue;
         }
         hits.push(hit(
             t.line,

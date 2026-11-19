@@ -12,6 +12,7 @@ use oa_airspace::snapshot::{decode, encode};
 use oa_display::cli;
 use oa_display::list::*;
 use oa_display::palette as pal;
+use oa_display::probe::list_capacities;
 use oa_display::project::{project, ring_radius16, NM_M};
 use oa_display::raster::{frame_digest, frame_len, rasterize, render, FrameSpec, RenderError};
 use oa_display::scene::*;
