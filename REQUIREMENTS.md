@@ -3138,7 +3138,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   address that is only unchecked (too few shared times) is kept. `AssocConfig::hint_over_plan` (default on) turns the
   rule off for protocols frozen before it. The case list holds the first 200 cases by severity; the ASSOC table
   counts the cases left out ("more cases not listed") and the truth addresses associated with more than one ERAM
-  flight, and lists them.
+  flight at the same time (time spans, first to last sample, that overlap; consecutive legs do not), and lists them.
 
 ## Winds aloft (oa-wind)
 

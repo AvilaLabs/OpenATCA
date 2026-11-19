@@ -274,14 +274,13 @@ fn truth_addresses_with_several_flights_are_counted_and_listed_and_a_cut_list_sa
     let asc = find(&out, "ASSOC").unwrap();
     let get = |k: &str| asc.scalars.iter().find(|(n, _)| n == k).unwrap().1;
     assert_eq!(
-        get("truth addresses associated with more than one ERAM flight"),
+        get("truth addresses associated with more than one ERAM flight at the same time"),
         1.0
     );
     assert_eq!(get("more cases not listed (the list is cut at 200)"), 0.0);
-    assert!(asc
-        .cases
-        .iter()
-        .any(|l| l.contains("truth address B00001 associated with 2 ERAM flights")));
+    assert!(asc.cases.iter().any(
+        |l| l.contains("truth address B00001 associated with 2 ERAM flights at the same time")
+    ));
     // 205 hint-over-plan flights and the one shared address make 206 lines; 200 are listed.
     let many = vec![(FAR, NEAR, 6); 205];
     let leg = world(&many);
@@ -297,4 +296,64 @@ fn truth_addresses_with_several_flights_are_counted_and_listed_and_a_cut_list_sa
     assert_eq!(asc.cases.len(), 200);
     let get = |k: &str| asc.scalars.iter().find(|(n, _)| n == k).unwrap().1;
     assert_eq!(get("more cases not listed (the list is cut at 200)"), 6.0);
+}
+
+/// Flights over `NEAR`'s track, each with `n` samples starting at sample `first`.
+fn spans(list: &[(i64, i64)]) -> oa_bench::legacy::Legacy {
+    let mut leg = new_legacy();
+    for (k, &(first, n)) in list.iter().enumerate() {
+        let f = flight_ix(&mut leg, k as u128 + 1).unwrap();
+        leg.flights.addr[f as usize] = NEAR;
+        leg.flights.callsign[f as usize][..6].copy_from_slice(b"HINT01");
+        for i in first..first + n {
+            let t = sample(41.0, T0_MS + 12_000 * i);
+            push_th(
+                &mut leg,
+                f,
+                T0_MS + 12_000 * i,
+                NO_TIME,
+                (t.lat * 1e7) as i32,
+                (t.lon * 1e7) as i32,
+                30_000,
+                None,
+                false,
+            );
+        }
+    }
+    leg
+}
+
+// REQ: OA-BENCH-132
+#[test]
+fn only_flights_at_the_same_time_count_as_sharing_a_truth_address_and_a_chunked_run_agrees() {
+    use oa_bench::chunked::{benchmark_chunk, chunk_add, chunk_finish, ChunkAcc};
+    let legs = legs();
+    let truth = Truth {
+        query: &query,
+        legs: &legs,
+    };
+    let key = "truth addresses associated with more than one ERAM flight at the same time";
+    for (list, want) in [
+        (vec![(0, 6), (3, 6)], 1.0), // overlapping
+        (vec![(0, 6), (6, 6)], 0.0), // consecutive legs
+    ] {
+        let leg = spans(&list);
+        let cfg = self_test_config();
+        let out = run_benchmark(&leg, &truth, &env(), &cfg);
+        let asc = find(&out, "ASSOC").unwrap();
+        let v = asc.scalars.iter().find(|(n, _)| n == key).unwrap().1;
+        assert_eq!(v, want, "{list:?}");
+        assert_eq!(
+            asc.cases.iter().any(|l| l.contains("at the same time")),
+            want > 0.0
+        );
+        let tix = index_truth(&legs);
+        let c = benchmark_chunk(&leg, &truth, &tix, &env(), &cfg, (0, u32::MAX));
+        let mut acc = ChunkAcc::default();
+        chunk_add(&mut acc, c).unwrap();
+        let (chunked, _) = chunk_finish(acc, &cfg).unwrap();
+        let ca = find(&chunked, "ASSOC").unwrap();
+        assert_eq!(ca.scalars, asc.scalars);
+        assert_eq!(ca.cases, asc.cases);
+    }
 }

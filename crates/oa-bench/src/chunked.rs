@@ -335,7 +335,7 @@ pub fn benchmark_chunk(
     let mut assoc_cases = association_case_lines(leg, &ix, &assoc);
     let assoc_cases_total = assoc_cases.len() as u64;
     sort_cases(&mut assoc_cases);
-    let duplicate_addrs = duplicate_addr_groups(&assoc).len() as u64;
+    let duplicate_addrs = duplicate_addr_groups(leg, &ix, &assoc).len() as u64;
     // Hint-over-plan association can put `assoc.addr` outside the chunk's range (and so refuse
     // the chunk below); chunked runs only score tracker output, which has no address hint.
     let in_range = |a: u32| a == NONE || (a >= range.0 && a <= range.1);
