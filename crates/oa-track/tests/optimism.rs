@@ -341,7 +341,7 @@ fn optimism() {
                 d.len(),
                 d.last().copied().unwrap_or(f64::NAN)
             );
-            if !(p99 <= MAX_STEPBACK_P99_M) {
+            if p99.is_nan() || p99 > MAX_STEPBACK_P99_M {
                 failures.push(format!(
                     "cell {}: step-back p99 {p99:.3} m above {MAX_STEPBACK_P99_M}",
                     cell.name
