@@ -24,4 +24,4 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::{frame, rows};
-pub use crate::shell::{adapt, cli};
+pub use crate::shell::{adapt, cli, store};

@@ -19,10 +19,8 @@ use oa_display::traffic::{
 };
 use oa_scope_replay::adapt::row_flags;
 use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
-use oa_scope_replay::rows::{
-    callsigns_build, store_add, store_finish, targets_at, ConvertStats, RowColumns, RowStore,
-    DEFAULT_CONVERT,
-};
+use oa_scope_replay::rows::{targets_at, ConvertStats, RowColumns, RowStore, DEFAULT_CONVERT};
+use oa_scope_replay::store::{callsigns_build, store_add, store_finish};
 use oa_track::{r95_m_of, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK, O_UNCERTAIN};
 
 const S: i64 = 1_000_000_000;

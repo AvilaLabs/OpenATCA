@@ -311,7 +311,8 @@ pub fn targets_clear(s: &mut TargetSet) {
     s.trail_lon_e7.clear();
 }
 
-fn position_ok(lat_e7: i32, lon_e7: i32) -> bool {
+/// True when `lat_e7`, `lon_e7` is a position on the globe (within 90 and 180 degrees).
+pub fn position_valid(lat_e7: i32, lon_e7: i32) -> bool {
     (-LAT_E7_MAX..=LAT_E7_MAX).contains(&lat_e7) && (-LON_E7_MAX..=LON_E7_MAX).contains(&lon_e7)
 }
 
@@ -321,10 +322,10 @@ fn malformed(t: &Target) -> Option<&'static str> {
     if n > MAX_TRAIL {
         return Some("trail length above the maximum");
     }
-    if !position_ok(t.lat_e7, t.lon_e7) {
+    if !position_valid(t.lat_e7, t.lon_e7) {
         return Some("position outside the globe");
     }
-    if t.trail.iter().take(n).any(|p| !position_ok(p.0, p.1)) {
+    if t.trail.iter().take(n).any(|p| !position_valid(p.0, p.1)) {
         return Some("history position outside the globe");
     }
     if t.flags & !FLAGS_KNOWN != 0 {
@@ -425,6 +426,9 @@ pub struct TrafficStats {
     pub leader_failed: u32,
     /// 95% circles not drawn although the radius is known (the geodesic or the projection failed).
     pub circle_failed: u32,
+    /// 95% circles drawn smaller than true because the radius was clamped to the largest the display
+    /// list takes (an absurd radius).
+    pub circle_radius_clamped: u32,
     /// History dots not drawn because the position did not project.
     pub trail_dropped: u32,
     /// Altitudes beyond what the data block can show, written `999+` or `-99-`: shown, not lost.
@@ -451,6 +455,7 @@ pub fn traffic_loss(s: &TrafficStats) -> u64 {
         s.leader_bad_track,
         s.leader_failed,
         s.circle_failed,
+        s.circle_radius_clamped,
         s.trail_dropped,
         s.text_clipped,
     ]
@@ -603,20 +608,22 @@ fn add(p: (i32, i32), dx: i32, dy: i32) -> (i32, i32) {
 }
 
 /// Pixel radius (1/16) of a circle of true radius `metres` about the target: the screen distance
-/// from the target to the point `metres` east of it.
+/// from the target to the point `metres` east of it, and whether it was clamped to the largest the
+/// display list takes (counted by the caller).
 fn true_radius16(
     proj: &Projection,
     ell: &Ellipsoid,
     here: (i32, i32),
     at: LatLon,
     metres: f64,
-) -> Option<i32> {
+) -> Option<(i32, bool)> {
     let east = ell.direct(at, 90.0, metres).ok()?.position;
     let (lat, lon) = (to_e7(east.lat())?, to_e7(east.lon())?);
     let p = project(proj, lat, lon)?;
     let d = oa_math::hypot(f64::from(p.0 - here.0), f64::from(p.1 - here.1));
-    d.is_finite()
-        .then_some(oa_ieee::round(d).min(f64::from(1 << 28)) as i32)
+    let max = f64::from(1 << 28);
+    let r = oa_ieee::round(d);
+    d.is_finite().then_some((r.min(max) as i32, r > max))
 }
 
 fn to_e7(deg: f64) -> Option<i32> {
@@ -641,7 +648,7 @@ pub enum MapPos {
 
 /// Classifies a position against the map area (see [`MapPos`]).
 pub fn map_position(proj: &Projection, lat_e7: i32, lon_e7: i32) -> MapPos {
-    if !position_ok(lat_e7, lon_e7) {
+    if !position_valid(lat_e7, lon_e7) {
         return MapPos::Invalid;
     }
     let Some((x, y)) = project(proj, lat_e7, lon_e7) else {
@@ -910,7 +917,10 @@ pub fn build_traffic(
             if t.r95.is_finite() && t.r95 > 0.0 {
                 let r = at.and_then(|a| true_radius16(proj, ell, c, a, f64::from(t.r95)));
                 match r {
-                    Some(r) => push_circle(l, c, r, palette::TARGET, LAYER_SYMBOL)?,
+                    Some((r, clamped)) => {
+                        stats.circle_radius_clamped += u32::from(clamped);
+                        push_circle(l, c, r, palette::TARGET, LAYER_SYMBOL)?;
+                    }
                     None => {
                         stats.circle_failed += 1;
                         no_circle = true;

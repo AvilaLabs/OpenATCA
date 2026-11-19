@@ -4,9 +4,10 @@
 //! `O_*` bits to the core's `RF_*` bits), with no decision in it.
 
 use crate::core::rows::{
-    callsigns_build, CallsignStats, Callsigns, RowColumns, RowsError, RF_COAST, RF_HAS_ALT,
-    RF_REACQUIRED, RF_UNCERTAIN,
+    CallsignStats, Callsigns, RowColumns, RowsError, RF_COAST, RF_HAS_ALT, RF_REACQUIRED,
+    RF_UNCERTAIN,
 };
+use crate::store::callsigns_build;
 use oa_adsb::Reports;
 use oa_track::{r95_m_of, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_UNCERTAIN};
 

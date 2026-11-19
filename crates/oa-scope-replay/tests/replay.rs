@@ -19,6 +19,7 @@ use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
 use oa_scope_replay::rows::*;
+use oa_scope_replay::store::*;
 use oa_sha256::to_hex;
 use oa_track::{output_new, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK, O_UNCERTAIN};
 

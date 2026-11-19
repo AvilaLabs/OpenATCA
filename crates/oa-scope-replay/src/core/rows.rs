@@ -1,7 +1,8 @@
 //! Tracker rows to displayed targets (**core**, B1, B2): pure functions of plain columns, the
 //! callsigns and the time asked for. Every public function here is core. The functions that build
-//! the store ([`store_add`], [`store_finish`], [`callsigns_build`]) allocate and run once, before
-//! the first frame (C1, C6); [`targets_at`] and everything it calls allocate nothing.
+//! the store and the callsigns (`store_add`, `store_finish`, `callsigns_build`) are shell
+//! ([`crate::shell::store`]): they allocate and run once per drain, before the frames (C1, C6).
+//! This module owns the data types and [`targets_at`], which allocates nothing.
 //!
 //! The core sees no tracker or decoder type (D3): the shell hands over [`RowColumns`], plain
 //! slices, with the 95% radius already reduced to a value and the flags in this module's own
@@ -26,8 +27,8 @@
 
 use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
-    map_position, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S, MAX_TRAIL, NO_ALT,
-    NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+    map_position, position_valid, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S,
+    MAX_TRAIL, NO_ALT, NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -151,18 +152,22 @@ pub struct Row {
 }
 const _: () = assert!(core::mem::size_of::<Row>() == 32);
 
-/// The rows of one address in columns (A3), sharing an index; in time order once [`store_finish`]
-/// has run. Private to this module (A4, A5).
+/// The rows of one address in columns (A3), sharing an index; in time order once `store_finish`
+/// (shell) has run. Visible to this crate only, for the shell's builder (A4, A5).
+// A7.2: cold struct, size guard waived (one per address, struct-of-arrays).
 #[derive(Clone, Debug, Default, PartialEq)]
-struct AddrRows {
-    t_ns: Vec<i64>,
-    lat_e7: Vec<i32>,
-    lon_e7: Vec<i32>,
-    alt_ft: Vec<i32>,
-    r95_m: Vec<f32>,
-    gs_dkt: Vec<u16>,
-    track_ddeg: Vec<u16>,
-    flags: Vec<u8>,
+pub(crate) struct AddrRows {
+    pub(crate) t_ns: Vec<i64>,
+    pub(crate) lat_e7: Vec<i32>,
+    pub(crate) lon_e7: Vec<i32>,
+    pub(crate) alt_ft: Vec<i32>,
+    pub(crate) r95_m: Vec<f32>,
+    pub(crate) gs_dkt: Vec<u16>,
+    pub(crate) track_ddeg: Vec<u16>,
+    pub(crate) flags: Vec<u8>,
+    /// The times of the rows flagged `RF_REACQUIRED`, in time order once finished: the newest one
+    /// at or before a time is found by binary search (C7).
+    pub(crate) reacq_t: Vec<i64>,
 }
 
 /// Rows by address. Capacities: [`MAX_STORE_ADDRESSES`], [`MAX_ROWS_PER_ADDRESS`],
@@ -170,8 +175,8 @@ struct AddrRows {
 // A7.2: cold struct, size guard waived (one per run); the per-address columns are SoA (A3).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowStore {
-    by_addr: BTreeMap<u32, AddrRows>,
-    rows: usize,
+    pub(crate) by_addr: BTreeMap<u32, AddrRows>,
+    pub(crate) rows: usize,
 }
 
 /// Rows in the store.
@@ -210,6 +215,8 @@ pub struct StoreStats {
     /// 95% radii that are not a number or do not fit `f32`: stored as unknown (NaN), and the
     /// data block of an uncertain target says `R95?`.
     pub r95_bad: u64,
+    /// Rows whose velocity is not a number: stored with the ground speed and the track unknown.
+    pub velocity_not_finite: u64,
 }
 
 /// `a` plus `b`, every count saturating.
@@ -224,6 +231,7 @@ pub fn store_stats_add(a: &mut StoreStats, b: &StoreStats) {
     a.alt_not_finite = a.alt_not_finite.saturating_add(b.alt_not_finite);
     a.speed_clamped = a.speed_clamped.saturating_add(b.speed_clamped);
     a.r95_bad = a.r95_bad.saturating_add(b.r95_bad);
+    a.velocity_not_finite = a.velocity_not_finite.saturating_add(b.velocity_not_finite);
 }
 
 /// The rows of `store_stats` that are work lost: refused for want of room or of a column.
@@ -233,16 +241,8 @@ pub fn store_loss(s: &StoreStats) -> u64 {
         .saturating_add(s.address_rows_full)
 }
 
-fn check_len(column: &'static str, got: usize, want: usize) -> Result<(), RowsError> {
-    if got == want {
-        Ok(())
-    } else {
-        Err(RowsError::ColumnLength { column, got, want })
-    }
-}
-
 /// An altitude as whole feet, clamped to `NO_ALT + 1 ..= i32::MAX`; the flag says it was clamped.
-fn alt_to_ft(alt: f32) -> (i32, bool) {
+pub(crate) fn alt_to_ft(alt: f32) -> (i32, bool) {
     let r = oa_ieee::round(f64::from(alt));
     let lo = f64::from(NO_ALT) + 1.0;
     if r < lo {
@@ -254,175 +254,21 @@ fn alt_to_ft(alt: f32) -> (i32, bool) {
     }
 }
 
-/// Adds the rows of `cols` at or after `keep_from_ns` (earlier ones are not needed for any frame,
-/// and are counted as before the window). The column lengths and the room left in the store are
-/// checked before any row is read; a row that cannot be added later (its address would be
-/// the store's last, or its address is full) is refused and counted.
-pub fn store_add(
-    store: &mut RowStore,
-    cols: &RowColumns<'_>,
-    keep_from_ns: i64,
-) -> Result<StoreStats, RowsError> {
-    let n = cols.t_ns.len();
-    check_len("addr", cols.addr.len(), n)?;
-    check_len("lat_e7", cols.lat_e7.len(), n)?;
-    check_len("lon_e7", cols.lon_e7.len(), n)?;
-    check_len("vel_east_mps", cols.vel_east_mps.len(), n)?;
-    check_len("vel_north_mps", cols.vel_north_mps.len(), n)?;
-    check_len("r95_m", cols.r95_m.len(), n)?;
-    check_len("alt_ft", cols.alt_ft.len(), n)?;
-    check_len("flags", cols.flags.len(), n)?;
-    // Room, from the sizes the input declares, before the work (C7).
-    let wanted = cols.t_ns.iter().filter(|&&t| t >= keep_from_ns).count();
-    if store.rows.saturating_add(wanted) > MAX_STORE_ROWS {
-        return Err(RowsError::TooMany {
-            what: "stored tracker rows",
-            wanted: store.rows.saturating_add(wanted),
-            max: MAX_STORE_ROWS,
-        });
-    }
-    let mut st = StoreStats {
-        rows_in: n as u64,
-        ..StoreStats::default()
-    };
-    for i in 0..n {
-        let (
-            Some(&t_ns),
-            Some(&addr),
-            Some(&lat_e7),
-            Some(&lon_e7),
-            Some(&ve),
-            Some(&vn),
-            Some(&r95),
-            Some(&alt),
-            Some(&flags),
-        ) = (
-            cols.t_ns.get(i),
-            cols.addr.get(i),
-            cols.lat_e7.get(i),
-            cols.lon_e7.get(i),
-            cols.vel_east_mps.get(i),
-            cols.vel_north_mps.get(i),
-            cols.r95_m.get(i),
-            cols.alt_ft.get(i),
-            cols.flags.get(i),
-        )
-        else {
-            st.missing_column += 1;
-            continue;
-        };
-        if t_ns < keep_from_ns {
-            st.before_window += 1;
-            continue;
-        }
-        let (gs_dkt, track_ddeg) = velocity_of(ve, vn);
-        if gs_dkt >= NO_U16 - 1 {
-            st.speed_clamped += 1;
-        }
-        let alt_ft = if flags & RF_HAS_ALT != 0 {
-            if alt.is_finite() {
-                let (a, clamped) = alt_to_ft(alt);
-                st.alt_clamped += u64::from(clamped);
-                a
-            } else {
-                st.alt_not_finite += 1;
-                NO_ALT
-            }
-        } else {
-            NO_ALT
-        };
-        let r95_m = if r95.is_finite() && r95 <= f64::from(f32::MAX) {
-            r95 as f32
-        } else {
-            st.r95_bad += 1;
-            f32::NAN
-        };
-        let row = Row {
-            t_ns,
-            lat_e7,
-            lon_e7,
-            alt_ft,
-            r95_m,
-            gs_dkt,
-            track_ddeg,
-            flags,
-        };
-        let known = store.by_addr.contains_key(&addr);
-        if !known && store.by_addr.len() >= MAX_STORE_ADDRESSES {
-            st.address_table_full += 1;
-            continue;
-        }
-        let v = store.by_addr.entry(addr).or_default();
-        if v.t_ns.len() >= MAX_ROWS_PER_ADDRESS {
-            st.address_rows_full += 1;
-            continue;
-        }
-        v.t_ns.push(row.t_ns);
-        v.lat_e7.push(row.lat_e7);
-        v.lon_e7.push(row.lon_e7);
-        v.alt_ft.push(row.alt_ft);
-        v.r95_m.push(row.r95_m);
-        v.gs_dkt.push(row.gs_dkt);
-        v.track_ddeg.push(row.track_ddeg);
-        v.flags.push(row.flags);
-        store.rows += 1;
-        st.kept += 1;
-    }
-    Ok(st)
-}
-
-/// `col` reordered by `order` (the old index of each new position); false, with `col` unchanged,
-/// when an index is out of range (cannot happen: the order is built from the same length).
-fn gather<T: Copy>(col: &mut Vec<T>, order: &[(i64, u32)]) -> bool {
-    let new: Vec<T> = order
-        .iter()
-        .filter_map(|k| col.get(k.1 as usize).copied())
-        .collect();
-    if new.len() != col.len() {
-        return false;
-    }
-    *col = new;
-    true
-}
-
-/// Puts every address's rows in time order (stable, so equal times keep the tracker's order).
-/// Returns the number of addresses whose rows could not be ordered (cannot happen; it is a count,
-/// not a panic, and the caller fails the run on it).
-pub fn store_finish(store: &mut RowStore) -> u64 {
-    let mut failed = 0u64;
-    for v in store.by_addr.values_mut() {
-        if v.t_ns.is_sorted() {
-            continue;
-        }
-        let mut order: Vec<(i64, u32)> = v.t_ns.iter().copied().zip(0u32..).collect();
-        order.sort_by_key(|k| k.0);
-        let ok = gather(&mut v.t_ns, &order)
-            && gather(&mut v.lat_e7, &order)
-            && gather(&mut v.lon_e7, &order)
-            && gather(&mut v.alt_ft, &order)
-            && gather(&mut v.r95_m, &order)
-            && gather(&mut v.gs_dkt, &order)
-            && gather(&mut v.track_ddeg, &order)
-            && gather(&mut v.flags, &order);
-        failed += u64::from(!ok);
-    }
-    failed
-}
-
 /// The callsign events of one address in time order (A3): from `t_ns` on, the callsign is
 /// `callsign`, or two different ones were heard at exactly that instant (`conflict`).
+// A7.2: cold struct, size guard waived (one per address, struct-of-arrays).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct AddrCalls {
-    t_ns: Vec<i64>,
-    callsign: Vec<[u8; 8]>,
-    conflict: Vec<bool>,
+pub(crate) struct AddrCalls {
+    pub(crate) t_ns: Vec<i64>,
+    pub(crate) callsign: Vec<[u8; 8]>,
+    pub(crate) conflict: Vec<bool>,
 }
 
 /// Callsigns by address.
 // A7.2: cold struct, size guard waived (one per run); the per-address columns are SoA (A3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Callsigns {
-    by_addr: BTreeMap<u32, AddrCalls>,
+    pub(crate) by_addr: BTreeMap<u32, AddrCalls>,
 }
 
 /// What building the callsigns did, by reason (E6).
@@ -446,65 +292,6 @@ pub struct CallsignAt {
     pub callsign: [u8; 8],
     /// Two different callsigns were heard at the newest instant.
     pub conflict: bool,
-}
-
-/// The callsigns heard: the report columns of one length. An empty callsign is not a change. Two
-/// different callsigns at one (address, time) are a conflict at that instant (E6), whatever the
-/// order they came in; the next report with a callsign ends it.
-pub fn callsigns_build(
-    time_ns: &[i64],
-    icao: &[u32],
-    callsign: &[[u8; 8]],
-) -> Result<(Callsigns, CallsignStats), RowsError> {
-    check_len("icao", icao.len(), time_ns.len())?;
-    check_len("callsign", callsign.len(), time_ns.len())?;
-    if time_ns.len() > MAX_CALLSIGN_REPORTS {
-        return Err(RowsError::TooMany {
-            what: "reports for callsigns",
-            wanted: time_ns.len(),
-            max: MAX_CALLSIGN_REPORTS,
-        });
-    }
-    let mut st = CallsignStats {
-        reports_in: time_ns.len() as u64,
-        ..CallsignStats::default()
-    };
-    let mut all: Vec<(i64, u32, [u8; 8])> = Vec::new();
-    for ((&t, &a), &cs) in time_ns.iter().zip(icao).zip(callsign) {
-        if cs.first().is_some_and(|&b| b != 0) {
-            all.push((t, a, cs));
-        } else {
-            st.empty += 1;
-        }
-    }
-    all.sort_unstable();
-    let mut out = Callsigns::default();
-    let mut at = 0usize;
-    while let Some(&(t, a, first)) = all.get(at) {
-        // The group of this (time, address), sorted by callsign: two ends that differ mean a
-        // conflict, whatever else is between them.
-        let mut end = at;
-        while all.get(end).is_some_and(|x| x.0 == t && x.1 == a) {
-            end += 1;
-        }
-        let last = end
-            .checked_sub(1)
-            .and_then(|e| all.get(e))
-            .map_or(first, |x| x.2);
-        let conflict = last != first;
-        st.conflicts += u64::from(conflict);
-        let cs = if conflict { [0; 8] } else { first };
-        let v = out.by_addr.entry(a).or_default();
-        let same = v.callsign.last() == Some(&cs) && v.conflict.last() == Some(&conflict);
-        if !same {
-            v.t_ns.push(t);
-            v.callsign.push(cs);
-            v.conflict.push(conflict);
-            st.changes += 1;
-        }
-        at = end;
-    }
-    Ok((out, st))
 }
 
 /// The newest callsign of `addr` at or before `t_ns`: all NUL and no conflict when none.
@@ -589,6 +376,9 @@ pub struct ConvertStats {
     pub invalid_position: u32,
     /// LOSS: rows with a valid position that does not project, not the scope's edge.
     pub unprojectable: u32,
+    /// LOSS: history dots left out because their position is not on the globe (the target is
+    /// kept, only that dot is dropped).
+    pub trail_dropped: u32,
     /// LOSS: a stored row whose columns could not all be read (cannot happen: they have one length).
     pub columns_inconsistent: u32,
 }
@@ -636,10 +426,8 @@ fn row_at(v: &AddrRows, i: usize) -> Option<Row> {
 }
 
 /// The target for the newest row `i` of `v` at time `t_ns`.
-#[allow(clippy::too_many_arguments)]
 fn target_of(
     v: &AddrRows,
-    i: usize,
     row: &Row,
     addr: u32,
     calls: &Callsigns,
@@ -658,29 +446,25 @@ fn target_of(
     if call.conflict {
         flags |= T_CS_CONFLICT;
     }
-    // Newest reacquired row inside the window, looking back from the newest row. The look-back is
-    // bounded by the rows of one address (MAX_ROWS_PER_ADDRESS) and by the window. A difference
-    // that does not fit an i64 is longer than any window.
+    // Newest reacquired row at or before the time, by binary search over the address's
+    // reacquired times (sorted); inside the window or not at all. A difference that does not fit
+    // an i64 is longer than any window.
     let window = i64::from(cfg.reacq_window_s) * NS_PER_S;
     let mut reacq_age_s = NO_REACQ;
-    for k in (0..=i).rev() {
-        let Some(age) = v
-            .t_ns
-            .get(k)
-            .and_then(|&rt| t_ns.checked_sub(rt))
-            .filter(|&a| a <= window)
-        else {
-            break;
-        };
-        if v.flags.get(k).is_some_and(|f| f & RF_REACQUIRED != 0) {
-            match u16::try_from(age / NS_PER_S)
-                .ok()
-                .filter(|&a| a <= MAX_REACQ_AGE_S)
-            {
-                Some(a) => reacq_age_s = a,
-                None => st.reacq_age_unrepresentable += 1,
-            }
-            break;
+    if let Some(age) = v
+        .reacq_t
+        .partition_point(|&rt| rt <= t_ns)
+        .checked_sub(1)
+        .and_then(|k| v.reacq_t.get(k))
+        .and_then(|&rt| t_ns.checked_sub(rt))
+        .filter(|&a| a <= window)
+    {
+        match u16::try_from(age / NS_PER_S)
+            .ok()
+            .filter(|&a| a <= MAX_REACQ_AGE_S)
+        {
+            Some(a) => reacq_age_s = a,
+            None => st.reacq_age_unrepresentable += 1,
         }
     }
     let mut trail = [(0, 0); MAX_TRAIL];
@@ -697,7 +481,10 @@ fn target_of(
             .and_then(|j| row_at(v, j))
             .filter(|r| tk.checked_sub(r.t_ns).is_some_and(|d| d <= cfg.stale_ns));
         if let Some(r) = hit {
-            if let Some(slot) = trail.get_mut(usize::from(trail_len)) {
+            // A bad history position drops that dot only (E5, E6); the target stays.
+            if !position_valid(r.lat_e7, r.lon_e7) {
+                st.trail_dropped += 1;
+            } else if let Some(slot) = trail.get_mut(usize::from(trail_len)) {
                 *slot = (r.lat_e7, r.lon_e7);
                 trail_len += 1;
             }
@@ -763,7 +550,7 @@ pub fn targets_at(
                 continue;
             }
         }
-        let t = target_of(v, i, &row, addr, calls, t_ns, cfg, &mut st);
+        let t = target_of(v, &row, addr, calls, t_ns, cfg, &mut st);
         // A refusal is counted by the set and shown on the frame.
         if targets_push(set, &t).is_ok() {
             st.added += 1;

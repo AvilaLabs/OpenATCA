@@ -18,18 +18,24 @@
 //! # What the run says it left out, and when it fails (E6, G6)
 //!
 //! The run ends with a report of everything it excluded or lost, each under a named reason and
-//! with its denominator. Three classes:
+//! with its denominator, and the loss line names every loss reason on its own. Two classes:
 //!
-//! * **Shown or by design**, never a failure: reports removed by the ADS-B quality gates and
-//!   records the decoder refused as invalid, measurements the tracker refused as invalid, clip
-//!   frames outside the window, tracker rows before the window, tracks that ended, targets off the
-//!   map, empty callsigns, callsign conflicts (shown as `CS?`), clamped or unknown values (shown).
-//! * **Loss**: damaged clip frames, payloads that could not be decoded, tracker output rows that
-//!   overflowed, tracker measurements refused for capacity or a numerical failure, stored rows
-//!   refused, targets the display refused (full or malformed), and every part of a target that
-//!   could not be drawn.
-//! * Any loss makes the run exit non-zero, after the pictures and the report are written, unless
-//!   `--allow-loss` is given (the report still says what was lost).
+//! * **Shown or by design**, never a failure, because the system did what it is for or the
+//!   screen says so: reports removed by the ADS-B quality gates, records the decoder dropped as
+//!   invalid and measurements the tracker refused as invalid (input that is wrong is refused and
+//!   counted by reason), jump-rejected measurements, clip frames outside the window, status
+//!   frames, tracker rows before the window, tracks that ended, targets off the map, empty
+//!   callsigns, callsign conflicts (shown as `CS?`), clamped or unknown values (shown, and
+//!   altitudes beyond the data block as `999+` or `-99-`).
+//! * **Loss**, work the run was asked to do and did not: damaged clip frames, undecodable
+//!   payloads, reject frames (messages the bridge refused, so input that never arrived),
+//!   tracker output rows that overflowed, tracker measurements refused for capacity or a
+//!   numerical failure (valid input not used), stored rows refused, targets the display refused
+//!   (full or malformed), positions off the globe or that do not project, and every part of a
+//!   target that could not be drawn.
+//!
+//! Any loss makes the run exit with code 3, after the pictures and the report are written, unless
+//! `--allow-loss` is given (the report still says what was lost).
 //!
 //! Exit codes (see the binary): 0 success, 1 a failure (a file, a clip, the tracker), 2 a usage
 //! error, 3 work was lost (the output is written). A `--duration-s` that is not a whole number of
@@ -41,17 +47,16 @@
 use crate::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use crate::frame::{replay_build, replay_new, replay_raster, ReplayConfig, ReplayError};
 use crate::rows::{
-    convert_check, store_add, store_addresses, store_finish, store_loss, store_rows,
-    store_stats_add, CallsignStats, Callsigns, ConvertConfig, RowStore, StoreStats,
-    DEFAULT_CONVERT, MAX_CALLSIGN_REPORTS, NS_PER_S,
+    convert_check, store_addresses, store_loss, store_rows, store_stats_add, CallsignStats,
+    Callsigns, ConvertConfig, RowStore, StoreStats, DEFAULT_CONVERT, MAX_CALLSIGN_REPORTS,
+    NS_PER_S,
 };
+use crate::store::{store_add, store_finish};
 use oa_adsb::{decode_payload_lenient, reports_len, Reports};
 use oa_display::cli::{parse_centre, parse_size};
 use oa_display::project::{MAX_RANGE_NM, MIN_RANGE_NM};
 use oa_display::raster::frame_digest;
-use oa_display::traffic::{
-    traffic_loss, TrafficStyle, DEFAULT_STYLE, MAX_LEADER_MIN, MAX_TARGETS, MAX_TRAIL,
-};
+use oa_display::traffic::{TrafficStyle, DEFAULT_STYLE, MAX_LEADER_MIN, MAX_TARGETS, MAX_TRAIL};
 use oa_sha256::to_hex;
 use oa_track::adsb::{adsb_measurements, AdsbConfig, AdsbStats};
 use oa_track::score::{interval_stats, scoring_config};
@@ -84,7 +89,7 @@ pub const REMOVE_NAMES: [&str; 13] = [
 ];
 
 /// Most frames one run writes.
-pub const MAX_FRAMES: u64 = 100_000;
+pub const MAX_FRAMES: u64 = 10_000;
 /// Shortest step, ns (0.1 s).
 pub const MIN_STEP_NS: i64 = 100_000_000;
 /// Default targets per frame.
@@ -504,12 +509,18 @@ pub struct DecodeTotals {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrackSummary {
     pub reports: usize,
-    /// Clip frames of messages outside the window: not read, not a loss.
+    /// Clip frames (of any kind) outside the window: not read, not a loss.
     pub frames_outside_window: u64,
     /// LOSS: frames the reader refused, and a partial frame at the end.
     pub damaged_frames: u64,
     /// LOSS: payloads in the window that could not be decoded at all.
     pub undecodable_payloads: u64,
+    /// LOSS: reject frames in the window: messages the bridge refused to frame, so input that
+    /// never reached the tracker.
+    pub reject_frames: u64,
+    /// Status frames in the window (connection state changes): counted, not loss, they carry no
+    /// aircraft data.
+    pub status_frames: u64,
     pub decode: DecodeTotals,
     pub adsb: AdsbStats,
     pub measurements: usize,
@@ -548,13 +559,22 @@ pub fn track_window(
     let mut window_full = false;
     let mut dec = DecodeTotals::default();
     let (mut outside, mut undecodable) = (0u64, 0u64);
+    let (mut rejects, mut statuses) = (0u64, 0u64);
     let damaged = oa_feed::read_frames(&mut file, &mut |fr| {
-        if fr.kind != oa_feed::Kind::Message {
-            return;
-        }
         if !(from_ns..=to_ns).contains(&fr.recv_unix_ns) {
             outside += 1;
             return;
+        }
+        match fr.kind {
+            oa_feed::Kind::Message => {}
+            oa_feed::Kind::Reject => {
+                rejects += 1;
+                return;
+            }
+            oa_feed::Kind::Status => {
+                statuses += 1;
+                return;
+            }
         }
         // The window is bounded by a named limit, checked before each payload is added.
         if reports_len(&reports) >= MAX_WINDOW_REPORTS {
@@ -592,6 +612,8 @@ pub fn track_window(
     sum.frames_outside_window = outside;
     sum.damaged_frames = damaged;
     sum.undecodable_payloads = undecodable;
+    sum.reject_frames = rejects;
+    sum.status_frames = statuses;
     sum.decode = dec;
     let (calls, call_stats) =
         callsigns_from_reports(&reports).map_err(|e| failed("callsigns", e))?;
@@ -641,13 +663,24 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-/// True for a file name this tool writes: `hashes.txt` or `frame-` digits `.ppm`.
+/// True for a file name this tool writes: `hashes.txt` or exactly `frame-` four digits `.ppm`
+/// (a run writes at most [`MAX_FRAMES`] frames, so an index never needs more digits).
 fn is_ours(name: &str) -> bool {
     name == "hashes.txt"
         || name
             .strip_prefix("frame-")
             .and_then(|r| r.strip_suffix(".ppm"))
-            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            .is_some_and(|d| d.len() == 4 && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Creates a new file, failing if the name exists in any form (a symlink included, never
+/// followed).
+fn create_new(path: &Path) -> Result<std::fs::File, CliError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| failed(&format!("create {}", path.display()), e))
 }
 
 /// Refuses an output directory that holds anything, unless `overwrite`. A directory that does not
@@ -669,7 +702,9 @@ fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Deletes the files of an earlier run (see [`is_ours`]) from `dir`, and nothing else.
+/// Deletes the files of an earlier run (see [`is_ours`]) from `dir`, and nothing else. A name
+/// like an output that is not a plain file (a symlink, a directory) is an error: it is never
+/// followed and never deleted.
 fn remove_ours(dir: &Path) -> Result<u64, CliError> {
     let mut removed = 0u64;
     let entries =
@@ -677,37 +712,97 @@ fn remove_ours(dir: &Path) -> Result<u64, CliError> {
     for entry in entries {
         let entry = entry.map_err(|e| failed(&format!("read {}", dir.display()), e))?;
         let name = entry.file_name();
-        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
-        if is_file && name.to_str().is_some_and(is_ours) {
-            std::fs::remove_file(entry.path())
-                .map_err(|e| failed(&format!("remove {}", entry.path().display()), e))?;
-            removed += 1;
+        if !name.to_str().is_some_and(is_ours) {
+            continue;
         }
+        let kind = entry
+            .file_type()
+            .map_err(|e| failed(&format!("stat {}", entry.path().display()), e))?;
+        if !kind.is_file() {
+            return Err(CliError::Failed(format!(
+                "{} is not a plain file (a link or a directory); remove it and run again",
+                entry.path().display()
+            )));
+        }
+        std::fs::remove_file(entry.path())
+            .map_err(|e| failed(&format!("remove {}", entry.path().display()), e))?;
+        removed += 1;
     }
     Ok(removed)
 }
 
-/// The frames of a run, summed, with the reasons.
+/// The frames of a run, summed, one field per reason (E6). Sums over frames of what each frame
+/// counted: a track that has ended is counted in every frame it is absent from, so these are
+/// target-frames, not targets.
 // A7.2: cold struct, size guard waived (one per run).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunTotals {
     pub most_drawn: u32,
     pub frames_with_refused: u64,
-    /// Sums over frames of what each frame counted: a track that has ended is counted in every
-    /// frame it is absent from, so these are target-frames, not targets.
+    // Not loss: a scope's edge, an ended track, or something the screen shows.
     pub ended: u64,
     pub off_map: u64,
     pub off_screen: u64,
     pub cs_conflict: u64,
     pub r95_unknown: u64,
-    /// LOSS: targets refused (set full, invalid) and the parts of targets not drawn, summed over
-    /// frames.
+    /// Altitudes written `999+` or `-99-`: shown, not lost.
+    pub alt_display_clamped: u64,
+    // LOSS: targets refused, and the parts of targets not drawn.
     pub refused: u64,
     pub malformed: u64,
-    pub traffic_other: u64,
-    /// LOSS: conversion failures that cannot happen for a checked configuration.
-    pub convert: u64,
+    pub inconsistent: u64,
+    pub invalid_position: u64,
+    pub unprojectable: u64,
+    pub leader_bad_track: u64,
+    pub leader_failed: u64,
+    pub circle_failed: u64,
+    pub circle_radius_clamped: u64,
+    pub trail_dropped: u64,
+    pub text_clipped: u64,
     pub stamp_clipped: u64,
+    // LOSS: rows the conversion could not turn into targets.
+    pub convert_invalid_position: u64,
+    pub convert_unprojectable: u64,
+    pub convert_trail_dropped: u64,
+    pub reacq_age_unrepresentable: u64,
+    pub time_overflow: u64,
+    pub columns_inconsistent: u64,
+}
+
+/// Adds one frame's counts to the run's.
+pub fn totals_add(
+    tot: &mut RunTotals,
+    tf: &oa_display::traffic::TrafficStats,
+    cv: &crate::rows::ConvertStats,
+    refused: u32,
+    stamp_clipped: bool,
+) {
+    tot.most_drawn = tot.most_drawn.max(tf.drawn);
+    tot.frames_with_refused += u64::from(refused > 0);
+    tot.ended += u64::from(cv.ended);
+    tot.off_map += u64::from(cv.off_map);
+    tot.off_screen += u64::from(tf.off_screen);
+    tot.cs_conflict += u64::from(tf.cs_conflict);
+    tot.r95_unknown += u64::from(tf.r95_unknown);
+    tot.alt_display_clamped += u64::from(tf.alt_display_clamped);
+    tot.refused += u64::from(tf.refused);
+    tot.malformed += u64::from(tf.malformed);
+    tot.inconsistent += u64::from(tf.inconsistent);
+    tot.invalid_position += u64::from(tf.invalid_position);
+    tot.unprojectable += u64::from(tf.unprojectable);
+    tot.leader_bad_track += u64::from(tf.leader_bad_track);
+    tot.leader_failed += u64::from(tf.leader_failed);
+    tot.circle_failed += u64::from(tf.circle_failed);
+    tot.circle_radius_clamped += u64::from(tf.circle_radius_clamped);
+    tot.trail_dropped += u64::from(tf.trail_dropped);
+    tot.text_clipped += u64::from(tf.text_clipped);
+    tot.stamp_clipped += u64::from(stamp_clipped);
+    tot.convert_invalid_position += u64::from(cv.invalid_position);
+    tot.convert_unprojectable += u64::from(cv.unprojectable);
+    tot.convert_trail_dropped += u64::from(cv.trail_dropped);
+    tot.reacq_age_unrepresentable += u64::from(cv.reacq_age_unrepresentable);
+    tot.time_overflow += u64::from(cv.time_overflow);
+    tot.columns_inconsistent += u64::from(cv.columns_inconsistent);
 }
 
 fn show_counts(names: &[&str], counts: &[u64]) -> String {
@@ -805,8 +900,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         let t4 = Instant::now();
         if !a.hashes_only {
             let path = a.out_dir.join(format!("frame-{i:04}.ppm"));
-            let file = std::fs::File::create(&path)
-                .map_err(|e| failed(&format!("write {}", path.display()), e))?;
+            let file = create_new(&path)?;
             let mut w = std::io::BufWriter::new(file);
             oa_display::ppm::write_ppm(&mut w, &r.spec, &r.buf)
                 .and_then(|()| w.flush())
@@ -819,28 +913,17 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         hash_ms += ms(t4 - t3);
         write_ms += ms(t5 - t4);
         worst_draw_ms = worst_draw_ms.max(ms(t3 - t1));
-        let (tf, cv) = (&info.traffic, &info.convert);
-        tot.most_drawn = tot.most_drawn.max(tf.drawn);
-        tot.frames_with_refused += u64::from(info.refused > 0);
-        tot.ended += u64::from(cv.ended);
-        tot.off_map += u64::from(cv.off_map);
-        tot.off_screen += u64::from(tf.off_screen);
-        tot.cs_conflict += u64::from(tf.cs_conflict);
-        tot.r95_unknown += u64::from(tf.r95_unknown);
-        tot.refused += u64::from(tf.refused);
-        tot.malformed += u64::from(tf.malformed);
-        tot.traffic_other += traffic_loss(tf)
-            .saturating_sub(u64::from(tf.refused))
-            .saturating_sub(u64::from(tf.malformed));
-        tot.convert += u64::from(cv.reacq_age_unrepresentable)
-            + u64::from(cv.time_overflow)
-            + u64::from(cv.columns_inconsistent)
-            + u64::from(cv.invalid_position)
-            + u64::from(cv.unprojectable);
-        tot.stamp_clipped += u64::from(info.stamp_clipped);
+        totals_add(
+            &mut tot,
+            &info.traffic,
+            &info.convert,
+            info.refused,
+            info.stamp_clipped,
+        );
     }
     let hashes_path = a.out_dir.join("hashes.txt");
-    std::fs::write(&hashes_path, hashes)
+    create_new(&hashes_path)?
+        .write_all(hashes.as_bytes())
         .map_err(|e| failed(&format!("write {}", hashes_path.display()), e))?;
 
     let n = a.frames as f64;
@@ -855,9 +938,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     );
     let _ = writeln!(
         out,
-        "clip     {} payload records read in the window: {} kept, {} dropped as invalid ({} with a bad time), {} of unknown source, {} with a bad measurement; {} clip frames outside the window",
+        "clip     {} payload records read in the window: {} kept, {} dropped as invalid ({} with a bad time), {} of unknown source, {} with a bad measurement; {} clip frames outside the window; in the window {} reject frames (input the bridge refused: loss), {} status frames (not loss), {} damaged frames and {} undecodable payloads (loss)",
         dc.records, dc.kept, dc.dropped, dc.bad_time, dc.unknown_source, dc.bad_measurement,
-        tr.frames_outside_window
+        tr.frames_outside_window, tr.reject_frames, tr.status_frames, tr.damaged_frames,
+        tr.undecodable_payloads
     );
     let _ = writeln!(
         out,
@@ -868,7 +952,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     );
     let _ = writeln!(
         out,
-        "tracker  {} reports, {} measurements ({} refused as invalid: {}; {} jump-rejected), {} tracks confirmed, {} addresses, {} rows kept, {} rows lost, {} bad frames, {:.0} ms",
+        "tracker  {} reports, {} measurements ({} refused as invalid: {}; {} jump-rejected), {} tracks confirmed, {} addresses, {} rows kept, {} rows lost, {:.0} ms",
         tr.reports,
         tr.measurements,
         tr.refused.iter().fold(0u64, |s, &n| s.saturating_add(n)),
@@ -878,13 +962,12 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         tr.addresses,
         tr.rows_kept,
         tr.overflow,
-        tr.damaged_frames.saturating_add(tr.undecodable_payloads),
         ms(track_time)
     );
     let s = &tr.store;
     let _ = writeln!(
         out,
-        "rows     of {} tracker rows: {} kept, {} before the window; refused {} (address table {}, rows per address {}, missing column {}); clamped: altitude {}, speed {}; altitude not a number {}; 95% radius unknown {}",
+        "rows     of {} tracker rows: {} kept, {} before the window; refused {} (address table {}, rows per address {}, missing column {}); clamped: altitude {}, speed {}; altitude not a number {}; velocity not a number {}; 95% radius unknown {}",
         s.rows_in,
         s.kept,
         s.before_window,
@@ -895,6 +978,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         s.alt_clamped,
         s.speed_clamped,
         s.alt_not_finite,
+        s.velocity_not_finite,
         s.r95_bad
     );
     let c = &tr.callsigns;
@@ -905,7 +989,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     );
     let _ = writeln!(
         out,
-        "targets  at most {} drawn in a frame, {} frames refused targets at the capacity of {}; over {} frames: {} track-frames ended, {} target-frames off the map and {} off the screen, {} shown with a callsign conflict, {} uncertain with no 95% radius",
+        "targets  at most {} drawn in a frame, {} frames refused targets at the capacity of {}; over {} frames: {} track-frames ended, {} target-frames off the map and {} off the screen, {} shown with a callsign conflict, {} uncertain with no 95% radius, {} altitudes beyond the data block shown as 999+ or -99-",
         tot.most_drawn,
         tot.frames_with_refused,
         a.max_targets,
@@ -914,7 +998,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         tot.off_map,
         tot.off_screen,
         tot.cs_conflict,
-        tot.r95_unknown
+        tot.r95_unknown,
+        tot.alt_display_clamped
     );
     let _ = writeln!(
         out,
@@ -932,6 +1017,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let losses = [
         ("damaged clip frames", tr.damaged_frames),
         ("undecodable clip payloads", tr.undecodable_payloads),
+        (
+            "clip reject frames (input refused upstream)",
+            tr.reject_frames,
+        ),
         ("tracker output rows lost (table full)", tr.overflow),
         (
             "tracker measurements refused for want of a track slot",
@@ -941,16 +1030,67 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             "tracker measurements refused for a numerical failure",
             tr.numerical_refused,
         ),
-        ("tracker rows refused by the store", store_loss(&tr.store)),
+        (
+            "rows refused by the store: address table full",
+            tr.store.address_table_full,
+        ),
+        (
+            "rows refused by the store: rows per address full",
+            tr.store.address_rows_full,
+        ),
+        (
+            "rows refused by the store: missing column",
+            tr.store.missing_column,
+        ),
         ("addresses whose rows could not be ordered", tr.sort_failed),
         ("targets refused, display full (target-frames)", tot.refused),
         ("targets refused as invalid (target-frames)", tot.malformed),
         (
-            "parts of targets not drawn (leader, circle, history, text)",
-            tot.traffic_other,
+            "targets with unreadable columns (target-frames)",
+            tot.inconsistent,
         ),
-        ("conversion failures", tot.convert),
+        (
+            "targets with a position off the globe (target-frames)",
+            tot.invalid_position,
+        ),
+        (
+            "targets that do not project (target-frames)",
+            tot.unprojectable,
+        ),
+        ("leaders not drawn, bad track", tot.leader_bad_track),
+        (
+            "leaders not drawn, geodesic or projection failed",
+            tot.leader_failed,
+        ),
+        ("95% circles not drawn", tot.circle_failed),
+        (
+            "95% circles drawn smaller than true (radius clamped)",
+            tot.circle_radius_clamped,
+        ),
+        ("history dots not drawn, did not project", tot.trail_dropped),
+        ("data block texts clipped", tot.text_clipped),
         ("frame stamps clipped", tot.stamp_clipped),
+        (
+            "rows with a position off the globe (row-frames)",
+            tot.convert_invalid_position,
+        ),
+        (
+            "rows that do not project (row-frames)",
+            tot.convert_unprojectable,
+        ),
+        (
+            "history dots dropped, position off the globe",
+            tot.convert_trail_dropped,
+        ),
+        (
+            "reacquisition ages that do not fit",
+            tot.reacq_age_unrepresentable,
+        ),
+        ("history times that overflowed", tot.time_overflow),
+        (
+            "stored rows with unreadable columns",
+            tot.columns_inconsistent,
+        ),
     ];
     let lost: Vec<String> = losses
         .iter()

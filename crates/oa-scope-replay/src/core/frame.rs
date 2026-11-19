@@ -109,6 +109,13 @@ pub struct FrameInfo {
 /// Allocates every table for the model and the configuration.
 pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayError> {
     convert_check(&cfg.convert).map_err(ReplayError::Config)?;
+    // The conversion makes `convert.trail_n` history positions and the drawing shows
+    // `style.trail_n`; two numbers for one setting would silently draw the smaller.
+    if cfg.convert.trail_n != cfg.style.trail_n {
+        return Err(ReplayError::Config(RowsError::Config(
+            "the conversion and the style disagree on the trail length",
+        )));
+    }
     let view = view_new(
         cfg.centre_lat_e7,
         cfg.centre_lon_e7,
