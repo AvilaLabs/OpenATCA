@@ -128,7 +128,7 @@ pub fn export_output(
         }
         match track_record(&row) {
             Ok(c) => {
-                ex.push(&c, key, (row.lat_e7, row.lon_e7))?;
+                ex.push_at(&c, key, (row.lat_e7, row.lon_e7), row.t_ns)?;
                 if rows == OpenatcaRows::Updates {
                     info.last_update_ns = Some(row.t_ns);
                     info.update_rows = info.update_rows.saturating_add(1);

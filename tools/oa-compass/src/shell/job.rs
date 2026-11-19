@@ -18,7 +18,9 @@ use super::adsb_export::{AdsbExport, AdsbFinished};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Finished, Layout, SystemExport, SystemReport};
-use super::guard::{guarded_opener, refuse_holdout, refuse_sealed_date};
+use super::guard::{
+    guarded_opener, refuse_holdout, refuse_sealed_date, SEALED_DAY, SEALED_DAY_TEXT,
+};
 use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
@@ -27,6 +29,7 @@ use super::run::{
     TrackRunInfo,
 };
 use super::slice::Stage;
+use crate::core::time::touches_day;
 
 /// Where the ERAM tracks come from.
 // A7.2: cold enum, size guard waived
@@ -94,6 +97,9 @@ pub fn run_job(
     if let Some(EramSource::Dir(p)) = &job.sfdps {
         refuse_holdout(p)?;
     }
+    // Before any directory or file is created, and before the tracker runs: no input time may be
+    // on the sealed day.
+    prescan_sealed(&job)?;
     check_out(&out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(&out, &mut run_dirs)?;
@@ -136,14 +142,6 @@ fn remove_run_dirs(out: &Path, layout: &Layout, created: &[PathBuf], run_dirs: &
         }
     }
     remove_created(run_dirs);
-}
-
-/// The silence of one aircraft address after which the tracker has dropped its track, in 1/128 s:
-/// a row after more is a new track (a restart), so it gets a new I040 number. Read from the
-/// tracker's own drop time as the scorer configures it.
-fn openatca_segment_gap() -> u32 {
-    let units = oa_track::score::SCORE_DROP_AFTER_NS.saturating_mul(128) / 1_000_000_000;
-    u32::try_from(units).unwrap_or(u32::MAX)
 }
 
 fn eram_counts(info: &EramInfo) -> Vec<(String, u64)> {
@@ -268,6 +266,72 @@ fn eram_details(info: &EramInfo) -> Vec<String> {
     v
 }
 
+/// Reads every raw input time (every ADS-B report of the clip, stale, other-source or later
+/// refused ones included; every ERAM track sample, unknown-flight, duplicate or later refused ones
+/// included) and refuses the run if any is on the sealed day by its raw time or by its rounded
+/// time. Nothing is created when it refuses. The tracker's own rows do not exist yet; they are
+/// checked as they are pushed (`refuse_sealed_row`), which also fails the whole run before
+/// anything is committed.
+///
+/// A time within 1/256 s before the sealed day's midnight (for example 2026-11-18 23:59:59.998)
+/// is refused too: its raw day is the day before, but it rounds to 00:00:00 of the sealed day,
+/// where the export would file it.
+fn prescan_sealed(job: &Job) -> Result<(), ExportError> {
+    if let Some(clip) = &job.adsb {
+        let c = oa_bench::input::load_adsb_with(clip, &guarded_opener())
+            .map_err(|e| ExportError::Input(format!("{}: {e}", clip.display())))?;
+        let n = oa_adsb::reports_len(&c.reports);
+        let mut hits = 0u64;
+        for i in 0..n {
+            if let Some(r) = oa_adsb::reports_row(&c.reports, i) {
+                if touches_day(r.time_ns, SEALED_DAY) {
+                    hits += 1;
+                }
+            }
+        }
+        refuse_sealed_count("ADS-B", hits)?;
+    }
+    match &job.sfdps {
+        Some(EramSource::Dir(dir)) => {
+            let loaded = load_with(
+                &[FeedInput {
+                    feed: FeedKind::Sfdps,
+                    dir: dir.clone(),
+                }],
+                &guarded_opener(),
+            )
+            .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
+            refuse_sealed_count("ERAM", count_sealed_ms(&loaded.legacy))?;
+        }
+        Some(EramSource::Loaded(leg, _)) => {
+            refuse_sealed_count("ERAM", count_sealed_ms(leg))?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// ERAM track samples whose position time is on the sealed day (raw or rounded).
+fn count_sealed_ms(leg: &Legacy) -> u64 {
+    leg.th
+        .pos_ms
+        .iter()
+        .filter(|&&ms| {
+            ms.checked_mul(1_000_000)
+                .is_some_and(|ns| touches_day(ns, SEALED_DAY))
+        })
+        .count() as u64
+}
+
+fn refuse_sealed_count(system: &str, hits: u64) -> Result<(), ExportError> {
+    if hits > 0 {
+        return Err(ExportError::Input(format!(
+            "{system}: {hits} input rows are on {SEALED_DAY_TEXT}, the sealed hold-out day, by their time or once rounded; nothing was created"
+        )));
+    }
+    Ok(())
+}
+
 fn export_all(
     job: &Job,
     done: &mut Done,
@@ -278,7 +342,7 @@ fn export_all(
     let mut positions = Vec::new();
     if let Some(clip) = &job.adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
-        ex.set_segment_gap(openatca_segment_gap());
+        ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
         let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
         ax.set_source_offset(job.self_test_adsb_offset_e7);
         let r = export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows);

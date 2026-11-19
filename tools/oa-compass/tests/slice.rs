@@ -435,3 +435,35 @@ fn a_slice_out_with_only_partial_files_says_an_earlier_run_was_interrupted() {
     );
     assert!(out.join("openatca.ast.partial").exists());
 }
+
+// REQ: OA-CMP-047
+#[test]
+#[cfg(unix)]
+fn a_symlink_to_a_directory_in_a_sealed_folder_is_refused_for_slice() {
+    let real_src = source("sealed-src");
+    let base = tmp("sealed-w");
+    let sealed = base.join("scds").join("rec-20261119");
+    fs::create_dir_all(&sealed).unwrap();
+    for f in [
+        "openatca.ast",
+        "adsb.ast",
+        "data_sources.json",
+        "README.txt",
+    ] {
+        fs::copy(real_src.join(f), sealed.join(f)).unwrap();
+    }
+    let link = base.join("innocent");
+    std::os::unix::fs::symlink(&sealed, &link).unwrap();
+    let out = base.join("o").join("x");
+    let e = slice_dir(&link, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(!base.join("o").exists());
+    // The STDDS sealed folder names are components too.
+    let stdds = base.join("stdds-20261119-holdout");
+    fs::create_dir_all(&stdds).unwrap();
+    assert!(oa_compass::shell::guard::refuse_holdout(&stdds).is_err());
+    assert!(
+        oa_compass::shell::guard::refuse_holdout(&base.join("stdds-smoke-20261119-a")).is_err()
+    );
+    assert!(oa_compass::shell::guard::refuse_holdout(&base.join("stdds-smoke-20261118")).is_ok());
+}

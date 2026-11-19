@@ -19,7 +19,7 @@ use super::adsb_export::{self, EDITION as EDITION_021, RECORDS_PER_BLOCK};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export;
-use super::guard::refuse_holdout;
+use super::guard::{copy_guarded, open_guarded, read_to_string_guarded, refuse_holdout};
 use super::notes::clock_text;
 use crate::core::time::UNITS_PER_DAY;
 
@@ -148,7 +148,7 @@ fn slice_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let f = File::open(input).map_err(|e| io_err(input, &e))?;
+    let f = open_guarded(input)?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let partial = out_path.with_extension("ast.partial");
     let mut w = BufWriter::with_capacity(
@@ -378,8 +378,7 @@ pub fn slice_dir_with(
         }
     }
     // The source README is needed for the import date line: read before anything is created.
-    let src_readme = fs::read_to_string(input.join("README.txt"))
-        .map_err(|e| io_err(&input.join("README.txt"), &e))?;
+    let src_readme = read_to_string_guarded(&input.join("README.txt"))?;
     check_out(out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(out, &mut run_dirs)?;
@@ -416,7 +415,7 @@ pub fn slice_dir_with(
             let dest = out.join("data_sources.json");
             let partial = out.join("data_sources.json.partial");
             pending.push((partial.clone(), dest));
-            fs::copy(&ds, &partial).map_err(|e| io_err(&ds, &e))?;
+            copy_guarded(&ds, &partial)?;
         }
         let readme = slice_readme(input, from, to, &files, &src_readme);
         let (rp, rf) = (out.join("README.txt.partial"), out.join("README.txt"));

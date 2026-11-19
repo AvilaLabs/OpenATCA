@@ -136,6 +136,13 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
         "  records written: {rows} in {} data blocks, {} octets, {} track segments (I040 numbers 1 to {}) of {} keys, {} keys with more than one segment",
         d.sink.blocks, d.sink.bytes, d.tracks, d.tracks, d.keys, d.keys_multi_segment
     );
+    if d.restarts > 0 || report.name == "OpenATCA" {
+        let _ = writeln!(
+            out,
+            "  track restarts: {} (a key whose next row came more than the tracker's drop time after its previous row; the key gets a new track number); row pairs left out of the interval statistics because they span a restart: {}",
+            d.restarts, d.restart_pairs_excluded
+        );
+    }
     let _ = writeln!(
         out,
         "  time span: {} to {} UTC (I070, rounded to 1/128 s)",

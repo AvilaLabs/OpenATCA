@@ -1407,7 +1407,7 @@ fn numbers_for(name: &str, times_s: &[i64]) -> (Vec<u16>, u64, u64) {
         split: false,
     };
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
-    ex.set_segment_gap(15_360); // 120 s in 1/128 s
+    ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
     let mut info = TrackRunInfo::default();
     let rows: Vec<(u8, i64, u32)> = times_s.iter().map(|&t| (oa_track::O_TICK, t, 7)).collect();
     export_output(
@@ -1460,7 +1460,7 @@ fn track_segments_are_numbered_in_order_reported_and_the_space_is_checked() {
         split: false,
     };
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
-    ex.set_segment_gap(15_360);
+    ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
     let mut info = TrackRunInfo::default();
     for (t, a) in [(1, 7), (2, 8), (100, 8), (200, 7), (400, 7)] {
         let o = track_output(&[(oa_track::O_TICK, t, a)]);
@@ -1553,4 +1553,317 @@ fn a_row_on_the_sealed_day_refuses_the_run_and_the_day_before_passes() {
         .unwrap_err()
         .to_string()
         .contains("sealed hold-out day"));
+}
+
+/// An OAF1 clip of one aircraft with one report per (time ns, flags, latitude) given.
+fn clip_rows(dir: &Path, name: &str, rows: &[(i64, u8, i32)]) -> PathBuf {
+    let mut all = Reports::default();
+    for &(time_ns, flags, lat_e7) in rows {
+        let row = oa_adsb::Row {
+            icao: ADDR,
+            time_ns,
+            lat_e7,
+            lon_e7: -880_000_000,
+            baro_alt_ft: 20_000,
+            gs_dkt: 3500,
+            track_ddeg: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            flags,
+            ..ROW_EMPTY
+        };
+        reports_push(&mut all, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &all, 0, oa_adsb::reports_len(&all)).unwrap();
+    let mut buf = vec![0u8; payload.len() + 256];
+    let n = oa_feed::encode_frame(&mut buf, 1, 0, 0, T0_NS, 0, &payload).unwrap();
+    let p = dir.join(name);
+    fs::write(&p, &buf[..n]).unwrap();
+    p
+}
+
+/// A job with an ERAM source of one flight with a sample at each (position ms, latitude).
+fn eram_job(out: &Path, day: i64, samples: &[(i64, i32)]) -> Job {
+    let mut leg = Legacy::default();
+    let a = flight_ix(&mut leg, 1).unwrap();
+    leg.flights.callsign[a as usize] = *b"SEAL1\0\0\0";
+    for &(ms, lat) in samples {
+        push_th(&mut leg, a, ms, 0, lat, -880_000_000, 35_000, None, false);
+    }
+    let mut j = job(out, None, false, false, OpenatcaRows::Ticks);
+    j.layout.day = day;
+    j.sfdps = Some(EramSource::Loaded(Box::new(leg), vec!["test input".into()]));
+    j
+}
+
+const SEALED_START_NS: i64 = 20_776 * 86_400 * 1_000_000_000;
+const NS_256TH: i64 = 3_906_250;
+
+fn assert_refused_and_nothing_made(j: Job, out: &Path, needle: &str) {
+    let e = match run(j) {
+        Ok(l) => panic!("{} was not refused: {l:?}", out.display()),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("sealed hold-out day"), "{e}");
+    assert!(e.contains(needle), "{e}");
+    assert!(!out.exists(), "no output directory after the refusal");
+    assert!(!out.parent().unwrap().exists(), "no parent made either");
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn the_prescan_refuses_sealed_eram_times_raw_or_rounded_before_anything_is_created() {
+    let work = tmp("pre-eram");
+    let ms_of = |ns: i64| ns / 1_000_000;
+    let lat = 410_000_000;
+    // 2026-11-19 23:59:59.999: its raw day is the sealed day.
+    let out = work.join("a").join("out");
+    let j = eram_job(
+        &out,
+        20_775,
+        &[(ms_of(SEALED_START_NS + 86_399_999_000_000), lat)],
+    );
+    assert_refused_and_nothing_made(j, &out, "ERAM: 1 input rows");
+    // 2026-11-18 23:59:59.998: raw day 11-18, but it rounds to 11-19 00:00:00: refused, because
+    // the export would file it under the sealed day.
+    let out = work.join("b").join("out");
+    let j = eram_job(&out, 20_775, &[(ms_of(SEALED_START_NS) - 2, lat)]);
+    assert_refused_and_nothing_made(j, &out, "ERAM: 1 input rows");
+    // A refused-only sample (latitude out of range) on the sealed day still refuses the run.
+    let out = work.join("c").join("out");
+    let j = eram_job(
+        &out,
+        20_775,
+        &[
+            (ms_of(SEALED_START_NS - 86_400_000_000_000), lat),
+            (ms_of(SEALED_START_NS) + 5_000, 950_000_000),
+        ],
+    );
+    assert_refused_and_nothing_made(j, &out, "ERAM: 1 input rows");
+    // 2026-11-20 00:00:00.000 is accepted (day 20 777), and 11-18 23:59:59.000 too.
+    let out = work.join("d");
+    run(eram_job(
+        &out,
+        20_777,
+        &[(ms_of(SEALED_START_NS + 86_400_000_000_000), lat)],
+    ))
+    .unwrap();
+    assert!(out.join("eram.ast").exists());
+    let out = work.join("e");
+    run(eram_job(
+        &out,
+        20_775,
+        &[(ms_of(SEALED_START_NS) - 1_000, lat)],
+    ))
+    .unwrap();
+    assert!(out.join("eram.ast").exists());
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn the_prescan_refuses_sealed_adsb_times_including_stale_and_refused_rows() {
+    let work = tmp("pre-adsb");
+    let ok_row = (SEALED_START_NS - 60_000_000_000, 0u8, 410_000_000);
+    // Exactly 1/256 s before midnight rounds to 00:00:00 of the sealed day: refused.
+    let clip = clip_rows(
+        &work,
+        "a.oaf",
+        &[ok_row, (SEALED_START_NS - NS_256TH, 0, 410_000_000)],
+    );
+    let out = work.join("a").join("out");
+    let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    assert_refused_and_nothing_made(j, &out, "ADS-B: 1 input rows");
+    // One ns earlier rounds down, stays on 11-18, and passes.
+    let clip = clip_rows(
+        &work,
+        "b.oaf",
+        &[ok_row, (SEALED_START_NS - NS_256TH - 1, 0, 410_000_000)],
+    );
+    let out = work.join("b");
+    let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    run(j).unwrap();
+    // A stale-only sealed row (the export leaves stale reports out) still refuses.
+    let clip = clip_rows(
+        &work,
+        "c.oaf",
+        &[
+            ok_row,
+            (
+                SEALED_START_NS + 1_000_000_000,
+                oa_adsb::F_STALE,
+                410_000_000,
+            ),
+        ],
+    );
+    let out = work.join("c").join("out");
+    let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    assert_refused_and_nothing_made(j, &out, "ADS-B: 1 input rows");
+    // A row the clip loader itself drops (position out of range) never becomes a report, so
+    // the pre-scan cannot see it; it cannot reach any output either.
+    // 2026-11-20 00:00:00.000 alone is accepted.
+    let clip = clip_rows(
+        &work,
+        "e.oaf",
+        &[(SEALED_START_NS + 86_400_000_000_000, 0, 410_000_000)],
+    );
+    let out = work.join("e");
+    let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_777;
+    run(j).unwrap();
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn the_second_check_refuses_a_sealed_day_row_at_the_eram_and_cat021_paths() {
+    use oa_compass::core::adsb::{adsb_record, AdsbRow};
+    use oa_compass::core::convert::EramRow;
+    // ERAM path: a sample on the sealed day pushed to the export.
+    let lay = Layout {
+        out: tmp("sec").join("e"),
+        day: 20_776,
+        split: true,
+    };
+    let mut ex = SystemExport::new(
+        "ERAM",
+        "eram.ast",
+        oa_compass::shell::notes::ERAM_SOURCE,
+        lay,
+    );
+    let r = EramRow {
+        pos_ms: SEALED_START_NS / 1_000_000 + 1000,
+        lat_e7: 410_000_000,
+        lon_e7: -880_000_000,
+        alt_ft: Some(35_000),
+        vel_dkt: None,
+        coast: false,
+        address: None,
+        callsign: None,
+        address_withheld: false,
+    };
+    let c = eram_record(&r).unwrap();
+    let e = ex
+        .push(&c, 1, (r.lat_e7, r.lon_e7))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("sealed hold-out day"), "{e}");
+    ex.abort();
+    // CAT021 path.
+    let lay = Layout {
+        out: tmp("sec").join("a"),
+        day: 20_776,
+        split: true,
+    };
+    let mut ax = AdsbExport::new(ADSB_SOURCE, lay);
+    let a = AdsbRow {
+        time_ns: SEALED_START_NS + 1_000_000_000,
+        address: ADDR,
+        non_icao: false,
+        lat_e7: 0,
+        lon_e7: 0,
+        baro_alt_ft: None,
+        geom_alt_ft: None,
+        ground: false,
+        vrate_fpm: None,
+        rate_geometric: false,
+        gs_dkt: None,
+        track_ddeg: None,
+        callsign: [0; 8],
+        category: 0,
+        nic: None,
+        nac_p: None,
+        nac_v: None,
+        sil: None,
+        sil_per_sample: None,
+        version: None,
+        gva: None,
+        sda: None,
+    };
+    let c = adsb_record(&a).unwrap();
+    let e = ax.push(&c, (0, 0)).unwrap_err().to_string();
+    assert!(e.contains("sealed hold-out day"), "{e}");
+    ax.abort();
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn the_restart_gap_is_compared_in_ns_on_raw_times() {
+    let two_rows = |name: &str, second_extra_ns: i64| -> Vec<u16> {
+        let out = tmp(name);
+        let lay = Layout {
+            out: out.clone(),
+            day: DAY,
+            split: false,
+        };
+        let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
+        ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
+        for t in [T0_NS, T0_NS + 120_000_000_000 + second_extra_ns] {
+            let mut row = row_with_velocity(1.0, 1.0);
+            row.t_ns = t;
+            let c = track_record(&row).unwrap();
+            ex.push_at(&c, 7, (row.lat_e7, row.lon_e7), t).unwrap();
+        }
+        ex.finish().unwrap().commit().unwrap();
+        records_062(&out.join("openatca.ast"))
+            .iter()
+            .map(|r| r.track_number.unwrap())
+            .collect()
+    };
+    assert_eq!(
+        two_rows("ns0", 0),
+        [1, 1],
+        "120.000000000 s is not a restart"
+    );
+    assert_eq!(two_rows("ns1", 1), [1, 2], "120.000000001 s is");
+}
+
+/// The track numbers of the file of a run over one aircraft that reports at the given seconds.
+fn run_numbers(name: &str, seconds: &[i64], rows: OpenatcaRows) -> (Vec<u16>, String) {
+    let work = tmp(name);
+    let reports: Vec<(i64, u8, i32)> = seconds
+        .iter()
+        .map(|&k| (T0_NS + k * 1_000_000_000, 0u8, clip_position(k).0))
+        .collect();
+    let clip = clip_rows(&work, "c.oaf", &reports);
+    let out = work.join("out");
+    run(job(&out, Some(clip), false, false, rows)).unwrap();
+    let nums = records_062(&out.join("openatca.ast"))
+        .iter()
+        .map(|r| r.track_number.unwrap())
+        .collect();
+    (nums, fs::read_to_string(out.join("README.txt")).unwrap())
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn a_restart_through_run_job_gets_a_new_number_and_the_readme_reports_its_effect() {
+    let burst = |from: i64| (from..from + 10).collect::<Vec<i64>>();
+    // Update rows are at the reports: 131 s of silence between the bursts is a restart, 119 s not.
+    let both: Vec<i64> = burst(0).into_iter().chain(burst(140)).collect();
+    let (n, readme) = run_numbers("e2e-restart", &both, OpenatcaRows::Updates);
+    assert_eq!((n.first(), n.last()), (Some(&1), Some(&2)), "{n:?}");
+    assert!(readme.contains("track restarts: 1"), "{readme}");
+    assert!(
+        readme.contains("left out of the interval statistics because they span a restart: 1"),
+        "{readme}"
+    );
+    assert!(
+        readme.contains("1 track segments") || readme.contains("2 track segments"),
+        "{readme}"
+    );
+    let near: Vec<i64> = burst(0).into_iter().chain(burst(128)).collect();
+    let (n, _) = run_numbers("e2e-same", &near, OpenatcaRows::Updates);
+    assert!(n.iter().all(|&x| x == 1), "{n:?}");
+    // Tick rows continue until the tracker drops the track, so only a longer silence shows as a
+    // gap between rows.
+    let ticks: Vec<i64> = burst(0).into_iter().chain(burst(400)).collect();
+    let (n, _) = run_numbers("e2e-ticks", &ticks, OpenatcaRows::Ticks);
+    assert_eq!((n.first(), n.last()), (Some(&1), Some(&2)), "{n:?}");
 }

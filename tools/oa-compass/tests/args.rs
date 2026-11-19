@@ -163,10 +163,24 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
 // REQ: OA-CMP-047
 #[test]
 fn the_sealed_date_is_refused_in_every_accepted_syntax() {
-    for d in ["2026.11.19", "2026-11-19", "2026.11.019", "2026-11-19"] {
+    for d in [
+        "2026.11.19",
+        "2026-11-19",
+        "2026.11.019",
+        "2026-011-019",
+        "+2026-11-19",
+    ] {
         let e = parse_export(&v(&["--date", d, "--out", "o", "--adsb", "c"])).unwrap_err();
         assert!(
             e.contains("2026-11-19 is the sealed hold-out day; it is never exported"),
+            "{d}: {e}"
+        );
+    }
+    // Forms that are not a date at all are rejected as such, not accepted as the sealed day.
+    for d in ["20261119", "2026-11-19T00:00Z", "1795046400", "2026/11/19"] {
+        let e = parse_export(&v(&["--date", d, "--out", "o", "--adsb", "c"])).unwrap_err();
+        assert!(
+            e.contains("is not a date") && !e.contains("sealed"),
             "{d}: {e}"
         );
     }

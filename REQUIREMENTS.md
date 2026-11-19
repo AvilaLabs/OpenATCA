@@ -5022,15 +5022,23 @@ scope.
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
-  refused in every date syntax, and any input row (ADS-B, SFDPS, tracker) on that UTC day refuses the whole run
-  before anything is committed. Any input path with the components `scds/rec-20261119`, and every file the run
-  opens (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is
-  refused by its resolved path, so a link into it is caught. A flag value that starts with `--` is a missing
-  value and a repeated flag is an error.
+  refused in every date syntax. Any input path with the components `scds/rec-20261119`, `stdds-20261119-holdout`
+  or `stdds-smoke-20261119*`, and every file the run opens (each file of the feed directory, the ADS-B clip, each
+  file and the README of a `slice` source), is resolved once, checked and opened by the resolved path; a path
+  that cannot be resolved is refused. Limits: a hard link, copy, rename or bind mount of a sealed file has no
+  sealed component in its path and is not detectable by path, which is why OA-CMP-051 exists. A flag value that
+  starts with `--` is a missing value and a repeated flag is an error.
 - **OA-CMP-048** A track restart gets a new I062/040 number: a row of one key (aircraft address) more than the
-  tracker's drop time (`oa_track::score::SCORE_DROP_AFTER_NS`, 120 s) after the previous row of the key starts a
-  new segment; exactly the drop time does not.
+  tracker's drop time (`oa_track::score::SCORE_DROP_AFTER_NS`, 120 s, compared in ns on the raw row times) after
+  the previous row of the key starts a new segment; exactly the drop time does not. The row pair that spans a
+  restart is left out of the interval statistics, and the README counts restarts and the excluded pairs.
 - **OA-CMP-049** Track numbers are one per (key, segment), allocated in order of first appearance, refused when
   the 16-bit space is exhausted; the README gives track segments, keys and keys with more than one segment.
 - **OA-CMP-050** I062/185 Vx and Vy are the true east and north velocity at the target (the frame of the CAT062
   specification and of COMPASS); the README names the frame.
+- **OA-CMP-051** Before any directory or file is created and before the tracker runs, every raw input time (every
+  ADS-B report of the clip including stale and other-source ones, every ERAM sample including unknown-flight,
+  duplicate and refused ones) is checked: one on the sealed day by its raw time or once rounded to 1/128 s (the
+  day the export would file it under) refuses the run, naming the system and the count, with nothing created.
+  The tracker's rows and every pushed row are checked again at the push. Records the clip loader itself drops
+  as undecodable are not reports and cannot be checked.

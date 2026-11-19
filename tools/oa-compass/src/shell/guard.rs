@@ -1,13 +1,22 @@
-//! Shell (B1): the sealed hold-out recording. The recording of 2026-11-19 lives under
-//! `scds/rec-20261119` and is never read by this tool: any input path that has `scds` followed by
-//! `rec-20261119` as two consecutive components (exact match, on the path as given and on its
-//! canonical form, so a link into it is caught) is refused.
+//! Shell (B1): the sealed hold-out recordings of 2026-11-19. Two checks stand between this tool
+//! and them, and neither is complete alone.
+//!
+//! By path: a path whose components include `scds` followed by `rec-20261119`, or a component
+//! `stdds-20261119-holdout`, or one that starts with `stdds-smoke-20261119`, is refused, on the
+//! path as given and on its canonical form (so a symbolic link into one is caught). Every file
+//! the run opens is resolved once, checked, and then opened by the resolved path.
+//!
+//! The limits of the path check: a hard link, a copy, a renamed folder or a bind mount of a
+//! sealed file has no sealed component in its path and is not detectable by path. That is why
+//! the time pre-scan (`job::prescan_sealed`) exists: it refuses any input time that is on the
+//! sealed day, whatever file it came from.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::{Component, Path};
 use std::rc::Rc;
 
-use oa_bench::input::{file_opener, Opener};
+use oa_bench::input::Opener;
 
 use super::error::ExportError;
 
@@ -40,10 +49,11 @@ pub fn refuse_sealed_row(system: &str, day: i64) -> Result<(), ExportError> {
 /// An opener that refuses any file whose resolved path is in the sealed recording, for the
 /// loaders that open each file of a directory themselves.
 pub fn guarded_opener() -> Opener {
-    let inner = file_opener();
     Rc::new(move |p: &Path| {
-        refuse_holdout(p).map_err(|e| io::Error::other(e.to_string()))?;
-        inner(p)
+        let resolved = resolve_checked(p).map_err(|e| io::Error::other(e.to_string()))?;
+        File::open(&resolved)
+            .map(|f| Box::new(f) as Box<dyn Read>)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", resolved.display())))
     })
 }
 
@@ -56,20 +66,71 @@ fn names(p: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether the components of a path name a sealed folder.
 fn holds_sealed(p: &Path) -> bool {
     let n = names(p);
-    n.windows(2)
-        .any(|w| matches!(w, [a, b] if a == "scds" && b == "rec-20261119"))
+    let pair = n
+        .windows(2)
+        .any(|w| matches!(w, [a, b] if a == "scds" && b == "rec-20261119"));
+    pair || n
+        .iter()
+        .any(|c| c == "stdds-20261119-holdout" || c.starts_with("stdds-smoke-20261119"))
 }
 
-/// Refuses `path` if it is, or is inside, the sealed recording.
+/// Resolves `path` once and refuses it if the path as given or its resolved form is, or is
+/// inside, a sealed recording. A path that cannot be resolved is refused, not passed. Returns the
+/// resolved path, which is the one to open.
+pub fn resolve_checked(path: &Path) -> Result<std::path::PathBuf, ExportError> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        ExportError::Input(format!(
+            "{}: cannot be resolved, so it cannot be checked against the sealed hold-out recordings: {e}",
+            path.display()
+        ))
+    })?;
+    if holds_sealed(path) || holds_sealed(&canonical) {
+        return Err(sealed_path_error(path));
+    }
+    Ok(canonical)
+}
+
+fn sealed_path_error(path: &Path) -> ExportError {
+    ExportError::Input(format!(
+        "{}: this is a sealed hold-out recording (scds/rec-20261119 or a stdds sealed folder); it is never read",
+        path.display()
+    ))
+}
+
+/// Opens a file by its resolved path, after the check.
+pub fn open_guarded(path: &Path) -> Result<File, ExportError> {
+    let p = resolve_checked(path)?;
+    File::open(&p).map_err(|e| super::error::io_err(&p, &e))
+}
+
+/// Reads a text file by its resolved path, after the check.
+pub fn read_to_string_guarded(path: &Path) -> Result<String, ExportError> {
+    let mut s = String::new();
+    open_guarded(path)?
+        .read_to_string(&mut s)
+        .map_err(|e| super::error::io_err(path, &e))?;
+    Ok(s)
+}
+
+/// Copies a file from its resolved path, after the check.
+pub fn copy_guarded(from: &Path, to: &Path) -> Result<(), ExportError> {
+    let p = resolve_checked(from)?;
+    std::fs::copy(&p, to)
+        .map(|_| ())
+        .map_err(|e| super::error::io_err(&p, &e))
+}
+
+/// Refuses `path` if it is, or is inside, a sealed recording, by the path as given and by its
+/// resolved form when it resolves. For arguments, which may not exist yet; the files themselves
+/// are opened only through [`open_guarded`] and [`guarded_opener`], which refuse what cannot be
+/// resolved.
 pub fn refuse_holdout(path: &Path) -> Result<(), ExportError> {
     let canonical = std::fs::canonicalize(path).ok();
     if holds_sealed(path) || canonical.as_deref().is_some_and(holds_sealed) {
-        return Err(ExportError::Input(format!(
-            "{}: this is the sealed hold-out recording (scds/rec-20261119); it is never read",
-            path.display()
-        )));
+        return Err(sealed_path_error(path));
     }
     Ok(())
 }
