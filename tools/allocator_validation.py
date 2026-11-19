@@ -15,8 +15,9 @@ HARNESS_DEPS = {
     "oa-track": "../../crates/oa-track", "oa-nam": "../../crates/oa-nam",
     "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
     "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
+    "oa-safety": "../../crates/oa-safety",
 }
-HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs")
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -29,6 +30,7 @@ FIXTURE_IDS = {
     "fusion_anonymous_init_and_assoc",
     "nam_session_activate_traffic_retry_full_deactivate",
     "display_rows_traffic_frame_refusal",
+    "safety_state_inhibit_display",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -115,6 +117,22 @@ ROUTE_LEDGER = {
     "display_unplaced_history_dot": ("crates/oa-display/src/core/traffic.rs", "display_frame.draw_trail_dropped"),
     "display_stamp_clipped": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.stamp_clipped"),
     "display_frame_digest": ("crates/oa-display/src/core/raster.rs", "display_frame.digests"),
+    "safety_state_report": ("crates/oa-safety/src/net.rs", "safety.state_reports"),
+    "safety_net_status": ("crates/oa-safety/src/net.rs", "safety.stale_unavailable"),
+    "safety_inhibit_create": ("crates/oa-safety/src/inhibit.rs", "safety.created"),
+    "safety_inhibit_refusal": ("crates/oa-safety/src/inhibit.rs", "safety.refused"),
+    "safety_table_full": ("crates/oa-safety/src/inhibit.rs", "safety.refused_full"),
+    "safety_suppress_log": ("crates/oa-safety/src/inhibit.rs", "safety.suppressed_logged"),
+    "safety_suppressed_overflow": ("crates/oa-safety/src/inhibit.rs", "safety.suppressed_overflow"),
+    "safety_inhibit_remove": ("crates/oa-safety/src/inhibit.rs", "safety.removed"),
+    "safety_inhibit_expire": ("crates/oa-safety/src/inhibit.rs", "safety.expired"),
+    "safety_events_take": ("crates/oa-safety/src/inhibit.rs", "safety.events"),
+    "safety_banner_draw": ("crates/oa-display/src/core/safety.rs", "safety.banner_lines"),
+    "safety_inhibit_draw": ("crates/oa-display/src/core/safety.rs", "safety.inhibitions_drawn"),
+    "safety_state_backdated": ("crates/oa-safety/src/net.rs", "safety.state_backdated"),
+    "safety_state_future_refusal": ("crates/oa-safety/src/net.rs", "safety.state_future_refused"),
+    "safety_banner_clamp": ("crates/oa-display/src/core/safety.rs", "safety.banner_hidden"),
+    "safety_build_error": ("crates/oa-display/src/core/safety.rs", "safety.error_builds"),
 }
 
 ROUTE_SYMBOLS = {
@@ -173,7 +191,23 @@ ROUTE_SYMBOLS = {
     "display_time_overflow": "targets_at",
     "display_unplaced_history_dot": "build_traffic",
     "display_stamp_clipped": "replay_build",
-    "display_frame_digest": "frame_digest"
+    "display_frame_digest": "frame_digest",
+    "safety_state_report": "state_report",
+    "safety_net_status": "net_status",
+    "safety_inhibit_create": "inhibit_create",
+    "safety_inhibit_refusal": "inhibit_create",
+    "safety_table_full": "inhibit_create",
+    "safety_suppress_log": "inhibit_suppress",
+    "safety_suppressed_overflow": "inhibit_suppress",
+    "safety_inhibit_remove": "inhibit_remove",
+    "safety_inhibit_expire": "inhibit_expire",
+    "safety_events_take": "events_take",
+    "safety_banner_draw": "build_safety",
+    "safety_inhibit_draw": "build_safety",
+    "safety_state_backdated": "state_report",
+    "safety_state_future_refusal": "state_report",
+    "safety_banner_clamp": "build_safety",
+    "safety_build_error": "build_safety"
 }
 
 
@@ -584,7 +618,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
                      "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
-                     "display_frame"}
+                     "display_frame", "safety"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -692,6 +726,11 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                           "convert_invalid_position": 1, "convert_unprojectable": 1,
                           "convert_trail_dropped": 1, "convert_time_overflow": 1,
                           "draw_trail_dropped": 1, "stamp_clipped": 1, "digests": 20},
+        "safety": {"state_reports": 4, "stale_unavailable": 4, "created": 3, "refused": 3,
+                   "refused_full": 1, "suppressed_logged": 4096, "suppressed_overflow": 3,
+                   "removed": 1, "expired": 1, "events": 1, "banner_lines": 160,
+                   "inhibitions_drawn": 20, "inhibitions_unplaced": 20, "state_backdated": 1,
+                   "state_future_refused": 1, "banner_hidden": 20, "error_builds": 20},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
                          "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1,
                          "tracker_applied": 1, "tracker_duplicates": 1_048_575,
@@ -739,6 +778,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},
         "display_frame": {"traffic_drawn": 64, "refused": 100, "malformed": 20, "digests": 20},
+        "safety": {"state_reports": 4, "stale_unavailable": 4, "created": 3, "refused": 3,
+                   "refused_full": 1, "suppressed_logged": 4096, "suppressed_overflow": 3,
+                   "removed": 1, "state_backdated": 1, "state_future_refused": 1,
+                   "error_builds": 20},
         "nam_session": {"peak_pending": 128, "pending_full": 1, "abandoned": 128,
                         "peer_silent": 1, "lrm_sent": 1, "dropped": 0, "script_errors": 0},
         "clock_gate": {"held": 2, "held_applied": 2, "step_forward": 1, "late": 5,

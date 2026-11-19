@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 48,
+  "expected_proof_count": 50,
   "proofs": [
     {
       "id": "output-append",
@@ -1005,6 +1005,36 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ]
+    },
+    {
+      "id": "inhibition-in-force",
+      "requirement": "OA-SAF-007: an inhibition is in force exactly when start <= t < end, for every i64 triple; never for an empty or reversed span.",
+      "package": "oa-safety",
+      "harness": "inhibit::proofs::in_force_is_start_inclusive_end_exclusive",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "inhibition-band",
+      "requirement": "OA-SAF-008: the altitude band is inclusive at both ends and empty when reversed, for every i32 triple.",
+      "package": "oa-safety",
+      "harness": "inhibit::proofs::band_is_inclusive_and_empty_when_reversed",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
     }
   ]
 }

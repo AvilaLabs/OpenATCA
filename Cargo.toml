@@ -39,6 +39,7 @@ members = [
     "crates/oa-sensorsim",
     "crates/oa-track",
     "crates/oa-encounter",
+    "crates/oa-safety",
     "tools/oa-build-info",
     "tools/oa-encounter",
     "tools/oa-compass",
