@@ -243,7 +243,7 @@ fn check_len(column: &'static str, got: usize, want: usize) -> Result<(), RowsEr
 
 /// An altitude as whole feet, clamped to `NO_ALT + 1 ..= i32::MAX`; the flag says it was clamped.
 fn alt_to_ft(alt: f32) -> (i32, bool) {
-    let r = f64::from(alt).round();
+    let r = oa_ieee::round(f64::from(alt));
     let lo = f64::from(NO_ALT) + 1.0;
     if r < lo {
         (NO_ALT + 1, true)
@@ -606,8 +606,8 @@ pub fn velocity_of(east_mps: f32, north_mps: f32) -> (u16, u16) {
         return (NO_U16, NO_U16);
     }
     let (e, n) = (f64::from(east_mps), f64::from(north_mps));
-    let kt = e.hypot(n) * MPS_TO_KT;
-    let gs = (kt * 10.0).round();
+    let kt = oa_math::hypot(e, n) * MPS_TO_KT;
+    let gs = oa_ieee::round(kt * 10.0);
     let gs = if gs < f64::from(NO_U16) {
         gs as u16
     } else {
@@ -616,8 +616,8 @@ pub fn velocity_of(east_mps: f32, north_mps: f32) -> (u16, u16) {
     if kt < MIN_TRACK_KT {
         return (gs, NO_U16);
     }
-    let deg = e.atan2(n).to_degrees().rem_euclid(360.0);
-    let dd = (deg * 10.0).round() as u16;
+    let deg = oa_display::core::project::rem_euclid_f64(oa_math::atan2(e, n).to_degrees(), 360.0);
+    let dd = oa_ieee::round(deg * 10.0) as u16;
     (gs, if dd >= 3600 { 0 } else { dd })
 }
 

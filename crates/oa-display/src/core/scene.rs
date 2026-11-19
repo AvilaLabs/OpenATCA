@@ -78,7 +78,7 @@ use crate::core::project::{
     dlon_e7, in_bbox, project, project_rad, projection_new, ring_radius16, view_bbox, Bbox,
     Projection, MAX_RANGE_NM, MIN_RANGE_NM, NM_M,
 };
-use oa_airspace::model::{
+use oa_airspace::core::model::{
     bit_get, point_kind, str_or_empty, stratum, unresolved_role, Model, PointIx, POS_NONE,
 };
 use std::fmt::Write;
@@ -330,7 +330,7 @@ pub fn scene_index(m: &Model) -> SceneIndex {
     let u = &m.unresolved;
     for i in 0..u.role.len() {
         let border = u.role.get(i) == Some(&unresolved_role::BORDER_CROSSING)
-            && u.owner_kind.get(i) == Some(&oa_airspace::model::owner_kind::AIRWAY);
+            && u.owner_kind.get(i) == Some(&oa_airspace::core::model::owner_kind::AIRWAY);
         if !border {
             continue;
         }
@@ -729,8 +729,8 @@ fn label_str(l: &Label) -> &str {
 
 /// Writes a number of nautical miles: whole when whole, else one decimal.
 fn put_nm(l: &mut Label, nm: f64) {
-    if (nm - nm.round()).abs() < 1e-9 {
-        let _ = write!(l, "{}", nm.round() as i64);
+    if (nm - oa_ieee::round(nm)).abs() < 1e-9 {
+        let _ = write!(l, "{}", oa_ieee::round(nm) as i64);
     } else {
         let _ = write!(l, "{nm:.1}");
     }
@@ -743,7 +743,11 @@ fn unit(lat_e7: i32, lon_e7: i32) -> [f64; 3] {
         f64::from(lat_e7) * DEG_E7_RAD,
         f64::from(lon_e7) * DEG_E7_RAD,
     );
-    [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()]
+    [
+        oa_math::cos(lat) * oa_math::cos(lon),
+        oa_math::cos(lat) * oa_math::sin(lon),
+        oa_math::sin(lat),
+    ]
 }
 
 /// How an edge between two positions is split, and the screen ends of it.
@@ -777,9 +781,9 @@ fn edge_plan(proj: &Projection, a: (i32, i32), b: (i32, i32), max_pieces: u32) -
     }
     let (ua, ub) = (unit(a.0, a.1), unit(b.0, b.1));
     let dot = (ua[0] * ub[0] + ua[1] * ub[1] + ua[2] * ub[2]).clamp(-1.0, 1.0);
-    let ground = dot.acos() * proj.radius_m;
+    let ground = oa_math::acos(dot) * proj.radius_m;
     let by_px = (chord + PIECE_16 - 1) / PIECE_16;
-    let by_ground = (ground / PIECE_M).ceil();
+    let by_ground = oa_ieee::ceil(ground / PIECE_M);
     let by_ground = if by_ground.is_finite() {
         by_ground as i64
     } else {
@@ -809,12 +813,16 @@ fn edge_point(proj: &Projection, e: &Edge, i: u32) -> Option<(i32, i32)> {
         e.a[1] * (1.0 - t) + e.b[1] * t,
         e.a[2] * (1.0 - t) + e.b[2] * t,
     ];
-    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let n = oa_ieee::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     if n < 1e-9 {
         // The ends are nearly opposite; the great circle is not defined. Draw straight.
         return Some(if t < 0.5 { e.pa } else { e.pb });
     }
-    project_rad(proj, (v[2] / n).clamp(-1.0, 1.0).asin(), v[1].atan2(v[0]))
+    project_rad(
+        proj,
+        oa_math::asin((v[2] / n).clamp(-1.0, 1.0)),
+        oa_math::atan2(v[1], v[0]),
+    )
 }
 
 /// True when both points lie beyond the same side of the screen (with a margin).
@@ -957,10 +965,10 @@ fn rings(
     sc: &mut Scratch,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
-    let centre = (p.cx16.round() as i32, p.cy16.round() as i32);
+    let centre = (oa_ieee::round(p.cx16) as i32, oa_ieee::round(p.cy16) as i32);
     let step = ring_step_nm(p);
     let map_h = f64::from(p.height - p.top_inset);
-    let half_diag16 = f64::from(p.width).hypot(map_h) * 8.0;
+    let half_diag16 = oa_math::hypot(f64::from(p.width), map_h) * 8.0;
     let (w16, top16) = (i64::from(p.width) * 16, i64::from(p.top_inset) * 16);
     let mut k = 1_i64;
     while k <= MAX_RINGS {

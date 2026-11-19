@@ -79,6 +79,8 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 
@@ -210,6 +212,8 @@ dependencies = [
  "oa-display",
  "oa-feed",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
  "oa-track",
  "oa-truth",

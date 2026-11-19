@@ -20,7 +20,7 @@
 use crate::core::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT};
 use crate::core::list::{DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS};
 use crate::core::palette::{bytes_of, BACKGROUND, PALETTE_LEN};
-use oa_sha256::{Digest, Sha256};
+use oa_sha256::core::sha256::{Digest, Sha256};
 use std::fmt;
 
 /// Coordinate magnitude limit, 1/16 pixel.

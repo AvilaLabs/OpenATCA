@@ -17,6 +17,8 @@ oa-track = { path = "../oa-track" }
 oa-adsb = { path = "../oa-adsb" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
+oa-ieee = { path = "../oa-ieee" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-airspace = { path = "../oa-airspace" }
 

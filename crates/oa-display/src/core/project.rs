@@ -105,16 +105,16 @@ pub fn projection_new(
     let a = ell.equatorial_radius();
     let f = ell.flattening();
     let e2 = f * (2.0 - f);
-    let ecc = e2.sqrt();
-    let sin0 = lat0.sin();
-    let cos0 = lat0.cos();
+    let ecc = oa_ieee::sqrt(e2);
+    let sin0 = oa_math::sin(lat0);
+    let cos0 = oa_math::cos(lat0);
     let w = 1.0 - e2 * sin0 * sin0;
     // Meridian and prime-vertical radii of curvature; the sphere gets their geometric mean.
-    let m = a * (1.0 - e2) / (w * w.sqrt());
-    let nu = a / w.sqrt();
-    let radius_m = (m * nu).sqrt();
-    let n = (1.0 + e2 * cos0.powi(4) / (1.0 - e2)).sqrt();
-    let w1 = iso_log(ecc, n, sin0).exp();
+    let m = a * (1.0 - e2) / (w * oa_ieee::sqrt(w));
+    let nu = a / oa_ieee::sqrt(w);
+    let radius_m = oa_ieee::sqrt(m * nu);
+    let n = oa_ieee::sqrt(1.0 + e2 * oa_math::powi(cos0, 4) / (1.0 - e2));
+    let w1 = oa_math::exp(iso_log(ecc, n, sin0));
     let sin_chi_start = (w1 - 1.0) / (w1 + 1.0);
     let c = (n + sin0) * (1.0 - sin_chi_start) / ((n - sin0) * (1.0 + sin_chi_start));
     let (sin_chi0, cos_chi0) = chi_sin_cos(c, w1);
@@ -167,29 +167,40 @@ fn chi_sin_cos(c: f64, w_over_c: f64) -> (f64, f64) {
     if w <= 0.0 {
         return (-1.0, 0.0);
     }
-    ((w - 1.0) / (w + 1.0), 2.0 * w.sqrt() / (w + 1.0))
+    ((w - 1.0) / (w + 1.0), 2.0 * oa_ieee::sqrt(w) / (w + 1.0))
+}
+
+/// The remainder of `a / b` with the sign of `b`, as `f64::rem_euclid` defines it (std's own
+/// definition, written here because the standard library's method is not allowed in core).
+pub fn rem_euclid_f64(a: f64, b: f64) -> f64 {
+    let r = a % b;
+    if r < 0.0 {
+        r + b.abs()
+    } else {
+        r
+    }
 }
 
 fn saturate(v: f64) -> i32 {
     let lim = f64::from(COORD_LIMIT);
     // Finite by the callers' checks; a NaN would saturate to 0 and is excluded before this.
-    v.round().clamp(-lim, lim) as i32
+    oa_ieee::round(v).clamp(-lim, lim) as i32
 }
 
 /// Screen position, 1/16 pixel, of a point given in radians. `None` if not finite or at the
 /// antipode of the centre.
 pub fn project_rad(p: &Projection, lat: f64, lon: f64) -> Option<(i32, i32)> {
-    let (sc, cc) = chi_sin_cos(p.c, iso_log(p.ecc, p.n, lat.sin()).exp());
+    let (sc, cc) = chi_sin_cos(p.c, oa_math::exp(iso_log(p.ecc, p.n, oa_math::sin(lat))));
     let tau = std::f64::consts::TAU;
     let d =
-        p.n * ((lon - p.lon0_rad + std::f64::consts::PI).rem_euclid(tau) - std::f64::consts::PI);
-    let cd = d.cos();
+        p.n * (rem_euclid_f64(lon - p.lon0_rad + std::f64::consts::PI, tau) - std::f64::consts::PI);
+    let cd = oa_math::cos(d);
     let denom = 1.0 + sc * p.sin_chi0 + cc * p.cos_chi0 * cd;
     if !denom.is_finite() || denom < MIN_DENOMINATOR {
         return None;
     }
     let k = 2.0 * p.radius_m / denom;
-    let x = k * cc * d.sin();
+    let x = k * cc * oa_math::sin(d);
     let y = k * (sc * p.cos_chi0 - cc * p.sin_chi0 * cd);
     let sx = p.cx16 + x * p.scale;
     let sy = p.cy16 - y * p.scale;
@@ -216,31 +227,30 @@ pub fn project(p: &Projection, lat_e7: i32, lon_e7: i32) -> Option<(i32, i32)> {
 pub fn unproject(p: &Projection, x16: i32, y16: i32) -> Option<(i32, i32)> {
     let x = (f64::from(x16) - p.cx16) / p.scale;
     let y = (p.cy16 - f64::from(y16)) / p.scale;
-    let rho = x.hypot(y);
-    let ang = 2.0 * (rho / (2.0 * p.radius_m)).atan();
-    let (sa, ca) = (ang.sin(), ang.cos());
+    let rho = oa_math::hypot(x, y);
+    let ang = 2.0 * oa_math::atan(rho / (2.0 * p.radius_m));
+    let (sa, ca) = (oa_math::sin(ang), oa_math::cos(ang));
     let (chi, d) = if rho == 0.0 {
-        (p.sin_chi0.asin(), 0.0)
+        (oa_math::asin(p.sin_chi0), 0.0)
     } else {
-        let chi = (ca * p.sin_chi0 + y * sa * p.cos_chi0 / rho)
-            .clamp(-1.0, 1.0)
-            .asin();
-        let d = (x * sa).atan2(rho * p.cos_chi0 * ca - y * p.sin_chi0 * sa);
+        let chi = oa_math::asin((ca * p.sin_chi0 + y * sa * p.cos_chi0 / rho).clamp(-1.0, 1.0));
+        let d = oa_math::atan2(x * sa, rho * p.cos_chi0 * ca - y * p.sin_chi0 * sa);
         (chi, d)
     };
     let lon = p.lon0_rad + d / p.n;
     // Isometric latitude from the conformal latitude, then Newton's method for the geodetic one.
-    let psi = 0.5 * ((1.0 + chi.sin()) / (p.c * (1.0 - chi.sin()))).ln() / p.n;
+    let psi =
+        0.5 * oa_math::ln((1.0 + oa_math::sin(chi)) / (p.c * (1.0 - oa_math::sin(chi)))) / p.n;
     let e2 = p.ecc * p.ecc;
     let mut lat = chi;
     for _ in 0..12 {
-        let s = lat.sin();
-        let psi_i = (std::f64::consts::FRAC_PI_4 + lat / 2.0).tan().ln()
-            + p.ecc / 2.0 * ((1.0 - p.ecc * s) / (1.0 + p.ecc * s)).ln();
-        lat -= (psi_i - psi) * lat.cos() * (1.0 - e2 * s * s) / (1.0 - e2);
+        let s = oa_math::sin(lat);
+        let psi_i = oa_math::ln(oa_math::tan(std::f64::consts::FRAC_PI_4 + lat / 2.0))
+            + p.ecc / 2.0 * oa_math::ln((1.0 - p.ecc * s) / (1.0 + p.ecc * s));
+        lat -= (psi_i - psi) * oa_math::cos(lat) * (1.0 - e2 * s * s) / (1.0 - e2);
     }
     let e7 = 1.0 / 1e-7_f64.to_radians();
-    let mut lon_e7 = (lon * e7).round();
+    let mut lon_e7 = oa_ieee::round(lon * e7);
     // Wrap into [-180, 180] degrees.
     let full = 3_600_000_000.0;
     while lon_e7 > 1_800_000_000.0 {
@@ -249,7 +259,7 @@ pub fn unproject(p: &Projection, x16: i32, y16: i32) -> Option<(i32, i32)> {
     while lon_e7 < -1_800_000_000.0 {
         lon_e7 += full;
     }
-    let lat_e7 = (lat * e7).round();
+    let lat_e7 = oa_ieee::round(lat * e7);
     if !lat_e7.is_finite() || !lon_e7.is_finite() {
         return None;
     }
@@ -271,7 +281,10 @@ pub struct Bbox {
 
 /// Longitude offset from `centre`, wrapped into -180 to 180 degrees, 1e-7 degree.
 pub fn dlon_e7(lon: i32, centre: i32) -> i64 {
-    (i64::from(lon) - i64::from(centre) + 1_800_000_000).rem_euclid(3_600_000_000) - 1_800_000_000
+    i64::rem_euclid(
+        i64::from(lon) - i64::from(centre) + 1_800_000_000,
+        3_600_000_000,
+    ) - 1_800_000_000
 }
 
 /// The box around the map area grown by `margin_px`, found by unprojecting its border (a position
@@ -334,7 +347,7 @@ pub fn ring_radius16(p: &Projection, metres: f64) -> Option<i32> {
     if !half.is_finite() || !(0.0..1.5).contains(&half) {
         return None;
     }
-    Some(saturate(2.0 * p.radius_m * half.tan() * p.scale))
+    Some(saturate(2.0 * p.radius_m * oa_math::tan(half) * p.scale))
 }
 
 #[cfg(test)]

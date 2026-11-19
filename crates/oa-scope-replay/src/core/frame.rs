@@ -6,7 +6,7 @@
 use crate::core::rows::{
     convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
-use oa_airspace::model::Model;
+use oa_airspace::core::model::Model;
 use oa_display::core::list::{
     list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT,
 };

@@ -614,13 +614,13 @@ fn true_radius16(
     let east = ell.direct(at, 90.0, metres).ok()?.position;
     let (lat, lon) = (to_e7(east.lat())?, to_e7(east.lon())?);
     let p = project(proj, lat, lon)?;
-    let d = f64::from(p.0 - here.0).hypot(f64::from(p.1 - here.1));
+    let d = oa_math::hypot(f64::from(p.0 - here.0), f64::from(p.1 - here.1));
     d.is_finite()
-        .then_some(d.round().min(f64::from(1 << 28)) as i32)
+        .then_some(oa_ieee::round(d).min(f64::from(1 << 28)) as i32)
 }
 
 fn to_e7(deg: f64) -> Option<i32> {
-    let v = (deg * 1e7).round();
+    let v = oa_ieee::round(deg * 1e7);
     (v.is_finite() && v.abs() <= 1.8e9).then_some(v as i32)
 }
 
