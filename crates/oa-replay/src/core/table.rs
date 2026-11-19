@@ -808,7 +808,9 @@ pub fn sweep(t: &mut FlightTable, now_ns: i64) -> usize {
 
 /// The first multiple of `step` after `now`.
 fn next_boundary(now: i64, step: i64) -> i64 {
-    now.div_euclid(step).saturating_add(1).saturating_mul(step)
+    i64::div_euclid(now, step)
+        .saturating_add(1)
+        .saturating_mul(step)
 }
 
 /// Moves the table's clock to replay time `now_ns`: runs a sweep if the cadence says one is due.

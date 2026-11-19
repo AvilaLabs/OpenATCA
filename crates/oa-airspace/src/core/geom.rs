@@ -21,7 +21,8 @@
 //!   chord lies within [`ARC_CHORD_M`] of the curve it stands for.
 //!
 //! Coordinates enter as the model's 1e-7 degree integers, so selection is a function of the
-//! values the snapshot stores.
+//! values the snapshot stores. Trigonometry and rounding come from `oa_math` and `oa_ieee`, not
+//! the platform library, so the same snapshot selects the same volumes on every machine (B6).
 
 use oa_geo::{wgs84, Ellipsoid, GeoError, LatLon, Polygon};
 
@@ -69,7 +70,7 @@ pub fn e7_to_deg(v: i32) -> f64 {
 
 /// Model units from degrees, rounded to nearest; `None` outside the `i32` range or non-finite.
 pub fn deg_to_e7(d: f64) -> Option<i32> {
-    let v = (d * 1e7).round();
+    let v = oa_ieee::round(d * 1e7);
     if v.is_finite() && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
         Some(v as i32)
     } else {
@@ -86,7 +87,9 @@ type V3 = [f64; 3];
 
 fn unit(p: LatLon) -> V3 {
     let (la, lo) = (p.lat().to_radians(), p.lon().to_radians());
-    [la.cos() * lo.cos(), la.cos() * lo.sin(), la.sin()]
+    let (sla, cla) = oa_math::sin_cos(la);
+    let (slo, clo) = oa_math::sin_cos(lo);
+    [cla * clo, cla * slo, sla]
 }
 
 fn dot(a: V3, b: V3) -> f64 {
@@ -102,12 +105,12 @@ fn cross(a: V3, b: V3) -> V3 {
 }
 
 fn norm(a: V3) -> f64 {
-    dot(a, a).sqrt()
+    oa_ieee::sqrt(dot(a, a))
 }
 
 /// Angle between two unit vectors, radians.
 fn angle(a: V3, b: V3) -> f64 {
-    norm(cross(a, b)).atan2(dot(a, b))
+    oa_math::atan2(norm(cross(a, b)), dot(a, b))
 }
 
 /// One polygon edge with what the spherical estimate needs.
@@ -176,7 +179,7 @@ fn approx_edge_m(e: &Edge, p: V3) -> f64 {
         // Foot of the perpendicular on the great circle, then check it lies between a and b.
         let q = [p[0] - s * e.n3[0], p[1] - s * e.n3[1], p[2] - s * e.n3[2]];
         if norm(q) > 1e-12 && dot(cross(e.a3, q), e.n3) >= 0.0 && dot(cross(q, e.b3), e.n3) >= 0.0 {
-            best = best.min(s.abs().min(1.0).asin());
+            best = best.min(oa_math::asin(s.abs().min(1.0)));
         }
     }
     best * R_MEAN_M
@@ -247,7 +250,7 @@ pub struct Bbox {
 
 /// Wraps a longitude difference into [-180, 180).
 fn wrap180(d: f64) -> f64 {
-    d - 360.0 * ((d + 180.0) / 360.0).floor()
+    d - 360.0 * oa_ieee::floor((d + 180.0) / 360.0)
 }
 
 /// True when the longitude intervals [`a_lo`, `a_hi`] and [`b_lo`, `b_hi`] share a point
@@ -282,19 +285,19 @@ fn lon_range(reference: f64, lons: impl Iterator<Item = f64>) -> Option<(f64, f6
 fn edge_vertex_lat(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<Option<f64>, GeoError> {
     let inv = ell.inverse(a, b)?;
     let (c1, c2) = (
-        inv.azimuth1_deg.to_radians().cos(),
-        inv.azimuth2_deg.to_radians().cos(),
+        oa_math::cos(inv.azimuth1_deg.to_radians()),
+        oa_math::cos(inv.azimuth2_deg.to_radians()),
     );
     if c1 * c2 >= 0.0 {
         return Ok(None);
     }
     let f1 = 1.0 - ell.flattening();
-    let beta_a = (f1 * a.lat().to_radians().tan()).atan();
-    let k = (beta_a.cos() * inv.azimuth1_deg.to_radians().sin())
+    let beta_a = oa_math::atan(f1 * oa_math::tan(a.lat().to_radians()));
+    let k = (oa_math::cos(beta_a) * oa_math::sin(inv.azimuth1_deg.to_radians()))
         .abs()
         .min(1.0);
-    let beta_max = k.acos();
-    let lat = (beta_max.tan() / f1).atan().to_degrees();
+    let beta_max = oa_math::acos(k);
+    let lat = oa_math::atan(oa_math::tan(beta_max) / f1).to_degrees();
     Ok(Some(if c1 > 0.0 { lat } else { -lat }))
 }
 
@@ -382,7 +385,7 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
     let dense_half = dense.iter().fold(0.0_f64, |m, e| m.max(e.half));
     let dlat = buffer_m / 110_000.0 + 0.01;
     let worst_lat = (min_lat.abs().max(max_lat.abs()) + dlat).min(89.0);
-    let dlon = buffer_m / (111_000.0 * worst_lat.to_radians().cos().max(0.05)) + 0.01;
+    let dlon = buffer_m / (111_000.0 * oa_math::cos(worst_lat.to_radians()).max(0.05)) + 0.01;
     let bbox = if edges.is_empty() || max_lon - min_lon > 120.0 || worst_lat > 80.0 {
         None
     } else {
@@ -494,7 +497,7 @@ fn edge_samples_within(
     remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
     let inv = ell.inverse(a, b)?;
-    let n = ((inv.distance_m / step_m).ceil() as usize).clamp(1, 10_000);
+    let n = (oa_ieee::ceil(inv.distance_m / step_m) as usize).clamp(1, 10_000);
     take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     out.push(a);
@@ -539,7 +542,7 @@ fn rhumb_samples(
     remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
     let inv = ell.rhumb_inverse(a, b)?;
-    let n = ((inv.distance_m / step_m).ceil() as usize).clamp(1, 10_000);
+    let n = (oa_ieee::ceil(inv.distance_m / step_m) as usize).clamp(1, 10_000);
     take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     out.push(a);
@@ -572,8 +575,8 @@ fn arc_samples(
     remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
     let r = radius_m.max(2.0 * ARC_CHORD_M);
-    let max_step_deg = (2.0 * (1.0 - ARC_CHORD_M / r).acos()).to_degrees();
-    let n = ((sweep_deg.abs() / max_step_deg).ceil() as usize).clamp(1, MAX_ARC_POINTS);
+    let max_step_deg = (2.0 * oa_math::acos(1.0 - ARC_CHORD_M / r)).to_degrees();
+    let n = (oa_ieee::ceil(sweep_deg.abs() / max_step_deg) as usize).clamp(1, MAX_ARC_POINTS);
     take_samples(remaining, n)?;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -595,7 +598,7 @@ fn arc_sweep(
     use crate::core::model::via;
     let from = ell.inverse(centre, a)?.azimuth1_deg;
     let to = ell.inverse(centre, b)?.azimuth1_deg;
-    let cw = (to - from).rem_euclid(360.0);
+    let cw = oa_math::rem_euclid(to - from, 360.0);
     Ok((from, if via == via::ARC_CW { cw } else { cw - 360.0 }))
 }
 
@@ -734,7 +737,7 @@ fn within_buffer_of_edge(area: &Area, e: &Edge, p: LatLon) -> Result<bool, GeoEr
 fn polyline_meets_area(area: &Area, pts: &[LatLon]) -> Result<bool, GeoError> {
     let edges = closed_edges(pts);
     for e in &edges {
-        let reach = (e.half + area.dense_half + 1e-7).cos();
+        let reach = oa_math::cos(e.half + area.dense_half + 1e-7);
         if area
             .dense
             .iter()
@@ -832,8 +835,8 @@ fn cell_outline(lat: i32, lon: i32) -> Result<Vec<LatLon>, GeoError> {
     let mut out = Vec::new();
     for (row, from, to) in [(la, lo, lo + 1.0), (la + 1.0, lo + 1.0, lo)] {
         let row = row.min(90.0);
-        let len_m = 111_000.0 * row.to_radians().cos().abs();
-        let n = ((len_m / PARALLEL_STEP_M).ceil() as usize).clamp(1, 400);
+        let len_m = 111_000.0 * oa_math::cos(row.to_radians()).abs();
+        let n = (oa_ieee::ceil(len_m / PARALLEL_STEP_M) as usize).clamp(1, 400);
         for i in 0..n {
             let t = i as f64 / n as f64;
             out.push(LatLon::new(

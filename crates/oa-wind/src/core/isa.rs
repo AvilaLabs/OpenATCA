@@ -7,6 +7,9 @@
 //!
 //! Two layers cover -5000 m to 20 000 m geopotential: the troposphere (lapse 6.5 K/km, to
 //! 11 000 m) and the isothermal layer (216.65 K, 11 000 to 20 000 m).
+//!
+//! The powers, exponential and logarithm come from `oa_math`, not the platform library, so the
+//! result is the same bits on every machine (B6); it can differ from a `std` build in the last bit.
 
 use crate::core::error::Refusal;
 
@@ -29,7 +32,7 @@ fn exponent() -> f64 {
 }
 
 fn p_tropopause_hpa() -> f64 {
-    P0_HPA * (1.0 - LAPSE_K_PER_M * TROPOPAUSE_M / T0_K).powf(exponent())
+    P0_HPA * oa_math::pow(1.0 - LAPSE_K_PER_M * TROPOPAUSE_M / T0_K, exponent())
 }
 
 /// ISA pressure in hPa at a pressure altitude in feet. Refuses non-finite input and altitudes
@@ -43,10 +46,10 @@ pub fn pressure_hpa_from_altitude_ft(alt_ft: f64) -> Result<f64, Refusal> {
         return Err(Refusal::AltitudeOutsideIsa { alt_m: h });
     }
     if h <= TROPOPAUSE_M {
-        Ok(P0_HPA * (1.0 - LAPSE_K_PER_M * h / T0_K).powf(exponent()))
+        Ok(P0_HPA * oa_math::pow(1.0 - LAPSE_K_PER_M * h / T0_K, exponent()))
     } else {
         let scale = R_AIR * T_TROPOPAUSE_K / G0;
-        Ok(p_tropopause_hpa() * (-(h - TROPOPAUSE_M) / scale).exp())
+        Ok(p_tropopause_hpa() * oa_math::exp(-(h - TROPOPAUSE_M) / scale))
     }
 }
 
@@ -58,10 +61,10 @@ pub fn altitude_ft_from_pressure_hpa(p_hpa: f64) -> Result<f64, Refusal> {
     }
     let pt = p_tropopause_hpa();
     let h = if p_hpa >= pt {
-        T0_K / LAPSE_K_PER_M * (1.0 - (p_hpa / P0_HPA).powf(1.0 / exponent()))
+        T0_K / LAPSE_K_PER_M * (1.0 - oa_math::pow(p_hpa / P0_HPA, 1.0 / exponent()))
     } else {
         let scale = R_AIR * T_TROPOPAUSE_K / G0;
-        TROPOPAUSE_M - scale * (p_hpa / pt).ln()
+        TROPOPAUSE_M - scale * oa_math::ln(p_hpa / pt)
     };
     if !(MIN_ALT_M..=MAX_ALT_M).contains(&h) {
         return Err(Refusal::AltitudeOutsideIsa { alt_m: h });

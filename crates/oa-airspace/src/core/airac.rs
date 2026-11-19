@@ -32,7 +32,7 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
         return None;
     }
     let y = i64::from(y) - i64::from(m <= 2);
-    let era = y.div_euclid(400);
+    let era = i64::div_euclid(y, 400);
     let yoe = y - era * 400;
     let mp = (i64::from(m) + 9) % 12;
     let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
@@ -43,7 +43,7 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
 /// The year of a day count (days since 1970-01-01).
 fn year_of_days(z: i64) -> i64 {
     let z = z + 719_468;
-    let era = z.div_euclid(146_097);
+    let era = i64::div_euclid(z, 146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
@@ -65,10 +65,10 @@ pub fn airac_cycle(yyyymmdd: u32) -> Option<u32> {
     }
     let day = days_from_civil(y, m, d)?;
     let epoch = days_from_civil(AIRAC_EPOCH.0, AIRAC_EPOCH.1, AIRAC_EPOCH.2)?;
-    let start = epoch + (day - epoch).div_euclid(AIRAC_DAYS) * AIRAC_DAYS;
+    let start = epoch + i64::div_euclid(day - epoch, AIRAC_DAYS) * AIRAC_DAYS;
     let year = year_of_days(start);
     let jan1 = days_from_civil(i32::try_from(year).ok()?, 1, 1)?;
-    let first = epoch + (jan1 - epoch + AIRAC_DAYS - 1).div_euclid(AIRAC_DAYS) * AIRAC_DAYS;
+    let first = epoch + i64::div_euclid(jan1 - epoch + AIRAC_DAYS - 1, AIRAC_DAYS) * AIRAC_DAYS;
     let release = (start - first) / AIRAC_DAYS + 1;
     u32::try_from((year - 2000) * 100 + release).ok()
 }

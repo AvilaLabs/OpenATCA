@@ -68,12 +68,12 @@ pub fn leg_end_ns(truth: &Truth, leg: LegIx) -> Option<i64> {
 /// First whole millisecond inside the leg (the start rounded up).
 pub fn leg_start_ms(truth: &Truth, leg: LegIx) -> Option<i64> {
     let t = leg_start_ns(truth, leg)?;
-    Some(t.div_euclid(NS_PER_MS) + i64::from(t.rem_euclid(NS_PER_MS) != 0))
+    Some(i64::div_euclid(t, NS_PER_MS) + i64::from(i64::rem_euclid(t, NS_PER_MS) != 0))
 }
 
 /// Last whole millisecond inside the leg (the end rounded down).
 pub fn leg_end_ms(truth: &Truth, leg: LegIx) -> Option<i64> {
-    Some(leg_end_ns(truth, leg)?.div_euclid(NS_PER_MS))
+    Some(i64::div_euclid(leg_end_ns(truth, leg)?, NS_PER_MS))
 }
 
 /// Number of reports in a leg.
@@ -179,7 +179,7 @@ pub fn truth_at(truth: &Truth, addr: u32, t_ms: i64) -> TruthQuery {
     // A non-finite state, or one moving faster than any ADS-B emitter class can report, is
     // unusable, not a position: finite is not the same as valid.
     if ![lat, lon, vel_e, vel_n].iter().all(|v| v.is_finite())
-        || vel_e.hypot(vel_n) > SPEED_ENVELOPE_MPS
+        || oa_math::hypot(vel_e, vel_n) > SPEED_ENVELOPE_MPS
     {
         return TruthQuery::TooUncertain;
     }

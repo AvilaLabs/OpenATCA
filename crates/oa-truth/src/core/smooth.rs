@@ -29,7 +29,8 @@ pub const SIGMA95: f64 = 2.447_746_830_680_816;
 /// no radius (`None`): it must never read as zero uncertainty. A tiny negative one from rounding
 /// is zero.
 pub fn sigma95_h_m(var: f64) -> Option<f64> {
-    var.is_finite().then(|| SIGMA95 * var.max(0.0).sqrt())
+    var.is_finite()
+        .then(|| SIGMA95 * oa_ieee::sqrt(var.max(0.0)))
 }
 
 /// The smoother's output for one leg, one entry per report. A7.2: cold, per-leg scratch.

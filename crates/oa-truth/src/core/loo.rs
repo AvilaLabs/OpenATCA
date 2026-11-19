@@ -103,9 +103,9 @@ pub(crate) fn loo_leg(
         }
         let [pe, ve, _, pn, vn, _] = x;
         let (dx, dy) = (ek - pe, nk - pn);
-        let hz = (dx * dx + dy * dy).sqrt();
+        let hz = oa_ieee::sqrt(dx * dx + dy * dy);
         acc.hz.push(hz);
-        let speed = (ve * ve + vn * vn).sqrt();
+        let speed = oa_ieee::sqrt(ve * ve + vn * vn);
         if speed >= 1.0 {
             let (ux, uy) = (ve / speed, vn / speed);
             acc.along.push(dx * ux + dy * uy);
@@ -117,7 +117,7 @@ pub(crate) fn loo_leg(
             acc.under_gate.hit += 1;
         }
         acc.coverage.n += 1;
-        if hz <= SIGMA95 * (var + sk * sk).sqrt() {
+        if hz <= SIGMA95 * oa_ieee::sqrt(var + sk * sk) {
             acc.coverage.hit += 1;
         }
         // Altitude: neighbours in the rest, all three must have one.
@@ -155,11 +155,11 @@ pub(crate) fn dist_of(v: &[f64]) -> Dist {
     }
     let nf = n as f64;
     let mean = v.iter().sum::<f64>() / nf;
-    let rms = (v.iter().map(|x| x * x).sum::<f64>() / nf).sqrt();
+    let rms = oa_ieee::sqrt(v.iter().map(|x| x * x).sum::<f64>() / nf);
     let mut a: Vec<f64> = v.iter().map(|x| x.abs()).collect();
     a.sort_by(|x, y| x.total_cmp(y));
     let rank = |p: f64| -> f64 {
-        let r = ((p * nf).ceil() as usize).clamp(1, n);
+        let r = (oa_ieee::ceil(p * nf) as usize).clamp(1, n);
         a.get(r - 1).copied().unwrap_or(0.0)
     };
     Dist {

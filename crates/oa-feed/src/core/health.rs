@@ -216,7 +216,7 @@ impl Default for FeedHealth {
 const NS_PER_SEC: i64 = 1_000_000_000;
 
 fn ring_index(sec: i64) -> usize {
-    sec.rem_euclid(RING_SLOTS as i64) as usize
+    i64::rem_euclid(sec, RING_SLOTS as i64) as usize
 }
 
 /// Folds one accepted frame into `h`. `now_ns` is the time the frame is observed (live: its
@@ -290,7 +290,7 @@ fn observe_message(h: &mut FeedHealth, f: &Frame<'_>, now_ns: i64) {
     if f.flags & FLAG_REDELIVERED != 0 {
         h.redelivered += 1;
     }
-    let sec = now_ns.div_euclid(NS_PER_SEC);
+    let sec = i64::div_euclid(now_ns, NS_PER_SEC);
     if let Some(slot) = h.ring.get_mut(ring_index(sec)) {
         if slot.sec != sec {
             *slot = Slot {
@@ -306,10 +306,7 @@ fn observe_message(h: &mut FeedHealth, f: &Frame<'_>, now_ns: i64) {
         h.no_timestamp += 1;
         return;
     }
-    let lat_ms = f
-        .recv_unix_ns
-        .div_euclid(1_000_000)
-        .saturating_sub(f.jms_timestamp_ms);
+    let lat_ms = i64::div_euclid(f.recv_unix_ns, 1_000_000).saturating_sub(f.jms_timestamp_ms);
     if lat_ms < 0 {
         h.skew += 1;
     } else {
@@ -361,8 +358,8 @@ pub fn rates_milli(h: &FeedHealth, now_ns: i64) -> (u64, u64) {
     if h.frames == 0 {
         return (0, 0);
     }
-    let now_sec = now_ns.div_euclid(NS_PER_SEC);
-    let first_sec = h.first_recv_ns.div_euclid(NS_PER_SEC);
+    let now_sec = i64::div_euclid(now_ns, NS_PER_SEC);
+    let first_sec = i64::div_euclid(h.first_recv_ns, NS_PER_SEC);
     let count_at = |sec: i64| -> u64 {
         match h.ring.get(ring_index(sec)) {
             Some(s) if s.sec == sec => u64::from(s.count),
