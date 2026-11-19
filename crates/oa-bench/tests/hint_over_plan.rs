@@ -10,7 +10,7 @@
 use oa_bench::assoc::{associate, astatus, index_truth, AssocConfig};
 use oa_bench::legacy::{flight_ix, new_legacy, push_th, Legacy, NONE, NO_TIME};
 use oa_bench::pair::{build_pairs, PairConfig};
-use oa_bench::run::{find, run_benchmark};
+use oa_bench::run::{find, run_benchmark, RunConfig};
 use oa_bench::stats::method;
 use oa_bench::synth::{env, self_test_config, T0_MS};
 use oa_bench::thindex::build_th_index;
@@ -21,6 +21,10 @@ const FAR: u32 = 0xA00001;
 /// Far from the flights, with a callsign that contradicts theirs.
 const OTHER: u32 = 0xC00001;
 const UNKNOWN: u32 = 0xDEAD00;
+/// Another aircraft far from the flights.
+const FAR2: u32 = 0xA00002;
+/// Near the flights but known only for the first three samples (too few to check).
+const PARTIAL: u32 = 0xD00001;
 
 fn sample(lat: f64, t_ms: i64) -> TruthSample {
     let s = (t_ms - T0_MS) as f64 / 1000.0;
@@ -48,6 +52,8 @@ fn legs() -> Vec<TruthLeg> {
         mk(NEAR, None),
         mk(FAR, None),
         mk(OTHER, Some(*b"OTHER1\0\0")),
+        mk(FAR2, None),
+        mk(PARTIAL, None),
     ]
 }
 
@@ -80,7 +86,8 @@ fn world(flights: &[(u32, u32, i64)]) -> Legacy {
 fn query(a: u32, t: i64) -> Result<TruthSample, NoTruth> {
     match a {
         NEAR => Ok(sample(41.0, t)),
-        FAR | OTHER => Ok(sample(46.0, t)),
+        FAR | FAR2 | OTHER => Ok(sample(46.0, t)),
+        PARTIAL if t < T0_MS + 36_000 => Ok(sample(41.0, t)),
         _ => Err(NoTruth::UnknownAircraft),
     }
 }
@@ -193,4 +200,101 @@ fn the_report_splits_the_hint_over_plan_method_and_lists_each_flight_with_both_a
     assert!(listed
         .iter()
         .any(|l| l.contains("plan address C00001") && l.contains("callsigns disagree")));
+}
+
+fn run_assoc(fl: &[(u32, u32, i64)], cfg: &AssocConfig) -> oa_bench::assoc::Assoc {
+    let legs = legs();
+    let truth = Truth {
+        query: &query,
+        legs: &legs,
+    };
+    let tix = index_truth(&legs);
+    let leg = world(fl);
+    let ix = build_th_index(&leg.th, fl.len());
+    associate(&leg, &ix, &truth, &tix, cfg)
+}
+
+// REQ: OA-BENCH-132
+#[test]
+fn a_plan_address_that_is_only_unchecked_is_kept_and_other_failures_of_the_hint_change_nothing() {
+    let a = run_assoc(
+        &[
+            (PARTIAL, NEAR, 6), // plan unchecked, hint plausible: plan kept
+            (FAR, FAR2, 6),     // hint known but far
+            (FAR, OTHER, 6),    // hint's truth callsign contradicts
+            (FAR, FAR, 6),      // hint equal to a failing plan
+        ],
+        &AssocConfig::default(),
+    );
+    assert_eq!((a.status[0], a.addr[0]), (astatus::ADDRESS, PARTIAL));
+    assert_eq!(a.unchecked, 1);
+    for f in 1..4 {
+        assert_eq!(a.status[f], astatus::ADDRESS_IMPLAUSIBLE, "flight {f}");
+        assert_eq!((a.addr[f], a.flag_addr[f]), (NONE, FAR));
+        assert_eq!(a.plan_fail[f], 0);
+    }
+    assert_eq!(a.counts[usize::from(astatus::HINT_OVER_PLAN)], 0);
+}
+
+// REQ: OA-BENCH-132
+#[test]
+fn with_the_rule_switched_off_the_statuses_are_the_old_ones() {
+    let cfg = AssocConfig {
+        hint_over_plan: false,
+        ..AssocConfig::default()
+    };
+    let a = run_assoc(&flights(), &cfg);
+    let want = [
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::ADDRESS,
+        astatus::ADDRESS_NO_TRUTH,
+        astatus::ADDRESS,
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::ADDRESS_IMPLAUSIBLE,
+        astatus::ADDRESS_NO_TRUTH,
+    ];
+    assert_eq!(a.status, want);
+    assert!(a.plan_fail.iter().all(|&p| p == 0));
+}
+
+// REQ: OA-BENCH-132
+#[test]
+fn truth_addresses_with_several_flights_are_counted_and_listed_and_a_cut_list_says_what_it_left_out(
+) {
+    let legs = legs();
+    let truth = Truth {
+        query: &query,
+        legs: &legs,
+    };
+    // Flight 0 by plan address, flight 1 by hint over plan: both NEAR.
+    let leg = world(&[(NEAR, NONE, 6), (FAR, NEAR, 6)]);
+    let out = run_benchmark(&leg, &truth, &env(), &self_test_config());
+    let asc = find(&out, "ASSOC").unwrap();
+    let get = |k: &str| asc.scalars.iter().find(|(n, _)| n == k).unwrap().1;
+    assert_eq!(
+        get("truth addresses associated with more than one ERAM flight"),
+        1.0
+    );
+    assert_eq!(get("more cases not listed (the list is cut at 200)"), 0.0);
+    assert!(asc
+        .cases
+        .iter()
+        .any(|l| l.contains("truth address B00001 associated with 2 ERAM flights")));
+    // 205 hint-over-plan flights and the one shared address make 206 lines; 200 are listed.
+    let many = vec![(FAR, NEAR, 6); 205];
+    let leg = world(&many);
+    let out = run_benchmark(
+        &leg,
+        &truth,
+        &env(),
+        &RunConfig {
+            ..self_test_config()
+        },
+    );
+    let asc = find(&out, "ASSOC").unwrap();
+    assert_eq!(asc.cases.len(), 200);
+    let get = |k: &str| asc.scalars.iter().find(|(n, _)| n == k).unwrap().1;
+    assert_eq!(get("more cases not listed (the list is cut at 200)"), 6.0);
 }

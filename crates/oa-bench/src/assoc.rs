@@ -19,7 +19,9 @@
 //!    different address, known to truth, that passes the check (not merely unchecked), the hint
 //!    is used instead (method hint over plan, scored as its own split, every such flight listed
 //!    with both addresses and the reason the plan address failed); a plausible plan address
-//!    always wins.
+//!    always wins, and so does one that is only unchecked (too few shared times): the rule
+//!    replaces a plan address that failed or is unknown to truth, nothing else
+//!    ([`AssocConfig::hint_over_plan`] switches it off for protocols frozen before it).
 //! 3. Otherwise the callsign (ERAM aircraft identification against the truth leg callsign, ASCII
 //!    case-insensitive) gives candidate aircraft. A candidate needs enough shared times (truth
 //!    and ERAM overlap in time) and the region test. Exactly one candidate is associated (method
@@ -105,6 +107,9 @@ pub struct AssocConfig {
     pub min_shared: u32,
     /// Most samples of a flight tested against one candidate (a deterministic stride is used).
     pub max_samples: usize,
+    /// Use a plausible address hint in place of a plan address that failed the plausibility
+    /// check or is unknown to truth (OA-BENCH-132).
+    pub hint_over_plan: bool,
 }
 
 impl Default for AssocConfig {
@@ -116,6 +121,7 @@ impl Default for AssocConfig {
             region_m: 50.0 * NM_M,
             min_shared: 5,
             max_samples: 200,
+            hint_over_plan: true,
         }
     }
 }
@@ -339,11 +345,11 @@ pub fn associate(
                 }
             } else {
                 status = astatus::ADDRESS_NO_TRUTH;
-                plan_fail = 3;
             }
             // A plan address that fails, or truth does not know, gives way to a different track
             // hint that passes the same check (an unchecked hint is not enough).
-            let plan_failed = fa != NONE
+            let plan_failed = cfg.hint_over_plan
+                && fa != NONE
                 && (status == astatus::ADDRESS_NO_TRUTH || status == astatus::ADDRESS_IMPLAUSIBLE);
             if plan_failed && hint != NONE && hint != fa && tix.by_addr.contains_key(&hint) {
                 let mut hint_shared = 0u32;

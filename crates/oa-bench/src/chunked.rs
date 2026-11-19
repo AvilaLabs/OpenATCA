@@ -46,8 +46,8 @@ use crate::metrics_th::{
 };
 use crate::pair::{build_pairs_with, PairTable};
 use crate::run::{
-    assoc_result, association_case_lines, flagged_assoc, flagged_metrics, flagged_views, RunConfig,
-    RunOutput,
+    assoc_result, association_case_lines, case_scalars, duplicate_addr_groups, flagged_assoc,
+    flagged_metrics, flagged_views, RunConfig, RunOutput,
 };
 use crate::stats::{
     band, new_result, sort_cases, Exclusions, KeyedCase, MetricResult, Row, Stats, COAST_NAMES,
@@ -250,6 +250,10 @@ pub struct ChunkOut {
     pub outside: u64,
     /// The association's case lines with their places in the list, at most [`MAX_CASES`].
     pub assoc_cases: Vec<KeyedCase>,
+    /// The association's case lines before the list was cut.
+    pub assoc_cases_total: u64,
+    /// Truth addresses associated with more than one flight of the chunk.
+    pub duplicate_addrs: u64,
     /// T9's case lines with their places in the list.
     pub t9_cases: Vec<KeyedCase>,
     pub t5: T5Hists,
@@ -329,7 +333,11 @@ pub fn benchmark_chunk(
         }
     }
     let mut assoc_cases = association_case_lines(leg, &ix, &assoc);
+    let assoc_cases_total = assoc_cases.len() as u64;
     sort_cases(&mut assoc_cases);
+    let duplicate_addrs = duplicate_addr_groups(&assoc).len() as u64;
+    // Hint-over-plan association can put `assoc.addr` outside the chunk's range (and so refuse
+    // the chunk below); chunked runs only score tracker output, which has no address hint.
     let in_range = |a: u32| a == NONE || (a >= range.0 && a <= range.1);
     let outside = (0..leg.flights.gufi.len())
         .filter(|&f| {
@@ -370,6 +378,8 @@ pub fn benchmark_chunk(
         assoc,
         outside,
         assoc_cases,
+        assoc_cases_total,
+        duplicate_addrs,
         t9_cases,
         t5,
         t6_none: leg.th.pos_ms.len() as u64 - with,
@@ -390,6 +400,8 @@ pub struct ChunkAcc {
     flag_reasons: [u64; astatus::REASON_NAMES.len()],
     unchecked: u64,
     assoc_cases: Vec<KeyedCase>,
+    assoc_cases_total: u64,
+    duplicate_addrs: u64,
     t9_cases: Vec<KeyedCase>,
     exclusions: Exclusions,
     assoc_counts: [u64; astatus::COUNT],
@@ -482,6 +494,8 @@ pub fn chunk_add(acc: &mut ChunkAcc, c: ChunkOut) -> Result<(), ChunkError> {
     }
     acc.unchecked += c.unchecked;
     acc.assoc_cases.extend(c.assoc_cases);
+    acc.assoc_cases_total += c.assoc_cases_total;
+    acc.duplicate_addrs += c.duplicate_addrs;
     sort_cases(&mut acc.assoc_cases);
     acc.t9_cases.extend(c.t9_cases);
     sort_cases(&mut acc.t9_cases);
@@ -596,6 +610,7 @@ pub fn chunk_finish(acc: ChunkAcc, cfg: &RunConfig) -> Result<(RunOutput, PairTa
         &cfg.assoc,
     );
     a.cases = acc.assoc_cases.into_iter().map(|c| c.1).collect();
+    case_scalars(&mut a, acc.duplicate_addrs, acc.assoc_cases_total);
     m.push(a);
     let n_pairs = pairs.t_ms.len();
     Ok((

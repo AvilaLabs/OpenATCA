@@ -95,7 +95,8 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         }
     }
     let mut a = assoc_result(&assoc.counts, &reasons, assoc.unchecked, &cfg.assoc);
-    association_cases(leg, &ix, &assoc, &mut a);
+    let total = association_cases(leg, &ix, &assoc, &mut a);
+    case_scalars(&mut a, duplicate_addr_groups(&assoc).len() as u64, total);
     m.push(a);
     RunOutput {
         metrics: m,
@@ -274,6 +275,35 @@ pub(crate) fn association_case_lines(
             .unwrap_or(0);
         v.push(((sev, addr, t), line));
     }
+    for (addr, fs) in duplicate_addr_groups(a) {
+        let names: Vec<String> = fs
+            .iter()
+            .map(|&f| {
+                leg.flights
+                    .callsign
+                    .get(f)
+                    .map_or_else(String::new, |c| crate::legacy::name(c).to_string())
+            })
+            .collect();
+        let t = fs
+            .iter()
+            .filter_map(|&f| {
+                crate::thindex::samples_of(ix, f as u32)
+                    .first()
+                    .and_then(|&s| leg.th.pos_ms.get(s as usize).copied())
+            })
+            .min()
+            .unwrap_or(0);
+        v.push((
+            (1u8, addr, t),
+            format!(
+                "truth address {} associated with {} ERAM flights: {}",
+                hex_addr(addr),
+                fs.len(),
+                names.join(", ")
+            ),
+        ));
+    }
     v
 }
 
@@ -288,15 +318,44 @@ fn hex_addr(a: u32) -> String {
 
 /// Lists the flights kept despite failing the tight check and the flagged flights, in the order
 /// of [`association_case_lines`], at most [`crate::stats::MAX_CASES`].
+/// Returns the number of case lines before the list was cut.
 pub(crate) fn association_cases(
     leg: &Legacy,
     ix: &crate::thindex::ThIndex,
     a: &Assoc,
     r: &mut MetricResult,
-) {
+) -> u64 {
     let mut v = association_case_lines(leg, ix, a);
+    let total = v.len() as u64;
     sort_cases(&mut v);
     r.cases = v.into_iter().map(|c| c.1).collect();
+    total
+}
+
+/// Truth addresses associated (in the primary rows) with more than one flight, with the flights.
+pub(crate) fn duplicate_addr_groups(a: &Assoc) -> std::collections::BTreeMap<u32, Vec<usize>> {
+    let mut m: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
+    for (f, &addr) in a.addr.iter().enumerate() {
+        if addr != NONE {
+            m.entry(addr).or_default().push(f);
+        }
+    }
+    m.retain(|_, v| v.len() > 1);
+    m
+}
+
+/// The scalars about the case list: addresses shared by several flights, and the lines the cut
+/// list left out (`total` lines were found, `r.cases` holds what was kept).
+pub(crate) fn case_scalars(r: &mut MetricResult, duplicates: u64, total: u64) {
+    r.scalars.push((
+        "truth addresses associated with more than one ERAM flight".to_string(),
+        duplicates as f64,
+    ));
+    let left = total.saturating_sub(r.cases.len() as u64);
+    r.scalars.push((
+        "more cases not listed (the list is cut at 200)".to_string(),
+        left as f64,
+    ));
 }
 
 /// Scores a tracker's output columns: the columns become the legacy table

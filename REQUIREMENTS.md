@@ -3134,7 +3134,11 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   `ADSB_02M_*` address hint is a different address, known to truth, that passes the check (not merely unchecked),
   the flight is associated with the hint under its own status and method (`hint over plan`); its pairs are scored
   in the primary rows as that method split, and each such flight is listed with both addresses and the reason the
-  plan address failed. A plausible plan address always wins; an unchecked hint never replaces it.
+  plan address failed. A plausible plan address always wins; an unchecked hint never replaces it, and a plan
+  address that is only unchecked (too few shared times) is kept. `AssocConfig::hint_over_plan` (default on) turns the
+  rule off for protocols frozen before it. The case list holds the first 200 cases by severity; the ASSOC table
+  counts the cases left out ("more cases not listed") and the truth addresses associated with more than one ERAM
+  flight, and lists them.
 
 ## Winds aloft (oa-wind)
 
