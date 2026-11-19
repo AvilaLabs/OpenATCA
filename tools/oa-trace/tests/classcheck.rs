@@ -744,7 +744,12 @@ fn the_real_workspace_passes() {
     assert!(rep.ok(), "{:#?}", rep.failures);
     assert_eq!(
         rep.unsplit,
-        ["oa-display", "oa-replay-diff", "oa-scope-replay", "oa-track"]
+        [
+            "oa-display",
+            "oa-replay-diff",
+            "oa-scope-replay",
+            "oa-track"
+        ]
     );
 }
 
@@ -788,11 +793,7 @@ fn float_methods_core_lacks_are_rejected_in_core_code() {
             "pub fn f(x: i32) -> i32 { x.rem_euclid(3) }\n",
             "rem_euclid",
         ),
-        (
-            "f6",
-            "pub fn f<R: Rt>(x: R) -> R { R::sin(x) }\n",
-            "sin",
-        ),
+        ("f6", "pub fn f<R: Rt>(x: R) -> R { R::sin(x) }\n", "sin"),
         ("f7", "pub fn f(x: f64) -> f64 { <f64>::sqrt(x) }\n", "sqrt"),
         (
             "f8",
