@@ -10,3 +10,5 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# Workspace crate, not an outside dependency (RULESET F1).
+oa-ieee = { path = "../oa-ieee" }

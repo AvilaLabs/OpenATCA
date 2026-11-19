@@ -118,7 +118,7 @@ fn norm2(x: f64, y: f64) -> (f64, f64) {
 /// sin and cos of an angle in degrees, exact at multiples of 90.
 pub(crate) fn sincosd(x: f64) -> (f64, f64) {
     let r = x % 360.0;
-    let q = (r / 90.0).round();
+    let q = oa_ieee::round(r / 90.0);
     let r = (r - 90.0 * q).to_radians();
     let (s, c) = oa_math::sin_cos(r);
     let (s, c) = match (q as i64).rem_euclid(4) {
@@ -134,7 +134,7 @@ pub(crate) fn sincosd(x: f64) -> (f64, f64) {
 pub(crate) fn atan2d(y: f64, x: f64) -> f64 {
     let (mut y, mut x, mut q) = (y, x, 0);
     if y.abs() > x.abs() {
-        std::mem::swap(&mut x, &mut y);
+        core::mem::swap(&mut x, &mut y);
         q = 2;
     }
     if x < 0.0 {
@@ -216,7 +216,7 @@ fn sin_series(c: &[f64; 6], sinx: f64, cosx: f64) -> f64 {
 }
 
 fn eps_from_k2(k2: f64) -> f64 {
-    k2 / (2.0 * (1.0 + (1.0 + k2).sqrt()) + k2)
+    k2 / (2.0 * (1.0 + oa_ieee::sqrt(1.0 + k2)) + k2)
 }
 
 fn series6(table: &[&[f64]; 6], eps: f64) -> [f64; 6] {
@@ -251,17 +251,21 @@ fn astroid(x: f64, y: f64) -> f64 {
     let mut u = r;
     if disc >= 0.0 {
         let mut t3 = s + r3;
-        t3 += if t3 < 0.0 { -disc.sqrt() } else { disc.sqrt() };
+        t3 += if t3 < 0.0 {
+            -oa_ieee::sqrt(disc)
+        } else {
+            oa_ieee::sqrt(disc)
+        };
         let t = oa_math::cbrt(t3);
         u += t + if t != 0.0 { r2 / t } else { 0.0 };
     } else {
-        let ang = oa_math::atan2((-disc).sqrt(), -(s + r3));
+        let ang = oa_math::atan2(oa_ieee::sqrt(-disc), -(s + r3));
         u += 2.0 * r * oa_math::cos(ang / 3.0);
     }
-    let v = (sq(u) + q).sqrt();
+    let v = oa_ieee::sqrt(sq(u) + q);
     let uv = if u < 0.0 { q / (v - u) } else { u + v };
     let w = (uv - q) / (2.0 * v);
-    uv / ((uv + sq(w)).sqrt() + w)
+    uv / (oa_ieee::sqrt(uv + sq(w)) + w)
 }
 
 // A7.2: cold struct, size guard waived
@@ -350,7 +354,7 @@ impl Ellipsoid {
         // Gauss-Legendre nodes and weights by Newton's method on P_n.
         let m = GL_N;
         for i in 0..m / 2 {
-            let mut x = oa_math::cos(std::f64::consts::PI * (i as f64 + 0.75) / (m as f64 + 0.5));
+            let mut x = oa_math::cos(core::f64::consts::PI * (i as f64 + 0.75) / (m as f64 + 0.5));
             for _ in 0..100 {
                 let (p, dp) = legendre(m, x);
                 let dx = p / dp;
@@ -443,14 +447,14 @@ impl Ellipsoid {
         (ssig1, csig1) = norm2(ssig1, csig1);
         let salp2 = if cbet2 != cbet1 { salp0 / cbet2 } else { salp1 };
         let calp2 = if cbet2 != cbet1 || sbet2.abs() != -sbet1 {
-            (sq(calp1 * cbet1)
-                + if cbet1 < -sbet1 {
-                    (cbet2 - cbet1) * (cbet1 + cbet2)
-                } else {
-                    (sbet1 - sbet2) * (sbet1 + sbet2)
-                })
-            .sqrt()
-                / cbet2
+            oa_ieee::sqrt(
+                sq(calp1 * cbet1)
+                    + if cbet1 < -sbet1 {
+                        (cbet2 - cbet1) * (cbet1 + cbet2)
+                    } else {
+                        (sbet1 - sbet2) * (sbet1 + sbet2)
+                    },
+            ) / cbet2
         } else {
             calp1.abs()
         };
@@ -524,7 +528,7 @@ impl Ellipsoid {
         if shortline {
             let mut sbetm2 = sq(sbet1 + sbet2);
             sbetm2 /= sbetm2 + sq(cbet1 + cbet2);
-            st.dnm = (1.0 + self.ep2 * sbetm2).sqrt();
+            st.dnm = oa_ieee::sqrt(1.0 + self.ep2 * sbetm2);
             let omg12 = lam12 / (self.f1 * st.dnm);
             (somg12, comg12) = oa_math::sin_cos(omg12);
         } else {
@@ -539,8 +543,8 @@ impl Ellipsoid {
         };
         let ssig12 = oa_math::hypot(st.salp1, st.calp1);
         let csig12 = sbet1 * sbet2 + cbet1 * cbet2 * comg12;
-        let etol2 =
-            0.1 * TOL2 / (self.f.abs().max(0.001) * (1.0_f64).min(1.0 - self.f / 2.0) / 2.0).sqrt();
+        let etol2 = 0.1 * TOL2
+            / oa_ieee::sqrt(self.f.abs().max(0.001) * (1.0_f64).min(1.0 - self.f / 2.0) / 2.0);
         if shortline && ssig12 < etol2 {
             st.salp2 = cbet1 * somg12;
             st.calp2 = sbet12
@@ -555,14 +559,14 @@ impl Ellipsoid {
             st.sig12 = oa_math::atan2(ssig12, csig12);
         } else if self.n.abs() > 0.1
             || csig12 >= 0.0
-            || ssig12 >= 6.0 * self.n.abs() * std::f64::consts::PI * sq(cbet1)
+            || ssig12 >= 6.0 * self.n.abs() * core::f64::consts::PI * sq(cbet1)
         {
             // The zeroth-order spherical estimate is adequate.
         } else {
             let lam12x = oa_math::atan2(-slam12, -clam12);
             let k2 = sq(sbet1) * self.ep2;
             let eps = eps_from_k2(k2);
-            let lamscale = self.f * cbet1 * self.a3f(eps) * std::f64::consts::PI;
+            let lamscale = self.f * cbet1 * self.a3f(eps) * core::f64::consts::PI;
             let betscale = lamscale * cbet1;
             let x = lam12x / lamscale;
             let y = sbet12a / betscale;
@@ -604,7 +608,7 @@ impl Ellipsoid {
         let (mut lat1, mut lat2) = (ang_round(lat1), ang_round(lat2));
         let mut lonsign = lonsign;
         let swapp = if lat1.abs() < lat2.abs() {
-            std::mem::swap(&mut lat1, &mut lat2);
+            core::mem::swap(&mut lat1, &mut lat2);
             lonsign = -lonsign;
             -1.0
         } else {
@@ -629,8 +633,8 @@ impl Ellipsoid {
         } else if sbet2.abs() == -sbet1 {
             cbet2 = cbet1;
         }
-        let dn1 = (1.0 + self.ep2 * sq(sbet1)).sqrt();
-        let dn2 = (1.0 + self.ep2 * sq(sbet2)).sqrt();
+        let dn1 = oa_ieee::sqrt(1.0 + self.ep2 * sq(sbet1));
+        let dn2 = oa_ieee::sqrt(1.0 + self.ep2 * sq(sbet2));
 
         let (mut salp1, mut calp1, mut salp2, mut calp2);
         let mut s12x = 0.0;
@@ -717,7 +721,7 @@ impl Ellipsoid {
                     }
                     if numit < MAXIT1 && dv > 0.0 {
                         let dalp1 = -v / dv;
-                        if dalp1.abs() < std::f64::consts::PI {
+                        if dalp1.abs() < core::f64::consts::PI {
                             let (sdalp1, cdalp1) = oa_math::sin_cos(dalp1);
                             let nsalp1 = salp1 * cdalp1 + calp1 * sdalp1;
                             if nsalp1 > 0.0 {
@@ -750,8 +754,8 @@ impl Ellipsoid {
         }
 
         if swapp < 0.0 {
-            std::mem::swap(&mut salp1, &mut salp2);
-            std::mem::swap(&mut calp1, &mut calp2);
+            core::mem::swap(&mut salp1, &mut salp2);
+            core::mem::swap(&mut calp1, &mut calp2);
         }
         salp1 *= swapp * lonsign;
         calp1 *= swapp * latsign;

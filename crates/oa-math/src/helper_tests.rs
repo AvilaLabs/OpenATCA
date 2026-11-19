@@ -219,11 +219,11 @@ fn trig_fast_equals_slow_near_table_and_quadrant_edges() {
         match r.below(5) {
             0 => {
                 let k = r.below(400) as f64 - 200.0;
-                r.near(k * std::f64::consts::PI / 32.0)
+                r.near(k * core::f64::consts::PI / 32.0)
             }
             1 => {
                 let k = r.below(20_000) as f64;
-                r.near(k * std::f64::consts::FRAC_PI_2)
+                r.near(k * core::f64::consts::FRAC_PI_2)
             }
             2 => r.logu(-26, 18, true),
             3 => {
@@ -263,7 +263,7 @@ fn exp_and_ln_fast_equal_slow_near_reduction_edges() {
             1 => r.uni(-1.0, 1.0),
             2 => {
                 let k = r.below(2000) as f64 - 1000.0;
-                r.near(k * std::f64::consts::LN_2 / 64.0)
+                r.near(k * core::f64::consts::LN_2 / 64.0)
             }
             _ => r.logu(-40, 9, true),
         },
@@ -310,7 +310,7 @@ fn atan_family_fast_equals_slow_near_table_and_swap_edges() {
             }
             2 => 1.0 - r.logu(-53, -1, false) * 0.5,
             3 => r.logu(-27, -1, true),
-            4 => r.near(std::f64::consts::FRAC_1_SQRT_2),
+            4 => r.near(core::f64::consts::FRAC_1_SQRT_2),
             _ => -r.uni(0.0, 1.0),
         }
     };
