@@ -2739,3 +2739,58 @@ fn compatibility_push_and_next_scale_with_a_large_buffer() {
     assert_eq!(g.last_work_refusal(), None);
     assert!(g.skipped_total() >= (6 << 20) - 3);
 }
+
+// REQ: OA-FEED-189
+#[test]
+fn a_refused_recorder_start_leaves_every_existing_file_byte_identical() {
+    let limit = crate::record::DEFAULT_MAX_DIRECTORY_ENTRIES;
+    let dir = tmpdir("dir-limit-untouched");
+    let mut expected = Vec::new();
+    for i in 0..=limit {
+        let name = format!("f{i}.oaf");
+        let body = format!("recording {i}").into_bytes();
+        std::fs::write(dir.join(&name), &body).unwrap();
+        expected.push((name, body));
+    }
+    let refused = Recorder::open(&dir, "feed", 1 << 20, 1 << 30, Format::Raw)
+        .err()
+        .expect("more than the limit must be refused");
+    let text = refused.to_string();
+    assert!(
+        text.contains(&format!("{} entries found", limit + 1)),
+        "{text}"
+    );
+    assert!(text.contains(&format!("limit of {limit}")), "{text}");
+    assert!(text.contains("no existing file was touched"), "{text}");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), limit + 1);
+    for (name, body) in &expected {
+        assert_eq!(&std::fs::read(dir.join(name)).unwrap(), body, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-FEED-184
+#[test]
+fn replay_resyncs_past_a_corrupt_maximum_length_frame_in_the_larger_storage() {
+    let mut bad = vec![0u8; MAX_FRAME_LEN];
+    assert_eq!(
+        encode_frame_mono(&mut bad, 1, 0, 2, 0, 0, 7, &vec![3u8; MAX_PAYLOAD]),
+        Some(MAX_FRAME_LEN)
+    );
+    let last = bad.len() - 1;
+    bad[last] ^= 1;
+    // A short valid frame first, so the bad frame completes mid-chunk and more than a quota's
+    // worth of bytes (the tail) is buffered behind it when its CRC fails.
+    let mut stream = msg(1, b"before");
+    stream.extend_from_slice(&bad);
+    let tail = 70usize;
+    for seq in 0..tail as u64 {
+        stream.extend_from_slice(&msg(10 + seq, &[5u8; 1000]));
+    }
+    assert!(stream.len() - 6 - MAX_FRAME_LEN >= 64 * 1024);
+    let r = replay_sources(vec![&stream[..]]).expect("no work refusal");
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(matches!(r.errors[0].error.kind, ErrorKind::Crc { .. }));
+    assert_eq!(r.health.messages, 1 + tail as u64);
+    assert_eq!(r.bytes, stream.len() as u64);
+}
