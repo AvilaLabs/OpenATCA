@@ -1,6 +1,7 @@
 # M5 — Safety nets: design
 
-Status: approved by Connor 2026-11-19. Nothing here is built yet.
+Status: approved by Connor 2026-11-19. Built: step 1 (net state, inhibition objects and their
+display indications, `oa-safety` and `oa-display`). The rest is not built yet.
 
 ## Goal
 
@@ -62,9 +63,10 @@ So every safety net here is designed from the start around five rules, before an
 - **Minimum vectoring and instrument altitudes** from `oa-mva`.
 - **Airspace.** Separation minima, alerting volumes, special-use airspace from `oa-airspace`
   (NASR), and temporary restrictions from `oa-notam`.
-- **Intent** (later). Cleared or selected altitude and heading, from flight data (M4) and from
-  ADS-B Target State reports, when present. The nets work without it and use it only to sharpen a
-  prediction, never to suppress an alert.
+- **Intent** (later). Cleared altitude and route from flight data (M4), and the selected altitude
+  from ADS-B, which about one airborne report in five carries in the ZAU data. The nets work without
+  it and use it only to sharpen a prediction, never to suppress an alert. The ADS-B selected heading,
+  roll angle and track rate were tested for turn prediction and do not help (§2).
 
 ## 2. Conflict alert
 
@@ -72,8 +74,15 @@ So every safety net here is designed from the start around five rules, before an
   coarse grid), within the look-ahead plus the minima plus each track's uncertainty, counted
   against the pair budget.
 - **Prediction.** Straight-line prediction first. Then turn-aware prediction for a track whose turn
-  is under way or signalled (the intent-signals experiment decides which signals are worth using).
-  JAL 907 is the test: a turning aircraft must not delay the alert.
+  is under way, and later for a turn the flight plan predicts (M4). JAL 907 is the test: a turning
+  aircraft must not delay the alert.
+- **What ADS-B intent gives (measured 2026-11-19, ZAU, 17 November 2026).** Roll angle and track
+  rate are almost never present during a turn (63 of 454,000 turning reports). The selected heading
+  is present before about a quarter of turn starts, but using it made position error worse, most
+  likely because the selected heading is not the heading flown while the flight management system
+  steers. Restricted to autopilot on and lateral navigation off, it did no harm but reached under 1%
+  of turn starts. None of these signals is used. The experiment is kept on the tag
+  `archive/intent-null-2026-11-19`.
 - **Uncertainty.** The predicted miss distance is judged with each track's covariance, so a poor
   track widens the alert rather than hiding it.
 - **Minima.** From adaptation, per volume: JO 7110.65 §5-5-4 gives 3 NM in terminal airspace within
@@ -146,7 +155,7 @@ same geometries; it is not copied in.
 4. The legacy-style baseline, and the evaluation harness on recorded traffic and on the encounter
    models.
 5. Severity grades.
-6. Turn-aware prediction, from the intent-signals result.
+6. Turn-aware prediction: turns under way, then flight-plan turn points once M4 exists.
 7. MSAW, on conservative terrain, obstacles and MVA.
 8. Area proximity warning; approach path monitoring.
 
