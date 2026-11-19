@@ -530,6 +530,7 @@ fn assoc_of(
         a.flag_addr.extend(p.flag_addr);
         a.flag_method.extend(p.flag_method);
         a.flag_reason.extend(p.flag_reason);
+        a.plan_fail.extend(p.plan_fail);
         a.gate_share.extend(p.gate_share);
         a.shared.extend(p.shared);
     }

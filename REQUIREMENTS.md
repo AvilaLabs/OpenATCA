@@ -3130,6 +3130,11 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   counted under `T4` / `no altimeter setting`, never compared uncorrected. T4 reports `compared_as_flight_level`,
   `corrected_with_altimeter`, `excluded_no_altimeter_setting` and `mean_altimeter_correction_ft`; the flagged view
   applies the same correction.
+- **OA-BENCH-132** Where a flight's `aircraftAddress` fails the plausibility check or is unknown to truth, and its
+  `ADSB_02M_*` address hint is a different address, known to truth, that passes the check (not merely unchecked),
+  the flight is associated with the hint under its own status and method (`hint over plan`); its pairs are scored
+  in the primary rows as that method split, and each such flight is listed with both addresses and the reason the
+  plan address failed. A plausible plan address always wins; an unchecked hint never replaces it.
 
 ## Winds aloft (oa-wind)
 

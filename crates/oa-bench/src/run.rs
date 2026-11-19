@@ -239,6 +239,19 @@ pub(crate) fn association_case_lines(
                     a.gate_share.get(f).copied().unwrap_or(f64::NAN) * 100.0
                 ),
             ),
+            astatus::HINT_OVER_PLAN => (
+                1u8,
+                a.addr.get(f).copied().unwrap_or(NONE),
+                format!(
+                    "flight {cs}: plan address {}, track address hint {}; used the hint, scored under method 'address hint (plan address implausible or unknown to truth)'; plan address failed: {}",
+                    hex_addr(leg.flights.addr.get(f).copied().unwrap_or(NONE)),
+                    hex_addr(leg.flights.addr_hint.get(f).copied().unwrap_or(NONE)),
+                    astatus::PLAN_FAIL_NAMES
+                        .get(usize::from(a.plan_fail.get(f).copied().unwrap_or(0)))
+                        .copied()
+                        .unwrap_or("")
+                ),
+            ),
             astatus::ADDRESS_IMPLAUSIBLE
             | astatus::HINT_IMPLAUSIBLE
             | astatus::CALLSIGN_IMPLAUSIBLE => (
@@ -262,6 +275,15 @@ pub(crate) fn association_case_lines(
         v.push(((sev, addr, t), line));
     }
     v
+}
+
+/// An address as six hex digits, `none` when absent.
+fn hex_addr(a: u32) -> String {
+    if a == NONE {
+        "none".to_string()
+    } else {
+        format!("{a:06X}")
+    }
 }
 
 /// Lists the flights kept despite failing the tight check and the flagged flights, in the order
