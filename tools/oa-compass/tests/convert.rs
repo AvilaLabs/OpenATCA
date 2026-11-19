@@ -27,6 +27,7 @@ fn row() -> TrackRow {
         radar_disagrees: false,
         uncertain: false,
         reacquired: false,
+        identity_unconfirmed: false,
         address: Some(0xA1B2C3),
         monosensor: true,
     }
@@ -41,6 +42,7 @@ fn eram() -> EramRow {
         vel_dkt: Some((2_000, -1_000)),
         coast: false,
         address: Some(0xA1B2C3),
+        address_withheld: false,
         callsign: Some(*b"UAL123\0\0"),
     }
 }

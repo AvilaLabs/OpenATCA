@@ -11,9 +11,11 @@
 //! I080 is one octet when nothing is set; AFF adds the first extent (bit 4), and a coasting track
 //! adds three extents (the first, an empty second, and the third with CST, bit 8). The primary
 //! octet has SIM, SPI and MRH at their default 0 and CNF 0 (confirmed): the tracker only
-//! publishes confirmed tracks, and for ERAM no tentative state exists in the data. SRC is 0 (no
+//! publishes confirmed tracks (its `O_IDENTITY_UNCONFIRMED` flag is not a tentative state and is
+//! not written as CNF 1), and for ERAM the feed carries no such state (an assumption, noted). SRC is 0 (no
 //! source) because I130 is never sent. MON is 1 for OpenATCA, whose tracker is fed ADS-B only
-//! (one kind of sensor), and 0 for ERAM, which fuses radar and ADS-B. MRH is 0 (barometric more
+//! (one kind of sensor), and 0 for ERAM, where it is an assumption (the feed does not say; counted
+//! as a note on every ERAM row). CNF is 0 for ERAM for the same reason. MRH is 0 (barometric more
 //! reliable) as a default: no geometric altitude is ever sent.
 
 use std::io::Write;
@@ -199,6 +201,14 @@ impl<W: Write> BlockSink<W> {
                     .stats
                     .max_lon_error_e7
                     .max(i32::try_from(dlo).unwrap_or(i32::MAX));
+                if dla > MAX_POSITION_ERROR_E7.unsigned_abs().into()
+                    || dlo > MAX_POSITION_ERROR_E7.unsigned_abs().into()
+                {
+                    return Err(ExportError::Verify(format!(
+                        "{}: a decoded position differs from its source by {dla} / {dlo} (1e-7 degree, latitude / longitude), over the limit {MAX_POSITION_ERROR_E7}; nothing is committed",
+                        self.system
+                    )));
+                }
             }
         }
         self.out

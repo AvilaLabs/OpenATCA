@@ -58,6 +58,7 @@ fn source(name: &str) -> PathBuf {
             radar_disagrees: false,
             uncertain: false,
             reacquired: false,
+            identity_unconfirmed: false,
             address: Some(0xABCDEF),
             monosensor: true,
         };

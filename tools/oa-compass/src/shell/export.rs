@@ -22,6 +22,7 @@ use oa_asterix::{decode_block, Block, SourceId};
 use super::encode::{BlockSink, SinkStats};
 use super::error::{io_err, ExportError};
 use crate::core::convert::{count_notes, Converted, Refusal, NOTES};
+use crate::core::stats::{summarize, IntervalSummary};
 use crate::core::time::civil_from_days;
 
 /// Where and how files are laid out. A7.2: cold.
@@ -63,6 +64,8 @@ pub struct DayReport {
     pub sink: SinkStats,
     pub tracks: u64,
     pub notes: [u64; NOTES],
+    /// Time between consecutive rows of one track, over all tracks of the file.
+    pub intervals: IntervalSummary,
     /// Records and blocks counted again by reading the file back.
     pub read_back_records: u64,
     pub read_back_blocks: u64,
@@ -81,14 +84,20 @@ pub struct SystemReport {
     pub counts: Vec<(String, u64)>,
     /// Descriptions of the inputs (set by the caller), one line each.
     pub inputs: Vec<String>,
+    /// Further lines for the README (set by the caller): what the run found that the counts do
+    /// not say, one line each.
+    pub details: Vec<String>,
 }
 
 struct DayFile {
     sink: BlockSink<BufWriter<File>>,
     partial: PathBuf,
     path: PathBuf,
-    tracks: BTreeMap<u32, u16>,
+    /// Key to (track number, time of its last row).
+    tracks: BTreeMap<u32, (u16, u32)>,
     notes: [u64; NOTES],
+    /// Histogram of the interval between consecutive rows of one track, 1/128 s to count.
+    intervals: BTreeMap<u32, u64>,
 }
 
 /// The writer of one system's files.
@@ -111,6 +120,11 @@ pub struct Finished {
 }
 
 impl Finished {
+    /// The (partial, final) names of the files, for a caller that renames them with other files.
+    pub fn renames(&self) -> &[(PathBuf, PathBuf)] {
+        &self.renames
+    }
+
     /// Moves the partial files to their final names.
     pub fn commit(self) -> Result<SystemReport, ExportError> {
         for (from, to) in &self.renames {
@@ -179,14 +193,23 @@ impl SystemExport {
                     path,
                     tracks: BTreeMap::new(),
                     notes: [0; NOTES],
+                    intervals: BTreeMap::new(),
                 },
             );
         }
         let Some(file) = self.files.get_mut(&c.day) else {
             return Err(ExportError::Io(format!("{}: day file missing", self.name)));
         };
-        let number = match file.tracks.get(&key) {
-            Some(&n) => n,
+        let time = c.values.time;
+        let number = match file.tracks.get_mut(&key) {
+            Some((n, last)) => {
+                // Rows are in time order (the sink refuses otherwise), so this does not wrap.
+                let gap = time.saturating_sub(*last);
+                *last = time;
+                let slot = file.intervals.entry(gap).or_insert(0);
+                *slot = slot.saturating_add(1);
+                *n
+            }
             None => {
                 let next = u16::try_from(file.tracks.len() + 1).map_err(|_| {
                     ExportError::TrackNumbers {
@@ -194,7 +217,7 @@ impl SystemExport {
                         day: date_text(c.day),
                     }
                 })?;
-                file.tracks.insert(key, next);
+                file.tracks.insert(key, (next, time));
                 next
             }
         };
@@ -225,6 +248,7 @@ impl SystemExport {
         let mut failure = None;
         for (day, f) in self.files {
             let (partial, path, tracks, notes) = (f.partial, f.path, f.tracks, f.notes);
+            let hist: Vec<(u32, u64)> = f.intervals.into_iter().collect();
             renames.push((partial.clone(), path.clone()));
             if failure.is_some() {
                 continue;
@@ -242,6 +266,7 @@ impl SystemExport {
                             sink,
                             tracks: tracks.len() as u64,
                             notes,
+                            intervals: summarize(&hist),
                             read_back_records: records,
                             read_back_blocks: blocks,
                         }),
@@ -265,6 +290,7 @@ impl SystemExport {
                 refused: self.refused,
                 counts: self.counts,
                 inputs: Vec::new(),
+                details: Vec::new(),
             },
             renames,
         })

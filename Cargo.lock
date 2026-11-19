@@ -65,12 +65,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-build-info"
+version = "0.0.1"
+
+[[package]]
 name = "oa-compass"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-asterix",
  "oa-bench",
+ "oa-build-info",
+ "oa-feed",
  "oa-ieee",
  "oa-json",
  "oa-math",

@@ -160,6 +160,11 @@ pub struct AdsbFinished {
 }
 
 impl AdsbFinished {
+    /// The (partial, final) names of the files, for a caller that renames them with other files.
+    pub fn renames(&self) -> &[(PathBuf, PathBuf)] {
+        &self.renames
+    }
+
     /// Moves the partial files to their final names.
     pub fn commit(self) -> Result<AdsbReport, ExportError> {
         for (from, to) in &self.renames {
@@ -347,6 +352,13 @@ fn flush(f: &mut DayFile) -> Result<(), ExportError> {
                 .stats
                 .max_lon_error_e7
                 .max(i32::try_from(dlo).unwrap_or(i32::MAX));
+            if dla > MAX_POSITION_ERROR_E7.unsigned_abs().into()
+                || dlo > MAX_POSITION_ERROR_E7.unsigned_abs().into()
+            {
+                return Err(ExportError::Verify(format!(
+                    "{SYSTEM}: a decoded position differs from its source by {dla} / {dlo} (1e-7 degree, latitude / longitude), over the limit {MAX_POSITION_ERROR_E7}; nothing is committed"
+                )));
+            }
         }
     }
     f.out

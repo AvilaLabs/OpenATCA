@@ -4473,3 +4473,29 @@ scope.
   tracker was fed, with the tracker adapter's removals per reason, and keeps the independence statement (UK-008).
 - **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
   each; 255/1 is left free because COMPASS writes its reference there, and the README says so.
+- **OA-CMP-030** The export refuses an `--out` that exists and is not empty (the same rule as `slice`), before
+  anything is written. The README lists exactly the files this run wrote into its directory, and its title,
+  import instruction, data-source entries and system paragraphs follow which systems were exported (OpenATCA,
+  ERAM, ADS-B): an ERAM-only run's README does not mention `openatca.ast`.
+- **OA-CMP-031** The position error limit is enforced: when a decoded position differs from its source by more
+  than `MAX_POSITION_ERROR_E7` (27 for CAT062, 1 for CAT021) the export fails with a verification error and no file
+  is committed.
+- **OA-CMP-032** Every README claim about the rows is backed by code: the tracker's `O_IDENTITY_UNCONFIRMED` rows
+  are counted and written with CNF = 0 (the flag means an unconfirmed identity, not a tentative track, and the
+  README says so); MON = 0 and CNF = 0 for ERAM are stated as assumptions ("not in the feed") and counted as a
+  note on every ERAM row; each system's README section states the nature of its rows and the measured interval
+  between consecutive rows of one track (median, 90th percentile, longest, pairs), computed by code; ERAM track
+  numbers are the export's own (one per flight) and the flights per address are counted.
+- **OA-CMP-033** The commit the README names is embedded at build time (`build.rs`, `git -C` the crate's own
+  directory, with a note if tracked files are modified), `unknown` only if git is unavailable at build.
+- **OA-CMP-034** The main export commits like `slice`: every file (data, `data_sources.json`, README) is written as
+  `.partial`, all are renamed in one pass, and on any error every file this run created is removed.
+- **OA-CMP-035** Every ERAM flight with an address is checked against the ADS-B reports of the same address
+  (nearest report within 10 s, at least 10 pairs, median distance over 25 km contradicts; the rule and its reason
+  are in the README); a flight whose track contradicts its address is exported without I380 address, counted,
+  and listed in the README, and a flight with too few pairs keeps its address and is counted as not checked.
+- **OA-CMP-036** `--openatca-rows ticks|updates` (default `ticks`, unchanged) selects the tracker's one-second tick
+  rows or its update rows (one per applied report, at the report's time, earlier-than-written rows counted and
+  left out); the README states the mode prominently and counts the rows of the other kind.
+- **OA-CMP-037** The README states that OpenATCA publishes a calculated altitude (I135) and no measured flight level
+  (I136), so COMPASS's "Mode C Present" does not apply to it.

@@ -456,8 +456,10 @@ fn the_file_refuses_disorder_another_day_and_splits_days_on_request() {
     // Split by day: one directory per day, no file holds two days.
     let (lay, out) = layout("days", true);
     let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
-    ex.push(&at(&base, 1000, 1), (0, 0)).unwrap();
-    ex.push(&adsb_record(&next).unwrap(), (0, 0)).unwrap();
+    ex.push(&at(&base, 1000, 1), (base.lat_e7, base.lon_e7))
+        .unwrap();
+    ex.push(&adsb_record(&next).unwrap(), (base.lat_e7, base.lon_e7))
+        .unwrap();
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days.len(), 2);
     assert!(out.join("2026.11.15/adsb.ast").exists() && out.join("2026.11.16/adsb.ast").exists());
@@ -650,6 +652,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         &Extras {
             adsb: Some(&rep),
             clip: Some(&clip),
+            ..Extras::default()
         },
     );
     for needle in [
@@ -677,7 +680,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "I071 time of applicability for position: the source has no avionics time",
         "10: I161 track number",
         "I210 LTT",
-        "limit 1)",
+        "limit 1, enforced",
     ] {
         assert!(text.contains(needle), "missing {needle:?}\n{text}");
     }
@@ -705,9 +708,14 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
         lay.clone(),
     );
     let mut ax = AdsbExport::new(ADSB_SOURCE, lay);
-    let (run, info) =
-        oa_compass::shell::run::export_adsb_clip(&clip, &mut ex, Some(&mut ax), InputsMode::All)
-            .unwrap();
+    let (run, info) = oa_compass::shell::run::export_adsb_clip(
+        &clip,
+        &mut ex,
+        Some(&mut ax),
+        InputsMode::All,
+        oa_compass::shell::run::OpenatcaRows::Ticks,
+    )
+    .unwrap();
     assert!(run.tick_rows > 1000);
     assert_eq!(info.not_offered, 0);
     let a = info.adsb.as_ref().unwrap();
@@ -741,6 +749,7 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
         &oa_compass::shell::notes::Extras {
             adsb: Some(&rep),
             clip: Some(&info),
+            ..oa_compass::shell::notes::Extras::default()
         },
     );
     let dropped = want.rows_in - want.passed;

@@ -19,7 +19,7 @@ use oa_compass::shell::export::{read_back, Layout, SystemExport};
 use oa_compass::shell::notes::{
     clock_text, data_sources_json, readme, ERAM_SOURCE, OPENATCA_SOURCE,
 };
-use oa_compass::shell::run::{export_eram, export_output};
+use oa_compass::shell::run::{export_eram, export_output, OpenatcaRows};
 
 /// 2026-11-15T00:00:00Z, Unix seconds, and the day count.
 const DAY_S: i64 = 20_772 * 86_400;
@@ -68,6 +68,7 @@ fn track_row(g: &mut Rng, t_ns: i64) -> TrackRow {
         radar_disagrees: g.next().is_multiple_of(9),
         uncertain: g.next().is_multiple_of(6),
         reacquired: g.next().is_multiple_of(6),
+        identity_unconfirmed: false,
         address: (!g.next().is_multiple_of(8)).then(|| (g.next() % 0x100_0000) as u32),
         monosensor: true,
     }
@@ -163,6 +164,7 @@ fn eram_rows_round_trip_with_address_and_identification() {
             }),
             coast: g.next().is_multiple_of(3),
             address: (!g.next().is_multiple_of(3)).then(|| (g.next() % 0x100_0000) as u32),
+            address_withheld: false,
             callsign: (!g.next().is_multiple_of(3)).then_some(*b"DAL42\0\0\0"),
         };
         let mut c = eram_record(&e).unwrap();
@@ -297,7 +299,7 @@ fn split_days_writes_one_directory_per_day_and_no_file_holds_two_days() {
         ex.push(
             &converted(t - 5 * 1_000_000_000 + i * 1_000_000_000, 100_000_000),
             1,
-            (0, 0),
+            (100_000_000, 100_000_000),
         )
         .ok();
     }
@@ -328,7 +330,7 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
         ex.push(
             &converted(t + i as i64 * 1_000_000_000, 100_000_000),
             *k,
-            (0, 0),
+            (100_000_000, 100_000_000),
         )
         .unwrap();
     }
@@ -340,11 +342,17 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
     // 65 535 keys fit, the next is refused.
     let (mut ex, _) = export_to("tracks-full", false, DAY);
     for k in 0..65_535u32 {
-        ex.push(&converted(t, 100_000_000), k, (0, 0)).unwrap();
+        ex.push(&converted(t, 100_000_000), k, (100_000_000, 100_000_000))
+            .unwrap();
     }
-    ex.push(&converted(t, 100_000_000), 0, (0, 0)).unwrap();
+    ex.push(&converted(t, 100_000_000), 0, (100_000_000, 100_000_000))
+        .unwrap();
     let e = ex
-        .push(&converted(t, 100_000_000), 65_535, (0, 0))
+        .push(
+            &converted(t, 100_000_000),
+            65_535,
+            (100_000_000, 100_000_000),
+        )
         .unwrap_err();
     assert!(matches!(e, ExportError::TrackNumbers { .. }), "{e}");
     ex.abort();
@@ -458,7 +466,7 @@ fn eram_samples_are_sorted_deduplicated_and_counted() {
             split: false,
         },
     );
-    let info = export_eram(&eram_legacy(), &mut ex).unwrap();
+    let info = export_eram(&eram_legacy(), &mut ex, None).unwrap();
     assert_eq!(info.rows_in, 6);
     assert_eq!(info.exact_duplicates, 1);
     assert_eq!(info.conflicting_same_time, 1);
@@ -579,7 +587,7 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
         split: false,
     };
     let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout);
-    let info = export_eram(&eram_legacy(), &mut ex).unwrap();
+    let info = export_eram(&eram_legacy(), &mut ex, None).unwrap();
     ex.counts
         .push(("samples in the input".into(), info.rows_in));
     let mut fin = ex.finish().unwrap();
@@ -601,7 +609,7 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
         "ingest: flight table overflow (must be 0): 0",
         "a row differing only in receive time is a duplicate",
         "it is NOT established as pressure altitude",
-        "MON = 0 for ERAM",
+        "MON = 0 and CNF = 0 are ASSUMPTIONS",
         "not an outside conformance test",
         "input: test input",
         "Edition 1.21",
@@ -646,7 +654,7 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
     push(O_TICK | O_COAST | O_UNCERTAIN, 1, 0x4000_0005);
     let (mut ex, out) = export_to("ticks", false, DAY);
     let mut info = oa_compass::shell::run::TrackRunInfo::default();
-    export_output(&o, &mut ex, &mut info, true).unwrap();
+    export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Ticks).unwrap();
     assert_eq!(info.tick_rows, 2);
     assert_eq!(info.update_rows_not_exported, 1);
     assert_eq!((info.coasting, info.uncertain), (1, 1));
@@ -695,7 +703,8 @@ fn a_slice_of_a_real_recording_round_trips_through_the_tracker_and_the_encoder()
         split: true,
     };
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout);
-    let info = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex, true).unwrap();
+    let info = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex, true, OpenatcaRows::Ticks)
+        .unwrap();
     assert!(info.tick_rows > 1000, "{info:?}");
     let rep = ex.finish().unwrap().commit().unwrap();
     let written: u64 = rep.days.iter().map(|d| d.sink.records).sum();
@@ -748,7 +757,7 @@ fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
             split: false,
         },
     );
-    assert!(export_eram(&leg, &mut ex).is_err());
+    assert!(export_eram(&leg, &mut ex, None).is_err());
     ex.abort();
     assert!(fs::read_dir(&out).unwrap().next().is_none());
 }
@@ -768,7 +777,7 @@ fn the_readme_states_the_inputs_mode_and_the_leak_warning() {
             split: false,
         },
     );
-    export_eram(&eram_legacy(), &mut ex).unwrap();
+    export_eram(&eram_legacy(), &mut ex, None).unwrap();
     let rep = ex.finish().unwrap().commit().unwrap();
     let all = readme(DAY, &[&rep], "b", false, Some(InputsMode::All));
     assert!(all.contains("ALL (--inputs all)") && all.contains("like-for-like"));

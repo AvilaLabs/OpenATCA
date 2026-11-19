@@ -101,8 +101,11 @@ pub const NOTE_ALT_ROUNDED: usize = 17;
 pub const NOTE_LON_WRAPPED: usize = 18;
 pub const NOTE_ALT_QNH: usize = 19;
 pub const NOTE_CLIMB_NO_ALT: usize = 20;
+pub const NOTE_IDENTITY_UNCONFIRMED: usize = 21;
+pub const NOTE_STATUS_ASSUMED: usize = 22;
+pub const NOTE_ADDRESS_WITHHELD: usize = 23;
 /// Number of notes.
-pub const NOTES: usize = 21;
+pub const NOTES: usize = 24;
 
 /// The report line of each note, indexed by the constants above.
 pub const NOTE_NAMES: [&str; NOTES] = [
@@ -127,6 +130,9 @@ pub const NOTE_NAMES: [&str; NOTES] = [
     "longitude of exactly +180 degrees (or rounding to it): written as -180, the same meridian (CAT062 range is -180 up to, not including, +180)",
     "ERAM altitude under 18 000 ft: written as I135 with QNH = 1 (altimeter-corrected, inferred; see README), not as a flight level",
     "I220 rate of climb/descent: exported on a row without an altitude (item kept)",
+    "O_IDENTITY_UNCONFIRMED row flag (the key is a local radar handle, not an address): written with CNF = 0 all the same, because CNF means a tentative track and this flag does not (see README)",
+    "I080 MON = 0 and CNF = 0: not in the feed; written as defaults, an assumption and not a fact about ERAM",
+    "I380 target address withheld: the flight's track contradicts the address it carries (see the address check below)",
 ];
 
 /// The bit of note `i` in [`Converted::notes`].
@@ -170,6 +176,9 @@ pub struct TrackRow {
     /// `O_UNCERTAIN` and `O_REACQUIRED`: known, but CAT062 has no field for them.
     pub uncertain: bool,
     pub reacquired: bool,
+    /// `O_IDENTITY_UNCONFIRMED`: the key is a local radar handle, not an address. Known, not
+    /// encoded: it is not the CNF (tentative track) state, which this export never writes as 1.
+    pub identity_unconfirmed: bool,
     /// The aircraft address of the track as the key holds it (bit 24 marks a non-ICAO address),
     /// or `None` when the key is not an address.
     pub address: Option<u32>,
@@ -193,6 +202,8 @@ pub struct EramRow {
     pub coast: bool,
     /// The flight's `aircraftAddress`, if any message carried it.
     pub address: Option<u32>,
+    /// The address is withheld: the flight's track contradicts it (see `addrcheck`).
+    pub address_withheld: bool,
     /// The flight's callsign, NUL padded; `None` if no message carried it.
     pub callsign: Option<[u8; 8]>,
 }
@@ -349,6 +360,9 @@ pub fn track_record(r: &TrackRow) -> Result<Converted, Refusal> {
     if r.reacquired {
         notes |= note_bit(NOTE_REACQUIRED);
     }
+    if r.identity_unconfirmed {
+        notes |= note_bit(NOTE_IDENTITY_UNCONFIRMED);
+    }
     match r.address {
         Some(a) if a <= 0x00FF_FFFF => v.address = Some(a),
         _ => notes |= note_bit(NOTE_ADDRESS),
@@ -435,11 +449,15 @@ pub fn eram_record(r: &EramRow) -> Result<Converted, Refusal> {
         | note_bit(NOTE_MOVEMENT)
         | note_bit(NOTE_ACCURACY_ABSENT)
         | note_bit(NOTE_CLIMB_ABSENT)
-        | note_bit(NOTE_SERVICE);
+        | note_bit(NOTE_SERVICE)
+        | note_bit(NOTE_STATUS_ASSUMED);
     if wrapped {
         notes |= note_bit(NOTE_LON_WRAPPED);
     }
     match r.address {
+        Some(_) if r.address_withheld => {
+            notes |= note_bit(NOTE_ADDRESS_WITHHELD);
+        }
         Some(a) if a <= 0x00FF_FFFF => v.address = Some(a),
         _ => notes |= note_bit(NOTE_ADDRESS),
     }

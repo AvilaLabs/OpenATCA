@@ -8,8 +8,9 @@ use std::fmt::Write as _;
 use oa_asterix::SourceId;
 
 use super::adsb_export::{AdsbDayReport, AdsbReport, MAX_POSITION_ERROR_E7};
+use super::encode::MAX_POSITION_ERROR_E7 as MAX_POSITION_ERROR_062;
 use super::export::{date_text, DayReport, SystemReport};
-use super::run::{ClipInfo, InputsMode};
+use super::run::{ClipInfo, InputsMode, OpenatcaRows};
 use crate::core::adsb::{
     ADSB_NOTES, ADSB_NOTE_NAMES, ANOTE_CATEGORY_ABSENT, ANOTE_CATEGORY_NO_CODE, ANOTE_FL_ABSENT,
     ANOTE_FL_RANGE, ANOTE_HEIGHT_ABSENT, ANOTE_HEIGHT_RANGE, ANOTE_IDENT_ABSENT, ANOTE_IDENT_CHARS,
@@ -17,9 +18,9 @@ use crate::core::adsb::{
     ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
 };
 use crate::core::convert::{
-    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ALT_ABSENT, NOTE_ALT_QNH, NOTE_ALT_RANGE,
-    NOTE_CLIMB_ABSENT, NOTE_CLIMB_RANGE, NOTE_IDENT, NOTE_NAMES, NOTE_SERVICE, NOTE_VEL_ABSENT,
-    NOTE_VEL_RANGE, REFUSAL_NAMES,
+    NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ADDRESS_WITHHELD, NOTE_ALT_ABSENT,
+    NOTE_ALT_QNH, NOTE_ALT_RANGE, NOTE_CLIMB_ABSENT, NOTE_CLIMB_RANGE, NOTE_IDENT, NOTE_NAMES,
+    NOTE_SERVICE, NOTE_VEL_ABSENT, NOTE_VEL_RANGE, REFUSAL_NAMES,
 };
 
 /// The data source of the OpenATCA tracker output.
@@ -39,20 +40,34 @@ pub const ADSB_SOURCE: SourceId = SourceId { sac: 255, sic: 13 };
 /// The `ds_type` strings the COMPASS manual's data-source example uses.
 pub const DS_TYPES: [&str; 6] = ["Radar", "MLAT", "ADSB", "Tracker", "RefTraj", "Other"];
 
-/// The COMPASS data-source file: the two trackers and the ADS-B source.
-pub fn data_sources_json() -> String {
+/// The COMPASS data-source file with the sources `present` (`OpenATCA`, `ERAM`, `ADS-B`), in that
+/// order; sources not asked for are left out.
+pub fn data_sources_for(openatca: bool, eram: bool, adsb: bool) -> String {
     let one = |ty: &str, name: &str, s: SourceId| {
         format!(
             "{{\"ds_type\":\"{ty}\",\"name\":\"{name}\",\"sac\":{},\"sic\":{}}}",
             s.sac, s.sic
         )
     };
+    let mut v = Vec::new();
+    if openatca {
+        v.push(one("Tracker", "OpenATCA", OPENATCA_SOURCE));
+    }
+    if eram {
+        v.push(one("Tracker", "ERAM", ERAM_SOURCE));
+    }
+    if adsb {
+        v.push(one("ADSB", "ADS-B", ADSB_SOURCE));
+    }
     format!(
-        "{{\"content_type\":\"data_sources\",\"content_version\":\"0.2\",\"data_sources\":[{},{},{}]}}\n",
-        one("Tracker", "OpenATCA", OPENATCA_SOURCE),
-        one("Tracker", "ERAM", ERAM_SOURCE),
-        one("ADSB", "ADS-B", ADSB_SOURCE)
+        "{{\"content_type\":\"data_sources\",\"content_version\":\"0.2\",\"data_sources\":[{}]}}\n",
+        v.join(",")
     )
+}
+
+/// The COMPASS data-source file with all three sources.
+pub fn data_sources_json() -> String {
+    data_sources_for(true, true, true)
 }
 
 /// A 1/128 s count since midnight as `hh:mm:ss.mmm`.
@@ -83,6 +98,28 @@ fn system_section(out: &mut String, report: &SystemReport, day: i64) {
         return;
     };
     day_lines(out, report, d);
+    for l in &report.details {
+        let _ = writeln!(out, "  {l}");
+    }
+}
+
+/// What the rows of the file are, and the measured interval between the rows of one track.
+fn sample_nature(report: &SystemReport, d: &DayReport) -> String {
+    let what = if report.name == "OpenATCA" {
+        "rows are the tracker's rows as the OpenATCA ROWS paragraph above says (ticks: its state once per second per track, coasting rows included and counted below)"
+    } else {
+        "rows are SFDPS track samples at their own position times, not a fixed rate; the whole-second share of those times is measured below"
+    };
+    let iv = &d.intervals;
+    let secs = |u: u32| f64::from(u) / 128.0;
+    format!(
+        "sample nature: {what}. Measured interval between consecutive rows of one track in this file: median {:.3} s, 90th percentile {:.3} s, longest {:.3} s, over {} pairs of rows ({} of them at the same time)",
+        secs(iv.median),
+        secs(iv.p90),
+        secs(iv.max),
+        iv.pairs,
+        iv.zero
+    )
 }
 
 fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
@@ -99,9 +136,10 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
         clock_text(d.sink.first_time),
         clock_text(d.sink.last_time)
     );
+    let _ = writeln!(out, "  {}", sample_nature(report, d));
     let _ = writeln!(
         out,
-        "  verification: every block was decoded again with this repository's oa-asterix decoder and equals the records encoded; the file was read back from disk ({} records, {} blocks) and equals what was written; largest position difference between source row and decoded record {} / {} (1e-7 degree, latitude / longitude; limit 27). This shows that our encoder and decoder agree with each other; it is not an outside conformance test (the encoder was written from, and reviewed item by item against, the Ed 1.21 text; the first outside decode is the COMPASS import)",
+        "  verification: every block was decoded again with this repository's oa-asterix decoder and equals the records encoded; the file was read back from disk ({} records, {} blocks) and equals what was written; largest position difference between source row and decoded record {} / {} (1e-7 degree, latitude / longitude; limit {MAX_POSITION_ERROR_062}, enforced: a larger difference stops the export). This shows that our encoder and decoder agree with each other; it is not an outside conformance test (the encoder was written from, and reviewed item by item against, the Ed 1.21 text; the first outside decode is the COMPASS import)",
         d.read_back_records, d.read_back_blocks, d.sink.max_lat_error_e7, d.sink.max_lon_error_e7
     );
     let n = |i: usize| d.notes.get(i).copied().unwrap_or(0);
@@ -130,7 +168,10 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
         "I185 velocity",
         rows - (n(NOTE_VEL_ABSENT) + n(NOTE_VEL_RANGE)).min(rows),
     );
-    item("I380 target address", rows - n(NOTE_ADDRESS).min(rows));
+    item(
+        "I380 target address",
+        rows - (n(NOTE_ADDRESS) + n(NOTE_ADDRESS_WITHHELD)).min(rows),
+    );
     item("I380 target identification", rows - n(NOTE_IDENT).min(rows));
     item("I040 track number", rows);
     item(
@@ -201,6 +242,18 @@ fn run_lines(out: &mut String, report: &SystemReport) {
 pub struct Extras<'a> {
     pub adsb: Option<&'a AdsbReport>,
     pub clip: Option<&'a ClipInfo>,
+    /// The names of the files this run wrote into the directory, as the README lists them.
+    pub files: &'a [String],
+    /// Which OpenATCA rows were exported, if the OpenATCA file was.
+    pub openatca_rows: Option<OpenatcaRows>,
+}
+
+/// The paragraph that states which OpenATCA rows the file holds.
+fn rows_mode_text(rows: OpenatcaRows) -> String {
+    match rows {
+        OpenatcaRows::Ticks => "OpenATCA ROWS: TICKS (--openatca-rows ticks, the default). The rows are the tracker's state once per second per track (fixed-rate ticks, coasting rows included and counted below). Each row's time is the tick's time, not the time of a measurement.".to_string(),
+        OpenatcaRows::Updates => "OpenATCA ROWS: UPDATES (--openatca-rows updates). The rows are the tracker's UPDATE rows, the state at each applied ADS-B report, at the report's own time: the time of a row is a MEASUREMENT time, not a regular tick, and a track's rows are as far apart as its reports are. The one-second tick rows are not written. A row earlier than one already written is left out and counted below (the file is in time order).".to_string(),
+    }
 }
 
 /// The README of the directory of `day`. `build` names the encoder build (commit).
@@ -225,16 +278,26 @@ pub fn readme_with(
 ) -> String {
     let mut o = String::new();
     let date = date_text(day);
-    let title = if extras.adsb.is_some() {
-        "OpenATCA and ERAM tracks as ASTERIX CAT062 and the ADS-B reports as CAT021"
-    } else {
-        "OpenATCA and ERAM tracks as ASTERIX CAT062"
+    let has = |name: &str| systems.iter().any(|s| s.name == name);
+    let (has_oa, has_eram, has_adsb) = (has("OpenATCA"), has("ERAM"), extras.adsb.is_some());
+    // The names of the CAT062 systems present, and the title and import line that follow.
+    let names: Vec<&str> = [(has_oa, "OpenATCA"), (has_eram, "ERAM")]
+        .iter()
+        .filter_map(|&(h, n)| h.then_some(n))
+        .collect();
+    let title = match (names.is_empty(), has_adsb) {
+        (false, true) => format!(
+            "{} tracks as ASTERIX CAT062 and the ADS-B reports as CAT021",
+            names.join(" and ")
+        ),
+        (false, false) => format!("{} tracks as ASTERIX CAT062", names.join(" and ")),
+        (true, _) => "ADS-B reports as ASTERIX CAT021".to_string(),
     };
     let _ = writeln!(o, "{title}, for evaluation in OpenATS COMPASS\n");
     let _ = writeln!(o, "UTC date to give at import (UTC Day): {date}");
     let _ = writeln!(
         o,
-        "  I062/070 is a time of day (UTC, 1/128 s since midnight) with no date; every record in this directory is on {date}."
+        "  I062/070 and I021/073 are times of day (UTC, 1/128 s since midnight) with no date; every record in this directory is on {date}."
     );
     if split {
         let _ = writeln!(
@@ -242,16 +305,70 @@ pub fn readme_with(
             "  The export was split by UTC day: one directory per day, each with its own files and this note; a day's files never hold another day's rows."
         );
     }
-    let _ = writeln!(o, "\nFormat: ASTERIX category 062 Edition 1.21 (EUROCONTROL-SPEC-0149-9), raw data blocks (CAT, LEN, records), no framing, records in time order, up to 256 records per block.");
+    let _ = writeln!(
+        o,
+        "\nFiles written by this run in this directory: {}.",
+        if extras.files.is_empty() {
+            "(not listed)".to_string()
+        } else {
+            extras.files.join(", ")
+        }
+    );
+    if let Some(rows) = extras.openatca_rows.filter(|_| has_oa) {
+        let _ = writeln!(o, "{}\n", rows_mode_text(rows));
+    }
+    if !names.is_empty() {
+        let _ = writeln!(o, "Format: ASTERIX category 062 Edition 1.21 (EUROCONTROL-SPEC-0149-9), raw data blocks (CAT, LEN, records), no framing, records in time order, up to 256 records per block.");
+    }
     let _ = writeln!(
         o,
         "Encoder: oa-asterix of this repository, written from the specification; build {build}."
     );
-    let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2). SAC 255 is a test range chosen by this export, not an allocation (OpenATCA 255/11, ERAM 255/12, ADS-B 255/13; 255/1 is left free because COMPASS uses it for its own reference): the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.");
-    let _ = writeln!(o, "Import openatca.ast and eram.ast as ASTERIX CAT062 and, if present, adsb.ast as ASTERIX CAT021 (Ed 2.4), with the UTC Day above; nothing in the files needs a time-of-day override.\n");
-    let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: CNF = 0 (confirmed: the tracker publishes confirmed tracks only); MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor, and MON = 0 for ERAM because it fuses radar and ADS-B; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.\n");
-    let _ = writeln!(o, "Altitude: OpenATCA's altitude is ADS-B barometric (pressure) altitude, filtered: I135 with QNH = 0. ERAM's altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, an inference and not a statement of the feed: at or above 18 000 ft the value is I136 (measured flight level), below it I135 with QNH = 1.\n");
-    let _ = writeln!(o, "ERAM duplicates: samples are compared on latitude, longitude, altitude, velocity east and north and the coast flag; a sample with the same flight, position time and those six values as an earlier one is a duplicate and is dropped (a row differing only in receive time is a duplicate). Same flight and position time with any difference are both kept and counted.\n");
+    let ids: Vec<String> = [
+        (has_oa, "OpenATCA", OPENATCA_SOURCE),
+        (has_eram, "ERAM", ERAM_SOURCE),
+        (has_adsb, "ADS-B", ADSB_SOURCE),
+    ]
+    .iter()
+    .filter_map(|&(h, n, s)| h.then(|| format!("{n} {}/{}", s.sac, s.sic)))
+    .collect();
+    let _ = writeln!(o, "Data sources are in data_sources.json (COMPASS content version 0.2), one entry per system in this directory. SAC 255 is a test range chosen by this export, not an allocation ({}; 255/1 is left free because COMPASS uses it for its own reference): the specification's SAC list is kept by the ASTERIX Manager and the editions held here carry no test range. Do not use it on a live link.", ids.join(", "));
+    let mut imports: Vec<String> = Vec::new();
+    if !names.is_empty() {
+        let files: Vec<String> = names
+            .iter()
+            .map(|n| format!("{}.ast", n.to_lowercase()))
+            .collect();
+        imports.push(format!("{} as ASTERIX CAT062", files.join(" and ")));
+    }
+    if has_adsb {
+        imports.push("adsb.ast as ASTERIX CAT021 (Ed 2.4)".to_string());
+    }
+    let _ = writeln!(
+        o,
+        "Import {}, with the UTC Day above; nothing in the files needs a time-of-day override.\n",
+        imports.join(" and ")
+    );
+    if has_oa || has_eram {
+        let mon = match (has_oa, has_eram) {
+            (true, true) => "MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor; for ERAM MON = 0 and CNF = 0 are ASSUMPTIONS: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
+            (true, false) => "MON = 1 (monosensor) because the tracker is fed ADS-B only, one kind of sensor",
+            _ => "MON = 0 and CNF = 0 are ASSUMPTIONS: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
+        };
+        let cnf = if has_oa {
+            " OpenATCA's CNF = 0 (confirmed): the tracker publishes confirmed tracks only. The tracker's O_IDENTITY_UNCONFIRMED flag (the key is a local radar handle, not an aircraft address) is NOT written as CNF = 1: CNF marks a tentative track, and that flag means an unconfirmed identity, which is another thing; its rows are counted below (none in an ADS-B-only run)."
+        } else {
+            ""
+        };
+        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
+    }
+    if has_oa {
+        let _ = writeln!(o, "Altitude (OpenATCA): the tracker's altitude is ADS-B barometric (pressure) altitude, filtered: it is a CALCULATED altitude, I135 with QNH = 0. OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it.\n");
+    }
+    if has_eram {
+        let _ = writeln!(o, "Altitude (ERAM): the altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, an inference and not a statement of the feed: at or above 18 000 ft the value is I136 (measured flight level), below it I135 with QNH = 1.\n");
+        let _ = writeln!(o, "ERAM duplicates: samples are compared on latitude, longitude, altitude, velocity east and north and the coast flag; a sample with the same flight, position time and those six values as an earlier one is a duplicate and is dropped (a row differing only in receive time is a duplicate). Same flight and position time with any difference are both kept and counted.\n");
+    }
     match mode {
         Some(InputsMode::All) => {
             let _ = writeln!(o, "OpenATCA inputs: ALL (--inputs all). The tracker's ADS-B adapter was offered every ADS-B report of the day's clip (it keeps those that pass its quality gates, counted below), as ERAM gets all its inputs, so the two files are like-for-like in what they were given (ERAM additionally has radar, and ADS-B reports from its own receivers, which OpenATCA does not). Because every report was offered to it, no half of the clip is independent of this OpenATCA output: a reference built from the same ADS-B clip is not independent truth for it.\n");
@@ -261,7 +378,9 @@ pub fn readme_with(
         }
         None => {}
     }
-    let _ = writeln!(o, "{I500_NOTE}\n");
+    if has_oa || has_eram {
+        let _ = writeln!(o, "{I500_NOTE}\n");
+    }
     if let Some(c) = extras.clip {
         let _ = writeln!(o, "{}\n", dedup_text(c, mode));
     }
@@ -331,7 +450,7 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) 
     );
     let _ = writeln!(
         out,
-        "  verification: every block was decoded again with this repository's Ed 2.4 decoder and equals the records encoded; the file was read back from disk ({} records, {} blocks) and equals what was written; largest position difference between report and decoded record {} / {} (1e-7 degree, latitude / longitude; limit {MAX_POSITION_ERROR_E7}). This shows that our encoder and decoder agree with each other and with the item definitions the tests were worked out from by hand; it is not an outside conformance test",
+        "  verification: every block was decoded again with this repository's Ed 2.4 decoder and equals the records encoded; the file was read back from disk ({} records, {} blocks) and equals what was written; largest position difference between report and decoded record {} / {} (1e-7 degree, latitude / longitude; limit {MAX_POSITION_ERROR_E7}, enforced: a larger difference stops the export). This shows that our encoder and decoder agree with each other and with the item definitions the tests were worked out from by hand; it is not an outside conformance test",
         d.read_back_records, d.read_back_blocks, d.stats.max_lat_error_e7, d.stats.max_lon_error_e7
     );
     let _ = writeln!(out, "  items present (records with the item, of {rows}):");

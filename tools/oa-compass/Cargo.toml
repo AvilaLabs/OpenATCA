@@ -14,6 +14,7 @@ workspace = true
 oa-adsb = { path = "../../crates/oa-adsb" }
 oa-asterix = { path = "../../crates/oa-asterix" }
 oa-bench = { path = "../../crates/oa-bench" }
+oa-build-info = { path = "../oa-build-info" }
 oa-ieee = { path = "../../crates/oa-ieee" }
 oa-math = { path = "../../crates/oa-math" }
 oa-replay = { path = "../../crates/oa-replay" }
@@ -23,6 +24,8 @@ oa-track = { path = "../../crates/oa-track" }
 [dev-dependencies]
 # Workspace crate; parses the data-source file in the test (RULESET F1: not an outside dependency).
 oa-json = { path = "../../crates/oa-json" }
+# Writes the small ADS-B clip the job tests run on.
+oa-feed = { path = "../../crates/oa-feed" }
 
 [package.metadata.openatca]
 class = "split"
