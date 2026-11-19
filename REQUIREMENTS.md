@@ -3305,7 +3305,10 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   `NO_BEACON` when no message carried one; a message without a valid code leaves the stored one.
 - **OA-BENCH-134** `Legacy::beacons` holds one row (flight, message time, code) each time a message gives a flight a
   code other than the one it had, the first code included, so the code in force at a time is the last row of the
-  flight at or before it. The table is capped; a row that does not fit is counted under the notes.
+  flight at or before it. The table is capped (`Limits::beacons`); a row that does not fit, or whose message has
+  no time, is counted under the notes and not stored.
+- **OA-BENCH-135** A beacon change beyond the cap is counted under the label `DROP_SFDPS_BEACON_FULL` and the flight
+  still holds the last code.
 
 ## Winds aloft (oa-wind)
 
@@ -5066,10 +5069,9 @@ value is a difference only when strictly greater than it.
   reports of the ERAM flight, and each such run is one `ID_BEACON` event with its span (the first report's codes in
   the detail). Nothing is compared where either side has no code, and a report that agrees or is not compared ends
   a run. `ID_CALLSIGN` is the same for ERAM's callsign against the callsigns offered (case and padding ignored).
-- **OA-SHD-008** A paired aircraft's ERAM track segment (gaps over 30 s split segments) and the OpenATCA segment it
-  overlaps most differ in start or in drop by more than 12 s plus the ERAM report interval at that end (to the next
-  or previous report of the segment): `START_TIMING`, `DROP_TIMING`, with the direction. The summary prints the
-  median ERAM report interval.
+- **OA-SHD-008** A paired aircraft's first compared ERAM report and OpenATCA's first in-box row (and the last of each)
+  differ by more than 12 s plus the ERAM report interval at that end: `START_TIMING`, `DROP_TIMING`, with the
+  direction. Gaps inside the track are `ERAM_REPORT_GAP` only. The summary prints the median ERAM report interval.
 - **OA-SHD-009** ERAM reports with no OpenATCA sample are `ERAM_ONLY_SPAN` (consecutive reports one span);
   OpenATCA rows outside the span of every ERAM flight of the aircraft, each widened by 12 s plus the report interval
   at that end, are `OA_ONLY_SPAN` (consecutive rows one span). A span's duration is first to last plus half the
@@ -5103,10 +5105,25 @@ value is a difference only when strictly greater than it.
 - **OA-SHD-019** A gap of more than 30 s between two reports of one ERAM flight is `ERAM_REPORT_GAP` with its
   length; OpenATCA rows inside the flight's span are not `OA_ONLY_SPAN`.
 - **OA-SHD-020** Two ERAM flights of one aircraft with overlapping spans: the overlap is `DUP_ERAM_TRACK` (its
-  duration), and inside it only the flight with the earliest first report (ties: the lower flight index) is
-  compared. Each (aircraft, ERAM time) is compared once.
+  duration, the union of the overlap with the flights before it in priority), and a flight's reports inside the
+  segments of those flights (gaps over 30 s not covered) are not compared; the flight with the earliest first report
+  (ties: the lower flight index) is the primary. Each (aircraft, ERAM time) is compared once.
 - **OA-SHD-021** An address-paired ERAM flight more than 20 NM from the paired aircraft for 3 or more consecutive
   reports is `ADDR_CONTRADICTS_TRACK` (with the span) and its reports in the span are left out of the position
   classes and of the worst-case columns.
 - **OA-SHD-022** Every file the run opens is canonicalised and refused when it resolves into a sealed recording, so a
   link inside an unsealed directory is caught; the run itself checks its arguments before creating anything.
+- **OA-SHD-023** A start or drop difference is not reported as `START_TIMING`/`DROP_TIMING` where an `OA_ONLY_SPAN` or
+  `ERAM_ONLY_SPAN` already covers the interval between the two times; the span classes are disjoint by construction
+  and the summary says span totals add.
+- **OA-SHD-024** `DUP_ERAM_TRACK` is one event per secondary flight, its value the union of overlap time with the
+  primary flights; a secondary's reports inside a gap of over 30 s of the primary are compared.
+- **OA-SHD-025** `ERAM_REPORT_GAP` is measured on the compared (not duplicate-excluded) reports only.
+- **OA-SHD-026** A beacon-paired flight is measured against the OpenATCA row nearest its first report within 12 s plus
+  the ERAM report interval, else the first row inside its span; no interpolated sample is needed.
+- **OA-SHD-027** Reports in an `ADDR_CONTRADICTS_TRACK` span are also left out of altitude, coast and identity; a
+  report with no OpenATCA sample neither extends nor breaks a contradiction run.
+- **OA-SHD-028** An output path that does not exist yet is resolved through its nearest existing ancestor before the
+  sealed check.
+- **OA-SHD-029** Every nonzero load count is printed in the summary header; a beacon table that overflowed
+  (`DROP_SFDPS_BEACON_FULL`) fails the run.

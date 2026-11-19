@@ -219,6 +219,10 @@ pub fn render(c: &Comparison, header: &[String]) -> Rendered {
     );
     let _ = writeln!(
         s,
+        "\nThe span classes (UNPAIRED_*, ERAM_ONLY_SPAN, OA_ONLY_SPAN, ERAM_REPORT_GAP, DUP_ERAM_TRACK) are disjoint by construction, and start/drop timing is not reported where a span already covers it, so span totals add."
+    );
+    let _ = writeln!(
+        s,
         "\nDifferences by class (events, flights affected, total span s, largest):"
     );
     for class in CLASSES {

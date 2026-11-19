@@ -75,3 +75,25 @@ fn beacon_changes_are_kept_with_their_message_time() {
     assert_eq!(leg.beacons.ts_ms[0], leg.beacons.ts_ms[1]);
     assert!(leg.beacons.ts_ms[0] > 0);
 }
+
+// REQ: OA-BENCH-135
+#[test]
+fn beacon_changes_over_the_cap_are_counted_not_stored() {
+    use oa_bench::ingest::DROP_SFDPS_BEACON_FULL;
+    let mut leg = new_legacy();
+    leg.limits.beacons = 1;
+    let mut r = new_reader().unwrap();
+    let a = "11111111-2222-4333-8444-555555555555";
+    for code in ["0123", "7700", "7600"] {
+        ingest_sfdps(
+            &mut leg,
+            &mut r,
+            doc("BA", a, &ba(code)).as_bytes(),
+            NO_TIME,
+        );
+    }
+    assert_eq!(leg.beacons.code, vec![123]);
+    assert_eq!(leg.counts.reasons.get(DROP_SFDPS_BEACON_FULL), Some(&2));
+    // The flight still holds the last code.
+    assert_eq!(leg.flights.beacon[0], 7600);
+}

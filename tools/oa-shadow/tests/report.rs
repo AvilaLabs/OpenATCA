@@ -410,3 +410,22 @@ fn the_extent_of_a_set_of_times_is_its_first_and_last() {
     assert_eq!(extent(std::iter::empty()), None);
     assert_eq!(extent([4].into_iter()), Some((4, 4)));
 }
+
+// REQ: OA-SHD-029
+#[test]
+fn nonzero_load_counts_are_listed_for_the_summary_header() {
+    let mut c = oa_bench::legacy::Counts::default();
+    assert!(oa_shadow::run::load_notes(&c).is_empty());
+    c.sfdps_rejected = 3;
+    c.note(
+        "SFDPS beacon changes dropped, reason no message time".into(),
+        2,
+    );
+    let v = oa_shadow::run::load_notes(&c);
+    assert!(v
+        .iter()
+        .any(|l| l.contains("rejected") && l.ends_with(" 3")));
+    assert!(v
+        .iter()
+        .any(|l| l.contains("no message time") && l.ends_with(" 2")));
+}

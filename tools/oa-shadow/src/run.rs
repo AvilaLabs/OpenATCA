@@ -108,6 +108,29 @@ fn collect_ticks(out: &TrackOutput, rows: &mut BTreeMap<u32, Vec<OaSample>>) {
     }
 }
 
+/// The nonzero counts of an ingest, as header lines for the summary.
+pub fn load_notes(c: &oa_bench::legacy::Counts) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut add = |label: &str, n: u64| {
+        if n > 0 {
+            v.push(format!("load: {label} {n}"));
+        }
+    };
+    add(
+        "SFDPS documents refused",
+        c.doc_errors.first().copied().unwrap_or(0),
+    );
+    add("SFDPS messages rejected", c.sfdps_rejected);
+    add("SFDPS field errors", c.sfdps_field_errors);
+    add("rows not decoded", c.rows_not_decoded);
+    add("flights dropped (table full)", c.overflow_flights);
+    add("track samples dropped (table full)", c.overflow_th);
+    for (label, n) in &c.reasons {
+        add(label, *n);
+    }
+    v
+}
+
 /// The opener every input file goes through: the path is canonicalised and a sealed target is
 /// refused before the file is opened, so a link inside an unsealed directory is caught too.
 pub fn guarded_opener() -> Opener {
@@ -208,6 +231,17 @@ pub fn run(args: &Args) -> Result<String, String> {
         ));
     }
     let leg = &loaded.legacy;
+    // Every nonzero load count is part of the report; a beacon table that overflowed means the
+    // ERAM side is incomplete, which is an error.
+    header.extend(load_notes(&leg.counts));
+    if leg
+        .counts
+        .reasons
+        .get(oa_bench::ingest::DROP_SFDPS_BEACON_FULL)
+        .is_some_and(|&n| n > 0)
+    {
+        return Err("the SFDPS beacon table overflowed; the ERAM identity is incomplete".into());
+    }
     let mut by_flight: BTreeMap<u32, Vec<EramSample>> = BTreeMap::new();
     for i in 0..leg.th.flight.len() {
         let (Some(&f), Some(&t), Some(&lat), Some(&lon), Some(&alt), Some(&coast)) = (

@@ -61,6 +61,7 @@ pub struct Limits {
     pub route_points: usize,
     pub tbfm: usize,
     pub tfms: usize,
+    pub beacons: usize,
 }
 
 impl Default for Limits {
@@ -73,6 +74,7 @@ impl Default for Limits {
             route_points: MAX_ROUTE_POINTS,
             tbfm: MAX_TBFM,
             tfms: MAX_TFMS,
+            beacons: MAX_BEACON_ROWS,
         }
     }
 }
@@ -161,7 +163,7 @@ pub struct ThTable {
 
 /// Transponder code changes of ERAM flights: one row each time a message gave a flight a code
 /// other than the one it had (the first code counts), so the code in force at a time is the last
-/// row of the flight at or before it. Capped at [`MAX_BEACON_ROWS`]; a row that does not fit is
+/// row of the flight at or before it. Capped at `Limits::beacons` ([`MAX_BEACON_ROWS`] by default); a row that does not fit is
 /// counted, not stored.
 // A3: one Vec per column.
 #[derive(Clone, Debug, Default)]

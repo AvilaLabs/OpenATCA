@@ -174,3 +174,18 @@ fn run_itself_refuses_a_sealed_argument_before_creating_anything() {
     assert!(!made.exists());
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// REQ: OA-SHD-028
+#[test]
+#[cfg(unix)]
+fn an_output_directory_that_does_not_exist_yet_is_resolved_through_its_existing_parent() {
+    let root = scratch("newdir");
+    let sealed = root.join("scds").join("rec-20261119");
+    std::fs::create_dir_all(&sealed).unwrap();
+    let link = root.join("innocent");
+    std::os::unix::fs::symlink(&sealed, &link).unwrap();
+    // `innocent/out/deeper` does not exist; its parent resolves into the sealed folder.
+    assert!(refuse_sealed(&link.join("out").join("deeper")).is_err());
+    assert!(refuse_sealed(&root.join("fresh").join("out")).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}

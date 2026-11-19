@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::geo::{deg, enu_m, oa_at};
+use crate::geo::{deg, enu_m};
 use crate::model::{EramFlight, OaAircraft};
 use crate::thresholds::THRESHOLDS;
 
@@ -129,10 +129,18 @@ fn beacon_match(
         if !offered {
             continue;
         }
-        let Some(p) = oa_at(&ac.samples, first.t_ms, &THRESHOLDS) else {
+        let Some((row_t, row_lat, row_lon)) = pairing_row(f, ac) else {
             continue;
         };
-        let (e, n) = enu_m(p.lat_deg, p.lon_deg, deg(first.lat_e7), deg(first.lon_e7));
+        // ERAM's report nearest in time to that OpenATCA row (the earlier on a tie).
+        let near = f.samples.partition_point(|s| s.t_ms < row_t);
+        let pick = [near.checked_sub(1), Some(near)]
+            .into_iter()
+            .flatten()
+            .filter_map(|k| f.samples.get(k))
+            .min_by_key(|s| (s.t_ms - row_t).abs());
+        let Some(pick) = pick else { continue };
+        let (e, n) = enu_m(row_lat, row_lon, deg(pick.lat_e7), deg(pick.lon_e7));
         let d = e.hypot(n);
         // Ascending address order, so a strict comparison keeps the lowest on a tie.
         if d <= THRESHOLDS.pair_radius_m && best.is_none_or(|(bd, _)| d < bd) {
@@ -140,4 +148,27 @@ fn beacon_match(
         }
     }
     best.map(|(_, a)| a)
+}
+
+/// The OpenATCA row beacon pairing measures against: the row nearest in time to ERAM's first
+/// report if it is within 12 s plus the interval to ERAM's second report, else the first row
+/// inside the flight's span. `(time, lat, lon)`, `None` when there is neither.
+fn pairing_row(f: &EramFlight, ac: &OaAircraft) -> Option<(i64, f64, f64)> {
+    let first = f.samples.first()?;
+    let last = f.samples.last()?;
+    let iv = f.samples.get(1).map_or(0, |s| s.t_ms - first.t_ms);
+    let reach = THRESHOLDS.timing_ms + iv;
+    let i = ac.samples.partition_point(|s| s.t_ms < first.t_ms);
+    let near = [i.checked_sub(1), Some(i)]
+        .into_iter()
+        .flatten()
+        .filter_map(|k| ac.samples.get(k))
+        .filter(|s| (s.t_ms - first.t_ms).abs() <= reach)
+        .min_by_key(|s| (s.t_ms - first.t_ms).abs());
+    let row = near.or_else(|| {
+        ac.samples
+            .get(i)
+            .filter(|s| s.t_ms >= first.t_ms && s.t_ms <= last.t_ms)
+    })?;
+    Some((row.t_ms, deg(row.lat_e7), deg(row.lon_e7)))
 }

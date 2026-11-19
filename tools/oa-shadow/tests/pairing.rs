@@ -249,26 +249,6 @@ fn start_and_drop_differences_must_exceed_twelve_seconds_plus_the_eram_report_in
     assert!(THRESHOLDS.timing_differs(12_001, 0));
     assert!(!THRESHOLDS.timing_differs(-24_000, 12_000));
     assert!(THRESHOLDS.timing_differs(-24_001, 12_000));
-    // ERAM 24..=60 s, a report every 12 s, so the threshold is 24 s at either end.
-    for (d, e, starts, drops) in [
-        (0i64, 0i64, 0usize, 0usize),
-        (24_000, 0, 0, 0),
-        (24_001, 0, 1, 0),
-        (-24_000, 0, 0, 0),
-        (-24_001, 0, 1, 0),
-        (0, 24_000, 0, 0),
-        (0, 24_001, 0, 1),
-        (0, -24_000, 0, 0),
-        (0, -24_001, 0, 1),
-    ] {
-        let oa = oa_between(1, 24_000 + d, 60_000 + e);
-        let c = compare_all(&[eram_24_to_60()], &oa_map(vec![oa]), None);
-        assert_eq!(
-            (count(&c, Class::StartTiming), count(&c, Class::DropTiming)),
-            (starts, drops),
-            "d {d} e {e}"
-        );
-    }
     // The median ERAM report interval is recorded for the summary.
     let c = compare_all(
         &[eram_24_to_60()],
@@ -278,33 +258,55 @@ fn start_and_drop_differences_must_exceed_twelve_seconds_plus_the_eram_report_in
     assert_eq!(c.totals.eram_intervals_ms, vec![12_000, 12_000, 12_000]);
 }
 
-// REQ: OA-SHD-008
+// REQ: OA-SHD-023
 #[test]
-fn timing_events_name_the_direction_and_the_two_times() {
-    let c = compare_all(
-        &[eram_24_to_60()],
-        &oa_map(vec![oa_between(1, 55_000, 100_000)]),
-        None,
-    );
-    let s = of(&c, Class::StartTiming);
-    assert_eq!(s.len(), 1);
+fn a_start_or_drop_difference_is_one_event_the_span_not_a_second_timing_event() {
+    // ERAM 24..=60 s, a report every 12 s: the threshold is 24 s at either end. A difference
+    // beyond it always leaves ERAM reports with no OpenATCA sample (OpenATCA starts late or ends
+    // early) or OpenATCA rows beyond ERAM's widened span (OpenATCA starts early or ends late):
+    // that span is the one event, and no START/DROP event is added for the same interval.
+    let run = |d: i64, e: i64| {
+        compare_all(
+            &[eram_24_to_60()],
+            &oa_map(vec![oa_between(1, 24_000 + d, 60_000 + e)]),
+            None,
+        )
+    };
+    let kinds = |c: &oa_shadow::compare::Comparison| {
+        (
+            count(c, Class::EramOnlySpan),
+            count(c, Class::OaOnlySpan),
+            count(c, Class::StartTiming) + count(c, Class::DropTiming),
+        )
+    };
+    assert_eq!(kinds(&run(24_001, 0)), (1, 0, 0)); // OpenATCA starts late
+    assert_eq!(kinds(&run(-24_001, 0)), (0, 1, 0)); // early
+    assert_eq!(kinds(&run(0, -24_001)), (1, 0, 0)); // ends early
+    assert_eq!(kinds(&run(0, 24_001)), (0, 1, 0)); // ends late
+                                                   // Within the threshold: neither a span nor a timing event for the early/late cases.
+    assert_eq!(kinds(&run(-24_000, 0)), (0, 0, 0));
+    assert_eq!(kinds(&run(0, 24_000)), (0, 0, 0));
+}
+
+// REQ: OA-SHD-023
+#[test]
+fn timing_is_judged_only_at_the_groups_first_and_last_report_not_at_internal_gaps() {
+    // ERAM reports 12, 24, then 100, 112 s (a 76 s gap); OpenATCA has rows throughout except
+    // 30..=90 s. The internal gap is ERAM_REPORT_GAP and the missing rows are one ERAM_ONLY
+    // span; no start or drop event comes from the internal segments.
+    let samples = [12, 24, 100, 112]
+        .iter()
+        .map(|&t| eram_at(t, t as f64, 100.0, 0.0, 0.0))
+        .collect();
+    let mut oa = oa_north(1, 0, 130, 100.0);
+    oa.samples
+        .retain(|s| s.t_ms - T0 < 30_000 || s.t_ms - T0 > 90_000);
+    let c = compare_all(&[flight(Some(1), samples)], &oa_map(vec![oa]), None);
+    assert_eq!(count(&c, Class::EramReportGap), 1);
     assert_eq!(
-        (s[0].t_ms, s[0].end_ms, s[0].value),
-        (T0 + 24_000, T0 + 55_000, 31.0)
+        count(&c, Class::StartTiming) + count(&c, Class::DropTiming),
+        0
     );
-    assert_eq!(s[0].detail, "oa_later");
-    let c = compare_all(
-        &[eram_24_to_60()],
-        &oa_map(vec![oa_between(1, 0, 30_000)]),
-        None,
-    );
-    let d = of(&c, Class::DropTiming);
-    assert_eq!(d.len(), 1);
-    assert_eq!(
-        (d[0].t_ms, d[0].end_ms, d[0].value),
-        (T0 + 60_000, T0 + 30_000, 30.0)
-    );
-    assert_eq!(d[0].detail, "oa_earlier");
 }
 
 #[test]
@@ -633,4 +635,113 @@ fn the_beacon_in_force_at_the_first_report_pairs_the_flight() {
     // A first message after the first report: the earliest code is used.
     f.beacons = vec![(T0 + 40_000, 9)];
     assert_eq!(pair(&[f], &oa).groups.len(), 1);
+}
+
+// REQ: OA-SHD-024
+#[test]
+fn duplicate_overlap_is_the_union_against_the_primary_and_gaps_are_not_covered() {
+    let o = oa_map(vec![oa_north(0xA, 0, 200, 100.0)]);
+    // Two secondaries overlapping each other and the primary: one event each, union time.
+    let mut b = track(Some(0xA), 36, 84);
+    b.gufi = 2;
+    let mut d = track(Some(0xA), 48, 96);
+    d.gufi = 3;
+    let c = compare_all(&[track(Some(0xA), 12, 60), b, d], &o, None);
+    let v: Vec<f64> = of(&c, Class::DupEramTrack)
+        .iter()
+        .map(|e| e.value)
+        .collect();
+    // B overlaps A for 36..=60 (24 s); D overlaps A's 48..=60 and B's compared 72..=84 (12 s each).
+    assert_eq!(v, vec![24.0, 24.0]);
+    // A secondary report inside a gap of the primary (over 30 s) is compared, not excluded.
+    let mut a = track(Some(0xA), 12, 36);
+    a.samples.extend(track(Some(0xA), 96, 120).samples);
+    let mut g = track(Some(0xA), 48, 72);
+    g.gufi = 2;
+    let c = compare_all(&[a, g], &o, None);
+    assert_eq!(count(&c, Class::DupEramTrack), 0);
+    assert_eq!(c.totals.compared, 9);
+}
+
+// REQ: OA-SHD-025
+#[test]
+fn a_report_gap_is_measured_on_the_compared_reports_only() {
+    // The secondary's reports at 96 and 108 s are inside the primary: not compared, so the
+    // secondary has no gap between its 24 s and 120 s reports.
+    let o = oa_map(vec![oa_north(0xA, 0, 200, 100.0)]);
+    let mut b = flight(
+        Some(0xA),
+        [12, 24, 96, 108, 120]
+            .iter()
+            .map(|&s| eram_at(s, s as f64, 100.0, 0.0, 0.0))
+            .collect(),
+    );
+    b.gufi = 2;
+    let c = compare_all(&[track(Some(0xA), 12, 108), b], &o, None);
+    assert_eq!(count(&c, Class::EramReportGap), 0);
+}
+
+// REQ: OA-SHD-026
+#[test]
+fn beacon_pairing_uses_the_openatca_row_nearest_the_flights_first_report() {
+    // OpenATCA's rows start 16 s after ERAM's first report: no interpolated sample exists
+    // there, but the first row is within 12 s plus the 12 s interval.
+    let mut f = track(None, 24, 108);
+    f.beacons = vec![(T0, 1234)];
+    let with_code = |from: i64, to: i64| {
+        let mut a = oa_north(0xA, from, to, 100.0);
+        a.idents = vec![ident(0, Some(1234), None), ident(300, Some(1234), None)];
+        oa_map(vec![a])
+    };
+    let p = pair(&[f.clone()], &with_code(40, 130));
+    assert_eq!(p.groups.len(), 1);
+    // Rows only after the flight's span and beyond 12 s + interval: no row, unpaired.
+    let p = pair(&[f], &with_code(140, 150));
+    assert_eq!((p.groups.len(), p.unpaired_eram.len()), (0, 1));
+}
+
+// REQ: OA-SHD-027
+#[test]
+fn a_contradicted_span_is_left_out_of_altitude_coast_and_identity() {
+    let samples: Vec<_> = (1..=9)
+        .map(|k| {
+            let far = if (4..=6).contains(&k) { 50_000.0 } else { 0.0 };
+            let mut s = eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, far);
+            if (4..=6).contains(&k) {
+                s.alt_ft = Some(15_000);
+                s.coast = true;
+            }
+            s
+        })
+        .collect();
+    let mut f = flight(Some(1), samples);
+    f.beacons = vec![(T0, 5555)];
+    let mut o = oa_north(1, 0, 120, 100.0);
+    o.idents = vec![ident(0, Some(1111), None), ident(300, Some(1111), None)];
+    let c = compare_all(&[f], &oa_map(vec![o]), None);
+    assert_eq!(count(&c, Class::AddrContradictsTrack), 1);
+    assert_eq!(count(&c, Class::Alt), 0);
+    assert_eq!(count(&c, Class::CoastEramOnly), 0);
+    // The identity runs cover the six agreeing-in-position reports only: 1..=3 and 7..=9 are two runs.
+    assert_eq!(count(&c, Class::IdBeacon), 2);
+}
+
+// REQ: OA-SHD-027
+#[test]
+fn a_report_with_no_openatca_sample_neither_extends_nor_breaks_a_contradiction_run() {
+    // Far reports at 36, 48 s; no OpenATCA rows at 60 s; far again at 72 s: one run of three.
+    let samples: Vec<_> = (1..=9)
+        .map(|k| {
+            let far = if [3, 4, 6].contains(&k) {
+                50_000.0
+            } else {
+                0.0
+            };
+            eram_at(k * 12, (k * 12) as f64, 100.0, 0.0, far)
+        })
+        .collect();
+    let mut o = oa_north(1, 0, 120, 100.0);
+    o.samples.retain(|s| (s.t_ms - T0 - 60_000).abs() > 2_000);
+    let c = compare_all(&[flight(Some(1), samples)], &oa_map(vec![o]), None);
+    assert_eq!(count(&c, Class::AddrContradictsTrack), 1);
 }

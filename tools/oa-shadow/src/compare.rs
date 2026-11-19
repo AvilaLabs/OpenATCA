@@ -246,13 +246,27 @@ pub fn segment_ix(times: &[i64], gap_ms: i64) -> Vec<(usize, usize)> {
     out
 }
 
+/// The union of intervals, sorted and merged where they overlap or touch.
+fn merge_intervals(mut v: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    v.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for (a, b) in v {
+        match out.last_mut() {
+            Some(l) if a <= l.1 => l.1 = l.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
 fn seconds(ms: i64) -> f64 {
     ms as f64 / 1000.0
 }
 
 /// The duration, ms, of the run of samples `i..=j` of `times` with half the local sample
 /// interval added at each end: the interval on the end's own side, or the other side's when it
-/// has no neighbour; a lone sample gets one interval. An interval is at most the segment gap.
+/// has no neighbour; a lone sample of a longer sequence gets one interval, a sequence of one
+/// sample (no interval is known) none. An interval is at most the segment gap.
 pub fn padded_ms(times: &[i64], i: usize, j: usize) -> i64 {
     let gap = THRESHOLDS.segment_gap_ms;
     let iv = |a: usize, b: usize| match (times.get(a), times.get(b)) {
@@ -491,34 +505,43 @@ fn compare_group(
     let spans: Vec<Option<(i64, i64)>> = flights.iter().map(|f| f.0.span()).collect();
     let mut order: Vec<usize> = (0..flights.len()).collect();
     order.sort_by_key(|&k| (spans.get(k).copied().flatten().map_or(i64::MAX, |s| s.0), k));
+    let base = events.len();
 
-    // Duplicate tracks: inside an overlap with a higher-priority flight a flight is not compared.
+    // Duplicate tracks: a flight is not compared where the segments of the flights before it in
+    // priority (their compared reports, gaps over the segment gap not covered) are present.
+    let mut cover: Vec<(i64, i64)> = Vec::new();
     let mut reps: Vec<Rep<'_>> = Vec::new();
-    for (rank, &k) in order.iter().enumerate() {
-        let (Some((a, b)), Some(f)) = (spans.get(k).copied().flatten(), flights.get(k)) else {
-            continue;
-        };
-        let mut earlier: Vec<(i64, i64)> = Vec::new();
-        for &i in order.iter().take(rank) {
-            if let Some((c, d)) = spans.get(i).copied().flatten() {
-                let (lo, hi) = (a.max(c), b.min(d));
+    for &k in &order {
+        let Some(f) = flights.get(k) else { continue };
+        let all: Vec<i64> = f.0.samples.iter().map(|s| s.t_ms).collect();
+        let mut overlap_ms = 0;
+        let mut seg_n = 0;
+        let mut lo_first: Option<i64> = None;
+        let mut hi_last: Option<i64> = None;
+        for &(sa, sb) in &segments(&all, th.segment_gap_ms) {
+            for &(ca, cb) in &cover {
+                let (lo, hi) = (sa.max(ca), sb.min(cb));
                 if lo <= hi {
-                    let mut e = event(flight, Class::DupEramTrack, lo);
-                    e.end_ms = hi;
-                    e.value = seconds(hi - lo);
-                    e.detail = format!(
-                        "primary_rank={}",
-                        order.iter().position(|&x| x == i).unwrap_or(0)
-                    );
-                    events.push(e);
-                    earlier.push((c, d));
+                    overlap_ms += hi - lo;
+                    seg_n += 1;
+                    lo_first = Some(lo_first.map_or(lo, |x| x.min(lo)));
+                    hi_last = Some(hi_last.map_or(hi, |x| x.max(hi)));
                 }
             }
         }
+        if let (Some(lo), Some(hi)) = (lo_first, hi_last) {
+            let mut e = event(flight, Class::DupEramTrack, lo);
+            e.end_ms = hi;
+            e.value = seconds(overlap_ms);
+            e.detail = format!("overlaps={seg_n}");
+            events.push(e);
+        }
+        let mut mine: Vec<&EramSample> = Vec::new();
         for s in &f.0.samples {
-            if earlier.iter().any(|&(c, d)| s.t_ms >= c && s.t_ms <= d) {
+            if cover.iter().any(|&(c, d)| s.t_ms >= c && s.t_ms <= d) {
                 continue;
             }
+            mine.push(s);
             let p = oa_at(&ac.samples, s.t_ms, th);
             let sep = p.as_ref().map(|p| separation(s, p, th));
             reps.push(Rep {
@@ -529,10 +552,26 @@ fn compare_group(
                 contradicts: false,
             });
         }
+        // Gaps between this flight's compared reports (not where a higher-priority flight is).
+        for w in mine.windows(2) {
+            if let [a, b] = w {
+                let inside = cover.iter().any(|&(c, d)| a.t_ms >= c && b.t_ms <= d);
+                if b.t_ms - a.t_ms > th.segment_gap_ms && !inside {
+                    let mut e = event(flight, Class::EramReportGap, a.t_ms);
+                    e.end_ms = b.t_ms;
+                    e.value = seconds(b.t_ms - a.t_ms);
+                    events.push(e);
+                }
+            }
+        }
+        let mine_t: Vec<i64> = mine.iter().map(|s| s.t_ms).collect();
+        cover.extend(segments(&mine_t, th.segment_gap_ms));
+        cover = merge_intervals(cover);
     }
     reps.sort_by_key(|r| (r.s.t_ms, r.flight_pos));
 
-    // Address contradicts track: a run of far reports of one address-paired flight.
+    // Address contradicts track: a run of far reports of one address-paired flight; a report
+    // with no OpenATCA sample neither extends nor breaks a run.
     for (k, (_, rule)) in flights.iter().enumerate() {
         if *rule != Rule::Address {
             continue;
@@ -540,7 +579,7 @@ fn compare_group(
         let idx: Vec<usize> = reps
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.flight_pos == k)
+            .filter(|(_, r)| r.flight_pos == k && r.sep.is_some())
             .map(|(i, _)| i)
             .collect();
         let times: Vec<i64> = idx
@@ -618,59 +657,46 @@ fn compare_group(
         .collect();
     row.oa_only_s = span_events(flight, Class::OaOnlySpan, &oa_times, &oa_covered, events);
 
-    // Gaps inside one ERAM flight.
-    for (f, _) in flights {
-        for w in f.samples.windows(2) {
-            if let [a, b] = w {
-                if b.t_ms - a.t_ms > th.segment_gap_ms {
-                    let mut e = event(flight, Class::EramReportGap, a.t_ms);
-                    e.end_ms = b.t_ms;
-                    e.value = seconds(b.t_ms - a.t_ms);
-                    events.push(e);
-                }
-            }
-        }
-    }
-
-    // Start and drop timing: each ERAM segment against the OpenATCA segment it overlaps most,
-    // a difference only beyond the threshold plus the ERAM report interval at that end.
-    let eram_ix = segment_ix(&times, th.segment_gap_ms);
-    let oa_segs = segments(&oa_times, th.segment_gap_ms);
-    for &(i, j) in &eram_ix {
-        let (Some(&es), Some(&ee)) = (times.get(i), times.get(j)) else {
-            continue;
-        };
+    // Report intervals of the compared ERAM track, for the summary.
+    for &(i, j) in &segment_ix(&times, th.segment_gap_ms) {
         for w in times.get(i..=j).unwrap_or(&[]).windows(2) {
             if let [a, b] = w {
                 totals.eram_intervals_ms.push(b - a);
             }
         }
-        let start_iv = if j > i {
-            times.get(i + 1).map_or(0, |&x| x - es)
-        } else {
-            0
-        };
-        let end_iv = if j > i {
-            j.checked_sub(1)
-                .and_then(|k| times.get(k))
-                .map_or(0, |&x| ee - x)
-        } else {
-            0
-        };
-        let mut best: Option<(i64, (i64, i64))> = None;
-        for &(os, oe) in &oa_segs {
-            let overlap = ee.min(oe) - es.max(os);
-            if overlap >= 0 && best.is_none_or(|(b, _)| overlap > b) {
-                best = Some((overlap, (os, oe)));
-            }
-        }
-        let Some((_, (os, oe))) = best else { continue };
+    }
+
+    // Start and drop: the group's first (last) ERAM report against OpenATCA's first (last)
+    // in-box row, a difference only beyond the threshold plus the ERAM report interval at that
+    // end, and only where no span event already covers the interval between the two times.
+    // Gaps inside the track belong to ERAM_REPORT_GAP.
+    let span_events_now: Vec<(i64, i64)> = events
+        .get(base..)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|e| matches!(e.class, Class::EramOnlySpan | Class::OaOnlySpan))
+        .map(|e| (e.t_ms, e.end_ms))
+        .collect();
+    if let (Some(&es), Some(&ee), Some(&os), Some(&oe)) = (
+        times.first(),
+        times.last(),
+        oa_times.first(),
+        oa_times.last(),
+    ) {
+        let start_iv = times.get(1).map_or(0, |&x| x - es);
+        let end_iv = times
+            .len()
+            .checked_sub(2)
+            .and_then(|k| times.get(k))
+            .map_or(0, |&x| ee - x);
         for (class, e_t, o_t, iv) in [
             (Class::StartTiming, es, os, start_iv),
             (Class::DropTiming, ee, oe, end_iv),
         ] {
             let delta = o_t - e_t;
-            if th.timing_differs(delta, iv) {
+            let (lo, hi) = (e_t.min(o_t), e_t.max(o_t));
+            let covered = span_events_now.iter().any(|&(a, b)| a <= hi && lo <= b);
+            if th.timing_differs(delta, iv) && !covered {
                 let mut e = event(flight, class, e_t);
                 e.end_ms = o_t;
                 e.value = seconds(delta.abs());
@@ -693,6 +719,11 @@ fn compare_group(
         let mut beacon_marks: Vec<Option<String>> = Vec::new();
         let mut call_marks: Vec<Option<String>> = Vec::new();
         for r in &mine {
+            if r.contradicts {
+                beacon_marks.push(None);
+                call_marks.push(None);
+                continue;
+            }
             let t = r.s.t_ms;
             let offered = ac.idents_in(t - th.ident_window_ms, t + th.ident_window_ms);
             let mut codes: Vec<u16> = offered.iter().filter_map(|p| p.squawk).collect();
@@ -803,6 +834,9 @@ fn compare_sample(
             e.closer = c;
             events.push(e);
         }
+    }
+    if r.contradicts {
+        return;
     }
     match (s.alt_ft, p.alt_ft) {
         (Some(ea), Some(oa_alt)) => {
