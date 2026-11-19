@@ -19,6 +19,8 @@ dependencies = [
  "oa-arinc424",
  "oa-csv",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-nasr",
  "oa-sha256",
  "oa-zip",
@@ -28,6 +30,11 @@ dependencies = [
 name = "oa-alloc-check"
 version = "0.0.0"
 dependencies = [
+ "oa-airspace",
+ "oa-display",
+ "oa-geo",
+ "oa-nam",
+ "oa-scope-replay",
  "oa-track",
 ]
 
@@ -77,6 +84,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-display"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-feed"
 version = "0.0.1"
 dependencies = [
@@ -95,8 +113,13 @@ dependencies = [
 name = "oa-geo"
 version = "0.0.1"
 dependencies = [
+ "oa-ieee",
  "oa-math",
 ]
+
+[[package]]
+name = "oa-ieee"
+version = "0.0.1"
 
 [[package]]
 name = "oa-json"
@@ -104,6 +127,13 @@ version = "0.0.1"
 
 [[package]]
 name = "oa-math"
+version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+]
+
+[[package]]
+name = "oa-nam"
 version = "0.0.1"
 
 [[package]]
@@ -135,6 +165,21 @@ dependencies = [
  "oa-tfms",
  "oa-xml",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-scope-replay"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-airspace",
+ "oa-display",
+ "oa-feed",
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-sha256",
+ "oa-track",
 ]
 
 [[package]]
@@ -193,6 +238,8 @@ dependencies = [
  "oa-adsb",
  "oa-feed",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 

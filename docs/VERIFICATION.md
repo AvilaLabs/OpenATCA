@@ -21,9 +21,9 @@ property holds for all inputs within the bound. If one does, Kani prints the inp
 Harnesses are compiled only under `#[cfg(kani)]`. They are not in any shipped build, and
 `cargo build`, `cargo test` and `cargo clippy` do not see them. The harness code is in
 `crates/oa-asterix/src/proofs.rs`, `crates/oa-asterix/src/proofs_wire.rs`,
-`crates/oa-adsb/src/frames.rs`, `crates/oa-feed/src/health.rs` and
-`crates/oa-replay/src/clock.rs`, `crates/oa-track/src/time_gate.rs`, `crates/oa-track/src/fixed_map.rs`,
-`crates/oa-math/src/trig.rs` and `crates/oa-truth/src/clip.rs` (each at the end, in a `proofs` module).
+`crates/oa-adsb/src/frames.rs`, `crates/oa-feed/src/core/health.rs` and
+`crates/oa-replay/src/core/clock.rs`, `crates/oa-track/src/time_gate.rs`, `crates/oa-track/src/fixed_map.rs`,
+`crates/oa-math/src/trig.rs` and `crates/oa-truth/src/shell/clip.rs` (each at the end, in a `proofs` module).
 
 Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` links the
 harness to the requirement and lists it as a proof harness, apart from tests. It does not run

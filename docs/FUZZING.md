@@ -41,7 +41,7 @@ The fuzz binaries are test tools. They are never built into a release artifact.
 fuzz/Cargo.toml          own [workspace]; path dependencies on the oa-* crates
 fuzz/Cargo.lock          committed
 fuzz/fuzz_targets/*.rs   one target per decoder entry point
-fuzz/seeds/<target>/     small synthetic seeds (about 130 KB in all), safe to commit
+fuzz/seeds/<target>/     small seeds (about 300 KB in all), safe to commit
 fuzz/make_corpora.py     builds the local corpora from the raw data (stays out of the repo)
 ```
 
@@ -120,23 +120,36 @@ Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mv
 | Target | Seeds (local corpus only unless noted) |
 |---|---|
 | nam | 35 of the Rev G example messages, bare and framed, and one with the printed spacing (committed, `fuzz/seeds/nam`) |
-| asterix | the GPL-2.0 captures in `raw/asterix-samples`, split into packets and blocks. Local only, never committed. |
+| asterix | committed (`fuzz/seeds/asterix`, 46 files): 23 valid blocks and streams and 23 refused ones. The valid ones are the hand-built CAT021, CAT048 and CAT062 records of the `oa-asterix` tests (byte derivations in `tests/handbuilt.rs`), the untyped-item and typed-item records of `tests/common`, FSPEC variants, reserved-expansion and special-purpose items, and a three-category stream; the refused ones are the refusal cases of `tests/refusal.rs` and `tests/findings.rs` (block length, FSPEC, unknown slots, compound items, truncation). Locally, the GPL-2.0 captures in `raw/asterix-samples`, split into packets and blocks, never committed. |
 | adsb-payload | three synthetic payloads (committed) |
-| adsb-trace | 232 real adsb.lol trace files (ODbL), from the first part of the 2026-11-13 archive |
+| adsb-trace | committed (`fuzz/seeds/adsb-trace`, 32 files): 17 accepted traces, 3 accepted with refused rows (`rowbad-`) and 12 refused whole (`bad-`), all built from the `oa-adsb` decode tests: every row flag, altitude form and source type, old 7 to 9 column rows, the aircraft object at its limits and with malformed minor fields, box edges, non-ICAO and reserved addresses, and the structural errors. No adsb.lol data is committed (ODbL). Locally, 232 real adsb.lol trace files (ODbL), from the first part of the 2026-11-13 archive. |
 | feed-frame | 200 real frames and 20 five-frame runs from the SWIM recordings, plus one synthetic stream (committed) |
 | grib2 | the ecCodes and NCEP files in `raw/grib2-testdata`, whole and split into messages |
-| j2k | the JPEG 2000 section-7 bodies cut out of the template 5.40 messages above |
+| j2k | committed (`fuzz/seeds/j2k`, 55 files): 20 codestreams that decode (the two frozen streams of the `oa-j2k` tests, and others made with the test encoder: sizes from 1x1 to 64x64, 1 to 16 bit, signed, image origin, layers, small and wide code blocks, constant and extreme images, an informative marker, Psot of zero) and 35 refused ones (unsupported markers, COD, SIZ, SOT and quantization fields set outside the profile, truncation, trailing bytes, damaged packets). Locally, the JPEG 2000 section-7 bodies cut out of the template 5.40 messages above. |
 | tiff | four synthetic GeoTIFFs (committed): little and big endian, raw and deflate |
 | xml | SWIM messages of each kind (TBFM, TFMS, SFDPS, FNS) and five synthetic documents (committed) |
-| tbfm, tfms, fixm | 600 real messages each from the 2026-11-14 SWIM dumps |
+| tbfm | committed (`fuzz/seeds/tbfm`, 35 files): 21 messages that decode (each section kind, all five in one flight, every message class, `air` change types, comment and CDATA split text, unknown elements) and 14 refused (namespace, root, XML, field and consistency errors, truncation); built from the made-up fixtures of the `oa-tbfm` tests |
+| tfms | committed (`fuzz/seeds/tfms`, 32 files): 21 documents that decode (every flight message type and every flow message type, mixed documents, status and empty documents) and 11 refused (root, namespace, XML, field errors, DOCTYPE, truncation); built from the made-up fixtures of the `oa-tfms` tests |
+| fixm | committed (`fuzz/seeds/fixm`, 29 files): 15 SFDPS documents that decode (message sources TH, HZ, FH, AH, OH, DH, CL, BA and LH, several messages, an empty collection) and 14 refused (whole-message rejections, field errors, other roots, non-XML, truncation); built from the made-up fixtures of the `oa-fixm` tests |
+| tbfm, tfms, fixm (local) | 600 real messages each from the 2026-11-14 SWIM dumps, never committed |
 | tar, zip, gzip | synthetic archives from Python's standard library (committed) |
-| awc | the AWC files in `raw/awc`, each prefixed with its selector byte |
-| json | the JSONTestSuite files, adsb.lol traces and AWC files |
+| awc | committed (`fuzz/seeds/awc`, 29 files, first byte is the product selector 0 to 5): 13 files from the made-up fixtures of the `oa-awc` tests for all six products, 6 excerpts of two or three records from the public-domain AWC files of 2026-11-14 (`*-real-*`), and 10 refused (broken records, truncation, wrong top level). Locally, the AWC files in `raw/awc`, each prefixed with its selector byte. |
+| json | committed (`fuzz/seeds/json`, 78 files): 32 documents that parse and 46 refused, written from the RFC 8259 grammar and examples (escapes, surrogate pairs, number forms, depth 64 and 65, duplicate keys, a trace-shaped object) and not copied from any suite. Locally, the JSONTestSuite files, adsb.lol traces and AWC files. |
 | csv | eight synthetic files (committed; the first byte is the buffer capacity); locally, four chunks (header plus up to eight rows) of each NASR CSV file with a random capacity |
 | arinc424 | six synthetic files (committed): the crate's fixture record layouts with the airport identifiers and names replaced, in files with a matching header count; locally, 400 chunks of 1-30 consecutive records of the real CIFP under its real header with the count patched |
 | nasr | seven synthetic files (committed): a structure file, a structure plus data file, fixes (valid and hostile), STAR base, and the STAR and DP families as three files; locally, chunks of every parsed NASR file (header plus 1-40 rows), the STAR and DP triples, the airway pairs, every structure file and structure-plus-data pairs |
 | notam | six synthetic messages (committed), built from the made-up fixture of the `oa-notam` tests; there is no local real NOTAM corpus |
 | mva | four synthetic charts (committed): two squares, one with a hole; a FUS5 chart; a sub-area chart; an unclosed ring; locally, the FAA chart files in `raw/mva` and `raw/mva-zjx` |
+
+The committed seeds of `asterix`, `adsb-trace`, `awc`, `fixm`, `j2k`, `json`, `tbfm` and `tfms`
+(added 2026-11-18) are named `ok-*` (must be accepted), `bad-*` (must be refused with an error) and,
+for `adsb-trace`, `rowbad-*` (the trace is accepted, at least one row is refused and counted); each
+is under 64 KiB. They come from the tests' own fixtures and from the decoders' grammars; none is a
+recording, apart from the six short AWC excerpts, and no real flight, aircraft or adsb.lol data was
+copied (no LADD list is available to filter it against). Each crate checks its folder with
+`tests/fuzz_seeds.rs`, which runs the same entry points as the fuzz target and asserts the prefix
+of every file, so a decoder change that flips a seed fails `cargo test` instead of silently
+shrinking the corpus. That test is not a fuzz run; it needs no nightly toolchain.
 
 Each seed is under 400 KB and each corpus was under 50 MB at the start; after a run the `awc` and
 `adsb-trace` corpora had grown past it and were merged back down (`-merge=1`).

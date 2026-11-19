@@ -17,3 +17,6 @@ oa-xml = { path = "../oa-xml" }
 oa-tiff = { path = "../oa-tiff" }
 oa-dof = { path = "../oa-dof" }
 oa-zip = { path = "../oa-zip" }
+
+[package.metadata.openatca]
+class = "shell"

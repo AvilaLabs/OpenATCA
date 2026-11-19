@@ -61,7 +61,8 @@ use crate::tracker::{
 };
 use crate::types::{
     output_clear, output_hash_into, output_len, output_new, Measurement, TrackError, TrackLog,
-    TrackOutput, TrackerConfig, TrackerStats, O_COAST, O_HAS_ALT, O_TICK, O_UNCERTAIN,
+    TrackOutput, TrackerConfig, TrackerStats, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK,
+    O_UNCERTAIN,
 };
 
 /// The split, in words, for every report.
@@ -737,6 +738,8 @@ pub struct ScoreRows {
     pub coast: Vec<bool>,
     /// The row carries `O_UNCERTAIN`.
     pub uncertain: Vec<bool>,
+    /// The row carries `O_REACQUIRED`.
+    pub reacquired: Vec<bool>,
 }
 
 /// Where scoring reads a run's output rows from: memory ([`TrackRun`]) or disk
@@ -785,6 +788,7 @@ impl RowSource for TrackRun {
                 .push(o.vel_north_mps.get(i).copied().unwrap_or(f32::NAN));
             r.coast.push(f & O_COAST != 0);
             r.uncertain.push(f & O_UNCERTAIN != 0);
+            r.reacquired.push(f & O_REACQUIRED != 0);
         }
         Ok(r)
     }
@@ -810,6 +814,7 @@ impl RowSource for SpilledRun {
                 .collect(),
             coast: flags.iter().map(|&f| f & O_COAST != 0).collect(),
             uncertain: flags.iter().map(|&f| f & O_UNCERTAIN != 0).collect(),
+            reacquired: flags.iter().map(|&f| f & O_REACQUIRED != 0).collect(),
             addr,
             t_ns,
             lat_e7,

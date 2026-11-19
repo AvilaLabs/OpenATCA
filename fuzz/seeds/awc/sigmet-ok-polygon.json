@@ -1,0 +1,1 @@
+[{"icaoId":"WAAF","firId":"WAAF","receiptTime":"2026-11-14T11:42:37.863Z","issueTime":"2026-11-14T11:40:00.000Z","validTimeFrom":1794656400,"validTimeTo":1794678000,"seriesId":"1","hazard":"VA","base":null,"top":null,"geom":"AREA","coords":[{"lon":10,"lat":10},{"lon":20,"lat":10},{"lon":20,"lat":20},{"lon":10,"lat":20}]}]

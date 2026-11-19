@@ -5,6 +5,7 @@ exclude = ["fuzz", "validation/oa-alloc-check", "validation/oa-creusot-check"]
 members = [
     "crates/oa-csv",
     "crates/oa-geo",
+    "crates/oa-ieee",
     "crates/oa-math",
     "crates/oa-nasr",
     "crates/oa-arinc424",
@@ -23,6 +24,7 @@ members = [
     "crates/oa-notam",
     "crates/oa-tfms",
     "crates/oa-display",
+    "crates/oa-scope-replay",
     "crates/oa-tiff",
     "crates/oa-dof",
     "crates/oa-grib2",
@@ -37,6 +39,7 @@ members = [
     "crates/oa-sensorsim",
     "crates/oa-track",
     "tools/oa-perf",
+    "tools/oa-replay-diff",
     "tools/oa-trace",
 ]
 

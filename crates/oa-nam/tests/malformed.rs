@@ -9,6 +9,7 @@
 )]
 
 use oa_nam::frame::{frame, read_header, unframe};
+use oa_nam::lrm::lrm;
 use oa_nam::*;
 
 const CASES: &[(&str, &str, ErrorKind, u8)] = &[
@@ -65,9 +66,9 @@ fn every_malformed_variant_is_refused_with_its_reason_and_field() {
 fn a_refusal_names_the_lrm_code_a_receiver_would_answer_with() {
     let (_, text, _, _) = CASES.iter().find(|c| c.0 == "acid_long").unwrap();
     let e = parse(text.as_bytes()).unwrap_err();
-    assert_eq!(e.lrm(), (6, 7));
+    assert_eq!(lrm(&e), (6, 7));
     let e = parse(b"(XYZKZHU/MMZT776)").unwrap_err();
-    assert_eq!(e.lrm().0, 60);
+    assert_eq!(lrm(&e).0, 60);
 }
 
 // REQ: OA-NAM-005

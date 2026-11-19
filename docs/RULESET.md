@@ -86,8 +86,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 
 ## B. Purity and the core/shell split
 
-- **B1 [MUST]** Every unit of code is classified core (pure) or shell (impure), stated in the
-  module's doc comment. There is no third category.
+- **B1 [MUST]** Every unit of code is classified core (pure) or shell (impure), stated by where it
+  lives (B7) and in the module's doc comment. There is no third category.
 - **B2 [MUST]** Core functions are pure: same input, same output; no I/O; no mutation of external
   state; no clock, randomness or globals. Tracking, correlation, prediction, conflict detection
   and display-list construction are all core.
@@ -98,6 +98,62 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   into the shell.
 - **B6 [MUST]** Because of B2–B5, any run can be replayed bit for bit from its recorded inputs. A
   change that breaks replay determinism is a defect.
+- **B7 [MUST]** Where code lives states its class (amended 2026-11-19, after a review found
+  classifications in doc comments that had drifted from the code). Every crate's Cargo.toml
+  declares `[package.metadata.openatca] class = "core"`, `"shell"` or `"split"`. In a split
+  crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs`
+  declares exactly those two modules plus re-exports, attributes and doc comments. Binaries, tests, examples and benches are shell. A pure
+  decoder that allocates per message is shell under C6, not core.
+- **B8 [MUST]** The gate checks B7 mechanically (`oa-trace`), by allowlist (amended 2026-11-19 after
+  a review showed a blocklist could be bypassed by aliases, globs and attributes). Outside
+  comments and string literals, core code:
+  - names from `std`, `core` and `alloc` only these modules: `fmt`, `ops`, `cmp`, `mem`, `num`,
+    `convert`, `iter`, `slice`, `array`, `str`, `char`, `ascii`, `option`, `result`, `marker`,
+    `default`, `clone`, `borrow`, `hint`, `error`, `f32`, `f64`, the primitive integer modules,
+    `vec`, `boxed`, `string`, `collections` (`BTreeMap`, `BTreeSet`, `VecDeque` and `BinaryHeap`
+    only) and `core::time` (`Duration` only). Every other module (among them `fs`, `io`, `net`,
+    `env`, `process`, `thread`, `sync`, `cell`, `os`, `path`, `ffi`, `panic`, `alloc::alloc`,
+    `std::time` and the hash-map family, whose default hasher is seeded from OS randomness)
+    fails;
+  - uses no `as` rename and no `*` glob on a `std`, `core`, `alloc` or workspace-crate path, no
+    `extern crate` other than `extern crate alloc;`, no `#[path]`, no `include!`,
+    `include_str!`, `include_bytes!`, `env!`, `option_env!` or `file!`, no `static mut`, no
+    `thread_local!`, and no print or `dbg!` macro;
+  - calls no floating-point method that `core` lacks on the pinned toolchain (among them `sqrt`,
+    `floor`, `ceil`, `trunc`, `round`, `powi`, `powf`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log`,
+    `log2`, `log10`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
+    `tanh`, `hypot`, `cbrt`, `mul_add`, `rem_euclid`, `div_euclid` and `fract`; the checker
+    holds the complete list for the pinned toolchain, called by any path or receiver). The five
+    exactly specified operations come from `oa-ieee` and the rest from `oa-math`. The standard
+    library's versions call the platform maths library, whose results differ between machines in
+    the last bit, and the compiler does not refuse them in a `no_std` crate once `std` is linked
+    below it;
+  - names `crate::` paths only under `crate::core::`, and another workspace crate only if that
+    crate is core, or through its `core` module if it is split.
+
+  - defines no `macro_rules!` macro and uses no raw identifier (`r#name`), so every name the
+    scan reads is the name the compiler resolves;
+  - has no target-dependent code: no `cfg!(target_…)`, no `#[cfg(target_…)]` and no
+    `cfg_attr` on a target, no raw pointer type, and no `{:p}` formatting, so core behaves the
+    same on every machine (B6).
+
+  A core or split crate has no `build.rs` and no custom `[lib]` or `[[bin]]` path. A core crate
+  has no dependency, in any dependency table and however renamed, on anything but core
+  workspace crates (F6), and its `src/lib.rs` declares no module named `main` or `bin`. A split
+  crate may depend on shell crates, because its shell module needs them; its core code may not
+  name them, which the scan above checks. The checker fails on anything it cannot read or parse,
+  on a dependency it cannot resolve, on symlinks, and on a core scan that finds no files.
+- **B10 [MUST]** Every crate of class core is `#![cfg_attr(not(test), no_std)]`, so the compiler
+  refuses every `std` path in it (amended 2026-11-19). The one exception is `oa-ieee`, the only
+  standard-library code beneath the core, whose public API is exactly `sqrt`, `floor`, `ceil`,
+  `trunc` and `round`: the IEEE-754 operations that are exactly specified, give the same bits on
+  every conforming machine, and that `core` does not provide on the pinned toolchain. A split
+  crate cannot be `no_std` as a whole, so its core module relies on the B8 scan; core code that
+  grows large is moved into its own core crate.
+- **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every
+  unsplit crate and fails if one appears that is not in the fixed list of the twelve crates
+  unsplit on 2026-11-19, held in the checker's source. This class exists only until the
+  migration ends, and this rule is then removed.
 
 ## C. Memory
 
@@ -223,6 +279,7 @@ tracker (M3) is the first fully real-time core and is held to every rule from it
 - [ ] Every hot struct has an exact compile-time size assertion (A7), increases justified (A7.1)
 - [ ] Hot state in fixed-point units (A9)
 - [ ] Module classified core or shell; core pure; time is an input (B1–B4)
+- [ ] Crate class declared; core code under `core/` and passing the gate's scan (B7–B9)
 - [ ] Replay stays bit-exact (B6)
 - [ ] No allocation after init in the real-time core; capacities stated and analysed (C1, C2)
 - [ ] Counting-allocator test for the core (C5)

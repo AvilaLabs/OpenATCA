@@ -11,7 +11,7 @@ const ALLOW: &[Allow] = &[
         reason: "--box: every value is range-checked next (a NaN or infinity is outside, the comparison is false) and a token that fails to parse leaves the count short, which is refused",
     },
     Allow {
-        file: "crates/oa-airspace/src/cli.rs",
+        file: "crates/oa-airspace/src/shell/cli.rs",
         needle: ".parse()",
         reason: "--buffer-nm: the product in metres is checked finite and within 0 to the limit on the next lines",
     },
@@ -51,7 +51,12 @@ const ALLOW: &[Allow] = &[
         reason: "bit-twiddling of an internal measurement to find its power of two; not an external value",
     },
     Allow {
-        file: "crates/oa-display/src/cli.rs",
+        file: "crates/oa-display/src/shell/cli.rs",
+        needle: "text.parse::<f64>()",
+        reason: "the crate's checked helper parse_finite for command-line numbers",
+    },
+    Allow {
+        file: "crates/oa-scope-replay/src/shell/cli.rs",
         needle: "text.parse::<f64>()",
         reason: "the crate's checked helper parse_finite for command-line numbers",
     },
@@ -107,12 +112,12 @@ const ALLOW: &[Allow] = &[
         reason: "bit-exact round trip of a value this program wrote to its own spill file (NaN marks an absent altitude)",
     },
     Allow {
-        file: "crates/oa-truth/src/main.rs",
+        file: "crates/oa-truth/src/bin/oa-truth-check.rs",
         needle: "v?.parse().ok()?",
         reason: "finite_positive, the checked reader for the tuning options",
     },
     Allow {
-        file: "crates/oa-wind/src/adsb_mode.rs",
+        file: "crates/oa-wind/src/bin/oa-wind-check/adsb_mode.rs",
         needle: "v.parse::<f64>().ok()",
         reason: "the guard arm accepts only a finite value of 0 or more",
     },

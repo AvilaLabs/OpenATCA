@@ -463,7 +463,7 @@
       "id": "replay-monotonic-split",
       "requirement": "OA-RPL-272: monotonic timestamp splitting matches the i128 reference over the full typed input domain.",
       "package": "oa-replay",
-      "harness": "mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
+      "harness": "core::mono_split::proofs::split_matches_i128_for_the_full_typed_domain",
       "enabled": true,
       "experimental": false,
       "required_covers": [

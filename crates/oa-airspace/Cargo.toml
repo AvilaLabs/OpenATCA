@@ -16,7 +16,9 @@ oa-nasr = { path = "../oa-nasr" }
 oa-arinc424 = { path = "../oa-arinc424" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-zip = { path = "../oa-zip" }
+# Workspace crates (platform-independent maths, B6, B10); not outside dependencies (RULESET F1).
+oa-math = { path = "../oa-math" }
+oa-ieee = { path = "../oa-ieee" }
 
-[[bin]]
-name = "oa-adapt"
-path = "src/bin/oa-adapt.rs"
+[package.metadata.openatca]
+class = "split"

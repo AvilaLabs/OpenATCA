@@ -1,0 +1,27 @@
+Reading GOTO program from 'oa_track-be393c5f130ea4dc__RNvNtNtNtCs54ksHOfKhD_8oa_track7tracker6proofs14rollback_paths36late_append_anchor_filter_projection.out'
+Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.0:
+  file crates/oa-track/src/tracker.rs line 1433 column 5 function tracker::update_late
+
+Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.1:
+  file crates/oa-track/src/tracker.rs line 1452 column 5 function tracker::update_late
+
+Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.2:
+  file crates/oa-track/src/tracker.rs line 1490 column 5 function tracker::update_late
+
+Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.3:
+  file crates/oa-track/src/tracker.rs line 1520 column 5 function tracker::update_late
+
+Loop _RINvYINtNtNtCs8xvirJzNMvV_4core3ops5range5RangejENtNtNtNtBa_4iter6traits8iterator8Iterator8try_folduNCINvNvBL_3any5checkjNCNvNtCs54ksHOfKhD_8oa_track7tracker8ring_has0E0INtNtB8_12control_flow11ControlFlowuEEB21_.0:
+  file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs line 2489 column 9 function <std::ops::Range<usize> as std::iter::Iterator>::try_fold::<(), {closure@std::iter::Iterator::any::check<usize, {closure@crates/oa-track/src/tracker.rs:458:32: 458:35}>::{closure#0}}, std::ops::ControlFlow<()>>
+
+Loop _RINvCs7f35Cc4Kq59_4kani14kani_intrinsicbEB2_.0:
+  file library/kani_core/src/lib.rs line 488 column 13 function kani::kani_intrinsic::<bool>
+
+Loop _RNvMs4_NtCs6xMQmN1AWUs_5alloc3vecINtB5_3VecNtNtCsjHXeQ31yX0G_7oa_adsb8category13CategoryStateE11extend_withCs54ksHOfKhD_8oa_track.0:
+  file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs line 3727 column 13 function std::vec::Vec::<oa_adsb::CategoryState>::extend_with
+
+Loop _RNvMs4_NtCs6xMQmN1AWUs_5alloc3vecINtB5_3VecxE11extend_withCst3Xf9TJgYG_9oa_replay.0:
+  file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs line 3727 column 13 function std::vec::Vec::<i64>::extend_with
+
+Loop __rust_alloc.0:
+  file /home/user/.kani/kani-0.68.0/library/kani/kani_lib.c line 43 function __rust_alloc

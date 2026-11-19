@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! oa-geo: WGS-84 geodesy for OpenATCA (see docs/M0_DESIGN.md).
+#![cfg_attr(not(test), no_std)]
+//! oa-geo: WGS-84 geodesy for OpenATCA (see docs/M0_DESIGN.md). Class: core (RULESET B1, B7).
 //!
 //! * [`LatLon`], [`Dms`]: validated coordinates and degrees/minutes/seconds conversion.
 //! * [`Ellipsoid`]: geodesic inverse and direct problems (Karney 2013), rhumb lines, the
@@ -9,7 +10,10 @@
 //!   origin) used by the truth builder and the tracker; [`small`] has the small-angle series it
 //!   uses so its common case needs no library call.
 //!
-//! No dependencies; no operation panics on any input (invalid input is an error).
+//! Depends only on the core crates `oa-math` and `oa-ieee`; no operation panics on any input
+//! (invalid input is an error).
+
+extern crate alloc;
 
 pub mod aeqd;
 mod coef;

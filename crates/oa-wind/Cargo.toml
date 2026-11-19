@@ -14,10 +14,11 @@ workspace = true
 oa-grib2 = { path = "../oa-grib2" }
 oa-awc = { path = "../oa-awc" }
 oa-adsb = { path = "../oa-adsb" }
+# Workspace crates (platform-independent maths, B6, B10); not outside dependencies (RULESET F1).
+oa-math = { path = "../oa-math" }
 
 [dev-dependencies]
 oa-grib2 = { path = "../oa-grib2", features = ["testenc"] }
 
-[[bin]]
-name = "oa-wind-check"
-path = "src/main.rs"
+[package.metadata.openatca]
+class = "split"

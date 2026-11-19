@@ -3,8 +3,19 @@
 //! NAS-IC-21009205 Revision G (15 December 2022), and the session layer ERAM runs it over,
 //! NAS-IC-82422100 (ERAM / NAM Non-US ACC System ICD, 7 May 2019) with NAS-IR-82422100. It is
 //! the message protocol ERAM speaks with the adjacent Canadian and Mexican (and Cuban,
-//! Dominican, Central American) centres. All of it is core, pure functions of bytes and values
-//! (RULESET B1, B2): no sockets, no clock. The shell supplies bytes and the time.
+//! Dominican, Central American) centres. No sockets, no clock: the shell supplies bytes and
+//! the time.
+//!
+//! # Classification (B1, B7)
+//!
+//! The crate is `split`. [`core`](crate::core) holds [`session`], a pure function of its inputs
+//! that allocates nothing and holds fixed, named capacities (C1, C2), checked under a counting
+//! allocator (C5), and the `Copy` identity types it uses (`core::identity`, re-exported by
+//! [`model`]). The `shell` modules (the codec: [`field`], [`message`], [`model`], [`schema`],
+//! [`frame`], [`lrm`], [`error`], [`workload`]) are an input-format adapter under the shell and
+//! offline rules (D1, C6, as the other decoders of this repository). They are a pure function
+//! of bytes and values, but they allocate per message (`Vec`, `String`), so they are not
+//! real-time core and are not held to C1 or C3. Their structs are cold under A7.2.
 //!
 //! # Layers
 //!
@@ -23,7 +34,7 @@
 //! # Refusal (E5)
 //!
 //! Input that breaks a rule is refused with a [`NamError`] that carries the Table A-1 code and
-//! field a receiving system would put in its LRM ([`NamError::lrm`]); nothing is repaired. The
+//! field a receiving system would put in its LRM ([`lrm::lrm`]); nothing is repaired. The
 //! only tolerance is [`parse_tolerant`], which drops spaces beside a hyphen (the ICD's own
 //! examples have them) and reports that it did.
 //!
@@ -34,15 +45,11 @@
 //! at most [`session::MAX_PENDING`] unanswered messages and returns at most
 //! [`session::MAX_ACTIONS`] actions per step.
 
-pub mod error;
-pub mod field;
-pub mod frame;
-pub mod lrm;
-pub mod message;
-pub mod model;
-pub mod schema;
-pub mod session;
-pub mod workload;
+pub mod core;
+pub mod shell;
+
+pub use crate::core::session;
+pub use crate::shell::{error, field, frame, lrm, message, model, schema, workload};
 
 pub use error::{ErrorKind, NamError, NO_OFFSET};
 pub use field::{MAX_F31_PLAIN, MAX_F31_TEXT, MAX_MESSAGE_LEN, MAX_ROUTE_ELEMENTS};

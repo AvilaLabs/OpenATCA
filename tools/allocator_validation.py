@@ -11,6 +11,12 @@ import tomllib
 
 
 HARNESS = Path("validation/oa-alloc-check")
+HARNESS_DEPS = {
+    "oa-track": "../../crates/oa-track", "oa-nam": "../../crates/oa-nam",
+    "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
+    "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
+}
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -21,6 +27,8 @@ FIXTURE_IDS = {
     "fusion_plot_pending_queue_capacity_recovery",
     "fusion_adsb_hard_assoc_registration",
     "fusion_anonymous_init_and_assoc",
+    "nam_session_activate_traffic_retry_full_deactivate",
+    "display_rows_traffic_frame_refusal",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -77,6 +85,36 @@ ROUTE_LEDGER = {
     "fusion_plot_pending_overflow": ("crates/oa-track/src/fusion.rs", "plot_pending.pending_overflow"),
     "fusion_plot_pending_bucket_cap": ("crates/oa-track/src/fusion.rs", "plot_pending.bucket_plot_overflow"),
     "fusion_plot_pending_recovery": ("crates/oa-track/src/fusion.rs", "plot_pending.recovery_applied"),
+    "nam_session_activation": ("crates/oa-nam/src/core/session.rs", "nam_session.irq_sent"),
+    "nam_session_traffic": ("crates/oa-nam/src/core/session.rs", "nam_session.atm_sent"),
+    "nam_session_resend": ("crates/oa-nam/src/core/session.rs", "nam_session.resent"),
+    "nam_session_timeout": ("crates/oa-nam/src/core/session.rs", "nam_session.timed_out"),
+    "nam_session_deliver": ("crates/oa-nam/src/core/session.rs", "nam_session.delivered"),
+    "nam_session_response": ("crates/oa-nam/src/core/session.rs", "nam_session.responses"),
+    "nam_session_keepalive": ("crates/oa-nam/src/core/session.rs", "nam_session.asm_sent"),
+    "nam_session_peer_silent": ("crates/oa-nam/src/core/session.rs", "nam_session.peer_silent"),
+    "nam_session_pending_full": ("crates/oa-nam/src/core/session.rs", "nam_session.pending_full"),
+    "nam_session_discard": ("crates/oa-nam/src/core/session.rs", "nam_session.discards"),
+    "nam_session_abandon": ("crates/oa-nam/src/core/session.rs", "nam_session.abandoned"),
+    "nam_session_deactivation": ("crates/oa-nam/src/core/session.rs", "nam_session.trq_sent"),
+    "display_rows_to_targets": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_added"),
+    "display_track_end": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_ended"),
+    "display_traffic_draw": ("crates/oa-display/src/core/traffic.rs", "display_frame.traffic_drawn"),
+    "display_uncertain_radius": ("crates/oa-display/src/core/traffic.rs", "display_frame.r95_unknown"),
+    "display_callsign_conflict": ("crates/oa-display/src/core/traffic.rs", "display_frame.cs_conflict"),
+    "display_altitude_marker": ("crates/oa-display/src/core/traffic.rs", "display_frame.alt_clamped"),
+    "display_set_refusal": ("crates/oa-display/src/core/traffic.rs", "display_frame.refused"),
+    "display_malformed_target": ("crates/oa-display/src/core/traffic.rs", "display_frame.malformed"),
+    "display_frame_chain": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.frame_drawn"),
+    "display_map_scene": ("crates/oa-display/src/core/scene.rs", "display_frame.scene_items"),
+    "display_frame_refusal": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.refusing_refused"),
+    "display_invalid_position": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_invalid_position"),
+    "display_unprojectable": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_unprojectable"),
+    "display_history_dot_dropped": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_trail_dropped"),
+    "display_time_overflow": ("crates/oa-scope-replay/src/core/rows.rs", "display_frame.convert_time_overflow"),
+    "display_unplaced_history_dot": ("crates/oa-display/src/core/traffic.rs", "display_frame.draw_trail_dropped"),
+    "display_stamp_clipped": ("crates/oa-scope-replay/src/core/frame.rs", "display_frame.stamp_clipped"),
+    "display_frame_digest": ("crates/oa-display/src/core/raster.rs", "display_frame.digests"),
 }
 
 ROUTE_SYMBOLS = {
@@ -111,6 +149,31 @@ ROUTE_SYMBOLS = {
     "fusion_plot_pending_overflow": "fusion_plots",
     "fusion_plot_pending_bucket_cap": "process_bucket",
     "fusion_plot_pending_recovery": "fusion_plots",
+    "nam_session_activation": "step",
+    "nam_session_traffic": "step",
+    "nam_session_resend": "step",
+    "nam_session_timeout": "step",
+    "nam_session_deliver": "step",
+    "nam_session_response": "step",
+    "nam_session_keepalive": "step",
+    "nam_session_peer_silent": "step",
+    "nam_session_pending_full": "step",
+    "nam_session_discard": "step",
+    "nam_session_abandon": "step",
+    "nam_session_deactivation": "step",
+    "display_rows_to_targets": "targets_at", "display_track_end": "targets_at",
+    "display_traffic_draw": "build_traffic", "display_uncertain_radius": "build_traffic",
+    "display_callsign_conflict": "build_traffic", "display_altitude_marker": "alt_text",
+    "display_set_refusal": "targets_push", "display_malformed_target": "targets_push",
+    "display_frame_chain": "replay_build", "display_map_scene": "build_scene",
+    "display_frame_refusal": "replay_build",
+    "display_invalid_position": "targets_at",
+    "display_unprojectable": "targets_at",
+    "display_history_dot_dropped": "targets_at",
+    "display_time_overflow": "targets_at",
+    "display_unplaced_history_dot": "build_traffic",
+    "display_stamp_clipped": "replay_build",
+    "display_frame_digest": "frame_digest"
 }
 
 
@@ -422,12 +485,13 @@ def allocation_layout_errors(repo: Path) -> list[str]:
             ("unwrap_used", "expect_used", "panic", "indexing_slicing"))):
         errors.append("allocator harness must deny the four strict runtime lints")
     deps = harness.get("dependencies", {})
-    if not isinstance(deps, dict) or set(deps) != {"oa-track"}:
-        errors.append("allocator harness may declare only the oa-track dependency")
-    elif (not isinstance(deps["oa-track"], dict)
-          or deps["oa-track"].get("path") != "../../crates/oa-track"
-          or set(deps["oa-track"]) != {"path"}):
-        errors.append("allocator harness oa-track dependency must be the local crate path")
+    if not isinstance(deps, dict) or set(deps) != set(HARNESS_DEPS):
+        errors.append("allocator harness may declare only its declared local crate dependencies")
+    else:
+        for name, crate_path in HARNESS_DEPS.items():
+            if (not isinstance(deps[name], dict) or deps[name].get("path") != crate_path
+                    or set(deps[name]) != {"path"}):
+                errors.append(f"allocator harness {name} dependency must be the local crate path")
     for section in ("dev-dependencies", "build-dependencies", "target"):
         if harness.get(section):
             errors.append(f"allocator harness may not declare {section}")
@@ -438,12 +502,13 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         return errors + ["allocator harness src directory escapes repository"]
     src_sources = sorted(p.name for p in src_real.glob("*.rs")) if src_real.is_dir() else []
     root_sources = sorted(p.name for p in harness_dir.glob("*.rs"))
-    if src_sources in (["allocator.rs", "main.rs"], ["allocator.rs", "main.rs", "pending_windows.rs"]):
+    if (set(src_sources) >= {"allocator.rs", "main.rs"}
+            and set(src_sources) <= {"allocator.rs", "main.rs", *HELPER_MODULES}):
         base = src_dir
     elif root_sources == ["allocator.rs", "main.rs"] and not src_dir.exists():
         base = harness_dir
     else:
-        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs")
+        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs, nam_window.rs and display_window.rs")
         base = src_dir if src_dir.is_dir() else harness_dir
     try:
         if base.is_dir() and any(p.is_symlink() or p.is_dir() for p in base.iterdir()):
@@ -477,22 +542,23 @@ def allocation_layout_errors(repo: Path) -> list[str]:
                 errors.append("allocator.rs must contain exactly one global allocator attribute")
             if not re.search(r"\bunsafe\s+impl\s+(?:<[^>]*>\s*)?GlobalAlloc\b", allocator):
                 errors.append("allocator.rs must contain the unsafe GlobalAlloc implementation")
-    pending_path = base / "pending_windows.rs"
-    if pending_path.exists():
-        if pending_path.is_symlink() or not _inside(pending_path.resolve(), root):
-            errors.append("pending_windows.rs escapes its source boundary")
-        else:
-            try:
-                pending = _rust_tokens(pending_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError) as exc:
-                errors.append(f"cannot read pending_windows.rs: {exc}")
+    for helper_name in HELPER_MODULES:
+        pending_path = base / helper_name
+        if pending_path.exists():
+            if pending_path.is_symlink() or not _inside(pending_path.resolve(), root):
+                errors.append(f"{helper_name} escapes its source boundary")
             else:
-                if not re.search(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", pending):
-                    errors.append("pending_windows.rs must forbid unsafe_code")
-                if re.search(r"\bunsafe\b", pending):
-                    errors.append("pending_windows.rs may not contain unsafe tokens")
-                if re.search(r"#\s*!?\s*\[\s*allow\s*\([^]]*\bunsafe_code\b", pending):
-                    errors.append("pending_windows.rs may not allow unsafe_code")
+                try:
+                    pending = _rust_tokens(pending_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError) as exc:
+                    errors.append(f"cannot read {helper_name}: {exc}")
+                else:
+                    if not re.search(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", pending):
+                        errors.append(f"{helper_name} must forbid unsafe_code")
+                    if re.search(r"\bunsafe\b", pending):
+                        errors.append(f"{helper_name} may not contain unsafe tokens")
+                    if re.search(r"#\s*!?\s*\[\s*allow\s*\([^]]*\bunsafe_code\b", pending):
+                        errors.append(f"{helper_name} may not allow unsafe_code")
     return errors
 
 
@@ -517,7 +583,8 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         return ["result must be a JSON object"]
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
-                     "bucket_capacity", "adsb_pending", "plot_pending", "fusion"}
+                     "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
+                     "display_frame"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -614,6 +681,17 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "bucket_capacity": {"plots_offered": 16_386, "bucket_plot_overflow": 1,
                             "known_hard_applied": 1, "unmatched_hard_no_track": 16_383,
                             "recovery_applied": 1},
+        "nam_session": {"irq_sent": 3, "atm_sent": 129, "resent": 1, "timed_out": 1,
+                        "delivered": 1, "responses": 1, "asm_sent": 1, "peer_silent": 1,
+                        "lrm_sent": 1, "trq_sent": 1, "abandoned": 128, "peak_pending": 128,
+                        "pending_full": 1, "discards": 1, "dropped": 0, "script_errors": 0},
+        "display_frame": {"convert_added": 1, "convert_ended": 1, "traffic_drawn": 30,
+                          "uncertain": 1, "cs_conflict": 1, "r95_unknown": 1, "refused": 1,
+                          "alt_clamped": 1, "malformed": 1, "frame_drawn": 50,
+                          "scene_items": 1, "refusing_refused": 1,
+                          "convert_invalid_position": 1, "convert_unprojectable": 1,
+                          "convert_trail_dropped": 1, "convert_time_overflow": 1,
+                          "draw_trail_dropped": 1, "stamp_clipped": 1, "digests": 20},
         "adsb_pending": {"offered": 1_048_577, "pending_overflow": 1,
                          "drained": 1_048_576, "bucket_plot_overflow": 0, "recovery_applied": 1,
                          "tracker_applied": 1, "tracker_duplicates": 1_048_575,
@@ -633,6 +711,8 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     for group, minima in extra_fields.items():
         evidence = result.get(group)
         required = set(minima) | {"overflow", "alloc", "zeroed", "realloc"}
+        if group == "nam_session":
+            required |= {"final_inactive"}
         if group == "output_log":
             required |= {"output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"}
         if not _object(evidence) or set(evidence) != required:
@@ -658,6 +738,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},
+        "display_frame": {"traffic_drawn": 64, "refused": 100, "malformed": 20, "digests": 20},
+        "nam_session": {"peak_pending": 128, "pending_full": 1, "abandoned": 128,
+                        "peer_silent": 1, "lrm_sent": 1, "dropped": 0, "script_errors": 0},
         "clock_gate": {"held": 2, "held_applied": 2, "step_forward": 1, "late": 5,
                        "step_back": 1, "future_dropped": 3, "recovered": 1},
         "bucket_capacity": {"plots_offered": 16_386, "bucket_plot_overflow": 1,
@@ -683,6 +766,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         for name, expected in fields.items():
             if not _object(evidence) or evidence.get(name) != expected:
                 errors.append(f"{group}.{name} must equal {expected}")
+    nam_session = result.get("nam_session")
+    if not _object(nam_session) or nam_session.get("final_inactive") is not True:
+        errors.append("nam_session.final_inactive must be true")
     output_log = result.get("output_log")
     for name in ("output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"):
         if not _object(output_log) or output_log.get(name) is not True:

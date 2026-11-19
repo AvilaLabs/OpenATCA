@@ -81,6 +81,7 @@ These are the design rules. How far the code meets each one today is in
 | `crates/oa-truth` | Reference trajectories from ADS-B for the M2 benchmark: quality selection, legs, RTS smoother, no-extrapolation queries, leave-one-out accuracy, and the `oa-truth-check` tool |
 | `crates/oa-replay` | Replay of recorded SWIM feeds (SFDPS, TBFM, TFMS, FNS) and ADS-B clips (`--adsb`, `--adsb-dir`) in one time-ordered stream; flight and aircraft state with a deterministic hash; the `oa-replay` tool |
 | `crates/oa-display` | Controller display foundation: display list, projection, stroke font, software rasterizer, `oa-scope` |
+| `crates/oa-scope-replay` | Tracker output on the scope: runs `oa-track` over an ADS-B clip and renders one image per step, with frame hashes |
 | `crates/oa-tiff` | TIFF 6.0 / GeoTIFF elevation reader (strips, tiles, Deflate, LZW, predictors 2 and 3) and terrain queries |
 | `crates/oa-dof` | FAA Digital Obstacle File parser |
 | `crates/oa-grib2` | GRIB2 decoder for NOAA RAP and HRRR winds and temperatures aloft |

@@ -1,6 +1,6 @@
 # Creusot check for `oa-replay` timestamp split
 
-This standalone package imports `crates/oa-replay/src/mono_split.rs` directly by `#[path]`.
+This standalone package imports `crates/oa-replay/src/core/mono_split.rs` directly by `#[path]`.
 That is the implementation production `clock::classify` calls; there is no second Rust model.
 The package is its own Cargo workspace and is excluded from the product dependency graph. Its
 only dependency, `creusot-std = 0.14.0`, is proof-only. RULESET F1 justification: Connor explicitly

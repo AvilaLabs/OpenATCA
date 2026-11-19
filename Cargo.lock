@@ -19,6 +19,8 @@ dependencies = [
  "oa-arinc424",
  "oa-csv",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-nasr",
  "oa-sha256",
  "oa-zip",
@@ -79,6 +81,8 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 
@@ -108,6 +112,7 @@ dependencies = [
 name = "oa-geo"
 version = "0.0.1"
 dependencies = [
+ "oa-ieee",
  "oa-math",
 ]
 
@@ -117,6 +122,10 @@ version = "0.0.1"
 dependencies = [
  "oa-j2k",
 ]
+
+[[package]]
+name = "oa-ieee"
+version = "0.0.1"
 
 [[package]]
 name = "oa-j2k"
@@ -129,6 +138,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-math"
 version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+]
 
 [[package]]
 name = "oa-mva"
@@ -184,6 +196,29 @@ dependencies = [
  "oa-tfms",
  "oa-xml",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-replay-diff"
+version = "0.0.1"
+dependencies = [
+ "oa-track",
+]
+
+[[package]]
+name = "oa-scope-replay"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-airspace",
+ "oa-display",
+ "oa-feed",
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-sha256",
+ "oa-track",
+ "oa-truth",
 ]
 
 [[package]]
@@ -257,6 +292,8 @@ dependencies = [
  "oa-adsb",
  "oa-feed",
  "oa-geo",
+ "oa-ieee",
+ "oa-math",
  "oa-sha256",
 ]
 
@@ -267,6 +304,7 @@ dependencies = [
  "oa-adsb",
  "oa-awc",
  "oa-grib2",
+ "oa-math",
 ]
 
 [[package]]

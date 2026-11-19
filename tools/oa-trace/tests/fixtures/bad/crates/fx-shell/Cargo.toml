@@ -1,0 +1,5 @@
+[package]
+name = "fx-shell"
+
+[package.metadata.openatca]
+class = "shell"

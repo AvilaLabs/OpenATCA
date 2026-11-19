@@ -20,6 +20,31 @@ Control authority is not part of the network. Exactly one position is responsibl
 aircraft, and responsibility moves only by explicit handoff. No vote, quorum or consensus
 protocol decides who controls an aircraft or sits in any real-time path.
 
+### What exists today, and what is new
+
+Redundancy and interfacility backup already exist, and the design is measured against them, not
+against their absence:
+
+- Each ERAM centre runs two functionally identical channels (FAA, ERAM programme page). The
+  separate backup of the Host era, EBUS, was removed after a 2019 safety evaluation and not
+  replaced (DOT OIG AV-2020-040).
+- FAA Order JO 1900.47G (effective 30 April 2024) requires every facility to keep contingency
+  plans that move airspace, frequencies, landlines and surveillance feeds to supporting
+  facilities, with control maps and automation adaptations documented well enough that
+  technicians can verify the supporting facility is capable. The order does not say the
+  adaptations are prepared in advance and loaded.
+- After the Chicago Center fire of 26 September 2014, the four neighbouring centres had to modify
+  their site-specific ERAM software to take its airspace; the OIG found that ERAM "does not
+  automatically enable one Center to control another Center's airspace", and that the lack of
+  automatic flight-plan transfer kept some departures waiting 20 to 30 minutes (DOT OIG
+  AV-2015-112). We found no public record of an ERAM capability added since then that changes
+  this, which is not proof that none exists.
+
+What the design adds is therefore narrow and testable: the automation for any airspace is
+already running, verified and current at the supporting facility before it is needed, so a
+transfer of responsibility needs no change to the supporting facility's automation; and machine
+faults are found by comparing independently computed state.
+
 ## 2. What a node is
 
 A node is the OpenATCA engine fed a wider set of inputs. The core does not change. Running
@@ -29,11 +54,57 @@ decide which network a node may join.
 | | Facility node | Observer node |
 |---|---|---|
 | Who | Authorised facilities, keys issued by the aviation authority | Anyone who opts in |
-| Inputs | The authority's surveillance and flight data feeds | Public ADS-B only |
+| Inputs | Surveillance and flight data from their sources, not another facility's output | Public ADS-B only |
 | Purpose | Resilience and cross-checking for live operation | Public verification and large-scale testing |
 | Effect on any aircraft | Advice to the people in charge | None |
 
 Every node keeps its own record and publishes checkpoints. Nothing else is shared routinely.
+
+### Independent inputs
+
+A facility node takes its inputs from their sources (radar and ADS-B surveillance, flight plans
+as filed and amended), never from another facility's automation output. The flight data that
+SWIM publishes today (SFDPS) is produced by ERAM at each centre and distributed through each
+centre's EDDS/HADDS (FAA, SFDPS page); a node fed by it loses exactly the data it needs when that
+centre's automation fails. Research use of SWIM output for comparison is unaffected. Getting
+flight data from its source is harder than getting surveillance, and is an open item
+(docs/UNKNOWNS.md, UK-007).
+
+### Three kinds of state
+
+| State | What it is | How a node holds it |
+|---|---|---|
+| Surveillance | Where each aircraft is and how it is moving | Computed from surveillance inputs |
+| Flight data | Route, amendments, assigned and interim altitudes, restrictions, coordination | Inputs to the engine: the filed plan plus every amendment and coordination message |
+| Control | Instructions issued and acknowledged | Only as far as controllers enter them |
+
+While OpenATCA runs in shadow beside ERAM, controller entries go into ERAM, and a node sees them
+only through ERAM's output, so a shadow node's flight-data state is incomplete by construction.
+Once OpenATCA is the operational system, every controller entry is an input to the deterministic
+engine and is replicated with the rest. An instruction given by voice and never entered is held
+by no automation, this one included; the takeover experiment measures how much of the control
+state that leaves out.
+
+### The core/shell boundary
+
+The design depends on RULESET section B, which the gate checks mechanically (B7 to B9):
+
+- **Comparison needs a pure core.** Nodes fed the same inputs reach the same state only if the
+  core is a pure function of its inputs. A clock read or a randomly seeded hash map in the core
+  would make healthy nodes disagree, and every mismatch alarm would be noise.
+- **The boundary defines the record and separates the fault classes.** The values the shell
+  hands to the core are the inputs a node logs and hashes; the core's state is what it hashes
+  and compares. A difference in inputs is a data-path fault in the shell; the same inputs giving
+  a different state is a compute fault (section 6).
+- **It is what makes the defences against code faults practical.** Inputs entering the core one
+  at a time through one boundary let the shell identify and quarantine the input that stops the
+  core. Small pure functions are what formal proof, mutation testing and a narrow second
+  implementation can cover. The safety monitor is itself a separate core module. A core with no
+  operating-system dependence runs unchanged on different compilers, hardware and operating
+  systems, which is what platform diversity needs (section 7).
+- **It does not catch a wrong requirement.** A pure, proven, replicated core computes a wrong
+  specification identically everywhere. Incident replays and review by controllers are the
+  defence against that.
 
 ## 3. The record
 
@@ -131,7 +202,8 @@ Two further rules:
 
 1. Full picture.
 2. Picture annotated by the safety monitor.
-3. Raw surveillance only (the role ERAM's EBUS and STARS's emergency service level play today).
+3. Raw surveillance only (the role the Host-era EBUS backup played for en route before its removal,
+   and STARS's emergency service level plays for terminal).
 
 Every step down is logged and counted.
 
@@ -168,6 +240,12 @@ for their own receiver; there is no token or payment.
   the project (docs/VERIFICATION.md).
 - **Monitor mutation study.** Bugs are planted in the tracker and the share the safety monitor
   catches is measured; the bugs it misses are reported as prominently as the ones it catches.
+- **Unannounced takeover experiment (the headline test).** A facility's node is cut off without
+  warning in a replay of real traffic. A neighbouring node must continue the affected airspace
+  with its current surveillance and flight-data state and no change to its configuration.
+  Measured: time to a working picture, flight-data state missing or wrong at takeover, entries a
+  controller would have to re-make, and checks failed. Compared against the three architectures
+  in section 12a, not only against 2014.
 - **Incident replays.** Each real incident in docs/LEGACY_SHORTCOMINGS.md and the migration
   record is replayed or assessed: did the node setup prevent it, reduce it, or make no difference,
   and why. Among them: the Chicago Center fire (September 2014), the Los Angeles Center ERAM
@@ -180,11 +258,48 @@ for their own receiver; there is no token or payment.
 |---|---|---|
 | Faulty machines are detected | Detection rate and time to detect under injected hardware faults | A single node with no peers |
 | Code faults that identical nodes share are caught | The monitor mutation study: share caught and share missed | Replication without a monitor |
-| A facility can take over a neighbour's airspace | Replayed takeovers: time to a working picture, hand edits needed | The weeks of the 2014 Chicago fire |
+| A facility can take over a neighbour's airspace with no automation change | The unannounced takeover experiment | A prepared regional standby, and the current contingency procedure (JO 1900.47G) |
 | Poison inputs do not stop the system | Every recorded crashing input replayed; time to quarantine | Restart-and-reprocess |
 | False alarms are rare | Mismatches raised on fault-free replays and live shadow | Zero |
 
 No availability figure or failure probability is derived from the number of nodes.
+
+## 12a. Architectures compared
+
+National replication at every facility is a hypothesis, adopted only if it beats the cheaper
+options on these measurements:
+
+| Architecture | What it is |
+|---|---|
+| Facility-specific | Today's pattern: each facility runs its own airspace; contingency plans move airspace to supporting facilities |
+| Regional standby | Each facility also runs, continuously and verified, the airspace of the neighbours it would support |
+| National | Every facility runs the whole NAS |
+
+Compared on: the takeover experiment; failure scenarios a single neighbour cannot cover (two
+adjacent facilities lost, a supporting facility itself degraded); fault identification, where
+naming which node is wrong needs at least three nodes computing the same airspace and a regional
+pair can only report that they disagree; and cost in distribution bandwidth, compute, the number
+of sites holding national data (a security exposure), and configuration management.
+
+## 12b. Storage by role
+
+Processing is deterministic, so a node stores its inputs and the hashes of its outputs; outputs
+are regenerated by replay. The checkpoint chain is kept permanently and is a few megabytes a
+year. Raw inputs are kept for the retention period and then pruned, except windows tied to an
+incident.
+
+| Role | Storage needed (estimates) |
+|---|---|
+| Facility node | The retention period of national input; at about 10 GB a day, 45 days is under 0.5 TB |
+| Archive (one or two nationally, if the authority wants long-term history) | A few TB a year uncompressed |
+| Public observer, regional | A rolling day of its own area or less: a few GB |
+| Public observer, national | A rolling day: about 5 to 10 GB |
+| Developer or researcher | The recordings they choose: one national day is about 5 to 8 GB |
+
+The national ADS-B figure is measured (1.32 GB for the four peak hours of 17 November 2026,
+about 80 bytes a report); the radar share is estimated until radar is recorded. Unpruned, a node
+would grow far faster than a Bitcoin node does; nothing in the design requires keeping
+everything at every node.
 
 ## 13. Deliberately left out
 
@@ -226,4 +341,10 @@ No availability figure or failure probability is derived from the number of node
 - L. Sha, "Using simplicity to control complexity", IEEE Software, 2001 (the Simplex architecture).
 - UK CAA, NATS System Failure 12 December 2014, independent enquiry final report, May 2015; UK CAA,
   independent review of the 28 August 2023 flight plan processing failure (CAP2993).
-- DOT Office of Inspector General audit reports on ERAM, including AV-2012-179 and AV-2020-040.
+- DOT Office of Inspector General audit reports on ERAM, including AV-2012-179 and AV-2020-040;
+  AV-2015-112, "FAA's Contingency Plans and Security Protocols Were Insufficient at Chicago Air
+  Traffic Control Facilities", 29 September 2015.
+- FAA Order JO 1900.47G, Air Traffic Control Operational Readiness and Contingency Planning,
+  effective 30 April 2024.
+- FAA, En Route Automation Modernization (ERAM) and SWIM Flight Data Publication Service (SFDPS)
+  programme pages.

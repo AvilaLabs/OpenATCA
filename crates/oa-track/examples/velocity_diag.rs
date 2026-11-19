@@ -610,6 +610,7 @@ fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> 
                 vel_north_mps: pick(&r.vel_north_mps, &keep),
                 coast: pick(&r.coast, &keep),
                 uncertain: pick(&r.uncertain, &keep),
+                reacquired: pick(&r.reacquired, &keep),
             };
         }
         let legacy = legacy_from_track_samples_by_leg(

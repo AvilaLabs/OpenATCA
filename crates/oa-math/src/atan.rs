@@ -339,7 +339,7 @@ fn cos_of_asin_fast(a: f64) -> Dd {
     let sq = two_sqr(a);
     let d = fast_two_sum(1.0, -sq.hi);
     let w = fast_two_sum(d.hi, d.lo - sq.lo);
-    let ch = w.hi.sqrt();
+    let ch = oa_ieee::sqrt(w.hi);
     let half_inv = 0.5 / ch;
     let e = two_sqr(ch);
     let rem = ((w.hi - e.hi) - e.lo) + w.lo;

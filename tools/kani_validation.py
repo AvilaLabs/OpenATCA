@@ -20,6 +20,7 @@ for a requested cover.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -37,6 +38,15 @@ from typing import Any, Iterable, Mapping
 
 PINNED_KANI_VERSION = "0.68.0"
 PINNED_CARGO_TOOLCHAIN = "1.89.0"
+# Loop ids are CBMC symbols that embed the crate disambiguator (`Cs<hash>_`),
+# which cargo derives from the dependency graph and which changes whenever any
+# dependency changes. Presets therefore register the id as a template; the run
+# discovers the concrete ids from the compiled goto program and binds them to
+# the registered source locations before any bound is passed to CBMC.
+_LATE_LOOP_ID_TEMPLATE = "_RNvNtC{disambiguator}_8oa_track7tracker11update_late."
+_DISAMBIGUATOR_RE = r"s[0-9A-Za-z]+"
+# Source line of every loop of update_late, by loop index; discovery must find exactly these.
+_LATE_FUNCTION_LOOPS = [1433, 1452, 1490, 1520]
 # Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
 # build and the source location below; never accept arbitrary CBMC arguments.
 LOOP_UNWIND_PRESETS = {
@@ -61,7 +71,7 @@ LOOP_UNWIND_PRESETS = {
             'tracker::proofs::rollback_paths::late_overflow_output_projection',
             'tracker::proofs::rollback_paths::late_append_output_projection',
         }),
-        "loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3",
+        "loop_id": _LATE_LOOP_ID_TEMPLATE + "3",
         "bound": 3,
         "global_unwind": 16,
         "harness_source": {
@@ -78,10 +88,10 @@ _late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
 LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
     **_late_base_preset,
     "loops": [
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.0", "bound": 3, "line": 1433, "guard_line": 1433, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.1", "bound": 2, "line": 1452, "guard_line": 1452, "source_line": "for k in (e + 1)..len {"},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.2", "bound": 2, "line": 1490, "source_line": "for k in 0..=e {"},
-        {"loop_id": "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late.3", "bound": 3, "line": 1520, "source_line": "while k < n_seq {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1433, "guard_line": 1433, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1452, "guard_line": 1452, "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1490, "source_line": "for k in 0..=e {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1520, "source_line": "while k < n_seq {"},
     ],
     "fixture_source": "crates/oa-track/src/tracker_proofs.rs",
     "fixture_snippets": [
@@ -103,37 +113,18 @@ LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
         "update_late(&mut t, PROOF_SLOT, &m, &mut out);",
     ],
 }
-_late_pinned_prefix = "_RNvNtCseRq8xMCbGsa_8oa_track7tracker11update_late."
-_late_local_prefix = "_RNvNtCs1K5hzcfmox7_8oa_track7tracker11update_late."
-_late_id_families = {
-    "local": [_late_local_prefix + str(index) for index in range(4)],
-    "ci": [_late_pinned_prefix + str(index) for index in range(4)],
-}
 LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo"] = {
     **LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"],
-    "loop_id": _late_pinned_prefix + "3",
-    "loops": [
-        {
-            **loop,
-            "loop_ids": [
-                _late_local_prefix + loop["loop_id"].rsplit(".", 1)[1],
-                _late_pinned_prefix + loop["loop_id"].rsplit(".", 1)[1],
-            ],
-        }
-        for loop in LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"]["loops"]
-    ],
-    "log_families": _late_id_families,
+    "log_family": "discovered",
     "cargo_toolchain": PINNED_CARGO_TOOLCHAIN,
 }
 LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo-one-loop"] = {
     **LOOP_UNWIND_PRESETS["late-replay-two-events"],
-    "loop_id": _late_pinned_prefix + "3",
-    "loop_ids": [_late_local_prefix + "3", _late_pinned_prefix + "3"],
-    "log_families": {
-        name: [ids[3]] for name, ids in _late_id_families.items()
-    },
+    "log_family": "discovered",
     "cargo_toolchain": PINNED_CARGO_TOOLCHAIN,
 }
+for _preset in LOOP_UNWIND_PRESETS.values():
+    _preset["function_loops"] = list(_LATE_FUNCTION_LOOPS)
 DEFAULT_TIMEOUT_SECONDS = 360
 DEFAULT_MEMORY_MIB = 6144
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
@@ -190,6 +181,139 @@ def _loop_unwind_configuration(preset_name: str | None) -> dict[str, Any] | None
     }
 
 
+def _loop_id_regex(template: str) -> re.Pattern[str]:
+    """Regex for a registered loop-id template; only the disambiguator and index are wild."""
+    head, tail = template.rsplit(".", 1)[0].split("{disambiguator}")
+    tail += "."
+    return re.compile(re.escape(head) + f"({_DISAMBIGUATOR_RE})" + re.escape(tail) + r"(\d+)")
+
+
+def resolve_loop_unwind_preset(preset_name: str, disambiguator: str) -> dict[str, Any]:
+    """Return the preset with the discovered crate disambiguator filled in.
+
+    Pinned-Cargo presets additionally get the single discovered log family, so
+    the log check accepts exactly the discovered ids and no others.
+    """
+    if not re.fullmatch(_DISAMBIGUATOR_RE, disambiguator):
+        raise ValueError(f"invalid crate disambiguator: {disambiguator!r}")
+    preset = copy.deepcopy(LOOP_UNWIND_PRESETS[preset_name])
+
+    def fill(loop: dict[str, Any]) -> None:
+        loop["loop_id"] = loop["loop_id"].replace("{disambiguator}", disambiguator)
+
+    fill(preset)
+    for loop in preset.get("loops", []):
+        fill(loop)
+    family = preset.pop("log_family", None)
+    if family is not None:
+        loops = preset.get("loops", [preset])
+        for loop in preset.get("loops", []):
+            loop["loop_ids"] = [loop["loop_id"]]
+        if "loops" not in preset:
+            preset["loop_ids"] = [preset["loop_id"]]
+        preset["log_families"] = {family: [loop["loop_id"] for loop in loops]}
+    return preset
+
+
+def discover_loop_unwind_loops(preset_name: str, goto_loops_output: str) -> dict[str, Any]:
+    """Bind `goto-instrument --show-loops` output to the preset's registered loops.
+
+    The loops whose ids match the registered function symbol (ignoring only the
+    crate disambiguator) must be exactly the registered set: one disambiguator,
+    one id per registered index, the registered source file, function and line.
+    """
+    id_re = _loop_id_regex(LOOP_UNWIND_PRESETS[preset_name]["loop_id"])
+    entry_re = re.compile(
+        r"^Loop (\S+):\n\s+file (\S+) line (\d+)(?: column \d+)? function (.+?)\s*$", re.MULTILINE
+    )
+    found = []
+    for match in entry_re.finditer(goto_loops_output):
+        id_match = id_re.fullmatch(match.group(1))
+        if id_match:
+            found.append({
+                "loop_id": match.group(1),
+                "disambiguator": id_match.group(1),
+                "index": int(id_match.group(2)),
+                "file": match.group(2),
+                "line": int(match.group(3)),
+                "function": match.group(4),
+            })
+    return bind_loop_unwind_discovery(preset_name, found)
+
+
+def bind_loop_unwind_discovery(preset_name: str, found: list[dict[str, Any]]) -> dict[str, Any]:
+    preset = LOOP_UNWIND_PRESETS[preset_name]
+    id_re = _loop_id_regex(preset["loop_id"])
+    registered = preset["function_loops"]
+    for entry in found:
+        id_match = id_re.fullmatch(str(entry.get("loop_id")))
+        if (
+            id_match is None
+            or entry.get("disambiguator") != id_match.group(1)
+            or entry.get("index") != int(id_match.group(2))
+            or not isinstance(entry.get("line"), int)
+            or not isinstance(entry.get("file"), str)
+            or not isinstance(entry.get("function"), str)
+        ):
+            raise ValueError(f"malformed discovered loop entry: {entry!r}")
+    if len({entry["disambiguator"] for entry in found}) > 1:
+        raise ValueError(
+            f"expected one crate disambiguator for {preset['function']}, found "
+            f"{sorted({entry['disambiguator'] for entry in found})}"
+        )
+    if sorted(entry["index"] for entry in found) != list(range(len(registered))):
+        raise ValueError(
+            f"discovered loop indexes {sorted(entry['index'] for entry in found)} of {preset['function']} "
+            f"differ from the registered {list(range(len(registered)))}"
+        )
+    for entry in found:
+        if (
+            not (entry["file"] == preset["source"] or entry["file"].endswith("/" + preset["source"]))
+            or entry["function"].split("::")[-1] != preset["function"]
+            or entry["function"].count("::") != 1
+            or entry["line"] != registered[entry["index"]]
+        ):
+            raise ValueError(
+                f"loop {entry['loop_id']} is at {entry['file']} line {entry['line']} function "
+                f"{entry['function']}; registered {preset['source']} line {registered[entry['index']]} "
+                f"function {preset['function']}"
+            )
+    for loop in preset.get("loops", [preset]):
+        index = int(loop["loop_id"].rsplit(".", 1)[1])
+        if registered[index] != loop["line"]:
+            raise ValueError(f"registered loop {index} line differs from the function's loop table")
+    return {
+        "disambiguator": found[0]["disambiguator"],
+        "loops": sorted(found, key=lambda entry: entry["index"]),
+    }
+
+
+def _find_goto_binary(target: Path, harness: str, newer_than: float) -> Path:
+    """Locate the linked goto binary Kani wrote for `harness` in the target dir."""
+    suffix = "".join(f"{len(part)}{part}" for part in harness.split("::")) + ".out"
+    matches = [
+        path for path in (target / "kani").rglob("*.out")
+        if path.name.endswith(suffix) and not path.name.endswith(".symtab.out")
+        and path.stat().st_mtime >= newer_than
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one goto binary for {harness}, found {len(matches)}")
+    return matches[0]
+
+
+def _find_goto_instrument() -> Path:
+    """The goto-instrument of the pinned Kani bundle; a PATH lookup is never trusted."""
+    home = Path(os.environ.get("KANI_HOME", Path.home() / ".kani"))
+    tool = home / f"kani-{PINNED_KANI_VERSION}" / "bin" / "goto-instrument"
+    if not tool.is_file():
+        raise ValueError(f"goto-instrument of the pinned Kani {PINNED_KANI_VERSION} bundle not found at {tool}")
+    return tool
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def _loop_unwind_argument(preset: Mapping[str, Any]) -> str:
     loops = preset.get("loops", [preset])
     return ",".join(
@@ -200,7 +324,7 @@ def _loop_unwind_argument(preset: Mapping[str, Any]) -> str:
 
 
 def _expected_loop_log_line_count(preset: Mapping[str, Any]) -> int:
-    if not preset.get("log_families"):
+    if not (preset.get("log_families") or preset.get("log_family")):
         return sum(
             len(loop.get("iterations", [])) if loop.get("log_mode") == "completed_before_bound" else 1
             for loop in preset.get("loops", [preset])
@@ -260,8 +384,10 @@ def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, har
         )
 
 
-def _check_loop_unwind_log(preset_name: str, stdout: str, stderr: str) -> dict[str, Any]:
-    preset = LOOP_UNWIND_PRESETS[preset_name]
+def _check_loop_unwind_log(
+    preset_name: str, stdout: str, stderr: str, disambiguator: str
+) -> dict[str, Any]:
+    preset = resolve_loop_unwind_preset(preset_name, disambiguator)
     families = preset.get("log_families")
     if families:
         return _check_aliased_loop_unwind_log(preset, stdout, stderr)
@@ -875,9 +1001,29 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
                 errors.append("pinned-Cargo unwind preset requires Cargo 1.89.0 invocation and version binding")
             if record.get("package") != expected_scoped["package"] or record.get("harness") not in expected_scoped["harnesses"]:
                 errors.append("loop-unwind preset is not applicable to the recorded proof")
+            discovery = record.get("loop_unwind_discovery")
+            try:
+                if not isinstance(discovery, dict) or not isinstance(discovery.get("loops"), list):
+                    raise ValueError("missing loop discovery record")
+                for key in ("goto_binary_sha256", "goto_instrument_sha256", "loops_listing_sha256"):
+                    if not _is_sha256_hex(discovery.get(key)):
+                        raise ValueError(f"{key} is missing or not a sha256")
+                tool_path = discovery.get("goto_instrument_path")
+                if not isinstance(tool_path, str) or not re.fullmatch(
+                    rf"/(?:.*/)?kani-{re.escape(PINNED_KANI_VERSION)}/bin/goto-instrument", tool_path
+                ):
+                    raise ValueError("goto-instrument is not from the pinned Kani bundle")
+                bound = bind_loop_unwind_discovery(preset_name, discovery["loops"])
+                if bound != {"disambiguator": discovery.get("disambiguator"), "loops": discovery["loops"]}:
+                    raise ValueError("discovery record is not canonical")
+                disambiguator = bound["disambiguator"]
+                resolved = resolve_loop_unwind_preset(preset_name, disambiguator)
+            except ValueError as exc:
+                errors.append(f"loop-unwind discovery does not bind to the registered loops: {exc}")
+                resolved, disambiguator = None, None
             expected_tail = [
                 "--cbmc-args", "--unwindset",
-                _loop_unwind_argument(expected_scoped),
+                _loop_unwind_argument(resolved) if resolved is not None else "",
                 "--unwinding-assertions",
             ]
             if not isinstance(command, list) or command[-len(expected_tail):] != expected_tail:
@@ -894,8 +1040,8 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
                 else:
                     matched_lines = log_check.get("matched_lines")
                 rechecked_log = (
-                    _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "")
-                    if isinstance(matched_lines, list) and all(isinstance(line, str) for line in matched_lines)
+                    _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "", disambiguator)
+                    if disambiguator is not None and isinstance(matched_lines, list) and all(isinstance(line, str) for line in matched_lines)
                     else {"passed": False}
                 )
                 if (
@@ -1123,6 +1269,70 @@ def _parse_cover_args(values: list[str], harnesses: set[str]) -> dict[str, list[
     return result
 
 
+def _discover_loop_unwind_ids(
+    preset_name: str, argv: list[str], harness: str, repo: Path, target: Path,
+    env: Mapping[str, str], check_dir: Path, memory_bytes: int, timeout_seconds: int,
+) -> dict[str, Any]:
+    """Compile the harness to its goto binary and bind the preset's loop ids.
+
+    The crate disambiguator in a loop id changes with the dependency graph, so
+    the ids are read from the program Kani will verify instead of being pinned.
+    Anything that does not match the registered loops exactly raises ValueError.
+    """
+    # Same package, harness, stubs and cfgs as the proof run; codegen only.
+    discovery_argv = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg in ("--export-json", "--harness-timeout"):
+            skip = True
+        else:
+            discovery_argv.append(arg)
+    # --force-build rewrites the goto binary even when Kani could reuse a fresh
+    # build, so the mtime filter below always selects this run's output; the
+    # verification run that follows then reuses that build.
+    discovery_argv.extend(["--force-build", "--only-codegen"])
+    started = time.time() - 1
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        with (check_dir / "discovery-stdout.log").open("w", encoding="utf-8") as stdout, (
+            check_dir / "discovery-stderr.log"
+        ).open("w", encoding="utf-8") as stderr:
+            rc, timed_out = run_limited_process(
+                discovery_argv, repo, env, stdout, stderr, timeout_seconds, memory_bytes
+            )
+        if rc != 0 or timed_out:
+            raise ValueError(f"loop discovery codegen failed (exit {rc}, timed out: {timed_out})")
+        goto = _find_goto_binary(target, harness, started)
+        tool = _find_goto_instrument()
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            raise ValueError("loop discovery exhausted the proof's external timeout")
+        listing = check_dir / "discovery-loops.txt"
+        with listing.open("w", encoding="utf-8") as stdout, (
+            check_dir / "discovery-listing-stderr.log"
+        ).open("w", encoding="utf-8") as stderr:
+            rc, timed_out = run_limited_process(
+                [str(tool), "--show-loops", str(goto)], repo, env, stdout, stderr,
+                min(300, remaining), memory_bytes,
+            )
+        if rc != 0 or timed_out:
+            raise ValueError(f"goto-instrument --show-loops failed (exit {rc}, timed out: {timed_out})")
+        bound = discover_loop_unwind_loops(preset_name, listing.read_text(encoding="utf-8", errors="replace"))
+        return {
+            **bound,
+            "goto_binary": goto.name,
+            "goto_binary_sha256": _sha256_file(goto),
+            "goto_instrument_path": str(tool),
+            "goto_instrument_sha256": _sha256_file(tool),
+            "loops_listing_sha256": _sha256_file(listing),
+            "elapsed_seconds": time.monotonic() - (deadline - timeout_seconds),
+        }
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(f"loop discovery failed: {exc}") from exc
+
+
 def run_one(
     repo: Path,
     package: str,
@@ -1155,12 +1365,6 @@ def run_one(
         argv.extend(["-Z", "stubbing"])
     if loop_unwind_preset is not None:
         _validate_loop_unwind_source(repo, loop_unwind_preset, package, harness)
-        preset = LOOP_UNWIND_PRESETS[loop_unwind_preset]
-        argv.extend([
-            "--cbmc-args", "--unwindset",
-            _loop_unwind_argument(preset),
-            "--unwinding-assertions",
-        ])
     checkout_namespace = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()
     env = os.environ.copy()
     for key in ("RUSTC_WRAPPER", "CARGO_ENCODED_RUSTFLAGS", "KANIFLAGS", "RUSTFLAGS"):
@@ -1181,7 +1385,24 @@ def run_one(
         if key in env
     }
     excluded = [check_dir, out, target]
+    # Snapshot before discovery so an edit between discovery and verification is caught.
     source_before = _source_snapshot(repo, excluded)
+    discovery: dict[str, Any] | None = None
+    resolved_preset: dict[str, Any] | None = None
+    if loop_unwind_preset is not None:
+        discovery = _discover_loop_unwind_ids(
+            loop_unwind_preset, argv, harness, repo, target, env, check_dir, memory_bytes, timeout_seconds
+        )
+        resolved_preset = resolve_loop_unwind_preset(loop_unwind_preset, discovery["disambiguator"])
+        argv.extend([
+            "--cbmc-args", "--unwindset",
+            _loop_unwind_argument(resolved_preset),
+            "--unwinding-assertions",
+        ])
+        # Discovery counts against the proof's external timeout.
+        timeout_seconds_run = max(1, timeout_seconds - int(discovery["elapsed_seconds"]))
+    else:
+        timeout_seconds_run = timeout_seconds
     record: dict[str, Any] = {
         "record_version": 1,
         "repo": str(repo),
@@ -1190,6 +1411,7 @@ def run_one(
         "harness": harness,
         "loop_unwind_preset": loop_unwind_preset,
         "loop_unwind_configuration": _loop_unwind_configuration(loop_unwind_preset),
+        "loop_unwind_discovery": discovery,
         "requested_covers": list(required_covers),
         "command": argv,
         "command_sha256": _canonical_sha256(argv),
@@ -1238,7 +1460,7 @@ def run_one(
     ).open("w", encoding="utf-8") as stderr:
         try:
             rc, timed_out = run_limited_process(
-                argv, repo, env, stdout, stderr, timeout_seconds, memory_bytes
+                argv, repo, env, stdout, stderr, timeout_seconds_run, memory_bytes
             )
         except OSError as exc:
             stderr.write(f"failed to start Kani command: {exc}\n")
@@ -1267,7 +1489,7 @@ def run_one(
         stdout_text = (check_dir / "stdout.log").read_text(encoding="utf-8", errors="replace")
         stderr_text = (check_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")
         record["loop_unwind_log_check"] = _check_loop_unwind_log(
-            loop_unwind_preset, stdout_text, stderr_text
+            loop_unwind_preset, stdout_text, stderr_text, discovery["disambiguator"]
         )
     copied_sources: dict[str, str] = {}
     source_names = set(changed_tracked) | set(changed_untracked)

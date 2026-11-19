@@ -11,6 +11,10 @@ reach the screen, so everything here is testable bit for bit, and every frame ca
 
 Core versus shell (RULESET B1):
 
+The modules live in `src/core/` and `src/shell/` and are re-exported at the crate root, so
+`oa_display::traffic` is `oa_display::core::traffic`. Every public function of a module has its
+module's class.
+
 | module    | class | role                                                               |
 |-----------|-------|--------------------------------------------------------------------|
 | `list`    | core  | the fixed-capacity struct-of-arrays display list and its pushes     |
@@ -19,6 +23,8 @@ Core versus shell (RULESET B1):
 | `font`    | core  | the built-in stroke font, const data                               |
 | `raster`  | core  | integer software rasterizer into an XRGB8888 buffer, frame hash    |
 | `scene`   | core  | airspace model to display list (boundaries, airways, fixes, rings)  |
+| `traffic` | core  | live targets to display list: symbols, leader, trail, data block    |
+| `text`    | core  | fixed-size stack text buffer: the data block text, no allocation    |
 | `ppm`     | shell | binary PPM (P6) writer                                             |
 | `cli`     | shell | the `oa-scope` command line, file reads and writes                 |
 
@@ -72,6 +78,61 @@ range circle always fits, and costs about a tenth of a 1080 px screen. Legs that
 crossings (published points outside the data, expected) are counted in the normal text colour
 ("N LEGS END AT BORDER CROSSINGS"). The alert colour is used only for conditions that need
 attention, never expected data: here, points, legs or edges that could not be placed.
+
+## Traffic
+
+`traffic` draws live targets over the map. The display knows a target only as plain data
+(`traffic::Target`: position, ground track and speed, altitude, address, callsign, coasting and
+uncertain flags, seconds since reacquisition, 95% radius in metres, up to 16 history positions);
+the tracker is not a dependency. `build_traffic` appends to the list `build_scene` built, so a
+frame is state, then list, then pixels, as for the map. Targets are drawn in set order.
+
+| state                  | drawing                                                                   |
+|------------------------|---------------------------------------------------------------------------|
+| tracking               | 8 px square outline and a centre dot                                       |
+| coasting               | the square with an X through it, no centre dot; tag `CST`                  |
+| uncertain              | 12 px diamond and a centre dot, the 95% radius as a circle of true scale; tag `UNC` |
+| coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`               |
+| reacquired (N s)       | a 9 px circle in the alert colour added to any of the above; tag `REACQ`   |
+| callsign conflict      | two callsigns heard for the address at one instant: its hex address is shown, tag `CS?` |
+| uncertain, radius unknown | the diamond without the circle; tag `R95?`                              |
+
+All of it is in the target colour (index 12). Each target also has a velocity leader along its track
+(default 1 minute of flight, none without a velocity), history dots in the dim text colour (default
+the last 5 positions) and a data block 14 px right and 30 px above the symbol: callsign (hex address
+without one), altitude in hundreds of feet and ground speed in knots over ten (`---` and `--` when
+absent), then the tags (`CST UNC CS? R95? REACQ`). Data blocks do not yet avoid one another (LS-401).
+A frame allocates nothing: the data block text is written into a stack buffer, and the list's tables
+are sized once (checked by `validation/oa-alloc-check`).
+
+A `TargetSet` has a fixed capacity and private columns: the only way in is `targets_push`. A push past
+the capacity is refused, counted and returns `TrafficError::Full`; a target that is not valid (a
+position off the globe, a trail over 16, unknown flag bits) returns `TrafficError::Malformed`. The frame
+then shows `TARGETS NOT DRAWN: N` and `TARGETS MALFORMED: N` at the bottom left in the alert colour.
+Every part of a target that cannot be drawn (a leader, the 95% circle, a history dot, a text) is
+counted by reason in `TrafficStats`, and `traffic_loss` sums what is lost. Targets off the map area are
+counted in `TrafficStats::off_screen`. Traffic is on layers 7 to
+10, above the map and below the legend strip. `oa-scope-replay` (crate `oa-scope-replay`) runs the
+tracker over an ADS-B clip and draws it:
+
+```text
+oa-scope-replay --snapshot <file> --adsb <clip.oaf> --centre <lat,lon> --range-nm <n> --size <WxH>
+                --start <unix-seconds|YYYY-MM-DDTHH:MM:SSZ> --duration-s <n> --step-s <n> --out-dir <dir>
+                [--leader-min <n>] [--trail-n <n>] [--trail-step-s <n>] [--reacq-s <n>]
+                [--max-targets <n>] [--warmup-s <n>] [--hashes-only] [--overwrite] [--allow-loss]
+```
+
+It writes `frame-NNNN.ppm` per step and `hashes.txt` (`frame_index time sha256`) into an empty or new
+directory (`--overwrite` deletes the files of an earlier run first). It ends with a report of
+everything it excluded or lost, by reason, and ends with exit code 3 if work was lost unless
+`--allow-loss` is given (0 success, 1 failure, 2 usage error, a duration that is not a whole number
+of steps among them). The tracker is linked in that crate and not here, so the display stays free of it.
+
+Peak memory of a run, from the named capacities: the row store is at most 2^24 rows of 32 bytes
+(512 MiB, and the reacquired times, 8 bytes for each reacquired row, a small part of it); the callsign changes at most 2^25 entries of about 17 bytes (about 544 MiB, far less in
+practice); one tracker output table, the display tables and the frame buffer (`width * height * 4`,
+8 MiB at 1920x1080) are small beside them. Together at most about 1.1 GiB, reached only by a
+window larger than any clip this tool is sized for; a typical hour is a few hundred MiB.
 
 ## Display list
 
@@ -141,6 +202,7 @@ dot).
 | 9     | alert      | `#FF5A4F` | attention conditions only        |
 | 10    | neighbour HIGH | `#2F6F96` | dim neighbour boundary      |
 | 11    | neighbour LOW  | `#9A6B00` | dim neighbour boundary      |
+| 12    | target     | `#7FE0B0` | live targets: symbol, leader, data block |
 
 ## Tests
 

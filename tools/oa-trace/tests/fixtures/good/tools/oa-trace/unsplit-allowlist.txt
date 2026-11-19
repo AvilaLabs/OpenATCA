@@ -1,0 +1,2 @@
+# Crates allowed to be unsplit; this list only shrinks.
+fx-old

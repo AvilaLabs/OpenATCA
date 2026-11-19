@@ -19,3 +19,6 @@ oa-truth = { path = "../../crates/oa-truth" }
 [[bin]]
 name = "oa-perf"
 path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

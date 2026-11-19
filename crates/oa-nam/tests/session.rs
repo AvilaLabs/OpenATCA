@@ -1032,3 +1032,79 @@ fn profile_sets_the_irq_retry_number_rule() {
     let (_, act) = run(&b, s, Event::Tick, 10_000);
     assert_eq!(act, [Action::SendIrq { number: 0 }]);
 }
+
+// REQ: OA-NAM-033
+#[test]
+fn message_number_arithmetic_cannot_overflow_from_any_field_value() {
+    let c = cfg();
+    // A hand-built session with the largest next_number: reduced modulo 1000 first.
+    let mut s = active(&c);
+    s.next_number = u16::MAX;
+    let (s, a) = run(
+        &c,
+        s,
+        Event::SendResponse {
+            kind: Kind::Lam,
+            reference: rx(Kind::Fpl, 1, None).id,
+        },
+        10,
+    );
+    assert_eq!(a.len(), 1);
+    assert!(s.next_number < NUMBER_MODULUS);
+    // A received message with the largest number, after one with the largest number.
+    let mut s = active(&c);
+    for _ in 0..3 {
+        let (ns, a) = run(&c, s, Event::Received(rx(Kind::Fpl, u16::MAX, None)), 20);
+        s = ns;
+        assert_eq!(a.len(), 1);
+    }
+    let (_, a) = run(&c, s, Event::Received(rx(Kind::Fpl, 0, None)), 30);
+    assert!(matches!(a[0], Action::Deliver { .. }));
+}
+
+// REQ: OA-NAM-034
+#[test]
+fn every_discard_and_refusal_is_counted_under_its_reason() {
+    let c = cfg();
+    let s = new_session();
+    // INACTIVE: an FPL is ignored, a send is refused.
+    let (s, _) = run(&c, s, Event::Received(rx(Kind::Fpl, 1, None)), 1);
+    assert_eq!(discard_count(&s, Discard::IgnoredInState), 1);
+    let (s, _) = run(&c, s, Event::SendAtm(Kind::Fpl), 2);
+    assert_eq!(refusal_count(&s, Refusal::NotActive), 1);
+    let (s, _) = run(&c, s, Event::Received(rx(Kind::Fpl, 2, None)), 3);
+    assert_eq!(discard_count(&s, Discard::IgnoredInState), 2);
+    // ACTIVE: an unmatched response and a response with no reference.
+    let mut s = active(&c);
+    let (n, _) = run(&c, s, Event::Received(rx(Kind::Lam, 5, Some(77))), 10);
+    s = n;
+    assert_eq!(discard_count(&s, Discard::UnmatchedResponse), 1);
+    let (n, _) = run(&c, s, Event::Received(rx(Kind::Lam, 6, None)), 11);
+    s = n;
+    assert_eq!(discard_count(&s, Discard::MissingReference), 1);
+    let (s, _) = run(&c, s, Event::SendAtm(Kind::Lam), 12);
+    assert_eq!(refusal_count(&s, Refusal::NotAnAtmMessage), 1);
+    // Reasons that did not occur stay at zero; every other counter is untouched.
+    assert_eq!(discard_count(&s, Discard::WrongSender), 0);
+    assert_eq!(refusal_count(&s, Refusal::PendingFull), 0);
+}
+
+// REQ: OA-NAM-034
+#[test]
+fn a_full_pending_table_is_counted_and_the_counters_saturate() {
+    let c = cfg();
+    let mut s = active(&c);
+    for i in 0..MAX_PENDING {
+        let (n, a) = run(&c, s, Event::SendAtm(Kind::Fpl), 10 + i as u64);
+        s = n;
+        assert!(matches!(a[0], Action::SendAtm { .. }));
+    }
+    let (s, a) = run(&c, s, Event::SendAtm(Kind::Fpl), 500);
+    assert_eq!(
+        a[0],
+        Action::Refuse {
+            reason: Refusal::PendingFull
+        }
+    );
+    assert_eq!(refusal_count(&s, Refusal::PendingFull), 1);
+}

@@ -162,7 +162,7 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   target the crate is built for (x86-64 and wasm32 checked).
 - **OA-MATH-019** The crate sources contain no call to a platform maths function (`sin`, `exp`,
   `powf`, `floor`, `mul_add` and the rest of a fixed list, as methods, `f64::` calls or bare
-  `f64::` paths used as values), no float `%` (only the listed integer shifts), no `unsafe`, and the
+  `f64::` paths used as values), no float `%` (only the listed integer shifts and the exact `fmod` line of `rem_euclid`), no `unsafe`, and the
   manifest lists no dependency; the check is itself tested against planted calls.
 - **OA-MATH-020** Every NaN returned has one fixed bit pattern (positive quiet NaN), whatever the
   NaN bits of the input.
@@ -206,6 +206,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-MATH-032** Proved (Kani, `cut_split_halves_are_exact_and_short`): the split of `two_prod_cut` gives
   a high half of at most 26 bits and a low half of at most 27 bits of the mantissa, each exact, whose sum
   is the input, for every normal double whose low half is normal.
+- **OA-MATH-033** `rem_euclid(a, b)` equals the standard library's `f64::rem_euclid` bit for bit on two
+  million inputs (bearing wraps, mixed signs, arbitrary bit patterns, wide exponent range) and on the
+  edge values, a NaN result excepted, which has the crate's one fixed bit pattern.
 
 ### NASR (oa-nasr)
 
@@ -369,6 +372,81 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-104** For Python source, `oa-trace` discovers only `test_*.py` modules and links a `# REQ:` tag directly above a
   Python `def test_*` as a test (not a proof), and reports malformed IDs and tags attached to non-test
   definitions.
+- **OA-TRC-200** `cargo run -p oa-trace` reads the class of every workspace member and passes a workspace
+  whose crates are all classified and whose core code is clean (RULESET B7 to B9). Core code excludes
+  top-level `src/bin/`, `src/main.rs` and test-only items.
+- **OA-TRC-201** A member with no `[package.metadata.openatca] class`, or one other than `core`, `shell`, `split`
+  or `unsplit`, fails the check and the failure names the crate.
+- **OA-TRC-202** Core code (all of `src/` for a core crate, `src/core/` and `src/core.rs` for a split crate) may
+  name from `std`, `core` and `alloc` only the modules RULESET B8 allows; any other (`fs`, `io`, `net`, `env`,
+  `process`, `thread`, `sync`, `cell`, `os`, `path`, `std::time`, the hash-map family, `alloc::sync`) fails, each hit
+  is reported as `file:line: token` with the allowed alternative, and `static mut`, `thread_local!`, the print
+  and `dbg!` macros, `HashMap`, `HashSet` and `RandomState` fail. A path split over lines or inside a
+  `use std::{..}` group is still found.
+- **OA-TRC-203** Core code that names a path into a `shell` module (`crate::shell`, `super::shell`,
+  `<crate>::shell`, or `shell` in a `use` group) fails.
+- **OA-TRC-204** Comments (line, block, nested), string literals (plain and raw), and character literals are
+  blanked before the scan, so a forbidden name inside them is not a hit; lifetimes are not mistaken for
+  character literals; line numbers are kept.
+- **OA-TRC-205** A core crate lists no shell or unsplit crate in any dependency table; core code names a
+  workspace crate (under its own name or a rename) only if it is core, or by its `::core::` path if it is split.
+- **OA-TRC-206** A split crate has `src/core` (or `core.rs`) and `src/shell` (or `shell.rs`), nothing else but
+  `lib.rs`, `main.rs` and `bin/` in `src/`, and a `lib.rs` that declares exactly `mod core;` and `mod shell;`
+  plus re-exports and attributes.
+- **OA-TRC-207** Every `unsplit` crate is in the fixed list of twelve in `classcheck.rs`; the count is printed as
+  migration debt; the allowlist file may hold only crates of that list that are still unsplit, so the debt
+  only shrinks (RULESET B9).
+- **OA-TRC-208** `oa-trace` reads the package name, class, every dependency table (including `[target.*]`, with
+  `package` renames and `path`), `[lib]`/`[[bin]]` paths, a `build` key and the root `members` and `exclude`
+  lists with its own small reader, without a dependency.
+- **OA-TRC-209** `members` is read in either quote style across lines; zero members, an entry that is not a plain
+  quoted path (a glob included) and a `crates/`, `tools/` or `validation/` directory with a Cargo.toml that is
+  neither a member nor excluded all fail.
+- **OA-TRC-210** An unreadable directory or file, a symlink under a scanned source tree, a core or split crate
+  that scans no file, a custom `[lib]` or `[[bin]]` path, and a `build.rs` or `build` key in a core or split
+  crate fail.
+- **OA-TRC-211** `#[cfg(test)]`, `cfg(all(test, ..))` and an inner `#![cfg(test)]` strip an item only when an item
+  keyword follows; on a field, variant, match arm, parameter or statement nothing is stripped, and
+  `cfg(any(test, ..))` and `cfg(not(test))` strip nothing.
+- **OA-TRC-212** In core code, a `use` that renames (`as`) or globs (`*`) a std, core, alloc or workspace-crate
+  path, a bare `use std;` or `use <crate>;`, a leading `::` path, `extern crate`, `#[path]` and the macros
+  `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!` and `file!` fail.
+- **OA-TRC-213** In a split crate, a third module, a `crate::` path outside `crate::core::` and a `super::` that
+  reaches the crate root fail from core code; `src/core.rs` is scanned like `src/core/`.
+- **OA-TRC-214** No file is exempt by name; a test-only `mod x;` resolves the way rustc resolves it, together with
+  the files below it; only the top-level `src/bin` and `src/main.rs` are skipped.
+- **OA-TRC-215** A core crate depending on a shell or unsplit crate fails whichever dependency table, rename or
+  path form declares it; a path dependency that is not a workspace member fails.
+- **OA-TRC-216** The check passes on the real workspace, and the unsplit crates are exactly those still listed
+  in the allowlist file.
+- **OA-TRC-217** In core code the only `extern crate` is `extern crate alloc;`.
+- **OA-TRC-218** In core code a float method `core` lacks fails, with the alternative named (`oa_ieee::x` for sqrt,
+  floor, ceil, trunc and round; `oa_math::pow` for `powf`; `oa_math::x` for the rest; for `rem_euclid` and
+  `div_euclid` the integer path form `i64::rem_euclid(a, b)` or `oa_math` for floats) and the note that a
+  user-defined method of that name is disallowed too. Only the crate `oa-ieee` is exempt. See OA-TRC-221 for
+  the list and the call forms.
+- **OA-TRC-219** Every crate of class core except `oa-ieee` has `#![no_std]` or `#![cfg_attr(not(test), no_std)]`
+  in `src/lib.rs` (RULESET B10).
+- **OA-TRC-220** The public API of `oa-ieee` is exactly `pub fn` sqrt, floor, ceil, trunc and round: any other
+  public item, module, re-export or macro, or a missing function, fails.
+- **OA-TRC-221** The float list in `classcheck.rs` equals the set of `f32`/`f64` inherent methods absent from `core` on
+  the pinned toolchain, derived from a `no_std` compile probe of std's documented methods. A listed name after
+  `.` (called) or after `::` (whatever precedes it: `f64::sin`, `<f64>::sqrt`, `Self::sin`, `R::sin`, called or not)
+  fails; `oa_ieee::x`, `oa_math::x` and `i64::rem_euclid(a, b)` pass.
+- **OA-TRC-222** In core code `macro_rules!`, the `$` token, a raw identifier, `cfg!(target_..)`, `#[cfg(target_..)]`,
+  `cfg_attr(target_..` (and `unix`, `windows`), a raw pointer type and `{:p}` in a string literal fail.
+- **OA-TRC-223** The `src/lib.rs` of a core crate declares no module named `main` or `bin`, in any visibility, inline or
+  in a file.
+- **OA-TRC-224** A `#[cfg(test)] mod x;` inside an inline module skips nothing: the file is scanned.
+- **OA-TRC-225** Every core-crate dependency, in any table, must resolve to a core workspace crate: `workspace = true`
+  entries are resolved through the root `[workspace.dependencies]`, a `[lib] name` is the name source uses, and a
+  dependency that cannot be resolved (an outside crate, a missing root entry) fails; a split crate may depend on
+  shell crates but not on outside code.
+- **OA-TRC-226** In split core code `self::super::` and any `super` after `self::` counts as `super`.
+- **OA-TRC-227** The `no_std` attribute of a core crate is an inner attribute at the top of `src/lib.rs`, before any
+  item and outside any module or cfg block; the failure says the crate "must have" it.
+- **OA-TRC-228** Each public function of `oa-ieee` has the body `v.<same name>()` exactly.
+- **OA-TRC-229** A workspace `exclude` entry that does not normalise fails.
 
 ### Hashing (oa-sha256)
 
@@ -1106,6 +1184,96 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   `DisplayError::TooLarge`, not an allocation.
 - **OA-DSP-037** `build_scene` refuses a view whose range thresholds are NaN, infinite or negative, or whose
   projection has a non-finite constant or an empty screen, with `DisplayError::BadView`.
+- **OA-DSP-038** Live traffic enters the display as plain data: one displayed target (position, ground track and
+  speed, altitude if known, address, callsign, coasting and uncertain flags, the age of the last reacquisition,
+  the 95% radius in metres, a bounded history) and a fixed-capacity set of them per frame. The display crate does
+  not depend on the tracker. A style with a leader outside 0 to 30 minutes, a trail above 16 positions, or a
+  capacity above 2^20 targets is refused, and nothing is allocated for it.
+- **OA-DSP-039** Each target state has its own drawing, never colour alone: a tracking target is an 8 px square with a
+  centre dot; coasting adds an X through the symbol and the data block tag `CST`; uncertain is a 12 px diamond with
+  its 95% radius drawn as a circle of true scale and the tag `UNC`; a track reacquired within the configured seconds
+  has a 9 px circle in the alert colour and the tag `REACQ`. Flags map to symbols exactly as the table in the
+  `traffic` module says.
+- **OA-DSP-040** Each target has a velocity leader along its ground track as long as it flies in the configured
+  minutes (default 1; none without a velocity), a history trail of the last N positions (default 5) as small dots
+  in the dim colour, and a data block at a fixed offset: callsign (the hex address without one), altitude in hundreds
+  of feet and ground speed in knots over ten, each rounded to the nearest, `---` or `--` when absent, then the state
+  tags. Data blocks do not yet avoid one another (LS-401, M8).
+- **OA-DSP-041** A target set at capacity refuses the target, counts it and returns a typed error; it never truncates
+  silently, and the frame shows `TARGETS NOT DRAWN: N` in the alert colour. Targets off the map area or under the
+  legend strip are counted as off screen, not as refused. The traffic tables are sized for the set's capacity and a
+  frame allocates nothing in the list.
+- **OA-DSP-042** The traffic of a frame is a pure function of the set, the projection and the style: the same
+  input gives the same display list and the same frame hash, and a synthetic scene has a golden hash.
+- **OA-DSP-043** The shell (`oa-scope-replay`, which links the tracker; the display crate does not) converts tracker
+  rows into targets: the newest row at or before the frame's time, none from a track silent for more than 3 s, ground
+  speed and track from the velocity (no track under 1 knot), the altitude only with the altitude flag, the
+  coasting and uncertain flags, the radius from the covariance, history rows a fixed step apart, the reacquired age
+  from the newest flagged row inside the window, the newest callsign heard at or before the time (never a later one).
+  Targets off the map are kept out of the set so they cannot use its capacity.
+- **OA-DSP-044** `oa-scope-replay` runs the tracker over an ADS-B clip from a warm-up before a start time and writes one
+  PPM per step with a `hashes.txt` of `frame_index time sha256` lines. The same inputs give the same hashes, with
+  or without the images; a frame does not depend on earlier frames. A bad number, time or step is a usage error and
+  a window without reports is a plain failure.
+- **OA-DSP-045** Traffic layers draw above the map and below the legend strip's backdrop, so the legend is never covered
+  by a target.
+- **OA-DSP-046** The traffic target set cannot hold an inconsistent or invalid target: its columns are private and the
+  only way in is the push, which refuses a target with a position or a history position off the globe, a trail longer
+  than 16, or unknown flag bits (counted, and `TARGETS MALFORMED: N` on the frame, as `TARGETS NOT DRAWN` is for a full
+  set). Nothing is defaulted for a missing column. Every part of a target that cannot be drawn is counted by reason
+  (a track outside [0, 3600), a leader or 95% circle the geodesic or projection could not place, a history dot that does
+  not project, a text that did not fit), an uncertain target with no usable 95% radius shows the tag `R95?`, and the
+  loss total names what was lost. A target carries `CS?` and its hex address when two callsigns were heard for the
+  address at one instant. A position is validated before it can count as off the map: a position off the globe
+  and one that does not project are loss, counted apart from off-map, which is not. An altitude beyond what the data
+  block holds is written `999+` or `-99-` and counted, never shown as a flight level. `Target` has a size guard of 164
+  bytes.
+- **OA-DSP-047** Tracker rows are stored as plain columns per address and shown without substitution: columns of
+  different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
+  the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
+  address 2^18, rows 2^24) is refused and counted, except that the total-rows cap is checked from the sizes the input declares
+  before any row is stored and aborts the run with an error before the frame loop. The store and the callsigns are built by the shell, once per drain, with the capacities a parameter; the core reads
+  them without allocating. The work of one frame is a fixed number of binary searches per address (the newest row, the
+  callsign, the newest reacquired row, the history dots), stated beside the capacities. Rows of one address at one
+  time keep the order the tracker wrote them and the later one wins. A velocity that is not a number is counted and
+  shown unknown; a history dot whose position is off the globe is dropped and counted, and the target stays. An altitude beyond `i32` feet is clamped to one above the absent value
+  and counted, an altitude flagged present but not a number is counted and shown absent, a speed beyond the field is the
+  largest it holds, a 95% radius that is not a number or does not fit `f32` is unknown (counted) and a reacquired window
+  that could equal the absent age is refused. Time differences that do not fit an `i64` are older than any window and
+  an overflow in the history lookup is counted. The stored `Row` has a size guard of 32 bytes.
+- **OA-DSP-048** Callsigns are the newest heard at or before the frame's time, never a later one. Two different
+  callsigns for one address at one instant are a conflict, reported as such and the same whatever order the reports
+  came in; the conflict stands until the next report with a callsign. Callsign inputs of different lengths are an
+  error.
+- **OA-DSP-049** `--start` is parsed with integer arithmetic only: Unix seconds (digits, and a point with up to nine
+  more) or `YYYY-MM-DDTHH:MM:SS[.fffffffff]Z` with fields of fixed width, a year from 1970 to 2261 (the last whole year
+  an `i64` of nanoseconds holds), a day the month has (leap years included), no leap second. A time that does not fit
+  is refused with a usage error and never saturated; fractional nanoseconds are kept exactly. Durations and steps use
+  the same integer parser.
+- **OA-DSP-050** `oa-scope-replay` refuses an `--out-dir` that is not empty unless `--overwrite` is given, which deletes
+  only the files the tool writes (`frame-NNNN.ppm` and `hashes.txt`) before the run writes its own.
+- **OA-DSP-051** `oa-scope-replay` ends with a report of what it excluded or lost, each reason named on its own and
+  with its denominator (clip frames by kind, decode, quality-gate removals by reason, tracker refusals by reason, rows
+  by reason, callsigns, every part of a target by reason), and exits with code 3 after writing its output when work
+  was lost, unless `--allow-loss` is given. Exit codes: 0 success, 1 a failure, 2 a usage error (including a duration
+  that is not a multiple of the step), 3 work was lost.
+  **Loss** is work the run was asked to do and did not: damaged clip frames, payloads that could not be decoded,
+  reject frames (messages the bridge refused to frame, so input that never arrived), tracker output rows that
+  overflowed, valid measurements the tracker could not use (no track slot, a numerical failure), rows the store
+  refused (address table, rows per address, a missing column), addresses that could not be put in time order, targets
+  the display refused (full, malformed, columns unreadable), positions off the globe or that do not project, a leader,
+  a circle (or one drawn smaller than true), a history dot or a text that could not be drawn, a stamp clipped, and
+  history dots dropped for a position off the globe.
+  **Not loss**, because the system did what it is for or the screen says so: reports removed by the ADS-B quality gates
+  and records the decoder dropped as invalid, and measurements the tracker refused as invalid or rejected by the jump
+  rule (input that is wrong is refused and counted by reason, not work lost), status frames, clip frames and tracker
+  rows outside the window, tracks that ended, targets off the map, empty callsigns, callsign conflicts (shown as
+  `CS?`), values clamped or shown unknown (velocity or altitude not a number, a 95% radius unknown), and altitudes
+  beyond the data block, written `999+` or `-99-`. There is no limit on a fraction removed by the quality gates.
+- **OA-DSP-052** A full traffic frame allocates nothing after the tables are built: the rows to targets conversion, the
+  traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
+  chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
+  (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
 
 ### Replay and flight state (oa-replay)
 
@@ -4178,3 +4346,54 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the POI does not, the POA carries 07 a, b, c, the POJ is a Field 18 reason, metric altitude is
   allowed in Field 32(e), none of the Attachment 2 additions apply, and a POA or POJ expects no
   response. All other messages and fields are as under `Core`.
+- **OA-NAM-032** A message kind with no definition in the schema is an error (`Mnemonic`, code 60),
+  never another message's definition: `spec` and `spec_for` return `None`, and `parse_header`,
+  `fmt_header` and `encode` refuse.
+- **OA-NAM-033** Message-number arithmetic in the session is reduced modulo 1000 before it is
+  used, so no `u16` value in `next_number`, `rx_last_number` or a header number can overflow it.
+- **OA-NAM-034** The session counts every discard and every refused send under its reason
+  (saturating, `discard_count` and `refusal_count`), in addition to returning it as an action.
+- **OA-NAM-035** After `new_session`, `session::step` allocates nothing through activation,
+  message traffic, retries, a full pending table and deactivation (the `nam_session` route of
+  `validation/oa-alloc-check`).
+
+## Release replay comparison (oa-track canonical output, oa-replay-diff)
+- **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
+  position, velocity, turn rate, altitude terms, position and velocity covariance terms, model
+  probabilities and flags, every field little-endian at a fixed offset (`oa_track::canon`), floats as
+  their IEEE bits so a NaN keeps its sign and payload, nothing zeroed or normalised. The same row
+  gives the same bytes on every call, and the form built from a row in memory equals the form built
+  from the column files of a spilled run.
+- **OA-TRK-361** The digest of an output second is the SHA-256 of the canonical rows whose time
+  falls in that Unix second, in the order the tracker emitted them; the chain hash of a second is the
+  SHA-256 of the chain hash before it (32 zero bytes at the start), the second, its digest and its row
+  count. A change to one second changes that second's digest and every chain hash from it on, and
+  leaves the digests of the other seconds unchanged.
+- **OA-TRK-362** `oa-track-run --digest <file>` writes the digest as text lines
+  `second chain_hash second_hash rows` after one `#` header line, and `--rows <file>` writes the
+  canonical rows, grouped by ascending second (each second in emission order), behind a versioned
+  binary header (magic, version, row size, row count). With neither flag the run does what it did
+  before and writes nothing more.
+- **OA-TRK-363** Two runs of the tracker on the same input write byte-identical digest and rows files.
+- **OA-RDF-001** `oa-replay-diff` calls two digests identical only when every line, chain hash
+  included, is equal; otherwise it reports the first differing second, the number of differing
+  seconds (a second whose rows differ in hash or count, or that only one run has) and how many seconds
+  only one run has.
+- **OA-RDF-002** A malformed digest file (wrong field count, a number or hash that does not parse,
+  seconds not strictly increasing) is an error naming the line, and the tool exits 2.
+- **OA-RDF-003** Given both rows files, for each differing second the tool reports the rows added,
+  removed and changed (rows matched by track address, time, tick flag and order among equals), the
+  tracks affected, the changed rows by class (position, velocity, covariance, flags, model), the
+  largest absolute difference of every field over finite values, the count of changed non-finite
+  values, and the flag bits that differ; a second whose rows are equal and only reordered is reported
+  as reordered. Totals follow, and a `key=value` summary.
+- **OA-RDF-004** With an expect file naming the declared classes (`position`, `velocity`,
+  `covariance`, `flags`, `model`, `added`, `removed`, `order`), a difference is accepted (exit 0) only
+  if every class present is declared; an undeclared class, or an expect file without rows files to
+  tell the classes, is a failure (exit 1 or 2), and an unknown class name is an error.
+- **OA-RDF-005** A rows file with a wrong magic, version or row size, truncated, not grouped by
+  ascending second, or whose row counts disagree with its digest file is an error (exit 2), never a
+  comparison.
+- **OA-RDF-006** `tools/replay_compare.sh` accepts only commit hashes or refs of the repository,
+  refuses a working-tree or option-like spec, builds each commit in its own clean detached worktree,
+  one build at a time, and records both commits and the clip's SHA-256 in its report.

@@ -15,7 +15,9 @@ oa-adsb = { path = "../oa-adsb" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
 oa-sha256 = { path = "../oa-sha256" }
+# Workspace crates (platform-independent maths, B6, B10); not outside dependencies (RULESET F1).
+oa-math = { path = "../oa-math" }
+oa-ieee = { path = "../oa-ieee" }
 
-[[bin]]
-name = "oa-truth-check"
-path = "src/main.rs"
+[package.metadata.openatca]
+class = "split"

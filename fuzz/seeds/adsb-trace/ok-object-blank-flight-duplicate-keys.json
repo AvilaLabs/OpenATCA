@@ -1,0 +1,1 @@
+{"icao":"abc123","timestamp":1700000000.000,"trace":[[1,40.0,-90.0,100,1.0,1.0,0,0,{"sil_type":"unknown","flight":"        ","category":"c2"},"adsb_icao"],[1,40.0,-90.0,100,1.0,1.0,0,0,{"nac_p":3,"nac_p":9},"adsb_icao"]]}

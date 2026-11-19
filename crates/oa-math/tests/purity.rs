@@ -9,8 +9,11 @@
 use std::path::Path;
 
 /// Method or associated-function names that are not guaranteed correctly rounded by IEEE-754
-/// (or that some targets lower to a libm call). `sqrt`, `abs` and bit casts are allowed.
+/// (or that some targets lower to a libm call), and the methods `core` lacks, which the crate
+/// reaches through `oa_ieee` instead (`sqrt`, `floor`, `ceil`, `trunc`, `round`). `abs` and bit
+/// casts are allowed.
 const BANNED: &[&str] = &[
+    "sqrt",
     "sin",
     "cos",
     "tan",
@@ -62,6 +65,9 @@ const BANNED: &[&str] = &[
 /// The lines that use `%` on integers (bit positions in the Payne-Hanek code).
 const INTEGER_REM: &[&str] = &["let s = pos % 64;", "let s = lo % 64;", "let s = lz % 64;"];
 
+/// The one float `%` allowed: `fmod` is an exact operation, and `rem_euclid` is built on it.
+const EXACT_FLOAT_REM: &str = "let r = a % b;";
+
 fn sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
@@ -92,6 +98,8 @@ fn sources_call_no_platform_maths_function() {
     let files = sources();
     assert!(files.len() >= 10, "found {} source files", files.len());
     let mut hits = Vec::new();
+    // how many times the one allowed float remainder appears, in rem.rs only
+    let mut exact_rem = 0;
     for (name, text) in &files {
         for (n, line) in text.lines().enumerate() {
             let code = code_part(line);
@@ -114,8 +122,11 @@ fn sources_call_no_platform_maths_function() {
                     }
                 }
             }
-            // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below.
-            if code.contains('%') && !INTEGER_REM.contains(&code.trim()) {
+            // `%` on floats lowers to fmod. The only `%` allowed are the integer shifts below
+            // and the exact `fmod` of `rem_euclid`.
+            if name == "rem.rs" && code.trim() == EXACT_FLOAT_REM {
+                exact_rem += 1;
+            } else if code.contains('%') && !INTEGER_REM.contains(&code.trim()) {
                 hits.push(format!("{name}:{}: `%` (float remainder is fmod)", n + 1));
             }
             for word in [
@@ -133,6 +144,13 @@ fn sources_call_no_platform_maths_function() {
                 }
             }
         }
+    }
+    // exactly one occurrence, so a second `a % b` in rem.rs, or a file named rem.rs elsewhere,
+    // is not allowed by the same exception
+    if exact_rem != 1 {
+        hits.push(format!(
+            "`{EXACT_FLOAT_REM}` appears {exact_rem} times in rem.rs, expected exactly 1"
+        ));
     }
     assert!(
         hits.is_empty(),
@@ -163,19 +181,32 @@ fn the_check_also_finds_a_bare_path_and_a_float_remainder() {
     });
     assert!(found);
     assert!(!INTEGER_REM.contains(&"let r = x % 2.0;"));
+    // the one allowed float remainder is that exact line only, and only in rem.rs
+    assert_ne!("let r = x % 2.0;", EXACT_FLOAT_REM);
 }
 
 // REQ: OA-MATH-019
 #[test]
-fn manifest_has_no_dependencies() {
+fn manifest_depends_only_on_oa_ieee() {
     let toml =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    // the [dependencies] table only, up to the next table header
     let after = toml.split("[dependencies]").nth(1).unwrap();
+    let after = after.split("\n[").next().unwrap();
     assert!(
-        after
-            .lines()
-            .all(|l| l.trim().is_empty() || l.trim().starts_with('#')),
-        "oa-math must have no dependencies, found: {after}"
+        after.lines().all(|l| l.trim().is_empty()
+            || l.trim().starts_with('#')
+            || l.trim() == "oa-ieee = { path = \"../oa-ieee\" }"),
+        "oa-math may depend only on oa-ieee, found: {after}"
     );
     assert!(!toml.contains("dev-dependencies") && !toml.contains("build-dependencies"));
+}
+
+// REQ: OA-MATH-019
+#[test]
+fn the_library_is_no_std_outside_tests() {
+    let lib =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
+    assert!(lib.contains("#![cfg_attr(not(test), no_std)]"));
+    assert!(lib.contains("#![forbid(unsafe_code)]"));
 }

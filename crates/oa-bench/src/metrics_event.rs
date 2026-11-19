@@ -1,4 +1,4 @@
-//! Metrics F1 to F3, R1 and H1: time estimates, routes and handoffs against truth. Core (pure).
+//! Metrics F1 to F3, R1 and H1: time estimates, routes and handoffs against truth. Shell (B7: `flight_windows` is a `HashMap`, lookups only, which B8 bans from core).
 //!
 //! **Truth crossing of a fix** (M2_DESIGN section 3): the time of closest approach of the truth
 //! path to the fix, found on a coarse grid then refined, accepted only when the refined distance

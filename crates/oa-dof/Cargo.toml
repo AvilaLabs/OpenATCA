@@ -14,3 +14,6 @@ workspace = true
 [dev-dependencies]
 # F1: path dependency inside this workspace, to read the FAA zip in the real-data test.
 oa-zip = { path = "../oa-zip" }
+
+[package.metadata.openatca]
+class = "shell"
