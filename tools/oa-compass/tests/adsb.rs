@@ -157,6 +157,13 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     }
     // No quality item: no NICBARO or PIC to note, and no LTT without I210.
     assert!(!n.contains(&ANOTE_NICBARO) && !n.contains(&ANOTE_PIC) && !n.contains(&ANOTE_LTT));
+    // A callsign padded with NULs is the callsign with spaces; a NUL inside it is refused.
+    let mut p = full();
+    p.callsign = *b"N911ZP\0\0";
+    assert_eq!(adsb_record(&p).unwrap().values.ident, Some(*b"N911ZP  "));
+    p.callsign = *b"N9\x0011ZP\0";
+    let c = adsb_record(&p).unwrap();
+    assert!(c.values.ident.is_none() && noted(&c).contains(&ANOTE_IDENT_CHARS));
     // A ground report has no flight level, an all-space callsign is none.
     let mut g = full();
     g.ground = true;

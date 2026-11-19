@@ -4444,7 +4444,8 @@ scope.
   category without an I020 code, MOPS version 3), is left out of the record and counted by item and reason;
   nothing is clipped.
 - **OA-CMP-021** A non-ICAO address is written with ATP 3, a ground report sets GBS and has no flight level, a
-  field that does not fit its bits counts as absent, and the emitter categories map to the I020 codes.
+  field that does not fit its bits counts as absent, a callsign padded with NUL is the callsign padded with
+  spaces (a NUL inside it is refused), and the emitter categories map to the I020 codes.
 - **OA-CMP-022** A position beyond 90 or 180 degrees refuses the report; +180 degrees is written as -180 and
   counted; the position error is at most 1 unit of 1e-7 degree; a time within 1/256 s before midnight belongs
   to the next day.

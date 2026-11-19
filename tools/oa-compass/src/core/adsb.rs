@@ -128,7 +128,7 @@ pub struct AdsbRow {
     pub gs_dkt: Option<u16>,
     /// Ground track, 0.1 degree.
     pub track_ddeg: Option<u16>,
-    /// Eight characters, all zero if the report has none.
+    /// Eight characters, padded with spaces or NULs; all zero if the report has none.
     pub callsign: [u8; 8],
     /// ADS-B emitter category byte (`0xA3` for A3), 0 if the report has none.
     pub category: u8,
@@ -251,6 +251,20 @@ pub fn emitter_code(category: u8) -> Option<u8> {
     }
 }
 
+/// `c` with its trailing NUL octets (the padding of a callsign shorter than eight characters)
+/// turned into spaces, the padding of I021/170. A NUL before a character stays and is refused.
+fn padded_with_spaces(c: &[u8; 8]) -> [u8; 8] {
+    let mut out = *c;
+    for b in out.iter_mut().rev() {
+        if *b == 0 {
+            *b = b' ';
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// `A` to `Z`, `0` to `9` and space: the six-bit character set of I021/170.
 fn ident_ok(c: &[u8; 8]) -> bool {
     c.iter()
@@ -337,11 +351,13 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
             None
         }
     };
-    let ident = if r.callsign == [0u8; 8] || r.callsign == *b"        " {
+    // The stored callsign is padded with NUL, or with spaces; trailing padding is spaces in the item.
+    let callsign = padded_with_spaces(&r.callsign);
+    let ident = if callsign == *b"        " {
         notes |= bit(ANOTE_IDENT_ABSENT);
         None
-    } else if ident_ok(&r.callsign) {
-        Some(r.callsign)
+    } else if ident_ok(&callsign) {
+        Some(callsign)
     } else {
         notes |= bit(ANOTE_IDENT_CHARS);
         None
