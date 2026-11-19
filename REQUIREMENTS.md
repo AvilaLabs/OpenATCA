@@ -1209,8 +1209,11 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
   the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
   address 2^18, rows 2^24) is refused and counted, except that the total-rows cap is checked from the sizes the input declares
-  before any row is stored and aborts the run with an error before the frame loop. The work of one frame is bounded
-  by those capacities and stated beside them in the source. An altitude beyond `i32` feet is clamped to one above the absent value
+  before any row is stored and aborts the run with an error before the frame loop. The store and the callsigns are built by the shell, once per drain, with the capacities a parameter; the core reads
+  them without allocating. The work of one frame is a fixed number of binary searches per address (the newest row, the
+  callsign, the newest reacquired row, the history dots), stated beside the capacities. Rows of one address at one
+  time keep the order the tracker wrote them and the later one wins. A velocity that is not a number is counted and
+  shown unknown; a history dot whose position is off the globe is dropped and counted, and the target stays. An altitude beyond `i32` feet is clamped to one above the absent value
   and counted, an altitude flagged present but not a number is counted and shown absent, a speed beyond the field is the
   largest it holds, a 95% radius that is not a number or does not fit `f32` is unknown (counted) and a reacquired window
   that could equal the absent age is refused. Time differences that do not fit an `i64` are older than any window and
@@ -1226,21 +1229,28 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   the same integer parser.
 - **OA-DSP-050** `oa-scope-replay` refuses an `--out-dir` that is not empty unless `--overwrite` is given, which deletes
   only the files the tool writes (`frame-NNNN.ppm` and `hashes.txt`) before the run writes its own.
-- **OA-DSP-051** `oa-scope-replay` ends with a report of what it excluded or lost, each by named reason and with its
-  denominator (clip decode, quality-gate removals by reason, tracker refusals by reason, rows by reason, callsigns,
-  targets), and exits non-zero after writing its output when work was lost (damaged or undecodable clip frames, tracker
-  rows or measurements lost, rows refused by the store, targets refused or parts of targets not drawn) unless
-  `--allow-loss` is given. Loss is counted by reason and is any one of: the damaged, undecodable or unusable input
-  frames, tracker rows or measurements dropped or refused, store refusals and inconsistent columns, targets refused at
-  capacity or malformed, positions off the globe or that do not project, and parts of a target that could not be
-  drawn. There is no limit on a fraction removed by the quality gates: they are reported by reason, as designed, and
-  are not loss. Targets off the map, rows before the window, ended tracks, altitudes marked `999+`, and values shown
-  as unknown are not loss. Exit codes: 0 success, 1 failure, 2 usage error (including a duration that is not a
-  multiple of the step), 3 work was lost.
+- **OA-DSP-051** `oa-scope-replay` ends with a report of what it excluded or lost, each reason named on its own and
+  with its denominator (clip frames by kind, decode, quality-gate removals by reason, tracker refusals by reason, rows
+  by reason, callsigns, every part of a target by reason), and exits with code 3 after writing its output when work
+  was lost, unless `--allow-loss` is given. Exit codes: 0 success, 1 a failure, 2 a usage error (including a duration
+  that is not a multiple of the step), 3 work was lost.
+  **Loss** is work the run was asked to do and did not: damaged clip frames, payloads that could not be decoded,
+  reject frames (messages the bridge refused to frame, so input that never arrived), tracker output rows that
+  overflowed, valid measurements the tracker could not use (no track slot, a numerical failure), rows the store
+  refused (address table, rows per address, a missing column), addresses that could not be put in time order, targets
+  the display refused (full, malformed, columns unreadable), positions off the globe or that do not project, a leader,
+  a circle (or one drawn smaller than true), a history dot or a text that could not be drawn, a stamp clipped, and
+  history dots dropped for a position off the globe.
+  **Not loss**, because the system did what it is for or the screen says so: reports removed by the ADS-B quality gates
+  and records the decoder dropped as invalid, and measurements the tracker refused as invalid or rejected by the jump
+  rule (input that is wrong is refused and counted by reason, not work lost), status frames, clip frames and tracker
+  rows outside the window, tracks that ended, targets off the map, empty callsigns, callsign conflicts (shown as
+  `CS?`), values clamped or shown unknown (velocity or altitude not a number, a 95% radius unknown), and altitudes
+  beyond the data block, written `999+` or `-99-`. There is no limit on a fraction removed by the quality gates.
 - **OA-DSP-052** A full traffic frame allocates nothing after the tables are built: the rows to targets conversion, the
   traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
-  chain (a non-empty airspace map, traffic, stamp, pixels) run under the counting allocator of `validation/oa-alloc-check`
-  (window `display_window`) with zero allocations, a positive control for each allocation call and a negative control that injects one.
+  chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
+  (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
 
 ### Replay and flight state (oa-replay)
 

@@ -129,7 +129,7 @@ everything it excluded or lost, by reason, and ends with exit code 3 if work was
 of steps among them). The tracker is linked in that crate and not here, so the display stays free of it.
 
 Peak memory of a run, from the named capacities: the row store is at most 2^24 rows of 32 bytes
-(512 MiB); the callsign changes at most 2^25 entries of about 17 bytes (about 544 MiB, far less in
+(512 MiB, and the reacquired times, 8 bytes for each reacquired row, a small part of it); the callsign changes at most 2^25 entries of about 17 bytes (about 544 MiB, far less in
 practice); one tracker output table, the display tables and the frame buffer (`width * height * 4`,
 8 MiB at 1920x1080) are small beside them. Together at most about 1.1 GiB, reached only by a
 window larger than any clip this tool is sized for; a typical hour is a few hundred MiB.
