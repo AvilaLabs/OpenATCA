@@ -1005,19 +1005,20 @@ fn random_scratch(seed: &mut u64, n: usize) -> Scratch {
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
     let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, LEGEND_STRIP_PX as i32 * 16, 1920 * 16, 1080 * 16];
+    s.used = n;
     for i in 0..n {
         let chars = 2 + lcg(seed) as usize % 7;
-        s.prio.push(1 + (lcg(seed) % 5) as u8);
-        s.x.push((lcg(seed) % (1920 * 16)) as i32);
-        s.y.push((lcg(seed) % (1080 * 16)) as i32);
-        s.gap.push(8 * 16);
-        s.w.push(((chars * 6 - 2) * 24) as i32);
-        s.point.push(i as u32);
+        s.prio[i] = 1 + (lcg(seed) % 5) as u8;
+        s.x[i] = (lcg(seed) % (1920 * 16)) as i32;
+        s.y[i] = (lcg(seed) % (1080 * 16)) as i32;
+        s.gap[i] = 8 * 16;
+        s.w[i] = ((chars * 6 - 2) * 24) as i32;
+        s.point[i] = i as u32;
     }
     // Priority, then the candidate number as the stable key.
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_by_key(|&i| (s.prio[i as usize], i));
-    s.order = order;
+    s.order[..n].copy_from_slice(&order);
     s
 }
 
@@ -1051,7 +1052,7 @@ fn placement_property_no_overlap_and_a_drop_means_every_offset_is_blocked_by_an_
         // overlapping a label placed earlier, which has equal or higher priority.
         let pos: Vec<usize> = {
             let mut p = vec![0; n];
-            for (o, &i) in s.order.iter().enumerate() {
+            for (o, &i) in s.order[..n].iter().enumerate() {
                 p[i as usize] = o;
             }
             p
@@ -1098,15 +1099,18 @@ fn a_full_grid_cell_drops_the_label_and_counts_it_without_overflowing() {
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
     let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, 104 * 16, 1920 * 16, 1080 * 16];
+    s.used = n;
     for i in 0..n {
-        s.prio.push(4);
-        s.x.push((i as i32 % 12) * 5 * 16 + 64 * 16 * 3);
-        s.y.push((i as i32 / 12) * 16 * 16 + 64 * 16 * 3);
-        s.gap.push(0);
-        s.w.push(16);
-        s.point.push(i as u32);
+        s.prio[i] = 4;
+        s.x[i] = (i as i32 % 12) * 5 * 16 + 64 * 16 * 3;
+        s.y[i] = (i as i32 / 12) * 16 * 16 + 64 * 16 * 3;
+        s.gap[i] = 0;
+        s.w[i] = 16;
+        s.point[i] = i as u32;
     }
-    s.order = (0..n as u32).collect();
+    for (i, o) in s.order.iter_mut().enumerate() {
+        *o = i as u32;
+    }
     let placed = place_labels(&mut s);
     let full = s
         .outcome

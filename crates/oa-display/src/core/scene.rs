@@ -463,6 +463,9 @@ pub fn scene_caps(m: &Model) -> Result<ListCaps, DisplayError> {
 pub struct Scratch {
     /// Candidate capacity: the number of points in the model.
     pub cap: usize,
+    /// Candidates the frame has filled so far (at most `cap`); every per-candidate buffer below
+    /// has a fixed length of `cap` and is written by index, so a frame never grows one.
+    pub used: usize,
     /// Per candidate, filled by the frame: priority (1 first), symbol centre and gap to the label,
     /// label width (all 1/16 pixel), model point row.
     pub prio: Vec<u8>,
@@ -527,15 +530,16 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
     }
     Ok(Scratch {
         cap: n,
-        prio: Vec::with_capacity(n),
-        x: Vec::with_capacity(n),
-        y: Vec::with_capacity(n),
-        gap: Vec::with_capacity(n),
-        w: Vec::with_capacity(n),
-        point: Vec::with_capacity(n),
-        order: Vec::with_capacity(n),
-        order_tmp: Vec::with_capacity(n),
-        outcome: Vec::with_capacity(n),
+        used: 0,
+        prio: vec![0; n],
+        x: vec![0; n],
+        y: vec![0; n],
+        gap: vec![0; n],
+        w: vec![0; n],
+        point: vec![0; n],
+        order: vec![0; n],
+        order_tmp: vec![0; n],
+        outcome: vec![DROPPED_NO_ROOM; n],
         overflow: 0,
         cols,
         rows,
@@ -547,14 +551,7 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
 
 /// Empties the candidates and the grid and sets where labels may lie.
 fn scratch_clear(s: &mut Scratch, p: &Projection) {
-    s.prio.clear();
-    s.x.clear();
-    s.y.clear();
-    s.gap.clear();
-    s.w.clear();
-    s.point.clear();
-    s.order.clear();
-    s.outcome.clear();
+    s.used = 0;
     s.overflow = 0;
     s.cell_n.fill(0);
     let px16 = |v: u32| i32::try_from(i64::from(v) * 16).unwrap_or(i32::MAX);
@@ -677,10 +674,11 @@ pub fn label_geom(gap: i32, w: i32, cx: i32, cy: i32, k: u8) -> ((i32, i32), u8,
 /// Places every candidate in `s.order` at its first free offset and records the outcome per
 /// candidate. Returns the number placed.
 pub fn place_labels(s: &mut Scratch) -> u32 {
-    s.outcome.clear();
-    s.outcome.resize(s.prio.len(), DROPPED_NO_ROOM);
+    for o in s.outcome.iter_mut().take(s.used) {
+        *o = DROPPED_NO_ROOM;
+    }
     let mut placed = 0;
-    for oi in 0..s.order.len() {
+    for oi in 0..s.used {
         let Some(&i) = s.order.get(oi) else { break };
         let i = i as usize;
         let (Some(&cx), Some(&cy), Some(&gap), Some(&w)) =
@@ -989,15 +987,15 @@ pub fn build_scene(
         });
     }
     if sc.cap < point_rows
-        || sc.prio.capacity() < point_rows
-        || sc.x.capacity() < point_rows
-        || sc.y.capacity() < point_rows
-        || sc.gap.capacity() < point_rows
-        || sc.w.capacity() < point_rows
-        || sc.point.capacity() < point_rows
-        || sc.order.capacity() < point_rows
-        || sc.order_tmp.capacity() < point_rows
-        || sc.outcome.capacity() < point_rows
+        || sc.prio.len() < point_rows
+        || sc.x.len() < point_rows
+        || sc.y.len() < point_rows
+        || sc.gap.len() < point_rows
+        || sc.w.len() < point_rows
+        || sc.point.len() < point_rows
+        || sc.order.len() < point_rows
+        || sc.order_tmp.len() < point_rows
+        || sc.outcome.len() < point_rows
     {
         return Err(DisplayError::BadView(
             "label scratch capacity is below the model point count",
@@ -1496,13 +1494,26 @@ fn points(
                 };
         let name = str_or_empty(&m.strings, *ident);
         if wanted && !name.is_empty() {
-            if sc.prio.len() < sc.cap {
-                sc.prio.push(prio);
-                sc.x.push(c.0);
-                sc.y.push(c.1);
-                sc.gap.push(gap);
-                sc.w.push(legend_width16(name.chars().count()));
-                sc.point.push(i as u32);
+            if sc.used < sc.cap {
+                let k = sc.used;
+                let width = legend_width16(name.chars().count());
+                // The buffers hold at least `point_rows >= cap` entries (checked up front), so
+                // every write lands.
+                for (buf, v) in [(&mut sc.x, c.0), (&mut sc.y, c.1), (&mut sc.gap, gap)] {
+                    if let Some(slot) = buf.get_mut(k) {
+                        *slot = v;
+                    }
+                }
+                if let Some(slot) = sc.prio.get_mut(k) {
+                    *slot = prio;
+                }
+                if let Some(slot) = sc.w.get_mut(k) {
+                    *slot = width;
+                }
+                if let Some(slot) = sc.point.get_mut(k) {
+                    *slot = i as u32;
+                }
+                sc.used += 1;
             } else {
                 sc.overflow += 1;
             }
@@ -1518,9 +1529,10 @@ fn labels(
     sc: &mut Scratch,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
-    let n = sc.prio.len();
-    sc.order.clear();
-    sc.order.extend(0..n as u32);
+    let n = sc.used;
+    for (i, o) in sc.order.iter_mut().take(n).enumerate() {
+        *o = i as u32;
+    }
     let key = |s: &Scratch, c: u32| {
         let c = c as usize;
         let row = s.point.get(c).copied().unwrap_or(0) as usize;
@@ -1540,18 +1552,21 @@ fn labels(
     // The key ends with the table row, so the order is total and any correct sort gives it.
     let mut order = std::mem::take(&mut sc.order);
     let mut tmp = std::mem::take(&mut sc.order_tmp);
-    tmp.clear();
-    tmp.resize(order.len(), 0);
-    let sorted = merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
-        key(sc, *a).cmp(&key(sc, *b))
-    });
+    let sorted = match (order.get_mut(..n), tmp.get_mut(..n)) {
+        (Some(data), Some(scratch)) => {
+            merge_sort_by(data, scratch, &mut |a, b| key(sc, *a).cmp(&key(sc, *b)))
+        }
+        _ => Err(DisplayError::BadView(
+            "label scratch is shorter than the candidates",
+        )),
+    };
     sc.order = order;
     sc.order_tmp = tmp;
     sorted?;
     let placed = place_labels(sc);
     st.labels = placed;
     st.labels_dropped = (n as u32 - placed).saturating_add(sc.overflow);
-    for oi in 0..sc.order.len() {
+    for oi in 0..sc.used {
         let Some(&c) = sc.order.get(oi) else { break };
         let c = c as usize;
         let Some(&k) = sc.outcome.get(c) else {
@@ -2009,5 +2024,64 @@ mod work_budget_tests {
                 }
             }
         }
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn a_cloned_scratch_renders_the_same_scene_and_a_shortened_buffer_is_refused() {
+        let model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let index = scene_index(&model);
+        let scratch = scratch_for(&model, &view).unwrap();
+        let caps = ListCaps {
+            lines: 64,
+            rects: 8,
+            circles: 32,
+            polylines: 32,
+            poly_vertices: 64,
+            texts: 128,
+            text_bytes: 4096,
+        };
+        let mut list = list_new(caps).unwrap();
+        let mut original = scratch.clone();
+        let mut cloned = scratch.clone();
+        assert!(build_scene(&mut list, &model, &index, &view, &mut original).is_ok());
+        let mut list2 = list_new(caps).unwrap();
+        assert!(build_scene(&mut list2, &model, &index, &view, &mut cloned).is_ok());
+        assert_eq!(list.lines.x0, list2.lines.x0);
+
+        // One point, so every candidate buffer has length 1; shorten each in turn to 0.
+        let mut one = empty_display_model();
+        one.points.kind.push(0);
+        one.points.ident.push(oa_airspace::model::StrIx::NONE);
+        let sc = scratch_for(&one, &view).unwrap();
+        assert!(sc.prio.len() == 1 && sc.order_tmp.len() == 1 && sc.outcome.len() == 1);
+        let mut list = list_new(caps).unwrap();
+        let idx = scene_index(&one);
+        type Cut = fn(&mut Scratch);
+        let cuts: [Cut; 9] = [
+            |s| s.prio.clear(),
+            |s| s.x.clear(),
+            |s| s.y.clear(),
+            |s| s.gap.clear(),
+            |s| s.w.clear(),
+            |s| s.point.clear(),
+            |s| s.order.clear(),
+            |s| s.order_tmp.clear(),
+            |s| s.outcome.clear(),
+        ];
+        for (i, cut) in cuts.iter().enumerate() {
+            let mut broken = sc.clone();
+            cut(&mut broken);
+            assert!(
+                matches!(
+                    build_scene(&mut list, &one, &idx, &view, &mut broken),
+                    Err(DisplayError::BadView(_))
+                ),
+                "buffer {i}"
+            );
+        }
+        let mut ok = sc.clone();
+        assert!(build_scene(&mut list, &one, &idx, &view, &mut ok).is_ok());
     }
 }
