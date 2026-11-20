@@ -7,11 +7,11 @@ use oa_json::{Doc, Kind, NodeIx};
 use crate::{
     is_reserved_address, reports_push, stats_note_unknown, Filter, Reports, Row, Stats,
     FLD_ALTITUDE, FLD_CATEGORY, FLD_FLAGS, FLD_FLIGHT, FLD_GEOM_ALT, FLD_GVA, FLD_NAC_P, FLD_NAC_V,
-    FLD_NIC, FLD_OBJECT, FLD_RATE, FLD_SDA, FLD_SIL, FLD_SIL_TYPE, FLD_SOURCE, FLD_SPEED,
-    FLD_SQUAWK, FLD_TRACK, FLD_VERSION, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN, MAX_TRACE_NODES,
-    MAX_TRACE_ROWS, NONE_I16, NONE_U16, NONE_U8, NON_ICAO, REJ_FLAGS, REJ_POSITION, REJ_SHAPE,
-    REJ_TIME, ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN, SOURCE_NAMES, SOURCE_UNKNOWN,
-    TIME_MAX_NS, TIME_MIN_NS,
+    FLD_NIC, FLD_NIC_BARO, FLD_OBJECT, FLD_RATE, FLD_SDA, FLD_SIL, FLD_SIL_TYPE, FLD_SOURCE,
+    FLD_SPEED, FLD_SQUAWK, FLD_TRACK, FLD_VERSION, F_GROUND, MAX_OBJECT_MEMBERS, MAX_ROW_LEN,
+    MAX_TRACE_NODES, MAX_TRACE_ROWS, NONE_I16, NONE_U16, NONE_U8, NON_ICAO, REJ_FLAGS,
+    REJ_POSITION, REJ_SHAPE, REJ_TIME, ROW_EMPTY, SIL_PER_HOUR, SIL_PER_SAMPLE, SIL_UNKNOWN,
+    SOURCE_NAMES, SOURCE_UNKNOWN, TIME_MAX_NS, TIME_MIN_NS,
 };
 
 /// Why a whole trace file was refused.
@@ -265,6 +265,7 @@ fn read_object(doc: &Doc<'_>, obj: NodeIx, row: &mut Row, bad: &mut u64, st: &mu
             "sil" => row.sil = small_field(doc, v, 3, FLD_SIL, st),
             "gva" => row.gva = small_field(doc, v, 3, FLD_GVA, st),
             "sda" => row.sda = small_field(doc, v, 3, FLD_SDA, st),
+            "nic_baro" => row.nic_baro = small_field(doc, v, 1, FLD_NIC_BARO, st),
             "version" => row.version = small_field(doc, v, 7, FLD_VERSION, st),
             "sil_type" => match doc.str(v) {
                 Some("unknown") => row.sil_type = SIL_UNKNOWN,

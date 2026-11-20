@@ -21,6 +21,7 @@ use oa_asterix::{decode_block, Block, SourceId};
 
 use super::encode::{BlockSink, SinkStats};
 use super::error::{io_err, ExportError};
+use super::guard::refuse_sealed_row;
 use crate::core::convert::{count_notes, Converted, Refusal, NOTES};
 use crate::core::stats::{summarize, IntervalSummary};
 use crate::core::time::civil_from_days;
@@ -62,7 +63,15 @@ pub struct DayReport {
     pub day: i64,
     pub file: String,
     pub sink: SinkStats,
+    /// Track numbers used (I040): one per segment of a key.
     pub tracks: u64,
+    /// Distinct keys (an address for OpenATCA, a flight for ERAM).
+    pub keys: u64,
+    /// Keys that have more than one segment (a track restart).
+    pub keys_multi_segment: u64,
+    /// Track restarts: segments after a key's first. Each left its one pair of rows (the last row
+    /// of the old segment and the first of the new) out of the interval statistics.
+    pub restarts: u64,
     pub notes: [u64; NOTES],
     /// Time between consecutive rows of one track, over all tracks of the file.
     pub intervals: IntervalSummary,
@@ -94,7 +103,12 @@ struct DayFile {
     partial: PathBuf,
     path: PathBuf,
     /// Key to (track number, time of its last row).
-    tracks: BTreeMap<u32, (u16, u32)>,
+    /// Key to (track number, time of its last row in 1/128 s, segments, segment of its last row).
+    tracks: BTreeMap<u32, (u16, u32, u32, u32)>,
+    /// Restarts (a key's second and later segments) and the row pairs they left out of `intervals`.
+    restarts: u64,
+    /// Last track number allocated.
+    last_number: u16,
     notes: [u64; NOTES],
     /// Histogram of the interval between consecutive rows of one track, 1/128 s to count.
     intervals: BTreeMap<u32, u64>,
@@ -176,6 +190,22 @@ impl SystemExport {
 
     /// Adds a converted row of track `key` (the position it came from is `src_e7`).
     pub fn push(&mut self, c: &Converted, key: u32, src_e7: (i32, i32)) -> Result<(), ExportError> {
+        self.push_segment(c, key, 0, src_e7)
+    }
+
+    /// [`push`](Self::push) for a row of segment `segment` of `key`: a track instance of the
+    /// key. A row whose segment differs from the key's previous row's starts a new track number
+    /// (a track restart); the pair of rows that spans it is not an interval of one track. The
+    /// caller (the tracker run) knows the instance from the tracker's own end events; a system
+    /// whose key is a track already (ERAM) passes 0.
+    pub fn push_segment(
+        &mut self,
+        c: &Converted,
+        key: u32,
+        segment: u32,
+        src_e7: (i32, i32),
+    ) -> Result<(), ExportError> {
+        refuse_sealed_row(self.name, c.day)?;
         if !self.layout.split && c.day != self.layout.day {
             return Err(ExportError::CrossesMidnight {
                 system: self.name,
@@ -200,6 +230,8 @@ impl SystemExport {
                     partial,
                     path,
                     tracks: BTreeMap::new(),
+                    last_number: 0,
+                    restarts: 0,
                     notes: [0; NOTES],
                     intervals: BTreeMap::new(),
                 },
@@ -210,22 +242,41 @@ impl SystemExport {
         };
         let time = c.values.time;
         let number = match file.tracks.get_mut(&key) {
-            Some((n, last)) => {
+            Some((n, last, segs, last_seg)) => {
                 // Rows are in time order (the sink refuses otherwise), so this does not wrap.
                 let gap = time.saturating_sub(*last);
                 *last = time;
-                let slot = file.intervals.entry(gap).or_insert(0);
-                *slot = slot.saturating_add(1);
+                if segment != *last_seg {
+                    // A track restart: a new number, and the pair of rows that spans it is not
+                    // an interval of one track.
+                    let next =
+                        file.last_number
+                            .checked_add(1)
+                            .ok_or(ExportError::TrackNumbers {
+                                system: self.name,
+                                day: date_text(c.day),
+                            })?;
+                    file.last_number = next;
+                    *n = next;
+                    *segs = segs.saturating_add(1);
+                    *last_seg = segment;
+                    file.restarts = file.restarts.saturating_add(1);
+                } else {
+                    let slot = file.intervals.entry(gap).or_insert(0);
+                    *slot = slot.saturating_add(1);
+                }
                 *n
             }
             None => {
-                let next = u16::try_from(file.tracks.len() + 1).map_err(|_| {
-                    ExportError::TrackNumbers {
+                let next = file
+                    .last_number
+                    .checked_add(1)
+                    .ok_or(ExportError::TrackNumbers {
                         system: self.name,
                         day: date_text(c.day),
-                    }
-                })?;
-                file.tracks.insert(key, (next, time));
+                    })?;
+                file.last_number = next;
+                file.tracks.insert(key, (next, time, 1, segment));
                 next
             }
         };
@@ -259,6 +310,9 @@ impl SystemExport {
         let mut failure = None;
         for (day, f) in self.files {
             let (partial, path, tracks, notes) = (f.partial, f.path, f.tracks, f.notes);
+            let numbers = u64::from(f.last_number);
+            let restarts = f.restarts;
+            let multi = tracks.values().filter(|t| t.2 > 1).count() as u64;
             let hist: Vec<(u32, u64)> = f.intervals.into_iter().collect();
             renames.push((partial.clone(), path.clone()));
             if failure.is_some() {
@@ -275,7 +329,10 @@ impl SystemExport {
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default(),
                             sink,
-                            tracks: tracks.len() as u64,
+                            tracks: numbers,
+                            keys: tracks.len() as u64,
+                            keys_multi_segment: multi,
+                            restarts,
                             notes,
                             intervals: summarize(&hist),
                             read_back_records: records,

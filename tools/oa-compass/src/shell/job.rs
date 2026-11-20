@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use oa_bench::input::{load_with, FeedInput};
+use oa_bench::input::{load_counted, FeedInput};
 use oa_bench::legacy::Legacy;
 use oa_replay::FeedKind;
 
@@ -18,15 +18,19 @@ use super::adsb_export::{AdsbExport, AdsbFinished};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Finished, Layout, SystemExport, SystemReport};
-use super::guard::refuse_holdout;
+use super::guard::{
+    guarded_opener, refuse_holdout, refuse_holdout_out, refuse_sealed_date, SEALED_DAY,
+    SEALED_DAY_TEXT,
+};
 use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
 use super::run::{
-    export_adsb_clip, export_eram, ClipInfo, EramAddress, EramInfo, InputsMode, OpenatcaRows,
-    TrackRunInfo,
+    export_adsb_clip, export_adsb_loaded, export_eram, AdsbInfo, ClipInfo, EramAddress, EramInfo,
+    InputsMode, OpenatcaRows, TrackRunInfo,
 };
 use super::slice::Stage;
+use crate::core::time::touches_day;
 
 /// Where the ERAM tracks come from.
 // A7.2: cold enum, size guard waived
@@ -117,27 +121,33 @@ pub fn run_job_tallied(
     // The refusals that need no output directory come first: the sealed recording, a missing
     // input, a directory that is not new or empty. `out` is created after them, and every level
     // created is recorded so that a failed run removes them all.
+    refuse_sealed_date(job.layout.day)?;
     if let Some(p) = &job.adsb {
         refuse_holdout(p)?;
     }
     if let Some(EramSource::Dir(p)) = &job.sfdps {
         refuse_holdout(p)?;
     }
-    refuse_holdout(&out)?;
+    // Before any directory or file is created, and before the tracker runs: no input time may be
+    // on the sealed day.
+    refuse_holdout_out(&out)?;
+    let mut pre = prescan_sealed(&job, sealed)?;
+    // What the pre-scan read is the count of every exit from here on (the inputs are read once).
+    let pre_total = *sealed;
     check_out(&out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(&out, &mut run_dirs)?;
     let mut created: Vec<PathBuf> = Vec::new();
     let mut done = Done::default();
     let has_adsb = job.adsb.is_some();
-    let result = match export_all(&job, &mut done, t0, log) {
+    let result = match export_all(&job, &mut pre, &mut done, t0, log) {
         Ok(()) => {
-            *sealed = done.sealed_window_dropped();
+            *sealed = pre_total.max(done.sealed_window_dropped());
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
         }
         Err(e) => {
-            *sealed = done.sealed_window_dropped();
+            *sealed = pre_total.max(done.sealed_window_dropped());
             done.abort();
             Err(e)
         }
@@ -293,8 +303,103 @@ fn eram_details(info: &EramInfo) -> Vec<String> {
     v
 }
 
+/// Reads every raw input time (every ADS-B report of the clip, stale, other-source or later
+/// refused ones included; every ERAM track sample, unknown-flight, duplicate or later refused ones
+/// included) and refuses the run if any is on the sealed day by its raw time or by its rounded
+/// time. Nothing is created when it refuses. The tracker's own rows do not exist yet; they are
+/// checked as they are pushed (`refuse_sealed_row`), which also fails the whole run before
+/// anything is committed.
+///
+/// A time within 1/256 s before the sealed day's midnight (for example 2026-11-18 23:59:59.998)
+/// is refused too: its raw day is the day before, but it rounds to 00:00:00 of the sealed day,
+/// where the export would file it.
+fn prescan_sealed(job: &Job, sealed: &mut u64) -> Result<Preloaded, ExportError> {
+    let mut pre = Preloaded::default();
+    if let Some(clip) = &job.adsb {
+        // The count is in `sealed` as soon as the frames are read, an error included.
+        let mut n = 0u64;
+        let loaded = oa_bench::input::load_adsb_counted(clip, &guarded_opener(), &mut n);
+        *sealed = sealed.saturating_add(n);
+        let c = loaded.map_err(|e| ExportError::Input(format!("{}: {e}", clip.display())))?;
+        let n = oa_adsb::reports_len(&c.reports);
+        let mut hits = 0u64;
+        for i in 0..n {
+            if let Some(r) = oa_adsb::reports_row(&c.reports, i) {
+                if touches_day(r.time_ns, SEALED_DAY) {
+                    hits += 1;
+                }
+            }
+        }
+        refuse_sealed_count("ADS-B", hits)?;
+        pre.clip = Some(c);
+    }
+    match &job.sfdps {
+        Some(EramSource::Dir(dir)) => {
+            let mut n = 0u64;
+            let loaded = load_counted(
+                &[FeedInput {
+                    feed: FeedKind::Sfdps,
+                    dir: dir.clone(),
+                }],
+                &guarded_opener(),
+                oa_bench::input::msg_limit(),
+                &mut n,
+            );
+            *sealed = sealed.saturating_add(n);
+            let loaded =
+                loaded.map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
+            refuse_sealed_count("ERAM", count_sealed_ms(&loaded.legacy))?;
+            let inputs = loaded
+                .inputs
+                .iter()
+                .map(|h| {
+                    format!(
+                        "{} files={} bytes={} sha256={}",
+                        h.label, h.files, h.bytes, h.sha256
+                    )
+                })
+                .collect();
+            pre.eram = Some((loaded.legacy, inputs, loaded.sealed_window_dropped));
+        }
+        Some(EramSource::Loaded(leg, _)) => {
+            refuse_sealed_count("ERAM", count_sealed_ms(leg))?;
+        }
+        None => {}
+    }
+    Ok(pre)
+}
+
+/// What the pre-scan loaded, kept so that what was scanned is what is exported.
+#[derive(Default)]
+struct Preloaded {
+    clip: Option<oa_bench::input::AdsbClip>,
+    eram: Option<(Legacy, Vec<String>, u64)>,
+}
+
+/// ERAM track samples whose position time is on the sealed day (raw or rounded).
+fn count_sealed_ms(leg: &Legacy) -> u64 {
+    leg.th
+        .pos_ms
+        .iter()
+        .filter(|&&ms| {
+            ms.checked_mul(1_000_000)
+                .is_some_and(|ns| touches_day(ns, SEALED_DAY))
+        })
+        .count() as u64
+}
+
+fn refuse_sealed_count(system: &str, hits: u64) -> Result<(), ExportError> {
+    if hits > 0 {
+        return Err(ExportError::Input(format!(
+            "{system}: {hits} input rows are on {SEALED_DAY_TEXT}, the sealed hold-out day, by their time or once rounded; nothing was created"
+        )));
+    }
+    Ok(())
+}
+
 fn export_all(
     job: &Job,
+    pre: &mut Preloaded,
     done: &mut Done,
     t0: Instant,
     log: &mut dyn FnMut(String),
@@ -305,7 +410,10 @@ fn export_all(
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
         let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
         ax.set_source_offset(job.self_test_adsb_offset_e7);
-        let r = export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows);
+        let r = match pre.clip.take() {
+            Some(c) => export_adsb_loaded(c, &mut ex, Some(&mut ax), job.mode, job.rows),
+            None => export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows),
+        };
         let (info, mut cinfo) = match r {
             Ok(x) => x,
             Err(e) => {
@@ -331,6 +439,10 @@ fn export_all(
                     a.stale,
                 ),
                 ("reports written", a.converted),
+                (
+                    "reports refused (position beyond 90 / 180 degrees, or time does not fit a day)",
+                    a.refused,
+                ),
             ] {
                 ax.counts.push((l.to_string(), v));
             }
@@ -353,6 +465,12 @@ fn export_all(
             .push(format!("ADS-B clip {}", clip.display()));
         done.systems.push(f);
         done.adsb = Some(ax.finish()?);
+        // A real check: the records in the written file, counted by the format walker, and the
+        // refusals the file listed, against the counts above. A mismatch fails the run.
+        if let (Some(a), Some(fin)) = (cinfo.adsb.as_ref(), done.adsb.as_mut()) {
+            let line = reconcile_adsb(a, fin)?;
+            fin.report.lines.push(line);
+        }
         done.clip = Some(cinfo);
     }
     if let Some(src) = &job.sfdps {
@@ -362,36 +480,24 @@ fn export_all(
         let mut eram_sealed = 0u64;
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
-                let loaded = load_with(
-                    &[FeedInput {
-                        feed: FeedKind::Sfdps,
-                        dir: dir.clone(),
-                    }],
-                    &super::guard::guarded_opener(),
-                )
-                .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
+                let Some((leg, inputs, sealed)) = pre.eram.take() else {
+                    return Err(ExportError::Input(format!(
+                        "{}: the pre-scan did not load the directory",
+                        dir.display()
+                    )));
+                };
                 log(format!(
                     "ERAM loaded at {:.1} s",
                     t0.elapsed().as_secs_f64()
                 ));
-                let info = match export_eram(&loaded.legacy, &mut ex, refs, job.eram_address) {
+                let info = match export_eram(&leg, &mut ex, refs, job.eram_address) {
                     Ok(i) => i,
                     Err(e) => {
                         ex.abort();
                         return Err(e);
                     }
                 };
-                eram_sealed = loaded.sealed_window_dropped;
-                let inputs: Vec<String> = loaded
-                    .inputs
-                    .iter()
-                    .map(|h| {
-                        format!(
-                            "{} files={} bytes={} sha256={}",
-                            h.label, h.files, h.bytes, h.sha256
-                        )
-                    })
-                    .collect();
+                eram_sealed = sealed;
                 (info, inputs)
             }
             EramSource::Loaded(leg, inputs) => {
@@ -420,6 +526,19 @@ fn export_all(
         done.systems.push(f);
     }
     Ok(())
+}
+
+/// The reconciliation line of the ADS-B file, or an error that carries it when the counts of
+/// the run, the records found in the finished file and the refusals the file listed disagree.
+pub fn reconcile_adsb(info: &AdsbInfo, fin: &AdsbFinished) -> Result<String, ExportError> {
+    let in_file = fin.records_on_disk()?;
+    let listed = fin.report.refused.iter().sum::<u64>();
+    let (line, ok) = info.reconciliation(in_file, listed);
+    if ok {
+        Ok(line)
+    } else {
+        Err(ExportError::Verify(line))
+    }
 }
 
 /// The run counts of the OpenATCA file, as README lines.
@@ -600,7 +719,7 @@ fn commit_staged(
     for r in &reports {
         for d in &r.days {
             lines.push(format!(
-                "{} {}: {} records, {} blocks, {} octets, {} tracks",
+                "{} {}: {} records, {} blocks, {} octets, {} track segments",
                 r.name,
                 date_text(d.day),
                 d.sink.records,

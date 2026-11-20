@@ -218,6 +218,7 @@ fn columns_match(r: &Reports, n: usize) -> bool {
         r.version.len(),
         r.gva.len(),
         r.sda.len(),
+        r.nic_baro.len(),
     ]
     .iter()
     .all(|&l| l == n)

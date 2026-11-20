@@ -34,6 +34,7 @@ fn full_row() -> Row {
         version: 2,
         gva: 1,
         sda: 2,
+        nic_baro: 1,
         ws_kt: 41,
         wd_deg: 271,
         tas_kt: 483,
@@ -94,6 +95,7 @@ fn every_field_of_an_ads2_record_round_trips() {
     assert_eq!(got.version, 2);
     assert_eq!(got.gva, 1);
     assert_eq!(got.sda, 2);
+    assert_eq!(got.nic_baro, 1);
     assert_eq!(got.callsign, *b"N123AB\0\0");
     assert_eq!(got.ws_kt, 41);
     assert_eq!(got.track_rate_cdps, 321);
@@ -120,6 +122,7 @@ fn every_field_of_an_ads1_record_decodes_and_the_measurements_are_absent() {
         tat_c: NONE_I16,
         roll_cdeg: NONE_I16,
         track_rate_cdps: NONE_I16,
+        nic_baro: NONE_U8,
         ..want
     };
     assert_eq!(got, expect);
@@ -145,7 +148,7 @@ fn every_anomaly_in_one_record_shows_in_its_own_count() {
     let rec = 16;
     p[rec + 39] = 200; // unknown source type
     p[rec + 59..rec + 61].copy_from_slice(&400u16.to_le_bytes()); // wind direction
-    p[rec + 79] = 1; // reserved
+    p[rec + 79] = 9; // reserved (above the NIC_baro codes)
     let mut out = Reports::default();
     let c = decode_payload_lenient(&p, &mut out).unwrap();
     assert_eq!(
@@ -171,7 +174,7 @@ fn every_anomaly_in_one_record_shows_in_its_own_count() {
             p[rec + 71 + 4..rec + 71 + 6].copy_from_slice(&20_000i16.to_le_bytes());
         }
         if res {
-            p[rec + 79] = 1;
+            p[rec + 79] = 9;
         }
         let c = decode_payload_lenient(&p, &mut Reports::default()).unwrap();
         (c.unknown_source, c.bad_measurement, c.reserved_set)
@@ -536,4 +539,78 @@ fn adding_stats_overflows_into_the_overflow_count() {
     stats_add(&mut a, &c);
     assert_eq!(slot_count(&a, FLD_SQUAWK, "v7"), 5);
     assert_eq!(a.unknown_overflow, 8);
+}
+
+// REQ: OA-ADSB-155
+#[test]
+fn nic_baro_is_the_last_byte_plus_one_and_a_clip_without_it_reads_as_absent() {
+    for (v, byte) in [(0u8, 1u8), (1, 2), (NONE_U8, 0)] {
+        let mut row = full_row();
+        row.nic_baro = v;
+        let p = payload_of(&row);
+        assert_eq!(p[16 + 79], byte);
+        assert_eq!(decoded(&p).nic_baro, v);
+    }
+    // A byte above 2 is not a NIC_baro: absent, and the record is still kept.
+    let mut p = payload_of(&full_row());
+    p[16 + 79] = 3;
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&p, &mut out).unwrap();
+    assert_eq!((c.kept, c.reserved_set), (1, 1));
+    assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
+}
+
+// REQ: OA-ADSB-173
+#[test]
+fn a_new_clip_is_ads3_an_old_clip_ads2_reads_without_nic_baro_and_an_old_magic_with_byte_79_set_is_reserved(
+) {
+    use oa_adsb::PREVIOUS_PAYLOAD_MAGIC;
+    // New clip: the magic is ADS3, which a reader of ADS1 and ADS2 only refuses by its magic, and
+    // NIC_baro 0 and 1 are carried at byte 79 as 1 and 2.
+    let mut want = full_row();
+    want.nic_baro = 1;
+    let p = payload_of(&want);
+    assert_eq!(&p[..4], b"ADS3");
+    assert_eq!(PAYLOAD_MAGIC, *b"ADS3");
+    assert_ne!(&p[..4], &PREVIOUS_PAYLOAD_MAGIC[..]);
+    assert_ne!(&p[..4], &LEGACY_PAYLOAD_MAGIC[..]);
+    assert_eq!(p[16 + 79], 2);
+    assert_eq!(decoded(&p).nic_baro, 1);
+    want.nic_baro = 0;
+    let p = payload_of(&want);
+    assert_eq!((p[16 + 79], decoded(&p).nic_baro), (1, 0));
+    want.nic_baro = NONE_U8;
+    let p = payload_of(&want);
+    assert_eq!((p[16 + 79], decoded(&p).nic_baro), (0, NONE_U8));
+    // Old clip: ADS2 with byte 79 zero reads, NIC_baro absent, nothing counted.
+    let mut old = p.clone();
+    old[..4].copy_from_slice(b"ADS2");
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&old, &mut out).unwrap();
+    assert_eq!((c.kept, c.reserved_set), (1, 0));
+    assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
+    // Old magic with byte 79 set: counted as a reserved byte, and NOT read as NIC_baro.
+    for v in [1u8, 2, 9] {
+        let mut dirty = old.clone();
+        dirty[16 + 79] = v;
+        let mut out = Reports::default();
+        let c = decode_payload_lenient(&dirty, &mut out).unwrap();
+        assert_eq!((c.kept, c.reserved_set), (1, 1), "byte 79 = {v}");
+        assert_eq!(
+            reports_row(&out, 0).unwrap().nic_baro,
+            NONE_U8,
+            "byte 79 = {v}"
+        );
+        assert_eq!(
+            decode_payload(&dirty, &mut Reports::default()),
+            Err(PayloadError::BadRecord(0))
+        );
+    }
+    // New clip, a byte above the codes: reserved, NIC_baro absent.
+    let mut bad = payload_of(&want);
+    bad[16 + 79] = 9;
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&bad, &mut out).unwrap();
+    assert_eq!((c.kept, c.reserved_set), (1, 1));
+    assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
 }
