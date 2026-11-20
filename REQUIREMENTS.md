@@ -1062,6 +1062,23 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   root that the decoder recognises as `message` elements; a foreign sibling counts for neither.
 - **OA-FIXM-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
   month; hour 24 is refused.
+- **OA-FIXM-022** The assigned altitude is decoded with its form as a state: `simple` and `vfrPlus` (the
+  value in `assigned_ft`), `vfr` (no number and no `AssignedAlt` field), `block` (limits `above` to `below`; that `above` is the lower limit is read from the recording and is
+  unconfirmed) and `altFixAlt` (altitude before and after a named fix; the meaning of the two is unconfirmed); the
+  form is its own field and no number stands for VFR.
+- **OA-FIXM-023** A doubled assigned-altitude form, a block with a limit missing or with `above` over `below`, and
+  an altitude at a fix with the fix or a value missing or unreadable, are a counted field error on the form; the
+  row is kept.
+- **OA-FIXM-024** The interim altitude is a value, or `xsi:nil` (flag `FLAG_INTERIM_NIL`: ERAM states there is
+  none); an absent element is neither, and an empty element without nil, a nil that is not a boolean and a doubled
+  element are a field error.
+- **OA-FIXM-025** The requested altitude is decoded as `simple`, `vfrPlus` or `vfr`, in its own columns, and a
+  doubled or unreadable form is a field error; the `vfr` form is a known path.
+- **OA-FIXM-026** The handoff `event` (initiation, acceptance, update, retraction, failure, take control) and the
+  accepting unit are decoded; a handoff with no event has none; an event outside the six is a field error and
+  the rest of the row is kept.
+- **OA-FIXM-027** The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six
+  hexadecimal digits, not all zero; any other value is a field error.
 
 ### TBFM metering publication (oa-tbfm)
 
@@ -3822,11 +3839,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   with no measurements and the last, the measurements, the processing time and the confirmed and tentative
   track counts after the last update in the second (a second with no updates carries the previous counts;
   the tracker is not advanced to the second boundary, and the peaks are sampled once per second). It reports the time's p50, p99 and maximum over all those seconds
-  (an empty second counts as zero), the seconds that did not finish within the second and the longest queue
-  behind the traffic (an upper bound: a second's work starts when the second ends), the final advance and
-  flush apart, CPU and wall time of the update window and, read right after the final flush and before any
+  (an empty second counts as zero) and, labelled as such with their count, p50 and p99 over the seconds with
+  at least one measurement; the seconds that did not finish within the second and the longest backlog under
+  this queue model: each second's reports form one batch, available when the second ends, processed during
+  the next second, leftover work carried on (backlog = max(0, backlog + work - 1 s)), a second finishing late
+  when backlog is left, so a report waits at most 1 s plus the backlog ahead of its batch before processing
+  starts and a batch completes at most its own work later (latency at most 1 s + backlog + that second's work), an upper bound because real reports arrive spread through the second; the final advance and
+  flush apart (including the output spill with `--with-output`), CPU and wall time of the update window,
+  which also hold the per-second track-count scan and bookkeeping, next to the sum of the per-second timers
+  and the difference named as outside them (the sum is at most the window) and, read right after the final flush and before any
   digest, of the run from its start (ingest, set-up, updates, flush) against the traffic's span with the CPU
-  source named, every refusal and overflow counter, resident memory with the process peak
+  source named (and, when the `/proc/self/stat` fallback served any reading, how many and its assumed 100 Hz
+  tick rate), the conditions (input decoded and held in memory before timing, sorted by time, one thread:
+  the figures exclude network input, decoding and interrupts of a live feed; a second with no measurements
+  does no tick work, its tick rows are emitted with the next update and charged to that second), every refusal and overflow counter, resident memory with the process peak
   labelled, and the tracker table bytes. A run summary digest (the track log and the counters, taken after the
   timed window; `oa-track` has no tracker state hash) is always printed; `--with-output` also writes the output
   rows to column files and prints their digest. These digests are comparable only between realtime runs of the
@@ -5480,40 +5506,133 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
   an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
+  sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
+  any path it cannot resolve.
+
+## M4 flight data: the per-flight record (oa-flight, oa-flight-sfdps)
+
+- **OA-FLT-001** A flight is keyed by its GUFI, or by the TFMS key (callsign, departure, arrival) where a source has no GUFI; a
+  key with a missing part (a zero GUFI, an empty callsign, departure or arrival, or a GUFI key carrying TFMS parts) is refused
+  as a bad key; one key is one flight and a GUFI flight is never a TFMS flight.
+- **OA-FLT-002** The assigned, interim and requested altitudes are separate fields. Each holds a form: one altitude, VFR on top
+  plus an altitude, VFR with no number, a block (assigned only), an altitude at a named fix (assigned only), or explicitly none
+  (interim only). A form the field cannot hold, an out-of-range value, an unused number that is not zero, an altitude operation
+  with no altitude, or an at-fix altitude without its fix is refused as a bad value and changes nothing.
+- **OA-FLT-003** Every field records when it last changed (the source's time), when it became available and the message it came
+  from; stating the value the record already holds changes nothing, not even the stamp.
+- **OA-FLT-004** An operation is available no earlier than its stamped time plus the measured lag floor and no earlier than any
+  operation before it (the clock never goes back); one stamped later than its receipt by more than the allowed clock
+  difference is refused as a bad time.
+- **OA-FLT-005** The plan lifecycle (proposed, active, departed, completed, cancelled, dropped) allows exactly the stated steps:
+  proposed goes to active, cancelled or dropped; active departs, completes, is cancelled or dropped; departed completes or is
+  dropped; dropped is reinstated by an active plan or completed or cancelled; completed and cancelled are final and a repeat of
+  the same end is a restatement. A step back, a step that skips one, or an operation on a flight or plan that is not there
+  (an operation other than setting a plan, which makes the flight) is refused and leaves the state; so is an amendment to a
+  flight whose plans have all ended. A refused operation never makes a flight. The one way past an ended plan is the refile
+  of OA-FLT-008.
+- **OA-FLT-006** Every refused operation is counted by operation and reason and listed with its key, times, message and the
+  state it found; a full list counts the entries it could not hold, so the counts stay exact whatever the list holds, and
+  operations equal applied plus unchanged plus refused.
+- **OA-FLT-007** A flight holds one plan view per reporting centre, because each centre reports its own status for the national
+  plan; a second centre's proposal after the first one's activation is not a step back; a dropped view reinstated is counted;
+  more centres than views are refused, never evicted.
+- **OA-FLT-008** Two plans for one flight are listed as conflicts: a different plan identifier on a live plan, and the key filed
+  again, which is a plan setting a plan identifier new to the flight on a view whose plan had ended (the view takes the plan) or
+  for a centre the flight has no view for while all its plans have ended (a new view). This is the only way past an ended plan.
+  A plan for a new centre on a flight whose plans have all ended with a plan identifier the flight already has, or none, is
+  refused as terminal.
+- **OA-FLT-009** An aircraft address held by two live flights, and a callsign, departure and arrival held by two live flights,
+  are each listed as a conflict naming both; both flights stay in the table; the address lookup returns the latest claimant and
+  a flight whose plans ended is no conflict.
+- **OA-FLT-010** A handoff is offered, optionally updated, accepted and completed when the owner becomes the accepting unit, or
+  is retracted, fails or ends in the accepting unit taking control; an offer does not move the owner; a step with no handoff
+  pending, a second offer while one is pending, and an update or a different acceptance after acceptance are refused.
+- **OA-FLT-011** A change older than the value a field holds is refused as stale and one at the same time with another value is
+  refused (the earlier stays); an older restatement of the held value is no error; the rule holds for altitudes, the plan state
+  and ownership.
+- **OA-FLT-012** A flight leaves the table only by a removal that is written to the removal log first; a full table refuses a new
+  flight and evicts none; the sweep retires flights whose plans ended or that went silent, logged each, and removes none when
+  the log has no room.
+- **OA-FLT-013** After every step of every sequence of up to four operations over a fixed alphabet covering every operation kind,
+  and of random sequences of sixty operations, the audit of the table holds: keys, indexes and chains, views, altitude forms,
+  handoff units, stamps against the clock and the logs.
+- **OA-FLT-014** Over random sequences, a flight has at most one plan view per centre, flights created equals flights held plus
+  flights removed, and every removal is in the removal log.
+- **OA-FLT-015** The same operations in the same order give the same table, logs included, and the same digest after every step.
+- **OA-FLT-016** The table allocates nothing after it is made: the capacity of every collection is unchanged by twenty thousand
+  operations with sweeps.
+- **OA-FLT-017** The SFDPS adapter turns one decoded message into the operations it carries and no others: the plan from the
+  status, a departure from an actual departure time on an active plan, the assigned, interim and requested altitudes with
+  their forms (an interim stated as none is the state "none", not a number; VFR is never a number), the controlling unit,
+  the aircraft address and the identity; each carries the message's own time and the time it was received.
+- **OA-FLT-018** A controlling unit the FAA gives as unknown makes no owner operation, a handoff `receivingUnit` with no event
+  makes no handoff operation, and a handoff event missing a unit it needs makes none; each is counted. The handoff events
+  make their own operations: offer, update, acceptance, retraction, failure and taking control.
+- **OA-FLT-019** A replay reads SFDPS recordings in receive order into the record, counts the lag of every message (received
+  minus stamped), skips frames before the window and ends at the first frame after it, and announces each operation's
+  availability time to the caller before applying it, so a question asked as of a time sees only what had aged in.
+- **OA-FLT-020** The climbing and descending encounters near 1,000 ft (airborne, not at the vertical minimum, 900 ft up to
+  the record volume apart at the closest approach, either aircraft at 300 fpm or more) are each split once, by the
+  clearances of the two aircraft in the flight record at the closest approach: cleared 1,000 ft or more apart is a
+  level-off, less apart is a climb or descent that does not stop; no record, no altitude and an altitude that is not one
+  level (VFR, block, at a fix) are counted apart; the split is given on the assigned altitude and on the interim altitude
+  over the assigned one.
+- **OA-FLT-022** The operations of one message share its time and its message number and are not a tie on a shared stamp: a plan
+  made active and then departed in one message, and an owner and the handoff it ends, all apply; another message at the same
+  time with another value is still a tie. An owner older than the handoff it would end leaves the handoff and its stamp as they
+  are and is counted. A question is not advanced past an operation refused for its key or its time. Taking control, once a unit
+  has accepted, is by that unit.
+- **OA-FLT-023** The SFDPS replay tool refuses a recording directory the shared sealed-data guard names, before it lists or
+  opens anything, and exits 2; every recording it reads is opened through the same guard.
+- **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
+  lag floor is not seen by it, and one that has aged in is.
+- **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
+  refuses a window that is open at one end or runs backwards.
+
   sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
 
 ## STDDS adsb-flag census (tools/oa-stdds-census)
 
 - **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
-  one track (facility, `recSTARSSrcID`, `trackNum`), attributed to the `adsb` flag of the update that ends
+  one track segment (a run of one key, facility, `recSTARSSrcID` and `trackNum`, that no restart has cut; see OA-CEN-019;
+  a coasting, pseudo or frozen update takes part in the time state, so a coast keeps a segment alive across a gap, since
+  STARS kept the track), attributed to the `adsb` flag of the update that ends
   it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
   and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
-- **OA-CEN-002** Flag changes within a track are counted (total, tracks with one, tracks by number of
+- **OA-CEN-002** Flag changes within a track segment are counted (total, segments with one, segments by number of
   changes), and for each direction the interval across the change, the one before it and the one after it
   are distributions of their own; intervals across a change stay out of the per-flag distributions.
 - **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
   Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
-  code and callsign, plus the share with the pseudo, frozen and new flags; and the tracks whose adsb=false
+  code and callsign, plus the share with the new flag (the identity shares leave out pseudo, frozen and coasting updates,
+  OA-CEN-021); and the track segments whose adsb=false
   updates ever carried an address.
 - **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
-  track number at two facilities, or under two `recSTARSSrcID`, is two tracks.
+  track number at two facilities, or under two `recSTARSSrcID`, is two tracks. A record with neither `src` nor
+  `recSTARSSrcID` is in a facility printed "facility unknown", not a merged all-zero source id; with no `src`, the
+  record's `recSTARSSrcID` names the facility.
 - **OA-CEN-005** An update with no `adsb` element is counted apart (never as false); updates with no
   `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
   and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
-  gzip file that ends inside a member (a recording still being written) is counted, never fatal.
+  gzip file that ends inside a member (a recording still being written) is counted, never fatal. A damaged gzip file
+  is counted and the run exits 3 after printing the report, as stalled bytes do.
 - **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012; the gateless check by address of
   adsb=true updates in OA-CEN-010 is a different, later check, not this one: the
   address field reads zero on almost all adsb=false updates).
 - **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
   code, flight-plan content or individual time; the only text from the data is a source id of letters and
-  digits, and the only times are the start (rounded down) and end (rounded up) to the minute of the STDDS
+  digits, and the only times are the start (rounded down) and end (rounded up) to the second of the STDDS
   recording and of the ADS-B clip, which are the span of each recording and not the time of any aircraft. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
   file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
   links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
   read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
   `rec/stdds` is refused (exit 2).
-- **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
-  adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
+- **OA-CEN-008** Track segments (not track numbers: STARS reuses them, so one key holds many aircraft) are classed by
+  the flags seen on them (fewer than two flagged updates, all adsb=false, all adsb=true, mixed), with their update
+  counts and per-flag interval distributions. Class, flag counts, changes, change bins, segments with adsb=false,
+  false address counts and the cross-check by class are all taken per segment; the report says "track segments".
+  A segment with no flagged update (only status updates, or only updates with no flag) is counted as "segments with no
+  flagged update" and is in no class; the class "one flagged update" holds segments with exactly one.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
   each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
   linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
@@ -5521,7 +5640,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
   update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
   count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo, frozen or
-  coasting track update are counted apart (a coasting position is dead-reckoned, not measured). A
+  coasting track update are counted apart (a coasting position is dead-reckoned, not measured), as are updates whose
+  `mrtTime` is outside the ADS-B clip's time span (OA-CEN-023). A
   gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
 - **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
   horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
@@ -5530,8 +5650,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   matches are summarised over a wide range to expose an altitude unit error. adsb=true is labelled
   ADS-B-fused and not independent of the truth (STARS fuses ADS-B into those updates, so its difference
   measures STARS latency and filtering, not accuracy). The adsb=false results are headlined by track class,
-  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-over-real
-  match ratio as the share of matches that may be chance. The ADS-B bracket width of the matches is counted
+  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-to-real
+  match ratio, worded as a rough indication of unknown direction and not as an estimate of the chance share (OA-CEN-017). The ADS-B bracket width of the matches is counted
   (up to 2 s, 2 to 5, 5 to 10, over 10). A bias injected into synthetic STDDS updates shows in the
   matched distribution of adsb=false and not of adsb=true. adsb=true updates with a Mode S address are
   also checked by address, with no gate, and reported apart.
@@ -5558,13 +5678,21 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
   any indexed ADS-B aircraft within 30 NM at their time.
 - **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
-  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, and exact
-  duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, outside the
+  ADS-B clip's time span, and updates with the same time and position as the track's previous update (updates with
+  the same key, time, position and flags are dropped earlier, OA-CEN-022); updates with no flag equal the not-checked no-flag count.
+  The report also reconciles, with or without a clip, the input TAIS records read against the updates, the duplicates
+  dropped, the updates outside the window and the updates with no time outside the window; with a clip, per flag and
+  shift of the placebo, matched plus not matched plus outside the clip against checked. Each line says "reconciles" or
+  "DOES NOT RECONCILE".
 - **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
   shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
   distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
-  real one is printed as an estimate of the chance share. A placebo lookup at a window's edge finds its
-  shifted ADS-B.
+  real one is printed as a rough indication of unknown direction, not as an estimate of the chance share: the
+  placebo shares route structure with the real match (aircraft in trail about 60 s apart, slow or circling aircraft
+  matching themselves) and is not suppressed by the single-candidate rule the way a real chance match is. A placebo
+  lookup at a window's edge finds its shifted ADS-B; a lookup whose shifted time lies outside the clip's time span (no
+  window, or near the clip's edges) is counted as "placebo outside the clip", never as a non-match.
 - **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
   ADS-B aircraft and the distinct STDDS track segments with a match, and the distribution over track
   segments of each segment's median difference (segments with 3 or more matches). A segment is a run of
@@ -5586,9 +5714,26 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   a clip of faster or sparser aircraft or a larger gate. (2) After it: the index's own estimate. (3) While
   reading: what the census holds (interval lists, cross-check records, segments, with 2x Vec slack) and the
   copies that `finish` makes of each match, address match, placebo value and segment (three accumulators:
-  all, class, facility). Not counted: the loaded clip columns, the read buffers, the quality-gate state
-  and the output. Updates left out by the time window are counted. A test sets the budget through
+  all, class, facility), the tracks map, the segments and the set of seen update fingerprints. The quality-state map
+  of the index build is counted, per distinct aircraft, in checks (1) and (2). Not counted: the loaded clip columns, the
+  read buffers and the output. The report and the refusal message call the figure an estimate, not a bound. Updates left out by the time window are counted. A test sets the budget through
   `OA_STDDS_CENSUS_BUDGET_BYTES`, which exists for tests only.
+- **OA-CEN-021** Updates flagged pseudo, frozen or coasting (each read only when present and true) are never counted
+  in the flag tallies, the track-segment class, the change counts or the interval census (the interval that starts at
+  one is not counted either); they remain in the update totals and have their own counts per kind and flag, so the
+  report shows how many coasts carried adsb=false and how many adsb=true. An all adsb=true segment with coasting
+  adsb=false updates stays "all adsb=true". The identity shares (address, callsign, code 1200), the adsb=false share of
+  flagged updates and the per-facility false share also leave out these updates, so they agree with the class lines;
+  the update totals still count them.
+- **OA-CEN-022** An update with the same facility, `recSTARSSrcID`, `trackNum`, `mrtTime`, position and flags as one
+  already seen, across files or within a file, is dropped before any count and counted as "duplicate updates dropped";
+  updates without a time or a track number are not checked for duplicates; the
+  consecutive-repeat rule of the position check (OA-CEN-016) stays. With `--from` and `--to`, an update with no
+  `mrtTime` is outside every window: it is excluded and counted as "no time, outside the window". `--from` and `--to`
+  take whole seconds; a fractional value, or one whose milliseconds do not fit an i64, is a usage error (exit 2).
+- **OA-CEN-023** An update whose `mrtTime` lies outside the ADS-B clip's time span is counted, per flag, as "outside the
+  ADS-B clip", never as no candidate or no ADS-B, and not checked; the run goes on. Exit 2 stays for no overlap at all.
+  The spans are printed to the second.
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
@@ -5620,7 +5765,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `// seal-allow: <why>` with a reason. String literals are stripped before a trailing `//` comment is cut off; only a
   `#[cfg(test)]` followed by a `mod` item is skipped (with its body), any other `#[cfg(test)]` item is scanned; an allow
   with no bare call on its line or the two after it is stale and fails, and the number of allows is pinned exactly in the
-  test (`ALLOW_COUNT`, now 42), not a budget. Stated exceptions, with the reason: oa-arinc424 (a no-dependency crate, so it
+  test (`ALLOW_COUNT`, now 44), not a budget. Stated exceptions, with the reason: oa-arinc424 (a no-dependency crate, so it
   cannot use oa-sealed), oa-geo (a core crate, which does not depend on the shell crate oa-sealed) and oa-trace (walks the
   repository's own sources and registers, no data). The bare opens of the first two are in tests only (fixtures and the
   env-named `OPENATCA_CIFP` and `OPENATCA_GEODTEST` inputs); a test pins the count of bare calls per file and fails if
@@ -5678,7 +5823,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   the window even when its frame was received outside it; `Loaded::sealed_window_dropped`, `Counts::sealed_window_dropped`),
   the `oa-replay` pipeline (rows by their own time; `Pipeline::sealed_window_dropped`), `oa-feed replay` (frames;
   `Report::sealed_window_dropped`), the `oa-stdds-census` reader (TAIS records by `mrtTime`) and the `stdds_summary` example.
-  For these the printed count is frames plus records and the tool says so. The same holds for `oa-scope-replay` (clip
+  For these the printed count is frames plus records and the tool says so. The same holds for `oa-flight` (`oa-flight-sfdps`: frames by receive time from the merge, rows by their own time; a run stopped early by `--to` does not count the frames dropped before the stop), the SFDPS join of `oa-encounter` (added to the clip's count), the recordings and clip of `oa-stdds-ref` (frames by receive time, TAIS records by `mrtTime`), and for `oa-scope-replay` (clip
   frames by receive time, rows by their own time, through `oa_adsb::reports_extend_unsealed` on a per-frame scratch), the
   `oa-replay` pipeline's ADS-B rows (own time) and FNS rows (issue or cancel time; the validity span is not a message time),
   the `oa-adsb` archive reader (trace rows; `Stats::sealed_window_dropped`, and `oa-adsb-clip` refuses, OA-SEAL-015),
@@ -5697,3 +5842,54 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   printed as `sealed-window rows dropped: N` (the reports are counted, not clipped). Otherwise it writes `<out>.source` next
   to the clip (not for `--out -`): each input path with its SHA-256, the window (`--from`, `--to` in Unix nanoseconds, `none`
   when open) and the counts (rows seen, outside the box, outside the window, kept, frames, sealed-window rows dropped).
+
+## Scoring against STDDS terminal tracks (oa-stdds-ref)
+
+- **OA-SRF-001** A STDDS record is paired with the tracker and the ADS-B truth by its Mode S address
+  (`acAddress`, 24 bits) only; a record without an address is counted and never paired.
+- **OA-SRF-002** Every STDDS record has a class from its own flags, by one function, read as the census
+  reads them and only when a flag's bit is in `present` (an absent flag is never false): `track/pseudo`,
+  `track/frozen` or `track/coast` present and true is "pseudo, frozen or coasting"; otherwise `track/adsb`
+  present gives "adsb=false" or "adsb=true", and absent gives "adsb absent". The names state the flag value,
+  not a meaning: what `track/adsb` means is not confirmed (the census measures it).
+- **OA-SRF-003** Every metric, count and time-offset distribution is reported per class; no line or section
+  blends the classes, "pseudo, frozen or coasting" is never pooled with another, and a class's records are
+  fitted as tracks of their own.
+- **OA-SRF-004** Per class, three error sets are computed on the same paired samples: tracker minus STDDS,
+  ADS-B truth minus STDDS, tracker minus ADS-B truth (the second is the diagnostic for STDDS following ADS-B).
+- **OA-SRF-005** Per STDDS track the stamp offset is fitted against the ADS-B truth only, never the tracker,
+  over -15 s to +15 s in 0.1 s steps minimising along-track error, ties toward zero; every metric is reported
+  at offset 0 and at the fitted offset, and a track with no fit has no fitted samples.
+- **OA-SRF-006** The offset search is exact at its edges, flags an offset at either end of the range, and
+  refuses a fit with fewer than 8 samples that have a moving truth at every offset (OA-SRF-015 gives the
+  reason).
+- **OA-SRF-007** Tracker fixes are interpolated between rows at most 5 s apart; at a track end a fix is
+  extrapolated by the end row's velocity up to 1 s and counted, and refused beyond that.
+- **OA-SRF-008** Per set: horizontal error, along and cross track, altitude difference (feet) and velocity
+  difference (m/s), each with n, rms, mean, p50, p95 and p99; an absent value is no data, never 0.
+- **OA-SRF-009** The summary carries the SHA-256 of each input file and one digest over the summary and the
+  per-sample CSV; the CSV (record place, class, status, offset and errors) carries neither. Both outputs
+  are byte-identical for the same inputs given by the same paths.
+- **OA-SRF-010** The tool uses the shared guard (`oa-sealed`, OA-SEAL-001, OA-SEAL-002) and no guard of
+  its own: every path it is given (the STDDS files, the ADS-B clip, the output folder) is checked before
+  anything is read or created, and a sealed one (a sealed folder, a sealed ADS-B day, a link into sealed
+  data) exits 2 with a message that names the path.
+- **OA-SRF-013** Every file the tool reads is opened by check, open and verify-the-open through the shared
+  guard, so a link swapped between the check and the open is refused (exit 2, the path named). The tool
+  walks no directory.
+- **OA-SRF-014** The text and the per-sample CSV hold counts and aggregate statistics only: never a track
+  number, callsign, Mode S address, time or position of a record.
+- **OA-SRF-011** A `.oaf` or `.oaf.gz` recording is read into records with counts of frames, other products
+  and damage, and the SHA-256 of the file's stored bytes.
+- **OA-SRF-012** A record with no time or no position is counted as its own unpaired reason, never paired.
+- **OA-SRF-015** Tracks that are not fitted are reported per class by reason: no ADS-B truth over the
+  +-15 s window at enough samples (the track has at least 8 sample records), and fewer than 8 usable samples
+  (too few records, or a covered truth too slow to give a direction).
+- **OA-SRF-016** The tool creates `stdds_ref.txt` and `stdds_ref.csv` with create-new and never overwrites:
+  an existing output (or link) exits 1 with its path named, before any work; each output path is checked
+  through the shared guard before it is created, and one that leads into sealed data exits 2.
+- **OA-SRF-017** The report states the assumed units (STDDS altitude feet, velocity m/s east and north) and
+  which tracker altitude is compared, and prints per class the median STDDS altitude against the median
+  truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
+  suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
+  ratio is outside 0.8 to 1.25.

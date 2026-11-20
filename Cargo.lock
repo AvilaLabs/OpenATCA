@@ -144,6 +144,8 @@ dependencies = [
  "oa-bench",
  "oa-encounter",
  "oa-feed",
+ "oa-flight",
+ "oa-flight-sfdps",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",
@@ -164,6 +166,22 @@ dependencies = [
 name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
+ "oa-xml",
+]
+
+[[package]]
+name = "oa-flight"
+version = "0.0.1"
+
+[[package]]
+name = "oa-flight-sfdps"
+version = "0.0.1"
+dependencies = [
+ "oa-feed",
+ "oa-fixm",
+ "oa-flight",
+ "oa-replay",
  "oa-sealed",
  "oa-xml",
 ]
@@ -358,6 +376,23 @@ dependencies = [
  "oa-math",
  "oa-sealed",
  "oa-stdds",
+ "oa-truth",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-stdds-ref"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-geo",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-stdds",
+ "oa-track",
  "oa-truth",
  "oa-xml",
  "oa-zip",

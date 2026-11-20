@@ -203,7 +203,7 @@ const ALLOW: &str = "// seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-const ALLOW_COUNT: usize = 42;
+const ALLOW_COUNT: usize = 44;
 
 /// `line` with the string literals emptied and any `//` comment cut off.
 fn code_of(line: &str) -> String {

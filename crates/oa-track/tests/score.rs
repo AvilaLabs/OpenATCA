@@ -1216,8 +1216,16 @@ fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
             "single-threaded today",
             "the same --max-tracks and the same build",
             "process peak",
-            "an upper bound",
+            "An upper bound",
             "counting as zero",
+            "processing time over the 300 busy seconds only (seconds with at least one measurement): p50 ",
+            "so at most 1000.000 ms; a batch completes at most its own work later, so a report's latency is at most 1 s + backlog + that second's work, at most ",
+            "conditions: the input was decoded and held in memory before timing, sorted by time, and processed on one thread, so the figures exclude network input, decoding and the interrupts of a live feed",
+            "the tick rows for a gap are emitted with the next update and charged to that second",
+            "sum of the per-second timers (wall only; no CPU is read per second): ",
+            " s wall outside the per-second timers: track counts, bookkeeping",
+            "final advance and flush after the last second: ",
+            "(includes the output spill)",
         ] {
             assert!(text.contains(needle), "missing {needle:?}\n{text}");
         }

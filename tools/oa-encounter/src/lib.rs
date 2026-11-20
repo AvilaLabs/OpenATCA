@@ -10,5 +10,6 @@
 
 pub mod args;
 pub mod guard;
+pub mod join;
 pub mod report;
 pub mod run;

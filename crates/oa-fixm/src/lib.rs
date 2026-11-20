@@ -26,7 +26,7 @@ mod known;
 mod scalar;
 
 pub use decode::Decoder;
-pub use scalar::{parse_beacon, parse_iso_ms, parse_scaled, parse_uuid};
+pub use scalar::{parse_beacon, parse_hex24, parse_iso_ms, parse_scaled, parse_uuid};
 
 use std::fmt;
 
@@ -89,10 +89,24 @@ pub enum Field {
     MsgSeq,
     /// `nameValue FLIGHT_PLAN_SEQ_NO`.
     PlanSeq,
+    /// The form of `assignedAltitude`: exactly one of `simple`, `vfrPlus`, `vfr`, `block` or
+    /// `altFixAlt`, see the `ALT_FORM_*` codes. Its values are in `AssignedAlt` (simple and
+    /// `vfrPlus`), the `block_*` columns and the `fixalt_*` columns.
+    AssignedForm,
+    /// `interimAltitude`: a value in `interim_ft`, or `xsi:nil` (flag [`FLAG_INTERIM_NIL`]).
+    InterimAlt,
+    /// The form and value of `requestedAltitude` (`simple`, `vfrPlus` or `vfr`).
+    RequestedForm,
+    /// `boundaryCrossings/handoff@event`, see the `HANDOFF_*` codes.
+    HandoffEvent,
+    /// `boundaryCrossings/handoff/acceptingUnit` unit and sector.
+    HandoffAccepting,
+    /// `aircraftDescription@aircraftAddress`, the 24-bit ICAO (Mode S) address.
+    AircraftAddress,
 }
 
 /// Number of [`Field`] values.
-pub const FIELD_COUNT: usize = 27;
+pub const FIELD_COUNT: usize = 33;
 
 /// Display names, indexed by `Field as usize`.
 pub const FIELD_NAMES: [&str; FIELD_COUNT] = [
@@ -123,6 +137,12 @@ pub const FIELD_NAMES: [&str; FIELD_COUNT] = [
     "arrival_estimated",
     "msg_seq",
     "plan_seq",
+    "assigned_form",
+    "interim_alt",
+    "requested_form",
+    "handoff_event",
+    "handoff_accepting",
+    "aircraft_address",
 ];
 
 /// All fields, in bit order.
@@ -154,6 +174,12 @@ pub const ALL_FIELDS: [Field; FIELD_COUNT] = [
     Field::ArrivalEstimated,
     Field::MsgSeq,
     Field::PlanSeq,
+    Field::AssignedForm,
+    Field::InterimAlt,
+    Field::RequestedForm,
+    Field::HandoffEvent,
+    Field::HandoffAccepting,
+    Field::AircraftAddress,
 ];
 
 /// `Events::status` codes (0 is "not present").
@@ -173,6 +199,34 @@ pub const FTYPE_GENERAL: u8 = 3;
 pub const FLAG_ASSIGNED_VFR: u32 = 1;
 /// The assigned altitude is "VFR on top plus" the stated value.
 pub const FLAG_ASSIGNED_VFR_PLUS: u32 = 2;
+/// The interim altitude is `xsi:nil`: ERAM states that there is none. Without this flag, a row
+/// that has the `InterimAlt` field carries a value in `interim_ft`.
+pub const FLAG_INTERIM_NIL: u32 = 4;
+
+/// `Events::assigned_form` and `Events::requested_form` codes (0 is "not present"). The forms
+/// are alternatives of one element; a number is never used to say VFR.
+/// A value in `assigned_ft` / `requested_ft` (`simple`).
+pub const ALT_FORM_SIMPLE: u8 = 1;
+/// "VFR on top plus" a value in `assigned_ft` / `requested_ft` (`vfrPlus`). The reading of the
+/// element name is unconfirmed (it is the one `FLAG_ASSIGNED_VFR_PLUS` already made).
+pub const ALT_FORM_VFR_PLUS: u8 = 2;
+/// VFR, no altitude (`vfr`).
+pub const ALT_FORM_VFR: u8 = 3;
+/// A block: `block_above_ft` to `block_below_ft` (`block/above` is the lower limit in every real
+/// message seen; a block with `above` over `below` is a field error). Assigned altitude only.
+pub const ALT_FORM_BLOCK: u8 = 4;
+/// Altitude at a fix: `fixalt_pre_ft` before `fixalt_point`, `fixalt_post_ft` after it. The
+/// reading of `pre` and `post` is unconfirmed. Assigned altitude only.
+pub const ALT_FORM_AT_FIX: u8 = 5;
+
+/// `Events::handoff_event` codes (0 is "not present": a `handoff` with no `event`, which the
+/// real feed carries on track messages with only the receiving unit).
+pub const HANDOFF_INITIATION: u8 = 1;
+pub const HANDOFF_ACCEPTANCE: u8 = 2;
+pub const HANDOFF_UPDATE: u8 = 3;
+pub const HANDOFF_RETRACTION: u8 = 4;
+pub const HANDOFF_FAILURE: u8 = 5;
+pub const HANDOFF_TAKE_CONTROL: u8 = 6;
 
 /// Why a whole message was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +427,26 @@ pub struct Events {
     pub arr_est_ms: Vec<i64>,
     pub msg_seq: Vec<u64>,
     pub plan_seq: Vec<u32>,
+    /// `ALT_FORM_*` of the assigned and of the requested altitude.
+    pub assigned_form: Vec<u8>,
+    pub requested_form: Vec<u8>,
+    /// Requested altitude value, feet (forms simple and VFR plus).
+    pub requested_ft: Vec<i32>,
+    /// Interim altitude value, feet (see `FLAG_INTERIM_NIL`).
+    pub interim_ft: Vec<i32>,
+    /// Assigned block limits, feet.
+    pub block_above_ft: Vec<i32>,
+    pub block_below_ft: Vec<i32>,
+    /// Assigned altitude at a fix: altitude before and after it, feet, and the fix name.
+    pub fixalt_pre_ft: Vec<i32>,
+    pub fixalt_post_ft: Vec<i32>,
+    pub fixalt_point: Vec<[u8; 12]>,
+    /// `HANDOFF_*` code of the handoff event.
+    pub handoff_event: Vec<u8>,
+    /// The accepting unit of a handoff, in the form of `ctrl`.
+    pub acpt: Vec<[u8; 8]>,
+    /// The 24-bit ICAO (Mode S) address.
+    pub address: Vec<u32>,
     /// The route string table: `strings_cap` bytes, `strings_used` of them in use.
     pub strings: Vec<u8>,
     pub strings_used: usize,
@@ -417,6 +491,18 @@ pub fn new_events(capacity: usize, string_bytes: usize) -> Events {
         arr_est_ms: Vec::with_capacity(capacity),
         msg_seq: Vec::with_capacity(capacity),
         plan_seq: Vec::with_capacity(capacity),
+        assigned_form: Vec::with_capacity(capacity),
+        requested_form: Vec::with_capacity(capacity),
+        requested_ft: Vec::with_capacity(capacity),
+        interim_ft: Vec::with_capacity(capacity),
+        block_above_ft: Vec::with_capacity(capacity),
+        block_below_ft: Vec::with_capacity(capacity),
+        fixalt_pre_ft: Vec::with_capacity(capacity),
+        fixalt_post_ft: Vec::with_capacity(capacity),
+        fixalt_point: Vec::with_capacity(capacity),
+        handoff_event: Vec::with_capacity(capacity),
+        acpt: Vec::with_capacity(capacity),
+        address: Vec::with_capacity(capacity),
         strings: vec![0; string_bytes],
         strings_used: 0,
     }
@@ -465,6 +551,18 @@ pub(crate) fn truncate_events(ev: &mut Events, len: usize, strings_used: usize) 
     ev.arr_est_ms.truncate(len);
     ev.msg_seq.truncate(len);
     ev.plan_seq.truncate(len);
+    ev.assigned_form.truncate(len);
+    ev.requested_form.truncate(len);
+    ev.requested_ft.truncate(len);
+    ev.interim_ft.truncate(len);
+    ev.block_above_ft.truncate(len);
+    ev.block_below_ft.truncate(len);
+    ev.fixalt_pre_ft.truncate(len);
+    ev.fixalt_post_ft.truncate(len);
+    ev.fixalt_point.truncate(len);
+    ev.handoff_event.truncate(len);
+    ev.acpt.truncate(len);
+    ev.address.truncate(len);
 }
 
 /// The bit of `f` in a `present` or `errors` word.
@@ -491,12 +589,12 @@ pub fn code_str(code: &[u8]) -> &str {
         .unwrap_or("")
 }
 
-/// The unit part of a `ctrl`, `recv` or `xfer` value.
+/// The unit part of a `ctrl`, `recv`, `xfer` or `acpt` value.
 pub fn unit_code(v: &[u8; 8]) -> &str {
     code_str(v.get(..4).unwrap_or(&[]))
 }
 
-/// The sector part of a `ctrl`, `recv` or `xfer` value.
+/// The sector part of a `ctrl`, `recv`, `xfer` or `acpt` value.
 pub fn sector_code(v: &[u8; 8]) -> &str {
     code_str(v.get(4..).unwrap_or(&[]))
 }

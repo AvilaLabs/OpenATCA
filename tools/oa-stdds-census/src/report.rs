@@ -3,13 +3,13 @@
 
 use crate::census::{
     ClassStats, DirStats, Group, IdShare, Results, CHANGE_BIN_NAMES, CLASS_NAMES, FLAG_NAMES,
-    RESYNC_AFTER,
+    RESYNC_AFTER, STATUS_NAMES,
 };
 use crate::dist::{Summary, HIST_BINS};
 use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
 use crate::xcheck::{source_names, Params, OUTCOME_NAMES};
-use crate::xcres::{addr_range, cidx, minute_span, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
+use crate::xcres::{addr_range, cidx, second_span, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
 use oa_stdds::STD_ERROR_NAMES;
 use oa_truth::REMOVE_NAMES;
 use std::fmt::Write;
@@ -19,6 +19,15 @@ fn pct(n: u64, d: u64) -> String {
         "n/a".to_string()
     } else {
         format!("{:.2}%", n as f64 * 100.0 / d as f64)
+    }
+}
+
+/// "reconciles" or "DOES NOT RECONCILE".
+fn verdict(ok: bool) -> &'static str {
+    if ok {
+        "reconciles"
+    } else {
+        "DOES NOT RECONCILE"
     }
 }
 
@@ -72,8 +81,6 @@ fn ids(out: &mut String, indent: &str, s: &IdShare) {
             "with none of non-zero address, Mode 3/A code, callsign",
             s.none_of_icao_beacon_acid,
         ),
-        ("pseudo flag true", s.pseudo),
-        ("frozen flag true", s.frozen),
         ("new flag true", s.is_new),
     ] {
         let _ = writeln!(out, "{indent}  {name}: {c} {}", pct(c, s.n));
@@ -104,7 +111,7 @@ pub fn fac_label(k: &[u8; 8], index: usize) -> String {
     let n = k.iter().position(|&b| b == 0).unwrap_or(8);
     let t = k.get(..n).unwrap_or(&[]);
     if t.is_empty() {
-        "(no src)".to_string()
+        "facility unknown".to_string()
     } else if t.iter().all(u8::is_ascii_alphanumeric) {
         String::from_utf8_lossy(t).into_owned()
     } else {
@@ -114,8 +121,8 @@ pub fn fac_label(k: &[u8; 8], index: usize) -> String {
 
 fn class_line(c: &ClassStats) -> String {
     format!(
-        "tracks {} updates false {} (non-zero address {}) true {}; intervals false: {}; true: {}",
-        c.tracks,
+        "track segments {} updates false {} (non-zero address {}) true {}; intervals false: {}; true: {}",
+        c.segments,
         c.updates[0],
         pct(c.false_nonzero, c.updates[0]),
         c.updates[1],
@@ -125,17 +132,18 @@ fn class_line(c: &ClassStats) -> String {
 }
 
 fn fac_line(g: &Group) -> String {
-    let flagged = g.updates[0] + g.updates[1];
+    // The share leaves out pseudo, frozen and coasting updates, like the class lines.
+    let flagged = g.ids[0].n + g.ids[1].n;
     format!(
-        "updates {} (false {} true {} absent {}) false share {}; tracks {} (with false {}, of which false carried a non-zero address {}); interval false: {}; true: {}; false updates with non-zero address {} callsign {} flight plan {} code 1200 {}",
+        "updates {} (false {} true {} absent {}) false share of the measured flagged updates {}; track segments {} (with false {}, of which false carried a non-zero address {}); interval false: {}; true: {}; false updates with non-zero address {} callsign {} flight plan {} code 1200 {}",
         g.updates.iter().sum::<u64>(),
         g.updates[0],
         g.updates[1],
         g.updates[2],
-        pct(g.updates[0], flagged),
-        g.tracks,
-        g.tracks_with_false,
-        g.tracks_false_with_icao,
+        pct(g.ids[0].n, flagged),
+        g.segments,
+        g.segments_with_false,
+        g.segments_false_with_icao,
         hist_line(&g.iv[0]),
         hist_line(&g.iv[1]),
         pct(g.ids[0].icao, g.ids[0].n),
@@ -223,7 +231,7 @@ fn xc_flag_part(g: &XcGroup, p: &Params, f: usize) -> String {
             )
         };
         format!(
-            "{name}{}: {}; {meds}; share of matches that may be chance (placebo estimate) {}",
+            "{name}{}: {}; {meds}; placebo-to-real ratio (rough indication, unknown direction, not a chance share) {}",
             if f == 1 { FUSED } else { "" },
             outcomes_line(&counts_of(g, f, p.primary)),
             chance_share(g, f, p.primary)
@@ -231,9 +239,12 @@ fn xc_flag_part(g: &XcGroup, p: &Params, f: usize) -> String {
     }
 }
 
-/// "Share of matches that may be chance": the placebo exactly-one matches (the mean of the two
-/// shifts) over the real exactly-one matches, at the primary gate. It is a ratio of counts, not
-/// a probability, and can exceed 100% (a target that sits still, or a crowded sky).
+/// The placebo-to-real ratio: the placebo exactly-one matches (the mean of the two shifts) over
+/// the real exactly-one matches, at the primary gate. A ratio of counts, not a probability, and
+/// it can exceed 100%. The placebo shares route structure with the real match (aircraft in trail
+/// about 60 s apart, slow or circling aircraft matching themselves) and is not suppressed by the
+/// single-candidate rule the way a real chance match is, so the ratio is a rough indication of
+/// unknown direction, not an estimate of the chance share.
 fn chance_share(g: &XcGroup, f: usize, primary: usize) -> String {
     let real = g.counts.get(cidx(f, primary, 1)).copied().unwrap_or(0);
     let pl = |k: usize| g.pcounts.get((k * 2 + f) * 3 + 1).copied().unwrap_or(0);
@@ -280,7 +291,7 @@ fn xc_section(o: &mut String, r: &Results) {
     }
     let _ = writeln!(
         o,
-        "caveats: STARS reuses track numbers, so a track here is a track number; a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Track classes are per track number, the medians per segment. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
+        "caveats: STARS reuses track numbers, so a track is cut into track segments: a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Track classes and the medians are per segment. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
     );
     let _ = writeln!(
         o,
@@ -292,9 +303,9 @@ fn xc_section(o: &mut String, r: &Results) {
     );
     let _ = writeln!(
         o,
-        "time spans (UTC, start rounded down and end up to the minute; the span of each recording, not of any aircraft): STDDS updates counted {}; ADS-B clip reports {}",
-        minute_span(x.stdds_span_ms),
-        minute_span(x.clip.span_ms)
+        "time spans (UTC, to the second, start rounded down and end up; the span of each recording, not of any aircraft): STDDS updates counted {}; ADS-B clip reports {}",
+        second_span(x.stdds_span_ms),
+        second_span(x.clip.span_ms)
     );
     let _ = writeln!(
         o,
@@ -332,7 +343,7 @@ fn xc_section(o: &mut String, r: &Results) {
     );
     let _ = writeln!(
         o,
-        "memory estimate: index {} MB, held in all {} MB",
+        "memory estimate (an estimate under stated assumptions, not a bound; the index, its quality-state map, the tracks map, the seen-update set and the per-segment records are counted): index {} MB, held in all {} MB",
         x.index_bytes / 1_000_000,
         x.held_bytes.saturating_add(x.index_bytes) / 1_000_000
     );
@@ -348,24 +359,27 @@ fn xc_section(o: &mut String, r: &Results) {
             + at(&nc.polar, f)
             + at(&nc.no_track, f)
             + at(&nc.duplicate, f)
-            + at(&nc.status, f);
+            + at(&nc.status, f)
+            + at(&nc.outside_clip, f);
         let _ = writeln!(
             o,
-            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} + pseudo, frozen or coasting {} ({})",
+            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + same time and position as the track's previous update {} + pseudo, frozen or coasting {} + outside the ADS-B clip (time span) {} ({})",
             at(&r.global.updates, f),
             at(&nc.no_position, f),
             at(&nc.polar, f),
             at(&nc.no_track, f),
             at(&nc.duplicate, f),
             at(&nc.status, f),
-            if total == at(&r.global.updates, f) { "reconciles" } else { "DOES NOT RECONCILE" }
+            at(&nc.outside_clip, f),
+            verdict(total == at(&r.global.updates, f))
         );
     }
     let _ = writeln!(
         o,
-        "  no flag: updates {} not checked {}",
+        "  no flag: updates {} = not checked {} ({})",
         at(&r.global.updates, 2),
-        nc.no_flag
+        nc.no_flag,
+        verdict(at(&r.global.updates, 2) == nc.no_flag)
     );
     let _ = writeln!(o, "outcome per update (only exactly-one is used):");
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
@@ -402,20 +416,34 @@ fn xc_section(o: &mut String, r: &Results) {
     }
     let _ = writeln!(
         o,
-        "null control (placebo): the same positions with the STDDS time shifted by plus and minus 60 s; the placebo matches over the real ones estimate the share of the real matches that may be chance:"
+        "null control (placebo): the same positions with the STDDS time shifted by plus and minus 60 s. The placebo shares route structure with the real match (aircraft in trail about 60 s apart, slow or circling aircraft matching themselves) and is not suppressed by the single-candidate rule the way a real chance match is; its ratio to the real matches is a rough indication of unknown direction, not an estimate of the chance share. Lookups whose shifted time falls outside the clip's time span are counted apart (placebo outside the clip), never as non-matches:"
     );
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
         let real = counts_of(g, f, p.primary);
         let _ = writeln!(
             o,
-            "  {name}, real time: {}; share of matches that may be chance (placebo estimate) {}",
+            "  {name}, real time: {}; placebo-to-real ratio (rough indication, unknown direction, not a chance share) {}",
             outcomes_line(&real),
             chance_share(g, f, p.primary)
         );
         for (k, sh) in ["+60 s", "-60 s"].iter().enumerate() {
             let code = k * 2 + f;
             let c: Vec<u64> = (0..3).map(|j| at(&g.pcounts, code * 3 + j)).collect();
-            let _ = writeln!(o, "  {name}, shifted {sh}: {}", outcomes_line(&c));
+            let checked: u64 = (0..3).map(|j| at(&g.counts, cidx(f, 0, j))).sum();
+            let _ = writeln!(
+                o,
+                "  {name}, shifted {sh}: {}; placebo outside the clip {}",
+                outcomes_line(&c),
+                at(&g.pout, code)
+            );
+            let _ = writeln!(
+                o,
+                "    placebo reconciliation: matched {} + not matched {} + outside the clip {} = checked {checked} ({})",
+                at(&c, 1),
+                at(&c, 0) + at(&c, 2),
+                at(&g.pout, code),
+                verdict(at(&c, 0) + at(&c, 1) + at(&c, 2) + at(&g.pout, code) == checked)
+            );
             if let Some(s) = g.psums.get(code) {
                 let _ = writeln!(
                     o,
@@ -533,19 +561,37 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
     for (name, c) in STD_ERROR_NAMES.iter().zip(&rs.refused) {
         let _ = writeln!(o, "refused whole, {name}: {c}");
     }
-    let flagged = g.updates[0] + g.updates[1];
+    let flagged = g.ids[0].n + g.ids[1].n;
     for (name, c) in FLAG_NAMES.iter().zip(&g.updates) {
         let _ = writeln!(o, "updates {name}: {c}");
     }
     let _ = writeln!(
         o,
-        "adsb=false share of flagged updates: {}",
-        pct(g.updates[0], flagged)
+        "adsb=false share of flagged updates, leaving out pseudo, frozen and coasting ones (as the class lines do): {}",
+        pct(g.ids[0].n, flagged)
+    );
+    let input = rs.tais_records;
+    let accounted = g
+        .updates
+        .iter()
+        .sum::<u64>()
+        .saturating_add(r.duplicates)
+        .saturating_add(r.outside_window)
+        .saturating_add(r.no_time_outside);
+    let _ = writeln!(
+        o,
+        "input TAIS records {input} = updates {} + duplicate updates dropped {} + outside the window {} + no time, outside the window {} ({})",
+        g.updates.iter().sum::<u64>(),
+        r.duplicates,
+        r.outside_window,
+        r.no_time_outside,
+        verdict(input == accounted)
     );
     let _ = writeln!(
         o,
-        "tracks (facility, recSTARSSrcID, trackNum): {}; records with no trackNum {}; distinct recSTARSSrcID {}; facilities {}",
-        g.tracks,
+        "track segments (a track key of facility, recSTARSSrcID and trackNum, cut at every restart): {} on {} track keys; records with no trackNum {}; distinct recSTARSSrcID {}; facilities {}",
+        g.segments,
+        r.track_keys,
         r.no_track_num,
         r.distinct_src_ids,
         r.facs.len()
@@ -563,6 +609,20 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
 
     let _ = writeln!(
         o,
+        "duplicate updates dropped (same key, time, position and flags, across files or within one; updates without a time or track number are not checked for duplicates): {}; with a window, updates with no time, outside the window: {}",
+        r.duplicates, r.no_time_outside
+    );
+    for (name, row) in STATUS_NAMES.iter().zip(&g.status) {
+        let _ = writeln!(
+            o,
+            "{name} updates (in no flag tally, class, change or interval): adsb=false {} adsb=true {} adsb absent {}",
+            at(row, 0),
+            at(row, 1),
+            at(row, 2)
+        );
+    }
+    let _ = writeln!(
+        o,
         "== 1. update interval by flag (track time mrtTime, per track) =="
     );
     for (i, name) in FLAG_NAMES.iter().take(2).enumerate() {
@@ -571,23 +631,28 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
             hist_bins(&mut o, h);
         }
     }
-    let _ = writeln!(o, "by track class (the flags seen on the track):");
+    let _ = writeln!(o, "by track class (the flags seen on the track segment; pseudo, frozen and coasting updates not counted):");
     for (name, c) in CLASS_NAMES.iter().zip(&r.classes) {
         let _ = writeln!(o, "  {name}: {}", class_line(c));
     }
 
+    let _ = writeln!(
+        o,
+        "track segments with no flagged update (only status updates, or only updates with no flag; in no class): {}",
+        r.segments_no_flag
+    );
     let _ = writeln!(o, "== 2. flag changes within a track ==");
     let _ = writeln!(
         o,
-        "changes {} on {} tracks; flagged update pairs {} (change rate per pair {})",
+        "changes {} on {} track segments; flagged update pairs {} (change rate per pair {})",
         r.changes,
-        r.tracks_with_change,
+        r.segments_with_change,
         r.flagged_pairs,
         pct(r.changes, r.flagged_pairs)
     );
     let _ = writeln!(
         o,
-        "tracks with 2 or more flagged updates, by number of changes:"
+        "track segments with 2 or more flagged updates, by number of changes:"
     );
     for (name, c) in CHANGE_BIN_NAMES.iter().zip(&r.change_bins) {
         let _ = writeln!(o, "  {name}: {c}");
@@ -597,17 +662,17 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
 
     let _ = writeln!(o, "== 3. identity carried by the updates ==");
     for (i, name) in FLAG_NAMES.iter().take(2).enumerate() {
-        let _ = writeln!(o, "{name}:");
+        let _ = writeln!(o, "{name} (pseudo, frozen and coasting updates left out):");
         if let Some(s) = g.ids.get(i) {
             ids(&mut o, "  ", s);
         }
     }
     let _ = writeln!(
         o,
-        "tracks with an adsb=false update: {}; of those, tracks whose adsb=false updates ever carried a non-zero address: {} ({})",
-        g.tracks_with_false,
-        g.tracks_false_with_icao,
-        pct(g.tracks_false_with_icao, g.tracks_with_false)
+        "track segments with an adsb=false update: {}; of those, segments whose adsb=false updates ever carried a non-zero address: {} ({})",
+        g.segments_with_false,
+        g.segments_false_with_icao,
+        pct(g.segments_false_with_icao, g.segments_with_false)
     );
 
     let _ = writeln!(
@@ -674,7 +739,7 @@ mod tests {
     #[test]
     fn facility_label_prints_only_plain_ids() {
         assert_eq!(fac_label(&src("ZZA"), 0), "ZZA");
-        assert_eq!(fac_label(&[0; 8], 1), "(no src)");
+        assert_eq!(fac_label(&[0; 8], 1), "facility unknown");
         let mut odd = src("AB");
         odd[2] = b'<';
         assert_eq!(fac_label(&odd, 7), "(other #7)");

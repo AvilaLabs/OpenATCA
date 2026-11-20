@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub const USAGE: &str =
-    "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half] [--nasr <NASR_CSV.zip>]";
+    "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half] [--nasr <NASR_CSV.zip>]\n       [--from <unix s> --to <unix s>] [--sfdps <recording dir> [--lag-floor-s <s>]] [--hours]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -16,6 +16,13 @@ pub struct Args {
     pub scorer_half: bool,
     /// The NASR CSV archive whose `APT_BASE.csv` gives the public airports of the surface rule.
     pub nasr: Option<PathBuf>,
+    /// Only the reports from `from_s` up to (excluding) `to_s`, Unix seconds.
+    pub window: Option<(i64, i64)>,
+    /// The SFDPS recordings to join the flight record from, and the lag floor to apply, seconds.
+    pub sfdps: Option<PathBuf>,
+    pub lag_floor_s: i64,
+    /// Print the reports of the clip by UTC hour and stop.
+    pub hours: bool,
 }
 
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
@@ -24,6 +31,13 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     let (mut adsb, mut out, mut nasr): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) =
         (None, None, None);
     let mut scorer_half = false;
+    let mut hours = false;
+    let (mut sfdps, mut from, mut to, mut lag): (
+        Option<PathBuf>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = (None, None, None, None);
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         let slot = match flag.as_str() {
@@ -33,6 +47,28 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
                 }
                 continue;
             }
+            "--hours" => {
+                if std::mem::replace(&mut hours, true) {
+                    return Err("--hours given twice".to_string());
+                }
+                continue;
+            }
+            "--from" | "--to" | "--lag-floor-s" => {
+                let v = it
+                    .next()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or_else(|| format!("{flag} needs a whole number"))?;
+                let slot = match flag.as_str() {
+                    "--from" => &mut from,
+                    "--to" => &mut to,
+                    _ => &mut lag,
+                };
+                if slot.replace(v).is_some() {
+                    return Err(format!("{flag} given twice"));
+                }
+                continue;
+            }
+            "--sfdps" => &mut sfdps,
             "--adsb" => &mut adsb,
             "--out" => &mut out,
             "--nasr" => &mut nasr,
@@ -46,12 +82,21 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             return Err(format!("{flag} given twice"));
         }
     }
+    let window = match (from, to) {
+        (Some(f), Some(t)) if f < t => Some((f, t)),
+        (None, None) => None,
+        _ => return Err("--from and --to go together, from before to".to_string()),
+    };
     match (adsb, out) {
         (Some(adsb), Some(out)) => Ok(Args {
             adsb,
             out,
             scorer_half,
             nasr,
+            window,
+            sfdps,
+            lag_floor_s: lag.unwrap_or(58),
+            hours,
         }),
         _ => Err("--adsb and --out are both required".to_string()),
     }
