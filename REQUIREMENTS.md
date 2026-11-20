@@ -5455,8 +5455,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
   an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
-  sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
-  any path it cannot resolve.
+  sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
 
 ## STDDS adsb-flag census (tools/oa-stdds-census)
 
@@ -5481,9 +5480,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   address field reads zero on almost all adsb=false updates).
 - **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
   code, flight-plan content or individual time; the only text from the data is a source id of letters and
-  digits. A path with a sealed name in any component, as given or resolved, is refused before it is
-  opened or listed; so is a directory named `scds` or holding a sealed name, and every subdirectory is
-  checked before it is listed (exit 2).
+  digits. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
+  file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
+  links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
+  read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
+  `rec/stdds` is refused (exit 2).
 - **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
   adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
@@ -5539,7 +5540,6 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-CEN-020** The census estimates the bytes it holds, prints the estimate, stops and refuses a run whose
   estimate passes 4 GB, and counts updates left out by the time window.
 
-  sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
 - **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries

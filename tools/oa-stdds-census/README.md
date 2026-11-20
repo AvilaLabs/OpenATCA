@@ -12,8 +12,8 @@ oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft 
 
 - `DIR`: a STDDS recording directory (files `*.oaf` or `*.oaf.gz`, searched up to three levels
   down). Given a capture day directory that holds `rec/stdds` (the layout `run-window.sh` writes:
-  `DAY/rec/<feed>/<feed>-<UTC start>-<NNNN>.oaf.gz`, `DAY/log`), only `rec/stdds` is read; the
-  other feeds' recordings are skipped.
+  `DAY/rec/<feed>/scds-<feed>-<UTC start>-<NNNN>.oaf.gz`, `DAY/log`), only `rec/stdds` is read, and only files named `scds-stdds-*`. A
+  directory with `rec` but no `rec/stdds`, or named `rec`, is refused (exit 2).
 - `--adsb`: an `.oaf` clip of the same day from `oa-adsb-clip`. Without it, only the census runs.
 - `--gate-nm`, `--gate-ft`: the match gates of the position comparison, 1 NM and 500 ft by
   default. The horizontal gate is also tried at 0.5 and 2 NM.
@@ -25,7 +25,7 @@ resolves links before it checks. A sealed path is refused before any byte is rea
 names the path and the exit status is 2. The tool writes only to stdout and stderr and takes no
 `--out`.
 
-Run on the 24 November development day, on 25 November (the clip is the `oa-adsb-clip` output
+The tool runs on 25 November on the 24 November development day (the clip is the `oa-adsb-clip` output
 for ADS-B day 2026.11.24):
 
 ```

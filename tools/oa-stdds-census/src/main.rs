@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 //! `oa-stdds-census DIR [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N]]` prints the census of the
 //! recordings in DIR, and with an ADS-B clip the position cross-check. Exit 0 on success, 1 on a
-//! failed run, 2 on a usage error, a sealed path, a bad gate or window, or a memory estimate past the budget, 3 if the frame reader stalled
-//! (the census is incomplete).
+//! failed run, 2 on a usage error, a bad gate or window, a memory estimate past the budget, a sealed
+//! path (given, met in the walk, or found when a file is opened or the clip is loaded) or a directory
+//! that is a `rec` folder or a capture day without `rec/stdds`, 3 if the frame reader stalled (the
+//! census is incomplete).
 
 use oa_sealed::Sealed;
 use oa_stdds_census::census::Census;
 use oa_stdds_census::census::DEFAULT_BUDGET;
-use oa_stdds_census::guard::refuse_sealed;
+use oa_stdds_census::guard::{is_refusal, refuse_sealed};
 use oa_stdds_census::read::{read_dir, ReadError};
 use oa_stdds_census::report::render;
 use oa_stdds_census::xcheck::{build, Params, Window};
@@ -91,6 +93,10 @@ fn main() -> ExitCode {
             let loaded = match oa_bench::input::load_adsb(Path::new(c)) {
                 Ok(l) => l,
                 Err(e) => {
+                    if is_refusal(&e.to_string()) {
+                        eprintln!("oa-stdds-census: refused: {e}");
+                        return ExitCode::from(2);
+                    }
                     eprintln!("oa-stdds-census: cannot read the ADS-B clip: {e}");
                     return ExitCode::from(1);
                 }
@@ -121,7 +127,7 @@ fn main() -> ExitCode {
         .with_window(window);
     let rs = match read_dir(Path::new(dir), &mut census) {
         Ok(rs) => rs,
-        Err(e @ ReadError::Refused(_)) => {
+        Err(e @ (ReadError::Refused(_) | ReadError::Layout(_))) => {
             eprintln!("oa-stdds-census: refused: {e}");
             return ExitCode::from(2);
         }
