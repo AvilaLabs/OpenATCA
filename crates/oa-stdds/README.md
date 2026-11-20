@@ -10,7 +10,7 @@ no I/O and no clock (RULESET B1, B2). The crate's only I/O is its example.
 | Module | Messages | Depth |
 |---|---|---|
 | `kind` | every STDDS message | Classified by root element and namespace. A message of no known kind is counted with its root name and namespace, never an error. |
-| `tais` | TAIS `TATrackAndFlightPlan`: STARS terminal radar tracks with their flight plans | Parsed in full into `TaisRecord`, with every field in a fixed unit named in the field. This includes the fusion and sensor flags and the coast flag, which say how independent of ADS-B each track is. |
+| `tais` | TAIS `TATrackAndFlightPlan`: STARS terminal radar tracks with their flight plans | Parsed in full into `TaisRecord`, with every field in a fixed unit named in the field. This includes the track flags (ADS-B, coast, pseudo, frozen, new), which tell how independent of ADS-B each track is. |
 | `smes` | SMES (ASDE-X) Cat11 `positionReport`: airport surface tracks | Parsed to the same level, including the runway the target is associated with. |
 | `status` | the service-status messages | Service name and state. |
 | — | Cat10 `mlatReport` and `adsbReport`, the FIXM-mediated forms, APDS, ISMC, RVR and TDES | Classified and counted only. |
