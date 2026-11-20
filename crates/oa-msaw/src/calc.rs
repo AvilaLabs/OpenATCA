@@ -52,10 +52,11 @@ pub fn deg_to_e7(x: f64) -> i32 {
 /// procedure areas that contain the point (`None` outside them all). `None` when the point has
 /// no terrain or chart coverage (rule 1): no floor is invented.
 ///
-/// The floor is the higher of terrain plus its clearance, the obstacle top plus its clearance
-/// and the chart altitude. In a procedure area the chart altitude is replaced by the published
-/// altitude when that is lower, and the clearances above terrain and obstacles are the
-/// procedure clearance: a lower floor in that area only.
+/// The normal floor is the higher of terrain plus its clearance, the obstacle top plus its
+/// clearance and the chart altitude. In a procedure area the floor is the published altitude when
+/// that is lower than the normal floor: a lower floor in that area only, and never a higher one.
+/// (A published procedure altitude already protects its path from terrain and obstacles, which is
+/// why the clearances do not apply under it.)
 pub fn floor_of(
     s: &FloorSample,
     proc_ft: Option<i32>,
@@ -64,26 +65,23 @@ pub fn floor_of(
     if s.terrain_ft == FLOOR_NONE || s.mva_ft == FLOOR_NONE {
         return None;
     }
-    let (tc, oc) = if proc_ft.is_some() {
-        (cfg.proc_clearance_ft, cfg.proc_clearance_ft)
-    } else {
-        (cfg.terrain_clearance_ft, cfg.obstacle_clearance_ft)
-    };
-    let (chart, chart_kind) = match proc_ft {
-        Some(p) if p < s.mva_ft => (p, FloorKind::Procedure),
-        _ => (s.mva_ft, FloorKind::Mva),
-    };
-    let mut best = (s.terrain_ft.saturating_add(tc), FloorKind::Terrain);
+    let mut best = (
+        s.terrain_ft.saturating_add(cfg.terrain_clearance_ft),
+        FloorKind::Terrain,
+    );
     if s.obstacle_ft != FLOOR_NONE {
-        let o = s.obstacle_ft.saturating_add(oc);
+        let o = s.obstacle_ft.saturating_add(cfg.obstacle_clearance_ft);
         if o > best.0 {
             best = (o, FloorKind::Obstacle);
         }
     }
-    if chart > best.0 {
-        best = (chart, chart_kind);
+    if s.mva_ft > best.0 {
+        best = (s.mva_ft, FloorKind::Mva);
     }
-    Some(best)
+    match proc_ft {
+        Some(p) if p < best.0 => Some((p, FloorKind::Procedure)),
+        _ => Some(best),
+    }
 }
 
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
@@ -220,7 +218,7 @@ mod proofs {
     use crate::types::{ProcArea, MAX_ABS_VRATE_FPM, MAX_LOOK_AHEAD_S, MAX_PROCS};
     use oa_safety::geom::POLYGON_EMPTY;
 
-    fn cfg_with(tc: i32, oc: i32, pc: i32) -> MsawConfig {
+    fn cfg_with(tc: i32, oc: i32) -> MsawConfig {
         MsawConfig {
             max_tracks: 1,
             max_open: 1,
@@ -231,7 +229,6 @@ mod proofs {
             hysteresis_ns: 1,
             terrain_clearance_ft: tc,
             obstacle_clearance_ft: oc,
-            proc_clearance_ft: pc,
             max_speed_mps: 300.0,
             r95_cap_m: 1000.0,
             procs: [ProcArea {
@@ -264,10 +261,9 @@ mod proofs {
             kani::any(),
             kani::any(),
         );
-        let (tc, oc, pc): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        let (tc, oc): (i32, i32) = (kani::any(), kani::any());
         kani::assume(tc >= 0 && tc <= MAX_CLEARANCE_FT);
         kani::assume(oc >= 0 && oc <= MAX_CLEARANCE_FT);
-        kani::assume(pc >= 0 && pc <= MAX_CLEARANCE_FT);
         let p: i32 = kani::any();
         let use_proc: bool = kani::any();
         let proc_ft = if use_proc { Some(p) } else { None };
@@ -275,7 +271,7 @@ mod proofs {
         kani::assume(t1 != FLOOR_NONE && m1 != FLOOR_NONE);
         kani::assume(t1 <= t2 && m1 <= m2);
         kani::assume(o1 == FLOOR_NONE || (o2 != FLOOR_NONE && o1 <= o2));
-        let cfg = cfg_with(tc, oc, pc);
+        let cfg = cfg_with(tc, oc);
         let s1 = FloorSample {
             terrain_ft: t1,
             obstacle_ft: o1,

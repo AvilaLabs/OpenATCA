@@ -6232,8 +6232,8 @@ FAA value.
   and stops hiding at its end time; an inhibition of another net or band hides nothing.
 - **OA-MSAW-008** The floor is the higher of terrain plus clearance, obstacle top plus clearance and the
   chart altitude; no coverage gives no floor.
-- **OA-MSAW-009** In a procedure area the published altitude replaces the chart altitude when lower and
-  the clearances are the procedure clearance; outside it nothing changes.
+- **OA-MSAW-009** In a procedure area the published altitude is the floor when lower than the normal
+  floor and never raises it; outside the area nothing changes.
 - **OA-MSAW-010** An alert is a warning when the predicted violation is within the warning time, else a
   caution; a track already below its floor is a warning.
 - **OA-MSAW-011** One alert is kept per track from its first to its last violating cycle and ends after the

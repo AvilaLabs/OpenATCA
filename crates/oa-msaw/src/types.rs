@@ -119,7 +119,7 @@ pub struct FloorSample {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcArea {
     pub area: Polygon,
-    /// The published altitude, feet MSL: in the area it replaces the chart altitude when lower.
+    /// The published altitude, feet MSL: in the area it is the floor when lower than the normal floor.
     pub floor_ft: i32,
 }
 
@@ -146,8 +146,6 @@ pub struct MsawConfig {
     pub terrain_clearance_ft: i32,
     /// Clearance above an obstacle top, feet.
     pub obstacle_clearance_ft: i32,
-    /// Clearance above terrain and obstacles inside a procedure area, feet.
-    pub proc_clearance_ft: i32,
     /// A row faster than this, metres per second, is refused as bad.
     pub max_speed_mps: f64,
     /// A track's 95 % radius is held to this, metres (a row without a usable radius takes it).

@@ -69,16 +69,10 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     for (v, name) in [
         (c.terrain_clearance_ft, "terrain_clearance_ft"),
         (c.obstacle_clearance_ft, "obstacle_clearance_ft"),
-        (c.proc_clearance_ft, "proc_clearance_ft"),
     ] {
         if !(0..=MAX_CLEARANCE_FT).contains(&v) {
             return Err(name);
         }
-    }
-    // A procedure area lowers the floor, it never raises it.
-    if c.proc_clearance_ft > c.terrain_clearance_ft || c.proc_clearance_ft > c.obstacle_clearance_ft
-    {
-        return Err("proc_clearance_ft above a clearance");
     }
     if !(pos(c.max_speed_mps) && c.max_speed_mps <= MAX_SPEED_LIMIT_MPS) {
         return Err("max_speed_mps");

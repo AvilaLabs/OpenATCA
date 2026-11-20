@@ -12,8 +12,8 @@
 //! * The floor is the higher of terrain plus a clearance, an obstacle top plus a clearance and the
 //!   minimum vectoring altitude of the sector ([`floor_of`]). Terrain and obstacles are the
 //!   shell's conservative maxima over the point's radius (the track's 95 % radius plus half a
-//!   step). Inside a procedure area the published altitude replaces the chart altitude when lower,
-//!   and the clearances are the procedure clearance: a lower floor in that area only.
+//!   step). Inside a procedure area the published altitude is the floor when lower than
+//!   that: a lower floor in that area only.
 //! * Nothing here has a default: the look-ahead, the warning time, every clearance, the budgets
 //!   and the procedure areas come from the caller in an [`MsawConfig`]. The tests use made-up
 //!   values and say so; no FAA value is in this crate.

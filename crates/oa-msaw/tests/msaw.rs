@@ -33,7 +33,6 @@ fn cfg() -> MsawConfig {
         hysteresis_ns: 5 * S,
         terrain_clearance_ft: 500,
         obstacle_clearance_ft: 500,
-        proc_clearance_ft: 100,
         max_speed_mps: 400.0,
         r95_cap_m: 2000.0,
         procs: [ProcArea {
@@ -117,7 +116,7 @@ type Edit = fn(&mut MsawConfig);
 #[test]
 fn a_configuration_out_of_range_is_refused_naming_the_key() {
     assert!(msaw_check(&cfg()).is_ok());
-    let cases: [(&str, Edit); 12] = [
+    let cases: [(&str, Edit); 11] = [
         ("max_tracks", |c| c.max_tracks = 0),
         ("max_tracks", |c| c.max_tracks = MAX_TRACKS_LIMIT + 1),
         ("max_open", |c| c.max_open = MAX_OPEN_LIMIT + 1),
@@ -129,9 +128,6 @@ fn a_configuration_out_of_range_is_refused_naming_the_key() {
         ("samples", |c| c.samples = MAX_SAMPLES + 1),
         ("hysteresis_ns", |c| c.hysteresis_ns = 0),
         ("terrain_clearance_ft", |c| c.terrain_clearance_ft = -1),
-        ("proc_clearance_ft above a clearance", |c| {
-            c.proc_clearance_ft = 600
-        }),
     ];
     for (key, f) in cases {
         let mut c = cfg();
@@ -514,23 +510,20 @@ fn a_procedure_area_lowers_the_floor_in_that_area_only() {
         obstacle_ft: FLOOR_NONE,
         mva_ft: 3000,
     };
-    // Outside: the chart altitude. Inside: the procedure altitude and the lower clearance.
+    // Outside: the normal floor. Inside: the published altitude, when lower.
     assert_eq!(floor_of(&s, None, &c), Some((3000, FloorKind::Mva)));
     assert_eq!(
         floor_of(&s, Some(1500), &c),
         Some((1500, FloorKind::Procedure))
     );
-    // A procedure altitude above the chart never raises the floor.
+    // A procedure altitude above the normal floor never raises it.
     assert_eq!(floor_of(&s, Some(4000), &c), Some((3000, FloorKind::Mva)));
-    // The terrain still counts, with the procedure clearance.
-    let t = FloorSample {
-        terrain_ft: 2000,
+    // No coverage is no floor, inside a procedure area as well.
+    let n = FloorSample {
+        terrain_ft: FLOOR_NONE,
         ..s
     };
-    assert_eq!(
-        floor_of(&t, Some(1500), &c),
-        Some((2100, FloorKind::Terrain))
-    );
+    assert_eq!(floor_of(&n, Some(1500), &c), None);
     // Through a cycle: a landing aircraft at 1,600 ft inside the area is clear; outside it alerts.
     let mut rg = rig(&c);
     let inside = tr(
