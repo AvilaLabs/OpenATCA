@@ -523,11 +523,12 @@ pub fn summary_text(i: &SummaryInput) -> String {
     }
     let _ = writeln!(
         o,
-        "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
+        "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2} of which reducing to grids {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
         sec(w.plan_ns),
         sec(w.floors_ns),
         sec(fl.ns_terrain),
         sec(fl.ns_tile_read),
+        sec(fl.ns_tile_reduce),
         sec(fl.ns_obstacle),
         sec(fl.ns_chart),
         sec(w.eval_ns),

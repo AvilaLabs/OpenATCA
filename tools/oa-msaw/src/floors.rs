@@ -67,6 +67,8 @@ pub struct FloorStats {
     /// obstacle index and in the chart.
     pub ns_terrain: u64,
     pub ns_tile_read: u64,
+    /// Of `ns_tile_read`, the part spent reducing a tile to its grid.
+    pub ns_tile_reduce: u64,
     pub ns_obstacle: u64,
     pub ns_chart: u64,
     /// Always zero (see `terrain_misaligned`).
@@ -252,7 +254,9 @@ impl Floors {
             Some(p) if p.is_file() => {
                 let t0 = Instant::now();
                 let g = read_tile(&p)?;
+                let t1 = Instant::now();
                 self.coarse.add_grid(&g);
+                self.stats.ns_tile_reduce += t1.elapsed().as_nanos() as u64;
                 self.stats.terrain_grid_bytes = self.coarse.bytes() as u64;
                 self.stats.ns_tile_read += t0.elapsed().as_nanos() as u64;
                 self.loaded.insert(cell);
