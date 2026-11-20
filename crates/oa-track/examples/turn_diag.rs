@@ -64,6 +64,8 @@ const MIN_SPEED_MPS: f64 = 50.0;
 /// Heading rate magnitude from which the reference is turning, degrees per second (the first
 /// bin edge).
 const TURN_DPS: f64 = 0.25;
+/// Report age beyond which a sample is "far" from a report, seconds (the gap diagnostic).
+const FAR_S: f64 = 5.0;
 /// The phase window, seconds.
 const WINDOW_S: i64 = 10;
 /// Bin edges of the reference turn rate magnitude, degrees per second.
@@ -98,7 +100,24 @@ struct Row {
     mu_turn: f64,
     /// Heading rate, degrees per second, clockwise positive.
     omega_dps: f64,
+    /// The row's position (degrees) and velocity (east, north, m/s).
+    lat: f64,
+    lon: f64,
+    ve: f64,
+    vn: f64,
 }
+
+/// One raw report of an aircraft: position (degrees) and the reported velocity (east, north, m/s).
+#[derive(Clone, Copy)]
+struct Raw {
+    lat: f64,
+    lon: f64,
+    ve: f64,
+    vn: f64,
+}
+
+/// Metres per degree of latitude (the flat-earth step of the dead-reckoning baseline).
+const M_PER_DEG: f64 = 111_320.0;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -220,24 +239,36 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
 }
 
 /// Keeps the tick rows of `o` whose key is wanted.
-fn collect(o: &TrackOutput, want: &BTreeSet<(u32, i64)>, got: &mut BTreeMap<(u32, i64), Row>) {
-    let rows = o
-        .addr
-        .iter()
-        .zip(&o.t_ns)
-        .zip(&o.flags)
-        .zip(&o.mu_h)
-        .zip(&o.turn_rate_rps);
-    for ((((&a, &t), &f), mu), &w) in rows {
-        if f & O_TICK == 0 {
+fn collect(
+    o: &TrackOutput,
+    want: &BTreeSet<(u32, i64)>,
+    got: &mut BTreeMap<(u32, i64), Row>,
+    want_upd: &BTreeSet<(u32, i64)>,
+    got_upd: &mut BTreeMap<(u32, i64), Row>,
+) {
+    for i in 0..o.addr.len() {
+        let (Some(&a), Some(&t), Some(&f)) = (o.addr.get(i), o.t_ns.get(i), o.flags.get(i)) else {
+            continue;
+        };
+        let key = (a, t.div_euclid(1_000_000));
+        let tick = f & O_TICK != 0;
+        if !(tick && want.contains(&key) || !tick && want_upd.contains(&key)) {
             continue;
         }
-        let key = (a, t.div_euclid(1_000_000));
-        if want.contains(&key) {
-            got.entry(key).or_insert(Row {
-                mu_turn: f64::from(mu[1]),
-                omega_dps: f64::from(w).to_degrees(),
-            });
+        let g = |v: &[f32]| v.get(i).copied().map_or(f64::NAN, f64::from);
+        let e7 = |v: &[i32]| v.get(i).map_or(f64::NAN, |&x| f64::from(x) * 1e-7);
+        let row = Row {
+            mu_turn: o.mu_h.get(i).map_or(f64::NAN, |m| f64::from(m[1])),
+            omega_dps: g(&o.turn_rate_rps).to_degrees(),
+            lat: e7(&o.lat_e7),
+            lon: e7(&o.lon_e7),
+            ve: g(&o.vel_east_mps),
+            vn: g(&o.vel_north_mps),
+        };
+        if tick {
+            got.entry(key).or_insert(row);
+        } else {
+            got_upd.entry(key).or_insert(row);
         }
     }
 }
@@ -260,6 +291,12 @@ fn stat(v: &[f64]) -> [f64; 4] {
 
 fn bin_of(edges: &[f64], x: f64) -> usize {
     edges.iter().take_while(|&&e| x >= e).count()
+}
+
+/// The time of the last report at or before `t`, Unix ms.
+fn last_report(times: &[i64], t: i64) -> Option<i64> {
+    let i = times.partition_point(|&x| x <= t);
+    i.checked_sub(1).and_then(|j| times.get(j)).copied()
 }
 
 /// The age of the last report at or before `t` and the gap from it to the next one, seconds
@@ -388,6 +425,33 @@ fn run(
                 .push(m.toa_ns.div_euclid(1_000_000));
         }
     }
+    // The last report at or before each sample more than [`FAR_S`] from one (the gap diagnostic):
+    // its tracker update row and its raw position and velocity.
+    let mut want_upd: BTreeSet<(u32, i64)> = BTreeSet::new();
+    let mut want_raw: BTreeSet<(u32, i64)> = BTreeSet::new();
+    for s in &samples {
+        if let Some(l) = times.get(&s.addr).and_then(|v| last_report(v, s.t_ms)) {
+            want_raw.insert((s.addr, l));
+            if (s.t_ms - l) as f64 / 1000.0 > FAR_S {
+                want_upd.insert((s.addr, l));
+            }
+        }
+    }
+    let mut raw: BTreeMap<(u32, i64), Raw> = BTreeMap::new();
+    for m in &meas {
+        let key = (m.addr, m.toa_ns.div_euclid(1_000_000));
+        if m.flags & M_HAS_VEL != 0 && want_raw.contains(&key) {
+            raw.insert(
+                key,
+                Raw {
+                    lat: f64::from(m.lat_e7) * 1e-7,
+                    lon: f64::from(m.lon_e7) * 1e-7,
+                    ve: f64::from(m.vel_east_mps),
+                    vn: f64::from(m.vel_north_mps),
+                },
+            );
+        }
+    }
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: 1_000_000_000,
@@ -398,6 +462,7 @@ fn run(
     let mut t = tracker_new(&cfg).map_err(|e| e.to_string())?;
     let mut scratch = output_new(cfg.out_capacity);
     let mut rows: BTreeMap<(u32, i64), Row> = BTreeMap::new();
+    let mut upd_rows: BTreeMap<(u32, i64), Row> = BTreeMap::new();
     let spill = out_dir.join(format!("spill-{}", std::process::id()));
     let mut w = if rescore {
         Some(spill_new(&spill).map_err(|e| e.to_string())?)
@@ -406,9 +471,10 @@ fn run(
     };
     let drain = |scratch: &mut TrackOutput,
                  w: &mut Option<oa_track::spill::SpillWriter>,
-                 rows: &mut BTreeMap<(u32, i64), Row>|
+                 rows: &mut BTreeMap<(u32, i64), Row>,
+                 upd: &mut BTreeMap<(u32, i64), Row>|
      -> Result<(), String> {
-        collect(scratch, &want, rows);
+        collect(scratch, &want, rows, &want_upd, upd);
         if let Some(w) = w {
             spill_append(w, scratch).map_err(|e| e.to_string())?;
         }
@@ -418,7 +484,7 @@ fn run(
     for m in &meas {
         tracker_update(&mut t, m, &mut scratch);
         if output_len(&scratch) > DRAIN_ROWS.min(cfg.out_capacity / 2) {
-            drain(&mut scratch, &mut w, &mut rows)?;
+            drain(&mut scratch, &mut w, &mut rows, &mut upd_rows)?;
         }
     }
     let end = meas.last().map_or(0, |m| m.toa_ns);
@@ -430,7 +496,7 @@ fn run(
         st.offered, st.applied, st.velocity_gated, st.jump_rejected
     );
     let overflow = scratch.overflow;
-    drain(&mut scratch, &mut w, &mut rows)?;
+    drain(&mut scratch, &mut w, &mut rows, &mut upd_rows)?;
     let run = match w {
         Some(w) => Some(
             spill_finish(
@@ -768,9 +834,272 @@ fn run(
             q(75)
         );
     }
+    let tq = |a: u32, t: i64| -> Option<[f64; 4]> {
+        let s = adsb_truth::query(&built.truth, a, t).ok()?;
+        Some([s.lat, s.lon, s.vel_east_mps, s.vel_north_mps])
+    };
+    gap_report(
+        &mut o,
+        &GapIn {
+            samples: &samples,
+            refs: &refs,
+            rows: &rows,
+            upd: &upd_rows,
+            raw: &raw,
+            times: &times,
+            truth: &tq,
+        },
+    );
     fs::write(out_dir.join("turn_diag.txt"), &o).map_err(|e| e.to_string())?;
     fs::write(out_dir.join("turn_samples.csv"), &csv).map_err(|e| e.to_string())?;
     Ok(o)
+}
+
+/// A bin of the growth fit: mean age, OpenATCA median, OpenATCA p95, dead-reckoning p95.
+type FitPoint = (f64, f64, f64, f64);
+
+/// What the gap diagnostic reads.
+struct GapIn<'a> {
+    samples: &'a [Sample],
+    refs: &'a [Ref],
+    rows: &'a BTreeMap<(u32, i64), Row>,
+    upd: &'a BTreeMap<(u32, i64), Row>,
+    raw: &'a BTreeMap<(u32, i64), Raw>,
+    times: &'a BTreeMap<u32, Vec<i64>>,
+    /// The reference at a time: latitude, longitude, east and north velocity.
+    truth: &'a dyn Fn(u32, i64) -> Option<[f64; 4]>,
+}
+
+/// The distance of the point (degrees) from the reference's track line at the reference state `r`
+/// (latitude, longitude, east, north velocity), metres, signed; none below the fit speed floor.
+fn cross_of(lat: f64, lon: f64, r: &[f64; 4]) -> Option<f64> {
+    let sp = r[2].hypot(r[3]);
+    if sp < MIN_SPEED_MPS {
+        return None;
+    }
+    let dn = (lat - r[0]) * M_PER_DEG;
+    let de = (lon - r[1]) * M_PER_DEG * r[0].to_radians().cos();
+    Some((de * r[3] - dn * r[2]) / sp)
+}
+
+fn wrap_deg(d: f64) -> f64 {
+    (d + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// One sample for the gap diagnostic.
+struct Far {
+    flight: String,
+    age: f64,
+    /// Cross-track error of the dead-reckoning baseline: the last raw report's position plus its
+    /// reported velocity times the age (a straight line; the velocity's lag does not matter then).
+    dr: f64,
+    /// OpenATCA's cross-track error by the same definition, from its tick row; and p002's.
+    oa: f64,
+    oa_p002: f64,
+    er: f64,
+    /// The reference's turn rate at the sample is under 0.5 deg/s.
+    level: bool,
+    /// The track's turn rate and turn probability at the sample.
+    omega: f64,
+    mu: f64,
+    ref_rate: f64,
+    /// Heading error (degrees, signed) of the track's velocity at the last report's update row
+    /// and of the raw reported velocity, against the reference's heading then.
+    upd_err: Option<f64>,
+    raw_err: Option<f64>,
+}
+
+/// The gap diagnostic: how a dead-reckoning baseline from the last raw report compares with the
+/// tracker and ERAM, by phase and age; what the tracker's velocity and turn rate are after a long
+/// gap; how the error grows with the age. Appended to `o`.
+fn gap_report(o: &mut String, g: &GapIn) {
+    let mut far: Vec<Far> = Vec::new();
+    for (s, r) in g.samples.iter().zip(g.refs) {
+        let Some(times) = g.times.get(&s.addr) else {
+            continue;
+        };
+        let Some(last) = last_report(times, s.t_ms) else {
+            continue;
+        };
+        let (Some(raw), Some(row), Some(rf)) = (
+            g.raw.get(&(s.addr, last)),
+            g.rows.get(&(s.addr, s.t_ms)),
+            (g.truth)(s.addr, s.t_ms),
+        ) else {
+            continue;
+        };
+        let age = (s.t_ms - last) as f64 / 1000.0;
+        let lat = raw.lat + raw.vn * age / M_PER_DEG;
+        let lon = raw.lon + raw.ve * age / (M_PER_DEG * raw.lat.to_radians().cos());
+        let (Some(dr), Some(oa)) = (cross_of(lat, lon, &rf), cross_of(row.lat, row.lon, &rf))
+        else {
+            continue;
+        };
+        let at_last = (g.truth)(s.addr, last);
+        let hdg = |ve: f64, vn: f64| ve.atan2(vn).to_degrees();
+        let upd_err = g.upd.get(&(s.addr, last)).zip(at_last).and_then(|(u, t)| {
+            (t[2].hypot(t[3]) >= MIN_SPEED_MPS).then(|| wrap_deg(hdg(u.ve, u.vn) - hdg(t[2], t[3])))
+        });
+        let raw_err = at_last.and_then(|t| {
+            (t[2].hypot(t[3]) >= MIN_SPEED_MPS)
+                .then(|| wrap_deg(hdg(raw.ve, raw.vn) - hdg(t[2], t[3])))
+        });
+        far.push(Far {
+            flight: s.flight.clone(),
+            age,
+            dr,
+            oa,
+            oa_p002: s.oa_cross,
+            er: s.er_cross,
+            level: r.rate.is_some_and(|x| x.abs() < 0.5),
+            omega: row.omega_dps,
+            mu: row.mu_turn,
+            ref_rate: r.rate.unwrap_or(f64::NAN),
+            upd_err,
+            raw_err,
+        });
+    }
+    let cell = |v: &[&Far], f: &dyn Fn(&Far) -> f64| -> String {
+        let x: Vec<f64> = v.iter().map(|a| f(a)).collect();
+        let t = stat(&x);
+        format!("{:>6.1} {:>6.1} {:>6.1}", t[1], t[2], t[3])
+    };
+    let _ = writeln!(
+        o,
+        "\nGap diagnostic: dead reckoning (last raw report's position plus its reported velocity times the age) against OpenATCA and ERAM, cross-track m, median p95 rms; samples with a raw report, a tracker row and a reference of 50 m/s or more ({} samples)",
+        far.len()
+    );
+    let _ = writeln!(
+        o,
+        "  {:<22} {:>6} | dead reckoning        | OpenATCA (same definition) | OpenATCA (p002)      | ERAM",
+        "phase, age", "n"
+    );
+    let ages: [(&str, f64, f64); 4] = [
+        ("under 5 s", 0.0, FAR_S),
+        ("5-8 s", FAR_S, 8.0),
+        ("over 8 s", 8.0, f64::INFINITY),
+        ("over 5 s", FAR_S, f64::INFINITY),
+    ];
+    for fl in ["all", "climb", "cruise", "descent"] {
+        for (name, lo, hi) in ages {
+            let v: Vec<&Far> = far
+                .iter()
+                .filter(|a| (fl == "all" || a.flight == fl) && a.age >= lo && a.age < hi)
+                .collect();
+            let _ = writeln!(
+                o,
+                "  {:<22} {:>6} | {} | {}     | {} | {}",
+                format!("{fl}, {name}"),
+                v.len(),
+                cell(&v, &|a| a.dr),
+                cell(&v, &|a| a.oa),
+                cell(&v, &|a| a.oa_p002),
+                cell(&v, &|a| a.er)
+            );
+        }
+    }
+    // The velocity and turn rate the track carries over a long gap.
+    let _ = writeln!(
+        o,
+        "\nSamples more than {FAR_S} s from a report, reference turn rate under 0.5 deg/s (level flight): what the track carries. Heading errors in degrees (absolute: n, median, p95), turn rates in deg/s"
+    );
+    let level: Vec<&Far> = far.iter().filter(|a| a.age > FAR_S && a.level).collect();
+    let show = |o: &mut String, name: &str, v: &[&Far]| {
+        let ae: Vec<f64> = v.iter().filter_map(|a| a.upd_err).collect();
+        let re: Vec<f64> = v.iter().filter_map(|a| a.raw_err).collect();
+        let w: Vec<f64> = v.iter().map(|a| a.omega).collect();
+        let rr: Vec<f64> = v.iter().map(|a| a.ref_rate).collect();
+        let mu: Vec<f64> = v.iter().map(|a| a.mu).collect();
+        let (e, r, w, rr, m) = (stat(&ae), stat(&re), stat(&w), stat(&rr), stat(&mu));
+        let hi = mu.iter().filter(|&&x| x >= 0.5).count();
+        let _ = writeln!(
+            o,
+            "  {:<26} n {:>5} | track heading at last report n {:>5} med {:>5.2} p95 {:>5.2} | raw heading n {:>5} med {:>5.2} p95 {:>5.2} | track turn rate |w| med {:>5.2} p95 {:>5.2} | ref |rate| med {:>5.2} p95 {:>5.2} | mu_turn med {:>5.3} p95 {:>5.3}, share >= 0.5 {:>5.3}",
+            name, v.len(), e[0], e[1], e[2], r[0], r[1], r[2], w[1], w[2], rr[1], rr[2], m[1], m[2],
+            hi as f64 / v.len().max(1) as f64
+        );
+    };
+    show(o, "all level samples", &level);
+    let big: Vec<&Far> = level
+        .iter()
+        .copied()
+        .filter(|a| a.oa.abs() > 50.0)
+        .collect();
+    let small: Vec<&Far> = level
+        .iter()
+        .copied()
+        .filter(|a| a.oa.abs() <= 50.0)
+        .collect();
+    show(o, "OpenATCA error over 50 m", &big);
+    show(o, "OpenATCA error 50 m or less", &small);
+    // Growth of the error with the age, level flight.
+    let _ = writeln!(
+        o,
+        "\nError against the age of the last report, level flight (reference turn rate under 0.5 deg/s): cross-track m. A straight coast with a heading error grows linearly with age; a carried turn rate grows with its square. p95/age is m/s"
+    );
+    let _ = writeln!(
+        o,
+        "  {:<10} {:>6} {:>8} | OpenATCA med  p95  p95/age | dead reckoning med  p95  p95/age | ERAM med  p95",
+        "age s", "n", "mean age"
+    );
+    let edges = [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0, f64::INFINITY];
+    let mut fit: Vec<FitPoint> = Vec::new();
+    for w in edges.windows(2) {
+        let (lo, hi) = match w {
+            [a, b] => (*a, *b),
+            _ => continue,
+        };
+        let v: Vec<&Far> = far
+            .iter()
+            .filter(|a| a.level && a.age >= lo && a.age < hi)
+            .collect();
+        if v.is_empty() {
+            continue;
+        }
+        let mean = v.iter().map(|a| a.age).sum::<f64>() / v.len() as f64;
+        let oa: Vec<f64> = v.iter().map(|a| a.oa).collect();
+        let dr: Vec<f64> = v.iter().map(|a| a.dr).collect();
+        let er: Vec<f64> = v.iter().map(|a| a.er).collect();
+        let (a, d, e) = (stat(&oa), stat(&dr), stat(&er));
+        let _ = writeln!(
+            o,
+            "  {:<10} {:>6} {:>8.2} | {:>12.1} {:>5.1} {:>8.2} | {:>20.1} {:>5.1} {:>8.2} | {:>8.1} {:>5.1}",
+            format!("{lo}-{hi}"),
+            v.len(),
+            mean,
+            a[1],
+            a[2],
+            a[2] / mean,
+            d[1],
+            d[2],
+            d[2] / mean,
+            e[1],
+            e[2]
+        );
+        if v.len() >= 30 && mean >= 3.0 {
+            fit.push((mean, a[1], a[2], d[2]));
+        }
+    }
+    // Log-log slope of the error against the age over the bins from 3 s on.
+    let slope = |pick: &dyn Fn(&FitPoint) -> f64| -> f64 {
+        let xs: Vec<f64> = fit.iter().map(|f| f.0.ln()).collect();
+        let ys: Vec<f64> = fit.iter().map(|f| pick(f).ln()).collect();
+        let n = xs.len() as f64;
+        let (mx, my) = (xs.iter().sum::<f64>() / n, ys.iter().sum::<f64>() / n);
+        let num: f64 = xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
+        let den: f64 = xs.iter().map(|x| (x - mx) * (x - mx)).sum();
+        num / den
+    };
+    if fit.len() >= 2 {
+        let _ = writeln!(
+            o,
+            "  log-log slope of error against mean age, bins from 3 s ({} bins): OpenATCA median {:.2}, OpenATCA p95 {:.2}, dead reckoning p95 {:.2} (1 is linear, 2 is quadratic)",
+            fit.len(),
+            slope(&|f| f.1),
+            slope(&|f| f.2),
+            slope(&|f| f.3)
+        );
+    }
 }
 
 #[cfg(test)]
