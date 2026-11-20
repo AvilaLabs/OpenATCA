@@ -114,7 +114,10 @@ for one centre, with the whole country's ADS-B traffic in one process.
 Tracker tables: 138.5 MiB for 65,536 track slots; process peak 0.69 GB, most of it the decoded
 clip. Run-to-run spread is small; the slowest seconds with rows kept come from writing about 30
 million output rows, not from tracking. The machine was not quiet (builds and an emulator were
-running), so these are upper bounds; a quiet re-run on the landed build is owed. The clip is
+running), which raises the figures; a quiet re-run on the landed build is owed. The input was
+decoded, sorted and held in memory before timing, and processed on one thread: a live feed adds
+network input, decoding and interrupts, which these figures do not include. Each second's reports
+are timed as one batch processed after the second ends. The clip is
 ADS-B only: radar, which ERAM also tracks, is not in it.
 
 ESASSP notes: any flight failing R2, R4, R12 or R13 must be investigated (R22). Track initiation
