@@ -19,9 +19,14 @@ fn main() -> ExitCode {
         }
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
-    for p in [Some(&args.adsb), Some(&args.out), args.nasr.as_ref()]
-        .into_iter()
-        .flatten()
+    for p in [
+        Some(&args.adsb),
+        Some(&args.out),
+        args.nasr.as_ref(),
+        args.sfdps.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         if let Err(e) = refuse_sealed(p) {
             eprintln!("oa-encounter: {e}");

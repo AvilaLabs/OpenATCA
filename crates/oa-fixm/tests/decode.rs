@@ -10,8 +10,9 @@
 use oa_fixm::{
     clear_events, code_str, field_error, has_field, new_events, parse_iso_ms, parse_scaled,
     parse_uuid, route_text, sector_code, track_ddeg, unit_code, unknown_text, Decoder, Events,
-    Field, FixmError, Limits, Reject, Summary, ALL_FIELDS, FIELD_COUNT, FIELD_NAMES,
-    FLAG_ASSIGNED_VFR, FLAG_ASSIGNED_VFR_PLUS, FTYPE_SCHEDULED, REJECT_COUNT, REJECT_NAMES,
+    Field, FixmError, Limits, Reject, Summary, ALL_FIELDS, ALT_FORM_AT_FIX, ALT_FORM_BLOCK,
+    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, FIELD_COUNT, FIELD_NAMES, FLAG_ASSIGNED_VFR,
+    FLAG_ASSIGNED_VFR_PLUS, FLAG_INTERIM_NIL, FTYPE_SCHEDULED, REJECT_COUNT, REJECT_NAMES,
     STATUS_ACTIVE, STATUS_CANCELLED, STATUS_PROPOSED,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
@@ -250,7 +251,7 @@ fn amendment_ah_carries_route_and_vfr_plus_altitude() {
 // REQ: OA-FIXM-001
 #[test]
 fn handoff_oh_with_transferring_and_receiving_units() {
-    let body = r#"<enRoute xsi:type="ns5:NasEnRouteType"><boundaryCrossings xsi:type="ns5:NasUnitBoundaryType"><handoff xsi:type="ns5:NasHandoffType" event="PROPOSE">
+    let body = r#"<enRoute xsi:type="ns5:NasEnRouteType"><boundaryCrossings xsi:type="ns5:NasUnitBoundaryType"><handoff xsi:type="ns5:NasHandoffType" event="INITIATION">
 <receivingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/>
 <transferringUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="???" sectorIdentifier="12"/>
 </handoff></boundaryCrossings></enRoute>"#;
@@ -260,6 +261,7 @@ fn handoff_oh_with_transferring_and_receiving_units() {
     assert_eq!(sector_code(&e.recv[0]), "1E");
     // The FAA writes an unknown unit as question marks; it is kept as stated.
     assert_eq!(unit_code(&e.xfer[0]), "???");
+    assert_eq!(e.handoff_event[0], oa_fixm::HANDOFF_INITIATION);
     assert_eq!(r.sum.unknown_attributes, 0);
 }
 
@@ -1284,4 +1286,259 @@ fn foreign_siblings_do_not_count_as_messages() {
     // Only foreign children: nothing to hold, nothing undecoded.
     let (s, _) = decode_prefix_run(&doc(&[foreign]), 0);
     assert_eq!(s.not_decoded, 0);
+}
+
+// REQ: OA-FIXM-022
+#[test]
+fn assigned_altitude_forms_are_states_not_numbers() {
+    let simple = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">36000.0</simple></assignedAltitude>"#,
+    );
+    assert_eq!(simple.ev.assigned_form[0], ALT_FORM_SIMPLE);
+    assert_eq!(simple.ev.assigned_ft[0], 36_000);
+
+    let plus = one(
+        "TH",
+        r#"<assignedAltitude><vfrPlus uom="FEET">5500.0</vfrPlus></assignedAltitude>"#,
+    );
+    assert_eq!(plus.ev.assigned_form[0], ALT_FORM_VFR_PLUS);
+    assert_eq!(plus.ev.assigned_ft[0], 5500);
+
+    let vfr = one("TH", r#"<assignedAltitude><vfr/></assignedAltitude>"#);
+    assert_eq!(vfr.ev.assigned_form[0], ALT_FORM_VFR);
+    assert!(has_field(&vfr.ev, 0, Field::AssignedForm));
+    assert!(
+        !has_field(&vfr.ev, 0, Field::AssignedAlt),
+        "VFR is not a number"
+    );
+
+    let block = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">45000.0</above><below uom="FEET">47000.0</below></block></assignedAltitude>"#,
+    );
+    assert_eq!(block.ev.assigned_form[0], ALT_FORM_BLOCK);
+    assert_eq!(
+        (block.ev.block_above_ft[0], block.ev.block_below_ft[0]),
+        (45_000, 47_000)
+    );
+    assert!(!has_field(&block.ev, 0, Field::AssignedAlt));
+    assert_eq!(block.sum.unknown_elements, 0);
+    assert_eq!(block.sum.unknown_attributes, 0);
+
+    let fix = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><point xsi:type="ns2:FixPointType" fix="ABCDE"/><post uom="FEET">7000.0</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    assert_eq!(fix.ev.assigned_form[0], ALT_FORM_AT_FIX);
+    assert_eq!(
+        (fix.ev.fixalt_pre_ft[0], fix.ev.fixalt_post_ft[0]),
+        (22_000, 7000)
+    );
+    assert_eq!(code_str(&fix.ev.fixalt_point[0]), "ABCDE");
+    assert_eq!(fix.sum.unknown_elements, 0);
+}
+
+// REQ: OA-FIXM-023
+#[test]
+fn a_bad_or_doubled_altitude_form_is_a_field_error() {
+    // Two forms of one altitude: the single one meant cannot be known.
+    let two = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">100</simple><vfr/></assignedAltitude>"#,
+    );
+    err_field_n(&two, Field::AssignedForm);
+    // A block whose limits are the wrong way round, and one with a limit missing.
+    let swapped = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">47000.0</above><below uom="FEET">45000.0</below></block></assignedAltitude>"#,
+    );
+    err_field_n(&swapped, Field::AssignedForm);
+    let half = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">45000.0</above></block></assignedAltitude>"#,
+    );
+    err_field_n(&half, Field::AssignedForm);
+    // An altitude at a fix with no fix, and one with an unreadable value.
+    let nofix = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><post uom="FEET">7000.0</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    err_field_n(&nofix, Field::AssignedForm);
+    let junk = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><point fix="ABCDE"/><post uom="FEET">x</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    err_field_n(&junk, Field::AssignedForm);
+    // A simple altitude that does not parse has no form either.
+    let bad = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">999999</simple></assignedAltitude>"#,
+    );
+    err_field_n(&bad, Field::AssignedForm);
+    err_field_n(&bad, Field::AssignedAlt);
+}
+
+fn err_field_n(r: &Run, f: Field) {
+    assert!(
+        field_error(&r.ev, 0, f),
+        "{} should be an error",
+        FIELD_NAMES[f as usize]
+    );
+    assert!(
+        !has_field(&r.ev, 0, f),
+        "{} should be absent",
+        FIELD_NAMES[f as usize]
+    );
+}
+
+// REQ: OA-FIXM-024
+#[test]
+fn interim_altitude_is_a_value_or_an_explicit_nil() {
+    let v = one(
+        "LH",
+        r#"<interimAltitude uom="FEET">23000.0</interimAltitude>"#,
+    );
+    assert!(has_field(&v.ev, 0, Field::InterimAlt));
+    assert_eq!(v.ev.interim_ft[0], 23_000);
+    assert_eq!(v.ev.flags[0] & FLAG_INTERIM_NIL, 0);
+    assert_eq!(v.sum.unknown_attributes, 0);
+
+    let nil = one("LH", r#"<interimAltitude uom="FEET" xsi:nil="true"/>"#);
+    assert!(has_field(&nil.ev, 0, Field::InterimAlt));
+    assert_ne!(nil.ev.flags[0] & FLAG_INTERIM_NIL, 0);
+    assert_eq!(nil.sum.unknown_attributes, 0);
+    assert_eq!(nil.sum.field_errors, 0);
+
+    // Not stated is not nil: nothing is present.
+    let none = one("TH", r#"<flightStatus fdpsFlightStatus="ACTIVE"/>"#);
+    assert!(!has_field(&none.ev, 0, Field::InterimAlt));
+    assert!(!field_error(&none.ev, 0, Field::InterimAlt));
+
+    // An empty element with no nil, a nil that is not a boolean, and a doubled element.
+    err_field_n(
+        &one("LH", r#"<interimAltitude uom="FEET"/>"#),
+        Field::InterimAlt,
+    );
+    err_field_n(
+        &one("LH", r#"<interimAltitude uom="FEET" xsi:nil="maybe"/>"#),
+        Field::InterimAlt,
+    );
+    err_field_n(
+        &one(
+            "LH",
+            r#"<interimAltitude uom="FEET">1000</interimAltitude><interimAltitude uom="FEET" xsi:nil="true"/>"#,
+        ),
+        Field::InterimAlt,
+    );
+}
+
+// REQ: OA-FIXM-025
+#[test]
+fn requested_altitude_forms() {
+    let s = one(
+        "FH",
+        r#"<requestedAltitude><simple uom="FEET">35000.0</simple></requestedAltitude>"#,
+    );
+    assert_eq!(s.ev.requested_form[0], ALT_FORM_SIMPLE);
+    assert_eq!(s.ev.requested_ft[0], 35_000);
+    let p = one(
+        "FH",
+        r#"<requestedAltitude><vfrPlus uom="FEET">5500.0</vfrPlus></requestedAltitude>"#,
+    );
+    assert_eq!(p.ev.requested_form[0], ALT_FORM_VFR_PLUS);
+    assert_eq!(p.ev.requested_ft[0], 5500);
+    let v = one("FH", r#"<requestedAltitude><vfr/></requestedAltitude>"#);
+    assert_eq!(v.ev.requested_form[0], ALT_FORM_VFR);
+    assert_eq!(v.sum.unknown_elements, 0, "the vfr form is a known path");
+    err_field_n(
+        &one(
+            "FH",
+            r#"<requestedAltitude><simple uom="FEET">100</simple><vfr/></requestedAltitude>"#,
+        ),
+        Field::RequestedForm,
+    );
+    err_field_n(
+        &one(
+            "FH",
+            r#"<requestedAltitude><simple uom="FEET">x</simple></requestedAltitude>"#,
+        ),
+        Field::RequestedForm,
+    );
+    // The requested altitude does not disturb the assigned one.
+    let both = one(
+        "FH",
+        r#"<assignedAltitude><simple uom="FEET">10000</simple></assignedAltitude><requestedAltitude><simple uom="FEET">35000.0</simple></requestedAltitude>"#,
+    );
+    assert_eq!(both.ev.assigned_ft[0], 10_000);
+    assert_eq!(both.ev.requested_ft[0], 35_000);
+}
+
+// REQ: OA-FIXM-026
+#[test]
+fn handoff_event_and_accepting_unit() {
+    let units = r#"<receivingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/><transferringUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZXX" sectorIdentifier="12"/><acceptingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/>"#;
+    for (name, code) in [
+        ("INITIATION", oa_fixm::HANDOFF_INITIATION),
+        ("ACCEPTANCE", oa_fixm::HANDOFF_ACCEPTANCE),
+        ("UPDATE", oa_fixm::HANDOFF_UPDATE),
+        ("RETRACTION", oa_fixm::HANDOFF_RETRACTION),
+        ("FAILURE", oa_fixm::HANDOFF_FAILURE),
+        ("TAKE_CONTROL", oa_fixm::HANDOFF_TAKE_CONTROL),
+    ] {
+        let body = format!(
+            r#"<enRoute><boundaryCrossings><handoff xsi:type="ns5:NasHandoffType" event="{name}">{units}</handoff></boundaryCrossings></enRoute>"#
+        );
+        let r = one("OH", &body);
+        assert_eq!(r.ev.handoff_event[0], code, "{name}");
+        assert_eq!(unit_code(&r.ev.acpt[0]), "ZYY");
+        assert_eq!(sector_code(&r.ev.acpt[0]), "1E");
+        assert_eq!(
+            r.sum.unknown_elements + r.sum.unknown_attributes,
+            0,
+            "{name}"
+        );
+    }
+    // A handoff with no event (the track-message form) has no event and no accepting unit.
+    let r = one(
+        "TH",
+        r#"<enRoute><boundaryCrossings><handoff><receivingUnit unitIdentifier="ZYY" sectorIdentifier="03"/></handoff></boundaryCrossings></enRoute>"#,
+    );
+    assert!(!has_field(&r.ev, 0, Field::HandoffEvent));
+    assert!(!field_error(&r.ev, 0, Field::HandoffEvent));
+    assert!(!has_field(&r.ev, 0, Field::HandoffAccepting));
+    assert!(has_field(&r.ev, 0, Field::HandoffReceiving));
+    // An event this decoder does not know is a field error, not a default.
+    let r = one(
+        "OH",
+        r#"<enRoute><boundaryCrossings><handoff event="OFFER"><receivingUnit unitIdentifier="ZYY"/></handoff></boundaryCrossings></enRoute>"#,
+    );
+    err_field_n(&r, Field::HandoffEvent);
+    assert!(
+        has_field(&r.ev, 0, Field::HandoffReceiving),
+        "the rest of the row is kept"
+    );
+}
+
+// REQ: OA-FIXM-027
+#[test]
+fn aircraft_address_is_six_hex_digits() {
+    let desc = |a: &str| {
+        format!(
+            r#"<aircraftDescription aircraftAddress="{a}" wakeTurbulence="MEDIUM"><aircraftType><icaoModelIdentifier>B738</icaoModelIdentifier></aircraftType></aircraftDescription>"#
+        )
+    };
+    let r = one("FH", &desc("A1B2C3"));
+    assert_eq!(r.ev.address[0], 0xA1_B2_C3);
+    let r = one("FH", &desc("a1b2c3"));
+    assert_eq!(r.ev.address[0], 0xA1_B2_C3);
+    let r = one("FH", &desc("000042"));
+    assert_eq!(r.ev.address[0], 0x42);
+    for bad in ["", "A1B2C", "A1B2C3D", "G1B2C3", "000000", "A1 2C3"] {
+        err_field_n(&one("FH", &desc(bad)), Field::AircraftAddress);
+    }
+    // No address attribute, no field and no error.
+    let r = one("FH", r#"<aircraftDescription wakeTurbulence="MEDIUM"/>"#);
+    assert!(!has_field(&r.ev, 0, Field::AircraftAddress));
+    assert!(!field_error(&r.ev, 0, Field::AircraftAddress));
 }

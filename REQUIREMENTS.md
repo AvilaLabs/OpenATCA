@@ -1062,6 +1062,23 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   root that the decoder recognises as `message` elements; a foreign sibling counts for neither.
 - **OA-FIXM-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
   month; hour 24 is refused.
+- **OA-FIXM-022** The assigned altitude is decoded with its form as a state: `simple` and `vfrPlus` (the
+  value in `assigned_ft`), `vfr` (no number and no `AssignedAlt` field), `block` (limits `above` to `below`; that `above` is the lower limit is read from the recording and is
+  unconfirmed) and `altFixAlt` (altitude before and after a named fix; the meaning of the two is unconfirmed); the
+  form is its own field and no number stands for VFR.
+- **OA-FIXM-023** A doubled assigned-altitude form, a block with a limit missing or with `above` over `below`, and
+  an altitude at a fix with the fix or a value missing or unreadable, are a counted field error on the form; the
+  row is kept.
+- **OA-FIXM-024** The interim altitude is a value, or `xsi:nil` (flag `FLAG_INTERIM_NIL`: ERAM states there is
+  none); an absent element is neither, and an empty element without nil, a nil that is not a boolean and a doubled
+  element are a field error.
+- **OA-FIXM-025** The requested altitude is decoded as `simple`, `vfrPlus` or `vfr`, in its own columns, and a
+  doubled or unreadable form is a field error; the `vfr` form is a known path.
+- **OA-FIXM-026** The handoff `event` (initiation, acceptance, update, retraction, failure, take control) and the
+  accepting unit are decoded; a handoff with no event has none; an event outside the six is a field error and
+  the rest of the row is kept.
+- **OA-FIXM-027** The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six
+  hexadecimal digits, not all zero; any other value is a field error.
 
 ### TBFM metering publication (oa-tbfm)
 
@@ -5480,6 +5497,89 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
   an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
+  sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
+  any path it cannot resolve.
+
+## M4 flight data: the per-flight record (oa-flight, oa-flight-sfdps)
+
+- **OA-FLT-001** A flight is keyed by its GUFI, or by the TFMS key (callsign, departure, arrival) where a source has no GUFI; a
+  key with a missing part (a zero GUFI, an empty callsign, departure or arrival, or a GUFI key carrying TFMS parts) is refused
+  as a bad key; one key is one flight and a GUFI flight is never a TFMS flight.
+- **OA-FLT-002** The assigned, interim and requested altitudes are separate fields. Each holds a form: one altitude, VFR on top
+  plus an altitude, VFR with no number, a block (assigned only), an altitude at a named fix (assigned only), or explicitly none
+  (interim only). A form the field cannot hold, an out-of-range value, an unused number that is not zero, an altitude operation
+  with no altitude, or an at-fix altitude without its fix is refused as a bad value and changes nothing.
+- **OA-FLT-003** Every field records when it last changed (the source's time), when it became available and the message it came
+  from; stating the value the record already holds changes nothing, not even the stamp.
+- **OA-FLT-004** An operation is available no earlier than its stamped time plus the measured lag floor and no earlier than any
+  operation before it (the clock never goes back); one stamped later than its receipt by more than the allowed clock
+  difference is refused as a bad time.
+- **OA-FLT-005** The plan lifecycle (proposed, active, departed, completed, cancelled, dropped) allows exactly the stated steps:
+  proposed goes to active, cancelled or dropped; active departs, completes, is cancelled or dropped; departed completes or is
+  dropped; dropped is reinstated by an active plan or completed or cancelled; completed and cancelled are final and a repeat of
+  the same end is a restatement. A step back, a step that skips one, or an operation on a flight or plan that is not there
+  (an operation other than setting a plan, which makes the flight) is refused and leaves the state; so is an amendment to a
+  flight whose plans have all ended. A refused operation never makes a flight. The one way past an ended plan is the refile
+  of OA-FLT-008.
+- **OA-FLT-006** Every refused operation is counted by operation and reason and listed with its key, times, message and the
+  state it found; a full list counts the entries it could not hold, so the counts stay exact whatever the list holds, and
+  operations equal applied plus unchanged plus refused.
+- **OA-FLT-007** A flight holds one plan view per reporting centre, because each centre reports its own status for the national
+  plan; a second centre's proposal after the first one's activation is not a step back; a dropped view reinstated is counted;
+  more centres than views are refused, never evicted.
+- **OA-FLT-008** Two plans for one flight are listed as conflicts: a different plan identifier on a live plan, and the key filed
+  again, which is a plan setting a plan identifier new to the flight on a view whose plan had ended (the view takes the plan) or
+  for a centre the flight has no view for while all its plans have ended (a new view). This is the only way past an ended plan.
+  A plan for a new centre on a flight whose plans have all ended with a plan identifier the flight already has, or none, is
+  refused as terminal.
+- **OA-FLT-009** An aircraft address held by two live flights, and a callsign, departure and arrival held by two live flights,
+  are each listed as a conflict naming both; both flights stay in the table; the address lookup returns the latest claimant and
+  a flight whose plans ended is no conflict.
+- **OA-FLT-010** A handoff is offered, optionally updated, accepted and completed when the owner becomes the accepting unit, or
+  is retracted, fails or ends in the accepting unit taking control; an offer does not move the owner; a step with no handoff
+  pending, a second offer while one is pending, and an update or a different acceptance after acceptance are refused.
+- **OA-FLT-011** A change older than the value a field holds is refused as stale and one at the same time with another value is
+  refused (the earlier stays); an older restatement of the held value is no error; the rule holds for altitudes, the plan state
+  and ownership.
+- **OA-FLT-012** A flight leaves the table only by a removal that is written to the removal log first; a full table refuses a new
+  flight and evicts none; the sweep retires flights whose plans ended or that went silent, logged each, and removes none when
+  the log has no room.
+- **OA-FLT-013** After every step of every sequence of up to four operations over a fixed alphabet covering every operation kind,
+  and of random sequences of sixty operations, the audit of the table holds: keys, indexes and chains, views, altitude forms,
+  handoff units, stamps against the clock and the logs.
+- **OA-FLT-014** Over random sequences, a flight has at most one plan view per centre, flights created equals flights held plus
+  flights removed, and every removal is in the removal log.
+- **OA-FLT-015** The same operations in the same order give the same table, logs included, and the same digest after every step.
+- **OA-FLT-016** The table allocates nothing after it is made: the capacity of every collection is unchanged by twenty thousand
+  operations with sweeps.
+- **OA-FLT-017** The SFDPS adapter turns one decoded message into the operations it carries and no others: the plan from the
+  status, a departure from an actual departure time on an active plan, the assigned, interim and requested altitudes with
+  their forms (an interim stated as none is the state "none", not a number; VFR is never a number), the controlling unit,
+  the aircraft address and the identity; each carries the message's own time and the time it was received.
+- **OA-FLT-018** A controlling unit the FAA gives as unknown makes no owner operation, a handoff `receivingUnit` with no event
+  makes no handoff operation, and a handoff event missing a unit it needs makes none; each is counted. The handoff events
+  make their own operations: offer, update, acceptance, retraction, failure and taking control.
+- **OA-FLT-019** A replay reads SFDPS recordings in receive order into the record, counts the lag of every message (received
+  minus stamped), skips frames before the window and ends at the first frame after it, and announces each operation's
+  availability time to the caller before applying it, so a question asked as of a time sees only what had aged in.
+- **OA-FLT-020** The climbing and descending encounters near 1,000 ft (airborne, not at the vertical minimum, 900 ft up to
+  the record volume apart at the closest approach, either aircraft at 300 fpm or more) are each split once, by the
+  clearances of the two aircraft in the flight record at the closest approach: cleared 1,000 ft or more apart is a
+  level-off, less apart is a climb or descent that does not stop; no record, no altitude and an altitude that is not one
+  level (VFR, block, at a fix) are counted apart; the split is given on the assigned altitude and on the interim altitude
+  over the assigned one.
+- **OA-FLT-022** The operations of one message share its time and its message number and are not a tie on a shared stamp: a plan
+  made active and then departed in one message, and an owner and the handoff it ends, all apply; another message at the same
+  time with another value is still a tie. An owner older than the handoff it would end leaves the handoff and its stamp as they
+  are and is counted. A question is not advanced past an operation refused for its key or its time. Taking control, once a unit
+  has accepted, is by that unit.
+- **OA-FLT-023** The SFDPS replay tool refuses a recording directory the shared sealed-data guard names, before it lists or
+  opens anything, and exits 2; every recording it reads is opened through the same guard.
+- **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
+  lag floor is not seen by it, and one that has aged in is.
+- **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
+  refuses a window that is open at one end or runs backwards.
+
   sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
 
 ## STDDS adsb-flag census (tools/oa-stdds-census)
