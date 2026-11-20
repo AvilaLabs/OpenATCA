@@ -5689,10 +5689,11 @@ configuration with no default; the crate's tests use synthetic values.
   (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
   time inside the look-ahead (`ca-horizontal-miss-point`); and the horizontal miss itself, the exactly rounded
   square root of `x*x + y*y` at that point, is finite and not negative (`ca-horizontal-miss`, on the real
-  function): at most 5e7 m on each axis the sum cannot overflow. Nothing in the chain rests on an unproved
-  library contract; the crate no longer calls `hypot`. The miss agrees with `oa_math::hypot` to 2 units in
-  the last place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the
-  squares underflow (`tests/miss.rs`). Beyond about 1e154 m the square overflows to infinity, far outside
+  function): at most 5e7 m on each axis the sum cannot overflow. The chain rests on the exact rounding of
+  `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no other library contract; the crate no
+  longer calls `hypot`. Tested, not proved: the miss agrees with `oa_math::hypot` to 2 units in the last
+  place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the squares
+  underflow (`tests/miss.rs`, on the real function). Beyond about 1e154 m the square overflows to infinity, far outside
   the bound the configuration check enforces (OA-CA-013).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or

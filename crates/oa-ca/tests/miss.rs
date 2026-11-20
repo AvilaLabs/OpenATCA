@@ -1,5 +1,6 @@
 //! The horizontal miss is `oa_ieee::sqrt(x * x + y * y)` (OA-CA-029). It agrees with
-//! `oa_math::hypot` to within 2 ulp over the whole range the proofs bound the closest point to.
+//! `oa_math::hypot` to within 2 ulp over the whole range the proofs bound the closest point to. The
+//! 2 ulp is observed on these inputs, not a proved bound.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -30,8 +31,10 @@ impl Rng {
     }
 }
 
+/// The real `horizontal_miss`: with no relative velocity the closest time is 0 and the closest
+/// point is `(x, y)` exactly, so this is the production function at the point `(x, y)`.
 fn new_form(x: f64, y: f64) -> f64 {
-    oa_ieee::sqrt(x * x + y * y)
+    oa_ca::solve::horizontal_miss(x, y, 0.0, 0.0, 60.0)
 }
 
 fn ulps(a: f64, b: f64) -> u64 {
@@ -55,13 +58,14 @@ fn check(x: f64, y: f64) {
 fn the_new_horizontal_miss_agrees_with_hypot_within_two_ulp() {
     let mut r = Rng(0x1234_5678_9abc_def0);
     for _ in 0..2_000_000 {
-        // Uniform over the bound, and log-uniform scales, so that small and large mix.
+        // Uniform over the bound, and log-uniform scales from the bound down to about 5e-149 m
+        // (156 decades), so that small and large mix and the 1e-150 m edge is reached.
         let (a, b) = (r.unit(), r.unit());
         check(a * POINT_MAX, b * POINT_MAX);
         let (sa, sb) = (r.unit().abs() * 40.0, r.unit().abs() * 40.0);
         check(
-            a * POINT_MAX * 10f64.powf(-sa / 5.0),
-            b * POINT_MAX * 10f64.powf(-sb / 5.0),
+            a * POINT_MAX * 10f64.powf(-sa * 3.9),
+            b * POINT_MAX * 10f64.powf(-sb * 3.9),
         );
     }
 }
