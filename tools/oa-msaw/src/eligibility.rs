@@ -43,11 +43,14 @@ pub enum Basis {
     Ambiguous,
     /// No flight for it.
     NoFlight,
+    /// No flight is found for it, or it is not active or ambiguous, and its beacon code is a VFR
+    /// code of the adaptation: not alerted.
+    VfrBeacon,
     /// No flight data was given: every track is alerted, and the summary says it was not judged.
     NotJudged,
 }
 
-pub const BASIS_COUNT: usize = 8;
+pub const BASIS_COUNT: usize = 9;
 
 impl Basis {
     pub fn text(self) -> &'static str {
@@ -59,16 +62,16 @@ impl Basis {
             Basis::NotActive => "plan_not_active",
             Basis::Ambiguous => "ambiguous",
             Basis::NoFlight => "no_flight",
+            Basis::VfrBeacon => "vfr_beacon",
             Basis::NotJudged => "not_judged",
         }
     }
 
-    /// Whether a track with this basis is alerted.
+    /// Whether a track with this basis is alerted: every one but a VFR flight plan and a VFR
+    /// beacon code. A track with no flight, an ambiguous one or a plan not yet active is alerted:
+    /// no flight record is not a reason to suppress a warning.
     pub fn alerted(self) -> bool {
-        matches!(
-            self,
-            Basis::Address | Basis::Callsign | Basis::Request | Basis::NotJudged
-        )
+        !matches!(self, Basis::VfrPlan | Basis::VfrBeacon)
     }
 }
 
@@ -118,6 +121,18 @@ pub fn basis_of(a: &Answer, requested: bool) -> Basis {
     }
 }
 
+/// The basis once the beacon code is known: a track with no flight, an ambiguous one or a plan not
+/// yet active is not alerted only if its code is a VFR code of the adaptation. Nothing else
+/// suppresses it (the SFDPS lag floor included: a flight filed within the lag is no flight yet,
+/// and the track is alerted).
+pub fn with_beacon(b: Basis, vfr_code: bool) -> Basis {
+    if vfr_code && matches!(b, Basis::NoFlight | Basis::Ambiguous | Basis::NotActive) {
+        Basis::VfrBeacon
+    } else {
+        b
+    }
+}
+
 /// Whether a `msaw_request` line names the track at `t_s` seconds after the clip's first
 /// measurement, by its address or by its callsign (as the ADS-B reports carry it).
 pub fn requested(reqs: &[RequestSpec], addr: u32, cs: CallsignObs, t_s: f64) -> bool {
@@ -150,8 +165,23 @@ pub struct Inputs<'a> {
     pub tracks: &'a [(u32, i64, i32, i32)],
     pub callsigns: &'a oa_encounter_run::join::Timeline,
     pub requests: &'a [RequestSpec],
+    /// The Mode A codes of each aircraft by time (nanoseconds), in time order, and the codes of VFR
+    /// traffic.
+    pub idents: &'a BTreeMap<u32, Vec<(i64, u16)>>,
+    pub vfr_codes: &'a [u16],
     pub t0_ns: i64,
     pub sfdps: Option<&'a Path>,
+}
+
+/// The Mode A codes of `meas` by address, with the time of each report, in time order.
+pub fn idents_of(meas: &[oa_track::Measurement]) -> BTreeMap<u32, Vec<(i64, u16)>> {
+    let mut m: BTreeMap<u32, Vec<(i64, u16)>> = BTreeMap::new();
+    for x in meas {
+        if x.ident != oa_track::NO_IDENT {
+            m.entry(x.addr).or_default().push((x.toa_ns, x.ident));
+        }
+    }
+    m
 }
 
 /// The distinct addresses of `meas` with their first time and position, in address order.
@@ -218,6 +248,16 @@ pub fn judge(i: &Inputs, sealed: &mut u64) -> Result<EligibilityReport, String> 
     };
     rep.judged = answers.is_some();
     let n_alerts = i.alerts.len();
+    // The beacon code the aircraft showed last at or before `t`, or the first after it.
+    let vfr_code_at = |addr: u32, t: i64| -> bool {
+        i.idents.get(&addr).is_some_and(|v| {
+            let k = v.partition_point(|&(x, _)| x <= t);
+            k.checked_sub(1)
+                .and_then(|k| v.get(k))
+                .or_else(|| v.first())
+                .is_some_and(|&(_, c)| i.vfr_codes.contains(&c))
+        })
+    };
     let basis_at = |k: usize, addr: u32, t: i64| -> Basis {
         match &answers {
             None => {
@@ -227,9 +267,12 @@ pub fn judge(i: &Inputs, sealed: &mut u64) -> Result<EligibilityReport, String> 
                     Basis::NotJudged
                 }
             }
-            Some(a) => a
-                .get(k)
-                .map_or(Basis::NoFlight, |a| basis_of(a, req_of(addr, t))),
+            Some(a) => {
+                let b = a
+                    .get(k)
+                    .map_or(Basis::NoFlight, |a| basis_of(a, req_of(addr, t)));
+                with_beacon(b, vfr_code_at(addr, t))
+            }
         }
     };
     for (k, a) in i.alerts.iter().enumerate() {

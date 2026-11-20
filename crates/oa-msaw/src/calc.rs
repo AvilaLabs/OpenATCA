@@ -5,8 +5,8 @@
 
 use crate::types::{
     Corridor, CorridorHit, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, CK_DEPARTURE,
-    CK_RUNWAY, FLOOR_NONE, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_FLOOR_FT,
-    MAX_RADIUS_M,
+    CK_RUNWAY, FLOOR_NONE, KB_APPROACH, KB_DEPARTURE, KB_RUNWAY, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG,
+    MAX_CLEARANCE_FT, MAX_FLOOR_FT, MAX_RADIUS_M,
 };
 
 /// Metres per degree of latitude (mean radius 6,371,008.8 m).
@@ -155,18 +155,63 @@ pub fn altitude_use(age_s: f32, max_s: f64, hold_s: f64) -> AltUse {
     }
 }
 
-/// The altitude a stale track is judged at: the altitude carried on at its vertical rate for its
-/// age if that is a descent, never a climb (an unknown rate, NaN, carries it level).
+/// The altitude a track is judged at after `age_s` seconds without a new measurement: the altitude
+/// carried on at its vertical rate if that is a descent, never a climb. An unknown rate (NaN) is
+/// carried on as a descent of [`UNKNOWN_RATE_DESCENT_FPM`], the conservative side.
 pub fn extrapolated_alt_ft(alt_ft: f64, vrate_fpm: f64, age_s: f64) -> f64 {
-    let vr = if vrate_fpm.is_nan() { 0.0 } else { vrate_fpm };
+    let vr = if vrate_fpm.is_nan() {
+        -UNKNOWN_RATE_DESCENT_FPM
+    } else {
+        vrate_fpm
+    };
     oa_math::min_f64(alt_ft, predicted_alt_ft(alt_ft, vr, age_s))
 }
 
-/// True if the path is a violation at a point: below the floor and not a landing, that is not
-/// reaching the runway elevation `landing_elev_ft` over the runway strip. Proved: a path at or
-/// below the runway elevation over the runway is never a violation.
-pub fn is_violation(low_ft: i32, floor_ft: i32, landing_elev_ft: Option<i32>) -> bool {
-    violates(low_ft, floor_ft) && landing_elev_ft.is_none_or(|e| low_ft > e)
+/// The descent a stale altitude of unknown rate is carried on at, feet per minute.
+pub const UNKNOWN_RATE_DESCENT_FPM: f64 = 1000.0;
+
+/// How far from the pavement edge a point may be and still be over the runway, metres.
+pub const PAVEMENT_MARGIN_M: f64 = 60.0;
+/// The vertical rate above which a track is climbing and no landing, feet per minute.
+pub const CLIMB_FPM: f64 = 200.0;
+/// An altitude change over 10 s within which a track is level, feet.
+pub const LEVEL_FT: f64 = 50.0;
+
+/// True if a track can be landing: not climbing. Its rate is at most [`CLIMB_FPM`], or it has
+/// stayed within [`LEVEL_FT`] over the last 10 s; a rate that is not known and no level evidence
+/// is not a landing.
+pub fn not_climbing(vrate_known: bool, vrate_fpm: f64, change_10s_ft: f64) -> bool {
+    (vrate_known && vrate_fpm <= CLIMB_FPM) || (-LEVEL_FT..=LEVEL_FT).contains(&change_10s_ft)
+}
+
+/// The runway elevation at a point, feet (rounded down), if the point itself is over the pavement
+/// of the runway strip `c`: along the runway between its threshold and its far end, and within the
+/// pavement half-width plus [`PAVEMENT_MARGIN_M`] of the centreline. The strip's wider margin gives
+/// no landing. The elevation is interpolated along the runway between the elevations of its two
+/// ends.
+pub fn runway_elev_at(c: &Corridor, lat_e7: i32, lon_e7: i32) -> Option<i32> {
+    if c.kind != CK_RUNWAY {
+        return None;
+    }
+    let thr_lat = f64::from(c.thr_lat_e7) * 1.0e-7;
+    let cos_lat = oa_math::cos(thr_lat * RAD_PER_DEG);
+    let (sin_b, cos_b) = oa_math::sin_cos(c.out_bearing_deg * RAD_PER_DEG);
+    let dy = f64::from(lat_e7.saturating_sub(c.thr_lat_e7)) * 1.0e-7 * M_PER_DEG;
+    let dx = f64::from(lon_e7.saturating_sub(c.thr_lon_e7)) * 1.0e-7 * M_PER_DEG * cos_lat;
+    let along = dx * sin_b + dy * cos_b;
+    let signed = dx * cos_b - dy * sin_b;
+    let across = if signed < 0.0 { -signed } else { signed };
+    let run = c.length_m - c.land_from_m;
+    if !(along.is_finite() && across.is_finite() && run > 0.0)
+        || along < c.land_from_m
+        || along > c.length_m
+        || across > c.pave_half_m + PAVEMENT_MARGIN_M
+    {
+        return None;
+    }
+    let f = (along - c.land_from_m) / run;
+    let e = f64::from(c.thr_elev_ft) + (f64::from(c.far_elev_ft) - f64::from(c.thr_elev_ft)) * f;
+    Some(alt_floor_ft(e))
 }
 
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
@@ -223,19 +268,15 @@ pub fn corridor_hit_ft(
         CK_DEPARTURE => CorridorHit {
             surface_ft: None,
             clearance_ft: cfg.departure_min_clearance_ft,
-            landing_elev_ft: None,
+            kinds: KB_DEPARTURE,
         },
         // The runway strip: an aircraft on final is necessarily close to the ground, so no
-        // clearance is added over terrain or obstacles, the surface is the runway elevation less
-        // the allowance, and reaching the runway elevation here is a landing.
+        // clearance is added over terrain or obstacles and the surface is the runway elevation
+        // less the allowance. A landing is judged on the point (see [`runway_elev_at`]), not here.
         CK_RUNWAY => CorridorHit {
             surface_ft: Some(c.thr_elev_ft.saturating_sub(cfg.approach_allowance_ft)),
             clearance_ft: 0,
-            landing_elev_ft: if along - radius_m >= c.land_from_m {
-                Some(c.thr_elev_ft)
-            } else {
-                None
-            },
+            kinds: KB_RUNWAY,
         },
         _ => {
             // The procedure's own path: the threshold crossing height over the threshold elevation,
@@ -250,13 +291,13 @@ pub fn corridor_hit_ft(
                 CorridorHit {
                     surface_ft: Some(surface),
                     clearance_ft: 0,
-                    landing_elev_ft: None,
+                    kinds: KB_APPROACH,
                 }
             } else {
                 CorridorHit {
                     surface_ft: Some(surface),
                     clearance_ft: cfg.approach_min_clearance_ft,
-                    landing_elev_ft: None,
+                    kinds: KB_APPROACH,
                 }
             }
         }
@@ -280,11 +321,7 @@ pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
                 (None, y) => y,
             },
             clearance_ft: a.clearance_ft.max(b.clearance_ft),
-            landing_elev_ft: match (a.landing_elev_ft, b.landing_elev_ft) {
-                (Some(x), Some(y)) => Some(x.max(y)),
-                (x, None) => x,
-                (None, y) => y,
-            },
+            kinds: a.kinds | b.kinds,
         },
     }
 }
@@ -456,6 +493,8 @@ mod proofs {
                 thr_elev_ft: 0,
                 faf_alt_ft: 0,
                 land_from_m: 0.0,
+                pave_half_m: 0.0,
+                far_elev_ft: 0,
                 path_angle_deg: 3.0,
                 tch_ft: 50,
             }; MAX_CORRIDORS],
@@ -498,7 +537,7 @@ mod proofs {
             Some(CorridorHit {
                 surface_ft: if use_surface { Some(a) } else { None },
                 clearance_ft: amc,
-                landing_elev_ft: None,
+                kinds: 0,
             })
         } else {
             None
@@ -583,7 +622,7 @@ mod proofs {
         let hit = CorridorHit {
             surface_ft: Some(a),
             clearance_ft: amc,
-            landing_elev_ft: None,
+            kinds: 0,
         };
         if let Some((f, _)) = floor_of(&s, Some(hit), &cfg) {
             // An answer needs terrain and the obstacle data, and then it holds the floor above
@@ -657,15 +696,5 @@ mod proofs {
         kani::assume(vr.is_nan() || (vr.is_finite() && vr.abs() <= MAX_ABS_VRATE_FPM));
         kani::assume(a.is_finite() && a >= 0.0 && a <= MAX_LOOK_AHEAD_S);
         assert!(extrapolated_alt_ft(alt, vr, a) <= alt);
-    }
-
-    // REQ: OA-MSAW-070
-    #[kani::proof]
-    fn a_path_at_or_below_the_runway_elevation_over_the_runway_is_never_a_violation() {
-        let (low, floor, elev): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
-        kani::assume(low <= elev);
-        assert!(!is_violation(low, floor, Some(elev)));
-        // Elsewhere the decision is the plain comparison.
-        assert!(is_violation(low, floor, None) == violates(low, floor));
     }
 }

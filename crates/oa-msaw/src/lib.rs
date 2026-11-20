@@ -47,9 +47,10 @@ mod types;
 
 pub use calc::{
     altitude_use, corridor_hit_ft, corridor_hit_linear, extrapolated_alt_ft, floor_of,
-    is_violation, violates, with_airport_area, AltUse,
+    not_climbing, runway_elev_at, violates, with_airport_area, AltUse, CLIMB_FPM, LEVEL_FT,
+    PAVEMENT_MARGIN_M, UNKNOWN_RATE_DESCENT_FPM,
 };
-pub use corridor::{corridor_hit_at, corridor_index_new, CorridorIndex};
+pub use corridor::{corridor_hit_at, corridor_index_new, corridor_runway_elev_at, CorridorIndex};
 pub use cycle::{
     msaw_evaluate, msaw_finish, msaw_plan, msaw_publish_refused, net_report_of, CycleOut,
 };
@@ -59,12 +60,13 @@ pub use state::{
 };
 pub use types::{
     Alert, AlertLog, Corridor, CorridorHit, CycleStats, FloorKind, FloorSample, Grade, MsawConfig,
-    MsawTrack, SamplePoint, SkipLog, SkipWhy, Skipped, AF_COAST, AF_GROUND_UNKNOWN,
-    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
-    AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, AIRBORNE, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, END_CLEAR,
-    END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST,
-    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN,
-    MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, MAX_CLEARANCE_FT, MAX_CORRIDORS,
-    MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT, MAX_RADIUS_M, MAX_SAMPLES,
-    MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT, ON_GROUND,
+    MsawTrack, SamplePoint, SkipLog, SkipWhy, Skipped, AF_COAST, AF_COLD_CORRECTED,
+    AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
+    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, AIRBORNE,
+    CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, END_CLEAR, END_LOST_ALTITUDE_MISSING,
+    END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST, F_COLD_CORRECTED, F_COLD_UNKNOWN,
+    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, KB_APPROACH,
+    KB_DEPARTURE, KB_RUNWAY, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, MAX_CLEARANCE_FT,
+    MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT, MAX_RADIUS_M,
+    MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT, ON_GROUND,
 };

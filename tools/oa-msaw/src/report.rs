@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use oa_msaw::{
-    Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_GROUND_UNKNOWN,
-    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
-    AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY,
-    END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE,
+    Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_COLD_CORRECTED,
+    AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
+    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_STALE_EXTRAPOLATED, AF_UNCERTAIN,
+    CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE,
 };
 use oa_safety::net::{reason_text, NetState};
 
@@ -19,7 +19,7 @@ use crate::qnh::QnhStats;
 use crate::run::{HiddenAgg, MadeInhibit, SkipAgg};
 
 /// The flag bits of an alert with their names, in the order the summary lists them.
-pub const FLAG_NAMES: [(u16, &str); 9] = [
+pub const FLAG_NAMES: [(u16, &str); 11] = [
     (AF_RATE_UNKNOWN, "rate_unknown"),
     (AF_COAST, "coast"),
     (AF_UNCERTAIN, "uncertain"),
@@ -29,13 +29,15 @@ pub const FLAG_NAMES: [(u16, &str); 9] = [
     (AF_GROUND_UNKNOWN, "ground_unknown"),
     (AF_QNH_MISSING, "qnh_missing"),
     (AF_STALE_EXTRAPOLATED, "stale_extrapolated"),
+    (AF_COLD_CORRECTED, "cold_corrected"),
+    (AF_COLD_UNKNOWN, "cold_unknown"),
 ];
 
 /// The text of how an alert ended.
 pub fn end_text(e: u8) -> &'static str {
     match e {
-        x if x == END_LOST_ALTITUDE_STALE => "lost: altitude stale",
-        x if x == END_LOST_ALTITUDE_MISSING => "lost: altitude missing",
+        x if x == END_LOST_ALTITUDE_STALE => "protection lost: altitude stale",
+        x if x == END_LOST_ALTITUDE_MISSING => "protection lost: altitude missing",
         _ => "cleared",
     }
 }
@@ -80,6 +82,9 @@ pub fn why_text(w: u8) -> &'static str {
         x if x == SkipWhy::BelowMva as u8 => "BELOW_MVA",
         x if x == SkipWhy::AltitudeStale as u8 => "ALTITUDE_STALE",
         x if x == SkipWhy::AltitudeExtrapolated as u8 => "ALTITUDE_STALE_EXTRAPOLATED",
+        x if x == SkipWhy::ProtectionLost as u8 => {
+            "MSAW protection lost: altitude (alert held open)"
+        }
         x if x == SkipWhy::GroundExcluded as u8 => "GROUND_EXCLUDED",
         _ => "?",
     }
@@ -653,7 +658,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2} of which reducing to grids {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
+        "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2} of which reducing to grids {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, ranking over the budget {:.2}, tracker and the rest {:.2}",
         sec(w.plan_ns),
         sec(w.floors_ns),
         sec(fl.ns_terrain),
@@ -663,6 +668,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         sec(fl.ns_chart),
         sec(w.eval_ns),
         sec(w.qnh_ns),
+        sec(w.rank_ns),
         sec(w.steady_ns.saturating_sub(w.plan_ns + w.floors_ns + w.eval_ns + w.qnh_ns))
     );
     let _ = writeln!(
@@ -697,7 +703,12 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "paths that reached the runway over the runway (landings, not violations) {}",
+        "protection lost: altitude missing or past the hold, whatever the share (track cycles) {}; of them with an open alert, held open (track cycles) {}",
+        t.protection_lost, t.protection_lost_open
+    );
+    let _ = writeln!(
+        o,
+        "track cycles with a point that qualified as a landing (over the pavement, not climbing, a setting, at the runway elevation there; the points after it are the roll-out and are not judged) {}",
         t.landings
     );
     let _ = writeln!(
@@ -895,7 +906,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         .count();
     let _ = writeln!(
         o,
-        "alerts judged at a stale-extrapolated altitude at some cycle {ext}; alerts ended \"lost: altitude\" {lost}"
+        "alerts judged at a stale-extrapolated altitude at some cycle {ext}; alerts ended \"protection lost: altitude\" {lost}"
     );
     nuisance_lines(&mut o, i, &order, &nears);
     diagnostic_lines(&mut o, i);
@@ -958,6 +969,7 @@ fn eligibility_lines(o: &mut String, e: &EligibilityReport, hours: f64, data: &D
             Basis::NotActive,
             Basis::Ambiguous,
             Basis::NoFlight,
+            Basis::VfrBeacon,
         ]
         .iter()
         .map(|b| format!("{} {}", b.text(), a.get(*b as usize).copied().unwrap_or(0)))
@@ -966,7 +978,7 @@ fn eligibility_lines(o: &mut String, e: &EligibilityReport, hours: f64, data: &D
     };
     let _ = writeln!(
         o,
-        "eligibility: alerts only for a track with an active IFR flight in SFDPS (by address, then callsign) or an msaw_request; the rest are advisories ({} SFDPS operations applied, {} flights held)",
+        "eligibility: every track is alerted except one SFDPS has a VFR flight for and one with no flight, an ambiguous or an inactive one whose beacon code is a VFR code; those are advisories ({} SFDPS operations applied, {} flights held; the lag of SFDPS never suppresses an alert)",
         e.sfdps_ops, e.sfdps_flights
     );
     let _ = writeln!(

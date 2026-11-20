@@ -12,7 +12,8 @@ use oa_msaw::{
     alert_log_clear, alert_log_new, msaw_check, msaw_evaluate, msaw_finish, msaw_new,
     msaw_note_lost_input, msaw_plan, msaw_points, msaw_totals, skip_log_clear, skip_log_new, Alert,
     AlertLog, CycleStats, FloorSample, MsawState, MsawTrack, SkipLog, SkipWhy, FLOOR_NONE, F_COAST,
-    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, MAX_CORRIDORS,
+    F_COLD_CORRECTED, F_COLD_UNKNOWN, F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY,
+    F_UNCERTAIN, MAX_CORRIDORS,
 };
 use oa_safety::geom::Vertex;
 use oa_safety::inhibit::{
@@ -36,7 +37,7 @@ use crate::cifp::{
 };
 use crate::config::GtmShape;
 use crate::config::{parse_config, InhibitSpec, Settings};
-use crate::eligibility::{callsign_timeline, first_seen, judge, Inputs};
+use crate::eligibility::{callsign_timeline, first_seen, idents_of, judge, Inputs};
 use crate::floors::{obstacle_index, FloorStats, Floors, ObstacleIndex};
 use crate::floors::{AirportArea, Area};
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
@@ -141,6 +142,8 @@ pub struct RunTimes {
     pub steady_ns: u64,
     /// The altimeter correction of the rows.
     pub qnh_ns: u64,
+    /// The terrain lookups that rank the tracks of a cycle over the budget (zero when none was).
+    pub rank_ns: u64,
 }
 
 struct Feed<'a> {
@@ -168,15 +171,23 @@ struct Feed<'a> {
     tick_rows: u64,
     rows_skipped: u64,
     last_overflow: u64,
+    /// The number of tracks the core evaluates in a cycle (its budget).
+    st_track_budget: usize,
     /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
     /// age of a track's altitude.
     alt_times: std::collections::HashMap<u32, Vec<i64>>,
+    /// The altitudes (after the datum) of each aircraft over the last 15 s, for the level evidence
+    /// of a landing.
+    alt_hist: std::collections::HashMap<u32, Vec<(i64, f32)>>,
     /// Rows with an altitude but no barometric measurement of it: taken as no altitude.
     alt_age_unknown: u64,
     last_t: i64,
     /// The first terrain file that could not be read: the run is then refused.
     error: Option<String>,
 }
+
+/// The radius of the terrain lookup that ranks a track over the budget: the cell it is in, metres.
+const BUDGET_CELL_RADIUS_M: f64 = 160.0;
 
 fn why_code(w: SkipWhy) -> u8 {
     w as u8
@@ -191,6 +202,22 @@ fn flush(f: &mut Feed) {
         return;
     }
     inhibit_expire(&mut f.inh, t);
+    // Over the budget the tracks are ranked by height above the highest terrain of their own cell,
+    // not by altitude above the sea: the lookup is made only then (the cells are cached).
+    if f.batch.len() > f.st_track_budget {
+        let tg = Instant::now();
+        for tr in f.batch.iter_mut() {
+            let ft = f
+                .floors
+                .terrain_within_ft(tr.lat_deg, tr.lon_deg, BUDGET_CELL_RADIUS_M);
+            tr.ground_ft = if ft == FLOOR_NONE {
+                f32::NAN
+            } else {
+                ft as f32
+            };
+        }
+        f.times.rank_ns += tg.elapsed().as_nanos() as u64;
+    }
     let t0 = Instant::now();
     msaw_plan(&mut f.st, t, &f.batch, &mut f.skips);
     f.times.plan_ns += t0.elapsed().as_nanos() as u64;
@@ -296,8 +323,8 @@ fn flush(f: &mut Feed) {
 
 /// The core's flag byte of the tracker's. The tracker's one identity flag is the radar-handle
 /// key of a track with no ADS-B address, so it sets both radar-only and identity-unconfirmed.
-fn flags_of(o: u8) -> u8 {
-    let mut f = 0;
+fn flags_of(o: u8) -> u16 {
+    let mut f: u16 = 0;
     if o & O_COAST != 0 {
         f |= F_COAST;
     }
@@ -382,8 +409,31 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             alt_ft = a as f32;
             if missing {
                 flags |= F_QNH_MISSING;
+            } else {
+                // The height above the station is lowered for air colder than standard.
+                let (c, code) = q.cold_ft(lat, lon, t.div_euclid(1_000_000_000), a);
+                alt_ft = c as f32;
+                match code {
+                    1 => flags |= F_COLD_CORRECTED,
+                    2 => flags |= F_COLD_UNKNOWN,
+                    _ => {}
+                }
             }
         }
+        let alt_change_10s_ft = if alt_ft.is_finite() {
+            let h = f.alt_hist.entry(addr).or_default();
+            let then = h
+                .iter()
+                .rev()
+                .find(|&&(x, _)| x <= t - 10_000_000_000 && x >= t - 14_000_000_000)
+                .map(|&(_, a)| a);
+            h.push((t, alt_ft));
+            let cut = t - 15_000_000_000;
+            h.retain(|&(x, _)| x >= cut);
+            then.map_or(f32::NAN, |a| alt_ft - a)
+        } else {
+            f32::NAN
+        };
         f.times.qnh_ns += tq.elapsed().as_nanos() as u64;
         f.batch.push(MsawTrack {
             lat_deg: lat,
@@ -397,6 +447,8 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             flags,
             ground: ground_at(f.ground, addr, t),
             alt_age_s,
+            alt_change_10s_ft,
+            ground_ft: f32::NAN,
         });
     }
 }
@@ -487,7 +539,9 @@ pub fn track_and_alert(
         tick_rows: 0,
         rows_skipped: 0,
         last_overflow: 0,
+        st_track_budget: set.msaw.track_budget,
         alt_times: std::collections::HashMap::new(),
+        alt_hist: std::collections::HashMap::new(),
         alt_age_unknown: 0,
         last_t: 0,
         error: None,
@@ -837,10 +891,30 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let obstacles = match &args.dof {
         Some(p) => {
             let tl = Instant::now();
-            let (ix, d) = read_dof(p)?;
-            if args.diagnose {
-                dof_records = Some(d);
+            // A comma-separated list is a set of files (each a DOF file or the zip of one cycle): the
+            // coverage is the union of each file's own.
+            let names = p.to_string_lossy().into_owned();
+            let mut ix: Option<ObstacleIndex> = None;
+            let mut single = true;
+            for part in names.split(',').filter(|s| !s.is_empty()) {
+                let (one, d) = read_dof(Path::new(part))?;
+                match ix.as_mut() {
+                    None => {
+                        ix = Some(one);
+                        if args.diagnose {
+                            dof_records = Some(d);
+                        }
+                    }
+                    Some(m) => {
+                        m.merge(one);
+                        single = false;
+                    }
+                }
             }
+            if !single {
+                dof_records = None;
+            }
+            let ix = ix.ok_or_else(|| "--dof: no file".to_string())?;
             used.load_ns
                 .push(("obstacle file", tl.elapsed().as_nanos() as u64));
             used.obstacles = Some(ix.count);
@@ -913,6 +987,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             set.msaw.n_corridors += 1;
         }
     }
+    crate::config::check_allowance(&set.msaw)?;
     // The altimeter settings: the METAR files, or none (every altitude below FL180 then reads as
     // having no setting, which the net counts).
     let qnh = match &args.metar {
@@ -1026,12 +1101,15 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     // Who is alerted: the rest of the violations are advisories, listed and counted.
     let tracks = first_seen(&meas);
+    let idents = idents_of(&meas);
     let elig = judge(
         &Inputs {
             alerts: &rec.alerts,
             tracks: &tracks,
             callsigns: &callsigns,
             requests: &set.requests,
+            idents: &idents,
+            vfr_codes: &set.vfr_codes,
             t0_ns,
             sfdps: args.sfdps.as_deref(),
         },

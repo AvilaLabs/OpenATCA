@@ -11,7 +11,7 @@ use oa_encounter_run::join::{AddrResult, Answer, CallsignObs, CsReject, CsResult
 use oa_flight::{Alt, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS};
 use oa_msaw::{Alert, FloorKind, Grade};
 use oa_msaw_run::config::{parse_config, RequestSpec, Requester};
-use oa_msaw_run::eligibility::{basis_of, judge, requested, Basis, Inputs};
+use oa_msaw_run::eligibility::{basis_of, judge, requested, with_beacon, Basis, Inputs};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
 
@@ -75,17 +75,44 @@ fn only_a_track_with_an_active_ifr_flight_or_a_request_is_alerted() {
         ..Answer::default()
     };
     assert_eq!(basis_of(&several_cs, false), Basis::Ambiguous);
-    for b in [Basis::Address, Basis::Callsign, Basis::Request] {
-        assert!(b.alerted());
-    }
     for b in [
-        Basis::VfrPlan,
+        Basis::Address,
+        Basis::Callsign,
+        Basis::Request,
         Basis::NotActive,
         Basis::Ambiguous,
         Basis::NoFlight,
     ] {
+        assert!(b.alerted());
+    }
+    for b in [Basis::VfrPlan, Basis::VfrBeacon] {
         assert!(!b.alerted());
     }
+}
+
+// REQ: OA-MSAW-056
+#[test]
+fn a_track_with_no_flight_is_alerted_unless_its_beacon_code_is_a_vfr_code() {
+    for b in [Basis::NoFlight, Basis::Ambiguous, Basis::NotActive] {
+        assert_eq!(with_beacon(b, false), b);
+        assert!(with_beacon(b, false).alerted());
+        assert_eq!(with_beacon(b, true), Basis::VfrBeacon);
+        assert!(!with_beacon(b, true).alerted());
+    }
+    // A flight that is known keeps its basis whatever the code.
+    for b in [
+        Basis::Address,
+        Basis::Callsign,
+        Basis::Request,
+        Basis::VfrPlan,
+    ] {
+        assert_eq!(with_beacon(b, true), b);
+    }
+    // The adaptation's VFR codes: 1200 and the lines of `vfr_beacon_code`.
+    let s = parse_config(&format!("{DEV_CFG}\nvfr_beacon_code = 1202\n")).unwrap();
+    assert_eq!(s.vfr_codes, vec![1200, 1202]);
+    assert_eq!(parse_config(DEV_CFG).unwrap().vfr_codes, vec![1200]);
+    assert!(parse_config(&format!("{DEV_CFG}\nvfr_beacon_code = 1280\n")).is_err());
 }
 
 #[test]
@@ -163,6 +190,7 @@ fn alert(addr: u32, start_s: i64) -> Alert {
         cycles: 1,
         flags: 0,
         end_reason: 0,
+        protect_ns: 0,
     }
 }
 
@@ -182,6 +210,8 @@ fn with_no_flight_data_every_alert_stands_and_is_said_not_to_be_judged() {
             tracks: &[(1, 0, 0, 0), (2, 0, 0, 0)],
             callsigns: &tl,
             requests: &reqs,
+            idents: &Default::default(),
+            vfr_codes: &[1200],
             t0_ns: 0,
             sfdps: None,
         },

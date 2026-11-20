@@ -13,25 +13,26 @@ use oa_safety::inhibit::{inhibit_suppress, InhibitTable};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
-    alt_floor_ft, altitude_use, deg_to_e7, extrapolated_alt_ft, floor_of, grade_of, is_violation,
-    lowest_alt_ft, predicted_alt_ft, sample_points, sample_span_s, violation_time_s,
+    alt_floor_ft, altitude_use, deg_to_e7, extrapolated_alt_ft, floor_of, grade_of, lowest_alt_ft,
+    not_climbing, predicted_alt_ft, sample_points, sample_span_s, violates, violation_time_s,
     with_airport_area, AltUse, PathStart,
 };
-use crate::corridor::corridor_hit_at;
+use crate::corridor::{corridor_hit_at, corridor_runway_elev_at};
 use crate::state::{alert_push, skip_push, MsawState};
 use crate::types::{
     Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawTrack, SamplePoint, SkipLog,
-    SkipWhy, Skipped, AF_COAST, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
-    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, END_CLEAR,
-    END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST,
-    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN,
-    MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, ON_GROUND,
+    SkipWhy, Skipped, AF_COAST, AF_COLD_CORRECTED, AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN,
+    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
+    AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, END_CLEAR, END_LOST_ALTITUDE_MISSING,
+    END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST, F_COLD_CORRECTED, F_COLD_UNKNOWN,
+    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, KB_APPROACH,
+    KB_DEPARTURE, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, ON_GROUND,
 };
 
 /// Internal bit of a planned row's flags: the vertical rate was unknown and is taken as zero.
-const IF_RATE_UNKNOWN: u8 = 0x80;
+const IF_RATE_UNKNOWN: u16 = 0x100;
 /// Internal bit of a planned row's flags: the altitude was stale within the hold and was extrapolated.
-const IF_STALE_EXTRAPOLATED: u8 = 0x40;
+const IF_STALE_EXTRAPOLATED: u16 = 0x200;
 
 /// What one cycle did.
 // A7.2: cold struct, size guard waived.
@@ -54,6 +55,10 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.alt_age_unknown = a.alt_age_unknown.saturating_add(b.alt_age_unknown);
     a.alt_loss = a.alt_loss.saturating_add(b.alt_loss);
     a.landings = a.landings.saturating_add(b.landings);
+    a.protection_lost = a.protection_lost.saturating_add(b.protection_lost);
+    a.protection_lost_open = a
+        .protection_lost_open
+        .saturating_add(b.protection_lost_open);
     a.rate_unknown = a.rate_unknown.saturating_add(b.rate_unknown);
     a.rows_bad = a.rows_bad.saturating_add(b.rows_bad);
     a.rows_over_capacity = a.rows_over_capacity.saturating_add(b.rows_over_capacity);
@@ -200,7 +205,7 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         if r.alt_ft.is_nan() {
             stats.alt_missing = stats.alt_missing.saturating_add(1);
             skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeMissing);
-            lose_open(st, r.addr, END_LOST_ALTITUDE_MISSING);
+            lose_protection(st, &mut stats, skips, t_ns, r, END_LOST_ALTITUDE_MISSING);
             continue;
         }
         let mut row = *r;
@@ -208,11 +213,20 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
             stats.alt_age_unknown = stats.alt_age_unknown.saturating_add(1);
         }
         match altitude_use(r.alt_age_s, cfg.max_altitude_age_s, cfg.stale_hold_s) {
-            AltUse::Fresh => {}
+            AltUse::Fresh => {
+                // Any age above nothing carries a known descent on: the measurement is of the
+                // past. A rate that is not known carries it level here (it is fresh).
+                let age = f64::from(r.alt_age_s);
+                if age > 0.0 && age.is_finite() && !r.vrate_fpm.is_nan() {
+                    row.alt_ft =
+                        extrapolated_alt_ft(f64::from(r.alt_ft), f64::from(r.vrate_fpm), age)
+                            as f32;
+                }
+            }
             AltUse::Lost => {
                 stats.alt_stale = stats.alt_stale.saturating_add(1);
                 skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeStale);
-                lose_open(st, r.addr, END_LOST_ALTITUDE_STALE);
+                lose_protection(st, &mut stats, skips, t_ns, r, END_LOST_ALTITUDE_STALE);
                 continue;
             }
             AltUse::Extrapolated => {
@@ -259,9 +273,14 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
     // and listed.
     if st.scratch.len() > cfg.track_budget {
         let la = cfg.look_ahead_s;
+        // The lowest height above the ground first; a track whose ground is not given first of all.
         let key = |r: &MsawTrack| {
             let (alt, vr) = (f64::from(r.alt_ft), f64::from(r.vrate_fpm));
-            alt + oa_math::min_f64(0.0, predicted_alt_ft(0.0, vr, la))
+            let ground = f64::from(r.ground_ft);
+            if ground.is_nan() {
+                return f64::MIN;
+            }
+            alt - ground + oa_math::min_f64(0.0, predicted_alt_ft(0.0, vr, la))
         };
         st.scratch.sort_unstable_by(|a, b| {
             oa_math::cmp_canon_f64(key(a), key(b)).then(a.addr.cmp(&b.addr))
@@ -304,12 +323,25 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
     st.plan.len()
 }
 
-/// Marks the open alert of a track whose altitude was lost: it ends at the evaluation, with the
-/// reason, not by the hysteresis.
-fn lose_open(st: &mut MsawState, addr: u32, why: u8) {
-    if let Ok(i) = st.open.binary_search_by_key(&addr, |a| a.addr) {
+/// A track whose altitude is lost (missing, or past the hold) has no protection: counted, whatever
+/// the share of the tracks. If it has an open alert the alert is held open with the reason, not
+/// closed as cleared, and the track says so; the alert ends when the altitude returns and the
+/// track is clear, or when the track ends.
+fn lose_protection(
+    st: &mut MsawState,
+    stats: &mut CycleStats,
+    skips: &mut SkipLog,
+    t_ns: i64,
+    r: &MsawTrack,
+    why: u8,
+) {
+    stats.protection_lost = stats.protection_lost.saturating_add(1);
+    if let Ok(i) = st.open.binary_search_by_key(&r.addr, |a| a.addr) {
         if let Some(a) = st.open.get_mut(i) {
             a.end_reason = why;
+            a.protect_ns = t_ns;
+            stats.protection_lost_open = stats.protection_lost_open.saturating_add(1);
+            skip(skips, stats, t_ns, r, SkipWhy::ProtectionLost);
         }
     }
 }
@@ -324,6 +356,8 @@ fn flags_of(tr: &MsawTrack) -> u16 {
         (IF_RATE_UNKNOWN, AF_RATE_UNKNOWN),
         (F_QNH_MISSING, AF_QNH_MISSING),
         (IF_STALE_EXTRAPOLATED, AF_STALE_EXTRAPOLATED),
+        (F_COLD_CORRECTED, AF_COLD_CORRECTED),
+        (F_COLD_UNKNOWN, AF_COLD_UNKNOWN),
     ] {
         if tr.flags & bit != 0 {
             f |= af;
@@ -365,13 +399,23 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         below_mva: false,
         landed: false,
     };
-    // The look-ahead is the terminal one where the track is now inside a corridor (the capture
-    // boxes of A2.08); airport terminal areas and `gtm_clearance` areas keep the general one. A path
-    // that leaves it keeps that look-ahead.
-    let limit = match pts.first() {
-        Some(p) if corridor_hit_at(cfg, &st.cidx, p).is_some() => cfg.terminal_lookahead_s,
+    // The look-ahead is the terminal one where the track is now inside an approach capture box (A2.08)
+    // and no departure corridor; runway strips, departure corridors, airport terminal areas and
+    // `gtm_clearance` areas keep the general one, since a departure climbs toward terrain. A path
+    // that leaves the box keeps that look-ahead.
+    let limit = match pts.first().and_then(|p| corridor_hit_at(cfg, &st.cidx, p)) {
+        Some(h) if h.kinds & KB_APPROACH != 0 && h.kinds & KB_DEPARTURE == 0 => {
+            cfg.terminal_lookahead_s
+        }
         _ => cfg.look_ahead_s,
     };
+    // A point over the pavement is a landing only for a track that is not climbing and whose
+    // altitude is not biased low by a missing altimeter setting.
+    let may_land = not_climbing(
+        tr.flags & IF_RATE_UNKNOWN == 0,
+        vr,
+        f64::from(tr.alt_change_10s_ft),
+    ) && tr.flags & F_QNH_MISSING == 0;
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
@@ -380,11 +424,18 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         }
         let hi = oa_math::min_f64(hi, limit);
         let low = alt_floor_ft(lowest_alt_ft(alt, vr, lo, hi));
-        let landing = hit.and_then(|h| h.landing_elev_ft);
-        if landing.is_some_and(|e| low <= e) {
-            // The path reaches the runway over the runway: a landing. What follows is the roll-out.
+        // After a touchdown point the rest of the path is the roll-out, along the runway and off its
+        // end: a straight line from the track's heading drifts off the pavement and below the
+        // ground, and is no path the aircraft flies. A track that does not qualify (a climb, a
+        // go-around, a low pass, no setting) never rolls out: every point of its path is judged.
+        if v.landed {
+            continue;
+        }
+        if may_land && corridor_runway_elev_at(cfg, &st.cidx, p).is_some_and(|e| low <= e) {
+            // The path reaches the runway elevation over the pavement: a landing at this point
+            // (and only this point: the points outside the runway are still judged).
             v.landed = true;
-            break;
+            continue;
         }
         let s = &with_airport_area(s, low);
         let Some((floor, kind)) = floor_of(s, hit, cfg) else {
@@ -401,7 +452,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
             v.worst_kind = kind;
             v.worst_at = (p.lat_e7, p.lon_e7, p.radius_m, k as u8);
         }
-        if is_violation(low, floor, landing) {
+        if violates(low, floor) {
             let t = violation_time_s(alt, vr, floor, lo, hi);
             v.ttv_s = Some(v.ttv_s.map_or(t, |b| oa_math::min_f64(b, t)));
         }
@@ -469,6 +520,7 @@ fn raise(
         cycles: 1,
         flags,
         end_reason: END_CLEAR,
+        protect_ns: 0,
     };
     match st.open.binary_search_by_key(&tr.addr, |a| a.addr) {
         Ok(i) => {
@@ -496,6 +548,9 @@ fn raise(
                 }
                 a.cycles = a.cycles.saturating_add(1);
                 a.flags |= flags;
+                // The altitude is back and the track is in violation: the same alert goes on.
+                a.end_reason = END_CLEAR;
+                a.protect_ns = 0;
             }
         }
         Err(i) => {
@@ -552,6 +607,17 @@ pub fn msaw_evaluate(
         let (Some(pts), Some(fl)) = (st.points.get(a..b), floors.get(a..b)) else {
             continue;
         };
+        // The altitude is back: a held alert is clear from now on (the hysteresis starts), or goes
+        // on below if the track is in violation.
+        if let Ok(i) = st.open.binary_search_by_key(&tr.addr, |a| a.addr) {
+            if let Some(a) = st.open.get_mut(i) {
+                if a.end_reason != END_CLEAR {
+                    a.end_reason = END_CLEAR;
+                    a.protect_ns = 0;
+                    a.end_ns = t_ns;
+                }
+            }
+        }
         let v = judge(tr, pts, fl, st);
         stats.evaluated = stats.evaluated.saturating_add(1);
         if v.partial {
@@ -601,16 +667,24 @@ pub fn msaw_evaluate(
     st.plan = plan;
     // An alert whose track has been clear for the hysteresis ends.
     let h = st.cfg.hysteresis_ns;
+    // An alert of a track whose altitude is lost stays open while the track is seen so; when the track
+    // is no longer seen it ends with the reason.
+    let keeps = |a: &Alert| {
+        if a.end_reason == END_CLEAR {
+            a.end_ns.saturating_add(h) >= t_ns
+        } else {
+            a.protect_ns == t_ns
+        }
+    };
     for a in st.open.iter() {
-        if a.end_reason != END_CLEAR || a.end_ns.saturating_add(h) < t_ns {
+        if !keeps(a) {
             stats.closed = stats.closed.saturating_add(1);
             if !alert_push(alerts, a) {
                 stats.alerts_dropped = stats.alerts_dropped.saturating_add(1);
             }
         }
     }
-    st.open
-        .retain(|a| a.end_reason == END_CLEAR && a.end_ns.saturating_add(h) >= t_ns);
+    st.open.retain(keeps);
     let report = net_report_of(&stats);
     publish(net, report, t_ns, &mut stats);
     add(&mut st.totals, &stats);

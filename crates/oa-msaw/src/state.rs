@@ -144,6 +144,13 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
         {
             return Err("corridor path");
         }
+        if !(p.pave_half_m.is_finite()
+            && p.pave_half_m >= 0.0
+            && p.pave_half_m <= MAX_CORRIDOR_LENGTH_M
+            && (-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.far_elev_ft))
+        {
+            return Err("corridor runway");
+        }
         if !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.thr_elev_ft)
             || !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.faf_alt_ft)
         {

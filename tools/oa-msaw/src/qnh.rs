@@ -24,6 +24,10 @@ use oa_sealed::Sealed;
 use crate::guard::{open_guarded, OpenFail};
 
 const NM_M: f64 = 1852.0;
+/// Metres in a foot.
+const FT_M: f64 = 0.3048;
+/// The METAR table's value for a field that is absent.
+const NONE_I16: i16 = i16::MIN;
 /// Metres per degree of latitude (the core's scale).
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 /// The cell and time bucket of a lookup.
@@ -37,6 +41,22 @@ const FALLBACK_AGE_S: i64 = 12 * 3600;
 /// The altitude from which the standard setting is flown, feet.
 pub const FL180_FT: f64 = 18_000.0;
 
+/// The cold-temperature correction of ICAO Doc 8168 (Vol. I, Part III), feet: for the height `h_ft`
+/// above the altimeter source (elevation `elev_ft`) and the temperature `t_c` at the source below
+/// 15 degrees, `h (15 - t) / (273 + t - 0.5 L (h + elev))` with the lapse rate L of 0.00198 degrees
+/// per foot. Zero at or above 15 degrees.
+pub fn cold_correction_ft(h_ft: f64, elev_ft: f64, t_c: f64) -> f64 {
+    if t_c >= 15.0 || h_ft <= 0.0 {
+        return 0.0;
+    }
+    let den = 273.0 + t_c - 0.5 * 0.00198 * (h_ft + elev_ft);
+    if den <= 100.0 {
+        // Beyond any air the formula describes: not a number to trust, left as no correction.
+        return 0.0;
+    }
+    h_ft * (15.0 - t_c) / den
+}
+
 /// A station given directly: latitude, longitude and observations (Unix seconds, hPa).
 pub type StationSpec = (f64, f64, Vec<(i64, f64)>);
 
@@ -45,7 +65,15 @@ struct Station {
     lat: f64,
     lon: f64,
     obs: Vec<(i64, f64)>,
+    /// The station's elevation, feet (NaN if unknown), and the temperature of each observation,
+    /// degrees C (NaN where absent), parallel to `obs`.
+    elev_ft: f64,
+    temp_c: Vec<f64>,
 }
+
+/// What a lookup finds: the altimeter setting (hPa), the temperature at the station (degrees C, NaN
+/// if not reported) and the station's elevation (feet, NaN if unknown).
+type Found = (f64, f64, f64);
 
 /// What the lookups did. A7.2: cold struct, size guard waived.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +89,8 @@ pub struct QnhStats {
     /// Of the altitudes without a setting at the usual radius and age, those corrected with the
     /// lowest setting of the last 12 h within 200 NM (the rest take the allowance).
     pub fallback: u64,
+    /// Altitudes lowered by the cold-temperature correction.
+    pub cold: u64,
     pub lookups: u64,
     pub cache_hits: u64,
 }
@@ -70,7 +100,7 @@ pub struct Qnh {
     stations: Vec<Station>,
     radius_m: f64,
     max_age_s: i64,
-    cache: HashMap<(i32, i32, i64), Option<f64>>,
+    cache: HashMap<(i32, i32, i64), Option<Found>>,
     low_cache: HashMap<(i32, i32, i64), Option<f64>>,
     pub stats: QnhStats,
 }
@@ -98,7 +128,13 @@ impl Qnh {
         let mut q = Qnh::empty(radius_nm, max_age_s);
         q.stations = stations
             .into_iter()
-            .map(|(lat, lon, obs)| Station { lat, lon, obs })
+            .map(|(lat, lon, obs)| Station {
+                lat,
+                lon,
+                temp_c: vec![f64::NAN; obs.len()],
+                obs,
+                elev_ft: f64::NAN,
+            })
             .collect();
         q.stats.stations = q.stations.len() as u64;
         q
@@ -141,14 +177,27 @@ impl Qnh {
             };
             if prev != Some(id) {
                 prev = Some(id);
+                let elev = table.elev_m.get(i).copied().unwrap_or(NONE_I16);
                 stations.push(Station {
                     lat: f64::from(la) / 1e5,
                     lon: f64::from(lo) / 1e5,
                     obs: Vec::new(),
+                    elev_ft: if elev == NONE_I16 {
+                        f64::NAN
+                    } else {
+                        f64::from(elev) / FT_M
+                    },
+                    temp_c: Vec::new(),
                 });
             }
             if let (Some(hpa), Some(s)) = (metar_altim_hpa(&table, i), stations.last_mut()) {
+                let t = table.temp_dc.get(i).copied().unwrap_or(NONE_I16);
                 s.obs.push((obs, hpa));
+                s.temp_c.push(if t == NONE_I16 {
+                    f64::NAN
+                } else {
+                    f64::from(t) / 10.0
+                });
             }
         }
         let mut q = Qnh::empty(radius_nm, max_age_s);
@@ -167,11 +216,11 @@ impl Qnh {
         let key = (cell_of(lat), cell_of(lon), bucket);
         if let Some(&v) = self.cache.get(&key) {
             self.stats.cache_hits += 1;
-            return v;
+            return v.map(|f| f.0);
         }
-        let found = self.nearest_observation(key).map(|(hpa, _)| hpa);
+        let found = self.nearest_observation(key).map(|(f, _)| f);
         self.cache.insert(key, found);
-        found
+        found.map(|f| f.0)
     }
 
     /// How old, seconds at the end of the time's bucket, the observation behind
@@ -183,7 +232,7 @@ impl Qnh {
 
     /// The setting of the nearest station within the radius with an observation within the age,
     /// and that observation's age at the end of the bucket.
-    fn nearest_observation(&self, key: (i32, i32, i64)) -> Option<(f64, i64)> {
+    fn nearest_observation(&self, key: (i32, i32, i64)) -> Option<(Found, i64)> {
         let (clat, clon) = (
             (f64::from(key.0) + 0.5) * CELL_DEG,
             (f64::from(key.1) + 0.5) * CELL_DEG,
@@ -205,9 +254,13 @@ impl Qnh {
                 continue;
             };
             let upto = s.obs.partition_point(|&(o, _)| o <= start);
-            if let Some(&(o, hpa)) = upto.checked_sub(1).and_then(|k| s.obs.get(k)) {
+            if let Some((k, &(o, hpa))) = upto
+                .checked_sub(1)
+                .and_then(|k| s.obs.get(k).map(|x| (k, x)))
+            {
                 if end - o <= self.max_age_s {
-                    return Some((hpa, end - o));
+                    let t = s.temp_c.get(k).copied().unwrap_or(f64::NAN);
+                    return Some(((hpa, t, s.elev_ft), end - o));
                 }
             }
         }
@@ -245,6 +298,45 @@ impl Qnh {
         }
         self.low_cache.insert(key, low);
         low
+    }
+
+    /// Sets the weather of the station `i` given to [`Qnh::from_stations`]: its elevation in feet and
+    /// the temperature of each observation in degrees C. For a test.
+    pub fn set_station_weather(&mut self, i: usize, elev_ft: f64, temp_c: Vec<f64>) {
+        if let Some(s) = self.stations.get_mut(i) {
+            s.elev_ft = elev_ft;
+            s.temp_c = temp_c;
+        }
+    }
+
+    /// The cold-temperature correction (ICAO Doc 8168) of an altitude that was corrected with the
+    /// setting at (`lat`, `lon`), `t_s`: the altitude lowered by the correction for the temperature
+    /// at the station of that setting, and a code (0: not needed, 1: corrected, 2: the temperature
+    /// or elevation of the station not known: no correction). Never raises an altitude.
+    pub fn cold_ft(&mut self, lat: f64, lon: f64, t_s: i64, indicated_ft: f64) -> (f64, u8) {
+        self.stats.lookups += 1;
+        let key = (cell_of(lat), cell_of(lon), t_s.div_euclid(BUCKET_S));
+        let found = match self.cache.get(&key) {
+            Some(&v) => v,
+            None => {
+                let v = self.nearest_observation(key).map(|(f, _)| f);
+                self.cache.insert(key, v);
+                v
+            }
+        };
+        let Some((_, t, elev)) = found else {
+            return (indicated_ft, 2);
+        };
+        if !t.is_finite() || !elev.is_finite() {
+            return (indicated_ft, 2);
+        }
+        let h = indicated_ft - elev;
+        if t >= 15.0 || h <= 0.0 {
+            return (indicated_ft, 0);
+        }
+        let dh = cold_correction_ft(h, elev, t);
+        self.stats.cold += 1;
+        (indicated_ft - dh, 1)
     }
 
     /// An altitude on the datum of the floors. `pressure_alt_ft` is the pressure altitude of the

@@ -150,7 +150,7 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
             c.approach_min_clearance_ft,
             c.velocity_uncertainty_mps
         ),
-        (100, 100, 5.0)
+        (250, 100, 5.0)
     );
     assert_eq!(
         (s.no_qnh_allowance_ft, s.metar_radius_nm, s.metar_max_age_s),
@@ -467,6 +467,71 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
     // An airport the file does not hold is an error, never an empty list.
     let e = corridors_from_cifp(&c, "KXYZ").unwrap_err();
     assert!(e.contains("KXYZ"), "{e}");
+}
+
+// REQ: OA-MSAW-075
+#[test]
+fn the_path_angle_is_the_final_approachs_only_and_the_strip_holds_its_pavement_and_far_elevation() {
+    let mut c = fixture_cifp();
+    let base = corridors_from_cifp(&c, "KORD").unwrap();
+    let strip = &base.corridors[1].corridor;
+    let rwy = c.runways.iter().find(|r| r.ident == "RW04R").unwrap();
+    assert!(
+        (strip.pave_half_m - f64::from(rwy.width_ft.unwrap_or(200)) * 0.3048 / 2.0).abs() < 1e-6
+    );
+    // No reciprocal runway in the fixture: the far end is the higher of the threshold and the
+    // airport elevation.
+    let apt = c.airports.iter().find(|a| a.ident == "KORD").unwrap();
+    assert_eq!(
+        strip.far_elev_ft,
+        strip
+            .thr_elev_ft
+            .max(apt.elevation_ft.unwrap_or(strip.thr_elev_ft))
+    );
+    // A step-down angle before the fix (a steep one) and a climb-sign angle after it are not the
+    // final approach's glidepath.
+    let p = c
+        .procedures
+        .iter_mut()
+        .find(|p| p.kind == oa_arinc424::ProcedureKind::Approach)
+        .unwrap();
+    let route = &mut p.routes[0];
+    let mut early = route.legs[0].clone();
+    early.vertical_angle_deg = Some(-5.0);
+    early.description[3] = ' ';
+    route.legs.insert(0, early);
+    let mut late = route.legs.last().unwrap().clone();
+    late.vertical_angle_deg = Some(1.0);
+    late.description[3] = ' ';
+    route.legs.push(late);
+    let a = corridors_from_cifp(&c, "KORD").unwrap();
+    assert!((a.corridors[0].corridor.path_angle_deg - 3.0).abs() < 1e-9);
+}
+
+// REQ: OA-MSAW-075
+#[test]
+fn a_configuration_whose_allowance_is_under_the_rise_of_the_path_over_the_lookup_radius_is_refused()
+{
+    let mut s = settings().msaw;
+    s.n_corridors = 1;
+    s.corridors[0].kind = CK_APPROACH;
+    s.corridors[0].path_angle_deg = 3.0;
+    assert!(oa_msaw_run::config::check_allowance(&s).is_ok());
+    // r95 of 2,000 m needs 400 ft and more; 100 ft is refused naming the cause.
+    s.r95_cap_m = 2000.0;
+    s.approach_allowance_ft = 100;
+    let e = oa_msaw_run::config::check_allowance(&s).unwrap_err();
+    assert!(
+        e.contains("approach_allowance_ft") && e.contains("r95_cap_m"),
+        "{e}"
+    );
+    s.approach_allowance_ft = 500;
+    assert!(oa_msaw_run::config::check_allowance(&s).is_ok());
+    // A steeper path needs more.
+    s.corridors[0].path_angle_deg = 6.0;
+    assert!(oa_msaw_run::config::check_allowance(&s).is_err());
+    // The development configuration passes.
+    assert!(oa_msaw_run::config::check_allowance(&settings().msaw).is_ok());
 }
 
 // REQ: OA-MSAW-055
@@ -1042,7 +1107,7 @@ fn a_point_outside_the_obstacle_file_extent_has_no_obstacle_data_and_inside_it_h
     let mut ix = ObstacleIndex::from_points(std::iter::once((400_000_000, -880_000_000, 900)));
     // No extent given: covered everywhere (as a test hands the data over).
     assert!(ix.covers(10.0, 10.0, 100.0));
-    ix.extent = Some((380_000_000, 460_000_000, -935_000_000, -835_000_000));
+    ix.set_extent_box(380_000_000, 460_000_000, -935_000_000, -835_000_000);
     assert!(ix.covers(40.0, -88.0, 5000.0));
     // Outside, or a circle that crosses the edge: not covered, never "no obstacle".
     assert!(!ix.covers(47.0, -88.0, 100.0));
@@ -1307,6 +1372,7 @@ fn tower_rig(
     use oa_msaw::{Corridor, CK_APPROACH, CK_DEPARTURE};
     let m = 111_194.926_644_558_74;
     let mut cfg = settings().msaw;
+    cfg.approach_allowance_ft = 100;
     cfg.corridors[0] = Corridor {
         kind: CK_APPROACH,
         thr_lat_e7: 400_000_000,
@@ -1318,6 +1384,8 @@ fn tower_rig(
         thr_elev_ft: 600,
         faf_alt_ft: 2250,
         land_from_m: 0.0,
+        pave_half_m: 0.0,
+        far_elev_ft: 0,
         path_angle_deg: 3.0,
         tch_ft: 50,
     };
@@ -1392,4 +1460,73 @@ fn an_obstacle_below_the_approach_surface_at_its_own_position_is_left_to_the_sur
     );
     g.set_corridors(&cfg);
     assert_eq!(g.floor_at(&p).unwrap().obstacle_ft, 750);
+}
+
+// REQ: OA-MSAW-073
+#[test]
+fn the_coverage_of_several_files_is_the_union_of_each_files_own_extent() {
+    use oa_msaw_run::floors::ObstacleIndex;
+    // California and Colorado loaded: a point in Nevada between them is obstacle data absent, and a
+    // point inside either is covered.
+    let ca = ObstacleIndex::from_file_points(vec![
+        (340_000_000, -1_180_000_000, 900),
+        (360_000_000, -1_200_000_000, 800),
+        (390_000_000, -1_220_000_000, 700),
+        (320_000_000, -1_150_000_000, 600),
+    ]);
+    let co = ObstacleIndex::from_file_points(vec![
+        (390_000_000, -1_050_000_000, 9000),
+        (380_000_000, -1_040_000_000, 9000),
+    ]);
+    let mut both = ca;
+    both.merge(co);
+    assert_eq!(both.files, 2);
+    assert_eq!(both.count, 6);
+    assert!(both.covers(36.0, -120.0, 1000.0), "California");
+    assert!(both.covers(39.0, -105.0, 1000.0), "Colorado");
+    assert!(!both.covers(38.5, -116.5, 1000.0), "Nevada: no file of it");
+    // The box around both would have covered it.
+    let (s, n, w, e) = both.extent.unwrap();
+    assert!(s < 385_000_000 && n > 385_000_000 && w < -1_165_000_000 && e > -1_165_000_000);
+    let mut f = Floors::new(None, Some(both), None);
+    assert!(
+        !f.floor_at(&point(38.5, -116.5, 100.0))
+            .unwrap()
+            .obstacle_covered
+    );
+    assert!(
+        f.floor_at(&point(36.0, -120.0, 100.0))
+            .unwrap()
+            .obstacle_covered
+    );
+}
+
+// REQ: OA-MSAW-078
+#[test]
+fn the_cold_temperature_correction_only_lowers_an_altitude_and_says_when_it_could_not_be_made() {
+    use oa_msaw_run::qnh::cold_correction_ft;
+    // Doc 8168: 1,000 ft above a station at sea level in air at -20 C reads about 160 ft high
+    // (ISA deviation 35 degrees: 1000 x 35 / (273 - 20 - 0.5 x 0.00198 x 1000) = 139 ft).
+    let dh = cold_correction_ft(1000.0, 0.0, -20.0);
+    assert!((dh - 139.0).abs() < 2.0, "{dh}");
+    // Warm or standard air, or no height: nothing, never a raise.
+    assert_eq!(cold_correction_ft(1000.0, 0.0, 15.0), 0.0);
+    assert_eq!(cold_correction_ft(1000.0, 0.0, 30.0), 0.0);
+    assert_eq!(cold_correction_ft(-50.0, 0.0, -20.0), 0.0);
+    let t = 1_700_000_000i64;
+    let obs = vec![(t - 600, 1013.25)];
+    let mut q = Qnh::from_stations(vec![(40.0, -88.0, obs.clone())], 100.0, 7200);
+    q.set_station_weather(0, 600.0, vec![-10.0]);
+    let (a, code) = q.cold_ft(40.0, -88.0, t, 2600.0);
+    assert_eq!(code, 1);
+    assert!(a < 2600.0 && a > 2400.0, "{a}");
+    // At or below the station there is nothing to correct; a warm station gives no correction.
+    assert_eq!(q.cold_ft(40.0, -88.0, t, 600.0), (600.0, 0));
+    let mut warm = Qnh::from_stations(vec![(40.0, -88.0, obs.clone())], 100.0, 7200);
+    warm.set_station_weather(0, 600.0, vec![20.0]);
+    assert_eq!(warm.cold_ft(40.0, -88.0, t, 2600.0), (2600.0, 0));
+    // The temperature missing: no correction, said so.
+    let mut none = Qnh::from_stations(vec![(40.0, -88.0, obs)], 100.0, 7200);
+    none.set_station_weather(0, 600.0, vec![f64::NAN]);
+    assert_eq!(none.cold_ft(40.0, -88.0, t, 2600.0), (2600.0, 2));
 }

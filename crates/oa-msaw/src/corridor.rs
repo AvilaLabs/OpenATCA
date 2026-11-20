@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use crate::calc::{corridor_hit_ft, hit_union, M_PER_DEG, RAD_PER_DEG};
+use crate::calc::{corridor_hit_ft, hit_union, runway_elev_at, M_PER_DEG, RAD_PER_DEG};
 use crate::types::{Corridor, CorridorHit, MsawConfig, SamplePoint};
 
 /// The cell of the index, 1e-7 degree (0.1 degree).
@@ -115,6 +115,33 @@ pub fn corridor_hit_at(
         };
         if let Some(h) = corridor_hit_ft(c, p.lat_e7, p.lon_e7, f64::from(p.radius_m), cfg) {
             best = Some(hit_union(best, h));
+        }
+    }
+    best
+}
+
+/// The runway elevation at a point if the point itself is over the pavement of a runway strip of the
+/// point's cell (the lowest of them where strips overlap), see [`crate::calc::runway_elev_at`].
+pub fn corridor_runway_elev_at(
+    cfg: &MsawConfig,
+    ix: &CorridorIndex,
+    p: &SamplePoint,
+) -> Option<i32> {
+    let cell = (
+        i32::div_euclid(p.lat_e7, CELL_E7),
+        i32::div_euclid(p.lon_e7, CELL_E7),
+    );
+    let from = ix.entries.partition_point(|&(a, b, _)| (a, b) < cell);
+    let mut best: Option<i32> = None;
+    for &(a, b, k) in ix.entries.get(from..).unwrap_or(&[]) {
+        if (a, b) != cell {
+            break;
+        }
+        let Some(c) = cfg.corridors.get(usize::from(k)) else {
+            continue;
+        };
+        if let Some(e) = runway_elev_at(c, p.lat_e7, p.lon_e7) {
+            best = Some(best.map_or(e, |b| b.min(e)));
         }
     }
     best

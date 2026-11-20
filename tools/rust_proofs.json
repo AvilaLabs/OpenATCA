@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 108,
+  "expected_proof_count": 107,
   "proofs": [
     {
       "id": "output-append",
@@ -1874,21 +1874,6 @@
       "requirement": "OA-MSAW-065: the classification msaw_plan switches on: an altitude older than the hold is lost (never judged), an unknown or fresh age is fresh, and an extrapolated altitude is never above the altitude. The plan-level property is a test.",
       "package": "oa-msaw",
       "harness": "calc::proofs::an_altitude_older_than_the_hold_is_classed_lost_and_an_extrapolation_never_climbs",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "msaw-landing-not-a-violation",
-      "requirement": "OA-MSAW-070: a path at or below the runway elevation over the runway is never a violation; elsewhere the decision is the plain comparison.",
-      "package": "oa-msaw",
-      "harness": "calc::proofs::a_path_at_or_below_the_runway_elevation_over_the_runway_is_never_a_violation",
       "enabled": true,
       "experimental": false,
       "required_covers": [],

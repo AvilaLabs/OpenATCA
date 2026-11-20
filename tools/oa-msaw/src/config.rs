@@ -105,6 +105,8 @@ pub struct Settings {
     pub inhibits: Vec<InhibitSpec>,
     pub cifp_airports: Vec<String>,
     pub requests: Vec<RequestSpec>,
+    /// The beacon codes of VFR traffic: 1200 and the `vfr_beacon_code` lines.
+    pub vfr_codes: Vec<u16>,
     pub gtm_areas: Vec<GtmArea>,
     /// Half-width of an approach corridor, nautical miles (legacy's lateral monitor distance).
     pub approach_half_width_nm: f64,
@@ -123,7 +125,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 38] = [
+const KEYS: [&str; 39] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -161,6 +163,7 @@ const KEYS: [&str; 38] = [
     "cifp_airport",
     "gtm_clearance",
     "msaw_request",
+    "vfr_beacon_code",
     "inhibit",
 ];
 
@@ -261,6 +264,8 @@ fn corridor(v: &str) -> Result<Corridor, String> {
         thr_elev_ft: feet("corridor thr_elev_ft", thr_elev)?,
         faf_alt_ft: feet("corridor faf_alt_ft", faf_alt)?,
         land_from_m: 0.0,
+        pave_half_m: 0.0,
+        far_elev_ft: 0,
         path_angle_deg: 3.0,
         tch_ft: 50,
     })
@@ -368,6 +373,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         ));
     }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut vfr_codes: Vec<u16> = vec![1200];
     let (mut procs, mut airports, mut inhibits, mut requests, mut areas) = (
         Vec::<&str>::new(),
         Vec::new(),
@@ -392,6 +398,18 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "cifp_airport" => airports.push(v),
             "inhibit" => inhibits.push(v),
             "msaw_request" => requests.push(v),
+            "vfr_beacon_code" => {
+                let code: u16 = v
+                    .parse()
+                    .ok()
+                    .filter(|c| {
+                        (0..=7777).contains(c) && v.bytes().all(|b| (b'0'..=b'7').contains(&b))
+                    })
+                    .ok_or_else(|| format!("vfr_beacon_code: `{v}` is not a beacon code"))?;
+                if !vfr_codes.contains(&code) {
+                    vfr_codes.push(code);
+                }
+            }
             "gtm_clearance" => areas.push(v),
             _ => {
                 if kv.insert(k, v).is_some() {
@@ -428,6 +446,8 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         thr_elev_ft: 0,
         faf_alt_ft: 0,
         land_from_m: 0.0,
+        pave_half_m: 0.0,
+        far_elev_ft: 0,
         path_angle_deg: 3.0,
         tch_ft: 50,
     }; MAX_CORRIDORS];
@@ -524,6 +544,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         inhibits: specs,
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
         requests: reqs,
+        vfr_codes,
         gtm_areas,
         approach_half_width_nm: positive(
             "approach_half_width_nm",
@@ -543,4 +564,38 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         metar_radius_nm,
         metar_max_age_s,
     })
+}
+
+/// Feet in a metre.
+const FT_PER_M: f64 = 1.0 / 0.3048;
+
+/// The largest radius a floor lookup of a point on an approach is made with, metres: the position
+/// radius the configuration allows plus the growth of the velocity uncertainty over the terminal
+/// look-ahead, rounded up as the lookup does.
+pub fn largest_lookup_radius_m(c: &MsawConfig) -> f64 {
+    let r = c.r95_cap_m + c.velocity_uncertainty_mps * c.terminal_lookahead_s;
+    crate::floors::Floors::effective_radius_m(r)
+}
+
+/// Refuses a configuration whose approach corridors would let terrain at the edge of the lookup
+/// circle stand above the surface at its centre: the surface falls by the tangent of the path angle
+/// for each metre toward the threshold, so the allowance must cover that tangent over the largest
+/// lookup radius.
+pub fn check_allowance(c: &MsawConfig) -> Result<(), String> {
+    let r = largest_lookup_radius_m(c);
+    for k in c
+        .corridors
+        .iter()
+        .take(c.n_corridors)
+        .filter(|k| k.kind == CK_APPROACH)
+    {
+        let need = oa_math::tan(k.path_angle_deg.to_radians()) * r * FT_PER_M;
+        if f64::from(c.approach_allowance_ft) < need {
+            return Err(format!(
+                "approach_allowance_ft {} is below {:.0} ft, the rise of a {:.1} degree path over the largest lookup radius of {:.0} m (r95_cap_m {} and the velocity uncertainty over the terminal look-ahead): raise the allowance or lower r95_cap_m",
+                c.approach_allowance_ft, need, k.path_angle_deg, r, c.r95_cap_m
+            ));
+        }
+    }
+    Ok(())
 }

@@ -99,10 +99,36 @@ pub struct ObstacleIndex {
     pub extent: Option<(i32, i32, i32, i32)>,
     /// How many states and countries the file names.
     pub regions: usize,
+    /// The coverage of the files loaded: the cells of [`COVER_CELL_DEG`] that hold an obstacle of
+    /// any file, with the cells next to them (the union of the files' own extents: a bounding box
+    /// of a whole state would cover its neighbours). `None`: no extent was given.
+    coverage: Option<std::collections::HashSet<(i32, i32)>>,
+    /// The files the set is made of.
+    pub files: usize,
 }
+
+/// The cells of the coverage of obstacle data, degrees.
+const COVER_CELL_DEG: f64 = 0.5;
 
 fn cell_of(deg: f64, size: f64) -> i32 {
     (deg / size).floor() as i32
+}
+
+/// The coverage cells of positions (1e-7 degree): each cell that holds one, and the cells next to it.
+fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::HashSet<(i32, i32)> {
+    let mut cells = std::collections::HashSet::new();
+    for (la, lo) in points {
+        let (a, b) = (
+            cell_of(f64::from(la) / 1e7, COVER_CELL_DEG),
+            cell_of(f64::from(lo) / 1e7, COVER_CELL_DEG),
+        );
+        for da in -1..=1 {
+            for db in -1..=1 {
+                cells.insert((a + da, b + db));
+            }
+        }
+    }
+    cells
 }
 
 /// Indexes the obstacles of `d` (position 1e-7 degree, top feet above mean sea level).
@@ -117,7 +143,11 @@ pub fn obstacle_index(d: &Dof) -> ObstacleIndex {
     let bounds = |v: &[i32]| v.iter().copied().min().zip(v.iter().copied().max());
     if let (Some((s, n)), Some((w, e))) = (bounds(&d.lat_e7), bounds(&d.lon_e7)) {
         ix.extent = Some((s, n, w, e));
+        ix.coverage = Some(cover_cells(
+            d.lat_e7.iter().zip(d.lon_e7.iter()).map(|(&a, &b)| (a, b)),
+        ));
     }
+    ix.files = 1;
     let mut r: Vec<[u8; 2]> = d.oas_code.clone();
     r.sort_unstable();
     r.dedup();
@@ -145,7 +175,7 @@ impl ObstacleIndex {
     /// obstacles came from (or no extent was given): obstacle data covers it. A point outside has
     /// no obstacle data, which is no coverage, never "no obstacle".
     pub fn covers(&self, lat: f64, lon: f64, radius_m: f64) -> bool {
-        let Some((s, n, w, e)) = self.extent else {
+        let Some(cells) = &self.coverage else {
             return true;
         };
         let cos = lat.to_radians().cos().max(0.01);
@@ -153,8 +183,81 @@ impl ObstacleIndex {
             radius_m / M_PER_DEG_LAT_MIN,
             radius_m / (M_PER_DEG_LAT_MIN * cos),
         );
-        let deg = |x: i32| f64::from(x) / 1e7;
-        lat - dlat >= deg(s) && lat + dlat <= deg(n) && lon - dlon >= deg(w) && lon + dlon <= deg(e)
+        [
+            (-1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (0.0, 0.0),
+        ]
+        .iter()
+        .all(|&(a, b)| {
+            cells.contains(&(
+                cell_of(lat + a * dlat, COVER_CELL_DEG),
+                cell_of(lon + b * dlon, COVER_CELL_DEG),
+            ))
+        })
+    }
+
+    /// An index of the obstacles (latitude, longitude 1e-7 degree, top feet) of one file, with the
+    /// coverage the file's own obstacles give, as a file read from disk gives it. For a test.
+    pub fn from_file_points(points: Vec<(i32, i32, i32)>) -> ObstacleIndex {
+        let cover = cover_cells(points.iter().map(|&(a, b, _)| (a, b)));
+        let lat = points.iter().map(|p| p.0);
+        let lon = points.iter().map(|p| p.1);
+        let extent = lat
+            .clone()
+            .min()
+            .zip(lat.max())
+            .zip(lon.clone().min().zip(lon.max()))
+            .map(|((s, n), (w, e))| (s, n, w, e));
+        let mut ix = ObstacleIndex::from_points(points.into_iter());
+        ix.extent = extent;
+        ix.coverage = Some(cover);
+        ix.files = 1;
+        ix
+    }
+
+    /// Gives the set the extent of one file as the box (south, north, west, east, 1e-7 degree): the
+    /// cells it holds, as a file read from disk gives its own. For a test.
+    pub fn set_extent_box(&mut self, s: i32, n: i32, w: i32, e: i32) {
+        self.extent = Some((s, n, w, e));
+        let cell = |x: i32| cell_of(f64::from(x) / 1e7, COVER_CELL_DEG);
+        let mut cells = std::collections::HashSet::new();
+        for a in cell(s)..=cell(n) {
+            for b in cell(w)..=cell(e) {
+                cells.insert((a, b));
+            }
+        }
+        self.coverage = Some(cells);
+        self.files = self.files.max(1);
+    }
+
+    /// Adds the obstacles and the coverage of `o`: the set of several files. The coverage is the
+    /// union of each file's own, the extent the box around both.
+    pub fn merge(&mut self, o: ObstacleIndex) {
+        let base = self.count;
+        for (k, v) in o.cells {
+            let e = self.cells.entry(k).or_default();
+            e.extend(
+                v.into_iter()
+                    .map(|(la, lo, t, r)| (la, lo, t, r + base as u32)),
+            );
+        }
+        self.count += o.count;
+        self.regions += o.regions;
+        self.files += o.files;
+        self.extent = match (self.extent, o.extent) {
+            (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1), a.2.min(b.2), a.3.max(b.3))),
+            (a, b) => a.or(b),
+        };
+        self.coverage = match (self.coverage.take(), o.coverage) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        };
     }
 
     /// The highest obstacle within `radius_m` of the point: its top (feet), its record number in

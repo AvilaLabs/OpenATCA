@@ -42,16 +42,21 @@ pub const MAX_ABS_LAT_DEG: f64 = 85.0;
 pub const FLOOR_NONE: i32 = i32::MIN;
 
 /// [`MsawTrack::flags`]: the track is coasting (no report this cycle).
-pub const F_COAST: u8 = 1;
+pub const F_COAST: u16 = 1;
 /// [`MsawTrack::flags`]: the track's position is uncertain.
-pub const F_UNCERTAIN: u8 = 2;
+pub const F_UNCERTAIN: u16 = 2;
 /// [`MsawTrack::flags`]: the track is held by radar only (no ADS-B).
-pub const F_RADAR_ONLY: u8 = 4;
+pub const F_RADAR_ONLY: u16 = 4;
 /// [`MsawTrack::flags`]: the identity of the track is not confirmed.
-pub const F_IDENTITY_UNCONFIRMED: u8 = 8;
+pub const F_IDENTITY_UNCONFIRMED: u16 = 8;
 /// [`MsawTrack::flags`]: the shell had no usable altimeter setting and gave the pressure altitude
 /// lowered by its allowance instead.
-pub const F_QNH_MISSING: u8 = 16;
+pub const F_QNH_MISSING: u16 = 16;
+/// [`MsawTrack::flags`]: the shell lowered the altitude by the cold-temperature correction.
+pub const F_COLD_CORRECTED: u16 = 32;
+/// [`MsawTrack::flags`]: the temperature at the altimeter station was not known: no cold-temperature
+/// correction was made.
+pub const F_COLD_UNKNOWN: u16 = 64;
 
 /// [`MsawTrack::ground`]: the tracker does not say (the track is evaluated).
 pub const GROUND_UNKNOWN: u8 = 0;
@@ -81,12 +86,17 @@ pub const AF_QNH_MISSING: u16 = 128;
 /// [`Alert::flags`]: the altitude was stale at some cycle of the alert and judged at an
 /// extrapolated altitude (a descent continued, never a climb).
 pub const AF_STALE_EXTRAPOLATED: u16 = 256;
+/// [`Alert::flags`]: the altitude was lowered by the cold-temperature correction at some cycle.
+pub const AF_COLD_CORRECTED: u16 = 512;
+/// [`Alert::flags`]: no cold-temperature correction was made for want of a station temperature, at
+/// some cycle.
+pub const AF_COLD_UNKNOWN: u16 = 1024;
 
 /// [`Alert::end_reason`]: the alert ended by the hysteresis (the track was clear).
 pub const END_CLEAR: u8 = 0;
 /// [`Alert::end_reason`]: the alert ended because the track's altitude went stale past the hold.
 pub const END_LOST_ALTITUDE_STALE: u8 = 1;
-/// [`Alert::end_reason`]: the alert ended because the track lost its altitude.
+/// [`Alert::end_reason`]: the alert ended (or stands at the end of the run) because the track lost its altitude.
 pub const END_LOST_ALTITUDE_MISSING: u8 = 2;
 
 /// One track's state at a cycle, as given by the shell from the tracker's row.
@@ -107,13 +117,19 @@ pub struct MsawTrack {
     /// Vertical rate, feet per minute; NaN when the track has none.
     pub vrate_fpm: f32,
     /// [`F_COAST`], [`F_UNCERTAIN`], [`F_RADAR_ONLY`], [`F_IDENTITY_UNCONFIRMED`],
-    /// [`F_QNH_MISSING`].
-    pub flags: u8,
+    /// [`F_QNH_MISSING`], [`F_COLD_CORRECTED`], [`F_COLD_UNKNOWN`].
+    pub flags: u16,
     /// [`GROUND_UNKNOWN`], [`AIRBORNE`] or [`ON_GROUND`].
     pub ground: u8,
     /// Seconds since the track's latest barometric altitude was measured; NaN if not known (the
     /// altitude is then taken as fresh, and counted as of unknown age).
     pub alt_age_s: f32,
+    /// The altitude now less the altitude 10 s before, feet; NaN if not known. Level within 50 ft
+    /// is evidence that a track is not climbing where its rate says otherwise.
+    pub alt_change_10s_ft: f32,
+    /// The highest terrain at the track's own cell, feet; NaN if not given (the track is then
+    /// ranked first for the budget). Given only when the tracks exceed the budget.
+    pub ground_ft: f32,
 }
 
 /// A point of a track's predicted path where the shell looks up the floor.
@@ -197,6 +213,11 @@ pub struct Corridor {
     /// strip may start before the threshold). A path that reaches the runway elevation beyond it is
     /// landing. Zero for the other kinds.
     pub land_from_m: f64,
+    /// For a runway strip: the half-width of the pavement, metres (the strip is wider by its
+    /// margin), and the elevation at the far end of the runway, feet; the runway elevation at a
+    /// point is interpolated along it from `thr_elev_ft`.
+    pub pave_half_m: f64,
+    pub far_elev_ft: i32,
     /// For an approach corridor: the angle of the procedure's own vertical path, degrees, and the
     /// height at which it crosses the threshold, feet above the threshold elevation. The surface
     /// is that path less the allowance.
@@ -210,10 +231,16 @@ pub struct Corridor {
 pub struct CorridorHit {
     pub surface_ft: Option<i32>,
     pub clearance_ft: i32,
-    /// The runway elevation where the whole query circle lies over the runway strip: a path that
-    /// reaches it there is landing, not in violation.
-    pub landing_elev_ft: Option<i32>,
+    /// The kinds of the corridors that hold the circle, as `KB_*` bits.
+    pub kinds: u8,
 }
+
+/// [`CorridorHit::kinds`]: an approach corridor holds the circle.
+pub const KB_APPROACH: u8 = 1;
+/// [`CorridorHit::kinds`]: a runway strip holds it.
+pub const KB_RUNWAY: u8 = 2;
+/// [`CorridorHit::kinds`]: a departure corridor holds it.
+pub const KB_DEPARTURE: u8 = 4;
 
 /// The settings of the net. Every value is the caller's (no defaults: no safety value is chosen
 /// by the core). A7.2: cold struct, size guard waived.
@@ -258,8 +285,8 @@ pub struct MsawConfig {
     /// The net degrades when more than this share (0 to 1) of the airborne tracks of a cycle are
     /// not monitored for altitude.
     pub altitude_loss_degrade_share: f64,
-    /// The prediction time inside an approach or departure corridor and an airport terminal area
-    /// below its ceiling, seconds; not above `look_ahead_s`.
+    /// The prediction time inside an approach corridor (a capture box) and no departure corridor,
+    /// and in an airport terminal area below its ceiling, seconds; not above `look_ahead_s`.
     pub terminal_lookahead_s: f64,
     /// The corridors; `n_corridors` of them are used.
     pub corridors: [Corridor; MAX_CORRIDORS],
@@ -328,8 +355,11 @@ pub struct Alert {
     pub cycles: u32,
     /// [`AF_RATE_UNKNOWN`] and the other `AF_` bits, of any cycle of the alert.
     pub flags: u16,
-    /// [`END_CLEAR`], [`END_LOST_ALTITUDE_STALE`] or [`END_LOST_ALTITUDE_MISSING`].
+    /// [`END_CLEAR`], [`END_LOST_ALTITUDE_STALE`] or [`END_LOST_ALTITUDE_MISSING`]. A lost reason on
+    /// an open alert means protection lost: the alert is held open.
     pub end_reason: u8,
+    /// The last cycle at which the track was seen with its altitude lost (zero: not lost).
+    pub protect_ns: i64,
 }
 
 /// Why a track was left out of a cycle's evaluation, wholly or in part.
@@ -363,6 +393,9 @@ pub enum SkipWhy {
     AltitudeExtrapolated = 9,
     /// The track is on the ground: excluded, and listed per track.
     GroundExcluded = 10,
+    /// The track lost its altitude (missing, or past the hold) while it had an open alert: the
+    /// alert stays open, and the protection of the track is lost until the altitude returns.
+    ProtectionLost = 11,
 }
 
 /// A track a cycle did not (fully) evaluate, listed and never silently passed.
@@ -419,8 +452,12 @@ pub struct CycleStats {
     /// Tracks not monitored for altitude in a cycle where they were more than the share that
     /// degrades the net.
     pub alt_loss: u64,
-    /// Track cycles whose path reached the runway over the runway: a landing, not a violation.
+    /// Track cycles with a point that qualified as a landing over the runway (not judged).
     pub landings: u64,
+    /// Tracks whose altitude was lost (missing or past the hold): protection lost, whatever the
+    /// share, and of them those that had an open alert (held open).
+    pub protection_lost: u64,
+    pub protection_lost_open: u64,
     /// Rows with no vertical rate (predicted level).
     pub rate_unknown: u64,
     /// Rows with a bad value.

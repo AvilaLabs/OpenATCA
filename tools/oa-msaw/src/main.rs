@@ -22,10 +22,23 @@ fn main() -> ExitCode {
         }
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
-    let optional = [&args.terrain, &args.dof, &args.mva, &args.cifp];
+    let optional = [&args.terrain, &args.mva, &args.cifp];
+    // `--dof` may name several files, separated by commas: each is checked.
+    let dof_parts: Vec<std::path::PathBuf> = args
+        .dof
+        .iter()
+        .flat_map(|d| {
+            d.to_string_lossy()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .collect();
     for p in [&args.adsb, &args.config, &args.out]
         .into_iter()
         .chain(optional.into_iter().flatten())
+        .chain(dof_parts.iter())
     {
         if let Err(e) = refuse_sealed(Sealed::production(), p) {
             eprintln!("oa-msaw: {e}");

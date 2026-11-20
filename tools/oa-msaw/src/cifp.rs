@@ -54,6 +54,10 @@ pub const DEPARTURE_NM: f64 = 5.0;
 pub const RUNWAY_MARGIN_NM: f64 = 0.3;
 /// How far outside the threshold the strip along the runway begins, metres.
 const RUNWAY_OVERLAP_M: f64 = NM_M;
+/// The range of a final approach's published vertical path angle taken as one, degrees: a value
+/// outside it is a step-down or a data fault, not the glidepath.
+const MIN_PATH_ANGLE_DEG: f64 = 2.0;
+const MAX_PATH_ANGLE_DEG: f64 = 6.0;
 /// The vertical path angle and threshold crossing height taken where the CIFP gives none.
 pub const DEFAULT_PATH_ANGLE_DEG: f64 = 3.0;
 pub const DEFAULT_TCH_FT: i32 = 50;
@@ -222,14 +226,25 @@ pub fn corridors_from_cifp_with(
                 continue;
             }
             any_approach = true;
-            for a in p
-                .routes
-                .iter()
-                .flat_map(|rt| rt.legs.iter())
-                .filter_map(|l| l.vertical_angle_deg)
-                .filter(|a| a.is_finite() && *a < 0.0)
-            {
-                angle = Some(angle.map_or(-a, |b| b.min(-a)));
+            // The final approach segment only: from the final approach fix leg on (the legs before
+            // it carry step-down angles), a descent angle of a usable size.
+            for rt in &p.routes {
+                let from = rt.legs.iter().position(|l| l.description[3] == 'F');
+                let Some(from) = from else { continue };
+                for a in rt
+                    .legs
+                    .iter()
+                    .skip(from)
+                    .filter_map(|l| l.vertical_angle_deg)
+                    .filter(|a| {
+                        a.is_finite()
+                            && *a < 0.0
+                            && -*a >= MIN_PATH_ANGLE_DEG
+                            && -*a <= MAX_PATH_ANGLE_DEG
+                    })
+                {
+                    angle = Some(angle.map_or(-a, |b| b.min(-a)));
+                }
             }
             let faf = p
                 .routes
@@ -291,6 +306,8 @@ pub fn corridors_from_cifp_with(
                 thr_elev_ft,
                 faf_alt_ft,
                 land_from_m: 0.0,
+                pave_half_m: 0.0,
+                far_elev_ft: thr_elev_ft,
                 path_angle_deg: angle.unwrap_or(DEFAULT_PATH_ANGLE_DEG),
                 tch_ft: r
                     .threshold_crossing_height_ft
@@ -375,7 +392,16 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
             ));
             continue;
         };
-        // From the landing threshold to the physical far end.
+        // The elevation at the far end: the other end's threshold elevation; where the CIFP has
+        // none, the higher of this threshold and the airport elevation.
+        let far_elev_ft = opposite_designator(designator)
+            .and_then(|o| runways_at(c, airport).find(|x| runway_designator(x) == o))
+            .and_then(|o| o.threshold_elevation_ft)
+            .unwrap_or_else(|| elev.max(apt.elevation_ft.unwrap_or(elev)));
+        // From the landing threshold to the physical far end. The CIFP length is the whole runway
+        // as NASR gives it (RWY_LEN, equal for 16,982 of 16,982 runways), the displaced part
+        // included, and the landing threshold is the displaced one: so the far end is the length
+        // less the displacement beyond the landing threshold.
         let run_m = (f64::from(r.length_ft) - f64::from(r.displaced_threshold_ft)).max(1.0) * FT_M;
         let half_m = r.width_ft.map_or(DEFAULT_RUNWAY_WIDTH_FT, f64::from) * FT_M / 2.0
             + RUNWAY_MARGIN_NM * NM_M;
@@ -395,6 +421,8 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
                 thr_elev_ft: elev,
                 faf_alt_ft: elev,
                 land_from_m: RUNWAY_OVERLAP_M,
+                pave_half_m: r.width_ft.map_or(DEFAULT_RUNWAY_WIDTH_FT, f64::from) * FT_M / 2.0,
+                far_elev_ft,
                 path_angle_deg: 3.0,
                 tch_ft: 50,
             },
@@ -422,6 +450,8 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
                 thr_elev_ft: elev,
                 faf_alt_ft: elev,
                 land_from_m: 0.0,
+                pave_half_m: 0.0,
+                far_elev_ft: elev,
                 path_angle_deg: 3.0,
                 tch_ft: 50,
             },
