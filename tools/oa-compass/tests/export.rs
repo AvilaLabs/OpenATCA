@@ -816,7 +816,7 @@ fn the_sources_are_255_11_12_13_and_the_readme_says_255_1_is_left_free() {
 
 fn fixed_measurement(addr: u32, sensor: u16, t_s: i64, k: i32) -> oa_track::Measurement {
     oa_track::Measurement {
-        toa_ns: t_s * 1_000_000_000,
+        toa_ns: (DAY_S + t_s) * 1_000_000_000,
         pos_cov_m2: [100.0, 0.0, 100.0],
         vel_cov_m2s2: [0.0; 3],
         vel_east_mps: 0.0,
@@ -856,14 +856,54 @@ fn stepped_back_run() -> Vec<oa_track::Measurement> {
     m
 }
 
+/// The tracker's config for `meas`, with the table size of the stepped-back run.
+fn stepped_back_cfg(meas: &[oa_track::Measurement]) -> oa_track::TrackerConfig {
+    oa_track::TrackerConfig {
+        max_tracks: 64,
+        ..oa_compass::shell::run::scorer_config(meas)
+    }
+}
+
+/// Every file and directory under `dir`, relative, sorted.
+fn tree(dir: &std::path::Path) -> Vec<String> {
+    fn walk(d: &std::path::Path, base: &std::path::Path, v: &mut Vec<String>) {
+        for e in fs::read_dir(d).unwrap().filter_map(Result::ok) {
+            let p = e.path();
+            v.push(p.strip_prefix(base).unwrap().display().to_string());
+            if p.is_dir() {
+                walk(&p, base, v);
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(dir, dir, &mut v);
+    v.sort();
+    v
+}
+
+/// What the tracker counts for `meas`, and the index of the measurement at which it first
+/// steps back (None if it never does).
+fn first_step_back(
+    meas: &[oa_track::Measurement],
+    cfg: &oa_track::TrackerConfig,
+) -> (oa_track::TrackerStats, Option<usize>) {
+    let mut t = oa_track::tracker_new(cfg).unwrap();
+    let mut o = oa_track::output_new(cfg.out_capacity);
+    let mut at = None;
+    for (i, m) in meas.iter().enumerate() {
+        oa_track::tracker_update(&mut t, m, &mut o);
+        if at.is_none() && oa_track::tracker_stats(&t).time_steps_back > 0 {
+            at = Some(i);
+        }
+    }
+    (*oa_track::tracker_stats(&t), at)
+}
+
 // REQ: OA-CMP-048
 #[test]
 fn a_tracker_clock_step_back_fails_the_run_instead_of_misplacing_a_restart() {
     let meas = stepped_back_run();
-    let cfg = oa_track::TrackerConfig {
-        max_tracks: 64,
-        ..oa_compass::shell::run::scorer_config(&meas)
-    };
+    let cfg = stepped_back_cfg(&meas);
     // The premise: the tracker did step back and drop a confirmed track of an address that
     // the real data then reuses.
     let mut t = oa_track::tracker_new(&cfg).unwrap();
@@ -885,5 +925,55 @@ fn a_tracker_clock_step_back_fails_the_run_instead_of_misplacing_a_restart() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("moved its clock back"), "{e}");
-    assert!(!out.join("2026.11.15").exists());
+    drop(ex);
+    assert_eq!(
+        tree(&out),
+        Vec::<String>::new(),
+        "nothing is left under --out"
+    );
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn a_step_back_on_the_very_last_measurement_fails_the_run() {
+    let mut meas = stepped_back_run();
+    let cfg = stepped_back_cfg(&meas);
+    let (_, at) = first_step_back(&meas, &cfg);
+    meas.truncate(at.unwrap() + 1);
+    assert_eq!(first_step_back(&meas, &cfg).1, Some(meas.len() - 1));
+    let (mut ex, out) = export_to("stepback-last", false, DAY);
+    let e = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex, true, OpenatcaRows::Ticks)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("moved its clock back"), "{e}");
+    drop(ex);
+    assert_eq!(tree(&out), Vec::<String>::new());
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn a_step_back_before_any_track_was_confirmed_still_fails_the_run() {
+    // Forged tracks with one report each are dropped by the step back unconfirmed.
+    let mut meas = Vec::new();
+    for s in 0..=20 {
+        for a in 0..3 {
+            meas.push(fixed_measurement(0xA00000 + a, 1, s, a as i32));
+        }
+    }
+    for (a, sensor) in [(0xF1u32, 7u16), (0xF2, 8), (0xF3, 7)] {
+        meas.push(fixed_measurement(a, sensor, 400, 50 + a as i32));
+    }
+    for s in 21..=60 {
+        for a in 0..3u32 {
+            meas.push(fixed_measurement(0xA00000 + a, 1, s, 7));
+        }
+    }
+    let cfg = stepped_back_cfg(&meas);
+    let (st, _) = first_step_back(&meas, &cfg);
+    assert!(st.time_steps_back >= 1, "{st:?}");
+    let (mut ex, _out) = export_to("stepback-unconfirmed", false, DAY);
+    let e = oa_compass::shell::run::run_tracker(&meas, &cfg, &mut ex, true, OpenatcaRows::Ticks)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("moved its clock back"), "{e}");
 }

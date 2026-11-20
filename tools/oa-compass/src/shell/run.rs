@@ -54,6 +54,10 @@ pub struct TrackRunInfo {
     /// could still have a row: its last applied update plus the drop age, in time order. A row of
     /// the address later than the k-th of these is of an instance after the k-th: that is how a
     /// restart is told apart, from the tracker's own end events and not from gaps between rows.
+    /// Valid only when the tracker never stepped its clock back: a step back drops every track
+    /// updated after the new clock at once, at the step and not at `last + drop age`, so a run
+    /// with `time_steps_back` or `time_future_dropped` above zero fails (`note_ends`) before
+    /// these are used.
     /// An instance's rows are all at or before its own entry (a tick row is on the table through
     /// the tick at which the age equals the drop age) and the next instance of the address starts
     /// only after the sweep that dropped the old one, which is after it (age over the drop age).
@@ -228,7 +232,7 @@ fn note_ends(
     let st = oa_track::tracker_stats(t);
     if st.time_steps_back > 0 || st.time_future_dropped > 0 {
         return Err(ExportError::Input(format!(
-            "the tracker moved its clock back {} time(s) and dropped {} track(s) built on the wrong clock; \
+            "the tracker moved its clock back {} time(s) and dropped {} track(s), confirmed or not, built on the wrong clock; \
              track restarts cannot be placed in time, so the run is not complete",
             st.time_steps_back, st.time_future_dropped
         )));
