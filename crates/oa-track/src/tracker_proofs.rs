@@ -1384,6 +1384,7 @@ fn filter_apply_rejects_as_the_real_path(
 #[derive(Clone, Copy, PartialEq)]
 enum Part {
     Scalars,
+    Counts,
     Category,
     Current,
     Anchor,
@@ -1443,17 +1444,23 @@ fn not_applied_scenario(
         r
     };
     if part == Part::Scalars {
-        t.state[PROOF_SLOT] = if kani::any() { CONFIRMED } else { TENTATIVE };
         t.first_ns[PROOF_SLOT] = kani::any();
         t.confirmed_ns[PROOF_SLOT] = kani::any();
         t.last_ns[PROOF_SLOT] = kani::any();
         t.updates[PROOF_SLOT] = kani::any();
+    } else {
+        t.first_ns[PROOF_SLOT] = PROOF_TIME - 9;
+        t.confirmed_ns[PROOF_SLOT] = PROOF_TIME - 8;
+        t.last_ns[PROOF_SLOT] = PROOF_TIME - 5;
+        t.updates[PROOF_SLOT] = 7;
+    }
+    if part == Part::Counts {
+        t.state[PROOF_SLOT] = if kani::any() { CONFIRMED } else { TENTATIVE };
         t.hits[PROOF_SLOT] = kani::any();
         t.ring_len[PROOF_SLOT] = kani::any();
         t.ring_head[PROOF_SLOT] = kani::any();
     } else {
-        t.last_ns[PROOF_SLOT] = PROOF_TIME - 5;
-        t.updates[PROOF_SLOT] = 7;
+        t.state[PROOF_SLOT] = TENTATIVE;
         t.hits[PROOF_SLOT] = 3;
         t.ring_len[PROOF_SLOT] = 2;
         t.ring_head[PROOF_SLOT] = 1;
@@ -1487,7 +1494,7 @@ fn not_applied_scenario(
     (before, after, vote, m, original)
 }
 
-// What these five prove, and only this: the production `update_in_order_held`, with `decide`
+// What these six prove, and only this: the production `update_in_order_held`, with `decide`
 // stubbed to what the real rejected path does (one more jump rejection counted, one more in the
 // filter's run of refusals), `filter_apply` stubbed likewise, and any distances (so every
 // verdict of `resolve_decide`), given a report that is not applied, leaves the whole track as
@@ -1499,8 +1506,9 @@ fn not_applied_scenario(
 // group by any value in each harness and the others by one fixed value each. The only counters
 // that change are `jump_rejected` (one more) and at most one of `moves_decision_rejected`,
 // `moves_old_path_votes`, `moves_old_path_unpredictable` (one more, the vote also setting the
-// old-path vote time to the report's); no outcome is counted, no row is made. Five harnesses,
-// one for each part of the track, because a proof comparing every float at once does not fit the
+// old-path vote time to the report's); no outcome is counted, no row is made. Six harnesses,
+// one for each part of the track (times and update count, state and counts, category,
+// current filter, anchor filter, ring), because a proof comparing every float at once does not fit the
 // memory budget. The stubs hold for the default configuration: `resync_consistent_k` is 0 (off)
 // and the run of refusals is below `RESYNC_AFTER`, so the refused report does not resynchronise
 // the filter (that case is the resynchronisation test, an integration test). Not covered by any
@@ -1529,10 +1537,6 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
     assert_eq!(after.expected_ns, before.expected_ns);
     assert_eq!(after.newest_update_ns, before.newest_update_ns);
     assert_eq!(after.updates, before.updates);
-    assert_eq!(after.state, before.state);
-    assert_eq!(after.hits, before.hits);
-    assert_eq!(after.ring_len, before.ring_len);
-    assert_eq!(after.ring_head, before.ring_head);
     let (b, a) = (&before.stats, &after.stats);
     assert_eq!(a.jump_rejected, b.jump_rejected + 1);
     let votes = a.moves_old_path_votes - b.moves_old_path_votes;
@@ -1556,6 +1560,23 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
         votes + unpredictable + decision_rejected == 0,
         "too soon to decide"
     );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_state_and_counts(
+) {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _, original) = not_applied_scenario(&mut t, Part::Counts);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.hits, before.hits);
+    assert_eq!(after.ring_len, before.ring_len);
+    assert_eq!(after.ring_head, before.ring_head);
+    assert_snap_bits(&t.snaps[0], &original);
 }
 
 // REQ: OA-TRK-354
