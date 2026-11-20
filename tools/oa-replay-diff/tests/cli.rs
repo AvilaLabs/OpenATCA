@@ -131,3 +131,38 @@ fn a_repeated_option_is_a_usage_error() {
         );
     }
 }
+
+// REQ: OA-SEAL-005
+#[test]
+fn a_sealed_path_is_refused_with_exit_2_naming_the_rule_and_nothing_is_written() {
+    let d = dir("sealed");
+    let digest = d.join("a.txt");
+    fs::write(&digest, digest_with(&[1])).unwrap();
+    // A fake path that only names a sealed folder; nothing real is touched.
+    let fake = "/nonexistent-fake/scds/rec-20261119/day2/digest.txt";
+    let summary = d.join("summary.txt");
+    for args in [
+        vec![fake.to_string(), digest.display().to_string()],
+        vec![
+            digest.display().to_string(),
+            digest.display().to_string(),
+            "--summary".into(),
+            "/nonexistent-fake/scds/stdds-20261119-holdout/s.txt".into(),
+        ],
+        vec![
+            digest.display().to_string(),
+            digest.display().to_string(),
+            "--rows-a".into(),
+            fake.into(),
+            "--rows-b".into(),
+            fake.into(),
+            "--summary".into(),
+            summary.display().to_string(),
+        ],
+    ] {
+        let out = bin().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("OA-SEAL-001"));
+    }
+    assert!(!summary.exists());
+}

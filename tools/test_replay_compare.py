@@ -14,9 +14,9 @@ CLEAN_ENV = Path(__file__).resolve().parent / "replay_clean_env.sh"
 REPO = Path(__file__).resolve().parent.parent
 
 
-def run(*args, cwd=None):
+def run(*args, cwd=None, script=SCRIPT):
     return subprocess.run(
-        ["bash", str(SCRIPT), *args],
+        ["bash", str(script), *args],
         capture_output=True,
         text=True,
         cwd=cwd,
@@ -24,16 +24,52 @@ def run(*args, cwd=None):
     )
 
 
+# The files the script needs beside it (the sealed-data check reads the list from the crate).
+SCRIPT_FILES = ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh", "sealed_guard.py"]
+
+
+def scratch_repo(base, commits):
+    """A private repository holding copies of the script and one commit per (name, canon, main).
+
+    The tests that name commits use this, never the shared repository: the script adds and prunes
+    worktrees of the repository it sits in, which other sessions are using. Nothing here reaches
+    the network.
+    """
+    repo = Path(base) / "r"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "crates/oa-track/src").mkdir(parents=True)
+    (repo / "crates/oa-sealed").mkdir(parents=True)
+    for n in SCRIPT_FILES:
+        (repo / "tools" / n).write_text((SCRIPT.parent / n).read_text())
+    (repo / "crates/oa-sealed/sealed_paths.txt").write_text(
+        (REPO / "crates/oa-sealed/sealed_paths.txt").read_text()
+    )
+    git(repo, "init", "-q", "-b", "main")
+    out = {}
+    for name, canon, main in commits:
+        (repo / "crates/oa-track/src/canon.rs").write_text(canon)
+        (repo / "crates/oa-track/src/main.rs").write_text(main)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", name)
+        out[name] = git(repo, "rev-parse", "HEAD").strip()
+    return repo, out
+
+
 class ReplayCompareArguments(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
+        # A private repository: `HEAD` is its one commit, which has the v2 digest format.
+        self.repo, _ = scratch_repo(self.dir, [("v2", "// oa-track digest v2: header\n", 'x "--digest" y\n')])
         self.clip = self.dir / "clip.oaf"
         self.clip.write_bytes(b"x")
         self.out = self.dir / "out"
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def script_run(self, *args):
+        return run(*args, script=self.repo / "tools/replay_compare.sh", cwd=self.repo)
 
     # REQ: OA-RDF-006
     def test_a_spec_that_is_not_a_hash_or_ref_is_refused_before_anything_is_built(self):
@@ -49,32 +85,32 @@ class ReplayCompareArguments(unittest.TestCase):
             "",
         ]:
             with self.subTest(spec=bad):
-                r = run(bad, "HEAD", str(self.clip), str(self.out))
+                r = self.script_run(bad, "HEAD", str(self.clip), str(self.out))
                 self.assertEqual(r.returncode, 2, r.stderr)
                 self.assertIn("not a commit hash or ref", r.stderr)
                 self.assertFalse((self.out / "work").exists())
         for opt in ["--help", "-x"]:
-            r = run(opt, "HEAD", str(self.clip), str(self.out))
+            r = self.script_run(opt, "HEAD", str(self.clip), str(self.out))
             self.assertEqual(r.returncode, 2)
             self.assertIn("usage", r.stderr)
-        r = run("HEAD", "no-such-ref-for-the-test", str(self.clip), str(self.out))
+        r = self.script_run("HEAD", "no-such-ref-for-the-test", str(self.clip), str(self.out))
         self.assertEqual(r.returncode, 2)
         self.assertIn("no such commit", r.stderr)
 
     # REQ: OA-RDF-006
     def test_missing_clip_wrong_argument_count_and_existing_report_are_refused(self):
-        r = run("HEAD", "HEAD", str(self.dir / "nope.oaf"), str(self.out))
+        r = self.script_run("HEAD", "HEAD", str(self.dir / "nope.oaf"), str(self.out))
         self.assertEqual(r.returncode, 2)
         self.assertIn("no such clip", r.stderr)
-        r = run("HEAD", "HEAD")
+        r = self.script_run("HEAD", "HEAD")
         self.assertEqual(r.returncode, 2)
         self.assertIn("usage", r.stderr)
-        r = run("HEAD", "HEAD", str(self.clip), str(self.out), "--expect", "missing.txt")
+        r = self.script_run("HEAD", "HEAD", str(self.clip), str(self.out), "--expect", "missing.txt")
         self.assertEqual(r.returncode, 2)
         self.assertIn("no such expect file", r.stderr)
         self.out.mkdir()
         (self.out / "report.txt").write_text("old")
-        r = run("HEAD", "HEAD", str(self.clip), str(self.out))
+        r = self.script_run("HEAD", "HEAD", str(self.clip), str(self.out))
         self.assertEqual(r.returncode, 2)
         self.assertIn("exists", r.stderr)
         self.assertEqual((self.out / "report.txt").read_text(), "old")
@@ -84,7 +120,7 @@ class ReplayCompareArguments(unittest.TestCase):
         self.out.mkdir()
         for name in ["overlay-A.txt", "hashes-A.txt", "time-A.txt", "rows-A.bin"]:
             (self.out / name).write_text("stale")
-        r = run("HEAD", "HEAD", str(self.clip), str(self.out))
+        r = self.script_run("HEAD", "HEAD", str(self.clip), str(self.out))
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("not empty", r.stderr)
         # Nothing was built or removed: the stale files are exactly as they were.
@@ -95,7 +131,7 @@ class ReplayCompareArguments(unittest.TestCase):
         # for the clip, not for the directory).
         empty = self.dir / "empty"
         empty.mkdir()
-        r = run("HEAD", "HEAD", str(self.dir / "nope.oaf"), str(empty))
+        r = self.script_run("HEAD", "HEAD", str(self.dir / "nope.oaf"), str(empty))
         self.assertIn("no such clip", r.stderr)
 
 
@@ -382,24 +418,15 @@ class DigestFormatRefusal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.d = Path(self.tmp.name)
-        self.repo = self.d / "r"
-        (self.repo / "tools").mkdir(parents=True)
-        (self.repo / "crates/oa-track/src").mkdir(parents=True)
-        for n in ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh"]:
-            (self.repo / "tools" / n).write_text((SCRIPT.parent / n).read_text())
-        git(self.repo, "init", "-q", "-b", "main")
-        self.commits = {}
-        for name, canon, main in [
+        self.repo, self.commits = scratch_repo(self.d, [
             ("v1", "// oa-track digest v1: header\n", 'x "--digest" y\n'),
             ("v2", "// oa-track digest v2: header\n", 'x "--digest" y\n'),
             ("half", "// oa-track digest v2: header\n", "no flag\n"),
             ("odd", "// some other header\n", 'x "--digest" y\n'),
-        ]:
-            (self.repo / "crates/oa-track/src/canon.rs").write_text(canon)
-            (self.repo / "crates/oa-track/src/main.rs").write_text(main)
-            git(self.repo, "add", "-A")
-            git(self.repo, "commit", "-q", "-m", name)
-            self.commits[name] = git(self.repo, "rev-parse", "HEAD").strip()
+            # The flag is on the first line of a file far longer than a pipe buffer: a reader
+            # that stops at the first match (grep -q) used to make `git show` die of SIGPIPE.
+            ("big", "// oa-track digest v2: header\n", '"--digest"\n' + ("// padding\n" * 200_000)),
+        ])
         self.clip = self.d / "clip.oaf"
         self.clip.write_bytes(b"x")
 
@@ -426,6 +453,14 @@ class DigestFormatRefusal(unittest.TestCase):
                 self.assertIn(msg, r.stderr)
                 self.assertFalse((out / "work").exists())
                 self.assertFalse(any("building" in l for l in r.stderr.splitlines()))
+
+    # REQ: OA-RDF-024
+    def test_a_commit_with_the_flag_in_a_large_file_is_not_read_as_half_way(self):
+        # Repeated: the failure was a race, so it showed in one run of many.
+        for _ in range(20):
+            r, out = self.go("big", "big")
+            self.assertNotIn("half-way", r.stderr)
+            self.assertNotIn("digest format this script does not know", r.stderr)
 
 
 class CleanBuildEnvironment(unittest.TestCase):

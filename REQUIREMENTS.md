@@ -4904,8 +4904,9 @@ scope.
 - **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
 - **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
   (the build script reruns on the git index and on those trees).
-- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
-  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
+- **OA-CMP-047** Any input path the shared sealed list refuses (OA-SEAL-001; of the recording
+  `scds/rec-20261119`, that is days 2 to 4, the run log and the folder itself) is refused, as given and after
+  resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
 
 - **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
@@ -5290,9 +5291,8 @@ value is a difference only when strictly greater than it.
 - **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
   identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
   per change.
-- **OA-SHD-016** An input or output path with the components `scds` then `rec-20261119`, `stdds-20261119-holdout` or
-  a name starting `stdds-smoke-20261119`, as given or after resolving links, is refused before anything is
-  opened, exit 2.
+- **OA-SHD-016** An input or output path the shared sealed list refuses (OA-SEAL-001), as given or after
+  resolving links, is refused before anything is opened, exit 2.
 - **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
   error, exit 2.
 - **OA-SHD-018** The two recordings are cut to the overlap of their in-box recorded extents (ERAM's in-box track
@@ -5494,3 +5494,275 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-SHD-038** The screen reads only usable raw ADS-B positions (not stale, not on the ground, an ADS-B source, a
   non-zero latitude), one per millisecond per address, with the NACp carried forward from the last known value
   (1 to 15) within the truth configuration's carry age; an absent or zero NACp is unknown.
+
+## SWIM STDDS terminal data (oa-stdds)
+
+- **OA-STD-001** Classifies a message by its root element and namespace into a product kind: TAIS
+  `TATrackAndFlightPlan`, SMES/ASDE-X `asdexMsg` by its first report child (Cat11 `positionReport`,
+  Cat10 `adsbReport`, Cat10 `mlatReport`), the other STDDS terminal-entities namespaces (APDS, ISMC,
+  RVR, TDES, any other), and the FIXM-mediated `MessageCollection` by `metadata@messageType`. Element
+  names and structure follow the FAA's public FIXM-Mediated STDDS Data Overview v2 (mapping tables,
+  sections 2.3.1 to 2.3.4) and the STDDS R6P2 release notes (sections 4.2 to 4.5); no real STDDS message
+  was available, so every unit and name marked ASSUMED in the crate docs awaits confirmation on real data.
+- **OA-STD-002** A message of no known kind is counted by kind and its root name and namespace are kept
+  in a bounded table; it is never an error.
+- **OA-STD-003** A TAIS message parses into typed records with `src` and, per `record`, every track field
+  (`trackNum`, `mrtTime`, `lat`, `lon`, `reportedAltitude`, `vx`, `vy`, `vVert`, `reportedBeaconCode`,
+  `acAddress`, `status`) and flight-plan field (`acid`, `acType`, both beacon codes, both altitudes,
+  `airport`, `runway`, both flight-rule fields, `ECID`, `sfpn`, `ptdTime`, entry and exit fix, `type`,
+  `status`) in fixed integer units named in the field (1e-7 degree, Unix ms, feet, cm/s, feet per minute);
+  no floating point is used.
+- **OA-STD-004** A field absent from a record clears only its own presence bit and is no error; a
+  latitude or longitude left without its partner is refused as an incomplete pair.
+- **OA-STD-005** A field that is present but malformed (syntax, range, empty, too long) is a counted
+  error naming the field and the byte offset of its element; the record is kept, the field is absent and
+  its bit is set in the record's error word, the other fields are intact, and nothing is defaulted.
+- **OA-STD-006** A field given twice in one record is a duplicate error at the second element and keeps
+  neither value.
+- **OA-STD-007** A latitude without a longitude, or the reverse (a delta-encoded message), is refused as
+  an incomplete position pair in both TAIS and SMES; the other fields of the record are kept.
+- **OA-STD-008** Values are checked exactly: beacon codes are four octal digits, Mode S addresses 1 to 6
+  hex digits, decimals take no sign, exponent or spaces and round half away from zero, and each range
+  (latitude +-90, longitude +-180, altitude -2,000 to 100,000 ft, velocity +-3,000 m/s, vertical rate
+  +-30,000 ft/min) accepts its edge and refuses one past it.
+- **OA-STD-009** Timestamps are strict ISO-8601 UTC (`Z` or `+00:00` only, real calendar dates, no leap
+  second, years 1970 to 9999) read to Unix milliseconds; anything else is refused.
+- **OA-STD-010** A field the sender marks `r="1"` is absent and counted as invalidated, not an error.
+- **OA-STD-011** The records per message are limited (`Limits::max_records`); a message over it is refused
+  whole with the offset of the first record over, and nothing from it is kept. Field errors past
+  `Limits::max_errors` are counted as dropped, while each record's error word keeps every bit.
+- **OA-STD-012** Input the XML reader refuses (truncated, DOCTYPE, bad bytes) is refused whole with the
+  reader's byte offset and counted; every truncation and every single-byte deletion of every fixture
+  returns a result without panicking.
+- **OA-STD-013** Elements outside the known structure are counted per path in a bounded table (overflow
+  counted too), only the topmost element of an unknown subtree is counted, and they are never errors;
+  known elements that are deliberately not read are not counted as unknown.
+- **OA-STD-014** An ASDE-X Cat11 `positionReport` parses into a typed report with `airport`, time,
+  position, altitude, heading, speed, velocity, vertical rate, sequence and track numbers, Mode S address,
+  Mode 3/A code, callsign, aircraft type, runway and target type; the Cat10 `mlatReport` and `adsbReport`,
+  the FIXM-mediated forms and the other STDDS products are classified only.
+- **OA-STD-015** A message of a classified-only kind returns its kind and is counted, with no record.
+- **OA-STD-016** The statistics count messages per kind, refusals per reason, field errors per kind,
+  records, records with errors, empty records, and per-field presence and refusal counts for TAIS and
+  SMES; they hold counts only, never a message value.
+- **OA-STD-017** A typed parser called on a message of another kind returns `WrongKind` with that kind and
+  counts it, with no byte offset.
+- **OA-STD-018** Parsing is deterministic: the same bytes give the same records whatever was parsed in
+  between, and a parser and a statistics accumulator are reusable.
+- **OA-STD-019** A `record` with no known field is kept with no bits set and counted as empty.
+- **OA-STD-020** Element text is trimmed and its character references and CDATA are decoded before it is
+  parsed.
+- **OA-STD-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days
+  that do not exist (the table shared with the other crates' calendar helpers).
+- **OA-STD-022** The namespace version (`vN-M`) is never compared, so a version change does not break
+  classification, but the shape of the namespace (`...:terminal:entities:vN-M:service:name`) is.
+- **OA-STD-023** Message frames of a recorded feed parse to the same counts as the same bytes parsed
+  directly; the summary example reads such a feed (raw or gzip) and prints counts and schema names only,
+  never a position, identity or time.
+- **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
+  resolved, is sealed by the shared guard (OA-SEAL-001, OA-SEAL-002), including through a link to the
+  file, to the folder or to a link.
+- **OA-STD-025** Forms the real feed uses are accepted: a decimal with up to 24 fraction digits (a heading
+  printed as a binary double, still range checked), a callsign with an inner space, a runway with `*` or `+`,
+  a flight plan status word up to 16 characters (`terminated`), and the sender's no-value words
+  (`unavailable` for the vertical rate, `unassigned` for an entry or exit fix) as an absent field counted
+  as present-empty, not an error. Encoding-damaged text (U+FFFD) and any other word stay refused.
+- **OA-STD-026** An element with no text is a counted `present_empty` field, not a field error, for
+  `flightPlan/rawFlightRules` (the real feed prints it empty as its normal absent form); every other field
+  keeps an empty element as a refused field. A record with only present-empty fields is not an empty record.
+- **OA-STD-027** The TAIS `track/pseudo`, `track/frozen`, `track/new` and `track/adsb` decode as booleans
+  (`true`, `false`, `1`, `0`); the stats keep a `[false, true]` count per flag, which the summary prints (the
+  flags are not identifying). `track/adsb` is the candidate radar-only marker.
+- **OA-STD-043** The TAIS `track/coast` decodes as a boolean like the other track flags (`true`, `false`,
+  `1`, `0`; an element is no longer skipped): absent stays absent, a present but unreadable value is a counted
+  field error and the field is absent, and the stats keep its presence count and a `[false, true]` count
+  (fifth flag), which the summary prints.
+- **OA-STD-028** The TAIS record header decodes: `recType`, `recSrc`, `recSTARSSrcID` as codes,
+  `recSTARSTimestamp` as milliseconds since midnight (ASSUMED from the observed digits; range 0 to 24 h) and
+  `recSAFAReceiptTime` as ISO-8601. The stats count the latency (receipt time of day minus STARS time of
+  day, wrapped into a day and folded into -12 h to 12 h, so a skew is negative and a midnight crossing small) in ms buckets, the records lacking a time, and the distinct `recSTARSSrcID` values,
+  never printing a time or an identifier.
+- **OA-STD-029** The five service-status roots in the `...:vN-M:status` namespace (`AirportDataServiceStatus`,
+  `TerminalAutomationInformationServiceStatus`, `TowerDepartureEventServiceStatus`,
+  `SurfaceMovementEventServiceStatus`, `STDDSStatus`) classify as kind `stdds-status`; the service name and
+  state are decoded (the root's `serviceStatus` text, or the top-level `p@k` ending in `Status` or `State` with
+  its `v` for `STDDSStatus`) and counted as a value histogram. Any other root of that namespace is unknown.
+- **OA-STD-030** An `AssetMessage` in the `https://mmixm.aero/base/` namespace classifies as kind `mmixm-asset`
+  and is counted, not decoded.
+- **OA-STD-031** ASDE-X `status/*` sub-elements other than `vertRate` stay unknown and are counted.
+- **OA-STD-032** A refused field is diagnosed by its text's shape (length and the first 12 character classes
+  with runs collapsed), kept per field and error kind in the stats and printed by the summary; no value is
+  kept or printed.
+- **OA-STD-033** A message is counted once: `messages == sum(kinds) + errors[xml]` after every refusal path;
+  a refusal after classification adds to `errors` only; a direct `parse_tais`, `parse_smes` or
+  `parse_status` call counts its records and refusals but never a message. The records read before a
+  too-many-records or too-deep refusal are counted.
+- **OA-STD-034** The message-level `src` (TAIS) and `airport` (SMES) follow the field rules: `r="1"` marks
+  them absent and counted, a duplicate keeps neither and is a counted field error, a bad value is a counted
+  field error.
+- **OA-STD-035** The latency (receipt time of day minus STARS time of day) is folded into -12 h to 12 h:
+  a true midnight crossing is a small positive latency and a skew of seconds counts in `<0`.
+- **OA-STD-036** Integer fields (TAIS altitudes, `vVert`, `recSTARSTimestamp`, SMES `vertRate`) take whole
+  numbers only: no fraction, no `+`, no `-0`, no leading zero beyond a single `0`; the counters (`trackNum`,
+  `sfpn`, `seqNum`, `track`) take no leading zero. More than 12 digits is out of range. The SMES altitude is
+  a decimal in the real feed and keeps rounding to feet.
+- **OA-STD-037** A bound is compared with the exact decimal before rounding (so 90.00000004 degrees is out
+  of range though it rounds to 90); a heading is at least 0 and below 360 (a value that rounds up to
+  360.00 is stored as 0).
+- **OA-STD-038** A fraction finer than a millisecond is rounded half up on its fourth digit with a carry
+  into the second, minute and day (not truncated).
+- **OA-STD-039** A status key or value longer than 64 bytes is counted (`status_key_too_long`,
+  `status_value_too_long`), an empty one or one past the per-message limit in `status_dropped`, and a state
+  past the table of distinct values in `status_table_overflow`; none is silent.
+- **OA-STD-040** Only elements with no namespace or in the root's namespace are fields (the real feed's
+  children are unqualified); an element in another namespace is unknown, counted, and nothing below it is
+  read.
+- **OA-STD-041** An `r` attribute other than `"1"` or `"0"` is a counted field error; an unknown element
+  path is stored cut to 120 bytes.
+- **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
+  an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
+  "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
+  sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
+
+## STDDS adsb-flag census (tools/oa-stdds-census)
+
+- **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
+  one track (facility, `recSTARSSrcID`, `trackNum`), attributed to the `adsb` flag of the update that ends
+  it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
+  and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
+- **OA-CEN-002** Flag changes within a track are counted (total, tracks with one, tracks by number of
+  changes), and for each direction the interval across the change, the one before it and the one after it
+  are distributions of their own; intervals across a change stay out of the per-flag distributions.
+- **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
+  Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
+  code and callsign, plus the share with the pseudo, frozen and new flags; and the tracks whose adsb=false
+  updates ever carried an address.
+- **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
+  track number at two facilities, or under two `recSTARSSrcID`, is two tracks.
+- **OA-CEN-005** An update with no `adsb` element is counted apart (never as false); updates with no
+  `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
+  and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
+  gzip file that ends inside a member (a recording still being written) is counted, never fatal.
+- **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012; the gateless check by address of
+  adsb=true updates in OA-CEN-010 is a different, later check, not this one: the
+  address field reads zero on almost all adsb=false updates).
+- **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
+  code, flight-plan content or individual time; the only text from the data is a source id of letters and
+  digits, and the only times are the start (rounded down) and end (rounded up) to the minute of the STDDS
+  recording and of the ADS-B clip, which are the span of each recording and not the time of any aircraft. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
+  file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
+  links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
+  read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
+  `rec/stdds` is refused (exit 2).
+- **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
+  adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
+- **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
+  each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
+  linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
+  segment faster than 600 m/s is left out and counted; ground reports are left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
+  vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
+  update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
+  count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo, frozen or
+  coasting track update are counted apart (a coasting position is dead-reckoned, not measured). A
+  gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
+- **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
+  horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
+  minus ADS-B, along the ADS-B track, positive ahead and to the right; aircraft at 100 kt or more) are summarised by count, median,
+  10th, 90th and 99th percentile and a 20-bin histogram; the vertical differences of horizontal-only
+  matches are summarised over a wide range to expose an altitude unit error. adsb=true is labelled
+  ADS-B-fused and not independent of the truth (STARS fuses ADS-B into those updates, so its difference
+  measures STARS latency and filtering, not accuracy). The adsb=false results are headlined by track class,
+  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-over-real
+  match ratio as the share of matches that may be chance. The ADS-B bracket width of the matches is counted
+  (up to 2 s, 2 to 5, 5 to 10, over 10). A bias injected into synthetic STDDS updates shows in the
+  matched distribution of adsb=false and not of adsb=true. adsb=true updates with a Mode S address are
+  also checked by address, with no gate, and reported apart.
+- **OA-CEN-011** The along-track difference is also given as time (along-track metres over the ADS-B ground
+  speed, aircraft at 100 kt or more); the ADS-B time is receipt time, so this is the STARS latency minus the
+  ADS-B latency; a known clock offset in synthetic data is recovered, positive when the
+  STDDS position is where the aircraft is later than the stated time.
+- **OA-CEN-012** The cross-check counts and difference medians are split by track class and by facility, and
+  absent without a clip.
+- **OA-CEN-013** The ADS-B reference is built with the gating of the tracker and the truth
+  (`oa_truth::quality_check`, default config: source type adsb_icao, adsb_icao_nt or adsb_other, NACp, NIC,
+  SIL, version, stale and range gates), in time order with per-aircraft carried state, not a parallel
+  filter; reports on the ground are then dropped. The census prints the clip's reports by source type before
+  any gating, what each gate removed, and what the time window left out. A TIS-B report on top of a
+  radar-only update is not a candidate. `--from` and `--to` restrict both sides to a time of the UTC day
+  (the ADS-B side padded by the interpolation gap and the placebo shift of 60 s, across midnight too); a window
+  outside 0 to 86400 s, or a non-finite bound, is refused. The STDDS and ADS-B time spans are printed, and
+  a run whose spans do not overlap (a wrong day or clip) exits 2.
+- **OA-CEN-014** The candidate search is exact at any latitude to 85 degrees and across the antimeridian:
+  each segment is stored in every grid cell its bounding box touches after widening by the largest gate
+  (in longitude at the box's highest latitude), longitude cells wrap, interpolation and the east difference
+  take the short way round. Distances are in the tangent plane at the interpolated ADS-B point. Segments and updates above 85 degrees, and segments faster than 600 m/s, are
+  counted and not used.
+- **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
+  any indexed ADS-B aircraft within 30 NM at their time.
+- **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, and exact
+  duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
+- **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
+  shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
+  distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
+  real one is printed as an estimate of the chance share. A placebo lookup at a window's edge finds its
+  shifted ADS-B.
+- **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
+  ADS-B aircraft and the distinct STDDS track segments with a match, and the distribution over track
+  segments of each segment's median difference (segments with 3 or more matches). A segment is a run of
+  one track number that a restart of the interval state (a gap over 120 s, an update flagged new, a resync)
+  has not cut, so a recycled track number is not one aircraft; along and cross metres, like the time,
+  leave out aircraft below 100 kt; a value is kept inside its histogram range after rounding to f32; the along-track-as-time figure leaves out aircraft
+  below 100 kt; a class or facility cell with fewer than 30 matches prints "n<30" for a flag instead of
+  medians; `--gate-nm` and `--gate-ft` without `--adsb` are refused; the histogram's upper edge is
+  inclusive.
+- **OA-CEN-019** Track state is kept in step: a change of flag is counted only where an interval across it
+  exists (so changes equal the changes by direction); a backwards update changes neither the time nor the
+  flag of the track, an absent-flag update obeys the same backwards and reset rules, 3 backwards updates in
+  a row restart the track (counted), and an update flagged new on a track number with state starts a new
+  segment (counted).
+- **OA-CEN-020** Three checks against 4 GB. Each is an estimate under stated assumptions, not a guaranteed
+  bound. (1) Before the ADS-B index is built: 16 bytes for every clip report, and for each report the padded
+  window keeps, its point and an assumed 8 cell entries and 2 new grid cells (72 bytes each), all with 2x
+  growth slack; a run past it is refused (exit 2) before the index is allocated. The cell assumption fails for
+  a clip of faster or sparser aircraft or a larger gate. (2) After it: the index's own estimate. (3) While
+  reading: what the census holds (interval lists, cross-check records, segments, with 2x Vec slack) and the
+  copies that `finish` makes of each match, address match, placebo value and segment (three accumulators:
+  all, class, facility). Not counted: the loaded clip columns, the read buffers, the quality-gate state
+  and the output. Updates left out by the time window are counted. A test sets the budget through
+  `OA_STDDS_CENSUS_BUDGET_BYTES`, which exists for tests only.
+
+
+## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
+- **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+  the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
+- **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
+  path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
+  is inside, resolves into or names (an entry's components in a row, as given or resolved) a sealed entry, if it is a
+  directory that holds one, or if a link on it cannot be resolved. The shared guard owns the path rule only; keeping a
+  sealed day's rows out of a file that also holds unsealed rows is a content rule that needs the tool's own parser.
+- **OA-SEAL-003** A tool that walks a directory checks every file it opens, through the guard's opener, not only its
+  arguments.
+- **OA-SEAL-004** Nothing switches the guard off: it reads no environment variable, flag or file, and an unknown option of
+  the checker is a usage error.
+- **OA-SEAL-005** Every tool that reads recordings refuses a sealed input or output path with a nonzero exit, a message that
+  names the rule, and nothing written: oa-compass, oa-encounter, oa-shadow, oa-track-run, oa-track-fusion, p002,
+  oa-replay-diff, validate_candidate.py, comparison_reference.py, comparison_evaluator.py, run_comparison.py,
+  track_set_score.py, replay_compare.sh and p002_build.sh.
+- **OA-SEAL-006** Every bin and example target of the workspace, found from the manifests and the source layout, uses the
+  sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
+  that does not exist, and a listed target that uses the guard all fail the test.
+- **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
+  link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
+  guard before they stat a listed entry, and every guarded opener is this one function.
+- **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
+  refuse anything else, and the same inputs are refused by both.
+- **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals the name prefixes `day2*`, `day3*` and
+  `day4*` (hold-out days A, B and C of protocol P-001, and any renamed or partial copy beside them such as `day2.tmp`) and
+  `runs*` (the recorder's run log, which covers every day); `day1` (the tune day, usable freely) and `bin` are not sealed,
+  so a path below them is accepted. The recorder (`bin/run-days.sh`) writes only `day1` to `day4` and `runs.log` at the
+  top of the folder. The folder itself holds sealed entries and is refused as a holding directory (OA-SEAL-002), like
+  `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
+  `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
+  `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).

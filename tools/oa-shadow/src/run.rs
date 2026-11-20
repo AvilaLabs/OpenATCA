@@ -9,8 +9,6 @@ use std::fs;
 
 use oa_adsb::{Reports, F_GROUND, F_STALE, NONE_U16, ZAU_BOX};
 use oa_bench::adsb_truth;
-use std::io;
-use std::rc::Rc;
 
 use oa_bench::input::{file_opener, load_adsb_with, load_with, FeedInput, Opener};
 use oa_bench::legacy::{NONE, NO_ALT};
@@ -135,14 +133,11 @@ pub fn load_notes(c: &oa_bench::legacy::Counts) -> Vec<String> {
     v
 }
 
-/// The opener every input file goes through: the path is canonicalised and a sealed target is
-/// refused before the file is opened, so a link inside an unsealed directory is caught too.
+/// The opener every input file goes through: the file opener of `oa-bench` is itself guarded
+/// (`oa-sealed`: checked before the open and again on the opened file), so a link inside an
+/// unsealed directory is caught too.
 pub fn guarded_opener() -> Opener {
-    let inner = file_opener();
-    Rc::new(move |p: &std::path::Path| {
-        refuse_sealed(p).map_err(io::Error::other)?;
-        inner(p)
-    })
+    file_opener()
 }
 
 /// The ERAM flights of the SFDPS recording in the clip box, sorted by GUFI, with the input digest
@@ -239,6 +234,9 @@ pub fn run(args: &Args) -> Result<String, String> {
         refuse_sealed(p)?;
     }
     let open = guarded_opener();
+    // The files of the SFDPS folder are guarded as they are listed, before anything is created.
+    oa_bench::input::list_inputs(&args.sfdps_dir)
+        .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let mut header: Vec<String> = Vec::new();
 
@@ -447,6 +445,9 @@ pub fn run_screen(args: &Args) -> Result<String, String> {
         refuse_sealed(p)?;
     }
     let open = guarded_opener();
+    // The files of the SFDPS folder are guarded as they are listed, before anything is created.
+    oa_bench::input::list_inputs(&args.sfdps_dir)
+        .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let mut header: Vec<String> = Vec::new();
     let mut eram = load_eram(args, &open, &mut header)?;

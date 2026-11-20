@@ -1,6 +1,6 @@
 # M5 — Safety nets: design
 
-Status: approved by Connor 2026-11-19. Built: step 1 (net state, inhibition objects and their
+Status: approved by Connor 2026-11-19, confirmed 2026-11-20. Built: step 1 (net state, inhibition objects and their
 display indications, `oa-safety` and `oa-display`) and step 2 (the close-encounter record,
 `oa-encounter` and `tools/oa-encounter`). The rest is not built yet.
 

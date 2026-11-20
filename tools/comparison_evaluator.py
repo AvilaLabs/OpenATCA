@@ -9,6 +9,11 @@ import os
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+# The sealed hold-out guard (tools/sealed_guard.py); the script's own directory may not be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
 
 MAX_FILE_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 2_000_000
@@ -45,10 +50,11 @@ def _parse_float(text):
     return float(text)
 
 def _csv(path, kind):
+    sealed_guard.refuse(path)
     try:
         if __import__('os').path.getsize(path) > MAX_FILE_BYTES:
             raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
-        with open(path, newline="", encoding="utf-8-sig") as f:
+        with sealed_guard.open_read(path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f, strict=True)
             if reader.fieldnames is None or len(reader.fieldnames) != len(set(reader.fieldnames)):
                 raise EvaluationError(f"{path}: missing or duplicate header")
@@ -129,9 +135,10 @@ def _stats_core(values):
     return {"count": len(values), "rms": rms, "p95": pct(.95), "p99": pct(.99), "mean": mean}
 
 def _sha256(path):
+    sealed_guard.refuse(path)
     if os.path.getsize(path)>MAX_FILE_BYTES: raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
     digest=hashlib.sha256()
-    with open(path,"rb") as f:
+    with sealed_guard.open_read(path,"rb") as f:
         for block in iter(lambda:f.read(65536),b""): digest.update(block)
     return digest.hexdigest()
 
@@ -194,8 +201,9 @@ def _profile_gate(role,init_ns,coast_limit_ns,epochs_complete,coverage,minimum=N
     result["status"]="nominal_profile_pass"; return result
 
 def _read_json(path):
+    sealed_guard.refuse(path)
     if os.path.getsize(path)>MAX_FILE_BYTES: raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
-    with open(path,encoding="utf-8") as f: return _loads_json(f.read())
+    with sealed_guard.open_read(path,"r",encoding="utf-8") as f: return _loads_json(f.read())
 
 def _loads_json(text):
     def unique(pairs):
@@ -209,9 +217,10 @@ def _loads_json(text):
 def _frozen_protocol(path=None):
     """Return the canonical protocol only if its bytes hash to the pinned v1 digest, else None."""
     path=path or CANONICAL_PROTOCOL
+    sealed_guard.refuse(path)
     try:
         if os.path.getsize(path)>MAX_FILE_BYTES: return None
-        with open(path,"rb") as f: raw=f.read()
+        with sealed_guard.open_read(path,"rb") as f: raw=f.read()
         if hashlib.sha256(raw).hexdigest()!=PROTOCOL_V1_SHA256: return None
         data=_loads_json(raw.decode("utf-8"))
         return data if isinstance(data,dict) else None
@@ -257,7 +266,7 @@ def _ledger_throughput(ledger):
 def _validate_identity_binding(path, truth_keys, output_rows):
     fields=["system","scenario_id","flight_id","score_ns","track_id","truth_flight_id"]
     try:
-        with open(path,newline="",encoding="utf-8-sig") as f:
+        with sealed_guard.open_read(path,"r",newline="",encoding="utf-8-sig") as f:
             reader=csv.DictReader(f,strict=True)
             if reader.fieldnames!=fields: return False,"identity_binding_schema_mismatch"
             seen=set(); track_truth={}; bound={"candidate":set(),"baseline":set()}
@@ -519,10 +528,11 @@ def main(argv=None):
     p.add_argument("--metadata",required=True); p.add_argument("--out",required=True)
     a=p.parse_args(argv)
     try:
+        sealed_guard.refuse(a.truth,a.measurements,a.candidate,a.baseline,a.metadata,a.out)
         meta=_read_json(a.metadata)
         result=evaluate(a.truth,a.measurements,a.candidate,a.baseline,meta)
         with open(a.out,"w",encoding="utf-8") as f: json.dump(result,f,indent=2,sort_keys=True); f.write("\n")
-    except (EvaluationError,OSError,ValueError,json.JSONDecodeError) as exc:
+    except (sealed_guard.SealedError,EvaluationError,OSError,ValueError,json.JSONDecodeError) as exc:
         print(f"comparison evaluator: {exc}",file=sys.stderr); return 2
     return 0
 if __name__=="__main__": raise SystemExit(main())

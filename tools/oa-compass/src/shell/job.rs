@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use oa_bench::input::{load, FeedInput};
+use oa_bench::input::{load_with, FeedInput};
 use oa_bench::legacy::Legacy;
 use oa_replay::FeedKind;
 
@@ -93,6 +93,7 @@ pub fn run_job(
     if let Some(EramSource::Dir(p)) = &job.sfdps {
         refuse_holdout(p)?;
     }
+    refuse_holdout(&out)?;
     check_out(&out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(&out, &mut run_dirs)?;
@@ -327,10 +328,13 @@ fn export_all(
         let refs = job.adsb.is_some().then_some(positions.as_slice());
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
-                let loaded = load(&[FeedInput {
-                    feed: FeedKind::Sfdps,
-                    dir: dir.clone(),
-                }])
+                let loaded = load_with(
+                    &[FeedInput {
+                        feed: FeedKind::Sfdps,
+                        dir: dir.clone(),
+                    }],
+                    &super::guard::guarded_opener(),
+                )
                 .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
                 log(format!(
                     "ERAM loaded at {:.1} s",
