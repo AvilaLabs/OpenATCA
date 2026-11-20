@@ -5767,21 +5767,38 @@ configuration with no default; the crate's tests use synthetic values.
   through `main`, a usage error, a refusal and a failed run included (with N the count, 0 when nothing was
   read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
   is being read still reports the rows dropped up to that point.
-- **OA-CA-033** A candidate pair is tested by the flat-earth separation only while that is a superset test
-  for the pair's own radius and latitudes (the larger tangent of the two latitudes times the radius at
-  most 0.02 of 6,356,752 m); otherwise by the chord between the two positions on the sphere, which has no
-  latitude limit and is never longer than the arc, and the pair is counted (`pairs_chord`, not a shortfall).
-  The cell search finds every pair within its radius up to 85 degrees of latitude, either hemisphere;
-  rows above 85 degrees are used, counted (`rows_high_lat`) and degrade the net (`InputMissing`). A 95 %
-  radius that is unusable or above the cap is held to the cap and counted (`r95_clamped`) as before; a
-  radius at the cap does not degrade the net. The largest radius of a cycle no longer limits the latitude
-  of any other pair.
-- **OA-CA-034** Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite
-  and not negative (`ca-chord-d2`, 5.6 s). Tested, not proved: the chord is symmetric and zero for one
-  point; the flat test's validity only narrows as a tangent or the radius grows (a proof of it did not finish
-  in ten minutes); the chord is never longer than the arc; where the flat test is valid it accepts every pair
-  the exact projection accepts (deterministic pairs at every latitude, `grid::tests`). The trigonometry is
-  outside what the harnesses reach.
+- **OA-CA-033** The prefilter never rejects a pair that the exact test would accept, at any latitude
+  up to 85 degrees, in either hemisphere and across the antimeridian. Each pair is judged on its own
+  radius and latitudes, so one fast or uncertain track no longer limits the latitude of every other
+  pair:
+  - A pair uses the flat-earth separation only while that over-estimates the distance by less than
+    the margin, that is while the larger tangent of the two latitudes times the pair's radius is at
+    most 0.02 of 6,356,752 m.
+  - Otherwise it uses the chord between the two positions on a sphere of 6,356,752 m. That sphere is
+    no larger than the Gaussian radius the exact test uses anywhere, so the chord is never longer than
+    the exact distance. Such pairs are counted (`pairs_chord`); they are not a shortfall.
+  - Rows above 85 degrees are still evaluated, but are counted (`rows_high_lat`) and degrade the net
+    (`InputMissing`), because the cell search is shown complete only up to 85 degrees.
+  - A 95 % radius that is unusable or above `r95_cap_m` is held to the cap and counted (`r95_clamped`),
+    and degrades the net, as before; a radius exactly at the cap does not.
+  - The development configuration's cap is 100 km. On the national hour of 19 November 2026 it bound
+    9 rows in 3,601 cycles, against 26,872 at 20 km.
+- **OA-CA-034** What is proved and what is tested for OA-CA-033:
+  - Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite and
+    not negative (`ca-chord-d2`). That is a small property; the trigonometry is outside what the
+    harnesses reach.
+  - Tested, not proved, by deterministic random pairs in `grid::tests`:
+    - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to
+      85 degrees and 400 km apart, the smallest ratio being 1.000000068;
+    - where the flat test is valid it accepts every pair the exact projection accepts;
+    - the chord is symmetric and zero for one point;
+    - the flat test's validity only narrows as a tangent or the radius grows. A proof of this did not
+      finish in ten minutes.
+  - Tested in `tests/ca.rs` through the full grid and cycle against an exact oracle:
+    - a pair at its reach at the tangent point, up to 85 degrees, both hemispheres, three band sizes;
+    - pairs across ±180 degrees at 60, 75 and 84.9 degrees, found at 0.99 of their reach and not at
+      1.05.
+  - The cell-search reach is shown numerically and by these tests, not by an analytic proof.
 
 ## SWIM STDDS terminal data (oa-stdds)
 

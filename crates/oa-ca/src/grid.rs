@@ -32,9 +32,10 @@ pub(crate) const R_MIN_M: f64 = 6_356_752.0;
 /// The flat test is a superset test for a pair while `tan(latitude) * radius / R_MIN_M` is at most
 /// this (the error of its east-west scale across the pair, kept inside [`CHEAP_MARGIN`]).
 pub(crate) const FLAT_TOL: f64 = 0.02;
-/// Latitude above which a row is not evaluated, degrees: the cell search is shown to reach every
-/// pair within the radius up to it (`tests/ca.rs`, the pair at the tangent point), and the
-/// windows of longitude it uses are not above it.
+/// Latitude, degrees, up to which the cell search is shown to find every pair within its radius
+/// (`tests/ca.rs`, the pair at the tangent point). A row above it is still searched and
+/// evaluated, but counted in `rows_high_lat` and degrades the net, because the search is not
+/// shown complete there.
 pub(crate) const MAX_LAT_DEG: f64 = 85.0;
 
 /// `(cells of longitude per band, first cell number per band, cosine of the band's edge nearest
