@@ -5299,7 +5299,7 @@ scope.
   `git diff --name-only <candidate> <frozen>` is exactly `crates/oa-sealed/sealed_paths.txt`; both commits are
   printed.
 - **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` to `.partial` names, flushes them and renames
-  both, only if neither final name exists; otherwise it refuses and writes nothing; a leftover `.partial` is
+  both (after the ledger line of a hold-out run, OA-TRK-399), only if neither final name exists; otherwise it refuses and writes nothing; a leftover `.partial` is
   reported. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
 - **OA-TRK-396** `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond or whole-second ISO times)
   removes every grid sample inside any window for all three systems alike, before any metric; each window and
@@ -5310,9 +5310,13 @@ scope.
 - **OA-TRK-398** A hold-out run takes its excluded windows only from `--damage-report` (an `oa-feed-gaps`
   report: the `window:` line, the `exclude <iso> <iso>` lines and the verdict line `CLEAN`), and refuses
   `--exclude-window`, a report that is not CLEAN, a window under 600 s, windows over 3,600 s in all, and a
-  report whose window is not the whole UTC day of the clip.
+  report whose window is not the scored window: it must lie inside the clip's UTC day and match S = [max(day
+  start, first SFDPS message), min(day end, last SFDPS message, last clip report)] to within 60 s at each end
+  (both windows are printed on a refusal). The parser is tested on reports printed by the tool itself.
 - **OA-TRK-399** Every run needs `--ledger <file>` and is refused when the clip's SHA-256 is in it; a hold-out
-  run appends one line (clip SHA-256, scored commit, candidate commit, UTC time) before it writes any result.
+  run appends one line (clip SHA-256, scored commit, candidate commit, UTC time) after both `.partial` files are
+  written and flushed and before either is renamed; if the append fails the partials are deleted and the run
+  fails, so a ledger line exists only when both result files were written.
 - **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
   the three-way set.
 ## Shadow comparator (oa-shadow)

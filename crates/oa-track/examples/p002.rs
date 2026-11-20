@@ -2021,15 +2021,35 @@ fn write_partial(path: &Path, text: &str) -> Result<(), String> {
     f.sync_all().map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// P-008 and P-006 section 7: both files are written to `.partial` names and flushed, then
-/// renamed, so a run that stops leaves no result under the final name. Neither final name may
-/// exist (checked again just before the renames).
-fn publish_outputs(out_dir: &Path, csv: &str, txt: &str) -> Result<(), String> {
+/// P-008 and P-006 section 7: both files are written to `.partial` names and flushed, then the
+/// ledger line (a hold-out run's) is appended and flushed, then both are renamed. A run that
+/// stops leaves no result under a final name, and a ledger line is there only when both partials
+/// were written. When the ledger cannot be appended to, the partials are deleted and the run
+/// fails. Neither final name may exist (checked again after the partials are written).
+fn publish_outputs(
+    out_dir: &Path,
+    csv: &str,
+    txt: &str,
+    ledger: Option<(&Path, &str)>,
+) -> Result<(), String> {
     outputs_free(out_dir)?;
     let part = |f: &str| out_dir.join(format!("{f}{PARTIAL}"));
-    write_partial(&part("samples.csv"), csv)?;
-    write_partial(&part("p002.txt"), txt)?;
-    outputs_free(out_dir)?;
+    let drop_partials = || {
+        for f in OUTPUT_FILES {
+            let _ = fs::remove_file(part(f));
+        }
+    };
+    let staged = write_partial(&part("samples.csv"), csv)
+        .and_then(|()| write_partial(&part("p002.txt"), txt))
+        .and_then(|()| outputs_free(out_dir).map(|_| ()))
+        .and_then(|()| match ledger {
+            Some((l, line)) => ledger_append(l, line),
+            None => Ok(()),
+        });
+    if let Err(e) = staged {
+        drop_partials();
+        return Err(e);
+    }
     for f in OUTPUT_FILES {
         fs::rename(part(f), out_dir.join(f)).map_err(|e| format!("{f}: {e}"))?;
     }
@@ -2125,8 +2145,9 @@ struct DamageReport {
 /// Reads an `oa-feed-gaps` report. The lines read, and no others, are:
 /// `window: <iso> to <iso> (<seconds> s)` (exactly one), `exclude <iso> <iso>` (any number) and
 /// the verdict, the single line `CLEAN`; a line starting `DAMAGED:` refuses. Refused: a verdict
-/// that is not `CLEAN`, a window under 600 s, windows totalling over 3,600 s, and a report
-/// window that is not one whole UTC day (00:00:00 to 23:59:59 or the end of that second).
+/// that is not `CLEAN`, a window under 600 s, windows totalling over 3,600 s, and a window
+/// outside the report's. That the report's window is the scored day's is checked against the
+/// recordings by [`damage_matches_clip`].
 fn parse_damage_report(text: &str, sha256: &str) -> Result<DamageReport, String> {
     let mut window: Option<(i64, i64)> = None;
     let mut windows: Vec<Window> = Vec::new();
@@ -2161,15 +2182,6 @@ fn parse_damage_report(text: &str, sha256: &str) -> Result<DamageReport, String>
     let Some((from_ns, to_ns)) = window else {
         return Err("damage report: no window line".into());
     };
-    let day = 86_400_000_000_000;
-    if from_ns.rem_euclid(day) != 0
-        || to_ns - from_ns < day - 1_000_000_000
-        || to_ns - from_ns >= day
-    {
-        return Err(format!(
-            "damage report: its window is not one whole UTC day (from {from_ns} ns to {to_ns} ns)"
-        ));
-    }
     let mut total = 0i64;
     for w in &windows {
         let len = w.to_ns - w.from_ns;
@@ -2202,16 +2214,93 @@ fn parse_damage_report(text: &str, sha256: &str) -> Result<DamageReport, String>
     })
 }
 
-/// The clip's report times (Unix ns) must lie inside the report's window: the day the report
-/// checked is the day being scored.
-fn damage_matches_clip(d: &DamageReport, first_ns: i64, last_ns: i64) -> Result<(), String> {
-    if first_ns < d.from_ns || last_ns > d.to_ns {
+/// How far each end of the report's window may lie from the scored window S, ns (P-008).
+const WINDOW_SLACK_NS: i64 = 60_000_000_000;
+/// One UTC day, ns.
+const DAY_NS: i64 = 86_400_000_000_000;
+
+/// The scored window S: from the later of the UTC day's start and the first SFDPS message, to the
+/// earliest of the day's end, the last SFDPS message and the last clip report. The day is the
+/// clip's: both its first and its last report must fall in one UTC day.
+fn scored_window(
+    clip_first: i64,
+    clip_last: i64,
+    sfdps_first: i64,
+    sfdps_last: i64,
+) -> Result<(i64, i64), String> {
+    let day = clip_first.div_euclid(DAY_NS) * DAY_NS;
+    if clip_last >= day + DAY_NS {
         return Err(format!(
-            "the damage report's window ({} ns to {} ns) is not the scored day: the clip's reports run from {first_ns} ns to {last_ns} ns",
-            d.from_ns, d.to_ns
+            "the clip's reports run from {} to {}: not one UTC day",
+            iso_utc(clip_first.div_euclid(1_000_000_000)),
+            iso_utc(clip_last.div_euclid(1_000_000_000))
+        ));
+    }
+    Ok((
+        day.max(sfdps_first),
+        (day + DAY_NS).min(sfdps_last).min(clip_last),
+    ))
+}
+
+/// The report's window must lie inside the clip's UTC day and match the scored window S to within
+/// 60 s at each end (the day the report checked is the window being scored). Refused, both
+/// windows are printed.
+fn damage_matches_clip(
+    d: &DamageReport,
+    clip_first: i64,
+    clip_last: i64,
+    sfdps_first: i64,
+    sfdps_last: i64,
+) -> Result<(), String> {
+    let (s_from, s_to) = scored_window(clip_first, clip_last, sfdps_first, sfdps_last)?;
+    let day = clip_first.div_euclid(DAY_NS) * DAY_NS;
+    let show = |a: i64, b: i64| {
+        format!(
+            "{} to {}",
+            iso_utc(a.div_euclid(1_000_000_000)),
+            iso_utc(b.div_euclid(1_000_000_000))
+        )
+    };
+    if d.from_ns < day
+        || d.to_ns > day + DAY_NS
+        || (d.from_ns - s_from).abs() > WINDOW_SLACK_NS
+        || (d.to_ns - s_to).abs() > WINDOW_SLACK_NS
+    {
+        return Err(format!(
+            "the damage report's window ({}) is not the scored window ({}): it must lie inside the clip's UTC day and match the scored window to within 60 s at each end",
+            show(d.from_ns, d.to_ns),
+            show(s_from, s_to)
         ));
     }
     Ok(())
+}
+
+/// The first and last receive time of the SFDPS messages in `dir`, Unix ns (each file opened
+/// through `open`, which checks the sealed list).
+fn sfdps_span(dir: &Path, open: &oa_bench::input::Opener) -> Result<(i64, i64), String> {
+    let (_, files) = oa_bench::input::list_inputs(dir).map_err(|e| e.to_string())?;
+    let mut it = files.into_iter();
+    let open = open.clone();
+    let spec = oa_replay::StreamSpec {
+        feed: FeedKind::Sfdps,
+        open: Box::new(move || {
+            let p = it.next()?;
+            Some(open(&p))
+        }),
+    };
+    let (mut first, mut last) = (i64::MAX, i64::MIN);
+    let (_, end) = oa_replay::merge_counted(vec![spec], 1 << 16, &mut |m| {
+        if m.kind == oa_feed::Kind::Message {
+            first = first.min(m.recv_ns);
+            last = last.max(m.recv_ns);
+        }
+        Ok(())
+    });
+    end.map_err(|e| e.to_string())?;
+    if first > last {
+        return Err(format!("{}: no SFDPS message", dir.display()));
+    }
+    Ok((first, last))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3020,14 +3109,19 @@ fn run(
             ledger.display()
         ));
     }
-    // P-008 section 2: the damage report is that of the day being scored.
+    // P-008 section 2: the damage report is that of the window being scored.
     if let Some(d) = damage {
         let t = &clip.reports.time_ns;
         let (first, last) = (
             t.iter().copied().min().unwrap_or(i64::MAX),
             t.iter().copied().max().unwrap_or(i64::MIN),
         );
-        damage_matches_clip(d, first, last)?;
+        let guard: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+            oa_sealed::refuse_io(p)?;
+            oa_bench::input::file_opener()(p)
+        });
+        let (s_first, s_last) = sfdps_span(sfdps, &guard)?;
+        damage_matches_clip(d, first, last, s_first, s_last)?;
     }
     let (clip_bad_frames, clip_dropped_records) = (clip.bad_frames, clip.dropped_records);
     let (set_a, set_b, split) = split_reports(&clip.reports);
@@ -3991,16 +4085,16 @@ fn run(
         if mode.holdout { "hold-out" } else { "non-hold-out" }
     );
 
-    // P-008 section 5: the ledger line is written before any result, and a clip already in the
-    // ledger was refused above.
-    if mode.holdout {
+    // P-008 section 5: a hold-out run's ledger line goes in after both partial files are written
+    // and before either is renamed; a clip already in the ledger was refused above.
+    let line = mode.holdout.then(|| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        ledger_append(ledger, &ledger_line(&clip_hash.sha256, commits, now))?;
-    }
+        ledger_line(&clip_hash.sha256, commits, now)
+    });
     // Create-new via `.partial` names, flushed, then renamed (P-006 section 7, P-008).
-    publish_outputs(out_dir, &csv, &o)?;
+    publish_outputs(out_dir, &csv, &o, line.as_deref().map(|l| (ledger, l)))?;
     Ok(o)
 }
 
@@ -5229,18 +5323,117 @@ mod tests {
         assert!(e.contains("over 3,600 s"), "{e}");
         let outside = "exclude 2026-11-20T00:00:00.000000000Z 2026-11-20T00:20:00.000000000Z\n";
         assert!(parse_damage_report(&format!("{head}{outside}CLEAN\n"), "x").is_err());
-        // A report window that is not one whole UTC day.
-        let part = ok.replace("T00:00:00.000000000Z to", "T00:00:01.000000000Z to");
-        assert!(parse_damage_report(&part, "x")
-            .unwrap_err()
-            .contains("whole UTC day"));
-        let short = ok.replace("T23:59:59.000000000Z (86399", "T12:00:00.000000000Z (43200");
-        assert!(parse_damage_report(&short, "x").is_err());
-        // The clip must lie in the report's window.
-        let day0 = parse_iso_ns("2026-11-19T00:00:00Z").unwrap();
-        assert!(damage_matches_clip(&d, day0 + 1, day0 + 86_000_000_000_000).is_ok());
-        assert!(damage_matches_clip(&d, day0 - 1, day0 + 5).is_err());
-        assert!(damage_matches_clip(&d, day0, day0 + 86_400_000_000_000).is_err());
+    }
+
+    /// Unix ns of `hh:mm:ss` on 2026-11-15, the development day.
+    fn at(hms: &str) -> i64 {
+        parse_iso_ns(&format!("2026-11-15T{hms}Z")).unwrap()
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn the_report_window_must_match_the_scored_window_not_a_whole_day() {
+        let report = |from: &str, to: &str| DamageReport {
+            sha256: "x".into(),
+            from_ns: at(from),
+            to_ns: if to == "24:00:00" {
+                at("00:00:00") + DAY_NS
+            } else {
+                at(to)
+            },
+            windows: vec![],
+            total_ns: 0,
+        };
+        // The clip runs the whole day; the SFDPS run starts at 00:17:04Z and ends at 23:59:40Z.
+        let (cf, cl) = (at("00:00:03"), at("23:59:50"));
+        let (sf, sl) = (at("00:17:04"), at("23:59:40"));
+        assert_eq!(
+            scored_window(cf, cl, sf, sl),
+            Ok((at("00:17:04"), at("23:59:40")))
+        );
+        // The day's start and end bound S when the recordings run past them.
+        assert_eq!(
+            scored_window(
+                at("01:00:00"),
+                cl,
+                at("00:00:00") - 5,
+                at("00:00:00") + DAY_NS + 5
+            ),
+            Ok((at("00:00:00"), cl))
+        );
+        // 00:17:00Z to 23:59:59Z, on an SFDPS run starting 00:17:04Z: accepted.
+        let ok = report("00:17:00", "23:59:59");
+        assert_eq!(damage_matches_clip(&ok, cf, cl, sf, sl), Ok(()));
+        // A report starting at 02:00Z, two hours late: refused, both windows printed.
+        let e = damage_matches_clip(&report("02:00:00", "23:59:59"), cf, cl, sf, sl).unwrap_err();
+        assert!(
+            e.contains("2026-11-15T02:00:00Z to 2026-11-15T23:59:59Z")
+                && e.contains("2026-11-15T00:17:04Z to 2026-11-15T23:59:40Z"),
+            "{e}"
+        );
+        // A report window ending exactly at the day's end is inside the day; one reaching into
+        // the next day is refused, even when the recordings run on past midnight.
+        assert_eq!(
+            damage_matches_clip(&report("00:17:00", "24:00:00"), cf, cl, sf, sl),
+            Ok(())
+        );
+        let mut next = report("00:17:00", "23:59:59");
+        next.to_ns = at("00:00:00") + DAY_NS + 30_000_000_000;
+        let e = damage_matches_clip(&next, cf, cl, sf, at("00:00:00") + DAY_NS + 20_000_000_000)
+            .unwrap_err();
+        assert!(e.contains("2026-11-16T00:00:30Z"), "{e}");
+        // 61 s off at either end is refused; 60 s is not.
+        let mut r = report("00:17:00", "23:59:59");
+        r.from_ns = sf - 61_000_000_000;
+        assert!(damage_matches_clip(&r, cf, cl, sf, sl).is_err());
+        r.from_ns = sf - 60_000_000_000;
+        assert_eq!(damage_matches_clip(&r, cf, cl, sf, sl), Ok(()));
+        r.to_ns = sl - 61_000_000_000;
+        assert!(damage_matches_clip(&r, cf, cl, sf, sl).is_err());
+        // A clip that is not one UTC day has no scored window.
+        assert!(scored_window(cf, at("00:00:00") + DAY_NS, sf, sl).is_err());
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn the_reports_the_tool_prints_are_read_exactly() {
+        // Printed by oa-feed-gaps (commit eee7e93) on small synthetic recordings: an SFDPS file
+        // from 00:17:04Z and an ADS-B clip, a message every 300 s with a 1,000 s hole, window
+        // 00:17:00Z to 23:59:59Z. In the second the SFDPS recording stops at 11:57:04Z.
+        let clean = include_str!("fixtures/oa-feed-gaps-clean.txt");
+        let damaged = include_str!("fixtures/oa-feed-gaps-damaged.txt");
+        let d = parse_damage_report(clean, "sha").unwrap();
+        assert_eq!(
+            (d.from_ns, d.to_ns),
+            (at("00:17:00"), at("23:59:59")),
+            "window: line"
+        );
+        assert_eq!(d.windows.len(), 1, "exclude line");
+        assert_eq!(
+            (d.windows[0].from_ns, d.windows[0].to_ns),
+            (at("00:47:04"), at("01:12:04"))
+        );
+        assert_eq!(d.total_ns, 1_500_000_000_000);
+        // Its one verdict is the last line, CLEAN.
+        assert!(clean.ends_with("\nCLEAN\n") && !clean.contains("DAMAGED:"));
+        // The damaged report has two exclude lines and a DAMAGED: verdict, and is refused.
+        assert_eq!(damaged.matches("\nexclude ").count(), 2);
+        assert!(damaged.lines().last().unwrap().starts_with("DAMAGED: "));
+        let e = parse_damage_report(damaged, "sha").unwrap_err();
+        assert!(e.contains("not CLEAN") && e.contains("1 DAMAGED"), "{e}");
+        // Only the lines read count: the same report with the DAMAGED line cut off has no verdict.
+        let cut: String = damaged
+            .lines()
+            .filter(|l| !l.starts_with("DAMAGED:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(parse_damage_report(&cut, "sha").is_err());
+        // The window of the tool's report is the scored one of a run that began at 00:17:04Z.
+        let (cf, cl) = (at("00:17:04"), at("23:59:50"));
+        assert_eq!(
+            damage_matches_clip(&d, cf, cl, at("00:17:04"), at("23:59:40")),
+            Ok(())
+        );
     }
 
     // REQ: OA-TRK-399
@@ -5268,6 +5461,41 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // REQ: OA-TRK-399
+    #[test]
+    fn the_ledger_line_is_there_only_when_both_partials_were_written() {
+        let line = Some("clip1 f c 2026-11-19T00:00:00Z");
+        // Both written: the line is in, both files are renamed.
+        let d = scratch("order-ok");
+        let l = d.join("ledger.txt");
+        publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).unwrap();
+        assert_eq!(fs::read_to_string(&l).unwrap().lines().count(), 1);
+        assert!(d.join("samples.csv").exists() && d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+        // The second partial cannot be written (its name is a directory): no ledger line, the
+        // first partial is removed, nothing is under a final name.
+        let d = scratch("order-partial");
+        let l = d.join("ledger.txt");
+        fs::create_dir(d.join("p002.txt.partial")).unwrap();
+        assert!(publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).is_err());
+        assert!(!l.exists() && !d.join("samples.csv.partial").exists());
+        assert!(!d.join("samples.csv").exists() && !d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+        // The ledger cannot be appended to (its directory is not there): the partials are
+        // deleted, the run fails, nothing is under a final name.
+        let d = scratch("order-ledger");
+        let l = d.join("no-such-dir").join("ledger.txt");
+        let e = publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).unwrap_err();
+        assert!(e.contains("ledger"), "{e}");
+        for f in OUTPUT_FILES {
+            assert!(!d.join(f).exists() && !d.join(format!("{f}{PARTIAL}")).exists());
+        }
+        // Without a ledger line (not a hold-out run) the files are still published.
+        publish_outputs(&d, "csv", "txt", None).unwrap();
+        assert!(d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
     // REQ: OA-TRK-395
     #[test]
     fn outputs_are_written_to_partial_names_then_renamed_and_never_over_a_result() {
@@ -5276,12 +5504,12 @@ mod tests {
         // A leftover partial does not block a run, and is reported.
         fs::write(d.join("p002.txt.partial"), "old").unwrap();
         assert_eq!(outputs_free(&d).unwrap(), vec![d.join("p002.txt.partial")]);
-        publish_outputs(&d, "csv", "txt").unwrap();
+        publish_outputs(&d, "csv", "txt", None).unwrap();
         assert_eq!(fs::read_to_string(d.join("p002.txt")).unwrap(), "txt");
         assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
         assert!(!d.join("p002.txt.partial").exists() && !d.join("samples.csv.partial").exists());
         // A result under a final name refuses the run and nothing is written.
-        let e = publish_outputs(&d, "new", "new").unwrap_err();
+        let e = publish_outputs(&d, "new", "new", None).unwrap_err();
         assert!(e.contains("exists"), "{e}");
         assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
         assert!(!d.join("samples.csv.partial").exists());
