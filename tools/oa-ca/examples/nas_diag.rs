@@ -252,6 +252,7 @@ struct CaSide {
     last_overflow: u64,
     cfg: oa_ca::CaConfig,
     diag: Diag,
+    last_fresh: std::collections::HashMap<u32, i64>,
     /// One line per closed alert: hash, start, end, midpoint, flags (no addresses).
     alert_lines: Vec<String>,
 }
@@ -260,6 +261,11 @@ struct CaSide {
 #[derive(Default)]
 struct Diag {
     csv: String,
+    /// Raw 95 % radii above 10 km, metres, of every measured row.
+    big_r: Vec<u64>,
+    /// Per row above 20 km: coasting, uncertain, and seconds since the address last had a row that
+    /// was not coasting (None: none in the clip so far).
+    over20: Vec<(bool, bool, Option<u64>)>,
     /// Latitude of every row above the limit, 5-degree bins from 0.
     lat_hist: [u64; 19],
     lat_above_min: f64,
@@ -324,7 +330,7 @@ impl CaSide {
         self.alerts_n += self.alerts.items.len() as u64;
         for a in &self.alerts.items {
             self.alert_lines.push(format!(
-                "{:016x} {} {} {} {} {} {} {}",
+                "{:016x} {} {} {} {} {} {} {} {} {:016x}",
                 fnv(a.addr_a, a.addr_b, a.start_ns),
                 a.start_ns,
                 a.end_ns,
@@ -332,7 +338,9 @@ impl CaSide {
                 a.lon_e7,
                 a.flags,
                 a.ticks_conflict,
-                a.ticks_current
+                a.ticks_current,
+                a.h_eff_m,
+                fnv(a.addr_a, a.addr_b, 0)
             ));
         }
         alert_log_clear(&mut self.alerts);
@@ -366,6 +374,24 @@ impl CaSide {
     /// Returns the count of rows above the limit by this calculation.
     fn pre(&mut self, t: i64) -> u64 {
         let cap = self.cfg.r95_cap_m;
+        for o in &self.batch {
+            let fresh = o.flags & F_COAST == 0;
+            if fresh {
+                self.last_fresh.insert(o.addr, t);
+            }
+            let r = f64::from(o.r95_m);
+            if r.is_finite() && r > 10_000.0 {
+                self.diag.big_r.push(r as u64);
+                if r > 20_000.0 {
+                    let age = self.last_fresh.get(&o.addr).map(|&l| ((t - l) / NS) as u64);
+                    self.diag.over20.push((
+                        o.flags & F_COAST != 0,
+                        o.flags & F_UNCERTAIN != 0,
+                        age,
+                    ));
+                }
+            }
+        }
         let big_t = self.cfg.look_ahead_ns as f64 / 1e9;
         let (h_max, _) = oa_ca::volume_maxima(&self.cfg);
         let rows: Vec<(f64, f64, f64)> = self
@@ -593,6 +619,7 @@ fn replay(
                 cfg: set.ca,
                 diag: Diag::default(),
                 alert_lines: Vec::new(),
+                last_fresh: std::collections::HashMap::new(),
             })
         }
     };
@@ -818,9 +845,30 @@ fn diag_report(c: &mut CaSide, outs: &(Option<String>, Option<String>)) -> Resul
         "diag_rows_above_limit latitude min {:.2} max {:.2} deg; histogram by 5 deg of |lat| (from 0): {:?}",
         d.lat_above_min, d.lat_above_max, d.lat_hist
     );
+    d.big_r.sort_unstable();
+    println!(
+        "diag_r95_above_10km_all_rows count {} p50 {} p99 {} max {} m",
+        d.big_r.len(),
+        pctv(&d.big_r, 50.0),
+        pctv(&d.big_r, 99.0),
+        d.big_r.last().copied().unwrap_or(0)
+    );
+    let n20 = d.over20.len();
+    let coast = d.over20.iter().filter(|x| x.0).count();
+    let unc = d.over20.iter().filter(|x| x.1).count();
+    let none = d.over20.iter().filter(|x| x.2.is_none()).count();
+    let mut ages: Vec<u64> = d.over20.iter().filter_map(|x| x.2).collect();
+    ages.sort_unstable();
+    println!("diag_rows_above_20km count {n20} coasting {coast} uncertain {unc} neither {} no_fresh_row_in_clip {none} age_s_since_last_non_coasting_row p50 {} p90 {} p99 {} max {} ; ages_over_30s {} over_60s {}",
+        d.over20.iter().filter(|x| !x.0 && !x.1).count(), pctv(&ages, 50.0), pctv(&ages, 90.0), pctv(&ages, 99.0), ages.last().copied().unwrap_or(0),
+        ages.iter().filter(|&&a| a > 30).count(), ages.iter().filter(|&&a| a > 60).count());
     if let Some(p) = &outs.1 {
         c.alert_lines.sort();
         fs::write(p, c.alert_lines.join("\n") + "\n").map_err(|e| format!("{p}: {e}"))?;
     }
     Ok(())
+}
+
+fn pctv(v: &[u64], p: f64) -> u64 {
+    pct(v, p)
 }
