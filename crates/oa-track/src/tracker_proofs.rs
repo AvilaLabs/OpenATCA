@@ -1572,10 +1572,7 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
     );
     kani::cover!(decision_rejected == 1, "a deciding report was refused");
     kani::cover!(votes == 1, "a first report on the old path");
-    kani::cover!(
-        votes + decision_rejected == 0,
-        "too soon to decide"
-    );
+    kani::cover!(votes + decision_rejected == 0, "too soon to decide");
 }
 
 // REQ: OA-TRK-354
