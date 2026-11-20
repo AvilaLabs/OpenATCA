@@ -24,6 +24,7 @@ oa-truth = { path = "../oa-truth" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
 oa-math = { path = "../oa-math" }
+oa-sealed = { path = "../oa-sealed" }
 
 [[bin]]
 name = "oa-bench"

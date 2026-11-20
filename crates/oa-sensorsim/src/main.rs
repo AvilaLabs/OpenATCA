@@ -61,6 +61,9 @@ fn run() -> Result<(), String> {
     let (Some(clip), Some(out_dir)) = (args.first(), args.get(1)) else {
         return Err(usage().to_string());
     };
+    // The sealed hold-out guard: the clip and the output directory, before anything is opened.
+    oa_sealed::refuse(std::path::Path::new(clip))?;
+    oa_sealed::refuse(std::path::Path::new(out_dir))?;
     let site_kind = flag(&args, "--site").ok_or_else(|| usage().to_string())?;
     let (lat, lon, h_ft, period, name) = match site_kind.as_str() {
         "terminal" => (

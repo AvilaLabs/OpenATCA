@@ -798,7 +798,7 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
         // As given.
         let o = run(&file);
         assert_eq!(o.status.code(), Some(2), "{name}");
-        assert!(String::from_utf8_lossy(&o.stderr).contains("refused"));
+        assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
         // A link to the file, and a link to the folder, from outside `scds`.
         let outside = root.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
@@ -826,14 +826,10 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
     std::fs::create_dir_all(&ok).unwrap();
     std::fs::write(ok.join("a.oaf"), b"").unwrap();
     assert_eq!(run(&ok.join("a.oaf")).status.code(), Some(0));
-    // A sealed name anywhere in a component refuses, and so does a path that cannot be resolved.
-    let sub = root.join("copy-of-rec-20261119-x");
-    std::fs::create_dir_all(&sub).unwrap();
-    std::fs::write(sub.join("a.oaf"), b"").unwrap();
-    assert_eq!(run(&sub.join("a.oaf")).status.code(), Some(2));
+    // A path that cannot be opened exits 2 as well, naming the path.
     let o = run(&ok.join("none.oaf"));
     assert_eq!(o.status.code(), Some(2), "fail closed");
-    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot resolve"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unreadable"));
     std::fs::remove_dir_all(&root).unwrap();
 }
 

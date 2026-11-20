@@ -41,6 +41,7 @@ members = [
     "crates/oa-track",
     "crates/oa-encounter",
     "crates/oa-safety",
+    "crates/oa-sealed",
     "tools/oa-build-info",
     "tools/oa-encounter",
     "tools/oa-compass",

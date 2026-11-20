@@ -65,6 +65,12 @@ clip="${pos[2]}"
 outdir="${pos[3]}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The sealed hold-out data is never read: every path argument is checked (resolved, links followed)
+# before anything is read, built or created. Nothing switches this check off.
+sealed_args=("$clip" "$outdir")
+[ -z "$expect" ] || sealed_args+=("$expect")
+[ -z "${pos[4]:-}" ] || sealed_args+=("${pos[4]}")
+python3 -I "$here/sealed_guard.py" "${sealed_args[@]}" || exit 2
 # shellcheck source=replay_clean_env.sh
 . "$here/replay_clean_env.sh"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
@@ -90,8 +96,11 @@ commit_b="$(resolve "$spec_b")"
 # The digest format a commit will emit, read from its tree (no build): the overlay's canon.rs is
 # v2, a commit with canon.rs says its own header constant, a half-way commit is refused.
 digest_format() {
-    local c="$1" canon has_flag=0
-    git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null | grep -q -- '"--digest"' && has_flag=1
+    local c="$1" canon main_rs has_flag=0
+    # Not `git show | grep -q`: grep exits at the first match, git then dies of SIGPIPE, and under
+    # pipefail the pipeline fails, which read a commit that has the flag as one without it.
+    main_rs="$(git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null || true)"
+    case "$main_rs" in *'"--digest"'*) has_flag=1 ;; esac
     if canon="$(git -C "$repo" show "$c:crates/oa-track/src/canon.rs" 2>/dev/null)"; then
         [ "$has_flag" = 1 ] || { echo half-way; return; }
         case "$canon" in

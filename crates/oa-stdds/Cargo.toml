@@ -13,6 +13,7 @@ workspace = true
 oa-xml = { path = "../oa-xml" }
 
 [dev-dependencies]
+oa-sealed = { path = "../oa-sealed" }
 # Workspace crates, used by the summary example only to read recordings (not outside code).
 oa-feed = { path = "../oa-feed" }
 oa-zip = { path = "../oa-zip" }

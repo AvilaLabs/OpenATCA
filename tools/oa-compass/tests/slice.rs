@@ -435,3 +435,36 @@ fn a_slice_out_with_only_partial_files_says_an_earlier_run_was_interrupted() {
     );
     assert!(out.join("openatca.ast.partial").exists());
 }
+
+// REQ: OA-SEAL-005
+#[test]
+fn a_sidecar_or_source_file_that_links_into_sealed_data_is_refused_and_nothing_is_created() {
+    use std::os::unix::fs::symlink;
+    // A fake sealed tree; the links to it sit inside otherwise ordinary source folders.
+    let t = tmp("sealed-tree");
+    let sealed = t.join("scds/rec-20261119");
+    fs::create_dir_all(&sealed).unwrap();
+    fs::write(
+        sealed.join("side.txt"),
+        b"UTC date to give at import (UTC Day): 2026.11.15\n",
+    )
+    .unwrap();
+    for (case, victim) in [
+        ("readme", "README.txt"),
+        ("sources", "data_sources.json"),
+        ("ast", "adsb.ast"),
+    ] {
+        let inp = source(&format!("sealed-{case}"));
+        let out = tmp(&format!("sealed-out-{case}"));
+        fs::remove_dir_all(&out).unwrap();
+        fs::remove_file(inp.join(victim)).unwrap();
+        symlink(sealed.join("side.txt"), inp.join(victim)).unwrap();
+        let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+        assert!(e.to_string().contains("OA-SEAL-001"), "{case}: {e}");
+        assert!(!out.exists(), "{case}");
+    }
+    // The source folder itself, reached through a symlinked parent.
+    symlink(t.join("scds"), t.join("via")).unwrap();
+    let e = slice_dir(&t.join("via/rec-20261119"), &tmp("sealed-out-x"), 0, 128).unwrap_err();
+    assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
+}

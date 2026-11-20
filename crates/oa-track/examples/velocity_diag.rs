@@ -134,6 +134,13 @@ fn main() -> ExitCode {
         eprintln!("usage: velocity_diag --adsb <clip.oaf> --out <dir> [--bound-table] [--vel-sigma a,b,c,d] [--vel-scale x] [--no-vel-gate] [--vel-gate-chi2 x]");
         return ExitCode::from(2);
     };
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [&adsb, &out] {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("velocity_diag: {e}");
+            return ExitCode::from(2);
+        }
+    }
     match run(&adsb, &out, &opts) {
         Ok(text) => {
             print!("{text}");

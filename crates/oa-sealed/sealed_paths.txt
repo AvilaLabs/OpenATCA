@@ -1,0 +1,11 @@
+# The sealed hold-out data: one list, read by the Rust guard (tools/oa-sealed) and the Python guard
+# (tools/sealed_guard.py). A test checks that both parse this file to the same set.
+#
+# root  the data root; the production guard resolves every path against it.
+# seal  a path below the root, as components; a last component ending in `*` is a name prefix.
+#       The names are also matched anywhere in a path as consecutive components, so a copy of the
+#       data under another root is refused too.
+root /home/connoravila/Documents/Avila-Labs/openatca-data
+seal scds/rec-20261119
+seal scds/stdds-20261119-holdout
+seal scds/stdds-smoke-20261119*

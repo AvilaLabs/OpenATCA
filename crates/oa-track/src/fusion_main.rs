@@ -1069,6 +1069,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let out = out.ok_or_else(|| USAGE.to_string())?;
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    oa_sealed::refuse(&out)?;
+    if let Some(c) = &clip {
+        oa_sealed::refuse(std::path::Path::new(c))?;
+    }
     if opts.quick {
         opts.worlds = 1;
         opts.pair_seeds = 3;
@@ -1168,6 +1173,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e == USAGE => {
             eprintln!("{e}");
+            ExitCode::from(2)
+        }
+        // A sealed hold-out path is a usage refusal, like the other tools: exit 2.
+        Err(e) if e.contains("OA-SEAL-001") => {
+            eprintln!("oa-track-fusion: {e}");
             ExitCode::from(2)
         }
         Err(e) => {

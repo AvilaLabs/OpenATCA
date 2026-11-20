@@ -75,6 +75,16 @@ fn run() -> Result<u8, String> {
     if rows_a.is_some() != rows_b.is_some() {
         return Err("--rows-a and --rows-b go together".to_string());
     }
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in pos
+        .iter()
+        .chain(rows_a.iter())
+        .chain(rows_b.iter())
+        .chain(expect.iter())
+        .chain(summary.iter())
+    {
+        oa_sealed::refuse(p)?;
+    }
     let read = |p: &PathBuf| {
         load_digest_text(p)
             .and_then(|t| parse_digest(&t).map_err(|e| format!("{}: {e}", p.display())))
