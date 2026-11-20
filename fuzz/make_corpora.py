@@ -2,11 +2,29 @@
 refreshes the small synthetic seeds in fuzz/seeds/. Real data never goes into the repository.
 
     python3 -I fuzz/make_corpora.py
+    python3 -I fuzz/make_corpora.py --filter-existing DIR
+
+Recorded messages, frames and traces whose own times fall in a sealed window are not copied; the
+count is printed as `sealed-window rows dropped: N` once at exit. `--filter-existing DIR` applies the
+same tests to the files already in a corpus directory, deletes the ones that match and prints only
+the counts (files scanned, removed, kept).
 """
 import os, sys, struct, glob, gzip, io, zlib, tarfile, zipfile, random
 # The sealed hold-out guard (tools/sealed_guard.py); -I does not put the script's directory on the path.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import sealed_guard
+DROPS = sealed_guard.DropCounter()
+if sys.argv[1:2] == ['--filter-existing']:
+    if len(sys.argv) != 3:
+        print('usage: make_corpora.py --filter-existing DIR', file=sys.stderr); sys.exit(2)
+    try:
+        _s, _r, _k = sealed_guard.filter_corpus_dir(sys.argv[2], DROPS)
+    except (sealed_guard.SealedError, OSError) as e:
+        print('make_corpora: cannot filter:', type(e).__name__, file=sys.stderr); sys.exit(2)
+    print(f'files scanned: {_s}\nfiles removed: {_r}\nfiles kept: {_k}')
+    sys.exit(0)
+if len(sys.argv) != 1:
+    print('usage: make_corpora.py [--filter-existing DIR]', file=sys.stderr); sys.exit(2)
 D = os.environ['OPENATCA_DATA']
 R = D + '/raw'
 S = D + '/scds'
@@ -75,25 +93,35 @@ def msgs(pattern, n, maxsz=200_000):
         if os.path.getsize(f) <= maxsz:
             yield os.path.basename(f), rb(f); c += 1
             if c >= n: break
+def xml_msgs(pattern, n):
+    """msgs() without the messages that hold a time in a sealed window: each is dropped and counted."""
+    for nm, d in msgs(pattern, n):
+        if sealed_guard.text_has_sealed_time(d):
+            DROPS.add(); continue
+        yield nm, d
 for tgt, pat, n in [('tbfm', S+'/tbfm-*/*.msg', 600), ('tfms', S+'/tfms-*/*.msg', 600), ('fixm', S+'/sfdps-*/*.msg', 600)]:
-    for nm, d in msgs(pat, n):
+    for nm, d in xml_msgs(pat, n):
         out(tgt, nm, d); out('xml', tgt + '-' + nm, d) if random.random() < 0.3 else None
-for nm, d in msgs(S+'/fns-*/*.msg', 113): out('xml', 'fns-' + nm, d)
+for nm, d in xml_msgs(S+'/fns-*/*.msg', 113): out('xml', 'fns-' + nm, d)
 # a few hostile XML starters (synthetic)
 for i, x in enumerate([b'<a/>', b'<a xmlns="u"><b:c xmlns:b="v" d="&amp;&#65;"/></a>', b'<?xml version="1.0"?><!-- c --><a><![CDATA[x]]></a>', b'<a b="1" b="2"/>', b'<!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>']):
     repo('xml', f'x{i}.xml', x)
 
 # --- feed frames from the recordings
 for f in gl(S + '/rec/*.oaf'):
-    b = rb(f); i = 0; fr = []
-    while i + 40 <= len(b):
-        if b[i:i+4] != b'OAF1': break
-        n = struct.unpack('<I', b[i+32:i+36])[0]
-        fr.append(b[i:i+40+n]); i += 40 + n
+    b = rb(f); fr = []
+    frames, _rest = sealed_guard.oaf1_frames(b)
+    for x, recv, jms, pay in frames:
+        bad = sealed_guard.oaf1_frame_in_window(recv, jms, pay)
+        if bad: DROPS.add()
+        fr.append((x, bad))
     random.shuffle(fr)
-    for k, x in enumerate(fr[:200]): out('feed-frame', f'{os.path.basename(f)}-{k}', x, 100_000)
+    for k, (x, bad) in enumerate(fr[:200]):
+        if not bad: out('feed-frame', f'{os.path.basename(f)}-{k}', x, 100_000)
     for k in range(20):
-        out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(fr[k*5:k*5+5]), 200_000)
+        run = fr[k*5:k*5+5]
+        if any(bad for _, bad in run): DROPS.add(); continue
+        out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(x for x, _ in run), 200_000)
 
 # --- adsb traces, json
 # The newest part among the unsealed days (the real layout is raw/adsblol/YYYY.MM.DD/v*.tar.aa);
@@ -113,6 +141,8 @@ try:
             except Exception:
                 continue
             if len(raw) > 400_000: continue
+            if sealed_guard.adsb_trace_in_window(raw):
+                DROPS.add(); continue
             out('adsb-trace', f'tr{n}', raw, 400_000); out('json', f'tr{n}', raw, 400_000) if n % 4 == 0 else None
             n += 1; tot += len(raw)
             if n >= 500 or tot > 30_000_000: break

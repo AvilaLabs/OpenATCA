@@ -15,6 +15,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard  # noqa: E402
 
+# Rows in a sealed time window are dropped and counted; the line is printed once at exit.
+DROPS = sealed_guard.DropCounter()
+TIME_COLUMNS = {
+    "truth": (("time_ns",), ()),
+    "grid": (("time_ns",), ()),
+    "measurements": (("sensor_ns", "receive_ns"), ()),
+    "output": (("score_ns",), ("source_ns", "publish_ns")),
+}
+
 MAX_FILE_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 2_000_000
 MAX_FIELD = 4096
@@ -69,6 +78,8 @@ def _csv(path, kind):
                     raise EvaluationError(f"{path}: exceeds row limit {MAX_ROWS}")
                 if None in row or any(v is None or len(v) > MAX_FIELD for v in row.values()):
                     raise EvaluationError(f"{path}:{n}: malformed or oversized record")
+                if sealed_guard.row_in_window(row, *TIME_COLUMNS[kind]):
+                    DROPS.add(); continue
                 rows.append(row)
             order_fields={"truth":("scenario_id","time_ns","flight_id"),"measurements":("receive_ns","event_id")}.get(kind)
             if order_fields:
@@ -272,6 +283,8 @@ def _validate_identity_binding(path, truth_keys, output_rows):
             seen=set(); track_truth={}; bound={"candidate":set(),"baseline":set()}
             outputs={name:{(*_key(r),_parse_int(r["score_ns"])):r for r in rows} for name,rows in output_rows.items()}
             for row in reader:
+                if sealed_guard.row_in_window(row,("score_ns",)):
+                    DROPS.add(); continue
                 system=row["system"]
                 if system not in bound: return False,"identity_binding_unknown_system"
                 key=(row["scenario_id"],row["flight_id"],_parse_int(row["score_ns"]))

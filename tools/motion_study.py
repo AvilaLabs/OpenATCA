@@ -13,6 +13,12 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# The sealed hold-out guard (tools/sealed_guard.py); the script's own directory may not be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
+
+# Rows in a sealed time window are dropped and counted; the line is printed once at exit.
+DROPS = sealed_guard.DropCounter()
 STUDY_PATH = Path(__file__).resolve().parents[1] / "validation" / "motion-study-v1.json"
 # Freeze: SHA-256 of validation/motion-study-v1.json; any other bytes are refused.
 STUDY_V1_SHA256 = "bd33609f2ddf189a0ea8377522f20b8d2ac7706d8e45ba90285b0c1d27a93989"
@@ -31,9 +37,25 @@ CHI2_2D = {50: 1.38629436112, 90: 4.60517018599, 95: 5.99146454711}
 class StudyError(ValueError):
     pass
 
+def _open(path, mode="r", **kw):
+    """Every file this tool reads goes through the sealed-data guard (a refused path is an error)."""
+    try:
+        return sealed_guard.open_read(path, mode, **kw)
+    except sealed_guard.SealedError as exc:
+        raise StudyError(str(exc)) from exc
+
+def _refuse(*paths):
+    try: sealed_guard.refuse(*paths)
+    except sealed_guard.SealedError as exc: raise StudyError(str(exc)) from exc
+
+def _read_text(path: Path):
+    _refuse(path)
+    with _open(path,"r",encoding="utf-8",errors="strict") as f: return f.read()
+
 def _study(path=None):
     """Load the study definition only if its bytes hash to the pinned v1 digest (fail closed)."""
-    raw=Path(path or STUDY_PATH).read_bytes()
+    p=Path(path or STUDY_PATH); _refuse(p)
+    with _open(p,"rb") as f: raw=f.read()
     if hashlib.sha256(raw).hexdigest()!=STUDY_V1_SHA256: raise StudyError(STUDY_MISMATCH_REASON)
     return json.loads(raw.decode("utf-8"))
 
@@ -51,10 +73,11 @@ def _unique_pairs(pairs):
     return out
 
 def read_json(path: Path):
+    _refuse(path)
     if path.stat().st_size > MAX_BYTES:
         raise StudyError(f"{path}: exceeds size limit")
     try:
-        with path.open(encoding="utf-8") as f:
+        with _open(path,"r",encoding="utf-8") as f:
             value = json.load(f, object_pairs_hook=_unique_pairs, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(f"invalid constant {x}")), parse_float=_parse_finite_float)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise StudyError(f"{path}: invalid JSON: {exc}") from exc
@@ -63,9 +86,10 @@ def read_json(path: Path):
     return value
 
 def read_score_list(path: Path):
+    _refuse(path)
     if path.stat().st_size>MAX_BYTES: raise StudyError(f"{path}: exceeds size limit")
     try:
-        with path.open(encoding="utf-8") as f:
+        with _open(path,"r",encoding="utf-8") as f:
             value=json.load(f,object_pairs_hook=_unique_pairs,parse_constant=lambda x: (_ for _ in ()).throw(ValueError(f"invalid constant {x}")),parse_float=_parse_finite_float)
     except (OSError,UnicodeError,ValueError,json.JSONDecodeError) as exc:
         raise StudyError(f"{path}: invalid score JSON: {exc}") from exc
@@ -73,10 +97,11 @@ def read_score_list(path: Path):
     return value
 
 def sha256(path: Path) -> str:
+    _refuse(path)
     if path.stat().st_size > MAX_BYTES:
         raise StudyError(f"{path}: exceeds size limit")
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    with _open(path,"rb") as f:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
@@ -88,10 +113,12 @@ def _id_order(value):
         return (1, value)
 
 def _csv(path: Path, fields):
+    _refuse(path)
+    times=tuple(f for f in fields if f in ("time_ns","sensor_ns","receive_ns","score_ns")); optional=tuple(f for f in fields if f in ("source_ns","publish_ns"))
     if path.stat().st_size > MAX_BYTES:
         raise StudyError(f"{path}: exceeds byte limit")
     try:
-        with path.open(newline="", encoding="utf-8-sig") as f:
+        with _open(path,"r",newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f, strict=True)
             if reader.fieldnames != fields:
                 raise StudyError(f"{path}: exact CSV header required")
@@ -101,6 +128,8 @@ def _csv(path: Path, fields):
                     raise StudyError(f"{path}: exceeds row limit")
                 if None in row or any(v is None or len(v) > MAX_FIELD for v in row.values()):
                     raise StudyError(f"{path}:{n}: malformed or oversized row")
+                if sealed_guard.row_in_window(row,times,optional):
+                    DROPS.add(); continue
                 rows.append(row)
             return rows
     except (OSError, UnicodeError, csv.Error) as exc:
@@ -266,6 +295,7 @@ def _validate_measurements(rows):
     return len(seen)
 
 def _read_outputs(directory: Path, truth):
+    _refuse(directory)
     path=directory/"candidate.csv"
     if not path.is_file(): raise StudyError(f"{directory}: candidate.csv missing")
     fields=["scenario_id","flight_id","score_ns","source_ns","publish_ns","lat_deg","lon_deg","ve_mps","vn_mps","status"]
@@ -312,7 +342,7 @@ def _native_guard(build, build_path):
         for arg in command:
             if cursor<len(required) and arg==required[cursor]: cursor+=1
         if cursor!=len(required): return False,None
-        log=log_path.read_text(encoding="utf-8",errors="strict")
+        log=_read_text(log_path)
         log_pass=bool(re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;",log))
         valid=(result.get("exit_code")==0 and log_pass and result.get("head")==build.get("source_head") and result.get("source_diff_sha256")==build.get("source_diff_sha256"))
         if "native_regression_pass" in build and build["native_regression_pass"] is not valid: valid=False
@@ -325,7 +355,7 @@ def _source_lineage(build, build_path):
     if not isinstance(diff_spec,str) or not diff_spec: raise StudyError(f"{build_path}: source_diff_path is required")
     diff_path=Path(diff_spec); diff_path=diff_path if diff_path.is_absolute() else build_path.parent/diff_path
     if sha256(diff_path)!=build.get("source_diff_sha256"): raise StudyError(f"{build_path}: source diff hash mismatch")
-    diff=diff_path.read_text(encoding="utf-8",errors="strict")
+    diff=_read_text(diff_path)
     changed=re.findall(r"^diff --git a/(.+?) b/(.+?)$",diff,re.MULTILINE)
     allowed_path="crates/oa-track/src/params.rs"
     if any(a!=allowed_path or b!=allowed_path for a,b in changed): raise StudyError(f"{build_path}: source diff changes files outside params.rs")
@@ -337,7 +367,7 @@ def _source_lineage(build, build_path):
     expected_modifications=[] if status=="" else ["-pub const H_Q_CV: f64 = 1.0;",f"+pub const H_Q_CV: f64 = {params.get('H_Q_CV')};"]
     if modifications!=expected_modifications: raise StudyError(f"{build_path}: source diff must change only the H_Q_CV declaration")
     params_path=Path(build["params_source_path"]); params_path=params_path if params_path.is_absolute() else build_path.parent/params_path
-    text=params_path.read_text(encoding="utf-8",errors="strict")
+    text=_read_text(params_path)
     pattern=r"(?m)^(\s*pub const H_Q_CV: f64 = )[0-9]+(?:\.[0-9]+)?(;\s*)$"
     normalized,count=re.subn(pattern,r"\g<1><STUDY_H_Q_CV>\2",text)
     if count!=1: raise StudyError(f"{build_path}: params source must declare H_Q_CV exactly once")
@@ -350,6 +380,7 @@ def _expected_model(scenario):
     return None
 
 def _load_run(directory: Path, build_path: Path):
+    _refuse(directory,build_path)
     truth_path=directory/"truth.csv"; meas_path=directory/"measurements.csv"; diag_path=directory/"diagnostics.csv"; manifest_path=directory/"manifest.json"
     for path in (truth_path,meas_path,diag_path,manifest_path,build_path):
         if not path.is_file(): raise StudyError(f"required artifact missing: {path}")
@@ -752,6 +783,7 @@ def main(argv=None):
     check=sub.add_parser("check"); check.add_argument("--selection",required=True); check.add_argument("--scores",required=True); check.add_argument("--out",required=True)
     args=parser.parse_args(argv)
     try:
+        _refuse(*(getattr(args,k) for k in ("candidate_dir","candidate_build","default_dir","default_build","scores","selection","out") if getattr(args,k,None) is not None))
         if args.command=="score": result=score_pair(args.candidate_dir,args.candidate_build,args.default_dir,args.default_build)
         elif args.command=="select":
             raw=read_score_list(Path(args.scores)); result=choose_training(raw)

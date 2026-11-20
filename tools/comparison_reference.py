@@ -25,6 +25,9 @@ from typing import Any, Iterable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard  # noqa: E402
 
+# Rows in a sealed time window are dropped and counted; the line is printed once at exit.
+DROPS = sealed_guard.DropCounter()
+
 
 TRUTH_FIELDS = (
     "scenario_id",
@@ -142,6 +145,9 @@ def _int(value: str, label: str) -> int:
         raise ValidationError(f"{label} is not a canonical base-10 integer") from e
 
 
+_TIME_FIELDS = ("time_ns", "sensor_ns", "receive_ns", "source_ns", "publish_ns", "score_ns")
+
+
 def _bounded_rows(path: Path, expected_fields: tuple[str, ...], max_rows: int) -> Iterable[dict[str, str]]:
     sealed_guard.refuse(path)
     try:
@@ -169,6 +175,8 @@ def _bounded_rows(path: Path, expected_fields: tuple[str, ...], max_rows: int) -
                     raise ValidationError(f"{path.name} exceeds the {max_rows}-row protocol limit")
                 if None in row or any(value is None for value in row.values()):
                     raise ValidationError(f"{path.name} row {count + 1} has the wrong field count")
+                if sealed_guard.row_in_window(row, tuple(c for c in expected_fields if c in _TIME_FIELDS)):
+                    DROPS.add(); continue
                 yield row
         except csv.Error as e:
             raise ValidationError(f"malformed CSV in {path.name}: {e}") from e

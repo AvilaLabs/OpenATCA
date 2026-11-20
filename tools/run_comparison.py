@@ -26,6 +26,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard  # noqa: E402
 
+# Rows in a sealed time window are dropped and counted; the line is printed once at exit.
+DROPS = sealed_guard.DropCounter()
+
 
 SCENARIOS = ("straight", "turn", "acceleration", "crossing", "dropout", "delayed")
 COMPARISON_CLASS = "development_control"
@@ -63,7 +66,7 @@ class ComparisonRunError(RuntimeError):
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    with sealed_guard.open_read(path, "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
@@ -80,7 +83,8 @@ def _read_json(path: Path) -> dict[str, Any]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"invalid JSON constant {value}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+        with sealed_guard.open_read(path, "r", encoding="utf-8") as f:
+            value = json.loads(f.read(), parse_constant=reject_constant)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise ComparisonRunError(f"cannot parse {path.name}: {exc}") from exc
     if not isinstance(value, dict):
@@ -309,11 +313,18 @@ def _hash_artifact(path: Path) -> dict[str, str]:
 
 
 def _csv_keys(path: Path, header: list[str]) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
+    with sealed_guard.open_read(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f, strict=True)
         if reader.fieldnames != header:
             raise ComparisonRunError(f"{path.name}: unexpected CSV header")
-        return list(reader)
+        times = tuple(c for c in header if c in ("time_ns", "score_ns"))
+        rows = []
+        for row in reader:
+            if sealed_guard.row_in_window(row, times, ("source_ns", "publish_ns") if "source_ns" in header else ()):
+                DROPS.add()
+                continue
+            rows.append(row)
+        return rows
 
 
 def _create_truth_grid(truth_path: Path, output_path: Path) -> None:

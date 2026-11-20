@@ -25,6 +25,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard  # noqa: E402
 
+# Rows in a sealed time window are dropped and counted; the line is printed once at exit.
+DROPS = sealed_guard.DropCounter()
+
 
 TRUTH_FIELDS = ("scenario_id", "time_ns", "truth_id", "lat_deg", "lon_deg")
 OUTPUT_FIELDS = ("scenario_id", "time_ns", "track_id", "source_ns", "lat_deg", "lon_deg", "status")
@@ -91,6 +94,8 @@ def _bounded_csv(path: Path, expected_fields: tuple[str, ...], kind: str) -> tup
                 if (None in row or any(value is None or len(value) > MAX_FIELD_CHARS for value in row.values())):
                     malformed += 1
                     continue
+                if sealed_guard.row_in_window(row, ("time_ns",), ("source_ns",)):
+                    DROPS.add(); continue
                 rows.append(row)
             return rows, malformed
     except (OSError, UnicodeError, csv.Error) as exc:
