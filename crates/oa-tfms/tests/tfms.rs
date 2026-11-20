@@ -2222,9 +2222,15 @@ fn a_message_timed_in_the_drop_window_is_dropped_before_any_count_flights_flows_
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
     assert_eq!(r.as_ref().unwrap().sealed_dropped, 0);
     assert_eq!(flights_len(&rows.flights), 1);
-    let xml = refused.replace(r#"acid="TST123""#, r#"acid="""#);
-    let xml = stamped(&wrap_flight(&xml), "2026-11-21T00:00:00Z");
+    // Refused after its time was read (a bad body field) and timed in the window: dropped for its
+    // time, not refused.
+    let xml = stamped(&wrap_flight(&refused), "2026-11-21T00:00:00Z");
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
-    // Refused for a field read before its time (the acid) or dropped for its time: never both.
-    assert_eq!(r.sealed_dropped + r.rejected, 1);
+    assert_eq!((r.sealed_dropped, r.rejected), (1, 0));
+    // Refused before its time is read (the message type is looked up before the other attributes and this one has none):
+    // no known time, so it is refused.
+    let early = wrap_flight(&track()).replace(r#" msgType="trackInformation""#, "");
+    let xml = stamped(&early, "2026-11-21T00:00:00Z");
+    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    assert_eq!((r.sealed_dropped, r.rejected), (0, 1));
 }
