@@ -24,6 +24,8 @@ oa-display = { path = "../../crates/oa-display" }
 oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 oa-airspace = { path = "../../crates/oa-airspace" }
 oa-geo = { path = "../../crates/oa-geo" }
+# F1: the safety-net state and inhibition core, by local path only.
+oa-safety = { path = "../../crates/oa-safety" }
 
 [profile.release]
 debug = 1

@@ -47,7 +47,7 @@ pub const PALETTE: [u32; PALETTE_LEN] = [
 /// machine (the byte order of a KMS dumb buffer): blue, green, red, unused. `None` for an index
 /// outside the palette.
 pub fn bytes_of(i: u8) -> Option<[u8; 4]> {
-    PALETTE.get(usize::from(i)).map(|c| c.to_le_bytes())
+    PALETTE.get(usize::from(i)).map(|c| u32::to_le_bytes(*c))
 }
 
 #[cfg(test)]

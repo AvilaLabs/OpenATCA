@@ -658,7 +658,7 @@ pub fn esassp_of(p: &PairTable, truth: &oa_truth::Truth) -> Esassp {
         .filter(|v| v.len() >= PER_FLIGHT_MIN_N)
         .map(|v| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt())
         .collect();
-    rms.sort_by(f64::total_cmp);
+    rms.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let p95 = if rms.is_empty() {
         0.0
     } else {

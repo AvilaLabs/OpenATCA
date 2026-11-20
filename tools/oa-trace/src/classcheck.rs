@@ -13,10 +13,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod boundary;
+mod floats;
 mod harden;
+pub use boundary::{callback_aliases, module_visibility, sealed_traits, FIXED_BOUNDS};
+pub use floats::FloatFacts;
 pub use harden::{
-    callback_sigs, count_float_calls, parse_budget, parse_callbacks, scan_shell, CallbackEntry,
-    CallbackSig, CALLBACK_ALLOWLIST, FLOAT_BUDGET,
+    count_float_calls, parse_budget, parse_callbacks, scan_shell, CallbackEntry, CallbackSig,
+    CALLBACK_ALLOWLIST, FLOAT_BUDGET, HELPERS,
 };
 
 /// The committed list of crates allowed to be `unsplit`, relative to the workspace root. It must
@@ -1067,9 +1071,23 @@ pub struct Ctx<'a> {
     /// Modules the crate declares (`mod x`): a lowercase path qualifier is one of these, a
     /// crate, or it fails.
     pub modules: &'a BTreeSet<String>,
-    /// Names of the float fields (`name: f64`) the crate's structs declare: a `.field` receiver of
-    /// `to_*_bytes` that is one skips `canon_nan`. A bare name is judged inside its own fn.
-    pub float_names: &'a BTreeSet<String>,
+    /// What the core crates of the whole workspace declare as floats: struct fields, tuple-struct
+    /// fields, `fn` return types and constants (a bare name is judged inside its own `fn`).
+    pub floats: &'a FloatFacts,
+    /// Modules of this crate that are not public (`mod x`, `pub(crate) mod x`): a trait reached
+    /// through one cannot be named by the shell, which is what seals a `pub trait` (B5).
+    pub private_mods: &'a BTreeSet<String>,
+    /// Names of the sealed `pub trait`s of every core crate (B5): a generic may be bounded by
+    /// one.
+    pub sealed: &'a BTreeSet<String>,
+    /// Names of the traits that seal them (`Sealed` in `sealed::Sealed`): they are not re-exported
+    /// and not implemented for a bare type parameter.
+    pub sealing: &'a BTreeSet<String>,
+    /// Names of the modules that hold a sealing trait: a `pub use` of one publishes the seal.
+    pub sealing_mods: &'a BTreeSet<String>,
+    /// Names of the type aliases of this crate whose body holds an `Fn*`, `dyn` or `fn(..)`: a
+    /// reachable signature that names one hands behaviour in (B5).
+    pub cb_types: &'a BTreeSet<String>,
     /// Class of every workspace crate by name.
     pub classes: &'a BTreeMap<String, Class>,
     /// Identifier used in source -> workspace crate it names (own name, dependency keys).
@@ -1298,10 +1316,12 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
                     "B8: core code does not branch on `debug_assertions`, a debug and a release build must compute the same (`debug_assert!` stays: it can only panic)",
                 ));
             }
-            let target = (open..end).find_map(|k| {
-                let x = s(toks, k);
-                (x.starts_with("target_") || matches!(x, "unix" | "windows")).then_some(x)
-            });
+            let target = (open..end)
+                .find_map(|k| {
+                    let x = s(toks, k);
+                    (x.starts_with("target_") || matches!(x, "unix" | "windows")).then_some(x)
+                })
+                .filter(|_| !pointer_width_guard(toks, i));
             if let Some(x) = target {
                 hits.push(hit(
                     t.line,
@@ -1406,6 +1426,17 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
 /// The tokens of one `use` statement (after `use`, before `;`): no `as` and no `*` where a
 /// std, core, alloc or workspace-crate path is imported.
 fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
+    // an `as` rename hides what a name is (a sealing trait, a float type alias): banned on every
+    // `use` in core
+    for t in stmt {
+        if t.s == "as" {
+            hits.push(hit(
+                t.line,
+                "as",
+                "B8: core code has no `as` rename in a `use`",
+            ));
+        }
+    }
     let has_root = stmt.iter().enumerate().any(|(k, t)| {
         (matches!(t.s.as_str(), "std" | "core" | "alloc") || ctx.aliases.contains_key(t.s.as_str()))
             && is_path_start(stmt, k)
@@ -1414,13 +1445,71 @@ fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
         return;
     }
     for t in stmt {
-        if t.s == "as" || t.s == "*" {
+        if t.s == "*" {
             hits.push(hit(
                 t.line,
                 &t.s,
-                "B8: no `as` rename and no `*` glob on a std, core, alloc or workspace-crate path",
+                "B8: no `*` glob on a std, core, alloc or workspace-crate path",
             ));
         }
+    }
+}
+
+/// Whether the `cfg` at `toks[i]` is the head of the one target cfg core code may have:
+/// `#[cfg(not(target_pointer_width = "64"))]` directly followed by `compile_error!` (the string is
+/// masked, `has_pointer_width_guard` reads it). It refuses a build, it changes no behaviour.
+fn pointer_width_guard(toks: &[Tok], i: usize) -> bool {
+    let want = [
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "target_pointer_width",
+        "=",
+        ")",
+        ")",
+        "]",
+        "compile_error",
+        "!",
+    ];
+    i >= 2
+        && s(toks, i - 1) == "["
+        && s(toks, i - 2) == "#"
+        && guard_position(toks, i - 2)
+        && want.iter().enumerate().all(|(k, w)| s(toks, i + k) == *w)
+}
+
+/// Whether the attribute that starts at the `#` at `toks[hash]` stands alone at an item
+/// boundary: at the start of the file, or after the `]` of an inner attribute, a `;` or a `}`.
+/// Another outer attribute directly before it (`#[cfg(any())]` stacked on the guard) does not.
+fn guard_position(toks: &[Tok], hash: usize) -> bool {
+    if hash == 0 {
+        return true;
+    }
+    match s(toks, hash - 1) {
+        ";" | "}" => true,
+        "]" => {
+            // walk back to the `[` that opens this `]`: an inner attribute is `# ! [`
+            let mut depth = 0usize;
+            let mut k = hash - 1;
+            loop {
+                match s(toks, k) {
+                    "]" => depth += 1,
+                    "[" => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return k >= 2 && s(toks, k - 1) == "!" && s(toks, k - 2) == "#";
+                        }
+                    }
+                    _ => {}
+                }
+                if k == 0 {
+                    return false;
+                }
+                k -= 1;
+            }
+        }
+        _ => false,
     }
 }
 
@@ -1511,7 +1600,7 @@ pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
         hits,
         test_mods: st.test_mods,
         whole_file: st.whole_file,
-        callbacks: callback_sigs(src),
+        callbacks: boundary::extra_sigs(src, ctx),
     }
 }
 
@@ -1532,6 +1621,69 @@ pub fn has_no_std(src: &str) -> bool {
             return true;
         }
         i = end;
+    }
+    false
+}
+
+/// `src` with comments blanked and its string literals kept, for the rules that read a literal.
+fn mask_keep_strings(src: &str) -> Option<String> {
+    let (masked, strings) = mask_with_strings(src);
+    let mut out: Vec<char> = masked.chars().collect();
+    let orig: Vec<char> = src.chars().collect();
+    if out.len() != orig.len() {
+        return None;
+    }
+    for (from, to) in strings {
+        for k in from..to.min(orig.len()) {
+            if let (Some(slot), Some(c)) = (out.get_mut(k), orig.get(k)) {
+                *slot = *c;
+            }
+        }
+    }
+    Some(out.into_iter().collect())
+}
+
+/// Whether `lib.rs` has `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`
+/// at the top level, outside test code: the crate refuses a non-64-bit target, so the width of
+/// `usize` is fixed by construction (RULESET B10).
+pub fn has_pointer_width_guard(src: &str) -> bool {
+    let Some(kept) = mask_keep_strings(src) else {
+        return false;
+    };
+    let toks = strip_test_items(tokenize(&kept)).toks;
+    let want = [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "target_pointer_width",
+        "=",
+        "\"",
+        "64",
+        "\"",
+        ")",
+        ")",
+        "]",
+        "compile_error",
+        "!",
+        "(",
+    ];
+    let mut depth = 0usize;
+    for (i, t) in toks.iter().enumerate() {
+        match t.s.as_str() {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0
+            && guard_position(&toks, i)
+            && want.iter().enumerate().all(|(k, w)| s(&toks, i + k) == *w)
+            && s(&toks, skip_group(&toks, i + want.len() - 1)) == ";"
+        {
+            return true;
+        }
     }
     false
 }
@@ -1668,6 +1820,17 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
             // only the attributes a lib.rs of a split crate needs: `forbid(unsafe_code)` and
             // `doc`; anything else (`macro_use` on a module, `allow`, `cfg_attr`, `path`) could
             // carry shell code into the core
+            // the 64-bit guard, exactly: the cfg and the `compile_error!(..);` after it (B10)
+            if !inner
+                && body == "cfg(not(target_pointer_width=))"
+                && s(&toks, end) == "compile_error"
+                && s(&toks, end + 1) == "!"
+                && s(&toks, end + 2) == "("
+                && s(&toks, skip_group(&toks, end + 2)) == ";"
+            {
+                i = skip_group(&toks, end + 2) + 1;
+                continue;
+            }
             let ok = body.starts_with("doc=")
                 || body.starts_with("doc(")
                 || (inner && body == "forbid(unsafe_code)");
@@ -1970,11 +2133,17 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
         allow: &allow_keys,
         used: BTreeSet::new(),
     };
+    let (floats, seals) = workspace_facts(root, &members);
     let view = Workspace {
         classes: &classes,
         by_dir: &by_dir,
         ws_deps: &ws_deps,
         libs: &libs,
+        floats: &floats,
+        sealed: &seals.sealed,
+        sealing: &seals.sealing,
+        sealing_mods: &seals.sealing_mods,
+        private: &seals.private,
     };
     for m in &members {
         if matches!(m.class, Class::Core | Class::Split) {
@@ -1989,6 +2158,7 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
         }
     }
     float_budget(root, &members, &mut rep);
+    sign_order(root, &members, &mut rep);
 
     // B9: the unsplit list is fixed in this source and only shrinks
     for name in &rep.unsplit {
@@ -2022,6 +2192,72 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
     rep.failures.sort();
     rep.failures.dedup();
     rep
+}
+
+/// The file `crates/oa-math/src/order.rs`, the one place the standard library's sign and order
+/// reads are allowed (RULESET B8).
+const ORDER_RS: &str = "crates/oa-math/src/order.rs";
+
+/// RULESET B8, OA-TRC-260: every crate of the workspace, whatever its class, reads the sign and
+/// order of a float through `oa_math`. Source under `src`, `examples` and `benches`, outside test
+/// code; `tests` directories are not scanned. A site the class check of core code already
+/// reports is not reported twice.
+fn sign_order(root: &Path, members: &[Member], rep: &mut ClassReport) {
+    let seen: BTreeSet<String> = rep
+        .failures
+        .iter()
+        .filter_map(|f| {
+            let mut it = f.splitn(3, ':');
+            Some(format!(
+                "{}:{}:{}",
+                it.next()?,
+                it.next()?,
+                it.next()?.trim()
+            ))
+        })
+        .collect();
+    for m in members {
+        let mut files = Vec::new();
+        let mut fails = Vec::new();
+        for d in ["src", "examples", "benches"] {
+            let dir = m.dir.join(d);
+            if dir.is_dir() {
+                walk_rs(&dir, &[], &mut files, &mut fails);
+            }
+        }
+        rep.failures.extend(fails);
+        files.sort();
+        let mut scanned = Vec::new();
+        for f in &files {
+            if rel(root, f) == ORDER_RS {
+                continue;
+            }
+            match fs::read_to_string(f) {
+                Ok(t) => scanned.push((f.clone(), harden::sign_order_hits(&t))),
+                Err(e) => rep
+                    .failures
+                    .push(format!("{}: cannot read: {e}", rel(root, f))),
+            }
+        }
+        let skips = TestSkips::new(scanned.iter().map(|(f, (_, tm, whole))| (f, tm, *whole)));
+        for (f, (hits, _, _)) in &scanned {
+            if skips.skips(f) {
+                continue;
+            }
+            for h in hits {
+                let key = format!("{}:{}:{}", rel(root, f), h.line, h.token);
+                if !seen.iter().any(|s| s.starts_with(&key)) {
+                    rep.failures.push(format!(
+                        "{}:{}: {}: {}",
+                        rel(root, f),
+                        h.line,
+                        h.token,
+                        h.message
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// The ratchet on unsplit crates (RULESET B9): platform float-method calls, counted per crate
@@ -2141,12 +2377,113 @@ struct Workspace<'a> {
     by_dir: &'a BTreeMap<String, String>,
     ws_deps: &'a [Dep],
     libs: &'a BTreeMap<String, String>,
+    /// Float facts of every core file in the workspace.
+    floats: &'a FloatFacts,
+    /// Sealed `pub trait` names of every core crate, and the traits that seal them.
+    sealed: &'a BTreeSet<String>,
+    sealing: &'a BTreeSet<String>,
+    /// Names of the modules that hold a sealing trait.
+    sealing_mods: &'a BTreeSet<String>,
+    /// Non-public module names, per crate.
+    private: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The reviewed core callback entries and which of them a core file used (B5).
 struct Callbacks<'a> {
     allow: &'a BTreeSet<(String, String)>,
     used: BTreeSet<(String, String)>,
+}
+
+/// The core files, the shell files and the read failures of a core or split crate, sorted.
+fn gather_files(root: &Path, m: &Member) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
+    let src = m.dir.join("src");
+    let mut files = Vec::new();
+    let mut shell_files = Vec::new();
+    let mut walk_fails = Vec::new();
+    if m.class == Class::Split {
+        check_split_layout(root, m, &mut files, &mut shell_files, &mut walk_fails);
+    } else {
+        let skip = [src.join("bin"), src.join("main.rs")];
+        walk_rs(&src, &skip, &mut files, &mut walk_fails);
+    }
+    files.sort();
+    files.dedup();
+    shell_files.sort();
+    shell_files.dedup();
+    (files, shell_files, walk_fails)
+}
+
+/// The module path of a source file: `src/a/b.rs` and `src/a/b/mod.rs` are `["a", "b"]`, `lib.rs`
+/// is empty, and the `core` root of a split crate is empty too (`src/core.rs`, `src/core/mod.rs`).
+fn file_module_path(src: &Path, file: &Path, split: bool) -> Vec<String> {
+    let rel = file.strip_prefix(src).unwrap_or(file);
+    let mut parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if let Some(last) = parts.pop() {
+        let stem = last.strip_suffix(".rs").unwrap_or(&last).to_string();
+        if !matches!(stem.as_str(), "lib" | "mod") {
+            parts.push(stem);
+        }
+    }
+    if split && parts.first().is_some_and(|p| p == "core") {
+        parts.remove(0);
+    }
+    parts
+}
+
+/// The facts of the sealed `pub trait`s and non-public modules of every core crate (B5).
+struct Seals {
+    sealed: BTreeSet<String>,
+    sealing: BTreeSet<String>,
+    sealing_mods: BTreeSet<String>,
+    private: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// What every core file of the workspace declares that a rule about one file needs to know: float
+/// fields, tuple fields, return types and constants (B8), the sealed `pub trait`s and the
+/// non-public modules (B5).
+fn workspace_facts(root: &Path, members: &[Member]) -> (FloatFacts, Seals) {
+    let mut floats = FloatFacts::default();
+    let mut seals = Seals {
+        sealed: BTreeSet::new(),
+        sealing: BTreeSet::new(),
+        sealing_mods: BTreeSet::new(),
+        private: BTreeMap::new(),
+    };
+    for m in members {
+        if !matches!(m.class, Class::Core | Class::Split) {
+            continue;
+        }
+        // read failures are reported by `check_member`, which reads the same files
+        let (files, _, _) = gather_files(root, m);
+        let src = m.dir.join("src");
+        let split = m.class == Class::Split;
+        let texts: Vec<(Vec<String>, String)> = files
+            .iter()
+            .filter_map(|f| {
+                fs::read_to_string(f)
+                    .ok()
+                    .map(|t| (file_module_path(&src, f, split), t))
+            })
+            .collect();
+        for (_, text) in &texts {
+            floats.add_source(text);
+        }
+        let borrowed: Vec<(Vec<String>, &str)> =
+            texts.iter().map(|(p, t)| (p.clone(), t.as_str())).collect();
+        let (mut private, public) = module_visibility(&borrowed);
+        private.retain(|n| !public.contains(n));
+        for (_, text) in &texts {
+            let (a, b, c) = sealed_traits(text, &private);
+            seals.sealed.extend(a);
+            seals.sealing.extend(b);
+            seals.sealing_mods.extend(c);
+        }
+        seals.private.insert(m.name.clone(), private);
+    }
+    (floats, seals)
 }
 
 /// B7 to B9 checks of one core or split crate.
@@ -2224,6 +2561,11 @@ fn check_member(
                         "{name}: A0: src/lib.rs of a core crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
                     ));
                 }
+                if !has_pointer_width_guard(&text) {
+                    fails.push(format!(
+                        "{name}: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
+                    ));
+                }
             }
             Ok(text) => {
                 for h in declares_main_or_bin(&text) {
@@ -2245,24 +2587,17 @@ fn check_member(
                         "{name}: A0: src/lib.rs of a core crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
                     ));
                 }
+                if !has_pointer_width_guard(&text) {
+                    fails.push(format!(
+                        "{name}: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
+                    ));
+                }
             }
         }
     }
-    let mut files = Vec::new();
-    let mut shell_files = Vec::new();
-    let mut walk_fails = Vec::new();
     let split = m.class == Class::Split;
-    if split {
-        check_split_layout(root, m, &mut files, &mut shell_files, &mut walk_fails);
-    } else {
-        let skip = [src.join("bin"), src.join("main.rs")];
-        walk_rs(&src, &skip, &mut files, &mut walk_fails);
-    }
+    let (files, shell_files, walk_fails) = gather_files(root, m);
     fails.extend(walk_fails);
-    files.sort();
-    files.dedup();
-    shell_files.sort();
-    shell_files.dedup();
     if files.is_empty() {
         fails.push(format!("{name}: B8: no core files found to scan"));
     }
@@ -2276,7 +2611,6 @@ fn check_member(
     // modules the crate declares, and the type and trait names its core files define
     let mut modules: BTreeSet<String> = BTreeSet::new();
     let mut core_types: BTreeSet<String> = BTreeSet::new();
-    let mut float_names: BTreeSet<String> = BTreeSet::new();
     for (_, text) in &texts {
         let toks = tokenize(&mask(text));
         for (i, t) in toks.iter().enumerate() {
@@ -2285,16 +2619,23 @@ fn check_member(
             }
         }
         core_types.extend(harden::defined_types(text));
-        float_names.extend(harden::float_fields(text));
     }
+    let cb_types = boundary::callback_aliases(texts.iter().map(|(_, text)| text.as_str()));
     let mut scans = Vec::new();
+    let empty = BTreeSet::new();
+    let no_private = &w.private;
     for (f, text) in &texts {
         let ctx = Ctx {
             split,
             ieee,
             math: m.name == "oa-math",
             modules: &modules,
-            float_names: &float_names,
+            floats: w.floats,
+            private_mods: no_private.get(name.as_str()).unwrap_or(&empty),
+            sealed: w.sealed,
+            sealing: w.sealing,
+            sealing_mods: w.sealing_mods,
+            cb_types: &cb_types,
             depth: module_depth(&src, f),
             classes: w.classes,
             aliases: &aliases,
@@ -2337,7 +2678,7 @@ fn check_member(
                 cbs.used.insert(key);
             } else {
                 fails.push(format!(
-                    "{}:{}: {}: B5: a core `pub fn` takes a callback or a bound ({}); the shell could inject behaviour. Remove it, or add `{name} {in_src}::{}` with the reason to {CALLBACK_ALLOWLIST}",
+                    "{}:{}: {}: B5: core code lets the shell hand in behaviour ({}). Remove it, or add `{name} {in_src}::{}` with the reason to {CALLBACK_ALLOWLIST}",
                     rel(root, f),
                     cb.line,
                     cb.name,
@@ -2435,6 +2776,11 @@ fn check_split_layout(
             if !has_forbid_unsafe(&text) {
                 fails.push(format!(
                     "{name}: A0: src/lib.rs of a split crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
+                ));
+            }
+            if !has_pointer_width_guard(&text) {
+                fails.push(format!(
+                    "{name}: B10: src/lib.rs of a split crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
                 ));
             }
             for h in lib_rs_problems(&text) {

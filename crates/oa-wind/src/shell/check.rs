@@ -34,7 +34,7 @@ pub fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
 /// Summary of values (sorted in place); `None` when empty. NaN values are dropped.
 pub fn summarize(values: &mut Vec<f64>) -> Option<Summary> {
     values.retain(|v| !v.is_nan());
-    values.sort_by(|a, b| a.total_cmp(b));
+    values.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let n = values.len();
     Some(Summary {
         n,

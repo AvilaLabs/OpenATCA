@@ -9,7 +9,7 @@
 use std::io::{self, Read};
 
 use crate::frame::{Frame, MAX_FRAME_LEN};
-use crate::reader::FrameReader;
+use crate::reader::{FrameReader, FrameWorkBudget};
 
 /// Bytes read from the source at once.
 const CHUNK_LEN: usize = 1 << 20;
@@ -32,9 +32,17 @@ pub fn read_frames<R: Read>(src: &mut R, f: &mut dyn FnMut(&Frame<'_>)) -> io::R
         let mut at = 0usize;
         while at < n {
             let Some(rest) = chunk.get(at..n) else { break };
-            let took = rd.push(rest);
+            let took = rd
+                .push_with_budget(rest, FrameWorkBudget::for_capacity(MAX_FRAME_LEN))
+                .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?;
             at += took;
-            while let Some(fr) = rd.next() {
+            loop {
+                let Some(fr) = rd
+                    .next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN))
+                    .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?
+                else {
+                    break;
+                };
                 match fr {
                     Ok(fr) => f(&fr),
                     Err(_) => bad += 1,

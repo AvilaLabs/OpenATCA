@@ -3,9 +3,10 @@
 //! core, the unsafe and address bans, the callback allowlist and the unsplit float budget.
 //! Same lexer as [`super`]; same rule: anything unreadable is a failure.
 
+use super::floats::Evidence;
 use super::{
-    call_at, hit, is_path_start, is_word, mask, s, skip_group, skip_modifiers, skip_turbofish,
-    strip_test_items, tokenize, Ctx, FileScan, Hit, Tok, FLOAT_METHODS,
+    call_at, hit, is_path_start, is_word, mask, s, skip_group, skip_turbofish, strip_test_items,
+    tokenize, Ctx, FileScan, Hit, Tok, FLOAT_METHODS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,6 +29,14 @@ const BANNED_IDENTS: &[(&str, &str)] = &[
     ("expose_provenance", "B8: core code takes no address"),
     ("expose_addr", "B8: core code takes no address"),
     ("with_exposed_provenance", "B8: core code takes no address"),
+    ("into_raw", "B8: core code takes no address"),
+    ("into_raw_parts", "B8: core code takes no address"),
+    ("from_raw", "B8: core code takes no address"),
+    ("leak", "B8: core code takes no address, a leaked allocation has one"),
+    ("as_ptr_range", "B8: core code takes no address"),
+    ("as_mut_ptr_range", "B8: core code takes no address"),
+    ("addr_of", "B8: core code takes no address"),
+    ("addr_of_mut", "B8: core code takes no address"),
     ("ptr_eq", "B8: core code compares no addresses"),
     ("addr_eq", "B8: core code compares no addresses"),
     ("non_camel_case_types", "B8: core code does not silence the type-name lint, a lowercase type alias could hide a float method"),
@@ -64,7 +73,7 @@ fn guard_mask(toks: &[Tok]) -> Vec<bool> {
 }
 
 /// Index of the `(` that matches the `)` at `toks[close]`.
-fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
+pub(super) fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
     let mut depth = 0usize;
     for j in (0..=close).rev() {
         match s(toks, j) {
@@ -83,16 +92,69 @@ fn open_of(toks: &[Tok], close: usize) -> Option<usize> {
 
 /// The functions that make a float's bits canonical (RULESET B8).
 const CANON: &[&str] = &["canon_nan", "canon_nan_f32"];
+/// Every `oa_math` helper that core code must reach by qualified path (RULESET B8): the NaN
+/// canonicalisers and each public function of `order.rs` (a test keeps this list whole).
+pub const HELPERS: &[&str] = &[
+    "canon_nan",
+    "canon_nan_f32",
+    "cmp_canon_f64",
+    "cmp_canon_f32",
+    "is_sign_negative_canon_f64",
+    "is_sign_negative_canon_f32",
+    "copysign_canon_f64",
+    "copysign_canon_f32",
+    "signum_canon_f64",
+    "signum_canon_f32",
+    "min_f64",
+    "min_f32",
+    "max_f64",
+    "max_f32",
+    "clamp_f64",
+    "clamp_f32",
+];
 const BYTES: &[&str] = &["to_le_bytes", "to_be_bytes", "to_ne_bytes"];
 
-/// Whether `toks[i]` starts a call of `canon_nan(..)` or `canon_nan_f32(..)`, bare or through
-/// `oa_math::`; returns the index just past its argument group.
+/// Whether `toks[i]` starts a call `oa_math::canon_nan(..)` or `oa_math::canon_nan_f32(..)`, by
+/// that qualified path only; returns the index just past its argument group.
 fn canon_call_end(toks: &[Tok], i: usize) -> Option<usize> {
-    let mut j = i;
-    if matches!(s(toks, j), "oa_math") && s(toks, j + 1) == "::" {
-        j += 2;
+    (s(toks, i) == "oa_math"
+        && s(toks, i + 1) == "::"
+        && CANON.contains(&s(toks, i + 2))
+        && s(toks, i + 3) == "(")
+        .then(|| skip_group(toks, i + 3))
+}
+
+/// Whether the `to_bits` at `toks[i]` is the method form on the result of a qualified
+/// `oa_math::canon_nan(..)` / `canon_nan_f32(..)` call, the call alone or inside extra parentheses.
+fn canon_to_bits(toks: &[Tok], i: usize) -> bool {
+    if i < 2 || s(toks, i - 1) != "." || s(toks, i - 2) != ")" || !call_at(toks, i + 1) {
+        return false;
     }
-    (CANON.contains(&s(toks, j)) && s(toks, j + 1) == "(").then(|| skip_group(toks, j + 1))
+    let mut close = i - 2;
+    loop {
+        let Some(open) = open_of(toks, close) else {
+            return false;
+        };
+        // a call's own argument group: `oa_math::canon_nan(x)` directly before `.to_bits()`
+        if open >= 3 && canon_call_end(toks, open - 3) == Some(close + 1) {
+            return open < 4 || s(toks, open - 4) != "::";
+        }
+        // extra parentheses: not an argument group, so not after a name, `)`, `]`, `>` or `?`
+        let before = s(toks, open.wrapping_sub(1));
+        let argument = open >= 1
+            && ((is_word(before)
+                && !matches!(before, "return" | "in" | "if" | "match" | "else" | "while"))
+                || matches!(before, ")" | "]" | ">" | "?"));
+        if argument || open + 1 >= close {
+            return false;
+        }
+        if s(toks, open + 1) == "(" && skip_group(toks, open + 1) == close {
+            close = skip_group(toks, open + 1) - 1;
+            continue;
+        }
+        return canon_call_end(toks, open + 1) == Some(close)
+            && (open < 1 || s(toks, open - 1) != "::");
+    }
 }
 
 /// `use` statements of the file: token ranges from after `use` up to `;`.
@@ -112,76 +174,168 @@ fn use_statements(toks: &[Tok]) -> Vec<(usize, usize)> {
     out
 }
 
+/// Token indexes inside a `use ..;` or `extern ..;` statement, where `as` renames.
+fn rename_statements(toks: &[Tok]) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if matches!(s(toks, i), "use" | "extern") && is_path_start(toks, i) {
+            let end = (i..toks.len())
+                .find(|&k| s(toks, k) == ";")
+                .unwrap_or(toks.len());
+            out.extend(i..end);
+            i = end;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether the integer primitive name at `toks[i]` is declared or renamed there: `type u32 = ..`,
+/// `mod i64`, `struct u8`, `enum`, `union`, `trait`, `.. as u64` in a `use` or `extern crate`, or a
+/// generic parameter (`fn f<u64>()`, `struct S<T, u8>`). Then `u64::to_le_bytes(x)` or
+/// `i64::signum(x)` may not mean the primitive's function.
+pub(super) fn int_shadow(toks: &[Tok], i: usize, stmt: &BTreeSet<usize>) -> bool {
+    if !super::INT_TYPES.contains(&s(toks, i)) {
+        return false;
+    }
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    if matches!(prev, "type" | "mod" | "struct" | "enum" | "union" | "trait") {
+        return true;
+    }
+    if prev == "as" && stmt.contains(&i) {
+        return true;
+    }
+    if matches!(prev, "<" | ",") {
+        // a generic parameter list: walk back to its `<`, named by `fn f`, `struct S`, `impl`..
+        let mut depth = 0usize;
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            match s(toks, j) {
+                ">" if s(toks, j.wrapping_sub(1)) != "-" => depth += 1,
+                "<" if depth == 0 => {
+                    // `impl<..>`, or `fn NAME<..>`, `struct NAME<..>` and the like
+                    return s(toks, j.wrapping_sub(1)) == "impl"
+                        || (j >= 2
+                            && matches!(
+                                s(toks, j - 2),
+                                "fn" | "struct" | "enum" | "union" | "trait" | "type"
+                            ));
+                }
+                "<" => depth -= 1,
+                ";" | "{" | "}" | "(" | ")" => return false,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// The ban checks of RULESET B8 that look at one token with its neighbours: unsafe and link
 /// items, addresses, platform sizes, lowercase type aliases, fn-pointer casts, and a float's
 /// bits that were not canonicalised. `oa-math` itself does bit arithmetic on floats by design.
 pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
     let math = ctx.math;
     let guard = guard_mask(toks);
-    let fn_names = fn_float_names(toks);
-    let is_math_root =
-        |w: &str| w == "oa_math" || ctx.aliases.get(w).is_some_and(|t| t == "oa-math");
-    // `canon_nan` names must be oa_math's: imported from it, or called through it
-    let mut imported: BTreeSet<&str> = BTreeSet::new();
+    let ev = Evidence::new(toks, ctx.floats);
+    // only the external crate `oa_math` (the dependency key, when the crate declares one, must
+    // name the oa-math package); a module, import rename or local of that name is not it
+    let math_dep = ctx.aliases.get("oa_math").is_none_or(|t| t == "oa-math");
+    let is_math_root = |w: &str| w == "oa_math" && math_dep;
+    // oa_math's helpers are called by qualified path only: an import, a bare call or a local
+    // of the same name could be anything, and the scan reads no types
     for (from, to) in use_statements(toks) {
+        if math {
+            break;
+        }
+        for t in toks.get(from..to).unwrap_or(&[]) {
+            if HELPERS.contains(&t.s.as_str()) {
+                hits.push(hit(
+                    t.line,
+                    &t.s,
+                    "B8: oa_math's helpers are called as `oa_math::<name>(..)`, never imported",
+                ));
+            }
+        }
         let body = toks.get(from..to).unwrap_or(&[]);
         let from_math = body
             .iter()
             .enumerate()
             .any(|(k, t)| is_math_root(&t.s) && is_path_start(body, k));
-        for t in body.iter().filter(|t| CANON.contains(&t.s.as_str())) {
-            if from_math {
-                imported.insert(t.s.as_str());
-            } else if !math {
-                hits.push(hit(
-                    t.line,
-                    &t.s,
-                    "B8: `canon_nan` is imported from `oa_math` only",
-                ));
-            }
+        if from_math && body.iter().any(|t| t.s == "*") {
+            hits.push(hit(
+                body.first().map_or(0, |t| t.line),
+                "*",
+                "B8: `use oa_math::*` hides which helper a name is; call `oa_math::<name>(..)`",
+            ));
         }
     }
+    let stmt = rename_statements(toks);
+    let in_use: BTreeSet<usize> = use_statements(toks)
+        .into_iter()
+        .flat_map(|(a, b)| a..b)
+        .collect();
     for (i, t) in toks.iter().enumerate() {
         let w = t.s.as_str();
         let prev = if i == 0 { "" } else { s(toks, i - 1) };
         let next = s(toks, i + 1);
         let qual = s(toks, i.wrapping_sub(2));
-        if CANON.contains(&w) && !math {
-            if matches!(
-                prev,
-                "fn" | "let"
-                    | "mut"
-                    | "const"
-                    | "static"
-                    | "type"
-                    | "struct"
-                    | "enum"
-                    | "trait"
-                    | "mod"
-                    | "impl"
-                    | "as"
-                    | "ref"
-                    | "."
-            ) {
-                hits.push(hit(
-                    t.line,
-                    w,
-                    "B8: core code defines or shadows nothing named `canon_nan`; it is oa_math's",
-                ));
-            } else if next == "(" {
-                let ours = if prev == "::" {
-                    is_math_root(qual)
-                } else {
-                    imported.contains(w)
-                };
-                if !ours {
-                    hits.push(hit(
-                        t.line,
-                        w,
-                        "B8: this `canon_nan` is not oa_math's: call `oa_math::canon_nan` or import it with `use oa_math::canon_nan;`",
-                    ));
-                }
-            }
+        if w == "oa_math"
+            && !math
+            && (next != "::"
+                || prev == "::"
+                || matches!(
+                    prev,
+                    "mod"
+                        | "as"
+                        | "fn"
+                        | "let"
+                        | "mut"
+                        | "const"
+                        | "static"
+                        | "type"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "trait"
+                        | "ref"
+                        | "crate"
+                        | "impl"
+                ))
+        {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: `oa_math` in core code names only the external crate, as the head of a path `oa_math::..`; a module, rename, local or parameter of that name fails",
+            ));
+        }
+        if (w == "capacity" && (prev == "::" || (prev == "." && next == "(")))
+            || w == "spare_capacity_mut"
+        {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: `capacity` (a call, a method or a path value such as `Vec::capacity`) is a value the allocator chooses; compare lengths or keep an explicit capacity value. `try_reserve`-style probes are left alone: their only result is success or failure",
+            ));
+        }
+        if !math && int_shadow(toks, i, &stmt) {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: an item, rename or generic parameter named after an integer primitive would capture `u64::to_le_bytes(x)`",
+            ));
+        }
+        if HELPERS.contains(&w)
+            && !math
+            && !in_use.contains(&i)
+            && (prev != "::" || !is_math_root(qual))
+        {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: this name is oa_math's: write `oa_math::<name>(..)`; core code defines, imports or shadows no helper of that name",
+            ));
         }
         if let Some((_, msg)) = BANNED_IDENTS.iter().find(|(n, _)| *n == w) {
             hits.push(hit(t.line, w, msg));
@@ -257,136 +411,140 @@ pub(super) fn token_bans(toks: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
                 "as fn",
                 "B8: no cast to a fn pointer, its Debug and Pointer text is an address",
             ));
-        } else if w == "to_bits"
-            && !math
-            && (prev == "." || (prev == "::" && matches!(qual, "f32" | "f64")))
-            && call_at(toks, i + 1)
-        {
-            // the receiver (or the UFCS argument) must be `canon_nan(..)`: a NaN's sign and
-            // payload are not portable
-            let open = skip_turbofish(toks, i + 1);
-            let canon = if prev == "." {
-                i >= 2
-                    && s(toks, i - 2) == ")"
-                    && open_of(toks, i - 2)
-                        .is_some_and(|o| o >= 1 && CANON.contains(&s(toks, o - 1)))
-            } else {
-                canon_call_end(toks, open + 1) == Some(skip_group(toks, open) - 1)
-            };
-            if !canon {
+        }
+        if !math {
+            float_rules(toks, i, &ev, hits);
+        }
+    }
+}
+
+/// The `Name::` qualifier of the method or path at `toks[i]` is a float type: `f64::x`, `<f32>::x`.
+fn float_path(toks: &[Tok], i: usize) -> bool {
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    let qual = s(toks, i.wrapping_sub(2));
+    prev == "::"
+        && (matches!(qual, "f32" | "f64")
+            || (qual == ">"
+                && matches!(s(toks, i.wrapping_sub(3)), "f32" | "f64")
+                && s(toks, i.wrapping_sub(4)) == "<"))
+}
+
+/// The rules of RULESET B8 about float bits, sign and order, for the token at `toks[i]`: what
+/// feeds a hash or a written output is `canon_nan(x).to_bits()`, and the functions whose result
+/// depends on the sign or payload of a NaN, or on the sign of a zero, are `oa_math`'s.
+fn float_rules(toks: &[Tok], i: usize, ev: &Evidence<'_>, hits: &mut Vec<Hit>) {
+    let w = s(toks, i);
+    let prev = if i == 0 { "" } else { s(toks, i - 1) };
+    let line = toks.get(i).map_or(0, |t| t.line);
+    let path = float_path(toks, i);
+    let method = prev == "." && call_at(toks, i + 1);
+    match w {
+        "to_bits" => {
+            // every `to_bits` token, method or path, any qualifier, fails unless it is the method
+            // on the result of `oa_math::canon_nan(..)`: a NaN's sign and payload are not portable
+            if !canon_to_bits(toks, i) {
                 hits.push(hit(
-                    t.line,
+                    line,
                     "to_bits",
-                    "B8: a float's bits in core code come from `oa_math::canon_nan(x).to_bits()`, a NaN's sign and payload differ between machines",
+                    "B8: `to_bits` in core code is allowed only directly after `oa_math::canon_nan(x)` or `oa_math::canon_nan_f32(x)`, a NaN's sign and payload differ between machines",
                 ));
             }
-        } else if BYTES.contains(&w) && !math && call_at(toks, i + 1) {
-            let float_recv = if prev == "::" {
-                matches!(qual, "f32" | "f64")
-            } else if prev == "." && i >= 2 {
-                let r = s(toks, i - 2);
-                // `name`, `name[..]` and `x.name` are judged by the name's declaration
-                let name_at = if r == "]" {
-                    open_of(toks, i - 2).and_then(|o| o.checked_sub(1))
-                } else {
-                    Some(i - 2)
-                };
-                (r.starts_with(|c: char| c.is_ascii_digit())
-                    && (r.ends_with("f64") || r.ends_with("f32")))
-                    || (r == ")"
-                        && matches!(s(toks, i.wrapping_sub(3)), "f32" | "f64")
-                        && s(toks, i.wrapping_sub(4)) == "as")
-                    || name_at.is_some_and(|n| {
-                        let name = s(toks, n);
-                        is_word(name)
-                            && if n >= 1 && s(toks, n - 1) == "." {
-                                ctx.float_names.contains(name)
-                            } else {
-                                fn_names.iter().any(|(from, to, names)| {
-                                    *from < n && n < *to && names.contains(name)
-                                })
-                            }
-                    })
-            } else {
-                false
-            };
-            if float_recv {
+        }
+        _ if BYTES.contains(&w) => {
+            // only `u64::to_le_bytes(x)` with an integer primitive qualifier: the compiler
+            // then rejects a float argument, which the scan cannot tell from any other receiver
+            let q = s(toks, i.wrapping_sub(2));
+            let ok = prev == "::"
+                && super::INT_TYPES.contains(&q)
+                && (s(toks, i.wrapping_sub(3)) != "::"
+                    || s(toks, i.wrapping_sub(4)) == "primitive");
+            if !ok {
                 hits.push(hit(
-                    t.line,
+                    line,
                     w,
-                    "B8: a float's bytes in core code come from `oa_math::canon_nan(x).to_bits()`, then the integer's bytes",
+                    &format!("B8: write `u64::{w}(x)` with an integer primitive as the qualifier (the compiler then refuses a float); a float's bytes come from `oa_math::canon_nan(x).to_bits()` and then the integer's"),
                 ));
             }
         }
-    }
-}
-
-/// Whether `toks[i]` is the `:` of a declaration `name: f64` (`&f32`, `[f64; N]`, `Vec<f64>`).
-fn declares_float(toks: &[Tok], i: usize) -> bool {
-    if s(toks, i) != ":" || i == 0 || !is_word(s(toks, i - 1)) {
-        return false;
-    }
-    let mut j = i + 1;
-    while matches!(s(toks, j), "&" | "mut" | "[" | "Vec" | "<" | "Option") {
-        j += 1;
-    }
-    matches!(s(toks, j), "f32" | "f64")
-}
-
-/// Names of the fields a file's structs declare with a float type.
-pub(super) fn float_fields(src: &str) -> BTreeSet<String> {
-    let toks = strip_test_items(tokenize(&mask(src))).toks;
-    let mut out = BTreeSet::new();
-    for (i, t) in toks.iter().enumerate() {
-        if t.s != "struct" {
-            continue;
+        "total_cmp" | "is_sign_negative" | "is_sign_positive" | "copysign" => {
+            let instead = match w {
+                "total_cmp" => "oa_math::cmp_canon_f64 or cmp_canon_f32",
+                "copysign" => "oa_math::copysign_canon_f64 or copysign_canon_f32",
+                _ => "oa_math::is_sign_negative_canon_f64 or is_sign_negative_canon_f32 (is_sign_positive is its negation)",
+            };
+            hits.push(hit(
+                line,
+                w,
+                &format!("B8: `{w}` reads the sign and payload of a NaN, which differ between machines; use {instead}"),
+            ));
         }
-        let Some(open) = (i..toks.len()).find(|&k| matches!(s(&toks, k), "{" | ";" | "(")) else {
-            continue;
-        };
-        if s(&toks, open) != "{" {
-            continue;
-        }
-        for k in open..skip_group(&toks, open) {
-            if declares_float(&toks, k) {
-                out.insert(s(&toks, k - 1).to_string());
+        "signum" | "min" | "max" | "clamp" => {
+            let float = path
+                || (method && {
+                    let open = skip_turbofish(toks, i + 1);
+                    let close = skip_group(toks, open);
+                    (i >= 2 && ev.recv_is_float(i - 2)) || ev.mentions(open + 1, close - 1)
+                });
+            if float {
+                let instead = match w {
+                    "signum" => "compare with 0.0 and write the sign out, or use oa_math::copysign_canon_f64(1.0, x)",
+                    "min" => "oa_math::min_f64 or min_f32",
+                    "max" => "oa_math::max_f64 or max_f32",
+                    _ => "oa_math::clamp_f64 or clamp_f32",
+                };
+                hits.push(hit(
+                    line,
+                    w,
+                    &format!("B8: a float `{w}` does not say which zero it returns for -0.0 and 0.0 or which NaN it keeps; use {instead}"),
+                ));
             }
         }
+        _ => {}
     }
-    out
 }
 
-/// Per `fn` of the file: the token span of the item and the names it declares with a float type
-/// (parameters, typed `let`s, closure parameters).
-fn fn_float_names(toks: &[Tok]) -> Vec<(usize, usize, BTreeSet<String>)> {
-    let mut out = Vec::new();
+/// Sign and order reads the whole workspace leaves to `oa_math` (RULESET B8, OA-TRC-260): the
+/// standard library's `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` and `signum`
+/// depend on the sign and payload of a NaN, which differ between machines, so a sort or a
+/// selection that reads them can pick differently on two of them. Returns the hits of the
+/// non-test tokens of `src`, the out-of-line test modules and whether the whole file is test code.
+/// `signum` is allowed only as the integer path `i64::signum(x)`, which the compiler checks.
+pub(super) fn sign_order_hits(src: &str) -> (Vec<Hit>, Vec<String>, bool) {
+    let st = strip_test_items(tokenize(&mask(src)));
+    let toks = &st.toks;
+    let mut hits = Vec::new();
+    let stmt = rename_statements(toks);
     for (i, t) in toks.iter().enumerate() {
-        if t.s != "fn" || !is_word(s(toks, i + 1)) {
+        let w = t.s.as_str();
+        if int_shadow(toks, i, &stmt) {
+            hits.push(hit(
+                t.line,
+                w,
+                "B8: an item, rename or generic parameter named after an integer primitive would capture `i64::signum(x)`",
+            ));
+        }
+        let instead = match w {
+            "total_cmp" => "oa_math::cmp_canon_f64 or cmp_canon_f32",
+            "copysign" => "oa_math::copysign_canon_f64 or copysign_canon_f32",
+            "is_sign_negative" | "is_sign_positive" => {
+                "oa_math::is_sign_negative_canon_f64 or is_sign_negative_canon_f32 (is_sign_positive is its negation)"
+            }
+            "signum" => "oa_math::signum_canon_f64 or signum_canon_f32, or the integer path `i64::signum(x)`",
+            _ => continue,
+        };
+        if w == "signum"
+            && s(toks, i.wrapping_sub(1)) == "::"
+            && super::INT_TYPES.contains(&s(toks, i.wrapping_sub(2)))
+        {
             continue;
         }
-        let mut depth = 0usize;
-        let mut k = i + 2;
-        while k < toks.len() {
-            match s(toks, k) {
-                "(" | "[" => depth += 1,
-                ")" | "]" => depth = depth.saturating_sub(1),
-                "{" | ";" if depth == 0 => break,
-                _ => {}
-            }
-            k += 1;
-        }
-        let end = if s(toks, k) == "{" {
-            skip_group(toks, k)
-        } else {
-            k
-        };
-        let names = (i..end)
-            .filter(|&m| declares_float(toks, m))
-            .map(|m| s(toks, m - 1).to_string())
-            .collect();
-        out.push((i, end, names));
+        hits.push(hit(
+            t.line,
+            w,
+            &format!("B8: `{w}` reads the sign and payload of a NaN, which differ between machines; use {instead}"),
+        ));
     }
-    out
+    (hits, st.test_mods, st.whole_file)
 }
 
 /// Item names a file defines with `struct`, `enum`, `union`, `trait` or `type` (the type and
@@ -453,7 +611,7 @@ fn taint(toks: &[Tok], core: &BTreeSet<String>) -> BTreeSet<String> {
 
 /// The last path segment that leads `toks` (`&mut a::b::T<X>` gives `T`) and whether the path
 /// runs through `crate::core`, `super::core` or `self::core`.
-fn head_of(toks: &[Tok]) -> (String, bool) {
+pub(super) fn head_of(toks: &[Tok]) -> (String, bool) {
     let mut j = 0;
     while matches!(
         s(toks, j),
@@ -579,172 +737,6 @@ pub struct CallbackSig {
     pub line: usize,
     /// What makes it one: `Fn`, `FnMut`, `FnOnce`, `dyn`, `impl` in a parameter, a bound, `where`.
     pub why: String,
-}
-
-/// The `pub` items of a core file (any visibility `pub`, `pub(crate)` included) that let shell
-/// code hand behaviour to the core (RULESET B5): a `pub fn` whose signature names `Fn`, `FnMut`,
-/// `FnOnce`, `dyn` or a bare `fn(..)` pointer type, takes `impl Trait` as a parameter or has a
-/// bound (`<T: Bound>` or `where`), also when the bound sits on the `impl` block around it; and a
-/// `pub struct`, `enum`, `union` or `type` that holds an `Fn*`, `dyn` or `fn(..)` type.
-pub fn callback_sigs(src: &str) -> Vec<CallbackSig> {
-    let toks = strip_test_items(tokenize(&mask(src))).toks;
-    let mut out = Vec::new();
-    // body span and reasons of every `impl` block whose header has a bound, a `where` or a
-    // callback type
-    let mut impls: Vec<(usize, usize, Vec<&str>)> = Vec::new();
-    for (i, t) in toks.iter().enumerate() {
-        let prev = if i == 0 { "" } else { s(&toks, i - 1) };
-        if t.s != "impl" || !matches!(prev, "" | ";" | "}" | "{" | "]" | "unsafe") {
-            continue;
-        }
-        let mut why: Vec<&str> = Vec::new();
-        let mut k = i + 1;
-        if s(&toks, k) == "<" {
-            let mut depth = 0usize;
-            while k < toks.len() {
-                match s(&toks, k) {
-                    "<" => depth += 1,
-                    ">" if s(&toks, k - 1) != "-" => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            k += 1;
-                            break;
-                        }
-                    }
-                    ":" if depth == 1 => why.push("impl bound"),
-                    _ => {}
-                }
-                k += 1;
-            }
-        }
-        let mut depth = 0usize;
-        while k < toks.len() {
-            let w = s(&toks, k);
-            match w {
-                "(" | "[" => depth += 1,
-                ")" | "]" => depth = depth.saturating_sub(1),
-                "{" | ";" if depth == 0 => break,
-                "where" if depth == 0 => why.push("impl where"),
-                "Fn" | "FnMut" | "FnOnce" | "dyn" => why.push("impl callback"),
-                "fn" if s(&toks, k + 1) == "(" => why.push("impl fn pointer"),
-                _ => {}
-            }
-            k += 1;
-        }
-        if s(&toks, k) == "{" && !why.is_empty() {
-            impls.push((k, skip_group(&toks, k), why));
-        }
-    }
-    for (i, t) in toks.iter().enumerate() {
-        if t.s != "pub" {
-            continue;
-        }
-        let mut j = i + 1;
-        if s(&toks, j) == "(" {
-            j = skip_group(&toks, j);
-        }
-        let j = skip_modifiers(&toks, j);
-        let kw = s(&toks, j);
-        if matches!(kw, "struct" | "enum" | "union" | "type") && is_word(s(&toks, j + 1)) {
-            let name = s(&toks, j + 1).to_string();
-            let mut depth = 0usize;
-            let mut k = j + 2;
-            let mut why: Vec<&str> = Vec::new();
-            while k < toks.len() {
-                let w = s(&toks, k);
-                match w {
-                    "(" | "[" | "{" => depth += 1,
-                    ")" | "]" => depth = depth.saturating_sub(1),
-                    "}" => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    ";" if depth == 0 => break,
-                    "Fn" | "FnMut" | "FnOnce" | "dyn" => why.push(w),
-                    "fn" if s(&toks, k + 1) == "(" => why.push("fn pointer"),
-                    _ => {}
-                }
-                k += 1;
-            }
-            why.sort_unstable();
-            why.dedup();
-            if !why.is_empty() {
-                out.push(CallbackSig {
-                    name,
-                    line: t.line,
-                    why: format!("a field type: {}", why.join(", ")),
-                });
-            }
-            continue;
-        }
-        if kw != "fn" || !is_word(s(&toks, j + 1)) {
-            continue;
-        }
-        let name = s(&toks, j + 1).to_string();
-        let line = toks.get(j).map_or(0, |t| t.line);
-        let mut k = j + 2;
-        let mut why: Vec<&str> = Vec::new();
-        if s(&toks, k) == "<" {
-            let mut depth = 0usize;
-            while k < toks.len() {
-                match s(&toks, k) {
-                    "<" => depth += 1,
-                    ">" if s(&toks, k - 1) != "-" => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            k += 1;
-                            break;
-                        }
-                    }
-                    ":" if depth == 1 => why.push("a bound"),
-                    _ => {}
-                }
-                k += 1;
-            }
-        }
-        let mut depth = 0usize;
-        let mut in_params = true;
-        let mut seen_params = false;
-        while k < toks.len() {
-            let w = s(&toks, k);
-            match w {
-                "(" | "[" => {
-                    depth += 1;
-                    seen_params = true;
-                }
-                ")" | "]" => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 && seen_params {
-                        in_params = false;
-                    }
-                }
-                "{" | ";" if depth == 0 => break,
-                "where" if depth == 0 => why.push("where"),
-                "Fn" | "FnMut" | "FnOnce" | "dyn" => why.push(w),
-                "fn" if s(&toks, k + 1) == "(" => why.push("fn pointer"),
-                "impl" if in_params => why.push("impl"),
-                _ => {}
-            }
-            k += 1;
-        }
-        for (from, to, ws) in &impls {
-            if *from < j && j < *to {
-                why.extend(ws.iter().copied());
-            }
-        }
-        why.sort_unstable();
-        why.dedup();
-        if !why.is_empty() {
-            out.push(CallbackSig {
-                name,
-                line,
-                why: why.join(", "),
-            });
-        }
-    }
-    out
 }
 
 /// One line of the callback allowlist.

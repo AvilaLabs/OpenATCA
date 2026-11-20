@@ -83,10 +83,10 @@ pub(crate) enum Meet {
 // E8: coordinates are i32, so every difference and product fits i128; the loop index stays below the slice length.
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn segments_meet(a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)) -> Meet {
-    let o1 = orient(a, b, c).signum();
-    let o2 = orient(a, b, d).signum();
-    let o3 = orient(c, d, a).signum();
-    let o4 = orient(c, d, b).signum();
+    let o1 = i128::signum(orient(a, b, c));
+    let o2 = i128::signum(orient(a, b, d));
+    let o3 = i128::signum(orient(c, d, a));
+    let o4 = i128::signum(orient(c, d, b));
     if o1 * o2 < 0 && o3 * o4 < 0 {
         return Meet::Proper;
     }

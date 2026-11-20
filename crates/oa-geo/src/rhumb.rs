@@ -169,7 +169,7 @@ impl Ellipsoid {
             } else {
                 (-HALF_PI, phi1)
             };
-            let mut phi = (phi1 + t / self.merid_radius(phi1)).clamp(lo, hi);
+            let mut phi = oa_math::clamp_f64(phi1 + t / self.merid_radius(phi1), lo, hi);
             let mut converged = false;
             for _ in 0..100 {
                 let val = self.meridian_arc(phi1, phi) - t;
@@ -179,7 +179,7 @@ impl Ellipsoid {
                     hi = phi;
                 }
                 let step = val / self.merid_radius(phi);
-                if val == 0.0 || step.abs() <= 2e-16 * phi.abs().max(1e-3) {
+                if val == 0.0 || step.abs() <= 2e-16 * oa_math::max_f64(phi.abs(), 1e-3) {
                     converged = true;
                     break;
                 }
@@ -198,7 +198,7 @@ impl Ellipsoid {
         let d = self.mean_parallel_radius(phi1, phi2);
         let dlon = (distance_m * sin_a / d).to_degrees();
         LatLon::new(
-            phi2.to_degrees().clamp(-90.0, 90.0),
+            oa_math::clamp_f64(phi2.to_degrees(), -90.0, 90.0),
             ang_normalize(p1.lon() + ang_normalize(dlon)),
         )
     }
@@ -242,12 +242,12 @@ impl Ellipsoid {
         s12: f64,
         guess: f64,
     ) -> Result<(f64, f64), GeoError> {
-        let mut s = guess.clamp(0.0, s12);
+        let mut s = oa_math::clamp_f64(guess, 0.0, s12);
         for _ in 0..NEWTON_STEPS {
             let q = self.direct(start, azi1, s)?;
             let inv = self.inverse(q.position, p)?;
             let theta = ang_normalize(inv.azimuth1_deg - q.azimuth2_deg).to_radians();
-            let next = (s + inv.distance_m * oa_math::cos(theta)).clamp(0.0, s12);
+            let next = oa_math::clamp_f64(s + inv.distance_m * oa_math::cos(theta), 0.0, s12);
             if (next - s).abs() < NEWTON_TOL_M {
                 // Distance from the last evaluated point; it differs from the distance at
                 // `next` by less than the tolerance, second order.
@@ -287,7 +287,7 @@ impl Ellipsoid {
         let mut x2 = lo + GOLDEN * (hi - lo);
         let mut f1 = dist_at(x1)?;
         let mut f2 = dist_at(x2)?;
-        let mut min = best.1.min(f1).min(f2);
+        let mut min = oa_math::min_f64(oa_math::min_f64(best.1, f1), f2);
         for _ in 0..80 {
             if f1 < f2 {
                 hi = x2;
@@ -302,7 +302,7 @@ impl Ellipsoid {
                 x2 = lo + GOLDEN * (hi - lo);
                 f2 = dist_at(x2)?;
             }
-            min = min.min(f1).min(f2);
+            min = oa_math::min_f64(oa_math::min_f64(min, f1), f2);
         }
         Ok(min)
     }

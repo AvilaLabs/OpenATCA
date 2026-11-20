@@ -95,7 +95,12 @@ pub fn run_benchmark(leg: &Legacy, truth: &Truth<'_>, env: &Env<'_>, cfg: &RunCo
         }
     }
     let mut a = assoc_result(&assoc.counts, &reasons, assoc.unchecked, &cfg.assoc);
-    association_cases(leg, &ix, &assoc, &mut a);
+    let total = association_cases(leg, &ix, &assoc, &mut a);
+    case_scalars(
+        &mut a,
+        duplicate_addr_groups(leg, &ix, &assoc).len() as u64,
+        total,
+    );
     m.push(a);
     RunOutput {
         metrics: m,
@@ -185,6 +190,10 @@ pub(crate) fn assoc_result(
         unchecked as f64,
     ));
     a.notes.push(format!(
+        "hint over plan: {}",
+        if cfg.hint_over_plan { "on" } else { "off" }
+    ));
+    a.notes.push(format!(
         "selection never uses ERAM accuracy: callsign flights are kept when truth overlaps in time and lies within {:.0} NM; the {:.0} NM / {:.0} ft check only splits the callsign method",
         cfg.region_m / crate::geo::NM_M,
         cfg.gate_h_m / crate::geo::NM_M,
@@ -239,6 +248,19 @@ pub(crate) fn association_case_lines(
                     a.gate_share.get(f).copied().unwrap_or(f64::NAN) * 100.0
                 ),
             ),
+            astatus::HINT_OVER_PLAN => (
+                1u8,
+                a.addr.get(f).copied().unwrap_or(NONE),
+                format!(
+                    "flight {cs}: plan address {}, track address hint {}; used the hint, scored under method 'address hint (plan address implausible or unknown to truth)'; plan address failed: {}",
+                    hex_addr(leg.flights.addr.get(f).copied().unwrap_or(NONE)),
+                    hex_addr(leg.flights.addr_hint.get(f).copied().unwrap_or(NONE)),
+                    astatus::PLAN_FAIL_NAMES
+                        .get(usize::from(a.plan_fail.get(f).copied().unwrap_or(0)))
+                        .copied()
+                        .unwrap_or("")
+                ),
+            ),
             astatus::ADDRESS_IMPLAUSIBLE
             | astatus::HINT_IMPLAUSIBLE
             | astatus::CALLSIGN_IMPLAUSIBLE => (
@@ -261,20 +283,111 @@ pub(crate) fn association_case_lines(
             .unwrap_or(0);
         v.push(((sev, addr, t), line));
     }
+    for (addr, fs) in duplicate_addr_groups(leg, ix, a) {
+        let names: Vec<String> = fs
+            .iter()
+            .map(|&f| {
+                leg.flights
+                    .callsign
+                    .get(f)
+                    .map_or_else(String::new, |c| crate::legacy::name(c).to_string())
+            })
+            .collect();
+        let t = fs
+            .iter()
+            .filter_map(|&f| {
+                crate::thindex::samples_of(ix, f as u32)
+                    .first()
+                    .and_then(|&s| leg.th.pos_ms.get(s as usize).copied())
+            })
+            .min()
+            .unwrap_or(0);
+        v.push((
+            (1u8, addr, t),
+            format!(
+                "truth address {} associated with {} ERAM flights at the same time: {}",
+                hex_addr(addr),
+                fs.len(),
+                names.join(", ")
+            ),
+        ));
+    }
     v
+}
+
+/// An address as six hex digits, `none` when absent.
+fn hex_addr(a: u32) -> String {
+    if a == NONE {
+        "none".to_string()
+    } else {
+        format!("{a:06X}")
+    }
 }
 
 /// Lists the flights kept despite failing the tight check and the flagged flights, in the order
 /// of [`association_case_lines`], at most [`crate::stats::MAX_CASES`].
+/// Returns the number of case lines before the list was cut.
 pub(crate) fn association_cases(
     leg: &Legacy,
     ix: &crate::thindex::ThIndex,
     a: &Assoc,
     r: &mut MetricResult,
-) {
+) -> u64 {
     let mut v = association_case_lines(leg, ix, a);
+    let total = v.len() as u64;
     sort_cases(&mut v);
     r.cases = v.into_iter().map(|c| c.1).collect();
+    total
+}
+
+/// Truth addresses associated (in the primary rows) with flights whose time spans (first to last
+/// sample time) overlap, with those flights. Consecutive legs of one aircraft do not overlap and
+/// are not listed.
+pub(crate) fn duplicate_addr_groups(
+    leg: &Legacy,
+    ix: &crate::thindex::ThIndex,
+    a: &Assoc,
+) -> std::collections::BTreeMap<u32, Vec<usize>> {
+    let span = |f: usize| {
+        let mut it = crate::thindex::samples_of(ix, f as u32)
+            .iter()
+            .filter_map(|&s| leg.th.pos_ms.get(s as usize).copied());
+        let first = it.next()?;
+        Some(it.fold((first, first), |(lo, hi), t| (lo.min(t), hi.max(t))))
+    };
+    let mut by: std::collections::BTreeMap<u32, Vec<(usize, i64, i64)>> =
+        std::collections::BTreeMap::new();
+    for (f, &addr) in a.addr.iter().enumerate() {
+        if let (true, Some((lo, hi))) = (addr != NONE, span(f)) {
+            by.entry(addr).or_default().push((f, lo, hi));
+        }
+    }
+    let mut m = std::collections::BTreeMap::new();
+    for (addr, v) in by {
+        let fs: Vec<usize> = v
+            .iter()
+            .filter(|x| v.iter().any(|y| y.0 != x.0 && x.1.max(y.1) <= x.2.min(y.2)))
+            .map(|x| x.0)
+            .collect();
+        if fs.len() > 1 {
+            m.insert(addr, fs);
+        }
+    }
+    m
+}
+
+/// The scalars about the case list: addresses shared by several flights, and the lines the cut
+/// list left out (`total` lines were found, `r.cases` holds what was kept).
+pub(crate) fn case_scalars(r: &mut MetricResult, duplicates: u64, total: u64) {
+    r.scalars.push((
+        "truth addresses associated with more than one ERAM flight at the same time".to_string(),
+        duplicates as f64,
+    ));
+    let left = total.saturating_sub(r.cases.len() as u64);
+    r.scalars.push((
+        "more cases not listed (the list is cut at 200)".to_string(),
+        left as f64,
+    ));
 }
 
 /// Scores a tracker's output columns: the columns become the legacy table

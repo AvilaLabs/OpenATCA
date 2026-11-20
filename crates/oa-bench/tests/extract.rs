@@ -186,6 +186,7 @@ fn rows_past_a_capacity_are_dropped_and_counted() {
         handoffs: 0,
         routes: 0,
         route_points: 2,
+        beacons: 1,
         tbfm: 2,
         tfms: 1,
     };

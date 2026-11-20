@@ -1,0 +1,249 @@
+{
+  "study_id": "openatca-motion-study-v1",
+  "status": "preregistered_development_experiment",
+  "created_before_results": true,
+  "purpose": "Select among exactly three H_Q_CV values for development-only kinematic accuracy checks.",
+  "claim_scope": "developmental_model_check_only",
+  "prohibited_claims": [
+    "independent_physical_accuracy",
+    "professional_tracker_qualification",
+    "v1_comparison_reference_qualification",
+    "qualification_seed_performance"
+  ],
+  "frozen_protocol": {
+    "protocol_id": "openatca-comparison",
+    "version": "1.0.3",
+    "sha256_source": "validation/comparison-protocol-v1.json",
+    "scenario_set": [
+      "straight",
+      "turn",
+      "acceleration",
+      "crossing",
+      "dropout",
+      "delayed"
+    ],
+    "diagnostic_scenario": "onset-exit"
+  },
+  "training": {
+    "seed_ids": [
+      1,
+      2,
+      3
+    ],
+    "aircraft_count": 20,
+    "duration_s": 300,
+    "settings": [
+      {
+        "setting_id": "hqcv-1",
+        "H_Q_CV": 1.0
+      },
+      {
+        "setting_id": "hqcv-0_1",
+        "H_Q_CV": 0.1
+      },
+      {
+        "setting_id": "hqcv-0_01",
+        "H_Q_CV": 0.01
+      }
+    ],
+    "changed_parameter": "H_Q_CV only",
+    "all_other_motion_and_measurement_parameters": "frozen_default",
+    "winner_rule": "Among candidates meeting every training gate, choose lowest pooled nominal post-initialization position RMS; exact ties choose lower H_Q_CV, then setting_id lexical order.",
+    "candidate_count": 3,
+    "candidate_runs": 63,
+    "paired_frozen_default_reference_runs": 63,
+    "case_allocation": "Each of 3 H_Q_CV candidates \u00d7 3 seeds \u00d7 (six v1 scenarios plus onset-exit) is paired with frozen default on byte-identical inputs."
+  },
+  "development_check": {
+    "seed_ids": [
+      4,
+      5,
+      6
+    ],
+    "aircraft_count": 20,
+    "duration_s": 300,
+    "selected_setting_only": false,
+    "observed_after_training_winner_selection": true,
+    "purpose": "development stability check only; never used to retune or select another winner",
+    "allowed_pair_settings": [
+      "selected_setting_id",
+      "frozen-default"
+    ],
+    "clarification": "Run the selected candidate and frozen-default H_Q_CV=1 control on the same check inputs; no other experimental H_Q_CV settings may be run.",
+    "selected_candidate_runs": 21,
+    "paired_frozen_default_reference_runs": 21,
+    "case_allocation": "One selected candidate \u00d7 3 seeds \u00d7 six v1 scenarios plus onset-exit, each paired with frozen default on identical inputs; no other candidate value."
+  },
+  "main_profile_gates": {
+    "coverage": {
+      "candidate_postinit_usable_fraction_min": 1.0,
+      "candidate_at_least_baseline_coverage": true,
+      "identical_usable_truth_grid_keys": true,
+      "zero_lost_pending_refused": true
+    },
+    "nominal_scenarios": [
+      "straight",
+      "turn",
+      "acceleration",
+      "crossing",
+      "delayed"
+    ],
+    "per_scenario_position_p99_ratio_to_frozen_default_max": 1.02,
+    "per_scenario_velocity_rms_ratio_to_frozen_default_max": 1.02,
+    "turn_velocity_rms_ratio_to_frozen_default_max": 1.02,
+    "dropout_diagnostic": {
+      "paired_position_p99_ratio_to_frozen_default_max": 1.02,
+      "same_coverage_as_frozen_default": true,
+      "does_not_qualify_or_reclassify_dropout": true
+    },
+    "per_scenario_position_rms_ratio_to_frozen_default_max": 1.02,
+    "turn_scenario_turn_phase_position_rms_ratio_to_frozen_default_max": 1.02,
+    "per_scenario_turn_rate_rms_ratio_to_frozen_default_max": 1.02
+  },
+  "onset-exit": {
+    "trajectory": {
+      "initial_position_m": "existing per-flight v2 x0,y0",
+      "initial_heading_deg": 0.0,
+      "speed_mps": 150.0,
+      "straight_interval_s": [
+        0,
+        60
+      ],
+      "turn_rate_deg_s": "s * 2",
+      "turn_interval_s": [
+        60,
+        120
+      ],
+      "final_heading_deg": "s * 120",
+      "post_turn_motion": "straight at 150 m/s on final heading",
+      "response_windows_s": [
+        [
+          0,
+          30
+        ],
+        [
+          60,
+          90
+        ],
+        [
+          120,
+          150
+        ]
+      ],
+      "hand_expected_times_s": [
+        0,
+        60,
+        105,
+        120
+      ],
+      "turn_direction": "mirrored by numeric flight ID parity: even s=+1, odd s=-1",
+      "formula": "q=s*w*(t-60); x=x0+9000+(150/(s*w))*sin(q), y=y0+(150/(s*w))*(1-cos(q)); after120 continue linearly at exit position/velocity"
+    },
+    "position_rms_ratio_to_frozen_default_max": 1.02,
+    "position_p99_ratio_to_frozen_default_max": 1.02,
+    "turn_rate_crossing_threshold_deg_s": 0.5,
+    "turn_rate_sustained_samples": 3,
+    "turn_lag_worse_than_default_max_s": 1.0,
+    "censored_lag": "reported as right-censored at response-window end; never assigned zero or dropped",
+    "turn_lag": {
+      "onset_ns": "60s from scenario epoch",
+      "exit_ns": "120s from scenario epoch",
+      "response_windows_s": [
+        [
+          60,
+          90
+        ],
+        [
+          120,
+          150
+        ]
+      ],
+      "mu_ct_onset": ">=0.5 sustained for 3 samples",
+      "mu_ct_exit": "<0.5 sustained for 3 samples",
+      "turn_rate_onset": "abs(turn_rate_rps)>=0.5 degrees/s sustained for 3 samples",
+      "turn_rate_exit": "abs(turn_rate_rps)<0.5 degrees/s sustained for 3 samples",
+      "candidate_minus_default_lag_max_s": 1.0,
+      "censored_crossing": "fails response guard; report as right-censored at 30s",
+      "gate_by": [
+        "flight_direction",
+        "transition"
+      ]
+    }
+  },
+  "uncertainty": {
+    "basis": "candidate output covariance in candidate local ENU axes",
+    "score": "2D posterior Mahalanobis containment of paired post-initialization horizontal errors",
+    "coverage_floors_by_nominal_scenario": {
+      "50": 0.45,
+      "90": 0.87,
+      "95": 0.93
+    },
+    "report_overcoverage": true,
+    "non_positive_definite_or_invalid_covariance": "fail setting",
+    "nis_claim": false,
+    "nis_reason": "pre-gate public API does not expose NIS",
+    "cluster_unit": "(seed, flight_id) paired cluster",
+    "bootstrap": {
+      "method": "hierarchical paired cluster bootstrap: sample seed blocks with replacement, then sample whole flights within each selected seed with replacement; retain each selected flight\u2019s full row/ping block",
+      "seed": 173,
+      "replicates": 2000,
+      "lower_bound": "one-sided 95%, nearest-rank index ceil(0.05 * replicates) - 1",
+      "minimum_clusters_per_group": 20,
+      "minimum_scored_rows_per_group": 200,
+      "pass_rule": "95% bootstrap lower bound meets each containment floor"
+    },
+    "grouping": "Pool the three training seeds separately for each nominal scenario; for onset-exit, separately for every direction \u00d7 transition-window group. Each per-case report stores per-(seed,flight) containment counts/successes for cohort aggregation.",
+    "floors_apply_to": "every preregistered nominal scenario and each onset-exit direction/response-window group",
+    "terminology": "undercoverage guard, not a complete calibration proof"
+  },
+  "analysis": {
+    "pairing_key": [
+      "scenario_id",
+      "flight_id",
+      "score_ns"
+    ],
+    "postinit_start": "scenario epoch + frozen initialization window",
+    "position_frame": "candidate local ENU for covariance; evaluator WGS84 horizontal error for paired benchmark metrics",
+    "velocity_metrics": [
+      "RMS",
+      "turn RMS"
+    ],
+    "percentile": "nearest rank, no interpolation",
+    "missing_policy": "retain full-grid coverage and missing/cold-start rows; do not impute errors",
+    "one_development_check_candidate_only": true,
+    "cross_scenario_confidence_intervals": "not claimed from this small development study",
+    "selection_rule": "All hard gates pass, then choose lowest pooled nominal post-initialization position RMS; exact ties choose lower H_Q_CV then lexical setting_id."
+  },
+  "stopping_rule": {
+    "candidate_settings": 3,
+    "development_check_candidates": 1,
+    "no_tuning_after_observing_development_check": true,
+    "no_qualification_or_fault_seed_access": true,
+    "never_open_seed_ids": "1000001 and above"
+  },
+  "implementation_parameter_fields": [
+    "H_Q_CV",
+    "H_Q_CT",
+    "H_Q_OMEGA",
+    "H_TAU_CV_S",
+    "H_TAU_CT_S",
+    "CT_OMEGA_STD_FLOOR"
+  ],
+  "build_evidence_fields": [
+    "source_head",
+    "source_status",
+    "params_source_sha256",
+    "runner_source_sha256",
+    "binary_sha256",
+    "expected_motion_parameters",
+    "native_regression_pass",
+    "native_guard_log_sha256"
+  ],
+  "native_regression_guard": {
+    "required_before_candidate_selection": true,
+    "test": "oa-track core accelerating_flight_is_tracked",
+    "run_for": "each of the three candidate settings before winner selection",
+    "failure_rule": "missing evidence or nonzero exit makes setting ineligible",
+    "selected_candidate_followup": "run full oa-track core suite; it cannot change the preselected candidate"
+  }
+}

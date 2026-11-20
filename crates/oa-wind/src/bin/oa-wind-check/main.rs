@@ -103,7 +103,7 @@ fn wind_obs(t: &PirepTable) -> Vec<ObsWind> {
             wspd_kt: f64::from(spd),
         });
     }
-    v.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    v.sort_by(|a, b| oa_math::cmp_canon_f64(a.time_s, b.time_s));
     v
 }
 

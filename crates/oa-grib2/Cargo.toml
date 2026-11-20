@@ -15,6 +15,7 @@ testenc = []
 
 [dependencies]
 oa-j2k = { path = "../oa-j2k" }
+oa-math = { path = "../oa-math" }
 
 [package.metadata.openatca]
 class = "shell"

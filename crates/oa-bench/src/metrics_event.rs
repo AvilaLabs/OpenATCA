@@ -773,7 +773,7 @@ fn nearest_clearly(cands: &[(f64, f64)], anchor: (f64, f64)) -> Option<(f64, f64
         .iter()
         .map(|&c| (dist_m(anchor.0, anchor.1, c.0, c.1), c))
         .collect();
-    d.sort_by(|a, b| a.0.total_cmp(&b.0));
+    d.sort_by(|a, b| oa_math::cmp_canon_f64(a.0, b.0));
     match (d.first(), d.get(1)) {
         (Some(&(d0, c)), Some(&(d1, _))) if d1 >= 1.5 * d0 => Some(c),
         _ => None,

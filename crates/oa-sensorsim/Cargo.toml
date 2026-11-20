@@ -15,6 +15,7 @@ oa-adsb = { path = "../oa-adsb" }
 oa-asterix = { path = "../oa-asterix" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
 oa-truth = { path = "../oa-truth" }
 
 [[bin]]

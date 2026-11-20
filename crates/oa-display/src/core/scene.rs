@@ -83,6 +83,12 @@ use oa_airspace::core::model::{
 };
 use std::fmt::Write;
 
+/// Maximum precharged work in one scene build. The charge covers table scans, declared span
+/// visits, edge subdivision, point-label sorting (at most n * ceil(log2 n) comparisons, times the longest identifier) and
+/// worst-case label-grid slot inspection.
+pub const MAX_SCENE_WORK: u128 = 1 << 40;
+pub const MAX_SCENE_PIXELS: u128 = crate::core::raster::MAX_DISPLAY_PIXELS as u128;
+
 /// Layers, drawn first to last.
 pub const LAYER_RING: u8 = 0;
 pub const LAYER_AIRWAY: u8 = 1;
@@ -457,6 +463,9 @@ pub fn scene_caps(m: &Model) -> Result<ListCaps, DisplayError> {
 pub struct Scratch {
     /// Candidate capacity: the number of points in the model.
     pub cap: usize,
+    /// Candidates the frame has filled so far (at most `cap`); every per-candidate buffer below
+    /// has a fixed length of `cap` and is written by index, so a frame never grows one.
+    pub used: usize,
     /// Per candidate, filled by the frame: priority (1 first), symbol centre and gap to the label,
     /// label width (all 1/16 pixel), model point row.
     pub prio: Vec<u8>,
@@ -467,6 +476,8 @@ pub struct Scratch {
     pub point: Vec<u32>,
     /// Candidate indexes in placement order.
     pub order: Vec<u32>,
+    /// The merge sort's one scratch buffer for `order`, bounded by the candidate capacity.
+    pub order_tmp: Vec<u32>,
     /// Per candidate: the offset 0 to 3 it was placed at, or [`DROPPED_NO_ROOM`] or
     /// [`DROPPED_CELL_FULL`].
     pub outcome: Vec<u8>,
@@ -500,6 +511,7 @@ pub const MAX_GRID_BOXES: usize = 1 << 22;
 /// grid above [`MAX_GRID_BOXES`] is refused with [`DisplayError::TooLarge`] before anything is
 /// allocated.
 pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
+    let pixels = u128::from(v.proj.width) * u128::from(v.proj.height);
     let n = check_limit(
         "label candidates",
         m.points.kind.len() as u128,
@@ -509,16 +521,25 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
     let rows = (v.proj.height as usize).div_ceil(64).max(1);
     let cells = (cols as u128) * (rows as u128);
     check_limit("label grid boxes", cells * CELL_CAP as u128, MAX_GRID_BOXES)?;
+    if pixels > MAX_SCENE_PIXELS {
+        return Err(DisplayError::TooLarge {
+            what: "scene pixels",
+            requested: pixels,
+            limit: MAX_SCENE_PIXELS as usize,
+        });
+    }
     Ok(Scratch {
         cap: n,
-        prio: Vec::with_capacity(n),
-        x: Vec::with_capacity(n),
-        y: Vec::with_capacity(n),
-        gap: Vec::with_capacity(n),
-        w: Vec::with_capacity(n),
-        point: Vec::with_capacity(n),
-        order: Vec::with_capacity(n),
-        outcome: Vec::with_capacity(n),
+        used: 0,
+        prio: vec![0; n],
+        x: vec![0; n],
+        y: vec![0; n],
+        gap: vec![0; n],
+        w: vec![0; n],
+        point: vec![0; n],
+        order: vec![0; n],
+        order_tmp: vec![0; n],
+        outcome: vec![DROPPED_NO_ROOM; n],
         overflow: 0,
         cols,
         rows,
@@ -530,14 +551,7 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
 
 /// Empties the candidates and the grid and sets where labels may lie.
 fn scratch_clear(s: &mut Scratch, p: &Projection) {
-    s.prio.clear();
-    s.x.clear();
-    s.y.clear();
-    s.gap.clear();
-    s.w.clear();
-    s.point.clear();
-    s.order.clear();
-    s.outcome.clear();
+    s.used = 0;
     s.overflow = 0;
     s.cell_n.fill(0);
     let px16 = |v: u32| i32::try_from(i64::from(v) * 16).unwrap_or(i32::MAX);
@@ -660,10 +674,11 @@ pub fn label_geom(gap: i32, w: i32, cx: i32, cy: i32, k: u8) -> ((i32, i32), u8,
 /// Places every candidate in `s.order` at its first free offset and records the outcome per
 /// candidate. Returns the number placed.
 pub fn place_labels(s: &mut Scratch) -> u32 {
-    s.outcome.clear();
-    s.outcome.resize(s.prio.len(), DROPPED_NO_ROOM);
+    for o in s.outcome.iter_mut().take(s.used) {
+        *o = DROPPED_NO_ROOM;
+    }
     let mut placed = 0;
-    for oi in 0..s.order.len() {
+    for oi in 0..s.used {
         let Some(&i) = s.order.get(oi) else { break };
         let i = i as usize;
         let (Some(&cx), Some(&cy), Some(&gap), Some(&w)) =
@@ -780,7 +795,7 @@ fn edge_plan(proj: &Projection, a: (i32, i32), b: (i32, i32), max_pieces: u32) -
         });
     }
     let (ua, ub) = (unit(a.0, a.1), unit(b.0, b.1));
-    let dot = (ua[0] * ub[0] + ua[1] * ub[1] + ua[2] * ub[2]).clamp(-1.0, 1.0);
+    let dot = oa_math::clamp_f64(ua[0] * ub[0] + ua[1] * ub[1] + ua[2] * ub[2], -1.0, 1.0);
     let ground = oa_math::acos(dot) * proj.radius_m;
     let by_px = (chord + PIECE_16 - 1) / PIECE_16;
     let by_ground = oa_ieee::ceil(ground / PIECE_M);
@@ -820,7 +835,7 @@ fn edge_point(proj: &Projection, e: &Edge, i: u32) -> Option<(i32, i32)> {
     }
     project_rad(
         proj,
-        oa_math::asin((v[2] / n).clamp(-1.0, 1.0)),
+        oa_math::asin(oa_math::clamp_f64(v[2] / n, -1.0, 1.0)),
         oa_math::atan2(v[1], v[0]),
     )
 }
@@ -943,6 +958,69 @@ pub fn build_scene(
     sc: &mut Scratch,
 ) -> Result<SceneStats, DisplayError> {
     view_check(v)?;
+    let cols = (v.proj.width as usize).div_ceil(64).max(1);
+    let rows = (v.proj.height as usize).div_ceil(64).max(1);
+    let cells = cols as u128 * rows as u128;
+    let boxes = cells * CELL_CAP as u128;
+    if u128::from(v.proj.width) * u128::from(v.proj.height) > MAX_SCENE_PIXELS {
+        return Err(DisplayError::TooLarge {
+            what: "scene pixels",
+            requested: u128::from(v.proj.width) * u128::from(v.proj.height),
+            limit: MAX_SCENE_PIXELS as usize,
+        });
+    }
+    if sc.cols != cols
+        || sc.rows != rows
+        || sc.cell_n.len() as u128 != cells
+        || sc.cell_box.len() as u128 != boxes
+    {
+        return Err(DisplayError::BadView(
+            "label scratch does not match the view",
+        ));
+    }
+    let point_rows = m.points.kind.len();
+    if point_rows > MAX_LIST_ROWS {
+        return Err(DisplayError::TooLarge {
+            what: "scene point rows",
+            requested: point_rows as u128,
+            limit: MAX_LIST_ROWS,
+        });
+    }
+    if sc.cap < point_rows
+        || sc.prio.len() < point_rows
+        || sc.x.len() < point_rows
+        || sc.y.len() < point_rows
+        || sc.gap.len() < point_rows
+        || sc.w.len() < point_rows
+        || sc.point.len() < point_rows
+        || sc.order.len() < point_rows
+        || sc.order_tmp.len() < point_rows
+        || sc.outcome.len() < point_rows
+    {
+        return Err(DisplayError::BadView(
+            "label scratch capacity is below the model point count",
+        ));
+    }
+    // This preflight span summation and the later boundary rendering pass each walk these rows;
+    // the row-count gate below caps both passes, including zero-length spans.
+    let boundary_rows = m.boundaries.stratum.len();
+    if boundary_rows > MAX_LIST_ROWS {
+        return Err(DisplayError::TooLarge {
+            what: "scene boundary rows",
+            requested: boundary_rows as u128,
+            limit: MAX_LIST_ROWS,
+        });
+    }
+    let boundary_vertex_visits = m
+        .boundaries
+        .stratum
+        .iter()
+        .zip(&m.boundaries.vertices)
+        .fold(0u128, |sum, (_, span)| {
+            sum.saturating_add(u128::from(span.len))
+        });
+    let work = scene_work_bound(m, sc, cells, boundary_vertex_visits);
+    check_scene_work(work)?;
     list_clear(l);
     scratch_clear(sc, &v.proj);
     let mut st = SceneStats::default();
@@ -954,6 +1032,146 @@ pub fn build_scene(
     points(l, m, idx, v, sc, &mut st)?;
     legend(l, m, v, &mut st)?;
     Ok(st)
+}
+
+/// The precharge [`build_scene`] checks against [`MAX_SCENE_WORK`] for `m` seen through `v` with
+/// scratch `sc`, for reporting.
+pub fn scene_work_charge(m: &Model, sc: &Scratch, v: &View) -> u128 {
+    let cells = (v.proj.width as usize).div_ceil(64).max(1) as u128
+        * (v.proj.height as usize).div_ceil(64).max(1) as u128;
+    let visits = m
+        .boundaries
+        .vertices
+        .iter()
+        .fold(0u128, |sum, span| sum.saturating_add(u128::from(span.len)));
+    scene_work_bound(m, sc, cells, visits)
+}
+
+/// Refuses a charge above [`MAX_SCENE_WORK`]; the charge equal to it is accepted.
+fn check_scene_work(work: u128) -> Result<(), DisplayError> {
+    if work > MAX_SCENE_WORK {
+        return Err(DisplayError::TooLarge {
+            what: "scene work units",
+            requested: work,
+            limit: MAX_SCENE_WORK as usize,
+        });
+    }
+    Ok(())
+}
+
+/// `ceil(log2 n)` for `n >= 2`, 0 for `n <= 1`.
+fn ceil_log2(n: u128) -> u128 {
+    u128::from(u128::BITS - n.saturating_sub(1).leading_zeros())
+}
+
+/// Bottom-up merge sort of `data` by `cmp`, using `tmp` (the same length) as its one scratch
+/// buffer: deterministic, no recursion, no allocation. A merge of two runs of `m` elements in all
+/// makes at most `m - 1` comparisons, and there are `ceil(log2 n)` passes, so it makes at most
+/// `n * ceil(log2 n)` comparisons (0 for `n <= 1`). Equal elements keep their order.
+fn merge_sort_by<T: Copy>(
+    data: &mut [T],
+    tmp: &mut [T],
+    cmp: &mut dyn FnMut(&T, &T) -> std::cmp::Ordering,
+) -> Result<(), DisplayError> {
+    let n = data.len();
+    if tmp.len() != n {
+        return Err(DisplayError::BadView(
+            "label sort scratch length differs from the candidates",
+        ));
+    }
+    let mut width = 1usize;
+    let mut in_data = true;
+    while width < n {
+        let (src, dst): (&[T], &mut [T]) = if in_data {
+            (&*data, &mut *tmp)
+        } else {
+            (&*tmp, &mut *data)
+        };
+        merge_pass(src, dst, width, cmp);
+        in_data = !in_data;
+        width = width.saturating_mul(2);
+    }
+    if !in_data {
+        data.copy_from_slice(tmp);
+    }
+    Ok(())
+}
+
+/// One pass: merges each pair of adjacent runs of `width` from `src` into `dst`.
+fn merge_pass<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    width: usize,
+    cmp: &mut dyn FnMut(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = src.len();
+    let mut lo = 0usize;
+    while lo < n {
+        let mid = lo.saturating_add(width).min(n);
+        let hi = lo.saturating_add(width.saturating_mul(2)).min(n);
+        let (mut i, mut j, mut k) = (lo, mid, lo);
+        while i < mid || j < hi {
+            let take_left = match (src.get(i), src.get(j)) {
+                (Some(a), Some(b)) if i < mid && j < hi => cmp(a, b) != std::cmp::Ordering::Greater,
+                _ => i < mid,
+            };
+            let from = if take_left { i } else { j };
+            if let (Some(out), Some(v)) = (dst.get_mut(k), src.get(from)) {
+                *out = *v;
+            }
+            if take_left {
+                i += 1;
+            } else {
+                j += 1;
+            }
+            k += 1;
+        }
+        lo = hi;
+    }
+}
+
+/// Upper bound on the point-label sort: [`merge_sort_by`] makes at most `n * ceil(log2 n)`
+/// comparisons, and one comparison reads at most the longest identifier plus the four fixed key
+/// fields (priority, latitude, longitude, row).
+fn point_sort_work(m: &Model) -> u128 {
+    let n = m.points.kind.len() as u128;
+    let longest = m
+        .points
+        .ident
+        .iter()
+        .map(|i| str_or_empty(&m.strings, *i).len() as u128)
+        .max()
+        .unwrap_or(0);
+    n.saturating_mul(ceil_log2(n)).saturating_mul(longest + 4)
+}
+
+/// Upper bound for each input-derived loop in a frame scene. This preflight runs before clearing
+/// the caller's list, so a refused view/model leaves the previous complete scene available.
+fn scene_work_bound(m: &Model, sc: &Scratch, cells: u128, boundary_vertex_visits: u128) -> u128 {
+    let points = m.points.kind.len() as u128;
+    let boundaries = m.boundaries.stratum.len() as u128;
+    let legs = m.airway_legs.from.len() as u128;
+    let point_sort = point_sort_work(m);
+    let grid = sc.cell_n.len() as u128;
+    points
+        .saturating_mul(34)
+        .saturating_add(boundaries.saturating_mul(2))
+        .saturating_add(boundary_vertex_visits.saturating_mul(u128::from(SUBDIV_BOUNDARY)))
+        .saturating_add(legs.saturating_mul(u128::from(SUBDIV_AIRWAY) + 1))
+        .saturating_add(point_sort)
+        .saturating_add(grid)
+        .saturating_add(
+            (MAX_RINGS as u128)
+                .saturating_mul(cells)
+                .saturating_mul(CELL_CAP as u128)
+                .saturating_mul(2),
+        )
+        .saturating_add(
+            points
+                .saturating_mul(5)
+                .saturating_mul(cells)
+                .saturating_mul(CELL_CAP as u128),
+        )
 }
 
 /// The ring labels sit where each ring meets the ray 45 degrees east of north from the centre.
@@ -1163,6 +1381,21 @@ fn points(
     let range = p.range_nm;
     let pts = &m.points;
     let rows = pts.kind.iter().zip(&pts.lat).zip(&pts.lon).zip(&pts.ident);
+    // Candidates the scratch can hold: its `cap`, and no more than the shortest buffer. The
+    // up-front preflight already guarantees every buffer holds the model's point count.
+    let lim = [
+        sc.prio.len(),
+        sc.x.len(),
+        sc.y.len(),
+        sc.gap.len(),
+        sc.w.len(),
+        sc.point.len(),
+        sc.order.len(),
+        sc.order_tmp.len(),
+        sc.outcome.len(),
+    ]
+    .into_iter()
+    .fold(sc.cap, usize::min);
     for (i, (((kind, lat), lon), ident)) in rows.enumerate() {
         let ifr = idx.point_ifr.get(i) == Some(&1);
         let shown = match *kind {
@@ -1276,19 +1509,37 @@ fn points(
                 };
         let name = str_or_empty(&m.strings, *ident);
         if wanted && !name.is_empty() {
-            if sc.prio.len() < sc.cap {
-                sc.prio.push(prio);
-                sc.x.push(c.0);
-                sc.y.push(c.1);
-                sc.gap.push(gap);
-                sc.w.push(legend_width16(name.chars().count()));
-                sc.point.push(i as u32);
+            if sc.used < lim {
+                let width = legend_width16(name.chars().count());
+                if set_candidate(sc, (c.0, c.1), gap, width, prio, i as u32).is_none() {
+                    return Err(DisplayError::BadView("label scratch write is out of range"));
+                }
+                sc.used += 1;
             } else {
                 sc.overflow += 1;
             }
         }
     }
     labels(l, m, sc, st)
+}
+
+/// Writes the next candidate (index `sc.used`); `None` when that is outside any of its buffers.
+fn set_candidate(
+    sc: &mut Scratch,
+    centre: (i32, i32),
+    gap: i32,
+    width: i32,
+    prio: u8,
+    row: u32,
+) -> Option<()> {
+    let k = sc.used;
+    *sc.x.get_mut(k)? = centre.0;
+    *sc.y.get_mut(k)? = centre.1;
+    *sc.gap.get_mut(k)? = gap;
+    *sc.w.get_mut(k)? = width;
+    *sc.prio.get_mut(k)? = prio;
+    *sc.point.get_mut(k)? = row;
+    Some(())
 }
 
 /// Sorts the candidates (priority, ident, position, row), places them and draws the placed ones.
@@ -1298,9 +1549,10 @@ fn labels(
     sc: &mut Scratch,
     st: &mut SceneStats,
 ) -> Result<(), DisplayError> {
-    let n = sc.prio.len();
-    sc.order.clear();
-    sc.order.extend(0..n as u32);
+    let n = sc.used;
+    for (i, o) in sc.order.iter_mut().take(n).enumerate() {
+        *o = i as u32;
+    }
     let key = |s: &Scratch, c: u32| {
         let c = c as usize;
         let row = s.point.get(c).copied().unwrap_or(0) as usize;
@@ -1317,14 +1569,24 @@ fn labels(
             row,
         )
     };
-    // Unstable sorting is deterministic here: the key ends with the table row, so the order is total.
+    // The key ends with the table row, so the order is total and any correct sort gives it.
     let mut order = std::mem::take(&mut sc.order);
-    order.sort_unstable_by(|a, b| key(sc, *a).cmp(&key(sc, *b)));
+    let mut tmp = std::mem::take(&mut sc.order_tmp);
+    let sorted = match (order.get_mut(..n), tmp.get_mut(..n)) {
+        (Some(data), Some(scratch)) => {
+            merge_sort_by(data, scratch, &mut |a, b| key(sc, *a).cmp(&key(sc, *b)))
+        }
+        _ => Err(DisplayError::BadView(
+            "label scratch is shorter than the candidates",
+        )),
+    };
     sc.order = order;
+    sc.order_tmp = tmp;
+    sorted?;
     let placed = place_labels(sc);
     st.labels = placed;
     st.labels_dropped = (n as u32 - placed).saturating_add(sc.overflow);
-    for oi in 0..sc.order.len() {
+    for oi in 0..sc.used {
         let Some(&c) = sc.order.get(oi) else { break };
         let c = c as usize;
         let Some(&k) = sc.outcome.get(c) else {
@@ -1543,4 +1805,244 @@ fn legend(
         legend_text(l, st, width16, (x, y), palette::ALERT, label_str(&t))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod work_budget_tests {
+    use super::*;
+    use crate::core::list::{list_new, push_line, ListCaps};
+    use oa_airspace::model::{empty_model, Meta};
+
+    fn empty_display_model() -> Model {
+        empty_model(Meta {
+            nasr_effective: 20261118,
+            cifp_cycle: 2611,
+            artcc: String::from("ZAU"),
+            buffer_m: 0,
+            nasr_sha256: [0; 32],
+            cifp_sha256: [0; 32],
+        })
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn scene_work_refusal_preserves_previous_list_and_retry_builds() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let index = scene_index(&model);
+        let mut scratch = scratch_for(&model, &view).unwrap();
+        let mut list = list_new(ListCaps {
+            lines: 64,
+            rects: 8,
+            circles: 32,
+            polylines: 32,
+            poly_vertices: 64,
+            texts: 128,
+            text_bytes: 4096,
+        })
+        .unwrap();
+        push_line(&mut list, (0, 0), (16, 16), palette::TEXT, LAYER_AIRWAY).unwrap();
+        let old_lines = list.lines.x0.clone();
+
+        model.boundaries.stratum.resize(20, stratum::ARTCC_HIGH);
+        model
+            .boundaries
+            .vertices
+            .extend((0..20).map(|_| oa_airspace::model::Span {
+                start: oa_airspace::model::VertexIx::new(0),
+                len: 1_000_000_000,
+            }));
+        assert!(matches!(
+            build_scene(&mut list, &model, &index, &view, &mut scratch),
+            Err(DisplayError::TooLarge {
+                what: "scene work units",
+                ..
+            })
+        ));
+        assert_eq!(list.lines.x0, old_lines);
+
+        model.boundaries.stratum.clear();
+        model.boundaries.vertices.clear();
+        assert!(build_scene(&mut list, &model, &index, &view, &mut scratch).is_ok());
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn boundary_scan_charge_includes_zero_length_spans() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        let cells = 510;
+        let empty_work = scene_work_bound(&model, &scratch, cells, 0);
+        model.boundaries.stratum.push(stratum::ARTCC_HIGH);
+        let one_boundary = scene_work_bound(&model, &scratch, cells, 0);
+        assert_eq!(one_boundary.saturating_sub(empty_work), 2);
+    }
+
+    // REQ: OA-DSP-055
+    #[test]
+    fn scratch_profile_refusal_precedes_allocation_and_smaller_retry_succeeds() {
+        let model = empty_display_model();
+        let large = view_new(0, 0, 50.0, 8193, 8192).unwrap();
+        assert!(matches!(
+            scratch_for(&model, &large),
+            Err(DisplayError::TooLarge {
+                what: "scene pixels",
+                ..
+            })
+        ));
+        let accepted = view_new(0, 0, 50.0, 8192, 8192).unwrap();
+        assert!(scratch_for(&model, &accepted).is_ok());
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn scene_work_limit_is_exact_and_one_above_is_refused() {
+        assert!(check_scene_work(MAX_SCENE_WORK).is_ok());
+        assert!(matches!(
+            check_scene_work(MAX_SCENE_WORK + 1),
+            Err(DisplayError::TooLarge {
+                what: "scene work units",
+                requested,
+                ..
+            }) if requested == MAX_SCENE_WORK + 1
+        ));
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn each_charged_term_moves_the_bound_by_its_own_cost() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        let cells = 510u128;
+        let base = scene_work_bound(&model, &scratch, cells, 0);
+
+        // Airway legs: SUBDIV_AIRWAY + 1 per leg.
+        model
+            .airway_legs
+            .from
+            .resize(3, oa_airspace::model::PointIx::new(0));
+        assert_eq!(
+            scene_work_bound(&model, &scratch, cells, 0) - base,
+            3 * (u128::from(SUBDIV_AIRWAY) + 1)
+        );
+        model.airway_legs.from.clear();
+
+        // Boundary vertex visits: SUBDIV_BOUNDARY each.
+        assert_eq!(
+            scene_work_bound(&model, &scratch, cells, 10) - base,
+            10 * u128::from(SUBDIV_BOUNDARY)
+        );
+
+        // Grid slots: one unit per cell of the scratch.
+        let mut bigger = scratch_for(&model, &view).unwrap();
+        bigger.cell_n.push(0);
+        assert_eq!(scene_work_bound(&model, &bigger, cells, 0) - base, 1);
+
+        // Point sort: n * ceil(log2 n) comparisons, each the longest identifier plus
+        // four key fields, on top of 34 per point and the label-grid inspections.
+        let n = 5usize;
+        model.points.kind.resize(n, 0);
+        model.strings.text = "x".repeat(12);
+        model.strings.offsets = vec![0, 12];
+        model
+            .points
+            .ident
+            .resize(n, oa_airspace::model::StrIx::new(0));
+        let with_points = scene_work_bound(&model, &scratch, cells, 0);
+        let sort = n as u128 * 3 * (12 + 4);
+        let others = n as u128 * 34 + n as u128 * 5 * cells * CELL_CAP as u128;
+        assert_eq!(with_points - base, sort + others);
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn point_sort_charge_follows_identifier_length_not_the_string_pool() {
+        let mut model = empty_display_model();
+        let view = view_new(0, 0, 50.0, 1920, 1080).unwrap();
+        let scratch = scratch_for(&model, &view).unwrap();
+        // A large pool of strings that no point uses must not change the charge.
+        model.points.kind.resize(1000, 0);
+        model.strings.text = "y".repeat(1 << 20);
+        model.strings.offsets = vec![0, 4];
+        model
+            .points
+            .ident
+            .resize(1000, oa_airspace::model::StrIx::new(0));
+        let small = scene_work_bound(&model, &scratch, 510, 0);
+        model.strings.offsets = vec![0, 4, 1 << 20];
+        let pool_only = scene_work_bound(&model, &scratch, 510, 0);
+        assert_eq!(small, pool_only);
+        assert!(small < MAX_SCENE_WORK);
+    }
+
+    /// A comparator over `vals` (the key is the value, then the row, so keys are unique) that
+    /// counts its calls.
+    fn sort_counting(vals: &[u32]) -> (Vec<u32>, u64) {
+        let n = vals.len();
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        let mut tmp = vec![0u32; n];
+        let mut count = 0u64;
+        merge_sort_by(&mut order, &mut tmp, &mut |a, b| {
+            count += 1;
+            (vals[*a as usize], *a).cmp(&(vals[*b as usize], *b))
+        })
+        .unwrap();
+        (order, count)
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn merge_sort_refuses_a_scratch_of_the_wrong_length_and_leaves_the_data() {
+        for tmp_len in [0usize, 3, 5] {
+            let mut data = [3u32, 1, 2, 0];
+            let mut tmp = vec![0u32; tmp_len];
+            let r = merge_sort_by(&mut data, &mut tmp, &mut |a, b| a.cmp(b));
+            assert!(matches!(r, Err(DisplayError::BadView(_))), "{tmp_len}");
+            assert_eq!(data, [3, 1, 2, 0]);
+        }
+    }
+
+    // REQ: OA-DSP-054
+    #[test]
+    fn merge_sort_matches_std_and_stays_within_n_ceil_log2_n_comparisons() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 33) as u32
+        };
+        for n in [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 1000, 1024, 4097] {
+            let sorted: Vec<u32> = (0..n as u32).collect();
+            let reversed: Vec<u32> = (0..n as u32).rev().collect();
+            let equal = vec![7u32; n];
+            let organ: Vec<u32> = (0..n as u32).map(|i| i.min(n as u32 - 1 - i)).collect();
+            let random: Vec<u32> = (0..n).map(|_| rnd() % 50).collect();
+            for (name, vals) in [
+                ("sorted", sorted),
+                ("reversed", reversed),
+                ("equal", equal),
+                ("organ-pipe", organ),
+                ("random", random),
+            ] {
+                let (got, count) = sort_counting(&vals);
+                let mut want: Vec<u32> = (0..n as u32).collect();
+                want.sort_unstable_by_key(|r| (vals[*r as usize], *r));
+                assert_eq!(got, want, "{name} n={n}");
+                let bound = n as u64 * ceil_log2(n as u128) as u64;
+                assert!(count <= bound, "{name} n={n}: {count} > {bound}");
+                if n <= 1 {
+                    assert_eq!(count, 0);
+                }
+            }
+        }
+    }
 }

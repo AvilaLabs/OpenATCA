@@ -467,8 +467,7 @@ fn solve_component(
         sc.order.extend(0..group.len() as u32);
         sc.order.sort_unstable_by(|&a, &b| {
             let (pa, pb) = (pr(&group[a as usize]), pr(&group[b as usize]));
-            pa.cost
-                .total_cmp(&pb.cost)
+            oa_math::cmp_canon_f64(pa.cost, pb.cost)
                 .then(pa.track.cmp(&pb.track))
                 .then(pa.plot.cmp(&pb.plot))
         });
@@ -977,5 +976,45 @@ mod tests {
         assert_eq!(assoc_ambiguous(&sc), &[true, false, false]);
         assigned_pairs(&mut sc, &pairs);
         assert_eq!(assoc_pair_of(&sc), &[0, 2, NONE]);
+    }
+    // REQ: OA-TRK-264
+    #[test]
+    fn the_greedy_order_of_a_large_component_does_not_depend_on_the_sign_of_a_nan_cost() {
+        // 100 tracks and 100 plots (over MAX_COMPONENT together): plot j has a finite pair to track
+        // j and a NaN pair to track j + 1. The raw `total_cmp` put a negative NaN first and a
+        // positive one last, so the two signs took different tracks.
+        let n = 100usize;
+        let solved = |nan: f64| {
+            let mut pairs = Vec::new();
+            for j in 0..n as u32 {
+                pairs.push(Pair {
+                    track: j,
+                    plot: j,
+                    cost: 1.0 + f64::from(j),
+                });
+                pairs.push(Pair {
+                    track: (j + 1) % n as u32,
+                    plot: j,
+                    cost: nan,
+                });
+            }
+            let mut sc = assoc_scratch_new(n, n, pairs.len());
+            reset_result(&mut sc, n);
+            let group: Vec<(u32, u32)> = (0..pairs.len() as u32).map(|k| (0, k)).collect();
+            let mut st = GnnStats::default();
+            solve_component(&mut sc, &pairs, &group, 1.0e9, &mut st);
+            assert_eq!(st.greedy_components, 1);
+            assoc_plot_track(&sc).to_vec()
+        };
+        let pos = solved(f64::from_bits(0x7ff8_0000_0000_0000));
+        let neg = solved(f64::from_bits(0xfff8_0000_0000_0000));
+        let payload = solved(f64::from_bits(0xfff8_0000_0000_1234));
+        assert_eq!(pos, neg);
+        assert_eq!(pos, payload);
+        // the finite pairs came first: every plot took its own track
+        assert!(
+            pos.iter().enumerate().all(|(j, &t)| t as usize == j),
+            "{pos:?}"
+        );
     }
 }

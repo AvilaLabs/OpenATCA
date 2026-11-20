@@ -1647,4 +1647,39 @@ mod tests {
         assert_eq!(west, ix.first_cell[la]);
         assert_eq!(east, ix.first_cell[la] + ix.lon_cells[la] - 1);
     }
+
+    // REQ: OA-TRK-264
+    #[test]
+    fn the_candidate_order_does_not_depend_on_the_sign_of_a_nan_in_a_distance() {
+        // the order the fusion keeps candidates in when a plot has more than it can visit: by
+        // `coarse_distance`, then by track number. A NaN term gives 0 whatever its sign, and the
+        // canonical order puts every NaN in one place, so both signs choose the same tracks.
+        let nans = [
+            f64::from_bits(0x7ff8_0000_0000_0000),
+            f64::from_bits(0xfff8_0000_0000_0000),
+            f64::from_bits(0xfff8_0000_0000_4321),
+        ];
+        let order = |nan: f64| {
+            let tracks = [
+                (3000.0, 1.0, 5.0e4, 10.0),
+                (nan, 1.0, 5.0e4, 10.0),
+                (1000.0, nan, 5.0e4, 10.0),
+                (2000.0, 1.0, nan, 10.0),
+                (1500.0, 1.0, 5.0e4, 10.0),
+                (nan, nan, nan, nan),
+            ];
+            let key = |ti: u32| coarse_distance((1200.0, 1.0), tracks[ti as usize]);
+            let mut cand: Vec<u32> = (0..tracks.len() as u32).rev().collect();
+            cand.sort_unstable_by(|&x, &y| oa_math::cmp_canon_f64(key(x), key(y)).then(x.cmp(&y)));
+            let bits: Vec<u64> = cand.iter().map(|&c| key(c).to_bits()).collect();
+            (cand, bits)
+        };
+        let want = order(nans[0]);
+        for nan in nans {
+            assert_eq!(order(nan), want);
+        }
+        // the four tracks with a NaN term sort first (distance 0), by track number
+        assert_eq!(&want.0[..4], &[1, 2, 3, 5], "{want:?}");
+        assert!(want.1[..4].iter().all(|&b| b == 0), "{want:?}");
+    }
 }

@@ -30,11 +30,12 @@ before.
 | Mutation testing | Saved numerical and truth cases have strengthened independent-answer tests | Unresolved cases are not automatically equivalent or confirmed defects |
 | Allocation instrumentation | Named M3 tracker/fusion routes run under an isolated counting allocator, with positive and injected-allocation controls | Complete C5 coverage remains open; see [candidate validation](VALIDATION.md) |
 | Turn-model moments | Closed-form and independent high-precision references for nonlinear prediction and separate discovery-floor regularization; numerical refusals are counted and history replay is atomic | Gaussian, cubature and regularization approximations remain; synthetic accuracy does not establish recorded-traffic truth |
-| CI | GitHub Actions: format, clippy with Rust 1.89.0 (the declared minimum), release-mode tests, traceability, scoped M3 allocation check, no external crates | One platform |
+| CI | GitHub Actions: format, clippy with Rust 1.89.0 (the declared minimum), release-mode tests, traceability, scoped M3 allocation check, no external crates | x86-64 and aarch64 Linux |
 
-Everything above runs on x86-64 Linux. Bit-identical replay (RULESET B6) is tested on that platform.
-`oa-math` is written so that results do not depend on the machine's maths library, but no other
-architecture has been tested.
+Everything above runs on x86-64 Linux. CI also runs the whole release test suite, golden replay
+digests included, on aarch64 Linux (the `arm` job), so bit-identical replay (RULESET B6) is tested
+on two architectures and gives the same digests on both. `oa-math` is written so that results do not
+depend on the machine's maths library. No other operating system or architecture has been tested.
 
 ## The design rules and how far the code meets them
 
