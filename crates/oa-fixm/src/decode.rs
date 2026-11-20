@@ -595,7 +595,7 @@ fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
     let mut hit = false;
     for i in 1..doc.elem_name.len() {
         for name in [&b"timestamp"[..], b"positionTime"] {
-            let mut buf = [0u8; 40];
+            let mut buf = [0u8; 64];
             if let Raw::Val(v) = attr(doc, i, name, &mut buf) {
                 hit |= parse_iso_ms(v).is_some_and(|t| window.contains(t));
             }

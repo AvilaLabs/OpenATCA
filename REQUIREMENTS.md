@@ -5914,14 +5914,29 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `Outcome::sealed_dropped`. It is in no other count (no message, document, row, kind, rejection, refused-field,
   field-error, shape, flag, unknown-path or unknown-root count) and touches no table or string store. No refusal can be
   caused by an in-window message, because the pre-scan has no record or row limit and runs before the decode. There is no
-  rollback in any decoder. TFMS TMI-list counts are therefore for the whole document, not per entry. A time that cannot be
+  window rollback in any decoder. TFMS TMI-list counts are therefore for the whole document, not per entry. The rule for what is a window key: every observation time the decoder parses into a row or a statistic is a key; a
+  reference time (an estimate, a schedule, a validity or event time such as ETA, ETD, STA, effective, begin, end, a departure
+  actual or a route point) is not. The keys per feed: TAIS `track/mrtTime` and `recSAFAReceiptTime` (`recSTARSTimestamp` is a
+  time of day, not a time); ASDE-X `time`; SFDPS `timestamp` and `positionTime`; TBFM `msgTime`, and the envelope time of
+  an `env` (`envTime`) or `mis` (`misTime`) document; TFMS `sourceTimeStamp`, `timeAtPosition` and an oceanic position's
+  `time`; NOTAM `issued` and `canceled`. A scan reads a time as the decoder would (character references decoded, text
+  split by a comment joined, whitespace trimmed where the decoder trims), and it also reads a repeated or foreign-namespace
+  element of a key name, so such a document is dropped too (the closed failure). A time that cannot be
   read falls to the receive-time gate of its frame; a document refused whole (not XML, wrong root) has no known time and is
   counted as refused. Development-day documents near the window edges that carry an in-window message are lost whole, and
   counted. `DropWindow::sealed()` fails closed: if the sealed list has no window or does not parse it is a window covering
-  all time (`DropWindow::all_time()`). The `oa-bench` scan (hints, addresses, handoffs, routes) runs only on documents that passed the pre-scan, and `docs` counts a
-  document after it. A recording's byte count (`oa-replay`, `oa-feed replay`) is
+  all time (`DropWindow::all_time()`); `oa_sealed::sealed_window_ms()` is its span and `Sealed::in_window` (so
+  `in_sealed_window`, the frame and row gates) seals all time for a list with no window line, so the gates and the
+  decoders agree. The millisecond span rounds the start down and the end up, so a window that is not a whole number of
+  milliseconds leaves no gap. The `oa-bench` scan (hints, addresses, handoffs, routes) runs only on documents that passed the pre-scan, and `docs` counts a
+  document after it. The replay pipeline counts a frame and a message only after the decode, and only for a document that
+  was not dropped (`Pipeline::last_doc_dropped`); the byte count of `oa-replay` leaves out the bytes of such a frame, as it
+  does for a frame dropped by receive time. The replay clock still moves to the receive time of the frame of a dropped
+  document: that time is outside the window (the receive-time gate has passed it), and it is printed only as the replay
+  time and the clock's own counters, not as a count of the document. The input digests and byte totals of `oa-bench` are
+  file identities, like the SHA-256 that `oa-stdds-ref` prints, and not statistics. A recording's byte count (`oa-replay`, `oa-feed replay`) is
   the bytes after the window gate: the bytes of a frame dropped by receive time are not in it. A failed read still adds what
-  was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which returns an error through
+  was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which uses `DropWindow::sealed()`, drops a file with a message in the window whole before any count, and returns an error through
   `main` instead of unwrapping). The SHA-256 `oa-stdds-ref` prints is a file identity (of the file as a whole, as a name for it), not a statistic of its contents. `oa-bench` and `oa-stdds-census` record the line in their report and also print one
   stderr line at exit, which is the same count printed once. Other message kinds (service status, classified only) carry no row time and go by
   the receive time of their frame. Tests assert the `records:`, a TAIS field and a flag count, a refused message whose early

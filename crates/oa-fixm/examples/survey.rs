@@ -50,7 +50,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     // Printed when `main` returns, also on a panic: the messages left out for their own time.
     let mut drops = oa_sealed::DropReport::new();
-    let window = oa_sealed::sealed_window_ms();
+    let window = oa_sealed::DropWindow::sealed();
     let dir = std::env::args()
         .nth(1)
         .ok_or_else(|| "usage: survey <dir>".to_string())?;
@@ -71,36 +71,30 @@ fn run() -> Result<(), String> {
             .parse(&bytes)
             .map_err(|e| format!("survey: {}: {e:?}", f.display()))?;
         let n = d.elem_name.len();
-        // A message whose own timestamp or position time is in the sealed window is left out of
-        // every count below (OA-SEAL-014): found first, so no count has seen it.
-        let mut sealed: Vec<bool> = Vec::new();
-        {
-            let mut of = vec![u32::MAX; n];
-            for i in 0..n {
-                let p = d.elem_parent[i];
-                if p == ElemIx::NONE {
-                    continue;
-                }
-                of[i] = if d.elem_parent[p.0 as usize] == ElemIx::NONE {
-                    sealed.push(false);
-                    (sealed.len() - 1) as u32
-                } else {
-                    of[p.0 as usize]
-                };
-                let first = d.elem_first_attr[i].0 as usize;
-                for a in first..first + d.elem_attr_count[i] as usize {
-                    let an = s(&d, d.attr_name[a]);
-                    if an == "timestamp" || an == "positionTime" {
-                        let t = oa_fixm::parse_iso_ms(s(&d, d.attr_value[a]).as_bytes());
-                        if window.is_some_and(|(a, b)| t.is_some_and(|t| a <= t && t < b)) {
-                            sealed[of[i] as usize] = true;
-                        }
-                    }
+        // A file with a message whose own timestamp or position time is in the sealed window is
+        // dropped whole (OA-SEAL-014), before any count below has seen it; only the number of
+        // its messages is counted, as each file is scanned so a later file's error keeps it.
+        let mut hit = false;
+        let mut in_file = 0u64;
+        for i in 0..n {
+            let p = d.elem_parent[i];
+            if p == ElemIx::NONE {
+                continue;
+            }
+            in_file += u64::from(d.elem_parent[p.0 as usize] == ElemIx::NONE);
+            let first = d.elem_first_attr[i].0 as usize;
+            for a in first..first + d.elem_attr_count[i] as usize {
+                let an = s(&d, d.attr_name[a]);
+                if an == "timestamp" || an == "positionTime" {
+                    let t = oa_fixm::parse_iso_ms(s(&d, d.attr_value[a]).as_bytes());
+                    hit |= t.is_some_and(|t| window.contains(t));
                 }
             }
         }
-        // Added as each file finishes its scan, so a later file's error keeps this count.
-        drops.add(sealed.iter().filter(|x| **x).count() as u64);
+        if hit {
+            drops.add(in_file.max(1));
+            continue;
+        }
         // Message of each element: the child of the root.
         let mut msg_of = vec![u32::MAX; n];
         let mut nmsg = 0;
@@ -124,9 +118,6 @@ fn run() -> Result<(), String> {
             };
             path_of[i] = path.clone();
             msg_of[i] = m;
-            if m != u32::MAX && sealed.get(m as usize) == Some(&true) {
-                continue;
-            }
             let first = d.elem_first_attr[i].0 as usize;
             let cnt = d.elem_attr_count[i] as usize;
             let e = paths.entry(path.clone()).or_default();
@@ -150,9 +141,7 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        *msgs_per_file
-            .entry(nmsg - sealed.iter().filter(|x| **x).count())
-            .or_default() += 1;
+        *msgs_per_file.entry(nmsg).or_default() += 1;
         for (m, set) in seen.iter().enumerate() {
             for p in set {
                 *src_paths

@@ -133,6 +133,8 @@ struct Head {
     mono_ns: Option<u64>,
     seq: u64,
     offset: u64,
+    /// The frame's bytes, header and trailer included.
+    frame_len: u64,
     kind: Kind,
     payload: Vec<u8>,
 }
@@ -196,6 +198,7 @@ impl<'b> Stream<'b> {
                 mono_ns: None,
                 seq: 0,
                 offset: 0,
+                frame_len: 0,
                 kind: Kind::Message,
                 payload: Vec::new(),
             },
@@ -260,6 +263,7 @@ impl Stream<'_> {
                 self.head.mono_ns = f.mono_ns();
                 self.head.seq = f.seq;
                 self.head.offset = f.offset;
+                self.head.frame_len = f.raw.len() as u64;
                 self.head.kind = f.kind;
                 self.head.payload.clear();
                 self.head.payload.extend_from_slice(f.payload);
@@ -391,6 +395,8 @@ pub struct Merged<'a> {
     pub stream: u32,
     /// Byte offset in the stream's decoded bytes (continues across chained files).
     pub offset: u64,
+    /// The frame's bytes, header and trailer included.
+    pub frame_len: u64,
     /// The payload.
     pub payload: &'a [u8],
 }
@@ -484,6 +490,7 @@ pub fn merge_counted(
                 seq: s.head.seq,
                 stream: i as u32,
                 offset: s.head.offset,
+                frame_len: s.head.frame_len,
                 payload: &s.head.payload,
             })?;
             if s.advance()? {
@@ -557,10 +564,17 @@ pub fn run_streams_counted(
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
     sealed_frames: &mut u64,
 ) -> io::Result<MergeReport> {
-    let (report, end) = merge_counted(specs, chunk, &mut |m| {
+    // The bytes of the frames whose document the decoder dropped whole (OA-SEAL-014): not in
+    // the byte count, like the frames dropped by receive time.
+    let mut dropped_bytes = 0u64;
+    let (mut report, end) = merge_counted(specs, chunk, &mut |m| {
         process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.stream, m.mono_ns, m.payload);
+        if p.last_doc_dropped {
+            dropped_bytes += m.frame_len;
+        }
         after_frame(p)
     });
+    report.bytes = report.bytes.saturating_sub(dropped_bytes);
     // The counts go in first, so they are there whether the run ended or a hook failed.
     *sealed_frames = report.sealed_window_dropped;
     for (a, b) in p.errors.iter_mut().zip(report.errors.iter()) {

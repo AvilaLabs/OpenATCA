@@ -1824,3 +1824,88 @@ fn the_summary_example_passes_the_sealed_window_to_the_decoder() {
     assert!(src.contains("Limits::new(oa_sealed::DropWindow::sealed())"));
     assert!(!src.contains("empty_for_tests_and_fuzz"));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_message_and_the_production_list_drops_the_window() {
+    let mut p = parser();
+    for (limits, xml, n, kept) in [
+        (
+            Limits::new(oa_sealed::DropWindow::all_time()),
+            tais_xml(TAIS_OUT),
+            1,
+            0,
+        ),
+        (
+            Limits::new(oa_sealed::DropWindow::sealed()),
+            tais_xml(TAIS_IN),
+            1,
+            0,
+        ),
+        (
+            Limits::new(oa_sealed::DropWindow::sealed()),
+            tais_xml(TAIS_OUT),
+            0,
+            1,
+        ),
+    ] {
+        let mut st = new_stats();
+        parse_message(&mut p, xml.as_bytes(), &limits, &mut st).unwrap();
+        assert_eq!((st.sealed_window_dropped, st.records), (n, kept));
+        if n == 1 {
+            assert_eq!(
+                st,
+                oa_stdds::Stats {
+                    sealed_window_dropped: 1,
+                    ..new_stats()
+                }
+            );
+        }
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn observation_times_are_window_keys_in_any_encoding_and_a_foreign_one_is_dropped_too() {
+    let rec = |inner: &str| tais_xml(&format!("<record>{inner}</record>"));
+    let inw = "2026-11-21T00:00:00Z";
+    // The SAFA receipt time in the window, the track time outside it.
+    assert_dropped_whole(
+        &rec(&format!(
+            "<track><mrtTime>2030-01-02T03:00:00Z</mrtTime></track><recSAFAReceiptTime>{inw}</recSAFAReceiptTime>"
+        )),
+        4096,
+        1,
+    );
+    // Entity-encoded (the final Z as a character reference) and split by a comment.
+    for t in ["2026-11-21T00:00:00&#90;", "2026-11-21T00:00:<!--x-->00Z"] {
+        assert_dropped_whole(
+            &rec(&format!("<track><mrtTime>{t}</mrtTime></track>")),
+            4096,
+            1,
+        );
+    }
+    // Padded with whitespace: the value is trimmed, as the record's own parser reads it.
+    assert_dropped_whole(
+        &rec("<track><mrtTime> 2026-11-21T00:00:00Z </mrtTime></track>"),
+        4096,
+        1,
+    );
+    // A repeated time element: both are read, so the one in the window is found.
+    assert_dropped_whole(
+        &rec(&format!(
+            "<track><mrtTime>2030-01-02T03:00:00Z</mrtTime><mrtTime>{inw}</mrtTime></track>"
+        )),
+        4096,
+        1,
+    );
+    // A time element of another namespace, which the decoder would not read as a field, is still
+    // read by the scan: dropping too much is the closed failure.
+    assert_dropped_whole(
+        &rec(&format!(
+            "<track><x:mrtTime xmlns:x=\"urn:other\">{inw}</x:mrtTime></track>"
+        )),
+        4096,
+        1,
+    );
+}

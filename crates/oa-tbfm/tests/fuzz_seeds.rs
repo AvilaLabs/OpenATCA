@@ -51,5 +51,5 @@ fn every_committed_seed_decodes_or_is_refused_as_named() {
         }
     }
     eprintln!("tbfm seeds: {accepted} accepted, {refused} refused");
-    assert_eq!((accepted, refused), (21, 14));
+    assert_eq!((accepted, refused), (29, 14));
 }

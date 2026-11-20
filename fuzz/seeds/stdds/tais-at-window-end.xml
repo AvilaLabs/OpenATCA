@@ -1,0 +1,1 @@
+<?xml version="1.0"?><ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation"><src>ZZA</src><record><track><trackNum>1</trackNum><mrtTime>2030-01-02T03:00:00Z</mrtTime></track></record><record><track><trackNum>2</trackNum><mrtTime>2026-11-23T00:17:00Z</mrtTime></track></record></ns2:TATrackAndFlightPlan>

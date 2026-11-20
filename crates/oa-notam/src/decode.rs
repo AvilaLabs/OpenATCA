@@ -757,7 +757,16 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> bool {
     if window.span().is_none() {
         return false;
     }
-    for (t, owner) in doc.text_owner.iter().enumerate() {
+    let total = doc.text_owner.len();
+    let mut t = 0usize;
+    while t < total {
+        let Some(&owner) = doc.text_owner.get(t) else {
+            break;
+        };
+        let first = t;
+        while doc.text_owner.get(t) == Some(&owner) {
+            t += 1;
+        }
         let name = doc
             .elem_name
             .get(owner.0 as usize)
@@ -767,13 +776,13 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> bool {
         if name != b"issued" && name != b"canceled" {
             continue;
         }
-        let Some(&sp) = doc.text_span.get(t) else {
-            continue;
-        };
+        // A text that a comment or CDATA section splits is one value.
         let mut buf = [0u8; 64];
-        let ent = text_needs_decode(doc, TextIx(t as u32));
-        if let Raw::Val(v) = raw_bytes(doc.input, sp, ent, SpanKind::Text, &mut buf) {
-            if parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)) {
+        if let Ok(n) = oa_xml::decode_text_run(doc, first, t - first, &mut buf) {
+            if buf
+                .get(..n)
+                .is_some_and(|v| parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)))
+            {
                 return true;
             }
         }

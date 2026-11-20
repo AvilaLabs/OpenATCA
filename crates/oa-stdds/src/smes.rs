@@ -268,7 +268,13 @@ pub fn parse_smes(
     let tx = text_index(doc);
     // The first step, before any count: a message with a report timed in the sealed window is
     // dropped whole (OA-SEAL-014).
-    let gone = prescan(doc, &tx, limits.drop_window, b"positionReport", &[b"time"]);
+    let gone = prescan(
+        doc,
+        &tx,
+        limits.drop_window,
+        b"positionReport",
+        &[&[b"time"]],
+    );
     if gone > 0 {
         stats.sealed_window_dropped += gone;
         return Ok(SmesMessage {

@@ -115,8 +115,8 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
-/// Reads the `msgTime` of every `tma` message of the document, directly from the parsed tree and
-/// whatever else is valid in it. If any is in `window`, returns how many messages the document
+/// Reads every message time of the document (the `msgTime` of each `tma`, the `misTime` or
+/// `envTime` of the others), directly from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many messages the document
 /// has (all are dropped); otherwise 0. A time that cannot be read is not in the window (the
 /// frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
@@ -126,23 +126,27 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
     let (mut messages, mut hit) = (0u32, false);
     for i in 0..doc.elem_name.len() {
         let e = ElemIx(i as u32);
-        if elem_name(doc, e) != b"tma" {
-            continue;
+        if elem_name(doc, e) == b"tma" {
+            messages = messages.saturating_add(1);
         }
-        messages = messages.saturating_add(1);
         let n = doc.elem_attr_count.get(i).copied().unwrap_or(0);
         for k in 0..n {
             let a = attr_ref(doc, e, k);
+            // The message time of a `tma` and the envelope time of the other documents
+            // (`misTime`, `envTime`); the validity and estimate times are not keys.
+            let field = match a.name {
+                b"msgTime" => Field::MsgTime,
+                b"misTime" | b"envTime" => Field::EnvTime,
+                _ => continue,
+            };
             let mut buf = [0u8; MAX_VALUE];
-            if a.name == b"msgTime" {
-                if let Ok(v) = attr_val(doc, &a, Field::MsgTime, &mut buf) {
-                    hit |= parse_time(v).is_ok_and(|t| window.contains(t));
-                }
+            if let Ok(v) = attr_val(doc, &a, field, &mut buf) {
+                hit |= parse_time(v).is_ok_and(|t| window.contains(t));
             }
         }
     }
     if hit {
-        messages
+        messages.max(1)
     } else {
         0
     }

@@ -1500,3 +1500,54 @@ fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is
     let o = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
     assert_eq!((o.sealed_dropped, rows_len(&rows)), (0, 1));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let air = format!("<air {AIR_ATTRS}>{FLT}</air>");
+    let xml = env_many(&[(OUT, &air)]);
+    let mut p = Parser::new(default_limits()).unwrap();
+    // All time (the closed failure of the list): dropped whole, whatever the time.
+    let mut rows = new_rows(16, oa_sealed::DropWindow::all_time());
+    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
+    assert_eq!((r, rows_len(&rows)), (Ok(sealed(1)), 0));
+    // The production list: the window is dropped, a time outside it is kept.
+    let w = oa_sealed::DropWindow::sealed();
+    let mut rows = new_rows(16, w);
+    let inside = env_many(&[(IN, &air)]);
+    let r = decode_bytes(&mut p, inside.as_bytes(), &mut rows);
+    assert_eq!((r, rows_len(&rows)), (Ok(sealed(1)), 0));
+    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    assert_eq!((r.sealed_dropped, rows_len(&rows)), (0, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_message_time_is_a_window_key_in_any_encoding_and_a_reference_time_is_not() {
+    let air = format!("<air {AIR_ATTRS}>{FLT}</air>");
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let inw = "2026-11-21T00:00:00Z";
+    // A `mis` document (no `tma`): its misTime is its message time.
+    let mis = |t: &str| {
+        format!("<mis xmlns=\"{NS}\" misTime=\"{t}\" misSrce=\"TMA.ZTT.FAA.GOV\"><hb/></mis>")
+    };
+    assert_dropped_whole(&mis(inw), 16, 1);
+    // An envelope time in the window, and a `tma` with no time of its own.
+    let env_in = env_many(&[("msgId=\"1\"", &air)]).replace("2026-11-14T14:11:42.420Z", inw);
+    assert_dropped_whole(&env_in, 16, 1);
+    // Entity-encoded (the final Z as a character reference), and padded with whitespace.
+    for t in ["2026-11-21T00:00:00&#90;", " 2026-11-21T00:00:00Z \t"] {
+        let a = format!("msgTime=\"{t}\" msgId=\"2\"");
+        assert_dropped_whole(&env_many(&[(&a, &air)]), 16, 1);
+    }
+    // A repeated attribute is not well-formed XML: the document is refused, not read.
+    let dup = env_many(&[(&format!("{IN} {OUT}"), &air)]);
+    let mut p = Parser::new(default_limits()).unwrap();
+    assert!(p.parse(dup.as_bytes()).is_err());
+    // A time in the window on an element that is not a message (a foreign attribute name) and
+    // reference times (ETA, STA) are not keys.
+    let mut rows = new_rows(16, w);
+    let refs = env_many(&[(OUT, &air.replace("2030-01-02", "2026-11-21"))]);
+    let o = decode_bytes(&mut p, refs.as_bytes(), &mut rows).unwrap();
+    assert_eq!(o.sealed_dropped, 0);
+}

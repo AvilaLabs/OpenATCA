@@ -466,7 +466,7 @@ fn reach(doc: &Doc<'_>, base: ElemIx, path: &[&[u8]], out: &mut Vec<ElemIx>) {
 }
 
 /// The first step of a message decode, before any count, table or record is touched: reads the
-/// own time of every record (`record` below the root, its time at `time_path`) directly from the
+/// observation times of every record (`record` below the root, each time at one of `time_paths`) directly from the
 /// parsed tree, whatever else in the message is valid. If any is in `window`, returns how many
 /// records the message has (all are dropped, at least 1); otherwise 0. A time that cannot be
 /// read is not in the window (the frame's receive time gates it). No record limit applies to
@@ -476,7 +476,7 @@ pub(crate) fn prescan(
     tx: &TextIndex,
     window: oa_sealed::DropWindow,
     record: &[u8],
-    time_path: &[&[u8]],
+    time_paths: &[&[&[u8]]],
 ) -> u64 {
     if window.span().is_none() {
         return 0;
@@ -489,7 +489,9 @@ pub(crate) fn prescan(
         }
         records += 1;
         found.clear();
-        reach(doc, c, time_path, &mut found);
+        for path in time_paths {
+            reach(doc, c, path, &mut found);
+        }
         for e in &found {
             let mut buf = [0u8; VALUE_BUF];
             if let Ok(t) = leaf_text(doc, tx, *e, &mut buf) {

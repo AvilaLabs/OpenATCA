@@ -134,9 +134,10 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
-/// Reads the `sourceTimeStamp` of every element of the document that has one (the `fltdMessage`
-/// and `fiMessage` messages, which also time their TMI flight list entries), directly from the
-/// parsed tree and whatever else is valid in it. If any is in `window`, returns how many
+/// Reads every observation time of the document: the `sourceTimeStamp` of every element that has
+/// one (the `fltdMessage` and `fiMessage` messages, which also time their TMI flight list
+/// entries), and the position times `timeAtPosition` and an oceanic position's `time`, directly
+/// from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many
 /// messages the document has (all are dropped, at least 1); otherwise 0. A time that cannot be
 /// read is not in the window (the frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
@@ -147,7 +148,7 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
     for i in 0..doc.elem_name.len() {
         let e = ElemIx(i as u32);
         let name = elem_name(doc, e);
-        if name == b"fltdMessage" || name == b"fiMessage" {
+        if name == b"fltdMessage" || name == b"fiMessage" || name == b"tfmsStatusOutput" {
             messages = messages.saturating_add(1);
         }
         for k in 0..attr_count(doc, e) {
@@ -158,6 +159,28 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             let mut buf = [0u8; MAX_VALUE];
             if let Ok(v) = value_bytes(doc, attr_val(&a), &mut buf) {
                 hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+            }
+        }
+    }
+    // The observation times that are element text: the track message's `timeAtPosition` and the
+    // oceanic reported position's `time` (a text a comment or CDATA section splits is one value).
+    let total = doc.text_owner.len();
+    let mut t = 0usize;
+    while t < total {
+        let Some(&owner) = doc.text_owner.get(t) else {
+            break;
+        };
+        let first = t;
+        while doc.text_owner.get(t) == Some(&owner) {
+            t += 1;
+        }
+        let name = elem_name(doc, owner);
+        if name == b"timeAtPosition" || name == b"time" {
+            let mut buf = [0u8; MAX_VALUE];
+            if let Ok(n) = decode_text_run(doc, first, t - first, &mut buf) {
+                hit |= buf
+                    .get(..n)
+                    .is_some_and(|v| parse_time(v).is_ok_and(|t| window.contains(t)));
             }
         }
     }

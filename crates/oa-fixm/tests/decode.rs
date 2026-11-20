@@ -1695,3 +1695,69 @@ fn a_message_with_an_invalid_field_before_its_time_is_still_dropped_with_its_doc
     assert_eq!(r.dec.stats(), &untouched(windowed(), 2));
     assert_eq!(r.sum.sealed_window_dropped, 2);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "")]);
+    // All time (the closed failure of the list).
+    let all = Limits::new(oa_sealed::DropWindow::all_time());
+    let (r, res) = run_with(&xml, 64, 1 << 16, all);
+    res.unwrap();
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 1,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(all, 1));
+    // The production list.
+    let prod = Limits::new(oa_sealed::DropWindow::sealed());
+    let (r, res) = run_with(&doc(&[at("2026-11-21T00:00:00Z", "")]), 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    let (r, res) = run_with(&xml, 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!((r.sum.sealed_window_dropped, r.ev.len), (0, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn message_and_position_times_are_window_keys_in_any_encoding_and_event_times_are_not() {
+    let dropped = |xml: &str| {
+        let (r, res) = run_with(xml, 64, 1 << 16, windowed());
+        res.unwrap();
+        r.sum.sealed_window_dropped
+    };
+    // Entity-encoded (the final Z as a character reference), and padded with whitespace.
+    for ts in ["2026-11-21T00:00:00&#90;", " 2026-11-21T00:00:00Z "] {
+        let x = doc(&[at(ts, "")]);
+        // The decoder's own parser reads a padded value as no time and refuses the message; then
+        // there is no row to protect, and the document is kept as refused.
+        let n = dropped(&x);
+        let (r, res) = run_with(&x, 64, 1 << 16, windowed());
+        res.unwrap();
+        assert!(n == 1 || r.ev.len == 0, "{ts:?}");
+    }
+    assert_eq!(dropped(&doc(&[at("2026-11-21T00:00:00&#90;", "")])), 1);
+    // A repeated attribute is not well-formed XML: the document is refused, not read.
+    let dup = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05Z" timestamp="2026-11-21T00:00:00Z""#,
+        &gufi_el(GUFI),
+    );
+    let mut p = oa_xml::Parser::new(oa_xml::Limits::default()).unwrap();
+    assert!(p.parse(doc(&[dup]).as_bytes()).is_err());
+    // A position time in the window, the message time outside it.
+    let pos = at(
+        "2030-01-02T03:04:05Z",
+        r#"<enRoute><position positionTime="2026-11-21T00:00:00Z"/></enRoute>"#,
+    );
+    assert_eq!(dropped(&doc(&[pos])), 1);
+    // An event time (the actual departure) in the window is not a key.
+    let dep = at(
+        "2030-01-02T03:04:05Z",
+        r#"<flight><departure><actualTime time="2026-11-21T00:00:00Z"/></departure></flight>"#,
+    );
+    assert_eq!(dropped(&doc(&[dep])), 0);
+}

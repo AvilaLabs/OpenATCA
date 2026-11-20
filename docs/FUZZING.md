@@ -100,6 +100,7 @@ error is the correct outcome for bad input and is not a finding. Where a decoder
 | `tbfm` | `oa_tbfm::decode_bytes` and `decode_doc_prefix`, then `row_at` | |
 | `tfms` | `oa_tfms::decode_bytes` and `decode_doc_prefix`, then `flight_at` | |
 | `fixm` | `oa_fixm::Decoder::decode` and `decode_prefix` | SFDPS messages |
+| `stdds` | `oa_stdds::parse_message` with no window and with the sealed window | TAIS and ASDE-X messages |
 | `tar` | `oa_tar::TarReader` `next_entry` / `read_entry_to_vec` | |
 | `zip` | `oa_zip::Archive::parse_with_limits` (default and tight limits), `extract_entry`, `is_safe_path` | |
 | `gzip` | `oa_zip::GzipReader`, `oa_zip::Inflater`, `oa_zip::inflate` | gzip members and raw DEFLATE, 64 MiB output cap |
@@ -111,6 +112,14 @@ error is the correct outcome for bad input and is not a finding. Where a decoder
 | `notam` | `oa_notam::decode_bytes`, then every row accessor, plus the `scalar` field parsers on the raw bytes | `cross_check` needs an `oa-mva` model and is not fuzzed |
 | `nam` | `oa_nam::frame::read_header`, `unframe`, `parse`, `parse_tolerant`, then `encode` of every accepted message (byte-exact for `parse`, re-parse for `parse_tolerant`) | NAM ACC-to-ACC messages; seeds are the ICD examples |
 | `mva` | `oa_mva::load_message`, then the model accessors and every query (`sectors_containing`, `min_altitude_at`, `min_altitude_with_sub`, `sector_distance_nm`, `sectors_within_radius`) at a vertex of the chart | |
+
+The sealed-window oracles (OA-SEAL-014): the `fixm`, `notam`, `tbfm`, `tfms` and `stdds` targets decode each
+input twice, with the window empty (`DropWindow::empty_for_tests_and_fuzz`) and with the sealed window
+(`DropWindow::sealed`), `decode` and `decode_prefix` where the decoder has both. They assert that no row the
+sealed decoder keeps has an observation time in the window, and that a document the sealed decoder did not drop
+decodes exactly as with no window (same result, same rows). `fuzz/seal_times.dict` holds the time names and the
+window edges (`-dict=fuzz/seal_times.dict`), and the `seal` seeds of each of the five targets carry in-window and
+edge times (made-up values, from the tests' own fixtures).
 
 Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mva`, `oa-nasr`,
 `oa-arinc424` and `oa-csv` were added in a second pass, below.)
@@ -138,7 +147,8 @@ Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mv
 | csv | eight synthetic files (committed; the first byte is the buffer capacity); locally, four chunks (header plus up to eight rows) of each NASR CSV file with a random capacity |
 | arinc424 | six synthetic files (committed): the crate's fixture record layouts with the airport identifiers and names replaced, in files with a matching header count; locally, 400 chunks of 1-30 consecutive records of the real CIFP under its real header with the count patched |
 | nasr | seven synthetic files (committed): a structure file, a structure plus data file, fixes (valid and hostile), STAR base, and the STAR and DP families as three files; locally, chunks of every parsed NASR file (header plus 1-40 rows), the STAR and DP triples, the airway pairs, every structure file and structure-plus-data pairs |
-| notam | six synthetic messages (committed), built from the made-up fixture of the `oa-notam` tests; there is no local real NOTAM corpus |
+| notam | thirteen synthetic messages (committed), six built from the made-up fixture of the `oa-notam` tests and seven `seal-*` ones with the issue and cancel times at the window edges; there is no local real NOTAM corpus |
+| stdds | thirteen synthetic TAIS and ASDE-X messages (committed, `fuzz/seeds/stdds`), built from the made-up fixtures of the `oa-stdds` tests with record and report times at the window edges |
 | mva | four synthetic charts (committed): two squares, one with a hole; a FUS5 chart; a sub-area chart; an unclosed ring; locally, the FAA chart files in `raw/mva` and `raw/mva-zjx` |
 
 The committed seeds of `asterix`, `adsb-trace`, `awc`, `fixm`, `j2k`, `json`, `tbfm` and `tfms`

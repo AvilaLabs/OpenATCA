@@ -457,7 +457,9 @@ pub fn parse_tais(
         &tx,
         limits.drop_window,
         b"record",
-        &[b"track", b"mrtTime"],
+        // Both observation times of a record: the track's and the SAFA receipt time (the
+        // STARS timestamp is a time of day, not a time).
+        &[&[b"track", b"mrtTime"], &[b"recSAFAReceiptTime"]],
     );
     if gone > 0 {
         stats.sealed_window_dropped += gone;

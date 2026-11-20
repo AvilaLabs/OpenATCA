@@ -72,6 +72,14 @@ fn a_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_i
     }
     assert_eq!(p.sealed_window_dropped, 2);
     assert_eq!(p.rows_seen[Feed::Sfdps as usize], 2);
+    // A dropped document is in no count but the drop: not a frame, not a message.
+    assert_eq!(
+        (
+            p.frames[Feed::Sfdps as usize],
+            p.messages[Feed::Sfdps as usize]
+        ),
+        (2, 2)
+    );
     // One document with a row in the window and others outside it is dropped whole.
     let mut q = new_pipeline(PipelineConfig::default()).unwrap();
     let doc = sf_doc(&[sf(1, from_ms - 1), sf(2, from_ms), sf(3, to_ms)]);
@@ -84,6 +92,14 @@ fn a_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_i
     );
     assert_eq!(q.sealed_window_dropped, 3);
     assert_eq!(q.rows_seen[Feed::Sfdps as usize], 0);
+    assert_eq!(
+        (
+            q.frames[Feed::Sfdps as usize],
+            q.messages[Feed::Sfdps as usize]
+        ),
+        (0, 0)
+    );
+    assert!(q.last_doc_dropped);
 }
 
 // REQ: OA-SEAL-014
@@ -146,4 +162,35 @@ fn the_byte_count_is_the_bytes_after_the_window_gate() {
     assert_eq!(a.sealed_window_dropped, 2);
     assert_eq!(a.bytes, kept.len() as u64);
     assert_eq!(b.bytes, kept.len() as u64);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_bytes_of_a_document_dropped_whole_are_not_in_the_byte_count() {
+    let from_ms = FROM / 1_000_000 - DAY;
+    let frame = |seq: u64, t_ms: i64| {
+        let doc = sf_doc(&[sf(1, t_ms)]);
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq, FROM - 1, 0, doc.as_bytes()).unwrap();
+        buf[..n].to_vec()
+    };
+    // Two frames received before the window: one with a row timed outside it, one inside it.
+    let kept = frame(0, from_ms - 1);
+    let mut all = kept.clone();
+    all.extend(frame(1, from_ms));
+    let run = |b: Vec<u8>| {
+        let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+        let rep = oa_replay::run_streams(
+            &mut p,
+            vec![spec_from_bytes(FeedKind::Sfdps, vec![b])],
+            4096,
+            &mut |_| {},
+        )
+        .unwrap();
+        (p, rep)
+    };
+    let (p, rep) = run(all);
+    assert_eq!(p.sealed_window_dropped, 1);
+    assert_eq!(p.frames[Feed::Sfdps as usize], 1);
+    assert_eq!(rep.bytes, kept.len() as u64);
 }

@@ -1503,3 +1503,79 @@ fn a_notam_issued_or_cancelled_in_the_drop_window_is_dropped_whole_and_every_cou
     assert!(r.is_err());
     assert_eq!(stats.sealed_window_dropped, 0);
 }
+
+/// Decodes `xml` with `w` and returns the outcome, the rows kept and the stats.
+fn decode_with_window(xml: &str, w: oa_sealed::DropWindow) -> (Outcome, usize, Stats) {
+    let mut p = parser();
+    let mut d = new_decoder(Limits::new(w));
+    let mut out = small();
+    let mut stats = default_stats();
+    let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+    (o, out.len, stats)
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let base = msg(&[&airport()]);
+    // All time (the closed failure of the list).
+    let (o, rows, s) = decode_with_window(&base, oa_sealed::DropWindow::all_time());
+    assert!(o.sealed_dropped);
+    assert_eq!(rows, 0);
+    assert_eq!(
+        s,
+        Stats {
+            sealed_window_dropped: 1,
+            ..default_stats()
+        }
+    );
+    // The production list.
+    let w = oa_sealed::DropWindow::sealed();
+    let inside = rep(
+        &base,
+        issued,
+        "<event:issued>2026-11-21T00:00:00.000Z</event:issued>",
+    );
+    assert!(decode_with_window(&inside, w).0.sealed_dropped);
+    let (o, rows, _) = decode_with_window(&base, w);
+    assert_eq!((o.sealed_dropped, rows), (false, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn issue_and_cancel_times_are_window_keys_in_any_encoding_and_validity_times_are_not() {
+    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let base = msg(&[&airport()]);
+    let with = |t: &str| rep(&base, issued, &format!("<event:issued>{t}</event:issued>"));
+    // Entity-encoded, padded with whitespace, and split by a comment.
+    for t in [
+        "2026-11-21T00:00:00.000&#90;",
+        " 2026-11-21T00:00:00.000Z\n",
+        "2026-11-21T00:00:<!--x-->00.000Z",
+    ] {
+        assert!(decode_with_window(&with(t), w).0.sealed_dropped, "{t:?}");
+    }
+    // A repeated issue element: both are read, so the one in the window is found.
+    let dup = rep(
+        &base,
+        issued,
+        &format!("{issued}<event:issued>2026-11-21T00:00:00.000Z</event:issued>"),
+    );
+    assert!(decode_with_window(&dup, w).0.sealed_dropped);
+    // A NOTAM with only a cancel time in the window, its issue time outside it.
+    let canc = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2026-11-22T00:00:00.000Z</fnse:canceled>",
+    );
+    assert!(decode_with_window(&canc, w).0.sealed_dropped);
+    // The same cancel time outside the window: kept.
+    let canc_out = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2030-03-06T00:00:00.000Z</fnse:canceled>",
+    );
+    assert!(!decode_with_window(&canc_out, w).0.sealed_dropped);
+}

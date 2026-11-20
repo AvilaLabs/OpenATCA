@@ -2273,3 +2273,98 @@ fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is
     let o = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
     assert_eq!((o.sealed_dropped, flights_len(&rows.flights)), (0, 1));
 }
+
+/// Decodes `xml` with `w` into roomy tables, returning the result and the stats.
+fn decode_with_window(
+    xml: &str,
+    w: oa_sealed::DropWindow,
+) -> (Result<Outcome, DocError>, usize, oa_tfms::Stats) {
+    let mut rows = new_rows(16, 8, 1 << 14, w);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let doc = p.parse(xml.as_bytes()).unwrap();
+    let r = oa_tfms::decode_doc(&doc, &mut rows);
+    let mut s = new_stats();
+    observe(&mut s, &r, &[], &[]);
+    (r, flights_len(&rows.flights) + flows_len(&rows.flows), s)
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let doc = wrap_flight(&track());
+    // All time (the closed failure of the list): the document is dropped whole.
+    let (r, rows, s) = decode_with_window(&doc, oa_sealed::DropWindow::all_time());
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    assert_eq!(
+        s,
+        oa_tfms::Stats {
+            sealed_window_dropped: 1,
+            ..new_stats()
+        }
+    );
+    // The production list: a message in the window is dropped, one outside it is kept.
+    let w = oa_sealed::DropWindow::sealed();
+    let (r, rows, _) = decode_with_window(&stamped(&doc, "2026-11-21T00:00:00Z"), w);
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    let (r, rows, s) = decode_with_window(&doc, w);
+    assert_eq!(
+        (r.unwrap().sealed_dropped, rows, s.sealed_window_dropped),
+        (0, 1, 0)
+    );
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_observation_time_is_a_window_key_in_any_encoding_and_a_reference_time_is_not() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let inw = "2026-11-21T00:00:00Z";
+    // The position time (`timeAtPosition`) in the window, the message time outside it.
+    let pos = wrap_flight(&track().replace(
+        "2030-01-02T03:04:00Z</nxcm:timeAtPosition>",
+        &format!("{inw}</nxcm:timeAtPosition>"),
+    ));
+    let (r, rows, _) = decode_with_window(&pos, w);
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    // The oceanic position's `time`.
+    let oc = pos.replace("timeAtPosition", "time");
+    assert!(decode_with_window(&oc, w)
+        .0
+        .map_or(true, |o| o.sealed_dropped == 1 || o.flight_rows == 0));
+    // Entity-encoded (the final Z as a character reference), in the message time and the
+    // position time, and split by a comment.
+    let enc = wrap_flight(&track()).replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        r#"sourceTimeStamp="2026-11-21T00:00:00&#90;""#,
+    );
+    assert_eq!(decode_with_window(&enc, w).0, Ok(sealed(1)));
+    let split = pos.replace(inw, "2026-11-21T00:00:<!--x-->00Z");
+    assert_eq!(decode_with_window(&split, w).0, Ok(sealed(1)));
+    // Padded with whitespace: if the decoder would read the value as a time in the window the
+    // document is dropped; if it refuses the value there is no row holding it.
+    let pad = wrap_flight(&track()).replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        r#"sourceTimeStamp=" 2026-11-21T00:00:00Z ""#,
+    );
+    let (r, rows, _) = decode_with_window(&pad, w);
+    assert!(
+        matches!(r, Ok(o) if o.sealed_dropped == 1) || rows == 0,
+        "{r:?} {rows}"
+    );
+    // A repeated position time element: both are read, so the one in the window is found.
+    let dup = wrap_flight(&track().replace(
+        "<nxcm:timeAtPosition>2030-01-02T03:04:00Z</nxcm:timeAtPosition>",
+        &format!("<nxcm:timeAtPosition>2030-01-02T03:04:00Z</nxcm:timeAtPosition><nxcm:timeAtPosition>{inw}</nxcm:timeAtPosition>"),
+    ));
+    assert_eq!(decode_with_window(&dup, w).0, Ok(sealed(1)));
+    // Reference times (here an ETA and the arrival fix time) in the window are not keys.
+    let refs = wrap_flight(
+        &track()
+            .replace("2030-01-02T04:30:00Z", inw)
+            .replace("2030-01-02T04:00:00Z", inw),
+    );
+    let (r, rows, _) = decode_with_window(&refs, w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
+    // A status output counts as a message of a dropped document.
+    let status = wrap_flight(&format!("{}<tfmsStatusOutput/>", stamped(&track(), inw)));
+    assert_eq!(decode_with_window(&status, w).0, Ok(sealed(2)));
+}
