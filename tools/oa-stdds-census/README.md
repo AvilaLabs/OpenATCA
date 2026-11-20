@@ -11,11 +11,27 @@ oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft 
 ```
 
 - `DIR`: a STDDS recording directory (files `*.oaf` or `*.oaf.gz`, searched up to three levels
-  down).
+  down). Given a capture day directory that holds `rec/stdds` (the layout `run-window.sh` writes:
+  `DAY/rec/<feed>/<feed>-<UTC start>-<NNNN>.oaf.gz`, `DAY/log`), only `rec/stdds` is read; the
+  other feeds' recordings are skipped.
 - `--adsb`: an `.oaf` clip of the same day from `oa-adsb-clip`. Without it, only the census runs.
 - `--gate-nm`, `--gate-ft`: the match gates of the position comparison, 1 NM and 500 ft by
   default. The horizontal gate is also tried at 0.5 and 2 NM.
 - `--from`, `--to`: a window of the UTC day in seconds, applied to both sides.
+
+Sealed hold-out data is never read. `DIR`, `--adsb`, every directory of the walk and every file
+opened go through the shared guard `oa-sealed` (`crates/oa-sealed/sealed_paths.txt`), which
+resolves links before it checks. A sealed path is refused before any byte is read: the message
+names the path and the exit status is 2. The tool writes only to stdout and stderr and takes no
+`--out`.
+
+Run on the 24 November development day, on 25 November (the clip is the `oa-adsb-clip` output
+for ADS-B day 2026.11.24):
+
+```
+oa-stdds-census /home/connoravila/Documents/Avila-Labs/openatca-data/scds/day-20261124 \
+  --adsb CLIP-2026.11.24.oaf > census-20261124.txt
+```
 
 Exit status: 0 on success, 2 on a usage error, a refused path, a bad gate or window, or a memory
 estimate above 4 GB; 3 if the frame reader stalls. The output is counts and distributions only.

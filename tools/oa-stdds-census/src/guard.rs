@@ -1,96 +1,93 @@
-//! The sealed recordings of 2026-11-19 are never read: a path with a component that contains a
-//! sealed name, as given or with links resolved, is refused before anything is opened or listed.
-//! A prefix that cannot be resolved fails closed.
+//! The sealed hold-out data is never read. The rule and the list live in the shared guard
+//! (`oa-sealed`, `crates/oa-sealed/sealed_paths.txt`); this is only the census's use of it. Every
+//! path (the recording directory, each directory of the walk, each file, the ADS-B clip) is
+//! resolved and checked there, as given and after links, before anything is listed or opened.
 
-use std::path::{Path, PathBuf};
+use oa_sealed::Sealed;
+use std::fs::File;
+use std::path::Path;
 
-/// Names of the sealed hold-out and smoke recordings.
-pub const SEALED: [&str; 3] = [
-    "rec-20261119",
-    "stdds-20261119-holdout",
-    "stdds-smoke-20261119",
-];
-
-/// Whether any component of `p` contains a sealed name anywhere in it.
-pub fn names_sealed(p: &Path) -> bool {
-    p.components().any(|c| {
-        let c = c.as_os_str().to_string_lossy();
-        SEALED.iter().any(|s| c.contains(s))
-    })
+/// Refuses `path` if it is, is inside, resolves into or holds a sealed entry. The error names
+/// the path.
+pub fn refuse_sealed(g: &Sealed, path: &Path) -> Result<(), String> {
+    g.check(path).map_err(|r| r.to_string())
 }
 
-/// Whether `dir` is, or directly holds, a sealed recording, decided without listing it: the
-/// data root (a directory named `scds`) is refused whole, and so is a directory that has a
-/// child of a sealed name (checked by name only, with a metadata probe, never opened).
-pub fn refuse_listing(dir: &Path) -> Result<(), String> {
-    refuse_sealed(dir)?;
-    let real = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let is_root = |p: &Path| p.file_name().is_some_and(|n| n == "scds");
-    if is_root(dir) || is_root(&real) {
-        return Err(
-            "the data root holds the sealed recordings; give one recording directory".to_string(),
-        );
-    }
-    for name in ["rec-20261119", "stdds-20261119-holdout"] {
-        if std::fs::symlink_metadata(real.join(name)).is_ok() {
-            return Err("the directory holds a sealed recording; it is not listed".to_string());
-        }
-    }
-    Ok(())
-}
-
-/// `Err` if `path` names a sealed recording as given, or any prefix of it does when resolved,
-/// or a prefix cannot be resolved.
-pub fn refuse_sealed(path: &Path) -> Result<(), String> {
-    let mut bad = names_sealed(path);
-    let mut prefix = PathBuf::new();
-    for comp in path.components() {
-        prefix.push(comp);
-        match std::fs::canonicalize(&prefix) {
-            Ok(real) => bad |= names_sealed(&real),
-            Err(e) => {
-                return Err(format!(
-                    "cannot resolve the path ({e}), so it cannot be checked"
-                ))
-            }
-        }
-    }
-    if bad {
-        return Err("the sealed hold-out recording is not read".to_string());
-    }
-    Ok(())
+/// Checks `path`, opens it for reading and verifies the opened file; the error names the path.
+pub fn open_guarded(g: &Sealed, path: &Path) -> Result<File, String> {
+    g.open(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A guard whose list also seals an ADS-B day, under a fake root.
+    pub(crate) fn guard(root: &Path) -> Sealed {
+        let text = format!(
+            "root {}\nseal scds/rec-20261119\nseal scds/stdds-20261119-holdout\nseal scds/stdds-smoke-20261119*\nseal raw/adsblol/2026.11.20\n",
+            root.display()
+        );
+        Sealed::with_list(&text, None)
+    }
+
+    fn tree(tag: &str) -> std::path::PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("oa-census-guard-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base.canonicalize().unwrap()
+    }
 
     // REQ: OA-CEN-007
     #[test]
-    fn sealed_names_are_refused_before_any_io() {
+    fn sealed_folders_and_adsb_day_are_refused_and_an_unsealed_one_accepted() {
+        let root = tree("names");
+        let g = guard(&root);
         for p in [
-            "/x/scds/rec-20261119",
-            "/x/scds/stdds-20261119-holdout/rec",
-            "/x/scds/stdds-smoke-20261119T192936Z",
-            "rec-20261119/a.oaf",
+            "scds/rec-20261119",
+            "scds/stdds-20261119-holdout/rec",
+            "scds/stdds-smoke-20261119T192936Z",
+            "raw/adsblol/2026.11.20",
+            "raw/adsblol/2026.11.20/clip.oaf",
         ] {
-            assert!(refuse_sealed(Path::new(p)).is_err(), "{p}");
+            let full = root.join(p);
+            std::fs::create_dir_all(&full).unwrap();
+            let e = refuse_sealed(&g, &full).unwrap_err();
+            assert!(e.contains(&*full.to_string_lossy()), "{e}");
+            assert!(e.contains("OA-SEAL-001"), "{e}");
         }
-        assert!(!names_sealed(Path::new("/x/scds/stdds-day-20261120/rec")));
+        let ok = root.join("scds").join("day-20261124");
+        std::fs::create_dir_all(&ok).unwrap();
+        assert!(refuse_sealed(&g, &ok).is_ok());
+        let other = root.join("raw").join("adsblol").join("2026.11.24");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(refuse_sealed(&g, &other).is_ok());
+        // The data root holds sealed entries and is refused whole.
+        assert!(refuse_sealed(&g, &root.join("scds")).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
     // REQ: OA-CEN-007
     #[test]
-    fn a_link_into_a_sealed_folder_is_refused() {
-        let base = std::env::temp_dir().join(format!("oa-census-guard-{}", std::process::id()));
-        let sealed = base.join("rec-20261119");
+    fn a_link_from_an_unsealed_name_to_a_sealed_folder_is_refused() {
+        let root = tree("link");
+        let g = guard(&root);
+        let sealed = root.join("scds").join("stdds-20261119-holdout");
+        let day = root.join("raw").join("adsblol").join("2026.11.20");
         std::fs::create_dir_all(&sealed).unwrap();
-        let link = base.join("innocent");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
+        let link = root.join("innocent");
         std::os::unix::fs::symlink(&sealed, &link).unwrap();
-        assert!(refuse_sealed(&link).is_err());
-        assert!(refuse_sealed(&base.join("missing")).is_err());
-        std::fs::remove_dir_all(&base).unwrap();
+        let link2 = root.join("clip");
+        std::os::unix::fs::symlink(&day, &link2).unwrap();
+        assert!(refuse_sealed(&g, &link).is_err());
+        assert!(refuse_sealed(&g, &link.join("a.oaf")).is_err());
+        assert!(open_guarded(&g, &link.join("a.oaf")).is_err());
+        assert!(refuse_sealed(&g, &link2).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

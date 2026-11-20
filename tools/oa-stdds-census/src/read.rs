@@ -5,9 +5,11 @@
 //! used.
 
 use crate::census::Census;
+use crate::guard::{open_guarded, refuse_sealed};
 use oa_feed::frame::{Kind as FrameKind, MAX_FRAME_LEN};
 use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
+use oa_sealed::Sealed;
 use oa_stdds::{new_stats, parse_message, std_error_index, Limits, Message, Stats};
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
@@ -189,9 +191,9 @@ impl std::fmt::Display for ReadError {
     }
 }
 
-fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), ReadError> {
+fn collect(g: &Sealed, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), ReadError> {
     // Every directory is checked before it is listed, the given one and each below it.
-    crate::guard::refuse_listing(dir).map_err(ReadError::Refused)?;
+    refuse_sealed(g, dir).map_err(ReadError::Refused)?;
     let fail = |e: std::io::Error| ReadError::Failed(format!("cannot list the directory: {e}"));
     for e in std::fs::read_dir(dir).map_err(fail)? {
         let e = e.map_err(fail)?;
@@ -199,7 +201,7 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), ReadE
         // A real subdirectory is searched; a link to one is not (no loops, no jumps elsewhere).
         if e.file_type().map_err(fail)?.is_dir() {
             if depth < MAX_DEPTH {
-                collect(&p, depth + 1, out)?;
+                collect(g, &p, depth + 1, out)?;
             }
         } else if p.is_file()
             && p.file_name()
@@ -214,9 +216,24 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), ReadE
 
 /// The recording files of `dir` and its subdirectories (up to three levels), in path order:
 /// names ending `.oaf` or `.oaf.gz`.
+///
+/// If `dir` is a capture day directory (it holds `rec/stdds`), only that feed's folder is read:
+/// the day also holds the other feeds' recordings (`rec/sfdps`, ...), which are not STDDS.
 pub fn recording_files(dir: &Path) -> Result<Vec<PathBuf>, ReadError> {
+    recording_files_in(Sealed::production(), dir)
+}
+
+/// [`recording_files`] against a given guard.
+pub fn recording_files_in(g: &Sealed, dir: &Path) -> Result<Vec<PathBuf>, ReadError> {
+    refuse_sealed(g, dir).map_err(ReadError::Refused)?;
+    let feed = dir.join("rec").join("stdds");
+    let start = if feed.is_dir() {
+        feed
+    } else {
+        dir.to_path_buf()
+    };
     let mut v = Vec::new();
-    collect(dir, 0, &mut v)?;
+    collect(g, &start, 0, &mut v)?;
     v.sort();
     Ok(v)
 }
@@ -224,7 +241,12 @@ pub fn recording_files(dir: &Path) -> Result<Vec<PathBuf>, ReadError> {
 /// Reads every recording in `dir` into `census`. Every directory is checked against the sealed
 /// list before it is listed, and each file again before it is opened.
 pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError> {
-    let files = recording_files(dir)?;
+    read_dir_in(Sealed::production(), dir, census)
+}
+
+/// [`read_dir`] against a given guard.
+pub fn read_dir_in(g: &Sealed, dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError> {
+    let files = recording_files_in(g, dir)?;
     let parser = Parser::new(XmlLimits::default())
         .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
     let mut ctx = Ctx {
@@ -234,8 +256,8 @@ pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError>
         rs: ReadStats::new(),
     };
     for f in &files {
-        crate::guard::refuse_sealed(f).map_err(ReadError::Refused)?;
-        let file = std::fs::File::open(f)
+        refuse_sealed(g, f).map_err(ReadError::Refused)?;
+        let file = open_guarded(g, f)
             .map_err(|e| ReadError::Failed(format!("cannot open a recording: {e}")))?;
         read_stream(file, &mut ctx)
             .map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
@@ -350,31 +372,114 @@ mod tests {
     fn a_walk_never_lists_a_sealed_folder_or_the_data_root() {
         use std::os::unix::fs::PermissionsExt;
         let t = std::env::temp_dir().join(format!("oa-census-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
         let sealed = t.join("scds").join("rec-20261119");
         let day = t.join("scds").join("stdds-day-20261120").join("rec");
         std::fs::create_dir_all(&sealed).unwrap();
         std::fs::create_dir_all(&day).unwrap();
         std::fs::write(day.join("a-0001.oaf"), b"").unwrap();
         std::fs::write(sealed.join("x.oaf"), b"").unwrap();
+        let t = t.canonicalize().unwrap();
+        let g = crate::guard::tests::guard(&t);
+        let sealed = t.join("scds").join("rec-20261119");
         // A listing of the sealed folder would fail (no permission) as Failed, not Refused.
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
         let mut c = Census::new();
-        // From the tree's top and from the data root: refused, nothing listed.
-        assert!(matches!(read_dir(&t, &mut c), Err(ReadError::Refused(_))));
+        // From the data root and the folder itself: refused, nothing listed.
         assert!(matches!(
-            read_dir(&t.join("scds"), &mut c),
+            read_dir_in(&g, &t.join("scds"), &mut c),
             Err(ReadError::Refused(_))
         ));
         assert!(matches!(
-            recording_files(&sealed),
+            recording_files_in(&g, &sealed),
             Err(ReadError::Refused(_))
         ));
         // An existing innocent recording directory is accepted and read.
-        let files = recording_files(&t.join("scds").join("stdds-day-20261120")).unwrap();
-        assert_eq!(files.len(), 1);
-        let rs = read_dir(&t.join("scds").join("stdds-day-20261120"), &mut c).unwrap();
+        let ok = t.join("scds").join("stdds-day-20261120");
+        assert_eq!(recording_files_in(&g, &ok).unwrap().len(), 1);
+        let rs = read_dir_in(&g, &ok, &mut c).unwrap();
         assert_eq!(rs.files, 1);
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[cfg(unix)]
+    // REQ: OA-CEN-007
+    #[test]
+    fn a_link_to_a_sealed_folder_and_a_sealed_file_inside_a_walk_are_refused() {
+        let t = std::env::temp_dir().join(format!("oa-census-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let sealed = t.join("scds").join("stdds-20261119-holdout");
+        let day = t
+            .join("scds")
+            .join("day-20261124")
+            .join("rec")
+            .join("stdds");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(sealed.join("a.oaf"), b"").unwrap();
+        let t = t.canonicalize().unwrap();
+        let g = crate::guard::tests::guard(&t);
+        let link = t.join("innocent");
+        std::os::unix::fs::symlink(t.join("scds").join("stdds-20261119-holdout"), &link).unwrap();
+        let mut c = Census::new();
+        assert!(matches!(
+            read_dir_in(&g, &link, &mut c),
+            Err(ReadError::Refused(_))
+        ));
+        // A link to a sealed file inside an accepted folder is refused when it is opened.
+        let day = t
+            .join("scds")
+            .join("day-20261124")
+            .join("rec")
+            .join("stdds");
+        std::os::unix::fs::symlink(
+            t.join("scds").join("stdds-20261119-holdout").join("a.oaf"),
+            day.join("scds-stdds-20261124T000000Z-0001.oaf"),
+        )
+        .unwrap();
+        let rs = read_dir_in(&g, &t.join("scds").join("day-20261124"), &mut c);
+        assert!(matches!(rs, Err(ReadError::Refused(_))));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // REQ: OA-CEN-005
+    #[test]
+    fn the_capture_day_layout_is_found_and_only_the_stdds_feed_is_read() {
+        // run-window.sh writes DIR/rec/<feed>/<feed-name>-<UTC start>-<NNNN>.oaf.gz and DIR/log.
+        let t = std::env::temp_dir().join(format!("oa-census-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let day = t.join("day-20261124");
+        for feed in ["stdds", "sfdps", "tfms"] {
+            let d = day.join("rec").join(feed);
+            std::fs::create_dir_all(&d).unwrap();
+            for n in ["0002", "0001"] {
+                std::fs::write(
+                    d.join(format!("scds-{feed}-20261124T000000Z-{n}.oaf.gz")),
+                    b"",
+                )
+                .unwrap();
+            }
+        }
+        std::fs::create_dir_all(day.join("log")).unwrap();
+        std::fs::write(day.join("log").join("run.log"), b"").unwrap();
+        let t = t.canonicalize().unwrap();
+        let day = t.join("day-20261124");
+        let g = crate::guard::tests::guard(&t);
+        for dir in [day.clone(), day.join("rec").join("stdds")] {
+            let names: Vec<String> = recording_files_in(&g, &dir)
+                .unwrap()
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "scds-stdds-20261124T000000Z-0001.oaf.gz",
+                    "scds-stdds-20261124T000000Z-0002.oaf.gz"
+                ]
+            );
+        }
         std::fs::remove_dir_all(&t).unwrap();
     }
 

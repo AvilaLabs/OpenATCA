@@ -4,6 +4,7 @@
 //! failed run, 2 on a usage error, a sealed path, a bad gate or window, or a memory estimate past the budget, 3 if the frame reader stalled
 //! (the census is incomplete).
 
+use oa_sealed::Sealed;
 use oa_stdds_census::census::Census;
 use oa_stdds_census::census::DEFAULT_BUDGET;
 use oa_stdds_census::guard::refuse_sealed;
@@ -78,7 +79,7 @@ fn main() -> ExitCode {
         _ => return usage(),
     };
     for p in std::iter::once(dir).chain(clip) {
-        if let Err(e) = refuse_sealed(Path::new(p)) {
+        if let Err(e) = refuse_sealed(Sealed::production(), Path::new(p)) {
             eprintln!("oa-stdds-census: refused: {e}");
             return ExitCode::from(2);
         }

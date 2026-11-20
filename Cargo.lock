@@ -341,6 +341,7 @@ dependencies = [
  "oa-bench",
  "oa-feed",
  "oa-math",
+ "oa-sealed",
  "oa-stdds",
  "oa-truth",
  "oa-xml",
