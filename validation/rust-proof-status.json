@@ -1062,6 +1062,104 @@
         ],
         "source_set_sha256": "beac411a7b8c97b96a25cde92e26b3093cf34fb5d0a7fae52d727fa07ef6d645",
         "source_snapshot_sha256": "7bc8677b354abdb57f7e4eff2045d7caa0d7ae9ff40d439b8920bb354a8d17e4"
+      },
+      "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "ce7b6f2239cab13453b911ff1a4afeba3523dae45c8f8f3695b07f897452d6e5",
+          "Cargo.lock": "9576e74fb6c436e1907a769e1c02c3fa26ce25be042ed5c32fa3b78d36afc2de",
+          "Cargo.toml": "e300a8d6697832553394316858b9ca068b5f8407f6e0d925e0a8272613b5e51f",
+          "crates/oa-track/Cargo.toml": "a3a20425b935f188f42d12e41b980b6ec1d3147b6c11a981cd7b114849b08783",
+          "crates/oa-track/src/adsb.rs": "a883bab035da0ca35faef880ada2a7d7f33c7602a52260b690a108208a10dbcf",
+          "crates/oa-track/src/assoc.rs": "834d36c10ac98cd43cfd7ca8e95bbc2a9caa0b7861c455f8c3dc7f40d1ebb8f6",
+          "crates/oa-track/src/canon.rs": "1138b29af897c1bf52c162f65bca51ae8675eb4fce2cb1f2468425bcad465b51",
+          "crates/oa-track/src/canon_spill.rs": "b206abcd9b41eb55413a84e6327692a9ea08389e9ae7a143646e0a9a8a4e6a1c",
+          "crates/oa-track/src/coarse.rs": "0e5583720c7c9af71161b9cb118b85c870a1738753c4c29380af9186c550668d",
+          "crates/oa-track/src/confirm.rs": "badcc30ca80a075a26390c579c615a14ea41dedf48f71813fc9142d09db462a9",
+          "crates/oa-track/src/filter.rs": "493761f6e86958c1a2274c12369f83ae78bcd20b6c2185266dc148dca521e9e0",
+          "crates/oa-track/src/fixed_map.rs": "689a92c128bb6d54e074b3d6a3563c0be26b212d54b9794db706c2bca79c86ed",
+          "crates/oa-track/src/fusion.rs": "9c2885be38573e2a394e926df47faa2cf0a399e5deedd69884d6bbb45ed81985",
+          "crates/oa-track/src/fusion_main.rs": "72a34c2e5cefc494e5a4f5b556e294950b92c7f6b973421ef3f45cabf598e4e6",
+          "crates/oa-track/src/fusion_params.rs": "9f3940a4cc5d49d1484692260d646225d32ea2bd7bddab5d11465606c6c1d81c",
+          "crates/oa-track/src/fusion_score.rs": "db56bfa7f1d91abcaddc52e80409907296875d65d619a41983637599c60dc835",
+          "crates/oa-track/src/fusion_world.rs": "0b566f648a2b7aea1dc4ff3ac9b8ffa04addedcff1875033079ad6c977395f62",
+          "crates/oa-track/src/gate_trace.rs": "47f9edb7f1a0ea3fb8abcf2a895bc23ca515166900f9aa4f4d6b4ccc100e2449",
+          "crates/oa-track/src/hfilter.rs": "c074e404ef6e9951d9b52ee920993b6c88aad6df0120e6986bb6f2b9cbacfd7b",
+          "crates/oa-track/src/latency.rs": "a03796740e4cedd20822876de8b571ff100c432e9bbd6780bf50e0e00b70f0eb",
+          "crates/oa-track/src/lib.rs": "b1397c0539e5ab0d1d5c1e987cfdda7fa39a6b61e7abcf0eef3fa947c1c6ae5d",
+          "crates/oa-track/src/linalg.rs": "8f5f66a47554cbc0e51cd7a32e3ab6de10aa4fd600b82c9554b33d99819d58a5",
+          "crates/oa-track/src/main.rs": "fa2ad165596d9a92da350d804e4324cb09e746795889553c2b1db50f6841f2b4",
+          "crates/oa-track/src/params.rs": "390f3823f7c02c704dc6c7b8554ac9c4db71a42123090b424ad86a3403e5e6cf",
+          "crates/oa-track/src/radar.rs": "2de89458d3de915059e52546ae36adad52c3ccb0a72af2be21bc69ed2337a539",
+          "crates/oa-track/src/registration.rs": "2b35908f3a03dc3c87bdaa6a6eb6b9a1d7f6fdf0b8ed70406739ad08ec2adf71",
+          "crates/oa-track/src/score.rs": "0138bc01c349331949ebac11b4e66ec9e4c4dc8ffb1429c87c447180032f2756",
+          "crates/oa-track/src/spill.rs": "002dbf32b47fc48a8d45eb0aa48d1e5a940801f1bb17f96b5e456e78b158e30d",
+          "crates/oa-track/src/synth_truth.rs": "8a8cf05da4b7e3a4865ab0b2873e8e1fa034555b7a0edf01bb01a594bb081bdc",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "37e2ce62dd2768cf9fc2757be22c63531d15a0c9d7a6704d57c9b1f9c34589a1",
+          "crates/oa-track/src/tracker.rs": "1314eb43868ef65d6ed4439528c0b5c5852c45423947448df92ac8e5cce325b0",
+          "crates/oa-track/src/tracker_proofs.rs": "a93f2465e3ee60519573bff72ab79341d42a22447c5f56906169c6bd859f78d8",
+          "crates/oa-track/src/tracker_rollback_paths.rs": "cb65aa9183d0fb5aafba056b34a816032d15c6a093cdd80b029ea02d42495e85",
+          "crates/oa-track/src/types.rs": "1482117f9a4a6deb146ef3ae12427ef0109bd7b40b0e93637d342140f8223357",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "crates/oa-track/src/vfilter.rs": "2d83be2ff4338cb49cc8b72d28a1f154c32f09f453caf6ede5b17762bf799e33",
+          "tools/kani_validation.py": "e5812b2607826e06df6db34f81ebae320d22d67c7990f85ed593df928a0b9838",
+          "tools/rust_proof_suite.py": "72b3558158d895453ffcb8a8fa5f7a6dd609ffae513242a823322fcecea3f875",
+          "tools/rust_proofs.json": "f28c560b669bb4f0b882238b49e8d96d8c6ca4202c4e30eef05911de05d36b62"
+        },
+        "source_revisions": [
+          "5e2d6015b38a5e713cce086996264506f2019ce3"
+        ],
+        "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+        "source_snapshot_sha256": null
+      },
+      "a546ede3aad369196e013d31323bb503c8f1b5e0d7fefafe1053b7708910382d": {
+        "selected_rust_kani_source_sha256": {
+          ".github/workflows/rust-proofs.yml": "ce7b6f2239cab13453b911ff1a4afeba3523dae45c8f8f3695b07f897452d6e5",
+          "Cargo.lock": "9576e74fb6c436e1907a769e1c02c3fa26ce25be042ed5c32fa3b78d36afc2de",
+          "Cargo.toml": "e300a8d6697832553394316858b9ca068b5f8407f6e0d925e0a8272613b5e51f",
+          "crates/oa-track/Cargo.toml": "a3a20425b935f188f42d12e41b980b6ec1d3147b6c11a981cd7b114849b08783",
+          "crates/oa-track/src/adsb.rs": "a883bab035da0ca35faef880ada2a7d7f33c7602a52260b690a108208a10dbcf",
+          "crates/oa-track/src/assoc.rs": "834d36c10ac98cd43cfd7ca8e95bbc2a9caa0b7861c455f8c3dc7f40d1ebb8f6",
+          "crates/oa-track/src/canon.rs": "1138b29af897c1bf52c162f65bca51ae8675eb4fce2cb1f2468425bcad465b51",
+          "crates/oa-track/src/canon_spill.rs": "b206abcd9b41eb55413a84e6327692a9ea08389e9ae7a143646e0a9a8a4e6a1c",
+          "crates/oa-track/src/coarse.rs": "0e5583720c7c9af71161b9cb118b85c870a1738753c4c29380af9186c550668d",
+          "crates/oa-track/src/confirm.rs": "badcc30ca80a075a26390c579c615a14ea41dedf48f71813fc9142d09db462a9",
+          "crates/oa-track/src/filter.rs": "493761f6e86958c1a2274c12369f83ae78bcd20b6c2185266dc148dca521e9e0",
+          "crates/oa-track/src/fixed_map.rs": "689a92c128bb6d54e074b3d6a3563c0be26b212d54b9794db706c2bca79c86ed",
+          "crates/oa-track/src/fusion.rs": "9c2885be38573e2a394e926df47faa2cf0a399e5deedd69884d6bbb45ed81985",
+          "crates/oa-track/src/fusion_main.rs": "72a34c2e5cefc494e5a4f5b556e294950b92c7f6b973421ef3f45cabf598e4e6",
+          "crates/oa-track/src/fusion_params.rs": "9f3940a4cc5d49d1484692260d646225d32ea2bd7bddab5d11465606c6c1d81c",
+          "crates/oa-track/src/fusion_score.rs": "db56bfa7f1d91abcaddc52e80409907296875d65d619a41983637599c60dc835",
+          "crates/oa-track/src/fusion_world.rs": "0b566f648a2b7aea1dc4ff3ac9b8ffa04addedcff1875033079ad6c977395f62",
+          "crates/oa-track/src/gate_trace.rs": "47f9edb7f1a0ea3fb8abcf2a895bc23ca515166900f9aa4f4d6b4ccc100e2449",
+          "crates/oa-track/src/hfilter.rs": "c074e404ef6e9951d9b52ee920993b6c88aad6df0120e6986bb6f2b9cbacfd7b",
+          "crates/oa-track/src/latency.rs": "a03796740e4cedd20822876de8b571ff100c432e9bbd6780bf50e0e00b70f0eb",
+          "crates/oa-track/src/lib.rs": "b1397c0539e5ab0d1d5c1e987cfdda7fa39a6b61e7abcf0eef3fa947c1c6ae5d",
+          "crates/oa-track/src/linalg.rs": "8f5f66a47554cbc0e51cd7a32e3ab6de10aa4fd600b82c9554b33d99819d58a5",
+          "crates/oa-track/src/main.rs": "fa2ad165596d9a92da350d804e4324cb09e746795889553c2b1db50f6841f2b4",
+          "crates/oa-track/src/params.rs": "390f3823f7c02c704dc6c7b8554ac9c4db71a42123090b424ad86a3403e5e6cf",
+          "crates/oa-track/src/radar.rs": "2de89458d3de915059e52546ae36adad52c3ccb0a72af2be21bc69ed2337a539",
+          "crates/oa-track/src/registration.rs": "2b35908f3a03dc3c87bdaa6a6eb6b9a1d7f6fdf0b8ed70406739ad08ec2adf71",
+          "crates/oa-track/src/score.rs": "0138bc01c349331949ebac11b4e66ec9e4c4dc8ffb1429c87c447180032f2756",
+          "crates/oa-track/src/spill.rs": "002dbf32b47fc48a8d45eb0aa48d1e5a940801f1bb17f96b5e456e78b158e30d",
+          "crates/oa-track/src/synth_truth.rs": "8a8cf05da4b7e3a4865ab0b2873e8e1fa034555b7a0edf01bb01a594bb081bdc",
+          "crates/oa-track/src/time_gate.rs": "b61b2332430be2644478b14f509dcf42ed224cb0e75aa4fa2e5c7695c6598e16",
+          "crates/oa-track/src/time_gate_proofs_full.rs": "37e2ce62dd2768cf9fc2757be22c63531d15a0c9d7a6704d57c9b1f9c34589a1",
+          "crates/oa-track/src/tracker.rs": "1314eb43868ef65d6ed4439528c0b5c5852c45423947448df92ac8e5cce325b0",
+          "crates/oa-track/src/tracker_proofs.rs": "173d824562d71ee4c5c5e5793e713c121c1e26bbb5db51a56b493d7cdd8d29cb",
+          "crates/oa-track/src/tracker_rollback_paths.rs": "cb65aa9183d0fb5aafba056b34a816032d15c6a093cdd80b029ea02d42495e85",
+          "crates/oa-track/src/types.rs": "1482117f9a4a6deb146ef3ae12427ef0109bd7b40b0e93637d342140f8223357",
+          "crates/oa-track/src/types_proofs.rs": "35e27e510979756a7fcaac2195fcd20d02574c0d7f00cde2596af6a6557ab3d1",
+          "crates/oa-track/src/vfilter.rs": "2d83be2ff4338cb49cc8b72d28a1f154c32f09f453caf6ede5b17762bf799e33",
+          "tools/kani_validation.py": "e5812b2607826e06df6db34f81ebae320d22d67c7990f85ed593df928a0b9838",
+          "tools/rust_proof_suite.py": "72b3558158d895453ffcb8a8fa5f7a6dd609ffae513242a823322fcecea3f875",
+          "tools/rust_proofs.json": "3e68d25eb12cb2e4e0eea1a4d8d42b1a670bc216bb12dc25f3e9104b269c43b5"
+        },
+        "source_revisions": [
+          "007a8a4c126a04f7acf6b3384e5a44ae9c7c0a35"
+        ],
+        "source_set_sha256": "a546ede3aad369196e013d31323bb503c8f1b5e0d7fefafe1053b7708910382d",
+        "source_snapshot_sha256": null
       }
     },
     "version": "0.68.0",
@@ -1160,6 +1258,780 @@
         }
       ],
       "other_moved_harnesses_note": "Plain cargo kani --lib runs, wall clock with compilation, jobs 1, Kani 0.68.0, Cargo 1.89.0, source revision above; not run through the registry runner, so no raw-result digest is recorded."
+    },
+    "rt239_large_move_snapshot_runs": {
+      "note": "RT-239: the 19 large-move and snapshot proofs, each run once locally by tools/rust_proof_suite.py, one at a time, on 2026-11-20, Kani 0.68.0, CBMC 6.11.0, Cargo 1.89.0. Eighteen ran at 5e2d6015b38a5e713cce086996264506f2019ce3; large-move-decision-rejected ran at 007a8a4 after its harness was changed (the unpredictable-old-path cover became unreachable once a refused report is counted as a refusal, so it was dropped and the refusal asserted never to count as unpredictable). The two commits differ in crates/ only in that harness (crates/oa-track/src/tracker_proofs.rs); the other 18 harnesses' source is unchanged. Earlier attempts of some of these proofs failed for memory, timeout or harness-selection reasons and are not recorded here. This is a cumulative local record, not one fresh-checkout run; the source groups differ; CI is separate. elapsed_seconds is the runner's own time; wall_clock is the whole run including compilation. After the runs, 5d7f263 re-wrapped one kani::cover! call in tracker_proofs.rs onto one line (rustfmt; `git diff -w 007a8a4 5d7f263 -- crates/oa-track/src/tracker_proofs.rs` is that line only), so that file's hash differs from the recorded groups while every harness is unchanged.",
+      "proofs": [
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 45.7,
+          "harness": "tracker::proofs::resolve_decide_needs_apart_reports_to_confirm_and_two_to_roll_back",
+          "id": "large-move-decision",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "confirmed",
+            "rolled back",
+            "a first report on the old path",
+            "old path cannot be predicted",
+            "undecided",
+            "too soon",
+            "a tie confirms"
+          ],
+          "result_sha256": "7402d3ed156c503570f56bdc59c9854acb82018847d4022305796c10c8c57e5b",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "0:45",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 7,
+              "Success": 319
+            },
+            "check_category_counts": {
+              "NaN": 3,
+              "assertion": 13,
+              "cover": 7,
+              "pointer_dereference": 300,
+              "unreachable": 3
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 363.2,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_scalars_and_counters",
+          "id": "large-move-decision-rejected",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "a deciding report was refused",
+            "a first report on the old path",
+            "too soon to decide"
+          ],
+          "result_sha256": "0f43821b9ee3db0ed1f25b1b51b0b589aa6d1d1e945fd1d347db71e7c2d71101",
+          "source_group_sha256": "a546ede3aad369196e013d31323bb503c8f1b5e0d7fefafe1053b7708910382d",
+          "source_revision": "007a8a4c126a04f7acf6b3384e5a44ae9c7c0a35",
+          "source_set_sha256": "a546ede3aad369196e013d31323bb503c8f1b5e0d7fefafe1053b7708910382d",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "6:03",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 3,
+              "Success": 6639,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 382,
+              "assume": 15,
+              "bit_count": 1,
+              "cover": 3,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5321,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 323.1,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter",
+          "id": "large-move-decision-rejected-anchor-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "6bd430755aac798d13a5a76c4b0436e3005ee418fda62f9c910e909500c1b3e6",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "5:23",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6614,
+              "Unreachable": 235
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 366,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 299.8,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_category",
+          "id": "large-move-decision-rejected-category",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "eca25b1e520a4a2ef165fe7314c697f9c20972d9b01e37acae3793ea2111ace9",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "4:59",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6614,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 369,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 413.4,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter",
+          "id": "large-move-decision-rejected-current-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "49074d89188dc28e7cb359b71c192c969a029a5ac66eff4b461b443902208469",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "6:53",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6614,
+              "Unreachable": 235
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 366,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 377.7,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_first_times",
+          "id": "large-move-decision-rejected-first-times",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "7056f7229dc541024d9bec8e263abda33d1cf76fbed9440dfed7d5676f088c12",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "6:17",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6613,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 368,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 341.5,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_last_time_and_updates",
+          "id": "large-move-decision-rejected-last-time-and-updates",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "a2dad562db59675805d74d3990f4a322e89dc210cbf7d1413a69ae77a845f1a8",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "5:41",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6616,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 371,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 186.5,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_other_counters",
+          "id": "large-move-decision-rejected-other-counters",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "69404959ac91739360124e6ad466c08e61abb1f855cc94e677abb17870569514",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "3:06",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6659,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 180,
+              "assertion": 356,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5393,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 207,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 408.2,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_ring",
+          "id": "large-move-decision-rejected-ring",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "17bc5419f5a16f05a46970bcbcc96e0be254a5c801f74004c72b933020c6c547",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "6:48",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6614,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 368,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 210,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 358.7,
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_state_and_counts",
+          "id": "large-move-decision-rejected-state-and-counts",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "b6b46b7ea4f308e50807c77216b88ccd04ebf3991f86eb05c213d771f79f9a21",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+            "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+            "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+          ],
+          "stubbing": true,
+          "wall_clock": "5:58",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 6615,
+              "Unreachable": 238
+            },
+            "check_category_counts": {
+              "NaN": 487,
+              "arithmetic_overflow": 32,
+              "array_bounds": 204,
+              "assertion": 370,
+              "assume": 15,
+              "bit_count": 1,
+              "division-by-zero": 6,
+              "pointer": 5,
+              "pointer_dereference": 5309,
+              "precondition_instance": 19,
+              "safety_check": 192,
+              "unreachable": 209,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 99.6,
+          "harness": "tracker::proofs::update_in_order_with_a_large_move_starts_it_and_emit_marks_the_row_it_makes",
+          "id": "large-move-marks-rows",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "the widening cannot be computed",
+            "the row is widened over an old path that differs",
+            "the row is already wide enough"
+          ],
+          "result_sha256": "15bfeec5e2d3951539b53a6d17583c80e3ab76831745dd81748735b80818850f",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [
+            "decide returns a large move (Step::Moved).",
+            "filter_output returns a row for the new filter and, for the snapshot's filter, a row at another position or none.",
+            "filter_row_distance_m and r95_m return any value (any non-NaN non-negative radius)."
+          ],
+          "stubbing": true,
+          "wall_clock": "1:39",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 3,
+              "Success": 2941,
+              "Unreachable": 26
+            },
+            "check_category_counts": {
+              "NaN": 11,
+              "arithmetic_overflow": 13,
+              "assertion": 86,
+              "assume": 13,
+              "bit_count": 1,
+              "cover": 3,
+              "division-by-zero": 2,
+              "pointer": 5,
+              "pointer_dereference": 2581,
+              "precondition_instance": 19,
+              "safety_check": 136,
+              "unreachable": 96,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 56.1,
+          "harness": "tracker::proofs::snap_restore_from_the_moves_snapshot_and_end_move_put_back_the_listed_columns",
+          "id": "large-move-rollback",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "4da08b7760db0ca436cdce30a6f940953bb5b57d65ea8c2d903eff4dd505bba1",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "0:56",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 1962,
+              "Unreachable": 7
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 5,
+              "assertion": 65,
+              "assume": 8,
+              "bit_count": 1,
+              "pointer": 4,
+              "pointer_dereference": 1700,
+              "precondition_instance": 19,
+              "safety_check": 78,
+              "unreachable": 77,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 186.9,
+          "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_anchor_filter",
+          "id": "snapshot-capture-equals-take-anchor-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "c3a7d17f9da012651c8e8b8e98f0043de33bf9257cf0188ccce759ffd4a3e8e3",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "3:07",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 1967,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 31,
+              "assertion": 112,
+              "assume": 8,
+              "bit_count": 1,
+              "pointer": 4,
+              "pointer_dereference": 1655,
+              "precondition_instance": 19,
+              "safety_check": 66,
+              "unreachable": 65,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 170.2,
+          "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_current_filter",
+          "id": "snapshot-capture-equals-take-current-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "47e1a0f3ecf648df4e3dacb3b58f947986aba13dd592f7bdc2bf2de5abcdc905",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "2:50",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 1967,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 31,
+              "assertion": 112,
+              "assume": 8,
+              "bit_count": 1,
+              "pointer": 4,
+              "pointer_dereference": 1655,
+              "precondition_instance": 19,
+              "safety_check": 66,
+              "unreachable": 65,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 167.2,
+          "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_ring",
+          "id": "snapshot-capture-equals-take-ring",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "afb9fcb610409b4108b0d736c021a5efe99749e0ad328f3e339dbe4733314572",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "2:47",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 1970,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 28,
+              "assertion": 110,
+              "assume": 8,
+              "bit_count": 1,
+              "pointer": 4,
+              "pointer_dereference": 1661,
+              "precondition_instance": 19,
+              "safety_check": 68,
+              "unreachable": 65,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 144.9,
+          "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_scalars_and_category",
+          "id": "snapshot-capture-equals-take-scalars-category",
+          "loop_unwind_overrides": [],
+          "required_covers": [],
+          "result_sha256": "97c0de2e07d4c80d393d06c6f691dcc17cbc7b7872c36069baf3633d1b5428c5",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "2:24",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Success": 2017,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 28,
+              "assertion": 110,
+              "assume": 8,
+              "bit_count": 1,
+              "pointer": 4,
+              "pointer_dereference": 1709,
+              "precondition_instance": 19,
+              "safety_check": 68,
+              "unreachable": 64,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 81.9,
+          "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_anchor_filter",
+          "id": "snapshot-round-trip-anchor-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "anchor filter differs before the snapshot is restored"
+          ],
+          "result_sha256": "19d12b88b21a6a830b9942ad86f2b6bdb8b57092b675e2435881848bdab959da",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "1:21",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 1,
+              "Success": 1747,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 29,
+              "assertion": 85,
+              "assume": 8,
+              "bit_count": 1,
+              "cover": 1,
+              "pointer": 4,
+              "pointer_dereference": 1451,
+              "precondition_instance": 19,
+              "safety_check": 72,
+              "unreachable": 72,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 80.8,
+          "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_current_filter",
+          "id": "snapshot-round-trip-current-filter",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "current filter differs before the snapshot is restored"
+          ],
+          "result_sha256": "a2bd5116ede0a6de56a9db484936ebf33dc66e74f2fa110281a7e35a628e1f58",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "1:20",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 1,
+              "Success": 1747,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 29,
+              "assertion": 85,
+              "assume": 8,
+              "bit_count": 1,
+              "cover": 1,
+              "pointer": 4,
+              "pointer_dereference": 1451,
+              "precondition_instance": 19,
+              "safety_check": 72,
+              "unreachable": 72,
+              "unsupported_construct": 4
+            }
+          }
+        },
+        {
+          "cfgs": [],
+          "date": "2026-11-20",
+          "elapsed_seconds": 68.2,
+          "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_ring",
+          "id": "snapshot-round-trip-ring",
+          "loop_unwind_overrides": [],
+          "required_covers": [
+            "ring differs before the snapshot is restored"
+          ],
+          "result_sha256": "2f22a6cf76354ab1a50a2dad0e78a5f37e08333238ea984d4a20cf5abbd8bfea",
+          "source_group_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "source_revision": "5e2d6015b38a5e713cce086996264506f2019ce3",
+          "source_set_sha256": "e357e6c4b1cc3543b22cc2ddc31ea9d02719d37bc09344af2c1256c5c19032d3",
+          "status": "PASS",
+          "stub_summaries": [],
+          "stubbing": false,
+          "wall_clock": "1:08",
+          "report_diagnostics": {
+            "check_status_counts": {
+              "Satisfied": 1,
+              "Success": 1704,
+              "Unreachable": 6
+            },
+            "check_category_counts": {
+              "arithmetic_overflow": 8,
+              "array_bounds": 5,
+              "assertion": 66,
+              "assume": 8,
+              "bit_count": 1,
+              "cover": 1,
+              "pointer": 4,
+              "pointer_dereference": 1451,
+              "precondition_instance": 19,
+              "safety_check": 72,
+              "unreachable": 72,
+              "unsupported_construct": 4
+            }
+          }
+        }
+      ]
     }
   },
   "miri": {

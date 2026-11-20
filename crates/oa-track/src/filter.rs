@@ -26,6 +26,7 @@ use oa_geo::aeqd::{
     Mat2,
 };
 
+use crate::confirm::move_is_large;
 use crate::gate_trace::{gate_trace_push, GateTraceRow};
 use crate::hfilter::{
     dwell_decay, h_change_frame, h_combine, h_gate_d2, h_init, h_pos_nis, h_predict, h_update,
@@ -90,6 +91,11 @@ pub(crate) enum Applied {
     NumericalRefused,
     /// Too many rejections in a row: the filter was re-initialised at this measurement.
     Resync,
+    /// Passed the position gate but lies farther than `confirm_move_m` from the predicted
+    /// position: not applied here, no state changed; the caller notes the move and applies it
+    /// again with the check off, which is exactly the application of a tracker without it
+    /// (RT-239, `crate::confirm`).
+    Large,
 }
 
 fn deg(e7: i32) -> f64 {
@@ -175,7 +181,9 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
     }
 }
 
-/// Applies `m` (at `m.toa_ns >= f.t_ns`) to `f`. Counters go to `stats`.
+/// Applies `m` (at `m.toa_ns >= f.t_ns`) to `f`. Counters go to `stats`. With `cfg.confirm_moves`
+/// a move over `cfg.confirm_move_m` that passed the gate is returned as [`Applied::Large`],
+/// unapplied.
 pub(crate) fn filter_apply(
     f: &mut Filter,
     m: &Measurement,
@@ -268,6 +276,37 @@ fn reject_jump(
     Applied::Rejected
 }
 
+/// Distance of the plane position `(zx, zy)` from the predicted mean position, metres.
+fn pred_miss_m(pred: &HFilter, zx: f64, zy: f64) -> f64 {
+    let mean = |i: usize| {
+        pred.m
+            .iter()
+            .zip(pred.mu.iter())
+            .map(|(m, w)| w * m.x.get(i).copied().unwrap_or(f64::NAN))
+            .sum::<f64>()
+    };
+    oa_math::hypot(zx - mean(0), zy - mean(1))
+}
+
+/// How far `m` lies from the filter's predicted position at `m`'s time, metres; not a number if
+/// the prediction fails. Reads only.
+pub(crate) fn filter_miss_m(f: &Filter, m: &Measurement) -> f64 {
+    let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    let frame = filter_frame(f);
+    let Some(pred) = h_predict(&f.h, dt, dwell_decay(dt), f.h_mode) else {
+        return f64::NAN;
+    };
+    let (zx, zy) = project(&frame, deg(m.lat_e7), deg(m.lon_e7));
+    pred_miss_m(&pred, zx, zy)
+}
+
+/// The distance between two output rows' positions, metres.
+pub(crate) fn filter_row_distance_m(a: &OutRow, b: &OutRow) -> f64 {
+    let frame = frame_new(deg(a.lat_e7), deg(a.lon_e7));
+    let (e, n) = project(&frame, deg(b.lat_e7), deg(b.lon_e7));
+    oa_math::hypot(e, n)
+}
+
 fn apply(
     f: &mut Filter,
     m: &Measurement,
@@ -309,6 +348,10 @@ fn apply(
         };
         if gate.is_nan() || gate > GATE_CHI2 {
             return reject_jump(f, m, stats, cfg);
+        }
+        // A fixed distance, not the covariance's: the gate widens with the gap, this does not.
+        if cfg.confirm_moves && move_is_large(pred_miss_m(&pred, zx, zy), cfg.confirm_move_m) {
+            return Applied::Large;
         }
         stats.nis_sum += nis;
         stats.nis_n += 1;

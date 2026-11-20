@@ -19,7 +19,7 @@ from kani_validation import LOOP_UNWIND_PRESETS
 
 
 REGISTRY_VERSION = 1
-MAX_PROOFS = 64
+MAX_PROOFS = 96
 ALLOWED_PACKAGES = {"oa-track", "oa-replay", "oa-safety"}
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -224,6 +224,7 @@ def _not_run_outcome(proof: dict[str, Any], failed_id: str) -> dict[str, Any]:
 
 def run_suite(
     repo: Path, out: Path, target_dir: Path, registry_path: Path, fail_fast: bool = False,
+    shard: tuple[int, int] = (0, 1),
 ) -> int:
     try:
         registry_path = registry_path.resolve(strict=True)
@@ -257,7 +258,10 @@ def run_suite(
     if out.exists():
         print("--out must not already exist", file=sys.stderr)
         return 2
-    selected = [p for p in registry["proofs"] if p["enabled"]]
+    # Shard `i` of `n` runs every n-th enabled proof from the i-th: the same registry split
+    # across jobs, so that each job finishes within the CI time limit.
+    shard_index, shard_count = shard
+    selected = [p for p in registry["proofs"] if p["enabled"]][shard_index::shard_count]
     if not selected:
         print("registry has no enabled proof entries", file=sys.stderr)
         return 2
@@ -383,6 +387,7 @@ def run_suite(
         "repo": str(repo),
         "selected_count": len(selected),
         "configured_count": len(registry["proofs"]),
+        "shard": f"{shard_index}/{shard_count}",
         "loop_unwind_presets": {
             proof["harness"]: proof.get("loop_unwind_overrides", []) for proof in selected
         },
@@ -405,10 +410,23 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-fast", action="store_true",
         help="stop starting proofs after the first non-PASS result",
     )
+    parser.add_argument(
+        "--shard", default="0/1",
+        help="run shard I of N (every N-th enabled proof from the I-th), for example 1/2",
+    )
     args = parser.parse_args(argv)
+    try:
+        shard_index, shard_count = (int(x) for x in args.shard.split("/"))
+    except ValueError:
+        parser.error("--shard must look like I/N")
+    if not 0 <= shard_index < shard_count:
+        parser.error("--shard I/N needs 0 <= I < N")
     repo = args.repo.resolve(strict=True)
     registry_path = args.registry or repo / "tools" / "rust_proofs.json"
-    return run_suite(repo, args.out, args.target_dir, registry_path, fail_fast=args.fail_fast)
+    return run_suite(
+        repo, args.out, args.target_dir, registry_path, fail_fast=args.fail_fast,
+        shard=(shard_index, shard_count),
+    )
 
 
 if __name__ == "__main__":

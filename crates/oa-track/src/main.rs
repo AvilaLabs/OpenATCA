@@ -521,6 +521,40 @@ fn tracker_section(
     for (n, c) in REFUSE_NAMES.iter().zip(s.refused.iter()) {
         let _ = writeln!(o, "    refused {n}: {c}");
     }
+    let outcomes = s.moves_confirmed
+        + s.moves_rolled_back
+        + s.moves_undecided
+        + s.moves_abandoned_ended
+        + s.moves_abandoned_restarted
+        + s.moves_abandoned_resync
+        + s.moves_abandoned_demoted;
+    let _ = writeln!(
+        o,
+        "  large moves: unconfirmed {} (of which late re-filters {}), confirmed {}, rolled back {}, undecided {}, abandoned: ended {}, restarted {}, resync {}, demoted {}; every move ends once (all tracks are flushed at the end): {}",
+        s.moves_unconfirmed,
+        s.moves_late,
+        s.moves_confirmed,
+        s.moves_rolled_back,
+        s.moves_undecided,
+        s.moves_abandoned_ended,
+        s.moves_abandoned_restarted,
+        s.moves_abandoned_resync,
+        s.moves_abandoned_demoted,
+        if outcomes == s.moves_unconfirmed { "yes" } else { "NO" }
+    );
+    let _ = writeln!(
+        o,
+        "  large moves: peak at once {}, deciding reports not applied {}, rollback lost to a late re-filter {}, no snapshot (pool full) {}, widening failed {}, internal refusals {}, first old-path reports (votes) {}, old path unpredictable {}, resyncs marked {}",
+        s.moves_peak_active,
+        s.moves_decision_rejected,
+        s.moves_rollback_lost_late,
+        s.move_no_snapshot,
+        s.move_widen_failed,
+        s.moves_internal_refused,
+        s.moves_old_path_votes,
+        s.moves_old_path_unpredictable,
+        s.moves_resync_marked
+    );
     let _ = writeln!(
         o,
         "  tracks: started {}, confirmed {}, ended: {}; tentative restarted for implausible second report {}, for window passed {}",
