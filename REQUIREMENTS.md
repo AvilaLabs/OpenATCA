@@ -5767,6 +5767,14 @@ configuration with no default; the crate's tests use synthetic values.
   through `main`, a usage error, a refusal and a failed run included (with N the count, 0 when nothing was
   read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
   is being read still reports the rows dropped up to that point.
+- **OA-CA-032** The example `nas_hour` (`tools/oa-ca/examples`) is the M9 national-hour measurement. `census` counts
+  the distinct airborne addresses (a barometric altitude, not on the ground) of each UTC hour of a clip and of
+  each minute of the busiest hour, and prints no address. `track` and `ca` feed every measurement of the clip
+  to the tracker (and, for `ca`, the one-second rows to conflict alert), measure only from `--start` to
+  `--start` + 3600 s, and print CPU, peak memory, reports, tracks, the latency of each update and of each
+  second, the tracker's refusal and capacity counters and, for `ca`, the pairs evaluated, the cycle times
+  and the cycles left short by a budget. A sealed path is refused and `--start` is required. It scores
+  nothing and changes neither the tracker nor conflict alert (`tests/nas_hour.rs`).
 
 ## SWIM STDDS terminal data (oa-stdds)
 
