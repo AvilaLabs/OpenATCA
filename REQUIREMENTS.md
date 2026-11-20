@@ -5280,6 +5280,25 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
+- **OA-TRK-389** The P-002 scorer scores every system, passthrough included, on the truth legs that contain
+  an aircraft's grid samples (the grid is ERAM's paired samples) and on no others; no system chooses its own
+  flight. The output prints each system's coverage under that rule and under the replaced per-system rule.
+- **OA-TRK-390** The reacquired group is OpenATCA's rows within 10 s after an update row of the same address
+  flagged `O_REACQUIRED`; ERAM and passthrough are shown on the same samples.
+- **OA-TRK-391** Every grid sample at which a system has no value is counted in exactly one class per system:
+  before its first row for the address, after its last, in a gap, address never present, other.
+- **OA-TRK-392** M1, M3t and M5 and their breakdowns are computed on the two-way common set (OpenATCA and ERAM
+  both have a value); the three-way set is used only for the reference-floor test; the n of each set is printed.
+- **OA-TRK-393** M1 median, M5 ground-speed median and M4t at 300 m are the primary metrics. Each run prints,
+  per primary metric, whether the day's interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour,
+  in ERAM's favour, or neither, as `CLAIM` lines; `p002 --combine <dirA> <dirB> <dirC>` applies the cross-day
+  rule (OpenATCA's favour on A and B, C not in ERAM's favour) and refuses a day that is not a hold-out run, or
+  days scored at different commits.
+- **OA-TRK-394** `--candidate-commit <40 hex>` is required with `--frozen-commit`; the run is refused unless
+  `git diff --name-only <candidate> <frozen>` is exactly `crates/oa-sealed/sealed_paths.txt`; both commits are
+  printed.
+- **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` only if neither exists; otherwise it refuses
+  and writes nothing. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
 ## Shadow comparator (oa-shadow)
 
 A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track
