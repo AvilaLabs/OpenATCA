@@ -828,6 +828,7 @@ fn fixed_measurement(addr: u32, sensor: u16, t_s: i64, k: i32) -> oa_track::Meas
         vel_cov_m2s2: [0.0; 3],
         vel_east_mps: 0.0,
         vel_north_mps: 0.0,
+        vel_lag_s: 0.0,
         lat_e7: 410_000_000 + k * 1000,
         lon_e7: -880_000_000,
         alt_ft: 20_000,

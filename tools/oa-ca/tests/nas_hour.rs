@@ -194,6 +194,7 @@ fn pt(addr: u32, t_s: f64, lat: i32, alt: i32, cov: f32) -> oa_track::Measuremen
         vel_cov_m2s2: [1.0; 3],
         vel_east_mps: lat as f32 / 1e6,
         vel_north_mps: 0.0,
+        vel_lag_s: 0.0,
         lat_e7: lat,
         lon_e7: -880_000_000,
         alt_ft: alt,

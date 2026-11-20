@@ -325,6 +325,7 @@ fn meas(t_s: i64, addr: u32, x_m: f64, y_m: f64, alt: i32) -> Measurement {
         vel_cov_m2s2: [1.0, 0.0, 1.0],
         vel_east_mps: 200.0,
         vel_north_mps: 0.0,
+        vel_lag_s: 0.0,
         lat_e7: (lat * 1e7).round() as i32,
         lon_e7: (lon * 1e7).round() as i32,
         alt_ft: alt,

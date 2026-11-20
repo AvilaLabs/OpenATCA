@@ -377,6 +377,7 @@ fn measurement(addr: u32, t_ns: i64, lat_e7: i32, lon_e7: i32) -> Measurement {
         vel_cov_m2s2: [1.0, 0.0, 1.0],
         vel_east_mps: 0.0,
         vel_north_mps: 0.0,
+        vel_lag_s: 0.0,
         lat_e7,
         lon_e7,
         alt_ft: 20_000,
