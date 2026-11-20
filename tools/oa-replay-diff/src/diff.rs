@@ -215,7 +215,42 @@ pub fn digest_seconds_in_window(lines: &[DigestLine], w: DropWindow) -> u64 {
 
 /// Whether the time of a canonical row is in the window.
 pub fn row_in_window(w: DropWindow, row: &CanonRow) -> bool {
-    w.contains(i64::from_le_bytes(field_at::<OFF_T_NS, 8>(row)).div_euclid(1_000_000))
+    w.contains(floor_ms(i64::from_le_bytes(field_at::<OFF_T_NS, 8>(row))))
+}
+
+/// The millisecond that holds `ns` (rounded towards minus infinity, so a time just before a
+/// millisecond boundary is never moved into the next one). Integer only (RULESET B9 counts
+/// `div_euclid` as a platform float method by name).
+fn floor_ms(ns: i64) -> i64 {
+    let q = ns / 1_000_000;
+    if ns % 1_000_000 < 0 {
+        q - 1
+    } else {
+        q
+    }
+}
+
+#[cfg(test)]
+mod floor_ms_tests {
+    use super::floor_ms;
+
+    #[test]
+    fn floor_ms_rounds_towards_minus_infinity() {
+        for (ns, ms) in [
+            (0, 0),
+            (1, 0),
+            (999_999, 0),
+            (1_000_000, 1),
+            (-1, -1),
+            (-999_999, -1),
+            (-1_000_000, -1),
+            (-1_000_001, -2),
+            (i64::MIN, -9_223_372_036_855),
+            (i64::MAX, 9_223_372_036_854),
+        ] {
+            assert_eq!(floor_ms(ns), ms, "{ns}");
+        }
+    }
 }
 
 /// How two digests compare.
