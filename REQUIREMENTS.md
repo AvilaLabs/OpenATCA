@@ -5914,12 +5914,14 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `Outcome::sealed_dropped`. It is in no other count (no message, document, row, kind, rejection, refused-field,
   field-error, shape, flag, unknown-path or unknown-root count) and touches no table or string store. No refusal can be
   caused by an in-window message, because the pre-scan has no record or row limit and runs before the decode. There is no
-  window rollback in any decoder. TFMS TMI-list counts are therefore for the whole document, not per entry. The rule for what is a window key: every observation time the decoder parses into a row or a statistic is a key; a
-  reference time (an estimate, a schedule, a validity or event time such as ETA, ETD, STA, effective, begin, end, a departure
-  actual or a route point) is not. The keys per feed: TAIS `track/mrtTime` and `recSAFAReceiptTime` (`recSTARSTimestamp` is a
-  time of day, not a time); ASDE-X `time`; SFDPS `timestamp` and `positionTime`; TBFM `msgTime`, and the envelope time of
-  an `env` (`envTime`) or `mis` (`misTime`) document; TFMS `sourceTimeStamp`, `timeAtPosition` and an oceanic position's
-  `time`; NOTAM `issued` and `canceled`. A scan reads a time as the decoder would (character references decoded, text
+  window rollback in any decoder. TFMS TMI-list counts are therefore for the whole document, not per entry. The rule for what is a window key: every observation time and every actual-event time the decoder parses into a row or a
+  statistic is a key (a message stamped after the window can report an event inside it); a reference time (an estimate, a
+  schedule or a validity time such as ETA, ETD, STA, effective, begin, end, original and filed times) is not. The keys per feed: TAIS `track/mrtTime` and `recSAFAReceiptTime` (`recSTARSTimestamp` is a
+  time of day, not a time); ASDE-X `time`; SFDPS `timestamp`, `positionTime` and the actual departure (`actual@time`); TBFM `msgTime`, and the envelope time of
+  an `env` (`envTime`) or `mis` (`misTime`) document; TFMS `sourceTimeStamp`, `timeAtPosition`, an oceanic position's `time`, the out, off, on and in times, the runway and
+  gate actuals, the boundary crossing time, an `etd` or `eta` typed ACTUAL, a time of departure or arrival that is not
+  marked estimated, an ACTUAL coordination time, and the event, sent and last-update times of flow messages and TMI
+  lists; NOTAM `issued` and `canceled`. A scan reads a time as the decoder would (character references decoded, text
   split by a comment joined, whitespace trimmed where the decoder trims), and it also reads a repeated or foreign-namespace
   element of a key name, so such a document is dropped too (the closed failure). A time that cannot be
   read falls to the receive-time gate of its frame; a document refused whole (not XML, wrong root) has no known time and is
