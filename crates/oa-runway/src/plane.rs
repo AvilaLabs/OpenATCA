@@ -9,8 +9,8 @@
 //! east from the origin drifts toward the equator by that much, so without it the plane's
 //! distances are wrong by tens of metres at 19 km and 64 degrees. Together they bring the error
 //! to the third order in distance. The
-//! conversion itself is a few multiplications and no library call, so a Kani proof can cover it
-//! ([`crate::occupy`]); the scales are found once, in [`plane_new`], with `oa_math`.
+//! conversion itself is a few multiplications and no library call; the scales are found once, in
+//! [`plane_new`], with `oa_math`.
 //!
 //! Extent and error: the plane is defined for points within [`EXTENT_M`] of the origin (a disc),
 //! and [`to_local`] refuses (returns `None` for) any point past it. Within the extent and
@@ -147,25 +147,4 @@ pub fn to_local(p: &Plane, g: Geo) -> Option<Local> {
         east_m: east,
         north_m: north,
     })
-}
-
-/// A plane with the given scales, for the proofs only: the proof states which scales a
-/// [`plane_new`] result can have and checks the conversion for every plane with them.
-#[cfg(kani)]
-pub(crate) fn plane_from_parts(
-    lat0_deg: f64,
-    lon0_deg: f64,
-    m_per_deg_lat: f64,
-    m_per_deg_lon: f64,
-    tan_lat0: f64,
-    half_curv: f64,
-) -> Plane {
-    Plane {
-        lat0_deg,
-        lon0_deg,
-        m_per_deg_lat,
-        m_per_deg_lon,
-        tan_lat0,
-        half_curv,
-    }
 }

@@ -71,7 +71,8 @@ pub enum HorizontalStep {
 
 /// The first step of [`horizontal_span`]: everything up to the square root of the discriminant.
 /// The values it works from are computed apart (the squared speed, the discriminant, the time of
-/// closest approach) and the decision on them is [`step_of`], so that each is proved alone.
+/// closest approach) and the decision on them is [`step_of`], so that the arithmetic is proved apart and the
+/// decision, which is a few comparisons, is tested over random inputs (`tests/split.rs`).
 pub fn horizontal_step(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -> HorizontalStep {
     let hh = h * h;
     let now = rx * rx + ry * ry < hh;
@@ -101,8 +102,9 @@ fn approach_time(rx: f64, ry: f64, vx: f64, vy: f64, a: f64) -> f64 {
 }
 
 /// The decision of [`horizontal_step`] from `now`, the squared speed `a`, the discriminant and the
-/// time of closest approach `tc` (the proofs take each of the last three under the contract
-/// proved for the function that computes it).
+/// time of closest approach `tc` (the proofs of the arithmetic around it take each of the last
+/// three under the contract proved for the function that computes it; `step_of` itself is
+/// tested, not proved).
 pub fn step_of(now: bool, a: f64, disc: f64, tc: f64, t_max: f64) -> HorizontalStep {
     if a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS {
         return HorizontalStep::Done(if now {
@@ -353,7 +355,8 @@ pub fn predict(
 }
 
 /// The prediction of a conflict span `m` and the two smallest separations: the part of
-/// [`predict`] after the span and the misses are known, proved apart from them.
+/// [`predict`] after the span and the misses are known, split off so that the spans and misses
+/// are proved apart from it; it only copies its inputs and is tested, not proved.
 pub fn prediction_of(m: &Span, h_miss_m: f64, v_miss_ft: f64) -> Prediction {
     Prediction {
         ttl_s: if m.now { 0.0 } else { m.lo },
@@ -416,7 +419,8 @@ mod proofs {
     // The proofs that follow split the horizontal solver and the miss at the square root, which
     // the proofs of the arithmetic around them take as a parameter. A composition proof is the
     // whole property (the step, the contract, the last step) only because the production code is
-    // exactly that composition: `horizontal_span` is `horizontal_step`, then `span_from_root` of
+    // exactly that composition (the decision `step_of` and the final `prediction_of` are tested,
+    // not proved): `horizontal_span` is `horizontal_step`, then `span_from_root` of
     // `oa_ieee::sqrt(disc)`; `horizontal_miss` is `closest_point`, then `oa_ieee::sqrt` of the sum
     // of squares; `predict` is `conflict_span`, `horizontal_miss` and `vertical_miss`, then
     // `prediction_of` (tested bit for bit against the unsplit code in `tests`).

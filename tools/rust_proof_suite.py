@@ -30,41 +30,72 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
-# Paths whose change reruns every push-tier proof: the registry, the runner, the workflow and
-# the workspace build inputs.
+# Paths whose change reruns every push-tier proof: the registry, the runner, the workflow, the
+# workspace build inputs and what feeds the proof controls.
 RUN_ALL_PATHS = frozenset({
     "tools/rust_proofs.json", "tools/rust_proof_suite.py", "tools/kani_validation.py",
-    ".github/workflows/rust-proofs.yml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+    "tools/prepare_rust_proof_controls.py", ".github/workflows/rust-proofs.yml",
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "mutants.toml",
 })
+RUN_ALL_PREFIXES = ("fuzz/", "validation/", "adapters/", ".cargo/", "tools/testdata/")
 TIERS = ("push", "nightly")
+# A proof recorded over this many seconds is nightly, one at or under it is push.
+NIGHTLY_OVER_SECONDS = 120
+CI_SECONDS_SOURCES = ("ci", "local", "none")
 _PACKAGE_ROOTS = ("crates", "tools")
+_DEPENDENCY_TABLES = ("dependencies", "build-dependencies", "dev-dependencies")
+
+
+class SelectionError(ValueError):
+    """The change cannot be mapped to packages; the run must not guess."""
+
+
+def _path_dependencies(data: dict[str, Any]) -> set[str]:
+    """Path dependencies of one manifest in every table, target-specific ones and dev ones
+    included: counting more dependencies only ever runs more proofs."""
+    tables = [data]
+    targets = data.get("target", {})
+    if isinstance(targets, dict):
+        tables.extend(t for t in targets.values() if isinstance(t, dict))
+    deps: set[str] = set()
+    for holder in tables:
+        for table in _DEPENDENCY_TABLES:
+            entries = holder.get(table, {})
+            if not isinstance(entries, dict):
+                continue
+            for dep, spec in entries.items():
+                if isinstance(spec, dict) and "path" in spec:
+                    deps.add(spec.get("package", dep))
+    return deps
 
 
 def package_graph(repo: Path) -> dict[str, dict[str, Any]]:
-    """Every workspace package under crates/ and tools/: its directory and path dependencies."""
+    """Every workspace package under crates/ and tools/: its directory and path dependencies.
+    A manifest that cannot be read or parsed raises: a silent skip would shrink the selection."""
     graph: dict[str, dict[str, Any]] = {}
     for root in _PACKAGE_ROOTS:
         for manifest in sorted((repo / root).glob("*/Cargo.toml")):
             try:
                 data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-                continue
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                raise SelectionError(f"cannot read {manifest}: {exc}") from exc
             name = data.get("package", {}).get("name")
             if not isinstance(name, str):
                 continue
-            deps: set[str] = set()
-            for table in ("dependencies", "build-dependencies"):
-                for dep, spec in data.get(table, {}).items():
-                    if isinstance(spec, dict) and "path" in spec:
-                        deps.add(spec.get("package", dep))
-            graph[name] = {"dir": f"{root}/{manifest.parent.name}/", "deps": deps}
+            graph[name] = {"dir": f"{root}/{manifest.parent.name}/", "deps": _path_dependencies(data)}
     return graph
+
+
+def registry_packages_missing(proofs: list[dict[str, Any]], graph: dict[str, dict[str, Any]]) -> list[str]:
+    """Registered packages that are not in the workspace graph (their proofs could never be
+    selected by a change)."""
+    return sorted({p["package"] for p in proofs} - set(graph))
 
 
 def affected_packages(graph: dict[str, dict[str, Any]], changed: list[str]) -> set[str] | None:
     """Packages whose proofs a change can affect: those with a changed file and every package
     that depends on one of them, directly or not. `None` means everything."""
-    if any(path in RUN_ALL_PATHS for path in changed):
+    if any(path in RUN_ALL_PATHS or path.startswith(RUN_ALL_PREFIXES) for path in changed):
         return None
     touched = {
         name for name, info in graph.items()
@@ -95,17 +126,35 @@ def select_proofs(
 
 
 def changed_files(repo: Path, base: str) -> list[str] | None:
-    """Files changed since `base`, or None when the comparison cannot be made."""
-    if not re.fullmatch(r"[0-9a-fA-F]{7,64}|[A-Za-z0-9_./-]+", base) or set(base) == {"0"}:
+    """Files changed since `base`, or None when the comparison cannot be made. Renames are
+    reported as a delete and an add, so both the old and the new path count as changed."""
+    if base.startswith("-") or not re.fullmatch(r"[0-9a-fA-F]{7,64}|[A-Za-z0-9_./-]+", base):
+        return None
+    if set(base) == {"0"}:
         return None
     try:
         out = subprocess.run(
-            ["git", "diff", "--name-only", base, "HEAD"], cwd=repo, check=True,
-            capture_output=True, text=True, timeout=60,
+            ["git", "diff", "--name-only", "--no-renames", base, "HEAD", "--"], cwd=repo,
+            check=True, capture_output=True, text=True, timeout=60,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     return [line for line in out.splitlines() if line]
+
+
+def balance_shards(proofs: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
+    """Split `proofs` into `count` shards of about equal `ci_seconds`: longest first onto the
+    least loaded shard, ties to the lowest shard, each shard in registry order."""
+    shards: list[list[dict[str, Any]]] = [[] for _ in range(count)]
+    load = [0] * count
+    order = {id(p): i for i, p in enumerate(proofs)}
+    for proof in sorted(proofs, key=lambda p: (-p["ci_seconds"], order[id(p)])):
+        target = min(range(count), key=lambda i: (load[i], i))
+        shards[target].append(proof)
+        load[target] += proof["ci_seconds"]
+    for shard in shards:
+        shard.sort(key=lambda p: order[id(p)])
+    return shards
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -144,6 +193,7 @@ def validate_registry(data: Any) -> list[str]:
             "id", "requirement", "package", "harness", "enabled", "experimental",
             "required_covers", "stubbing", "stub_summaries", "cfgs",
             "harness_timeout_seconds", "external_timeout_seconds", "memory_mib", "tier",
+            "ci_seconds", "ci_seconds_source",
         }
         allowed_keys = required_keys | {"loop_unwind_overrides"}
         if not required_keys.issubset(entry) or not set(entry).issubset(allowed_keys):
@@ -169,6 +219,17 @@ def validate_registry(data: Any) -> list[str]:
             harnesses.add((package, harness))
         if entry.get("tier") not in TIERS:
             errors.append(f"{label}.tier must be one of {', '.join(TIERS)}")
+        ci_seconds = entry.get("ci_seconds")
+        if not isinstance(ci_seconds, int) or isinstance(ci_seconds, bool) or ci_seconds < 0:
+            errors.append(f"{label}.ci_seconds must be a nonnegative integer")
+        elif entry.get("tier") in TIERS and (ci_seconds > NIGHTLY_OVER_SECONDS) != (
+            entry.get("tier") == "nightly"
+        ):
+            errors.append(
+                f"{label}.tier must be nightly exactly when ci_seconds is over {NIGHTLY_OVER_SECONDS}"
+            )
+        if entry.get("ci_seconds_source") not in CI_SECONDS_SOURCES:
+            errors.append(f"{label}.ci_seconds_source must be one of {', '.join(CI_SECONDS_SOURCES)}")
         if not isinstance(entry.get("enabled"), bool) or not isinstance(entry.get("experimental"), bool):
             errors.append(f"{label}.enabled and experimental must be booleans")
         covers = entry.get("required_covers")
@@ -349,19 +410,35 @@ def run_suite(
     if out.exists():
         print("--out must not already exist", file=sys.stderr)
         return 2
-    # Shard `i` of `n` runs every n-th enabled proof from the i-th: the same registry split
-    # across jobs, so that each job finishes within the CI time limit.
+    # Shard `i` of `n` is the i-th of `n` groups of about equal recorded time: the same registry
+    # split across jobs, so that each job finishes within the CI time limit.
     shard_index, shard_count = shard
     # A push run (--changed-from given) takes only the push tier of the packages the change reaches;
-    # without it the whole enabled registry runs, nightly tier included.
+    # without it the whole enabled registry runs, nightly tier included. The shards are balanced by
+    # recorded seconds over what was chosen.
     affected: set[str] | None = None
+    changed: list[str] | None = None
     if changed_from is not None:
+        try:
+            graph = package_graph(repo)
+        except SelectionError as exc:
+            print(f"cannot select proofs: {exc}", file=sys.stderr)
+            return 2
+        missing = registry_packages_missing(registry["proofs"], graph)
+        if missing:
+            print(f"registry packages not in the workspace: {', '.join(missing)}", file=sys.stderr)
+            return 2
         changed = changed_files(repo, changed_from)
-        affected = None if changed is None else affected_packages(package_graph(repo), changed)
+        affected = None if changed is None else affected_packages(graph, changed)
     chosen = select_proofs(registry["proofs"], affected, changed_from is not None)
-    selected = chosen[shard_index::shard_count]
+    selected = balance_shards(chosen, shard_count)[shard_index]
     if changed_from is not None and not selected:
-        print(json.dumps({"suite_status": "SKIPPED", "reason": "no proof of this shard is affected"}))
+        print(json.dumps({
+            "suite_status": "SKIPPED", "reason": "no proof of this shard is affected",
+            "base": changed_from,
+            "changed_files": changed if changed is not None else "unknown, all packages assumed",
+            "affected_packages": sorted(affected) if affected is not None else "all",
+        }))
         return 0
     if not selected:
         print("registry has no enabled proof entries", file=sys.stderr)
@@ -513,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--shard", default="0/1",
-        help="run shard I of N (every N-th enabled proof from the I-th), for example 1/2",
+        help="run shard I of N (the I-th of N groups balanced by ci_seconds), for example 1/4",
     )
     parser.add_argument(
         "--changed-from", metavar="REV",

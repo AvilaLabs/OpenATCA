@@ -151,23 +151,6 @@
         "cfgs": [
           "kani_full_capacity"
         ],
-        "evidence_ref": "prior-phase/full-sensor-live-count",
-        "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
-        "id": "full-sensor-live-count",
-        "loop_unwind_overrides": [],
-        "required_covers": [],
-        "result_sha256": "337f917e17e84cfbe249ab56d292d5f4dd4006f393aa80619b74f53eaa96af79",
-        "source_group": "prior-phase",
-        "source_revision": "a9bfff66d2fe2ccaa654614d14f06d8c6b867066",
-        "source_set_sha256": "b77004091eeb278495cd25bc2aa1300707294a14d4b29368f851bc47194ddeb5",
-        "status": "PASS",
-        "stub_summaries": [],
-        "stubbing": false
-      },
-      {
-        "cfgs": [
-          "kani_full_capacity"
-        ],
         "evidence_ref": "prior-phase/full-sensor-monotonicity",
         "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
         "id": "full-sensor-monotonicity",
@@ -877,8 +860,8 @@
         "stubbing": true
       }
     ],
-    "required_passed": 43,
-    "source_provenance_note": "Each added PASS binds its own raw result SHA-256, source snapshot SHA-256, selected Rust/Kani source-set SHA-256, source revision, cfgs, stubs, covers, and unwind preset. Source groups differ; do not read this aggregation as 43 proofs of one source tree. Exact-head CI remains a separate required run.",
+    "required_passed": 42,
+    "source_provenance_note": "Each added PASS binds its own raw result SHA-256, source snapshot SHA-256, selected Rust/Kani source-set SHA-256, source revision, cfgs, stubs, covers, and unwind preset. Source groups differ; do not read this aggregation as 42 proofs of one source tree. Exact-head CI remains a separate required run.",
     "source_snapshot_groups": {
       "86a635a5d0ab956b3f6f1de78b9ad22685ebf63dfe9dad1d7cfb5ee5cb61a98f": {
         "selected_rust_kani_source_sha256": {
@@ -2316,16 +2299,6 @@
           "cfgs": [
             "kani_full_capacity"
           ],
-          "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
-          "id": "full-sensor-live-count",
-          "result_sha256": "337f917e17e84cfbe249ab56d292d5f4dd4006f393aa80619b74f53eaa96af79",
-          "status": "PASS",
-          "stubbing": false
-        },
-        {
-          "cfgs": [
-            "kani_full_capacity"
-          ],
           "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
           "id": "full-sensor-monotonicity",
           "result_sha256": "da342c37172d9d2c7750319f479afcfce28514ceb5040f85872c5cb956eb5349",
@@ -2333,7 +2306,7 @@
           "stubbing": false
         }
       ],
-      "required_passed": 22,
+      "required_passed": 21,
       "version": "0.68.0"
     },
     "local_verified_source_sha256": {

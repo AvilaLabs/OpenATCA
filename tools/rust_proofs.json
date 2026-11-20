@@ -16,7 +16,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-capacity",
@@ -32,7 +34,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-clear",
@@ -48,7 +52,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 6,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-current-row",
@@ -71,7 +77,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unrepresentable-row",
@@ -94,7 +102,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 33,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-output-overflow",
@@ -117,7 +127,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 69,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-rejected-dispatch",
@@ -135,7 +147,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 23,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-applied",
@@ -154,7 +168,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-begun",
@@ -172,7 +188,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-confirmed-begun-dispatch",
@@ -191,7 +209,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 47,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-actual-decision",
@@ -213,7 +233,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-refusal-routing",
@@ -234,7 +256,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-current-filter",
@@ -252,7 +276,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 56,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-anchor-filter",
@@ -270,7 +296,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 79,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-ring-history",
@@ -288,7 +316,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-metadata-category",
@@ -306,7 +336,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-statistics",
@@ -324,7 +356,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 50,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-appended-row",
@@ -340,7 +374,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-overflow",
@@ -359,7 +395,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 15,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-numerical-refusal-rollback",
@@ -377,7 +415,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "tracker-late-replay-rollback",
@@ -398,7 +438,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision",
@@ -422,7 +464,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-marks-rows",
@@ -446,7 +490,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected",
@@ -470,7 +516,9 @@
       "harness_timeout_seconds": 2000,
       "external_timeout_seconds": 2400,
       "memory_mib": 24576,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 361,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-rollback",
@@ -486,7 +534,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 32,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "replay-monotonic-split",
@@ -512,7 +562,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-monotonicity",
@@ -534,7 +586,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 48,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-update",
@@ -558,7 +612,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "caller-current-filter",
@@ -578,7 +634,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-metadata",
@@ -598,7 +656,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 61,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-anchor-filter",
@@ -618,7 +678,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 77,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-ring-history",
@@ -638,7 +700,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 90,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-statistics",
@@ -658,7 +722,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 72,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-existing",
@@ -682,7 +748,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 125,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-new",
@@ -705,7 +773,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 12288,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-anchor-filter-projection",
@@ -730,7 +800,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 202,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-current-filter-projection",
@@ -755,7 +827,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-metadata-projection",
@@ -780,7 +854,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 124,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-output-projection",
@@ -805,7 +881,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 130,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-ring-projection",
@@ -830,7 +908,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 161,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-stats-projection",
@@ -855,7 +935,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 147,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-anchor-filter-projection",
@@ -880,7 +962,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 188,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-current-filter-projection",
@@ -905,7 +989,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 138,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-metadata-projection",
@@ -930,7 +1016,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 118,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-output-projection",
@@ -955,7 +1043,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 120,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-ring-projection",
@@ -980,7 +1070,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 158,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-stats-projection",
@@ -1005,7 +1097,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-reachability",
@@ -1036,7 +1130,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 113,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-reachability",
@@ -1067,7 +1163,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 86,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-combined",
@@ -1092,7 +1190,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "late-append-combined",
@@ -1117,7 +1217,9 @@
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
       ],
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "snapshot-round-trip-current-filter",
@@ -1135,7 +1237,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 82,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-anchor-filter",
@@ -1153,7 +1257,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-ring",
@@ -1171,7 +1277,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 55,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-scalars-category",
@@ -1187,7 +1295,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-current-filter",
@@ -1203,7 +1313,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 154,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-anchor-filter",
@@ -1219,7 +1331,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-ring",
@@ -1235,7 +1349,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 155,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter",
@@ -1255,7 +1371,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-horizontal",
@@ -1275,7 +1393,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 136,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-snapshot",
@@ -1295,7 +1415,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-ring",
@@ -1315,7 +1437,9 @@
       "harness_timeout_seconds": 1500,
       "external_timeout_seconds": 1800,
       "memory_mib": 24576,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 349,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter",
@@ -1335,7 +1459,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 144,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter-snapshot",
@@ -1355,7 +1481,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 307,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-span",
@@ -1371,7 +1499,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-vertical-span",
@@ -1387,7 +1517,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-bounds",
@@ -1403,7 +1535,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 8,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-approach",
@@ -1419,7 +1553,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-root",
@@ -1435,7 +1571,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-sqrt",
@@ -1451,7 +1589,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-vertical-now-has-span",
@@ -1467,7 +1607,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-miss-point",
@@ -1483,7 +1625,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-miss",
@@ -1499,7 +1643,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-predict-span",
@@ -1519,7 +1665,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-unknown-altitude",
@@ -1537,7 +1685,9 @@
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-operands-ordered",
@@ -1553,7 +1703,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-slow-operands",
@@ -1569,7 +1721,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-operands",
@@ -1585,7 +1739,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-sum",
@@ -1601,7 +1757,9 @@
       "harness_timeout_seconds": 207,
       "external_timeout_seconds": 327,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 66,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-scale-round",
@@ -1617,7 +1775,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-square",
@@ -1633,7 +1793,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-dd-root",
@@ -1649,7 +1811,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-fast-plain",
@@ -1665,7 +1829,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-fast-scaled",
@@ -1681,7 +1847,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision-rejected-category",
@@ -1701,7 +1869,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-state-and-counts",
@@ -1721,7 +1891,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-first-times",
@@ -1741,7 +1913,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 296,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-last-time-and-updates",
@@ -1761,7 +1935,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 226,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-other-counters",
@@ -1781,7 +1957,9 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 179,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "runway-occupies-total",
@@ -1800,7 +1978,9 @@
       "harness_timeout_seconds": 540,
       "external_timeout_seconds": 600,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 27,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "asterix-primitives",
@@ -1816,7 +1996,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-time-round-trip",
@@ -1832,7 +2014,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-ident-round-trip",
@@ -1848,23 +2032,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
-    },
-    {
-      "id": "asterix-block-framing",
-      "requirement": "OA-AST-103: block framing over every byte string of up to three octets returns without panic, and a block it accepts has a length that is positive and within the input.",
-      "package": "oa-asterix",
-      "harness": "proofs::parse_block_any_bytes_up_to_3",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 120,
-      "external_timeout_seconds": 180,
-      "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 10,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-position-range",
@@ -1880,7 +2050,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-walk-cat048",
@@ -1896,7 +2068,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-fspec-cat021",
@@ -1912,7 +2086,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1020,
       "memory_mib": 8192,
-      "tier": "nightly"
+      "tier": "nightly",
+      "ci_seconds": 453,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-fspec-cat048",
@@ -1928,7 +2104,9 @@
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1020,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 271,
+      "ci_seconds_source": "local"
     },
     {
       "id": "asterix-fspec-cat062",
@@ -1944,7 +2122,9 @@
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 185,
+      "ci_seconds_source": "local"
     },
     {
       "id": "adsb-decode-row-ads2",
@@ -1960,7 +2140,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
     },
     {
       "id": "adsb-decode-row-ads1",
@@ -1976,7 +2158,9 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "local"
     },
     {
       "id": "adsb-header-two-records",
@@ -1992,30 +2176,13 @@
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 180,
       "memory_mib": 8192,
-      "tier": "push"
-    },
-    {
-      "id": "adsb-payload-ads2-4",
-      "requirement": "OA-ADSB-101: a payload with a valid header and four v2 records is accepted by the lenient and the strict decoder with the counts kept, dropped and flagged consistent, and a strict refusal names a record inside the payload.",
-      "package": "oa-adsb",
-      "harness": "frames::proofs::payload_records_ads2_4",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": true,
-      "stub_summaries": [
-        "decode_row returns any record kept with any anomaly bits among the three that exist, or dropped; its own contract is proved apart.",
-        "reports_push appends nothing; the output columns are not inspected, the record loop and the counting are in the path."
-      ],
-      "cfgs": [],
-      "harness_timeout_seconds": 600,
-      "external_timeout_seconds": 720,
-      "memory_mib": 8192,
-      "tier": "push"
+      "tier": "push",
+      "ci_seconds": 7,
+      "ci_seconds_source": "local"
     },
     {
       "id": "adsb-payload-ads1-4",
-      "requirement": "OA-ADSB-101: a payload with a valid header and four legacy records is accepted by the lenient and the strict decoder with the counts kept, dropped and flagged consistent, and a strict refusal names a record inside the payload.",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS1 header and four all-zero legacy records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload.",
       "package": "oa-adsb",
       "harness": "frames::proofs::payload_records_ads1_4",
       "enabled": true,
@@ -2023,14 +2190,55 @@
       "required_covers": [],
       "stubbing": true,
       "stub_summaries": [
-        "decode_row returns any record kept with any anomaly bits among the three that exist, or dropped; its own contract is proved apart.",
-        "reports_push appends nothing; the output columns are not inspected, the record loop and the counting are in the path."
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
       ],
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
       "memory_mib": 8192,
-      "tier": "push"
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-block-framing",
+      "requirement": "OA-AST-103: block framing over every byte string of up to three octets, which is too short to reach a record, returns without panic, and a block it accepts has a length that is positive and within the input.",
+      "package": "oa-asterix",
+      "harness": "proofs::parse_block_any_bytes_up_to_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-payload-ads3-4",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS3 header and four all-zero v2 records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload; the ADS2 magic shares the header branch but is not proved separately.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::payload_records_ads3_4",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "local"
     }
   ]
 }

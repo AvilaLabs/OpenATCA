@@ -8,12 +8,15 @@ import os
 from pathlib import Path
 import tempfile
 import re
+import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from rust_proof_suite import (
-    affected_packages, load_registry, package_graph, run_suite, select_proofs, validate_registry,
+    NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
+    load_registry, package_graph, registry_packages_missing, run_suite, select_proofs,
+    validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
 
@@ -38,6 +41,8 @@ def proof_entry():
         "external_timeout_seconds": 420,
         "memory_mib": 4096,
         "tier": "push",
+        "ci_seconds": 10,
+        "ci_seconds_source": "ci",
     }
 
 
@@ -185,25 +190,51 @@ class SuiteConfigurationTests(unittest.TestCase):
         })
         self.assertEqual(by_package["oa-adsb"], {
             "adsb-decode-row-ads2", "adsb-decode-row-ads1", "adsb-header-two-records",
-            "adsb-payload-ads2-4", "adsb-payload-ads1-4",
+            "adsb-payload-ads3-4", "adsb-payload-ads1-4",
         })
         stubbed = {p["id"] for p in registry["proofs"] if p["package"] == "oa-adsb" and p["stubbing"]}
-        self.assertEqual(stubbed, {"adsb-payload-ads2-4", "adsb-payload-ads1-4"})
+        self.assertEqual(stubbed, {"adsb-payload-ads3-4", "adsb-payload-ads1-4"})
 
-    def test_the_nightly_tier_is_the_proofs_recorded_over_five_minutes(self):
+    def test_the_nightly_tier_is_exactly_the_proofs_recorded_over_the_threshold(self):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
-        nightly = {p["id"] for p in registry["proofs"] if p["tier"] == "nightly"}
-        self.assertEqual(nightly, {
-            "large-move-decision-rejected",
-            "large-move-decision-rejected-current-filter-snapshot",
-            "large-move-decision-rejected-ring",
-            "large-move-decision-rejected-anchor-filter-snapshot",
-            "large-move-decision-rejected-state-and-counts",
-            "large-move-decision-rejected-first-times",
-            "large-move-decision-rejected-last-time-and-updates",
-            "asterix-fspec-cat021",
-        })
+        self.assertEqual(NIGHTLY_OVER_SECONDS, 120)
+        for p in registry["proofs"]:
+            over = p["ci_seconds"] > NIGHTLY_OVER_SECONDS
+            self.assertEqual(p["tier"], "nightly" if over else "push", p["id"])
+            self.assertEqual(p["ci_seconds_source"] == "none", p["ci_seconds"] == 0, p["id"])
+            if p["enabled"]:
+                self.assertGreater(p["ci_seconds"], 0, p["id"])
+        # A few known ones: slow tracker proofs and the long FSPEC walk are nightly.
+        tiers = {p["id"]: p["tier"] for p in registry["proofs"]}
+        self.assertEqual(tiers["large-move-decision-rejected"], "nightly")
+        self.assertEqual(tiers["asterix-fspec-cat021"], "nightly")
+        self.assertEqual(tiers["output-append"], "push")
+        local = {p["id"] for p in registry["proofs"] if p["ci_seconds_source"] == "local"}
+        self.assertEqual(len(local), 14)
+        self.assertTrue(all(i.startswith(("asterix-", "adsb-")) for i in local))
+
+    def test_the_tier_must_follow_the_ci_seconds_rule(self):
+        for seconds, tier, ok in (
+            (120, "push", True), (121, "nightly", True), (121, "push", False),
+            (120, "nightly", False), (0, "push", True),
+        ):
+            proof = proof_entry()
+            proof.update(ci_seconds=seconds, tier=tier)
+            self.assertEqual(validate_registry(registry_with(proof)) == [], ok, (seconds, tier))
+
+    def test_ci_seconds_and_its_source_are_validated(self):
+        for field, bad in (
+            ("ci_seconds", -1), ("ci_seconds", 1.5), ("ci_seconds", True), ("ci_seconds", None),
+            ("ci_seconds_source", "guess"), ("ci_seconds_source", None),
+        ):
+            proof = proof_entry()
+            proof[field] = bad
+            self.assertTrue(validate_registry(registry_with(proof)), (field, bad))
+        for field in ("ci_seconds", "ci_seconds_source"):
+            proof = proof_entry()
+            del proof[field]
+            self.assertTrue(validate_registry(registry_with(proof)), field)
 
     def test_an_entry_needs_a_known_tier(self):
         for bad in ("weekly", None):
@@ -535,6 +566,9 @@ class PushSelectionTests(unittest.TestCase):
     def test_the_real_workspace_graph_ties_the_tracker_to_its_dependencies(self):
         graph = package_graph(REPO)
         self.assertIn("oa-math", graph["oa-track"]["deps"])
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        self.assertEqual(registry_packages_missing(registry["proofs"], graph), [])
         self.assertEqual(graph["oa-track"]["dir"], "crates/oa-track/")
         registry, _ = load_registry(REGISTRY_PATH)
         proofs = registry["proofs"]
@@ -546,6 +580,196 @@ class PushSelectionTests(unittest.TestCase):
             proofs, affected_packages(graph, ["crates/oa-track/src/tracker.rs"]), True)}
         self.assertIn("oa-track", tracker_change)
         self.assertNotIn("oa-asterix", tracker_change)
+
+
+def manifest(name, deps="", dev="", target=""):
+    text = f'[package]\nname = "{name}"\nversion = "0.0.1"\n'
+    if deps:
+        text += "[dependencies]\n" + deps
+    if dev:
+        text += "[dev-dependencies]\n" + dev
+    if target:
+        text += target
+    return text
+
+
+def git(repo, *args):
+    done = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=repo, check=True, capture_output=True, text=True,
+    )
+    return done.stdout.strip()
+
+
+def make_workspace(root, files):
+    """A real git repository holding `files` (path -> text), committed; returns its path."""
+    repo = Path(root) / "ws"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    for path, text in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+    return repo
+
+
+class SelectionHardeningTests(unittest.TestCase):
+    BASE = {
+        "Cargo.toml": "[workspace]\nmembers = []\n",
+        "crates/a/Cargo.toml": manifest("oa-math"),
+        "crates/b/Cargo.toml": manifest("oa-track", 'oa-math = { path = "../a" }\n'),
+        "crates/c/Cargo.toml": manifest("oa-ca"),
+        "crates/a/src/lib.rs": "",
+    }
+
+    def test_a_rename_counts_as_a_change_to_the_old_and_the_new_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, self.BASE)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "mv", "crates/a/src/lib.rs", "crates/c/lib.rs")
+            git(repo, "commit", "-q", "-m", "move")
+            changed = changed_files(repo, base)
+            self.assertEqual(sorted(changed), ["crates/a/src/lib.rs", "crates/c/lib.rs"])
+            affected = affected_packages(package_graph(repo), changed)
+            self.assertEqual(affected, {"oa-math", "oa-track", "oa-ca"})
+
+    def test_a_base_starting_with_a_dash_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, self.BASE)
+            for base in ("--output=/tmp/x", "-p", "--help"):
+                self.assertIsNone(changed_files(repo, base))
+            self.assertIsNone(changed_files(repo, "0" * 40))
+            self.assertIsNotNone(changed_files(repo, "HEAD"))
+
+    def test_dev_and_target_dependencies_count_as_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/c/Cargo.toml"] = manifest(
+                "oa-ca", dev='oa-math = { path = "../a" }\n',
+                target='[target.\'cfg(unix)\'.dependencies]\noa-track = { path = "../b" }\n',
+            )
+            repo = make_workspace(temp, files)
+            graph = package_graph(repo)
+            self.assertEqual(graph["oa-ca"]["deps"], {"oa-math", "oa-track"})
+            self.assertEqual(
+                affected_packages(graph, ["crates/a/src/lib.rs"]), {"oa-math", "oa-track", "oa-ca"}
+            )
+            only_target = dict(self.BASE)
+            only_target["crates/c/Cargo.toml"] = manifest(
+                "oa-ca",
+                target='[target.\'cfg(unix)\'.build-dependencies]\noa-math = { path = "../a" }\n',
+            )
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, only_target)
+            self.assertEqual(package_graph(repo)["oa-ca"]["deps"], {"oa-math"})
+
+    def test_a_manifest_that_does_not_parse_is_an_error_not_a_skip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/c/Cargo.toml"] = '[package\nname = "c"\n'
+            repo = make_workspace(temp, files)
+            with self.assertRaises(SelectionError):
+                package_graph(repo)
+
+    def test_a_registry_package_missing_from_the_workspace_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, self.BASE)
+            graph = package_graph(repo)
+            ghost = proof_entry()
+            ghost["package"] = "oa-runway"
+            self.assertEqual(registry_packages_missing([ghost], graph), ["oa-runway"])
+            known = proof_entry()
+            known["package"] = "oa-math"
+            self.assertEqual(registry_packages_missing([known], graph), [])
+            registry = Path(temp) / "reg.json"
+            registry.write_text(json.dumps(registry_with(ghost)) + "\n")
+            (repo / "tools").mkdir()
+            (repo / "tools" / "kani_validation.py").write_text("")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "t", registry, changed_from="HEAD",
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("oa-runway", stderr.getvalue())
+
+    def test_a_change_to_the_proof_inputs_selects_everything_in_the_push_tier(self):
+        graph = {"a": {"dir": "crates/a/", "deps": set()}}
+        for path in (
+            "fuzz/Cargo.toml", "fuzz/fuzz_targets/x.rs", "validation/rust-proof-status.json",
+            "adapters/scds-bridge/src/lib.rs", ".cargo/mutants.toml",
+            "tools/prepare_rust_proof_controls.py", "tools/testdata/goto_show_loops_update_late.txt",
+            "mutants.toml", "tools/rust_proofs.json", "tools/rust_proof_suite.py",
+            "tools/kani_validation.py", ".github/workflows/rust-proofs.yml",
+        ):
+            self.assertIsNone(affected_packages(graph, [path]), path)
+        self.assertEqual(affected_packages(graph, ["docs/x.md", "crates/b/src/lib.rs"]), set())
+
+    def test_an_empty_selection_says_what_it_compared_before_it_skips(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["docs/readme.md"] = "x"
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            (repo / "docs/readme.md").write_text("y")
+            git(repo, "commit", "-qam", "docs")
+            (repo / "tools").mkdir()
+            (repo / "tools" / "kani_validation.py").write_text("")
+            known = proof_entry()
+            known["package"] = "oa-ca"
+            registry = Path(temp) / "reg.json"
+            registry.write_text(json.dumps(registry_with(known)) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "t", registry, changed_from=base,
+                )
+            self.assertEqual(result, 0, stderr.getvalue())
+            report = json.loads(stdout.getvalue().splitlines()[-1])
+            self.assertEqual(report["suite_status"], "SKIPPED")
+            self.assertEqual(report["base"], base)
+            self.assertEqual(report["changed_files"], ["docs/readme.md"])
+            self.assertEqual(report["affected_packages"], [])
+
+
+class ShardBalanceTests(unittest.TestCase):
+    def proofs(self, seconds):
+        out = []
+        for i, sec in enumerate(seconds):
+            proof = proof_entry()
+            proof.update(id=f"p{i}", ci_seconds=sec)
+            out.append(proof)
+        return out
+
+    def test_every_proof_lands_in_exactly_one_shard_in_registry_order(self):
+        proofs = self.proofs([300, 5, 5, 200, 40, 40, 1, 90, 0, 7])
+        shards = balance_shards(proofs, 4)
+        flat = [p["id"] for shard in shards for p in shard]
+        self.assertEqual(sorted(flat), sorted(p["id"] for p in proofs))
+        for shard in shards:
+            ids = [int(p["id"][1:]) for p in shard]
+            self.assertEqual(ids, sorted(ids))
+
+    def test_the_shards_are_balanced_by_ci_seconds(self):
+        proofs = self.proofs([100, 100, 100, 100, 50, 50, 50, 50, 25, 25, 25, 25])
+        loads = [sum(p["ci_seconds"] for p in shard) for shard in balance_shards(proofs, 4)]
+        self.assertEqual(loads, [175] * 4)
+        skewed = self.proofs([400, 10, 10, 10, 10, 10, 10, 10])
+        loads = sorted(sum(p["ci_seconds"] for p in s) for s in balance_shards(skewed, 3))
+        self.assertEqual(loads[-1], 400)
+        self.assertLessEqual(loads[0], 40)
+
+    def test_the_real_registry_full_run_is_balanced_over_four_shards(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        chosen = select_proofs(registry["proofs"], None, False)
+        loads = [sum(p["ci_seconds"] for p in s) for s in balance_shards(chosen, 4)]
+        self.assertLessEqual(max(loads) - min(loads), max(p["ci_seconds"] for p in chosen))
+
+    def test_the_workflow_runs_four_shards(self):
+        text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()
+        self.assertIn('shard: ["0/4", "1/4", "2/4", "3/4"]', text)
 
 
 if __name__ == "__main__":

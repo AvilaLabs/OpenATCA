@@ -536,84 +536,265 @@ fn plane_error_against_geodesic_is_within_the_stated_bound() {
     assert!(to_local(&plane, g(q.lat(), q.lon())).is_some());
 }
 
-// REQ: OA-RWY-009
-#[test]
-fn every_region_flag_at_a_smaller_radius_stays_set_at_a_larger_one() {
-    let rw = mdw_runway();
-    let radii = [0.0, 0.5, 3.0, 40.0, 400.0, 2_000.0];
-    for i in 0..5 {
-        let (lo, hi, w) = region_box(&rw, i);
-        // Points inside, on and outside every edge of the region, and far away.
-        for along in [
-            lo - 900.0,
-            lo - 1.0,
-            lo,
-            (lo + hi) / 2.0,
-            hi,
-            hi + 1.0,
-            hi + 900.0,
-        ] {
-            for across in [-w - 900.0, -w - 1.0, -w, 0.0, w, w + 1.0, w + 900.0] {
-                let p = at(&rw, along, across);
-                for pair in radii.windows(2) {
-                    let (small, large) = (occupies(&rw, p, pair[0]), occupies(&rw, p, pair[1]));
-                    assert!(!flag(&small, i) || flag(&large, i), "{i} {along} {across}");
-                }
-            }
+/// A seeded generator for the sweeps below (splitmix64; the tests use no outside crate).
+struct Sweep(u64);
+
+impl Sweep {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    /// Uniform in `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+    /// Uniform in `[lo, hi)`.
+    fn between(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.unit()
+    }
+    /// A magnitude spread over many decades, up to `max`: 1e-3 to `max` on a log scale, with
+    /// the extremes and zero drawn often.
+    fn scale(&mut self, max: f64) -> f64 {
+        match self.next() % 12 {
+            0 => 0.0,
+            1 => max,
+            _ => 10f64.powf(self.between(-3.0, max.log10())),
+        }
+    }
+    fn signed(&mut self, max: f64) -> f64 {
+        let v = self.scale(max);
+        if self.next() & 1 == 0 {
+            v
+        } else {
+            -v
         }
     }
 }
 
+/// A runway of any heading and size inside the limits `build_runway` keeps: every number finite
+/// and within 1e9 m, the axis a unit vector, all five regions with their own extents.
+fn random_runway(g: &mut Sweep) -> Runway {
+    let mut rw = mdw_runway();
+    let heading = g.between(0.0, std::f64::consts::TAU);
+    (rw.ux, rw.uy) = (heading.cos(), heading.sin());
+    let reach = if g.next() % 2 == 0 { 2.0e4 } else { 4.0e8 };
+    rw.center = Local {
+        east_m: g.between(-reach, reach),
+        north_m: g.between(-reach, reach),
+    };
+    rw.half_len_m = g.scale(1.0e5).max(1.0);
+    rw.half_width_m = g.scale(2.0e3).max(1.0);
+    for end in 0..2 {
+        let lo = rw.half_len_m * g.between(0.5, 1.5);
+        let hi = lo + g.scale(2.0e4).max(1.0);
+        rw.approach_along[end] = if end == 0 { [-hi, -lo] } else { [lo, hi] };
+        let lo = rw.half_len_m * g.between(0.5, 1.5);
+        let hi = lo + g.scale(2.0e4).max(1.0);
+        rw.departure_along[end] = if end == 0 { [-hi, -lo] } else { [lo, hi] };
+    }
+    rw.approach_half_width_m = g.scale(2.0e3).max(1.0);
+    rw.departure_half_width_m = g.scale(2.0e3).max(1.0);
+    rw
+}
+
+fn all_flags(o: &Occupancy) -> [bool; 5] {
+    [
+        o.on_runway,
+        o.approach[0],
+        o.approach[1],
+        o.departure[0],
+        o.departure[1],
+    ]
+}
+
+/// Every geometry number of a runway, for breaking one.
+fn geometry(rw: &mut Runway) -> [&mut f64; 16] {
+    let [[a00, a01], [a10, a11]] = &mut rw.approach_along;
+    let [[d00, d01], [d10, d11]] = &mut rw.departure_along;
+    [
+        &mut rw.center.east_m,
+        &mut rw.center.north_m,
+        &mut rw.ux,
+        &mut rw.uy,
+        &mut rw.half_len_m,
+        &mut rw.half_width_m,
+        a00,
+        a01,
+        a10,
+        a11,
+        &mut rw.approach_half_width_m,
+        d00,
+        d01,
+        d10,
+        d11,
+        &mut rw.departure_half_width_m,
+    ]
+}
+
+// REQ: OA-RWY-009
+#[test]
+fn a_larger_radius_never_clears_a_region_for_random_runways_positions_and_radii() {
+    let mut sw = Sweep(0x0a11_0c01);
+    let (mut adds, mut clear_at_larger, mut cases) = (0u32, 0u32, 0u32);
+    for _ in 0..30_000 {
+        let rw = random_runway(&mut sw);
+        // A position within 1e9 m: far away half of the time, near the regions otherwise.
+        let pos = if sw.next() % 2 == 0 {
+            Local {
+                east_m: sw.between(-1.0e9, 1.0e9),
+                north_m: sw.between(-1.0e9, 1.0e9),
+            }
+        } else {
+            at(&rw, sw.signed(2.0e5), sw.signed(5.0e3))
+        };
+        let (a, b) = (sw.scale(1.0e9), sw.scale(1.0e9));
+        let (r1, r2) = (a.min(b), a.max(b));
+        let (small, large) = (occupies(&rw, pos, r1), occupies(&rw, pos, r2));
+        for (s, l) in all_flags(&small).into_iter().zip(all_flags(&large)) {
+            assert!(!s || l, "{rw:?} {pos:?} {r1} {r2}");
+        }
+        cases += 1;
+        adds += u32::from(all_flags(&small) != all_flags(&large));
+        clear_at_larger += u32::from(!is_occupied(&large));
+    }
+    assert!(
+        adds > 300 && clear_at_larger > 300,
+        "{cases} {adds} {clear_at_larger}"
+    );
+}
+
 // REQ: OA-RWY-010
 #[test]
-fn a_position_radius_or_runway_that_is_not_known_occupies_every_region_whatever_the_rest() {
-    let rw = mdw_runway();
-    let beyond = 1.0e9 * 1.000_001;
-    let bad_positions = [
-        (f64::NAN, 0.0),
-        (0.0, f64::NEG_INFINITY),
-        (beyond, 0.0),
-        (0.0, -beyond),
-        (f64::MAX, f64::MIN),
-    ];
-    for r in [0.0, 5.0, 1.0e6] {
-        for (e, n) in bad_positions {
-            let o = occupies(
-                &rw,
-                Local {
-                    east_m: e,
-                    north_m: n,
-                },
-                r,
-            );
-            assert!(
-                o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]
-            );
+fn a_position_radius_or_runway_that_is_not_known_occupies_every_region_for_random_runways() {
+    let mut sw = Sweep(0x0a11_0c02);
+    let unknown = |o: Occupancy| {
+        o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]
+    };
+    let breaks = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+    for case in 0..30_000u32 {
+        let rw = random_runway(&mut sw);
+        let near = at(&rw, sw.signed(1.0e4), sw.signed(1.0e3));
+        // A position or radius the guard refuses, on a runway that is fine.
+        let beyond = 1.0e9 * (1.0 + sw.unit() + 1.0e-6);
+        let bad_coord = [
+            breaks[(sw.next() % 3) as usize],
+            beyond,
+            -beyond,
+            f64::MAX,
+            f64::MIN,
+        ][(sw.next() % 5) as usize];
+        let mut pos = near;
+        if sw.next() % 2 == 0 {
+            pos.east_m = bad_coord;
+        } else {
+            pos.north_m = bad_coord;
+        }
+        assert!(
+            unknown(occupies(&rw, pos, sw.scale(1.0e6))),
+            "{case} {pos:?}"
+        );
+        let bad_r = [
+            breaks[(sw.next() % 3) as usize],
+            -sw.scale(1.0e9).max(f64::MIN_POSITIVE),
+            -f64::MIN_POSITIVE,
+        ][(sw.next() % 3) as usize];
+        assert!(unknown(occupies(&rw, near, bad_r)), "{case} {bad_r}");
+        // A runway with one non-finite number, at any position and radius.
+        let mut broken = rw;
+        *geometry(&mut broken)[(sw.next() % 16) as usize] = breaks[(sw.next() % 3) as usize];
+        let any_pos = if sw.next() % 2 == 0 {
+            near
+        } else {
+            Local {
+                east_m: sw.signed(2.0e9),
+                north_m: sw.signed(2.0e9),
+            }
+        };
+        let any_r = if sw.next() % 4 == 0 {
+            sw.signed(1.0e9)
+        } else {
+            sw.scale(1.0e5)
+        };
+        assert!(unknown(occupies(&broken, any_pos, any_r)), "{case}");
+    }
+}
+
+// REQ: OA-RWY-011
+#[test]
+fn a_target_inside_a_random_runway_rectangle_touches_it_at_every_radius() {
+    let mut sw = Sweep(0x0a11_0c03);
+    for case in 0..30_000u32 {
+        let rw = random_runway(&mut sw);
+        // Strictly inside by 1e-6 m (the rotation back into the runway axes rounds), and on
+        // each edge with a positive radius, which widens the rectangle past the rounding.
+        let (m, w) = (rw.half_len_m - 1.0e-6, rw.half_width_m - 1.0e-6);
+        let inside = (sw.between(-m, m), sw.between(-w, w));
+        let r = if sw.next() % 3 == 0 {
+            0.0
+        } else {
+            sw.scale(1.0e6)
+        };
+        let o = occupies(&rw, at(&rw, inside.0, inside.1), r);
+        assert!(o.on_runway && !o.unknown, "{case} {inside:?} {r}");
+        let edge = [
+            (rw.half_len_m, sw.between(-w, w)),
+            (-rw.half_len_m, sw.between(-w, w)),
+            (sw.between(-m, m), rw.half_width_m),
+            (sw.between(-m, m), -rw.half_width_m),
+        ][(sw.next() % 4) as usize];
+        let r = sw.between(1.0e-3, 5.0e3);
+        let o = occupies(&rw, at(&rw, edge.0, edge.1), r);
+        assert!(o.on_runway && !o.unknown, "{case} {edge:?} {r}");
+    }
+}
+
+// REQ: OA-RWY-013
+#[test]
+fn a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused_for_random_origins_and_points(
+) {
+    let mut sw = Sweep(0x0a11_0c04);
+    let (mut some, mut none) = (0u32, 0u32);
+    for case in 0..30_000u32 {
+        let (lat0, lon0) = (sw.between(-80.0, 80.0), sw.between(-180.0, 180.0));
+        let plane = plane_new(lat0, lon0).unwrap();
+        let huge = [f64::MAX, f64::MIN, 1.0e300, -1.0e300, 1.0e18, -1.0e18];
+        let point = match sw.next() % 5 {
+            // Near the origin, mostly inside the extent.
+            0 | 1 => sw.between(-0.4, 0.4),
+            // Anywhere on the globe.
+            2 => sw.between(-360.0, 360.0),
+            // Huge but finite.
+            3 => huge[(sw.next() % 6) as usize],
+            // Non-finite.
+            _ => [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][(sw.next() % 3) as usize],
+        };
+        let other = sw.between(-0.4, 0.4);
+        let geo = if sw.next() % 2 == 0 {
+            g(lat0 + point, lon0 + other)
+        } else {
+            g(point, lon0 + other)
+        };
+        match to_local(&plane, geo) {
+            Some(l) => {
+                some += 1;
+                assert!(geo.lat_deg.is_finite() && geo.lon_deg.is_finite(), "{case}");
+                assert!(l.east_m.is_finite() && l.north_m.is_finite(), "{case}");
+                assert!(
+                    l.east_m.abs() <= EXTENT_M && l.north_m.abs() <= EXTENT_M,
+                    "{case} {l:?}"
+                );
+                assert!(l.east_m * l.east_m + l.north_m * l.north_m <= EXTENT_M * EXTENT_M);
+            }
+            None => none += 1,
+        }
+        if !(geo.lat_deg.is_finite() && geo.lon_deg.is_finite()) {
+            assert!(to_local(&plane, geo).is_none(), "{case}");
         }
     }
-    let inside = at(&rw, 0.0, 0.0);
-    for r in [f64::NAN, f64::INFINITY, -f64::MIN_POSITIVE, -3.0] {
-        let o = occupies(&rw, inside, r);
-        assert!(o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]);
-    }
-    // A runway with a non-finite number, at every kind of position and radius.
-    let mut broken = rw;
-    broken.half_len_m = f64::NAN;
-    for p in [
-        inside,
-        at(&rw, 9_000.0, 0.0),
-        Local {
-            east_m: f64::NAN,
-            north_m: 0.0,
-        },
-    ] {
-        for r in [0.0, 10.0, f64::NAN] {
-            let o = occupies(&broken, p, r);
-            assert!(
-                o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]
-            );
-        }
-    }
+    assert!(some > 500 && none > 500, "{some} {none}");
 }
 
 // REQ: OA-RWY-011
@@ -621,45 +802,28 @@ fn a_position_radius_or_runway_that_is_not_known_occupies_every_region_whatever_
 fn a_target_inside_the_runway_rectangle_touches_it_at_every_radius() {
     let rw = mdw_runway();
     let (lo, hi, w) = region_box(&rw, 0);
-    for along in [lo, lo + 0.001, 0.0, hi - 0.001, hi] {
-        for across in [-w, -w + 0.001, 0.0, w - 0.001, w] {
+    // Strictly inside by 1e-6 m: the rotation back into the runway axes rounds, so the exact
+    // edge is not a safe place to test radius zero.
+    let eps = 1.0e-6;
+    for along in [lo + eps, lo + 0.001, 0.0, hi - 0.001, hi - eps] {
+        for across in [-w + eps, -w + 0.001, 0.0, w - 0.001, w - eps] {
             for r in [0.0, 1.0, 50.0, 5_000.0] {
                 let o = occupies(&rw, at(&rw, along, across), r);
                 assert!(o.on_runway && !o.unknown, "{along} {across} {r}");
             }
         }
     }
-}
-
-// REQ: OA-RWY-013
-#[test]
-fn a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused() {
-    for (lat0, lon0) in [
-        (0.0, 0.0),
-        (40.0, -100.0),
-        (52.0, 179.95),
-        (-34.0, 151.0),
-        (80.0, 10.0),
-    ] {
-        let plane = plane_new(lat0, lon0).unwrap();
-        let (mut some, mut none) = (0u32, 0u32);
-        for i in -40..=40 {
-            for j in -40..=40 {
-                let p = g(lat0 + f64::from(i) * 0.01, lon0 + f64::from(j) * 0.01);
-                match to_local(&plane, p) {
-                    Some(l) => {
-                        some += 1;
-                        assert!(l.east_m.is_finite() && l.north_m.is_finite());
-                        assert!(l.east_m.abs() <= EXTENT_M && l.north_m.abs() <= EXTENT_M);
-                    }
-                    None => none += 1,
-                }
+    // On the edges themselves a positive radius widens the rectangle past the rounding.
+    for along in [lo, 0.0, hi] {
+        for across in [-w, w] {
+            for r in [1.0e-3, 1.0, 50.0] {
+                assert!(occupies(&rw, at(&rw, along, across), r).on_runway);
             }
         }
-        assert!(some > 100 && none > 100, "{lat0} {some} {none}");
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(to_local(&plane, g(bad, lon0)).is_none());
-            assert!(to_local(&plane, g(lat0, bad)).is_none());
+    }
+    for along in [lo, hi] {
+        for across in [-w, 0.0, w] {
+            assert!(occupies(&rw, at(&rw, along, across), 1.0e-3).on_runway);
         }
     }
 }

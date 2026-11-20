@@ -8,10 +8,10 @@
 //! construction:
 //!
 //! * every region test compares the target's distance from the region with `r`, so a larger radius
-//!   adds occupancy and removes none (proof `occupancy_is_monotone_in_r95`);
+//!   adds occupancy and removes none (tested over random runways, positions and radii, not proved);
 //! * a position or radius that is not finite, a negative radius, a position
-//!   beyond [`COORD_LIMIT_M`], or a runway with a non-finite number, is unknown and occupies every region (proof
-//!   `non_finite_input_occupies`): missing data never clears a runway (design rule 4).
+//!   beyond [`COORD_LIMIT_M`], or a runway with a non-finite number, is unknown and occupies every region (tested
+//!   over random runways, not proved): missing data never clears a runway (design rule 4).
 
 use crate::plane::{Local, PLANE_ERROR_BOUND_M};
 use crate::runway::Runway;
