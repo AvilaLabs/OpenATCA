@@ -1006,3 +1006,64 @@ fn the_box_edge_is_within_the_margin_of_any_side() {
     assert!(at(46.5, -88.0));
     assert!(at(42.0, -93.6));
 }
+
+/// A path through the given (seconds, metres east, metres north of the origin) points, all joined.
+fn path_through(pts: &[(i64, f64, f64)]) -> Vec<PathPoint> {
+    let cos_lat = (ORIGIN.lat_deg * std::f64::consts::PI / 180.0).cos();
+    pts.iter()
+        .map(|&(t, e, n)| PathPoint {
+            t_ms: t * 1000,
+            lat_deg: ORIGIN.lat_deg + n / M_PER_DEG,
+            lon_deg: ORIGIN.lon_deg + e / (M_PER_DEG * cos_lat),
+            gap_before: false,
+        })
+        .collect()
+}
+
+// REQ: OA-LTJ-048
+#[test]
+fn the_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none() {
+    // An early passage 4 NM away that starts the path (at an edge), then a later one 0.8 NM away.
+    let p = path_through(&[
+        (0, 4.0 * NM, 0.0),
+        (10, 6.0 * NM, 0.0),
+        (200, 1500.0, -20_000.0),
+        (300, 1500.0, 0.0),
+        (400, 1500.0, 20_000.0),
+        (500, 1500.0, 40_000.0),
+    ]);
+    let widest = approach(&p, ORIGIN, 5.0 * NM);
+    assert_eq!(widest.passages.len(), 2);
+    let cuts = [0.5, 1.0, 2.0, 5.0];
+    let at = |issue_s: i64| -> Vec<Result<i64, Exclusion>> {
+        cuts.iter()
+            .map(|c| {
+                let cfg = Config {
+                    cut_m: c * NM,
+                    ..cfg()
+                };
+                choose_passage(&widest, issue_s * 1000, &cfg).map(|x| x.t_ms)
+            })
+            .collect()
+    };
+    // Issued at the start: the early passage is the one chosen at every cut, and it is scored at
+    // none: beyond the cut below 4 NM, at an edge above.
+    let early = at(0);
+    assert_eq!(early[0], Err(Exclusion::BeyondCut));
+    assert_eq!(early[2], Err(Exclusion::BeyondCut));
+    assert_eq!(early[3], Err(Exclusion::PassageAtEdge));
+    // Issued after it: the later passage, scored from the cut that holds its 0.8 NM, at the same time.
+    let late = at(100);
+    assert_eq!(late[0], Err(Exclusion::BeyondCut));
+    assert!(
+        late[1..].iter().all(|r| *r == late[1]) && late[1].is_ok(),
+        "{late:?}"
+    );
+    // Nesting: a cut that scores scores at every larger cut, for every issue time.
+    for issue in (0..=400).step_by(20) {
+        let r = at(issue);
+        for w in r.windows(2) {
+            assert!(w[0].is_err() || w[0] == w[1], "issue {issue}: {r:?}");
+        }
+    }
+}

@@ -540,7 +540,7 @@ struct Flight<'a, 'b> {
     old_ok: Vec<bool>,
     binds: BTreeMap<i64, Binding>,
     paths: BTreeMap<u32, Vec<PathPoint>>,
-    searches: BTreeMap<(u32, (i64, i64)), Vec<Approach>>,
+    searches: BTreeMap<(u32, (i64, i64)), Approach>,
     lands: BTreeMap<(u32, String), AirportLandings>,
     /// Whether the leg has any ground report.
     ground_cov: BTreeMap<u32, bool>,
@@ -711,24 +711,20 @@ impl<'a, 'b> Flight<'a, 'b> {
         let ctx = self.ctx;
         let key = (leg, place_key(place));
         if !self.searches.contains_key(&key) {
-            let a: Vec<Approach> = {
-                let path = self.path(leg);
-                ctx.cuts_m
-                    .iter()
-                    .map(|&c| approach(path, place, c))
-                    .collect()
-            };
-            if let (Some(sys), Some(p)) = (sys, a.get(ctx.primary)) {
-                closest_add(sys, p.min_dist_m);
+            // One search at the largest cut: the passage is chosen once, and each cut scores it.
+            let widest = ctx.cuts_m.last().copied().unwrap_or(ctx.cfg.cut_m);
+            let a = approach(self.path(leg), place, widest);
+            if let Some(sys) = sys {
+                closest_add(sys, a.min_dist_m);
             }
             self.searches.insert(key, a);
         }
-        let Some(all) = self.searches.get(&key) else {
+        let Some(a) = self.searches.get(&key) else {
             return Vec::new();
         };
-        all.iter()
-            .zip(&ctx.cuts_m)
-            .map(|(a, &c)| {
+        ctx.cuts_m
+            .iter()
+            .map(|&c| {
                 let cfg = Config {
                     cut_m: c,
                     ..ctx.cfg

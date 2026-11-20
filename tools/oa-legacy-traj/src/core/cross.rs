@@ -167,7 +167,8 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
     }
 }
 
-/// The time the aircraft reached the point for an estimate issued at `issue_ms`: the closest
+/// The passage the aircraft reached the point at for an estimate issued at `issue_ms`, scored at
+/// the cut `cfg.cut_m` from a search `a` made at the largest cut: the closest
 /// approach of the first passage that is not before the issue; when every passage is before it,
 /// the last one (the event happened before the message: the error is kept). The estimate never
 /// chooses. A passage that is in progress at the issue is chosen by its closest approach like any
@@ -179,6 +180,8 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passa
     if a.min_dist_m > cfg.cut_m {
         return Err(Exclusion::BeyondCut);
     }
+    // The passage is chosen among all of `a`'s, whatever `cfg.cut_m` is: searching `a` at the
+    // largest cut and scoring the one passage at each smaller cut makes the cuts nest.
     let chosen = a
         .passages
         .iter()
@@ -186,6 +189,7 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passa
         .or_else(|| a.passages.last());
     match chosen {
         None => Err(Exclusion::BeyondCut),
+        Some(p) if p.dist_m > cfg.cut_m => Err(Exclusion::BeyondCut),
         Some(p) if p.at_edge => Err(Exclusion::PassageAtEdge),
         Some(p) => Ok(*p),
     }
