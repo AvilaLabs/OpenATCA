@@ -24,8 +24,11 @@ import json
 import os
 import re
 import stat
+import struct
 import sys
+import zlib
 from pathlib import Path
+from typing import NamedTuple
 
 LIST_PATH = Path(__file__).resolve().parent.parent / "crates" / "oa-sealed" / "sealed_paths.txt"
 MAX_LINKS = 40
@@ -439,12 +442,14 @@ class DropCounter:
 _STRICT_INT = re.compile(r"-?[0-9]+", re.ASCII)
 
 
-def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, keep_malformed: bool = False) -> bool:
+def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, keep_malformed: bool = False,
+                   loose: bool = False) -> bool:
     """Whether a time cell (nanoseconds since the Unix epoch, an int or integer text) is in a sealed
-    window. A cell that does not parse counts as in the window (fail closed), unless `keep_malformed`:
-    then it is not in the window and the caller's own validation rejects it, as before. Text is read
-    as Python's `int()` reads it (the widest reading any caller uses), so no spelling of a number
-    escapes. With `optional`, an empty cell is no time and is not in the window."""
+    window. A cell that does not parse counts as in the window (fail closed; text is then read as
+    Python's `int()` reads it), unless `keep_malformed`: then it is not in the window and the caller's
+    own validation rejects it, as before. With `keep_malformed` text must be `-?[0-9]+` to parse, or
+    anything `int()` reads when `loose` (for a reader that itself reads text with `int()`). With
+    `optional`, an empty cell is no time and is not in the window."""
     if isinstance(value, bool):
         return not keep_malformed
     if isinstance(value, int):
@@ -452,6 +457,8 @@ def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, 
     if isinstance(value, str):
         if optional and value == "":
             return False
+        if keep_malformed and not loose:
+            return _in_window_ns(int(value), guard) if _STRICT_INT.fullmatch(value) else False
         try:
             return _in_window_ns(int(value), guard)
         except ValueError:
@@ -459,37 +466,57 @@ def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, 
     return not keep_malformed
 
 
-def row_in_window(row, columns, optional=(), guard: "Guard | None" = None, keep_malformed: bool = False) -> bool:
+def row_in_window(row, columns, optional=(), guard: "Guard | None" = None, keep_malformed: bool = False,
+                  loose: bool = False) -> bool:
     """Whether a row (a mapping) must be dropped: any of `columns` is in a sealed window, or any
     non-empty `optional` column is. A missing or unparsable time also drops the row, unless
-    `keep_malformed` (scoring readers: the row goes on to their own validation, which rejects it)."""
+    `keep_malformed` (scoring readers: the row goes on to their own validation, which rejects it);
+    `loose` as in `time_in_window`."""
     for c in columns:
         if c not in row:
             if keep_malformed:
                 continue
             return True
-        if time_in_window(row[c], guard=guard, keep_malformed=keep_malformed):
+        if time_in_window(row[c], guard=guard, keep_malformed=keep_malformed, loose=loose):
             return True
-    return any(c in row and time_in_window(row[c], optional=True, guard=guard, keep_malformed=keep_malformed)
+    return any(c in row and time_in_window(row[c], optional=True, guard=guard, keep_malformed=keep_malformed, loose=loose)
                for c in optional)
 
 
 # ---- time tokens in text (recorded messages, frames, corpus files) ----------------------------
 
 _NS = 1_000_000_000
+_DAY_NS = 86_400 * _NS
 _ZONE = r"(?:Z|z|[+-][0-9]{2}(?::?[0-9]{2})?)"
+# No look-around on digits anywhere: digits glued to a date must not hide it.
 _EXT = re.compile(
-    r"(?<![0-9])([0-9]{4})-([0-9]{2})-([0-9]{2})"
-    r"(?:[Tt ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:[.,]([0-9]+))?)?(" + _ZONE + r")?)?(?![0-9])", re.ASCII)
+    r"([0-9]{4})([-/.])([0-9]{1,2})([-/.])([0-9]{1,2})"
+    r"(?:[Tt ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:[.,]([0-9]+))?)?(" + _ZONE + r")?)?", re.ASCII)
 _BASIC = re.compile(
-    r"(?<![0-9])([0-9]{4})([0-9]{2})([0-9]{2})[Tt]([0-9]{2})(?:([0-9]{2})(?:([0-9]{2})(?:[.,]([0-9]+))?)?)?("
-    + _ZONE + r")?(?![0-9])", re.ASCII)
-_RUN = re.compile(r"(?<![0-9])[0-9]+(?![0-9])", re.ASCII)
+    r"([0-9]{4})([0-9]{2})([0-9]{2})[Tt]([0-9]{2})(?:([0-9]{2})(?:([0-9]{2})(?:[.,]([0-9]+))?)?)?("
+    + _ZONE + r")?", re.ASCII)
+_DMY_NUM = re.compile(r"([0-9]{1,2})[-/.]([0-9]{1,2})[-/.]([0-9]{4})", re.ASCII)
+_YY_NUM = re.compile(r"([0-9]{2})[-/.]([0-9]{2})[-/.]([0-9]{2})", re.ASCII)
+_MON = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+_MONTH_NO = {m: i for i, m in enumerate(_MON.split("|"), 1)}
+_NSEP = r"[\s.,/-]*"
+_DMY_NAME = re.compile(r"([0-9]{1,2})(?:st|nd|rd|th)?" + _NSEP + "(" + _MON + r")[a-z]*\.?" + _NSEP + r"([0-9]{4}|[0-9]{2})",
+                       re.ASCII | re.IGNORECASE)
+_MDY_NAME = re.compile("(" + _MON + r")[a-z]*\.?" + _NSEP + r"([0-9]{1,2})(?:st|nd|rd|th)?" + _NSEP + r"([0-9]{4})",
+                       re.ASCII | re.IGNORECASE)
+_MY_NAME = re.compile("(" + _MON + r")[a-z]*" + _NSEP + r"([0-9]{4})", re.ASCII | re.IGNORECASE)
+_ORDINAL = re.compile(r"([0-9]{4})-([0-9]{3})", re.ASCII)
+_WEEK = re.compile(r"([0-9]{4})-?[Ww]([0-9]{2})(?:-?([0-9]))?", re.ASCII)
+_RUN = re.compile(r"[0-9]+", re.ASCII)
+_CHAIN = re.compile(r"[0-9]+(?:[,_ \xa0  ][0-9]+)+")
+_SCI = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+", re.ASCII)
 _ENTITY = re.compile(r"&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z_][A-Za-z0-9_.:-]*);", re.ASCII)
 _BAD_AMP = re.compile(r"&#")
 _NAMED = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
-# A time written without a zone could be any local time: the instant is checked over every zone
-# from UTC-12 to UTC+14.
+# Epoch values are judged in s, ds, cs, ms, us, 100 ns and ns.
+_EPOCH_SCALES = (10 ** 9, 10 ** 8, 10 ** 7, 10 ** 6, 10 ** 3, 100, 1)
+# A time written without a zone could be any local time, UTC-12 to UTC+14: local time L is UTC
+# L-14h to L+12h.
 _NAIVE_BEFORE_NS = 14 * 3600 * _NS
 _NAIVE_AFTER_NS = 12 * 3600 * _NS
 
@@ -564,76 +591,196 @@ def _zone_ns(z):
     return sign * (hh * 3600 + mm * 60) * _NS
 
 
+def _days_hit(y, mo, d, n, guard) -> bool:
+    """`n` whole days from the date (no zone: any zone)."""
+    lo = _civil_ns(y, mo, d)
+    return _overlaps_window(lo - _NAIVE_BEFORE_NS, lo + n * _DAY_NS + _NAIVE_AFTER_NS, guard)
+
+
 def _token_hit(y, mo, d, h, mi, s, frac, zone, guard) -> bool:
     if h is None:
-        lo = _civil_ns(y, mo, d)
-        hi = lo + 24 * 3600 * _NS
-        zone_ns = None
+        return _days_hit(y, mo, d, 1, guard)
+    lo = _civil_ns(y, mo, d, int(h), int(mi or 0), int(s or 0))
+    if frac is not None:
+        width = _NS // (10 ** min(len(frac), 9)) or 1
+        lo += int(frac[:9].ljust(9, "0"))
+    elif s is not None:
+        width = _NS
+    elif mi is not None:
+        width = 60 * _NS
     else:
-        lo = _civil_ns(y, mo, d, int(h), int(mi or 0), int(s or 0))
-        if frac is not None:
-            width = _NS // (10 ** min(len(frac), 9)) or 1
-            lo += int(frac[:9].ljust(9, "0"))
-        elif s is not None:
-            width = _NS
-        elif mi is not None:
-            width = 60 * _NS
-        else:
-            width = 3600 * _NS
-        hi = lo + width
-        zone_ns = _zone_ns(zone)
+        width = 3600 * _NS
+    hi = lo + width
+    zone_ns = _zone_ns(zone)
     if zone_ns is None:
-        return _overlaps_window(lo - _NAIVE_AFTER_NS, hi + _NAIVE_BEFORE_NS, guard)
+        return _overlaps_window(lo - _NAIVE_BEFORE_NS, hi + _NAIVE_AFTER_NS, guard)
     return _overlaps_window(lo - zone_ns, hi - zone_ns, guard)
 
 
+def _loose_date_hit(y, mo, d, n, guard) -> bool:
+    """A date in a loose form (its reading is a guess): one that does not parse is ignored."""
+    try:
+        return _days_hit(y, mo, d, n, guard)
+    except _Unparsable:
+        return False
+
+
+def _epoch_hit(lo_v, hi_v, guard) -> bool:
+    return any(_overlaps_window(int(lo_v * sc), int(hi_v * sc) + 1, guard) for sc in _EPOCH_SCALES)
+
+
+def _scan_run(run: str, guard) -> bool:
+    """A run of digits as a compact date or date-time, a day of the year, or an epoch time."""
+    import datetime
+    n = len(run)
+    if n >= 4 and 1970 <= int(run[:4]) <= 2200:
+        if n == 7:
+            ddd = int(run[4:])
+            if 1 <= ddd <= 366:
+                try:
+                    d = datetime.date(int(run[:4]), 1, 1) + datetime.timedelta(days=ddd - 1)
+                    if d.year == int(run[:4]) and _days_hit(d.year, d.month, d.day, 1, guard):
+                        return True
+                except (ValueError, _Unparsable):
+                    pass
+        if n in (8, 10, 12, 14, 15, 16, 17):
+            # YYYYMMDD[HH[MM[SS[fraction]]]]; only a date that does not parse fails closed
+            try:
+                if _token_hit(int(run[:4]), int(run[4:6]), int(run[6:8]), run[8:10] or None, run[10:12] or None,
+                              run[12:14] or None, run[14:] or None, None, guard):
+                    return True
+            except _Unparsable:
+                if n == 8:
+                    return True
+    if 9 <= n <= 19:
+        v = int(run)
+        if _epoch_hit(v, v + 1, guard):
+            return True
+    return False
+
+
+def _scan_sci(token: str, guard) -> bool:
+    import decimal
+    try:
+        v = decimal.Decimal(token)
+        mant, _, exp = token.lower().partition("e")
+        decimals = len(mant.partition(".")[2])
+        e = int(exp) - decimals
+        if abs(e) > 40 or not v.is_finite() or v > 10 ** 30:
+            return False
+        unit = decimal.Decimal(1).scaleb(e)
+        return _epoch_hit(int(v - unit), int(v + unit) + 1, guard)
+    except (decimal.InvalidOperation, ValueError):
+        return False
+
+
 def _scan_text(text: str, guard) -> bool:
+    import datetime
+    spans = []   # date-times judged to the instant: the loose readers below do not read them again
     for m in _EXT.finditer(text):
-        y, mo, d, h, mi, s, frac, zone = m.groups()
+        y, s1, mo, s2, d, h, mi, s, frac, zone = m.groups()
         try:
             if _token_hit(int(y), int(mo), int(d), h, mi, s, frac, zone, guard):
                 return True
+            if h is not None:
+                spans.append(m.span())
         except _Unparsable:
-            return True
+            if s1 == "-" and s2 == "-":
+                return True
     for m in _BASIC.finditer(text):
         y, mo, d, h, mi, s, frac, zone = m.groups()
         try:
             if _token_hit(int(y), int(mo), int(d), h, mi, s, frac, zone, guard):
                 return True
+            spans.append(m.span())
         except _Unparsable:
             return True
-    for m in _RUN.finditer(text):
-        run = m.group(0)
-        n = len(run)
+    if spans:
+        pieces, at = [], 0
+        for a, b in sorted(spans):
+            if a >= at:
+                pieces += [text[at:a], " "]
+                at = b
+        text = "".join(pieces) + text[at:]
+    for m in _DMY_NUM.finditer(text):
+        a, b, y = (int(g) for g in m.groups())
+        if _loose_date_hit(y, b, a, 1, guard) or _loose_date_hit(y, a, b, 1, guard):
+            return True
+    for m in _YY_NUM.finditer(text):
+        a, b, c = (int(g) for g in m.groups())
+        if (_loose_date_hit(2000 + a, b, c, 1, guard) or _loose_date_hit(2000 + c, b, a, 1, guard)
+                or _loose_date_hit(2000 + c, a, b, 1, guard)):
+            return True
+    for m in _DMY_NAME.finditer(text):
+        d, mon, y = m.groups()
+        y = int(y) if len(y) == 4 else 2000 + int(y)
+        if _loose_date_hit(y, _MONTH_NO[mon.lower()], int(d), 1, guard):
+            return True
+    for m in _MDY_NAME.finditer(text):
+        mon, d, y = m.groups()
+        if _loose_date_hit(int(y), _MONTH_NO[mon.lower()], int(d), 1, guard):
+            return True
+    for m in _MY_NAME.finditer(text):
+        mon, y = m.groups()
+        mo, y = _MONTH_NO[mon.lower()], int(y)
+        if 1900 <= y <= 2300 and _loose_date_hit(y, mo, 1, calendar.monthrange(y, mo)[1], guard):
+            return True
+    for m in _ORDINAL.finditer(text):
+        y, ddd = int(m.group(1)), int(m.group(2))
+        if 1900 <= y <= 2300 and 1 <= ddd <= 366:
+            try:
+                dt = datetime.date(y, 1, 1) + datetime.timedelta(days=ddd - 1)
+            except (ValueError, OverflowError):
+                continue
+            if dt.year == y and _loose_date_hit(dt.year, dt.month, dt.day, 1, guard):
+                return True
+    for m in _WEEK.finditer(text):
+        y, w, dd = int(m.group(1)), int(m.group(2)), m.group(3)
         try:
-            if n in (8, 10, 12, 14) and 1970 <= int(run[:4]) <= 2200:
-                # compact civil date or date-time (YYYYMMDD[HH[MM[SS]]]); only a date that does not
-                # parse fails closed, for the other lengths an invalid one is just a number
-                try:
-                    parts = [int(run[:4]), int(run[4:6]), int(run[6:8])]
-                    parts += [run[8:10] or None, run[10:12] or None, run[12:14] or None]
-                    if _token_hit(*parts, None, None, guard):
-                        return True
-                except _Unparsable:
-                    if n == 8:
-                        return True
-            scale = {10: _NS, 13: 1_000_000, 16: 1_000, 19: 1}.get(n)
-            if scale is not None:
-                ns = int(run) * scale
-                if _overlaps_window(ns, ns + scale, guard):
+            first = datetime.date.fromisocalendar(y, w, int(dd) if dd else 1)
+            n = 1 if dd else 7
+            if _days_hit(first.year, first.month, first.day, n, guard):
+                return True
+        except (ValueError, _Unparsable):
+            return True
+    for m in _RUN.finditer(text):
+        if _scan_run(m.group(0), guard):
+            return True
+    for m in _CHAIN.finditer(text):
+        groups = re.split(r"[^0-9]", m.group(0))
+        for i in range(len(groups)):
+            acc = ""
+            for g in groups[i:]:
+                acc += g
+                if len(acc) > 19:
+                    break
+                if _scan_run(acc, guard):
                     return True
-        except ValueError:
+    for m in _SCI.finditer(text):
+        if _scan_sci(m.group(0), guard):
             return True
     return False
 
 
+_MARKUP = re.compile(r"<!--.*?-->|<!\[CDATA\[|\]\]>|<[^>]*>|\s+", re.DOTALL)
+
+
+def _strip_markup(text: str) -> str:
+    """The text with comments, CDATA marks, tags and every white space removed: a time split by
+    markup or a line break reads whole."""
+    return _MARKUP.sub("", text)
+
+
 def text_has_sealed_time(data: bytes, guard: "Guard | None" = None) -> bool:
     """Conservative: whether `data` (a recorded message or frame payload) holds a time in a sealed
-    window. XML numeric references are decoded first. Every ISO 8601 date-time token (extended and
-    basic forms, with or without Z, a fraction or an offset), every date-only token (the whole day),
-    and every 8 to 19 digit run that reads as a compact date, a compact date-time or a Unix time in
-    s, ms, us or ns is checked. True also when a token looks like a date but does not parse, when an
-    entity is left that is not decoded, and when the sealed list does not parse."""
+    window. XML numeric references are decoded first, and the text is read both as it is and with
+    comments, tags and white space removed. Every ISO 8601 date-time token (extended and basic
+    forms, with or without Z, a fraction or an offset), every date-only token (the whole day), the
+    day/month/year forms with `-`, `/` or `.`, two-digit years, month names, ordinal and week
+    dates, compact dates and date-times, and every run of 9 to 19 digits (also with `,`, `_` or a
+    space between groups, and in scientific form) read as an epoch time in s, ds, cs, ms, us, 100 ns
+    or ns are checked. True also when a token looks like a date but does not parse, when an entity
+    is left that is not decoded, and when the sealed list does not parse."""
     g = guard or production()
     if g.broken or not g.windows:
         return True
@@ -654,44 +801,88 @@ def text_has_sealed_time(data: bytes, guard: "Guard | None" = None) -> bool:
         decoded = _decode_entities(v)
         if decoded is None:
             return True
-        if _scan_text(decoded, g):
+        if _scan_text(decoded, g) or _scan_text(_strip_markup(decoded), g):
             return True
     return False
 
 
-# ---- OAF1 frames and ADS-B traces --------------------------------------------------------------
+# ---- recording directories ----------------------------------------------------------------------
 
-OAF1_HEADER = 36
-OAF1_TRAILER = 4
+_PATH_DATE = re.compile(r"(?<![0-9])([0-9]{4})([-._]?)([0-9]{2})\2([0-9]{2})(?![0-9])")
 
 
-def oaf1_frames(data: bytes):
-    """The OAF1 frames of a stream as (frame bytes, header recv_unix_ns, jms_timestamp_ms, payload),
-    layout as in docs/FEED_FRAMES.md (magic 0..4, kind, flags, reserved, seq 8..16, recv_unix_ns
-    16..24 i64, jms_timestamp_ms 24..32 i64, payload_len 32..36 u32, payload, crc32), and the number
-    of bytes after the last whole frame."""
-    import struct
+def path_date(relpath: str):
+    """The latest date written in a path as YYYYMMDD, YYYY-MM-DD, YYYY.MM.DD or YYYY_MM_DD, as a
+    (year, month, day) tuple; None when the path has no date or one that is not a real date."""
+    import datetime
+    found = []
+    for m in _PATH_DATE.finditer(relpath):
+        y, _, mo, d = m.groups()
+        if not 1970 <= int(y) <= 2200:
+            continue
+        try:
+            found.append(datetime.date(int(y), int(mo), int(d)))
+        except ValueError:
+            return None
+    if not found:
+        return None
+    last = max(found)
+    return last.year, last.month, last.day
+
+
+# ---- OAF frames and ADS-B traces ----------------------------------------------------------------
+
+OAF_MAGIC = {b"OAF1": 36, b"OAF2": 44}   # header bytes before the payload (docs/FEED_FRAMES.md)
+OAF_TRAILER = 4
+OAF_MAX_PAYLOAD = 4 * 1024 * 1024
+OAF_KINDS = (1, 2, 3)
+
+
+class Frame(NamedTuple):
+    raw: bytes
+    kind: int
+    recv_ns: int
+    jms_ms: int
+    payload: bytes
+    crc_ok: bool
+
+
+def oaf_frames(data: bytes):
+    """The OAF1 and OAF2 frames of a stream and the number of bytes after the last whole frame.
+    Layout as in docs/FEED_FRAMES.md and crates/oa-feed/src/core/frame.rs, little-endian: magic 0..4,
+    kind 4, flags 5, reserved 6..8, seq 8..16, recv_unix_ns 16..24 (i64), jms_timestamp_ms 24..32
+    (i64); an OAF1 frame has payload_len (u32) at 32 and the payload at 36; an OAF2 frame has mono_ns
+    (u64) at 32..40, payload_len at 40 and the payload at 44; then the payload and a CRC-32 (IEEE) of
+    every preceding byte of the frame. A frame is cut by its length field; one whose CRC is wrong is
+    still returned, flagged."""
     out = []
     i = 0
-    while i + OAF1_HEADER + OAF1_TRAILER <= len(data) and data[i:i + 4] == b"OAF1":
-        n = struct.unpack("<I", data[i + 32:i + 36])[0]
-        end = i + OAF1_HEADER + n + OAF1_TRAILER
-        if end > len(data):
+    while i + 4 <= len(data) and data[i:i + 4] in OAF_MAGIC:
+        head = OAF_MAGIC[data[i:i + 4]]
+        if i + head + OAF_TRAILER > len(data):
+            break
+        n = struct.unpack("<I", data[i + head - 4:i + head])[0]
+        end = i + head + n + OAF_TRAILER
+        if n > OAF_MAX_PAYLOAD or end > len(data):
             break
         recv, jms = struct.unpack("<qq", data[i + 16:i + 32])
-        out.append((data[i:end], recv, jms, data[i + OAF1_HEADER:i + OAF1_HEADER + n]))
+        crc_ok = struct.unpack("<I", data[end - 4:end])[0] == zlib.crc32(data[i:end - 4])
+        out.append(Frame(data[i:end], data[i + 4], recv, jms, data[i + head:i + head + n], crc_ok))
         i = end
     return out, len(data) - i
 
 
-def oaf1_frame_in_window(recv_ns: int, jms_ms: int, payload: bytes, guard: "Guard | None" = None) -> bool:
-    """Whether a frame is dropped: its receive time (or its JMS time, when set) is in the window, or
-    its payload holds a sealed time by `text_has_sealed_time`."""
-    if _in_window_ns(recv_ns, guard):
+def oaf_frame_dropped(f: Frame, guard: "Guard | None" = None) -> bool:
+    """Whether a frame is dropped: a bad header (unknown kind, receive time not above 0, a negative
+    JMS time, a CRC that does not match), its receive time or its JMS time (when set) in a sealed
+    window, or a sealed time in its payload by `text_has_sealed_time`."""
+    if f.kind not in OAF_KINDS or f.recv_ns <= 0 or f.jms_ms < 0 or not f.crc_ok:
         return True
-    if jms_ms != 0 and _in_window_ns(jms_ms * 1_000_000, guard):
+    if _in_window_ns(f.recv_ns, guard):
         return True
-    return text_has_sealed_time(payload, guard)
+    if f.jms_ms != 0 and _in_window_ns(f.jms_ms * 1_000_000, guard):
+        return True
+    return text_has_sealed_time(f.payload, guard)
 
 
 def adsb_trace_in_window(raw: bytes, guard: "Guard | None" = None) -> bool:
@@ -725,44 +916,73 @@ def adsb_trace_in_window(raw: bytes, guard: "Guard | None" = None) -> bool:
 
 def file_has_sealed_time(data: bytes, guard: "Guard | None" = None) -> bool:
     """The test `make_corpora.py --filter-existing` applies to a corpus file: the text scan, the OAF1
-    frames (each frame's header time and payload; a stream that is cut or has bytes after the last
+    and OAF2 frames (each by `oaf_frame_dropped`; a stream that is cut or has bytes after the last
     frame is scanned whole too) and the trace shape."""
     if text_has_sealed_time(data, guard):
         return True
-    if data[:4] == b"OAF1":
-        frames, rest = oaf1_frames(data)
-        for _, recv, jms, payload in frames:
-            if oaf1_frame_in_window(recv, jms, payload, guard):
-                return True
-        if rest:
+    if data[:4] in OAF_MAGIC:
+        frames, rest = oaf_frames(data)
+        if rest or any(oaf_frame_dropped(f, guard) for f in frames):
             return True
     return adsb_trace_in_window(data, guard)
 
 
-def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = None, exempt_sha256=frozenset()):
-    """Deletes every file below `directory` that `file_has_sealed_time` flags, whatever its name; a
-    file whose bytes (sha256) are one of `exempt_sha256` (the committed seeds) stays; a file that
-    cannot be read by the guarded opener is deleted too. Returns (scanned, removed, kept); nothing
-    about a file is printed."""
+def corpus_dir_check(directory, guard: "Guard | None" = None) -> str:
+    """The resolved path of `directory` if it is a corpus directory, `<data root>/fuzz/<target>/corpus`
+    or a directory below it, and passes the guard's check; SealedError otherwise (the data root, raw,
+    scds, derived, fuzz itself and every sealed directory are refused); NotADirectoryError if it is
+    not a directory."""
     g = guard or production()
-    g.check(directory, True)
-    scanned = removed = 0
-    for base, dirs, files in os.walk(os.fspath(directory), followlinks=False):
-        dirs.sort()
+    g.check(directory)
+    real = _resolve(os.fspath(directory))
+    root = g.root.rstrip("/")
+    names = _names(real[len(root):]) if root and real.startswith(root + "/") else []
+    if len(names) < 3 or names[0] != "fuzz" or names[2] != "corpus":
+        raise SealedError(
+            f"{os.fspath(directory)}: refused: only a corpus directory (<data root>/fuzz/<target>/corpus, "
+            "or a directory below it) is filtered")
+    if not os.path.isdir(real):
+        raise NotADirectoryError(f"{os.fspath(directory)}: not a directory")
+    return real
+
+
+def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = None, exempt_sha256=frozenset()):
+    """Deletes every regular file below a corpus directory that `file_has_sealed_time` flags,
+    whatever its name; a file whose bytes (sha256) are one of `exempt_sha256` (the committed seeds)
+    stays. A subdirectory the guard refuses is not entered. A file the guard refuses or that cannot
+    be read or removed is never deleted: it is counted as refused. Anything that is not a regular
+    file (FIFO, device, socket, link) is skipped and counted. Returns (scanned, removed, kept,
+    refused, skipped); nothing about a file is printed."""
+    g = guard or production()
+    top = corpus_dir_check(directory, g)
+    scanned = removed = refused = skipped = 0
+    for base, dirs, files in os.walk(top, followlinks=False):
+        keep = []
+        for name in sorted(dirs):
+            try:
+                g.check(os.path.join(base, name), True)
+            except SealedError:
+                continue
+            keep.append(name)
+        dirs[:] = keep
         for name in sorted(files):
             path = os.path.join(base, name)
             scanned += 1
             try:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    skipped += 1
+                    continue
+                g.check(path)
                 with g.open(path, "rb") as f:
                     data = f.read()
                 bad = hashlib.sha256(data).hexdigest() not in exempt_sha256 and file_has_sealed_time(data, g)
+                if bad:
+                    os.unlink(path)
+                    removed += 1
+                    counter.add()
             except (SealedError, OSError, MemoryError):
-                bad = True
-            if bad:
-                os.unlink(path)
-                removed += 1
-                counter.add()
-    return scanned, removed, scanned - removed
+                refused += 1
+    return scanned, removed, scanned - removed, refused, skipped
 
 
 def walk_unsealed(root):

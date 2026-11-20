@@ -14,22 +14,40 @@ import os, sys, hashlib, struct, gzip, io, zlib, tarfile, zipfile, random
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import sealed_guard
 DROPS = sealed_guard.DropCounter()
+def filter_existing(directory):
+    """--filter-existing: only a corpus directory, only with a clean tracked fuzz tree; prints counts."""
+    import subprocess
+    fz = os.path.dirname(os.path.abspath(__file__))
+    try:
+        sealed_guard.corpus_dir_check(directory)
+    except (sealed_guard.SealedError, OSError) as e:
+        print('make_corpora: not filtered:', type(e).__name__, str(e).split(': ', 1)[-1][:120], file=sys.stderr); return 2
+    # Only a file whose bytes equal a committed (git-tracked) fuzz file is left alone, whatever it is
+    # named; a fuzz tree with untracked or modified files is not trusted for that.
+    def git(*a):
+        return subprocess.run(['git', '-C', fz, *a], capture_output=True, check=True).stdout
+    try:
+        if git('status', '--porcelain', '--', '.').strip():
+            print('make_corpora: not filtered: the fuzz tree has untracked or modified files', file=sys.stderr); return 2
+        names = [n for n in git('ls-files', '-z', '--', '.').split(b'\0') if n]
+    except (OSError, subprocess.CalledProcessError):
+        print('make_corpora: not filtered: git cannot list the fuzz tree', file=sys.stderr); return 2
+    ok = set()
+    for n in names:
+        try:
+            with sealed_guard.open_read(os.path.join(fz, os.fsdecode(n)), 'rb') as f: ok.add(hashlib.sha256(f.read()).hexdigest())
+        except (sealed_guard.SealedError, OSError):
+            pass
+    try:
+        s, r, k, bad, skipped = sealed_guard.filter_corpus_dir(directory, DROPS, exempt_sha256=ok)
+    except (sealed_guard.SealedError, OSError) as e:
+        print('make_corpora: cannot filter:', type(e).__name__, file=sys.stderr); return 2
+    print(f'files scanned: {s}\nfiles removed: {r}\nfiles kept: {k}\nfiles refused (kept): {bad}\nfiles skipped (not regular): {skipped}')
+    return 1 if bad else 0
 if sys.argv[1:2] == ['--filter-existing']:
     if len(sys.argv) != 3:
         print('usage: make_corpora.py --filter-existing DIR', file=sys.stderr); sys.exit(2)
-    try:
-        # Only a file whose bytes equal a committed seed is left alone, whatever it is named.
-        _fz = os.path.dirname(os.path.abspath(__file__))
-        _seeds, _, _ = sealed_guard.walk_unsealed(_fz + '/seeds')
-        _seeds += [_fz + '/' + n for n in sealed_guard.listdir(_fz) if not sealed_guard.isdir(_fz + '/' + n)]
-        _ok = set()
-        for _p in _seeds:
-            with sealed_guard.open_read(_p, 'rb') as _f: _ok.add(hashlib.sha256(_f.read()).hexdigest())
-        _s, _r, _k = sealed_guard.filter_corpus_dir(sys.argv[2], DROPS, exempt_sha256=_ok)
-    except (sealed_guard.SealedError, OSError) as e:
-        print('make_corpora: cannot filter:', type(e).__name__, file=sys.stderr); sys.exit(2)
-    print(f'files scanned: {_s}\nfiles removed: {_r}\nfiles kept: {_k}')
-    sys.exit(0)
+    sys.exit(filter_existing(sys.argv[2]))
 if len(sys.argv) != 1:
     print('usage: make_corpora.py [--filter-existing DIR]', file=sys.stderr); sys.exit(2)
 D = os.environ['OPENATCA_DATA']
@@ -83,8 +101,16 @@ for f in gl(A + '/*.pcap'):
         k += 1
 
 # --- xml family from scds message dumps
+LAST_RECORDING_DAY = (2026, 11, 18)   # a second bound, besides the text scan: nothing recorded later is copied
+def dated_ok(path):
+    """Whether a recording file is from a directory (or file name) dated LAST_RECORDING_DAY or
+    earlier; an undated or unparsable path, or a later one, is dropped and counted (not opened)."""
+    d = sealed_guard.path_date(os.path.relpath(path, S))
+    if d is None or d > LAST_RECORDING_DAY:
+        DROPS.add(); return False
+    return True
 def msgs(pattern, n, maxsz=200_000):
-    fs = sorted(gl(pattern))
+    fs = sorted(p for p in gl(pattern) if dated_ok(p))
     random.shuffle(fs)
     c = 0
     for f in fs:
@@ -107,18 +133,19 @@ for i, x in enumerate([b'<a/>', b'<a xmlns="u"><b:c xmlns:b="v" d="&amp;&#65;"/>
 
 # --- feed frames from the recordings
 for f in gl(S + '/rec/*.oaf'):
+    if not dated_ok(f): continue
     b = rb(f); fr = []
-    frames, _rest = sealed_guard.oaf1_frames(b)
-    for x, recv, jms, pay in frames:
-        bad = sealed_guard.oaf1_frame_in_window(recv, jms, pay)
-        if bad: DROPS.add()
-        fr.append((x, bad))
+    frames, _rest = sealed_guard.oaf_frames(b)
+    for x in frames:
+        bad = sealed_guard.oaf_frame_dropped(x)
+        if bad: DROPS.add()   # the drop count is of frames (a run holding a dropped frame is not counted again)
+        fr.append((x.raw, bad))
     random.shuffle(fr)
     for k, (x, bad) in enumerate(fr[:200]):
         if not bad: out('feed-frame', f'{os.path.basename(f)}-{k}', x, 100_000)
     for k in range(20):
         run = fr[k*5:k*5+5]
-        if any(bad for _, bad in run): DROPS.add(); continue
+        if any(bad for _, bad in run): continue
         out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(x for x, _ in run), 200_000)
 
 # --- adsb traces, json

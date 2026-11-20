@@ -128,7 +128,7 @@ def _csv(path: Path, fields):
                     raise StudyError(f"{path}: exceeds row limit")
                 if None in row or any(v is None or len(v) > MAX_FIELD for v in row.values()):
                     raise StudyError(f"{path}:{n}: malformed or oversized row")
-                if sealed_guard.row_in_window(row,times,optional,keep_malformed=True):
+                if sealed_guard.row_in_window(row,times,optional,keep_malformed=True,loose=True):
                     DROPS.add(); continue
                 rows.append(row)
             return rows
