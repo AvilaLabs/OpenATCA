@@ -591,7 +591,7 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
             // Both signed so that the reference turns "positive": a tracker rate of the same sign
             // and size reads the same number.
             e.0.push(x.abs());
-            e.1.push(row.omega_dps * x.signum());
+            e.1.push(row.omega_dps * oa_math::signum_canon_f64(x));
         }
         let _ = writeln!(
             csv,
