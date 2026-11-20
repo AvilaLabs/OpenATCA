@@ -390,6 +390,8 @@ impl Traffic {
                 vel_cov_m2s2: [vvar, 0.0, vvar],
                 vel_east_mps: (te + nve) as f32,
                 vel_north_mps: (tn + nvn) as f32,
+                // The generator's velocity is the aircraft's at the report time: no lag.
+                vel_lag_s: 0.0,
                 lat_e7: (lat * 1.0e7).round() as i32,
                 lon_e7: (lon * 1.0e7).round() as i32,
                 alt_ft: ((f64::from(a.alt_ft) / 25.0).round() * 25.0) as i32,

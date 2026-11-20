@@ -62,10 +62,16 @@ pub struct Measurement {
     /// ADS-B emitter category byte (`"A3"` is 0xA3), 0 if not known or not ADS-B. The tracker
     /// trusts a cap-raising one only after it persists (`oa_adsb::category_observe`).
     pub category: u8,
+    /// How far the reported velocity lags the aircraft's, seconds: the velocity is the aircraft's
+    /// as of this long before the time of applicability. Zero (the velocity is current) unless the
+    /// source says otherwise; ADS-B sets [`crate::params::VEL_LAG_S`]. Meaningful only with
+    /// [`M_HAS_VEL`].
+    pub vel_lag_s: f32,
 }
 
 // Budget: 8 (time) + 12 + 12 (covariances) + 8 (velocity) + 5 x 4 (position, altitude, rate,
-// address) + 3 x 2 (quantisation, sensor, identity) + 1 (flags) + 1 (category) = 68 packed; 72 with alignment.
+// address) + 3 x 2 (quantisation, sensor, identity) + 1 (flags) + 1 (category) + 4 (velocity lag)
+// = 72 packed; 72 with alignment.
 // A7.1: three more bytes were cheaper than reordering around the 8-byte time.
 const _: () = assert!(core::mem::size_of::<Measurement>() == 72);
 

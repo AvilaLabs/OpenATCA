@@ -217,6 +217,7 @@ fn blank_measurement() -> Measurement {
         ident: crate::types::NO_IDENT,
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     }
 }
 
@@ -547,7 +548,8 @@ pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
         let v_ok = m.vel_east_mps.is_finite()
             && m.vel_north_mps.is_finite()
             && (ve * ve + vn * vn).sqrt() <= SPEED_ENVELOPE_MPS
-            && cov_ok(&m.vel_cov_m2s2);
+            && cov_ok(&m.vel_cov_m2s2)
+            && (0.0..=crate::params::VEL_LAG_MAX_S).contains(&f64::from(m.vel_lag_s));
         if !v_ok {
             return Err(REF_VELOCITY);
         }

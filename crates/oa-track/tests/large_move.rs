@@ -463,6 +463,52 @@ fn a_later_large_move_keeps_the_original_snapshot_and_a_refuting_report_rolls_ba
     balanced(&l.t);
 }
 
+// REQ: OA-TRK-401
+#[test]
+fn with_the_lag_of_a_transponder_the_forger_is_still_confirmed_and_a_junk_report_still_decides_nothing(
+) {
+    // The forger's feed with the velocity lag of ADS-B (1 s) on every report: over seeds the
+    // second forged report still confirms the move with no resynchronisation. (Whether the gate
+    // refuses a repeat depends on the seed; with the lag no seed of 40 does, so the refusal is
+    // exercised by a junk report 5 km away, as in
+    // `a_report_that_is_not_applied_decides_nothing_and_the_mark_survives`.)
+    let lag = |v: Vec<Measurement>| -> Vec<Measurement> { v.into_iter().map(with_lag).collect() };
+    for seed in 1..=40u64 {
+        let mut rng = Rng(seed);
+        let mut l = Live::new(&big_config());
+        l.feed(&lag(genuine(&mut rng, &seconds(0.0, 20.0))));
+        for k in 0..8 {
+            let tt = 40.0 + f64::from(k);
+            l.feed(&lag(vec![report_of(
+                &mut rng,
+                tt,
+                &truth(tt, FORGED_OFFSET_M),
+            )]));
+        }
+        let s = l.s();
+        assert_eq!(
+            (s.moves_confirmed, s.moves_rolled_back, s.resyncs),
+            (1, 0, 0),
+            "seed {seed} {s:?}"
+        );
+    }
+    let mut rng = Rng(7);
+    let mut l = Live::new(&big_config());
+    l.feed(&lag(genuine(&mut rng, &seconds(0.0, 20.0))));
+    l.feed(&lag(vec![report_of(
+        &mut rng,
+        40.0,
+        &truth(40.0, FORGED_OFFSET_M),
+    )]));
+    l.feed(&lag(vec![report_of(&mut rng, 41.0, &truth(41.0, 5_000.0))]));
+    let s = l.s();
+    assert_eq!(s.moves_decision_rejected, 1, "{s:?}");
+    assert_eq!(
+        (s.moves_confirmed, s.moves_rolled_back, s.moves_undecided),
+        (0, 0, 0)
+    );
+}
+
 // REQ: OA-TRK-348
 #[test]
 fn a_forger_who_repeats_the_same_false_place_is_confirmed_by_the_second_report() {

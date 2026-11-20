@@ -5361,6 +5361,30 @@ scope.
 - **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
   the three-way set (P-008 §1).
 
+- **OA-TRK-401** Velocity lag. A measurement carries `vel_lag_s`, how far its velocity lags behind the
+  aircraft's.
+  - It is zero unless the source sets it. ADS-B sets `VEL_LAG_S`, 1.0 s. A lag outside 0 to 10 s, or not a
+    number, refuses the velocity as bad.
+  - The horizontal filter treats the velocity as the aircraft's velocity `L = vel_lag_s` seconds before the
+    report. Against the state, the expected measurement is `z = R(-w L) v`: the state's velocity turned back
+    by its turn rate `w` over `L`. The update is linearised at the state, so a lagged velocity also
+    corrects the turn rate, and the turn-rate column of the Jacobian is the derivative of `z`.
+  - The velocity gate compares the report against the same expectation, with the same innovation
+    covariance as the update.
+  - At a lag of zero the update and the gate are the plain velocity ones, bit for bit. The straight model's
+    turn rate is zero, so its update is always the plain one.
+  - A report that agrees with the expectation leaves the state unchanged. The covariance stays symmetric
+    and not negative. A singular innovation covariance changes nothing.
+  - Limit: with the ADS-B lag, the shipped gate accepts a report forged 2 km away after a 9 s gap in the
+    track's reports, against 10 s without the lag (docs/TURNS_EXPERIMENTS.md).
+- **OA-TRK-402** `turn_diag` reports OpenATCA's and ERAM's cross-track and track-angle error on the common
+  samples of a P-002 `samples.csv`: n, median, p95 and RMS of the absolute values, by nearest rank.
+  - It bins them by the reference's turn rate, the turn phase, the tracker's turn-model probability, the
+    time since the track's last report, and the gap the sample falls in. A value goes to the highest bin
+    whose lower edge it reaches.
+  - It reports how far the reported velocity's track angle lags behind the reference's.
+  - With `--rescore`, `--thin N` keeps every Nth input report per aircraft and `--vel-lag` sets the lag, so both effects can
+    be measured on the same day.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

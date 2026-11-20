@@ -1,6 +1,6 @@
 Reading GOTO program from 'oa_track-be393c5f130ea4dc__RNvNtNtNtCs54ksHOfKhD_8oa_track7tracker6proofs14rollback_paths36late_append_anchor_filter_projection.out'
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker21restore_track_columns.0:
-  file crates/oa-track/src/tracker.rs line 1113 column 5 function tracker::restore_track_columns
+  file crates/oa-track/src/tracker.rs line 1115 column 5 function tracker::restore_track_columns
 
 Loop _RNvNtCs7f35Cc4Kq59_4kani16rustc_intrinsics10panic_stub.0:
   file library/kani_core/src/models.rs line 39 column 17 function kani::rustc_intrinsics::panic_stub
@@ -30,7 +30,7 @@ Loop _RINvYINtNtNtCs8xvirJzNMvV_4core5slice4iter4IterdENtNtNtNtBa_4iter6traits12
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/double_ended.rs line 359 column 9 function <std::slice::Iter<'_, f64> as std::iter::DoubleEndedIterator>::rfold::<f64, {closure@oa_geo::small::horner::{closure#0}}>
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker9track_txn.0:
-  file crates/oa-track/src/tracker.rs line 1073 column 5 function tracker::track_txn
+  file crates/oa-track/src/tracker.rs line 1075 column 5 function tracker::track_txn
 
 Loop _RNvMs4_NtCs6xMQmN1AWUs_5alloc3vecINtB5_3VectE11extend_withCs1JC6yF4LcoB_6oa_awc.0:
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs line 3727 column 13 function std::vec::Vec::<u16>::extend_with
@@ -102,16 +102,16 @@ Loop _RNvNtNtCs54ksHOfKhD_8oa_track7tracker6proofs29observe_track_fields_directl
   file crates/oa-track/src/tracker_proofs.rs line 769 column 5 function tracker::proofs::observe_track_fields_directly
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.0:
-  file crates/oa-track/src/tracker.rs line 1567 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1569 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.1:
-  file crates/oa-track/src/tracker.rs line 1586 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1588 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.2:
-  file crates/oa-track/src/tracker.rs line 1624 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1626 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.3:
-  file crates/oa-track/src/tracker.rs line 1654 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1656 column 5 function tracker::update_late
 
 Loop _RNvMs4_NtCs6xMQmN1AWUs_5alloc3vecINtB5_3VecNtNtCs54ksHOfKhD_8oa_track5types11MeasurementE11extend_withBJ_.0:
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs line 3727 column 13 function std::vec::Vec::<types::Measurement>::extend_with
@@ -159,7 +159,7 @@ Loop _RNvMs9_NtCs8xvirJzNMvV_4core3fmtNtB5_11PostPadding5write.0:
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/mod.rs line 1756 column 9 function core::fmt::PostPadding::write
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker10ring_state.0:
-  file crates/oa-track/src/tracker.rs line 488 column 5 function tracker::ring_state
+  file crates/oa-track/src/tracker.rs line 489 column 5 function tracker::ring_state
 
 Loop _RINvCs7f35Cc4Kq59_4kani14kani_intrinsicbEB2_.0:
   file library/kani_core/src/lib.rs line 488 column 13 function kani::kani_intrinsic::<bool>

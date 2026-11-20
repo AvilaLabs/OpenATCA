@@ -1252,6 +1252,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         ident: crate::types::NO_IDENT,
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     };
     let none = Decision {
         kind: D_UNASSIGNED,
@@ -3555,6 +3556,7 @@ mod tests {
                     ident: crate::types::NO_IDENT,
                     flags: crate::types::M_HAS_VEL,
                     category: 0,
+                    vel_lag_s: 0.0,
                 });
             }
             t += 1_000_000_000;
@@ -4618,6 +4620,7 @@ mod tests {
             ident: crate::types::NO_IDENT,
             flags: crate::types::M_HAS_VEL,
             category: 0,
+            vel_lag_s: 0.0,
         }
     }
 

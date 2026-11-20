@@ -326,6 +326,7 @@ pub fn simulate_adsb(
                             ident: NO_IDENT,
                             flags: M_HAS_VEL,
                             category: 0,
+                            vel_lag_s: 0.0,
                         });
                     }
                 }
