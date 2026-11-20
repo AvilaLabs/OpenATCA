@@ -33,6 +33,8 @@ pub struct ReadStats {
     pub refused: [u64; 4],
     /// Bytes the frame reader would not take (a stall).
     pub stalled_bytes: u64,
+    /// The memory estimate went past the budget and the read stopped.
+    pub over_budget: bool,
     /// Parse-level stats of every message (field presence, errors).
     pub stats: Stats,
 }
@@ -58,6 +60,7 @@ impl ReadStats {
             other_messages: 0,
             refused: [0; 4],
             stalled_bytes: 0,
+            over_budget: false,
             stats: new_stats(),
         }
     }
@@ -71,6 +74,9 @@ impl Default for ReadStats {
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
     while let Some(ev) = reader.next() {
+        if ctx.rs.over_budget {
+            break;
+        }
         match ev {
             Ok(f) if f.kind == FrameKind::Message => {
                 ctx.rs.frames += 1;
@@ -82,6 +88,7 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                             ctx.rs.tais_records += 1;
                             ctx.census.observe(src, r);
                         }
+                        ctx.rs.over_budget |= ctx.census.over_budget();
                     }
                     Ok(_) => ctx.rs.other_messages += 1,
                     Err(e) => {
@@ -103,6 +110,9 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>, data: &[u8]) {
         let took = reader.push(rest);
         off += took;
         drain(reader, ctx);
+        if ctx.rs.over_budget {
+            break;
+        }
         if took == 0 {
             ctx.rs.stalled_bytes += rest.len() as u64;
             break;
@@ -163,12 +173,31 @@ fn read_stream<R: Read>(mut src: R, ctx: &mut Ctx<'_>) -> std::io::Result<()> {
 /// Deepest subdirectory level searched below the given directory.
 const MAX_DEPTH: usize = 3;
 
-fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
+/// Why a directory could not be read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadError {
+    /// A path that is or holds a sealed recording; nothing was listed or opened.
+    Refused(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Refused(m) | ReadError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), ReadError> {
+    // Every directory is checked before it is listed, the given one and each below it.
+    crate::guard::refuse_listing(dir).map_err(ReadError::Refused)?;
+    let fail = |e: std::io::Error| ReadError::Failed(format!("cannot list the directory: {e}"));
+    for e in std::fs::read_dir(dir).map_err(fail)? {
+        let e = e.map_err(fail)?;
         let p = e.path();
         // A real subdirectory is searched; a link to one is not (no loops, no jumps elsewhere).
-        if e.file_type()?.is_dir() {
+        if e.file_type().map_err(fail)?.is_dir() {
             if depth < MAX_DEPTH {
                 collect(&p, depth + 1, out)?;
             }
@@ -185,18 +214,19 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<
 
 /// The recording files of `dir` and its subdirectories (up to three levels), in path order:
 /// names ending `.oaf` or `.oaf.gz`.
-pub fn recording_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub fn recording_files(dir: &Path) -> Result<Vec<PathBuf>, ReadError> {
     let mut v = Vec::new();
     collect(dir, 0, &mut v)?;
     v.sort();
     Ok(v)
 }
 
-/// Reads every recording in `dir` into `census`. The caller has checked the path against the
-/// sealed list; each file is checked again here.
-pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, String> {
-    let files = recording_files(dir).map_err(|e| format!("cannot list the directory: {e}"))?;
-    let parser = Parser::new(XmlLimits::default()).map_err(|e| format!("xml parser: {e:?}"))?;
+/// Reads every recording in `dir` into `census`. Every directory is checked against the sealed
+/// list before it is listed, and each file again before it is opened.
+pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError> {
+    let files = recording_files(dir)?;
+    let parser = Parser::new(XmlLimits::default())
+        .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
     let mut ctx = Ctx {
         parser,
         limits: Limits::default(),
@@ -204,9 +234,16 @@ pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, String> {
         rs: ReadStats::new(),
     };
     for f in &files {
-        crate::guard::refuse_sealed(f)?;
-        let file = std::fs::File::open(f).map_err(|e| format!("cannot open a recording: {e}"))?;
-        read_stream(file, &mut ctx).map_err(|e| format!("cannot read a recording: {e}"))?;
+        crate::guard::refuse_sealed(f).map_err(ReadError::Refused)?;
+        let file = std::fs::File::open(f)
+            .map_err(|e| ReadError::Failed(format!("cannot open a recording: {e}")))?;
+        read_stream(file, &mut ctx)
+            .map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
+        if ctx.rs.over_budget {
+            return Err(ReadError::Failed(
+                "stopped: the memory estimate is past the budget (use --from and --to)".to_string(),
+            ));
+        }
     }
     Ok(ctx.rs)
 }
@@ -305,6 +342,40 @@ mod tests {
             .collect();
         std::fs::remove_dir_all(&base).unwrap();
         assert_eq!(names, ["b-0001.oaf", "b-0002.oaf.gz"]);
+    }
+
+    #[cfg(unix)]
+    // REQ: OA-CEN-007
+    #[test]
+    fn a_walk_never_lists_a_sealed_folder_or_the_data_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = std::env::temp_dir().join(format!("oa-census-walk-{}", std::process::id()));
+        let sealed = t.join("scds").join("rec-20261119");
+        let day = t.join("scds").join("stdds-day-20261120").join("rec");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("a-0001.oaf"), b"").unwrap();
+        std::fs::write(sealed.join("x.oaf"), b"").unwrap();
+        // A listing of the sealed folder would fail (no permission) as Failed, not Refused.
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut c = Census::new();
+        // From the tree's top and from the data root: refused, nothing listed.
+        assert!(matches!(read_dir(&t, &mut c), Err(ReadError::Refused(_))));
+        assert!(matches!(
+            read_dir(&t.join("scds"), &mut c),
+            Err(ReadError::Refused(_))
+        ));
+        assert!(matches!(
+            recording_files(&sealed),
+            Err(ReadError::Refused(_))
+        ));
+        // An existing innocent recording directory is accepted and read.
+        let files = recording_files(&t.join("scds").join("stdds-day-20261120")).unwrap();
+        assert_eq!(files.len(), 1);
+        let rs = read_dir(&t.join("scds").join("stdds-day-20261120"), &mut c).unwrap();
+        assert_eq!(rs.files, 1);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&t).unwrap();
     }
 
     // REQ: OA-CEN-005

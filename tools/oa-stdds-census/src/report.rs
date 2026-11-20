@@ -3,13 +3,15 @@
 
 use crate::census::{
     ClassStats, DirStats, Group, IdShare, Results, CHANGE_BIN_NAMES, CLASS_NAMES, FLAG_NAMES,
+    RESYNC_AFTER,
 };
 use crate::dist::{Summary, HIST_BINS};
 use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
-use crate::xcheck::{Params, OUTCOME_NAMES};
-use crate::xcres::{cidx, XcGroup, Q_NAMES};
+use crate::xcheck::{source_names, Params, OUTCOME_NAMES};
+use crate::xcres::{cidx, XcGroup, MIN_CELL_N, Q_NAMES};
 use oa_stdds::STD_ERROR_NAMES;
+use oa_truth::REMOVE_NAMES;
 use std::fmt::Write;
 
 fn pct(n: u64, d: u64) -> String {
@@ -191,22 +193,34 @@ fn med(s: Option<&Summary>) -> String {
         .map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}"))
 }
 
-/// One line for a class or facility: the outcomes at the primary gate and the median
-/// differences of the matches, for each flag.
+/// One line for a class or facility: the outcomes at the primary gate and, for a flag with at
+/// least [`MIN_CELL_N`] matches, the median differences of the matches.
 fn xc_group_line(g: &XcGroup, p: &Params) -> String {
     let mut parts = Vec::new();
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        let n = g.sums.get(f * 5).map_or(0, |s| s.n);
+        let meds = if n < MIN_CELL_N {
+            format!("n<30 (matches {n})")
+        } else {
+            format!(
+                "matches {n}, medians horizontal {} m, vertical {} ft, along {} m, cross {} m, along {} s",
+                med(g.sums.get(f * 5)),
+                med(g.sums.get(f * 5 + 1)),
+                med(g.sums.get(f * 5 + 2)),
+                med(g.sums.get(f * 5 + 3)),
+                med(g.sums.get(f * 5 + 4)),
+            )
+        };
         parts.push(format!(
-            "{name}: {}; matched medians horizontal {} m, vertical {} ft, along {} m, cross {} m, along {} s",
-            outcomes_line(&counts_of(g, f, p.primary)),
-            med(g.sums.get(f * 5)),
-            med(g.sums.get(f * 5 + 1)),
-            med(g.sums.get(f * 5 + 2)),
-            med(g.sums.get(f * 5 + 3)),
-            med(g.sums.get(f * 5 + 4)),
+            "{name}: {}; {meds}",
+            outcomes_line(&counts_of(g, f, p.primary))
         ));
     }
     parts.join(" | ")
+}
+
+fn at(a: &[u64], i: usize) -> u64 {
+    a.get(i).copied().unwrap_or(0)
 }
 
 fn xc_section(o: &mut String, r: &Results) {
@@ -216,10 +230,11 @@ fn xc_section(o: &mut String, r: &Results) {
         return;
     };
     let p = &x.params;
+    let g = &x.global;
     let h_primary = p.gates_nm.get(p.primary).copied().unwrap_or(0.0);
     let _ = writeln!(
         o,
-        "time compared: STDDS track/mrtTime against the ADS-B report time, each aircraft interpolated linearly between the two reports around it (at most {} ms apart); altitude: STDDS reportedAltitude (assumed feet) against ADS-B barometric altitude, gated only when both exist; ground and stale ADS-B reports left out",
+        "time compared: STDDS track/mrtTime against the ADS-B report time, each aircraft interpolated linearly between the two reports around it (at most {} ms apart); altitude: STDDS reportedAltitude (assumed feet) against ADS-B barometric altitude, gated only when both exist",
         p.max_gap_ms
     );
     let _ = writeln!(
@@ -227,50 +242,150 @@ fn xc_section(o: &mut String, r: &Results) {
         "gates: horizontal {:?} NM (primary {h_primary} NM), vertical {} ft; both inclusive; a candidate is one aircraft inside both gates",
         p.gates_nm, p.v_gate_ft
     );
+    if let Some(w) = x.window {
+        let _ = writeln!(
+            o,
+            "window: UTC time of day {} s to {} s, both sides; updates outside it left out: {}",
+            w.from_s, w.to_s, r.outside_window
+        );
+    }
     let _ = writeln!(
         o,
-        "ADS-B index: reports {} aircraft {} interpolable segments {}",
-        x.points, x.aircraft, x.segments
+        "caveats: STARS reuses track numbers, so a track here is a track number; a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
+    );
+    let c = &x.clip;
+    let _ = writeln!(
+        o,
+        "ADS-B reference: the tracker's and truth's gating (oa_truth quality_check, default config). Clip reports {} by source type, before any gating:",
+        c.reports
+    );
+    for (name, n) in source_names().iter().zip(&c.by_source) {
+        if *n > 0 {
+            let _ = writeln!(o, "  {name}: {n}");
+        }
+    }
+    let _ = writeln!(o, "  left out by the time window: {}", c.outside_window);
+    for (name, n) in REMOVE_NAMES.iter().zip(&c.removed).take(8) {
+        let _ = writeln!(o, "  removed by gate {name}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "  on the ground, dropped: {}; kept: {}",
+        c.ground, c.kept
     );
     let _ = writeln!(
         o,
-        "updates not checked: no position or time (adsb=false {}, adsb=true {}); no flag {}; records with no trackNum are not checked (see section 0)",
-        x.no_position.first().copied().unwrap_or(0),
-        x.no_position.get(1).copied().unwrap_or(0),
-        x.no_flag
+        "ADS-B index: reports {} aircraft {} interpolable segments {} (left out: faster than 600 m/s {}, above 85 degrees {})",
+        x.points, x.aircraft, x.segments, x.segments_fast, x.segments_polar
+    );
+    let _ = writeln!(
+        o,
+        "memory estimate: index {} MB, held in all {} MB",
+        x.index_bytes / 1_000_000,
+        x.held_bytes.saturating_add(x.index_bytes) / 1_000_000
+    );
+    let nc = &x.not_checked;
+    let _ = writeln!(
+        o,
+        "updates by flag, checked and not checked (they reconcile with section 0):"
+    );
+    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        let checked: u64 = (0..3).map(|k| at(&g.counts, cidx(f, 0, k))).sum();
+        let total = checked
+            + at(&nc.no_position, f)
+            + at(&nc.polar, f)
+            + at(&nc.no_track, f)
+            + at(&nc.duplicate, f);
+        let _ = writeln!(
+            o,
+            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} ({})",
+            at(&r.global.updates, f),
+            at(&nc.no_position, f),
+            at(&nc.polar, f),
+            at(&nc.no_track, f),
+            at(&nc.duplicate, f),
+            if total == at(&r.global.updates, f) { "reconciles" } else { "DOES NOT RECONCILE" }
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  no flag: updates {} not checked {}",
+        at(&r.global.updates, 2),
+        nc.no_flag
     );
     let _ = writeln!(o, "outcome per update (only exactly-one is used):");
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
-        for (g, nm) in p.gates_nm.iter().enumerate() {
+        let checked: u64 = (0..3).map(|k| at(&g.counts, cidx(f, 0, k))).sum();
+        let _ = writeln!(
+            o,
+            "  {name}: ADS-B coverage (any indexed aircraft within 30 NM at that time) {} of {checked} checked ({})",
+            at(&g.covered, f),
+            pct(at(&g.covered, f), checked)
+        );
+        for (gi, nm) in p.gates_nm.iter().enumerate() {
             let _ = writeln!(
                 o,
                 "  {name}, gate {nm} NM / {} ft: {}",
                 p.v_gate_ft,
-                outcomes_line(&counts_of(&x.global, f, g))
+                outcomes_line(&counts_of(g, f, gi))
             );
         }
-        let h: Vec<u64> = (0..3)
-            .map(|k| x.global.hcounts.get(f * 3 + k).copied().unwrap_or(0))
-            .collect();
+        let h: Vec<u64> = (0..3).map(|k| at(&g.hcounts, f * 3 + k)).collect();
         let _ = writeln!(
             o,
             "  {name}, horizontal gate {h_primary} NM with no altitude gate: {}",
             outcomes_line(&h)
         );
+        let n0 = g.sums.get(f * 5).map_or(0, |s| s.n);
+        let n1 = g.sums.get(f * 5 + 1).map_or(0, |s| s.n);
+        let _ = writeln!(
+            o,
+            "  {name}: matches {n0}, of which without a vertical difference (altitude gate not applied) {}; distinct ADS-B aircraft matched {}; distinct STDDS tracks with a match {}",
+            n0.saturating_sub(n1),
+            at(&x.matched_aircraft, f),
+            at(&g.tracks_matched, f)
+        );
     }
     let _ = writeln!(
         o,
-        "differences STDDS minus ADS-B of the exactly-one matches at the primary gate (a match is inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts above say how many updates fall outside):"
+        "null control (placebo): the same positions with the STDDS time shifted by plus and minus 60 s; a real match rate far above these means the matches are not chance:"
+    );
+    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        let real = counts_of(g, f, p.primary);
+        let _ = writeln!(o, "  {name}, real time: {}", outcomes_line(&real));
+        for (k, sh) in ["+60 s", "-60 s"].iter().enumerate() {
+            let code = k * 2 + f;
+            let c: Vec<u64> = (0..3).map(|j| at(&g.pcounts, code * 3 + j)).collect();
+            let _ = writeln!(o, "  {name}, shifted {sh}: {}", outcomes_line(&c));
+            if let Some(s) = g.psums.get(code) {
+                let _ = writeln!(
+                    o,
+                    "    horizontal difference of its exactly-one matches, metres: {}",
+                    sum_line(s)
+                );
+            }
+        }
+    }
+    let _ = writeln!(
+        o,
+        "differences STDDS minus ADS-B of the exactly-one matches at the primary gate:"
     );
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
         let _ = writeln!(o, "  {name}{}:", if f == 1 { " (control)" } else { "" });
         for (q, qn) in Q_NAMES.iter().enumerate() {
-            if let Some(s) = x.global.sums.get(f * 5 + q) {
+            if let Some(s) = g.sums.get(f * 5 + q) {
                 let _ = writeln!(o, "    {qn}: {}", sum_line(s));
                 sum_bins(o, s);
             }
+            if let Some(s) = g.tsums.get(f * 5 + q) {
+                let _ = writeln!(
+                    o,
+                    "      over tracks (each track's median, tracks with 3 or more matches): {}",
+                    sum_line(s)
+                );
+            }
         }
-        if let Some(s) = x.global.hdv.get(f) {
+        if let Some(s) = g.hdv.get(f) {
             let _ = writeln!(
                 o,
                 "    vertical difference of horizontal-only matches, feet (wide range, to check the altitude unit): {}",
@@ -279,8 +394,8 @@ fn xc_section(o: &mut String, r: &Results) {
         }
     }
     let _ = writeln!(o, "by track class:");
-    for (name, g) in CLASS_NAMES.iter().zip(&x.classes) {
-        let _ = writeln!(o, "  {name}: {}", xc_group_line(g, p));
+    for (name, gr) in CLASS_NAMES.iter().zip(&x.classes) {
+        let _ = writeln!(o, "  {name}: {}", xc_group_line(gr, p));
     }
     let _ = writeln!(o, "by facility (source id the data carries):");
     let mut order: Vec<usize> = (0..r.facs.len()).collect();
@@ -292,8 +407,13 @@ fn xc_section(o: &mut String, r: &Results) {
         )
     });
     for i in order {
-        if let (Some((k, _)), Some(g)) = (r.facs.get(i), x.facs.get(i)) {
-            let _ = writeln!(o, "  facility {}: {}", fac_label(k, i), xc_group_line(g, p));
+        if let (Some((k, _)), Some(gr)) = (r.facs.get(i), x.facs.get(i)) {
+            let _ = writeln!(
+                o,
+                "  facility {}: {}",
+                fac_label(k, i),
+                xc_group_line(gr, p)
+            );
         }
     }
 }
@@ -341,6 +461,11 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
         o,
         "updates with no mrtTime {}; with a time before the track's previous {}; with a gap over 120 s (reset, counted not binned) {}",
         g.no_mrt, g.backwards, g.resets
+    );
+    let _ = writeln!(
+        o,
+        "track restarts: after {} backwards updates in a row {}; at an update flagged new on a track number with state {}; updates left out by the time window {}",
+        RESYNC_AFTER, g.resyncs, g.new_resets, r.outside_window
     );
 
     let _ = writeln!(

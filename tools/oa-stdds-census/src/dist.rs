@@ -13,7 +13,8 @@ pub struct Summary {
     pub p50: Option<f64>,
     pub p90: Option<f64>,
     pub p99: Option<f64>,
-    /// The histogram range `[lo, hi)`, the counts below and at or above it, and the 20 bins.
+    /// The histogram range `[lo, hi]` (the upper edge inclusive, in the last bin), the counts
+    /// below and above it, and the 20 bins.
     pub lo: f64,
     pub hi: f64,
     pub below: u64,
@@ -62,9 +63,9 @@ pub fn summarize(values: &mut [f32], lo: f64, hi: f64) -> Summary {
         let v = f64::from(v);
         if v < lo {
             s.below += 1;
-        } else if v >= hi {
+        } else if v > hi {
             s.above += 1;
-        } else if let Some(b) = s.bins.get_mut(((v - lo) / w) as usize) {
+        } else if let Some(b) = s.bins.get_mut((((v - lo) / w) as usize).min(HIST_BINS - 1)) {
             *b += 1;
         }
     }
@@ -86,12 +87,14 @@ mod tests {
         assert_eq!(s.p50, Some(50.0));
         assert_eq!(s.p90, Some(90.0));
         assert_eq!(s.p99, Some(99.0));
-        // 1..=99 fall in bins of width 5; 100 is at the edge and counts as above.
-        assert_eq!(s.above, 1);
+        // 1..=99 fall in bins of width 5; 100 is the inclusive upper edge, in the last bin.
+        assert_eq!(s.above, 0);
         assert_eq!(s.below, 0);
         assert_eq!(s.bins[0], 4);
-        assert_eq!(s.bins[19], 5);
-        assert_eq!(s.bins.iter().sum::<u64>(), 99);
+        assert_eq!(s.bins[19], 6);
+        assert_eq!(s.bins.iter().sum::<u64>(), 100);
+        let mut w = vec![100.001f32];
+        assert_eq!(summarize(&mut w, 0.0, 100.0).above, 1);
     }
 
     // REQ: OA-CEN-010

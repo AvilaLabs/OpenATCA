@@ -4,24 +4,35 @@
 //! cannot answer it (the address field reads zero on almost all such updates), so the update's
 //! position is compared with every ADS-B aircraft, interpolated to the update's time.
 //!
+//! The reference. The ADS-B index is built with the same gating the tracker and the truth use,
+//! `oa_truth::quality_check` with `DEFAULT_CONFIG` (source type adsb_icao, adsb_icao_nt or
+//! adsb_other only, NACp, NIC, SIL, version, stale and range gates), in time order with the
+//! per-aircraft carried state, not a parallel filter. This matters: a TIS-B report is a
+//! rebroadcast of the FAA radar picture, so radar-only updates would match it at about zero
+//! distance. Reports on the ground are dropped after the gates. [`ClipStats`] counts every
+//! report by source type before any gating and what each gate removed.
+//!
 //! Time base: the STDDS time compared is `track/mrtTime` (the track's time stamp, UTC ms),
 //! against the ADS-B report time of the clip (UTC, 10 ms resolution). Each ADS-B aircraft is
 //! linearly interpolated between the two reports that bracket that time, if they are at most
-//! [`Params::max_gap_ms`] apart; an aircraft with no such bracket is not a candidate.
+//! [`Params::max_gap_ms`] apart; an aircraft with no such bracket is not a candidate. A segment
+//! whose implied speed is above [`MAX_SEGMENT_MPS`] is left out and counted.
 //! Altitude: the STDDS `reportedAltitude` (ASSUMED feet, pressure altitude) against the ADS-B
 //! barometric altitude, interpolated the same way. If either side has none the altitude gate is
 //! not applied to that pair (counted by the census as not compared).
-//! Reports on the ground and stale reports are left out of the index.
 //!
-//! Candidates are found through a grid of 10 s time bins and 0.2 degree cells holding the
-//! segments (pairs of consecutive reports of one aircraft). A segment is stored in the cell of
-//! its first report, and a query reads the 3 x 3 cells around the point, so the largest gate
-//! plus the longest segment must stay below the cell: [`build`] refuses a gate above 5 NM or a
-//! gap above 10 s (9.3 km + 3.4 km is below the 14 km a 0.2 degree cell is wide at 50 degrees
-//! north). Latitudes above 60 degrees are not supported.
+//! Exactness of the search at any latitude and across the antimeridian. Candidates are found
+//! through a grid of 10 s time bins and 0.2 degree cells. Each segment (a pair of consecutive
+//! reports of one aircraft) is stored in every cell its bounding box touches after the box is
+//! widened by the largest gate, in latitude by the gate over the smallest metres per degree and
+//! in longitude by the gate over the metres per degree at the box's highest latitude; a query
+//! reads only the one cell of the point. Longitude cells wrap at 180 degrees, and interpolation
+//! and the east difference take the short way round. Reports and updates above 85 degrees of
+//! latitude are not supported: they are counted, not checked.
 
-use oa_adsb::{reports_len, Reports, F_GROUND, F_STALE, NONE_I32, NONE_U16};
-use std::collections::HashMap;
+use oa_adsb::{reports_row, Reports, F_GROUND, NONE_I32, NONE_U16, NONE_U8, SOURCE_NAMES};
+use oa_truth::{quality_check, QualityState, DEFAULT_CONFIG, REMOVE_KINDS};
+use std::collections::{BTreeMap, HashMap};
 
 /// Metres per nautical mile.
 pub const NM_M: f64 = 1852.0;
@@ -32,13 +43,26 @@ pub const DEFAULT_GATES_NM: [f64; 3] = [0.5, 1.0, 2.0];
 pub const DEFAULT_V_GATE_FT: f64 = 500.0;
 /// Longest gap between two reports of one aircraft that is still interpolated, ms.
 pub const DEFAULT_MAX_GAP_MS: i64 = 10_000;
+/// A segment faster than this is left out, metres per second (above any aircraft).
+pub const MAX_SEGMENT_MPS: f64 = 600.0;
+/// Coverage radius: an update counts as covered if any indexed aircraft is this near, metres.
+pub const COVERAGE_M: f64 = 30.0 * NM_M;
+/// Highest absolute latitude supported, degrees.
+pub const MAX_LAT_DEG: f64 = 85.0;
 
 const TBIN_MS: i64 = 10_000;
 const CELL_DEG: f64 = 0.2;
-const MAX_GATE_NM: f64 = 5.0;
-const MAX_GAP_LIMIT_MS: i64 = 10_000;
+const LON_CELLS: i64 = 1800;
+const MAX_GATE_NM: f64 = 10.0;
+const MAX_GAP_LIMIT_MS: i64 = 30_000;
+/// Smallest metres per degree of latitude (at the equator), for widening boxes.
+const MIN_M_PER_DEG_LAT: f64 = 110_500.0;
+/// Metres per degree of longitude at the equator, a lower bound times the cosine of latitude.
+const M_PER_DEG_LON_EQ: f64 = 111_319.0;
 /// Ground speed from which an along-track difference is turned into seconds, m/s (about 100 kt).
 pub const MIN_GS_FOR_TIME_MPS: f64 = 51.4;
+const E7: f64 = 1e7;
+const LON_FULL_E7: i64 = 3_600_000_000;
 
 /// The gates and limits of a cross-check.
 // A7.2: cold struct, size guard waived
@@ -85,9 +109,39 @@ impl Params {
             return Err("the vertical gate must be above 0 ft".to_string());
         }
         if !(1..=MAX_GAP_LIMIT_MS).contains(&self.max_gap_ms) {
-            return Err("the interpolation gap must be 1 ms to 10 s".to_string());
+            return Err("the interpolation gap must be 1 ms to 30 s".to_string());
         }
         Ok(())
+    }
+}
+
+/// A time-of-day window, seconds of the UTC day, `[from, to)`; applied to both sides.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub from_s: i64,
+    pub to_s: i64,
+}
+
+impl Window {
+    pub fn new(from_s: i64, to_s: i64) -> Result<Window, String> {
+        if !(0 <= from_s && from_s < to_s && to_s <= 86_400) {
+            return Err(
+                "the window must satisfy 0 <= from < to <= 86400 (seconds of the UTC day)"
+                    .to_string(),
+            );
+        }
+        Ok(Window { from_s, to_s })
+    }
+
+    /// Whether the time of day of `t_ms` is in the window widened by `pad_ms` each side.
+    pub fn contains_padded(&self, t_ms: i64, pad_ms: i64) -> bool {
+        let tod = t_ms.rem_euclid(86_400_000);
+        tod >= self.from_s * 1000 - pad_ms && tod < self.to_s * 1000 + pad_ms
+    }
+
+    pub fn contains(&self, t_ms: i64) -> bool {
+        self.contains_padded(t_ms, 0)
     }
 }
 
@@ -105,6 +159,31 @@ pub struct Pt {
     pub track_ddeg: u16,
     /// Ground speed, 0.1 kt; [`NONE_U16`] if absent.
     pub gs_dkt: u16,
+}
+
+/// What the gating did to the clip: counts by source type before any gate, and what each gate
+/// removed.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClipStats {
+    /// Reports in the clip by source type ([`SOURCE_NAMES`] order, then "no source column").
+    pub by_source: [u64; 15],
+    pub reports: u64,
+    /// Reports outside the time window (left out before the gates).
+    pub outside_window: u64,
+    /// Removed by each `oa_truth` rule ([`oa_truth::REMOVE_NAMES`]); the first eight apply here.
+    pub removed: [u64; REMOVE_KINDS],
+    /// Passed the gates but on the ground.
+    pub ground: u64,
+    /// Kept.
+    pub kept: u64,
+}
+
+/// Names of [`ClipStats::by_source`].
+pub fn source_names() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = SOURCE_NAMES.to_vec();
+    v.push("no source column");
+    v
 }
 
 /// One aircraft's interpolated state compared with an STDDS update.
@@ -135,89 +214,30 @@ impl Cand {
 /// The ADS-B index.
 pub struct Index {
     pts: Vec<Pt>,
-    cells: HashMap<(i64, i32, i32), Vec<u32>>,
+    cells: HashMap<(i64, i32, i64), Vec<u32>>,
     pub params: Params,
+    pub clip: ClipStats,
     /// Distinct aircraft and interpolable segments indexed.
     pub aircraft: u64,
     pub segments: u64,
+    /// Segments left out: implied speed above [`MAX_SEGMENT_MPS`], or above [`MAX_LAT_DEG`].
+    pub segments_fast: u64,
+    pub segments_polar: u64,
+    bytes: u64,
 }
 
-fn cell_of(lat_e7: i32, lon_e7: i32) -> (i32, i32) {
-    let c = |e7: i32| (f64::from(e7) / 1e7 / CELL_DEG).floor() as i32;
-    (c(lat_e7), c(lon_e7))
+/// Longitude difference `b - a` in 1e-7 degree, the short way round.
+fn wrap_e7(d: i64) -> i64 {
+    (d + LON_FULL_E7 / 2).rem_euclid(LON_FULL_E7) - LON_FULL_E7 / 2
 }
 
-/// Points from the clip's reports: ground and stale reports are dropped.
-pub fn points_from_reports(r: &Reports) -> Vec<Pt> {
-    let mut v = Vec::new();
-    for i in 0..reports_len(r) {
-        let (Some(&icao), Some(&ns), Some(&lat), Some(&lon), Some(&fl)) = (
-            r.icao.get(i),
-            r.time_ns.get(i),
-            r.lat_e7.get(i),
-            r.lon_e7.get(i),
-            r.flags.get(i),
-        ) else {
-            continue;
-        };
-        if fl & (F_GROUND | F_STALE) != 0 {
-            continue;
-        }
-        v.push(Pt {
-            icao,
-            t_ms: ns.div_euclid(1_000_000),
-            lat_e7: lat,
-            lon_e7: lon,
-            alt_ft: r.baro_alt_ft.get(i).copied().unwrap_or(NONE_I32),
-            track_ddeg: r.track_ddeg.get(i).copied().unwrap_or(NONE_U16),
-            gs_dkt: r.gs_dkt.get(i).copied().unwrap_or(NONE_U16),
-        });
-    }
-    v
+fn lat_cell(lat_deg: f64) -> i32 {
+    (lat_deg / CELL_DEG).floor() as i32
 }
 
-/// Builds the index from the clip's reports.
-pub fn build(r: &Reports, params: Params) -> Result<Index, String> {
-    build_from_points(points_from_reports(r), params)
-}
-
-/// Builds the index from points (the tests' entry).
-pub fn build_from_points(mut pts: Vec<Pt>, params: Params) -> Result<Index, String> {
-    params.check()?;
-    pts.sort_by_key(|p| (p.icao, p.t_ms));
-    let mut cells: HashMap<(i64, i32, i32), Vec<u32>> = HashMap::new();
-    let mut aircraft = 0u64;
-    let mut segments = 0u64;
-    let mut last_icao: Option<u32> = None;
-    for p in &pts {
-        if last_icao != Some(p.icao) {
-            last_icao = Some(p.icao);
-            aircraft += 1;
-        }
-    }
-    for (i, w) in pts.windows(2).enumerate() {
-        let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
-            continue;
-        };
-        if a.icao != b.icao || b.t_ms <= a.t_ms || b.t_ms - a.t_ms > params.max_gap_ms {
-            continue;
-        }
-        let Ok(ix) = u32::try_from(i) else {
-            return Err("too many ADS-B reports".to_string());
-        };
-        let (la, lo) = cell_of(a.lat_e7, a.lon_e7);
-        for tb in a.t_ms.div_euclid(TBIN_MS)..=b.t_ms.div_euclid(TBIN_MS) {
-            cells.entry((tb, la, lo)).or_default().push(ix);
-        }
-        segments += 1;
-    }
-    Ok(Index {
-        pts,
-        cells,
-        params,
-        aircraft,
-        segments,
-    })
+/// Longitude cell of an unwrapped longitude in degrees, wrapped into `0..LON_CELLS`.
+fn lon_cell(lon_deg: f64) -> i64 {
+    (((lon_deg + 180.0) / CELL_DEG).floor() as i64).rem_euclid(LON_CELLS)
 }
 
 /// Metres per radian of latitude and of longitude at latitude `lat_rad` (WGS-84).
@@ -231,15 +251,53 @@ fn radii(lat_rad: f64) -> (f64, f64) {
     (m, n * lat_rad.cos())
 }
 
+/// The interpolated state of a segment at `t_ms`.
+struct SegAt {
+    lat_deg: f64,
+    lon_e7: f64,
+    f: f64,
+}
+
+fn seg_at(a: &Pt, b: &Pt, t_ms: i64) -> SegAt {
+    let f = (t_ms - a.t_ms) as f64 / (b.t_ms - a.t_ms) as f64;
+    let lat_e7 = f64::from(a.lat_e7) + (f64::from(b.lat_e7) - f64::from(a.lat_e7)) * f;
+    let dlon = wrap_e7(i64::from(b.lon_e7) - i64::from(a.lon_e7)) as f64;
+    SegAt {
+        lat_deg: lat_e7 / E7,
+        lon_e7: f64::from(a.lon_e7) + dlon * f,
+        f,
+    }
+}
+
+/// East and north differences, metres, of the point (`lat_e7`, `lon_e7`) minus the segment state,
+/// the east difference the short way round.
+fn diff_m(p_lat_e7: i32, p_lon_e7: i32, s: &SegAt) -> (f64, f64) {
+    let (m_per_rad, n_cos) = radii(s.lat_deg.to_radians());
+    let dlon_e7 = wrap_e7((f64::from(p_lon_e7) - s.lon_e7).round() as i64) as f64;
+    let de = (dlon_e7 / E7).to_radians() * n_cos;
+    let dn = (f64::from(p_lat_e7) / E7 - s.lat_deg).to_radians() * m_per_rad;
+    (de, dn)
+}
+
 impl Index {
     /// Reports kept.
     pub fn points(&self) -> usize {
         self.pts.len()
     }
 
+    /// Whether a point at this latitude can be searched.
+    pub fn supports(&self, lat_e7: i32) -> bool {
+        f64::from(lat_e7).abs() / E7 <= MAX_LAT_DEG
+    }
+
+    /// An estimate of the bytes the index holds.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
     /// Every aircraft that is interpolable at `t_ms` and within the largest gate of the point,
     /// one candidate per aircraft; altitude is compared but not gated here. `alt_ft` is the
-    /// STDDS altitude, if it has one.
+    /// STDDS altitude, if it has one. The point must be [`supports`](Self::supports)ed.
     pub fn candidates(
         &self,
         t_ms: i64,
@@ -248,12 +306,77 @@ impl Index {
         alt_ft: Option<i32>,
     ) -> Vec<Cand> {
         let mut out: Vec<Cand> = Vec::new();
-        let (cla, clo) = cell_of(lat_e7, lon_e7);
-        let tb = t_ms.div_euclid(TBIN_MS);
+        let key = (
+            t_ms.div_euclid(TBIN_MS),
+            lat_cell(f64::from(lat_e7) / E7),
+            lon_cell(f64::from(lon_e7) / E7),
+        );
+        let Some(list) = self.cells.get(&key) else {
+            return out;
+        };
         let max_h = self.params.max_gate_m();
-        for la in cla - 1..=cla + 1 {
-            for lo in clo - 1..=clo + 1 {
-                let Some(list) = self.cells.get(&(tb, la, lo)) else {
+        for &ix in list {
+            let (Some(a), Some(b)) = (self.pts.get(ix as usize), self.pts.get(ix as usize + 1))
+            else {
+                continue;
+            };
+            if t_ms < a.t_ms || t_ms > b.t_ms || out.iter().any(|c| c.icao == a.icao) {
+                continue;
+            }
+            let s = seg_at(a, b, t_ms);
+            let (de, dn) = diff_m(lat_e7, lon_e7, &s);
+            let dh = de.hypot(dn);
+            if dh > max_h {
+                continue;
+            }
+            let lerp = |x: i32, y: i32| f64::from(x) + (f64::from(y) - f64::from(x)) * s.f;
+            let alt_a =
+                (a.alt_ft != NONE_I32 && b.alt_ft != NONE_I32).then(|| lerp(a.alt_ft, b.alt_ft));
+            let dv_ft = alt_ft.zip(alt_a).map(|(v, x)| f64::from(v) - x);
+            let track = [a.track_ddeg, b.track_ddeg]
+                .into_iter()
+                .find(|&t| t != NONE_U16)
+                .map(|t| f64::from(t) / 10.0);
+            let (along_m, cross_m) = match track {
+                Some(deg) => {
+                    let (sn, cs) = deg.to_radians().sin_cos();
+                    (Some(de * sn + dn * cs), Some(de * cs - dn * sn))
+                }
+                None => (None, None),
+            };
+            let gs_mps = [a.gs_dkt, b.gs_dkt]
+                .into_iter()
+                .find(|&g| g != NONE_U16)
+                .map(|g| f64::from(g) / 10.0 * NM_M / 3600.0);
+            out.push(Cand {
+                icao: a.icao,
+                dh_m: dh,
+                dv_ft,
+                along_m,
+                cross_m,
+                gs_mps,
+            });
+        }
+        out
+    }
+
+    /// Whether any indexed aircraft, at any altitude, is within `radius_m` of the point at `t_ms`
+    /// (coverage). Reads the cells around the point; a segment is stored in every cell of its
+    /// own box, so the window of cells covering the radius finds any aircraft inside it.
+    pub fn covered(&self, t_ms: i64, lat_e7: i32, lon_e7: i32, radius_m: f64) -> bool {
+        let lat = f64::from(lat_e7) / E7;
+        let lon = f64::from(lon_e7) / E7;
+        let lat_x = radius_m / MIN_M_PER_DEG_LAT * 1.02;
+        let lon_x =
+            radius_m / (M_PER_DEG_LON_EQ * (lat.abs() + lat_x).min(89.9).to_radians().cos()) * 1.02;
+        let tb = t_ms.div_euclid(TBIN_MS);
+        let (c0, c1) = (lat_cell(lat - lat_x), lat_cell(lat + lat_x));
+        let l0 = ((lon - lon_x + 180.0) / CELL_DEG).floor() as i64;
+        let l1 = ((lon + lon_x + 180.0) / CELL_DEG).floor() as i64;
+        let l1 = l1.min(l0 + LON_CELLS - 1);
+        for la in c0..=c1 {
+            for lo in l0..=l1 {
+                let Some(list) = self.cells.get(&(tb, la, lo.rem_euclid(LON_CELLS))) else {
                     continue;
                 };
                 for &ix in list {
@@ -262,51 +385,162 @@ impl Index {
                     else {
                         continue;
                     };
-                    if t_ms < a.t_ms || t_ms > b.t_ms || out.iter().any(|c| c.icao == a.icao) {
+                    if t_ms < a.t_ms || t_ms > b.t_ms {
                         continue;
                     }
-                    let f = (t_ms - a.t_ms) as f64 / (b.t_ms - a.t_ms) as f64;
-                    let lerp = |x: i32, y: i32| f64::from(x) + (f64::from(y) - f64::from(x)) * f;
-                    let lat = lerp(a.lat_e7, b.lat_e7) / 1e7;
-                    let lon = lerp(a.lon_e7, b.lon_e7) / 1e7;
-                    let (m_per_rad, n_cos) = radii(lat.to_radians());
-                    let de = (f64::from(lon_e7) / 1e7 - lon).to_radians() * n_cos;
-                    let dn = (f64::from(lat_e7) / 1e7 - lat).to_radians() * m_per_rad;
-                    let dh = de.hypot(dn);
-                    if dh > max_h {
-                        continue;
+                    let (de, dn) = diff_m(lat_e7, lon_e7, &seg_at(a, b, t_ms));
+                    if de.hypot(dn) <= radius_m {
+                        return true;
                     }
-                    let alt_a = (a.alt_ft != NONE_I32 && b.alt_ft != NONE_I32)
-                        .then(|| lerp(a.alt_ft, b.alt_ft));
-                    let dv_ft = alt_ft.zip(alt_a).map(|(s, x)| f64::from(s) - x);
-                    let track = [a.track_ddeg, b.track_ddeg]
-                        .into_iter()
-                        .find(|&t| t != NONE_U16)
-                        .map(|t| f64::from(t) / 10.0);
-                    let (along_m, cross_m) = match track {
-                        Some(deg) => {
-                            let (s, c) = deg.to_radians().sin_cos();
-                            (Some(de * s + dn * c), Some(de * c - dn * s))
-                        }
-                        None => (None, None),
-                    };
-                    let gs_mps = [a.gs_dkt, b.gs_dkt]
-                        .into_iter()
-                        .find(|&g| g != NONE_U16)
-                        .map(|g| f64::from(g) / 10.0 * NM_M / 3600.0);
-                    out.push(Cand {
-                        icao: a.icao,
-                        dh_m: dh,
-                        dv_ft,
-                        along_m,
-                        cross_m,
-                        gs_mps,
-                    });
                 }
             }
         }
-        out
+        false
     }
+}
+
+/// Builds the index from the clip's reports: the truth gates in time order, then the
+/// ground and window filters.
+pub fn build(r: &Reports, params: Params, window: Option<Window>) -> Result<Index, String> {
+    params.check()?;
+    let n = r.icao.len();
+    let mut order: Vec<(i64, u32)> = Vec::with_capacity(n);
+    for (i, &t) in r.time_ns.iter().enumerate() {
+        order.push((
+            t,
+            u32::try_from(i).map_err(|_| "too many ADS-B reports".to_string())?,
+        ));
+    }
+    order.sort_unstable();
+    let mut stats = ClipStats::default();
+    let mut quality: BTreeMap<u32, QualityState> = BTreeMap::new();
+    let mut pts = Vec::new();
+    for &(t_ns, i) in &order {
+        let Some(row) = reports_row(r, i as usize) else {
+            continue;
+        };
+        stats.reports += 1;
+        let src = if row.source == NONE_U8 {
+            14
+        } else {
+            usize::from(row.source).min(13)
+        };
+        if let Some(c) = stats.by_source.get_mut(src) {
+            *c += 1;
+        }
+        let t_ms = t_ns.div_euclid(1_000_000);
+        if window.is_some_and(|w| !w.contains_padded(t_ms, params.max_gap_ms)) {
+            stats.outside_window += 1;
+            continue;
+        }
+        let q = quality.entry(row.icao).or_default();
+        if let Some(why) = quality_check(q, &row, t_ns, &DEFAULT_CONFIG).removal {
+            if let Some(c) = stats.removed.get_mut(why) {
+                *c += 1;
+            }
+            continue;
+        }
+        if row.flags & F_GROUND != 0 {
+            stats.ground += 1;
+            continue;
+        }
+        stats.kept += 1;
+        pts.push(Pt {
+            icao: row.icao,
+            t_ms,
+            lat_e7: row.lat_e7,
+            lon_e7: row.lon_e7,
+            alt_ft: row.baro_alt_ft,
+            track_ddeg: row.track_ddeg,
+            gs_dkt: row.gs_dkt,
+        });
+    }
+    let mut idx = build_from_points(pts, params)?;
+    idx.clip = stats;
+    Ok(idx)
+}
+
+/// Builds the index from points (the tests' entry); no gating.
+pub fn build_from_points(mut pts: Vec<Pt>, params: Params) -> Result<Index, String> {
+    params.check()?;
+    pts.sort_by_key(|p| (p.icao, p.t_ms));
+    let mut cells: HashMap<(i64, i32, i64), Vec<u32>> = HashMap::new();
+    let mut aircraft = 0u64;
+    let mut last_icao: Option<u32> = None;
+    for p in &pts {
+        if last_icao != Some(p.icao) {
+            last_icao = Some(p.icao);
+            aircraft += 1;
+        }
+    }
+    let (mut segments, mut segments_fast, mut segments_polar) = (0u64, 0u64, 0u64);
+    let gate = params.max_gate_m();
+    let lat_x = gate / MIN_M_PER_DEG_LAT * 1.02;
+    for (i, w) in pts.windows(2).enumerate() {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
+            continue;
+        };
+        if a.icao != b.icao || b.t_ms <= a.t_ms || b.t_ms - a.t_ms > params.max_gap_ms {
+            continue;
+        }
+        let (la, lb) = (f64::from(a.lat_e7) / E7, f64::from(b.lat_e7) / E7);
+        if la.abs().max(lb.abs()) > MAX_LAT_DEG {
+            segments_polar += 1;
+            continue;
+        }
+        let from_a = SegAt {
+            lat_deg: la,
+            lon_e7: f64::from(a.lon_e7),
+            f: 0.0,
+        };
+        let (de, dn) = diff_m(b.lat_e7, b.lon_e7, &from_a);
+        let speed = de.hypot(dn) / ((b.t_ms - a.t_ms) as f64 / 1000.0);
+        if speed > MAX_SEGMENT_MPS {
+            segments_fast += 1;
+            continue;
+        }
+        let Ok(ix) = u32::try_from(i) else {
+            return Err("too many ADS-B reports".to_string());
+        };
+        let lat_hi = la.max(lb) + lat_x;
+        let lat_lo = la.min(lb) - lat_x;
+        let lon_a = f64::from(a.lon_e7) / E7;
+        let lon_b = lon_a + wrap_e7(i64::from(b.lon_e7) - i64::from(a.lon_e7)) as f64 / E7;
+        let cos = (la.abs().max(lb.abs()) + lat_x)
+            .min(89.9)
+            .to_radians()
+            .cos();
+        let lon_x = gate / (M_PER_DEG_LON_EQ * cos) * 1.02;
+        let l0 = ((lon_a.min(lon_b) - lon_x + 180.0) / CELL_DEG).floor() as i64;
+        let l1 = ((lon_a.max(lon_b) + lon_x + 180.0) / CELL_DEG).floor() as i64;
+        let l1 = l1.min(l0 + LON_CELLS - 1);
+        for tb in a.t_ms.div_euclid(TBIN_MS)..=b.t_ms.div_euclid(TBIN_MS) {
+            for lc in lat_cell(lat_lo)..=lat_cell(lat_hi) {
+                for lo in l0..=l1 {
+                    cells
+                        .entry((tb, lc, lo.rem_euclid(LON_CELLS)))
+                        .or_default()
+                        .push(ix);
+                }
+            }
+        }
+        segments += 1;
+    }
+    let entries: usize = cells.values().map(Vec::len).sum();
+    let bytes = (pts.len() * std::mem::size_of::<Pt>()
+        + cells.len() * 72
+        + entries * std::mem::size_of::<u32>()) as u64;
+    Ok(Index {
+        pts,
+        cells,
+        params,
+        clip: ClipStats::default(),
+        aircraft,
+        segments,
+        segments_fast,
+        segments_polar,
+        bytes,
+    })
 }
 
 /// The outcome of one gate: no candidate, exactly one, more than one.
@@ -337,6 +571,17 @@ pub(crate) mod tests {
             alt_ft: alt,
             track_ddeg: 900, // due east
             gs_dkt: 4000,    // 400 kt
+        }
+    }
+
+    /// A report with its own track (0.1 degree) and ground speed (0.1 kt); the longitude is
+    /// wrapped into -180..180.
+    pub fn pt_full(icao: u32, t_ms: i64, lat: f64, lon: f64, alt: i32, trk: u16, gs: u16) -> Pt {
+        let lon = if lon >= 180.0 { lon - 360.0 } else { lon };
+        Pt {
+            track_ddeg: trk,
+            gs_dkt: gs,
+            ..pt(icao, t_ms, lat, lon, alt)
         }
     }
 
@@ -456,11 +701,11 @@ pub(crate) mod tests {
         let bad = |p: Params| build_from_points(vec![], p).is_err();
         assert!(!bad(Params::default()));
         assert!(bad(Params {
-            gates_nm: [0.5, 1.0, 6.0],
+            gates_nm: [0.5, 1.0, 11.0],
             ..Params::default()
         }));
         assert!(bad(Params {
-            max_gap_ms: 20_000,
+            max_gap_ms: 40_000,
             ..Params::default()
         }));
         assert!(bad(Params {
@@ -474,5 +719,269 @@ pub(crate) mod tests {
         assert_eq!(outcome(0), 0);
         assert_eq!(outcome(1), 1);
         assert_eq!(outcome(5), 2);
+    }
+
+    use oa_adsb::{reports_push, Row, ROW_EMPTY};
+    use oa_truth::{REM_NACP, REM_SOURCE, REM_STALE};
+
+    fn row(icao: u32, t_s: i64, lat: f64, lon: f64, source: u8) -> Row {
+        Row {
+            icao,
+            time_ns: t_s * 1_000_000_000,
+            lat_e7: (lat * 1e7).round() as i32,
+            lon_e7: (lon * 1e7).round() as i32,
+            baro_alt_ft: 10_000,
+            gs_dkt: 4000,
+            track_ddeg: 900,
+            source,
+            nac_p: 10,
+            nic: 8,
+            sil: 3,
+            version: 2,
+            ..ROW_EMPTY
+        }
+    }
+
+    fn clip(rows: &[Row]) -> Reports {
+        let mut r = Reports::default();
+        for row in rows {
+            reports_push(&mut r, row);
+        }
+        r
+    }
+
+    // REQ: OA-CEN-013
+    #[test]
+    fn a_tisb_report_on_a_radar_only_update_is_not_a_candidate() {
+        // Aircraft 1 (adsb_icao) is 50 km north of the update. Aircraft 2 is a TIS-B report right
+        // on the update; aircraft 3 is stale, 4 on the ground, 5 has NACp 3: none is kept.
+        let (lat, lon) = (40.0, -75.0);
+        let far = lat + 50_000.0 * deg_lat_per_m(40.0);
+        let mut rows = Vec::new();
+        for s in 0..=20 {
+            rows.push(row(1, s, far, lon, 0));
+            rows.push(row(2, s, lat, lon, 3));
+            let mut st = row(3, s, lat, lon, 0);
+            st.flags |= oa_adsb::F_STALE;
+            rows.push(st);
+            let mut gr = row(4, s, lat, lon, 0);
+            gr.flags |= oa_adsb::F_GROUND;
+            rows.push(gr);
+            let mut lo = row(5, s, lat, lon, 0);
+            lo.nac_p = 3;
+            rows.push(lo);
+        }
+        let x = build(&clip(&rows), Params::default(), None).unwrap();
+        let c = &x.clip;
+        assert_eq!(c.reports, 105);
+        assert_eq!(c.by_source[0], 84);
+        assert_eq!(c.by_source[3], 21);
+        assert_eq!(c.removed[REM_SOURCE], 21);
+        assert_eq!(c.removed[REM_STALE], 21);
+        assert_eq!(c.removed[REM_NACP], 21);
+        assert_eq!(c.ground, 21);
+        assert_eq!(c.kept, 21);
+        assert_eq!(x.aircraft, 1);
+        let at =
+            |x: &Index| x.candidates(10_500, (lat * 1e7) as i32, (lon * 1e7) as i32, Some(10_000));
+        assert!(at(&x).is_empty());
+        // The same aircraft as an ADS-B source is a candidate: the filter, not the geometry,
+        // is what removed it.
+        let rows2: Vec<Row> = (0..=20).map(|s| row(2, s, lat, lon, 0)).collect();
+        let y = build(&clip(&rows2), Params::default(), None).unwrap();
+        assert_eq!(at(&y).len(), 1);
+    }
+
+    // REQ: OA-CEN-013
+    #[test]
+    fn the_time_window_pads_the_adsb_side() {
+        let rows: Vec<Row> = (0..=40)
+            .map(|s| row(1, 3_600 + s, 40.0, -75.0, 0))
+            .collect();
+        let w = Window::new(3_610, 3_620).unwrap();
+        let x = build(&clip(&rows), Params::default(), Some(w)).unwrap();
+        // Reports from 3600 s: kept from 10 s before the window start to 10 s after its end,
+        // exclusive (the 10 s gap padding): 3600 to 3629 s, 30 reports.
+        assert_eq!(x.clip.outside_window, 41 - 30);
+        assert!(Window::new(5, 5).is_err() && Window::new(0, 86_401).is_err());
+        assert!(w.contains(3_610_000) && !w.contains(3_620_000));
+    }
+
+    // REQ: OA-CEN-014
+    #[test]
+    fn the_search_is_exact_at_62_north_with_a_5_nm_gate() {
+        // Gates 1, 2 and 5 NM; aircraft eastbound at 62 N. An update 4.8 NM ahead, 4.8 NM behind,
+        // 4.8 NM north and 4.8 NM south of the aircraft is found (the old fixed grid missed the
+        // longitude cases), and one at 5.2 NM is not.
+        let p = Params {
+            gates_nm: [1.0, 2.0, 5.0],
+            primary: 2,
+            ..Params::default()
+        };
+        let lat = 62.0;
+        let x = build_from_points(
+            (0..=20)
+                .map(|s| {
+                    pt(
+                        1,
+                        s * 1000,
+                        lat,
+                        -100.0 + s as f64 * 205.0 * deg_lon_per_m(lat),
+                        9000,
+                    )
+                })
+                .collect(),
+            p,
+        )
+        .unwrap();
+        let here = -100.0 + 10.5 * 205.0 * deg_lon_per_m(lat);
+        for (de, dn, found) in [
+            (4.8 * NM_M, 0.0, true),
+            (-4.8 * NM_M, 0.0, true),
+            (0.0, 4.8 * NM_M, true),
+            (0.0, -4.8 * NM_M, true),
+            (5.2 * NM_M, 0.0, false),
+            (0.0, 5.2 * NM_M, false),
+        ] {
+            let lon = here + de * deg_lon_per_m(lat);
+            let la = lat + dn * deg_lat_per_m(lat);
+            let c = x.candidates(
+                10_500,
+                (la * 1e7).round() as i32,
+                (lon * 1e7).round() as i32,
+                None,
+            );
+            assert_eq!(c.len(), usize::from(found), "{de} {dn}");
+            if found {
+                assert!((c[0].dh_m - 4.8 * NM_M).abs() < 5.0, "{}", c[0].dh_m);
+            }
+        }
+    }
+
+    // REQ: OA-CEN-014
+    #[test]
+    fn the_search_crosses_the_antimeridian() {
+        let lat = 40.0;
+        let v = 205.0;
+        // Eastbound across 180: at 10.5 s the aircraft is 100 m east of the line; its reports
+        // before 9.5 s or so are west of it.
+        let lon_ac = 180.0 + 100.0 * deg_lon_per_m(lat);
+        let start = lon_ac - 10.5 * v * deg_lon_per_m(lat);
+        let x = build_from_points(
+            (0..=20)
+                .map(|s| {
+                    let lon = start + s as f64 * v * deg_lon_per_m(lat);
+                    pt_full(1, s * 1000, lat, lon, 9000, 900, 4000)
+                })
+                .collect(),
+            Params::default(),
+        )
+        .unwrap();
+        // The update is 300 m ahead of it (east of the line), then 300 m behind (west of it).
+        for (east, along) in [(300.0, 300.0), (-300.0, -300.0)] {
+            let lon = lon_ac + east * deg_lon_per_m(lat);
+            let lon = if lon >= 180.0 { lon - 360.0 } else { lon };
+            let c = x.candidates(10_500, (lat * 1e7) as i32, (lon * 1e7).round() as i32, None);
+            assert_eq!(c.len(), 1, "{east}");
+            assert!((c[0].dh_m - 300.0).abs() < 2.0, "{}", c[0].dh_m);
+            assert!((c[0].along_m.unwrap() - along).abs() < 2.0);
+        }
+        // Coverage works across the line as well: 20 NM east of the aircraft, within 30 NM.
+        let lon = lon_ac + 20.0 * NM_M * deg_lon_per_m(lat);
+        let lon = if lon >= 180.0 { lon - 360.0 } else { lon };
+        assert!(x.covered(10_500, (lat * 1e7) as i32, (lon * 1e7) as i32, COVERAGE_M));
+        let far = lon_ac + 40.0 * NM_M * deg_lon_per_m(lat);
+        let far = if far >= 180.0 { far - 360.0 } else { far };
+        assert!(!x.covered(10_500, (lat * 1e7) as i32, (far * 1e7) as i32, COVERAGE_M));
+    }
+
+    // REQ: OA-CEN-014
+    #[test]
+    fn polar_and_too_fast_segments_are_counted_not_indexed() {
+        let fast_dlon = 7_000.0 * deg_lon_per_m(40.0);
+        let x = build_from_points(
+            vec![
+                pt(1, 0, 40.0, -75.0, 9000),
+                pt(1, 10_000, 40.0, -75.0 + fast_dlon, 9000), // 700 m/s
+                pt(2, 0, 86.0, 10.0, 9000),
+                pt(2, 5_000, 86.0, 10.0, 9000),
+                pt(3, 0, 40.0, -75.0, 9000),
+                pt(3, 10_000, 40.0, -75.0 + 5_000.0 * deg_lon_per_m(40.0), 9000), // 500 m/s
+            ],
+            Params::default(),
+        )
+        .unwrap();
+        assert_eq!((x.segments, x.segments_fast, x.segments_polar), (1, 1, 1));
+        assert!(!x.supports(860_000_000) && x.supports(850_000_000));
+    }
+
+    // REQ: OA-CEN-009
+    #[test]
+    fn along_and_cross_signs_for_northbound_and_southbound_tracks() {
+        let lat = 40.0;
+        let mk = |trk: u16| {
+            build_from_points(
+                vec![
+                    pt_full(1, 0, lat, -75.0, 9000, trk, 4000),
+                    pt_full(1, 10_000, lat, -75.0, 9000, trk, 4000),
+                ],
+                Params::default(),
+            )
+            .unwrap()
+        };
+        let at = |x: &Index, east: f64, north: f64| {
+            let c = x.candidates(
+                5_000,
+                ((lat + north * deg_lat_per_m(lat)) * 1e7).round() as i32,
+                ((-75.0 + east * deg_lon_per_m(lat)) * 1e7).round() as i32,
+                None,
+            );
+            (c[0].along_m.unwrap(), c[0].cross_m.unwrap())
+        };
+        // North (0 degrees): 300 m north is ahead, 100 m east is to the right.
+        let (a, c) = at(&mk(0), 100.0, 300.0);
+        assert!(
+            (a - 300.0).abs() < 1.0 && (c - 100.0).abs() < 1.0,
+            "{a} {c}"
+        );
+        // South (180): 300 m south is ahead, 100 m west is to the right.
+        let (a, c) = at(&mk(1800), -100.0, -300.0);
+        assert!(
+            (a - 300.0).abs() < 1.0 && (c - 100.0).abs() < 1.0,
+            "{a} {c}"
+        );
+        // West (270): 300 m west is ahead, 100 m north is to the right.
+        let (a, c) = at(&mk(2700), -300.0, 100.0);
+        assert!(
+            (a - 300.0).abs() < 1.0 && (c - 100.0).abs() < 1.0,
+            "{a} {c}"
+        );
+        // Northeast (45): along is the projection on the diagonal.
+        let (a, c) = at(&mk(450), 100.0, 0.0);
+        assert!(
+            (a - 70.71).abs() < 0.5 && (c - 70.71).abs() < 0.5,
+            "{a} {c}"
+        );
+    }
+
+    // REQ: OA-CEN-015
+    #[test]
+    fn coverage_is_separate_from_no_candidate() {
+        let lat = 40.0;
+        let x = build_from_points(
+            (0..=20)
+                .map(|s| pt(1, s * 1000, lat, -75.0, 9000))
+                .collect(),
+            Params::default(),
+        )
+        .unwrap();
+        let near = |nm: f64| {
+            let la = lat + nm * NM_M * deg_lat_per_m(lat);
+            x.covered(10_500, (la * 1e7).round() as i32, -750_000_000, COVERAGE_M)
+        };
+        assert!(near(0.0) && near(29.5));
+        assert!(!near(30.5));
+        // Not covered when the time is outside every segment.
+        assert!(!x.covered(500_000, (lat * 1e7) as i32, -750_000_000, COVERAGE_M));
     }
 }

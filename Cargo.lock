@@ -321,6 +321,7 @@ dependencies = [
  "oa-feed",
  "oa-math",
  "oa-stdds",
+ "oa-truth",
  "oa-xml",
  "oa-zip",
 ]

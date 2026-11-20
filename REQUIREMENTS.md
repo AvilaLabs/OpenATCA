@@ -5482,17 +5482,18 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
   code, flight-plan content or individual time; the only text from the data is a source id of letters and
   digits. A path with a sealed name in any component, as given or resolved, is refused before it is
-  opened or listed.
+  opened or listed; so is a directory named `scds` or holding a sealed name, and every subdirectory is
+  checked before it is listed (exit 2).
 - **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
   adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
   each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
-  linearly to `mrtTime` between the two reports around it (at most 10 s apart; ground and stale reports
-  left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
+  linearly to `mrtTime` between the two reports around it (at most 10 s apart by default, 30 s at most; a
+  segment faster than 600 m/s is left out and counted; ground reports are left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
   vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
   update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
   count is kept at the primary gate. Updates with no position or time, or no flag, are counted apart. A
-  gate above 5 NM, a gap above 10 s, or an unusable parameter is refused.
+  gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
 - **OA-CEN-010** For exactly-one matches at the primary gate, per flag (adsb=true is the control), the
   horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
   minus ADS-B, along the ADS-B track, positive ahead and to the right) are summarised by count, median,
@@ -5504,3 +5505,36 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   STDDS position is where the aircraft is later than the stated time.
 - **OA-CEN-012** The cross-check counts and difference medians are split by track class and by facility, and
   absent without a clip.
+- **OA-CEN-013** The ADS-B reference is built with the gating of the tracker and the truth
+  (`oa_truth::quality_check`, default config: source type adsb_icao, adsb_icao_nt or adsb_other, NACp, NIC,
+  SIL, version, stale and range gates), in time order with per-aircraft carried state, not a parallel
+  filter; reports on the ground are then dropped. The census prints the clip's reports by source type before
+  any gating, what each gate removed, and what the time window left out. A TIS-B report on top of a
+  radar-only update is not a candidate. `--from` and `--to` restrict both sides to a time of the UTC day
+  (the ADS-B side padded by the interpolation gap); a window outside 0 to 86400 s is refused.
+- **OA-CEN-014** The candidate search is exact at any latitude to 85 degrees and across the antimeridian:
+  each segment is stored in every grid cell its bounding box touches after widening by the largest gate
+  (in longitude at the box's highest latitude), longitude cells wrap, interpolation and the east difference
+  take the short way round. Segments and updates above 85 degrees, and segments faster than 600 m/s, are
+  counted and not used.
+- **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
+  any indexed ADS-B aircraft within 30 NM at their time.
+- **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
+  checked plus no position or time, above 85 degrees, no trackNum, and exact duplicates of the track's
+  previous update (time and position); updates with no flag equal the not-checked no-flag count.
+- **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
+  shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
+  distribution of its exactly-one matches.
+- **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
+  ADS-B aircraft and the distinct STDDS tracks with a match, and the distribution over tracks of each track's
+  median difference (tracks with 3 or more matches); the along-track-as-time figure leaves out aircraft
+  below 100 kt; a class or facility cell with fewer than 30 matches prints "n<30" for a flag instead of
+  medians; `--gate-nm` and `--gate-ft` without `--adsb` are refused; the histogram's upper edge is
+  inclusive.
+- **OA-CEN-019** Track state is kept in step: a change of flag is counted only where an interval across it
+  exists (so changes equal the changes by direction); a backwards update changes neither the time nor the
+  flag of the track, an absent-flag update obeys the same backwards and reset rules, 3 backwards updates in
+  a row restart the track (counted), and an update flagged new on a track number with state starts a new
+  segment (counted).
+- **OA-CEN-020** The census estimates the bytes it holds, prints the estimate, stops and refuses a run whose
+  estimate passes 4 GB, and counts updates left out by the time window.

@@ -5,8 +5,8 @@
 //! durations, and are dropped by [`Census::finish`]).
 
 use crate::hist::{Hist, MAX_TICKS, TICK_MS};
-use crate::xcheck::{outcome, Cand, Index, MIN_GS_FOR_TIME_MPS, NM_M};
-use crate::xcres::{cidx, MatchRec, XcAcc, XcGroup, XcResults};
+use crate::xcheck::{outcome, Cand, Index, Window, COVERAGE_M, MIN_GS_FOR_TIME_MPS, NM_M};
+use crate::xcres::{cidx, MatchRec, NotChecked, TrackXc, XcAcc, XcGroup, XcResults, PLACEBO_S};
 use oa_stdds::tais::tais_bit;
 use oa_stdds::{TaisField, TaisRecord};
 use std::collections::{HashMap, HashSet};
@@ -104,6 +104,10 @@ pub struct Group {
     pub no_mrt: u64,
     pub backwards: u64,
     pub resets: u64,
+    /// Restarts of a track after [`RESYNC_AFTER`] backwards updates in a row, and restarts at an
+    /// update flagged new (a new track on a track number that had state).
+    pub resyncs: u64,
+    pub new_resets: u64,
     /// Tracks seen, tracks with at least one adsb=false update, and of those the tracks whose
     /// adsb=false updates ever carried a non-zero Mode S address.
     pub tracks: u64,
@@ -125,6 +129,14 @@ impl Group {
     }
 }
 
+/// Applies `f` to the global group and to the facility's.
+fn bump(global: &mut Group, facs: &mut [Group], fac: u32, f: fn(&mut Group)) {
+    f(global);
+    if let Some(g) = facs.get_mut(fac as usize) {
+        f(g);
+    }
+}
+
 fn flag_index(flag: Option<bool>) -> usize {
     flag.map_or(2, usize::from)
 }
@@ -132,65 +144,80 @@ fn flag_index(flag: Option<bool>) -> usize {
 /// A track's identity: facility index, `recSTARSSrcID`, track number.
 type TrackKey = (u32, [u8; 8], u32);
 
+/// Backwards updates in a row after which a track restarts from the latest update.
+pub const RESYNC_AFTER: u8 = 3;
+
+/// Bytes counted per kept interval entry, match record and similar small item (estimates).
+const IV_BYTES: u64 = 2;
+const REC_BYTES: u64 = std::mem::size_of::<MatchRec>() as u64;
+const SMALL_BYTES: u64 = 8;
+
 struct Track {
     fac: u32,
     updates: u32,
     last_ms: Option<i64>,
     last_flag: Option<bool>,
+    /// Time, latitude and longitude of the previous update with a position (duplicate check).
+    last_key: Option<(i64, i32, i32)>,
+    /// Backwards updates in a row.
+    backs: u8,
     changes: u32,
     n: [u32; 2],
     false_icao: bool,
     false_nonzero: u32,
     ivs: Vec<u16>,
-    /// Position cross-check: outcomes by flag, gate, outcome (see [`cidx`]), by flag and
-    /// outcome for the horizontal-only check, the exactly-one matches, and the vertical
-    /// differences of the horizontal-only matches. Empty or zero when the check is off.
-    xc_cnt: [u32; 18],
-    xc_hcnt: [u32; 6],
-    xc_recs: Vec<MatchRec>,
-    xc_hdv: Vec<(bool, f32)>,
+    xc: TrackXc,
 }
 
 fn nan_or(v: Option<f64>) -> f32 {
     v.map_or(f32::NAN, |x| x as f32)
 }
 
-/// Counts the outcomes of one update's candidates at every gate and keeps the match.
-fn xc_observe(x: &Index, t: &mut Track, flag: bool, r: &TaisRecord) {
+/// Counts the outcomes of one update's candidates at every gate, keeps the match, the
+/// coverage and the two placebo passes (the same positions with the time shifted by plus and
+/// minus [`PLACEBO_S`]). Returns the bytes added and the matched aircraft, if exactly one.
+fn xc_observe(x: &Index, t: &mut TrackXc, flag: bool, r: &TaisRecord) -> (u64, Option<u32>) {
     let p = x.params;
     let alt = has(r, TaisField::ReportedAltitude).then_some(r.reported_alt_ft);
     let cands = x.candidates(r.mrt_time_ms, r.lat_e7, r.lon_e7, alt);
     let f = usize::from(flag);
+    let mut bytes = 0;
     for (g, &nm) in p.gates_nm.iter().enumerate() {
         let n = cands
             .iter()
             .filter(|c| c.passes(nm * NM_M, p.v_gate_ft))
             .count();
-        if let Some(c) = t.xc_cnt.get_mut(cidx(f, g, outcome(n))) {
+        if let Some(c) = t.cnt.get_mut(cidx(f, g, outcome(n))) {
             *c += 1;
         }
     }
+    let covered = !cands.is_empty() || x.covered(r.mrt_time_ms, r.lat_e7, r.lon_e7, COVERAGE_M);
+    if let Some(c) = t.cov.get_mut(f) {
+        *c += u32::from(covered);
+    }
     let h_m = p.gates_nm.get(p.primary).map_or(0.0, |g| g * NM_M);
     let h_only: Vec<&Cand> = cands.iter().filter(|c| c.dh_m <= h_m).collect();
-    if let Some(c) = t.xc_hcnt.get_mut(f * 3 + outcome(h_only.len())) {
+    if let Some(c) = t.hcnt.get_mut(f * 3 + outcome(h_only.len())) {
         *c += 1;
     }
     if let [c] = h_only.as_slice() {
         if let Some(v) = c.dv_ft {
-            t.xc_hdv.push((flag, v as f32));
+            t.hdv.push((flag, v as f32));
+            bytes += SMALL_BYTES;
         }
     }
     let gated: Vec<&Cand> = cands
         .iter()
         .filter(|c| c.passes(h_m, p.v_gate_ft))
         .collect();
+    let mut matched = None;
     if let [c] = gated.as_slice() {
         let along_s = c
             .along_m
             .zip(c.gs_mps)
             .filter(|&(_, gs)| gs >= MIN_GS_FOR_TIME_MPS)
             .map(|(a, gs)| a / gs);
-        t.xc_recs.push(MatchRec {
+        t.recs.push(MatchRec {
             flag,
             dh: c.dh_m as f32,
             dv: nan_or(c.dv_ft),
@@ -198,7 +225,22 @@ fn xc_observe(x: &Index, t: &mut Track, flag: bool, r: &TaisRecord) {
             cross: nan_or(c.cross_m),
             along_s: nan_or(along_s),
         });
+        bytes += REC_BYTES;
+        matched = Some(c.icao);
     }
+    for (k, shift) in [PLACEBO_S, -PLACEBO_S].into_iter().enumerate() {
+        let pc = x.candidates(r.mrt_time_ms + shift * 1000, r.lat_e7, r.lon_e7, alt);
+        let ok: Vec<&Cand> = pc.iter().filter(|c| c.passes(h_m, p.v_gate_ft)).collect();
+        let code = k * 2 + f;
+        if let Some(c) = t.pcnt.get_mut(code * 3 + outcome(ok.len())) {
+            *c += 1;
+        }
+        if let [c] = ok.as_slice() {
+            t.pdh.push((code as u8, c.dh_m as f32));
+            bytes += SMALL_BYTES;
+        }
+    }
+    (bytes, matched)
 }
 
 /// The running census.
@@ -211,10 +253,18 @@ pub struct Census {
     src_ids: HashSet<[u8; 8]>,
     no_track_num: u64,
     xc: Option<Index>,
-    /// Updates not cross-checked: no position or time (by flag), and no flag.
-    xc_nopos: [u64; 2],
-    xc_noflag: u64,
+    xc_nc: NotChecked,
+    /// Distinct ADS-B aircraft that were an exactly-one match, by flag.
+    xc_ac: [HashSet<u32>; 2],
+    window: Option<Window>,
+    outside_window: u64,
+    /// Estimate of the bytes held, and the budget past which the run is stopped.
+    held_bytes: u64,
+    budget: u64,
 }
+
+/// Default memory budget, bytes.
+pub const DEFAULT_BUDGET: u64 = 4_000_000_000;
 
 impl Default for Census {
     fn default() -> Census {
@@ -264,6 +314,9 @@ pub struct Results {
     pub flagged_pairs: u64,
     pub distinct_src_ids: u64,
     pub no_track_num: u64,
+    /// Updates left out by the time window.
+    pub outside_window: u64,
+    pub window: Option<Window>,
     /// The position cross-check, if an ADS-B index was given.
     pub xc: Option<XcResults>,
 }
@@ -279,9 +332,30 @@ impl Census {
             src_ids: HashSet::new(),
             no_track_num: 0,
             xc: None,
-            xc_nopos: [0; 2],
-            xc_noflag: 0,
+            xc_nc: NotChecked::default(),
+            xc_ac: [HashSet::new(), HashSet::new()],
+            window: None,
+            outside_window: 0,
+            held_bytes: 0,
+            budget: DEFAULT_BUDGET,
         }
+    }
+
+    /// Restricts the census to updates whose `mrtTime` is in the window (time of day).
+    pub fn with_window(mut self, w: Option<Window>) -> Census {
+        self.window = w;
+        self
+    }
+
+    /// Sets the memory budget, bytes.
+    pub fn with_budget(mut self, bytes: u64) -> Census {
+        self.budget = bytes;
+        self
+    }
+
+    /// Whether the estimate of the bytes held is past the budget.
+    pub fn over_budget(&self) -> bool {
+        self.held_bytes + self.xc.as_ref().map_or(0, Index::bytes) > self.budget
     }
 
     /// A census that also cross-checks every tracked update against the ADS-B `index`.
@@ -301,6 +375,13 @@ impl Census {
     /// message carries none).
     pub fn observe(&mut self, src: [u8; 8], r: &TaisRecord) {
         let flag = has(r, TaisField::TrackAdsb).then_some(r.adsb);
+        let mrt = has(r, TaisField::MrtTime).then_some(r.mrt_time_ms);
+        if let (Some(w), Some(m)) = (self.window, mrt) {
+            if !w.contains(m) {
+                self.outside_window += 1;
+                return;
+            }
+        }
         let fac = match self.fac_ix.get(&src) {
             Some(&f) => f,
             None => {
@@ -318,76 +399,129 @@ impl Census {
         self.src_ids.insert(r.rec_stars_src_id);
         if !has(r, TaisField::TrackNum) {
             self.no_track_num += 1;
+            if self.xc.is_some() {
+                match flag {
+                    Some(f) => {
+                        if let Some(c) = self.xc_nc.no_track.get_mut(usize::from(f)) {
+                            *c += 1;
+                        }
+                    }
+                    None => self.xc_nc.no_flag += 1,
+                }
+            }
             return;
         }
         let key = (fac, r.rec_stars_src_id, r.track_num);
-        let t = self.tracks.entry(key).or_insert_with(|| Track {
-            fac,
-            updates: 0,
-            last_ms: None,
-            last_flag: None,
-            changes: 0,
-            n: [0; 2],
-            false_icao: false,
-            false_nonzero: 0,
-            ivs: Vec::new(),
-            xc_cnt: [0; 18],
-            xc_hcnt: [0; 6],
-            xc_recs: Vec::new(),
-            xc_hdv: Vec::new(),
+        let held = &mut self.held_bytes;
+        let t = self.tracks.entry(key).or_insert_with(|| {
+            *held += std::mem::size_of::<Track>() as u64;
+            Track {
+                fac,
+                updates: 0,
+                last_ms: None,
+                last_flag: None,
+                last_key: None,
+                backs: 0,
+                changes: 0,
+                n: [0; 2],
+                false_icao: false,
+                false_nonzero: 0,
+                ivs: Vec::new(),
+                xc: TrackXc::default(),
+            }
         });
-        match (self.xc.as_ref(), flag) {
-            (Some(x), Some(f)) => {
-                if has(r, TaisField::Lat) && has(r, TaisField::Lon) && has(r, TaisField::MrtTime) {
-                    xc_observe(x, t, f, r);
-                } else if let Some(c) = self.xc_nopos.get_mut(usize::from(f)) {
-                    *c += 1;
+        let pos = has(r, TaisField::Lat) && has(r, TaisField::Lon);
+        let key_now = mrt.filter(|_| pos).map(|m| (m, r.lat_e7, r.lon_e7));
+        if let Some(x) = self.xc.as_ref() {
+            match (flag, key_now) {
+                (None, _) => self.xc_nc.no_flag += 1,
+                (Some(f), None) => {
+                    if let Some(c) = self.xc_nc.no_position.get_mut(usize::from(f)) {
+                        *c += 1;
+                    }
+                }
+                (Some(f), Some(k)) => {
+                    let fi = usize::from(f);
+                    if !x.supports(r.lat_e7) {
+                        if let Some(c) = self.xc_nc.polar.get_mut(fi) {
+                            *c += 1;
+                        }
+                    } else if t.last_key == Some(k) {
+                        if let Some(c) = self.xc_nc.duplicate.get_mut(fi) {
+                            *c += 1;
+                        }
+                    } else {
+                        let (bytes, matched) = xc_observe(x, &mut t.xc, f, r);
+                        self.held_bytes += bytes;
+                        if let (Some(a), Some(set)) = (matched, self.xc_ac.get_mut(fi)) {
+                            set.insert(a);
+                        }
+                    }
                 }
             }
-            (Some(_), None) => self.xc_noflag += 1,
-            _ => {}
         }
-        let mrt = has(r, TaisField::MrtTime).then_some(r.mrt_time_ms);
+        if key_now.is_some() {
+            t.last_key = key_now;
+        }
+        let is_new = has(r, TaisField::TrackNew) && r.is_new;
         let mut entry = GAP;
-        let mut counter: Option<fn(&mut Group)> = None;
-        match (mrt, flag) {
-            (None, _) => {
-                counter = Some(|g| g.no_mrt += 1);
+        match mrt {
+            None => {
+                bump(&mut self.global, &mut self.facs, fac, |g| g.no_mrt += 1);
                 t.last_ms = None;
+                t.last_flag = None;
+                t.backs = 0;
             }
-            (Some(m), None) => t.last_ms = Some(m),
-            (Some(m), Some(f)) => match t.last_ms {
-                Some(l) if m < l => counter = Some(|g| g.backwards += 1),
-                Some(l) if m - l > MAX_INTERVAL_MS => {
-                    counter = Some(|g| g.resets += 1);
+            Some(m) => match t.last_ms {
+                Some(_) if is_new => {
+                    bump(&mut self.global, &mut self.facs, fac, |g| g.new_resets += 1);
                     t.last_ms = Some(m);
+                    t.last_flag = flag;
+                    t.backs = 0;
+                }
+                None => {
+                    t.last_ms = Some(m);
+                    t.last_flag = flag;
+                    t.backs = 0;
+                }
+                Some(l) if m < l => {
+                    bump(&mut self.global, &mut self.facs, fac, |g| g.backwards += 1);
+                    t.backs += 1;
+                    if t.backs >= RESYNC_AFTER {
+                        bump(&mut self.global, &mut self.facs, fac, |g| g.resyncs += 1);
+                        t.last_ms = Some(m);
+                        t.last_flag = flag;
+                        t.backs = 0;
+                    }
+                }
+                Some(l) if m - l > MAX_INTERVAL_MS => {
+                    bump(&mut self.global, &mut self.facs, fac, |g| g.resets += 1);
+                    t.last_ms = Some(m);
+                    t.last_flag = flag;
+                    t.backs = 0;
                 }
                 Some(l) => {
-                    let ticks = u16::try_from((m - l) / TICK_MS).unwrap_or(TICK_MASK);
-                    let across = t.last_flag.is_some_and(|p| p != f);
-                    entry = ticks.min(TICK_MASK)
-                        | if f { FLAG_BIT } else { 0 }
-                        | if across { ACROSS_BIT } else { 0 };
+                    t.backs = 0;
+                    if let Some(f) = flag {
+                        let ticks = u16::try_from((m - l) / TICK_MS).unwrap_or(TICK_MASK);
+                        // A change is counted only where an across interval exists.
+                        let across = t.last_flag.is_some_and(|p| p != f);
+                        t.changes += u32::from(across);
+                        entry = ticks.min(TICK_MASK)
+                            | if f { FLAG_BIT } else { 0 }
+                            | if across { ACROSS_BIT } else { 0 };
+                        t.last_flag = Some(f);
+                    }
                     t.last_ms = Some(m);
                 }
-                None => t.last_ms = Some(m),
             },
-        }
-        if let Some(c) = counter {
-            c(&mut self.global);
-            if let Some(g) = self.facs.get_mut(fac as usize) {
-                c(g);
-            }
         }
         if t.updates > 0 {
             t.ivs.push(entry);
+            self.held_bytes += IV_BYTES;
         }
         t.updates = t.updates.saturating_add(1);
         if let Some(f) = flag {
-            if t.last_flag.is_some_and(|p| p != f) {
-                t.changes += 1;
-            }
-            t.last_flag = Some(f);
             if let Some(c) = t.n.get_mut(usize::from(f)) {
                 *c += 1;
             }
@@ -407,8 +541,11 @@ impl Census {
             src_ids,
             no_track_num,
             xc,
-            xc_nopos,
-            xc_noflag,
+            xc_nc,
+            xc_ac,
+            window,
+            outside_window,
+            held_bytes,
             ..
         } = self;
         let xc_params = xc.as_ref().map(|x| x.params);
@@ -457,7 +594,7 @@ impl Census {
             if xc_params.is_some() {
                 for k in [0, 1 + class, 5 + fac] {
                     if let Some(a) = accs.get_mut(k) {
-                        a.add_track(&t.xc_cnt, &t.xc_hcnt, &t.xc_recs, &t.xc_hdv);
+                        a.add_track(&t.xc);
                     }
                 }
             }
@@ -513,11 +650,20 @@ impl Census {
             let classes: Vec<XcGroup> = it.by_ref().take(4).collect();
             Some(XcResults {
                 params: p,
+                window,
+                clip: x.clip.clone(),
                 points: x.points() as u64,
                 aircraft: x.aircraft,
                 segments: x.segments,
-                no_position: xc_nopos,
-                no_flag: xc_noflag,
+                segments_fast: x.segments_fast,
+                segments_polar: x.segments_polar,
+                not_checked: xc_nc,
+                matched_aircraft: {
+                    let [a, b] = &xc_ac;
+                    [a.len() as u64, b.len() as u64]
+                },
+                index_bytes: x.bytes(),
+                held_bytes,
                 global,
                 classes,
                 facs: it.collect(),
@@ -535,6 +681,8 @@ impl Census {
             flagged_pairs,
             distinct_src_ids: src_ids.len() as u64,
             no_track_num,
+            outside_window,
+            window,
             xc: xc_res,
         }
     }
@@ -843,8 +991,8 @@ pub(crate) mod tests {
 
     // --- position cross-check ---------------------------------------------------------------
 
-    use crate::xcheck::tests::{deg_lat_per_m, deg_lon_per_m, pt};
-    use crate::xcheck::{build_from_points, Params, Pt, NM_M};
+    use crate::xcheck::tests::{deg_lat_per_m, deg_lon_per_m, pt, pt_full};
+    use crate::xcheck::{build_from_points, Params, Pt, Window, NM_M};
 
     const V: f64 = 400.0 * NM_M / 3600.0;
 
@@ -977,8 +1125,8 @@ pub(crate) mod tests {
         nof.present &= !tais_bit(TaisField::TrackAdsb);
         c.observe(src("AAA"), &nof);
         let x = c.finish().xc.unwrap();
-        assert_eq!(x.no_position, [1, 0]);
-        assert_eq!(x.no_flag, 1);
+        assert_eq!(x.not_checked.no_position, [1, 0]);
+        assert_eq!(x.not_checked.no_flag, 1);
         assert_eq!(x.global.counts.iter().sum::<u64>(), 0);
     }
 
@@ -1109,5 +1257,338 @@ pub(crate) mod tests {
             &upd(1, 5_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0),
         );
         assert!(c.finish().xc.is_none());
+    }
+
+    // REQ: OA-CEN-016
+    #[test]
+    fn outcome_totals_reconcile_with_the_update_counts_per_flag() {
+        let lat = 40.0;
+        let mut c = xcensus(fly(1, -75.0, lat, 10_000));
+        // Checked: two updates (one false, one true).
+        c.observe(
+            src("AAA"),
+            &upd(1, 10_300, Some(false), -75.0, lat, 10_000, 0.0, 0.0, 0.0),
+        );
+        c.observe(
+            src("AAA"),
+            &upd(2, 10_300, Some(true), -75.0, lat, 10_000, 0.0, 0.0, 0.0),
+        );
+        // An exact repeat of the previous update of track 1: a duplicate.
+        c.observe(
+            src("AAA"),
+            &upd(1, 10_300, Some(false), -75.0, lat, 10_000, 0.0, 0.0, 0.0),
+        );
+        // No trackNum (false and true), no position (true), polar (false), no flag.
+        let mut nt = upd(3, 11_300, Some(false), -75.0, lat, 10_000, 0.0, 0.0, 0.0);
+        nt.present &= !tais_bit(TaisField::TrackNum);
+        c.observe(src("AAA"), &nt);
+        let mut nt2 = upd(3, 11_300, Some(true), -75.0, lat, 10_000, 0.0, 0.0, 0.0);
+        nt2.present &= !tais_bit(TaisField::TrackNum);
+        c.observe(src("AAA"), &nt2);
+        c.observe(src("AAA"), &rec(4, 12_000, Some(true)));
+        let mut polar = upd(5, 12_000, Some(false), -75.0, lat, 10_000, 0.0, 0.0, 0.0);
+        polar.lat_e7 = 880_000_000;
+        c.observe(src("AAA"), &polar);
+        let mut nof = upd(6, 12_000, None, -75.0, lat, 10_000, 0.0, 0.0, 0.0);
+        nof.present &= !tais_bit(TaisField::TrackAdsb);
+        c.observe(src("AAA"), &nof);
+        let r = c.finish();
+        let x = r.xc.clone().unwrap();
+        let nc = x.not_checked;
+        assert_eq!(nc.duplicate, [1, 0]);
+        assert_eq!(nc.no_track, [1, 1]);
+        assert_eq!(nc.no_position, [0, 1]);
+        assert_eq!(nc.polar, [1, 0]);
+        assert_eq!(nc.no_flag, 1);
+        for f in 0..2 {
+            let checked: u64 = (0..3).map(|k| x.global.counts[cidx(f, 0, k)]).sum();
+            let total =
+                checked + nc.no_position[f] + nc.polar[f] + nc.no_track[f] + nc.duplicate[f];
+            assert_eq!(total, r.global.updates[f], "flag {f}");
+        }
+        assert_eq!(r.global.updates[2], nc.no_flag);
+        // And the report says so.
+        let text = crate::report::render(&crate::read::ReadStats::new(), &r);
+        assert!(text.contains("(reconciles)"));
+        assert!(!text.contains("DOES NOT RECONCILE"));
+    }
+
+    // REQ: OA-CEN-017
+    #[test]
+    fn placebo_passes_do_not_match_and_coverage_is_counted() {
+        let lat = 40.0;
+        let mut c = xcensus(fly(1, -75.0, lat, 10_000));
+        for k in 0..5 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    1,
+                    20_300 + k * 2_000,
+                    Some(false),
+                    -75.0,
+                    lat,
+                    10_000,
+                    0.0,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        // An update far from any aircraft (100 NM north): no candidate and not covered; one
+        // 20 NM north: no candidate but covered.
+        let far = |nm: f64| {
+            upd(
+                2,
+                30_300,
+                Some(true),
+                -75.0,
+                lat + nm * NM_M * deg_lat_per_m(lat),
+                10_000,
+                0.0,
+                0.0,
+                0.0,
+            )
+        };
+        let mut f100 = far(100.0);
+        f100.track_num = 3;
+        c.observe(src("AAA"), &f100);
+        c.observe(src("AAA"), &far(20.0));
+        let x = c.finish().xc.unwrap();
+        let g = &x.global;
+        assert_eq!(g.counts[cidx(0, 1, 1)], 5);
+        // Shifted by 60 s the aircraft is 12 km away: never within the 1 NM gate.
+        for code in [0usize, 2] {
+            assert_eq!(g.pcounts[code * 3 + 1], 0, "{code}");
+            assert_eq!(g.pcounts[code * 3], 5);
+            assert_eq!(g.psums[code].n, 0);
+        }
+        assert_eq!(g.covered, [5, 1]);
+        assert_eq!(g.counts[cidx(1, 1, 0)], 2);
+    }
+
+    // REQ: OA-CEN-017
+    #[test]
+    fn a_stationary_target_matches_at_the_placebo_times_too() {
+        // The control shows what chance looks like: a target that does not move matches at any
+        // time shift, so the placebo exactly-one rate is as high as the real one.
+        let mut pts = Vec::new();
+        for s in 0..=240 {
+            pts.push(pt_full(1, s * 1000, 40.0, -75.0, 9000, 900, 0));
+        }
+        let mut c = xcensus(pts);
+        for k in 0..3 {
+            c.observe(
+                src("AAA"),
+                &upd_at(1, 100_300 + k * 2_000, Some(false), 40.0, -75.0, 9000),
+            );
+        }
+        let g = c.finish().xc.unwrap().global;
+        assert_eq!(g.counts[cidx(0, 1, 1)], 3);
+        assert_eq!(g.pcounts[1], 3);
+        assert_eq!(g.pcounts[2 * 3 + 1], 3);
+    }
+
+    /// An update at a given position (degrees), no motion model.
+    fn upd_at(n: u32, t_ms: i64, flag: Option<bool>, lat: f64, lon: f64, alt: i32) -> TaisRecord {
+        let mut r = rec(n, t_ms, flag);
+        r.lat_e7 = (lat * 1e7).round() as i32;
+        r.lon_e7 = (lon * 1e7).round() as i32;
+        r.reported_alt_ft = alt;
+        r.present |= tais_bit(TaisField::Lat)
+            | tais_bit(TaisField::Lon)
+            | tais_bit(TaisField::ReportedAltitude);
+        r
+    }
+
+    // REQ: OA-CEN-018
+    #[test]
+    fn distinct_aircraft_tracks_per_track_medians_and_no_vertical_counts() {
+        let lat = 40.0;
+        let mut pts = fly(1, -75.0, lat, 10_000);
+        pts.extend(fly(2, -75.0, lat + 0.2, 10_000));
+        // Aircraft 3 has no barometric altitude.
+        pts.extend(fly(3, -75.0, lat + 0.4, i32::MIN));
+        let mut c = xcensus(pts);
+        // Track 1 (false): 4 matches on aircraft 1, along offsets 100, 200, 300, 400 m.
+        for k in 0..4 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    1,
+                    5_300 + k * 3_000,
+                    Some(false),
+                    -75.0,
+                    lat,
+                    10_000,
+                    100.0 * (k + 1) as f64,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        // Track 2 (false): 2 matches on aircraft 2: too few for a track median.
+        for k in 0..2 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    2,
+                    5_300 + k * 3_000,
+                    Some(false),
+                    -75.0,
+                    lat + 0.2,
+                    10_000,
+                    50.0,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        // Track 3 (true): 3 matches on aircraft 3, which has no altitude: no vertical difference.
+        for k in 0..3 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    3,
+                    5_300 + k * 3_000,
+                    Some(true),
+                    -75.0,
+                    lat + 0.4,
+                    10_000,
+                    0.0,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        let x = c.finish().xc.unwrap();
+        let g = &x.global;
+        assert_eq!(x.matched_aircraft, [2, 1]);
+        assert_eq!(g.tracks_matched, [2, 1]);
+        assert_eq!(g.sums[0].n, 6);
+        assert_eq!(g.sums[1].n, 6);
+        assert_eq!(g.sums[5].n, 3);
+        assert_eq!(
+            g.sums[6].n, 0,
+            "no vertical difference without an ADS-B altitude"
+        );
+        // Per-track medians: only track 1 (4 matches) for false; its median along is 200 m.
+        assert_eq!(g.tsums[2].n, 1);
+        assert!((g.tsums[2].p50.unwrap() - 200.0).abs() < 1.5);
+        assert_eq!(g.tsums[7].n, 1);
+        assert!(x.held_bytes > 0 && x.index_bytes > 0);
+    }
+
+    // REQ: OA-CEN-018
+    #[test]
+    fn the_100_kt_cut_leaves_slow_aircraft_out_of_the_time_figure() {
+        let pts: Vec<Pt> = (0..=20)
+            .map(|s| pt_full(1, s * 1000, 40.0, -75.0, 9000, 900, 300))
+            .collect();
+        let mut c = xcensus(pts);
+        c.observe(
+            src("AAA"),
+            &upd_at(
+                1,
+                10_300,
+                Some(false),
+                40.0,
+                -75.0 + 100.0 * deg_lon_per_m(40.0),
+                9000,
+            ),
+        );
+        let x = c.finish().xc.unwrap();
+        assert_eq!(x.global.sums[0].n, 1);
+        assert!((x.global.sums[2].p50.unwrap() - 100.0).abs() < 1.0);
+        assert_eq!(x.global.sums[4].n, 0);
+    }
+
+    // REQ: OA-CEN-018
+    #[test]
+    fn small_cells_print_n_below_30_instead_of_medians() {
+        let mut c = xcensus(fly(1, -75.0, 40.0, 10_000));
+        for k in 0..5 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    1,
+                    5_300 + k * 2_000,
+                    Some(false),
+                    -75.0,
+                    40.0,
+                    10_000,
+                    0.0,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        let text = crate::report::render(&crate::read::ReadStats::new(), &c.finish());
+        assert!(text.contains("n<30 (matches 5)"));
+        assert!(!text.contains("matches 5, medians"));
+    }
+
+    // REQ: OA-CEN-019
+    #[test]
+    fn flag_changes_equal_the_changes_by_direction_and_resets_cut_the_chain() {
+        let mut c = Census::new();
+        // Track 1: false, true, then a backwards update with the other flag (no change counted),
+        // then false at the right time: one false to true, one true to false.
+        for (t, f) in [(0, false), (4600, true), (3000, false), (9200, false)] {
+            c.observe(src("AAA"), &rec(1, t, Some(f)));
+        }
+        // Track 2: a gap over 120 s between a false and a true is a reset, not a change.
+        c.observe(src("AAA"), &rec(2, 0, Some(false)));
+        c.observe(src("AAA"), &rec(2, 200_000, Some(true)));
+        // Track 3: an update flagged new starts a new segment, so its flag is not a change.
+        c.observe(src("AAA"), &rec(3, 0, Some(false)));
+        let mut n = rec(3, 4600, Some(true));
+        n.present |= tais_bit(TaisField::TrackNew);
+        n.is_new = true;
+        c.observe(src("AAA"), &n);
+        let r = c.finish();
+        assert_eq!(r.global.backwards, 1);
+        assert_eq!(r.global.resets, 1);
+        assert_eq!(r.global.new_resets, 1);
+        assert_eq!(r.changes, 2);
+        assert_eq!(r.changes, r.dirs[0].changes + r.dirs[1].changes);
+        assert_eq!(r.dirs[0].changes, 1);
+        assert_eq!(r.dirs[1].changes, 1);
+    }
+
+    // REQ: OA-CEN-019
+    #[test]
+    fn a_backwards_absent_flag_update_does_not_rewind_the_track_and_three_resync() {
+        let mut c = Census::new();
+        c.observe(src("AAA"), &rec(1, 100_000, Some(false)));
+        // An absent-flag update before the track's time is backwards, not an anchor.
+        c.observe(src("AAA"), &rec(1, 50_000, None));
+        c.observe(src("AAA"), &rec(1, 104_600, Some(false)));
+        // Three backwards updates in a row restart the track at the latest one.
+        for t in [90_000, 80_000, 70_000] {
+            c.observe(src("AAA"), &rec(1, t, Some(false)));
+        }
+        c.observe(src("AAA"), &rec(1, 74_600, Some(false)));
+        let r = c.finish();
+        assert_eq!(r.global.backwards, 4);
+        assert_eq!(r.global.resyncs, 1);
+        // Intervals: 4.6 s (before the backwards run) and 4.6 s (after the restart).
+        assert_eq!(r.global.iv[0].n, 2);
+        assert!((r.global.iv[0].quantile(1, 2).unwrap() - 4.605).abs() < 1e-9);
+    }
+
+    // REQ: OA-CEN-020
+    #[test]
+    fn the_window_and_the_memory_budget_are_applied() {
+        let w = Window::new(10, 20).unwrap();
+        let mut c = Census::new().with_window(Some(w)).with_budget(1);
+        for t in [5_000, 12_000, 25_000] {
+            c.observe(src("AAA"), &rec(1, t, Some(false)));
+        }
+        assert!(c.over_budget());
+        let r = c.finish();
+        assert_eq!(r.outside_window, 2);
+        assert_eq!(r.global.updates, [1, 0, 0]);
+        let c = Census::new();
+        assert!(!c.over_budget());
     }
 }

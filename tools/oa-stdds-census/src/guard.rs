@@ -19,6 +19,26 @@ pub fn names_sealed(p: &Path) -> bool {
     })
 }
 
+/// Whether `dir` is, or directly holds, a sealed recording, decided without listing it: the
+/// data root (a directory named `scds`) is refused whole, and so is a directory that has a
+/// child of a sealed name (checked by name only, with a metadata probe, never opened).
+pub fn refuse_listing(dir: &Path) -> Result<(), String> {
+    refuse_sealed(dir)?;
+    let real = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let is_root = |p: &Path| p.file_name().is_some_and(|n| n == "scds");
+    if is_root(dir) || is_root(&real) {
+        return Err(
+            "the data root holds the sealed recordings; give one recording directory".to_string(),
+        );
+    }
+    for name in ["rec-20261119", "stdds-20261119-holdout"] {
+        if std::fs::symlink_metadata(real.join(name)).is_ok() {
+            return Err("the directory holds a sealed recording; it is not listed".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// `Err` if `path` names a sealed recording as given, or any prefix of it does when resolved,
 /// or a prefix cannot be resolved.
 pub fn refuse_sealed(path: &Path) -> Result<(), String> {
