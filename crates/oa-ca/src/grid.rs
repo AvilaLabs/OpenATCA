@@ -89,23 +89,13 @@ fn lon_cell(st: &CaState, band: usize, lon: f64) -> i64 {
 pub(crate) fn grid_build(st: &mut CaState) {
     st.cos_lat.clear();
     st.tan_lat.clear();
-    st.unit.clear();
     st.speed.clear();
     st.keys.clear();
     for i in 0..st.obs.len() {
         let Some(o) = st.obs.get(i).copied() else {
             break;
         };
-        let (lat, lon) = (o.lat_deg.to_radians(), o.lon_deg.to_radians());
-        let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
-        st.cos_lat.push(cl);
-        st.tan_lat.push(if cl > 0.0 {
-            sl.abs() / cl
-        } else {
-            f64::INFINITY
-        });
-        st.unit
-            .push([cl * oa_math::cos(lon), cl * oa_math::sin(lon), sl]);
+        st.cos_lat.push(oa_math::cos(o.lat_deg.to_radians()));
         let (e, n) = (f64::from(o.vel_east_mps), f64::from(o.vel_north_mps));
         st.speed.push(oa_ieee::sqrt(e * e + n * n));
         let band = lat_band(st, o.lat_deg);
@@ -115,6 +105,63 @@ pub(crate) fn grid_build(st: &mut CaState) {
         st.keys.push(cell << 32 | i as u64);
     }
     st.keys.sort_unstable();
+    // A tangent is kept only for the rows the cycle's largest pair radius does not already cover:
+    // at or below `cut` degrees the flat test is valid for every pair of the cycle (stored as 0).
+    let radius = max_radius(st) * CHEAP_MARGIN;
+    let cut = if radius > 0.0 {
+        oa_math::atan(FLAT_TOL * R_MIN_M / radius).to_degrees() * (1.0 - 1e-9)
+    } else {
+        90.0
+    };
+    for i in 0..st.obs.len() {
+        let lat = st.obs.get(i).map_or(90.0, |o| o.lat_deg.abs());
+        let t = if lat <= cut {
+            0.0
+        } else {
+            oa_math::tan(lat.to_radians())
+        };
+        st.tan_lat
+            .push(if t.is_finite() { t } else { f64::INFINITY });
+    }
+    // Unit vectors are made when a pair needs the chord (rarely), and kept for the cycle.
+    st.unit.clear();
+    st.unit.resize(st.obs.len(), [f64::NAN; 3]);
+}
+
+/// The largest search radius of the cycle, metres (zero for no tracks).
+fn max_radius(st: &CaState) -> f64 {
+    let vmax = st.speed.iter().copied().fold(0.0f64, oa_math::max_f64);
+    let rmax = st
+        .obs
+        .iter()
+        .map(|o| f64::from(o.r95_m))
+        .fold(0.0f64, oa_math::max_f64);
+    if st.obs.is_empty() {
+        0.0
+    } else {
+        pair_radius(st, vmax, vmax, rmax, rmax)
+    }
+}
+
+/// Unit vector of the position at `lat_deg`, `lon_deg` on the sphere.
+pub(crate) fn unit_vector(lat_deg: f64, lon_deg: f64) -> [f64; 3] {
+    let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
+    let cl = oa_math::cos(lat);
+    [
+        cl * oa_math::cos(lon),
+        cl * oa_math::sin(lon),
+        oa_math::sin(lat),
+    ]
+}
+
+/// The unit vector of track `k`, made on first use in the cycle.
+fn unit_of(units: &mut [[f64; 3]], obs: &[crate::types::CaTrack], k: usize) -> Option<[f64; 3]> {
+    let u = units.get_mut(k)?;
+    if u[0].is_nan() {
+        let o = obs.get(k)?;
+        *u = unit_vector(o.lat_deg, o.lon_deg);
+    }
+    Some(*u)
 }
 
 /// True if the flat test is a superset test for a pair of these latitude tangents (absolute) and
@@ -189,12 +236,11 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
     let budget = st.cfg.work_budget;
     let mut work = 0u64;
     'tracks: for i in 0..n {
-        let (Some(oi), Some(cosl), Some(vi), Some(ti), Some(ui)) = (
+        let (Some(oi), Some(cosl), Some(vi), Some(ti)) = (
             st.obs.get(i).copied(),
             st.cos_lat.get(i).copied(),
             st.speed.get(i).copied(),
             st.tan_lat.get(i).copied(),
-            st.unit.get(i).copied(),
         ) else {
             break;
         };
@@ -252,11 +298,10 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
                     if j <= i {
                         continue;
                     }
-                    let (Some(oj), Some(vj), Some(tj), Some(uj)) = (
+                    let (Some(oj), Some(vj), Some(tj)) = (
                         st.obs.get(j),
                         st.speed.get(j).copied(),
                         st.tan_lat.get(j).copied(),
-                        st.unit.get(j),
                     ) else {
                         continue;
                     };
@@ -265,7 +310,13 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
                         flat_d2(&oi, cosl, oj)
                     } else {
                         stats.pairs_chord += 1;
-                        chord_d2(&ui, uj)
+                        let (Some(ua), Some(ub)) = (
+                            unit_of(&mut st.unit, &st.obs, i),
+                            unit_of(&mut st.unit, &st.obs, j),
+                        ) else {
+                            continue;
+                        };
+                        chord_d2(&ua, &ub)
                     };
                     if d2 <= r * r {
                         if cannot_converge(st, &oi, oj) {
@@ -384,14 +435,13 @@ mod tests {
         }
     }
 
-    fn unit_of(o: &CaTrack) -> ([f64; 3], f64, f64) {
-        let (lat, lon) = (o.lat_deg.to_radians(), o.lon_deg.to_radians());
-        let (sl, cl) = (oa_math::sin(lat), oa_math::cos(lat));
-        (
-            [cl * oa_math::cos(lon), cl * oa_math::sin(lon), sl],
-            cl,
-            sl.abs() / cl,
-        )
+    /// The unit vector, the cosine and the absolute tangent of the latitude of `o`.
+    fn vectors_of(o: &CaTrack) -> ([f64; 3], f64, f64) {
+        let (sl, cl) = (
+            oa_math::sin(o.lat_deg.to_radians()),
+            oa_math::cos(o.lat_deg.to_radians()),
+        );
+        (unit_vector(o.lat_deg, o.lon_deg), cl, sl.abs() / cl)
     }
 
     /// A position `d` metres (on the sphere of `R_MIN_M`) from `(lat, lon)` toward a bearing.
@@ -423,7 +473,7 @@ mod tests {
             let d = 1000.0 + g.next() * 1.0e6;
             let (lat2, lon2) = offset(lat, lon, d, g.next() * core::f64::consts::TAU);
             let (a, b) = (track(lat, lon), track(lat2, lon2));
-            let (ua, ub) = (unit_of(&a).0, unit_of(&b).0);
+            let (ua, ub) = (vectors_of(&a).0, vectors_of(&b).0);
             // The arc from the unit vectors: the angle between them, stable for small angles.
             let cross = [
                 ua[1] * ub[2] - ua[2] * ub[1],
@@ -461,8 +511,8 @@ mod tests {
             let d = pr * EXACT_MARGIN * oa_ieee::sqrt(oa_ieee::sqrt(g.next()));
             let (lat2, lon2) = offset(lat, lon, d, g.next() * core::f64::consts::TAU);
             let (a, b) = (track(lat, lon), track(lat2, lon2));
-            let (_, cos_a, tan_a) = unit_of(&a);
-            let (_, _, tan_b) = unit_of(&b);
+            let (_, cos_a, tan_a) = vectors_of(&a);
+            let (_, _, tan_b) = vectors_of(&b);
             let (x, y) = project(&frame_new(lat, lon), lat2, lon2);
             let exact = oa_ieee::sqrt(x * x + y * y);
             if exact > pr * EXACT_MARGIN {
@@ -481,7 +531,7 @@ mod tests {
             } else {
                 invalid += 1;
                 // Whatever the flat test would say, the chord test accepts.
-                let (ua, ub) = (unit_of(&a).0, unit_of(&b).0);
+                let (ua, ub) = (vectors_of(&a).0, vectors_of(&b).0);
                 assert!(
                     oa_ieee::sqrt(chord_d2(&ua, &ub)) <= r,
                     "{lat} {lon} pr {pr}"

@@ -53,9 +53,10 @@ pub struct CaState {
     pub(crate) scratch: Vec<CaTrack>,
     pub(crate) obs: Vec<CaTrack>,
     pub(crate) cos_lat: Vec<f64>,
-    /// Absolute tangent of each track's latitude (infinite at a pole).
+    /// Absolute tangent of each track's latitude, or 0 where the cycle's largest radius makes the
+    /// flat test valid anyway (infinite at a pole).
     pub(crate) tan_lat: Vec<f64>,
-    /// Unit vector of each track's position.
+    /// Unit vector of each track's position, NaN until a pair needs it.
     pub(crate) unit: Vec<[f64; 3]>,
     pub(crate) speed: Vec<f64>,
     pub(crate) frames: Vec<Frame>,
