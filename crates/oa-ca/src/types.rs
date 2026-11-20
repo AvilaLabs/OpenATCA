@@ -234,13 +234,18 @@ pub struct CycleStats {
     pub rows_duplicate: u64,
     /// Rows past the track capacity.
     pub rows_over_capacity: u64,
-    /// Rows above the latitude the grid's flat test is proved for (see the crate documentation).
+    /// Rows above 85 degrees of latitude. They are evaluated, but the cell search is not shown to
+    /// find every pair there, so they degrade the net (see the crate documentation).
     pub rows_high_lat: u64,
     /// Rows whose 95 % radius was not finite, negative or above the cap, and was held to the cap.
     pub r95_clamped: u64,
     pub grid_work: u64,
     /// Tracks the grid scan did not reach before its budget ran out.
     pub tracks_unscanned: u64,
+    /// Pairs the grid tested by the chord, not the flat test, because the flat test's validity
+    /// (for the pair's own radius and latitudes) did not hold. Not a shortfall: the chord test
+    /// has no latitude limit.
+    pub pairs_chord: u64,
     /// Pairs the grid found inside the radius and the altitude test: every one, before the
     /// table-full test. `evaluated + not_evaluated == candidates`.
     pub candidates: u64,

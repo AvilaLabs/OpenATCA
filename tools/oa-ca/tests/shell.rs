@@ -383,7 +383,7 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             CycleStats { rows_bad: 1, ..ok },
         ),
         (
-            "rows above the grid's latitude limit: 1",
+            "rows above 85 degrees of latitude: 1",
             CycleStats {
                 rows_high_lat: 1,
                 ..ok

@@ -27,12 +27,14 @@
 //!   everything was evaluated, degraded with the count otherwise ([`net_report_of`]), and
 //!   unavailable when the cycle was refused.
 //!
-//! Limits, stated: the grid test uses a local flat approximation (east-west scale at the first
-//! track's latitude), a superset test up to the latitude `atan(0.02 / dphi)`, `dphi` being the
-//! cycle's largest radius over 6,356,752 m; rows above it are used and counted
-//! ([`CycleStats::rows_high_lat`]) and the net reports degraded. Prediction is a straight line
-//! from the cycle's position and velocity; a turning aircraft is not yet predicted (build order
-//! step 6).
+//! Limits, stated: the grid tests a pair by a local flat approximation (east-west scale at the
+//! first track's latitude) where that is a superset test for the pair's own radius and latitudes,
+//! and by the chord between the two positions on the sphere (no latitude limit) where it is not
+//! ([`CycleStats::pairs_chord`]); the cell search reaches every pair within the radius up to 85
+//! degrees of latitude. Rows above 85 degrees are used and counted
+//! ([`CycleStats::rows_high_lat`]) and the net reports degraded, as it does for a 95 % radius held
+//! to the cap ([`CycleStats::r95_clamped`]). Prediction is a straight line from the cycle's
+//! position and velocity; a turning aircraft is not yet predicted (build order step 6).
 
 // The width of `usize` is fixed by construction: this crate does not build for a target whose
 // pointers are not 64 bits (RULESET B10).

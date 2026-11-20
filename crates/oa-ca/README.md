@@ -50,13 +50,14 @@ gap.
 
 - Prediction is a straight line from the cycle's position and velocity. A turning aircraft is not
   yet predicted; that is build order step 6.
-- The grid uses a local flat approximation, with the east-west scale taken at the first track's
-  latitude. The superset holds up to a latitude set by the cycle's largest radius (about
-  `atan(0.02 / dphi)`, `dphi` being that radius over 6,356,752 m). Rows above it are still used,
-  counted in `CycleStats::rows_high_lat`, and the net reports degraded.
+- The grid tests a pair by a local flat approximation (east-west scale at the first track's
+  latitude) only while that is a superset test for the pair's own radius and latitudes, and by the
+  chord between the two positions on the sphere otherwise (`CycleStats::pairs_chord`). The cell
+  search reaches every pair within its radius up to 85 degrees of latitude. Rows above 85 degrees
+  are still used, counted in `CycleStats::rows_high_lat`, and the net reports degraded.
 
 ## Verification
 
-Requirements OA-CA-001 to OA-CA-031 in `REQUIREMENTS.md` (there is no OA-CA-020), each with its tests. The solvers have
+Requirements OA-CA-001 to OA-CA-034 in `REQUIREMENTS.md` (there is no OA-CA-020), each with its tests. The solvers have
 Kani harnesses (`solve`), registered with the proof suite (`tools/rust_proof_suite.py`). Their
 results go into `VERIFICATION.md` when they have been run.

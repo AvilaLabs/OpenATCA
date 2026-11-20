@@ -5315,6 +5315,46 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
+- **OA-TRK-389** The P-002 scorer scores every system, passthrough included, on the truth legs that contain
+  an aircraft's grid samples, and on no others; no system chooses its own flight (P-004). The grid is the
+  paired samples of the aircraft's most-paired ERAM flight. The output prints each system's coverage under that rule and under the replaced per-system rule.
+- **OA-TRK-390** The reacquired group is OpenATCA's rows within 10 s after an update row of the same address
+  flagged `O_REACQUIRED`; ERAM and passthrough are shown on the same samples.
+- **OA-TRK-391** Every grid sample at which a system has no value is counted in exactly one class per system:
+  before its first row for the address, after its last, in a gap, address never present, other.
+- **OA-TRK-392** M1, M3t and M5 and their breakdowns are computed on the two-way common set (OpenATCA and ERAM
+  both have a value); the three-way set is used only for the reference-floor test; the n of each set is printed.
+- **OA-TRK-393** M1 median, M5 ground-speed median and M4t at 300 m are the primary metrics. Each run prints,
+  per primary metric, whether the day's interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour,
+  in ERAM's favour, or neither, as `CLAIM` lines; `p002 --combine <dirA> <dirB> <dirC>` applies the cross-day
+  rule (OpenATCA's favour on A and B, C not in ERAM's favour) and refuses a day that is not a hold-out run, days
+  scored at different commits or by different binaries, days with the same clip hash, a `samples.csv` that is
+  not the one its run recorded, and primary metrics that differ from those recomputed from the three `samples.csv`.
+- **OA-TRK-394** `--candidate-commit <40 hex>` is required with `--frozen-commit`; the run is refused unless
+  `git diff --name-only <candidate> <frozen>` is exactly `crates/oa-sealed/sealed_paths.txt`; both commits are
+  printed.
+- **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` to `.partial` names, flushes them and renames
+  both (after the ledger line of a hold-out run, OA-TRK-399), only if neither final name exists; otherwise it refuses and writes nothing; a leftover `.partial` is
+  reported. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
+- **OA-TRK-396** On a development run, `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond
+  or whole-second ISO times) removes every grid sample inside any window for all three systems alike, before any metric; each window and
+  the number of samples it removed are printed and written to the `CLAIM` lines.
+- **OA-TRK-397** Each `CLAIM metric=` line carries `floor=0|1` and the three-way OpenATCA and passthrough
+  values it was judged on (M4t on the share over all grid samples); `--combine` prints "AT REFERENCE FLOOR:
+  no claim" for a metric whose floor applies on any day and never "RULE MET" for it.
+- **OA-TRK-398** A hold-out run takes its excluded windows only from `--damage-report` (an `oa-feed-gaps`
+  report: the `window:` line, the `exclude <iso> <iso>` lines and the verdict line `CLEAN`), and refuses
+  `--exclude-window`, a report that is not CLEAN, a window under 600 s, windows over 3,600 s in all, and a
+  report whose window is not the scored window: it must lie inside the clip's UTC day and match S = [max(day
+  start, first SFDPS message), min(day end, last SFDPS message, last clip report)] to within 60 s at each end
+  (both windows are printed on a refusal). The parser is tested on reports printed by the tool itself.
+- **OA-TRK-399** Every run needs `--ledger <file>` and is refused when the clip's SHA-256 is in it; a hold-out
+  run appends one line (clip SHA-256, scored commit, candidate commit, UTC time) after both `.partial` files are
+  written and flushed and before either is renamed; if the append fails the partials are deleted and the run
+  fails, so a ledger line exists only when both result files were written.
+- **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
+  the three-way set (P-008 §1).
+
 - **OA-TRK-401** Velocity lag. A measurement carries `vel_lag_s`, how far its velocity lags behind the
   aircraft's.
   - It is zero unless the source sets it. ADS-B sets `VEL_LAG_S`, 1.0 s. A lag outside 0 to 10 s, or not a
@@ -5772,11 +5812,14 @@ configuration with no default; the crate's tests use synthetic values.
   is finite and inside the look-ahead, the misses carried unchanged (`ca-predict-ttl`; `predict` is the
   conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
   (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
-  time inside the look-ahead (`ca-horizontal-miss-point`). Not proved: that `oa_math::hypot` of such a
-  point is finite and not negative, which the horizontal miss takes as a contract. The parts of `hypot`
-  that were proved are in OA-MATH-039; four parts that need the exactness of double-double products did
-  not finish in 10 minutes in CBMC (the exact square, the double-double root, and the two fast paths).
-  The contract is the documented behaviour of `hypot` (OA-MATH-005, tested against reference data).
+  time inside the look-ahead (`ca-horizontal-miss-point`); and the horizontal miss itself, the exactly rounded
+  square root of `x*x + y*y` at that point, is finite and not negative (`ca-horizontal-miss`, on the real
+  function): at most 5e7 m on each axis the sum cannot overflow. The chain rests on the exact rounding of
+  `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no other library contract; the crate no
+  longer calls `hypot`. Tested, not proved: the miss agrees with `oa_math::hypot` to 2 units in the last
+  place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the squares
+  underflow (`tests/miss.rs`, on the real function). Beyond about 1e154 m the square overflows to infinity, far outside
+  the bound the configuration check enforces (OA-CA-013).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check
@@ -5788,6 +5831,50 @@ configuration with no default; the crate's tests use synthetic values.
   through `main`, a usage error, a refusal and a failed run included (with N the count, 0 when nothing was
   read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
   is being read still reports the rows dropped up to that point.
+- **OA-CA-032** The example `nas_hour` (`tools/oa-ca/examples`) is the M9 national-hour measurement. `census` counts
+  the distinct airborne addresses (a barometric altitude, not on the ground) and the trace rows of each UTC
+  hour of a clip, and the peak minute of each hour, and prints no address. `track` and `ca` feed every
+  measurement of the clip to the tracker (and, for `ca`, the one-second rows to conflict alert), measure only
+  from `--start` to `--start` + 3600 s, and print CPU, peak and working-set memory, reports, tracks, the
+  latency of the update calls and of the tick-crossing calls apart, the latency of each second, the tracker's
+  refusal and capacity counters and, for `ca`, the pairs evaluated, the cycle times and the cycles left short by
+  a budget. With `--rate-hz`, the stream is interpolated linearly between consecutive points of an aircraft no
+  more than 60 s apart, at that rate, with the earlier point's quality fields, and nothing is added past an
+  aircraft's last point (`oa_ca_run::synth`); the output says "synthetic rate from interpolated trace points".
+  A sealed path is refused and `--start` is required. It scores nothing and changes neither the tracker nor
+  conflict alert (`tests/nas_hour.rs`).
+- **OA-CA-033** The prefilter never rejects a pair that the exact test would accept, at any latitude
+  up to 85 degrees, in either hemisphere and across the antimeridian. Each pair is judged on its own
+  radius and latitudes, so one fast or uncertain track no longer limits the latitude of every other
+  pair:
+  - A pair uses the flat-earth separation only while that over-estimates the distance by less than
+    the margin, that is while the larger tangent of the two latitudes times the pair's radius is at
+    most 0.02 of 6,356,752 m.
+  - Otherwise it uses the chord between the two positions on a sphere of 6,356,752 m. That sphere is
+    no larger than the Gaussian radius the exact test uses anywhere, so the chord is never longer than
+    the exact distance. Such pairs are counted (`pairs_chord`); they are not a shortfall.
+  - Rows above 85 degrees are still evaluated, but are counted (`rows_high_lat`) and degrade the net
+    (`InputMissing`), because the cell search is shown complete only up to 85 degrees.
+  - A 95 % radius that is unusable or above `r95_cap_m` is held to the cap and counted (`r95_clamped`),
+    and degrades the net, as before; a radius exactly at the cap does not.
+  - The development configuration's cap is 100 km. On the national hour of 19 November 2026 it bound
+    9 rows in 3,601 cycles, against 26,872 at 20 km.
+- **OA-CA-034** What is proved and what is tested for OA-CA-033:
+  - Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite and
+    not negative (`ca-chord-d2`). That is a small property; the trigonometry is outside what the
+    harnesses reach.
+  - Tested, not proved, by deterministic random pairs in `grid::tests`:
+    - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to
+      85 degrees and 400 km apart, the smallest ratio being 1.000000068;
+    - where the flat test is valid it accepts every pair the exact projection accepts;
+    - the chord is symmetric and zero for one point;
+    - the flat test's validity only narrows as a tangent or the radius grows. A proof of this did not
+      finish in ten minutes.
+  - Tested in `tests/ca.rs` through the full grid and cycle against an exact oracle:
+    - a pair at its reach at the tangent point, up to 85 degrees, both hemispheres, three band sizes;
+    - pairs across ±180 degrees at 60, 75 and 84.9 degrees, found at 0.99 of their reach and not at
+      1.05.
+  - The cell-search reach is shown numerically and by these tests, not by an analytic proof.
 
 ## SWIM STDDS terminal data (oa-stdds)
 
@@ -6452,3 +6539,90 @@ configuration with no default; the crate's tests use synthetic values.
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+
+## Runway geometry and occupancy (oa-runway)
+
+- **OA-RWY-001** An airport's local east-north plane is a tangent plane about its reference point with the WGS-84
+  local scales and a curvature term. It is defined on the disc within 20 km of the origin, for an origin up to 80
+  degrees of latitude; a point outside the disc, a non-finite point or an origin outside those limits gives no
+  position. On the disc a point's distance from the origin differs from the geodesic distance by at most 1.5 m, the
+  plane error bound: test `plane_error_against_geodesic_is_within_the_stated_bound`, 11 latitudes to 80 degrees, 72
+  bearings, out to the edge (worst 1.05 m, at 80 degrees and 20 km). The distance between two points on the disc
+  differs from the geodesic by at most twice the bound: test
+  `plane_distance_between_two_points_against_geodesic_is_within_twice_the_bound`, 2,800 random pairs (worst 1.90 m).
+  These are measured bounds on the cases tested, not proved ones.
+- **OA-RWY-002** A runway is built from the published length, width, alignment, end coordinates, displaced-threshold
+  coordinates and declared distances. It keeps each physical end and each landing threshold apart, and the rectangle is
+  the one between the physical ends at the published width (tests on KMDW 04L/22R, displaced at both ends, and on KAUS
+  18L/36R and KSFO 10L/28R, from the NASR 2026-10-29 values).
+- **OA-RWY-003** Per OA-ASP-067, an end with a displacement and no NASR displaced coordinate takes its landing
+  threshold from the CIFP record and is marked as such; with no CIFP threshold the runway is refused. Where NASR has
+  no end coordinate, the CIFP threshold is taken as the physical end only when the published displacement is exactly
+  zero; with an unknown displacement the runway is refused. An end with both a NASR displaced coordinate and a CIFP
+  threshold is refused when they lie more than 30 m apart, because one of them is wrong and nothing here can tell which.
+- **OA-RWY-004** A runway is refused, and counted under its own one of 16 reasons, when its width is missing, zero or
+  over 500 ft, its length is missing, an end name is bad, a displacement is negative or not finite, a physical end or
+  landing threshold is missing, a displaced coordinate has no displacement length to check it against, a coordinate is
+  invalid or outside the plane, or the ends are under 1 m apart. Nothing is guessed.
+- **OA-RWY-005** A runway is refused when the published length and the distance between the physical ends differ by
+  more than 60 m, the published alignment and the azimuth between the ends by more than 2 degrees, a published
+  displacement and the measured one by more than 30 m, or a threshold lies more than 15 m off the line between the
+  ends or outside the runway (tests include a threshold past the far end, and one 25 m behind the near end).
+- **OA-RWY-006** The occupancy regions are the rectangle, an approach area for each end measured outward from the
+  landing threshold (1,500 m long, 100 m wider than the runway on each side) and a departure area beyond each physical
+  end (1,000 m long, 50 m wider on each side). These dimensions are development values, not FAA values. The test
+  `every_edge_of_every_region_at_the_interval_ends` probes each of the four edges of all five regions on the edge,
+  inside, and outside by the margin and just past it, and the KMDW test checks the hand-worked interval ends.
+- **OA-RWY-007** `occupies` reports whether a target touches the rectangle, either approach area or either departure
+  area, with its position widened by its 95 % radius plus the 1.5 m plane error bound and a 1e-6 m rounding pad. A
+  non-finite or negative position or radius, a coordinate beyond 1e9 m, or a runway with any non-finite number,
+  counts as occupying every region and is marked unknown. Every comparison is written so that a NaN reads as
+  touching. Tests `unknown_position_or_radius_occupies_everything`, `a_runway_with_a_non_finite_number_never_clears_a_target`
+  (nine fields) and `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and
+  longitude).
+- **OA-RWY-008** Raising the radius never removes a region from the result (test `a_larger_radius_only_adds_occupancy`,
+  a sweep of radii at six positions). For the whole of `occupies` this is tested, not proved; OA-RWY-009 proves it
+  for the one-region test underneath.
+- **OA-RWY-009** For every region box and every coordinate pair within 1e9 m, and finite radii 0 <= r1 <= r2, the
+  one-region test `in_box`, which every occupancy flag uses, is true at r2 whenever it is true at r1; the runway-axis
+  coordinates do not depend on the radius. Proved with Kani (`occupancy_is_monotone_in_r95`, with `kani::cover!` that
+  gaining a region is reachable). A proof through `occupies` with a symbolic runway did not finish in the time budget.
+- **OA-RWY-010** For every runway, every non-finite, negative or beyond-1e9 m position or radius occupies every region
+  and is marked unknown (Kani `non_finite_input_occupies`), and for every runway with any non-finite number, every
+  position and radius does too (Kani `non_finite_runway_occupies`).
+- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a target
+  whose coordinates in the runway axes lie inside the rectangle touches it. Proved with Kani
+  (`point_in_rectangle_occupies`); the rotation from the plane into the runway axes is covered by the unit tests, not
+  the proof.
+- **OA-RWY-012** For every runway of the kind `build_runway` makes (finite geometry within 1e9 m, axis components
+  within [-1, 1]) and every position and radius, any `f64` bit pattern included, `occupies` returns without panic,
+  and for a known position the coordinates in the runway axes are finite and under 1e10 m. Proved with Kani
+  (`occupies_never_panics`). The proof checks panics and those assertions; it does not run a separate float-overflow
+  check.
+- **OA-RWY-013** For every plane scale `plane_new` can produce, the conversion from degrees gives no position for a
+  non-finite input, and any position it gives is finite and within 20 km on each axis. Proved with Kani
+  (`local_plane_is_bounded`). The disc limit itself (east squared plus north squared within the extent squared) is
+  tested, not proved.
+
+## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
+
+- **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.
+- **OA-GAP-002** The interval from the window start to the first time, and from the last time to the window end, counts.
+- **OA-GAP-003** A window with no message in a feed is damaged.
+- **OA-GAP-004** At most 1,000 intervals over 600 s are listed; the rest are counted and make the window damaged.
+- **OA-GAP-005** Any reader gzip or frame error count, and any ADS-B damaged-frame count, makes the window damaged.
+- **OA-GAP-006** A time earlier than the one before it is counted, left out of the intervals, and makes the window damaged.
+- **OA-GAP-007** SFDPS times are the recorder's receive times, sorted, so files that overlap or are named out of order give the true intervals.
+- **OA-GAP-008** A frame the reader finds damaged is counted by kind, never skipped silently.
+- **OA-GAP-009** ADS-B report times are sorted before the intervals are taken.
+- **OA-GAP-010** Exit 0 clean, 1 damaged, 2 usage or read error; the report is deterministic and written by temporary file and rename.
+- **OA-GAP-011** Both inputs go through the shared sealed guard (OA-SEAL-001); a refusal is exit 2.
+- **OA-GAP-012** `--from` and `--to` are `YYYY-MM-DDTHH:MM:SSZ`, both required, from before to.
+- **OA-GAP-013** An excluded interval is the interval over 600 s and the 300 s after it, in either feed, cut at the window end; each merged block is written as `exclude <from ISO ns> <to ISO ns>`.
+- **OA-GAP-014** Excluded intervals are merged where they overlap; more than 3600 s in total makes the window damaged.
+- **OA-GAP-015** `--clip-log` is required. A refused trace, not exactly one summary line and one `archive:` line, or an archive not reported complete makes the window damaged.
+- **OA-GAP-016** The clip log's `kept` must equal the reports decoded from the clip; a mismatch is damage, with both numbers printed.
+- **OA-GAP-017** A regular file in the SFDPS directory that is not `.oaf` or `.oaf.gz` is a read error (exit 2) that names it; the report names the files used.
+- **OA-GAP-018** An `exclude` line parses back to the same nanosecond window under the whole-second ISO grammar of `oa_adsb::cli::parse_iso` plus a nine-digit fraction. The scorer's own parser of these lines is tested on its side, not here.
+- **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
+

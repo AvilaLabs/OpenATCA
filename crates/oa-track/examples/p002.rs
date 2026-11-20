@@ -2,11 +2,14 @@
 //!
 //! ```text
 //! cargo run --release -p oa-track --example p002 -- \
-//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha>]
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] \
+//!     [--frozen-commit <sha> --candidate-commit <sha>]
+//! cargo run --release -p oa-track --example p002 -- --combine <dirA> <dirB> <dirC>
 //! ```
 //!
-//! Written from the comparison's scoring protocol P-002 and its amendment P-003, fixed by their
-//! hashes before any hold-out data was read; the protocol governs where this code and it differ. The split, the
+//! Written from the comparison's scoring protocol P-002 and its amendments P-003 to P-006, fixed by
+//! their hashes before any hold-out data was read; the protocol governs where this code and it
+//! differ. The split, the
 //! tracker run, the reference, the ERAM load, the association and the pairing are those of
 //! `vs_eram`, and the error definitions are `oa-bench`'s (cross-track and along-track in the
 //! truth frame, the time offset as `metrics_th::fit_offset` defines it, here per aircraft).
@@ -27,13 +30,26 @@
 //! build-time variables `OA_BUILD_COMMIT` and `OA_BUILD_DIRTY`, see `tools/p002_build.sh`) is that
 //! commit, that build's tree was clean, and the working tree at run time is clean and at it.
 //!
+//! P-004 replaces each system's own flight choice by one rule for all three: an aircraft's scored
+//! legs are the truth legs that contain its grid samples (the grid is ERAM's paired samples), and
+//! every system is scored on those legs only. The output prints the coverage under both rules. The
+//! reacquired group is OpenATCA's rows within 10 s after an update row flagged `O_REACQUIRED`, and
+//! every grid sample without a value is counted in one miss class per system. P-006 fixes three
+//! primary metrics (M1 median, M5 ground-speed median, M4t at 300 m), the two-way common set
+//! (OpenATCA and ERAM both have a value) for M1, M3t and M5 with the three-way set kept for the
+//! reference-floor test, the `--candidate-commit` check (`git diff --name-only <candidate>
+//! <frozen>` is exactly the sealed list), create-new outputs, and the `--combine` mode that applies
+//! the cross-day claim rule to the `CLAIM` lines of three days' `p002.txt`.
+//!
 //! Writes `p002.txt` (tables M1 to M7 and M2t, M3t, M4t, M7t with bootstrap intervals,
-//! breakdowns by phase, altitude and the three flags, exclusions, offsets, digests, commit) and
-//! `samples.csv` (one row per grid sample).
+//! breakdowns by phase, altitude and the three flags, exclusions, offsets, digests, commits, the
+//! loader's damage counts) and `samples.csv` (one row per grid sample), each only if it does not
+//! exist.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
@@ -50,8 +66,9 @@ use oa_bench::run::RunConfig;
 use oa_bench::stats::{band, phase, Exclusions};
 use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
-use oa_bench::truth::Truth;
+use oa_bench::truth::{Truth, TruthLeg};
 use oa_replay::FeedKind;
+use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
@@ -89,11 +106,32 @@ const PT: usize = 2;
 const STATS: [&str; 3] = ["median", "p95", "rms"];
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("--combine") {
+        return combine_main(argv.get(1..).unwrap_or(&[]));
+    }
+    let mut args = argv.into_iter();
     let (mut adsb, mut sfdps, mut out, mut label) = (None, None, None, String::new());
     let (mut allow_dirty, mut development) = (false, false);
     let mut frozen: Option<String> = None;
+    let mut candidate: Option<String> = None;
+    let (mut damage_path, mut ledger): (Option<PathBuf>, Option<PathBuf>) = (None, None);
+    let mut windows: Vec<Window> = Vec::new();
     while let Some(a) = args.next() {
+        if a == "--exclude-window" {
+            let (Some(from), Some(to)) = (args.next(), args.next()) else {
+                eprintln!("p002: --exclude-window needs <from ISO> <to ISO>");
+                return ExitCode::from(2);
+            };
+            match Window::parse(&from, &to) {
+                Ok(w) => windows.push(w),
+                Err(e) => {
+                    eprintln!("p002: --exclude-window: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
         if a == "--allow-dirty" {
             allow_dirty = true;
             continue;
@@ -109,6 +147,9 @@ fn main() -> ExitCode {
             "--out" => out = v.map(PathBuf::from),
             "--label" => label = v.unwrap_or_default(),
             "--frozen-commit" => frozen = v,
+            "--candidate-commit" => candidate = v,
+            "--damage-report" => damage_path = v.map(PathBuf::from),
+            "--ledger" => ledger = v.map(PathBuf::from),
             _ => {
                 eprintln!("p002: unknown option {a}");
                 return ExitCode::from(2);
@@ -117,7 +158,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha>]"
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
@@ -153,7 +194,66 @@ fn main() -> ExitCode {
         eprintln!("p002: refused: {e}");
         return ExitCode::from(2);
     }
-    match run(&adsb, &sfdps, &out, &label, &git, mode) {
+    let commits = Commits { frozen, candidate };
+    if let Err(e) = candidate_binding(mode, &commits, Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        eprintln!("p002: refused: {e}");
+        return ExitCode::from(2);
+    }
+    // P-008 sections 2 and 5: a hold-out run takes its excluded windows only from the damage
+    // report of its day, and every run is checked against the ledger of scored days.
+    let Some(ledger) = ledger else {
+        eprintln!("p002: refused: --ledger <file> is required (the ledger of scored days; a development run may pass a fresh empty file)");
+        return ExitCode::from(2);
+    };
+    if mode.holdout && !windows.is_empty() {
+        eprintln!("p002: refused: --exclude-window is for development runs; a hold-out run takes its windows from --damage-report");
+        return ExitCode::from(2);
+    }
+    if mode.holdout && damage_path.is_none() {
+        eprintln!(
+            "p002: refused: a hold-out run needs --damage-report <oa-feed-gaps report of the day>"
+        );
+        return ExitCode::from(2);
+    }
+    let mut damage: Option<DamageReport> = None;
+    if let Some(dp) = &damage_path {
+        let read = oa_sealed::refuse(dp)
+            .and_then(|()| oa_sealed::read(dp).map_err(|e| format!("{}: {e}", dp.display())))
+            .and_then(|b| {
+                let text = String::from_utf8(b.clone()).map_err(|e| e.to_string())?;
+                parse_damage_report(&text, &to_hex(&sha256(&b)))
+            });
+        match read {
+            Ok(d) => damage = Some(d),
+            Err(e) => {
+                eprintln!("p002: refused: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if let Err(e) = oa_sealed::refuse(&ledger) {
+        eprintln!("p002: {e}");
+        return ExitCode::from(2);
+    }
+    // Nothing is written if either output exists (P-006 section 7).
+    if let Err(e) = outputs_free(&out) {
+        eprintln!("p002: refused: {e}");
+        return ExitCode::from(2);
+    }
+    match run(
+        &adsb,
+        &sfdps,
+        &out,
+        &git,
+        &Opts {
+            label: &label,
+            mode,
+            commits: &commits,
+            windows: &windows,
+            damage: damage.as_ref(),
+            ledger: &ledger,
+        },
+    ) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -161,6 +261,57 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("p002: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// `--combine <dirA> <dirB> <dirC>`: the cross-day claim rule over the `CLAIM` lines of three
+/// days' `p002.txt`. Reads through the seal guard; writes nothing.
+fn combine_main(dirs: &[String]) -> ExitCode {
+    let [a, b, c] = dirs else {
+        eprintln!("usage: p002 --combine <dirA> <dirB> <dirC>");
+        return ExitCode::from(2);
+    };
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for d in [a, b, c] {
+        let dir = Path::new(d);
+        if let Err(e) = oa_sealed::refuse(dir) {
+            eprintln!("p002: {e}");
+            return ExitCode::from(2);
+        }
+        let mut two = Vec::new();
+        for f in ["p002.txt", "samples.csv"] {
+            match oa_sealed::read_to_string(dir.join(f)) {
+                Ok(t) => two.push(t),
+                Err(e) => {
+                    eprintln!("p002: {d}/{f}: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        let mut it = two.into_iter();
+        let (Some(t), Some(v)) = (it.next(), it.next()) else {
+            return ExitCode::from(2);
+        };
+        texts.push((t, v));
+    }
+    let [ta, tb, tc] = texts.as_slice() else {
+        return ExitCode::from(2);
+    };
+    fn day(t: &(String, String)) -> DayFiles<'_> {
+        DayFiles {
+            txt: t.0.as_str(),
+            csv: t.1.as_str(),
+        }
+    }
+    match combine([day(ta), day(tb), day(tc)]) {
+        Ok(report) => {
+            print!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("p002: refused: {e}");
+            ExitCode::from(2)
         }
     }
 }
@@ -302,49 +453,93 @@ type PerAc = BTreeMap<u32, Vec<Pt>>;
 #[derive(Default, Clone, Copy)]
 // A7.2: cold struct, size guard waived
 struct Dropped {
-    other_flight: u64,
+    /// Finite pairs on a truth leg that holds no grid sample of the aircraft (P-004 section 1).
+    off_scored_legs: u64,
     no_cross_along: u64,
     duplicate_time: u64,
 }
 
-/// Each aircraft's primary flight (most finite position pairs, lowest flight on a tie; never the
-/// one with the smaller error), its finite position pairs, sorted by time, one per time.
-fn points_of(p: &PairTable, per: &mut PerAc, dropped: &mut Dropped) {
+/// Sample or row times, Unix ms, by address, each list sorted.
+type TimesBy = BTreeMap<u32, Vec<i64>>;
+
+/// The truth legs of each address by start time, for the leg a time falls on.
+// A7.2: cold struct, size guard waived
+struct LegIndex {
+    starts: BTreeMap<u32, Vec<i64>>,
+}
+
+impl LegIndex {
+    fn new(legs: &[TruthLeg]) -> LegIndex {
+        let mut starts: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        for l in legs {
+            starts.entry(l.addr).or_default().push(l.start_ms);
+        }
+        for v in starts.values_mut() {
+            v.sort_unstable();
+        }
+        LegIndex { starts }
+    }
+
+    /// The leg of `addr` at `t_ms`: the latest leg that starts at or before it, the first leg if it
+    /// precedes them all, leg 0 for an address with none. This is the cut
+    /// `legacy_from_track_samples_by_leg` makes (it numbers a tracker row's flight the same way),
+    /// and a paired sample always lies within a leg, because the pairing needs a truth value.
+    fn leg_of(&self, addr: u32, t_ms: i64) -> u32 {
+        self.starts.get(&addr).map_or(0, |v| {
+            u32::try_from(v.partition_point(|&x| x <= t_ms).saturating_sub(1)).unwrap_or(u32::MAX)
+        })
+    }
+}
+
+/// The legs each aircraft is scored on (P-004 section 1): those that contain its grid samples.
+type ScoredLegs = BTreeMap<u32, BTreeSet<u32>>;
+
+fn scored_legs(grid: &PerAc, legs: &LegIndex) -> ScoredLegs {
+    grid.iter()
+        .map(|(&a, v)| (a, v.iter().map(|s| legs.leg_of(a, s.t)).collect()))
+        .collect()
+}
+
+/// Whether `t_ms` of `addr` lies on one of its scored legs.
+fn on_scored_leg(scored: &ScoredLegs, legs: &LegIndex, addr: u32, t_ms: i64) -> bool {
+    scored
+        .get(&addr)
+        .is_some_and(|s| s.contains(&legs.leg_of(addr, t_ms)))
+}
+
+/// A pair table's finite position pairs per aircraft, sorted by time, one per time, those for
+/// which `keep(address, time)` holds. No flight is chosen: a system's samples are kept or left
+/// out by the leg rule the caller passes (P-004 section 1).
+fn pair_points(
+    p: &PairTable,
+    flights: Option<&BTreeMap<u32, u32>>,
+    keep: &dyn Fn(u32, i64) -> bool,
+    per: &mut PerAc,
+    dropped: &mut Dropped,
+) {
     let n = p.t_ms.len();
     let fin = |i: usize| {
         p.cross_m.get(i).is_some_and(|v| v.is_finite())
             && p.along_m.get(i).is_some_and(|v| v.is_finite())
     };
-    let mut count: BTreeMap<(u32, u32), u64> = BTreeMap::new();
-    for i in 0..n {
-        if let (Some(&a), true) = (p.addr.get(i), fin(i)) {
-            *count
-                .entry((a, p.flight.get(i).copied().unwrap_or(0)))
-                .or_default() += 1;
-        }
-    }
-    let mut primary: BTreeMap<u32, (u32, u64)> = BTreeMap::new();
-    for (&(a, f), &c) in &count {
-        let e = primary.entry(a).or_insert((f, c));
-        if c > e.1 {
-            *e = (f, c);
-        }
-    }
     let nan = f32::NAN;
     let mut local: PerAc = BTreeMap::new();
     for i in 0..n {
         let (Some(&a), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
             continue;
         };
-        let f = p.flight.get(i).copied().unwrap_or(0);
-        if primary.get(&a).map(|e| e.0) != Some(f) {
-            if fin(i) {
-                dropped.other_flight += 1;
-            }
+        // Only ERAM's grid is limited to a flight (the most-paired one); not counted as dropped.
+        if flights
+            .is_some_and(|f| f.get(&a).copied() != Some(p.flight.get(i).copied().unwrap_or(0)))
+        {
             continue;
         }
         if !fin(i) {
             dropped.no_cross_along += 1;
+            continue;
+        }
+        if !keep(a, t) {
+            dropped.off_scored_legs += 1;
             continue;
         }
         let g = |v: &[f32], d: f32| f64::from(v.get(i).copied().unwrap_or(d));
@@ -369,6 +564,88 @@ fn points_of(p: &PairTable, per: &mut PerAc, dropped: &mut Dropped) {
         dropped.duplicate_time += (before - v.len()) as u64;
         per.entry(a).or_default().extend(v);
     }
+}
+
+/// The times of the finite pairs that P-003 resolution 11 would have kept: per aircraft, the
+/// flight with the most finite pairs (the lowest on a tie), one pair per time. Kept only so the
+/// output can show the coverage under the replaced rule beside P-004's; no table reads it.
+fn old_rule_times(p: &PairTable, out: &mut TimesBy) {
+    let n = p.t_ms.len();
+    let fin = |i: usize| {
+        p.cross_m.get(i).is_some_and(|v| v.is_finite())
+            && p.along_m.get(i).is_some_and(|v| v.is_finite())
+    };
+    let best = most_paired_flights(p);
+    let mut local: TimesBy = BTreeMap::new();
+    for i in 0..n {
+        let (Some(&a), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
+            continue;
+        };
+        if fin(i) && best.get(&a).copied() == Some(p.flight.get(i).copied().unwrap_or(0)) {
+            local.entry(a).or_default().push(t);
+        }
+    }
+    for (a, mut v) in local {
+        v.sort_unstable();
+        v.dedup();
+        out.entry(a).or_default().extend(v);
+    }
+}
+
+/// Each aircraft's flight with the most finite pairs (the lowest flight on a tie). P-004 keeps
+/// this for ERAM only, where it defines the grid ("as before, from ERAM's paired times").
+fn most_paired_flights(p: &PairTable) -> BTreeMap<u32, u32> {
+    let n = p.t_ms.len();
+    let fin = |i: usize| {
+        p.cross_m.get(i).is_some_and(|v| v.is_finite())
+            && p.along_m.get(i).is_some_and(|v| v.is_finite())
+    };
+    let mut count: BTreeMap<(u32, u32), u64> = BTreeMap::new();
+    for i in 0..n {
+        if let (Some(&a), true) = (p.addr.get(i), fin(i)) {
+            *count
+                .entry((a, p.flight.get(i).copied().unwrap_or(0)))
+                .or_default() += 1;
+        }
+    }
+    let mut best: BTreeMap<u32, (u32, u64)> = BTreeMap::new();
+    for (&(a, f), &c) in &count {
+        let e = best.entry(a).or_insert((f, c));
+        if c > e.1 {
+            *e = (f, c);
+        }
+    }
+    best.into_iter().map(|(a, (f, _))| (a, f)).collect()
+}
+
+/// The sample times of every aircraft of a per-aircraft table.
+fn times_of(per: &PerAc) -> TimesBy {
+    per.iter()
+        .map(|(&a, v)| (a, v.iter().map(|s| s.t).collect()))
+        .collect()
+}
+
+/// Whether `v` (sorted) holds a time within [`TOL_MS`] of `t`.
+fn near_time(v: &[i64], t: i64) -> bool {
+    let i = v.partition_point(|&x| x < t);
+    i.checked_sub(1)
+        .and_then(|j| v.get(j))
+        .is_some_and(|&x| t - x <= TOL_MS)
+        || v.get(i).is_some_and(|&x| x - t <= TOL_MS)
+}
+
+/// Coverage of a system under the replaced rule: `(grid samples it has a time within 0.5 s of,
+/// grid samples)`, the grid being ERAM's under that rule.
+fn old_rule_coverage(grid: &TimesBy, sys: &TimesBy) -> (u64, u64) {
+    let (mut hit, mut all) = (0u64, 0u64);
+    for (a, ts) in grid {
+        let own = sys.get(a).map_or(&[][..], Vec::as_slice);
+        for &t in ts {
+            all += 1;
+            hit += u64::from(near_time(own, t));
+        }
+    }
+    (hit, all)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -531,8 +808,16 @@ struct Row {
 const _: () = assert!(core::mem::size_of::<Row>() == 312);
 
 impl Row {
+    /// The three-way common set: all three systems have a value.
     fn common(&self) -> bool {
         self.val.iter().all(Option::is_some)
+    }
+
+    /// The two-way common set (P-006 section 4): OpenATCA and ERAM both have a value.
+    fn two_way(&self) -> bool {
+        [OA, ER]
+            .iter()
+            .all(|&s| self.val.get(s).is_some_and(Option::is_some))
     }
 }
 
@@ -541,6 +826,170 @@ fn of_ac(rows: &[Row], ac: usize) -> &[Row] {
     let a = rows.partition_point(|r| r.ac < ac);
     let b = rows.partition_point(|r| r.ac <= ac);
     rows.get(a..b).unwrap_or(&[])
+}
+
+/// P-004 section 3: why a system has no value at a grid sample, judged by the system's own rows
+/// of the address (OpenATCA's output rows, ERAM's paired samples, the set-A reports).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Miss {
+    /// Before the system's first row for the address.
+    Before,
+    /// After its last row.
+    After,
+    /// In a gap between rows.
+    Gap,
+    /// The system has no row for the address at all.
+    NeverPresent,
+    /// A row lies within 0.5 s, but it is not scored (left out at pairing, off the scored legs,
+    /// no finite error).
+    Other,
+}
+
+/// The order of [`Miss`] in the counts.
+const MISS_NAMES: [&str; 5] = [
+    "before the system's first row for the address",
+    "after its last row",
+    "in a gap between rows",
+    "address never present",
+    "other (a row within 0.5 s that is not scored: left out at pairing, off the scored legs, or no finite error)",
+];
+
+impl Miss {
+    fn index(self) -> usize {
+        match self {
+            Miss::Before => 0,
+            Miss::After => 1,
+            Miss::Gap => 2,
+            Miss::NeverPresent => 3,
+            Miss::Other => 4,
+        }
+    }
+}
+
+/// The class of a miss at `t` given the system's row times for the address (sorted; `None` or
+/// empty when it has no row for the address). Every miss falls in exactly one class.
+fn classify_miss(times: Option<&[i64]>, t: i64) -> Miss {
+    let Some(v) = times.filter(|v| !v.is_empty()) else {
+        return Miss::NeverPresent;
+    };
+    if near_time(v, t) {
+        return Miss::Other;
+    }
+    let i = v.partition_point(|&x| x < t);
+    if i == 0 {
+        Miss::Before
+    } else if i >= v.len() {
+        Miss::After
+    } else {
+        Miss::Gap
+    }
+}
+
+/// P-004 section 2: an OpenATCA row lies in the reacquired group when it is within this many ms
+/// after an update row of the address flagged `O_REACQUIRED` (the window the display uses).
+const REACQ_WINDOW_MS: i64 = 10_000;
+
+/// Whether `t_ms` is within [`REACQ_WINDOW_MS`] after one of `updates` (the times of the
+/// address's reacquired update rows, sorted), the update's own time included.
+fn reacquired_at(updates: Option<&[i64]>, t_ms: i64) -> bool {
+    let Some(v) = updates else {
+        return false;
+    };
+    let i = v.partition_point(|&u| u <= t_ms);
+    i.checked_sub(1)
+        .and_then(|j| v.get(j))
+        .is_some_and(|&u| t_ms - u <= REACQ_WINDOW_MS)
+}
+
+/// The grid and what it holds, before any time fit.
+// A7.2: cold struct, size guard waived
+struct Grid {
+    rows: Vec<Row>,
+    ac_addr: Vec<u32>,
+    /// Misses per system: [aircraft has no paired samples, no paired sample within 0.5 s].
+    miss: [[u64; 2]; 3],
+    /// Misses per system by [`Miss`] class.
+    classes: [[u64; 5]; 3],
+}
+
+/// The grid: every sample of `er` (ERAM's paired samples) with each system's nearest sample
+/// within 0.5 s of it. `oa` and `pt` hold only samples on the aircraft's scored legs. `row_times`
+/// are each system's row times by address, for the miss classes.
+fn build_grid(er: &PerAc, oa: &PerAc, pt: &PerAc, row_times: [&TimesBy; 3]) -> Grid {
+    let mut g = Grid {
+        rows: Vec::new(),
+        ac_addr: Vec::new(),
+        miss: [[0; 2]; 3],
+        classes: [[0; 5]; 3],
+    };
+    for (&addr, ev) in er {
+        let ac = g.ac_addr.len();
+        g.ac_addr.push(addr);
+        let others = [oa.get(&addr), None, pt.get(&addr)];
+        for s in ev {
+            let mut val: [Option<Val>; 3] = [None; 3];
+            for (k, slot) in val.iter_mut().enumerate() {
+                let p = if k == ER {
+                    Some(*s)
+                } else {
+                    match others.get(k).copied().flatten() {
+                        None => {
+                            if let Some(m) = g.miss.get_mut(k).and_then(|m| m.get_mut(0)) {
+                                *m += 1;
+                            }
+                            None
+                        }
+                        Some(v) => {
+                            let n = nearest(v, s.t).copied();
+                            if n.is_none() {
+                                if let Some(m) = g.miss.get_mut(k).and_then(|m| m.get_mut(1)) {
+                                    *m += 1;
+                                }
+                            }
+                            n
+                        }
+                    }
+                };
+                if p.is_none() {
+                    let own = row_times
+                        .get(k)
+                        .and_then(|t| t.get(&addr))
+                        .map(Vec::as_slice);
+                    let c = classify_miss(own, s.t).index();
+                    if let Some(n) = g.classes.get_mut(k).and_then(|c2| c2.get_mut(c)) {
+                        *n += 1;
+                    }
+                }
+                *slot = p.map(|pt| Val {
+                    pt,
+                    along_fit: pt.along,
+                    h_raw: pt.cross.hypot(pt.along),
+                    h_fit: pt.cross.hypot(pt.along),
+                    along_tol: along_tol(pt.along, pt.v),
+                    h_tol: pt.cross.hypot(along_tol(pt.along, pt.v)),
+                });
+            }
+            g.rows.push(Row {
+                ac,
+                addr,
+                t: s.t,
+                phase: s.phase,
+                band: s.band,
+                val,
+            });
+        }
+    }
+    g
+}
+
+/// Whether a grid row is one a system's time offset is fitted on (P-008 section 1): the two-way
+/// common set for OpenATCA and ERAM, the three-way set for the passthrough.
+fn in_fit_set(r: &Row, system: usize) -> bool {
+    if system == PT {
+        r.common()
+    } else {
+        r.two_way()
+    }
 }
 
 /// The least-squares offset `tau` of `along = tau * v` over `(along, v)` pairs (library fit).
@@ -692,12 +1141,12 @@ fn m6_counts(rows: &[Row], n_ac: usize) -> M6 {
     m
 }
 
-/// Samples of all flagged OpenATCA points still without a tracker row for their flags, counted
-/// over every point (not only the addresses the join saw).
-fn unmatched_points(pts: &PerAc) -> u64 {
-    pts.values()
-        .flatten()
-        .filter(|p| p.uncertain == Tri::Unmatched || p.reacquired == Tri::Unmatched)
+/// Grid samples whose OpenATCA row has no tracker row for its flags (or only a conflicting one).
+/// Only the rows matched to a grid sample count, not every point on a scored leg.
+fn unmatched_rows(rows: &[Row]) -> u64 {
+    rows.iter()
+        .filter_map(|r| r.val.first().and_then(|v| v.as_ref()))
+        .filter(|v| v.pt.uncertain == Tri::Unmatched || v.pt.reacquired == Tri::Unmatched)
         .count() as u64
 }
 
@@ -862,11 +1311,36 @@ impl Kind {
     }
 }
 
-/// Whether the row is in the common set for `k`: all three systems have a finite value.
-fn common_for(r: &Row, k: Kind) -> bool {
+/// Which systems a common set needs a value of (P-006 section 4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Set {
+    /// OpenATCA and ERAM: the set the claims are made on.
+    Two,
+    /// OpenATCA, ERAM and passthrough: used for the reference-floor test only.
+    Three,
+}
+
+impl Set {
+    fn has(self, system: usize) -> bool {
+        system != PT || self == Set::Three
+    }
+
+    /// Whether every system of the set has a value at the row.
+    fn present(self, r: &Row) -> bool {
+        match self {
+            Set::Two => r.two_way(),
+            Set::Three => r.common(),
+        }
+    }
+}
+
+/// Whether the row is in the common set `set` for `k`: every system of the set has a finite value.
+fn common_for(r: &Row, k: Kind, set: Set) -> bool {
     r.val
         .iter()
-        .all(|v| v.as_ref().is_some_and(|v| k.get(v).is_finite()))
+        .enumerate()
+        .filter(|(s, _)| set.has(*s))
+        .all(|(_, v)| v.as_ref().is_some_and(|v| k.get(v).is_finite()))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1007,8 +1481,8 @@ fn draws_of(n_ac: usize) -> Vec<Vec<u32>> {
 // A7.2: cold struct (one per metric or aircraft column, not per sample), size guard waived
 struct Metric {
     n: [usize; 3],
-    /// Samples present in all three systems and kept by the group, left out of the common set
-    /// because this system's value is not finite (E6): reported apart from "not common".
+    /// Samples present in every system of the set and kept by the group, left out of the common
+    /// set because this system's value is not finite (E6): reported apart from "not common".
     nonfinite: [usize; 3],
     pt: [[f64; 3]; 3],
     boot: [Vec<[f64; 3]>; 3],
@@ -1020,10 +1494,11 @@ fn metric(
     draws: &[Vec<u32>],
     k: Kind,
     keep: &dyn Fn(&Row) -> bool,
+    set: Set,
 ) -> Metric {
     let col = |s: usize| {
         build_col(rows, n_ac, &|r: &Row| {
-            if keep(r) && common_for(r, k) {
+            if set.has(s) && keep(r) && common_for(r, k, set) {
                 r.val.get(s).and_then(|v| v.as_ref()).map(|v| k.get(v))
             } else {
                 None
@@ -1034,10 +1509,10 @@ fn metric(
     let mut nonfinite = [0usize; 3];
     for r in rows
         .iter()
-        .filter(|r| keep(r) && r.common() && !common_for(r, k))
+        .filter(|r| keep(r) && set.present(r) && !common_for(r, k, set))
     {
-        for (n, v) in nonfinite.iter_mut().zip(&r.val) {
-            if v.as_ref().is_some_and(|v| !k.get(v).is_finite()) {
+        for (s, (n, v)) in nonfinite.iter_mut().zip(&r.val).enumerate() {
+            if set.has(s) && v.as_ref().is_some_and(|v| !k.get(v).is_finite()) {
                 *n += 1;
             }
         }
@@ -1077,8 +1552,9 @@ fn cell(m: &Metric, s: usize, k: usize, prec: usize) -> String {
     fmt_ci(pv(m, s, k), lo, hi, prec)
 }
 
-/// OpenATCA minus ERAM, statistic `k`, with the interval of the paired resamples.
-fn diff_cell(m: &Metric, k: usize, prec: usize) -> String {
+/// OpenATCA minus ERAM, statistic `k`: the point difference and the interval of the paired
+/// resamples.
+fn diff_of(m: &Metric, k: usize) -> (f64, f64, f64) {
     let d = pv(m, OA, k) - pv(m, ER, k);
     let (lo, hi) = interval(
         bv(m, OA)
@@ -1086,6 +1562,11 @@ fn diff_cell(m: &Metric, k: usize, prec: usize) -> String {
             .zip(bv(m, ER))
             .filter_map(|(a, b)| Some(a.get(k).copied()? - b.get(k).copied()?)),
     );
+    (d, lo, hi)
+}
+
+fn diff_cell(m: &Metric, k: usize, prec: usize) -> String {
+    let (d, lo, hi) = diff_of(m, k);
     fmt_ci(d, lo, hi, prec)
 }
 
@@ -1112,14 +1593,33 @@ fn floor_note(oa: f64, pt: f64) -> String {
     }
 }
 
-fn write_metric(o: &mut String, title: &str, unit: &str, m: &Metric) {
+/// One metric: the two-way table `m` (OpenATCA and ERAM, with intervals and the difference) and,
+/// for the reference-floor test only, the three-way values `floor`. `primary` is the statistic
+/// that is a primary metric of P-006 section 3, when one is.
+fn write_metric(
+    o: &mut String,
+    title: &str,
+    unit: &str,
+    m: &Metric,
+    floor: &Metric,
+    primary: Option<usize>,
+) {
     let _ = writeln!(
         o,
-        "{title} ({unit}; common set; absolute values for median and p95)"
+        "{title} ({unit}; two-way common set, OpenATCA and ERAM both have a value, n={}; absolute values for median and p95)",
+        m.n.first().copied().unwrap_or(0)
     );
     for (k, name) in STATS.iter().enumerate() {
-        let _ = writeln!(o, "  {name}:");
-        for (s, sys) in SYS.iter().enumerate() {
+        let _ = writeln!(
+            o,
+            "  {name}{}:",
+            if primary == Some(k) {
+                " (PRIMARY metric, P-006 section 3)"
+            } else {
+                ""
+            }
+        );
+        for (s, sys) in SYS.iter().enumerate().filter(|(s, _)| *s != PT) {
             let _ = writeln!(
                 o,
                 "    {sys:<12} {}   n={}",
@@ -1130,8 +1630,11 @@ fn write_metric(o: &mut String, title: &str, unit: &str, m: &Metric) {
         let _ = writeln!(o, "    OpenATCA minus ERAM  {}", diff_cell(m, k, 3));
         let _ = writeln!(
             o,
-            "    passthrough within 10%: {}",
-            floor_note(pv(m, OA, k), pv(m, PT, k))
+            "    reference floor, three-way set (n={}): OpenATCA {:.3}, Passthrough {:.3}; passthrough within 10%: {}",
+            floor.n.first().copied().unwrap_or(0),
+            pv(floor, OA, k),
+            pv(floor, PT, k),
+            floor_note(pv(floor, OA, k), pv(floor, PT, k))
         );
     }
     let _ = writeln!(o, "  {}", nonfinite_text(m));
@@ -1142,7 +1645,7 @@ fn write_metric(o: &mut String, title: &str, unit: &str, m: &Metric) {
 /// samples that were simply not in all three systems.
 fn nonfinite_text(m: &Metric) -> String {
     format!(
-        "left out of the common set for a non-finite value (present in all three systems): OpenATCA {}, ERAM {}, Passthrough {}",
+        "left out of the common set for a non-finite value (present in every system of the set): OpenATCA {}, ERAM {}, Passthrough {}",
         m.nonfinite[0], m.nonfinite[1], m.nonfinite[2]
     )
 }
@@ -1159,7 +1662,7 @@ fn write_strata(
 ) {
     let _ = writeln!(
         o,
-        "{title}: breakdown (common set; median with 95% interval, p95 and rms as points)"
+        "{title}: breakdown (two-way common set; median with 95% interval, p95 and rms as points)"
     );
     let mut strata: Vec<(String, Keep)> = Vec::new();
     for (i, name) in phase::NAMES.iter().enumerate() {
@@ -1237,7 +1740,7 @@ fn write_flag_groups(
 ) {
     let _ = writeln!(
         o,
-        "{title}: breakdown by OpenATCA row flag (common set; groups by OpenATCA's flag on the grid sample; median with 95% interval, p95 and rms as points)"
+        "{title}: breakdown by OpenATCA row flag (two-way common set; groups by OpenATCA's flag on the grid sample; median with 95% interval, p95 and rms as points)"
     );
     write_groups(o, rows, n_ac, draws, k, &flag_groups());
 }
@@ -1251,7 +1754,7 @@ fn write_groups(
     strata: &[(String, Keep)],
 ) {
     for (name, keep) in strata {
-        let m = metric(rows, n_ac, draws, k, keep.as_ref());
+        let m = metric(rows, n_ac, draws, k, keep.as_ref(), Set::Two);
         let n = m.n.first().copied().unwrap_or(0);
         if n == 0 {
             let _ = writeln!(o, "  {name:<28} n=0 (no common samples)");
@@ -1263,20 +1766,18 @@ fn write_groups(
         }
         let _ = writeln!(
             o,
-            "      median  OpenATCA {}  ERAM {}  Passthrough {}  OpenATCA minus ERAM {}",
+            "      median  OpenATCA {}  ERAM {}  OpenATCA minus ERAM {}",
             cell(&m, OA, 0, 2),
             cell(&m, ER, 0, 2),
-            cell(&m, PT, 0, 2),
             diff_cell(&m, 0, 2)
         );
         for k2 in 1..3 {
             let _ = writeln!(
                 o,
-                "      {:<7} OpenATCA {:.2}  ERAM {:.2}  Passthrough {:.2}",
+                "      {:<7} OpenATCA {:.2}  ERAM {:.2}",
                 STATS.get(k2).copied().unwrap_or(""),
                 pv(&m, OA, k2),
-                pv(&m, ER, k2),
-                pv(&m, PT, k2)
+                pv(&m, ER, k2)
             );
         }
     }
@@ -1287,23 +1788,1118 @@ fn write_groups(
 // The run.
 // ---------------------------------------------------------------------------------------------
 
-fn git_state() -> GitState {
-    let dir = env!("CARGO_MANIFEST_DIR");
-    let git = |args: &[&str]| {
-        // seal-allow: git describes this source tree for the report; it reads no input data
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+/// A time window excluded from the grid for every system alike (P-007 section 2), in Unix ns.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Window {
+    from_ns: i64,
+    to_ns: i64,
+    /// The times as given.
+    from: String,
+    to: String,
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.n{1,9}]Z` as Unix nanoseconds.
+fn parse_iso_ns(t: &str) -> Result<i64, String> {
+    let bad = || format!("`{t}` is not YYYY-MM-DDTHH:MM:SS[.nnnnnnnnn]Z");
+    let body = t.strip_suffix('Z').ok_or_else(bad)?;
+    let (main, frac) = match body.split_once('.') {
+        Some((m, f)) => (m, f),
+        None => (body, ""),
     };
-    GitState {
-        head: git(&["rev-parse", "HEAD"]).map_or("unknown".into(), |s| s.trim().to_string()),
-        porcelain: git(&["status", "--porcelain"]),
+    if frac.len() > 9 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
     }
+    let (date, time) = main.split_once('T').ok_or_else(bad)?;
+    let num = |x: &str, w: usize| -> Result<i64, String> {
+        if x.len() != w || !x.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        x.parse::<i64>().map_err(|_| bad())
+    };
+    let dp: Vec<&str> = date.split('-').collect();
+    let tp: Vec<&str> = time.split(':').collect();
+    let ([y, mo, d], [h, mi, se]) = (dp.as_slice(), tp.as_slice()) else {
+        return Err(bad());
+    };
+    let (y, mo, d) = (num(y, 4)?, num(mo, 2)?, num(d, 2)?);
+    let (h, mi, se) = (num(h, 2)?, num(mi, 2)?, num(se, 2)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 59 {
+        return Err(bad());
+    }
+    let fr = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<9}").parse::<i64>().map_err(|_| bad())?
+    };
+    let secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se;
+    Ok(secs * 1_000_000_000 + fr)
+}
+
+impl Window {
+    fn parse(from: &str, to: &str) -> Result<Window, String> {
+        let (f, t) = (parse_iso_ns(from)?, parse_iso_ns(to)?);
+        if t < f {
+            return Err(format!("the window {from} to {to} ends before it starts"));
+        }
+        Ok(Window {
+            from_ns: f,
+            to_ns: t,
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+    }
+
+    /// Whether the sample time `t_ms` is in the window (both ends included).
+    fn holds_ms(&self, t_ms: i64) -> bool {
+        let t = t_ms.saturating_mul(1_000_000);
+        t >= self.from_ns && t <= self.to_ns
+    }
+}
+
+/// The grid without the samples inside any window, and per window the number of grid samples it
+/// holds (a sample in two windows is counted in both, removed once).
+fn exclude_windows(grid: &PerAc, windows: &[Window]) -> (PerAc, Vec<u64>, u64) {
+    let mut counts = vec![0u64; windows.len()];
+    let mut removed = 0u64;
+    let mut out: PerAc = BTreeMap::new();
+    for (&a, v) in grid {
+        let mut keep = Vec::with_capacity(v.len());
+        for s in v {
+            let mut hit = false;
+            for (w, c) in windows.iter().zip(counts.iter_mut()) {
+                if w.holds_ms(s.t) {
+                    *c += 1;
+                    hit = true;
+                }
+            }
+            if hit {
+                removed += 1;
+            } else {
+                keep.push(*s);
+            }
+        }
+        // An aircraft left with no sample is no aircraft of the grid (it takes no bootstrap slot).
+        if !keep.is_empty() {
+            out.insert(a, keep);
+        }
+    }
+    (out, counts, removed)
+}
+
+/// The scored legs and the grid of a run. The legs are those of the grid as it was before any
+/// window (P-004 section 1: the legs that contain the aircraft's grid samples), so an excluded
+/// window changes which samples are scored and never which legs they lie on. Also the number of
+/// samples each window holds, and the number removed.
+fn plan_grid(
+    er_pts: &PerAc,
+    legs: &LegIndex,
+    windows: &[Window],
+) -> (ScoredLegs, PerAc, Vec<u64>, u64) {
+    let scored = scored_legs(er_pts, legs);
+    let (grid, counts, removed) = exclude_windows(er_pts, windows);
+    (scored, grid, counts, removed)
+}
+
+/// `git -C dir args`: its standard output, `None` when git failed or could not run.
+fn git_run(dir: &Path, args: &[&str]) -> Option<String> {
+    // seal-allow: git describes this source tree for the report; it reads no input data
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+fn git_state() -> GitState {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    GitState {
+        head: git_run(dir, &["rev-parse", "HEAD"])
+            .map_or("unknown".into(), |s| s.trim().to_string()),
+        porcelain: git_run(dir, &["status", "--porcelain"]),
+    }
+}
+
+/// The one file U may differ from the frozen candidate C in (P-006 section 5).
+const SEALED_LIST_PATH: &str = "crates/oa-sealed/sealed_paths.txt";
+
+/// The frozen candidate C and the scored commit U of a run (P-006 section 5).
+// A7.2: cold struct, size guard waived
+struct Commits {
+    /// `--frozen-commit`: the scored commit U.
+    frozen: Option<String>,
+    /// `--candidate-commit`: the frozen candidate C.
+    candidate: Option<String>,
+}
+
+/// P-006 section 5: `--candidate-commit` is needed with `--frozen-commit` (so in every hold-out
+/// run) and the other way round, both are full commit ids, and `git diff --name-only C U` run in
+/// `repo` lists exactly the sealed list and nothing else.
+fn candidate_binding(mode: Mode, c: &Commits, repo: &Path) -> Result<(), String> {
+    let (frozen, cand) = match (c.frozen.as_deref(), c.candidate.as_deref()) {
+        (None, None) if !mode.holdout => return Ok(()),
+        (Some(f), Some(c)) => (f, c),
+        _ => {
+            return Err(
+                "--candidate-commit <40 hex> is required together with --frozen-commit (both, in a hold-out run)"
+                    .into(),
+            )
+        }
+    };
+    for (name, v) in [("--frozen-commit", frozen), ("--candidate-commit", cand)] {
+        if !is_full_sha(v) {
+            return Err(format!("{name} must be 40 lowercase hex digits, got `{v}`"));
+        }
+    }
+    let Some(names) = git_run(repo, &["diff", "--name-only", cand, frozen]) else {
+        return Err(format!(
+            "git diff --name-only {cand} {frozen} failed (is either commit missing from this repository?)"
+        ));
+    };
+    let files: Vec<&str> = names.lines().filter(|l| !l.trim().is_empty()).collect();
+    if files != [SEALED_LIST_PATH] {
+        return Err(format!(
+            "the scored commit {frozen} must differ from the candidate {cand} in {SEALED_LIST_PATH} and nothing else; git diff --name-only lists {} file(s): {}",
+            files.len(),
+            files.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The names of the two files a run writes.
+const OUTPUT_FILES: [&str; 2] = ["samples.csv", "p002.txt"];
+
+/// The suffix of a file being written; it becomes the final name only when both are complete.
+const PARTIAL: &str = ".partial";
+
+/// P-006 section 7: refuses when either output file already exists (nothing is written then).
+/// A leftover `.partial` does not refuse; it is returned so the run can report it.
+fn outputs_free(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut left = Vec::new();
+    for f in OUTPUT_FILES {
+        let p = out_dir.join(f);
+        if p.exists() || p.is_symlink() {
+            return Err(format!(
+                "{} exists; a run writes its output files only if they do not exist, and writes nothing otherwise",
+                p.display()
+            ));
+        }
+        let part = out_dir.join(format!("{f}{PARTIAL}"));
+        if part.exists() || part.is_symlink() {
+            left.push(part);
+        }
+    }
+    Ok(left)
+}
+
+/// Writes `text` to `path` (a `.partial` name: a leftover of an earlier run is replaced), and
+/// flushes it to disk.
+fn write_partial(path: &Path, text: &str) -> Result<(), String> {
+    // seal-allow: the scorer's own output file, write-only, a partial name
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(text.as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.sync_all().map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// P-008 and P-006 section 7: both files are written to `.partial` names and flushed, then the
+/// ledger line (a hold-out run's) is appended and flushed, then both are renamed. A run that
+/// stops leaves no result under a final name, and a ledger line is there only when both partials
+/// were written. When the ledger cannot be appended to, the partials are deleted and the run
+/// fails. Neither final name may exist (checked again after the partials are written).
+fn publish_outputs(
+    out_dir: &Path,
+    csv: &str,
+    txt: &str,
+    ledger: Option<(&Path, &str)>,
+) -> Result<(), String> {
+    outputs_free(out_dir)?;
+    let part = |f: &str| out_dir.join(format!("{f}{PARTIAL}"));
+    let drop_partials = || {
+        for f in OUTPUT_FILES {
+            let _ = fs::remove_file(part(f));
+        }
+    };
+    let staged = write_partial(&part("samples.csv"), csv)
+        .and_then(|()| write_partial(&part("p002.txt"), txt))
+        .and_then(|()| outputs_free(out_dir).map(|_| ()))
+        .and_then(|()| match ledger {
+            Some((l, line)) => ledger_append(l, line),
+            None => Ok(()),
+        });
+    if let Err(e) = staged {
+        drop_partials();
+        return Err(e);
+    }
+    for f in OUTPUT_FILES {
+        fs::rename(part(f), out_dir.join(f)).map_err(|e| format!("{f}: {e}"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The ledger (P-008 section 5).
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the ledger already holds `clip_sha` (the first field of a line). A ledger that does
+/// not exist yet is empty.
+fn ledger_has(ledger: &Path, clip_sha: &str) -> Result<bool, String> {
+    match oa_sealed::read_to_string(ledger) {
+        Ok(t) => Ok(t
+            .lines()
+            .any(|l| l.split_whitespace().next() == Some(clip_sha))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("ledger {}: {e}", ledger.display())),
+    }
+}
+
+/// Appends one line to the ledger (O_APPEND, created if missing) and flushes it.
+fn ledger_append(ledger: &Path, line: &str) -> Result<(), String> {
+    // seal-allow: the append-only ledger of scored days, write-only
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(ledger)
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))?;
+    f.write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))
+}
+
+/// The date of a day count since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso_utc(secs: i64) -> String {
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let r = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        r / 3600,
+        r % 3600 / 60,
+        r % 60
+    )
+}
+
+/// The ledger line of a hold-out run: clip SHA-256, scored commit, candidate commit, UTC time.
+fn ledger_line(clip_sha: &str, c: &Commits, now_secs: i64) -> String {
+    format!(
+        "{clip_sha} {} {} {}",
+        c.frozen.as_deref().unwrap_or("none"),
+        c.candidate.as_deref().unwrap_or("none"),
+        iso_utc(now_secs)
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The damage report (P-008 section 2).
+// ---------------------------------------------------------------------------------------------
+
+/// No excluded window may be shorter than this (P-007), ns.
+const MIN_WINDOW_NS: i64 = 600_000_000_000;
+/// The excluded windows of a hold-out day may total at most this (P-007: 60 minutes), ns.
+const MAX_WINDOWS_NS: i64 = 3_600_000_000_000;
+
+/// What a run takes from the report of `tools/oa-feed-gaps`.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DamageReport {
+    sha256: String,
+    /// The report's window, Unix ns.
+    from_ns: i64,
+    to_ns: i64,
+    windows: Vec<Window>,
+    total_ns: i64,
+}
+
+/// Reads an `oa-feed-gaps` report. The lines read, and no others, are:
+/// `window: <iso> to <iso> (<seconds> s)` (exactly one), `exclude <iso> <iso>` (any number) and
+/// the verdict, the single line `CLEAN`; a line starting `DAMAGED:` refuses. Refused: a verdict
+/// that is not `CLEAN`, a window under 600 s, windows totalling over 3,600 s, and a window
+/// outside the report's. That the report's window is the scored day's is checked against the
+/// recordings by [`damage_matches_clip`].
+fn parse_damage_report(text: &str, sha256: &str) -> Result<DamageReport, String> {
+    let mut window: Option<(i64, i64)> = None;
+    let mut windows: Vec<Window> = Vec::new();
+    let (mut clean, mut damaged) = (0u32, 0u32);
+    for l in text.lines() {
+        if let Some(rest) = l.strip_prefix("window: ") {
+            let mut it = rest.split_whitespace();
+            let (Some(f), Some("to"), Some(t)) = (it.next(), it.next(), it.next()) else {
+                return Err(format!("damage report: cannot read the window line `{l}`"));
+            };
+            if window.is_some() {
+                return Err("damage report: two window lines".into());
+            }
+            window = Some((parse_iso_ns(f)?, parse_iso_ns(t)?));
+        } else if let Some(rest) = l.strip_prefix("exclude ") {
+            let mut it = rest.split_whitespace();
+            let (Some(f), Some(t), None) = (it.next(), it.next(), it.next()) else {
+                return Err(format!("damage report: cannot read the exclude line `{l}`"));
+            };
+            windows.push(Window::parse(f, t)?);
+        } else if l == "CLEAN" {
+            clean += 1;
+        } else if l.starts_with("DAMAGED:") {
+            damaged += 1;
+        }
+    }
+    if damaged > 0 || clean != 1 {
+        return Err(format!(
+            "damage report: the verdict is not CLEAN ({clean} CLEAN lines, {damaged} DAMAGED lines); a damaged day is not scored"
+        ));
+    }
+    let Some((from_ns, to_ns)) = window else {
+        return Err("damage report: no window line".into());
+    };
+    let mut total = 0i64;
+    for w in &windows {
+        let len = w.to_ns - w.from_ns;
+        if len < MIN_WINDOW_NS {
+            return Err(format!(
+                "damage report: the window {} to {} is under 600 s",
+                w.from, w.to
+            ));
+        }
+        if w.from_ns < from_ns || w.to_ns > to_ns {
+            return Err(format!(
+                "damage report: the window {} to {} lies outside the report's window",
+                w.from, w.to
+            ));
+        }
+        total += len;
+    }
+    if total > MAX_WINDOWS_NS {
+        return Err(format!(
+            "damage report: the windows total {} s, over 3,600 s",
+            total / 1_000_000_000
+        ));
+    }
+    Ok(DamageReport {
+        sha256: sha256.to_string(),
+        from_ns,
+        to_ns,
+        windows,
+        total_ns: total,
+    })
+}
+
+/// How far each end of the report's window may lie from the scored window S, ns (P-008).
+const WINDOW_SLACK_NS: i64 = 60_000_000_000;
+/// One UTC day, ns.
+const DAY_NS: i64 = 86_400_000_000_000;
+
+/// The scored window S: from the later of the UTC day's start and the first SFDPS message, to the
+/// earliest of the day's end, the last SFDPS message and the last clip report. The day is the
+/// clip's: both its first and its last report must fall in one UTC day.
+fn scored_window(
+    clip_first: i64,
+    clip_last: i64,
+    sfdps_first: i64,
+    sfdps_last: i64,
+) -> Result<(i64, i64), String> {
+    let day = clip_first.div_euclid(DAY_NS) * DAY_NS;
+    if clip_last >= day + DAY_NS {
+        return Err(format!(
+            "the clip's reports run from {} to {}: not one UTC day",
+            iso_utc(clip_first.div_euclid(1_000_000_000)),
+            iso_utc(clip_last.div_euclid(1_000_000_000))
+        ));
+    }
+    Ok((
+        day.max(sfdps_first),
+        (day + DAY_NS).min(sfdps_last).min(clip_last),
+    ))
+}
+
+/// The report's window must lie inside the clip's UTC day and match the scored window S to within
+/// 60 s at each end (the day the report checked is the window being scored). Refused, both
+/// windows are printed.
+fn damage_matches_clip(
+    d: &DamageReport,
+    clip_first: i64,
+    clip_last: i64,
+    sfdps_first: i64,
+    sfdps_last: i64,
+) -> Result<(), String> {
+    let (s_from, s_to) = scored_window(clip_first, clip_last, sfdps_first, sfdps_last)?;
+    let day = clip_first.div_euclid(DAY_NS) * DAY_NS;
+    let show = |a: i64, b: i64| {
+        format!(
+            "{} to {}",
+            iso_utc(a.div_euclid(1_000_000_000)),
+            iso_utc(b.div_euclid(1_000_000_000))
+        )
+    };
+    if d.from_ns < day
+        || d.to_ns > day + DAY_NS
+        || (d.from_ns - s_from).abs() > WINDOW_SLACK_NS
+        || (d.to_ns - s_to).abs() > WINDOW_SLACK_NS
+    {
+        return Err(format!(
+            "the damage report's window ({}) is not the scored window ({}): it must lie inside the clip's UTC day and match the scored window to within 60 s at each end",
+            show(d.from_ns, d.to_ns),
+            show(s_from, s_to)
+        ));
+    }
+    Ok(())
+}
+
+/// The first and last receive time of the SFDPS messages in `dir`, Unix ns (each file opened
+/// through `open`, which checks the sealed list).
+fn sfdps_span(dir: &Path, open: &oa_bench::input::Opener) -> Result<(i64, i64), String> {
+    let (_, files) = oa_bench::input::list_inputs(dir).map_err(|e| e.to_string())?;
+    let mut it = files.into_iter();
+    let open = open.clone();
+    let spec = oa_replay::StreamSpec {
+        feed: FeedKind::Sfdps,
+        open: Box::new(move || {
+            let p = it.next()?;
+            Some(open(&p))
+        }),
+    };
+    let (mut first, mut last) = (i64::MAX, i64::MIN);
+    let (_, end) = oa_replay::merge_counted(vec![spec], 1 << 16, &mut |m| {
+        if m.kind == oa_feed::Kind::Message {
+            first = first.min(m.recv_ns);
+            last = last.max(m.recv_ns);
+        }
+        Ok(())
+    });
+    end.map_err(|e| e.to_string())?;
+    if first > last {
+        return Err(format!("{}: no SFDPS message", dir.display()));
+    }
+    Ok((first, last))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The claim rule (P-006 section 3).
+// ---------------------------------------------------------------------------------------------
+
+/// What one day's interval of the OpenATCA-minus-ERAM difference says of a primary metric.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The interval excludes zero in OpenATCA's favour.
+    OpenAtca,
+    /// It excludes zero in ERAM's favour.
+    Eram,
+    /// It contains zero (or is not defined).
+    Neither,
+}
+
+impl Verdict {
+    fn word(self) -> &'static str {
+        match self {
+            Verdict::OpenAtca => "oa",
+            Verdict::Eram => "eram",
+            Verdict::Neither => "none",
+        }
+    }
+
+    fn parse(w: &str) -> Option<Verdict> {
+        [Verdict::OpenAtca, Verdict::Eram, Verdict::Neither]
+            .into_iter()
+            .find(|v| v.word() == w)
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Verdict::OpenAtca => "the interval excludes zero in OpenATCA's favour",
+            Verdict::Eram => "the interval excludes zero in ERAM's favour",
+            Verdict::Neither => "the interval does not exclude zero",
+        }
+    }
+}
+
+/// The primary metrics: id, whether a lower value is better, and its name.
+const PRIMARY: [(&str, bool, &str); 3] = [
+    ("M1_median", true, "M1 median cross-track error (m)"),
+    (
+        "M5_speed_median",
+        true,
+        "M5 ground-speed error median, absolute (m/s)",
+    ),
+    (
+        "M4t_300",
+        false,
+        "M4t share of ALL grid samples within 300 m (rounding-tolerant, time-fitted)",
+    ),
+];
+
+/// The verdict of an interval `[lo, hi]` of OpenATCA minus ERAM.
+fn verdict_of(lo: f64, hi: f64, lower_is_better: bool) -> Verdict {
+    if !(lo.is_finite() && hi.is_finite()) {
+        return Verdict::Neither;
+    }
+    let (oa_better, eram_better) = if lower_is_better {
+        (hi < 0.0, lo > 0.0)
+    } else {
+        (lo > 0.0, hi < 0.0)
+    };
+    if oa_better {
+        Verdict::OpenAtca
+    } else if eram_better {
+        Verdict::Eram
+    } else {
+        Verdict::Neither
+    }
+}
+
+/// One day's piece of the claim for a primary metric.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq)]
+struct ClaimPiece {
+    id: String,
+    diff: f64,
+    lo: f64,
+    hi: f64,
+    verdict: Verdict,
+    /// P-008 section 3: the passthrough is within 10 % of OpenATCA on the three-way set (for M4t,
+    /// on the share over all grid samples), and the two values it was judged on.
+    floor: bool,
+    oa3: f64,
+    pt3: f64,
+}
+
+/// Whether the passthrough is within 10 % of OpenATCA's value (P-002), as [`floor_note`] says.
+fn floor_applies(oa: f64, pt: f64) -> bool {
+    floor_note(oa, pt).starts_with("APPLIES")
+}
+
+/// What a run records of itself in its `CLAIM run` line (P-008 sections 3 to 5).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq)]
+struct RunInfo {
+    holdout: bool,
+    frozen: String,
+    candidate: String,
+    /// SHA-256 of the ADS-B clip.
+    clip_sha: String,
+    /// The SFDPS inputs' manifest hash (SHA-256 over the sorted `name:sha256` lines).
+    sfdps_sha: String,
+    replay_hash: String,
+    /// SHA-256 of the `samples.csv` the run wrote.
+    samples_sha: String,
+    /// SHA-256 of the scorer binary.
+    binary_sha: String,
+    /// SHA-256 of the damage report, `none` when there was none.
+    damage_sha: String,
+    /// Total of the excluded windows, seconds.
+    window_total_s: String,
+}
+
+/// The `CLAIM metric=` line of a piece.
+fn claim_metric_line(p: &ClaimPiece) -> String {
+    let better = PRIMARY
+        .iter()
+        .find(|(id, _, _)| *id == p.id)
+        .map_or("?", |(_, lower, _)| if *lower { "lower" } else { "higher" });
+    format!(
+        "CLAIM metric={} better={better} diff={} lo={} hi={} verdict={} floor={} oa3={} pt3={}",
+        p.id,
+        p.diff,
+        p.lo,
+        p.hi,
+        p.verdict.word(),
+        u8::from(p.floor),
+        p.oa3,
+        p.pt3
+    )
+}
+
+/// The machine-readable lines of a run, for `--combine`.
+fn claim_lines(
+    info: &RunInfo,
+    pieces: &[ClaimPiece],
+    windows: &[Window],
+    removed: &[u64],
+) -> String {
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "CLAIM run holdout={} frozen={} candidate={} clip={} sfdps={} replay={} samples={} binary={} damage={} window_total_s={}",
+        u8::from(info.holdout),
+        info.frozen,
+        info.candidate,
+        info.clip_sha,
+        info.sfdps_sha,
+        info.replay_hash,
+        info.samples_sha,
+        info.binary_sha,
+        info.damage_sha,
+        info.window_total_s
+    );
+    for (w, n) in windows.iter().zip(removed) {
+        let _ = writeln!(o, "CLAIM window from={} to={} removed={n}", w.from, w.to);
+    }
+    for p in pieces {
+        let _ = writeln!(o, "{}", claim_metric_line(p));
+    }
+    o
+}
+
+/// A day's parsed `CLAIM` lines.
+// A7.2: cold struct, size guard waived
+struct DayClaim {
+    info: RunInfo,
+    pieces: Vec<ClaimPiece>,
+    /// The excluded windows as `(from, to, grid samples removed)`.
+    windows: Vec<(String, String, u64)>,
+}
+
+/// Reads the `CLAIM` lines of a `p002.txt`. Every primary metric must appear once, its direction
+/// must be the one fixed here, and its verdict must be the one its interval gives.
+fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
+    let mut run: Option<RunInfo> = None;
+    let mut pieces: Vec<ClaimPiece> = Vec::new();
+    let mut windows: Vec<(String, String, u64)> = Vec::new();
+    for line in text.lines().filter_map(|l| l.strip_prefix("CLAIM ")) {
+        let kv: BTreeMap<&str, &str> = line
+            .split_whitespace()
+            .filter_map(|w| w.split_once('='))
+            .collect();
+        let get = |k: &str| {
+            kv.get(k)
+                .copied()
+                .ok_or_else(|| format!("CLAIM line without {k}: {line}"))
+        };
+        if line.starts_with("run ") {
+            if run.is_some() {
+                return Err("two CLAIM run lines".into());
+            }
+            let g = |k: &str| get(k).map(str::to_string);
+            run = Some(RunInfo {
+                holdout: get("holdout")? == "1",
+                frozen: g("frozen")?,
+                candidate: g("candidate")?,
+                clip_sha: g("clip")?,
+                sfdps_sha: g("sfdps")?,
+                replay_hash: g("replay")?,
+                samples_sha: g("samples")?,
+                binary_sha: g("binary")?,
+                damage_sha: g("damage")?,
+                window_total_s: g("window_total_s")?,
+            });
+        } else if line.starts_with("window ") {
+            let n = get("removed")?
+                .parse::<u64>()
+                .map_err(|_| format!("CLAIM removed is not a count: {line}"))?;
+            windows.push((get("from")?.to_string(), get("to")?.to_string(), n));
+        } else {
+            let num = |k: &str| -> Result<f64, String> {
+                get(k)?
+                    .parse::<f64>()
+                    .map_err(|_| format!("CLAIM {k} is not a number: {line}"))
+            };
+            let id = get("metric")?.to_string();
+            let Some((_, lower, _)) = PRIMARY.iter().find(|(p, _, _)| *p == id) else {
+                return Err(format!("CLAIM names a metric that is not primary: {id}"));
+            };
+            if get("better")? != if *lower { "lower" } else { "higher" } {
+                return Err(format!("CLAIM direction of {id} is not the fixed one"));
+            }
+            let (diff, lo, hi) = (num("diff")?, num("lo")?, num("hi")?);
+            let verdict = Verdict::parse(get("verdict")?)
+                .ok_or_else(|| format!("CLAIM verdict unknown: {line}"))?;
+            if verdict != verdict_of(lo, hi, *lower) {
+                return Err(format!(
+                    "CLAIM verdict of {id} is not the one its interval [{lo}, {hi}] gives"
+                ));
+            }
+            let floor = match get("floor")? {
+                "1" => true,
+                "0" => false,
+                f => return Err(format!("CLAIM floor must be 0 or 1, got {f}")),
+            };
+            if pieces.iter().any(|p| p.id == id) {
+                return Err(format!("CLAIM metric {id} appears twice"));
+            }
+            pieces.push(ClaimPiece {
+                id,
+                diff,
+                lo,
+                hi,
+                verdict,
+                floor,
+                oa3: num("oa3")?,
+                pt3: num("pt3")?,
+            });
+        }
+    }
+    let Some(info) = run else {
+        return Err("no CLAIM run line (not a p002.txt of this scorer)".into());
+    };
+    for (id, _, _) in PRIMARY {
+        if !pieces.iter().any(|p| p.id == id) {
+            return Err(format!("no CLAIM line for the primary metric {id}"));
+        }
+    }
+    Ok(DayClaim {
+        info,
+        pieces,
+        windows,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// samples.csv: written, and read back to recompute the primary metrics (P-008 section 4).
+// ---------------------------------------------------------------------------------------------
+
+/// A number at full precision (it reads back exactly), empty when it is not finite.
+fn fmt_full(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v}")
+    } else {
+        String::new()
+    }
+}
+
+/// Columns before the per-system ones, and per system.
+const CSV_LEAD: usize = 6;
+const CSV_PER_SYS: usize = 10;
+
+/// The text of `samples.csv`: one row per grid sample.
+fn samples_csv(rows: &[Row], stamps: &[&str]) -> String {
+    let mut csv = String::new();
+    for st in stamps {
+        let _ = writeln!(csv, "# {st}");
+    }
+    csv.push_str("addr,t_ms,phase,band,common,common_two_way");
+    for p in ["oa", "eram", "pt"] {
+        let _ = write!(
+            csv,
+            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_along_tol_m,{p}_h_tol_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
+        );
+    }
+    csv.push_str(",oa_coast,oa_uncertain,oa_reacquired\n");
+    for r in rows {
+        let _ = write!(
+            csv,
+            "{:06x},{},{},{},{},{}",
+            r.addr,
+            r.t,
+            phase::NAMES
+                .get(usize::from(r.phase))
+                .copied()
+                .unwrap_or(""),
+            band::NAMES.get(usize::from(r.band)).copied().unwrap_or(""),
+            u8::from(r.common()),
+            u8::from(r.two_way())
+        );
+        for v in &r.val {
+            match v {
+                None => csv.push_str(",1,,,,,,,,,"),
+                Some(v) => {
+                    let _ = write!(
+                        csv,
+                        ",0,{},{},{},{},{},{},{},{},{}",
+                        fmt_full(v.pt.cross),
+                        fmt_full(v.pt.along),
+                        fmt_full(v.along_fit),
+                        fmt_full(v.h_fit),
+                        fmt_full(v.along_tol),
+                        fmt_full(v.h_tol),
+                        fmt_full(v.pt.spd),
+                        fmt_full(v.pt.hdg),
+                        v.pt.t - r.t
+                    );
+                }
+            }
+        }
+        let oa = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
+        let _ = writeln!(
+            csv,
+            ",{},{},{}",
+            oa.map_or(String::new(), |p| p.coast.to_string()),
+            oa.map_or(String::new(), |p| tri_text(p.uncertain)),
+            oa.map_or(String::new(), |p| tri_text(p.reacquired))
+        );
+    }
+    csv
+}
+
+/// The grid rows of a `samples.csv` with the columns the primary metrics read (the cross-track,
+/// ground-speed and rounding-tolerant horizontal errors of each system, and which have a value),
+/// and the number of aircraft: one per run of rows with one address.
+fn rows_from_csv(text: &str) -> Result<(Vec<Row>, usize), String> {
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header = lines.next().ok_or("samples.csv is empty")?;
+    if !header.starts_with("addr,t_ms,phase,band,common,common_two_way,oa_miss,") {
+        return Err("samples.csv: unexpected header".into());
+    }
+    let num = |f: &str| -> Result<f64, String> {
+        if f.is_empty() {
+            Ok(f64::NAN)
+        } else {
+            f.parse::<f64>()
+                .map_err(|_| format!("samples.csv: `{f}` is not a number"))
+        }
+    };
+    let mut rows = Vec::new();
+    let mut n_ac = 0usize;
+    let mut last: Option<&str> = None;
+    for l in lines {
+        let f: Vec<&str> = l.split(',').collect();
+        if f.len() != CSV_LEAD + 3 * CSV_PER_SYS + 3 {
+            return Err(format!("samples.csv: a row has {} fields", f.len()));
+        }
+        let at = |i: usize| f.get(i).copied().unwrap_or("");
+        let addr_text = at(0);
+        if last != Some(addr_text) {
+            n_ac += 1;
+            last = Some(addr_text);
+        }
+        let mut val: [Option<Val>; 3] = [None; 3];
+        for (s, slot) in val.iter_mut().enumerate() {
+            let c = CSV_LEAD + s * CSV_PER_SYS;
+            if at(c) == "1" {
+                continue;
+            }
+            let pt = Pt {
+                t: 0,
+                cross: num(at(c + 1))?,
+                along: num(at(c + 2))?,
+                v: f64::NAN,
+                spd: num(at(c + 7))?,
+                hdg: num(at(c + 8))?,
+                coast: 0,
+                uncertain: Tri::Unmatched,
+                reacquired: Tri::Unmatched,
+                phase: 0,
+                band: 0,
+            };
+            *slot = Some(Val {
+                pt,
+                along_fit: num(at(c + 3))?,
+                h_raw: f64::NAN,
+                h_fit: num(at(c + 4))?,
+                along_tol: num(at(c + 5))?,
+                h_tol: num(at(c + 6))?,
+            });
+        }
+        rows.push(Row {
+            ac: n_ac.saturating_sub(1),
+            t: at(1)
+                .parse::<i64>()
+                .map_err(|_| "samples.csv: bad time".to_string())?,
+            addr: u32::from_str_radix(addr_text, 16)
+                .map_err(|_| "samples.csv: bad address".to_string())?,
+            phase: 0,
+            band: 0,
+            val,
+        });
+    }
+    Ok((rows, n_ac))
+}
+
+/// The three primary metrics of a day (P-006 section 3) from its grid rows, with the floor test of
+/// P-008 section 3. Used by the run and, on the rows read back from `samples.csv`, by `--combine`.
+fn claim_pieces(rows: &[Row], n_ac: usize, draws: &[Vec<u32>]) -> Vec<ClaimPiece> {
+    let all = |_: &Row| true;
+    let share_point = |c: &Cnt| {
+        let (n, d) = c.point();
+        if d == 0 {
+            f64::NAN
+        } else {
+            n as f64 / d as f64
+        }
+    };
+    let m1 = metric(rows, n_ac, draws, Kind::Cross, &all, Set::Two);
+    let f1 = metric(rows, n_ac, &[], Kind::Cross, &all, Set::Three);
+    let m5 = metric(rows, n_ac, draws, Kind::Speed, &all, Set::Two);
+    let f5 = metric(rows, n_ac, &[], Kind::Speed, &all, Set::Three);
+    let (c4t, _) = m4_counts(rows, n_ac, |v| v.h_tol, 300.0);
+    let (oa4, er4) = (&c4t[OA], &c4t[ER]);
+    let (ba, bb) = (oa4.boot(draws), er4.boot(draws));
+    let (lo4, hi4) = interval(ba.iter().zip(&bb).map(|(x, y)| x - y));
+    let d4 = share_point(oa4) - share_point(er4);
+    let (o4, p4) = (share_point(oa4), share_point(&c4t[PT]));
+    let (d1, lo1, hi1) = diff_of(&m1, 0);
+    let (d5, lo5, hi5) = diff_of(&m5, 0);
+    let vals = [
+        (d1, lo1, hi1, pv(&f1, OA, 0), pv(&f1, PT, 0)),
+        (d5, lo5, hi5, pv(&f5, OA, 0), pv(&f5, PT, 0)),
+        (d4, lo4, hi4, o4, p4),
+    ];
+    PRIMARY
+        .iter()
+        .zip(vals)
+        .map(|((id, lower, _), (diff, lo, hi, oa3, pt3))| ClaimPiece {
+            id: (*id).to_string(),
+            diff,
+            lo,
+            hi,
+            verdict: verdict_of(lo, hi, *lower),
+            floor: floor_applies(oa3, pt3),
+            oa3,
+            pt3,
+        })
+        .collect()
+}
+
+/// One day's files for `--combine`: its `p002.txt` and `samples.csv`, as bytes read.
+// A7.2: cold struct, size guard waived
+struct DayFiles<'a> {
+    txt: &'a str,
+    csv: &'a str,
+}
+
+/// The cross-day claim rule (P-006 section 3, with P-008 sections 3 and 4): for each primary
+/// metric, OpenATCA's favour on day A and on day B, day C not in ERAM's favour, and the reference
+/// floor not applying on any day. The three days must be three different clips, each run's
+/// `samples.csv` must be the one it recorded, every run a hold-out run at one binary and one pair
+/// of full commit ids, and the primary metrics recomputed from the three `samples.csv` files must
+/// equal the recorded `CLAIM` lines.
+fn combine(days: [DayFiles<'_>; 3]) -> Result<String, String> {
+    let mut parsed = Vec::new();
+    for (name, d) in ["A", "B", "C"].iter().zip(&days) {
+        let c = parse_claim_lines(d.txt).map_err(|e| format!("hold-out {name}: {e}"))?;
+        if !c.info.holdout {
+            return Err(format!(
+                "hold-out {name} is not a hold-out run (development or dirty-tree runs are not scores)"
+            ));
+        }
+        for (what, v) in [("frozen", &c.info.frozen), ("candidate", &c.info.candidate)] {
+            if !is_full_sha(v) {
+                return Err(format!(
+                    "hold-out {name}: the {what} commit is `{v}`, not a full 40-hex commit id"
+                ));
+            }
+        }
+        let sha = to_hex(&sha256(d.csv.as_bytes()));
+        if sha != c.info.samples_sha {
+            return Err(format!(
+                "hold-out {name}: samples.csv has SHA-256 {sha}, not the {} its run recorded",
+                c.info.samples_sha
+            ));
+        }
+        // The recomputation: same rows, same bootstrap and seed, same code.
+        let (rows, n_ac) = rows_from_csv(d.csv).map_err(|e| format!("hold-out {name}: {e}"))?;
+        let re = claim_pieces(&rows, n_ac, &draws_of(n_ac));
+        for (a, b) in re.iter().zip(&c.pieces) {
+            if claim_metric_line(a) != claim_metric_line(b) {
+                return Err(format!(
+                    "hold-out {name}: the primary metrics recomputed from samples.csv differ from its CLAIM line:\n  recomputed {}\n  recorded   {}",
+                    claim_metric_line(a),
+                    claim_metric_line(b)
+                ));
+            }
+        }
+        parsed.push(c);
+    }
+    let [a, b, c] = parsed.as_slice() else {
+        return Err("three days are needed".into());
+    };
+    let same =
+        |f: &dyn Fn(&RunInfo) -> &String| f(&b.info) == f(&a.info) && f(&c.info) == f(&a.info);
+    if !same(&|i| &i.frozen) || !same(&|i| &i.candidate) {
+        return Err(format!(
+            "the days were not scored at one commit pair: A {}/{}, B {}/{}, C {}/{}",
+            a.info.frozen,
+            a.info.candidate,
+            b.info.frozen,
+            b.info.candidate,
+            c.info.frozen,
+            c.info.candidate
+        ));
+    }
+    if !same(&|i| &i.binary_sha) {
+        return Err("the days were not scored by one scorer binary".into());
+    }
+    let clips = [&a.info.clip_sha, &b.info.clip_sha, &c.info.clip_sha];
+    if clips[0] == clips[1] || clips[0] == clips[2] || clips[1] == clips[2] {
+        return Err(format!(
+            "the three days are not three different clips (clip hashes {}, {}, {})",
+            clips[0], clips[1], clips[2]
+        ));
+    }
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "P-006 claim rule over hold-outs A, B, C (scored commit {}, candidate {}; scorer binary {})",
+        a.info.frozen, a.info.candidate, a.info.binary_sha
+    );
+    let _ = writeln!(
+        o,
+        "rule: the 95% interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour on A and on B, and C's interval does not exclude zero in ERAM's favour; a metric at the reference floor on any day gives no claim (P-008 section 3)"
+    );
+    for (day, d) in [("A", a), ("B", b), ("C", c)] {
+        for (f, t, n) in &d.windows {
+            let _ = writeln!(
+                o,
+                "{day}: excluded window {f} to {t}: {n} grid samples removed"
+            );
+        }
+    }
+    for (id, _, name) in PRIMARY {
+        let piece = |d: &DayClaim| d.pieces.iter().find(|p| p.id == id).cloned();
+        let ps = [piece(a), piece(b), piece(c)];
+        let v = |p: &Option<ClaimPiece>| p.as_ref().map_or(Verdict::Neither, |p| p.verdict);
+        let (va, vb, vc) = (v(&ps[0]), v(&ps[1]), v(&ps[2]));
+        let floor = ps.iter().any(|p| p.as_ref().is_some_and(|p| p.floor));
+        let met = va == Verdict::OpenAtca && vb == Verdict::OpenAtca && vc != Verdict::Eram;
+        let line = if floor {
+            "AT REFERENCE FLOOR: no claim"
+        } else if met {
+            "RULE MET"
+        } else {
+            "RULE NOT MET"
+        };
+        let _ = writeln!(o, "{name}: {line}");
+        for (day, p, vd) in [("A", &ps[0], va), ("B", &ps[1], vb), ("C", &ps[2], vc)] {
+            let _ = writeln!(
+                o,
+                "  {day}: difference {} [{}, {}]: {}; reference floor {} (OpenATCA {}, passthrough {} on the three-way set)",
+                p.as_ref().map_or(f64::NAN, |p| p.diff),
+                p.as_ref().map_or(f64::NAN, |p| p.lo),
+                p.as_ref().map_or(f64::NAN, |p| p.hi),
+                vd.text(),
+                if p.as_ref().is_some_and(|p| p.floor) {
+                    "APPLIES"
+                } else {
+                    "does not apply"
+                },
+                p.as_ref().map_or(f64::NAN, |p| p.oa3),
+                p.as_ref().map_or(f64::NAN, |p| p.pt3)
+            );
+        }
+    }
+    let _ = writeln!(
+        o,
+        "A claim of 'better than ERAM' may be made of a primary metric only if its rule is met, with the inputs, set sizes and exclusions of P-006 section 8 beside it."
+    );
+    Ok(o)
 }
 
 fn peak_rss_mb() -> f64 {
@@ -1319,177 +2915,70 @@ fn peak_rss_mb() -> f64 {
         .map_or(f64::NAN, |kb| kb / 1024.0)
 }
 
-fn fmt_opt(v: Option<f64>, prec: usize) -> String {
-    v.filter(|x| x.is_finite())
-        .map_or(String::new(), |x| format!("{x:.prec$}"))
+/// What the SFDPS loader and the clip reader reported of damage and drops, for the output
+/// (P-006 section 6 needs the numbers on the record).
+// A7.2: cold struct, size guard waived
+struct Damage {
+    clip_bad_frames: u64,
+    clip_dropped_records: u64,
+    clip_sealed: u64,
+    sfdps_sealed: u64,
+    replay_hash: String,
+    notes: Vec<String>,
+    counts: Vec<String>,
 }
 
-fn run(
-    clip_path: &Path,
-    sfdps: &Path,
-    out_dir: &Path,
-    label: &str,
-    git: &GitState,
-    mode: Mode,
-) -> Result<String, String> {
-    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    let t_start = Instant::now();
-
-    // Tracker on set A (as vs_eram).
-    // The clip's count and the SFDPS loader's, each input once, printed when this function
-    // returns, an error included.
-    let mut drops = oa_sealed::DropReport::new();
-    let mut clip_sealed = 0u64;
-    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
-    drops.add(clip_sealed);
-    let clip = clip.map_err(|e| e.to_string())?;
-    let clip_hash = clip.hash.clone();
-    let (set_a, set_b, split) = split_reports(&clip.reports);
-    oa_bench::split_check::check_split(&set_a, &set_b)
-        .map_err(|v| format!("split refused: {v:?}"))?;
-    drop(clip);
-    let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
-    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
-        n: 0,
-        p50_ns: 1_000_000_000,
-        p90_ns: 1_000_000_000,
-        p99_ns: 1_000_000_000,
-    });
-    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
-    let spill = out_dir.join(format!("spill-{}", std::process::id()));
-    let t_track = Instant::now();
-    let run = run_tracker_spilled(&meas, &cfg, &spill).map_err(|e| e.to_string())?;
-    let track_secs = t_track.elapsed().as_secs_f64();
-    let n_meas = meas.len();
-    let withheld = run.stats.rows_uncertain;
-    drop(meas);
-    eprintln!("tracker done in {track_secs:.1} s");
-
-    // Reference from set B only.
-    let tcfg = TRUTH_DEFAULT;
-    let built = adsb_truth::build(&set_b, &tcfg).map_err(|e| format!("truth: {e}"))?;
-    drop(set_b);
-    let q = |a: u32, t: i64| adsb_truth::query(&built.truth, a, t);
-    let truth = Truth {
-        query: &q,
-        legs: &built.legs,
-    };
-    let mut rcfg = RunConfig::default();
-    rcfg.pair.max_sigma_m = tcfg.max_sigma95_h_m;
-    // frozen p002 protocol: scored without the hint-over-plan rule (OA-BENCH-132 came later)
-    rcfg.assoc.hint_over_plan = false;
-    let tix = truth_index(&truth);
-    eprintln!("reference built");
-
-    // OpenATCA pairs, one address range at a time (each aircraft is in one range).
-    let mut oa_pts: PerAc = BTreeMap::new();
-    let mut oa_drop = Dropped::default();
-    let mut oa_ex = Exclusions::new();
-    let mut oa_assoc = [0u64; astatus::COUNT];
-    let mut oa_rows = 0u64;
-    let (mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64);
-    let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
-    for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
-        let r = run
-            .rows_in(RowSet::Ticks, range.0, range.1)
-            .map_err(|e| e.0)?;
-        let legacy = legacy_from_track_samples_by_leg(
-            &TrackSamples {
-                addr: &r.addr,
-                t_ns: &r.t_ns,
-                lat_e7: &r.lat_e7,
-                lon_e7: &r.lon_e7,
-                alt_ft: &r.alt_ft,
-                vel_east_mps: &r.vel_east_mps,
-                vel_north_mps: &r.vel_north_mps,
-                coast: &r.coast,
-            },
-            truth.legs,
-        )
-        .map_err(|e| format!("track samples: {e:?}"))?;
-        oa_rows += r.addr.len() as u64;
-        // The tracker's flags by (address, row time in ms), duplicates counted.
-        let flags = flag_join(&r.addr, &r.t_ns, &r.uncertain, &r.reacquired)?;
-        drop(r);
-        flag_dup_rows += flags.duplicate_rows;
-        flag_conflicts += flags.conflict_keys;
-        let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
-        let first_new: BTreeSet<u32> = flags.map.keys().map(|k| k.0).collect();
-        points_of(&p.pairs, &mut oa_pts, &mut oa_drop);
-        for a in first_new {
-            for pt in oa_pts.get_mut(&a).into_iter().flatten() {
-                let (u, re) = flag_lookup(&flags, a, pt.t);
-                pt.uncertain = u;
-                pt.reacquired = re;
-            }
-        }
-        for (k, v) in p.ex {
-            *oa_ex.entry(k).or_default() += v;
-        }
-        for (a, b) in oa_assoc.iter_mut().zip(p.assoc_counts) {
-            *a += b;
-        }
+/// The ingest counts of a loaded legacy table as lines of text.
+fn counts_lines(c: &oa_bench::legacy::Counts) -> Vec<String> {
+    let mut v = vec![
+        format!(
+            "documents offered (SFDPS, TBFM, TFMS): {:?}; refused by the parser or decoder: {:?}",
+            c.docs, c.doc_errors
+        ),
+        format!(
+            "SFDPS messages rejected: {}; SFDPS field errors in kept rows: {}; rows not decoded (past the table size): {}",
+            c.sfdps_rejected, c.sfdps_field_errors, c.rows_not_decoded
+        ),
+        format!(
+            "TBFM flights refused: {}; TFMS messages refused: {}",
+            c.tbfm_rejected, c.tfms_rejected
+        ),
+        format!(
+            "rows that did not fit, by table (flights, th, handoffs, routes, tbfm, tfms): {}, {}, {}, {}, {}, {}",
+            c.overflow_flights,
+            c.overflow_th,
+            c.overflow_handoffs,
+            c.overflow_routes,
+            c.overflow_tbfm,
+            c.overflow_tfms
+        ),
+        format!(
+            "TH samples with a coast indicator: {}; without altitude: {}; records left out in a sealed window: {}",
+            c.th_coast, c.th_no_alt, c.sealed_window_dropped
+        ),
+    ];
+    for (k, n) in &c.reasons {
+        v.push(format!("drop reason: {k}: {n}"));
     }
-    drop(run);
-    let _ = fs::remove_dir_all(&spill);
-    eprintln!("OpenATCA paired aircraft: {}", oa_pts.len());
-    // A hold-out score needs every sample's flags: an unmatched sample is not scored as if its
-    // flags were "no" (E6, G6). Every point is counted, whichever way the join reached it.
-    let flag_unmatched = unmatched_points(&oa_pts);
-    flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
+    v
+}
 
-    // ERAM pairs.
-    // Every file of the directory is checked against the sealed list as it is opened.
-    let open: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
-        oa_sealed::refuse_io(p)?;
-        oa_bench::input::file_opener()(p)
-    });
-    let mut sfdps_sealed = 0u64;
-    let loaded = load_counted(
-        &[FeedInput {
-            feed: FeedKind::Sfdps,
-            dir: sfdps.to_path_buf(),
-        }],
-        &open,
-        msg_limit(),
-        &mut sfdps_sealed,
-    );
-    drops.add(sfdps_sealed);
-    let loaded = loaded.map_err(|e| e.to_string())?;
-    let sfdps_inputs: Vec<String> = loaded
-        .inputs
-        .iter()
-        .map(|h| {
-            format!(
-                "{} files={} bytes={} sha256={}",
-                h.label, h.files, h.bytes, h.sha256
-            )
-        })
-        .collect();
-    let ep = pair_legacy(&loaded.legacy, &truth, &tix, &rcfg);
-    drop(loaded);
-    let mut er_pts: PerAc = BTreeMap::new();
-    let mut er_drop = Dropped::default();
-    points_of(&ep.pairs, &mut er_pts, &mut er_drop);
-    eprintln!("ERAM paired aircraft: {}", er_pts.len());
-
-    // Passthrough: for each grid sample, the nearest set-A report of that aircraft within 0.5 s.
-    let by_addr_time: Vec<(u32, i64, u32)> = {
-        let mut v: Vec<(u32, i64, u32)> = set_a
-            .icao
-            .iter()
-            .zip(&set_a.time_ns)
-            .enumerate()
-            .map(|(i, (&a, &t))| (a, t, i as u32))
-            .collect();
-        v.sort_unstable();
-        v
-    };
+/// The passthrough baseline for the grid `grid` (sample times, Unix ms, by address): for each
+/// grid sample the nearest set-A report of that aircraft within 0.5 s, paired with the reference.
+/// Returns the paired table and the number of distinct reports chosen.
+fn passthrough_pairs(
+    set_a: &oa_adsb::Reports,
+    by_addr_time: &[(u32, i64, u32)],
+    grid: &TimesBy,
+    truth: &Truth<'_>,
+    tix: &TruthIndex,
+    rcfg: &RunConfig,
+) -> Result<(Paired, usize), String> {
     let tol_ns = TOL_MS * 1_000_000;
     let mut chosen: BTreeSet<u32> = BTreeSet::new();
-    for (&a, v) in &er_pts {
-        for s in v {
-            let t = s.t * 1_000_000;
+    for (&a, v) in grid {
+        for &tms in v {
+            let t = tms * 1_000_000;
             let i = by_addr_time.partition_point(|x| (x.0, x.1) < (a, t));
             let before = i
                 .checked_sub(1)
@@ -1507,7 +2996,6 @@ fn run(
             }
         }
     }
-    drop(by_addr_time);
     let mut order: Vec<(u32, i64, u32)> = chosen
         .iter()
         .filter_map(|&i| {
@@ -1548,9 +3036,7 @@ fn run(
         }
         c_coast.push(false);
     }
-    let set_a_reports = reports_len(&set_a);
-    drop(set_a);
-    let pt_legacy = legacy_from_track_samples_by_leg(
+    let legacy = legacy_from_track_samples_by_leg(
         &TrackSamples {
             addr: &c_addr,
             t_ns: &c_t,
@@ -1564,77 +3050,365 @@ fn run(
         truth.legs,
     )
     .map_err(|e| format!("passthrough samples: {e:?}"))?;
-    let pp = pair_legacy(&pt_legacy, &truth, &tix, &rcfg);
-    let mut pt_pts: PerAc = BTreeMap::new();
-    let mut pt_drop = Dropped::default();
-    points_of(&pp.pairs, &mut pt_pts, &mut pt_drop);
-    eprintln!("passthrough paired aircraft: {}", pt_pts.len());
+    Ok((pair_legacy(&legacy, truth, tix, rcfg), c_addr.len()))
+}
 
-    // The grid.
-    let mut rows: Vec<Row> = Vec::new();
-    let mut ac_addr: Vec<u32> = Vec::new();
-    // Misses per system: [aircraft has no paired samples, no paired sample within 0.5 s].
-    let mut miss = [[0u64; 2]; 3];
-    for (&addr, ev) in &er_pts {
-        let ac = ac_addr.len();
-        ac_addr.push(addr);
-        let others = [oa_pts.get(&addr), None, pt_pts.get(&addr)];
-        for s in ev {
-            let mut val: [Option<Val>; 3] = [None; 3];
-            for (k, slot) in val.iter_mut().enumerate() {
-                let p = if k == ER {
-                    Some(*s)
-                } else {
-                    match others.get(k).copied().flatten() {
-                        None => {
-                            if let Some(m) = miss.get_mut(k).and_then(|m| m.get_mut(0)) {
-                                *m += 1;
-                            }
-                            None
-                        }
-                        Some(v) => {
-                            let n = nearest(v, s.t).copied();
-                            if n.is_none() {
-                                if let Some(m) = miss.get_mut(k).and_then(|m| m.get_mut(1)) {
-                                    *m += 1;
-                                }
-                            }
-                            n
-                        }
-                    }
-                };
-                *slot = p.map(|pt| Val {
-                    pt,
-                    along_fit: pt.along,
-                    h_raw: pt.cross.hypot(pt.along),
-                    h_fit: pt.cross.hypot(pt.along),
-                    along_tol: along_tol(pt.along, pt.v),
-                    h_tol: pt.cross.hypot(along_tol(pt.along, pt.v)),
-                });
+/// What a run was asked for besides its inputs and output.
+#[derive(Clone, Copy)]
+// A7.2: cold struct, size guard waived
+struct Opts<'a> {
+    label: &'a str,
+    mode: Mode,
+    commits: &'a Commits,
+    /// Hand-typed windows (development runs only).
+    windows: &'a [Window],
+    /// The `oa-feed-gaps` report (its windows are the only ones of a hold-out run).
+    damage: Option<&'a DamageReport>,
+    ledger: &'a Path,
+}
+
+fn run(
+    clip_path: &Path,
+    sfdps: &Path,
+    out_dir: &Path,
+    git: &GitState,
+    opts: &Opts<'_>,
+) -> Result<String, String> {
+    let Opts {
+        label,
+        mode,
+        commits,
+        windows: hand_windows,
+        damage,
+        ledger,
+    } = *opts;
+    let partials_left = outputs_free(out_dir)?;
+    let windows_all: Vec<Window> = hand_windows
+        .iter()
+        .chain(damage.iter().flat_map(|d| d.windows.iter()))
+        .cloned()
+        .collect();
+    let windows = windows_all.as_slice();
+    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    let t_start = Instant::now();
+
+    // Tracker on set A (as vs_eram).
+    // The clip's count and the SFDPS loader's, each input once, printed when this function
+    // returns, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
+    let clip_hash = clip.hash.clone();
+    // P-008 section 5: a clip already scored is refused, whatever the mode.
+    if ledger_has(ledger, &clip_hash.sha256)? {
+        return Err(format!(
+            "the clip {} is already in the ledger {}: one result per day",
+            clip_hash.sha256,
+            ledger.display()
+        ));
+    }
+    // P-008 section 2: the damage report is that of the window being scored.
+    if let Some(d) = damage {
+        let t = &clip.reports.time_ns;
+        let (first, last) = (
+            t.iter().copied().min().unwrap_or(i64::MAX),
+            t.iter().copied().max().unwrap_or(i64::MIN),
+        );
+        let guard: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+            oa_sealed::refuse_io(p)?;
+            oa_bench::input::file_opener()(p)
+        });
+        let (s_first, s_last) = sfdps_span(sfdps, &guard)?;
+        damage_matches_clip(d, first, last, s_first, s_last)?;
+    }
+    let (clip_bad_frames, clip_dropped_records) = (clip.bad_frames, clip.dropped_records);
+    let (set_a, set_b, split) = split_reports(&clip.reports);
+    oa_bench::split_check::check_split(&set_a, &set_b)
+        .map_err(|v| format!("split refused: {v:?}"))?;
+    drop(clip);
+    let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
+    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
+        n: 0,
+        p50_ns: 1_000_000_000,
+        p90_ns: 1_000_000_000,
+        p99_ns: 1_000_000_000,
+    });
+    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let spill = out_dir.join(format!("spill-{}", std::process::id()));
+    let t_track = Instant::now();
+    let run = run_tracker_spilled(&meas, &cfg, &spill).map_err(|e| e.to_string())?;
+    let track_secs = t_track.elapsed().as_secs_f64();
+    let n_meas = meas.len();
+    let withheld = run.stats.rows_uncertain;
+    drop(meas);
+    eprintln!("tracker done in {track_secs:.1} s");
+
+    // Reference from set B only.
+    let tcfg = TRUTH_DEFAULT;
+    let built = adsb_truth::build(&set_b, &tcfg).map_err(|e| format!("truth: {e}"))?;
+    drop(set_b);
+    let q = |a: u32, t: i64| adsb_truth::query(&built.truth, a, t);
+    let truth = Truth {
+        query: &q,
+        legs: &built.legs,
+    };
+    let mut rcfg = RunConfig::default();
+    rcfg.pair.max_sigma_m = tcfg.max_sigma95_h_m;
+    // frozen p002 protocol: scored without the hint-over-plan rule (OA-BENCH-132 came later)
+    rcfg.assoc.hint_over_plan = false;
+    let tix = truth_index(&truth);
+    let legs = LegIndex::new(truth.legs);
+    eprintln!("reference built");
+
+    // ERAM pairs come first: the grid is ERAM's paired samples, and every system is scored on the
+    // truth legs that hold them (P-004 section 1).
+    // Every file of the directory is checked against the sealed list as it is opened.
+    let open: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+        oa_sealed::refuse_io(p)?;
+        oa_bench::input::file_opener()(p)
+    });
+    let mut sfdps_sealed = 0u64;
+    let loaded = load_counted(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: sfdps.to_path_buf(),
+        }],
+        &open,
+        msg_limit(),
+        &mut sfdps_sealed,
+    );
+    drops.add(sfdps_sealed);
+    let loaded = loaded.map_err(|e| e.to_string())?;
+    let sfdps_manifest = loaded
+        .inputs
+        .iter()
+        .map(|h| h.sha256.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sfdps_inputs: Vec<String> = loaded
+        .inputs
+        .iter()
+        .map(|h| {
+            format!(
+                "{} files={} bytes={} sha256={}",
+                h.label, h.files, h.bytes, h.sha256
+            )
+        })
+        .collect();
+    let loader = Damage {
+        clip_bad_frames,
+        clip_dropped_records,
+        clip_sealed,
+        sfdps_sealed,
+        replay_hash: loaded.replay_hash.clone(),
+        notes: loaded.notes.clone(),
+        counts: counts_lines(&loaded.legacy.counts),
+    };
+    let ep = pair_legacy(&loaded.legacy, &truth, &tix, &rcfg);
+    drop(loaded);
+    let mut er_pts: PerAc = BTreeMap::new();
+    let mut er_drop = Dropped::default();
+    pair_points(
+        &ep.pairs,
+        Some(&most_paired_flights(&ep.pairs)),
+        &|_, _| true,
+        &mut er_pts,
+        &mut er_drop,
+    );
+    let mut er_old: TimesBy = BTreeMap::new();
+    old_rule_times(&ep.pairs, &mut er_old);
+    // P-007: the samples inside an excluded window leave the grid for every system alike. The
+    // scored legs, the passthrough pairs and the other systems' samples are made from the grid
+    // as it was, so no remaining value changes.
+    let (scored, er_grid, win_removed, n_win_removed) = plan_grid(&er_pts, &legs, windows);
+    let er_old_win = {
+        let t = |m: &TimesBy| -> TimesBy {
+            m.iter()
+                .map(|(&a, v)| {
+                    (
+                        a,
+                        v.iter()
+                            .copied()
+                            .filter(|&t| !windows.iter().any(|w| w.holds_ms(t)))
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        t(&er_old)
+    };
+    let on_leg = |a: u32, t: i64| on_scored_leg(&scored, &legs, a, t);
+    eprintln!("ERAM paired aircraft: {}", er_pts.len());
+
+    // OpenATCA pairs, one address range at a time (each aircraft is in one range).
+    let mut oa_pts: PerAc = BTreeMap::new();
+    let mut oa_drop = Dropped::default();
+    let mut oa_ex = Exclusions::new();
+    let mut oa_assoc = [0u64; astatus::COUNT];
+    let mut oa_rows = 0u64;
+    let mut oa_old: TimesBy = BTreeMap::new();
+    // Every output row time (ms) of the grid aircraft, for the miss classes.
+    let mut oa_row_times: TimesBy = BTreeMap::new();
+    let mut n_reacq_updates = 0u64;
+    let (mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64);
+    let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
+    for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
+        let r = run
+            .rows_in(RowSet::Ticks, range.0, range.1)
+            .map_err(|e| e.0)?;
+        let legacy = legacy_from_track_samples_by_leg(
+            &TrackSamples {
+                addr: &r.addr,
+                t_ns: &r.t_ns,
+                lat_e7: &r.lat_e7,
+                lon_e7: &r.lon_e7,
+                alt_ft: &r.alt_ft,
+                vel_east_mps: &r.vel_east_mps,
+                vel_north_mps: &r.vel_north_mps,
+                coast: &r.coast,
+            },
+            truth.legs,
+        )
+        .map_err(|e| format!("track samples: {e:?}"))?;
+        oa_rows += r.addr.len() as u64;
+        for (&a, &t) in r.addr.iter().zip(&r.t_ns) {
+            if er_pts.contains_key(&a) {
+                oa_row_times
+                    .entry(a)
+                    .or_default()
+                    .push(t.div_euclid(1_000_000));
             }
-            rows.push(Row {
-                ac,
-                addr,
-                t: s.t,
-                phase: s.phase,
-                band: s.band,
-                val,
-            });
+        }
+        // The tracker's flags by (address, row time in ms), duplicates counted.
+        let flags = flag_join(&r.addr, &r.t_ns, &r.uncertain, &r.reacquired)?;
+        drop(r);
+        // P-004 section 2: the update rows flagged reacquired (the tick rows never carry it).
+        let up = run
+            .rows_in(RowSet::Updates, range.0, range.1)
+            .map_err(|e| e.0)?;
+        let mut reacq: TimesBy = BTreeMap::new();
+        for ((&a, &t), &re) in up.addr.iter().zip(&up.t_ns).zip(&up.reacquired) {
+            if re {
+                reacq.entry(a).or_default().push(t.div_euclid(1_000_000));
+                n_reacq_updates += 1;
+            }
+        }
+        for v in reacq.values_mut() {
+            v.sort_unstable();
+        }
+        drop(up);
+        flag_dup_rows += flags.duplicate_rows;
+        flag_conflicts += flags.conflict_keys;
+        let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
+        old_rule_times(&p.pairs, &mut oa_old);
+        let mut local: PerAc = BTreeMap::new();
+        pair_points(&p.pairs, None, &on_leg, &mut local, &mut oa_drop);
+        for (a, v) in &mut local {
+            for pt in v {
+                let (u, re) = flag_lookup(&flags, *a, pt.t);
+                pt.uncertain = u;
+                // A sample with no tracker row stays unmatched; otherwise the group is the window.
+                pt.reacquired = if re == Tri::Unmatched {
+                    Tri::Unmatched
+                } else {
+                    tri_of(reacquired_at(reacq.get(a).map(Vec::as_slice), pt.t))
+                };
+            }
+        }
+        for (a, v) in local {
+            oa_pts.entry(a).or_default().extend(v);
+        }
+        for (k, v) in p.ex {
+            *oa_ex.entry(k).or_default() += v;
+        }
+        for (a, b) in oa_assoc.iter_mut().zip(p.assoc_counts) {
+            *a += b;
         }
     }
+    for v in oa_row_times.values_mut() {
+        v.sort_unstable();
+    }
+    drop(run);
+    let _ = fs::remove_dir_all(&spill);
+    eprintln!("OpenATCA paired aircraft: {}", oa_pts.len());
+
+    // Passthrough: for each grid sample, the nearest set-A report of that aircraft within 0.5 s.
+    let by_addr_time: Vec<(u32, i64, u32)> = {
+        let mut v: Vec<(u32, i64, u32)> = set_a
+            .icao
+            .iter()
+            .zip(&set_a.time_ns)
+            .enumerate()
+            .map(|(i, (&a, &t))| (a, t, i as u32))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    // The set-A report times (ms) of the grid aircraft: the passthrough's rows, for the miss classes.
+    let mut pt_row_times: TimesBy = BTreeMap::new();
+    for &(a, t, _) in &by_addr_time {
+        if er_pts.contains_key(&a) {
+            pt_row_times
+                .entry(a)
+                .or_default()
+                .push(t.div_euclid(1_000_000));
+        }
+    }
+    let er_times = times_of(&er_pts);
+    let (pp, pt_chosen) = passthrough_pairs(&set_a, &by_addr_time, &er_times, &truth, &tix, &rcfg)?;
+    let mut pt_pts: PerAc = BTreeMap::new();
+    let mut pt_drop = Dropped::default();
+    pair_points(&pp.pairs, None, &on_leg, &mut pt_pts, &mut pt_drop);
+    eprintln!("passthrough paired aircraft: {}", pt_pts.len());
+    // The replaced rule's passthrough, on the replaced rule's grid (coverage record only).
+    let (pp_old, _) = passthrough_pairs(&set_a, &by_addr_time, &er_old, &truth, &tix, &rcfg)?;
+    let mut pt_old: TimesBy = BTreeMap::new();
+    old_rule_times(&pp_old.pairs, &mut pt_old);
+    drop(pp_old);
+    drop(by_addr_time);
+    let set_a_reports = reports_len(&set_a);
+    drop(set_a);
+    let old_cov = [
+        old_rule_coverage(&er_old_win, &oa_old),
+        old_rule_coverage(&er_old_win, &er_old),
+        old_rule_coverage(&er_old_win, &pt_old),
+    ];
+    drop((oa_old, pt_old, er_old));
+
+    // The grid.
+    let g = build_grid(
+        &er_grid,
+        &oa_pts,
+        &pt_pts,
+        [&oa_row_times, &er_times, &pt_row_times],
+    );
+    let Grid {
+        mut rows,
+        ac_addr,
+        miss,
+        classes,
+    } = g;
     let n_ac = ac_addr.len();
     let grid = rows.len();
     let n_common = rows.iter().filter(|r| r.common()).count();
+    let n_two = rows.iter().filter(|r| r.two_way()).count();
+    // A hold-out score needs every scored sample's flags: an unmatched sample is not scored as if
+    // its flags were "no" (E6, G6). Counted over the OpenATCA rows matched to a grid sample.
+    let flag_unmatched = unmatched_rows(&rows);
+    flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
 
-    // Per-aircraft, per-system time offsets, fitted on the aircraft's common samples and applied
-    // to all of its samples.
+    // Per-aircraft, per-system time offsets, applied to all of the aircraft's samples. P-008
+    // section 1: OpenATCA's and ERAM's are fitted on the two-way common set (the set the claim is
+    // made on); the passthrough's on the three-way set, the only one where it has values.
     let mut taus: Vec<[Option<f64>; 3]> = vec![[None; 3]; n_ac];
     for (ac, tau) in taus.iter_mut().enumerate() {
         for (s, slot) in tau.iter_mut().enumerate() {
             *slot = fit_tau(
                 of_ac(&rows, ac)
                     .iter()
-                    .filter(|r| r.common())
+                    .filter(|r| in_fit_set(r, s))
                     .filter_map(|r| r.val.get(s).and_then(|v| v.as_ref()))
                     .map(|v| (v.pt.along, v.pt.v)),
             );
@@ -1655,21 +3429,55 @@ fn run(
             }
         }
     }
-    eprintln!("grid {grid} samples, {n_common} common, {n_ac} aircraft");
+    eprintln!("grid {grid} samples, {n_two} two-way, {n_common} three-way, {n_ac} aircraft");
 
     // Bootstrap draws and metrics.
     let draws = draws_of(n_ac);
     let all = |_: &Row| true;
-    let m1 = metric(&rows, n_ac, &draws, Kind::Cross, &all);
-    let m2r = metric(&rows, n_ac, &draws, Kind::AlongRaw, &all);
-    let m2f = metric(&rows, n_ac, &draws, Kind::AlongFit, &all);
-    let m3 = metric(&rows, n_ac, &draws, Kind::HFit, &all);
-    let m2t = metric(&rows, n_ac, &draws, Kind::AlongTol, &all);
-    let m3t = metric(&rows, n_ac, &draws, Kind::HTol, &all);
-    let m5s = metric(&rows, n_ac, &draws, Kind::Speed, &all);
-    let m5t = metric(&rows, n_ac, &draws, Kind::Track, &all);
+    // Each table is on the two-way set; the three-way values, point values only (no resamples),
+    // are for the reference-floor test.
+    let two = |k: Kind| metric(&rows, n_ac, &draws, k, &all, Set::Two);
+    let three = |k: Kind| metric(&rows, n_ac, &[], k, &all, Set::Three);
+    let m1 = two(Kind::Cross);
+    let m2r = two(Kind::AlongRaw);
+    let m2f = two(Kind::AlongFit);
+    let m3 = two(Kind::HFit);
+    let m2t = two(Kind::AlongTol);
+    let m3t = two(Kind::HTol);
+    let m5s = two(Kind::Speed);
+    let m5t = two(Kind::Track);
     eprintln!("main metrics bootstrapped");
 
+    // samples.csv, and what the run records of itself for `--combine` (P-008 sections 3 to 5).
+    let mut stamps: Vec<&str> = Vec::new();
+    if git_is_dirty(git) {
+        stamps.push(DIRTY_STAMP);
+    }
+    if mode.development {
+        stamps.push(DEV_STAMP);
+    }
+    let csv = samples_csv(&rows, &stamps);
+    let binary_sha = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|p| {
+            // seal-allow: the scorer's own executable, not input data (the guard refuses a hard-linked build output)
+            fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))
+        })
+        .map_or_else(|e| format!("unavailable ({e})"), |b| to_hex(&sha256(&b)));
+    let window_total_ns: i64 = windows.iter().map(|w| w.to_ns - w.from_ns).sum();
+    let info = RunInfo {
+        holdout: mode.holdout,
+        frozen: commits.frozen.clone().unwrap_or_else(|| "none".into()),
+        candidate: commits.candidate.clone().unwrap_or_else(|| "none".into()),
+        clip_sha: clip_hash.sha256.clone(),
+        sfdps_sha: sfdps_manifest.clone(),
+        replay_hash: loader.replay_hash.clone(),
+        samples_sha: to_hex(&sha256(csv.as_bytes())),
+        binary_sha,
+        damage_sha: damage.map_or_else(|| "none".to_string(), |d| d.sha256.clone()),
+        window_total_s: format!("{}", window_total_ns / 1_000_000_000),
+    };
+    let pieces = claim_pieces(&rows, n_ac, &draws);
     let mut o = String::new();
     if git_is_dirty(git) {
         let _ = writeln!(o, "{DIRTY_STAMP}");
@@ -1679,7 +3487,7 @@ fn run(
     }
     let _ = writeln!(
         o,
-        "P-002 scoring with the P-003 amendment: OpenATCA, ERAM, passthrough baseline"
+        "P-002 scoring with the P-003 to P-006 amendments: OpenATCA, ERAM, passthrough baseline"
     );
     if !label.is_empty() {
         let _ = writeln!(o, "  label: {label}");
@@ -1692,10 +3500,35 @@ fn run(
     );
     let _ = writeln!(
         o,
+        "  scored commit U (--frozen-commit): {}; frozen candidate C (--candidate-commit): {}; U differs from C in {SEALED_LIST_PATH} only (checked with git diff --name-only C U, when both are given)",
+        commits.frozen.as_deref().unwrap_or("none given"),
+        commits.candidate.as_deref().unwrap_or("none given")
+    );
+    let _ = writeln!(
+        o,
         "  binary built from: {} (build tree clean: {})",
         option_env!("OA_BUILD_COMMIT").unwrap_or("unknown"),
         option_env!("OA_BUILD_DIRTY").map_or("unknown", |d| if d == "0" { "yes" } else { "no" })
     );
+    let _ = writeln!(
+        o,
+        "  scorer binary sha256: {}; damage report sha256: {} (excluded windows total {} s); ledger: {}",
+        info.binary_sha,
+        info.damage_sha,
+        info.window_total_s,
+        ledger.display()
+    );
+    for p in &partials_left {
+        eprintln!(
+            "p002: a leftover {} from an earlier run was replaced",
+            p.display()
+        );
+        let _ = writeln!(
+            o,
+            "  a leftover {} from an earlier run was found and replaced",
+            p.display()
+        );
+    }
     let _ = writeln!(
         o,
         "  P-003: M2t = sign(a) * max(0, |a| - {ROUND_TOL_S} s * v) of the time-fitted along-track error a and the reference ground speed v; M3t = hypot(cross, M2t); all three systems alike; headline position metrics are M1 and M3t (no 'better than ERAM' claim may rest on M2 or M3); M4 and M7 are also given on M3t"
@@ -1728,7 +3561,27 @@ fn run(
     );
     let _ = writeln!(
         o,
-        "  grid: {grid} samples on {n_ac} aircraft (ERAM sample times, primary flight per aircraft, finite cross/along); common set (all three systems have a value): {n_common}"
+        "  P-004: an aircraft's scored legs are the truth legs that contain its grid samples; every system, the passthrough included, is scored on those legs and no others"
+    );
+    for (w, n) in windows.iter().zip(&win_removed) {
+        let _ = writeln!(
+            o,
+            "  excluded window (P-007) {} to {}: {n} grid samples removed for all three systems",
+            w.from, w.to
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  excluded windows: {}; grid samples removed in all: {n_win_removed}",
+        windows.len()
+    );
+    let _ = writeln!(
+        o,
+        "  grid: {grid} samples on {n_ac} aircraft (ERAM's paired samples on each aircraft's most-paired ERAM flight, as before, finite cross/along)"
+    );
+    let _ = writeln!(
+        o,
+        "  set sizes: grid {grid}; two-way common set (OpenATCA and ERAM both have a value; M1, M3t, M5 and their breakdowns, and the claim): {n_two}; three-way common set (passthrough too; the reference-floor test only): {n_common}; M4, M4t, M7, M7t are on all {grid} grid samples"
     );
     let _ = writeln!(
         o,
@@ -1744,9 +3597,70 @@ fn run(
     );
     let _ = writeln!(
         o,
-        "  passthrough rows paired (one per distinct nearest set-A report of the grid): {}",
-        c_addr.len()
+        "  passthrough rows paired (one per distinct nearest set-A report of the grid): {pt_chosen}"
     );
+    let _ = writeln!(
+        o,
+        "  OpenATCA update rows flagged reacquired (they define the reacquired group, within {} s after each): {n_reacq_updates}",
+        REACQ_WINDOW_MS / 1000
+    );
+    // P-004 section 1 and P-006 section 2: the coverage under both rules, on the record.
+    let _ = writeln!(
+        o,
+        "  COVERAGE UNDER THE TWO SCORED-LEG RULES (grid samples with a value within 0.5 s)"
+    );
+    let _ = writeln!(
+        o,
+        "    P-003 rule 11, replaced by P-004 (each system on its own most-sampled flight; grid = ERAM's samples on its own most-sampled flight, {} samples):",
+        old_cov[ER].1
+    );
+    for (sys, (hit, all)) in SYS.iter().zip(old_cov) {
+        let _ = writeln!(
+            o,
+            "      {sys}: {hit} of {all} ({:.2} %), misses {}",
+            100.0 * hit as f64 / all.max(1) as f64,
+            all - hit
+        );
+    }
+    let _ = writeln!(
+        o,
+        "    P-004 (every system on the truth legs that contain the grid samples; used for every table; grid {grid} samples):"
+    );
+    for (s, sys) in SYS.iter().enumerate() {
+        let valued = rows
+            .iter()
+            .filter(|r| r.val.get(s).is_some_and(Option::is_some))
+            .count();
+        let _ = writeln!(
+            o,
+            "      {sys}: {valued} of {grid} ({:.2} %), misses {}",
+            100.0 * valued as f64 / grid.max(1) as f64,
+            grid - valued
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  MISS CLASSES (P-004 section 3; every grid sample without a value is in exactly one class; classes are judged by the system's own rows of the address: OpenATCA's output rows, ERAM's paired samples, the set-A reports)"
+    );
+    for (s, sys) in SYS.iter().enumerate() {
+        let c = classes.get(s).copied().unwrap_or([0; 5]);
+        let valued = rows
+            .iter()
+            .filter(|r| r.val.get(s).is_some_and(Option::is_some))
+            .count();
+        let _ = writeln!(
+            o,
+            "    {sys}: {} misses: {}",
+            c.iter().sum::<u64>(),
+            MISS_NAMES
+                .iter()
+                .zip(c)
+                .map(|(n, k)| format!("{n}: {k}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        debug_assert_eq!(c.iter().sum::<u64>() as usize, grid - valued);
+    }
     for (s, sys) in SYS.iter().enumerate() {
         let valued = rows
             .iter()
@@ -1806,9 +3720,32 @@ fn run(
         }
         let _ = writeln!(
             o,
-            "  {name} paired samples left out of the grid: {} on a non-primary flight, {} without finite cross/along (truth nearly stationary), {} at a time already used",
-            d.other_flight, d.no_cross_along, d.duplicate_time
+            "  {name} paired samples left out of the grid: {} on a leg with no grid sample of the aircraft, {} without finite cross/along (truth nearly stationary), {} at a time already used",
+            d.off_scored_legs, d.no_cross_along, d.duplicate_time
         );
+    }
+    let _ = writeln!(o);
+
+    // Damage visibility (P-006 section 6): what the readers counted, as printed.
+    let _ = writeln!(
+        o,
+        "INPUT DAMAGE AND INGEST DROPS (as the readers counted them)"
+    );
+    let _ = writeln!(
+        o,
+        "  ADS-B clip: frames that did not decode {}; records dropped from decoded frames {}; rows left out in a sealed window {}",
+        loader.clip_bad_frames, loader.clip_dropped_records, loader.clip_sealed
+    );
+    let _ = writeln!(
+        o,
+        "  SFDPS: replay state hash {}; frames and records left out in a sealed window {}",
+        loader.replay_hash, loader.sfdps_sealed
+    );
+    for n in &loader.notes {
+        let _ = writeln!(o, "  SFDPS loader note: {n}");
+    }
+    for c in &loader.counts {
+        let _ = writeln!(o, "  SFDPS ingest: {c}");
     }
     let _ = writeln!(o);
 
@@ -1848,7 +3785,10 @@ fn run(
         "SIGNED RAW ERRORS (m; signed mean and median of the unfitted errors; along > 0: ahead of the reference)"
     );
     for (s, sys) in SYS.iter().enumerate() {
-        for (set, only_common) in [("all valued grid samples", false), ("common set", true)] {
+        for (set, only_common) in [
+            ("all valued grid samples", false),
+            ("three-way common set", true),
+        ] {
             let sel = |f: &dyn Fn(&Val) -> f64| -> Vec<f64> {
                 rows.iter()
                     .filter(|r| !only_common || r.common())
@@ -1871,25 +3811,100 @@ fn run(
     }
     let _ = writeln!(o);
 
+    // The primary metrics and the claim rule (P-006 section 3).
+    let _ = writeln!(
+        o,
+        "PRIMARY METRICS AND THE CLAIM RULE (P-006 section 3): three metrics are primary: M1 median, M5 ground-speed error median (absolute), M4t at 300 m. A claim of 'better than ERAM' may rest on a primary metric only; every other metric is secondary."
+    );
+    let _ = writeln!(
+        o,
+        "  rule: the 95% interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour on hold-out A and on hold-out B, and hold-out C's interval does not exclude zero in ERAM's favour. One run scores one day, so each day's verdict is given here and the rule across days is applied by `p002 --combine <dirA> <dirB> <dirC>`."
+    );
+    for ((_, _, name), p) in PRIMARY.iter().zip(&pieces) {
+        let _ = writeln!(
+            o,
+            "  PRIMARY {name}: OpenATCA minus ERAM {} [{}, {}]: this day: {}; the day's part of the rule (favours OpenATCA, needed on A and B): {}; (not in ERAM's favour, needed on C): {}",
+            p.diff,
+            p.lo,
+            p.hi,
+            p.verdict.text(),
+            if p.verdict == Verdict::OpenAtca { "met" } else { "not met" },
+            if p.verdict != Verdict::Eram { "met" } else { "not met" },
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  the rule across the three days is met for a metric only if the A and B parts and the C part are all met: not decidable from one day"
+    );
+    let _ = writeln!(o, "  machine-readable (read by --combine):");
+    o.push_str(&claim_lines(&info, &pieces, windows, &win_removed));
+    let _ = writeln!(o);
+
     // M1 to M3, M5.
-    write_metric(&mut o, "M1 cross-track error", "m", &m1);
-    write_metric(&mut o, "M2 along-track error, raw", "m", &m2r);
-    write_metric(&mut o, "M2 along-track error, time-fitted", "m", &m2f);
-    write_metric(&mut o, "M3 horizontal error after time fit", "m", &m3);
+    write_metric(
+        &mut o,
+        "M1 cross-track error",
+        "m",
+        &m1,
+        &three(Kind::Cross),
+        Some(0),
+    );
+    write_metric(
+        &mut o,
+        "M2 along-track error, raw",
+        "m",
+        &m2r,
+        &three(Kind::AlongRaw),
+        None,
+    );
+    write_metric(
+        &mut o,
+        "M2 along-track error, time-fitted",
+        "m",
+        &m2f,
+        &three(Kind::AlongFit),
+        None,
+    );
+    write_metric(
+        &mut o,
+        "M3 horizontal error after time fit",
+        "m",
+        &m3,
+        &three(Kind::HFit),
+        None,
+    );
     write_metric(
         &mut o,
         "M2t along-track error, rounding-tolerant (P-003)",
         "m",
         &m2t,
+        &three(Kind::AlongTol),
+        None,
     );
     write_metric(
         &mut o,
         "M3t horizontal error, rounding-tolerant (P-003)",
         "m",
         &m3t,
+        &three(Kind::HTol),
+        None,
     );
-    write_metric(&mut o, "M5 ground-speed error", "m/s", &m5s);
-    write_metric(&mut o, "M5 track-angle error", "deg", &m5t);
+    write_metric(
+        &mut o,
+        "M5 ground-speed error",
+        "m/s",
+        &m5s,
+        &three(Kind::Speed),
+        Some(0),
+    );
+    write_metric(
+        &mut o,
+        "M5 track-angle error",
+        "deg",
+        &m5t,
+        &three(Kind::Track),
+        None,
+    );
 
     // M4.
     for (what, h) in [
@@ -1904,8 +3919,13 @@ fn run(
     ] {
         let _ = writeln!(
             o,
-            "M4{} coverage-penalised share of ALL {grid} grid samples with {what} within threshold (a miss is a failure)",
-            if what.contains("M3t") { "t" } else { "" }
+            "M4{} coverage-penalised share of ALL {grid} grid samples with {what} within threshold (a miss is a failure){}",
+            if what.contains("M3t") { "t" } else { "" },
+            if what.contains("M3t") {
+                "; PRIMARY at 300 m (P-006 section 3)"
+            } else {
+                ""
+            }
         );
         for (name, thr) in [("within 100 m", 100.0), ("within 300 m", 300.0)] {
             let (c, nan) = m4_counts(&rows, n_ac, h, thr);
@@ -2061,70 +4081,20 @@ fn run(
     );
     let _ = writeln!(
         o,
-        "NOTE: OpenATCA's uncertain and reacquired flags are joined to the paired samples by address and row time in whole milliseconds (the finest time the pair table carries; tracker times are floored to the millisecond); paired OpenATCA samples with no tracker row to read the flags from (or only rows that disagree), shown as the UNMATCHED groups and as `unmatched` in samples.csv: {flag_unmatched}; tracker rows sharing a key with an earlier row: {flag_dup_rows}; keys whose rows disagree: {flag_conflicts}; run is a {} run",
+        "NOTE: OpenATCA's uncertain flag is joined to the paired samples by address and row time in whole milliseconds (the finest time the pair table carries; tracker times are floored to the millisecond); paired OpenATCA samples with no tracker row to read the flags from (or only rows that disagree), shown as the UNMATCHED groups and as `unmatched` in samples.csv: {flag_unmatched}; tracker rows sharing a key with an earlier row: {flag_dup_rows}; keys whose rows disagree: {flag_conflicts}; the reacquired group is not read from the tick rows (they never carry the flag) but from the update rows, P-004 section 2; run is a {} run",
         if mode.holdout { "hold-out" } else { "non-hold-out" }
     );
 
-    // samples.csv.
-    let mut csv = String::new();
-    if git_is_dirty(git) {
-        let _ = writeln!(csv, "# {DIRTY_STAMP}");
-    }
-    if mode.development {
-        let _ = writeln!(csv, "# {DEV_STAMP}");
-    }
-    csv.push_str("addr,t_ms,phase,band,common");
-    for p in ["oa", "eram", "pt"] {
-        let _ = write!(
-            csv,
-            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_along_tol_m,{p}_h_tol_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
-        );
-    }
-    csv.push_str(",oa_coast,oa_uncertain,oa_reacquired\n");
-    for r in &rows {
-        let _ = write!(
-            csv,
-            "{:06x},{},{},{},{}",
-            r.addr,
-            r.t,
-            phase::NAMES
-                .get(usize::from(r.phase))
-                .copied()
-                .unwrap_or(""),
-            band::NAMES.get(usize::from(r.band)).copied().unwrap_or(""),
-            u8::from(r.common())
-        );
-        for v in &r.val {
-            match v {
-                None => csv.push_str(",1,,,,,,,,,"),
-                Some(v) => {
-                    let _ = write!(
-                        csv,
-                        ",0,{},{},{},{},{},{},{},{},{}",
-                        fmt_opt(Some(v.pt.cross), 2),
-                        fmt_opt(Some(v.pt.along), 2),
-                        fmt_opt(Some(v.along_fit), 2),
-                        fmt_opt(Some(v.h_fit), 2),
-                        fmt_opt(Some(v.along_tol), 2),
-                        fmt_opt(Some(v.h_tol), 2),
-                        fmt_opt(Some(v.pt.spd), 3),
-                        fmt_opt(Some(v.pt.hdg), 2),
-                        v.pt.t - r.t
-                    );
-                }
-            }
-        }
-        let oa = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
-        let _ = writeln!(
-            csv,
-            ",{},{},{}",
-            oa.map_or(String::new(), |p| p.coast.to_string()),
-            oa.map_or(String::new(), |p| tri_text(p.uncertain)),
-            oa.map_or(String::new(), |p| tri_text(p.reacquired))
-        );
-    }
-    fs::write(out_dir.join("samples.csv"), &csv).map_err(|e| e.to_string())?;
-    fs::write(out_dir.join("p002.txt"), &o).map_err(|e| e.to_string())?;
+    // P-008 section 5: a hold-out run's ledger line goes in after both partial files are written
+    // and before either is renamed; a clip already in the ledger was refused above.
+    let line = mode.holdout.then(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        ledger_line(&clip_hash.sha256, commits, now)
+    });
+    // Create-new via `.partial` names, flushed, then renamed (P-006 section 7, P-008).
+    publish_outputs(out_dir, &csv, &o, line.as_deref().map(|l| (ledger, l)))?;
     Ok(o)
 }
 
@@ -2525,39 +4495,11 @@ mod tests {
             fx_row(0, [None, Some(20.0), Some(30.0)]),
         ];
         // Cross-track is finite everywhere; use the fitted horizontal error as the kind.
-        let m = metric(&rows, 1, &draws_of(1), Kind::HFit, &|_| true);
+        let m = metric(&rows, 1, &draws_of(1), Kind::HFit, &|_| true, Set::Three);
         assert_eq!(m.n, [1, 1, 1]);
         assert_eq!(m.nonfinite, [1, 0, 0]);
         assert!(nonfinite_text(&m).contains("OpenATCA 1, ERAM 0"));
         rows.clear();
-    }
-
-    // REQ: OA-TRK-373
-    #[test]
-    fn the_hold_out_gate_refuses_any_unmatched_sample_and_counts_every_point() {
-        let pts = |u| {
-            let mut p = fx_pt();
-            p.uncertain = u;
-            p
-        };
-        let mut per: PerAc = BTreeMap::new();
-        per.insert(1, vec![pts(Tri::No), pts(Tri::Yes)]);
-        assert_eq!(unmatched_points(&per), 0);
-        // An unmatched point on an address the join never saw is still counted.
-        per.insert(9, vec![pts(Tri::Unmatched)]);
-        assert_eq!(unmatched_points(&per), 1);
-        let hold = Mode {
-            holdout: true,
-            development: false,
-        };
-        let dev = Mode {
-            holdout: false,
-            development: true,
-        };
-        assert!(flag_gate(hold, 0, 3, 1).is_ok());
-        let e = flag_gate(hold, 1, 3, 1).unwrap_err();
-        assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
-        assert!(flag_gate(dev, 5, 0, 0).is_ok());
     }
 
     // REQ: OA-TRK-377
@@ -2617,5 +4559,1020 @@ mod tests {
         assert_eq!(b[0], 1.0);
         assert_eq!(b[1], 0.0);
         assert!((b[2] - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    // ----- P-004 section 1: the scored legs -----
+
+    fn leg(addr: u32, start_ms: i64, end_ms: i64) -> TruthLeg {
+        TruthLeg {
+            addr,
+            start_ms,
+            end_ms,
+            callsign: None,
+            start: oa_bench::truth::LegStart::default(),
+        }
+    }
+
+    fn pt_at(t: i64) -> Pt {
+        Pt { t, ..fx_pt() }
+    }
+
+    /// A pair table of `(address, flight, time)` samples with finite errors.
+    fn table(samples: &[(u32, u32, i64)]) -> PairTable {
+        let mut p = PairTable::default();
+        for &(a, f, t) in samples {
+            p.flight.push(f);
+            p.addr.push(a);
+            p.t_ms.push(t);
+            p.cross_m.push(1.0);
+            p.along_m.push(1.0);
+            p.speed_err_kt.push(0.0);
+            p.hdg_err_deg.push(0.0);
+            p.truth_speed_mps.push(100.0);
+            p.coast.push(0);
+            p.phase.push(0);
+            p.band.push(0);
+        }
+        p
+    }
+
+    // REQ: OA-TRK-389
+    #[test]
+    fn a_grid_on_leg_one_is_scored_on_leg_one_though_openatca_has_more_samples_on_leg_two() {
+        let legs = LegIndex::new(&[leg(1, 0, 100_000), leg(1, 1_000_000, 1_100_000)]);
+        assert_eq!(legs.leg_of(1, 50_000), 0);
+        assert_eq!(legs.leg_of(1, 1_050_000), 1);
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, vec![pt_at(10_000), pt_at(20_000), pt_at(30_000)]);
+        let scored = scored_legs(&er, &legs);
+        assert_eq!(
+            scored.get(&1).unwrap().iter().copied().collect::<Vec<_>>(),
+            [0]
+        );
+        // OpenATCA: 3 samples on leg 1 (flight 0), 10 on leg 2 (flight 1).
+        let mut samples: Vec<(u32, u32, i64)> = [10_000, 20_000, 30_000]
+            .iter()
+            .map(|&t| (1, 0, t))
+            .collect();
+        samples.extend((0..10).map(|i| (1, 1, 1_000_000 + i * 1000)));
+        let p = table(&samples);
+        let mut oa: PerAc = BTreeMap::new();
+        let mut dropped = Dropped::default();
+        pair_points(
+            &p,
+            None,
+            &|a, t| on_scored_leg(&scored, &legs, a, t),
+            &mut oa,
+            &mut dropped,
+        );
+        assert_eq!(oa.get(&1).unwrap().len(), 3);
+        assert_eq!(dropped.off_scored_legs, 10);
+        // Every grid sample has an OpenATCA value.
+        let times = times_of(&oa);
+        let empty = TimesBy::new();
+        let g = build_grid(&er, &oa, &BTreeMap::new(), [&times, &times_of(&er), &empty]);
+        assert_eq!(g.rows.len(), 3);
+        assert!(g.rows.iter().all(|r| r.val[OA].is_some()));
+        // The replaced rule took the flight with the most samples, which is on leg 2: no coverage.
+        let mut old = TimesBy::new();
+        old_rule_times(&p, &mut old);
+        assert_eq!(old.get(&1).unwrap().len(), 10);
+        assert_eq!(old_rule_coverage(&times_of(&er), &old), (0, 3));
+        // An address with no scored leg keeps nothing.
+        let other = table(&[(2, 0, 10_000)]);
+        let mut none: PerAc = BTreeMap::new();
+        let mut d2 = Dropped::default();
+        pair_points(
+            &other,
+            None,
+            &|a, t| on_scored_leg(&scored, &legs, a, t),
+            &mut none,
+            &mut d2,
+        );
+        assert!(none.is_empty());
+        assert_eq!(d2.off_scored_legs, 1);
+    }
+
+    // ----- P-004 section 2: the reacquired window -----
+
+    // REQ: OA-TRK-390
+    #[test]
+    fn a_row_is_reacquired_within_ten_seconds_after_a_flagged_update_row() {
+        let u = [1_000_i64, 50_000];
+        let at = |t| reacquired_at(Some(&u), t);
+        assert!(at(1_000));
+        assert!(at(11_000));
+        assert!(!at(11_001));
+        // Before the update row it is not.
+        assert!(!at(999));
+        assert!(at(50_000));
+        assert!(at(60_000));
+        assert!(!at(60_001));
+        assert!(!reacquired_at(None, 5_000));
+        assert!(!reacquired_at(Some(&[]), 5_000));
+    }
+
+    // ----- P-004 section 3: the miss classes -----
+
+    // REQ: OA-TRK-391
+    #[test]
+    fn each_miss_has_one_class() {
+        let rows = [10_000_i64, 20_000, 30_000];
+        let c = |t| classify_miss(Some(&rows), t);
+        assert_eq!(c(5_000), Miss::Before);
+        assert_eq!(c(40_000), Miss::After);
+        assert_eq!(c(15_000), Miss::Gap);
+        // A row within 0.5 s that was not scored.
+        assert_eq!(c(10_400), Miss::Other);
+        assert_eq!(c(20_000), Miss::Other);
+        assert_eq!(classify_miss(None, 5_000), Miss::NeverPresent);
+        assert_eq!(classify_miss(Some(&[]), 5_000), Miss::NeverPresent);
+        let idx: Vec<usize> = [
+            Miss::Before,
+            Miss::After,
+            Miss::Gap,
+            Miss::NeverPresent,
+            Miss::Other,
+        ]
+        .iter()
+        .map(|m| m.index())
+        .collect();
+        assert_eq!(idx, [0, 1, 2, 3, 4]);
+    }
+
+    // REQ: OA-TRK-391
+    #[test]
+    fn the_grid_counts_every_miss_in_exactly_one_class_per_system() {
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, vec![pt_at(0), pt_at(1_000), pt_at(100_000)]);
+        let oa: PerAc = BTreeMap::new();
+        let er_times = times_of(&er);
+        // OpenATCA's rows: one at 1.0 s (not scored). Passthrough has none for the address.
+        let oa_rows: TimesBy = [(1, vec![1_000_i64])].into_iter().collect();
+        let none = TimesBy::new();
+        let g = build_grid(&er, &oa, &BTreeMap::new(), [&oa_rows, &er_times, &none]);
+        assert_eq!(g.rows.len(), 3);
+        // t = 0: before the first row (1 s away); t = 1 s: a row is there but it is not scored;
+        // t = 100 s: after the last row.
+        assert_eq!(g.classes[OA], [1, 1, 0, 0, 1]);
+        assert_eq!(g.classes[ER], [0; 5]);
+        assert_eq!(g.classes[PT], [0, 0, 0, 3, 0]);
+        // Every miss is in a class: OpenATCA and passthrough have no value anywhere.
+        assert_eq!(g.classes[OA].iter().sum::<u64>(), 3);
+        assert_eq!(g.classes[PT].iter().sum::<u64>(), 3);
+        // A gap between two rows.
+        let rows2: TimesBy = [(1, vec![0_i64, 50_000, 100_000])].into_iter().collect();
+        let mut er2: PerAc = BTreeMap::new();
+        er2.insert(1, vec![pt_at(25_000)]);
+        let g2 = build_grid(
+            &er2,
+            &oa,
+            &BTreeMap::new(),
+            [&rows2, &times_of(&er2), &none],
+        );
+        assert_eq!(g2.classes[OA], [0, 0, 1, 0, 0]);
+    }
+
+    // ----- P-006 section 4: the two-way set -----
+
+    // REQ: OA-TRK-392
+    #[test]
+    fn the_two_way_set_needs_openatca_and_eram_only_and_the_three_way_set_needs_passthrough_too() {
+        let rows = vec![
+            fx_row(0, [Some(1.0), Some(2.0), None]),
+            fx_row(0, [Some(1.0), Some(2.0), Some(3.0)]),
+            fx_row(0, [Some(1.0), None, Some(3.0)]),
+            fx_row(1, [Some(f64::NAN), Some(2.0), Some(3.0)]),
+        ];
+        assert_eq!(rows.iter().filter(|r| r.two_way()).count(), 3);
+        assert_eq!(rows.iter().filter(|r| r.common()).count(), 2);
+        let draws = draws_of(2);
+        let two = metric(&rows, 2, &draws, Kind::HFit, &|_| true, Set::Two);
+        let three = metric(&rows, 2, &draws, Kind::HFit, &|_| true, Set::Three);
+        // The NaN sample is in no common set; passthrough has no column in the two-way set.
+        assert_eq!(two.n, [2, 2, 0]);
+        assert_eq!(three.n, [1, 1, 1]);
+        assert_eq!(two.nonfinite, [1, 0, 0]);
+        assert!(pv(&two, PT, 0).is_nan());
+        assert_eq!(pv(&two, OA, 0), 1.0);
+        assert_eq!(pv(&three, PT, 0), 3.0);
+    }
+
+    // ----- P-006 section 3: the claim rule -----
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn a_verdict_excludes_zero_in_the_direction_the_metric_prefers() {
+        // Lower is better: OpenATCA minus ERAM below zero favours OpenATCA.
+        assert_eq!(verdict_of(-3.0, -1.0, true), Verdict::OpenAtca);
+        assert_eq!(verdict_of(1.0, 3.0, true), Verdict::Eram);
+        assert_eq!(verdict_of(-1.0, 1.0, true), Verdict::Neither);
+        assert_eq!(verdict_of(0.0, 1.0, true), Verdict::Neither);
+        // Higher is better: the other way round.
+        assert_eq!(verdict_of(1.0, 3.0, false), Verdict::OpenAtca);
+        assert_eq!(verdict_of(-3.0, -1.0, false), Verdict::Eram);
+        assert_eq!(verdict_of(f64::NAN, 1.0, false), Verdict::Neither);
+    }
+
+    // ----- P-006 section 5: the candidate commit -----
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("p002-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) -> String {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    fn commit_file(dir: &Path, files: &[(&str, &str)], msg: &str) -> String {
+        for (f, text) in files {
+            let p = dir.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        }
+        git_ok(dir, &["add", "-A"]);
+        git_ok(dir, &["commit", "-q", "-m", msg]);
+        git_ok(dir, &["rev-parse", "HEAD"])
+    }
+
+    // REQ: OA-TRK-394
+    #[test]
+    fn the_scored_commit_may_differ_from_the_candidate_in_the_sealed_list_only() {
+        let d = scratch("cand");
+        git_ok(&d, &["init", "-q"]);
+        let c = commit_file(
+            &d,
+            &[(SEALED_LIST_PATH, "one\n"), ("crates/x/lib.rs", "a\n")],
+            "candidate",
+        );
+        let u = commit_file(&d, &[(SEALED_LIST_PATH, "two\n")], "sealed list");
+        let v = commit_file(
+            &d,
+            &[(SEALED_LIST_PATH, "three\n"), ("crates/x/lib.rs", "b\n")],
+            "list and code",
+        );
+        let w = commit_file(&d, &[("crates/x/lib.rs", "c\n")], "code only");
+        let hold = Mode {
+            holdout: true,
+            development: false,
+        };
+        let dev = Mode {
+            holdout: false,
+            development: true,
+        };
+        let pair = |f: &str, c: &str| Commits {
+            frozen: Some(f.into()),
+            candidate: Some(c.into()),
+        };
+        assert_eq!(candidate_binding(hold, &pair(&u, &c), &d), Ok(()));
+        // Another file changed too, only another file changed, nothing changed.
+        let e = candidate_binding(hold, &pair(&v, &c), &d).unwrap_err();
+        assert!(
+            e.contains("crates/x/lib.rs") && e.contains(SEALED_LIST_PATH),
+            "{e}"
+        );
+        assert!(candidate_binding(hold, &pair(&w, &v), &d).is_err());
+        assert!(candidate_binding(hold, &pair(&c, &c), &d).is_err());
+        // Not a commit of this repository, not a full id.
+        assert!(candidate_binding(hold, &pair(&u, &"1".repeat(40)), &d).is_err());
+        assert!(candidate_binding(hold, &pair(&u, "abc"), &d).is_err());
+        // Needed together: a hold-out run needs it, so does a frozen commit without one.
+        let only_frozen = Commits {
+            frozen: Some(u.clone()),
+            candidate: None,
+        };
+        let only_cand = Commits {
+            frozen: None,
+            candidate: Some(c.clone()),
+        };
+        let neither = Commits {
+            frozen: None,
+            candidate: None,
+        };
+        assert!(candidate_binding(hold, &only_frozen, &d).is_err());
+        assert!(candidate_binding(dev, &only_frozen, &d).is_err());
+        assert!(candidate_binding(dev, &only_cand, &d).is_err());
+        assert!(candidate_binding(hold, &neither, &d).is_err());
+        assert_eq!(candidate_binding(dev, &neither, &d), Ok(()));
+        // A development run that gives both is checked too.
+        assert!(candidate_binding(dev, &pair(&v, &c), &d).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ----- P-006 section 7: create-new outputs -----
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn the_ingest_drop_counts_are_listed_with_their_reasons() {
+        let mut c = oa_bench::legacy::Counts::default();
+        c.sfdps_rejected = 7;
+        c.note("a reason".to_string(), 3);
+        let text = counts_lines(&c).join("\n");
+        assert!(text.contains("SFDPS messages rejected: 7"), "{text}");
+        assert!(text.contains("drop reason: a reason: 3"), "{text}");
+    }
+
+    // REQ: OA-TRK-396
+    #[test]
+    fn iso_times_parse_to_nanoseconds() {
+        assert_eq!(parse_iso_ns("1970-01-01T00:00:00Z"), Ok(0));
+        assert_eq!(
+            parse_iso_ns("1970-01-02T00:00:01.5Z"),
+            Ok(86_401_500_000_000)
+        );
+        assert_eq!(
+            parse_iso_ns("2026-11-19T23:24:42.123456789Z"),
+            Ok((20_776 * 86_400 + 23 * 3600 + 24 * 60 + 42) * 1_000_000_000 + 123_456_789)
+        );
+        assert_eq!(
+            parse_iso_ns("2000-03-01T00:00:00Z"),
+            Ok(951_868_800_000_000_000)
+        );
+        for bad in [
+            "2026-11-19 23:24:42Z",
+            "2026-11-19T23:24:42",
+            "2026-13-19T00:00:00Z",
+            "2026-11-19T00:00:00.1234567890Z",
+        ] {
+            assert!(parse_iso_ns(bad).is_err(), "{bad}");
+        }
+        assert!(Window::parse("1970-01-01T00:00:10Z", "1970-01-01T00:00:05Z").is_err());
+    }
+
+    // REQ: OA-TRK-396
+    #[test]
+    fn a_window_removes_the_same_samples_from_every_system_and_changes_no_other_value() {
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, (0..10).map(|i| pt_at(i * 1000)).collect());
+        er.insert(2, (0..10).map(|i| pt_at(i * 1000)).collect());
+        // OpenATCA and passthrough miss every third sample.
+        let thin = |k: i64| -> PerAc {
+            (1..=2)
+                .map(|a| {
+                    (
+                        a,
+                        (0..10)
+                            .filter(|i| i % k != 0)
+                            .map(|i| Pt {
+                                cross: i as f64,
+                                ..pt_at(i * 1000)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        let (oa, pt) = (thin(3), thin(2));
+        let none = TimesBy::new();
+        let times = times_of(&er);
+        let rt = [&times, &times, &times];
+        let full = build_grid(&er, &oa, &pt, rt);
+        let w = Window::parse("1970-01-01T00:00:03Z", "1970-01-01T00:00:05.000000000Z").unwrap();
+        let (cut, counts, removed) = exclude_windows(&er, &[w.clone()]);
+        // Samples at 3, 4 and 5 s of both aircraft.
+        assert_eq!((counts, removed), (vec![6], 6));
+        let g = build_grid(&cut, &oa, &pt, rt);
+        assert_eq!(g.rows.len(), full.rows.len() - 6);
+        let kept: Vec<&Row> = full.rows.iter().filter(|r| !w.holds_ms(r.t)).collect();
+        assert_eq!(kept.len(), g.rows.len());
+        for (a, b) in kept.iter().zip(&g.rows) {
+            assert_eq!((a.addr, a.t), (b.addr, b.t));
+            for s in 0..3 {
+                assert_eq!(
+                    a.val[s].map(|v| v.pt.cross.to_bits()),
+                    b.val[s].map(|v| v.pt.cross.to_bits())
+                );
+            }
+        }
+        // No removed time is left for any system.
+        assert!(g.rows.iter().all(|r| !w.holds_ms(r.t)));
+        let _ = none;
+        // The window is recorded in the machine-readable lines and read back.
+        let rows = synth_rows(true, false);
+        let (txt, _) = make_day(&rows, "clip", &"a".repeat(40), true, &[w], &[6]);
+        let d = parse_claim_lines(&txt).unwrap();
+        assert_eq!(
+            d.windows,
+            vec![(
+                "1970-01-01T00:00:03Z".to_string(),
+                "1970-01-01T00:00:05.000000000Z".to_string(),
+                6
+            )]
+        );
+    }
+
+    // REQ: OA-TRK-396
+    #[test]
+    fn a_window_changes_the_samples_scored_and_never_the_scored_legs() {
+        let legs = LegIndex::new(&[leg(1, 0, 50_000), leg(1, 100_000, 150_000)]);
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, vec![pt_at(10_000), pt_at(20_000), pt_at(110_000)]);
+        er.insert(2, vec![pt_at(30_000)]);
+        // The window holds every sample of leg 0 of aircraft 1, and all of aircraft 2.
+        let w = Window::parse("1970-01-01T00:00:05Z", "1970-01-01T00:00:35Z").unwrap();
+        let (scored, grid, counts, removed) = plan_grid(&er, &legs, &[w]);
+        assert_eq!((counts, removed), (vec![3], 3));
+        // The legs are those of the grid before the window: leg 0 stays scored.
+        assert_eq!(scored, scored_legs(&er, &legs));
+        assert!(scored.get(&1).unwrap().contains(&0));
+        assert!(scored.get(&2).is_some());
+        // Computed from the grid after the window they would differ.
+        assert_ne!(scored, scored_legs(&grid, &legs));
+        // The grid has lost the emptied aircraft.
+        assert_eq!(grid.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(grid.get(&1).unwrap().len(), 1);
+    }
+
+    // REQ: OA-TRK-389
+    #[test]
+    fn only_eram_most_paired_flight_forms_the_grid() {
+        // Address 1: flight 0 has 2 pairs, flight 1 has 4, flight 2 has 4 (lower flight wins a tie).
+        let mut samples: Vec<(u32, u32, i64)> = vec![(1, 0, 0), (1, 0, 1000)];
+        samples.extend((0..4).map(|i| (1, 1, 100_000 + i * 1000)));
+        samples.extend((0..4).map(|i| (1, 2, 200_000 + i * 1000)));
+        samples.push((2, 5, 0));
+        let p = table(&samples);
+        let best = most_paired_flights(&p);
+        assert_eq!(best.get(&1), Some(&1));
+        assert_eq!(best.get(&2), Some(&5));
+        let mut er: PerAc = BTreeMap::new();
+        let mut d = Dropped::default();
+        pair_points(&p, Some(&best), &|_, _| true, &mut er, &mut d);
+        let ts: Vec<i64> = er.get(&1).unwrap().iter().map(|s| s.t).collect();
+        assert_eq!(ts, [100_000, 101_000, 102_000, 103_000]);
+        assert_eq!(er.get(&2).unwrap().len(), 1);
+        // The scored legs are the legs of those samples only.
+        let legs = LegIndex::new(&[
+            leg(1, 0, 50_000),
+            leg(1, 100_000, 150_000),
+            leg(1, 200_000, 250_000),
+        ]);
+        let sc = scored_legs(&er, &legs);
+        assert_eq!(sc.get(&1).unwrap().iter().copied().collect::<Vec<_>>(), [1]);
+    }
+
+    // ----- P-008 -----
+
+    fn syn_val(cross: f64, spd: f64, h: f64) -> Val {
+        Val {
+            pt: Pt {
+                cross,
+                spd,
+                ..fx_pt()
+            },
+            along_fit: 0.0,
+            h_raw: 1.0,
+            h_fit: h,
+            along_tol: 0.0,
+            h_tol: h,
+        }
+    }
+
+    /// 12 aircraft of 20 grid samples. OpenATCA beats ERAM when `oa_better`, the two are equal
+    /// when not and `eram_better` is false; the passthrough has every second sample and equals
+    /// OpenATCA when `pt_equal`, else is far better.
+    fn synth_rows_with(oa_better: bool, eram_better: bool, pt_equal: bool) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for ac in 0..12usize {
+            for i in 0..20usize {
+                let base = 1.0 + ((i + ac) % 4) as f64 * 0.3;
+                let slow = 8.0 + ((i * 3 + ac) % 5) as f64 * 0.5;
+                let (oa_c, er_c) = if oa_better {
+                    (base, slow)
+                } else if eram_better {
+                    (slow, base)
+                } else {
+                    (base, base)
+                };
+                let spd = |c: f64| c * 0.1;
+                let pt = (i % 2 == 0).then(|| {
+                    let c = if pt_equal { oa_c } else { oa_c * 0.2 };
+                    syn_val(c, spd(c), c * 40.0)
+                });
+                rows.push(Row {
+                    ac,
+                    t: i as i64 * 1000,
+                    addr: ac as u32 + 1,
+                    phase: 0,
+                    band: 0,
+                    val: [
+                        Some(syn_val(oa_c, spd(oa_c), oa_c * 40.0)),
+                        Some(syn_val(er_c, spd(er_c), er_c * 40.0)),
+                        pt,
+                    ],
+                });
+            }
+        }
+        rows
+    }
+
+    fn synth_rows(oa_better: bool, pt_equal: bool) -> Vec<Row> {
+        synth_rows_with(oa_better, false, pt_equal)
+    }
+
+    /// One day's `p002.txt` and `samples.csv` as the run writes them.
+    fn make_day(
+        rows: &[Row],
+        clip: &str,
+        frozen: &str,
+        holdout: bool,
+        windows: &[Window],
+        removed: &[u64],
+    ) -> (String, String) {
+        let csv = samples_csv(rows, &[]);
+        let n_ac = rows.iter().map(|r| r.ac).max().map_or(0, |m| m + 1);
+        let pieces = claim_pieces(rows, n_ac, &draws_of(n_ac));
+        let info = RunInfo {
+            holdout,
+            frozen: frozen.into(),
+            candidate: "c".repeat(40),
+            clip_sha: clip.into(),
+            sfdps_sha: "s".into(),
+            replay_hash: "r".into(),
+            samples_sha: to_hex(&sha256(csv.as_bytes())),
+            binary_sha: "b".into(),
+            damage_sha: "d".into(),
+            window_total_s: "0".into(),
+        };
+        (
+            format!(
+                "other text\n{}",
+                claim_lines(&info, &pieces, windows, removed)
+            ),
+            csv,
+        )
+    }
+
+    fn files<'a>(d: &'a [(String, String); 3]) -> [DayFiles<'a>; 3] {
+        [
+            DayFiles {
+                txt: &d[0].0,
+                csv: &d[0].1,
+            },
+            DayFiles {
+                txt: &d[1].0,
+                csv: &d[1].1,
+            },
+            DayFiles {
+                txt: &d[2].0,
+                csv: &d[2].1,
+            },
+        ]
+    }
+
+    const U: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn the_cross_day_rule_is_met_only_on_a_and_b_in_openatcas_favour_and_c_not_against() {
+        let win = synth_rows(true, false);
+        let flat = synth_rows_with(false, false, false);
+        let lose = synth_rows_with(false, true, false);
+        let day = |r: &[Row], clip: &str| make_day(r, clip, U, true, &[], &[]);
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&flat, "c3")];
+        let r = combine(files(&d)).unwrap();
+        assert_eq!(r.matches("RULE MET").count(), 3, "{r}");
+        // C against OpenATCA, or B silent, breaks it.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&lose, "c3")];
+        assert_eq!(
+            combine(files(&d)).unwrap().matches("RULE NOT MET").count(),
+            3
+        );
+        let d = [day(&win, "c1"), day(&flat, "c2"), day(&win, "c3")];
+        assert_eq!(
+            combine(files(&d)).unwrap().matches("RULE NOT MET").count(),
+            3
+        );
+    }
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn combine_refuses_one_day_three_times_and_runs_that_are_not_holdout_or_not_one_commit_pair() {
+        let win = synth_rows(true, false);
+        let day = |clip: &str, f: &str, h: bool| make_day(&win, clip, f, h, &[], &[]);
+        // The same clip three times.
+        let d = [day("c1", U, true), day("c1", U, true), day("c1", U, true)];
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("three different clips"), "{e}");
+        // A development run.
+        let d = [day("c1", U, true), day("c2", U, true), day("c3", U, false)];
+        assert!(combine(files(&d))
+            .unwrap_err()
+            .contains("not a hold-out run"));
+        // frozen=none, a short commit, another commit.
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", "none", true),
+        ];
+        assert!(combine(files(&d)).unwrap_err().contains("40-hex"));
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", "abc", true),
+        ];
+        assert!(combine(files(&d)).is_err());
+        let other = "b".repeat(40);
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", &other, true),
+        ];
+        assert!(combine(files(&d)).unwrap_err().contains("one commit pair"));
+        // No CLAIM lines.
+        let mut d = [day("c1", U, true), day("c2", U, true), day("c3", U, true)];
+        d[2].0 = "nothing".into();
+        assert!(combine(files(&d)).is_err());
+    }
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn combine_recomputes_and_refuses_an_edited_interval_or_an_edited_samples_file() {
+        let win = synth_rows(true, false);
+        let day = |clip: &str| make_day(&win, clip, U, true, &[], &[]);
+        let good = [day("c1"), day("c2"), day("c3")];
+        assert!(combine(files(&good)).is_ok());
+        // An edited difference or interval in a CLAIM line.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        let line = d[1]
+            .0
+            .lines()
+            .find(|l| l.contains("metric=M1_median"))
+            .unwrap()
+            .to_string();
+        let lo = line
+            .split_whitespace()
+            .find(|w| w.starts_with("lo="))
+            .unwrap()
+            .to_string();
+        d[1].0 = d[1].0.replace(&lo, "lo=-99");
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("recomputed"), "{e}");
+        // An edited samples.csv no longer has its recorded hash.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        d[0].1 = d[0].1.replacen(",1,", ",2,", 1).replacen("0,", "1,", 0);
+        d[0].1.push('\n');
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("samples.csv has SHA-256"), "{e}");
+        // A samples.csv edited AND rehashed in the CLAIM line still fails the recomputation.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        let mut rows = win.clone();
+        for r in &mut rows {
+            if let Some(v) = r.val[OA].as_mut() {
+                v.pt.cross += 50.0;
+            }
+        }
+        let forged_csv = samples_csv(&rows, &[]);
+        let old_sha = to_hex(&sha256(d[2].1.as_bytes()));
+        d[2].0 = d[2]
+            .0
+            .replace(&old_sha, &to_hex(&sha256(forged_csv.as_bytes())));
+        d[2].1 = forged_csv;
+        assert!(combine(files(&d)).unwrap_err().contains("recomputed"));
+    }
+
+    // REQ: OA-TRK-397
+    #[test]
+    fn a_metric_at_the_reference_floor_on_any_day_gives_no_claim_and_never_rule_met() {
+        let win = synth_rows(true, false);
+        // The passthrough equals OpenATCA: at the floor on M1 and M5.
+        let floor_rows = synth_rows(true, true);
+        let day = |r: &[Row], clip: &str| make_day(r, clip, U, true, &[], &[]);
+        let d = [
+            day(&floor_rows, "c1"),
+            day(&floor_rows, "c2"),
+            day(&floor_rows, "c3"),
+        ];
+        let r = combine(files(&d)).unwrap();
+        assert!(
+            r.contains("M1 median cross-track error (m): AT REFERENCE FLOOR: no claim"),
+            "{r}"
+        );
+        assert!(r.contains(
+            "M5 ground-speed error median, absolute (m/s): AT REFERENCE FLOOR: no claim"
+        ));
+        // M4t is judged on the share, where the passthrough is far below: not at the floor.
+        assert!(!r.contains("M4t share of ALL grid samples within 300 m (rounding-tolerant, time-fitted): AT REFERENCE"), "{r}");
+        // On one day only, the metric still gets no claim.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&floor_rows, "c3")];
+        let r = combine(files(&d)).unwrap();
+        assert_eq!(r.matches("AT REFERENCE FLOOR: no claim").count(), 2, "{r}");
+        assert!(r.contains(
+            "M4t share of ALL grid samples within 300 m (rounding-tolerant, time-fitted): RULE MET"
+        ));
+        // Without any floor, the rule is met and the flag is 0 in the CLAIM lines.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&win, "c3")];
+        assert!(!combine(files(&d))
+            .unwrap()
+            .contains("AT REFERENCE FLOOR: no claim"));
+        assert!(d[0].0.contains("floor=0"));
+        // Floor test on the share.
+        assert!(floor_applies(0.95, 0.99));
+        assert!(!floor_applies(0.997, 0.19));
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn an_oa_feed_gaps_report_gives_the_windows_of_a_clean_day_and_is_refused_otherwise() {
+        let head = "oa-feed-gaps report (P-006 section 6)\nwindow: 2026-11-19T00:00:00.000000000Z to 2026-11-19T23:59:59.000000000Z (86399.000000000 s)\nlimit: 600.000000000 s\n";
+        let ex = |a: &str, b: &str| {
+            format!("exclude 2026-11-19T{a}.000000000Z 2026-11-19T{b}.000000000Z\n")
+        };
+        let ok = format!(
+            "{head}{}{}CLEAN\n",
+            ex("10:00:00", "10:15:00"),
+            ex("12:00:00", "12:10:00")
+        );
+        let d = parse_damage_report(&ok, "abc").unwrap();
+        assert_eq!(
+            (d.windows.len(), d.total_ns, d.sha256.as_str()),
+            (2, 1_500_000_000_000, "abc")
+        );
+        assert!(parse_damage_report(&format!("{head}CLEAN\n"), "x")
+            .unwrap()
+            .windows
+            .is_empty());
+        // Not CLEAN, no verdict, two verdicts.
+        assert!(parse_damage_report(&format!("{head}DAMAGED: an interval\n"), "x").is_err());
+        assert!(parse_damage_report(head, "x").is_err());
+        assert!(parse_damage_report(&format!("{head}CLEAN\nCLEAN\n"), "x").is_err());
+        // A window under 600 s, windows over 3,600 s in all, outside the report's window.
+        let e = parse_damage_report(&format!("{head}{}CLEAN\n", ex("10:00:00", "10:09:59")), "x")
+            .unwrap_err();
+        assert!(e.contains("under 600 s"), "{e}");
+        let many: String = (0..5)
+            .map(|i| ex(&format!("0{}:00:00", i + 1), &format!("0{}:15:00", i + 1)))
+            .collect();
+        let e = parse_damage_report(&format!("{head}{many}CLEAN\n"), "x").unwrap_err();
+        assert!(e.contains("over 3,600 s"), "{e}");
+        let outside = "exclude 2026-11-20T00:00:00.000000000Z 2026-11-20T00:20:00.000000000Z\n";
+        assert!(parse_damage_report(&format!("{head}{outside}CLEAN\n"), "x").is_err());
+    }
+
+    /// Unix ns of `hh:mm:ss` on 2026-11-15, the development day.
+    fn at(hms: &str) -> i64 {
+        parse_iso_ns(&format!("2026-11-15T{hms}Z")).unwrap()
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn the_report_window_must_match_the_scored_window_not_a_whole_day() {
+        let report = |from: &str, to: &str| DamageReport {
+            sha256: "x".into(),
+            from_ns: at(from),
+            to_ns: if to == "24:00:00" {
+                at("00:00:00") + DAY_NS
+            } else {
+                at(to)
+            },
+            windows: vec![],
+            total_ns: 0,
+        };
+        // The clip runs the whole day; the SFDPS run starts at 00:17:04Z and ends at 23:59:40Z.
+        let (cf, cl) = (at("00:00:03"), at("23:59:50"));
+        let (sf, sl) = (at("00:17:04"), at("23:59:40"));
+        assert_eq!(
+            scored_window(cf, cl, sf, sl),
+            Ok((at("00:17:04"), at("23:59:40")))
+        );
+        // The day's start and end bound S when the recordings run past them.
+        assert_eq!(
+            scored_window(
+                at("01:00:00"),
+                cl,
+                at("00:00:00") - 5,
+                at("00:00:00") + DAY_NS + 5
+            ),
+            Ok((at("00:00:00"), cl))
+        );
+        // 00:17:00Z to 23:59:59Z, on an SFDPS run starting 00:17:04Z: accepted.
+        let ok = report("00:17:00", "23:59:59");
+        assert_eq!(damage_matches_clip(&ok, cf, cl, sf, sl), Ok(()));
+        // A report starting at 02:00Z, two hours late: refused, both windows printed.
+        let e = damage_matches_clip(&report("02:00:00", "23:59:59"), cf, cl, sf, sl).unwrap_err();
+        assert!(
+            e.contains("2026-11-15T02:00:00Z to 2026-11-15T23:59:59Z")
+                && e.contains("2026-11-15T00:17:04Z to 2026-11-15T23:59:40Z"),
+            "{e}"
+        );
+        // A report window ending exactly at the day's end is inside the day; one reaching into
+        // the next day is refused, even when the recordings run on past midnight.
+        assert_eq!(
+            damage_matches_clip(&report("00:17:00", "24:00:00"), cf, cl, sf, sl),
+            Ok(())
+        );
+        let mut next = report("00:17:00", "23:59:59");
+        next.to_ns = at("00:00:00") + DAY_NS + 30_000_000_000;
+        let e = damage_matches_clip(&next, cf, cl, sf, at("00:00:00") + DAY_NS + 20_000_000_000)
+            .unwrap_err();
+        assert!(e.contains("2026-11-16T00:00:30Z"), "{e}");
+        // 61 s off at either end is refused; 60 s is not.
+        let mut r = report("00:17:00", "23:59:59");
+        r.from_ns = sf - 61_000_000_000;
+        assert!(damage_matches_clip(&r, cf, cl, sf, sl).is_err());
+        r.from_ns = sf - 60_000_000_000;
+        assert_eq!(damage_matches_clip(&r, cf, cl, sf, sl), Ok(()));
+        r.to_ns = sl - 61_000_000_000;
+        assert!(damage_matches_clip(&r, cf, cl, sf, sl).is_err());
+        // A clip that is not one UTC day has no scored window.
+        assert!(scored_window(cf, at("00:00:00") + DAY_NS, sf, sl).is_err());
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn the_reports_the_tool_prints_are_read_exactly() {
+        // Printed by oa-feed-gaps (commit eee7e93) on small synthetic recordings: an SFDPS file
+        // from 00:17:04Z and an ADS-B clip, a message every 300 s with a 1,000 s hole, window
+        // 00:17:00Z to 23:59:59Z. In the second the SFDPS recording stops at 11:57:04Z.
+        let clean = include_str!("fixtures/oa-feed-gaps-clean.txt");
+        let damaged = include_str!("fixtures/oa-feed-gaps-damaged.txt");
+        let d = parse_damage_report(clean, "sha").unwrap();
+        assert_eq!(
+            (d.from_ns, d.to_ns),
+            (at("00:17:00"), at("23:59:59")),
+            "window: line"
+        );
+        assert_eq!(d.windows.len(), 1, "exclude line");
+        assert_eq!(
+            (d.windows[0].from_ns, d.windows[0].to_ns),
+            (at("00:47:04"), at("01:12:04"))
+        );
+        assert_eq!(d.total_ns, 1_500_000_000_000);
+        // Its one verdict is the last line, CLEAN.
+        assert!(clean.ends_with("\nCLEAN\n") && !clean.contains("DAMAGED:"));
+        // The damaged report has two exclude lines and a DAMAGED: verdict, and is refused.
+        assert_eq!(damaged.matches("\nexclude ").count(), 2);
+        assert!(damaged.lines().last().unwrap().starts_with("DAMAGED: "));
+        let e = parse_damage_report(damaged, "sha").unwrap_err();
+        assert!(e.contains("not CLEAN") && e.contains("1 DAMAGED"), "{e}");
+        // Only the lines read count: the same report with the DAMAGED line cut off has no verdict.
+        let cut: String = damaged
+            .lines()
+            .filter(|l| !l.starts_with("DAMAGED:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(parse_damage_report(&cut, "sha").is_err());
+        // The window of the tool's report is the scored one of a run that began at 00:17:04Z.
+        let (cf, cl) = (at("00:17:04"), at("23:59:50"));
+        assert_eq!(
+            damage_matches_clip(&d, cf, cl, at("00:17:04"), at("23:59:40")),
+            Ok(())
+        );
+    }
+
+    // REQ: OA-TRK-399
+    #[test]
+    fn the_ledger_refuses_a_clip_it_holds_and_is_only_ever_appended_to() {
+        let dir = scratch("ledger");
+        let l = dir.join("ledger.txt");
+        assert_eq!(ledger_has(&l, "clip1"), Ok(false));
+        let c = Commits {
+            frozen: Some(U.into()),
+            candidate: Some("c".repeat(40)),
+        };
+        assert_eq!(
+            ledger_line("clip1", &c, 1_795_130_682),
+            format!("clip1 {U} {} 2026-11-19T23:24:42Z", "c".repeat(40))
+        );
+        ledger_append(&l, &ledger_line("clip1", &c, 0)).unwrap();
+        ledger_append(&l, &ledger_line("clip2", &c, 0)).unwrap();
+        let text = fs::read_to_string(&l).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(ledger_has(&l, "clip1"), Ok(true));
+        assert_eq!(ledger_has(&l, "clip2"), Ok(true));
+        assert_eq!(ledger_has(&l, "clip"), Ok(false));
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // REQ: OA-TRK-399
+    #[test]
+    fn the_ledger_line_is_there_only_when_both_partials_were_written() {
+        let line = Some("clip1 f c 2026-11-19T00:00:00Z");
+        // Both written: the line is in, both files are renamed.
+        let d = scratch("order-ok");
+        let l = d.join("ledger.txt");
+        publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).unwrap();
+        assert_eq!(fs::read_to_string(&l).unwrap().lines().count(), 1);
+        assert!(d.join("samples.csv").exists() && d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+        // The second partial cannot be written (its name is a directory): no ledger line, the
+        // first partial is removed, nothing is under a final name.
+        let d = scratch("order-partial");
+        let l = d.join("ledger.txt");
+        fs::create_dir(d.join("p002.txt.partial")).unwrap();
+        assert!(publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).is_err());
+        assert!(!l.exists() && !d.join("samples.csv.partial").exists());
+        assert!(!d.join("samples.csv").exists() && !d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+        // The ledger cannot be appended to (its directory is not there): the partials are
+        // deleted, the run fails, nothing is under a final name.
+        let d = scratch("order-ledger");
+        let l = d.join("no-such-dir").join("ledger.txt");
+        let e = publish_outputs(&d, "csv", "txt", line.map(|x| (l.as_path(), x))).unwrap_err();
+        assert!(e.contains("ledger"), "{e}");
+        for f in OUTPUT_FILES {
+            assert!(!d.join(f).exists() && !d.join(format!("{f}{PARTIAL}")).exists());
+        }
+        // Without a ledger line (not a hold-out run) the files are still published.
+        publish_outputs(&d, "csv", "txt", None).unwrap();
+        assert!(d.join("p002.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn outputs_are_written_to_partial_names_then_renamed_and_never_over_a_result() {
+        let d = scratch("out");
+        assert_eq!(outputs_free(&d), Ok(vec![]));
+        // A leftover partial does not block a run, and is reported.
+        fs::write(d.join("p002.txt.partial"), "old").unwrap();
+        assert_eq!(outputs_free(&d).unwrap(), vec![d.join("p002.txt.partial")]);
+        publish_outputs(&d, "csv", "txt", None).unwrap();
+        assert_eq!(fs::read_to_string(d.join("p002.txt")).unwrap(), "txt");
+        assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
+        assert!(!d.join("p002.txt.partial").exists() && !d.join("samples.csv.partial").exists());
+        // A result under a final name refuses the run and nothing is written.
+        let e = publish_outputs(&d, "new", "new", None).unwrap_err();
+        assert!(e.contains("exists"), "{e}");
+        assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
+        assert!(!d.join("samples.csv.partial").exists());
+        // Either final file alone refuses; so does a dangling symlink.
+        for f in OUTPUT_FILES {
+            fs::remove_file(d.join(f)).unwrap();
+        }
+        fs::write(d.join("samples.csv"), "kept").unwrap();
+        assert!(outputs_free(&d).unwrap_err().contains("samples.csv"));
+        fs::remove_file(d.join("samples.csv")).unwrap();
+        std::os::unix::fs::symlink(d.join("nowhere"), d.join("p002.txt")).unwrap();
+        assert!(outputs_free(&d).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // REQ: OA-TRK-400
+    #[test]
+    fn the_time_fit_of_openatca_and_eram_uses_the_two_way_set_and_the_passthroughs_the_three_way_set(
+    ) {
+        let both = fx_row(0, [Some(1.0), Some(1.0), None]);
+        let all3 = fx_row(0, [Some(1.0), Some(1.0), Some(1.0)]);
+        let pt_only = fx_row(0, [Some(1.0), None, Some(1.0)]);
+        for (r, oa, er, pt) in [
+            (&both, true, true, false),
+            (&all3, true, true, true),
+            (&pt_only, false, false, false),
+        ] {
+            assert_eq!(in_fit_set(r, OA), oa);
+            assert_eq!(in_fit_set(r, ER), er);
+            assert_eq!(in_fit_set(r, PT), pt);
+        }
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn the_hold_out_gate_counts_only_openatca_rows_matched_to_a_grid_sample() {
+        let mut matched = syn_val(1.0, 0.0, 1.0);
+        matched.pt.uncertain = Tri::No;
+        matched.pt.reacquired = Tri::No;
+        let mut bad = matched;
+        bad.pt.uncertain = Tri::Unmatched;
+        let row = |v: Option<Val>| Row {
+            ac: 0,
+            t: 0,
+            addr: 1,
+            phase: 0,
+            band: 0,
+            val: [v, None, None],
+        };
+        // An unmatched OpenATCA point that no grid sample uses is not in the rows at all.
+        assert_eq!(unmatched_rows(&[row(Some(matched)), row(None)]), 0);
+        assert_eq!(unmatched_rows(&[row(Some(matched)), row(Some(bad))]), 1);
+        let hold = Mode {
+            holdout: true,
+            development: false,
+        };
+        let dev = Mode {
+            holdout: false,
+            development: true,
+        };
+        assert!(flag_gate(hold, 0, 3, 1).is_ok());
+        let e = flag_gate(hold, 1, 3, 1).unwrap_err();
+        assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
+        assert!(flag_gate(dev, 5, 0, 0).is_ok());
     }
 }

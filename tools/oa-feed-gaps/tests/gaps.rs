@@ -1,0 +1,732 @@
+//! The damage check of P-006 section 6: the interval logic on synthetic times, and the readers on
+//! small synthetic recordings.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
+use oa_feed_gaps::core::clip::{parse_clip_log, ClipLog};
+use oa_feed_gaps::core::gaps::{reasons, scan_unsorted, Scan, Stats, Window, GAP_CAP};
+use oa_feed_gaps::core::report::{render, Feed};
+use oa_feed_gaps::core::timefmt::{iso, parse_iso};
+use oa_feed_gaps::shell::args::parse;
+use oa_feed_gaps::shell::read::{read_adsb, read_sfdps};
+use oa_feed_gaps::shell::run::write_atomic;
+
+const S: i64 = 1_000_000_000;
+const MS: i64 = 1_000_000;
+/// 2026-11-15T00:00:00Z, a development day.
+const BASE: i64 = 20_772 * 86_400 * S;
+
+fn win(len_s: i64) -> Window {
+    Window::new(BASE, BASE + len_s * S).unwrap()
+}
+
+fn run(w: Window, times: &[i64]) -> Stats {
+    let mut t: Vec<i64> = times.iter().map(|t| BASE + t).collect();
+    scan_unsorted(w, &mut t)
+}
+
+/// A log of a clean run that kept no rows (for the feeds with no clip in the test).
+fn ok_log() -> ClipLog {
+    parse_clip_log("traces_refused=0 kept=0 frames=0\narchive: complete\n")
+}
+
+/// A clean log for the clip the feed was read from.
+fn log_for(f: &Feed) -> ClipLog {
+    parse_clip_log(&format!(
+        "traces_refused=0 kept={} frames=1\narchive: complete\n",
+        f.decoded.unwrap()
+    ))
+}
+
+fn verdict(st: &Stats, damage: &[(String, u64)]) -> (String, bool) {
+    let f = Feed {
+        name: "SFDPS",
+        stats: st.clone(),
+        damage: damage.to_vec(),
+        info: vec![],
+        files: vec![],
+        decoded: None,
+    };
+    render(st.window, &[f], &ok_log())
+}
+
+// REQ: OA-GAP-001
+#[test]
+fn a_feed_without_a_gap_is_clean() {
+    let ts: Vec<i64> = (0..=60).map(|k| k * 60 * S).collect();
+    let st = run(win(3600), &ts);
+    assert_eq!(st.count, 61);
+    assert_eq!(st.largest.unwrap().len_ns(), 60 * S);
+    assert_eq!(st.over_total, 0);
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(!damaged && text.ends_with("CLEAN\n"), "{text}");
+}
+
+// REQ: OA-GAP-001
+#[test]
+fn an_interval_of_exactly_600_s_is_not_over_and_600_001_s_is() {
+    let w = win(1200);
+    let st = run(w, &[0, 600 * S, 1200 * S]);
+    assert_eq!(st.largest.unwrap().len_ns(), 600 * S);
+    assert_eq!(st.over_total, 0);
+    let st = run(w, &[0, 600 * S + MS, 1200 * S]);
+    assert_eq!(st.over_total, 1);
+    let g = st.over[0];
+    assert_eq!((g.start_ns, g.end_ns), (BASE, BASE + 600 * S + MS));
+    // Over the limit is an excluded interval, not damage by itself.
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(!damaged, "{text}");
+    assert!(
+        text.contains("exclude 2026-11-15T00:00:00.000000000Z"),
+        "{text}"
+    );
+}
+
+// REQ: OA-GAP-013
+#[test]
+fn a_1005_s_gap_is_clean_with_one_excluded_interval_of_1305_s() {
+    let w = win(7200);
+    let st = run(
+        w,
+        &[
+            0,
+            600 * S,
+            1200 * S,
+            2205 * S,
+            2800 * S,
+            3400 * S,
+            4000 * S,
+            4600 * S,
+            5200 * S,
+            5800 * S,
+            6400 * S,
+            7000 * S,
+            7200 * S,
+        ],
+    );
+    assert_eq!(st.over_total, 1);
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(!damaged && text.ends_with("CLEAN\n"), "{text}");
+    assert!(
+        text.contains("exclude 2026-11-15T00:20:00.000000000Z 2026-11-15T00:41:45.000000000Z\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 interval") || text.contains(": 1, 1305.000000000 s"),
+        "{text}"
+    );
+}
+
+// REQ: OA-GAP-014
+#[test]
+fn excluded_intervals_whose_margins_overlap_are_merged_and_over_an_hour_is_damaged() {
+    let w = win(20_000);
+    // Gaps 0-700 s and 800-1500 s in one feed: margins 300 s reach 1000 s and 1800 s, so one block.
+    let a = run(
+        w,
+        &[
+            0,
+            700 * S,
+            800 * S,
+            1500 * S,
+            2000 * S,
+            2600 * S,
+            3200 * S,
+            3800 * S,
+            4400 * S,
+            5000 * S,
+            5600 * S,
+            6200 * S,
+            6800 * S,
+            7400 * S,
+            8000 * S,
+            8600 * S,
+            9200 * S,
+            9800 * S,
+            10_400 * S,
+            11_000 * S,
+            11_600 * S,
+            12_200 * S,
+            12_800 * S,
+            13_400 * S,
+            14_000 * S,
+            14_600 * S,
+            15_200 * S,
+            15_800 * S,
+            16_400 * S,
+            17_000 * S,
+            17_600 * S,
+            18_200 * S,
+            18_800 * S,
+            19_400 * S,
+            20_000 * S,
+        ],
+    );
+    assert_eq!(a.over_total, 2);
+    let (text, damaged) = verdict(&a, &[]);
+    assert!(!damaged, "{text}");
+    assert_eq!(text.matches("\nexclude ").count(), 1, "{text}");
+    assert!(
+        text.contains("exclude 2026-11-15T00:00:00.000000000Z 2026-11-15T00:30:00.000000000Z"),
+        "{text}"
+    );
+    // Merged across the two feeds too.
+    let b = run(
+        w,
+        &[
+            0,
+            1000 * S,
+            1200 * S,
+            1500 * S,
+            2100 * S,
+            2700 * S,
+            3300 * S,
+            3900 * S,
+            4500 * S,
+            5100 * S,
+            5700 * S,
+            6300 * S,
+            6900 * S,
+            7500 * S,
+            8100 * S,
+            8700 * S,
+            9300 * S,
+            9900 * S,
+            10_500 * S,
+            11_100 * S,
+            11_700 * S,
+            12_300 * S,
+            12_900 * S,
+            13_500 * S,
+            14_100 * S,
+            14_700 * S,
+            15_300 * S,
+            15_900 * S,
+            16_500 * S,
+            17_100 * S,
+            17_700 * S,
+            18_300 * S,
+            18_900 * S,
+            19_500 * S,
+            20_000 * S,
+        ],
+    );
+    let (merged, _) = (oa_feed_gaps::core::exclude::excluded(w, &[&a, &b]), ());
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        (merged[0].start_ns, merged[0].end_ns),
+        (BASE, BASE + 1800 * S)
+    );
+}
+
+// REQ: OA-GAP-014
+#[test]
+fn excluded_time_of_3600_s_is_clean_and_3601_s_is_damaged() {
+    // One gap of G s, excluded G + 300 s: G = 3300 gives 3600, G = 3301 gives 3601.
+    for (g, bad) in [(3300, false), (3301, true)] {
+        let w = win(g + 600);
+        let st = run(w, &[0, g * S, (g + 600) * S]);
+        let (text, damaged) = verdict(&st, &[]);
+        assert_eq!(damaged, bad, "{g}: {text}");
+        if bad {
+            assert!(
+                text.contains("excluded intervals total 3601.000000000 s"),
+                "{text}"
+            );
+        }
+    }
+}
+
+// REQ: OA-GAP-015
+#[test]
+fn the_clip_log_is_read_and_tied_to_the_clip() {
+    let w = win(600);
+    let st = run(w, &[0, 300 * S, 600 * S]);
+    let f = |log: &str| {
+        let feed = Feed {
+            name: "ADS-B",
+            stats: st.clone(),
+            damage: vec![],
+            info: vec![],
+            files: vec![],
+            decoded: Some(3),
+        };
+        render(w, &[feed], &parse_clip_log(log))
+    };
+    let good =
+        "traces_read=5 traces_refused=0 kept=3 frames=2\nmeasurements_bad 0\narchive: complete\n";
+    let (t, d) = f(good);
+    assert!(
+        !d && t.contains("traces_refused=0 kept=3 archive_complete=true"),
+        "{t}"
+    );
+    let (t, d) = f(&good.replace("traces_refused=0", "traces_refused=2"));
+    assert!(d && t.contains("clip tool refused 2 trace(s)"), "{t}");
+    let (t, d) = f("traces_refused=0 kept=3\narchive: TRUNCATED at byte 5\n");
+    assert!(d && t.contains("TRUNCATED"), "{t}");
+    let (_, d) = f("traces_refused=0 kept=3\n");
+    assert!(d);
+    let (t, d) = f("");
+    assert!(d && t.contains("0 summary lines"), "{t}");
+    // Several summary or archive lines: a log of more than one run.
+    let (t, d) = f(&format!("{good}{good}"));
+    assert!(
+        d && t.contains("2 summary lines") && t.contains("2 archive: lines"),
+        "{t}"
+    );
+}
+
+// REQ: OA-GAP-016
+#[test]
+fn a_log_of_another_clip_with_the_wrong_count_is_damaged_with_both_numbers() {
+    let w = win(600);
+    let st = run(w, &[0, 300 * S, 600 * S]);
+    let feed = Feed {
+        name: "ADS-B",
+        stats: st,
+        damage: vec![],
+        info: vec![],
+        files: vec![],
+        decoded: Some(3),
+    };
+    let other = parse_clip_log("traces_refused=0 kept=4792350 frames=9\narchive: complete\n");
+    let (t, d) = render(w, &[feed], &other);
+    assert!(d, "{t}");
+    assert!(
+        t.contains("kept=4792350 but the clip holds 3 reports"),
+        "{t}"
+    );
+}
+
+// REQ: OA-GAP-002
+#[test]
+fn a_gap_at_the_start_or_the_end_of_the_window_counts() {
+    let w = win(3600);
+    // First message 601 s after the window start.
+    let st = run(
+        w,
+        &[601 * S, 1200 * S, 1800 * S, 2400 * S, 3000 * S, 3600 * S],
+    );
+    assert_eq!(st.over[0].start_ns, BASE);
+    assert_eq!(st.over[0].end_ns, BASE + 601 * S);
+    assert_eq!(st.first_ns, Some(BASE + 601 * S));
+    assert_eq!(st.over_total, 1);
+    // Last message 601 s before the window end.
+    let st = run(w, &[0, 600 * S, 1200 * S, 1800 * S, 2400 * S, 2999 * S]);
+    assert_eq!(st.over[0].start_ns, BASE + 2999 * S);
+    assert_eq!(st.over[0].end_ns, BASE + 3600 * S);
+    assert_eq!(st.last_ns, Some(BASE + 2999 * S));
+    assert_eq!(st.over_total, 1);
+    // Exactly 600 s at either edge is clean.
+    let st = run(w, &[600 * S, 1200 * S, 1800 * S, 2400 * S, 3000 * S]);
+    assert_eq!(st.over_total, 0);
+    // Times outside the window are not counted.
+    let st = run(w, &[-5 * S, 0, 3600 * S, 3601 * S]);
+    assert_eq!(st.count, 2);
+}
+
+// REQ: OA-GAP-003
+#[test]
+fn a_window_with_no_message_is_damaged() {
+    let st = run(win(3600), &[-10 * S, 4000 * S]);
+    assert_eq!(st.count, 0);
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(damaged, "{text}");
+    assert!(text.contains("DAMAGED: SFDPS has no message in the window"));
+    assert!(text.contains("first message: none"));
+}
+
+// REQ: OA-GAP-004
+#[test]
+fn the_gap_list_is_capped_counts_the_overflow_and_stays_damaged() {
+    let n = GAP_CAP as i64 + 50;
+    let ts: Vec<i64> = (0..=n).map(|k| k * 601 * S).collect();
+    let st = run(win(n * 601 + 1), &ts);
+    assert_eq!(st.over.len(), GAP_CAP);
+    // n intervals between messages, plus the 1 s left at the end of the window, which is not over.
+    assert_eq!(st.over_total, n as u64);
+    assert_eq!(st.overflow, 50);
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(damaged && text.contains("50 more are not listed"), "{text}");
+}
+
+// REQ: OA-GAP-005
+#[test]
+fn a_reader_error_count_is_damage_even_with_no_gap() {
+    let ts: Vec<i64> = (0..=60).map(|k| k * 60 * S).collect();
+    let st = run(win(3600), &ts);
+    let (text, damaged) = verdict(&st, &[("reader frame-crc".to_string(), 2)]);
+    assert!(
+        damaged && text.contains("DAMAGED: SFDPS reader frame-crc: 2"),
+        "{text}"
+    );
+    let (_, damaged) = verdict(&st, &[("reader frame-crc".to_string(), 0)]);
+    assert!(!damaged);
+}
+
+// REQ: OA-GAP-006
+#[test]
+fn a_time_out_of_order_is_counted_and_left_out_of_the_intervals() {
+    let mut sc = Scan::new(win(100));
+    for t in [10, 20, 15, 30] {
+        sc.observe(BASE + t * S);
+    }
+    let st = sc.finish();
+    assert_eq!((st.count, st.out_of_order), (3, 1));
+    assert!(!reasons("SFDPS", &st, &[]).is_empty());
+}
+
+fn tmp(name: &str) -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("gaps-{name}"));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn frames(times: &[i64]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (k, t) in times.iter().enumerate() {
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, k as u64, BASE + t, 0, b"<x/>").unwrap();
+        out.extend_from_slice(&buf[..n]);
+    }
+    out
+}
+
+fn sfdps_file(dir: &Path, n: u32, times_s: &[i64]) -> PathBuf {
+    let p = dir.join(format!("scds-sfdps-20261115T000000Z-{n:04}.oaf"));
+    let t: Vec<i64> = times_s.iter().map(|s| s * S).collect();
+    fs::write(&p, frames(&t)).unwrap();
+    p
+}
+
+// REQ: OA-GAP-007
+#[test]
+fn overlapping_recording_files_out_of_order_are_read_by_receive_time() {
+    let d = tmp("overlap");
+    // The later file by name holds the earlier times, and the two overlap.
+    sfdps_file(&d, 0, &[40, 50, 60]);
+    sfdps_file(&d, 1, &[10, 20, 30, 45]);
+    let f = read_sfdps(&d, win(70)).unwrap();
+    assert_eq!(f.stats.count, 7);
+    assert_eq!(f.stats.out_of_order, 0);
+    assert!(f
+        .info
+        .iter()
+        .any(|(k, n)| k.starts_with("frames earlier") && *n > 0));
+    assert_eq!(f.stats.first_ns, Some(BASE + 10 * S));
+    assert_eq!(f.stats.last_ns, Some(BASE + 60 * S));
+    assert_eq!(f.stats.largest.unwrap().len_ns(), 10 * S);
+    assert!(f.damage.is_empty());
+}
+
+// REQ: OA-GAP-008
+#[test]
+fn a_damaged_frame_in_the_recording_is_counted_as_damage() {
+    let d = tmp("damaged");
+    let p = sfdps_file(&d, 0, &[10, 20, 30]);
+    // Cut the last frame short.
+    let mut b = fs::read(&p).unwrap();
+    b.truncate(b.len() - 5);
+    fs::write(&p, b).unwrap();
+    let f = read_sfdps(&d, win(40)).unwrap();
+    assert_eq!(f.stats.count, 2);
+    let total: u64 = f.damage.iter().map(|(_, n)| n).sum();
+    assert!(total > 0, "{:?}", f.damage);
+    let (text, damaged) = render(win(40), &[f], &ok_log());
+    assert!(damaged && text.contains("DAMAGED:"), "{text}");
+}
+
+fn adsb_clip(path: &Path, times_s: &[i64]) {
+    let mut r = oa_adsb::Reports::default();
+    for (i, t) in times_s.iter().enumerate() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.icao = 0xA00000 + i as u32;
+        row.time_ns = BASE + t * S;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        row.source = 0;
+        oa_adsb::reports_push(&mut r, &row);
+    }
+    let mut bytes = Vec::new();
+    for k in 0..times_s.len() {
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, k, k + 1).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, k as u64, BASE + 1, 0, &payload).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+// REQ: OA-GAP-009
+#[test]
+fn the_adsb_clip_is_checked_sorted_for_gaps_and_for_damaged_frames() {
+    let d = tmp("adsb");
+    let clip = d.join("c.oaf");
+    // Reports are not in time order in the file.
+    adsb_clip(&clip, &[30, 0, 20, 10, 40]);
+    let f = read_adsb(&clip, win(40)).unwrap();
+    assert_eq!(
+        (f.stats.count, f.stats.largest.unwrap().len_ns()),
+        (5, 10 * S)
+    );
+    assert!(f.damage.iter().all(|(_, n)| *n == 0));
+    // A gap of 700 s.
+    adsb_clip(&clip, &[0, 700, 710]);
+    let f = read_adsb(&clip, win(710)).unwrap();
+    assert_eq!(f.stats.over_total, 1);
+    let l = log_for(&f);
+    assert!(!render(win(710), &[f], &l).1);
+    // A flipped byte in a frame is a damaged frame.
+    adsb_clip(&clip, &[0, 10, 20]);
+    let mut b = fs::read(&clip).unwrap();
+    let mid = b.len() / 2;
+    b[mid] ^= 0xFF;
+    fs::write(&clip, b).unwrap();
+    let f = read_adsb(&clip, win(20)).unwrap();
+    assert!(
+        f.damage
+            .iter()
+            .any(|(k, n)| k == "damaged frames" && *n > 0),
+        "{:?}",
+        f.damage
+    );
+    let l = log_for(&f);
+    assert!(render(win(20), &[f], &l).1);
+}
+
+const BIN: &str = env!("CARGO_BIN_EXE_oa-feed-gaps");
+
+fn cli(d: &Path, from: &str, to: &str, extra: &[&str]) -> std::process::Output {
+    Command::new(BIN)
+        .arg("--sfdps-dir")
+        .arg(d.join("sfdps"))
+        .arg("--adsb")
+        .arg(d.join("c.oaf"))
+        .args(["--from", from, "--to", to])
+        .arg("--clip-log")
+        .arg(d.join("clip.log"))
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+// REQ: OA-GAP-010
+#[test]
+fn the_exit_status_is_0_clean_1_damaged_2_error_and_the_report_is_written_atomically() {
+    let d = tmp("cli");
+    fs::create_dir_all(d.join("sfdps")).unwrap();
+    sfdps_file(&d.join("sfdps"), 0, &[0, 300, 600, 900]);
+    adsb_clip(&d.join("c.oaf"), &[0, 300, 600, 900]);
+    let log = d.join("clip.log");
+    fs::write(
+        &log,
+        "traces_refused=0 kept=4 frames=4\narchive: complete\n",
+    )
+    .unwrap();
+    let (from, to) = ("2026-11-15T00:00:00Z", "2026-11-15T00:15:00Z");
+    let o = cli(&d, from, to, &[]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&o.stdout).ends_with("CLEAN\n"));
+    let out = d.join("report.txt");
+    let o = cli(&d, from, to, &["--out", out.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(o.stdout.is_empty());
+    assert!(fs::read_to_string(&out).unwrap().ends_with("CLEAN\n"));
+    assert!(!d.join("report.txt.partial").exists());
+    // An existing output is refused before any work and is left as it is: exit 2.
+    let first = fs::read(&out).unwrap();
+    let o = cli(&d, from, to, &["--out", out.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("already exists"));
+    assert_eq!(first, fs::read(&out).unwrap());
+    // The report names the files it used.
+    assert!(
+        String::from_utf8_lossy(&first).contains("file: scds-sfdps-20261115T000000Z-0000.oaf\n")
+    );
+    assert!(String::from_utf8_lossy(&first).contains("file: c.oaf\n"));
+    // A window that runs on for hours past the last message has over an hour excluded: damaged.
+    let o = cli(&d, from, "2026-11-15T03:00:00Z", &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("DAMAGED:"));
+    // The clip log: a refused trace or a count of another clip is damaged; a missing file or a
+    // missing --clip-log is exit 2.
+    fs::write(&log, "traces_refused=1 kept=4\narchive: complete\n").unwrap();
+    assert_eq!(cli(&d, from, to, &[]).status.code(), Some(1));
+    fs::write(&log, "traces_refused=0 kept=5\narchive: complete\n").unwrap();
+    let o = cli(&d, from, to, &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("kept=5 but the clip holds 4 reports"));
+    fs::write(&log, "traces_refused=0 kept=4\narchive: complete\n").unwrap();
+    fs::remove_file(&log).unwrap();
+    assert_eq!(cli(&d, from, to, &[]).status.code(), Some(2));
+    fs::write(&log, "traces_refused=0 kept=4\narchive: complete\n").unwrap();
+    let o = Command::new(BIN)
+        .arg("--sfdps-dir")
+        .arg(d.join("sfdps"))
+        .arg("--adsb")
+        .arg(d.join("c.oaf"))
+        .args(["--from", from, "--to", to])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--clip-log is required"));
+    // Usage and read errors.
+    assert_eq!(cli(&d, from, "nonsense", &[]).status.code(), Some(2));
+    assert_eq!(cli(&d, to, from, &[]).status.code(), Some(2));
+    let o = Command::new(BIN).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    fs::remove_file(d.join("c.oaf")).unwrap();
+    assert_eq!(cli(&d, from, to, &[]).status.code(), Some(2));
+    // A failed write leaves no partial file.
+    let bad = d.join("no-such-dir/report.txt");
+    assert!(write_atomic(&bad, "x").is_err());
+}
+
+// REQ: OA-GAP-017
+#[test]
+fn a_file_in_the_recording_directory_that_is_not_a_recording_is_refused_by_name() {
+    let d = tmp("unrecognised");
+    sfdps_file(&d, 0, &[10, 20]);
+    fs::write(d.join("scds-sfdps-20261115T000000Z-0002.oaf.bak"), b"x").unwrap();
+    fs::write(d.join("notes.txt"), b"x").unwrap();
+    let e = read_sfdps(&d, win(40)).err().unwrap().to_string();
+    assert!(
+        e.contains("scds-sfdps-20261115T000000Z-0002.oaf.bak") && e.contains("notes.txt"),
+        "{e}"
+    );
+}
+
+// REQ: OA-GAP-018
+#[test]
+fn an_exclude_line_parses_back_to_the_same_window_with_a_fractional_boundary() {
+    // The scorer's grammar is the whole-second `YYYY-MM-DDTHH:MM:SSZ` of `oa_adsb::cli::parse_iso`
+    // (the clip tool's) plus a nine-digit fraction; parse each line with that and compare.
+    let back = |t: &str| -> i64 {
+        let (head, frac) = t.split_once('.').unwrap();
+        let frac = frac.strip_suffix('Z').unwrap();
+        assert_eq!(frac.len(), 9);
+        oa_adsb::cli::parse_iso(&format!("{head}Z")).unwrap() * S + frac.parse::<i64>().unwrap()
+    };
+    let w = win(7200);
+    let gap_end = 1200 * S + 1_004_760_000_001;
+    let st = run(
+        w,
+        &[
+            0,
+            600 * S,
+            1200 * S,
+            gap_end,
+            2800 * S,
+            3400 * S,
+            4000 * S,
+            4600 * S,
+            5200 * S,
+            5800 * S,
+            6400 * S,
+            7000 * S,
+            7200 * S,
+        ],
+    );
+    let (text, _) = verdict(&st, &[]);
+    let line = text.lines().find(|l| l.starts_with("exclude ")).unwrap();
+    let mut it = line.split(' ').skip(1);
+    let (a, b) = (back(it.next().unwrap()), back(it.next().unwrap()));
+    assert_eq!(a, BASE + 1200 * S);
+    assert_eq!(b, BASE + gap_end + 300 * S);
+    assert_eq!(b - a, 1_004_760_000_001 + 300 * S);
+}
+
+// REQ: OA-GAP-019
+#[test]
+fn the_report_file_is_new_synced_and_renamed_never_replaced() {
+    let d = tmp("atomic");
+    let out = d.join("r.txt");
+    write_atomic(&out, "a").unwrap();
+    assert_eq!(fs::read_to_string(&out).unwrap(), "a");
+    assert!(!d.join("r.txt.partial").exists());
+    assert!(write_atomic(&out, "b").is_err());
+    assert_eq!(fs::read_to_string(&out).unwrap(), "a");
+    // A temporary file left by someone else is not replaced either.
+    let out2 = d.join("r2.txt");
+    fs::write(d.join("r2.txt.partial"), "x").unwrap();
+    assert!(write_atomic(&out2, "y").is_err());
+    assert_eq!(fs::read_to_string(d.join("r2.txt.partial")).unwrap(), "x");
+    assert!(!out2.exists());
+}
+
+// REQ: OA-GAP-011
+#[test]
+fn a_sealed_input_is_refused_through_the_shared_guard() {
+    let t = tmp("sealed");
+    let sealed = t.join("scds/stdds-smoke-20261119T192936Z");
+    fs::create_dir_all(&sealed).unwrap();
+    fs::write(sealed.join("clip.oaf"), b"x").unwrap();
+    let o = Command::new(BIN)
+        .arg("--sfdps-dir")
+        .arg(&sealed)
+        .arg("--adsb")
+        .arg(sealed.join("clip.oaf"))
+        .arg("--clip-log")
+        .arg(t.join("clip.log"))
+        .args([
+            "--from",
+            "2026-11-15T00:00:00Z",
+            "--to",
+            "2026-11-15T01:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
+    assert!(o.stdout.is_empty());
+}
+
+// REQ: OA-GAP-012
+#[test]
+fn times_and_arguments_are_parsed_strictly() {
+    assert_eq!(parse_iso("2026-11-15T00:00:00Z"), Some(BASE));
+    assert_eq!(iso(BASE + 5 * MS), "2026-11-15T00:00:00.005000000Z");
+    for bad in [
+        "2026-11-15T00:00:00",
+        "2026-11-15 00:00:00Z",
+        "2026-02-30T00:00:00Z",
+        "2026-11-15T24:00:00Z",
+        "1969-12-31T23:59:59Z",
+        "",
+    ] {
+        assert_eq!(parse_iso(bad), None, "{bad}");
+    }
+    let a = |v: &[&str]| parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let ok = [
+        "--sfdps-dir",
+        "d",
+        "--adsb",
+        "c",
+        "--from",
+        "2026-11-15T00:00:00Z",
+        "--to",
+        "2026-11-15T01:00:00Z",
+        "--clip-log",
+        "l",
+    ];
+    assert!(a(&ok).is_ok());
+    assert!(a(&ok[..ok.len() - 2]).is_err());
+    assert!(a(&ok[..ok.len() - 4]).is_err());
+    assert!(a(&[&ok[..], &["--bogus", "x"]].concat()).is_err());
+    assert!(a(&[&ok[..], &["--from", "2026-11-15T00:00:00Z"]].concat()).is_err());
+}

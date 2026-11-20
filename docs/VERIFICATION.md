@@ -23,7 +23,7 @@ Harnesses are compiled only under `#[cfg(kani)]`. They are not in any shipped bu
 `crates/oa-asterix/src/proofs.rs`, `crates/oa-asterix/src/proofs_wire.rs`,
 `crates/oa-adsb/src/frames.rs`, `crates/oa-feed/src/core/health.rs` and
 `crates/oa-replay/src/core/clock.rs`, `crates/oa-track/src/time_gate.rs`, `crates/oa-track/src/fixed_map.rs`,
-`crates/oa-math/src/trig.rs` and `crates/oa-truth/src/shell/clip.rs` (each at the end, in a `proofs` module).
+`crates/oa-math/src/trig.rs`, `crates/oa-truth/src/shell/clip.rs` and `crates/oa-runway/src/occupy.rs` (each at the end, in a `proofs` module).
 
 Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` links the
 harness to the requirement and lists it as a proof harness, apart from tests. It does not run
@@ -220,6 +220,16 @@ minutes each (`hypot-dd-square`, `hypot-dd-root`, `hypot-fast-plain`, `hypot-fas
 disabled). They depend on the exactness of the Veltkamp-split products, a multiplier-equivalence
 problem for the SAT solver, so the horizontal miss's finiteness rests on the documented, tested
 behaviour of `hypot` (OA-MATH-005), not on a proof.
+
+### Conflict alert: the grid's pair test (OA-CA-033, OA-CA-034)
+
+`ca-chord-d2` (`grid::proofs`, 5.6 s, 0.2 GB): the squared chord of two vectors with components in
+`[-1, 1]` is finite and not negative. Not proved, because CBMC did not finish within 10 minutes (the
+products of symbolic doubles again): that the chord is symmetric and zero for one point (in the same
+harness), and that the flat test's validity only narrows as a tangent or the radius grows. Not
+provable here: that the chord is never longer than the arc and that a valid flat test accepts every
+pair the exact projection does; both rest on the trigonometry of `oa_math`. All four are dense
+deterministic tests (`grid::tests`, `tests/ca.rs`).
 
 ## What the proofs do not cover
 
