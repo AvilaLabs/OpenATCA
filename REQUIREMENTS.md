@@ -4741,8 +4741,9 @@ scope.
 - **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
 - **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
   (the build script reruns on the git index and on those trees).
-- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
-  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
+- **OA-CMP-047** Any input path the shared sealed list refuses (OA-SEAL-001; of the recording
+  `scds/rec-20261119`, that is days 2 to 4, the run log and the folder itself) is refused, as given and after
+  resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
 
 - **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
@@ -5127,9 +5128,8 @@ value is a difference only when strictly greater than it.
 - **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
   identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
   per change.
-- **OA-SHD-016** An input or output path with the components `scds` then `rec-20261119`, `stdds-20261119-holdout` or
-  a name starting `stdds-smoke-20261119`, as given or after resolving links, is refused before anything is
-  opened, exit 2.
+- **OA-SHD-016** An input or output path the shared sealed list refuses (OA-SEAL-001), as given or after
+  resolving links, is refused before anything is opened, exit 2.
 - **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
   error, exit 2.
 - **OA-SHD-018** The two recordings are cut to the overlap of their in-box recorded extents (ERAM's in-box track
