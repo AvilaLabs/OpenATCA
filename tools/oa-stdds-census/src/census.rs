@@ -5,6 +5,8 @@
 //! durations, and are dropped by [`Census::finish`]).
 
 use crate::hist::{Hist, MAX_TICKS, TICK_MS};
+use crate::xcheck::{outcome, Cand, Index, MIN_GS_FOR_TIME_MPS, NM_M};
+use crate::xcres::{cidx, MatchRec, XcAcc, XcGroup, XcResults};
 use oa_stdds::tais::tais_bit;
 use oa_stdds::{TaisField, TaisRecord};
 use std::collections::{HashMap, HashSet};
@@ -140,6 +142,63 @@ struct Track {
     false_icao: bool,
     false_nonzero: u32,
     ivs: Vec<u16>,
+    /// Position cross-check: outcomes by flag, gate, outcome (see [`cidx`]), by flag and
+    /// outcome for the horizontal-only check, the exactly-one matches, and the vertical
+    /// differences of the horizontal-only matches. Empty or zero when the check is off.
+    xc_cnt: [u32; 18],
+    xc_hcnt: [u32; 6],
+    xc_recs: Vec<MatchRec>,
+    xc_hdv: Vec<(bool, f32)>,
+}
+
+fn nan_or(v: Option<f64>) -> f32 {
+    v.map_or(f32::NAN, |x| x as f32)
+}
+
+/// Counts the outcomes of one update's candidates at every gate and keeps the match.
+fn xc_observe(x: &Index, t: &mut Track, flag: bool, r: &TaisRecord) {
+    let p = x.params;
+    let alt = has(r, TaisField::ReportedAltitude).then_some(r.reported_alt_ft);
+    let cands = x.candidates(r.mrt_time_ms, r.lat_e7, r.lon_e7, alt);
+    let f = usize::from(flag);
+    for (g, &nm) in p.gates_nm.iter().enumerate() {
+        let n = cands
+            .iter()
+            .filter(|c| c.passes(nm * NM_M, p.v_gate_ft))
+            .count();
+        if let Some(c) = t.xc_cnt.get_mut(cidx(f, g, outcome(n))) {
+            *c += 1;
+        }
+    }
+    let h_m = p.gates_nm.get(p.primary).map_or(0.0, |g| g * NM_M);
+    let h_only: Vec<&Cand> = cands.iter().filter(|c| c.dh_m <= h_m).collect();
+    if let Some(c) = t.xc_hcnt.get_mut(f * 3 + outcome(h_only.len())) {
+        *c += 1;
+    }
+    if let [c] = h_only.as_slice() {
+        if let Some(v) = c.dv_ft {
+            t.xc_hdv.push((flag, v as f32));
+        }
+    }
+    let gated: Vec<&Cand> = cands
+        .iter()
+        .filter(|c| c.passes(h_m, p.v_gate_ft))
+        .collect();
+    if let [c] = gated.as_slice() {
+        let along_s = c
+            .along_m
+            .zip(c.gs_mps)
+            .filter(|&(_, gs)| gs >= MIN_GS_FOR_TIME_MPS)
+            .map(|(a, gs)| a / gs);
+        t.xc_recs.push(MatchRec {
+            flag,
+            dh: c.dh_m as f32,
+            dv: nan_or(c.dv_ft),
+            along: nan_or(c.along_m),
+            cross: nan_or(c.cross_m),
+            along_s: nan_or(along_s),
+        });
+    }
 }
 
 /// The running census.
@@ -151,6 +210,10 @@ pub struct Census {
     tracks: HashMap<TrackKey, Track>,
     src_ids: HashSet<[u8; 8]>,
     no_track_num: u64,
+    xc: Option<Index>,
+    /// Updates not cross-checked: no position or time (by flag), and no flag.
+    xc_nopos: [u64; 2],
+    xc_noflag: u64,
 }
 
 impl Default for Census {
@@ -201,6 +264,8 @@ pub struct Results {
     pub flagged_pairs: u64,
     pub distinct_src_ids: u64,
     pub no_track_num: u64,
+    /// The position cross-check, if an ADS-B index was given.
+    pub xc: Option<XcResults>,
 }
 
 impl Census {
@@ -213,6 +278,17 @@ impl Census {
             tracks: HashMap::new(),
             src_ids: HashSet::new(),
             no_track_num: 0,
+            xc: None,
+            xc_nopos: [0; 2],
+            xc_noflag: 0,
+        }
+    }
+
+    /// A census that also cross-checks every tracked update against the ADS-B `index`.
+    pub fn with_xcheck(index: Index) -> Census {
+        Census {
+            xc: Some(index),
+            ..Census::new()
         }
     }
 
@@ -255,7 +331,22 @@ impl Census {
             false_icao: false,
             false_nonzero: 0,
             ivs: Vec::new(),
+            xc_cnt: [0; 18],
+            xc_hcnt: [0; 6],
+            xc_recs: Vec::new(),
+            xc_hdv: Vec::new(),
         });
+        match (self.xc.as_ref(), flag) {
+            (Some(x), Some(f)) => {
+                if has(r, TaisField::Lat) && has(r, TaisField::Lon) && has(r, TaisField::MrtTime) {
+                    xc_observe(x, t, f, r);
+                } else if let Some(c) = self.xc_nopos.get_mut(usize::from(f)) {
+                    *c += 1;
+                }
+            }
+            (Some(_), None) => self.xc_noflag += 1,
+            _ => {}
+        }
         let mrt = has(r, TaisField::MrtTime).then_some(r.mrt_time_ms);
         let mut entry = GAP;
         let mut counter: Option<fn(&mut Group)> = None;
@@ -315,8 +406,16 @@ impl Census {
             tracks,
             src_ids,
             no_track_num,
+            xc,
+            xc_nopos,
+            xc_noflag,
             ..
         } = self;
+        let xc_params = xc.as_ref().map(|x| x.params);
+        let mut accs: Vec<XcAcc> = Vec::new();
+        if xc_params.is_some() {
+            accs.resize_with(5 + fac_keys.len(), XcAcc::default);
+        }
         let mut classes: [ClassStats; 4] = Default::default();
         let mut dirs: [DirStats; 2] = Default::default();
         let mut changes = 0u64;
@@ -355,6 +454,13 @@ impl Census {
                 }
             }
             let fac = t.fac as usize;
+            if xc_params.is_some() {
+                for k in [0, 1 + class, 5 + fac] {
+                    if let Some(a) = accs.get_mut(k) {
+                        a.add_track(&t.xc_cnt, &t.xc_hcnt, &t.xc_recs, &t.xc_hdv);
+                    }
+                }
+            }
             for g in std::iter::once(&mut global).chain(facs.get_mut(fac)) {
                 g.tracks += 1;
                 g.tracks_with_false += u64::from(nf > 0);
@@ -401,6 +507,22 @@ impl Census {
                 }
             }
         }
+        let xc_res = xc.zip(xc_params).and_then(|(x, p)| {
+            let mut it = accs.into_iter().map(|a| a.finish(&p));
+            let global = it.next()?;
+            let classes: Vec<XcGroup> = it.by_ref().take(4).collect();
+            Some(XcResults {
+                params: p,
+                points: x.points() as u64,
+                aircraft: x.aircraft,
+                segments: x.segments,
+                no_position: xc_nopos,
+                no_flag: xc_noflag,
+                global,
+                classes,
+                facs: it.collect(),
+            })
+        });
         let facs = fac_keys.into_iter().zip(facs).collect();
         Results {
             global,
@@ -413,6 +535,7 @@ impl Census {
             flagged_pairs,
             distinct_src_ids: src_ids.len() as u64,
             no_track_num,
+            xc: xc_res,
         }
     }
 }
@@ -716,5 +839,275 @@ pub(crate) mod tests {
         assert_eq!(r.no_track_num, 1);
         assert_eq!(r.global.updates[0], 1);
         assert_eq!(r.global.tracks, 0);
+    }
+
+    // --- position cross-check ---------------------------------------------------------------
+
+    use crate::xcheck::tests::{deg_lat_per_m, deg_lon_per_m, pt};
+    use crate::xcheck::{build_from_points, Params, Pt, NM_M};
+
+    const V: f64 = 400.0 * NM_M / 3600.0;
+
+    /// One aircraft flying east at 400 kt from `lon0` at 40 N, reporting at 1 Hz for 0 to 120 s.
+    fn fly(icao: u32, lon0: f64, lat: f64, alt: i32) -> Vec<Pt> {
+        (0..=120)
+            .map(|s| {
+                pt(
+                    icao,
+                    s * 1000,
+                    lat,
+                    lon0 + s as f64 * V * deg_lon_per_m(40.0),
+                    alt,
+                )
+            })
+            .collect()
+    }
+
+    /// An STDDS update of track `n` at `t_ms` at the position of an aircraft that left `lon0` at
+    /// `lat` at 400 kt, moved `east_m` and `north_m` and with the clock `shift_s` seconds late
+    /// (the position is where the aircraft is at `t + shift`).
+    #[allow(clippy::too_many_arguments)]
+    fn upd(
+        n: u32,
+        t_ms: i64,
+        flag: Option<bool>,
+        lon0: f64,
+        lat: f64,
+        alt: i32,
+        east_m: f64,
+        north_m: f64,
+        shift_s: f64,
+    ) -> TaisRecord {
+        let mut r = rec(n, t_ms, flag);
+        let ts = t_ms as f64 / 1000.0 + shift_s;
+        r.lat_e7 = ((lat + north_m * deg_lat_per_m(40.0)) * 1e7).round() as i32;
+        r.lon_e7 = ((lon0 + (ts * V + east_m) * deg_lon_per_m(40.0)) * 1e7).round() as i32;
+        r.reported_alt_ft = alt;
+        r.present |= tais_bit(TaisField::Lat)
+            | tais_bit(TaisField::Lon)
+            | tais_bit(TaisField::ReportedAltitude);
+        r
+    }
+
+    fn xcensus(pts: Vec<Pt>) -> Census {
+        Census::with_xcheck(build_from_points(pts, Params::default()).unwrap())
+    }
+
+    // REQ: OA-CEN-009
+    #[test]
+    fn counts_none_one_and_ambiguous_at_each_gate() {
+        // Aircraft 1 is 0.7 NM from the update; aircraft 2 flies 1.5 NM north of it, 300 ft higher.
+        let lat = 40.0;
+        let mut pts = fly(1, -75.0, lat, 10_000);
+        pts.extend(fly(
+            2,
+            -75.0,
+            lat + 1.5 * NM_M * deg_lat_per_m(40.0),
+            10_300,
+        ));
+        let mut c = xcensus(pts);
+        // Update on aircraft 1's path, 0.7 NM north of it; altitude 10_000 ft.
+        c.observe(
+            src("AAA"),
+            &upd(
+                1,
+                30_500,
+                Some(false),
+                -75.0,
+                lat,
+                10_000,
+                0.0,
+                0.7 * NM_M,
+                0.0,
+            ),
+        );
+        let r = c.finish();
+        let x = r.xc.unwrap();
+        let at = |f: usize, g: usize| -> Vec<u64> {
+            (0..3)
+                .map(|o| x.global.counts[crate::xcres::cidx(f, g, o)])
+                .collect()
+        };
+        // 0.5 NM: nobody. 1 NM and 2 NM: aircraft 1 (0.7 NM away) and aircraft 2 (0.8 NM away,
+        // 300 ft off, inside the 500 ft gate) are both candidates: ambiguous.
+        assert_eq!(at(0, 0), [1, 0, 0]);
+        assert_eq!(at(0, 1), [0, 0, 1]);
+        assert_eq!(at(0, 2), [0, 0, 1]);
+        assert_eq!(at(1, 1), [0, 0, 0]);
+    }
+
+    // REQ: OA-CEN-009
+    #[test]
+    fn the_altitude_gate_separates_two_candidates() {
+        let lat = 40.0;
+        let mut pts = fly(1, -75.0, lat, 10_000);
+        pts.extend(fly(
+            2,
+            -75.0,
+            lat + 0.5 * NM_M * deg_lat_per_m(40.0),
+            11_000,
+        ));
+        let mut c = xcensus(pts);
+        // Both are inside 1 NM; only aircraft 1 is inside 500 ft of the update's altitude.
+        c.observe(
+            src("AAA"),
+            &upd(1, 30_000, Some(true), -75.0, lat, 10_100, 0.0, 0.0, 0.0),
+        );
+        // No altitude on the update: the altitude gate is not applied, so both are candidates.
+        let mut no_alt = upd(2, 31_000, Some(true), -75.0, lat, 0, 0.0, 0.0, 0.0);
+        no_alt.present &= !tais_bit(TaisField::ReportedAltitude);
+        c.observe(src("AAA"), &no_alt);
+        let x = c.finish().xc.unwrap();
+        let one = |g: usize| {
+            (0..3)
+                .map(|o| x.global.counts[crate::xcres::cidx(1, g, o)])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(one(1), [0, 1, 1]);
+        // Horizontal only at the primary gate: both updates see two aircraft.
+        assert_eq!(&x.global.hcounts[3..6], [0, 0, 2]);
+    }
+
+    // REQ: OA-CEN-009
+    #[test]
+    fn updates_without_position_or_flag_are_counted_not_checked() {
+        let mut c = xcensus(fly(1, -75.0, 40.0, 10_000));
+        c.observe(src("AAA"), &rec(1, 10_000, Some(false)));
+        let mut nof = upd(1, 14_600, None, -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
+        nof.present &= !tais_bit(TaisField::TrackAdsb);
+        c.observe(src("AAA"), &nof);
+        let x = c.finish().xc.unwrap();
+        assert_eq!(x.no_position, [1, 0]);
+        assert_eq!(x.no_flag, 1);
+        assert_eq!(x.global.counts.iter().sum::<u64>(), 0);
+    }
+
+    // REQ: OA-CEN-010
+    #[test]
+    fn an_injected_bias_shows_in_the_matched_distribution_and_the_control_does_not() {
+        // adsb=false updates on aircraft 1 sit 300 m ahead and 100 m left of it; the control
+        // (adsb=true) updates on aircraft 2 sit exactly on it. 40 updates each, at times with
+        // a fraction of a second so the interpolation is used.
+        let mut pts = fly(1, -75.0, 40.0, 10_000);
+        pts.extend(fly(2, -75.0, 40.2, 20_000));
+        let mut c = xcensus(pts);
+        for k in 0..40 {
+            let t = 5_300 + k * 2_000;
+            c.observe(
+                src("AAA"),
+                &upd(1, t, Some(false), -75.0, 40.0, 10_000, 300.0, 100.0, 0.0),
+            );
+            c.observe(
+                src("AAA"),
+                &upd(2, t, Some(true), -75.0, 40.2, 20_000, 0.0, 0.0, 0.0),
+            );
+        }
+        let x = c.finish().xc.unwrap();
+        let g = &x.global;
+        let m = |f: usize, q: usize| g.sums[f * 5 + q].p50.unwrap();
+        assert_eq!(g.sums[0].n, 40);
+        assert_eq!(g.sums[5].n, 40);
+        // Bias: along +300 m, cross is minus the 100 m north offset (east track, so left).
+        assert!((m(0, 2) - 300.0).abs() < 1.0, "{}", m(0, 2));
+        assert!((m(0, 3) + 100.0).abs() < 1.0, "{}", m(0, 3));
+        assert!((m(0, 0) - 316.2).abs() < 1.5, "{}", m(0, 0));
+        assert!(m(1, 0) < 1.0 && m(1, 2).abs() < 1.0 && m(1, 3).abs() < 1.0);
+        // The histogram holds the 40 matches: the bias bin is far from the control's.
+        assert_eq!(g.sums[0].bins.iter().sum::<u64>(), 40);
+        assert_eq!(g.sums[5].bins[0], 40);
+        assert!(g.sums[0].bins[0] == 0);
+        // Both flags' updates were exactly-one at every gate (aircraft 1 is 316 m away).
+        assert_eq!(g.counts[crate::xcres::cidx(0, 0, 1)], 40);
+    }
+
+    // REQ: OA-CEN-011
+    #[test]
+    fn a_known_time_offset_is_recovered_as_the_along_track_time() {
+        // The position belongs to 1.5 s after the stated time: along-track ahead by 1.5 s.
+        let mut c = xcensus(fly(1, -75.0, 40.0, 10_000));
+        for k in 0..30 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    1,
+                    5_300 + k * 3_000,
+                    Some(false),
+                    -75.0,
+                    40.0,
+                    10_000,
+                    0.0,
+                    0.0,
+                    1.5,
+                ),
+            );
+        }
+        let x = c.finish().xc.unwrap();
+        let along = x.global.sums[2].p50.unwrap();
+        let secs = x.global.sums[4].p50.unwrap();
+        assert!((secs - 1.5).abs() < 0.01, "{secs}");
+        assert!((along - 1.5 * V).abs() < 1.0, "{along}");
+        assert_eq!(x.global.sums[4].n, 30);
+        // A late label (position of 2 s before) gives a negative value.
+        let mut c = xcensus(fly(1, -75.0, 40.0, 10_000));
+        c.observe(
+            src("AAA"),
+            &upd(1, 20_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, -2.0),
+        );
+        let x = c.finish().xc.unwrap();
+        assert!((x.global.sums[4].p50.unwrap() + 2.0).abs() < 0.01);
+    }
+
+    // REQ: OA-CEN-012
+    #[test]
+    fn matches_are_split_by_track_class_and_facility() {
+        let mut pts = fly(1, -75.0, 40.0, 10_000);
+        pts.extend(fly(2, -75.0, 40.3, 10_000));
+        pts.extend(fly(3, -75.0, 40.6, 10_000));
+        let mut c = xcensus(pts);
+        // Facility AAA: track 1 all false (aircraft 1), track 2 mixed (aircraft 2).
+        for k in 0..4 {
+            let t = 5_300 + k * 4_000;
+            c.observe(
+                src("AAA"),
+                &upd(1, t, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0),
+            );
+            c.observe(
+                src("AAA"),
+                &upd(2, t, Some(k % 2 == 0), -75.0, 40.3, 10_000, 0.0, 0.0, 0.0),
+            );
+        }
+        // Facility BBB: track 1 (the same number) has one update only.
+        c.observe(
+            src("BBB"),
+            &upd(1, 9_300, Some(false), -75.0, 40.6, 10_000, 0.0, 0.0, 0.0),
+        );
+        let r = c.finish();
+        let x = r.xc.unwrap();
+        let ones = |g: &crate::xcres::XcGroup, f: usize| g.counts[crate::xcres::cidx(f, 1, 1)];
+        assert_eq!(ones(&x.global, 0), 4 + 2 + 1);
+        assert_eq!(ones(&x.global, 1), 2);
+        // Classes: [single, all false, all true, mixed].
+        assert_eq!(ones(&x.classes[0], 0), 1);
+        assert_eq!(ones(&x.classes[1], 0), 4);
+        assert_eq!(ones(&x.classes[2], 0), 0);
+        assert_eq!(ones(&x.classes[3], 0), 2);
+        assert_eq!(ones(&x.classes[3], 1), 2);
+        // Facilities, in the census order.
+        let a = r.facs.iter().position(|(k, _)| *k == src("AAA")).unwrap();
+        let b = r.facs.iter().position(|(k, _)| *k == src("BBB")).unwrap();
+        assert_eq!(ones(&x.facs[a], 0), 6);
+        assert_eq!(ones(&x.facs[b], 0), 1);
+        assert_eq!(x.facs[a].sums[0].n, 6);
+    }
+
+    // REQ: OA-CEN-012
+    #[test]
+    fn without_a_clip_there_is_no_cross_check() {
+        let mut c = Census::new();
+        c.observe(
+            src("AAA"),
+            &upd(1, 5_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0),
+        );
+        assert!(c.finish().xc.is_none());
     }
 }

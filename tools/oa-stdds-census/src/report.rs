@@ -4,8 +4,11 @@
 use crate::census::{
     ClassStats, DirStats, Group, IdShare, Results, CHANGE_BIN_NAMES, CLASS_NAMES, FLAG_NAMES,
 };
+use crate::dist::{Summary, HIST_BINS};
 use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
+use crate::xcheck::{Params, OUTCOME_NAMES};
+use crate::xcres::{cidx, XcGroup, Q_NAMES};
 use oa_stdds::STD_ERROR_NAMES;
 use std::fmt::Write;
 
@@ -140,6 +143,161 @@ fn fac_line(g: &Group) -> String {
     )
 }
 
+fn sum_line(s: &Summary) -> String {
+    let f = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}"));
+    format!(
+        "n {} median {} p10 {} p90 {} p99 {} (outside the histogram range: below {} above {})",
+        s.n,
+        f(s.p50),
+        f(s.p10),
+        f(s.p90),
+        f(s.p99),
+        s.below,
+        s.above
+    )
+}
+
+fn sum_bins(o: &mut String, s: &Summary) {
+    let w = (s.hi - s.lo) / HIST_BINS as f64;
+    for (i, c) in s.bins.iter().enumerate() {
+        let _ = writeln!(
+            o,
+            "      [{:8.1},{:8.1}) {c} {}",
+            s.lo + i as f64 * w,
+            s.lo + (i + 1) as f64 * w,
+            pct(*c, s.n)
+        );
+    }
+}
+
+fn outcomes_line(c: &[u64]) -> String {
+    let total: u64 = c.iter().sum();
+    OUTCOME_NAMES
+        .iter()
+        .zip(c)
+        .map(|(n, &v)| format!("{n} {v} ({})", pct(v, total)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn counts_of(g: &XcGroup, flag: usize, gate: usize) -> Vec<u64> {
+    (0..3)
+        .map(|o| g.counts.get(cidx(flag, gate, o)).copied().unwrap_or(0))
+        .collect()
+}
+
+fn med(s: Option<&Summary>) -> String {
+    s.and_then(|s| s.p50)
+        .map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}"))
+}
+
+/// One line for a class or facility: the outcomes at the primary gate and the median
+/// differences of the matches, for each flag.
+fn xc_group_line(g: &XcGroup, p: &Params) -> String {
+    let mut parts = Vec::new();
+    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        parts.push(format!(
+            "{name}: {}; matched medians horizontal {} m, vertical {} ft, along {} m, cross {} m, along {} s",
+            outcomes_line(&counts_of(g, f, p.primary)),
+            med(g.sums.get(f * 5)),
+            med(g.sums.get(f * 5 + 1)),
+            med(g.sums.get(f * 5 + 2)),
+            med(g.sums.get(f * 5 + 3)),
+            med(g.sums.get(f * 5 + 4)),
+        ));
+    }
+    parts.join(" | ")
+}
+
+fn xc_section(o: &mut String, r: &Results) {
+    let _ = writeln!(o, "== 5. position cross-check against ADS-B (same day) ==");
+    let Some(x) = &r.xc else {
+        let _ = writeln!(o, "not run (no ADS-B clip given: --adsb CLIP)");
+        return;
+    };
+    let p = &x.params;
+    let h_primary = p.gates_nm.get(p.primary).copied().unwrap_or(0.0);
+    let _ = writeln!(
+        o,
+        "time compared: STDDS track/mrtTime against the ADS-B report time, each aircraft interpolated linearly between the two reports around it (at most {} ms apart); altitude: STDDS reportedAltitude (assumed feet) against ADS-B barometric altitude, gated only when both exist; ground and stale ADS-B reports left out",
+        p.max_gap_ms
+    );
+    let _ = writeln!(
+        o,
+        "gates: horizontal {:?} NM (primary {h_primary} NM), vertical {} ft; both inclusive; a candidate is one aircraft inside both gates",
+        p.gates_nm, p.v_gate_ft
+    );
+    let _ = writeln!(
+        o,
+        "ADS-B index: reports {} aircraft {} interpolable segments {}",
+        x.points, x.aircraft, x.segments
+    );
+    let _ = writeln!(
+        o,
+        "updates not checked: no position or time (adsb=false {}, adsb=true {}); no flag {}; records with no trackNum are not checked (see section 0)",
+        x.no_position.first().copied().unwrap_or(0),
+        x.no_position.get(1).copied().unwrap_or(0),
+        x.no_flag
+    );
+    let _ = writeln!(o, "outcome per update (only exactly-one is used):");
+    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        for (g, nm) in p.gates_nm.iter().enumerate() {
+            let _ = writeln!(
+                o,
+                "  {name}, gate {nm} NM / {} ft: {}",
+                p.v_gate_ft,
+                outcomes_line(&counts_of(&x.global, f, g))
+            );
+        }
+        let h: Vec<u64> = (0..3)
+            .map(|k| x.global.hcounts.get(f * 3 + k).copied().unwrap_or(0))
+            .collect();
+        let _ = writeln!(
+            o,
+            "  {name}, horizontal gate {h_primary} NM with no altitude gate: {}",
+            outcomes_line(&h)
+        );
+    }
+    let _ = writeln!(
+        o,
+        "differences STDDS minus ADS-B of the exactly-one matches at the primary gate (a match is inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts above say how many updates fall outside):"
+    );
+    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        let _ = writeln!(o, "  {name}{}:", if f == 1 { " (control)" } else { "" });
+        for (q, qn) in Q_NAMES.iter().enumerate() {
+            if let Some(s) = x.global.sums.get(f * 5 + q) {
+                let _ = writeln!(o, "    {qn}: {}", sum_line(s));
+                sum_bins(o, s);
+            }
+        }
+        if let Some(s) = x.global.hdv.get(f) {
+            let _ = writeln!(
+                o,
+                "    vertical difference of horizontal-only matches, feet (wide range, to check the altitude unit): {}",
+                sum_line(s)
+            );
+        }
+    }
+    let _ = writeln!(o, "by track class:");
+    for (name, g) in CLASS_NAMES.iter().zip(&x.classes) {
+        let _ = writeln!(o, "  {name}: {}", xc_group_line(g, p));
+    }
+    let _ = writeln!(o, "by facility (source id the data carries):");
+    let mut order: Vec<usize> = (0..r.facs.len()).collect();
+    order.sort_by_key(|&i| {
+        std::cmp::Reverse(
+            r.facs
+                .get(i)
+                .map_or(0, |(_, f)| f.updates.iter().sum::<u64>()),
+        )
+    });
+    for i in order {
+        if let (Some((k, _)), Some(g)) = (r.facs.get(i), x.facs.get(i)) {
+            let _ = writeln!(o, "  facility {}: {}", fac_label(k, i), xc_group_line(g, p));
+        }
+    }
+}
+
 /// The whole report.
 pub fn render(rs: &ReadStats, r: &Results) -> String {
     let mut o = String::new();
@@ -253,14 +411,7 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
         }
     }
 
-    let _ = writeln!(
-        o,
-        "== 5. cross-check against an ADS-B recording of the same day =="
-    );
-    let _ = writeln!(
-        o,
-        "not run (TODO: no ADS-B clip for 2026-11-20 exists; the counting function is in crosscheck.rs, tested on synthetic data only)"
-    );
+    xc_section(&mut o, r);
     o
 }
 
@@ -298,7 +449,7 @@ mod tests {
         }
         assert!(text.contains("facility ZZA"));
         assert!(text.contains("with a non-zero Mode S address: 4 100.00%"));
-        assert!(text.contains("TODO"));
+        assert!(text.contains("not run"));
     }
 
     // REQ: OA-CEN-007

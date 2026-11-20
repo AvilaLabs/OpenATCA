@@ -11,7 +11,10 @@ workspace = true
 
 [dependencies]
 # Workspace crates; not outside dependencies (RULESET F1).
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-bench = { path = "../../crates/oa-bench" }
 oa-feed = { path = "../../crates/oa-feed" }
+oa-math = { path = "../../crates/oa-math" }
 oa-stdds = { path = "../../crates/oa-stdds" }
 oa-xml = { path = "../../crates/oa-xml" }
 oa-zip = { path = "../../crates/oa-zip" }

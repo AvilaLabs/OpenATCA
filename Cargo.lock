@@ -316,7 +316,10 @@ dependencies = [
 name = "oa-stdds-census"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb",
+ "oa-bench",
  "oa-feed",
+ "oa-math",
  "oa-stdds",
  "oa-xml",
  "oa-zip",
