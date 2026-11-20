@@ -5687,11 +5687,13 @@ configuration with no default; the crate's tests use synthetic values.
   is finite and inside the look-ahead, the misses carried unchanged (`ca-predict-ttl`; `predict` is the
   conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
   (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
-  time inside the look-ahead (`ca-horizontal-miss-point`). Not proved: that `oa_math::hypot` of such a
-  point is finite and not negative, which the horizontal miss takes as a contract. The parts of `hypot`
-  that were proved are in OA-MATH-039; four parts that need the exactness of double-double products did
-  not finish in 10 minutes in CBMC (the exact square, the double-double root, and the two fast paths).
-  The contract is the documented behaviour of `hypot` (OA-MATH-005, tested against reference data).
+  time inside the look-ahead (`ca-horizontal-miss-point`); and the horizontal miss itself, the exactly rounded
+  square root of `x*x + y*y` at that point, is finite and not negative (`ca-horizontal-miss`, on the real
+  function): at most 5e7 m on each axis the sum cannot overflow. Nothing in the chain rests on an unproved
+  library contract; the crate no longer calls `hypot`. The miss agrees with `oa_math::hypot` to 2 units in
+  the last place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the
+  squares underflow (`tests/miss.rs`). Beyond about 1e154 m the square overflows to infinity, far outside
+  the bound the configuration check enforces (OA-CA-013).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check
